@@ -109,7 +109,8 @@ impl Cloudflare {
         Ok(Some(z.id))
     }
 
-    async fn zone_for(&self, name: &str) -> anyhow::Result<String> {
+    /// The id of the zone `name` is in: its parent domains', longest first.
+    pub async fn zone_for(&self, name: &str) -> anyhow::Result<String> {
         let labels: Vec<&str> = name.split('.').collect();
         for i in 1..labels.len().saturating_sub(1) {
             if let Some(id) = self.zone_id(&labels[i..].join(".")).await? {
@@ -308,78 +309,120 @@ impl Acme {
     pub fn new(account: Arc<AcmeAccount>, solver: Solver) -> Self {
         Self { account, solver }
     }
+}
 
-    async fn publish(&self, ch: &instant_acme::ChallengeHandle<'_>, published: &mut Vec<Published>) -> anyhow::Result<()> {
-        let Identifier::Dns(domain) = ch.identifier().identifier else { anyhow::bail!("acme: not a DNS identifier") };
-        match &self.solver {
-            Solver::Dns01(dns) => {
-                let name = format!("_acme-challenge.{domain}");
-                let id = dns.create_txt(&name, &ch.key_authorization().dns_value()).await?;
-                published.push(Published::Txt { name, id });
-            }
-            Solver::Http01(tokens) => {
-                tokens.put(&ch.token, ch.key_authorization().as_str());
-                published.push(Published::Token(ch.token.clone()));
-            }
-        }
-        Ok(())
-    }
+/// How long an order waits, and for what: [`order`]'s settings.
+#[derive(Clone, Copy, Debug)]
+pub struct Timing {
+    /// After publishing DNS-01 records, before asking the CA to check them.
+    pub propagation: Duration,
+    /// From ready to the certificate.
+    pub timeout: Duration,
+}
 
-    async fn order(&self, names: &[String], published: &mut Vec<Published>) -> anyhow::Result<CertPem> {
-        let cfg = &self.account.cfg;
-        let account = self.account.get().await?;
-        let kind = self.solver.challenge_type();
-        let ids: Vec<Identifier> = names.iter().map(|n| Identifier::Dns(n.clone())).collect();
-        let mut order = account.new_order(&NewOrder::new(&ids)).await?;
-        // Publish every proof first, wait once (DNS), then tell the CA.
-        let mut authzs = order.authorizations();
-        while let Some(a) = authzs.next().await {
-            let mut a = a?;
-            match a.status {
-                AuthorizationStatus::Pending => {}
-                AuthorizationStatus::Valid => continue,
-                s => anyhow::bail!("acme: authorization is {s:?}"),
-            }
-            let ch = a.challenge(kind.clone()).with_context(|| format!("acme: the CA offers no {kind:?} challenge"))?;
-            self.publish(&ch, published).await?;
+async fn publish(solver: &Solver, ch: &instant_acme::ChallengeHandle<'_>, published: &mut Vec<Published>) -> anyhow::Result<()> {
+    let Identifier::Dns(domain) = ch.identifier().identifier else { anyhow::bail!("acme: not a DNS identifier") };
+    match solver {
+        Solver::Dns01(dns) => {
+            let name = format!("_acme-challenge.{domain}");
+            let id = dns.create_txt(&name, &ch.key_authorization().dns_value()).await?;
+            published.push(Published::Txt { name, id });
         }
-        if matches!(self.solver, Solver::Dns01(_)) {
-            tokio::time::sleep(cfg.propagation).await;
+        Solver::Http01(tokens) => {
+            tokens.put(&ch.token, ch.key_authorization().as_str());
+            published.push(Published::Token(ch.token.clone()));
         }
-        let mut authzs = order.authorizations();
-        while let Some(a) = authzs.next().await {
-            let mut a = a?;
-            if a.status != AuthorizationStatus::Pending {
-                continue;
-            }
-            a.challenge(kind.clone()).with_context(|| format!("acme: {kind:?} challenge gone"))?.set_ready().await?;
-        }
-        let retry = RetryPolicy::new().initial_delay(Duration::from_millis(500)).timeout(cfg.timeout);
-        let status = order.poll_ready(&retry).await?;
-        anyhow::ensure!(status == OrderStatus::Ready, "acme: order is {status:?}, not ready");
-        let key = order.finalize().await?;
-        let chain = order.poll_certificate(&retry).await?;
-        Ok(CertPem { chain, key })
     }
+    Ok(())
+}
+
+async fn order_inner(account: &Account, solver: &Solver, names: &[String], timing: Timing, published: &mut Vec<Published>) -> anyhow::Result<CertPem> {
+    let kind = solver.challenge_type();
+    let ids: Vec<Identifier> = names.iter().map(|n| Identifier::Dns(n.clone())).collect();
+    let mut order = account.new_order(&NewOrder::new(&ids)).await?;
+    // Publish every proof first, wait once (DNS), then tell the CA.
+    let mut authzs = order.authorizations();
+    while let Some(a) = authzs.next().await {
+        let mut a = a?;
+        match a.status {
+            AuthorizationStatus::Pending => {}
+            AuthorizationStatus::Valid => continue,
+            s => anyhow::bail!("acme: authorization is {s:?}"),
+        }
+        let ch = a.challenge(kind.clone()).with_context(|| format!("acme: the CA offers no {kind:?} challenge"))?;
+        publish(solver, &ch, published).await?;
+    }
+    if matches!(solver, Solver::Dns01(_)) {
+        tokio::time::sleep(timing.propagation).await;
+    }
+    let mut authzs = order.authorizations();
+    while let Some(a) = authzs.next().await {
+        let mut a = a?;
+        if a.status != AuthorizationStatus::Pending {
+            continue;
+        }
+        a.challenge(kind.clone()).with_context(|| format!("acme: {kind:?} challenge gone"))?.set_ready().await?;
+    }
+    let retry = RetryPolicy::new().initial_delay(Duration::from_millis(500)).timeout(timing.timeout);
+    // Not ready: say which names the CA couldn't prove, and what it said about each.
+    match order.poll_ready(&retry).await {
+        Ok(OrderStatus::Ready) => {}
+        Ok(status) => match unproven(&mut order).await {
+            names if names.is_empty() => anyhow::bail!("acme: order is {status:?}, not ready"),
+            names => anyhow::bail!("acme: order is {status:?}: not proven: {}", names.join(", ")),
+        },
+        Err(e) => match unproven(&mut order).await {
+            names if names.is_empty() => return Err(e.into()),
+            names => anyhow::bail!("acme: {e}: not proven: {}", names.join(", ")),
+        },
+    }
+    let key = order.finalize().await?;
+    let chain = order.poll_certificate(&retry).await?;
+    Ok(CertPem { chain, key })
+}
+
+/// The names of `order` whose authorization the CA found invalid, each with what it said.
+async fn unproven(order: &mut instant_acme::Order) -> Vec<String> {
+    let mut out = vec![];
+    let mut authzs = order.authorizations();
+    while let Some(Ok(a)) = authzs.next().await {
+        if a.status != AuthorizationStatus::Invalid {
+            continue;
+        }
+        let Identifier::Dns(name) = a.identifier().identifier else { continue };
+        let star = if a.wildcard { "*." } else { "" };
+        let said = a.challenges.iter().find_map(|c| c.error.as_ref()).and_then(|p| p.detail.clone()).unwrap_or_default();
+        out.push(format!("{star}{name} ({said})"));
+    }
+    out
+}
+
+/// A certificate for `names` from `account`'s CA, each name proven through `solver`; the proofs
+/// are taken down again whether the order worked or not. The edge's [`Acme`] and roll secrets'
+/// public certificates both order through this.
+pub async fn order(account: &Account, solver: &Solver, names: &[String], timing: Timing) -> anyhow::Result<CertPem> {
+    let mut published = vec![];
+    let result = order_inner(account, solver, names, timing, &mut published).await;
+    for p in published {
+        match (p, solver) {
+            (Published::Txt { name, id }, Solver::Dns01(dns)) => {
+                if let Err(e) = dns.delete_txt(&name, &id).await {
+                    warn!(%name, error = %e, "acme: challenge record left behind");
+                }
+            }
+            (Published::Token(t), Solver::Http01(tokens)) => tokens.remove(&t),
+            _ => {}
+        }
+    }
+    result
 }
 
 impl Issuer for Acme {
     fn issue<'a>(&'a self, names: &'a [String]) -> BoxFuture<'a, anyhow::Result<CertPem>> {
         Box::pin(async move {
-            let mut published = vec![];
-            let result = self.order(names, &mut published).await;
-            for p in published {
-                match (p, &self.solver) {
-                    (Published::Txt { name, id }, Solver::Dns01(dns)) => {
-                        if let Err(e) = dns.delete_txt(&name, &id).await {
-                            warn!(%name, error = %e, "acme: challenge record left behind");
-                        }
-                    }
-                    (Published::Token(t), Solver::Http01(tokens)) => tokens.remove(&t),
-                    _ => {}
-                }
-            }
-            result
+            let cfg = &self.account.cfg;
+            let account = self.account.get().await?;
+            order(&account, &self.solver, names, Timing { propagation: cfg.propagation, timeout: cfg.timeout }).await
         })
     }
 }

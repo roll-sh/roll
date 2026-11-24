@@ -178,7 +178,7 @@ pub(super) enum Written {
 
 /// The highest generation roll reads or writes: far past any repository's, and far enough from
 /// `i64::MAX` that the next one can't overflow.
-const GENERATION_MAX: i64 = 1 << 62;
+pub(super) const GENERATION_MAX: i64 = 1 << 62;
 
 /// A generation as roll writes it in `index.latest` (decimal), `None` for anything else.
 fn generation_in(b: &[u8]) -> Option<i64> {
@@ -460,7 +460,7 @@ impl Bucket {
                 for (key, _) in &listed {
                     let g = key.strip_prefix(&self.prefix).and_then(|r| r.strip_prefix("index-")).filter(|g| !g.is_empty() && g.bytes().all(|b| b.is_ascii_digit())).and_then(|g| g.parse::<i64>().ok());
                     match g {
-                        Some(g) if g > 0 => newest = newest.max(Some(g)),
+                        Some(g) if (1..=GENERATION_MAX).contains(&g) => newest = newest.max(Some(g)),
                         _ => return Ok(Contents::Foreign(format!("[{key}] isn't roll's"))),
                     }
                 }
@@ -537,7 +537,7 @@ impl Bucket {
     /// `index.latest` lagging half the generations readers probe past it is first moved to the
     /// generation just read; failing that, nothing more is committed.
     async fn write_data(&self, data: &RepositoryData, previous: i64) -> EsResult<Written> {
-        if data.generation != previous + 1 {
+        if previous >= GENERATION_MAX || data.generation != previous + 1 {
             return Err(EsError::internal(format!("[{}] repository generation [{}] doesn't follow [{previous}]", self.name, data.generation)));
         }
         let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -565,7 +565,9 @@ impl Bucket {
         if previous - at >= PROBES / 2 {
             match self.store.put_if(&latest_key, Bytes::from(previous.to_string()), tag.as_deref()).await {
                 Ok(Some(t)) => tag = Some(t),
-                _ => {
+                // Another writer moved it meanwhile.
+                Ok(None) => return Err(concurrent()),
+                Err(_) => {
                     return Err(failed(
                         &self.name,
                         format!("[{latest_key}] has stayed at generation [{at}] while the repository reached [{previous}]: writing it keeps failing (the store must take conditional writes), and nothing more is committed until it moves"),
@@ -575,7 +577,7 @@ impl Bucket {
         }
         let generation = data.generation;
         let key = format!("{}index-{generation}", self.prefix);
-        let Some(written) = self.store.put_if(&key, body, None).await.map_err(|e| self.fail("writing the repository data", e))? else { return Err(concurrent()) };
+        let Some(written) = self.store.put_if(&key, body.clone(), None).await.map_err(|e| self.fail("writing the repository data", e))? else { return Err(concurrent()) };
         let (mut moved, mut passed, mut warning) = (false, false, None);
         let could_not = |why: String| format!("[{}] generation [{generation}] is committed, but [{latest_key}] couldn't be moved to it ({why}); readers find it all the same", self.name);
         for _ in 0..4 {
@@ -601,9 +603,16 @@ impl Bucket {
                             break;
                         }
                         None => {
-                            // Without a version to delete it at (a GCS answer without its
-                            // generation), it stays: nothing reads it there any more.
-                            let removed = !written.is_empty() && self.store.delete_if(&key, &written).await.unwrap_or(false);
+                            // A GCS answer without its generation: the one there now, when it
+                            // holds exactly what roll wrote.
+                            let at = match written.is_empty() {
+                                false => Some(written.clone()),
+                                true => self.store.get_tagged(&key, body.len()).await.ok().flatten().filter(|(b, _)| *b == body).map(|(_, t)| t),
+                            };
+                            let removed = match at {
+                                Some(t) => self.store.delete_if(&key, &t).await.unwrap_or(false),
+                                None => false,
+                            };
                             return Ok(Written::RolledBack { removed, error: self.foreign(&format!("[{latest_key}] isn't roll's any more")) });
                         }
                     },

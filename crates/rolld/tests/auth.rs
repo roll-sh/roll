@@ -606,6 +606,19 @@ async fn mcp_search_with_a_project_token() {
     assert_eq!(found["structuredContent"]["hits"]["total"]["value"], 2, "{found}");
     let (s, refused) = tool("search_query", serde_json::json!({ "cluster": other, "index": "notes", "query": { "match_all": {} } })).await;
     assert_eq!(s, 403, "a cluster in another project: {refused}");
+    // The web crawler's site verifications are the cluster's: its project's write starts, checks
+    // and drops one there (the check finds no record and says so), and another project's
+    // cluster refuses all three.
+    let (s, v) = tool("search_verify_site", serde_json::json!({ "cluster": "ada-alpha", "domain": "ada-alpha.invalid" })).await;
+    assert_eq!(s, 200, "{v}");
+    let site = v["structuredContent"]["site"].as_str().unwrap_or_else(|| panic!("{v}")).to_string();
+    for (name, cluster, want) in [("search_check_site_verification", "ada-alpha", 200), ("search_delete_site_verification", "ada-alpha", 200), ("search_verify_site", other.as_str(), 403), ("search_check_site_verification", other.as_str(), 403), ("search_delete_site_verification", other.as_str(), 403)] {
+        let args = match name {
+            "search_verify_site" => serde_json::json!({ "cluster": cluster, "domain": "ada-alpha.invalid" }),
+            _ => serde_json::json!({ "cluster": cluster, "site": site }),
+        };
+        assert_eq!(tool(name, args).await.0, want, "{name} on {cluster}");
+    }
     // Refused as the gate refuses (never a 404 or an empty answer): what's missing, and where the
     // person can allow it.
     let text = refused["content"][0]["text"].as_str().unwrap_or_default();
