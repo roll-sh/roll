@@ -753,11 +753,13 @@ impl Store {
         Ok(self.db.read(|x| x.query("SELECT id FROM search_clusters WHERE owner = ?1 AND deleting = 0", params![owner], |r| r.get(0)))?)
     }
 
-    /// Whose cluster `id` is and when it was made (Unix seconds), live or kept for restoring,
-    /// synchronously (rolld's workspace pass): `None` when there's no such cluster, an owner of
-    /// `None` for one that has none.
-    pub fn owner_and_made(&self, id: &str) -> anyhow::Result<Option<(Option<String>, i64)>> {
-        Ok(self.db.read(|x| x.query_row("SELECT owner, created_at FROM search_clusters WHERE id = ?1 AND deleting = 0", params![id], |r| Ok((r.get(0)?, r.get(1)?))).optional())?)
+    /// Whose cluster `id` is, when it was made and when it was last restored (Unix seconds), live
+    /// or kept for restoring, synchronously (rolld's workspace pass): `None` when there's no such
+    /// cluster, an owner of `None` for one that has none.
+    pub fn owner_and_made(&self, id: &str) -> anyhow::Result<Option<(Option<String>, i64, Option<i64>)>> {
+        Ok(self.db.read(|x| {
+            x.query_row("SELECT owner, created_at, restored_at FROM search_clusters WHERE id = ?1 AND deleting = 0", params![id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()
+        })?)
     }
 
     /// Cluster `id` (live or kept for restoring) is its workspace project's from now on (it got a

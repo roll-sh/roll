@@ -364,17 +364,21 @@ evaluator and search's catalogue rows. search adds no role checks of its own.
   project trusts a cluster when the project is its home, or when the cluster belongs to one of the
   project's owners (`Workspace::trusts`). A cluster made with `X-Roll-Project` gets that project as
   its home and has no owner: it's the project's, so whoever made it loses it when they leave
-  the project. Any cluster that gets a home is handed to the project this way (rolld's
-  `on_homed`): a person's own one homed by hand (`PUT …/homes`), a branch a person makes, which
-  takes its parent's home, and a home that comes back with its project's restore. A create is
+  the project. Any cluster homed now is handed to the project this way (rolld's `on_homed`): a
+  person's own one homed by hand (`PUT …/homes`), a branch a person makes, which takes its
+  parent's home, or a home said again. A home that comes back with its project's restore is
+  settled as what's kept from before is (below), since nobody decided it now. A create is
   its maker's until its home hands it over, so a placement that fails leaves it theirs, never no
   one's. Canvases and homes keep a cluster by its id, never a name another cluster could take
-  once it's gone (a name is resolved as it's placed or homed; a node without roll search places
-  none). rolld puts what's kept from before right at every start:
-  - a ref kept by a name becomes the id of the cluster that name names, if that cluster existed
-    before the ref was placed or homed; otherwise its places and home go;
-  - a homed cluster with an owner who's an admin or owner of the project is handed over;
-  - any other home of an owned cluster goes, and is reported;
+  once it's gone (a name is resolved as it's placed or homed, and an owner answers for ids only; a
+  node without roll search places none). rolld puts what's kept from before right at every start,
+  and the homes again every five minutes:
+  - a ref kept by a name becomes the id of the cluster that name names, if that cluster existed,
+    and wasn't restored, since before the ref was placed or homed; otherwise its places and homes
+    go, deleted projects' too;
+  - a homed cluster with an owner who's an admin or owner of the project is handed over, as is
+    one whose home is the one its create was placed in (a hand-over that failed then is owed);
+  - any other home of an owned cluster goes (that home only, in that project), and is reported;
   - a roll secrets search link by a name (the provider once took names, and now refuses them) is
     rewritten to the id that name names, when that cluster is on the link's project's canvas and
     still the project's: at home there, owned by someone in it, or the operator's cluster in the
@@ -383,7 +387,8 @@ evaluator and search's catalogue rows. search adds no role checks of its own.
 
   A stranger's cluster dropped on the project's canvas reaches nobody through it, and a purged
   cluster leaves every canvas. A project still home to live clusters can't be deleted (409); when
-  that can't be read, or on a node without roll search, the delete is answered 503.
+  that can't be read, or on a node without roll search, the delete is answered 503, and a home made
+in the project while it was being deleted refuses the delete (409, try again).
 
   | role | what they may do to the project's clusters |
   | --- | --- |

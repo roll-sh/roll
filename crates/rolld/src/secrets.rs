@@ -1441,7 +1441,9 @@ impl roll_workspace::Owners for People {
         let Ok(Some(p)) = roll_secrets::People::person(self, user) else { return false };
         match kind {
             roll_workspace::Kind::Repo => roll_secrets::access::owns_repo(p.code_owner.as_deref(), r#ref),
-            roll_workspace::Kind::Search => self.search.as_ref().is_some_and(|s| matches!(s.store.owner_of(r#ref), Ok(Some(Some(o))) if o == user)),
+            // By its id only (`Workspace::owned_by` resolves a name first): a name a canvas or a
+            // consumer passes could be another cluster's by now.
+            roll_workspace::Kind::Search => self.search.as_ref().is_some_and(|s| matches!(s.store.id_of(r#ref), Ok(Some(id)) if id == r#ref) && matches!(s.store.owner_of(r#ref), Ok(Some(Some(o))) if o == user)),
             _ => false,
         }
     }

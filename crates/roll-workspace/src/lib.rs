@@ -25,7 +25,7 @@ pub mod members;
 
 pub use events::{EventPage, EventsQuery, FeedEvent};
 pub use groups::{Counts, Group, GroupMember, GroupOp, GroupRole};
-pub use members::{Actor, Invite, Member, MemberEvent, People, Person, TrustBasis};
+pub use members::{Actor, HomeRow, Homed, Invite, Member, MemberEvent, People, Person, TrustBasis};
 
 use code_sql::{Db, OptionalExtension, Target, params};
 use serde::Serialize;
@@ -425,12 +425,20 @@ impl Workspace {
     /// ([`Workspace::restore`]); its pending invites end.
     pub fn delete(&self, scope: Scope<'_>, id: &str, request: &axum::http::request::Parts) -> Result<()> {
         let project = self.get(scope, id)?;
+        // The homes the products' hooks were asked about: one made meanwhile (a create placed in
+        // the project between them and this write) wasn't, so the delete is refused, never left
+        // with something that lost its owner to a project that's gone.
+        let homes_asked = self.homes_of_project(id)?;
         for f in self.before_delete.read().expect("before_delete").iter() {
             f(&Deleting { project: &project, request }).map_err(Error::Refused)?;
         }
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             owner_of(c, scope, id)?;
+            let homes_now = members::homes_of(c, id)?;
+            if homes_now.iter().any(|h| !homes_asked.contains(h)) {
+                return Err(Error::Conflict(format!("something got a home in project {id} while it was being deleted: try again")));
+            }
             let old: Vec<String> = c.query("SELECT id FROM deleted_projects WHERE deleted_at < ? OR id = ?", params![now - KEEP_DELETED_DAYS * 86_400_000, id], |r| r.get(0))?;
             for p in &old {
                 forget_deleted_rows(c, p)?;
@@ -474,8 +482,13 @@ impl Workspace {
             if c.query_row("SELECT 1 FROM projects WHERE id = ?", [id], |r| r.get::<_, i64>(0)).optional()?.is_some() {
                 return load(c, id);
             }
-            // Its homes come back: what a product does when something gets a home runs for them.
-            homes = c.query("SELECT kind, ref FROM deleted_homes WHERE project_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            // Its homes come back where nothing else holds one: what a product does when something
+            // gets a home back runs for those.
+            homes = c.query(
+                "SELECT kind, ref FROM deleted_homes d WHERE project_id = ? AND NOT EXISTS (SELECT 1 FROM homes h WHERE h.kind = d.kind AND h.ref = d.ref)",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
             let (owner, name): (String, String) = c.query_row("SELECT owner, name FROM deleted_projects WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?.ok_or_else(|| not_found(id))?;
             name_free(c, &owner, &name, None).map_err(|_| Error::Conflict(format!("a project named {name} exists now: rename it, then restore this one")))?;
             c.execute(&format!("INSERT INTO projects ({PROJECT_COLUMNS}) SELECT {PROJECT_COLUMNS} FROM deleted_projects WHERE id = ?"), [id])?;
@@ -492,7 +505,7 @@ impl Workspace {
         for (kind, r#ref) in &homes {
             if let Ok(kind) = Kind::parse(kind) {
                 for f in self.on_homed.read().expect("on_homed").iter() {
-                    f(kind, r#ref, id);
+                    f(kind, r#ref, id, members::Homed::Restored);
                 }
             }
         }
@@ -552,7 +565,9 @@ impl Workspace {
     /// Whether [`Owners`] says `kind ref` is `user`'s own (their repo, their search cluster): what a
     /// person may put on a canvas, or make a project the home of.
     pub fn owned_by(&self, user: &str, kind: Kind, r#ref: &str) -> bool {
-        self.owners.get().is_some_and(|o| o.owns(user, kind, r#ref))
+        // By the id it goes by (a name is resolved first; the owner answers for ids only).
+        let Ok(r#ref) = self.canonical(kind, r#ref) else { return false };
+        self.owners.get().is_some_and(|o| o.owns(user, kind, &r#ref))
     }
 
     /// Run `f` after each project is deleted, outside the transaction.
