@@ -4477,8 +4477,8 @@ impl Apps {
         if d.run.kind != RunType::Web {
             return Err(Error::Conflict("only a web service's deployments have their own URL".into()));
         }
-        if d.run.volume.is_some() {
-            return Err(Error::Conflict("a service with a volume has no deployment URLs: one instance writes the volume".into()));
+        if d.run.one_writer() {
+            return Err(Error::Conflict("a service with a volume has no deployment URLs: one instance writes the volume (volume.shared lets many)".into()));
         }
         // Waiting for its approvals: nothing of it runs (with the environment's values) before.
         if row.approvals > 0 && d.status == DeployStatus::Ready {

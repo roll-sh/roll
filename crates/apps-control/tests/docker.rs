@@ -1656,6 +1656,7 @@ async fn a_next_apps_cache_outlives_its_instance() {
         ("next.config.mjs", "export default { cacheComponents: true };\n"),
         ("app/layout.js", "export default function Layout({ children }) { return <html><body>{children}</body></html> }\n"),
         ("app/page.js", "export default function Page() { return <p>home</p> }\n"),
+        ("app/built/page.js", "export default async function Page() { 'use cache'; return <p id=\"t\">{String(Date.now())}</p> }\n"),
         ("app/stamp/route.js", "import { cacheTag } from 'next/cache';\nasync function stamp() { 'use cache'; cacheTag('stamp'); return String(Date.now()) + '-' + Math.random() }\nexport async function GET() { return new Response(await stamp()) }\n"),
         ("app/revalidate/route.js", "import { revalidateTag } from 'next/cache';\nexport async function POST() { revalidateTag('stamp', { expire: 0 }); return new Response('ok') }\n"),
     ], json!({})).await;
@@ -1668,12 +1669,20 @@ async fn a_next_apps_cache_outlives_its_instance() {
             (st, String::from_utf8(r.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap())
         }
     };
+    // The page the build prerendered is what the first request after the deploy gets (its time
+    // the build's, before the request), and from then roll's cache's, for every instance.
+    let asked = code_sql::now_ms();
+    let stamp = |p: &str| p.split("<p id=\"t\">").nth(1).and_then(|r| r.split('<').next()).and_then(|t| t.parse::<i64>().ok());
+    let (st, page) = fetch("GET", "/built").await;
+    let built = stamp(&page).unwrap_or_else(|| panic!("{st} {page}"));
+    assert!(st == StatusCode::OK && built < asked, "prerendered by the build, not on this request: {built} vs {asked}");
     let (st, first) = fetch("GET", "/stamp").await;
     assert_eq!(st, StatusCode::OK, "{first}");
     assert_eq!(fetch("GET", "/stamp").await.1, first, "cached");
     // Asleep: the next request starts another instance, which serves what the first one made.
     w.apps.live(&id, "production").sleep().await;
     assert_eq!(fetch("GET", "/stamp").await.1, first, "the cache outlived its instance");
+    assert_eq!(stamp(&fetch("GET", "/built").await.1), Some(built), "the prerendered page, from roll's cache");
     assert_eq!(fetch("POST", "/revalidate").await.1, "ok");
     // Next marks the tag once the route has answered: read until it's made again.
     let mut again = String::new();

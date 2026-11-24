@@ -129,6 +129,7 @@ interface Form {
   sleepAfter: string;
   volumeMount: string;
   volumeSize: string;
+  volumeShared: boolean;
   /** Hours between scheduled backups ("" the default, a day; 0 by hand only). */
   backupEvery: string;
   /** Backups kept ("" the default, seven). */
@@ -245,6 +246,7 @@ export function formOf(s: Service): Form {
     sleepAfter: str(s.run.sleep_after_s),
     volumeMount: s.run.volume?.mount ?? "",
     volumeSize: str(s.run.volume?.size_gb),
+    volumeShared: !!s.run.volume?.shared,
     backupEvery: str(s.run.volume?.backups?.every_hours),
     backupKeep: str(s.run.volume?.backups?.keep),
   };
@@ -382,10 +384,10 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   }
   if (f.suspendAfter !== before.suspendAfter) run.suspend_after_s = num(f.suspendAfter);
   if (f.sleepAfter !== before.sleepAfter) run.sleep_after_s = num(f.sleepAfter);
-  if (f.volumeMount !== before.volumeMount || f.volumeSize !== before.volumeSize || f.backupEvery !== before.backupEvery || f.backupKeep !== before.backupKeep) {
+  if (f.volumeMount !== before.volumeMount || f.volumeSize !== before.volumeSize || f.volumeShared !== before.volumeShared || f.backupEvery !== before.backupEvery || f.backupKeep !== before.backupKeep) {
     // Unset both: the default schedule; one set takes the default for the other.
     const backups = f.backupEvery.trim() || f.backupKeep.trim() ? { every_hours: f.backupEvery.trim() ? Number(f.backupEvery) : 24, keep: f.backupKeep.trim() ? Number(f.backupKeep) : 7 } : undefined;
-    run.volume = f.volumeMount.trim() ? { mount: f.volumeMount.trim(), size_gb: Number(f.volumeSize) || 1, ...(backups ? { backups } : {}) } : null;
+    run.volume = f.volumeMount.trim() ? { mount: f.volumeMount.trim(), size_gb: Number(f.volumeSize) || 1, ...(f.volumeShared ? { shared: true } : {}), ...(backups ? { backups } : {}) } : null;
   }
   if (Object.keys(run).length) patch.run = run;
   return patch;
@@ -769,9 +771,17 @@ export function SettingsTab({
                 )}
               </>
             )}
-            <Field label="Volume mount" hint="optional; one instance at most">
+            <Field label="Volume mount" hint={form.volumeShared ? "optional; every instance mounts it" : "optional; one instance at most, unless shared"}>
               {t("volumeMount", "/data")}
             </Field>
+            {form.volumeMount.trim() && (
+              <Field label="Instances that mount it" hint="shared: many instances and overlapping deploys write it at once (no SQLite)">
+                <select value={form.volumeShared ? "all" : "one"} onChange={(e) => set("volumeShared", e.target.value === "all")} className={`${input} w-full`}>
+                  <option value="one">One (the old stops before the new starts)</option>
+                  <option value="all">Every instance (shared)</option>
+                </select>
+              </Field>
+            )}
             {form.volumeMount.trim() && (
               <Field label="Volume size (GB)" hint="what it's billed and planned at; a host without disk quotas doesn't stop it growing past">
                 {t("volumeSize", "1")}
