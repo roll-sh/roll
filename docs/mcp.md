@@ -1471,7 +1471,9 @@ From a 2026-11-24 gap review (every tool run as an agent would against a fresh r
    mapped in #901. roll apps' `apps_fetch` (#890) is read by `debug_failing_service` and
    `ship_from_chat`. roll previews' share `label` and guest `notes` (#911, on main): mapped onto
    `previews_share` in #911 itself, on this thread's suggestion; guests' notes are outside text,
-   marked by roll previews (#916, gating) and withheld in lockdown (`note`, `selector`). roll
+   marked by roll previews (#916, #943: outside readers' notes too, and a fork's try and fetch)
+   and withheld in lockdown (#917, #940, #944). After previews #955 lands, `previews_try`'s
+   steps name its `{choose: [selector, n]}` (the route takes it already). roll
    secrets' leak rotation rules (#909): `respond_to_leaked_secret` says when a report rotates by
    itself. roll secrets' requests cursor (#927): mapped in #933.
 4. **After #808 (roll search on members) lands:** `Tool::within_session`'s comment (a create that names a project is held within the person's session now; listing stays as it is) and the members sentence in "With a scoped token" naming search. Waiting on its merge commit.
