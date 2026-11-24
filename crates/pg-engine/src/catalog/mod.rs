@@ -455,6 +455,12 @@ pub struct Index {
     /// either way (`bound_indexes`); this is what pg_index shows.
     #[serde(default, skip_serializing_if = "compact::falsy")]
     pub not_ready: bool,
+    /// pg_index.indcheckxmin, with the xmin of the index's pg_index row (0: not set). CREATE
+    /// INDEX sets it when its build found a broken HOT chain (`Heap::broken_hot_chain`),
+    /// REINDEX clears it when its build finds none; a snapshot whose xmin isn't past it
+    /// plans without the index (get_relation_info).
+    #[serde(default, skip_serializing_if = "compact::zero64")]
+    pub check_xmin: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -1724,6 +1730,10 @@ pub mod compact {
     }
 
     pub fn zero16(v: &u16) -> bool {
+        *v == 0 && on()
+    }
+
+    pub fn zero64(v: &u64) -> bool {
         *v == 0 && on()
     }
 }

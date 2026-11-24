@@ -1226,6 +1226,7 @@ impl Ddl<'_, '_> {
     /// A rewritten table (VACUUM FULL, CLUSTER): heap and every index measured afresh,
     /// nothing all-visible yet.
     fn measure_rewritten(&mut self, t: &Table, order: Option<&[Vec<u8>]>) -> Result<f64> {
+        self.rewritten_check_xmin(t);
         let hold = self.ctx.sess.hold_notices();
         let quiet = self.ctx.notices.borrow().len();
         let r = self.measure_rewritten_quiet(t, order);

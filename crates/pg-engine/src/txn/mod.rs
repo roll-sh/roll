@@ -1321,12 +1321,21 @@ pub struct IndexSince {
     /// The newest time here: a snapshot at or after it uses every index.
     max: AtomicU64,
     map: Mutex<HashMap<u32, u64>>,
+    /// The newest pg_index xmin of an index whose indcheckxmin is set (`Index::check_xmin`;
+    /// 0: none, or every snapshot's xmin is past it): snapshots whose xmin isn't past it
+    /// plan without that index.
+    check_xmin: AtomicU64,
 }
 
 impl IndexSince {
     /// Whether a snapshot at `ts` reads index `oid`'s entries.
     pub fn usable(&self, oid: u32, ts: u64) -> bool {
         self.max.load(Ordering::Acquire) <= ts || self.map.lock().get(&oid).is_none_or(|&t| t <= ts)
+    }
+
+    /// An index's indcheckxmin was set with pg_index xmin `x` (`Index::check_xmin`).
+    pub fn note_check_xmin(&self, x: u64) {
+        self.check_xmin.fetch_max(x, Ordering::AcqRel);
     }
 
     /// `oids` committed at `ts` (under the commit lock, before the catalog naming them is
@@ -1771,9 +1780,23 @@ impl TxnState {
         self.every_index_at(ts)
     }
 
-    /// Whether a snapshot at `ts` of this transaction uses every index (`index_usable`).
+    /// Whether a snapshot at `ts` of this transaction uses every index (`index_usable`), and
+    /// every snapshot uses every index whose indcheckxmin is set.
     pub fn every_index_at(&self, ts: u64) -> bool {
-        self.ddl_reads.as_ref().is_none_or(|d| d.stale.is_empty()) && self.db.index_since.max.load(Ordering::Acquire) <= ts
+        let since = &self.db.index_since;
+        self.ddl_reads.as_ref().is_none_or(|d| d.stale.is_empty())
+            && since.max.load(Ordering::Acquire) <= ts
+            && match since.check_xmin.load(Ordering::Acquire) {
+                0 => true,
+                // (Once every snapshot's xmin is past it, no snapshot leaves such an index out.)
+                x => {
+                    let past = x < self.db.xids().horizon();
+                    if past {
+                        let _ = since.check_xmin.compare_exchange(x, 0, Ordering::AcqRel, Ordering::Relaxed);
+                    }
+                    past
+                }
+            }
     }
 
     /// Its own (virtual) transaction lock, which others waiting for it wait on: held by a

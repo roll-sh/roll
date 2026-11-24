@@ -148,6 +148,7 @@ fn read_sys_indexes(t: SysTable, lines: &[(usize, Vec<&str>)]) -> Vec<Arc<Index>
             clustered: false,
             replident: false,
             not_ready: false,
+            check_xmin: 0,
         }));
     }
     out

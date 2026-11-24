@@ -1350,6 +1350,28 @@ impl Heap {
         n
     }
 
+    /// Whether an index built now finds a broken HOT chain (heapam_index_build_range_scan's
+    /// ii_BrokenHotChain): a HOT-updated version that is recently dead, or whose update is
+    /// the building transaction's own (`own`; an insert of its own too, which
+    /// HeapTupleSatisfiesVacuum calls DELETE_IN_PROGRESS then). The build indexes only the
+    /// chain's live end, which a snapshot that sees the older version can't reach
+    /// (pg_index.indcheckxmin).
+    pub fn broken_hot_chain(&self, v: &Vis, own: &dyn Fn(u64) -> bool) -> bool {
+        self.pages.iter().any(|p| {
+            p.lps.iter().any(|l| match l {
+                Lp::Normal(t) if t.hot_updated() => match t.status(v) {
+                    Htsv::RecentlyDead => true,
+                    Htsv::DeleteInProgress | Htsv::InsertInProgress => {
+                        let x = t.update_xid(v);
+                        x != 0 && own(x)
+                    }
+                    _ => false,
+                },
+                _ => false,
+            })
+        })
+    }
+
     /// A relcache invalidation: the cached insertion targets are forgotten.
     pub fn invalidate(&mut self) {
         self.targets.clear();

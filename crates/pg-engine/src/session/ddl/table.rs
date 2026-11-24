@@ -2462,6 +2462,7 @@ impl Ddl<'_, '_> {
                         clustered: false,
                         replident: false,
                         not_ready: false,
+                        check_xmin: 0,
                     };
                     for c in &cols {
                         if matches!(t.columns[*c].ty, DataType::Json | DataType::Xid) {
@@ -2501,6 +2502,7 @@ impl Ddl<'_, '_> {
                     self.cat.put_index(index.clone());
                     if existing && !keyed && t.partkey.is_none() {
                         self.build_index(&t, &index)?;
+                        self.check_xmin_after_build(&t, index.oid, None)?;
                     }
                     // Partitions get theirs (not under ONLY).
                     for p in self.cat.partitions(t.oid) {
@@ -2800,6 +2802,7 @@ impl Ddl<'_, '_> {
             clustered: false,
             replident: false,
             not_ready: false,
+            check_xmin: 0,
         };
         t.indexes.push(ix_oid);
         let con_oid = self.cat.alloc_con_oid(x.deferrable);
@@ -2819,6 +2822,7 @@ impl Ddl<'_, '_> {
         self.cat.put_index(index.clone());
         if existing {
             self.build_index(t, &index)?;
+            self.check_xmin_after_build(t, index.oid, None)?;
             self.validate_exclusion(t, ix_oid, &name)?;
         } else {
             crate::exec::sizing::index_created(t.oid, ix_oid, crate::exec::sizing::models_build(&index.method), self.ctx);
@@ -4450,6 +4454,7 @@ impl Ddl<'_, '_> {
     /// finish_heap_swap's reindex_relation after a rewrite: each index built anew measures
     /// it and its table (index_update_stats), where the swapped-in heap had no statistics.
     fn reindexed(&mut self, t: &Table) -> Result<()> {
+        self.rewritten_check_xmin(t);
         // (The primary key's index too: `pkey_index`, apart from `indexes`.)
         for ixo in t.indexes.iter().chain(t.pkey_index.iter()) {
             if let Some(ix) = self.cat.index(*ixo).cloned() {
@@ -4457,6 +4462,40 @@ impl Ddl<'_, '_> {
             }
         }
         Ok(())
+    }
+
+    /// pg_index.indcheckxmin after index `oid` of `t` was built (index_build) or rebuilt
+    /// (`reindex`, whether it was valid: reindex_index). A new index whose build found a
+    /// broken HOT chain (`sizing::broken_hot_chain`) is one snapshots whose xmin isn't past
+    /// this transaction's id don't use (`Index::check_xmin`); a rebuild that finds none clears
+    /// that, and a rebuild of an invalid index that finds one sets it. (Not after a concurrent
+    /// build, which waits out the older snapshots instead.)
+    pub(super) fn check_xmin_after_build(&mut self, t: &Table, oid: u32, reindex: Option<bool>) -> Result<()> {
+        let Some(ix) = self.cat.index(oid).map(|i| (**i).clone()) else { return Ok(()) };
+        if reindex == Some(true) && ix.check_xmin == 0 {
+            return Ok(());
+        }
+        let broken = crate::exec::sizing::broken_hot_chain(t, self.ctx)?;
+        let x = match reindex {
+            None | Some(false) if broken => self.ctx.txn.borrow_mut().xid(),
+            None | Some(true) if broken => return Ok(()),
+            _ => 0,
+        };
+        if x != ix.check_xmin {
+            self.ctx.sess.db.index_since.note_check_xmin(x);
+            self.cat.put_index(Index { check_xmin: x, ..ix });
+        }
+        Ok(())
+    }
+
+    /// A rewrite leaves no HOT chain (rewrite_heap_tuple clears the bits): reindex_relation's
+    /// rebuilds clear every index's indcheckxmin.
+    pub(super) fn rewritten_check_xmin(&mut self, t: &Table) {
+        for ixo in t.indexes.iter().chain(t.pkey_index.iter()) {
+            if let Some(ix) = self.cat.index(*ixo).filter(|ix| ix.check_xmin != 0).map(|i| (**i).clone()) {
+                self.cat.put_index(Index { check_xmin: 0, ..ix });
+            }
+        }
     }
 
     /// `rewrite_heap_rows` of the newest rows; where the transaction's snapshot misses
@@ -5863,6 +5902,7 @@ impl Ddl<'_, '_> {
                         let x = crate::catalog::Index {
                             replident: Some(*i) == chosen,
                             not_ready: false,
+                            check_xmin: 0,
                             ..(**x).clone()
                         };
                         self.cat.put_index(x);
@@ -9674,10 +9714,23 @@ impl Ddl<'_, '_> {
                     }
                     self.clear_index_entries(&t, &ix)?;
                     self.build_index(&t, &ix)?;
+                    let oid = ix.oid;
                     self.cat.put_index(Index { valid: true, not_ready: false, ..ix });
+                    self.check_xmin_after_build(&t, oid, (!concurrently).then_some(false).or(Some(true)))?;
                 }
                 // The valid ones are rebuilt too: their expressions are computed.
                 self.evaluate_index_exprs(&t, Some(&valid))?;
+                // (reindex_index's indcheckxmin. A concurrent rebuild's new index has none.)
+                for &i in &valid {
+                    match concurrently {
+                        false => self.check_xmin_after_build(&t, i, Some(true))?,
+                        true => {
+                            if let Some(ix) = self.cat.index(i).filter(|ix| ix.check_xmin != 0).map(|i| (**i).clone()) {
+                                self.cat.put_index(Index { check_xmin: 0, ..ix });
+                            }
+                        }
+                    }
+                }
                 // (In new files, laid out by a sorted build: the size models start them afresh
                 // and their statistics are the build's, as index_build's index_update_stats.
                 // A concurrent REINDEX builds its copies below. Only indexes of plain columns:

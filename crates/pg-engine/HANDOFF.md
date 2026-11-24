@@ -22111,3 +22111,42 @@ case `a312_copy_lock_wait` covers all three.
   recorded from PostgreSQL 18.6. All three differ on the base binary (`PROTOCOL_SERVER`).
 - probe7.py: every case as PostgreSQL.
 - The DDL isolation specs: 58 / 58.
+
+### Third candidate (`cand/a312-3`, on `cand/a312-2`): pg_index.indcheckxmin
+
+PostgreSQL 18.6 sets `indcheckxmin` when a non-concurrent CREATE INDEX (or ADD PRIMARY KEY /
+UNIQUE building a new index) finds a broken HOT chain (`heapam_index_build_range_scan`'s
+`ii_BrokenHotChain`). That is a HOT-updated version that is still RECENTLY_DEAD, or whose
+update is the building transaction's own. Its planner then leaves the index out for every
+snapshot whose TransactionXmin isn't past the index's pg_index row (`get_relation_info`).
+`reindex_index` clears the flag when its build finds no broken chain. CLUSTER, VACUUM FULL and
+ALTER TABLE rewrites rebuild indexes over a heap without HOT chains, so they clear it too.
+roll's `indcheckxmin` was always false, and roll used the index in those cases.
+
+roll's heap model keeps HOT chains (`heapsim`: `HOT_UPDATED`, next offsets, versions kept while
+a snapshot needs them), so the same decision is made from it:
+- `Heap::broken_hot_chain` and `sizing::broken_hot_chain` make the check.
+- `Index::check_xmin` holds the pg_index row's xmin; 0 means not set, and is not serialized, so
+  stored catalogs don't change.
+- `Ddl::check_xmin_after_build` (index_build's and reindex_index's rules) sets and clears it;
+  `rewritten_check_xmin` clears it after a rewrite.
+- `paths::index_readable` leaves the index out while the snapshot's xmin isn't past it.
+- `pg_index.indcheckxmin` shows it.
+
+Kept plans: `IndexSince::check_xmin` holds the newest such xmin. While some snapshot may still
+leave such an index out (`xids().horizon()` not past it), no plan is kept or reused
+(`every_index_at`). Once the horizon passes it, the value goes back to 0 and the check is one
+load again.
+
+Isolation spec `roll-index-checkxmin` (5 permutations):
+- a REPEATABLE READ snapshot older than the HOT update;
+- a running transaction with an older id, which holds back other sessions' xmin;
+- the creating transaction's own HOT update;
+- nothing older (not set);
+- REINDEX and VACUUM FULL clearing it.
+
+It is 5 / 5 against PostgreSQL 18.6 live, and the base binary 2 / 5.
+
+Not modelled: an UPDATE of the index's pg_index row (CLUSTER's `indisclustered`, REPLICA
+IDENTITY) gives that row a new xmin in PostgreSQL; roll keeps the creating one. A table past the
+heap model (`ROLL_MODEL_MAX_VERSIONS`) has no HOT chains to look at, so its flag stays false.

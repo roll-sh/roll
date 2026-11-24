@@ -489,6 +489,7 @@ impl Ddl<'_, '_> {
             clustered: false,
             replident: false,
             not_ready: false,
+            check_xmin: 0,
         };
         if let Some(a) = &made_am {
             self.cat.rel_am.insert(oid, a.oid);
@@ -519,6 +520,7 @@ impl Ddl<'_, '_> {
             if !s.concurrent {
                 self.lock_new_relation(ix.oid)?;
                 self.build_index(&t, &ix)?;
+                self.check_xmin_after_build(&t, ix.oid, None)?;
             } else {
                 // DefineIndex's later phases: after the build, the table's writers again
                 // (WaitForLockers, ShareLock), then the transactions with snapshots older

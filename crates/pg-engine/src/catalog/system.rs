@@ -4265,7 +4265,7 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
                     b(!con.is_some_and(|c| c.deferral().0)),
                     b(ix.clustered),
                     b(ix.valid),
-                    b(false),
+                    b(ix.check_xmin != 0),
                     b(!ix.not_ready),
                     b(true),
                     b(ix.replident),

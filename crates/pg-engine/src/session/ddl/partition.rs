@@ -1668,6 +1668,7 @@ impl Ddl<'_, '_> {
                 clustered: false,
                 replident: false,
                 not_ready: false,
+                check_xmin: 0,
                 ..(*six).clone()
             };
             if primary {

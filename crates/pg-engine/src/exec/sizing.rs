@@ -7449,6 +7449,17 @@ pub fn heap_tuple_stats(oid: u32, ctx: &ExecCtx) -> Result<Option<(u64, u64, u64
     })
 }
 
+/// Whether an index built on table `t` now finds a broken HOT chain in its heap model
+/// (`Heap::broken_hot_chain`; false without a model).
+pub fn broken_hot_chain(t: &Table, ctx: &ExecCtx) -> Result<bool> {
+    fork_blocks(t.oid, Fork::Main, ctx)?;
+    let xids = ctx.sess.db.xids();
+    let v = heapsim::Vis::new(xids).with_multis(&ctx.sess.db.multis);
+    let txn = ctx.txn.borrow();
+    let rf = ctx.sess.db.relfiles.of(t.oid).read();
+    Ok(rf.heaps.get(&t.oid).is_some_and(|h| h.broken_hot_chain(&v, &|x| txn.is_current_xid(x))))
+}
+
 /// The dead and recently dead tuples of table `t`'s heap model (what a rewrite leaves out
 /// and must keep); None without a model.
 pub fn dead_counts(t: &Table, ctx: &ExecCtx) -> Result<Option<(u64, u64)>> {
