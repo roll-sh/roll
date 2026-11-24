@@ -1291,7 +1291,7 @@ deterministic (#396).
 1. **Search from the browser** (landed in #358 after six reviews, its policy enforced in the
    engine on the parsed request: per-cluster CORS, browser keys with rate limits and their own body
    cap, a Browser search section and the site-search guide's browser page; keys derived without a call to roll in
-   this PR (Algolia's `generateSecuredApiKey`, Typesense's `generateScopedSearchKey`, Meilisearch's
+   #954 (Algolia's `generateSecuredApiKey`, Typesense's `generateScopedSearchKey`, Meilisearch's
    tenant tokens: a derivable browser key's backend signs a short-lived, narrower key per end
    customer, checked on the owner every request, with a per-user share of the parent's rate);
    what remains: RAG's chat limits for browser keys (item 11); browser search on previews (a branch keeps the
