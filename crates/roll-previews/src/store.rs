@@ -484,6 +484,18 @@ fn hook_row(r: &code_sql::Row<'_>) -> code_sql::Result<Hook> {
 /// How many people [`Store::visitors`] names.
 pub const VISITORS: usize = 8;
 
+/// Mail about a note still to send ([`Store::claim_tells`]).
+#[derive(Clone, Debug)]
+pub struct Tell {
+    pub id: String,
+    pub preview: String,
+    /// Their roll handle.
+    pub to: String,
+    pub subject: String,
+    pub text: String,
+    pub attempts: i64,
+}
+
 /// A live share link, as [`Store::share_live`] finds it.
 #[derive(Clone, Debug)]
 pub struct LiveShare {
@@ -3212,20 +3224,20 @@ impl Store {
     }
 
     /// Up to `n` tells that are due, each claimed for `hold` ms (another node doesn't send it
-    /// meanwhile): `(id, preview, to, subject, text, attempts)`.
-    pub fn claim_tells(&self, n: usize, hold: i64) -> Result<Vec<(String, String, String, String, String, i64)>> {
+    /// meanwhile).
+    pub fn claim_tells(&self, n: usize, hold: i64) -> Result<Vec<Tell>> {
         let now = self.now_ms()?;
-        Ok(self.db.write(|c| {
-            let due: Vec<(String, String, String, String, String, i64)> = c.query(
+        self.db.write(|c| {
+            let due: Vec<Tell> = c.query(
                 "SELECT id, preview_id, to_handle, subject, text, attempts FROM note_tells WHERE next_at <= ? ORDER BY next_at LIMIT ?",
                 params![now, n as i64],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+                |r| Ok(Tell { id: r.get(0)?, preview: r.get(1)?, to: r.get(2)?, subject: r.get(3)?, text: r.get(4)?, attempts: r.get(5)? }),
             )?;
             for d in &due {
-                c.execute("UPDATE note_tells SET next_at = ? WHERE id = ?", params![now + hold, d.0])?;
+                c.execute("UPDATE note_tells SET next_at = ? WHERE id = ?", params![now + hold, d.id])?;
             }
             Ok::<_, Error>(due)
-        })?)
+        })
     }
 
     /// The mail about a preview's notes still to send: `(to, attempts)`.

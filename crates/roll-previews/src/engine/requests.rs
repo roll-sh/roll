@@ -508,7 +508,7 @@ impl Engine {
 
     /// Send the mail about notes that's due (a few at a time; each claimed first, so one node
     /// sends it): to the person's own address while they may open the project's previews. One
-    /// that can't go now is tried again (1, 5, 30 minutes), then given up.
+    /// that can't go now is tried again (after 1 and 5 minutes), then given up.
     pub async fn tend_tells(&self) {
         let Some(visitors) = self.visitors.get().cloned() else { return };
         let due = match self.store.claim_tells(20, 120_000) {
@@ -518,19 +518,19 @@ impl Engine {
                 return;
             }
         };
-        for (id, preview, to, subject, text, attempts) in due {
-            let Ok(project) = self.store.row(&preview).map(|r| r.project_id) else {
-                let _ = self.store.tell_done(&id, None);
+        for t in due {
+            let Ok(project) = self.store.row(&t.preview).map(|r| r.project_id) else {
+                let _ = self.store.tell_done(&t.id, None);
                 continue;
             };
-            let v = visitors.clone();
+            let (v, to, subject, text) = (visitors.clone(), t.to.clone(), t.subject.clone(), t.text.clone());
             let sent = tokio::task::spawn_blocking(move || v.mail(&to, &project, &subject, &text)).await;
             let retry = match sent {
                 Ok(Ok(_)) => None,
-                _ if attempts >= 2 => None,
-                _ => Some(self.store.now_ms().unwrap_or(0) + [60_000, 300_000, 1_800_000][attempts.clamp(0, 2) as usize]),
+                _ if t.attempts >= 2 => None,
+                _ => Some(self.store.now_ms().unwrap_or(0) + [60_000, 300_000][t.attempts.clamp(0, 1) as usize]),
             };
-            let _ = self.store.tell_done(&id, retry);
+            let _ = self.store.tell_done(&t.id, retry);
         }
     }
 
