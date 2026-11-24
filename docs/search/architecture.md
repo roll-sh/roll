@@ -532,10 +532,13 @@ allowlist (a preview's branch included); change it like any setting.
   without one, root `snap-`/`meta-` blobs, `index-0`, an `index-N` that isn't gzip, or a key
   under `indices/` of a shape roll doesn't write) refuses registration, reads, writes,
   `_verify` and `_analyze` (the scan of `indices/`, and of uploads in parts, stops at the first
-  foreign key or after 10,000 of roll's); `index-N` is the commit and `index.latest` is written
-  after it only at the version read (`put_if`: another writer's is never overwritten, and roll's
-  `index-N` goes again; a failed write is a warning); a failed snapshot deletes its uploads
-  only when the data shows it isn't recorded; `_cleanup` deletes, and aborts uploads of, only
+  foreign key or after 10,000 of roll's; uploads in progress count on S3 and Azure, not GCS);
+  `index-N` is the commit and `index.latest` moves after it only from the version read
+  (`put_if`; changed meanwhile, it's read again: another roll writer's behind is moved on from,
+  one past it built on it, someone else's takes `index-N` back out with a conditional delete and
+  the snapshot's uploads go; a failed move is a warning, the generation two back goes only after
+  a move, and an `index.latest` 8 generations behind stops commits); a failed snapshot otherwise
+  deletes its uploads only when the data shows it isn't recorded; `_cleanup` deletes, and aborts uploads of, only
   keys of roll's own shapes, nothing without repository data. A restore creates each index from Elasticsearch's index
   metadata as `PUT <index>` would (no templates), then a task reads each shard's Lucene files
   through `search-lucene` on a blocking thread (ranged reads in 8 MiB windows across a file's

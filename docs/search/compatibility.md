@@ -2165,18 +2165,23 @@ the rest are skipped by the tests' own prerequisites.
   below). Someone else's repository under that prefix (an `index.latest` that isn't a decimal
   generation; without one, `snap-` or `meta-` blobs at its root, an `index-0`, a newest
   `index-N` that isn't roll's gzip, or anything under `indices/` roll doesn't name so, finished
-  or still uploading in parts, such as the shard files of Elasticsearch's first snapshot before
-  it's finalized; the scan stops at the first such key, or after 10,000 of roll's own) is never
+  or still being uploaded (an S3 upload in parts, an Azure blob with uncommitted blocks; GCS
+  can't list resumable uploads in progress, so Elasticsearch's first blob still going up there
+  isn't seen), such as the shard files of Elasticsearch's first snapshot before it's finalized;
+  the scan stops at the first such key, or after 10,000 of roll's own) is never
   read or written: `PUT` with `verify` refuses to register the repository, and reads,
   snapshots, `_verify`, `_analyze` and `_cleanup` answer 500 `repository_exception` (so does
   listing snapshots across repositories that include it, as Elasticsearch fails such a
   listing; the OpenSearch dialect lists one repository named exactly, as OpenSearch does, so
   `_all`, a list or a pattern is 404 `repository_missing_exception`). Writing `index-N` commits
-  a snapshot: when `index.latest` can't be written after it, the snapshot stays (readers find
-  it past `index.latest`) and the request answers with a warning, as Elasticsearch only logs
-  it. `index.latest` is only ever replaced at the version roll read, so one someone else writes
-  meanwhile takes roll's `index-N` back out and fails the snapshot as a concurrent modification
-  instead of being overwritten; a snapshot that fails deletes what it uploaded only once the
+  a snapshot: when `index.latest` can't be moved after it, the snapshot stays (readers find it
+  past `index.latest`, or from the newest `index-N` listed when the generation it names is
+  gone) and the request answers with a warning, as Elasticsearch only logs it; once
+  `index.latest` lags 8 generations, nothing more is committed until it moves.
+  `index.latest` is only ever replaced at the version roll read: another roll writer's written
+  meanwhile is moved on from (or, when it's already past, built on this snapshot), and someone
+  else's takes roll's `index-N` and the snapshot's uploads back out and fails it instead of
+  being overwritten; otherwise a snapshot that fails deletes what it uploaded only once the
   repository data shows it isn't there;
   `_cleanup` deletes what no snapshot references, and only objects of the names roll writes
   (`index-N` from 1, `tests-<uuid>`, its shard files and chunks under `indices/`; nothing when

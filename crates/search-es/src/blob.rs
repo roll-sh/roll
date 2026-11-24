@@ -70,6 +70,12 @@ impl Store {
         each!(self, c => c.delete(key).await)
     }
 
+    /// Deletes `key` only at version `tag` ([`Store::put_if`]'s): whether it's gone (`false`: it
+    /// changed since).
+    pub async fn delete_if(&self, key: &str, tag: &str) -> Result<bool, Error> {
+        each!(self, c => c.delete_if(key, tag).await)
+    }
+
     /// Every object under `prefix` with its size, bounded.
     pub async fn list(&self, prefix: &str) -> Result<Vec<(String, u64)>, Error> {
         each!(self, c => c.list(prefix).await)
@@ -79,6 +85,16 @@ impl Store {
     /// whether it did. Bounded as [`Store::list`] is.
     pub async fn list_while(&self, prefix: &str, f: &mut (dyn FnMut(&str, u64) -> bool + Send)) -> Result<bool, Error> {
         each!(self, c => c.list_while(prefix, f).await)
+    }
+
+    /// [`Store::list_while`], with what is still being written where the store lists it: Azure's
+    /// blobs with staged, uncommitted blocks. (S3's uploads in parts are [`Store::list_uploads`];
+    /// GCS can't list resumable uploads in progress.)
+    pub async fn list_while_pending(&self, prefix: &str, f: &mut (dyn FnMut(&str, u64) -> bool + Send)) -> Result<bool, Error> {
+        match self {
+            Store::Azure(c) => c.list_blobs(prefix, true, f).await,
+            _ => each!(self, c => c.list_while(prefix, f).await),
+        }
     }
 
     /// Uploads in parts in progress under `prefix` (S3 only: the others list none).

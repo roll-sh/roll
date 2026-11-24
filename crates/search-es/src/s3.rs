@@ -376,6 +376,16 @@ impl Client {
         Err(err("TooLarge", format!("the listing of uploads under [{prefix}] is more than [{LIST_PAGES_MAX}] pages")))
     }
 
+    /// Deletes the object at `key` only at version `etag`: whether it's gone (`false`: it changed).
+    pub async fn delete_if(&self, key: &str, etag: &str) -> Result<bool, Error> {
+        let r = self.send(reqwest::Method::DELETE, key, &[], &[("If-Match", etag)], Bytes::new()).await?;
+        match r.status().as_u16() {
+            200..=299 | 404 => Ok(true),
+            412 => Ok(false),
+            _ => Err(failure(r).await),
+        }
+    }
+
     /// Deletes the object at `key` (none there is fine).
     pub async fn delete(&self, key: &str) -> Result<(), Error> {
         let r = self.send(reqwest::Method::DELETE, key, &[], &[], Bytes::new()).await?;

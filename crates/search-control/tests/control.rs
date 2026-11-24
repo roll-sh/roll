@@ -2281,6 +2281,8 @@ struct MockBucket {
     drop_test_blobs: Arc<std::sync::atomic::AtomicBool>,
     /// Writes of `index.latest` fail (after the `index-N` they name landed).
     fail_latest: Arc<std::sync::atomic::AtomicBool>,
+    /// What another writer puts in `index.latest` just before the next write of it lands.
+    latest_race: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
 }
 
 /// A multipart upload in a [`MockBucket`]: its key and parts by number.
@@ -2409,6 +2411,11 @@ impl MockBucket {
             "PUT" if m.fail_latest.load(Relaxed) && key.ends_with("/index.latest") => StatusCode::FORBIDDEN.into_response(),
             "PUT" => {
                 let mut objects = m.objects.lock().unwrap();
+                if key.ends_with("/index.latest")
+                    && let Some(other) = m.latest_race.lock().unwrap().take()
+                {
+                    objects.insert(key.clone(), other);
+                }
                 let current = objects.get(&key).map(|v| m.etag(&key, v));
                 let refused = match (header("if-none-match"), header("if-match")) {
                     (Some(_), _) => current.is_some(),
@@ -3214,14 +3221,37 @@ async fn an_s3_repository_bounds_and_checks_what_a_bucket_holds() {
     expect("snapshot beside a first snapshot", es(reqwest::Method::PUT, "/_snapshot/mid/s?wait_for_completion=true", Some(json!({"indices": "docs"}))).await, 500, "isn't roll's");
     expect("cleanup beside a first snapshot", es(reqwest::Method::POST, "/_snapshot/mid/_cleanup", None).await, 500, "isn't roll's");
     assert!(bucket.keys("mid/").len() == 2, "{:?}", bucket.keys("mid/"));
-    // `index-N` is the commit: an `index.latest` that can't be written after it leaves the
-    // snapshot listed with every file it needs.
+    // `index-N` is the commit, and `index.latest` moves only from the version read. Another roll
+    // writer's newer one, written meanwhile, built on it: it stays. Elasticsearch's, written
+    // meanwhile: roll's `index-N` and everything the snapshot uploaded go again.
+    let newest = || bucket.keys("prod/roll/index-").iter().filter_map(|k| k.rsplit('-').next()?.parse::<i64>().ok()).max().unwrap();
+    let next = newest() + 1;
+    *bucket.latest_race.lock().unwrap() = Some((next + 1).to_string().into_bytes());
+    expect("passed by another writer", es(reqwest::Method::PUT, "/_snapshot/backup/passed?wait_for_completion=true", Some(json!({"indices": "docs"}))).await, 200, "SUCCESS");
+    assert_eq!(newest(), next, "the index-N another writer built on stays");
+    expect("listed past a missing index.latest generation", es(reqwest::Method::GET, "/_snapshot/backup/passed", None).await, 200, "SUCCESS");
+    put("prod/roll/index.latest".into(), next.to_string().into_bytes());
+    let before = bucket.keys("prod/");
+    *bucket.latest_race.lock().unwrap() = Some(7i64.to_be_bytes().to_vec());
+    expect("taken by Elasticsearch", es(reqwest::Method::PUT, "/_snapshot/backup/taken?wait_for_completion=true", Some(json!({"indices": "docs"}))).await, 500, "isn't roll's any more");
+    assert_eq!(bucket.keys("prod/"), before, "the rolled back snapshot left nothing");
+    put("prod/roll/index.latest".into(), next.to_string().into_bytes());
+    // An `index.latest` that can't be written after `index-N` leaves each snapshot listed with
+    // every file it needs, and the generations readers start from in place.
     bucket.fail_latest.store(true, std::sync::atomic::Ordering::Relaxed);
-    let (s, v) = es(reqwest::Method::PUT, "/_snapshot/backup/late?wait_for_completion=true", Some(json!({"indices": "docs"}))).await;
+    for name in ["late1", "late2", "late3"] {
+        let (s, v) = e.es(&u, &p, reqwest::Method::PUT, &format!("/_snapshot/backup/{name}?wait_for_completion=true"), Some(json!({"indices": "docs"}))).await;
+        expect("committed without index.latest", (s, v), 200, "SUCCESS");
+    }
     bucket.fail_latest.store(false, std::sync::atomic::Ordering::Relaxed);
-    expect("committed without index.latest", (s, v), 200, "SUCCESS");
-    expect("listed", es(reqwest::Method::GET, "/_snapshot/backup/late", None).await, 200, "SUCCESS");
-    expect("restored", e.es(&u, &p, reqwest::Method::POST, "/_snapshot/backup/late/_restore?wait_for_completion=true", Some(json!({"rename_pattern": "docs", "rename_replacement": "late"}))).await, 200, "late");
+    let (_, v) = es(reqwest::Method::GET, "/_snapshot/backup/_all", None).await;
+    let listed: Vec<&str> = v["snapshots"].as_array().into_iter().flatten().filter_map(|s| s["snapshot"].as_str()).collect();
+    assert!(["passed", "late1", "late2", "late3"].iter().all(|n| listed.contains(n)) && !listed.contains(&"taken"), "{listed:?}");
+    expect("restored", e.es(&u, &p, reqwest::Method::POST, "/_snapshot/backup/late1/_restore?wait_for_completion=true", Some(json!({"rename_pattern": "docs", "rename_replacement": "late"}))).await, 200, "late");
+    // Another program's upload in parts under `indices/` makes a location someone else's.
+    bucket.uploads.lock().unwrap().insert("es-upload".into(), ("parts/roll/indices/Xq/0/__e".into(), Default::default()));
+    let parts = json!({"type": "s3", "settings": {"bucket": "backups", "base_path": "parts", "endpoint": endpoint, "path_style_access": true}});
+    expect("an upload in progress", es(reqwest::Method::PUT, "/_snapshot/parts", Some(parts)).await, 500, "isn't roll's");
 
     // A listing that never ends.
     bucket.endless.store(true, std::sync::atomic::Ordering::Relaxed);

@@ -318,6 +318,16 @@ impl Client {
         }
     }
 
+    /// Deletes the object at `key` only at `generation`: whether it's gone (`false`: it changed).
+    pub async fn delete_if(&self, key: &str, generation: &str) -> Result<bool, Error> {
+        let r = self.send(reqwest::Method::DELETE, self.object(key, &[("ifGenerationMatch", generation)]), &[], Bytes::new(), Some(REQUEST_MAX)).await?;
+        match r.status().as_u16() {
+            200..=299 | 404 => Ok(true),
+            412 => Ok(false),
+            _ => Err(failure(r).await),
+        }
+    }
+
     /// Deletes the object at `key` (none there is fine).
     pub async fn delete(&self, key: &str) -> Result<(), Error> {
         let r = self.send(reqwest::Method::DELETE, self.object(key, &[]), &[], Bytes::new(), Some(REQUEST_MAX)).await?;
