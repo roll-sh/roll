@@ -128,7 +128,10 @@ function SyncRow({ sync: s, kind, onChanged, onError }: { sync: Sync; kind?: Syn
   const { api } = useSecrets();
   const [running, setRunning] = useState(false);
   const [sure, setSure] = useState(false);
+  const [alsoRemove, setAlsoRemove] = useState(false);
   const status = STATUS[s.status] ?? STATUS.pending;
+  // A certificate sync's certificate and private key stay at the target unless it's removed too.
+  const removable = !!kind?.certificate && !!s.remote_id;
   const run = async () => {
     setRunning(true);
     try {
@@ -172,8 +175,13 @@ function SyncRow({ sync: s, kind, onChanged, onError }: { sync: Sync; kind?: Syn
           </button>
         )}
         {sure ? (
-          <span className="flex gap-1">
-            <button className={dangerButton} onClick={() => api.deleteSync(s.id).then(onChanged, (e) => onError(errorText(e)))}>
+          <span className="flex items-center gap-1">
+            {removable && (
+              <label className="mr-1 flex items-center gap-1.5 text-[11.5px] text-muted" title="Delete the certificate and its private key there first; the sync stays if that fails">
+                <input type="checkbox" checked={alsoRemove} onChange={(e) => setAlsoRemove(e.target.checked)} /> also remove it from {kind?.label ?? s.kind}
+              </label>
+            )}
+            <button className={dangerButton} onClick={() => api.deleteSync(s.id, removable && alsoRemove).then(onChanged, (e) => (setSure(false), onError(errorText(e)), onChanged()))}>
               Delete
             </button>
             <button className={ghost} onClick={() => setSure(false)}>
@@ -181,7 +189,7 @@ function SyncRow({ sync: s, kind, onChanged, onError }: { sync: Sync; kind?: Syn
             </button>
           </span>
         ) : (
-          <button className={ghost} onClick={() => setSure(true)} title="Delete the sync; what it pushed stays at the target">
+          <button className={ghost} onClick={() => setSure(true)} title={removable ? "Delete the sync; the certificate and its private key stay at the target unless you remove them too" : "Delete the sync; what it pushed stays at the target"}>
             Delete
           </button>
         )}

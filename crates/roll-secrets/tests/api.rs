@@ -137,10 +137,12 @@ impl SyncTarget for FakeSync {
 type CertPushed = (String, String, String, Option<String>, Option<String>);
 
 /// A fake certificate platform (`aws-acm`'s shape): the first push makes `arn:fake:1`, later ones
-/// replace what they're given.
+/// replace what they're given; what it was asked to delete, refused while `in_use`.
 #[derive(Default)]
 struct FakeCertSync {
     pushes: Mutex<Vec<CertPushed>>,
+    removed: Mutex<Vec<String>>,
+    in_use: std::sync::atomic::AtomicBool,
 }
 
 impl SyncTarget for FakeCertSync {
@@ -169,6 +171,14 @@ impl SyncTarget for FakeCertSync {
         let aws = p.aws.map(|s| s.access_key_id.expose().to_string());
         self.pushes.lock().unwrap().push((c.certificate.expose().into(), c.private_key.expose().into(), c.chain.expose().into(), remote.map(String::from), aws));
         Ok(remote.unwrap_or("arn:fake:1").to_string())
+    }
+    fn remove_certificate(&self, _: &Value, p: &Push<'_>, remote: &str) -> roll_secrets::Result<()> {
+        assert!(p.aws.is_some(), "signed in as the sync's role");
+        if self.in_use.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(roll_secrets::Error::Conflict("in_use", format!("fake-cert: {remote} is in use")));
+        }
+        self.removed.lock().unwrap().push(remote.to_string());
+        Ok(())
     }
 }
 
@@ -2586,6 +2596,20 @@ async fn a_certificate_sync_pushes_a_pki_keys_certificate_on_issue_and_each_rota
         let line = key.lines().nth(1).unwrap();
         assert!(!everything.contains(line), "a private key in the audit or events");
     }
+
+    // Deleting it with remove=true deletes the certificate at the target first; while the target
+    // refuses (in use), the sync stays with its error.
+    api.certs.in_use.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (s, e) = api.call(Method::DELETE, &format!("/syncs/{id}?remove=true"), None).await;
+    assert!(s == StatusCode::CONFLICT && e["error"].as_str().unwrap().contains("in use"), "{e}");
+    let kept = api.ok(Method::GET, "/syncs", None).await;
+    assert!(kept["syncs"][0]["id"] == id.as_str() && kept["syncs"][0]["error"].as_str().unwrap().contains("arn:fake:1"), "{kept}");
+    api.certs.in_use.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(api.call(Method::DELETE, &format!("/syncs/{id}?remove=true"), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(*api.certs.removed.lock().unwrap(), ["arn:fake:1"]);
+    assert!(api.ok(Method::GET, "/syncs", None).await["syncs"].as_array().unwrap().is_empty());
+    let audit = api.ok(Method::GET, "/audit?action=sync.delete", None).await.to_string();
+    assert!(audit.contains(&format!("deleted fake-cert sync {id} and removed arn:fake:1 from the target")), "{audit}");
 }
 
 #[tokio::test]
@@ -4366,8 +4390,23 @@ async fn an_intermediate_ca_issues_under_the_customers_own_root() {
     let inter = intermediate(30, "prod.svc.internal").signed_by(&spki, &root_issuer).unwrap();
     let (s, e) = api.call(Method::PUT, &chain_at, Some(json!({ "certificate": inter.pem() }))).await;
     assert!(s == StatusCode::BAD_REQUEST && e["error"].as_str().unwrap().contains("doesn't reach a self-signed root"), "{e}");
+    // A signer that dropped the CSR's name constraints (AWS's plain subordinate templates, openssl
+    // ca's default) is refused, saying so; an admin takes it for a root that constrains elsewhere,
+    // and the CA says so. Each install is checked again.
+    let mut bare = intermediate(30, "svc.internal");
+    bare.name_constraints = None;
+    let bare = bare.signed_by(&spki, &root_issuer).unwrap();
+    let (s, e) = api.call(Method::PUT, &chain_at, Some(json!({ "certificate": bare.pem(), "chain": root_cert.pem() }))).await;
+    let why = e["error"].as_str().unwrap_or_default();
+    assert!(s == StatusCode::BAD_REQUEST && why.contains("has no name constraints") && why.contains("copy_extensions = copy") && why.contains("unconstrained: true"), "{e}");
+    let loose = api.ok(Method::PUT, &chain_at, Some(json!({ "certificate": bare.pem(), "chain": root_cert.pem(), "unconstrained": true }))).await;
+    assert_eq!((loose["status"].as_str(), &loose["unconstrained"]), (Some("active"), &json!(true)));
+    let audit = api.ok(Method::GET, "/audit?action=ca.chain", None).await.to_string();
+    assert!(audit.contains("no name constraints within those domains (unconstrained: true)"), "{audit}");
+    let (s, _) = api.call(Method::PUT, &chain_at, Some(json!({ "certificate": bare.pem(), "chain": root_cert.pem() }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "a renewal without name constraints asks again");
     let ca = api.ok(Method::PUT, &chain_at, Some(json!({ "certificate": inter.pem(), "chain": root_cert.pem() }))).await;
-    assert_eq!((ca["status"].as_str(), ca["domains"].clone()), (Some("active"), json!(["prod.svc.internal"])));
+    assert_eq!((ca["status"].as_str(), ca["domains"].clone(), &ca["unconstrained"]), (Some("active"), json!(["prod.svc.internal"]), &json!(false)));
     assert!(ca.get("csr").is_none() && ca["ca_chain"].as_str().unwrap().ends_with(&root_cert.pem()));
     // A leaf never outlives the intermediate, and comes with the chain.
     let (s, e) = api.call(Method::POST, &format!("/cas/{id}/sign"), Some(json!({ "csr": leaf_csr, "days": 60 }))).await;
