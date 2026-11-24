@@ -3453,6 +3453,39 @@ impl Cursor {
         }
     }
 
+    /// `head` of a cursor of a view without column blocks (`Merge::cols`), as before format 5.
+    #[inline(always)]
+    fn head_plain(&self) -> Option<(&[u8], Option<&[u8]>)> {
+        match self {
+            Cursor::Mem { buf, .. } => buf.front().map(|(k, v)| (k.as_slice(), v.as_deref())),
+            Cursor::Level { ssts, file, block, pos, end, whole, .. } => {
+                if *file >= ssts.len() {
+                    return None;
+                }
+                let b = block.as_ref()?;
+                if pos.index() >= b.len() {
+                    return None;
+                }
+                let k = pos.key();
+                (*whole || end.is_empty() || k < end.as_slice()).then(|| (k, b.value_ref_plain(pos)))
+            }
+        }
+    }
+
+    /// `take` of a cursor of a view without column blocks.
+    #[inline(always)]
+    fn take_plain(&mut self) -> RawEntry {
+        match self {
+            Cursor::Mem { buf, .. } => buf.pop_front().expect("a head entry"),
+            Cursor::Level { block, pos, .. } => {
+                let b = block.as_ref().expect("a head entry");
+                let e = (pos.key().to_vec(), b.value_plain(pos));
+                b.step(pos);
+                e
+            }
+        }
+    }
+
     /// The head entry, owned, and on past it.
     fn take(&mut self) -> RawEntry {
         match self {
@@ -3468,8 +3501,8 @@ impl Cursor {
 
     /// The head entry (not a tombstone) into `batch` under its first `ulen` key bytes (the
     /// user key), by reference; the cursor stays on it.
-    fn push_head(&self, ulen: usize, batch: &mut batch::RowBatch) {
-        if let Cursor::Level { block: Some(b), .. } = self
+    fn push_head<const C: bool>(&self, ulen: usize, batch: &mut batch::RowBatch) {
+        if C && let Cursor::Level { block: Some(b), .. } = self
             && b.is_cols()
         {
             return self.push_head_col(ulen, batch);
@@ -3500,9 +3533,9 @@ impl Cursor {
     /// source: below `bound` (the other sources' smallest head) and the end, the first entry
     /// of a key after the last row pushed, a version at or before `ts`, not a deletion, and
     /// (`resolve`) without out-of-line values. Up to `max`; how many, and the last version.
-    fn run_into(&mut self, ts: u64, bound: Option<&[u8]>, resolve: bool, batch: &mut batch::RowBatch, max: usize) -> (usize, u64) {
+    fn run_into<const C: bool>(&mut self, ts: u64, bound: Option<&[u8]>, resolve: bool, batch: &mut batch::RowBatch, max: usize) -> (usize, u64) {
         // (A column block's out of line at once, nothing live but the arguments.)
-        if let Cursor::Level { block: Some(b), .. } = self
+        if C && let Cursor::Level { block: Some(b), .. } = self
             && b.is_cols()
         {
             return self.run_into_cols(ts, bound, batch, max);
@@ -3717,11 +3750,15 @@ struct Merge {
     rank: Vec<usize>,
     /// The head of the source after those `with_zip` merges, their bound (a buffer kept).
     zbound: Vec<u8>,
+    /// A source is a file with column blocks (format 5): the scan's readers go the way that
+    /// knows them (`Scan::fill_batch_in::<true>`); without, they are as before format 5.
+    cols: bool,
 }
 
 impl Merge {
     fn new(sources: Vec<Cursor>, end: Vec<u8>) -> Merge {
-        Merge { sources, end, cur: None, bound: Vec::new(), bounded: false, rank: Vec::new(), zbound: Vec::new() }
+        let cols = sources.iter().any(|c| matches!(c, Cursor::Level { ssts, .. } if ssts.iter().any(|f| f.meta.cols)));
+        Merge { sources, end, cur: None, bound: Vec::new(), bounded: false, rank: Vec::new(), zbound: Vec::new(), cols }
     }
 
     /// The source holding the smallest raw entry left (None: none below the end). Identical
@@ -3781,7 +3818,8 @@ impl Merge {
     /// caller then sets `cur` to None.
     fn with_zip<R>(&mut self, g: impl FnOnce(&mut [(&sst::Block, &mut sst::BlockPos)], Option<&[u8]>) -> R) -> Option<R> {
         // (Not a column block's: the zips read values in the block's bytes.)
-        let zippable = |c: &Cursor| matches!(c, Cursor::Level { block: Some(b), end, whole, .. } if (*whole || end.is_empty()) && !b.is_cols());
+        let cols = self.cols;
+        let zippable = |c: &Cursor| matches!(c, Cursor::Level { block: Some(b), end, whole, .. } if (*whole || end.is_empty()) && !(cols && b.is_cols()));
         let n = self.rank.iter().take(sst::ZIP_MAX).take_while(|&&i| zippable(&self.sources[i])).count();
         if n < 2 {
             return None;
@@ -4071,13 +4109,19 @@ impl Scan {
 impl Scan {
     /// The source whose head is the next visible row (None: none left), the versions and
     /// deletions before it passed. The row stays at the head until taken or advanced.
-    fn position(&mut self) -> Result<Option<usize>> {
+    fn position<const C: bool>(&mut self) -> Result<Option<usize>> {
         loop {
             let Some(i) = self.merge.min()? else {
                 return Ok(None);
             };
             // (Entries passed over are never copied.)
-            let (k, v) = self.merge.sources[i].head_meta().expect("a head entry");
+            let (k, deleted) = if C {
+                let (k, v) = self.merge.sources[i].head_meta().expect("a head entry");
+                (k, v.is_none())
+            } else {
+                let (k, v) = self.merge.sources[i].head_plain().expect("a head entry");
+                (k, v.is_none())
+            };
             let uk = user_key(k);
             if self.decided.as_deref() == Some(uk) {
                 // Another version of a key decided already. Past a second one, a seek past
@@ -4121,7 +4165,7 @@ impl Scan {
                 None => self.decided = Some(uk.to_vec()),
             }
             self.decided_ts = ts;
-            if v.is_none() {
+            if deleted {
                 self.dead_run += 1;
                 self.merge.sources[i].advance();
                 // (The deletions after it in its block that need no other source: a run at
@@ -4174,7 +4218,10 @@ impl Scan {
         max: usize,
         put_back: Option<&mut dyn FnMut(&[u8], Bytes) -> Result<Bytes>>,
     ) -> Result<()> {
-        let r = self.fill_batch_in(batch, max, put_back);
+        if !self.merge.cols {
+            return self.fill_batch_in::<false>(batch, max, put_back);
+        }
+        let r = self.fill_batch_in::<true>(batch, max, put_back);
         // (Rows of column blocks made for a batch that doesn't take them unmade.)
         if batch.has_col_rows() && !batch.takes_col_rows() {
             batch.make_rows();
@@ -4182,8 +4229,10 @@ impl Scan {
         r
     }
 
+    /// `fill_batch_with` of a scan with column blocks among its sources (`C`) or without (its
+    /// code then as before format 5).
     #[inline(always)]
-    fn fill_batch_in(
+    fn fill_batch_in<const C: bool>(
         &mut self,
         batch: &mut batch::RowBatch,
         max: usize,
@@ -4213,12 +4262,18 @@ impl Scan {
             return Ok(());
         }
         while batch.len() < target {
-            let Some(i) = self.position()? else {
+            let Some(i) = self.position::<C>()? else {
                 break;
             };
             let c = &mut self.merge.sources[i];
-            let (k, v) = c.head_meta().expect("a head entry");
-            if resolve && v == Some(true) {
+            let (k, ext) = if C {
+                let (k, v) = c.head_meta().expect("a head entry");
+                (k, resolve && v == Some(true))
+            } else {
+                let (k, v) = c.head_plain().expect("a head entry");
+                (k, resolve && v.is_some_and(toast::has_external))
+            };
+            if ext {
                 if put_back.is_some() && batch.len() > first {
                     // (Left at the head for the next call, which `position` finds again: not
                     // as a key decided already.)
@@ -4227,7 +4282,7 @@ impl Scan {
                     }
                     break;
                 }
-                let (mut k, v) = c.take();
+                let (mut k, v) = if C { c.take() } else { c.take_plain() };
                 k.truncate(k.len().saturating_sub(8));
                 let v = v.expect("a value");
                 let v = match &mut put_back {
@@ -4243,7 +4298,7 @@ impl Scan {
                 continue;
             }
             let c = &mut self.merge.sources[i];
-            c.push_head(ulen, batch);
+            c.push_head::<C>(ulen, batch);
             c.advance();
             // (The rows after it in its block that need no other source: a block at a time;
             // under range deletions a row at a time, each checked.)
@@ -4251,7 +4306,7 @@ impl Scan {
                 continue;
             }
             let bound = self.merge.bounded.then_some(self.merge.bound.as_slice());
-            let (n, last) = c.run_into(self.ts, bound, resolve, batch, target - batch.len());
+            let (n, last) = c.run_into::<C>(self.ts, bound, resolve, batch, target - batch.len());
             if n > 0 {
                 let d = self.decided.get_or_insert_with(Vec::new);
                 d.clear();
@@ -4293,13 +4348,14 @@ impl Scan {
         if self.rows.is_some() {
             return self.next().map(|r| r.map(|(_, v)| f(&v)));
         }
-        let i = match self.position() {
+        let i = match if self.merge.cols { self.position::<true>() } else { self.position::<false>() } {
             Ok(Some(i)) => i,
             Ok(None) => return None,
             Err(e) => return Some(Err(e)),
         };
+        let cols = self.merge.cols;
         let c = &mut self.merge.sources[i];
-        let (_, v) = c.head().expect("a head entry");
+        let (_, v) = if cols { c.head() } else { c.head_plain() }.expect("a head entry");
         let v = v.expect("a value");
         if self.resolve && toast::has_external(v) {
             let (mut k, v) = c.take();
@@ -4330,13 +4386,24 @@ impl Iterator for Scan {
             }
             return Some(Ok((k.to_vec(), v)));
         }
-        let i = match self.position() {
+        match self.merge.cols {
+            false => self.next_in::<false>(),
+            true => self.next_in::<true>(),
+        }
+    }
+}
+
+impl Scan {
+    /// `next` of a merging scan with column blocks among its sources (`C`) or without.
+    #[inline(always)]
+    fn next_in<const C: bool>(&mut self) -> Option<Result<(Vec<u8>, Bytes)>> {
+        let i = match self.position::<C>() {
             Ok(Some(i)) => i,
             Ok(None) => return None,
             Err(e) => return Some(Err(e)),
         };
         // (The entry's own key cut to the user key: one allocation per row.)
-        let (mut k, v) = self.merge.sources[i].take();
+        let (mut k, v) = if C { self.merge.sources[i].take() } else { self.merge.sources[i].take_plain() };
         k.truncate(k.len().saturating_sub(8));
         let v = v.expect("a value");
         if self.resolve && toast::has_external(&v) {

@@ -1949,6 +1949,29 @@ impl Block {
         self.data.slice(off as usize..(off + n) as usize)
     }
 
+    /// `value` of a block that isn't a column block (a scan of a view without one:
+    /// `Merge::cols`), as before format 5.
+    #[inline]
+    pub fn value_plain(&self, pos: &BlockPos) -> Option<Bytes> {
+        debug_assert!(!self.is_cols());
+        match pos.val_len {
+            TOMBSTONE => None,
+            DERIVED => Some(Bytes::copy_from_slice(&pos.dval)),
+            n => Some(self.data.slice(pos.val_off as usize..(pos.val_off + n) as usize)),
+        }
+    }
+
+    /// `value_ref` of a block that isn't a column block (`value_plain`).
+    #[inline]
+    pub fn value_ref_plain<'a>(&'a self, pos: &'a BlockPos) -> Option<&'a [u8]> {
+        debug_assert!(!self.is_cols());
+        match pos.val_len {
+            TOMBSTONE => None,
+            DERIVED => Some(&pos.dval),
+            n => Some(&self.data[pos.val_off as usize..(pos.val_off + n) as usize]),
+        }
+    }
+
     /// The value at `pos`, borrowed. (A column block's from its rows made, `col_rows`: a
     /// reader of a few rows asks for `value`.)
     pub fn value_ref<'a>(&'a self, pos: &'a BlockPos) -> Option<&'a [u8]> {
