@@ -2045,8 +2045,9 @@ impl Runtime {
         if !endpoints.is_empty() {
             args.extend(["--env".into(), format!("ENDPOINTS={}", serde_json::to_string(&endpoints)?)]);
         }
-        if let Some(crops) = crops_env(&opts.crops) {
-            args.extend(["--env".into(), format!("CROPS={crops}")]);
+        let crops = crops_env(&opts.crops);
+        if !crops.is_empty() {
+            args.extend(["--env".into(), format!("CROPS={}", serde_json::to_string(&crops)?)]);
         }
         // The PNG on the first line, the timings (if the command wrote them) on the second, the
         // phone-width PNG (if it took one) on the third, then the other pages: what each said,
@@ -2685,8 +2686,8 @@ async fn serve(rt: Arc<Runtime>, preview: String, service: String, mut req: Requ
 
 /// The notes' elements Chromium's run crops ($CROPS), checked again (they come from the preview's
 /// code): as their reviewers saw them, viewport and steps (each step's selector checked), the
-/// other engines' left to the other browsers' run. `None`: none.
-fn crops_env(asks: &[crate::ports::CropAsk]) -> Option<String> {
+/// other engines' left to the other browsers' run.
+fn crops_env(asks: &[crate::ports::CropAsk]) -> Vec<serde_json::Value> {
     let steps_ok = |c: &crate::ports::CropAsk| {
         c.steps.iter().all(|s| match s {
             crate::settings::Step::Click(sel) => crate::settings::selector_ok(sel),
@@ -2694,16 +2695,14 @@ fn crops_env(asks: &[crate::ports::CropAsk]) -> Option<String> {
             _ => false,
         })
     };
-    let crops: Vec<serde_json::Value> = asks
-        .iter()
+    asks.iter()
         .filter(|c| c.browser.is_none() && crate::settings::page_path_ok(&c.path) && crate::settings::selector_ok(&c.selector) && !c.note.is_empty() && c.note.len() <= 64)
         .take(crate::store::CROPS_PER_RUN)
         .map(|c| {
             let steps: &[crate::settings::Step] = if steps_ok(c) { &c.steps[..c.steps.len().min(10)] } else { &[] };
             serde_json::json!({ "note": c.note, "path": c.path, "selector": c.selector, "width": c.width, "height": c.height, "steps": steps })
         })
-        .collect();
-    (!crops.is_empty()).then(|| serde_json::to_string(&crops).unwrap_or_default())
+        .collect()
 }
 
 /// The cookie a skew-protected service's page load gets: the push that answered it.
@@ -3177,11 +3176,11 @@ mod tests {
     fn crops_carry_how_their_reviewers_saw_the_page() {
         use crate::settings::Step;
         let ask = |note: &str, browser: Option<&str>, steps: Vec<Step>| crate::ports::CropAsk { note: note.into(), path: "/cart".into(), selector: "button.pay".into(), width: Some(390), height: Some(844), steps, browser: browser.map(String::from) };
-        let env: serde_json::Value = serde_json::from_str(&crops_env(&[ask("rv_1", None, vec![Step::Click("li > button".into()), Step::Press("Escape".into())]), ask("rv_2", Some("webkit-phone"), vec![]), ask("rv_3", None, vec![Step::Click("a[href='//x']{".into())])]).unwrap()).unwrap();
+        let env = crops_env(&[ask("rv_1", None, vec![Step::Click("li > button".into()), Step::Press("Escape".into())]), ask("rv_2", Some("webkit-phone"), vec![]), ask("rv_3", None, vec![Step::Click("a[href='//x']{".into())])]);
         assert_eq!(env[0], serde_json::json!({ "note": "rv_1", "path": "/cart", "selector": "button.pay", "width": 390, "height": 844, "steps": [{ "click": "li > button" }, { "press": "Escape" }] }));
-        assert_eq!(env.as_array().unwrap().len(), 2, "WebKit's is the other browsers' run's");
+        assert_eq!(env.len(), 2, "WebKit's is the other browsers' run's");
         assert_eq!(env[1]["steps"], serde_json::json!([]), "a step its checks refuse: none of them");
-        assert_eq!(crops_env(&[ask("rv_4", Some("firefox"), vec![])]), None);
+        assert!(crops_env(&[ask("rv_4", Some("firefox"), vec![])]).is_empty());
     }
 
     /// A screenshot run's other pages are only those asked for, each once, their numbers
