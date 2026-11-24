@@ -59,9 +59,12 @@ const crop = async (c) => {
     await el.scrollIntoViewIfNeeded({ timeout: 3000 });
     const b = await el.boundingBox();
     if (!b || !(b.width > 0 && b.height > 0)) return;
+    // A margin around it, within the page's width (a clip past it is refused), at most 1280 by
+    // 800, from the whole page (it may sit below the fold).
     const m = 24;
-    const x = Math.max(0, b.x - m), y = Math.max(0, b.y - m);
-    const png = await page.screenshot({ clip: { x, y, width: Math.min(b.width + 2 * m, 1280), height: Math.min(b.height + 2 * m, 800) } });
+    const x = Math.max(0, b.x - m), y = Math.max(0, b.y + (await page.evaluate(() => scrollY)) - m);
+    const width = Math.max(1, Math.min(b.width + 2 * m, 1280, w - x));
+    const png = await page.screenshot({ fullPage: true, clip: { x, y, width, height: Math.min(b.height + 2 * m, 800) } });
     if (png.length > 512 * 1024) return;
     process.stdout.write(JSON.stringify({ crop: c.note, png: png.toString("base64") }) + "\n");
   } catch (e) {
