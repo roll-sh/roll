@@ -885,7 +885,7 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                     let found = match inspect_call(ctx, find::NAME, &args).await {
                         Some(refused) => refused,
                         None => {
-                            let found = find::run(&args, has, |tool, a, quiet| {
+                            let found = find::run(&args, &ctx.m.config.web_url, has, |tool, a, quiet| {
                                 let ctx = ctx.clone();
                                 async move { call_as(&ctx, tool, a, quiet.then_some(find::NAME)).await }
                             });

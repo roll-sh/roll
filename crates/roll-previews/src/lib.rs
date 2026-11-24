@@ -236,6 +236,15 @@ pub struct GrewSpan {
     pub main_ms: u64,
 }
 
+/// A token of roll's issuer for a preview's own service (`GET …/oidc/{token}`): Vercel's OIDC
+/// federation's, for a cloud's trust.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct OidcToken {
+    pub token: String,
+    /// Unix seconds.
+    pub expires_at: i64,
+}
+
 /// A look at a data branch as a reviewer sees it from the sheet (Neon's Tables): its tables, or a
 /// table's first rows, read as the branch's own role and read-only (`GET …/data/{resource}`).
 #[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
