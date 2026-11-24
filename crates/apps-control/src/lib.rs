@@ -18,6 +18,7 @@ pub mod bots;
 pub mod attacks;
 pub mod attack_mode;
 pub mod advice;
+pub mod build_steps;
 pub mod visitor_token;
 pub mod backups;
 pub mod browser;

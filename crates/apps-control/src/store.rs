@@ -1033,6 +1033,7 @@ fn deploy_row(r: &code_sql::Row<'_>) -> code_sql::Result<Deployment> {
         error_detail,
         fix,
         steps: Vec::new(),
+        build_steps: Vec::new(),
         approved_by: Vec::new(),
         url: None,
     })
@@ -1081,6 +1082,7 @@ impl Store {
         db.add_column("env_access", "sso", "TEXT")?;
         // A deployment's image's size, where the runtime says (Fly's release sizes).
         db.add_column("deployments", "image_bytes", "INTEGER")?;
+        db.add_column("deployments", "build_steps", "TEXT")?;
         // Paths whose CORS preflights pass the gate (`access.preflight`), as JSON.
         db.add_column("env_access", "preflight", "TEXT")?;
         // Services let in with roll's token for them (`access.callers`), as JSON.
@@ -1853,6 +1855,17 @@ impl Store {
         let now = self.now()?;
         self.db.execute("INSERT INTO deploy_steps (deployment, step, at) VALUES (?, ?, ?) ON CONFLICT (deployment, step) DO NOTHING", params![deployment, step, now])?;
         Ok(())
+    }
+
+    /// Its build's steps ([`crate::build_steps`]), as JSON.
+    pub fn set_build_steps(&self, id: &str, steps: &str) -> Result<()> {
+        self.db.execute("UPDATE deployments SET build_steps = ? WHERE id = ?", params![steps, id])?;
+        Ok(())
+    }
+
+    pub fn build_steps(&self, id: &str) -> Result<Vec<crate::build_steps::BuildStep>> {
+        let j: Option<String> = self.db.query_row("SELECT build_steps FROM deployments WHERE id = ?", [id], |r| r.get(0)).optional()?.flatten();
+        Ok(j.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default())
     }
 
     pub fn steps(&self, deployment: &str) -> Result<Vec<Step>> {
