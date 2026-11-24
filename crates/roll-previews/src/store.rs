@@ -2184,7 +2184,7 @@ impl Store {
                     if g.len() != 12 || !g.bytes().all(|b| b.is_ascii_hexdigit()) {
                         return Err(Error::BadRequest("a group is 12 hex characters (visual_review.pages[].group)".into()));
                     }
-                    let these: Vec<String> = c.query("SELECT path FROM page_shots WHERE preview_id = ? AND substr(base_sig, 1, 12) = ?", params![id, g], |r| r.get(0))?;
+                    let these: Vec<String> = c.query("SELECT path FROM page_shots WHERE preview_id = ? AND base_sig = ?", params![id, g], |r| r.get(0))?;
                     if these.is_empty() {
                         return Err(Error::NotFound(format!("no pages changed as group {g}")));
                     }
@@ -2253,7 +2253,7 @@ impl Store {
                 let unstable = if path.is_empty() { first_unstable } else { pages.iter().any(|p| p.path == *path && p.unstable) };
                 // Its group, when another page under review shares it.
                 let sig = pages.iter().find(|p| p.path == *path).and_then(|p| p.base_group.clone());
-                let group = sig.filter(|g| changed.iter().filter(|(q, _)| pages.iter().any(|p| p.path == *q && p.base_group.as_ref() == Some(g))).count() > 1).map(|g| g[..12].to_string());
+                let group = sig.filter(|g| changed.iter().filter(|(q, _)| pages.iter().any(|p| p.path == *q && p.base_group.as_ref() == Some(g))).count() > 1);
                 crate::PageReview { path: path.clone(), percent: *percent, by: a.as_ref().map(|(by, _)| by.clone()), at: a.map(|(_, at)| at), unstable, group }
             })
             .collect();

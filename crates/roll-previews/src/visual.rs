@@ -25,10 +25,10 @@ pub fn changed(before: &[u8], after: &[u8]) -> Option<f64> {
 }
 
 /// [`changed`], and what the change is (Percy's grouped diffs): the area that differs, as it
-/// was and as it is, each reduced to an 8 × 8 average hash. Two pages changed the same way (a
-/// header's new logo on every page, at every width and in every browser where it lands alike)
-/// have the same signature, so a reviewer accepts them once. `None` for the signature when
-/// nothing differs.
+/// was and as it is, each reduced to an 8 × 8 average hash and its brightness, digested to 12
+/// hex characters. Two pages changed the same way (a header's new logo on every page, at every
+/// width and in every browser where it lands alike) have the same signature, so a reviewer
+/// accepts them once. `None` for the signature when nothing differs.
 pub fn compare(before: &[u8], after: &[u8]) -> Option<(f64, Option<String>)> {
     let (a, b) = (decode(before)?, decode(after)?);
     let (w, h) = (a.width().max(b.width()), a.height().max(b.height()));
@@ -55,15 +55,24 @@ pub fn compare(before: &[u8], after: &[u8]) -> Option<(f64, Option<String>)> {
         }
     }
     let share = differ as f64 / (w as u64 * h as u64) as f64;
-    Some((share, bbox.map(|r| format!("{:016x}{:016x}", average_hash(&a, r), average_hash(&b, r)))))
+    let signature = bbox.map(|r| {
+        use sha2::Digest as _;
+        let ((was, was_mean), (is, is_mean)) = (average_hash(&a, r), average_hash(&b, r));
+        // The shapes, and how bright each side is (a uniform area's hash is all zeros: a button
+        // gone red and one gone blue aren't the same change).
+        let raw = format!("{was:016x}{is:016x}{was_mean:02x}{is_mean:02x}");
+        let digest = sha2::Sha256::digest(raw.as_bytes());
+        digest.iter().take(6).map(|b| format!("{b:02x}")).collect::<String>()
+    });
+    Some((share, signature))
 }
 
 /// An 8 × 8 average hash of `img` inside `(x0, y0, x1, y1)` (clipped to it): each cell's
-/// brightness against the mean.
-fn average_hash(img: &RgbaImage, (x0, y0, x1, y1): (u32, u32, u32, u32)) -> u64 {
+/// brightness against the mean; and that mean, in 16 steps.
+fn average_hash(img: &RgbaImage, (x0, y0, x1, y1): (u32, u32, u32, u32)) -> (u64, u8) {
     let (x1, y1) = (x1.min(img.width()), y1.min(img.height()));
     if x0 >= x1 || y0 >= y1 {
-        return 0;
+        return (0, 0);
     }
     let mut cells = [0f64; 64];
     for (i, cell) in cells.iter_mut().enumerate() {
@@ -87,7 +96,7 @@ fn average_hash(img: &RgbaImage, (x0, y0, x1, y1): (u32, u32, u32, u32)) -> u64 
         *cell = if n > 0.0 { sum / n } else { 0.0 };
     }
     let mean = cells.iter().sum::<f64>() / 64.0;
-    cells.iter().enumerate().fold(0u64, |h, (i, c)| if *c > mean { h | (1 << i) } else { h })
+    (cells.iter().enumerate().fold(0u64, |h, (i, c)| if *c > mean { h | (1 << i) } else { h }), (mean / 16.0) as u8)
 }
 
 /// The diff's largest picture: a screenshot is a viewport (1280 × 800, a phone's 780 × 1688), and
@@ -179,6 +188,21 @@ pub fn text_diff(then: &str, now: &str) -> crate::TextDiff {
 
 #[cfg(test)]
 mod tests {
+    /// Pages changed the same way have one signature wherever the change sits (Percy's grouped
+    /// diffs); another change, a color included, has another; an unchanged page none.
+    #[test]
+    fn the_same_change_on_two_pages_has_one_signature() {
+        // A 6 × 6 square at (x, y) on a white 40 × 40 page, in `color`.
+        let page = |x: u32, y: u32, color: [u8; 4]| png(40, 40, move |px, py| if (x..x + 6).contains(&px) && (y..y + 6).contains(&py) { color } else { [255, 255, 255, 255] });
+        let (black, red, blue) = ([0, 0, 0, 255], [220, 30, 30, 255], [30, 30, 220, 255]);
+        let sig = |before: &[u8], after: &[u8]| super::compare(before, after).unwrap().1;
+        let here = sig(&page(2, 2, black), &page(2, 2, red));
+        assert!(here.as_ref().is_some_and(|s| s.len() == 12));
+        assert_eq!(sig(&page(20, 30, black), &page(20, 30, red)), here, "the same change elsewhere");
+        assert_ne!(sig(&page(2, 2, black), &page(2, 2, blue)), here, "a button gone blue isn't one gone red");
+        assert_eq!(sig(&page(2, 2, black), &page(2, 2, black)), None, "nothing changed");
+    }
+
     #[test]
     fn a_page_s_words_against_main_s() {
         let d = super::text_diff("Shop\nCheckout\nHelp\nHelp", "Shop\nPay now\n\n  Help  ");
