@@ -1129,6 +1129,10 @@ pub struct PageCheck {
     /// Paint in the lab.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step_ms: Option<u32>,
+    /// What its change against the baseline is ([`crate::visual::compare`]'s signature): pages
+    /// with the same one changed the same way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_group: Option<String>,
 }
 
 /// What a page's session found besides its picture: the first page's checks, for another page.
@@ -1147,10 +1151,6 @@ pub struct PageReport {
     /// Its slowest step's time to the next paint (ms).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step_ms: Option<u32>,
-    /// What its change against the baseline is ([`crate::visual::compare`]'s signature): pages
-    /// with the same one changed the same way.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base_group: Option<String>,
 }
 
 /// A page's checks against main's page at the same path.
