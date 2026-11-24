@@ -62,6 +62,11 @@ impl Engine {
         }
         self.store.resolve_note(id, note, by)?;
         self.store.log(id, &format!("{by} resolved a note on its page"))?;
+        // Said on the change too: its pull request and the note's Slack thread hear it. Best
+        // effort: the page has it resolved either way.
+        if let Err(e) = self.source.note_resolved(change, note, by).await {
+            tracing::warn!(preview = %id, error = %e, "previews: saying a note was resolved on its change");
+        }
         Ok(())
     }
 
