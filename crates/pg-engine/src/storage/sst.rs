@@ -537,6 +537,10 @@ pub struct SstWriter {
     /// holds the entries it held in format 1, and the cache holds it as it did).
     raw1: usize,
     hashes: Vec<u64>,
+    /// Hashes of keys that came from the file `known_in` (a compaction's L1 input: `add_from`),
+    /// kept apart: when the writer adopts that file's filter they are in it already.
+    known: Vec<u64>,
+    known_in: Option<u64>,
     last_user_hash: Option<u64>,
     /// A key not an index entry was added: the file gets a bloom filter (one of index
     /// entries alone gets none, `index_entry`).
@@ -729,6 +733,8 @@ impl SstWriter {
             block_target: None,
             raw1: 0,
             hashes: Vec::new(),
+            known: Vec::new(),
+            known_in: None,
             last_user_hash: None,
             rows: false,
             offset: 0,
@@ -883,6 +889,13 @@ impl SstWriter {
 
     /// Keys must arrive in strictly increasing order.
     pub fn add(&mut self, key: &[u8], value: Option<&[u8]>) -> Result<()> {
+        self.add_from(key, value, None)
+    }
+
+    /// `add` of an entry read from the file with id `from` (a compaction's L1 input), whose
+    /// bloom filter holds its user key: when the writer adopts that file's filter (`adopt`),
+    /// the key's bits aren't set again (`copied_bloom`).
+    pub fn add_from(&mut self, key: &[u8], value: Option<&[u8]>, from: Option<u64>) -> Result<()> {
         if self.first_key.is_none() {
             self.first_key = Some(key.to_vec());
         }
@@ -910,9 +923,17 @@ impl SstWriter {
         if !self.index_run {
             let h = if self.v2 { hash64_2(user_key(key)) } else { hash64(user_key(key)) };
             if self.last_user_hash != Some(h) {
-                match &mut self.bloom {
-                    Some((b, m)) => bloom_set(b, *m, h),
-                    None => self.hashes.push(h),
+                match (&mut self.bloom, from) {
+                    (Some((b, m)), _) => bloom_set(b, *m, h),
+                    (None, Some(f)) => {
+                        // (Keys of one file at a time: another file's before them are not.)
+                        if self.known_in != Some(f) {
+                            self.hashes.append(&mut self.known);
+                            self.known_in = Some(f);
+                        }
+                        self.known.push(h);
+                    }
+                    (None, None) => self.hashes.push(h),
                 }
                 self.last_user_hash = Some(h);
             } else {
@@ -1155,6 +1176,7 @@ impl SstWriter {
             Some((b, _)) => b,
             None if !self.copied.is_empty() => self.copied_bloom()?,
             None => {
+                self.hashes.append(&mut self.known);
                 let nbits = (self.hashes.len() * BLOOM_BITS_PER_KEY).max(64);
                 let mut bloom = vec![0u8; nbits.div_ceil(8)];
                 let m = FastMod::new(bloom.len() as u64 * 8);
@@ -1219,7 +1241,11 @@ impl SstWriter {
     /// at most 60% of them set: 10 bits a key with 7 set each sets about half); else made
     /// for its keys, the copied blocks' read again for theirs.
     fn copied_bloom(&mut self) -> Result<Vec<u8>> {
-        let keys = self.copied_keys as usize + self.hashes.len();
+        // (Keys of the adopted file are in its filter already; another file's are not.)
+        if self.known_in != self.adopted.as_ref().map(|f| f.meta.id) {
+            self.hashes.append(&mut self.known);
+        }
+        let keys = self.copied_keys as usize + self.hashes.len() + self.known.len();
         let mut b = std::mem::take(&mut self.carried);
         if !b.is_empty() {
             let m = FastMod::new(b.len() as u64 * 8);
@@ -1232,6 +1258,7 @@ impl SstWriter {
                 return Ok(b);
             }
         }
+        self.hashes.append(&mut self.known);
         let f = self.adopted.clone().ok_or_else(|| internal("copied blocks without their file"))?;
         let mut pos = BlockPos::default();
         for &i in &self.copied {
@@ -2380,13 +2407,14 @@ fn zip_n<const N: usize>(
 }
 
 /// Blocks' entries in key order, every version and deletion (a compaction's merge; up to
-/// `ZIP_MAX` blocks), each passed to `f` (storage key, value: None for a deletion), from the
+/// `ZIP_MAX` blocks), each passed to `f` (storage key, value: None for a deletion, its block's
+/// place in `srcs`), from the
 /// entries their positions are on (each the head of its source; together the smallest heads,
 /// below `bound`, the next source's head, if any), while every block has one, below `bound`,
 /// whose key fits a buffer. The positions are left on each side's first entry not passed, as
 /// `Block::step` leaves them. Whether it passed any.
 #[inline(never)]
-pub fn zip_entries(srcs: &mut [(&Block, &mut BlockPos)], bound: Option<&[u8]>, f: &mut dyn FnMut(&[u8], Option<&[u8]>) -> Result<()>) -> Result<bool> {
+pub fn zip_entries(srcs: &mut [(&Block, &mut BlockPos)], bound: Option<&[u8]>, f: &mut dyn FnMut(&[u8], Option<&[u8]>, usize) -> Result<()>) -> Result<bool> {
     let mut s: smallvec::SmallVec<[ZipSide; ZIP_MAX]> = smallvec::SmallVec::new();
     for (b, p) in srcs.iter() {
         match ZipSide::new(b, p, 0) {
@@ -2408,7 +2436,7 @@ pub fn zip_entries(srcs: &mut [(&Block, &mut BlockPos)], bound: Option<&[u8]>, f
 
 /// `zip_entries`' merge of `N` sides.
 #[inline(always)]
-fn entries_n<const N: usize>(s: &mut [ZipSide; N], bound: Option<&[u8]>, f: &mut dyn FnMut(&[u8], Option<&[u8]>) -> Result<()>) -> Result<bool> {
+fn entries_n<const N: usize>(s: &mut [ZipSide; N], bound: Option<&[u8]>, f: &mut dyn FnMut(&[u8], Option<&[u8]>, usize) -> Result<()>) -> Result<bool> {
     let mut moved = false;
     let mut dval = [0u8; ZK];
     let bound = bound.map(ZipBound::new);
@@ -2436,7 +2464,7 @@ fn entries_n<const N: usize>(s: &mut [ZipSide; N], bound: Option<&[u8]>, f: &mut
             }
             n => Some(&x.blk.data[x.vat..x.vat + n as usize]),
         };
-        f(k, v)?;
+        f(k, v, m)?;
         moved = true;
         if !x.step() {
             break;

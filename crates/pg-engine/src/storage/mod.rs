@@ -136,8 +136,9 @@ impl Compacted<'_> {
     /// Entry `k` (a storage key) of an input, in key order: written, or dropped when no one
     /// reads it any more. (Called through a reference from the merge and its zipped blocks:
     /// one body.)
+    /// `from`: the id of the L1 input it was read from (`SstWriter::add_from`).
     #[inline(never)]
-    fn entry(&mut self, k: &[u8], v: Option<&[u8]>) -> Result<()> {
+    fn entry(&mut self, k: &[u8], v: Option<&[u8]>, from: Option<u64>) -> Result<()> {
         let uk = user_key(k);
         let ts = key_ts(k);
         let first_version = !self.started || !sst::short_eq(&self.cur_user, uk);
@@ -173,7 +174,7 @@ impl Compacted<'_> {
         if self.writer.is_none() {
             self.writer = Some(self.store.sst_writer(self.store.next_id.fetch_add(1, Ordering::Relaxed), true)?);
         }
-        self.writer.as_mut().unwrap().add(k, v)?;
+        self.writer.as_mut().unwrap().add_from(k, v, from)?;
         if first_version || self.part.1 == 0 {
             self.set_part(uk);
         }
@@ -2688,13 +2689,23 @@ impl Store {
                 out.copy_blocks(&mut merge, li, &mut copies)?;
             }
             let Some(i) = merge.min()? else { break };
+            // (The L1 input file the L1 source is in: its keys are in its filter.)
+            let l1_file = merge.sources[li].file_id();
             // (Interleaved files, an UPDATE's versions over the table, a block at a time.)
-            if merge.rank.len() > 1 && merge.with_zip(|srcs, bound| sst::zip_entries(srcs, bound, &mut |k, v| out.entry(k, v))).transpose()? == Some(true) {
+            if merge.rank.len() > 1
+                && merge
+                    .with_zip(|srcs, bound, picked| {
+                        let l1 = (picked.last() == Some(&li)).then_some(srcs.len() - 1);
+                        sst::zip_entries(srcs, bound, &mut |k, v, s| out.entry(k, v, if l1 == Some(s) { l1_file } else { None }))
+                    })
+                    .transpose()?
+                    == Some(true)
+            {
                 merge.cur = None;
                 continue;
             }
             let (k, v) = merge.sources[i].head().expect("a head entry");
-            out.entry(k, v)?;
+            out.entry(k, v, if i == li { l1_file } else { None })?;
             merge.sources[i].advance();
         }
         if let Some(w) = out.writer.take() {
@@ -3363,6 +3374,14 @@ impl Cursor {
         }
     }
 
+    /// The id of the file a level's cursor is in (None: a memtable's, or past its files).
+    fn file_id(&self) -> Option<u64> {
+        match self {
+            Cursor::Level { ssts, file, .. } => ssts.get(*file).map(|s| s.meta.id),
+            Cursor::Mem { .. } => None,
+        }
+    }
+
     /// The entry `fill` positioned on (None: none left), without reading further.
     fn head(&self) -> Option<(&[u8], Option<&[u8]>)> {
         match self {
@@ -3677,7 +3696,8 @@ impl Merge {
     /// next source's head as their bound (`sst::zip_rows`, `sst::zip_entries`). Only the source
     /// `min` chose last may have moved since; a `g` that moves any makes the ranks stale: the
     /// caller then sets `cur` to None.
-    fn with_zip<R>(&mut self, g: impl FnOnce(&mut [(&sst::Block, &mut sst::BlockPos)], Option<&[u8]>) -> R) -> Option<R> {
+    /// `g` also gets the sources' indexes, in the order of their blocks.
+    fn with_zip<R>(&mut self, g: impl FnOnce(&mut [(&sst::Block, &mut sst::BlockPos)], Option<&[u8]>, &[usize]) -> R) -> Option<R> {
         let zippable = |c: &Cursor| matches!(c, Cursor::Level { block: Some(_), end, whole, .. } if *whole || end.is_empty());
         let n = self.rank.iter().take(sst::ZIP_MAX).take_while(|&&i| zippable(&self.sources[i])).count();
         if n < 2 {
@@ -3693,6 +3713,8 @@ impl Merge {
             None => None,
         };
         let picked = &self.rank[..n];
+        let mut order: smallvec::SmallVec<[usize; sst::ZIP_MAX]> = picked.iter().copied().collect();
+        order.sort_unstable();
         let mut srcs: smallvec::SmallVec<[(&sst::Block, &mut sst::BlockPos); sst::ZIP_MAX]> = self
             .sources
             .iter_mut()
@@ -3703,7 +3725,7 @@ impl Merge {
                 Cursor::Mem { .. } | Cursor::Level { .. } => None,
             })
             .collect();
-        Some(g(&mut srcs, bound))
+        Some(g(&mut srcs, bound, &order))
     }
 
     /// Every source on to its first entry >= `target`.
@@ -4234,7 +4256,7 @@ impl Scan {
     #[inline(never)]
     fn zip(&mut self, resolve: bool, batch: &mut batch::RowBatch, max: usize) -> bool {
         let (ts, decided) = (self.ts, self.decided.get_or_insert_with(Vec::new));
-        let Some(z) = self.merge.with_zip(|srcs, bound| sst::zip_rows(srcs, bound, ts, max, resolve, batch, decided)) else {
+        let Some(z) = self.merge.with_zip(|srcs, bound, _| sst::zip_rows(srcs, bound, ts, max, resolve, batch, decided)) else {
             return false;
         };
         if !z.moved {
