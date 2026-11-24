@@ -37,8 +37,9 @@ pub struct Note {
 
 /// How a note's reviewer saw its page (the note's own words, from the page's button): their
 /// viewport, and the steps on that page roll's browser can take again: clicks (checking a box
-/// is one) and Enter or Escape, after their last page change, the last 10. Typing isn't among
-/// them (the button keeps how many characters, never what), nor a choice in a list.
+/// is one), typing (as many `x`s as they typed: the button keeps how many characters, never
+/// what) and Enter or Escape, after their last page change, the last 10. A choice in a list
+/// isn't among them (the button doesn't say which).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Seen {
     pub width: Option<u32>,
@@ -90,6 +91,9 @@ impl Seen {
             }
             let step = if let Some(sel) = what.strip_prefix("click ").or_else(|| what.strip_prefix("check ")).or_else(|| what.strip_prefix("uncheck ")) {
                 crate::settings::selector_ok(sel).then(|| crate::settings::Step::Click(sel.to_string()))
+            } else if let Some((n, sel)) = what.strip_prefix("type ").and_then(|r| r.split_once(" characters in ")) {
+                // Their length, never their words: the field sees as much typing as it did.
+                n.parse::<usize>().ok().filter(|n| (1..=200).contains(n)).filter(|_| crate::settings::selector_ok(sel)).map(|n| crate::settings::Step::Type(sel.to_string(), "x".repeat(n)))
             } else if let Some(rest) = what.strip_prefix("press ") {
                 rest.split_once(" in ").map(|(k, _)| k).filter(|k| matches!(*k, "Enter" | "Escape")).map(|k| crate::settings::Step::Press(k.to_string()))
             } else {
@@ -278,9 +282,13 @@ mod tests {
         let body = "**Feedback on the preview** · [`/cart`](https://x/cart) · `button.pay`\n\nToo small\n\n<sub>390x844 viewport · Safari 18 on iOS · roll preview pv_1</sub>\n\n<details><summary>On the page: 6 steps</summary>\n\nWhat they did:\n\n1. `30s before · click a.shop`\n2. `20s before · go to /cart`\n3. `9s before · click li:nth-of-type(2) > button`\n4. `8s before · type 8 characters in #coupon`\n5. `6s before · check input.gift`\n6. `2s before · press Escape in body`\n\n- error: `TypeError: x is undefined`\n\n</details>";
         let seen = super::Seen::of(body);
         assert_eq!((seen.width, seen.height), (Some(390), Some(844)));
-        assert_eq!(seen.steps, [Step::Click("li:nth-of-type(2) > button".into()), Step::Click("input.gift".into()), Step::Press("Escape".into())], "only what came after the page change");
+        assert_eq!(
+            seen.steps,
+            [Step::Click("li:nth-of-type(2) > button".into()), Step::Type("#coupon".into(), "xxxxxxxx".into()), Step::Click("input.gift".into()), Step::Press("Escape".into())],
+            "only what came after the page change, typing as long as theirs"
+        );
         assert_eq!(seen.browser.as_deref(), Some("webkit-phone"), "every browser on iOS is WebKit at a phone's size");
-        assert_eq!(seen.label().as_deref(), Some("WebKit, 390x844, after 3 steps"));
+        assert_eq!(seen.label().as_deref(), Some("WebKit, 390x844, after 4 steps"));
         let engine = |sub: &str| super::Seen::of(&format!("**Feedback on the preview** · `/`\n\nx\n\n<sub>{sub}</sub>")).browser;
         assert_eq!(engine("1280x800 viewport · Firefox 133 on Windows"), Some("firefox".into()));
         assert_eq!(engine("1280x800 viewport · Safari 18 on macOS"), Some("webkit".into()));

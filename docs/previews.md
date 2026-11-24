@@ -1765,9 +1765,10 @@ land on the change.
   `a_notes_element_is_cropped_by_the_next_screenshot`.
   As its reviewer saw it (Jam's recordings, without trusting the reviewer's browser): a note
   says the reviewer's viewport and their last steps (#879), so roll's browser takes it at that
-  viewport (a phone's emulated as one) after taking their clicks again (checking a box is one)
-  and Enter or Escape, from their last page change on, the last 10, 10 s at most; typing and
-  choices aren't taken (the button keeps how many characters, never what). Roll's own browser
+  viewport (a phone's emulated as one) after taking their clicks again (checking a box is one),
+  their typing (as many `x`s as they typed: the button keeps how many characters, never what)
+  and Enter or Escape, from their last page change on, the last 10, 10 s at most; a choice in a
+  list isn't taken (the button doesn't say which). Roll's own browser
   does it, so the page's code still can't forge the picture. The crop says how it was taken
   (`crop_as` in the notes list, `X-Roll-Crop-As` on the picture: "390x844, after 2 steps";
   the sheet's "As they saw it"). In their browser's engine too (the note's "Safari 18 on iOS"):
@@ -2764,8 +2765,9 @@ Ranked by what a person notices first. Done so far:
    and guests' notes go through it.
 4. **`note_mail` in the dashboard's rules**: the setting is in the API and roll MCP, not the page.
 5. **`roll preview try`**: an agent's page drive (`…/try`) from the CLI, as `roll preview fetch`.
-6. **A note in its reviewer's engine, typing**: their typing where the button can say what
-   without the value (a field's length, a choice's index).
+6. **A note in its reviewer's engine, choices** (typing in review: taken again as long as
+   theirs): a choice in a list isn't taken yet; the button would say its index, and steps need a
+   `choose` kind for it.
 7. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
    is kept only where the product puts a branch back in place, keeping its id (their delete
    guards check it); each needs its control plane's reset `from`, as pg-control's.
