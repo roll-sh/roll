@@ -1962,12 +1962,24 @@ the rest are skipped by the tests' own prerequisites.
   (doc-values buffers, a segment's fielddata) doesn't count. A document's `_source` is parsed
   once per document, as Elasticsearch's `SourceLookup` does, so changes persist across reads.
   It's charged, but left out of the limit. So a script can churn through temporaries far beyond
-  the limit, as long as it doesn't keep them. Freeing data the execution didn't make (`params`,
-  `_source`, an earlier document's leftovers) never lets it grow the thread by more than the
-  limit: such frees can offset what it allocates, but never take its balance below zero. A
-  script run inside another one counts against the caller once it ends. That covers a runtime
-  field another script reads, up to 5 levels deep. While it runs, it also has an account of its
-  own, so one thread holds at most about six times the limit, plus the document's `_source`. Past the limit roll answers like that guard: a
+  the limit, as long as it doesn't keep them. Freeing data the execution didn't make never
+  lets it grow the thread by more than the limit. That covers `params` and an earlier
+  document's leftovers. Such frees can offset what it
+  allocates, but never take its balance below zero. A script run inside another one counts
+  against the caller once it ends. That covers a runtime field another script reads, up to 5
+  levels deep. While it runs, it also has an account of its own, and it reads its own copy of
+  `_source`. So one thread holds at most about six times the limit plus the document's
+  `_source`, counting each nesting level. What a runtime field is charged to the script
+  reading it leaves out the part of the document's `_source` it keeps. That part is measured as
+  what dropping the `_source` didn't free, so data the field took out of the `_source` can go
+  uncharged up to one document's `_source` per field. A lenient runtime field
+  (`on_script_error: continue`) skips the documents its script fails on. That includes this
+  limit's `painless_error`, as Elasticsearch 9.5.5 skips a document for any failure there, a
+  `painless_error` or a stack overflow too. Only failures that aren't the script's stop the
+  request: the breaker refusing what the field keeps (429), even when the script also failed
+  on that document, and a cancelled or timed-out search. After such a failure no script of the
+  search runs again in that segment, a runtime field's or a sort key's (`top_hits` included). Past the limit roll
+  answers like that guard: a
   `script_exception` caused by an uncatchable `painless_error`, `script allocation limit
   exceeded: allocation of [N] bytes brings the running total to [T] bytes, over the limit of
   [L] bytes`, without a script portion. Both guards apply in every context (`_execute`,
