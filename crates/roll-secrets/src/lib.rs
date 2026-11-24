@@ -621,6 +621,9 @@ impl Secrets {
         db.add_column("saas_rotators", "credential_expires_at", "INTEGER")?;
         db.ensure_schema(transit::SCHEMA)?;
         db.ensure_schema(pki::SCHEMA)?;
+        // An intermediate CA (pki.rs): its CSR while it's pending, then the certificates above it.
+        db.add_column("cas", "csr", "TEXT")?;
+        db.add_column("cas", "chain", "TEXT")?;
         // ACME on a CA (acme.rs): whether its bindings' names are pre-authorized.
         db.ensure_schema(acme::SCHEMA)?;
         db.add_column("cas", "acme_preauthorize", "INTEGER")?;

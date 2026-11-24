@@ -4116,6 +4116,75 @@ async fn a_projects_ca_signs_short_lived_certificates_for_its_names_only() {
     assert_eq!(api.call(Method::DELETE, &format!("/cas/{}", ca["id"].as_str().unwrap()), None).await.0, StatusCode::CONFLICT);
 }
 
+#[tokio::test]
+async fn an_intermediate_ca_issues_under_the_customers_own_root() {
+    use x509_parser::prelude::*;
+    let api = Api::new().await;
+    let ca = api.ok(Method::POST, "/cas", Some(json!({ "name": "under-root", "intermediate": true, "domains": ["svc.internal"] }))).await;
+    let id = ca["id"].as_str().unwrap().to_string();
+    assert_eq!((ca["status"].as_str(), ca["certificate"].as_str()), (Some("pending"), Some("")));
+    let csr_pem = ca["csr"].as_str().unwrap();
+    // A throwaway offline root (obviously fake) signs the CSR roll answered, as a customer's would.
+    let root_key = rcgen::KeyPair::generate().unwrap();
+    let mut root = rcgen::CertificateParams::default();
+    root.distinguished_name.push(rcgen::DnType::CommonName, "Example Fake Offline Root");
+    root.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    root.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign, rcgen::KeyUsagePurpose::CrlSign];
+    let root_cert = root.self_signed(&root_key).unwrap();
+    let root_issuer = rcgen::Issuer::from_params(&root, &root_key);
+    let (_, csr_der) = parse_x509_pem(csr_pem.as_bytes()).unwrap();
+    let (_, csr) = x509_parser::certification_request::X509CertificationRequest::from_der(&csr_der.contents).unwrap();
+    csr.verify_signature().expect("the CSR is signed with the CA's key");
+    let wanted = csr.requested_extensions().unwrap().any(|e| matches!(e, ParsedExtension::NameConstraints(_)));
+    assert!(wanted, "the CSR asks for the CA's name constraints");
+    let spki = rcgen::SubjectPublicKeyInfo::from_der(csr.certification_request_info.subject_pki.raw).unwrap();
+    let intermediate = |days: i64, permitted: &str| {
+        let mut p = rcgen::CertificateParams::default();
+        p.distinguished_name.push(rcgen::DnType::CommonName, "roll intermediate");
+        p.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Constrained(0));
+        p.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign, rcgen::KeyUsagePurpose::CrlSign];
+        p.name_constraints = Some(rcgen::NameConstraints { permitted_subtrees: vec![rcgen::GeneralSubtree::DnsName(permitted.into())], excluded_subtrees: vec![] });
+        p.not_after = ::time::OffsetDateTime::now_utc() + ::time::Duration::days(days);
+        p.use_authority_key_identifier_extension = true;
+        p
+    };
+    let chain_at = format!("/cas/{id}/chain");
+    // A pending CA signs nothing; a certificate for another key isn't installed.
+    let device = rcgen::KeyPair::generate().unwrap();
+    let leaf_csr = rcgen::CertificateParams::new(vec!["api.prod.svc.internal".to_string()]).unwrap().serialize_request(&device).unwrap().pem().unwrap();
+    let (s, e) = api.call(Method::POST, &format!("/cas/{id}/sign"), Some(json!({ "csr": leaf_csr }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e["error"].as_str().unwrap().contains("waiting for its certificate"), "{e}");
+    let other = rcgen::KeyPair::generate().unwrap();
+    let wrong = intermediate(30, "svc.internal").signed_by(&other, &root_issuer).unwrap();
+    let (s, e) = api.call(Method::PUT, &chain_at, Some(json!({ "certificate": wrong.pem(), "chain": root_cert.pem() }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e["error"].as_str().unwrap().contains("isn't for this CA's key"), "{e}");
+    // The root signs narrower names than asked, for 30 days: the CA keeps the narrower names.
+    let inter = intermediate(30, "prod.svc.internal").signed_by(&spki, &root_issuer).unwrap();
+    let (s, e) = api.call(Method::PUT, &chain_at, Some(json!({ "certificate": inter.pem() }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e["error"].as_str().unwrap().contains("doesn't reach a self-signed root"), "{e}");
+    let ca = api.ok(Method::PUT, &chain_at, Some(json!({ "certificate": inter.pem(), "chain": root_cert.pem() }))).await;
+    assert_eq!((ca["status"].as_str(), ca["domains"].clone()), (Some("active"), json!(["prod.svc.internal"])));
+    assert!(ca.get("csr").is_none() && ca["ca_chain"].as_str().unwrap().ends_with(&root_cert.pem()));
+    // A leaf never outlives the intermediate, and comes with the chain.
+    let (s, e) = api.call(Method::POST, &format!("/cas/{id}/sign"), Some(json!({ "csr": leaf_csr, "days": 60 }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e["error"].as_str().unwrap().contains("its own certificate ends"), "{e}");
+    let signed = api.ok(Method::POST, &format!("/cas/{id}/sign"), Some(json!({ "csr": leaf_csr }))).await;
+    let ders: Vec<Vec<u8>> = x509_parser::pem::Pem::iter_from_buffer(signed["ca_chain"].as_str().unwrap().as_bytes()).map(|p| p.unwrap().contents).collect();
+    assert_eq!(ders.len(), 2);
+    let (_, leaf_pem) = parse_x509_pem(signed["certificate"].as_str().unwrap().as_bytes()).unwrap();
+    let leaf = rustls_pki_types::CertificateDer::from(leaf_pem.contents);
+    let root_der = rustls_pki_types::CertificateDer::from(root_cert.der().to_vec());
+    let anchors = [webpki::anchor_from_trusted_cert(&root_der).unwrap()];
+    let through = [rustls_pki_types::CertificateDer::from(ders[0].clone())];
+    let ee = webpki::EndEntityCert::try_from(&leaf).unwrap();
+    ee.verify_for_usage(webpki::ALL_VERIFICATION_ALGS, &anchors, &through, rustls_pki_types::UnixTime::now(), webpki::KeyUsage::server_auth(), None, None).expect("the leaf verifies against the root through roll's intermediate");
+    // A link's certificate carries the chain too.
+    let link = json!({ "kind": "pki", "ref": id, "field": "ca_chain", "mode": "dynamic", "options": { "names": ["web.prod.svc.internal"], "ttl_minutes": 60 } });
+    api.ok(Method::POST, "/environments/production/changes", Some(json!({ "ops": [{ "op": "set", "key": "TLS_CA_CHAIN", "link": link }] }))).await;
+    let r = api.ok(Method::POST, "/environments/production/resolve", Some(json!({ "consumer": "app:web" }))).await;
+    assert_eq!(r["values"]["TLS_CA_CHAIN"], signed["ca_chain"]);
+}
+
 /// Another source of bound hosts (`Secrets::set_bound_hosts`), for bindings placeholders refuse to
 /// make: a CA refuses them too.
 #[derive(Default)]
