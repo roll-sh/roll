@@ -895,11 +895,39 @@ impl roll_previews::ports::Apps for Services {
 
     /// A `roll.toml` service's page, read through the runtime (roll apps' services answer at their
     /// own URL, on `pv-…`).
-    async fn fetch(&self, preview: &str, service: &str, path: &str, head: bool) -> anyhow::Result<Option<roll_previews::ports::Fetched>> {
-        if self.apps.find(preview, service).await?.is_some() {
-            return Ok(None);
+    async fn fetch(&self, preview: &str, service: &str, url: &str, access: Option<&str>, path: &str, head: bool) -> anyhow::Result<Option<roll_previews::ports::Fetched>> {
+        if self.apps.find(preview, service).await?.is_none() {
+            return self.runtime.fetch(preview, service, url, access, path, head).await;
         }
-        self.runtime.fetch(preview, service, path, head).await
+        // roll apps serves it: through this node's own listener (its proxy, on whichever node the
+        // instance runs), by its host, as a visitor who came in by the preview's link.
+        let host = url.split_once("://").map_or(url, |(_, rest)| rest).split(['/', '?', '#']).next().unwrap_or("").to_string();
+        anyhow::ensure!(!host.is_empty(), "{service} has no address yet");
+        let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(30)).build()?;
+        let method = if head { reqwest::Method::HEAD } else { reqwest::Method::GET };
+        let mut req = client
+            .request(method, format!("{}{path}", self.apps.api.base))
+            .header(reqwest::header::HOST, host)
+            .header(reqwest::header::ACCEPT, "text/html,application/json,text/plain;q=0.9,*/*;q=0.5")
+            .header(reqwest::header::ACCEPT_ENCODING, "identity");
+        if let Some(t) = access {
+            req = req.header(reqwest::header::COOKIE, format!("roll_access_{}={t}", roll_previews::branch_name(preview)));
+        }
+        let mut resp = req.send().await?;
+        let status = resp.status().as_u16();
+        const SHOWN: [&str; 4] = ["content-type", "location", "cache-control", "content-length"];
+        let headers = SHOWN.iter().filter_map(|h| resp.headers().get(*h).and_then(|v| v.to_str().ok()).map(|v| (h.to_string(), v.chars().take(500).collect()))).collect();
+        let (mut body, mut truncated) = (Vec::new(), false);
+        while let Some(chunk) = resp.chunk().await? {
+            let room = roll_previews::ports::FETCH_MAX - body.len();
+            if chunk.len() > room {
+                body.extend_from_slice(&chunk[..room]);
+                truncated = true;
+                break;
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(Some(roll_previews::ports::Fetched { status, headers, body, truncated }))
     }
 
     /// A `roll.toml` service can stand in for a laptop's process (roll apps' services are served by

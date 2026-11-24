@@ -328,12 +328,14 @@ impl Engine {
             return Err(Error::BadRequest("path: a path of the service's own, starting with / (up to 200 characters, no #, quotes or spaces)".into()));
         }
         let svc = self.files_service(id, service)?;
-        let f = match self.apps.fetch(id, &svc, path, head).await {
+        let url = self.store.services(id)?.into_iter().find(|s| s.name == svc).map(|s| s.url).unwrap_or_default();
+        // A private preview's link token: roll apps' gate takes it as a visitor's cookie.
+        let access = self.store.access(id)?.filter(|a| a.required()).map(|a| a.token);
+        let f = match self.apps.fetch(id, &svc, &url, access.as_deref(), path, head).await {
             Ok(Some(f)) => f,
-            Ok(None) => return Err(Error::Conflict(format!("{svc} runs on roll apps, which serves it at its own URL"))),
+            Ok(None) => return Err(Error::Conflict(format!("{svc} can't be read through roll here"))),
             Err(e) => return Err(Error::Conflict(self.mask_text(id, &format!("{e:#}")).await?)),
         };
-        let url = self.store.services(id)?.into_iter().find(|s| s.name == svc).map(|s| s.url).unwrap_or_default();
         let headers: std::collections::BTreeMap<String, String> = f.headers.into_iter().collect();
         let text = headers.get("content-type").is_none_or(|t| ["text/", "json", "xml", "javascript"].iter().any(|k| t.contains(k)));
         let body = match String::from_utf8(f.body) {

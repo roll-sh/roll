@@ -905,10 +905,10 @@ pub trait Apps: Send + Sync {
     async fn forward(&self, _preview: &str, _service: &str, _port: u16) -> anyhow::Result<Option<Box<dyn ShellIo>>> {
         Ok(None)
     }
-    /// `path` of the service, read through roll's own way in (past its gate: no link token, no
-    /// share), `GET` or `HEAD`. `None` where this backend doesn't serve it itself (roll apps'
-    /// services answer at their own URL).
-    async fn fetch(&self, _preview: &str, _service: &str, _path: &str, _head: bool) -> anyhow::Result<Option<Fetched>> {
+    /// `path` of the service, read through roll's own way in, `GET` or `HEAD`: the runtime's own
+    /// proxy past its gate; a roll apps service through roll apps' proxy at its `url`, with the
+    /// preview's link token (`access`) as a visitor's cookie. `None` where this backend can't.
+    async fn fetch(&self, _preview: &str, _service: &str, _url: &str, _access: Option<&str>, _path: &str, _head: bool) -> anyhow::Result<Option<Fetched>> {
         Ok(None)
     }
     /// Whether `service` can be swapped for a laptop's process here (`roll preview swap`): roll's
