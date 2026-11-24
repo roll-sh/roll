@@ -218,9 +218,13 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
 `sdk/terraform-provider-roll` manages roll secrets as code, as Doppler's and Infisical's providers
 do. It speaks the same HTTP API as the CLI and the clients, with a roll token or the operator's.
 
-- **`roll_secrets_environment`** ensures an environment (`PUT …/environments/{env}`) and sets its name
-  and whether it's protected. The policy is only written when `protected` changes, so approvers and
-  a notify URL set in the dashboard stay. Destroying one passes its confirmation.
+- **`roll_secrets_environment`** ensures an environment (`PUT …/environments/{env}`) and sets its name,
+  whether it's protected, and its `approvals` and `approvers`. The policy is only written when one of
+  those changes; approvals and approvers left out of the configuration stay as the dashboard set
+  them, and the notify URL is never touched. Destroying one passes its confirmation.
+- **`roll_secrets_folder_policy`** is a folder's change policy (`PUT …/folder-policies?path=`):
+  `environment`, `path`, `approvals` (1 by default) and `approvers`, changed in place; imported by
+  `prj_…/<environment>/<path without its leading />`.
 - **`roll_secret`** is one key in a folder: a value, or a `link` to a resource on the canvas. On
   refresh it reads the stored value back (`resolve=false`, references as written; the token needs
   `reveal`), so a change made outside Terraform shows in the plan. A key that only shows through a
@@ -259,6 +263,10 @@ do. It speaks the same HTTP API as the CLI and the clients, with a roll token or
   - **`roll_secrets_aws_role`** and **`roll_secrets_aws_user`**: both change in place (`PATCH`),
     except a user's IAM user name.
   - **`roll_secrets_cloud_account`**: `cloud = "gcp"` or `"azure"`, with that cloud's fields.
+  - **`roll_secrets_saas_rotator`**: `vendor`, `target` (JSON, `jsonencode({…})`; roll's defaults
+    and lowercased hosts aren't a change), `credential_wo` and `credential_expires_at` (RFC 3339).
+    Bumping `credential_wo_version` replaces the credential in place (`PATCH …/saas/{id}`), as do a
+    new name and a new date; another vendor or target replaces the registration.
 
   Sinks, Apps and accounts have no `PATCH`, so every attribute replaces them.
 - **Project settings**, imported by `prj_…`:
@@ -1554,6 +1562,20 @@ Databricks token roll signs in with all have an end date of their own. Give it a
 the dashboard; a date in the past is refused) and health lists the registration under `expiring`
 two weeks before (`its gitlab credential expires 2026-12-03: after that roll can't issue or revoke
 its keys`) and `expired` after, by name: never the credential. The list answers the date.
+
+**Replacing the credential in place.** Before it ends, give the registration a new one: `PATCH
+…/saas/{id} {credential?, credential_expires_at?, name?}` (`admin`; `roll secrets saas update
+sas_… --credential-stdin --credential-expires 2027-12-31`, the credential on stdin; the key button,
+"Replace credential", in the dashboard). A new credential is checked with the vendor exactly as
+registering checks one (below), outside any transaction, then sealed bound to the registration's
+vendor and target and swapped in by one write. One the vendor refuses is a 400 that changes nothing:
+the old credential stays in use. Keys linked to the registration keep working, and every issue and
+revocation from then on (a retired key's, after its grace period, included) uses the new one. The
+vendor and target never change in place: another account is another registration. A new credential
+without `credential_expires_at` has no end date (the old date was the old credential's); `null`
+clears the date. Each change is one `saas.update` row in the audit log naming what changed (name,
+credential, credential expiry), never the value. It's not an event on the feed: `access.changed` is
+about who may change what (an environment's protection, a folder's policy), and nothing else fits.
 
 Registering checks the credential with the vendor first, read only, so a credential the vendor
 refuses, or one that can't manage keys, is refused at once (400, naming the vendor and the status)
@@ -5984,6 +6006,7 @@ isn't in the workspace is 404.
 | `GET /saas` | | `SaasRotator[]` (`read` on the project; never the credential) |
 | `POST /saas` | `{name, vendor, target, credential, credential_expires_at?}` (`credential_expires_at`: when the credential ends at the vendor, ms, in the future) | 201 `SaasRotator` (`admin`; never the credential; `credential_expires_at` when given) |
 | `DELETE /saas/{id}` | | 204; 409 while a key links to it or a retired key waits (`admin`) |
+| `PATCH /saas/{id}` | `SaasRotatorChange` | `SaasRotator` (`admin`; a new `credential` is checked with the vendor first, read only, and a refused one is a 400 that changes nothing; never the credential) |
 | `GET /outside-databases` | | `OutsideDatabase[]` (`read` on the project; never the URL) |
 | `POST /outside-databases` | `{name, url, roles?: [a, b], group?, ca?, gateway?}` | 201 `OutsideDatabase` (`admin`; connects and checks the roles first: 400 with the server's reason) |
 | `DELETE /outside-databases/{id}` | | 204; 409 while a key links to it or a retired password waits (`admin`) |
@@ -6140,7 +6163,10 @@ type ProjectFindings = { project: string; project_name: string; findings: Findin
 type Finding = { issue: "decoy_used" | "production_unprotected" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "unplaced" | "operator_made" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy }; // decoy: on decoy_used only (an admin's session's or the operator's), the key's Decoy
 type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; rotate_window: string | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
-type SaasRotator = { id: string; name: string; vendor: "sendgrid" | "twilio" | "okta" | "entra" | "auth0" | "gitlab" | "openai" | "datadog" | "cloudflare" | "databricks" | "confluent"; target: Record<string, unknown>; created_at: number; created_by: string };
+type SaasRotator = { id: string; name: string; vendor: "sendgrid" | "twilio" | "okta" | "entra" | "auth0" | "gitlab" | "openai" | "datadog" | "cloudflare" | "databricks" | "confluent"; target: Record<string, unknown>; credential_expires_at?: number; created_at: number; created_by: string };
+// PATCH …/saas/{id}: the vendor and target stay. `credential_expires_at`: absent keeps it (a new
+// credential drops the old one's), null clears it, ms in the future sets it.
+type SaasRotatorChange = { name?: string; credential?: string; credential_expires_at?: number | null };
 type KubernetesCluster = { id: string; name: string; api_url: string; has_ca: boolean; created_at: number; created_by: string };
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
 type NewValueRequest = { keys: string[]; note?: string; ttl_minutes?: number /* 5–43200, default 10080 */; answers?: number /* 1–10, default 1 */ };

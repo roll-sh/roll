@@ -544,6 +544,8 @@ export type SaasVendor = "sendgrid" | "twilio" | "okta" | "entra" | "auth0" | "g
 export type SaasRotator = { id: string; name: string; vendor: SaasVendor; target: Record<string, unknown>; credential_expires_at?: number; created_at: number; created_by: string };
 /** `credential` is sealed at once and never answered; `credential_expires_at` (ms, in the future) is when it ends at the vendor. */
 export type NewSaasRotator = { name: string; vendor: SaasVendor; target: Record<string, unknown>; credential: string; credential_expires_at?: number };
+/** `PATCH …/saas/{id}`: a new `credential` is checked with the vendor before it replaces the old one (linked keys keep working); `credential_expires_at: null` clears the date, and a new credential without one has none. */
+export type SaasRotatorChange = { name?: string; credential?: string; credential_expires_at?: number | null };
 /** A Kubernetes cluster whose service accounts get short-lived tokens per lease (dynamic `kubernetes` links); the admin token and the CA stay sealed. */
 export type KubernetesCluster = { id: string; name: string; api_url: string; has_ca: boolean; created_at: number; created_by: string };
 /** `token`: a service account token that may create tokens; `ca_pem`: the cluster's CA, when it isn't publicly trusted. */

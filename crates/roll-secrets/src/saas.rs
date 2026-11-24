@@ -390,6 +390,52 @@ pub struct NewSaasRotator {
     pub credential_expires_at: Option<i64>,
 }
 
+/// `PATCH …/saas/{id}`: a new name, a replacement credential, or when it ends. The vendor and
+/// target stay (another account is another registration).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SaasRotatorChange {
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The replacement, checked with the vendor as registering checks one, then sealed in the old
+    /// one's place; never answered, logged or audited.
+    #[serde(default)]
+    pub credential: Option<Value>,
+    /// Absent: unchanged, except that a new credential drops the old one's date (it was that
+    /// credential's end); `null`: no date.
+    #[serde(default, deserialize_with = "some")]
+    pub credential_expires_at: Option<Option<i64>>,
+}
+
+fn some<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> std::result::Result<Option<T>, D::Error> {
+    T::deserialize(d).map(Some)
+}
+
+fn check_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.len() > 64 || !name.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c)) {
+        return Err(Error::BadRequest("a SaaS rotator's name is letters, digits, - and _ (64 at most)".into()));
+    }
+    Ok(())
+}
+
+/// The credential as kept: trimmed, one line.
+fn check_credential<'a>(vendor: &Vendor, credential: &'a Value) -> Result<&'a str> {
+    let credential = credential.expose().trim();
+    if credential.is_empty() || credential.len() > 4096 || credential.contains(['\r', '\n']) {
+        return Err(Error::BadRequest(format!("credential is the {} credential roll issues keys with, one line", vendor.name())));
+    }
+    Ok(credential)
+}
+
+fn check_expiry(at: Option<i64>, now: i64) -> Result<()> {
+    if let Some(t) = at
+        && !(now..=names::MAX_TIME).contains(&t)
+    {
+        return Err(Error::BadRequest("credential_expires_at is when the credential ends, a future time in ms since 1970".into()));
+    }
+    Ok(())
+}
+
 /// Bound to the vendor and target too: a row pointed at another host doesn't open.
 fn aad(project: &str, id: &str, vendor: &str, target: &str) -> String {
     format!("roll-secrets:saas:{project}:{id}:{vendor}:{target}")
@@ -1000,20 +1046,11 @@ impl Secrets {
         if self.deliver.is_none() {
             return Err(Error::BadRequest("SaaS rotators aren't on this server".into()));
         }
-        if n.name.is_empty() || n.name.len() > 64 || !n.name.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c)) {
-            return Err(Error::BadRequest("a SaaS rotator's name is letters, digits, - and _ (64 at most)".into()));
-        }
+        check_name(&n.name)?;
         let vendor = Vendor::parse(&n.vendor, n.target)?.checked()?;
-        let credential = n.credential.expose().trim();
-        if credential.is_empty() || credential.len() > 4096 || credential.contains(['\r', '\n']) {
-            return Err(Error::BadRequest(format!("credential is the {} credential roll issues keys with, one line", vendor.name())));
-        }
+        let credential = check_credential(&vendor, &n.credential)?;
         let now = self.db.now_ms()?;
-        if let Some(t) = n.credential_expires_at
-            && !(now..=names::MAX_TIME).contains(&t)
-        {
-            return Err(Error::BadRequest("credential_expires_at is when the credential ends, a future time in ms since 1970".into()));
-        }
+        check_expiry(n.credential_expires_at, now)?;
         let dek = self.project(project)?;
         // Asked of the vendor before anything is kept (outside any transaction).
         let deliver = self.deliver.clone().ok_or_else(|| Error::BadRequest("SaaS rotators aren't on this server".into()))?;
@@ -1033,6 +1070,82 @@ impl Secrets {
             audit::record(c, self.keys()?, project, caller, "saas.add", None, None, &[], &format!("added SaaS rotator {} ({}, {})", r.name, r.vendor.name(), r.vendor.label()), now)
         })?;
         Ok(r)
+    }
+
+    fn saas_rotator(&self, project: &str, id: &str) -> Result<SaasRotator> {
+        type Row = (String, String, String, Option<i64>, i64, String);
+        let row: Option<Row> = self.db.read(|c| {
+            Ok::<_, Error>(
+                c.query_row("SELECT name, vendor, target, credential_expires_at, created_at, created_by FROM saas_rotators WHERE id = ? AND project_id = ?", [id, project], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+                })
+                .optional()?,
+            )
+        })?;
+        let (name, vendor, target, credential_expires_at, created_at, created_by) = row.ok_or_else(|| Error::NotFound(format!("no SaaS rotator {id}")))?;
+        let vendor = Vendor::parse(&vendor, serde_json::from_str(&target).unwrap_or(Json::Null))?;
+        Ok(SaasRotator { id: id.to_string(), name, vendor, credential_expires_at, created_at, created_by })
+    }
+
+    /// Change a registration in place: its name, when its credential ends, or the credential
+    /// itself, checked with the vendor first (outside the write) as registering checks one. Links
+    /// keep working: every issue and revocation from then on, retired keys' included, uses the new
+    /// credential. A credential the vendor refuses changes nothing.
+    pub fn update_saas_rotator(&self, project: &str, id: &str, ch: SaasRotatorChange, caller: &Caller) -> Result<SaasRotator> {
+        caller.need(Action::Admin, &Scope::project(project))?;
+        let deliver = self.deliver.clone().ok_or_else(|| Error::BadRequest("SaaS rotators aren't on this server".into()))?;
+        let dek = self.project(project)?;
+        let r = self.saas_rotator(project, id)?;
+        if let Some(n) = &ch.name {
+            check_name(n)?;
+        }
+        let now = self.db.now_ms()?;
+        if let Some(at) = ch.credential_expires_at {
+            check_expiry(at, now)?;
+        }
+        let target = r.vendor.target().to_string();
+        let sealed = match &ch.credential {
+            Some(credential) => {
+                let credential = check_credential(&r.vendor, credential)?;
+                probe(deliver.as_ref(), &r.vendor, &Value::new(credential)).map_err(|e| Error::BadRequest(format!("roll couldn't use this credential: {e}")))?;
+                Some(dek.seal(&aad(project, id, r.vendor.name(), &target), &Value::new(credential)))
+            }
+            None => None,
+        };
+        // A new credential's end isn't the old one's.
+        let expires_at = ch.credential_expires_at.or(sealed.as_ref().map(|_| None));
+        let mut changed: Vec<&str> = vec![];
+        self.db.write(|c| {
+            changed.clear();
+            // Sealed for this vendor and target: the row must still be the one checked.
+            let row: Option<(String, String, String)> = c.query_row("SELECT name, vendor, target FROM saas_rotators WHERE id = ? AND project_id = ?", [id, project], |x| Ok((x.get(0)?, x.get(1)?, x.get(2)?))).optional()?;
+            let (name, vendor, now_target) = row.ok_or_else(|| Error::NotFound(format!("no SaaS rotator {id}")))?;
+            if vendor != r.vendor.name() || now_target != target {
+                return Err(Error::Conflict("changed", format!("SaaS rotator {name} changed meanwhile: try again")));
+            }
+            if let Some(n) = ch.name.as_ref().filter(|n| **n != name) {
+                if c.query_row("SELECT 1 FROM saas_rotators WHERE project_id = ? AND name = ?", [project, n.as_str()], |_| Ok(())).optional()?.is_some() {
+                    return Err(Error::Conflict("exists", format!("a SaaS rotator named {n} exists")));
+                }
+                c.execute("UPDATE saas_rotators SET name = ? WHERE id = ?", [n.as_str(), id])?;
+                changed.push("name");
+            }
+            if let Some(sealed) = &sealed {
+                c.execute("UPDATE saas_rotators SET credential = ? WHERE id = ?", params![sealed, id])?;
+                changed.push("credential");
+            }
+            if let Some(at) = expires_at
+                && at != r.credential_expires_at
+            {
+                c.execute("UPDATE saas_rotators SET credential_expires_at = ? WHERE id = ?", params![at, id])?;
+                changed.push("credential expiry");
+            }
+            if !changed.is_empty() {
+                audit::record(c, self.keys()?, project, caller, "saas.update", None, None, &[], &format!("changed SaaS rotator {name}'s {} ({}, {})", changed.join(", "), r.vendor.name(), r.vendor.label()), now)?;
+            }
+            Ok(())
+        })?;
+        self.saas_rotator(project, id)
     }
 
     /// Delete a SaaS rotator no key links to and no retired key waits on.
