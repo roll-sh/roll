@@ -136,9 +136,12 @@ pub struct SearchConfig {
     pub catalog_connections: usize,
     pub defaults: Defaults,
     pub pricing: Pricing,
-    /// Seals the secrets clusters store (watch passwords, connector and Fleet secrets, `s3`
-    /// repository credentials) and clusters' own passwords in the catalog under the deployment's
-    /// key (rolld: `ROLL_SECRET_KEY`); `None`: stored as given.
+    /// The deployment's key (rolld: `ROLL_SECRET_KEY`). It seals the secrets clients give the
+    /// clusters (watch passwords, connector and Fleet secrets, `s3` repository credentials,
+    /// remotes' API keys) and clusters' own passwords in the catalog. `None`: those secrets are
+    /// refused (kept as given with `unsealed_secrets`), and passwords are sealed with a key of
+    /// this node's own ([`node_key`], `<home>/key`; what it sealed is sealed again with the
+    /// deployment's key once there is one); a catalog in Postgres (`catalog`) needs it.
     pub sealer: Option<Arc<search_es::seal::Sealer>>,
     /// The name every cluster's default snapshot repository has (`found-snapshots`, as on
     /// Elastic Cloud): an `s3` repository on roll's own object storage, so `_snapshot` and
@@ -400,6 +403,39 @@ const MAX_KEPT_REVOKES: i64 = 1000;
 /// mixed in.
 fn kept_name(id: &str) -> String {
     format!("deleted_{id}_{}", random_string(8))
+}
+
+/// The key of a node without the deployment's (`<home>/key`), which seals clusters' passwords in
+/// its own `search.db`: made once (48 random characters, mode 0600), then read back.
+pub fn node_key(home: &std::path::Path) -> anyhow::Result<Arc<search_es::seal::Sealer>> {
+    let path = home.join("key");
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    match o.open(&path) {
+        Ok(mut f) => {
+            let key = random_string(48);
+            std::io::Write::write_all(&mut f, key.as_bytes())?;
+            f.sync_all()?;
+            Ok(search_es::seal::Sealer::from_secret(&key).expect("48 characters"))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(former_node_key(home)?.expect("it exists")),
+        Err(e) => Err(anyhow::anyhow!("making search's key {}: {e}", path.display())),
+    }
+}
+
+/// The node's own key ([`node_key`]) if it has one, never made: on a node given the deployment's
+/// key since, it opens the passwords it sealed, for the store to seal them again.
+fn former_node_key(home: &std::path::Path) -> anyhow::Result<Option<Arc<search_es::seal::Sealer>>> {
+    let path = home.join("key");
+    let key = match std::fs::read_to_string(&path) {
+        Ok(k) => k,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(anyhow::anyhow!("reading search's key {}: {e}", path.display())),
+    };
+    let sealer = search_es::seal::Sealer::from_secret(&key).ok_or_else(|| anyhow::anyhow!("search's key {} is too short (32 characters at least)", path.display()))?;
+    Ok(Some(sealer))
 }
 
 fn random_string(n: usize) -> String {
@@ -795,11 +831,22 @@ impl Control {
         std::fs::create_dir_all(&cfg.home)?;
         let store = match (catalog, &cfg.catalog) {
             (Some(c), _) => c,
-            (None, Some(url)) => Arc::new(Store::postgres(url, code_sql::PgOptions { max_connections: cfg.catalog_connections.max(1), ..Default::default() })?),
-            (None, None) => Arc::new(Store::open(&cfg.home.join("search.db"))?),
+            (None, Some(url)) => {
+                // Every node opens every cluster's password: a key of one node's own can't.
+                let Some(sealer) = cfg.sealer.clone() else {
+                    anyhow::bail!("search on a fleet needs ROLL_SECRET_KEY: clusters' passwords in the shared catalog are sealed with it");
+                };
+                Arc::new(Store::postgres(url, code_sql::PgOptions { max_connections: cfg.catalog_connections.max(1), ..Default::default() }, sealer)?)
+            }
+            (None, None) => {
+                let (sealer, former) = match &cfg.sealer {
+                    Some(s) => (s.clone(), former_node_key(&cfg.home)?),
+                    None => (node_key(&cfg.home)?, None),
+                };
+                Arc::new(Store::open(&cfg.home.join("search.db"), sealer, former)?)
+            }
         };
         if let Some(s) = &cfg.sealer {
-            store.seal_passwords(s.clone());
             // Remotes linked before the node had a key: sealed now, or they couldn't be opened.
             let n = store.seal_remote_credentials(|r| s.seal_text(&crate::remotes::kind(&r.cluster_id, &r.alias, &r.target_id), &r.credentials)).await?;
             if n > 0 {
@@ -890,7 +937,7 @@ impl Control {
             let node = node.clone();
             Box::pin(async move {
                 match node.upgrade() {
-                    Some(n) => n.unload(&name).await,
+                    Some(n) => n.hand_over(&name).await,
                     None => true,
                 }
             })

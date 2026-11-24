@@ -355,7 +355,7 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
             let request_start = req.headers().get("x-request-start").and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
             // What roll hands an edge function (`crate::edge`).
             let edge: serde_json::Map<String, serde_json::Value> = ["x-edge-path", "x-edge-next"].iter().filter_map(|h| Some((h.to_string(), req.headers().get(*h)?.to_str().ok()?.into()))).collect();
-            let mut r = (status, axum::Json(serde_json::json!({ "instance": name, "deployment": dep, "port": port, "path": req.uri().path(), "vars": vars, "forwarded_host": host, "cookie": cookie, "version": version, "te": te, "traceparent": traceparent, "edge": edge, "request_start": request_start }))).into_response();
+            let mut r = (status, axum::Json(serde_json::json!({ "instance": name, "deployment": dep, "port": port, "path": req.uri().path(), "vars": vars, "forwarded_host": host, "cookie": cookie, "version": version, "te": te, "traceparent": traceparent, "edge": edge, "request_start": request_start, "visitor": req.headers().get("x-roll-visitor").and_then(|v| v.to_str().ok()), "visitor_jwt": req.headers().get("x-roll-visitor-jwt").and_then(|v| v.to_str().ok()) }))).into_response();
             if let Some(c) = cache {
                 r.headers_mut().insert(axum::http::header::CACHE_CONTROL, c);
                 let seg = req.uri().path().trim_start_matches('/').split('/').next().unwrap_or("").to_string();
@@ -452,6 +452,11 @@ impl Runtime for Fake {
             let _ = tokio::io::copy(&mut r, &mut w).await;
         });
         Ok(Box::new(ours))
+    }
+
+    /// A size of its name's (an image named `…:big…` is 2 GB).
+    async fn image_bytes(&self, image: &str) -> Option<u64> {
+        Some(if image.contains("big") { 2 << 30 } else { 48 << 20 })
     }
 
     /// A digest of its name: the same image, the same digest.
@@ -940,7 +945,12 @@ impl Builder for Fake {
                 _ = cancel.cancelled() => anyhow::bail!("canceled"),
             }
         }
+        // BuildKit's plain progress, as Docker writes it (its steps are read from these).
+        log.line("#3 [1/2] FROM docker.io/library/alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc");
+        log.line("#3 CACHED");
+        log.line("#4 [2/2] RUN make");
         if job.context.join("FAIL_BUILD").exists() {
+            log.line("#4 ERROR: process \"/bin/sh -c make\" did not complete successfully: exit code: 2");
             log.line("#2 ERROR: the build failed on purpose");
             anyhow::bail!("the build failed");
         }
@@ -966,6 +976,7 @@ impl Builder for Fake {
         }
         self.build_trees.lock().push(seen);
         self.build_files.lock().push(contents);
+        log.line("#4 DONE 1.2s");
         log.line("#2 DONE");
         Ok(job.tag.clone())
     }

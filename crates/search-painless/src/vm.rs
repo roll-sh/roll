@@ -147,6 +147,8 @@ pub fn recharged(t: Thrown) -> Thrown {
 pub fn memory_refused(e: crate::host::MemoryRefused) -> Thrown {
     let mut t = Throw::new(cls::RUNTIME_EXCEPTION, Some(e.reason));
     t.catchable = false;
+    // a breaker's 429 (roll's own charge: Elasticsearch charges scripts to no breaker)
+    t.status = Some(429);
     t.offset = Some(u32::MAX);
     t.es_type = Some("circuit_breaking_exception");
     t.es_root = true;

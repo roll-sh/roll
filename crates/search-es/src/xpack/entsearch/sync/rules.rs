@@ -267,7 +267,7 @@ pub fn s3_rules(v: &Value) -> Result<Vec<S3Rule>, String> {
 
 /// The `validation` of a draft filtering of a `service` connector roll runs (`buckets`: an `s3`
 /// connector's configured buckets).
-pub fn validate(service: &str, draft: &Value, buckets: &[String]) -> Value {
+pub fn validate(service: &str, draft: &Value, buckets: &[String], crawler: &super::crawler::config::Ceilings) -> Value {
     let mut errors: Vec<Value> = match Rules::compile(draft) {
         Ok(_) => Vec::new(),
         Err(p) => p.into_iter().map(|p| obj! { "ids" => crate::arr![p.id], "messages" => crate::arr![p.message] }).collect(),
@@ -275,6 +275,7 @@ pub fn validate(service: &str, draft: &Value, buckets: &[String]) -> Value {
     if let Some(a) = advanced(draft) {
         let problem = match service {
             "s3" => s3_rules_within(a, buckets).err(),
+            super::crawler::SERVICE => super::crawler::config::snippet_problem(a, crawler),
             _ => Some(format!("advanced sync rules aren't supported for {service} connectors yet")),
         };
         if let Some(m) = problem {
@@ -321,8 +322,9 @@ mod tests {
     fn s3_advanced_rules_stay_within_the_configured_buckets() {
         let draft = |bucket: &str| crate::json::parse(format!(r#"{{"advanced_snippet":{{"value":[{{"bucket":"{bucket}","prefix":"a/"}}]}},"rules":[]}}"#).as_bytes()).unwrap().unwrap();
         let buckets = vec!["docs".to_string()];
-        assert_eq!(validate("s3", &draft("docs"), &buckets).get("state").and_then(Value::as_str), Some("valid"));
-        let v = validate("s3", &draft("payroll"), &buckets);
+        let ceilings = super::super::crawler::config::Ceilings::new(|_| None, 3_600_000);
+        assert_eq!(validate("s3", &draft("docs"), &buckets, &ceilings).get("state").and_then(Value::as_str), Some("valid"));
+        let v = validate("s3", &draft("payroll"), &buckets, &ceilings);
         assert_eq!(v.get("state").and_then(Value::as_str), Some("invalid"));
         assert!(v.to_json().contains("payroll"));
     }

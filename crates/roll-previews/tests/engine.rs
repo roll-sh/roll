@@ -422,6 +422,146 @@ async fn a_previews_metrics_are_what_its_running_services_use() {
     assert!(matches!(e.engine.metrics("pv_nope").await, Err(roll_previews::Error::NotFound(_))));
 }
 
+/// A trusted preview's own services get roll's word for the clouds the project names
+/// (`oidc_audiences`): an address of their own (`ROLL_OIDC_URL`) answering a token for a named
+/// audience, as the service it is (another audience is a 403, an address that isn't one a 404),
+/// answered again for a minute rather than signed again.
+#[tokio::test]
+async fn a_previews_service_gets_roll_s_word_for_a_named_cloud_only() {
+    use roll_previews::ports::EnvSource;
+    struct FakeIssuer(std::sync::Mutex<Vec<(String, String, String)>>);
+    #[async_trait::async_trait]
+    impl roll_previews::ports::Issuer for FakeIssuer {
+        async fn issue(&self, _project: &str, _repo: &str, preview: &str, service: &str, aud: &str, _ttl: std::time::Duration) -> anyhow::Result<Option<String>> {
+            self.0.lock().unwrap().push((preview.into(), service.into(), aud.into()));
+            Ok(Some(format!("jwt-for-{service}-{aud}")))
+        }
+    }
+    let e = env(json!({ "enabled": true, "oidc_audiences": ["sts.amazonaws.com", "roll"] }));
+    let issuer = Arc::new(FakeIssuer(std::sync::Mutex::new(Vec::new())));
+    let _ = e.engine.issuer.set(issuer.clone());
+    e.code.open(change("chg_oi", 9));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_oi").unwrap().unwrap();
+    let web = e.engine.store.services(&p.id).unwrap()[0].name.clone();
+    let (_, vars) = EnvSource::env(e.engine.as_ref(), &p.id, &web).await.unwrap();
+    let var = |k: &str| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    let url = var("ROLL_OIDC_URL").expect("an address of its own");
+    assert!(url.starts_with(&format!("http://127.0.0.1:7070/v1/previews/{}/oidc/", p.id)) && var("ROLL_OIDC_AUDIENCE").as_deref() == Some("sts.amazonaws.com"), "{url}");
+    let token = url.rsplit('/').next().unwrap();
+    assert_eq!(e.engine.oidc(&p.id, token, None).await.unwrap().token, format!("jwt-for-{web}-sts.amazonaws.com"));
+    assert_eq!(e.engine.oidc(&p.id, token, Some("roll")).await.unwrap().token, format!("jwt-for-{web}-roll"));
+    assert!(matches!(e.engine.oidc(&p.id, token, Some("storage.googleapis.com")).await, Err(roll_previews::Error::Forbidden(_))));
+    assert!(matches!(e.engine.oidc(&p.id, "0123abcd", None).await, Err(roll_previews::Error::NotFound(_))));
+    e.engine.oidc(&p.id, token, None).await.unwrap();
+    assert_eq!(issuer.0.lock().unwrap().len(), 2, "a minute's token answered again, not signed again");
+}
+
+/// A look at a data branch from the sheet (Neon's Tables): a ready Postgres branch's tables and a
+/// table's rows, through the product as the branch's own role; a kind with no way to show it yet
+/// is a 409, and a data branch the preview doesn't have a 404.
+#[tokio::test]
+async fn a_previews_data_branch_is_looked_at_from_the_sheet() {
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_db", 8));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_db").unwrap().unwrap();
+    let res = e.engine.store.resources(&p.id).unwrap();
+    let id = |k: Kind| res.iter().find(|r| r.kind == k).map(|r| format!("{}:{}", r.kind.as_str(), r.parent)).unwrap();
+    let tables = e.engine.browse(&p.id, &id(Kind::Postgres), None).await.unwrap();
+    assert!(matches!(&tables, roll_previews::Browse::Tables { tables } if tables[0].name == "public.users"), "{tables:?}");
+    let rows = e.engine.browse(&p.id, &id(Kind::Postgres), Some("public.users")).await.unwrap();
+    assert!(matches!(&rows, roll_previews::Browse::Rows { rows, .. } if rows[0][0].as_deref().is_some_and(|v| v.ends_with(".invalid"))), "{rows:?}");
+    assert!(matches!(e.engine.browse(&p.id, &id(Kind::Redis), None).await, Err(roll_previews::Error::Conflict(_))));
+    assert!(matches!(e.engine.browse(&p.id, "postgres:nope", None).await, Err(roll_previews::Error::NotFound(_))));
+}
+
+/// A secret value its pages serve (Netlify's secrets scan) is named on its record and in its
+/// activity, with where, never the value; one meant for the browser (`NEXT_PUBLIC_…`) or a user
+/// name isn't.
+#[tokio::test]
+async fn a_secret_value_its_pages_serve_is_named_on_its_record() {
+    let e = env(json!({ "enabled": true, "github": { "screenshot": true } }));
+    e.secrets.values.lock().push(("STRIPE_KEY".into(), "sk_test_51Hx9abc".into()));
+    e.secrets.values.lock().push(("NEXT_PUBLIC_MAPS_KEY".into(), "pk_maps_123456".into()));
+    e.secrets.values.lock().push(("PGUSER".into(), "pv_role_abcdef".into()));
+    let mut png = Vec::new();
+    image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    *e.apps.shot.lock() = Some(png);
+    *e.apps.served.lock() = vec![("/assets/app.js".into(), b"const k = 'sk_test_51Hx9abc', m = 'pk_maps_123456', u = 'pv_role_abcdef';".to_vec())];
+    e.code.open(change("chg_ss", 5));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_ss").unwrap().unwrap();
+    let served = |e: &Env| e.engine.store.preview(&p.id).unwrap().served_secrets;
+    for _ in 0..3000 {
+        if !served(&e).is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(served(&e), [roll_previews::ServedSecret { key: "STRIPE_KEY".into(), path: "/assets/app.js".into() }]);
+    let said: Vec<String> = e.engine.store.activity(&p.id).unwrap().into_iter().map(|a| a.message).filter(|m| m.contains("serve secret values")).collect();
+    assert!(said.len() == 1 && said[0].contains("STRIPE_KEY in /assets/app.js") && !said[0].contains("sk_test"), "{said:?}");
+}
+
+/// An agent's run on a page (`POST …/try`): what it showed, masked as logs are, its picture
+/// behind its run's id for a while (another preview's id gets nothing), a bad step refused.
+#[tokio::test]
+async fn an_agents_run_on_a_page_answers_what_it_showed_masked() {
+    use tower::ServiceExt;
+    let e = env(json!({ "enabled": true }));
+    e.secrets.values.lock().push(("STRIPE_KEY".into(), "sk_test_51Hx9abc".into()));
+    e.code.open(change("chg_try", 4));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_try").unwrap().unwrap();
+    *e.apps.tried.lock() = Some(roll_previews::ports::Tried { png: Some(b"\x89PNG...".to_vec()), status: 200, step_failed: None, text: "Cart\nkey sk_test_51Hx9abc".into(), errors: vec!["TypeError".into()] });
+    let call = |req: axum::http::Request<axum::body::Body>| {
+        let router = roll_previews::api::router(e.engine.clone());
+        async move {
+            let resp = router.oneshot(req).await.unwrap();
+            (resp.status(), axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap())
+        }
+    };
+    let post = |body: serde_json::Value| axum::http::Request::post(format!("/v1/previews/{}/try", p.id)).header("content-type", "application/json").body(axum::body::Body::from(body.to_string())).unwrap();
+    let (status, body) = call(post(json!({ "path": "/cart", "steps": [{ "click": "#add" }, { "press": "Enter" }] }))).await;
+    assert_eq!(status, 200);
+    let run: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!((run["status"].clone(), run["text"].clone(), run["errors"].clone()), (json!(200), json!("Cart\nkey ***"), json!(["TypeError"])));
+    let picture = |id: &str| axum::http::Request::get(format!("/v1/previews/{id}/try/{}/screenshot", run["run"].as_str().unwrap())).body(axum::body::Body::empty()).unwrap();
+    let (status, png) = call(picture(&p.id)).await;
+    assert!(status == 200 && png.starts_with(b"\x89PNG"));
+    assert_eq!(call(picture("pv_other00000")).await.0, 404, "another preview's id gets nothing");
+    assert!(call(post(json!({ "path": "/", "steps": [{ "eval": "alert(1)" }] }))).await.0.is_client_error(), "a step it doesn't know");
+    assert_eq!(call(post(json!({ "path": "//evil.example", "steps": [] }))).await.0, 400, "a path of its own");
+}
+
+/// A fork's preview is marked `outside`, and so are its error groups and its logs (its traces,
+/// spans and routes too): its title and what its code wrote are text from people who can't push,
+/// which roll MCP's lockdown keeps from a model; a trusted preview isn't.
+#[tokio::test]
+async fn a_forks_preview_and_its_errors_are_marked_outside() {
+    use tower::ServiceExt;
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_out", 3));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_out").unwrap().unwrap();
+    let web = e.engine.store.services(&p.id).unwrap()[0].name.clone();
+    let group = roll_previews::ErrorGroup { service: String::new(), fingerprint: "aa".into(), kind: "line".into(), title: "x".into(), count: 1, first_seen: 1, last_seen: 2, sample: "x".into(), trace: None };
+    e.apps.errors.lock().insert(web, vec![group]);
+    let get = |path: String| {
+        let router = roll_previews::api::router(e.engine.clone());
+        async move {
+            let resp = router.oneshot(axum::http::Request::get(path).body(axum::body::Body::empty()).unwrap()).await.unwrap();
+            serde_json::from_slice::<serde_json::Value>(&axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap()).unwrap()
+        }
+    };
+    assert!(get(format!("/v1/previews/{}", p.id)).await.get("outside").is_none());
+    e.engine.store.update(&p.id, |r| r.trusted = false).unwrap();
+    assert_eq!(get(format!("/v1/previews/{}", p.id)).await["outside"], json!(true));
+    assert_eq!(get(format!("/v1/previews/{}/errors?minutes=360", p.id)).await["groups"][0]["outside"], json!(true));
+    assert_eq!(get(format!("/v1/previews/{}/logs", p.id)).await["outside"], json!(true), "its log lines too");
+}
+
 /// A preview's errors are its services' groups, newest first, named by service, with a secret its
 /// code printed shown as `***` in the title and the sample (as its logs are), a value a cut split
 /// included; its values are read only when there's an error (counting reads none), and a
@@ -1102,6 +1242,41 @@ async fn masked_postgres_is_masked_before_it_serves_and_new_rules_reach_it() {
     assert_eq!(e.pg.made.load(Ordering::SeqCst), made + 2);
     assert_eq!(e.pg.masks.lock().len(), 3);
     assert_eq!(e.engine.store.row(&p.id).unwrap().state, State::Ready);
+}
+
+/// A restore point: the data saved (Postgres's, the product that puts a branch back in place),
+/// put back without seeding again, gone when the masking rules change, and with the preview.
+#[tokio::test]
+async fn a_restore_point_puts_the_data_back_without_seeding_again() {
+    let e = env(json!({ "enabled": true, "seed": { "image": "node:22", "run": "node seed.js" }, "masking": { "postgres:prj_db": { "public.users.email": "email" } } }));
+    e.code.open(change("chg_rp", 5));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_rp").unwrap().unwrap();
+    assert_eq!(p.state, State::Ready);
+    let point = e.engine.save_point(&p.id, "before the test run", "ana").await.unwrap();
+    assert_eq!((point.label.as_str(), point.data.clone()), ("before the test run", vec!["postgres:prj_db".to_string()]));
+    let (live, copy) = (format!("prj_db~pv-{}", &p.id[3..]), format!("prj_db~pv-{}-{}", &p.id[3..], &point.id[3..]));
+    assert!(e.pg.branches.lock().contains(&copy), "a copy of the preview's branch");
+    let seeds = e.apps.seeds.lock().len();
+    assert!(seeds > 0);
+    e.engine.restore(&p.id, &point.id, "ana").unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(*e.pg.restored.lock(), [(live, copy.clone())], "the preview's branch put back in place");
+    assert_eq!(e.apps.seeds.lock().len(), seeds, "the point holds what the seed made: it isn't run again");
+    assert_eq!(e.engine.store.row(&p.id).unwrap().state, State::Ready);
+    // Other masking rules: the point, masked by the old ones, goes.
+    let mut s = e.engine.store.settings(&e.project).unwrap();
+    s.masking.insert("postgres:prj_db".into(), [("public.users.name".to_string(), "redact".to_string())].into_iter().collect());
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    e.engine.store.update(&p.id, |r| r.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(e.engine.restore_points(&p.id).unwrap().is_empty() && !e.pg.branches.lock().contains(&copy), "a point masked by older rules is deleted");
+    // And with the preview.
+    let again = e.engine.save_point(&p.id, "", "ana").await.unwrap();
+    e.code.edit("chg_rp", |c| c.open = false);
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(e.pg.branches.lock().is_empty(), "{again:?}'s copy goes with the preview");
 }
 
 /// The rules dialog's suggestions: an unmasked column that looks like people's data is offered
@@ -1877,6 +2052,33 @@ async fn a_service_that_didnt_change_keeps_its_pages() {
     assert_eq!(runs("web"), web_before + 1, "after a reset its pages are taken again");
 }
 
+/// The first page in the project's modes (`github.modes`: dark, another language): each a page of
+/// its own (`mode:<name>`), kept and served by the sheet's picture route, as a state's page is.
+#[tokio::test]
+async fn the_first_page_in_each_mode_is_a_page_of_its_own() {
+    use tower::ServiceExt;
+    let e = env(json!({ "enabled": true, "github": { "screenshot": true, "modes": [{ "name": "dark", "color_scheme": "dark" }], "states": [{ "name": "tab", "page": "/", "steps": [{ "press": "Tab" }] }] } }));
+    let mut png = Vec::new();
+    image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    *e.apps.shot.lock() = Some(png);
+    e.code.open(change("chg_md", 3));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_md").unwrap().unwrap();
+    let pages = |e: &Env| e.engine.store.preview(&p.id).unwrap().pages.iter().map(|x| x.path.clone()).collect::<Vec<_>>();
+    for _ in 0..3000 {
+        if pages(&e).contains(&"mode:dark".to_string()) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(pages(&e).contains(&"mode:dark".to_string()), "{:?}", pages(&e));
+    for key in ["mode:dark", "state:tab"] {
+        let req = axum::http::Request::get(format!("/v1/previews/{}/screenshot?page={key}", p.id)).body(axum::body::Body::empty()).unwrap();
+        let resp = roll_previews::api::router(e.engine.clone()).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200, "the sheet's picture of {key}");
+    }
+}
+
 /// A Storybook another service serves (`github.storybook`): its stories are pages of their own
 /// (`story:<id>`), kept with the rest of that service's pages while it runs what it ran.
 #[tokio::test]
@@ -2176,8 +2378,47 @@ async fn a_pages_notes_by_its_environment_name() {
     assert_eq!(e.engine.open_notes(&p.id).await.unwrap().iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), ["rv_Too big", "rv_Typo"], "every page's, with ids");
     e.engine.resolve_note(&p.id, "rv_Too big", "bob").await.unwrap();
     assert!(e.engine.notes_for(&env_name, "/").await.unwrap().is_empty());
+    // Said on the change as bob, so its pull request and the note's Slack thread hear it.
+    assert_eq!(*e.code.comments.lock(), [("chg_n".to_string(), "**Reply on the preview** · `rv_Too big`\n\nResolved.".to_string(), "bob".to_string(), false)]);
     assert_eq!(e.engine.open_notes(&p.id).await.unwrap().len(), 1);
     assert!(e.engine.resolve_note(&p.id, "rv_someone else's", "bob").await.is_err());
+}
+
+/// A guest's note through a share link that takes notes: on the change as `guest:<name>`, its
+/// words inert for a pull request, the link's label said; a link that takes none refuses; ten an
+/// hour per link; a guest sees only their link's notes.
+#[tokio::test]
+async fn a_share_links_guest_leaves_notes_as_a_guest() {
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_g", 5));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_g").unwrap().unwrap();
+    let live = |notes: bool, label: &str| {
+        let (_, url) = e.engine.share(&p.id, 2, "ada", None, label, notes).unwrap();
+        let token = url.split("roll_share=").nth(1).unwrap().to_string();
+        e.engine.store.share_live(&p.id, &token).unwrap().unwrap()
+    };
+    let (open, closed) = (live(true, "Acme's review"), live(false, ""));
+    let note = roll_previews::notes::GuestNote { name: "Ada <script>".into(), path: "/pricing".into(), selector: "button.buy".into(), note: "Ping @team ![x](https://t.example/p.gif) <b>here</b>".into(), viewport: "390x844".into(), ..Default::default() };
+    e.engine.guest_note(&p.id, &open, &note).await.unwrap();
+    let (change, body, by, outside) = e.code.comments.lock()[0].clone();
+    assert_eq!((change.as_str(), by.as_str()), ("chg_g", "guest:Ada script"), "no handle has a colon: never a team member");
+    assert!(outside, "a guest's words are outside the team's, on the review too (MCP's lockdown)");
+    assert!(body.starts_with("**Feedback on the preview** · [`/pricing`](") && body.contains("· `button.buy`\n\nPing @\u{200b}team !\u{200b}[x](https://t.example/p.gif) &lt;b&gt;here&lt;/b&gt;\n\n"), "{body}");
+    assert!(body.contains("390x844 viewport") && body.contains("a guest, through the share link \"Acme's review\""), "{body}");
+    assert_eq!(roll_previews::notes::parse(&body).map(|(path, sel, _)| (path, sel)), Some(("/pricing".to_string(), "button.buy".to_string())), "read back as a note");
+    assert!(matches!(e.engine.guest_note(&p.id, &closed, &note).await, Err(roll_previews::Error::Forbidden(_))), "a link that takes no notes");
+    for _ in 1..roll_previews::notes::GUEST_PER_HOUR {
+        e.engine.guest_note(&p.id, &open, &note).await.unwrap();
+    }
+    assert!(matches!(e.engine.guest_note(&p.id, &open, &note).await, Err(roll_previews::Error::Conflict(_))), "ten an hour per link");
+    // What a guest sees: their link's notes only.
+    let theirs = roll_previews::notes::Note { id: "rv_c1".into(), path: "/pricing".into(), selector: "button.buy".into(), note: "Too small".into(), by: "guest:Ada".into(), at: 1, replies: Vec::new(), crop: false };
+    let team = roll_previews::notes::Note { id: "rv_team".into(), by: "bob".into(), ..theirs.clone() };
+    e.code.feedback.lock().insert("chg_g".into(), vec![theirs, team]);
+    let seen: Vec<String> = e.engine.guest_notes_of(&p.id, &open.id, "/pricing").await.unwrap().into_iter().map(|n| n.id).collect();
+    assert_eq!(seen, ["rv_c1"]);
+    assert!(e.engine.guest_notes_of(&p.id, &closed.id, "/pricing").await.unwrap().is_empty());
 }
 
 /// A start's dynamic credentials (roll secrets' leases) live as long as it runs: renewed near

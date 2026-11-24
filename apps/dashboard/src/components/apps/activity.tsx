@@ -52,12 +52,25 @@ export function describe(e: AppEvent): string {
       return `skipped push ${String(d.revision ?? "").slice(0, 8)}${where}: its message says ${String(d.tag ?? "to")}`;
     case "crash_loop":
       return `saw it crash ${String(d.crashes ?? "")} times in 10 minutes${where}: ${String(d.last_error ?? "")}`;
+    case "deploy.started":
+      return `began building ${d.revision ? String(d.revision).slice(0, 8) : "a deploy"}${where}${d.reused ? " (an earlier build's image)" : ""}`;
+    case "instance.crashed":
+      return `saw an instance crash${where}: ${String(d.reason ?? "it exited")}`;
+    case "scale.out":
+    case "scale.in":
+      return `scaled ${e.kind === "scale.out" ? "out" : "in"} from ${String(d.from ?? "")} to ${String(d.to ?? "")} instances${where} (${String(d.reason ?? "")})`;
     case "cron.failed":
       return `saw a scheduled run fail${where}${d.exit_code != null ? ` (exit ${String(d.exit_code)})` : ""}`;
     case "job.failed":
       return `saw a job fail${where}${d.exit_code != null ? ` (exit ${String(d.exit_code)})` : ""}`;
     case "alert.metric":
       return `alerted: ${String(d.metric ?? "a metric")} at ${String(d.value ?? "")} (${d.above != null ? `above ${String(d.above)}` : `below ${String(d.below ?? "")}`} for ${String(d.minutes ?? "")} minutes)${where}`;
+    case "alert.route": {
+      const route = `${d.method ? `${String(d.method)} ` : ""}${String(d.route ?? "")}`;
+      return d.kind === "latency"
+        ? `alerted: ${route} at p95 ${String(d.value ?? "")} ms (the alert is at ${String(d.threshold ?? "")} ms)${where}`
+        : `alerted: ${route} answered ${String(d.value ?? "")}% 5xx (the alert is at ${String(d.threshold ?? "")}%)${where}`;
+    }
     case "alert.memory":
     case "alert.cpu":
     case "alert.errors":
@@ -78,6 +91,7 @@ export function describe(e: AppEvent): string {
     case "error.new":
       return `saw a new error${where}: ${String(d.name ?? "an error")}`;
     case "alert.resolved":
+      if (d.alert === "alert.route") return `cleared the ${d.method ? `${String(d.method)} ` : ""}${String(d.route ?? "")} ${d.kind === "latency" ? "latency" : "5xx"} alert${where}`;
       return `cleared the ${String(d.alert ?? "alert.").slice(6)} alert${where}`;
     case "domain.active":
       return `put ${String(d.hostname)} live${where}`;
@@ -138,9 +152,28 @@ export function ActivityPanel({ service }: { service: string }) {
  */
 export function EventsTab({ service, changed }: { service: string; changed: string }) {
   const [events, setEvents] = useState<AppEvent[] | null>(null);
+  // Older pages read so far, and whether there may be more (a page comes back full).
+  const [older, setOlder] = useState<AppEvent[]>([]);
+  const [more, setMore] = useState(false);
   useEffect(() => {
-    appsApi.activity(service, true).then(setEvents, () => setEvents([]));
+    appsApi.activity(service, true).then(
+      (e) => {
+        setEvents(e);
+        setOlder([]);
+        setMore(e.length >= PAGE);
+      },
+      () => setEvents([]),
+    );
   }, [service, changed]);
+  const all = [...(events ?? []), ...older];
+  const back = () => {
+    const last = all[all.length - 1];
+    if (!last) return;
+    appsApi.activity(service, true, last.seq).then((e) => {
+      setOlder((o) => [...o, ...e]);
+      setMore(e.length >= PAGE);
+    });
+  };
   return (
     <Panel title="Events">
       {events === null ? (
@@ -151,7 +184,7 @@ export function EventsTab({ service, changed }: { service: string; changed: stri
         <p className="px-5 py-4 text-[13px] text-muted">Nothing yet. Deploys, failures, crash loops, alerts, domains and changes people make show here.</p>
       ) : (
         <ul className="divide-y divide-line">
-          {events.map((e) => {
+          {all.map((e) => {
             const bad = /failed|crash_loop|alert\.|expired|spend\.limit/.test(e.kind);
             const who = e.kind.startsWith("audit.") ? (typeof e.data?.actor === "string" ? (e.data.actor as string) : "the operator") : "roll";
             return (
@@ -164,9 +197,19 @@ export function EventsTab({ service, changed }: { service: string; changed: stri
               </li>
             );
           })}
+          {more && (
+            <li className="px-5 py-2.5">
+              <button type="button" className="text-[12px] text-muted hover:text-fg" onClick={back}>
+                Older events
+              </button>
+            </li>
+          )}
         </ul>
       )}
     </Panel>
   );
 }
+
+/** A page of the timeline (the API's). */
+const PAGE = 200;
 

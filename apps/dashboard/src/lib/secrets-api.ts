@@ -7,7 +7,7 @@
  * revealed value for as long as it's shown and no longer.
  */
 
-import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, HeldValues, ValuesDelta, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Hosts, PlaceholderRecord, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Totp, Share, NewShare, ValueRequest, NewValueRequest, NewToken, AuditEntry, AuditFilter, AuditVerification, AuditFormat, EventsQuery, EventPage, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, SaasRotator, NewSaasRotator, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, Directory, NewDirectory, SnowflakeAccount, NewSnowflakeAccount, AtlasProject, NewAtlasProject, AwsUser, CloudAccount, NewCloudAccount, KubernetesCluster, NewKubernetesCluster, SignedCertificate, CaCertificate, Ca, AcmeSettings, NewAcmeKey, SshCa, HostCertificate, UserCertificate, TransitKey, TransitPublicKey, Rotation, FolderPolicy, Reach, GitHubApp, SinkFormat, Gateway, MadeGateway, NewDecoy, CutOff, CutOffRequest, ValidityProbe, CheckedCredential, DeletedProject, Recovered, EnvironmentDeletion, EnvironmentDeleted, RecoveredEnvironment } from "@roll/secrets/types";
+import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, HeldValues, ValuesDelta, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Hosts, PlaceholderRecord, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Totp, Share, NewShare, ValueRequest, NewValueRequest, NewToken, AuditEntry, AuditFilter, AuditVerification, AuditFormat, EventsQuery, EventPage, NewNotification, SecretsNotification, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, SaasRotator, NewSaasRotator, SaasRotatorChange, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, Directory, NewDirectory, SnowflakeAccount, NewSnowflakeAccount, AtlasProject, NewAtlasProject, AwsUser, CloudAccount, NewCloudAccount, KubernetesCluster, NewKubernetesCluster, SignedCertificate, CaCertificate, Ca, AcmeSettings, NewAcmeKey, SshCa, HostCertificate, UserCertificate, TransitKey, TransitPublicKey, Rotation, FolderPolicy, Reach, GitHubApp, SinkFormat, Gateway, MadeGateway, NewDecoy, CutOff, CutOffRequest, ValidityProbe, CheckedCredential, LeakRotate, DeletedProject, Recovered, EnvironmentDeletion, EnvironmentDeleted, RecoveredEnvironment } from "@roll/secrets/types";
 import type { Grant } from "./access-api";
 import { withSession } from "./code-token";
 import { grantFor, tokenOf } from "./secrets-tokens";
@@ -123,6 +123,8 @@ export function secretsApi(project: string) {
     setHistoryDays: (history_days: number | null) => req<{ history_days: number | null }>("PATCH", P, { history_days }),
     /** Check credentials found in code with their providers (admin: on or off; it contacts them). */
     setValidityChecks: (validity_checks: "on" | "off") => req<{ validity_checks: "on" | "off" }>("PATCH", P, { validity_checks }),
+    /** What a leaked managed key does (admin): rotated at once, or only reported. */
+    setLeakRotate: (rotate: LeakRotate) => req<{ leaks: { rotate: LeakRotate } }>("PATCH", P, { leaks: { rotate } }),
     /** Whether found credentials work, asked of their providers; none asked while the project's checks are off. */
     checkValidity: (credentials: ValidityProbe[]) => req<{ validity_checks: "on" | "off"; results: CheckedCredential[] }>("POST", `${P}/validity`, { credentials }),
     /** A credential's last check, by its fingerprint. */
@@ -250,6 +252,11 @@ export function secretsApi(project: string) {
     events: (q: EventsQuery = {}) => req<EventPage>("GET", `${P}/events${qs({ after: q.after, limit: q.limit, kinds: q.kinds?.join(","), environment: q.environment, latest: q.latest ? 1 : undefined })}`),
     /** Walks the audit log's hash chain and checks roll's signed digests (from the last before `since`). */
     verifyAudit: (since?: number) => req<AuditVerification>("GET", `${P}/audit/verify${qs({ since })}`),
+    /** The caller's own notifications of the project's events (a project admin's: everyone's). */
+    notifications: () => req<SecretsNotification[]>("GET", `${P}/notifications`),
+    /** Be told of the project's events from now on, as the caller may read them at each one. */
+    notify: (n: NewNotification) => req<SecretsNotification>("POST", `${P}/notifications`, n),
+    stopNotification: (id: string) => req<null>("DELETE", `${P}/notifications/${enc(id)}`),
     sinks: () => req<Sink[]>("GET", `${P}/audit/sinks`),
     /** The `whsec_…` signing secret comes back once. */
     /** Postgres outside roll: registering one connects to it and checks both roles. */
@@ -295,7 +302,9 @@ export function secretsApi(project: string) {
     transitPublicKeys: (name: string) => req<TransitPublicKey[]>("GET", `${P}/transit/${enc(name)}/public`),
     /** The project's certificate authorities (pki links). */
     cas: () => req<Ca[]>("GET", `${P}/cas`),
-    addCa: (c: { name: string; domains: string[]; allow_ip?: boolean; max_days?: number }) => req<Ca>("POST", `${P}/cas`, c),
+    addCa: (c: { name: string; domains: string[]; allow_ip?: boolean; max_days?: number; intermediate?: boolean }) => req<Ca>("POST", `${P}/cas`, c),
+    /** An intermediate's certificate, signed by the customer's root, and the chain up to that root (PEM): the CA becomes active. */
+    installCaChain: (id: string, b: { certificate: string; chain?: string }) => req<Ca>("PUT", `${P}/cas/${enc(id)}/chain`, b),
     deleteCa: (id: string) => req<null>("DELETE", `${P}/cas/${enc(id)}`),
     /** SSH CAs (ssh links): servers trust their public keys. */
     sshCas: () => req<SshCa[]>("GET", `${P}/ssh-cas`),
@@ -342,6 +351,8 @@ export function secretsApi(project: string) {
     saasRotators: () => req<SaasRotator[]>("GET", `${P}/saas`),
     /** The answer never holds the credential. */
     addSaasRotator: (r: NewSaasRotator) => req<SaasRotator>("POST", `${P}/saas`, r),
+    /** Checked with the vendor first; the answer never holds the credential. */
+    updateSaasRotator: (id: string, ch: SaasRotatorChange) => req<SaasRotator>("PATCH", `${P}/saas/${enc(id)}`, ch),
     deleteSaasRotator: (id: string) => req<null>("DELETE", `${P}/saas/${enc(id)}`),
   };
 }

@@ -162,6 +162,14 @@ pub fn rules(m: &Membership) -> Vec<Rule> {
     out
 }
 
+/// The weakest role whose rules let a member `action` `product` in a project (a developer's in the
+/// environments their role reaches), for a refusal to say what would.
+pub fn weakest_allowed(product: &str, action: Action) -> Option<Role> {
+    Role::ALL.into_iter().find(|role| {
+        rules(&Membership { project: String::new(), role: *role, environments: None }).iter().any(|r| r.product == product && r.actions.get(&action) == Some(&Effect::Allow))
+    })
+}
+
 /// A person's session grant: every membership's rules, their own and their groups' (roles add
 /// up: a union of rules, so one role through a group and another directly give both).
 pub fn session_scope(memberships: &[Membership]) -> Scope {
@@ -203,6 +211,19 @@ pub fn confined_to(scope: &Scope, ask_otherwise: bool, project: &str) -> bool {
 mod tests {
     use super::*;
     use crate::scope::{Outcome, Resource, Target};
+
+    /// A refusal names the weakest role that may: what each role's rules allow, weakest first.
+    #[test]
+    fn the_weakest_role_that_may() {
+        assert_eq!(weakest_allowed("secrets", Action::Read), Some(Role::Viewer));
+        assert_eq!(weakest_allowed("secrets", Action::Write), Some(Role::Developer));
+        assert_eq!(weakest_allowed("secrets", Action::Admin), Some(Role::Admin));
+        assert_eq!(weakest_allowed("workspace", Action::Admin), Some(Role::Admin));
+        assert_eq!(weakest_allowed("workspace", Action::Delete), Some(Role::Owner));
+        assert_eq!(weakest_allowed("search", Action::Read), Some(Role::Viewer));
+        assert_eq!(weakest_allowed("search", Action::Admin), Some(Role::Admin));
+        assert_eq!(weakest_allowed("storage", Action::Read), None, "not a member product");
+    }
 
     fn secret(env: &str, protected: bool) -> Target {
         Target::One(Resource { project: Some("prj_a".into()), environment: Some(env.into()), protected: Some(protected), ..Resource::new("secrets", "prj_a") })

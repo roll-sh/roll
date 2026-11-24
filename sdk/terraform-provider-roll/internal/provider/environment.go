@@ -5,12 +5,16 @@ import (
 	"net/http"
 	"net/url"
 
+	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
@@ -24,6 +28,8 @@ type environmentModel struct {
 	Slug      types.String `tfsdk:"slug"`
 	Name      types.String `tfsdk:"name"`
 	Protected types.Bool   `tfsdk:"protected"`
+	Approvals types.Int64  `tfsdk:"approvals"`
+	Approvers types.List   `tfsdk:"approvers"`
 }
 
 func newEnvironmentResource() resource.Resource { return &environmentResource{} }
@@ -42,6 +48,11 @@ func (r *environmentResource) Schema(_ context.Context, _ resource.SchemaRequest
 			"slug":      schema.StringAttribute{Required: true, PlanModifiers: replace, Description: "Its slug (production, staging, qa…)."},
 			"name":      schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}, Description: "Its display name."},
 			"protected": schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(false), Description: "Writes go through change requests someone else approves."},
+			"approvals": schema.Int64Attribute{Optional: true, Computed: true, PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
+				Description: "Approvals a protected environment's change requests need, 0–10 (0: whoever may write still writes directly). Left out: roll's (1 when it's protected), or what the dashboard set.",
+				Validators:  []validator.Int64{int64validator.Between(0, 10)}},
+			"approvers": schema.ListAttribute{Optional: true, Computed: true, ElementType: types.StringType, PlanModifiers: []planmodifier.List{listplanmodifier.UseStateForUnknown()},
+				Description: "Who may approve (principals, or role:owner, role:admin…); empty: anyone with admin. Left out: what the dashboard set."},
 		},
 	}
 }
@@ -68,13 +79,33 @@ func (r *environmentResource) apply(ctx context.Context, m *environmentModel) er
 			return err
 		}
 	}
-	// Only when it changes: the policy also holds approvers and a notify URL set elsewhere.
-	want := m.Protected.ValueBool()
+	// Only when it changes: approvals and approvers left out stay as the dashboard set them, and
+	// the notify URL is never sent (absent keeps it).
+	want, approvals, approvers := m.Protected.ValueBool(), m.Approvals, m.Approvers
 	if err := r.read(ctx, m); err != nil {
 		return err
 	}
-	if m.Protected.ValueBool() != want {
-		if err := r.c.call(ctx, http.MethodPut, r.c.envPath(p, m.Slug.ValueString())+"/policy", map[string]any{"protected": want}, nil); err != nil {
+	kept := []string{}
+	_ = m.Approvers.ElementsAs(ctx, &kept, false)
+	policy := map[string]any{"protected": want, "approvers": kept}
+	differs := m.Protected.ValueBool() != want
+	if !approvals.IsNull() && !approvals.IsUnknown() {
+		policy["approvals"] = approvals.ValueInt64()
+		differs = differs || approvals.ValueInt64() != m.Approvals.ValueInt64()
+	} else if m.Protected.ValueBool() == want {
+		policy["approvals"] = m.Approvals.ValueInt64()
+	}
+	if !approvers.IsNull() && !approvers.IsUnknown() {
+		var xs []string
+		_ = approvers.ElementsAs(ctx, &xs, false)
+		if xs == nil {
+			xs = []string{}
+		}
+		differs = differs || !approvers.Equal(m.Approvers)
+		policy["approvers"] = xs
+	}
+	if differs {
+		if err := r.c.call(ctx, http.MethodPut, r.c.envPath(p, m.Slug.ValueString())+"/policy", policy, nil); err != nil {
 			return err
 		}
 		return r.read(ctx, m)
@@ -90,6 +121,7 @@ func (r *environmentResource) read(ctx context.Context, m *environmentModel) err
 	}
 	m.ID = types.StringValue(p + "/" + e.Slug)
 	m.Project, m.Name, m.Protected = types.StringValue(p), types.StringValue(e.Name), types.BoolValue(e.Protected)
+	m.Approvals, m.Approvers = types.Int64Value(e.Approvals), listOf(e.Approvers, types.ListValueMust(types.StringType, nil))
 	return nil
 }
 

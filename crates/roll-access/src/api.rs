@@ -1217,6 +1217,11 @@ async fn request_access(State(a): S, ext: Extensions, Json(r): Json<AccessReques
     // does): one with "ask for anything else", or a rule that asks.
     let asks = grant.ask_otherwise || grant.rules.0.iter().any(|r| r.actions.values().any(|e| *e == roll_auth::scope::Effect::Ask));
     if !asks {
+        // A person's token acts within their roles: its rules can't reach past them, so the way on
+        // is a role, not the token.
+        if grant.user.is_some() {
+            return Err(Error::Forbidden("a person's token never asks for more: it acts within your roles, so a project admin gives a role that may".into()));
+        }
         return Err(Error::Forbidden("this token was made never to ask a person: its owner changes its rules instead".into()));
     }
     if request_duration(&r.for_).is_none() {
@@ -1460,7 +1465,9 @@ async fn feedback(State(a): S, ext: Extensions, Json(f): Json<Feedback>) -> crat
         return Err(Error::BadRequest("task (1-500 characters) and actual (1-2,000) are required; expected up to 2,000; tool is a tool's name (a-z, 0-9, _; up to 64)".into()));
     }
     let data = json!({
-        "grant": grant, "name": name, "tool": f.tool, "title": f.task.trim(), "text": f.actual.trim(),
+        // `connection`, not `name`: the token's name is a person's, and lockdown withholds an
+        // outside record's `name` (a fork's route and span names).
+        "grant": grant, "connection": name, "tool": f.tool, "title": f.task.trim(), "text": f.actual.trim(),
         "description": f.expected.as_deref().map(str::trim), "outside": true,
     });
     let seq = blocking(a, move |a| {

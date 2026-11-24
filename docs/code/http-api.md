@@ -174,6 +174,7 @@ Preview = {state: "creating" | "running" | "sleeping" | "failed", url: string | 
                           diff_url?: string /* the same for where it differs from the default branch's, when it does */,
                           expires_at?: number /* ms: when it goes (its TTL, or a keep, running out), once a day away */,
                           browser_checks?: [{service, name, state}] /* production's browser checks on this head: pending, passed or failed */,
+                          served_secrets?: [{key, path}] /* its secret values its pages serve: names and where, never values */,
                           browser_checks_rule?: "check" | "required" /* the project's rule: the roll/browser-checks status; required also a blocker */,
                           earlier?: [{service, head, url, own_data}] /* earlier pushes still reachable, newest first; own_data: on its own copy of the data, as its head left it (else the preview's) */,
                           visual_change?: {since, percent, phone_percent?} /* how much the first service's page changed since the screenshot at an earlier head */,
@@ -211,6 +212,8 @@ Blocker   = {kind: "state" | "draft" | "untrusted" | "checks" | "needs_approval"
                    /* more may come: show unknown kinds by message */,
              message,
              key?: string, environments?: string[] /* secret_leak, secret_missing: the roll secrets key and where */,
+             rotate?: {environment, folder}[] /* secret_leak: where a person may rotate the key with roll secrets' rotate route, as themselves (a managed
+                                                credential, in a project whose leaks.rotate is off); absent when none (docs/secrets.md "When a value leaks") */,
              path?: string, line?: number, fingerprint?: string /* secret_unstored: where (1-based line) and what .roll/secrets-allow names to keep it */,
              validity?: {fingerprint, result: "live" | "invalid" | "unknown", account?: string, checked_at?: number, rotator?: "aws-iam" | "github-app"}
                /* secret_unstored, with the project's roll secrets validity checks on: whether it works, as its provider answered (a live one is listed first); docs/secrets.md "Is it live?" */}

@@ -134,11 +134,16 @@ pub enum Preview {
         diff: Option<String>,
     },
     /// A link for someone outside the team, open for --hours (24 unless said; at most 720); the
-    /// link is printed once. --list shows them, --revoke ends one.
+    /// link is printed once. --label says who it's for; with --notes its visitors may leave notes
+    /// on the pages (as guests, with a name). --list shows them, --revoke ends one.
     Share {
         preview: String,
         #[arg(long, default_value_t = 24, conflicts_with_all = ["list", "revoke"])]
         hours: u32,
+        #[arg(long, default_value = "", conflicts_with_all = ["list", "revoke"])]
+        label: String,
+        #[arg(long, conflicts_with_all = ["list", "revoke"])]
+        notes: bool,
         #[arg(long)]
         list: bool,
         #[arg(long)]
@@ -174,6 +179,17 @@ pub enum Preview {
         preview: String,
         #[arg(long)]
         resolve: Option<String>,
+    },
+    /// Its restore points (its Postgres data saved, to put back later): --save [label] one now,
+    /// --restore <point> to put the data back as that point left it, --delete <point>.
+    Points {
+        preview: String,
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
+        save: Option<String>,
+        #[arg(long, conflicts_with = "save")]
+        restore: Option<String>,
+        #[arg(long, conflicts_with_all = ["save", "restore"])]
+        delete: Option<String>,
     },
     /// Re-branch its data from the parents (every resource, or the ones named).
     Reset {
@@ -297,6 +313,26 @@ pub enum Preview {
         /// The port here (the same one by default).
         #[arg(long)]
         local_port: Option<u16>,
+    },
+    /// Read a page of a service through roll (no link or share needed): its status, a few
+    /// headers and its text, masked: `roll preview fetch pv_… /checkout`.
+    Fetch {
+        preview: String,
+        path: String,
+        #[arg(long, short)]
+        service: Option<String>,
+        /// Only its status and headers.
+        #[arg(long)]
+        head: bool,
+    },
+    /// Swap a service for a process on this machine (Signadot's local sandboxes, Telepresence):
+    /// the preview's requests for it, its visitors' and its other services', come here to
+    /// 127.0.0.1:<port> until Ctrl-C: `roll preview swap pv_… 3000 --service web`.
+    Swap {
+        preview: String,
+        port: u16,
+        #[arg(long, short)]
+        service: Option<String>,
     },
     /// Print a service's link (with its access token when the preview is private); `--browser`
     /// opens it.
@@ -698,6 +734,9 @@ fn print_preview(p: &Value) {
     if let Some(t) = timeline_line(p) {
         println!("{t}");
     }
+    for x in p["served_secrets"].as_array().into_iter().flatten() {
+        println!("serves a secret value  {} at {}", s(&x["key"]), s(&x["path"]));
+    }
     for c in p["browser_checks"].as_array().into_iter().flatten() {
         let state = match s(&c["state"]).as_str() {
             "pending" => "running".to_string(),
@@ -1004,7 +1043,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
             api.post(&format!("/v1/previews/{preview}/visual/accept"), body).await?
         }
         Preview::Keep { preview, hours, release } => api.post(&format!("/v1/previews/{preview}/keep"), json!({ "hours": if release { 0 } else { hours } })).await?,
-        Preview::Share { preview, hours, list, revoke } => {
+        Preview::Share { preview, hours, label, notes, list, revoke } => {
             let path = format!("/v1/previews/{preview}/shares");
             let v = match (list, revoke) {
                 (_, Some(sid)) => {
@@ -1012,7 +1051,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
                     json!({ "revoked": sid })
                 }
                 (true, None) => api.get(&path).await?,
-                (false, None) => api.post(&path, json!({ "hours": hours })).await?,
+                (false, None) => api.post(&path, json!({ "hours": hours, "label": label, "notes": notes })).await?,
             };
             if !as_json {
                 match (&v["url"], v.as_array()) {
@@ -1023,7 +1062,9 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
                     (_, Some(list)) if !list.is_empty() => {
                         for x in list {
                             let state = if x["revoked"] == true { "revoked" } else { "open" };
-                            println!("{}  {state}  until {}  by {}", s(&x["id"]), until_utc(x["expires_at"].as_i64().unwrap_or(0)), s(&x["created_by"]));
+                            let label = s(&x["label"]);
+                            let extra = [if label.is_empty() { String::new() } else { format!("  \"{label}\"") }, if x["notes"] == true { "  takes notes".into() } else { String::new() }].concat();
+                            println!("{}  {state}  until {}  by {}{extra}", s(&x["id"]), until_utc(x["expires_at"].as_i64().unwrap_or(0)), s(&x["created_by"]));
                         }
                     }
                     (_, Some(_)) => println!("no share links"),
@@ -1122,6 +1163,31 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
             v
         }
         Preview::Reset { preview, resources } => api.post(&format!("/v1/previews/{preview}/reset"), json!({ "resources": resources })).await?,
+        Preview::Points { preview, save, restore, delete } => {
+            let base = format!("/v1/previews/{preview}/restore-points");
+            let (v, said) = match (save, restore, delete) {
+                (Some(label), _, _) => {
+                    let v = api.post(&base, json!({ "label": label })).await?;
+                    let said = format!("saved {} ({})", s(&v["id"]), v["data"].as_array().into_iter().flatten().map(s).collect::<Vec<_>>().join(", "));
+                    (v, Some(said))
+                }
+                (_, Some(point), _) => (api.post(&format!("{base}/{point}/restore"), json!({})).await?, Some(format!("putting the data back to {point}: the preview's services sleep until it's done"))),
+                (_, _, Some(point)) => (api.call(reqwest::Method::DELETE, &format!("{base}/{point}"), None).await?, Some(format!("deleted {point}"))),
+                _ => (api.get(&base).await?, None),
+            };
+            if !as_json {
+                match (said, v["points"].as_array()) {
+                    (Some(said), _) => println!("{said}"),
+                    (None, Some(list)) if !list.is_empty() => list.iter().for_each(|p| {
+                        let label = s(&p["label"]);
+                        println!("{}  {}  by {}  {}{}", s(&p["id"]), ago(p["at"].as_i64().unwrap_or(0) / 1000), s(&p["by"]), p["data"].as_array().into_iter().flatten().map(s).collect::<Vec<_>>().join(", "), if label.is_empty() { String::new() } else { format!("  \"{label}\"") });
+                    }),
+                    _ => println!("no restore points"),
+                }
+                return Ok(());
+            }
+            v
+        }
         Preview::Logs { preview, service, lines, follow } => {
             let path_base = match &service {
                 Some(svc) => format!("/v1/previews/{preview}/logs?service={svc}"),
@@ -1377,6 +1443,39 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
             }
             return Ok(());
         }
+        Preview::Fetch { preview, path, service, head } => {
+            let svc = service.as_deref().map(|s| format!("&service={}", crate::apps::enc(s))).unwrap_or_default();
+            let v = api.get(&format!("/v1/previews/{preview}/fetch?path={}{svc}{}", crate::apps::enc(&path), if head { "&head=true" } else { "" })).await?;
+            if !as_json {
+                eprintln!("{} {}{}", v["status"], s(&v["url"]).trim_end_matches('/'), s(&v["path"]));
+                for (k, h) in v["headers"].as_object().into_iter().flatten() {
+                    eprintln!("{k}: {}", h.as_str().unwrap_or(""));
+                }
+                if let Some(b) = v["body"].as_str() {
+                    println!("{b}");
+                }
+                if v["truncated"].as_bool() == Some(true) {
+                    eprintln!("(cut at 256 KiB)");
+                }
+                return Ok(());
+            }
+            v
+        }
+        Preview::Swap { preview, port, service } => {
+            let base = api.base.strip_prefix("http").map(|rest| format!("ws{rest}")).unwrap_or_else(|| api.base.clone());
+            let svc = service.as_deref().map(|s| format!("?service={}", crate::apps::enc(s))).unwrap_or_default();
+            let url = format!("{base}/v1/previews/{preview}/swap{svc}");
+            let mut headers: Vec<(String, String)> = api.headers.clone();
+            if let Some(k) = api.bearer().await? {
+                headers.push(("authorization".into(), format!("Bearer {k}")));
+            }
+            eprintln!("{preview}'s {} → 127.0.0.1:{port} (Ctrl-C gives it back)", service.as_deref().unwrap_or("first service"));
+            tokio::select! {
+                r = swap_to(url, headers, port) => r?,
+                _ = tokio::signal::ctrl_c() => {}
+            }
+            return Ok(());
+        }
         Preview::Cp { preview, src, dst, service } => {
             let svc = service.map(|s| format!("&service={}", crate::apps::enc(&s))).unwrap_or_default();
             let url = |path: &str| format!("/v1/previews/{preview}/files?path={}{svc}", crate::apps::enc(path));
@@ -1474,6 +1573,53 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
         return Ok(());
     }
     println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
+}
+
+/// `roll preview swap`: the tunnel carries one HTTP/2 connection the preview opens toward this
+/// side, and each request on it is sent to 127.0.0.1:<port> (as that host, so a dev server's host
+/// check passes; `x-forwarded-host` keeps the preview's), each said on stderr.
+async fn swap_to(url: String, headers: Vec<(String, String)>, port: u16) -> anyhow::Result<()> {
+    use http_body_util::{BodyExt, Full};
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut req = url.as_str().into_client_request()?;
+    for (k, v) in &headers {
+        req.headers_mut().insert(reqwest::header::HeaderName::from_bytes(k.as_bytes())?, v.parse()?);
+    }
+    let (ours, theirs) = tokio::io::duplex(256 << 10);
+    let tunnel = crate::apps::carry(req, theirs);
+    let client = hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).build_http::<hyper::body::Incoming>();
+    let here: hyper::http::uri::Authority = format!("127.0.0.1:{port}").parse()?;
+    let svc = hyper::service::service_fn(move |mut r: hyper::Request<hyper::body::Incoming>| {
+        let (client, here) = (client.clone(), here.clone());
+        async move {
+            let (method, path) = (r.method().clone(), r.uri().path().to_string());
+            let pq = r.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into());
+            let resp = match format!("http://{here}{pq}").parse::<hyper::Uri>() {
+                Ok(uri) => {
+                    *r.uri_mut() = uri;
+                    *r.version_mut() = hyper::Version::HTTP_11;
+                    if let Ok(h) = here.as_str().parse() {
+                        r.headers_mut().insert(hyper::header::HOST, h);
+                    }
+                    client.request(r).await.map(|x| x.map(|b| b.map_err(|e| anyhow::anyhow!(e)).boxed_unsync())).map_err(|e| e.to_string())
+                }
+                Err(e) => Err(e.to_string()),
+            };
+            let resp = resp.unwrap_or_else(|e| {
+                let mut x = hyper::Response::new(Full::new(bytes::Bytes::from(format!("127.0.0.1:{} didn't answer: {e}", here.port_u16().unwrap_or(0)))).map_err(|e| anyhow::anyhow!(e)).boxed_unsync());
+                *x.status_mut() = hyper::StatusCode::BAD_GATEWAY;
+                x
+            });
+            eprintln!("{method} {path} {}", resp.status().as_u16());
+            Ok::<_, std::convert::Infallible>(resp)
+        }
+    });
+    let serve = hyper::server::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new()).serve_connection(hyper_util::rt::TokioIo::new(ours), svc);
+    tokio::select! {
+        r = serve => r.map_err(|e| anyhow::anyhow!("the preview's connection ended: {e}"))?,
+        r = tunnel => r?,
+    }
     Ok(())
 }
 

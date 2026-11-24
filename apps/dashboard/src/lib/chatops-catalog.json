@@ -497,6 +497,50 @@
       "config": {
         "additionalProperties": false,
         "properties": {
+          "channel": {
+            "description": "Where notes are posted",
+            "format": "lookup",
+            "lookup": {
+              "kind": "channels",
+              "parent": "team",
+              "source": "slack"
+            },
+            "title": "Channel",
+            "type": "string",
+            "x-order": 1
+          },
+          "team": {
+            "description": "Unset: the event's, or the owner's only one",
+            "format": "lookup",
+            "lookup": {
+              "kind": "workspaces",
+              "source": "slack"
+            },
+            "title": "Workspace",
+            "type": "string",
+            "x-order": 0
+          }
+        },
+        "required": [
+          "channel"
+        ],
+        "type": "object"
+      },
+      "description": "On a change's review event: a note left on its preview's pages becomes a message in the channel, replies in its thread become the note's replies, and replies on the page show in the thread. Other reviews are left alone.",
+      "integration": "slack",
+      "kind": "slack.note",
+      "output": [
+        "posted",
+        "channel",
+        "ts",
+        "note"
+      ],
+      "title": "Preview notes in Slack"
+    },
+    {
+      "config": {
+        "additionalProperties": false,
+        "properties": {
           "machine": {
             "description": "Unset: the agent event's",
             "format": "roll-machine",

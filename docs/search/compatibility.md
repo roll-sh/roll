@@ -1646,6 +1646,51 @@ roll runs the syncs of Elastic-managed (`is_native: true`) `postgresql` and `s3`
 - Access control syncs fail (neither service syncs permissions on Elastic either). A job's
   `indexed_document_volume` is in MiB, as Elastic's connectors report it.
 
+### The web crawler (`roll_web_crawler`)
+
+Elasticsearch 9.x has no crawler (Elastic's hosted one was discontinued in 9.0), so the reference
+is Elastic Open Crawler: its config's shape, crawl rules, robots directives, canonical URLs,
+document fields and ids (the hex SHA-1 of the normalised URL), so an Open Crawler index can be
+taken over by roll's crawler. Where roll's differs ([crawler.md](crawler.md)):
+
+- **robots.txt** is read for the product token `roll-crawler`, not `Elastic-Crawler`: a site's
+  `Elastic-Crawler` group doesn't apply (the job's `metadata.robots_elastic_crawler_group_ignored`
+  names the origins that have one and no `roll-crawler` group). A 429 for robots.txt disallows the
+  origin for the crawl, as a 5xx does; redirects are followed up to 5 times, to other origins too.
+- **The purge** deletes a document only for proof the page is gone (a 404 or 410, `noindex`, a URL
+  now excluded by the crawl's domains, rules or robots.txt). Errors (5xx, other 4xx, timeouts,
+  network errors, a robots.txt that's unreadable or disallows the whole site) and what may only be
+  an outage (a redirect off the crawl, onto a URL it already has or onto a new one, a body that
+  isn't HTML, an empty page) keep it, until it has gone unrefreshed through three full crawls in
+  a row, the last keeping it, and it's a week old. A crawl that didn't refresh more than half the index's documents, or whose re-checked
+  redirects mostly led to one URL, deletes nothing (`metadata.purge_skipped`), and nothing of an
+  origin most of whose documents weren't refreshed, so an outage, an expired login redirecting to
+  SSO, or a maintenance page can't empty the index. `force_purge` lifts the guards once. Open
+  Crawler deletes anything that doesn't answer 200.
+- **Canonical URLs** are honoured only once the crawl has fetched the canonical URL and indexed it
+  as itself; until then a page is stored under its own URL. Open Crawler stores a page under its
+  canonical URL at once.
+- **Deep pages**: a page nesting more than 512 elements deep is a failed document.
+- **Limits** keep Open Crawler's names and defaults, except `max_unique_url_count` (10,000, not
+  100,000) and `max_duration` (6 hours, not 24), and each has a node ceiling: a value over it fails
+  validation. A connector holds at most 1,000 crawl rules across its domains. Until domain
+  verification lands every domain is unverified: at most 1,000 URLs a crawl, a second between
+  requests to one site across every crawl on the node, and 4 crawls a day per connector and per
+  owner and site on the node. A crawl fetches one URL at a time (`threads_per_crawl` doesn't
+  apply).
+- **Credentials** are the connector's sealed `auth_header` or basic auth, sent only to
+  `auth_origin` over https, never after a redirect to another origin; one per connector.
+  `http_auth_allowed`, proxies and `domains[].auth` in the snippet aren't taken (the CLI import
+  moves `auth` to the sealed fields).
+- **Not yet**: extraction rules (a snippet with any fails validation), XPath, incremental crawls
+  (an incremental job fails), binary content extraction (only `text/html` and
+  `application/xhtml+xml` are indexed), `data-elastic-name` and `meta.elastic` beyond 100 fields a
+  page, and `full_html` is the page as served, not Jsoup's re-serialisation. Pages are decoded as
+  UTF-8 (a page in another charset reads with replacement characters).
+- **URLs** are normalised with the WHATWG URL parser plus RFC 3986's percent-encoding rules, where
+  Open Crawler uses Addressable's `normalize!`: IDNs, case, default ports, dot segments and
+  percent-encoding agree; `links` and `url` hold the normalised URL rather than the link as written.
+
 ## Per area
 
 `roll` = baseline tests roll passes, `ES` = tests passing on Elasticsearch 9.5.5. The most
@@ -1917,12 +1962,24 @@ the rest are skipped by the tests' own prerequisites.
   (doc-values buffers, a segment's fielddata) doesn't count. A document's `_source` is parsed
   once per document, as Elasticsearch's `SourceLookup` does, so changes persist across reads.
   It's charged, but left out of the limit. So a script can churn through temporaries far beyond
-  the limit, as long as it doesn't keep them. Freeing data the execution didn't make (`params`,
-  `_source`, an earlier document's leftovers) never lets it grow the thread by more than the
-  limit: such frees can offset what it allocates, but never take its balance below zero. A
-  script run inside another one counts against the caller once it ends. That covers a runtime
-  field another script reads, up to 5 levels deep. While it runs, it also has an account of its
-  own, so one thread holds at most about six times the limit, plus the document's `_source`. Past the limit roll answers like that guard: a
+  the limit, as long as it doesn't keep them. Freeing data the execution didn't make never
+  lets it grow the thread by more than the limit. That covers `params` and an earlier
+  document's leftovers. Such frees can offset what it
+  allocates, but never take its balance below zero. A script run inside another one counts
+  against the caller once it ends. That covers a runtime field another script reads, up to 5
+  levels deep. While it runs, it also has an account of its own, and it reads its own copy of
+  `_source`. So one thread holds at most about six times the limit plus the document's
+  `_source`, counting each nesting level. What a runtime field is charged to the script
+  reading it leaves out the part of the document's `_source` it keeps. That part is measured as
+  what dropping the `_source` didn't free, so data the field took out of the `_source` can go
+  uncharged up to one document's `_source` per field. A lenient runtime field
+  (`on_script_error: continue`) skips the documents its script fails on. That includes this
+  limit's `painless_error`, as Elasticsearch 9.5.5 skips a document for any failure there, a
+  `painless_error` or a stack overflow too. Only failures that aren't the script's stop the
+  request: the breaker refusing what the field keeps (429), even when the script also failed
+  on that document, and a cancelled or timed-out search. After such a failure no script of the
+  search runs again in that segment, a runtime field's or a sort key's (`top_hits` included). Past the limit roll
+  answers like that guard: a
   `script_exception` caused by an uncatchable `painless_error`, `script allocation limit
   exceeded: allocation of [N] bytes brings the running total to [T] bytes, over the limit of
   [L] bytes`, without a script portion. Both guards apply in every context (`_execute`,
@@ -2161,11 +2218,116 @@ the rest are skipped by the tests' own prerequisites.
   `_verify` write, read and delete a test object before answering (500
   `repository_verification_exception` when the bucket can't be reached; the repository stays
   registered, as on Elasticsearch). Its layout is roll's own
-  (`<base_path>/roll/`), so Elasticsearch can't read roll's snapshots nor roll Elasticsearch's;
-  `_cleanup` deletes what no snapshot references, `_verify_integrity` checks every shard
+  (`<base_path>/roll/`), so Elasticsearch can't read roll's snapshots (roll reads Elasticsearch's:
+  below). Someone else's repository under that prefix (an `index.latest` that isn't a decimal
+  generation; without one, `snap-` or `meta-` blobs at its root, an `index-0`, a newest
+  `index-N` that isn't roll's gzip, or anything under `indices/` roll doesn't name so, finished
+  or still being uploaded (an S3 upload in parts, an Azure blob with uncommitted blocks; GCS
+  can't list resumable uploads in progress, so Elasticsearch's first blob still going up there
+  isn't seen), such as the shard files of Elasticsearch's first snapshot before it's finalized;
+  the scan stops at the first such key, or after 10,000 of roll's own) is never
+  read or written: `PUT` with `verify` refuses to register the repository, and reads,
+  snapshots, `_verify`, `_analyze` and `_cleanup` answer 500 `repository_exception` (so does
+  listing snapshots across repositories that include it, as Elasticsearch fails such a
+  listing; the OpenSearch dialect lists one repository named exactly, as OpenSearch does, so
+  `_all`, a list or a pattern is 404 `repository_missing_exception`). Writing `index-N` commits
+  a snapshot: when `index.latest` can't be moved after it, the snapshot stays (readers find it
+  past `index.latest`, or from the newest `index-N` listed when the generation it names is
+  gone) and the request answers with a warning, as Elasticsearch only logs it; once
+  `index.latest` lags 8 generations, the next commit first moves it to the newest generation,
+  and when that fails too nothing more is committed until it moves.
+  `index.latest` is only ever replaced at the version roll read: another roll writer's written
+  meanwhile is moved on from (or, when it's already past, built on this snapshot), and someone
+  else's takes roll's `index-N` back out (a delete conditional on what roll wrote) and fails it
+  instead of being overwritten. A snapshot that fails deletes its own shard files once the
+  repository data shows it isn't there; its chunks, named by segment and so possibly uploaded
+  by a snapshot taken at the same time, are left to `_cleanup`, which keeps every generation
+  readers may start from;
+  `_cleanup` deletes what no snapshot references, and only objects of the names roll writes
+  (`index-N` from 1, `tests-<uuid>`, its shard files and chunks under `indices/`; nothing when
+  the bucket holds no repository data), and aborts only its own dangling uploads,
+  `_verify_integrity` checks every shard
   snapshot is in the bucket. Not supported: `chunk_size`, `server_side_encryption`,
   `canned_acl`, `storage_class` (accepted, not applied), throttling of bucket traffic, `gcs` and
   `azure`.
+- Restoring snapshots Elasticsearch wrote (`api/snapshots/elastic.rs`, `elastic_restore.rs`,
+  the Lucene readers in `search-lucene`). Register the location Elasticsearch snapshots to (an
+  `fs` directory under `path.repo`, or the `s3`, `gcs` or `azure` bucket and `base_path`, with
+  read credentials) and run Elasticsearch's own `POST _snapshot/{repo}/{snapshot}/_restore`; no
+  network route to the old cluster is needed (reindex from remote is the live path). A
+  repository whose base path holds Elasticsearch's `index.latest` is Elasticsearch's, unless roll
+  keeps snapshots there (snapshots recorded for the location, or a bucket's `roll/`), which stay
+  roll's whatever someone puts beside them. Whose it is is decided each time it's read: a
+  location whose `index.latest` is gone (wiped to be reused) is roll's again, and the snapshots
+  listed from it go:
+  - **Listing** (`GET _snapshot/{repo}/_all`, `_cat/snapshots`) answers from its `index-N` and
+    each snapshot's `SnapshotInfo` (`snap-<uuid>.dat`): names, uuids, states, indices, data
+    streams, times, shard counts, metadata. `_status` reports one small file per shard (the
+    shard snapshots aren't read for it).
+  - **Read only, whatever the registration says**: creating, deleting or cloning snapshots,
+    `_cleanup`, `_analyze` and `_verify_integrity` are refused, `PUT` with `verify` and `_verify`
+    read it without writing a test object. Nothing is ever written where Elasticsearch keeps its
+    snapshots.
+  - **Restoring** indexes every live document again from `_source`, with its `_id` (decoded from
+    Elasticsearch's Lucene encoding), routing, `_seq_no`, `_version` and `_primary_term` (their
+    doc values), as a task (`cluster:admin/snapshot/restore`), one shard after another;
+    `_recovery` and `_cat/recovery` show each shard's files and bytes as they're read (type
+    `SNAPSHOT`, stage `INDEX` then `DONE`). `indices`, `ignore_unavailable`, `rename_pattern` and
+    `rename_replacement`, `include_aliases`, `partial`, `index_settings` and
+    `ignore_index_settings` apply as on Elasticsearch, and `include_global_state` restores the
+    snapshot's component and index templates, legacy templates, ingest pipelines and lifecycle
+    policies one by one through the APIs that set them (as the requester; those Elasticsearch
+    manages itself, `_meta.managed`, and dot-names are left out); what roll refuses is reported
+    in a `Warning` header and the rest goes on.
+  - **Formats**: segments Lucene 9 and 10 wrote (Elasticsearch 8.0 to 9.x; checked against
+    8.19.7 and 9.5.5): segment infos, compound files, `Lucene94FieldInfos` (and Lucene 9.0 to
+    9.3's `Lucene90FieldInfos`), stored fields in
+    LZ4 (`index.codec: default`), DEFLATE (`best_compression` before 8.14) and Elasticsearch's
+    zstd (`best_compression` since 8.14), live docs, `Lucene90` numeric doc values for soft
+    deletes and sequence numbers, `Lucene99` flat vectors. Shard snapshots' files in parts
+    (`chunk_size`), small files kept inside the shard snapshot, metadata compressed or not.
+  - **Refused, per index, with the reason** (`partial: true` restores the others; without it
+    nothing is restored): no stored `_source` (`_source.enabled: false`, synthetic `_source`,
+    `index.mode` `logsdb` or `time_series` unless they store it), a `sparse_vector` or
+    `rank_vectors` field Elasticsearch 9 may have left out of `_source`, dense vectors left out
+    of `_source` inside nested objects, an index roll's index creation refuses (its mapping or a
+    setting; the error names it). Refused for the whole shard: segments Lucene 8 or older wrote
+    (Elasticsearch 7.x indices never merged since, named as such), doc values for soft deletes in a format other than `Lucene90`, any file whose
+    checksum doesn't match.
+  - **What differs**: `_source` is the one Elasticsearch stored, byte for byte, except that the
+    dense vectors Elasticsearch 9 leaves out of it (`index.mapping.exclude_source_vectors`) are
+    read from the vector files and appended (shortest `float` text, as Elasticsearch prints
+    them; cosine vectors, which Elasticsearch keeps normalized, multiplied back by the magnitude
+    it keeps in `<field>._magnitude`); fields `_source.excludes` left out don't come back (the restore warns). Sequence
+    numbers, versions and primary terms are Elasticsearch's, so the next write of a document
+    gets the next version; `index.uuid`, `index.creation_date` and `index.version.created` are
+    the restoring cluster's, and the settings Elasticsearch set for its cluster (allocation,
+    blocks, lifecycle, `index.store.*`, the made-by-the-cluster ones) are dropped with a warning,
+    as the migration from a live cluster drops them; `index.mapping.exclude_source_vectors` is set
+    explicitly to what the index had. Data streams restore as their backing indices (the data
+    stream itself isn't recreated), and feature states aren't restored. At most one such restore
+    runs per cluster (a second answers 503 `concurrent_snapshot_execution_exception`) and two per
+    node; a restore is a full reindex, at roll's indexing rate (docs/search/README.md, "Next").
+  - **Hostile input**: everything is read as a tenant's bytes. No allocation is sized from a count
+    or length in a file (counts are bounded by the bytes present, lengths checked before
+    anything is copied), every CodecUtil checksum is checked (large files as they stream), a
+    stored fields chunk may not decompress past `http.max_content_length` plus 1 MiB nor have
+    more than 64 compressed blocks a piece, metadata blobs are capped before (64 MiB) and after
+    (256 MiB) inflating, SMILE nesting at 100 levels and its numbers at 1,000 digits (Jackson's
+    limit), doc values and vector ordinals must name documents of the segment in order, sequence
+    numbers must be in `[0, 2^62)` and primary terms and versions at least 1, and what is read
+    (metadata as read, inflated and parsed; the doc values and vector ordinals kept per segment,
+    at most 512 MiB; read windows; every document from when it is read until it is indexed) is
+    charged to the `request` breaker. A repository's `index-N` is parsed once per generation. Blob
+    names that become keys or paths are checked. Reads pay `max_restore_bytes_per_sec` and
+    `indices.recovery.max_bytes_per_sec`; the task obeys cancellation between documents.
+  - **On the fleet**, the restore runs on the cluster's owner and its writes are logged and fenced
+    like any write; each index's recovery source records the restore, and an owner that opens a
+    cluster with one still running restores those indices again from the start (the documents
+    already there are written again under the same ids; one deleted on roll meanwhile comes back
+    once its tombstone is gone), or records why it can't; a task that stops on a panic marks its
+    indices failed. The old owner's task isn't stopped; its writes fail the write-ahead log's
+    ownership check like every write of a node that lost the cluster.
 - Searchable snapshots mount through the snapshot restore API, so a mounted index holds its own
   copy of the snapshot's documents (as `full_copy` does), not one that reads the snapshot's
   segments: roll's snapshots already share segments with the index they were taken of, but a

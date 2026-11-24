@@ -76,6 +76,8 @@ pub struct Inst {
     in_flight: AtomicU32,
     last_used: Mutex<Instant>,
     started_at: Mutex<Option<i64>>,
+    /// How long its last start took the runtime (the container up, before the app answers).
+    runtime_ms: Mutex<Option<f64>>,
     cpu_seen: Mutex<Option<u64>>,
     /// Consecutive crashes (a worker's restart backoff).
     crashes: AtomicU32,
@@ -152,6 +154,7 @@ impl Inst {
             in_flight: AtomicU32::new(0),
             last_used: Mutex::new(Instant::now()),
             started_at: Mutex::new(None),
+            runtime_ms: Mutex::new(None),
             cpu_seen: Mutex::new(None),
             crashes: AtomicU32::new(0),
             done: AtomicBool::new(false),
@@ -406,8 +409,10 @@ pub struct Gate {
     pub traces: bool,
     /// Its pages carry roll's Web Vitals tag.
     pub vitals: bool,
-    /// Its challenge rules' key ([`crate::challenge`]), when it has such a rule.
+    /// Its challenge rules' key ([`crate::challenge`]), when it has such a rule or attack mode.
     pub challenge_key: Option<Vec<u8>>,
+    /// Attack mode is on until then (unix ms; [`crate::attack_mode`]).
+    pub attack_until: Option<i64>,
     /// Its split test.
     pub split: Option<crate::model::Split>,
     /// Where a share of its bodiless requests is copied.
@@ -469,14 +474,32 @@ type BucketKey = (u16, Option<std::net::IpAddr>, Option<u64>);
 const FILE_BUCKETS: u16 = 1000;
 
 /// The first of `rules` that matches decides; none: in. A limit's bucket is `base` + its index.
-fn first_match(rules: &[crate::model::FirewallRule], asked: &crate::model::Asked<'_>, base: u16) -> Verdict {
-    match rules.iter().enumerate().find(|(_, r)| r.matches(asked)) {
+/// The first rule that matches and decides; every one matched on the way (a `log` rule's, and
+/// the deciding one's) goes in `hits`.
+fn first_match(rules: &[crate::model::FirewallRule], asked: &crate::model::Asked<'_>, base: u16, hits: &mut Vec<u64>) -> Verdict {
+    let found = rules.iter().enumerate().find(|(_, r)| {
+        if !r.matches(asked) {
+            return false;
+        }
+        hits.push(r.fingerprint());
+        r.action != crate::model::FirewallAction::Log
+    });
+    match found {
         None => Verdict::Allow,
         Some((_, r)) if r.action == crate::model::FirewallAction::Allow => Verdict::Allow,
         Some((i, r)) if r.action == crate::model::FirewallAction::Limit => Verdict::Limit(base + i as u16, crate::model::RateLimit { per_minute: r.per_minute.unwrap_or(60), burst: r.burst }, r.client_key(asked)),
         Some((_, r)) if r.action == crate::model::FirewallAction::Challenge => Verdict::Challenge,
         Some(_) => Verdict::Deny,
     }
+}
+
+/// Something an environment's instances did that's an event (`scale.out`, `scale.in`,
+/// `instance.crashed`), for the tick to record.
+#[derive(Clone, Debug)]
+pub struct Note {
+    pub kind: &'static str,
+    pub deployment: String,
+    pub data: serde_json::Value,
 }
 
 /// A firewall's answer: in, a 403, or in under a rule's own limit (its bucket, 1 + its index).
@@ -498,14 +521,15 @@ impl Gate {
     /// matching, it does.
     /// What its firewall says of the request: the first rule that matches decides; none lets it
     /// in.
-    pub fn firewall_verdict(&self, asked: &crate::model::Asked<'_>) -> Verdict {
-        let own = first_match(&self.firewall, asked, 1);
+    /// The rules it matched go in `hits` ([`EnvLive::count_hits`]).
+    pub fn firewall_verdict(&self, asked: &crate::model::Asked<'_>, hits: &mut Vec<u64>) -> Verdict {
+        let own = first_match(&self.firewall, asked, 1, hits);
         if self.file_firewall.is_empty() {
             return own;
         }
         // The tree's rules on their own, their limits in buckets of their own: the stricter of
         // the two answers (deny, then a challenge, then the lower limit) decides.
-        let file = first_match(&self.file_firewall, asked, FILE_BUCKETS);
+        let file = first_match(&self.file_firewall, asked, FILE_BUCKETS, hits);
         let rank = |v: &Verdict| match v {
             Verdict::Allow => 0,
             Verdict::Limit(..) => 1,
@@ -525,6 +549,17 @@ impl Gate {
         }
         let Some(ip) = client_ip(client) else { return false };
         self.allow.iter().any(|n| n.contains(&ip))
+    }
+}
+
+/// Empties the hourly slots between `last` and `now` (the hours nothing came).
+fn roll_slots(slots: &mut [u32; 24], last: i64, now: i64) {
+    if now - last >= 24 {
+        *slots = [0; 24];
+        return;
+    }
+    for h in last + 1..=now {
+        slots[(h % 24) as usize] = 0;
     }
 }
 
@@ -642,6 +677,11 @@ pub struct EnvLive {
     /// Crashes of the last ten minutes: when, when in unix ms, why.
     /// Recent crashes: when, unix ms, why, and the deployment the instance ran.
     crashes: Mutex<std::collections::VecDeque<(Instant, i64, String, String)>>,
+    /// What its instances did that's an event ([`EnvLive::take_notes`]): scaling out or in (with
+    /// why), a crash (with its reason), and the deployment it was of.
+    notes: Mutex<Vec<Note>>,
+    /// Its last cold start, in parts.
+    last_cold: Mutex<Option<crate::model::ColdStart>>,
     seq: AtomicU64,
     /// Every instance this process made here (a deploy's being checked isn't in `insts` until
     /// its commit): [`Self::adopt`] never takes one for a previous owner's.
@@ -660,6 +700,8 @@ pub struct EnvLive {
     /// Each client's tokens and when they were counted (its rate limit; None: no address).
     /// Each client's tokens, by bucket: 0 the environment's rate limit, 1 + i firewall rule i's.
     buckets: Mutex<HashMap<BucketKey, (f64, Instant)>>,
+    /// Requests each firewall rule matched, by its fingerprint: an hour a slot, the last 24.
+    rule_hits: Mutex<HashMap<u64, ([u32; 24], i64)>>,
     /// CPU its awake instances used and could have used, per tick, for `cpu_window` (only what
     /// the runtime measures).
     cpu_samples: Mutex<std::collections::VecDeque<(Instant, f64, f64)>>,
@@ -711,6 +753,8 @@ impl EnvLive {
             freed: Arc::new(tokio::sync::Notify::new()),
             failed: Mutex::new(None),
             crashes: Mutex::new(std::collections::VecDeque::new()),
+            notes: Mutex::new(Vec::new()),
+            last_cold: Mutex::new(None),
             seq: AtomicU64::new(0),
             mine: Mutex::default(),
             log,
@@ -721,6 +765,7 @@ impl EnvLive {
             gate: Mutex::new(None),
             gate_gen: AtomicU64::new(0),
             buckets: Mutex::new(HashMap::new()),
+            rule_hits: Mutex::new(HashMap::new()),
             cpu_samples: Mutex::new(std::collections::VecDeque::new()),
             lat_window: Mutex::new((Instant::now(), Served::default(), None)),
             mem_samples: Mutex::new(std::collections::VecDeque::new()),
@@ -927,6 +972,7 @@ impl EnvLive {
         }
         *inst.phase.lock() = Phase::Starting;
         let log = self.log.instance(&inst.name, &inst.deployment);
+        let t0 = Instant::now();
         let addr = match self.runtime.start(&inst.name, log).await {
             Ok(a) => a,
             Err(e) => {
@@ -934,6 +980,7 @@ impl EnvLive {
                 return Err(WakeError::Failed(e.to_string()));
             }
         };
+        *inst.runtime_ms.lock() = Some(t0.elapsed().as_secs_f64() * 1000.0);
         *inst.started_at.lock() = Some(now_ms());
         inst.health_fails.store(0, Ordering::SeqCst);
         *inst.cpu_seen.lock() = None;
@@ -1285,7 +1332,11 @@ impl EnvLive {
         };
         let ms = woke.elapsed().as_secs_f64() * 1000.0;
         self.meter.lock().cold_start(now_ms(), ms);
-        self.log.stream(Stream::System).line(format!("cold start: {} answered in {ms:.0} ms", inst.name));
+        // Its parts (Cloud Run's startup latency): the runtime bringing the container up, then the
+        // app until it answers.
+        let runtime = inst.runtime_ms.lock().unwrap_or(0.0).min(ms);
+        *self.last_cold.lock() = Some(crate::model::ColdStart { at: now_ms(), ms: ms.round() as u64, runtime_ms: runtime.round() as u64, app_ms: (ms - runtime).round() as u64 });
+        self.log.stream(Stream::System).line(format!("cold start: {} answered in {ms:.0} ms (the container up in {runtime:.0} ms, the app answering {:.0} ms after)", inst.name, ms - runtime));
         let mut l = self.pick(dep, tpl.run.concurrency, true).ok_or_else(|| WakeError::Failed("the instance stopped again".into()))?;
         l.waited = began.elapsed();
         l.cold = true;
@@ -1294,6 +1345,40 @@ impl EnvLive {
 
     pub fn gate(&self) -> Option<Arc<Gate>> {
         self.gate.lock().clone()
+    }
+
+    /// Its last cold start, in parts (none since this node had it).
+    pub fn last_cold_start(&self) -> Option<crate::model::ColdStart> {
+        *self.last_cold.lock()
+    }
+
+    /// Counts a request against the rules it matched (their fingerprints).
+    pub fn count_hits(&self, hits: &[u64]) {
+        if hits.is_empty() {
+            return;
+        }
+        let hour = code_sql::now_ms() / 3_600_000;
+        let mut m = self.rule_hits.lock();
+        // Never more than two environments' worth of rules (theirs and a tree's, changed).
+        if m.len() > 4 * crate::model::MAX_FIREWALL_RULES {
+            m.retain(|_, (_, last)| hour - *last < 24);
+        }
+        for h in hits {
+            let (slots, last) = m.entry(*h).or_insert(([0; 24], hour));
+            roll_slots(slots, *last, hour);
+            *last = hour;
+            slots[(hour % 24) as usize] = slots[(hour % 24) as usize].saturating_add(1);
+        }
+    }
+
+    /// Requests matched in the last 24 hours, by fingerprint.
+    pub fn hits(&self, fingerprint: u64) -> u32 {
+        let hour = code_sql::now_ms() / 3_600_000;
+        self.rule_hits.lock().get(&fingerprint).map_or(0, |(slots, last)| {
+            let mut s = *slots;
+            roll_slots(&mut s, *last, hour);
+            s.iter().fold(0u32, |a, b| a.saturating_add(*b))
+        })
     }
 
     pub fn gate_gen(&self) -> u64 {
@@ -1472,6 +1557,7 @@ impl EnvLive {
     fn crashed_with(&self, inst: &Inst, why: &str, grace: Duration) {
         *inst.phase.lock() = Phase::Crashed;
         self.count(&inst.deployment, |s| s.crashes += 1);
+        self.note("instance.crashed", &inst.deployment, serde_json::json!({ "instance": inst.name, "reason": why }));
         let (runtime, name, released) = (self.runtime.clone(), inst.name.clone(), self.released.clone());
         *inst.stopping.lock() = Some(tokio::spawn(async move {
             if !released.load(Ordering::SeqCst) {
@@ -1490,6 +1576,42 @@ impl EnvLive {
         if entered {
             self.log.stream(Stream::System).line(format!("crash loop: {} crashes in 10 minutes, the last because {why}", self.crashes.lock().len()));
         }
+    }
+
+    /// An instance event, kept for the next tick to record ([`EnvLive::take_notes`]); at most a
+    /// hundred wait (the oldest go).
+    fn note(&self, kind: &'static str, deployment: &str, data: serde_json::Value) {
+        let mut n = self.notes.lock();
+        if n.len() >= 100 {
+            n.remove(0);
+        }
+        n.push(Note { kind, deployment: deployment.to_string(), data });
+    }
+
+    /// Scaled from `from` to `to` instances, and why: a note.
+    fn note_scaled(&self, deployment: &str, from: u32, to: u32, reason: &str) {
+        let kind = if to > from { "scale.out" } else { "scale.in" };
+        self.note(kind, deployment, serde_json::json!({ "from": from, "to": to, "reason": reason }));
+    }
+
+    /// The notes since the last time, a run of scaling the same way made one (from where it
+    /// started to where it ended, the last reason).
+    pub fn take_notes(&self) -> Vec<Note> {
+        let notes = std::mem::take(&mut *self.notes.lock());
+        let mut out: Vec<Note> = Vec::with_capacity(notes.len());
+        for n in notes {
+            if let Some(last) = out.last_mut()
+                && last.kind == n.kind
+                && last.kind.starts_with("scale.")
+                && last.deployment == n.deployment
+            {
+                last.data["to"] = n.data["to"].clone();
+                last.data["reason"] = n.data["reason"].clone();
+                continue;
+            }
+            out.push(n);
+        }
+        out
     }
 
     fn looping(c: &std::collections::VecDeque<(Instant, i64, String, String)>) -> bool {
@@ -1540,7 +1662,9 @@ impl EnvLive {
         let woke = Instant::now();
         if self.start(&inst, &tpl.run, None, deadline).await.is_ok() {
             self.meter.lock().cold_start(now_ms(), woke.elapsed().as_secs_f64() * 1000.0);
-            self.log.stream(Stream::System).line(format!("scaled out: {} instances", self.awake_count()));
+            let awake = self.awake_count() as u32;
+            self.log.stream(Stream::System).line(format!("scaled out: {awake} instances"));
+            self.note_scaled(&tpl.deployment, awake.saturating_sub(1), awake, "requests at its concurrency");
         }
     }
 
@@ -2348,6 +2472,7 @@ impl EnvLive {
                         self.cpu_need.store(awake, Ordering::SeqCst);
                         let at = if what == "p95" { format!("p95 at {load:.0} ms, over its {target} ms target") } else { format!("{what} at {load:.0}% of the {target}% target") };
                         self.log.stream(Stream::System).line(format!("scaled out: {at}, {awake} instances"));
+                        self.note_scaled(&tpl.deployment, awake - 1, awake, &at);
                     }
                 }
             }
@@ -2380,6 +2505,7 @@ impl EnvLive {
             awake -= 1;
             *self.over_since.lock() = None;
             self.log.stream(Stream::System).line(format!("scaled in: {awake} instances"));
+            self.note_scaled(&i.deployment, awake + 1, awake, "fewer requests");
         }
         for i in &insts {
             if matches!(i.phase(), Phase::Running(_) | Phase::Suspended(_)) && !self.runtime.running(&i.name).await {
@@ -2532,6 +2658,7 @@ impl EnvLive {
             }
             up += 1;
             self.log.stream(Stream::System).line(format!("scaled out: {up} instances for the backlog"));
+            self.note_scaled(&tpl.deployment, up - 1, up, "its backlog");
         }
         // Crashed ones past what's wanted (its backlog fell while they waited): they go, their
         // crash kept in the crash list; none is started again to be scaled in.
@@ -2576,6 +2703,7 @@ impl EnvLive {
             self.insts.lock().retain(|x| !Arc::ptr_eq(x, &i));
             *self.fewer_since.lock() = None;
             self.log.stream(Stream::System).line(format!("scaled in: {} instances for the backlog", up - 1));
+            self.note_scaled(&i.deployment, up, up - 1, "its backlog fell");
             let (runtime, name, grace, released) = (self.runtime.clone(), i.name.clone(), self.drain_of(run), self.released.clone());
             tokio::spawn(async move {
                 if released.load(Ordering::SeqCst) {

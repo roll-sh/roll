@@ -26,6 +26,8 @@ pub struct FakeCode {
     pub watch: Mutex<Vec<String>>,
     /// The feedback left on changes' preview pages, by change.
     pub feedback: Mutex<HashMap<String, Vec<roll_previews::notes::Note>>>,
+    /// Comments made on changes: (change, body, by, outside).
+    pub comments: Mutex<Vec<(String, String, String, bool)>>,
     /// The `health` path every service says it has.
     pub health: Mutex<Option<String>>,
     /// The page states every service's `roll.toml` names (`[[preview.states]]`).
@@ -85,6 +87,11 @@ impl Source for FakeCode {
     }
     async fn feedback(&self, change: &str) -> anyhow::Result<Vec<roll_previews::notes::Note>> {
         Ok(self.feedback.lock().get(change).cloned().unwrap_or_default())
+    }
+    async fn comment(&self, change: &str, body: &str, by: &str, outside: bool) -> anyhow::Result<Option<String>> {
+        let mut all = self.comments.lock();
+        all.push((change.into(), body.into(), by.into(), outside));
+        Ok(Some(format!("rv_c{}", all.len())))
     }
     async fn paths_between(&self, _repo: &str, from: &str, to: &str) -> anyhow::Result<Option<Vec<String>>> {
         Ok(self.between.lock().get(&format!("{from}..{to}")).cloned())
@@ -147,6 +154,8 @@ pub struct FakeData {
     pub at: Mutex<Vec<i64>>,
     /// What `columns` answers, by parent (`Err`: it sleeps).
     pub columns: Mutex<std::collections::HashMap<String, Result<Vec<roll_previews::mask::Column>, roll_previews::ports::Asleep>>>,
+    /// Branches put back to a restore point: (the branch, the point's copy).
+    pub restored: Mutex<Vec<(String, String)>>,
 }
 
 impl FakeData {
@@ -164,6 +173,7 @@ impl FakeData {
             at: Mutex::new(Vec::new()),
             columns: Mutex::new(Default::default()),
             branch_now: Mutex::new(None),
+            restored: Mutex::new(Vec::new()),
         })
     }
 }
@@ -205,6 +215,14 @@ impl Brancher for FakeData {
         self.branches.lock().insert(id.clone());
         Ok(Some(Branched::plain(id)))
     }
+    fn restores(&self) -> bool {
+        self.kind == Kind::Postgres
+    }
+    async fn restore(&self, _parent: &str, branch: &str, _kept: Option<&str>, point: &str, _name: &str, _mode: Mode) -> anyhow::Result<Option<Branched>> {
+        anyhow::ensure!(self.branches.lock().contains(point), "no restore point {point}");
+        self.restored.lock().push((branch.to_string(), point.to_string()));
+        Ok(Some(Branched::plain(branch.to_string())))
+    }
     async fn delete_snapshot(&self, parent: &str, _from: &str, snapshot: &str, _kept: Option<&str>, name: &str) -> anyhow::Result<()> {
         if self.fail_snapshot_deletes.load(Ordering::SeqCst) > 0 {
             self.fail_snapshot_deletes.fetch_sub(1, Ordering::SeqCst);
@@ -218,6 +236,16 @@ impl Brancher for FakeData {
     }
     async fn schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<(Vec<String>, Vec<String>)>> {
         Ok(self.schema.lock().clone())
+    }
+    async fn browse(&self, _parent: &str, branch: &str, table: Option<&str>) -> anyhow::Result<Option<roll_previews::Browse>> {
+        if self.kind != Kind::Postgres {
+            return Ok(None);
+        }
+        let tables = vec![roll_previews::BrowseTable { name: "public.users".into(), rows: 2 }];
+        Ok(Some(match table {
+            None => roll_previews::Browse::Tables { tables },
+            Some(t) => roll_previews::Browse::Rows { table: t.into(), columns: vec!["email".into()], rows: vec![vec![Some(format!("user-1@{branch}.invalid"))]], more: false },
+        }))
     }
     async fn branch_schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<Vec<String>>> {
         // As it's made, a branch is its parent.
@@ -319,6 +347,10 @@ pub struct FakeApps {
     pub shot_services: Mutex<Vec<String>>,
     /// The notes each screenshot was asked to crop (a `#missing` selector finds nothing).
     pub crops_asked: Mutex<Vec<String>>,
+    /// What an agent's run (`…/try`) answers.
+    pub tried: Mutex<Option<roll_previews::ports::Tried>>,
+    /// What the first page's run says its pages served.
+    pub served: Mutex<Vec<(String, Vec<u8>)>>,
     /// Where each drain follower asked to start (`drain_from`'s `since`), and the end the test
     /// writes the followed container's lines into (`(stderr, "<stamp> <text>")`).
     pub drain_since: Mutex<Vec<String>>,
@@ -504,7 +536,10 @@ impl Apps for FakeApps {
         self.crops_asked.lock().extend(opts.crops.iter().map(|c| c.note.clone()));
         let crops = opts.crops.iter().filter(|c| c.selector != "#missing").map(|c| (c.note.clone(), png.clone())).collect();
         let health = self.page_says.lock().clone().map(|said| roll_previews::PageHealth { errors: 1, first_error: Some(said), failed: 0, first_failed: None, unstable: false });
-        Ok(Some(roll_previews::ports::Shot { png, speed: None, health, a11y: None, phone: None, pages, text: None, links: None, api, crops }))
+        Ok(Some(roll_previews::ports::Shot { png, speed: None, health, a11y: None, phone: None, pages, text: None, links: None, api, crops, bodies: self.served.lock().clone() }))
+    }
+    async fn try_page(&self, _preview: &str, _service: &str, _path: &str, _steps: &[roll_previews::settings::Step]) -> anyhow::Result<Option<roll_previews::ports::Tried>> {
+        Ok(self.tried.lock().clone())
     }
     fn status(&self, p: &str, s: &str) -> Option<ServiceState> {
         self.running.lock().contains(&(p.to_string(), s.to_string())).then_some(ServiceState::Running)

@@ -639,6 +639,8 @@ impl Apps {
         let id = dep.to_string();
         d.steps = self.db(move |s| s.steps(&id)).await?;
         let id = dep.to_string();
+        d.build_steps = self.db(move |s| s.build_steps(&id)).await?;
+        let id = dep.to_string();
         d.vulnerabilities = self.db(move |s| s.scan(&id)).await?.map(|(sum, _)| sum);
         let id = dep.to_string();
         d.approved_by = self.db(move |s| s.approvals_of(&id)).await?;
@@ -973,8 +975,19 @@ impl Apps {
                     log.line(n);
                 }
                 let run = if env.ephemeral { run } else { svc.run.clone() };
+                let bytes = self.deps.runtime.image_bytes(&pinned).await;
+                if let Some(b) = bytes.filter(|b| *b >= 1 << 30) {
+                    log.line(format!("the image is {:.1} GB: a slimmer one starts faster each time it's pulled", b as f64 / (1u64 << 30) as f64));
+                }
                 let (id, p, r) = (d.id.clone(), pinned.clone(), run.clone());
-                self.db(move |s| s.set_built(&id, &p, None, Some(&r))).await?;
+                self.db(move |s| {
+                    s.set_built(&id, &p, None, Some(&r))?;
+                    match bytes {
+                        Some(b) => s.set_image_bytes(&id, b),
+                        None => Ok(()),
+                    }
+                })
+                .await?;
                 (pinned, run)
             }
             None => {
@@ -1748,6 +1761,12 @@ impl Apps {
         };
         let log = &log;
         let mut plan_json = serde_json::to_value(&plan)?;
+        // What the repo's `.env.example` names and the environment doesn't set: said before the
+        // build, rather than found as a crash after it.
+        let unset: Vec<&String> = plan.variables.iter().filter(|n| !build_env.iter().any(|(k, _)| k == *n) && !runtime_only.contains(*n)).collect();
+        if !unset.is_empty() {
+            log.line(format!("the repo expects variables this environment doesn't set: {} (its example file names them)", unset.iter().map(|n| n.as_str()).collect::<Vec<_>>().join(", ")));
+        }
         // The images it builds on, to watch for their fixes (`watch_bases`).
         let base_text = if plan.provider == apps_build::Provider::Dockerfile { std::fs::read_to_string(context.join(&dockerfile)).unwrap_or_default() } else { plan.dockerfile.clone() };
         let bases = apps_build::base_images(&base_text);
@@ -1762,7 +1781,7 @@ impl Apps {
                 false => log.line("build.size: this node's builds share its BuildKit, unsized (it applies on the fleet's builders)"),
             }
         }
-        let job = BuildJob {
+        let mut job = BuildJob {
             service: svc.id.clone(),
             deployment: d.id.clone(),
             context,
@@ -1784,6 +1803,14 @@ impl Apps {
         // The same inputs built before in this project (Railway's skipped builds): the same tree,
         // Dockerfile, target and build variables, and its image still kept. Never with `no_cache`.
         let build_key = if job.no_cache { None } else { Some(build_key(&job, &plan.dockerfile, self.deps.builder.name()).await?) };
+        // Next's deployment id, from the same inputs as the build's key (it's left out of it): a
+        // reused image's pages, or a cached build step's, name the id this deployment records,
+        // which skew protection follows (`skew.rs`).
+        if plan.framework.as_deref() == Some("next") && !job.env.iter().any(|(k, _)| k == apps_build::NEXT_DEPLOYMENT_ID) {
+            let id = format!("nb_{}", build_key.as_deref().map_or_else(|| d.id.trim_start_matches("dep_").to_string(), |k| k[..20].to_string()));
+            job.env.push((apps_build::NEXT_DEPLOYMENT_ID.into(), id.clone()));
+            plan_json["next_deployment_id"] = json!(id);
+        }
         let reused = match build_key.clone() {
             Some(k) => {
                 let p = svc.project.clone();
@@ -1791,13 +1818,25 @@ impl Apps {
             }
             None => None,
         };
+        // Its build begins (Vercel's `deployment.created`, Netlify's "deploy started"): webhooks and
+        // chat can say "building…".
+        let (sid, en, did, data) = (svc.id.clone(), d.environment.clone(), d.id.clone(), json!({ "revision": d.revision, "trigger": d.trigger, "reused": reused.is_some() }));
+        let _ = self.db(move |s| s.add_event("deploy.started", &sid, &en, Some(&did), &data)).await;
         let (reused_from, began) = (reused.as_ref().map(|(from, _)| from.clone()), code_sql::now_ms());
         let image = if let Some((from, image)) = reused {
             log.line(format!("{from} was built from the same source, settings and build variables: its image goes on, no build"));
             image
         } else {
         log.line(format!("building with {}", self.deps.builder.name()));
-        match self.deps.builder.build(&job, log, cancel.clone()).await {
+        // Its steps, read from the lines BuildKit writes, kept whether or not it built.
+        let steps = Arc::new(parking_lot::Mutex::new(crate::build_steps::BuildSteps::default()));
+        let built = self.deps.builder.build(&job, &log.collecting(steps.clone()), cancel.clone()).await;
+        let steps = steps.lock().steps();
+        if !steps.is_empty() {
+            let (id, j) = (d.id.clone(), serde_json::to_string(&steps).unwrap_or_default());
+            let _ = self.db(move |s| s.set_build_steps(&id, &j)).await;
+        }
+        match built {
             Ok(i) => i,
             // What failed, as BuildKit said it (the step, its last words), not only its exit code.
             Err(e) if !cancel.is_cancelled() => {
@@ -1848,9 +1887,22 @@ impl Apps {
                 log.line(format!("its provenance wasn't recorded: {e}"));
             }
         }
+        // Its size (Fly's release sizes): a large one starts slower every time it's pulled.
+        let bytes = self.deps.runtime.image_bytes(&image).await;
+        if let Some(b) = bytes {
+            let gb = b as f64 / (1u64 << 30) as f64;
+            if gb >= 1.0 {
+                log.line(format!("the image is {gb:.1} GB: a slimmer base (-slim, alpine, distroless) or a multi-stage build makes its cold starts faster"));
+            } else {
+                log.line(format!("the image is {} MB", b >> 20));
+            }
+        }
         let (id, img, r) = (d.id.clone(), image.clone(), run.clone());
         self.db(move |s| {
             s.set_built(&id, &img, Some(&plan_json), Some(&r))?;
+            if let Some(b) = bytes {
+                s.set_image_bytes(&id, b)?;
+            }
             match &build_key {
                 Some(k) => s.set_build_key(&id, k),
                 None => Ok(()),
@@ -2311,6 +2363,21 @@ impl Apps {
         });
     }
 
+    /// Its instances' events since the last tick: scaling (with why) and crashes (with their
+    /// reason).
+    async fn record_notes(self: &Arc<Self>, l: &crate::live::EnvLive) {
+        let live = l.template().map(|t| t.deployment.clone());
+        for n in l.take_notes() {
+            // A new deployment's instance failing its start is its deploy's failure (said as
+            // `deploy.failed`), not an instance of what's live crashing.
+            if n.kind == "instance.crashed" && live.as_deref() != Some(n.deployment.as_str()) {
+                continue;
+            }
+            let (sid, e) = (l.service.clone(), l.env.clone());
+            let _ = self.db(move |s| s.add_event(n.kind, &sid, &e, Some(&n.deployment), &n.data)).await;
+        }
+    }
+
     /// An environment that went into a crash loop gets one event for it (until it leaves it).
     async fn note_crash_loop(self: &Arc<Self>, l: &crate::live::EnvLive) {
         let key = format!("{}/{}", l.service, l.env);
@@ -2375,6 +2442,9 @@ impl Apps {
         let Ok(all) = self.db(move |s| s.minutes(&sid, &e, now - back)).await else { return };
         let all: Vec<_> = all.into_iter().filter(|r| r.minute < now).collect();
         let rows: Vec<_> = all.iter().filter(|r| r.minute >= now - 5).cloned().collect();
+        if let Some(last) = rows.iter().filter(|r| r.minute == now - 1).map(|r| r.requests).next() {
+            self.judge_attack(&l.service, &l.env, &tpl.deployment, last).await;
+        }
         let mut firing: Vec<(&'static str, serde_json::Value)> = Vec::new();
         if a.memory_pct > 0 && rows.len() >= 5 {
             let share = |r: &crate::store::MinuteRow| r.memory_bytes as f64 / r.instances.max(1) as f64 / (limit_mb as f64 * 1048576.0) * 100.0;
@@ -2405,6 +2475,32 @@ impl Apps {
             if slow >= 3 {
                 let value = rows.iter().map(|r| r.p95_ms).fold(0.0, f64::max).round();
                 firing.push(("alert.latency", serde_json::json!({ "value": value, "threshold": a.p95_ms })));
+            }
+        }
+        // One route's errors or latency: each (route, kind) fires and resolves on its own.
+        if !a.routes.is_empty() {
+            let firing = self.judge_routes(&l.service, &l.env, &a.routes).await;
+            for r in &a.routes {
+                let label = r.label();
+                for kind in ["errors", "latency"] {
+                    let key = format!("{}/{}/alert.route:{label}:{kind}", l.service, l.env);
+                    match firing.iter().find(|(f, k, _)| *f == label && *k == kind) {
+                        Some((_, _, data)) => {
+                            if self.looping.lock().insert(key) {
+                                let (sid, e, dep, d) = (l.service.clone(), l.env.clone(), tpl.deployment.clone(), data.clone());
+                                let _ = self.db(move |s| s.add_event("alert.route", &sid, &e, Some(&dep), &d)).await;
+                                l.log.stream(Stream::System).line(format!("alert: alert.route {data}"));
+                            }
+                        }
+                        None => {
+                            if self.looping.lock().remove(&key) {
+                                let (sid, e, dep, d) = (l.service.clone(), l.env.clone(), tpl.deployment.clone(), serde_json::json!({ "alert": "alert.route", "route": r.route, "method": r.method, "kind": kind }));
+                                let _ = self.db(move |s| s.add_event("alert.resolved", &sid, &e, Some(&dep), &d)).await;
+                                l.log.stream(Stream::System).line(format!("alert: alert.route {label} {kind} resolved"));
+                            }
+                        }
+                    }
+                }
             }
         }
         // Its log-based metrics: the minute's matching lines, as gauges beside its own metrics.
@@ -2538,6 +2634,7 @@ impl Apps {
             // Each environment's tick on its own task: one waiting for a cold start to finish
             // doesn't hold up the others.
             for l in self.lives().into_iter().filter(|l| self.owns(&l.service)) {
+                self.record_notes(&l).await;
                 self.note_crash_loop(&l).await;
                 if l.ticking.swap(true, Ordering::SeqCst) {
                     continue;

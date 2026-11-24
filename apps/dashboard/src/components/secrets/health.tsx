@@ -10,7 +10,7 @@ import { ago, card, errorText, ErrorNote, ghost, Section, sized, useLoad } from 
 const ISSUES: { issue: Finding["issue"]; title: string; what: string; serious: boolean }[] = [
   { issue: "decoy_used", title: "Decoy used", what: "Someone used a decoy key's credential (its token or database login): they found it where it was planted. Cut off whatever could reach that place, rotate the real credentials beside it, then delete the decoy and plant a new one.", serious: true },
   { issue: "production_unprotected", title: "Production isn't protected", what: "Checks, sandboxes and untrusted previews may read production, and no change there needs approval. New projects start with it protected; this one was made before. Protecting it keeps writes direct for whoever may write (no approvals until you ask for them) and keeps everything else out.", serious: true },
-  { issue: "expired", title: "Expired", what: "Their values stopped working outside roll.", serious: true },
+  { issue: "expired", title: "Expired", what: "Their values stopped working outside roll, or a SaaS rotator's own credential did: roll can't issue or revoke its keys.", serious: true },
   { issue: "rotation_failing", title: "Rotation failing", what: "Their scheduled rotation fails: the database, vendor or rotator refused or didn't answer. The old credential keeps working; roll tries again.", serious: true },
   { issue: "revoke_failing", title: "Not revoked yet", what: "Credentials roll retired or that expired but couldn't revoke yet: they still work until it can. roll keeps trying.", serious: true },
   { issue: "missing", title: "Missing", what: "Required keys an environment doesn't define.", serious: true },
@@ -19,12 +19,15 @@ const ISSUES: { issue: Finding["issue"]; title: string; what: string; serious: b
   { issue: "weak", title: "Weak", what: "Credentials easy to guess: New value replaces one with 48 random characters.", serious: false },
   { issue: "unplaced", title: "No placement", what: "Keys bound to hosts without naming the header or query parameter that carries them: a placeholder may ride in any header, one the host might echo back, and untrusted code's doesn't swap. Bind each again (Authorization: Bearer {} by default).", serious: false },
   { issue: "operator_made", title: "Made as the operator", what: "Syncs and workload identities an admin's session made before roll recorded the person: they'd keep acting after that admin is demoted or can't sign in. Make each again from your session to bind it to you.", serious: false },
-  { issue: "expiring", title: "Expiring", what: "Values that stop working outside roll within two weeks.", serious: false },
+  { issue: "expiring", title: "Expiring", what: "Values that stop working outside roll within two weeks, and SaaS rotators whose own credential does.", serious: false },
   { issue: "certificate_expiring", title: "Certificates ending", what: "Certificates a CA here signed for a CSR that end within two weeks: nothing renews them but whoever asked. Sign a new CSR.", serious: false },
   { issue: "stale", title: "Stale", what: "Unchanged for longer than their environment allows.", serious: false },
   { issue: "unread", title: "Unread", what: "Nobody revealed, exported, resolved or synced them in 90 days: still needed?", serious: false },
   { issue: "unreferenced", title: "Not in the code", what: "No repository on this project's canvas mentions them (roll code's search): still needed?", serious: false },
 ];
+
+/** A SaaS rotator's own credential ending (`expired`/`expiring` with no environment): named, not a key to open or date. */
+const registration = (f: Finding) => (f.issue === "expired" || f.issue === "expiring") && !f.environment;
 
 /** Everything insights flag, in every environment at once, worst first (docs/secrets.md, "Health"). */
 export function HealthView() {
@@ -133,10 +136,10 @@ export function HealthView() {
                 <div key={`${f.environment}/${f.path}/${f.key}`} className="flex flex-wrap items-center gap-x-3 gap-y-0.5 px-3 py-1.5 text-[12.5px]">
                   {f.issue === "production_unprotected" ? (
                     <span className="text-fg">{name(f.environment)}</span>
-                  ) : f.issue === "certificate_expiring" || f.issue === "operator_made" ? (
+                  ) : f.issue === "certificate_expiring" || f.issue === "operator_made" || registration(f) ? (
                     <span className="flex min-w-0 items-center gap-3">
                       <span className="font-mono text-fg">{f.key}</span>
-                      <span className="text-subtle">{f.issue === "certificate_expiring" ? `CA ${f.path}` : f.environment ? `${name(f.environment)}${f.path === "/" ? "" : ` ${f.path}`}` : ""}</span>
+                      <span className="text-subtle">{f.issue === "certificate_expiring" ? `CA ${f.path}` : registration(f) ? "SaaS rotator" : f.environment ? `${name(f.environment)}${f.path === "/" ? "" : ` ${f.path}`}` : ""}</span>
                     </span>
                   ) : (
                     <Link href={secretsHref(project.id, { env: f.environment, path: f.path === "/" ? undefined : f.path, key: f.issue === "missing" ? undefined : f.key })} className="flex min-w-0 items-center gap-3 rounded transition-colors hover:text-accent">
@@ -165,7 +168,7 @@ export function HealthView() {
                       <ShieldCheck className="size-3.5" /> Protect {name(f.environment).toLowerCase()}
                     </button>
                   )}
-                  {(f.issue === "expired" || f.issue === "expiring") && <NewDate onSet={(at) => fix(f, { expires_at: at }, "dated again")} />}
+                  {(f.issue === "expired" || f.issue === "expiring") && !registration(f) && <NewDate onSet={(at) => fix(f, { expires_at: at }, "dated again")} />}
                 </div>
               ))}
             </div>

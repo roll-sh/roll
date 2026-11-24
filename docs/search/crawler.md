@@ -1,9 +1,11 @@
 # A web crawler for site search: design
 
-`## Next` item 13 in [README.md](README.md). Status: design, nothing built. It depends on the
-connector runner in #318 (open), which it reuses for jobs, schedules, slots, cancelling, counters
-and sealed credentials. This document refers to that runner's design, the "Connectors" section of
-architecture.md on `feature/search-connectors`.
+`## Next` item 13 in [README.md](README.md). Status: phase 1 landed (the crawl, robots.txt,
+sitemaps, crawl rules, default fields, the purge, limits and politeness, unverified limits, and
+`roll search crawler import`; `search-es` `xpack/entsearch/sync/crawler/`). Phases 2 and 3 are
+to come. It runs on the connector runner of #318, which it reuses for jobs, schedules, slots,
+cancelling, counters and sealed credentials (architecture.md, "Connectors" and "Web crawler").
+Where phase 1 differs from Open Crawler is listed in compatibility.md ("The web crawler").
 
 ## Why
 
@@ -94,11 +96,29 @@ ever sees JSON.
 3. **Robots.txt** follows RFC 9309. It is fetched once per origin per crawl, parsed under the
    product token `roll-crawler` (or `*` when there's no group for it), and honoured always: like
    Open Crawler, nothing configures it away. A 4xx means everything is allowed. A 5xx, a timeout or
-   a network error means the origin is disallowed for this crawl, as the RFC asks. Redirects to the
-   same origin are followed for robots.txt up to 5 times. `Crawl-delay` is honoured.
+   a network error means the origin is disallowed for this crawl, as the RFC asks. Redirects are
+   followed for robots.txt up to 5 times within the same site (`http` to `https`, the apex to
+   `www`), each hop's address checked and the credential not sent after a hop leaves its origin;
+   more, or a hop to another site, is unreachable. A leading byte order mark is ignored. A rule is
+   matched by finding the literal text between its `*`s left to right, which is exact for `*`
+   patterns and linear in the URL per rule; a group of more than 5,000 rules disallows its origin,
+   and the files are charged to the request breaker. `Crawl-delay` is honoured, up to the crawl's
+   deadline: a request whose turn would come after it isn't made, and an origin whose next turn
+   comes after the deadline is left for this crawl rather than holding up the others.
+
+   Deciding whether URLs may be fetched (crawl rules and robots.txt) has a budget of 30 seconds a
+   crawl; past it the crawl ends `completed` with `limit_reached: rule_matching_time`. The cheap
+   checks (depth, seen, a full frontier) come first, a sitemap stops being read once the frontier
+   is full, and long lists of links yield to the runtime as they're queued (the job's
+   `metadata.checked_url_count` counts the checks). Crawl rules are fully built DFAs over a URL's
+   bytes with Unicode off, one step per byte whatever the pattern; a rule whose DFA doesn't fit its
+   equal share of a 10 MiB budget (or whose NFA passes 64 KiB) fails validation. They're built off
+   the async workers, both when a draft is validated and when a crawl starts, and a deny rule
+   whose search gives up denies.
 
    Unlike Open Crawler, a site's `Elastic-Crawler` group doesn't apply to roll, whose token is
-   `roll-crawler`. The import step warns when it finds such a group.
+   `roll-crawler`. A crawl that finds such a group and no `roll-crawler` group names the origin in
+   `metadata.robots_elastic_crawler_group_ignored`.
 4. **Visit, breadth first by depth.** The frontier is a FIFO per depth. Each URL is normalised (see
    "Documents"), checked against the limits, the domains, the crawl rules and robots.txt, and then
    fetched (see "Fetching").
@@ -111,8 +131,10 @@ ever sees JSON.
 5. **Extract.** An HTML page becomes a document, and its links feed the frontier unless the page
    says `nofollow`. Directives follow Open Crawler's crawler directives:
    - `<meta name="robots">` with `noindex` and `nofollow`, and `rel="nofollow"` on links.
-   - `<link rel="canonical">`. The document is stored under the canonical URL, and the other URLs
-     go in `additional_urls`.
+   - `<link rel="canonical">`, honoured only for a canonical URL the crawl fetched and indexed as
+     itself: the page naming it then goes in that document's `additional_urls` and gets no
+     document of its own. Until the canonical URL is fetched (it is queued), the page is stored
+     under its own URL, so no page can take over another's document.
    - `data-elastic-include` and `data-elastic-exclude`, nestable, which choose the text that is
      indexed.
    - `<meta class="elastic" name=… content=…>`, which becomes a field.
@@ -127,10 +149,13 @@ ever sees JSON.
 Every URL is the tenant's choice, so fetching follows AGENTS.md's rule for such URLs and goes
 further:
 
-- **Public addresses only.** Every request goes through a client built on `roll_net::PublicOnly`.
-  Names resolve to public addresses, and `roll_net::literal_private_host` refuses IP literals and
-  `localhost`. No proxy is used. `roll.connectors.allow_private_hosts` lifts this for local
-  development only, as it does for other connectors.
+- **Public addresses only.** Every request goes through roll's one egress check
+  (`search-es` `egress.rs`), as every other outbound call of roll search does: names resolve
+  through its resolver to public addresses that are neither the node's own nor in the operator's
+  deny lists, addresses written out and `localhost` are checked before connecting, and nothing
+  goes out until the node has resolved its own names. No proxy is used.
+  `roll.connectors.allow_private_hosts` lifts the private-address rule for local development
+  only, as it does for other connectors.
 - **Redirects are followed by hand.** The client follows none itself. The crawler follows up to
   `max_redirects` (10), and each hop is a new URL checked like a link: public address, domains,
   crawl rules, robots.txt. A redirect leaving the crawl's domains ends there, and the source URL is
@@ -168,7 +193,7 @@ works in a minute:
 |---|---|---|
 | URLs per crawl | 1,000 | `max_unique_url_count`, up to the operator's ceiling |
 | Interval between requests | at least 1 s | at least `roll.crawler.min_request_interval` |
-| Crawls per day | 4 | by schedule |
+| Crawls per day | 4, per owner and site | by schedule |
 
 To verify a domain, the owner proves control in one of two ways:
 
@@ -226,8 +251,11 @@ browsers parse them. Parsing builds a small arena DOM because extraction rules n
 the charge-what-you-build rule, each node and text run is charged to the request breaker as the tree
 builder makes it, and the charge is held until the document is serialised into the page body. A
 page of a million empty `<p>` tags trips `circuit_breaking_exception` for that URL, which is counted
-as a failed document, rather than growing the node. Page depth is capped at 512 elements, so a page
-can't recurse the serialiser. Nothing in the page runs: no scripts, no styles, no external fetches.
+as a failed document, rather than growing the node. html5ever puts no limit on nesting and scans its
+stack of open elements for every element it opens, so the tree builder fails a page as soon as it
+nests more than 512 elements deep (a failed document), and a parse runs off the async workers, fed
+in 4 KiB chunks against a 10-second deadline. Reading the DOM never recurses. Nothing in the page
+runs: no scripts, no styles, no external fetches.
 
 Extraction rules use Open Crawler's ruleset shape (`url_filters`, then `rules` with `action`
 `extract` or `set`, `field_name`, `selector`, `join_as`, `value`, `source` `html` or `url`):
@@ -245,13 +273,28 @@ don't answer 200. A site that is down during the purge, or a CDN serving 503s fo
 the index. roll keeps Open Crawler's re-check and deletes a document only for something that proves
 the page is gone:
 
-- **Deleted:** a 404 or a 410, a `noindex` page, a URL now excluded by crawl rules or robots.txt,
-  and a redirect to a URL outside the crawl.
-- **Kept:** 5xx responses, timeouts, network errors, and an origin whose robots.txt couldn't be
-  read. The document's `last_crawled_at` stays as it was. A document kept this way through three
-  full crawls in a row is deleted on the third, and the job's metadata names the count.
-- **Purge skipped:** when more than half of the previous crawl's documents fail with errors that
-  keep them. Then the job ends `completed` with `metadata.purge_skipped: true` and its reason.
+- **Deleted:** a 404 or a 410, a `noindex` page, a URL now excluded by the crawl's domains, crawl
+  rules or robots.txt, and a page naming as canonical a URL the crawl indexed.
+- **Kept:** 5xx responses, other 4xx (401, 403), timeouts, network errors, an origin whose
+  robots.txt couldn't be read or disallows the whole site, and signs that may only be an outage: a
+  redirect off the crawl (a login), onto a URL the crawl already has (a maintenance page) or onto
+  a new one (the page moved), a body that isn't HTML, or a page with no title and no text (a soft
+  404). The document's `last_crawled_at` stays as it was. A document this crawl kept, which also
+  wasn't refreshed by the two full crawls before it (they kept it or didn't get to it) and is at
+  least a week old (`roll.crawler.strike_min_age`), is deleted, and the job's metadata names the
+  count.
+- **Purge skipped:** when more than half of the index's documents weren't refreshed by the crawl
+  (gone, kept or not re-checked; documents the crawl's own configuration now leaves out, by its
+  domains, rules or URL limits, don't count and are decided as they're listed, before any budget
+  or deadline, so removing a domain purges it even from a crawl that used its whole budget), or when ten redirects or more of re-checked documents mostly led
+  to one URL. And per origin: nothing of an origin more than half of whose documents weren't
+  refreshed is deleted (`metadata.purge_skipped_origins`), so one domain of a crawl that ships
+  `Disallow: /` or 404s everywhere keeps its documents. A site that is down, behind an expired
+  login, in maintenance or wrongly deployed then loses nothing, however many crawls it lasts. The
+  job ends `completed` with `metadata.purge_skipped: true` and its reason. Pages that name an
+  indexed canonical URL lose their own documents only when the purge runs.
+- **Forced:** the connector's `force_purge` field lifts the guards for the next full crawl, then
+  turns itself off: for a site that really removed more than half its pages.
 
 Unseen documents are found with a `last_crawled_at` range query over the crawler's own index, and
 re-fetched with the same politeness. The re-check counts against `max_unique_url_count` and
@@ -275,12 +318,19 @@ an operator can raise, and the tenant's value must be at or under the ceiling.
 | `max_crawl_depth` | 10 | 50 |
 | `max_duration` | 6 h for the whole crawl (Open Crawler: 24 h) | `roll.connectors.max_sync_duration` |
 | `max_response_size` | 10 MiB | 10 MiB |
-| `max_url_length`, `max_url_segments`, `max_url_params` | 2048, 16, 10 | the same |
+| `max_url_length`, `max_url_segments`, `max_url_params` | 2048, 16, 32 | the same |
 | `max_redirects` | 10 | 10 |
 | `max_extracted_links_count` | 1,000 per page | 1,000 |
 | `url_queue_size_limit` | 10,000 | 100,000 |
-| `max_title_size`, `max_body_size`, `max_keywords_size`, `max_description_size` | Open Crawler's (1000, 5 MiB, 512, 512) | the same |
-| `max_indexed_links_count`, `max_headings_count` | 10, 10 | 100, 100 |
+| `max_title_size`, `max_body_size`, `max_keywords_size`, `max_description_size`, `max_elastic_tag_size` | Open Crawler's (1 KiB, 5 MiB, 512, 1 KiB, 512) | the same |
+| `max_indexed_links_count`, `max_headings_count` | Open Crawler's (25, 25) | 100, 100 |
+
+An operator moves a ceiling with the node setting `roll.crawler.limits.<key>`; `max_duration`'s is
+`roll.connectors.max_sync_duration`. The unverified limits are node settings too
+(`roll.crawler.unverified.max_unique_url_count`, `.min_request_interval` and
+`.max_crawls_per_day`), and `roll.crawler.min_request_interval` is 500 ms. A crawl that reaches
+`max_unique_url_count` or `max_duration` ends `completed`, with `metadata.limit_reached` naming the
+limit.
 
 The frontier holds URLs as text and is capped by `url_queue_size_limit`. A link that arrives when
 the queue is full is dropped and counted in `metadata.dropped_link_count`. The visited set holds

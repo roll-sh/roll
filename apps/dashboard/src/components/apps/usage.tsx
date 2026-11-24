@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { appsApi, type Prices, type Usage } from "@/lib/apps-api";
+import { appsApi, type Advice, type Prices, type Usage } from "@/lib/apps-api";
 import { formatBytes } from "@/lib/roll-api";
 import { monthOf, projectMonth, usd } from "@/lib/workspace-resources";
 import { panel, Stats } from "../ui";
@@ -25,10 +25,53 @@ export function UsageTab({ service, env, prices }: { service: string; env: strin
   }, [service, env, month.elapsed]);
 
   const sum = (k: keyof Usage["days"][number]) => (u ? u.days.reduce((s, d) => s + d[k], 0) : 0);
+  // What its last week says about its settings (Cloud Run's recommender), each applied in place.
+  const [advice, setAdvice] = useState<Advice[]>([]);
+  const [applied, setApplied] = useState<Set<string>>(new Set());
+  const [applyError, setApplyError] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    appsApi.advice(service, env).then(
+      (a) => live && setAdvice(a.advice),
+      () => live && setAdvice([]),
+    );
+    return () => {
+      live = false;
+    };
+  }, [service, env]);
 
   return (
     <div className="space-y-6">
       {error && <p className="text-[13px] text-danger">Usage didn't load: {error}</p>}
+      {advice.length > 0 && (
+        <section className={panel} aria-label="Advice">
+          <div className="border-b border-line px-5 py-3 text-[15px] font-medium">From its last week</div>
+          <ul className="divide-y divide-line">
+            {advice.map((a) => (
+              <li key={a.kind} className="flex flex-wrap items-center justify-between gap-3 px-5 py-3 text-[13px]">
+                <span className="min-w-0 flex-1 text-muted">
+                  {a.message}
+                  {a.saving_usd_month ? <span className="text-fg"> · saves ≈ {usd(a.saving_usd_month)}/month</span> : null}
+                </span>
+                <button
+                  type="button"
+                  className="rounded-md border border-line px-2.5 py-1 text-[12px] text-fg hover:bg-panel-2 disabled:opacity-50"
+                  disabled={applied.has(a.kind)}
+                  onClick={() =>
+                    appsApi.putEnvironment(service, env, a.set).then(
+                      () => setApplied((s) => new Set(s).add(a.kind)),
+                      (e) => setApplyError(message(e)),
+                    )
+                  }
+                >
+                  {applied.has(a.kind) ? "Applied" : `Set ${Object.entries(a.set.run ?? {}).map(([k, v]) => `${k} ${String(v)}`).join(", ")}`}
+                </button>
+              </li>
+            ))}
+          </ul>
+          {applyError && <p className="border-t border-line px-5 py-3 text-[13px] text-danger">Not applied: {applyError}</p>}
+        </section>
+      )}
       <Stats
         items={[
           { label: `${month.label} so far`, value: u ? usd(u.total_usd) : "—", hint: `day ${month.elapsed} of ${month.days}` },

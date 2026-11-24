@@ -467,7 +467,7 @@ impl search_painless::Host for IntervalHost {
             let kind: &'static str = if e.kind() == "task_cancelled_exception" { "task_cancelled_exception" } else { "time_exceeded_exception" };
             let reason = e.to_string();
             search_index::search::note_interrupted(e);
-            search_painless::HostError { kind, reason, frames: Vec::new() }
+            search_painless::HostError { kind, reason, frames: Vec::new(), fields: Vec::new() }
         })
     }
 }

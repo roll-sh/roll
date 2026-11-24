@@ -436,8 +436,8 @@ async fn due_jobs_run_once_on_the_next_owner() {
 }
 
 /// ES|QL across clusters owned by two nodes (the remote's part runs on its owner), and a
-/// migration started before its cluster's owner drained is reported on the next owner: the copy
-/// finished, failed or stopped, never a task that just vanished.
+/// migration copying when its cluster's owner drains is reported on the next owner as stopped by
+/// the handover, never a task that just vanished.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn esql_and_a_migration_work_across_nodes() {
     let (a, b) = two_nodes("fleet-esql", |c| c.node_settings.push((search_control::REINDEX_ALLOW_PRIVATE.into(), "true".into()))).await;
@@ -479,10 +479,10 @@ async fn esql_and_a_migration_work_across_nodes() {
     assert!(!near_node.control.node.loaded().iter().any(|n| **n == *far), "the remote isn't loaded on the local cluster's node");
     assert!(far_node.control.node.loaded().iter().any(|n| **n == *far), "it runs on its owner");
 
-    // A migration into `near` from `far` (another cluster's endpoint, read as a remote), slow
-    // enough to be running when `near`'s owner drains.
+    // A migration into `near` from `far` (another cluster's endpoint, read as a remote): one
+    // document every 10 seconds, so it's always mid-copy when `near`'s owner drains.
     let source = json!({"host": a.rest, "username": far, "password": far_pw});
-    let (s, v) = call(&http, reqwest::Method::POST, format!("{}/v1/search/clusters/near/migrate", a.api), None, Some(json!({"source": source, "indices": [{"index": "items", "dest": "copied"}], "requests_per_second": 1, "size": 1}))).await;
+    let (s, v) = call(&http, reqwest::Method::POST, format!("{}/v1/search/clusters/near/migrate", a.api), None, Some(json!({"source": source, "indices": [{"index": "items", "dest": "copied"}], "requests_per_second": 0.1, "size": 1}))).await;
     assert_eq!(s, 200, "{v}");
     let task = v["indices"][0]["task"].as_str().unwrap_or_else(|| panic!("{v}")).to_string();
     let (owner, other) = if owner_of("near") == "a" { (&a, &b) } else { (&b, &a) };
@@ -493,9 +493,69 @@ async fn esql_and_a_migration_work_across_nodes() {
     })
     .await;
     let (_, v) = reported.unwrap_or_else(|seen| panic!("the copy isn't reported on the next owner: {seen:?}"));
-    // Stopped by the handover (the unload cancels its tasks), finished, or failed.
-    let stopped = v["response"]["canceled"].is_string() || v["error"].is_object();
-    assert!(stopped || v["response"]["created"].as_u64() == Some(3), "finished or failed: {v}");
+    // Stopped by the handover: the unload cancels its tasks, saying why.
+    assert_eq!(v["response"]["canceled"], search_server::HANDED_OVER, "{v}");
+}
+
+/// A connector sync running when its cluster's owner drains isn't left `in_progress` for the
+/// stale check: the owner records it `suspended`, and the next owner resumes it at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_drain_hands_a_running_sync_to_the_next_owner() {
+    use tokio::io::AsyncReadExt;
+    // A Postgres that holds the first owner's sync: silent until `hang` is cleared, then it
+    // closes every connection (the resumed sync fails at once, on the next owner).
+    let hang = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let pg = listener.local_addr().unwrap();
+    let (h, n) = (hang.clone(), connections.clone());
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = listener.accept().await {
+            n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if h.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::spawn(async move { s.read_to_end(&mut Vec::new()).await });
+            }
+        }
+    });
+    let (a, b) = two_nodes("fleet-sync", |c| {
+        c.sealer = search_control::Sealer::from_secret(SECRET);
+        c.node_settings.push((search_es::xpack::entsearch::sync::ALLOW_PRIVATE.into(), "true".into()));
+    })
+    .await;
+    let http = reqwest::Client::new();
+    let (s, c) = call(&http, reqwest::Method::POST, format!("{}/v1/search/clusters", a.api), None, Some(json!({"name": "sync"}))).await;
+    assert_eq!(s, 200, "{c}");
+    let pw = c["password"].as_str().unwrap().to_string();
+    let es = |n: &Node, method: reqwest::Method, path: &str, body: Option<Value>| call(&http, method, format!("{}{path}", n.rest), Some(("sync", &pw)), body);
+    let (s, v) = es(&a, reqwest::Method::PUT, "/_connector/pg", Some(json!({"index_name": "content-pg", "is_native": true, "service_type": "postgresql"}))).await;
+    assert_eq!(s, 201, "{v}");
+    let values = json!({"values": {"host": "127.0.0.1", "port": pg.port(), "username": "roll", "password": "pw", "database": "shop", "tables": "*", "ssl_enabled": false}});
+    let (s, v) = es(&a, reqwest::Method::PUT, "/_connector/pg/_configuration", Some(values)).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = es(&a, reqwest::Method::POST, "/_connector/_sync_job", Some(json!({"id": "pg", "job_type": "full"}))).await;
+    assert_eq!(s, 201, "{v}");
+    let job = format!("/_connector/_sync_job/{}", v["id"].as_str().unwrap());
+    eventually(20, async || {
+        let (_, v) = es(&a, reqwest::Method::GET, &job, None).await;
+        (v["status"] == "in_progress", v)
+    })
+    .await
+    .expect("the sync runs on the owner");
+
+    let key = search_control::cluster::key("sync");
+    let (owner, other) = if a.cluster.owns(&key) { (&a, &b) } else { (&b, &a) };
+    hang.store(false, std::sync::atomic::Ordering::SeqCst);
+    owner.cluster.drain(Duration::from_secs(20)).await;
+    // Long before the stale check (5 minutes), the next owner has run it again.
+    let v = eventually(20, async || {
+        let (_, v) = es(other, reqwest::Method::GET, &job, None).await;
+        (v["status"] == "error", v)
+    })
+    .await
+    .expect("the next owner resumes the sync");
+    assert!(connections.load(std::sync::atomic::Ordering::SeqCst) >= 2, "the sync ran again: {v}");
+    assert!(!v["error"].as_str().unwrap_or_default().contains("stopped checking in"), "{v}");
+    assert!(other.cluster.owns(&key));
 }
 
 /// A scroll and a point in time whose parts live on two owner nodes: the local cluster's on
@@ -573,4 +633,40 @@ async fn a_scroll_over_clusters_on_two_nodes_pages_through_either_front() {
     let (home_node, away_node) = if owner_of("home") == "a" { (&a, &b) } else { (&b, &a) };
     assert!(!home_node.control.node.loaded().iter().any(|n| **n == *away), "the remote's parts run only on its owner");
     assert!(away_node.control.node.loaded().iter().any(|n| **n == *away));
+}
+
+/// Index lifecycle management runs on its own on a node: an index under a policy whose `hot`
+/// phase starts at once rolls over after its first document, with no request asking for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ilm_rolls_an_index_over_on_its_own() {
+    let leases = MemoryStore::new();
+    let objects = search_store::test_objects("fleet-ilm");
+    let catalog = Arc::new(search_control::store::Store::memory().unwrap());
+    let a = node("a", &leases, &objects, &catalog).await;
+    let http = reqwest::Client::new();
+    let (s, c) = call(&http, reqwest::Method::POST, format!("{}/v1/search/clusters", a.api), None, Some(json!({"name": "logs"}))).await;
+    assert_eq!(s, 200, "{c}");
+    let pw = c["password"].as_str().unwrap().to_string();
+    let es = |method: reqwest::Method, path: &str, body: Option<Value>| call(&http, method, format!("{}{path}", a.rest), Some(("logs", &pw)), body);
+    let (s, v) = es(reqwest::Method::PUT, "/_cluster/settings", Some(json!({"persistent": {"indices.lifecycle.poll_interval": "1s"}}))).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = es(reqwest::Method::PUT, "/_ilm/policy/roll", Some(json!({"policy": {"phases": {"hot": {"min_age": "0ms", "actions": {"rollover": {"max_docs": 1}}}}}}))).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = es(reqwest::Method::PUT, "/app-000001", Some(json!({"settings": {"index.lifecycle.name": "roll", "index.lifecycle.rollover_alias": "app"}, "aliases": {"app": {"is_write_index": true}}}))).await;
+    assert_eq!(s, 200, "{v}");
+    // The index enters `hot` by itself.
+    eventually(10, async || {
+        let (_, v) = es(reqwest::Method::GET, "/app-000001/_ilm/explain", None).await;
+        (v["indices"]["app-000001"]["phase"] == "hot", v)
+    })
+    .await
+    .expect("the index enters the hot phase");
+    let (s, v) = es(reqwest::Method::POST, "/app/_doc?refresh=true", Some(json!({"n": 1}))).await;
+    assert_eq!(s, 201, "{v}");
+    eventually(10, async || {
+        let (_, v) = es(reqwest::Method::GET, "/_alias/app", None).await;
+        (v["app-000002"]["aliases"]["app"]["is_write_index"] == true, v)
+    })
+    .await
+    .expect("the first document rolls the index over");
 }

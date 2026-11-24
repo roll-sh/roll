@@ -21,7 +21,7 @@ pub const PASS_S: i64 = 3600;
 
 /// The pass cookie's name in an environment.
 pub fn cookie(env: &str) -> String {
-    format!("roll_pass_{env}")
+    format!("roll_challenge_{env}")
 }
 
 /// The network a client counts as: its /24, or its /64 (one host has the whole of either to

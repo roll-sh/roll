@@ -199,6 +199,7 @@ impl CodeSource {
                     total: n.total,
                     errors: n.errors.iter().map(|x| code_control::model::PreviewNewError { service: x.service.clone(), title: x.title.clone() }).collect(),
                 }),
+                served_secrets: p.served_secrets.iter().map(|x| code_control::model::PreviewServedSecret { key: x.key.clone(), path: x.path.clone() }).collect(),
                 page_links: p.page_links.as_ref().map(|l| code_control::model::PreviewPageLinks {
                     checked: l.checked,
                     broken: l.broken.iter().map(|b| code_control::model::PreviewBrokenLink { path: b.path.clone(), status: b.status }).collect(),
@@ -375,6 +376,15 @@ impl Source for CodeSource {
             .filter(|r| !r.dismissed && r.verdict == code_control::review::Verdict::Comment)
             .map(|r| crate::notes::Comment { id: r.id, body: r.body, by: r.reviewer.name, at: r.created_at });
         Ok(crate::notes::thread(comments))
+    }
+
+    async fn comment(&self, change: &str, body: &str, by: &str, outside: bool) -> anyhow::Result<Option<String>> {
+        let Some(c) = self.code.db.change(change)? else { return Ok(None) };
+        let Some(r) = self.code.db.repo_by_id(&c.repo_id)? else { return Ok(None) };
+        let input = serde_json::json!({ "verdict": "comment", "body": body });
+        let origin = code_control::review::Origin { outside, ..code_control::review::Origin::ROLL };
+        let review = self.code.submit_review(&r, &c, &code_control::review::Reviewer::user(by), &input, &origin).await?;
+        Ok(Some(review.id))
     }
 
     async fn git_commit(&self, repo: &str, revision: &str) -> anyhow::Result<Option<String>> {

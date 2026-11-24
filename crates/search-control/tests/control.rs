@@ -1910,7 +1910,8 @@ async fn documents_survive_unload_and_branch() {
     cfg.http_port = listener.local_addr().unwrap().port();
     cfg.home = e.home.with_extension("restarted");
     std::fs::create_dir_all(&cfg.home).unwrap();
-    for f in ["search.db", "search.db-wal", "search.db-shm"] {
+    // The catalog and the node's key that seals its passwords.
+    for f in ["search.db", "search.db-wal", "search.db-shm", "key"] {
         let _ = std::fs::copy(e.home.join(f), cfg.home.join(f));
     }
     let restarted_home = cfg.home.clone();
@@ -1954,7 +1955,8 @@ async fn always_on_clusters_load_without_a_request() {
     let mut cfg = e.cfg.clone();
     cfg.home = e.home.with_extension("restarted");
     std::fs::create_dir_all(&cfg.home).unwrap();
-    for f in ["search.db", "search.db-wal", "search.db-shm"] {
+    // The catalog and the node's key that seals its passwords.
+    for f in ["search.db", "search.db-wal", "search.db-shm", "key"] {
         let _ = std::fs::copy(e.home.join(f), cfg.home.join(f));
     }
     let restarted_home = cfg.home.clone();
@@ -2289,7 +2291,16 @@ struct MockBucket {
     fail_parts: Arc<std::sync::atomic::AtomicBool>,
     /// Writes of `test-blob-*` objects are acknowledged and dropped (an S3 clone that loses them).
     drop_test_blobs: Arc<std::sync::atomic::AtomicBool>,
+    /// Writes of `index.latest` fail (after the `index-N` they name landed).
+    fail_latest: Arc<std::sync::atomic::AtomicBool>,
+    /// What another writer puts in `index.latest` just before the next write of it lands.
+    latest_race: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+    /// The next new `index-N` write says it arrived (the first), then waits for the second.
+    hold_index: Arc<std::sync::Mutex<Option<MockHold>>>,
 }
+
+/// A held write in a [`MockBucket`]: told it arrived, then waits to be released.
+type MockHold = (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>);
 
 /// A multipart upload in a [`MockBucket`]: its key and parts by number.
 type MockUpload = (String, std::collections::BTreeMap<u32, Vec<u8>>);
@@ -2414,8 +2425,19 @@ impl MockBucket {
                 tagged(StatusCode::OK, m.etag("", &body), Vec::new())
             }
             "PUT" if dropped => tagged(StatusCode::OK, m.etag("", &body), Vec::new()),
+            "PUT" if m.fail_latest.load(Relaxed) && key.ends_with("/index.latest") => StatusCode::FORBIDDEN.into_response(),
             "PUT" => {
+                let held = if key.rsplit('/').next().is_some_and(|f| f.starts_with("index-")) && header("if-none-match").is_some() { m.hold_index.lock().unwrap().take() } else { None };
+                if let Some((arrived, release)) = held {
+                    arrived.notify_one();
+                    release.notified().await;
+                }
                 let mut objects = m.objects.lock().unwrap();
+                if key.ends_with("/index.latest")
+                    && let Some(other) = m.latest_race.lock().unwrap().take()
+                {
+                    objects.insert(key.clone(), other);
+                }
                 let current = objects.get(&key).map(|v| m.etag(&key, v));
                 let refused = match (header("if-none-match"), header("if-match")) {
                     (Some(_), _) => current.is_some(),
@@ -2435,7 +2457,13 @@ impl MockBucket {
                 StatusCode::NO_CONTENT.into_response()
             }
             "DELETE" => {
-                m.objects.lock().unwrap().remove(&key);
+                let mut objects = m.objects.lock().unwrap();
+                if let Some(want) = header("if-match")
+                    && objects.get(&key).is_some_and(|v| m.etag(&key, v) != want)
+                {
+                    return StatusCode::PRECONDITION_FAILED.into_response();
+                }
+                objects.remove(&key);
                 StatusCode::NO_CONTENT.into_response()
             }
             _ => StatusCode::METHOD_NOT_ALLOWED.into_response(),
@@ -3049,7 +3077,7 @@ async fn a_branch_runs_none_of_its_parents_jobs() {
     assert_eq!(s, 200, "{v}");
     assert_eq!(e.es(&bu, &bp, Method::GET, "/restored/_count", None).await.1["count"], 1);
     let (s, v) = e.es(&bu, &bp, Method::PUT, "/_snapshot/backup/mine?wait_for_completion=true", Some(json!({"indices": "docs"}))).await;
-    assert_eq!((s, v["error"]["type"].as_str()), (400, Some("illegal_argument_exception")), "{v}");
+    assert_eq!((s, v["error"]["type"].as_str()), (500, Some("repository_exception")), "{v}");
     let (s, v) = e.es(&bu, &bp, Method::DELETE, "/_snapshot/backup/base", None).await;
     assert_eq!(s, 500, "{v}");
     let (s, v) = e.es(&bu, &bp, Method::PUT, "/_snapshot/backup/base/_clone/copy", Some(json!({"indices": "docs"}))).await;
@@ -3059,7 +3087,7 @@ async fn a_branch_runs_none_of_its_parents_jobs() {
     let (s, v) = e.es(&bu, &bp, Method::PUT, "/_snapshot/mine", Some(again)).await;
     assert_eq!(s, 200, "{v}");
     let (s, v) = e.es(&bu, &bp, Method::PUT, "/_snapshot/mine/mine?wait_for_completion=true", Some(json!({"indices": "docs"}))).await;
-    assert_eq!((s, v["error"]["type"].as_str()), (400, Some("illegal_argument_exception")), "{v}");
+    assert_eq!((s, v["error"]["type"].as_str()), (500, Some("repository_exception")), "{v}");
 
     // SLM running on the branch neither runs the inherited policy nor applies its retention.
     let (s, v) = e.es(&bu, &bp, Method::POST, "/_slm/start", None).await;
@@ -3187,6 +3215,97 @@ async fn an_s3_repository_bounds_and_checks_what_a_bucket_holds() {
     put(format!("prod/roll/index-{generation}"), gzip(&dense));
     expect("value bomb", es(reqwest::Method::GET, "/_snapshot/backup/_all", None).await, 500, "values");
     bucket.objects.lock().unwrap().remove(&format!("prod/roll/index-{generation}"));
+
+    // Elasticsearch's repository at base path `roll`, under a roll repository at the bucket's
+    // root (whose own files would be under `roll/`): neither a cleanup nor a snapshot touches it.
+    let root = json!({"type": "s3", "settings": {"bucket": "backups", "endpoint": endpoint, "path_style_access": true}});
+    assert_eq!(es(reqwest::Method::PUT, "/_snapshot/root", Some(root)).await.0, 200);
+    put("roll/index.latest".into(), 20i64.to_be_bytes().to_vec());
+    put("roll/indices/Xq/0/__a".into(), b"shard data".to_vec());
+    expect("cleanup", es(reqwest::Method::POST, "/_snapshot/root/_cleanup", None).await, 500, "isn't roll's");
+    expect("snapshot", es(reqwest::Method::PUT, "/_snapshot/root/s?wait_for_completion=true", Some(json!({"indices": "docs"}))).await, 500, "isn't roll's");
+    assert_eq!(object("roll/index.latest"), 20i64.to_be_bytes());
+    assert_eq!(object("roll/indices/Xq/0/__a"), b"shard data");
+    // Elasticsearch finding its generation by listing writes no `index.latest`: its `index-N` and
+    // shard files under the prefix still make it someone else's. Registering it is refused;
+    // registered anyway (no `verify`), it is neither written nor cleaned, and a listing across
+    // repositories fails as Elasticsearch's does.
+    put("nested/roll/index-5".into(), br#"{"min_version":"7.12.0","uuid":"u","snapshots":[]}"#.to_vec());
+    put("nested/roll/indices/Xq/0/__b".into(), b"shard data".to_vec());
+    let nested = json!({"type": "s3", "settings": {"bucket": "backups", "base_path": "nested", "endpoint": endpoint, "path_style_access": true}});
+    expect("register", es(reqwest::Method::PUT, "/_snapshot/nested", Some(nested.clone())).await, 500, "isn't roll's");
+    expect("not registered", es(reqwest::Method::GET, "/_snapshot/nested", None).await, 404, "repository_missing_exception");
+    assert_eq!(es(reqwest::Method::PUT, "/_snapshot/nested?verify=false", Some(nested)).await.0, 200);
+    expect("cleanup without index.latest", es(reqwest::Method::POST, "/_snapshot/nested/_cleanup", None).await, 500, "isn't roll's");
+    expect("snapshot without index.latest", es(reqwest::Method::PUT, "/_snapshot/nested/s?wait_for_completion=true", Some(json!({"indices": "docs"}))).await, 500, "isn't roll's");
+    expect("listing", es(reqwest::Method::GET, "/_snapshot/_all/_all", None).await, 500, "isn't roll's");
+    assert_eq!(object("nested/roll/indices/Xq/0/__b"), b"shard data");
+    assert!(bucket.keys("nested/").len() == 2, "{:?}", bucket.keys("nested/"));
+    // Elasticsearch's first snapshot before it's finalized: only its shard files are there.
+    put("mid/roll/indices/Xq/0/__c".into(), b"shard data".to_vec());
+    put("mid/roll/indices/Xq/0/snap-Yz.dat".into(), b"shard snapshot".to_vec());
+    let mid = json!({"type": "s3", "settings": {"bucket": "backups", "base_path": "mid", "endpoint": endpoint, "path_style_access": true}});
+    assert_eq!(es(reqwest::Method::PUT, "/_snapshot/mid?verify=false", Some(mid)).await.0, 200);
+    expect("snapshot beside a first snapshot", es(reqwest::Method::PUT, "/_snapshot/mid/s?wait_for_completion=true", Some(json!({"indices": "docs"}))).await, 500, "isn't roll's");
+    expect("cleanup beside a first snapshot", es(reqwest::Method::POST, "/_snapshot/mid/_cleanup", None).await, 500, "isn't roll's");
+    assert!(bucket.keys("mid/").len() == 2, "{:?}", bucket.keys("mid/"));
+    // `index-N` is the commit, and `index.latest` moves only from the version read. Another roll
+    // writer's newer one, written meanwhile, built on it: it stays. Elasticsearch's, written
+    // meanwhile: roll's `index-N` and everything the snapshot uploaded go again.
+    let newest = || bucket.keys("prod/roll/index-").iter().filter_map(|k| k.rsplit('-').next()?.parse::<i64>().ok()).max().unwrap();
+    // Another roll writer's older one (their writes landing out of order): moved on from.
+    *bucket.latest_race.lock().unwrap() = Some(b"1".to_vec());
+    expect("behind another writer", es(reqwest::Method::PUT, "/_snapshot/backup/behind?wait_for_completion=true", Some(json!({"indices": "docs"}))).await, 200, "SUCCESS");
+    assert_eq!(object("prod/roll/index.latest"), newest().to_string().into_bytes());
+    let next = newest() + 1;
+    *bucket.latest_race.lock().unwrap() = Some((next + 1).to_string().into_bytes());
+    expect("passed by another writer", es(reqwest::Method::PUT, "/_snapshot/backup/passed?wait_for_completion=true", Some(json!({"indices": "docs"}))).await, 200, "SUCCESS");
+    assert_eq!(newest(), next, "the index-N another writer built on stays");
+    expect("listed past a missing index.latest generation", es(reqwest::Method::GET, "/_snapshot/backup/passed", None).await, 200, "SUCCESS");
+    put("prod/roll/index.latest".into(), next.to_string().into_bytes());
+    let before = bucket.keys("prod/");
+    *bucket.latest_race.lock().unwrap() = Some(7i64.to_be_bytes().to_vec());
+    expect("taken by Elasticsearch", es(reqwest::Method::PUT, "/_snapshot/backup/taken?wait_for_completion=true", Some(json!({"indices": "docs"}))).await, 500, "isn't roll's any more");
+    // Its `index-N` and shard files went (the delete conditional on what it wrote); chunks are
+    // left to `_cleanup`.
+    let left: Vec<String> = bucket.keys("prod/").into_iter().filter(|k| !before.contains(k)).collect();
+    assert!(left.iter().all(|k| k.ends_with(".gz")), "{left:?}");
+    put("prod/roll/index.latest".into(), next.to_string().into_bytes());
+    // An `index.latest` that can't be written after `index-N` leaves each snapshot listed with
+    // every file it needs, and the generations readers start from in place; once the store
+    // takes it again, the next commit moves it.
+    bucket.fail_latest.store(true, std::sync::atomic::Ordering::Relaxed);
+    for n in 1..=8 {
+        let (s, v) = e.es(&u, &p, reqwest::Method::PUT, &format!("/_snapshot/backup/late{n}?wait_for_completion=true"), Some(json!({"indices": "docs"}))).await;
+        expect("committed without index.latest", (s, v), 200, "SUCCESS");
+    }
+    bucket.fail_latest.store(false, std::sync::atomic::Ordering::Relaxed);
+    expect("caught up", es(reqwest::Method::PUT, "/_snapshot/backup/caught-up?wait_for_completion=true", Some(json!({"indices": "docs"}))).await, 200, "SUCCESS");
+    assert_eq!(object("prod/roll/index.latest"), newest().to_string().into_bytes());
+    let (_, v) = es(reqwest::Method::GET, "/_snapshot/backup/_all", None).await;
+    let listed: Vec<&str> = v["snapshots"].as_array().into_iter().flatten().filter_map(|s| s["snapshot"].as_str()).collect();
+    assert!(["behind", "passed", "late1", "late8", "caught-up"].iter().all(|n| listed.contains(n)) && !listed.contains(&"taken"), "{listed:?}");
+    expect("restored", e.es(&u, &p, reqwest::Method::POST, "/_snapshot/backup/late1/_restore?wait_for_completion=true", Some(json!({"rename_pattern": "docs", "rename_replacement": "late"}))).await, 200, "late");
+    // Two snapshots of one index taken at once upload its new segment under the same keys: one
+    // failing after the other committed leaves the committed one whole.
+    assert_eq!(es(reqwest::Method::PUT, "/docs/_doc/fresh?refresh=true", Some(json!({"n": 2}))).await.0, 201);
+    let (arrived, release) = (Arc::new(tokio::sync::Notify::new()), Arc::new(tokio::sync::Notify::new()));
+    *bucket.hold_index.lock().unwrap() = Some((arrived.clone(), release.clone()));
+    let first = es(reqwest::Method::PUT, "/_snapshot/backup/first?wait_for_completion=true", Some(json!({"indices": "docs"})));
+    let second = async {
+        arrived.notified().await;
+        let r = es(reqwest::Method::PUT, "/_snapshot/backup/second?wait_for_completion=true", Some(json!({"indices": "docs"}))).await;
+        release.notify_one();
+        r
+    };
+    let (first, second) = tokio::join!(first, second);
+    expect("committed while the other waited", second, 200, "SUCCESS");
+    expect("refused after the other committed", first, 500, "concurrent modification");
+    expect("the committed one restores", e.es(&u, &p, reqwest::Method::POST, "/_snapshot/backup/second/_restore?wait_for_completion=true", Some(json!({"rename_pattern": "docs", "rename_replacement": "second"}))).await, 200, "second");
+    // Another program's upload in parts under `indices/` makes a location someone else's.
+    bucket.uploads.lock().unwrap().insert("es-upload".into(), ("parts/roll/indices/Xq/0/__e".into(), Default::default()));
+    let parts = json!({"type": "s3", "settings": {"bucket": "backups", "base_path": "parts", "endpoint": endpoint, "path_style_access": true}});
+    expect("an upload in progress", es(reqwest::Method::PUT, "/_snapshot/parts", Some(parts)).await, 500, "isn't roll's");
 
     // A listing that never ends.
     bucket.endless.store(true, std::sync::atomic::Ordering::Relaxed);

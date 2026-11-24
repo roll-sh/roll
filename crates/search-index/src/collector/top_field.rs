@@ -409,10 +409,14 @@ impl LeafKey {
                 // Each doc's distances in order, as Elasticsearch sorts them before selecting.
                 self.scratch[start..].sort_unstable();
             }
-            Source::Script(sc) => match sc.number(doc) {
-                Ok(v) => self.scratch.push(encode::f64_sortable(v)),
-                Err(e) => crate::search::defer_error(e),
-            },
+            Source::Script(sc) => {
+                if let Err(e) = sc.number(doc).map(|v| self.scratch.push(encode::f64_sortable(v))) {
+                    crate::search::defer_error(e);
+                    // the search fails with that error: the script runs no more on this
+                    // segment, and parks no error per document after it
+                    self.src = Source::None;
+                }
+            }
         }
     }
 

@@ -3,6 +3,7 @@
 # tool's argument nor here (map it, or say why not), and on a line whose field a tool takes now.
 POST /v1/secrets/projects/{project}/environments/{env}/rollback bypass           an admin landing past a protected environment's approvals: a person's call
 POST /v1/secrets/projects/{project}/environments/{env}/requests/{id}/apply bypass   an admin landing past a protected environment's approvals: a person's call
+POST /v1/secrets/projects/{project}/leaks leaked                                 a report that the text was published: it can rotate the project's managed keys, a person's or a scanner's call (the tool checks what it would write)
 POST /v1/secrets/projects/{project}/transit key                                  key material brought in: a credential in a tool's arguments (roll makes one instead)
 POST /v1/secrets/projects/{project}/transit vault_version                        goes with a brought key (above)
 POST /v1/secrets/projects/{project}/transit/{name}/rotate key                    key material brought in: a credential in a tool's arguments (roll makes one instead)
@@ -29,3 +30,32 @@ GET /v1/secrets/projects/{project}/environments/{env}/values digest             
 GET /v1/secrets/projects/{project}/environments/{env}/values codes                 TOTP codes beside their keys: secrets_totp answers one, audited as itself
 DELETE /v1/secrets/projects/{project}/environments/{env} confirm                   a protected environment's delete repeats its slug: a person's confirmation, not an argument an agent fills
 DELETE /v1/workspace/projects/{id} confirm                                        a project holding secrets repeats its name: a secrets admin's confirmation, not an argument an agent fills
+POST /v1/apps/projects/{project}/services registry          a private registry's login: sets a credential (the dashboard, or roll apps' registry route)
+POST /v1/apps/projects/{project}/services git_login         a private Git repository's login: sets a credential (the dashboard)
+POST /v1/apps/projects/{project}/services x                 where it sits on the project's canvas: the dashboard's
+POST /v1/apps/projects/{project}/services y                 where it sits on the project's canvas: the dashboard's
+PUT /v1/apps/services/{id}/environments/{env} access        a visitor password, token or bypass hash: sets a credential (the dashboard)
+PUT /v1/apps/services/{id}/environments/{env} heartbeats    its answer carries each new heartbeat's URL token once: answers a credential (the dashboard)
+PUT /v1/apps/services/{id}/environments/{env} closed_by     the operator's and roll previews' (who a closed environment's placeholders are made by)
+PUT /v1/apps/services/{id}/environments/{env} preview_host  roll previews sets it on its own environments
+PUT /v1/apps/services/{id}/environments/{env} feedback      roll previews sets it on its own environments (400 on another)
+POST /v1/secrets/projects/{project}/environments branches   an ephemeral environment's branched resources: roll previews' and the operator's
+PUT /v1/previews/projects/{project}/settings access         who may open a project's previews (public too): a person's
+PUT /v1/previews/projects/{project}/settings secrets        which roll secrets environment previews read, production's included: a person's
+PUT /v1/previews/projects/{project}/settings env            values every preview's services get, API keys among them: a person's (keys go in roll secrets)
+PUT /v1/previews/projects/{project}/settings env_for        per-branch variable values, API keys among them: a person's (as env)
+PUT /v1/previews/projects/{project}/settings oidc_audiences which clouds a preview's code gets roll's word for (a cloud session): a person's, as egress
+PUT /v1/previews/projects/{project}/settings egress         what previews' code may reach outside roll: a person's
+PUT /v1/previews/projects/{project}/settings egress_hosts   hosts outside roll previews' code may reach: a person's
+PUT /v1/previews/projects/{project}/settings egress_forks   what a fork's preview may reach: a person's
+PUT /v1/previews/projects/{project}/settings masking        how production's data is masked in previews: a person's (previews_mask_suggestions reads what isn't)
+PUT /v1/previews/projects/{project}/settings visual_review  a gate on landing: a person's
+PUT /v1/previews/projects/{project}/settings regressions    a gate on landing: a person's
+PUT /v1/previews/projects/{project}/settings mail           deliver sends previews' mail to real people: a person's
+PUT /v1/previews/projects/{project}/settings github         what's posted to GitHub and measured there: a person's
+PUT /v1/previews/projects/{project}/settings seed           a job run with the preview's secrets: a person's
+PUT /v1/previews/projects/{project}/settings release        a job run with the preview's secrets at each head: a person's
+PUT /v1/previews/projects/{project}/settings teardown       a job run with the preview's secrets: a person's
+POST /v1/apps/plan git_login                                  a private repository's login: sets a credential in a tool's arguments
+PUT /v1/secrets/projects/{project}/environments/{env} replace  drops the overrides it isn't given: an ensure never deletes keys (secrets_apply_changes says when it does)
+PUT /v1/secrets/projects/{project}/environments/{env} branches an ephemeral environment's branched resources: roll previews' and the operator's

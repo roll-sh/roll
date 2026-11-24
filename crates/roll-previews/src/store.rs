@@ -88,6 +88,14 @@ CREATE TABLE IF NOT EXISTS shares (
     revoked INTEGER NOT NULL DEFAULT 0,
     opened_day INTEGER
 ) WITHOUT ROWID;
+-- The notes guests left through a share link (their reviews on the change).
+CREATE TABLE IF NOT EXISTS guest_notes (
+    preview_id TEXT NOT NULL,
+    share_id TEXT NOT NULL,
+    review_id TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (preview_id, review_id)
+);
 CREATE TABLE IF NOT EXISTS visit_tickets (
     hash TEXT PRIMARY KEY,
     preview_id TEXT NOT NULL,
@@ -312,6 +320,21 @@ CREATE TABLE IF NOT EXISTS leases (
     expires_at INTEGER NOT NULL,
     PRIMARY KEY (preview_id, lease)
 );
+CREATE TABLE IF NOT EXISTS restore_points (
+    preview_id TEXT NOT NULL,
+    point TEXT NOT NULL,
+    label TEXT NOT NULL,
+    by TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    parent TEXT NOT NULL,
+    name TEXT NOT NULL,
+    ref TEXT NOT NULL,
+    kept TEXT,
+    source TEXT NOT NULL,
+    mask TEXT NOT NULL,
+    PRIMARY KEY (preview_id, point, kind, parent)
+);
 ";
 
 /// [`Store::set_page_shots`]'s rows, prepared: path, PNG, errors, the one before, change, report.
@@ -450,9 +473,13 @@ fn hook_row(r: &code_sql::Row<'_>) -> code_sql::Result<Hook> {
 pub const VISITORS: usize = 8;
 
 /// A live share link, as [`Store::share_live`] finds it.
+#[derive(Clone, Debug)]
 pub struct LiveShare {
     pub id: String,
     pub ends: i64,
+    pub label: String,
+    /// Its visitors may leave notes.
+    pub notes: bool,
     /// Who made it (`usr_…`: a person, or the person behind their token); none for the operator.
     pub maker: Option<String>,
     /// When its maker was last asked whether they still may.
@@ -614,6 +641,35 @@ pub struct PinnedData {
     pub kept: Option<String>,
     /// The preview's branch it was copied from.
     pub source: String,
+}
+
+/// A restore point (`…/restore-points`): the preview's data saved as it was, to put back later.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct RestorePoint {
+    pub id: String,
+    pub label: String,
+    pub by: String,
+    pub at: i64,
+    /// What it holds, `<kind>:<parent>`.
+    pub data: Vec<String>,
+}
+
+/// One branch a restore point holds: a copy-on-write branch of the preview's branch of
+/// `parent`, as it was then.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PointData {
+    pub point: String,
+    pub kind: Kind,
+    pub parent: String,
+    /// Its name in the product (the guard its delete checks).
+    pub name: String,
+    pub r#ref: String,
+    pub kept: Option<String>,
+    /// The preview's branch it was copied from.
+    pub source: String,
+    /// The masking rules it was masked by (the resource's digest then): never put back under
+    /// other rules.
+    pub mask: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -779,6 +835,13 @@ impl Store {
         }
         if !db.has_column("shares", "maker_checked")? {
             db.add_column("shares", "maker_checked", "INTEGER NOT NULL DEFAULT 0")?;
+        }
+        // Who a share link is for, and whether its visitors may leave notes (as guests).
+        if !db.has_column("shares", "label")? {
+            db.add_column("shares", "label", "TEXT NOT NULL DEFAULT ''")?;
+        }
+        if !db.has_column("shares", "notes")? {
+            db.add_column("shares", "notes", "INTEGER NOT NULL DEFAULT 0")?;
         }
         if !db.has_column("previews", "idled")? {
             db.add_column("previews", "idled", "INTEGER NOT NULL DEFAULT 0")?;
@@ -1320,7 +1383,7 @@ impl Store {
             if let Some((project, change, head)) = gone {
                 emit(c, now, "deleted", &project, id, change.as_deref(), &serde_json::json!({ "head": head }))?;
             }
-            for t in ["resources", "services", "pinned", "pinned_data", "shares", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "previews"] {
+            for t in ["resources", "services", "pinned", "pinned_data", "restore_points", "shares", "guest_notes", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -2076,6 +2139,7 @@ impl Store {
                 against,
                 unstable: report.unstable,
                 step: report.step,
+                step_ms: report.step_ms,
             })
             .collect())
     }
@@ -2241,6 +2305,18 @@ impl Store {
         let mut m = hmac::Hmac::<sha2::Sha256>::new_from_slice(&self.signing_key()?).map_err(|e| Error::Internal(e.to_string()))?;
         m.update(b"otlp:");
         m.update(id.as_bytes());
+        Ok(hex::encode(&m.finalize().into_bytes()[..16]))
+    }
+
+    /// A preview's service's address for roll's OIDC issuer (`ROLL_OIDC_URL`), derived from its id
+    /// and name with the store's key: one service's never gets another's tokens.
+    pub fn oidc_token(&self, id: &str, service: &str) -> Result<String> {
+        use hmac::Mac;
+        let mut m = hmac::Hmac::<sha2::Sha256>::new_from_slice(&self.signing_key()?).map_err(|e| Error::Internal(e.to_string()))?;
+        m.update(b"oidc:");
+        m.update(id.as_bytes());
+        m.update(b":");
+        m.update(service.as_bytes());
         Ok(hex::encode(&m.finalize().into_bytes()[..16]))
     }
 
@@ -2693,6 +2769,55 @@ impl Store {
         })
     }
 
+    /// A preview's restore points, oldest first.
+    pub fn restore_points(&self, id: &str) -> Result<Vec<RestorePoint>> {
+        let mut out: Vec<RestorePoint> = Vec::new();
+        for (point, label, by, at, kind, parent) in self.db.read(|c| {
+            c.query("SELECT point, label, by, at, kind, parent FROM restore_points WHERE preview_id = ? ORDER BY at, point, kind, parent", [id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?))
+            })
+        })? {
+            let data = format!("{kind}:{parent}");
+            match out.last_mut() {
+                Some(p) if p.id == point => p.data.push(data),
+                _ => out.push(RestorePoint { id: point, label, by, at, data: vec![data] }),
+            }
+        }
+        Ok(out)
+    }
+
+    /// The branches restore points hold: `point`'s, or every one's.
+    pub fn point_data(&self, id: &str, point: Option<&str>) -> Result<Vec<PointData>> {
+        Ok(self.db.read(|c| {
+            c.query(
+                "SELECT point, kind, parent, name, ref, kept, source, mask FROM restore_points WHERE preview_id = ? AND (? IS NULL OR point = ?) ORDER BY at",
+                params![id, point, point],
+                |r| {
+                    let kind: String = r.get(1)?;
+                    Ok(PointData { point: r.get(0)?, kind: Kind::parse(&kind).unwrap_or(Kind::Postgres), parent: r.get(2)?, name: r.get(3)?, r#ref: r.get(4)?, kept: r.get(5)?, source: r.get(6)?, mask: r.get(7)? })
+                },
+            )
+        })?)
+    }
+
+    pub fn add_point_data(&self, id: &str, label: &str, by: &str, at: i64, d: &PointData) -> Result<()> {
+        self.db.write(|c| {
+            c.execute(
+                "INSERT INTO restore_points (preview_id, point, label, by, at, kind, parent, name, ref, kept, source, mask) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT (preview_id, point, kind, parent) DO UPDATE SET name = excluded.name, ref = excluded.ref, kept = excluded.kept",
+                params![id, d.point, label, by, at, d.kind.as_str(), d.parent, d.name, d.r#ref, d.kept, d.source, d.mask],
+            )?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    pub fn drop_point_data(&self, id: &str, d: &PointData) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("DELETE FROM restore_points WHERE preview_id = ? AND point = ? AND kind = ? AND parent = ?", params![id, d.point, d.kind.as_str(), d.parent])?;
+            Ok::<_, Error>(())
+        })
+    }
+
     /// Keep `revision` of `service` reachable at a host of its own (an earlier push), and the
     /// [`PINNED_KEEP`] latest per service. Returns the ones that no longer fit, by
     /// `<service>@<revision>`, whose containers go.
@@ -2969,7 +3094,8 @@ impl Store {
     /// A link that opens the preview until `expires_at` (Vercel's shareable links), on a token of
     /// its own: only its SHA-256 is kept, so the token is in the answer once. At most
     /// [`SHARES_MAX`] live ones.
-    pub fn create_share(&self, id: &str, expires_at: i64, by: &str, maker: Option<&str>) -> Result<(crate::Share, String)> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_share(&self, id: &str, expires_at: i64, by: &str, maker: Option<&str>, label: &str, notes: bool) -> Result<(crate::Share, String)> {
         let now = self.now_ms()?;
         let token = format!("rps_{}", new_token());
         let sid = format!("shr_{}", &new_token()[..12]);
@@ -2979,17 +3105,20 @@ impl Store {
             if live as usize >= SHARES_MAX {
                 return Err(Error::Conflict(format!("the preview has {SHARES_MAX} live share links: revoke one first")));
             }
-            c.execute("INSERT INTO shares (id, preview_id, hash, expires_at, created_by, created_at, maker, maker_checked) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", params![sid, id, hash, expires_at, by, now, maker, now])?;
+            c.execute(
+                "INSERT INTO shares (id, preview_id, hash, expires_at, created_by, created_at, maker, maker_checked, label, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![sid, id, hash, expires_at, by, now, maker, now, label, notes as i64],
+            )?;
             Ok::<_, Error>(())
         })?;
-        Ok((crate::Share { id: sid, expires_at, created_by: by.to_string(), created_at: now, revoked: false }, token))
+        Ok((crate::Share { id: sid, expires_at, created_by: by.to_string(), created_at: now, revoked: false, label: label.to_string(), notes }, token))
     }
 
     /// The preview's share links, newest first (never their tokens).
     pub fn shares(&self, id: &str) -> Result<Vec<crate::Share>> {
         Ok(self.db.read(|c| {
-            c.query("SELECT id, expires_at, created_by, created_at, revoked FROM shares WHERE preview_id = ? ORDER BY created_at DESC", [id], |r| {
-                Ok(crate::Share { id: r.get(0)?, expires_at: r.get(1)?, created_by: r.get(2)?, created_at: r.get(3)?, revoked: r.get::<_, i64>(4)? != 0 })
+            c.query("SELECT id, expires_at, created_by, created_at, revoked, label, notes FROM shares WHERE preview_id = ? ORDER BY created_at DESC", [id], |r| {
+                Ok(crate::Share { id: r.get(0)?, expires_at: r.get(1)?, created_by: r.get(2)?, created_at: r.get(3)?, revoked: r.get::<_, i64>(4)? != 0, label: r.get(5)?, notes: r.get::<_, i64>(6)? != 0 })
             })
         })?)
     }
@@ -3007,12 +3136,27 @@ impl Store {
         let now = self.now_ms()?;
         Ok(self.db.read(|c| {
             c.query_row(
-                "SELECT id, expires_at, maker, maker_checked FROM shares WHERE preview_id = ? AND hash = ? AND revoked = 0 AND expires_at > ?",
+                "SELECT id, expires_at, maker, maker_checked, label, notes FROM shares WHERE preview_id = ? AND hash = ? AND revoked = 0 AND expires_at > ?",
                 params![id, bypass_hash(token), now],
-                |r| Ok(LiveShare { id: r.get(0)?, ends: r.get(1)?, maker: r.get(2)?, maker_checked: r.get(3)? }),
+                |r| Ok(LiveShare { id: r.get(0)?, ends: r.get(1)?, maker: r.get(2)?, maker_checked: r.get(3)?, label: r.get(4)?, notes: r.get::<_, i64>(5)? != 0 }),
             )
             .optional()
         })?)
+    }
+
+    /// How many notes guests left through share link `share` since `since`.
+    pub fn guest_notes_since(&self, id: &str, share: &str, since: i64) -> Result<usize> {
+        Ok(self.db.read(|c| c.query_row("SELECT COUNT(*) FROM guest_notes WHERE preview_id = ? AND share_id = ? AND at > ?", params![id, share, since], |r| r.get::<_, i64>(0)))? as usize)
+    }
+
+    pub fn add_guest_note(&self, id: &str, share: &str, review: &str, at: i64) -> Result<()> {
+        self.db.write(|c| c.execute("INSERT INTO guest_notes (preview_id, share_id, review_id, at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING", params![id, share, review, at]).map(drop))?;
+        Ok(())
+    }
+
+    /// The reviews guests left through share link `share`.
+    pub fn guest_note_ids(&self, id: &str, share: &str) -> Result<std::collections::HashSet<String>> {
+        Ok(self.db.read(|c| c.query("SELECT review_id FROM guest_notes WHERE preview_id = ? AND share_id = ?", params![id, share], |r| r.get::<_, String>(0)))?.into_iter().collect())
     }
 
     /// A share link's maker was just asked about (and still may).
@@ -3262,6 +3406,7 @@ impl Store {
         // What the holder read against main's, for this head only (a push reads it again), and
         // whether it compared at this head at all (errors; routes too with traces).
         let new_errors = self.runtime_fact::<crate::NewErrors>(&r.id, "new_errors")?.filter(|f| f.head == r.head);
+        let served_secrets = self.runtime_fact::<crate::ServedSecrets>(&r.id, "served_secrets")?.filter(|f| f.head == r.build()).map(|f| f.secrets).unwrap_or_default();
         let slower_routes = if settings.traces { self.runtime_fact::<crate::SlowerRoutes>(&r.id, "slower_routes")?.filter(|f| f.head == r.head) } else { None };
         let compared_at = |kind: &str| -> Result<bool> { Ok(self.runtime_fact::<String>(&r.id, kind)?.as_deref() == Some(r.head.as_str())) };
         let regressions_compared = compared_at("compared_errors")? && (!settings.traces || compared_at("compared_routes")?);
@@ -3318,6 +3463,7 @@ impl Store {
             head: r.head,
             reaches: settings.egress_for(r.trusted),
             trusted: r.trusted,
+            outside: !r.trusted,
             desired: r.desired,
             state: r.state,
             error: r.error,
@@ -3362,6 +3508,7 @@ impl Store {
             page_links,
             slower_routes,
             new_errors,
+            served_secrets,
             regressions,
             regressions_accepted,
             regressions_compared,
@@ -3549,12 +3696,12 @@ mod tests {
         let (row, _) = store.create(&new("chg_share")).unwrap();
         let id = row.id.as_str();
         let now = store.now_ms().unwrap();
-        let (share, token) = store.create_share(id, now + 3_600_000, "ada", None).unwrap();
+        let (share, token) = store.create_share(id, now + 3_600_000, "ada", None, "", false).unwrap();
         assert!(token.starts_with("rps_") && share.id.starts_with("shr_"));
         assert_eq!(store.share_ends(id, &token).unwrap(), Some(now + 3_600_000));
         assert_eq!(store.share_ends("pv_other", &token).unwrap(), None, "another preview");
         assert_eq!(store.share_ends(id, "rps_guess").unwrap(), None);
-        let (_, ended) = store.create_share(id, now - 1, "ada", None).unwrap();
+        let (_, ended) = store.create_share(id, now - 1, "ada", None, "", false).unwrap();
         assert_eq!(store.share_ends(id, &ended).unwrap(), None, "past its end");
         store.revoke_share(id, &share.id).unwrap();
         assert_eq!(store.share_ends(id, &token).unwrap(), None, "revoked");

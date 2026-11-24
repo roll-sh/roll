@@ -45,6 +45,7 @@ object_store = { version = "0.14", features = ["aws"] }
 postgres-protocol = "0.6"
 zstd = "0.14"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+miniz_oxide = "0.9"
 lz4_flex = { version = "0.11", default-features = false, features = ["frame", "std"] }
 snap = "1"
 humantime = "2"
@@ -223,6 +224,12 @@ comrak = { version = "0.56", default-features = false }
 ammonia = "4"
 # roll storage (S3-compatible object storage).
 quick-xml = "0.41"
+# roll search's web crawler parses pages with the WHATWG algorithm (`xpack/entsearch/sync/crawler/html.rs`).
+html5ever = "0.40"
+# roll search's web crawler: a URL's site (registrable domain) for per-site crawl limits.
+psl = "2"
+# Crawl rules as fully built DFAs (`search-es` `xpack/entsearch/sync/crawler/config.rs`).
+regex-automata = "0.4"
 crc-fast = "1"
 httpdate = "1"
 ipnet = "2"
@@ -313,6 +320,7 @@ search-analysis = { path = "crates/search-analysis" }
 search-embed = { path = "crates/search-embed" }
 search-codec = { path = "crates/search-codec" }
 search-index = { path = "crates/search-index" }
+search-lucene = { path = "crates/search-lucene" }
 search-aggs = { path = "crates/search-aggs" }
 search-painless = { path = "crates/search-painless" }
 search-store = { path = "crates/search-store" }

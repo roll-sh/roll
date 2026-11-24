@@ -74,6 +74,7 @@ const GROUPS: [string, string[]][] = [
   ["Hosting", ["vercel", "netlify", "render", "fly", "railway", "heroku", "digitalocean", "cloudflare"]],
   ["Pages and backends", ["cloudflare-pages", "supabase"]],
   ["Clouds and clusters", ["aws-ssm", "aws-secrets-manager", "google-secret-manager", "azure-key-vault", "azure-app-configuration", "vault-kv", "kubernetes", "terraform-cloud"]],
+  ["Certificates", ["aws-acm", "azure-keyvault-cert", "cloudflare-cert"]],
   ["Anything else", []],
 ];
 
@@ -101,6 +102,9 @@ function targetSummary(s: Sync): string {
   if (s.kind === "google-secret-manager") return `${str("project")}${str("prefix") ? ` · ${str("prefix")}…` : ""}`;
   if (s.kind === "azure-key-vault") return str("vault");
   if (s.kind === "azure-devops") return `${str("organization")}/${str("project")} · ${str("group")}`;
+  if (s.kind === "aws-acm") return `${str("region")} · ${str("role")}`;
+  if (s.kind === "azure-keyvault-cert") return `${str("vault")}/${str("certificate")}`;
+  if (s.kind === "cloudflare-cert") return `zone ${str("zone")}`;
   if (s.kind === "terraform-cloud") return `${str("workspace_id")} · ${str("category") || "env"}`;
   if (str("url")) {
     try {
@@ -182,6 +186,7 @@ function SyncRow({ sync: s, kind, onChanged, onError }: { sync: Sync; kind?: Syn
           </button>
         )}
       </div>
+      {s.remote_id && <p className="mt-0.5 truncate pl-6 font-mono text-[10.5px] text-subtle" title="What the target calls the certificate: each renewal replaces it">{s.remote_id}</p>}
       {s.status === "error" && s.error && <p className="mt-1 pl-6 text-[11.5px] break-words text-danger">{s.error}</p>}
       <p className="mt-0.5 pl-6 text-[10.5px] text-faint">
         <ActorMark who={s.created_by} /> · created {ago(s.created_at)}
@@ -233,7 +238,10 @@ function NewSyncForm({ kinds, onCreate, onCancel }: { kinds: SyncKind[]; onCreat
   const keyList = keys.split(/[\s,]+/).filter(Boolean);
   const badKeys = keyList.filter((k) => !SECRET_KEY.test(k));
   const prefixOk = prefix === "" || /^[A-Za-z0-9_]{1,64}$/.test(prefix);
-  const ok = !!kind && !!env && FOLDER_PATH.test(path) && badKeys.length === 0 && prefixOk && kind.fields.every((f) => !f.required || (target[f.name] ?? "").trim() !== "");
+  // A certificate kind pushes one managed pki key: named alone, no prefix.
+  const cert = !!kind?.certificate;
+  const keysOk = cert ? keyList.length === 1 : true;
+  const ok = !!kind && !!env && FOLDER_PATH.test(path) && badKeys.length === 0 && keysOk && (cert || prefixOk) && kind.fields.every((f) => !f.required || (target[f.name] ?? "").trim() !== "");
 
   const draft = (): NewSync => {
     const t: Record<string, string> = {};
@@ -241,7 +249,7 @@ function NewSyncForm({ kinds, onCreate, onCancel }: { kinds: SyncKind[]; onCreat
       const v = (target[f.name] ?? "").trim();
       if (v) t[f.name] = v;
     }
-    return { environment: env, path, kind: kindName, target: t, ...(keyList.length && { keys: keyList }), ...(prefix && { prefix }) };
+    return { environment: env, path, kind: kindName, target: t, ...(keyList.length && { keys: keyList }), ...(prefix && !cert && { prefix }) };
   };
   return (
     <form
@@ -310,17 +318,25 @@ function NewSyncForm({ kinds, onCreate, onCancel }: { kinds: SyncKind[]; onCreat
           ))}
         </div>
       )}
-      {kind && !kind.values && <p className="text-[11.5px] text-muted">This kind sends no values: only that the environment changed, and which keys.</p>}
-      <div className="grid gap-3 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
-        <label>
-          <span className={label}>Keys (empty for all)</span>
-          <input value={keys} onChange={(e) => setKeys(e.target.value)} placeholder="DATABASE_URL, STRIPE_KEY" className={`${field} font-mono`} aria-invalid={badKeys.length > 0} />
+      {kind && !kind.values && !cert && <p className="text-[11.5px] text-muted">This kind sends no values: only that the environment changed, and which keys.</p>}
+      {cert ? (
+        <label className="block">
+          <span className={label}>Key linked to the certificate</span>
+          <input value={keys} onChange={(e) => setKeys(e.target.value)} placeholder="TLS_CERT" className={`${field} font-mono`} aria-invalid={badKeys.length > 0 || (keys !== "" && !keysOk)} />
+          <span className="mt-1 block text-[11.5px] text-muted">One key of this folder linked managed to a project CA. Its certificate, private key and chain go out on issue and on every rotation, replacing the same certificate at the target.</span>
         </label>
-        <label>
-          <span className={label}>Prefix at the target (optional)</span>
-          <input value={prefix} onChange={(e) => setPrefix(e.target.value)} placeholder="APP_" className={`${field} font-mono`} aria-invalid={!prefixOk} />
-        </label>
-      </div>
+      ) : (
+        <div className="grid gap-3 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+          <label>
+            <span className={label}>Keys (empty for all)</span>
+            <input value={keys} onChange={(e) => setKeys(e.target.value)} placeholder="DATABASE_URL, STRIPE_KEY" className={`${field} font-mono`} aria-invalid={badKeys.length > 0} />
+          </label>
+          <label>
+            <span className={label}>Prefix at the target (optional)</span>
+            <input value={prefix} onChange={(e) => setPrefix(e.target.value)} placeholder="APP_" className={`${field} font-mono`} aria-invalid={!prefixOk} />
+          </label>
+        </div>
+      )}
       {badKeys.length > 0 && <p className="text-[11.5px] text-danger">Not a key: {badKeys.join(", ")}</p>}
       {preview && (
         <div className="rounded-lg border border-line-2 bg-panel-2 px-3 py-2 text-[12px]" role="status">

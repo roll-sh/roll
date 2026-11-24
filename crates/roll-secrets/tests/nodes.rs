@@ -408,12 +408,14 @@ fn two_nodes_writing_events_never_leave_a_gap_a_follower_has_passed() {
             })
         })
         .collect();
-    let follow = |s: Arc<Secrets>, done: Arc<std::sync::atomic::AtomicBool>, project: String| {
+    // One follower of `scan.finding` only: its short pages jump to the head, past rows it left out.
+    let follow = |s: Arc<Secrets>, done: Arc<std::sync::atomic::AtomicBool>, project: String, kinds: Option<&'static str>| {
         std::thread::spawn(move || {
             let (mut seen, mut after) = (Vec::new(), 0);
             loop {
                 let last = done.load(std::sync::atomic::Ordering::SeqCst);
-                let page = s.events(&project, roll_secrets::EventsQuery { after: Some(after), limit: Some(7), ..Default::default() }, &Caller::operator()).unwrap();
+                let q = roll_secrets::EventsQuery { after: Some(after), limit: Some(7), kinds: kinds.map(String::from), ..Default::default() };
+                let page = s.events(&project, q, &Caller::operator()).unwrap();
                 seen.extend(page.events.iter().map(|e| e.seq));
                 after = page.next;
                 if last && page.events.is_empty() {
@@ -422,7 +424,8 @@ fn two_nodes_writing_events_never_leave_a_gap_a_follower_has_passed() {
             }
         })
     };
-    let followers = [follow(a.clone(), done.clone(), project.clone()), follow(b.clone(), done.clone(), project.clone())];
+    let followers = [follow(a.clone(), done.clone(), project.clone(), None), follow(b.clone(), done.clone(), project.clone(), None)];
+    let scans = follow(b.clone(), done.clone(), project.clone(), Some("scan.finding"));
     for w in writers {
         w.join().unwrap();
     }
@@ -438,5 +441,7 @@ fn two_nodes_writing_events_never_leave_a_gap_a_follower_has_passed() {
     for f in followers {
         assert_eq!(f.join().unwrap(), all);
     }
+    let all_scans: Vec<i64> = page.events.iter().filter(|e| e.kind == "scan.finding").map(|e| e.seq).collect();
+    assert_eq!(scans.join().unwrap(), all_scans);
     assert!(b.verify_audit(&project, Default::default(), &caller).unwrap().ok);
 }

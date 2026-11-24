@@ -239,7 +239,7 @@ async fn tools_follow_the_tokens_rules() {
     // Search mode's tools load upfront in clients that defer tools (Claude Code's alwaysLoad).
     let (_, _, found) = d.http(OPERATOR, Method::POST, "/v1/mcp?tools=search", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
     let search: Vec<&Value> = found["result"]["tools"].as_array().unwrap().iter().filter(|t| t["name"].as_str().is_some_and(|n| n.starts_with("roll_"))).collect();
-    assert!(search.len() == 3 && search.iter().all(|t| t["_meta"]["anthropic/alwaysLoad"] == true), "{found}");
+    assert!(search.len() == 4 && search.iter().all(|t| t["_meta"]["anthropic/alwaysLoad"] == true), "{found}");
     let all = names(&d.rpc(OPERATOR, "tools/list", json!({})).await);
     assert!(all.contains(&"postgres_delete_project".into()) && all.contains(&"workspace_list_projects".into()));
     // Not even one any token may call (apps_plan).
@@ -378,6 +378,7 @@ async fn search_mode_finds_and_runs_through_the_same_checks() {
     let listed = names(&rpc(at(""), "tools/list", json!({})).await);
     assert!(listed.contains(&"roll_find_tools".into()) && listed.contains(&"roll_run_read".into()) && !listed.iter().any(|n| n.starts_with("postgres_")), "{listed:?}");
     assert!(!listed.contains(&"roll_run".into()), "a reader has nothing to run that changes things: {listed:?}");
+    assert!(listed.contains(&"roll_find".into()), "finding a resource by name works in search mode too: {listed:?}");
     let found = rpc(at(""), "tools/call", json!({ "name": "roll_find_tools", "arguments": { "query": "list postgres projects" } })).await;
     assert_eq!(found["structuredContent"]["tools"][0]["name"], "postgres_list_projects", "{found}");
     assert!(found["structuredContent"]["tools"][0]["inputSchema"].is_object());

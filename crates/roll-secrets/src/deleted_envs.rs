@@ -135,18 +135,16 @@ fn breaks(c: &Conn<'_>, dek: &crate::crypto::Dek, env: &EnvRow) -> Result<Vec<Br
     Ok(out.into_iter().collect())
 }
 
-/// Whether one of grant `g`'s rules names environment `slug` of `project` (one that covers every
-/// environment doesn't break).
-fn names_env(g: &roll_auth::Grant, project: &str, slug: &str) -> bool {
-    use roll_auth::scope::{Resources, Selector};
-    g.scope.0.iter().any(|r| {
-        (r.product == "secrets" || r.product == "*")
-            && match &r.resources {
-                Resources::All => true,
-                Resources::Some(s) => s.iter().any(|s| matches!(s, Selector::Project { project: p } if p == project)),
-            }
-            && r.environments.as_ref().is_some_and(|e| e.iter().any(|e| e == slug))
-    })
+/// The folders of environment `slug` of `project` that grant `g`'s rules name it for (`/` for a
+/// rule over all of it); empty when none names it (one that covers every environment doesn't
+/// break). Read from the rules: whether the grant reaches them is [`Secrets::token_actions`]'s.
+fn names_env(g: &roll_auth::Grant, project: &str, slug: &str) -> BTreeSet<String> {
+    g.scope
+        .0
+        .iter()
+        .filter(|r| crate::access::rule_may_name(r, project) && r.environments.as_ref().is_some_and(|e| e.iter().any(|e| e == slug)))
+        .flat_map(|r| r.paths.clone().unwrap_or_else(|| vec!["/".into()]))
+        .collect()
 }
 
 /// The 409 before a delete that needs a confirm: what's protected, what breaks, and the window.
@@ -216,8 +214,10 @@ impl Secrets {
                 }
             }
         }
-        if let Some(w) = &self.workloads {
-            for g in w.grants()?.into_iter().filter(|g| names_env(g, project, &env.slug)) {
+        // Only tokens that reach it here, judged as reach judges them: another person's token naming
+        // every project's `staging` reaches nothing in this one, and isn't named.
+        for g in self.tokens_naming(project)? {
+            if names_env(&g, project, &env.slug).iter().any(|p| !self.token_actions(&g, project, &env.slug, p).is_empty()) {
                 out.insert(Break { project: None, environment: env.slug.clone(), path: "/".into(), key: None, via: "token", name: Some(g.name.to_string()), id: Some(g.id.to_string()) });
             }
         }
@@ -350,13 +350,29 @@ impl Secrets {
 
     /// Where `slug` of `project` stands, for a consumer that was refused a read of it and must tell
     /// "deleted, still recoverable" (wait) from "gone" (let go of what it copied). Checks no
-    /// access and says nothing of what's in it: the consumer was already allowed to name it.
+    /// access and says nothing of what's in it: the consumer was already allowed to name it. A
+    /// deleted project's environments stay live on their rows, so its window counts too: kept
+    /// while it's open (a `project.recovered` brings them back), gone once it's closed.
     pub fn environment_standing(&self, project: &str, slug: &str) -> Result<Standing> {
-        let row: Option<(Option<i64>, Option<i64>)> = self.db.read(|c| c.query_row("SELECT forgotten_at, purge_at FROM environments WHERE project_id = ? AND slug = ?", [project, slug], |r| Ok((r.get(0)?, r.get(1)?))).optional())?;
-        Ok(match row {
+        type Window = (Option<i64>, Option<i64>);
+        let now = self.db.now_ms()?;
+        let (env, project): (Option<Window>, Option<Window>) = self.db.read(|c| {
+            let env = c.query_row("SELECT forgotten_at, purge_at FROM environments WHERE project_id = ? AND slug = ?", [project, slug], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            let project = c.query_row("SELECT forgotten_at, purge_at FROM projects WHERE project_id = ?", [project], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            Ok::<_, Error>((env, project))
+        })?;
+        let env = match env {
             Some((None, _)) => Standing::Live,
             Some((Some(_), Some(purge_at))) => Standing::Kept { purge_at },
-            Some((Some(_), None)) | None => Standing::Gone,
+            Some((Some(_), None)) | None => return Ok(Standing::Gone),
+        };
+        Ok(match project {
+            Some((Some(_), Some(purge_at))) if purge_at > now => match env {
+                Standing::Live => Standing::Kept { purge_at },
+                kept => kept,
+            },
+            Some((Some(_), _)) => Standing::Gone,
+            _ => env,
         })
     }
 

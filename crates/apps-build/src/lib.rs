@@ -16,6 +16,7 @@ mod docker;
 mod dotnet;
 pub mod edge;
 mod elixir;
+pub mod expects;
 pub mod functions;
 mod gleam;
 mod golang;
@@ -131,6 +132,10 @@ pub struct Plan {
     /// make and link them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub uses: Vec<Datastore>,
+    /// The variables the repo says it needs ([`expects`]: its `.env.example`'s names), so New
+    /// service asks for them before the first deploy and a deploy says which are still unset.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variables: Vec<String>,
     /// The Procfile's `release:` (Heroku's release phase): the pre-deploy command when the
     /// service sets none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -287,6 +292,11 @@ pub fn candidates(tree: &dyn Tree) -> Vec<Candidate> {
     out
 }
 
+/// Next.js's deployment id (`deploymentId`), set at a Next build: its pages then name it on
+/// their requests (`?dpl=` on assets, `x-deployment-id` on its own fetches), which roll's skew
+/// protection follows, and Next reloads a page whose build is no longer the one answering.
+pub const NEXT_DEPLOYMENT_ID: &str = "NEXT_DEPLOYMENT_ID";
+
 pub fn plan(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
     // A Procfile (Heroku's; Nixpacks and Railpack read it too) names the start command when
     // the service doesn't, unless the tree's own Dockerfile has its CMD.
@@ -346,11 +356,16 @@ pub fn plan(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
     } else if !own_dockerfile && p.start.is_some() && overrides.builder != Builder::Functions {
         // Middleware for any web service (Vercel's Routing Middleware, Netlify's edge functions on
         // a server's routes): the same files, run before the service by its functions service.
-        // Next.js runs its own middleware.ts.
+        // Next.js runs its own middleware.ts; a server's own module of that name isn't one.
         let (mut found, notes) = edge::find(tree);
-        if p.framework.as_deref() == Some("next") {
-            found.retain(|f| f.kind != edge::EdgeKind::Vercel);
-        }
+        let next = p.framework.as_deref() == Some("next");
+        found.retain(|f| {
+            let keep = f.kind != edge::EdgeKind::Vercel || (!next && edge::vercel_middleware(tree, &f.file));
+            if !keep && !next {
+                p.notes.push(format!("{}: not Vercel's middleware (no config.matcher, no next/server or @vercel import): left to the app", f.file));
+            }
+            keep
+        });
         p.notes.extend(notes);
         for f in &found {
             p.notes.push(format!("{}: an edge function on {}, run before the service by its functions service (Run its functions)", f.file, f.paths.join(", ")));
@@ -370,6 +385,10 @@ pub fn plan(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
     for (store, why) in uses(tree) {
         p.uses.push(store);
         p.notes.push(format!("{why}: it uses {}", store.label()));
+    }
+    if let Some((file, names)) = expects::expected(tree) {
+        p.notes.push(format!("{file} names {} variable(s) it expects", names.len()));
+        p.variables = names;
     }
     if overrides.otel {
         if own_dockerfile {
@@ -574,6 +593,7 @@ impl Draft {
             notes,
             spa: false,
             uses: Vec::new(),
+            variables: Vec::new(),
             release: None,
             crons: Vec::new(),
             functions: Vec::new(),

@@ -311,7 +311,7 @@ impl Provider {
         let until = self.db.now_ms()? + ttl_minutes as i64 * 60_000 + SLACK_MS;
         self.outside.create_login(&o.at(), &name, pw.expose(), &group, until).map_err(|why| Error::Link(format!("creating a login: {why}")))?;
         let parts = BTreeMap::from([("username".to_string(), Value::new(name.clone())), ("password".to_string(), pw)]);
-        Ok(Issued { parts, handle: json!({ "login": name }) })
+        Ok(Issued { expires_at: None, parts, handle: json!({ "login": name }) })
     }
 }
 
@@ -352,7 +352,7 @@ impl LinkProvider for Provider {
         }
         let (role, pw, handle) = TURNS.issue(&self.db, r#ref, &o.roles, password, |role, pw| self.outside.set_password(&o.at(), role, pw))?;
         let parts = BTreeMap::from([("username".to_string(), Value::new(role)), ("password".to_string(), pw)]);
-        Ok(Issued { parts, handle })
+        Ok(Issued { expires_at: None, parts, handle })
     }
 
     /// After the grace period: the old role's password replaced by one nobody knows, unless the

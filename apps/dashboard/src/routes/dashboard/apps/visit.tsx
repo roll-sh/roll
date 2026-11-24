@@ -5,23 +5,23 @@ import { appsApi } from "@/lib/apps-api";
 import { pageHead } from "@/lib/head";
 
 /**
- * A sign-in-gated environment sends a visitor here (`?service=&env=&to=`): signed in to roll, the
- * page asks for a one-use ticket to `to` as them and goes on with it; the environment's own host
- * trades the ticket for its session.
+ * A sign-in-gated environment sends a visitor here (`?service=&env=&to=&state=`): signed in to
+ * roll, the page asks for a one-use ticket to `to` as them (bound to the browser that came, by
+ * `state`) and goes on with it; the environment's own host trades the ticket for its session.
  */
 export const Route = createFileRoute("/dashboard/apps/visit")({
   head: () => pageHead({ title: "Opening" }),
   component: function VisitRoute() {
-    const { service, env, to } = Route.useSearch() as { service?: string; env?: string; to?: string };
+    const { service, env, to, state } = Route.useSearch() as { service?: string; env?: string; to?: string; state?: string };
     const [error, setError] = useState<string | null>(null);
     useEffect(() => {
-      if (!service || !env || !to) {
+      if (!service || !env || !to || !state) {
         setError("This link doesn't say where to go.");
         return;
       }
       let live = true;
       appsApi
-        .visit(service, env, to)
+        .visit(service, env, to, state)
         .then((r) => {
           if (live && /^https?:\/\//.test(r.url)) window.location.replace(r.url);
         })
@@ -29,7 +29,7 @@ export const Route = createFileRoute("/dashboard/apps/visit")({
       return () => {
         live = false;
       };
-    }, [service, env, to]);
+    }, [service, env, to, state]);
     return (
       <div className="grid min-h-[60vh] place-items-center px-4">
         <div className="flex max-w-sm flex-col items-center gap-5 text-center">

@@ -20,11 +20,17 @@ pub(crate) const COOKIE: &str = "__roll_dpl";
 /// Earlier deployments a request may name.
 const EARLIER: usize = 3;
 
-/// An environment's earlier deployments, as last read for its live one.
+/// An environment's earlier deployments, as last read for its live one: each with the Next.js
+/// deployment id its build was given (`next_deployment_id` in its plan), which its pages name.
 pub(crate) struct Earlier {
     live: String,
+    live_next: Option<String>,
     until: i64,
-    deployments: Vec<String>,
+    deployments: Vec<(String, Option<String>)>,
+}
+
+fn next_id(plan: Option<&serde_json::Value>) -> Option<String> {
+    plan?.get("next_deployment_id")?.as_str().map(str::to_string)
 }
 
 /// A browser's page load (its document): what's live answers it.
@@ -46,7 +52,8 @@ pub(crate) fn asked(req: &Request) -> Option<String> {
 }
 
 fn named(req: &Request) -> Option<String> {
-    let ok = |s: &str| (s.starts_with("dep_") && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')).then(|| s.to_string());
+    // roll's deployment ids, or the Next.js ids roll gives its builds (`nb_…`).
+    let ok = |s: &str| ((s.starts_with("dep_") || s.starts_with("nb_")) && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')).then(|| s.to_string());
     if let Some(d) = req.headers().get("x-deployment-id").and_then(|v| v.to_str().ok()) {
         return ok(d);
     }
@@ -72,8 +79,8 @@ impl Apps {
         }
         let d = asked.filter(|d| *d != live.deployment)?;
         let ek = env_key(service, env);
-        let cached = self.skew.lock().get(&ek).filter(|c| c.live == live.deployment).map(|c| (c.until, c.deployments.clone()));
-        let (until, earlier) = match cached {
+        let cached = self.skew.lock().get(&ek).filter(|c| c.live == live.deployment).map(|c| (c.until, c.live_next.clone(), c.deployments.clone()));
+        let (until, live_next, earlier) = match cached {
             Some(c) => c,
             None => {
                 let (sid, e) = (service.to_string(), env.to_string());
@@ -82,16 +89,21 @@ impl Apps {
                 let until = active.and_then(|a| a.finished_at).map_or(0, |at| at + crate::sites::SKEW_WINDOW_MS);
                 // Before the live one, live once: never one rolled back from, never pruned.
                 let before = active.map_or(i64::MIN, |a| a.created_at);
-                let earlier: Vec<String> = deps.iter().filter(|d| d.status == DeployStatus::Inactive && d.created_at < before && d.image.is_some() && d.pruned_at.is_none()).take(EARLIER).map(|d| d.id.clone()).collect();
+                let earlier: Vec<(String, Option<String>)> = deps.iter().filter(|d| d.status == DeployStatus::Inactive && d.created_at < before && d.image.is_some() && d.pruned_at.is_none()).take(EARLIER).map(|d| (d.id.clone(), next_id(d.plan.as_ref()))).collect();
+                let live_next = next_id(active.and_then(|a| a.plan.as_ref()));
                 let mut cache = self.skew.lock();
                 if cache.len() >= 10_000 {
                     cache.clear();
                 }
-                cache.insert(ek, Earlier { live: live.deployment.clone(), until, deployments: earlier.clone() });
-                (until, earlier)
+                cache.insert(ek, Earlier { live: live.deployment.clone(), live_next: live_next.clone(), until, deployments: earlier.clone() });
+                (until, live_next, earlier)
             }
         };
-        (code_sql::now_ms() <= until && earlier.contains(&d)).then_some(d)
+        // The live build's own pages (a rollback's too: the same build, a new deployment).
+        if live_next.as_deref() == Some(d.as_str()) || code_sql::now_ms() > until {
+            return None;
+        }
+        earlier.into_iter().find(|(id, next)| *id == d || next.as_deref() == Some(d.as_str())).map(|(id, _)| id)
     }
 }
 
@@ -110,6 +122,7 @@ mod tests {
         assert_eq!(named(&req(Request::builder().uri("/_next/a.js?dpl=dep_abc"))).as_deref(), Some("dep_abc"));
         assert_eq!(named(&req(get().header("cookie", "a=1; __roll_dpl=dep_abc"))).as_deref(), Some("dep_abc"));
         assert_eq!(named(&req(get().header("x-deployment-id", "../etc"))), None, "only a deployment id");
+        assert_eq!(named(&req(Request::builder().uri("/_next/static/a.js?dpl=nb_0123abcd"))).as_deref(), Some("nb_0123abcd"), "or the Next.js id roll gave its build");
         assert!(navigation(&req(get().header("sec-fetch-dest", "document"))));
         assert!(!navigation(&req(get().header("sec-fetch-dest", "script"))));
     }

@@ -91,6 +91,7 @@ export function EnvironmentsView() {
 
       <Retention onError={setError} />
       <ValidityChecks onError={setError} />
+      <LeakRotation onError={setError} />
 
       <Backup />
 
@@ -593,6 +594,41 @@ function ValidityChecks({ onError }: { onError: (e: string) => void }) {
         A GitHub, Stripe, Slack, OpenAI or Anthropic key that roll code or <span className="font-mono">roll secrets scan</span> finds and roll doesn&apos;t hold is sent to its
         provider&apos;s own API once a day at most, to say whether it&apos;s live; roll&apos;s own tokens are looked up without being used. An AWS key isn&apos;t tried (that trips
         canary tokens): its account is read from the key id. Nothing else is sent, and the value is never kept.
+      </p>
+    </Section>
+  );
+}
+
+/** What a leaked managed key does (docs/secrets.md, "When a value leaks"). */
+function LeakRotation({ onError }: { onError: (e: string) => void }) {
+  const { api, leakRotate, reloadEnvs } = useSecrets();
+  const [busy, setBusy] = useState(false);
+  const on = leakRotate === "managed";
+  return (
+    <Section title="Leaked keys" aside={<span className="text-[11.5px] text-subtle">Off by default.</span>}>
+      <label className="flex items-center gap-2 text-[12.5px]">
+        <input
+          type="checkbox"
+          checked={on}
+          disabled={busy}
+          onChange={async () => {
+            setBusy(true);
+            try {
+              await api.setLeakRotate(on ? "off" : "managed");
+              reloadEnvs();
+            } catch (e) {
+              onError(errorText(e));
+            } finally {
+              setBusy(false);
+            }
+          }}
+        />
+        Rotate a leaked managed key at once
+      </label>
+      <p className="mt-1.5 text-[11.5px] text-muted">
+        When roll code finds a managed key&apos;s value in a change or a scan, roll issues a new credential and revokes the leaked one with no grace period, so whatever still
+        holds the old value stops working until it reads again. An environment or folder that needs approvals gets a change request for the rotation instead. Personal values
+        and plain values are never rotated. Off, the leak is reported and the change offers a Rotate button.
       </p>
     </Section>
   );

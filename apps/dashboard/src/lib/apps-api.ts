@@ -18,10 +18,26 @@ export interface Prices {
   stored_gb_month: number;
 }
 
+/** Signing visitors in through a provider (`access.sso`): `@acme.com`, `ada@acme.com`, `org:acme` (GitHub). */
+export interface Sso {
+  provider: "github" | "google";
+  allow: string[];
+}
+
+/** What an environment's last week says about a setting, and the body that acts on it. */
+export interface Advice {
+  kind: "memory" | "cpu" | "max_instances" | "min_instances";
+  message: string;
+  set: EnvironmentPut;
+  saving_usd_month?: number;
+}
+
 /** What a service would cost at most (`POST /v1/apps/quote`), in US dollars at roll's prices. */
 export interface Quote {
   instance_hour: number;
   idle_hour: number;
+  /** The highest floor by the clock's hour, while it holds; null without one higher. */
+  scheduled_idle_hour: number | null;
   month: { least: number; most: number };
   scales_to_zero: boolean;
   currency: "USD";
@@ -106,6 +122,16 @@ export interface PushState extends Push {
 }
 
 /** An alert on one of the app's own gauges: above or below a threshold for 1–5 minutes running. */
+/** An alert on one route (a route group as Routes shows it, or a prefix `/api/*`), for one method or all; at most 10. */
+export interface RouteAlert {
+  route: string;
+  method?: string;
+  /** 5xx at or above this share of its requests in five minutes (0, off). */
+  error_pct?: number;
+  /** Its p95 at or above this (0, off). */
+  p95_ms?: number;
+}
+
 export interface MetricAlert {
   name: string;
   above?: number;
@@ -157,7 +183,7 @@ export interface Run {
   volume?: { mount: string; size_gb: number; backups?: { every_hours: number; keep: number } };
   /** Metric alerts (`alert.*` events), over five minutes; each 0 is off. */
   /** log_match: text its output holds log_count times in five minutes (alert.log). */
-  alerts?: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct?: number; log_match?: string; log_count?: number; cpu_pct?: number; metrics?: MetricAlert[]; /** The last hour against the same hour of the week over four weeks: alert.anomaly. */ anomaly?: boolean };
+  alerts?: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct?: number; log_match?: string; log_count?: number; cpu_pct?: number; metrics?: MetricAlert[]; /** The last hour against the same hour of the week over four weeks: alert.anomaly. */ anomaly?: boolean; /** One route's 5xx share or p95 over five minutes: alert.route. */ routes?: RouteAlert[] };
   /** Its service level objective: `objective`% of requests not 5xx (and of minutes under `latency_ms` at p95) over `window_days`; `alert.slo` when its budget burns fast. */
   slo?: Slo;
   /** Its own Prometheus endpoint, scraped every 15 s on each running instance (port: the app's own by default). */
@@ -201,6 +227,8 @@ export interface Run {
   push?: Push[];
   /** Containers beside each instance, in its network namespace (a web service's or a worker's); at most 4. */
   sidecars?: Sidecar[];
+  /** Floors by the clock: in any of a rule's weekly windows (as a freeze's, in its timezone), its min_instances is the floor when higher; at most 10. */
+  schedule_scale?: { windows: { from: string; to: string }[]; timezone?: string; min_instances: number }[];
 }
 
 /** A container beside each instance: `name` a-z, 0-9 and - (unique, at most 20); its image pinned with each deployment. */
@@ -407,7 +435,7 @@ export function describePending(p: Pending): string | null {
 
 export interface FirewallRule {
   /** `limit`: let in at `per_minute` a client, a 429 past it. */
-  action: "allow" | "deny" | "limit" | "challenge";
+  action: "allow" | "deny" | "limit" | "challenge" | "log";
   per_minute?: number;
   burst?: number;
   /** `limit`'s client: `ip` (default), `header:<name>` or `cookie:<name>` (a request without it counts by address). */
@@ -423,14 +451,24 @@ export interface FirewallRule {
   header?: FieldMatch;
   cookie?: FieldMatch;
   query?: FieldMatch;
+  /** Kinds of client from roll's managed lists; any of them matches. */
+  bots?: BotKind[];
+  /** Kinds of attack from roll's managed patterns; any of them matches. */
+  attacks?: AttackKind[];
 }
+
+/** Probes for left-out files and scanners' user agents, `../` in any encoding, SQL injection, script in the request, and Log4Shell/Shellshock/shell in a parameter: read on the request line and the user agent, referer and cookies, never a body. */
+export type AttackKind = "scanners" | "traversal" | "sqli" | "xss" | "rce";
+
+/** `ai` crawlers and assistants' fetchers, `search` engines, link `preview`s, HTTP `tools` and headless browsers; `verified`: a crawler its operator's DNS vouches for; `spoofed`: one claiming such a crawler's name from elsewhere. */
+export type BotKind = "ai" | "search" | "preview" | "tools" | "verified" | "spoofed";
 
 export interface FieldMatch {
   name: string;
   contains?: string;
 }
 
-/** Firewall rules as typed, one a line: `deny /admin/*`, `limit 100 /api/* key=header:x-api-key`, `deny method=DELETE,PUT`, `allow /admin/health`, `deny ip=203.0.113.0/24`, `deny header=X-Bot`, `deny query=debug:1`, `deny ua=BadBot` (`ua=` last: the rest of the line). */
+/** Firewall rules as typed, one a line: `deny /admin/*`, `limit 100 /api/* key=header:x-api-key`, `deny method=DELETE,PUT`, `allow /admin/health`, `deny ip=203.0.113.0/24`, `deny header=X-Bot`, `deny query=debug:1`, `deny bots=ai`, `deny ua=BadBot` (`ua=` last: the rest of the line). */
 export function parseFirewall(text: string): FirewallRule[] {
   return text
     .split("\n")
@@ -438,7 +476,7 @@ export function parseFirewall(text: string): FirewallRule[] {
     .filter((l) => l && !l.startsWith("#"))
     .map((l) => {
       const [action, ...words] = l.split(/\s+/);
-      const rule: FirewallRule = { action: action === "allow" ? "allow" : action === "limit" ? "limit" : action === "challenge" ? "challenge" : "deny" };
+      const rule: FirewallRule = { action: action === "allow" ? "allow" : action === "limit" ? "limit" : action === "challenge" ? "challenge" : action === "log" ? "log" : "deny" };
       let rest = words;
       // `limit N[:BURST] …`
       if (rule.action === "limit") {
@@ -464,6 +502,8 @@ export function parseFirewall(text: string): FirewallRule[] {
         else if (t.startsWith("cookie=")) rule.cookie = field(t.slice(7));
         else if (t.startsWith("query=")) rule.query = field(t.slice(6));
         else if (t.startsWith("key=")) rule.key = t.slice(4);
+        else if (t.startsWith("bots=")) rule.bots = t.slice(5).split(",").filter(Boolean) as BotKind[];
+        else if (t.startsWith("attacks=")) rule.attacks = t.slice(8).split(",").filter(Boolean) as AttackKind[];
         else if (t.startsWith("/")) rule.path = t;
       }
       return rule;
@@ -485,6 +525,8 @@ export function formatFirewall(rules: FirewallRule[]): string {
         field("cookie", r.cookie),
         field("query", r.query),
         r.key ? `key=${r.key}` : undefined,
+        r.bots?.length ? `bots=${r.bots.join(",")}` : undefined,
+        r.attacks?.length ? `attacks=${r.attacks.join(",")}` : undefined,
         // Last: it takes the rest of the line.
         r.user_agent ? `ua=${r.user_agent}` : undefined,
       ]
@@ -587,6 +629,12 @@ export interface EnvironmentDiff {
 }
 
 export interface EnvironmentPut {
+  /** Attack mode by itself: once a minute's requests reach per_minute, a challenge for every visitor without a pass for minutes; null: never by itself. */
+  attack_mode?: { per_minute: number; minutes?: number } | null;
+  /** Attack mode on by hand until then (unix ms, within 24 hours); null ends it. */
+  challenge_until?: number | null;
+  /** Paths whose CORS preflights reach the app past its gate; null: none. */
+  preflight?: string[] | null;
   /** false: its schedules don't run (deploys and runs still do). */
   scheduled?: boolean;
   /** Data of its own: a branch of each Postgres and Redis database it links (admin); null goes back. */
@@ -598,7 +646,7 @@ export interface EnvironmentPut {
   /** Private: visitors need `?roll_access=<token>` once; null makes it public again. */
   /** `signed_in`: people signed in to roll who can open the project get in (alone, or with a token). */
   /** Who gets in: a link's token, people signed in to roll, or a password visitors type (8–200; replaces the whole of access). */
-  access?: { token?: string; signed_in?: boolean; password?: string; bypass_sha256?: string } | null;
+  access?: { token?: string; signed_in?: boolean; password?: string; sso?: Sso; callers?: string[]; bypass_sha256?: string } | null;
   /** Creating it: start with this environment's variables. */
   variables_from?: string;
   wait_for_ci?: boolean;
@@ -719,6 +767,8 @@ export interface Environment extends EnvironmentSummary {
   schedules?: { name: string; next_run_at: number | null; last: { job: string; status: Job["status"]; started_at: number } | null; last_call?: { at: number; status?: number; ms: number; error?: string } }[];
   /** Its instances keep crashing: three or more in the last ten minutes. */
   crash_loop: { crashes: number; last_at: number; last_error: string } | null;
+  /** Its last cold start on the node serving it: the container up, then the app until it answered. */
+  last_cold_start?: { at: number; ms: number; runtime_ms: number; app_ms: number };
   /** A gradual rollout under way: the new deployment and the percent of requests it takes. */
   canary?: { deployment: string; share: number; /** Its step passed and it waits for a person (`rollout.manual`). */ waiting?: boolean } | null;
   /** Its own run settings over the service's; empty: the service's. */
@@ -746,6 +796,12 @@ export interface Environment extends EnvironmentSummary {
   report?: boolean;
   /** People signed in to roll who can open its project get in. */
   signed_in?: boolean;
+  /** People GitHub or Google vouches for get in, by domain, email or GitHub organisation. */
+  sso?: Sso;
+  /** Paths whose CORS preflights reach the app past its gate. */
+  preflight?: string[];
+  /** Other services of the project let in with roll's token for this environment. */
+  callers?: string[];
   /** Visitors may type its password (`access.password`, never returned). */
   password?: boolean;
   /** What its code may reach: roll and the listed hosts (`roll`), or anything (`open`). */
@@ -784,6 +840,12 @@ export interface Environment extends EnvironmentSummary {
   rate_limit?: { per_minute: number; burst?: number | null } | null;
   /** Its firewall rules, in order. */
   firewall?: FirewallRule[];
+  /** Requests each rule matched in the last 24 hours, in their order. */
+  firewall_hits?: number[];
+  /** When attack mode goes on by itself. */
+  attack_mode?: { per_minute: number; minutes: number };
+  /** Attack mode is on until then (unix ms). */
+  challenge_until?: number;
   /** Headers its answers carry. */
   headers?: HeaderRule[];
   /** Paths another service of the project answers. */
@@ -848,6 +910,8 @@ export interface Plan {
   spa?: boolean;
   /** Datastores the code has client libraries for (New service offers to make and link them). */
   uses?: ("postgres" | "redis")[];
+  /** The variables its `.env.example` (or `.env.sample`, `.env.template`, `.env.dist`, `example.env`) names: asked for before the first deploy. */
+  variables?: string[];
   /** A static site's function directories (`netlify/functions`, `api`) the `functions` builder runs. */
   functions?: string[];
   /** A static site's edge functions: run before its files on their paths by its `-fn` service. */
@@ -865,6 +929,16 @@ export interface RootCandidate {
 }
 
 export type PlanRequest = { repo: string; revision?: string; root?: string } | { git: string; branch?: string; root?: string; git_login?: { username: string; password: string } } | { files: Record<string, string> };
+
+/** One of a build's steps (BuildKit's): a Dockerfile step, sending the context, exporting the image. */
+export interface BuildStep {
+  name: string;
+  /** How long it ran, once it finished. */
+  ms?: number;
+  /** Its cache answered: it didn't run. */
+  cached: boolean;
+  failed?: true;
+}
 
 export interface Deployment {
   id: string;
@@ -884,6 +958,8 @@ export interface Deployment {
   started_at: number | null;
   finished_at: number | null;
   ready_ms: number | null;
+  /** Its image's size, where the runtime says. */
+  image_bytes?: number;
   /** What the app or the build printed when it failed (the step, its last line): only shown here, never sent in a commit status or a notification. */
   error_detail?: string;
   /** How to fix a failure roll knows (a private image's login, more memory, a lockfile): the setting and its command. */
@@ -892,6 +968,8 @@ export interface Deployment {
   pruned_at?: number;
   /** When each step began (`build`, `pre_deploy`, `rollout`, then `live` or `failed`): on a single deployment's GET. */
   steps?: { step: string; at: number }[];
+  /** Its build's steps from BuildKit's progress, in order: how long each took, which its cache answered, where it failed. On a single deployment's GET. */
+  build_steps?: BuildStep[];
   /** Its image's last scan for known vulnerabilities, once one ran. */
   vulnerabilities?: ScanSummary;
   /** Who approved putting it live, where its environment asks for approvals (single GET only). */
@@ -1305,6 +1383,11 @@ export interface NotifyTarget {
 
 export type NotifyEvent =
   | "alert.anomaly"
+  | "attack.mode"
+  | "deploy.started"
+  | "scale.out"
+  | "scale.in"
+  | "instance.crashed"
   | "deploy.failed"
   | "deploy.base_updated"
   | "rollout.waiting"
@@ -1321,6 +1404,7 @@ export type NotifyEvent =
   | "alert.latency"
   | "alert.capacity"
   | "alert.log"
+  | "alert.route"
   | "error.new"
   | "error.regressed"
   | "cron.failed"
@@ -1555,7 +1639,7 @@ export const appsApi = {
 
   links: (id: string) => call<Link[]>("GET", `${svc(id)}/links`),
   /** `all`: every kind of event (its timeline), not only what people changed. */
-  activity: (id: string, all = false) => call<AppEvent[]>("GET", `${svc(id)}/activity${qs({ all: all || undefined })}`),
+  activity: (id: string, all = false, before?: number) => call<AppEvent[]>("GET", `${svc(id)}/activity${qs({ all: all || undefined, before })}`),
   link: (id: string, kind: LinkKind, ref: string, prefix?: string) =>
     call<Link>("PUT", `${svc(id)}/links/${kind}/${enc(ref)}`, prefix ? { prefix } : {}),
   unlink: (id: string, kind: LinkKind, ref: string) => call<null>("DELETE", `${svc(id)}/links/${kind}/${enc(ref)}`),
@@ -1600,7 +1684,7 @@ export const appsApi = {
   disconnectGitHub: (id: string) => call<Service>("DELETE", `${svc(id)}/github`),
   putEnvironment: (id: string, e: string, body: EnvironmentPut) => call<Environment>("PUT", env(id, e), body),
   /** A one-use way into a sign-in-gated environment, as the signed-in person: the URL to go on to. */
-  visit: (id: string, e: string, to: string) => call<{ url: string }>("POST", `${env(id, e)}/visit`, { to }),
+  visit: (id: string, e: string, to: string, state: string) => call<{ url: string }>("POST", `${env(id, e)}/visit`, { to, state }),
   removeEnvironment: (id: string, e: string) => call<null>("DELETE", env(id, e)),
 
   deploy: (id: string, e: string, body: NewDeploy = {}) => call<Deployment>("POST", `${env(id, e)}/deploys`, body),
@@ -1721,6 +1805,7 @@ export const appsApi = {
     return data as Deployment;
   },
   metrics: (id: string, e: string, minutes = 60) => call<Metrics>("GET", `${env(id, e)}/metrics${qs({ minutes })}`),
+  advice: (id: string, e: string) => call<{ days: number; minutes: number; advice: Advice[] }>("GET", `${env(id, e)}/advice`),
   /** Errors and latency by route over the last `minutes` (5–60). */
   routes: (id: string, e: string, minutes = 60) => call<RouteStats>("GET", `${env(id, e)}/routes${qs({ minutes })}`),
   analytics: (id: string, e: string, minutes = 1440) => call<Analytics>("GET", `${env(id, e)}/analytics${qs({ minutes })}`),
@@ -1791,6 +1876,8 @@ export interface AccessLine {
   request_id?: string;
   cold?: boolean;
   waited_ms?: number;
+  /** With traces on, the proxy's span's trace: its waterfall opens from the line. */
+  trace?: string;
   /** An answer roll gave itself, before any instance, and why. */
   by?: "allow_list" | "firewall" | "rate_limit" | "private" | "maintenance" | "wake" | "capped" | "paused" | "not_deployed" | "moving" | "unavailable";
 }

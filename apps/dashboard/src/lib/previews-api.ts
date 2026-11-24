@@ -178,6 +178,8 @@ export interface Preview {
   slower_routes?: { branch: string; routes: { name: string; count: number; p50_ms: number; main_p50_ms: number; grew?: GrewSpan | null; /** Its budget, when it's over it. */ budget_ms?: number | null }[] } | null;
   /** Earlier pushes of the change's services, still reachable (newest first), each on its own copy of the data where `own_data` names products. */
   earlier?: { service: string; revision: string; url: string; share_url: string | null; at: number; own_data?: string[] }[];
+  /** Its secret values its pages serve at its head, by name and where (never the value). */
+  served_secrets?: { key: string; path: string }[];
   /** Production's browser checks on this head (roll apps runs them as its deployment goes live). */
   browser_checks?: { service: string; name: string; state: "pending" | "passed" | "failed"; error: string | null; files?: { service_id: string; environment: string } | null }[];
   /** The earlier pushes' own copies of the data: how many, their bytes and a month of keeping them (in `cost`). */
@@ -223,6 +225,10 @@ export interface PreviewShare {
   created_by: string;
   created_at: number;
   revoked: boolean;
+  /** Who it's for (`""`: not said). */
+  label: string;
+  /** Its visitors may leave notes on the pages, as `guest:<name>`. */
+  notes: boolean;
 }
 
 /** Another page of the first service: errors while it loaded, its change since the screenshot at
@@ -237,9 +243,11 @@ export interface PageCheck {
   a11y?: { issues: A11yIssue[]; lang: boolean; title: boolean; seo?: PageSeo | null } | null;
   links?: { checked: number; broken: { path: string; status: number }[] } | null;
   /** Against main's page at the same path. */
-  against?: { a11y_added: number | null; links_added: number | null; seo_added: number | null; text: TextDiff | null } | null;
+  against?: { a11y_added: number | null; links_added: number | null; seo_added: number | null; text: TextDiff | null; step_ms?: number | null } | null;
   /** A page state's step that found nothing (the state taken as it was then). */
   step?: string | null;
+  /** A page state's slowest click or typing to the next paint (ms): INP in the lab. */
+  step_ms?: number | null;
 }
 
 /** A page state (`github.states`): a page of the first service's, reached by its steps. */
@@ -395,10 +403,10 @@ export const endpointSlower = (e: EndpointTime) => e.slower ?? (e.main_ms != nul
 /** Which row of the screenshot's chooser a page check goes in: a page, a view of the first one (a
  * width or a browser), or a state (`state:<name>`). */
 export const pageGroup = (path: string): "Pages" | "Views" | "States" | "Stories" =>
-  /^@\d+$/.test(path) || path.startsWith("browser:") ? "Views" : path.startsWith("state:") ? "States" : path.startsWith("story:") ? "Stories" : "Pages";
+  /^@\d+$/.test(path) || path.startsWith("browser:") || path.startsWith("mode:") ? "Views" : path.startsWith("state:") ? "States" : path.startsWith("story:") ? "Stories" : "Pages";
 
 export const pageLabel = (path: string) =>
-  /^@\d+$/.test(path) ? `${path.slice(1)} px` : path.startsWith("story:") ? path.slice(6).replace("--", " / ") : path === "browser:firefox" ? "Firefox" : path === "browser:webkit" ? "WebKit" : path === "browser:webkit-phone" ? "WebKit, phone" : path || "/";
+  /^@\d+$/.test(path) ? `${path.slice(1)} px` : path.startsWith("mode:") ? `${path.slice(5)} mode` : path.startsWith("story:") ? path.slice(6).replace("--", " / ") : path === "browser:firefox" ? "Firefox" : path === "browser:webkit" ? "WebKit" : path === "browser:webkit-phone" ? "WebKit, phone" : path || "/";
 
 /** "1.2 s" or "380 ms". */
 export const duration = (ms: number) => (ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`);
@@ -430,7 +438,7 @@ export interface PreviewSettings {
   secrets: { base: string; allow_production: boolean };
   /** A patch replaces the whole map. */
   env: Record<string, string>;
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot?: boolean; baseline?: boolean; pages?: string[]; hide?: string[]; budget?: SpeedBudget; visual_threshold?: number; widths?: number[]; openapi?: string | null; endpoints?: string[]; states?: PageState[]; browsers?: ("firefox" | "webkit" | "webkit-phone")[]; storybook?: string | null };
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot?: boolean; baseline?: boolean; pages?: string[]; hide?: string[]; budget?: SpeedBudget; visual_threshold?: number; widths?: number[]; openapi?: string | null; endpoints?: string[]; states?: PageState[]; browsers?: ("firefox" | "webkit" | "webkit-phone")[]; storybook?: string | null; modes?: { name: string; color_scheme?: "dark" | "light"; locale?: string; timezone?: string }[] };
   /** "link": a preview's URLs need its link (its access token once, then a cookie). "team": only people signed in to roll who may open the project (they sign in on the way; the link's token lets nobody in). */
   access: "link" | "team" | "public";
   /** Chromatic's UI Review: `check` posts `roll/visual`; `required` also keeps a change waiting for one from landing in roll. */
@@ -452,6 +460,8 @@ export interface PreviewSettings {
   data_at?: string | null;
   /** A feedback button on its pages for people who came in through roll (link access, or a team session). */
   feedback: boolean;
+  /** Feature flags a reviewer sets for their own view from the page's toolbar. */
+  flags?: { name: string; options: string[] }[];
   /** Variables for a family of branches: a branch glob → `{name: value}`, over `env`. */
   env_for: Record<string, Record<string, string>>;
   /** Wake the change's services as soon as a new head is deployed (a warm first visit). */
@@ -558,6 +568,8 @@ export async function screenshotUrl(id: string, previous = false, phone = false,
 }
 
 export const previewsApi = {
+  browse: (id: string, resource: string, table?: string) =>
+    call<Browse>("GET", `${one(id)}/data/${encodeURIComponent(resource)}${table ? `?table=${encodeURIComponent(table)}` : ""}`),
   /** Newest first. */
   list: (filter: { project?: string; state?: PreviewState } = {}) => call<Preview[]>("GET", `/v1/previews${query(filter)}`),
   get: (id: string) => call<Preview>("GET", one(id)),
@@ -582,7 +594,8 @@ export const previewsApi = {
   /** Its share links (never their tokens). */
   shares: (id: string) => call<PreviewShare[]>("GET", `${one(id)}/shares`),
   /** A link for someone outside the team, open for `hours`; `url` is in this answer only. */
-  share: (id: string, hours: number) => call<PreviewShare & { url: string }>("POST", `${one(id)}/shares`, { hours }),
+  share: (id: string, hours: number, opts: { label?: string; notes?: boolean } = {}) =>
+    call<PreviewShare & { url: string }>("POST", `${one(id)}/shares`, { hours, label: opts.label ?? "", notes: opts.notes ?? false }),
   unshare: (id: string, share: string) => call<void>("DELETE", `${one(id)}/shares/${encodeURIComponent(share)}`),
   /** Its own variables, over the project's `env`. */
   vars: (id: string) => call<{ vars: Record<string, string> }>("GET", `${one(id)}/env`),
@@ -605,6 +618,12 @@ export const previewsApi = {
   wake: (id: string) => call<Preview>("POST", `${one(id)}/wake`),
   /** Re-branches every resource, or the ones named (`"<kind>:<parent>"`). */
   reset: (id: string, resources?: string[]) => call<Preview>("POST", `${one(id)}/reset`, resources?.length ? { resources } : {}),
+  /** Its restore points (its Postgres data saved, to put back later), oldest first, and how many it may keep. */
+  restorePoints: (id: string) => call<{ points: RestorePoint[]; max: number }>("GET", `${one(id)}/restore-points`),
+  savePoint: (id: string, label: string) => call<RestorePoint>("POST", `${one(id)}/restore-points`, { label }),
+  /** Puts the data back as the point left it (its next converge; the services sleep meanwhile, no seed). */
+  restorePoint: (id: string, point: string) => call<Preview>("POST", `${one(id)}/restore-points/${encodeURIComponent(point)}/restore`),
+  deletePoint: (id: string, point: string) => call<null>("DELETE", `${one(id)}/restore-points/${encodeURIComponent(point)}`),
   /** Its latest requests through roll, newest first (roll's runtime; a roll apps instance's are roll apps'). */
   requests: (id: string) => call<{ requests: RequestLine[] }>("GET", `${one(id)}/requests`),
   /** What its running services use right now (cores of CPU, resident memory, the memory each runs with). */
@@ -716,8 +735,21 @@ export function followShell(id: string, sh: string, opts: ScreenHandlers): () =>
   return followScreen(`${ROLL_API}${one(id)}/shell/sessions/${encodeURIComponent(sh)}/screen`, () => apiHeaders() ?? {}, opts);
 }
 
+/** A restore point: the preview's data saved at `at` (ms), `data` naming what it holds (`<kind>:<parent>`). */
+export interface RestorePoint {
+  id: string;
+  label: string;
+  by: string;
+  at: number;
+  data: string[];
+}
+
 /** A resource as the reset body and the settings name it. */
 export const resourceId = (r: Pick<PreviewResource, "kind" | "parent">) => `${r.kind}:${r.parent}`;
+
+/** A look at a data branch (`GET …/data/{resource}`): its tables, or a table's first rows, read as
+ * the branch's own role. */
+export type Browse = { tables: { name: string; rows: number }[] } | { table: string; columns: string[]; rows: (string | null)[][]; more: boolean };
 
 /** Work in progress: the list polls quickly while any preview is in one of these. */
 export const BUSY: ReadonlySet<PreviewState> = new Set(["creating", "updating", "deleting"]);

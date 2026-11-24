@@ -891,7 +891,7 @@ pub struct Pruned {
     pub image: Option<String>,
 }
 
-const DEPLOY_COLS: &str = "id, service, env, status, cause, revision, message, image, plan, rollback_of, error, created_at, started_at, finished_at, ready_ms, run, vars_hash, actor, pruned_at, error_detail";
+const DEPLOY_COLS: &str = "id, service, env, status, cause, revision, message, image, plan, rollback_of, error, created_at, started_at, finished_at, ready_ms, run, vars_hash, actor, pruned_at, error_detail, image_bytes";
 
 fn json<T: serde::de::DeserializeOwned>(s: &str) -> code_sql::Result<T> {
     serde_json::from_str(s).map_err(|e| code_sql::Error::Conversion(e.to_string()))
@@ -1028,10 +1028,12 @@ fn deploy_row(r: &code_sql::Row<'_>) -> code_sql::Result<Deployment> {
         vars_hash: r.get(16)?,
         actor: r.get(17)?,
         pruned_at: r.get(18)?,
+        image_bytes: r.get(20)?,
         vulnerabilities: None,
         error_detail,
         fix,
         steps: Vec::new(),
+        build_steps: Vec::new(),
         approved_by: Vec::new(),
         url: None,
     })
@@ -1076,6 +1078,17 @@ impl Store {
         db.add_column("env_access", "bypass_hash", "TEXT")?;
         db.add_column("env_access", "signed_in", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("env_access", "password_hash", "TEXT")?;
+        // Visitors a provider signs in (`access.sso`), as JSON.
+        db.add_column("env_access", "sso", "TEXT")?;
+        // A deployment's image's size, where the runtime says (Fly's release sizes).
+        db.add_column("deployments", "image_bytes", "INTEGER")?;
+        db.add_column("deployments", "build_steps", "TEXT")?;
+        // Paths whose CORS preflights pass the gate (`access.preflight`), as JSON.
+        db.add_column("env_access", "preflight", "TEXT")?;
+        // Services let in with roll's token for them (`access.callers`), as JSON.
+        db.add_column("env_access", "callers", "TEXT")?;
+        // The browser a ticket is for: the SHA-256 of the state cookie set where it began.
+        db.add_column("visit_tickets", "binding", "TEXT")?;
         // Bytes answered a minute (what egress is billed by), for Metrics.
         db.add_column("metrics", "egress_bytes", "INTEGER NOT NULL DEFAULT 0")?;
         // Requests past every instance's concurrency at max_instances a minute (saturation).
@@ -1712,11 +1725,12 @@ impl Store {
     /// A service's audit trail (`audit.*` events), newest first.
     /// A service's events, newest first: the audit trail (what people changed), or (`all`) every
     /// kind (deploys, failures, crash loops, alerts, domains) as one timeline.
-    pub fn activity(&self, service: &str, limit: usize, all: bool) -> Result<Vec<Event>> {
+    /// `before`: only events older than that one's `seq` (the next page back).
+    pub fn activity(&self, service: &str, limit: usize, all: bool, before: Option<i64>) -> Result<Vec<Event>> {
         let only = if all { "" } else { " AND kind LIKE 'audit.%'" };
         Ok(self.db.query(
-            &format!("SELECT seq, at, kind, service, env, deployment, data FROM events WHERE service = ?{only} ORDER BY seq DESC LIMIT ?"),
-            params![service, limit.clamp(1, 500) as i64],
+            &format!("SELECT seq, at, kind, service, env, deployment, data FROM events WHERE service = ?{only} AND seq < ? ORDER BY seq DESC LIMIT ?"),
+            params![service, before.unwrap_or(i64::MAX), limit.clamp(1, 500) as i64],
             |r| {
                 let data: String = r.get(6)?;
                 Ok(Event { seq: r.get(0)?, at: r.get(1)?, kind: r.get(2)?, service: r.get(3)?, environment: r.get(4)?, deployment: r.get(5)?, data: serde_json::from_str(&data).unwrap_or(serde_json::Value::Null) })
@@ -1790,7 +1804,7 @@ impl Store {
                 )?;
             }
             c.execute(
-                &format!("INSERT INTO deployments ({DEPLOY_COLS}, upload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, ?, ?, ?, NULL, NULL, ?)"),
+                &format!("INSERT INTO deployments ({DEPLOY_COLS}, upload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, ?, ?, ?, NULL, NULL, NULL, ?)"),
                 params![
                     id,
                     service,
@@ -1830,11 +1844,28 @@ impl Store {
             .ok_or_else(|| Error::NotFound(format!("no deployment {id}")))
     }
 
+    /// A deployment's image's size.
+    pub fn set_image_bytes(&self, id: &str, bytes: u64) -> Result<()> {
+        self.db.execute("UPDATE deployments SET image_bytes = ? WHERE id = ?", params![bytes as i64, id])?;
+        Ok(())
+    }
+
     /// That a deployment's step began (the first time counts).
     pub fn mark_step(&self, deployment: &str, step: &str) -> Result<()> {
         let now = self.now()?;
         self.db.execute("INSERT INTO deploy_steps (deployment, step, at) VALUES (?, ?, ?) ON CONFLICT (deployment, step) DO NOTHING", params![deployment, step, now])?;
         Ok(())
+    }
+
+    /// Its build's steps ([`crate::build_steps`]), as JSON.
+    pub fn set_build_steps(&self, id: &str, steps: &str) -> Result<()> {
+        self.db.execute("UPDATE deployments SET build_steps = ? WHERE id = ?", params![steps, id])?;
+        Ok(())
+    }
+
+    pub fn build_steps(&self, id: &str) -> Result<Vec<crate::build_steps::BuildStep>> {
+        let j: Option<String> = self.db.query_row("SELECT build_steps FROM deployments WHERE id = ?", [id], |r| r.get(0)).optional()?.flatten();
+        Ok(j.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default())
     }
 
     pub fn steps(&self, deployment: &str) -> Result<Vec<Step>> {
@@ -3370,10 +3401,13 @@ impl Store {
     pub fn access(&self, service: &str, env: &str) -> Result<Option<Access>> {
         Ok(self
             .db
-            .query_row("SELECT token_hash, bypass_hash, signed_in, password_hash FROM env_access WHERE service = ? AND env = ?", params![service, env], |r| {
+            .query_row("SELECT token_hash, bypass_hash, signed_in, password_hash, sso, preflight, callers FROM env_access WHERE service = ? AND env = ?", params![service, env], |r| {
                 // No token: an empty one (the column was made required), which no digest matches.
                 let token: String = r.get(0)?;
-                Ok(Access { token_hash: Some(token).filter(|t| !t.is_empty()), bypass_hash: r.get(1)?, signed_in: r.get::<_, i64>(2)? != 0, password_hash: r.get(3)? })
+                let sso = r.get::<_, Option<String>>(4)?.and_then(|s| serde_json::from_str(&s).ok());
+                let preflight = r.get::<_, Option<String>>(5)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+                let callers = r.get::<_, Option<String>>(6)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+                Ok(Access { token_hash: Some(token).filter(|t| !t.is_empty()), bypass_hash: r.get(1)?, signed_in: r.get::<_, i64>(2)? != 0, password_hash: r.get(3)?, sso, preflight, callers })
             })
             .optional()?)
     }
@@ -3381,8 +3415,8 @@ impl Store {
     pub fn set_access(&self, service: &str, env: &str, access: Option<&Access>) -> Result<()> {
         match access {
             Some(a) => self.db.execute(
-                "INSERT INTO env_access (service, env, token_hash, bypass_hash, signed_in, password_hash) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (service, env) DO UPDATE SET token_hash = excluded.token_hash, bypass_hash = excluded.bypass_hash, signed_in = excluded.signed_in, password_hash = excluded.password_hash",
-                params![service, env, a.token_hash.as_deref().unwrap_or(""), a.bypass_hash, a.signed_in as i64, a.password_hash],
+                "INSERT INTO env_access (service, env, token_hash, bypass_hash, signed_in, password_hash, sso, preflight, callers) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (service, env) DO UPDATE SET token_hash = excluded.token_hash, bypass_hash = excluded.bypass_hash, signed_in = excluded.signed_in, password_hash = excluded.password_hash, sso = excluded.sso, preflight = excluded.preflight, callers = excluded.callers",
+                params![service, env, a.token_hash.as_deref().unwrap_or(""), a.bypass_hash, a.signed_in as i64, a.password_hash, a.sso.as_ref().and_then(|s| serde_json::to_string(s).ok()), (!a.preflight.is_empty()).then(|| serde_json::to_string(&a.preflight).unwrap_or_default()), (!a.callers.is_empty()).then(|| serde_json::to_string(&a.callers).unwrap_or_default())],
             )?,
             None => self.db.execute("DELETE FROM env_access WHERE service = ? AND env = ?", params![service, env])?,
         };
@@ -3391,25 +3425,37 @@ impl Store {
         Ok(())
     }
 
+    /// The paths whose CORS preflights pass the environment's gate; false: it has no gate.
+    pub fn set_preflight(&self, service: &str, env: &str, paths: &[String]) -> Result<bool> {
+        let v = (!paths.is_empty()).then(|| serde_json::to_string(paths).unwrap_or_default());
+        Ok(self.db.execute("UPDATE env_access SET preflight = ? WHERE service = ? AND env = ?", params![v, service, env])? > 0)
+    }
+
     // ── signed-in visitors ──
 
     /// A ticket for `user`, asked for by their roll login `login` (`ses_…`).
-    pub fn put_visit_ticket(&self, hash: &str, service: &str, env: &str, user: &str, login: &str, expires_at: i64) -> Result<()> {
-        self.db.execute("INSERT INTO visit_tickets (hash, service, env, user_id, login, expires_at) VALUES (?, ?, ?, ?, ?, ?)", params![hash, service, env, user, login, expires_at])?;
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_visit_ticket(&self, hash: &str, service: &str, env: &str, user: &str, login: &str, expires_at: i64, binding: &str) -> Result<()> {
+        self.db.execute("INSERT INTO visit_tickets (hash, service, env, user_id, login, expires_at, binding) VALUES (?, ?, ?, ?, ?, ?, ?)", params![hash, service, env, user, login, expires_at, binding])?;
         Ok(())
     }
 
     /// A ticket used: its person and their roll login, if it was this environment's and still
     /// good. It goes either way.
-    pub fn take_visit_ticket(&self, hash: &str, service: &str, env: &str, now: i64) -> Result<Option<(String, String)>> {
+    /// `binding`: the SHA-256 of the state cookie the browser bringing it holds; a ticket made
+    /// for another browser (or before tickets were bound) opens nothing.
+    pub fn take_visit_ticket(&self, hash: &str, service: &str, env: &str, now: i64, binding: &str) -> Result<Option<(String, String)>> {
         let h = hash.to_string();
-        let (s, e) = (service.to_string(), env.to_string());
+        let (s, e, b) = (service.to_string(), env.to_string(), binding.to_string());
         self.db.write(move |c| {
-            let row: Option<(String, String, String, Option<String>, i64)> =
-                c.query_row("SELECT service, env, user_id, login, expires_at FROM visit_tickets WHERE hash = ?", [&h], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).optional()?;
+            type Row = (String, String, String, Option<String>, i64, Option<String>);
+            let row: Option<Row> =
+                c.query_row("SELECT service, env, user_id, login, expires_at, binding FROM visit_tickets WHERE hash = ?", [&h], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))).optional()?;
             c.execute("DELETE FROM visit_tickets WHERE hash = ? OR expires_at < ?", params![h, now])?;
             // One made before logins were kept has none: it opens nothing.
-            Ok(row.filter(|(rs, re, _, l, exp)| *rs == s && *re == e && *exp >= now && l.is_some()).map(|(_, _, u, l, _)| (u, l.unwrap_or_default())))
+            Ok(row
+                .filter(|(rs, re, _, l, exp, bound)| *rs == s && *re == e && *exp >= now && l.is_some() && bound.as_deref().is_some_and(|x| !b.is_empty() && crate::public::same(x, &b)))
+                .map(|(_, _, u, l, _, _)| (u, l.unwrap_or_default())))
         })
     }
 
@@ -4506,6 +4552,24 @@ impl Store {
     /// Set `key` only when it isn't set: whether this call set it (one wins, on any node).
     pub fn claim_state(&self, key: &str, value: &str) -> Result<bool> {
         Ok(self.db.write(|c| c.execute("INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING", [key, value]))? == 1)
+    }
+
+    /// `key`'s value changed by `f` in one write (read and written together: nothing changes it
+    /// in between); `f` answering None changes nothing. The new value, if it changed. `f` may run
+    /// more than once.
+    pub fn update_state(&self, key: &str, mut f: impl FnMut(Option<&str>) -> Option<String>) -> Result<Option<String>> {
+        self.db.write(|c| {
+            let old = c.query_row("SELECT value FROM state WHERE key = ?", [key], |r| r.get::<_, String>(0)).optional()?;
+            let Some(new) = f(old.as_deref()) else { return Ok(None) };
+            c.execute("DELETE FROM state WHERE key = ?", [key])?;
+            c.execute("INSERT INTO state (key, value) VALUES (?, ?)", [key, new.as_str()])?;
+            Ok(Some(new))
+        })
+    }
+
+    /// `key`'s value, if it has one.
+    pub fn state(&self, key: &str) -> Result<Option<String>> {
+        self.db.read(|c| Ok(c.query_row("SELECT value FROM state WHERE key = ?", [key], |r| r.get::<_, String>(0)).optional()?))
     }
 
     /// `key` removed: whether it was there (one caller gets true, on any node).

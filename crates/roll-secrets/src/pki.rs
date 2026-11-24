@@ -19,6 +19,13 @@
 //!   managed one's grace runs out. The CA signs a CRL of the revoked ones that haven't expired,
 //!   served without a token (`/v1/secrets/crl/{id}`), and every certificate names it (its CRL
 //!   distribution point) once rolld has said where it's reached.
+//! - A CA can be an intermediate under the customer's own root (offline, or AWS Private CA):
+//!   `intermediate: true` makes its key exactly as for a root and answers a CSR, and the CA is
+//!   `pending` (it signs nothing) until `…/cas/{id}/chain` installs the certificate its parent
+//!   signed. That certificate must carry the CA's key, be a CA's (`keyCertSign`, `cRLSign`), be
+//!   valid now and chain to a self-signed root; the CA's policy narrows to the name constraints the
+//!   chain actually has. Every certificate it issues comes with the chain (`ca_chain`), and lives
+//!   no longer than the intermediate does. CRLs and OCSP stay roll's.
 
 use crate::access::{Action, Caller, Scope};
 use crate::crypto::Keyring;
@@ -81,8 +88,21 @@ fn max_days() -> u32 {
 pub struct Ca {
     pub id: String,
     pub name: String,
-    /// The CA's certificate (PEM), for clients to trust.
+    /// The CA's certificate (PEM), for clients to trust (an intermediate's clients trust its root,
+    /// the last in `ca_chain`); empty while an intermediate is pending.
     pub certificate: String,
+    /// `active`, or `pending`: an intermediate waiting for its signed certificate. A pending CA
+    /// signs nothing.
+    pub status: &'static str,
+    /// Signed by the customer's own root (or an intermediate under it) rather than by itself.
+    pub intermediate: bool,
+    /// A pending intermediate's certificate signing request (PEM), for its parent to sign.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub csr: Option<String>,
+    /// An active intermediate's chain (PEM): its own certificate, then each issuer's up to the
+    /// self-signed root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ca_chain: Option<String>,
     #[serde(flatten)]
     pub policy: Policy,
     pub created_at: i64,
@@ -92,14 +112,30 @@ pub struct Ca {
 #[derive(Debug, Deserialize)]
 pub struct NewCa {
     pub name: String,
+    /// An intermediate: answered with a CSR, active once `…/chain` installs its certificate.
+    #[serde(default)]
+    pub intermediate: bool,
     #[serde(flatten)]
     pub policy: Policy,
+}
+
+/// An intermediate's certificate, signed by its parent, and the certificates above it up to the
+/// root (PEM; any order).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Chain {
+    pub certificate: String,
+    #[serde(default)]
+    pub chain: Option<String>,
 }
 
 const FIELDS: &[Field] = &[
     Field { field: "certificate", label: "Certificate", modes: &[Mode::Dynamic, Mode::Managed], secret: false, suggest: "TLS_CERT", credential: Some("cert") },
     Field { field: "private_key", label: "Private key", modes: &[Mode::Dynamic, Mode::Managed], secret: true, suggest: "TLS_KEY", credential: Some("cert") },
     Field { field: "ca", label: "CA certificate", modes: &[Mode::Dynamic, Mode::Managed], secret: false, suggest: "TLS_CA", credential: Some("cert") },
+    // The issuing CA's certificate and every one above it up to the root: an intermediate's
+    // servers present it after their own.
+    Field { field: "ca_chain", label: "CA chain", modes: &[Mode::Dynamic, Mode::Managed], secret: false, suggest: "TLS_CA_CHAIN", credential: Some("cert") },
 ];
 
 fn aad(project: &str, id: &str) -> String {
@@ -144,23 +180,65 @@ pub(crate) struct Provider {
     pub crls: Crls,
 }
 
+/// An active CA, opened to sign.
+pub(crate) struct Opened {
+    /// Its certificate (PEM).
+    pub certificate: String,
+    /// Its private key (PEM).
+    pub key: Value,
+    pub policy: Policy,
+    /// Its certificate and, for an intermediate, every one above it up to the root (PEM).
+    pub chain: String,
+    /// When its own certificate ends.
+    pub end: time::OffsetDateTime,
+}
+
+impl Opened {
+    /// The longest a certificate it signs may live, in minutes: its policy's `max_days`, and never
+    /// past its own end.
+    fn longest(&self) -> u64 {
+        let left = (self.end - time::OffsetDateTime::now_utc()).whole_minutes().max(0) as u64;
+        (u64::from(self.policy.max_days) * 24 * 60).min(left)
+    }
+}
+
 impl Provider {
-    /// The CA's certificate, key (PEM) and policy.
-    pub(crate) fn open(&self, id: &str) -> Result<(String, Value, Policy)> {
-        type Row = (String, String, Vec<u8>, String, String);
+    /// An active CA: its certificate, key, policy and chain. A pending intermediate, or one whose
+    /// certificate has ended, signs nothing.
+    pub(crate) fn open(&self, id: &str) -> Result<Opened> {
+        type Row = (String, String, String, Vec<u8>, String, Option<String>, String);
         let row: Option<Row> = self.db.read(|c| {
             Ok::<_, Error>(
-                c.query_row("SELECT a.project_id, a.certificate, a.private_key, a.policy, p.dek FROM cas a JOIN projects p ON p.project_id = a.project_id WHERE a.id = ?", [id], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                c.query_row("SELECT a.project_id, a.name, a.certificate, a.private_key, a.policy, a.chain, p.dek FROM cas a JOIN projects p ON p.project_id = a.project_id WHERE a.id = ?", [id], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
                 })
                 .optional()?,
             )
         })?;
-        let (project, cert, key, policy, dek) = row.ok_or_else(|| Error::Link(format!("CA {id} doesn't exist any more")))?;
+        let (project, name, certificate, key, policy, parents, dek) = row.ok_or_else(|| Error::Link(format!("CA {id} doesn't exist any more")))?;
+        if certificate.is_empty() {
+            return Err(Error::BadRequest(format!("CA {name} is an intermediate waiting for its certificate: it signs nothing until its parent's signed certificate is installed (PUT …/cas/{id}/chain)")));
+        }
+        let end = not_after(&certificate)?;
+        if end <= time::OffsetDateTime::now_utc() {
+            return Err(Error::BadRequest(format!("CA {name}'s own certificate ended on {}: install a renewed one (PUT …/cas/{id}/chain)", chrono_day(end.unix_timestamp() * 1000))));
+        }
         let inner = self.unwrap.inner(&project, &dek)?;
         let (dek, _) = self.keys.open_dek(&project, &inner)?;
-        Ok((cert, dek.open(&aad(&project, id), &key)?, serde_json::from_str(&policy).map_err(|_| Error::Internal("a CA's policy isn't JSON".into()))?))
+        let key = dek.open(&aad(&project, id), &key)?;
+        let policy = serde_json::from_str(&policy).map_err(|_| Error::Internal("a CA's policy isn't JSON".into()))?;
+        let chain = format!("{certificate}{}", parents.unwrap_or_default());
+        Ok(Opened { certificate, key, policy, chain, end })
     }
+}
+
+/// When a certificate (PEM) ends.
+fn not_after(pem: &str) -> Result<time::OffsetDateTime> {
+    x509_parser::pem::parse_x509_pem(pem.as_bytes())
+        .ok()
+        .and_then(|(_, p)| x509_parser::parse_x509_certificate(&p.contents).ok().map(|(_, c)| c.validity().not_after.timestamp()))
+        .and_then(|t| time::OffsetDateTime::from_unix_timestamp(t).ok())
+        .ok_or_else(|| Error::Internal("the CA's certificate doesn't parse".into()))
 }
 
 /// The names a link asks for, all of which the CA signs for.
@@ -211,36 +289,54 @@ impl LinkProvider for Provider {
     /// Names the CA signs for, and for a managed certificate a rotation that always comes before
     /// its end: refused when the link is written, not at its first issue.
     fn check(&self, link: &Link) -> Result<()> {
-        let (_, _, policy) = self.open(&link.r#ref)?;
-        allowed(&names_of(link), &policy)?;
+        let ca = self.open(&link.r#ref)?;
+        allowed(&names_of(link), &ca.policy)?;
         if link.mode == Mode::Managed {
             let days = link.rotate_days().ok_or_else(|| Error::BadRequest("a managed certificate rotates on a schedule: set rotate_days (its certificate lives twice that)".into()))?;
-            if days * 2 > u64::from(policy.max_days) {
-                return Err(Error::BadRequest(format!("this CA's certificates live {} days at most: rotate_days is {} at most, so each is replaced before it ends", policy.max_days, policy.max_days / 2)));
+            // An intermediate's real lifetime counts: its certificates never outlive it.
+            let longest = ca.longest() / (24 * 60);
+            if days * 2 > longest {
+                let why = if longest < u64::from(ca.policy.max_days) { format!(" (its own certificate ends on {})", chrono_day(ca.end.unix_timestamp() * 1000)) } else { String::new() };
+                return Err(Error::BadRequest(format!("this CA's certificates live {longest} days at most{why}: rotate_days is {} at most, so each is replaced before it ends", longest / 2)));
             }
         }
         Ok(())
     }
 
+    /// An intermediate's chain too.
+    fn suggested_for(&self, r#ref: &str) -> Vec<(&'static str, Mode)> {
+        let intermediate = self.db.read(|c| c.query_row("SELECT 1 FROM cas WHERE id = ? AND (chain IS NOT NULL OR csr IS NOT NULL)", [r#ref], |_| Ok(())).optional()).ok().flatten().is_some();
+        let mut s = self.suggested().to_vec();
+        if intermediate {
+            s.push(("ca_chain", Mode::Managed));
+        }
+        s
+    }
+
     fn issue(&self, r#ref: &str, _credential: &str, link: &Link, label: &str, ttl_minutes: Option<u64>) -> Result<Issued> {
-        let (ca_pem, ca_key, policy) = self.open(r#ref)?;
+        let ca = self.open(r#ref)?;
         let names = names_of(link);
-        allowed(&names, &policy)?;
+        allowed(&names, &ca.policy)?;
         let minutes = match (link.mode, ttl_minutes) {
             (Mode::Dynamic, ttl) => ttl.unwrap_or(60) + 5,
             _ => link.rotate_days().unwrap_or(30) * 2 * 24 * 60,
         }
-        .min(u64::from(policy.max_days) * 24 * 60);
-        let ca_key = rcgen::KeyPair::from_pem(ca_key.expose()).map_err(|e| Error::Internal(format!("the CA's key: {e}")))?;
-        let issuer = rcgen::Issuer::from_ca_cert_pem(&ca_pem, &ca_key).map_err(|e| Error::Internal(format!("the CA's certificate: {e}")))?;
+        .min(u64::from(ca.policy.max_days) * 24 * 60);
+        let ca_key = rcgen::KeyPair::from_pem(ca.key.expose()).map_err(|e| Error::Internal(format!("the CA's key: {e}")))?;
+        let issuer = rcgen::Issuer::from_ca_cert_pem(&ca.certificate, &ca_key).map_err(|e| Error::Internal(format!("the CA's certificate: {e}")))?;
         let key = rcgen::KeyPair::generate().map_err(|e| Error::Internal(format!("a certificate's key: {e}")))?;
-        let params = leaf(&ca_pem, &names, minutes, ca_urls(&self.public_api, r#ref))?;
+        let params = leaf(ca.end, &names, minutes, ca_urls(&self.public_api, r#ref))?;
         let cert = params.signed_by(&key, &issuer).map_err(|e| Error::Internal(format!("signing a certificate: {e}")))?;
         let not_after = (params.not_after.unix_timestamp_nanos() / 1_000_000) as i64;
         let project: String = self.db.read(|c| c.query_row("SELECT project_id FROM cas WHERE id = ?", [r#ref], |r| r.get(0)))?;
         record(&self.db, r#ref, &project, &hex(&serial_of(&params)), &names, "link", not_after, label)?;
-        let parts = BTreeMap::from([("certificate".to_string(), Value::new(cert.pem())), ("private_key".to_string(), Value::new(key.serialize_pem())), ("ca".to_string(), Value::new(ca_pem))]);
-        Ok(Issued { parts, handle: json!({ "serial": hex(&serial_of(&params)), "names": names, "not_after": not_after }) })
+        let parts = BTreeMap::from([
+            ("certificate".to_string(), Value::new(cert.pem())),
+            ("private_key".to_string(), Value::new(key.serialize_pem())),
+            ("ca".to_string(), Value::new(ca.certificate)),
+            ("ca_chain".to_string(), Value::new(ca.chain)),
+        ]);
+        Ok(Issued { expires_at: None, parts, handle: json!({ "serial": hex(&serial_of(&params)), "names": names, "not_after": not_after }) })
     }
 
     /// A lease that ends, or a managed certificate past its grace: on the CA's CRL until it expires.
@@ -260,17 +356,12 @@ impl LinkProvider for Provider {
 
 /// A leaf certificate's parameters: `names`, `minutes` long (never past the CA's own end), and
 /// only this CA's usages.
-fn leaf(ca_pem: &str, names: &[String], minutes: u64, urls: Option<(String, String)>) -> Result<rcgen::CertificateParams> {
+fn leaf(ca_end: time::OffsetDateTime, names: &[String], minutes: u64, urls: Option<(String, String)>) -> Result<rcgen::CertificateParams> {
     let now = time::OffsetDateTime::now_utc();
     let mut params = rcgen::CertificateParams::new(names.to_vec()).map_err(|e| Error::BadRequest(format!("a certificate's names: {e}")))?;
     params.distinguished_name = rcgen::DistinguishedName::new();
     params.distinguished_name.push(rcgen::DnType::CommonName, names[0].clone());
     params.not_before = now - time::Duration::minutes(1);
-    let ca_end = x509_parser::pem::parse_x509_pem(ca_pem.as_bytes())
-        .ok()
-        .and_then(|(_, p)| x509_parser::parse_x509_certificate(&p.contents).ok().map(|(_, c)| c.validity().not_after.timestamp()))
-        .and_then(|t| time::OffsetDateTime::from_unix_timestamp(t).ok())
-        .ok_or_else(|| Error::Internal("the CA's certificate doesn't parse".into()))?;
     params.not_after = (now + time::Duration::minutes(minutes as i64)).min(ca_end);
     params.serial_number = Some(rcgen::SerialNumber::from_slice(&serial()));
     // An ECDSA key signs; it never enciphers (RFC 5480).
@@ -282,6 +373,205 @@ fn leaf(ca_pem: &str, names: &[String], minutes: u64, urls: Option<(String, Stri
         params.custom_extensions = vec![rcgen::CustomExtension::from_oid_content(&[1, 3, 6, 1, 5, 5, 7, 1, 1], crate::ocsp::aia(&ocsp))];
     }
     Ok(params)
+}
+
+/// An intermediate's CSR (PEM): the subject, usages and name constraints a root's certificate
+/// has. rcgen writes no name constraints into a CSR, so the extension is copied byte for byte
+/// from the self-signed certificate made with the same parameters (which is never kept or shown).
+fn request(mut params: rcgen::CertificateParams, cert: &rcgen::Certificate, key: &rcgen::KeyPair) -> Result<String> {
+    let (_, x) = x509_parser::parse_x509_certificate(cert.der()).map_err(|_| Error::Internal("a CA's certificate doesn't parse".into()))?;
+    let nc = x.extensions().iter().find(|e| e.oid.to_id_string() == "2.5.29.30").ok_or_else(|| Error::Internal("a CA's certificate has no name constraints".into()))?;
+    let mut ext = rcgen::CustomExtension::from_oid_content(&[2, 5, 29, 30], nc.value.to_vec());
+    ext.set_criticality(true);
+    params.name_constraints = None;
+    params.serial_number = None;
+    params.custom_extensions.push(ext);
+    let csr = params.serialize_request(key).map_err(|e| Error::Internal(format!("a CA's CSR: {e}")))?;
+    csr.pem().map_err(|e| Error::Internal(format!("a CA's CSR: {e}")))
+}
+
+/// The most certificates `…/chain` takes: the CA's own and those above it.
+const CHAIN_MAX: usize = 10;
+
+/// An installed intermediate's certificate and what was checked.
+struct Checked {
+    /// Its certificate (PEM, as roll writes it).
+    certificate: String,
+    /// The certificates above it, nearest first, up to and including the root (PEM).
+    parents: String,
+    /// Its issuer's name.
+    issuer: String,
+    /// When it ends (unix seconds).
+    end: i64,
+}
+
+/// The DER of each certificate in `pem` (more than [`CHAIN_MAX`] is refused).
+fn certificates(pem: &str, what: &str) -> Result<Vec<Vec<u8>>> {
+    let mut out = vec![];
+    for p in x509_parser::pem::Pem::iter_from_buffer(pem.trim().as_bytes()) {
+        let p = p.map_err(|_| Error::BadRequest(format!("{what} isn't PEM (-----BEGIN CERTIFICATE-----)")))?;
+        if p.label != "CERTIFICATE" {
+            return Err(Error::BadRequest(format!("{what} holds a PEM {}: only certificates", p.label.chars().take(40).collect::<String>())));
+        }
+        out.push(p.contents);
+        if out.len() > CHAIN_MAX {
+            return Err(Error::BadRequest(format!("a CA's chain is {CHAIN_MAX} certificates at most")));
+        }
+    }
+    Ok(out)
+}
+
+fn parse<'a>(der: &'a [u8], what: &str) -> Result<x509_parser::certificate::X509Certificate<'a>> {
+    x509_parser::parse_x509_certificate(der).map(|(_, c)| c).map_err(|_| Error::BadRequest(format!("{what} doesn't parse as an X.509 certificate")))
+}
+
+fn pem_of(der: &[u8]) -> String {
+    use base64::Engine;
+    let b = base64::engine::general_purpose::STANDARD.encode(der);
+    let lines: Vec<&str> = b.as_bytes().chunks(64).map(|c| std::str::from_utf8(c).expect("base64")).collect();
+    format!("-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n", lines.join("\n"))
+}
+
+fn self_signed(c: &x509_parser::certificate::X509Certificate<'_>) -> bool {
+    c.subject().as_raw() == c.issuer().as_raw() && c.verify_signature(None).is_ok()
+}
+
+/// A CA's certificate in a path: a CA, allowed to sign certificates (and CRLs, for roll's own,
+/// which signs them), valid now, and allowing `below` CA certificates under it.
+fn authority(c: &x509_parser::certificate::X509Certificate<'_>, whose: &str, below: u32, crls: bool) -> Result<()> {
+    let bad = |why: &str| Err(Error::BadRequest(format!("{whose} {why}")));
+    match c.basic_constraints() {
+        Ok(Some(b)) if b.value.ca => {
+            if b.value.path_len_constraint.is_some_and(|n| n < below) {
+                return bad("allows fewer CAs under it than this chain has (pathLenConstraint)");
+            }
+        }
+        _ => return bad("isn't a CA's certificate (basicConstraints CA:TRUE)"),
+    }
+    match c.key_usage() {
+        Ok(Some(k)) if !k.value.key_cert_sign() => return bad("may not sign certificates (keyUsage keyCertSign)"),
+        Ok(Some(k)) if crls && !k.value.crl_sign() => return bad("may not sign CRLs (keyUsage cRLSign), and roll signs its certificates' CRLs"),
+        Ok(None) if crls => return bad("names no key usages: roll's CA needs keyCertSign and cRLSign"),
+        Err(_) => return bad("has a key usage that doesn't parse"),
+        _ => {}
+    }
+    if !c.validity().is_valid() {
+        return bad(&format!("isn't valid now (valid from {} until {})", c.validity().not_before, c.validity().not_after));
+    }
+    Ok(())
+}
+
+/// An intermediate's certificate and its chain checked against the CA's key (its raw public key)
+/// and narrowed into `policy`; see [`Secrets::install_chain`].
+fn check_chain(req: &Chain, key: &[u8], policy: &mut Policy) -> Result<Checked> {
+    if req.certificate.len() > 64 * 1024 || req.chain.as_ref().is_some_and(|c| c.len() > 256 * 1024) {
+        return Err(Error::BadRequest("a CA's certificate is 64 KiB at most, its chain 256 KiB".into()));
+    }
+    let mine = certificates(&req.certificate, "certificate")?;
+    let [mine] = mine.as_slice() else {
+        return Err(Error::BadRequest("certificate is one PEM certificate, the CA's own (the ones above it go in chain)".into()));
+    };
+    let pool = certificates(req.chain.as_deref().unwrap_or(""), "chain")?;
+    let cert = parse(mine, "certificate")?;
+    let pool = pool.iter().map(|d| parse(d, "a certificate in chain")).collect::<Result<Vec<_>>>()?;
+    if cert.public_key().subject_public_key.data.as_ref() != key {
+        return Err(Error::BadRequest("that certificate isn't for this CA's key: have its parent sign the CSR roll answered for it".into()));
+    }
+    authority(&cert, "the certificate", 0, true)?;
+    if self_signed(&cert) {
+        return Err(Error::BadRequest("the certificate is self-signed: an intermediate's is signed by its parent".into()));
+    }
+    // Up from the CA's certificate: each issuer found in the chain by name and signature.
+    let mut path: Vec<usize> = vec![];
+    let mut current = &cert;
+    loop {
+        let found = pool.iter().enumerate().find(|(i, p)| !path.contains(i) && p.subject().as_raw() == current.issuer().as_raw() && current.verify_signature(Some(p.public_key())).is_ok());
+        let Some((i, p)) = found else {
+            return Err(Error::BadRequest(format!(
+                "the chain doesn't reach a self-signed root: nothing in it signed {} (chain is every certificate above the CA's, up to and including the root)",
+                current.issuer()
+            )));
+        };
+        authority(p, &format!("{}", p.subject()), path.len() as u32 + 1, false)?;
+        path.push(i);
+        if self_signed(p) {
+            break;
+        }
+        current = p;
+    }
+    // Name constraints apply from every CA below the root (a trust anchor's are its own business).
+    narrow(policy, &cert, "the certificate")?;
+    for &i in &path[..path.len() - 1] {
+        narrow(policy, &pool[i], &format!("{}", pool[i].subject()))?;
+    }
+    Ok(Checked {
+        certificate: pem_of(mine),
+        parents: path.iter().map(|&i| pem_of(pool[i].as_raw())).collect(),
+        issuer: cert.issuer().to_string(),
+        end: cert.validity().not_after.timestamp(),
+    })
+}
+
+/// `policy` narrowed to a certificate's name constraints: DNS names within both, IP addresses
+/// only if it permits every one. What roll's policy can't say (part of a domain excluded, limits
+/// on subject names) is refused rather than issued into certificates clients would reject.
+fn narrow(policy: &mut Policy, c: &x509_parser::certificate::X509Certificate<'_>, whose: &str) -> Result<()> {
+    use x509_parser::extensions::GeneralName;
+    let nc = match c.name_constraints() {
+        Ok(Some(nc)) => nc.value,
+        Ok(None) => return Ok(()),
+        Err(_) => return Err(Error::BadRequest(format!("{whose} has name constraints that don't parse"))),
+    };
+    let base = |n: &str| n.trim_start_matches('.').trim_end_matches('.').to_ascii_lowercase();
+    let under = |name: &str, d: &str| d.is_empty() || name == d || name.ends_with(&format!(".{d}"));
+    let (mut dns, mut ips) = (vec![], vec![]);
+    for s in nc.permitted_subtrees.iter().flatten() {
+        match &s.base {
+            GeneralName::DNSName(d) => dns.push(base(d)),
+            GeneralName::IPAddress(ip) => ips.push(ip.to_vec()),
+            GeneralName::DirectoryName(_) => {
+                return Err(Error::BadRequest(format!("{whose} limits subject names (directoryName): roll's certificates are named for their DNS name, so clients would reject them; constrain DNS names and IP addresses only")));
+            }
+            _ => {}
+        }
+    }
+    if !dns.is_empty() {
+        let mut kept: Vec<String> = vec![];
+        for d in &policy.domains {
+            if dns.iter().any(|p| under(d, p)) {
+                kept.push(d.clone());
+            } else {
+                kept.extend(dns.iter().filter(|p| !p.is_empty() && under(p, d)).cloned());
+            }
+        }
+        kept.sort();
+        kept.dedup();
+        if kept.is_empty() {
+            return Err(Error::BadRequest(format!("{whose} permits only {}: none of the CA's domains ({})", dns.join(", "), policy.domains.join(", "))));
+        }
+        policy.domains = kept;
+    }
+    let any = |len: usize| ips.iter().any(|b| b.len() == len * 2 && b[len..].iter().all(|x| *x == 0));
+    if !ips.is_empty() && !(any(4) && any(16)) {
+        policy.allow_ip = false;
+    }
+    for s in nc.excluded_subtrees.iter().flatten() {
+        match &s.base {
+            GeneralName::DNSName(e) => {
+                let e = base(e);
+                if let Some(d) = policy.domains.iter().find(|d| under(&e, d) && !under(d, &e)) {
+                    return Err(Error::BadRequest(format!("{whose} excludes {e}, inside {d}: a CA's policy can't leave part of a domain out; have it signed without that exclusion, or make the CA for narrower domains")));
+                }
+                policy.domains.retain(|d| !under(d, &e));
+                if policy.domains.is_empty() {
+                    return Err(Error::BadRequest(format!("{whose} excludes every one of the CA's domains")));
+                }
+            }
+            GeneralName::IPAddress(_) => policy.allow_ip = false,
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Where a CA's CRL and OCSP responder are reached, once rolld has said where its API is.
@@ -339,6 +629,8 @@ pub struct Csr {
 pub struct Signed {
     pub certificate: String,
     pub ca: String,
+    /// The CA's certificate and, for an intermediate, every one above it up to the root.
+    pub ca_chain: String,
     pub serial: String,
     pub names: Vec<String>,
     pub not_after: i64,
@@ -445,17 +737,23 @@ impl Secrets {
     pub fn cas(&self, project: &str, caller: &Caller) -> Result<Vec<Ca>> {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
+        type Row = (String, String, String, String, i64, String, Option<String>, Option<String>);
         self.db.read(|c| {
-            Ok(c.query("SELECT id, name, certificate, policy, created_at, created_by FROM cas WHERE project_id = ? ORDER BY name", [project], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get(4)?, r.get(5)?))
+            Ok(c.query::<Row>("SELECT id, name, certificate, policy, created_at, created_by, csr, chain FROM cas WHERE project_id = ? ORDER BY name", [project], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?))
             })?
             .into_iter()
-            .filter_map(|(id, name, certificate, policy, created_at, created_by)| Some(Ca { id, name, certificate, policy: serde_json::from_str(&policy).ok()?, created_at, created_by }))
+            .filter_map(|(id, name, certificate, policy, created_at, created_by, csr, chain)| {
+                let ca_chain = chain.map(|p| format!("{certificate}{p}"));
+                let status = if certificate.is_empty() { "pending" } else { "active" };
+                Some(Ca { id, name, certificate, status, intermediate: csr.is_some() || ca_chain.is_some(), csr, ca_chain, policy: serde_json::from_str(&policy).ok()?, created_at, created_by })
+            })
             .collect())
         })
     }
 
-    /// A new CA: its key made here and sealed, its certificate self-signed for ten years.
+    /// A new CA: its key made here and sealed, its certificate self-signed for ten years; or, for
+    /// an intermediate, a CSR for its parent to sign, the CA pending until [`Secrets::install_chain`].
     pub fn add_ca(&self, project: &str, n: NewCa, caller: &Caller) -> Result<Ca> {
         caller.need(Action::Admin, &Scope::project(project))?;
         if n.name.is_empty() || n.name.len() > 64 || !n.name.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c)) {
@@ -486,21 +784,61 @@ impl Secrets {
         params.not_after = now + time::Duration::days(3650);
         params.serial_number = Some(rcgen::SerialNumber::from_slice(&serial()));
         let cert = params.self_signed(&key).map_err(|e| Error::Internal(format!("a CA's certificate: {e}")))?;
+        let (certificate, csr) = if n.intermediate { (String::new(), Some(request(params, &cert, &key)?)) } else { (cert.pem(), None) };
         let id = names::new_id("ca", 16);
         let sealed = dek.seal(&aad(project, &id), &Value::new(key.serialize_pem()));
         let at = self.db.now_ms()?;
-        let ca = Ca { id: id.clone(), name: n.name, certificate: cert.pem(), policy, created_at: at, created_by: caller.made_by().to_string() };
+        let status = if n.intermediate { "pending" } else { "active" };
+        let ca = Ca { id: id.clone(), name: n.name, certificate, status, intermediate: n.intermediate, csr, ca_chain: None, policy, created_at: at, created_by: caller.made_by().to_string() };
         self.db.write(|c| {
             if c.query_row("SELECT 1 FROM cas WHERE project_id = ? AND name = ?", [project, &ca.name], |_| Ok(())).optional()?.is_some() {
                 return Err(Error::Conflict("exists", format!("a CA named {} exists", ca.name)));
             }
             c.execute(
-                "INSERT INTO cas (id, project_id, name, certificate, private_key, policy, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                params![id, project, ca.name, ca.certificate, sealed, serde_json::to_string(&ca.policy).expect("JSON"), at, ca.created_by],
+                "INSERT INTO cas (id, project_id, name, certificate, private_key, policy, created_at, created_by, csr) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![id, project, ca.name, ca.certificate, sealed, serde_json::to_string(&ca.policy).expect("JSON"), at, ca.created_by, ca.csr],
             )?;
-            audit::record(c, self.keys()?, project, caller, "ca.add", None, None, &[], &format!("made CA {} for {}", ca.name, ca.policy.domains.join(", ")), at)
+            let what = if n.intermediate { "an intermediate CA (pending its signed certificate)" } else { "CA" };
+            audit::record(c, self.keys()?, project, caller, "ca.add", None, None, &[], &format!("made {what} {} for {}", ca.name, ca.policy.domains.join(", ")), at)
         })?;
         Ok(ca)
+    }
+
+    /// Install an intermediate's certificate, signed by its parent, and the chain up to its root
+    /// (pending, or active for a renewal). Checked before anything is written: the certificate
+    /// carries the CA's key, is a CA's (`keyCertSign`, `cRLSign`), is valid now, and chains to a
+    /// self-signed root through certificates that are CAs, valid now and allow the path's length.
+    /// The CA's policy narrows to the name constraints of the certificate and of each issuer below
+    /// the root. Audited.
+    pub fn install_chain(&self, project: &str, id: &str, req: Chain, caller: &Caller) -> Result<Ca> {
+        caller.need(Action::Admin, &Scope::project(project))?;
+        let dek = self.project(project)?;
+        type Row = (String, String, Vec<u8>, String, Option<String>, Option<String>);
+        let row: Option<Row> = self.db.read(|c| {
+            c.query_row("SELECT name, certificate, private_key, policy, csr, chain FROM cas WHERE id = ? AND project_id = ?", [id, project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))).optional()
+        })?;
+        let (name, before, key, policy, csr, parents) = row.ok_or_else(|| Error::NotFound(format!("no CA {id}")))?;
+        if csr.is_none() && parents.is_none() {
+            return Err(Error::Conflict("not_intermediate", format!("{name} is a root: its certificate is its own (make an intermediate with intermediate: true)")));
+        }
+        let mut policy: Policy = serde_json::from_str(&policy).map_err(|_| Error::Internal("a CA's policy isn't JSON".into()))?;
+        let key = rcgen::KeyPair::from_pem(dek.open(&aad(project, id), &key)?.expose()).map_err(|e| Error::Internal(format!("the CA's key: {e}")))?;
+        let checked = check_chain(&req, key.public_key_raw(), &mut policy)?;
+        let at = self.db.now_ms()?;
+        let summary = format!("installed {name}'s certificate, signed by {} until {}; it signs for {}", checked.issuer, chrono_day(checked.end * 1000), policy.domains.join(", "));
+        let policy_json = serde_json::to_string(&policy).expect("JSON");
+        self.db.write(|c| {
+            // Whatever installed a certificate in between, this one replaces it only if the CA is
+            // the one that was read.
+            let n = c.execute("UPDATE cas SET certificate = ?, chain = ?, csr = NULL, policy = ? WHERE id = ? AND project_id = ? AND certificate = ?", params![checked.certificate, checked.parents, policy_json, id, project, before])?;
+            if n == 0 {
+                return Err(Error::Conflict("changed", format!("{name} changed while its certificate was checked: try again")));
+            }
+            audit::record(c, self.keys()?, project, caller, "ca.chain", None, None, &[], &summary, at)
+        })?;
+        // A renewal: this node's CRL and OCSP answers are signed again under the new certificate.
+        self.crls.lock().expect("crls").revoked(id);
+        self.cas(project, caller)?.into_iter().find(|c| c.id == id).ok_or_else(|| Error::NotFound(format!("no CA {id}")))
     }
 
     /// Delete a CA no key links to (the certificates it signed stay valid until they expire).
@@ -564,24 +902,25 @@ impl Secrets {
         mut commit: impl FnMut(&code_sql::Conn<'_>, &Signed, i64) -> Result<()>,
     ) -> Result<Signed> {
         let ca_name: String = self.db.read(|c| c.query_row("SELECT name FROM cas WHERE id = ? AND project_id = ?", [id, project], |r| r.get(0)).optional())?.ok_or_else(|| Error::NotFound(format!("no CA {id}")))?;
-        let (ca_pem, ca_key, policy) = self.pki()?.open(id)?;
-        allowed(&names, &policy)?;
-        let longest = u64::from(policy.max_days) * 24 * 60;
+        let ca = self.pki()?.open(id)?;
+        allowed(&names, &ca.policy)?;
+        let longest = ca.longest();
         let minutes = minutes.unwrap_or((30 * 24 * 60).min(longest));
         if !(5..=longest).contains(&minutes) {
-            return Err(Error::BadRequest(format!("a certificate from {ca_name} lives 5 minutes to {} days", policy.max_days)));
+            let why = if longest < u64::from(ca.policy.max_days) * 24 * 60 { format!(": its own certificate ends on {}, and no certificate it signs outlives it", chrono_day(ca.end.unix_timestamp() * 1000)) } else { String::new() };
+            return Err(Error::BadRequest(format!("a certificate from {ca_name} lives 5 minutes to {} days{why}", longest / (24 * 60))));
         }
-        let ca_key = rcgen::KeyPair::from_pem(ca_key.expose()).map_err(|e| Error::Internal(format!("the CA's key: {e}")))?;
-        let issuer = rcgen::Issuer::from_ca_cert_pem(&ca_pem, &ca_key).map_err(|e| Error::Internal(format!("the CA's certificate: {e}")))?;
+        let ca_key = rcgen::KeyPair::from_pem(ca.key.expose()).map_err(|e| Error::Internal(format!("the CA's key: {e}")))?;
+        let issuer = rcgen::Issuer::from_ca_cert_pem(&ca.certificate, &ca_key).map_err(|e| Error::Internal(format!("the CA's certificate: {e}")))?;
         let live: i64 = self.db.read(|c| c.query_row("SELECT COUNT(*) FROM ca_certs WHERE ca_id = ? AND source IN ('csr', 'acme') AND not_after >= ?", params![id, self.db.now_ms()?], |r| r.get(0)))?;
         if live >= CSR_MAX {
             return Err(Error::Conflict("limit", format!("{ca_name} has {CSR_MAX} certificates from CSRs still valid: that's the most one CA keeps")));
         }
-        let params = leaf(&ca_pem, &names, minutes, ca_urls(&self.public_api, id))?;
+        let params = leaf(ca.end, &names, minutes, ca_urls(&self.public_api, id))?;
         let not_after = (params.not_after.unix_timestamp_nanos() / 1_000_000) as i64;
         let serial = hex(&serial_of(&params));
         let cert = rcgen::CertificateSigningRequestParams { params, public_key: csr.public_key }.signed_by(&issuer).map_err(|e| Error::BadRequest(format!("signing the CSR: {e}")))?;
-        let signed = Signed { certificate: cert.pem(), ca: ca_pem, serial, names, not_after };
+        let signed = Signed { certificate: cert.pem(), ca: ca.certificate, ca_chain: ca.chain, serial, names, not_after };
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             record_in(c, id, project, &signed.serial, &signed.names, source, not_after, by, now)?;
@@ -669,9 +1008,9 @@ impl Secrets {
 
     fn sign_crl(&self, id: &str, now_ms: i64) -> Result<Vec<u8>> {
         let revoked: Vec<(String, i64)> = self.db.read(|c| Ok::<_, Error>(c.query("SELECT serial, revoked_at FROM ca_certs WHERE ca_id = ? AND revoked_at IS NOT NULL AND not_after >= ? ORDER BY serial", params![id, now_ms], |r| Ok((r.get(0)?, r.get(1)?)))?))?;
-        let (ca_pem, ca_key, _) = self.pki()?.open(id).map_err(|_| Error::NotFound(format!("no CA {id}")))?;
-        let ca_key = rcgen::KeyPair::from_pem(ca_key.expose()).map_err(|e| Error::Internal(format!("the CA's key: {e}")))?;
-        let issuer = rcgen::Issuer::from_ca_cert_pem(&ca_pem, &ca_key).map_err(|e| Error::Internal(format!("the CA's certificate: {e}")))?;
+        let ca = self.pki()?.open(id).map_err(|_| Error::NotFound(format!("no CA {id}")))?;
+        let ca_key = rcgen::KeyPair::from_pem(ca.key.expose()).map_err(|e| Error::Internal(format!("the CA's key: {e}")))?;
+        let issuer = rcgen::Issuer::from_ca_cert_pem(&ca.certificate, &ca_key).map_err(|e| Error::Internal(format!("the CA's certificate: {e}")))?;
         let now = time::OffsetDateTime::now_utc();
         let at = |ms: i64| time::OffsetDateTime::from_unix_timestamp(ms / 1000).unwrap_or(now);
         let params = rcgen::CertificateRevocationListParams {

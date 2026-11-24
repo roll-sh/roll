@@ -273,6 +273,19 @@ pub fn host_error(e: HostError) -> Thrown {
     let mut t = Throw::new(cls::ILLEGAL_ARGUMENT_EXCEPTION, Some(e.reason));
     t.es_type = Some(e.kind);
     t.frames = e.frames;
+    t.cause_fields = e.fields;
+    match e.kind {
+        // the memory breaker refused what a script the host ran (a runtime field's) keeps: no
+        // script may catch that, and it answers the breaker's 429
+        "circuit_breaking_exception" => {
+            t.catchable = false;
+            t.status = Some(429);
+            t.es_root = true;
+        }
+        // the search was cancelled or timed out while the host ran another script
+        "task_cancelled_exception" | "time_exceeded_exception" => t.catchable = false,
+        _ => {}
+    }
     t
 }
 

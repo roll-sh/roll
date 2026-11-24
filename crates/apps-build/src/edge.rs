@@ -137,8 +137,20 @@ fn config_paths(src: &str, key: &str, not: &str) -> (Vec<String>, Vec<String>) {
 /// Whether `path` is one an edge function runs on: one of its patterns and none of its excluded
 /// ones. A pattern is a path where `*` is any rest, `:name` one segment and `:name*` (or `:name+`,
 /// `(.*)`) any rest.
+/// Whether a root `middleware.*` is Vercel's Routing Middleware (a `config.matcher`, or an
+/// import of `next/server`, `@vercel/edge` or `@vercel/functions`), not a server's own module of
+/// that name (an Express app's auth helpers).
+pub fn vercel_middleware(tree: &dyn Tree, file: &str) -> bool {
+    let Some(t) = tree.read(file).and_then(|b| String::from_utf8(b).ok()) else { return false };
+    t.contains("matcher") || ["next/server", "@vercel/edge", "@vercel/functions"].iter().any(|m| t.contains(&format!("'{m}'")) || t.contains(&format!("\"{m}\"")))
+}
+
+/// Whether `f` runs on `path` (as the app would read it: decoded, dot segments resolved), in
+/// any case: an app's router may not mind case, and running on one more path is safe.
 pub fn runs_on(f: &EdgeFn, path: &str) -> bool {
-    f.paths.iter().any(|p| matches(p, path)) && !f.excluded.iter().any(|p| matches(p, path))
+    let path = path.to_ascii_lowercase();
+    let m = |p: &String| matches(&p.to_ascii_lowercase(), &path);
+    f.paths.iter().any(m) && !f.excluded.iter().any(m)
 }
 
 pub fn matches(pattern: &str, path: &str) -> bool {
@@ -189,6 +201,19 @@ mod tests {
 
     fn tree(files: &[(&str, &str)]) -> crate::MapTree {
         crate::MapTree(files.iter().map(|(p, c)| (p.to_string(), c.to_string())).collect())
+    }
+
+    #[test]
+    fn a_servers_own_middleware_module_isnt_vercels() {
+        let t = tree(&[
+            ("middleware.js", "module.exports = (req, res, next) => next();"),
+            ("a/middleware.ts", "import { NextResponse } from 'next/server';\nexport default () => NextResponse.next();"),
+            ("b/middleware.ts", "export default () => new Response('x');\nexport const config = { matcher: '/x' };"),
+        ]);
+        assert!(!vercel_middleware(&t, "middleware.js"));
+        assert!(vercel_middleware(&t, "a/middleware.ts") && vercel_middleware(&t, "b/middleware.ts"));
+        let f = EdgeFn { name: "m".into(), kind: EdgeKind::Vercel, file: "m.ts".into(), paths: vec!["/admin/*".into()], excluded: Vec::new() };
+        assert!(runs_on(&f, "/ADMIN/users"), "in any case");
     }
 
     #[test]

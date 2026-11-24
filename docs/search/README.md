@@ -477,8 +477,10 @@ Elasticsearch-flavor.
   Revoking the key on the remote (`DELETE _security/api_key`) cuts the link; `DELETE …/remotes/
   {alias}` removes the settings and credentials and revokes a key roll made, and so does deleting
   the cluster for good (at once with no retention, else when its restore window ends). A cluster
-  holds credentials for at most 20 remotes (409 past that). Without `ROLL_SECRET_KEY` (local
-  development) credentials are stored as given, as every secret search keeps.
+  holds credentials for at most 20 remotes (409 past that). Clusters' own passwords are never
+  stored in the clear: without `ROLL_SECRET_KEY` a single node seals them under a key of its own
+  (`<home>/search/key`), and a fleet needs the key (architecture.md, "Multi-tenancy and
+  authentication").
 - **Execution**: the remote's part runs on the remote cluster's owner node through roll's own
   in-process call or signed fleet forward (`Control::on_owner`, `cluster::to_owner`), never over
   the public endpoint, so neither cluster's IP allowlist applies to it: a client the local
@@ -1264,7 +1266,8 @@ deterministic (#396).
    (records, synonyms, rules) mapped onto indices, synonym sets and query rules, a Typesense
    and Meilisearch import (their dump formats onto indices and settings), and catch-up and cutover
    (AWS OpenSearch Migration Assistant's capture and replay): a copy is one point in time today, so
-   writes made during the copy are lost unless the client double-writes.
+   writes made during the copy are lost unless the client double-writes. Offline, with no route
+   to the old cluster: its snapshots restore on roll from the bucket they're in (item 9, #652).
 3. **One memory account per request** (landed: Painless per execution in #591, af195cbbe, after
    four reviews: each execution holds at most `--search-script-memory-mb`, and once-per-document
    scripts charge the `request` breaker; the node-wide body budget in #601; ES|QL and aggregations
@@ -1411,24 +1414,23 @@ deterministic (#396).
    storage (branches copy them, they go with the cluster). And the `s3` repository type: a bucket
    the tenant names, reached through `roll_net::PublicOnly`, credentials sealed apart from the
    settings and never shown, snapshots uploaded as documents per segment (incremental), so
-   another cluster restores them (docs/search/architecture.md, "Snapshots"). Left: `_analyze`
-   against a real bucket (it plans and answers without touching one), multipart uploads and a
-   `chunk_size` setting (a chunk is ~8 MiB; one object per chunk), the `gcs` and `azure` types,
-   `max_snapshot_bytes_per_sec`/`max_restore_bytes_per_sec` throttling of bucket traffic, and
-   credentials from roll secrets instead of the repository's settings (landed in #361: `roll://ENV/KEY`
-   references, the maker checked again on every use). Restoring from a snapshot Elasticsearch wrote:
-   in progress (read-only foreign repositories, `_source` read from the Lucene stored fields and
-   reindexed). It means reading Elasticsearch's repository
-   (`index-N`, `snap-*.dat`, `meta-*.dat`, shard `index-*`/`snap-*.dat`: SMILE inside Lucene
-   codec headers, DEFLATE-compressed) and each shard's Lucene files (segment infos, field infos,
-   compound files, LZ4/DEFLATE stored fields for `_id`, `_routing`, `_source`, numeric doc values
-   for `_seq_no`, `_primary_term`, `_version`, live docs, flat vectors for excluded source
-   vectors; Lucene 9 and 10 codecs for 8.x and 9.x snapshots), all as hostile input, then
-   re-indexing every document from `_source`: about 4,000 lines and Elasticsearch-made fixtures,
-   and a restore that is a full reindex. Indices without a stored `_source` (synthetic source,
-   the logsdb and time-series default, `_source.enabled: false`) can't come back that way.
-   Decided 2026-11-17: not now. A live cluster moves by reindex from remote (item 2: today it
-   can't, over HTTPS); build it once tenants ask to move by backup alone.
+   another cluster restores them (docs/search/architecture.md, "Snapshots"); multipart uploads,
+   `chunk_size`, throttling and a real `_analyze` (#237); credentials from roll secrets (#361:
+   `roll://ENV/KEY` references, the maker checked again on every use). And restoring snapshots Elasticsearch
+   wrote (#652, compatibility.md "Restoring snapshots Elasticsearch wrote"): a team on Elastic
+   Cloud or its own Elasticsearch registers the bucket (or `fs` directory) it already snapshots
+   to and runs Elasticsearch's own `_restore`, with no network route to the old cluster. Such a
+   repository is read only whatever its registration says; listing answers from its own
+   metadata; a restore reads each shard's Lucene files (Lucene 9 and 10: Elasticsearch 8.0 to
+   9.x, LZ4, DEFLATE and zstd stored fields, soft deletes, sequence numbers and versions from doc
+   values, vectors Elasticsearch 9 leaves out of `_source` from the flat vector files), all as
+   hostile input, and indexes every live document again from `_source` as a task `_recovery`
+   follows. Indices without a stored `_source` are refused by name and reason (`partial`
+   restores the rest). Measured: 1M documents (~200 bytes, 2 shards, from an `fs` repository) restored in 22.8 s, 43,900 docs/s (a release build into an in-memory cluster on lane b's 12 build CPUs at nice 19, one run). Left of
+   the restore: segments Lucene 8 wrote (Elasticsearch 7.x indices never merged since), data streams themselves (their backing indices restore), `sparse_vector`
+   and `rank_vectors` values and nested dense vectors that Elasticsearch 9 left out of `_source`,
+   `_status` file counts from the shard snapshots, and resuming after a takeover from the shard
+   reached rather than from the start of each index.
 10. **Relevance tuning by MCP and Terraform**: `/v1/search` serves synonyms sets, query rulesets
    (and `_test`), writing an index's settings and `_explain` (the routes table), and `roll search`
    has `synonyms`, `rules`, `indices settings` and `explain` and makes `read` and `append` keys on
@@ -1455,13 +1457,24 @@ deterministic (#396).
    with no `inference_id` fails, because its default (`.elser-2-elasticsearch`) answers as a
    cluster without ML nodes, the first error anyone copying Elasticsearch's docs hits; and no
    screen is named Discover.
-13. **A web crawler for site search** (phase 1 in progress on `feat/search-crawler`: the
-   `roll_web_crawler` connector on #318's runner, in its gate; design in [crawler.md](crawler.md); Elastic Open Crawler,
-   Algolia Crawler, DocSearch, Meilisearch's docs-scraper): connectors (#318) sync Postgres and S3;
-   getting a website in is the customer's job. A native connector roll runs (`roll_web_crawler`,
-   on #318's runner) taking Open Crawler's config, fields and ids, fetching through
-   `roll_net::PublicOnly` with redirects checked hop by hop, robots.txt always honoured, domain
-   verification for more than small crawls, and a purge that a site outage can't empty.
+13. **A web crawler for site search** (design in [crawler.md](crawler.md); Elastic Open Crawler,
+   Algolia Crawler, DocSearch, Meilisearch's docs-scraper). Phase 1 landed: a native connector roll
+   runs (`roll_web_crawler`, on #318's runner) taking Open Crawler's config, fields and ids;
+   robots.txt (RFC 9309, token `roll-crawler`) always honoured; sitemaps; crawl rules with Open
+   Crawler's semantics on the linear-time `regex` crate; canonical URLs, robots meta,
+   `rel=nofollow`, `data-elastic-include`/`-exclude`; fetching through roll's one egress check (`egress.rs`) with
+   redirects checked hop by hop and the credential bound to one origin; pages parsed by
+   `html5ever` into a DOM charged to the request breaker and capped at 512 levels; a purge that
+   outages, expired logins and maintenance redirects can't empty (it's skipped when most documents
+   weren't refreshed); the limits with node ceilings; unverified-domain limits per owner and site
+   on a node; and `roll search crawler import` for an
+   Open Crawler YAML file. Left: domain verification (phase 2: higher limits, the
+   `/v1/search/site-verifications` routes), the `crawl-test` route, its MCP tool and CLI, and the
+   dashboard's URL box and "crawl a site" empty state; then extraction rules (CSS selectors on the
+   arena DOM), incremental crawls with `If-Modified-Since`, and the docs preset (phase 3).
+   Charset detection beyond UTF-8, fetching several origins at once, per-site politeness by
+   address rather than name, fleet-wide per-owner limits, and seeding `roll.crawler.blocked_hosts`
+   with the fleet's own names are open too.
 14. **Semantic search on OpenSearch-flavor clusters** (design in
    [opensearch-neural.md](opensearch-neural.md); AWS OpenSearch neural search):
    `neural`, `neural_sparse` and `agentic` are names only (`meta/aliases.rs`); ML Commons
@@ -1706,8 +1719,7 @@ deterministic (#396).
    (main at d9aecc990), ranked; each test goes in `test:search`, not the merge gate (all landed, each
    failing against its guarded line: (1) with the egress fix in #771, 0d6daf6cc; (2), (3), (4), (7)
    and (8) in #768, 1c2b5e62c; (5), (6), (9), (10), (11) and the unused e2e file's removal in
-   #833, f47d36793, which also found that a drain leaves a running connector sync `in_progress` for
-   5 minutes on the next owner, not yet fixed; `persist.rs`'s memory-budget flake fixed in
+   #833, f47d36793, whose three fleet findings are fixed in #853 (below); `persist.rs`'s memory-budget flake fixed in
    #766, 9641a1bd6: the test no longer races a second commit, 60 of 60 under load):
    (1) connectors refusing private addresses: every `connectors.rs` cluster sets
    `allow_private_hosts`, so deleting the check fails nothing (now
@@ -1756,18 +1768,21 @@ deterministic (#396).
    take over a second, and the test still lost 1 run in 10 (at host loads 63-81; the old build
    passed 10 of 10 there, but at loads 18-50). The suite's minimum (108) holds on a rerun, and
    that load is much harsher than CI's.
-   **Found by the fleet tests (2026-11-23)**: a connector sync running when its cluster's owner
-   drains isn't stopped or settled by the unload (`Node::unload_with` cancels tasks, not
-   `connector_syncs`), so the next owner reads the job `in_progress` with a fresh `last_seen` and
-   marks it `error` only after `STALE_MS` (5 minutes): "Syncing…" in the dashboard and no new sync
-   for that connector until then. `due_jobs_run_once_on_the_next_owner` covers the watch, not the
-   sync, until the unload settles it. And a migration copy the drain stops
-   reports `"canceled": "by user request"` (the unload's cancel), though nobody asked. And ILM
-   doesn't advance on a `search-control` node (a fleet node, no drain; `poll_interval` 1s): an
-   index under a policy whose `hot` phase has `min_age` 0 stays at `new/complete/complete` (15 s
-   checked, though `ilm_run::next_due` says due at once), and a document on its write alias
-   doesn't roll it over (10 s). `ilm_run`'s unit tests call `run` directly, so the node's scheduler
-   path is uncovered; the drain test leaves ILM out until it moves.
+   **Found by the fleet tests (2026-11-23), fixed in #853**: (a) ILM didn't
+   advance on a node. The job scheduler (`opensearch/jobs.rs`) ran the other jobs first, then
+   read ILM's due time again with the clock: an index to move on is due "now", so once the other
+   jobs took a millisecond it was past the run's `now`, never due, and the task looped at once
+   (unit tests ran within one millisecond). The lifecycles' due times are now read at the run's
+   instant (`time::at_sync`), and `sync::run_due` no longer saves the cluster state when it has
+   nothing to settle (it saved it on every scheduler run, which is what took the millisecond).
+   `cluster.rs`'s `ilm_rolls_an_index_over_on_its_own`: `hot` with `min_age` 0 entered by itself,
+   then a rollover after one document. (b) A drain didn't settle a running connector sync: the
+   next owner read it `in_progress` and called it abandoned only after `STALE_MS` (5 minutes).
+   An unload now records it `suspended` (`sync::suspend`, Elastic's connector service on
+   shutdown) and the next load resumes it at once:
+   `a_drain_hands_a_running_sync_to_the_next_owner`. (c) A migration copy a drain stopped said
+   `"canceled": "by user request"`; a handover's cancel now says "the node handed the cluster
+   over" (`search_server::HANDED_OVER`, asserted in `esql_and_a_migration_work_across_nodes`).
 29. **Security**: landed in #632 (53a45bd36), a fix for a bypass a #358 review found: a role's document level
    security filter was evaluated with the request's own `runtime_mappings` in scope, so a runtime
    field could shadow the field the filter tests. Security filters (roles, API keys' role

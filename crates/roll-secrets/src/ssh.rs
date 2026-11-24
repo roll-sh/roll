@@ -449,7 +449,7 @@ impl LinkProvider for Provider {
         let cert = certificate(&ca, &user.verifying_key().to_bytes(), &key_id, &principals, after, before);
         let key = private_key(&user, &key_id);
         let parts = BTreeMap::from([("certificate".to_string(), Value::new(cert)), ("private_key".to_string(), Value::new(key.to_string()))]);
-        Ok(Issued { parts, handle: json!({ "principals": principals, "valid_before": before }) })
+        Ok(Issued { expires_at: None, parts, handle: json!({ "principals": principals, "valid_before": before }) })
     }
 
     /// A certificate can't be taken back: it ends at its own expiry.

@@ -236,6 +236,71 @@ pub struct GrewSpan {
     pub main_ms: u64,
 }
 
+/// A token of roll's issuer for a preview's own service (`GET …/oidc/{token}`): Vercel's OIDC
+/// federation's, for a cloud's trust.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct OidcToken {
+    pub token: String,
+    /// Unix seconds.
+    pub expires_at: i64,
+}
+
+/// A look at a data branch as a reviewer sees it from the sheet (Neon's Tables): its tables, or a
+/// table's first rows, read as the branch's own role and read-only (`GET …/data/{resource}`).
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum Browse {
+    Rows { table: String, columns: Vec<String>, rows: Vec<Vec<Option<String>>>, more: bool },
+    Tables { tables: Vec<BrowseTable> },
+}
+
+/// A table of a branch: its name (`schema.table`) and about how many rows it holds.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct BrowseTable {
+    pub name: String,
+    pub rows: i64,
+}
+
+/// The most rows a look at a table shows.
+pub const BROWSE_ROWS: usize = 50;
+
+/// One of a preview's secret values in what its pages served (Netlify's secrets scan): which, by
+/// the name the preview gets it as (never the value), and where.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct ServedSecret {
+    pub key: String,
+    pub path: String,
+}
+
+/// What a preview's pages served, looked in at a head (`served_secrets`, a runtime fact).
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct ServedSecrets {
+    pub head: String,
+    pub secrets: Vec<ServedSecret>,
+}
+
+/// `keyed`'s values (name, value) found in `bodies` (path, bytes): each name and path once, at
+/// most 20.
+pub fn served_secrets(bodies: &[(String, Vec<u8>)], keyed: &[(String, String)]) -> Vec<ServedSecret> {
+    let mut out: Vec<ServedSecret> = Vec::new();
+    if keyed.is_empty() {
+        return out;
+    }
+    let Ok(ac) = aho_corasick::AhoCorasick::new(keyed.iter().map(|(_, v)| v.as_bytes())) else { return out };
+    for (path, bytes) in bodies {
+        for m in ac.find_overlapping_iter(bytes.as_slice()) {
+            let key = &keyed[m.pattern().as_usize()].0;
+            if !out.iter().any(|s| s.key == *key && s.path == *path) {
+                out.push(ServedSecret { key: key.clone(), path: path.clone() });
+                if out.len() >= 20 {
+                    return out;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// A preview's error groups that main's preview (`branch`) doesn't have: how many, and the most
 /// frequent few by service and title (masked).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -307,6 +372,11 @@ pub struct Preview {
     /// paths the project's path filters ignore (`None`: they run `head`).
     pub runs: Option<String>,
     pub trusted: bool,
+    /// A fork's preview (code from someone who can't push): its title, and anything its code
+    /// wrote, are outside text, which roll MCP's lockdown keeps from a model (`outside: true`, as
+    /// roll code marks a fork's change).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub outside: bool,
     pub desired: Desired,
     pub state: State,
     pub error: Option<String>,
@@ -387,6 +457,9 @@ pub struct Preview {
     /// minutes: Sentry's new issues in a release).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_errors: Option<NewErrors>,
+    /// Its secret values its pages served at its head, by name and path (never the value).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub served_secrets: Vec<ServedSecret>,
     /// The project's rule for regressions against main's (`check`, `required`), when it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub regressions: Option<String>,
@@ -1015,6 +1088,10 @@ pub struct Share {
     pub created_by: String,
     pub created_at: i64,
     pub revoked: bool,
+    /// Who it's for, as its maker wrote it (`""`: not said).
+    pub label: String,
+    /// Its visitors may leave notes on the preview's pages (as `guest:<name>`).
+    pub notes: bool,
 }
 
 /// How much a preview's page changed between the screenshots of two heads.
@@ -1048,6 +1125,10 @@ pub struct PageCheck {
     /// A page state's step that found nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step: Option<String>,
+    /// A page state's slowest click or typing, to the next paint (ms): Interaction to Next
+    /// Paint in the lab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_ms: Option<u32>,
 }
 
 /// What a page's session found besides its picture: the first page's checks, for another page.
@@ -1063,6 +1144,9 @@ pub struct PageReport {
     /// taken as it was then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step: Option<String>,
+    /// Its slowest step's time to the next paint (ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_ms: Option<u32>,
 }
 
 /// A page's checks against main's page at the same path.
@@ -1072,6 +1156,9 @@ pub struct PageAgainst {
     pub links_added: Option<u32>,
     pub seo_added: Option<u32>,
     pub text: Option<TextDiff>,
+    /// Main's same state's slowest step to the next paint (ms), when both timed one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_ms: Option<u32>,
 }
 
 impl PageReport {
@@ -1082,6 +1169,7 @@ impl PageReport {
             links_added: self.links.as_ref().zip(main.links.as_ref()).map(|(a, b)| a.added_since(b)),
             seo_added: self.a11y.as_ref().and_then(|a| a.seo.as_ref()).zip(main.a11y.as_ref().and_then(|a| a.seo.as_ref())).map(|(a, b)| a.added_since(b)),
             text: self.text.as_deref().zip(main.text.as_deref()).map(|(now, then)| crate::visual::text_diff(then, now)),
+            step_ms: main.step_ms.filter(|_| self.step_ms.is_some()),
         }
     }
 }
@@ -1553,6 +1641,21 @@ mod tests {
         assert!(!e(14, Some(4)).slower(), "within 20 ms");
         assert!(!e(55, Some(40)).slower(), "not half again");
         assert!(!e(140, None).slower(), "nothing to compare with");
+    }
+
+    /// A secret value in what a preview's pages served is named with where, each name and path
+    /// once; nothing else is.
+    #[test]
+    fn a_served_secret_is_named_with_where_each_once() {
+        let keyed = [("STRIPE_KEY".to_string(), "sk_live_abcdef12".to_string()), ("DATABASE_URL".to_string(), "p4ssw0rd-xyz".to_string())];
+        let bodies = [
+            ("/app.js".to_string(), b"a='sk_live_abcdef12';b='sk_live_abcdef12'".to_vec()),
+            ("/".to_string(), b"<p>nothing here</p>".to_vec()),
+            ("/api/me".to_string(), b"{\"db\":\"postgres://u:p4ssw0rd-xyz@h\"}".to_vec()),
+        ];
+        let found: Vec<(String, String)> = super::served_secrets(&bodies, &keyed).into_iter().map(|s| (s.key, s.path)).collect();
+        assert_eq!(found, [("STRIPE_KEY".to_string(), "/app.js".to_string()), ("DATABASE_URL".to_string(), "/api/me".to_string())]);
+        assert!(super::served_secrets(&bodies, &[]).is_empty());
     }
 
     /// An endpoint's JSON answer against main's: a field gone (the outermost only) or a type

@@ -83,7 +83,7 @@ fn next_on_pnpm() {
             "corepack enable",
             "COPY package.json pnpm-lock.yaml ./",
             "RUN --mount=type=cache,target=/root/.local/share/pnpm/store pnpm install --frozen-lockfile",
-            "RUN --mount=type=cache,target=/app/.next/cache pnpm run build",
+            "RUN --mount=type=cache,target=/app/.next/cache --mount=type=secret,id=NEXT_DEPLOYMENT_ID,env=NEXT_DEPLOYMENT_ID pnpm run build",
             "COPY --from=build --chown=node:node /app /app",
             "ENV PORT=8080\nEXPOSE 8080\nUSER node\n",
             r#"CMD ["sh", "-c", "exec node_modules/.bin/next start -p $PORT"]"#,

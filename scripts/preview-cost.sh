@@ -243,6 +243,12 @@ PG_BRANCH_EP=$(api GET "/v1/projects/$PG" | jq_ "[b['endpoint']['id'] for b in d
 PG_MASKED=$(api POST "/v1/endpoints/$PG_BRANCH_EP/query" '{"sql":"SELECT email FROM users WHERE id = 1"}' | jq_ "d['results'][0]['rows'][0][0]")
 PG_PARENT=$(api POST "/v1/endpoints/$PG_PARENT_EP/query" '{"sql":"SELECT email FROM users WHERE id = 1"}' | jq_ "d['results'][0]['rows'][0][0]")
 case "$PG_MASKED" in user-*@example.invalid) ;; *) echo "the Postgres branch should read masked, not $PG_MASKED"; exit 1;; esac
+# From the sheet too (GET …/data/{kind:parent}): its tables as the branch's own role sees them,
+# and a table's rows, masked.
+SHEET_TABLES=$(api GET "/v1/previews/$PV/data/postgres:$PG" | jq_ "' '.join(t['name'] for t in d.get('tables') or [])")
+case " $SHEET_TABLES " in *" public.users "*) ;; *) echo "the sheet should list the branch's tables: $SHEET_TABLES"; exit 1;; esac
+SHEET_EMAIL=$(api GET "/v1/previews/$PV/data/postgres:$PG?table=public.users" | jq_ "(lambda c: [r[c.index('email')] for r in d['rows']])(d['columns'])[0]")
+case "$SHEET_EMAIL" in user-*@example.invalid) ;; *) echo "the sheet should show the branch's rows masked, not $SHEET_EMAIL"; exit 1;; esac
 [ "$PG_PARENT" = "ada@example.com" ] || { echo "the parent changed: $PG_PARENT"; exit 1; }
 # The search branch reads the parent's document, and its own writes stay in it.
 BRANCH_SEARCH=$(echo "$P" | jq_ "[r['ref'] for r in d['resources'] if r['kind']=='search'][0]")
@@ -438,6 +444,20 @@ SJAR="$HOME_DIR/cookies-share"
 [ "$(curl -s -o /dev/null -w '%{http_code}' -b "$SJAR" -H "Host: $HOST" "http://$API/")" = 200 ] || { echo "a share link's cookie should open the preview"; exit 1; }
 api DELETE "/v1/previews/$PV/shares/$SHARE_ID" >/dev/null
 [ "$(curl -s -o /dev/null -w '%{http_code}' -b "$SJAR" -H "Host: $HOST" "http://$API/")" = 401 ] || { echo "a revoked share link should stop at once"; exit 1; }
+# A link that takes notes: its guest posts one from the page (the button's guest mode), made on
+# the change as guest:<name>, its words inert; another site's page posts nothing.
+GSHARE=$(api POST "/v1/previews/$PV/shares" '{"hours":1,"label":"Acme review","notes":true}')
+GJAR="$HOME_DIR/cookies-guest"
+curl -s -o /dev/null -c "$GJAR" -H "Host: $HOST" "http://$API/?$(echo "$GSHARE" | jq_ "d['url'].split('/?')[1]")"
+curl -sS -b "$GJAR" -H "Host: $HOST" "http://$API/__roll/feedback.js" | grep -q "const GUEST = true;" || { echo "a link that takes notes should give its guest the button in guest mode"; exit 1; }
+GNOTE='{"name":"Ada","path":"/","selector":"h1","note":"Hi @team, the title is cut off","viewport":"390x844"}'
+[ "$(curl -s -o /dev/null -w '%{http_code}' -b "$GJAR" -H "Host: $HOST" -H "Origin: http://evil.example" -H 'content-type: application/json' -d "$GNOTE" "http://$API/__roll/notes")" = 403 ] || { echo "another site's page should post no note"; exit 1; }
+GUEST_ID=$(curl -sS -b "$GJAR" -H "Host: $HOST" -H "Origin: http://$HOST" -H 'content-type: application/json' -d "$GNOTE" "http://$API/__roll/notes" | jq_ "d['id']")
+GUEST_SAID=$(api GET "/v1/code/changes/$CHG/reviews" | jq_ "[(r['reviewer']['name'], '@\u200bteam' in r['body'], 'Acme review' in r['body'], r['outside']) for r in d if r['id'] == '$GUEST_ID']")
+[ "$GUEST_SAID" = "[('guest:Ada', True, True, True)]" ] || { echo "the guest's note should be on the change as guest:Ada, its @ inert, the link's label said, outside the team's: $GUEST_SAID"; exit 1; }
+[ "$(api GET "/v1/previews/$PV/notes" | jq_ "[n.get('outside') for n in d['notes'] if n['id'] == '$GUEST_ID']")" = "[True]" ] || { echo "the notes answer should mark a guest's note outside (MCP's lockdown)"; exit 1; }
+[ "$(curl -sS -b "$GJAR" -H "Host: $HOST" "http://$API/__roll/feedback.json?path=%2F" | jq_ "[n['id'] for n in d]")" = "['$GUEST_ID']" ] || { echo "a guest should see only their link's notes"; exit 1; }
+api DELETE "/v1/previews/$PV/shares/$(echo "$GSHARE" | jq_ "d['id']")" >/dev/null
 CONTAINER="roll-previews-$(echo "$HOST" | cut -d. -f1)"
 STATS=$(docker stats --no-stream --format '{{.MemUsage}} {{.CPUPerc}}' "$CONTAINER")
 RSS1=$(ps -o rss= -p "$PID")
@@ -472,6 +492,39 @@ kill "$FWD_PID" 2>/dev/null || true; wait "$FWD_PID" 2>/dev/null || true
 api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]" | grep -q "forwarded port 8000 of web" || { echo "the activity should say the port was forwarded"; exit 1; }
 for _ in $(seq 1 30); do [ "$(docker ps -aq --filter name=roll-previews-fwd- | wc -l)" = 0 ] && break; sleep 0.5; done
 [ "$(docker ps -aq --filter name=roll-previews-fwd- | wc -l)" = 0 ] || { echo "a forward's relay should go with its connection"; exit 1; }
+
+say "a service swapped for a process on this machine (roll preview swap): the preview's host reaches it, then the container again"
+SWAP_PORT=${PREVIEW_E2E_PORTS:-27}978
+SWAP_DIR=$(mktemp -d)
+echo "from the laptop" > "$SWAP_DIR/index.html"
+python3 -m http.server "$SWAP_PORT" --bind 127.0.0.1 --directory "$SWAP_DIR" >/dev/null 2>&1 &
+SWAP_SRV=$!
+ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview swap "$PV" "$SWAP_PORT" --service web 2>"$HOME_DIR/swap.log" &
+SWAP_PID=$!
+SWAPPED=""
+for _ in $(seq 1 100); do
+  SWAPPED=$(curl -s --max-time 10 -b "$JAR" -H "Host: $HOST" "http://$API/index.html")
+  [ "$SWAPPED" = "from the laptop" ] && break
+  sleep 0.2
+done
+kill "$SWAP_PID" 2>/dev/null || true; wait "$SWAP_PID" 2>/dev/null || true
+kill "$SWAP_SRV" 2>/dev/null || true; wait "$SWAP_SRV" 2>/dev/null || true
+rm -rf "$SWAP_DIR"
+[ "$SWAPPED" = "from the laptop" ] || { echo "a swapped service should be answered by this machine's process: $SWAPPED ($(cat "$HOME_DIR/swap.log"))"; exit 1; }
+BACK=""
+for _ in $(seq 1 100); do
+  BACK=$(curl -s --max-time 10 -b "$JAR" -H "Host: $HOST" "http://$API/index.html")
+  [ -n "$BACK" ] && [ "$BACK" != "from the laptop" ] && break
+  sleep 0.2
+done
+[ -n "$BACK" ] && [ "$BACK" != "from the laptop" ] || { echo "given back, the container should answer again: $BACK"; exit 1; }
+api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]" | grep -q "swapped web for a process on their machine" || { echo "the activity should say web was swapped"; exit 1; }
+
+say "a page read through roll (roll preview fetch, roll MCP's previews_fetch): no link token asked or answered"
+FETCHED=$(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview fetch "$PV" /index.html --service web 2>/dev/null)
+CONTAINER_PAGE=$(curl -s --max-time 10 -b "$JAR" -H "Host: $HOST" "http://$API/index.html")
+[ -n "$FETCHED" ] && [ "$FETCHED" = "$CONTAINER_PAGE" ] || { echo "roll preview fetch should read the page as the container serves it: '$FETCHED' vs '$CONTAINER_PAGE'"; exit 1; }
+api GET "/v1/previews/$PV/fetch?path=/index.html&service=web" | grep -q "roll_access" && { echo "a fetched page's answer must carry no token"; exit 1; }
 
 say "traces: with the project's traces on, the service gets OpenTelemetry's variables, spans it posts are the preview's traces, and an error naming one opens it"
 api PUT "/v1/previews/projects/$PRJ/settings" '{"traces":true}' >/dev/null
@@ -518,7 +571,7 @@ done
 
 say "a screenshot of the service (github.screenshot), once per head"
 # And /pricing, which the test service doesn't have (a 404 page, one failed request).
-api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true,"pages":["/pricing","web:/","wiki:/"],"widths":[768],"hide":[".clock"],"budget":{"load_ms":60000},"openapi":"/openapi.json","endpoints":["/openapi.json"],"states":[{"name":"tab","page":"/","steps":[{"press":"Tab"}]}],"browsers":["firefox","webkit-phone"]}}' >/dev/null
+api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true,"pages":["/pricing","web:/","wiki:/"],"widths":[768],"hide":[".clock"],"budget":{"load_ms":60000},"openapi":"/openapi.json","endpoints":["/openapi.json","/env.txt"],"states":[{"name":"tab","page":"/","steps":[{"press":"Tab"},{"click":"body"}]}],"browsers":["firefox","webkit-phone"]}}' >/dev/null
 # roll keeps a preview of the default branch (github.baseline): the change's screenshots are
 # compared with its.
 MAINPV=""
@@ -569,6 +622,36 @@ api PUT "/v1/previews/projects/$PRJ/settings" '{"access":"link"}' >/dev/null
 [ "$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -H "Host: $HOST" "http://$API/")" = 401 ] || { echo "a link retired by leaving link access should stop opening the preview"; exit 1; }
 QUERY=$(api GET "/v1/previews/$PV" | jq_ "[x for x in d['services'] if x['name'] == 'web'][0]['share_url'].split('/?')[1]")
 curl -sS -o /dev/null -L -c "$JAR" -b "$JAR" -H "Host: $HOST" "http://$API/?$QUERY" --max-time 120
+
+say "a restore point (roll preview points): saved, a table made after it, put back"
+# A restore point (roll preview points): a table made after it is gone once it's put back, on
+# the same DATABASE_URL (pg-control's reset from the point: same endpoint and role).
+psql_app() { docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB" -Atc "$1" 2>&1 | head -1; }
+POINT=$(api POST "/v1/previews/$PV/restore-points" '{"label":"before the live check"}' | jq_ "d['id']")
+case "$POINT" in rp_*) ;; *) echo "a restore point should be saved: $POINT"; exit 1;; esac
+ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview points "$PV" | grep -q "$POINT" || { echo "roll preview points should list $POINT"; exit 1; }
+psql_app "CREATE TABLE after_the_point (id int)" >/dev/null
+TR0=$(now_ms)
+api POST "/v1/previews/$PV/restore-points/$POINT/restore" >/dev/null
+# Put back: the line is looked for in the whole activity (the services' lines come after it),
+# and the preview settled, ready or asleep (its services slept for it; a visit wakes them).
+PUT_BACK=""
+for _ in $(seq 1 240); do
+  api GET "/v1/previews/$PV/activity" | jq_ "any('back as restore point' in a['message'] for a in d)" | grep -q True && case "$(api GET "/v1/previews/$PV" | jq_ "d['state']")" in ready|sleeping) true;; *) false;; esac && PUT_BACK=yes && break
+  sleep 0.5
+done
+RESTORE_MS=$(( $(now_ms) - TR0 ))
+[ -n "$PUT_BACK" ] || { echo "the restore point should be put back and the preview settled (ready or asleep)"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:12]]"; exit 1; }
+RESTORED=$(psql_app "SELECT coalesce(to_regclass('public.after_the_point')::text, 'gone') || ' ' || (SELECT email FROM users WHERE id = 1)")
+[ "$RESTORED" = "gone $APP_MASKED" ] || { echo "putting the point back should drop what came after it, still masked, on the same DATABASE_URL: $RESTORED"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:8]]"; exit 1; }
+api DELETE "/v1/previews/$PV/restore-points/$POINT" >/dev/null
+# Its services slept while the data went back: a visit wakes them, on the same DATABASE_URL.
+for _ in $(seq 1 120); do
+  AFTER_DB=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt" | sed -n 's/^DATABASE_URL=//p' | sed 's#host.docker.internal#127.0.0.1#')
+  [ -n "$AFTER_DB" ] && break
+  sleep 0.5
+done
+[ "$AFTER_DB" = "$APP_DB" ] || { echo "the service should come back on the same DATABASE_URL after a restore point: ${AFTER_DB%%@*}…"; exit 1; }
 
 say "sleep it"
 api POST "/v1/previews/$PV/sleep" >/dev/null
@@ -850,6 +933,24 @@ case "$ENDPOINTS" in "/openapi.json 200 "*" ms, main "[0-9]*" ms") ;; *) echo "t
 # And its answer's shape against main's: the operation the change removes is a field gone.
 RESHAPED=$(api GET "/v1/previews/$PV" | jq_ "' | '.join('%s %s' % (c['path'], c.get('now') or 'gone') for x in d['base_change'].get('endpoints') or [] for c in x.get('shape_changes') or [])")
 [ "$RESHAPED" = "paths./users/{id} gone" ] || { echo "the change's /openapi.json should lose paths./users/{id} against main's: $RESHAPED"; exit 1; }
+# The feedback button driven in a real browser (Playwright's image, which the run built by now):
+# in through the preview's link, an element picked and a note written; what it opens roll with
+# names the page, the element and the note. Nothing else drives the page's toolbar end to end.
+# An agent's run on the page (roll MCP's previews_try): a step taken in a browser, the text after
+# it and its picture by the run's id.
+TRY=$(api POST "/v1/previews/$PV/try" '{"service":"web","path":"/","steps":[{"press":"Tab"}]}')
+TRY_SAID=$(echo "$TRY" | jq_ "'%s %s' % (d['status'], 'preview of change 1' in d['text'])")
+[ "$TRY_SAID" = "200 True" ] || { echo "an agent's run should answer the page's status and text: ${TRY:0:300}"; exit 1; }
+curl -sf "http://$API/v1/previews/$PV/try/$(echo "$TRY" | jq_ "d['run']")/screenshot" -o "$HOME_DIR/try.png" && head -c 8 "$HOME_DIR/try.png" | od -An -c | grep -q "P   N   G" || { echo "the run's picture should be a PNG"; exit 1; }
+FB_LINK=$(api GET "/v1/previews/$PV" | jq_ "[x for x in d['services'] if x['name'] == 'web'][0]['share_url']")
+FB_SAID=$(docker run --rm --name roll-previews-fbtest --network host -e LINK="$FB_LINK" -v "$ROOT/scripts/preview-cost/feedback-check.js:/w/check.js:ro" roll-previews-shot:1.64.1 sh -c 'NODE_PATH=$(npm root -g) node /w/check.js' 2>&1 | tail -1)
+case "$FB_SAID" in "/ · "*"a"*" · a live note") ;; *) echo "the page's feedback button should open roll with the page, the element and the note: $FB_SAID"; exit 1;; esac
+# Its secret values in what its pages served (the session fetched /env.txt, which this service
+# writes its environment to): named with where, never the value.
+SERVED=$(api GET "/v1/previews/$PV" | jq_ "' '.join(sorted(set('%s@%s' % (x['key'], x['path']) for x in d.get('served_secrets') or [])))")
+case " $SERVED " in *" DATABASE_URL@/env.txt "*) ;; *) echo "the preview's record should name DATABASE_URL in /env.txt: $SERVED"; exit 1;; esac
+SERVED_PW=$(echo "$APP_DB" | sed -nE 's#^postgres://[^:]+:([^@]+)@.*#\1#p')
+[ -n "$SERVED_PW" ] && api GET "/v1/previews/$PV" | grep -qF "$SERVED_PW" && { echo "the record must never carry a served value"; exit 1; }
 case "$WORDS" in "+['preview of change 1"*"-['main']") ;; *) echo "the page's words should be compared with main's: $WORDS"; exit 1;; esac
 MAIN_LOAD=$(api GET "/v1/previews/$PV" | jq_ "d['base_change'].get('load_ms')")
 case "$MAIN_LOAD" in [0-9]*) ;; *) echo "the comparison with main should carry main's load time: $MAIN_LOAD"; exit 1;; esac
@@ -876,6 +977,9 @@ PRICING=$(api GET "/v1/previews/$PV" | jq_ "(lambda p: 'a11y %s, seo %s; new: a1
 case "$PAGES" in *"wiki:/: 0 error(s), "*"% against main"*) ;; *) echo "the wiki service's page should be taken in its own run and compared: $PAGES"; exit 1;; esac
 # A page state (github.states: Tab pressed on /), taken after its step and compared with main's.
 case "$PAGES" in *"state:tab: "*"% against main"*) ;; *) echo "the page state should be taken after its steps and compared: $PAGES"; exit 1;; esac
+# Its click timed to the next paint (INP in the lab), and main's same state's beside it.
+STEP_MS=$(api GET "/v1/previews/$PV" | jq_ "[(isinstance(x.get('step_ms'), int), isinstance((x.get('against') or {}).get('step_ms'), int)) for x in d.get('pages', []) if x['path'] == 'state:tab']")
+[ "$STEP_MS" = "[(True, True)]" ] || { echo "the state's click should be timed to the next paint, main's beside it: $STEP_MS $(api GET "/v1/previews/$PV" | jq_ "[x for x in d.get('pages', []) if x['path'] == 'state:tab']")"; exit 1; }
 # The repo's own page, from its roll.toml (pages = ["/index.html"]), taken with the project's.
 case "$PAGES" in *"/index.html: "*"% against main"*) ;; *) echo "the repo's own page should be taken and compared: $PAGES"; exit 1;; esac
 # And the repo's own, from its roll.toml ([[preview.states]], versioned with its selectors).
@@ -1145,7 +1249,10 @@ cat <<EOF
 | The first page's words against main's | $WORDS |
 | Its API against main's (from each one's OpenAPI document) / what it breaks in the operations both keep | $API_DIFF / $API_BREAKING |
 | Its endpoints against main's (the median of 10 GETs) | $ENDPOINTS |
+| The branch's tables from the sheet / users.email there | $SHEET_TABLES / $SHEET_EMAIL |
 | Its endpoint's answer against main's, by shape | $RESHAPED |
+| The feedback button in a browser: page · element · note | $FB_SAID |
+| Its secret values in what its pages served (names and where) | $SERVED |
 | SEO basics of the first page | $SEO |
 | /pricing's own checks (against main's /pricing) | $PRICING |
 | The first page's broken links (HEAD only) / new against main | $LINKS / $LINKS_NEW |
@@ -1163,6 +1270,7 @@ cat <<EOF
 | The migration's risks the preview names | ${RISKS:-} |
 | The teardown as the preview went (its exit code, with the branch's URL) / runs | 3 / $TEARDOWN |
 | The service's Postgres role / its WAL read / users.email as it reads it | $(echo "$APP_DB" | sed -E 's#^postgres://([^:]+):.*#\1#') / refused / $APP_MASKED |
+| A restore point put back (a table made after it gone, same DATABASE_URL, still masked) | $RESTORE_MS ms |
 | Postgres: the parent's data directory / the branch's (a full copy on this disk) | ${PG_PARENT_KB} KiB / ${PG_BRANCH_KB} KiB |
 | First visit (cold start of the service container, image cached) | $((T3 - T2)) ms |
 | Next visit (warm) | $((T5 - T4)) ms |
@@ -1177,6 +1285,7 @@ cat <<EOF
 | ignore_paths: docs/ | $KEPT |
 | \`[skip preview]\` in the title, then without it | removed, then a new preview |
 | A share link (1 hour): in through it / revoked | 200 / 401 |
+| A guest's note through a link that takes notes (as guest:Ada, `@` inert) / from another site | $GUEST_SAID / 403 |
 | What went wrong while the page loaded (a push whose page logs an error) | $HEALTH; new against main: $ERRORS_NEW |
 | The page's change since the push before (screenshots) | $VISUAL |
 | The phone-width screenshot | $PHONE |

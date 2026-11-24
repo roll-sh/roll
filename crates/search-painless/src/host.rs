@@ -216,11 +216,14 @@ pub struct HostError {
     /// Java frames to report above the script frame (`org.elasticsearch.server@9.5.5/…`),
     /// innermost first.
     pub frames: Vec<String>,
+    /// The exception's own fields after `reason` (a breaker's `bytes_wanted`, `bytes_limit`,
+    /// `durability`).
+    pub fields: Vec<(String, serde_json::Value)>,
 }
 
 impl HostError {
     pub fn illegal_argument(reason: impl Into<String>) -> HostError {
-        HostError { kind: "illegal_argument_exception", reason: reason.into(), frames: Vec::new() }
+        HostError { kind: "illegal_argument_exception", reason: reason.into(), frames: Vec::new(), fields: Vec::new() }
     }
     pub fn with_frames(mut self, frames: &[&str]) -> HostError {
         self.frames = frames.iter().map(|f| f.to_string()).collect();
@@ -245,7 +248,7 @@ pub(crate) fn call<T: Copy>(f: impl FnOnce() -> Result<T, HostError>) -> Result<
     match (ok, failed) {
         (Some(v), _) => Ok(v),
         (None, Some(e)) => {
-            let copy = HostError { kind: e.kind, reason: e.reason.clone(), frames: e.frames.clone() };
+            let copy = e.clone();
             crate::guard::paused(|| drop(e));
             Err(copy)
         }
@@ -296,7 +299,11 @@ pub trait Host {
     /// its scripts hold across executions (values kept in `params` or a scripted metric's state)
     /// and at the peak of each one. Hosts that answer to a memory breaker (a search's `request`
     /// breaker) reserve it there and refuse past its limit; the script then fails with a
-    /// `circuit_breaking_exception`.
+    /// `circuit_breaking_exception`. It's asked with the execution's account open for the reports
+    /// during it (what it allocates then, its refusal included, counts as the script's and is
+    /// given back when freed), and after the account closes for the one at its end. An execution
+    /// another's host call started (a runtime field's script read by a script) reports nothing:
+    /// the enclosing execution is charged what it keeps, and its host reports.
     fn script_memory(&mut self, delta: i64) -> Result<(), MemoryRefused> {
         let _ = delta;
         Ok(())

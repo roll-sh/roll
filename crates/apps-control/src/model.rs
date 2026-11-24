@@ -280,6 +280,93 @@ pub struct Access {
     pub signed_in: bool,
     /// Its password's argon2id hash ([`crate::password`]), never returned.
     pub password_hash: Option<String>,
+    /// People a provider vouches for, who needn't be roll's ([`Sso`]).
+    pub sso: Option<Sso>,
+    /// Paths whose CORS preflights (`OPTIONS` with `Access-Control-Request-Method`) go to the app
+    /// past the gate (Vercel's OPTIONS Allowlist): a preflight carries no credentials, so a page on
+    /// another of the owner's sites can then call the API with its own.
+    pub preflight: Vec<String>,
+    /// Other services of the project let in with roll's own token for them (Cloud Run's invoker,
+    /// [`Access::callers`] entries: `api`, `api/production`, or an id): `x-roll-caller`.
+    pub callers: Vec<String>,
+}
+
+/// A cold start in parts (Cloud Run's startup latency): the runtime bringing the container up, then
+/// the app until it answered.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct ColdStart {
+    pub at: i64,
+    pub ms: u64,
+    pub runtime_ms: u64,
+    pub app_ms: u64,
+}
+
+/// The most `access.callers` entries.
+pub const MAX_CALLERS: usize = 20;
+
+/// The most `access.preflight` paths.
+pub const MAX_PREFLIGHT: usize = 20;
+
+/// Signing visitors in through GitHub or Google (Cloud Run's IAP, Cloudflare Access): anyone whose
+/// verified email, email domain or GitHub organisation is in `allow`, account of roll's or not
+/// (`access.sso`; docs/apps/README.md, "Signing in to an environment").
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Sso {
+    /// `github` or `google`.
+    pub provider: String,
+    /// `@acme.com` (a domain's people), `ada@acme.com` (one person), `org:acme` (a GitHub
+    /// organisation's members; GitHub only). 1–100, kept in lower case.
+    pub allow: Vec<String>,
+}
+
+impl Sso {
+    pub fn check(mut self) -> Result<Sso> {
+        let bad = |m: &str| Err(Error::BadRequest(format!("access.sso: {m}")));
+        if !["github", "google"].contains(&self.provider.as_str()) {
+            return bad("provider is github or google");
+        }
+        if self.allow.is_empty() || self.allow.len() > 100 {
+            return bad("allow is 1–100 entries: @domain, an email, or org:name (GitHub)");
+        }
+        let label = |s: &str| !s.is_empty() && s.len() <= 63 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') && !s.starts_with('-');
+        let domain = |d: &str| d.len() <= 253 && d.contains('.') && d.split('.').all(label);
+        for a in &mut self.allow {
+            *a = a.trim().to_ascii_lowercase();
+            let ok = if let Some(org) = a.strip_prefix("org:") {
+                self.provider == "github" && org.len() <= 39 && label(org)
+            } else if let Some(d) = a.strip_prefix('@') {
+                domain(d)
+            } else {
+                a.split_once('@').is_some_and(|(local, d)| !local.is_empty() && local.len() <= 64 && !local.contains(char::is_whitespace) && domain(d))
+            };
+            if !ok {
+                return bad(&format!("{a:?} isn't @domain, an email, or org:name (org: only with github)"));
+            }
+        }
+        self.allow.sort();
+        self.allow.dedup();
+        Ok(self)
+    }
+
+    /// Whether the sign-in needs GitHub's organisations read.
+    pub fn orgs(&self) -> bool {
+        self.allow.iter().any(|a| a.starts_with("org:"))
+    }
+
+    /// The entry that lets someone in (their verified email, lower case, organisations, and
+    /// Google's `hd`). With Google, a domain's entry also needs the account to be that
+    /// Workspace domain's (`hd`): a consumer account made with a work address isn't.
+    pub fn admits(&self, email: &str, orgs: &[String], hosted_domain: Option<&str>) -> Option<&str> {
+        let domain = email.rsplit_once('@').map(|(_, d)| d)?;
+        self.allow.iter().map(String::as_str).find(|a| match a.strip_prefix("org:") {
+            Some(org) => orgs.iter().any(|o| o == org),
+            None => match a.strip_prefix('@') {
+                Some(d) => d == domain && (self.provider != "google" || hosted_domain.is_some_and(|h| h.eq_ignore_ascii_case(d))),
+                None => *a == email,
+            },
+        })
+    }
 }
 
 /// A private registry's login for a service's image (`PUT …/registry`); the password is sealed
@@ -1192,13 +1279,56 @@ pub struct Alerts {
     /// default.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub anomaly: bool,
+    /// One route's 5xx share or p95 over the five minutes (Cloud Monitoring's path filters, a
+    /// checkout that fails while the rest is fine): `alert.route`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<RouteAlert>,
 }
 
 impl Default for Alerts {
     fn default() -> Self {
-        Alerts { memory_pct: 90, error_pct: 5, p95_ms: 0, capacity_pct: 10, log_match: None, log_count: 10, cpu_pct: 0, metrics: Vec::new(), anomaly: false }
+        Alerts { memory_pct: 90, error_pct: 5, p95_ms: 0, capacity_pct: 10, log_match: None, log_count: 10, cpu_pct: 0, metrics: Vec::new(), anomaly: false, routes: Vec::new() }
     }
 }
+
+/// An alert on one route: a route group as the Routes view shows it (`/users/:id/orders`; a path
+/// is folded the same way), or every route under a prefix (`/api/*`), for one method or all.
+/// Judged from the access log's last five minutes, with 20 requests at least.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RouteAlert {
+    pub route: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    /// 5xx answers at or above this share of its requests (0, off).
+    #[serde(default)]
+    pub error_pct: u8,
+    /// Its p95 at or above this (0, off).
+    #[serde(default)]
+    pub p95_ms: u32,
+}
+
+impl RouteAlert {
+    /// Whether a request of `method` to the route group `route` is one of its.
+    pub fn matches(&self, method: &str, route: &str) -> bool {
+        let ours = match self.route.strip_suffix("/*") {
+            Some(prefix) => route == prefix || route.strip_prefix(prefix).is_some_and(|r| r.starts_with('/')) || prefix.is_empty(),
+            None => route == self.route,
+        };
+        ours && self.method.as_deref().is_none_or(|m| m.eq_ignore_ascii_case(method))
+    }
+
+    /// How events and the alert's state name it: `POST /api/checkout`, or the route alone.
+    pub fn label(&self) -> String {
+        match &self.method {
+            Some(m) => format!("{m} {}", self.route),
+            None => self.route.clone(),
+        }
+    }
+}
+
+/// The most route alerts a service has.
+pub const MAX_ROUTE_ALERTS: usize = 10;
 
 /// An alert on one of the app's own gauges: its value now (each series' newest point of the
 /// last minute, the largest, or their sum with `sum`) above or below a threshold in `minutes`
@@ -1306,6 +1436,24 @@ impl Run {
             if self.alerts.metrics[..i].iter().any(|o| o.name == m.name && o.sum == m.sum) {
                 return Err(Error::BadRequest(format!("alerts.metrics names {} twice", m.name)));
             }
+        }
+        if self.alerts.routes.len() > MAX_ROUTE_ALERTS {
+            return Err(Error::BadRequest(format!("alerts.routes is at most {MAX_ROUTE_ALERTS} alerts")));
+        }
+        for r in &mut self.alerts.routes {
+            // A path folds as the Routes view folds it (`/users/42` is `/users/:id`); a prefix keeps its `/*`.
+            r.route = match r.route.strip_suffix("/*") {
+                Some(p) => format!("{}/*", crate::traffic::route_of(p).trim_end_matches('/')),
+                None => crate::traffic::route_of(&r.route),
+            };
+            r.method = r.method.take().map(|m| m.to_ascii_uppercase());
+            let method_ok = r.method.as_deref().is_none_or(|m| !m.is_empty() && m.len() <= 16 && m.bytes().all(|b| b.is_ascii_uppercase()));
+            if !method_ok || r.error_pct > 100 || (r.error_pct == 0 && r.p95_ms == 0) {
+                return Err(Error::BadRequest("alerts.routes[] is a route (`/api/checkout`, `/users/:id`, `/api/*`), an optional method, and error_pct (1–100) or p95_ms".into()));
+            }
+        }
+        if let Some(r) = self.alerts.routes.iter().enumerate().find_map(|(i, r)| self.alerts.routes[..i].iter().any(|o| o.label() == r.label()).then_some(r)) {
+            return Err(Error::BadRequest(format!("alerts.routes names {} twice", r.label())));
         }
         if self.alerts.log_match.as_ref().is_some_and(|m| m.trim().is_empty() || m.len() > 200) || !(1..=10_000).contains(&self.alerts.log_count) {
             return Err(Error::BadRequest("alerts.log_match is 1–200 characters, alerts.log_count 1–10000".into()));
@@ -1794,6 +1942,18 @@ pub struct Environment {
     /// People signed in to roll who may open the project get in (`access.signed_in`).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub signed_in: bool,
+    /// Visitors a provider signs in (`access.sso`): its provider and who it lets in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sso: Option<Sso>,
+    /// Its last cold start on the node serving it, in parts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_cold_start: Option<ColdStart>,
+    /// Paths whose CORS preflights reach the app past its gate (`access.preflight`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub preflight: Vec<String>,
+    /// Other services of the project let in with roll's token for them (`access.callers`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub callers: Vec<String>,
     /// Visitors may type its password (`access.password`; never returned).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub password: bool,
@@ -1855,6 +2015,12 @@ pub struct Environment {
     /// person deploys, redeploys or promotes, or resumes them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub held_after: Option<String>,
+    /// When attack mode goes on by itself ([`crate::attack_mode`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attack_mode: Option<crate::attack_mode::AttackMode>,
+    /// Attack mode is on until then (unix ms): every request without a pass gets the challenge.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub challenge_until: Option<i64>,
     /// A person holds its deploys (`PUT … {held: true}`): pushes, hooks and tag moves build to
     /// `ready` (a web service without a volume) for them to put live, or wait.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -1868,6 +2034,10 @@ pub struct Environment {
     pub rate_limit: Option<RateLimit>,
     /// Its firewall rules, in order ([]: none).
     pub firewall: Vec<FirewallRule>,
+    /// How many requests each of them matched in the last 24 hours, in their order (on the node
+    /// that serves it: a takeover starts them again). A `log` rule's too.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub firewall_hits: Vec<u32>,
     /// Headers its answers carry ([]: none).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub headers: Vec<HeaderRule>,
@@ -2003,6 +2173,14 @@ pub struct FirewallRule {
     /// request without it counts by its address.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// Kinds of client from roll's managed lists ([`crate::bots`]): `ai`, `search`, `preview`,
+    /// `tools`, `verified`, `spoofed`; any of them matches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bots: Vec<String>,
+    /// Kinds of attack from roll's managed patterns ([`crate::attacks`]): `scanners`,
+    /// `traversal`, `sqli`, `xss`, `rce`; any of them matches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attacks: Vec<String>,
 }
 
 /// A named part of a request a firewall rule reads ([`FirewallRule::header`]): there, or there
@@ -2045,11 +2223,15 @@ pub struct Asked<'a> {
     pub method: &'a str,
     /// As [`normal_path`] gives it.
     pub path: &'a str,
+    /// As it came, still encoded ([`crate::attacks`] reads how it was spelt).
+    pub raw_path: &'a str,
     pub user_agent: &'a str,
     /// The address the fleet vouches for.
     pub ip: Option<std::net::IpAddr>,
     pub headers: &'a axum::http::HeaderMap,
     pub query: Option<&'a str>,
+    /// What [`crate::bots`] made of its client.
+    pub bot: Option<crate::bots::Bot>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2062,6 +2244,19 @@ pub enum FirewallAction {
     /// Let in a browser that has passed a proof of work this hour (Vercel's Attack Challenge
     /// Mode, `challenge.rs`); anything else gets the page that works it out.
     Challenge,
+    /// Count what it matches and go on to the next rule (Vercel's Log action, Cloud Armor's
+    /// preview mode): a rule tried on real traffic before it blocks anyone.
+    Log,
+}
+
+impl FirewallRule {
+    /// What it's counted by ([`Environment::firewall_hits`]): its content, so moving it or
+    /// changing another setting keeps its count, and changing it starts a new one.
+    pub fn fingerprint(&self) -> u64 {
+        use sha2::{Digest, Sha256};
+        let d = Sha256::digest(serde_json::to_vec(self).unwrap_or_default());
+        u64::from_be_bytes(d[..8].try_into().unwrap_or_default())
+    }
 }
 
 /// The most rules an environment has.
@@ -2128,8 +2323,18 @@ impl FirewallRule {
                 m.check(what, lower)?;
             }
         }
-        if self.path.is_none() && self.methods.is_empty() && self.user_agent.is_none() && self.ips.is_empty() && self.header.is_none() && self.cookie.is_none() && self.query.is_none() {
-            return bad("a rule matches on a path, methods, a user agent, addresses, a header, a cookie or a query parameter");
+        if self.bots.len() > crate::bots::KINDS.len() || self.bots.iter().any(|b| !crate::bots::KINDS.contains(&b.as_str())) {
+            return bad("bots are any of ai, search, preview, tools, verified, spoofed");
+        }
+        self.bots.sort();
+        self.bots.dedup();
+        if self.attacks.len() > crate::attacks::KINDS.len() || self.attacks.iter().any(|b| !crate::attacks::KINDS.contains(&b.as_str())) {
+            return bad("attacks are any of scanners, traversal, sqli, xss, rce");
+        }
+        self.attacks.sort();
+        self.attacks.dedup();
+        if self.path.is_none() && self.methods.is_empty() && self.user_agent.is_none() && self.ips.is_empty() && self.header.is_none() && self.cookie.is_none() && self.query.is_none() && self.bots.is_empty() && self.attacks.is_empty() {
+            return bad("a rule matches on a path, methods, a user agent, addresses, a header, a cookie, a query parameter, bots or attacks");
         }
         if self.action == FirewallAction::Challenge && !self.methods.is_empty() && self.methods.iter().any(|m| m != "GET") {
             return bad("a challenge is a page a browser opens: GET only");
@@ -2174,7 +2379,9 @@ impl FirewallRule {
             let pairs: Vec<(String, String)> = url::form_urlencoded::parse(a.query.unwrap_or("").as_bytes()).map(|(k, v)| (k.into_owned(), v.into_owned())).collect();
             m.takes(pairs.iter().filter(|(k, _)| *k == m.name).map(|(_, v)| v.as_str()))
         });
-        path_ok && method_ok && ua_ok && ip_ok && header_ok && cookie_ok && query_ok
+        let bots_ok = self.bots.is_empty() || a.bot.is_some_and(|b| self.bots.iter().any(|k| b.is(k)));
+        // Last: the dearest to read.
+        path_ok && method_ok && ua_ok && ip_ok && header_ok && cookie_ok && query_ok && bots_ok && (self.attacks.is_empty() || crate::attacks::matches(&self.attacks, a))
     }
 
     /// A limit's client by its `key` (a header's or cookie's value, hashed: never kept as it
@@ -2896,6 +3103,9 @@ pub struct Deployment {
     pub started_at: Option<i64>,
     pub finished_at: Option<i64>,
     pub ready_ms: Option<i64>,
+    /// Its image's size, where the runtime says (bytes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_bytes: Option<i64>,
     /// Who asked for it: a push's commit author, the token or connection that called the API
     /// (`operator` for the operator's token), none when roll did it on its own or nothing said.
     pub actor: Option<String>,
@@ -2923,6 +3133,10 @@ pub struct Deployment {
     /// single deployment's GET; the list leaves them out.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<Step>,
+    /// Its build's steps (the Dockerfile's, sending the context, exporting the image) with how
+    /// long each took and whether its cache answered, on a single deployment's GET.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub build_steps: Vec<crate::build_steps::BuildStep>,
     /// Who approved putting it live, where the environment asks for approvals; on a single
     /// deployment's GET.
     #[serde(skip_serializing_if = "Vec::is_empty")]

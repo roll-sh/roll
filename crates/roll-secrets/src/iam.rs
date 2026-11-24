@@ -129,7 +129,7 @@ impl LinkProvider for Provider {
         }
         let (id, secret) = self.sts.iam_create_key(&arn, &ext, &user).map_err(|why| Error::Link(format!("creating a key for {user}: {why}")))?;
         let handle = json!({ "key_id": id.expose() });
-        Ok(Issued { parts: BTreeMap::from([("access_key_id".to_string(), id), ("secret_access_key".to_string(), secret)]), handle })
+        Ok(Issued { expires_at: None, parts: BTreeMap::from([("access_key_id".to_string(), id), ("secret_access_key".to_string(), secret)]), handle })
     }
 
     /// The grace period ended: the key goes (one that's gone already is fine).

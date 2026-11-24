@@ -106,6 +106,10 @@ pub struct Field {
 pub struct Issued {
     pub parts: BTreeMap<String, Value>,
     pub handle: Json,
+    /// When the vendor ends the credential by itself (unix ms): a GitLab token's `expires_at`, an
+    /// Entra password's `endDateTime`. The key's `expires_at`, so health's `expiring` and
+    /// `expired` see it. `None`: it lives until it's revoked (or roll's lease is its end).
+    pub expires_at: Option<i64>,
 }
 
 /// A decoy credential a product made ([`LinkProvider::plant_decoy`]).

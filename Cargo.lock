@@ -6603,6 +6603,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "psl"
+version = "2.1.261"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3058f918351d1ee290ff4e70243e419b33269dcb83bc8cd46c5afa8a97a90012"
+dependencies = [
+ "psl-types",
+]
+
+[[package]]
+name = "psl-types"
+version = "2.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
+
+[[package]]
 name = "pulp"
 version = "0.22.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7297,6 +7312,7 @@ dependencies = [
  "aes-gcm",
  "anyhow",
  "argon2",
+ "async-trait",
  "aws-config",
  "aws-sdk-sesv2",
  "axum",
@@ -7377,6 +7393,9 @@ dependencies = [
  "getrandom 0.4.3",
  "hkdf",
  "hmac 0.12.1",
+ "http-body-util",
+ "hyper 1.12.0",
+ "hyper-util",
  "ignore",
  "libc",
  "model-gateway",
@@ -7398,6 +7417,7 @@ dependencies = [
  "roll-previews",
  "roll-secrets",
  "roll-secrets-chain",
+ "roll-secrets-ref",
  "roll-workspace",
  "rustls-pemfile",
  "rustyline",
@@ -7591,6 +7611,7 @@ dependencies = [
 name = "roll-previews"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "anyhow",
  "async-trait",
  "axum",
@@ -8583,6 +8604,7 @@ dependencies = [
  "futures-util",
  "hickory-resolver",
  "hkdf",
+ "html5ever",
  "indexmap",
  "itoa",
  "jsonwebtoken",
@@ -8591,8 +8613,11 @@ dependencies = [
  "memchr",
  "parking_lot",
  "pbkdf2",
+ "psl",
+ "quick-xml",
  "rand 0.8.8",
  "regex",
+ "regex-automata",
  "regex-syntax",
  "reqwest",
  "roll-net",
@@ -8603,6 +8628,7 @@ dependencies = [
  "search-analysis",
  "search-codec",
  "search-index",
+ "search-lucene",
  "search-painless",
  "search-test-support",
  "serde_json",
@@ -8636,6 +8662,17 @@ dependencies = [
  "smallvec",
  "thiserror 2.0.21",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "search-lucene"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "miniz_oxide 0.9.1",
+ "serde_json",
+ "thiserror 2.0.21",
+ "zstd 0.14.3",
 ]
 
 [[package]]

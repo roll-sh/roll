@@ -188,6 +188,11 @@ pub trait SecretSource: Send + Sync {
     async fn issue(&self, _project: &str, _service: &str, _env: &str, _aud: &str, _ttl: std::time::Duration) -> anyhow::Result<Option<String>> {
         Ok(None)
     }
+    /// A token of roll's issuer, checked (its signature against roll's keys, `iss`, `aud`, its
+    /// times): its `sub`. None: it isn't one, or there's no issuer here.
+    async fn verify_issued(&self, _token: &str, _aud: &str) -> Option<String> {
+        None
+    }
     /// Bind `reference` (a `roll://` of another environment) to `who`, who writes it into
     /// `service`'s variables: refused unless they may reveal it there now. What to keep beside it
     /// (roll secrets' maker: who chose it, never a credential).
@@ -330,6 +335,27 @@ pub trait Visitors: Send + Sync {
     /// Whether the roll login `session` (`ses_…`, the one that asked for the ticket) is still
     /// live: signing out of roll, or a person revoking their sessions, ends what it opened.
     fn session_live(&self, user: &str, session: &str) -> bool;
+}
+
+/// Signing in visitors who needn't be roll's (rolld: roll-accounts' GitHub and Google, as a
+/// visit only; `access.sso`).
+pub trait VisitorSignIn: Send + Sync {
+    /// Where a visitor's browser goes to sign in with `provider` for apps' signed `request`
+    /// (`orgs`: GitHub reads their organisations too). None: that provider isn't set up here.
+    fn start_url(&self, provider: &str, request: &str, orgs: bool) -> Option<String>;
+}
+
+/// Someone a provider vouched for, coming back to [`crate::Apps::admit_visitor`].
+#[derive(Clone, Debug)]
+pub struct SsoVisitor {
+    pub provider: String,
+    pub subject: String,
+    /// Verified, lower case.
+    pub email: String,
+    /// GitHub organisations they're a member of (lower case), when the sign-in read them.
+    pub orgs: Vec<String>,
+    /// Google's `hd`: the Workspace domain the account belongs to (none for a consumer account).
+    pub hosted_domain: Option<String>,
 }
 
 /// A model that reads a failed deployment (rolld: the owner of the service's roll code repo's
@@ -576,6 +602,11 @@ pub trait Resolver: Send + Sync {
     async fn addresses(&self, _host: &str) -> Vec<String> {
         Vec::new()
     }
+    /// The PTR names a reverse name (`1.2.0.192.in-addr.arpa`) answers with: verifying a
+    /// crawler's address ([`crate::bots`]).
+    async fn ptr(&self, _name: &str) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// DNS over HTTPS (RFC 8484's JSON form, as Cloudflare and Google serve it): no resolver
@@ -600,6 +631,7 @@ impl Doh {
             "CNAME" => 5,
             "A" => 1,
             "AAAA" => 28,
+            "PTR" => 12,
             _ => 16,
         };
         v["Answer"]
@@ -629,6 +661,10 @@ impl Resolver for Doh {
         let mut v = self.query(host, "A").await;
         v.extend(self.query(host, "AAAA").await);
         v
+    }
+
+    async fn ptr(&self, name: &str) -> Vec<String> {
+        self.query(name, "PTR").await
     }
 }
 
@@ -660,5 +696,9 @@ impl Resolver for StaticDns {
         let mut v = self.find(host, "A");
         v.extend(self.find(host, "AAAA"));
         v
+    }
+
+    async fn ptr(&self, name: &str) -> Vec<String> {
+        self.find(name, "PTR")
     }
 }

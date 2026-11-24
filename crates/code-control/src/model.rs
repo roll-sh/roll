@@ -377,6 +377,9 @@ pub struct PreviewEnvironment {
     /// Its error groups (from its services' output) that main's preview doesn't have.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_errors: Option<PreviewNewErrors>,
+    /// Its secret values its pages serve, by name and path (never the value).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub served_secrets: Vec<PreviewServedSecret>,
     /// How much its page differs from the project's preview of the default branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_change: Option<PreviewBaseChange>,
@@ -542,6 +545,13 @@ pub struct PreviewBaseChange {
     /// the branch's.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub endpoints: Vec<PreviewEndpoint>,
+}
+
+/// One of a preview's secret values its pages serve: its name and where.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewServedSecret {
+    pub key: String,
+    pub path: String,
 }
 
 /// Error groups the branch's preview doesn't have: how many, and the most frequent few. A title
@@ -761,6 +771,18 @@ pub struct Blocker {
     /// project's roll secrets validity checks are on (docs/secrets.md, "Is it live?").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validity: Option<CredentialValidity>,
+    /// `secret_leak`: where a person may rotate the key from the notice (roll secrets' rotate
+    /// route, as them): a managed credential, in a project that doesn't rotate leaked keys on its
+    /// own. Empty otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rotate: Vec<RotateAt>,
+}
+
+/// A leaked key's place in roll secrets, where it can be rotated.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RotateAt {
+    pub environment: String,
+    pub folder: String,
 }
 
 /// A credential's validity as its provider answered (roll secrets' validity checks): never its
@@ -784,7 +806,7 @@ pub struct CredentialValidity {
 
 impl Blocker {
     pub fn new(kind: &str, message: impl Into<String>) -> Blocker {
-        Blocker { kind: kind.into(), message: message.into(), key: None, environments: Vec::new(), path: None, line: None, fingerprint: None, validity: None }
+        Blocker { kind: kind.into(), message: message.into(), key: None, environments: Vec::new(), path: None, line: None, fingerprint: None, validity: None, rotate: Vec::new() }
     }
 
     /// One about roll secrets key `key` in `environments`.

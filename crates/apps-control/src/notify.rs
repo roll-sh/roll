@@ -18,7 +18,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// What a target can ask for; a new one gets the two that need someone.
-pub const EVENTS: [&str; 33] = [
+pub const EVENTS: [&str; 39] = [
+    "deploy.started",
     "deploy.failed",
     "deploy.base_updated",
     "rollout.waiting",
@@ -37,6 +38,7 @@ pub const EVENTS: [&str; 33] = [
     "alert.latency",
     "alert.capacity",
     "alert.log",
+    "alert.route",
     "cron.failed",
     "job.failed",
     "domain.active",
@@ -51,10 +53,14 @@ pub const EVENTS: [&str; 33] = [
     "deploy.vulnerable",
     "alert.slo",
     "alert.anomaly",
+    "attack.mode",
+    "scale.out",
+    "scale.in",
+    "instance.crashed",
     // Every `audit.*` entry (who changed what), for a SIEM's webhook; never an on-call page.
     "audit",
 ];
-const DEFAULT_EVENTS: [&str; 26] = ["check.down", "heartbeat.missed", "alert.slo", "alert.anomaly", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.spike", "spend.limit", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"];
+const DEFAULT_EVENTS: [&str; 27] = ["check.down", "heartbeat.missed", "alert.slo", "alert.anomaly", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.spike", "spend.limit", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "alert.route", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"];
 /// Whether a target with `events` hears an event: its own kind, or for a resolution, the alert's
 /// (whoever heard an alert hears it clear; there's nothing else to ask for).
 fn wants(events: &[String], kind: &str, data: &Value, oncall: bool) -> bool {
@@ -474,6 +480,17 @@ impl Apps {
                 ),
             ),
             "alert.errors" => (format!("{what}: errors"), format!("{}% of its {} requests in five minutes answered 5xx (the alert is at {}%).", e.data["value"], e.data["requests"], e.data["threshold"])),
+            "alert.route" => {
+                let route = match e.data["method"].as_str() {
+                    Some(m) => format!("{m} {}", e.data["route"].as_str().unwrap_or("")),
+                    None => e.data["route"].as_str().unwrap_or("a route").to_string(),
+                };
+                if e.data["kind"] == "latency" {
+                    (format!("{what}: {route} is slow"), format!("Its p95 on {route} reached {} ms over {} requests in five minutes (the alert is at {} ms).", e.data["value"], e.data["requests"], e.data["threshold"]))
+                } else {
+                    (format!("{what}: {route} is failing"), format!("{}% of its {} requests to {route} in five minutes answered 5xx (the alert is at {}%).", e.data["value"], e.data["requests"], e.data["threshold"]))
+                }
+            }
             "alert.latency" => (format!("{what}: slow"), format!("Its p95 latency reached {} ms (the alert is at {} ms).", e.data["value"], e.data["threshold"])),
             "alert.capacity" => (format!("{what}: at capacity"), format!("{}% of its {} requests in five minutes found all {} instances busy ({} requests each at once). Raise its max instances (`roll apps set --max`) or its concurrency, or make it answer faster (the alert is at {}%).", e.data["value"], e.data["requests"], e.data["max_instances"], e.data["concurrency"], e.data["threshold"])),
             "heartbeat.missed" => (
@@ -500,6 +517,21 @@ impl Apps {
                     _ => (format!("{what}: slower than usual"), format!("p95 {v} ms in the last hour, where this hour of the week is usually {usual} ms.")),
                 }
             }
+            "deploy.started" => (format!("{what}: building"), format!("A deploy{} began building{}.", e.data["revision"].as_str().map(|r| format!(" of {}", &r[..r.len().min(8)])).unwrap_or_default(), if e.data["reused"] == true { " (an earlier build's image, no build)" } else { "" })),
+            "scale.out" | "scale.in" => (
+                format!("{what}: scaled {} to {} instances", if e.kind == "scale.out" { "out" } else { "in" }, e.data["to"]),
+                format!("From {} instances: {}.", e.data["from"], e.data["reason"].as_str().unwrap_or("")),
+            ),
+            "instance.crashed" => (format!("{what}: an instance crashed"), format!("It stopped because {}. Another starts in its place.", e.data["reason"].as_str().unwrap_or("it exited"))),
+            "attack.mode" => (
+                format!("{what}: attack mode is on"),
+                format!(
+                    "{} requests in a minute (its threshold is {}): every visitor without a pass gets the challenge page until {}. End it early with `challenge_until: null`.",
+                    e.data["requests"],
+                    e.data["per_minute"],
+                    e.data["until"].as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(|d| d.format("%H:%M UTC").to_string()).unwrap_or_default()
+                ),
+            ),
             "volume.backup_failed" => (format!("{what}: volume backup failed"), format!("The daily backup of its volume failed: {}. The last one that worked is still there.", e.data["error"].as_str().unwrap_or("no reason given"))),
             "alert.resolved" => {
                 let which = match e.data["alert"].as_str() {
@@ -512,6 +544,7 @@ impl Apps {
                     Some("alert.latency") => "latency",
                     Some("alert.capacity") => "capacity",
                     Some("alert.log") => "log",
+                    Some("alert.route") => e.data["route"].as_str().unwrap_or("a route"),
                     Some("check.down") => "uptime check",
                     _ => "an",
                 };

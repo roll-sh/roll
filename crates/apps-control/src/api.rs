@@ -120,10 +120,12 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/variables/values"), get(reveal))
         .route(&format!("{env}/logs"), get(env_logs))
         .route(&format!("{env}/metrics"), get(metrics))
+        .route(&format!("{env}/advice"), get(advice))
         .route(&format!("{env}/slo"), get(slo))
         .route(&format!("{env}/routes"), get(routes))
         .route(&format!("{env}/analytics"), get(analytics))
         .route(&format!("{env}/visit"), post(visit))
+        .route(&format!("{env}/fetch"), get(fetch_page))
         .route(&format!("{env}/vitals"), get(vitals))
         .route(&format!("{env}/app-metrics"), get(app_metrics))
         .route(&format!("{env}/errors"), get(errors))
@@ -555,10 +557,12 @@ async fn links(State(apps): S, Path(id): Path<String>) -> R {
 struct ActivityQuery {
     /// Every kind of event, not only the audit trail: the service's timeline.
     all: Option<String>,
+    /// Older than this event (its `seq`): the next page back.
+    before: Option<i64>,
 }
 
 async fn activity(State(apps): S, Path(id): Path<String>, Query(q): Query<ActivityQuery>) -> R {
-    ok(apps.activity(&id, truthy(&q.all)).await?)
+    ok(apps.activity(&id, truthy(&q.all), q.before).await?)
 }
 
 async fn put_link(State(apps): S, Path((id, kind, r)): Path<(String, String, String)>, ext: Extensions, b: Bytes) -> R {
@@ -1518,6 +1522,10 @@ async fn vitals(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q
 #[derive(Deserialize)]
 struct VisitBody {
     to: String,
+    /// The SHA-256 the environment's host gave the browser it sent here (`state`): the ticket
+    /// opens only in that browser.
+    #[serde(default)]
+    state: Option<String>,
 }
 
 /// A signed-in person's one-use way into a sign-in-gated environment (roll's dashboard asks
@@ -1526,7 +1534,25 @@ async fn visit(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Ext
     let Some(user) = ext.get::<roll_auth::SignedIn>() else {
         return Err(Error::Forbidden("signing in to an environment is for a person signed in to roll, not a token".into()));
     };
-    ok(json!({ "url": apps.visit_ticket(&id, &env, &user.user, &user.session, &b.to).await? }))
+    ok(json!({ "url": apps.visit_ticket(&id, &env, &user.user, &user.session, &b.to, b.state.as_deref().unwrap_or("")).await? }))
+}
+
+#[derive(Deserialize)]
+struct FetchQuery {
+    path: Option<String>,
+    head: Option<bool>,
+    deployment: Option<String>,
+}
+
+/// One of an environment's pages as roll reads it, past its gates (an agent checking what it
+/// deployed): `{status, url, headers, body, truncated}`.
+async fn fetch_page(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<FetchQuery>) -> R {
+    ok(apps.fetch_page(&id, &env, q.path.as_deref().unwrap_or("/"), q.head.unwrap_or(false), q.deployment.as_deref()).await?)
+}
+
+/// What its last week says about its settings (`advice.rs`).
+async fn advice(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
+    ok(apps.advice(&id, &env).await?)
 }
 
 async fn trace(State(apps): S, Path((id, env, trace)): Path<(String, String, String)>) -> R {

@@ -93,9 +93,11 @@ func pathQuery(path string) string {
 }
 
 type environment struct {
-	Slug      string `json:"slug"`
-	Name      string `json:"name"`
-	Protected bool   `json:"protected"`
+	Slug      string   `json:"slug"`
+	Name      string   `json:"name"`
+	Protected bool     `json:"protected"`
+	Approvals int64    `json:"approvals"`
+	Approvers []string `json:"approvers"`
 }
 
 type link struct {

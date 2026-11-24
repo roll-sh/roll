@@ -62,6 +62,12 @@ impl Engine {
         }
         self.store.resolve_note(id, note, by)?;
         self.store.log(id, &format!("{by} resolved a note on its page"))?;
+        // Said on the change too: its pull request and the note's Slack thread hear it. Best
+        // effort: the page has it resolved either way.
+        let said = code_control::review::preview_note::reply_body(note, crate::notes::RESOLVED);
+        if let Err(e) = self.source.comment(change, &said, by, false).await {
+            tracing::warn!(preview = %id, error = %e, "previews: saying a note was resolved on its change");
+        }
         Ok(())
     }
 
@@ -429,9 +435,13 @@ impl Engine {
     /// (`access: link` or `team`); a public one needs none.
     /// `maker`: who it is (`usr_…`, a person or the person behind their token; none for the
     /// operator): the link works only while they may still open the project's previews.
-    pub fn share(&self, id: &str, hours: u32, by: &str, maker: Option<&str>) -> Result<(crate::Share, String)> {
+    pub fn share(&self, id: &str, hours: u32, by: &str, maker: Option<&str>, label: &str, notes: bool) -> Result<(crate::Share, String)> {
         if !(1..=KEEP_MAX_HOURS).contains(&hours) {
             return Err(Error::BadRequest(format!("hours: 1 to {KEEP_MAX_HOURS}")));
+        }
+        let label = label.trim();
+        if label.chars().count() > 60 || label.chars().any(char::is_control) {
+            return Err(Error::BadRequest("a share link's label is one line of 60 characters at most".into()));
         }
         let r = self.store.row(id)?;
         if r.desired == Desired::Deleted {
@@ -441,9 +451,38 @@ impl Engine {
             return Err(Error::Conflict("the preview is public: anyone can open it without a link".into()));
         }
         let url = self.store.services(id)?.into_iter().next().map(|s| s.url).ok_or_else(|| Error::Conflict("the preview has no service to share yet".into()))?;
-        let (share, token) = self.store.create_share(id, self.store.now_ms()? + hours as i64 * 3_600_000, by, maker)?;
-        self.store.log(id, &format!("shared for {hours} hours by {by} ({})", share.id))?;
+        let (share, token) = self.store.create_share(id, self.store.now_ms()? + hours as i64 * 3_600_000, by, maker, label, notes)?;
+        self.store.log(id, &format!("shared for {hours} hours by {by} ({}{}{})", share.id, if label.is_empty() { String::new() } else { format!(", \"{label}\"") }, if notes { ", guests may leave notes" } else { "" }))?;
         Ok((share, format!("{}/?roll_share={token}", url.trim_end_matches('/'))))
+    }
+
+    /// A note a guest left through share link `share` (its `notes` on): posted on the change as
+    /// `guest:<name>`, its text made inert for a pull request (no mention, image or HTML), at most
+    /// [`crate::notes::GUEST_PER_HOUR`] an hour per link. Its review's id.
+    pub async fn guest_note(&self, id: &str, share: &crate::store::LiveShare, n: &crate::notes::GuestNote) -> Result<String> {
+        if !share.notes {
+            return Err(Error::Forbidden("this share link doesn't take notes".into()));
+        }
+        let r = self.store.row(id)?;
+        let change = r.change_id.clone().ok_or_else(|| Error::BadRequest("only a change's preview has notes".into()))?;
+        let now = self.store.now_ms()?;
+        if self.store.guest_notes_since(id, &share.id, now - 3_600_000)? >= crate::notes::GUEST_PER_HOUR {
+            return Err(Error::Conflict(format!("{} notes an hour through one share link: try again later", crate::notes::GUEST_PER_HOUR)));
+        }
+        let url = self.store.services(id)?.into_iter().next().map(|s| s.url).unwrap_or_default();
+        let (by, body) = crate::notes::guest_body(n, &url, id, &share.label).map_err(Error::BadRequest)?;
+        // A guest's words: outside the team, wherever the review is read (MCP's lockdown).
+        let review = self.source.comment(&change, &body, &by, true).await.map_err(|e| Error::Internal(format!("{e:#}")))?;
+        let review = review.ok_or_else(|| Error::Conflict("this preview's change takes no notes".into()))?;
+        self.store.add_guest_note(id, &share.id, &review, now)?;
+        self.store.log(id, &format!("{by} left a note through share link {}", share.id))?;
+        Ok(review)
+    }
+
+    /// The notes on `path` a guest of share link `share` sees: only those left through it.
+    pub async fn guest_notes_of(&self, id: &str, share: &str, path: &str) -> anyhow::Result<Vec<crate::notes::Note>> {
+        let mine = self.store.guest_note_ids(id, share)?;
+        Ok(self.notes_of(id, path).await?.into_iter().filter(|n| mine.contains(&n.id)).collect())
     }
 
     /// End a share link at once.
@@ -559,6 +598,29 @@ impl Engine {
         self.store.log(id, &format!("{by} accepted its regressions against main at {}", short(&r.head)))?;
         self.report(r.clone()).await;
         self.store.view(self.store.row(id)?)
+    }
+
+    /// `GET …/{id}/data/{resource}?table=`: a look at a data branch from the sheet (Neon's Tables,
+    /// Supabase's table editor): its tables, or a table's first rows, read as the branch's own
+    /// role and read-only, so its masks hold. Only a branch that's ready and masked with today's
+    /// rules, as `connect` gives.
+    pub async fn browse(&self, id: &str, resource: &str, table: Option<&str>) -> Result<crate::Browse> {
+        let r = self.store.row(id)?;
+        if r.desired == Desired::Deleted {
+            return Err(Error::Conflict("the preview is being deleted".into()));
+        }
+        let s = self.store.settings(&r.project_id)?;
+        let res = self.store.resources(id)?.into_iter().find(|x| format!("{}:{}", x.kind.as_str(), x.parent) == resource).ok_or_else(|| Error::NotFound(format!("the preview has no data branch {resource}")))?;
+        let Some(branch) = res.r#ref.clone() else { return Err(Error::Conflict("it isn't branched yet".into())) };
+        if res.state != ResourceState::Ready || self.store.mask_digest(id, res.kind, &res.parent)?.unwrap_or_default() != mask_digest(&s, &res) {
+            return Err(Error::Conflict("it's being made or masked: look again in a moment".into()));
+        }
+        let b = self.brancher(res.kind).map_err(|e| Error::Conflict(format!("{e:#}")))?;
+        match b.browse(&res.parent, &branch, table).await {
+            Ok(Some(v)) => Ok(v),
+            Ok(None) => Err(Error::Conflict(format!("a {} branch can't be looked at here yet: connect to it (roll preview connect)", res.kind.as_str()))),
+            Err(e) => Err(Error::Conflict(format!("{e:#}"))),
+        }
     }
 
     /// Each data branch's connection, as the preview's services get it (Neon's connection

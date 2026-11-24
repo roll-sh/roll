@@ -696,6 +696,10 @@ impl Runtime for Docker {
         true
     }
 
+    async fn image_bytes(&self, image: &str) -> Option<u64> {
+        docker(&["image", "inspect", "-f", "{{.Size}}", image]).await.ok().and_then(|s| s.trim().parse().ok())
+    }
+
     async fn image_id(&self, image: &str) -> Option<String> {
         docker(&["image", "inspect", "-f", "{{.Id}}", image]).await.ok().map(|s| s.trim().to_string()).filter(|s| s.starts_with("sha256:"))
     }

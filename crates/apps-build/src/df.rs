@@ -67,6 +67,19 @@ impl Df {
         self.line(&format!("ENV {}", pairs.join(" ")));
     }
 
+    /// [`Df::run`] with one more variable for this step only (a Next.js build's
+    /// [`crate::NEXT_DEPLOYMENT_ID`]: a secret, so its value never keys a cached layer).
+    pub(crate) fn run_with(&mut self, also: &str, caches: &[&str], cmd: &str) {
+        let added = !self.env.iter().any(|e| e == also);
+        if added {
+            self.env.push(also.to_string());
+        }
+        self.run(caches, cmd);
+        if added {
+            self.env.pop();
+        }
+    }
+
     /// `RUN cmd` with a BuildKit cache mount on each of `caches`. A command over several lines
     /// (an override) goes in the exec form, so its newlines stay the shell's.
     pub(crate) fn run(&mut self, caches: &[&str], cmd: &str) {

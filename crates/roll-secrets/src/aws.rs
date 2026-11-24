@@ -212,7 +212,7 @@ impl LinkProvider for Provider {
         let seconds = ((ttl_minutes.unwrap_or(60) + 5) * 60).clamp(900, 43_200) as i32;
         let s = session(&*self.sts, &self.db, self.issuing.as_ref(), &project, &arn, &trust, &session_name(label), seconds).map_err(|why| Error::Link(format!("AWS didn't let roll assume {name}: {why}")))?;
         let parts = BTreeMap::from([("access_key_id".to_string(), s.access_key_id), ("secret_access_key".to_string(), s.secret_access_key), ("session_token".to_string(), s.session_token)]);
-        Ok(Issued { parts, handle: json!({ "expires_at": s.expires_at }) })
+        Ok(Issued { expires_at: None, parts, handle: json!({ "expires_at": s.expires_at }) })
     }
 
     /// STS has no way to end one session early: it ends at its own expiry.
@@ -345,6 +345,24 @@ impl Secrets {
             c.execute("DELETE FROM aws_roles WHERE id = ?", [id])?;
             audit::record(c, self.keys()?, project, caller, "aws_role.delete", None, None, &[], &format!("deleted AWS role {name}"), now)
         })
+    }
+
+    /// A session of the project's role `name` for one push of sync `sync` (syncs.rs,
+    /// [`crate::syncs::SyncTarget::aws_role`]): the shortest STS gives, as a link's issue would,
+    /// and only while the role's maker may still manage the project.
+    pub(crate) fn sync_aws_session(&self, project: &str, name: &str, sync: &str) -> Result<Session> {
+        let id: String = self
+            .db
+            .read(|c| c.query_row("SELECT id FROM aws_roles WHERE project_id = ? AND name = ?", [project, name], |r| r.get(0)).optional())?
+            .ok_or_else(|| Error::BadRequest(format!("the project has no AWS role named {name} (…/aws-roles)")))?;
+        self.provider_for(KIND, &id)?;
+        let sts = self.sts.clone().ok_or_else(|| Error::BadRequest("AWS roles aren't on this server".into()))?;
+        let (arn, trust): (String, String) = self.db.read(|c| c.query_row("SELECT role_arn, COALESCE(trust, 'external_id') FROM aws_roles WHERE id = ?", [&id], |r| Ok((r.get(0)?, r.get(1)?))))?;
+        let issuing = match (&self.clouds, &self.keys) {
+            (Some(c), Ok(keys)) => Some(Issuing { url: c.issuer.clone(), keys: keys.clone() }),
+            _ => None,
+        };
+        session(&*sts, &self.db, issuing.as_ref(), project, &arn, &trust, &session_name(&format!("sync-{sync}")), 900).map_err(|why| Error::Link(format!("AWS didn't let roll assume {name}: {why}")))
     }
 
     /// The project's roles, as link targets' (kind, ref).

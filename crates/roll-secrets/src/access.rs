@@ -285,6 +285,22 @@ pub fn confined_to(g: &roll_auth::Grant, project: &str) -> bool {
     roll_auth::roles::confined_to(&g.scope, g.ask_otherwise, project)
 }
 
+/// Whether `rule` can be about `project`'s secrets at all: secrets' or every product's, over every
+/// project or naming this one (`{project}`, or `{id}`, which is the project's id). Read as data, a
+/// superset of the rules that allow anything there: it narrows roll-access's tokens before each is
+/// judged ([`Workloads::grants_naming`]).
+pub fn rule_may_name(rule: &roll_auth::scope::Rule, project: &str) -> bool {
+    use roll_auth::scope::{Resources, Selector};
+    (rule.product == "secrets" || rule.product == "*")
+        && match &rule.resources {
+            Resources::All => true,
+            Resources::Some(sel) => sel.iter().any(|s| match s {
+                Selector::Project { project: p } => p == project,
+                Selector::Id { id, .. } => id == project,
+            }),
+        }
+}
+
 /// Short-lived roll-access tokens for workload identities' logins (rolld: `Access::mint_workload`).
 /// The login is the proof, so there's no caller to gate: roll-access checks the rule is within the
 /// identity's scope and that its owner can still sign in.
@@ -298,6 +314,11 @@ pub trait Workloads: Send + Sync {
     /// those that reach a folder). Blocking.
     fn grants(&self) -> crate::Result<Vec<roll_auth::Grant>> {
         Ok(vec![])
+    }
+    /// Those of [`Workloads::grants`] with a rule that can name `project` ([`rule_may_name`]): the
+    /// only ones that may reach it. An implementation narrows before resolving each. Blocking.
+    fn grants_naming(&self, project: &str) -> crate::Result<Vec<roll_auth::Grant>> {
+        Ok(self.grants()?.into_iter().filter(|g| g.scope.0.iter().any(|r| rule_may_name(r, project))).collect())
     }
     /// A long-lived roll token with `rule`, made for the request `ext` belongs to as `POST
     /// /v1/access/tokens` makes one (its owner the caller; a gateway's). Blocking.

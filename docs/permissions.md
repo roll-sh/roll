@@ -695,12 +695,16 @@ token's: the row, the resource, the rules. Making a project is the person's own
   never an environment named `production`, protected or not. It only narrows, so a token can
   carry it too.
 - A project the session's rules don't name is a 404 (as the workspace answers); one they do is a
-  403 that names what the role lacks. A list it can't see whole is filtered; a session never asks.
+  403 that names what the role lacks, the weakest role that may (`roles::weakest_allowed`), and
+  that a project admin changes roles. A list it can't see whole is filtered; a session never asks,
+  and neither does a person's token that wasn't made to: its rules can't reach past their roles,
+  so its refusal points at a role, not at the token's rules.
 - A canvas proves nothing for a person's grant (their session, or a token of theirs): on a member
   product, a resource a project's canvas holds is in that project for their rules only when the
   project trusts it (`Workspace::trusts`: its home, or one of the project's owners' own;
   `Access::resource_as`). A resource in none of their projects is a 404 worded as for a missing
-  one. Products that aren't member products yet keep the canvas as it is.
+  one, with no role hint (that's only for a project they're in). Products that aren't member
+  products yet keep the canvas as it is.
 - A person's token is held within their session on a create too, whatever its own rules say: it
   never makes anything in a project its person isn't in (404), nor where their role doesn't let
   them (403). A create naming no project is refused the same way (previews'), except where it's

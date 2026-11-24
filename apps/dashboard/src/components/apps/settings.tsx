@@ -1,7 +1,7 @@
 import { Trash2 } from "lucide-react";
 import { useReducedMotion } from "@roll/brand";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { appsApi, SERVICE_NAME, type Build, type Environment, type MetricAlert, type Prices, type PushState, type Reset, type Run, type Service, type ServicePatch, type Source } from "@/lib/apps-api";
+import { appsApi, SERVICE_NAME, type Build, type Environment, type MetricAlert, type RouteAlert, type Prices, type PushState, type Reset, type Run, type Service, type ServicePatch, type Source } from "@/lib/apps-api";
 import { Field, Segmented } from "../redis/shared";
 import { btn, Confirm, danger, input, Panel, panel, primary } from "../ui";
 import { Link } from "@/components/link";
@@ -88,6 +88,7 @@ interface Form {
   alertCpu: string;
   /** Alerts on its own gauges, one a line (`queue_depth > 100 for 5m`). */
   alertMetrics: string;
+  alertRoutes: string;
   alertAnomaly: boolean;
   rolloutSteps: string;
   rolloutStep: string;
@@ -205,6 +206,7 @@ export function formOf(s: Service): Form {
     alertLogCount: str(s.run.alerts?.log_count ?? 10),
     alertCpu: str(s.run.alerts?.cpu_pct ?? 0),
     alertMetrics: (s.run.alerts?.metrics ?? []).map(metricAlertLine).join("\n"),
+    alertRoutes: (s.run.alerts?.routes ?? []).map(routeAlertLine).join("\n"),
     alertAnomaly: !!s.run.alerts?.anomaly,
     rolloutSteps: (s.run.rollout?.steps ?? []).join(", "),
     rolloutStep: str(s.run.rollout?.step_s),
@@ -317,8 +319,9 @@ export function patchOf(s: Service, f: Form): ServicePatch {
     run.oidc_audiences = list.length ? list : null;
   }
   if (f.memoryTarget !== before.memoryTarget) run.memory_target = num(f.memoryTarget);
-  if (f.alertMemory !== before.alertMemory || f.alertErrors !== before.alertErrors || f.alertP95 !== before.alertP95 || f.alertCapacity !== before.alertCapacity || f.alertLog !== before.alertLog || f.alertLogCount !== before.alertLogCount || f.alertCpu !== before.alertCpu || f.alertMetrics !== before.alertMetrics || f.alertAnomaly !== before.alertAnomaly)
+  if (f.alertMemory !== before.alertMemory || f.alertErrors !== before.alertErrors || f.alertP95 !== before.alertP95 || f.alertCapacity !== before.alertCapacity || f.alertLog !== before.alertLog || f.alertLogCount !== before.alertLogCount || f.alertCpu !== before.alertCpu || f.alertMetrics !== before.alertMetrics || f.alertAnomaly !== before.alertAnomaly || f.alertRoutes !== before.alertRoutes)
     run.alerts = {
+      routes: routeAlerts(f.alertRoutes),
       ...(f.alertAnomaly ? { anomaly: true } : {}),
       cpu_pct: Number(f.alertCpu) || 0,
       metrics: metricAlerts(f.alertMetrics),
@@ -399,6 +402,27 @@ export function metricAlerts(text: string): MetricAlert[] {
       if (!m) return { name: l };
       const value = Number(m[3]);
       return { name: m[1], ...(m[2] === ">" ? { above: value } : { below: value }), ...(m[4] ? { minutes: Number(m[4]) } : {}), ...(m[5] ? { sum: true } : {}) };
+    });
+}
+
+/** A route alert as Settings writes it: `POST /api/checkout 5xx >= 2% p95 >= 800ms`. */
+export function routeAlertLine(r: RouteAlert): string {
+  return `${r.method ? `${r.method} ` : ""}${r.route}${r.error_pct ? ` 5xx >= ${r.error_pct}%` : ""}${r.p95_ms ? ` p95 >= ${r.p95_ms}ms` : ""}`;
+}
+
+/** Lines of `[METHOD] /route` with `5xx >= n%` and/or `p95 >= nms`, as `alerts.routes` (a line it
+ *  can't read goes as its route with no threshold, for the API to refuse whole, never dropped). */
+export function routeAlerts(text: string): RouteAlert[] {
+  return text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => {
+      const m = /^(?:([A-Za-z]+)\s+)?(\/\S*)((?:\s+(?:5xx\s*>=?\s*\d+\s*%|p95\s*>=?\s*\d+\s*ms))+)$/.exec(l);
+      if (!m) return { route: l };
+      const errors = /5xx\s*>=?\s*(\d+)/.exec(m[3]);
+      const p95 = /p95\s*>=?\s*(\d+)/.exec(m[3]);
+      return { route: m[2], ...(m[1] ? { method: m[1].toUpperCase() } : {}), ...(errors ? { error_pct: Number(errors[1]) } : {}), ...(p95 ? { p95_ms: Number(p95[1]) } : {}) };
     });
 }
 
@@ -853,6 +877,9 @@ export function SettingsTab({
                 </Field>
                 <Field label="Alert: p95 latency (ms)" hint="in three of five minutes; 0 off">
                   {t("alertP95", "0")}
+                </Field>
+                <Field label="Alerts on one route" hint="[method] /route (as Routes shows it, or /api/*) with 5xx >= n% and/or p95 >= n ms, one a line; over five minutes">
+                  <textarea value={form.alertRoutes} onChange={(e) => set("alertRoutes", e.target.value)} rows={2} placeholder="POST /api/checkout 5xx >= 2% p95 >= 800ms" className={`${input} w-full font-mono text-[12px]`} spellCheck={false} />
                 </Field>
                 <Field label="Metrics from its log" hint="name: pattern, one a line; each minute, the lines holding it (any case) as a gauge">
                   <textarea value={form.logMetrics} onChange={(e) => set("logMetrics", e.target.value)} rows={2} placeholder="payments_failed: payment failed" className={`${input} w-full font-mono text-[12px]`} spellCheck={false} />

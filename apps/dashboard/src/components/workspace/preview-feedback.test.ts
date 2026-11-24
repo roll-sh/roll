@@ -35,4 +35,14 @@ describe("feedback from a preview page", () => {
     expect(browserOf("Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1")).toBe("Safari 18 on iOS");
     expect(browserOf(mac.replace("Safari/537.36", "Safari/537.36 Edg/131.0.0.0"))).toBe("Edge 131 on macOS");
   });
+
+  it("carries what the reviewer did first, inert, the last 20", () => {
+    const steps = Array.from({ length: 22 }, (_, i) => `${22 - i}s before · click li:nth-of-type(${i + 1})`);
+    steps[21] = "1s before · type 8 characters in `#coupon`";
+    const f = feedbackFrom(new URLSearchParams({ fb_path: "/cart", fb_note: "Broken", fb_steps: JSON.stringify(steps) }).toString())!;
+    expect(f.steps?.length).toBe(20);
+    const body = feedbackBody(p, f, f.note);
+    expect(body).toContain("<details><summary>On the page: 20 steps</summary>\n\nWhat they did:\n\n1. `20s before · click li:nth-of-type(3)`\n");
+    expect(body).toContain("20. `1s before · type 8 characters in #coupon`\n\n</details>");
+  });
 });
