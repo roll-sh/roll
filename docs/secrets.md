@@ -3203,10 +3203,19 @@ npx prisma migrate dev                            # in another: reads .env as us
   mount still serves, or one no mount made, is refused.
 - In a git work tree, a path git doesn't ignore (`git check-ignore`) is added to the work tree's
   `.gitignore`, and the mount says so.
-- **Watchers.** A dev server that watches `.env` and reloads on a change event can loop on a pipe
-  (its read is an event too, as 1Password documents for Vite). Run such a server with `roll run --
-  npm run dev` instead (Vite takes `VITE_*` variables from its environment too: no file at all), or
-  keep the pipe out of the directory it watches for env files (Vite's `envDir`).
+- **Watchers.** Every read writes to the pipe, which moves its modification time, so a watcher that
+  compares times (chokidar's: Vite, nodemon) sees `.env` change once per read, its own reads
+  included. The new pipe each reader gets adds no event of its own (one `change` per read with or
+  without it). A change in roll is no event at all: a tool sees it at its next read. Measured on
+  2026-11-24:
+  - Next.js 15.5 doesn't watch a pipe: it reads `.env` when `next dev` starts and never again, so
+    restart it after a change in roll.
+  - Vite 8.3 reads `.env` once more after another tool's read, then stops: no restart, no loop.
+
+  A tool that restarts on any change of a watched `.env` (nodemon told to watch it; 1Password
+  documents this for older Vite) would see its own read as a change and loop. Run it with `roll run
+  -- npm run dev` instead (the values in its environment, no file at all), or don't have it watch
+  `.env`.
 - Not on Windows (no named pipe a tool can open as a file): `roll run` there.
 
 ### Docker builds and Compose
