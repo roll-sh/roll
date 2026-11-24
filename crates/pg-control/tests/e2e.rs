@@ -591,14 +591,27 @@ async fn branches_are_isolated_copies() {
     // A reset (roll previews) brings back the parent's current state on the same endpoint, so
     // the connection string doesn't change; the branch's own history starts again.
     drop(d);
-    let reset = h.control.reset_branch(&db.project.id, &dev.id, false).await.unwrap();
+    let reset = h.control.reset_branch(&db.project.id, &dev.id, false, None).await.unwrap();
     assert_eq!((reset.id.as_str(), h.primary(&reset).id.as_str()), (dev.id.as_str(), dev_ep.id.as_str()));
     let d = h.connect(&db, &dev_ep.id).await;
     assert_eq!(count(&d, "SELECT count(*) FROM t").await, 400, "the parent's rows, not the branch's old ones");
     d.batch_execute("INSERT INTO t VALUES (100002, 'after reset')").await.unwrap();
     assert!(h.connect_as(&dev.id, &password, &dev_ep.id).await.is_ok(), "its role, same password, after the reset");
     h.wait_for_base(&dev.id).await;
-    assert!(h.control.reset_branch(&db.project.id, "main", false).await.is_err(), "the root branch has no parent");
+    assert!(h.control.reset_branch(&db.project.id, "main", false, None).await.is_err(), "the root branch has no parent");
+
+    // From another branch (a preview's restore point: a branch of its own made earlier): that
+    // branch's rows come back, on the same endpoint and role.
+    let point = h.control.create_branch(&db.project.id, "dev-point", Some(&dev.id), None).await.unwrap();
+    d.batch_execute("INSERT INTO t VALUES (100003, 'after the point')").await.unwrap();
+    drop(d);
+    let back = h.control.reset_branch(&db.project.id, &dev.id, false, Some(&point.id)).await.unwrap();
+    assert_eq!(h.primary(&back).id, dev_ep.id);
+    let d = h.connect(&db, &dev_ep.id).await;
+    assert_eq!(count(&d, "SELECT count(*) FROM t WHERE id > 100000").await, 1, "the point's rows: 100002, not 100003");
+    assert!(h.connect_as(&dev.id, &password, &dev_ep.id).await.is_ok(), "its role, same password, after a reset from a point");
+    drop(d);
+    h.wait_for_base(&dev.id).await;
 
     // Structure only (previews' `schema` mode): emptied before it exists, so nothing serves or
     // records the rows: tables, materialized views and large objects empty; structure kept.
