@@ -1283,6 +1283,8 @@ environments (previews_), secrets and environment variables (secrets_), source c
 workspace projects (workspace_) with access tokens (access_). When the user asks to deploy, debug a failing app, change a database, \
 rotate a secret, check a preview, tune search or work in a repo, look for roll's tools by those prefixes; workflows (prompts) walk the \
 common tasks. Tools are named <product>_<verb>. Ids are each product's own (Postgres projects prj_…, Redis rdb_…, streams st_…, buckets by name, repos owner/name). \
+Given a name (\"the checkout database\") or a roll dashboard link instead of an id, call roll_find: it answers the id and the tool that reads it. \
+If a tool gets in your way (wrong, missing, confusing), tell roll's operator with access_send_feedback. \
 {who} Some actions ask a person first: such a call waits up to a minute, then returns status \"approval_pending\" with an approval id and a link. \
 Tell the user, then call the same tool again with the same arguments plus \"approval\": \"apr_…\": it waits for the decision and runs once approved. \
 postgres_query is read-only (postgres_execute changes data). Credentials come back as [redacted] unless the token may reveal them. \
