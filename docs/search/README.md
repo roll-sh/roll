@@ -1268,6 +1268,9 @@ deterministic (#396).
    (AWS OpenSearch Migration Assistant's capture and replay): a copy is one point in time today, so
    writes made during the copy are lost unless the client double-writes. Offline, with no route
    to the old cluster: its snapshots restore on roll from the bucket they're in (item 9, #652).
+   In progress (`feature/search-import-saas`): Algolia, Typesense and Meilisearch as migration
+   sources (records, settings mapped where they map, synonyms onto synonyms sets, rules and
+   curations onto query rules, everything that doesn't map listed with its reason).
 3. **One memory account per request** (landed: Painless per execution in #591, af195cbbe, after
    four reviews: each execution holds at most `--search-script-memory-mb`, and once-per-document
    scripts charge the `request` breaker; the node-wide body budget in #601; ES|QL and aggregations
@@ -1285,11 +1288,12 @@ deterministic (#396).
    page of rows charged to the request breaker as it is built and released when dropped,
    `circuit_breaking_exception` past the limit, and a node-level limit no tenant setting can
    raise. Time has its own cap (#530, landed: one limit per request, by-query scans and internal pagers included). Rule: charge what a structure costs as it is
-   built, never a multiple of the bytes it came from. Also left: `_bulk`'s own preparation (`bulk_ahead`
-   parses each source into a tree) is charged only as the body's `inflight_requests`, for
-   clients' bulks and connector syncs' alike (#318's pages are text until then). The
-   remote-reindex budget (`roll.reindex.remote.memory`) is a child of #549's node budget; connector
-   pages should become one too, so a node has one memory account for its background egress.
+   built, never a multiple of the bytes it came from. `_bulk`'s documents prepared ahead
+   (`bulk_ahead`) are charged to the `request` breaker while held since #937: when there's no
+   room, preparing ahead stops rather than the request, and no trip is counted. Connector pages
+   are held on the cluster's `request` breaker (a child of the node's budget), as remote reindex's
+   budget is a child of it, so every background copy is in the node's one account. What's left
+   is the sweep of item 4: any structure a review finds built outside a breaker.
 4. **A sweep for the bug classes the 2026-11-19 reviews kept finding** (first pass landed in #434, the follow-up in #492; what
    today's reviews still find is resource accounting, item 3). Four
    independent security reviews (connectors #318, cross-cluster search #347 and its gaps #389,
