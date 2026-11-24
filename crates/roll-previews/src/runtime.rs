@@ -2048,14 +2048,7 @@ impl Runtime {
         if !endpoints.is_empty() {
             args.extend(["--env".into(), format!("ENDPOINTS={}", serde_json::to_string(&endpoints)?)]);
         }
-        // The notes' elements to crop, checked again (they come from the preview's code).
-        let crops: Vec<serde_json::Value> = opts
-            .crops
-            .iter()
-            .filter(|c| crate::settings::page_path_ok(&c.path) && crate::settings::selector_ok(&c.selector) && !c.note.is_empty() && c.note.len() <= 64)
-            .take(crate::store::CROPS_PER_RUN)
-            .map(|c| serde_json::json!({ "note": c.note, "path": c.path, "selector": c.selector }))
-            .collect();
+        let crops = crops_env(&opts.crops);
         if !crops.is_empty() {
             args.extend(["--env".into(), format!("CROPS={}", serde_json::to_string(&crops)?)]);
         }
@@ -2085,7 +2078,9 @@ impl Runtime {
         // container each in the service's network): the slot is held for the longer, not both.
         let browsers_run = async {
             let started = std::time::Instant::now();
-            let r = if opts.browsers.is_empty() { None } else { Some(self.other_browsers(name, port, opts).await) };
+            // Also for a note whose reviewer's browser was another engine.
+            let wanted = !opts.browsers.is_empty() || opts.crops.iter().any(|c| c.browser.is_some());
+            let r = if wanted { Some(self.other_browsers(name, port, opts).await) } else { None };
             (r, started.elapsed().as_millis() as u64)
         };
         // Its Storybook's stories, in a run of their own alongside (`github.storybook`).
@@ -2140,7 +2135,10 @@ impl Runtime {
         };
         // The other browsers', best effort: Chromium's screenshot stands.
         match more {
-            Some(Ok(more)) => shot.pages.extend(more),
+            Some(Ok((more, crops))) => {
+                shot.pages.extend(more);
+                shot.crops.extend(crops);
+            }
             Some(Err(e)) => tracing::warn!(container = name, error = %e, "previews: other browsers' screenshots"),
             None => {}
         }
@@ -2191,7 +2189,7 @@ impl Runtime {
 
     /// The first page in the other browsers `opts.browsers` names (`browser:<name>` pages), in the
     /// service's network as Chromium's run is, locked down the same way.
-    async fn other_browsers(&self, name: &str, port: u16, opts: &crate::ports::ShotOptions) -> anyhow::Result<Vec<crate::ports::PageShot>> {
+    async fn other_browsers(&self, name: &str, port: u16, opts: &crate::ports::ShotOptions) -> anyhow::Result<(Vec<crate::ports::PageShot>, Vec<(String, Vec<u8>)>)> {
         use base64::Engine as _;
         let building = self.browsers_building.lock().await;
         if code_preview::docker::docker(&["image", "inspect", "--format", "{{.Id}}", BROWSERS_IMAGE]).await.is_err() {
@@ -2224,10 +2222,18 @@ impl Runtime {
         args.extend(code_preview::docker::limits(1024, 1.0));
         args.extend(["--env".into(), format!("URL=http://127.0.0.1:{port}/"), "--env".into(), "HOME=/tmp".into()]);
         args.extend(["--env".into(), format!("BROWSERS={}", serde_json::to_string(&browsers)?), "--env".into(), format!("HIDE={}", serde_json::to_string(&hide)?)]);
+        // The notes in another engine, as roll checked them (their pages and selectors).
+        let crops: Vec<&crate::ports::CropAsk> = opts
+            .crops
+            .iter()
+            .filter(|c| c.browser.as_deref().is_some_and(|b| crate::settings::BROWSERS.contains(&b)) && crate::settings::page_path_ok(&c.path) && crate::settings::selector_ok(&c.selector))
+            .take(10)
+            .collect();
+        args.extend(["--env".into(), format!("CROPS={}", serde_json::to_string(&crops)?)]);
         args.extend(["--env".into(), format!("ROLL_BROWSERS_JS={BROWSERS_JS}"), BROWSERS_IMAGE.into(), "sh".into(), "-c".into(), r#"node -e "$ROLL_BROWSERS_JS""#.into()]);
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-        let within = Duration::from_secs(30 + 40 * browsers.len() as u64);
-        let max = browsers.len() * (SCREENSHOT_MAX * 4 / 3 + 4096);
+        let within = Duration::from_secs(30 + 40 * browsers.len() as u64 + 25 * crops.len() as u64);
+        let max = browsers.len() * (SCREENSHOT_MAX * 4 / 3 + 4096) + crops.len() * (crate::store::CROP_MAX * 4 / 3 + 4096);
         let out = match tokio::time::timeout(within, docker_with_input(&argv, Vec::new(), max)).await {
             Ok(Ok(out)) => out,
             Ok(Err(e)) => {
@@ -2241,20 +2247,33 @@ impl Runtime {
         };
         #[derive(serde::Deserialize)]
         struct Line {
-            browser: String,
+            #[serde(default)]
+            browser: Option<String>,
+            #[serde(default)]
+            crop: Option<String>,
             #[serde(default)]
             errors: u32,
             png: String,
         }
-        let mut pages: Vec<crate::ports::PageShot> = Vec::new();
+        let (mut pages, mut cropped): (Vec<crate::ports::PageShot>, Vec<(String, Vec<u8>)>) = (Vec::new(), Vec::new());
         for l in out.lines().filter_map(|l| serde_json::from_str::<Line>(l).ok()) {
             let Ok(png) = base64::engine::general_purpose::STANDARD.decode(l.png.trim()) else { continue };
-            let path = format!("browser:{}", l.browser);
-            if png.starts_with(b"\x89PNG") && png.len() <= SCREENSHOT_MAX && browsers.iter().any(|b| **b == l.browser) && !pages.iter().any(|p| p.path == path) {
-                pages.push(crate::ports::PageShot { path, png, errors: l.errors.min(10_000), report: Default::default() });
+            if !png.starts_with(b"\x89PNG") {
+                continue;
+            }
+            match (l.browser, l.crop) {
+                (Some(b), None) => {
+                    let path = format!("browser:{b}");
+                    if png.len() <= SCREENSHOT_MAX && browsers.iter().any(|x| **x == b) && !pages.iter().any(|p| p.path == path) {
+                        pages.push(crate::ports::PageShot { path, png, errors: l.errors.min(10_000), report: Default::default() });
+                    }
+                }
+                // Only a note asked for, once, within a crop's size.
+                (None, Some(note)) if png.len() <= crate::store::CROP_MAX && crops.iter().any(|c| c.note == note) && !cropped.iter().any(|(n, _)| *n == note) => cropped.push((note, png)),
+                _ => {}
             }
         }
-        Ok(pages)
+        Ok((pages, cropped))
     }
 
     async fn seed_job(&self, job: &crate::ports::SeedJob) -> anyhow::Result<(i32, String)> {
@@ -2668,6 +2687,27 @@ async fn serve(rt: Arc<Runtime>, preview: String, service: String, mut req: Requ
         None => rt.proxy(&preview, &service, req, feedback).await,
     };
     with_skew_cookie(resp, skew_cookie, rt.cfg.scheme == "https")
+}
+
+/// The notes' elements Chromium's run crops ($CROPS), checked again (they come from the preview's
+/// code): as their reviewers saw them, viewport and steps (each step's selector checked), the
+/// other engines' left to the other browsers' run.
+fn crops_env(asks: &[crate::ports::CropAsk]) -> Vec<serde_json::Value> {
+    let steps_ok = |c: &crate::ports::CropAsk| {
+        c.steps.iter().all(|s| match s {
+            crate::settings::Step::Click(sel) => crate::settings::selector_ok(sel),
+            crate::settings::Step::Press(k) => matches!(k.as_str(), "Enter" | "Escape"),
+            _ => false,
+        })
+    };
+    asks.iter()
+        .filter(|c| c.browser.is_none() && crate::settings::page_path_ok(&c.path) && crate::settings::selector_ok(&c.selector) && !c.note.is_empty() && c.note.len() <= 64)
+        .take(crate::store::CROPS_PER_RUN)
+        .map(|c| {
+            let steps: &[crate::settings::Step] = if steps_ok(c) { &c.steps[..c.steps.len().min(10)] } else { &[] };
+            serde_json::json!({ "note": c.note, "path": c.path, "selector": c.selector, "width": c.width, "height": c.height, "steps": steps })
+        })
+        .collect()
 }
 
 /// The cookie a skew-protected service's page load gets: the push that answered it.
@@ -3133,6 +3173,19 @@ mod tests {
         rt.store.set_service_skew(&row.id, "web", false).unwrap();
         let off = get("/api", "x-deployment-id: cs_2\r\n").await;
         assert!(off.ends_with("\r\n\r\ncs_3") && !get("/", "Sec-Fetch-Dest: document\r\n").await.contains("__roll_dpl"), "off: {off}");
+    }
+
+    /// Chromium's crops carry how their reviewers saw the page (viewport, steps); another
+    /// engine's go to the other browsers' run; a step roll's checks refuse sends none.
+    #[test]
+    fn crops_carry_how_their_reviewers_saw_the_page() {
+        use crate::settings::Step;
+        let ask = |note: &str, browser: Option<&str>, steps: Vec<Step>| crate::ports::CropAsk { note: note.into(), path: "/cart".into(), selector: "button.pay".into(), width: Some(390), height: Some(844), steps, browser: browser.map(String::from) };
+        let env = crops_env(&[ask("rv_1", None, vec![Step::Click("li > button".into()), Step::Press("Escape".into())]), ask("rv_2", Some("webkit-phone"), vec![]), ask("rv_3", None, vec![Step::Click("a[href='//x']{".into())])]);
+        assert_eq!(env[0], serde_json::json!({ "note": "rv_1", "path": "/cart", "selector": "button.pay", "width": 390, "height": 844, "steps": [{ "click": "li > button" }, { "press": "Escape" }] }));
+        assert_eq!(env.len(), 2, "WebKit's is the other browsers' run's");
+        assert_eq!(env[1]["steps"], serde_json::json!([]), "a step its checks refuse: none of them");
+        assert!(crops_env(&[ask("rv_4", Some("firefox"), vec![])]).is_empty());
     }
 
     /// A screenshot run's other pages are only those asked for, each once, their numbers

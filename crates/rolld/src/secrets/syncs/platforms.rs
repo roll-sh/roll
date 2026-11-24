@@ -134,6 +134,99 @@ pub(super) fn credential_keys(t: &Json, fields: &[&str]) -> Vec<String> {
     fields.iter().filter_map(|f| t[*f].as_str().map(|k| k.trim().to_string())).collect()
 }
 
+/// An AWS region's name (`us-east-1`).
+pub(super) fn aws_region(r: &str) -> bool {
+    ident(r, 32, "-") && !r.chars().any(|c| c.is_ascii_uppercase()) && !r.starts_with('-')
+}
+
+/// How an AWS sync signs its calls: a session of one of the project's AWS roles (`role`, assumed
+/// for each push: nothing kept), or an IAM user's keys stored in roll.
+#[derive(Debug, PartialEq)]
+pub(super) enum AwsAuth {
+    Role(String),
+    Keys { access_key_id_key: String, secret_access_key_key: String },
+}
+
+impl AwsAuth {
+    /// Exactly one of `role` or both key fields.
+    fn of(kind: &str, role: Option<String>, ak: Option<String>, sk: Option<String>) -> Result<AwsAuth> {
+        match (role, ak, sk) {
+            (Some(role), None, None) if ident(&role, 64, "-_") => Ok(AwsAuth::Role(role)),
+            (Some(_), None, None) => Err(bad("role is the name of one of the project's AWS roles (…/aws-roles)")),
+            (None, Some(ak), Some(sk)) => Ok(AwsAuth::Keys { access_key_id_key: key_field(kind, "access_key_id_key", Some(ak))?, secret_access_key_key: key_field(kind, "secret_access_key_key", Some(sk))? }),
+            _ => Err(bad(format!("a {kind} target signs in with role (one of the project's AWS roles) or with both access_key_id_key and secret_access_key_key, not both"))),
+        }
+    }
+
+    fn role(&self) -> Option<String> {
+        match self {
+            AwsAuth::Role(r) => Some(r.clone()),
+            AwsAuth::Keys { .. } => None,
+        }
+    }
+
+    fn keys(&self) -> Vec<String> {
+        match self {
+            AwsAuth::Role(_) => vec![],
+            AwsAuth::Keys { access_key_id_key, secret_access_key_key } => vec![access_key_id_key.clone(), secret_access_key_key.clone()],
+        }
+    }
+
+    /// This push's access key, secret and session token (a role's session has one).
+    fn signer<'a>(&self, p: &'a Push<'_>, kind: &str) -> Result<(&'a str, &'a str, Option<&'a str>)> {
+        match self {
+            AwsAuth::Role(_) => {
+                let s = p.aws.ok_or_else(|| bad(format!("an {kind} sync with a role signs in as the project's AWS role")))?;
+                Ok((s.access_key_id.expose(), s.secret_access_key.expose(), Some(s.session_token.expose())))
+            }
+            AwsAuth::Keys { access_key_id_key, secret_access_key_key } => Ok((credential(p, access_key_id_key)?, credential(p, secret_access_key_key)?, None)),
+        }
+    }
+}
+
+/// What health says instead of an AWS key.
+const AWS_INSTEAD: &str = "make it again with role, one of the project's AWS roles (…/aws-roles), assumed for each push";
+
+/// How an Azure sync signs in: a client secret stored in roll (`client_secret_key`), or, with
+/// none, a federated credential on the app registration that trusts roll's issuer for the sync's
+/// own subject.
+pub(super) fn azure_auth(kind: &str, tenant: &str, client_id: &str, secret: Option<String>, scope: String) -> Result<std::result::Result<String, roll_secrets::clouds::Account>> {
+    match secret {
+        Some(k) => Ok(Ok(key_field(kind, "client_secret_key", Some(k))?)),
+        None => {
+            let account = roll_secrets::clouds::Account::Azure { tenant: tenant.into(), client_id: client_id.into(), scope };
+            account.check().map_err(|_| bad(format!("a {kind} target without client_secret_key signs in with a federated credential: tenant_id is the tenant's id or domain and client_id the app registration's (a GUID)")))?;
+            Ok(Err(account))
+        }
+    }
+}
+
+/// What health says instead of an Azure client secret.
+pub(super) const AZURE_INSTEAD: &str = "make it again without client_secret_key, after adding a federated credential for roll's issuer to the app registration";
+
+/// An Entra access token for `scope`: the federated one roll-secrets got for this push when the
+/// target keeps no secret (`secret_key` `None`), else client credentials with the stored secret
+/// at `login` (Microsoft's sign-in).
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn azure_token(h: &Http, client: &reqwest::Client, login: &str, p: &Push<'_>, tenant: &str, client_id: &str, secret_key: Option<&str>, scope: &str, what: &str) -> Result<zeroize::Zeroizing<String>> {
+    let Some(key) = secret_key else {
+        return p.cloud_token.map(|t| zeroize::Zeroizing::new(t.expose().to_string())).ok_or_else(|| bad(format!("{what}: a federated sync signs in with roll's issuer")));
+    };
+    let secret = credential(p, key)?;
+    let form = zeroize::Zeroizing::new(format!(
+        "grant_type=client_credentials&client_id={}&client_secret={}&scope={}",
+        urlencoding::encode(client_id),
+        urlencoding::encode(secret),
+        urlencoding::encode(scope)
+    ));
+    let req = client.post(format!("{login}/{tenant}/oauth2/v2.0/token")).header("content-type", "application/x-www-form-urlencoded").body(form.to_string());
+    let (status, v) = h.send(req, what).await?;
+    match v["access_token"].as_str() {
+        Some(tok) if status.is_success() => Ok(zeroize::Zeroizing::new(tok.to_string())),
+        _ => Err(Error::Link(format!("{what}: signing in: {status} {}", v["error"].as_str().unwrap_or_default()))),
+    }
+}
+
 /// A value over `max` bytes, named.
 fn too_long(p: &Push<'_>, max: usize, what: &str) -> Result<()> {
     match p.changed.iter().find(|n| p.values.get(*n).is_some_and(|v| v.expose().len() > max)) {
@@ -578,14 +671,16 @@ pub(super) struct GoogleSecrets(pub(super) Http);
 struct GsmTarget {
     project: String,
     prefix: String,
-    key_key: String,
+    /// The key holding a service account's JSON key, or (`Err`) workload identity federation.
+    auth: std::result::Result<String, roll_secrets::clouds::Account>,
 }
 
 const GSM_LABEL: (&str, &str) = ("managed-by", "roll-secrets");
 
 impl GoogleSecrets {
     fn target(&self, t: &Json) -> Result<GsmTarget> {
-        let [project, prefix, key_key] = target("google-secret-manager", t, [("project", true), ("prefix", false), ("service_account_key", true)])?;
+        let fields = [("project", true), ("prefix", false), ("service_account_key", false), ("workload_identity_provider", false), ("service_account_email", false)];
+        let [project, prefix, key_key, provider, email] = target("google-secret-manager", t, fields)?;
         let project = project.unwrap_or_default();
         if !ident(&project, 64, "-") || project.chars().any(|c| c.is_ascii_uppercase()) {
             return Err(bad("project is a Google Cloud project id"));
@@ -594,7 +689,20 @@ impl GoogleSecrets {
         if prefix.len() > 100 || !prefix.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
             return Err(bad("prefix is letters, digits, _ and - (shop_production_)"));
         }
-        Ok(GsmTarget { project, prefix, key_key: key_field("google-secret-manager", "service_account_key", key_key)? })
+        let auth = match (key_key, provider, email) {
+            (Some(k), None, None) => Ok(key_field("google-secret-manager", "service_account_key", Some(k))?),
+            (None, Some(provider), Some(email)) => {
+                // `projects/…` as Google's own tools write it, or the full `//iam.googleapis.com/projects/…`.
+                let audience = if provider.starts_with("projects/") { format!("//iam.googleapis.com/{provider}") } else { provider };
+                let account = roll_secrets::clouds::Account::Gcp { audience, service_account: email };
+                account.check().map_err(|_| {
+                    bad("workload_identity_provider is projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>, and service_account_email name@project.iam.gserviceaccount.com")
+                })?;
+                Err(account)
+            }
+            _ => return Err(bad("a google-secret-manager target signs in with service_account_key, or with workload_identity_provider and service_account_email (no key kept), not both")),
+        };
+        Ok(GsmTarget { project, prefix, auth })
     }
 
     /// An access token for the service account in `key` (its JSON key file), from Google's token
@@ -638,12 +746,20 @@ impl SyncTarget for GoogleSecrets {
         const F: &[SyncField] = &[
             SyncField { name: "project", label: "Google Cloud project", required: true, placeholder: "shop-prod" },
             SyncField { name: "prefix", label: "Secret name prefix (optional)", required: false, placeholder: "shop_production_" },
-            SyncField { name: "service_account_key", label: "Key holding a service account's JSON key", required: true, placeholder: "GCP_SYNC_KEY" },
+            SyncField { name: "workload_identity_provider", label: "Workload identity provider trusting roll's issuer", required: false, placeholder: "projects/123456789/locations/global/workloadIdentityPools/roll/providers/roll" },
+            SyncField { name: "service_account_email", label: "Service account it impersonates", required: false, placeholder: "roll-sync@shop-prod.iam.gserviceaccount.com" },
+            SyncField { name: "service_account_key", label: "Or: key holding a service account's JSON key", required: false, placeholder: "GCP_SYNC_KEY" },
         ];
         F
     }
     fn credentials(&self, t: &Json) -> Vec<String> {
         credential_keys(t, &["service_account_key"])
+    }
+    fn federation(&self, t: &Json) -> Option<roll_secrets::clouds::Account> {
+        self.target(t).ok()?.auth.err()
+    }
+    fn stored_cloud_key(&self, t: &Json) -> Option<&'static str> {
+        self.target(t).ok()?.auth.ok().map(|_| "make it again with workload_identity_provider and service_account_email, a workload identity pool provider that trusts roll's issuer")
     }
     fn check(&self, _: &str, _: &Resources, t: &Json) -> Result<()> {
         self.target(t).map(|_| ())
@@ -651,14 +767,17 @@ impl SyncTarget for GoogleSecrets {
     fn push(&self, t: &Json, p: &Push<'_>) -> Result<()> {
         use base64::Engine as _;
         let t = self.target(t)?;
-        let key = credential(p, &t.key_key)?;
+        let key = t.auth.as_ref().ok().map(|k| credential(p, k)).transpose()?;
         too_long(p, 65_536, "Secret Manager's 64 KiB")?;
         let what = format!("google-secret-manager {}", t.project);
         let base = format!("{}/v1/projects/{}/secrets", self.0.google, t.project);
         // Google's `error.status` (`NOT_FOUND`, `PERMISSION_DENIED`), never the answer.
         let status_of = |v: &Json| v["error"]["status"].as_str().unwrap_or_default().to_string();
         block_on(async {
-            let token = self.token(key, &what).await?;
+            let token = match key {
+                Some(key) => self.token(key, &what).await?,
+                None => p.cloud_token.ok_or_else(|| bad(format!("{what}: a federated sync signs in with roll's issuer")))?.expose().to_string(),
+            };
             let ours = |v: &Json| v["labels"][GSM_LABEL.0] == GSM_LABEL.1;
             for name in p.changed {
                 let Some(v) = p.values.get(name) else { continue };
@@ -713,14 +832,18 @@ struct AkvTarget {
     vault: String,
     tenant: String,
     client_id: String,
-    secret_key: String,
+    /// The key holding the client secret, or (`Err`) a federated credential.
+    auth: std::result::Result<String, roll_secrets::clouds::Account>,
 }
+
+/// The scope of an Entra token for Key Vault.
+const AKV_SCOPE: &str = "https://vault.azure.net/.default";
 
 const AKV_API: &str = "api-version=7.4";
 
 impl AzureKeyVault {
     fn target(&self, t: &Json) -> Result<AkvTarget> {
-        let [vault, tenant, client, secret] = target("azure-key-vault", t, [("vault", true), ("tenant_id", true), ("client_id", true), ("client_secret_key", true)])?;
+        let [vault, tenant, client, secret] = target("azure-key-vault", t, [("vault", true), ("tenant_id", true), ("client_id", true), ("client_secret_key", false)])?;
         let vault = vault.unwrap_or_default();
         if !(3..=24).contains(&vault.len()) || !ident(&vault, 24, "-") {
             return Err(bad("vault is a Key Vault's name (3–24 letters, digits and -)"));
@@ -733,7 +856,8 @@ impl AzureKeyVault {
         if !ident(&client_id, 64, "-") {
             return Err(bad("client_id is an app registration's client id"));
         }
-        Ok(AkvTarget { vault, tenant, client_id, secret_key: key_field("azure-key-vault", "client_secret_key", secret)? })
+        let auth = azure_auth("azure-key-vault", &tenant, &client_id, secret, AKV_SCOPE.into())?;
+        Ok(AkvTarget { vault, tenant, client_id, auth })
     }
 }
 
@@ -749,19 +873,24 @@ impl SyncTarget for AzureKeyVault {
             SyncField { name: "vault", label: "Vault name", required: true, placeholder: "shop-prod" },
             SyncField { name: "tenant_id", label: "Tenant id", required: true, placeholder: "contoso.onmicrosoft.com" },
             SyncField { name: "client_id", label: "App registration's client id", required: true, placeholder: "00000000-0000-0000-0000-000000000000" },
-            SyncField { name: "client_secret_key", label: "Key holding its client secret", required: true, placeholder: "AZURE_SYNC_CLIENT_SECRET" },
+            SyncField { name: "client_secret_key", label: "Key holding its client secret (none: a federated credential)", required: false, placeholder: "AZURE_SYNC_CLIENT_SECRET" },
         ];
         F
     }
     fn credentials(&self, t: &Json) -> Vec<String> {
         credential_keys(t, &["client_secret_key"])
     }
+    fn federation(&self, t: &Json) -> Option<roll_secrets::clouds::Account> {
+        self.target(t).ok()?.auth.err()
+    }
+    fn stored_cloud_key(&self, t: &Json) -> Option<&'static str> {
+        self.target(t).ok()?.auth.ok().map(|_| AZURE_INSTEAD)
+    }
     fn check(&self, _: &str, _: &Resources, t: &Json) -> Result<()> {
         self.target(t).map(|_| ())
     }
     fn push(&self, t: &Json, p: &Push<'_>) -> Result<()> {
         let t = self.target(t)?;
-        let secret = credential(p, &t.secret_key)?;
         too_long(p, 25_000, "Key Vault's 25 KB")?;
         let what = format!("azure-key-vault {}", t.vault);
         let vault = self.0.azure_vault.clone().unwrap_or_else(|| format!("https://{}.vault.azure.net", t.vault));
@@ -769,22 +898,12 @@ impl SyncTarget for AzureKeyVault {
         // Key Vault's `error.code` (`SecretNotFound`, `Forbidden`), never the answer.
         let code_of = |v: &Json| v["error"]["code"].as_str().unwrap_or_default().to_string();
         block_on(async {
-            let form = format!(
-                "grant_type=client_credentials&client_id={}&client_secret={}&scope={}",
-                urlencoding::encode(&t.client_id),
-                urlencoding::encode(secret),
-                urlencoding::encode("https://vault.azure.net/.default")
-            );
-            let login = self.0.client.post(format!("{}/{}/oauth2/v2.0/token", self.0.azure_login, t.tenant)).header("content-type", "application/x-www-form-urlencoded").body(form);
-            let (status, v) = self.0.send(login, &what).await?;
-            let token = match v["access_token"].as_str() {
-                Some(tok) if status.is_success() => tok.to_string(),
-                _ => return Err(Error::Link(format!("{what}: signing in: {status} {}", v["error"].as_str().unwrap_or_default()))),
-            };
+            let token = azure_token(&self.0, &self.0.client, &self.0.azure_login, p, &t.tenant, &t.client_id, t.auth.as_ref().ok().map(String::as_str), AKV_SCOPE, &what).await?;
+            let token = token.as_str();
             let ours = |v: &Json| v["tags"]["managed-by"] == "roll-secrets";
             for name in p.changed {
                 let Some(v) = p.values.get(name) else { continue };
-                let (status, got) = self.0.send(self.0.client.get(url(name, "/secrets")).bearer_auth(&token), &what).await?;
+                let (status, got) = self.0.send(self.0.client.get(url(name, "/secrets")).bearer_auth(token), &what).await?;
                 if status.is_success() && !ours(&got) {
                     return Err(Error::Link(format!("{what}: {name} exists and roll didn't create it (no managed-by=roll-secrets tag): roll never writes to it")));
                 }
@@ -793,32 +912,32 @@ impl SyncTarget for AzureKeyVault {
                     return Err(Error::Link(format!("{what}: reading {name}: {status} {}", code_of(&got))));
                 }
                 let body = json!({ "value": v.expose(), "tags": { "managed-by": "roll-secrets" }, "contentType": "roll-secrets" });
-                let mut put = self.0.send(self.0.client.put(url(name, "/secrets")).bearer_auth(&token).json(&body), &what).await?;
+                let mut put = self.0.send(self.0.client.put(url(name, "/secrets")).bearer_auth(token).json(&body), &what).await?;
                 // Deleted before, and kept by the vault's soft delete: recover it only if it was roll's.
                 if put.0 == reqwest::StatusCode::CONFLICT && code_of(&put.1) == "Conflict" {
-                    let (status, deleted) = self.0.send(self.0.client.get(format!("{vault}/deletedsecrets/{}?{AKV_API}", name.replace('_', "-"))).bearer_auth(&token), &what).await?;
+                    let (status, deleted) = self.0.send(self.0.client.get(format!("{vault}/deletedsecrets/{}?{AKV_API}", name.replace('_', "-"))).bearer_auth(token), &what).await?;
                     if !status.is_success() || !ours(&deleted) {
                         return Err(Error::Link(format!("{what}: {name} is soft-deleted and roll can't tell it was its own ({status}): roll never recovers it")));
                     }
-                    let (status, got) = self.0.send(self.0.client.post(format!("{vault}/deletedsecrets/{}/recover?{AKV_API}", name.replace('_', "-"))).bearer_auth(&token), &what).await?;
+                    let (status, got) = self.0.send(self.0.client.post(format!("{vault}/deletedsecrets/{}/recover?{AKV_API}", name.replace('_', "-"))).bearer_auth(token), &what).await?;
                     if !status.is_success() {
                         return Err(Error::Link(format!("{what}: recovering {name}: {status} {}", code_of(&got))));
                     }
-                    put = self.0.send(self.0.client.put(url(name, "/secrets")).bearer_auth(&token).json(&body), &what).await?;
+                    put = self.0.send(self.0.client.put(url(name, "/secrets")).bearer_auth(token).json(&body), &what).await?;
                 }
                 if !put.0.is_success() {
                     return Err(Error::Link(format!("{what}: {name}: {} {}", put.0, code_of(&put.1))));
                 }
             }
             for name in p.removed {
-                let (status, got) = self.0.send(self.0.client.get(url(name, "/secrets")).bearer_auth(&token), &what).await?;
+                let (status, got) = self.0.send(self.0.client.get(url(name, "/secrets")).bearer_auth(token), &what).await?;
                 if status == reqwest::StatusCode::NOT_FOUND || (status.is_success() && !ours(&got)) {
                     continue;
                 }
                 if !status.is_success() {
                     return Err(Error::Link(format!("{what}: reading {name}: {status} {}", code_of(&got))));
                 }
-                let (status, got) = self.0.send(self.0.client.delete(url(name, "/secrets")).bearer_auth(&token), &what).await?;
+                let (status, got) = self.0.send(self.0.client.delete(url(name, "/secrets")).bearer_auth(token), &what).await?;
                 if !status.is_success() && status != reqwest::StatusCode::NOT_FOUND {
                     return Err(Error::Link(format!("{what}: deleting {name}: {status} {}", code_of(&got))));
                 }
@@ -1672,8 +1791,7 @@ impl SyncTarget for GitLab {
 struct SsmTarget {
     region: String,
     prefix: String,
-    access_key_id_key: String,
-    secret_access_key_key: String,
+    auth: AwsAuth,
     kms_key_id: Option<String>,
 }
 
@@ -1684,10 +1802,10 @@ const SSM_VALUE_MAX: usize = 4096;
 
 impl Ssm {
     fn target(&self, t: &Json) -> Result<SsmTarget> {
-        let [region, prefix, ak, sk, kms] =
-            target("aws-ssm", t, [("region", true), ("prefix", true), ("access_key_id_key", true), ("secret_access_key_key", true), ("kms_key_id", false)])?;
+        let [region, prefix, role, ak, sk, kms] =
+            target("aws-ssm", t, [("region", true), ("prefix", true), ("role", false), ("access_key_id_key", false), ("secret_access_key_key", false), ("kms_key_id", false)])?;
         let region = region.unwrap_or_default();
-        if !ident(&region, 32, "-") || region.chars().any(|c| c.is_ascii_uppercase()) {
+        if !aws_region(&region) {
             return Err(bad("region is an AWS region (us-east-1)"));
         }
         let prefix = prefix.unwrap_or_default();
@@ -1698,29 +1816,49 @@ impl Ssm {
         if kms.as_ref().is_some_and(|k| !ident(k, 2048, "-_:/.")) {
             return Err(bad("kms_key_id is a KMS key's id, alias or ARN"));
         }
-        Ok(SsmTarget {
-            region,
-            prefix,
-            access_key_id_key: key_field("aws-ssm", "access_key_id_key", ak)?,
-            secret_access_key_key: key_field("aws-ssm", "secret_access_key_key", sk)?,
-            kms_key_id: kms,
-        })
+        Ok(SsmTarget { region, prefix, auth: AwsAuth::of("aws-ssm", role, ak, sk)?, kms_key_id: kms })
     }
 }
 
-/// The `Authorization` of an AWS JSON 1.1 call to `service` (SigV4; content type, host, date and
-/// target signed), with s3-proto's SigV4 primitives for the key and the string to sign.
+/// The `Authorization` of an AWS JSON 1.1 call to `service` (SigV4; content type, host, date,
+/// target and a session's token signed), with s3-proto's SigV4 primitives for the key and the
+/// string to sign.
 #[allow(clippy::too_many_arguments)]
-fn sigv4(host: &str, region: &str, service: &str, amz_target: &str, amz_date: &str, body: &[u8], access_key: &str, secret: &str) -> String {
+pub(super) fn sigv4(host: &str, region: &str, service: &str, amz_target: &str, amz_date: &str, body: &[u8], access_key: &str, secret: &str, token: Option<&str>) -> String {
     use sha2::{Digest, Sha256};
     let payload: String = Sha256::digest(body).iter().map(|b| format!("{b:02x}")).collect();
-    let signed = "content-type;host;x-amz-date;x-amz-target";
-    let canonical = format!("POST\n/\n\ncontent-type:application/x-amz-json-1.1\nhost:{host}\nx-amz-date:{amz_date}\nx-amz-target:{amz_target}\n\n{signed}\n{payload}");
+    let (signed, token_line) = match token {
+        Some(t) => ("content-type;host;x-amz-date;x-amz-security-token;x-amz-target", format!("x-amz-security-token:{t}\n")),
+        None => ("content-type;host;x-amz-date;x-amz-target", String::new()),
+    };
+    let canonical = format!("POST\n/\n\ncontent-type:application/x-amz-json-1.1\nhost:{host}\nx-amz-date:{amz_date}\n{token_line}x-amz-target:{amz_target}\n\n{signed}\n{payload}");
     let date = &amz_date[..8];
     let scope = format!("{date}/{region}/{service}/aws4_request");
     let sts = s3_proto::sigv4::string_to_sign(amz_date, &scope, &canonical);
     let sig = s3_proto::sigv4::sign(&s3_proto::sigv4::signing_key(secret, date, region, service), &sts);
     format!("AWS4-HMAC-SHA256 Credential={access_key}/{scope}, SignedHeaders={signed}, Signature={sig}")
+}
+
+/// An AWS JSON 1.1 call's request to `url` (`host` as reqwest sends it), signed for this push.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn aws_call(client: &reqwest::Client, url: &url::Url, host: &str, region: &str, service: &str, amz_target: &str, body: &[u8], (ak, sk, token): (&str, &str, Option<&str>)) -> reqwest::RequestBuilder {
+    let amz_date = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let auth = sigv4(host, region, service, amz_target, &amz_date, body, ak, sk, token);
+    let mut req = client.post(url.clone()).header("content-type", "application/x-amz-json-1.1").header("x-amz-date", amz_date).header("x-amz-target", amz_target).header("authorization", auth);
+    if let Some(t) = token {
+        req = req.header("x-amz-security-token", t);
+    }
+    req.body(body.to_vec())
+}
+
+/// An endpoint's URL and its `host` as reqwest sends it (the port only when it isn't the scheme's).
+pub(super) fn aws_endpoint(base: &str) -> Result<(url::Url, String)> {
+    let url = url::Url::parse(&format!("{base}/")).map_err(|e| Error::Internal(e.to_string()))?;
+    let host = match url.port() {
+        Some(port) => format!("{}:{port}", url.host_str().unwrap_or_default()),
+        None => url.host_str().unwrap_or_default().to_string(),
+    };
+    Ok((url, host))
 }
 
 impl SyncTarget for Ssm {
@@ -1734,43 +1872,35 @@ impl SyncTarget for Ssm {
         const F: &[SyncField] = &[
             SyncField { name: "region", label: "Region", required: true, placeholder: "us-east-1" },
             SyncField { name: "prefix", label: "Parameter path", required: true, placeholder: "/shop/production/" },
-            SyncField { name: "access_key_id_key", label: "Key holding the IAM access key id", required: true, placeholder: "AWS_SYNC_ACCESS_KEY_ID" },
-            SyncField { name: "secret_access_key_key", label: "Key holding the IAM secret key", required: true, placeholder: "AWS_SYNC_SECRET_ACCESS_KEY" },
+            SyncField { name: "role", label: "The project's AWS role (by name)", required: false, placeholder: "parameters" },
+            SyncField { name: "access_key_id_key", label: "Or: key holding an IAM access key id", required: false, placeholder: "AWS_SYNC_ACCESS_KEY_ID" },
+            SyncField { name: "secret_access_key_key", label: "And the key holding its secret key", required: false, placeholder: "AWS_SYNC_SECRET_ACCESS_KEY" },
             SyncField { name: "kms_key_id", label: "KMS key (optional)", required: false, placeholder: "alias/shop" },
         ];
         F
     }
     fn credentials(&self, t: &Json) -> Vec<String> {
-        credential_keys(t, &["access_key_id_key", "secret_access_key_key"])
+        self.target(t).map(|t| t.auth.keys()).unwrap_or_default()
+    }
+    fn aws_role(&self, t: &Json) -> Option<String> {
+        self.target(t).ok()?.auth.role()
+    }
+    fn stored_cloud_key(&self, t: &Json) -> Option<&'static str> {
+        self.target(t).ok().filter(|t| t.auth.role().is_none()).map(|_| AWS_INSTEAD)
     }
     fn check(&self, _: &str, _: &Resources, t: &Json) -> Result<()> {
         self.target(t).map(|_| ())
     }
     fn push(&self, t: &Json, p: &Push<'_>) -> Result<()> {
         let t = self.target(t)?;
-        let (ak, sk) = (credential(p, &t.access_key_id_key)?, credential(p, &t.secret_access_key_key)?);
+        let signer = t.auth.signer(p, "aws-ssm")?;
         too_long(p, SSM_VALUE_MAX, "Parameter Store's 4 KB (standard tier)")?;
         let base = self.0.ssm.clone().unwrap_or_else(|| format!("https://ssm.{}.amazonaws.com", t.region));
-        let url = url::Url::parse(&format!("{base}/")).map_err(|e| Error::Internal(e.to_string()))?;
-        // What reqwest sends as `host`: the port only when it isn't the scheme's.
-        let host = match url.port() {
-            Some(port) => format!("{}:{port}", url.host_str().unwrap_or_default()),
-            None => url.host_str().unwrap_or_default().to_string(),
-        };
+        let (url, host) = aws_endpoint(&base)?;
         let what = format!("aws-ssm {}", t.region);
         let call = |op: &str, body: Json| {
-            let body = serde_json::to_vec(&body).expect("JSON");
-            let amz_date = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-            let amz_target = format!("AmazonSSM.{op}");
-            let auth = sigv4(&host, &t.region, "ssm", &amz_target, &amz_date, &body, ak, sk);
-            self.0
-                .client
-                .post(url.clone())
-                .header("content-type", "application/x-amz-json-1.1")
-                .header("x-amz-date", amz_date)
-                .header("x-amz-target", amz_target)
-                .header("authorization", auth)
-                .body(body)
+            let body = zeroize::Zeroizing::new(serde_json::to_vec(&body).expect("JSON"));
+            aws_call(&self.0.client, &url, &host, &t.region, "ssm", &format!("AmazonSSM.{op}"), &body, signer)
         };
         // `__type` without its namespace (`ParameterNotFound`); never the message.
         let kind = |v: &Json| v["__type"].as_str().unwrap_or_default().rsplit('#').next().unwrap_or_default().to_string();
@@ -1802,10 +1932,14 @@ impl SyncTarget for Ssm {
 struct SmTarget {
     region: String,
     secret_name: String,
-    access_key_id_key: String,
-    secret_access_key_key: String,
+    auth: AwsAuth,
     kms_key_id: Option<String>,
+    /// Regions the secret is replicated to; `None` leaves its replicas as they are.
+    replica_regions: Option<Vec<String>>,
 }
+
+/// The most regions a secret replicates to.
+const SM_REPLICAS_MAX: usize = 32;
 
 /// One AWS Secrets Manager secret holding the environment's values as a JSON object (how apps
 /// usually read it), created by roll and tagged so; one roll didn't create is never replaced.
@@ -1817,12 +1951,30 @@ const SM_TAG: (&str, &str) = ("managed-by", "roll-secrets");
 
 impl SecretsManager {
     fn target(&self, t: &Json) -> Result<SmTarget> {
-        let [region, name, ak, sk, kms] =
-            target("aws-secrets-manager", t, [("region", true), ("secret_name", true), ("access_key_id_key", true), ("secret_access_key_key", true), ("kms_key_id", false)])?;
+        // `replica_regions` is a list: read apart from the string fields.
+        let mut strings = t.clone();
+        let replicas = strings.as_object_mut().and_then(|o| o.remove("replica_regions"));
+        let fields = [("region", true), ("secret_name", true), ("role", false), ("access_key_id_key", false), ("secret_access_key_key", false), ("kms_key_id", false)];
+        let [region, name, role, ak, sk, kms] = target("aws-secrets-manager", &strings, fields)?;
         let region = region.unwrap_or_default();
-        if !ident(&region, 32, "-") || region.chars().any(|c| c.is_ascii_uppercase()) {
+        if !aws_region(&region) {
             return Err(bad("region is an AWS region (us-east-1)"));
         }
+        // A list, or a comma-separated string (the dashboard's form, `--target`).
+        let replicas: Option<Vec<Json>> = match replicas {
+            None | Some(Json::Null) => None,
+            Some(Json::Array(rs)) => Some(rs),
+            Some(Json::String(rs)) => Some(rs.split(',').map(str::trim).filter(|r| !r.is_empty()).map(|r| json!(r)).collect()),
+            Some(_) => return Err(bad("replica_regions is a list of AWS regions")),
+        };
+        let replica_regions = match replicas {
+            Some(rs) if rs.len() > SM_REPLICAS_MAX => return Err(bad(format!("replica_regions lists at most {SM_REPLICAS_MAX} regions"))),
+            Some(rs) => {
+                let rs: std::collections::BTreeSet<String> = rs.iter().map(|r| r.as_str().filter(|r| aws_region(r) && *r != region).map(str::to_string)).collect::<Option<_>>().ok_or_else(|| bad("replica_regions are AWS regions other than region (us-west-2)"))?;
+                Some(rs.into_iter().collect())
+            }
+            None => None,
+        };
         let name = name.unwrap_or_default();
         if !ident(&name, 512, "/_+=.@-") || name.to_ascii_lowercase().starts_with("aws") {
             return Err(bad("secret_name is a Secrets Manager name such as shop/production (letters, digits and /_+=.@-; not aws…)"));
@@ -1830,13 +1982,7 @@ impl SecretsManager {
         if kms.as_ref().is_some_and(|k| !ident(k, 2048, "-_:/.")) {
             return Err(bad("kms_key_id is a KMS key's id, alias or ARN"));
         }
-        Ok(SmTarget {
-            region,
-            secret_name: name,
-            access_key_id_key: key_field("aws-secrets-manager", "access_key_id_key", ak)?,
-            secret_access_key_key: key_field("aws-secrets-manager", "secret_access_key_key", sk)?,
-            kms_key_id: kms,
-        })
+        Ok(SmTarget { region, secret_name: name, auth: AwsAuth::of("aws-secrets-manager", role, ak, sk)?, kms_key_id: kms, replica_regions })
     }
 }
 
@@ -1851,21 +1997,29 @@ impl SyncTarget for SecretsManager {
         const F: &[SyncField] = &[
             SyncField { name: "region", label: "Region", required: true, placeholder: "us-east-1" },
             SyncField { name: "secret_name", label: "Secret name (one JSON secret)", required: true, placeholder: "shop/production" },
-            SyncField { name: "access_key_id_key", label: "Key holding the IAM access key id", required: true, placeholder: "AWS_SYNC_ACCESS_KEY_ID" },
-            SyncField { name: "secret_access_key_key", label: "Key holding the IAM secret key", required: true, placeholder: "AWS_SYNC_SECRET_ACCESS_KEY" },
+            SyncField { name: "role", label: "The project's AWS role (by name)", required: false, placeholder: "secrets" },
+            SyncField { name: "access_key_id_key", label: "Or: key holding an IAM access key id", required: false, placeholder: "AWS_SYNC_ACCESS_KEY_ID" },
+            SyncField { name: "secret_access_key_key", label: "And the key holding its secret key", required: false, placeholder: "AWS_SYNC_SECRET_ACCESS_KEY" },
             SyncField { name: "kms_key_id", label: "KMS key (optional)", required: false, placeholder: "alias/shop" },
+            SyncField { name: "replica_regions", label: "Replica regions (optional, comma-separated)", required: false, placeholder: "us-west-2, eu-west-1" },
         ];
         F
     }
     fn credentials(&self, t: &Json) -> Vec<String> {
-        credential_keys(t, &["access_key_id_key", "secret_access_key_key"])
+        self.target(t).map(|t| t.auth.keys()).unwrap_or_default()
+    }
+    fn aws_role(&self, t: &Json) -> Option<String> {
+        self.target(t).ok()?.auth.role()
+    }
+    fn stored_cloud_key(&self, t: &Json) -> Option<&'static str> {
+        self.target(t).ok().filter(|t| t.auth.role().is_none()).map(|_| AWS_INSTEAD)
     }
     fn check(&self, _: &str, _: &Resources, t: &Json) -> Result<()> {
         self.target(t).map(|_| ())
     }
     fn push(&self, t: &Json, p: &Push<'_>) -> Result<()> {
         let t = self.target(t)?;
-        let (ak, sk) = (credential(p, &t.access_key_id_key)?, credential(p, &t.secret_access_key_key)?);
+        let signer = t.auth.signer(p, "aws-secrets-manager")?;
         // The whole environment each time: the secret is one JSON object, removed keys just aren't in it.
         let all: std::collections::BTreeMap<&str, &str> = p.values.iter().map(|(k, v)| (k.as_str(), v.expose())).collect();
         let secret = zeroize::Zeroizing::new(serde_json::to_string(&all).expect("JSON"));
@@ -1873,25 +2027,11 @@ impl SyncTarget for SecretsManager {
             return Err(Error::BadRequest(format!("the environment's values come to {} bytes as JSON, over Secrets Manager's 64 KB", secret.len())));
         }
         let base = self.0.ssm.clone().unwrap_or_else(|| format!("https://secretsmanager.{}.amazonaws.com", t.region));
-        let url = url::Url::parse(&format!("{base}/")).map_err(|e| Error::Internal(e.to_string()))?;
-        let host = match url.port() {
-            Some(port) => format!("{}:{port}", url.host_str().unwrap_or_default()),
-            None => url.host_str().unwrap_or_default().to_string(),
-        };
+        let (url, host) = aws_endpoint(&base)?;
         let what = format!("aws-secrets-manager {} {}", t.region, t.secret_name);
         let call = |op: &str, body: Json| {
             let body = zeroize::Zeroizing::new(serde_json::to_vec(&body).expect("JSON"));
-            let amz_date = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-            let amz_target = format!("secretsmanager.{op}");
-            let auth = sigv4(&host, &t.region, "secretsmanager", &amz_target, &amz_date, &body, ak, sk);
-            self.0
-                .client
-                .post(url.clone())
-                .header("content-type", "application/x-amz-json-1.1")
-                .header("x-amz-date", amz_date)
-                .header("x-amz-target", amz_target)
-                .header("authorization", auth)
-                .body(body.to_vec())
+            aws_call(&self.0.client, &url, &host, &t.region, "secretsmanager", &format!("secretsmanager.{op}"), &body, signer)
         };
         // `__type` without its namespace; never the message (it may quote the request).
         let kind = |v: &Json| v["__type"].as_str().unwrap_or_default().rsplit('#').next().unwrap_or_default().to_string();
@@ -1906,6 +2046,25 @@ impl SyncTarget for SecretsManager {
                 if !status.is_success() {
                     return Err(Error::Link(format!("{what}: {status} {}", kind(&v))));
                 }
+                // The secret is roll's, so its replicas are what the target lists: new regions
+                // added, others removed. Unset leaves them as they are.
+                if let Some(want) = &t.replica_regions {
+                    let have: Vec<&str> = described["ReplicationStatus"].as_array().into_iter().flatten().filter_map(|r| r["Region"].as_str()).collect();
+                    let add: Vec<Json> = want.iter().filter(|r| !have.contains(&r.as_str())).map(|r| json!({ "Region": r })).collect();
+                    let remove: Vec<&str> = have.iter().copied().filter(|r| !want.iter().any(|w| w == r)).collect();
+                    if !add.is_empty() {
+                        let (status, v) = self.0.send(call("ReplicateSecretToRegions", json!({ "SecretId": t.secret_name, "AddReplicaRegions": add })), &what).await?;
+                        if !status.is_success() {
+                            return Err(Error::Link(format!("{what}: replicating: {status} {}", kind(&v))));
+                        }
+                    }
+                    if !remove.is_empty() {
+                        let (status, v) = self.0.send(call("RemoveRegionsFromReplication", json!({ "SecretId": t.secret_name, "RemoveReplicaRegions": remove })), &what).await?;
+                        if !status.is_success() {
+                            return Err(Error::Link(format!("{what}: removing replicas: {status} {}", kind(&v))));
+                        }
+                    }
+                }
                 return Ok(());
             }
             if kind(&described) != "ResourceNotFoundException" {
@@ -1919,6 +2078,10 @@ impl SyncTarget for SecretsManager {
             });
             if let Some(k) = &t.kms_key_id {
                 body["KmsKeyId"] = json!(k);
+            }
+            // Replicas use each region's own Secrets Manager key (a KMS key is one region's).
+            if let Some(rs) = t.replica_regions.as_ref().filter(|rs| !rs.is_empty()) {
+                body["AddReplicaRegions"] = json!(rs.iter().map(|r| json!({ "Region": r })).collect::<Vec<_>>());
             }
             let (status, v) = self.0.send(call("CreateSecret", body), &what).await?;
             if !status.is_success() {
@@ -2131,7 +2294,8 @@ struct AacTarget {
     prefix: String,
     tenant: String,
     client_id: String,
-    secret_key: String,
+    /// The key holding the client secret, or (`Err`) a federated credential.
+    auth: std::result::Result<String, roll_secrets::clouds::Account>,
 }
 
 const AAC_API: &str = "api-version=2023-11-01";
@@ -2140,7 +2304,7 @@ const AAC_MAX: usize = 10_000;
 
 impl AzureAppConfig {
     fn target(&self, t: &Json) -> Result<AacTarget> {
-        let fields = [("store", true), ("label", false), ("prefix", false), ("tenant_id", true), ("client_id", true), ("client_secret_key", true)];
+        let fields = [("store", true), ("label", false), ("prefix", false), ("tenant_id", true), ("client_id", true), ("client_secret_key", false)];
         let [store, label, prefix, tenant, client, secret] = target("azure-app-configuration", t, fields)?;
         let store = store.unwrap_or_default();
         // The store's name is the host's first label: nothing else gets in.
@@ -2163,8 +2327,14 @@ impl AzureAppConfig {
         if !ident(&client_id, 64, "-") {
             return Err(bad("client_id is an app registration's client id"));
         }
-        Ok(AacTarget { store, label, prefix, tenant, client_id, secret_key: key_field("azure-app-configuration", "client_secret_key", secret)? })
+        let auth = azure_auth("azure-app-configuration", &tenant, &client_id, secret, aac_scope(&store))?;
+        Ok(AacTarget { store, label, prefix, tenant, client_id, auth })
     }
+}
+
+/// The scope of an Entra token for one App Configuration store.
+fn aac_scope(store: &str) -> String {
+    format!("https://{store}.azconfig.io/.default")
 }
 
 /// App Configuration's problem `type`, its last part (`key-locked`); Entra's `error`. Never a
@@ -2187,19 +2357,24 @@ impl SyncTarget for AzureAppConfig {
             SyncField { name: "prefix", label: "Key prefix (optional)", required: false, placeholder: "shop:" },
             SyncField { name: "tenant_id", label: "Tenant id", required: true, placeholder: "contoso.onmicrosoft.com" },
             SyncField { name: "client_id", label: "App registration's client id", required: true, placeholder: "00000000-0000-0000-0000-000000000000" },
-            SyncField { name: "client_secret_key", label: "Key holding its client secret", required: true, placeholder: "AZURE_SYNC_CLIENT_SECRET" },
+            SyncField { name: "client_secret_key", label: "Key holding its client secret (none: a federated credential)", required: false, placeholder: "AZURE_SYNC_CLIENT_SECRET" },
         ];
         F
     }
     fn credentials(&self, t: &Json) -> Vec<String> {
         credential_keys(t, &["client_secret_key"])
     }
+    fn federation(&self, t: &Json) -> Option<roll_secrets::clouds::Account> {
+        self.target(t).ok()?.auth.err()
+    }
+    fn stored_cloud_key(&self, t: &Json) -> Option<&'static str> {
+        self.target(t).ok()?.auth.ok().map(|_| AZURE_INSTEAD)
+    }
     fn check(&self, _: &str, _: &Resources, t: &Json) -> Result<()> {
         self.target(t).map(|_| ())
     }
     fn push(&self, t: &Json, p: &Push<'_>) -> Result<()> {
         let t = self.target(t)?;
-        let secret = credential(p, &t.secret_key)?;
         too_long(p, AAC_MAX, "a key-value's 10 KB")?;
         let what = format!("azure-app-configuration {}", t.store);
         let h = &self.0.http;
@@ -2209,22 +2384,12 @@ impl SyncTarget for AzureAppConfig {
         let url = |name: &str| format!("{store}/kv/{}?label={label}&{AAC_API}", urlencoding::encode(&format!("{}{name}", t.prefix)));
         let ours = |v: &Json| v["tags"]["managed-by"] == "roll-secrets";
         block_on(async {
-            let form = format!(
-                "grant_type=client_credentials&client_id={}&client_secret={}&scope={}",
-                urlencoding::encode(&t.client_id),
-                urlencoding::encode(secret),
-                urlencoding::encode(&format!("https://{}.azconfig.io/.default", t.store))
-            );
-            let login = h.client.post(format!("{}/{}/oauth2/v2.0/token", h.azure_login, t.tenant)).header("content-type", "application/x-www-form-urlencoded").body(form);
-            let (status, v) = h.send(login, &what).await?;
-            let token = match v["access_token"].as_str() {
-                Some(tok) if status.is_success() => tok.to_string(),
-                _ => return Err(Error::Link(format!("{what}: signing in: {status} {}", aac_code(&v)))),
-            };
+            let token = azure_token(h, &h.client, &h.azure_login, p, &t.tenant, &t.client_id, t.auth.as_ref().ok().map(String::as_str), &aac_scope(&t.store), &what).await?;
+            let token = token.as_str();
             for name in p.changed {
                 let Some(v) = p.values.get(name) else { continue };
                 // Whether it's roll's must be known before writing: a refused read stops here.
-                let (status, got) = h.send(h.client.get(url(name)).bearer_auth(&token), &what).await?;
+                let (status, got) = h.send(h.client.get(url(name)).bearer_auth(token), &what).await?;
                 if status.is_success() && !ours(&got) {
                     return Err(Error::Link(format!("{what}: {}{name} exists and roll didn't create it (no managed-by=roll-secrets tag): roll never writes to it", t.prefix)));
                 }
@@ -2232,14 +2397,14 @@ impl SyncTarget for AzureAppConfig {
                     return Err(Error::Link(format!("{what}: reading {}{name}: {status} {}", t.prefix, aac_code(&got))));
                 }
                 let body = json!({ "value": v.expose(), "tags": { "managed-by": "roll-secrets" } });
-                let put = h.client.put(url(name)).bearer_auth(&token).header("content-type", "application/vnd.microsoft.appconfig.kv+json").body(serde_json::to_vec(&body).expect("JSON"));
+                let put = h.client.put(url(name)).bearer_auth(token).header("content-type", "application/vnd.microsoft.appconfig.kv+json").body(serde_json::to_vec(&body).expect("JSON"));
                 let (status, got) = h.send(put, &what).await?;
                 if !status.is_success() {
                     return Err(Error::Link(format!("{what}: {}{name}: {status} {}", t.prefix, aac_code(&got))));
                 }
             }
             for name in p.removed {
-                let (status, got) = h.send(h.client.get(url(name)).bearer_auth(&token), &what).await?;
+                let (status, got) = h.send(h.client.get(url(name)).bearer_auth(token), &what).await?;
                 // Gone already, or someone else's: nothing of roll's to delete.
                 if status == reqwest::StatusCode::NOT_FOUND || (status.is_success() && !ours(&got)) {
                     continue;
@@ -2247,7 +2412,7 @@ impl SyncTarget for AzureAppConfig {
                 if !status.is_success() {
                     return Err(Error::Link(format!("{what}: reading {}{name}: {status} {}", t.prefix, aac_code(&got))));
                 }
-                let (status, got) = h.send(h.client.delete(url(name)).bearer_auth(&token), &what).await?;
+                let (status, got) = h.send(h.client.delete(url(name)).bearer_auth(token), &what).await?;
                 if !status.is_success() && status != reqwest::StatusCode::NOT_FOUND {
                     return Err(Error::Link(format!("{what}: deleting {}{name}: {status} {}", t.prefix, aac_code(&got))));
                 }
@@ -2521,8 +2686,17 @@ mod tests {
                 let hash: String = Sha256::digest(&body).iter().map(|b| format!("{b:02x}")).collect();
                 let target = target.to_str().unwrap();
                 let service = if target.starts_with("secretsmanager.") { "secretsmanager" } else { "ssm" };
-                let verified = s3_proto::sigv4::authenticate_service(&req, chrono::Utc::now().timestamp(), service, &hash, |ak| (ak == "AKIATEST").then(|| "aws-secret".to_string()));
-                if !matches!(verified, Ok(Some(_))) {
+                // An IAM user's keys, or a role's session whose token is signed too.
+                let secret = |ak: &str| match ak {
+                    "AKIATEST" => Some("aws-secret".to_string()),
+                    "ASIAFAKE" => Some("fake-session-secret".to_string()),
+                    _ => None,
+                };
+                let verified = s3_proto::sigv4::authenticate_service(&req, chrono::Utc::now().timestamp(), service, &hash, secret);
+                let auth = headers.get("authorization").and_then(|a| a.to_str().ok()).unwrap_or_default();
+                let token = headers.get("x-amz-security-token").and_then(|t| t.to_str().ok());
+                let session_ok = !auth.contains("Credential=ASIAFAKE/") || (token == Some("fake-session-token") && auth.contains("x-amz-security-token"));
+                if !matches!(verified, Ok(Some(_))) || !session_ok {
                     return (StatusCode::FORBIDDEN, axum::Json(json!({ "__type": "InvalidSignatureException", "message": "no" })));
                 }
                 let asked: Json = serde_json::from_slice(&body).unwrap_or(Json::Null);
@@ -2530,6 +2704,11 @@ mod tests {
                     "AmazonSSM.DeleteParameter" => (StatusCode::BAD_REQUEST, axum::Json(json!({ "__type": "com.amazonaws.ssm#ParameterNotFound", "message": "gone" }))),
                     // Secrets Manager: someone else's secret exists untagged; ours doesn't yet.
                     "secretsmanager.DescribeSecret" if asked["SecretId"] == "theirs/production" => (StatusCode::OK, axum::Json(json!({ "Name": "theirs/production", "Tags": [] }))),
+                    // Roll's, replicated to us-west-2 and ap-south-1.
+                    "secretsmanager.DescribeSecret" if asked["SecretId"] == "shop/replicated" => (StatusCode::OK, axum::Json(json!({
+                        "Name": "shop/replicated", "Tags": [{ "Key": "managed-by", "Value": "roll-secrets" }],
+                        "ReplicationStatus": [{ "Region": "us-west-2", "Status": "InSync" }, { "Region": "ap-south-1", "Status": "InSync" }],
+                    }))),
                     "secretsmanager.DescribeSecret" => (StatusCode::BAD_REQUEST, axum::Json(json!({ "__type": "ResourceNotFoundException", "message": "no" }))),
                     _ => (StatusCode::OK, axum::Json(json!({ "Version": 1 }))),
                 };
@@ -2554,6 +2733,16 @@ mod tests {
     /// Check `target`, then push `NEW` and remove `OLD` with `credentials`, on a blocking thread
     /// as the store does.
     async fn push(t: Arc<dyn SyncTarget>, target: Json, credentials: &[(&str, &str)]) -> Result<()> {
+        push_as(t, target, credentials, None).await
+    }
+
+    /// A role's session, as roll-secrets assumes one for a push: obviously fake.
+    fn session() -> roll_secrets::aws::Session {
+        roll_secrets::aws::Session { access_key_id: Value::new("ASIAFAKE"), secret_access_key: Value::new("fake-session-secret"), session_token: Value::new("fake-session-token"), expires_at: 0 }
+    }
+
+    /// [`push`], signed in as the project's AWS role when `aws` is given.
+    async fn push_as(t: Arc<dyn SyncTarget>, target: Json, credentials: &[(&str, &str)], aws: Option<roll_secrets::aws::Session>) -> Result<()> {
         let credentials: BTreeMap<String, Value> = credentials.iter().map(|(k, v)| (k.to_string(), Value::new(v.to_string()))).collect();
         tokio::task::spawn_blocking(move || {
             t.check("prj_1", &BTreeSet::new(), &target)?;
@@ -2572,7 +2761,8 @@ mod tests {
                 removed: &removed,
                 secret: None,
                 credentials: &credentials,
-                aws: None,
+                aws: aws.as_ref(),
+                cloud_token: None,
             };
             t.push(&target, &p)
         })
@@ -2865,6 +3055,45 @@ mod tests {
         assert!(Ssm(http(&base)).check("p", &BTreeSet::new(), &host_in_region).is_err());
     }
 
+    /// `role`: the push signs with the project role's session (its token signed too), and the
+    /// sync names no key to keep; keys are what health flags.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn aws_ssm_with_a_role_signs_with_the_session_and_keeps_no_key() {
+        let (base, seen) = mock().await;
+        let ssm = || Arc::new(Ssm(http(&base)));
+        let t = json!({ "region": "eu-west-1", "prefix": "/shop/production/", "role": "parameters" });
+        assert_eq!((ssm().aws_role(&t), ssm().credentials(&t), ssm().stored_cloud_key(&t)), (Some("parameters".into()), vec![], None));
+        push_as(ssm(), t.clone(), &[], Some(session())).await.expect("signed with the session and its token");
+        assert_eq!(seen.lock().unwrap()[0].2["Name"], "/shop/production/NEW");
+        // Without the session's token the signature doesn't hold.
+        let mut tokenless = session();
+        tokenless.session_token = Value::new("another-token");
+        assert!(push_as(ssm(), t, &[], Some(tokenless)).await.unwrap_err().to_string().contains("InvalidSignatureException"));
+        let keys = json!({ "region": "eu-west-1", "prefix": "/a/", "access_key_id_key": "AK", "secret_access_key_key": "SK" });
+        assert!(ssm().stored_cloud_key(&keys).is_some() && ssm().aws_role(&keys).is_none());
+        for neither_or_both in [json!({ "region": "eu-west-1", "prefix": "/a/" }), json!({ "region": "eu-west-1", "prefix": "/a/", "role": "parameters", "access_key_id_key": "AK", "secret_access_key_key": "SK" })] {
+            assert!(ssm().check("p", &BTreeSet::new(), &neither_or_both).is_err());
+        }
+    }
+
+    /// `replica_regions`: a new secret is made with its replicas; roll's own secret gains the
+    /// missing regions and loses the ones no longer listed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn aws_secrets_manager_keeps_replicas_in_the_listed_regions() {
+        let (base, seen) = mock().await;
+        let sm = || Arc::new(SecretsManager(http(&base)));
+        let t = |name: &str| json!({ "region": "us-east-1", "secret_name": name, "role": "secrets", "replica_regions": "us-west-2, eu-west-1" });
+        push_as(sm(), t("shop/production"), &[], Some(session())).await.unwrap();
+        let created = seen.lock().unwrap().last().unwrap().2.clone();
+        assert_eq!(created["AddReplicaRegions"], json!([{ "Region": "eu-west-1" }, { "Region": "us-west-2" }]));
+        seen.lock().unwrap().clear();
+        push_as(sm(), t("shop/replicated"), &[], Some(session())).await.unwrap();
+        let calls: Vec<Json> = seen.lock().unwrap().iter().map(|(_, _, b)| b.clone()).collect();
+        assert_eq!(calls[2], json!({ "SecretId": "shop/replicated", "AddReplicaRegions": [{ "Region": "eu-west-1" }] }));
+        assert_eq!(calls[3], json!({ "SecretId": "shop/replicated", "RemoveReplicaRegions": ["ap-south-1"] }));
+        assert!(sm().check("p", &BTreeSet::new(), &json!({ "region": "us-east-1", "secret_name": "a", "role": "r", "replica_regions": ["us-east-1"] })).is_err(), "not its own region");
+    }
+
     /// One fake for supabase, cloudflare-pages, azure-app-configuration and vault-kv. A request
     /// without the right credential gets an answer that quotes it and a value back, which no error
     /// may repeat. App Configuration has `shop:OLD` (roll's) and `shop:THEIRS` (not); Vault has
@@ -3001,7 +3230,7 @@ mod tests {
                 let values = BTreeMap::from([("THEIRS".to_string(), Value::new("v-123".to_string()))]);
                 let creds = BTreeMap::from([("AZURE_SECRET".to_string(), Value::new("fake-client-secret".to_string()))]);
                 let changed = vec!["THEIRS".to_string()];
-                let p = Push { sync: "syn_1", project: "prj_1", resources: &BTreeSet::new(), environment: "production", path: "/", digest: "d", at: 0, values: &values, changed: &changed, removed: &[], secret: None, credentials: &creds, aws: None };
+                let p = Push { sync: "syn_1", project: "prj_1", resources: &BTreeSet::new(), environment: "production", path: "/", digest: "d", at: 0, values: &values, changed: &changed, removed: &[], secret: None, credentials: &creds, aws: None, cloud_token: None };
                 AzureAppConfig(guarded(&base)).push(&t, &p)
             }
         })
@@ -3039,5 +3268,187 @@ mod tests {
         let guarded_only = VaultKv(Guarded { allow_private: false, ..guarded(&base) });
         assert!(guarded_only.check("p", &BTreeSet::new(), &t("shop/production")).is_err(), "a private address");
         assert!(VaultKv(guarded(&base)).check("p", &BTreeSet::new(), &json!({ "address": base, "path": "shop/../sys", "token_key": "T" })).is_err());
+    }
+
+    // ── syncing without a cloud key ──
+
+    /// What the fake Google and Microsoft endpoints saw: path, `authorization`, body.
+    #[derive(Default)]
+    struct Fed {
+        secrets: std::sync::OnceLock<Arc<roll_secrets::Secrets>>,
+        project: std::sync::OnceLock<String>,
+        seen: Mutex<Vec<(String, String, String)>>,
+    }
+
+    const ISSUER: &str = "https://roll.test/v1/secrets/oidc";
+    const PROVIDER: &str = "//iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/roll/providers/roll";
+
+    impl Fed {
+        /// The claims of `jwt` if roll's issuer signed it (its JWKS, RS256) for `aud`, and its
+        /// subject is one of this project's syncs (a provider named `loose` takes any subject).
+        fn verified(&self, jwt: &str, aud: &str) -> Option<Json> {
+            use base64::Engine as _;
+            let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+            let (signed, sig) = jwt.rsplit_once('.')?;
+            let header: Json = serde_json::from_slice(&b64.decode(signed.split('.').next()?).ok()?).ok()?;
+            let claims: Json = serde_json::from_slice(&b64.decode(signed.split('.').nth(1)?).ok()?).ok()?;
+            let jwks = self.secrets.get()?.oidc_jwks().ok()?;
+            let key = jwks["keys"].as_array()?.iter().find(|k| k["kid"] == header["kid"])?;
+            let (n, e) = (b64.decode(key["n"].as_str()?).ok()?, b64.decode(key["e"].as_str()?).ok()?);
+            ring::signature::RsaPublicKeyComponents { n, e }.verify(&ring::signature::RSA_PKCS1_2048_8192_SHA256, signed.as_bytes(), &b64.decode(sig).ok()?).ok()?;
+            let ours = claims["sub"].as_str()?.starts_with(&format!("roll-secrets:{}:sync:syn_", self.project.get()?));
+            (claims["iss"] == ISSUER && claims["aud"] == aud && (ours || aud.ends_with("/providers/loose"))).then_some(claims)
+        }
+    }
+
+    /// Google's STS and IAM Credentials, Microsoft's sign-in, and Secret Manager and Key Vault
+    /// taking only the tokens those gave.
+    async fn clouds() -> (String, Arc<Fed>) {
+        async fn any(State(f): State<Arc<Fed>>, method: Method, uri: Uri, headers: HeaderMap, body: axum::body::Bytes) -> (StatusCode, axum::Json<Json>) {
+            let pq = uri.path_and_query().map(|p| p.as_str().to_string()).unwrap_or_default();
+            let auth = headers.get("authorization").and_then(|a| a.to_str().ok()).unwrap_or_default().to_string();
+            let text = String::from_utf8_lossy(&body).into_owned();
+            f.seen.lock().unwrap().push((format!("{method} {pq}"), auth.clone(), text.clone()));
+            let ok = |v: Json| (StatusCode::OK, axum::Json(v));
+            match pq.as_str() {
+                "/v1/token" => {
+                    let b: Json = serde_json::from_str(&text).unwrap_or_default();
+                    let aud = b["audience"].as_str().unwrap_or_default();
+                    match f.verified(b["subjectToken"].as_str().unwrap_or_default(), aud) {
+                        Some(_) if b["subjectTokenType"] == "urn:ietf:params:oauth:token-type:jwt" => ok(json!({ "access_token": "federated.fake", "expires_in": 3600 })),
+                        _ => (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": "invalid_grant", "error_description": "The given credential is rejected by the attribute condition." }))),
+                    }
+                }
+                "/v1/projects/-/serviceAccounts/roll-sync@shop-prod.iam.gserviceaccount.com:generateAccessToken" if auth == "Bearer federated.fake" => ok(json!({ "accessToken": "ya29.wif-fake", "expireTime": "2030-01-01T00:00:00Z" })),
+                "/contoso.onmicrosoft.com/oauth2/v2.0/token" => {
+                    let form: std::collections::HashMap<String, String> = url::form_urlencoded::parse(text.as_bytes()).into_owned().collect();
+                    let assertion = form.get("client_assertion").map(String::as_str).unwrap_or_default();
+                    let fine = form.get("client_assertion_type").map(String::as_str) == Some("urn:ietf:params:oauth:client-assertion-type:jwt-bearer")
+                        && !form.contains_key("client_secret")
+                        && form.get("scope").map(String::as_str) == Some("https://vault.azure.net/.default")
+                        && f.verified(assertion, "api://AzureADTokenExchange").is_some();
+                    match fine {
+                        true => ok(json!({ "access_token": "akv.wif-fake", "token_type": "Bearer", "expires_in": 3599 })),
+                        false => (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": "invalid_client", "error_description": "AADSTS70021: No matching federated identity record found." }))),
+                    }
+                }
+                p if p.starts_with("/v1/projects/shop-prod/secrets") && auth == "Bearer ya29.wif-fake" => match method.as_str() {
+                    "GET" => (StatusCode::NOT_FOUND, axum::Json(json!({ "error": { "status": "NOT_FOUND" } }))),
+                    _ => ok(json!({})),
+                },
+                p if p.starts_with("/secrets/") && auth == "Bearer akv.wif-fake" => match method.as_str() {
+                    "GET" => (StatusCode::NOT_FOUND, axum::Json(json!({ "error": { "code": "SecretNotFound" } }))),
+                    _ => ok(json!({})),
+                },
+                _ => (StatusCode::UNAUTHORIZED, axum::Json(json!({ "error": { "status": "UNAUTHENTICATED", "code": "Unauthorized" } }))),
+            }
+        }
+        let f: Arc<Fed> = Default::default();
+        let app = axum::Router::new().fallback(any).with_state(f.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (base, f)
+    }
+
+    /// roll secrets with `kind` registered and roll's issuer exchanging its tokens at `clouds`;
+    /// project `shop` with `API_KEY` in `production`, and an untrusted preview `pv-fork`.
+    async fn federated(kind: Arc<dyn SyncTarget>, base: &str, fed: &Fed) -> (tempfile::TempDir, axum::Router, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
+        let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
+        let project = ws.create("", "shop", "", None).unwrap().id;
+        let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
+        let mut syncs = roll_secrets::syncs::Syncs::default();
+        syncs.register(kind);
+        let clouds = roll_secrets::clouds::Clouds { issuer: ISSUER.into(), tokens: Arc::new(crate::secrets::clouds::RollClouds::at(base, base, base)) };
+        let opts = roll_secrets::Options { keyring: Ok(roll_secrets::Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: None, sts: None, outside: None, github: None, clouds: Some(clouds), workloads: None, directory: None, gateways: None };
+        let secrets = Arc::new(roll_secrets::Secrets::new(db, ws, opts).unwrap());
+        let _ = (fed.secrets.set(secrets.clone()), fed.project.set(project.clone()));
+        let router = roll_secrets::router(secrets);
+        for body in [json!({ "slug": "production" }), json!({ "slug": "pv-fork", "base": "production", "trusted": false })] {
+            let (st, e) = call(&router, "POST", &format!("/v1/secrets/projects/{project}/environments"), Some(body)).await;
+            assert!(st < 300 || st == 409, "{st} {e}");
+        }
+        let (st, e) = call(&router, "PUT", &format!("/v1/secrets/projects/{project}/environments/production/secrets/API_KEY"), Some(json!({ "value": "fake-api-value" }))).await;
+        assert!(st < 300, "{st} {e}");
+        (dir, router, project)
+    }
+
+    async fn call(router: &axum::Router, method: &str, path: &str, body: Option<Json>) -> (u16, Json) {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        let req = axum::http::Request::builder().method(method).uri(path).header("content-type", "application/json").body(body.map_or(axum::body::Body::empty(), |b| axum::body::Body::from(b.to_string()))).unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        let status = resp.status().as_u16();
+        (status, serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap_or(Json::Null))
+    }
+
+    /// Google: roll's issuer signs a token for the sync's own subject, Google's STS exchanges it
+    /// and the service account is impersonated; Secret Manager gets that access token, and the
+    /// sync names no key. A provider whose trust takes any of roll's syncs is refused when the
+    /// sync is made; a sync keeping a service account key is what health flags.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn google_secret_manager_signs_in_through_workload_identity_federation() {
+        let (base, fed) = clouds().await;
+        let (_dir, router, project) = federated(Arc::new(GoogleSecrets(http(&base))), &base, &fed).await;
+        let target = |provider: &str| json!({ "project": "shop-prod", "workload_identity_provider": provider, "service_account_email": "roll-sync@shop-prod.iam.gserviceaccount.com" });
+        let syncs = format!("/v1/secrets/projects/{project}/syncs");
+        let (st, made) = call(&router, "POST", &syncs, Some(json!({ "environment": "production", "kind": "google-secret-manager", "target": target("projects/123456789/locations/global/workloadIdentityPools/roll/providers/roll") }))).await;
+        assert_eq!(st, 201, "{made}");
+        let id = made["id"].as_str().unwrap();
+        assert_eq!(made["subject"], json!(format!("roll-secrets:{project}:sync:{id}")), "the subject its trust names");
+        let (st, ran) = call(&router, "POST", &format!("{syncs}/{id}/run"), None).await;
+        assert_eq!((st, ran["status"].as_str()), (200, Some("ok")), "{ran}");
+        let seen = fed.seen.lock().unwrap().clone();
+        let routes: Vec<&str> = seen.iter().map(|(r, _, _)| r.as_str()).collect();
+        assert_eq!(
+            routes,
+            [
+                "POST /v1/token",
+                "POST /v1/token",
+                "POST /v1/projects/-/serviceAccounts/roll-sync@shop-prod.iam.gserviceaccount.com:generateAccessToken",
+                "GET /v1/projects/shop-prod/secrets/API_KEY",
+                "POST /v1/projects/shop-prod/secrets?secretId=API_KEY",
+                "POST /v1/projects/shop-prod/secrets/API_KEY:addVersion"
+            ],
+            "the made-up project's token refused when the sync was made, then the push's exchanged"
+        );
+        let sts: Json = serde_json::from_str(&seen[1].2).unwrap();
+        assert_eq!(sts["audience"], PROVIDER);
+        assert!(seen[3..].iter().all(|(_, auth, _)| auth == "Bearer ya29.wif-fake"), "Secret Manager gets the impersonated token");
+        assert!(seen[5].2.contains(&base64::Engine::encode(&base64::engine::general_purpose::STANDARD, "fake-api-value")));
+        // A trust that takes any of roll's syncs.
+        let (st, e) = call(&router, "POST", &syncs, Some(json!({ "environment": "production", "kind": "google-secret-manager", "target": target("projects/123456789/locations/global/workloadIdentityPools/roll/providers/loose") }))).await;
+        assert!(st == 400 && e.to_string().contains("takes any of roll's syncs"), "{st} {e}");
+        // A stored service account key: health recommends federation for that sync only.
+        let (st, keyed) = call(&router, "POST", &syncs, Some(json!({ "environment": "production", "kind": "google-secret-manager", "target": { "project": "shop-prod", "service_account_key": "GCP_SYNC_KEY" } }))).await;
+        assert_eq!(st, 201, "{keyed}");
+        let (_, health) = call(&router, "GET", &format!("/v1/secrets/projects/{project}/health"), None).await;
+        let flagged: Vec<&str> = health.as_array().into_iter().flatten().filter(|f| f["issue"] == "stored_cloud_key").filter_map(|f| f["key"].as_str()).collect();
+        assert_eq!(flagged, [keyed["id"].as_str().unwrap()], "{health}");
+    }
+
+    /// Azure: the token request carries a client assertion roll's issuer signed for the sync's
+    /// subject (no secret), and Key Vault gets the token it answered. Never from an untrusted
+    /// environment.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn azure_key_vault_signs_in_with_a_client_assertion_from_rolls_issuer() {
+        let (base, fed) = clouds().await;
+        let (_dir, router, project) = federated(Arc::new(AzureKeyVault(http(&base))), &base, &fed).await;
+        let syncs = format!("/v1/secrets/projects/{project}/syncs");
+        let sync = |env: &str| json!({ "environment": env, "kind": "azure-key-vault", "target": { "vault": "shop-prod", "tenant_id": "contoso.onmicrosoft.com", "client_id": "00000000-0000-0000-0000-0000000000aa" } });
+        let (st, e) = call(&router, "POST", &syncs, Some(sync("pv-fork"))).await;
+        assert!(st == 400 && e.to_string().contains("untrusted environment"), "{st} {e}");
+        let (st, made) = call(&router, "POST", &syncs, Some(sync("production"))).await;
+        assert_eq!(st, 201, "{made}");
+        let (st, ran) = call(&router, "POST", &format!("{syncs}/{}/run", made["id"].as_str().unwrap()), None).await;
+        assert_eq!((st, ran["status"].as_str()), (200, Some("ok")), "{ran}");
+        let seen = fed.seen.lock().unwrap().clone();
+        let signed_in = seen.iter().filter(|(r, _, _)| r == "POST /contoso.onmicrosoft.com/oauth2/v2.0/token").count();
+        assert_eq!(signed_in, 2, "the made-up project's assertion, refused; then the push's");
+        let put = seen.iter().find(|(r, _, _)| r == "PUT /secrets/API-KEY?api-version=7.4").expect("the push wrote the value");
+        assert_eq!(put.1, "Bearer akv.wif-fake");
+        assert_eq!(serde_json::from_str::<Json>(&put.2).unwrap()["value"], "fake-api-value");
     }
 }

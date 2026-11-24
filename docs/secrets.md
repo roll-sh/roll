@@ -1259,6 +1259,9 @@ were people, an admin's session made them as `operator`, which would act forever
 was demoted or disabled; nothing is migrated, since nothing tells those from what the deployment's
 own token made. Making the sync again, or the identity (or setting its pinned keys again), from a
 person's session binds it to them. `key` is its id, an identity's environment and folder empty),
+`stored_cloud_key` (a recommendation: a sync that signs in to AWS, Google or Azure with a key
+stored in roll where it could sign in without one; `key` is the sync's id, the detail says what to
+use instead; see "Syncing without a cloud key"),
 `stale`, then `unread` (nobody revealed, exported, resolved or synced it in 90 days,
 and it's older than that). Each `Finding` names the environment, folder and key where it's set,
 with a detail (the other environments, the reason, the date): never a value, and nothing is
@@ -4719,18 +4722,18 @@ certificate):
 | `notify` | `{url}` | No values: that the environment changed, and which keys, POSTed to `url` (deploy hooks) |
 | `vercel` | `{project: "<id or name>", team?: "<team id>", target: ["production" \| "preview" \| "development", …], token_key: "VERCEL_TOKEN"}` | A Vercel project's environment variables (`type: "encrypted"`) for those environments |
 | `cloudflare` | `{account: "<account id>", script: "<worker>", token_key: "CLOUDFLARE_API_TOKEN"}` | A Worker's secrets (`secret_text`) |
-| `aws-ssm` | `{region, prefix: "/shop/production/", access_key_id_key, secret_access_key_key, kms_key_id?}` | Parameter Store `SecureString`s named `<prefix><name>` |
-| `google-secret-manager` | `{project, prefix?, service_account_key}` | one Secret Manager secret per key, `<prefix><KEY>`, each change a new version |
-| `azure-key-vault` | `{vault, tenant_id, client_id, client_secret_key}` | one Key Vault secret per key (`_` becomes `-`) |
+| `aws-ssm` | `{region, prefix: "/shop/production/", role, kms_key_id?}` (`role`: one of the project's AWS roles), or `access_key_id_key, secret_access_key_key` instead of `role` | Parameter Store `SecureString`s named `<prefix><name>` |
+| `google-secret-manager` | `{project, prefix?, workload_identity_provider, service_account_email}`, or `service_account_key` instead of the two | one Secret Manager secret per key, `<prefix><KEY>`, each change a new version |
+| `azure-key-vault` | `{vault, tenant_id, client_id, client_secret_key?}` (none: a federated credential) | one Key Vault secret per key (`_` becomes `-`) |
 | `azure-devops` | `{organization, project, group, token_key}`, or `tenant_id, client_id, client_secret_key` instead of `token_key` | an Azure Pipelines variable group's variables, all secret |
-| `aws-secrets-manager` | `{region, secret_name: "shop/production", access_key_id_key, secret_access_key_key, kms_key_id?}` | one Secrets Manager secret: the environment's values as a JSON object |
+| `aws-secrets-manager` | `{region, secret_name: "shop/production", role, kms_key_id?, replica_regions?: ["us-west-2", …]}`, or `access_key_id_key, secret_access_key_key` instead of `role` | one Secrets Manager secret: the environment's values as a JSON object, replicated to `replica_regions` |
 | `search-inference` | `{cluster, endpoint, service, pin}` (made by roll search, see "roll search's inference endpoints") | one key: a roll search inference endpoint's `api_key` (`PUT _inference/{task}/{endpoint}/_update`) |
 | `supabase` | `{project_ref, token_key}` | a Supabase project's Edge Function secrets |
 | `cloudflare-pages` | `{account, project, environment: "production" \| "preview", token_key}` | a Pages project's environment variables, as `secret_text` |
-| `azure-app-configuration` | `{store, label?, prefix?, tenant_id, client_id, client_secret_key}` | one App Configuration key-value per key, `<prefix><KEY>` under `label` |
+| `azure-app-configuration` | `{store, label?, prefix?, tenant_id, client_id, client_secret_key?}` (none: a federated credential) | one App Configuration key-value per key, `<prefix><KEY>` under `label` |
 | `vault-kv` | `{address, mount?, path, namespace?, token_key}`, or `role_id, secret_id_key, approle_mount?` instead of `token_key`; `ca_key?` | one Vault (or OpenBao) KV v2 secret holding the folder's keys |
 | `aws-acm` | `{region, role}` (`role`: one of the project's AWS roles, by name); `keys: [KEY]` | one ACM certificate (`ImportCertificate`), re-imported to the same ARN on each rotation |
-| `azure-keyvault-cert` | `{vault, certificate, tenant_id, client_id, client_secret_key}`; `keys: [KEY]` | one Key Vault certificate (PEM import), a new version on each rotation |
+| `azure-keyvault-cert` | `{vault, certificate, tenant_id, client_id, client_secret_key?}` (none: a federated credential); `keys: [KEY]` | one Key Vault certificate (PEM import), a new version on each rotation |
 | `cloudflare-cert` | `{zone, token_key}`; `keys: [KEY]` | one custom certificate on a zone, `PATCH`ed on each rotation |
 
 ### `github`
@@ -4752,6 +4755,7 @@ certificate):
 A platform's own credential is never in the sync. The target names **keys of the sync's own
 environment and folder** that hold it (`token_key`; for AWS `access_key_id_key` and
 `secret_access_key_key`, an IAM user's key the team stores, not a roll bucket's managed key).
+AWS, Google and Azure don't need one: see "Syncing without a cloud key".
 They are resolved at each push like any value (references work), never pushed themselves (they're
 left out of the synced keys, and `keys` can't list them), and never stored, logged or put in an
 error. A credential key that isn't set, is empty or doesn't resolve fails the push with an error
@@ -4770,19 +4774,24 @@ naming it. The calls go to the platforms' fixed hosts (`api.vercel.com`, `api.cl
   (a 404 counts as done). Values are at most 5 KB.
 - **`aws-ssm`**: `PutParameter` (`SecureString`, standard tier, `Overwrite`, `KeyId` when
   `kms_key_id` is set) and `DeleteParameter` (`ParameterNotFound` counts as done) over AWS JSON 1.1,
-  signed with SigV4 by hand from s3-proto's primitives (no AWS SDK in rolld). `prefix` is a path
+  signed with SigV4 by hand from s3-proto's primitives (no AWS SDK in rolld), as the project's AWS
+  role (`role`, a session per push, its token signed too) or an IAM user's stored keys (exactly one
+  of the two). `prefix` is a path
   that starts and ends with `/`, not under `/aws` or `/ssm`. A value over 4 KB is an error naming
   it.
-- **`google-secret-manager`**: `service_account_key` names the key holding a service account's JSON
-  key file. rolld signs a JWT with its private key (RS256, `ring`) and trades it at Google's token
-  endpoint (`oauth2.googleapis.com`, never the `token_uri` the file names) for an access token, then
-  per changed key: `GET` the secret, create it when missing (labelled `managed-by=roll-secrets`,
+- **`google-secret-manager`**: signs in through workload identity federation
+  (`workload_identity_provider`, `service_account_email`; see "Syncing without a cloud key"), or
+  with `service_account_key`, naming the key holding a service account's JSON key file: rolld signs
+  a JWT with its private key (RS256, `ring`) and trades it at Google's token endpoint
+  (`oauth2.googleapis.com`, never the `token_uri` the file names) for an access token. Then per
+  changed key: `GET` the secret, create it when missing (labelled `managed-by=roll-secrets`,
   automatic replication), and `addVersion` with the value; per removed key, delete the secret only
   when it carries that label. A secret that exists without the label is someone else's: roll never
   writes to it. Errors carry Google's `error.status`, never an answer.
 - **`azure-key-vault`**: rolld signs in as the app registration (client credentials at
-  `login.microsoftonline.com`, scope `vault.azure.net`), with its client secret from the key
-  `client_secret_key` names, then per changed key: `GET` the secret (a name's `_` becomes `-`, since
+  `login.microsoftonline.com`, scope `vault.azure.net`), with a client assertion from roll's issuer
+  when the target has no `client_secret_key` (a federated credential: "Syncing without a cloud
+  key"), else with its client secret from the key `client_secret_key` names, then per changed key: `GET` the secret (a name's `_` becomes `-`, since
   Key Vault allows only letters, digits and `-`, and roll's keys never hold a `-`), and `PUT` the
   value with the tag `managed-by=roll-secrets`; per removed key, delete it only when it carries the
   tag. A secret roll deleted earlier is kept by the vault's soft delete: setting it again recovers it
@@ -4794,7 +4803,13 @@ naming it. The calls go to the platforms' fixed hosts (`api.vercel.com`, `api.cl
   from it. `DescribeSecret`, then `PutSecretValue` on a secret roll created (tagged
   `managed-by=roll-secrets`) or `CreateSecret` (with that tag, and `KmsKeyId` when set); a secret
   that exists without the tag is someone else's, and roll never replaces it. Deleting the sync
-  leaves the secret. Same SigV4 by hand (service `secretsmanager`); over 64 KB of JSON is an error.
+  leaves the secret. Signed as `aws-ssm` is (`role` or stored keys; service `secretsmanager`); over
+  64 KB of JSON is an error. `replica_regions` (a list, or a comma-separated string as the
+  dashboard's form and `--target` send it; at most 32, never `region` itself) replicates the
+  secret: `CreateSecret` makes it with `AddReplicaRegions`, and on later pushes roll's own secret
+  gains the regions it lacks (`ReplicateSecretToRegions`) and loses the ones no longer listed
+  (`RemoveRegionsFromReplication`). Replicas use each region's own Secrets Manager key (a KMS key
+  belongs to one region). Leaving `replica_regions` out leaves the replicas as they are.
 
 `supabase`, `cloudflare-pages`, `azure-app-configuration` and `vault-kv` call through rolld's
 guarded client (`roll_net::PublicOnly`, no proxy, no redirects, timeouts, at most 1 MiB of an
@@ -4832,8 +4847,8 @@ An error carries the status and the vendor's error code where it has one, never 
 - **`azure-app-configuration`**, `{store, label?, prefix?, tenant_id, client_id,
   client_secret_key}`: one key-value per key in an App Configuration store, named `<prefix><KEY>`
   (`shop:DB_URL`), under `label` (no label by default). rolld signs in as `azure-key-vault` does
-  (client credentials at `login.microsoftonline.com`), for the scope
-  `https://<store>.azconfig.io/.default`; the app registration needs App Configuration Data Owner on
+  (client credentials at `login.microsoftonline.com`, a client assertion from roll's issuer when
+  there's no `client_secret_key`), for the scope `https://<store>.azconfig.io/.default`; the app registration needs App Configuration Data Owner on
   the store. Per changed key: `GET /kv/{key}?label=…`, then `PUT` the value tagged
   `managed-by=roll-secrets` (API `2023-11-01`); per removed key, `DELETE` it only when it carries
   the tag. A key-value that exists without the tag is someone else's: roll never writes to it, and
@@ -4866,6 +4881,107 @@ An error carries the status and the vendor's error code where it has one, never 
     --target path=shop/production --target role_id=db02de05-fa39-4855-059b-67221c5c2f63 \
     --target secret_id_key=VAULT_SECRET_ID
   ```
+
+### Syncing without a cloud key
+
+The syncs that write into a cloud's own secret store would otherwise hold the most sensitive
+credential of all: a key that can write the customer's production secrets, which leaks, expires
+and needs rotating. They don't need one. As Vault 2.x's secrets sync destinations do, a sync signs
+in through the cloud's own federation, and no cloud key is stored in roll:
+
+| Kind | Signs in as | Instead of |
+| --- | --- | --- |
+| `aws-ssm`, `aws-secrets-manager` (and `aws-acm`) | `role`: one of the project's AWS roles (`…/aws-roles`), assumed for each push | `access_key_id_key`, `secret_access_key_key` |
+| `google-secret-manager` | `workload_identity_provider` and `service_account_email`: roll's issuer's token, exchanged at Google's STS, then the service account impersonated (`generateAccessToken`) | `service_account_key` |
+| `azure-key-vault`, `azure-app-configuration`, `azure-keyvault-cert` | `tenant_id` and `client_id` with no `client_secret_key`: a federated credential on the app registration, roll's issuer's token as the client assertion (`urn:ietf:params:oauth:client-assertion-type:jwt-bearer`) | `client_secret_key` |
+
+- **The token.** For Google and Azure, roll's OIDC issuer (`<rolld's public URL>/v1/secrets/oidc`,
+  as "GCP and Azure" links use it) signs a token for each push whose `sub` names the project and
+  the sync, `roll-secrets:<project>:sync:<id>` (claims `project` and `sync` too), with the
+  provider's resource name or `api://AzureADTokenExchange` as `aud`, living five minutes. The trust
+  names that subject, so it trusts that one sync and nothing else of the project's. The sync's
+  answer and `GET …/syncs` show it as `subject`. An AWS role trusts the project, as it does for
+  `aws-acm` and dynamic links (`roll-secrets:<project>`, or the project's ExternalId, proved when
+  the role is registered); its session for a sync is named `roll-sync-<id>` in CloudTrail. Give a
+  sync a role of its own to scope it to that sync's parameters or secret.
+- **Only in memory.** The cloud's access token (or the role's session) is made for one push, used
+  for it and dropped: it's never stored, logged, audited or put in an error.
+- **Never for an untrusted environment.** A sync that signs in as the project (a role, or roll's
+  issuer) can't be made in, or push from, an untrusted preview environment (400): code nobody
+  vetted never acts as the project in a cloud.
+- **A loose trust is refused.** Making a Google or Azure sync without a key first asks the cloud to
+  exchange a token for a made-up project's sync: it must be refused definitely (`invalid_grant`,
+  `PERMISSION_DENIED`, `AADSTS70021`…), or the sync isn't made (a trust that takes any of roll's
+  tokens would let another tenant's sync write there). A timeout or an outage proves nothing, so
+  the sync isn't made then either: try again.
+- **The order.** The sync's id is in its subject, so: make the sync, read its `subject` (the
+  dashboard shows it under the sync), add that subject to the cloud's trust, then **Run now**.
+  Until then its pushes fail with an error naming the issuer and the subject to trust.
+- **Health** lists every sync that still signs in with a stored cloud key (`stored_cloud_key`, a
+  recommendation): make it again without the key, then delete the key.
+
+**AWS.** Register a role whose trust names roll's issuer for the project (`roll secrets aws-roles
+add parameters arn:aws:iam::123456789012:role/roll-parameters --oidc`, or by ExternalId: see
+"AWS"), with permissions on the sync's parameters or secret only, then name it in the sync:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": { "Federated": "arn:aws:iam::123456789012:oidc-provider/roll.example.com/v1/secrets/oidc" },
+    "Action": "sts:AssumeRoleWithWebIdentity",
+    "Condition": { "StringEquals": {
+      "roll.example.com/v1/secrets/oidc:aud": "sts.amazonaws.com",
+      "roll.example.com/v1/secrets/oidc:sub": "roll-secrets:prj_0123456789abcdef"
+    } }
+  }]
+}
+```
+
+```sh
+roll secrets -e production syncs add aws-ssm --target region=eu-west-1 \
+  --target prefix=/shop/production/ --target role=parameters
+roll secrets -e production syncs add aws-secrets-manager --target region=us-east-1 \
+  --target secret_name=shop/production --target role=secrets --target replica_regions=us-west-2,eu-west-1
+```
+
+**Google.** A workload identity pool provider that trusts roll's issuer, and the service account
+the sync impersonates (`roles/secretmanager.admin` on the project) letting exactly the sync's
+subject use it:
+
+```sh
+gcloud iam workload-identity-pools create roll --location=global
+gcloud iam workload-identity-pools providers create-oidc roll --location=global \
+  --workload-identity-pool=roll --issuer-uri=https://roll.example.com/v1/secrets/oidc \
+  --attribute-mapping=google.subject=assertion.sub \
+  --attribute-condition="assertion.sub.startsWith('roll-secrets:prj_0123456789abcdef:sync:')"
+roll secrets -e production syncs add google-secret-manager --target project=shop-prod \
+  --target workload_identity_provider=projects/123456789/locations/global/workloadIdentityPools/roll/providers/roll \
+  --target service_account_email=roll-sync@shop-prod.iam.gserviceaccount.com
+# the sync's subject, from its answer:
+gcloud iam service-accounts add-iam-policy-binding roll-sync@shop-prod.iam.gserviceaccount.com \
+  --role=roles/iam.workloadIdentityUser \
+  --member=principal://iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/roll/subject/roll-secrets:prj_0123456789abcdef:sync:syn_0123456789abcdef
+```
+
+`workload_identity_provider` may be `projects/…` (as Google's own tools write it) or the full
+`//iam.googleapis.com/projects/…`; the token's `aud` is the full one, the provider's default.
+
+**Azure.** A federated credential on the app registration for the sync's subject (Key Vault
+Secrets Officer on the vault, App Configuration Data Owner on the store, or Key Vault Certificates
+Officer for `azure-keyvault-cert`):
+
+```sh
+roll secrets -e production syncs add azure-key-vault --target vault=shop-prod \
+  --target tenant_id=contoso.onmicrosoft.com --target client_id=00000000-0000-0000-0000-0000000000aa
+az ad app federated-credential create --id 00000000-0000-0000-0000-0000000000aa --parameters '{
+  "name": "roll-sync-shop-prod",
+  "issuer": "https://roll.example.com/v1/secrets/oidc",
+  "subject": "roll-secrets:prj_0123456789abcdef:sync:syn_0123456789abcdef",
+  "audiences": ["api://AzureADTokenExchange"]
+}'
+```
 
 ### `render`, `netlify`, `fly`, `railway`, `heroku`, `digitalocean`, `circleci`, `bitbucket` and `terraform-cloud`
 
@@ -6457,7 +6573,7 @@ type Insights = { path: string; max_age_days: number | null; reads_since: number
 type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string; owner?: string /* who supplies it */; password?: { length: number; classes?: ("lower" | "upper" | "digit" | "symbol")[]; symbols?: string } };
 type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
 type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
-type Finding = { issue: "decoy_used" | "production_unprotected" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "unplaced" | "operator_made" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy }; // decoy: on decoy_used only (an admin's session's or the operator's), the key's Decoy
+type Finding = { issue: "decoy_used" | "production_unprotected" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "unplaced" | "operator_made" | "stored_cloud_key" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy }; // decoy: on decoy_used only (an admin's session's or the operator's), the key's Decoy
 type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; rotate_window: string | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 type SaasRotator = { id: string; name: string; vendor: "sendgrid" | "twilio" | "okta" | "entra" | "auth0" | "gitlab" | "openai" | "datadog" | "cloudflare" | "databricks" | "confluent"; target: Record<string, unknown>; credential_expires_at?: number; created_at: number; created_by: string };
@@ -6492,6 +6608,7 @@ type Sync = {
   last_digest: string | null; last_synced_at: number | null; synced: number; // names at the target
   signed: boolean; created_at: number; created_by: string;
   remote_id?: string; // a certificate kind's: the ACM ARN, Key Vault version or Cloudflare id it pushed to
+  subject?: string; // a federated one's (Google, Azure without a stored key): the subject its trust names, roll-secrets:<project>:sync:<id>
 };
 type NewSync = { environment: string; path?: string; kind: string; target: Record<string, unknown>; keys?: string[]; prefix?: string };
 type SyncKind = { kind: string; label: string; values: boolean; signed: boolean; certificate: boolean; fields: { name: string; label: string; required: boolean; placeholder: string }[] }; // certificate: keys names one managed pki key

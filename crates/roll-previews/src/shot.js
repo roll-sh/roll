@@ -738,7 +738,8 @@ const tryIt = async (sessionId) => {
   // visible, is left out. Best effort, as the pages are.
   const crops = [];
   try {
-    const asked = JSON.parse(process.env.CROPS || "[]").filter((c) => c && typeof c.note === "string" && typeof c.path === "string" && typeof c.selector === "string").slice(0, 10);
+    // Another engine's (a Safari or Firefox reviewer's) are the other browsers' run's.
+    const asked = JSON.parse(process.env.CROPS || "[]").filter((c) => c && typeof c.note === "string" && typeof c.path === "string" && typeof c.selector === "string" && !c.browser).slice(0, 10);
     for (const c of asked) {
       if (!/^\/(?!\/)[^\s#"'`\\]{0,199}$/.test(c.path)) continue;
       const w = Number.isInteger(c.width) && c.width >= 320 && c.width <= 2560 ? c.width : null;

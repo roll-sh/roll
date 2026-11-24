@@ -70,6 +70,13 @@ pub fn subject(project: &str) -> String {
     format!("roll-secrets:{project}")
 }
 
+/// The subject of a token roll signs for one push of sync `sync` (syncs.rs, "Syncing without a
+/// cloud key"): a cloud's trust names it, so it trusts that one sync and nothing else of the
+/// project's.
+pub fn sync_subject(project: &str, sync: &str) -> String {
+    format!("roll-secrets:{project}:sync:{sync}")
+}
+
 /// Who a token roll signs for another roll product stands for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Subject {
