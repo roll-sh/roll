@@ -2613,20 +2613,26 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A workload identity for `roll.toml` services, in review** (Vercel's OIDC federation): roll apps' `pv-`
-   instances have one; runtime services don't.
-2. **Restore points for a preview's data** (Neon's snapshots): save the branches now, put them back
+1. **Screenshot modes, in review** (Chromatic's Modes): the first page in a dark color scheme,
+   another language or time zone, each a page compared and reviewed (`github.modes`).
+2. **A recording with a feedback note** (Netlify's drawer, Jam): what the reviewer did before it
+   went wrong, inputs masked.
+3. **Agents driving the preview in a browser** (GitHub Copilot's Playwright): a session an agent
+   steps through, with roll MCP.
+4. **Restore points for a preview's data** (Neon's snapshots): save the branches now, put them back
    after a test run.
-3. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+5. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-4. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+6. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+7. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+8. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-24, early morning: OIDC tokens for a preview's own services (#865, roll secrets' `Subject::Preview`), a roll apps service's page read through roll (#870), a fork's preview and its code's words marked outside for roll MCP's lockdown (#873).
 
 Landed 2026-11-24, later: feature flags a reviewer sets for their own view (#861: the toolbar's Flags, `x-roll-flags`).
 
