@@ -2763,18 +2763,32 @@ TLS certificates for services (mTLS between them), with no CA to run.
   `--csr FILE`) makes the key exactly as for a root and answers `status: "pending"` with a `csr`
   (PEM): the CA's subject, `CA:TRUE` with a path length of 0, `keyCertSign` and `cRLSign`, and its
   name constraints. A pending CA signs nothing (links, CSRs, ACME, CRL and OCSP all refuse).
-  `PUT …/cas/{id}/chain {certificate, chain?}` (admin, audited; `roll secrets cas chain NAME
-  cert.pem [--chain chain.pem]`) installs what the root signed: `certificate` is the CA's own,
+  `PUT …/cas/{id}/chain {certificate, chain?, unconstrained?}` (admin, audited; `roll secrets cas
+  chain NAME cert.pem [--chain chain.pem] [--unconstrained]`) installs what the root signed: `certificate` is the CA's own,
   `chain` every certificate above it up to and including the self-signed root, in any order (10 at
   most; 64 KiB and 256 KiB). It's taken only if the certificate carries the CA's key, is a CA's
   (`basicConstraints CA:TRUE`, `keyCertSign` and `cRLSign`, since roll signs its leaves' CRLs), is
   valid now, and verifies through certificates that are CAs, valid now and allow the path's length,
-  up to a self-signed root. Name constraints are taken as signed: the CA's domains narrow to what
+  up to a self-signed root.
+  **It must be constrained.** The certificate, or one between it and the root, must carry a
+  critical `nameConstraints` whose permitted DNS names are all within the CA's domains. Otherwise
+  roll's key would be a CA for every name under a root that every laptop and service trusts, so
+  it's refused with a 400 that says what the signer dropped and how to keep it:
+  - AWS Private CA's plain subordinate templates (`SubordinateCACertificate_PathLen0/V1`) drop a
+    CSR's extensions. Issue it with `SubordinateCACertificate_PathLen0_CSRPassthrough/V1` (or
+    `…_APIPassthrough/V1` with the constraints in the API passthrough).
+  - `openssl ca` copies none by default (`copy_extensions = none`). Set `copy_extensions = copy`,
+    or put `nameConstraints = critical,permitted;DNS:svc.internal` in the extension section.
+
+  A root that constrains this CA some other way (a policy outside the certificate) can install it
+  with `unconstrained: true`: the CA then answers `unconstrained: true` (the dashboard marks it),
+  and the audit row says so. That's asked again at every install, renewals too.
+  Name constraints are taken as signed: the CA's domains narrow to what
   the certificate and every issuer below the root permit (a root that signs `prod.svc.internal`
   for a CA asked for `svc.internal` gives a CA for `prod.svc.internal`), IP addresses stay only if
   every one is permitted, and what a policy can't say (part of a domain excluded, subject-name
   limits) is refused. The same route renews an active intermediate (the same key, a new
-  certificate; it only narrows). Every certificate it issues answers `ca_chain` (the link field
+  certificate; it only narrows; the constraint check runs again). Every certificate it issues answers `ca_chain` (the link field
   `ca_chain`, `TLS_CA_CHAIN`; `…/sign`'s answer; ACME serves the leaf then the chain), and never
   outlives it: links and CSRs are clamped to its end, a CSR asking for longer is refused naming
   the date, and a managed link's `rotate_days` is at most half of `max_days` or of what's left of
@@ -2814,7 +2828,8 @@ listener or a hostname keeps serving it; what the target calls it is the sync's 
 - **AWS signs in as a project role** (`…/aws-roles`, "AWS"), assumed for each push for 15 minutes
   (by roll's issuer or its ExternalId, whichever the role trusts): no AWS key is stored for the
   sync. The role's maker must still be able to manage the project. It needs
-  `acm:ImportCertificate` and `acm:AddTagsToCertificate`.
+  `acm:ImportCertificate` and `acm:AddTagsToCertificate` (and `acm:DeleteCertificate` for
+  `remove=true`, below).
 - **Hosts come from names, never URLs.** ACM is `acm.<region>.amazonaws.com` (`region` is
   `[a-z0-9-]`), Key Vault `<vault>.vault.azure.net` (3–24 letters, digits and `-`), both through
   rolld's guarded client (`roll_net::PublicOnly`, no redirects); Cloudflare is
@@ -2824,6 +2839,22 @@ listener or a hostname keeps serving it; what the target calls it is the sync's 
 - A public client trusts a certificate only if its CA is public; a project CA's certificates are
   for clients that trust that CA (internal load balancers, mTLS between services, Cloudflare's
   origin pulls).
+- **Deleting the sync leaves the certificate and its private key at the target**, valid until the
+  leaf ends (up to the CA's `max_days`) and never rotated again. The `sync.delete` audit row names
+  `remote_id`. `DELETE …/syncs/{id}?remove=true` (`roll secrets syncs rm ID --remove`, the delete
+  dialog's "also remove it from …") deletes it there first, as the sync's maker with the sync's own
+  credentials, and deletes the sync only once that worked:
+  - `aws-acm`: `DeleteCertificate`. ACM won't delete a
+    certificate something still serves (a load balancer, CloudFront, API Gateway): that's a 409
+    `in_use`, and the sync stays, with the error, until they use another certificate.
+  - `azure-keyvault-cert`: deletes the certificate, every version, only if it carries roll's tag.
+    A vault with soft delete keeps it recoverable for its retention days; purge it there if it must
+    go at once.
+  - `cloudflare-cert`: deletes the custom certificate by its id.
+
+  Already gone at the target counts as removed. Any other failure at the target is a 502 and keeps
+  the sync with the target's error. `remove=true` on a sync that pushes values is a 400: those leave what they
+  pushed, as below.
 
 ### ACME
 Each CA is an ACME server (RFC 8555), as Vault's PKI is: cert-manager, certbot, Caddy and lego get
@@ -4664,7 +4695,8 @@ certificate):
   the prefix) and never a value; a push that fails is audited too.
 - **Errors** name keys and the target, never a value: `github owner/app: 404 Not Found`,
   `DB_URL: ${staging.X} doesn't exist`. A failed push keeps the previous `last_digest` and is tried
-  again after 5 minutes. Deleting a sync leaves what it pushed at the target. Deleting its
+  again after 5 minutes. Deleting a sync leaves what it pushed at the target (a certificate sync
+  can remove its certificate: "Getting certificates where TLS terminates"). Deleting its
   environment or project deletes the sync.
 - **A product's own kinds** (`SyncTarget::internal`: `search-inference`) are made by that
   product's route (`Secrets::create_product_sync`), never `POST …/syncs` (400), and aren't offered
@@ -6228,7 +6260,7 @@ isn't in the workspace is 404.
 | `GET /syncs` | | `{syncs: Sync[], kinds: SyncKind[]}` |
 | `POST /syncs` | `NewSync` | 201 `Sync & {signing_secret?}` (shown once; `admin`) |
 | `POST /syncs/preview` | `NewSync` | `{names, credentials, missing_credentials, unknown_keys}`: what it would push, before it exists (`admin`; names only, the platform isn't called) |
-| `DELETE /syncs/{id}` | | 204 (`admin`) |
+| `DELETE /syncs/{id}` | `?remove=true` (certificate kinds) | 204 (`admin`). With `remove=true` the certificate it pushed is deleted at the target first: 409 `in_use` when ACM refuses one in use, 502 for another failure (both keep the sync, with the error); 400 for a kind that pushes values |
 | `PATCH /syncs/{id}` | `{paused}` | `Sync`: pause or resume, with what running the kind needs (`admin`; `reveal` for a product's kind) or `admin`. Resuming one a cut-off paused is `admin` only; it's due at once |
 | `POST /syncs/{id}/run` | | `Sync` after pushing every key (`admin`; 409 `running` while another push holds it) |
 | `GET /v1/secrets/shares/{id}` (public) | | `{note, views_left, expires_at}` |
@@ -6304,8 +6336,8 @@ isn't in the workspace is 404.
 | `GET /v1/secrets/audit/jwks` | | `{keys, legacy, pulled}` (public): the audit log's digest keys (Ed25519 JWKs, retired ones too, never pulled ones), the issuer keys whose legacy digests count (RSA JWKs), and `[{kid, pulled_at}]` for keys pulled in an emergency, either kind. What `audit verify --file` takes |
 | `POST /v1/secrets/audit/key/rotate` | `{now?, retire?}` | `{kid, pulled, signed}` (the operator's): a new digest key signs now and the previous one retires. `{now: true, retire: kid}` (both or neither): `kid` is pulled too, and every project's chain is signed under the new key before the answer (`signed`, how many); 404 for a kid not roll's or pulled already |
 | `GET /cas` | | `Ca[]` (`read` on the project; certificates, never keys) |
-| `POST /cas` | `{name, domains, allow_ip?, max_days?, intermediate?}` | 201 `Ca` (`admin`): `{id, name, certificate, status, intermediate, csr?, ca_chain?, domains, allow_ip, max_days, created_at, created_by}`; an intermediate is `pending` with an empty `certificate` and its `csr` |
-| `PUT /cas/{id}/chain` | `{certificate, chain?}` | `Ca`, now `active` with `ca_chain` (`admin`, audited); 400 for a certificate that isn't for the CA's key, isn't a CA's (`keyCertSign`, `cRLSign`), isn't valid now, or doesn't chain to a self-signed root; 409 for a root CA |
+| `POST /cas` | `{name, domains, allow_ip?, max_days?, intermediate?}` | 201 `Ca` (`admin`): `{id, name, certificate, status, intermediate, csr?, ca_chain?, unconstrained, domains, allow_ip, max_days, created_at, created_by}` (`unconstrained`: installed without name constraints, `PUT …/chain`); an intermediate is `pending` with an empty `certificate` and its `csr` |
+| `PUT /cas/{id}/chain` | `{certificate, chain?, unconstrained?}` | `Ca`, now `active` with `ca_chain` (`admin`, audited); 400 for a certificate that isn't for the CA's key, isn't a CA's (`keyCertSign`, `cRLSign`), isn't valid now, doesn't chain to a self-signed root, or has no critical name constraints within the CA's domains (in it or below the root) without `unconstrained: true`; 409 for a root CA |
 | `DELETE /cas/{id}` | | 204; 409 while a key links to it (`admin`) |
 | `GET /cas/{id}/certificates` | | `CaCertificate[]`: `{serial, names, source, not_after, issued_at, issued_by, revoked_at?}`, what it signed that hasn't expired, newest first (`read`) |
 | `POST /cas/{id}/revoke` | `{serial}` | 204; 404 for a serial it didn't sign or that has expired (`write`, audited) |
