@@ -1501,7 +1501,7 @@ forward` (no relay left after).
 An agent drives a page too (GitHub Copilot's coding agent with Playwright; roll MCP's
 `previews_try` and `previews_try_screenshot`): `POST …/try` `{service?, path, steps}` loads the
 service's page in a browser in its network (locked down as a screenshot is) and takes the steps,
-a page state's (`click`, `type`, `press`, `wait`; 10 at most, 15 s), stateless: nothing is held
+a page state's (`click`, `type`, `choose`, `press`, `wait`; 10 at most, 15 s), stateless: nothing is held
 between calls, so an agent sends the whole way to a state each time. It answers `{run, status,
 step_failed?, text, errors}`: the page's status, the step that found nothing ("click #nope:
 nothing matched"), its visible text after the steps (its own line breaks kept, cut at 40,000
@@ -1510,7 +1510,8 @@ as its logs are. Its picture is `GET …/try/{run}/screenshot` (`image/png`, kep
 preview's holder; another preview's id gets a 404), asked for only when the text isn't enough.
 From a terminal it's `roll preview try <preview> [--service web] [--out page.png] /login type
 '#email' ada@example.com press Enter`: the steps are words after the path, each verb taking its
-own (`type` a selector and the text, the others one).
+own (`type` a selector and the text, `choose` a selector and the option's place from 1, the
+others one).
 Two runs at a time per preview (a third is a 409), each taking one of the node's screenshot
 slots; typed text is never kept or said by previews. Both are `reveal` (its clicks can change the
 preview's own data). A roll apps service's runs in its instance's network on the node that runs
@@ -1729,7 +1730,8 @@ land on the change.
   offers it on the toolbar too). `a_reviewers_flags_reach_the_service_as_a_header`.
 - A note says what the reviewer did before it (Jam's user actions, the light part of Netlify's
   recordings): the page's script keeps the last 20 clicks (by a selector), inputs ("type 11
-  characters in #coupon": how many, never what), choices, form submits, Enter and Escape, and page
+  characters in #coupon": how many, never what), choices ("choose option 2 in select#size": the
+  option's place, never its words), form submits, Enter and Escape, and page
   changes (the address looked at twice a second; none of the page's own functions wrapped), each
   with how long before the note; roll's own toolbar and the element picked for the note aren't
   steps. They go with the errors and requests in the note's folded "On the page" block ("What
@@ -1766,9 +1768,10 @@ land on the change.
   As its reviewer saw it (Jam's recordings, without trusting the reviewer's browser): a note
   says the reviewer's viewport and their last steps (#879), so roll's browser takes it at that
   viewport (a phone's emulated as one) after taking their clicks again (checking a box is one),
-  their typing (as many `x`s as they typed: the button keeps how many characters, never what)
-  and Enter or Escape, from their last page change on, the last 10, 10 s at most; a choice in a
-  list isn't taken (the button doesn't say which). Roll's own browser
+  their typing (as many `x`s as they typed: the button keeps how many characters, never what),
+  their choices in a list (the button says the option's place, "choose option 2 in
+  select#size", never its words) and Enter or Escape, from their last page change on, the last
+  10, 10 s at most. Roll's own browser
   does it, so the page's code still can't forge the picture. The crop says how it was taken
   (`crop_as` in the notes list, `X-Roll-Crop-As` on the picture: "390x844, after 2 steps";
   the sheet's "As they saw it"). In their browser's engine too (the note's "Safari 18 on iOS"):
@@ -2256,7 +2259,8 @@ type Settings = {
     Page states too (Chromatic's interaction tests, Percy's scripted snapshots): much of what a
     change touches shows only after a click (a cart open, a dialog, a form's errors). A project
     names up to 3 (`github.states`: a name, a page of the first service's, and 1 to 10 steps:
-    `{"click": selector}`, `{"type": [selector, text]}`, `{"press": key}` from a short list,
+    `{"click": selector}`, `{"type": [selector, text]}`, `{"choose": [selector, n]}` (a list's
+    nth option, from 1, up to 500), `{"press": key}` from a short list,
     `{"wait": ms}` up to 5 s), and the first service's run reaches each one after loading its page,
     in the checks' world (the page's DOM, none of its JavaScript; a value typed the way a person's
     input sets it, so a framework's change handler sees it; Enter submits a form as a person's
@@ -2765,9 +2769,9 @@ Ranked by what a person notices first. Done so far:
    and guests' notes go through it.
 4. **`note_mail` in the dashboard's rules**: the setting is in the API and roll MCP, not the page.
 5. **`roll preview try`**: an agent's page drive (`…/try`) from the CLI, as `roll preview fetch`.
-6. **A note in its reviewer's engine, choices** (typing in review: taken again as long as
-   theirs): a choice in a list isn't taken yet; the button would say its index, and steps need a
-   `choose` kind for it.
+6. **A note in its reviewer's engine, typing and choices, in review**: typing taken again as
+   long as theirs, a choice in a list by its option's place (a `choose` step, also in
+   `roll.toml` states, `…/try` and `roll preview try`).
 7. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
    is kept only where the product puts a branch back in place, keeping its id (their delete
    guards check it); each needs its control plane's reset `from`, as pg-control's.

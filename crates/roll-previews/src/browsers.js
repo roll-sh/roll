@@ -48,6 +48,7 @@ const crop = async (c) => {
         if (typeof s.click === "string") await page.click(s.click, { timeout: Math.min(left, 3000) });
         // Typing as long as theirs (never their words: roll types `x`s).
         else if (Array.isArray(s.type) && s.type.length === 2 && typeof s.type[0] === "string" && typeof s.type[1] === "string") await page.fill(s.type[0], s.type[1].slice(0, 200), { timeout: Math.min(left, 3000) });
+        else if (Array.isArray(s.choose) && s.choose.length === 2 && typeof s.choose[0] === "string" && Number.isInteger(s.choose[1]) && s.choose[1] >= 1) await page.selectOption(s.choose[0], { index: s.choose[1] - 1 }, { timeout: Math.min(left, 3000) });
         else if (s.press === "Enter" || s.press === "Escape") await page.keyboard.press(s.press);
         else break;
       } catch {
