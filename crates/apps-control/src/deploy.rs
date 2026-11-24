@@ -973,8 +973,19 @@ impl Apps {
                     log.line(n);
                 }
                 let run = if env.ephemeral { run } else { svc.run.clone() };
+                let bytes = self.deps.runtime.image_bytes(&pinned).await;
+                if let Some(b) = bytes.filter(|b| *b >= 1 << 30) {
+                    log.line(format!("the image is {:.1} GB: a slimmer one starts faster each time it's pulled", b as f64 / (1u64 << 30) as f64));
+                }
                 let (id, p, r) = (d.id.clone(), pinned.clone(), run.clone());
-                self.db(move |s| s.set_built(&id, &p, None, Some(&r))).await?;
+                self.db(move |s| {
+                    s.set_built(&id, &p, None, Some(&r))?;
+                    match bytes {
+                        Some(b) => s.set_image_bytes(&id, b),
+                        None => Ok(()),
+                    }
+                })
+                .await?;
                 (pinned, run)
             }
             None => {
@@ -1866,9 +1877,22 @@ impl Apps {
                 log.line(format!("its provenance wasn't recorded: {e}"));
             }
         }
+        // Its size (Fly's release sizes): a large one starts slower every time it's pulled.
+        let bytes = self.deps.runtime.image_bytes(&image).await;
+        if let Some(b) = bytes {
+            let gb = b as f64 / (1u64 << 30) as f64;
+            if gb >= 1.0 {
+                log.line(format!("the image is {gb:.1} GB: a slimmer base (-slim, alpine, distroless) or a multi-stage build makes its cold starts faster"));
+            } else {
+                log.line(format!("the image is {} MB", b >> 20));
+            }
+        }
         let (id, img, r) = (d.id.clone(), image.clone(), run.clone());
         self.db(move |s| {
             s.set_built(&id, &img, Some(&plan_json), Some(&r))?;
+            if let Some(b) = bytes {
+                s.set_image_bytes(&id, b)?;
+            }
             match &build_key {
                 Some(k) => s.set_build_key(&id, k),
                 None => Ok(()),

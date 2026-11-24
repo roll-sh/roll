@@ -1847,6 +1847,7 @@ impl Apps {
         let (sid, e) = (r.service.clone(), r.name.clone());
         let rotated = self.db(move |s| s.runtime_config_rotated(&sid, &e)).await?;
         let attack = self.attack(&r.service, &r.name).await?;
+        let last_cold_start = self.lives.lock().get(&env_key(&r.service, &r.name)).and_then(|l| l.last_cold_start());
         let firewall_hits: Vec<u32> = match self.lives.lock().get(&env_key(&r.service, &r.name)) {
             Some(l) if !r.firewall.is_empty() => r.firewall.iter().map(|f| l.hits(f.fingerprint())).collect(),
             _ => Vec::new(),
@@ -1863,6 +1864,7 @@ impl Apps {
             private,
             signed_in,
             sso,
+            last_cold_start,
             preflight,
             callers,
             password,
