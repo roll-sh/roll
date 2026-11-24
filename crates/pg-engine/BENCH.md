@@ -285,6 +285,230 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Standing, 2026-11-24: roll PGO and plain against PostgreSQL 18.6 and pgrust (agent 314)
+
+One run a cell of all four servers, the same afternoon (2026-11-24 14:35-18:15 UTC), the same lane
+and settings per workload. **roll PGO** is `tools/dist-pgo.sh --out` of origin's `57d194f69` (the
+shipped recipe, its own training; profile staleness 0 of 2,938 hot functions; instrumented build
+2,912 s, training 716 s, optimised build 2,681 s); **roll plain** is `tools/dist.sh` of the same
+commit (origin has since landed cand/a306, the merging scan's runs between newer versions: not
+in these builds). PostgreSQL 18.6 and pgrust are the images by digest (`postgres@sha256:77f58511...`,
+`malisper/pgrust@sha256:9ec8cbd6...`, pgrust's published build is PGO-built). Harness
+`~/.cache/a314/bench` (agent 302's servers, 306's cells, 309's bulk steps, 258's TPC-H pass), one
+`tools/lane.sh` hold a cell:
+
+- Every server in a container on the lane's server CPUs (8 GiB, swap off, cpu-shares 2, host
+  network), clients on the lane's client CPUs. Settings on all four: 2 GB cache
+  (`shared_buffers` / `--cache-mb 2048`), `max_parallel_workers_per_gather=2`,
+  `max_parallel_workers=8`, `maintenance_work_mem=256MB` (roll keeps its 64 MB default; the bulk
+  script sets 256 MB on its database for all), `max_wal_size=8GB`, `checkpoint_timeout=30min`,
+  `max_connections=1100`, fsync and synchronous_commit on; pgrust also `io_method=sync`,
+  `max_stack_depth=60000` (its README's). Each server's `pg_settings` was read back after its start
+  (in `runs/*.txt`); PostgreSQL's JIT is on (its default, as in every earlier round).
+- Counts are perf stat of the server container's cgroup on its CPUs: every process and thread
+  (PostgreSQL's backends and background processes, roll's connection, flush, compaction and
+  parallel threads). **Instruction counts decide**; cycles, tps, wall times and p99 are readings
+  under the load beside them.
+- **TPC-H SF1** (lane C): each server's data loaded once by `bench tpch-load` and copied for the
+  run; a fresh server, a warm-up pass of the 22, then each query once in its own perf window (the
+  client's run of it). Every result hash of both roll builds and pgrust equals PostgreSQL's.
+  Peak memory over the warm-up and the measured pass.
+- **Bulk** (lane C): agent 309's steps with joined windows (each step's window runs on until the
+  server is quiet, so a flush or compaction a step left counts in it), then `bulkp` (primary key
+  and index) and `bulks` (index only) COPYs of the same 1M rows, then a `CHECKPOINT` (PostgreSQL
+  and pgrust write their heap pages there: compare the bytes of all steps, not of a step). Row
+  sums and the ctid hashes of `bulk`, `bulkp` and `bulks` equal PostgreSQL's on every server.
+- **Reads** (select-only lane A, ranges lane B) and **TPC-B-like** (lane A): a fresh server,
+  `pgbench -i -I dtGvp -s 32`, a CHECKPOINT, until the server is quiet, then `-M prepared -j 4`.
+  Reads: 2 s warm-up, 10 s, counts over 8 s from +1 s divided by tps x 8. TPC-B: 160,000
+  transactions (20,000 a client at 8, 5,000 at 32), counts from the first transaction through 8 s
+  after the last and a CHECKPOINT, divided by 160,000 (so every server's deferred writes count);
+  fsyncs are `fsync` + `fdatasync` calls (`sync_file_range` is listed in the raw lines).
+  p99 from pgbench's sampled logs. The connection-thread share is from two separate runs a cell
+  (an instruction-sampled profile by thread name over the run; the per-thread perf windows of
+  the measured runs started too late under this load to give it).
+- **Idle sessions** (lane A): a fresh server, pgbench sessions of `SELECT 1; \sleep 60 s` with
+  password auth, measured 8 s after all connected.
+- **Memory** is the peak anon+shmem of the server's cgroup, sampled every 0.2 s (agent 302's
+  measure), over the whole cell.
+
+**Load.** The machine ran at load 60-135 all afternoon (other sessions' builds unpinned over
+every CPU): `lane.sh` read 4-7.6 foreign cores on every hold's 8 CPUs, the harness 1-3.5 on the
+server CPUs alone; no cell met the 1.0 rule. The disk was shared with those builds: every
+server's TPC-B throughput fell to a third or less of round 11's (PostgreSQL 2,980 / 909 tps
+against 6,794 / 7,274 on 2026-11-22), fsync-bound, so its tps and p99 say little. Roll's reads
+poll for up to 50 µs while cores are free before sleeping, so its user instructions per read
+carry polling that moves with the load (plain's select-only at 8 clients read 47.2 k here,
+40.6 k in round 11).
+
+Bold: the leader of the row. The last column is roll PGO over the better of PostgreSQL and
+pgrust (above 1x roll uses more, except tps, where above 1x roll is faster).
+
+### The table
+
+| cell | measure | roll PGO | roll plain | PostgreSQL 18.6 | pgrust | leads | PGO ÷ best other |
+|---|---|---:|---:|---:|---:|---|---:|
+| TPC-H SF1, the 22 | G user instructions (sum) | **86.17** | 94.78 | 160.37 | 86.56 | roll PGO | 1.00x |
+| TPC-H SF1, the 22 | wall s (sum of the queries) | 21.6 | 20.8 | 52.3 | **20.8** | pgrust | 1.04x |
+| TPC-H SF1, the 22 | peak anon+shmem MB | 1,606 | **1,606** | 1,728 | 2,033 | roll plain | 0.93x |
+| TPC-H q01 | G user instructions | 7.35 | 7.39 | 45.22 | **6.76** | pgrust | 1.09x |
+| TPC-H q02 | G user instructions | 2.24 | 2.63 | 1.16 | **1.03** | pgrust | 2.17x |
+| TPC-H q03 | G user instructions | 3.69 | 4.14 | 4.07 | **3.52** | pgrust | 1.05x |
+| TPC-H q04 | G user instructions | 1.58 | 1.72 | **1.01** | 1.54 | PostgreSQL | 1.57x |
+| TPC-H q05 | G user instructions | 2.73 | 3.12 | 1.98 | **1.69** | pgrust | 1.61x |
+| TPC-H q06 | G user instructions | 4.98 | 5.14 | **4.84** | 5.76 | PostgreSQL | 1.03x |
+| TPC-H q07 | G user instructions | 3.00 | 3.49 | **2.57** | 3.31 | PostgreSQL | 1.17x |
+| TPC-H q08 | G user instructions | 1.20 | 1.41 | **0.93** | 1.14 | PostgreSQL | 1.30x |
+| TPC-H q09 | G user instructions | **6.73** | 7.79 | 13.12 | 14.35 | roll PGO | 0.51x |
+| TPC-H q10 | G user instructions | 7.01 | 7.48 | 6.58 | **4.33** | pgrust | 1.62x |
+| TPC-H q11 | G user instructions | 0.72 | 0.84 | **0.38** | 0.39 | PostgreSQL | 1.90x |
+| TPC-H q12 | G user instructions | **5.86** | 5.98 | 8.73 | 8.93 | roll PGO | 0.67x |
+| TPC-H q13 | G user instructions | **3.61** | 4.13 | 6.83 | 3.63 | roll PGO | 0.99x |
+| TPC-H q14 | G user instructions | 1.19 | 1.39 | 1.12 | **0.68** | pgrust | 1.74x |
+| TPC-H q15 | G user instructions | 4.60 | 4.70 | 3.16 | **2.95** | pgrust | 1.56x |
+| TPC-H q16 | G user instructions | 2.47 | 2.96 | 3.60 | **1.79** | pgrust | 1.38x |
+| TPC-H q17 | G user instructions | 4.36 | 4.99 | 4.60 | **2.22** | pgrust | 1.96x |
+| TPC-H q18 | G user instructions | **14.53** | 16.26 | 41.14 | 16.22 | roll PGO | 0.90x |
+| TPC-H q19 | G user instructions | 0.44 | 0.48 | **0.40** | 0.41 | PostgreSQL | 1.10x |
+| TPC-H q20 | G user instructions | 1.12 | 1.36 | **0.44** | 0.62 | PostgreSQL | 2.56x |
+| TPC-H q21 | G user instructions | 6.21 | 6.76 | 7.38 | **4.71** | pgrust | 1.32x |
+| TPC-H q22 | G user instructions | **0.54** | 0.63 | 1.13 | 0.59 | roll PGO | 0.92x |
+| bulk script + indexed COPYs | G user instructions, all steps | **62.26** | 73.25 | 96.06 | 86.14 | roll PGO | 0.72x |
+| bulk script + indexed COPYs | MB written, all steps (CHECKPOINT at the end) | **299** | 461 | 3,556 | 3,342 | roll PGO | 0.09x |
+| bulk script + indexed COPYs | peak anon+shmem MB | 562 | 555 | **386** | 555 | PostgreSQL | 1.45x |
+| bulk copy_in | G user instructions | **5.782** | 6.400 | 6.476 | 7.072 | roll PGO | 0.89x |
+| bulk create_index | G user instructions | 3.070 | 3.308 | **2.888** | 5.006 | PostgreSQL | 1.06x |
+| bulk create_unique_index | G user instructions | 2.667 | 2.961 | 2.245 | **1.912** | pgrust | 1.39x |
+| bulk copy_out | G user instructions | 2.504 | 3.084 | 3.211 | **2.015** | pgrust | 1.24x |
+| bulk insert_select | G user instructions | **3.923** | 4.428 | 4.321 | 4.634 | roll PGO | 0.91x |
+| bulk update_half | G user instructions | **9.674** | 11.558 | 27.506 | 22.972 | roll PGO | 0.42x |
+| bulk delete_quarter | G user instructions | 6.733 | 7.740 | 1.867 | **1.536** | pgrust | 4.38x |
+| bulk vacuum | G user instructions | **1.312** | 1.719 | 2.531 | 3.141 | roll PGO | 0.52x |
+| bulk analyze | G user instructions | **0.426** | 0.472 | 0.503 | 0.580 | roll PGO | 0.85x |
+| bulk count_after | G user instructions | 0.341 | 0.359 | 0.490 | **0.204** | pgrust | 1.67x |
+| bulk truncate | G user instructions | **0.003** | 0.004 | 0.032 | 0.063 | roll PGO | 0.09x |
+| bulk drop_table | G user instructions | **0.002** | 0.002 | 0.037 | 0.067 | roll PGO | 0.05x |
+| bulk copy_pk | G user instructions | **15.033** | 18.292 | 24.710 | 20.045 | roll PGO | 0.75x |
+| bulk copy_sx | G user instructions | **10.784** | 12.926 | 18.935 | 14.326 | roll PGO | 0.75x |
+| bulk checkpoint | G user instructions | **0.001** | 0.001 | 0.304 | 2.566 | roll PGO | 0.00x |
+| select-only, 8 clients | user instructions / read | **34,395** | 47,163 | 45,265 | 43,492 | roll PGO | 0.79x |
+| select-only, 8 clients | kernel instructions / read | 43,560 | **41,079** | 71,114 | 41,937 | roll plain | 1.04x |
+| select-only, 8 clients | user cycles / read | **73,344** | 114,162 | 129,998 | 78,314 | roll PGO | 0.94x |
+| select-only, 8 clients | kernel cycles / read | 72,484 | 73,524 | 141,645 | **66,897** | pgrust | 1.08x |
+| select-only, 8 clients | tps | 30,504 | 42,712 | 23,810 | **65,927** | pgrust | 0.46x |
+| select-only, 8 clients | p99 ms | 3.52 | 0.79 | 2.98 | **0.33** | pgrust | 10.61x |
+| select-only, 8 clients | peak anon+shmem MB | **495** | 496 | 667 | 918 | roll PGO | 0.74x |
+| select-only, 32 clients | user instructions / read | **38,886** | 45,673 | 47,398 | 45,208 | roll PGO | 0.86x |
+| select-only, 32 clients | kernel instructions / read | **41,895** | 43,601 | 79,769 | 44,482 | roll PGO | 0.94x |
+| select-only, 32 clients | user cycles / read | **92,869** | 148,596 | 183,927 | 96,363 | roll PGO | 0.96x |
+| select-only, 32 clients | kernel cycles / read | 73,918 | 91,600 | 179,221 | **72,295** | pgrust | 1.02x |
+| select-only, 32 clients | tps | 35,989 | 23,272 | 18,865 | **64,503** | pgrust | 0.56x |
+| select-only, 32 clients | p99 ms | 10.66 | 14.29 | 14.15 | **2.40** | pgrust | 4.44x |
+| select-only, 32 clients | peak anon+shmem MB | **492** | 492 | 660 | 894 | roll PGO | 0.75x |
+| 100-row range, 8 clients | user instructions / read | **269,915** | 374,621 | 347,380 | 410,353 | roll PGO | 0.78x |
+| 100-row range, 8 clients | kernel instructions / read | **41,413** | 57,089 | 82,348 | 47,702 | roll PGO | 0.87x |
+| 100-row range, 8 clients | user cycles / read | **326,765** | 597,807 | 468,913 | 504,190 | roll PGO | 0.70x |
+| 100-row range, 8 clients | kernel cycles / read | **88,433** | 167,952 | 198,127 | 112,783 | roll PGO | 0.78x |
+| 100-row range, 8 clients | tps | **19,689** | 4,346 | 10,776 | 18,464 | roll PGO | 1.07x |
+| 100-row range, 8 clients | p99 ms | 1.97 | 20.84 | 6.02 | **1.23** | pgrust | 1.60x |
+| 100-row range, 8 clients | peak anon+shmem MB | 498 | **490** | 667 | 880 | roll plain | 0.75x |
+| 1,000-row range, 8 clients | user instructions / read | **1,823,438** | 2,134,949 | 2,103,048 | 2,130,334 | roll PGO | 0.87x |
+| 1,000-row range, 8 clients | kernel instructions / read | 96,495 | 123,793 | 152,698 | **61,253** | pgrust | 1.58x |
+| 1,000-row range, 8 clients | user cycles / read | **1,398,219** | 1,970,419 | 1,940,871 | 1,786,342 | roll PGO | 0.78x |
+| 1,000-row range, 8 clients | kernel cycles / read | 178,356 | 391,528 | 316,790 | **164,312** | pgrust | 1.09x |
+| 1,000-row range, 8 clients | tps | **5,958** | 942 | 4,585 | 5,370 | roll PGO | 1.11x |
+| 1,000-row range, 8 clients | p99 ms | 4.86 | 64.44 | 7.78 | **4.71** | pgrust | 1.03x |
+| 1,000-row range, 8 clients | peak anon+shmem MB | 494 | **494** | 660 | 841 | roll plain | 0.75x |
+| TPC-B-like s32, 8 clients | user instructions / txn | 494,154 | 527,999 | **404,227** | 484,134 | PostgreSQL | 1.22x |
+| TPC-B-like s32, 8 clients | user cycles / txn | 1,319,849 | 1,914,279 | **932,427** | 1,086,561 | PostgreSQL | 1.42x |
+| TPC-B-like s32, 8 clients | kernel instructions / txn | **346,213** | 357,671 | 412,361 | 347,491 | roll PGO | 1.00x |
+| TPC-B-like s32, 8 clients | kernel cycles / txn | 827,763 | 992,269 | 843,779 | **710,997** | pgrust | 1.16x |
+| TPC-B-like s32, 8 clients | bytes written / txn | 11,498 | **10,562** | 25,695 | 25,636 | roll plain | 0.45x |
+| TPC-B-like s32, 8 clients | fsync+fdatasync / txn | 0.76 | **0.72** | 0.77 | 0.76 | roll plain | 1.00x |
+| TPC-B-like s32, 8 clients | tps | 801 | 551 | **2,980** | 1,870 | PostgreSQL | 0.27x |
+| TPC-B-like s32, 8 clients | p99 ms | 85.87 | 109.85 | **9.08** | 35.88 | PostgreSQL | 9.46x |
+| TPC-B-like s32, 8 clients | peak anon+shmem MB | **494** | 494 | 667 | 867 | roll PGO | 0.74x |
+| TPC-B-like s32, 8 clients | roll: user instructions on connection / flush / other threads (sampled, a separate run) | 81% / 17% / 2% | 83% / 15% / 2% |  |  | | |
+| TPC-B-like s32, 32 clients | user instructions / txn | 468,664 | 547,295 | **368,255** | 541,224 | PostgreSQL | 1.27x |
+| TPC-B-like s32, 32 clients | user cycles / txn | 1,614,467 | 1,996,432 | 1,626,103 | **1,492,038** | pgrust | 1.08x |
+| TPC-B-like s32, 32 clients | kernel instructions / txn | 362,389 | 366,143 | 481,361 | **354,605** | pgrust | 1.02x |
+| TPC-B-like s32, 32 clients | kernel cycles / txn | 973,977 | 1,017,811 | 1,328,058 | **829,563** | pgrust | 1.17x |
+| TPC-B-like s32, 32 clients | bytes written / txn | **9,601** | 9,894 | 18,972 | 19,030 | roll PGO | 0.51x |
+| TPC-B-like s32, 32 clients | fsync+fdatasync / txn | 0.59 | 0.57 | **0.35** | 0.35 | PostgreSQL | 1.69x |
+| TPC-B-like s32, 32 clients | tps | 578 | 744 | 909 | **1,424** | pgrust | 0.41x |
+| TPC-B-like s32, 32 clients | p99 ms | 356.52 | 278.88 | 195.51 | **111.24** | pgrust | 3.20x |
+| TPC-B-like s32, 32 clients | peak anon+shmem MB | **491** | 494 | 682 | 922 | roll PGO | 0.72x |
+| TPC-B-like s32, 32 clients | roll: user instructions on connection / flush / other threads (sampled, a separate run) | 81% / 18% / 1% | 86% / 13% / 1% |  |  | | |
+| 1 idle session | peak anon+shmem MB | **7.9** | 9.2 | 115.9 | 224.6 | roll PGO | 0.07x |
+| 100 idle sessions | peak anon+shmem MB | 38.4 | **38.1** | 247.1 | 538.6 | roll plain | 0.16x |
+| 1,000 idle sessions | peak anon+shmem MB | 312.1 | **296.1** | 1,442.9 | 3,227.7 | roll plain | 0.22x |
+
+### Where roll PGO does not lead
+
+Instruction counts first (they decide); then the readings. "Reason" is the latest round's stated
+one, where a round states one.
+
+**TPC-H** (the 22 together: roll PGO 86.17 G, pgrust 86.56, PostgreSQL 160.37: roll leads by
+0.5%; wall 21.6 s against pgrust's 20.8, a reading). Behind on 17 of 22 queries, ahead on q09
+(0.51x), q12, q13, q18 and q22:
+- q10 +2.68 G (1.62x pgrust), q17 +2.14 G (1.96x pgrust), q15 +1.65 G (1.56x pgrust), q21 +1.50 G
+  (1.32x pgrust), q02 +1.21 G (2.17x pgrust), q05 +1.04 G (1.61x pgrust), q20 +0.68 G (2.56x
+  PostgreSQL), q16 +0.68 G (1.38x pgrust), q01 +0.59 G (1.09x pgrust), q04 +0.57 G (1.57x
+  PostgreSQL), q14 +0.51 G (1.74x pgrust), q07 +0.43 G (1.17x PostgreSQL), q11 +0.34 G (1.90x
+  PostgreSQL), q08 +0.27 G (1.30x PostgreSQL), q03 +0.17 G (1.05x pgrust), q06 +0.14 G (1.03x
+  PostgreSQL), q19 +0.04 G (1.10x PostgreSQL).
+- Reasons stated: q02, q11, q20 run PostgreSQL's plans node for node and lose on the serial
+  executor's joined rows (whole rows copied into each joined row, a SubPlan's Aggregate and index
+  scan set up again per run: rounds 5-6, agents 258 / 261); q20's serial part scan is read twice
+  under the heap-order emulation (261); q04, q17, q21, q22 are nested-loop inner sides and
+  SubPlans (q17's over a bitmap heap scan), q05, q07, q08 the store's point gets and key compares
+  of index nested loops (261, 283's probes and seeks); q01, q06, q15 the typed walk's numeric step
+  and code placement under PGO (rounds 12-13, agents 286 / 294); q10 and q14: none since the
+  per-row cost above the scan (rounds 24 / 6). q15 and q10 have no round of their own.
+
+**Bulk** (all steps: roll PGO 62.26 G, pgrust 86.14, PostgreSQL 96.06; roll leads by 28%; bytes
+written 299 MB against 3,342 / 3,556):
+- DELETE of a quarter, with its compaction: 6.73 G against pgrust's 1.54 (4.38x) and PostgreSQL's
+  1.87: the largest gap in the table. Reason (round 20, agent 275): the compaction's rewrite of
+  the table with the UPDATE's versions (zstd with the dictionary about a fifth of the step) and
+  the statement's deferred tombstones (sorted, written with their filter), scan and filter. This
+  profile (PGO, `instructions:upp`): half the step on the flush thread (zstd 28% of its samples,
+  `Compacted::entry` 16%, `zip_entries` 12%), half on the connection (`put_entry_deletes` 16% of
+  the step, `ScanNode::emit` 6%, `SstWriter::finish` 5%, `zip_rows` 4%).
+- CREATE UNIQUE INDEX 2.67 G (1.39x pgrust's 1.91; PostgreSQL 2.25), CREATE INDEX 3.07 G (1.06x
+  PostgreSQL's 2.89), COPY out 2.50 G (1.24x pgrust's 2.02), `count(*), sum(c)` after the DELETE
+  0.34 G (1.67x pgrust's 0.20): no round states a reason beyond the block decode (round 20 left
+  CREATE UNIQUE INDEX's +0.15% unexplained).
+- Peak memory 562 MB against PostgreSQL's 386 (1.45x; pgrust 555), over the whole run (not split
+  by step here; agent 302's round 1 had 239 MB for the script alone, before the indexed COPYs).
+
+**Reads** (roll PGO leads every user-instruction and user-cycle cell, and memory):
+- Kernel instructions per 1,000-row read 96.5 k against pgrust's 61.3 k (1.58x; PostgreSQL 152.7
+  k); per select-only read at 8 clients 43.6 k against pgrust's 41.9 k (1.04x). No round states
+  why (rows sent in more writes is the likely place: not measured).
+- Readings: select-only tps 30.5 k / 36.0 k against pgrust's 65.9 k / 64.5 k (8 / 32 clients),
+  p99 3.5 / 10.7 ms against 0.33 / 2.4; range p99s. Under 1.5-2.5 foreign cores on the server CPUs.
+
+**TPC-B-like** (scale 32; agent 313 owns this area now):
+- User instructions per transaction 494 k at 8 clients against PostgreSQL's 404 k (1.22x), 469 k
+  at 32 against 368 k (1.27x); fsync + fdatasync calls 0.59 a transaction at 32 clients against
+  PostgreSQL's 0.35 (1.69x; at 8 clients level, 0.76 / 0.77). The connection threads did 81% of
+  roll PGO's user instructions in both cells (plain 83-86%), the flush thread 13-18%. Reason
+  (round 17 and earlier, agents 299 / 306 / 313): the connection's per-transaction work and the
+  merging scans over a big table's newer versions.
+- A second run of the same cell (the split run, roll PGO at 8 clients) read 425 k user
+  instructions a transaction against this one's 494 k: these counts move with the throughput a
+  run reaches (agent 304 saw the same), so read the TPC-B cells to about 15%.
+- Readings: tps 801 / 578 (8 / 32 clients) against PostgreSQL's 2,980 / 909 and pgrust's 1,870 /
+  1,424; p99 86 / 357 ms against 9 / 196 and 36 / 111. Every server was fsync-bound on the shared
+  disk (above).
+
+**Memory, idle sessions**: roll leads every cell (7.9 / 38.4 / 312 MB for 1 / 100 / 1,000
+sessions against PostgreSQL's 116 / 247 / 1,443 and pgrust's 225 / 539 / 3,228).
+
+Raw lines: `~/.cache/a314/runs/{tpch,bulk,oltp}.txt` (the split runs in `oltp-split2.txt` and
+`comm-*.txt`), the table from `~/.cache/a314/bench/table.py`.
+
 ## Memory, round 2: parallel index builds' lists (2026-11-24, agent 308)
 
 HANDOFF "Memory, round 2" has what changed and why. Plain dist builds (`tools/dist.sh`): **h**,

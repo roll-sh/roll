@@ -21439,6 +21439,50 @@ Not done, found:
 - Subquery Scan widths (remove_unused_subquery_outputs' NULLs at their types' widths), memoize:8,
   subselect:19 rows, the catalog plans (bloat), as agent 288 left them.
 
+## The standing on the shipped build, 2026-11-24 (agent 314)
+
+BENCH "Standing, 2026-11-24" is one table of every benchmarked workload with roll PGO
+(`tools/dist-pgo.sh --out` of `57d194f69`, its own training), roll plain (`tools/dist.sh`, same
+commit), PostgreSQL 18.6 and pgrust, one run a cell, the same afternoon, the same lane and
+settings per workload (2 GB cache, 2 workers a gather, 8 workers on all four; pgrust's other
+defaults set). It replaces the stitched-together standing (PostgreSQL's and pgrust's TPC-H and
+bulk figures from 2026-11-19, roll's PGO figures from other commits). Later rounds can compare
+with it directly: the harness is `~/.cache/a314/bench` (`lib.sh` one server a container, every
+arm; `tpch.sh`, `bulk.sh`, `oltp.sh` the cells; `table.py` the table; `lr.sh` one `lane.sh`
+hold a cell). origin has since landed cand/a306 (BENCH "Short write transactions, round 17": a
+merging scan's run of a block goes on between newer versions), not in these builds.
+
+What it says, instructions first (the machine carried 4-7.6 foreign cores on every lane all
+afternoon, so cycles, tps and p99 are readings only):
+- roll PGO leads the TPC-H total (86.17 G against pgrust's 86.56 and PostgreSQL's 160.37) but is
+  behind on 17 of the 22 queries; the largest: q10 +2.68 G, q17 +2.14, q15 +1.65, q21 +1.50,
+  q02 +1.21, q05 +1.04 over pgrust; q20 2.56x and q11 1.90x PostgreSQL.
+- It leads the bulk script (62.3 G against 86.1 / 96.1, a tenth of the bytes written) except
+  bulk DELETE with its compaction, 6.73 G against pgrust's 1.54 (4.38x: the table's largest gap),
+  CREATE UNIQUE INDEX (1.39x pgrust), COPY out (1.24x), the count after the DELETE (1.67x), CREATE
+  INDEX (1.06x PostgreSQL), and peak memory (562 MB against PostgreSQL's 386).
+- It leads every read cell in user instructions and user cycles (select-only 34.4 k against
+  pgrust's 43.5 k, 1,000-row ranges 1.82 M against 2.10 M), and memory; kernel instructions of a
+  1,000-row read are 1.58x pgrust's.
+- TPC-B-like at scale 32: 494 k / 469 k user instructions a transaction against PostgreSQL's
+  404 k / 368 k, and 0.59 fsyncs a transaction at 32 clients against 0.35 (agent 313's area).
+- Idle sessions: 7.9 / 38.4 / 312 MB for 1 / 100 / 1,000 sessions, a fifth to a fourteenth of
+  PostgreSQL's.
+
+Measuring notes for whoever repeats it:
+- perf's syscall tracepoints need tracefs, which is root-only here: a `--user 1000` perf
+  container counts them only through `docker exec --user 0` (the fsync counts did).
+- `perf stat --per-thread -p` attached before a run misses threads started later (it folds them
+  into their parents with inherit, and drops them with `--no-inherit`), and attached during a run
+  its window does not match a cgroup window under load (a share above 100% came out): the
+  connection / background split here is an `instructions:u` sample profile by thread name over
+  the run (`perf report --sort comm`), in a separate run.
+- `perf record -a` system-wide takes seconds to start under this load: start it at least 5 s
+  before the statement (the first DELETE profile caught only the compaction after it).
+- `perf record`'s `-G` must follow `-e`.
+- Two fixed-count TPC-B runs of the same binary read 494 k and 425 k user instructions a
+  transaction (304 saw the same: the counts follow the throughput a run reaches).
+
 ## The shipped build: profile-guided (agent 304, 2026-11-23)
 
 **The shipped roll-engine is the PGO build, `tools/dist-pgo.sh`** (the user approved it on
