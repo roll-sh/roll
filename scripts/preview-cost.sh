@@ -453,8 +453,9 @@ curl -sS -b "$GJAR" -H "Host: $HOST" "http://$API/__roll/feedback.js" | grep -q 
 GNOTE='{"name":"Ada","path":"/","selector":"h1","note":"Hi @team, the title is cut off","viewport":"390x844"}'
 [ "$(curl -s -o /dev/null -w '%{http_code}' -b "$GJAR" -H "Host: $HOST" -H "Origin: http://evil.example" -H 'content-type: application/json' -d "$GNOTE" "http://$API/__roll/notes")" = 403 ] || { echo "another site's page should post no note"; exit 1; }
 GUEST_ID=$(curl -sS -b "$GJAR" -H "Host: $HOST" -H "Origin: http://$HOST" -H 'content-type: application/json' -d "$GNOTE" "http://$API/__roll/notes" | jq_ "d['id']")
-GUEST_SAID=$(api GET "/v1/code/changes/$CHG/reviews" | jq_ "[(r['reviewer']['name'], '@\u200bteam' in r['body'], 'Acme review' in r['body']) for r in d if r['id'] == '$GUEST_ID']")
-[ "$GUEST_SAID" = "[('guest:Ada', True, True)]" ] || { echo "the guest's note should be on the change as guest:Ada, its @ inert, the link's label said: $GUEST_SAID"; exit 1; }
+GUEST_SAID=$(api GET "/v1/code/changes/$CHG/reviews" | jq_ "[(r['reviewer']['name'], '@\u200bteam' in r['body'], 'Acme review' in r['body'], r['outside']) for r in d if r['id'] == '$GUEST_ID']")
+[ "$GUEST_SAID" = "[('guest:Ada', True, True, True)]" ] || { echo "the guest's note should be on the change as guest:Ada, its @ inert, the link's label said, outside the team's: $GUEST_SAID"; exit 1; }
+[ "$(api GET "/v1/previews/$PV/notes" | jq_ "[n.get('outside') for n in d['notes'] if n['id'] == '$GUEST_ID']")" = "[True]" ] || { echo "the notes answer should mark a guest's note outside (MCP's lockdown)"; exit 1; }
 [ "$(curl -sS -b "$GJAR" -H "Host: $HOST" "http://$API/__roll/feedback.json?path=%2F" | jq_ "[n['id'] for n in d]")" = "['$GUEST_ID']" ] || { echo "a guest should see only their link's notes"; exit 1; }
 api DELETE "/v1/previews/$PV/shares/$(echo "$GSHARE" | jq_ "d['id']")" >/dev/null
 CONTAINER="roll-previews-$(echo "$HOST" | cut -d. -f1)"

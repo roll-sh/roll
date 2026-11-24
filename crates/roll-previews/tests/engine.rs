@@ -2414,7 +2414,7 @@ async fn a_pages_notes_by_its_environment_name() {
     e.engine.resolve_note(&p.id, "rv_Too big", "bob").await.unwrap();
     assert!(e.engine.notes_for(&env_name, "/").await.unwrap().is_empty());
     // Said on the change as bob, so its pull request and the note's Slack thread hear it.
-    assert_eq!(*e.code.comments.lock(), [("chg_n".to_string(), "**Reply on the preview** · `rv_Too big`\n\nResolved.".to_string(), "bob".to_string())]);
+    assert_eq!(*e.code.comments.lock(), [("chg_n".to_string(), "**Reply on the preview** · `rv_Too big`\n\nResolved.".to_string(), "bob".to_string(), false)]);
     assert_eq!(e.engine.open_notes(&p.id).await.unwrap().len(), 1);
     assert!(e.engine.resolve_note(&p.id, "rv_someone else's", "bob").await.is_err());
 }
@@ -2436,8 +2436,9 @@ async fn a_share_links_guest_leaves_notes_as_a_guest() {
     let (open, closed) = (live(true, "Acme's review"), live(false, ""));
     let note = roll_previews::notes::GuestNote { name: "Ada <script>".into(), path: "/pricing".into(), selector: "button.buy".into(), note: "Ping @team ![x](https://t.example/p.gif) <b>here</b>".into(), viewport: "390x844".into(), ..Default::default() };
     e.engine.guest_note(&p.id, &open, &note).await.unwrap();
-    let (change, body, by) = e.code.comments.lock()[0].clone();
+    let (change, body, by, outside) = e.code.comments.lock()[0].clone();
     assert_eq!((change.as_str(), by.as_str()), ("chg_g", "guest:Ada script"), "no handle has a colon: never a team member");
+    assert!(outside, "a guest's words are outside the team's, on the review too (MCP's lockdown)");
     assert!(body.starts_with("**Feedback on the preview** · [`/pricing`](") && body.contains("· `button.buy`\n\nPing @\u{200b}team !\u{200b}[x](https://t.example/p.gif) &lt;b&gt;here&lt;/b&gt;\n\n"), "{body}");
     assert!(body.contains("390x844 viewport") && body.contains("a guest, through the share link \"Acme's review\""), "{body}");
     assert_eq!(roll_previews::notes::parse(&body).map(|(path, sel, _)| (path, sel)), Some(("/pricing".to_string(), "button.buy".to_string())), "read back as a note");
