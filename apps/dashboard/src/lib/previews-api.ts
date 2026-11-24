@@ -239,9 +239,11 @@ export interface PageCheck {
   a11y?: { issues: A11yIssue[]; lang: boolean; title: boolean; seo?: PageSeo | null } | null;
   links?: { checked: number; broken: { path: string; status: number }[] } | null;
   /** Against main's page at the same path. */
-  against?: { a11y_added: number | null; links_added: number | null; seo_added: number | null; text: TextDiff | null } | null;
+  against?: { a11y_added: number | null; links_added: number | null; seo_added: number | null; text: TextDiff | null; step_ms?: number | null } | null;
   /** A page state's step that found nothing (the state taken as it was then). */
   step?: string | null;
+  /** A page state's slowest click or typing to the next paint (ms): INP in the lab. */
+  step_ms?: number | null;
 }
 
 /** A page state (`github.states`): a page of the first service's, reached by its steps. */

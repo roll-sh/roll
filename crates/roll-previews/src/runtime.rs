@@ -2471,6 +2471,8 @@ fn page_shots<'a>(asked: &[&String], said: &str, pngs: impl Iterator<Item = &'a 
         unstable: bool,
         #[serde(default)]
         step: Option<String>,
+        #[serde(default)]
+        step_ms: Option<f64>,
     }
     let said: Vec<Said> = serde_json::from_str(said.trim()).unwrap_or_default();
     let mut out: Vec<crate::ports::PageShot> = Vec::new();
@@ -2485,6 +2487,8 @@ fn page_shots<'a>(asked: &[&String], said: &str, pngs: impl Iterator<Item = &'a 
                 unstable: s.unstable,
                 // A state's step that found nothing (the page's own words in it: one bounded line).
                 step: s.step.map(|t| t.chars().filter(|c| !c.is_control()).take(200).collect()),
+                // The page's own number: one that could be a time (a minute at most).
+                step_ms: s.step_ms.filter(|m| m.is_finite() && (0.0..=60_000.0).contains(m)).map(|m| m.round() as u32),
             };
             out.push(crate::ports::PageShot { path: s.path, png, errors: s.errors.min(10_000), report });
         }
@@ -3041,8 +3045,8 @@ mod tests {
         assert!(off.ends_with("\r\n\r\ncs_3") && !get("/", "Sec-Fetch-Dest: document\r\n").await.contains("__roll_dpl"), "off: {off}");
     }
 
-    /// The tag goes in as the page streams: before `</body>` even when a chunk splits it, at the
-    /// end of a page without one, and once.
+    /// A screenshot run's other pages are only those asked for, each once, their numbers
+    /// bounded (a state's slowest step a time of a minute at most).
     #[test]
     fn a_screenshot_run_s_pages_are_only_those_asked_for_each_once() {
         use base64::Engine as _;
@@ -3057,6 +3061,11 @@ mod tests {
         assert_eq!(run(r#"[{"path":"/pricing","errors":2},{"path":"/pricing"}]"#, &[&png, &png]), [pricing()], "once");
         assert_eq!(run(r#"[{"path":"/pricing","errors":99999}]"#, &[&png]), [("/pricing".to_string(), 10_000)], "bounded");
         assert_eq!(run("not json", &[&png]), []);
+        // A state's slowest step to the next paint: kept when it could be a time (a minute at most).
+        let step_ms = |said: &str| page_shots(&asked, said, [png.as_str()].into_iter()).into_iter().map(|p| p.report.step_ms).collect::<Vec<_>>();
+        assert_eq!(step_ms(r#"[{"path":"/pricing","step_ms":120.4}]"#), [Some(120)]);
+        assert_eq!(step_ms(r#"[{"path":"/pricing","step_ms":1e12}]"#), [None]);
+        assert_eq!(step_ms(r#"[{"path":"/pricing","step_ms":-3}]"#), [None]);
     }
 
     /// A stories run's report is the preview's code's: each story once, by an id Storybook would
