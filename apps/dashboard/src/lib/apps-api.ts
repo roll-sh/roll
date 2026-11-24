@@ -122,6 +122,16 @@ export interface PushState extends Push {
 }
 
 /** An alert on one of the app's own gauges: above or below a threshold for 1–5 minutes running. */
+/** An alert on one route (a route group as Routes shows it, or a prefix `/api/*`), for one method or all; at most 10. */
+export interface RouteAlert {
+  route: string;
+  method?: string;
+  /** 5xx at or above this share of its requests in five minutes (0, off). */
+  error_pct?: number;
+  /** Its p95 at or above this (0, off). */
+  p95_ms?: number;
+}
+
 export interface MetricAlert {
   name: string;
   above?: number;
@@ -173,7 +183,7 @@ export interface Run {
   volume?: { mount: string; size_gb: number; backups?: { every_hours: number; keep: number } };
   /** Metric alerts (`alert.*` events), over five minutes; each 0 is off. */
   /** log_match: text its output holds log_count times in five minutes (alert.log). */
-  alerts?: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct?: number; log_match?: string; log_count?: number; cpu_pct?: number; metrics?: MetricAlert[]; /** The last hour against the same hour of the week over four weeks: alert.anomaly. */ anomaly?: boolean };
+  alerts?: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct?: number; log_match?: string; log_count?: number; cpu_pct?: number; metrics?: MetricAlert[]; /** The last hour against the same hour of the week over four weeks: alert.anomaly. */ anomaly?: boolean; /** One route's 5xx share or p95 over five minutes: alert.route. */ routes?: RouteAlert[] };
   /** Its service level objective: `objective`% of requests not 5xx (and of minutes under `latency_ms` at p95) over `window_days`; `alert.slo` when its budget burns fast. */
   slo?: Slo;
   /** Its own Prometheus endpoint, scraped every 15 s on each running instance (port: the app's own by default). */
@@ -920,6 +930,16 @@ export interface RootCandidate {
 
 export type PlanRequest = { repo: string; revision?: string; root?: string } | { git: string; branch?: string; root?: string; git_login?: { username: string; password: string } } | { files: Record<string, string> };
 
+/** One of a build's steps (BuildKit's): a Dockerfile step, sending the context, exporting the image. */
+export interface BuildStep {
+  name: string;
+  /** How long it ran, once it finished. */
+  ms?: number;
+  /** Its cache answered: it didn't run. */
+  cached: boolean;
+  failed?: true;
+}
+
 export interface Deployment {
   id: string;
   service: string;
@@ -948,6 +968,8 @@ export interface Deployment {
   pruned_at?: number;
   /** When each step began (`build`, `pre_deploy`, `rollout`, then `live` or `failed`): on a single deployment's GET. */
   steps?: { step: string; at: number }[];
+  /** Its build's steps from BuildKit's progress, in order: how long each took, which its cache answered, where it failed. On a single deployment's GET. */
+  build_steps?: BuildStep[];
   /** Its image's last scan for known vulnerabilities, once one ran. */
   vulnerabilities?: ScanSummary;
   /** Who approved putting it live, where its environment asks for approvals (single GET only). */
@@ -1382,6 +1404,7 @@ export type NotifyEvent =
   | "alert.latency"
   | "alert.capacity"
   | "alert.log"
+  | "alert.route"
   | "error.new"
   | "error.regressed"
   | "cron.failed"
