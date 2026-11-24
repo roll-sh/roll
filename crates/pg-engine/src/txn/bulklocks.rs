@@ -221,6 +221,17 @@ impl KeySet {
         self.upsert_with(key, payload, |_| tag)
     }
 
+    /// `insert_with` of a key that may be in already, its entry then left as it is:
+    /// Some(true) put in, Some(false) in already, None as `insert`'s false.
+    pub fn insert_new_with(&mut self, key: &[u8], tag: u8, payload: &[u8]) -> Option<bool> {
+        let mut new = false;
+        self.upsert_with(key, payload, |old| {
+            new = old.is_none();
+            old.unwrap_or(tag)
+        })
+        .then_some(new)
+    }
+
     /// Put `key` in, its tag `f(the tag it had)` (None: not in). False as `insert`.
     pub fn upsert(&mut self, key: &[u8], f: impl FnOnce(Option<u8>) -> u8) -> bool {
         self.upsert_with(key, &[], f)

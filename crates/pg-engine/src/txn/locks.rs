@@ -2034,10 +2034,12 @@ impl LockManager {
 
     /// Take unique key lock `key` (Exclusive) for (sub)transaction `holder` (transaction id
     /// `xid`) of transaction `owner` into its compact set, standing for its in-progress index
-    /// entry. Only while nobody else holds or wants the key: false, take it the usual way
-    /// (`acquire`, which first moves another's compact hold into the main table). `row_key`:
-    /// the entry's heap tuple (named by the CONTEXT of a wait for it). `xact_held`: the
-    /// holder's transaction lock is in the main table already (`hold_xact`).
+    /// entry. Only while nobody else holds or wants the key: else not taken, for the caller to
+    /// take it the usual way (`acquire`, which first moves another's compact hold, or
+    /// `holder`'s own, into the main table). Some(true): taken now; Some(false): not taken,
+    /// `holder`'s compact set holds it (one probe of that set for both); None: not taken.
+    /// `row_key`: the entry's heap tuple (named by the CONTEXT of a wait for it).
+    /// `xact_held`: the holder's transaction lock is in the main table already (`hold_xact`).
     #[allow(clippy::too_many_arguments)]
     pub fn hold_compact_unique_key(
         &self,
@@ -2048,20 +2050,22 @@ impl LockManager {
         xid: u64,
         row_key: Option<&[u8]>,
         xact_held: bool,
-    ) -> bool {
+    ) -> Option<bool> {
         let mut s = self.state.lock();
-        if s.locks.contains_key(key) || s.bulk.values().any(|b| b.segs.iter().any(|g| g.ukeys.get(key).is_some())) {
-            return false;
+        if s.locks.contains_key(key)
+            || s.bulk.iter().any(|(o, b)| b.segs.iter().any(|g| (*o != owner || g.holder != holder) && g.ukeys.get(key).is_some()))
+        {
+            return None;
         }
         if !xact_held {
             Self::hold_xact(&mut s, holder, owner, proc, xid);
         }
         let b = s.bulk.entry(owner).or_insert_with(|| BulkLocks { proc, segs: Vec::new() });
-        let done = b.seg(holder, xid).ukeys.insert_with(key, 0, compact_row_payload(key, row_key));
-        if done {
+        let new = b.seg(holder, xid).ukeys.insert_new_with(key, 0, compact_row_payload(key, row_key));
+        if new == Some(true) {
             COMPACT_HOLDS.fetch_add(1, Ordering::Relaxed);
         }
-        done
+        new
     }
 
     /// Move all of `owner`'s compact locks into the main tables (PREPARE TRANSACTION: they

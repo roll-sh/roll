@@ -17,7 +17,7 @@ use crate::sql::plan::{
     RowMark, TableRules, UpdatePlan, Wait,
 };
 use crate::storage::keys::{encode_value, index_prefix, prefix_end};
-use crate::txn::DeferredFk;
+use crate::txn::{DeferredFk, Taken};
 use crate::txn::locks::{LockMode, RowLockMode, WaitPolicy};
 use crate::types::text::format_value;
 use crate::types::{DataType, Value};
@@ -842,20 +842,23 @@ fn find_conflict(
     let lock_key = unique_lock_key(t, bix, vals, !nondet.is_empty());
     let exprs = form_existing && index_has_exprs(bix);
     let what = || format!("unique key in \"{}\"", t.name);
+    let fresh = entering.and_then(|e| e.fresh).filter(|f| f.covers(bix));
+    let report = fresh.is_some_and(|f| f.exact);
     loop {
         ctx.check()?;
-        let mine = match entering {
-            Some(e) => ctx.txn.borrow_mut().lock_unique_key(
+        let mut taken = match entering {
+            Some(e) => ctx.txn.borrow_mut().lock_unique_key_as(
                 &lock_key,
                 e.token,
                 e.row.cloned(),
                 WaitPolicy::SkipLocked,
                 &what,
                 e.key,
+                report,
             )?,
-            None => false,
+            None => Taken::No,
         };
-        if !mine {
+        if taken == Taken::No {
             let holder = ctx.txn.borrow().unique_key_holder(&lock_key);
             if let Some(kh) = holder {
                 if exprs && let Some(r) = &kh.row {
@@ -870,28 +873,40 @@ fn find_conflict(
             }
             if let Some(e) = entering {
                 // Free, but others are queued for it: wait in line.
-                ctx.txn.borrow_mut().lock_unique_key(
+                taken = ctx.txn.borrow_mut().lock_unique_key_as(
                     &lock_key,
                     e.token,
                     e.row.cloned(),
                     WaitPolicy::Block,
                     &what,
                     e.key,
+                    report,
                 )?;
             }
         }
         // (A fresh index's key, its lock ours: this statement's rows hold it, or, once
-        // another transaction has ended since the statement began, a committed row.)
-        if let Some(f) = entering.and_then(|e| e.fresh).filter(|f| f.covers(bix)) {
-            if !f.others_ended(ctx) {
-                return Ok(f.enter(&lock_key).then(Vec::new));
-            }
-            if f.holds(&lock_key) {
-                return Ok(Some(Vec::new()));
+        // another transaction has ended since the statement began, a committed row. Its
+        // keys are the locks this transaction holds of it, when it held none before:
+        // `exact`.)
+        if let Some(f) = fresh {
+            if f.exact {
+                if taken == Taken::Held {
+                    return Ok(Some(Vec::new()));
+                }
+                if !f.others_ended(ctx) {
+                    return Ok(None);
+                }
+            } else {
+                if !f.others_ended(ctx) {
+                    return Ok(f.enter(&lock_key).then(Vec::new));
+                }
+                if f.holds(&lock_key) {
+                    return Ok(Some(Vec::new()));
+                }
             }
         }
         let Some(dkey) = committed_conflict(t, bix, vals, own, &nondet, ctx)? else {
-            if let Some(f) = entering.and_then(|e| e.fresh).filter(|f| f.covers(bix)) {
+            if let Some(f) = fresh.filter(|f| !f.exact) {
                 f.add(&lock_key);
             }
             return Ok(None);
@@ -3738,6 +3753,9 @@ pub struct FreshUnique {
     indexes: Vec<u32>,
     /// `Xids::completions` when they were found empty.
     completions: u64,
+    /// The transaction held no unique key's lock as it started: the keys this statement
+    /// entered are those whose locks it holds (`Taken::Held`), and `keys` stays empty.
+    exact: bool,
     keys: std::cell::RefCell<FreshKeys>,
 }
 
@@ -3780,7 +3798,8 @@ impl FreshUnique {
                 indexes.push(b.index.oid);
             }
         }
-        Ok((!indexes.is_empty()).then(|| FreshUnique { indexes, completions, keys: Default::default() }))
+        let exact = ctx.txn.borrow().unique_keys_taken() == 0;
+        Ok((!indexes.is_empty()).then(|| FreshUnique { indexes, completions, exact, keys: Default::default() }))
     }
 
     fn covers(&self, bix: &BoundIndex) -> bool {

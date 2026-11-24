@@ -1292,6 +1292,17 @@ fn seg_of(key: &[u8]) -> [u8; 8] {
     s
 }
 
+/// What `TxnState::lock_unique_key_as` did with a unique key's lock.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Taken {
+    /// Not taken (another holds or wants it: `SkipLocked`).
+    No,
+    /// Taken now: this transaction held no lock of the key before.
+    New,
+    /// This transaction held it already.
+    Held,
+}
+
 /// The table (or other relation) a data key is of: its first 4 bytes.
 fn key_table(key: &[u8]) -> u32 {
     key.get(..4).map_or(0, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
@@ -3500,28 +3511,49 @@ impl TxnState {
         what: &dyn Fn() -> String,
         row_key: Option<&[u8]>,
     ) -> Result<bool> {
-        if token.is_none()
-            && row.is_none()
-            && self.unique_keys_taken >= bulklocks::compact_after()
-            && !self.locks_held.contains_key(&HeldKey(key, LockMode::Exclusive))
-        {
+        Ok(self.lock_unique_key_as(key, token, row, policy, what, row_key, false)? != Taken::No)
+    }
+
+    /// `lock_unique_key`, saying, when `report`, whether this transaction held the key
+    /// already (in its current subtransaction's compact set or the main table: a multi-insert
+    /// COPY's `FreshUnique`, which holds no key of its own before it starts, reads its keys
+    /// from that). Without `report`, a key taken is `Taken::New` either way.
+    #[allow(clippy::too_many_arguments)]
+    pub fn lock_unique_key_as(
+        &mut self,
+        key: &[u8],
+        token: Option<u32>,
+        row: Option<Arc<Vec<crate::types::Value>>>,
+        policy: WaitPolicy,
+        what: &dyn Fn() -> String,
+        row_key: Option<&[u8]>,
+        report: bool,
+    ) -> Result<Taken> {
+        let compact = token.is_none() && row.is_none() && self.unique_keys_taken >= bulklocks::compact_after();
+        let mut held = (compact || report) && self.locks_held.contains_key(&HeldKey(key, LockMode::Exclusive));
+        if compact && !held {
             let holder = self.holder();
             let xid = self.cur_xid();
             let proc = self.lock_proc();
             self.table_used = true;
             // (The transaction's own lock is in the main table once it has its id: `cur_xid`.)
             let xact_held = holder == self.id && self.xid != 0 && self.xact_locks.contains(&self.id);
-            if self.db.locks.hold_compact_unique_key(key, self.id, proc, holder, xid, row_key, xact_held) {
-                // (As `lock` and `hold_unique_key` do: the transaction's own lock, which
-                // waiting for it waits on, and its subtransaction's.)
-                if !self.xact_locks.contains(&self.id) {
-                    self.db.locks.hold_xact_lock(self.id, self.id, proc, self.xid);
-                    self.xact_locks.push(self.id);
+            match self.db.locks.hold_compact_unique_key(key, self.id, proc, holder, xid, row_key, xact_held) {
+                Some(true) => {
+                    // (As `lock` and `hold_unique_key` do: the transaction's own lock, which
+                    // waiting for it waits on, and its subtransaction's.)
+                    if !self.xact_locks.contains(&self.id) {
+                        self.db.locks.hold_xact_lock(self.id, self.id, proc, self.xid);
+                        self.xact_locks.push(self.id);
+                    }
+                    if !self.xact_locks.contains(&holder) {
+                        self.xact_locks.push(holder);
+                    }
+                    return Ok(Taken::New);
                 }
-                if !self.xact_locks.contains(&holder) {
-                    self.xact_locks.push(holder);
-                }
-                return Ok(true);
+                // (Its compact set's: taken again the usual way, as before.)
+                Some(false) => held = true,
+                None => {}
             }
         }
         let got = self.lock(key, LockMode::Exclusive, policy, what)?;
@@ -3529,7 +3561,16 @@ impl TxnState {
             self.unique_keys_taken += 1;
             self.hold_unique_key(key, token, row, row_key);
         }
-        Ok(got)
+        Ok(match (got, held) {
+            (false, _) => Taken::No,
+            (true, true) => Taken::Held,
+            (true, false) => Taken::New,
+        })
+    }
+
+    /// Unique key locks taken (`lock_unique_key`) so far, not counting the compact ones.
+    pub fn unique_keys_taken(&self) -> usize {
+        self.unique_keys_taken
     }
 
     /// PREPARE TRANSACTION: the compact locks move into the lock manager's main tables
