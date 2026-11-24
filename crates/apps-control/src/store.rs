@@ -891,7 +891,7 @@ pub struct Pruned {
     pub image: Option<String>,
 }
 
-const DEPLOY_COLS: &str = "id, service, env, status, cause, revision, message, image, plan, rollback_of, error, created_at, started_at, finished_at, ready_ms, run, vars_hash, actor, pruned_at, error_detail";
+const DEPLOY_COLS: &str = "id, service, env, status, cause, revision, message, image, plan, rollback_of, error, created_at, started_at, finished_at, ready_ms, run, vars_hash, actor, pruned_at, error_detail, image_bytes";
 
 fn json<T: serde::de::DeserializeOwned>(s: &str) -> code_sql::Result<T> {
     serde_json::from_str(s).map_err(|e| code_sql::Error::Conversion(e.to_string()))
@@ -1028,6 +1028,7 @@ fn deploy_row(r: &code_sql::Row<'_>) -> code_sql::Result<Deployment> {
         vars_hash: r.get(16)?,
         actor: r.get(17)?,
         pruned_at: r.get(18)?,
+        image_bytes: r.get(20)?,
         vulnerabilities: None,
         error_detail,
         fix,
@@ -1078,6 +1079,8 @@ impl Store {
         db.add_column("env_access", "password_hash", "TEXT")?;
         // Visitors a provider signs in (`access.sso`), as JSON.
         db.add_column("env_access", "sso", "TEXT")?;
+        // A deployment's image's size, where the runtime says (Fly's release sizes).
+        db.add_column("deployments", "image_bytes", "INTEGER")?;
         // Paths whose CORS preflights pass the gate (`access.preflight`), as JSON.
         db.add_column("env_access", "preflight", "TEXT")?;
         // Services let in with roll's token for them (`access.callers`), as JSON.
@@ -1799,7 +1802,7 @@ impl Store {
                 )?;
             }
             c.execute(
-                &format!("INSERT INTO deployments ({DEPLOY_COLS}, upload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, ?, ?, ?, NULL, NULL, ?)"),
+                &format!("INSERT INTO deployments ({DEPLOY_COLS}, upload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, ?, ?, ?, NULL, NULL, NULL, ?)"),
                 params![
                     id,
                     service,
@@ -1837,6 +1840,12 @@ impl Store {
             .query_row(&format!("SELECT {DEPLOY_COLS} FROM deployments WHERE id = ?"), [id], deploy_row)
             .optional()?
             .ok_or_else(|| Error::NotFound(format!("no deployment {id}")))
+    }
+
+    /// A deployment's image's size.
+    pub fn set_image_bytes(&self, id: &str, bytes: u64) -> Result<()> {
+        self.db.execute("UPDATE deployments SET image_bytes = ? WHERE id = ?", params![bytes as i64, id])?;
+        Ok(())
     }
 
     /// That a deployment's step began (the first time counts).
