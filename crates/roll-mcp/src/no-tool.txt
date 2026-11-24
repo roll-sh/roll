@@ -58,6 +58,10 @@ GET /v1/previews/{id}/errors/count                                             t
 GET /v1/previews/{id}/files                                                    interactive (a shell, files, a forward): an admin's, live
 PUT /v1/previews/{id}/files                                                    interactive (a shell, files, a forward): an admin's, live
 GET /v1/previews/{id}/forward                                                  interactive (a shell, files, a forward): an admin's, live
+GET /v1/previews/{id}/restore-points                                           no tool yet: roll MCP maps restore points
+POST /v1/previews/{id}/restore-points                                          no tool yet: roll MCP maps restore points
+DELETE /v1/previews/{id}/restore-points/{point}                                no tool yet: roll MCP maps restore points
+POST /v1/previews/{id}/restore-points/{point}/restore                          no tool yet: roll MCP maps restore points
 GET /v1/previews/{id}/swap                                                     interactive (a laptop's process standing in for a service): an admin's, live
 GET /v1/previews/{id}/notes/{note}/crop                                        the dashboard's (a note's image)
 GET /v1/previews/{id}/qr.png                                                   the dashboard's (a QR code)

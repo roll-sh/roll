@@ -312,6 +312,21 @@ CREATE TABLE IF NOT EXISTS leases (
     expires_at INTEGER NOT NULL,
     PRIMARY KEY (preview_id, lease)
 );
+CREATE TABLE IF NOT EXISTS restore_points (
+    preview_id TEXT NOT NULL,
+    point TEXT NOT NULL,
+    label TEXT NOT NULL,
+    by TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    parent TEXT NOT NULL,
+    name TEXT NOT NULL,
+    ref TEXT NOT NULL,
+    kept TEXT,
+    source TEXT NOT NULL,
+    mask TEXT NOT NULL,
+    PRIMARY KEY (preview_id, point, kind, parent)
+);
 ";
 
 /// [`Store::set_page_shots`]'s rows, prepared: path, PNG, errors, the one before, change, report.
@@ -614,6 +629,35 @@ pub struct PinnedData {
     pub kept: Option<String>,
     /// The preview's branch it was copied from.
     pub source: String,
+}
+
+/// A restore point (`…/restore-points`): the preview's data saved as it was, to put back later.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct RestorePoint {
+    pub id: String,
+    pub label: String,
+    pub by: String,
+    pub at: i64,
+    /// What it holds, `<kind>:<parent>`.
+    pub data: Vec<String>,
+}
+
+/// One branch a restore point holds: a copy-on-write branch of the preview's branch of
+/// `parent`, as it was then.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PointData {
+    pub point: String,
+    pub kind: Kind,
+    pub parent: String,
+    /// Its name in the product (the guard its delete checks).
+    pub name: String,
+    pub r#ref: String,
+    pub kept: Option<String>,
+    /// The preview's branch it was copied from.
+    pub source: String,
+    /// The masking rules it was masked by (the resource's digest then): never put back under
+    /// other rules.
+    pub mask: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1320,7 +1364,7 @@ impl Store {
             if let Some((project, change, head)) = gone {
                 emit(c, now, "deleted", &project, id, change.as_deref(), &serde_json::json!({ "head": head }))?;
             }
-            for t in ["resources", "services", "pinned", "pinned_data", "shares", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "previews"] {
+            for t in ["resources", "services", "pinned", "pinned_data", "restore_points", "shares", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -2701,6 +2745,55 @@ impl Store {
     pub fn drop_pinned_data(&self, id: &str, d: &PinnedData) -> Result<()> {
         self.db.write(|c| {
             c.execute("DELETE FROM pinned_data WHERE preview_id = ? AND revision = ? AND kind = ? AND parent = ?", params![id, d.revision, d.kind.as_str(), d.parent])?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// A preview's restore points, oldest first.
+    pub fn restore_points(&self, id: &str) -> Result<Vec<RestorePoint>> {
+        let mut out: Vec<RestorePoint> = Vec::new();
+        for (point, label, by, at, kind, parent) in self.db.read(|c| {
+            c.query("SELECT point, label, by, at, kind, parent FROM restore_points WHERE preview_id = ? ORDER BY at, point, kind, parent", [id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?))
+            })
+        })? {
+            let data = format!("{kind}:{parent}");
+            match out.last_mut() {
+                Some(p) if p.id == point => p.data.push(data),
+                _ => out.push(RestorePoint { id: point, label, by, at, data: vec![data] }),
+            }
+        }
+        Ok(out)
+    }
+
+    /// The branches restore points hold: `point`'s, or every one's.
+    pub fn point_data(&self, id: &str, point: Option<&str>) -> Result<Vec<PointData>> {
+        Ok(self.db.read(|c| {
+            c.query(
+                "SELECT point, kind, parent, name, ref, kept, source, mask FROM restore_points WHERE preview_id = ? AND (? IS NULL OR point = ?) ORDER BY at",
+                params![id, point, point],
+                |r| {
+                    let kind: String = r.get(1)?;
+                    Ok(PointData { point: r.get(0)?, kind: Kind::parse(&kind).unwrap_or(Kind::Postgres), parent: r.get(2)?, name: r.get(3)?, r#ref: r.get(4)?, kept: r.get(5)?, source: r.get(6)?, mask: r.get(7)? })
+                },
+            )
+        })?)
+    }
+
+    pub fn add_point_data(&self, id: &str, label: &str, by: &str, at: i64, d: &PointData) -> Result<()> {
+        self.db.write(|c| {
+            c.execute(
+                "INSERT INTO restore_points (preview_id, point, label, by, at, kind, parent, name, ref, kept, source, mask) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT (preview_id, point, kind, parent) DO UPDATE SET name = excluded.name, ref = excluded.ref, kept = excluded.kept",
+                params![id, d.point, label, by, at, d.kind.as_str(), d.parent, d.name, d.r#ref, d.kept, d.source, d.mask],
+            )?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    pub fn drop_point_data(&self, id: &str, d: &PointData) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("DELETE FROM restore_points WHERE preview_id = ? AND point = ? AND kind = ? AND parent = ?", params![id, d.point, d.kind.as_str(), d.parent])?;
             Ok::<_, Error>(())
         })
     }
