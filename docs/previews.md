@@ -1272,7 +1272,7 @@ thirty-fourth review found them in the clear.
       environment, so roll apps' own sign-in flow and its own check decide (its
       `AccountsVisitors` and `/dashboard/apps/visit`: admins only today), not previews'. roll
       apps refuses `signed_in` on a node without roll's dashboard address (`web_url`), which
-      fails the deploy. Share links don't open services on roll apps, as under `link`. roll
+      fails the deploy. Share links open them as previews' own (see Share links). roll
       apps adds the feedback button only for a visitor with its access cookie (`via_link` in
       `apps-control/src/public.rs`), never for one with its sign-in session, so a team
       preview's services on roll apps have no button yet.
@@ -1361,6 +1361,13 @@ thirty-fourth review found them in the clear.
   change, or in Slack); a link without `notes` gives no button, as before.
   `a_share_links_guest_leaves_notes_as_a_guest` and the runtime's link test (the guest's
   script; a note from another site's page refused).
+  Where roll apps serves the preview, its proxy takes the same links on the `pv-` environment's
+  host through a port of roll apps' (`integrations::PreviewShares`, rolld's
+  `previews::services::Shares`): `?roll_share=` sets the same cookie, and every request asks
+  previews again (`Engine::share_visit`, which previews' own proxy uses too: live, and its maker
+  still reaching the project), so a revoked link stops at once there as well. The cookie never
+  reaches the app, and a guest is no visitor session of roll apps'. Guests' notes and their list
+  go through the same port. `apps-control/tests/api.rs::a_previews_share_link_lets_its_guest_in_until_it_ends`.
 
 ## Cost
 
@@ -2752,9 +2759,9 @@ Ranked by what a person notices first. Done so far:
 2. **roll apps on par, in review**: roll apps' feedback button is previews' own script (a note
    carries the page's errors and the reviewer's steps there too), and a share link on a preview
    roll apps serves is a 409 that says why, not a link that answers 401.
-3. **Share links on roll apps** (with roll apps' thread): a port in roll apps' access check that
-   asks previews whether a `roll_share` token is a live link of the environment's preview (its
-   maker still reaching the project), and guests' notes through roll apps' host.
+3. **Share links on roll apps, in review**: a port in roll apps' access check asks previews about a
+   `roll_share` link at every request (`Engine::share_visit`, shared with previews' own proxy),
+   and guests' notes go through it.
 4. **`note_mail` in the dashboard's rules**: the setting is in the API and roll MCP, not the page.
 5. **`roll preview try`**: an agent's page drive (`…/try`) from the CLI, as `roll preview fetch`.
 6. **A note in its reviewer's engine, typing**: their typing where the button can say what
