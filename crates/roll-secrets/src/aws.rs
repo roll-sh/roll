@@ -347,6 +347,24 @@ impl Secrets {
         })
     }
 
+    /// A session of the project's role `name` for one push of sync `sync` (syncs.rs,
+    /// [`crate::syncs::SyncTarget::aws_role`]): the shortest STS gives, as a link's issue would,
+    /// and only while the role's maker may still manage the project.
+    pub(crate) fn sync_aws_session(&self, project: &str, name: &str, sync: &str) -> Result<Session> {
+        let id: String = self
+            .db
+            .read(|c| c.query_row("SELECT id FROM aws_roles WHERE project_id = ? AND name = ?", [project, name], |r| r.get(0)).optional())?
+            .ok_or_else(|| Error::BadRequest(format!("the project has no AWS role named {name} (…/aws-roles)")))?;
+        self.provider_for(KIND, &id)?;
+        let sts = self.sts.clone().ok_or_else(|| Error::BadRequest("AWS roles aren't on this server".into()))?;
+        let (arn, trust): (String, String) = self.db.read(|c| c.query_row("SELECT role_arn, COALESCE(trust, 'external_id') FROM aws_roles WHERE id = ?", [&id], |r| Ok((r.get(0)?, r.get(1)?))))?;
+        let issuing = match (&self.clouds, &self.keys) {
+            (Some(c), Ok(keys)) => Some(Issuing { url: c.issuer.clone(), keys: keys.clone() }),
+            _ => None,
+        };
+        session(&*sts, &self.db, issuing.as_ref(), project, &arn, &trust, &session_name(&format!("sync-{sync}")), 900).map_err(|why| Error::Link(format!("AWS didn't let roll assume {name}: {why}")))
+    }
+
     /// The project's roles, as link targets' (kind, ref).
     pub(crate) fn aws_role_refs(&self, project: &str) -> Result<Vec<(String, String)>> {
         self.db.read(|c| Ok(c.query("SELECT id, name FROM aws_roles WHERE project_id = ? ORDER BY name", [project], |r| Ok((r.get(0)?, r.get(1)?)))?))

@@ -1,7 +1,8 @@
 //! The kinds roll secrets' syncs push to (docs/secrets.md, "Syncs"): `github` (Actions secrets
 //! through roll's GitHub App), `webhook` (values sealed to a key of the team's own) and `notify`
 //! (that something changed, no values); `vercel`, `cloudflare` and `aws-ssm` are in
-//! [`platforms`]; `search-inference` (roll search's inference endpoints keyed by a secret) is in
+//! [`platforms`]; `aws-acm`, `azure-keyvault-cert` and `cloudflare-cert` (a `pki` key's
+//! certificate where TLS terminates) are in [`certs`]; `search-inference` (roll search's inference endpoints keyed by a secret) is in
 //! [`search`]. roll-secrets knows no platform: each kind is a
 //! [`SyncTarget`] registered here.
 //!
@@ -17,6 +18,7 @@ use serde_json::{Value as Json, json};
 use std::sync::Arc;
 use std::time::Duration;
 
+mod certs;
 mod platforms;
 pub(super) mod search;
 
@@ -55,6 +57,9 @@ pub fn kinds(api: Api, allow_private: bool) -> Syncs {
     s.register(Arc::new(platforms::CloudflarePages(guarded.clone())));
     s.register(Arc::new(platforms::AzureAppConfig(guarded.clone())));
     s.register(Arc::new(platforms::VaultKv(guarded)));
+    s.register(Arc::new(certs::Acm(http.clone(), None)));
+    s.register(Arc::new(certs::KeyVaultCert(http.clone(), certs::Azure::new())));
+    s.register(Arc::new(certs::CloudflareCert(http.clone(), "https://api.cloudflare.com".into())));
     s.register(Arc::new(platforms::Ssm(http)));
     s.register(Arc::new(platforms::Kubernetes { allow_private }));
     s.register(Arc::new(platforms::GitLab { allow_private }));

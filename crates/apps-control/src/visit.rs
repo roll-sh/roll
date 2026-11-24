@@ -231,6 +231,41 @@ impl Apps {
         Ok(serde_json::json!({ "status": status, "url": format!("{}{path}", self.origin(&host)), "headers": shown, "body": String::from_utf8_lossy(&body), "truncated": truncated }))
     }
 
+    /// The audience another service asks roll's token for to call this environment
+    /// (`x-roll-caller`): never a URL, so it's nothing roll's pushes or schedules sign for.
+    pub fn caller_audience(service: &str, env: &str) -> String {
+        format!("roll-apps:{service}/{env}")
+    }
+
+    /// Another service's call with roll's token (`x-roll-caller`): its subject when the token
+    /// checks out for this environment, the caller is of the same project, and `callers` names it
+    /// (its name or id, all its environments or `/env` one).
+    pub(crate) async fn caller_admits(self: &Arc<Self>, service: &str, env: &str, callers: &[String], token: &str) -> Option<String> {
+        if callers.is_empty() || token.len() > 8192 {
+            return None;
+        }
+        let sub = self.deps.secrets.verify_issued(token, &Self::caller_audience(service, env)).await?;
+        let mut parts = sub.strip_prefix("roll-apps:")?.splitn(3, ':');
+        let (project, caller, caller_env) = (parts.next()?, parts.next()?, parts.next()?);
+        let sid = service.to_string();
+        let ours = self.db(move |s| s.service(&sid)).await.ok()?;
+        if ours.project != project {
+            return None;
+        }
+        let c = caller.to_string();
+        let theirs = self.db(move |s| s.service(&c)).await.ok()?;
+        if theirs.project != project {
+            return None;
+        }
+        callers
+            .iter()
+            .any(|entry| {
+                let (who, on) = entry.split_once('/').map_or((entry.as_str(), None), |(s, e)| (s, Some(e)));
+                (who == theirs.id || who == theirs.name) && on.is_none_or(|e| e == caller_env)
+            })
+            .then_some(sub)
+    }
+
     /// A visitor signing out: their session (`token`) ends on every node at its next look.
     pub(crate) async fn end_visit(self: &Arc<Self>, token: &str) {
         let hash = crate::public::token_hash(token);

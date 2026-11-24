@@ -1832,6 +1832,7 @@ impl Apps {
         let (private, signed_in, password) = (gate.is_some(), gate.as_ref().is_some_and(|a| a.signed_in), gate.as_ref().is_some_and(|a| a.password_hash.is_some()));
         let sso = gate.as_ref().and_then(|a| a.sso.clone());
         let preflight = gate.as_ref().map(|a| a.preflight.clone()).unwrap_or_default();
+        let callers = gate.as_ref().map(|a| a.callers.clone()).unwrap_or_default();
         let (sid, e) = (r.service.clone(), r.name.clone());
         let waiting_for_ci = self.db(move |s| s.ci_waits()).await?.into_iter().find(|(w, _)| w.service == sid && w.env == e).map(|(w, _)| w.sha);
         let (sid, e) = (r.service.clone(), r.name.clone());
@@ -1863,6 +1864,7 @@ impl Apps {
             signed_in,
             sso,
             preflight,
+            callers,
             password,
             next_run_at,
             schedules: self.schedule_states(&svc, &r).await,
@@ -2371,7 +2373,7 @@ impl Apps {
             None => None,
             Some(Value::Null) => Some(None),
             Some(Value::Object(a)) => {
-                if let Some(k) = a.keys().find(|k| !["token", "bypass_sha256", "signed_in", "password", "sso"].contains(&k.as_str())) {
+                if let Some(k) = a.keys().find(|k| !["token", "bypass_sha256", "signed_in", "password", "sso", "callers"].contains(&k.as_str())) {
                     return Err(Error::BadRequest(format!("access.{k} isn't a field")));
                 }
                 let signed_in = match a.get("signed_in") {
@@ -2393,8 +2395,17 @@ impl Apps {
                 if sso.is_some() && self.visitor_sign_in.get().is_none() {
                     return Err(Error::Conflict("signing visitors in through a provider needs roll's accounts on this node".into()));
                 }
+                // Other services of the project, with roll's token for them.
+                let callers: Vec<String> = match a.get("callers") {
+                    None | Some(Value::Null) => Vec::new(),
+                    Some(v) => serde_json::from_value(v.clone()).map_err(|_| Error::BadRequest("access.callers is services (a name or id, `/env` to name one environment)".into()))?,
+                };
+                let label = |s: &str| !s.is_empty() && s.len() <= 63 && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_');
+                if callers.len() > crate::model::MAX_CALLERS || callers.iter().any(|c| !c.split_once('/').map_or(label(c), |(s, e)| label(s) && label(e))) {
+                    return Err(Error::BadRequest(format!("access.callers is at most {} services: a name or id, `/env` to name one of its environments", crate::model::MAX_CALLERS)));
+                }
                 let token = match a.get("token") {
-                    None | Some(Value::Null) if signed_in || password.is_some() || sso.is_some() => None,
+                    None | Some(Value::Null) if signed_in || password.is_some() || sso.is_some() || !callers.is_empty() => None,
                     Some(Value::String(t)) if (20..=200).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)) => Some(t.as_str()),
                     _ => return Err(Error::BadRequest("access.token is 20–200 of A-Z, a-z, 0-9, - and _ (or access.signed_in is true, or there's a password or sso)".into())),
                 };
@@ -2409,9 +2420,9 @@ impl Apps {
                 // A new way in keeps the paths whose preflights pass (`preflight`, set on its own).
                 let (sid, e) = (service.to_string(), env.to_string());
                 let preflight = self.db(move |s| s.access(&sid, &e)).await.ok().flatten().map(|a| a.preflight).unwrap_or_default();
-                Some(Some(Access { token_hash: token.map(crate::public::token_hash), bypass_hash: bypass, signed_in, password_hash: password, sso, preflight }))
+                Some(Some(Access { token_hash: token.map(crate::public::token_hash), bypass_hash: bypass, signed_in, password_hash: password, sso, preflight, callers }))
             }
-            Some(_) => return Err(Error::BadRequest("access is {token?, signed_in?, password?, sso?, bypass_sha256?} or null".into())),
+            Some(_) => return Err(Error::BadRequest("access is {token?, signed_in?, password?, sso?, callers?, bypass_sha256?} or null".into())),
         };
         // A new environment may start with another's variables (cloning staging from production).
         let variables_from = match o.get("variables_from") {
