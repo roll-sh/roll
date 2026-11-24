@@ -397,23 +397,6 @@ KEY_MINT=$(curl -s -o /dev/null -w '%{http_code}' -XPOST -H "Authorization: ApiK
 APP_WAL=$(docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB" -Atc "SELECT length(pg_read_binary_file('pg_wal/' || pg_walfile_name(pg_current_wal_lsn())))" 2>&1 | head -1 || true)
 case "$APP_WAL" in *"permission denied"*) ;; *) echo "the branch's role should be refused the WAL: $APP_WAL"; exit 1;; esac
 APP_MASKED=$(docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB" -Atc "SELECT email FROM users WHERE id = 1" 2>&1 | head -1 || true)
-# A restore point (roll preview points): a table made after it is gone once it's put back, on
-# the same DATABASE_URL (pg-control's reset from the point: same endpoint and role).
-psql_app() { docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB" -Atc "$1" 2>&1 | head -1; }
-POINT=$(api POST "/v1/previews/$PV/restore-points" '{"label":"before the live check"}' | jq_ "d['id']")
-case "$POINT" in rp_*) ;; *) echo "a restore point should be saved: $POINT"; exit 1;; esac
-ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview points "$PV" | grep -q "$POINT" || { echo "roll preview points should list $POINT"; exit 1; }
-psql_app "CREATE TABLE after_the_point (id int)" >/dev/null
-TR0=$(now_ms)
-api POST "/v1/previews/$PV/restore-points/$POINT/restore" >/dev/null
-for _ in $(seq 1 240); do
-  api GET "/v1/previews/$PV/activity" | jq_ "any('back as restore point' in a['message'] for a in d[:10])" | grep -q True && [ "$(api GET "/v1/previews/$PV" | jq_ "d['state']")" = ready ] && break
-  sleep 0.5
-done
-RESTORE_MS=$(( $(now_ms) - TR0 ))
-RESTORED=$(psql_app "SELECT coalesce(to_regclass('public.after_the_point')::text, 'gone') || ' ' || (SELECT email FROM users WHERE id = 1)")
-[ "$RESTORED" = "gone $APP_MASKED" ] || { echo "putting the point back should drop what came after it, still masked, on the same DATABASE_URL: $RESTORED"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:8]]"; exit 1; }
-api DELETE "/v1/previews/$PV/restore-points/$POINT" >/dev/null
 # Logs are pushed: a request made while following shows up on the stream.
 FOLLOW="$HOME_DIR/follow.txt"
 curl -sN --max-time 20 "http://$API/v1/previews/$PV/logs?follow=1&lines=1" >"$FOLLOW" &
@@ -625,6 +608,32 @@ api PUT "/v1/previews/projects/$PRJ/settings" '{"access":"link"}' >/dev/null
 [ "$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -H "Host: $HOST" "http://$API/")" = 401 ] || { echo "a link retired by leaving link access should stop opening the preview"; exit 1; }
 QUERY=$(api GET "/v1/previews/$PV" | jq_ "[x for x in d['services'] if x['name'] == 'web'][0]['share_url'].split('/?')[1]")
 curl -sS -o /dev/null -L -c "$JAR" -b "$JAR" -H "Host: $HOST" "http://$API/?$QUERY" --max-time 120
+
+say "a restore point (roll preview points): saved, a table made after it, put back"
+# A restore point (roll preview points): a table made after it is gone once it's put back, on
+# the same DATABASE_URL (pg-control's reset from the point: same endpoint and role).
+psql_app() { docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB" -Atc "$1" 2>&1 | head -1; }
+POINT=$(api POST "/v1/previews/$PV/restore-points" '{"label":"before the live check"}' | jq_ "d['id']")
+case "$POINT" in rp_*) ;; *) echo "a restore point should be saved: $POINT"; exit 1;; esac
+ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview points "$PV" | grep -q "$POINT" || { echo "roll preview points should list $POINT"; exit 1; }
+psql_app "CREATE TABLE after_the_point (id int)" >/dev/null
+TR0=$(now_ms)
+api POST "/v1/previews/$PV/restore-points/$POINT/restore" >/dev/null
+for _ in $(seq 1 240); do
+  api GET "/v1/previews/$PV/activity" | jq_ "any('back as restore point' in a['message'] for a in d[:10])" | grep -q True && [ "$(api GET "/v1/previews/$PV" | jq_ "d['state']")" = ready ] && break
+  sleep 0.5
+done
+RESTORE_MS=$(( $(now_ms) - TR0 ))
+RESTORED=$(psql_app "SELECT coalesce(to_regclass('public.after_the_point')::text, 'gone') || ' ' || (SELECT email FROM users WHERE id = 1)")
+[ "$RESTORED" = "gone $APP_MASKED" ] || { echo "putting the point back should drop what came after it, still masked, on the same DATABASE_URL: $RESTORED"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:8]]"; exit 1; }
+api DELETE "/v1/previews/$PV/restore-points/$POINT" >/dev/null
+# Its services slept while the data went back: a visit wakes them, on the same DATABASE_URL.
+for _ in $(seq 1 120); do
+  AFTER_DB=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt" | sed -n 's/^DATABASE_URL=//p' | sed 's#host.docker.internal#127.0.0.1#')
+  [ -n "$AFTER_DB" ] && break
+  sleep 0.5
+done
+[ "$AFTER_DB" = "$APP_DB" ] || { echo "the service should come back on the same DATABASE_URL after a restore point: ${AFTER_DB%%@*}…"; exit 1; }
 
 say "sleep it"
 api POST "/v1/previews/$PV/sleep" >/dev/null
