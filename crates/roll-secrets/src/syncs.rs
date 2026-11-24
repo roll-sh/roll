@@ -97,6 +97,8 @@ pub struct Push<'a> {
     pub credentials: &'a BTreeMap<String, Value>,
     /// A session of the project's AWS role [`SyncTarget::aws_role`] named, for this push only.
     pub aws: Option<&'a crate::aws::Session>,
+    /// An access token from the cloud [`SyncTarget::federation`] named, for this push only.
+    pub cloud_token: Option<&'a Value>,
 }
 
 /// What a certificate kind pushes: a managed `pki` key's current credential, PEM. Its `Debug`
@@ -167,6 +169,20 @@ pub trait SyncTarget: Send + Sync {
         let _ = target;
         None
     }
+    /// The cloud a push signs in to with roll's issuer (workload identity federation for Google,
+    /// a federated credential for Azure): roll signs a token whose subject is the sync's own
+    /// ([`crate::issuer::sync_subject`]) and exchanges it for each push ([`Push::cloud_token`]), so
+    /// no cloud key is kept for the sync.
+    fn federation(&self, target: &Json) -> Option<crate::clouds::Account> {
+        let _ = target;
+        None
+    }
+    /// A target that signs in to a cloud with a key stored in roll ([`SyncTarget::credentials`])
+    /// where it could sign in without one: what to use instead, for health (`stored_cloud_key`).
+    fn stored_cloud_key(&self, target: &Json) -> Option<&'static str> {
+        let _ = target;
+        None
+    }
     /// Push a certificate. `remote`: what the target called it after the last push (`None` the
     /// first time, or after it was deleted there). Answers what it's called now, kept for the next.
     /// Errors name the target and the platform's status, never the key or the certificate.
@@ -228,6 +244,10 @@ pub struct SecretSync {
     /// Key Vault certificate's latest version, a Cloudflare custom certificate's id).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_id: Option<String>,
+    /// A sync that signs in with roll's issuer ([`SyncTarget::federation`]): the subject its
+    /// cloud's trust names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
     /// Only in the answer that made it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signing_secret: Option<String>,
@@ -312,6 +332,7 @@ fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
             paused_at: r.get(16)?,
             paused_why: r.get(17)?,
             remote_id: r.get(18)?,
+            subject: None,
             signing_secret: None,
         },
         project: r.get(15)?,
@@ -380,7 +401,7 @@ impl Secrets {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
         let rows = self.db.read(|c| c.query(&format!("SELECT {COLUMNS} FROM syncs s JOIN environments e ON e.id = s.env_id AND e.forgotten_at IS NULL WHERE s.project_id = ? ORDER BY s.created_at"), [project], row))?;
-        Ok(rows.into_iter().map(|r| masked(r.info)).filter(|s| caller.allows(Action::Read, &Scope::at(project, &s.environment, &s.path))).collect())
+        Ok(rows.into_iter().map(|r| self.shown(project, masked(r.info))).filter(|s| caller.allows(Action::Read, &Scope::at(project, &s.environment, &s.path))).collect())
     }
 
     /// What `create_sync` with `n` would push, without creating it or calling the platform: the
@@ -470,6 +491,13 @@ impl Secrets {
         if target.certificate() {
             self.certificate_key(project, &n.environment, &path, &keys, Some(&prefix), &n.kind, caller)?;
         }
+        let federation = target.federation(&n.target);
+        if target.aws_role(&n.target).is_some() || federation.is_some() {
+            self.keyless_environment(project, &n.environment, &n.kind)?;
+        }
+        if let Some(account) = &federation {
+            self.check_sync_trust(project, account)?;
+        }
         for k in target.credentials(&n.target) {
             names::key(&k)?;
             if keys.as_ref().is_some_and(|ks| ks.contains(&k)) {
@@ -503,7 +531,7 @@ impl Secrets {
             )?;
             audit::record(c, self.keys()?, project, caller, "sync.create", Some(&n.environment), Some(&path), keys.as_deref().unwrap_or_default(), &format!("created {} sync {id}", n.kind), now)
         })?;
-        Ok(masked(SecretSync {
+        Ok(self.shown(project, masked(SecretSync {
             id,
             environment: n.environment,
             path,
@@ -522,8 +550,9 @@ impl Secrets {
             paused_at: None,
             paused_why: None,
             remote_id: None,
+            subject: None,
             signing_secret: secret.map(|s| s.expose().to_string()),
-        }))
+        })))
     }
 
     fn sync_row(&self, project: &str, id: &str) -> Result<Row> {
@@ -577,7 +606,7 @@ impl Secrets {
             };
             audit::record(c, self.keys()?, project, caller, "sync.update", Some(&r.info.environment), Some(&r.info.path), &[], &format!("{what} {} sync {id}", r.info.kind), now)
         })?;
-        Ok(masked(self.sync_row(project, id)?.info))
+        Ok(self.shown(project, masked(self.sync_row(project, id)?.info)))
     }
 
     /// Push every key now, whatever the digest says. 409 `running` while another push holds it.
@@ -591,7 +620,7 @@ impl Secrets {
         }
         let hold = self.claim_sync(id, r.info.last_digest.as_deref())?.ok_or_else(|| Error::Conflict("running", format!("sync {id} is being pushed right now")))?;
         self.push_sync(r, hold, None, true);
-        Ok(self.sync_row(project, id)?.info)
+        Ok(self.shown(project, self.sync_row(project, id)?.info))
     }
 
     /// Claim a sync for one push: `Some(hold)` when this caller won it.
@@ -843,8 +872,16 @@ impl Secrets {
             true => Some(self.certificate_parts(project, env, path, r, &entries, &dek)?),
             false => None,
         };
-        let session = match target.aws_role(&r.info.target) {
+        let (role, federation) = (target.aws_role(&r.info.target), target.federation(&r.info.target));
+        if role.is_some() || federation.is_some() {
+            self.keyless_environment(project, env, &r.info.kind)?;
+        }
+        let session = match role {
             Some(role) => Some(self.sync_aws_session(project, &role, &r.info.id)?),
+            None => None,
+        };
+        let cloud_token = match &federation {
+            Some(account) => Some(self.sync_cloud_token(project, &r.info.id, account)?),
             None => None,
         };
         let now = self.db.now_ms()?;
@@ -862,6 +899,7 @@ impl Secrets {
             secret: secret.as_ref(),
             credentials: &credentials,
             aws: session.as_ref(),
+            cloud_token: cloud_token.as_ref(),
         };
         let remote = match &cert {
             Some(cert) => Some(target.push_certificate(&r.info.target, &push, cert, r.info.remote_id.as_deref())?),
@@ -879,6 +917,25 @@ impl Secrets {
         // The audit log names roll's keys, not the target's names.
         let keys = changed.iter().chain(&removed).map(|n| n.strip_prefix(r.info.prefix.as_str()).unwrap_or(n).to_string()).collect();
         Ok(Outcome { digest, state, keys, summary, problems, remote })
+    }
+
+    /// A sync as the API shows it: a federated one's subject.
+    fn shown(&self, project: &str, mut s: SecretSync) -> SecretSync {
+        if self.syncs.get(&s.kind).is_ok_and(|t| t.federation(&s.target).is_some()) {
+            s.subject = Some(crate::issuer::sync_subject(project, &s.id));
+        }
+        s
+    }
+
+    /// A sync that signs in as the project (its AWS role, or roll's issuer for its own subject)
+    /// pushes from an environment that isn't an untrusted one: code nobody vetted never acts as
+    /// the project in a customer's cloud. Asked on create and before every push.
+    fn keyless_environment(&self, project: &str, slug: &str, kind: &str) -> Result<()> {
+        let env = self.db.read(|c| envs::by_slug(c, project, slug))?;
+        if env.kind == envs::Kind::Ephemeral && !env.trusted {
+            return Err(Error::BadRequest(format!("{slug} is an untrusted environment: a {kind} sync signing in as the project (a role or roll's issuer) would act in your cloud for code nobody vetted; use a stored key there")));
+        }
+        Ok(())
     }
 
     /// A certificate kind's sync, on create and preview: it names one key of its own folder, linked
