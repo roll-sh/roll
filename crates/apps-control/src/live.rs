@@ -490,6 +490,15 @@ fn first_match(rules: &[crate::model::FirewallRule], asked: &crate::model::Asked
     }
 }
 
+/// Something an environment's instances did that's an event (`scale.out`, `scale.in`,
+/// `instance.crashed`), for the tick to record.
+#[derive(Clone, Debug)]
+pub struct Note {
+    pub kind: &'static str,
+    pub deployment: String,
+    pub data: serde_json::Value,
+}
+
 /// A firewall's answer: in, a 403, or in under a rule's own limit (its bucket, 1 + its index).
 #[derive(Debug, PartialEq)]
 pub enum Verdict {
@@ -665,6 +674,9 @@ pub struct EnvLive {
     /// Crashes of the last ten minutes: when, when in unix ms, why.
     /// Recent crashes: when, unix ms, why, and the deployment the instance ran.
     crashes: Mutex<std::collections::VecDeque<(Instant, i64, String, String)>>,
+    /// What its instances did that's an event ([`EnvLive::take_notes`]): scaling out or in (with
+    /// why), a crash (with its reason), and the deployment it was of.
+    notes: Mutex<Vec<Note>>,
     seq: AtomicU64,
     /// Every instance this process made here (a deploy's being checked isn't in `insts` until
     /// its commit): [`Self::adopt`] never takes one for a previous owner's.
@@ -736,6 +748,7 @@ impl EnvLive {
             freed: Arc::new(tokio::sync::Notify::new()),
             failed: Mutex::new(None),
             crashes: Mutex::new(std::collections::VecDeque::new()),
+            notes: Mutex::new(Vec::new()),
             seq: AtomicU64::new(0),
             mine: Mutex::default(),
             log,
@@ -1527,6 +1540,7 @@ impl EnvLive {
     fn crashed_with(&self, inst: &Inst, why: &str, grace: Duration) {
         *inst.phase.lock() = Phase::Crashed;
         self.count(&inst.deployment, |s| s.crashes += 1);
+        self.note("instance.crashed", &inst.deployment, serde_json::json!({ "instance": inst.name, "reason": why }));
         let (runtime, name, released) = (self.runtime.clone(), inst.name.clone(), self.released.clone());
         *inst.stopping.lock() = Some(tokio::spawn(async move {
             if !released.load(Ordering::SeqCst) {
@@ -1545,6 +1559,42 @@ impl EnvLive {
         if entered {
             self.log.stream(Stream::System).line(format!("crash loop: {} crashes in 10 minutes, the last because {why}", self.crashes.lock().len()));
         }
+    }
+
+    /// An instance event, kept for the next tick to record ([`EnvLive::take_notes`]); at most a
+    /// hundred wait (the oldest go).
+    fn note(&self, kind: &'static str, deployment: &str, data: serde_json::Value) {
+        let mut n = self.notes.lock();
+        if n.len() >= 100 {
+            n.remove(0);
+        }
+        n.push(Note { kind, deployment: deployment.to_string(), data });
+    }
+
+    /// Scaled from `from` to `to` instances, and why: a note.
+    fn note_scaled(&self, deployment: &str, from: u32, to: u32, reason: &str) {
+        let kind = if to > from { "scale.out" } else { "scale.in" };
+        self.note(kind, deployment, serde_json::json!({ "from": from, "to": to, "reason": reason }));
+    }
+
+    /// The notes since the last time, a run of scaling the same way made one (from where it
+    /// started to where it ended, the last reason).
+    pub fn take_notes(&self) -> Vec<Note> {
+        let notes = std::mem::take(&mut *self.notes.lock());
+        let mut out: Vec<Note> = Vec::with_capacity(notes.len());
+        for n in notes {
+            if let Some(last) = out.last_mut()
+                && last.kind == n.kind
+                && last.kind.starts_with("scale.")
+                && last.deployment == n.deployment
+            {
+                last.data["to"] = n.data["to"].clone();
+                last.data["reason"] = n.data["reason"].clone();
+                continue;
+            }
+            out.push(n);
+        }
+        out
     }
 
     fn looping(c: &std::collections::VecDeque<(Instant, i64, String, String)>) -> bool {
@@ -1595,7 +1645,9 @@ impl EnvLive {
         let woke = Instant::now();
         if self.start(&inst, &tpl.run, None, deadline).await.is_ok() {
             self.meter.lock().cold_start(now_ms(), woke.elapsed().as_secs_f64() * 1000.0);
-            self.log.stream(Stream::System).line(format!("scaled out: {} instances", self.awake_count()));
+            let awake = self.awake_count() as u32;
+            self.log.stream(Stream::System).line(format!("scaled out: {awake} instances"));
+            self.note_scaled(&tpl.deployment, awake.saturating_sub(1), awake, "requests at its concurrency");
         }
     }
 
@@ -2403,6 +2455,7 @@ impl EnvLive {
                         self.cpu_need.store(awake, Ordering::SeqCst);
                         let at = if what == "p95" { format!("p95 at {load:.0} ms, over its {target} ms target") } else { format!("{what} at {load:.0}% of the {target}% target") };
                         self.log.stream(Stream::System).line(format!("scaled out: {at}, {awake} instances"));
+                        self.note_scaled(&tpl.deployment, awake - 1, awake, &at);
                     }
                 }
             }
@@ -2435,6 +2488,7 @@ impl EnvLive {
             awake -= 1;
             *self.over_since.lock() = None;
             self.log.stream(Stream::System).line(format!("scaled in: {awake} instances"));
+            self.note_scaled(&i.deployment, awake + 1, awake, "fewer requests");
         }
         for i in &insts {
             if matches!(i.phase(), Phase::Running(_) | Phase::Suspended(_)) && !self.runtime.running(&i.name).await {
@@ -2587,6 +2641,7 @@ impl EnvLive {
             }
             up += 1;
             self.log.stream(Stream::System).line(format!("scaled out: {up} instances for the backlog"));
+            self.note_scaled(&tpl.deployment, up - 1, up, "its backlog");
         }
         // Crashed ones past what's wanted (its backlog fell while they waited): they go, their
         // crash kept in the crash list; none is started again to be scaled in.
@@ -2631,6 +2686,7 @@ impl EnvLive {
             self.insts.lock().retain(|x| !Arc::ptr_eq(x, &i));
             *self.fewer_since.lock() = None;
             self.log.stream(Stream::System).line(format!("scaled in: {} instances for the backlog", up - 1));
+            self.note_scaled(&i.deployment, up, up - 1, "its backlog fell");
             let (runtime, name, grace, released) = (self.runtime.clone(), i.name.clone(), self.drain_of(run), self.released.clone());
             tokio::spawn(async move {
                 if released.load(Ordering::SeqCst) {
