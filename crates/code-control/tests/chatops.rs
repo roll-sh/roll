@@ -794,7 +794,8 @@ async fn preview_notes_are_slack_threads_both_ways() {
     let (s, v) = w.a.req("POST", &format!("/v1/code/changes/{change}/reviews/{note_id}/dismiss"), Some(json!({ "reason": "fixed" })), admin).await;
     assert!(s.is_success(), "{v}");
     until("the resolution in the thread", || posts().iter().any(|p| p["text"].as_str().is_some_and(|t| t.starts_with("Resolved by")))).await;
-    let in_thread: Vec<&str> = posts()[1..].iter().map(|p| p["thread_ts"].as_str().unwrap_or_default()).collect();
+    let all = posts();
+    let in_thread: Vec<&str> = all[1..].iter().map(|p| p["thread_ts"].as_str().unwrap_or_default()).collect();
     assert!(in_thread.iter().all(|t| *t == thread_ts), "{in_thread:?}");
     // The reply that came from Slack was never posted back.
     assert!(!posts().iter().any(|p| p["text"].as_str().is_some_and(|t| t.contains("Fixed at 768px?"))), "{:?}", posts());
