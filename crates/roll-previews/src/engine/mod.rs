@@ -151,6 +151,9 @@ type ErrorsRead = HashMap<(String, i64), (i64, Vec<crate::ErrorGroup>)>;
 /// How many errors a preview's services wrote by `(id, minutes)`: when read (ms), and how many.
 type ErrorCountsRead = HashMap<(String, i64), (i64, u64)>;
 
+/// Tokens of roll's issuer answered in the last minute: (preview, service, audience) → (when, token).
+type OidcIssued = HashMap<(String, String, String), (i64, crate::OidcToken)>;
+
 pub struct Engine {
     pub cfg: Config,
     pub store: Arc<Store>,
@@ -174,7 +177,7 @@ pub struct Engine {
     /// roll's OIDC issuer for the preview's own services (`oidc_audiences`), when it's here.
     pub issuer: std::sync::OnceLock<Arc<dyn crate::ports::Issuer>>,
     /// Tokens issued in the last minute, by preview, service and audience (as roll apps' are).
-    oidc_issued: Mutex<HashMap<(String, String, String), (i64, crate::OidcToken)>>,
+    oidc_issued: Mutex<OidcIssued>,
     /// Forwarded connections open per preview, and when each (preview, person, service, port)
     /// was last said in the activity (`shell.rs`).
     forwards: Mutex<HashMap<String, Arc<std::sync::atomic::AtomicUsize>>>,
