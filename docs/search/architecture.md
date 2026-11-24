@@ -882,11 +882,15 @@ credentials and branches' adoption all apply unchanged; the crawler adds:
   that didn't refresh most of the index or of an origin, or whose re-checked redirects mostly led
   to one URL, deletes nothing there (`force_purge` lifts this once). Deciding whether URLs may be
   fetched has a 30-second budget a crawl.
-- **Unverified domains** (all of them until domain verification lands): 1,000 URLs a crawl, a
-  second between requests to one site across every crawl on the node, 4 crawls a day per connector
-  and per owner and site, a site being a registrable domain by the public suffix list
-  (`crawler/hosts.rs`, node memory outside cluster state; verification moves it to roll's
-  catalogue, fleet-wide) (`roll.crawler.unverified.*`). `roll.crawler.enabled`
+- **Sites** (a registrable domain by the public suffix list): an owner verifies one with a DNS TXT
+  record or the well-known file (`crawler/verify.rs`, through the crawler's fetch path), kept in
+  search-control's catalogue (`sites.rs`; `site_verifications`, re-checked every 30 days), which
+  clusters read through `ClusterConfig::sites`. A crawl whose sites are all verified gets its own
+  `max_unique_url_count` and the node's request interval; otherwise 1,000 URLs, a second between
+  requests to one site across every crawl on the node, and 4 crawls a day per connector and per
+  owner and site, counted in the catalogue (`site_crawls`) so the fleet shares the count
+  (`roll.crawler.unverified.*`). `crawl-test` (`crawler/probe.rs`) runs one URL through the same
+  path. The node's own names (`roll.egress.deny_names`) are blocked hosts. `roll.crawler.enabled`
   turns crawlers off on a node.
 
 ## On the fleet (roll cloud)

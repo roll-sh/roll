@@ -76,7 +76,9 @@ impl Control {
     /// token to publish (the same token again for a site already started).
     pub async fn start_site_verification(&self, c: &SearchCluster, domain: &str) -> Result<Value> {
         let (site, file) = verify::target(domain, &egress(self)).map_err(ControlError::Invalid)?;
-        let token = format!("{:032x}", rand::random::<u128>());
+        let mut bytes = [0u8; 16];
+        getrandom::fill(&mut bytes).map_err(|e| ControlError::Internal(anyhow::anyhow!("os randomness: {e}")))?;
+        let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
         let origin = file.origin();
         let v = self.store.start_verification(&owner_of(c), &site, &origin, &token, crate::meter::now_ms()).await?;
         Ok(shown(&v))
@@ -87,7 +89,7 @@ impl Control {
     pub async fn check_site_verification(&self, c: &SearchCluster, site: &str) -> Result<Value> {
         let owner = owner_of(c);
         let v = self.store.verification(&owner, site).await?.ok_or_else(|| ControlError::NotFound(format!("no verification of [{site}]: start one first")))?;
-        self.check(&v).await?;
+        self.check_site(&v).await?;
         let v = self.store.verification(&owner, site).await?.ok_or_else(|| ControlError::NotFound(format!("no verification of [{site}]")))?;
         Ok(shown(&v))
     }
@@ -99,7 +101,7 @@ impl Control {
         }
     }
 
-    async fn check(&self, v: &SiteVerification) -> Result<()> {
+    async fn check_site(&self, v: &SiteVerification) -> Result<()> {
         let file = search_es::xpack::entsearch::sync::crawler::url::Link::parse(&format!("{}{}", v.origin, verify::FILE), None).ok_or_else(|| ControlError::Invalid(format!("[{}] isn't a URL", v.origin)))?;
         let now = crate::meter::now_ms();
         match verify::check(&egress(self), &v.site, &file, &v.token).await {
@@ -114,7 +116,8 @@ impl Control {
     /// (the route's), loading it if it sleeps; writes nothing.
     pub async fn crawl_test(&self, c: &SearchCluster, url: &str, connector: Option<&str>) -> Result<Value> {
         let loaded = self.node.open(crate::control::spec_for(c)).await?;
-        search_es::xpack::entsearch::sync::crawler::probe::test(&loaded.cluster, connector, url).await.map_err(ControlError::Invalid)
+        let v = search_es::xpack::entsearch::sync::crawler::probe::test(&loaded.cluster, connector, url).await.map_err(ControlError::Invalid)?;
+        serde_json::from_str(&v.to_json()).map_err(|e| ControlError::Internal(e.into()))
     }
 
     /// Re-checks verifications older than [`RECHECK_AFTER`], every [`RECHECK_EVERY`]: each is
@@ -134,7 +137,7 @@ impl Control {
                     }
                 };
                 for v in due {
-                    if let Err(e) = c.check(&v).await {
+                    if let Err(e) = c.check_site(&v).await {
                         tracing::warn!(site = v.site, error = %e, "re-checking a site verification failed");
                     }
                 }
