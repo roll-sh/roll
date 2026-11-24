@@ -311,6 +311,8 @@ impl Engine {
             .filter(|x| wanted.iter().any(|(k, p, m)| *k == x.kind && *p == x.parent && *m != x.mode))
             .collect();
         for res in changed {
+            // Its restore points were the other mode's copies: they go with it.
+            self.drop_points(&r.id, |d| d.kind == res.kind && d.parent == res.parent).await?;
             self.delete_branch(&r.id, &res, &name).await?;
             self.store.drop_resource(&r.id, res.kind, &res.parent)?;
             self.store.log(&r.id, &format!("{}:{} moves to {} mode: branched again", res.kind.as_str(), res.parent, res.mode.as_str()))?;
@@ -325,6 +327,7 @@ impl Engine {
             }
         }
         for gone in self.store.want_resources(&r.id, &wanted)? {
+            self.drop_points(&r.id, |d| d.kind == gone.kind && d.parent == gone.parent).await?;
             self.delete_branch(&r.id, &gone, &name).await?;
             self.store.drop_resource(&r.id, gone.kind, &gone.parent)?;
         }
@@ -342,6 +345,11 @@ impl Engine {
         for res in self.store.resources(&r.id)? {
             let masked = mask_digest(&s, &res) != mask_digest(&Settings::default(), &res);
             let rules_moved = res.r#ref.is_some() && res.state == ResourceState::Ready && self.store.mask_digest(&r.id, res.kind, &res.parent)?.unwrap_or_default() != mask_digest(&s, &res);
+            if rules_moved {
+                // Restore points masked by the old rules go: never put back less masked than the
+                // rules say.
+                self.drop_points(&r.id, |d| d.kind == res.kind && d.parent == res.parent).await?;
+            }
             if res.kind == Kind::Postgres && ((masked && reset_of(&res)) || rules_moved) {
                 // Earlier pushes' copies were masked by the old rules: they go too, never served
                 // with less masked than the rules say.
@@ -361,8 +369,20 @@ impl Engine {
             }
         }
         self.store.want_resources(&r.id, &wanted)?;
+        // A restore point to put back (`point:<id>`, asked through `…/restore-points/{p}/restore`):
+        // its branches, by resource. One deleted meanwhile puts nothing back.
+        let points = match asked.iter().find_map(|a| a.strip_prefix("point:")) {
+            Some(p) => {
+                let data = self.store.point_data(&r.id, Some(p))?;
+                if data.is_empty() {
+                    self.store.log(&r.id, &format!("restore point {p} is gone: nothing put back"))?;
+                }
+                data
+            }
+            None => Vec::new(),
+        };
         // Nothing serves data while it's replaced (and until its seed and masks have run again).
-        let resetting = remask || self.store.resources(&r.id)?.iter().any(reset_of);
+        let resetting = remask || !points.is_empty() || self.store.resources(&r.id)?.iter().any(reset_of);
         if resetting {
             for svc in self.store.services(&r.id)? {
                 self.apps.sleep(&r.id, &svc.name).await;
@@ -371,7 +391,18 @@ impl Engine {
         }
         // Every resource at once (a Postgres branch doesn't wait for the bucket's): each records its
         // own progress as it goes, and the first error is the converge's once all are done.
-        let results = futures::future::join_all(self.store.resources(&r.id)?.into_iter().map(|res| self.converge_resource(r, &s, &name, res, reset_due, &asked))).await;
+        // A resource being put back to a restore point is only that (no reset, no seed).
+        let results = futures::future::join_all(self.store.resources(&r.id)?.into_iter().map(|res| {
+            let point = points.iter().find(|d| d.kind == res.kind && d.parent == res.parent).filter(|_| res.r#ref.is_some());
+            let (s, name, asked) = (&s, &name, &asked);
+            async move {
+                match point {
+                    Some(p) => self.put_back(r, name, res, p).await.map(|said| (false, said)),
+                    None => self.converge_resource(r, s, name, res, reset_due, asked).await,
+                }
+            }
+        }))
+        .await;
         let mut first_error = None;
         for result in results {
             match result {
@@ -1575,6 +1606,7 @@ impl Engine {
             self.apps.remove(&r.id, &name).await.map_err(|e| anyhow::anyhow!("removing {name}: {e:#}"))?;
         }
         self.drop_pinned_data(&r.id, |_| true).await?;
+        self.drop_points(&r.id, |_| true).await?;
         for svc in self.store.services(&r.id)? {
             self.apps.remove(&r.id, &svc.name).await.map_err(|e| anyhow::anyhow!("removing {}: {e:#}", svc.name))?;
             self.store.drop_service(&r.id, &svc.name)?;
