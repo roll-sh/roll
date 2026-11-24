@@ -46,7 +46,10 @@ fn walk(v: &Value, depth: usize, product: &str) -> Value {
         Value::Object(o) => {
             let mut out = Map::new();
             for (k, x) in o.iter().take(MAX_ITEMS) {
-                let kept = if secret_name(k, product) && !x.is_null() { Value::String(REDACTED.into()) } else { walk(x, depth + 1, product) };
+                // A browser step that types (`{"type": [selector, text]}`: previews' states and runs)
+                // can type a password; a `type` that's a word stays.
+                let typing = k == "type" && x.is_array();
+                let kept = if (secret_name(k, product) || typing) && !x.is_null() { Value::String(REDACTED.into()) } else { walk(x, depth + 1, product) };
                 out.insert(k.clone(), kept);
             }
             Value::Object(out)
@@ -124,6 +127,10 @@ mod tests {
         assert_eq!(value(&serde_json::json!({ "kind": "pagerduty", "routing_key": "R0" }), "apps")["routing_key"], REDACTED);
         assert_eq!(v["nested"][0]["token"], REDACTED);
         assert!(v["nested"][0]["sql"].as_str().unwrap().len() < 2200);
+        // A browser step that types (a preview's states and runs) keeps neither selector nor text;
+        // a `type` that's a word stays.
+        let steps = value(&serde_json::json!({ "steps": [{ "click": "#login" }, { "type": ["#password", "hunter2"] }], "type": "personal" }), "previews");
+        assert_eq!((&steps["steps"][1]["type"], &steps["steps"][0]["click"], &steps["type"]), (&serde_json::json!(REDACTED), &serde_json::json!("#login"), &serde_json::json!("personal")));
         let mut a = serde_json::json!({ "id": "c1", "password": "p", "branches": [{ "password": "q", "connection_uri": "postgres://roll:pw@h:5432/main" }] });
         fields(&mut a, &["password", "connection_uri"]);
         assert_eq!(

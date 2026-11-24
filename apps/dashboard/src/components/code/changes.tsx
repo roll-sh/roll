@@ -23,6 +23,7 @@ import { CodeShell } from "./shell";
 import { AcceptVisual, PreviewEnvironmentView } from "./preview-environment";
 import { ChangeAgent } from "./change-agent";
 import { StoreInRoll } from "./store-in-roll";
+import { RotateLeaked } from "./rotate-leaked";
 import { ago, btn, Confirm, EmptyPanel, ErrorNote, Panel, panel, primary } from "../ui";
 import { DiffViewer, type DiffReview } from "./diff";
 import { AiProgress, RunAiReview, useAiJobs } from "./ai";
@@ -326,7 +327,14 @@ export function CodeChange({ fullName, id }: { fullName: string; id: string }) {
         // A secrets blocker or notice links to its key in the project that has this repo on its canvas.
         const project = ws.projects.find((p) => p.resources.some((x) => x.kind === "repo" && x.ref === r.full_name));
         const fixIn = (b: Blocker) =>
-          project && b.key ? (
+          project && b.key && b.rotate?.length ? (
+            // roll can rotate it: here, as the person looking (their rights decide).
+            <div className="mt-1 flex flex-wrap gap-1">
+              {b.rotate.map((at) => (
+                <RotateLeaked key={`${at.environment}:${at.folder}`} project={project.id} k={b.key as string} at={at} />
+              ))}
+            </div>
+          ) : project && b.key ? (
             <Link href={`/dashboard/projects/${project.id}/secrets?${b.environments?.length ? `env=${encodeURIComponent(b.environments[0])}&` : ""}key=${encodeURIComponent(b.key)}`} className="mt-1 inline-block text-[12px] text-accent hover:underline">
               {b.kind === "secret_leak" ? `Rotate ${b.key} in roll secrets` : `Add ${b.key} in roll secrets`}
             </Link>

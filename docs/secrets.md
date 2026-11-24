@@ -1385,7 +1385,8 @@ A link is `{kind, ref, field, mode, options}`:
       and anyone else sees that one is there;
   - a protected environment whose policy asks for approvals (`approvals` ≥ 1) is deleted through a
     change request with those approvals and every folder policy in it (`"action":
-    "delete_environment"`, answered 202 `{request}`), exactly as deleting one of its folders is;
+    "delete_environment"`, answered 202 `{request}`; a leaked key's rotation is the other action,
+    `"rotate"`, "When a value leaks"), exactly as deleting one of its folders is;
     applying it (`delete` there) is the delete, and an admin's `bypass` is audited as any other.
     With `approvals: 0` (a new project's `production`) the confirmed delete is direct;
   - one write decides: it checks again that the environment may go (no ephemeral environment based
@@ -3468,6 +3469,59 @@ the change`. The blocker names keys and environments, never the value or the lin
 - **Way around.** Rotate the secret and remove the value from the change. For a false positive, an
   admin lands with `bypass` (on a queue repo, the queue bypass; on a direct-land repo, the bypass of
   review rules, which now covers `secret_leak` too), audited as `secret_leak_bypass`.
+
+#### When a value leaks
+
+A value found where it shouldn't be is a leak whether or not the change ever lands: the change is
+pushed, and whoever can read the repo has it. roll's own tokens are revoked when they leak
+(`Access::revoke_leaked`). A *managed* key (a link roll issues and rotates: a database login, an
+IAM user's keys, Atlas, Snowflake, the SaaS rotators) can be rotated by roll too, since roll
+holds its rotator. Rotating one is what GitGuardian's remediation playbooks and AWS + GitGuardian's
+webhook design do.
+
+- **What counts as found.** A roll code change's added lines and a repo scan ("Leaked secrets don't
+  land"), and `POST …/leaks` with `leaked: true` (the caller's text was published: a paste, a
+  public repo, an outside scanner's report; it matches only values the caller may reveal). A plain
+  scan (`roll secrets scan`, a pre-commit hook, roll MCP's guard) is text that hasn't left yet, so
+  it reports values and never rotates. GitHub's secret scanning reports only roll's own token
+  formats, which roll-access revokes. A live link stores no value, so its value can't be matched in
+  text. Its resource's credential is rotated through the same route (`…/rotate`), by hand.
+- **The event.** Each folder that leaked gets `secret.leaked` in the project that holds the value.
+  It goes out once a day for the same keys and place, and also whenever a rotation starts. It
+  carries `rotatable: true` when roll can rotate one of the keys, meaning a shared managed link.
+  A person's personal value, a plain value, and a live or dynamic link are never rotatable.
+- **`leaks.rotate`, a project setting** (`PATCH /v1/secrets/projects/{project}
+  {leaks: {rotate}}`, an admin's, audited as `leaks.rotate`; Settings, "Leaked keys"):
+  - **`off`** (the default, and every existing project's): nothing rotates. The change's
+    `secret_leak` blocker lists where the key can be rotated (`rotate: [{environment, folder}]`),
+    and the dashboard gives it a Rotate button. The button calls `…/secrets/{key}/rotate` as the
+    person who clicks it, with their own rights (`write` there).
+  - **`managed`:** each leaked managed credential rotates at once, through the same rotate path as
+    `…/rotate` and the schedule, with **no grace**. The leaked value is the old one, so the old
+    credential is retired now and revoked as soon as the new one is stored. A failed revoke goes to
+    the sweeper and is retried a minute later. Whatever still holds the old value stops working
+    until it reads again.
+- **Where approvals are needed.** A leak never rotates a key in an environment, or a folder, that
+  needs approvals (a protected environment with `approvals` ≥ 1, or a folder policy). Instead it
+  opens a change request for the rotation (`action: "rotate"`, its one item the key, `rotated`),
+  and the event says so (`requests`). Nothing is issued until the request is applied with its
+  approvals. Applying it rotates the key with no grace, as above. A rotation that fails then leaves
+  the request as it was.
+- **Once.** A credential is claimed in `leak_rotations` (by environment and credential id) in the
+  same write as the event, before anything is issued. So one leak rotates it once, on one node,
+  however often the change is read again. After the rotation the stored value differs, so the old
+  one no longer matches. A rotation that failed, or whose node stopped, is claimed again when the
+  same value is found an hour later or more. A rotation waiting in a change request isn't: its
+  reviewers decide.
+- **Audit and events.** The rotation is `secrets.rotation_succeeded` by `roll:leaks`, with
+  `rotation.succeeded` carrying `via: "leak"` and `grace_minutes: 0`, and the value change before
+  it is `secret.changed` via `rotation`. A failure is `secrets.rotation_failed`, with
+  `rotation.failed` `{reason, via: "leak"}`, and health's `rotation_failing` until a rotation
+  works. Events, logs and errors name keys, folders and the provider's step, never a value.
+- **Default for new projects.** `off`. A rotation with no grace cuts every consumer that hasn't
+  read the new value. A change that's blocked from landing has leaked only to the repo's readers,
+  so the team's call is often right there. A project whose repos are public, or whose consumers
+  re-read on a change (`roll run --watch`, the SDKs' watchers, roll apps), should turn it on.
 
 #### Credentials roll doesn't hold
 
@@ -5765,10 +5819,10 @@ roll-workspace's records, not secrets' audit rows: they're the workspace's own f
 | --- | --- | --- |
 | `secret.changed` | a change added, changed, linked or rotated stored values (a change that only edits comments, tags or expiry isn't one) | `via`, `change` (its number in the history), `version` (one key) or `versions` (`{key: version}`), `keys` when the row names more (the change's other keys only had their metadata edited or were deleted), `deleted` (keys the same change deleted), `folders` (a change across folders) |
 | `secret.deleted` | a change only deleted keys (a folder's delete too) | `via`, `change`, `version` or `versions` (the delete's), `folders` (a change across folders) |
-| `secret.leaked` | a stored value turned up in a roll code repository (a change's added lines or a scan; in the project holding the value, once a day for the same keys and repo), or GitHub's secret scanning found a placeholder (`secrets.placeholders.end`) | `repo` (and `project`, the repo's, when the value came from another's shared folder), or `placeholder`, `consumer`, `reason` |
+| `secret.leaked` | a stored value turned up in a roll code repository (a change's added lines or a scan) or in text reported published (`POST …/leaks` with `leaked: true`), in the project holding the value, once a day for the same keys and place and whenever a rotation of them starts ("When a value leaks"); or GitHub's secret scanning found a placeholder (`secrets.placeholders.end`) | `repo` (and `project`, the repo's, when the value came from another's shared folder) or `reported: true`, with `rotatable` (roll can rotate one of the keys), `rotating` (the keys `leaks.rotate = managed` rotates now) and `requests` (the change requests opened for their rotation where approvals are needed); or `placeholder`, `consumer`, `reason` |
 | `scan.finding` | `roll secrets scan` or roll MCP's credential guard (`POST …/leaks`) matched values: a row per folder | `candidates`, `matched`, `guard` |
-| `rotation.failed` | a managed key's scheduled rotation failed: once as a failing run starts (health's `rotation_failing` until one works) | `reason` |
-| `rotation.succeeded` | a rotation worked, scheduled or `--now`: a managed key's new credential (the row right after its `secret.changed` via `rotation`, in the same transaction), or a live link's resource credential reset | `mode` (`managed` or `live`), `scheduled`, `version` and `change` (managed), `sharing` (the keys holding the same credential, when more than one) |
+| `rotation.failed` | a managed key's scheduled rotation failed: once as a failing run starts (health's `rotation_failing` until one works); a leaked key's rotation failed | `reason`, `via: "leak"` (a leak's) |
+| `rotation.succeeded` | a rotation worked, scheduled, `--now` or for a leak: a managed key's new credential (the row right after its `secret.changed` via `rotation`, in the same transaction), or a live link's resource credential reset | `mode` (`managed` or `live`), `scheduled`, `version` and `change` (managed), `sharing` (the keys holding the same credential, when more than one), `via: "leak"` and `grace_minutes: 0` (a leak's: the leaked credential revoked at once) |
 | `request.pending` | a change request or a secret request opened | `request`, `type` (`change` or `value`), `expires_at` (a secret request's) |
 | `request.decided` | a change request approved or rejected (once its state moves) or closed; a secret request answered or cancelled | `request`, `type`, `state` |
 | `sync.failed` | a sync's push failed | `sync`, `target`, `reason` |
@@ -5958,8 +6012,8 @@ isn't in the workspace is 404.
 | --- | --- | --- |
 | `GET /v1/secrets/health` | | `{ok, key: "env"\|"kms"\|"file"\|"shares"\|"missing", resealed: "all"\|number\|null, customer_managed, issuer_pulled: {kid, pulled_at, detail}[], links: string[], syncs: string[]}` (`links`, `syncs`: the kinds registered; `issuer_pulled`: issuer keys an emergency rotation pulled in the last 30 days) |
 | `GET`, `POST /v1/secrets/unseal` | `{share}` (`POST`) | `{sealed, have?, need?, error?}`: a sealed node's progress (public; see "Starting sealed"); 429 with `Retry-After` past the limits |
-| `GET` | | `{project, environments: Environment[], previews: number, history_days: number \| null, validity_checks: "on" \| "off", deletion: {window_days, holds: string \| null}}` (`deletion`: what deleting the workspace project takes with it, as its refusal says it, and how many days it stays recoverable) |
-| `PATCH` | `{history_days?, validity_checks?: "on" \| "off"}` | what changed, as given (`admin`; validity checks audited as `validity.checks`) |
+| `GET` | | `{project, environments: Environment[], previews: number, history_days: number \| null, validity_checks: "on" \| "off", leaks: {rotate: "managed" \| "off"}, deletion: {window_days, holds: string \| null}}` (`deletion`: what deleting the workspace project takes with it, as its refusal says it, and how many days it stays recoverable; `leaks.rotate`: "When a value leaks") |
+| `PATCH` | `{history_days?, validity_checks?: "on" \| "off", leaks?: {rotate: "managed" \| "off"}}` | what changed, as given (`admin`; validity checks audited as `validity.checks`, leak rotation as `leaks.rotate`) |
 | `GET /grid?path=` | | `Grid` |
 | `GET /environments` | | `Environment[]` in order |
 | `POST /environments` | `NewEnvironment` | 201 `Environment` |
@@ -5991,7 +6045,7 @@ isn't in the workspace is 404.
 | `PUT /environments/{env}/exports?path=` | `{project}[]` | `Export[]` (admin) |
 | `GET /environments/{env}/secrets?path=` | | `Secret[]` (own, imported, inherited; no values) |
 | `GET /environments/{env}/secrets/{key}?path=&type=` | | `Secret` |
-| `PUT /environments/{env}/secrets/{key}?path=` | `SetSecret` | `Written`; 409 `stale` when `if_version` isn't the key's version |
+| `PUT /environments/{env}/secrets/{key}?path=` | `SetSecret` | `Written`; 409 `stale` when `if_version` isn't the key's version; without `value` (or `link`) it only changes a key already at that path and type, else a 400 "a new secret needs a value" (`""` is a value; a batch's sets too) |
 | `DELETE /environments/{env}/secrets/{key}?path=&type=&if_version=` | | `Written`; 409 `stale` when `if_version` isn't the key's version |
 | `GET /environments/{env}/secrets/{key}/value?path=&resolve=` | | `{value, problems}` |
 | `POST /environments/{env}/decoys` | `NewDecoy` | 201 `Secret` (admin, signed in or the operator; 403 for any token; a new key, never its value; 409 `exists` when the key is there; "Decoys") |
@@ -6064,7 +6118,7 @@ isn't in the workspace is 404.
 | `DELETE /audit/sinks/{id}` | | 204 |
 | `GET /v1/secrets/findings` | | `{project, project_name, findings: Finding[]}[]`: every project's findings the caller may read, projects with none left out |
 | `GET /health?code=` | | `Finding[]`, worst first: every standard environment's findings the caller may read (`read` on the project) |
-| `POST /leaks` | `{candidates: string[]}` (at most 20,000); header `X-Roll-Guard: 1` from a credential guard (roll MCP's check of what a tool call would write), audited as `secrets.guard` instead of `secrets.scan`; rolld keeps the header only on a request roll MCP's guard tool makes in process, and removes anyone else's | `{index, key, environment, path}[]`: candidates that are values the caller may reveal (`read` on the project) |
+| `POST /leaks` | `{candidates: string[], leaked?: boolean}` (at most 20,000; `leaked`: the text was published, so what it matches is a leak, answered as in "When a value leaks", 400 with the guard header); header `X-Roll-Guard: 1` from a credential guard (roll MCP's check of what a tool call would write), audited as `secrets.guard` instead of `secrets.scan`; rolld keeps the header only on a request roll MCP's guard tool makes in process, and removes anyone else's | `{index, key, environment, path}[]`: candidates that are values the caller may reveal (`read` on the project) |
 | `POST /validity` | `{credentials: {value, pair?}[]}` (at most 200; `pair`: an AWS access key id's secret access key) | `{validity_checks: "on" \| "off", results: Checked[]}`, one per credential in order (`write` on the project); while checks are off, `results` is empty and nothing is asked. `Checked` is `{fingerprint, kind, result: "live" \| "invalid" \| "unknown", account?, checked_at?, why?, rotator?: "aws-iam" \| "github-app"}` ("Is it live?") |
 | `GET /unstored/{fingerprint}` | | `Checked`: a credential's last check (`read`; 404 when it hasn't been checked) |
 | `GET /kms` | | `{key: string \| null}`: the customer-managed key wrapping the project's data key (admin) |
@@ -6585,6 +6639,34 @@ The bench's consumer is an in-process one whose maker is the operator; a token o
 adds roll-access's grant lookup or the accounts' and workspace's.
 
 ## Next
+
+**State, 2026-11-24 06:10.** The thirty-sixth review is done: #830 (99cb3b05e; Cloudflare, Databricks, Confluent) and #825 (the fresh-project production test) landed.
+
+The thirty-seventh product review (2026-11-23, cold, read only, against efafbcac6) found one live bug, low-medium: an environment's deletion preview named every roll-access token on the server whose rule was "every project, environment `<slug>`". Landed since, each with main's CI green, most after a check of the merged tree:
+- #847 (4d73111dd): items 1 and 9. The preview names only tokens that reach the project, judged as reach does (one shared `token_actions`) and narrowed before resolving. A sandbox copying from a deleted, recoverable project keeps its values.
+- #836 (a8a5eb3b4): item 2. An agents machine's `roll://` key is sent as refused only on a refusal; anything else retries with backoff.
+- #844 (c0af796a8): item 3. The events cursor moves to the head past filtered rows (an index on kinds), and a folder-scoped reader sees a change across folders, trimmed to its folders.
+- #881 (3f5aaf25b): item 4. With `leaks.rotate: managed`, a leaked managed key rotates at once without grace, once per credential. A change request opens instead where approvals are needed. With `off`, the event says `rotatable` and roll code offers a Rotate button.
+- #872 (c6dcb2ae7): item 5a. A CA can be an intermediate under the customer's own root (CSR, then `PUT …/cas/{id}/chain`), with name constraints narrowed and leaves carrying the chain.
+- #857 (528cae7d6): item 6. Vendor-side expiry is tracked (GitLab, Databricks, Entra), `rotate_days` must beat it, and Health warns on a registration's own `credential_expires_at`.
+- #850 (63a7ff4a3): item 7. `roll secrets mount .env` is a FIFO served from the CLI, never a file on disk.
+- #856 (c4afb6c56): item 8, first half. An Events tab in the dashboard, live, with kind and environment filters sent to the server.
+- #876 (9f3c36324): item 10. Doppler's references stay references, and Infisical and Doppler bring whole projects with folders, comments and a dry run.
+- #867 (fa9400fe0): item 11. `PATCH …/saas/{id}` replaces a registration's credential in place, plus Terraform's `roll_secrets_saas_rotator` (`credential_wo`), `roll_secrets_folder_policy`, and approvals on environments.
+
+With other threads:
+- previews' #865 (8d0ddeda7): `Subject::Preview`, roll's issuer for a trusted preview's own services, reviewed here (preview subjects need an ephemeral environment);
+- search's #808 (in flight): creates naming a project are held to the person's session in roll-access's shared evaluator, and our search link refuses a cluster whose owner isn't in its home project;
+- roll workspace's events feed #813 (8b2470590) for roll MCP's `workspace.event`.
+
+In flight:
+- item 5b, certificate syncs to ACM, Key Vault and Cloudflare;
+- a value-less set never creating a secret (roll MCP's finding);
+- `roll secrets mount` serving one copy per open, however slow the reader.
+
+Left:
+- item 5c, an ACME client for public CAs;
+- item 8's second half, "notify me" by Slack or email.
 
 **State, 2026-11-23 16:50.** The thirty-fifth review is done: item 6B (#763, 5583dfbfd; `Reference::parse` moved into `crates/roll-secrets-ref`, so agent-proto, the `roll` binary and the gateway don't link roll-secrets) and 6C (#794, dbb4d65af; a refused upstream key fails closed without trying another key of that provider) landed. Also #778, the 05:20 entry below.
 

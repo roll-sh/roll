@@ -1400,6 +1400,7 @@ previews are listed once those products are on.
 | `previews_resolve_note` | A note from the preview page's feedback button marked dealt with (write). | `POST /v1/previews/{id}/notes/{note}/resolve` |
 | `previews_screenshot` | A preview's page as an image the agent can look at (`diff`, `page`, `view`); accepting a visual change stays a person's (admin, no tool). | `GET /v1/previews/{id}/screenshot` |
 | `previews_fetch` | A preview's page read through roll as a visitor gets it, without a share link (Vercel's `web_fetch_vercel_url`): status, a few headers and the text, masked as its logs are, cut at 256 KiB (`path`, `service`, `head`); reveal, since a page can show copies of production's people. `review_preview` uses it on the pages a change touches. | `GET /v1/previews/{id}/fetch` |
+| `previews_tables` | What a preview's data branch holds, read as the branch's own read-only role: its tables and row counts, or a table's first 50 rows (`resource` is `kind:parent`, Postgres for now); reveal, since it shows masked copies of production's data. | `GET /v1/previews/{id}/data/{resource}` |
 | `previews_sleep` | Stop a preview's services until it's woken. | `POST /v1/previews/{id}/sleep` |
 | `previews_wake` | Start a sleeping preview's services again. | `POST /v1/previews/{id}/wake` |
 | `previews_usage` | What a project's previews used and cost this month. | `GET /v1/previews/projects/{project}/usage` |
