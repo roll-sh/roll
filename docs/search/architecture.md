@@ -377,20 +377,22 @@ evaluator and search's catalogue rows. search adds no role checks of its own.
     and wasn't restored, since before the ref was placed or homed; otherwise its places and homes
     go, deleted projects' too;
   - a homed cluster with an owner who's an admin or owner of the project is handed over, as is
-    one whose home is the one its create was placed in (a hand-over that failed then is owed);
+    one whose hand-over was decided when its home was set and failed (recorded as owed in
+    `search_handovers` before it's done, never inferred from times);
   - any other home of an owned cluster goes (that home only, in that project), and is reported;
   - a roll secrets search link by a name (the provider once took names, and now refuses them) is
-    rewritten to the id that name names, when that cluster is on the link's project's canvas and
-    still the project's: at home there, owned by someone in it, or the operator's cluster in the
-    operator's project (`Secrets::rekey_links`, audited as `link.rekey`). Any other stays as it is
+    rewritten to the id that name names, when that cluster is on the link's project's canvas, the
+    project trusts it (`Workspace::trusts`, as links are written), and it was made and last
+    restored no later than the link (`Secrets::rekey_links`, audited as `link.rekey`). Any other stays as it is
     and keeps failing visibly. Only the current versions are rewritten: older versions of a secret
     keep the cluster's name in their link, so rolling a key back to a version from before the
     rekey brings the name back, and it fails visibly until it's linked by id again.
 
   A stranger's cluster dropped on the project's canvas reaches nobody through it, and a purged
   cluster leaves every canvas. A project still home to live clusters can't be deleted (409); when
-  that can't be read, or on a node without roll search, the delete is answered 503, and a home made
-in the project while it was being deleted refuses the delete (409, try again).
+  that can't be read, or on a node without roll search, the delete is answered 503. Inside the
+delete's transaction, a home made in the project meanwhile, or one whose cluster came alive
+meanwhile (a restore), refuses it too (409, try again).
 
   | role | what they may do to the project's clusters |
   | --- | --- |

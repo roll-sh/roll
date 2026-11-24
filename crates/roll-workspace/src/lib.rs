@@ -222,6 +222,11 @@ pub struct Refusal {
 /// project holds secrets, unless a secrets admin confirms).
 pub type BeforeDelete = Box<dyn Fn(&Deleting<'_>) -> std::result::Result<(), Refusal> + Send + Sync>;
 
+/// Asked inside a project delete's transaction with the homes in the project then, as
+/// `(kind, ref)`: a product refuses one whose resource came alive since [`BeforeDelete`] asked (a
+/// restore meanwhile). Quick and read-only; it may be asked again if the write re-runs.
+pub type InDelete = Box<dyn Fn(&str, &[(String, String)]) -> std::result::Result<(), Refusal> + Send + Sync>;
+
 /// Called after a project is deleted, outside the transaction (roll secrets keeps its secrets for
 /// a recovery window).
 pub type OnDelete = Box<dyn Fn(&Deleting<'_>) + Send + Sync>;
@@ -259,6 +264,7 @@ pub struct Workspace {
     web_url: std::sync::OnceLock<String>,
     on_event: std::sync::RwLock<Vec<members::OnEvent>>,
     on_homed: std::sync::RwLock<Vec<members::OnHomed>>,
+    in_delete: std::sync::RwLock<Vec<InDelete>>,
 }
 
 impl Workspace {
@@ -297,7 +303,7 @@ impl Workspace {
         })?;
         // Members came after owners: every project's maker is its owner.
         db.migrate("workspace-members", members::migrate)?;
-        Ok(Workspace { db, before_delete: Default::default(), on_delete: Default::default(), owners: Default::default(), people: Default::default(), grants: Default::default(), web_url: Default::default(), on_event: Default::default(), on_homed: Default::default() })
+        Ok(Workspace { db, before_delete: Default::default(), on_delete: Default::default(), owners: Default::default(), people: Default::default(), grants: Default::default(), web_url: Default::default(), on_event: Default::default(), on_homed: Default::default(), in_delete: Default::default() })
     }
 
     /// Every project `scope` sees, with its resources, oldest first.
@@ -439,6 +445,9 @@ impl Workspace {
             if homes_now.iter().any(|h| !homes_asked.contains(h)) {
                 return Err(Error::Conflict(format!("something got a home in project {id} while it was being deleted: try again")));
             }
+            for f in self.in_delete.read().expect("in_delete").iter() {
+                f(id, &homes_now).map_err(Error::Refused)?;
+            }
             let old: Vec<String> = c.query("SELECT id FROM deleted_projects WHERE deleted_at < ? OR id = ?", params![now - KEEP_DELETED_DAYS * 86_400_000, id], |r| r.get(0))?;
             for p in &old {
                 forget_deleted_rows(c, p)?;
@@ -531,6 +540,11 @@ impl Workspace {
     /// may bring it back.
     pub fn trusts_deleted(&self, project: &Project, kind: Kind, r#ref: &str) -> bool {
         project.owner.is_empty() || self.trusted_when_deleted(&project.id, &project.owner, kind, r#ref)
+    }
+
+    /// Ask `f` inside each project delete's transaction ([`InDelete`]): a [`Refusal`] stops it.
+    pub fn in_delete(&self, f: InDelete) {
+        self.in_delete.write().expect("in_delete").push(f);
     }
 
     /// Ask `f` before each project is deleted, outside the transaction: a [`Refusal`] stops it.

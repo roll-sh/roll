@@ -805,8 +805,9 @@ impl Workspace {
             owner_of(c, actor.scope(), project)?;
             let current: Option<String> = c.query_row("SELECT project_id FROM homes WHERE kind = ? AND ref = ?", [kind.as_str(), r#ref], |r| r.get(0)).optional()?;
             match current {
-                // Said again: a product still acts on it (a hand-over that failed before).
-                Some(p) if p == project => return Ok(true),
+                // Said again by the operator or its owner: a product acts on it again (a hand-over
+                // that failed before); by anyone else, nothing changes. Never an audit row.
+                Some(p) if p == project => return Ok(owns),
                 Some(_) if only_if_none => return Ok(false),
                 Some(from) => {
                     if let Some(user) = &actor.user

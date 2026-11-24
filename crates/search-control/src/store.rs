@@ -576,6 +576,9 @@ impl Store {
         db.ensure_schema("CREATE INDEX IF NOT EXISTS search_clusters_owner ON search_clusters (owner, created_at)")?;
         // Who made a cluster in a workspace project (no owner), for their caps.
         db.add_column("search_clusters", "made_by", "TEXT")?;
+        // Hand-overs to a workspace project decided (a home set) and not done yet
+        // ([`Store::owe_handover`]).
+        db.ensure_schema("CREATE TABLE IF NOT EXISTS search_handovers (cluster_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, at INTEGER NOT NULL)")?;
         db.ensure_schema("CREATE INDEX IF NOT EXISTS search_clusters_made_by ON search_clusters (made_by) WHERE made_by IS NOT NULL")?;
         // Deleted clusters kept for restoring.
         db.add_column("search_clusters", "deleted_at", "INTEGER")?;
@@ -771,8 +774,38 @@ impl Store {
     /// owner, so leaving the project ends their access. Synchronously (the workspace's
     /// `on_homed`). Whether it had an owner to hand over.
     pub fn disown(&self, id: &str) -> anyhow::Result<bool> {
-        let n = self.db.write(|x| x.execute("UPDATE search_clusters SET made_by = COALESCE(made_by, owner), owner = NULL WHERE id = ?1 AND owner IS NOT NULL", params![id]))?;
+        let n = self.db.write(|x| {
+            let n = x.execute("UPDATE search_clusters SET made_by = COALESCE(made_by, owner), owner = NULL WHERE id = ?1 AND owner IS NOT NULL", params![id])?;
+            // Owed no more.
+            x.execute("DELETE FROM search_handovers WHERE cluster_id = ?1", params![id])?;
+            Ok::<_, code_sql::Error>(n)
+        })?;
         Ok(n > 0)
+    }
+
+    /// Cluster `id` is owed to workspace project `project` (its home was set there): recorded
+    /// before [`Store::disown`] does it, which clears it, so a hand-over that fails is done later
+    /// (rolld's homes pass) rather than forgotten. Synchronously.
+    pub fn owe_handover(&self, id: &str, project: &str) -> anyhow::Result<()> {
+        let at = crate::meter::now_ms();
+        self.db.write(|x| {
+            x.execute(
+                "INSERT INTO search_handovers (cluster_id, project_id, at) VALUES (?1, ?2, ?3) ON CONFLICT (cluster_id) DO UPDATE SET project_id = excluded.project_id, at = excluded.at",
+                params![id, project, at],
+            )
+        })?;
+        Ok(())
+    }
+
+    /// The project cluster `id` is owed to, if a hand-over was decided and isn't done. Synchronously.
+    pub fn owed_handover(&self, id: &str) -> anyhow::Result<Option<String>> {
+        Ok(self.db.read(|x| x.query_row("SELECT project_id FROM search_handovers WHERE cluster_id = ?1", params![id], |r| r.get(0)).optional())?)
+    }
+
+    /// Whether `id` is a cluster's id in any state (live, being deleted, kept for restoring).
+    /// Synchronously.
+    pub fn is_cluster_id(&self, id: &str) -> anyhow::Result<bool> {
+        Ok(self.db.read(|x| x.query_row("SELECT 1 FROM search_clusters WHERE id = ?1", params![id], |r| r.get::<_, i64>(0)).optional())?.is_some())
     }
 
     async fn one(&self, filter: &str, arg: &str) -> anyhow::Result<Option<SearchCluster>> {

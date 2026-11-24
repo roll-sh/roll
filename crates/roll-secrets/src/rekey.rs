@@ -9,16 +9,18 @@ use crate::{Error, Result, Secrets, audit};
 use code_sql::params;
 
 impl Secrets {
-    /// Every project's links of `kind`, as `(project, ref)`, once each.
-    pub fn link_refs(&self, kind: &str) -> Result<Vec<(String, String)>> {
-        let rows: Vec<(String, String)> = self.db.read(|c| c.query("SELECT project_id, link FROM secrets WHERE link IS NOT NULL", params![], |r| Ok((r.get(0)?, r.get(1)?))))?;
-        let mut out: Vec<(String, String)> = rows
-            .into_iter()
-            .filter_map(|(project, link)| serde_json::from_str::<Link>(&link).ok().filter(|l| l.kind == kind).map(|l| (project, l.r#ref)))
-            .collect();
-        out.sort();
-        out.dedup();
-        Ok(out)
+    /// Every project's links of `kind`, as `(project, ref, since)`, once each: `since` is the
+    /// earliest any of those rows was written (unix ms), so a caller can tell a resource made after
+    /// the link from the one it was made against.
+    pub fn link_refs(&self, kind: &str) -> Result<Vec<(String, String, i64)>> {
+        let rows: Vec<(String, String, i64)> = self.db.read(|c| c.query("SELECT project_id, link, updated_at FROM secrets WHERE link IS NOT NULL", params![], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?;
+        let mut out: std::collections::BTreeMap<(String, String), i64> = std::collections::BTreeMap::new();
+        for (project, link, at) in rows {
+            let Some(l) = serde_json::from_str::<Link>(&link).ok().filter(|l| l.kind == kind) else { continue };
+            let since = out.entry((project, l.r#ref)).or_insert(at);
+            *since = (*since).min(at);
+        }
+        Ok(out.into_iter().map(|((project, r), since)| (project, r, since)).collect())
     }
 
     /// `project`'s links of `kind` to `from` name `to` from now on, in one write, audited as the
