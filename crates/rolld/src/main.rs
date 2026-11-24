@@ -699,6 +699,16 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     // Gateways into private networks: their links follow leases on the node's cluster.
     let gateways = secrets::gateway::Gateways::new(cluster.clone(), access.clone() as std::sync::Arc<dyn roll_auth::Grants>, args.code_webhook_allow_private.unwrap_or(!auth.enforcing()));
     let secrets = secrets::open(&args, &home, workspace.clone(), !auth.enforcing(), products_api.clone(), access.clone(), people, gateways.clone())?;
+    // What canvases, homes and roll secrets' links kept of search clusters from before is put
+    // right (docs/search/architecture.md, "Who sees a cluster"): the canvases first, then the
+    // links, which look the clusters up on them.
+    if let Some(s) = &search {
+        let (c, ws, sec) = (s.control.clone(), workspace.clone(), secrets.clone());
+        tokio::task::spawn_blocking(move || {
+            search::fix_homes(&c, &ws);
+            search::fix_links(&c, &ws, &sec);
+        });
+    }
     if let Some(p) = &postgres {
         secrets::tell_postgres_decoys(&p.control, secrets.clone());
     }

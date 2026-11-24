@@ -60,6 +60,7 @@ pub mod issuer;
 pub mod kubernetes;
 mod oidc;
 mod read;
+mod rekey;
 mod metrics;
 pub mod backup_schedule;
 pub mod reach;

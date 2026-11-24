@@ -472,6 +472,37 @@ async fn a_search_cluster_links_only_while_its_owner_is_in_its_home_project() {
     assert!(!status.is_success() && !body.contains(&url), "an apps link: {status} {body}");
 }
 
+/// A roll secrets search link made by the cluster's name (as the provider once took them) is kept
+/// by the cluster's id at the next start, so the service reading it keeps its value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_search_link_made_by_name_is_kept_by_id_at_the_next_start() {
+    let home = Arc::new(tempfile::tempdir().unwrap());
+    let r = Rolld::start_in(home.clone(), "search", false, &[], "/v1/info").await;
+    let p = Project::new(&r).await;
+    let project = p.id.clone();
+    let sc = r.post("/v1/search/clusters", json!({ "name": "named" })).await;
+    let (id, url) = (sc["id"].as_str().unwrap().to_string(), sc["url"].as_str().unwrap().to_string());
+    p.link("search", &id, &[("ELASTICSEARCH_URL", "url", "live")]).await;
+    drop(p);
+    drop(r);
+    // Stopped, the link is made to name the cluster by its name, as an old one did.
+    let db = rusqlite::Connection::open(home.path().join("secrets.db")).unwrap();
+    let n = db.execute("UPDATE secrets SET link = replace(link, ?1, ?2) WHERE project_id = ?3", [format!("\"ref\":\"{id}\""), "\"ref\":\"named\"".to_string(), project.clone()]).unwrap();
+    assert_eq!(n, 1);
+    drop(db);
+    let r = Rolld::start_in(home.clone(), "search", false, &[], "/v1/info").await;
+    let p = Project { rolld: &r, id: project };
+    let started = Instant::now();
+    loop {
+        let v = r.get(&format!("/v1/secrets/projects/{}/environments/production/values?path=/", p.id)).await;
+        if v["values"]["ELASTICSEARCH_URL"].as_str() == Some(url.as_str()) {
+            break;
+        }
+        assert!(started.elapsed() < Duration::from_secs(30), "the link by name never read again: {v}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 /// roll apps shows a service's values from roll secrets only as roll secrets would show them to
 /// the asker: a token that may reveal staging, but not production, gets a 403 for staging's
 /// values and shell once a staging key references production (the service reads it), and can't

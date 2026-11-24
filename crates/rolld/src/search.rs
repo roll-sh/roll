@@ -473,7 +473,7 @@ pub fn home_branches(workspace: std::sync::Arc<roll_workspace::Workspace>) -> se
 /// - A cluster that gets a home, or gets it back with its project's restore, loses its owner
 ///   (`Store::disown`: who owned it becomes `made_by`, for their caps), so leaving the project
 ///   ends their access and a home never stands for a stranger's cluster.
-/// - What's kept from before is put right at start ([`fix_homes`]).
+/// - What's kept from before is put right at start ([`fix_homes`], then [`fix_links`]).
 /// - Deleting a project at home to live clusters is refused (409), and answered 503 when that
 ///   can't be read: they'd be no one's.
 pub fn members(control: &std::sync::Arc<search_control::Control>, workspace: &std::sync::Arc<roll_workspace::Workspace>) {
@@ -509,8 +509,6 @@ pub fn members(control: &std::sync::Arc<search_control::Control>, workspace: &st
             message: format!("project {} is home to {} search cluster(s) ({}): delete them first", d.project.name, live.len(), live.join(", ")),
         })
     }));
-    let (c, ws) = (control.clone(), workspace.clone());
-    tokio::task::spawn_blocking(move || fix_homes(&c, &ws));
 }
 
 /// A node without roll search: it can't tell a cluster's id from a name (`Owners::canonical`
@@ -587,6 +585,48 @@ pub fn fix_homes(c: &search_control::Control, ws: &roll_workspace::Workspace) {
                 }
             }
             Err(e) => tracing::warn!(cluster = id, error = %e, "reading a project's members failed"),
+        }
+    }
+}
+
+/// roll secrets' search links that name a cluster by a name (made when the provider still took
+/// names, which it now refuses on every read) are kept by the id that name stands for, so running
+/// services keep their values: on every start, after [`fix_homes`]. A name is moved only to the
+/// cluster it names now when that cluster is on the link's project's canvas and still the
+/// project's: at home in it, owned by someone in it, or the operator's cluster in the operator's
+/// project (nothing recorded which id a link was made against). Anything else stays as it is and
+/// keeps failing visibly; nothing is dropped.
+pub fn fix_links(c: &search_control::Control, ws: &roll_workspace::Workspace, secrets: &roll_secrets::Secrets) {
+    let kind = roll_workspace::Kind::Search;
+    let links = match secrets.link_refs("search") {
+        Ok(l) => l,
+        Err(e) => return tracing::warn!(error = %e, "reading roll secrets' search links failed"),
+    };
+    for (project, name) in links {
+        let id = match c.store.id_of(&name) {
+            Ok(Some(id)) if id != name => id,
+            // Kept by its id already, or a name that names nothing now (it stays, and fails).
+            Ok(_) => continue,
+            Err(e) => {
+                tracing::warn!(project, name, error = %e, "reading a search cluster failed");
+                continue;
+            }
+        };
+        let on_canvas = ws.projects_of("search", &id).is_ok_and(|p| p.contains(&project));
+        let home_here = ws.home_of(kind, &id).ok().flatten().as_deref() == Some(project.as_str());
+        let owners = match c.store.owner_and_made(&id) {
+            Ok(Some((Some(owner), _))) => ws.reaches(&project, &owner).unwrap_or(false),
+            // The operator's cluster, in one of the operator's projects.
+            Ok(Some((None, _))) => ws.get(roll_workspace::Scope::All, &project).is_ok_and(|p| p.owner.is_empty()),
+            _ => false,
+        };
+        if !(on_canvas && (home_here || owners)) {
+            tracing::warn!(project, name, cluster = id, "a roll secrets search link by a name that now names a cluster this project doesn't hold: it stays (and fails) until it's linked by id");
+            continue;
+        }
+        match secrets.rekey_links(&project, "search", &name, &id) {
+            Ok(n) => tracing::info!(project, name, cluster = id, links = n, "roll secrets search links kept by the cluster's id from now on"),
+            Err(e) => tracing::warn!(project, name, error = %e, "keeping roll secrets search links by id failed"),
         }
     }
 }

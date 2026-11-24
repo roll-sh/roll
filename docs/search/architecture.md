@@ -374,7 +374,12 @@ evaluator and search's catalogue rows. search adds no role checks of its own.
   - a ref kept by a name becomes the id of the cluster that name names, if that cluster existed
     before the ref was placed or homed; otherwise its places and home go;
   - a homed cluster with an owner who's an admin or owner of the project is handed over;
-  - any other home of an owned cluster goes, and is reported.
+  - any other home of an owned cluster goes, and is reported;
+  - a roll secrets search link by a name (the provider once took names, and now refuses them) is
+    rewritten to the id that name names, when that cluster is on the link's project's canvas and
+    still the project's: at home there, owned by someone in it, or the operator's cluster in the
+    operator's project (`Secrets::rekey_links`, audited as `link.rekey`). Any other stays as it is
+    and keeps failing visibly.
 
   A stranger's cluster dropped on the project's canvas reaches nobody through it, and a purged
   cluster leaves every canvas. A project still home to live clusters can't be deleted (409); when
