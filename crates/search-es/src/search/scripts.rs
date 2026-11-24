@@ -1207,6 +1207,13 @@ pub(crate) fn park_script_error(e: crate::error::EsError) -> String {
     format!("{TICKET}{id}")
 }
 
+/// How many errors were ever parked (tests: a failing script parks one per segment, not one per
+/// document).
+#[doc(hidden)]
+pub fn parked_so_far() -> u64 {
+    NEXT_TICKET.load(std::sync::atomic::Ordering::Relaxed) - 1
+}
+
 /// The full script error behind an engine error reason (and the reason without its ticket).
 pub fn take_script_error(reason: &str) -> (Option<crate::error::EsError>, &str) {
     let Some((text, id)) = reason.rsplit_once(TICKET) else { return (None, reason) };
