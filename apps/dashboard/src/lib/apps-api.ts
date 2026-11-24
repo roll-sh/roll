@@ -82,6 +82,8 @@ export interface Build {
   watch?: string[];
   /** A single-page app (a page path with no file answers index.html); unset: detected. */
   spa?: boolean;
+  /** Where a static build's files are (Netlify's publish directory): a Node app with one is served as a static site. */
+  output?: string;
   /** The Dockerfile's stage to build (a multi-stage one whose last stage isn't what runs). */
   target?: string;
   /** System packages the generated Dockerfile installs (apt, or apk on Alpine): `ffmpeg`, `chromium`. */
@@ -972,6 +974,8 @@ export interface Deployment {
   ready_ms: number | null;
   /** Its image's size, where the runtime says. */
   image_bytes?: number;
+  /** When it was pinned: never pruned, so always one rollback away. */
+  pinned_at?: number;
   /** What the app or the build printed when it failed (the step, its last line): only shown here, never sent in a commit status or a notification. */
   error_detail?: string;
   /** How to fix a failure roll knows (a private image's login, more memory, a lockfile): the setting and its command. */
@@ -1728,6 +1732,8 @@ export const appsApi = {
   vulnerabilities: (id: string, e: string, d: string) => call<{ scan: ScanSummary | null; vulnerabilities: Vulnerability[] }>("GET", `${dep(id, e, d)}/vulnerabilities`),
   buildLog: (id: string, e: string, d: string, q: LogQuery = {}) => call<LogLine[]>("GET", `${dep(id, e, d)}/logs${qs({ tail: q.tail })}`),
   /** `keepVariables`: its image with the variables as they are now (after a rotated secret), not as they were then. */
+  /** Keep a deployment from pruning (`on`), or let it go again. */
+  pin: (id: string, e: string, d: string, on: boolean) => call<Deployment>(on ? "POST" : "DELETE", `${dep(id, e, d)}/pin`),
   rollback: (id: string, e: string, d: string, keepVariables = false) => call<Deployment>("POST", `${dep(id, e, d)}/rollback`, keepVariables ? { keep_variables: true } : undefined),
   /** Back to the one live before what runs (the server walks back through rollbacks). */
   rollbackPrevious: (id: string, e: string) => call<Deployment>("POST", `${env(id, e)}/rollback`),
