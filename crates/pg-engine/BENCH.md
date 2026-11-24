@@ -910,6 +910,53 @@ pgrust's PGO-built 90.4 G 0.996-1.013x.
 
 Foreign cores per arm 2.4-3.2. One binary's q03 cycles moved 8.5% between pairs.
 
+## Bulk writes, round 26: a bulk load's runs one a table or index (2026-11-24, agent 309)
+
+HANDOFF "Bulk writes, round 26" has what changed. Lane C, agent 246's `bulkx.sh` with `JOIN=1`
+(copied to `~/.cache/a309/bench`), plain dist builds (`tools/dist.sh`): **b0** origin's
+`ad12b41b5`; **n1** the sink's runs a segment (order checked by key, prefixes ranked); **n2** n1
+with the order checked by words; **n4** the candidate's code (`cand/a309`). Steps: `copy_in ctids
+insert_select check2 ctids2 pk_setup copy_pk checkp ctidsp sx_setup copy_sx checks` (`bulkp`:
+`bulk1m.tsv` into `(id int PRIMARY KEY, a int NOT NULL, b text, c float8)` with `CREATE INDEX
+bulkp_a ON bulkp (a)`; `bulks`: the same without the primary key; INSERT … SELECT without the index
+builds before it). Each pair one `tools/lane.sh` hold, alternating. G user instructions of the
+server's cgroup, every counter at 100% of its window. Foreign load 1.1-3.8 cores by the harness,
+3.3-5.5 by lane.sh: over the 1.0 rule in every hold; instruction counts repeat within 0.05% on a
+build; cycles are a reading only.
+
+### Two alternating pairs each
+
+| step | b0 | n1 | n2 | n4 | PostgreSQL 18.6 |
+|---|---|---|---|---|---|
+| COPY in | 6.460-6.462 x6 | 6.464 x2 | 6.464-6.465 x2 | 6.400 x2 (-0.96%) | 6.48 |
+| INSERT … SELECT | 4.421 x6 | 4.485 x2 | 4.485 x2 | 4.421 x2 | 4.31 |
+| COPY into `bulkp` | 26.804-26.817 x6 | 19.180 x2 | 18.900 x2 | 18.848 x2 (-29.7%) | 24.70 |
+| COPY into `bulks` | 19.056-19.062 x6 | 13.436-13.437 x2 | 13.137-13.138 x2 | 13.109-13.110 x2 (-31.2%) | 18.92 |
+
+(b0 against n1, n2 and n4, two pairs each.) Bytes written: COPY in 33.7 -> 32.3 MB, INSERT …
+SELECT 35.7 both, `bulkp` 110.4 -> 49.4, `bulks` 90.9 -> 42.6. Every run: rows (count and sums of
+every column) equal, the ctid hashes of `bulk`, `bulk2`, `bulkp` and `bulks` equal
+(`fc801150f9235279cbea45f12f8ee039`), `bulk2` 68,272,128 bytes, `bulkp` / `bulks` 68,747,264,
+`bulkp_pkey` 22,429,696, `bulkp_a` and `bulks_a` 9,625,600. Peak cgroup memory 780-835 MB (b0),
+784-824 (n4); VmHWM 727-728 / 721-722 MB. Cycles of the `bulkp` COPY 17.1-23.7 G (b0) and 13.1-13.9
+(n4). After the `bulkp` COPY b0's manifest has the compaction's three L1 files (heap 17.6 MB,
+`bulkp_pkey` 5.2 MB, `bulkp_a` 5.4 MB); n4's L0 is empty and its L1 holds the linked runs as they
+were: the heap's three (16.4 MB), the primary key's three (3.4 MB: an index's run has no bloom
+filter) and `bulkp_a`'s one of 1M entries (5.2 MB).
+A sequential scan of the loaded `bulk`, b0 against n2: `seq_sum` 1.160 and `seq_count` 0.222 G on
+both.
+
+### Profiles (`instructions:upp`, inclusive shares of the `bulkp` COPY's joined window)
+
+| | b0 (26.8 G) | n1 (19.2 G) |
+|---|---|---|
+| the flush thread (compaction) | 17.8% | 0.08% |
+| the sink's flush | 23.7% | 32.0% |
+| of it: zstd, sort, close's merge | 15.9%, 5.7%, - | 10.7%, 6.9%, 8.7% |
+| unique checks (`find_conflict`) | 9.0% | 10.9% |
+| the size model (`inserted_with`) | 12.7% | 15.8% |
+| parsing (`next_batch`) | 7.0% | 8.0% |
+
 ## Bulk writes, round 25: INSERT … SELECT's stored rows in runs, a fresh-unique COPY's key path, the sink's sort (2026-11-23, agent 300)
 
 HANDOFF "Bulk writes, round 25" has what changed. Lane C, agent 246's `bulkx.sh` with `JOIN=1`

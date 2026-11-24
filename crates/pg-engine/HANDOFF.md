@@ -10627,6 +10627,120 @@ and confirm on PGO:
 Agent 218's short-transaction stack (ten steps, `wip/a218`) was gated this way and landed: BENCH
 "Profile-guided build", part 2.
 
+## Bulk writes, round 26: a bulk load's runs one a table or index, none overlapping (agent 309)
+
+BENCH.md "Bulk writes, round 26" has the measurements (lane C, agent 246's `bulkx.sh` with
+`JOIN=1`, copied to `~/.cache/a309/bench`; plain dist builds). `cand/a309`: one code commit on
+origin's `ad12b41b5` and this section. No format change: the same rows, TIDs, relation and index
+sizes; files of kinds the store has (a sink run of one index's entries is written as an index
+build's run is, without a bloom filter: `SstWriter::index_run`).
+
+**Where COPY into `bulkp` went** (b0 = `ad12b41b5`, `instructions:upp` samples of the joined
+window, inclusive shares, 26.8 G): the store's compaction 17.8% (the flush thread, all of it
+`compact_within`), the sink's flush 23.7% (zstd, `SstWriter::add`, the bloom filter 2.9%, the sort
+5.7%), the size model 12.7% (`untracked_write` 6.1% for the rows past the model), the unique checks
+9% (`find_conflict`: `lock_unique_key` 4.3%, `FreshUnique::enter` 2.3%), parsing 7%.
+
+**Why the compaction.** A load's sink (`Txn::open_sink`) wrote each flush (each 64 MB of rows and
+entries) as one run holding all of them sorted: the table's rows, the primary key's entries and the
+secondary index's. Each run's key range spanned the table and both indexes, so every run's range
+met every other's. At commit a linked run goes to L1 as it is only when no other file meets its
+range (`Store::alone_at_bottom`); none did, so all went to L0 and a compaction merged them: the
+COPY's 110 MB written, then read and written once more. The load's first 10,000 rows (the sink
+opened past `SINK_AFTER`) went through the write buffer, whose run at commit (`link_fresh_buffer`)
+spanned every segment too.
+
+**The change** (`txn/sink.rs`, new: the sink moved out of `txn/mod.rs`, whose `flush_sink` calls
+it; `exec/dml.rs`, the sink's opening):
+- each flush writes one run per segment (a table's rows, or one index's entries: the keys' first 8
+  bytes). A segment whose keys came in order and after its last run's (rows by row id, an index
+  over an ascending column: the primary key here) goes to its run as it came, unsorted; its runs
+  follow each other and meet no other. A load of one segment (a table without indexes: COPY in,
+  INSERT … SELECT) skips the segments' counting sort;
+- a segment whose keys came in no order (`bulkp_a`), or behind its last run, is sorted (as the
+  sink sorted before: its 16 bytes after the prefix as two words, then the keys) and kept in a
+  chunk file of plain bytes (each entry's two lengths, its key and value) in the transaction's
+  spill directory. When the sink closes its chunks and last entries are merged into runs of their
+  own (a new one past each 64 MB of entries). At most 32 chunks a segment: past that they are
+  merged into one first, so the close reads at most 32 files at once. A chunk is removed when
+  dropped (an error, the transaction's end), and with the spill directory when the store opens;
+- a held COPY (rows stored with their TIDs) opens the sink from its first row, so that all its
+  keys are in its runs. The sink's room is 1 MB until it outgrows it, then the buffer's 64 MB at
+  once (a small load takes little; a big one isn't copied as it doubles), and a small load's
+  writes go to the buffer as the sink closes, as before. Once a load has written runs its last
+  entries go to runs however few (in the buffer they would go to a run at commit spanning every
+  segment);
+- a run of one index's entries gets no bloom filter (an index build's runs have none: index reads
+  are prefix scans).
+Each run is its own linked file at commit, alone in its range: all go to L1 as they are. No
+compaction follows the load (the flush thread's share of the step 17.8% -> 0.08%), and the bytes
+written drop by what it rewrote. Test: `big_tables::copy_sink_chunks` (a 4 KB sink: a COPY of
+3,000 rows into a table with a primary key and an index over a column in no order, flushed about a
+hundred times, its chunks merged on the way and at the close; index-only scans against the rows; a
+COPY failing on its last line leaves nothing); `copy_through_the_sink` covers the rest (a cursor
+before the load, a failed COPY, writes over the linked keys, a restart).
+
+Results (BENCH "Bulk writes, round 26"; plain dist, G user instructions, two alternating pairs,
+each one `tools/lane.sh` hold; b0 = `ad12b41b5`, n4 = the candidate's code):
+- COPY of 1M rows into `bulkp` (primary key and a secondary index): 26.804 / 26.815 -> 18.848 x2
+  (-29.7%; PostgreSQL 18.6's 24.70: 1.09x -> 0.76x), bytes written 110.4 -> 49.4 MB;
+- into `bulks` (one secondary index): 19.056 x2 -> 13.109 / 13.110 (-31.2%; PostgreSQL's 18.92:
+  1.007x -> 0.69x), bytes written 90.9 -> 42.6 MB;
+- COPY in (no index): 6.461 / 6.462 -> 6.400 x2 (-0.96%; PostgreSQL's 6.48), bytes written 33.7 ->
+  32.3 MB; INSERT … SELECT 4.421 on both (PostgreSQL's 4.31).
+Rows (count and sums of every column), the ctid hashes of `bulk`, `bulk2`, `bulkp` and `bulks`
+(`fc801150f9235279cbea45f12f8ee039`), the relation and index sizes (`bulkp` 68,747,264,
+`bulkp_pkey` 22,429,696, `bulkp_a` and `bulks_a` 9,625,600, `bulk2` 68,272,128) equal on every
+run; peak cgroup memory 780-835 MB on b0, 784-824 on n4, VmHWM 727-728 / 721-722 MB. Foreign
+load 1.2-2.1 cores by the harness, 3.3-3.6 by lane.sh (over the 1.0 rule in every hold; the
+machine's load average 27-50): instruction counts repeat within 0.05% on a build; cycles are a
+reading only (`bulkp` 17.1-17.6 -> 13.1-13.9 G).
+
+A first version (n1) checked each segment's order with a key comparison an entry and ranked every
+entry's prefix: INSERT … SELECT +1.45% (4.421 -> 4.485 in two pairs; COPY in +0.05%). Comparing the
+16 bytes after the prefix as two words first (n2) left it at 4.485; taking a load of one segment's
+entries as they came, without the counting sort, and reading those words without a copy (n4)
+brought it level. A sequential scan of the loaded table read the same on b0 and n2 (`seq_sum`
+1.160, `seq_count` 0.222 G): the source was not the cause.
+
+Not gated on the PGO build yet: the flush's code moved into new functions (`txn/sink.rs`); see
+"Left".
+
+Verification: `tools/quick-check.sh` with `QC_CHECKED=1` and `QC_TESTS="big_tables txn_spill
+crash_bulk storage_linked_gc"` on `43922ebfd` (the candidate's tree before this line): Clippy 16
+warnings, none new in a changed file; 439 tests in 25 binaries, again built `--profile
+verify-checked`; crash_random seeds 1-3 x 2, power_cut_at_every_point; regress 51,148 / 51,150, 0
+newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed. (A first run stopped at the
+new test: its table, within the model, has no visibility map for index-only scans to read
+entries; it runs past the model now, as `copy_through_the_sink` does.)
+
+**Considered, not built:**
+- Keeping a kept segment's entries in the sink's memory until the close instead of chunk files:
+  the secondary index's 1M entries take about 57 MB with their offsets, past half the 64 MB buffer,
+  and keeping them would make every flush of the other segments smaller; chunks of plain bytes
+  cost a write and a read each, with no compression and no store file.
+- Splitting `link_fresh_buffer`'s run by segment: with the sink open from a held COPY's first row
+  that run has none of the load's keys; INSERT … SELECT still opens its sink past 10,000 rows
+  (`SINK_AFTER`), so its first rows' run spans the table (one segment there: alone anyway).
+
+**Left (G user instructions, against PostgreSQL 18.6):**
+1. COPY into `bulkp` 18.85 against 24.70 and `bulks` 13.11 against 18.92: roll is under
+   PostgreSQL now. Of the step (n1's profile, `bulkp`, 19.2 G): the sink's flush 32% (zstd 10.7%,
+   the sort of the secondary index's entries 6.9%, `SstWriter::add` 4.6%, the close's merge 8.7%),
+   the unique checks 10.9% (`cand/a309-2`), the size model 15.8% (the rows past the model 9.8%:
+   `untracked_write`, about 3,100 instructions a row in many small parts: three locks, the btree
+   estimates' entries, `BtEst::insert`), the rows' encoding 14.2%, parsing 8%.
+2. A load of many flushes into a table with indexes in order: the transaction's runs merge in
+   tiers of 16 linked runs (`spill::LINKED_MERGE_FAN`); with a run a segment, a 1M-row load writes
+   about 10, a 10M-row one past 16, and the tier's merged run spans several segments (to L0 at
+   commit, compacted as before). Merging a tier's runs only where they overlap would keep them
+   alone.
+3. A kept segment's merged runs past 128 MB compressed don't go to L1 as they are
+   (`alone_at_bottom`'s size rule); the merge starts a new run each 64 MB of entries, which
+   compresses to well under that.
+4. Stored rows for indexed tables (the brief's item 3): not started.
+5. PGO gate of this change (function boundaries moved): not run.
+
 ## Bulk writes, round 25: INSERT … SELECT's stored rows in runs, a fresh-unique COPY's key path, the sink's sort (agent 300)
 
 BENCH.md "Bulk writes, round 25" has the measurements (lane C, agent 246's `bulkx.sh` with
