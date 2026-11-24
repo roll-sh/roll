@@ -298,12 +298,20 @@ impl BlockCache {
 
 #[cfg(test)]
 mod tests {
+    // mimalloc's own C library, linked through the `mimalloc` crate. (Not libmimalloc-sys as a
+    // dev-dependency: its `extended` feature would give a test build's pg_engine another crate
+    // id than roll-engine's, and the PGO profile would then miss every function of it.)
+    extern crate mimalloc as _;
+    unsafe extern "C" {
+        fn mi_good_size(size: usize) -> usize;
+    }
+
     /// What the cache counts of an allocation is what the server's allocator makes of it.
     #[test]
     fn alloc_bytes_is_the_allocators_size() {
         for n in 1..=256 << 10 {
             // SAFETY: mi_good_size only computes a size.
-            assert_eq!(super::alloc_bytes(n), unsafe { libmimalloc_sys::mi_good_size(n) }, "{n}");
+            assert_eq!(super::alloc_bytes(n), unsafe { mi_good_size(n) }, "{n}");
         }
     }
 }

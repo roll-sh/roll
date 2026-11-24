@@ -72,8 +72,13 @@ heapprof = []
 # (src/storage/powerloss.rs).
 powerloss = []
 
+# No build script: this only asks the proc-macros' syn for what a test build's dev-dependencies
+# do (tokio-postgres -> async-trait), so pg_engine has one crate id in roll-engine and in test
+# builds and the PGO profile applies to the crash tests too (HANDOFF "The shipped build").
+[build-dependencies]
+syn = { workspace = true, features = ["visit-mut"] }
+
 [dev-dependencies]
-libmimalloc-sys.workspace = true
 fallible-iterator.workspace = true
 futures.workspace = true
 snap.workspace = true
