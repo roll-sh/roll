@@ -17,14 +17,15 @@ cd "$(dirname "$0")/.."
 PATHS=(crates Cargo.toml Cargo.lock scripts/test-mcp-sweep.sh scripts/mcp-sweep.py scripts/mcp_output_schemas.py)
 STAMP=target/.test-mcp-sweep.hash
 
-force=0 writes=--writes verbose= record=()
+force=0 writes=--writes verbose= record=() report=()
 for a in "$@"; do
   case "$a" in
     --force) force=1 ;;
     --reads) writes= ;;
     --verbose) verbose=-v ;;
     --record) force=1 record=(--record target/mcp-sweep-samples.json) ;;
-    *) echo "unknown argument $a (--force, --reads, --verbose, --record)" >&2; exit 2 ;;
+    --report) force=1 report=(--report target/mcp-sweep-report.json) ;;
+    *) echo "unknown argument $a (--force, --reads, --verbose, --record, --report)" >&2; exit 2 ;;
   esac
 done
 
@@ -100,10 +101,10 @@ for _ in $(seq 120); do
 done
 
 mkdir -p target
-if python3 -I scripts/mcp-sweep.py "$api" "$home/token" $writes $verbose ${record[@]+"${record[@]}"}; then
+if python3 -I scripts/mcp-sweep.py "$api" "$home/token" $writes $verbose ${record[@]+"${record[@]}"} ${report[@]+"${report[@]}"}; then
   if [[ ${#record[@]} -gt 0 ]]; then
     python3 -I scripts/mcp_output_schemas.py target/mcp-sweep-samples.json
-  else
+  elif [[ ${#report[@]} == 0 ]]; then
     echo "$hash" > "$STAMP"
   fi
 else

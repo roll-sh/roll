@@ -18,7 +18,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// What a target can ask for; a new one gets the two that need someone.
-pub const EVENTS: [&str; 34] = [
+pub const EVENTS: [&str; 38] = [
+    "deploy.started",
     "deploy.failed",
     "deploy.base_updated",
     "rollout.waiting",
@@ -52,6 +53,9 @@ pub const EVENTS: [&str; 34] = [
     "alert.slo",
     "alert.anomaly",
     "attack.mode",
+    "scale.out",
+    "scale.in",
+    "instance.crashed",
     // Every `audit.*` entry (who changed what), for a SIEM's webhook; never an on-call page.
     "audit",
 ];
@@ -501,6 +505,12 @@ impl Apps {
                     _ => (format!("{what}: slower than usual"), format!("p95 {v} ms in the last hour, where this hour of the week is usually {usual} ms.")),
                 }
             }
+            "deploy.started" => (format!("{what}: building"), format!("A deploy{} began building{}.", e.data["revision"].as_str().map(|r| format!(" of {}", &r[..r.len().min(8)])).unwrap_or_default(), if e.data["reused"] == true { " (an earlier build's image, no build)" } else { "" })),
+            "scale.out" | "scale.in" => (
+                format!("{what}: scaled {} to {} instances", if e.kind == "scale.out" { "out" } else { "in" }, e.data["to"]),
+                format!("From {} instances: {}.", e.data["from"], e.data["reason"].as_str().unwrap_or("")),
+            ),
+            "instance.crashed" => (format!("{what}: an instance crashed"), format!("It stopped because {}. Another starts in its place.", e.data["reason"].as_str().unwrap_or("it exited"))),
             "attack.mode" => (
                 format!("{what}: attack mode is on"),
                 format!(

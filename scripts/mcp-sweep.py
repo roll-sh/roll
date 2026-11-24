@@ -11,10 +11,12 @@ made-up value and a product that's off are fine.
 
 Every answer must also fit the output schema its tool publishes (crates/roll-mcp/src/output-schemas.json);
 with --record FILE, the answers are kept there for scripts/mcp_output_schemas.py to widen them.
+With --report FILE, every call's time and, for a refusal, the text the model reads go there (a gap
+review: slow tools and confusing errors).
 
-    mcp-sweep.py <api> <operator token file> [--writes] [-v] [--tool NAME] [--record FILE]
+    mcp-sweep.py <api> <operator token file> [--writes] [-v] [--tool NAME] [--record FILE] [--report FILE]
 """
-import importlib.util, json, os, re, sys, urllib.error, urllib.request
+import importlib.util, json, os, re, sys, time, urllib.error, urllib.request
 
 # Loaded by path: `python3 -I` leaves this directory off the import path.
 _spec = importlib.util.spec_from_file_location("mcp_output_schemas", os.path.join(os.path.dirname(os.path.abspath(__file__)), "mcp_output_schemas.py"))
@@ -26,6 +28,8 @@ except FileNotFoundError:
     published = {}
 record = sys.argv[sys.argv.index("--record") + 1] if "--record" in sys.argv else None
 samples, unfit = {}, []
+report = sys.argv[sys.argv.index("--report") + 1] if "--report" in sys.argv else None
+calls = []
 
 api, tok = sys.argv[1], open(sys.argv[2]).read().strip()
 only = sys.argv[sys.argv.index("--tool") + 1] if "--tool" in sys.argv else None
@@ -37,8 +41,19 @@ def rpc(method, params, token=None):
     n += 1
     req = urllib.request.Request(f"{api}/v1/mcp", data=json.dumps({"jsonrpc": "2.0", "id": n, "method": method, "params": params}).encode(),
                                  headers={"authorization": f"Bearer {token or tok}", "content-type": "application/json", "accept": "application/json"})
+    t0 = time.monotonic()
     with urllib.request.urlopen(req, timeout=60) as r:
         out = json.load(r)
+    if report and method == "tools/call":
+        res = out.get("result") if isinstance(out, dict) else None
+        entry = {"tool": params.get("name"), "args": params.get("arguments", {}), "ms": round((time.monotonic() - t0) * 1000), "member": bool(token)}
+        if not isinstance(res, dict):
+            entry["rpc_error"] = out.get("error")
+        elif res.get("isError"):
+            sc = res.get("structuredContent")
+            entry["status"] = sc.get("http_status") if isinstance(sc, dict) else None
+            entry["text"] = " ".join(c.get("text", "") for c in res.get("content", []))[:600]
+        calls.append(entry)
     # What a tool answers, against the output schema it publishes (and kept, with --record).
     res = out.get("result") if isinstance(out, dict) else None
     if method == "tools/call" and isinstance(res, dict) and not res.get("isError") and isinstance(res.get("structuredContent"), dict):
@@ -575,6 +590,10 @@ if "--writes" in sys.argv:
     for f in wslow:
         print("SLOW", f)
     fails += wfails
+if report:
+    with open(report, "w") as f:
+        json.dump(calls, f)
+    print(f"reported {len(calls)} calls in {report}")
 if record:
     with open(record, "w") as f:
         json.dump(samples, f)

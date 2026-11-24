@@ -378,6 +378,14 @@ impl Source for CodeSource {
         Ok(crate::notes::thread(comments))
     }
 
+    async fn comment(&self, change: &str, body: &str, by: &str) -> anyhow::Result<Option<String>> {
+        let Some(c) = self.code.db.change(change)? else { return Ok(None) };
+        let Some(r) = self.code.db.repo_by_id(&c.repo_id)? else { return Ok(None) };
+        let input = serde_json::json!({ "verdict": "comment", "body": body });
+        let review = self.code.submit_review(&r, &c, &code_control::review::Reviewer::user(by), &input, &code_control::review::Origin::ROLL).await?;
+        Ok(Some(review.id))
+    }
+
     async fn git_commit(&self, repo: &str, revision: &str) -> anyhow::Result<Option<String>> {
         let r = self.repo(repo)?;
         let cs = self.code.store.resolve_or_404(&r.id, revision)?;

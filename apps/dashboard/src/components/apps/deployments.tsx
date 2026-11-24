@@ -159,6 +159,11 @@ export function Deployments({
                     <p className="mt-0.5 flex gap-2 font-mono text-[11px] text-subtle">
                       <span title={clock(d.created_at, true)}>{since(d.created_at, now)}</span>
                       {d.ready_ms != null && <span>ready in {formatMs(d.ready_ms)}</span>}
+                      {d.image_bytes != null && (
+                        <span className={d.image_bytes >= 2 ** 30 ? "text-muted" : undefined} title="Its image's size: a smaller one starts faster">
+                          {d.image_bytes >= 2 ** 30 ? `${(d.image_bytes / 2 ** 30).toFixed(1)} GB` : `${Math.round(d.image_bytes / 2 ** 20)} MB`}
+                        </span>
+                      )}
                       {d.vulnerabilities && !d.vulnerabilities.error && d.vulnerabilities.critical + d.vulnerabilities.high > 0 && (
                         <span className={d.vulnerabilities.critical ? "text-danger" : "text-muted"} title="Known vulnerabilities in its image">
                           {worst(d.vulnerabilities)}
