@@ -81,25 +81,28 @@ async fn run<'a, T: serde::Serialize, F: std::future::Future<Output = anyhow::Re
 /// A screenshot of `service`'s instance in `env`, wherever it runs: on its holder when that's
 /// another node, else here (`local`).
 pub async fn shoot(cluster: Option<&Arc<Cluster>>, local: &dyn Shoot, service: &str, env: &str, opts: &ShotOptions) -> anyhow::Result<Option<Shot>> {
-    if let Some(holder) = elsewhere(cluster, service).await {
-        return on(&holder.0, &holder.1, SHOT, serde_json::json!({ "service": service, "env": env, "opts": opts })).await;
+    if let Some(c) = cluster
+        && let Some(holder) = elsewhere(c, service).await
+    {
+        return on(c, &holder, SHOT, serde_json::json!({ "service": service, "env": env, "opts": opts })).await;
     }
     local.shoot(service, env, opts).await
 }
 
 /// An agent's run on `service`'s page in `env` (`…/try`), wherever its instance runs.
 pub async fn try_page(cluster: Option<&Arc<Cluster>>, local: &dyn Shoot, service: &str, env: &str, path: &str, steps: &[Step]) -> anyhow::Result<Option<Tried>> {
-    if let Some(holder) = elsewhere(cluster, service).await {
-        return on(&holder.0, &holder.1, TRY, serde_json::json!({ "service": service, "env": env, "path": path, "steps": steps })).await;
+    if let Some(c) = cluster
+        && let Some(holder) = elsewhere(c, service).await
+    {
+        return on(c, &holder, TRY, serde_json::json!({ "service": service, "env": env, "path": path, "steps": steps })).await;
     }
     local.try_page(service, env, path, steps).await
 }
 
 /// The service's holder, when that's another node.
-async fn elsewhere(cluster: Option<&Arc<Cluster>>, service: &str) -> Option<(Arc<Cluster>, Node)> {
-    let c = cluster?;
-    match c.route_async(&apps_control::lease_key(service)).await {
-        Ok(Route::Forward(holder)) => Some((c.clone(), holder)),
+async fn elsewhere(cluster: &Cluster, service: &str) -> Option<Node> {
+    match cluster.route_async(&apps_control::lease_key(service)).await {
+        Ok(Route::Forward(holder)) => Some(holder),
         _ => None,
     }
 }
