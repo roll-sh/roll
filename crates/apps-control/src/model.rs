@@ -1868,6 +1868,10 @@ pub struct Environment {
     pub rate_limit: Option<RateLimit>,
     /// Its firewall rules, in order ([]: none).
     pub firewall: Vec<FirewallRule>,
+    /// How many requests each of them matched in the last 24 hours, in their order (on the node
+    /// that serves it: a takeover starts them again). A `log` rule's too.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub firewall_hits: Vec<u32>,
     /// Headers its answers carry ([]: none).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub headers: Vec<HeaderRule>,
@@ -2007,6 +2011,10 @@ pub struct FirewallRule {
     /// `tools`, `verified`, `spoofed`; any of them matches.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bots: Vec<String>,
+    /// Kinds of attack from roll's managed patterns ([`crate::attacks`]): `scanners`,
+    /// `traversal`, `sqli`, `xss`, `rce`; any of them matches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attacks: Vec<String>,
 }
 
 /// A named part of a request a firewall rule reads ([`FirewallRule::header`]): there, or there
@@ -2049,6 +2057,8 @@ pub struct Asked<'a> {
     pub method: &'a str,
     /// As [`normal_path`] gives it.
     pub path: &'a str,
+    /// As it came, still encoded ([`crate::attacks`] reads how it was spelt).
+    pub raw_path: &'a str,
     pub user_agent: &'a str,
     /// The address the fleet vouches for.
     pub ip: Option<std::net::IpAddr>,
@@ -2068,6 +2078,19 @@ pub enum FirewallAction {
     /// Let in a browser that has passed a proof of work this hour (Vercel's Attack Challenge
     /// Mode, `challenge.rs`); anything else gets the page that works it out.
     Challenge,
+    /// Count what it matches and go on to the next rule (Vercel's Log action, Cloud Armor's
+    /// preview mode): a rule tried on real traffic before it blocks anyone.
+    Log,
+}
+
+impl FirewallRule {
+    /// What it's counted by ([`Environment::firewall_hits`]): its content, so moving it or
+    /// changing another setting keeps its count, and changing it starts a new one.
+    pub fn fingerprint(&self) -> u64 {
+        use sha2::{Digest, Sha256};
+        let d = Sha256::digest(serde_json::to_vec(self).unwrap_or_default());
+        u64::from_be_bytes(d[..8].try_into().unwrap_or_default())
+    }
 }
 
 /// The most rules an environment has.
@@ -2139,8 +2162,13 @@ impl FirewallRule {
         }
         self.bots.sort();
         self.bots.dedup();
-        if self.path.is_none() && self.methods.is_empty() && self.user_agent.is_none() && self.ips.is_empty() && self.header.is_none() && self.cookie.is_none() && self.query.is_none() && self.bots.is_empty() {
-            return bad("a rule matches on a path, methods, a user agent, addresses, a header, a cookie, a query parameter or bots");
+        if self.attacks.len() > crate::attacks::KINDS.len() || self.attacks.iter().any(|b| !crate::attacks::KINDS.contains(&b.as_str())) {
+            return bad("attacks are any of scanners, traversal, sqli, xss, rce");
+        }
+        self.attacks.sort();
+        self.attacks.dedup();
+        if self.path.is_none() && self.methods.is_empty() && self.user_agent.is_none() && self.ips.is_empty() && self.header.is_none() && self.cookie.is_none() && self.query.is_none() && self.bots.is_empty() && self.attacks.is_empty() {
+            return bad("a rule matches on a path, methods, a user agent, addresses, a header, a cookie, a query parameter, bots or attacks");
         }
         if self.action == FirewallAction::Challenge && !self.methods.is_empty() && self.methods.iter().any(|m| m != "GET") {
             return bad("a challenge is a page a browser opens: GET only");
@@ -2186,7 +2214,8 @@ impl FirewallRule {
             m.takes(pairs.iter().filter(|(k, _)| *k == m.name).map(|(_, v)| v.as_str()))
         });
         let bots_ok = self.bots.is_empty() || a.bot.is_some_and(|b| self.bots.iter().any(|k| b.is(k)));
-        path_ok && method_ok && ua_ok && ip_ok && header_ok && cookie_ok && query_ok && bots_ok
+        // Last: the dearest to read.
+        path_ok && method_ok && ua_ok && ip_ok && header_ok && cookie_ok && query_ok && bots_ok && (self.attacks.is_empty() || crate::attacks::matches(&self.attacks, a))
     }
 
     /// A limit's client by its `key` (a header's or cookie's value, hashed: never kept as it

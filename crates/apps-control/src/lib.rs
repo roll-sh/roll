@@ -15,6 +15,7 @@
 pub mod api;
 pub mod challenge;
 pub mod bots;
+pub mod attacks;
 pub mod backups;
 pub mod browser;
 pub mod moving;
@@ -1829,6 +1830,10 @@ impl Apps {
         };
         let (sid, e) = (r.service.clone(), r.name.clone());
         let rotated = self.db(move |s| s.runtime_config_rotated(&sid, &e)).await?;
+        let firewall_hits: Vec<u32> = match self.lives.lock().get(&env_key(&r.service, &r.name)) {
+            Some(l) if !r.firewall.is_empty() => r.firewall.iter().map(|f| l.hits(f.fingerprint())).collect(),
+            _ => Vec::new(),
+        };
         Ok(Environment {
             summary,
             service: r.service.clone(),
@@ -1876,6 +1881,7 @@ impl Apps {
             allow_ips: r.allow_ips.clone(),
             rate_limit: r.rate_limit,
             firewall: r.firewall.clone(),
+            firewall_hits,
             headers: r.headers.clone(),
             routes: r.routes.clone(),
             redirects: r.redirects.clone(),

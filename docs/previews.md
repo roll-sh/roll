@@ -1457,6 +1457,24 @@ egress included, removed with each connection. `a_shell_in_a_previews_service_is
 live preview's container through `roll preview shell` and reads its `ROLL_PREVIEW` back, puts a
 file in with `roll preview cp` and brings it back, and reads the service through `roll preview
 forward` (no relay left after).
+A data branch can be looked at from the sheet too (Neon's Tables, Supabase's table editor): a
+Postgres branch's "Tables" lists the tables its own role can read (with about how many rows), and
+one's first 50 rows, cells as text cut at 200 characters (`…/data/{kind:parent}?table=`). It's
+read as the branch's own role, in a read-only transaction of at most 5 s with only the catalog in
+its path, so it sees what the preview's code sees (masked as the preview's is), and a table is
+taken only from that list, its name quoted, never run. Only a branch that's ready and masked with
+today's rules, as `connect` gives (409 otherwise); another kind's is a 409 until its product has
+a way to show it (connect to it with `roll preview connect`). It's `reveal` (copies of
+production's data). `a_previews_data_branch_is_looked_at_from_the_sheet`,
+`a_browsed_tables_name_is_quoted`.
+A page can be read through roll too (Vercel MCP's `web_fetch_vercel_url`; roll MCP's
+`previews_fetch`): `…/fetch?path=/checkout` (`roll preview fetch <preview> /checkout`) answers its
+status, the headers worth seeing (content type, location, cache control, length), and its text up
+to 256 KiB, masked as its logs are, so an agent checks the page its change touched without anyone
+making a share link. It goes through the runtime's own proxy past the preview's gate (no token
+asked or answered), to the preview's own service only, `GET` or `HEAD`, with no body; it's
+`reveal`, as its mail is (a page can show copies of production's people). A roll apps service
+answers at its own URL (409). `a_page_read_through_roll_passes_the_gate_bounded`.
 A service can also be swapped for a process on a laptop (Signadot's local sandboxes,
 Telepresence's intercepts): `roll preview swap <preview> 3000 --service web` opens
 `…/swap?service=web`, a WebSocket carrying one HTTP/2 connection the laptop serves, and while
@@ -1617,6 +1635,16 @@ land on the change.
   team session, through roll), from the change's feedback reviews (`roll_previews::notes` reads back the shape the
   dashboard posts and nothing else; dismissed ones don't show), the latest 50. Each note says
   who and when, and outlines its element on hover; all of it is text, never HTML.
+- A reviewer sets the project's feature flags for their own view (Vercel's Flags Explorer): with
+  `flags` (`[{name, options}]`, at most 20, each name and option 1-60 letters, digits, `-`, `_` or
+  `.`), the page's toolbar gets "Flags": each flag a choice (the app's own, or one of its
+  options), applied to this browser only by reloading with a cookie (`roll_flags`). The preview's
+  proxy turns it into the header the services read, `x-roll-flags: new-checkout=on,theme=dark`,
+  only what the project's rule names with one of its options; the cookie never reaches the
+  services, and an `x-roll-flags` a visitor sends is dropped. The app reads the header where it
+  decides a flag (a flags SDK's override hook); a visitor without the toolbar gets the app's own
+  choices. roll MCP's `previews_set_rules` takes `flags` (an agent that adds a flag to the code
+  offers it on the toolbar too). `a_reviewers_flags_reach_the_service_as_a_header`.
 - A note or an error becomes a fix to make (Vercel Comments' "Create issue", Netlify's drawer):
   the note's sheet (opened from its Reply or Resolve) and each error group on the sheet's Errors
   tab have "Make a work item". It's made in the preview's repo as the person looking (roll code's
@@ -1753,6 +1781,8 @@ previews in it), the operator and admins see every project.
 | `DELETE /v1/previews/{id}/shell/sessions/{sh}` | | 204 |
 | `GET /v1/previews/{id}/files?service=&path=` | | `application/x-tar`: what's at `path` (absolute) in the running `roll.toml` service, started if it sleeps (`docker cp`), `x-roll-service` naming it; 404 before any of the answer when nothing is there; said in the activity ("ana copied /app/out.csv out of web"). Admin, as the shell is (it reads anything the service keeps); a roll apps service's is 409 (roll apps' own `…/files` on `pv-`). Runs on the preview's holder |
 | `GET /v1/previews/{id}/forward?service=&port=` | WebSocket | one TCP connection to `port` in the running `roll.toml` service, any port it listens on (a debugger's, an admin's), published or not: a relay (busybox `nc`, `alpine:3.20`, 32 MiB, no capabilities) in the service's network namespace, removed with the connection; binary both ways, an empty message a half-close, as roll apps' tunnel (`roll preview forward`). The service is held awake while connections are open; at most 32 a preview (409); said in the activity once an hour per person, service and port. Admin; a roll apps service's is 409 (roll apps' own tunnel). Runs on the preview's holder (roll-cluster forwards the upgrade) |
+| `GET /v1/previews/{id}/fetch?path=&service=&head=` | `{service, path, url, status, headers: {content-type?, location?, cache-control?, content-length?}, body: string \| null, truncated}` | one page of a `roll.toml` service read through roll's own way in (no link token or share link), `GET` or `HEAD` (`head=true`); its text masked as its logs are, `null` when not text, cut at 256 KiB (`truncated`); `url` never carries a token; a roll apps service is 409 (it answers at its own URL); `reveal` (roll MCP's `previews_fetch`; `roll preview fetch`) |
+| `GET /v1/previews/{id}/data/{resource}?table=` | | `{tables: [{name, rows}]}` (its tables, as its own role sees them, at most 200) or, with `table`, `{table, columns, rows: (string \| null)[][], more}` (the first 50 rows, cells cut at 200 characters); `resource` is `kind:parent`; read as the branch's own role, read-only, 5 s at most; 409 for a branch not ready or masked yet and for a kind with no way to show it yet (Postgres only for now); `reveal` |
 | `POST /v1/previews/{id}/otlp/{token}/v1/traces` | OTLP/HTTP traces: protobuf or JSON (`Content-Type`), gzip or not, at most 8 MiB | `{"partialSuccess": {}}`; 404 for anything but the preview's own token (derived from its id with the store's key, as its SMTP password is). Public in rolld's gate: the token in the path is the credential. A service gets it as `OTEL_EXPORTER_OTLP_ENDPOINT` when the project's `traces` is on. Spans are kept on the preview's holder, in memory: its newest 20,000, for 6 hours |
 | `GET /v1/previews/{id}/traces?minutes=` | | `{ minutes, traces: [{ trace, name, service, start_ms, ms, spans, error }] }`: its recent traces (5 to 360 minutes, 60 by default), newest first, at most 100, the root span's name masked as logs are |
 | `GET /v1/previews/{id}/traces/{trace}` | | `{ trace, spans }`: one trace's spans, oldest first, names and attributes masked |
@@ -1862,6 +1892,7 @@ type Settings = {
   access: "link" | "team" | "public"; // "link": a preview's URLs need its link; "team": a person signed in to roll who may open the project
   visual_review: "off" | "check" | "required";   // the roll/visual review; required also blocks landing in roll ("off")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
+  flags?: {name: string; options: string[]}[]; // feature flags a reviewer sets for their own view from that button's toolbar (x-roll-flags)
   egress: "open" | "roll";            // what its services' code may reach: anything ("open"), or only roll's products on a network with no route out (see "Egress")
   egress_hosts?: string[];            // with "roll" (or egress_forks "roll", for forks): hosts outside roll still reachable through its egress proxy (api.stripe.com, *.sentry.io; at most 20)
   egress_forks: "roll" | "open";      // what a fork's preview reaches when egress is "open" (default "roll")
@@ -2551,30 +2582,28 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A note or an error made a work item, in review** (Vercel Comments' "Create issue"): on the
-   note's sheet and each error group, in the preview's repo, where roll's agents claim work too.
-2. **A preview's page read through roll, for agents** (Vercel MCP's `web_fetch_vercel_url`; roll
-   MCP's ask): `GET …/fetch?path=` answering its status, a few headers and its text, bounded, with
-   roll's own access to the preview (no share link), its own host only, `GET`/`HEAD` only;
-   `reveal`, as its mail is. roll MCP maps it as `previews_fetch`.
-3. **A preview's data from the sheet** (Neon's Tables, Supabase's table editor): a branch's tables
-   read as the branch's own role (so masks hold), a few rows a page.
-4. **Feature flags on a preview** (Vercel's Flags Explorer): per-preview values, and a reviewer's
+1. **Feature flags on a preview, in review** (Vercel's Flags Explorer): per-preview values, and a reviewer's
    own override from the page's toolbar.
-5. **Restore points for a preview's data** (Neon's snapshots): save the branches now, put them back
+2. **Restore points for a preview's data** (Neon's snapshots): save the branches now, put them back
    after a test run.
-6. **A workload identity for `roll.toml` services** (Vercel's OIDC federation): roll apps' `pv-`
+3. **A workload identity for `roll.toml` services** (Vercel's OIDC federation): roll apps' `pv-`
    instances have one; runtime services don't.
-7. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+4. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-8. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+5. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-9. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+6. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-10. **Watch: pg-control's recovery to a time seconds old** (unowned).
+7. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-24: a data branch looked at from the sheet (#858: its tables and first rows, as the branch's own role; live, `public.users` masked).
+
+Landed 2026-11-23, after midnight: a page read through roll for agents (#852: `GET …/fetch`, `roll preview fetch`; roll MCP maps it as `previews_fetch`).
+
+Landed 2026-11-23, at midnight: a note or an error made a work item (#851), and a user name isn't a served secret.
 
 Landed 2026-11-23, near midnight: secret values in what a preview serves (#846: named with where, never the value; live, `DATABASE_URL` in `/env.txt`).
 

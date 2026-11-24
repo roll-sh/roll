@@ -1169,7 +1169,10 @@ certificate, a trial token. A secret's optional `expires_at` (ms; set in any wri
 operation, `null` clears it, leaving it out keeps it) records that date. It's versioned like the
 comment, so history, rollback, promote, change requests and backups carry it, and a new value
 keeps the date until someone changes it, except a certificate: a new value holding PEM
-certificates is dated by the earliest `notAfter` among them, unless the write gives a date. Insights add `expires_at` and `expiring` (within 14 days,
+certificates is dated by the earliest `notAfter` among them, unless the write gives a date, and a
+managed key a vendor ends by itself is dated by the vendor's end for each credential roll issues (a
+GitLab token's `expires_at`, a Databricks token's lifetime, an Entra password's `endDateTime`; see
+"SaaS rotators"). Insights add `expires_at` and `expiring` (within 14 days,
 or past); the grid and the environment's list show a clock, with the days left inside two weeks
 and "expired" in red after. The daily notice above lists expiring and expired keys too (names and
 dates only), for any environment with a notify URL, limit or not. Like
@@ -1220,7 +1223,9 @@ policy, as projects made before new ones started with it protected: checks, sand
 untrusted previews may read it and nothing there needs approval; the detail names what reaches it,
 owners, admins and developers who name it by handle, and the checks and sandboxes that resolved it
 in the last 90 days from the audit log; `key` is empty; nothing changes it but an admin, the
-dashboard's "Protect production" setting `{"protected": true, "approvals": 0}`), `expired`, `rotation_failing` (a managed key's scheduled rotation fails: the
+dashboard's "Protect production" setting `{"protected": true, "approvals": 0}`), `expired` (a
+key past its `expires_at`, or a SaaS rotator whose registered credential has ended:
+`environment` empty, `key` its name), `rotation_failing` (a managed key's scheduled rotation fails: the
 database, vendor, product or rotator refused or didn't answer; the detail says why, the old
 credential keeps working, and the sweeper tries again; cleared by the next rotation that works),
 `revoke_failing` (a credential roll retired, or a lease that ended, that it couldn't revoke yet: it
@@ -1231,7 +1236,10 @@ in one run, for an operator's maintenance window, and fails if one does), `missi
 imports and base), `exposed` (a protected value also in an unprotected environment), `public`,
 `weak`, `unplaced` (a key bound to hosts without a `header` or `query`, from before a placement
 was required: a trusted reader's placeholder may ride in any header, and an untrusted consumer's
-doesn't swap; see "Using a key without seeing it"), `expiring`, `certificate_expiring` (a certificate a project CA signed for a CSR that ends
+doesn't swap; see "Using a key without seeing it"), `expiring` (within two weeks: a key's
+`expires_at`, so a vendor's key roll hasn't rotated in time, or a SaaS rotator's
+`credential_expires_at`, listed by its name with `environment` empty, never with the credential),
+`certificate_expiring` (a certificate a project CA signed for a CSR that ends
 within two weeks: links' certificates are replaced by roll, a CSR's only by whoever asked; `key` is
 its names, `path` its CA), `operator_made` (a sync or a workload identity made as the
 operator account: "made by the operator account: re-save to bind it to a person". Before makers
@@ -1363,8 +1371,10 @@ A link is `{kind, ref, field, mode, options}`:
       deploy, or a wake that resolves at runtime, fails;
     - agents sandboxes copying from it: they lose those values;
     - its syncs, which stop: the copies they pushed stay at their targets until removed there;
-    - workload identities and roll-access tokens whose scope names it (their names only for a
-      project admin; anyone else sees that one is there);
+    - workload identities and roll-access tokens whose scope names it and that reach it, judged as
+      reach judges them (a person's own token only within their own projects, so another person's
+      "every project, `staging`" token isn't named here); their names only for a project admin,
+      and anyone else sees that one is there;
   - a protected environment whose policy asks for approvals (`approvals` ≥ 1) is deleted through a
     change request with those approvals and every folder policy in it (`"action":
     "delete_environment"`, answered 202 `{request}`), exactly as deleting one of its folders is;
@@ -1515,7 +1525,7 @@ use stays) and is retried, as any failed rotation or revocation is.
 
 For the vendors below, roll speaks the vendor's own API, so there's no endpoint to write. A project
 registers a vendor credential roll may issue and revoke keys with (`POST …/saas {name, vendor,
-target, credential}`, `admin`; `roll secrets saas add NAME --vendor sendgrid`, the credential on
+target, credential, credential_expires_at?}`, `admin`; `roll secrets saas add NAME --vendor sendgrid`, the credential on
 stdin), and a key linked to it in `managed` mode (`{kind: "saas", ref: "sas_…", field: "secret" |
 "id", mode: "managed"}`, from the dashboard's Link a resource too) gets a fresh vendor secret on
 every rotation. It works as a rotator does: it rotates every `rotate_days` or on demand, and the
@@ -1524,6 +1534,26 @@ the key's or secret's id at the vendor (plain). Keys of one environment linked t
 registration share one issue: linking `TWILIO_API_KEY` to `id` and `TWILIO_API_SECRET` to `secret`
 gives one Twilio key. Each rotation is `rotation.succeeded` on the events feed, and a scheduled one
 the vendor refuses is `rotation.failed` (and `rotation_failing` in health), as for every managed key.
+
+**Keys a vendor ends by itself rotate before that.** GitLab ends each token after `expires_days`,
+Databricks after `lifetime_days`, and Entra a password after Microsoft's two years. A link to one
+of those needs `rotate_days`, at most the lifetime less 14 days (half the lifetime below 28 days),
+refused at link time otherwise (`gitlab ends these keys after 90 days: set rotate_days (at most
+76)…`). The margin is health's `expiring` window: a rotation on schedule (a weekly `rotate_window`'s
+wait included) replaces each key before health would warn of it, so `expiring` on such a key means
+its rotation is late or failing. Each issued key carries the vendor's end as its `expires_at` (the
+day GitLab ends the token, as that day starts in UTC; Databricks' `expiry_time`; Entra's
+`endDateTime`, which a tenant's policy may make shorter than two years), so health lists it under
+`expiring` two weeks before and `expired` after, like any dated key. A lifetime too short to rotate
+in (one day) is refused at link time. Okta's client secrets, and the other vendors' keys, live
+until revoked.
+
+**The registered credential ends too.** A GitLab access token, an Entra client secret and a
+Databricks token roll signs in with all have an end date of their own. Give it as
+`credential_expires_at` (ms; `--credential-expires YYYY-MM-DD` on the CLI, "Credential expires" in
+the dashboard; a date in the past is refused) and health lists the registration under `expiring`
+two weeks before (`its gitlab credential expires 2026-12-03: after that roll can't issue or revoke
+its keys`) and `expired` after, by name: never the credential. The list answers the date.
 
 Registering checks the credential with the vendor first, read only, so a credential the vendor
 refuses, or one that can't manage keys, is refused at once (400, naming the vendor and the status)
@@ -1563,14 +1593,17 @@ instead of at the first rotation:
   so a second environment linking the same registration is refused (409 `in_use`): register the
   app once per environment, or link one environment. Okta also refuses a new secret while the app
   already has two; a rotation then fails and shows in health.
-- Entra passwords get Microsoft's default lifetime (two years); set `rotate_days` below it.
+- Entra passwords get Microsoft's default lifetime (two years, or less where the tenant's policy
+  says): a link rotates within 716 days, and each key's `expires_at` is the `endDateTime` Microsoft
+  answered.
 - **GitLab tokens are made new, not rotated in place.** GitLab's rotate endpoint
   (`POST …/access_tokens/{id}/rotate`) revokes the old token the moment it answers, so every
   consumer still holding it would fail until it reloads. roll makes a new token with the same
   scopes and role instead, and revokes the old one after `grace_minutes`, as for every other
   vendor. Each token is a new bot member of the project or group, which GitLab removes with the
   token. A token expires after `expires_days` (GitLab needs a date; an instance may cap it lower
-  than 365): set `rotate_days` below it. `host` is a hostname (no IP literal, no port).
+  than 365): a link's `rotate_days` is at most `expires_days` less 14 (351 by default). `host` is a
+  hostname (no IP literal, no port).
 - **OpenAI keys belong to service accounts.** Each rotation adds a service account to the project
   and keeps its key; revoking deletes the account, which ends the key. For a key that leaked,
   rotate it, then end the retired key's lease (`DELETE …/leases/{id}`, or Revoke in the
@@ -1589,8 +1622,8 @@ instead of at the first rotation:
   cloud takes them, and every consumer (the CLI, SDKs, JDBC/ODBC, `DATABRICKS_TOKEN`) uses one
   as is; a service principal's OAuth secret is account-level, and each consumer must exchange it
   for a token. A new token belongs to the credential's identity, so register a service principal's
-  token. Each lasts `lifetime_days` (a workspace may cap it lower): set `rotate_days` below it.
-  `host` is a hostname (no IP literal, no port).
+  token. Each lasts `lifetime_days` (a workspace may cap it lower): a link's `rotate_days` is at
+  most `lifetime_days` less 14 (76 by default). `host` is a hostname (no IP literal, no port).
 - **Confluent: link `CONFLUENT_API_KEY` to `id` and `CONFLUENT_API_SECRET` to `secret`.** They
   share one key, and a new one can take a moment to work on a cluster: keep `grace_minutes` above
   a few minutes.
@@ -3308,9 +3341,10 @@ cluster, instead of a key pasted into it: the Inference tab's "A roll secret", o
   copied count: a key of the folder that doesn't resolve for an untrusted read (`${production.X}`,
   production being protected, or a reference to a deleted environment) stops nothing that didn't
   copy it, and a copied one that doesn't resolve is left unset and named with why
-  (`secrets_unset`). An environment deleted but still in its recovery window holds the sandbox's
-  create and start (they wait), so recovering it brings the values back; once it's purged, the
-  sandbox starts without them (`secrets_dropped`). A sandbox made before
+  (`secrets_unset`). An environment deleted but still in its recovery window, or one of a project
+  deleted but still in its window, holds the sandbox's create and start (they wait), so recovering
+  it brings the values back; once it's purged or the window has closed, the sandbox starts without
+  them (`secrets_dropped`). A sandbox made before
   `secrets_from` was kept only has its maker asked whether they can still act (`maker_acts`), and
   keeps what it was made with; delete it and make another to get fresh reads
   (docs/code/http-api.md, "Sandboxes").
@@ -5575,6 +5609,13 @@ webhooks, with a `project` argument; docs/mcp.md, "Events"). It answers
 answers `{events: [], next}` at the head, for a follower that starts from now. `limit` is 1–500
 (default 100).
 
+The dashboard's Events tab (`components/secrets/events.tsx`, `lib/secrets-events.ts`) is a person's
+view of it. It opens at `?latest=1` and polls after that `next` every 5 s while it's in view,
+following each `next` as answered. The feed only reads forward, so the tab goes back by windows of
+chain rows before the oldest row it holds: `after=hi-w` up to `hi`. A window of 500 rows or fewer is
+answered whole. A wider one whose `next` falls short of `hi` is narrowed and read again, so no
+events are skipped. The kind chips and the environment filter are `kinds=` and `environment=`.
+
 **The cursor.** An event is an audit row that carries one (`audit.event`, `audit.event_data`), so
 `seq` is the row's number in the project's chain ("Tamper evidence"): taken from `audit_heads` in
 the row's own write, under the head's row lock (on Postgres a second writer waits for it, or loses a
@@ -5941,7 +5982,7 @@ isn't in the workspace is 404.
 | `PATCH /rotators/{id}` | `{name?, url?}` | `Rotator` (`admin`; a new URL is checked first) |
 | `POST /rotators/{id}/rotate-secret` | | `Rotator & {secret}` (`admin`; the new signing secret, shown once) |
 | `GET /saas` | | `SaasRotator[]` (`read` on the project; never the credential) |
-| `POST /saas` | `{name, vendor, target, credential}` | 201 `SaasRotator` (`admin`; never the credential) |
+| `POST /saas` | `{name, vendor, target, credential, credential_expires_at?}` (`credential_expires_at`: when the credential ends at the vendor, ms, in the future) | 201 `SaasRotator` (`admin`; never the credential; `credential_expires_at` when given) |
 | `DELETE /saas/{id}` | | 204; 409 while a key links to it or a retired key waits (`admin`) |
 | `GET /outside-databases` | | `OutsideDatabase[]` (`read` on the project; never the URL) |
 | `POST /outside-databases` | `{name, url, roles?: [a, b], group?, ca?, gateway?}` | 201 `OutsideDatabase` (`admin`; connects and checks the roles first: 400 with the server's reason) |

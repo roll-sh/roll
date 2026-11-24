@@ -42,6 +42,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}/mail/{mail}", get(mail_raw))
         .route("/v1/previews/{id}/screenshot.png", get(screenshot_link))
         .route("/v1/previews/{id}/reset", post(reset))
+        .route("/v1/previews/{id}/data/{resource}", get(browse_data))
         // These act on running services, which live on the preview's holder in a cluster.
         .merge(
             Router::new()
@@ -60,6 +61,8 @@ pub fn router(engine: Arc<Engine>) -> Router {
                 .route("/v1/previews/{id}/shell/sessions/{sh}/resize", post(shell_resize))
                 .route("/v1/previews/{id}/forward", get(forward))
                 .route("/v1/previews/{id}/swap", get(swap))
+                // A page read through roll (roll MCP's `previews_fetch`): its services are here.
+                .route("/v1/previews/{id}/fetch", get(fetch_page))
                 // A preview's spans, kept on its holder: the intake (its token the credential) and the reads.
                 .route("/v1/previews/{id}/otlp/{token}/v1/traces", post(otlp_traces).layer(axum::extract::DefaultBodyLimit::max(8 << 20)))
                 .route("/v1/previews/{id}/traces", get(traces))
@@ -878,6 +881,34 @@ async fn bridge(socket: axum::extract::ws::WebSocket, mut f: crate::engine::shel
     // `f` lives as long as the bridge: it holds the service awake.
     let ended = f.ended.clone();
     bridge_io(socket, &mut f.io, ended).await;
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BrowseQuery {
+    table: Option<String>,
+}
+
+/// A look at one of the preview's data branches (its tables, or a table's first rows).
+async fn browse_data(AxState(e): S, Path((id, resource)): Path<(String, String)>, Query(q): Query<BrowseQuery>) -> crate::Result<Json<crate::Browse>> {
+    check_id(&id)?;
+    Ok(Json(e.browse(&id, &resource, q.table.as_deref()).await?))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FetchQuery {
+    path: String,
+    service: Option<String>,
+    #[serde(default)]
+    head: bool,
+}
+
+/// One page of a preview's service, read through roll's own way in: for an agent checking its
+/// change (roll MCP's `previews_fetch`) without anyone making a share link.
+async fn fetch_page(AxState(e): S, Path(id): Path<String>, Query(q): Query<FetchQuery>) -> crate::Result<Json<crate::engine::shell::FetchedPage>> {
+    check_id(&id)?;
+    Ok(Json(e.fetch(&id, q.service.as_deref(), &q.path, q.head).await?))
 }
 
 #[derive(serde::Deserialize)]

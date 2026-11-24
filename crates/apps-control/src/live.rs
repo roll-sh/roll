@@ -469,8 +469,17 @@ type BucketKey = (u16, Option<std::net::IpAddr>, Option<u64>);
 const FILE_BUCKETS: u16 = 1000;
 
 /// The first of `rules` that matches decides; none: in. A limit's bucket is `base` + its index.
-fn first_match(rules: &[crate::model::FirewallRule], asked: &crate::model::Asked<'_>, base: u16) -> Verdict {
-    match rules.iter().enumerate().find(|(_, r)| r.matches(asked)) {
+/// The first rule that matches and decides; every one matched on the way (a `log` rule's, and
+/// the deciding one's) goes in `hits`.
+fn first_match(rules: &[crate::model::FirewallRule], asked: &crate::model::Asked<'_>, base: u16, hits: &mut Vec<u64>) -> Verdict {
+    let found = rules.iter().enumerate().find(|(_, r)| {
+        if !r.matches(asked) {
+            return false;
+        }
+        hits.push(r.fingerprint());
+        r.action != crate::model::FirewallAction::Log
+    });
+    match found {
         None => Verdict::Allow,
         Some((_, r)) if r.action == crate::model::FirewallAction::Allow => Verdict::Allow,
         Some((i, r)) if r.action == crate::model::FirewallAction::Limit => Verdict::Limit(base + i as u16, crate::model::RateLimit { per_minute: r.per_minute.unwrap_or(60), burst: r.burst }, r.client_key(asked)),
@@ -498,14 +507,15 @@ impl Gate {
     /// matching, it does.
     /// What its firewall says of the request: the first rule that matches decides; none lets it
     /// in.
-    pub fn firewall_verdict(&self, asked: &crate::model::Asked<'_>) -> Verdict {
-        let own = first_match(&self.firewall, asked, 1);
+    /// The rules it matched go in `hits` ([`EnvLive::count_hits`]).
+    pub fn firewall_verdict(&self, asked: &crate::model::Asked<'_>, hits: &mut Vec<u64>) -> Verdict {
+        let own = first_match(&self.firewall, asked, 1, hits);
         if self.file_firewall.is_empty() {
             return own;
         }
         // The tree's rules on their own, their limits in buckets of their own: the stricter of
         // the two answers (deny, then a challenge, then the lower limit) decides.
-        let file = first_match(&self.file_firewall, asked, FILE_BUCKETS);
+        let file = first_match(&self.file_firewall, asked, FILE_BUCKETS, hits);
         let rank = |v: &Verdict| match v {
             Verdict::Allow => 0,
             Verdict::Limit(..) => 1,
@@ -525,6 +535,17 @@ impl Gate {
         }
         let Some(ip) = client_ip(client) else { return false };
         self.allow.iter().any(|n| n.contains(&ip))
+    }
+}
+
+/// Empties the hourly slots between `last` and `now` (the hours nothing came).
+fn roll_slots(slots: &mut [u32; 24], last: i64, now: i64) {
+    if now - last >= 24 {
+        *slots = [0; 24];
+        return;
+    }
+    for h in last + 1..=now {
+        slots[(h % 24) as usize] = 0;
     }
 }
 
@@ -660,6 +681,8 @@ pub struct EnvLive {
     /// Each client's tokens and when they were counted (its rate limit; None: no address).
     /// Each client's tokens, by bucket: 0 the environment's rate limit, 1 + i firewall rule i's.
     buckets: Mutex<HashMap<BucketKey, (f64, Instant)>>,
+    /// Requests each firewall rule matched, by its fingerprint: an hour a slot, the last 24.
+    rule_hits: Mutex<HashMap<u64, ([u32; 24], i64)>>,
     /// CPU its awake instances used and could have used, per tick, for `cpu_window` (only what
     /// the runtime measures).
     cpu_samples: Mutex<std::collections::VecDeque<(Instant, f64, f64)>>,
@@ -721,6 +744,7 @@ impl EnvLive {
             gate: Mutex::new(None),
             gate_gen: AtomicU64::new(0),
             buckets: Mutex::new(HashMap::new()),
+            rule_hits: Mutex::new(HashMap::new()),
             cpu_samples: Mutex::new(std::collections::VecDeque::new()),
             lat_window: Mutex::new((Instant::now(), Served::default(), None)),
             mem_samples: Mutex::new(std::collections::VecDeque::new()),
@@ -1294,6 +1318,35 @@ impl EnvLive {
 
     pub fn gate(&self) -> Option<Arc<Gate>> {
         self.gate.lock().clone()
+    }
+
+    /// Counts a request against the rules it matched (their fingerprints).
+    pub fn count_hits(&self, hits: &[u64]) {
+        if hits.is_empty() {
+            return;
+        }
+        let hour = code_sql::now_ms() / 3_600_000;
+        let mut m = self.rule_hits.lock();
+        // Never more than two environments' worth of rules (theirs and a tree's, changed).
+        if m.len() > 4 * crate::model::MAX_FIREWALL_RULES {
+            m.retain(|_, (_, last)| hour - *last < 24);
+        }
+        for h in hits {
+            let (slots, last) = m.entry(*h).or_insert(([0; 24], hour));
+            roll_slots(slots, *last, hour);
+            *last = hour;
+            slots[(hour % 24) as usize] = slots[(hour % 24) as usize].saturating_add(1);
+        }
+    }
+
+    /// Requests matched in the last 24 hours, by fingerprint.
+    pub fn hits(&self, fingerprint: u64) -> u32 {
+        let hour = code_sql::now_ms() / 3_600_000;
+        self.rule_hits.lock().get(&fingerprint).map_or(0, |(slots, last)| {
+            let mut s = *slots;
+            roll_slots(&mut s, *last, hour);
+            s.iter().fold(0u32, |a, b| a.saturating_add(*b))
+        })
     }
 
     pub fn gate_gen(&self) -> u64 {

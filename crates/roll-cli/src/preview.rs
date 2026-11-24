@@ -298,6 +298,17 @@ pub enum Preview {
         #[arg(long)]
         local_port: Option<u16>,
     },
+    /// Read a page of a service through roll (no link or share needed): its status, a few
+    /// headers and its text, masked: `roll preview fetch pv_… /checkout`.
+    Fetch {
+        preview: String,
+        path: String,
+        #[arg(long, short)]
+        service: Option<String>,
+        /// Only its status and headers.
+        #[arg(long)]
+        head: bool,
+    },
     /// Swap a service for a process on this machine (Signadot's local sandboxes, Telepresence):
     /// the preview's requests for it, its visitors' and its other services', come here to
     /// 127.0.0.1:<port> until Ctrl-C: `roll preview swap pv_… 3000 --service web`.
@@ -1388,6 +1399,24 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
                 _ = tokio::signal::ctrl_c() => {}
             }
             return Ok(());
+        }
+        Preview::Fetch { preview, path, service, head } => {
+            let svc = service.as_deref().map(|s| format!("&service={}", crate::apps::enc(s))).unwrap_or_default();
+            let v = api.get(&format!("/v1/previews/{preview}/fetch?path={}{svc}{}", crate::apps::enc(&path), if head { "&head=true" } else { "" })).await?;
+            if !as_json {
+                eprintln!("{} {}{}", v["status"], s(&v["url"]).trim_end_matches('/'), s(&v["path"]));
+                for (k, h) in v["headers"].as_object().into_iter().flatten() {
+                    eprintln!("{k}: {}", h.as_str().unwrap_or(""));
+                }
+                if let Some(b) = v["body"].as_str() {
+                    println!("{b}");
+                }
+                if v["truncated"].as_bool() == Some(true) {
+                    eprintln!("(cut at 256 KiB)");
+                }
+                return Ok(());
+            }
+            v
         }
         Preview::Swap { preview, port, service } => {
             let base = api.base.strip_prefix("http").map(|rest| format!("ws{rest}")).unwrap_or_else(|| api.base.clone());

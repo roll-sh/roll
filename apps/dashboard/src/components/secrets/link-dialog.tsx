@@ -160,10 +160,15 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
   const clusterName = cluster.trim();
   const needsCluster = chosen.some((c) => c.t.kind === "mongodb_atlas" && c.f.field === "connection_string");
   const clusterOk = !atlas || (clusterName === "" ? !needsCluster : /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/.test(clusterName));
-  // A managed certificate rotates on a schedule, before it ends (it lives twice that).
-  const needsRotation = chosen.some((c) => c.t.kind === "pki" && c.p.mode === "managed");
+  // A managed certificate rotates on a schedule, before it ends (it lives twice that). A SaaS
+  // vendor's key may too (empty: on demand only), and must where the vendor ends it by itself
+  // (GitLab, Databricks, Entra): the server says how soon.
+  const certRotation = chosen.some((c) => c.t.kind === "pki" && c.p.mode === "managed");
+  const saasRotation = chosen.some((c) => c.t.kind === "saas");
+  const needsRotation = certRotation || saasRotation;
   const rotate = Number(rotateDays);
-  const rotateOk = !needsRotation || (Number.isInteger(rotate) && rotate >= 1 && rotate <= 198);
+  const rotateSet = rotateDays.trim() !== "";
+  const rotateOk = !needsRotation || (!certRotation && !rotateSet) || (Number.isInteger(rotate) && rotate >= 1 && rotate <= (certRotation ? 198 : 3650));
   // A Kubernetes token is a service account's, in a namespace, for audiences (the API server's own by default):
   // an existing account, or one made per lease with a role of the rules given.
   const needsAccount = chosen.some((c) => c.t.kind === "kubernetes");
@@ -186,10 +191,11 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
         ref: c.t.ref,
         field: c.f.field,
         mode: c.p.mode,
-        ...((c.p.mode === "dynamic" || c.t.kind === "pki" || c.t.kind === "ssh" || (c.t.kind === "mongodb_atlas" && clusterName !== "") || queueUser(c)) && {
+        ...((c.p.mode === "dynamic" || c.t.kind === "pki" || c.t.kind === "ssh" || (c.t.kind === "saas" && rotateSet) || (c.t.kind === "mongodb_atlas" && clusterName !== "") || queueUser(c)) && {
           options: {
             ...(c.p.mode === "dynamic" && { ttl_minutes: ttlMinutes }),
             ...(c.t.kind === "pki" && { names, ...(c.p.mode === "managed" && { rotate_days: rotate }) }),
+            ...(c.t.kind === "saas" && rotateSet && { rotate_days: rotate }),
             ...(c.t.kind === "ssh" && { principals: logins }),
             ...(queueUser(c) && { permission: queueAccess }),
             ...((c.t.kind === "snowflake" || c.t.kind === "mongodb_atlas") && c.p.mode === "dynamic" && roles.length > 0 && { roles }),
@@ -370,7 +376,7 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
           </label>
         )}
         <span className="text-[11.5px] text-danger">
-          {badKey ? `${badKey.p.key || "A key"} isn't a valid key` : dupKey ? `${dupKey.p.key} is picked twice` : !ttlOk ? (needsGitHub ? "A GitHub token's lease is 1 to 60 minutes" : "A lease is 1 minute to 7 days") : !githubOk ? "Repositories are names in the installation's owner; permissions are name:read, name:write or name:admin" : !namesOk ? "A certificate names what it's for" : !rotateOk ? "Rotate every 1 to 198 days" : !principalsOk ? "An SSH certificate names its logins" : !clusterOk ? "A connection string needs its Atlas cluster's name" : !accountOk ? (account === "generated" ? "A generated role names its namespace and its rules, a JSON list" : "A Kubernetes token names its namespace and service account") : !k8sTtlOk ? "A Kubernetes token's lease is a day at most" : ""}
+          {badKey ? `${badKey.p.key || "A key"} isn't a valid key` : dupKey ? `${dupKey.p.key} is picked twice` : !ttlOk ? (needsGitHub ? "A GitHub token's lease is 1 to 60 minutes" : "A lease is 1 minute to 7 days") : !githubOk ? "Repositories are names in the installation's owner; permissions are name:read, name:write or name:admin" : !namesOk ? "A certificate names what it's for" : !rotateOk ? (certRotation ? "Rotate every 1 to 198 days" : "Rotate every 1 to 3650 days, or leave it empty to rotate on demand") : !principalsOk ? "An SSH certificate names its logins" : !clusterOk ? "A connection string needs its Atlas cluster's name" : !accountOk ? (account === "generated" ? "A generated role names its namespace and its rules, a JSON list" : "A Kubernetes token names its namespace and service account") : !k8sTtlOk ? "A Kubernetes token's lease is a day at most" : ""}
         </span>
         <span className="ml-auto" />
         <button className={ghost} onClick={onClose}>

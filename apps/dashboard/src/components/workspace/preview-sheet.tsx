@@ -74,6 +74,8 @@ export function PreviewSheet({
 }) {
   const [tab, setTab] = useState<"Overview" | "Activity" | "Logs" | "Shell" | "Requests" | "Errors">("Overview");
   const [busy, setBusy] = useState<string | null>(null);
+  // The data branch whose tables are open (`kind:parent`).
+  const [browsing, setBrowsing] = useState<string | null>(null);
   // The service whose link is shown as a QR code, to open on a phone.
   const [phoneFor, setPhoneFor] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -332,6 +334,11 @@ export function PreviewSheet({
                         />
                         {r.error && <p className="mt-0.5 text-[11px] break-words whitespace-pre-line text-danger">{r.error}</p>}
                       </div>
+                      {!gone && r.ref && r.kind === "postgres" && r.state === "ready" && (
+                        <button onClick={() => setBrowsing(browsing === id ? null : id)} aria-expanded={browsing === id} className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-muted hover:bg-white/[0.06] hover:text-fg">
+                          Tables
+                        </button>
+                      )}
                       {!gone && r.ref && <CopyConnection previewId={p.id} kind={r.kind} parent={r.parent} name={names.get(id) ?? r.parent} />}
                       {!gone && (
                         <button
@@ -351,6 +358,7 @@ export function PreviewSheet({
             ) : (
               <p className="text-[11.5px] text-subtle">No data branches.</p>
             )}
+            {browsing && <DataBrowser key={browsing} previewId={p.id} resource={browsing} />}
             {!!p.copies?.count && (
               <p className="mt-1.5 font-mono text-[11px] text-subtle tabular-nums" title="Each earlier push's own copy of the data, as its head left it: counted in the cost above">
                 earlier pushes' copies: {p.copies.count} · {formatBytes(p.copies.bytes)} · {money(p.copies.usd_month)}/mo asleep
@@ -1832,6 +1840,83 @@ function Errors({ preview: p }: { preview: Preview }) {
         </ul>
       )}
     </>
+  );
+}
+
+/** A look at a data branch (Neon's Tables): its tables as the branch's own role sees them, and a
+ * table's first rows, read-only, cells as text (the branch's data, masked as the preview's is). */
+function DataBrowser({ previewId, resource }: { previewId: string; resource: string }) {
+  const [tables, setTables] = useState<{ name: string; rows: number }[] | null>(null);
+  const [table, setTable] = useState<string | null>(null);
+  const [rows, setRows] = useState<{ columns: string[]; rows: (string | null)[][]; more: boolean } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    previewsApi.browse(previewId, resource).then(
+      (b) => live && "tables" in b && setTables(b.tables),
+      (e) => live && setError(errorText(e)),
+    );
+    return () => {
+      live = false;
+    };
+  }, [previewId, resource]);
+  useEffect(() => {
+    if (!table) return;
+    let live = true;
+    setRows(null);
+    previewsApi.browse(previewId, resource, table).then(
+      (b) => live && "columns" in b && setRows(b),
+      (e) => live && setError(errorText(e)),
+    );
+    return () => {
+      live = false;
+    };
+  }, [previewId, resource, table]);
+  if (error) return <p className="mt-1.5 text-[11.5px] text-danger">{error}</p>;
+  if (!tables) return <p className="mt-1.5 text-[11.5px] text-subtle">Reading its tables…</p>;
+  return (
+    <div className="mt-1.5 rounded-lg border border-line-2 bg-canvas p-2 text-[11.5px]">
+      {!tables.length ? (
+        <p className="text-subtle">The branch's role can read no tables.</p>
+      ) : (
+        <select aria-label="Table" value={table ?? ""} onChange={(e) => setTable(e.target.value || null)} className="h-7 w-full rounded-md border border-line-2 bg-canvas px-2 font-mono text-[11px] outline-none focus:border-accent/60">
+          <option value="">A table…</option>
+          {tables.map((t) => (
+            <option key={t.name} value={t.name}>
+              {t.name} (about {t.rows} rows)
+            </option>
+          ))}
+        </select>
+      )}
+      {table && !rows && <p className="mt-1.5 text-subtle">Reading {table}…</p>}
+      {rows && (
+        <div className="mt-1.5 max-h-[40vh] overflow-auto [scrollbar-width:thin]">
+          <table className="w-max min-w-full border-collapse font-mono text-[10.5px]">
+            <thead>
+              <tr>
+                {rows.columns.map((c) => (
+                  <th key={c} className="sticky top-0 border-b border-line bg-canvas px-1.5 py-1 text-left font-normal text-muted">
+                    {c}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.rows.map((r, i) => (
+                <tr key={i} className="border-b border-line last:border-b-0">
+                  {r.map((v, j) => (
+                    <td key={j} className={`max-w-64 truncate px-1.5 py-0.5 ${v === null ? "text-subtle" : "text-soft"}`} title={v ?? "null"}>
+                      {v ?? "null"}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {rows.more && <p className="mt-1 text-subtle">The first 50 rows.</p>}
+        </div>
+      )}
+    </div>
   );
 }
 

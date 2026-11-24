@@ -1400,8 +1400,8 @@ pub enum AppsCmd {
         /// A firewall rule, in order (the first match decides): `deny /admin/*`,
         /// `deny method=DELETE,PUT`, `allow /admin/health`, `deny ip=203.0.113.0/24`,
         /// `deny header=X-Bot`, `deny cookie=beta:1`, `deny query=debug`, `deny bots=ai,spoofed`
-        /// (roll's lists: ai, search, preview, tools, verified, spoofed), `deny ua=BadBot` (ua=
-        /// last). Repeatable; the rules replace the ones it has.
+        /// (roll's lists: ai, search, preview, tools, verified, spoofed), `log attacks=sqli,xss`
+        /// (roll's patterns: scanners, traversal, sqli, xss, rce), `deny ua=BadBot` (ua= last). Repeatable; the rules replace the ones it has.
         #[arg(long = "firewall", value_name = "RULE", conflicts_with = "no_firewall")]
         firewall: Vec<String>,
         /// No firewall rules.
@@ -5269,7 +5269,7 @@ pub(crate) fn new_token() -> String {
 /// A firewall rule as typed: `<allow|deny> [/path] [method=A,B] [ua=the rest of the line]`.
 fn firewall_rule(line: &str) -> anyhow::Result<Value> {
     let mut words = line.split_whitespace();
-    let action = words.next().filter(|a| ["allow", "deny", "limit", "challenge"].contains(a)).ok_or_else(|| anyhow::anyhow!("a firewall rule starts with allow, deny, limit or challenge: {line:?}"))?;
+    let action = words.next().filter(|a| ["allow", "deny", "limit", "challenge", "log"].contains(a)).ok_or_else(|| anyhow::anyhow!("a firewall rule starts with allow, deny, limit, challenge or log: {line:?}"))?;
     let mut rule = json!({ "action": action });
     // `limit N[:BURST] …`: N a minute a client through the rule.
     if action == "limit" {
@@ -5299,10 +5299,12 @@ fn firewall_rule(line: &str) -> anyhow::Result<Value> {
             rule["key"] = json!(k);
         } else if let Some(b) = w.strip_prefix("bots=") {
             rule["bots"] = json!(b.split(',').filter(|b| !b.is_empty()).collect::<Vec<_>>());
+        } else if let Some(b) = w.strip_prefix("attacks=") {
+            rule["attacks"] = json!(b.split(',').filter(|b| !b.is_empty()).collect::<Vec<_>>());
         } else if w.starts_with('/') {
             rule["path"] = json!(w);
         } else {
-            anyhow::bail!("{w:?} in {line:?}: a path (/…), method=…, ip=…, header=…, cookie=…, query=…, key=…, bots=…, or ua=…");
+            anyhow::bail!("{w:?} in {line:?}: a path (/…), method=…, ip=…, header=…, cookie=…, query=…, key=…, bots=…, attacks=…, or ua=…");
         }
     }
     Ok(rule)

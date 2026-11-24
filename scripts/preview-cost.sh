@@ -243,6 +243,12 @@ PG_BRANCH_EP=$(api GET "/v1/projects/$PG" | jq_ "[b['endpoint']['id'] for b in d
 PG_MASKED=$(api POST "/v1/endpoints/$PG_BRANCH_EP/query" '{"sql":"SELECT email FROM users WHERE id = 1"}' | jq_ "d['results'][0]['rows'][0][0]")
 PG_PARENT=$(api POST "/v1/endpoints/$PG_PARENT_EP/query" '{"sql":"SELECT email FROM users WHERE id = 1"}' | jq_ "d['results'][0]['rows'][0][0]")
 case "$PG_MASKED" in user-*@example.invalid) ;; *) echo "the Postgres branch should read masked, not $PG_MASKED"; exit 1;; esac
+# From the sheet too (GET …/data/{kind:parent}): its tables as the branch's own role sees them,
+# and a table's rows, masked.
+SHEET_TABLES=$(api GET "/v1/previews/$PV/data/postgres:$PG" | jq_ "' '.join(t['name'] for t in d.get('tables') or [])")
+case " $SHEET_TABLES " in *" public.users "*) ;; *) echo "the sheet should list the branch's tables: $SHEET_TABLES"; exit 1;; esac
+SHEET_EMAIL=$(api GET "/v1/previews/$PV/data/postgres:$PG?table=public.users" | jq_ "(lambda c: [r[c.index('email')] for r in d['rows']])(d['columns'])[0]")
+case "$SHEET_EMAIL" in user-*@example.invalid) ;; *) echo "the sheet should show the branch's rows masked, not $SHEET_EMAIL"; exit 1;; esac
 [ "$PG_PARENT" = "ada@example.com" ] || { echo "the parent changed: $PG_PARENT"; exit 1; }
 # The search branch reads the parent's document, and its own writes stay in it.
 BRANCH_SEARCH=$(echo "$P" | jq_ "[r['ref'] for r in d['resources'] if r['kind']=='search'][0]")
@@ -499,6 +505,12 @@ for _ in $(seq 1 100); do
 done
 [ -n "$BACK" ] && [ "$BACK" != "from the laptop" ] || { echo "given back, the container should answer again: $BACK"; exit 1; }
 api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]" | grep -q "swapped web for a process on their machine" || { echo "the activity should say web was swapped"; exit 1; }
+
+say "a page read through roll (roll preview fetch, roll MCP's previews_fetch): no link token asked or answered"
+FETCHED=$(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview fetch "$PV" /index.html --service web 2>/dev/null)
+CONTAINER_PAGE=$(curl -s --max-time 10 -b "$JAR" -H "Host: $HOST" "http://$API/index.html")
+[ -n "$FETCHED" ] && [ "$FETCHED" = "$CONTAINER_PAGE" ] || { echo "roll preview fetch should read the page as the container serves it: '$FETCHED' vs '$CONTAINER_PAGE'"; exit 1; }
+api GET "/v1/previews/$PV/fetch?path=/index.html&service=web" | grep -q "roll_access" && { echo "a fetched page's answer must carry no token"; exit 1; }
 
 say "traces: with the project's traces on, the service gets OpenTelemetry's variables, spans it posts are the preview's traces, and an error naming one opens it"
 api PUT "/v1/previews/projects/$PRJ/settings" '{"traces":true}' >/dev/null
@@ -1178,6 +1190,7 @@ cat <<EOF
 | The first page's words against main's | $WORDS |
 | Its API against main's (from each one's OpenAPI document) / what it breaks in the operations both keep | $API_DIFF / $API_BREAKING |
 | Its endpoints against main's (the median of 10 GETs) | $ENDPOINTS |
+| The branch's tables from the sheet / users.email there | $SHEET_TABLES / $SHEET_EMAIL |
 | Its endpoint's answer against main's, by shape | $RESHAPED |
 | Its secret values in what its pages served (names and where) | $SERVED |
 | SEO basics of the first page | $SEO |
