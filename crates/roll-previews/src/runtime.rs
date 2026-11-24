@@ -1893,7 +1893,7 @@ impl Runtime {
         let pages: Vec<&String> = opts
             .pages
             .iter()
-            .filter(|p| crate::settings::page_path_ok(p) || crate::settings::width_entry(p).is_some() || crate::settings::state_entry(p).is_some())
+            .filter(|p| crate::settings::page_path_ok(p) || crate::settings::width_entry(p).is_some() || crate::settings::state_entry(p).is_some() || crate::settings::mode_entry(p).is_some())
             .take(crate::settings::MAX_PAGES)
             .collect();
         args.extend(["--env".into(), format!("PAGES={}", serde_json::to_string(&pages)?)]);
@@ -1911,6 +1911,11 @@ impl Runtime {
                 .collect();
         if !states.is_empty() {
             args.extend(["--env".into(), format!("STATES={}", serde_json::to_string(&states)?)]);
+        }
+        // Each mode's emulation, by name (`shot.js` takes the first page in it).
+        let modes: std::collections::BTreeMap<&str, &crate::settings::ModeRule> = opts.modes.iter().map(|m| (m.name.as_str(), m)).collect();
+        if !modes.is_empty() {
+            args.extend(["--env".into(), format!("MODES={}", serde_json::to_string(&modes)?)]);
         }
         let endpoints: Vec<&String> = opts.endpoints.iter().filter(|p| crate::settings::page_path_ok(p)).take(crate::settings::MAX_ENDPOINTS).collect();
         if !endpoints.is_empty() {
