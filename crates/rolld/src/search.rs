@@ -321,9 +321,12 @@ impl Search {
             0 => {}
             s => cfg.node_settings.push((search_control::SEARCH_MAX_TIME.to_string(), format!("{s}s"))),
         }
-        // Watch passwords, connector and Fleet secrets are sealed in cluster state under the
-        // deployment's key. Without one, watch and Fleet secrets are stored as given (as on
-        // Elasticsearch), and a connector roll runs refuses its credentials.
+        // Clusters' passwords in the catalog, and the secrets clients give the clusters (watch
+        // passwords, connector and Fleet secrets, repository credentials, remotes' API keys),
+        // are sealed under the deployment's key. Without one, a single node seals passwords with
+        // a key of its own (`<home>/search/key`, search_control::control::node_key), a fleet
+        // refuses to start search (every node opens every password), and clients' secrets are
+        // refused unless --search-allow-unsealed-secrets.
         cfg.sealer = secret_key.and_then(search_control::Sealer::from_secret);
         cfg.unsealed_secrets = args.search_allow_unsealed_secrets;
         // Behind the edge, cluster URLs name `<cluster>.search.<region>.<domain>` over HTTPS.
