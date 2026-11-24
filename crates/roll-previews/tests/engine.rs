@@ -226,6 +226,13 @@ async fn pages_changed_the_same_way_are_accepted_together() {
     e.code.open(change("chg_v", 1));
     e.engine.pass().await.unwrap();
     e.engine.pass().await.unwrap();
+    // The passes' own screenshot runs done: none lands over the pictures this test writes.
+    for _ in 0..3000 {
+        if !e.engine.shooting() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     let chg = e.engine.store.row_by_change("chg_v").unwrap().unwrap();
     let base = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.change_id.is_none()).unwrap();
     let paths: Vec<String> = ["/a", "/b", "/c"].map(String::from).to_vec();
