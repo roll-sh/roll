@@ -1806,12 +1806,17 @@ impl TxnState {
     /// Whether the snapshot its next statement reads at uses every index (`index_usable`):
     /// plans made otherwise leave some out, and plans made by snapshots that use them aren't
     /// its to run, so the plans kept across statements and sessions (`session::litplan`)
-    /// are neither kept nor reused then.
+    /// are neither kept nor reused then. (The usual case is one branch, inlined: no DDL of
+    /// its own that read the newest rows, and no index some snapshot leaves out.)
+    #[inline]
     pub fn reads_every_index(&self) -> bool {
-        // (The usual case before the snapshot's time is read: `every_index_at`.)
-        if self.ddl_reads.is_none() && !self.db.index_since.pending.load(Ordering::Acquire) {
-            return true;
-        }
+        (self.ddl_reads.is_none() && !self.db.index_since.pending.load(Ordering::Acquire)) || self.reads_every_index_slow()
+    }
+
+    /// `reads_every_index` when some snapshot may leave an index out: the snapshot's time.
+    #[cold]
+    #[inline(never)]
+    fn reads_every_index_slow(&self) -> bool {
         let ts = match self.isolation.txn_snapshot() && self.snapshot_fixed {
             true => self.statement_snapshot_ts(),
             false => self.db.store.visible_ts(),
