@@ -278,6 +278,8 @@ export type ChangeRequest = {
   applied_seq: number | null;
   /** What it does instead of changing keys: a protected environment's delete, kept for the recovery window once applied, or a leaked key's rotation (its one item), with no grace for the leaked credential. */
   action?: "delete_environment" | "rotate";
+  /** What applying it did instead: a leak's rotation whose key was already on another credential says `already rotated (…)` and issued nothing. */
+  outcome?: string;
 };
 /** Something that stops working when an environment goes: a value elsewhere in the project that references it (`key`), or a folder here or in another project (`project`) that imports from it. Names only. */
 /** What stops working when an environment goes: a key referencing it, a folder importing it, a roll apps service or agents sandbox reading it, a sync of it, or an identity or token whose scope names it.

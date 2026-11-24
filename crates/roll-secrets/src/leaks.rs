@@ -7,7 +7,9 @@
 //! once through [`Secrets::rotate_leaked`] (the rotate path, with no grace for the leaked
 //! credential), or a change request for its rotation where the environment needs approvals. A
 //! credential is claimed in `leak_rotations` before anything is issued, so one leak rotates it
-//! once, whichever node and however often the same text is checked.
+//! once, whichever node and however often the same text is checked. A key rotates for a leak at
+//! most once an hour, whatever found it, and a caller's report (`leaked: true`) rotates only what
+//! the caller could rotate itself: reading a value is never the power to cut it.
 
 use crate::access::{Action, Caller, Scope};
 use crate::events::{Event, Kind};
@@ -32,6 +34,10 @@ CREATE TABLE IF NOT EXISTS leak_rotations (
 /// How long a leak rotation that failed, or whose node stopped mid-way, waits before the same
 /// leak found again claims it anew.
 const RETRY_MS: i64 = 3_600_000;
+/// A key rotated for a leak isn't rotated for another within this long, whoever reports it.
+const CAP_MS: i64 = 3_600_000;
+/// Why a leak didn't rotate a key it otherwise would have (the event's `reason`).
+const CAPPED: &str = "rotated within the hour";
 /// Who rotates a leaked managed key (the project's `leaks.rotate`, an admin's choice).
 pub(crate) const LEAKS: &str = "roll:leaks";
 
@@ -66,7 +72,8 @@ impl LeakRotate {
 enum Whence {
     /// In a roll code repository (a change's added lines or a scan), of the project `project`.
     Code { repo: String, project: String },
-    /// Reported by a caller who holds the value (`POST …/leaks` with `leaked: true`).
+    /// Reported by a caller who holds the value (`POST …/leaks` with `leaked: true`): it rotates
+    /// only where the caller may rotate (`write`) itself.
     Report { by: Caller },
 }
 
@@ -118,7 +125,8 @@ impl Secrets {
     /// [`Secrets::scan`], from a credential guard (roll MCP's, checking what a tool call would write:
     /// `X-Roll-Guard: 1`): the same match, audited as `secrets.guard` so those rows can be told apart.
     /// With `leaked`, the text was published (a paste, a public repo, a scanner's report): what it
-    /// matched is a leak, answered as one found in code is ("When a value leaks").
+    /// matched is a leak, answered as one found in code is ("When a value leaks"), except that it
+    /// rotates a key only where the caller itself may write it.
     pub fn scan_as(&self, project: &str, candidates: &[String], caller: &Caller, guard: bool, leaked: bool) -> Result<Vec<Found>> {
         caller.need(Action::Read, &Scope::project(project))?;
         if candidates.len() > SCAN_MAX {
@@ -219,6 +227,8 @@ impl Secrets {
     /// and place) saying whether roll can rotate them, and, under `leaks.rotate = managed`, each
     /// leaked credential claimed in the same write, then rotated outside it, or, where the
     /// environment or folder needs approvals, a change request for its rotation opened instead.
+    /// A caller's report claims only in folders where it may write, and no key whose credential
+    /// rotated for a leak within the hour is claimed again (the event says so instead).
     /// The holding projects' settings, as read.
     fn respond(&self, found: &[Match], whence: &Whence) -> HashMap<String, LeakRotate> {
         let mut settings: HashMap<String, LeakRotate> = HashMap::new();
@@ -263,19 +273,30 @@ impl Secrets {
                 Whence::Report { .. } => json!({ "reported": true }),
             };
             data["rotatable"] = json!(!creds.is_empty());
+            // A report is the reporter's say-so: it rotates only what the reporter could rotate
+            // through `…/rotate` (`write` there). Otherwise it's answered as `off` would be.
+            let may_rotate = match whence {
+                Whence::Code { .. } => true,
+                Whence::Report { by } => by.allows(Action::Write, &Scope::at(holder, env, path)),
+            };
             let res = self.db.write(|c| {
                 // Claims first, so the event says what happens next.
                 let mut now_rotating: Vec<(String, String, String)> = vec![];
                 let mut requested: Vec<String> = vec![];
-                if setting == LeakRotate::Managed && !creds.is_empty() {
+                let mut capped: Vec<String> = vec![];
+                if setting == LeakRotate::Managed && may_rotate && !creds.is_empty() {
                     let e = envs::by_slug(c, holder, env)?;
                     let approvals = e.needs_request() || !crate::folder_policy::covering(c, &e.id, &[path])?.is_empty();
                     for (&cred, &key) in &creds {
-                        if !claim(c, holder, &e.id, cred, now)? {
+                        if rotated_lately(c, &e.id, cred, path, key, now)? {
+                            capped.push(key.to_string());
+                            continue;
+                        }
+                        if !claim(c, holder, &e.id, cred, path, key, now)? {
                             continue;
                         }
                         if approvals {
-                            let id = self.open_rotate_request(c, holder, &e, path, key, &leaks, now)?;
+                            let id = self.open_rotate_request(c, holder, &e, path, key, cred, &leaks, now)?;
                             c.execute("UPDATE leak_rotations SET state = 'requested', request_id = ? WHERE env_id = ? AND credential = ?", params![id, e.id, cred])?;
                             requested.push(id);
                         } else {
@@ -293,8 +314,16 @@ impl Secrets {
                     data["requests"] = json!(requested);
                     summary = format!("{summary}; {env} needs approvals, so its rotation waits in {}", requested.join(", "));
                 }
-                // The event once a day; a claim (above) whenever there's a credential to rotate.
-                if crate::events::fresh(c, holder, &mark, now)? || !now_rotating.is_empty() || !requested.is_empty() {
+                if !capped.is_empty() {
+                    if now_rotating.is_empty() {
+                        data["rotating"] = json!(false);
+                    }
+                    data["reason"] = json!(CAPPED);
+                    summary = format!("{summary}; {} {CAPPED}, so roll doesn't rotate it again yet", capped.join(", "));
+                }
+                // The event once a day; a claim (above) whenever there's a credential to rotate,
+                // and a held one each time (whoever keeps reporting it hears why).
+                if crate::events::fresh(c, holder, &mark, now)? || !now_rotating.is_empty() || !requested.is_empty() || !capped.is_empty() {
                     crate::audit::record_event(c, mac, holder, &by, "secrets.leaked", Some(env), Some(path), &keys, &summary, now, Event::new(Kind::SecretLeaked, data))?;
                 }
                 Ok::<_, Error>(now_rotating)
@@ -372,16 +401,40 @@ impl Secrets {
     }
 }
 
-/// Claim a leaked credential's rotation (in the leak's write): new, or one that failed or whose
-/// node stopped more than [`RETRY_MS`] ago. A rotation waiting in a change request is never
-/// claimed again: whoever reviews it decides.
-fn claim(c: &Conn<'_>, project: &str, env_id: &str, credential: &str, now: i64) -> Result<bool> {
+/// Claim a leaked credential's rotation (in the leak's write), found by `path`/`key`: new, or
+/// one that failed or whose node stopped more than [`RETRY_MS`] ago. A rotation waiting in a
+/// change request is never claimed again: whoever reviews it decides.
+fn claim(c: &Conn<'_>, project: &str, env_id: &str, credential: &str, path: &str, key: &str, now: i64) -> Result<bool> {
     Ok(c.execute(
-        "INSERT INTO leak_rotations (project_id, env_id, credential, state, request_id, at) VALUES (?, ?, ?, 'claimed', NULL, ?)
-         ON CONFLICT (env_id, credential) DO UPDATE SET state = 'claimed', at = excluded.at
+        "INSERT INTO leak_rotations (project_id, env_id, credential, state, request_id, at, path, key) VALUES (?, ?, ?, 'claimed', NULL, ?, ?, ?)
+         ON CONFLICT (env_id, credential) DO UPDATE SET state = 'claimed', at = excluded.at, path = excluded.path, key = excluded.key
          WHERE leak_rotations.state IN ('claimed', 'failed') AND leak_rotations.at < ?",
-        params![project, env_id, credential, now, now - RETRY_MS],
+        params![project, env_id, credential, now, path, key, now - RETRY_MS],
     )? == 1)
+}
+
+/// Whether a key on `credential` (`path`/`key`, or another key sharing it) rotated for a leak of
+/// an earlier credential within [`CAP_MS`], or is rotating now: at most one leak rotation per key
+/// an hour, so revealing each new value and reporting it again can't churn the key.
+fn rotated_lately(c: &Conn<'_>, env_id: &str, credential: &str, path: &str, key: &str, now: i64) -> Result<bool> {
+    let mut on: Vec<(String, String)> = match credential.strip_prefix("cred:") {
+        Some(id) => c.query("SELECT path, key FROM secrets WHERE env_id = ? AND owner = '' AND link_state LIKE ?", [env_id, &format!("%\"credential\":\"{id}\"%")], |r| Ok((r.get(0)?, r.get(1)?)))?,
+        None => vec![],
+    };
+    on.push((path.to_string(), key.to_string()));
+    for (p, k) in on {
+        let hit: Option<i64> = c
+            .query_row(
+                "SELECT 1 FROM leak_rotations WHERE env_id = ? AND path = ? AND key = ? AND credential <> ? AND state IN ('claimed', 'rotated') AND at > ? LIMIT 1",
+                params![env_id, p, k, credential, now - CAP_MS],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if hit.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// A folder's leaked keys, and its leaked credentials, each with a key it was found by.
@@ -393,9 +446,9 @@ fn warn_unrecorded(e: Error) -> HashMap<String, LeakRotate> {
 }
 
 /// A shared managed link's credential, from its row (`owner`, `link`, `link_state`): what a leak
-/// of it rotates. One without a credential id (from before they had one) is named by its folder
-/// and key.
-fn credential_of(owner: &str, link: Option<&str>, state: Option<&str>, path: &str, key: &str) -> Option<String> {
+/// of it rotates, and what a rotation request names as leaked. One without a credential id (from
+/// before they had one) is named by its folder and key.
+pub(crate) fn credential_of(owner: &str, link: Option<&str>, state: Option<&str>, path: &str, key: &str) -> Option<String> {
     if !owner.is_empty() {
         return None;
     }

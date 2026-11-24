@@ -3556,14 +3556,31 @@ webhook design do.
     credential is retired now and revoked as soon as the new one is stored. A failed revoke goes to
     the sweeper and is retried a minute later. Whatever still holds the old value stops working
     until it reads again.
+- **Who may report a leak that rotates.** roll code's own finds (a change's added lines, a repo
+  scan) rotate as `roll:leaks`: nobody's say-so starts them. A report (`POST …/leaks` with
+  `leaked: true`) rotates a key only where the reporter itself may rotate it, `write` at its
+  environment and folder, as `…/rotate` asks. A caller that may only `read` and `reveal` there (a
+  CI token, a workload identity's login) still reports it: the event goes out with
+  `reported: true` and `rotatable: true`, as under `off`, and nothing rotates. Reading a value is
+  never the power to cut it (roll MCP leaves `leaked` out of `secrets_scan` for the same reason).
+- **At most once an hour per key.** Whatever found the leak, a key rotated for one isn't rotated
+  for another within the hour: `leak_rotations` keeps the environment, folder and key each
+  rotation was found by, and a key sharing the credential counts too. A leak of its new value
+  within the hour is recorded with `rotating: false` and `reason: "rotated within the hour"`, each
+  time it's reported, and rotates nothing. So revealing each new value and reporting it again
+  can't churn the key against the vendor.
 - **Where approvals are needed.** A leak never rotates a key in an environment, or a folder, that
   needs approvals (a protected environment with `approvals` ≥ 1, or a folder policy). Instead it
   opens a change request for the rotation (`action: "rotate"`, its one item the key, `rotated`),
   and the event says so (`requests`). Nothing is issued until the request is applied with its
   approvals. Applying it rotates the key with no grace, as above. A rotation that fails then leaves
-  the request as it was.
-- **Once.** A credential is claimed in `leak_rotations` (by environment and credential id) in the
-  same write as the event, before anything is issued. So one leak rotates it once, on one node,
+  the request as it was. The request keeps the credential that leaked: if the key is on another
+  one by the time it's applied (rotated by hand or on schedule meanwhile), applying it issues
+  nothing and answers `state: "applied"` with `outcome: "already rotated (…)"`, so it never cuts
+  a credential that didn't leak. A scheduled rotation of the leaked credential applies every
+  request still waiting for it the same way (`request.apply`, `request.decided`).
+- **Once.** A credential is claimed in `leak_rotations` (by environment and credential id, with the
+  folder and key it was found by) in the same write as the event, before anything is issued. So one leak rotates it once, on one node,
   however often the change is read again. After the rotation the stored value differs, so the old
   one no longer matches. A rotation that failed, or whose node stopped, is claimed again when the
   same value is found an hour later or more. A rotation waiting in a change request isn't: its
@@ -5892,7 +5909,7 @@ roll-workspace's records, not secrets' audit rows: they're the workspace's own f
 | --- | --- | --- |
 | `secret.changed` | a change added, changed, linked or rotated stored values (a change that only edits comments, tags or expiry isn't one) | `via`, `change` (its number in the history), `version` (one key) or `versions` (`{key: version}`), `keys` when the row names more (the change's other keys only had their metadata edited or were deleted), `deleted` (keys the same change deleted), `folders` (a change across folders) |
 | `secret.deleted` | a change only deleted keys (a folder's delete too) | `via`, `change`, `version` or `versions` (the delete's), `folders` (a change across folders) |
-| `secret.leaked` | a stored value turned up in a roll code repository (a change's added lines or a scan) or in text reported published (`POST …/leaks` with `leaked: true`), in the project holding the value, once a day for the same keys and place and whenever a rotation of them starts ("When a value leaks"); or GitHub's secret scanning found a placeholder (`secrets.placeholders.end`) | `repo` (and `project`, the repo's, when the value came from another's shared folder) or `reported: true`, with `rotatable` (roll can rotate one of the keys), `rotating` (the keys `leaks.rotate = managed` rotates now) and `requests` (the change requests opened for their rotation where approvals are needed); or `placeholder`, `consumer`, `reason` |
+| `secret.leaked` | a stored value turned up in a roll code repository (a change's added lines or a scan) or in text reported published (`POST …/leaks` with `leaked: true`), in the project holding the value, once a day for the same keys and place and whenever a rotation of them starts ("When a value leaks"); or GitHub's secret scanning found a placeholder (`secrets.placeholders.end`) | `repo` (and `project`, the repo's, when the value came from another's shared folder) or `reported: true`, with `rotatable` (roll can rotate one of the keys), `rotating` (the keys `leaks.rotate = managed` rotates now; `false` with `reason: "rotated within the hour"` when the keys rotated for a leak within the hour) and `requests` (the change requests opened for their rotation where approvals are needed); or `placeholder`, `consumer`, `reason` |
 | `scan.finding` | `roll secrets scan` or roll MCP's credential guard (`POST …/leaks`) matched values: a row per folder | `candidates`, `matched`, `guard` |
 | `rotation.failed` | a managed key's scheduled rotation failed: once as a failing run starts (health's `rotation_failing` until one works); a leaked key's rotation failed | `reason`, `via: "leak"` (a leak's) |
 | `rotation.succeeded` | a rotation worked, scheduled, `--now` or for a leak: a managed key's new credential (the row right after its `secret.changed` via `rotation`, in the same transaction), or a live link's resource credential reset | `mode` (`managed` or `live`), `scheduled`, `version` and `change` (managed), `sharing` (the keys holding the same credential, when more than one), `via: "leak"` and `grace_minutes: 0` (a leak's: the leaked credential revoked at once) |
@@ -6191,7 +6208,7 @@ isn't in the workspace is 404.
 | `DELETE /audit/sinks/{id}` | | 204 |
 | `GET /v1/secrets/findings` | | `{project, project_name, findings: Finding[]}[]`: every project's findings the caller may read, projects with none left out |
 | `GET /health?code=` | | `Finding[]`, worst first: every standard environment's findings the caller may read (`read` on the project) |
-| `POST /leaks` | `{candidates: string[], leaked?: boolean}` (at most 20,000; `leaked`: the text was published, so what it matches is a leak, answered as in "When a value leaks", 400 with the guard header); header `X-Roll-Guard: 1` from a credential guard (roll MCP's check of what a tool call would write), audited as `secrets.guard` instead of `secrets.scan`; rolld keeps the header only on a request roll MCP's guard tool makes in process, and removes anyone else's | `{index, key, environment, path}[]`: candidates that are values the caller may reveal (`read` on the project) |
+| `POST /leaks` | `{candidates: string[], leaked?: boolean}` (at most 20,000; `leaked`: the text was published, so what it matches is a leak, answered as in "When a value leaks": it rotates a managed key only where the caller may `write`; 400 with the guard header); header `X-Roll-Guard: 1` from a credential guard (roll MCP's check of what a tool call would write), audited as `secrets.guard` instead of `secrets.scan`; rolld keeps the header only on a request roll MCP's guard tool makes in process, and removes anyone else's | `{index, key, environment, path}[]`: candidates that are values the caller may reveal (`read` on the project) |
 | `POST /validity` | `{credentials: {value, pair?}[]}` (at most 200; `pair`: an AWS access key id's secret access key) | `{validity_checks: "on" \| "off", results: Checked[]}`, one per credential in order (`write` on the project); while checks are off, `results` is empty and nothing is asked. `Checked` is `{fingerprint, kind, result: "live" \| "invalid" \| "unknown", account?, checked_at?, why?, rotator?: "aws-iam" \| "github-app"}` ("Is it live?") |
 | `GET /unstored/{fingerprint}` | | `Checked`: a credential's last check (`read`; 404 when it hasn't been checked) |
 | `GET /kms` | | `{key: string \| null}`: the customer-managed key wrapping the project's data key (admin) |
@@ -6385,7 +6402,7 @@ type Cell = { fp: string; version: number; updated_at: number; link: Link | null
 type Compare = { from: string; to: string; path: string; rows: { key: string; status: "same" | "different" | "only_from" | "only_to" | "hidden"; from: number | null; to: number | null }[] };
 type Request = { id: string; environment: string; path: string; message: string; by: string; at: number; state: "open" | "approved" | "rejected" | "applied" | "closed" | "stale"; items: Item[]; reviews: { by: string; verdict: "approve" | "reject"; comment: string; at: number }[]; approvals: number; approvals_needed: number; applied_seq: number | null };
 type Compare = { from: string; to: string; path: string; rows: { key: string; status: "same" | "different" | "only_from" | "only_to"; from: number | null; to: number | null }[] };
-type Request = { id: string; environment: string; path: string; message: string; by: string; at: number; state: "open" | "approved" | "rejected" | "applied" | "closed" | "stale"; items: Item[]; reviews: { by: string; verdict: "approve" | "reject"; comment: string; at: number; gates?: (string | null)[] }[]; approvals: number; approvals_needed: number; gates: { path?: string; approvals: number; approvers?: string[]; approved: number }[]; applied_seq: number | null };
+type Request = { id: string; environment: string; path: string; message: string; by: string; at: number; state: "open" | "approved" | "rejected" | "applied" | "closed" | "stale"; items: Item[]; reviews: { by: string; verdict: "approve" | "reject"; comment: string; at: number; gates?: (string | null)[] }[]; approvals: number; approvals_needed: number; gates: { path?: string; approvals: number; approvers?: string[]; approved: number }[]; applied_seq: number | null; action?: "delete_environment" | "rotate"; outcome?: string /* a leak's rotation applied after its key was rotated meanwhile: "already rotated (…)", nothing issued */ };
 type FolderPolicy = { path: string; approvals: number; approvers: string[]; created_at: number; created_by: string };
 type LinkTarget = { kind: string; ref: string; name: string; fields: { field: string; label: string; modes: Link["mode"][]; secret: boolean; suggest: string; credential?: string }[] };
 type Lease = { id: string; environment: string; path: string; key: string; kind: "dynamic" | "retired"; link: Link | null; consumer: string; issued_at: number; expires_at: number; revoked_at: number | null };
@@ -6429,7 +6446,7 @@ secrets(id PK, project_id, env_id, path, key, owner, version, value BLOB, fp, co
 versions(secret_id, version, seq, env_id, path, key, owner, op, value BLOB, fp, comment, tags, link,
          at, by, PRIMARY KEY (secret_id, version))
 changes(project_id, seq, env_id, path, kind, message, by, at, keys, PRIMARY KEY (project_id, seq))
-requests(id PK, project_id, env_id, path, message, by, at, state, ops BLOB, items, reviews, applied_seq)
+requests(id PK, project_id, env_id, path, message, by, at, state, ops BLOB, items, reviews, applied_seq, action, credential, outcome)  -- credential: a leak rotation's leaked one; outcome: "already rotated (…)"
 leases(id PK, project_id, env_id, key, path, kind, link, handle, consumer, issued_at, expires_at,
        revoked_at)
 key_hosts(secret_id PK, project_id, binding, set_by, set_at)  -- binding: Hosts as JSON

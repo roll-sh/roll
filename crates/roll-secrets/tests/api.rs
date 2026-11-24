@@ -3338,6 +3338,60 @@ async fn a_leaked_key_in_an_environment_with_approvals_gets_a_change_request_ins
     assert_eq!(api.sent.5.lock().unwrap().live, ["sgk2"], "the leaked key is revoked at once");
 }
 
+/// An approved leak request whose key rotated meanwhile issues nothing: the credential it would
+/// cut with no grace isn't the one that leaked.
+#[tokio::test]
+async fn a_leak_request_whose_key_rotated_meanwhile_is_applied_as_already_rotated() {
+    let api = Api::new().await;
+    sendgrid_in_production(&api).await;
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "approvals": 1 }))).await;
+    api.ok(Method::PATCH, "", Some(json!({ "leaks": { "rotate": "managed" } }))).await;
+    leak_in_code(&api, "SG.key-1").await;
+    let open = api.ok(Method::GET, "/environments/production/requests?state=open", None).await;
+    let id = open[0]["id"].as_str().unwrap().to_string();
+    api.ok(Method::POST, "/environments/production/secrets/SENDGRID_API_KEY/rotate", None).await;
+    assert_eq!(api.sent.5.lock().unwrap().live, ["sgk1", "sgk2"], "rotated by hand, with its grace");
+
+    api.ok(Method::POST, &format!("/environments/production/requests/{id}/review"), Some(json!({ "verdict": "approve" }))).await;
+    let r = api.ok(Method::POST, &format!("/environments/production/requests/{id}/apply"), None).await;
+    assert!(r["state"] == "applied" && r["outcome"].as_str().is_some_and(|o| o.starts_with("already rotated")) && r["applied_seq"].is_null(), "{r}");
+    assert_eq!(api.values("production", "/").await["values"]["SENDGRID_API_KEY"], "SG.key-2");
+    assert_eq!(api.sent.5.lock().unwrap().live, ["sgk1", "sgk2"], "nothing issued or revoked");
+}
+
+/// A report that text was published (`leaked: true`) rotates a managed key only for a caller
+/// that could rotate it itself (`write`), and a key rotates for a leak at most once an hour.
+#[tokio::test]
+async fn a_reported_leak_rotates_only_for_a_writer_and_once_an_hour() {
+    let api = Api::new().await;
+    sendgrid_in_production(&api).await;
+    api.ok(Method::PATCH, "", Some(json!({ "leaks": { "rotate": "managed" } }))).await;
+    let start = api.ok(Method::GET, "/events?latest=1", None).await["next"].as_i64().unwrap();
+    let report = |value: &str| json!({ "candidates": [value], "leaked": true });
+
+    let reader = api.token(json!({ "name": "ci", "actions": ["read", "reveal"] }));
+    let (s, found) = api.req(Method::POST, "/leaks", Some(report("SG.key-1")), Some(reader.as_str())).await;
+    assert_eq!((s, &found[0]["key"]), (StatusCode::OK, &json!("SENDGRID_API_KEY")), "{found}");
+    assert_eq!(api.values("production", "/").await["values"]["SENDGRID_API_KEY"], "SG.key-1", "a reader's report rotates nothing");
+    assert_eq!(api.sent.5.lock().unwrap().live, ["sgk1"]);
+
+    let writer = api.token(json!({ "name": "deploy", "actions": ["read", "reveal", "write"] }));
+    api.req(Method::POST, "/leaks", Some(report("SG.key-1")), Some(writer.as_str())).await;
+    assert_eq!(api.values("production", "/").await["values"]["SENDGRID_API_KEY"], "SG.key-2");
+    assert_eq!(api.sent.5.lock().unwrap().live, ["sgk2"], "rotated at once, no grace");
+    // The new value reported too, within the hour: held, and the event says why.
+    api.req(Method::POST, "/leaks", Some(report("SG.key-2")), Some(writer.as_str())).await;
+    assert_eq!(api.values("production", "/").await["values"]["SENDGRID_API_KEY"], "SG.key-2");
+    assert_eq!(api.sent.5.lock().unwrap().made, 2);
+
+    let leaked = api.ok(Method::GET, &format!("/events?after={start}&kinds=secret.leaked"), None).await;
+    let data: Vec<&Value> = leaked["events"].as_array().unwrap().iter().map(|e| &e["data"]).collect();
+    assert_eq!(data.len(), 3, "{leaked}");
+    assert_eq!((&data[0]["reported"], &data[0]["rotatable"], &data[0]["rotating"]), (&json!(true), &json!(true), &Value::Null), "{leaked}");
+    assert_eq!(data[1]["rotating"], json!(["SENDGRID_API_KEY"]));
+    assert_eq!((&data[2]["rotating"], &data[2]["reason"]), (&json!(false), &json!("rotated within the hour")), "{leaked}");
+}
+
 /// Register `vendor` (a refused admin credential first, which isn't kept), link `key` to its
 /// secret in production, managed with `options`, and answer the registration.
 async fn key_vendor(api: &Api, vendor: &str, target: Value, credential: &str, key: &str, options: Value) -> Value {

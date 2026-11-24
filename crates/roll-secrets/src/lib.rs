@@ -612,6 +612,12 @@ impl Secrets {
         // What a leaked managed key does (leaks.rs): `managed` rotates it, `off` (NULL) reports it.
         db.add_column("projects", "leak_rotate", "TEXT")?;
         db.ensure_schema(leaks::SCHEMA)?;
+        // The key a leak rotation was found by (at most one an hour per key), and a rotation
+        // request's leaked credential and what applying it did instead of rotating.
+        db.add_column("leak_rotations", "path", "TEXT")?;
+        db.add_column("leak_rotations", "key", "TEXT")?;
+        db.add_column("requests", "credential", "TEXT")?;
+        db.add_column("requests", "outcome", "TEXT")?;
         db.ensure_schema(alerts::SCHEMA)?;
         db.ensure_schema(decoys::SCHEMA)?;
         db.ensure_schema(intercept::SCHEMA)?;

@@ -175,6 +175,7 @@ function RequestCard({ env, request: r, onChanged }: { env: Environment; request
         <ActorMark who={r.by} /> · {ago(r.at)}
         {r.path !== "/" && <span className="font-mono">· {r.path}</span>}
         {r.applied_seq !== null && <span>· applied as change #{r.applied_seq}</span>}
+        {r.outcome && <span>· {r.outcome}</span>}
       </p>
       {r.gates.length > 1 || r.gates.some((g) => g.path) ? (
         <p className="mt-1 flex flex-wrap gap-1.5 text-[10.5px]">
