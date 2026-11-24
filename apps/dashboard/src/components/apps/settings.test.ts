@@ -31,6 +31,16 @@ describe("the settings form", () => {
     });
   });
 
+  it("keeps route alerts when another alert is edited, and reads them as lines", () => {
+    const routes = [{ route: "/api/checkout", method: "POST", error_pct: 2, p95_ms: 800 }, { route: "/api/*", p95_ms: 1500 }];
+    const withRoutes = { ...svc, run: { ...svc.run, alerts: { memory_pct: 90, error_pct: 5, p95_ms: 0, routes } } };
+    const f = formOf(withRoutes);
+    expect(f.alertRoutes).toBe("POST /api/checkout 5xx >= 2% p95 >= 800ms\n/api/* p95 >= 1500ms");
+    expect(patchOf(withRoutes, { ...f, alertMemory: "80" }).run?.alerts?.routes).toEqual(routes);
+    // A line it can't read goes as it is, for the API to refuse, never dropped.
+    expect(patchOf(withRoutes, { ...f, alertRoutes: "get /users/:id 5xx > 10%\n/oops" }).run?.alerts?.routes).toEqual([{ route: "/users/:id", method: "GET", error_pct: 10 }, { route: "/oops" }]);
+  });
+
   it("keeps what was edited when the service changes under the form", () => {
     const base = formOf(svc);
     const edited = { ...base, build: "pnpm build:prod" };

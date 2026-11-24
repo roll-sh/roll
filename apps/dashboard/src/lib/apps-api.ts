@@ -24,6 +24,14 @@ export interface Sso {
   allow: string[];
 }
 
+/** What an environment's last week says about a setting, and the body that acts on it. */
+export interface Advice {
+  kind: "memory" | "cpu" | "max_instances" | "min_instances";
+  message: string;
+  set: EnvironmentPut;
+  saving_usd_month?: number;
+}
+
 /** What a service would cost at most (`POST /v1/apps/quote`), in US dollars at roll's prices. */
 export interface Quote {
   instance_hour: number;
@@ -114,6 +122,16 @@ export interface PushState extends Push {
 }
 
 /** An alert on one of the app's own gauges: above or below a threshold for 1–5 minutes running. */
+/** An alert on one route (a route group as Routes shows it, or a prefix `/api/*`), for one method or all; at most 10. */
+export interface RouteAlert {
+  route: string;
+  method?: string;
+  /** 5xx at or above this share of its requests in five minutes (0, off). */
+  error_pct?: number;
+  /** Its p95 at or above this (0, off). */
+  p95_ms?: number;
+}
+
 export interface MetricAlert {
   name: string;
   above?: number;
@@ -165,7 +183,7 @@ export interface Run {
   volume?: { mount: string; size_gb: number; backups?: { every_hours: number; keep: number } };
   /** Metric alerts (`alert.*` events), over five minutes; each 0 is off. */
   /** log_match: text its output holds log_count times in five minutes (alert.log). */
-  alerts?: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct?: number; log_match?: string; log_count?: number; cpu_pct?: number; metrics?: MetricAlert[]; /** The last hour against the same hour of the week over four weeks: alert.anomaly. */ anomaly?: boolean };
+  alerts?: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct?: number; log_match?: string; log_count?: number; cpu_pct?: number; metrics?: MetricAlert[]; /** The last hour against the same hour of the week over four weeks: alert.anomaly. */ anomaly?: boolean; /** One route's 5xx share or p95 over five minutes: alert.route. */ routes?: RouteAlert[] };
   /** Its service level objective: `objective`% of requests not 5xx (and of minutes under `latency_ms` at p95) over `window_days`; `alert.slo` when its budget burns fast. */
   slo?: Slo;
   /** Its own Prometheus endpoint, scraped every 15 s on each running instance (port: the app's own by default). */
@@ -749,6 +767,8 @@ export interface Environment extends EnvironmentSummary {
   schedules?: { name: string; next_run_at: number | null; last: { job: string; status: Job["status"]; started_at: number } | null; last_call?: { at: number; status?: number; ms: number; error?: string } }[];
   /** Its instances keep crashing: three or more in the last ten minutes. */
   crash_loop: { crashes: number; last_at: number; last_error: string } | null;
+  /** Its last cold start on the node serving it: the container up, then the app until it answered. */
+  last_cold_start?: { at: number; ms: number; runtime_ms: number; app_ms: number };
   /** A gradual rollout under way: the new deployment and the percent of requests it takes. */
   canary?: { deployment: string; share: number; /** Its step passed and it waits for a person (`rollout.manual`). */ waiting?: boolean } | null;
   /** Its own run settings over the service's; empty: the service's. */
@@ -910,6 +930,16 @@ export interface RootCandidate {
 
 export type PlanRequest = { repo: string; revision?: string; root?: string } | { git: string; branch?: string; root?: string; git_login?: { username: string; password: string } } | { files: Record<string, string> };
 
+/** One of a build's steps (BuildKit's): a Dockerfile step, sending the context, exporting the image. */
+export interface BuildStep {
+  name: string;
+  /** How long it ran, once it finished. */
+  ms?: number;
+  /** Its cache answered: it didn't run. */
+  cached: boolean;
+  failed?: true;
+}
+
 export interface Deployment {
   id: string;
   service: string;
@@ -928,6 +958,8 @@ export interface Deployment {
   started_at: number | null;
   finished_at: number | null;
   ready_ms: number | null;
+  /** Its image's size, where the runtime says. */
+  image_bytes?: number;
   /** What the app or the build printed when it failed (the step, its last line): only shown here, never sent in a commit status or a notification. */
   error_detail?: string;
   /** How to fix a failure roll knows (a private image's login, more memory, a lockfile): the setting and its command. */
@@ -936,6 +968,8 @@ export interface Deployment {
   pruned_at?: number;
   /** When each step began (`build`, `pre_deploy`, `rollout`, then `live` or `failed`): on a single deployment's GET. */
   steps?: { step: string; at: number }[];
+  /** Its build's steps from BuildKit's progress, in order: how long each took, which its cache answered, where it failed. On a single deployment's GET. */
+  build_steps?: BuildStep[];
   /** Its image's last scan for known vulnerabilities, once one ran. */
   vulnerabilities?: ScanSummary;
   /** Who approved putting it live, where its environment asks for approvals (single GET only). */
@@ -1370,6 +1404,7 @@ export type NotifyEvent =
   | "alert.latency"
   | "alert.capacity"
   | "alert.log"
+  | "alert.route"
   | "error.new"
   | "error.regressed"
   | "cron.failed"
@@ -1770,6 +1805,7 @@ export const appsApi = {
     return data as Deployment;
   },
   metrics: (id: string, e: string, minutes = 60) => call<Metrics>("GET", `${env(id, e)}/metrics${qs({ minutes })}`),
+  advice: (id: string, e: string) => call<{ days: number; minutes: number; advice: Advice[] }>("GET", `${env(id, e)}/advice`),
   /** Errors and latency by route over the last `minutes` (5–60). */
   routes: (id: string, e: string, minutes = 60) => call<RouteStats>("GET", `${env(id, e)}/routes${qs({ minutes })}`),
   analytics: (id: string, e: string, minutes = 1440) => call<Analytics>("GET", `${env(id, e)}/analytics${qs({ minutes })}`),

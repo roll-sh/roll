@@ -1,7 +1,7 @@
 import { HorizonMark } from "@roll/brand";
 import { Check, CircleHelp, ExternalLink, Rocket, RotateCcw, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { appsApi, FUNCTION_ROUTES, runFunctions, deploymentUrl, followChanges, followLog, formatMs, isPending, shortSha, stepDurations, TRIGGER_LABEL, type Deployment, type DeployCommits, type Environment, type Explanation, type LogLine, type ScanSummary, type Vulnerability } from "@/lib/apps-api";
+import { appsApi, FUNCTION_ROUTES, runFunctions, deploymentUrl, followChanges, followLog, formatMs, isPending, shortSha, stepDurations, TRIGGER_LABEL, type BuildStep, type Deployment, type DeployCommits, type Environment, type Explanation, type LogLine, type ScanSummary, type Vulnerability } from "@/lib/apps-api";
 import { btn, panel } from "../ui";
 import { PlanDetails } from "./new-service";
 import { usePageVisible } from "./live";
@@ -159,6 +159,11 @@ export function Deployments({
                     <p className="mt-0.5 flex gap-2 font-mono text-[11px] text-subtle">
                       <span title={clock(d.created_at, true)}>{since(d.created_at, now)}</span>
                       {d.ready_ms != null && <span>ready in {formatMs(d.ready_ms)}</span>}
+                      {d.image_bytes != null && (
+                        <span className={d.image_bytes >= 2 ** 30 ? "text-muted" : undefined} title="Its image's size: a smaller one starts faster">
+                          {d.image_bytes >= 2 ** 30 ? `${(d.image_bytes / 2 ** 30).toFixed(1)} GB` : `${Math.round(d.image_bytes / 2 ** 20)} MB`}
+                        </span>
+                      )}
                       {d.vulnerabilities && !d.vulnerabilities.error && d.vulnerabilities.critical + d.vulnerabilities.high > 0 && (
                         <span className={d.vulnerabilities.critical ? "text-danger" : "text-muted"} title="Known vulnerabilities in its image">
                           {worst(d.vulnerabilities)}
@@ -241,8 +246,8 @@ export function Deployments({
   );
 }
 
-/** The open deployment's steps with their times (its own GET has them); polled while it's on its way. */
-function useSteps(service: string, env: string, d: Deployment) {
+/** The open deployment's own GET (its steps with their times, its build's steps); polled while it's on its way. */
+function useFull(service: string, env: string, d: Deployment) {
   const [full, setFull] = useState<Deployment | null>(null);
   const pending = isPending(d.status);
   const visible = usePageVisible();
@@ -259,7 +264,38 @@ function useSteps(service: string, env: string, d: Deployment) {
       if (t) clearInterval(t);
     };
   }, [service, env, d.id, pending, visible]);
-  return full ? stepDurations(full) : [];
+  return full;
+}
+
+/** A build's time by step (Vercel's, Netlify's): each step's share of the slowest, which its cache answered. */
+function BuildSteps({ steps }: { steps: BuildStep[] }) {
+  const ran = steps.filter((s) => !s.cached);
+  const total = ran.reduce((t, s) => t + (s.ms ?? 0), 0);
+  const most = Math.max(1, ...steps.map((s) => s.ms ?? 0));
+  return (
+    <details className="mb-2 rounded-lg border border-line bg-panel text-[11.5px]">
+      <summary className="flex cursor-pointer items-center gap-2 px-3 py-2 text-muted">
+        <span className="text-fg">Build steps</span>
+        <span>
+          {steps.length} · {steps.length - ran.length} cached
+        </span>
+        <span className="ml-auto font-mono tabular-nums">{formatMs(total)} running</span>
+      </summary>
+      <ol className="space-y-1 border-t border-line px-3 py-2" aria-label="Build steps">
+        {steps.map((s, i) => (
+          <li key={i} className="grid grid-cols-[minmax(0,1fr)_6rem_4.5rem] items-center gap-3">
+            <span className={`truncate font-mono ${s.failed ? "text-danger" : s.cached ? "text-subtle" : "text-muted"}`} title={s.name}>
+              {s.name}
+            </span>
+            <span className="h-1 overflow-hidden rounded-full bg-line">
+              {!s.cached && <span className={`block h-full rounded-full ${s.failed ? "bg-danger" : "bg-fg/60"}`} style={{ width: `${Math.max(2, ((s.ms ?? 0) / most) * 100)}%` }} />}
+            </span>
+            <span className="text-right font-mono text-subtle tabular-nums">{s.cached ? "cached" : s.failed ? "failed" : s.ms != null ? formatMs(s.ms) : "—"}</span>
+          </li>
+        ))}
+      </ol>
+    </details>
+  );
 }
 
 /** A repo deployment's commits over the live one (Render's deploy view), read once it's opened. */
@@ -443,7 +479,8 @@ function WhyFailed({ service, env, d }: { service: string; env: string; d: Deplo
 
 function BuildLog({ service, env, d, explains = false }: { service: string; env: string; d: Deployment; explains?: boolean }) {
   const { lines, error } = useBuildLog(service, env, d);
-  const steps = useSteps(service, env, d);
+  const full = useFull(service, env, d);
+  const steps = full ? stepDurations(full) : [];
   const commits = useCommits(service, env, d);
   return (
     <section className="min-w-0">
@@ -468,6 +505,7 @@ function BuildLog({ service, env, d, explains = false }: { service: string; env:
           ))}
         </ol>
       )}
+      {(full?.build_steps?.length ?? 0) > 0 && <BuildSteps steps={full?.build_steps ?? []} />}
       <LogView
         lines={lines}
         className="h-[460px]"

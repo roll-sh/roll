@@ -378,13 +378,13 @@ impl Source for CodeSource {
         Ok(crate::notes::thread(comments))
     }
 
-    async fn note_resolved(&self, change: &str, note: &str, by: &str) -> anyhow::Result<()> {
-        let Some(c) = self.code.db.change(change)? else { return Ok(()) };
-        let Some(r) = self.code.db.repo_by_id(&c.repo_id)? else { return Ok(()) };
-        let body = code_control::review::preview_note::reply_body(note, crate::notes::RESOLVED);
+    async fn comment(&self, change: &str, body: &str, by: &str, outside: bool) -> anyhow::Result<Option<String>> {
+        let Some(c) = self.code.db.change(change)? else { return Ok(None) };
+        let Some(r) = self.code.db.repo_by_id(&c.repo_id)? else { return Ok(None) };
         let input = serde_json::json!({ "verdict": "comment", "body": body });
-        self.code.submit_review(&r, &c, &code_control::review::Reviewer::user(by), &input, &code_control::review::Origin::ROLL).await?;
-        Ok(())
+        let origin = code_control::review::Origin { outside, ..code_control::review::Origin::ROLL };
+        let review = self.code.submit_review(&r, &c, &code_control::review::Reviewer::user(by), &input, &origin).await?;
+        Ok(Some(review.id))
     }
 
     async fn git_commit(&self, repo: &str, revision: &str) -> anyhow::Result<Option<String>> {

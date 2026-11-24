@@ -1156,6 +1156,7 @@ async fn an_image_service_scales_to_zero_and_wakes_on_the_first_request() {
     let (svc, d) = image_service(&w, "web", json!({"port": 80})).await;
     assert_eq!(d["status"], "active", "{d}");
     assert!(d["image"].as_str().unwrap().contains("@sha256:"), "pinned by digest: {d}");
+    assert_eq!(d["image_bytes"], 48 << 20, "its image's size: {d}");
     let id = svc["id"].as_str().unwrap();
     let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await;
     assert_eq!(env["state"], "stopped", "health-checked at deploy, then back to zero: {env}");
@@ -1169,6 +1170,9 @@ async fn an_image_service_scales_to_zero_and_wakes_on_the_first_request() {
     assert!(!body["forwarded_host"].as_str().unwrap().is_empty());
     let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await;
     assert_eq!(env["state"], "running");
+    // The cold start, in parts: the container up, then the app until it answered.
+    let cold = &env["last_cold_start"];
+    assert!(cold["ms"].as_u64() == Some(cold["runtime_ms"].as_u64().unwrap() + cold["app_ms"].as_u64().unwrap()) || cold["ms"].as_u64().unwrap().abs_diff(cold["runtime_ms"].as_u64().unwrap() + cold["app_ms"].as_u64().unwrap()) <= 1, "{env}");
     // Idle: suspended, then stopped by the reaper; nothing metered while asleep.
     let live = w.apps.live(id, "production");
     live.backdate(Duration::from_secs(31));
@@ -1203,6 +1207,8 @@ async fn a_repo_service_builds_its_plan_deploys_on_push_and_rolls_back_without_a
     assert_eq!(d1["plan"]["provider"], "node", "{d1}");
     let steps: Vec<&str> = d1["steps"].as_array().unwrap().iter().map(|s| s["step"].as_str().unwrap()).collect();
     assert_eq!(steps, ["build", "rollout", "live"], "{d1}");
+    // Its build's steps, read from BuildKit's lines: how long each took, which its cache answered.
+    assert_eq!(d1["build_steps"], json!([{"name": "[1/2] FROM docker.io/library/alpine:3.20", "cached": true}, {"name": "[2/2] RUN make", "ms": 1200, "cached": false}]), "{d1}");
     // The app knows its commit, its branch and which instance it is.
     let (_, body) = visit_deployment(&w, &host(&svc["environments"][0]["url"]), &first).await;
     assert_eq!((&body["vars"]["ROLL_GIT_COMMIT"], &body["vars"]["ROLL_GIT_BRANCH"]), (&json!("a1a1a1a1a1a1"), &json!("main")), "{body}");
@@ -2513,6 +2519,29 @@ async fn traffic_unusual_for_the_hour_is_an_anomaly() {
     assert!(events("alert.resolved").await.iter().any(|e| e["data"]["alert"] == "alert.anomaly"));
 }
 
+/// Right-sizing advice (Cloud Run's recommender): memory near its limit is one to raise, a warm
+/// instance idle most of the week one to let sleep (with the month's saving), each with the body
+/// that acts on it; nothing before there's an hour to read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_environments_week_says_what_to_change() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80, "min_instances": 1, "memory_mb": 512})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    assert_eq!(call(&w.api, "GET", &format!("{env}/advice"), None).await.1["advice"], json!([]), "nothing to read yet");
+    let now = code_sql::now_ms() / 60_000;
+    let minute = |m: i64, requests: i64| apps_control::store::MinuteRow { minute: m, requests, instances: 1, memory_bytes: 470 << 20, cpu: 1.0, ..Default::default() };
+    w.apps.store.put_minutes(&id, "production", &(1..=180).map(|i| minute(now - i, if i % 20 == 0 { 3 } else { 0 })).collect::<Vec<_>>()).unwrap();
+    let (st, a) = call(&w.api, "GET", &format!("{env}/advice"), None).await;
+    let kinds: Vec<&str> = a["advice"].as_array().unwrap().iter().map(|x| x["kind"].as_str().unwrap()).collect();
+    assert_eq!((st, kinds.clone()), (StatusCode::OK, vec!["memory", "min_instances"]), "{a}");
+    assert_eq!(a["advice"][0]["set"], json!({"run": {"memory_mb": 768}}), "{a}");
+    assert!(a["advice"][1]["saving_usd_month"].as_f64() > Some(0.0), "{a}");
+    // Its body acts on it.
+    assert_eq!(call(&w.api, "PUT", &env, Some(a["advice"][1]["set"].clone())).await.0, StatusCode::OK);
+    assert_eq!(call(&w.api, "GET", &env, None).await.1["run"]["min_instances"], 0);
+}
+
 /// Attack mode: on by itself once a minute's requests reach its threshold (said as
 /// `attack.mode`), every visitor without a pass then gets the challenge page while a rule that
 /// denies still denies; on and off by hand with `challenge_until`.
@@ -2547,6 +2576,60 @@ async fn a_flood_turns_attack_mode_on_until_it_ends() {
     assert_eq!(call(&w.api, "PUT", &base, Some(json!({"challenge_until": null}))).await.0, StatusCode::OK);
     assert_eq!(get("/").await, StatusCode::OK);
     assert!(call(&w.api, "GET", &base, None).await.1.get("challenge_until").is_none());
+}
+
+/// An alert on one route (`alert.route`) fires on that route's 5xx share while the service as a
+/// whole is fine, once, and clears naming the route; routes are folded as Routes folds them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_alert_on_one_route_fires_for_that_route_only() {
+    let w = world().await;
+    let routes = json!([{"route": "/checkout/42", "method": "post", "error_pct": 20}, {"route": "/api/*", "p95_ms": 500}]);
+    let (svc, _) = image_service(&w, "shop", json!({"port": 80, "min_instances": 1, "alerts": {"routes": routes}})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}");
+    let (_, s) = call(&w.api, "GET", &base, None).await;
+    assert_eq!(s["run"]["alerts"]["routes"][0], json!({"route": "/checkout/:id", "method": "POST", "error_pct": 20, "p95_ms": 0}), "{s}");
+    let (st, _) = call(&w.api, "PATCH", &base, Some(json!({"run": {"alerts": {"routes": [{"route": "/x"}]}}}))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "a route alert needs a threshold");
+    let access = w.apps.logs.sink(format!("http:{id}/production"), apps_control::logs::Stream::Http);
+    let line = |method: &str, path: &str, status: u16, ms: u64| access.line(json!({ "method": method, "path": path, "status": status, "ms": ms }).to_string());
+    // 10 of 30 checkouts fail; 200 pages and the API answer fine and fast.
+    for i in 0..30 {
+        line("POST", &format!("/checkout/{i}"), if i % 3 == 0 { 500 } else { 200 }, 40);
+        line("GET", "/api/items", 200, 30);
+    }
+    for _ in 0..200 {
+        line("GET", "/", 200, 5);
+    }
+    let live = w.apps.live(&id, "production");
+    let events = |kind: &'static str| {
+        let api = &w.api;
+        async move {
+            let (_, ev) = call(api, "GET", "/v1/apps/events?after=0", None).await;
+            ev["events"].as_array().unwrap().iter().filter(|e| e["kind"] == kind).cloned().collect::<Vec<Value>>()
+        }
+    };
+    // The live deployment's template can be a moment behind on a loaded machine.
+    for _ in 0..100 {
+        w.apps.judge_alerts(&live).await;
+        if !events("alert.route").await.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    w.apps.judge_alerts(&live).await;
+    let fired = events("alert.route").await;
+    assert_eq!(fired.len(), 1, "{fired:?}");
+    assert_eq!(fired[0]["data"], json!({"route": "/checkout/:id", "method": "POST", "kind": "errors", "value": 33, "threshold": 20, "requests": 30}));
+    // Enough good checkouts after: it clears once, naming the route.
+    for i in 0..100 {
+        line("POST", &format!("/checkout/{i}"), 200, 40);
+    }
+    w.apps.judge_alerts(&live).await;
+    w.apps.judge_alerts(&live).await;
+    let resolved = events("alert.resolved").await;
+    assert_eq!(resolved.len(), 1, "{resolved:?}");
+    assert_eq!(resolved[0]["data"], json!({"alert": "alert.route", "route": "/checkout/:id", "method": "POST", "kind": "errors"}));
 }
 
 /// Five minutes of 5xx answers past the alert's share make one `alert.errors` event; more of the
@@ -4802,7 +4885,7 @@ async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     let (st, hook) = call(&w.api, "POST", &base, Some(json!({"url": format!("http://{ok_at}/hook")}))).await;
     assert_eq!(st, StatusCode::CREATED, "{hook}");
     let secret = hook["secret"].as_str().unwrap().to_string();
-    assert_eq!(hook["events"], json!(["check.down", "heartbeat.missed", "alert.slo", "alert.anomaly", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.spike", "spend.limit", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]), "the default events");
+    assert_eq!(hook["events"], json!(["check.down", "heartbeat.missed", "alert.slo", "alert.anomaly", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.spike", "spend.limit", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "alert.route", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]), "the default events");
     let (_, down) = call(&w.api, "POST", &base, Some(json!({"kind": "webhook", "url": format!("http://{bad_at}/x"), "events": ["deploy.failed"]}))).await;
     let (_, list) = call(&w.api, "GET", &base, None).await;
     assert!(!list.to_string().contains(&secret) && !list.to_string().contains("/hook"), "neither the secret nor the URL comes back: {list}");

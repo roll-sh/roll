@@ -1900,7 +1900,8 @@ async fn documents_survive_unload_and_branch() {
     cfg.http_port = listener.local_addr().unwrap().port();
     cfg.home = e.home.with_extension("restarted");
     std::fs::create_dir_all(&cfg.home).unwrap();
-    for f in ["search.db", "search.db-wal", "search.db-shm"] {
+    // The catalog and the node's key that seals its passwords.
+    for f in ["search.db", "search.db-wal", "search.db-shm", "key"] {
         let _ = std::fs::copy(e.home.join(f), cfg.home.join(f));
     }
     let restarted_home = cfg.home.clone();
@@ -1944,7 +1945,8 @@ async fn always_on_clusters_load_without_a_request() {
     let mut cfg = e.cfg.clone();
     cfg.home = e.home.with_extension("restarted");
     std::fs::create_dir_all(&cfg.home).unwrap();
-    for f in ["search.db", "search.db-wal", "search.db-shm"] {
+    // The catalog and the node's key that seals its passwords.
+    for f in ["search.db", "search.db-wal", "search.db-shm", "key"] {
         let _ = std::fs::copy(e.home.join(f), cfg.home.join(f));
     }
     let restarted_home = cfg.home.clone();

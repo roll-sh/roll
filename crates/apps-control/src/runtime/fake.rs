@@ -454,6 +454,11 @@ impl Runtime for Fake {
         Ok(Box::new(ours))
     }
 
+    /// A size of its name's (an image named `…:big…` is 2 GB).
+    async fn image_bytes(&self, image: &str) -> Option<u64> {
+        Some(if image.contains("big") { 2 << 30 } else { 48 << 20 })
+    }
+
     /// A digest of its name: the same image, the same digest.
     async fn image_id(&self, image: &str) -> Option<String> {
         use sha2::{Digest, Sha256};
@@ -940,7 +945,12 @@ impl Builder for Fake {
                 _ = cancel.cancelled() => anyhow::bail!("canceled"),
             }
         }
+        // BuildKit's plain progress, as Docker writes it (its steps are read from these).
+        log.line("#3 [1/2] FROM docker.io/library/alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc");
+        log.line("#3 CACHED");
+        log.line("#4 [2/2] RUN make");
         if job.context.join("FAIL_BUILD").exists() {
+            log.line("#4 ERROR: process \"/bin/sh -c make\" did not complete successfully: exit code: 2");
             log.line("#2 ERROR: the build failed on purpose");
             anyhow::bail!("the build failed");
         }
@@ -966,6 +976,7 @@ impl Builder for Fake {
         }
         self.build_trees.lock().push(seen);
         self.build_files.lock().push(contents);
+        log.line("#4 DONE 1.2s");
         log.line("#2 DONE");
         Ok(job.tag.clone())
     }
