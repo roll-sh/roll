@@ -391,7 +391,7 @@ const PROMPTS: &[Prompt] = &[
                  on the pages the change touches, and look at each image; previews_fetch on those pages (and the API \
                  paths it changed) for their status and what they answer, if you have it; previews_try on a flow the \
                  change touches (its steps: click, type, press, wait), with previews_try_screenshot only when the text \
-                 isn't enough, if you have it; before a flow that changes its data, previews_create_restore_point, and \
+                 isn't enough, if you have it; before a flow that changes its data, previews_save_data, and \
                  after it previews_restore with previews_wait until it's ready again (it can take minutes); \
                  previews_list_notes for what people left on \
                  its pages. Tell me whether it's ready to land, with the evidence for each problem. Don't resolve \
