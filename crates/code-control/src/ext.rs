@@ -100,6 +100,19 @@ impl std::fmt::Display for Refused {
 
 impl std::error::Error for Refused {}
 
+/// A stored value found among some candidates ([`SecretEnv::leaks`]): where it is, never what.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FoundLeak {
+    /// The candidate's index.
+    pub index: usize,
+    pub key: String,
+    pub environment: String,
+    pub folder: String,
+    /// A person may rotate it from the leak's notice: a managed credential roll rotates, in a
+    /// project that doesn't rotate leaked keys on its own (`leaks.rotate` is `off`).
+    pub rotatable: bool,
+}
+
 /// An environment's secrets from roll secrets (docs/secrets.md, "Consumption"). Values come back
 /// resolved; the caller puts them in a process's environment and nowhere else (no records, no
 /// logs). Every read is in the project's audit log as `consumer`.
@@ -132,10 +145,11 @@ pub trait SecretEnv: Send + Sync {
         let _ = (by, project, environment, consumer);
         Err(Refused("roll secrets can't read as its copier".into()).into())
     }
-    /// (candidate index, key, environment, folder) for every secret, in any environment of the
-    /// projects that have repo `owner/name` on their canvas, whose value is one of `candidates`
-    /// (matched by fingerprint; values never come back). Empty for a repo on no project's canvas.
-    async fn leaks(&self, repo: &str, candidates: Vec<String>) -> anyhow::Result<Vec<(usize, String, String, String)>>;
+    /// Every secret, in any environment of the projects that have repo `owner/name` on their
+    /// canvas, whose value is one of `candidates` (matched by fingerprint; values never come
+    /// back). Empty for a repo on no project's canvas. roll secrets answers it as a leak (its
+    /// event, and the project's `leaks.rotate`).
+    async fn leaks(&self, repo: &str, candidates: Vec<String>) -> anyhow::Result<Vec<FoundLeak>>;
     /// Of `keys`, the ones a standard environment of the project that has repo `owner/name` on its
     /// canvas doesn't define, with those environments: (key, [environment]). Names only.
     async fn missing(&self, repo: &str, keys: Vec<String>) -> anyhow::Result<Vec<(String, Vec<String>)>> {

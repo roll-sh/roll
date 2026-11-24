@@ -889,6 +889,12 @@ case "$ENDPOINTS" in "/openapi.json 200 "*" ms, main "[0-9]*" ms") ;; *) echo "t
 # And its answer's shape against main's: the operation the change removes is a field gone.
 RESHAPED=$(api GET "/v1/previews/$PV" | jq_ "' | '.join('%s %s' % (c['path'], c.get('now') or 'gone') for x in d['base_change'].get('endpoints') or [] for c in x.get('shape_changes') or [])")
 [ "$RESHAPED" = "paths./users/{id} gone" ] || { echo "the change's /openapi.json should lose paths./users/{id} against main's: $RESHAPED"; exit 1; }
+# The feedback button driven in a real browser (Playwright's image, which the run built by now):
+# in through the preview's link, an element picked and a note written; what it opens roll with
+# names the page, the element and the note. Nothing else drives the page's toolbar end to end.
+FB_LINK=$(api GET "/v1/previews/$PV" | jq_ "[x for x in d['services'] if x['name'] == 'web'][0]['share_url']")
+FB_SAID=$(docker run --rm --name roll-previews-fbtest --network host -e LINK="$FB_LINK" -v "$ROOT/scripts/preview-cost/feedback-check.js:/w/check.js:ro" roll-previews-shot:1.64.1 sh -c 'NODE_PATH=$(npm root -g) node /w/check.js' 2>&1 | tail -1)
+case "$FB_SAID" in "/ · "*"a"*" · a live note") ;; *) echo "the page's feedback button should open roll with the page, the element and the note: $FB_SAID"; exit 1;; esac
 # Its secret values in what its pages served (the session fetched /env.txt, which this service
 # writes its environment to): named with where, never the value.
 SERVED=$(api GET "/v1/previews/$PV" | jq_ "' '.join(sorted(set('%s@%s' % (x['key'], x['path']) for x in d.get('served_secrets') or [])))")
@@ -1192,6 +1198,7 @@ cat <<EOF
 | Its endpoints against main's (the median of 10 GETs) | $ENDPOINTS |
 | The branch's tables from the sheet / users.email there | $SHEET_TABLES / $SHEET_EMAIL |
 | Its endpoint's answer against main's, by shape | $RESHAPED |
+| The feedback button in a browser: page · element · note | $FB_SAID |
 | Its secret values in what its pages served (names and where) | $SERVED |
 | SEO basics of the first page | $SEO |
 | /pricing's own checks (against main's /pricing) | $PRICING |
