@@ -1244,6 +1244,41 @@ async fn masked_postgres_is_masked_before_it_serves_and_new_rules_reach_it() {
     assert_eq!(e.engine.store.row(&p.id).unwrap().state, State::Ready);
 }
 
+/// A restore point: the data saved (Postgres's, the product that puts a branch back in place),
+/// put back without seeding again, gone when the masking rules change, and with the preview.
+#[tokio::test]
+async fn a_restore_point_puts_the_data_back_without_seeding_again() {
+    let e = env(json!({ "enabled": true, "seed": { "image": "node:22", "run": "node seed.js" }, "masking": { "postgres:prj_db": { "public.users.email": "email" } } }));
+    e.code.open(change("chg_rp", 5));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_rp").unwrap().unwrap();
+    assert_eq!(p.state, State::Ready);
+    let point = e.engine.save_point(&p.id, "before the test run", "ana").await.unwrap();
+    assert_eq!((point.label.as_str(), point.data.clone()), ("before the test run", vec!["postgres:prj_db".to_string()]));
+    let (live, copy) = (format!("prj_db~pv-{}", &p.id[3..]), format!("prj_db~pv-{}-{}", &p.id[3..], &point.id[3..]));
+    assert!(e.pg.branches.lock().contains(&copy), "a copy of the preview's branch");
+    let seeds = e.apps.seeds.lock().len();
+    assert!(seeds > 0);
+    e.engine.restore(&p.id, &point.id, "ana").unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(*e.pg.restored.lock(), [(live, copy.clone())], "the preview's branch put back in place");
+    assert_eq!(e.apps.seeds.lock().len(), seeds, "the point holds what the seed made: it isn't run again");
+    assert_eq!(e.engine.store.row(&p.id).unwrap().state, State::Ready);
+    // Other masking rules: the point, masked by the old ones, goes.
+    let mut s = e.engine.store.settings(&e.project).unwrap();
+    s.masking.insert("postgres:prj_db".into(), [("public.users.name".to_string(), "redact".to_string())].into_iter().collect());
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    e.engine.store.update(&p.id, |r| r.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(e.engine.restore_points(&p.id).unwrap().is_empty() && !e.pg.branches.lock().contains(&copy), "a point masked by older rules is deleted");
+    // And with the preview.
+    let again = e.engine.save_point(&p.id, "", "ana").await.unwrap();
+    e.code.edit("chg_rp", |c| c.open = false);
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(e.pg.branches.lock().is_empty(), "{again:?}'s copy goes with the preview");
+}
+
 /// The rules dialog's suggestions: an unmasked column that looks like people's data is offered
 /// with a rule, a masked one isn't, nor a resource the caller's grant can't read; a parent that
 /// sleeps isn't woken but named.

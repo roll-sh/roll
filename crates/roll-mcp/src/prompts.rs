@@ -244,7 +244,9 @@ const PROMPTS: &[Prompt] = &[
                  for the newest deploy if it failed (and, if you have it, apps_explain_deploy: the repo owner's model \
                  reads its error and logs, and its answer is kept); apps_errors for the errors grouped, newest \
                  regressions first; apps_logs with http and a status of 500 for the failing \
-                 requests, and without http for errors; apps_metrics for CPU and memory. Tell me the most likely \
+                 requests, and without http for errors; apps_metrics for CPU and memory; apps_fetch on a failing route, \
+                 if you have it, for what it answers now (past the environment's sign-in; deployment= for an older \
+                 deploy's answer to compare). Tell me the most likely \
                  cause with the evidence. If the newest deploy caused it, offer apps_rollback_previous; it puts back \
                  that deploy's variables too, and in production it may ask a person first. Don't roll back without \
                  asking me.",
@@ -340,7 +342,8 @@ const PROMPTS: &[Prompt] = &[
                  string: a new service has no users yet, so its first deploy is production's. Follow it with \
                  apps_wait_deploy. If the build or start fails, read apps_deploy_logs, fix the files, land again \
                  (base: the changeset the last land answered) and wait again; after three failed tries, stop and \
-                 show me the error. When it's live, tell me its URL (apps_get_environment) and what you built. \
+                 show me the error. When it's live, check it answers with apps_fetch on its main page if you have it \
+                 (it reads past a sign-in), then tell me its URL (apps_get_environment) and what you built. \
                  Changes after that are lands into {owner}/{name}: production follows its default branch, so say \
                  what each one changes before you land it.",
                 project = a("project"),

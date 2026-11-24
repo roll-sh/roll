@@ -175,6 +175,17 @@ pub enum Preview {
         #[arg(long)]
         resolve: Option<String>,
     },
+    /// Its restore points (its Postgres data saved, to put back later): --save [label] one now,
+    /// --restore <point> to put the data back as that point left it, --delete <point>.
+    Points {
+        preview: String,
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
+        save: Option<String>,
+        #[arg(long, conflicts_with = "save")]
+        restore: Option<String>,
+        #[arg(long, conflicts_with_all = ["save", "restore"])]
+        delete: Option<String>,
+    },
     /// Re-branch its data from the parents (every resource, or the ones named).
     Reset {
         preview: String,
@@ -1145,6 +1156,31 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
             v
         }
         Preview::Reset { preview, resources } => api.post(&format!("/v1/previews/{preview}/reset"), json!({ "resources": resources })).await?,
+        Preview::Points { preview, save, restore, delete } => {
+            let base = format!("/v1/previews/{preview}/restore-points");
+            let (v, said) = match (save, restore, delete) {
+                (Some(label), _, _) => {
+                    let v = api.post(&base, json!({ "label": label })).await?;
+                    let said = format!("saved {} ({})", s(&v["id"]), v["data"].as_array().into_iter().flatten().map(s).collect::<Vec<_>>().join(", "));
+                    (v, Some(said))
+                }
+                (_, Some(point), _) => (api.post(&format!("{base}/{point}/restore"), json!({})).await?, Some(format!("putting the data back to {point}: the preview's services sleep until it's done"))),
+                (_, _, Some(point)) => (api.call(reqwest::Method::DELETE, &format!("{base}/{point}"), None).await?, Some(format!("deleted {point}"))),
+                _ => (api.get(&base).await?, None),
+            };
+            if !as_json {
+                match (said, v["points"].as_array()) {
+                    (Some(said), _) => println!("{said}"),
+                    (None, Some(list)) if !list.is_empty() => list.iter().for_each(|p| {
+                        let label = s(&p["label"]);
+                        println!("{}  {}  by {}  {}{}", s(&p["id"]), ago(p["at"].as_i64().unwrap_or(0) / 1000), s(&p["by"]), p["data"].as_array().into_iter().flatten().map(s).collect::<Vec<_>>().join(", "), if label.is_empty() { String::new() } else { format!("  \"{label}\"") });
+                    }),
+                    _ => println!("no restore points"),
+                }
+                return Ok(());
+            }
+            v
+        }
         Preview::Logs { preview, service, lines, follow } => {
             let path_base = match &service {
                 Some(svc) => format!("/v1/previews/{preview}/logs?service={svc}"),

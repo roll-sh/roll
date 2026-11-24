@@ -183,6 +183,9 @@ GET /v1/previews/{id}/activity
 GET /v1/previews/{id}/visitors
 PUT /v1/previews/{id}/env
 POST /v1/previews/{id}/keep
+GET /v1/previews/{id}/restore-points
+POST /v1/previews/{id}/restore-points
+DELETE /v1/previews/{id}/restore-points/{point}
 GET /v1/previews/{id}/notes
 POST /v1/previews/{id}/notes/{note}/resolve
 GET /v1/previews/{id}/notes/{note}/crop

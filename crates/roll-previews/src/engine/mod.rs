@@ -971,6 +971,8 @@ mod discover;
 mod drains;
 mod env;
 mod masks;
+mod points;
+pub use points::MAX_POINTS;
 pub mod shell;
 pub mod traces;
 pub use masks::ErrorMasks;
