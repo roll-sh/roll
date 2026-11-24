@@ -386,7 +386,9 @@ const PROMPTS: &[Prompt] = &[
                  previews_routes for routes slower than in main's preview (call out a p95 more than 20% slower, and \
                  open one of its slow traces with previews_get_trace if you have it); previews_screenshot with diff=base \
                  on the pages the change touches, and look at each image; previews_fetch on those pages (and the API \
-                 paths it changed) for their status and what they answer, if you have it; previews_list_notes for what people left on \
+                 paths it changed) for their status and what they answer, if you have it; previews_try on a flow the \
+                 change touches (its steps: click, type, press, wait), with previews_try_screenshot only when the text \
+                 isn't enough, if you have it; previews_list_notes for what people left on \
                  its pages. Tell me whether it's ready to land, with the evidence for each problem. Don't resolve \
                  notes, refresh, reset or delete the preview without asking me.",
                 a("preview")
