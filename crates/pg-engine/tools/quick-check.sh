@@ -44,6 +44,16 @@
 #   QC_SKIP    steps to skip, comma-separated (regress,iso,dump without containers; clippy; crash)
 #   QC_TESTS   more test binaries (names under tests/, space-separated); QC_ALL=1 runs all of them
 #   QC_DRY=1   print the diff step's choice of tests and stop
+#   QC_PGO     a tools/dist-pgo.sh output dir: the shipped build's check (HANDOFF "The shipped
+#              build"). regress, iso and dump run against <dir>/roll-engine itself, and the crash
+#              step runs whatever changed, its crash_random binaries built `--profile dist` with
+#              the shipped flags and <dir>/roll-engine.profdata (as verification-train.sh's
+#              TRAIN_PGO_PROFDATA): two fat-LTO builds, about an hour more. The profile does not
+#              apply to them: a test build compiles pg_engine under another crate id (its
+#              dev-dependencies' features change cargo's metadata hash), so none of its functions
+#              match the profile's names; the crash line's staleness (tools/pgo-stale.py) shows it
+#              (~95% of the hot counts "under another crate id"). The crash step checks the dist
+#              profile with the shipped flags, not the PGO code layout
 set -u
 export PATH="$HOME/.cargo/bin:$PATH"
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
@@ -147,12 +157,25 @@ if [ $ENGINE = 0 ]; then
 fi
 CRASH=0
 case " $SEL " in *" CRASH "*) skip crash || CRASH=1 ;; esac
+PGOCFG= CR=crash_random
+if [ -n "${QC_PGO:-}" ]; then
+  QC_PGO=$(realpath "$QC_PGO")
+  [ -x "$QC_PGO/roll-engine" ] && [ -f "$QC_PGO/roll-engine.profdata" ] || fail diff "$t" "QC_PGO: no roll-engine and roll-engine.profdata in $QC_PGO"
+  export PGREGRESS_ENGINE_BIN=$QC_PGO/roll-engine PGISOLATION_ENGINE_BIN=$QC_PGO/roll-engine PGDUMP_ENGINE_BIN=$QC_PGO/roll-engine
+  skip crash || CRASH=1
+  . "$TOOLS/dist-flags.sh"
+  PGOCFG="build.rustflags=['-Cprofile-use=$QC_PGO/roll-engine.profdata','-Cllvm-args=-pgo-warn-missing-function'${DIST_RUSTFLAGS:+,'$DIST_RUSTFLAGS'}]"
+  CR=crash_random@pgo
+fi
+# The crash step's builds: the run's profile, or with QC_PGO the shipped build's (the second in a
+# process group of its own, for cleanup).
+crash_build() { if [ -n "$PGOCFG" ]; then exec "$@" --profile dist --config "$PGOCFG"; else exec "$@" --profile "$PROF"; fi; }
 case " $SEL " in *" ALL "*)
   SEL="lib $(ls crates/pg-engine/tests/*.rs | sed 's,.*/,,; s,\.rs$,,' | grep -v -x -e pg_regress -e pg_isolation -e pg_dump -e pg_contrib)" ;;
 esac
 SEL=$(for s in $SEL; do case $s in lib) echo lib ;; *) [ -f "crates/pg-engine/tests/$s.rs" ] && echo "$s" ;; esac; done | sort -u)
 ARGS=$(for s in $SEL; do [ "$s" = lib ] && echo --lib || echo "--test $s"; done)
-line diff ok "$t" "$(wc -l <"$D/changed") files against ${BASE%"${BASE#?????????}"}; tests: $(echo $SEL)$([ $CRASH = 1 ] && echo ', crash')"
+line diff ok "$t" "$(wc -l <"$D/changed") files against ${BASE%"${BASE#?????????}"}; tests: $(echo $SEL)$([ $CRASH = 1 ] && echo ', crash')${QC_PGO:+; PGO: $QC_PGO/roll-engine ($(sha256sum "$QC_PGO/roll-engine" | cut -c1-16))}"
 [ -n "${QC_DRY:-}" ] && exit 0
 
 # --- containers, clippy and the build, side by side ----------------------------------------
@@ -213,10 +236,14 @@ fi
 build $ARGS | artifacts "" >>"$D/bins"
 [ -n "$(bin wire)" ] && ! grep -q '^error' "$D/build.log" || fail build "$t" "$(grep -m1 -E '^error' "$D/build.log")"
 if [ $CRASH = 1 ]; then
-  build --test crash_random | artifacts "" >>"$D/bins"
+  ( crash_build cargo test -p pg-engine --no-run --message-format=json-render-diagnostics --test crash_random ) 2>"$D/build-crash.log" \
+    | artifacts "${PGOCFG:+@pgo}" >>"$D/bins"
+  cat "$D/build-crash.log" >>"$D/build.log"
+  STALE=
+  [ -z "$PGOCFG" ] || STALE="; $(python3 -I "$TOOLS/pgo-stale.py" "$QC_PGO/roll-engine.profdata" "$D/build-crash.log" | head -1)"
   # The power cut build compiles the engine again (a feature): alongside the tests.
-  setsid cargo test --profile "$PROF" -p pg-engine --no-run --message-format=json-render-diagnostics \
-    --features powerloss --test crash_random >"$D/build-power.json" 2>"$D/build-power.log" &
+  ( crash_build setsid cargo test -p pg-engine --no-run --message-format=json-render-diagnostics \
+    --features powerloss --test crash_random >"$D/build-power.json" 2>"$D/build-power.log" ) &
   POWERB=$!; KILLGRPS="$KILLGRPS $POWERB"
 fi
 line build ok "$t" "profile $PROF, $(wc -l <"$D/bins") test binaries"
@@ -282,13 +309,13 @@ done
 line tests ok "$t" "$(grep -o '[0-9]* passed' "$D/tests.log" | awk '{s += $1} END {print s}') passed in $(echo $SEL | wc -w) binaries"
 if [ $CRASH = 1 ]; then
   t=$(now)
-  CRASH_SEEDS=1,2,3 CRASH_ROUNDS=2 run crash_random >"$D/crash.log" 2>&1 ||
+  CRASH_SEEDS=1,2,3 CRASH_ROUNDS=2 run $CR >"$D/crash.log" 2>&1 ||
     fail crash "$t" "seeds 1-3 x 2: $(grep -m1 'panicked' "$D/crash.log")"
   wait "$POWERB"; artifacts @power <"$D/build-power.json" >>"$D/bins"
   [ -n "$(bin crash_random@power)" ] || fail crash "$t" "powerloss build: $(grep -m1 -E '^error' "$D/build-power.log")"
   run crash_random@power --exact power_cut_at_every_point >>"$D/crash.log" 2>&1 ||
     fail crash "$t" "power_cut_at_every_point: $(grep 'panicked' "$D/crash.log" | tail -1)"
-  line crash ok "$t" "seeds 1-3 x 2 rounds, power_cut_at_every_point"
+  line crash ok "$t" "seeds 1-3 x 2 rounds, power_cut_at_every_point${CR#crash_random}${STALE:-}"
 fi
 if [ -n "${QC_CHECKED:-}" ]; then
   t=$(now); : >"$D/checked.log"

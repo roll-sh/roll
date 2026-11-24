@@ -2,7 +2,9 @@
 
 Build both server revisions in release mode with the same Cargo targets and feature set.
 Against PostgreSQL, build the engine with `tools/dist.sh` (the `dist` profile with the shipped
-build flags; see HANDOFF.md, Conventions and "Build flags").
+build flags; see HANDOFF.md, Conventions and "Build flags"). The binary users run is the
+profile-guided build, `tools/dist-pgo.sh --out <dir>` (HANDOFF.md "The shipped build"): use it
+for release numbers and three-server tables, and name the build (plain dist or PGO) in every table.
 Copy each server binary aside before rebuilding, and record its source commit, command
 and SHA-256. Use the same checked client binary for both endpoints.
 

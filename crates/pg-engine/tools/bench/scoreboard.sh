@@ -17,12 +17,15 @@
 # full mode; quick measures 60 s and scales to 5 minutes), the server's memory with 100 idle
 # sessions (pgbench -c 100 of `SELECT 1; \sleep 40 s`), the size of a fresh data directory.
 #
-# Needs the engine built with the dist profile (fat LTO: what users run; a release engine
-# understates it) and the bench client in release, through tools/heavy.sh:
-#   tools/dist.sh        (the dist profile with the shipped build flags, HANDOFF "Build flags")
+# Needs the engine built with the dist profile (fat LTO; a release engine understates it) and the
+# bench client in release, through tools/heavy.sh:
+#   tools/dist-pgo.sh --out <dir>   (the shipped build, profile-guided: HANDOFF "The shipped build";
+#                                    full mode, for releases: BENCH_BIN=<dir>)
+#   tools/dist.sh                   (plain dist, the agents' A/B build, HANDOFF "Build flags")
 #   tools/heavy.sh cargo build --release -p pg-engine --example bench
 # (BENCH_BIN, default <target>/dist, has roll-engine; BENCH_CLIENT, default
 # <target>/release/examples/bench, is the client; <target> is CARGO_TARGET_DIR or <repo>/target.)
+# The table names the build: "PGO" when BENCH_BIN has dist-pgo.sh's BUILD.txt, else "plain dist".
 # Knobs (environment): SB_DATA (results and data, default ~/.cache/scoreboard), SERVER_CPUS /
 # CLIENT_CPUS (default 20-23 / 8-11: pick cores no other benchmark pins), PG_PORT /
 # ENGINE_PORT (default 55370 / 55371), PG_NAME (sb-pg), ROUNDS, IDLE_SECS, SB_ONLY (a comma
@@ -47,6 +50,7 @@ export BENCH_BIN=${BENCH_BIN:-$TARGET/dist} BENCH_CLIENT=${BENCH_CLIENT:-$TARGET
 for b in "$BENCH_BIN/roll-engine" "$BENCH_CLIENT"; do
   [ -x "$b" ] || { echo "missing $b: build it (see the header)" >&2; exit 1; }
 done
+if [ -f "$BENCH_BIN/BUILD.txt" ]; then export SB_BUILD=${SB_BUILD:-PGO}; else export SB_BUILD=${SB_BUILD:-plain dist}; fi
 export BENCH_DATA=${SB_DATA:-$HOME/.cache/scoreboard}
 export SERVER_CPUS=${SERVER_CPUS:-20-23} CLIENT_CPUS=${CLIENT_CPUS:-8-11}
 export PG_PORT=${PG_PORT:-55370} ENGINE_PORT=${ENGINE_PORT:-55371} PG_NAME=${PG_NAME:-sb-pg}

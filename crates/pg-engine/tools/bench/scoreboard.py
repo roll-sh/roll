@@ -197,7 +197,7 @@ def table(score, gate, order, mode, rounds, idle):
         commit = '?'
     out = [
         f'Scoreboard, {mode} mode ({rounds} interleaved rounds, the median of the rounds\' ratios), '
-        f'engine at `{commit}`, {datetime.date.today().isoformat()}, every server in a container on the '
+        f'engine at `{commit}` ({os.environ.get("SB_BUILD", "plain dist")} build), {datetime.date.today().isoformat()}, every server in a container on the '
         f'same cores ({", ".join(NAMES[t] for t in present)}). Ratios are the engine against each; '
         'above 1x the engine is ahead (bold: behind; ~: the rounds disagree on which is ahead). '
         'PostgreSQL is tuned (shared_buffers=2GB, a quarter of the containers\' memory); PostgreSQL '
