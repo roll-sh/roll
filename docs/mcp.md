@@ -405,10 +405,10 @@ How it works:
     `GET /v1/previews/{id}/notes`), and the reviews those notes are on the change (made with an
     outside origin, so roll code's review tools mark them too).
 - In lockdown, every result has the `title`, `body`, `description`, `message`, `text`, `line`,
-  `lines` (each line, so the list keeps its shape), `sample`, `name`, `note` and `selector` of
-  those records replaced
-  with a notice, wherever they sit in the answer: a fork's code chooses its log lines, error
-  samples and route and span names as much as its title. (An `agent_feedback` alert names its
+  `lines` (each line, so the list keeps its shape), `sample`, `name`, `note`, `selector` and
+  `path` of those records replaced with a notice, wherever they sit in the answer: a fork's code
+  chooses its log lines, error samples and route and span names as much as its title. A share
+  link guest's name is theirs too: their `by` (`guest:<name>`) keeps only `guest:` and the notice. (An `agent_feedback` alert names its
   connection in `connection`, a person's choice, which stays.)
 - A tool whose answer anyone outside can write names those fields itself (`Tool::outside`):
   `apps_form_submissions` withholds every submission's `fields`, since anyone can submit a site's
@@ -1449,10 +1449,14 @@ gaps are in how results read and how roll is distributed):
 From a 2026-11-24 gap review (every tool run as an agent would against a fresh rolld with
 `mcp-sweep.py --report`, 1,161 calls, plus probes with scoped tokens):
 
-1. **A review of #907–#933 (this PR).** Nine PRs today changed what the model reads (refusals,
-   cut notes, links), what a call may send (choices) and the permission evaluator's refusal and a
-   token rule's parsing; an independent review of the combined diff (security first: lockdown,
-   what a refusal or a link reveals, choices narrower than their routes), as after #814 and #838.
+1. **A review of #907–#933 (this PR).** An independent review of the nine PRs' combined diff
+   found no high or medium issue. Fixed here: lockdown withholds a share link guest's `path` and
+   the name in their `by` too, not only the note; `severity` takes `unknown` as its route does; an
+   optional choice sent empty passes, as routes read it; a choice is asked for in a form only once
+   no id the call needs is missing. Kept on purpose: choices publish each route's canonical values
+   only (no `scylladb`, `match` or `AllKeys-LRU`), so a model picks the canonical one. Clean:
+   refusals' parsing, token rules' resources, a refused member's text (strangers still get 404),
+   links' encoding, error objects.
 2. **Paging is the products'.** No list route takes a cursor (approvals take `limit` only). History
    and logs are all capped (a `LIMIT`, the latest N, or a retention window), so nothing grows
    without bound there; the lists of things people make are whole (buckets, queues, topics,
