@@ -236,7 +236,6 @@ impl SnapshotData {
         Ok(RunningGuard { data: self, entry })
     }
 
-    /// The snapshots running in repository `repo` that it hasn't recorded yet.
     /// Waits until no snapshot runs in repository `repo` here.
     async fn idle(&self, repo: &str) {
         loop {
@@ -249,6 +248,7 @@ impl SnapshotData {
         }
     }
 
+    /// The snapshots running in repository `repo` that it hasn't recorded yet.
     fn running_in(&self, repo: &str, recorded: Option<&RepositoryData>) -> Vec<Arc<Running>> {
         self.running
             .lock()
