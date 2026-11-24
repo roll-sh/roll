@@ -2603,7 +2603,35 @@ async fn serve_named(rt: Arc<Runtime>, preview: String, service: String, req: Re
     // Kept out of search engines, whatever the service says (as Vercel's previews are): a public
     // preview, a share link or an earlier push's URL is never what a search should land on.
     resp.headers_mut().insert(header::HeaderName::from_static("x-robots-tag"), header::HeaderValue::from_static("noindex"));
+    if let Some(csp) = fork_policy(&rt, &preview) {
+        resp.headers_mut().append(header::CONTENT_SECURITY_POLICY, csp);
+    }
     resp
+}
+
+/// A fork's preview (code from someone who can't push, that a writer approved to run on the
+/// repo's data): its pages may load from and send to only the preview's own hosts, so its code
+/// can't carry what a reviewer's page shows to another site from their browser (its server's
+/// reach is `egress_forks`'). Inline scripts, `eval`, `data:` and `blob:` stay allowed, so its
+/// pages run as they did; a policy of the page's own still applies too (a browser keeps both).
+/// A navigation away isn't something a policy can stop.
+fn fork_policy(rt: &Runtime, preview: &str) -> Option<HeaderValue> {
+    if rt.store.row(preview).ok()?.trusted {
+        return None;
+    }
+    let mut own: Vec<String> = rt.store.services(preview).ok()?.into_iter().filter_map(|s| origin_of(&s.url)).collect();
+    own.sort();
+    own.dedup();
+    let own = own.join(" ");
+    HeaderValue::from_str(&format!("default-src 'self' {own} 'unsafe-inline' 'unsafe-eval' data: blob:; form-action 'self' {own}; base-uri 'self'")).ok()
+}
+
+/// A URL's scheme and host (and port), when it's a plain one.
+fn origin_of(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    let host = rest.split(['/', '?', '#']).next()?;
+    let plain = matches!(scheme, "http" | "https") && !host.is_empty() && host.bytes().all(|b| b.is_ascii_alphanumeric() || b"-.:".contains(&b));
+    plain.then(|| format!("{scheme}://{host}"))
 }
 
 /// A request for a preview's service: through its gate, then to the service.
@@ -2827,6 +2855,15 @@ mod tests {
         s.read_to_string(&mut out).await.unwrap();
         assert!(out.ends_with("service saw /hello"), "{out}");
         assert!(out.contains("x-robots-tag: noindex"), "never indexed, whatever the service says: {out}");
+        assert!(!out.contains("content-security-policy"), "a trusted preview's pages keep only their own policy: {out}");
+        // A fork's: its pages may load from and send to only the preview's own hosts.
+        rt.store.update(&row.id, |r| r.trusted = false).unwrap();
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        s.write_all(format!("GET /hello HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nCookie: roll_access_{}={token}\r\nConnection: close\r\n\r\n", row.id).as_bytes()).await.unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).await.unwrap();
+        assert!(out.ends_with("service saw /hello") && out.contains("content-security-policy: default-src 'self' http://web-pr1-shop.preview.test 'unsafe-inline'"), "{out}");
+        rt.store.update(&row.id, |r| r.trusted = true).unwrap();
         // Automation: the project's bypass secret in a header, which the service never sees.
         let raw = |head: String| async move {
             let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
