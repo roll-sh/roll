@@ -1180,7 +1180,7 @@ static TOOLS: &[Tool] = &[
     t("secrets_list_environments", "List environments", "A project's secret environments.", "secrets", "GET", "/v1/secrets/projects/{project}/environments", &[SECRET_PROJECT]),
     t("secrets_project", "A project's secrets at a glance", "A project's environments (with their kind, base, protection and expiry), how many are previews', and how long old versions are kept.", "secrets", "GET", "/v1/secrets/projects/{project}", &[SECRET_PROJECT]),
     t("secrets_get_environment", "Get an environment", "One environment's settings: slug, name, kind (standard or ephemeral), base, labels, protection, approvals, expiry and max age.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}", &[SECRET_PROJECT, ENV]),
-    t("secrets_ensure_environment", "Make or update an environment", "Make an environment if it isn't there, or check one that is matches (a mismatch is a 409, and changing a kind or base means deleting it first: a person's): standard, or ephemeral with a base it overlays and an expiry (a preview's or a CI run's). Protection and approvers are a person's (secrets' policy), not set here.", "secrets", "PUT", "/v1/secrets/projects/{project}/environments/{env}", &[SECRET_PROJECT, ENV, b("name", Ty::Str, "Display name"), b("kind", Ty::Str, "standard (default) or ephemeral"), b("base", Ty::Str, "Ephemeral: the environment it overlays"), b("labels", Ty::Obj, "Labels, {key: value}"), b("expires_at", Ty::Int, "Ephemeral: unix ms it's deleted at"), b("ttl_minutes", Ty::Int, "Ephemeral: or minutes from now"), b("trusted", Ty::Bool, "Ephemeral: may read a protected base (admin on it)")]),
+    t("secrets_ensure_environment", "Make or update an environment", "Make an environment if it isn't there, or check one that is matches (a mismatch is a 409, and changing a kind or base means deleting it first: a person's): standard, or ephemeral with a base it overlays and an expiry (a preview's or a CI run's). Protection and approvers are a person's (secrets' policy), not set here.", "secrets", "PUT", "/v1/secrets/projects/{project}/environments/{env}", &[SECRET_PROJECT, ENV, b("name", Ty::Str, "Display name"), b("kind", Ty::Str, "standard (default) or ephemeral"), b("base", Ty::Str, "Ephemeral: the environment it overlays"), b("labels", Ty::Obj, "Labels, {key: value}"), b("expires_at", Ty::Int, "Ephemeral: unix ms it's deleted at"), b("ttl_minutes", Ty::Int, "Ephemeral: or minutes from now"), b("trusted", Ty::Bool, "Ephemeral: may read a protected base (admin on it)"), b("secrets", Ty::Arr, "Ephemeral: its overrides, made with it: [{op: set|delete, key, value?, comment?, tags?, type?}]")]),
     t("secrets_update_environment", "Rename or set an environment's expiry", "Change an environment's slug, name, expiry or max age (how old a value may get before it's flagged). A field left out stays.", "secrets", "PATCH", "/v1/secrets/projects/{project}/environments/{env}", &[SECRET_PROJECT, ENV, b("slug", Ty::Str, "New slug"), b("name", Ty::Str, "New display name"), bnull("expires_at", Ty::Int, "Unix ms it's deleted at (clear it: never)"), bnull("max_age_days", Ty::Int, "Days a value may get old (clear it: no limit)")]),
     t("secrets_delete_environment", "Delete an environment", "Delete an environment and every secret in it. A standard one is kept for the recovery window (an admin can recover it); a protected one asks a person to confirm, and where its policy asks for approvals the delete is a change request.", "secrets", "DELETE", "/v1/secrets/projects/{project}/environments/{env}", &[SECRET_PROJECT, ENV]),
     t("secrets_delete_ephemeral_environments", "Delete ephemeral environments by label", "Delete every ephemeral environment with a label (a finished CI run's, a closed preview's): standard ones are never touched.", "secrets", "DELETE", "/v1/secrets/projects/{project}/environments", &[SECRET_PROJECT, qreq("label", "key=value")]),
@@ -1203,7 +1203,7 @@ static TOOLS: &[Tool] = &[
     t("secrets_shared", "Folders shared with a project", "The folders other projects share with this one, which its environments can import.", "secrets", "GET", "/v1/secrets/projects/{project}/shared", &[SECRET_PROJECT]),
     t("secrets_list_shares", "A project's share links", "Its one-off share links, newest first: note, views left, who made it and when, when it expires and whether it was opened (never the link or its value). Open ones are values out of roll until they expire.", "secrets", "GET", "/v1/secrets/projects/{project}/shares", &[SECRET_PROJECT]),
     t("secrets_reveal", "Read a secret's value", "Read a secret's value. A key tagged sensitive is never returned to anyone (403): only running services get it, so don't retry or look for it another way.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/value", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder"), q("resolve", Ty::Bool, "false: the value as stored, a reference as written")]),
-    t("secrets_set", "Set a secret", "Create or change a secret's value. Give if_version (the version you read) so a change someone made meanwhile isn't overwritten: then it's a 409 stale, and you read it again.", "secrets", "PUT", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}", &[SECRET_PROJECT, ENV, req("name", "Secret name"), b("value", Ty::Str, "The value (leave it out to change only the comment, tags, type or expiry: the value never passes through you)"), q("path", Ty::Str, "Folder"), b("if_version", Ty::Int, "Only if it's still this version (0: only if it doesn't exist)"), b("comment", Ty::Str, "What it is, shown beside it"), b("tags", Ty::Arr, "Tags (replace its tags)"), b("type", Ty::Str, "shared (default) or personal (only yours, over the shared one)"), b("message", Ty::Str, "The change's message, in its history"), bnull("expires_at", Ty::Int, "When it expires (Unix ms; the health check flags it before); clear it for never")]),
+    t("secrets_set", "Set a secret", "Create or change a secret's value. Give if_version (the version you read) so a change someone made meanwhile isn't overwritten: then it's a 409 stale, and you read it again.", "secrets", "PUT", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}", &[SECRET_PROJECT, ENV, req("name", "Secret name"), b("value", Ty::Str, "The value. Leave it out to change only an existing secret's comment, tags, type or expiry, so the value never passes through you, and give if_version: on a key that doesn't exist yet, no value makes an empty secret"), q("path", Ty::Str, "Folder"), b("if_version", Ty::Int, "Only if it's still this version (0: only if it doesn't exist)"), b("comment", Ty::Str, "What it is, shown beside it"), b("tags", Ty::Arr, "Tags (replace its tags)"), b("type", Ty::Str, "shared (default) or personal (only yours, over the shared one)"), b("message", Ty::Str, "The change's message, in its history"), bnull("expires_at", Ty::Int, "When it expires (Unix ms; the health check flags it before); clear it for never")]),
     t("secrets_import", "Import a .env file", "Write a .env file's keys (or JSON: {\"KEY\": \"value\"} or [{key, value, comment?}]) into an environment as one change: only new keys unless overwrite, and replace makes the folder match the file (its other own keys are deleted). On a protected environment it opens a change request instead (request: true asks for one anywhere).", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/import", &[SECRET_PROJECT, ENV, b("dotenv", Ty::Str, "A .env file's text"), b("json", Ty::Obj, "Or the keys as JSON"), b("path", Ty::Str, "Folder (default /)"), b("overwrite", Ty::Bool, "Replace keys that exist"), b("replace", Ty::Bool, "Also delete the folder's keys the file lacks"), b("message", Ty::Str, "Why, for the change's history"), b("request", Ty::Bool, "Open a change request instead of writing"), b("if_seq", Ty::Int, "Only if the environment's last change is still this one")]).destructive(),
     t("secrets_rollback", "Roll back an environment", "Put an environment's values back as they were at a change (to: its seq, from secrets_changes) or a time (at: Unix ms), as one new change: what's there now is replaced. On a protected environment it opens a change request.", "secrets", "POST", "/v1/secrets/projects/{project}/environments/{env}/rollback", &[SECRET_PROJECT, ENV, b("to", Ty::Int, "The change (seq) to go back to"), b("at", Ty::Int, "Or a time, Unix ms"), b("message", Ty::Str, "Why")]).destructive(),
     t("secrets_create_environment", "Add an environment", "A new environment in a project (staging, a preview's): slug, optional name, base (an environment it inherits from), labels, and for an ephemeral one ttl_minutes. Making one is the project admin's.", "secrets", "POST", "/v1/secrets/projects/{project}/environments", &[SECRET_PROJECT, breq("slug", Ty::Str, "Short name (staging, pr-42)"), b("name", Ty::Str, "Display name"), b("kind", Ty::Str, "standard or ephemeral"), b("base", Ty::Str, "Environment it inherits from"), b("labels", Ty::Obj, "Labels, {key: value}"), b("ttl_minutes", Ty::Int, "An ephemeral one ends after this"), b("expires_at", Ty::Int, "Or an ephemeral one ends then (Unix ms)"), b("secrets", Ty::Arr, "An ephemeral one's overrides, made in the same call: [{op: set|delete, key, value?, comment?, tags?, type?}]"), b("trusted", Ty::Bool, "An ephemeral one may read a protected base (needs admin on it)")]),
@@ -1479,7 +1479,7 @@ static TOOLS: &[Tool] = &[
     t("apps_diff_environments", "Compare environments", "How an environment differs from another (Railway's environment sync): variables missing, extra or with another value (names only; which differ needs reveal on both), and settings with the body that makes each match. Read on both environments.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/diff", &[SERVICE, ENV, qreq("from", "The environment to compare with")]),
     t("apps_metrics", "Service metrics", "CPU, memory and requests of an environment, and each instance's own last hour (by_instance).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/metrics", &[SERVICE, ENV, q("minutes", Ty::Int, "Window")]),
     t("apps_quote", "Quote a service", "What a service would cost at most a month and an hour, before making it: its run settings (cpu, memory_mb, min_instances, max_instances, type, sidecars) at roll's prices. Sleeping costs nothing; min_instances always run.", "apps", "POST", "/v1/apps/quote", &[b("run", Ty::Obj, "The run settings apps_create_service would take; left out, the defaults")]),
-    t("apps_plan", "Plan a service", "How roll would build and run a repo (provider, framework, install, build and start commands, port), before making a service: a dry run.", "apps", "POST", "/v1/apps/plan", &[breq("repo", Ty::Str, "owner/name"), b("revision", Ty::Str, "A branch or commit"), b("root", Ty::Str, "The app's folder in the repo")]),
+    t("apps_plan", "Plan a service", "How roll would build and run code (provider, framework, install, build and start commands, port), before making a service: a dry run. Give one of repo (a roll code repo), git (a public Git URL) or files (the files themselves).", "apps", "POST", "/v1/apps/plan", &[b("repo", Ty::Str, "A roll code repo, owner/name"), b("revision", Ty::Str, "With repo: a branch or commit"), b("git", Ty::Str, "Or a public Git URL, read at its branch's head as its deploy would be"), b("branch", Ty::Str, "With git: its branch (default: the default one)"), b("files", Ty::Obj, "Or the files themselves, {path: content}: how an app written in a chat would build"), b("root", Ty::Str, "The app's folder in the repo")]),
     t("apps_import", "Check a project file", "What a roll.toml, a docker-compose file or another platform's file (Render, Fly, Railway, Heroku) would make, without making anything: the apps with their source, branch, run settings, links and variables, the databases, notes on what isn't carried over, and the file as roll.toml (check it before roll up --all). Give one: a file's text, a roll code repo's root roll.toml, or a public Git repository's.", "apps", "POST", "/v1/apps/import", &[b("roll_toml", Ty::Str, "A roll.toml's text"), b("compose", Ty::Str, "A docker-compose.yml's text"), b("render", Ty::Str, "A Render Blueprint's render.yaml text"), b("fly", Ty::Str, "A fly.toml's text"), b("railway", Ty::Str, "A railway.json or railway.toml's text"), b("heroku", Ty::Str, "A Heroku app.json's text"), b("procfile", Ty::Str, "With heroku: its Procfile's text"), b("repo", Ty::Str, "A roll code repo (owner/name): its root roll.toml"), b("revision", Ty::Str, "With repo: a branch or commit (default: its default branch's head)"), b("git", Ty::Str, "A public Git repository's https URL: its root roll.toml"), b("branch", Ty::Str, "With git: a branch (default: its default branch)")]).open_world(),
     t("apps_export_project", "Export a project file", "A project as a roll.toml: its services (source, branch, run settings that differ from defaults) and the postgres and redis databases they link, variables by name only, never a value. Write it to the repo, check it with apps_import, deploy it with roll up --all.", "apps", "POST", "/v1/apps/projects/{project}/export", &[req("project", "Workspace project"), b("databases", Ty::Obj, "Names for the linked databases, as {\"postgres:<ref>\": \"db\"}")]),
     t("apps_get_environment", "Get an environment", "One environment: its URL, state (running, asleep), live deploy, branch and size; build_closed (its builds get no secret value) and base_updated (base images that moved since its build).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}", &[SERVICE, ENV]),
@@ -1775,11 +1775,6 @@ mod tests {
         out
     }
 
-    /// The top-level field names of the shape `body` starts with.
-    fn shape_fields(body: &str) -> Vec<String> {
-        shape_typed(body).into_iter().map(|(name, _)| name).collect()
-    }
-
     /// The top-level fields of the shape `body` starts with, each with its type (what follows `:`).
     fn shape_typed(body: &str) -> Vec<(String, String)> {
         let (mut depth, mut segs, mut cur) = (0usize, Vec::new(), String::new());
@@ -1808,22 +1803,27 @@ mod tests {
             .collect()
     }
 
-    /// The keys of the object a field's type holds (`{ a, b }[] | null`: a and b), if it holds one.
+    /// The keys of the objects a field's type writes out (`{ a, b }[] | { c } | null`: a, b and c).
     fn nested_keys(ty: &str) -> Vec<String> {
-        ty.find('{').map(|i| shape_fields(&ty[i..])).unwrap_or_default()
+        body_fields(ty)
     }
 
-    /// The body a contract names by type (`` `EnvironmentPut` ``): its `type X = { … }` in the same
-    /// contract, comments taken out, so its fields are checked as an inline body's are.
-    fn named_body(doc: &str, body: &str) -> Option<String> {
-        let name = body.trim().strip_prefix('`')?.split('`').next()?;
+    /// The body a contract names by type (`` `EnvironmentPut` ``): its type expanded ([`expand`]),
+    /// so its fields are checked as an inline body's are. `Err` names a type it can't find: the
+    /// test fails rather than check nothing.
+    fn named_body(doc: &str, body: &str) -> Result<Option<String>, String> {
+        let Some(name) = body.trim().strip_prefix('`').and_then(|b| b.split('`').next()) else { return Ok(None) };
         if !name.starts_with(|c: char| c.is_ascii_uppercase()) || !name.chars().all(|c| c.is_ascii_alphanumeric()) {
-            return None;
+            return Ok(None);
         }
-        let start = doc.find(&format!("type {name} = {{"))? + format!("type {name} = ").len();
-        // Comments out first: `/* … */` and `// …` to the end of the line.
-        let (mut out, mut rest) = (String::new(), &doc[start..]);
-        let mut depth = 0usize;
+        type_rhs(doc, name).map(|rhs| Some(expand(doc, &rhs, 0))).ok_or_else(|| name.to_string())
+    }
+
+    /// The right side of `type name = …;` in `doc`, comments out (`/* … */`, `// …`), up to its `;`
+    /// at the top level.
+    fn type_rhs(doc: &str, name: &str) -> Option<String> {
+        let start = doc.find(&format!("type {name} = "))? + format!("type {name} = ").len();
+        let (mut out, mut rest, mut depth) = (String::new(), &doc[start..], 0usize);
         while let Some(c) = rest.chars().next() {
             if rest.starts_with("/*") {
                 rest = rest.find("*/").map_or("", |e| &rest[e + 2..]);
@@ -1833,20 +1833,77 @@ mod tests {
                 rest = rest.find('\n').map_or("", |e| &rest[e..]);
                 continue;
             }
-            out.push(c);
             rest = &rest[c.len_utf8()..];
             match c {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(out);
-                    }
-                }
+                '{' | '[' | '(' | '<' => depth += 1,
+                '}' | ']' | ')' | '>' => depth = depth.saturating_sub(1),
+                ';' if depth == 0 => return Some(out),
+                '\n' if depth == 0 && rest.trim_start().starts_with("type ") => return Some(out),
                 _ => {}
             }
+            out.push(c);
         }
-        None
+        (!out.trim().is_empty()).then_some(out)
+    }
+
+    /// A type's text with what it names at its top level written out, as far as 4 deep: a bare type
+    /// (`Source`), `Patch<X>` and `Partial<X>` as X, `Omit<X, "a" | "b">` as X without those fields;
+    /// `A & B` and `A | B` stay as they are, and [`body_fields`] reads every object in them. Inside
+    /// an object its fields' types stay as written (`build?: Patch<Build>`).
+    fn expand(doc: &str, ty: &str, depth: usize) -> String {
+        if depth > 4 {
+            return ty.to_string();
+        }
+        let (mut out, mut i, mut braces, bytes) = (String::new(), 0usize, 0usize, ty.as_bytes());
+        while i < ty.len() {
+            let c = bytes[i] as char;
+            match c {
+                '{' => braces += 1,
+                '}' => braces = braces.saturating_sub(1),
+                _ => {}
+            }
+            let prev_ok = i == 0 || !(bytes[i - 1] as char).is_ascii_alphanumeric();
+            if c.is_ascii_uppercase() && prev_ok && braces == 0 {
+                let word: String = ty[i..].chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+                let after = &ty[i + word.len()..];
+                // A generic: its argument list, to the matching `>`.
+                let generic = after.starts_with('<').then(|| {
+                    let mut d = 0usize;
+                    let end = after.char_indices().find(|(_, c)| {
+                        match c {
+                            '<' => d += 1,
+                            '>' => d -= 1,
+                            _ => {}
+                        }
+                        d == 0
+                    });
+                    end.map(|(e, _)| &after[1..e])
+                });
+                let (inner, used) = match generic.flatten() {
+                    Some(args) => (Some(args), word.len() + args.len() + 2),
+                    None => (None, word.len()),
+                };
+                let text = match (word.as_str(), inner) {
+                    ("Patch" | "Partial", Some(x)) => Some(expand(doc, x, depth + 1)),
+                    ("Omit", Some(args)) => args.split_once(',').map(|(x, keys)| {
+                        let keys: Vec<&str> = keys.split('|').map(|k| k.trim().trim_matches('"')).collect();
+                        let fields: Vec<String> = body_shapes(&expand(doc, x.trim(), depth + 1)).into_iter().filter(|(n, _)| !keys.contains(&n.as_str())).map(|(n, t)| format!("{n}: {t}")).collect();
+                        format!("{{ {} }}", fields.join("; "))
+                    }),
+                    (w, None) => type_rhs(doc, w).map(|rhs| expand(doc, &rhs, depth + 1)),
+                    _ => None,
+                };
+                match text {
+                    Some(t) => out.push_str(&t),
+                    None => out.push_str(&ty[i..i + used]),
+                }
+                i += used;
+                continue;
+            }
+            out.push(c);
+            i += c.len_utf8();
+        }
+        out
     }
 
     /// A tool takes every body field and query parameter its route's contract lists, or
@@ -1870,7 +1927,7 @@ mod tests {
                 Some((w.next()?.to_string(), norm(w.next()?), w.next()?.to_string()))
             })
             .collect();
-        let (mut missing, mut taken, mut vague) = (Vec::new(), std::collections::HashSet::new(), Vec::new());
+        let (mut missing, mut taken, mut vague, mut unresolved) = (Vec::new(), std::collections::HashSet::new(), Vec::new(), Vec::new());
         for (doc, prefix) in CONTRACTS {
             for line in doc.lines() {
                 let Some(rest) = line.strip_prefix("| `") else { continue };
@@ -1898,9 +1955,18 @@ mod tests {
                 if tools.is_empty() {
                     continue;
                 }
-                let shapes = if matches!(method, "POST" | "PUT" | "PATCH") { body_shapes(&named_body(doc, &body).unwrap_or_else(|| body.clone())) } else { Vec::new() };
+                let named = match named_body(doc, &body) {
+                    Ok(n) => n,
+                    Err(name) => {
+                        unresolved.push(format!("{method} {path}: `{name}`"));
+                        None
+                    }
+                };
+                let shapes = if matches!(method, "POST" | "PUT" | "PATCH") { body_shapes(&named.unwrap_or_else(|| body.clone())) } else { Vec::new() };
                 // An object a tool takes names each of its keys in the argument's description, so a
                 // key the product adds inside it (a firewall rule's `attacks`) isn't unknown to agents.
+                // Objects written out in the field's own type, every alternative of a union; a named
+                // type (`Run`, ~50 keys) is described by where it's shown, not key by key.
                 for (field, ty) in &shapes {
                     let keys = nested_keys(ty);
                     for p in tools.iter().flat_map(|t| t.params.iter().filter(|p| p.name == *field).map(move |p| (t.name, p))) {
@@ -1923,13 +1989,18 @@ mod tests {
             }
         }
         assert!(missing.is_empty(), "body fields and query parameters a route's contract lists that its tool doesn't take: add each to the tool in tools.rs, or `METHOD route field  why` to crates/roll-mcp/src/no-field.txt:\n{}", missing.join("\n"));
+        assert!(unresolved.is_empty(), "bodies named by a type their contract doesn't define (`type X = …`), so nothing in them was checked:\n{}", unresolved.join("\n"));
         assert!(vague.is_empty(), "object arguments whose description doesn't name every key the contract gives them: name each in the argument's description in tools.rs:\n{}", vague.join("\n"));
         let stale: Vec<String> = listed.iter().filter(|l| taken.contains(l)).map(|(m, r, f)| format!("{m} {r} {f}")).collect();
         assert!(stale.is_empty(), "no-field.txt lines for fields a tool takes now: remove them:\n{}", stale.join("\n"));
         assert_eq!(body_fields("{ from, message?, expect?: string, files?: {[name]: path | null} }"), ["from", "message", "expect", "files"]);
         assert_eq!(body_fields("{ url, headers? } or { bucket, prefix?, … } (prose `{ x }`)"), ["url", "headers", "bucket", "prefix"]);
         let doc = "type Put = {\n  a?: string; // b: no, c\n  d: { e: number } /* f: g */;\n};";
-        assert_eq!(body_fields(&named_body(doc, "`Put` (as is)").unwrap()), ["a", "d"]);
+        assert_eq!(body_fields(&named_body(doc, "`Put` (as is)").unwrap().unwrap()), ["a", "d"]);
+        let doc = "type A = { x: string; y?: B };\ntype B = { z: number };\ntype C = Omit<A, \"x\"> & { w?: Patch<B> } | { v: string };";
+        assert_eq!(body_fields(&named_body(doc, "`C`").unwrap().unwrap()), ["y", "w", "v"]);
+        assert_eq!(body_fields(&expand(doc, "Patch<B>", 0)), ["z"]);
+        assert_eq!(named_body(doc, "`Missing`"), Err("Missing".to_string()));
     }
 
     #[test]

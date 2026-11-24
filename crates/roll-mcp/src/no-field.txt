@@ -55,3 +55,6 @@ PUT /v1/previews/projects/{project}/settings github         what's posted to Git
 PUT /v1/previews/projects/{project}/settings seed           a job run with the preview's secrets: a person's
 PUT /v1/previews/projects/{project}/settings release        a job run with the preview's secrets at each head: a person's
 PUT /v1/previews/projects/{project}/settings teardown       a job run with the preview's secrets: a person's
+POST /v1/apps/plan git_login                                  a private repository's login: sets a credential in a tool's arguments
+PUT /v1/secrets/projects/{project}/environments/{env} replace  drops the overrides it isn't given: an ensure never deletes keys (secrets_apply_changes says when it does)
+PUT /v1/secrets/projects/{project}/environments/{env} branches an ephemeral environment's branched resources: roll previews' and the operator's
