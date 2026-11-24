@@ -2178,6 +2178,18 @@ impl Store {
             let others: Vec<String> = c.query("SELECT path FROM page_shots WHERE preview_id = ?", [id], |r| r.get(0))?;
             let pages: Vec<String> = match page {
                 None => std::iter::once(String::new()).chain(others).collect(),
+                // Every page changed the same way (its group: a signature's first 12 characters).
+                Some(p) if p.starts_with("group:") => {
+                    let g = &p["group:".len()..];
+                    if g.len() != 12 || !g.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        return Err(Error::BadRequest("a group is 12 hex characters (visual_review.pages[].group)".into()));
+                    }
+                    let these: Vec<String> = c.query("SELECT path FROM page_shots WHERE preview_id = ? AND substr(base_sig, 1, 12) = ?", params![id, g], |r| r.get(0))?;
+                    if these.is_empty() {
+                        return Err(Error::NotFound(format!("no pages changed as group {g}")));
+                    }
+                    these
+                }
                 Some(p) if p.is_empty() || others.iter().any(|o| o == p) => vec![p.to_string()],
                 Some(p) => return Err(Error::NotFound(format!("the preview has no screenshot of {p:?}"))),
             };
