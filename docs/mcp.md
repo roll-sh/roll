@@ -658,7 +658,9 @@ alone, as at the gate.
     a token, a bucket, a stream or topic, a NoSQL or Redis database, a search cluster or index, a
     vhost or queue, a tasks message, run, schedule, function, event or dead letter (tasks' `id`, by
     the tool's route), and for roll code's tools (fronted from `code_control::mcp`) a repo as
-    `owner/name` or its owner. `pnpm test:mcp-sweep` checks each against a live rolld: the form must offer
+    `owner/name` or its owner. A required argument with a fixed set of values (a member's role, a
+    rollout's action, how long an access request lasts) is asked for the same way, once no id is
+    missing, its choices the set. `pnpm test:mcp-sweep` checks each against a live rolld: the form must offer
     the fixture's id, so a list answer of another shape can't offer nothing unnoticed, and a new
     kind of id fails it until it has choices or a reason not to (`NO_CHOICES`: a Postgres
     endpoint, which sits inside its branch, and no tool lists every project's). The
