@@ -2645,22 +2645,22 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **What the reviewer did, with a feedback note, in review** (Jam's user actions): the last 20
-   steps before the note, no typed value; and the note's form found again after #861.
-2. **Agents driving the preview in a browser** (GitHub Copilot's Playwright): a session an agent
-   steps through, with roll MCP.
-3. **Restore points for a preview's data** (Neon's snapshots): save the branches now, put them back
+1. **Agents driving the preview in a browser, in review** (GitHub Copilot's Playwright): `POST
+   …/try`, stateless steps and their picture (roll MCP's `previews_try`); roll apps services next.
+2. **Restore points for a preview's data** (Neon's snapshots): save the branches now, put them back
    after a test run.
-4. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+3. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-5. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+4. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-6. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-7. **Watch: pg-control's recovery to a time seconds old** (unowned).
+6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-24, morning, later: a note says what the reviewer did before it, and the note's form works again after #861 (#879, the toolbar now driven in a browser live).
 
 Landed 2026-11-24, morning: screenshot modes (#877: dark, a language, a time zone), and the sheet's pictures of every page kind.
 
