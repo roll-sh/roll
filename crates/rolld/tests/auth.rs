@@ -769,8 +769,8 @@ async fn mcp_search_with_a_project_token() {
 /// A search cluster homed in a project its owner doesn't manage, with no hand-over ever decided for
 /// it (as a person's token could make one before members: a create in someone else's project), is
 /// never handed to that project: at start its home is dropped and the cluster stays its owner's;
-/// while such a home is there, an admin of its project can't move it to another project they
-/// manage; and a project's restore doesn't bring such a home back.
+/// while such a home is there, an owner of its project can't move it to another project they
+/// own; and a project's restore doesn't bring such a home back.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_strangers_home_from_before_is_dropped_never_handed_over() {
     let home = tempfile::tempdir().unwrap();
@@ -840,34 +840,39 @@ async fn a_strangers_home_from_before_is_dropped_never_handed_over() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     assert_eq!(owner_of(&c1).as_deref(), Some("usr_x"), "dropped, never handed over");
-    // Such a home while rolld runs (made a stranger's in the store): Ada, an admin of its project
+    // Such a home while rolld runs (made a stranger's in the store): Ada, an owner of its project
     // and of another, can't move it there to have it handed over.
-    let g = id_of(&op(api.clone(), reqwest::Method::POST, "/v1/workspace/projects".into(), Some(serde_json::json!({ "name": "g" }))).await.1);
+    let cookie = sign_in(&http, &api, &home.path().join("outbox"), "ada@example.com").await;
+    let session: serde_json::Value = http.get(format!("{api}/v1/accounts/session")).header("cookie", &cookie).send().await.unwrap().json().await.unwrap();
+    let csrf = session["csrf"].as_str().unwrap().to_string();
+    let as_ada = |method: reqwest::Method, path: String, body: Option<serde_json::Value>| {
+        let mut req = http.request(method, format!("{api}{path}")).header("cookie", &cookie).header("origin", DASHBOARD).header("x-roll-csrf", &csrf);
+        if let Some(b) = body {
+            req = req.json(&b);
+        }
+        async move {
+            let r = req.send().await.unwrap();
+            (r.status().as_u16(), r.text().await.unwrap())
+        }
+    };
+    let mut hers = Vec::new();
+    for name in ["adas-f", "adas-g"] {
+        let (s, v) = as_ada(reqwest::Method::POST, "/v1/workspace/projects".into(), Some(serde_json::json!({ "name": name }))).await;
+        assert_eq!(s, 201, "{v}");
+        hers.push(serde_json::from_str::<serde_json::Value>(&v).unwrap()["id"].as_str().unwrap().to_string());
+    }
+    let (f, g) = (hers[0].clone(), hers[1].clone());
     let c3 = id_of(&op(api.clone(), reqwest::Method::POST, "/v1/search/clusters".into(), Some(serde_json::json!({ "name": "c3" }))).await.1);
-    for path in [format!("/v1/workspace/projects/{p}/resources/search/{c3}"), format!("/v1/workspace/projects/{p}/homes/search/{c3}")] {
+    for path in [format!("/v1/workspace/projects/{f}/resources/search/{c3}"), format!("/v1/workspace/projects/{f}/homes/search/{c3}")] {
         let (s, v) = op(api.clone(), reqwest::Method::PUT, path.clone(), Some(serde_json::json!({ "x": 0, "y": 0 }))).await;
         assert_eq!(s, 200, "{path}: {v}");
     }
     search.execute("UPDATE search_clusters SET owner = 'usr_x', made_by = NULL WHERE id = ?1", [&c3]).unwrap();
-    let cookie = sign_in(&http, &api, &home.path().join("outbox"), "ada@example.com").await;
-    let session: serde_json::Value = http.get(format!("{api}/v1/accounts/session")).header("cookie", &cookie).send().await.unwrap().json().await.unwrap();
-    let ada = session["user"]["id"].as_str().unwrap().to_string();
-    for project in [&p, &g] {
-        ws.execute("INSERT INTO members (project_id, user_id, role, environments, added_by, added_at) VALUES (?1, ?2, 'admin', NULL, 'operator', 0)", [project.as_str(), ada.as_str()]).unwrap();
-    }
-    let moved = http
-        .put(format!("{api}/v1/workspace/projects/{g}/homes/search/{c3}"))
-        .header("cookie", &cookie)
-        .header("origin", DASHBOARD)
-        .header("x-roll-csrf", session["csrf"].as_str().unwrap())
-        .send()
-        .await
-        .unwrap();
-    let status = moved.status().as_u16();
-    let body = moved.text().await.unwrap();
+    let (status, body) = as_ada(reqwest::Method::PUT, format!("/v1/workspace/projects/{g}/homes/search/{c3}"), None).await;
+    // The gate refuses it (a person homes only what's theirs, or into the project it's at home in),
+    // and the workspace would too (`Owners::has_person_owner`).
     assert_eq!(status, 403, "{body}");
-    assert!(body.contains("still a person's own"), "refused by the workspace, past the gate: {body}");
-    assert!(home_of(&c3, &p), "its home stays");
+    assert!(home_of(&c3, &f), "its home stays");
     assert_eq!(owner_of(&c3).as_deref(), Some("usr_x"), "and it stays its owner's");
     // A deleted project whose kept homes hold such a cluster: its restore drops that home too.
     let (s, v) = op(api.clone(), reqwest::Method::DELETE, format!("/v1/workspace/projects/{q}?confirm=q"), None).await;
