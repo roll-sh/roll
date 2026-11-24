@@ -658,7 +658,9 @@ alone, as at the gate.
     a token, a bucket, a stream or topic, a NoSQL or Redis database, a search cluster or index, a
     vhost or queue, a tasks message, run, schedule, function, event or dead letter (tasks' `id`, by
     the tool's route), and for roll code's tools (fronted from `code_control::mcp`) a repo as
-    `owner/name` or its owner. `pnpm test:mcp-sweep` checks each against a live rolld: the form must offer
+    `owner/name` or its owner. A required argument with a fixed set of values (a member's role, a
+    rollout's action, how long an access request lasts) is asked for the same way, once no id is
+    missing, its choices the set. `pnpm test:mcp-sweep` checks each against a live rolld: the form must offer
     the fixture's id, so a list answer of another shape can't offer nothing unnoticed, and a new
     kind of id fails it until it has choices or a reason not to (`NO_CHOICES`: a Postgres
     endpoint, which sits inside its branch, and no tool lists every project's). The
@@ -1433,14 +1435,12 @@ gaps are in how results read and how roll is distributed):
 From a 2026-11-24 gap review (every tool run as an agent would against a fresh rolld with
 `mcp-sweep.py --report`, 1,161 calls, plus probes with scoped tokens):
 
-1. **Choices as JSON Schema `enum` (this PR).** 20 arguments listed their values only in
-   prose; a model guessed and read a parse error. `Ty::Choice` publishes the set as `enum` (a
-   client checks it, a model picks from it) and `Tool::request` refuses anything else before the
-   call. Each set is the route's own, read from its parser, and three proses were short of it:
-   queues' exchange types (9, not 5), a policy's `apply_to` (6, not 3), apps' log streams (`http`).
-   Left as text: sets with aliases (apps' log `level`), the audit log's `decision` (change names
-   too), and secrets' request `state` (six states, its route changing with the cursor). Next: a
-   missing required choice asked for in a form, as a missing id is (`ask.rs`).
+1. **A refused member hears what would let them (this PR).** A viewer's agent read "your role
+   in project … can't write secrets there", and `access_request_access` then said "its owner
+   changes its rules instead", though no token's rules reach past a role. The refusal now names
+   the weakest role that may and that a project admin changes roles; a person's token says the
+   same. When members' time-boxed elevation (docs/members-v1-1.md, D13–D17) is built, both name
+   its request instead.
 2. **Paging is the products'.** No list route takes a cursor (approvals take `limit` only). History
    and logs are all capped (a `LIMIT`, the latest N, or a retention window), so nothing grows
    without bound there; the lists of things people make are whole (buckets, queues, topics,
@@ -1451,7 +1451,10 @@ From a 2026-11-24 gap review (every tool run as an agent would against a fresh r
    onto the tool when it lands.
 3. **Coming from the sibling threads, mapped as they land:** roll previews' restore points (#897):
    mapped in #901. roll apps' `apps_fetch` (#890) is read by `debug_failing_service` and
-   `ship_from_chat`.
+   `ship_from_chat`. roll previews' share `label` and guest `notes` (#911, gating): mapped onto
+   `previews_share` in #911 itself, on this thread's suggestion. roll secrets' requests cursor
+   (`before`/`next`, `state` in the query): `secrets_list_requests` takes it when it lands, and its
+   `state` becomes a choice then.
 4. **After #808 (roll search on members) lands:** `Tool::within_session`'s comment (a create that names a project is held within the person's session now; listing stays as it is) and the members sentence in "With a scoped token" naming search. Waiting on its merge commit.
 5. **More quotes before creating something billable** (Supabase's form, PlanetScale's `confirm`): apps' is `apps_quote` (roll apps #835 on this thread's suggestion; `ship_a_service` and `ship_from_chat` ask it first, #840). Next: Postgres projects and search clusters, as their threads add a quote route.
 6. **MCP Events: more feeds.** All three delivery modes are on main (poll #692, webhook #703,
@@ -1516,7 +1519,7 @@ From a 2026-11-24 gap review (every tool run as an agent would against a fresh r
    stateless and search mode (`?tools=search`) covers clients that can't take the list; "remember this browser"; a preset that reveals development's values without asking
    (#354); a connection-level `?project=` (only a token's rules bound a project; a default that
    some tools can't honour would look like a boundary).
-15. **Landed 2026-11-23 and 24:** refusals that say why: search's error objects, token rules' resources, axum's body rejections; a cut answer naming its tool's filters; the sweep's `--report` (#907, from the 2026-11-24 gap review); `workspace.event` (#817); MCP Apps views that refresh themselves (#820); `roll_find`, any resource by name, part of its id or a pasted dashboard link (#821), its page table (#845) and search mode (#849); `ship_from_chat` (#826); review fixes for #814–#826 (#832: lookups held by `agents_ask`, the inspector on `roll_find`, approvals only from the gate); lists answered as tables (#838: 20+ rows about 40% smaller); the ship prompts quote first (#840); `secrets_list_saas`'s eleven vendors (#843); the field test reading named body types, 46 fields mapped or explained (#854), and object arguments naming every key (#862); `previews_fetch` on roll previews #852 (#859); review fixes for #838–#868 (#871); `roll_find` links matches (#864) and reads Postgres and streams links, which now carry their selection (#878); `previews_tables` (#883); a browser step's typed text redacted from the audit (#887); `previews_try` and `previews_try_screenshot`, an agent driving a preview's page (#892); `respond_to_leaked_secret` checks for a rotation roll already started (#891).
+15. **Landed 2026-11-23 and 24:** a missing required choice asked for in a form, as a missing id is (#912); tool arguments with a fixed set as JSON Schema `enum`, checked before the call; three proses were short of their route's set (#910); refusals that say why: search's error objects, token rules' resources, axum's body rejections; a cut answer naming its tool's filters; the sweep's `--report` (#907, from the 2026-11-24 gap review); `workspace.event` (#817); MCP Apps views that refresh themselves (#820); `roll_find`, any resource by name, part of its id or a pasted dashboard link (#821), its page table (#845) and search mode (#849); `ship_from_chat` (#826); review fixes for #814–#826 (#832: lookups held by `agents_ask`, the inspector on `roll_find`, approvals only from the gate); lists answered as tables (#838: 20+ rows about 40% smaller); the ship prompts quote first (#840); `secrets_list_saas`'s eleven vendors (#843); the field test reading named body types, 46 fields mapped or explained (#854), and object arguments naming every key (#862); `previews_fetch` on roll previews #852 (#859); review fixes for #838–#868 (#871); `roll_find` links matches (#864) and reads Postgres and streams links, which now carry their selection (#878); `previews_tables` (#883); a browser step's typed text redacted from the audit (#887); `previews_try` and `previews_try_screenshot`, an agent driving a preview's page (#892); `respond_to_leaked_secret` checks for a rotation roll already started (#891).
 16. **Landed 2026-11-22 morning:** operator policy for agent connections: `agents_ask` and
    `mcp_lockdown` / `mcp_read_only` (#678), and `oauth_clients`, the OAuth clients that may connect,
    checked at consent, at every token and on every request, nothing revoked (#680). SQL sessions name who sent them (`application_name`: `roll tok_…`, so `postgres_activity` tells
@@ -1665,7 +1668,11 @@ From a 2026-11-24 gap review (every tool run as an agent would against a fresh r
    again, keep its run's "increments took" line and the load: that says whether contention or the
    machine was the cause. A test-side deadline, not more retries in production, stays the fix. (The 2026-11-18 turn's combined
    gate passed without them: #208, #209, #210, #225, #226, #231, #236 and #239 landed as one gated
-   tree, main 53b939213.)
+   tree, main 53b939213.) roll-cluster's `postgres::a_dead_nodes_keys_move_to_their_preferred_live_node`
+   and `postgres::draining_hands_everything_over` (and, once, `a_pinned_node_id_waits_for_its_previous_incarnation`
+   and `every_node_routes_a_key_to_the_same_owner`) failed in three `pnpm test:code` runs on
+   2026-11-24 at load 85-105 and passed alone each time (6 of 6, three runs each, at load 92-105):
+   they lose only beside the other suites.
 32. **Enterprise sign-in (#210), what's left:** a live check with a real provider's ID-JAG (Okta's
    Cross App Access sandbox needs an account: the review pack's decision 5). The draft names the
    tenant `tenant`; a provider whose assertions say it another way (Entra's own tokens use `tid`)

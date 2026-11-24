@@ -291,6 +291,16 @@ pub struct Access {
     pub callers: Vec<String>,
 }
 
+/// A cold start in parts (Cloud Run's startup latency): the runtime bringing the container up, then
+/// the app until it answered.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct ColdStart {
+    pub at: i64,
+    pub ms: u64,
+    pub runtime_ms: u64,
+    pub app_ms: u64,
+}
+
 /// The most `access.callers` entries.
 pub const MAX_CALLERS: usize = 20;
 
@@ -1874,6 +1884,9 @@ pub struct Environment {
     /// Visitors a provider signs in (`access.sso`): its provider and who it lets in.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sso: Option<Sso>,
+    /// Its last cold start on the node serving it, in parts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_cold_start: Option<ColdStart>,
     /// Paths whose CORS preflights reach the app past its gate (`access.preflight`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub preflight: Vec<String>,
@@ -3029,6 +3042,9 @@ pub struct Deployment {
     pub started_at: Option<i64>,
     pub finished_at: Option<i64>,
     pub ready_ms: Option<i64>,
+    /// Its image's size, where the runtime says (bytes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_bytes: Option<i64>,
     /// Who asked for it: a push's commit author, the token or connection that called the API
     /// (`operator` for the operator's token), none when roll did it on its own or nothing said.
     pub actor: Option<String>,

@@ -855,12 +855,54 @@ impl Runtime {
         crate::settings::flags_header(&self.flags_of(preview), cookie)
     }
 
-    fn feedback_target(&self, preview: &str, req: &Request) -> Option<String> {
-        let web = self.cfg.dashboard.as_deref()?;
-        req.extensions().get::<ThroughRoll>()?;
+    fn feedback_target(&self, preview: &str, req: &Request) -> Option<Feedback> {
         let row = self.store.row(preview).ok()?;
         row.change_id.as_ref()?;
-        self.store.settings(&row.project_id).ok()?.feedback.then(|| format!("{}/dashboard/projects/{}/previews?preview={preview}", web.trim_end_matches('/'), row.project_id))
+        if !self.store.settings(&row.project_id).ok()?.feedback {
+            return None;
+        }
+        // A share link's visitor, when its maker let them leave notes: posted from the page.
+        if let Some(ShareVisit(live)) = req.extensions().get::<ShareVisit>() {
+            return live.notes.then(|| Feedback::Guest(live.clone()));
+        }
+        let web = self.cfg.dashboard.as_deref()?;
+        req.extensions().get::<ThroughRoll>()?;
+        Some(Feedback::Team(format!("{}/dashboard/projects/{}/previews?preview={preview}", web.trim_end_matches('/'), row.project_id)))
+    }
+
+    /// A guest's note from the page's button (`POST /__roll/notes`): a JSON body from this page
+    /// (its own origin), bounded, posted on the change as them.
+    async fn guest_note(&self, preview: &str, share: &crate::store::LiveShare, req: Request) -> Response {
+        let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
+        let origin = req.headers().get(header::ORIGIN).and_then(|h| h.to_str().ok()).unwrap_or("");
+        let json = req.headers().get(header::CONTENT_TYPE).and_then(|h| h.to_str().ok()).is_some_and(|t| t.starts_with("application/json"));
+        if !json || origin.split_once("://").map(|(_, h)| h) != Some(host.as_str()) {
+            return (StatusCode::FORBIDDEN, "notes come from the preview's own pages").into_response();
+        }
+        let Ok(bytes) = axum::body::to_bytes(req.into_body(), 64 << 10).await else { return (StatusCode::PAYLOAD_TOO_LARGE, "a note is 64 KiB at most").into_response() };
+        let Ok(note) = serde_json::from_slice::<crate::notes::GuestNote>(&bytes) else { return (StatusCode::BAD_REQUEST, "expected {name, path, selector?, note, …}").into_response() };
+        let Ok(engine) = self.engine() else { return StatusCode::SERVICE_UNAVAILABLE.into_response() };
+        match engine.guest_note(preview, share, &note).await {
+            Ok(id) => (StatusCode::CREATED, axum::Json(serde_json::json!({ "id": id }))).into_response(),
+            Err(e) => {
+                let status = match &e {
+                    crate::Error::BadRequest(_) => StatusCode::BAD_REQUEST,
+                    crate::Error::Forbidden(_) => StatusCode::FORBIDDEN,
+                    crate::Error::Conflict(_) => StatusCode::TOO_MANY_REQUESTS,
+                    _ => StatusCode::BAD_GATEWAY,
+                };
+                (status, e.to_string()).into_response()
+            }
+        }
+    }
+
+    /// The notes a share link's guest sees on `path`: those left through it.
+    async fn guest_notes(&self, preview: &str, share: &str, path: &str) -> Response {
+        let here = match self.engine() {
+            Ok(e) => e.guest_notes_of(preview, share, path).await.unwrap_or_default(),
+            Err(_) => Vec::new(),
+        };
+        ([(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "private, no-store")], axum::Json(here)).into_response()
     }
 
     /// Link access: a request carries the preview's token in its query (it gets a cookie and is
@@ -917,15 +959,16 @@ impl Runtime {
         // so a revoked or ended one stops at once.
         let share_cookie = format!("roll_share_{preview}");
         if let Some(t) = cookie_value(req, &share_cookie).map(str::to_string)
-            && self.share_live(preview, &t).await.is_some()
+            && let Some(live) = self.share_live(preview, &t).await
         {
+            req.extensions_mut().insert(ShareVisit(live));
             return None;
         }
         if !token.is_empty() && given("roll_access").is_some_and(|v| same(v, &token)) {
             return Some(self.enter(req, "roll_access", &cookie, &token, 2_592_000));
         }
         if let Some(t) = given("roll_share").map(str::to_string)
-            && let Some(ends) = self.share_live(preview, &t).await
+            && let Some(crate::store::LiveShare { ends, .. }) = self.share_live(preview, &t).await
         {
             let t = t.as_str();
             let now = self.store.now_ms().unwrap_or(ends);
@@ -1009,12 +1052,13 @@ impl Runtime {
     /// may still open the project's previews, asked again (off the async workers: it reads roll's
     /// accounts) once last asked `visitor_recheck` ago. One whose maker may not ends now, said in
     /// the preview's activity.
-    async fn share_live(&self, preview: &str, token: &str) -> Option<i64> {
-        let crate::store::LiveShare { id: share, ends, maker, maker_checked } = self.store.share_live(preview, token).ok().flatten()?;
-        let Some(maker) = maker else { return Some(ends) };
+    async fn share_live(&self, preview: &str, token: &str) -> Option<crate::store::LiveShare> {
+        let live = self.store.share_live(preview, token).ok().flatten()?;
+        let (share, maker_checked) = (live.id.clone(), live.maker_checked);
+        let Some(maker) = live.maker.clone() else { return Some(live) };
         let now = self.store.now_ms().ok()?;
         if maker_checked > now - self.cfg.visitor_recheck.as_millis() as i64 {
-            return Some(ends);
+            return Some(live);
         }
         let engine = self.engine().ok()?;
         let project = self.store.row(preview).ok()?.project_id;
@@ -1022,7 +1066,7 @@ impl Runtime {
         let reaches = tokio::task::spawn_blocking(move || e.maker_reaches(&maker, &project)).await.unwrap_or(false);
         if reaches {
             let _ = self.store.share_maker_checked(&share, now);
-            return Some(ends);
+            return Some(live);
         }
         let by = self.store.shares(preview).ok().and_then(|all| all.into_iter().find(|s| s.id == share)).map(|s| s.created_by).unwrap_or_default();
         if self.store.revoke_share(preview, &share).is_ok() {
@@ -1216,11 +1260,25 @@ impl Runtime {
 #[derive(Clone, Copy)]
 struct ThroughRoll;
 
+/// A share link's visitor (its link live at this request).
+#[derive(Clone)]
+struct ShareVisit(crate::store::LiveShare);
+
+/// Who gets the feedback button, and where their note goes.
+enum Feedback {
+    /// Someone who came in through roll: the note is posted in roll's dashboard, as them.
+    Team(String),
+    /// A share link's guest (the link takes notes): posted from the page, as `guest:<name>`.
+    Guest(crate::store::LiveShare),
+}
+
 /// Where a preview's pages load the feedback button from (its own host, so `script-src 'self'`
 /// allows it), and the tag that loads it.
 pub const FEEDBACK_PATH: &str = "/__roll/feedback.js";
 /// The feedback already left on a page (`?path=`), for the button to list.
 pub const FEEDBACK_NOTES_PATH: &str = "/__roll/feedback.json";
+/// Where a share link's guest posts a note from the button.
+pub const GUEST_NOTE_PATH: &str = "/__roll/notes";
 pub(crate) const FEEDBACK_TAG: &[u8] = b"<script src=\"/__roll/feedback.js\" defer></script>";
 /// Adds the feedback button's tag to a page as it streams: before the first `</body>` (matched
 /// across chunk boundaries, in any case), or at the end of a page without one. Chunks pass on as
@@ -1299,9 +1357,10 @@ const FLAGS_COOKIE: &str = "roll_flags";
 /// The header the services get them in (`name=value,…`).
 const FLAGS_HEADER: HeaderName = HeaderName::from_static("x-roll-flags");
 
-fn feedback_script(target: &str, flags: &[crate::settings::FlagRule]) -> Response {
+fn feedback_script(target: &str, guest: bool, flags: &[crate::settings::FlagRule]) -> Response {
     let js = include_str!("feedback.js")
         .replace("__ROLL_TARGET__", &serde_json::to_string(target).unwrap_or_else(|_| "\"\"".into()))
+        .replace("__ROLL_GUEST__", if guest { "true" } else { "false" })
         .replace("__ROLL_FLAGS__", &serde_json::to_string(flags).unwrap_or_else(|_| "[]".into()));
     ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8"), (header::CACHE_CONTROL, "private, max-age=300")], js).into_response()
 }
@@ -2567,11 +2626,26 @@ async fn serve(rt: Arc<Runtime>, preview: String, service: String, mut req: Requ
     if req.uri().path() == FEEDBACK_PATH
         && let Some(t) = &target
     {
-        return feedback_script(t, &rt.flags_of(&preview));
+        return match t {
+            Feedback::Team(url) => feedback_script(url, false, &rt.flags_of(&preview)),
+            Feedback::Guest(_) => feedback_script("", true, &rt.flags_of(&preview)),
+        };
     }
-    if req.uri().path() == FEEDBACK_NOTES_PATH && target.is_some() {
+    if req.uri().path() == FEEDBACK_NOTES_PATH
+        && let Some(t) = &target
+    {
         let path = req.uri().query().unwrap_or("").split('&').filter_map(|kv| kv.split_once('=')).find(|(k, _)| *k == "path").map(|(_, v)| percent_decode(v)).unwrap_or_default();
-        return rt.feedback_notes(&preview, &path).await;
+        return match t {
+            Feedback::Team(_) => rt.feedback_notes(&preview, &path).await,
+            Feedback::Guest(share) => rt.guest_notes(&preview, &share.id, &path).await,
+        };
+    }
+    if req.uri().path() == GUEST_NOTE_PATH
+        && req.method() == axum::http::Method::POST
+        && let Some(Feedback::Guest(share)) = &target
+    {
+        let share = share.clone();
+        return rt.guest_note(&preview, &share, req).await;
     }
     let feedback = target.is_some() && req.method() == axum::http::Method::GET && is_page_load(&req);
     let (service, skew_cookie) = rt.skew(&preview, service, &mut req);
@@ -2751,11 +2825,22 @@ mod tests {
         assert!(raw("GET /__roll/feedback.js HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nConnection: close\r\n\r\n".into()).await.starts_with("HTTP/1.1 401"));
         // A share link: in through its token (a cookie of its own, only for its life), out once
         // it's revoked.
-        let (share, stoken) = rt.store.create_share(&row.id, rt.store.now_ms().unwrap() + 3_600_000, "ada", None).unwrap();
+        let (share, stoken) = rt.store.create_share(&row.id, rt.store.now_ms().unwrap() + 3_600_000, "ada", None, "", false).unwrap();
         let entered = raw(format!("GET /hello?roll_share={stoken} HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nConnection: close\r\n\r\n")).await;
         assert!(entered.starts_with("HTTP/1.1 302") && entered.contains(&format!("roll_share_{}={stoken}", row.id)) && entered.contains("Max-Age=3"), "{entered}");
         let with_share = format!("GET /hello HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nCookie: roll_share_{}={stoken}\r\nConnection: close\r\n\r\n", row.id);
         assert!(raw(with_share.clone()).await.ends_with("service saw /hello"));
+        assert!(!raw(format!("GET /__roll/feedback.js HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nCookie: roll_share_{}={stoken}\r\nConnection: close\r\n\r\n", row.id)).await.contains("GUEST"), "a link that takes no notes gives no button");
+        // A link that takes notes: its guest gets the button in its own mode (posting from the
+        // page), and a note only from the page's own origin.
+        let (_, gtoken) = rt.store.create_share(&row.id, rt.store.now_ms().unwrap() + 3_600_000, "ada", None, "Acme's review", true).unwrap();
+        let guest_script = raw(format!("GET /__roll/feedback.js HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nCookie: roll_share_{}={gtoken}\r\nConnection: close\r\n\r\n", row.id)).await;
+        assert!(guest_script.contains("const GUEST = true;"), "{guest_script}");
+        let post = |origin: &str| {
+            let body = r#"{"name":"Ada","path":"/","note":"Too small"}"#;
+            format!("POST /__roll/notes HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nOrigin: {origin}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCookie: roll_share_{}={gtoken}\r\nConnection: close\r\n\r\n{body}", body.len(), row.id)
+        };
+        assert!(raw(post("https://evil.example")).await.starts_with("HTTP/1.1 403"), "another site's page posts nothing");
         rt.store.revoke_share(&row.id, &share.id).unwrap();
         assert!(raw(with_share).await.starts_with("HTTP/1.1 401"), "revoked: out at once");
         // The notes already left on a page: for the same visitors only.
