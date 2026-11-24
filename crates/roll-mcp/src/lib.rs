@@ -1409,8 +1409,10 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: Option<&str>) -
     if !quiet && let Some(refused) = inspect_call(ctx, name, &args).await {
         return Some(refused);
     }
+    let mut narrowing = None;
     let (mut result, route) = if let Some(t) = tools::all().iter().find(|t| t.name == name) {
         outside = t.outside;
+        narrowing = t.narrowing();
         (run(ctx, t, &args, ext).await, format!("{} {}", t.method, t.path))
     } else {
         let set = ctx.m.sets.iter().find(|s| s.tools().iter().any(|t| t["name"] == name))?;
@@ -1430,7 +1432,7 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: Option<&str>) -
     // In lockdown, an outside record's text never reaches the model: withheld in the structured
     // answer, and the text block (a fronted set may write its own) rebuilt from what's left.
     if ctx.lockdown && lockdown::withhold(&mut result["structuredContent"]) + lockdown::withhold_fields(&mut result["structuredContent"], outside) > 0 {
-        let text = text::fit(text::render(&result["structuredContent"]));
+        let text = text::fit(text::render(&result["structuredContent"]), narrowing.as_deref());
         if let Some(content) = result["content"].as_array_mut() {
             content.retain(|c| c["type"] != "text");
             content.insert(0, json!({ "type": "text", "text": text }));
@@ -1724,7 +1726,7 @@ async fn run(ctx: &Arc<Ctx>, t: &tools::Tool, args: &Value, ext: Extensions) -> 
         Ok(r) => r,
         Err(e) => match e {},
     };
-    outcome(t.name, resp).await
+    outcome(t.name, t.narrowing().as_deref(), resp).await
 }
 
 /// The approval a call waits on, when roll's gate answered it so ([`outcome`]: a refusal with
@@ -1736,7 +1738,7 @@ pub(crate) fn waiting_approval(s: &Value) -> Option<&str> {
 }
 
 /// A tool's MCP result from its route's answer.
-async fn outcome(tool: &str, resp: Response) -> Value {
+async fn outcome(tool: &str, narrowing: Option<&[&str]>, resp: Response) -> Value {
     let status = resp.status();
     let ct = resp.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
     let bytes = axum::body::to_bytes(resp.into_body(), MAX_ANSWER).await.unwrap_or_default();
@@ -1744,9 +1746,14 @@ async fn outcome(tool: &str, resp: Response) -> Value {
     if !status.is_success() {
         let body = json.unwrap_or_else(|| json!({ "error": String::from_utf8_lossy(&bytes).trim() }));
         let code = body.get("code").and_then(Value::as_str).unwrap_or("");
-        let msg = body.get("error").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| status.to_string());
+        let msg = refusal(&body).unwrap_or_else(|| status.to_string());
         let mut data = if body.is_object() { body.clone() } else { json!({}) };
         data["http_status"] = json!(status.as_u16());
+        // `error` becomes the text below; an object there (search's type, reason, causes and where
+        // in the query) stays whole beside it.
+        if body["error"].is_object() {
+            data["error_object"] = body["error"].clone();
+        }
         // Waiting on a person is an outcome the agent acts on, not a failure.
         if code == "approval_pending" {
             data["status"] = json!("approval_pending");
@@ -1777,7 +1784,7 @@ async fn outcome(tool: &str, resp: Response) -> Value {
         // Compact: a model reads JSON without its indentation, which is about a third of a
         // pretty-printed answer's tokens (and leaves more under the cut); a list of objects as a
         // table, which names its columns once.
-        Some(v) => (text::fit(text::render(&v)), if v.is_object() { v } else { json!({ "items": v }) }),
+        Some(v) => (text::fit(text::render(&v), narrowing), if v.is_object() { v } else { json!({ "items": v }) }),
         None if bytes.is_empty() => ("done".to_string(), json!({ "ok": true })),
         None => match std::str::from_utf8(&bytes) {
             Ok(s) => (cut(s.to_string(), false), json!({ "content_type": ct, "bytes": bytes.len() })),
@@ -1802,12 +1809,89 @@ async fn outcome(tool: &str, resp: Response) -> Value {
     json!({ "content": [{ "type": "text", "text": text }], "structuredContent": structured, "isError": false })
 }
 
+/// What a product's refusal says, in the shapes roll's APIs answer: `error` as text (most), an
+/// Elasticsearch error object (search: `type: reason`, then each `caused_by` under it), or a
+/// `message`. Without one the model would read only the status ("400 Bad Request").
+fn refusal(body: &Value) -> Option<String> {
+    let said = |s: Option<&str>| s.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    match &body["error"] {
+        Value::String(s) => return said(Some(s.as_str())).map(|s| rejection(&s)),
+        e @ Value::Object(_) => {
+            let mut parts = Vec::new();
+            let mut at = Some(e);
+            while let Some(e) = at.filter(|_| parts.len() < 4) {
+                let reason = said(e["reason"].as_str().or(e["message"].as_str()));
+                match (said(e["type"].as_str()), reason) {
+                    (Some(t), Some(r)) => parts.push(format!("{t}: {r}")),
+                    (t, r) => parts.extend(r.or(t)),
+                }
+                at = e.get("caused_by").filter(|c| c.is_object());
+            }
+            if !parts.is_empty() {
+                return Some(parts.join("; caused by "));
+            }
+        }
+        _ => {}
+    }
+    said(body["message"].as_str())
+}
+
+/// axum's own refusal of a body or query a route couldn't take, as the part about the argument:
+/// `Failed to deserialize the JSON body into the target type: action: unknown variant `x`, expected
+/// one of `advance`, `all`, `abort` at line 1 column 24` is `action: unknown variant …, expected
+/// one of …` (the line and column are in a body the tool built, not one the model wrote).
+fn rejection(s: &str) -> String {
+    let Some(rest) = ["Failed to deserialize the JSON body into the target type: ", "Failed to deserialize query string: "].iter().find_map(|p| s.strip_prefix(p)) else {
+        return s.to_string();
+    };
+    match rest.rsplit_once(" at line ") {
+        Some((head, tail)) if tail.split_once(" column ").is_some_and(|(l, c)| l.parse::<u64>().is_ok() && c.parse::<u64>().is_ok()) => head.to_string(),
+        _ => rest.to_string(),
+    }
+}
+
 /// A tool's product, from its name's first word (`apps_logs` is apps'): roll code's `search` and
 /// `fetch` keep the names ChatGPT asks for and are roll code's.
 fn tool_product(name: &str) -> &str {
     match name {
         "search" | "fetch" => "code",
         n => n.split('_').next().unwrap_or(""),
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use serde_json::json;
+
+    async fn refused(status: StatusCode, body: serde_json::Value) -> (String, serde_json::Value) {
+        let r = super::outcome("t", None, (status, axum::Json(body)).into_response()).await;
+        assert_eq!(r["isError"], true);
+        (r["content"][0]["text"].as_str().unwrap().to_string(), r["structuredContent"].clone())
+    }
+
+    /// A refusal's text says why in each shape roll's products answer, never just the status.
+    #[tokio::test]
+    async fn a_refusal_says_why_in_every_products_shape() {
+        // Search answers Elasticsearch's error object: its type and reason, and what caused it.
+        let es = json!({ "error": { "root_cause": [{ "type": "mapper_parsing_exception", "reason": "Failed to parse mapping: x" }], "type": "mapper_parsing_exception", "reason": "Failed to parse mapping: x",
+            "caused_by": { "type": "illegal_argument_exception", "reason": "No handler for type [nope] declared on field [x]" } }, "status": 400 });
+        let (text, sc) = refused(StatusCode::BAD_REQUEST, es.clone()).await;
+        assert_eq!(text, "mapper_parsing_exception: Failed to parse mapping: x; caused by illegal_argument_exception: No handler for type [nope] declared on field [x]");
+        assert_eq!(sc["error_object"], es["error"], "the object stays whole");
+        let (text, _) = refused(StatusCode::NOT_FOUND, json!({ "error": { "type": "index_not_found_exception", "reason": "no such index [nope]" }, "status": 404 })).await;
+        assert_eq!(text, "not found: index_not_found_exception: no such index [nope]");
+        // axum's refusal of a body: the part about the argument.
+        let (text, _) = refused(StatusCode::UNPROCESSABLE_ENTITY, json!({ "error": "Failed to deserialize the JSON body into the target type: action: unknown variant `go`, expected one of `advance`, `all`, `abort` at line 1 column 24" })).await;
+        assert_eq!(text, "action: unknown variant `go`, expected one of `advance`, `all`, `abort`");
+        let (text, _) = refused(StatusCode::BAD_REQUEST, json!({ "message": "name is taken" })).await;
+        assert_eq!(text, "name is taken");
+        // Only the status when the product said nothing; a plain error as it was.
+        let (text, _) = refused(StatusCode::BAD_REQUEST, json!({ "error": { "root_cause": [] } })).await;
+        assert_eq!(text, "400 Bad Request");
+        let (text, _) = refused(StatusCode::CONFLICT, json!({ "error": "bucket b isn't empty at line 3 column 4" })).await;
+        assert_eq!(text, "bucket b isn't empty at line 3 column 4");
     }
 }
 

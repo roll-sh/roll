@@ -235,19 +235,27 @@ impl Serialize for Resources {
     }
 }
 
+/// By what it is, so a mistake says what's wrong (an untagged enum says only "did not match any
+/// variant", for an object in place of the list and for a bad selector inside it alike).
 impl<'de> Deserialize<'de> for Resources {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Raw {
-            Star(String),
-            List(Vec<Selector>),
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = Resources;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("resources as \"*\" or a list of selectors, like [{\"id\": \"srch_…\"}] or [{\"project\": \"prj_…\"}]")
+            }
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<Resources, E> {
+                match s {
+                    "*" => Ok(Resources::All),
+                    s => Err(E::custom(format!("resources must be \"*\" or a list, not {s:?}"))),
+                }
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, seq: A) -> Result<Resources, A::Error> {
+                Vec::<Selector>::deserialize(serde::de::value::SeqAccessDeserializer::new(seq)).map(Resources::Some)
+            }
         }
-        match Raw::deserialize(d)? {
-            Raw::Star(s) if s == "*" => Ok(Resources::All),
-            Raw::Star(s) => Err(serde::de::Error::custom(format!("resources must be \"*\" or a list, not {s:?}"))),
-            Raw::List(v) => Ok(Resources::Some(v)),
-        }
+        d.deserialize_any(V)
     }
 }
 
@@ -513,6 +521,17 @@ mod tests {
 
     fn rule(json: serde_json::Value) -> Rule {
         serde_json::from_value(json).unwrap()
+    }
+
+    /// A rule's resources that don't parse say why: what's expected, or what's wrong in a selector.
+    #[test]
+    fn bad_resources_say_why() {
+        let err = |resources: serde_json::Value| serde_json::from_value::<Rule>(serde_json::json!({ "product": "search", "resources": resources, "actions": { "read": "allow" } })).unwrap_err().to_string();
+        assert!(err(serde_json::json!({ "id": "srch_1" })).contains("expected resources as \"*\" or a list of selectors, like [{\"id\""), "{}", err(serde_json::json!({ "id": "srch_1" })));
+        assert!(err(serde_json::json!("all")).contains("resources must be \"*\" or a list, not \"all\""));
+        assert!(err(serde_json::json!([{ "id": "srch_1", "nope": 1 }])).contains("nope"), "{}", err(serde_json::json!([{ "id": "srch_1", "nope": 1 }])));
+        assert_eq!(rule(serde_json::json!({ "product": "search", "resources": [{ "id": "srch_1" }], "actions": { "read": "allow" } })).resources, Resources::Some(vec![Selector::Id { id: "srch_1".into(), index: None }]));
+        assert_eq!(rule(serde_json::json!({ "product": "search", "resources": "*", "actions": { "read": "allow" } })).resources, Resources::All);
     }
 
     #[test]
