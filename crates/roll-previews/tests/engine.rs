@@ -504,6 +504,33 @@ async fn a_secret_value_its_pages_serve_is_named_on_its_record() {
     assert!(said.len() == 1 && said[0].contains("STRIPE_KEY in /assets/app.js") && !said[0].contains("sk_test"), "{said:?}");
 }
 
+/// A fork's preview is marked `outside`, and so are its error groups and its logs (its traces,
+/// spans and routes too): its title and what its code wrote are text from people who can't push,
+/// which roll MCP's lockdown keeps from a model; a trusted preview isn't.
+#[tokio::test]
+async fn a_forks_preview_and_its_errors_are_marked_outside() {
+    use tower::ServiceExt;
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_out", 3));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_out").unwrap().unwrap();
+    let web = e.engine.store.services(&p.id).unwrap()[0].name.clone();
+    let group = roll_previews::ErrorGroup { service: String::new(), fingerprint: "aa".into(), kind: "line".into(), title: "x".into(), count: 1, first_seen: 1, last_seen: 2, sample: "x".into(), trace: None };
+    e.apps.errors.lock().insert(web, vec![group]);
+    let get = |path: String| {
+        let router = roll_previews::api::router(e.engine.clone());
+        async move {
+            let resp = router.oneshot(axum::http::Request::get(path).body(axum::body::Body::empty()).unwrap()).await.unwrap();
+            serde_json::from_slice::<serde_json::Value>(&axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap()).unwrap()
+        }
+    };
+    assert!(get(format!("/v1/previews/{}", p.id)).await.get("outside").is_none());
+    e.engine.store.update(&p.id, |r| r.trusted = false).unwrap();
+    assert_eq!(get(format!("/v1/previews/{}", p.id)).await["outside"], json!(true));
+    assert_eq!(get(format!("/v1/previews/{}/errors?minutes=360", p.id)).await["groups"][0]["outside"], json!(true));
+    assert_eq!(get(format!("/v1/previews/{}/logs", p.id)).await["outside"], json!(true), "its log lines too");
+}
+
 /// A preview's errors are its services' groups, newest first, named by service, with a secret its
 /// code printed shown as `***` in the title and the sample (as its logs are), a value a cut split
 /// included; its values are read only when there's an error (counting reads none), and a
