@@ -3,6 +3,7 @@ import { appsApi, followLog, type LogLine, atLeast, type LogLevel } from "@/lib/
 import { matchesTerms, splitFilter } from "@/lib/log-where";
 import { btn } from "../ui";
 import { LogBar, LogView } from "./shared";
+import { TraceWaterfall } from "./metrics";
 import { usePageVisible } from "./live";
 
 const MAX_LINES = 5000;
@@ -10,6 +11,8 @@ const MAX_LINES = 5000;
 /** The environment's runtime log, live: every instance's stdout and stderr, filterable, pausable. */
 export function RuntimeLogs({ service, env, onGroup }: { service: string; env: string; onGroup?: () => void }) {
   const [lines, setLines] = useState<LogLine[]>([]);
+  // A request's trace, opened from its line.
+  const [trace, setTrace] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const [paused, setPaused] = useState(false);
   const [filter, setFilter] = useState("");
@@ -252,9 +255,23 @@ export function RuntimeLogs({ service, env, onGroup }: { service: string; env: s
           </button>
         </p>
       )}
+      {trace && (
+        <div className="rise mb-2 rounded-lg border border-line bg-panel px-3 py-2">
+          <div className="mb-2 flex items-center justify-between text-[11.5px] text-muted">
+            <span>
+              Trace <span className="font-mono text-subtle">{trace.slice(0, 16)}</span>
+            </span>
+            <button type="button" className="hover:text-fg" onClick={() => setTrace(null)}>
+              Close
+            </button>
+          </div>
+          <TraceWaterfall service={service} env={env} trace={trace} />
+        </div>
+      )}
       <LogView
         lines={found ? found.lines : shown}
         columns
+        onTrace={setTrace}
         onGroup={onGroup}
         onBlock={async (ip) => {
           // First in the list (the first match decides), unless a rule denies it already.

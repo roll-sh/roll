@@ -1805,6 +1805,10 @@ impl Apps {
             }
             None => None,
         };
+        // Its build begins (Vercel's `deployment.created`, Netlify's "deploy started"): webhooks and
+        // chat can say "building…".
+        let (sid, en, did, data) = (svc.id.clone(), d.environment.clone(), d.id.clone(), json!({ "revision": d.revision, "trigger": d.trigger, "reused": reused.is_some() }));
+        let _ = self.db(move |s| s.add_event("deploy.started", &sid, &en, Some(&did), &data)).await;
         let (reused_from, began) = (reused.as_ref().map(|(from, _)| from.clone()), code_sql::now_ms());
         let image = if let Some((from, image)) = reused {
             log.line(format!("{from} was built from the same source, settings and build variables: its image goes on, no build"));
@@ -2325,6 +2329,21 @@ impl Apps {
         });
     }
 
+    /// Its instances' events since the last tick: scaling (with why) and crashes (with their
+    /// reason).
+    async fn record_notes(self: &Arc<Self>, l: &crate::live::EnvLive) {
+        let live = l.template().map(|t| t.deployment.clone());
+        for n in l.take_notes() {
+            // A new deployment's instance failing its start is its deploy's failure (said as
+            // `deploy.failed`), not an instance of what's live crashing.
+            if n.kind == "instance.crashed" && live.as_deref() != Some(n.deployment.as_str()) {
+                continue;
+            }
+            let (sid, e) = (l.service.clone(), l.env.clone());
+            let _ = self.db(move |s| s.add_event(n.kind, &sid, &e, Some(&n.deployment), &n.data)).await;
+        }
+    }
+
     /// An environment that went into a crash loop gets one event for it (until it leaves it).
     async fn note_crash_loop(self: &Arc<Self>, l: &crate::live::EnvLive) {
         let key = format!("{}/{}", l.service, l.env);
@@ -2555,6 +2574,7 @@ impl Apps {
             // Each environment's tick on its own task: one waiting for a cold start to finish
             // doesn't hold up the others.
             for l in self.lives().into_iter().filter(|l| self.owns(&l.service)) {
+                self.record_notes(&l).await;
                 self.note_crash_loop(&l).await;
                 if l.ticking.swap(true, Ordering::SeqCst) {
                     continue;

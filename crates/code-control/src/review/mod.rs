@@ -20,6 +20,7 @@ pub mod codeowners;
 mod comments;
 pub mod lines;
 pub mod pattern;
+pub mod preview_note;
 pub mod rules;
 pub mod store;
 

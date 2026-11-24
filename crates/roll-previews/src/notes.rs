@@ -36,8 +36,8 @@ pub struct Reply {
 
 pub const MAX_REPLIES: usize = 20;
 
-const HEAD: &str = "**Feedback on the preview** · ";
-const REPLY: &str = "**Reply on the preview** · ";
+/// The bodies' shapes are roll code's (chat ops carries notes to Slack and back too).
+pub use code_control::review::preview_note::{parse, parse_reply};
 
 /// A change's comment review, as notes are read from it.
 pub struct Comment {
@@ -68,30 +68,6 @@ pub fn thread(comments: impl IntoIterator<Item = Comment>) -> Vec<Note> {
     notes
 }
 
-/// The note a reply's body answers, and the reply, if it is one.
-pub fn parse_reply(body: &str) -> Option<(String, String)> {
-    let (first, rest) = body.split_once("\n\n")?;
-    let id = first.strip_prefix(REPLY)?.strip_prefix('`')?.strip_suffix('`')?;
-    let reply = rest.trim();
-    let id_ok = (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
-    (id_ok && !reply.is_empty()).then(|| (id.to_string(), reply.chars().take(2000).collect()))
-}
-
-/// The page, the element and the note of a feedback review's body, if it is one.
-pub fn parse(body: &str) -> Option<(String, String, String)> {
-    let (first, rest) = body.split_once("\n\n")?;
-    let first = first.strip_prefix(HEAD)?;
-    // `[`/path`](url)` or `` `/path` ``, then ` · `selector``.
-    let mut parts = first.splitn(2, " · ");
-    let place = parts.next()?;
-    let path = place.strip_prefix("[`").and_then(|p| p.split_once("`]")).map(|(p, _)| p).or_else(|| place.strip_prefix('`').and_then(|p| p.strip_suffix('`')))?;
-    let selector = parts.next().and_then(|s| s.strip_prefix('`')?.strip_suffix('`')).unwrap_or("");
-    let note = rest.rsplit_once("\n\n<sub>").map_or(rest, |(n, _)| n).trim();
-    if !path.starts_with('/') || note.is_empty() {
-        return None;
-    }
-    Some((path.to_string(), selector.to_string(), note.chars().take(2000).collect()))
-}
 
 #[cfg(test)]
 mod tests {
