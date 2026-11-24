@@ -2207,6 +2207,13 @@ type Settings = {
     #open: nothing matched`"), the state taken as it was then (checked by hand in the screenshot
     image: a click opening a cart, typing reaching the page's handler, Escape closing it, a missing
     element named; live: a Tab state compared with main's, and one from the repo's `roll.toml`).
+    A state's clicks and typing are timed to the next paint (`step_ms`, the slowest one: its
+    handlers' work and the frame after them, most of what Interaction to Next Paint counts, in the
+    lab; the browser's own Event Timing counts only a person's input, and steps are the checks'),
+    beside main's same state (`against.step_ms`); the sheet says so when a state's is past 200 ms
+    and half again main's (Vercel's Speed Insights' INP, without visitors' own numbers yet). A
+    number the page reports is kept only when it could be a time (a minute at most). Live: the
+    Tab state's click timed on both. `a_screenshot_run_s_pages_are_only_those_asked_for_each_once`.
     Other browsers too (Percy's and Chromatic's browsers; `github.browsers`: `firefox`, `webkit`,
     and `webkit-phone`, WebKit at 390 × 844 at twice the density as a touch device, mobile
     Safari's engine; a picture past 2 MiB is left out so the others still fit):
