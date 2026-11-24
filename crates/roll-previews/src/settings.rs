@@ -63,6 +63,11 @@ pub struct Settings {
     /// errors main's doesn't have (`slower_routes`, `new_errors`); `required` also keeps it from
     /// landing in roll until they're gone or someone other than its author accepts them.
     pub regressions: RegressionsRule,
+    /// Production's browser checks on each preview head (roll apps' `checks[].browser`): `report`
+    /// (the default) shows them; `check` also posts `roll/browser-checks`, pending while they run
+    /// and failing while one fails; `required` also keeps the change from landing in roll until
+    /// they pass at its head.
+    pub browser_checks: BrowserChecksRule,
     /// `catch` (the default): services send mail to roll's catcher (`SMTP_*` are roll's, mail
     /// providers' API keys are removed), listed on the preview, never delivered; `deliver`: the
     /// project's own mail settings reach previews.
@@ -94,6 +99,18 @@ pub struct Settings {
     /// A feedback button on the pages of people who came in through roll (link access, or a team
     /// session): it pins a note to an element and posts it on the change, from roll.
     pub feedback: bool,
+    /// Feature flags a reviewer sets for their own view from that button's toolbar (Vercel's
+    /// Flags Explorer): each a name and its options, at most [`MAX_FLAGS`]. The choice reaches the
+    /// services as the `x-roll-flags` header (`name=value`, comma-joined), only what this rule
+    /// names, never as the cookie it's kept in.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flags: Vec<FlagRule>,
+    /// Who a trusted preview's own services may have roll's word for (Vercel's OIDC federation):
+    /// clouds' relying parties (`sts.amazonaws.com`, a GCP pool provider), at most 5. Each service
+    /// gets `ROLL_OIDC_URL` and `ROLL_OIDC_AUDIENCE` (the first); a token's `sub` is
+    /// `roll-previews:<project>:<preview>:<service>`. Empty: none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub oidc_audiences: Vec<String>,
     /// Wake the change's services as soon as a new head is deployed, so the first visit (often
     /// the pull request comment's link) doesn't wait for a cold start.
     pub warm: bool,
@@ -156,6 +173,15 @@ pub enum EgressRule {
     #[default]
     Open,
     Roll,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BrowserChecksRule {
+    #[default]
+    Report,
+    Check,
+    Required,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,6 +280,30 @@ pub struct GithubRule {
     /// browsers): `firefox`, `webkit`, each a page of its own (`browser:<name>`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub browsers: Vec<String>,
+    /// The preview's Storybook (Chromatic's stories): `web`, or `web:/storybook/` when that
+    /// service serves it under a path (a static build or `storybook dev`). Each story, up to
+    /// [`MAX_STORIES`] (docs left out), is taken alone, clipped to what it renders, compared with
+    /// main's and reviewed like a page (`story:<id>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storybook: Option<String>,
+}
+
+/// The most stories a Storybook's run takes (`github.storybook`).
+pub const MAX_STORIES: usize = 40;
+
+/// `github.storybook`'s service and where it serves Storybook (a path ending in `/`).
+pub fn storybook_entry(e: &str) -> Option<(&str, &str)> {
+    let label = |s: &str| !s.is_empty() && s.len() <= 63 && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    match page_entry(e) {
+        Some((Some(svc), path)) => path.ends_with('/').then_some((svc, path)),
+        _ => label(e).then_some((e, "/")),
+    }
+}
+
+/// A Storybook story's id as Storybook makes them (`components-button--primary`).
+pub fn story_id_ok(id: &str) -> bool {
+    let part = |p: &str| !p.is_empty() && p.len() <= 100 && !p.starts_with('-') && p.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    id.split_once("--").is_some_and(|(a, b)| part(a) && part(b))
 }
 
 /// The browsers `github.browsers` may name (Chromium always takes the screenshot):
@@ -262,6 +312,30 @@ pub struct GithubRule {
 pub const BROWSERS: [&str; 3] = ["firefox", "webkit", "webkit-phone"];
 
 pub use code_preview::config::{MAX_STATES, MAX_STEPS, STEP_KEYS, StateRule, Step, state_entry, state_name_ok, step_ok};
+
+/// A feature flag a reviewer may set for their own view (`flags`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlagRule {
+    pub name: String,
+    pub options: Vec<String>,
+}
+
+/// The most flags a project names (`flags`).
+pub const MAX_FLAGS: usize = 20;
+
+/// A reviewer's choice (the toolbar's cookie: `name:value|name:value`) as the services get it
+/// (`name=value`, comma-joined): only flags the rule names, each with one of its options, once.
+pub fn flags_header(rule: &[FlagRule], cookie: &str) -> Option<String> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for pair in cookie.split('|').take(MAX_FLAGS) {
+        let Some((name, value)) = pair.split_once(':') else { continue };
+        if rule.iter().any(|f| f.name == name && f.options.iter().any(|o| o == value)) && !out.iter().any(|(n, _)| n == name) {
+            out.push((name.to_string(), value.to_string()));
+        }
+    }
+    (!out.is_empty()).then(|| out.iter().map(|(n, v)| format!("{n}={v}")).collect::<Vec<_>>().join(","))
+}
 
 /// The most endpoints timed (`github.endpoints`).
 pub const MAX_ENDPOINTS: usize = 5;
@@ -398,6 +472,7 @@ impl Default for Settings {
             access: Access::Link,
             visual_review: VisualReviewRule::Off,
             regressions: RegressionsRule::Off,
+            browser_checks: BrowserChecksRule::Report,
             mail: MailRule::Catch,
             traces: false,
             egress: EgressRule::Open,
@@ -405,6 +480,8 @@ impl Default for Settings {
             egress_forks: EgressRule::Roll,
             data_at: None,
             feedback: true,
+            flags: Vec::new(),
+            oidc_audiences: Vec::new(),
             warm: true,
             crons: false,
             seed: None,
@@ -423,7 +500,7 @@ impl Default for SecretsRule {
 
 impl Default for GithubRule {
     fn default() -> Self {
-        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new(), hide: Vec::new(), budget: Budget::default(), visual_threshold: 0.0, widths: Vec::new(), openapi: None, endpoints: Vec::new(), states: Vec::new(), browsers: Vec::new() }
+        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new(), hide: Vec::new(), budget: Budget::default(), visual_threshold: 0.0, widths: Vec::new(), openapi: None, endpoints: Vec::new(), states: Vec::new(), browsers: Vec::new(), storybook: None }
     }
 }
 
@@ -668,6 +745,21 @@ impl Settings {
         if br.iter().enumerate().any(|(i, b)| !BROWSERS.contains(&b.as_str()) || br[..i].contains(b)) {
             return bad(format!("github.browsers: some of {}, each once (Chromium always takes the screenshot)", BROWSERS.join(", ")));
         }
+        if self.github.storybook.as_deref().is_some_and(|s| storybook_entry(s).is_none()) {
+            return bad("github.storybook: the name of the service that serves Storybook (web), and the path it's under when not / (web:/storybook/, ending in /)".into());
+        }
+        let word = |s: &str| (1..=60).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
+        let flags_ok = self.flags.len() <= MAX_FLAGS
+            && self.flags.iter().enumerate().all(|(i, f)| {
+                word(&f.name) && !self.flags[..i].iter().any(|g| g.name == f.name) && (1..=10).contains(&f.options.len()) && f.options.iter().enumerate().all(|(j, o)| word(o) && !f.options[..j].contains(o))
+            });
+        let auds = &self.oidc_audiences;
+        if auds.len() > 5 || auds.iter().enumerate().any(|(i, a)| a.is_empty() || a.len() > 256 || a.chars().any(|c| c.is_control() || c.is_whitespace()) || auds[..i].contains(a)) {
+            return bad("oidc_audiences: at most 5 different audiences, each 1-256 characters with no spaces (sts.amazonaws.com)".into());
+        }
+        if !flags_ok {
+            return bad(format!("flags: at most {MAX_FLAGS}, each a name and 1-10 options, every one of 1-60 letters, digits, -, _ or ., each once"));
+        }
         let eps = &self.github.endpoints;
         if eps.len() > MAX_ENDPOINTS || eps.iter().any(|p| !page_path_ok(p)) || eps.iter().enumerate().any(|(i, p)| eps[..i].contains(p)) {
             return bad(format!("github.endpoints: at most {MAX_ENDPOINTS} different GET paths of the first service's (/api/users), up to 200 characters, no #, quotes or spaces"));
@@ -732,6 +824,16 @@ mod tests {
         let browsers = |b: serde_json::Value| Settings::default().patched(&serde_json::json!({ "github": { "browsers": b } })).is_ok();
         assert!(browsers(serde_json::json!(["firefox", "webkit", "webkit-phone"])));
         assert!(!browsers(serde_json::json!(["chrome"])) && !browsers(serde_json::json!(["webkit", "webkit"])), "the two other browsers, each once");
+        assert_eq!((storybook_entry("web"), storybook_entry("web:/sb/")), (Some(("web", "/")), Some(("web", "/sb/"))));
+        let flags = |f: serde_json::Value| Settings::default().patched(&serde_json::json!({ "flags": f })).is_ok();
+        assert!(flags(serde_json::json!([{ "name": "new-checkout", "options": ["off", "on"] }])));
+        assert!(!flags(serde_json::json!([{ "name": "a b", "options": ["on"] }])) && !flags(serde_json::json!([{ "name": "x", "options": [] }])), "names of a word, and an option at least");
+        let rule = [FlagRule { name: "new-checkout".into(), options: vec!["off".into(), "on".into()] }];
+        assert_eq!(flags_header(&rule, "new-checkout:on|theme:dark|new-checkout:off|new-checkout"), Some("new-checkout=on".into()), "only what the rule names, once");
+        assert_eq!(flags_header(&rule, "new-checkout:maybe"), None);
+        assert!(storybook_entry("web:/sb").is_none() && storybook_entry("Web").is_none() && storybook_entry("web:/a b/").is_none(), "a service, and a path ending in /");
+        assert!(Settings::default().patched(&serde_json::json!({ "github": { "storybook": "web:/x" } })).is_err());
+        assert!(story_id_ok("components-button--primary") && !story_id_ok("button") && !story_id_ok("../x--y") && !story_id_ok("a--"), "Storybook's ids");
     }
 
     #[test]

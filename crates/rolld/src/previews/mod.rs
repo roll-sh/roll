@@ -21,7 +21,7 @@ mod services;
 pub mod fleet;
 
 pub use data::*;
-pub use secrets::{Secrets, SecretsIntercepts, SecretsReveal};
+pub use secrets::{PreviewIssuer, Secrets, SecretsIntercepts, SecretsReveal};
 pub use services::{RollApps, Services};
 
 /// Which products run here (an adapter for each).
@@ -203,7 +203,7 @@ pub fn start(
         branchers,
         // roll apps' instances are screenshotted where roll apps says they run (`Apps::reachable`):
         // on a fleet, on their service's holder (`fleet`).
-        Arc::new(Services { apps: roll_apps, runtime: runtime.clone(), shots: shots.clone(), fleet: clustered.then(|| cluster.clone()) }),
+        Arc::new(Services { apps: roll_apps, apps_listen: args.apps.listen, runtime: runtime.clone(), shots: shots.clone(), fleet: clustered.then(|| cluster.clone()) }),
         Arc::new(Secrets(api.clone())),
         leader,
     );
@@ -314,11 +314,20 @@ impl Api {
 
     /// [`Api::call`] with an `Idempotency-Key`.
     async fn call_with(&self, method: Method, path: &str, body: Option<Value>, key: Option<&str>) -> anyhow::Result<Value> {
+        self.call_as(method, path, body, key, self.token.as_deref()).await
+    }
+
+    /// A `GET` as someone else (a tasks tenant's own token, for its own routes).
+    async fn get_as(&self, path: &str, token: &str) -> anyhow::Result<Value> {
+        self.call_as(Method::GET, path, None, None, Some(token)).await
+    }
+
+    async fn call_as(&self, method: Method, path: &str, body: Option<Value>, key: Option<&str>, token: Option<&str>) -> anyhow::Result<Value> {
         let mut req = self.http.request(method.clone(), format!("{}{path}", self.base));
         if let Some(k) = key {
             req = req.header("idempotency-key", k);
         }
-        if let Some(t) = &self.token {
+        if let Some(t) = token {
             req = req.bearer_auth(t);
         }
         if let Some(b) = body {

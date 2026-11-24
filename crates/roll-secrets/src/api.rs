@@ -120,7 +120,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/rotators/{{id}}"), axum::routing::delete(delete_rotator).patch(update_rotator))
         .route(&format!("{P}/rotators/{{id}}/rotate-secret"), post(rotate_rotator_secret))
         .route(&format!("{P}/saas"), get(saas_rotators).post(add_saas_rotator))
-        .route(&format!("{P}/saas/{{id}}"), axum::routing::delete(delete_saas_rotator))
+        .route(&format!("{P}/saas/{{id}}"), axum::routing::delete(delete_saas_rotator).patch(update_saas_rotator))
         .route(&format!("{P}/transit"), get(transit_keys).post(add_transit_key))
         .route(&format!("{P}/transit/{{name}}"), axum::routing::patch(config_transit_key).delete(delete_transit_key))
         .route(&format!("{P}/transit/{{name}}/rotate"), post(rotate_transit_key))
@@ -140,6 +140,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/ssh-cas/{{id}}/sign-host"), post(sign_host_key))
         .route(&format!("{P}/ssh-cas/{{id}}/sign-user"), post(sign_user_key))
         .route(&format!("{P}/cas/{{id}}/sign"), post(sign_csr))
+        .route(&format!("{P}/cas/{{id}}/chain"), axum::routing::put(install_chain))
         .route(&format!("{P}/cas/{{id}}/certificates"), get(ca_certificates))
         .route(&format!("{P}/cas/{{id}}/revoke"), post(revoke_certificate))
         .route(&format!("{P}/cas/{{id}}/acme"), get(acme_settings).patch(set_acme))
@@ -1076,7 +1077,7 @@ async fn import_dotenv(State(s): S, Who(c): Who, Path((project, env)): Path<(Str
             let r = s.open_request(&project, &env, b, &c)?;
             return Ok(json!({ "request": r, "skipped": skipped }));
         }
-        let a = s.batch(&project, &env, b, &c)?;
+        let a = s.batch_via(&project, &env, b, crate::write::Via::Import, &c)?;
         Ok(json!({ "change": a.change, "items": a.items, "warnings": a.warnings, "skipped": skipped }))
     })
     .await?;
@@ -1524,6 +1525,11 @@ async fn add_saas_rotator(State(s): S, Who(c): Who, Path(project): Path<String>,
     Ok(created(blocking(s, move |s| s.add_saas_rotator(&project, n, &c)).await?))
 }
 
+async fn update_saas_rotator(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let ch: crate::saas::SaasRotatorChange = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.update_saas_rotator(&project, &id, ch, &c)).await?))
+}
+
 async fn delete_saas_rotator(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
     blocking(s, move |s| s.delete_saas_rotator(&project, &id, &c)).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -1660,6 +1666,11 @@ async fn sign_host_key(State(s): S, Who(c): Who, Path((project, id)): Path<(Stri
 async fn delete_ssh_ca(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
     blocking(s, move |s| s.delete_ssh_ca(&project, &id, &c)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn install_chain(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let req: crate::pki::Chain = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.install_chain(&project, &id, req, &c)).await?))
 }
 
 async fn sign_csr(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {

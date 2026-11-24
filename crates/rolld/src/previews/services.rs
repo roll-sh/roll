@@ -360,6 +360,28 @@ impl roll_previews::ports::Apps for RollApps {
         Some(roll_previews::ports::LiveBuild { id: dep, revision: s(&d["revision"])?, url: s(&d["url"])? })
     }
 
+    /// The `pv-` environment's `check_states`: production's browser checks, run once on each of
+    /// its heads; a result counts when it's of the live deployment (`deployment`).
+    async fn browser_checks(&self, preview: &str, service: &str) -> Option<Vec<roll_previews::ports::BrowserCheckResult>> {
+        let (id, env) = self.find(preview, service).await.ok()??;
+        let e = self.api.get(&Self::env_path(&id, &env)).await.ok()?;
+        let live = e["active"]["id"].as_str()?.to_string();
+        let states = e["check_states"].as_array().filter(|a| !a.is_empty())?;
+        Some(
+            states
+                .iter()
+                .filter_map(|c| {
+                    let name = s(&c["name"])?;
+                    let ran = c["deployment"].as_str() == Some(live.as_str());
+                    let passed = if ran { c["up"].as_bool() } else { None };
+                    // A failure's screenshot and trace, kept by roll apps under this environment.
+                    let files = (passed == Some(false) && c["failure_at"].is_number()).then(|| roll_previews::BrowserCheckFiles { service_id: id.clone(), environment: env.clone() });
+                    Some(roll_previews::ports::BrowserCheckResult { name, passed, error: s(&c["error"]).filter(|_| passed == Some(false)), files })
+                })
+                .collect(),
+        )
+    }
+
     /// roll apps' rollback of `deployment` taking no traffic, with the copy's variables in place
     /// of the ones roll set (`plain`, and each link to a branched parent from `branches`, as a
     /// deploy sets them; only names the environment has, which roll apps requires), polled until
@@ -551,6 +573,9 @@ fn variables_patch(before: &Value, mut set: serde_json::Map<String, Value>) -> V
 /// roll apps for the services in its catalog, the container runtime for `roll.toml`'s.
 pub struct Services {
     pub apps: RollApps,
+    /// roll apps' own listener (`--apps-listen`): a roll apps service's page read through roll
+    /// (`…/fetch`) goes in there, by its host, as a visitor's request does.
+    pub apps_listen: std::net::SocketAddr,
     pub runtime: Arc<roll_previews::runtime::Runtime>,
     /// Screenshots of roll apps' instances that run on this node (`None`: no roll apps here, so a
     /// project on roll apps gets no screenshots and no baseline).
@@ -803,6 +828,10 @@ impl roll_previews::ports::Apps for Services {
         if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { self.apps.live_build(preview, service).await } else { None }
     }
 
+    async fn browser_checks(&self, preview: &str, service: &str) -> Option<Vec<roll_previews::ports::BrowserCheckResult>> {
+        if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { self.apps.browser_checks(preview, service).await } else { None }
+    }
+
     async fn view_build(&self, preview: &str, service: &str, deployment: &str, plain: &[(String, String)], branches: &[roll_previews::ports::BranchVars]) -> anyhow::Result<Option<String>> {
         if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { self.apps.view_build(preview, service, deployment, plain, branches).await } else { Ok(None) }
     }
@@ -865,6 +894,54 @@ impl roll_previews::ports::Apps for Services {
             return Ok(None);
         }
         self.runtime.forward(preview, service, port).await
+    }
+
+    /// A `roll.toml` service's page, read through the runtime (roll apps' services answer at their
+    /// own URL, on `pv-…`).
+    async fn fetch(&self, preview: &str, service: &str, url: &str, access: Option<&str>, path: &str, head: bool) -> anyhow::Result<Option<roll_previews::ports::Fetched>> {
+        if self.apps.find(preview, service).await?.is_none() {
+            return self.runtime.fetch(preview, service, url, access, path, head).await;
+        }
+        // roll apps serves it: through this node's own apps listener (its proxy, forwarding to
+        // whichever node the instance runs on), by its host, as a visitor who came in by the
+        // preview's link.
+        let host = url.split_once("://").map_or(url, |(_, rest)| rest).split(['/', '?', '#']).next().unwrap_or("").to_string();
+        anyhow::ensure!(!host.is_empty(), "{service} has no address yet");
+        let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(30)).build()?;
+        let method = if head { reqwest::Method::HEAD } else { reqwest::Method::GET };
+        let mut req = client
+            .request(method, format!("http://{}{path}", loopback(self.apps_listen)))
+            .header(reqwest::header::HOST, host)
+            .header(reqwest::header::ACCEPT, "text/html,application/json,text/plain;q=0.9,*/*;q=0.5")
+            .header(reqwest::header::ACCEPT_ENCODING, "identity");
+        if let Some(t) = access {
+            req = req.header(reqwest::header::COOKIE, format!("roll_access_{}={t}", roll_previews::branch_name(preview)));
+        }
+        let mut resp = req.send().await?;
+        let status = resp.status().as_u16();
+        const SHOWN: [&str; 4] = ["content-type", "location", "cache-control", "content-length"];
+        let headers = SHOWN.iter().filter_map(|h| resp.headers().get(*h).and_then(|v| v.to_str().ok()).map(|v| (h.to_string(), v.chars().take(500).collect()))).collect();
+        let (mut body, mut truncated) = (Vec::new(), false);
+        while let Some(chunk) = resp.chunk().await? {
+            let room = roll_previews::ports::FETCH_MAX - body.len();
+            if chunk.len() > room {
+                body.extend_from_slice(&chunk[..room]);
+                truncated = true;
+                break;
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(Some(roll_previews::ports::Fetched { status, headers, body, truncated }))
+    }
+
+    /// A `roll.toml` service can stand in for a laptop's process (roll apps' services are served by
+    /// roll apps' proxy).
+    async fn can_swap(&self, preview: &str, service: &str) -> anyhow::Result<bool> {
+        Ok(self.apps.find(preview, service).await?.is_none())
+    }
+
+    fn swap(&self, preview: &str, service: &str, to: Option<roll_previews::ports::Laptop>) {
+        self.runtime.swap(preview, service, to);
     }
 
     /// A `roll.toml` service's files (roll apps' services have their own, on `pv-…`).
@@ -985,6 +1062,14 @@ fn group_errors(lines: &[(i64, bool, String)]) -> Vec<roll_previews::ErrorGroup>
     groups.sort_by(|a, b| b.last.cmp(&a.last).then(b.count.cmp(&a.count)));
     groups.truncate(apps_control::errors::MAX_GROUPS);
     groups.iter().filter_map(|g| serde_json::to_value(g).ok().and_then(|v| serde_json::from_value(v).ok())).collect()
+}
+
+/// `addr`, but the loopback address when it listens on every interface.
+fn loopback(mut addr: std::net::SocketAddr) -> std::net::SocketAddr {
+    if addr.ip().is_unspecified() {
+        addr.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
+    }
+    addr
 }
 
 #[cfg(test)]

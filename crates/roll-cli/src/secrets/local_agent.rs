@@ -58,7 +58,7 @@ pub struct LocalAgent {
 /// The header every request carries (the Lambda extension's).
 const HEADER: &str = "x-roll-token";
 /// How long a request waits on roll.
-const READ_TIMEOUT: Duration = Duration::from_secs(15);
+pub(super) const READ_TIMEOUT: Duration = Duration::from_secs(15);
 /// After a failed poll or read, or a server that doesn't hold a long poll: the wait before the next.
 const RETRY: Duration = Duration::from_secs(5);
 /// Dynamic credentials' leases are renewed at least this often while their folder is kept (as
@@ -77,7 +77,7 @@ pub async fn run(api: &Api, args: &super::AtArgs, a: LocalAgent) -> anyhow::Resu
     }
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, a.port)).await.with_context(|| format!("127.0.0.1:{} is taken: pick another with --port", a.port))?;
     let addr = listener.local_addr()?;
-    let store = Arc::new(Store { api: api.with_header(None), project: format!("/v1/secrets/projects/{}", enc(&project)), ttl, size: a.cache_size, slots: Default::default() });
+    let store = Arc::new(Store::new("roll secrets agent", api.with_header(None), &project, ttl, a.cache_size));
     if !prefetch.is_empty() {
         let reads = prefetch.iter().map(|f| {
             let store = store.clone();
@@ -147,9 +147,9 @@ fn request_token(file: Option<&std::path::Path>) -> anyhow::Result<String> {
 
 /// One environment's folder.
 #[derive(Clone, PartialEq, Eq, Hash)]
-struct Folder {
-    env: String,
-    path: String,
+pub(super) struct Folder {
+    pub(super) env: String,
+    pub(super) path: String,
 }
 
 impl std::fmt::Display for Folder {
@@ -159,10 +159,10 @@ impl std::fmt::Display for Folder {
 }
 
 /// One values answer. No `Debug` beyond the keys: it holds values.
-struct Read {
-    values: BTreeMap<String, String>,
+pub(super) struct Read {
+    pub(super) values: BTreeMap<String, String>,
     /// Keys that don't resolve, and why.
-    problems: Vec<(String, String)>,
+    pub(super) problems: Vec<(String, String)>,
     /// Keys set but not given to this caller (sensitive, or an untrusted caller's).
     withheld: Vec<String>,
     leases: Vec<String>,
@@ -204,14 +204,20 @@ struct Leases {
     renew_at: Instant,
 }
 
-/// The folders read so far, each followed by a task of its own while it's kept.
-struct Store {
+/// The folders read so far, each followed by a task of its own while it's kept. `roll secrets
+/// mount` serves its pipe from one too.
+pub(super) struct Store {
     api: Api,
     /// `/v1/secrets/projects/{project}`.
     project: String,
     ttl: Duration,
     size: usize,
     slots: std::sync::Mutex<HashMap<Folder, Arc<Slot>>>,
+    /// The last time roll refused a kept folder while following it (which folder, and roll's
+    /// message): a mount stops serving on it.
+    refusals: tokio::sync::watch::Sender<Option<String>>,
+    /// What its log lines start with: `roll secrets agent`, `roll secrets mount`.
+    name: &'static str,
 }
 
 struct Slot {
@@ -222,13 +228,26 @@ struct Slot {
 }
 
 impl Store {
+    pub(super) fn new(name: &'static str, api: Api, project: &str, ttl: Duration, size: usize) -> Store {
+        Store { api, project: format!("/v1/secrets/projects/{}", enc(project)), ttl, size, slots: Default::default(), refusals: tokio::sync::watch::Sender::new(None), name }
+    }
+
+    /// Told each time roll refuses a kept folder while it's followed.
+    pub(super) fn refusals(&self) -> tokio::sync::watch::Receiver<Option<String>> {
+        self.refusals.subscribe()
+    }
+
+    fn refused_following(&self, f: &Folder, e: &anyhow::Error) {
+        self.refusals.send_replace(Some(format!("roll refused {f}: {e:#}")));
+    }
+
     fn fresh(&self, k: &Kept, now: Instant) -> bool {
         now < k.confirmed + self.ttl && k.leases.is_none_or(|l| now < l.fresh_until)
     }
 
     /// The folder's values: from memory while fresh, else from roll (and kept, unless a key doesn't
     /// resolve, or a dynamic credential's lease can't be renewed).
-    async fn read(self: &Arc<Self>, f: &Folder) -> anyhow::Result<Arc<Read>> {
+    pub(super) async fn read(self: &Arc<Self>, f: &Folder) -> anyhow::Result<Arc<Read>> {
         if self.ttl.is_zero() {
             return Ok(Arc::new(self.fetch(f).await?));
         }
@@ -237,7 +256,15 @@ impl Store {
         if let Some(k) = kept.as_ref().filter(|k| self.fresh(k, Instant::now())) {
             return Ok(k.read.clone());
         }
-        let read = Arc::new(self.fetch(f).await?);
+        let read = match self.fetch(f).await {
+            Ok(r) => Arc::new(r),
+            Err(e) => {
+                if refused(&e) {
+                    *kept = None;
+                }
+                return Err(e);
+            }
+        };
         *kept = self.keep(&read).await;
         if kept.is_some() {
             self.follow(f, &slot);
@@ -291,7 +318,7 @@ impl Store {
                     life = Some(life.map_or(left, |l| l.min(left)));
                 }
                 Err(e) => {
-                    eprintln!("roll secrets agent: renewing lease {id}: {e:#}");
+                    eprintln!("{}: renewing lease {id}: {e:#}", self.name);
                     return None;
                 }
             }
@@ -354,18 +381,30 @@ impl Store {
                             let next = self.keep(&read).await;
                             let stop = next.is_none();
                             *slot.kept.lock().await = next;
-                            eprintln!("roll secrets agent: {f} changed; {}", if stop { "not kept (read again on its next request)" } else { "read again" });
+                            eprintln!("{}: {f} changed; {}", self.name, if stop { "not kept (read again on its next request)" } else { "read again" });
                             if stop {
                                 return;
                             }
                         }
+                        Err(e) if refused(&e) => {
+                            *slot.kept.lock().await = None;
+                            eprintln!("{}: {f} changed, and roll refused reading it ({e:#}); not kept (its next request gets roll's answer)", self.name);
+                            self.refused_following(f, &e);
+                            return;
+                        }
                         Err(e) => {
-                            eprintln!("roll secrets agent: {f} changed, but reading it failed ({e:#}); kept as it was until its TTL");
+                            eprintln!("{}: {f} changed, but reading it failed ({e:#}); kept as it was until its TTL", self.name);
                             tokio::time::sleep(RETRY).await;
                         }
                     },
+                    Err(e) if refused(&e) => {
+                        *slot.kept.lock().await = None;
+                        eprintln!("{}: following {f}: roll refused it ({e:#}); not kept (its next request gets roll's answer)", self.name);
+                        self.refused_following(f, &e);
+                        return;
+                    }
                     Err(e) => {
-                        eprintln!("roll secrets agent: following {f}: {e:#}");
+                        eprintln!("{}: following {f}: {e:#}; kept until its TTL", self.name);
                         tokio::time::sleep(RETRY).await;
                     }
                 },
@@ -379,6 +418,17 @@ impl Store {
         let v = tokio::time::timeout(Duration::from_secs(40), self.api.call(Method::GET, &url, None)).await.map_err(|_| anyhow::anyhow!("no answer in 40 s"))??;
         Ok(v["digest"].as_str().unwrap_or_default().to_string())
     }
+}
+
+/// roll's answer, when it answered with an error status.
+fn roll_status(e: &anyhow::Error) -> Option<u16> {
+    e.chain().find_map(|c| c.downcast_ref::<crate::ApiStatus>()).map(|s| s.status.as_u16())
+}
+
+/// roll said no to this login for the folder: a 401 (after logging in again), a 403 or a 404. A
+/// folder roll refuses isn't kept a moment longer; only no answer, or a 5xx, keeps it until its TTL.
+pub(super) fn refused(e: &anyhow::Error) -> bool {
+    matches!(roll_status(e), Some(401 | 403 | 404))
 }
 
 struct Agent {
@@ -434,7 +484,9 @@ fn folder(a: &Agent, q: &HashMap<String, String>) -> Result<Folder, Refusal> {
 }
 
 /// The folder's values, or the answer that says why not: roll's 403, 404, 409, 423 and 429 as
-/// they are, anything else a 502. roll's messages name keys and folders, never values.
+/// they are, its 401 (the agent's login refused, after logging in again) a 403 (the agent's own
+/// 401 is a request without its token), anything else a 502. roll's messages name keys and
+/// folders, never values.
 async fn values(a: &Agent, f: &Folder) -> Result<Arc<Read>, Refusal> {
     let failed = |status: StatusCode, message: String| {
         eprintln!("roll secrets agent: {f}: {message}");
@@ -451,14 +503,17 @@ async fn values(a: &Agent, f: &Folder) -> Result<Arc<Read>, Refusal> {
     match tokio::time::timeout(READ_TIMEOUT, a.store.read(f)).await {
         Ok(Ok(r)) => Ok(r),
         Ok(Err(e)) => {
-            let status = e.chain().find_map(|c| c.downcast_ref::<crate::ApiStatus>()).map(|s| s.status.as_u16()).filter(|s| [403, 404, 409, 423, 429].contains(s));
+            let status = match roll_status(&e) {
+                Some(401) => return Err(failed(StatusCode::FORBIDDEN, format!("roll refused the agent's login: {e:#}"))),
+                s => s.filter(|s| [403, 404, 409, 423, 429].contains(s)),
+            };
             Err(failed(status.and_then(|s| StatusCode::from_u16(s).ok()).unwrap_or(StatusCode::BAD_GATEWAY), format!("{e:#}")))
         }
         Err(_) => Err(failed(StatusCode::BAD_GATEWAY, format!("no answer from roll in {} s", READ_TIMEOUT.as_secs()))),
     }
 }
 
-fn unresolved(f: &Folder, r: &Read) -> String {
+pub(super) fn unresolved(f: &Folder, r: &Read) -> String {
     let keys: Vec<String> = r.problems.iter().map(|(k, p)| format!("{k} ({p})")).collect();
     format!("{f} doesn't resolve: {}", keys.join(", "))
 }
@@ -513,7 +568,7 @@ mod tests {
     /// dynamic credential's lease.
     #[test]
     fn a_kept_folder_is_fresh_within_its_ttl_and_its_leases() {
-        let store = Store { api: Api { base: String::new(), http: reqwest::Client::new(), key: None, headers: vec![], login: None }, project: String::new(), ttl: Duration::from_secs(300), size: 0, slots: Default::default() };
+        let store = Store::new("roll secrets agent", Api { base: String::new(), http: reqwest::Client::new(), key: None, headers: vec![], login: None }, "", Duration::from_secs(300), 0);
         let read = Arc::new(Read::from(&json!({ "values": { "K": "fake-value" }, "digest": "d1" })));
         let now = Instant::now();
         let k = Kept { read: read.clone(), confirmed: now, leases: None };

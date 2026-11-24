@@ -2,6 +2,7 @@
 //! environment variables, and a command run with them in its environment, without files.
 
 mod local_agent;
+mod mount;
 mod repo;
 
 use crate::Api;
@@ -629,9 +630,10 @@ pub enum Secrets {
     #[command(subcommand)]
     Gateways(GatewaysCmd),
     /// Vendor credentials roll issues and revokes keys with (SendGrid, Twilio, Okta, Entra,
-    /// Auth0): list, add (the credential on stdin), remove.
+    /// Auth0, GitLab, OpenAI, Datadog, Cloudflare, Databricks, Confluent): list, add (the
+    /// credential on stdin), remove.
     #[command(subcommand)]
-    Saas(SaasCmd),
+    Saas(Box<SaasCmd>),
     /// Kubernetes clusters that issue short-lived service account tokens per lease (link kind
     /// `kubernetes`): list, add (the admin token on stdin), remove. Not `kubernetes`, which pulls
     /// an environment into a cluster.
@@ -845,6 +847,18 @@ pub enum Secrets {
     /// Serve the environment's values to apps on this machine from 127.0.0.1, cached and kept
     /// current, as the Lambda extension does (a sidecar or a unit; docs/secrets.md, "A local agent").
     Agent(local_agent::LocalAgent),
+    /// Serve the environment's values as a named pipe at a path (`.env`) for tools that only read a
+    /// file: each read gets the current values, and nothing is on disk (docs/secrets.md, "A local
+    /// `.env`").
+    ///
+    /// The pipe is 0600 and served from this process until Ctrl-C, SIGTERM or roll refusing the
+    /// login, which remove it. In a git work tree, a path git doesn't ignore is added to
+    /// `.gitignore`.
+    ///
+    /// A dev server that watches `.env` (Vite) can loop on a pipe: run it with `roll run -- <command>`
+    /// instead, or keep the pipe out of the directory it watches (Vite's `envDir`). Not on Windows:
+    /// use `roll run` there.
+    Mount(mount::Mount),
 }
 
 #[derive(Subcommand)]
@@ -973,15 +987,18 @@ pub enum Envs {
         #[arg(long)]
         name: Option<String>,
     },
-    /// Delete an environment (`--label k=v`: every ephemeral one with that label).
+    /// Delete an environment (`--label k=v`: every ephemeral one with that label). A standard one
+    /// is kept for the recovery window (`envs recover`); first it says what it would break.
     Rm {
         slug: Option<String>,
         #[arg(long)]
         label: Option<String>,
-        /// Confirm deleting a protected environment.
+        /// Confirm deleting an environment that's protected or that something reads.
         #[arg(long)]
         yes: bool,
     },
+    /// Bring back a deleted environment within its recovery window.
+    Recover { slug: String },
     /// Put the standard environments in this order.
     Order { slugs: Vec<String> },
     /// Writes need a change request with this many approvals: to the whole environment, or with
@@ -1159,13 +1176,21 @@ pub enum SaasCmd {
     Ls,
     /// Register a vendor credential, read from stdin (never an argument). Each vendor takes its
     /// own flags: sendgrid `--scope`…; twilio `--account-sid`; okta `--domain --app-id`; entra
-    /// `--tenant --client-id --object-id`; auth0 `--domain --client-id --app-client-id`.
+    /// `--tenant --client-id --object-id`; auth0 `--domain --client-id --app-client-id`; gitlab
+    /// `[--host] --gitlab-project|--gitlab-group --scope… [--access-level] [--expires-days]`; openai
+    /// `--openai-project`; datadog `[--site] --key api|application [--scope…]`; cloudflare
+    /// `[--account-id] --template`; databricks `--host [--lifetime-days]`; confluent `--owner
+    /// [--resource [--confluent-environment]]`. Datadog's credential is `<API key>:<application
+    /// key>`, Confluent's `KEY:SECRET`. `--credential-expires` is when the credential itself ends at
+    /// the vendor: health warns two weeks before.
     Add {
         name: String,
-        /// sendgrid, twilio, okta, entra or auth0.
+        /// sendgrid, twilio, okta, entra, auth0, gitlab, openai, datadog, cloudflare, databricks or
+        /// confluent.
         #[arg(long)]
         vendor: String,
-        /// A scope each SendGrid key gets (none: full access).
+        /// A scope each key gets: SendGrid's (none: full access), GitLab's (one at least) or a
+        /// Datadog application key's (none: its user's permissions).
         #[arg(long = "scope", num_args = 1)]
         scopes: Vec<String>,
         #[arg(long)]
@@ -1186,6 +1211,68 @@ pub enum SaasCmd {
         /// The Auth0 app whose secret rotates.
         #[arg(long)]
         app_client_id: Option<String>,
+        /// A self-managed GitLab's host (default gitlab.com), or a Databricks workspace's.
+        #[arg(long)]
+        host: Option<String>,
+        /// The GitLab project whose access tokens rotate: its id or group/project.
+        #[arg(long = "gitlab-project")]
+        gitlab_project: Option<String>,
+        /// The GitLab group whose access tokens rotate: its id or path.
+        #[arg(long = "gitlab-group")]
+        gitlab_group: Option<String>,
+        /// Each GitLab token's role: 10 guest, 20 reporter, 30 developer, 40 maintainer (the
+        /// default), 50 owner (groups).
+        #[arg(long)]
+        access_level: Option<u8>,
+        /// Each GitLab token's lifetime in days (default 365).
+        #[arg(long)]
+        expires_days: Option<u16>,
+        /// The OpenAI project (proj_…) whose service account keys rotate.
+        #[arg(long = "openai-project")]
+        openai_project: Option<String>,
+        /// Datadog's site (default datadoghq.com; datadoghq.eu, us3.datadoghq.com…).
+        #[arg(long)]
+        site: Option<String>,
+        /// Which Datadog keys rotate: api or application.
+        #[arg(long)]
+        key: Option<String>,
+        /// The Cloudflare account whose tokens rotate (none: your user's).
+        #[arg(long)]
+        account_id: Option<String>,
+        /// The Cloudflare token whose policies each new token copies.
+        #[arg(long)]
+        template: Option<String>,
+        /// Each Databricks token's lifetime in days (default 90).
+        #[arg(long)]
+        lifetime_days: Option<u16>,
+        /// The Confluent service account or user (sa-…, u-…) whose keys rotate.
+        #[arg(long)]
+        owner: Option<String>,
+        /// The Confluent resource the keys are for (lkc-…; none: Cloud API keys).
+        #[arg(long)]
+        resource: Option<String>,
+        /// The Confluent environment of --resource (env-…).
+        #[arg(long = "confluent-environment")]
+        confluent_environment: Option<String>,
+        /// When the registered credential ends at the vendor: a date (2027-03-31), RFC 3339 or how
+        /// long from now (90d).
+        #[arg(long = "credential-expires")]
+        credential_expires: Option<String>,
+    },
+    /// Change a registration in place: its name, when its credential ends, or the credential
+    /// itself (`--credential-stdin`: read from stdin, never an argument), checked with the vendor
+    /// before it replaces the old one. Linked keys keep working; their next rotation uses it.
+    Update {
+        id: String,
+        #[arg(long)]
+        name: Option<String>,
+        /// Read a new credential from stdin.
+        #[arg(long = "credential-stdin")]
+        credential_stdin: bool,
+        /// When the credential ends at the vendor: a date (2027-03-31), RFC 3339, how long from
+        /// now (90d), or never. A new credential without it has no end date.
+        #[arg(long = "credential-expires")]
+        credential_expires: Option<String>,
     },
     Rm { id: String },
 }
@@ -1415,6 +1502,22 @@ pub enum CasCmd {
         /// The longest a certificate lives (days, 397 at most; 90 by default).
         #[arg(long)]
         max_days: Option<u32>,
+        /// An intermediate under your own root: prints its CSR (or writes it to --csr) for the root
+        /// to sign; it signs nothing until `roll secrets cas chain` installs the certificate.
+        #[arg(long)]
+        intermediate: bool,
+        /// Where an intermediate's CSR goes (stdout by default).
+        #[arg(long, requires = "intermediate")]
+        csr: Option<std::path::PathBuf>,
+    },
+    /// Install an intermediate's certificate signed by your root (PEM file), with the certificates
+    /// above it up to the root: the CA becomes active.
+    Chain {
+        id: String,
+        certificate: std::path::PathBuf,
+        /// The certificates above it, up to and including the root (PEM file).
+        #[arg(long)]
+        chain: Option<std::path::PathBuf>,
     },
     /// Print a CA's certificate (PEM), for clients to trust.
     Cert { id: String },
@@ -1999,23 +2102,34 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
     // A deleted project isn't in the workspace: it's found among the recoverable ones.
     if let Secrets::Recover { project } = &cmd {
         let deleted = api.get("/v1/secrets/deleted").await?;
-        let rows = deleted.as_array().cloned().unwrap_or_default();
+        // Deleted environments of live projects are in the same list, with `environment`: they're
+        // listed apart and recovered with `envs recover`.
+        let (envs, rows): (Vec<Value>, Vec<Value>) = deleted.as_array().cloned().unwrap_or_default().into_iter().partition(|p| p["environment"].is_string());
         let Some(given) = project else {
             if json_out {
                 println!("{}", serde_json::to_string_pretty(&deleted)?);
-            } else if rows.is_empty() {
+                return Ok(());
+            }
+            if rows.is_empty() {
                 println!("no deleted project you can recover");
             }
-            if !json_out {
-                for p in &rows {
-                    println!("{:<20} {:<18} recoverable until {}", s(&p["name"]), s(&p["project"]), chrono::DateTime::from_timestamp_millis(p["purge_at"].as_i64().unwrap_or(0)).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default());
-                }
+            for p in &rows {
+                println!("{:<20} {:<18} recoverable until {}", s(&p["name"]), s(&p["project"]), utc_ms(p["purge_at"].as_i64().unwrap_or(0)));
+            }
+            if !envs.is_empty() {
+                println!("\nDeleted environments (`roll secrets -p <project> envs recover <env>`):");
+            }
+            for e in &envs {
+                println!("{:<20} {:<18} recoverable until {}", format!("{}/{}", s(&e["name"]), s(&e["environment"])), s(&e["project"]), utc_ms(e["purge_at"].as_i64().unwrap_or(0)));
             }
             return Ok(());
         };
         let found: Vec<&Value> = rows.iter().filter(|p| p["project"] == given.as_str() || p["name"] == given.as_str()).collect();
         let id = match found.as_slice() {
             [one] => s(&one["project"]),
+            [] if envs.iter().any(|e| e["project"] == given.as_str() || e["name"] == given.as_str()) => {
+                bail!("{given} isn't deleted, but some of its environments are: `roll secrets -p {given} envs recover <env>` (`roll secrets recover` lists them)")
+            }
             [] => bail!("no deleted project {given} you can recover (`roll secrets recover` lists them)"),
             _ => bail!("{} deleted projects are named {given}: give its prj_… id", found.len()),
         };
@@ -2037,6 +2151,10 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
     // The agent finds its project itself and serves until stopped.
     if let Secrets::Agent(a) = cmd {
         return local_agent::run(api, &args, a).await;
+    }
+    // So does a mount.
+    if let Secrets::Mount(m) = cmd {
+        return mount::run(api, &args, m).await;
     }
     // An export is checked on this machine, against keys saved earlier. A `prj_…` id needs no
     // server; a name is looked up.
@@ -3012,7 +3130,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Removed {id}");
             }
         },
-        Secrets::Saas(a) => match a {
+        Secrets::Saas(a) => match *a {
             SaasCmd::Ls => {
                 let v = c.call(Method::GET, &format!("{}/saas", c.base()), None).await?;
                 if json_out {
@@ -3020,18 +3138,33 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 }
                 for r in v.as_array().into_iter().flatten() {
                     let target: Vec<String> = r["target"].as_object().into_iter().flatten().map(|(k, v)| format!("{k}={}", v.as_str().map(String::from).unwrap_or_else(|| v.to_string()))).collect();
-                    println!("{}  {:<16} {:<9} {}", s(&r["id"]), s(&r["name"]), s(&r["vendor"]), target.join(" "));
+                    let ends = r["credential_expires_at"].as_i64().map(|t| format!("  credential expires {}", day(t))).unwrap_or_default();
+                    println!("{}  {:<16} {:<9} {}{ends}", s(&r["id"]), s(&r["name"]), s(&r["vendor"]), target.join(" "));
                 }
             }
-            SaasCmd::Add { name, vendor, scopes, account_sid, domain, app_id, tenant, client_id, object_id, app_client_id } => {
+            SaasCmd::Add { name, vendor, scopes, account_sid, domain, app_id, tenant, client_id, object_id, app_client_id, host, gitlab_project, gitlab_group, access_level, expires_days, openai_project, site, key, account_id, template, lifetime_days, owner, resource, confluent_environment, credential_expires } => {
+                let credential_expires_at = match credential_expires.as_deref().map(expiry).transpose()? {
+                    Some(None) => anyhow::bail!("--credential-expires is when the credential ends: a date, RFC 3339 or how long from now"),
+                    Some(Some(t)) => Some(t),
+                    None => None,
+                };
                 let mut target = serde_json::Map::new();
                 if !scopes.is_empty() {
                     target.insert("scopes".into(), json!(scopes));
                 }
-                for (k, v) in [("account_sid", account_sid), ("domain", domain), ("app_id", app_id), ("tenant", tenant), ("client_id", client_id), ("object_id", object_id), ("app_client_id", app_client_id)] {
+                for (k, v) in [("account_sid", account_sid), ("domain", domain), ("app_id", app_id), ("tenant", tenant), ("client_id", client_id), ("object_id", object_id), ("app_client_id", app_client_id), ("host", host), ("project", gitlab_project), ("group", gitlab_group), ("project_id", openai_project), ("site", site), ("key", key), ("account_id", account_id), ("template", template), ("owner", owner), ("resource", resource), ("environment", confluent_environment)] {
                     if let Some(v) = v {
                         target.insert(k.into(), json!(v));
                     }
+                }
+                if let Some(n) = access_level {
+                    target.insert("access_level".into(), json!(n));
+                }
+                if let Some(n) = expires_days {
+                    target.insert("expires_days".into(), json!(n));
+                }
+                if let Some(n) = lifetime_days {
+                    target.insert("lifetime_days".into(), json!(n));
                 }
                 // The vendor credential mints keys: never an argument.
                 if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
@@ -3039,12 +3172,42 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 }
                 let mut credential = zeroize::Zeroizing::new(String::new());
                 std::io::stdin().read_to_string(&mut credential).context("reading the credential from stdin")?;
-                let body = json!({ "name": name, "vendor": vendor, "target": target, "credential": credential.trim() });
+                let mut body = json!({ "name": name, "vendor": vendor, "target": target, "credential": credential.trim() });
+                if let Some(t) = credential_expires_at {
+                    body["credential_expires_at"] = json!(t);
+                }
                 let v = c.call(Method::POST, &format!("{}/saas", c.base()), Some(body)).await?;
                 if json_out {
                     return print(&v);
                 }
                 println!("Added {} ({}): link a key to its secret (and id), managed, to have roll issue and rotate it.", s(&v["name"]), s(&v["id"]));
+            }
+            SaasCmd::Update { id, name, credential_stdin, credential_expires } => {
+                let mut body = json!({});
+                if let Some(n) = name {
+                    body["name"] = json!(n);
+                }
+                if let Some(e) = credential_expires.as_deref() {
+                    body["credential_expires_at"] = json!(expiry(e)?);
+                }
+                // The vendor credential mints keys: never an argument.
+                let mut credential = zeroize::Zeroizing::new(String::new());
+                if credential_stdin {
+                    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                        eprint!("The new credential roll issues keys with, then Enter and Ctrl-D: ");
+                    }
+                    std::io::stdin().read_to_string(&mut credential).context("reading the credential from stdin")?;
+                    body["credential"] = json!(credential.trim());
+                }
+                if body.as_object().is_some_and(|o| o.is_empty()) {
+                    anyhow::bail!("nothing to change: --name, --credential-stdin or --credential-expires");
+                }
+                let v = c.call(Method::PATCH, &format!("{}/saas/{}", c.base(), enc(&id)), Some(body)).await?;
+                if json_out {
+                    return print(&v);
+                }
+                let ends = v["credential_expires_at"].as_i64().map(|t| format!("; the credential expires {}", day(t))).unwrap_or_default();
+                println!("Updated {} ({}){ends}", s(&v["name"]), s(&v["id"]));
             }
             SaasCmd::Rm { id } => {
                 c.call(Method::DELETE, &format!("{}/saas/{}", c.base(), enc(&id)), None).await?;
@@ -3231,8 +3394,8 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     println!("{}  {:<16} {}{}  up to {} days", s(&a["id"]), s(&a["name"]), domains.join(","), if a["allow_ip"] == true { " +IPs" } else { "" }, a["max_days"]);
                 }
             }
-            CasCmd::Add { name, domains, allow_ip, max_days } => {
-                let mut body = json!({ "name": name, "domains": domains, "allow_ip": allow_ip });
+            CasCmd::Add { name, domains, allow_ip, max_days, intermediate, csr } => {
+                let mut body = json!({ "name": name, "domains": domains, "allow_ip": allow_ip, "intermediate": intermediate });
                 if let Some(d) = max_days {
                     body["max_days"] = json!(d);
                 }
@@ -3240,7 +3403,28 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 if json_out {
                     return print(&v);
                 }
+                if intermediate {
+                    match csr {
+                        Some(path) => std::fs::write(&path, s(&v["csr"])).with_context(|| format!("writing {}", path.display()))?,
+                        None => print!("{}", s(&v["csr"])),
+                    }
+                    eprintln!("Made {} ({}), pending: have your root sign its CSR, then `roll secrets cas chain {} cert.pem --chain root.pem`.", s(&v["name"]), s(&v["id"]), s(&v["name"]));
+                    return Ok(());
+                }
                 println!("Made {} ({}): link TLS_CERT, TLS_KEY and TLS_CA to it with options.names; `roll secrets cas cert {}` prints what clients trust.", s(&v["name"]), s(&v["id"]), s(&v["id"]));
+            }
+            CasCmd::Chain { id, certificate, chain } => {
+                let read = |p: &std::path::Path| std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()));
+                let mut body = json!({ "certificate": read(&certificate)? });
+                if let Some(p) = chain {
+                    body["chain"] = json!(read(&p)?);
+                }
+                let v = c.call(Method::PUT, &format!("{}/cas/{}/chain", c.base(), enc(&ca_id(&c, &id).await?)), Some(body)).await?;
+                if json_out {
+                    return print(&v);
+                }
+                let domains: Vec<&str> = v["domains"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                println!("{} is active: it signs for {}; its certificates come with the chain up to your root (ca_chain, TLS_CA_CHAIN).", s(&v["name"]), domains.join(", "));
             }
             CasCmd::Cert { id } => {
                 let v = c.call(Method::GET, &format!("{}/cas", c.base()), None).await?;
@@ -3427,7 +3611,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Revoked {id}");
             }
         },
-        Secrets::Keygen { .. } | Secrets::Key(_) | Secrets::Unseal { .. } | Secrets::Find { .. } | Secrets::Recover { .. } | Secrets::Doctor | Secrets::Health { all: true, .. } | Secrets::Issuer { .. } | Secrets::Agent(_) => unreachable!("handled before a project is picked"),
+        Secrets::Keygen { .. } | Secrets::Key(_) | Secrets::Unseal { .. } | Secrets::Find { .. } | Secrets::Recover { .. } | Secrets::Doctor | Secrets::Health { all: true, .. } | Secrets::Issuer { .. } | Secrets::Agent(_) | Secrets::Mount(_) => unreachable!("handled before a project is picked"),
         Secrets::Backup { to, out } => {
             let v = c.call(Method::POST, &format!("{}/backup", c.base()), Some(json!({ "recipient": to }))).await?;
             let text = serde_json::to_string_pretty(&v)?;
@@ -4136,12 +4320,45 @@ async fn envs(c: &Client<'_>, e: Envs, json_out: bool) -> anyhow::Result<()> {
         Envs::Rm { slug, label, yes } => match (slug, label) {
             (_, Some(l)) => c.call(Method::DELETE, &format!("{base}/environments?label={}", enc(&l)), None).await?,
             (Some(sl), None) => {
-                let q = if yes { format!("?confirm={}", enc(&sl)) } else { String::new() };
-                c.call(Method::DELETE, &format!("{}{q}", c.env(&sl)), None).await?;
-                json!({ "deleted": [sl] })
+                // What it would do first: what breaks, and whether it needs a confirm.
+                let preview = c.call(Method::GET, &format!("{}/deletion", c.env(&sl)), None).await?;
+                let mut confirm = yes;
+                if preview["confirm"] == true && !yes {
+                    print_deletion(&preview);
+                    if !(std::io::IsTerminal::is_terminal(&std::io::stdin()) && ask(&format!("Delete {sl}?"))?) {
+                        bail!("not deleted: run `roll secrets envs rm {sl} --yes` to delete it");
+                    }
+                    confirm = true;
+                }
+                let q = if confirm { format!("?confirm={}", enc(&sl)) } else { String::new() };
+                let v = c.call(Method::DELETE, &format!("{}{q}", c.env(&sl)), None).await?;
+                if json_out {
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                    return Ok(());
+                }
+                if let Some(r) = v.get("request").filter(|r| r.is_object()) {
+                    println!("Opened change request {} to delete {sl}: it's deleted once it has {} approval{} and is applied (`roll secrets requests apply {} -e {sl}`)", s(&r["id"]), preview["approvals"], if preview["approvals"] == 1 { "" } else { "s" }, s(&r["id"]));
+                } else if let Some(at) = v["purge_at"].as_i64() {
+                    println!("Deleted {sl}: kept until {}; `roll secrets envs recover {sl}` brings it back", utc_ms(at));
+                } else {
+                    println!("Deleted {sl}");
+                }
+                return Ok(());
             }
             (None, None) => bail!("envs rm <slug> or --label key=value"),
         },
+        Envs::Recover { slug } => {
+            let v = c.call(Method::POST, &format!("{}/recover", c.env(&slug)), Some(json!({}))).await?;
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+                    return Ok(());
+            }
+            println!("Recovered {slug} with its secrets");
+            if let Some(failed) = v["rotation_failed"].as_array().filter(|f| !f.is_empty()) {
+                eprintln!("warning: these managed links didn't get a new credential; rotate them: {}", failed.iter().map(s).collect::<Vec<_>>().join(", "));
+            }
+            return Ok(());
+        }
         Envs::Order { slugs } => c.call(Method::PUT, &format!("{base}/environments/order"), Some(json!({ "order": slugs }))).await?,
         Envs::Protect { slug, approvals, folder: Some(folder), approvers } => {
             let p = c.call(Method::PUT, &format!("{}/folder-policies?path={}", c.env(&slug), enc(&folder)), Some(json!({ "approvals": approvals, "approvers": approvers }))).await?;
@@ -5163,6 +5380,43 @@ async fn approve_table(api: &Api, all: &mut setup::File, f: &repo::Found) -> any
     let file = setup::save(all)?;
     println!("Approved {}'s [secrets] for {dir}: {}  (kept in {}; a changed table asks again)", f.file.display(), f.table.describe(), file.display());
     Ok(())
+}
+
+/// `2026-11-30 05:00 UTC`.
+fn utc_ms(at: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(at).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default()
+}
+
+/// An environment's deletion preview (`GET …/deletion`), on stderr: what goes, for how long, and
+/// what stops working.
+fn print_deletion(p: &Value) {
+    let env = s(&p["environment"]);
+    eprintln!("Deleting {env}: its {} secret{} become unreadable, kept {} days (`roll secrets envs recover {env}`).", p["secrets"], if p["secrets"] == 1 { "" } else { "s" }, p["window_days"]);
+    let breaks = p["breaks"].as_array().cloned().unwrap_or_default();
+    if !breaks.is_empty() {
+        eprintln!("These stop working until it's recovered or they're changed:");
+    }
+    for b in &breaks {
+        let name = b["name"].as_str().unwrap_or("(name for admins)");
+        let at = match (b["key"].as_str(), s(&b["path"])) {
+            (Some(k), p) if p == "/" => format!("/{k}"),
+            (Some(k), p) => format!("{p}/{k}"),
+            (None, p) => p,
+        };
+        let line = match b["via"].as_str().unwrap_or_default() {
+            "service" => format!("service {name} ({})", s(&b["environment"])),
+            "sandbox" => format!("sandbox {name}, which copies from {}:{at} (it loses those values)", s(&b["environment"])),
+            "sync" => format!("sync to {name} (what it pushed stays there)"),
+            "identity" => format!("identity {name}"),
+            "token" => format!("token {name}"),
+            "import" => format!("{}{}:{at} (imports it)", b["project"].as_str().map(|p| format!("{p}/")).unwrap_or_default(), s(&b["environment"])),
+            _ => format!("{}:{at}", s(&b["environment"])),
+        };
+        eprintln!("  {line}");
+    }
+    if p["needs_request"] == true {
+        eprintln!("{env} needs {} approval{}: deleting it opens a change request.", p["approvals"], if p["approvals"] == 1 { "" } else { "s" });
+    }
 }
 
 /// A yes or no on the terminal (default no).

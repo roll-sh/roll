@@ -538,6 +538,8 @@ async fn blockers_keep_changes_out_of_the_queue() {
             screenshot_url: None,
             expires_at: None,
             earlier: Vec::new(),
+            browser_checks: Vec::new(),
+            browser_checks_rule: None,
             visual_change: None,
             page_speed: None,
             page_health: None,
@@ -545,6 +547,7 @@ async fn blockers_keep_changes_out_of_the_queue() {
             page_links: None,
             slower_routes: None,
             new_errors: None,
+            served_secrets: Vec::new(),
             base_change: None,
             diff_url: None,
             pages: Vec::new(),
@@ -587,6 +590,21 @@ async fn blockers_keep_changes_out_of_the_queue() {
     a.code.report_environment(&id(&c), Some(&regressed(Some(&author)))).unwrap();
     assert_eq!(kinds(&a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await), ["regressions"]);
     a.code.report_environment(&id(&c), Some(&regressed(Some("someone-else")))).unwrap();
+    let c = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
+    assert_eq!(c["blockers"], json!([]));
+    // Required browser checks (production's, on its preview's head) wait while one fails or runs.
+    let checked = |state: &str| {
+        let mut p = regressed(Some("someone-else"));
+        let e = p.environment.as_mut().unwrap();
+        e.browser_checks_rule = Some("required".into());
+        e.browser_checks = vec![code_control::model::PreviewBrowserCheck { service: "web".into(), name: "checkout".into(), state: state.into() }];
+        p
+    };
+    for state in ["failed", "pending"] {
+        a.code.report_environment(&id(&c), Some(&checked(state))).unwrap();
+        assert_eq!(kinds(&a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await), ["browser"], "{state}");
+    }
+    a.code.report_environment(&id(&c), Some(&checked("passed"))).unwrap();
     let c = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
     assert_eq!(c["blockers"], json!([]));
     enqueue(&a, &c, "normal").await;

@@ -1213,6 +1213,74 @@ Checked against Elasticsearch 9.5.5 (captures in
   `model_inference`, `eql_sequence` and `parent` in Elasticsearch's order with live numbers.
   The `request` breaker's messages carry the documentation link too. `fielddata` accounts
   nothing yet.
+- ES|QL's memory (and SQL's, which runs on it) is charged to `request` as Elasticsearch charges
+  its blocks: each page of rows while the commands work on it; `STATS` group tables and
+  aggregate states as they grow; `SORT` buffers, keys and merge buffers; what `EVAL`, `DISSECT`,
+  `GROK`, `MV_EXPAND`, `ENRICH` and `LOOKUP JOIN` build, row by row as it is built; lookup
+  tables; `INLINE STATS`; `FORK` branches' and subqueries' results (once each); and the result,
+  its JSON or text rendering until the response is built, and a result kept with
+  `keep_on_completion` until it is deleted or expires. Aggregate states are bounded as
+  Elasticsearch's are, with the same results: `VALUES` keeps each distinct value once, `TOP` the
+  best `n`, `SAMPLE` a reservoir of `n`, `MEDIAN`, `PERCENTILE` and `MEDIAN_ABSOLUTE_DEVIATION`
+  the t-digest `QuantileStates` builds (compression 1000, exact up to 20,000 values), `STD_DEV`
+  and `VARIANCE` Welford's sums. Everything comes back when the query ends, however it ends
+  (`_nodes/stats` shows `request` at 0 after a refusal). Past the limit, `_query` and
+  `_query/async` answer Elasticsearch's 429 `circuit_breaking_exception` (checked against
+  9.5.5). Sizes are what roll allocates, so a query crosses the limit at a different point than
+  on Elasticsearch, and `data for [...]` names where roll's query was (`<reused_arrays>`, `load
+  blocks`; Elasticsearch's varies too: `ords`, `<reused_arrays>`, `load blocks`). The internal
+  `_search` reads keep their own accounting.
+- ES|QL's functions build strings and multi-values through one bounded builder that counts
+  each append before making it, so none allocates past its limit. Elasticsearch 9.5.5's own
+  limits apply exactly: `CONCAT` past 1 MiB fails the query (400 `esql_client_exception`,
+  `concatenating more than [1048576] bytes is not supported`), `REPLACE` past 1 MiB is null with
+  Elasticsearch's two warnings (it stops as it builds: an empty pattern with a large replacement
+  never gets far), `REPEAT` and `SPACE` as before. Elasticsearch charges what its other
+  functions build to the breaker as it builds it (a 1 MB delimiter between 100,000 values gets
+  its 429); roll holds them to 1 MiB or their largest input, whichever is larger, null with a
+  warning (`Creating strings with more than [1048576] bytes is not supported`, or
+  `multi-values` for a list): `MV_CONCAT` and `MV_ZIP` (refused before building when the
+  delimiter between each pair already passes), `MV_APPEND`, `MV_UNION`, `SPLIT` (each part
+  counts its value's slot, so at most about 32,000 one-byte parts per MiB), `URL_ENCODE`,
+  `URL_ENCODE_COMPONENT` and `TO_BASE64`; `TO_UPPER`, `TO_LOWER` and `TO_STRING` of a multi-value
+  convert each value within their input's size plus 1 MiB (a number's text adds its digits to
+  its slot, so a multi-value of more than about 55,000 longs of 19 digits is null with the
+  warning).
+  The others build no more than one of their inputs (`MV_SLICE`, `MV_SORT`, `MV_DEDUPE`,
+  `MV_INTERSECTION`, `MV_DIFFERENCE`, `LEFT`, `RIGHT`, `SUBSTRING`, the trims, `REVERSE`,
+  `FROM_BASE64`, `URL_DECODE`, `TOP_SNIPPETS`) or a fixed size (hashes, dates, numbers).
+  `MV_DEDUPE`, `MV_CONTAINS` and the set functions use a hash index, not a scan per value.
+- Kept async results (async search, ES|QL, SQL, EQL, SQL cursors) are charged to `request` at
+  what they hold in memory until they are deleted, expire or are pushed out, so a client that
+  keeps results can't hold memory the breakers don't see; expired ones are swept even on a
+  cluster nobody calls. One the breaker refuses is not kept and the request fails with its 429.
+  A durable cluster's results read back on a wake that finds no room stay stored (never deleted
+  for memory) and are read and charged on their first get (the breaker's 429 while there is
+  still no room). One larger than the store (256 MiB) fails with
+  `illegal_argument_exception` (`Can't store an async search response larger than [268435456]
+  bytes.`). Async search also enforces `search.max_async_search_response_size` (10mb) on a kept
+  response, with Elasticsearch's error. Elasticsearch 9.5.5 applies no such limit to ES|QL.
+- Cross-cluster scroll and point-in-time contexts hold their parts' buffered hits on `request`,
+  at what they hold in memory, for as long as they live (`keep_alive`); local contexts hold only
+  shard searchers. Their number is bounded by `search.max_open_scroll_context` (500) and their
+  memory by the cluster's share of the node's budget (below).
+- roll's differences in the `request` breaker, because one node serves many clusters:
+  - everything charged to it (aggregations, ES|QL, kept results and contexts, buffered
+    `_msearch` responses, snapshot transfers) is also charged to the node's budget, which only
+    the operator sets: `--search-memory-mb`, shared with what the loaded clusters hold resident
+    (else half of the host's memory). The node divides what residents leave fairly: a cluster
+    holding more than its share (that room over the clusters holding request memory, at least
+    two) may grow only while an eighth of it stays free, so one busy tenant never takes the last
+    of it from the others. A refusal is Elasticsearch's `[parent]` breaker
+    (`circuit_breaking_exception`, 429, counted in `parent.tripped`), told in the cluster's own
+    numbers only: `bytes_wanted` is what it would hold, `bytes_limit` its own effective `request`
+    limit (never the node's free memory or how many tenants share it), `real usage` what it
+    held, and `usages` lists `request` only;
+  - its effective limit is `indices.breaker.request.limit` held to an operator maximum
+    (`--search-request-memory-max`, node setting `roll.breaker.request.max_limit`: a byte size,
+    or a percentage of the node's budget, `25%` by default; `-1` for none). The setting still
+    reads and writes as on Elasticsearch (`-1` included); `_nodes/stats` and
+    `_cat/circuit_breaker` show the effective limit, and refusals carry it as `bytes_limit`.
 
 ## Inference (`_inference`)
 
@@ -1268,8 +1336,9 @@ request. So are the other credentials: Azure's `entra_id`, Bedrock's `access_key
 `secret_key`, Vertex AI's `service_account_json` and `custom`'s `secret_parameters`. Each goes only
 to its provider's host (a resource name, region or location must be a host name label before it
 becomes part of one), and the replay tests check that none appears in a listing, an answer, an
-error or an endpoint's `Debug` form. Every URL is fetched through `roll_net::PublicOnly` with no redirects and no proxy,
-refusing private IP literals and `localhost`, reading at most 32 MiB
+error or an endpoint's `Debug` form. Every URL is fetched through the node's egress check
+(`search_es::egress`: public addresses only, never one the node denies) with no redirects and no proxy,
+refusing private and denied IP literals and `localhost`, reading at most 32 MiB
 (`roll.inference.allow_private_hosts` lifts the address rule, for test clusters only). A call
 waits at most the node's `roll.inference.max_timeout` (default 120s), retries and the rate
 limiter's wait included: a larger `timeout` is accepted and clamped to it. Elasticsearch 9.5.5
@@ -1558,6 +1627,13 @@ roll runs the syncs of Elastic-managed (`is_native: true`) `postgresql` and `s3`
   credential goes (a Postgres `host`, `port`, `username`, `database` or TLS setting; an S3
   `endpoint`, `region`, access key id or `buckets`) without giving it again clears it and sets
   the connector to `needs_configuration`.
+- A self-managed connector (`is_native: false`, or a service roll doesn't run) keeps its
+  configuration values as Elasticsearch does: stored and returned in the clear, since the
+  tenant's connector service reads them. The dashboard's Connectors tab blanks `sensitive` ones.
+- A connector roll runs reaches its source through the node's egress check, as reindex from
+  remote does: an address the node denies (its own, the operator's networks) fails the job, even
+  with private hosts allowed. Elasticsearch's connectors run in the tenant's service and reach
+  whatever it can.
 - `postgresql` has incremental syncs (Elastic's has none) through roll's `incremental_column`;
   advanced sync rules (custom SQL) aren't supported yet and make a draft `invalid`.
 - `s3` takes roll's `endpoint` and `region` (any S3-compatible store), not `buckets: *`, and
@@ -1569,6 +1645,51 @@ roll runs the syncs of Elastic-managed (`is_native: true`) `postgresql` and `s3`
   that write keeps only the credentials it gives.
 - Access control syncs fail (neither service syncs permissions on Elastic either). A job's
   `indexed_document_volume` is in MiB, as Elastic's connectors report it.
+
+### The web crawler (`roll_web_crawler`)
+
+Elasticsearch 9.x has no crawler (Elastic's hosted one was discontinued in 9.0), so the reference
+is Elastic Open Crawler: its config's shape, crawl rules, robots directives, canonical URLs,
+document fields and ids (the hex SHA-1 of the normalised URL), so an Open Crawler index can be
+taken over by roll's crawler. Where roll's differs ([crawler.md](crawler.md)):
+
+- **robots.txt** is read for the product token `roll-crawler`, not `Elastic-Crawler`: a site's
+  `Elastic-Crawler` group doesn't apply (the job's `metadata.robots_elastic_crawler_group_ignored`
+  names the origins that have one and no `roll-crawler` group). A 429 for robots.txt disallows the
+  origin for the crawl, as a 5xx does; redirects are followed up to 5 times, to other origins too.
+- **The purge** deletes a document only for proof the page is gone (a 404 or 410, `noindex`, a URL
+  now excluded by the crawl's domains, rules or robots.txt). Errors (5xx, other 4xx, timeouts,
+  network errors, a robots.txt that's unreadable or disallows the whole site) and what may only be
+  an outage (a redirect off the crawl, onto a URL it already has or onto a new one, a body that
+  isn't HTML, an empty page) keep it, until it has gone unrefreshed through three full crawls in
+  a row, the last keeping it, and it's a week old. A crawl that didn't refresh more than half the index's documents, or whose re-checked
+  redirects mostly led to one URL, deletes nothing (`metadata.purge_skipped`), and nothing of an
+  origin most of whose documents weren't refreshed, so an outage, an expired login redirecting to
+  SSO, or a maintenance page can't empty the index. `force_purge` lifts the guards once. Open
+  Crawler deletes anything that doesn't answer 200.
+- **Canonical URLs** are honoured only once the crawl has fetched the canonical URL and indexed it
+  as itself; until then a page is stored under its own URL. Open Crawler stores a page under its
+  canonical URL at once.
+- **Deep pages**: a page nesting more than 512 elements deep is a failed document.
+- **Limits** keep Open Crawler's names and defaults, except `max_unique_url_count` (10,000, not
+  100,000) and `max_duration` (6 hours, not 24), and each has a node ceiling: a value over it fails
+  validation. A connector holds at most 1,000 crawl rules across its domains. Until domain
+  verification lands every domain is unverified: at most 1,000 URLs a crawl, a second between
+  requests to one site across every crawl on the node, and 4 crawls a day per connector and per
+  owner and site on the node. A crawl fetches one URL at a time (`threads_per_crawl` doesn't
+  apply).
+- **Credentials** are the connector's sealed `auth_header` or basic auth, sent only to
+  `auth_origin` over https, never after a redirect to another origin; one per connector.
+  `http_auth_allowed`, proxies and `domains[].auth` in the snippet aren't taken (the CLI import
+  moves `auth` to the sealed fields).
+- **Not yet**: extraction rules (a snippet with any fails validation), XPath, incremental crawls
+  (an incremental job fails), binary content extraction (only `text/html` and
+  `application/xhtml+xml` are indexed), `data-elastic-name` and `meta.elastic` beyond 100 fields a
+  page, and `full_html` is the page as served, not Jsoup's re-serialisation. Pages are decoded as
+  UTF-8 (a page in another charset reads with replacement characters).
+- **URLs** are normalised with the WHATWG URL parser plus RFC 3986's percent-encoding rules, where
+  Open Crawler uses Addressable's `normalize!`: IDNs, case, default ports, dot segments and
+  percent-encoding agree; `links` and `url` hold the normalised URL rather than the link as written.
 
 ## Per area
 
@@ -1908,12 +2029,12 @@ the rest are skipped by the tests' own prerequisites.
     REST client's 100 MiB (past it, Elasticsearch's own error), and charged to a node-wide budget
     rather than the request breaker (past it, a 429 `circuit_breaking_exception`); a page's hits
     are scanned, never parsed into a tree; a scroll or point-in-time id is kept up to 4 KiB;
-  - addresses the node denies (`roll.reindex.remote.deny_addresses` and the names in
-    `roll.reindex.remote.deny_names`: rolld's own) are refused, checked on the address each
+  - addresses the node denies (`roll.egress.deny_addresses` and the names in
+    `roll.egress.deny_names`: rolld's own, for every outbound call) are refused, checked on the address each
     connection uses; the lists match the host as the client connects to it (percent-decoded,
     IDNA-mapped); `source.remote.headers` can't set `Host` or a pseudo-header;
   - a page with more hits than the `size` asked for is refused;
-  - at most 2 tasks per cluster and 4 per node run at once (a 429
+  - at most 2 tasks per cluster, 2 per owner and 4 per node run at once, taken in turn (a 429
     `es_rejected_execution_exception` past them), and a task stops after
     `roll.reindex.remote.max_duration` (24h; its `canceled` reason says so);
   - a request's whole exchange is capped at 10 minutes, whatever `socket_timeout` (which bounds

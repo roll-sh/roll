@@ -91,7 +91,7 @@ impl Source for FakeCode {
     }
     async fn services(&self, repo: &str, _revision: &str) -> anyhow::Result<Vec<ServiceSpec>> {
         let name = repo.rsplit('/').next().unwrap().to_string();
-        Ok(vec![ServiceSpec { name, image: "node:22".into(), run: "node app.js".into(), port: 3000, memory_mb: 512, cpus: 0.5, env: vec![], health: self.health.lock().clone(), states: self.repo_states.lock().clone(), pages: vec![], hide: vec![], watch: self.watch.lock().clone() }])
+        Ok(vec![ServiceSpec { name, image: "node:22".into(), run: "node app.js".into(), port: 3000, memory_mb: 512, cpus: 0.5, env: vec![], health: self.health.lock().clone(), skew_protection: false, states: self.repo_states.lock().clone(), pages: vec![], hide: vec![], watch: self.watch.lock().clone() }])
     }
     async fn report(&self, p: &Preview, _s: &Settings) {
         self.reports.lock().push(p.clone());
@@ -133,6 +133,10 @@ pub struct FakeData {
     pub parents: HashSet<String>,
     pub made: AtomicUsize,
     pub fail_next: AtomicUsize,
+    /// How many earlier-push copies to fail next.
+    pub fail_snapshots: AtomicUsize,
+    /// How many deletes of an earlier push's copy to fail next.
+    pub fail_snapshot_deletes: AtomicUsize,
     /// What `schema` answers: (the parent's lines, the branch's).
     pub schema: Mutex<Option<(Vec<String>, Vec<String>)>>,
     /// What reading a branch alone finds (unset: its parent's lines, as a branch is when it's made).
@@ -153,6 +157,8 @@ impl FakeData {
             parents: parents.iter().map(|s| s.to_string()).collect(),
             made: AtomicUsize::new(0),
             fail_next: AtomicUsize::new(0),
+            fail_snapshots: AtomicUsize::new(0),
+            fail_snapshot_deletes: AtomicUsize::new(0),
             schema: Mutex::new(None),
             masks: Mutex::new(Vec::new()),
             at: Mutex::new(Vec::new()),
@@ -191,9 +197,20 @@ impl Brancher for FakeData {
             return Ok(None);
         }
         anyhow::ensure!(self.branches.lock().contains(branch), "no branch {branch} to copy");
+        if self.fail_snapshots.load(Ordering::SeqCst) > 0 {
+            self.fail_snapshots.fetch_sub(1, Ordering::SeqCst);
+            anyhow::bail!("the product is down");
+        }
         let id = format!("{parent}~{name}");
         self.branches.lock().insert(id.clone());
         Ok(Some(Branched::plain(id)))
+    }
+    async fn delete_snapshot(&self, parent: &str, _from: &str, snapshot: &str, _kept: Option<&str>, name: &str) -> anyhow::Result<()> {
+        if self.fail_snapshot_deletes.load(Ordering::SeqCst) > 0 {
+            self.fail_snapshot_deletes.fetch_sub(1, Ordering::SeqCst);
+            anyhow::bail!("the product is down");
+        }
+        self.delete(parent, snapshot, name).await
     }
     async fn mask(&self, _parent: &str, branch: &str, _kept: Option<&str>, columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
         self.masks.lock().push((branch.to_string(), columns.clone()));
@@ -201,6 +218,16 @@ impl Brancher for FakeData {
     }
     async fn schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<(Vec<String>, Vec<String>)>> {
         Ok(self.schema.lock().clone())
+    }
+    async fn browse(&self, _parent: &str, branch: &str, table: Option<&str>) -> anyhow::Result<Option<roll_previews::Browse>> {
+        if self.kind != Kind::Postgres {
+            return Ok(None);
+        }
+        let tables = vec![roll_previews::BrowseTable { name: "public.users".into(), rows: 2 }];
+        Ok(Some(match table {
+            None => roll_previews::Browse::Tables { tables },
+            Some(t) => roll_previews::Browse::Rows { table: t.into(), columns: vec!["email".into()], rows: vec![vec![Some(format!("user-1@{branch}.invalid"))]], more: false },
+        }))
     }
     async fn branch_schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<Vec<String>>> {
         // As it's made, a branch is its parent.
@@ -260,6 +287,8 @@ pub struct FakeApps {
     pub woken: Mutex<Vec<(String, String)>>,
     /// The build each service runs now, by service: (git commit, its own URL).
     pub live: Mutex<HashMap<String, (String, String)>>,
+    /// Each service's browser checks on its live deployment.
+    pub browser: Mutex<HashMap<String, Vec<roll_previews::ports::BrowserCheckResult>>>,
     /// Builds started again on an earlier push's copy: (service, deployment, the variables).
     pub views: Mutex<Vec<(String, String, Vars)>>,
     /// What a service answers on its health path (unset: the backend can't tell).
@@ -300,6 +329,8 @@ pub struct FakeApps {
     pub shot_services: Mutex<Vec<String>>,
     /// The notes each screenshot was asked to crop (a `#missing` selector finds nothing).
     pub crops_asked: Mutex<Vec<String>>,
+    /// What the first page's run says its pages served.
+    pub served: Mutex<Vec<(String, Vec<u8>)>>,
     /// Where each drain follower asked to start (`drain_from`'s `since`), and the end the test
     /// writes the followed container's lines into (`(stderr, "<stamp> <text>")`).
     pub drain_since: Mutex<Vec<String>>,
@@ -390,6 +421,9 @@ impl Apps for FakeApps {
     async fn metrics(&self, _: &str, service: &str) -> Option<(f64, u64)> {
         self.metrics.lock().get(service).copied()
     }
+    async fn browser_checks(&self, _: &str, service: &str) -> Option<Vec<roll_previews::ports::BrowserCheckResult>> {
+        self.browser.lock().get(service).cloned()
+    }
     async fn live_build(&self, _: &str, service: &str) -> Option<roll_previews::ports::LiveBuild> {
         self.live.lock().get(service).cloned().map(|(revision, url)| roll_previews::ports::LiveBuild { id: format!("dep_{revision}"), revision, url })
     }
@@ -475,12 +509,14 @@ impl Apps for FakeApps {
             .iter()
             .cloned()
             .chain(opts.browsers.iter().filter(|_| !self.no_browsers.load(Ordering::SeqCst)).map(|b| format!("browser:{b}")))
+            // A Storybook with two stories.
+            .chain(opts.stories.iter().flat_map(|_| ["story:button--primary".to_string(), "story:button--secondary".to_string()]))
             .map(|path| roll_previews::ports::PageShot { path, png: png.clone(), errors: 0, report: Default::default() })
             .collect();
         self.crops_asked.lock().extend(opts.crops.iter().map(|c| c.note.clone()));
         let crops = opts.crops.iter().filter(|c| c.selector != "#missing").map(|c| (c.note.clone(), png.clone())).collect();
         let health = self.page_says.lock().clone().map(|said| roll_previews::PageHealth { errors: 1, first_error: Some(said), failed: 0, first_failed: None, unstable: false });
-        Ok(Some(roll_previews::ports::Shot { png, speed: None, health, a11y: None, phone: None, pages, text: None, links: None, api, crops }))
+        Ok(Some(roll_previews::ports::Shot { png, speed: None, health, a11y: None, phone: None, pages, text: None, links: None, api, crops, bodies: self.served.lock().clone() }))
     }
     fn status(&self, p: &str, s: &str) -> Option<ServiceState> {
         self.running.lock().contains(&(p.to_string(), s.to_string())).then_some(ServiceState::Running)

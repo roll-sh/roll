@@ -18,6 +18,25 @@ export interface Prices {
   stored_gb_month: number;
 }
 
+/** Signing visitors in through a provider (`access.sso`): `@acme.com`, `ada@acme.com`, `org:acme` (GitHub). */
+export interface Sso {
+  provider: "github" | "google";
+  allow: string[];
+}
+
+/** What a service would cost at most (`POST /v1/apps/quote`), in US dollars at roll's prices. */
+export interface Quote {
+  instance_hour: number;
+  idle_hour: number;
+  /** The highest floor by the clock's hour, while it holds; null without one higher. */
+  scheduled_idle_hour: number | null;
+  month: { least: number; most: number };
+  scales_to_zero: boolean;
+  currency: "USD";
+  note: string;
+  prices: Prices;
+}
+
 export interface Overview {
   services: Service[];
   runtime: "docker" | "fargate";
@@ -396,9 +415,11 @@ export function describePending(p: Pending): string | null {
 
 export interface FirewallRule {
   /** `limit`: let in at `per_minute` a client, a 429 past it. */
-  action: "allow" | "deny" | "limit" | "challenge";
+  action: "allow" | "deny" | "limit" | "challenge" | "log";
   per_minute?: number;
   burst?: number;
+  /** `limit`'s client: `ip` (default), `header:<name>` or `cookie:<name>` (a request without it counts by address). */
+  key?: string;
   /** A path, or a prefix ending in `*`. */
   path?: string;
   methods?: string[];
@@ -410,14 +431,24 @@ export interface FirewallRule {
   header?: FieldMatch;
   cookie?: FieldMatch;
   query?: FieldMatch;
+  /** Kinds of client from roll's managed lists; any of them matches. */
+  bots?: BotKind[];
+  /** Kinds of attack from roll's managed patterns; any of them matches. */
+  attacks?: AttackKind[];
 }
+
+/** Probes for left-out files and scanners' user agents, `../` in any encoding, SQL injection, script in the request, and Log4Shell/Shellshock/shell in a parameter: read on the request line and the user agent, referer and cookies, never a body. */
+export type AttackKind = "scanners" | "traversal" | "sqli" | "xss" | "rce";
+
+/** `ai` crawlers and assistants' fetchers, `search` engines, link `preview`s, HTTP `tools` and headless browsers; `verified`: a crawler its operator's DNS vouches for; `spoofed`: one claiming such a crawler's name from elsewhere. */
+export type BotKind = "ai" | "search" | "preview" | "tools" | "verified" | "spoofed";
 
 export interface FieldMatch {
   name: string;
   contains?: string;
 }
 
-/** Firewall rules as typed, one a line: `deny /admin/*`, `deny method=DELETE,PUT`, `allow /admin/health`, `deny ip=203.0.113.0/24`, `deny header=X-Bot`, `deny query=debug:1`, `deny ua=BadBot` (`ua=` last: the rest of the line). */
+/** Firewall rules as typed, one a line: `deny /admin/*`, `limit 100 /api/* key=header:x-api-key`, `deny method=DELETE,PUT`, `allow /admin/health`, `deny ip=203.0.113.0/24`, `deny header=X-Bot`, `deny query=debug:1`, `deny bots=ai`, `deny ua=BadBot` (`ua=` last: the rest of the line). */
 export function parseFirewall(text: string): FirewallRule[] {
   return text
     .split("\n")
@@ -425,7 +456,7 @@ export function parseFirewall(text: string): FirewallRule[] {
     .filter((l) => l && !l.startsWith("#"))
     .map((l) => {
       const [action, ...words] = l.split(/\s+/);
-      const rule: FirewallRule = { action: action === "allow" ? "allow" : action === "limit" ? "limit" : action === "challenge" ? "challenge" : "deny" };
+      const rule: FirewallRule = { action: action === "allow" ? "allow" : action === "limit" ? "limit" : action === "challenge" ? "challenge" : action === "log" ? "log" : "deny" };
       let rest = words;
       // `limit N[:BURST] …`
       if (rule.action === "limit") {
@@ -450,6 +481,9 @@ export function parseFirewall(text: string): FirewallRule[] {
         else if (t.startsWith("header=")) rule.header = field(t.slice(7));
         else if (t.startsWith("cookie=")) rule.cookie = field(t.slice(7));
         else if (t.startsWith("query=")) rule.query = field(t.slice(6));
+        else if (t.startsWith("key=")) rule.key = t.slice(4);
+        else if (t.startsWith("bots=")) rule.bots = t.slice(5).split(",").filter(Boolean) as BotKind[];
+        else if (t.startsWith("attacks=")) rule.attacks = t.slice(8).split(",").filter(Boolean) as AttackKind[];
         else if (t.startsWith("/")) rule.path = t;
       }
       return rule;
@@ -470,6 +504,9 @@ export function formatFirewall(rules: FirewallRule[]): string {
         field("header", r.header),
         field("cookie", r.cookie),
         field("query", r.query),
+        r.key ? `key=${r.key}` : undefined,
+        r.bots?.length ? `bots=${r.bots.join(",")}` : undefined,
+        r.attacks?.length ? `attacks=${r.attacks.join(",")}` : undefined,
         // Last: it takes the rest of the line.
         r.user_agent ? `ua=${r.user_agent}` : undefined,
       ]
@@ -572,6 +609,10 @@ export interface EnvironmentDiff {
 }
 
 export interface EnvironmentPut {
+  /** Attack mode by itself: once a minute's requests reach per_minute, a challenge for every visitor without a pass for minutes; null: never by itself. */
+  attack_mode?: { per_minute: number; minutes?: number } | null;
+  /** Attack mode on by hand until then (unix ms, within 24 hours); null ends it. */
+  challenge_until?: number | null;
   /** false: its schedules don't run (deploys and runs still do). */
   scheduled?: boolean;
   /** Data of its own: a branch of each Postgres and Redis database it links (admin); null goes back. */
@@ -583,7 +624,7 @@ export interface EnvironmentPut {
   /** Private: visitors need `?roll_access=<token>` once; null makes it public again. */
   /** `signed_in`: people signed in to roll who can open the project get in (alone, or with a token). */
   /** Who gets in: a link's token, people signed in to roll, or a password visitors type (8–200; replaces the whole of access). */
-  access?: { token?: string; signed_in?: boolean; password?: string; bypass_sha256?: string } | null;
+  access?: { token?: string; signed_in?: boolean; password?: string; sso?: Sso; bypass_sha256?: string } | null;
   /** Creating it: start with this environment's variables. */
   variables_from?: string;
   wait_for_ci?: boolean;
@@ -621,6 +662,8 @@ export interface EnvironmentPut {
   firewall?: FirewallRule[] | null;
   headers?: HeaderRule[] | null;
   /** Paths another service of the project answers (its environment of the same name); null or [] for none. */
+  /** Its own redirects on any service: `_redirects` lines (301 by default, 302, 303, 307, 308); null: none. */
+  redirects?: string | null;
   routes?: RouteRule[] | null;
   /** Its uptime checks (at most 5), or null for none. */
   checks?: UptimeCheck[] | null;
@@ -729,6 +772,8 @@ export interface Environment extends EnvironmentSummary {
   report?: boolean;
   /** People signed in to roll who can open its project get in. */
   signed_in?: boolean;
+  /** People GitHub or Google vouches for get in, by domain, email or GitHub organisation. */
+  sso?: Sso;
   /** Visitors may type its password (`access.password`, never returned). */
   password?: boolean;
   /** What its code may reach: roll and the listed hosts (`roll`), or anything (`open`). */
@@ -767,9 +812,17 @@ export interface Environment extends EnvironmentSummary {
   rate_limit?: { per_minute: number; burst?: number | null } | null;
   /** Its firewall rules, in order. */
   firewall?: FirewallRule[];
+  /** Requests each rule matched in the last 24 hours, in their order. */
+  firewall_hits?: number[];
+  /** When attack mode goes on by itself. */
+  attack_mode?: { per_minute: number; minutes: number };
+  /** Attack mode is on until then (unix ms). */
+  challenge_until?: number;
   /** Headers its answers carry. */
   headers?: HeaderRule[];
   /** Paths another service of the project answers. */
+  /** Its own redirects, `_redirects` lines. */
+  redirects?: string;
   routes?: RouteRule[];
   checks?: UptimeCheck[];
   /** How each check stands on its owner. */
@@ -974,7 +1027,7 @@ export interface Vulnerability {
  * OpenSearch-flavor cluster's `OPENSEARCH_URL`, `OPENSEARCH_USERNAME`, `OPENSEARCH_PASSWORD`). `service`: another web service of the project, its `<NAME>_URL`
  * (private) and `<NAME>_PUBLIC_URL`.
  */
-export type LinkKind = "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql" | "search" | "service";
+export type LinkKind = "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql" | "search" | "service" | "tasks";
 
 export interface Link {
   kind: LinkKind;
@@ -1136,6 +1189,12 @@ export interface UptimeCheck {
   contains?: string;
   /** A browser check: a Playwright script run in Chromium against `path` (the body of an async function given `page`, `context` and `url`; it fails by throwing). At most 16 KiB; every 300–3600 s, timeout 1–120 s. */
   browser?: string;
+  /** A browser check's performance budgets: its lab metrics past any fail it. */
+  budgets?: { lcp_ms?: number; cls?: number; ttfb_ms?: number; kb?: number; requests?: number };
+  /** `public`: fetched over the internet as a visitor's request (DNS, a custom domain's TLS, the edge, its gates); default: through roll's own proxy. */
+  from?: "roll" | "public";
+  /** A public check's host: one of its active custom domains (none: its own URL). */
+  host?: string;
 }
 
 export interface UptimeCheckState {
@@ -1148,6 +1207,14 @@ export interface UptimeCheckState {
   ms: number | null;
   error: string | null;
   down_since: number | null;
+  /** A browser check's last failure kept (its screenshot and Playwright trace), as the owner knows. */
+  failure_at?: number;
+  /** A preview's: the deployment this result is of (production's browser checks, run on each of its heads). */
+  deployment?: string;
+  /** A browser check's lab metrics from its last run. */
+  metrics?: { lcp_ms: number; cls: number; ttfb_ms: number; kb: number; requests: number };
+  /** Its last pass was over its budgets, and how (never down). */
+  over_budget?: string;
 }
 
 /** A heartbeat: something outside roll pings its URL at least every `every_s` (60–604800); one not come within that and `grace_s` (default 300) is `heartbeat.missed`. */
@@ -1272,6 +1339,7 @@ export interface NotifyTarget {
 
 export type NotifyEvent =
   | "alert.anomaly"
+  | "attack.mode"
   | "deploy.failed"
   | "deploy.base_updated"
   | "rollout.waiting"
@@ -1491,6 +1559,7 @@ export interface LogQuery {
 export const appsApi = {
   overview: () => call<Overview>("GET", "/v1/apps"),
   plan: (req: PlanRequest) => call<Plan>("POST", "/v1/apps/plan", req),
+  quote: (run: Partial<Run>) => call<Quote>("POST", "/v1/apps/quote", { run }),
   /** The folders of a repo's or a Git URL's tree that build on their own (a monorepo's apps). */
   roots: (req: { repo: string } | { git: string; branch?: string; git_login?: { username: string; password: string } }) => call<{ roots: RootCandidate[] }>("POST", "/v1/apps/plan", { ...req, roots: true }),
   /** The project as roll.toml: `databases` names what its services link (`{"postgres:<id>": "db"}`). */
@@ -1514,6 +1583,8 @@ export const appsApi = {
   update: (id: string, patch: ServicePatch) => call<Service>("PATCH", svc(id), patch),
   /** Deletes it until it's restored (48 hours); a deleted service's delete deletes it for good. */
   remove: (id: string) => call<null>("DELETE", svc(id)),
+  /** Move it to another project of the same owner (refused, naming them, while it's tied to its own). */
+  move: (id: string, project: string) => call<{ id: string; project: string; redeployed: { environment: string; deployment: string }[] }>("POST", `${svc(id)}/move`, { project }),
   deletedServices: (project?: string) => call<DeletedService[]>("GET", `/v1/apps/services${qs({ project, deleted: "true" })}`),
   restoreService: (id: string) => call<Service>("POST", `${svc(id)}/restore`),
 
@@ -1541,8 +1612,9 @@ export const appsApi = {
   removeDrain: (project: string, id: string) => call<null>("DELETE", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}`),
   limits: (project: string) => call<SpendLimits>("GET", `/v1/apps/projects/${enc(project)}/limits`),
   /** The project's image signing rule: cosign public keys and whether image services must meet them. */
-  signing: (project: string) => call<{ keys: string[]; required: boolean }>("GET", `/v1/apps/projects/${enc(project)}/signing`),
-  setSigning: (project: string, body: { keys: string[]; required?: boolean }) => call<{ keys: string[]; required: boolean }>("PUT", `/v1/apps/projects/${enc(project)}/signing`, body),
+  /** `roll_key`: the public key that signs the project's builds' provenance. */
+  signing: (project: string) => call<{ keys: string[]; required: boolean; roll_key: string }>("GET", `/v1/apps/projects/${enc(project)}/signing`),
+  setSigning: (project: string, body: { keys: string[]; required?: boolean }) => call<{ keys: string[]; required: boolean; roll_key: string }>("PUT", `/v1/apps/projects/${enc(project)}/signing`, body),
   deleteSigning: (project: string) => call<void>("DELETE", `/v1/apps/projects/${enc(project)}/signing`),
   /** A month's use by service and environment (this one by default), most costly first. */
   projectUsage: (project: string, month?: string) => call<ProjectUsage>("GET", `/v1/apps/projects/${enc(project)}/usage${qs({ month })}`),
@@ -1574,6 +1646,8 @@ export const appsApi = {
   commits: (id: string, e: string, d: string) => call<DeployCommits>("GET", `${dep(id, e, d)}/commits`),
   slo: (id: string, e: string) => call<SloReport>("GET", `${env(id, e)}/slo`),
   sbom: (id: string, e: string, d: string) => call<unknown>("GET", `${dep(id, e, d)}/sbom`),
+  /** Its image's signed SLSA provenance (a DSSE envelope), when roll built it. */
+  provenance: (id: string, e: string, d: string) => call<{ payloadType: string; payload: string; signatures: { keyid: string; sig: string }[] }>("GET", `${dep(id, e, d)}/provenance`),
   /** A failed deployment explained by its repo owner's model: kept, unless `again` asks anew (charged again). */
   explain: (id: string, e: string, d: string, again = false) => call<Explanation>("POST", `${dep(id, e, d)}/explain${qs({ again })}`),
   vulnerabilities: (id: string, e: string, d: string) => call<{ scan: ScanSummary | null; vulnerabilities: Vulnerability[] }>("GET", `${dep(id, e, d)}/vulnerabilities`),
@@ -1650,6 +1724,16 @@ export const appsApi = {
       throw new Error(data?.error ?? `${res.status} ${res.statusText}`.trim());
     }
     return { tar: await res.blob(), instance: res.headers.get("x-roll-instance") };
+  },
+  /** A browser check's last failure: its screenshot (PNG) or Playwright trace (zip). */
+  checkFailure: async (id: string, e: string, check: string, which: "screenshot" | "trace"): Promise<Blob> => {
+    const res = await fetch(`${ROLL_API}${env(id, e)}/checks/${encodeURIComponent(check)}/${which}`, withSession({ headers: apiHeaders(), cache: "no-store" }));
+    onApiStatus(res.status);
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.error ?? `${res.status} ${res.statusText}`.trim());
+    }
+    return res.blob();
   },
   /** A tar written under the directory `path` in a running instance (`PUT …/files`, admin: what's written runs next). */
   uploadFiles: async (id: string, e: string, path: string, tar: Blob, instance?: string): Promise<{ instance: string; path: string }> => {

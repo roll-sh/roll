@@ -140,6 +140,7 @@ describe("agent-proto fixtures", () => {
       "endpoint.key": true,
       "gateway.configure": true,
       "gateway.key": true,
+      "gateway.upstream_key": true,
       "gateway.client.issue": true,
       "gateway.client.revoke": true,
       "gateway.test": true,

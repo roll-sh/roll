@@ -400,12 +400,16 @@ pub struct Gate {
     pub file_headers: Vec<crate::model::HeaderRule>,
     /// Paths another service answers, the first that takes a path deciding.
     pub routes: Vec<crate::model::Route>,
+    /// Its own redirects, answered before anything wakes.
+    pub redirects: Option<Arc<crate::site_rules::EnvRedirects>>,
     /// Traces are on: the proxy adds its own span to each request's trace.
     pub traces: bool,
     /// Its pages carry roll's Web Vitals tag.
     pub vitals: bool,
-    /// Its challenge rules' key ([`crate::challenge`]), when it has such a rule.
+    /// Its challenge rules' key ([`crate::challenge`]), when it has such a rule or attack mode.
     pub challenge_key: Option<Vec<u8>>,
+    /// Attack mode is on until then (unix ms; [`crate::attack_mode`]).
+    pub attack_until: Option<i64>,
     /// Its split test.
     pub split: Option<crate::model::Split>,
     /// Where a share of its bodiless requests is copied.
@@ -460,17 +464,27 @@ fn grpc_serving(frame: &[u8]) -> bool {
 
 /// A rate-limit bucket: which (0 the environment's, 1 + i firewall rule i's, [`FILE_BUCKETS`] + i
 /// the live deployment's roll.toml rule i's) and whose.
-type BucketKey = (u16, Option<std::net::IpAddr>);
+/// A bucket, and its client: an address, or a rule's key's hashed value.
+type BucketKey = (u16, Option<std::net::IpAddr>, Option<u64>);
 
 /// Where the buckets of a deployment's own firewall rules start (past any environment's).
 const FILE_BUCKETS: u16 = 1000;
 
 /// The first of `rules` that matches decides; none: in. A limit's bucket is `base` + its index.
-fn first_match(rules: &[crate::model::FirewallRule], asked: &crate::model::Asked<'_>, base: u16) -> Verdict {
-    match rules.iter().enumerate().find(|(_, r)| r.matches(asked)) {
+/// The first rule that matches and decides; every one matched on the way (a `log` rule's, and
+/// the deciding one's) goes in `hits`.
+fn first_match(rules: &[crate::model::FirewallRule], asked: &crate::model::Asked<'_>, base: u16, hits: &mut Vec<u64>) -> Verdict {
+    let found = rules.iter().enumerate().find(|(_, r)| {
+        if !r.matches(asked) {
+            return false;
+        }
+        hits.push(r.fingerprint());
+        r.action != crate::model::FirewallAction::Log
+    });
+    match found {
         None => Verdict::Allow,
         Some((_, r)) if r.action == crate::model::FirewallAction::Allow => Verdict::Allow,
-        Some((i, r)) if r.action == crate::model::FirewallAction::Limit => Verdict::Limit(base + i as u16, crate::model::RateLimit { per_minute: r.per_minute.unwrap_or(60), burst: r.burst }),
+        Some((i, r)) if r.action == crate::model::FirewallAction::Limit => Verdict::Limit(base + i as u16, crate::model::RateLimit { per_minute: r.per_minute.unwrap_or(60), burst: r.burst }, r.client_key(asked)),
         Some((_, r)) if r.action == crate::model::FirewallAction::Challenge => Verdict::Challenge,
         Some(_) => Verdict::Deny,
     }
@@ -481,7 +495,8 @@ fn first_match(rules: &[crate::model::FirewallRule], asked: &crate::model::Asked
 pub enum Verdict {
     Allow,
     Deny,
-    Limit(u16, crate::model::RateLimit),
+    /// Its bucket, its limit, and its client by the rule's key (none: by address).
+    Limit(u16, crate::model::RateLimit, Option<u64>),
     /// In with a pass ([`crate::challenge`]); else its page.
     Challenge,
 }
@@ -494,14 +509,15 @@ impl Gate {
     /// matching, it does.
     /// What its firewall says of the request: the first rule that matches decides; none lets it
     /// in.
-    pub fn firewall_verdict(&self, asked: &crate::model::Asked<'_>) -> Verdict {
-        let own = first_match(&self.firewall, asked, 1);
+    /// The rules it matched go in `hits` ([`EnvLive::count_hits`]).
+    pub fn firewall_verdict(&self, asked: &crate::model::Asked<'_>, hits: &mut Vec<u64>) -> Verdict {
+        let own = first_match(&self.firewall, asked, 1, hits);
         if self.file_firewall.is_empty() {
             return own;
         }
         // The tree's rules on their own, their limits in buckets of their own: the stricter of
         // the two answers (deny, then a challenge, then the lower limit) decides.
-        let file = first_match(&self.file_firewall, asked, FILE_BUCKETS);
+        let file = first_match(&self.file_firewall, asked, FILE_BUCKETS, hits);
         let rank = |v: &Verdict| match v {
             Verdict::Allow => 0,
             Verdict::Limit(..) => 1,
@@ -509,7 +525,7 @@ impl Gate {
             Verdict::Deny => 3,
         };
         match (own, file) {
-            (Verdict::Limit(a, x), Verdict::Limit(b, y)) => if y.per_minute < x.per_minute { Verdict::Limit(b, y) } else { Verdict::Limit(a, x) },
+            (Verdict::Limit(a, x, ka), Verdict::Limit(b, y, kb)) => if y.per_minute < x.per_minute { Verdict::Limit(b, y, kb) } else { Verdict::Limit(a, x, ka) },
             (a, b) => if rank(&b) > rank(&a) { b } else { a },
         }
     }
@@ -521,6 +537,17 @@ impl Gate {
         }
         let Some(ip) = client_ip(client) else { return false };
         self.allow.iter().any(|n| n.contains(&ip))
+    }
+}
+
+/// Empties the hourly slots between `last` and `now` (the hours nothing came).
+fn roll_slots(slots: &mut [u32; 24], last: i64, now: i64) {
+    if now - last >= 24 {
+        *slots = [0; 24];
+        return;
+    }
+    for h in last + 1..=now {
+        slots[(h % 24) as usize] = 0;
     }
 }
 
@@ -656,6 +683,8 @@ pub struct EnvLive {
     /// Each client's tokens and when they were counted (its rate limit; None: no address).
     /// Each client's tokens, by bucket: 0 the environment's rate limit, 1 + i firewall rule i's.
     buckets: Mutex<HashMap<BucketKey, (f64, Instant)>>,
+    /// Requests each firewall rule matched, by its fingerprint: an hour a slot, the last 24.
+    rule_hits: Mutex<HashMap<u64, ([u32; 24], i64)>>,
     /// CPU its awake instances used and could have used, per tick, for `cpu_window` (only what
     /// the runtime measures).
     cpu_samples: Mutex<std::collections::VecDeque<(Instant, f64, f64)>>,
@@ -717,6 +746,7 @@ impl EnvLive {
             gate: Mutex::new(None),
             gate_gen: AtomicU64::new(0),
             buckets: Mutex::new(HashMap::new()),
+            rule_hits: Mutex::new(HashMap::new()),
             cpu_samples: Mutex::new(std::collections::VecDeque::new()),
             lat_window: Mutex::new((Instant::now(), Served::default(), None)),
             mem_samples: Mutex::new(std::collections::VecDeque::new()),
@@ -1292,6 +1322,35 @@ impl EnvLive {
         self.gate.lock().clone()
     }
 
+    /// Counts a request against the rules it matched (their fingerprints).
+    pub fn count_hits(&self, hits: &[u64]) {
+        if hits.is_empty() {
+            return;
+        }
+        let hour = code_sql::now_ms() / 3_600_000;
+        let mut m = self.rule_hits.lock();
+        // Never more than two environments' worth of rules (theirs and a tree's, changed).
+        if m.len() > 4 * crate::model::MAX_FIREWALL_RULES {
+            m.retain(|_, (_, last)| hour - *last < 24);
+        }
+        for h in hits {
+            let (slots, last) = m.entry(*h).or_insert(([0; 24], hour));
+            roll_slots(slots, *last, hour);
+            *last = hour;
+            slots[(hour % 24) as usize] = slots[(hour % 24) as usize].saturating_add(1);
+        }
+    }
+
+    /// Requests matched in the last 24 hours, by fingerprint.
+    pub fn hits(&self, fingerprint: u64) -> u32 {
+        let hour = code_sql::now_ms() / 3_600_000;
+        self.rule_hits.lock().get(&fingerprint).map_or(0, |(slots, last)| {
+            let mut s = *slots;
+            roll_slots(&mut s, *last, hour);
+            s.iter().fold(0u32, |a, b| a.saturating_add(*b))
+        })
+    }
+
     pub fn gate_gen(&self) -> u64 {
         self.gate_gen.load(Ordering::SeqCst)
     }
@@ -1315,11 +1374,11 @@ impl EnvLive {
     /// One request from `client` under `limit`: let through (a token taken), or how long until
     /// the next token.
     pub fn take_token(&self, client: Option<std::net::IpAddr>, limit: &crate::model::RateLimit) -> Result<(), Duration> {
-        self.take_token_in(0, client, limit)
+        self.take_token_in(0, client, None, limit)
     }
 
     /// [`Self::take_token`] in one of its buckets (a firewall rule's own: 1 + its index).
-    pub fn take_token_in(&self, bucket: u16, client: Option<std::net::IpAddr>, limit: &crate::model::RateLimit) -> Result<(), Duration> {
+    pub fn take_token_in(&self, bucket: u16, client: Option<std::net::IpAddr>, keyed: Option<u64>, limit: &crate::model::RateLimit) -> Result<(), Duration> {
         let (rate, burst) = (limit.per_minute as f64 / 60.0, limit.burst() as f64);
         // An IPv6 client counts by its /64: one host has the whole of it to rotate through.
         let client = client.map(|ip| match ip {
@@ -1327,7 +1386,11 @@ impl EnvLive {
             v4 => v4,
         });
         let now = Instant::now();
-        let key = (bucket, client);
+        // Keyed: the key's value is the client, wherever it comes from.
+        let key = match keyed {
+            Some(k) => (bucket, None, Some(k)),
+            None => (bucket, client, None),
+        };
         let mut b = self.buckets.lock();
         if b.len() >= MAX_BUCKETS && !b.contains_key(&key) {
             // Full ones first: they're the same as no entry. Then the longest unseen, never
@@ -2613,13 +2676,15 @@ impl EnvLive {
             tpl.spec.aliases.clear();
         }
         tpl.spec.vars.extend(vars.iter().cloned());
-        self.run_template(tpl, name, log, timeout, cancel).await
+        self.run_template(tpl, name, log, timeout, cancel, None).await
     }
 
     /// A browser check's container (`crate::browser`): roll's checker `image` on the live
     /// deployment's network with `vars` only (none of the app's), no port, volume, sidecar or
     /// name of its own there, 1 vCPU and 1 GiB, to its exit or `timeout`; metered to the service.
-    pub async fn run_checker(self: &Arc<Self>, image: &str, command: &str, vars: Vec<(String, String)>, timeout: Duration, log: LogSink) -> anyhow::Result<Exit> {
+    /// What it left at `keep` comes back in [`Exit::kept`].
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_checker(self: &Arc<Self>, image: &str, command: &str, vars: Vec<(String, String)>, timeout: Duration, log: LogSink, keep: &str, cancel: tokio_util::sync::CancellationToken) -> anyhow::Result<Exit> {
         let mut tpl = (*self.template().ok_or_else(|| anyhow::anyhow!("no deployment"))?).clone();
         let s = &mut tpl.spec;
         (s.image, s.command, s.vars, s.port, s.volume, s.idle_stop_s, s.registry, s.health) = (image.to_string(), Some(command.to_string()), vars, None, None, None, None, None);
@@ -2628,10 +2693,10 @@ impl EnvLive {
         s.files.clear();
         s.sidecars.clear();
         (s.cpu, s.memory_mb, tpl.run.cpu, tpl.run.memory_mb) = (1.0, 1024, 1.0, 1024);
-        self.run_template(tpl, None, Some(log), timeout, tokio_util::sync::CancellationToken::new()).await
+        self.run_template(tpl, None, Some(log), timeout, cancel, Some(keep)).await
     }
 
-    async fn run_template(self: &Arc<Self>, tpl: Template, name: Option<String>, log: Option<LogSink>, timeout: Duration, cancel: tokio_util::sync::CancellationToken) -> anyhow::Result<Exit> {
+    async fn run_template(self: &Arc<Self>, tpl: Template, name: Option<String>, log: Option<LogSink>, timeout: Duration, cancel: tokio_util::sync::CancellationToken, keep: Option<&str>) -> anyhow::Result<Exit> {
         let inst = self.make_run(&tpl, name).await?;
         let log = log.unwrap_or_else(|| self.log.instance(&inst.name, &inst.deployment));
         let began = Instant::now();
@@ -2654,9 +2719,24 @@ impl EnvLive {
         // With its sidecars' size: they run beside it.
         let (side_cpu, side_mb) = tpl.spec.sidecars_size();
         self.meter.lock().sample(now_ms(), secs * (tpl.run.cpu + side_cpu) * 0.5, ((tpl.run.memory_mb + side_mb) as u64) << 20, secs, 1);
+        // What it was asked to keep, from the stopped container, bounded.
+        let kept = match keep {
+            Some(path) => match self.runtime.copy_from(&inst.name, path).await {
+                Ok(stream) => {
+                    use tokio::io::AsyncReadExt;
+                    let mut buf = Vec::new();
+                    match stream.take(MAX_KEPT + 1).read_to_end(&mut buf).await {
+                        Ok(_) if buf.len() as u64 <= MAX_KEPT => Some(buf),
+                        _ => None,
+                    }
+                }
+                Err(_) => None,
+            },
+            None => None,
+        };
         self.runtime.remove(&inst.name).await;
         let (code, timed_out, canceled) = ran?;
-        Ok(Exit { deployment: tpl.deployment.clone(), container: inst.name.clone(), code, timed_out, canceled })
+        Ok(Exit { deployment: tpl.deployment.clone(), container: inst.name.clone(), code, timed_out, canceled, kept })
     }
 }
 
@@ -2732,7 +2812,13 @@ pub struct Exit {
     pub code: Option<i32>,
     pub timed_out: bool,
     pub canceled: bool,
+    /// What a run kept at the path it was asked to keep, copied out after it stopped: a tar
+    /// archive, at most [`MAX_KEPT`] (a browser check's failure: `crate::browser`).
+    pub kept: Option<Vec<u8>>,
 }
+
+/// The most a run's kept files may be.
+pub const MAX_KEPT: u64 = 24 << 20;
 
 #[cfg(test)]
 mod tests {

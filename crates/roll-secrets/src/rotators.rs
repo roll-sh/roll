@@ -145,7 +145,7 @@ impl LinkProvider for Provider {
             return Err(Error::Link(format!("rotator {ref} answered an empty value", ref = r#ref)));
         }
         names::value(a.value.expose()).map_err(|_| Error::Link(format!("rotator {ref} answered a value roll can't keep (over 64 KiB)", ref = r#ref)))?;
-        Ok(Issued { parts: BTreeMap::from([("value".to_string(), a.value)]), handle: json!({ "handle": a.handle }) })
+        Ok(Issued { expires_at: None, parts: BTreeMap::from([("value".to_string(), a.value)]), handle: json!({ "handle": a.handle }) })
     }
 
     fn revoke(&self, r#ref: &str, handle: &Json) -> Result<()> {

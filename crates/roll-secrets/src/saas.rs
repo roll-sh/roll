@@ -7,7 +7,8 @@
 //!
 //! Requests go out through rolld ([`Deliver::request`]): HTTPS to a public address, no redirects,
 //! the answer bounded, a timeout. Hosts are the vendors' own, except Okta's and Auth0's tenant
-//! domains, which are checked as hostnames and then go through the same guard. The credential is
+//! domains, a self-managed GitLab's host and a Databricks workspace's, which are checked as
+//! hostnames and then go through the same guard; Datadog's site is one of its documented ones. The credential is
 //! sealed with the project's data key, bound to the registration's vendor and target, so a row
 //! pointed somewhere else no longer opens. Errors name the vendor and the status, never what a
 //! vendor answered.
@@ -63,7 +64,108 @@ pub enum Vendor {
     /// The credential is the client secret of `client_id`, a machine-to-machine app of the
     /// Management API with `update:client_keys`; `app_client_id` is the app whose secret rotates.
     Auth0 { domain: String, client_id: String, app_client_id: String },
+    /// The credential is an access token with the `api` scope of a Maintainer or Owner of `project`
+    /// or `group` (one of them), on gitlab.com or a self-managed `host`. Each key is a new project
+    /// or group access token; the old one is revoked after the grace period (not GitLab's rotate,
+    /// which ends the old token at once).
+    Gitlab {
+        #[serde(default = "gitlab_com")]
+        host: String,
+        /// A project's numeric id or its path (`group/project`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        /// A group's numeric id or its path.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group: Option<String>,
+        scopes: Vec<String>,
+        /// GitLab's role number (10 guest … 40 maintainer, 50 owner for a group); GitLab's own
+        /// default, 40, when left out.
+        #[serde(default = "gitlab_level")]
+        access_level: u8,
+        /// Each token's lifetime in days (GitLab needs one; 365 is its default cap).
+        #[serde(default = "gitlab_days")]
+        expires_days: u16,
+    },
+    /// The credential is an organization's Admin API key. Each key is the API key of a new
+    /// service account in `project_id`; deleting the old service account revokes its key.
+    Openai { project_id: String },
+    /// The credential is `<API key>:<application key>`, the application key allowed to manage the
+    /// kind of key that rotates (`api_keys_write`, or its user's `user_app_keys`).
+    Datadog {
+        #[serde(default = "datadog_site")]
+        site: String,
+        key: DatadogKey,
+        /// The scopes each application key gets (none: its user's permissions).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        scopes: Vec<String>,
+    },
+    /// The credential is an API token that may manage API tokens (`API Tokens Write`, the user's or
+    /// `account_id`'s). Each key is a new token with `template`'s policies and conditions; the old
+    /// one is deleted after the grace period (not Cloudflare's roll, which ends the old value at
+    /// once).
+    Cloudflare {
+        /// An account whose account-owned tokens rotate (none: the user's own tokens).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_id: Option<String>,
+        /// The id of the token whose policies each new token copies (it may be disabled).
+        template: String,
+    },
+    /// The credential is a personal access token (or a service principal's) on the workspace
+    /// `host`; each key is a new token of the same identity, `lifetime_days` long.
+    Databricks {
+        host: String,
+        #[serde(default = "databricks_days")]
+        lifetime_days: u16,
+    },
+    /// The credential is a Cloud API key as `KEY:SECRET` of an OrganizationAdmin (or one that may
+    /// manage `owner`'s keys). Each key is a new API key of `owner` for `resource` (a Kafka cluster,
+    /// Schema Registry…, in `environment`), or a Cloud API key when `resource` is left out.
+    Confluent {
+        owner: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resource: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        environment: Option<String>,
+    },
 }
+
+fn databricks_days() -> u16 {
+    90
+}
+
+/// An Entra password's lifetime when none is asked for (Microsoft's default: two years).
+const ENTRA_DAYS: u64 = 730;
+/// How long before a vendor ends a key roll rotates it at the latest (health's `expiring` window).
+const EXPIRY_MARGIN_DAYS: u64 = crate::insights::EXPIRING_DAYS as u64;
+
+/// Which of Datadog's keys a registration rotates.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum DatadogKey {
+    /// An organization API key.
+    Api,
+    /// An application key of the user the credential's application key belongs to.
+    Application,
+}
+
+fn gitlab_com() -> String {
+    "gitlab.com".into()
+}
+
+fn gitlab_level() -> u8 {
+    40
+}
+
+fn gitlab_days() -> u16 {
+    365
+}
+
+fn datadog_site() -> String {
+    "datadoghq.com".into()
+}
+
+/// Datadog's documented sites; its API is `api.<site>`.
+const DATADOG_SITES: &[&str] = &["datadoghq.com", "us3.datadoghq.com", "us5.datadoghq.com", "datadoghq.eu", "ap1.datadoghq.com", "ap2.datadoghq.com", "ddog-gov.com"];
 
 impl Vendor {
     pub fn name(&self) -> &'static str {
@@ -73,6 +175,12 @@ impl Vendor {
             Vendor::Okta { .. } => "okta",
             Vendor::Entra { .. } => "entra",
             Vendor::Auth0 { .. } => "auth0",
+            Vendor::Gitlab { .. } => "gitlab",
+            Vendor::Openai { .. } => "openai",
+            Vendor::Datadog { .. } => "datadog",
+            Vendor::Cloudflare { .. } => "cloudflare",
+            Vendor::Databricks { .. } => "databricks",
+            Vendor::Confluent { .. } => "confluent",
         }
     }
 
@@ -121,6 +229,47 @@ impl Vendor {
                     return bad("auth0's app_client_id is another app than the one roll signs in as");
                 }
             }
+            Vendor::Gitlab { host, project, group, scopes, access_level, expires_days } => {
+                *host = host.trim().to_ascii_lowercase();
+                let one = match (project.as_deref(), group.as_deref()) {
+                    (Some(p), None) | (None, Some(p)) => gitlab_path(p),
+                    _ => false,
+                };
+                let scopes_ok = !scopes.is_empty() && scopes.len() <= 20 && scopes.iter().all(|s| !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_lowercase() || c == '_'));
+                let levels: &[u8] = if group.is_some() { &[10, 15, 20, 30, 40, 50] } else { &[10, 15, 20, 30, 40] };
+                if !hostname(host) || !one || !scopes_ok || !levels.contains(&*access_level) || !(1..=400).contains(&*expires_days) {
+                    return bad("a gitlab target is {host?: gitlab.com or your instance's host, project: an id or group/project | group: an id or path, scopes: [\"read_api\", …], access_level?: 10-40 (50 for a group; default 40), expires_days?: 1-400 (default 365)}");
+                }
+            }
+            Vendor::Openai { project_id } => {
+                if !(project_id.starts_with("proj_") && id_ok(project_id)) {
+                    return bad("an openai target is {project_id: proj_…}");
+                }
+            }
+            Vendor::Datadog { site, key, scopes } => {
+                *site = site.trim().to_ascii_lowercase();
+                let scopes_ok = scopes.len() <= 100 && scopes.iter().all(|s| !s.is_empty() && s.len() <= 100 && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'));
+                if !DATADOG_SITES.contains(&site.as_str()) || !scopes_ok || (*key == DatadogKey::Api && !scopes.is_empty()) {
+                    return bad("a datadog target is {site?: one of Datadog's sites (datadoghq.com, us3.datadoghq.com, us5.datadoghq.com, datadoghq.eu, ap1.datadoghq.com, ap2.datadoghq.com, ddog-gov.com), key: \"api\" | \"application\", scopes?: [\"dashboards_read\", …] (application keys only)}");
+                }
+            }
+            Vendor::Cloudflare { account_id, template } => {
+                if !account_id.as_deref().is_none_or(id_ok) || !id_ok(template) {
+                    return bad("a cloudflare target is {account_id?: the account whose tokens rotate (none: your user's), template: the id of the token whose policies each new token copies}");
+                }
+            }
+            Vendor::Databricks { host, lifetime_days } => {
+                *host = host.trim().to_ascii_lowercase();
+                if !hostname(host) || !(1..=730).contains(&*lifetime_days) {
+                    return bad("a databricks target is {host: the workspace's host (dbc-a1b2c3d4-e5f6.cloud.databricks.com), lifetime_days?: 1-730 (default 90)}");
+                }
+            }
+            Vendor::Confluent { owner, resource, environment } => {
+                let ok = id_ok(owner) && resource.as_deref().is_none_or(id_ok) && environment.as_deref().is_none_or(id_ok) && (resource.is_some() || environment.is_none());
+                if !ok {
+                    return bad("a confluent target is {owner: the service account or user (sa-…, u-…), resource?: lkc-… or another resource (none: a Cloud API key), environment?: env-… (with resource)}");
+                }
+            }
         }
         Ok(self)
     }
@@ -133,6 +282,16 @@ impl Vendor {
             Vendor::Okta { domain, app_id } => format!("{app_id} on {domain}"),
             Vendor::Entra { object_id, tenant, .. } => format!("{object_id} in {tenant}"),
             Vendor::Auth0 { domain, app_client_id, .. } => format!("{app_client_id} on {domain}"),
+            Vendor::Gitlab { host, project: Some(p), .. } => format!("project {p} on {host}"),
+            Vendor::Gitlab { host, group, .. } => format!("group {} on {host}", group.as_deref().unwrap_or_default()),
+            Vendor::Openai { project_id } => project_id.clone(),
+            Vendor::Datadog { site, key: DatadogKey::Api, .. } => format!("API keys on {site}"),
+            Vendor::Datadog { site, key: DatadogKey::Application, .. } => format!("application keys on {site}"),
+            Vendor::Cloudflare { account_id: Some(a), template } => format!("like {template} in account {a}"),
+            Vendor::Cloudflare { template, .. } => format!("like {template}"),
+            Vendor::Databricks { host, .. } => host.clone(),
+            Vendor::Confluent { owner, resource: Some(r), .. } => format!("{owner} on {r}"),
+            Vendor::Confluent { owner, .. } => format!("{owner} (Cloud API keys)"),
         }
     }
 
@@ -142,6 +301,24 @@ impl Vendor {
         matches!(self, Vendor::Okta { .. } | Vendor::Auth0 { .. })
     }
 
+    /// Days each key lives at the vendor, when the vendor ends it by itself: GitLab's
+    /// `expires_days`, Databricks' `lifetime_days`, Entra's two years. The rest live until revoked.
+    fn lifetime_days(&self) -> Option<u64> {
+        match self {
+            Vendor::Gitlab { expires_days, .. } => Some(u64::from(*expires_days)),
+            Vendor::Databricks { lifetime_days, .. } => Some(u64::from(*lifetime_days)),
+            Vendor::Entra { .. } => Some(ENTRA_DAYS),
+            _ => None,
+        }
+    }
+
+    /// The longest `rotate_days` a key of `lifetime_days` may have: rotated two weeks before it
+    /// ends (before health's `expiring` would show it, with a weekly `rotate_window`'s wait
+    /// covered), or at half its life when it lives under four weeks. Zero: too short to rotate.
+    fn rotate_within(lifetime_days: u64) -> u64 {
+        if lifetime_days >= 2 * EXPIRY_MARGIN_DAYS { lifetime_days - EXPIRY_MARGIN_DAYS } else { lifetime_days / 2 }
+    }
+
     fn fields(&self) -> Vec<Field> {
         let (secret, id) = match self {
             Vendor::Sendgrid { .. } => ("SENDGRID_API_KEY", "SENDGRID_API_KEY_ID"),
@@ -149,6 +326,13 @@ impl Vendor {
             Vendor::Okta { .. } => ("OKTA_CLIENT_SECRET", "OKTA_CLIENT_SECRET_ID"),
             Vendor::Entra { .. } => ("AZURE_CLIENT_SECRET", "AZURE_CLIENT_SECRET_ID"),
             Vendor::Auth0 { .. } => ("AUTH0_CLIENT_SECRET", "AUTH0_CLIENT_ID"),
+            Vendor::Gitlab { .. } => ("GITLAB_TOKEN", "GITLAB_TOKEN_ID"),
+            Vendor::Openai { .. } => ("OPENAI_API_KEY", "OPENAI_SERVICE_ACCOUNT_ID"),
+            Vendor::Datadog { key: DatadogKey::Api, .. } => ("DD_API_KEY", "DD_API_KEY_ID"),
+            Vendor::Datadog { key: DatadogKey::Application, .. } => ("DD_APP_KEY", "DD_APP_KEY_ID"),
+            Vendor::Cloudflare { .. } => ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_API_TOKEN_ID"),
+            Vendor::Databricks { .. } => ("DATABRICKS_TOKEN", "DATABRICKS_TOKEN_ID"),
+            Vendor::Confluent { .. } => ("CONFLUENT_API_SECRET", "CONFLUENT_API_KEY"),
         };
         FIELDS.iter().cloned().zip([secret, id]).map(|(f, suggest)| Field { suggest, ..f }).collect()
     }
@@ -168,6 +352,11 @@ fn id_ok(s: &str) -> bool {
     !s.is_empty() && s.len() <= 128 && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c))
 }
 
+/// A GitLab project or group: its numeric id, or its full path (`group/sub/project`).
+fn gitlab_path(s: &str) -> bool {
+    s.len() <= 1024 && s.split('/').all(|seg| !seg.is_empty() && seg.len() <= 255 && seg != "." && seg != ".." && seg.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)))
+}
+
 fn guid(s: &str) -> bool {
     s.len() == 36 && s.char_indices().all(|(i, c)| if [8, 13, 18, 23].contains(&i) { c == '-' } else { c.is_ascii_hexdigit() })
 }
@@ -178,6 +367,10 @@ pub struct SaasRotator {
     pub name: String,
     #[serde(flatten)]
     pub vendor: Vendor,
+    /// When the registered credential itself ends at the vendor (unix ms), as the admin said:
+    /// health warns two weeks before. Only the date; never the credential.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_expires_at: Option<i64>,
     pub created_at: i64,
     pub created_by: String,
 }
@@ -191,6 +384,56 @@ pub struct NewSaasRotator {
     pub target: Json,
     /// Sealed at once; never answered, logged or audited.
     pub credential: Value,
+    /// When `credential` ends at the vendor (unix ms; a GitLab or Databricks token's expiry, an
+    /// Entra client secret's end date), for health's `expiring` and `expired`.
+    #[serde(default)]
+    pub credential_expires_at: Option<i64>,
+}
+
+/// `PATCH …/saas/{id}`: a new name, a replacement credential, or when it ends. The vendor and
+/// target stay (another account is another registration).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SaasRotatorChange {
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The replacement, checked with the vendor as registering checks one, then sealed in the old
+    /// one's place; never answered, logged or audited.
+    #[serde(default)]
+    pub credential: Option<Value>,
+    /// Absent: unchanged, except that a new credential drops the old one's date (it was that
+    /// credential's end); `null`: no date.
+    #[serde(default, deserialize_with = "some")]
+    pub credential_expires_at: Option<Option<i64>>,
+}
+
+fn some<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> std::result::Result<Option<T>, D::Error> {
+    T::deserialize(d).map(Some)
+}
+
+fn check_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.len() > 64 || !name.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c)) {
+        return Err(Error::BadRequest("a SaaS rotator's name is letters, digits, - and _ (64 at most)".into()));
+    }
+    Ok(())
+}
+
+/// The credential as kept: trimmed, one line.
+fn check_credential<'a>(vendor: &Vendor, credential: &'a Value) -> Result<&'a str> {
+    let credential = credential.expose().trim();
+    if credential.is_empty() || credential.len() > 4096 || credential.contains(['\r', '\n']) {
+        return Err(Error::BadRequest(format!("credential is the {} credential roll issues keys with, one line", vendor.name())));
+    }
+    Ok(credential)
+}
+
+fn check_expiry(at: Option<i64>, now: i64) -> Result<()> {
+    if let Some(t) = at
+        && !(now..=names::MAX_TIME).contains(&t)
+    {
+        return Err(Error::BadRequest("credential_expires_at is when the credential ends, a future time in ms since 1970".into()));
+    }
+    Ok(())
 }
 
 /// Bound to the vendor and target too: a row pointed at another host doesn't open.
@@ -277,6 +520,23 @@ impl LinkProvider for Provider {
     fn exclusive_for(&self, r#ref: &str) -> bool {
         self.vendor(r#ref).is_some_and(|v| v.exclusive())
     }
+
+    /// A vendor that ends its keys by itself: the link rotates them before that, or the key
+    /// would stop working at the vendor with nothing in roll noticing.
+    fn check(&self, link: &Link) -> Result<()> {
+        let Some(vendor) = self.vendor(&link.r#ref) else { return Ok(()) };
+        let Some(life) = vendor.lifetime_days() else { return Ok(()) };
+        let v = vendor.name();
+        let most = Vendor::rotate_within(life);
+        if most == 0 {
+            return Err(Error::BadRequest(format!("{v} keys from this rotator end after {life} day: too soon to rotate one before it ends (register it with a longer lifetime)")));
+        }
+        match link.rotate_days() {
+            Some(d) if d <= most => Ok(()),
+            Some(d) => Err(Error::BadRequest(format!("rotate_days is {d}, but {v} ends these keys after {life} days: at most {most}, so roll replaces each one before it stops working"))),
+            None => Err(Error::BadRequest(format!("{v} ends these keys after {life} days: set rotate_days (at most {most}) so roll replaces each one before it stops working"))),
+        }
+    }
 }
 
 // ── the vendors' APIs ──
@@ -351,6 +611,9 @@ fn key_id(vendor: &Vendor, id: String) -> Result<String> {
 pub(crate) fn issue(d: &dyn Deliver, vendor: &Vendor, credential: &Value, label: &str) -> Result<Issued> {
     let label = short(label);
     let step = "issuing a key";
+    let days_ms = |days: u64| now_ms() + days as i64 * 86_400_000;
+    // When the vendor ends the key by itself.
+    let mut expires_at = None;
     let (secret, id): (Value, String) = match vendor {
         Vendor::Sendgrid { scopes } => {
             #[derive(Deserialize)]
@@ -393,11 +656,15 @@ pub(crate) fn issue(d: &dyn Deliver, vendor: &Vendor, credential: &Value, label:
             struct A {
                 key_id: String,
                 secret_text: Value,
+                #[serde(default)]
+                end_date_time: Option<String>,
             }
             let token = token(d, vendor, credential)?;
             let body = Value::new(json!({ "passwordCredential": { "displayName": label } }).to_string());
             let answer = send(d, vendor, step, "POST", &format!("https://graph.microsoft.com/v1.0/applications/{object_id}/addPassword"), &[("authorization", &bearer(&token))], Some((JSON_TYPE, &body)), false)?;
             let a: A = parse(vendor, step, &answer.unwrap_or_default())?;
+            // The end Microsoft gave it (a tenant's policy may shorten the default two years).
+            expires_at = Some(a.end_date_time.as_deref().and_then(utc_ms).unwrap_or_else(|| days_ms(ENTRA_DAYS)));
             (a.secret_text, a.key_id)
         }
         Vendor::Auth0 { domain, app_client_id, .. } => {
@@ -410,6 +677,121 @@ pub(crate) fn issue(d: &dyn Deliver, vendor: &Vendor, credential: &Value, label:
             let a: A = parse(vendor, step, &answer.unwrap_or_default())?;
             (a.client_secret, app_client_id.clone())
         }
+        Vendor::Gitlab { scopes, access_level, expires_days, .. } => {
+            #[derive(Deserialize)]
+            struct A {
+                id: u64,
+                token: Value,
+            }
+            let day = in_days(*expires_days);
+            let body = json!({ "name": label, "scopes": scopes, "access_level": access_level, "expires_at": format!("{:04}-{:02}-{:02}", day.year(), u8::from(day.month()), day.day()) });
+            let answer = send(d, vendor, step, "POST", &gitlab_tokens(vendor), &[("private-token", credential)], Some((JSON_TYPE, &Value::new(body.to_string()))), false)?;
+            let a: A = parse(vendor, step, &answer.unwrap_or_default())?;
+            // GitLab ends it as that day starts (UTC).
+            expires_at = Some(day.midnight().assume_utc().unix_timestamp() * 1000);
+            (a.token, a.id.to_string())
+        }
+        Vendor::Openai { project_id } => {
+            #[derive(Deserialize)]
+            struct Key {
+                value: Value,
+            }
+            #[derive(Deserialize)]
+            struct A {
+                id: String,
+                api_key: Key,
+            }
+            let body = Value::new(json!({ "name": label }).to_string());
+            let answer = send(d, vendor, step, "POST", &format!("{OPENAI_PROJECTS}/{project_id}/service_accounts"), &[("authorization", &bearer(credential))], Some((JSON_TYPE, &body)), false)?;
+            let a: A = parse(vendor, step, &answer.unwrap_or_default())?;
+            (a.api_key.value, a.id)
+        }
+        Vendor::Datadog { site, key, scopes } => {
+            #[derive(Deserialize)]
+            struct Attributes {
+                key: Value,
+            }
+            #[derive(Deserialize)]
+            struct Data {
+                id: String,
+                attributes: Attributes,
+            }
+            #[derive(Deserialize)]
+            struct A {
+                data: Data,
+            }
+            let (api, app) = datadog_auth(credential)?;
+            let (path, kind) = match key {
+                DatadogKey::Api => ("api_keys", "api_keys"),
+                DatadogKey::Application => ("current_user/application_keys", "application_keys"),
+            };
+            let mut attributes = json!({ "name": label });
+            if !scopes.is_empty() {
+                attributes["scopes"] = json!(scopes);
+            }
+            let body = Value::new(json!({ "data": { "type": kind, "attributes": attributes } }).to_string());
+            let answer = send(d, vendor, step, "POST", &format!("https://api.{site}/api/v2/{path}"), &[("dd-api-key", &api), ("dd-application-key", &app)], Some((JSON_TYPE, &body)), false)?;
+            let a: A = parse(vendor, step, &answer.unwrap_or_default())?;
+            (a.data.attributes.key, a.data.id)
+        }
+        Vendor::Cloudflare { .. } => {
+            #[derive(Deserialize)]
+            struct Made {
+                id: String,
+                value: Value,
+            }
+            #[derive(Deserialize)]
+            struct A {
+                result: Made,
+            }
+            let auth = [("authorization", &bearer(credential))];
+            let mut body = cloudflare_template(d, vendor, credential, step)?;
+            body["name"] = json!(label);
+            let answer = send(d, vendor, step, "POST", &cloudflare_tokens(vendor), &auth, Some((JSON_TYPE, &Value::new(body.to_string()))), false)?;
+            let a: A = parse(vendor, step, &answer.unwrap_or_default())?;
+            (a.result.value, a.result.id)
+        }
+        Vendor::Databricks { host, lifetime_days } => {
+            #[derive(Deserialize)]
+            struct Info {
+                token_id: String,
+                /// Unix ms; -1 for a token that doesn't end.
+                #[serde(default)]
+                expiry_time: Option<i64>,
+            }
+            #[derive(Deserialize)]
+            struct A {
+                token_value: Value,
+                token_info: Info,
+            }
+            let body = Value::new(json!({ "comment": label, "lifetime_seconds": u64::from(*lifetime_days) * 86_400 }).to_string());
+            let answer = send(d, vendor, step, "POST", &format!("https://{host}/api/2.0/token/create"), &[("authorization", &bearer(credential))], Some((JSON_TYPE, &body)), false)?;
+            let a: A = parse(vendor, step, &answer.unwrap_or_default())?;
+            expires_at = Some(a.token_info.expiry_time.filter(|t| *t > 0).unwrap_or_else(|| days_ms(u64::from(*lifetime_days))));
+            (a.token_value, a.token_info.token_id)
+        }
+        Vendor::Confluent { owner, resource, environment } => {
+            #[derive(Deserialize)]
+            struct Spec {
+                secret: Value,
+            }
+            #[derive(Deserialize)]
+            struct A {
+                id: String,
+                spec: Spec,
+            }
+            let mut spec = json!({ "display_name": label, "owner": { "id": owner } });
+            if let Some(r) = resource {
+                spec["resource"] = json!({ "id": r });
+                if let Some(e) = environment {
+                    spec["resource"]["environment"] = json!(e);
+                }
+            }
+            let body = Value::new(json!({ "spec": spec }).to_string());
+            let answer = send(d, vendor, step, "POST", CONFLUENT_KEYS, &[("authorization", &confluent_auth(credential)?)], Some((JSON_TYPE, &body)), false)?;
+            let a: A = parse(vendor, step, &answer.unwrap_or_default())?;
+            (a.spec.secret, a.id)
+        }
     };
     if secret.expose().is_empty() {
         return Err(Error::Link(format!("{} answered an empty secret", vendor.name())));
@@ -418,7 +800,7 @@ pub(crate) fn issue(d: &dyn Deliver, vendor: &Vendor, credential: &Value, label:
     let id = key_id(vendor, id)?;
     // Auth0 replaced the old secret already: there's nothing to revoke later.
     let handle = if matches!(vendor, Vendor::Auth0 { .. }) { json!({}) } else { json!({ "id": id }) };
-    Ok(Issued { parts: BTreeMap::from([("secret".to_string(), secret), ("id".to_string(), Value::new(id))]), handle })
+    Ok(Issued { parts: BTreeMap::from([("secret".to_string(), secret), ("id".to_string(), Value::new(id))]), handle, expires_at })
 }
 
 /// Revoke a key [`issue`] made; one that's already gone is revoked.
@@ -449,6 +831,31 @@ pub(crate) fn revoke(d: &dyn Deliver, vendor: &Vendor, credential: &Value, handl
             let token = token(d, vendor, credential)?;
             let body = Value::new(json!({ "keyId": id }).to_string());
             send(d, vendor, step, "POST", &format!("https://graph.microsoft.com/v1.0/applications/{object_id}/removePassword"), &[("authorization", &bearer(&token))], Some((JSON_TYPE, &body)), true)?;
+        }
+        Vendor::Gitlab { .. } => {
+            send(d, vendor, step, "DELETE", &format!("{}/{id}", gitlab_tokens(vendor)), &[("private-token", credential)], None, true)?;
+        }
+        Vendor::Openai { project_id } => {
+            // The key is the service account's: deleting the account revokes it.
+            send(d, vendor, step, "DELETE", &format!("{OPENAI_PROJECTS}/{project_id}/service_accounts/{id}"), &[("authorization", &bearer(credential))], None, true)?;
+        }
+        Vendor::Datadog { site, key, .. } => {
+            let (api, app) = datadog_auth(credential)?;
+            let path = match key {
+                DatadogKey::Api => "api_keys",
+                DatadogKey::Application => "current_user/application_keys",
+            };
+            send(d, vendor, step, "DELETE", &format!("https://api.{site}/api/v2/{path}/{id}"), &[("dd-api-key", &api), ("dd-application-key", &app)], None, true)?;
+        }
+        Vendor::Cloudflare { .. } => {
+            send(d, vendor, step, "DELETE", &format!("{}/{id}", cloudflare_tokens(vendor)), &[("authorization", &bearer(credential))], None, true)?;
+        }
+        Vendor::Databricks { host, .. } => {
+            let body = Value::new(json!({ "token_id": id }).to_string());
+            send(d, vendor, step, "POST", &format!("https://{host}/api/2.0/token/delete"), &[("authorization", &bearer(credential))], Some((JSON_TYPE, &body)), true)?;
+        }
+        Vendor::Confluent { .. } => {
+            send(d, vendor, step, "DELETE", &format!("{CONFLUENT_KEYS}/{id}"), &[("authorization", &confluent_auth(credential)?)], None, true)?;
         }
         Vendor::Auth0 { .. } => unreachable!("returned above"),
     }
@@ -487,8 +894,121 @@ pub(crate) fn probe(d: &dyn Deliver, vendor: &Vendor, credential: &Value) -> Res
             let token = token(d, vendor, credential)?;
             send(d, vendor, step, "GET", &format!("https://{domain}/api/v2/clients/{app_client_id}?fields=client_id"), &[("authorization", &bearer(&token))], None, false)?;
         }
+        Vendor::Gitlab { .. } => {
+            // Listing the access tokens takes the role that makes them.
+            send(d, vendor, step, "GET", &format!("{}?per_page=1", gitlab_tokens(vendor)), &[("private-token", credential)], None, false)?;
+        }
+        Vendor::Openai { project_id } => {
+            send(d, vendor, step, "GET", &format!("{OPENAI_PROJECTS}/{project_id}/service_accounts?limit=1"), &[("authorization", &bearer(credential))], None, false)?;
+        }
+        Vendor::Datadog { site, key, .. } => {
+            let (api, app) = datadog_auth(credential)?;
+            let path = match key {
+                DatadogKey::Api => "api_keys",
+                DatadogKey::Application => "current_user/application_keys",
+            };
+            send(d, vendor, step, "GET", &format!("https://api.{site}/api/v2/{path}?page%5Bsize%5D=1"), &[("dd-api-key", &api), ("dd-application-key", &app)], None, false)?;
+        }
+        Vendor::Cloudflare { .. } => {
+            // The template, read: what every rotation copies.
+            cloudflare_template(d, vendor, credential, step)?;
+        }
+        Vendor::Databricks { host, .. } => {
+            send(d, vendor, step, "GET", &format!("https://{host}/api/2.0/token/list"), &[("authorization", &bearer(credential))], None, false)?;
+        }
+        Vendor::Confluent { owner, .. } => {
+            send(d, vendor, step, "GET", &format!("{CONFLUENT_KEYS}?spec.owner={owner}&page_size=1"), &[("authorization", &confluent_auth(credential)?)], None, false)?;
+        }
     }
     Ok(())
+}
+
+const CONFLUENT_KEYS: &str = "https://api.confluent.cloud/iam/v2/api-keys";
+
+/// A Cloudflare registration's tokens: the user's, or the account's.
+fn cloudflare_tokens(vendor: &Vendor) -> String {
+    match vendor {
+        Vendor::Cloudflare { account_id: Some(a), .. } => format!("https://api.cloudflare.com/client/v4/accounts/{a}/tokens"),
+        Vendor::Cloudflare { .. } => "https://api.cloudflare.com/client/v4/user/tokens".into(),
+        _ => unreachable!("only Cloudflare has tokens there"),
+    }
+}
+
+/// A new token's body from the template's: its policies (each permission group by id) and its
+/// conditions, nothing else (not its name, status or expiry).
+fn cloudflare_template(d: &dyn Deliver, vendor: &Vendor, credential: &Value, step: &str) -> Result<Json> {
+    let Vendor::Cloudflare { template, .. } = vendor else { unreachable!("only Cloudflare has templates") };
+    let answer = send(d, vendor, step, "GET", &format!("{}/{template}", cloudflare_tokens(vendor)), &[("authorization", &bearer(credential))], None, false)?;
+    let t: Json = parse(vendor, step, &answer.unwrap_or_default())?;
+    let unexpected = || Error::Link(format!("cloudflare answered something roll didn't expect {step}"));
+    let policies = t["result"]["policies"].as_array().filter(|p| !p.is_empty()).ok_or_else(unexpected)?;
+    let policies = policies
+        .iter()
+        .map(|p| {
+            let groups = p["permission_groups"].as_array().ok_or_else(unexpected)?.iter().map(|g| g["id"].as_str().map(|id| json!({ "id": id })).ok_or_else(unexpected)).collect::<Result<Vec<_>>>()?;
+            Ok(json!({ "effect": p["effect"], "resources": p["resources"], "permission_groups": groups }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut body = json!({ "policies": policies });
+    if let Some(c) = t["result"].get("condition").filter(|c| !c.is_null()) {
+        body["condition"] = c.clone();
+    }
+    Ok(body)
+}
+
+/// Basic auth for Confluent Cloud from `KEY:SECRET`.
+fn confluent_auth(credential: &Value) -> Result<Value> {
+    use base64::Engine;
+    match credential.expose().split_once(':') {
+        Some((k, s)) if !k.is_empty() && !s.is_empty() => Ok(Value::new(format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(credential.expose())))),
+        _ => Err(Error::Link("a confluent credential is a Cloud API key as KEY:SECRET".into())),
+    }
+}
+
+const OPENAI_PROJECTS: &str = "https://api.openai.com/v1/organization/projects";
+
+/// A GitLab registration's access tokens: `https://{host}/api/v4/{projects|groups}/{id}/access_tokens`,
+/// a path's slashes encoded as GitLab asks.
+fn gitlab_tokens(vendor: &Vendor) -> String {
+    let Vendor::Gitlab { host, project, group, .. } = vendor else { unreachable!("only GitLab has access tokens") };
+    let (kind, id) = match (project, group) {
+        (Some(p), _) => ("projects", p),
+        (None, Some(g)) => ("groups", g),
+        (None, None) => unreachable!("checked: one of them"),
+    };
+    format!("https://{host}/api/v4/{kind}/{}/access_tokens", id.replace('/', "%2F"))
+}
+
+/// The date `days` from now (UTC), as GitLab's `expires_at` takes it.
+fn in_days(days: u16) -> time::Date {
+    (time::OffsetDateTime::now_utc() + time::Duration::days(i64::from(days))).date()
+}
+
+fn now_ms() -> i64 {
+    (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64
+}
+
+/// A UTC time as Microsoft Graph writes it (`2028-11-23T10:24:31.123Z`), as unix ms; `None` for
+/// anything else.
+fn utc_ms(s: &str) -> Option<i64> {
+    let s = s.strip_suffix('Z').unwrap_or(s);
+    let (date, clock) = s.split_once('T')?;
+    let clock = clock.split('.').next()?;
+    let num = |p: &str| p.parse::<u16>().ok();
+    let d: Vec<u16> = date.split('-').map(num).collect::<Option<_>>()?;
+    let t: Vec<u16> = clock.split(':').map(num).collect::<Option<_>>()?;
+    let ([y, m, day], [h, min, sec]) = (d.as_slice(), t.as_slice()) else { return None };
+    let date = time::Date::from_calendar_date(i32::from(*y), time::Month::try_from(u8::try_from(*m).ok()?).ok()?, u8::try_from(*day).ok()?).ok()?;
+    let at = date.with_hms(u8::try_from(*h).ok()?, u8::try_from(*min).ok()?, u8::try_from(*sec).ok()?).ok()?;
+    Some(at.assume_utc().unix_timestamp() * 1000)
+}
+
+/// Datadog's two headers' values from `<API key>:<application key>`.
+fn datadog_auth(credential: &Value) -> Result<(Value, Value)> {
+    match credential.expose().split_once(':') {
+        Some((api, app)) if !api.is_empty() && !app.is_empty() && !app.contains(':') => Ok((Value::new(api), Value::new(app))),
+        _ => Err(Error::Link("a datadog credential is <API key>:<application key>".into())),
+    }
 }
 
 /// Basic auth for Twilio: the account and its Auth Token, or a main API key given as `SK…:secret`.
@@ -505,15 +1025,17 @@ impl Secrets {
     pub fn saas_rotators(&self, project: &str, caller: &Caller) -> Result<Vec<SaasRotator>> {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
-        let rows: Vec<(String, String, String, String, i64, String)> = self.db.read(|c| {
-            Ok::<_, Error>(c.query("SELECT id, name, vendor, target, created_at, created_by FROM saas_rotators WHERE project_id = ? ORDER BY name", [project], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+        // (id, name, vendor, target, credential_expires_at, created_at, created_by)
+        type Row = (String, String, String, String, Option<i64>, i64, String);
+        let rows: Vec<Row> = self.db.read(|c| {
+            Ok::<_, Error>(c.query("SELECT id, name, vendor, target, credential_expires_at, created_at, created_by FROM saas_rotators WHERE project_id = ? ORDER BY name", [project], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
             })?)
         })?;
         rows.into_iter()
-            .map(|(id, name, vendor, target, created_at, created_by)| {
+            .map(|(id, name, vendor, target, credential_expires_at, created_at, created_by)| {
                 let vendor = Vendor::parse(&vendor, serde_json::from_str(&target).unwrap_or(Json::Null))?;
-                Ok(SaasRotator { id, name, vendor, created_at, created_by })
+                Ok(SaasRotator { id, name, vendor, credential_expires_at, created_at, created_by })
             })
             .collect()
     }
@@ -524,14 +1046,11 @@ impl Secrets {
         if self.deliver.is_none() {
             return Err(Error::BadRequest("SaaS rotators aren't on this server".into()));
         }
-        if n.name.is_empty() || n.name.len() > 64 || !n.name.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c)) {
-            return Err(Error::BadRequest("a SaaS rotator's name is letters, digits, - and _ (64 at most)".into()));
-        }
+        check_name(&n.name)?;
         let vendor = Vendor::parse(&n.vendor, n.target)?.checked()?;
-        let credential = n.credential.expose().trim();
-        if credential.is_empty() || credential.len() > 4096 || credential.contains(['\r', '\n']) {
-            return Err(Error::BadRequest(format!("credential is the {} credential roll issues keys with, one line", vendor.name())));
-        }
+        let credential = check_credential(&vendor, &n.credential)?;
+        let now = self.db.now_ms()?;
+        check_expiry(n.credential_expires_at, now)?;
         let dek = self.project(project)?;
         // Asked of the vendor before anything is kept (outside any transaction).
         let deliver = self.deliver.clone().ok_or_else(|| Error::BadRequest("SaaS rotators aren't on this server".into()))?;
@@ -539,19 +1058,94 @@ impl Secrets {
         let id = names::new_id("sas", 16);
         let target = vendor.target().to_string();
         let sealed = dek.seal(&aad(project, &id, vendor.name(), &target), &Value::new(credential));
-        let now = self.db.now_ms()?;
-        let r = SaasRotator { id: id.clone(), name: n.name, vendor, created_at: now, created_by: caller.made_by().to_string() };
+        let r = SaasRotator { id: id.clone(), name: n.name, vendor, credential_expires_at: n.credential_expires_at, created_at: now, created_by: caller.made_by().to_string() };
         self.db.write(|c| {
             if c.query_row("SELECT 1 FROM saas_rotators WHERE project_id = ? AND name = ?", [project, &r.name], |_| Ok(())).optional()?.is_some() {
                 return Err(Error::Conflict("exists", format!("a SaaS rotator named {} exists", r.name)));
             }
             c.execute(
-                "INSERT INTO saas_rotators (id, project_id, name, vendor, target, credential, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                params![id, project, r.name, r.vendor.name(), target, sealed, now, r.created_by],
+                "INSERT INTO saas_rotators (id, project_id, name, vendor, target, credential, credential_expires_at, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![id, project, r.name, r.vendor.name(), target, sealed, r.credential_expires_at, now, r.created_by],
             )?;
             audit::record(c, self.keys()?, project, caller, "saas.add", None, None, &[], &format!("added SaaS rotator {} ({}, {})", r.name, r.vendor.name(), r.vendor.label()), now)
         })?;
         Ok(r)
+    }
+
+    fn saas_rotator(&self, project: &str, id: &str) -> Result<SaasRotator> {
+        type Row = (String, String, String, Option<i64>, i64, String);
+        let row: Option<Row> = self.db.read(|c| {
+            Ok::<_, Error>(
+                c.query_row("SELECT name, vendor, target, credential_expires_at, created_at, created_by FROM saas_rotators WHERE id = ? AND project_id = ?", [id, project], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+                })
+                .optional()?,
+            )
+        })?;
+        let (name, vendor, target, credential_expires_at, created_at, created_by) = row.ok_or_else(|| Error::NotFound(format!("no SaaS rotator {id}")))?;
+        let vendor = Vendor::parse(&vendor, serde_json::from_str(&target).unwrap_or(Json::Null))?;
+        Ok(SaasRotator { id: id.to_string(), name, vendor, credential_expires_at, created_at, created_by })
+    }
+
+    /// Change a registration in place: its name, when its credential ends, or the credential
+    /// itself, checked with the vendor first (outside the write) as registering checks one. Links
+    /// keep working: every issue and revocation from then on, retired keys' included, uses the new
+    /// credential. A credential the vendor refuses changes nothing.
+    pub fn update_saas_rotator(&self, project: &str, id: &str, ch: SaasRotatorChange, caller: &Caller) -> Result<SaasRotator> {
+        caller.need(Action::Admin, &Scope::project(project))?;
+        let deliver = self.deliver.clone().ok_or_else(|| Error::BadRequest("SaaS rotators aren't on this server".into()))?;
+        let dek = self.project(project)?;
+        let r = self.saas_rotator(project, id)?;
+        if let Some(n) = &ch.name {
+            check_name(n)?;
+        }
+        let now = self.db.now_ms()?;
+        if let Some(at) = ch.credential_expires_at {
+            check_expiry(at, now)?;
+        }
+        let target = r.vendor.target().to_string();
+        let sealed = match &ch.credential {
+            Some(credential) => {
+                let credential = check_credential(&r.vendor, credential)?;
+                probe(deliver.as_ref(), &r.vendor, &Value::new(credential)).map_err(|e| Error::BadRequest(format!("roll couldn't use this credential: {e}")))?;
+                Some(dek.seal(&aad(project, id, r.vendor.name(), &target), &Value::new(credential)))
+            }
+            None => None,
+        };
+        // A new credential's end isn't the old one's.
+        let expires_at = ch.credential_expires_at.or(sealed.as_ref().map(|_| None));
+        let mut changed: Vec<&str> = vec![];
+        self.db.write(|c| {
+            changed.clear();
+            // Sealed for this vendor and target: the row must still be the one checked.
+            let row: Option<(String, String, String)> = c.query_row("SELECT name, vendor, target FROM saas_rotators WHERE id = ? AND project_id = ?", [id, project], |x| Ok((x.get(0)?, x.get(1)?, x.get(2)?))).optional()?;
+            let (name, vendor, now_target) = row.ok_or_else(|| Error::NotFound(format!("no SaaS rotator {id}")))?;
+            if vendor != r.vendor.name() || now_target != target {
+                return Err(Error::Conflict("changed", format!("SaaS rotator {name} changed meanwhile: try again")));
+            }
+            if let Some(n) = ch.name.as_ref().filter(|n| **n != name) {
+                if c.query_row("SELECT 1 FROM saas_rotators WHERE project_id = ? AND name = ?", [project, n.as_str()], |_| Ok(())).optional()?.is_some() {
+                    return Err(Error::Conflict("exists", format!("a SaaS rotator named {n} exists")));
+                }
+                c.execute("UPDATE saas_rotators SET name = ? WHERE id = ?", [n.as_str(), id])?;
+                changed.push("name");
+            }
+            if let Some(sealed) = &sealed {
+                c.execute("UPDATE saas_rotators SET credential = ? WHERE id = ?", params![sealed, id])?;
+                changed.push("credential");
+            }
+            if let Some(at) = expires_at
+                && at != r.credential_expires_at
+            {
+                c.execute("UPDATE saas_rotators SET credential_expires_at = ? WHERE id = ?", params![at, id])?;
+                changed.push("credential expiry");
+            }
+            if !changed.is_empty() {
+                audit::record(c, self.keys()?, project, caller, "saas.update", None, None, &[], &format!("changed SaaS rotator {name}'s {} ({}, {})", changed.join(", "), r.vendor.name(), r.vendor.label()), now)?;
+            }
+            Ok(())
+        })?;
+        self.saas_rotator(project, id)
     }
 
     /// Delete a SaaS rotator no key links to and no retired key waits on.
@@ -564,6 +1158,18 @@ impl Secrets {
             crate::rotators::in_use(c, project, KIND, id, &name)?;
             c.execute("DELETE FROM saas_rotators WHERE id = ?", [id])?;
             audit::record(c, self.keys()?, project, caller, "saas.delete", None, None, &[], &format!("deleted SaaS rotator {name}"), now)
+        })
+    }
+
+    /// The project's SaaS rotators whose registered credential ends before `before` (unix ms), as
+    /// (name, vendor, when): health's `expiring` and `expired`.
+    pub(crate) fn saas_credentials_ending(&self, project: &str, before: i64) -> Result<Vec<(String, String, i64)>> {
+        self.db.read(|c| {
+            Ok(c.query(
+                "SELECT name, vendor, credential_expires_at FROM saas_rotators WHERE project_id = ? AND credential_expires_at IS NOT NULL AND credential_expires_at < ? ORDER BY credential_expires_at, name",
+                params![project, before],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
         })
     }
 
@@ -623,9 +1229,11 @@ mod tests {
         let guid = "11111111-2222-3333-4444-555555555555";
         let entra = Vendor::Entra { tenant: "contoso.onmicrosoft.com".into(), client_id: guid.into(), object_id: guid.into() };
         let token = (200, r#"{"access_token":"tok","token_type":"Bearer","expires_in":3599}"#);
-        let sent = run(vec![token, (200, r#"{"keyId":"k-1","secretText":"entra-secret"}"#), token, (404, "{}")], |d| {
+        let sent = run(vec![token, (200, r#"{"keyId":"k-1","secretText":"entra-secret","endDateTime":"2028-11-23T10:24:31.1234567Z"}"#), token, (404, "{}")], |d| {
             let i = issue(d, &entra, &cred, "label").unwrap();
             assert_eq!((i.parts["secret"].expose(), i.parts["id"].expose()), ("entra-secret", "k-1"));
+            // The end Microsoft gave the password: the key's expiry.
+            assert_eq!(i.expires_at, Some(1_858_587_871_000));
             revoke(d, &entra, &cred, &i.handle).unwrap();
         });
         assert_eq!(sent[0], format!("POST https://login.microsoftonline.com/contoso.onmicrosoft.com/oauth2/v2.0/token [] client_id={guid}&client_secret=c%26s%3D1&scope=https%3A%2F%2Fgraph.microsoft.com%2F.default&grant_type=client_credentials"));

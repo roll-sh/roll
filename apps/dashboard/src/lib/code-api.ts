@@ -415,6 +415,8 @@ export interface PreviewEnvironment {
   expires_at?: number;
   /** Earlier pushes still reachable (newest first). */
   earlier?: { service: string; head: string; url: string; own_data?: boolean }[];
+  /** Production's browser checks on the preview's head. */
+  browser_checks?: { service: string; name: string; state: "pending" | "passed" | "failed" }[];
   /** How much the first service's page changed since the screenshot at an earlier head. */
   visual_change?: { since: string; percent: number };
   /** How fast that page loaded (timed with its screenshot), and its load at the head before. */
@@ -422,7 +424,7 @@ export interface PreviewEnvironment {
   /** What went wrong while that page loaded (the page's own words). */
   page_health?: { errors: number; first_error: string | null; failed: number; first_failed: string | null };
   /** How much its page differs from the project's preview of the default branch. */
-  base_change?: { branch: string; percent: number; phone_percent: number | null; head?: string | null; load_ms?: number | null; lcp_ms?: number | null; a11y_added?: number | null; errors_added?: number | null; text?: { added: string[]; removed: string[]; added_n: number; removed_n: number } | null; links_added?: number | null; seo_added?: number | null; api?: { added: string[]; removed: string[]; added_n: number; removed_n: number } | null; api_breaking?: string[]; api_unread?: boolean; endpoints?: { path: string; ms: number; status: number; main_ms: number | null; slower: boolean }[] };
+  base_change?: { branch: string; percent: number; phone_percent: number | null; head?: string | null; load_ms?: number | null; lcp_ms?: number | null; a11y_added?: number | null; errors_added?: number | null; text?: { added: string[]; removed: string[]; added_n: number; removed_n: number } | null; links_added?: number | null; seo_added?: number | null; api?: { added: string[]; removed: string[]; added_n: number; removed_n: number } | null; api_breaking?: string[]; api_unread?: boolean; endpoints?: { path: string; ms: number; status: number; main_ms: number | null; slower: boolean; shape_changes?: { path: string; main: string; now: string | null }[] }[] };
   /** The project's other pages (`github.pages`): errors while each loaded, change since the push before, against the default branch. */
   /** The project's other pages: each one's checks too, and what of them is new against main's same page. */
   pages?: {

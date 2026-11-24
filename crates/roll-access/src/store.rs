@@ -935,6 +935,14 @@ impl Store {
         if !db.has_column("grants", "user_id")? {
             db.add_column("grants", "user_id", "TEXT")?;
         }
+        // Whose an alert is (a person's token's decoy, revocation or finding); none: the operator's.
+        if !db.has_column("access_alerts", "user_id")? {
+            db.add_column("access_alerts", "user_id", "TEXT")?;
+        }
+        db.ensure_schema("CREATE INDEX IF NOT EXISTS access_alerts_user ON access_alerts (user_id, seq);")?;
+        // MCP calls by tool (agent activity, failure jumps): only rows that name a tool, so the
+        // rest of the audit log's writes don't pay for it.
+        db.ensure_schema("CREATE INDEX IF NOT EXISTS audit_tool ON audit (tool, at) WHERE tool IS NOT NULL;")?;
         db.ensure_schema("CREATE INDEX IF NOT EXISTS grants_user ON grants (user_id);")?;
         // Why it was revoked, when roll did it (a leaked secret).
         if !db.has_column("grants", "decoy")? {
@@ -1846,50 +1854,55 @@ impl Store {
     /// Tools whose server errors jumped: at least [`JUMP_MIN_ERRORS`] 5xx answers in the last
     /// [`JUMP_WINDOW_MS`], a quarter or more of their calls there, and three times (or more) their
     /// rate over the day before. Each with its counts and its usual rate.
-    pub fn failure_jumps(&self, now: i64) -> Result<Vec<Value>> {
+    /// `skip`: tools not to look at (alerted on lately), before their day is read.
+    pub fn failure_jumps(&self, now: i64, skip: &dyn Fn(&str) -> bool) -> Result<Vec<Value>> {
         let recent_from = now - JUMP_WINDOW_MS;
         let errors = "SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END)";
-        self.db
-            .read(|c| {
-                let recent = c.query(
-                    &format!("SELECT tool, COUNT(*), {errors} FROM audit WHERE at >= ? AND tool IS NOT NULL GROUP BY tool HAVING {errors} >= ?"),
-                    params![recent_from, JUMP_MIN_ERRORS],
-                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)),
-                )?;
-                let mut out = Vec::new();
-                for (tool, calls, failed) in recent {
-                    let (before, before_failed): (i64, i64) = c.query_row(
-                        &format!("SELECT COUNT(*), COALESCE({errors}, 0) FROM audit WHERE tool = ? AND at >= ? AND at < ?"),
-                        params![tool, now - 86_400_000, recent_from],
-                        |r| Ok((r.get(0)?, r.get(1)?)),
-                    )?;
-                    let rate = failed as f64 / calls as f64;
-                    let usual = if before > 0 { before_failed as f64 / before as f64 } else { 0.0 };
-                    if rate >= 0.25 && rate >= 3.0 * usual {
-                        out.push(json!({ "tool": tool, "calls": calls, "failed": failed, "rate": rate, "usual": usual }));
-                    }
-                }
-                Ok::<_, code_sql::Error>(out)
-            })
-            .map_err(Into::into)
+        let recent = self.db.read(|c| {
+            c.query(
+                &format!("SELECT tool, COUNT(*), {errors} FROM audit WHERE at >= ? AND tool IS NOT NULL GROUP BY tool HAVING {errors} >= ?"),
+                params![recent_from, JUMP_MIN_ERRORS],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)),
+            )
+        })?;
+        // `skip` reads the store too: asked between reads, never inside one (a pool with one reader
+        // would wait on itself).
+        let mut out = Vec::new();
+        for (tool, calls, failed) in recent.into_iter().filter(|(t, ..)| !skip(t)) {
+            let (before, before_failed): (i64, i64) = self.db.read(|c| {
+                c.query_row(
+                    &format!("SELECT COUNT(*), COALESCE({errors}, 0) FROM audit WHERE tool = ? AND at >= ? AND at < ?"),
+                    params![tool, now - 86_400_000, recent_from],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+            })?;
+            let rate = failed as f64 / calls as f64;
+            let usual = if before > 0 { before_failed as f64 / before as f64 } else { 0.0 };
+            if rate >= 0.25 && rate >= 3.0 * usual {
+                out.push(json!({ "tool": tool, "calls": calls, "failed": failed, "rate": rate, "usual": usual }));
+            }
+        }
+        Ok(out)
     }
 
     /// Keep an alert for the operator's feed (`GET /v1/access/alerts`, MCP Events' `access.alert`):
     /// its place is the next after the newest, taken in the same write. Its place.
-    pub fn record_alert(&self, kind: &str, data: &Value) -> Result<i64> {
+    /// `user`: the person it's about (their token's), who sees it on their own feed too.
+    pub fn record_alert(&self, kind: &str, data: &Value, user: Option<&str>) -> Result<i64> {
         let (now, data) = (code_sql::now_ms(), data.to_string());
         self.db.write(|c| {
             let seq: i64 = c.query_row("SELECT COALESCE(MAX(seq), 0) + 1 FROM access_alerts", (), |r| r.get(0))?;
-            c.execute("INSERT INTO access_alerts (seq, at, kind, data) VALUES (?, ?, ?, ?)", params![seq, now, kind, data])?;
+            c.execute("INSERT INTO access_alerts (seq, at, kind, data, user_id) VALUES (?, ?, ?, ?, ?)", params![seq, now, kind, data, user])?;
             Ok::<_, Error>(seq)
         })
     }
 
     /// Alerts after `after`, oldest first (at most `limit`), each its data with `seq`, `at` and
     /// `kind`.
-    pub fn alerts_after(&self, after: i64, limit: usize) -> Result<Vec<Value>> {
+    /// `user`: only that person's (their own feed); `None`, every alert.
+    pub fn alerts_after(&self, after: i64, limit: usize, user: Option<&str>) -> Result<Vec<Value>> {
         let rows = self.db.read(|c| {
-            c.query("SELECT seq, at, kind, data FROM access_alerts WHERE seq > ? ORDER BY seq LIMIT ?", params![after, limit.clamp(1, 500) as i64], |r| {
+            c.query("SELECT seq, at, kind, data FROM access_alerts WHERE seq > ?1 AND (CAST(?2 AS TEXT) IS NULL OR user_id = ?2) ORDER BY seq LIMIT ?3", params![after, user, limit.clamp(1, 500) as i64], |r| {
                 Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
             })
         })?;
@@ -1905,9 +1918,45 @@ impl Store {
             .collect())
     }
 
-    /// The newest alert's place (0: none yet).
-    pub fn alerts_head(&self) -> Result<i64> {
-        Ok(self.db.read(|c| c.query_row("SELECT COALESCE(MAX(seq), 0) FROM access_alerts", (), |r| r.get(0)))?)
+    /// The newest alert's place (0: none yet); `user`: that person's newest (so a person's cursor
+    /// says nothing about how often others' alerts come).
+    pub fn alerts_head(&self, user: Option<&str>) -> Result<i64> {
+        Ok(self.db.read(|c| c.query_row("SELECT COALESCE(MAX(seq), 0) FROM access_alerts WHERE CAST(?1 AS TEXT) IS NULL OR user_id = ?1", params![user], |r| r.get(0)))?)
+    }
+
+    /// The newest `n` alerts (`user`: that person's), oldest first.
+    pub fn alerts_last(&self, n: usize, user: Option<&str>) -> Result<Vec<Value>> {
+        let from: i64 = self.db.read(|c| {
+            c.query_row(
+                "SELECT COALESCE(MIN(seq), 1) - 1 FROM (SELECT seq FROM access_alerts WHERE CAST(?1 AS TEXT) IS NULL OR user_id = ?1 ORDER BY seq DESC LIMIT ?2) newest",
+                params![user, n.clamp(1, 100) as i64],
+                |r| r.get(0),
+            )
+        })?;
+        self.alerts_after(from, n.clamp(1, 100), user)
+    }
+
+    /// Count one use of `key` this hour (`hour`: the hour's number), on any node: false once
+    /// `max` were counted this hour (one row per key, reset when the hour moves on).
+    pub fn bump_hourly(&self, key: &str, hour: i64, max: i64) -> Result<bool> {
+        self.db.write(|c| {
+            let had: Option<String> = c.query_row("SELECT value FROM settings WHERE key = ?", [key], |r| r.get(0)).optional()?;
+            let n = had.and_then(|v| v.split_once(':').filter(|(h, _)| h.parse::<i64>().ok() == Some(hour)).and_then(|(_, n)| n.parse::<i64>().ok())).unwrap_or(0);
+            if n >= max {
+                return Ok::<_, Error>(false);
+            }
+            c.execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", params![key, format!("{hour}:{}", n + 1)])?;
+            Ok(true)
+        })
+    }
+
+    /// Whether the alert `key` went out within `ms` (a read: no write when it did).
+    pub fn alerted_within(&self, key: &str, now: i64, ms: i64) -> Result<bool> {
+        Ok(self.setting_raw(key)?.and_then(|v| v.parse::<i64>().ok()).is_some_and(|at| now - at < ms))
+    }
+
+    fn setting_raw(&self, key: &str) -> Result<Option<String>> {
+        Ok(self.db.read(|c| c.query_row("SELECT value FROM settings WHERE key = ?", [key], |r| r.get(0)).optional())?)
     }
 
     /// Claim an alert named `key` if it hasn't gone out in `every_ms`: true for one caller on any

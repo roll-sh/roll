@@ -581,6 +581,10 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     if let Some(a) = &apps {
         a.apps.set_mailbox(std::sync::Arc::new(apps::AccountsMail(accounts.clone())));
         a.apps.set_visitors(std::sync::Arc::new(apps::AccountsVisitors(accounts.clone())));
+        // Visitors a provider vouches for (`access.sso`): roll-accounts signs them in as a
+        // visit only, and roll apps lets them in.
+        a.apps.set_visitor_sign_in(std::sync::Arc::new(apps::AccountsSignIn(accounts.clone())));
+        accounts.set_visit_gate(std::sync::Arc::new(apps::AppsVisitGate(a.apps.clone())));
     }
     // roll previews' team access asks the same accounts, and the workspace for who owns what.
     if let Some((_, engine)) = &preview_hosts {
@@ -658,6 +662,11 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     }
     // Someone disabled, no longer an admin or deleted: roll secrets' hook below, from the outbox.
     let offboarding = accounts.clone();
+    // A person who can't sign in any more is `member.deactivated` in each project's events feed.
+    {
+        let ws = workspace.clone();
+        offboarding.on_offboarded(Box::new(move |user| ws.person_deactivated(user).map(|_| ()).map_err(|e| e.to_string())));
+    }
     // SCIM's groups are the workspace's (docs/members-v1-1.md): a person's grant reads their
     // group roles in the same query as their memberships.
     accounts.set_directory(std::sync::Arc::new(workspace::Directory(workspace.clone())));
@@ -707,6 +716,8 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     // Previews' rules name roll secrets' keys only where their writer may reveal them.
     if let Some(e) = &previews_engine {
         let _ = e.reveal.set(std::sync::Arc::new(previews::SecretsReveal(secrets.clone())));
+        // roll's word for a preview's own services (`oidc_audiences`).
+        let _ = e.issuer.set(std::sync::Arc::new(previews::PreviewIssuer { secrets: secrets.clone(), workspace: workspace.clone() }));
     }
     // Keys a fork's preview never holds: its interception CA and the swap, roll secrets'.
     if let Some((rt, e)) = &preview_hosts {

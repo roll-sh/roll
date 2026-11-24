@@ -461,7 +461,7 @@ impl Provider {
             return Err(Error::Link(format!("creating {user}: {why}")));
         }
         let parts = BTreeMap::from([("user".to_string(), Value::new(user.clone())), ("account".to_string(), Value::new(o.account_field())), (secret_field(o.auth).to_string(), secret)]);
-        Ok(Issued { parts, handle: json!({ "user": user }) })
+        Ok(Issued { expires_at: None, parts, handle: json!({ "user": user }) })
     }
 }
 
@@ -534,7 +534,7 @@ impl LinkProvider for Provider {
             Auth::Password => TURNS.issue(&self.db, r#ref, &o.logins(), password, |u, pw| client.set_password(u, pw).map_err(why))?,
         };
         let parts = BTreeMap::from([("user".to_string(), Value::new(user)), ("account".to_string(), Value::new(o.account_field())), (secret_field(o.auth).to_string(), secret)]);
-        Ok(Issued { parts, handle })
+        Ok(Issued { expires_at: None, parts, handle })
     }
 
     fn issue_lease(&self, r#ref: &str, credential: &str, link: &Link, label: &str, ttl_minutes: u64, lease: &str) -> Result<Issued> {

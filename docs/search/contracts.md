@@ -1228,6 +1228,7 @@ pub struct ClusterConfig { pub name, pub dialect: Dialect /* Elasticsearch|OpenS
                           pub host_metrics: bool /* false: node stats report synthetic figures (shared nodes must not leak the host) */,
                           pub default_repository: Option<String> /* roll's default snapshot repository's name (api::snapshots::install_default_repository) */,
                           pub file_service_tokens: bool /* read <path.conf>/service_tokens; search-server sets it in dev mode or for clusters named in roll.security.service_token_file.clusters */,
+                          pub request_memory: Option<Arc<MemoryBudget>> /* the node's budget for what requests hold: the `request` breaker's parent (breaker::Breakers::node), its limit held to roll.breaker.request.max_limit (25% of this by default); search-server passes Node::request_memory */,
                           pub embedder: Option<Arc<dyn xpack::inference::local::Embedder>> /* the node's model pool: runs E5 for the `elasticsearch`
                                                           service; None: E5 answers as without ML nodes */ }
 #[async_trait] pub trait xpack::inference::local::Embedder: Send + Sync {
@@ -1510,8 +1511,10 @@ pub struct NodeConfig { pub node_name, pub node_id: Option<String> /* lease iden
                         pub lease_ttl: Duration /* 10 s */,
                         pub snapshot_leftover_grace: Duration /* 1 h: age before the post-wake sweep drops unrecorded snapshot pins */,
                         pub default_repository: Option<String> /* copied into ClusterConfig for clusters with object storage */,
-                        pub memory_budget: Option<u64> /* resident bytes of all loaded clusters; LRU idle clusters are unloaded past it,
-                                                          and a wake makes room first */,
+                        pub memory_budget: Option<u64> /* resident bytes of all loaded clusters plus what their requests hold
+                                                          (Node::request_memory); LRU idle clusters are unloaded past it, and a wake
+                                                          makes room first. Also the limit of Node::request_memory (None: half the
+                                                          host's memory) */,
                         pub unload_memory_only: bool /* false: with a StoreProvider whose data() is None, idle and budget unloads skip
                                                         clusters holding documents (they'd lose them; warned once); explicit unload still
                                                         unloads. true: tests / throwaway nodes */,

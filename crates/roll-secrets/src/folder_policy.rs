@@ -171,7 +171,8 @@ impl Secrets {
                 "INSERT INTO folder_policies (env_id, path, approvals, approvers, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?)",
                 params![env.id, path, approvals, json(&approvers), now, caller.principal],
             )?;
-            audit::record(c, self.keys()?, project, caller, "folder.policy", Some(slug), Some(&path), &[], &format!("changes to {path} need {approvals} approval{}", if approvals == 1 { "" } else { "s" }), now)?;
+            let event = crate::events::Event::new(crate::events::Kind::AccessChanged, serde_json::json!({ "what": "folder", "approvals": approvals }));
+            audit::record_event(c, self.keys()?, project, caller, "folder.policy", Some(slug), Some(&path), &[], &format!("changes to {path} need {approvals} approval{}", if approvals == 1 { "" } else { "s" }), now, event)?;
             Ok(FolderPolicy { path: path.clone(), approvals, approvers: approvers.clone(), created_at: now, created_by: caller.principal.clone() })
         })
     }
@@ -186,7 +187,8 @@ impl Secrets {
             if c.execute("DELETE FROM folder_policies WHERE env_id = ? AND path = ?", [&env.id, &path])? == 0 {
                 return Err(Error::NotFound(format!("{path} in {slug} has no change policy")));
             }
-            audit::record(c, self.keys()?, project, caller, "folder.policy", Some(slug), Some(&path), &[], &format!("changes to {path} no longer need approval"), now)
+            let event = crate::events::Event::new(crate::events::Kind::AccessChanged, serde_json::json!({ "what": "folder", "approvals": 0 }));
+            audit::record_event(c, self.keys()?, project, caller, "folder.policy", Some(slug), Some(&path), &[], &format!("changes to {path} no longer need approval"), now, event)
         })
     }
 }

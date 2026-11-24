@@ -58,6 +58,8 @@ GET /v1/previews/{id}/errors/count                                             t
 GET /v1/previews/{id}/files                                                    interactive (a shell, files, a forward): an admin's, live
 PUT /v1/previews/{id}/files                                                    interactive (a shell, files, a forward): an admin's, live
 GET /v1/previews/{id}/forward                                                  interactive (a shell, files, a forward): an admin's, live
+GET /v1/previews/{id}/data/{resource}                                          no tool yet: agents query a branch with postgres_query on its endpoint
+GET /v1/previews/{id}/swap                                                     interactive (a laptop's process standing in for a service): an admin's, live
 GET /v1/previews/{id}/notes/{note}/crop                                        the dashboard's (a note's image)
 GET /v1/previews/{id}/qr.png                                                   the dashboard's (a QR code)
 POST /v1/previews/{id}/regressions/accept                                      a person's call (approving, accepting, cutting off)
@@ -115,6 +117,7 @@ DELETE /v1/secrets/projects/{project}/cas/{id}                                 a
 PATCH /v1/secrets/projects/{project}/cas/{id}/acme                             an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/cas/{id}/acme/eab                          an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/cas/{id}/acme/eab/{eab}                  an outside integration's setup: an admin's, with its credentials
+PUT /v1/secrets/projects/{project}/cas/{id}/chain                              a person's call: installing a CA chain
 POST /v1/secrets/projects/{project}/cas/{id}/revoke                            an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/cas/{id}/sign                              an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/cloud-accounts                             an outside integration's setup: an admin's, with its credentials
@@ -162,6 +165,7 @@ PATCH /v1/secrets/projects/{project}/rotators/{id}                             a
 POST /v1/secrets/projects/{project}/rotators/{id}/rotate-secret                an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/saas                                       an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/saas/{id}                                an outside integration's setup: an admin's, with its credentials
+PATCH /v1/secrets/projects/{project}/saas/{id}                                 an outside integration's setup: an admin's, with its credentials (a credential, a person's call)
 POST /v1/secrets/projects/{project}/shares                                     answers or sets a credential
 POST /v1/secrets/projects/{project}/snowflake-accounts                         an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/snowflake-accounts/{id}                  an outside integration's setup: an admin's, with its credentials
@@ -205,9 +209,12 @@ POST /v1/tasks/keys/rotate                                                     a
 POST /v1/tasks/publish/{*destination}                                          the data plane (clients' own protocol)
 DELETE /v1/tasks/topics/{name}/endpoints                                       covered by tasks_set_topic (a topic's endpoints, whole)
 POST /v1/tasks/topics/{name}/endpoints                                         covered by tasks_set_topic (a topic's endpoints, whole)
+GET /v1/workspace/projects/{id}/events                                         an MCP Events feed (workspace.event), mapped by roll MCP's feed table
 PUT /v1/workspace/projects/{id}/homes/{product}/{ref}                          an admin's: where a product's resource lives for the project (#501)
 GET /v1/workspace/projects/{id}/invites                                        a person's call: invites are a signed-in person's (#501)
 DELETE /v1/workspace/projects/{id}/invites/{invite}                            a person's call: invites are a signed-in person's (#501)
 DELETE /v1/workspace/projects/{id}/members/me                                  a person's call: leaving a project is the person's own (#501)
 GET /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files            raw bytes, not JSON: apps_sandbox_exec reads and writes files (cat, a heredoc)
+GET /v1/apps/services/{id}/environments/{env}/checks/{check}/screenshot        a PNG, not JSON: the check's state says its error and when its failure was kept
+GET /v1/apps/services/{id}/environments/{env}/checks/{check}/trace             a Playwright trace archive, not JSON: for `npx playwright show-trace`
 PUT /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files            raw bytes, not JSON: apps_sandbox_exec reads and writes files (cat, a heredoc)

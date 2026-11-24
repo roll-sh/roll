@@ -724,7 +724,7 @@ impl LinkProvider for Postgres {
             ("role_user".to_string(), Value::new(role.clone())),
             ("role_password".to_string(), Value::new(password)),
         ]);
-        Ok(Issued { parts, handle: json!({ "role": role, "endpoint": endpoint }) })
+        Ok(Issued { expires_at: None, parts, handle: json!({ "role": role, "endpoint": endpoint }) })
     }
     /// A decoy role (docs/secrets.md, "Decoys"): named and passworded as `issue`'s roles are, in
     /// the root branch's connection string. roll Postgres keeps no password for it: the proxy
@@ -867,7 +867,7 @@ impl LinkProvider for Stream {
             ("password".to_string(), text(&k, "/secret")?),
             ("properties".to_string(), text(&k, "/connect/properties")?),
         ]);
-        Ok(Issued { parts, handle: json!({ "username": username.expose() }) })
+        Ok(Issued { expires_at: None, parts, handle: json!({ "username": username.expose() }) })
     }
     fn revoke(&self, r#ref: &str, h: &Json) -> roll_secrets::Result<()> {
         let Some(u) = h["username"].as_str() else { return Ok(()) };
@@ -908,7 +908,7 @@ impl LinkProvider for Bucket {
         let k = self.0.call(Method::POST, "/v1/storage/keys", Some(json!({ "name": label.chars().take(64).collect::<String>(), "permission": permission, "buckets": [r#ref] })))?;
         let id = text(&k, "/id")?;
         let parts = BTreeMap::from([("access_key_id".to_string(), id.clone()), ("secret_access_key".to_string(), text(&k, "/secret_access_key")?)]);
-        Ok(Issued { parts, handle: json!({ "id": id.expose() }) })
+        Ok(Issued { expires_at: None, parts, handle: json!({ "id": id.expose() }) })
     }
     fn revoke(&self, _: &str, h: &Json) -> roll_secrets::Result<()> {
         let Some(id) = h["id"].as_str() else { return Ok(()) };
@@ -1062,7 +1062,7 @@ impl LinkProvider for Queue {
             ("username".to_string(), Value::new(user.clone())),
             ("password".to_string(), Value::new(password)),
         ]);
-        Ok(Issued { parts, handle: json!({ "user": user }) })
+        Ok(Issued { expires_at: None, parts, handle: json!({ "user": user }) })
     }
     /// Deletes the user, which closes its connections and drops its permissions.
     fn revoke(&self, _: &str, h: &Json) -> roll_secrets::Result<()> {
@@ -1214,7 +1214,7 @@ impl LinkProvider for Search {
             let made = k["access"].as_str().map_or("a key without its access".to_string(), |a| format!("a {a} key on {}", k["indices"]));
             return Err(Error::Link(format!("roll search made {made}, not the {access} key asked for: refused (and deleted)")));
         }
-        Ok(Issued { parts: search_parts(&k)?, handle: json!({ "id": id.expose() }) })
+        Ok(Issued { expires_at: None, parts: search_parts(&k)?, handle: json!({ "id": id.expose() }) })
     }
     /// A field the cluster's flavor doesn't issue (an API key from OpenSearch, a user from
     /// Elasticsearch) is refused when the link is written. A build of roll search that doesn't
@@ -1325,9 +1325,9 @@ impl roll_secrets::reach::Holders for ReachHolders {
             }
             for env in apps.store.environments(&svc.id).map_err(|e| e.to_string())? {
                 let last_deployed_at = env.active.as_deref().and_then(|d| apps.store.deployment(d).ok()).map(|d| d.finished_at.unwrap_or(d.created_at));
-                // A variable goes back only when it is a `roll://` reference (its text, as roll
-                // secrets parses it); every other value is dropped here.
-                let references = apps.store.variables(&svc.id, &env.name).map_err(|e| e.to_string())?.into_values().filter(|v| matches!(roll_secrets::Reference::parse(v), Ok(Some(_)))).collect();
+                // Its `roll://` references, as roll apps keeps them beside the values (roll
+                // secrets' parser decided when each was set): no value is opened.
+                let references = apps.store.variable_references(&svc.id, &env.name).map_err(|e| e.to_string())?.into_values().collect();
                 out.push(roll_secrets::reach::ServiceUse { service: svc.id.clone(), name: svc.name.clone(), environment: env.name, last_deployed_at, references });
             }
         }
@@ -1727,9 +1727,10 @@ impl apps_control::integrations::SecretSource for ForApps {
     async fn issue(&self, project: &str, service: &str, env: &str, aud: &str, ttl: std::time::Duration) -> anyhow::Result<Option<String>> {
         let (secrets, ws) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting: try again in a moment"))?;
         let subject = roll_secrets::Subject::App { project: project.to_string(), service: service.to_string(), env: env.to_string() };
-        let aud = aud.to_string();
+        let (aud, service) = (aud.to_string(), service.to_string());
         tokio::task::spawn_blocking(move || {
-            let roll_secrets::Subject::App { project, service, .. } = &subject;
+            let project = subject.project().to_string();
+            let (project, service) = (&project, &service);
             let p = ws.get(roll_workspace::Scope::All, project).map_err(|e| anyhow::anyhow!("{e}"))?;
             if !ws.trusts(&p, roll_workspace::Kind::Service, service) {
                 anyhow::bail!("project {project} doesn't stand for {service}, so roll signs no token for it");
@@ -2006,8 +2007,21 @@ impl roll_secrets::Workloads for Workloads {
     /// Each token as roll-access answers it now: gone once revoked or expired, or (a person's own)
     /// once its person can't sign in.
     fn grants(&self) -> roll_secrets::Result<Vec<roll_auth::Grant>> {
+        self.live(|_| true)
+    }
+
+    /// Only tokens whose rules (and rules approved for a while) can name `project` are resolved.
+    fn grants_naming(&self, project: &str) -> roll_secrets::Result<Vec<roll_auth::Grant>> {
+        let names = |r: &roll_auth::scope::Rule| roll_secrets::access::rule_may_name(r, project);
+        Ok(self.live(|g| g.rules.0.iter().chain(g.temporary.iter().map(|t| &t.rule)).any(names))?.into_iter().filter(|g| g.scope.0.iter().any(names)).collect())
+    }
+}
+
+impl Workloads {
+    /// roll-access's tokens that aren't revoked and that `keep` keeps, each as its grant now.
+    fn live(&self, keep: impl Fn(&roll_access::store::Grant) -> bool) -> roll_secrets::Result<Vec<roll_auth::Grant>> {
         let list = self.0.store.list().map_err(|e| Error::Internal(format!("listing roll-access's tokens: {e}")))?;
-        Ok(list.into_iter().filter(|g| g.revoked_at.is_none()).filter_map(|g| roll_auth::Grants::grant(&*self.0, &g.id)).collect())
+        Ok(list.into_iter().filter(|g| g.revoked_at.is_none() && keep(g)).filter_map(|g| roll_auth::Grants::grant(&*self.0, &g.id)).collect())
     }
 }
 
@@ -2165,20 +2179,34 @@ impl code_control::SecretEnv for ForCode {
     }
 
     /// As roll secrets reads for `by` now (`values_as_maker`: the check and the read in one), what a
-    /// sandbox it copied into starts with. Never a protected environment or an unresolved reference.
-    async fn reveal_as(&self, by: &str, project: &str, environment: &str, consumer: &str) -> anyhow::Result<Vec<(String, String)>> {
+    /// sandbox it copied into starts with. Never a protected environment or an unresolved reference:
+    /// those keys come back as unresolved, for the sandbox to leave out the ones it copied. An
+    /// environment deleted but still in its recovery window leaves the answer open (a recovery
+    /// brings the values back); one purged is refused.
+    async fn reveal_as(&self, by: &str, project: &str, environment: &str, consumer: &str) -> anyhow::Result<code_control::Reread> {
         let (secrets, _) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting"))?;
         let (by, project, environment, consumer) = (by.to_string(), project.to_string(), environment.to_string(), consumer.to_string());
         tokio::task::spawn_blocking(move || {
             let (slug, path) = environment.split_once(':').unwrap_or((&environment, "/"));
-            let v = secrets.values_as_maker(&by, &project, slug, path, &consumer).map_err(|e| match e {
-                roll_secrets::Error::Forbidden(m) | roll_secrets::Error::NotFound(m) | roll_secrets::Error::MakerUnreachable(m) => code_control::Refused(m).into(),
-                e => anyhow::Error::from(e),
-            })?;
-            if let Some(p) = v.problems.first() {
-                anyhow::bail!("{} of {slug} didn't resolve ({}: {})", v.problems.len(), p.key, p.problem);
-            }
-            Ok(v.values.into_iter().map(|(k, v)| (k, v.expose().to_string())).collect())
+            let v = match secrets.values_as_maker(&by, &project, slug, path, &consumer) {
+                Ok(v) => v,
+                // Where it stands first: a deleted project fails the maker check too, and its
+                // recovery brings both back.
+                Err(e) => {
+                    return Err(match secrets.environment_standing(&project, slug)? {
+                        roll_secrets::deleted_envs::Standing::Kept { .. } => anyhow::anyhow!("{slug}, or its project, is deleted and kept for its recovery window: its values come back if it's recovered"),
+                        roll_secrets::deleted_envs::Standing::Gone => code_control::Refused(format!("{slug} no longer exists")).into(),
+                        roll_secrets::deleted_envs::Standing::Live => match e {
+                            roll_secrets::Error::MakerUnreachable(m) | roll_secrets::Error::Forbidden(m) | roll_secrets::Error::NotFound(m) => code_control::Refused(m).into(),
+                            e => anyhow::Error::from(e),
+                        },
+                    });
+                }
+            };
+            Ok(code_control::Reread {
+                values: v.values.into_iter().map(|(k, v)| (k, v.expose().to_string())).collect(),
+                unresolved: v.problems.into_iter().map(|p| (p.key, p.problem)).collect(),
+            })
         })
         .await?
     }
@@ -2268,7 +2296,7 @@ impl code_control::SecretEnv for ForCode {
         let maker: roll_secrets::Maker = serde_json::from_value(serde_json::Value::String(maker.to_string()))?;
         let (resource, reference) = (roll_secrets::ResourceRef::agent_machine(owner, machine), reference.to_string());
         tokio::task::spawn_blocking(move || {
-            let v = secrets.resolve_as(&resource, &reference, &maker).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let v = secrets.resolve_as(&resource, &reference, &maker).map_err(machine_refusal)?;
             Ok(code_control::CredentialValue(v.value.expose().to_string()))
         })
         .await?
@@ -2279,7 +2307,7 @@ impl code_control::SecretEnv for ForCode {
         let secrets = self.secrets().map_err(|e| anyhow::anyhow!("{e}"))?;
         let maker: roll_secrets::Maker = serde_json::from_value(serde_json::Value::String(maker.to_string()))?;
         let (resource, reference) = (roll_secrets::ResourceRef::agent_machine(owner, machine), reference.to_string());
-        tokio::task::spawn_blocking(move || secrets.digest_as(&resource, &reference, &maker).map_err(|e| anyhow::anyhow!("{e}"))).await?
+        tokio::task::spawn_blocking(move || secrets.digest_as(&resource, &reference, &maker).map_err(machine_refusal)).await?
     }
 
     /// That key for a review, as its maker may read it now (audited as `code:review:<owner>`).
@@ -2316,6 +2344,17 @@ fn bind_for_code(secrets: &Secrets, resource: &roll_secrets::ResourceRef, refere
         e => code_control::Error::Invalid(e.to_string()),
     })?;
     Ok(serde_json::to_value(&maker).map_err(|e| code_control::Error::Internal(e.into()))?.as_str().unwrap_or_default().to_string())
+}
+
+/// Why an agent machine's `roll://` key didn't read, as roll code's relay acts on it: a refusal
+/// (`code_control::Refused`: the daemon drops the key it held) only when roll secrets refused; a
+/// database, a KMS or a product that didn't answer, or too many reads, leave the daemon's key as
+/// it is until the relay asks again (so does "roll secrets is starting", before this is reached).
+fn machine_refusal(e: roll_secrets::Refusal) -> anyhow::Error {
+    match e {
+        roll_secrets::Refusal::Failed(e @ (Error::Db(_) | Error::Internal(_) | Error::Unavailable(_) | Error::TooMany(_) | Error::Link(_))) => e.into(),
+        e => code_control::Refused(e.to_string()).into(),
+    }
 }
 
 /// roll secrets' answer as roll code's API answers it (the same statuses).
@@ -2462,6 +2501,58 @@ mod tests {
         let os = super::search_parts(&json!({ "id": "roll-key-x", "username": "roll-key-x@logs", "password": "pw" })).unwrap();
         assert_eq!((os["user"].expose(), os["password"].expose()), ("roll-key-x@logs", "pw"));
         assert!(super::search_parts(&json!({ "id": "x" })).is_err());
+    }
+
+    /// A search link narrowed by `names` and `permission` refuses a key roll search made wider
+    /// than asked (another access, other indices, or one that doesn't say) and deletes it; the
+    /// key asked for is kept.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_search_link_refuses_and_deletes_a_wider_key() {
+        use super::LinkProvider as _;
+        use axum::routing::{delete, post};
+        let answer: Arc<Mutex<Json>> = Arc::new(Mutex::new(Json::Null));
+        let asked: Arc<Mutex<Vec<Json>>> = Default::default();
+        let deleted: Arc<Mutex<Vec<String>>> = Default::default();
+        let (a, q, d) = (answer.clone(), asked.clone(), deleted.clone());
+        let router = axum::Router::new()
+            .route(
+                "/v1/search/clusters/{id}/keys",
+                post(move |axum::Json(body): axum::Json<Json>| {
+                    q.lock().unwrap().push(body);
+                    let v = a.lock().unwrap().clone();
+                    async move { axum::Json(v) }
+                }),
+            )
+            .route(
+                "/v1/search/clusters/{id}/keys/{key}",
+                delete(move |axum::extract::Path((_, key)): axum::extract::Path<(String, String)>| {
+                    d.lock().unwrap().push(key);
+                    async { axum::http::StatusCode::NO_CONTENT }
+                }),
+            );
+        let api = super::Api::default();
+        api.set(router);
+        let search = super::Search(api, Default::default());
+        let link: super::Link = serde_json::from_value(json!({ "kind": "search", "ref": "srch_logs", "field": "api_key", "mode": "managed", "options": { "names": ["logs-app"], "permission": "read" } })).unwrap();
+        let issue = |made: Json| {
+            *answer.lock().unwrap() = made;
+            let (search, link) = (&search, &link);
+            tokio::task::block_in_place(|| search.issue("srch_logs", "api_key", link, "roll secrets ELASTICSEARCH_API_KEY", None).map(|i| i.handle))
+        };
+        for wider in [
+            json!({ "id": "k_data", "access": "data", "indices": ["logs-app"], "api_key": "x" }),
+            json!({ "id": "k_all", "access": "read", "indices": ["*"], "api_key": "x" }),
+            json!({ "id": "k_mute", "api_key": "x" }),
+        ] {
+            let e = issue(wider.clone()).expect_err("a wider key is refused");
+            assert!(e.to_string().contains("refused (and deleted)"), "{e}");
+            assert!(!e.to_string().contains("\"x\""), "no key in the error: {e}");
+        }
+        assert_eq!(*deleted.lock().unwrap(), ["k_data", "k_all", "k_mute"]);
+        assert_eq!(asked.lock().unwrap()[0]["access"], "read");
+        assert_eq!(asked.lock().unwrap()[0]["indices"], json!(["logs-app"]));
+        assert_eq!(issue(json!({ "id": "k_ok", "access": "read", "indices": ["logs-app"], "api_key": "x" })).unwrap(), json!({ "id": "k_ok" }));
+        assert_eq!(deleted.lock().unwrap().len(), 3, "the key asked for is kept");
     }
 
     /// roll queues in process (a broker with an AMQP listener, mq-control's routes behind the
@@ -3000,7 +3091,7 @@ mod tests {
         let opts = roll_secrets::Options { keyring: Ok(roll_secrets::Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: None, sts: None, outside: None, github: None, clouds: Some(clouds), workloads: None, directory: None, gateways: None };
         let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
         let apps = super::ForApps::default();
-        apps.set(secrets.clone(), ws);
+        apps.set(secrets.clone(), ws.clone());
         let ttl = std::time::Duration::from_secs(900);
         let token = apps.issue(&operators, "svc_web", "production", "sts.amazonaws.com", ttl).await.unwrap().expect("a token");
         use base64::Engine as _;
@@ -3020,6 +3111,17 @@ mod tests {
         let claims: Json = serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token.split('.').nth(1).unwrap()).unwrap()).unwrap();
         assert_eq!((claims["sub"].clone(), claims["environment"].clone()), (json!(format!("roll-apps:{operators}:svc_web:pv-vetted")), json!("pv-vetted")));
         assert!(apps.issue(&operators, "svc_web", "nowhere", "sts.amazonaws.com", ttl).await.is_err());
+        // A preview's own service (roll previews' `roll.toml` services, `PreviewIssuer`): a subject
+        // of its own in the preview's environment, for a repo the project stands for; a fork's
+        // preview gets none.
+        use roll_previews::ports::Issuer as _;
+        let previews = crate::previews::PreviewIssuer { secrets: secrets.clone(), workspace: ws };
+        let token = previews.issue(&operators, "acme/web", "pv_vetted", "web", "sts.amazonaws.com", ttl).await.unwrap().expect("a vetted preview's service's token");
+        let claims: Json = serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token.split('.').nth(1).unwrap()).unwrap()).unwrap();
+        assert_eq!((claims["sub"].clone(), claims["environment"].clone(), claims["preview"].clone()), (json!(format!("roll-previews:{operators}:pv_vetted:web")), json!("pv-vetted"), json!(true)));
+        let refused = previews.issue(&operators, "acme/web", "pv_fork", "web", "sts.amazonaws.com", ttl).await.unwrap_err();
+        assert!(refused.to_string().contains("untrusted preview"), "{refused}");
+        assert!(previews.issue(&adas, "acme/web", "pv_vetted", "web", "sts.amazonaws.com", ttl).await.is_err(), "a person's project stands only for its own repos");
     }
 
     /// A customer's key wraps a project's data key: Encrypt and Decrypt name the key and carry the

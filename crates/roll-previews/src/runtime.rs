@@ -173,6 +173,8 @@ const DOMAINS_FOR: Duration = Duration::from_secs(10);
 
 pub struct Runtime {
     cfg: RuntimeConfig,
+    /// Services swapped for a laptop's process (`roll preview swap`), by preview and service.
+    swaps: Mutex<HashMap<(String, String), crate::ports::Laptop>>,
     /// Projects' own preview domains' bases, and when they were read (every request is matched
     /// against them, so the store is read at most every [`DOMAINS_FOR`]).
     domains: Mutex<(Option<std::time::Instant>, Arc<std::collections::HashSet<String>>)>,
@@ -364,6 +366,7 @@ impl Runtime {
             intercepts: OnceLock::new(),
             intercepting: Mutex::new(HashMap::new()),
             requests: Mutex::new(HashMap::new()),
+            swaps: Mutex::new(HashMap::new()),
             client: Client::builder(TokioExecutor::new()).build_http(),
         })
     }
@@ -842,6 +845,16 @@ impl Runtime {
     /// they came in through roll ([`ThroughRoll`]: the link's cookie, or a team session), the
     /// preview is a change's, the rules have `feedback` on and roll's dashboard is known. The
     /// note is posted there, by whoever is signed in to roll, as them.
+    /// The project's flags a reviewer may set (`flags`).
+    fn flags_of(&self, preview: &str) -> Vec<crate::settings::FlagRule> {
+        self.store.row(preview).ok().and_then(|r| self.store.settings(&r.project_id).ok()).map(|s| s.flags).unwrap_or_default()
+    }
+
+    /// A reviewer's cookie as the services' header, by the project's rule.
+    fn flags_header(&self, preview: &str, cookie: &str) -> Option<String> {
+        crate::settings::flags_header(&self.flags_of(preview), cookie)
+    }
+
     fn feedback_target(&self, preview: &str, req: &Request) -> Option<String> {
         let web = self.cfg.dashboard.as_deref()?;
         req.extensions().get::<ThroughRoll>()?;
@@ -1061,6 +1074,11 @@ impl Runtime {
     }
 
     async fn proxy_to(self: &Arc<Self>, preview: &str, service: &str, mut req: Request, feedback: bool) -> Response {
+        // Swapped for a laptop's process: its requests go there, not to the container.
+        let laptop = self.swaps.lock().get(&(preview.to_string(), service.to_string())).cloned();
+        if let Some(laptop) = laptop {
+            return self.to_laptop(laptop, req, feedback).await;
+        }
         let mut retried = false;
         let addr = loop {
             let addr = match self.ready(preview, service, self.cfg.wait).await {
@@ -1122,6 +1140,66 @@ impl Runtime {
         }
         let resp = resp.map(Body::new);
         if feedback { add_feedback(resp) } else { resp }
+    }
+
+    /// Skew protection (`roll.toml` `skew_protection`; Vercel's): a request a page loaded before a
+    /// push makes, naming the push that served it, goes to that push's own service (`web@<rev>`,
+    /// as its own URL would, past the same gate), while it's kept and for a day after it was
+    /// replaced. A page load always gets the current push, and a cookie naming it, so a reload
+    /// moves a visitor on. The cookie is roll's: the app never sees it.
+    fn skew(&self, preview: &str, service: String, req: &mut Request) -> (String, Option<String>) {
+        let cookie = take_cookies(req, SKEW_COOKIE).pop();
+        if service.contains('@') {
+            return (service, None);
+        }
+        let page = req.method() == axum::http::Method::GET && is_page_load(req);
+        let asked = if page { None } else { skew_asked(req, cookie) };
+        if !page && asked.is_none() {
+            return (service, None);
+        }
+        match self.store.skew(preview, &service, asked.as_deref()) {
+            Ok(Some((current, _))) if page => (service, Some(current)),
+            Ok(Some((_, true))) => (format!("{service}@{}", asked.unwrap_or_default()), None),
+            _ => (service, None),
+        }
+    }
+
+    /// A request for a swapped service, over the laptop's HTTP/2 connection (`roll preview swap`):
+    /// as the container would get it (its gate passed, roll's own headers and cookies taken
+    /// out). A WebSocket isn't carried.
+    async fn to_laptop(&self, mut laptop: crate::ports::Laptop, mut req: Request, feedback: bool) -> Response {
+        if is_upgrade(req.headers()) {
+            return (StatusCode::NOT_IMPLEMENTED, "this service is swapped for a laptop's process, which takes no WebSocket from the preview").into_response();
+        }
+        let host = req.headers().get(header::HOST).cloned();
+        let authority = host.as_ref().and_then(|h| h.to_str().ok()).filter(|h| h.parse::<axum::http::uri::Authority>().is_ok()).unwrap_or("preview").to_string();
+        let pq = req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into());
+        let Ok(uri) = format!("http://{authority}{pq}").parse::<Uri>() else {
+            return (StatusCode::BAD_REQUEST, "bad request").into_response();
+        };
+        *req.uri_mut() = uri;
+        *req.version_mut() = axum::http::Version::HTTP_2;
+        strip_hop_by_hop(req.headers_mut(), false);
+        req.headers_mut().remove(header::HOST);
+        req.headers_mut().remove(BYPASS_HEADER);
+        if let Some(h) = host {
+            req.headers_mut().insert(HeaderName::from_static("x-forwarded-host"), h);
+        }
+        req.headers_mut().insert(HeaderName::from_static("x-forwarded-proto"), HeaderValue::from_str(&self.cfg.scheme).unwrap_or(HeaderValue::from_static("http")));
+        if feedback {
+            req.headers_mut().insert(header::ACCEPT_ENCODING, HeaderValue::from_static("identity"));
+        }
+        if laptop.ready().await.is_err() {
+            return (StatusCode::BAD_GATEWAY, "the laptop standing in for this service went").into_response();
+        }
+        match laptop.send_request(req).await {
+            Ok(r) => {
+                let mut r = r.map(Body::new);
+                strip_hop_by_hop(r.headers_mut(), false);
+                if feedback { add_feedback(r) } else { r }
+            }
+            Err(e) => (StatusCode::BAD_GATEWAY, format!("the laptop standing in for this service didn't answer: {e}")).into_response(),
+        }
     }
 
     #[cfg(test)]
@@ -1216,8 +1294,15 @@ fn add_feedback(resp: Response) -> Response {
 }
 
 /// The feedback button's script, sending notes to `target` (the preview in roll's dashboard).
-fn feedback_script(target: &str) -> Response {
-    let js = include_str!("feedback.js").replace("__ROLL_TARGET__", &serde_json::to_string(target).unwrap_or_else(|_| "\"\"".into()));
+/// The toolbar's cookie: a reviewer's own flags (`name:value|…`).
+const FLAGS_COOKIE: &str = "roll_flags";
+/// The header the services get them in (`name=value,…`).
+const FLAGS_HEADER: HeaderName = HeaderName::from_static("x-roll-flags");
+
+fn feedback_script(target: &str, flags: &[crate::settings::FlagRule]) -> Response {
+    let js = include_str!("feedback.js")
+        .replace("__ROLL_TARGET__", &serde_json::to_string(target).unwrap_or_else(|_| "\"\"".into()))
+        .replace("__ROLL_FLAGS__", &serde_json::to_string(flags).unwrap_or_else(|_| "[]".into()));
     ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8"), (header::CACHE_CONTROL, "private, max-age=300")], js).into_response()
 }
 
@@ -1227,7 +1312,82 @@ pub const SCREENSHOT_MAX: usize = 2 << 20;
 /// pages'), each at most this, and everything it writes: every PNG it can take, in base64, and
 /// those lines.
 const SHOT_REPORT_MAX: usize = 4 << 20;
-const SHOT_OUTPUT_MAX: usize = (crate::settings::MAX_PAGES + 2) * SCREENSHOT_MAX * 4 / 3 + 3 * SHOT_REPORT_MAX + crate::store::CROPS_PER_RUN * crate::store::CROP_MAX * 4 / 3 + (64 << 10);
+/// The line of what a run's pages served (`$OUT.bodies.json`: 8 MiB as base64, and JSON).
+const BODIES_LINE_MAX: usize = 12 << 20;
+
+/// What a run's pages served (`[{path, b64}]`), bounded again: at most 40 bodies and 8 MiB, each
+/// under a path. The pages are the preview's code: nothing of it is kept, only looked in.
+fn served_bodies(line: Option<&str>) -> Vec<(String, Vec<u8>)> {
+    use base64::Engine as _;
+    #[derive(serde::Deserialize)]
+    struct Served {
+        path: String,
+        b64: String,
+    }
+    let Some(line) = line.filter(|l| l.len() <= BODIES_LINE_MAX) else { return Vec::new() };
+    let all: Vec<Served> = serde_json::from_str(line.trim()).unwrap_or_default();
+    let mut total = 0;
+    let mut out = Vec::new();
+    for s in all.into_iter().take(40) {
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(s.b64) else { continue };
+        total += bytes.len();
+        if total > 8 << 20 {
+            break;
+        }
+        if s.path.starts_with('/') {
+            out.push((s.path.chars().filter(|c| !c.is_control() && *c != '`').take(200).collect(), bytes));
+        }
+    }
+    out
+}
+/// A story's PNG, at most (one clipped to what it renders).
+const STORY_MAX: usize = 256 << 10;
+/// A stories run's output: its report, and its PNGs as base64.
+const STORIES_OUTPUT_MAX: usize = crate::settings::MAX_STORIES * STORY_MAX * 4 / 3 + (64 << 10);
+/// A stories run, at most (its own 100 s, and the browser's start).
+const STORIES_FOR: Duration = Duration::from_secs(150);
+
+/// `docker run` for a browser run in container `name`'s network (its page at
+/// `127.0.0.1:<port>`), locked down: the page is the preview's code.
+fn shot_args(shot: &str, name: &str, port: u16) -> Vec<String> {
+    let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "-i".into(), "--name".into(), shot.to_string(), "--network".into(), format!("container:{name}")];
+    // Cleaned up with the runtime's own containers after a crash.
+    args.extend(["--label".into(), format!("{}=preview", code_preview::docker::LABEL)]);
+    if let Some(l) = code_preview::docker::home_label() {
+        args.extend(["--label".into(), l]);
+    }
+    // No capabilities, no new privileges, nothing written but /tmp.
+    args.extend(["--cap-drop".into(), "ALL".into(), "--security-opt".into(), "no-new-privileges".into(), "--read-only".into(), "--tmpfs".into(), "/tmp:rw,size=256m".into()]);
+    args.extend(code_preview::docker::limits(1024, 1.0));
+    args.extend(["--env".into(), format!("URL=http://127.0.0.1:{port}/"), "--env".into(), "OUT=/tmp/s.png".into(), "--env".into(), "HOME=/tmp".into()]);
+    args.extend(["--env".into(), format!("ROLL_SHOT_JS={SHOT_JS}")]);
+    args
+}
+
+/// What a stories run said (`[{id, errors}]`), and its PNGs a line each, in that order: each
+/// story once, by an id roll accepts, with a PNG of at most [`STORY_MAX`] bytes, at most
+/// [`crate::settings::MAX_STORIES`]. The run is the preview's code: nothing else is taken.
+fn story_shots<'a>(said: &str, pngs: impl Iterator<Item = &'a str>) -> Vec<crate::ports::PageShot> {
+    use base64::Engine as _;
+    #[derive(serde::Deserialize)]
+    struct Said {
+        id: String,
+        #[serde(default)]
+        errors: u32,
+    }
+    let said: Vec<Said> = serde_json::from_str(said.trim()).unwrap_or_default();
+    let mut out: Vec<crate::ports::PageShot> = Vec::new();
+    for (s, b64) in said.into_iter().zip(pngs).take(crate::settings::MAX_STORIES) {
+        let path = format!("story:{}", s.id);
+        let Ok(png) = base64::engine::general_purpose::STANDARD.decode(b64.trim()) else { continue };
+        if !crate::settings::story_id_ok(&s.id) || !png.starts_with(b"\x89PNG") || png.len() > STORY_MAX || out.iter().any(|p| p.path == path) {
+            continue;
+        }
+        out.push(crate::ports::PageShot { path, png, errors: s.errors.min(10_000), report: Default::default() });
+    }
+    out
+}
+const SHOT_OUTPUT_MAX: usize = BODIES_LINE_MAX + (crate::settings::MAX_PAGES + 2) * SCREENSHOT_MAX * 4 / 3 + 3 * SHOT_REPORT_MAX + crate::store::CROPS_PER_RUN * crate::store::CROP_MAX * 4 / 3 + (64 << 10);
 
 /// The header automation sends a project's bypass secret in (docs/previews.md, "Safety").
 pub const BYPASS_HEADER: &str = "x-roll-preview-bypass";
@@ -1499,6 +1659,49 @@ impl Apps for Runtime {
     /// A relay in the service's network namespace (`--network container:<it>`, as screenshots
     /// join it): busybox's `nc` to `127.0.0.1:<port>` there, its stdio the connection. Removed
     /// when the connection is dropped.
+    async fn can_swap(&self, _preview: &str, _service: &str) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+
+    async fn fetch(&self, preview: &str, service: &str, _url: &str, _access: Option<&str>, path: &str, head: bool) -> anyhow::Result<Option<crate::ports::Fetched>> {
+        use futures::StreamExt;
+        let me = self.me.upgrade().ok_or_else(|| anyhow::anyhow!("the preview runtime is stopping"))?;
+        let host = self.store.service_host(preview, service)?.ok_or_else(|| anyhow::anyhow!("no service {service}"))?;
+        let req = Request::builder()
+            .method(if head { axum::http::Method::HEAD } else { axum::http::Method::GET })
+            .uri(path)
+            .header(header::HOST, format!("{host}.{}", self.cfg.domain))
+            .header(header::ACCEPT, "text/html,application/json,text/plain;q=0.9,*/*;q=0.5")
+            .header(header::ACCEPT_ENCODING, "identity")
+            .body(Body::empty())?;
+        let resp = me.proxy(preview, service, req, false).await;
+        let status = resp.status().as_u16();
+        const SHOWN: [&str; 4] = ["content-type", "location", "cache-control", "content-length"];
+        let headers = SHOWN.iter().filter_map(|h| resp.headers().get(*h).and_then(|v| v.to_str().ok()).map(|v| (h.to_string(), v.chars().take(500).collect()))).collect();
+        let mut body = Vec::new();
+        let mut truncated = false;
+        let mut stream = resp.into_body().into_data_stream();
+        while let Some(chunk) = stream.next().await {
+            let Ok(chunk) = chunk else { break };
+            let room = crate::ports::FETCH_MAX - body.len();
+            if chunk.len() > room {
+                body.extend_from_slice(&chunk[..room]);
+                truncated = true;
+                break;
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(Some(crate::ports::Fetched { status, headers, body, truncated }))
+    }
+
+    fn swap(&self, preview: &str, service: &str, to: Option<crate::ports::Laptop>) {
+        let key = (preview.to_string(), service.to_string());
+        match to {
+            Some(l) => self.swaps.lock().insert(key, l),
+            None => self.swaps.lock().remove(&key),
+        };
+    }
+
     async fn forward(&self, preview: &str, service: &str, port: u16) -> anyhow::Result<Option<Box<dyn crate::ports::ShellIo>>> {
         let me = self.me.upgrade().ok_or_else(|| anyhow::anyhow!("the preview runtime is stopping"))?;
         let name = me.shell_container(preview, service).await?;
@@ -1685,17 +1888,8 @@ impl Runtime {
             code_preview::docker::docker(&["pull", "--quiet", &self.cfg.screenshot_image]).await?;
         }
         let shot = format!("roll-previews-shot-{}", name.trim_start_matches("roll-previews-"));
-        let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "-i".into(), "--name".into(), shot.clone(), "--network".into(), format!("container:{name}")];
-        // Cleaned up with the runtime's own containers after a crash.
-        args.extend(["--label".into(), format!("{}=preview", code_preview::docker::LABEL)]);
-        if let Some(l) = code_preview::docker::home_label() {
-            args.extend(["--label".into(), l]);
-        }
-        // The page is the preview's code: no capabilities, no new privileges, nothing written but /tmp.
-        args.extend(["--cap-drop".into(), "ALL".into(), "--security-opt".into(), "no-new-privileges".into(), "--read-only".into(), "--tmpfs".into(), "/tmp:rw,size=256m".into()]);
-        args.extend(code_preview::docker::limits(1024, 1.0));
-        args.extend(["--env".into(), format!("URL=http://127.0.0.1:{port}/"), "--env".into(), "OUT=/tmp/s.png".into(), "--env".into(), "HOME=/tmp".into()]);
-        args.extend(["--env".into(), format!("ROLL_SHOT_JS={SHOT_JS}"), "--env".into(), "AXE=/tmp/axe.js".into()]);
+        let mut args = shot_args(&shot, name, port);
+        args.extend(["--env".into(), "AXE=/tmp/axe.js".into()]);
         let pages: Vec<&String> = opts
             .pages
             .iter()
@@ -1743,7 +1937,8 @@ impl Runtime {
             format!(
                 "cat > /tmp/axe.js; {} >/dev/null 2>&1 && base64 -w0 /tmp/s.png && echo && (cat /tmp/s.png.json 2>/dev/null || true) && echo && (base64 -w0 /tmp/s.png.phone.png 2>/dev/null || true) \
                  && echo && (cat /tmp/s.png.pages.json 2>/dev/null || true) && for n in 0 1 2 3 4 5 6 7 8 9; do echo; base64 -w0 /tmp/s.png.$n.png 2>/dev/null || true; done \
-                 && echo && (cat /tmp/s.png.crops.json 2>/dev/null || true) && for n in 0 1 2 3 4 5 6 7 8 9; do echo; base64 -w0 /tmp/s.png.crop.$n.png 2>/dev/null || true; done",
+                 && echo && (cat /tmp/s.png.crops.json 2>/dev/null || true) && for n in 0 1 2 3 4 5 6 7 8 9; do echo; base64 -w0 /tmp/s.png.crop.$n.png 2>/dev/null || true; done \
+                 && echo && (cat /tmp/s.png.bodies.json 2>/dev/null || true)",
                 self.cfg.screenshot_command
             ),
         ]);
@@ -1761,7 +1956,14 @@ impl Runtime {
             let r = if opts.browsers.is_empty() { None } else { Some(self.other_browsers(name, port, opts).await) };
             (r, started.elapsed().as_millis() as u64)
         };
-        let (run, (more, browsers_ms)) = tokio::join!(tokio::time::timeout(within, docker_with_input(&argv, AXE_JS.as_bytes(), SHOT_OUTPUT_MAX)), browsers_run);
+        // Its Storybook's stories, in a run of their own alongside (`github.storybook`).
+        let stories_run = async {
+            match opts.stories.as_deref().filter(|p| crate::settings::page_path_ok(p) && p.ends_with('/')) {
+                Some(at) => Some(self.stories_in(name, port, at).await),
+                None => None,
+            }
+        };
+        let (run, (more, browsers_ms), stories) = tokio::join!(tokio::time::timeout(within, docker_with_input(&argv, AXE_JS.as_bytes(), SHOT_OUTPUT_MAX)), browsers_run, stories_run);
         let out = match run {
             Ok(Ok(out)) => out,
             // Its container outlives a docker CLI that gave up on it (too much output).
@@ -1788,6 +1990,8 @@ impl Runtime {
         // Ten page lines, then what the crops said and their PNGs.
         let page_lines: Vec<&str> = lines.by_ref().take(10).collect();
         let crops_said = report(lines.next());
+        let crop_lines: Vec<&str> = lines.by_ref().take(10).collect();
+        let bodies = served_bodies(lines.next());
         let asked: Vec<&str> = crops.iter().filter_map(|c| c["note"].as_str()).collect();
         let mut shot = crate::ports::Shot {
             png,
@@ -1799,7 +2003,8 @@ impl Runtime {
             api: crate::openapi::lines(speed),
             phone,
             pages: page_shots(&pages, said, page_lines.into_iter()),
-            crops: note_crops(&asked, crops_said, lines),
+            crops: note_crops(&asked, crops_said, crop_lines.into_iter()),
+            bodies,
         };
         // The other browsers', best effort: Chromium's screenshot stands.
         match more {
@@ -1807,9 +2012,49 @@ impl Runtime {
             Some(Err(e)) => tracing::warn!(container = name, error = %e, "previews: other browsers' screenshots"),
             None => {}
         }
+        // The stories, best effort too.
+        match stories {
+            Some(Ok(s)) => shot.pages.extend(s),
+            Some(Err(e)) => tracing::warn!(container = name, error = %e, "previews: Storybook's stories"),
+            None => {}
+        }
         // How long it took, and the other browsers' run within it.
         tracing::info!(container = name, pages = pages.len(), run_ms = chromium.elapsed().as_millis() as u64, browsers_ms, "previews: screenshot run");
         Ok(shot)
+    }
+
+    /// A service's Storybook stories (`github.storybook`; Chromatic's stories), served at `at`: a
+    /// run of their own in its network, locked down as the screenshot's is, each story a page
+    /// (`story:<id>`).
+    async fn stories_in(&self, name: &str, port: u16, at: &str) -> anyhow::Result<Vec<crate::ports::PageShot>> {
+        let shot = format!("roll-previews-story-{}", name.trim_start_matches("roll-previews-"));
+        let mut args = shot_args(&shot, name, port);
+        args.extend(["--env".into(), format!("STORIES={at}")]);
+        args.extend([
+            self.cfg.screenshot_image.clone(),
+            "sh".into(),
+            "-c".into(),
+            format!(
+                "{} >/dev/null 2>&1; (cat /tmp/s.png.stories.json 2>/dev/null || true) && for n in $(seq 0 {}); do echo; base64 -w0 /tmp/s.png.story.$n.png 2>/dev/null || true; done",
+                self.cfg.screenshot_command,
+                crate::settings::MAX_STORIES - 1
+            ),
+        ]);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = match tokio::time::timeout(STORIES_FOR, docker_with_input(&argv, Vec::new(), STORIES_OUTPUT_MAX)).await {
+            Ok(Ok(out)) => out,
+            Ok(Err(e)) => {
+                code_preview::docker::remove(&shot).await;
+                return Err(e);
+            }
+            Err(_) => {
+                code_preview::docker::remove(&shot).await;
+                anyhow::bail!("its stories took over {} s", STORIES_FOR.as_secs());
+            }
+        };
+        let mut lines = out.split('\n');
+        let said = lines.next().filter(|l| l.len() <= SHOT_REPORT_MAX).unwrap_or("");
+        Ok(story_shots(said, lines))
     }
 
     /// The first page in the other browsers `opts.browsers` names (`browser:<name>` pages), in the
@@ -2238,17 +2483,25 @@ async fn serve(rt: Arc<Runtime>, preview: String, service: String, mut req: Requ
     let target = rt.feedback_target(&preview, &req);
     // The link's token is roll's: the app never sees it, whichever way they came in.
     take_cookies(&mut req, &format!("roll_access_{preview}"));
+    // A reviewer's own flags (the toolbar's cookie): what the project's rule names, as a header,
+    // and only that (a header a visitor sent is dropped).
+    let chosen = take_cookies(&mut req, FLAGS_COOKIE).pop();
+    req.headers_mut().remove(FLAGS_HEADER);
+    if let Some(h) = chosen.and_then(|c| rt.flags_header(&preview, &c)).and_then(|h| HeaderValue::from_str(&h).ok()) {
+        req.headers_mut().insert(FLAGS_HEADER, h);
+    }
     if req.uri().path() == FEEDBACK_PATH
         && let Some(t) = &target
     {
-        return feedback_script(t);
+        return feedback_script(t, &rt.flags_of(&preview));
     }
     if req.uri().path() == FEEDBACK_NOTES_PATH && target.is_some() {
         let path = req.uri().query().unwrap_or("").split('&').filter_map(|kv| kv.split_once('=')).find(|(k, _)| *k == "path").map(|(_, v)| percent_decode(v)).unwrap_or_default();
         return rt.feedback_notes(&preview, &path).await;
     }
     let feedback = target.is_some() && req.method() == axum::http::Method::GET && is_page_load(&req);
-    match rt.cluster.get().cloned() {
+    let (service, skew_cookie) = rt.skew(&preview, service, &mut req);
+    let resp = match rt.cluster.get().cloned() {
         Some(cluster) => {
             let rt2 = rt.clone();
             cluster
@@ -2260,7 +2513,33 @@ async fn serve(rt: Arc<Runtime>, preview: String, service: String, mut req: Requ
                 .await
         }
         None => rt.proxy(&preview, &service, req, feedback).await,
+    };
+    with_skew_cookie(resp, skew_cookie, rt.cfg.scheme == "https")
+}
+
+/// The cookie a skew-protected service's page load gets: the push that answered it.
+const SKEW_COOKIE: &str = "__roll_dpl";
+
+/// The push a request that isn't a page load names: `x-deployment-id`, a `dpl` query parameter,
+/// or the cookie its page load got (the app's `ROLL_DEPLOYMENT`, as roll apps').
+fn skew_asked(req: &Request, cookie: Option<String>) -> Option<String> {
+    let ok = |s: &str| (!s.is_empty() && s.len() <= 100 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')).then(|| s.to_string());
+    if let Some(d) = req.headers().get("x-deployment-id").and_then(|v| v.to_str().ok()) {
+        return ok(d);
     }
+    if let Some(q) = req.uri().query()
+        && let Some((_, d)) = url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "dpl")
+    {
+        return ok(&d);
+    }
+    cookie.as_deref().and_then(ok)
+}
+
+fn with_skew_cookie(mut resp: Response, push: Option<String>, secure: bool) -> Response {
+    if let Some(v) = push.and_then(|p| HeaderValue::from_str(&format!("{SKEW_COOKIE}={p}; Path=/; HttpOnly; SameSite=Lax{}", if secure { "; Secure" } else { "" })).ok()) {
+        resp.headers_mut().append(header::SET_COOKIE, v);
+    }
+    resp
 }
 
 #[cfg(test)]
@@ -2437,6 +2716,261 @@ mod tests {
         assert!(gone.starts_with("HTTP/1.1 410") && gone.contains("http://web-pr1-shop.preview.test") && gone.contains("x-robots-tag: noindex"), "{gone}");
     }
 
+    /// A service swapped for a laptop's process (`roll preview swap`) gets its requests over the
+    /// laptop's HTTP/2 connection, roll's own cookie and secret taken out; given back, its
+    /// container answers again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_swapped_service_is_answered_by_the_laptop_until_given_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&code_sql::Target::Sqlite(dir.path().join("p.db")), Default::default()).unwrap());
+        let new = crate::store::New {
+            project_id: "prj_1".into(),
+            key: "pr1".into(),
+            project_name: "shop".into(),
+            repo: "acme/web".into(),
+            change_id: Some("chg_1".into()),
+            branch: None,
+            number: Some(1),
+            title: "t".into(),
+            github_pr: Some(1),
+            head: "cs_1".into(),
+            trusted: true,
+            state: crate::State::Ready,
+            expires_at: None,
+            created_by: "roll".into(),
+        };
+        let (row, _) = store.create(&new).unwrap();
+        store.want_service(&row.id, "web", "acme/web", "cs_1", 512, &|h| format!("http://{h}.preview.test")).unwrap();
+        let (secret, _) = store.rotate_bypass("prj_1").unwrap();
+        let rt = Runtime::new(RuntimeConfig { domain: "preview.test".into(), ..RuntimeConfig::default() }, Arc::new(code_preview::docker::Docker), Arc::new(NoTrees), store);
+        // The container.
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        rt.pretend_running(&row.id, "web", upstream.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = upstream.accept().await else { return };
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let _ = s.read(&mut buf).await;
+                    let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\ncontainer").await;
+                });
+            }
+        });
+        // The laptop: an HTTP/2 server on one end of a pipe, saying what it was asked.
+        let (ours, theirs) = tokio::io::duplex(64 << 10);
+        tokio::spawn(async move {
+            let svc = hyper::service::service_fn(|r: hyper::Request<hyper::body::Incoming>| async move {
+                let said = format!("laptop saw {} {} bypass={}", r.uri().path(), r.headers().get("x-forwarded-host").and_then(|h| h.to_str().ok()).unwrap_or(""), r.headers().contains_key(BYPASS_HEADER));
+                Ok::<_, std::convert::Infallible>(hyper::Response::new(axum::body::Body::from(said)))
+            });
+            let _ = hyper::server::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new()).serve_connection(hyper_util::rt::TokioIo::new(theirs), svc).await;
+        });
+        let (laptop, conn) = hyper::client::conn::http2::handshake(hyper_util::rt::TokioExecutor::new(), hyper_util::rt::TokioIo::new(ours)).await.unwrap();
+        tokio::spawn(conn);
+        let app = axum::Router::new().fallback(|| async { "api" }).layer(axum::middleware::from_fn_with_state(rt.clone(), route));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let get = || {
+            let req = format!("GET /cart HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nx-roll-preview-bypass: {secret}\r\nConnection: close\r\n\r\n");
+            async move {
+                let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+                s.write_all(req.as_bytes()).await.unwrap();
+                let mut out = String::new();
+                s.read_to_string(&mut out).await.unwrap();
+                out
+            }
+        };
+        assert!(get().await.ends_with("\r\n\r\ncontainer"));
+        rt.swap(&row.id, "web", Some(laptop));
+        let swapped = get().await;
+        assert!(swapped.ends_with("laptop saw /cart web-pr1-shop.preview.test bypass=false"), "{swapped}");
+        rt.swap(&row.id, "web", None);
+        assert!(get().await.ends_with("\r\n\r\ncontainer"), "given back");
+    }
+
+    /// A page read through roll's own way in (`GET …/fetch`): past the preview's gate (no token
+    /// asked), only the headers worth seeing, the body cut at its cap and said so.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_page_read_through_roll_passes_the_gate_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&code_sql::Target::Sqlite(dir.path().join("p.db")), Default::default()).unwrap());
+        let new = crate::store::New {
+            project_id: "prj_1".into(),
+            key: "pr1".into(),
+            project_name: "shop".into(),
+            repo: "acme/web".into(),
+            change_id: Some("chg_1".into()),
+            branch: None,
+            number: Some(1),
+            title: "t".into(),
+            github_pr: Some(1),
+            head: "cs_1".into(),
+            trusted: true,
+            state: crate::State::Ready,
+            expires_at: None,
+            created_by: "roll".into(),
+        };
+        let (row, _) = store.create(&new).unwrap();
+        store.want_service(&row.id, "web", "acme/web", "cs_1", 512, &|h| format!("http://{h}.preview.test")).unwrap();
+        let rt = Runtime::new(RuntimeConfig { domain: "preview.test".into(), ..RuntimeConfig::default() }, Arc::new(code_preview::docker::Docker), Arc::new(NoTrees), store);
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        rt.pretend_running(&row.id, "web", upstream.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = upstream.accept().await else { return };
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let n = s.read(&mut buf).await.unwrap_or(0);
+                    let big = String::from_utf8_lossy(&buf[..n]).contains("GET /big ");
+                    let body = if big { "x".repeat(crate::ports::FETCH_MAX + 10) } else { "<h1>Cart</h1>".to_string() };
+                    let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nSet-Cookie: s=1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
+                });
+            }
+        });
+        // Link access (the default): a visitor without the token gets a 401; roll reads the page.
+        let page = rt.fetch(&row.id, "web", "", None, "/cart", false).await.unwrap().unwrap();
+        assert_eq!((page.status, String::from_utf8_lossy(&page.body).to_string(), page.truncated), (200, "<h1>Cart</h1>".to_string(), false));
+        assert!(page.headers.iter().any(|(k, v)| k == "content-type" && v == "text/html") && !page.headers.iter().any(|(k, _)| k == "set-cookie"), "{:?}", page.headers);
+        let big = rt.fetch(&row.id, "web", "", None, "/big", false).await.unwrap().unwrap();
+        assert_eq!((big.body.len(), big.truncated), (crate::ports::FETCH_MAX, true));
+    }
+
+    /// A reviewer's flags (the toolbar's cookie) reach the service as `x-roll-flags`, only what
+    /// the project's rule names; the cookie never does, nor a header a visitor sent.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reviewers_flags_reach_the_service_as_a_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&code_sql::Target::Sqlite(dir.path().join("p.db")), Default::default()).unwrap());
+        let new = crate::store::New {
+            project_id: "prj_1".into(),
+            key: "pr1".into(),
+            project_name: "shop".into(),
+            repo: "acme/web".into(),
+            change_id: Some("chg_1".into()),
+            branch: None,
+            number: Some(1),
+            title: "t".into(),
+            github_pr: Some(1),
+            head: "cs_1".into(),
+            trusted: true,
+            state: crate::State::Ready,
+            expires_at: None,
+            created_by: "roll".into(),
+        };
+        let (row, _) = store.create(&new).unwrap();
+        store.want_service(&row.id, "web", "acme/web", "cs_1", 512, &|h| format!("http://{h}.preview.test")).unwrap();
+        let flags = vec![crate::settings::FlagRule { name: "new-checkout".into(), options: vec!["off".into(), "on".into()] }];
+        store.put_settings("prj_1", &crate::Settings { access: crate::settings::Access::Public, flags, ..Default::default() }).unwrap();
+        let rt = Runtime::new(RuntimeConfig { domain: "preview.test".into(), ..RuntimeConfig::default() }, Arc::new(code_preview::docker::Docker), Arc::new(NoTrees), store);
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        rt.pretend_running(&row.id, "web", upstream.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = upstream.accept().await else { return };
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let n = s.read(&mut buf).await.unwrap_or(0);
+                    let head = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+                    let flags = head.lines().find_map(|l| l.strip_prefix("x-roll-flags: ")).unwrap_or("none").trim().to_string();
+                    let body = format!("flags {flags} cookie {}", head.contains("roll_flags"));
+                    let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
+                });
+            }
+        });
+        let app = axum::Router::new().fallback(|| async { "api" }).layer(axum::middleware::from_fn_with_state(rt.clone(), route));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let get = |headers: &str| {
+            let req = format!("GET / HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\n{headers}Connection: close\r\n\r\n");
+            async move {
+                let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+                s.write_all(req.as_bytes()).await.unwrap();
+                let mut out = String::new();
+                s.read_to_string(&mut out).await.unwrap();
+                out
+            }
+        };
+        assert!(get("Cookie: a=1; roll_flags=new-checkout:on|theme:dark\r\n").await.ends_with("flags new-checkout=on cookie false"));
+        assert!(get("x-roll-flags: theme=dark\r\n").await.ends_with("flags none cookie false"), "a visitor's own header is dropped");
+    }
+
+    /// Skew protection: a request naming an earlier push (its header, `?dpl=`, or the cookie its
+    /// page load got) reaches that push while it's kept and for a day after it was replaced; a
+    /// page load gets the current push and the cookie; off, nothing moves; the app never sees
+    /// roll's cookie.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_request_naming_an_earlier_push_goes_to_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&code_sql::Target::Sqlite(dir.path().join("p.db")), Default::default()).unwrap());
+        let new = crate::store::New {
+            project_id: "prj_1".into(),
+            key: "pr1".into(),
+            project_name: "shop".into(),
+            repo: "acme/web".into(),
+            change_id: Some("chg_1".into()),
+            branch: None,
+            number: Some(1),
+            title: "t".into(),
+            github_pr: Some(1),
+            head: "cs_3".into(),
+            trusted: true,
+            state: crate::State::Ready,
+            expires_at: None,
+            created_by: "roll".into(),
+        };
+        let (row, _) = store.create(&new).unwrap();
+        let url = |h: &str| format!("http://{h}.preview.test");
+        store.want_service(&row.id, "web", "acme/web", "cs_3", 512, &url).unwrap();
+        store.pin(&row.id, "web", "cs_1", &url).unwrap();
+        store.pin(&row.id, "web", "cs_2", &url).unwrap();
+        store.age_pinned(&row.id, "web", "cs_1", crate::store::SKEW_WINDOW_MS + 1).unwrap();
+        store.set_service_skew(&row.id, "web", true).unwrap();
+        store.put_settings("prj_1", &crate::Settings { access: crate::settings::Access::Public, ..Default::default() }).unwrap();
+        let rt = Runtime::new(RuntimeConfig { domain: "preview.test".into(), ..RuntimeConfig::default() }, Arc::new(code_preview::docker::Docker), Arc::new(NoTrees), store);
+        // Each push's container says which it is, and whether roll's cookie reached it.
+        for (service, said) in [("web", "cs_3"), ("web@cs_2", "cs_2"), ("web@cs_1", "cs_1")] {
+            let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            rt.pretend_running(&row.id, service, upstream.local_addr().unwrap());
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut s, _)) = upstream.accept().await else { return };
+                    tokio::spawn(async move {
+                        let mut buf = vec![0u8; 4096];
+                        let n = s.read(&mut buf).await.unwrap_or(0);
+                        let body = format!("{said}{}", if String::from_utf8_lossy(&buf[..n]).contains("__roll_dpl") { " and the cookie" } else { "" });
+                        let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
+                    });
+                }
+            });
+        }
+        let app = axum::Router::new().fallback(|| async { "api" }).layer(axum::middleware::from_fn_with_state(rt.clone(), route));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let get = |path: &str, headers: &str| {
+            let req = format!("GET {path} HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\n{headers}Connection: close\r\n\r\n");
+            async move {
+                let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+                s.write_all(req.as_bytes()).await.unwrap();
+                let mut out = String::new();
+                s.read_to_string(&mut out).await.unwrap();
+                out
+            }
+        };
+        assert!(get("/api", "Cookie: a=1; __roll_dpl=cs_2\r\n").await.ends_with("\r\n\r\ncs_2"), "the cookie, kept from the app");
+        assert!(get("/api", "x-deployment-id: cs_2\r\n").await.ends_with("\r\n\r\ncs_2"));
+        assert!(get("/assets/app.js?dpl=cs_2", "").await.ends_with("\r\n\r\ncs_2"));
+        assert!(get("/api", "x-deployment-id: cs_1\r\n").await.ends_with("\r\n\r\ncs_3"), "replaced over a day ago");
+        assert!(get("/api", "x-deployment-id: cs_9\r\n").await.ends_with("\r\n\r\ncs_3"), "never kept");
+        let page = get("/", "Sec-Fetch-Dest: document\r\nCookie: __roll_dpl=cs_2\r\n").await;
+        assert!(page.ends_with("\r\n\r\ncs_3") && page.contains("set-cookie: __roll_dpl=cs_3; Path=/; HttpOnly"), "a page load: the current push, {page}");
+        rt.store.set_service_skew(&row.id, "web", false).unwrap();
+        let off = get("/api", "x-deployment-id: cs_2\r\n").await;
+        assert!(off.ends_with("\r\n\r\ncs_3") && !get("/", "Sec-Fetch-Dest: document\r\n").await.contains("__roll_dpl"), "off: {off}");
+    }
+
     /// The tag goes in as the page streams: before `</body>` even when a chunk splits it, at the
     /// end of a page without one, and once.
     #[test]
@@ -2453,6 +2987,20 @@ mod tests {
         assert_eq!(run(r#"[{"path":"/pricing","errors":2},{"path":"/pricing"}]"#, &[&png, &png]), [pricing()], "once");
         assert_eq!(run(r#"[{"path":"/pricing","errors":99999}]"#, &[&png]), [("/pricing".to_string(), 10_000)], "bounded");
         assert_eq!(run("not json", &[&png]), []);
+    }
+
+    /// A stories run's report is the preview's code's: each story once, by an id Storybook would
+    /// make, with a PNG within the cap; anything else is dropped.
+    #[test]
+    fn a_stories_runs_pages_are_stories_it_can_name_each_once() {
+        use base64::Engine as _;
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        let (png, junk, big) = (b64(b"\x89PNG\r\n\x1a\n..."), b64(b"not a png"), b64(&[b"\x89PNG".as_slice(), &vec![0u8; STORY_MAX]].concat()));
+        let said = r#"[{"id":"button--primary","errors":2},{"id":"../x--y"},{"id":"button--primary"},{"id":"card--empty"},{"id":"card--big"},{"id":"card--full"}]"#;
+        let pngs = [&png, &png, &png, &junk, &big, &png];
+        let got: Vec<(String, u32)> = story_shots(said, pngs.iter().map(|s| s.as_str())).into_iter().map(|p| (p.path, p.errors)).collect();
+        assert_eq!(got, [("story:button--primary".to_string(), 2), ("story:card--full".to_string(), 0)]);
+        assert!(story_shots("not json", [png.as_str()].into_iter()).is_empty());
     }
 
     #[test]

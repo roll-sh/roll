@@ -51,6 +51,7 @@ pub fn sandbox_json(s: &SandboxRow) -> Value {
         "last_active_at": s.last_active_at,
         "secrets_by": s.secrets_by,
         "secrets_dropped": s.secrets_dropped,
+        "secrets_unset": s.secrets_unset,
     })
 }
 

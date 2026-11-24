@@ -41,6 +41,7 @@ pub fn router(access: Arc<Access>) -> Router {
         .route("/v1/access/audit", get(audit))
         .route("/v1/access/activity", get(activity))
         .route("/v1/access/alerts", get(alerts))
+        .route("/v1/access/feedback", post(feedback))
         .route("/v1/access/audit/sinks", get(sinks).post(create_sink))
         .route("/v1/access/audit/sinks/{id}", axum::routing::delete(delete_sink))
         .route("/v1/access/audit/sinks/{id}/retry", post(retry_sink))
@@ -440,46 +441,48 @@ const CHECKUP_TIGHTEN: usize = 200;
 async fn checkup(State(a): S, ext: Extensions) -> crate::Result<Json<Value>> {
     // A person's checkup is of their own tokens.
     let who = who(&a, &ext)?;
-    let policy = a.policy_now();
-    let out = blocking(a, move |a| {
-        let now = code_sql::now_ms();
-        let counts = a.store.network_counts()?;
-        let machines: std::collections::HashMap<String, crate::store::ListedClient> = a.store.machine_clients()?.into_iter().map(|c| (c.grant_id.clone(), c)).collect();
-        let since = now - crate::checkup::UNUSED_DAYS * 86_400_000;
-        let mut checked = 0;
-        let mut out = Vec::new();
-        for g in a.store.list()?.into_iter().filter(|g| g.live(now) && visible(&who, g)) {
-            // Whether its proposal is narrower: for tokens used lately, a bounded number of them.
-            let used_lately = g.last_used_at.is_some_and(|t| t >= since);
-            let narrower = if used_lately && checked < CHECKUP_TIGHTEN {
-                checked += 1;
-                let used = a.store.used(&g.id, since)?;
-                !used.is_empty() && crate::tighten::tighten(&g.rules, &used) != g.rules
-            } else {
-                false
-            };
-            let machine = machines.get(&g.id).map(|c| crate::checkup::Machine { secret: !c.signs_with_key && c.trusts.is_none(), last_sign_in: c.last_sign_in });
-            let seen = crate::checkup::Seen { networks: counts.get(&g.id).copied().unwrap_or(0), narrower, machine };
-            let mut findings = crate::checkup::findings(&g, &seen, now);
-            // A person sees that their own waits elsewhere; deciding it isn't theirs.
-            if matches!(who, Who::User(_)) {
-                findings.retain(|f| f.kind != "pending");
-            } else if g.user.is_some() && !g.pending && g.approved_at.is_none() && g.live(now) && policy.needs_approval(&g.rules, g.ask_otherwise) {
-                // A person's token made before the policy asked: it works, unapproved, until an
-                // admin decides it.
-                findings.insert(0, crate::checkup::Finding { kind: "unapproved", why: "a person's token that reaches what the policy has an admin approve, made before the policy asked: approve it or deny it".into(), fix: "approve" });
-            }
-            if !findings.is_empty() {
-                out.push(json!({
-                    "grant": { "id": g.id, "name": g.name, "kind": g.kind, "last_used_at": g.last_used_at, "expires_at": g.expires_at, "created_at": g.created_at },
-                    "findings": findings,
-                }));
-            }
-        }
-        Ok(out)
-    })
-    .await?;
+    let out = blocking(a, move |a| checkup_rows(a, &who)).await?;
     Ok(Json(json!(out)))
+}
+
+/// The checkup's rows as `who` sees them (the route's, and the hourly scan's as the operator).
+pub(crate) fn checkup_rows(a: &Access, who: &Who) -> crate::Result<Vec<Value>> {
+    let policy = a.policy_now();
+    let now = code_sql::now_ms();
+    let counts = a.store.network_counts()?;
+    let machines: std::collections::HashMap<String, crate::store::ListedClient> = a.store.machine_clients()?.into_iter().map(|c| (c.grant_id.clone(), c)).collect();
+    let since = now - crate::checkup::UNUSED_DAYS * 86_400_000;
+    let mut checked = 0;
+    let mut out = Vec::new();
+    for g in a.store.list()?.into_iter().filter(|g| g.live(now) && visible(who, g)) {
+        // Whether its proposal is narrower: for tokens used lately, a bounded number of them.
+        let used_lately = g.last_used_at.is_some_and(|t| t >= since);
+        let narrower = if used_lately && checked < CHECKUP_TIGHTEN {
+            checked += 1;
+            let used = a.store.used(&g.id, since)?;
+            !used.is_empty() && crate::tighten::tighten(&g.rules, &used) != g.rules
+        } else {
+            false
+        };
+        let machine = machines.get(&g.id).map(|c| crate::checkup::Machine { secret: !c.signs_with_key && c.trusts.is_none(), last_sign_in: c.last_sign_in });
+        let seen = crate::checkup::Seen { networks: counts.get(&g.id).copied().unwrap_or(0), narrower, machine };
+        let mut findings = crate::checkup::findings(&g, &seen, now);
+        // A person sees that their own waits elsewhere; deciding it isn't theirs.
+        if matches!(who, Who::User(_)) {
+            findings.retain(|f| f.kind != "pending");
+        } else if g.user.is_some() && !g.pending && g.approved_at.is_none() && g.live(now) && policy.needs_approval(&g.rules, g.ask_otherwise) {
+            // A person's token made before the policy asked: it works, unapproved, until an
+            // admin decides it.
+            findings.insert(0, crate::checkup::Finding { kind: "unapproved", why: "a person's token that reaches what the policy has an admin approve, made before the policy asked: approve it or deny it".into(), fix: "approve" });
+        }
+        if !findings.is_empty() {
+            out.push(json!({
+                "grant": { "id": g.id, "name": g.name, "kind": g.kind, "last_used_at": g.last_used_at, "expires_at": g.expires_at, "created_at": g.created_at },
+                "findings": findings,
+            }));
+        }
+    }
+    Ok(out)
 }
 
 /// The networks a token has been used from (its /24 or /48), with when first and last.
@@ -1384,26 +1387,87 @@ async fn activity(State(a): S, ext: Extensions, Query(q): Query<ActivityQuery>) 
     Ok(Json(v))
 }
 
-/// `GET /v1/access/alerts?after=&limit=&latest=1`: what roll alerted the operator about (a tool
-/// whose server errors jumped), oldest first after a place; MCP Events' `access.alert`. About the
-/// whole deployment, so the operator's (and tokens the operator made) only: a person's own
-/// connections get none, at the newest place.
-async fn alerts(State(a): S, ext: Extensions, Query(q): Query<DecidedQuery>) -> crate::Result<Json<Value>> {
-    let theirs = who(&a, &ext)?.mine().is_some();
+/// `GET /v1/access/alerts?after=&limit=&latest=1`: what roll alerted about, oldest first after a
+/// place; MCP Events' `access.alert`. The operator (and tokens the operator made) see every alert; a
+/// person's own connections see the ones about their tokens (a decoy of theirs used, one revoked
+/// for a leak, the checkup's news about one).
+async fn alerts(State(a): S, ext: Extensions, Query(q): Query<AlertsQuery>) -> crate::Result<Json<Value>> {
+    let theirs = who(&a, &ext)?.mine().map(str::to_string);
+    // The newest few (the access page): oldest first, the caller's own.
+    if let Some(n) = q.last {
+        if q.after.is_some() || q.latest.is_some() || !(1..=100).contains(&n) {
+            return Err(Error::BadRequest("last is 1-100, alone".into()));
+        }
+        let events = blocking(a, move |a| a.store.alerts_last(n, theirs.as_deref())).await?;
+        let next = events.last().and_then(|e| e["seq"].as_i64()).unwrap_or(0);
+        return Ok(Json(json!({ "events": events, "next": next })));
+    }
     match (q.latest, q.after) {
         (Some(1), Some(_)) => return Err(Error::BadRequest("latest=1 starts from now: leave out after".into())),
         (Some(1), None) => {}
         (Some(_), _) => return Err(Error::BadRequest("latest is 1 or left out".into())),
-        (None, _) if theirs => {}
         (None, after) => {
             let (after, limit) = (after.unwrap_or(0), q.limit.unwrap_or(100));
-            let events = blocking(a, move |a| a.store.alerts_after(after, limit)).await?;
+            let events = blocking(a, move |a| a.store.alerts_after(after, limit, theirs.as_deref())).await?;
             let next = events.last().and_then(|e| e["seq"].as_i64()).unwrap_or(after);
             return Ok(Json(json!({ "events": events, "next": next })));
         }
     }
-    let next = blocking(a, |a| a.store.alerts_head()).await?;
+    // A person starts from their own newest: it says nothing about others' alerts.
+    let next = blocking(a, move |a| a.store.alerts_head(theirs.as_deref())).await?;
     Ok(Json(json!({ "events": [], "next": next })))
+}
+
+#[derive(Deserialize)]
+struct Feedback {
+    task: String,
+    actual: String,
+    expected: Option<String>,
+    tool: Option<String>,
+}
+
+/// Feedback a connection sends a step at a time (MCP's `access_send_feedback`, as Vercel's
+/// `submit_feedback`): what it was doing, what happened, what it expected. Kept on the alert feed
+/// (`agent_feedback`): the operator sees all of it, a person their own connections'. The words are
+/// a model's, maybe steered by what it read, so they're marked `outside` (lockdown withholds them),
+/// under the text fields lockdown knows (`title`: the task, `text`: what happened, `description`:
+/// what it expected). `tool` is only a tool's name (letters, digits, `_`), so no model text rides
+/// past lockdown in it. 20 an hour per token (the operator's connections share one count).
+async fn feedback(State(a): S, ext: Extensions, Json(f): Json<Feedback>) -> crate::Result<Json<Value>> {
+    let who = who(&a, &ext)?;
+    let (key, grant, name, user) = match &who {
+        Who::Operator => ("operator".to_string(), None, None, None),
+        Who::Grant(g) => (g.id.to_string(), Some(g.id.to_string()), Some(g.name.to_string()), g.user.as_deref().map(str::to_string)),
+        Who::User(u) => (u.user.clone(), None, Some(u.handle.clone()), Some(u.user.clone())),
+    };
+    let fits = |v: &str, max: usize| !v.trim().is_empty() && v.chars().count() <= max;
+    let a_name = |t: &str| (1..=64).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+    if !fits(&f.task, 500) || !fits(&f.actual, 2000) || f.expected.as_deref().is_some_and(|e| e.chars().count() > 2000) || f.tool.as_deref().is_some_and(|t| !a_name(t)) {
+        return Err(Error::BadRequest("task (1-500 characters) and actual (1-2,000) are required; expected up to 2,000; tool is a tool's name (a-z, 0-9, _; up to 64)".into()));
+    }
+    let data = json!({
+        // `connection`, not `name`: the token's name is a person's, and lockdown withholds an
+        // outside record's `name` (a fork's route and span names).
+        "grant": grant, "connection": name, "tool": f.tool, "title": f.task.trim(), "text": f.actual.trim(),
+        "description": f.expected.as_deref().map(str::trim), "outside": true,
+    });
+    let seq = blocking(a, move |a| {
+        if !a.store.bump_hourly(&format!("feedback:{key}"), code_sql::now_ms() / 3_600_000, 20)? {
+            return Err(Error::TooMany("20 feedback notes an hour per token: thanks, the operator has plenty to go on".into()));
+        }
+        a.store.record_alert("agent_feedback", &data, user.as_deref())
+    })
+    .await?;
+    Ok(Json(json!({ "kept": true, "seq": seq })))
+}
+
+#[derive(Deserialize)]
+struct AlertsQuery {
+    after: Option<i64>,
+    limit: Option<usize>,
+    latest: Option<u8>,
+    /// The newest this many (1-100), alone.
+    last: Option<usize>,
 }
 
 async fn audit(State(a): S, ext: Extensions, Query(mut q): Query<AuditQuery>) -> crate::Result<Response> {

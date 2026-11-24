@@ -151,6 +151,9 @@ type ErrorsRead = HashMap<(String, i64), (i64, Vec<crate::ErrorGroup>)>;
 /// How many errors a preview's services wrote by `(id, minutes)`: when read (ms), and how many.
 type ErrorCountsRead = HashMap<(String, i64), (i64, u64)>;
 
+/// Tokens of roll's issuer answered in the last minute: (preview, service, audience) → (when, token).
+type OidcIssued = HashMap<(String, String, String), (i64, crate::OidcToken)>;
+
 pub struct Engine {
     pub cfg: Config,
     pub store: Arc<Store>,
@@ -171,12 +174,18 @@ pub struct Engine {
     pub git_report: std::sync::OnceLock<Arc<dyn crate::ports::GitReport>>,
     /// The projects' log drains (roll apps'); unset, previews' runtime output goes to none.
     pub drains: std::sync::OnceLock<Arc<dyn crate::ports::Drains>>,
+    /// roll's OIDC issuer for the preview's own services (`oidc_audiences`), when it's here.
+    pub issuer: std::sync::OnceLock<Arc<dyn crate::ports::Issuer>>,
+    /// Tokens issued in the last minute, by preview, service and audience (as roll apps' are).
+    oidc_issued: Mutex<OidcIssued>,
     /// Forwarded connections open per preview, and when each (preview, person, service, port)
     /// was last said in the activity (`shell.rs`).
     forwards: Mutex<HashMap<String, Arc<std::sync::atomic::AtomicUsize>>>,
     forwards_said: Mutex<HashMap<(String, String, String, u16), i64>>,
     /// What ends a preview's forwarded connections when it goes, by preview.
     forwards_end: Mutex<HashMap<String, tokio::sync::watch::Sender<bool>>>,
+    /// Services swapped for a laptop's process (`roll preview swap`): by preview and service, who.
+    swaps: Mutex<HashMap<(String, String), String>>,
     /// Each preview's recent spans (`traces.rs`), and what reads an OTLP request into them
     /// (rolld: roll apps' reader); unset, the intake answers 404.
     traces: Mutex<traces::Kept>,
@@ -326,6 +335,8 @@ impl Engine {
             deploying_since: Mutex::new(HashMap::new()),
             passing: tokio::sync::Mutex::new(()),
             drains: std::sync::OnceLock::new(),
+            issuer: std::sync::OnceLock::new(),
+            oidc_issued: Mutex::new(HashMap::new()),
             draining: Mutex::new(HashMap::new()),
             shells: Mutex::new(HashMap::new()),
             traces: Mutex::new(HashMap::new()),
@@ -339,6 +350,7 @@ impl Engine {
             forwards: Mutex::new(HashMap::new()),
             forwards_said: Mutex::new(HashMap::new()),
             forwards_end: Mutex::new(HashMap::new()),
+            swaps: Mutex::new(HashMap::new()),
             started_stamp: drains::now_stamp(),
         })
     }
@@ -935,6 +947,10 @@ fn title_says(title: &str) -> Option<bool> {
 pub fn env_name(preview_id: &str) -> String {
     branch_name(preview_id)
 }
+
+/// How long after a head is up its browser checks are read for (roll apps runs them once as the
+/// deployment goes live).
+pub const BROWSER_CHECKS_FOR_MS: i64 = 5 * 60_000;
 
 fn short(rev: &str) -> &str {
     let rev = rev.strip_prefix("cs_").unwrap_or(rev);

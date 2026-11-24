@@ -171,6 +171,30 @@ impl Prices {
     pub fn cost(&self, u: &UsageAdd) -> f64 {
         u.cpu_seconds * self.cpu_second + u.gb_seconds * self.gb_second + u.egress_bytes as f64 / 1e9 * self.egress_gb + u.build_seconds / 60.0 * self.build_minute + u.stored_gb_hours / HOURS_A_MONTH * self.stored_gb_month
     }
+
+    /// What a service run as `run` costs at most (`POST /v1/apps/quote`; Supabase's cost
+    /// confirmation, PlanetScale's): instances are metered on what they use, so an instance's
+    /// hour at its whole CPU and memory (its sidecars' too) is the ceiling. Nothing runs while it
+    /// sleeps; `min_instances` always do (a cron service's only while a run is on).
+    pub fn quote(&self, run: &crate::model::Run) -> serde_json::Value {
+        let round = |x: f64| (x * 10_000.0).round() / 10_000.0;
+        let cpu = run.cpu + run.sidecars.iter().map(|s| s.cpu).sum::<f64>();
+        let mb = run.memory_mb as f64 + run.sidecars.iter().map(|s| s.memory_mb as f64).sum::<f64>();
+        let hour = cpu * 3600.0 * self.cpu_second + mb * 1_048_576.0 / 1e9 * 3600.0 * self.gb_second;
+        let floor = if run.kind == crate::model::RunType::Cron { 0 } else { run.min_instances };
+        // Floors by the clock: the highest of them, for the hours it holds (as a ceiling).
+        let busiest = run.schedule_scale.iter().map(|w| w.min_instances).max().unwrap_or(0).max(floor);
+        serde_json::json!({
+            "instance_hour": round(hour),
+            "idle_hour": round(hour * floor as f64),
+            "scheduled_idle_hour": (busiest > floor).then(|| round(hour * busiest as f64)),
+            "month": { "least": round(hour * floor as f64 * HOURS_A_MONTH), "most": round(hour * run.max_instances as f64 * HOURS_A_MONTH) },
+            "scales_to_zero": floor == 0,
+            "currency": "USD",
+            "note": "a ceiling: instances are metered on the CPU and memory they use, at most these; egress, builds and stored logs are extra (prices)",
+            "prices": self,
+        })
+    }
 }
 
 #[cfg(test)]

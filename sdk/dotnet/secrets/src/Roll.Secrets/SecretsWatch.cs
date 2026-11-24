@@ -47,6 +47,8 @@ public sealed class SecretsWatch : IDisposable, IAsyncDisposable
     private readonly CancellationTokenSource _stop = new();
     private readonly object _lock = new();
     private readonly Task _loop;
+    // The last answer and its stamps, so a change reads only what changed (`…/values/delta`).
+    private readonly Held _held = new();
     private volatile bool _stopped;
     private int _callbackThread = -1;
 
@@ -100,7 +102,7 @@ public sealed class SecretsWatch : IDisposable, IAsyncDisposable
                 }
                 if (changed)
                 {
-                    var v = await _client.LoadAsync(_env, _o, ct).ConfigureAwait(false); // a failure is retried on the next round
+                    var v = await _client.LoadAsync(_env, _o, _held, ct).ConfigureAwait(false); // a failure is retried on the next round
                     string? before = last;
                     last = now;
                     if (v.Problems.Count > 0)

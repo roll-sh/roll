@@ -16,6 +16,7 @@
 //!   confined tokens and roll secrets ends what needs the role. Their next request is decided
 //!   without the role anyway: grants are read live.
 
+use crate::events::{self, Kind as Event};
 use crate::members::{Actor, MemberEvent, envs_json, envs_of, random, record};
 use crate::{Error, Result, Scope, Workspace, owner_of};
 use code_sql::{Conn, OptionalExtension, params};
@@ -449,6 +450,10 @@ impl Workspace {
             let g = load(c, id)?.ok_or_else(|| no_group(id))?;
             let lost = held_by(c, id)?;
             record_loss(c, now, "group.delete", "", actor, Loss { group: id, lost: &lost, who: Who::Everyone }, json!({ "name": g.name, "source": g.source }))?;
+            for m in &lost {
+                let data = json!({ "group": id, "name": g.name, "role": m.role, "environments": m.environments, "reason": "group_deleted" });
+                events::emit(c, &m.project, now, Event::GroupRoleRemoved, id, &actor.id, data)?;
+            }
             for t in ["group_roles", "group_members", "groups"] {
                 let col = if t == "groups" { "id" } else { "group_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
@@ -546,6 +551,8 @@ impl Workspace {
                 }
                 c.execute("INSERT INTO group_roles (project_id, group_id, role, environments, added_by, added_at) VALUES (?, ?, ?, ?, ?, ?)", params![project, group, role.as_str(), envs_json(&environments), actor.id, now])?;
                 record(c, now, "group.role", project, actor, None, json!({ "group": group, "new": { "role": role, "environments": environments } }))?;
+                let data = json!({ "group": group, "name": g.name, "from": null, "to": { "role": role, "environments": environments } });
+                events::emit(c, project, now, Event::GroupRoleSet, group, &actor.id, data)?;
             } else {
                 c.execute("UPDATE group_roles SET role = ?, environments = ? WHERE project_id = ? AND group_id = ?", params![role.as_str(), envs_json(&environments), project, group])?;
                 // Only a change that narrows the role can have cut someone off: theirs is checked again.
@@ -553,6 +560,10 @@ impl Workspace {
                 let was = roles::Membership { project: project.into(), role: r, environments: e.clone() };
                 let is = roles::Membership { project: project.into(), role, environments: environments.clone() };
                 let detail = json!({ "old": { "role": r, "environments": e }, "new": { "role": role, "environments": environments } });
+                if (r, &e) != (role, &environments) {
+                    let data = json!({ "group": group, "name": g.name, "from": detail["old"].clone(), "to": detail["new"].clone() });
+                    events::emit(c, project, now, Event::GroupRoleSet, group, &actor.id, data)?;
+                }
                 if still_covered(std::slice::from_ref(&is), &was) {
                     record(c, now, "group.role", project, actor, None, json!({ "group": group, "old": detail["old"].clone(), "new": detail["new"].clone() }))?;
                 } else {
@@ -578,6 +589,9 @@ impl Workspace {
             }
             let was = roles::Membership { project: project.into(), role, environments: envs.clone() };
             record_loss(c, now, "group.role_remove", project, actor, Loss { group, lost: std::slice::from_ref(&was), who: Who::Everyone }, json!({ "role": role, "environments": envs }))?;
+            let name: Option<String> = c.query_row("SELECT name FROM groups WHERE id = ?", [group], |r| r.get(0)).optional()?;
+            let data = json!({ "group": group, "name": name, "role": role, "environments": envs, "reason": "removed" });
+            events::emit(c, project, now, Event::GroupRoleRemoved, group, &actor.id, data)?;
             c.execute("DELETE FROM group_roles WHERE project_id = ? AND group_id = ?", [project, group])?;
             Ok(())
         })?;
@@ -944,18 +958,20 @@ pub(crate) fn put_aside(c: &Conn<'_>, project: &str) -> Result<()> {
 /// A restored project's group roles, back as they were, except those of groups deleted since:
 /// dropped, each in the audit log.
 pub(crate) fn bring_back(c: &Conn<'_>, project: &str, now: i64) -> Result<Vec<String>> {
-    let dropped: Vec<String> = c.query("SELECT d.group_id FROM deleted_group_roles d WHERE d.project_id = ? AND NOT EXISTS (SELECT 1 FROM groups g WHERE g.id = d.group_id) ORDER BY d.group_id", [project], |r| r.get(0))?;
+    let dropped: Vec<(String, String, Option<String>)> = c.query("SELECT d.group_id, d.role, d.environments FROM deleted_group_roles d WHERE d.project_id = ? AND NOT EXISTS (SELECT 1 FROM groups g WHERE g.id = d.group_id) ORDER BY d.group_id", [project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
     c.execute(
         "INSERT INTO group_roles (project_id, group_id, role, environments, added_by, added_at) SELECT d.project_id, d.group_id, d.role, d.environments, d.added_by, d.added_at FROM deleted_group_roles d \
          WHERE d.project_id = ? AND EXISTS (SELECT 1 FROM groups g WHERE g.id = d.group_id) ON CONFLICT (group_id, project_id) DO NOTHING",
         [project],
     )?;
     let roll = Actor { id: "roll:restore".into(), ..Default::default() };
-    for g in &dropped {
+    for (g, role, envs) in &dropped {
         record(c, now, "group.role_remove", project, &roll, None, json!({ "group": g, "why": "the group was deleted while the project was" }))?;
+        let data = json!({ "group": g, "name": null, "role": group_role(role), "environments": envs_of(envs.clone()), "reason": "group_deleted" });
+        events::emit(c, project, now, Event::GroupRoleRemoved, g, &roll.id, data)?;
     }
     c.execute("DELETE FROM deleted_group_roles WHERE project_id = ?", [project])?;
-    Ok(dropped)
+    Ok(dropped.into_iter().map(|(g, ..)| g).collect())
 }
 
 pub(crate) fn forget_aside(c: &Conn<'_>, project: &str) -> Result<()> {

@@ -121,6 +121,17 @@ CREATE TABLE IF NOT EXISTS build_cache_artifacts (
     used_at INTEGER NOT NULL,
     PRIMARY KEY (project, ns, hash)
 ) WITHOUT ROWID;
+-- Provenance on roll's builds (`provenance`): each project's signing key (PKCS#8, sealed) and its
+-- public key, made once; each built image's signed statement (a DSSE envelope).
+CREATE TABLE IF NOT EXISTS provenance_keys (
+    project TEXT PRIMARY KEY,
+    sealed TEXT NOT NULL,
+    public TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS image_provenance (
+    image TEXT PRIMARY KEY,
+    envelope TEXT NOT NULL
+);
 -- Next.js's cache across an environment's instances (`next_cache`): their token, sealed, found by
 -- its hash on each request; its entries, each one's bytes in object storage under a key of its
 -- own upload's (`scope` is a deployment's, or `data` for Next's fetch cache, which every
@@ -155,6 +166,7 @@ CREATE TABLE IF NOT EXISTS next_cache_tags (
     PRIMARY KEY (service, env, tag)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS next_cache_tags_at ON next_cache_tags (service, env, at);
+
 -- Where an environment's instances read roll's OIDC tokens: its URL's token, sealed.
 CREATE TABLE IF NOT EXISTS oidc_access (
     service TEXT NOT NULL,
@@ -726,6 +738,8 @@ pub struct EnvRow {
     /// Who last set its egress (a person, their token's user, the operator): a closed
     /// environment's placeholders are made by them. None: set before it was kept.
     pub egress_by: Option<String>,
+    /// Its own redirects (`crate::site_rules::EnvRedirects`'s text), any kind of service.
+    pub redirects: Option<String>,
     /// Its deploys are reported to the Git host (commit statuses, GitHub Deployments); false:
     /// someone else reports them (roll previews for its `pv-` environments).
     pub report: bool,
@@ -858,13 +872,19 @@ const SERVICE_COLS: &str = "id, project, name, source, build, run, created_at";
 const NOT_DELETED: &str = "service NOT IN (SELECT id FROM services WHERE deleted_at IS NOT NULL)";
 
 /// The conflict a taken name is: a live service's, or a deleted one's until it goes for good.
+/// What the `reference` column keeps for a variable's value: its text when roll secrets' parser
+/// takes it for a `roll://` reference, else ''.
+fn reference_of(value: &str) -> String {
+    if matches!(roll_secrets_ref::Reference::parse(value), Ok(Some(_))) { value.to_string() } else { String::new() }
+}
+
 fn name_taken(name: &str, deleted: Option<i64>) -> String {
     match deleted {
         None => format!("a service named {name} exists in this project"),
         Some(_) => format!("a deleted service named {name} holds the name: restore it, or delete it again to delete it for good"),
     }
 }
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split, freeze, mirror, pause_schedule, snippets, log_retention_days, approvals, badge, egress_by";
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split, freeze, mirror, pause_schedule, snippets, log_retention_days, approvals, badge, egress_by, redirects";
 /// A deployment [`Store::prune_deployments`] pruned, with its image when nothing else names it.
 pub struct Pruned {
     pub id: String,
@@ -955,6 +975,7 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         approvals: r.get::<_, Option<i64>>(37)?.unwrap_or(0) as u32,
         badge: r.get::<_, i64>(38)? != 0,
         egress_by: r.get(39)?,
+        redirects: r.get(40)?,
     })
 }
 
@@ -1055,6 +1076,8 @@ impl Store {
         db.add_column("env_access", "bypass_hash", "TEXT")?;
         db.add_column("env_access", "signed_in", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("env_access", "password_hash", "TEXT")?;
+        // Visitors a provider signs in (`access.sso`), as JSON.
+        db.add_column("env_access", "sso", "TEXT")?;
         // Bytes answered a minute (what egress is billed by), for Metrics.
         db.add_column("metrics", "egress_bytes", "INTEGER NOT NULL DEFAULT 0")?;
         // Requests past every instance's concurrency at max_instances a minute (saturation).
@@ -1091,6 +1114,10 @@ impl Store {
         db.add_column("environments", "follow_tag", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("environments", "tag_seen", "TEXT")?;
         db.add_column("variables", "write_only", "INTEGER NOT NULL DEFAULT 0")?;
+        // A variable's text when it's a `roll://` reference, '' when it isn't, kept beside its
+        // sealed value (a reference isn't secret): roll secrets' reach reads it without opening
+        // anything. NULL: set before this column, marked by `mark_references` when the store opens.
+        db.add_column("variables", "reference", "TEXT")?;
         db.add_column("services", "build_cache", "TEXT")?;
         db.add_column("environments", "pages", "TEXT")?;
         db.add_column("environments", "redeploy_on_secrets", "INTEGER NOT NULL DEFAULT 0")?;
@@ -1126,6 +1153,7 @@ impl Store {
         db.add_column("visit_tickets", "login", "TEXT")?;
         db.add_column("visit_sessions", "login", "TEXT")?;
         db.add_column("environments", "routes", "TEXT")?;
+        db.add_column("environments", "redirects", "TEXT")?;
         db.add_column("environments", "checks", "TEXT")?;
         db.add_column("environments", "heartbeats", "TEXT")?;
         db.add_column("environments", "split", "TEXT")?;
@@ -1150,7 +1178,9 @@ impl Store {
         // NULL: NDJSON, as every drain was before formats.
         db.add_column("log_drains", "format", "TEXT")?;
         db.add_column("domains", "redirect_to", "TEXT")?;
-        Ok(Store { db, sealer })
+        let store = Store { db, sealer };
+        store.mark_references()?;
+        Ok(store)
     }
 
     pub fn now(&self) -> Result<i64> {
@@ -1235,6 +1265,52 @@ impl Store {
     }
 
     /// Remove a service and everything that belongs to it (deployments' history included).
+    /// A service moved to project `to` in one write: what it used so far stays project `from`'s
+    /// (as when it's deleted: the month's spend never moves with it), and a service of `to`
+    /// already named `name` is a conflict.
+    pub fn move_service(&self, id: &str, from: &str, to: &str, name: &str) -> Result<()> {
+        self.db.write(|c| {
+            let taken = c.query_row("SELECT 1 FROM services WHERE project = ? AND name = ? AND id <> ?", params![to, name, id], |_| Ok(())).optional()?.is_some();
+            if taken {
+                return Err(Error::Conflict(format!("that project already has a service named {name}")));
+            }
+            // Links either way, again here: one made since they were read holds it too.
+            let linked = c.query_row("SELECT 1 FROM links WHERE service = ? OR (kind = 'service' AND ref = ?) LIMIT 1", params![id, id], |_| Ok(())).optional()?.is_some();
+            if linked {
+                return Err(Error::Conflict("a link was made to or from it meanwhile: remove it first".into()));
+            }
+            // Its previews' hostnames are the project's preview domain's: theirs in the target too.
+            let clash = c
+                .query_row("SELECT h.label FROM preview_hosts h WHERE h.service = ? AND EXISTS (SELECT 1 FROM preview_hosts o WHERE o.project = ? AND o.label = h.label)", params![id, to], |r| r.get::<_, String>(0))
+                .optional()?;
+            if let Some(label) = clash {
+                return Err(Error::Conflict(format!("its preview hostname {label} is taken in that project")));
+            }
+            c.execute("UPDATE preview_hosts SET project = ? WHERE service = ?", params![to, id])?;
+            c.execute(
+                "INSERT INTO project_usage (project, hour, cpu_seconds, gb_seconds, requests, egress_bytes, build_seconds, stored_gb_hours) \
+                 SELECT ?, u.hour, SUM(u.cpu_seconds), SUM(u.gb_seconds), SUM(u.requests), SUM(u.egress_bytes), SUM(u.build_seconds), SUM(u.stored_gb_hours) \
+                 FROM usage u WHERE u.service = ? GROUP BY u.hour \
+                 ON CONFLICT (project, hour) DO UPDATE SET cpu_seconds = project_usage.cpu_seconds + excluded.cpu_seconds, \
+                 gb_seconds = project_usage.gb_seconds + excluded.gb_seconds, requests = project_usage.requests + excluded.requests, \
+                 egress_bytes = project_usage.egress_bytes + excluded.egress_bytes, build_seconds = project_usage.build_seconds + excluded.build_seconds, \
+                 stored_gb_hours = project_usage.stored_gb_hours + excluded.stored_gb_hours",
+                params![from, id],
+            )?;
+            c.execute("DELETE FROM usage WHERE service = ?", [id])?;
+            match c.execute("UPDATE services SET project = ? WHERE id = ? AND project = ?", params![to, id, from])? {
+                0 => Err(Error::Conflict("the service moved meanwhile".into())),
+                _ => Ok(()),
+            }
+        })
+    }
+
+    /// An environment's hold lifted only while it's `deployment`'s (one roll set, nobody's since).
+    pub fn clear_hold_if(&self, service: &str, env: &str, deployment: &str) -> Result<()> {
+        self.db.execute("UPDATE environments SET held_by = NULL WHERE service = ? AND name = ? AND held_by = ?", params![service, env, deployment])?;
+        Ok(())
+    }
+
     pub fn delete_service(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
             // What it used stays its project's (spend limits, the month's bill): deleting a
@@ -1377,7 +1453,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }
@@ -2204,6 +2280,34 @@ impl Store {
         rows.into_iter().map(|(n, s)| Ok((n.clone(), self.sealer.open(&Self::aad(service, env, &n), &s)?))).collect()
     }
 
+    /// `env`'s variables that are `roll://` references, and what each names, by name: read from
+    /// beside the values, never opening one (roll secrets' reach).
+    pub fn variable_references(&self, service: &str, env: &str) -> Result<BTreeMap<String, String>> {
+        Ok(self.db.query("SELECT name, reference FROM variables WHERE service = ? AND env = ? AND reference IS NOT NULL AND reference <> ''", [service, env], |r| Ok((r.get(0)?, r.get(1)?)))?.into_iter().collect())
+    }
+
+    /// Marks the variables set before references were kept beside them: each is opened once, here.
+    /// Runs at every open and finds nothing after the first. One that doesn't open stays unmarked
+    /// (its deploys fail on it anyway); a value changed meanwhile keeps the mark its write made.
+    fn mark_references(&self) -> Result<()> {
+        let rows: Vec<(String, String, String, String)> =
+            self.db.query("SELECT service, env, name, sealed FROM variables WHERE reference IS NULL", (), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+        for (service, env, name, sealed) in rows {
+            let reference = match self.sealer.open(&Self::aad(&service, &env, &name), &sealed) {
+                Ok(v) => reference_of(&v),
+                Err(e) => {
+                    tracing::warn!(%service, %env, variable = %name, "marking a variable's reference: {e}");
+                    continue;
+                }
+            };
+            self.db.execute(
+                "UPDATE variables SET reference = ? WHERE service = ? AND env = ? AND name = ? AND sealed = ? AND reference IS NULL",
+                params![reference, service, env, name, sealed],
+            )?;
+        }
+        Ok(())
+    }
+
     /// The names of `env`'s sealed variables: set and run with, never shown again.
     pub fn sealed_variables(&self, service: &str, env: &str) -> Result<BTreeSet<String>> {
         Ok(self.db.query("SELECT name FROM variables WHERE service = ? AND env = ? AND write_only = 1", [service, env], |r| r.get(0))?.into_iter().collect())
@@ -2218,7 +2322,7 @@ impl Store {
     /// [`Store::change_variables`], with the makers of `set`'s references into other environments
     /// (a variable set without one has none from now on).
     pub fn change_variables_made(&self, service: &str, env: &str, set: &BTreeMap<String, String>, unset: &[String], seal: &BTreeSet<String>, makers: &BTreeMap<String, String>) -> Result<()> {
-        let sealed: Vec<(String, String)> = set.iter().map(|(k, v)| (k.clone(), self.sealer.seal(&Self::aad(service, env, k), v))).collect();
+        let sealed: Vec<(String, String, String)> = set.iter().map(|(k, v)| (k.clone(), self.sealer.seal(&Self::aad(service, env, k), v), reference_of(v))).collect();
         self.db.write(|c| {
             for n in unset.iter().chain(set.keys()) {
                 c.execute("DELETE FROM variable_makers WHERE service = ? AND env = ? AND name = ?", [service, env, n])?;
@@ -2229,10 +2333,10 @@ impl Store {
             for n in unset {
                 c.execute("DELETE FROM variables WHERE service = ? AND env = ? AND name = ?", [service, env, n])?;
             }
-            for (n, s) in &sealed {
+            for (n, s, r) in &sealed {
                 c.execute(
-                    "INSERT INTO variables (service, env, name, sealed) VALUES (?, ?, ?, ?) ON CONFLICT (service, env, name) DO UPDATE SET sealed = excluded.sealed",
-                    [service, env, n, s],
+                    "INSERT INTO variables (service, env, name, sealed, reference) VALUES (?, ?, ?, ?, ?) ON CONFLICT (service, env, name) DO UPDATE SET sealed = excluded.sealed, reference = excluded.reference",
+                    [service, env, n, s, r],
                 )?;
             }
             for n in seal {
@@ -2952,6 +3056,37 @@ impl Store {
         })
     }
 
+    /// A project's provenance key (PKCS#8 DER) and its public key (PEM), made the first time.
+    pub fn provenance_key(&self, project: &str) -> Result<(Vec<u8>, String)> {
+        let what = format!("provenance:{project}");
+        let (der, public) = crate::provenance::new_key();
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let sealed = self.sealer.seal(&what, &b64.encode(&der));
+        self.db.execute("INSERT INTO provenance_keys (project, sealed, public) VALUES (?, ?, ?) ON CONFLICT (project) DO NOTHING", params![project, sealed, public])?;
+        let (kept, public): (String, String) = self.db.query_row("SELECT sealed, public FROM provenance_keys WHERE project = ?", [project], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let der = b64.decode(self.sealer.open(&what, &kept)?).map_err(|e| Error::Internal(e.to_string()))?;
+        Ok((der, public))
+    }
+
+    /// A project's provenance public key, if it has one yet.
+    pub fn provenance_public(&self, project: &str) -> Result<Option<String>> {
+        Ok(self.db.query_row("SELECT public FROM provenance_keys WHERE project = ?", [project], |r| r.get(0)).optional()?)
+    }
+
+    pub fn put_provenance(&self, image: &str, envelope: &str) -> Result<()> {
+        self.db.execute("INSERT INTO image_provenance (image, envelope) VALUES (?, ?) ON CONFLICT (image) DO UPDATE SET envelope = excluded.envelope", params![image, envelope])?;
+        Ok(())
+    }
+
+    pub fn drop_provenance(&self, image: &str) -> Result<()> {
+        self.db.execute("DELETE FROM image_provenance WHERE image = ?", [image])?;
+        Ok(())
+    }
+
+    pub fn provenance(&self, image: &str) -> Result<Option<String>> {
+        Ok(self.db.query_row("SELECT envelope FROM image_provenance WHERE image = ?", [image], |r| r.get(0)).optional()?)
+    }
+
     /// An environment's Next.js cache token, made the first time it's asked for.
     pub fn next_cache_token(&self, service: &str, env: &str) -> Result<String> {
         let token = roll_auth::credentials::new_secret("rlr_");
@@ -3009,16 +3144,21 @@ impl Store {
         if expires_at.is_some_and(|x| x <= now) {
             return Ok(None);
         }
-        let tags: Vec<String> = serde_json::from_str(&tags).unwrap_or_default();
-        // Only what was invalidated after it was written can make it old.
-        let marks: Vec<(String, Option<i64>, Option<i64>)> = self.db.query(
-            "SELECT tag, stale_at, expired_at FROM next_cache_tags WHERE service = ? AND env = ? AND at > ? LIMIT 10000",
-            params![service, env, written_at],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )?;
+        let mut tags: Vec<String> = serde_json::from_str(&tags).unwrap_or_default();
+        tags.extend(soft.iter().cloned());
+        tags.sort();
+        tags.dedup();
+        // Its own tags' marks only (at most 256, by the primary key): only what was invalidated
+        // after it was written can make it old.
+        let mut marks: Vec<(String, Option<i64>, Option<i64>, i64)> = Vec::new();
+        for chunk in tags.chunks(100) {
+            let sql = format!("SELECT tag, stale_at, expired_at, at FROM next_cache_tags WHERE service = ? AND env = ? AND tag IN ({})", vec!["?"; chunk.len()].join(", "));
+            let args: Vec<String> = [service.to_string(), env.to_string()].into_iter().chain(chunk.iter().cloned()).collect();
+            marks.extend(self.db.query(&sql, &args, |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?);
+        }
         let mut stale = false;
-        for (tag, stale_at, expired_at) in marks {
-            if !tags.contains(&tag) && !soft.contains(&tag) {
+        for (_, stale_at, expired_at, at) in marks {
+            if at <= written_at {
                 continue;
             }
             if expired_at.is_some_and(|x| x > written_at && x <= now) {
@@ -3232,10 +3372,11 @@ impl Store {
     pub fn access(&self, service: &str, env: &str) -> Result<Option<Access>> {
         Ok(self
             .db
-            .query_row("SELECT token_hash, bypass_hash, signed_in, password_hash FROM env_access WHERE service = ? AND env = ?", params![service, env], |r| {
+            .query_row("SELECT token_hash, bypass_hash, signed_in, password_hash, sso FROM env_access WHERE service = ? AND env = ?", params![service, env], |r| {
                 // No token: an empty one (the column was made required), which no digest matches.
                 let token: String = r.get(0)?;
-                Ok(Access { token_hash: Some(token).filter(|t| !t.is_empty()), bypass_hash: r.get(1)?, signed_in: r.get::<_, i64>(2)? != 0, password_hash: r.get(3)? })
+                let sso = r.get::<_, Option<String>>(4)?.and_then(|s| serde_json::from_str(&s).ok());
+                Ok(Access { token_hash: Some(token).filter(|t| !t.is_empty()), bypass_hash: r.get(1)?, signed_in: r.get::<_, i64>(2)? != 0, password_hash: r.get(3)?, sso })
             })
             .optional()?)
     }
@@ -3243,8 +3384,8 @@ impl Store {
     pub fn set_access(&self, service: &str, env: &str, access: Option<&Access>) -> Result<()> {
         match access {
             Some(a) => self.db.execute(
-                "INSERT INTO env_access (service, env, token_hash, bypass_hash, signed_in, password_hash) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (service, env) DO UPDATE SET token_hash = excluded.token_hash, bypass_hash = excluded.bypass_hash, signed_in = excluded.signed_in, password_hash = excluded.password_hash",
-                params![service, env, a.token_hash.as_deref().unwrap_or(""), a.bypass_hash, a.signed_in as i64, a.password_hash],
+                "INSERT INTO env_access (service, env, token_hash, bypass_hash, signed_in, password_hash, sso) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (service, env) DO UPDATE SET token_hash = excluded.token_hash, bypass_hash = excluded.bypass_hash, signed_in = excluded.signed_in, password_hash = excluded.password_hash, sso = excluded.sso",
+                params![service, env, a.token_hash.as_deref().unwrap_or(""), a.bypass_hash, a.signed_in as i64, a.password_hash, a.sso.as_ref().and_then(|s| serde_json::to_string(s).ok())],
             )?,
             None => self.db.execute("DELETE FROM env_access WHERE service = ? AND env = ?", params![service, env])?,
         };
@@ -3578,6 +3719,11 @@ impl Store {
     pub fn set_pause_schedule(&self, service: &str, env: &str, p: Option<&crate::freeze::PauseSchedule>) -> Result<()> {
         let j = p.map(|p| serde_json::to_string(p).expect("a schedule serializes"));
         self.db.execute("UPDATE environments SET pause_schedule = ? WHERE service = ? AND name = ?", params![j, service, env])?;
+        Ok(())
+    }
+
+    pub fn set_redirects(&self, service: &str, env: &str, text: Option<&str>) -> Result<()> {
+        self.db.execute("UPDATE environments SET redirects = ? WHERE service = ? AND name = ?", params![text, service, env])?;
         Ok(())
     }
 
@@ -4363,6 +4509,11 @@ impl Store {
     /// Set `key` only when it isn't set: whether this call set it (one wins, on any node).
     pub fn claim_state(&self, key: &str, value: &str) -> Result<bool> {
         Ok(self.db.write(|c| c.execute("INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING", [key, value]))? == 1)
+    }
+
+    /// `key`'s value, if it has one.
+    pub fn state(&self, key: &str) -> Result<Option<String>> {
+        self.db.read(|c| Ok(c.query_row("SELECT value FROM state WHERE key = ?", [key], |r| r.get::<_, String>(0)).optional()?))
     }
 
     /// `key` removed: whether it was there (one caller gets true, on any node).

@@ -190,6 +190,8 @@ pub fn link_target(kind: &str) -> Option<(&'static str, &'static str)> {
         "queue" => ("queues", "vhost"),
         "nosql" => ("nosql", "nosql-database"),
         "search" => ("search", "cluster"),
+        // A tasks tenant: an API key of the link's own and its signing keys.
+        "tasks" => ("tasks", "tasks"),
         // Another service's URLs: no credential, but held to the same `reveal` as the rest.
         "service" => ("apps", "service"),
         // Not a link: a repo apps reads (`apps_repo`).
@@ -1040,6 +1042,8 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/access/audit", "access", R, Tgt::Product),
     row("GET", "/v1/access/activity", "access", R, Tgt::Product),
     row("GET", "/v1/access/alerts", "access", R, Tgt::Product),
+    // Any connection may tell the operator what was hard (it changes nothing; capped an hour).
+    row("POST", "/v1/access/feedback", "access", R, Tgt::AnyGrant),
     row("GET", "/v1/access/oauth/clients", "access", R, Tgt::Product),
     row("GET", "/v1/access/oauth/clients/{id}", "access", R, Tgt::Product),
     row("GET", "/v1/access/oauth/step-ups/{id}", "access", R, Tgt::Product),
@@ -1060,6 +1064,9 @@ static ROWS: &[Row] = &[
     // member's own. A home changes which project stands for a resource: admin on the project, and
     // admin outright on the resource ([`placement`]).
     row("GET", "/v1/workspace/projects/{id}/members", "workspace", R, one(&["id"], "project")),
+    // The project's events feed (member, group role and invite changes), for whoever sees its
+    // members; an invite's address only for its admins. roll MCP's `workspace.event`.
+    row("GET", "/v1/workspace/projects/{id}/events", "workspace", R, one(&["id"], "project")),
     row("PATCH", "/v1/workspace/projects/{id}/members/{user}", "workspace", ADMIN, one(&["id"], "project")),
     row("DELETE", "/v1/workspace/projects/{id}/members/{user}", "workspace", ADMIN, one(&["id"], "project")),
     row("DELETE", "/v1/workspace/projects/{id}/members/me", "workspace", R, one(&["id"], "project")),
@@ -1460,6 +1467,7 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/projects/{project}/saas", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/saas", "secrets", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/saas/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("PATCH", "/v1/secrets/projects/{project}/saas/{id}", "secrets", ADMIN, one(&["project"], "project")),
     // Lists only the keys the caller's grant reaches (`Grants::reaches_key`, each key's name as
     // its index), so a rule limited to some keys sees those.
     row("GET", "/v1/secrets/projects/{project}/transit", "secrets", R, one(&["project"], "project")).filters_index(),
@@ -1481,6 +1489,7 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/projects/{project}/cas", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/cas", "secrets", ADMIN, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/cas/{id}/sign", "secrets", W, one(&["project"], "project")),
+    row("PUT", "/v1/secrets/projects/{project}/cas/{id}/chain", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/cas/{id}/certificates", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/cas/{id}/revoke", "secrets", W, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/cas/{id}", "secrets", ADMIN, one(&["project"], "project")),
@@ -1666,6 +1675,8 @@ static ROWS: &[Row] = &[
     row("*", "/v1/apps/services/{id}/", "apps", M, one(PG, "service")),
     // A restore puts a deleted service's deployments live again, production's too: a deploy.
     row("POST", "/v1/apps/services/{id}/restore", "apps", DEPLOY, one(PG, "service")).env(EnvFrom::Fixed("production")),
+    // Moving a service to another project: admin on it (and, asked inside, on it there too).
+    row("POST", "/v1/apps/services/{id}/move", "apps", ADMIN, one(PG, "service")),
     // `variables_from` copies another environment's values into this one: reveal there too.
     // A new heartbeat's ping URL (its token) is in the PUT's answer, once: a credential.
     // Setting or lifting a deploy freeze is admin (lifting one would get past it).
@@ -1724,6 +1735,7 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/apps", "apps", R, Tgt::Product),
     // A plan or an import of a roll code repo reads it: read there too.
     row("POST", "/v1/apps/plan", "apps", R, Tgt::AnyGrant).lends(Lend::Each(apps_repo)),
+    row("POST", "/v1/apps/quote", "apps", R, Tgt::AnyGrant),
     row("POST", "/v1/apps/import", "apps", R, Tgt::AnyGrant).lends(Lend::Each(apps_repo)),
     row("GET", "/v1/apps/projects/{project}/services", "apps", R, one(&["project"], "project")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/variables/values", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
@@ -1800,6 +1812,16 @@ static ROWS: &[Row] = &[
     // A port of a preview's service on a laptop (`roll preview forward`): any port it listens on,
     // past its access: admin, as roll apps' tunnel is.
     row("GET", "/v1/previews/{id}/forward", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // A laptop's process standing in for a preview's service (`roll preview swap`): it gets the
+    // preview's requests, its visitors' included: admin, as the shell is.
+    row("GET", "/v1/previews/{id}/swap", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // A page of a preview's service read through roll (roll MCP's `previews_fetch`): what its
+    // visitors see, which can be copies of production's people (masked or not): reveal, as its
+    // mail is.
+    row("GET", "/v1/previews/{id}/fetch", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // A look at a preview's data branch (its tables, a table's first rows): copies of
+    // production's (masked or not): reveal.
+    row("GET", "/v1/previews/{id}/data/{resource}", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     row("PUT", "/v1/previews/{id}/files", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // The mail a preview's services sent, caught and never delivered (previews-next): it can hold
     // copies of production's people, so reveal, as the preview's env is.

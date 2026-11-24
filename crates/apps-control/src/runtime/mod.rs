@@ -203,6 +203,11 @@ pub trait Runtime: Send + Sync {
     }
     /// A pinned image's cosign signature verified with one of `keys` (PEM public keys) from its
     /// registry ([`crate::registry::Registry::verify_cosign`]): which key, or why none.
+    /// A local image's content digest (`sha256:…`, its config's), for provenance; None where the
+    /// runtime can't say.
+    async fn image_id(&self, _image: &str) -> Option<String> {
+        None
+    }
     async fn verify_signature(&self, pinned: &str, keys: &[String], login: Option<&RegistryLogin>) -> anyhow::Result<usize> {
         crate::registry::Registry::new(None)?.verify_cosign(pinned, keys, login).await
     }

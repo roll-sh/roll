@@ -1170,7 +1170,9 @@ impl Control {
     /// A new cluster with `parent`'s indices, as they are now or as they were at `at` (Unix
     /// seconds, within the history window). Instant: the branch's commit points name the
     /// parent's segments, nothing is copied. Settings and the owner come from the parent (settings
-    /// unless given), and the branch counts toward the owner's `caps`. In a
+    /// unless given), but not its `reindex_whitelist`: the remotes the parent reads from are the
+    /// parent's (a branch whitelists its own). The parent's CORS origins, IP allowlist and
+    /// browser rate stay; its browser keys don't. The branch counts toward the owner's `caps`. In a
     /// fleet, call it on the node holding the parent (the API forwards there): a loaded parent
     /// is committed first, so the branch sees every acknowledged write. `parent` is the cluster
     /// the caller was checked against: it is read again by its id, never its name, so a cluster
@@ -1195,6 +1197,8 @@ impl Control {
                 parent_at: Some(at.unwrap_or(now).min(now)),
                 // Its first load marks what it inherits (`search_es::branch`).
                 inherit_pending: true,
+                // The remotes the parent may read from aren't the branch's.
+                reindex_whitelist: Vec::new(),
                 ..p.clone()
             },
             o,

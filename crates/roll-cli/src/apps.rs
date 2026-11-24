@@ -532,6 +532,15 @@ pub enum AppsCmd {
         #[arg(long, short = 'y')]
         yes: bool,
     },
+    /// Move a service to another project of the same owner (`--to`, its name or id): refused,
+    /// naming what ties it here (links, routes, roll:// references, a private network, sandboxes);
+    /// its live environments redeploy there.
+    Move {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long, value_name = "PROJECT")]
+        to: String,
+    },
     /// Restore a deleted service as it was (within 48 hours of its delete); `--list`: the
     /// deleted services, and when each goes for good.
     Restore {
@@ -1354,6 +1363,11 @@ pub enum AppsCmd {
         /// in, then back); its link, if it has one, stops.
         #[arg(long, conflicts_with_all = ["open", "private"])]
         signed_in: bool,
+        /// Only people GitHub or Google vouches for get in, whether roll's or not:
+        /// `github:@acme.com,org:acme` or `google:@acme.com,ada@x.com` (a domain, an email, a
+        /// GitHub organisation).
+        #[arg(long, value_name = "PROVIDER:ALLOW", conflicts_with_all = ["open", "private", "signed_in"])]
+        sso: Option<String>,
         /// Maintenance: its public names answer roll's page (with this note, if given) and
         /// nothing wakes.
         #[arg(long, value_name = "NOTE", num_args = 0..=1, default_missing_value = "", conflicts_with = "serve")]
@@ -1390,8 +1404,9 @@ pub enum AppsCmd {
         no_rate_limit: bool,
         /// A firewall rule, in order (the first match decides): `deny /admin/*`,
         /// `deny method=DELETE,PUT`, `allow /admin/health`, `deny ip=203.0.113.0/24`,
-        /// `deny header=X-Bot`, `deny cookie=beta:1`, `deny query=debug`, `deny ua=BadBot` (ua=
-        /// last). Repeatable; the rules replace the ones it has.
+        /// `deny header=X-Bot`, `deny cookie=beta:1`, `deny query=debug`, `deny bots=ai,spoofed`
+        /// (roll's lists: ai, search, preview, tools, verified, spoofed), `log attacks=sqli,xss`
+        /// (roll's patterns: scanners, traversal, sqli, xss, rce), `deny ua=BadBot` (ua= last). Repeatable; the rules replace the ones it has.
         #[arg(long = "firewall", value_name = "RULE", conflicts_with = "no_firewall")]
         firewall: Vec<String>,
         /// No firewall rules.
@@ -1412,6 +1427,13 @@ pub enum AppsCmd {
         /// No routes to other services.
         #[arg(long)]
         no_routes: bool,
+        /// Its own redirects, from a file of `_redirects` lines (`/old /new 308`, `/blog/* /posts/:splat`),
+        /// on any kind of service; the file replaces the environment's.
+        #[arg(long, value_name = "FILE", conflicts_with = "no_redirects")]
+        redirects: Option<std::path::PathBuf>,
+        /// No redirects of its own.
+        #[arg(long)]
+        no_redirects: bool,
         /// Its own page (an HTML file, at most 64 KiB) for the 502, 503 and 504 visitors get
         /// while the app can't answer or wake (Heroku's error page).
         #[arg(long, value_name = "HTML_FILE")]
@@ -1665,7 +1687,7 @@ pub(crate) async fn tunnels(url: String, headers: Vec<(String, String)>, l: toki
 }
 
 /// One local connection over one tunnel, until either side closes.
-async fn carry(req: tokio_tungstenite::tungstenite::handshake::client::Request, conn: tokio::net::TcpStream) -> anyhow::Result<()> {
+pub(crate) async fn carry(req: tokio_tungstenite::tungstenite::handshake::client::Request, conn: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin) -> anyhow::Result<()> {
     use futures::{SinkExt, StreamExt};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_tungstenite::tungstenite::{Error as WsError, Message};
@@ -1674,7 +1696,7 @@ async fn carry(req: tokio_tungstenite::tungstenite::handshake::client::Request, 
         e => anyhow::anyhow!("{e}"),
     })?;
     let (mut tx, mut rx) = ws.split();
-    let (mut rd, mut wr) = conn.into_split();
+    let (mut rd, mut wr) = tokio::io::split(conn);
     let mut buf = vec![0u8; 64 << 10];
     // An empty message ends a direction (a half-close); the tunnel ends when both have.
     let (mut from_local, mut from_service) = (true, true);
@@ -3615,6 +3637,11 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             all
         }
+        AppsCmd::Move { target, to } => {
+            let svc = service(api, &target).await?;
+            let project = project_id(api, &to).await?;
+            api.post(&format!("/v1/apps/services/{}/move", enc(&s(&svc["id"]))), json!({ "project": project })).await?
+        }
         AppsCmd::Restore { target, list: false } => {
             let Some(d) = deleted_service(api, &target).await? else {
                 bail!("no deleted service named {} (`roll apps restore --list` lists them)", target.service.as_deref().unwrap_or("that"));
@@ -5007,7 +5034,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, data, wait_for_ci, run, follow_tag, redeploy_on_secrets, vitals, egress, egress_host, private, open, signed_in, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, route, no_routes, error_page, maintenance_page, roll_pages, freeze, unfreeze, rotate_config, set } => {
+        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, data, wait_for_ci, run, follow_tag, redeploy_on_secrets, vitals, egress, egress_host, private, open, signed_in, sso, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, route, no_routes, redirects, no_redirects, error_page, maintenance_page, roll_pages, freeze, unfreeze, rotate_config, set } => {
             let svc = service(api, &target).await?;
             if rotate_config {
                 let e = api.post(&format!("{}/config/rotate", env_path(&svc, &target.env)), json!({})).await?;
@@ -5055,6 +5082,10 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             if signed_in {
                 body.insert("access".into(), json!({ "signed_in": true }));
+            }
+            if let Some(s) = sso {
+                let (provider, allow) = s.split_once(':').ok_or_else(|| anyhow::anyhow!("--sso is PROVIDER:ALLOW, as github:@acme.com,org:acme"))?;
+                body.insert("access".into(), json!({ "sso": { "provider": provider, "allow": allow.split(',').map(str::trim).filter(|a| !a.is_empty()).collect::<Vec<_>>() } }));
             }
             if let Some(mode) = egress {
                 body.insert("egress".into(), json!({ "mode": mode, "hosts": egress_host }));
@@ -5106,6 +5137,12 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 body.insert("routes".into(), Value::Array(rs));
             } else if no_routes {
                 body.insert("routes".into(), Value::Null);
+            }
+            if let Some(f) = &redirects {
+                let text = std::fs::read_to_string(f).map_err(|e| anyhow::anyhow!("{}: {e}", f.display()))?;
+                body.insert("redirects".into(), json!(text));
+            } else if no_redirects {
+                body.insert("redirects".into(), Value::Null);
             }
             let mut pages = serde_json::Map::new();
             for (k, f) in [("error", &error_page), ("maintenance", &maintenance_page)] {
@@ -5241,7 +5278,7 @@ pub(crate) fn new_token() -> String {
 /// A firewall rule as typed: `<allow|deny> [/path] [method=A,B] [ua=the rest of the line]`.
 fn firewall_rule(line: &str) -> anyhow::Result<Value> {
     let mut words = line.split_whitespace();
-    let action = words.next().filter(|a| ["allow", "deny", "limit", "challenge"].contains(a)).ok_or_else(|| anyhow::anyhow!("a firewall rule starts with allow, deny, limit or challenge: {line:?}"))?;
+    let action = words.next().filter(|a| ["allow", "deny", "limit", "challenge", "log"].contains(a)).ok_or_else(|| anyhow::anyhow!("a firewall rule starts with allow, deny, limit, challenge or log: {line:?}"))?;
     let mut rule = json!({ "action": action });
     // `limit N[:BURST] …`: N a minute a client through the rule.
     if action == "limit" {
@@ -5267,10 +5304,16 @@ fn firewall_rule(line: &str) -> anyhow::Result<Value> {
                 Some((name, contains)) => json!({ "name": name, "contains": contains }),
                 None => json!({ "name": v }),
             };
+        } else if let Some(k) = w.strip_prefix("key=") {
+            rule["key"] = json!(k);
+        } else if let Some(b) = w.strip_prefix("bots=") {
+            rule["bots"] = json!(b.split(',').filter(|b| !b.is_empty()).collect::<Vec<_>>());
+        } else if let Some(b) = w.strip_prefix("attacks=") {
+            rule["attacks"] = json!(b.split(',').filter(|b| !b.is_empty()).collect::<Vec<_>>());
         } else if w.starts_with('/') {
             rule["path"] = json!(w);
         } else {
-            anyhow::bail!("{w:?} in {line:?}: a path (/…), method=…, ip=…, header=…, cookie=…, query=…, or ua=…");
+            anyhow::bail!("{w:?} in {line:?}: a path (/…), method=…, ip=…, header=…, cookie=…, query=…, key=…, bots=…, attacks=…, or ua=…");
         }
     }
     Ok(rule)

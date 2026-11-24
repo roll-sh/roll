@@ -54,7 +54,7 @@ impl LinkProvider for Fake {
         let id = format!("AK{n}");
         self.live_keys.lock().unwrap().push(id.clone());
         let parts = BTreeMap::from([("access_key_id".to_string(), Secret::new(id.clone())), ("secret_access_key".to_string(), Secret::new(format!("sk-{n}")))]);
-        Ok(Issued { parts, handle: json!({ "id": id }) })
+        Ok(Issued { expires_at: None, parts, handle: json!({ "id": id }) })
     }
     fn revoke(&self, _: &str, handle: &Value) -> roll_secrets::Result<()> {
         self.live_keys.lock().unwrap().retain(|k| Some(k.as_str()) != handle["id"].as_str());
@@ -134,9 +134,135 @@ impl SyncTarget for FakeSync {
 
 /// Audit deliveries, kept instead of sent; an OIDC issuer's keys, served; vendors' APIs; a
 /// Snowflake account's SQL API; MongoDB Atlas's Admin API; and STS, answering AWS identities'
-/// logins with the caller set in `.8`; and the providers validity checks ask (`.9`).
+/// logins with the caller set in `.8`; the providers validity checks ask (`.9`); and GitLab's,
+/// OpenAI's and Datadog's key APIs (`.10`).
 #[derive(Default)]
-struct Sent(Mutex<Vec<Value>>, Mutex<Option<Value>>, std::sync::atomic::AtomicBool, Mutex<Option<(String, String)>>, Mutex<BTreeMap<(String, String), Value>>, Mutex<Vendors>, FakeSnowflake, FakeAtlas, Mutex<FakeStsLogin>, FakeProviders);
+struct Sent(Mutex<Vec<Value>>, Mutex<Option<Value>>, std::sync::atomic::AtomicBool, Mutex<Option<(String, String)>>, Mutex<BTreeMap<(String, String), Value>>, Mutex<Vendors>, FakeSnowflake, FakeAtlas, Mutex<FakeStsLogin>, FakeProviders, FakeKeyVendors);
+
+/// A self-managed GitLab's access tokens for project `acme/web`, OpenAI's service accounts in one
+/// project, Datadog's keys on its EU site, an account's Cloudflare API tokens, a Databricks
+/// workspace's tokens and Confluent Cloud's API keys, as their docs describe them, each taking only
+/// its admin credential (all obviously fake): the key ids live, every request body, and whether the
+/// admin credentials still work (`refuse`).
+#[derive(Default)]
+struct FakeKeyVendors {
+    live: Mutex<Vec<String>>,
+    made: std::sync::atomic::AtomicU32,
+    bodies: Mutex<Vec<Value>>,
+    refuse: std::sync::atomic::AtomicBool,
+    /// The admin credential each GitLab request came with.
+    gitlab_admins: Mutex<Vec<String>>,
+}
+
+const GITLAB_TOKENS: &str = "https://gitlab.example.com/api/v4/projects/acme%2Fweb/access_tokens";
+const OPENAI_ACCOUNTS: &str = "https://api.openai.com/v1/organization/projects/proj_rollfake/service_accounts";
+const DATADOG_API: &str = "https://api.datadoghq.eu/api/v2/";
+const CLOUDFLARE_TOKENS: &str = "https://api.cloudflare.com/client/v4/accounts/rollfakeaccount/tokens";
+const DATABRICKS_TOKENS: &str = "https://dbc-rollfake.cloud.databricks.com/api/2.0/token/";
+const CONFLUENT_KEYS: &str = "https://api.confluent.cloud/iam/v2/api-keys";
+
+/// The Cloudflare template's policies, as Cloudflare answers them (permission groups named too).
+fn cloudflare_policies(named: bool) -> Value {
+    let group = if named { json!({ "id": "fakepermissiongroup1", "name": "Workers Scripts Write" }) } else { json!({ "id": "fakepermissiongroup1" }) };
+    json!([{ "effect": "allow", "resources": { "com.cloudflare.api.account.rollfakeaccount": "*" }, "permission_groups": [group] }])
+}
+
+impl FakeKeyVendors {
+    fn answer(&self, method: &str, url: &str, headers: &[(&str, &Secret)], body: Option<(&str, &Secret)>) -> Option<(u16, Value)> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let header = |name: &str| headers.iter().find(|(k, _)| *k == name).map(|(_, v)| v.expose().to_string()).unwrap_or_default();
+        let (vendor, rest, authorized) = if let Some(rest) = url.strip_prefix(GITLAB_TOKENS) {
+            self.gitlab_admins.lock().unwrap().push(header("private-token"));
+            ("gitlab", rest, ["fake-gitlab-admin", "fake-gitlab-admin-2"].contains(&header("private-token").as_str()))
+        } else if let Some(rest) = url.strip_prefix(OPENAI_ACCOUNTS) {
+            ("openai", rest, header("authorization") == "Bearer fake-openai-admin")
+        } else if let Some(rest) = url.strip_prefix(CLOUDFLARE_TOKENS) {
+            ("cloudflare", rest, header("authorization") == "Bearer fake-cf-admin")
+        } else if let Some(rest) = url.strip_prefix(DATABRICKS_TOKENS) {
+            ("databricks", rest, header("authorization") == "Bearer fake-dbx-admin")
+        } else if let Some(rest) = url.strip_prefix(CONFLUENT_KEYS) {
+            use base64::Engine;
+            ("confluent", rest, header("authorization") == format!("Basic {}", base64::engine::general_purpose::STANDARD.encode("FAKECONFLUENTADMIN:fake-confluent-admin")))
+        } else {
+            let rest = url.strip_prefix(DATADOG_API)?;
+            ("datadog", rest, header("dd-api-key") == "fake-dd-api" && header("dd-application-key") == "fake-dd-app")
+        };
+        if !authorized || self.refuse.load(Relaxed) {
+            return Some((if vendor == "datadog" { 403 } else { 401 }, json!({ "message": "401 Unauthorized" })));
+        }
+        let body: Value = body.map(|(t, b)| {
+            assert_eq!(t, "application/json");
+            serde_json::from_str(b.expose()).unwrap()
+        }).unwrap_or(Value::Null);
+        let mut live = self.live.lock().unwrap();
+        let made = || {
+            let n = self.made.fetch_add(1, Relaxed) + 1;
+            self.bodies.lock().unwrap().push(body.clone());
+            n
+        };
+        Some(match (vendor, method, rest) {
+            // Registering checks the credential, read only.
+            ("gitlab", "GET", "?per_page=1") | ("openai", "GET", "?limit=1") => (200, json!([])),
+            ("datadog", "GET", "api_keys?page%5Bsize%5D=1" | "current_user/application_keys?page%5Bsize%5D=1") | ("confluent", "GET", "?spec.owner=sa-rollfake&page_size=1") => (200, json!({ "data": [] })),
+            ("databricks", "GET", "list") => (200, json!({ "token_infos": [] })),
+            // The template, read at registration and before each new token.
+            ("cloudflare", "GET", "/tmplrollfake") => {
+                (200, json!({ "success": true, "errors": [], "result": { "id": "tmplrollfake", "name": "template", "status": "disabled", "policies": cloudflare_policies(true), "condition": { "request.ip": { "in": ["192.0.2.0/24"] } } } }))
+            }
+            ("cloudflare", "POST", "") => {
+                assert_eq!((&body["policies"], &body["condition"]["request.ip"]["in"][0]), (&cloudflare_policies(false), &json!("192.0.2.0/24")), "the template's policies and condition: {body}");
+                let n = made();
+                live.push(format!("cftokfake{n}"));
+                (200, json!({ "success": true, "errors": [], "result": { "id": format!("cftokfake{n}"), "name": body["name"], "status": "active", "value": format!("fake-cf-token-{n}") } }))
+            }
+            ("databricks", "POST", "create") => {
+                assert_eq!(body["lifetime_seconds"], 30 * 86_400, "{body}");
+                let n = made();
+                live.push(format!("dbxtokfake{n}"));
+                (200, json!({ "token_value": format!("fake-dbx-token-{n}"), "token_info": { "token_id": format!("dbxtokfake{n}"), "comment": body["comment"] } }))
+            }
+            ("databricks", "POST", "delete") => {
+                let id = body["token_id"].as_str().unwrap().to_string();
+                let found = live.contains(&id);
+                live.retain(|k| *k != id);
+                if found { (200, json!({})) } else { (404, json!({ "error_code": "RESOURCE_DOES_NOT_EXIST" })) }
+            }
+            ("confluent", "POST", "") => {
+                assert_eq!((&body["spec"]["owner"], &body["spec"]["resource"]), (&json!({ "id": "sa-rollfake" }), &json!({ "id": "lkc-rollfake", "environment": "env-rollfake" })), "{body}");
+                let n = made();
+                live.push(format!("CONFLUENTFAKE{n}"));
+                (202, json!({ "api_version": "iam/v2", "kind": "ApiKey", "id": format!("CONFLUENTFAKE{n}"), "spec": { "secret": format!("fake-confluent-secret-{n}"), "display_name": body["spec"]["display_name"] } }))
+            }
+            ("gitlab", "POST", "") => {
+                assert!(body["expires_at"].as_str().is_some_and(|d| d.len() == 10) && body["scopes"] == json!(["read_api"]), "{body}");
+                let n = made();
+                live.push(format!("{n}"));
+                (201, json!({ "id": n, "name": body["name"], "token": format!("fake-gitlab-token-{n}"), "active": true }))
+            }
+            ("openai", "POST", "") => {
+                let n = made();
+                let id = format!("svc_acct_fake{n}");
+                live.push(id.clone());
+                (200, json!({ "object": "organization.project.service_account", "id": id, "name": body["name"], "role": "member", "api_key": { "object": "organization.project.service_account.api_key", "value": format!("fake-openai-key-{n}"), "id": format!("key_fake{n}") } }))
+            }
+            ("datadog", "POST", "api_keys" | "current_user/application_keys") => {
+                let kind = if rest == "api_keys" { "api_keys" } else { "application_keys" };
+                assert_eq!(body["data"]["type"], kind, "{body}");
+                let n = made();
+                let id = format!("00000000-0000-0000-0000-{n:012}");
+                live.push(id.clone());
+                (201, json!({ "data": { "type": kind, "id": id, "attributes": { "name": body["data"]["attributes"]["name"], "key": format!("fake-dd-{kind}-{n}") } } }))
+            }
+            (_, "DELETE", r) => {
+                let id = r.trim_start_matches('/').rsplit('/').next().unwrap().to_string();
+                let found = live.contains(&id);
+                live.retain(|k| *k != id);
+                (if found { 204 } else { 404 }, Value::Null)
+            }
+            _ => (404, json!({ "message": "404 Not Found" })),
+        })
+    }
+}
 
 /// Fixture credentials for validity checks, built from pieces (push protection scans this repo):
 /// obviously roll's, still each detector's shape. `live` ones work, the rest are refused.
@@ -559,6 +685,9 @@ impl roll_secrets::Deliver for Sent {
     /// SendGrid's and Twilio's key APIs, matched on the URL, each taking only its credential;
     /// Snowflake's SQL API ([`Sent::snowflake`]) and MongoDB Atlas's Admin API ([`FakeAtlas`]) apart.
     fn request(&self, method: &str, url: &str, headers: &[(&str, &Secret)], body: Option<(&str, &Secret)>, _: usize) -> roll_secrets::Result<(u16, zeroize::Zeroizing<Vec<u8>>)> {
+        if let Some((status, v)) = self.10.answer(method, url, headers, body) {
+            return Ok((status, if v.is_null() { Vec::new() } else { v.to_string().into_bytes() }.into()));
+        }
         if let Some((status, answer)) = self.9.answer(method, url, headers) {
             let bytes = match answer {
                 Value::String(xml) => xml.into_bytes(),
@@ -2049,7 +2178,8 @@ async fn nothing_reaches_an_environment_its_caller_cannot_read() {
     // resource (that's an admin's), nor see the fingerprint of what it can't reveal.
     let t = api.token(json!({ "name": "dev", "environments": ["development"], "actions": ["read", "reveal", "write", "delete"] }));
     let token = Some(t.as_str());
-    let (s, _) = api.req(Method::DELETE, "/environments/development", None, token).await;
+    // The token's own scope names development: deleting it is confirmed.
+    let (s, _) = api.req(Method::DELETE, "/environments/development?confirm=development", None, token).await;
     assert_eq!(s, StatusCode::OK, "kept for the window");
     let (s, _) = api.req(Method::POST, "/environments", Some(json!({ "slug": "development", "base": "production" })), token).await;
     assert_eq!(s, StatusCode::FORBIDDEN);
@@ -2239,8 +2369,9 @@ async fn a_shared_value_opens_as_many_times_as_allowed_and_the_server_never_hold
 
 /// docs/accounts.md, "Offboarding": a disabled person (an admin, SCIM) keeps their memberships,
 /// but what they handed out ends anyway. Their one-time share refuses to open (it checks its
-/// maker), and rolld's offboarding hook revokes their dynamic credential now, not at its TTL.
-/// Enabled again, they get nothing back.
+/// maker), and rolld's offboarding hook revokes their dynamic credential now, not at its TTL,
+/// checking only the projects holding what they made: never root's unrelated project with root's
+/// own open share. Enabled again, they get nothing back.
 #[tokio::test]
 async fn a_disabled_persons_share_refuses_to_open_and_their_leases_are_revoked() {
     use base64::Engine as _;
@@ -2259,11 +2390,16 @@ async fn a_disabled_persons_share_refuses_to_open_and_their_leases_are_revoked()
     let (s, share) = api.as_ada(Method::POST, &at("/shares"), Some(json!({ "ciphertext": blob, "note": "for the contractor" }))).await;
     assert_eq!(s, StatusCode::CREATED, "{share}");
     let open = format!("/v1/secrets/shares/{}/open", share["id"].as_str().unwrap());
+    let (_, unrelated) = api.signed_in("root", true, Method::POST, "/v1/workspace/projects", Some(json!({ "name": "root-shop" }))).await;
+    let (s, e) = api.signed_in("root", true, Method::POST, &format!("/v1/secrets/projects/{}/shares", unrelated["id"].as_str().unwrap()), Some(json!({ "ciphertext": blob }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{e}");
 
     *api.people.disabled.lock().unwrap() = true;
     assert_eq!(api.call(Method::POST, &open, None).await.0, StatusCode::NOT_FOUND, "a disabled maker's share ends unopened");
     assert!(api.fake.live_keys.lock().unwrap().contains(&key), "until the hook runs, the credential is live");
+    let rechecks = api.secrets.metrics().unwrap().member_rechecks;
     api.secrets.person_offboarded("usr_ada").unwrap();
+    assert_eq!(api.secrets.metrics().unwrap().member_rechecks, rechecks + 1, "only her own project is checked, not root's");
     assert!(!api.fake.live_keys.lock().unwrap().contains(&key), "revoked now, not at its TTL");
     let leases = api.ok(Method::GET, "/leases", None).await;
     assert!(leases.as_array().unwrap().iter().all(|l| !l["revoked_at"].is_null()), "{leases}");
@@ -2996,6 +3132,220 @@ async fn a_saas_rotator_issues_and_revokes_vendor_keys() {
     let s = api.secrets.clone();
     tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
     assert_eq!(api.sent.5.lock().unwrap().live, ["sgk3", "SK4"]);
+}
+
+/// Register `vendor` (a refused admin credential first, which isn't kept), link `key` to its
+/// secret in production, managed with `options`, and answer the registration.
+async fn key_vendor(api: &Api, vendor: &str, target: Value, credential: &str, key: &str, options: Value) -> Value {
+    let wrong = "fake-wrong:admin";
+    let (s, e) = api.call(Method::POST, "/saas", Some(json!({ "name": vendor, "vendor": vendor, "target": target, "credential": wrong }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains(vendor) && !e.to_string().contains(wrong), "{vendor}: {e}");
+    let r = api.ok(Method::POST, "/saas", Some(json!({ "name": vendor, "vendor": vendor, "target": target, "credential": credential }))).await;
+    assert!(!r.to_string().contains(credential) && !api.ok(Method::GET, "/audit", None).await.to_string().contains(credential), "never the credential: {r}");
+    api.ok(Method::PUT, &format!("/environments/production/secrets/{key}"), Some(json!({ "link": { "kind": "saas", "ref": r["id"], "field": "secret", "mode": "managed", "options": options } }))).await;
+    r
+}
+
+/// The grace period over: the sweep revokes the retired keys.
+async fn end_grace(api: &Api) {
+    let p = api.project.clone();
+    api.db.write(move |c| c.execute("UPDATE leases SET expires_at = 0 WHERE project_id = ? AND revoked_at IS NULL", [p.as_str()])).unwrap();
+    let s = api.secrets.clone();
+    tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
+}
+
+#[tokio::test]
+async fn gitlab_access_tokens_rotate_and_the_old_one_is_revoked_after_the_grace_period() {
+    let api = Api::new().await;
+    let (s, _) = api.call(Method::POST, "/saas", Some(json!({ "name": "gl", "vendor": "gitlab", "target": { "host": "10.0.0.1", "project": "1", "scopes": ["api"] }, "credential": "x" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "a self-managed host is a hostname");
+    let target = json!({ "host": "gitlab.example.com", "project": "acme/web", "scopes": ["read_api"], "access_level": 20, "expires_days": 90 });
+    key_vendor(&api, "gitlab", target, "fake-gitlab-admin", "GITLAB_TOKEN", json!({ "rotate_days": 60 })).await;
+    assert_eq!(api.values("production", "/").await["values"]["GITLAB_TOKEN"], "fake-gitlab-token-1");
+    assert_eq!(api.sent.10.bodies.lock().unwrap()[0]["access_level"], 20);
+
+    // A new token, not GitLab's rotate: the old one keeps working through the grace period.
+    let start = api.ok(Method::GET, "/events?latest=1", None).await["next"].as_i64().unwrap();
+    api.ok(Method::POST, "/environments/production/secrets/GITLAB_TOKEN/rotate", None).await;
+    assert_eq!(api.values("production", "/").await["values"]["GITLAB_TOKEN"], "fake-gitlab-token-2");
+    assert_eq!(*api.sent.10.live.lock().unwrap(), ["1", "2"]);
+    let events = api.ok(Method::GET, &format!("/events?after={start}&kinds=rotation.succeeded"), None).await;
+    assert_eq!(events["events"][0]["key"], "GITLAB_TOKEN", "{events}");
+    end_grace(&api).await;
+    assert_eq!(*api.sent.10.live.lock().unwrap(), ["2"]);
+}
+
+#[tokio::test]
+async fn keys_a_vendor_ends_rotate_before_that_and_health_warns_of_them_and_of_the_admin_credential() {
+    let api = Api::new().await;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    let day = 86_400_000;
+    let gitlab = |expires_days: u16, name: &str, credential_expires_at: Option<i64>| {
+        let mut r = json!({ "name": name, "vendor": "gitlab", "target": { "host": "gitlab.example.com", "project": "acme/web", "scopes": ["read_api"], "expires_days": expires_days }, "credential": "fake-gitlab-admin" });
+        if let Some(t) = credential_expires_at {
+            r["credential_expires_at"] = json!(t);
+        }
+        r
+    };
+    let (s, e) = api.call(Method::POST, "/saas", Some(gitlab(90, "gl", Some(now - day)))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "an admin credential that has ended already: {e}");
+    let gl = api.ok(Method::POST, "/saas", Some(gitlab(90, "gl", Some(now + 10 * day)))).await;
+    assert_eq!(gl["credential_expires_at"], now + 10 * day);
+    assert!(!gl.to_string().contains("fake-gitlab-admin"), "{gl}");
+    let link = |r: &Value, options: Value| json!({ "link": { "kind": "saas", "ref": r["id"], "field": "secret", "mode": "managed", "options": options } });
+
+    // GitLab ends each token after 90 days: a link rotates it two weeks before, or isn't made.
+    for options in [json!({}), json!({ "rotate_days": 77 })] {
+        let (s, e) = api.call(Method::PUT, "/environments/production/secrets/GITLAB_TOKEN", Some(link(&gl, options.clone()))).await;
+        assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("at most 76"), "{options}: {e}");
+    }
+    assert!(api.sent.10.live.lock().unwrap().is_empty(), "nothing issued for a refused link");
+    let set = api.ok(Method::PUT, "/environments/production/secrets/GITLAB_TOKEN", Some(link(&gl, json!({ "rotate_days": 76 })))).await;
+    let ends = (time::OffsetDateTime::now_utc() + time::Duration::days(90)).date().midnight().assume_utc().unix_timestamp() * 1000;
+    assert_eq!(set["secret"]["expires_at"].as_i64(), Some(ends), "the key carries GitLab's end: {set}");
+
+    // A token that ends in ten days is listed two weeks ahead; one that ends in 90 isn't. The admin
+    // credential ending in ten days is listed by the registration's name, never its value.
+    let short = api.ok(Method::POST, "/saas", Some(gitlab(10, "gl-short", None))).await;
+    api.ok(Method::PUT, "/environments/production/secrets/GITLAB_SHORT", Some(link(&short, json!({ "rotate_days": 5 })))).await;
+    let health = api.ok(Method::GET, "/health", None).await;
+    let expiring: Vec<(&str, &str)> = health.as_array().unwrap().iter().filter(|f| f["issue"] == "expiring").map(|f| (f["environment"].as_str().unwrap(), f["key"].as_str().unwrap())).collect();
+    assert_eq!(expiring, [("", "gl"), ("production", "GITLAB_SHORT")], "{health}");
+    assert!(!health.to_string().contains("fake-gitlab"), "{health}");
+}
+
+#[tokio::test]
+async fn a_saas_rotators_credential_is_replaced_in_place_and_the_next_rotation_uses_it() {
+    let api = Api::new().await;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    let day = 86_400_000;
+    let target = json!({ "host": "gitlab.example.com", "project": "acme/web", "scopes": ["read_api"], "access_level": 20, "expires_days": 90 });
+    let r = key_vendor(&api, "gitlab", target, "fake-gitlab-admin", "GITLAB_TOKEN", json!({ "rotate_days": 60 })).await;
+    let at = format!("/saas/{}", r["id"].as_str().unwrap());
+    let last_admin = || api.sent.10.gitlab_admins.lock().unwrap().last().cloned().unwrap();
+    let expiring = |health: &Value| -> Vec<String> { health.as_array().unwrap().iter().filter(|f| f["issue"] == "expiring" && f["environment"] == "").map(|f| f["key"].as_str().unwrap().to_string()).collect() };
+
+    // A credential the vendor refuses changes nothing: the old one stays, dated as it was.
+    let (s, e) = api.call(Method::PATCH, &at, Some(json!({ "credential": "fake-gitlab-wrong", "credential_expires_at": now + 10 * day, "name": "gl-ops" }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("gitlab answered 401") && !e.to_string().contains("fake-gitlab-wrong"), "{e}");
+    let kept = &api.ok(Method::GET, "/saas", None).await[0];
+    assert!(kept["name"] == "gitlab" && kept.get("credential_expires_at").is_none(), "{kept}");
+    api.ok(Method::POST, "/environments/production/secrets/GITLAB_TOKEN/rotate", None).await;
+    assert_eq!(last_admin(), "fake-gitlab-admin");
+
+    // A good one is checked, swapped in place (the link stays), and the next rotation uses it.
+    let patched = api.ok(Method::PATCH, &at, Some(json!({ "credential": "fake-gitlab-admin-2", "credential_expires_at": now + 10 * day, "name": "gl-ops" }))).await;
+    assert!(patched["id"] == r["id"] && patched["name"] == "gl-ops" && patched["credential_expires_at"] == now + 10 * day && !patched.to_string().contains("fake-gitlab-admin"), "{patched}");
+    assert_eq!(expiring(&api.ok(Method::GET, "/health", None).await), ["gl-ops"], "health warns of the new credential's end");
+    api.ok(Method::POST, "/environments/production/secrets/GITLAB_TOKEN/rotate", None).await;
+    assert_eq!((last_admin().as_str(), api.values("production", "/").await["values"]["GITLAB_TOKEN"].clone()), ("fake-gitlab-admin-2", json!("fake-gitlab-token-3")));
+    // Retired keys are revoked through the new credential too.
+    end_grace(&api).await;
+    assert_eq!((api.sent.10.live.lock().unwrap().clone(), last_admin()), (vec!["3".to_string()], "fake-gitlab-admin-2".to_string()));
+
+    // Moving the date moves health; audited, never with the credential.
+    api.ok(Method::PATCH, &at, Some(json!({ "credential_expires_at": now + 100 * day }))).await;
+    assert!(expiring(&api.ok(Method::GET, "/health", None).await).is_empty());
+    let audit = api.ok(Method::GET, "/audit", None).await;
+    assert!(audit.to_string().contains("changed SaaS rotator gl-ops's credential expiry") && !audit.to_string().contains("fake-gitlab-admin-2"), "{audit}");
+}
+
+#[tokio::test]
+async fn openai_service_account_keys_rotate_and_a_leaked_one_is_revoked_at_once() {
+    let api = Api::new().await;
+    key_vendor(&api, "openai", json!({ "project_id": "proj_rollfake" }), "fake-openai-admin", "OPENAI_API_KEY", json!({})).await;
+    assert_eq!(api.values("production", "/").await["values"]["OPENAI_API_KEY"], "fake-openai-key-1");
+    api.ok(Method::PUT, "/environments/production/secrets/OPENAI_SERVICE_ACCOUNT_ID", Some(json!({ "link": { "kind": "saas", "ref": api.ok(Method::GET, "/saas", None).await[0]["id"], "field": "id", "mode": "managed" } }))).await;
+    assert_eq!(api.values("production", "/").await["values"]["OPENAI_SERVICE_ACCOUNT_ID"], "svc_acct_fake1", "one service account for both keys");
+
+    // A leak: rotate, then end the retired key's lease instead of waiting out the grace period.
+    api.ok(Method::POST, "/environments/production/secrets/OPENAI_API_KEY/rotate", None).await;
+    assert_eq!(api.values("production", "/").await["values"]["OPENAI_API_KEY"], "fake-openai-key-2");
+    assert_eq!(*api.sent.10.live.lock().unwrap(), ["svc_acct_fake1", "svc_acct_fake2"]);
+    let leases = api.ok(Method::GET, "/leases", None).await;
+    let retired = leases.as_array().unwrap().iter().find(|l| l["kind"] == "retired" && l["revoked_at"].is_null()).unwrap();
+    api.ok(Method::DELETE, &format!("/leases/{}", retired["id"].as_str().unwrap()), None).await;
+    assert_eq!(*api.sent.10.live.lock().unwrap(), ["svc_acct_fake2"], "deleting the service account revoked its key");
+}
+
+#[tokio::test]
+async fn datadog_keys_rotate_and_a_refused_rotation_is_rotation_failed() {
+    let api = Api::new().await;
+    let (s, _) = api.call(Method::POST, "/saas", Some(json!({ "name": "dd", "vendor": "datadog", "target": { "site": "datadog.attacker.example", "key": "api" }, "credential": "a:b" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "only Datadog's own sites");
+    key_vendor(&api, "datadog", json!({ "site": "datadoghq.eu", "key": "api" }), "fake-dd-api:fake-dd-app", "DD_API_KEY", json!({})).await;
+    assert_eq!(api.values("production", "/").await["values"]["DD_API_KEY"], "fake-dd-api_keys-1");
+    // Application keys of the credential's user, with the scopes asked for.
+    let app = api.ok(Method::POST, "/saas", Some(json!({ "name": "dd-app", "vendor": "datadog", "target": { "site": "datadoghq.eu", "key": "application", "scopes": ["dashboards_read"] }, "credential": "fake-dd-api:fake-dd-app" }))).await;
+    api.ok(Method::PUT, "/environments/production/secrets/DD_APP_KEY", Some(json!({ "link": { "kind": "saas", "ref": app["id"], "field": "secret", "mode": "managed" } }))).await;
+    assert_eq!(api.values("production", "/").await["values"]["DD_APP_KEY"], "fake-dd-application_keys-2");
+    assert_eq!(api.sent.10.bodies.lock().unwrap()[1]["data"]["attributes"]["scopes"], json!(["dashboards_read"]));
+
+    api.ok(Method::POST, "/environments/production/secrets/DD_API_KEY/rotate", None).await;
+    assert_eq!(api.values("production", "/").await["values"]["DD_API_KEY"], "fake-dd-api_keys-3");
+    end_grace(&api).await;
+    let first = "00000000-0000-0000-0000-000000000001";
+    assert!(!api.sent.10.live.lock().unwrap().iter().any(|k| k == first), "the old API key is deleted");
+
+    // The admin key revoked at Datadog: the scheduled rotation fails, and says so.
+    api.sent.10.refuse.store(true, std::sync::atomic::Ordering::Relaxed);
+    let p = api.project.clone();
+    api.db
+        .write(move |c| {
+            let state: String = c.query_row("SELECT link_state FROM secrets WHERE project_id = ? AND key = 'DD_API_KEY'", [p.as_str()], |r| r.get(0))?;
+            let mut state: Value = serde_json::from_str(&state).unwrap();
+            state["issued_at"] = json!(0);
+            c.execute("UPDATE secrets SET link_state = ?, link = replace(link, '\"mode\":\"managed\"', '\"mode\":\"managed\",\"options\":{\"rotate_days\":1}') WHERE project_id = ? AND key = 'DD_API_KEY'", [state.to_string().as_str(), p.as_str()])
+        })
+        .unwrap();
+    let start = api.ok(Method::GET, "/events?latest=1", None).await["next"].as_i64().unwrap();
+    let s = api.secrets.clone();
+    tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
+    let events = api.ok(Method::GET, &format!("/events?after={start}&kinds=rotation.failed"), None).await;
+    assert_eq!(events["events"][0]["key"], "DD_API_KEY", "{events}");
+    assert!(events.to_string().contains("datadog answered 403"), "{events}");
+    assert_eq!(api.values("production", "/").await["values"]["DD_API_KEY"], "fake-dd-api_keys-3", "the key in use stays");
+}
+
+#[tokio::test]
+async fn cloudflare_tokens_copy_the_template_and_the_old_one_is_deleted_after_the_grace_period() {
+    let api = Api::new().await;
+    key_vendor(&api, "cloudflare", json!({ "account_id": "rollfakeaccount", "template": "tmplrollfake" }), "fake-cf-admin", "CLOUDFLARE_API_TOKEN", json!({})).await;
+    assert_eq!(api.values("production", "/").await["values"]["CLOUDFLARE_API_TOKEN"], "fake-cf-token-1");
+    // A new token, not Cloudflare's roll: the old value keeps working through the grace period.
+    api.ok(Method::POST, "/environments/production/secrets/CLOUDFLARE_API_TOKEN/rotate", None).await;
+    assert_eq!(api.values("production", "/").await["values"]["CLOUDFLARE_API_TOKEN"], "fake-cf-token-2");
+    assert_eq!(*api.sent.10.live.lock().unwrap(), ["cftokfake1", "cftokfake2"]);
+    end_grace(&api).await;
+    assert_eq!(*api.sent.10.live.lock().unwrap(), ["cftokfake2"]);
+}
+
+#[tokio::test]
+async fn databricks_tokens_rotate_and_the_old_one_is_revoked_after_the_grace_period() {
+    let api = Api::new().await;
+    let (s, _) = api.call(Method::POST, "/saas", Some(json!({ "name": "dbx", "vendor": "databricks", "target": { "host": "192.168.0.10" }, "credential": "x" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "a workspace host is a hostname");
+    key_vendor(&api, "databricks", json!({ "host": "dbc-rollfake.cloud.databricks.com", "lifetime_days": 30 }), "fake-dbx-admin", "DATABRICKS_TOKEN", json!({ "rotate_days": 16 })).await;
+    assert_eq!(api.values("production", "/").await["values"]["DATABRICKS_TOKEN"], "fake-dbx-token-1");
+    api.ok(Method::POST, "/environments/production/secrets/DATABRICKS_TOKEN/rotate", None).await;
+    assert_eq!(api.values("production", "/").await["values"]["DATABRICKS_TOKEN"], "fake-dbx-token-2");
+    assert_eq!(*api.sent.10.live.lock().unwrap(), ["dbxtokfake1", "dbxtokfake2"]);
+    end_grace(&api).await;
+    assert_eq!(*api.sent.10.live.lock().unwrap(), ["dbxtokfake2"]);
+}
+
+#[tokio::test]
+async fn confluent_api_keys_rotate_for_the_same_owner_and_resource() {
+    let api = Api::new().await;
+    let target = json!({ "owner": "sa-rollfake", "resource": "lkc-rollfake", "environment": "env-rollfake" });
+    let r = key_vendor(&api, "confluent", target, "FAKECONFLUENTADMIN:fake-confluent-admin", "CONFLUENT_API_SECRET", json!({})).await;
+    api.ok(Method::PUT, "/environments/production/secrets/CONFLUENT_API_KEY", Some(json!({ "link": { "kind": "saas", "ref": r["id"], "field": "id", "mode": "managed" } }))).await;
+    let pair = |v: Value| (v["values"]["CONFLUENT_API_KEY"].clone(), v["values"]["CONFLUENT_API_SECRET"].clone());
+    assert_eq!(pair(api.values("production", "/").await), (json!("CONFLUENTFAKE1"), json!("fake-confluent-secret-1")));
+    api.ok(Method::POST, "/environments/production/secrets/CONFLUENT_API_SECRET/rotate", None).await;
+    assert_eq!(pair(api.values("production", "/").await), (json!("CONFLUENTFAKE2"), json!("fake-confluent-secret-2")));
+    end_grace(&api).await;
+    assert_eq!(*api.sent.10.live.lock().unwrap(), ["CONFLUENTFAKE2"]);
 }
 
 #[tokio::test]
@@ -3764,6 +4114,75 @@ async fn a_projects_ca_signs_short_lived_certificates_for_its_names_only() {
     }
     // A CA a key links to stays.
     assert_eq!(api.call(Method::DELETE, &format!("/cas/{}", ca["id"].as_str().unwrap()), None).await.0, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn an_intermediate_ca_issues_under_the_customers_own_root() {
+    use x509_parser::prelude::*;
+    let api = Api::new().await;
+    let ca = api.ok(Method::POST, "/cas", Some(json!({ "name": "under-root", "intermediate": true, "domains": ["svc.internal"] }))).await;
+    let id = ca["id"].as_str().unwrap().to_string();
+    assert_eq!((ca["status"].as_str(), ca["certificate"].as_str()), (Some("pending"), Some("")));
+    let csr_pem = ca["csr"].as_str().unwrap();
+    // A throwaway offline root (obviously fake) signs the CSR roll answered, as a customer's would.
+    let root_key = rcgen::KeyPair::generate().unwrap();
+    let mut root = rcgen::CertificateParams::default();
+    root.distinguished_name.push(rcgen::DnType::CommonName, "Example Fake Offline Root");
+    root.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    root.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign, rcgen::KeyUsagePurpose::CrlSign];
+    let root_cert = root.self_signed(&root_key).unwrap();
+    let root_issuer = rcgen::Issuer::from_params(&root, &root_key);
+    let (_, csr_der) = parse_x509_pem(csr_pem.as_bytes()).unwrap();
+    let (_, csr) = x509_parser::certification_request::X509CertificationRequest::from_der(&csr_der.contents).unwrap();
+    csr.verify_signature().expect("the CSR is signed with the CA's key");
+    let wanted = csr.requested_extensions().unwrap().any(|e| matches!(e, ParsedExtension::NameConstraints(_)));
+    assert!(wanted, "the CSR asks for the CA's name constraints");
+    let spki = rcgen::SubjectPublicKeyInfo::from_der(csr.certification_request_info.subject_pki.raw).unwrap();
+    let intermediate = |days: i64, permitted: &str| {
+        let mut p = rcgen::CertificateParams::default();
+        p.distinguished_name.push(rcgen::DnType::CommonName, "roll intermediate");
+        p.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Constrained(0));
+        p.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign, rcgen::KeyUsagePurpose::CrlSign];
+        p.name_constraints = Some(rcgen::NameConstraints { permitted_subtrees: vec![rcgen::GeneralSubtree::DnsName(permitted.into())], excluded_subtrees: vec![] });
+        p.not_after = ::time::OffsetDateTime::now_utc() + ::time::Duration::days(days);
+        p.use_authority_key_identifier_extension = true;
+        p
+    };
+    let chain_at = format!("/cas/{id}/chain");
+    // A pending CA signs nothing; a certificate for another key isn't installed.
+    let device = rcgen::KeyPair::generate().unwrap();
+    let leaf_csr = rcgen::CertificateParams::new(vec!["api.prod.svc.internal".to_string()]).unwrap().serialize_request(&device).unwrap().pem().unwrap();
+    let (s, e) = api.call(Method::POST, &format!("/cas/{id}/sign"), Some(json!({ "csr": leaf_csr }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e["error"].as_str().unwrap().contains("waiting for its certificate"), "{e}");
+    let other = rcgen::KeyPair::generate().unwrap();
+    let wrong = intermediate(30, "svc.internal").signed_by(&other, &root_issuer).unwrap();
+    let (s, e) = api.call(Method::PUT, &chain_at, Some(json!({ "certificate": wrong.pem(), "chain": root_cert.pem() }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e["error"].as_str().unwrap().contains("isn't for this CA's key"), "{e}");
+    // The root signs narrower names than asked, for 30 days: the CA keeps the narrower names.
+    let inter = intermediate(30, "prod.svc.internal").signed_by(&spki, &root_issuer).unwrap();
+    let (s, e) = api.call(Method::PUT, &chain_at, Some(json!({ "certificate": inter.pem() }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e["error"].as_str().unwrap().contains("doesn't reach a self-signed root"), "{e}");
+    let ca = api.ok(Method::PUT, &chain_at, Some(json!({ "certificate": inter.pem(), "chain": root_cert.pem() }))).await;
+    assert_eq!((ca["status"].as_str(), ca["domains"].clone()), (Some("active"), json!(["prod.svc.internal"])));
+    assert!(ca.get("csr").is_none() && ca["ca_chain"].as_str().unwrap().ends_with(&root_cert.pem()));
+    // A leaf never outlives the intermediate, and comes with the chain.
+    let (s, e) = api.call(Method::POST, &format!("/cas/{id}/sign"), Some(json!({ "csr": leaf_csr, "days": 60 }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e["error"].as_str().unwrap().contains("its own certificate ends"), "{e}");
+    let signed = api.ok(Method::POST, &format!("/cas/{id}/sign"), Some(json!({ "csr": leaf_csr }))).await;
+    let ders: Vec<Vec<u8>> = x509_parser::pem::Pem::iter_from_buffer(signed["ca_chain"].as_str().unwrap().as_bytes()).map(|p| p.unwrap().contents).collect();
+    assert_eq!(ders.len(), 2);
+    let (_, leaf_pem) = parse_x509_pem(signed["certificate"].as_str().unwrap().as_bytes()).unwrap();
+    let leaf = rustls_pki_types::CertificateDer::from(leaf_pem.contents);
+    let root_der = rustls_pki_types::CertificateDer::from(root_cert.der().to_vec());
+    let anchors = [webpki::anchor_from_trusted_cert(&root_der).unwrap()];
+    let through = [rustls_pki_types::CertificateDer::from(ders[0].clone())];
+    let ee = webpki::EndEntityCert::try_from(&leaf).unwrap();
+    ee.verify_for_usage(webpki::ALL_VERIFICATION_ALGS, &anchors, &through, rustls_pki_types::UnixTime::now(), webpki::KeyUsage::server_auth(), None, None).expect("the leaf verifies against the root through roll's intermediate");
+    // A link's certificate carries the chain too.
+    let link = json!({ "kind": "pki", "ref": id, "field": "ca_chain", "mode": "dynamic", "options": { "names": ["web.prod.svc.internal"], "ttl_minutes": 60 } });
+    api.ok(Method::POST, "/environments/production/changes", Some(json!({ "ops": [{ "op": "set", "key": "TLS_CA_CHAIN", "link": link }] }))).await;
+    let r = api.ok(Method::POST, "/environments/production/resolve", Some(json!({ "consumer": "app:web" }))).await;
+    assert_eq!(r["values"]["TLS_CA_CHAIN"], signed["ca_chain"]);
 }
 
 /// Another source of bound hosts (`Secrets::set_bound_hosts`), for bindings placeholders refuse to
@@ -5844,6 +6263,42 @@ async fn roll_signs_an_apps_instance_a_token_for_an_hour_at_most() {
     assert!(!audit.to_string().contains(tokens[0].as_str()), "never the token");
 }
 
+/// A preview's own service (roll previews' `roll.toml` services) gets roll's word under a subject of
+/// its own, never an app's, in the preview's environment; a fork's preview (untrusted) gets nothing,
+/// decided here from the environment's own flag; each is audited as the preview's service, never
+/// the token.
+#[tokio::test]
+async fn a_previews_service_gets_a_token_of_its_own_and_a_forks_none() {
+    let api = Api::new().await;
+    for (slug, trusted) in [("pv-vetted1", true), ("pv-fork1", false)] {
+        api.ok(Method::POST, "/environments", Some(json!({ "slug": slug, "base": "production", "trusted": trusted }))).await;
+    }
+    // A standard environment a person named like a preview's.
+    api.ok(Method::POST, "/environments", Some(json!({ "slug": "pv-std1" }))).await;
+    let (s, p) = (api.secrets.clone(), api.project.clone());
+    let (vetted, fork, standard) = tokio::task::spawn_blocking(move || {
+        let sub = |preview: &str| roll_secrets::Subject::Preview { project: p.clone(), preview: preview.into(), service: "web".into() };
+        let hour = std::time::Duration::from_secs(3600);
+        (s.issue(sub("pv_vetted1"), "sts.amazonaws.com", 2 * hour), s.issue(sub("pv_fork1"), "sts.amazonaws.com", hour), s.issue(sub("pv_std1"), "sts.amazonaws.com", hour))
+    })
+    .await
+    .unwrap();
+    assert!(matches!(fork, Err(roll_secrets::Error::Forbidden(_))), "{fork:?}");
+    assert!(matches!(standard, Err(roll_secrets::Error::NotFound(_))), "a standard environment is no preview's: {standard:?}");
+    let token = vetted.unwrap();
+    let jwks = api.ok(Method::GET, "/v1/secrets/oidc/jwks", None).await;
+    let (_, claims, signed) = roll_token(&jwks, &token);
+    assert!(signed);
+    let sub = format!("roll-previews:{}:pv_vetted1:web", api.project);
+    assert_eq!(claims["sub"], json!(sub));
+    assert_eq!((claims["environment"].clone(), claims["preview"].clone(), claims["preview_id"].clone()), (json!("pv-vetted1"), json!(true), json!("pv_vetted1")));
+    assert_eq!(claims["exp"].as_i64().unwrap() - claims["iat"].as_i64().unwrap(), 3600, "an hour at most");
+    assert!(matches!(roll_secrets::Subject::parse(&sub), Some(roll_secrets::Subject::Preview { .. })));
+    let audit = api.ok(Method::GET, "/audit", None).await;
+    assert!(audit.as_array().unwrap().iter().any(|a| a["action"] == "oidc.issue" && a["actor"] == "preview:pv_vetted1:web"), "{audit}");
+    assert!(!audit.to_string().contains(token.as_str()), "never the token");
+}
+
 #[tokio::test]
 async fn the_issuers_key_rotates_published_a_day_before_it_signs_and_retires_after_its_tokens() {
     use roll_secrets::issuer::{PUBLISH_AHEAD_MS, RETIRE_AFTER_MS};
@@ -6458,6 +6913,41 @@ async fn members_reach_secrets_by_their_role() {
     assert_eq!(get("bob", format!("/v1/secrets/projects/{}/environments/development/secrets", api.project)).await.0, StatusCode::NOT_FOUND);
 }
 
+/// A project as it's made, nothing protected by hand (#688): a developer on the default role works
+/// in development and staging but never reveals production, and a check (an untrusted resolve)
+/// reads staging but is refused production, even through the operator.
+#[tokio::test]
+async fn a_fresh_projects_production_is_out_of_a_developers_and_a_checks_reach() {
+    let api = Api::new().await;
+    let (_, p) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "fresh" }))).await;
+    let fresh = p["id"].as_str().unwrap().to_string();
+    let at = |rest: &str| format!("/v1/secrets/projects/{fresh}{rest}");
+    let (s, e) = api.as_ada(Method::PUT, &at("/environments/production/secrets/KEY"), Some(json!({ "value": "fake-prod-value" }))).await;
+    assert!(s.is_success(), "{e}");
+    api.join(&fresh, "bob", "developer", None).await;
+
+    for env in ["development", "staging"] {
+        let value = format!("fake-{env}-value");
+        let (s, e) = api.signed_in("bob", false, Method::PUT, &at(&format!("/environments/{env}/secrets/KEY")), Some(json!({ "value": value }))).await;
+        assert!(s.is_success(), "{env}: {e}");
+        let (s, v) = api.signed_in("bob", false, Method::GET, &at(&format!("/environments/{env}/secrets/KEY/value")), None).await;
+        assert_eq!((s, v["value"].as_str()), (StatusCode::OK, Some(value.as_str())), "{env}: {v}");
+    }
+    let (s, v) = api.signed_in("bob", false, Method::GET, &at("/environments/production/secrets/KEY/value"), None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+    assert!(!v.to_string().contains("fake-prod-value"));
+
+    let check = |env: &str| {
+        let (api, path) = (&api, at(&format!("/environments/{env}/resolve")));
+        async move { api.call(Method::POST, &path, Some(json!({ "consumer": "check:fresh/web#1", "untrusted": true }))).await }
+    };
+    let (s, r) = check("staging").await;
+    assert_eq!((s, r["values"]["KEY"].as_str()), (StatusCode::OK, Some("fake-staging-value")), "{r}");
+    let (s, r) = check("production").await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{r}");
+    assert!(!r.to_string().contains("fake-prod-value"));
+}
+
 /// A project whose production isn't protected (made before new ones started with it protected) is
 /// never changed silently: Health says so and names what reaches it (owners and admins, a developer
 /// who names it, a check that read it), a developer's default still leaves it out, and protecting it
@@ -6924,11 +7414,20 @@ async fn a_deleted_project_reads_as_unknown_and_comes_back_within_its_window() {
     let (ada_ci, _) = api.gate.grant("ada-ci", roll_secrets::access::rule(&hers, None, None, &[roll_secrets::Action::Read]), Some("usr_ada"));
     let envs = format!("/v1/secrets/projects/{hers}/environments");
     assert_eq!(api.req(Method::GET, &envs, None, Some(&ada_ci)).await.0, StatusCode::OK);
+    // A sandbox she copied development into reads it again as her at each start: in the project's
+    // window it's kept (the sandbox waits), not refused (it would let go of the values for good).
+    let copy = || api.secrets.values_as_maker("usr_ada", &hers, "development", "/", "sandbox:sbx_notes").map(|v| v.values.contains_key("TOKEN"));
+    let standing = || api.secrets.environment_standing(&hers, "development").unwrap();
+    assert!(copy().unwrap());
     assert_eq!(api.call(Method::DELETE, &format!("/v1/workspace/projects/{hers}?confirm=notes"), None).await.0, StatusCode::NO_CONTENT);
     assert_eq!(api.req(Method::GET, &envs, None, Some(&ada_ci)).await.0, StatusCode::NOT_FOUND);
+    assert!(copy().is_err());
+    assert!(matches!(standing(), roll_secrets::deleted_envs::Standing::Kept { .. }), "{:?}", standing());
     assert_eq!(api.as_ada(Method::GET, "/v1/secrets/deleted", None).await.1[0]["project"], hers.as_str());
     assert_eq!(api.as_ada(Method::POST, &format!("/v1/secrets/projects/{hers}/recover"), None).await.0, StatusCode::OK);
     assert_eq!(api.req(Method::GET, &envs, None, Some(&ada_ci)).await.0, StatusCode::OK, "her membership came back with it");
+    assert_eq!(standing(), roll_secrets::deleted_envs::Standing::Live);
+    assert!(copy().unwrap(), "the sandbox's next start has its values again");
 
     let back = api.ok(Method::POST, &recover, None).await;
     assert_eq!(back["name"], "shop");
@@ -6966,6 +7465,7 @@ async fn past_its_window_a_deleted_project_ends_its_log_at_a_signed_digest_then_
     sweep().await;
     let recover = format!("/v1/secrets/projects/{}/recover", api.project);
     assert_eq!(api.call(Method::POST, &recover, None).await.0, StatusCode::GONE, "closed: no way back");
+    assert_eq!(api.secrets.environment_standing(&api.project, "production").unwrap(), roll_secrets::deleted_envs::Standing::Gone, "a sandbox copying it lets go");
     assert_eq!(count("secrets"), 1, "the sink hasn't had the closing digest yet");
     api.db.write(|c| c.execute("UPDATE audit SET at = at - 60000", ())).unwrap();
     sweep().await;
@@ -7040,6 +7540,36 @@ async fn deleting_a_protected_environment_that_asks_for_approvals_is_a_change_re
     assert_eq!(r["state"], "applied");
     assert_eq!(api.call(Method::GET, "/environments/production", None).await.0, StatusCode::NOT_FOUND);
     assert_eq!(api.ok(Method::GET, "/v1/secrets/deleted", None).await[0]["environment"], "production");
+}
+
+/// Decide, then revoke: an environment's delete that its write refuses (here an ephemeral one based
+/// on it meanwhile) revokes none of what it issued and is no event; the delete that goes revokes it
+/// all, with its `env.deleted`.
+#[tokio::test]
+async fn an_environment_delete_its_write_refuses_revokes_nothing() {
+    let api = Api::new().await;
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{}/resources/bucket/assets", api.project), Some(json!({ "x": 0, "y": 0 }))).await;
+    let link = |field: &str, mode: &str| json!({ "link": { "kind": "bucket", "ref": "assets", "field": field, "mode": mode } });
+    api.ok(Method::PUT, "/environments/production/secrets/AWS_ACCESS_KEY_ID", Some(link("access_key_id", "managed"))).await;
+    api.ok(Method::PUT, "/environments/production/secrets/TEMP_KEY", Some(link("access_key_id", "dynamic"))).await;
+    api.ok(Method::POST, "/environments/production/resolve", Some(json!({ "consumer": "app:web" }))).await;
+    let live = api.fake.live_keys.lock().unwrap().clone();
+    assert_eq!(live.len(), 2, "a managed key and a lease: {live:?}");
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "approvals": 1 }))).await;
+    let (_, r) = api.call(Method::DELETE, "/environments/production?confirm=production", None).await;
+    let id = r["request"]["id"].as_str().unwrap().to_string();
+    let reviewer = api.token(json!({ "name": "lead", "actions": ["read", "admin", "write", "delete"] }));
+    api.req(Method::POST, &format!("/environments/production/requests/{id}/review"), Some(json!({ "verdict": "approve" })), Some(&reviewer)).await;
+    api.ok(Method::POST, "/environments", Some(json!({ "slug": "pv-1", "base": "production", "ttl_minutes": 60 }))).await;
+    let (s, e) = api.call(Method::POST, &format!("/environments/production/requests/{id}/apply"), None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{e}");
+    assert_eq!(*api.fake.live_keys.lock().unwrap(), live, "refused: nothing revoked");
+    assert!(api.ok(Method::GET, "/leases", None).await.as_array().unwrap().iter().all(|l| l["revoked_at"].is_null()));
+    assert_eq!(api.ok(Method::GET, "/events?kinds=env.deleted", None).await["events"], json!([]), "nor an event");
+    api.ok(Method::DELETE, "/environments/pv-1", None).await;
+    assert_eq!(api.ok(Method::POST, &format!("/environments/production/requests/{id}/apply"), None).await["state"], "applied");
+    assert!(api.fake.live_keys.lock().unwrap().is_empty(), "deleted: what it issued is revoked");
+    assert_eq!(api.ok(Method::GET, "/events?kinds=env.deleted", None).await["events"].as_array().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -7160,7 +7690,7 @@ async fn the_events_feed_answers_in_commit_order_filtered_by_kind_environment_an
     assert_eq!(got, [("scan.finding", Some("production")), ("scan.finding", Some("staging")), ("production.unprotected", Some("production")), ("env.deleted", Some("qa")), ("env.recovered", Some("qa"))]);
     let seqs: Vec<i64> = events.iter().map(|e| e["seq"].as_i64().unwrap()).collect();
     assert!(seqs.windows(2).all(|w| w[0] < w[1]) && seqs[0] > start, "{seqs:?}");
-    assert_eq!(all["next"], json!(seqs[4]));
+    assert_eq!(all["next"], api.ok(Method::GET, "/events?latest=1", None).await["next"], "a short page ends at the head");
     assert_eq!(events[0]["key"], "STRIPE_KEY");
     assert_eq!(events[0]["data"]["matched"], 2);
     // Never a value, or anything made from one: names, kinds, ids, counts and reasons.
@@ -7261,4 +7791,101 @@ async fn a_permission_change_since_the_answer_held_gets_the_full_set() {
     assert_eq!((s, d["delta"].as_bool()), (StatusCode::OK, Some(false)), "{d}");
     assert_eq!(d["values"]["A"], "1");
     assert!(d["problems"].as_array().unwrap().iter().any(|p| p["key"] == "R"), "{d}");
+}
+
+#[tokio::test]
+async fn a_change_is_one_event_at_its_audit_rows_seq_naming_keys_and_versions_never_a_value() {
+    let api = Api::new().await;
+    let (a, b, p) = ("sk_live_changedA0123456789", "sk_live_changedB0123456789", "sk_live_changedP0123456789");
+    let start = api.ok(Method::GET, "/events?latest=1", None).await["next"].as_i64().unwrap();
+    // A bulk write is one row naming its keys, so one event; then production, a delete, and a
+    // policy change (not a value: `access.changed`).
+    let bulk = api.ok(Method::POST, "/environments/staging/changes", Some(json!({ "ops": [{ "op": "set", "key": "A", "value": a }, { "op": "set", "key": "B", "value": b }] }))).await;
+    api.set("production", "STRIPE_KEY", p).await;
+    api.ok(Method::DELETE, "/environments/staging/secrets/A", None).await;
+    api.ok(Method::PUT, "/environments/staging/policy", Some(json!({ "protected": true, "approvals": 0 }))).await;
+
+    let all = api.ok(Method::GET, &format!("/events?after={start}"), None).await;
+    let events = all["events"].as_array().unwrap();
+    let got: Vec<(&str, Option<&str>)> = events.iter().map(|e| (e["kind"].as_str().unwrap(), e["environment"].as_str())).collect();
+    assert_eq!(got, [("secret.changed", Some("staging")), ("secret.changed", Some("production")), ("secret.deleted", Some("staging")), ("access.changed", Some("staging"))], "{all}");
+    let change = bulk["change"]["seq"].as_i64().unwrap();
+    assert_eq!(events[0]["data"]["keys"], json!(["A", "B"]));
+    assert_eq!((&events[0]["data"]["versions"], &events[0]["data"]["via"], &events[0]["data"]["change"]), (&json!({ "A": 1, "B": 1 }), &json!("write"), &json!(change)));
+    assert_eq!((&events[2]["key"], &events[2]["data"]["version"]), (&json!("A"), &json!(2)));
+    // At its audit row's place in the chain.
+    let audit = api.ok(Method::GET, "/audit?action=secrets.write", None).await;
+    let row = audit.as_array().unwrap().iter().find(|r| r["summary"].as_str().unwrap().starts_with(&format!("#{change} "))).unwrap();
+    assert_eq!(row["seq"], events[0]["seq"]);
+    let text = all.to_string();
+    assert!(![a, b, p, "changedA", "changedB", "changedP"].iter().any(|v| text.contains(v)), "{text}");
+
+    // Filtered by family, and left out where the reader can't read.
+    let kinds = api.ok(Method::GET, &format!("/events?after={start}&kinds=secret.*"), None).await;
+    assert_eq!(kinds["events"].as_array().unwrap().iter().map(|e| e["kind"].as_str().unwrap()).collect::<Vec<_>>(), ["secret.changed", "secret.changed", "secret.deleted"]);
+    let token = api.token(json!({ "environments": ["staging"], "actions": ["read"] }));
+    let (_, mine) = api.req(Method::GET, &format!("/events?after={start}&kinds=secret.changed"), None, Some(&token)).await;
+    assert_eq!(mine["events"].as_array().unwrap().iter().map(|e| e["environment"].as_str().unwrap()).collect::<Vec<_>>(), ["staging"], "{mine}");
+}
+
+/// Every write is an event (#793): a follower of rare kinds, of one environment, or with a grant
+/// that leaves most rows out, has its cursor at the head once it has read up to it, so it never
+/// walks the same rows again.
+#[tokio::test]
+async fn a_filtered_follower_moves_to_the_head_past_the_rows_its_filter_left_out() {
+    let api = Api::new().await;
+    let start = api.ok(Method::GET, "/events?latest=1", None).await["next"].as_i64().unwrap();
+    for i in 0..300 {
+        api.set("development", "N", &i.to_string()).await;
+    }
+    let head = api.ok(Method::GET, "/events?latest=1", None).await["next"].clone();
+    assert!(head.as_i64().unwrap() >= start + 300, "{head}");
+    for q in ["kinds=secret.leaked", "environment=staging", "kinds=secret.changed&environment=production"] {
+        let page = api.ok(Method::GET, &format!("/events?after={start}&{q}"), None).await;
+        assert_eq!((&page["events"], &page["next"]), (&json!([]), &head), "{q}");
+    }
+    let staging = api.token(json!({ "environments": ["staging"], "actions": ["read"] }));
+    let (_, page) = api.req(Method::GET, &format!("/events?after={start}"), None, Some(&staging)).await;
+    assert_eq!((&page["events"], &page["next"]), (&json!([]), &head), "the grant's");
+    // A full page stops at its last event, short of the head.
+    let page = api.ok(Method::GET, &format!("/events?after={start}&limit=10"), None).await;
+    assert_eq!(page["next"], page["events"][9]["seq"]);
+}
+
+/// A change across folders (a batch whose operations name their folders) is one change at `/`: a
+/// reader of one folder sees it, with that folder's keys only, never another folder's key names.
+#[tokio::test]
+async fn a_folder_scoped_reader_sees_a_change_across_folders_with_only_its_keys() {
+    let api = Api::new().await;
+    let start = api.ok(Method::GET, "/events?latest=1", None).await["next"].as_i64().unwrap();
+    let ops = json!([{ "op": "set", "key": "DB_URL", "value": "postgres://app", "path": "/app" }, { "op": "set", "key": "X", "value": "x", "path": "/db" }]);
+    api.ok(Method::POST, "/environments/staging/changes", Some(json!({ "ops": ops }))).await;
+    let all = api.ok(Method::GET, &format!("/events?after={start}&kinds=secret.changed"), None).await;
+    assert_eq!(all["events"][0]["data"]["folders"], json!({ "/app": ["DB_URL"], "/db": ["X"] }), "{all}");
+
+    let app = api.token(json!({ "environments": ["staging"], "paths": ["/app"], "actions": ["read"] }));
+    let (s, mine) = api.req(Method::GET, &format!("/events?after={start}&kinds=secret.changed"), None, Some(&app)).await;
+    assert_eq!(s, StatusCode::OK, "{mine}");
+    let e = &mine["events"][0];
+    assert_eq!((mine["events"].as_array().unwrap().len(), &e["key"], &e["data"]["folders"], &e["data"]["versions"]), (1, &json!("DB_URL"), &json!({ "/app": ["DB_URL"] }), &json!({ "DB_URL": 1 })), "{mine}");
+    let text = mine.to_string();
+    assert!(!text.contains("\"X\"") && !text.contains("/db"), "{text}");
+    let web = api.token(json!({ "environments": ["staging"], "paths": ["/web"], "actions": ["read"] }));
+    assert_eq!(api.req(Method::GET, &format!("/events?after={start}"), None, Some(&web)).await.1["events"], json!([]));
+}
+
+#[tokio::test]
+async fn a_rotation_now_is_rotation_succeeded_with_the_keys_new_version() {
+    let api = Api::new().await;
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{}/resources/bucket/assets", api.project), Some(json!({ "x": 0, "y": 0 }))).await;
+    let link = json!({ "kind": "bucket", "ref": "assets", "field": "secret_access_key", "mode": "managed" });
+    api.ok(Method::PUT, "/environments/staging/secrets/AWS_SECRET_ACCESS_KEY", Some(json!({ "link": link }))).await;
+    let start = api.ok(Method::GET, "/events?latest=1", None).await["next"].as_i64().unwrap();
+    api.ok(Method::POST, "/environments/staging/secrets/AWS_SECRET_ACCESS_KEY/rotate", None).await;
+    let events = api.ok(Method::GET, &format!("/events?after={start}"), None).await["events"].clone();
+    let got: Vec<(&str, &Value)> = events.as_array().unwrap().iter().map(|e| (e["kind"].as_str().unwrap(), &e["data"]["via"])).collect();
+    assert_eq!(got, [("secret.changed", &json!("rotation")), ("rotation.succeeded", &Value::Null)], "{events}");
+    let done = &events[1];
+    assert_eq!((&done["key"], &done["data"]["version"], &done["data"]["scheduled"]), (&json!("AWS_SECRET_ACCESS_KEY"), &json!(2), &json!(false)), "{done}");
+    assert!(!events.to_string().contains("sk-2"));
 }

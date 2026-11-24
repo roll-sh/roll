@@ -532,6 +532,9 @@ impl Secrets {
         db.add_column("audit", "event", "TEXT")?;
         db.add_column("audit", "event_data", "TEXT")?;
         db.ensure_schema(events::SCHEMA)?;
+        // A feed filtered by kind reads an index range, not every event since its cursor (#793 made
+        // every write an event).
+        db.migrate("secrets-audit-event-kinds", |c| c.execute_batch("CREATE INDEX IF NOT EXISTS audit_event_kinds ON audit (project_id, event, seq) WHERE event IS NOT NULL"))?;
         // Workload identities (identities.rs); their logins' tokens are roll-access's.
         db.ensure_schema(identities::SCHEMA)?;
         // Secrets' own `rlst_` tokens are gone (roll-access's grants instead); never on main.
@@ -615,8 +618,12 @@ impl Secrets {
         db.ensure_schema(placeholders::SCHEMA)?;
         db.ensure_schema(rotators::SCHEMA)?;
         db.ensure_schema(saas::SCHEMA)?;
+        db.add_column("saas_rotators", "credential_expires_at", "INTEGER")?;
         db.ensure_schema(transit::SCHEMA)?;
         db.ensure_schema(pki::SCHEMA)?;
+        // An intermediate CA (pki.rs): its CSR while it's pending, then the certificates above it.
+        db.add_column("cas", "csr", "TEXT")?;
+        db.add_column("cas", "chain", "TEXT")?;
         // ACME on a CA (acme.rs): whether its bindings' names are pre-authorized.
         db.ensure_schema(acme::SCHEMA)?;
         db.add_column("cas", "acme_preauthorize", "INTEGER")?;

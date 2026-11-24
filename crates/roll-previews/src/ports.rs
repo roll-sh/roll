@@ -155,6 +155,12 @@ pub trait Brancher: Send + Sync {
     async fn branch_schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<Vec<String>>> {
         Ok(None)
     }
+    /// A look at the branch's data as its own role, read-only: its tables (`table: None`), or a
+    /// table's first [`crate::BROWSE_ROWS`] rows. `None` where the product has no way to show it
+    /// here yet.
+    async fn browse(&self, _parent: &str, _branch: &str, _table: Option<&str>) -> anyhow::Result<Option<crate::Browse>> {
+        Ok(None)
+    }
 }
 
 /// A change (or branch) as previews see it.
@@ -202,6 +208,8 @@ pub struct ServiceSpec {
     pub env: Vec<(String, String)>,
     /// A path that answers 2xx/3xx once the service works (`roll.toml` `health`).
     pub health: Option<String>,
+    /// A page loaded before a push keeps reaching that push (`roll.toml` `skew_protection`).
+    pub skew_protection: bool,
     /// Page states its screenshots reach, from its `roll.toml` (`[[preview.states]]`).
     pub states: Vec<crate::settings::StateRule>,
     /// More of its own pages, and selectors blanked in screenshots, from its `roll.toml`.
@@ -235,6 +243,10 @@ pub struct Shot {
     /// [`crate::store::CROP_MAX`] bytes. A note whose element wasn't found is left out.
     #[serde(with = "png_b64::pairs")]
     pub crops: Vec<(String, Vec<u8>)>,
+    /// What its pages served (a path, its bytes), for the engine to look for the preview's secret
+    /// values in ([`crate::served_secrets`]); never kept.
+    #[serde(default, with = "png_b64::pairs")]
+    pub bodies: Vec<(String, Vec<u8>)>,
 }
 
 /// PNG bytes as base64 in JSON (a [`Shot`] from another node).
@@ -368,6 +380,9 @@ pub struct ShotOptions {
     /// The open notes' elements to crop in the first service's run (Vercel's comments show what
     /// they're about), at most [`crate::store::CROPS_PER_RUN`].
     pub crops: Vec<CropAsk>,
+    /// Where the service serves Storybook (`/`, `/storybook/`; `github.storybook`): its stories
+    /// are taken too, each a page (`story:<id>`).
+    pub stories: Option<String>,
 }
 
 /// One more page of a [`Shot`]: its path, its PNG, and what went wrong while it loaded.
@@ -449,6 +464,18 @@ pub trait Source: Send + Sync {
 }
 
 /// What a service should run. (No `Debug`: `vars` holds the branches' passwords.)
+/// A browser check's result on the service's live deployment, where its backend runs them on
+/// previews (roll apps: production's browser checks, once on each head).
+#[derive(Clone, Debug, PartialEq)]
+pub struct BrowserCheckResult {
+    pub name: String,
+    /// `None`: not run on the live deployment yet.
+    pub passed: Option<bool>,
+    pub error: Option<String>,
+    /// Where its backend keeps the failure's screenshot and trace, when it kept them.
+    pub files: Option<crate::BrowserCheckFiles>,
+}
+
 /// The build a service runs now, where its backend keeps each build at a URL of its own.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LiveBuild {
@@ -624,6 +651,31 @@ pub trait SpanReader: Send + Sync {
 }
 
 /// A terminal's stream, both ways (a hijacked Docker exec).
+/// A laptop's process standing in for a service (`roll preview swap`): the HTTP/2 connection its
+/// tunnel carries, which the laptop serves.
+pub type Laptop = hyper::client::conn::http2::SendRequest<axum::body::Body>;
+
+/// A page of a preview's service as roll read it (`GET …/fetch`): its status, the headers worth
+/// seeing, and its body up to [`FETCH_MAX`] bytes.
+pub struct Fetched {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    pub truncated: bool,
+}
+
+/// The most of a page `GET …/fetch` reads.
+pub const FETCH_MAX: usize = 256 << 10;
+
+/// roll's OIDC issuer for a preview's own services (roll secrets', in process: Vercel's OIDC
+/// federation): a token whose `sub` is `roll-previews:<project>:<preview>:<service>`, for `aud`, at
+/// most an hour. roll secrets refuses a fork's preview itself; rolld's checks the project stands
+/// for the service's repo. `None` where the issuer isn't on this server (no public URL).
+#[async_trait]
+pub trait Issuer: Send + Sync {
+    async fn issue(&self, project: &str, repo: &str, preview: &str, service: &str, aud: &str, ttl: std::time::Duration) -> anyhow::Result<Option<String>>;
+}
+
 pub trait ShellIo: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> ShellIo for T {}
 
@@ -749,6 +801,11 @@ pub trait Apps: Send + Sync {
     async fn live_build(&self, _preview: &str, _service: &str) -> Option<LiveBuild> {
         None
     }
+    /// Production's browser checks on the service's live deployment, each with its result once
+    /// it has run there; `None` where the backend runs none for it.
+    async fn browser_checks(&self, _preview: &str, _service: &str) -> Option<Vec<BrowserCheckResult>> {
+        None
+    }
     /// A build like `deployment` (an earlier head's), taking no traffic, with `plain` and the
     /// branches' `branches` in place of the environment's own (an earlier push's own copy of the
     /// data): its own URL once it's ready. `None` where the backend can't (it then shares the
@@ -848,6 +905,20 @@ pub trait Apps: Send + Sync {
     async fn forward(&self, _preview: &str, _service: &str, _port: u16) -> anyhow::Result<Option<Box<dyn ShellIo>>> {
         Ok(None)
     }
+    /// `path` of the service, read through roll's own way in, `GET` or `HEAD`: the runtime's own
+    /// proxy past its gate; a roll apps service through roll apps' proxy at its `url`, with the
+    /// preview's link token (`access`) as a visitor's cookie. `None` where this backend can't.
+    async fn fetch(&self, _preview: &str, _service: &str, _url: &str, _access: Option<&str>, _path: &str, _head: bool) -> anyhow::Result<Option<Fetched>> {
+        Ok(None)
+    }
+    /// Whether `service` can be swapped for a laptop's process here (`roll preview swap`): roll's
+    /// runtime serves its requests itself; roll apps' services are roll apps'.
+    async fn can_swap(&self, _preview: &str, _service: &str) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+    /// The service's requests go to `to` while it's there, instead of its container; `None` gives
+    /// them back.
+    fn swap(&self, _preview: &str, _service: &str, _to: Option<Laptop>) {}
     /// A tar's files written under `dir` in the running service (started if it sleeps). `false`
     /// where this backend has none here.
     async fn write_files(&self, _preview: &str, _service: &str, _dir: &str, _tar: bytes::Bytes) -> anyhow::Result<bool> {

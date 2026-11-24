@@ -254,7 +254,7 @@ fails, ran, stood_in = [], 0, []
 # Two passes: tools without required arguments first (their answers give ids), then the others.
 for pass_ in (0, 1):
     for t in reads:
-        req = t["inputSchema"].get("required", [])
+        req = t["inputSchema"].get("required", []) or t.get("_meta", {}).get("roll/one_of", [])[:1]  # one of some arguments: the first
         if (pass_ == 0) != (not req):
             continue
         args = {}
@@ -301,7 +301,7 @@ if reader:
     secrets.discard(reader)
     for t in reads:
         prod = t.get("_meta", {}).get("roll/product", "")
-        req = t["inputSchema"].get("required", [])
+        req = t["inputSchema"].get("required", []) or t.get("_meta", {}).get("roll/one_of", [])[:1]  # one of some arguments: the first
         if any((prod, a) not in seen for a in req):
             continue
         args = {a: seen[(prod, a)] for a in req}
@@ -401,7 +401,7 @@ if isinstance(viewer, dict):
         prod = t.get("_meta", {}).get("roll/product", "")
         if prod not in ("secrets", "previews", "workspace") or not t.get("annotations", {}).get("readOnlyHint"):
             continue
-        req = t["inputSchema"].get("required", [])
+        req = t["inputSchema"].get("required", []) or t.get("_meta", {}).get("roll/one_of", [])[:1]  # one of some arguments: the first
         args = {a: seen[(prod, a)] if (prod, a) in seen else stand_in(t, prod, a) for a in req}
         res = rpc("tools/call", {"name": t["name"], "arguments": args}, token=vt).get("result", {})
         called += 1

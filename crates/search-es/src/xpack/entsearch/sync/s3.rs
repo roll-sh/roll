@@ -1,18 +1,20 @@
 //! The `s3` connector: a bucket's objects, listed a page at a time, each a document with its
 //! text ([`super::extract`]). Any S3-compatible endpoint works; it is the tenant's choice, so it
-//! goes through [`crate::s3::Client`] (public addresses only, no redirects, bounded reads).
+//! goes through [`crate::s3::Client`] (the node's egress check, [`crate::egress`]: public
+//! addresses only, never one the node denies; no redirects, bounded reads).
 
 use super::config::Values;
 use super::extract;
 use super::rules::{S3Rule, s3_rules_within};
 use super::{DOC_BYTES_MAX, PAGE_BYTES, Sink, Stop};
 use crate::json::{Map, Value};
+use crate::egress::Egress;
 use crate::s3::{Client, Credentials, Location};
 use md5::Digest;
 
 /// Syncs the configured buckets (or the advanced rules' prefixes); the new cursor
 /// (`{"buckets": {bucket: newest LastModified}}`).
-pub async fn sync(v: &Values, sink: &mut Sink<'_>, full: bool, cursor: &Value, advanced: Option<&Value>, allow_private: bool) -> Result<Value, Stop> {
+pub async fn sync(v: &Values, sink: &mut Sink<'_>, full: bool, cursor: &Value, advanced: Option<&Value>, egress: &Egress) -> Result<Value, Stop> {
     let targets: Vec<S3Rule> = match advanced {
         Some(a) => s3_rules_within(a, &v.list("buckets"))?,
         None => v.list("buckets").into_iter().map(|bucket| S3Rule { bucket, prefix: String::new(), extensions: Vec::new() }).collect(),
@@ -25,7 +27,9 @@ pub async fn sync(v: &Values, sink: &mut Sink<'_>, full: bool, cursor: &Value, a
     }
     let region = v.text("region").unwrap_or_else(|| "us-east-1".into());
     let given = v.text("endpoint");
-    let endpoint = crate::s3::endpoint(given.as_deref(), None, &region, allow_private).map_err(|e| Stop::Failed(format!("the connector's endpoint: {e}")))?;
+    let endpoint = crate::s3::endpoint(given.as_deref(), None, &region, egress).map_err(|e| Stop::Failed(format!("the connector's endpoint: {e}")))?;
+    // An address written out, against the node's own names as they resolve now.
+    egress.check_url_now(&endpoint).await.map_err(|e| Stop::Failed(format!("the connector's endpoint: {}", super::refused(e))))?;
     let creds = match (v.text("aws_access_key_id"), v.text("aws_secret_access_key")) {
         (Some(access_key), Some(secret_key)) => Some(Credentials { access_key, secret_key, session_token: None }),
         _ => None,
@@ -34,7 +38,7 @@ pub async fn sync(v: &Values, sink: &mut Sink<'_>, full: bool, cursor: &Value, a
     let mut next = cursor.get("buckets").and_then(Value::as_object).cloned().unwrap_or_default();
     for t in &targets {
         let at = Location { endpoint: endpoint.clone(), bucket: t.bucket.clone(), region: region.clone(), path_style: given.is_some() };
-        let client = Client::new(at, creds.clone(), allow_private).map_err(|e| Stop::Failed(format!("bucket [{}]: {e}", t.bucket)))?;
+        let client = Client::new(at, creds.clone(), egress).map_err(|e| Stop::Failed(format!("bucket [{}]: {e}", t.bucket)))?;
         let since = if full { None } else { next.get(&t.bucket).and_then(Value::as_str).map(str::to_string) };
         let newest = read_bucket(&client, sink, t, since.as_deref(), page_size).await?;
         let keep = next.get(&t.bucket).and_then(Value::as_str).map(str::to_string);

@@ -19,9 +19,11 @@
 //! [`api::router`] serves it under `/v1/workspace`.
 
 pub mod api;
+pub mod events;
 pub mod groups;
 pub mod members;
 
+pub use events::{EventPage, EventsQuery, FeedEvent};
 pub use groups::{Counts, Group, GroupMember, GroupOp, GroupRole};
 pub use members::{Actor, Invite, Member, MemberEvent, People, Person};
 
@@ -272,6 +274,7 @@ impl Workspace {
         db.ensure_schema(SCHEMA)?;
         db.ensure_schema(members::SCHEMA)?;
         db.ensure_schema(groups::SCHEMA)?;
+        db.ensure_schema(events::SCHEMA)?;
         db.migrate("workspace-owners-copy", |c| {
             if !c.has_column("projects_v1", "id")? {
                 return Ok(());
@@ -355,6 +358,7 @@ impl Workspace {
         let icon = icon.map(check_icon).transpose()?;
         let id = new_id();
         let now = self.db.now_ms()?;
+        let handle = self.handle(owner);
         self.db.write(|c| {
             name_free(c, owner, name, None)?;
             // After every project before it, even one made the same millisecond: projects list
@@ -363,6 +367,10 @@ impl Workspace {
             let at = last.map_or(now, |l| now.max(l + 1));
             c.execute("INSERT INTO projects (id, owner, name, description, icon, created_at) VALUES (?, ?, ?, ?, ?, ?)", params![id, owner, name, description, icon, at])?;
             members::first_owner(c, &id, owner, at)?;
+            if !owner.is_empty() {
+                let data = serde_json::json!({ "user": owner, "handle": handle, "role": "owner", "environments": null, "via": "created" });
+                events::emit(c, &id, at, events::Kind::MemberAdded, owner, owner, data)?;
+            }
             let mut p = load(c, &id)?;
             p.role = (!owner.is_empty()).then_some(roll_auth::roles::Role::Owner);
             Ok(p)
@@ -418,6 +426,11 @@ impl Workspace {
             let old: Vec<String> = c.query("SELECT id FROM deleted_projects WHERE deleted_at < ? OR id = ?", params![now - KEEP_DELETED_DAYS * 86_400_000, id], |r| r.get(0))?;
             for p in &old {
                 forget_deleted_rows(c, p)?;
+                // Gone for good: its feed too (never this project's, which may come back and
+                // must go on from its cursor).
+                if p != id {
+                    events::forget(c, p)?;
+                }
             }
             c.execute(&format!("INSERT INTO deleted_projects ({PROJECT_COLUMNS}, deleted_at) SELECT {PROJECT_COLUMNS}, ? FROM projects WHERE id = ?"), params![now, id])?;
             c.execute("INSERT INTO deleted_resources (project_id, owner, kind, ref, x, y, added_at) SELECT project_id, owner, kind, ref, x, y, added_at FROM resources WHERE project_id = ?", [id])?;
@@ -470,7 +483,14 @@ impl Workspace {
 
     /// Stop keeping a deleted project (a product purged what it kept of it).
     pub fn forget_deleted(&self, id: &str) -> Result<()> {
-        self.db.write(|c| forget_deleted_rows(c, id))
+        self.db.write(|c| {
+            // Only a project that is kept deleted, never one restored since.
+            let kept = c.query_row("SELECT 1 FROM deleted_projects WHERE id = ?", [id], |r| r.get::<_, i64>(0)).optional()?.is_some();
+            if kept {
+                events::forget(c, id)?;
+            }
+            forget_deleted_rows(c, id)
+        })
     }
 
     /// Whether a deleted project's canvas stood for `kind ref` when it was deleted, from its kept

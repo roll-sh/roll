@@ -236,6 +236,71 @@ pub struct GrewSpan {
     pub main_ms: u64,
 }
 
+/// A token of roll's issuer for a preview's own service (`GET …/oidc/{token}`): Vercel's OIDC
+/// federation's, for a cloud's trust.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct OidcToken {
+    pub token: String,
+    /// Unix seconds.
+    pub expires_at: i64,
+}
+
+/// A look at a data branch as a reviewer sees it from the sheet (Neon's Tables): its tables, or a
+/// table's first rows, read as the branch's own role and read-only (`GET …/data/{resource}`).
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum Browse {
+    Rows { table: String, columns: Vec<String>, rows: Vec<Vec<Option<String>>>, more: bool },
+    Tables { tables: Vec<BrowseTable> },
+}
+
+/// A table of a branch: its name (`schema.table`) and about how many rows it holds.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct BrowseTable {
+    pub name: String,
+    pub rows: i64,
+}
+
+/// The most rows a look at a table shows.
+pub const BROWSE_ROWS: usize = 50;
+
+/// One of a preview's secret values in what its pages served (Netlify's secrets scan): which, by
+/// the name the preview gets it as (never the value), and where.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct ServedSecret {
+    pub key: String,
+    pub path: String,
+}
+
+/// What a preview's pages served, looked in at a head (`served_secrets`, a runtime fact).
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct ServedSecrets {
+    pub head: String,
+    pub secrets: Vec<ServedSecret>,
+}
+
+/// `keyed`'s values (name, value) found in `bodies` (path, bytes): each name and path once, at
+/// most 20.
+pub fn served_secrets(bodies: &[(String, Vec<u8>)], keyed: &[(String, String)]) -> Vec<ServedSecret> {
+    let mut out: Vec<ServedSecret> = Vec::new();
+    if keyed.is_empty() {
+        return out;
+    }
+    let Ok(ac) = aho_corasick::AhoCorasick::new(keyed.iter().map(|(_, v)| v.as_bytes())) else { return out };
+    for (path, bytes) in bodies {
+        for m in ac.find_overlapping_iter(bytes.as_slice()) {
+            let key = &keyed[m.pattern().as_usize()].0;
+            if !out.iter().any(|s| s.key == *key && s.path == *path) {
+                out.push(ServedSecret { key: key.clone(), path: path.clone() });
+                if out.len() >= 20 {
+                    return out;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// A preview's error groups that main's preview (`branch`) doesn't have: how many, and the most
 /// frequent few by service and title (masked).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -307,6 +372,11 @@ pub struct Preview {
     /// paths the project's path filters ignore (`None`: they run `head`).
     pub runs: Option<String>,
     pub trusted: bool,
+    /// A fork's preview (code from someone who can't push): its title, and anything its code
+    /// wrote, are outside text, which roll MCP's lockdown keeps from a model (`outside: true`, as
+    /// roll code marks a fork's change).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub outside: bool,
     pub desired: Desired,
     pub state: State,
     pub error: Option<String>,
@@ -349,6 +419,11 @@ pub struct Preview {
     /// Earlier pushes of the change's services, still reachable (newest first; the last
     /// [`store::PINNED_KEEP`] per service).
     pub earlier: Vec<Pinned>,
+    /// Production's browser checks on this head (roll apps runs them on a preview's deployment as
+    /// it goes live): each one's state, read until each has run.
+    pub browser_checks: Vec<BrowserCheck>,
+    /// The project's rule for them (`check`, `required`), when it's more than showing them.
+    pub browser_checks_rule: Option<String>,
     /// The earlier pushes' own copies of its data: how many, what they hold and keep costing
     /// (counted in `cost` with its branches').
     pub copies: Copies,
@@ -382,6 +457,9 @@ pub struct Preview {
     /// minutes: Sentry's new issues in a release).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_errors: Option<NewErrors>,
+    /// Its secret values its pages served at its head, by name and path (never the value).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub served_secrets: Vec<ServedSecret>,
     /// The project's rule for regressions against main's (`check`, `required`), when it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub regressions: Option<String>,
@@ -732,7 +810,9 @@ impl PageA11y {
 
 /// Something that happened to a preview, for followers (`GET /v1/previews/events`, roll MCP's
 /// event feeds): `created`, `ready` (up after a push or its first deploy; never a sleeping one
-/// waking), `failed`, `visual_change` (a visual change waits for review, once a head) or `deleted`. Ids and kinds only: `data` holds the head.
+/// waking), `failed`, `visual_change` (a visual change waits for review, once a head),
+/// `browser_checks_passed` or `browser_checks_failed` (production's browser checks have all run on
+/// the head, once a head) or `deleted`. Ids and kinds only: `data` holds the head.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Event {
     pub seq: i64,
@@ -879,6 +959,71 @@ pub struct EndpointTime {
     pub path: String,
     pub ms: u32,
     pub status: u16,
+    /// Its JSON answer's shape, `path types` lines ([`shape_changes`]); empty when it wasn't JSON.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shape: Vec<String>,
+}
+
+/// A field of an endpoint's JSON answer that main's has and this one doesn't, or whose type
+/// widened (Signadot's SmartTests, Optic's traffic diff): what breaks whoever reads it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ShapeChange {
+    /// `users[].email`: `[]` an array's elements, `*` an object keyed by ids.
+    pub path: String,
+    /// Its types in main's answer (`string`, `number|null`).
+    pub main: String,
+    /// Its types now; `None`: gone.
+    pub now: Option<String>,
+}
+
+const SHAPE_TYPES: [&str; 7] = ["object", "array", "[]", "string", "number", "boolean", "null"];
+
+/// A shape line as the session writes it: a printable path, a space, known types.
+fn shape_line_ok(l: &str) -> bool {
+    l.len() <= 200
+        && !l.chars().any(|c| c.is_control() || c == '`')
+        && l.rsplit_once(' ').is_some_and(|(p, t)| !p.is_empty() && t.split('|').all(|t| SHAPE_TYPES.contains(&t)))
+}
+
+/// What a JSON answer lost against main's: fields gone (only the outermost one said) and types
+/// that widened (`string` to `number`, or to `string|null`). Fields it gained and types that
+/// narrowed break nobody. What sits under an array that's empty on either side isn't known
+/// there, so it's never called gone: the two previews' data can differ. At most 10.
+pub fn shape_changes(now: &[String], main: &[String]) -> Vec<ShapeChange> {
+    use std::collections::{BTreeMap, BTreeSet};
+    if now.is_empty() || main.is_empty() {
+        return Vec::new();
+    }
+    let read = |lines: &[String]| -> BTreeMap<String, BTreeSet<String>> {
+        lines.iter().filter_map(|l| l.rsplit_once(' ')).map(|(p, t)| (p.to_string(), t.split('|').map(str::to_string).collect())).collect()
+    };
+    let (now, main) = (read(now), read(main));
+    let empty = |m: &BTreeMap<String, BTreeSet<String>>| m.iter().filter(|(_, t)| t.contains("[]") && !t.contains("array")).map(|(p, _)| format!("{p}[]")).collect::<Vec<_>>();
+    let unknown: Vec<String> = empty(&now).into_iter().chain(empty(&main)).collect();
+    let types = |t: &BTreeSet<String>| t.iter().map(|x| if x == "[]" { "array" } else { x.as_str() }).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>().join("|");
+    let mut gone: Vec<String> = Vec::new();
+    let mut out = Vec::new();
+    // Sorted: a field comes before what's under it.
+    for (p, was) in &main {
+        let under = |g: &String| p.starts_with(&format!("{g}.")) || p.starts_with(&format!("{g}[]"));
+        if out.len() >= 10 || unknown.iter().any(|u| p.starts_with(u.as_str())) || gone.iter().any(under) {
+            continue;
+        }
+        let was = types(was);
+        match now.get(p) {
+            None => {
+                gone.push(p.clone());
+                out.push(ShapeChange { path: p.clone(), main: was, now: None });
+            }
+            Some(t) => {
+                let is = types(t);
+                if is.split('|').any(|x| !was.split('|').any(|w| w == x)) {
+                    out.push(ShapeChange { path: p.clone(), main: was, now: Some(is) });
+                }
+            }
+        }
+    }
+    out
 }
 
 /// An endpoint's time against the branch's (`base_change.endpoints`).
@@ -889,6 +1034,9 @@ pub struct EndpointAgainst {
     pub status: u16,
     /// The branch's, when it timed the same path.
     pub main_ms: Option<u32>,
+    /// What its JSON answer lost against the branch's, when both answered 2xx JSON.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub shape_changes: Vec<ShapeChange>,
 }
 
 impl EndpointAgainst {
@@ -900,6 +1048,14 @@ impl EndpointAgainst {
 }
 
 impl PageSpeed {
+    /// As a preview's record shows it: its endpoints' shapes stay with the comparison.
+    pub fn without_shapes(mut self) -> PageSpeed {
+        for e in &mut self.endpoints {
+            e.shape.clear();
+        }
+        self
+    }
+
     /// From what the browser wrote, if it's that and within reason (10 minutes, 10 GiB, a
     /// layout shift up to 100).
     pub fn parse(json: &str) -> Option<PageSpeed> {
@@ -909,10 +1065,13 @@ impl PageSpeed {
         let ok = s.ttfb_ms <= ms && s.load_ms <= ms && s.fcp_ms.is_none_or(|f| f <= ms) && s.bytes <= 10 << 30;
         // The endpoints the project named, each once and within reason; anything else dropped.
         let mut seen = Vec::new();
-        s.endpoints.retain(|e| {
+        s.endpoints.retain_mut(|e| {
             let keep = crate::settings::page_path_ok(&e.path) && e.ms <= 60_000 && e.status <= 599 && !seen.contains(&e.path) && seen.len() < crate::settings::MAX_ENDPOINTS;
             if keep {
                 seen.push(e.path.clone());
+                // Its shape: whole lines as the session writes them, at most 100.
+                e.shape.retain(|l| shape_line_ok(l));
+                e.shape.truncate(100);
             }
             keep
         });
@@ -1159,6 +1318,44 @@ pub struct LeaseRow {
     pub lease: String,
     pub issued_at: i64,
     pub expires_at: i64,
+}
+
+/// A browser check's state on a preview's head.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CheckState {
+    /// Not run on this head's deployment yet.
+    Pending,
+    Passed,
+    Failed,
+}
+
+/// One of production's browser checks, run on a preview's head (roll apps' `checks[].browser`).
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct BrowserCheck {
+    pub service: String,
+    pub name: String,
+    pub state: CheckState,
+    /// What failed (the check's own words, made printable and cut).
+    pub error: Option<String>,
+    /// Where its failure's screenshot and Playwright trace are kept (roll apps': `GET
+    /// /v1/apps/services/{service_id}/environments/{environment}/checks/{name}/screenshot` and
+    /// `/trace`, `read` on that service), when they were.
+    pub files: Option<BrowserCheckFiles>,
+}
+
+/// A roll apps service and environment a browser check's failure files are kept under.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct BrowserCheckFiles {
+    pub service_id: String,
+    pub environment: String,
+}
+
+/// The browser checks read for `head` (a runtime fact; a new head reads its own).
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct BrowserChecks {
+    pub head: String,
+    pub checks: Vec<BrowserCheck>,
 }
 
 /// What the earlier pushes' own copies of a preview's data add up to.
@@ -1424,11 +1621,51 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.endpoints.iter().map(|e| (e.path.as_str(), e.ms)).collect::<Vec<_>>(), [("/api/users", 40)]);
-        let e = |ms, main_ms| super::EndpointAgainst { path: "/x".into(), ms, status: 200, main_ms };
+        let e = |ms, main_ms| super::EndpointAgainst { path: "/x".into(), ms, status: 200, main_ms, shape_changes: Vec::new() };
         assert!(e(140, Some(40)).slower());
         assert!(!e(14, Some(4)).slower(), "within 20 ms");
         assert!(!e(55, Some(40)).slower(), "not half again");
         assert!(!e(140, None).slower(), "nothing to compare with");
+    }
+
+    /// A secret value in what a preview's pages served is named with where, each name and path
+    /// once; nothing else is.
+    #[test]
+    fn a_served_secret_is_named_with_where_each_once() {
+        let keyed = [("STRIPE_KEY".to_string(), "sk_live_abcdef12".to_string()), ("DATABASE_URL".to_string(), "p4ssw0rd-xyz".to_string())];
+        let bodies = [
+            ("/app.js".to_string(), b"a='sk_live_abcdef12';b='sk_live_abcdef12'".to_vec()),
+            ("/".to_string(), b"<p>nothing here</p>".to_vec()),
+            ("/api/me".to_string(), b"{\"db\":\"postgres://u:p4ssw0rd-xyz@h\"}".to_vec()),
+        ];
+        let found: Vec<(String, String)> = super::served_secrets(&bodies, &keyed).into_iter().map(|s| (s.key, s.path)).collect();
+        assert_eq!(found, [("STRIPE_KEY".to_string(), "/app.js".to_string()), ("DATABASE_URL".to_string(), "/api/me".to_string())]);
+        assert!(super::served_secrets(&bodies, &[]).is_empty());
+    }
+
+    /// An endpoint's JSON answer against main's: a field gone (the outermost only) or a type
+    /// widened is said; a field gained, a type narrowed, or what's under an array empty on either
+    /// side isn't. Its shape reads back as whole, known lines only.
+    #[test]
+    fn a_response_shape_change_is_a_field_gone_or_a_type_widened() {
+        let lines = |s: &[&str]| s.iter().map(|l| l.to_string()).collect::<Vec<_>>();
+        let main = lines(&["$ object", "total number", "users array", "users[] object", "users[].email string", "users[].name string", "meta object", "meta.page number", "tags []", "next string|null"]);
+        let now = lines(&["$ object", "total string", "users array", "users[] object", "users[].name null|string", "users[].avatar string", "tags array", "tags[] string", "next string"]);
+        let said: Vec<(String, String, Option<String>)> = super::shape_changes(&now, &main).into_iter().map(|c| (c.path, c.main, c.now)).collect();
+        assert_eq!(
+            said,
+            [
+                ("meta".to_string(), "object".to_string(), None),
+                ("total".into(), "number".into(), Some("string".into())),
+                ("users[].email".into(), "string".into(), None),
+                ("users[].name".into(), "string".into(), Some("null|string".into())),
+            ]
+        );
+        let unknown = super::shape_changes(&lines(&["$ object", "users []"]), &main);
+        assert!(!unknown.iter().any(|c| c.path.starts_with("users[]")), "under an empty array: {unknown:?}");
+        assert!(super::shape_changes(&[], &main).is_empty(), "not JSON now");
+        let s = super::PageSpeed::parse(r#"{"ttfb_ms": 1, "fcp_ms": null, "load_ms": 9, "bytes": 1, "endpoints": [{"path": "/x", "ms": 4, "status": 200, "shape": ["$ object", "a`b string", "c date", "d\nx string", "e number"]}]}"#).unwrap();
+        assert_eq!(s.endpoints[0].shape, ["$ object", "e number"]);
     }
 
     /// What the browser writes reads back; numbers past reason, or anything else, don't.

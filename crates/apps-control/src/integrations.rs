@@ -332,6 +332,25 @@ pub trait Visitors: Send + Sync {
     fn session_live(&self, user: &str, session: &str) -> bool;
 }
 
+/// Signing in visitors who needn't be roll's (rolld: roll-accounts' GitHub and Google, as a
+/// visit only; `access.sso`).
+pub trait VisitorSignIn: Send + Sync {
+    /// Where a visitor's browser goes to sign in with `provider` for apps' signed `request`
+    /// (`orgs`: GitHub reads their organisations too). None: that provider isn't set up here.
+    fn start_url(&self, provider: &str, request: &str, orgs: bool) -> Option<String>;
+}
+
+/// Someone a provider vouched for, coming back to [`crate::Apps::admit_visitor`].
+#[derive(Clone, Debug)]
+pub struct SsoVisitor {
+    pub provider: String,
+    pub subject: String,
+    /// Verified, lower case.
+    pub email: String,
+    /// GitHub organisations they're a member of (lower case), when the sign-in read them.
+    pub orgs: Vec<String>,
+}
+
 /// A model that reads a failed deployment (rolld: the owner of the service's roll code repo's
 /// provider, through roll code, metered on their account). Unset: nothing is explained.
 #[async_trait]
@@ -431,6 +450,12 @@ pub trait Resources: Send + Sync {
     /// The variables a link to this resource injects, under their unprefixed names
     /// (`DATABASE_URL`, `REDIS_URL`, …). An error when the resource doesn't exist.
     async fn link_vars(&self, kind: LinkKind, r#ref: &str) -> anyhow::Result<Vec<(String, String)>>;
+    /// What a link sets, read with the credentials it made for itself (`minted`'s variables):
+    /// what only its own key may read (a tasks tenant's signing keys). By default
+    /// [`Resources::link_vars`].
+    async fn link_vars_as(&self, kind: LinkKind, r#ref: &str, _minted: &[(String, String)]) -> anyhow::Result<Vec<(String, String)>> {
+        self.link_vars(kind, r#ref).await
+    }
     /// A new link's own credentials, made once when the link is made and kept sealed with it
     /// (a search cluster's API key for this service): `None` for a kind whose variables are
     /// read fresh with [`Resources::link_vars`] (a database's own URL).
@@ -570,6 +595,11 @@ pub trait Resolver: Send + Sync {
     async fn addresses(&self, _host: &str) -> Vec<String> {
         Vec::new()
     }
+    /// The PTR names a reverse name (`1.2.0.192.in-addr.arpa`) answers with: verifying a
+    /// crawler's address ([`crate::bots`]).
+    async fn ptr(&self, _name: &str) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// DNS over HTTPS (RFC 8484's JSON form, as Cloudflare and Google serve it): no resolver
@@ -594,6 +624,7 @@ impl Doh {
             "CNAME" => 5,
             "A" => 1,
             "AAAA" => 28,
+            "PTR" => 12,
             _ => 16,
         };
         v["Answer"]
@@ -623,6 +654,10 @@ impl Resolver for Doh {
         let mut v = self.query(host, "A").await;
         v.extend(self.query(host, "AAAA").await);
         v
+    }
+
+    async fn ptr(&self, name: &str) -> Vec<String> {
+        self.query(name, "PTR").await
     }
 }
 
@@ -654,5 +689,9 @@ impl Resolver for StaticDns {
         let mut v = self.find(host, "A");
         v.extend(self.find(host, "AAAA"));
         v
+    }
+
+    async fn ptr(&self, name: &str) -> Vec<String> {
+        self.find(name, "PTR")
     }
 }

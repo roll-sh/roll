@@ -1507,7 +1507,7 @@ pub async fn reindex(ctx: &Ctx<'_>) -> EsResult<Reply> {
     // A place in the node's limits, taken by the request (a 429 past them); its background run
     // finds it in the task's state.
     let slot = match &req.remote {
-        Some(_) if BACKGROUND.try_with(|_| ()).is_err() => Some(ctx.cluster.remote.acquire(&ctx.cluster.remote_running)?),
+        Some(_) if BACKGROUND.try_with(|_| ()).is_err() => Some(ctx.cluster.remote.acquire(&ctx.cluster.name, &crate::slots::owner_of(ctx.cluster.config.owner.as_deref(), &ctx.cluster.name))?),
         _ => None,
     };
     let remote = req.remote.clone();

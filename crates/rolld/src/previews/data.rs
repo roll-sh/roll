@@ -173,6 +173,33 @@ impl Brancher for Postgres {
         Ok(Some((pg_schema_lines(&self.0, s(&from["endpoint"]["id"]), None).await?, pg_schema_lines(&self.0, s(&b["endpoint"]["id"]), role).await?)))
     }
 
+    /// Its tables (as its own role sees them), or one's first rows, read-only, as its own role.
+    async fn browse(&self, parent: &str, branch: &str, table: Option<&str>) -> anyhow::Result<Option<roll_previews::Browse>> {
+        let p = self.0.get(&format!("/v1/projects/{}", seg(parent))).await?;
+        let b = p["branches"].as_array().and_then(|bs| bs.iter().find(|b| b["id"] == branch).cloned()).ok_or_else(|| anyhow::anyhow!("no Postgres branch {branch}"))?;
+        anyhow::ensure!(!b["parent_id"].is_null(), "{branch} isn't a branch of {parent}");
+        let ep = s(&b["endpoint"]["id"]).ok_or_else(|| anyhow::anyhow!("Postgres branch {branch} has no endpoint"))?;
+        anyhow::ensure!(b["app_connection_uri"].is_string(), "Postgres branch {branch} has no role of its own yet");
+        let role = s(&b["id"]).unwrap_or_default();
+        let list = pg_read_as(&self.0, &ep, &role, BROWSE_TABLES_SQL).await?;
+        let tables: Vec<roll_previews::BrowseTable> = list["rows"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|r| Some(roll_previews::BrowseTable { name: r[0].as_str()?.to_string(), rows: r[1].as_str().and_then(|n| n.parse().ok()).unwrap_or(0).max(0) }))
+            .collect();
+        let Some(table) = table else { return Ok(Some(roll_previews::Browse::Tables { tables })) };
+        // Only a table it listed: a name is quoted, never run.
+        anyhow::ensure!(tables.iter().any(|t| t.name == table), "no table {table} the branch's role can read");
+        let v = pg_read_as(&self.0, &ep, &role, &browse_rows_sql(table).ok_or_else(|| anyhow::anyhow!("{table} isn't schema.table"))?).await?;
+        let cell = |c: &Value| c.as_str().map(|s| s.chars().take(200).collect::<String>());
+        let mut rows: Vec<Vec<Option<String>>> = v["rows"].as_array().into_iter().flatten().map(|r| r.as_array().into_iter().flatten().map(cell).collect()).collect();
+        let more = rows.len() > roll_previews::BROWSE_ROWS;
+        rows.truncate(roll_previews::BROWSE_ROWS);
+        let columns = v["columns"].as_array().into_iter().flatten().filter_map(|c| c.as_str().map(str::to_string)).collect();
+        Ok(Some(roll_previews::Browse::Rows { table: table.to_string(), columns, rows, more }))
+    }
+
     /// The branch's lines alone, as `schema` reads them (as its own role), the parent untouched.
     async fn branch_schema(&self, parent: &str, branch: &str) -> anyhow::Result<Option<Vec<String>>> {
         let p = self.0.get(&format!("/v1/projects/{}", seg(parent))).await?;
@@ -856,7 +883,17 @@ impl Brancher for Tasks {
 
     async fn connect(&self, _parent: &str, branch: &str, kept: Option<&str>) -> anyhow::Result<Vec<(String, String)>> {
         let kept: Value = kept.and_then(|k| serde_json::from_str(k).ok()).ok_or_else(|| anyhow::anyhow!("the tenant {branch} has no key: reset it"))?;
-        Ok(kept.as_object().into_iter().flatten().filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect())
+        let mut vars: Vec<(String, String)> = kept.as_object().into_iter().flatten().filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect();
+        // Its own webhook signing keys (roll apps' `tasks` link names them): the preview verifies
+        // its tenant's deliveries with these, never production's. Read at each start, so a
+        // rotation reaches the next one.
+        // The tenant's own route, as the tenant (its token, the one its services hold).
+        let token = s(&kept["ROLL_TASKS_TOKEN"]).ok_or_else(|| anyhow::anyhow!("the tenant {branch} has no token: reset it"))?;
+        let keys = self.api.get_as(&format!("/t/{}/v1/tasks/keys", seg(branch)), &token).await.map_err(|e| anyhow::anyhow!("reading the tenant {branch}'s signing keys: {e:#}"))?;
+        for (name, field) in [("ROLL_TASKS_SIGNING_KEY", "current"), ("ROLL_TASKS_NEXT_SIGNING_KEY", "next")] {
+            vars.push((name.to_string(), s(&keys[field]).ok_or_else(|| anyhow::anyhow!("the tenant {branch} has no {field} signing key"))?));
+        }
+        Ok(vars)
     }
 
     async fn usage(&self, _parent: &str, _branch: &str) -> anyhow::Result<Usage> {
@@ -888,6 +925,30 @@ if (!mask(ctx._source, params.path, 0, params.rule, ctx._id)) { ctx.op = 'noop';
 /// type, nested ones by path (`field users.address.city text`) and multi-fields too. Bounded.
 /// One Postgres endpoint's schema lines (`SCHEMA_SQL`), as `role` when given (a branch's own),
 /// with only the catalog's names in reach.
+/// The tables a branch's role can read, with about how many rows each holds, at most 200.
+const BROWSE_TABLES_SQL: &str = "SELECT n.nspname || '.' || c.relname, c.reltuples::bigint::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+     WHERE c.relkind IN ('r', 'p', 'v', 'm') AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg_toast%' \
+     AND has_table_privilege(c.oid, 'SELECT') ORDER BY 1 LIMIT 200";
+
+/// A table's first rows (one more than are shown: whether there are more), its name quoted
+/// (`schema.table`, split at the first dot).
+fn browse_rows_sql(table: &str) -> Option<String> {
+    let (schema, name) = table.split_once('.')?;
+    let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
+    (!schema.is_empty() && !name.is_empty()).then(|| format!("SELECT * FROM {}.{} LIMIT {}", q(schema), q(name), roll_previews::BROWSE_ROWS + 1))
+}
+
+/// `sql` on endpoint `ep` as `role`, in a read-only transaction of at most 5 s, with only the
+/// catalog in its path: its result (the one before the commit's).
+async fn pg_read_as(api: &Api, ep: &str, role: &str, sql: &str) -> anyhow::Result<Value> {
+    let q = format!(
+        "BEGIN READ ONLY; SET LOCAL ROLE \"{}\"; SET LOCAL search_path = pg_catalog, pg_temp; SET LOCAL statement_timeout = '5s'; {sql}; COMMIT",
+        role.replace('"', "\"\"")
+    );
+    let v = api.post(&format!("/v1/endpoints/{}/query", seg(ep)), json!({ "sql": q })).await?;
+    v["results"].as_array().and_then(|r| r.iter().rev().find(|x| x["columns"].as_array().is_some_and(|c| !c.is_empty())).cloned()).ok_or_else(|| anyhow::anyhow!("the branch answered nothing"))
+}
+
 async fn pg_schema_lines(api: &Api, ep: Option<String>, role: Option<String>) -> anyhow::Result<Vec<String>> {
     let ep = ep.ok_or_else(|| anyhow::anyhow!("a Postgres branch without an endpoint"))?;
     let set_role = role.map(|r| format!("SET ROLE \"{}\"; ", r.replace('"', "\"\""))).unwrap_or_default();
@@ -1283,6 +1344,92 @@ mod tests {
         search.retire("srch_p", "srch_b", Some(&serde_json::json!({ "OPENSEARCH_USERNAME": "pv@pv-x" }).to_string())).await.unwrap();
         search.delete("srch_p", "srch_b", "pv-x").await.unwrap();
         assert_eq!(revoked.lock().unwrap().clone(), ["key_1", "pv", "password", "cluster"].map(String::from).to_vec());
+    }
+
+    /// Previews' masking over a real roll search (in process): on a branch of a seeded cluster,
+    /// no original value is left in `_source`, `_terms_enum` or a terms aggregation on the
+    /// `.keyword`, for a text field, an address inside an array of objects, a field under a dotted
+    /// key and an index whose name has a dot; the parent keeps every original.
+    /// A browsed table's name is quoted, never run: one with quotes stays one identifier.
+    #[test]
+    fn a_browsed_tables_name_is_quoted() {
+        assert_eq!(super::browse_rows_sql("public.users").as_deref(), Some("SELECT * FROM \"public\".\"users\" LIMIT 51"));
+        assert_eq!(super::browse_rows_sql("a\"b.c; DROP TABLE x").as_deref(), Some("SELECT * FROM \"a\"\"b\".\"c; DROP TABLE x\" LIMIT 51"));
+        assert!(super::browse_rows_sql("users").is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_masked_search_branch_shows_no_original_value() {
+        use roll_previews::ports::Brancher as _;
+        use serde_json::{Value, json};
+        let home = tempfile::tempdir().unwrap();
+        let mut cfg = search_control::SearchConfig::local(home.path().to_path_buf());
+        cfg.gc_interval = None;
+        cfg.unsealed_secrets = true;
+        let es = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        cfg.http_port = es.local_addr().unwrap().port();
+        let control = search_control::Control::new(cfg, search_store::test_objects("previews-mask")).await.unwrap();
+        tokio::spawn(search_server::serve(es, control.node.clone(), search_server::ListenOptions::default()));
+        let api = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = api.local_addr().unwrap();
+        let router = search_control::api::router(control.clone());
+        tokio::spawn(async move { axum::serve(api, router).await });
+        let http = reqwest::Client::new();
+        let post = |path: String, body: Value| {
+            let req = http.post(format!("http://{addr}{path}")).json(&body);
+            async move {
+                let r = req.send().await.unwrap();
+                let (status, v) = (r.status(), r.json::<Value>().await.unwrap());
+                assert!(status.is_success(), "{path}: {status} {v}");
+                v
+            }
+        };
+        // One REST request on a cluster through the operator's console: its JSON body.
+        let rest = |cluster: &str, method: &'static str, path: &str, body: Value| {
+            let call = post(format!("/v1/search/clusters/{cluster}/request"), json!({ "method": method, "path": path, "body": body }));
+            let path = path.to_string();
+            async move {
+                let v = call.await;
+                assert!(v["status"].as_u64().is_some_and(|s| s < 300), "{method} {path}: {v}");
+                serde_json::from_str::<Value>(v["body"].as_str().unwrap()).unwrap()
+            }
+        };
+        post("/v1/search/clusters".into(), json!({ "name": "shop" })).await;
+        let originals = ["Alice Original", "1 Secret St", "2 Hidden Rd", "alice@corp.example", "alice-secret-login"];
+        rest(
+            "shop",
+            "PUT",
+            "/people/_doc/1?refresh=true",
+            json!({ "name": "Alice Original", "contacts": [{ "address": "1 Secret St" }, { "address": "2 Hidden Rd" }], "meta.email": "alice@corp.example" }),
+        )
+        .await;
+        rest("shop", "PUT", "/logs.2024/_doc/1?refresh=true", json!({ "user": "alice-secret-login" })).await;
+        let branch = post("/v1/search/clusters/shop/branches".into(), json!({ "name": "pv-mask" })).await["id"].as_str().unwrap().to_string();
+        let fields: std::collections::BTreeMap<String, String> =
+            [("people.name", "redact"), ("people.contacts.address", "redact"), ("people.meta.email", "email"), ("logs.2024.user", "redact")].map(|(k, v)| (k.to_string(), v.to_string())).into();
+        super::Search(super::super::Api::new(addr)).mask("shop", &branch, None, &fields).await.unwrap();
+
+        // Everything the branch can show of those fields, as one text.
+        let shown = |cluster: String| async move {
+            let mut out = vec![rest(&cluster, "POST", "/people,logs.2024/_search", json!({})).await];
+            for (path, field) in [("/people/_terms_enum", "name.keyword"), ("/people/_terms_enum", "contacts.address.keyword"), ("/people/_terms_enum", "meta.email.keyword"), ("/logs.2024/_terms_enum", "user.keyword")] {
+                out.push(rest(&cluster, "POST", path, json!({ "field": field })).await);
+            }
+            let aggs = json!({ "size": 0, "aggs": { "n": { "terms": { "field": "name.keyword" } }, "a": { "terms": { "field": "contacts.address.keyword" } }, "e": { "terms": { "field": "meta.email.keyword" } } } });
+            out.push(rest(&cluster, "POST", "/people/_search", aggs).await);
+            out.push(rest(&cluster, "POST", "/logs.2024/_search", json!({ "size": 0, "aggs": { "u": { "terms": { "field": "user.keyword" } } } })).await);
+            Value::Array(out).to_string()
+        };
+        let masked = shown(branch.clone()).await;
+        for o in originals {
+            assert!(!masked.contains(o), "the branch still shows {o:?}: {masked}");
+        }
+        assert!(masked.contains("[masked]") && masked.contains("@example.invalid"), "{masked}");
+        let parent = shown("shop".into()).await;
+        for o in originals {
+            assert!(parent.contains(o), "the parent lost {o:?}: {parent}");
+        }
+        control.shutdown().await.unwrap();
     }
 
     #[test]

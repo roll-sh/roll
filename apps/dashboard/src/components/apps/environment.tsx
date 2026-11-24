@@ -76,6 +76,9 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
   const [pauseTo, setPauseTo] = useState("mon 07:00");
   const [freezeWhy, setFreezeWhy] = useState("");
   const [password, setPassword] = useState("");
+  // Who a provider lets in (`access.sso`): `@acme.com, org:acme`.
+  const [ssoProvider, setSsoProvider] = useState<"github" | "google">(env.sso?.provider ?? "google");
+  const [ssoAllow, setSsoAllow] = useState(env.sso?.allow.join(", ") ?? "");
   const [hook, setHook] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [notice, setNotice] = useState(env.maintenance?.message ?? "");
@@ -95,6 +98,7 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
   useEffect(() => setHdr(hdrText), [hdrText]);
   const routeText = formatRoutes(env.routes ?? []);
   const [routes, setRoutes] = useState(routeText);
+  const [redirects, setRedirects] = useState(env.redirects ?? "");
   useEffect(() => setRoutes(routeText), [routeText]);
   const rateText = env.rate_limit ? String(env.rate_limit.per_minute) : "";
   const [rate, setRate] = useState(rateText);
@@ -563,9 +567,11 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
         <div className="space-y-3 px-5 py-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <p className="text-[13px] font-medium">{env.signed_in ? "Signed in to roll" : env.password ? "Password" : env.private ? "Private" : "Public"}</p>
+              <p className="text-[13px] font-medium">{env.sso ? `Signed in with ${env.sso.provider === "github" ? "GitHub" : "Google"}` : env.signed_in ? "Signed in to roll" : env.password ? "Password" : env.private ? "Private" : "Public"}</p>
               <p className="mt-1 text-[12px] text-muted">
-                {env.signed_in
+                {env.sso
+                  ? `Only people ${env.sso.provider === "github" ? "GitHub" : "Google"} vouches for get in, roll's or not: ${env.sso.allow.join(", ")}. Anyone else is sent to sign in first, before anything wakes.`
+                  : env.signed_in
                   ? "Only people signed in to roll who can open this project get in: anyone else is sent to sign in first, before anything wakes."
                   : env.password
                     ? "Visitors type its password on roll's page (a session for seven days); nothing wakes before they do."
@@ -612,6 +618,23 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
               </button>
             </form>
           )}
+          <form
+            className="flex flex-wrap items-center gap-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              const allow = ssoAllow.split(/[\s,]+/).filter(Boolean);
+              void runner.run("access", () => appsApi.putEnvironment(service.id, env.name, { access: { sso: { provider: ssoProvider, allow } } })).then((r) => r && setLink(null));
+            }}
+          >
+            <select value={ssoProvider} onChange={(e) => setSsoProvider(e.target.value as "github" | "google")} aria-label="Sign in with" className={`${input} text-[12px]`}>
+              <option value="google">Google</option>
+              <option value="github">GitHub</option>
+            </select>
+            <input value={ssoAllow} onChange={(e) => setSsoAllow(e.target.value)} placeholder={ssoProvider === "github" ? "@acme.com, org:acme, ada@x.com" : "@acme.com, ada@x.com"} aria-label="Who gets in" className={`${input} min-w-48 flex-1 font-mono text-[12px]`} />
+            <button type="submit" className={btn} disabled={busy || !ssoAllow.trim()}>
+              {env.sso ? "Change who" : "Let them sign in"}
+            </button>
+          </form>
           {link && (
             <div className="rise rounded-lg border border-line bg-bg px-3 py-2">
               <p className="text-[11px] text-subtle">The private link, shown once (only its hash is kept):</p>
@@ -658,8 +681,13 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
                 <p className="mt-1 text-[12px] text-muted">
                   {env.firewall?.length
                     ? `${env.firewall.length} ${env.firewall.length === 1 ? "rule" : "rules"}, in order: the first that matches a request decides.`
-                    : "No rules. One a line: deny /admin/*, deny method=DELETE, allow /admin/health, deny ua=BadBot, limit 10 /login method=POST (10 a minute a client), challenge /* (a browser check)."}
+                    : "No rules. One a line: deny /admin/*, deny method=DELETE, allow /admin/health, deny ua=BadBot, limit 10 /login method=POST (10 a minute a client), challenge /* (a browser check), deny bots=ai,spoofed (AI crawlers, and crawlers posing as Google's or Bing's), log /wp-* (counts, blocks nothing), log attacks=sqli,xss (roll's attack patterns: scanners, traversal, sqli, xss, rce)."}
                 </p>
+                {!!env.firewall?.length && !!env.firewall_hits?.length && (
+                  <p className="mt-1 font-mono text-[11px] text-subtle">
+                    Last 24 h: {env.firewall.map((r, i) => `${i + 1}. ${r.action} ${(env.firewall_hits?.[i] ?? 0).toLocaleString()}`).join(" · ")}
+                  </p>
+                )}
               </div>
               <button className={btn} disabled={busy || fw === fwText} onClick={() => runner.run("firewall", () => appsApi.putEnvironment(service.id, env.name, { firewall: parseFirewall(fw) }))}>
                 Save
@@ -674,6 +702,24 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
               aria-label="Firewall rules, one a line"
               className={`${input} mt-2 w-full font-mono text-[12px]`}
             />
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-line pt-3">
+              <p className="text-[12px] text-muted">
+                {env.challenge_until
+                  ? `Attack mode is on until ${new Date(env.challenge_until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}: every visitor without a pass gets the challenge page.`
+                  : env.attack_mode
+                    ? `Attack mode goes on by itself past ${env.attack_mode.per_minute.toLocaleString()} requests a minute, for ${env.attack_mode.minutes} minutes.`
+                    : "Attack mode: a challenge for every visitor without a pass, for an hour (set attack_mode to have it go on by itself)."}
+              </p>
+              <button
+                className={btn}
+                disabled={busy}
+                onClick={() =>
+                  runner.run("attack mode", () => appsApi.putEnvironment(service.id, env.name, { challenge_until: env.challenge_until ? null : Date.now() + 3_600_000 }))
+                }
+              >
+                {env.challenge_until ? "End attack mode" : "Attack mode for an hour"}
+              </button>
+            </div>
           </div>
         )}
 
@@ -726,6 +772,29 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
             />
           </div>
         )}
+
+        <div className="px-5 py-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-[13px] font-medium">Redirects</p>
+              <p className="mt-1 text-[12px] text-muted">
+                One a line, as <code className="font-mono">_redirects</code> takes them: <code className="font-mono">/old /new 308</code>, <code className="font-mono">/blog/* /posts/:splat</code>. 301 unless a line says 302, 303, 307 or 308; answered before anything wakes.
+              </p>
+            </div>
+            <button className={btn} disabled={busy || redirects === (env.redirects ?? "")} onClick={() => runner.run("redirects", () => appsApi.putEnvironment(service.id, env.name, { redirects: redirects.trim() ? redirects : null }))}>
+              Save
+            </button>
+          </div>
+          <textarea
+            value={redirects}
+            onChange={(e) => setRedirects(e.target.value)}
+            rows={Math.min(10, Math.max(2, redirects.split("\n").length))}
+            placeholder={"/old-pricing /pricing 308\n/blog/* /posts/:splat"}
+            spellCheck={false}
+            aria-label="Redirects, one a line"
+            className={`${input} mt-2 w-full font-mono text-[12px]`}
+          />
+        </div>
 
         {service.run.type === "web" && service.run.public !== false && (
           <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">

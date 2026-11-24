@@ -2143,7 +2143,8 @@ async fn a_rule_can_grant_some_indices() {
         async move { d.call(OPERATOR, Method::GET, &path, None).await.1.as_array().unwrap().iter().map(|e| e["resource"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>() }
     };
     // The audit writer batches: wait for the searches' rows rather than a fixed time.
-    d.audit_until("/v1/access/audit?resource=cl_1", |l| l.as_array().is_some_and(|a| a.iter().any(|e| e["resource"] == "cl_1/logs-2025"))).await;
+    // Both rows asserted below: the cluster's own (the later refusals) and an index's.
+    d.audit_until("/v1/access/audit?resource=cl_1", |l| l.as_array().is_some_and(|a| ["cl_1", "cl_1/logs-2025"].iter().all(|r| a.iter().any(|e| e["resource"] == *r)))).await;
     let all = who("resource=cl_1").await;
     assert!(all.contains(&"cl_1".to_string()) && all.contains(&"cl_1/logs-2025".to_string()), "{all:?}");
     assert!(who("resource=cl_1/logs-2025&action=read").await.iter().all(|r| r == "cl_1/logs-2025"));
@@ -2422,6 +2423,20 @@ async fn the_checkup_names_what_needs_attention() {
     assert_eq!(kinds(&root), ["everything", "never_expires"], "{list}");
     assert_eq!(kinds(&wide_id), ["narrower"], "{list}");
     assert!(kinds(&fit_id).is_empty(), "{list}");
+
+    // The hourly look keeps what it saw: the first only remembers; a token made broad since is new,
+    // on the operator's alert feed with its fix; looking again finds nothing new.
+    assert_eq!(d.access.checkup_alerts_every(0).unwrap(), 0, "what was already there isn't news");
+    let (_, broad) = d.token(json!([{ "product": "*", "resources": "*", "actions": { "admin": "allow" } }]), json!({})).await;
+    assert!(d.access.checkup_alerts_every(0).unwrap() >= 2);
+    let (_, feed) = d.call(OPERATOR, Method::GET, "/v1/access/alerts?after=0", None).await;
+    let mut new: Vec<&str> = feed["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "checkup_finding" && e["grant"] == broad.as_str()).map(|e| e["finding"].as_str().unwrap()).collect();
+    new.sort_unstable();
+    assert_eq!(new, ["everything", "never_expires"], "{feed}");
+    let before = feed["next"].as_i64().unwrap();
+    d.access.checkup_alerts_every(0).unwrap();
+    let (_, again) = d.call(OPERATOR, Method::GET, &format!("/v1/access/alerts?after={before}"), None).await;
+    assert!(!again["events"].as_array().unwrap().iter().any(|e| e["grant"] == broad.as_str()), "not again: {again}");
 }
 
 /// A person hears of their own tokens by mail (GitHub mails a token's owner): when one is about to
@@ -2802,6 +2817,9 @@ async fn a_decoy_token_allows_nothing_and_gives_its_user_away() {
     let (_, feed) = d.call(OPERATOR, Method::GET, "/v1/access/alerts?after=0", None).await;
     let decoys: Vec<&Value> = feed["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "decoy_used").collect();
     assert_eq!((decoys.len(), decoys[0]["grant"].as_str(), decoys[0]["route"].as_str()), (1, Some(id.as_str()), Some("/v1/workspace/projects")), "{feed}");
+    // Its owner hears it on their own feed too.
+    let (_, hers) = d.as_user("usr_alice", Method::GET, "/v1/access/alerts?last=20", None).await;
+    assert!(hers["events"].as_array().unwrap().iter().any(|e| e["kind"] == "decoy_used" && e["grant"] == id.as_str()), "her newest (the access page's): {hers}");
 }
 
 /// docs/members.md, "Evaluation": a person's session is the grant of their roles, decided by the
@@ -3037,7 +3055,7 @@ async fn agent_activity_by_tool_and_connection() {
             client: None,
         });
     }
-    let jumps = d.access.store.failure_jumps(now).unwrap();
+    let jumps = d.access.store.failure_jumps(now, &|_| false).unwrap();
     assert_eq!((jumps.len(), jumps[0]["tool"].as_str(), jumps[0]["failed"].as_i64()), (1, Some("flaky_tool"), Some(12)), "{jumps:?}");
     // Alerted once (kept for the operator's feed), not again within six hours.
     assert_eq!(d.access.activity_alerts().await.unwrap(), 1);
@@ -3045,5 +3063,26 @@ async fn agent_activity_by_tool_and_connection() {
     let (_, feed) = d.call(OPERATOR, Method::GET, "/v1/access/alerts?after=0", None).await;
     assert_eq!((feed["events"][0]["kind"].as_str(), feed["events"][0]["tool"].as_str(), feed["next"].as_i64()), (Some("tool_failing"), Some("flaky_tool"), Some(1)), "{feed}");
     let (_, theirs) = d.as_user("usr_ada", Method::GET, "/v1/access/alerts?after=0", None).await;
-    assert_eq!((theirs["events"].as_array().map(Vec::len), theirs["next"].as_i64()), (Some(0), Some(1)), "a person's connections get none: {theirs}");
+    assert_eq!(theirs["events"].as_array().map(Vec::len), Some(0), "not about their tokens: {theirs}");
+    let (_, head) = d.as_user("usr_ada", Method::GET, "/v1/access/alerts?latest=1", None).await;
+    assert_eq!(head["next"], 0, "their own newest, which says nothing of others' alerts: {head}");
+}
+
+/// An agent's feedback (`access_send_feedback`): kept on the alert feed for the operator, marked as
+/// a model's words (lockdown withholds them), and capped at 20 an hour per connection.
+#[tokio::test]
+async fn an_agent_sends_feedback() {
+    let d = Daemon::new(50);
+    let (token, grant) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({})).await;
+    let note = json!({ "task": "list the projects", "actual": "postgres_list_projects answered 502", "expected": "the project list", "tool": "postgres_list_projects" });
+    let (s, kept) = d.call(&token, Method::POST, "/v1/access/feedback", Some(note.clone())).await;
+    assert_eq!((s, kept["kept"].as_bool()), (StatusCode::OK, Some(true)), "{kept}");
+    let (_, feed) = d.call(OPERATOR, Method::GET, "/v1/access/alerts?after=0", None).await;
+    let e = &feed["events"][0];
+    assert_eq!((e["kind"].as_str(), e["grant"].as_str(), e["title"].as_str(), e["outside"].as_bool()), (Some("agent_feedback"), Some(grant.as_str()), Some("list the projects"), Some(true)), "{feed}");
+    for _ in 0..19 {
+        assert_eq!(d.call(&token, Method::POST, "/v1/access/feedback", Some(note.clone())).await.0, StatusCode::OK);
+    }
+    assert_eq!(d.call(&token, Method::POST, "/v1/access/feedback", Some(note)).await.0, StatusCode::TOO_MANY_REQUESTS, "20 an hour");
+    assert_eq!(d.call(&token, Method::POST, "/v1/access/feedback", Some(json!({ "task": "", "actual": "x" }))).await.0, StatusCode::BAD_REQUEST);
 }

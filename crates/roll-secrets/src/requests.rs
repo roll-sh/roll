@@ -526,7 +526,7 @@ impl Secrets {
                     return Err(Error::Conflict("stale", format!("{} changed after {id} was opened: open a new request", i.key)));
                 }
             }
-            let (change, diffs) = crate::write::apply(c, &dek, self.keys()?, &env, &prepared.items, "request", &message, caller, now)?;
+            let (change, diffs) = crate::write::apply(c, &dek, self.keys()?, &env, &prepared.items, crate::write::Via::Request, &message, caller, now)?;
             let seq = (!diffs.is_empty()).then_some(change.seq);
             c.execute("UPDATE requests SET state = 'applied', applied_seq = ? WHERE id = ? AND state = ?", params![seq, id, r.state])?;
             if bypass && !met {

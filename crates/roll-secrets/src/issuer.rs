@@ -9,7 +9,8 @@
 //! - Tokens are RS256 (Azure takes nothing else), live five minutes, and carry `sub =
 //!   roll-secrets:<project>`, so a cloud's trust names one project and nobody else's.
 //! - Other roll products get tokens in process ([`Subject`], `Secrets::issue`): roll apps' instances
-//!   carry `sub = roll-apps:<project>:<service>:<env>`, for an hour at most.
+//!   carry `sub = roll-apps:<project>:<service>:<env>`, a preview's own services `sub =
+//!   roll-previews:<project>:<preview>:<service>` (never an app's prefix), for an hour at most.
 //! - Signing keys (RSA 2048) are sealed with the deployment key and shared by every node through
 //!   the database; a node that finds none makes one. They rotate ([`rotate`], every 90 days by
 //!   default): the next key is published [`PUBLISH_AHEAD_MS`] before it starts signing (clouds
@@ -74,9 +75,15 @@ pub fn subject(project: &str) -> String {
 pub enum Subject {
     /// One environment of a roll apps service: `roll-apps:<project>:<service>:<env>`.
     App { project: String, service: String, env: String },
+    /// A service of a roll preview (its `roll.toml`'s, run by roll previews):
+    /// `roll-previews:<project>:<preview>:<service>`. Its environment is the preview's own
+    /// (`pv-<id>`, roll previews' `branch_name`), so a trust written for an app's subject never
+    /// matches one.
+    Preview { project: String, preview: String, service: String },
 }
 
 const APPS_PREFIX: &str = "roll-apps:";
+const PREVIEWS_PREFIX: &str = "roll-previews:";
 
 /// A project's or a service's id: `prj_…`, `svc_…` (lowercase letters, digits, `_` and `-`).
 fn id_ok(s: &str) -> bool {
@@ -88,12 +95,29 @@ impl Subject {
     pub fn sub(&self) -> String {
         match self {
             Subject::App { project, service, env } => format!("{APPS_PREFIX}{project}:{service}:{env}"),
+            Subject::Preview { project, preview, service } => format!("{PREVIEWS_PREFIX}{project}:{preview}:{service}"),
         }
     }
 
     pub fn project(&self) -> &str {
         match self {
-            Subject::App { project, .. } => project,
+            Subject::App { project, .. } | Subject::Preview { project, .. } => project,
+        }
+    }
+
+    /// The environment it acts in: an app's own, or the preview's (`pv-<id>`).
+    pub fn env(&self) -> String {
+        match self {
+            Subject::App { env, .. } => env.clone(),
+            Subject::Preview { preview, .. } => format!("pv-{}", preview.trim_start_matches("pv_")),
+        }
+    }
+
+    /// Who the audit log says asked: the app's service, or the preview's.
+    fn actor(&self) -> String {
+        match self {
+            Subject::App { service, .. } => format!("app:{service}"),
+            Subject::Preview { preview, service, .. } => format!("preview:{preview}:{service}"),
         }
     }
 
@@ -106,15 +130,28 @@ impl Subject {
                 }
                 names::slug(env)
             }
+            Subject::Preview { project, preview, service } => {
+                if !id_ok(project) || !preview.starts_with("pv_") || !id_ok(preview) || !id_ok(service) {
+                    return Err(Error::BadRequest("a project, a preview (pv_…) and a service are ids: 1–64 characters of a-z, 0-9, _ and -".into()));
+                }
+                names::slug(&self.env())
+            }
         }
     }
 
     /// The subject a `sub` names, when it's one of roll's products' and well formed.
     pub fn parse(sub: &str) -> Option<Subject> {
-        let rest = sub.strip_prefix(APPS_PREFIX)?;
+        let (rest, app) = match sub.strip_prefix(APPS_PREFIX) {
+            Some(rest) => (rest, true),
+            None => (sub.strip_prefix(PREVIEWS_PREFIX)?, false),
+        };
         let mut parts = rest.split(':');
-        let (project, service, env) = (parts.next()?, parts.next()?, parts.next()?);
-        let s = Subject::App { project: project.into(), service: service.into(), env: env.into() };
+        let (project, second, third) = (parts.next()?, parts.next()?, parts.next()?);
+        let s = if app {
+            Subject::App { project: project.into(), service: second.into(), env: third.into() }
+        } else {
+            Subject::Preview { project: project.into(), preview: second.into(), service: third.into() }
+        };
         (parts.next().is_none() && s.check().is_ok()).then_some(s)
     }
 
@@ -122,6 +159,7 @@ impl Subject {
     fn claims(&self) -> Json {
         match self {
             Subject::App { project, service, env } => json!({ "project": project, "service": service, "environment": env }),
+            Subject::Preview { project, preview, service } => json!({ "project": project, "preview_id": preview, "service": service, "environment": self.env(), "preview": true }),
         }
     }
 }
@@ -478,21 +516,29 @@ impl crate::Secrets {
         let keys = self.keys()?;
         let project = subject.project().to_string();
         self.project(&project)?;
-        let Subject::App { service, env, .. } = &subject;
+        let env = subject.env();
+        let env = env.as_str();
         // Only an environment the project has, live, and never one running code nobody vetted (an
         // untrusted preview: a fork's pull request, outside code). Its `pv-…` subject would
         // otherwise be roll's word, and a cloud trust on `…:<service>:*` would hand it a session.
+        // A preview's own services act in the preview's environment, decided here from its own
+        // `trusted`, never by the caller.
         let e = self.db.read(|c| crate::envs::by_slug(c, &project, env))?;
         let now = self.db.now_ms()?;
         if e.expires_at.is_some_and(|t| t <= now) {
             return Err(Error::NotFound(format!("no environment {env}")));
+        }
+        // A preview's own service acts only in a preview's (ephemeral) environment: a standard one a
+        // person named `pv-…` (slugs don't reserve it) never gets a `preview: true` token.
+        if matches!(subject, Subject::Preview { .. }) && e.kind != crate::envs::Kind::Ephemeral {
+            return Err(Error::NotFound(format!("no preview environment {env}")));
         }
         if e.kind == crate::envs::Kind::Ephemeral && !e.trusted {
             return Err(Error::Forbidden(format!("{env} is an untrusted preview (code nobody vetted): roll signs no token for it")));
         }
         let token = Issuer { url }.sign_subject(&self.db, keys, &subject, aud, ttl_s)?;
         let sub = subject.sub();
-        let caller = crate::Caller::consumer(&format!("app:{service}"));
+        let caller = crate::Caller::consumer(&subject.actor());
         self.db.write(|c| {
             let first = c.execute(
                 "INSERT INTO oidc_issued (subject, audience, hour, project_id, tokens) VALUES (?, ?, ?, ?, 1) ON CONFLICT (subject, audience, hour) DO NOTHING",

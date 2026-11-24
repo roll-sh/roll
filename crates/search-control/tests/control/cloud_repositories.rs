@@ -205,7 +205,7 @@ impl Cloud {
         let r = reqwest::Client::new().post(format!("{emulator}/storage/v1/b?project=test-project")).json(&json!({"name": bucket})).send().await.unwrap();
         assert!(r.status().is_success() || r.status().as_u16() == 409, "creating the bucket: {}", r.status());
         let (file, private, tokens) = service_account().await;
-        let store = search_es::blob::Store::Gcs(search_es::gcs::Client::new(reqwest::Url::parse(&emulator).unwrap(), bucket, None, None, true).unwrap());
+        let store = search_es::blob::Store::Gcs(search_es::gcs::Client::new(reqwest::Url::parse(&emulator).unwrap(), bucket, None, None, &search_es::egress::Egress::of(|_| None, true).unwrap()).unwrap());
         // A line from the middle of the key: the PEM's armour isn't secret.
         let key_line = private.lines().nth(10).unwrap().to_string();
         let base = format!("{test}-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
@@ -223,7 +223,7 @@ impl Cloud {
         let endpoint = format!("{proxy}{}", reqwest::Url::parse(&emulator).unwrap().path().trim_end_matches('/'));
         let container = "roll-backups";
         let key = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, AZURITE_KEY).unwrap();
-        let client = search_es::azure::Client::new(AZURITE_ACCOUNT, search_es::azure::Auth::Key(key), reqwest::Url::parse(&emulator).unwrap(), None, search_es::azure::LocationMode::PrimaryOnly, container, true).unwrap();
+        let client = search_es::azure::Client::new(AZURITE_ACCOUNT, search_es::azure::Auth::Key(key), reqwest::Url::parse(&emulator).unwrap(), None, search_es::azure::LocationMode::PrimaryOnly, container, &search_es::egress::Egress::of(|_| None, true).unwrap()).unwrap();
         client.create_container().await.unwrap();
         let base = format!("{test}-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
         let settings = json!({"container": container, "endpoint": endpoint, "account": AZURITE_ACCOUNT, "key": AZURITE_KEY});

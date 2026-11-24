@@ -317,6 +317,101 @@ impl SiteRules {
     }
 }
 
+/// An environment's own redirects (`redirects` on any service's environment; Vercel's project
+/// redirects, Netlify's): `_redirects` lines, each a redirect (301 by default, 302, 303, 307 or
+/// 308) to a path on the same host or another site's URL, with the same patterns and conditions.
+/// A rule on an exact path (no `*`, no `:name`, no condition) is looked up by its path, up to
+/// [`MAX_EXACT`] of them (Vercel's bulk redirects), and wins over the patterns, which are tried
+/// in order, up to [`MAX_REDIRECTS`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EnvRedirects {
+    exact: std::collections::HashMap<String, (String, u16)>,
+    patterns: SiteRules,
+}
+
+/// The most exact-path redirects an environment holds, and the most its text may weigh.
+pub const MAX_EXACT: usize = 20_000;
+pub const MAX_REDIRECTS_TEXT: usize = 1 << 20;
+
+impl EnvRedirects {
+    /// Whether `text` is an environment's redirects: every line a redirect roll takes (the first
+    /// that isn't, by its number), within the limits.
+    pub fn check(text: &str) -> Result<(), String> {
+        if text.len() > MAX_REDIRECTS_TEXT {
+            return Err("redirects are at most 1 MiB".into());
+        }
+        let (mut exact, mut patterns) = (0usize, 0usize);
+        for (n, line) in text.lines().enumerate() {
+            let rule = line.split('#').next().unwrap_or("").trim();
+            if rule.is_empty() {
+                continue;
+            }
+            let single = SiteRules::parse(Some(rule), None);
+            let Some(r) = single.redirects.first() else {
+                return Err(format!("redirects, line {}: not a rule (`/from /to [301|302|303|307|308] [Country=…]`)", n + 1));
+            };
+            if !matches!(r.status, 301 | 302 | 303 | 307 | 308) {
+                return Err(format!("redirects, line {}: an environment's redirects are 301, 302, 303, 307 or 308 (a static site's own _redirects also rewrites)", n + 1));
+            }
+            if service_target(&r.to).is_some() {
+                return Err(format!("redirects, line {}: a redirect goes to a path or another site's URL (routes send a path to a service)", n + 1));
+            }
+            if is_exact(r) { exact += 1 } else { patterns += 1 }
+        }
+        if exact > MAX_EXACT || patterns > MAX_REDIRECTS {
+            return Err(format!("redirects: at most {MAX_EXACT} on exact paths and {MAX_REDIRECTS} with patterns or conditions"));
+        }
+        Ok(())
+    }
+
+    pub fn parse(text: &str) -> EnvRedirects {
+        let mut out = EnvRedirects::default();
+        let mut pattern_lines = Vec::new();
+        for line in text.lines() {
+            let rule = line.split('#').next().unwrap_or("").trim();
+            let single = SiteRules::parse(Some(rule), None);
+            let Some(r) = single.redirects.into_iter().next().filter(|r| matches!(r.status, 301 | 302 | 303 | 307 | 308)) else { continue };
+            if is_exact(&r) {
+                if out.exact.len() < MAX_EXACT {
+                    let key = r.from.segments.iter().map(|s| match s { Segment::Literal(l) | Segment::Name(l) => l.as_str() }).collect::<Vec<_>>().join("/");
+                    out.exact.entry(format!("/{key}")).or_insert((r.to, r.status));
+                }
+            } else {
+                pattern_lines.push(rule);
+            }
+        }
+        out.patterns = SiteRules::parse(Some(&pattern_lines.join("\n")), None);
+        out
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.exact.is_empty() && self.patterns.redirects.is_empty()
+    }
+
+    /// Where a request for `path` is sent, and with which status (its query kept on a redirect
+    /// that names none).
+    pub fn find(&self, path: &str, query: Option<&str>, visitor: &Visitor) -> Option<(u16, String)> {
+        // The path as patterns read it: its segments, empty ones dropped.
+        let key = format!("/{}", path.split('/').filter(|s| !s.is_empty()).collect::<Vec<_>>().join("/"));
+        if let Some((to, status)) = self.exact.get(&key) {
+            let mut to = to.clone();
+            if let Some(q) = query.filter(|q| !q.is_empty() && !to.contains('?')) {
+                to = format!("{to}?{q}");
+            }
+            return Some((*status, to));
+        }
+        match self.patterns.redirect(path, query, false, visitor)? {
+            Outcome::Redirect(s, to) => Some((s, to)),
+            _ => None,
+        }
+    }
+}
+
+/// A rule on one exact path, with no condition.
+fn is_exact(r: &Redirect) -> bool {
+    !r.from.splat && r.from.segments.iter().all(|s| matches!(s, Segment::Literal(_))) && r.when == Conditions::default()
+}
+
 /// The files a site's rules come from, which are never served themselves (a site built from
 /// its tree's root has its `netlify.toml` and `vercel.json` in it, and those can hold build
 /// settings).
@@ -327,6 +422,24 @@ pub fn is_rules_file(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_environments_redirects_are_exact_paths_then_patterns() {
+        let text = "# moved\n/old /new 308\n/old/ /never\n/blog/* /posts/:splat 301\n/fr/* /fr-FR/:splat 302 Country=fr\n/docs https://docs.acme.dev\n";
+        assert_eq!(EnvRedirects::check(text), Ok(()));
+        let r = EnvRedirects::parse(text);
+        let v = Visitor::default();
+        assert_eq!(r.find("/old/", Some("a=1"), &v), Some((308, "/new?a=1".into())), "an exact path, the first rule for it");
+        assert_eq!(r.find("/blog/2026/hi", None, &v), Some((301, "/posts/2026/hi".into())));
+        assert_eq!(r.find("/fr/a", None, &v), None, "its condition doesn't hold");
+        assert_eq!(r.find("/docs", None, &v), Some((301, "https://docs.acme.dev".into())));
+        assert_eq!(r.find("/other", None, &v), None);
+        assert!(EnvRedirects::check("/a /b 200").unwrap_err().contains("line 1"), "no rewrites");
+        assert!(EnvRedirects::check("/a service:api/x 301").is_err(), "no service: targets");
+        assert!(EnvRedirects::check("/ok /b\nnonsense").unwrap_err().contains("line 2"));
+        let bulk: String = (0..=MAX_EXACT).map(|i| format!("/p{i} /q{i}\n")).collect();
+        assert!(EnvRedirects::check(&bulk).is_err(), "past the limit");
+    }
 
     #[test]
     fn redirects_match_in_order_with_splats_and_placeholders() {

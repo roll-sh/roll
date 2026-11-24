@@ -543,6 +543,88 @@ async fn sign_in(http: &reqwest::Client, api: &str, outbox: &std::path::Path) ->
     set.split(';').next().unwrap().to_string()
 }
 
+/// A person's token for one of their projects works roll search through `/v1/mcp`, scoped by
+/// the gate with search's real resolver: it makes a cluster in that project, bulk-indexes and
+/// queries it, and gets the gate's 403 on their cluster in another project; `tools/list` shows it
+/// search's tools only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_search_with_a_project_token() {
+    let home = tempfile::tempdir().unwrap();
+    let env = vec![
+        ("ROLL_ADMIN_TOKEN", TOKEN.to_string()),
+        ("ROLL_DASHBOARD_ORIGIN", DASHBOARD.to_string()),
+        ("ROLL_PRODUCTS", "search".to_string()),
+        ("ROLL_ACCOUNTS_OUTBOX", home.path().join("outbox").display().to_string()),
+    ];
+    let mut cmd = rolld(home.path(), &[], &env);
+    let started = common::on_any_port(&mut cmd, common::LISTENERS, home.path());
+    let mut child = cmd.stdout(Stdio::null()).spawn().expect("rolld starts");
+    let api = started.addrs(&mut child).await.url("api");
+    let _d = Rolld(child);
+    let http = reqwest::Client::builder().timeout(Duration::from_secs(30)).build().unwrap();
+    let started = std::time::Instant::now();
+    while !http.get(format!("{api}/v1/info")).bearer_auth(TOKEN).send().await.is_ok_and(|r| r.status().is_success()) {
+        assert!(started.elapsed() < Duration::from_secs(60), "rolld didn't answer");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let cookie = sign_in(&http, &api, &home.path().join("outbox")).await;
+    let session: serde_json::Value = http.get(format!("{api}/v1/accounts/session")).header("cookie", &cookie).send().await.unwrap().json().await.unwrap();
+    let csrf = session["csrf"].as_str().unwrap().to_string();
+    let as_ada = |method: reqwest::Method, path: String, body: serde_json::Value| {
+        let req = http.request(method, format!("{api}{path}")).header("cookie", &cookie).header("origin", DASHBOARD).header("x-roll-csrf", &csrf).json(&body);
+        async move {
+            let r = req.send().await.unwrap();
+            let status = r.status();
+            let v: serde_json::Value = r.json().await.unwrap_or_default();
+            assert!(status.is_success(), "{path}: {status} {v}");
+            v
+        }
+    };
+    let alpha = as_ada(reqwest::Method::POST, "/v1/workspace/projects".into(), serde_json::json!({ "name": "alpha" })).await["id"].as_str().unwrap().to_string();
+    let beta = as_ada(reqwest::Method::POST, "/v1/workspace/projects".into(), serde_json::json!({ "name": "beta" })).await["id"].as_str().unwrap().to_string();
+    let other = as_ada(reqwest::Method::POST, "/v1/search/clusters".into(), serde_json::json!({ "name": "ada-beta" })).await["id"].as_str().unwrap().to_string();
+    as_ada(reqwest::Method::PUT, format!("/v1/workspace/projects/{beta}/resources/search/{other}"), serde_json::json!({ "x": 0, "y": 0 })).await;
+    let rules = serde_json::json!([{ "product": "search", "resources": [{ "project": alpha }], "actions": { "read": "allow", "write": "allow" } }]);
+    let token = as_ada(reqwest::Method::POST, "/v1/access/tokens".into(), serde_json::json!({ "name": "agent", "rules": rules })).await["token"].as_str().unwrap().to_string();
+
+    let tool = |name: &'static str, arguments: serde_json::Value| {
+        let req = http.post(format!("{api}/v1/mcp")).bearer_auth(&token).header("accept", "application/json").json(&serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": name, "arguments": arguments } }));
+        async move {
+            let v: serde_json::Value = req.send().await.unwrap().json().await.unwrap();
+            let r = v["result"].clone();
+            (r["structuredContent"]["http_status"].as_u64().unwrap_or(if r["isError"] == true { 0 } else { 200 }), r)
+        }
+    };
+    let (s, made) = tool("search_create_cluster", serde_json::json!({ "name": "ada-alpha", "workspace_project": alpha })).await;
+    assert_eq!(s, 200, "{made}");
+    let ndjson = "{\"index\":{\"_id\":\"1\"}}\n{\"t\":\"rolling hills\"}\n{\"index\":{\"_id\":\"2\"}}\n{\"t\":\"rolling stones\"}\n";
+    let (s, bulk) = tool("search_bulk", serde_json::json!({ "cluster": "ada-alpha", "index": "notes", "ndjson": ndjson })).await;
+    assert_eq!(s, 200, "{bulk}");
+    assert_eq!(tool("search_refresh", serde_json::json!({ "cluster": "ada-alpha", "index": "notes" })).await.0, 200);
+    let (s, found) = tool("search_query", serde_json::json!({ "cluster": "ada-alpha", "index": "notes", "query": { "match": { "t": "rolling" } } })).await;
+    assert_eq!(s, 200, "{found}");
+    assert_eq!(found["structuredContent"]["hits"]["total"]["value"], 2, "{found}");
+    let (s, refused) = tool("search_query", serde_json::json!({ "cluster": other, "index": "notes", "query": { "match_all": {} } })).await;
+    assert_eq!(s, 403, "a cluster in another project: {refused}");
+    // Refused as the gate refuses (never a 404 or an empty answer): what's missing, and where the
+    // person can allow it.
+    let text = refused["content"][0]["text"].as_str().unwrap_or_default();
+    let widen = refused["structuredContent"]["widen"].as_str().unwrap_or_default();
+    assert!(refused["isError"] == true && text.starts_with("not allowed: this token can't") && !widen.is_empty() && text.contains(widen), "{refused}");
+    // Its tool list follows its rules: search's tools, not a project-scoped tool of a product it
+    // has no rule for (secrets' cross-project ones take any grant, so they stay).
+    let names = |token: &str| {
+        let req = http.post(format!("{api}/v1/mcp")).bearer_auth(token).header("accept", "application/json").json(&serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }));
+        async move {
+            let v: serde_json::Value = req.send().await.unwrap().json().await.unwrap();
+            v["result"]["tools"].as_array().unwrap_or_else(|| panic!("{v}")).iter().filter_map(|t| t["name"].as_str().map(str::to_string)).collect::<Vec<_>>()
+        }
+    };
+    assert!(names(TOKEN).await.iter().any(|n| n == "secrets_list_environments"), "the operator's list");
+    let listed = names(&token).await;
+    assert!(listed.iter().any(|n| n.starts_with("search_")) && !listed.iter().any(|n| n.starts_with("postgres_") || n == "secrets_list_environments"), "{listed:?}");
+}
+
 #[test]
 fn refuses_to_listen_off_loopback_without_a_token() {
     let home = tempfile::tempdir().unwrap();
