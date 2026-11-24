@@ -70,6 +70,8 @@ reqwest = { workspace = true, features = ["rustls"] }
 ring.workspace = true
 roll-auth.workspace = true
 roll-edge.workspace = true
+# roll secrets' public certificates: the edge's ACME client, over a guarded HTTP client of rolld's.
+instant-acme.workspace = true
 roll-workspace.workspace = true
 roll-secrets.workspace = true
 http-body-util.workspace = true
