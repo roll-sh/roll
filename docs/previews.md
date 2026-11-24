@@ -2096,9 +2096,12 @@ type Settings = {
     `page_speed` doesn't carry them (live: the change's `/openapi.json` loses
     `paths./users/{id}`).
     Its modes too (Chromatic's Modes): with `github.modes` (up to 3, each a name and at least one
-    of a `color_scheme`, `dark` or `light`; a `locale`, `de-DE`, also sent as `Accept-Language`;
-    and a `timezone`, `Europe/Berlin`), the first page is taken again in each, emulated by the
-    browser (`prefers-color-scheme`, the locale and the time zone), the emulation undone after.
+    of a `color_scheme`, `dark` or `light`; a `locale`, `de-DE`, for the page's `Intl` formatting
+    and sent as `Accept-Language` (`navigator.language` stays the browser's); and a `timezone`,
+    `Europe/Berlin`), the first page is taken again in each, emulated by the browser
+    (`prefers-color-scheme`, the locale and the time zone), the emulation undone after (checked in
+    the screenshot image: black in `mode:dark` and white at the width after it, GMT+9 then UTC, a
+    German date order).
     Each is a page of its own (`mode:dark`, "Views" on the sheet, labelled "dark mode"), compared
     with main's same mode and reviewed like a page. The sheet's picture route takes every kind of
     page key a run keeps (`page=` a path, `@768`, `state:`, `browser:`, `mode:` or `story:`; it
