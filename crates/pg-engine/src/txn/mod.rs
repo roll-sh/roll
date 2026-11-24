@@ -3778,7 +3778,16 @@ impl TxnState {
     /// Lock relation `rel` in `mode` (LockRelationOid) until the transaction ends.
     pub fn lock_relation(&mut self, rel: u32, mode: LockMode, policy: WaitPolicy, name: &dyn Fn() -> String) -> Result<bool> {
         let key = locks::relation_key_bytes(self.db.oid, rel);
-        self.lock(&key, mode, policy, &|| format!("relation \"{}\"", name()))
+        let got = self.lock(&key, mode, policy, &|| format!("relation \"{}\"", name()))?;
+        // A lock writers' RowExclusiveLock conflicts with (SHARE and up: CREATE INDEX, ALTER
+        // TABLE, CLUSTER, ...) waited for the transactions writing the table to end. What they
+        // committed meanwhile is the command's to read, as PostgreSQL's index build (SnapshotAny)
+        // and table rewrite (GetLatestSnapshot) read it, not the statement's older snapshot:
+        // an index built from that missed their rows, a rewrite dropped them.
+        if got && mode >= LockMode::Share {
+            self.refresh_read_committed_snapshot();
+        }
+        Ok(got)
     }
 
     /// The lock id of the running (sub)transaction (whose transaction lock its row locks
