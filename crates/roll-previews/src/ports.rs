@@ -379,6 +379,10 @@ pub struct CropAsk {
     pub height: Option<u32>,
     #[serde(default)]
     pub steps: Vec<crate::settings::Step>,
+    /// In this engine ([`crate::settings::BROWSERS`]) rather than Chromium's: the other browsers'
+    /// run takes it.
+    #[serde(default)]
+    pub browser: Option<String>,
 }
 
 /// What a screenshot run takes: the project's other pages, and what it blanks first.

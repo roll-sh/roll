@@ -1107,7 +1107,7 @@ impl Engine {
                 let wanted: Vec<String> = entries.iter().cloned().chain(width_keys.iter().cloned()).chain(own_keys.iter().filter(|k| took(k)).cloned()).chain(stories).collect();
                 for (note, png) in &shot.crops {
                     // How it was taken: as its reviewer saw it, when the note said.
-                    let seen = opts_crops.iter().find(|c| c.note == *note).and_then(|c| crate::notes::Seen { width: c.width, height: c.height, steps: c.steps.clone() }.label());
+                    let seen = opts_crops.iter().find(|c| c.note == *note).and_then(|c| crate::notes::Seen { width: c.width, height: c.height, steps: c.steps.clone(), browser: c.browser.clone() }.label());
                     if let Err(e) = self.store.set_note_crop(&r.id, note, png, seen.as_deref()) {
                         warn!(preview = %r.id, error = %e, "previews: keeping a note's crop");
                     }
@@ -1173,7 +1173,7 @@ impl Engine {
             .into_iter()
             .filter(|n| !n.crop && crate::settings::page_path_ok(&n.path) && crate::settings::selector_ok(&n.selector))
             .take(crate::store::CROPS_PER_RUN)
-            .map(|n| crate::ports::CropAsk { note: n.id, path: n.path, selector: n.selector, width: n.seen.width, height: n.seen.height, steps: n.seen.steps })
+            .map(|n| crate::ports::CropAsk { note: n.id, path: n.path, selector: n.selector, width: n.seen.width, height: n.seen.height, steps: n.seen.steps, browser: n.seen.browser })
             .collect()
     }
 
