@@ -21211,3 +21211,122 @@ directory: its premise (above) was wrong.
    code passed it (1.86%); what that costs in speed was not measured. The shipped command trains
    afresh, so the warning only concerns `--profdata` reuse.
 5. BOLT (agent 225, 236): not in the toolchain.
+
+## Storage format 5: column blocks, stage 1 (agent 303; not handed in: the switch-off gate is not met)
+
+Agent 282's prototype (HANDOFF "Storage format 5: column blocks, a prototype", branch
+`proto/a282-format5`) brought onto the head **behind a switch that is off by default**, branch
+`wip/a303` (the commits on `ad12b41b5`). **Not a candidate**: the brief's gate for landing stage 1 at
+all is "switch off, format 4's instructions within 0.1%", and the best build (n9) is still above it
+on some cells (table below). BENCH.md "Storage format 5, stage 1" has the pairs. Steps 2-4 not done
+(one step-2 piece written, not measured: below).
+
+**The switch** is the data directory's, from when it is made: `StoreOptions::colblocks`, default
+`ROLL_COLBLOCKS=1` (off otherwise), kept in the manifest (`"colblocks": true`, left out when false).
+A directory keeps what it was made with whatever the environment says later (test
+`column_blocks_read_as_rows` reopens each store with the switch the other way). One made without it
+never writes a column block: its manifest stays format 4 and the head before this reads it. One made
+with it writes column blocks at its first L1 write (compaction, clean close); from then its manifest
+says 5 (`STORE_FORMAT` = `sst::FORMAT_COLS`) and older builds refuse it at open; before that, an
+older build reads it and drops the field when it rewrites the manifest (the directory is then format
+4's for good). The file format is 282's unchanged (`storage/colblock.rs`; trailer flag bit 1; footer
+format 5 = format 4's, a dictionary of length 0 when none; `SstMeta::cols`). 292's block copy skips
+format 5 files (their `format()` differs): compactions rewrite them (step 3).
+
+**Keeping format 4's paths as they were** (the work of this stage; what each costs or saves was found
+by diffing the dist builds' symbol tables (`nm`, storage and parscan) and q06's / q01's / a range
+read's `perf record -e instructions:upp` per symbol and per instruction, against the base):
+- `Block`: a column block's restarts' value offsets are moved at load past the end of its buffer
+  (`ColBlk::base`): a value read by offset (`value`, `value_ref`, `value_span`, `external`) misses
+  the buffer, and only then goes the cold way (`col_row`: that row; `col_rows`: all of them, kept
+  with the block: a compaction's input). `Block` stays 80 bytes (`common` a u32; a const assert), so
+  the cache counts format 4's blocks as before.
+- `RowBatch`: rows of column blocks are left unmade only in a batch that takes them
+  (`take_col_rows`: parscan's `Reader`, which decodes their columns, `cols::gather_runs`, and calls
+  `make_rows` before it reads a row by index: after `Pre::mark`, before a run's row path). Any other
+  batch gets them made at the end of the fill. The state is one `Option<Box<ColRows>>`: three plain
+  `Vec` fields made every `RowBatch` drop call two drop functions, +1.7 to +3.2% on COPY TO,
+  INSERT ... SELECT and range reads (which make a batch a call); boxed, they're level.
+- Accessors that test for column rows at their start (`get`, `value_in`, `take`) cost 2
+  instructions a row: +0.6 to +1.7% on count(*) and COPY TO; a fallback call that returns where a
+  panic was made `get` save 4 more registers a call. Both gone: the accessors are format 4's.
+- Second callers made the compiler outline `cols::walk_row`, `walk_plan`, `push_shared`,
+  `Block::run_rows`, `rank_of`, `Cursor::head_meta`, `RowBatch::value_in`; a call with 8-9 live
+  arguments in the middle of an inlined body (`decode_mixed`, `run_into_cols`) made the walk and
+  run loops reload values from the stack. Fixed by one caller, `#[inline(always)]` where the base
+  inlined it, and leaving at a function's start (`decode_cols_mixed`, `push_head_col`).
+- A scan without a column-block file among its sources runs format 4's code: `Merge::cols`, and
+  `fill_batch_in::<false>`, `position::<false>`, `next_in::<false>` use the plain accessors
+  (`head_plain`, `take_plain`, `value_plain`); one test a call.
+- Tried and dropped: the column-block instances out of line (`fill_batch_cols`, `next_cols`) and
+  `ColData::size` inlined: q01 +0.34 -> +0.68%, q06 +0.14 -> +0.94% (patch
+  `~/.cache/a303/patches/0001-pg-engine-storage-format-5-WIP-a-scan-s-column-block.patch`).
+
+**Where switch off stands** (n9 against `ad12b41b5`, plain dist, two pairs, user instructions):
+q01 **+0.34%**, q06 +0.14%, q10 +0.15%, q03 -2.2%; COPY TO **+0.77%**, INSERT ... SELECT **+0.54%**,
+count(*) / sum scans +0.3 to +1.1% (at the script's 3-digit resolution: 1-2 instructions a row);
+COPY in, CREATE INDEX, UPDATE, DELETE, VACUUM, ANALYZE within ±0.25%; range reads level (565k / 527k
+against 570k / 574k a read, noisy); point selects level (62.0k / 63.3k against 62.6k; a select's
+count moved 3% between runs of one binary: spinning between requests on a loaded lane). What's left
+is code placement and register allocation around the new branches (per-symbol profiles of q01 show
+no one cost above sampling noise). Next: the PGO build (required anyway for changes of function
+boundaries; 3-3.5 h a build here, not run), which may place the cold format-5 paths apart; else
+`#[cold]` blocks around each `C` branch and a per-function asm diff of `fill_batch_with` and
+`Pre::decode` against the base.
+
+**Format 5 against format 4** (n9, one binary, two TPC-H pairs, hashes equal): q01 **-28.0%**, q06
+**-36.1%**; q03 +78%, q07 +45%, q09 +26%, q10 +163% (n1, before the batch opt-in: q03 +34%, q10
+-15%). VmHWM 1,682 -> 1,357 MB (-19%); the store 612.4 -> 569.8 MB on disk (-7.0%); the load 707.3 ->
+748.6 G instructions (+5.8%: the encoder and its check). Bulk script on a directory made with the
+switch: the scans -14 to -17%, DELETE +9.4%, VACUUM +12%, ANALYZE +55%, the rest within +0.5%.
+q10's profile on format 5: `ColDir::value` + `ColDir::row` 63% of its instructions: parscan's row
+path makes every row of a batch after `Pre::mark` (`make_rows`), the ~75% `Pre` dropped
+(`l_returnflag = 'R'`) too; n1 made only the rows read. **First thing to fix**: `make_rows` of the
+rows whose fate isn't DROP only (`Reader::next_row_with` has `skip`); then `ColDir::value` (~120
+instructions a value, a match and a varint each: a writer per column made once per block).
+
+**Step 2, written, not built or measured** (`wip/a303-s2`, on the head before `ad12b41b5`; to be ported): a lookup's multi-get makes a column block's rows of the columns it reads, the others NULL
+(`PointReader::get_sorted_cols`, `ColDir::row_cols`, `Lookup::reads` = the decoded columns and
+`StoredCmps::mark_cols`), into one buffer after the seeks; a batch's lazy rows made a run at a time.
+
+**Correctness**: unit test `storage::tests::column_blocks_read_as_rows` (the same writes into a
+store with and without the switch: batches with columns decoded from the blocks and rows made,
+scans by row and reverse, point reads, the multi-get, a unique probe; across L0 over column blocks,
+a reopen with the switch the other way and a compaction; the manifest's format) and 282's
+`sections_give_their_rows_back`. `tools/quick-check.sh` with `QC_CHECKED=1` on `7723d8bc7` (n9's code), switch off: tests 402
+passed in 20 binaries, crash seeds 1-3 x 2 and the power cut, the checked build's 402, regress
+51,148 / 51,150 units (0 newly differing), isolation 1,647 / 1,648, pg_dump 14,609 passed; the same
+with `ROLL_COLBLOCKS=1` in the environment (every store the tests, the crash cases and regress's
+engine make has column blocks on): every step the same counts. Not checked: how many of regress's
+tables reached L1 (the engine's 8 MB memtables; the unit test and the small-memtable integration
+tests do). `wire_waits`' transaction_timeout transcript once differed in the client's message
+("error communicating with the server" for "connection closed"), passed 3 of 3 alone: timing.
+
+**One format revision for four changes** (only column blocks are built). Each is one-way for the
+same reason (an older build would misread what it writes), so they can share the one number: the
+manifest says 5 when it names a file with any of them, each behind its own switch kept in the
+manifest at directory creation like `colblocks` (`"dated_dead"`, `"est2"`, `"enum_order"`), so
+turning one on never needs another format number; files and records say which form they hold (a
+block's trailer flag, a record's tag, an index's catalog flag), so a format 5 build reads any mix,
+and flipping the defaults is one decision once each is no worse than format 4.
+- *Delete markers with a snapshot bound* (282's "B"): per L1 file a bitmap of entries per block with
+  the deleting commit's ts, named in the manifest beside `dv`, folded into `DeadSet` once the GC
+  horizon passes it; a reader at snapshot S drops an entry whose bit is set in a generation with ts
+  <= S (with column blocks a run just splits). The WAL keeps the deleted keys' record (replay and
+  logical decoding as now). Switch `dated_dead`.
+- *Smaller estimate records* (agent 292's item 3, "Short write transactions, round 13"): tag 0xe3,
+  varint fields and deltas. An older build drops such a table's estimate at restart rather than
+  misreading it, so it needs no manifest gate of its own; under format 5 it keeps "a build older
+  than this directory refuses it" true for everything. Switch `est2`.
+- *Enum keys in sort order* ("Enum keys reading btree indexes in order"): an enum column's index key
+  encoded as its label's `enumsortorder` (f32, order-preserving bits) instead of its text, so
+  `key_order` accepts an enum's `<` (min / max InitPlans, ORDER BY through the index). Per index: a
+  catalog flag says which encoding its entries have; `ALTER TYPE ... ADD VALUE` renumbers existing
+  labels only when the sort orders run out of precision (`RenumberEnumType`), and then every index
+  of the type is rebuilt. New indexes get it when `enum_order` is on; REINDEX converts an old one.
+
+**Measuring notes**: lanes A-C carried 2-7.8 foreign cores throughout (lane.sh), so every number is
+user instructions (cycles moved ±10% between runs of one binary). `ROLL_COLBLOCKS=1` at the load
+made the format 5 data; arms of one binary on both data sets. Harness copies under `~/.cache/a303/`
+(tpch/, bench/, pt/; the bulk harness's `PROF_ALL=1` records the server's CPUs, as `perf record -p`
+missed the step's connection thread).

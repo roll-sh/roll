@@ -518,6 +518,52 @@ The regress class's 31.7 G that agent 294 saw from `2a0f67b0d` on is 0.98 G at t
 29 files alone in a clean data directory: 0.94 G, `~/.cache/a304/regress-probe.sh`; with the
 catalog class's 1,500 tables present the same files count the same, e.g. catalog_static 118.69 M).
 
+## Storage format 5, stage 1: column blocks behind a switch (2026-11-24, agent 303)
+
+HANDOFF "Storage format 5: column blocks, stage 1". Plain dist builds (`tools/dist.sh`): **b2** = the
+head `ad12b41b5`; **n9** = stage 1 on it (`wip/a303`, the switch off by default). TPC-H SF1 loaded once
+per form (format 4 by the head; format 5 by an earlier stage-1 build with `ROLL_COLBLOCKS=1`; the
+file format didn't change since), closed cleanly, copied per run; 2 GB cache; 3 runs a query in one
+perf window after a warm-up of the 22. Lane C (TPC-H, bulk), A (point selects), B (range reads); all
+loaded (lane.sh 2-7.8 foreign cores): user instructions only, cycles not comparable.
+
+**Switch off against the head** (the gate for landing stage 1: within 0.1%; not met):
+
+| | b2 | n9 | pair 1 | pair 2 |
+|---|---|---|---|---|
+| q01 (G) | 7.3889 | 7.4141 | +0.34% | +0.34% |
+| q06 | 5.1482 | 5.1556 | +0.14% | +0.14% |
+| q10 | 7.4726 / 7.4824 | 7.4885 / 7.4915 | +0.21% | +0.12% |
+| q03 | 4.1505 / 4.1517 | 4.0575 / 4.0662 | -2.24% | -2.06% |
+| bulk COPY TO | 3.085 | 3.109 | +0.78% | +0.75% |
+| INSERT ... SELECT | 4.429 | 4.453 | +0.54% | +0.54% |
+| CREATE INDEX / UNIQUE | 4.346 / 3.329 | 4.357 / 3.337 | +0.25% / +0.24% | +0.21% / +0.15% |
+| COPY in, UPDATE, DELETE, VACUUM, ANALYZE | | | -0.02 to +0.17% | 0.00 to +0.17% |
+| count(*), sum(c), sum(a) scans | 0.177-0.366 | 0.178-0.368 | +0.30 to +1.13% | +0.30 to +1.13% |
+| range read (k / read) | 570.5 / 574.3 | 565.3 / 527.4 | | |
+| point select (k / select) | 62.6 | 62.0 / 63.3 | | |
+
+Builds on the way (q01 / q06 / COPY TO switch off, against their base): n1 +1.4 / +2.8 / -; n4
++1.1 / +2.2 / -; n6 +0.52 / +0.70 / +3.2; n7 +0.40 / +0.36 / +3.2; n8 +0.38 / +0.37 / +0.84; n9 +0.34
+/ +0.14 / +0.77; n10 (format-5 instances out of line, dropped) +0.68 / +0.94 / -.
+
+**Format 5 against format 4** (n9, one binary, two pairs, hashes equal):
+
+| | format 4 | format 5 | |
+|---|---|---|---|
+| q01 (G) | 7.413 | 5.335 | **-28.0%** |
+| q06 | 5.155 | 3.294 | **-36.1%** |
+| q03 | 4.057 | 7.234 | +78% |
+| q07 | 3.443 | 4.989 | +45% |
+| q09 | 7.823 | 9.844 | +26% |
+| q10 | 7.492 | 19.716 | +163% (rows made after `Pre::mark`: HANDOFF) |
+| VmHWM (MB) | 1,682 | 1,357 | -19% |
+| store on disk (MB) | 612.4 | 569.8 | -7.0% |
+| TPC-H load, user G | 707.3 | 748.6 | +5.8% |
+| bulk: aggregating scans | 0.330 / 0.368 | 0.284 / 0.305 | -14 to -17% |
+| bulk: DELETE / VACUUM / ANALYZE | 7.745 / 1.718 / 0.468 | 8.474 / 1.925 / 0.724 | +9.4% / +12% / +55% |
+| bulk: COPY in, indexes, COPY TO, INSERT ... SELECT, UPDATE | | | +0.1 to +0.5% |
+
 ## Analytic CPU, round 13: q09's rows over the lookup stages, unique probes (2026-11-22, agent 294)
 
 HANDOFF "Analytic CPU, round 13" has what changed. Plain dist builds (`tools/dist.sh`): **b0**
