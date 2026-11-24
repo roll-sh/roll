@@ -718,7 +718,14 @@ struct ErrorsQuery {
 async fn errors(AxState(e): S, Path(id): Path<String>, Query(q): Query<ErrorsQuery>) -> crate::Result<Json<Value>> {
     check_id(&id)?;
     let minutes = crate::engine::error_span(q.minutes.unwrap_or(60));
-    Ok(Json(json!({ "minutes": minutes, "groups": e.errors(&id, minutes).await? })))
+    let mut groups = serde_json::to_value(e.errors(&id, minutes).await?).unwrap_or_default();
+    // A fork's: its code's own words, outside text (roll MCP's lockdown keeps it from a model).
+    if e.store.row(&id).is_ok_and(|r| !r.trusted) {
+        for g in groups.as_array_mut().into_iter().flatten() {
+            g["outside"] = json!(true);
+        }
+    }
+    Ok(Json(json!({ "minutes": minutes, "groups": groups })))
 }
 
 /// How many errors its services wrote in the span (`{minutes, count}`): a list's rows, with

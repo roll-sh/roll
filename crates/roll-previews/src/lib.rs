@@ -372,6 +372,11 @@ pub struct Preview {
     /// paths the project's path filters ignore (`None`: they run `head`).
     pub runs: Option<String>,
     pub trusted: bool,
+    /// A fork's preview (code from someone who can't push): its title, and anything its code
+    /// wrote, are outside text, which roll MCP's lockdown keeps from a model (`outside: true`, as
+    /// roll code marks a fork's change).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub outside: bool,
     pub desired: Desired,
     pub state: State,
     pub error: Option<String>,
