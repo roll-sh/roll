@@ -22067,3 +22067,47 @@ transaction runs no statement, and its commit checks nothing, so it no longer ne
   against PostgreSQL 18.6 live, with the base binary as well (without a restart the base was
   right). With agent 310's and 307's DDL specs: 58 / 58.
 - probe6.py: every case as PostgreSQL, the SIGKILL ones included.
+
+### Second candidate (`cand/a312-2`, on `cand/a312`): kept plans and old snapshots; COPY TO after a lock wait
+
+**Kept plans (agent 310's difference 4).** Agent 310 kept no literal plan (`litplan`) while the
+next statement's snapshot can't read some index. Every other plan cache could still hand a plan
+made with an index to a snapshot older than that index's commit, which then read nothing
+through it. The reverse also happened: a plan made while an older snapshot left an index out
+stuck once the index was usable. probe7.py and protocol case `a312_kept_import` (1,000 rows,
+`enable_seqscan = off`; the old snapshot imported with SET TRANSACTION SNAPSHOT from a
+transaction begun before the CREATE INDEX):
+
+| plan | PostgreSQL 18.6 | base | now |
+|---|---|---|---|
+| a named extended-protocol statement's | 499 | **0** | 499 |
+| a named statement's generic plan (after five custom ones) | 499 | **0** | 499 |
+| an unnamed statement parsed again with the same text (`ParamPlans`' binding) | 499 | **0** | 499 |
+| SQL PREPARE / EXECUTE | 499 | **0** | 499 |
+| a PL/pgSQL function's (`PLANS`, `FN_PLANS`: kept per thread, so another session's plan too) | 499 | **0** | 499 |
+| a named statement or SQL PREPARE planned in a REPEATABLE READ snapshot older than the index, run after COMMIT (`a312_kept_sticks`) | Index Only Scan | Seq Scan (Disabled) | Index Only Scan |
+
+The fix keeps or reuses no plan while the statement's snapshot can't read every index, in
+every cache:
+- `litplan`'s environment (`lit_env`) is None then, which covers literal plans, values plans,
+  Parse bindings, generic-binding custom plans and rechosen custom plans.
+- `Prepared::bound` (named statements, SQL PREPARE, generic plans) is neither kept nor reused.
+- PL/pgSQL's `compile_generic` binds afresh, from `paths::every_index_readable` of the
+  statement's own snapshot.
+
+The check is agent 310's `Txn::reads_every_index` (`every_index_at`).
+
+**COPY TO after a lock wait (agent 310's "found and not fixed" 1).** `COPY table TO` checked the
+table's privileges, which takes its lock and may wait for it, in a statement context of its
+own. The query that reads the rows then began again with a newer READ COMMITTED snapshot, so it
+copied the row of the transaction it had waited for (11 rows; PostgreSQL 10: `DoCopy` locks the
+table after `PortalRunUtility`'s snapshot). The check now runs in the query's context, before
+the binding (`session/copy.rs`). `COPY (SELECT ...) TO` and SELECT were already right. Protocol
+case `a312_copy_lock_wait` covers all three.
+
+**Checks.**
+- `protocol_cases` with the three new cases (`tests/common/protocol.rs` `turns`: several
+  sessions taking turns, exporting and importing a snapshot, a turn that waits for a lock), all
+  recorded from PostgreSQL 18.6. All three differ on the base binary (`PROTOCOL_SERVER`).
+- probe7.py: every case as PostgreSQL.
+- The DDL isolation specs: 58 / 58.

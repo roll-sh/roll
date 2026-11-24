@@ -2419,6 +2419,13 @@ impl<'c, 'a> Interp<'c, 'a> {
         // (A function's expressions by its oid across calls: its body and options are the
         // catalog version's, which the fingerprint has. A DO block's for its run.)
         let shared = (self.fn_oid != 0).then(|| (self.cx().sess.db.instance, self.fn_oid, e.id));
+        // (Nor while the statement's snapshot doesn't read every index: a plan kept from one
+        // that does would read nothing through an index this one can't, and one made now
+        // would leave an index out where later snapshots can use it. Plans here are the
+        // thread's, any session's.)
+        if !crate::sql::paths::every_index_readable(self.ctx) {
+            return self.compile_generic_keyed(e, stmt, targets, false);
+        }
         let hit = match shared {
             Some(k) => FN_PLANS.with(|m| m.borrow().get(&k).filter(|(f, _)| *f == fp).map(|(_, c)| c.clone())),
             None => self.memo.borrow().get(&e.id).filter(|(f, _)| *f == fp).map(|(_, c)| c.clone()),
@@ -2426,7 +2433,7 @@ impl<'c, 'a> Interp<'c, 'a> {
         if let Some(c) = hit {
             return Ok(c);
         }
-        let c = self.compile_generic_keyed(e, stmt, targets)?;
+        let c = self.compile_generic_keyed(e, stmt, targets, true)?;
         match shared {
             Some(k) => FN_PLANS.with(|m| {
                 let mut m = m.borrow_mut();
@@ -2468,6 +2475,7 @@ impl<'c, 'a> Interp<'c, 'a> {
         e: &PlExpr,
         stmt: bool,
         targets: Option<&[DataType]>,
+        keep: bool,
     ) -> Result<Rc<Compiled>> {
         let (sig, quals, aliases) = self.signature();
         let cat = self.cx().catalog();
@@ -2502,7 +2510,7 @@ impl<'c, 'a> Interp<'c, 'a> {
             enrs,
             colls
         );
-        if let Some(c) = PLANS.with(|p| p.borrow().get(&key).cloned()) {
+        if keep && let Some(c) = PLANS.with(|p| p.borrow().get(&key).cloned()) {
             return Ok(c);
         }
         let text = if stmt {
@@ -2512,6 +2520,9 @@ impl<'c, 'a> Interp<'c, 'a> {
         };
         let text = self.lexed(e.id, &text)?;
         let c = Rc::new(self.bind_text(&text, targets, true)?);
+        if !keep {
+            return Ok(c);
+        }
         PLANS.with(|p| {
             let mut p = p.borrow_mut();
             if p.len() > 1024 {

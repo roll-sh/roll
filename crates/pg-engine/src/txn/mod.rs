@@ -1768,6 +1768,11 @@ impl TxnState {
             true => self.statement_snapshot_ts(),
             false => self.db.store.visible_ts(),
         };
+        self.every_index_at(ts)
+    }
+
+    /// Whether a snapshot at `ts` of this transaction uses every index (`index_usable`).
+    pub fn every_index_at(&self, ts: u64) -> bool {
         self.ddl_reads.as_ref().is_none_or(|d| d.stale.is_empty()) && self.db.index_since.max.load(Ordering::Acquire) <= ts
     }
 

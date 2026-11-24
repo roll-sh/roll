@@ -4939,6 +4939,79 @@ fn protocol_cases() {
             }
             s + rest
         }),
+        // Kept plans and snapshots older than an index (agent 312): a plan made with the index
+        // (a named statement's, its generic one after five custom plans, an unnamed one's
+        // binding, SQL PREPARE's, a PL/pgSQL function's) runs in a snapshot imported from
+        // before the index's commit and reads the table's rows (roll's index entries are the
+        // commit's: such a snapshot plans without the index); and a plan made while a
+        // snapshot older than the index left it out doesn't stick once the index is usable.
+        c("a312_kept_import", |a| {
+            let off = "set enable_seqscan = off; set enable_bitmapscan = off";
+            let named = |n: usize| [bind("", "q", &[], NONE, &[]), execute("", 0), sync()].concat().repeat(n);
+            let p500: &[Option<&[u8]>] = &[Some(b"500".as_slice())];
+            let generic = [bind("", "g", &[], p500, &[]), execute("", 0), sync()].concat();
+            turns(a, &[
+                "drop table if exists a312k",
+                "create table a312k (a int, b int)",
+                "insert into a312k select g, g from generate_series(1, 1000) g",
+                "analyze a312k",
+                "create or replace function a312k_f(x int) returns bigint language plpgsql as $$ begin return (select count(*) from a312k where b < x); end $$",
+            ], &[
+                Turn::Send(1, query("begin isolation level repeatable read")),
+                Turn::Export(1),
+                Turn::Send(0, query("create index a312k_b on a312k (b)")),
+                Turn::Send(2, query(off)),
+                Turn::Send(2, [parse("q", "select count(*) from a312k where b < 500", &[]), sync()].concat()),
+                Turn::Send(2, named(1)),
+                Turn::Send(2, [parse("g", "select count(*) from a312k where b < $1", &[]), sync()].concat()),
+                Turn::Send(2, generic.repeat(6)),
+                Turn::Send(2, query("prepare p as select count(*) from a312k where b < 500; execute p; select a312k_f(500); select a312k_f(500)")),
+                Turn::Send(2, query("begin isolation level repeatable read")),
+                Turn::Import(2),
+                Turn::Send(2, named(1)),
+                Turn::Send(2, generic.clone()),
+                Turn::Send(2, [parse("", "select count(*) from a312k where b < $1", &[]), bind("", "", &[], p500, &[]), execute("", 0), sync()].concat()),
+                Turn::Send(2, query("execute p; select a312k_f(500); select count(*) from a312k where b < 500")),
+                Turn::Send(2, query("commit")),
+                Turn::Send(2, [named(1), generic.clone()].concat()),
+                Turn::Send(1, query("commit")),
+                Turn::Send(0, query("drop table a312k; drop function a312k_f")),
+            ])
+        }),
+        // COPY of a table that waited for its lock reads the snapshot taken before the wait,
+        // as COPY (query) does (DoCopy locks the table after PortalRunUtility's snapshot); a
+        // query reads after it (agent 312).
+        c("a312_copy_lock_wait", |a| {
+            let mut steps = Vec::new();
+            for copy in ["copy a312c to stdout", "copy (select * from a312c) to stdout", "select count(*) from a312c"] {
+                steps.extend([
+                    Turn::Send(1, query("begin; lock table a312c in access exclusive mode; insert into a312c values (11)")),
+                    Turn::Start(2, query(copy)),
+                    Turn::AwaitBlocked(0),
+                    Turn::Send(1, query("commit")),
+                    Turn::Finish(2),
+                    Turn::Send(0, query("delete from a312c where a = 11")),
+                ]);
+            }
+            steps.push(Turn::Send(0, query("drop table a312c")));
+            turns(a, &["drop table if exists a312c", "create table a312c (a int)", "insert into a312c select generate_series(1, 10)"], &steps)
+        }),
+        c("a312_kept_sticks", |a| {
+            turns(a, &[
+                "drop table if exists a312s",
+                "create table a312s (a int, b int)",
+                "insert into a312s select g, g from generate_series(1, 1000) g",
+                "analyze a312s",
+            ], &[
+                Turn::Send(1, query("set enable_seqscan = off; set enable_bitmapscan = off; begin isolation level repeatable read; select 1")),
+                Turn::Send(0, query("create index a312s_b on a312s (b)")),
+                Turn::Send(1, [parse("q", "select count(*) from a312s where b < 500", &[]), bind("", "q", &[], NONE, &[]), execute("", 0), sync()].concat()),
+                Turn::Send(1, query("prepare p as select count(*) from a312s where b < 500; execute p; commit")),
+                Turn::Send(1, query("explain (costs off) execute q; explain (costs off) execute p")),
+                Turn::Send(1, [bind("", "q", &[], NONE, &[]), execute("", 0), sync()].concat()),
+                Turn::Send(0, query("drop table a312s")),
+            ])
+        }),
     ];
     let file = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/protocol_cases.out");
     if let Ok(addr) = std::env::var("PROTOCOL_RECORD") {

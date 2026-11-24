@@ -222,14 +222,20 @@ struct Env {
 }
 
 impl Session {
-    fn lit_env(&mut self) -> Env {
+    /// The environment plans kept now are kept under, and kept plans must match to run. None
+    /// when the next statement's snapshot doesn't read every index (`reads_every_index`):
+    /// then no plan is kept or reused.
+    fn lit_env(&mut self) -> Option<Env> {
         self.ensure_txn();
+        if !self.reads_every_index() {
+            return None;
+        }
         // (The catalog the statement will begin with: another session's DDL may have
         // committed since the last one began.)
         let cat = self.txn.as_ref().unwrap().borrow().next_catalog();
         let st = self.state.settings.borrow();
         let who = (self.state.current_role(&cat), st.get_str("row_security") != Some("off"));
-        Env { version: cat.version, settings: st.generation(), path: self.state.shared_search_path(), who }
+        Some(Env { version: cat.version, settings: st.generation(), path: self.state.shared_search_path(), who })
     }
 
     /// The plan kept for `p`'s template that fits it now, with the values of its parameters
@@ -245,7 +251,7 @@ impl Session {
 
     /// Whether the transaction's next statement reads every index (`Txn::reads_every_index`):
     /// else its plans aren't kept, nor kept plans run.
-    fn reads_every_index(&self) -> bool {
+    pub(super) fn reads_every_index(&self) -> bool {
         self.txn.as_ref().is_none_or(|t| t.try_borrow().is_ok_and(|t| t.reads_every_index()))
     }
 
@@ -259,7 +265,7 @@ impl Session {
         if self.lit_plans.map.get(&l.scan.shape)?.plans.is_empty() {
             return None;
         }
-        let env = self.lit_env();
+        let env = self.lit_env()?;
         let kp = self.lit_plans.map.get(&l.scan.shape)?;
         let at = kp.plans.iter().position(|k| k.fixed.iter().all(|(i, t)| l.lit_text(*i) == &**t))?;
         let k = &kp.plans[at];
@@ -430,7 +436,7 @@ impl Session {
         if !ok || j != l.tpl.consts.len() || params.is_empty() {
             return None;
         }
-        let env = self.lit_env();
+        let env = self.lit_env()?;
         let types: Vec<DataType> = params.iter().map(|p| p.2.clone()).collect();
         let (bound, reads) = self.lit_bind(&generic, types.clone(), &env.path);
         let Bound { bq, unplanned } = bound?;
@@ -480,7 +486,7 @@ impl Session {
         if !ok || j != l.tpl.consts.len() {
             return None;
         }
-        let env = self.lit_env();
+        let env = self.lit_env()?;
         let types: Vec<DataType> = params.iter().map(|p| p.2.clone()).collect();
         // (An analysis that raised a notice, folding a constant, isn't kept: PostgreSQL
         // raises it each time it plans the query. Its notices were the query's already.)
@@ -514,7 +520,7 @@ impl Session {
             return None;
         }
         let l = p.lit.as_deref()?;
-        let env = self.lit_env();
+        let env = self.lit_env()?;
         let v = self.lit_plans.map.get(&l.scan.shape)?.values.as_ref()?;
         if v.env != env || v.ok == Some(false) || !v.fixed.iter().all(|(i, t)| l.lit_text(*i) == &**t) {
             return None;
@@ -770,7 +776,7 @@ impl Session {
     /// plans are that binding.
     pub(super) fn param_parsed(&mut self, sql: &str, oids: &[u32]) -> Option<(Parsed, u64, crate::catalog::names::SearchPath, (u32, bool), bool)> {
         self.param_plans.map.get(sql)?;
-        let env = self.lit_env();
+        let env = self.lit_env()?;
         let e = self.param_entry(sql, oids)?;
         if e.env != env {
             return None;
@@ -806,7 +812,7 @@ impl Session {
         if sql.len() > MAX_PARAM_SQL || reads.contains(&SizeRead::Data) {
             return false;
         }
-        let env = self.lit_env();
+        let Some(env) = self.lit_env() else { return false };
         if let Some(e) = self.param_entry(sql, oids) {
             // (The same catalog and settings: whether custom plans are the binding stands.)
             if e.env != env {
@@ -852,6 +858,7 @@ impl Session {
         let oids = self.param_custom_key(p, params)?;
         if fresh
             && unnamed
+            && self.reads_every_index()
             && let Some(bq) = p.bound.lock().as_ref().map(|b| b.3.clone())
         {
             self.param_plans.uses += 1;
@@ -862,7 +869,7 @@ impl Session {
         if self.param_entry(&p.sql, &oids)?.custom_is_generic != Some(true) {
             return None;
         }
-        let env = self.lit_env();
+        let env = self.lit_env()?;
         let e = self.param_entry(&p.sql, &oids)?;
         if e.env != env || e.parsed.param_types != p.param_types {
             return None;
@@ -898,7 +905,7 @@ impl Session {
         if !self.param_plans.map.contains_key(&*p.sql) {
             return;
         }
-        let env = self.lit_env();
+        let Some(env) = self.lit_env() else { return };
         let Some(e) = self.param_entry(&p.sql, &oids) else { return };
         if e.custom_is_generic.is_some() || e.env != env || e.parsed.param_types != p.param_types {
             return;
@@ -932,7 +939,7 @@ impl Session {
             plans.parse_oids.clone()?
         };
         self.param_plans.map.get(&*p.sql)?;
-        let env = self.lit_env();
+        let env = self.lit_env()?;
         let e = self.param_entry(&p.sql, &oids)?;
         if e.env != env || e.parsed.param_types != p.param_types || e.values_ok == Some(false) {
             return None;

@@ -1873,8 +1873,11 @@ impl Session {
         let path = self.state.shared_search_path();
         let who = (role, self.state.settings.borrow().hot().row_security);
         // (A binding that left its PL/pgSQL calls for planning is only an analysis: a plan
-        // to run is bound again, running them.)
-        if !cursor
+        // to run is bound again, running them. Nor is one kept or reused while the statement's
+        // snapshot doesn't read every index: a plan with an index it can't read would read
+        // nothing through it, one without an index would stick.)
+        let keeps = !cursor && self.reads_every_index();
+        if keeps
             && let Some((v, sp, w, b)) = &*p.bound.lock()
             && *v == version
             && *sp == path
@@ -1967,7 +1970,9 @@ impl Session {
                 Arc::new(self.txn.as_ref().unwrap().borrow().with_catalog(|cat| plandeps::Deps::of(cat, &b)))
             });
         }
-        *p.bound.lock() = Some((version, path, who, b.clone()));
+        if keeps {
+            *p.bound.lock() = Some((version, path, who, b.clone()));
+        }
         Ok(b)
     }
 

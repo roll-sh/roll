@@ -544,6 +544,16 @@ fn index_readable(ctx: &ExecCtx, oid: u32) -> bool {
     txn.index_usable(oid, ts)
 }
 
+/// Whether the statement's snapshot reads every index (`Txn::every_index_at`): else plans
+/// made now leave some out, and plans kept from snapshots that read them aren't its to run.
+pub(crate) fn every_index_readable(ctx: &ExecCtx) -> bool {
+    let Ok(txn) = ctx.txn.try_borrow() else {
+        return true;
+    };
+    let ts = ctx.snapshot().map_or_else(|| txn.snapshot_ts(), |s| s.ts());
+    txn.every_index_at(ts)
+}
+
 fn index_infos(ctx: &ExecCtx, t: &Arc<Table>, rel_tuples: f64) -> Vec<IndexInfo> {
     if let Some(st) = syscat::stand_in_of(t) {
         return syscat::sys_index_infos(st, rel_tuples);

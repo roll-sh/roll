@@ -740,7 +740,9 @@ impl Session {
             cin.file_size = Some(data.len() as i64);
             return self.copy_in_rows(&cin, &data).map(Outcome::Done);
         }
-        // COPY TO: a query.
+        // COPY TO: a query. (A table's privileges are checked, and its lock taken, as the query
+        // starts: `rel_perms`.)
+        let mut rel_perms = None;
         let sql = match (&s.relation, &s.query) {
             (_, Some(q)) => {
                 // Rules on the statement's relation must leave one query (BeginCopyTo).
@@ -880,7 +882,7 @@ impl Session {
                     named_locks: 1,
                     command: None,
                 };
-                self.with_ctx(params, |ctx| crate::sql::binder::perms::check(&perms, ctx))?;
+                rel_perms = Some(perms);
                 let rel = if rv.schemaname.is_empty() {
                     crate::catalog::quote_ident(&rv.relname)
                 } else {
@@ -923,6 +925,13 @@ impl Session {
         }
         let enc = self.copy_encoding(&format);
         let run = self.with_ctx(params, |ctx| {
+            // (DoCopy opens the table under the snapshot the statement took before: a wait for
+            // its lock doesn't move it, as a query's own wait doesn't. Checked in a context of
+            // its own, the query's began again after the wait, reading what the transaction
+            // waited for committed.)
+            if let Some(p) = &rel_perms {
+                crate::sql::binder::perms::check(p, ctx)?;
+            }
             let bq = Binder::new(ctx, Vec::new()).bind_statement(&stmt)?;
             bq.check_perms(ctx)?;
             // BeginCopyTo opens the file (or starts the program) once the query is planned.

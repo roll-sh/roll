@@ -434,6 +434,111 @@ fn session_as(addr: &str, proto: i32, params: &[(&str, &str)], setup: &[&str], s
     out.join(" / ")
 }
 
+/// A turn of `turns`.
+pub enum Turn {
+    /// Messages to session n (they end in Sync, or are a Query).
+    Send(usize, Vec<u8>),
+    /// Session n exports its snapshot (pg_export_snapshot()): the id is kept, not shown.
+    Export(usize),
+    /// Session n imports the snapshot exported last (SET TRANSACTION SNAPSHOT).
+    Import(usize),
+    /// Messages to session n, its replies read later (`Finish`): one that waits for a lock.
+    Start(usize, Vec<u8>),
+    /// Session n's replies to what it was sent last (`Start`).
+    Finish(usize),
+    /// Session n asks pg_locks until some lock is waited for (nothing shown).
+    AwaitBlocked(usize),
+}
+
+/// Sessions taking turns: `setup` simple queries on session 0 (their replies dropped), then
+/// each turn on its session (opened at its first turn) and what it got, "n: ..." for session
+/// n, " / " between turns.
+pub fn turns(addr: &str, setup: &[&str], steps: &[Turn]) -> String {
+    let mut conns: Vec<Option<Conn>> = Vec::new();
+    let open = |conns: &mut Vec<Option<Conn>>, n: usize| -> Result<(), String> {
+        if conns.len() <= n {
+            conns.resize_with(n + 1, || None);
+        }
+        if conns[n].is_none() {
+            let mut c = Conn::open(addr, &startup_packet(P30, &[], b"\0"));
+            c.quiet = ANSWER;
+            let s = c.startup();
+            if s.last().map(String::as_str) != Some("ZI") {
+                return Err(format!("startup {}", s.join(" ")));
+            }
+            conns[n] = Some(c);
+        }
+        Ok(())
+    };
+    if let Err(e) = open(&mut conns, 0) {
+        return e;
+    }
+    for q in setup {
+        let c = conns[0].as_mut().unwrap();
+        c.send(&query(q));
+        c.rest();
+    }
+    let mut snapshot = String::new();
+    let mut out = Vec::new();
+    for t in steps {
+        let (n, msgs, export) = match t {
+            Turn::Send(n, m) | Turn::Start(n, m) => (*n, m.clone(), false),
+            Turn::Export(n) => (*n, query("select pg_export_snapshot()"), true),
+            Turn::Import(n) => (*n, query(&format!("set transaction snapshot '{snapshot}'")), false),
+            Turn::Finish(n) | Turn::AwaitBlocked(n) => (*n, Vec::new(), false),
+        };
+        if let Err(e) = open(&mut conns, n) {
+            out.push(format!("{n}: {e}"));
+            break;
+        }
+        let c = conns[n].as_mut().unwrap();
+        if let Turn::AwaitBlocked(_) = t {
+            let blocked = (0..3000).any(|_| {
+                c.send(&query("select count(*) > 0 from pg_locks where not granted"));
+                let r = c.rest();
+                r.iter().any(|m| m == "D:[\"t\"]") || {
+                    std::thread::sleep(Duration::from_millis(10));
+                    false
+                }
+            });
+            if !blocked {
+                out.push(format!("{n}: nothing blocked"));
+            }
+            continue;
+        }
+        if !msgs.is_empty() && !c.send(&msgs) {
+            out.push(format!("{n}: send failed"));
+            break;
+        }
+        if let Turn::Start(..) = t {
+            continue;
+        }
+        // (A ReadyForQuery for each Sync and Query sent.)
+        let (mut ends, mut at) = (0, 0);
+        while at + 5 <= msgs.len() {
+            ends += usize::from(matches!(msgs[at], b'S' | b'Q'));
+            at += 1 + i32::from_be_bytes(msgs[at + 1..at + 5].try_into().unwrap()) as usize;
+        }
+        let mut r = Vec::new();
+        for _ in 0..ends.max(1) {
+            r.extend(c.rest());
+            if r.last().is_some_and(|m| m == "closed" || m == "quiet") {
+                break;
+            }
+        }
+        if export && let Some(d) = r.iter_mut().find(|m| m.starts_with("D:")) {
+            snapshot = d.trim_start_matches("D:[\"").trim_end_matches("\"]").to_string();
+            *d = "D:[snapshot]".into();
+        }
+        let closed = r.last().map(String::as_str) == Some("closed");
+        out.push(format!("{n}: {}", r.join(" ")));
+        if closed {
+            break;
+        }
+    }
+    out.join(" / ")
+}
+
 /// `session` of one extended-protocol batch ending in Sync.
 pub fn ext(addr: &str, setup: &[&str], ms: &[Vec<u8>]) -> String {
     let mut b: Vec<u8> = ms.concat();
