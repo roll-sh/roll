@@ -40,6 +40,9 @@ pub struct Seen {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub steps: Vec<crate::settings::Step>,
+    /// Their browser's engine when it isn't Chromium's ([`crate::settings::BROWSERS`]): every
+    /// browser on iOS is WebKit at a phone's size, Safari elsewhere WebKit, Firefox Firefox.
+    pub browser: Option<String>,
 }
 
 impl Seen {
@@ -48,6 +51,20 @@ impl Seen {
         let mut seen = Seen::default();
         if let Some(sub) = body.split("<sub>").nth(1).and_then(|s| s.split("</sub>").next()) {
             for part in sub.split(" · ") {
+                // `Safari 18 on iOS`, `Firefox 133 on Windows` (the button's `browserOf`).
+                if let Some((name, os)) = part.split_once(" on ")
+                    && name.split_once(' ').is_some_and(|(_, v)| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+                {
+                    seen.browser = if os == "iOS" {
+                        Some("webkit-phone".into())
+                    } else if name.starts_with("Safari ") {
+                        Some("webkit".into())
+                    } else if name.starts_with("Firefox ") {
+                        Some("firefox".into())
+                    } else {
+                        None
+                    };
+                }
                 if let Some((w, h)) = part.strip_suffix(" viewport").and_then(|v| v.split_once('x'))
                     && let (Ok(w), Ok(h)) = (w.parse::<u32>(), h.parse::<u32>())
                     && (320..=2560).contains(&w)
@@ -80,13 +97,19 @@ impl Seen {
         seen
     }
 
-    /// What a crop taken this way says it is: the viewport, and the steps taken first.
+    /// What a crop taken this way says it is: the engine when not Chromium's, the viewport, and
+    /// the steps taken first.
     pub fn label(&self) -> Option<String> {
         let (w, h) = (self.width?, self.height?);
+        let engine = match self.browser.as_deref() {
+            Some("webkit" | "webkit-phone") => "WebKit, ",
+            Some("firefox") => "Firefox, ",
+            _ => "",
+        };
         Some(match self.steps.len() {
-            0 => format!("{w}x{h}"),
-            1 => format!("{w}x{h}, after 1 step"),
-            n => format!("{w}x{h}, after {n} steps"),
+            0 => format!("{engine}{w}x{h}"),
+            1 => format!("{engine}{w}x{h}, after 1 step"),
+            n => format!("{engine}{w}x{h}, after {n} steps"),
         })
     }
 }
