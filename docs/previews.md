@@ -2153,7 +2153,8 @@ type Settings = {
     percent). Pages under review that share one carry it (`visual_review.pages[].group`, only
     when two or more do); the sheet offers "Accept the 4 changed the same way" on the first of
     them, and `…/visual/accept {group}` (`roll preview accept --group`) accepts them in one
-    transaction. The first page isn't grouped (it's compared on its own, at both widths).
+    transaction. The first page joins its group by its desktop picture (its signature on the
+    screenshot's row).
     `the_same_change_on_two_pages_has_one_signature`, `pages_changed_the_same_way_are_accepted_together`.
     A project can set a visual threshold (`github.visual_threshold`, a percent up to 50, as
     Chromatic's `diffThreshold` and Percy's sensitivity): a page that differs from the
@@ -2720,7 +2721,7 @@ Ranked by what a person notices first. Done so far:
 1. **Grouped visual changes, in review** (Percy's grouped diffs): pages changed the same way
    against main's share a group (`visual::compare`'s signature), accepted together (`…/visual/accept
    {group}`, the sheet's "Accept the N changed the same way", `roll preview accept --group`).
-   The first page joins them next.
+   The first page in them too.
 2. **A note that shows what the reviewer saw** (Jam's recordings, Netlify's markup): today a
    note carries a selector, the last steps, errors and failed requests, and roll's own browser
    crops the element later at desktop width; a phone-only or Safari-only bug has no picture.

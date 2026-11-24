@@ -853,7 +853,7 @@ impl Store {
         if !db.has_column("previews", "seed_needed")? {
             db.add_column("previews", "seed_needed", "INTEGER NOT NULL DEFAULT 1")?;
         }
-        for (col, ty) in [("tried", "TEXT"), ("prev_head", "TEXT"), ("prev_png", "TEXT"), ("change_bp", "INTEGER"), ("speed", "TEXT"), ("prev_speed", "TEXT"), ("health", "TEXT"), ("phone_png", "TEXT"), ("prev_phone_png", "TEXT"), ("phone_change_bp", "INTEGER"), ("a11y", "TEXT"), ("base_preview", "TEXT"), ("base_branch", "TEXT"), ("base_change_bp", "INTEGER"), ("base_phone_bp", "INTEGER"), ("base_head", "TEXT"), ("base_speed", "TEXT"), ("base_a11y", "TEXT"), ("base_health", "TEXT"), ("text", "TEXT"), ("base_text", "TEXT"), ("links", "TEXT"), ("base_links", "TEXT"), ("api", "TEXT"), ("base_api", "TEXT"), ("base_api_breaking", "TEXT"), ("base_api_unread", "INTEGER")] {
+        for (col, ty) in [("tried", "TEXT"), ("prev_head", "TEXT"), ("prev_png", "TEXT"), ("change_bp", "INTEGER"), ("speed", "TEXT"), ("prev_speed", "TEXT"), ("health", "TEXT"), ("phone_png", "TEXT"), ("prev_phone_png", "TEXT"), ("phone_change_bp", "INTEGER"), ("a11y", "TEXT"), ("base_preview", "TEXT"), ("base_branch", "TEXT"), ("base_change_bp", "INTEGER"), ("base_phone_bp", "INTEGER"), ("base_head", "TEXT"), ("base_speed", "TEXT"), ("base_a11y", "TEXT"), ("base_health", "TEXT"), ("text", "TEXT"), ("base_text", "TEXT"), ("links", "TEXT"), ("base_links", "TEXT"), ("api", "TEXT"), ("base_api", "TEXT"), ("base_api_breaking", "TEXT"), ("base_api_unread", "INTEGER"), ("base_sig", "TEXT")] {
             if !db.has_column("screenshots", col)? {
                 db.add_column("screenshots", col, ty)?;
             }
@@ -1961,13 +1961,17 @@ impl Store {
             let (a, b) = (b64e.decode(a?).ok()?, b64e.decode(b?).ok()?);
             crate::visual::changed(&b, &a).map(|f| (f * 10_000.0).round() as i64)
         };
-        let (change, phone) = (bp(Some(&ours.png), Some(&theirs.png)), bp(ours.phone.as_ref(), theirs.phone.as_ref()));
-        // The other pages, each against the baseline's page at the same path, with what the
-        // change is (pages changed the same way are grouped for review).
+        // Each page against the baseline's at the same path, with what the change is (pages
+        // changed the same way are grouped for review); the first page too, at desktop width.
         let compared = |a: &String, b: Option<&String>| -> Option<(i64, Option<String>)> {
             let (a, b) = (b64e.decode(a).ok()?, b64e.decode(b?).ok()?);
             crate::visual::compare(&b, &a).map(|(f, sig)| ((f * 10_000.0).round() as i64, sig))
         };
+        let (change, first_sig) = match compared(&ours.png, Some(&theirs.png)) {
+            Some((bp, sig)) => (Some(bp), sig),
+            None => (None, None),
+        };
+        let phone = bp(ours.phone.as_ref(), theirs.phone.as_ref());
         let page_bps: Vec<(String, Option<i64>, Option<String>)> = ours
             .pages
             .iter()
@@ -1998,8 +2002,8 @@ impl Store {
         self.db.write(|c| {
             c.execute(
                 "UPDATE screenshots SET base_preview = ?, base_branch = ?, base_change_bp = ?, base_phone_bp = ?, base_head = ?, base_speed = ?, base_a11y = ?, base_health = ?, base_text = ?, \
-                 base_links = ?, base_api = ?, base_api_breaking = ?, base_api_unread = ? WHERE preview_id = ?",
-                params![base, branch, change, phone, theirs.head, theirs.speed, theirs.a11y, theirs.health, text, theirs.links, api, api_breaking, api_unread, id],
+                 base_links = ?, base_api = ?, base_api_breaking = ?, base_api_unread = ?, base_sig = ? WHERE preview_id = ?",
+                params![base, branch, change, phone, theirs.head, theirs.speed, theirs.a11y, theirs.health, text, theirs.links, api, api_breaking, api_unread, first_sig, id],
             )?;
             for (path, bp, sig) in &page_bps {
                 c.execute("UPDATE page_shots SET base_bp = ?, base_sig = ? WHERE preview_id = ? AND path = ?", params![bp, sig, id, path])?;
@@ -2184,7 +2188,11 @@ impl Store {
                     if g.len() != 12 || !g.bytes().all(|b| b.is_ascii_hexdigit()) {
                         return Err(Error::BadRequest("a group is 12 hex characters (visual_review.pages[].group)".into()));
                     }
-                    let these: Vec<String> = c.query("SELECT path FROM page_shots WHERE preview_id = ? AND base_sig = ?", params![id, g], |r| r.get(0))?;
+                    let mut these: Vec<String> = c.query("SELECT path FROM page_shots WHERE preview_id = ? AND base_sig = ?", params![id, g], |r| r.get(0))?;
+                    let first: Option<String> = c.query_row("SELECT base_sig FROM screenshots WHERE preview_id = ?", [id], |r| r.get(0)).optional()?.flatten();
+                    if first.as_deref() == Some(g) {
+                        these.insert(0, String::new());
+                    }
                     if these.is_empty() {
                         return Err(Error::NotFound(format!("no pages changed as group {g}")));
                     }
@@ -2244,6 +2252,9 @@ impl Store {
         let accepts: Vec<(String, String, String, i64)> = self.db.read(|c| c.query("SELECT path, head, by, at FROM visual_page_accepts WHERE preview_id = ?", [&r.id], |x| Ok((x.get(0)?, x.get(1)?, x.get(2)?, x.get(3)?))))?;
         let accepted = |path: &str| accepts.iter().find(|(p, h, _, _)| p == path && shot.as_deref() == Some(h.as_str())).map(|(_, _, by, at)| (by.clone(), *at));
         let first = base.percent.max(base.phone_percent.unwrap_or(0.0));
+        // What each changed page's change is: the first page's from its row, the others' checks.
+        let first_sig: Option<String> = self.db.read(|c| c.query_row("SELECT base_sig FROM screenshots WHERE preview_id = ?", [&r.id], |x| x.get(0)).optional())?.flatten();
+        let sig_of = |path: &str| if path.is_empty() { first_sig.clone() } else { pages.iter().find(|p| p.path == path).and_then(|p| p.base_group.clone()) };
         let changed: Vec<(String, f64)> =
             std::iter::once((String::new(), first)).chain(pages.iter().filter_map(|p| Some((p.path.clone(), p.base_percent?)))).filter(|(_, pct)| *pct > threshold).collect();
         let reviews: Vec<crate::PageReview> = changed
@@ -2252,8 +2263,7 @@ impl Store {
                 let a = accepted(path);
                 let unstable = if path.is_empty() { first_unstable } else { pages.iter().any(|p| p.path == *path && p.unstable) };
                 // Its group, when another page under review shares it.
-                let sig = pages.iter().find(|p| p.path == *path).and_then(|p| p.base_group.clone());
-                let group = sig.filter(|g| changed.iter().filter(|(q, _)| pages.iter().any(|p| p.path == *q && p.base_group.as_ref() == Some(g))).count() > 1);
+                let group = sig_of(path).filter(|g| changed.iter().filter(|(q, _)| sig_of(q).as_ref() == Some(g)).count() > 1);
                 crate::PageReview { path: path.clone(), percent: *percent, by: a.as_ref().map(|(by, _)| by.clone()), at: a.map(|(_, at)| at), unstable, group }
             })
             .collect();
