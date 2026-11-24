@@ -615,6 +615,11 @@ pub enum RunType {
 pub struct Volume {
     pub mount: String,
     pub size_gb: u32,
+    /// Every instance mounts it (Cloud Run's NFS and Cloud Storage mounts): the service scales
+    /// past one, and deploys overlap; writers at once are the app's to coordinate (no SQLite).
+    /// Off: one instance writes it, the old one stopped before the new one starts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared: bool,
     /// Its backups' schedule and retention (Fly's snapshot retention, Railway's schedules);
     /// none: one a day, the newest seven kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1471,6 +1476,12 @@ impl Default for Run {
 }
 
 impl Run {
+    /// One instance writes its volume (one not `shared`): nothing of it runs beside the live
+    /// one, and the old instance stops before the new one starts.
+    pub fn one_writer(&self) -> bool {
+        self.volume.as_ref().is_some_and(|v| !v.shared)
+    }
+
     /// The checked settings, with what the type implies filled in (a worker runs at least one
     /// instance; a volume allows one).
     pub fn normalized(mut self) -> Result<Run> {
@@ -1825,10 +1836,12 @@ impl Run {
             {
                 return bad("volume.backups is {every_hours: 0–168 (0: by hand only), keep: 1–90}");
             }
-            self.max_instances = 1;
-            self.min_instances = self.min_instances.min(1);
-            if !self.rollout.steps.is_empty() {
-                return bad("rollout: a service with a volume switches at once (one instance writes it)");
+            if !v.shared {
+                self.max_instances = 1;
+                self.min_instances = self.min_instances.min(1);
+                if !self.rollout.steps.is_empty() {
+                    return bad("rollout: a service with a volume switches at once (one instance writes it; volume.shared lets many)");
+                }
             }
         }
         if self.kind != RunType::Web {
@@ -3646,6 +3659,8 @@ mod tests {
         assert_eq!(run.min_instances, 1, "a worker runs at least one");
         let run = Run::default().merged(Some(&serde_json::json!({"volume": {"mount": "/data", "size_gb": 5}, "max_instances": 4}))).unwrap();
         assert_eq!(run.max_instances, 1, "a volume allows one instance");
+        let shared = Run::default().merged(Some(&serde_json::json!({"volume": {"mount": "/data", "size_gb": 5, "shared": true}, "max_instances": 4, "rollout": {"steps": [10]}}))).unwrap();
+        assert_eq!((shared.max_instances, shared.one_writer(), shared.rollout.steps.clone()), (4, false, vec![10]), "a shared volume: many instances, and deploys overlap");
         assert!(Run::default().merged(Some(&serde_json::json!({"type": "cron"}))).is_err(), "cron needs a schedule");
         assert!(Run::default().merged(Some(&serde_json::json!({"type": "cron", "schedule": "*/5 * * * *"}))).is_ok());
         assert!(Run::default().merged(Some(&serde_json::json!({"cpu": 64}))).is_err());

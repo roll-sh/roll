@@ -17,8 +17,20 @@
 //! metadata is still the very `Arc` it was prepared against: an earlier item's dynamic mapping
 //! update, or any settings change, invalidates it and it is prepared again — in parallel again
 //! for the rest of the request ([`Ahead::take`]), a bounded number of times.
+//!
+//! The request body is charged to `inflight_requests`, but the documents prepared from it are
+//! new memory, several times the body's bytes for small fields, and all of a request's are held
+//! until their turn. Each is charged to the `request` breaker as it is built
+//! ([`IndexableDoc::heap_bytes`](search_index::doc::IndexableDoc::heap_bytes)) and released when
+//! its item takes it or the request ends. Preparing ahead only saves time, so when the breaker
+//! has no room it stops, not the request, and no trip is counted
+//! ([`MemoryBudget::try_reserve`]): the items left unprepared go through the sequential path,
+//! one document at a time, as a small request's do.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use search_aggs::memory::MemoryBudget;
 
 use crate::api::bulk::Item;
 use crate::api::document::parse_doc;
@@ -47,14 +59,31 @@ const MAX_ROUNDS: usize = 4;
 
 /// Prepared documents for a bulk request's items, by item position.
 pub struct Ahead {
-    slots: Vec<Option<Prepared>>,
+    /// Each prepared document and the bytes charged for it.
+    slots: Vec<Option<(Prepared, u64)>>,
     rounds: usize,
+    /// The cluster's `request` breaker, charged for every document in `slots`.
+    budget: Arc<MemoryBudget>,
+}
+
+/// What a prepared document is charged: the engine document, its id and the item's own
+/// bookkeeping (its source is the request body's, charged to `inflight_requests` already).
+fn charge_of(p: &Prepared) -> u64 {
+    (p.doc.heap_bytes() + p.id.len() + p.routing.as_ref().map_or(0, String::len) + std::mem::size_of::<Prepared>()) as u64
+}
+
+impl Drop for Ahead {
+    fn drop(&mut self) {
+        let held: u64 = self.slots.iter().flatten().map(|(_, b)| b).sum();
+        self.budget.release(held);
+    }
 }
 
 impl Ahead {
     /// Prepares the eligible items of `items` (`ids[i]`: the id item `i` is written with).
     pub fn new(cluster: &Cluster, items: &[Item], ids: &[Option<String>]) -> Ahead {
-        let mut a = Ahead { slots: (0..items.len()).map(|_| None).collect(), rounds: 0 };
+        let budget = cluster.breakers.request(cluster, &cluster.state());
+        let mut a = Ahead { slots: (0..items.len()).map(|_| None).collect(), rounds: 0, budget };
         a.fill(cluster, items, ids, 0);
         a
     }
@@ -67,7 +96,8 @@ impl Ahead {
     /// The prepared document of item `i`, if it is still valid for `idx` (the index the item's
     /// target resolves to now). An invalid one triggers a new round for the items after it.
     pub fn take(&mut self, cluster: &Cluster, items: &[Item], ids: &[Option<String>], i: usize, idx: &Arc<IndexMeta>) -> Option<Prepared> {
-        let p = self.slots.get_mut(i)?.take()?;
+        let (p, bytes) = self.slots.get_mut(i)?.take()?;
+        self.budget.release(bytes);
         if Arc::ptr_eq(&p.index, idx) {
             return Some(p);
         }
@@ -76,10 +106,11 @@ impl Ahead {
         if self.rounds < MAX_ROUNDS {
             self.rounds += 1;
             self.fill(cluster, items, ids, i);
-            if let Some(p) = self.slots[i].take()
-                && Arc::ptr_eq(&p.index, idx)
-            {
-                return Some(p);
+            if let Some((p, bytes)) = self.slots[i].take() {
+                self.budget.release(bytes);
+                if Arc::ptr_eq(&p.index, idx) {
+                    return Some(p);
+                }
             }
         }
         None
@@ -87,7 +118,9 @@ impl Ahead {
 
     fn fill(&mut self, cluster: &Cluster, items: &[Item], ids: &[Option<String>], from: usize) {
         for s in &mut self.slots[from..] {
-            *s = None;
+            if let Some((_, bytes)) = s.take() {
+                self.budget.release(bytes);
+            }
         }
         let st = cluster.state();
         // The indexes of the eligible items (usually one), and (item, index) of each.
@@ -140,7 +173,11 @@ impl Ahead {
         // workers (no thread start-up, no fresh per-thread allocator heaps per request); small
         // chunks balance uneven documents.
         let chunks: Vec<&[Work<'_>]> = work.chunks(PER_THREAD).collect();
-        let results: Vec<parking_lot::Mutex<Vec<(usize, Prepared)>>> = chunks.iter().map(|_| parking_lot::Mutex::new(Vec::new())).collect();
+        let results: Vec<parking_lot::Mutex<Vec<(usize, Prepared, u64)>>> = chunks.iter().map(|_| parking_lot::Mutex::new(Vec::new())).collect();
+        // Set once the breaker refuses a document: no more are prepared. Items left unprepared
+        // take the sequential path at their turn, whichever they are.
+        let refused = AtomicBool::new(false);
+        let budget = &self.budget;
         // The request's dialect follows the work onto the workers (document grammar differs).
         let opensearch = crate::opensearch::active();
         search_index::search::pool::for_each_index(chunks.len(), cores - 1, &|c| {
@@ -151,6 +188,9 @@ impl Ahead {
                 // more than parsing a small document).
                 let mut ctx: Option<(*const Target, crate::mapping::MappingCtx)> = None;
                 for &(i, t) in part {
+                    if refused.load(Ordering::Relaxed) {
+                        break;
+                    }
                     let it = &items[i];
                     let id = ids[i].as_deref().unwrap_or_default();
                     let cx = match &mut ctx {
@@ -160,15 +200,20 @@ impl Ahead {
                     // A panic leaves the item to the sequential path, which reports it.
                     let p = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| prepare_one(t, cx, id, it.args.routing.as_deref(), &it.data)));
                     if let Ok(Some(p)) = p {
-                        out.push((i, p));
+                        let bytes = charge_of(&p);
+                        if !budget.try_reserve(bytes) {
+                            refused.store(true, Ordering::Relaxed);
+                            break;
+                        }
+                        out.push((i, p, bytes));
                     }
                 }
                 *results[c].lock() = out;
             })
         });
-        let results = results.into_iter().map(parking_lot::Mutex::into_inner);
-        for (i, p) in results.into_iter().flatten() {
-            self.slots[i] = Some(p);
+        let prepared = results.into_iter().flat_map(parking_lot::Mutex::into_inner);
+        for (i, p, bytes) in prepared {
+            self.slots[i] = Some((p, bytes));
         }
     }
 }
