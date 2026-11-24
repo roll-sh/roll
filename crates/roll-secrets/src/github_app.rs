@@ -232,7 +232,7 @@ impl LinkProvider for Provider {
         let (token, expires_at) = self.github.token(&o.api_base, o.app_id, &o.key, o.installation, &repositories, &permissions).map_err(|why| Error::Link(format!("GitHub didn't give {} a token: {why}", o.name)))?;
         // Kept sealed: revoking it at the lease's end needs it.
         let sealed = base64::engine::general_purpose::STANDARD.encode(o.dek.seal(&token_aad(&o.project, r#ref), &token));
-        Ok(Issued { parts: BTreeMap::from([("token".to_string(), token)]), handle: json!({ "token": sealed, "expires_at": expires_at }) })
+        Ok(Issued { expires_at: None, parts: BTreeMap::from([("token".to_string(), token)]), handle: json!({ "token": sealed, "expires_at": expires_at }) })
     }
 
     fn revoke(&self, r#ref: &str, handle: &Json) -> Result<()> {

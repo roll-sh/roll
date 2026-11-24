@@ -4978,6 +4978,13 @@ async fn a_request_naming_an_earlier_deployment_goes_to_it() {
     let (st, d3) = call(&w.api, "POST", &format!("{base}/deploys/{first}/rollback"), Some(json!({}))).await;
     assert!(st.is_success(), "{d3}");
     let d3 = settled(&w, &id, "production", d3["id"].as_str().unwrap()).await;
+    // Once its proxy answers from it (a moment after the store says it's live).
+    for _ in 0..100 {
+        if ask("/", &[("sec-fetch-dest", "document")]).await.0 == d3["id"] {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     assert_eq!(ask("/api", &[("x-deployment-id", "nb_0a1b2c3d")]).await.0, d3["id"], "{d3}");
 }
 
@@ -6935,6 +6942,12 @@ async fn firewall_rules_decide_in_order() {
     assert_eq!(ask("66.249.66.1:5000", "/", &gb).await, StatusCode::OK, "a verified crawler passes a challenge");
     assert_eq!(ask("66.249.66.1:5000", "/", &[("user-agent", "Mozilla/5.0 (compatible; Amazonbot/0.1)")]).await, StatusCode::FORBIDDEN, "an AI crawler gets the page");
     assert_eq!(ask("198.51.100.1:5000", "/", &gb).await, StatusCode::FORBIDDEN, "a claimed one gets the page");
+    // Managed attack patterns, in any encoding; an ordinary request goes on.
+    call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "deny", "attacks": ["traversal", "sqli", "scanners"]}]}))).await;
+    assert_eq!(req("GET", "/download?file=%252e%252e%252fetc%252fpasswd", "curl").await, StatusCode::FORBIDDEN, "double-encoded ../");
+    assert_eq!(req("GET", "/items?id=1%27%20UNION%20SELECT%20password", "curl").await, StatusCode::FORBIDDEN);
+    assert_eq!(req("GET", "/.env", "curl").await, StatusCode::FORBIDDEN);
+    assert_eq!(req("GET", "/items?id=12&sort=name", "curl").await, StatusCode::OK);
     // A rule tried before it blocks: `log` counts and goes on; each rule's last 24 hours.
     call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "log", "path": "/wp-*"}, {"action": "deny", "path": "/wp-admin/*"}]}))).await;
     assert_eq!(req("GET", "/wp-login.php", "curl").await, StatusCode::OK, "logged, let in");

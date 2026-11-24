@@ -1712,7 +1712,9 @@ contract (apps, workspace, previews, queues, secrets) and fails on a body field 
 the route's tool doesn't take and no line explains, as `no-tool.txt` does for routes. A body the
 contract names by type (`EnvironmentPut`, `NewService`, `Settings`, `SetSecret`) is read from its
 `type X = { … }` (comments out, `;` or `,` between fields), and a route two tools share
-(`secrets_set` and `secrets_link`) counts a field once either takes it. Until 2026-11-24 named
+(`secrets_set` and `secrets_link`) counts a field once either takes it. An object argument's
+description names every key the contract gives it (a firewall rule's `attacks`, added by apps #860,
+was the one it found), so a key a product adds inside an object isn't one agents never hear of. Until 2026-11-24 named
 bodies weren't read at all, so 46 fields had gone unchecked; that pass added apps environments'
 `checks`, `pause_schedule`, `approvals`, `split`, `mirror`, `snippets`, `badge` and
 `log_retention_days`, a new service's `build` and `sealed`, secrets' `comment`, `tags`, `type`,

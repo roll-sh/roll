@@ -307,7 +307,7 @@ impl Provider {
             return Err(Error::Link(format!("creating {dn}: {why}")));
         }
         let names = (o.flavor == Flavor::ActiveDirectory).then(|| AccountNames::dynamic(&dn));
-        Ok(Issued { parts: parts(dn.clone(), pw, names), handle: json!({ "user": dn }) })
+        Ok(Issued { expires_at: None, parts: parts(dn.clone(), pw, names), handle: json!({ "user": dn }) })
     }
 }
 
@@ -366,7 +366,7 @@ impl LinkProvider for Provider {
         };
         let (dn, pw, handle) = TURNS.issue(&self.db, r#ref, &o.accounts, || password(o.flavor), |dn, pw| self.directory.set_password(&o.bind(), dn, pw))?;
         let names = o.accounts.iter().position(|a| *a == dn).and_then(|i| names.get(i).cloned());
-        Ok(Issued { parts: parts(dn, pw, names), handle })
+        Ok(Issued { expires_at: None, parts: parts(dn, pw, names), handle })
     }
 
     fn issue_lease(&self, r#ref: &str, credential: &str, link: &Link, label: &str, ttl_minutes: u64, lease: &str) -> Result<Issued> {

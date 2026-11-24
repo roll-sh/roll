@@ -659,7 +659,7 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
                 <p className="mt-1 text-[12px] text-muted">
                   {env.firewall?.length
                     ? `${env.firewall.length} ${env.firewall.length === 1 ? "rule" : "rules"}, in order: the first that matches a request decides.`
-                    : "No rules. One a line: deny /admin/*, deny method=DELETE, allow /admin/health, deny ua=BadBot, limit 10 /login method=POST (10 a minute a client), challenge /* (a browser check), deny bots=ai,spoofed (AI crawlers, and crawlers posing as Google's or Bing's), log /wp-* (counts, blocks nothing)."}
+                    : "No rules. One a line: deny /admin/*, deny method=DELETE, allow /admin/health, deny ua=BadBot, limit 10 /login method=POST (10 a minute a client), challenge /* (a browser check), deny bots=ai,spoofed (AI crawlers, and crawlers posing as Google's or Bing's), log /wp-* (counts, blocks nothing), log attacks=sqli,xss (roll's attack patterns: scanners, traversal, sqli, xss, rce)."}
                 </p>
                 {!!env.firewall?.length && !!env.firewall_hits?.length && (
                   <p className="mt-1 font-mono text-[11px] text-subtle">
