@@ -176,6 +176,7 @@ impl Host for MockHost {
                         "org.elasticsearch.server@9.5.5/org.elasticsearch.index.IndexService.loadFielddata(IndexService.java:1451)".into(),
                         "org.elasticsearch.server@9.5.5/org.elasticsearch.index.query.SearchExecutionContext.lambda$setLookupProviders$5(SearchExecutionContext.java:570)".into(),
                     ],
+                    fields: Vec::new(),
                 })
             }
             _ => return Ok(false),
