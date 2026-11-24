@@ -477,6 +477,29 @@ for (prod, param), value in sorted(seen.items()):
 print(f"choices: {offered} kinds of id offered as a form's choices, {len(NO_CHOICES)} with none by design, {len(no_form)} missing")
 fails += [f"choices {c}" for c in no_form]
 
+# Fixed sets (`Ty::Choice`): a required one left out, once no id is missing, is asked for in a form
+# that offers exactly the tool's set. Nothing runs while an argument is missing, so writes are in.
+asked, no_ask = 0, []
+for t in tools:
+    props, req = t["inputSchema"].get("properties", {}), t["inputSchema"].get("required", [])
+    prod = t.get("_meta", {}).get("roll/product", "")
+    picks = [p for p in req if props.get(p, {}).get("enum")]
+    others = [p for p in req if p not in picks]
+    if not picks or not all((prod, a) in seen for a in others):
+        continue
+    param = picks[0]
+    args = {a: seen[(prod, a)] for a in others} | {c: props[c]["enum"][0] for c in picks[1:]}
+    r = form_call(t["name"], args).get("result", {})
+    field = r.get("inputRequests", {}).get(f"missing:{param}", {}).get("params", {}).get("requestedSchema", {}).get("properties", {}).get("value", {})
+    if r.get("resultType") != "input_required" or field.get("enum") != props[param]["enum"]:
+        no_ask.append(f"{t['name']} {param}: {r.get('resultType')} {json.dumps(field)[:120]}")
+    else:
+        asked += 1
+if not asked:
+    no_ask.append("no tool with a required choice had its other arguments in the fixtures: the pass checks nothing")
+print(f"choice forms: {asked} tools ask for a missing choice with its set, {len(no_ask)} don't")
+fails += [f"choice form {c}" for c in no_ask]
+
 # The rest of what a client reads: every prompt (its arguments from the fixtures), every resource
 # listed, a project's page, every skill. An error is a failure: they're all read-only.
 surface = []
