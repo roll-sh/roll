@@ -1626,6 +1626,23 @@ impl TxnState {
         }
     }
 
+    /// The statement's snapshot, pinned, for `restore_snapshot` (None: it has none).
+    pub fn keep_snapshot(&self) -> Option<(u64, SnapshotPin)> {
+        self._pin.as_ref().map(|_| (self.snapshot_ts, self.pin_at(self.snapshot_ts)))
+    }
+
+    /// The snapshot `keep_snapshot` kept is the statement's again (REFRESH MATERIALIZED VIEW
+    /// reads the one taken before its lock's wait, as PostgreSQL's refresh_matview_datafill
+    /// reads the active snapshot; `lock_relation` took a newer one).
+    pub fn restore_snapshot(&mut self, kept: Option<(u64, SnapshotPin)>) {
+        if let Some((ts, pin)) = kept
+            && ts != self.snapshot_ts
+        {
+            self.snapshot_ts = ts;
+            self._pin = Some(pin);
+        }
+    }
+
     /// `begin_latest_reads` is running: reads see what committed since (`lock_relation`).
     fn refresh_latest_reads(&mut self) {
         if self.latest_reads.is_some() && self.db.store.visible_ts() != self.snapshot_ts {
@@ -3953,6 +3970,10 @@ impl TxnState {
         // an index built from that missed their rows, a rewrite dropped them.
         if got && mode >= LockMode::Share {
             self.refresh_read_committed_snapshot();
+        }
+        // (A DDL statement reads what committed while it waited for any lock: ANALYZE's and
+        // VACUUM's SHARE UPDATE EXCLUSIVE too, `begin_latest_reads`.)
+        if got {
             self.refresh_latest_reads();
         }
         Ok(got)

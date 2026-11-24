@@ -21790,5 +21790,34 @@ lookup per key: predicted well under 0.1% of a point select.
 5. COMMIT PREPARED does not carry `DdlReads`: an index created in a prepared transaction isn't
    put in `index_since`, so a snapshot older than the COMMIT PREPARED reads nothing through it.
 
-**Left**: the wider audit (TRUNCATE, REFRESH MATERIALIZED VIEW, CREATE TABLE AS, COPY TO, ATTACH /
-DETACH validation, constraint validation, ANALYZE) is the next candidate (`cand/a310-2`).
+**The wider audit (`cand/a310-2`, on top of `cand/a310`).** Every statement that reads a whole
+table under a lock it may wait for, or with the transaction's snapshot, against PostgreSQL 18.6
+(`~/.cache/a310/scripts/probe3.py`, `probe4.py`; READ COMMITTED lock waits and REPEATABLE READ
+transactions with a change committed after their snapshot):
+
+| statement | PostgreSQL reads | base roll | now |
+|---|---|---|---|
+| ADD CONSTRAINT CHECK, SET NOT NULL, ADD FOREIGN KEY (child row or parent delete), ALTER DOMAIN ADD CONSTRAINT, in REPEATABLE READ | newest rows (`validateCheckConstraint`, ATRewriteTable's not-null scan, `RI_Initial_Check`, `validateDomainCheckConstraint`): error | **snapshot: the constraint committed over a violating row** (CHECK, NOT NULL, FK child row, domain) | as PostgreSQL (`cand/a310`'s statement scope) |
+| VALIDATE CONSTRAINT, ATTACH PARTITION, CREATE TABLE ... PARTITION OF beside a default partition, in REPEATABLE READ | newest rows | as PostgreSQL | as PostgreSQL |
+| ANALYZE after waiting for its SHARE UPDATE EXCLUSIVE lock | after the wait (reltuples 900) | before it (500) | as PostgreSQL: the scope refreshes on every lock it is granted |
+| CREATE TABLE AS, SELECT INTO, CREATE MATERIALIZED VIEW after a lock wait (READ COMMITTED) | after the wait: the waited-for transaction's row copied (11) | **before it (10)** | as PostgreSQL: the snapshot is taken again once the query's relations are locked, as a query's is |
+| REFRESH MATERIALIZED VIEW waiting for another REFRESH of the view | the snapshot before the wait | **40001 "concurrent schema change"** (it started from the old heap's catalog) | as PostgreSQL: the catalog is taken up after the lock (`refresh_catalog`), and the snapshot before the wait is kept (agent 307's refresh on SHARE locks made it read newer rows) |
+| REFRESH MATERIALIZED VIEW, CREATE TABLE AS in REPEATABLE READ | the transaction's snapshot | as PostgreSQL | as PostgreSQL |
+| TRUNCATE in REPEATABLE READ, or after a writer it waited for | every row gone | as PostgreSQL | as PostgreSQL |
+| INSERT ... SELECT, SELECT, COPY (query) TO after a lock wait | SELECT, INSERT ... SELECT after; COPY (query) TO before | as PostgreSQL | as PostgreSQL |
+
+Isolation spec `roll-ddl-validation-snapshots` (10 permutations): 10 / 10 against PostgreSQL
+18.6; `cand/a310`'s binary 5 / 10, the base 1 / 10. With the other DDL specs 53 / 53. probe.py,
+probe2.py: unchanged. crash-binary.py seeds 1 and 2: green. Rebased onto agents 302 / 308's
+parallel btree build (`acdb8df70`): `probe5.py` (400,000-row tables, `max_parallel_maintenance_workers
+= 2`, REPEATABLE READ: CREATE INDEX after an insert, CREATE UNIQUE INDEX after a duplicate or a
+delete, ADD PRIMARY KEY) as PostgreSQL (the base: the index one row short, the duplicate
+accepted); whether workers ran was not checked separately.
+
+**Found and not fixed (no rows lost, results differ):**
+1. `COPY table TO` after waiting for a lock reads what the waited-for transaction committed
+   (11 rows); PostgreSQL's COPY is a utility that opens the table after its snapshot was taken
+   (10). `COPY (SELECT ...) TO` matches. Reproduction: `probe4.py`.
+2. TRUNCATE (and ALTER TABLE rewrites, item 3 above) seen from a snapshot older than the
+   commit: roll's old snapshot still reads the rows, PostgreSQL's reads none (documented as not
+   MVCC-safe). Reproduction: `probe3.py` `old-truncate`.

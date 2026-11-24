@@ -1533,7 +1533,10 @@ impl Ddl<'_, '_> {
             }
         };
         self.require_rel_priv(v.oid, crate::catalog::acl::MAINTAIN, false)?;
-        // ExecRefreshMatView: ACCESS EXCLUSIVE (CONCURRENTLY: EXCLUSIVE).
+        // ExecRefreshMatView: ACCESS EXCLUSIVE (CONCURRENTLY: EXCLUSIVE). The query reads the
+        // statement's snapshot, taken before a wait for the lock (refresh_matview_datafill's
+        // active snapshot), not a newer one.
+        let kept = self.ctx.txn.borrow().keep_snapshot();
         self.note_lock(
             v.oid,
             if s.concurrent {
@@ -1542,6 +1545,12 @@ impl Ddl<'_, '_> {
                 super::table::lockmode::ACCESS_EXCLUSIVE
             },
         )?;
+        self.ctx.txn.borrow_mut().restore_snapshot(kept);
+        // (A REFRESH that held the lock committed the view's new heap meanwhile: this one
+        // starts from it, as the relcache entry its lock's invalidations rebuilt. It started
+        // from the old one, and its commit failed as a concurrent schema change.)
+        self.refresh_catalog()?;
+        let v = self.cat.views.get(&v.oid).cloned().unwrap_or(v);
         let storage = v
             .storage
             .clone()

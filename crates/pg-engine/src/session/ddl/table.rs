@@ -4374,6 +4374,14 @@ impl Ddl<'_, '_> {
         if self.ctx.instr.borrow().is_some() {
             *self.ctx.explained.borrow_mut() = Some((bq.plan.clone(), bq.hidden_rtes));
         }
+        if !into.skip_data {
+            // The query's relations locked, READ COMMITTED reads what the transactions it
+            // waited for committed: its snapshot is taken after its locks, as a query's
+            // (CREATE TABLE AS is analyzed, and its relations locked, before PostgreSQL takes
+            // the snapshot it runs with).
+            crate::sql::binder::perms::lock_relations(&bq.perms, self.ctx)?;
+            self.ctx.txn.borrow_mut().refresh_read_committed_snapshot();
+        }
         let rows = if into.skip_data {
             Vec::new()
         } else if matview {
