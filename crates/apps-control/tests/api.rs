@@ -634,6 +634,68 @@ async fn web_vitals_from_visitors_read_back_as_p75s() {
     assert_eq!(req("POST", "/__roll/vitals", "*/*", Some(json!({"path": "/", "lcp": 1}).to_string())).await.0, StatusCode::OK, "off, the path is the app's own");
 }
 
+/// Signing visitors in through a provider (`access.sso`; Cloud Run's IAP, Cloudflare Access): a
+/// page load with no session goes to roll's sign-in with GitHub carrying a request signed for this
+/// environment and page; whoever the provider vouches for and `allow` names (a domain, an email,
+/// a GitHub organisation) gets a one-use ticket to it and a session; anyone else is refused in
+/// words, and so is a request tampered with; taking them out of `allow` ends their session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_provider_signs_visitors_in_by_their_domain_or_organisation() {
+    let w = world_with(|c| c.visitor_recheck = Duration::ZERO).await;
+    struct Start;
+    impl apps_control::integrations::VisitorSignIn for Start {
+        fn start_url(&self, provider: &str, request: &str, orgs: bool) -> Option<String> {
+            Some(format!("https://api.roll.test/v1/accounts/oauth/{provider}/visit?r={request}{}", if orgs { "&orgs=1" } else { "" }))
+        }
+    }
+    let (svc, _) = image_service(&w, "wiki", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let h = host(&svc["environments"][0]["url"]);
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    let sso = json!({"access": {"sso": {"provider": "github", "allow": ["@Acme.com", "org:roll-sh"]}}});
+    assert_eq!(call(&w.api, "PUT", &env, Some(sso.clone())).await.0, StatusCode::CONFLICT, "no sign-in on this node yet");
+    w.apps.set_visitor_sign_in(Arc::new(Start));
+    assert_eq!(call(&w.api, "PUT", &env, Some(json!({"access": {"sso": {"provider": "google", "allow": ["org:roll-sh"]}}}))).await.0, StatusCode::BAD_REQUEST, "organisations are GitHub's");
+    let (st, e) = call(&w.api, "PUT", &env, Some(sso)).await;
+    assert_eq!((st, &e["sso"]["allow"]), (StatusCode::OK, &json!(["@acme.com", "org:roll-sh"])), "{e}");
+    let get = |path: String, cookie: Option<String>| {
+        let mut r = Request::builder().uri(path).header("host", h.clone()).header("accept", "text/html");
+        if let Some(c) = cookie {
+            r = r.header("cookie", c);
+        }
+        let public = w.public.clone();
+        async move {
+            let resp = public.oneshot(r.body(Body::empty()).unwrap()).await.unwrap();
+            (resp.status(), resp.headers().clone())
+        }
+    };
+    let (st, hd) = get("/pages/home?x=1".into(), None).await;
+    let start = hd["location"].to_str().unwrap().to_string();
+    assert!(st == StatusCode::FOUND && start.starts_with("https://api.roll.test/v1/accounts/oauth/github/visit?r=") && start.ends_with("&orgs=1"), "{start}");
+    let request = start.split("r=").nth(1).unwrap().trim_end_matches("&orgs=1").to_string();
+    let who = |email: &str, orgs: &[&str]| apps_control::integrations::SsoVisitor { provider: "github".into(), subject: "7".into(), email: email.into(), orgs: orgs.iter().map(|o| o.to_string()).collect() };
+    // Turned away: someone else, a tampered request, another provider's sign-in.
+    let no = w.apps.admit_visitor(&request, &who("eve@evil.example", &["other"])).await.unwrap_err();
+    assert!(no.contains("eve@evil.example"), "{no}");
+    let mut forged = request.clone();
+    forged.replace_range(0..2, "AA");
+    assert!(w.apps.admit_visitor(&forged, &who("ann@acme.com", &[])).await.is_err());
+    assert!(w.apps.admit_visitor(&request, &apps_control::integrations::SsoVisitor { provider: "google".into(), ..who("ann@acme.com", &[]) }).await.is_err());
+    // A member of the organisation, whatever their email: a ticket back to the page they wanted.
+    assert!(w.apps.admit_visitor(&request, &who("bob@elsewhere.example", &["roll-sh"])).await.is_ok());
+    let back = w.apps.admit_visitor(&request, &who("ann@acme.com", &[])).await.unwrap();
+    let path = back.split_once(&h).map(|(_, p)| p.to_string()).unwrap_or_else(|| panic!("on the environment's host: {back}"));
+    let path = path.trim_start_matches(|c: char| c == ':' || c.is_ascii_digit()).to_string();
+    let (st, hd) = get(path.clone(), None).await;
+    assert_eq!((st, hd["location"].to_str().unwrap()), (StatusCode::FOUND, "/pages/home?x=1"));
+    let session = hd["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_string();
+    assert_eq!(get("/".into(), Some(session.clone())).await.0, StatusCode::OK, "in with the session");
+    assert_eq!(get(path, None).await.0, StatusCode::UNAUTHORIZED, "a ticket opens one session");
+    // `@acme.com` gone from allow: Ann's session ends.
+    call(&w.api, "PUT", &env, Some(json!({"access": {"sso": {"provider": "github", "allow": ["org:roll-sh"]}}}))).await;
+    assert_eq!(get("/".into(), Some(session)).await.0, StatusCode::FOUND, "back to signing in");
+}
+
 /// Signing in to an environment: a page load with no session goes to roll's dashboard; a person
 /// signed in there gets a one-use ticket to a page at one of the environment's names (a token
 /// gets none); the ticket opens a host-only session, which the app never sees; changing the
