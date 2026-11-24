@@ -4835,10 +4835,13 @@ async fn a_migration_is_bounded() {
     assert!(again["indices"][0]["task"].is_string(), "{again}");
 }
 
+/// A fake site's answers by path: status, headers, body.
+type SiteRoutes = Arc<parking_lot::Mutex<std::collections::HashMap<String, (u16, Vec<(String, String)>, String)>>>;
+
 /// A site on loopback for the web crawler: fixed answers by path, the rest 404.
 struct FakeSite {
     base: String,
-    routes: Arc<parking_lot::Mutex<std::collections::HashMap<String, (u16, Vec<(String, String)>, String)>>>,
+    routes: SiteRoutes,
 }
 
 impl FakeSite {
@@ -4846,7 +4849,7 @@ impl FakeSite {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
-        let routes: Arc<parking_lot::Mutex<std::collections::HashMap<String, (u16, Vec<(String, String)>, String)>>> = Arc::default();
+        let routes: SiteRoutes = Arc::default();
         let r = routes.clone();
         tokio::spawn(async move {
             while let Ok((mut sock, _)) = listener.accept().await {
