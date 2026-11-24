@@ -147,6 +147,8 @@ pub struct FakeData {
     pub at: Mutex<Vec<i64>>,
     /// What `columns` answers, by parent (`Err`: it sleeps).
     pub columns: Mutex<std::collections::HashMap<String, Result<Vec<roll_previews::mask::Column>, roll_previews::ports::Asleep>>>,
+    /// Branches put back to a restore point: (the branch, the point's copy).
+    pub restored: Mutex<Vec<(String, String)>>,
 }
 
 impl FakeData {
@@ -164,6 +166,7 @@ impl FakeData {
             at: Mutex::new(Vec::new()),
             columns: Mutex::new(Default::default()),
             branch_now: Mutex::new(None),
+            restored: Mutex::new(Vec::new()),
         })
     }
 }
@@ -204,6 +207,14 @@ impl Brancher for FakeData {
         let id = format!("{parent}~{name}");
         self.branches.lock().insert(id.clone());
         Ok(Some(Branched::plain(id)))
+    }
+    fn restores(&self) -> bool {
+        self.kind == Kind::Postgres
+    }
+    async fn restore(&self, _parent: &str, branch: &str, _kept: Option<&str>, point: &str, _name: &str, _mode: Mode) -> anyhow::Result<Option<Branched>> {
+        anyhow::ensure!(self.branches.lock().contains(point), "no restore point {point}");
+        self.restored.lock().push((branch.to_string(), point.to_string()));
+        Ok(Some(Branched::plain(branch.to_string())))
     }
     async fn delete_snapshot(&self, parent: &str, _from: &str, snapshot: &str, _kept: Option<&str>, name: &str) -> anyhow::Result<()> {
         if self.fail_snapshot_deletes.load(Ordering::SeqCst) > 0 {
