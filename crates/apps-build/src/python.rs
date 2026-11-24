@@ -153,6 +153,10 @@ pub(crate) fn detect(tree: &dyn Tree, _: &Overrides) -> Result<Option<Draft>, Er
         Some(s) => notes.push(format!("starts with {s}")),
         None => notes.push("nothing says how to start it: add main.py or set start".into()),
     }
+    // Their workers follow the instance's size: roll sets WEB_CONCURRENCY from its CPU and memory.
+    if let Some(server) = start.as_deref().and_then(|s| ["gunicorn", "uvicorn"].into_iter().find(|w| s.starts_with(w))) {
+        notes.push(format!("{server} runs $WEB_CONCURRENCY workers: roll sets it from the instance's CPU and memory (set it to choose)"));
+    }
 
     let whole_tree = requirements.as_deref().is_some_and(|r| {
         r.lines().any(|l| {

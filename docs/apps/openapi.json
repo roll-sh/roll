@@ -2223,6 +2223,94 @@
         "x-roll-action": "read"
       }
     },
+    "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/pin": {
+      "delete": {
+        "description": "Answers `Deployment`: pruned again as the kept ones are; audited.",
+        "operationId": "deleteServicesIdEnvironmentsEnvDeploysDepPin",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "dep",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`Deployment`: pruned again as the kept ones are; audited"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Delete pin",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "write"
+      },
+      "post": {
+        "description": "Answers `Deployment` with `pinned_at`: never pruned (its image and build log stay, so its rollback stays instant), nor counted toward the kept ones; 409 once pruned; audited.",
+        "operationId": "postServicesIdEnvironmentsEnvDeploysDepPin",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "dep",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`Deployment` with `pinned_at`: never pruned (its image and build log stay, so its rollback stays instant), nor counted toward the kept ones; 409 once pruned; audited"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Pin deploy",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "write"
+      }
+    },
     "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/provenance": {
       "get": {
         "description": "Answers its image's SLSA v1 provenance as roll built it, a DSSE envelope (`payloadType` `application/vnd.in-toto+json`, the statement base64 in `payload`, an ECDSA P-256 signature over its PAE): the source and revision, base images' digests, the plan, the Dockerfile's hash, the build variables' names, the image's digest as its subject; verify with the project's `roll_key` (`GET …/projects/{project}/signing`). 404 for an image roll didn't build (an image service's).",

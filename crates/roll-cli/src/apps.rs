@@ -610,6 +610,12 @@ pub enum AppsCmd {
         sbom: Option<String>,
         #[arg(long, short = 'o', requires = "sbom")]
         output: Option<PathBuf>,
+        /// Keep a deployment from pruning, so rolling back to it stays instant.
+        #[arg(long, value_name = "DEPLOYMENT", conflicts_with_all = ["commits", "vulnerabilities", "explain", "sbom", "unpin"])]
+        pin: Option<String>,
+        /// Let a pinned deployment be pruned again.
+        #[arg(long, value_name = "DEPLOYMENT", conflicts_with_all = ["commits", "vulnerabilities", "explain", "sbom"])]
+        unpin: Option<String>,
     },
     /// Its objective (`run.slo`) against its window: what met it, the error budget left, and
     /// whether it's burning fast.
@@ -3723,6 +3729,20 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 bail!("no deleted service named {} (`roll apps restore --list` lists them)", target.service.as_deref().unwrap_or("that"));
             };
             api.post(&format!("/v1/apps/services/{}/restore", enc(&s(&d["id"]))), json!({})).await?
+        }
+        AppsCmd::Deploys { target, pin, unpin, .. } if pin.is_some() || unpin.is_some() => {
+            let svc = service(api, &target).await?;
+            let (dep, on) = match (pin, unpin) {
+                (Some(d), _) => (d, true),
+                (None, d) => (d.unwrap_or_default(), false),
+            };
+            let path = format!("{}/deploys/{}/pin", env_path(&svc, &target.env), enc(&dep));
+            let d = if on { api.post(&path, json!({})).await? } else { api.call(reqwest::Method::DELETE, &path, None).await? };
+            if !json_out {
+                println!("{dep} {}", if on { "pinned: never pruned, always one rollback away" } else { "unpinned: pruned as the kept deployments are" });
+                return Ok(());
+            }
+            d
         }
         AppsCmd::Deploys { target, sbom: Some(dep), output, .. } => {
             let svc = service(api, &target).await?;

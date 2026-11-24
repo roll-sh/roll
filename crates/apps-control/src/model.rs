@@ -1485,6 +1485,14 @@ impl Default for Run {
 }
 
 impl Run {
+    /// How many worker processes an app server runs on one of its instances (Heroku's
+    /// `WEB_CONCURRENCY` by dyno size): gunicorn's 2 × cores + 1, at most one per 256 MB, 1–16.
+    pub fn web_concurrency(&self) -> u32 {
+        let by_cpu = (self.cpu.max(0.0) * 2.0).floor() as u32 + 1;
+        let by_memory = (self.memory_mb / 256).max(1);
+        by_cpu.min(by_memory).clamp(1, 16)
+    }
+
     /// One instance writes its volume (one not `shared`): nothing of it runs beside the live
     /// one, and the old instance stops before the new one starts.
     pub fn one_writer(&self) -> bool {
@@ -3187,6 +3195,9 @@ pub struct Deployment {
     /// Its image's size, where the runtime says (bytes).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_bytes: Option<i64>,
+    /// When it was pinned (unix ms): never pruned, so always one rollback away.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pinned_at: Option<i64>,
     /// Who asked for it: a push's commit author, the token or connection that called the API
     /// (`operator` for the operator's token), none when roll did it on its own or nothing said.
     pub actor: Option<String>,
@@ -3668,6 +3679,8 @@ mod tests {
         assert_eq!(run.min_instances, 1, "a worker runs at least one");
         let run = Run::default().merged(Some(&serde_json::json!({"volume": {"mount": "/data", "size_gb": 5}, "max_instances": 4}))).unwrap();
         assert_eq!(run.max_instances, 1, "a volume allows one instance");
+        let size = |cpu: f64, memory_mb: u32| Run { cpu, memory_mb, ..Run::default() }.web_concurrency();
+        assert_eq!((size(0.25, 256), size(0.5, 512), size(1.0, 2048), size(4.0, 1024), size(16.0, 32768)), (1, 2, 3, 4, 16), "workers follow the instance");
         let shared = Run::default().merged(Some(&serde_json::json!({"volume": {"mount": "/data", "size_gb": 5, "shared": true}, "max_instances": 4, "rollout": {"steps": [10]}}))).unwrap();
         assert_eq!((shared.max_instances, shared.one_writer(), shared.rollout.steps.clone()), (4, false, vec![10]), "a shared volume: many instances, and deploys overlap");
         assert!(Run::default().merged(Some(&serde_json::json!({"type": "cron"}))).is_err(), "cron needs a schedule");
