@@ -479,6 +479,8 @@ export type Sync = {
   paused_why: string | null;
   /** A certificate kind's: what the target calls what it pushed (an ACM ARN, a Key Vault certificate's latest version, a Cloudflare custom certificate's id). */
   remote_id?: string;
+  /** A sync that signs in with roll's issuer (workload identity federation, a federated credential): the subject its cloud's trust names, `roll-secrets:<project>:sync:<id>`. */
+  subject?: string;
 };
 /** What a sync would push before it exists (`POST …/syncs/preview`): names only. */
 export type SyncPreview = { names: string[]; credentials: string[]; missing_credentials: string[]; unknown_keys: string[] };
@@ -503,7 +505,7 @@ export type DeletedProject = { project: string; name: string; environment?: stri
 export type Recovered = { project: string; name: string; recovered_at: number; rotated: number; rotation_failed: string[] };
 export type Place = { project: string; project_name: string; environment: string; path: string; key: string; version: number; updated_at: number; linked: boolean };
 /** One thing to fix (`GET …/health`), worst first: where, never a value. */
-export type Finding = { issue: "decoy_used" | "production_unprotected" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "unplaced" | "operator_made" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy };
+export type Finding = { issue: "decoy_used" | "production_unprotected" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "unplaced" | "operator_made" | "stored_cloud_key" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy };
 /** One project's findings (`GET /v1/secrets/findings`). */
 export type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
 /** A URL roll calls to issue and revoke a value that lives outside roll (`rotator` links). */
@@ -584,13 +586,19 @@ export type MadeGateway = { gateway: Gateway; token?: string };
 export type GitHubApp = { id: string; name: string; app_id: number; installation_id: number; api_base: string; repositories: string[]; permissions: Record<string, string>; created_at: number; created_by: string };
 export type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 /** A vendor roll issues and revokes keys at itself (`saas` links): its account, never the credential. */
-export type SaasVendor = "sendgrid" | "twilio" | "okta" | "entra" | "auth0" | "gitlab" | "openai" | "datadog" | "cloudflare" | "databricks" | "confluent";
+export type SaasVendor = "sendgrid" | "twilio" | "okta" | "entra" | "auth0" | "gitlab" | "openai" | "datadog" | "cloudflare" | "databricks" | "confluent" | "sonarqube" | "jenkins";
 /** `credential_expires_at`: when the registered credential ends at the vendor (ms), if the admin gave it; health warns two weeks before. */
 export type SaasRotator = { id: string; name: string; vendor: SaasVendor; target: Record<string, unknown>; credential_expires_at?: number; created_at: number; created_by: string };
 /** `credential` is sealed at once and never answered; `credential_expires_at` (ms, in the future) is when it ends at the vendor. */
 export type NewSaasRotator = { name: string; vendor: SaasVendor; target: Record<string, unknown>; credential: string; credential_expires_at?: number };
 /** `PATCH …/saas/{id}`: a new `credential` is checked with the vendor before it replaces the old one (linked keys keep working); `credential_expires_at: null` clears the date, and a new credential without one has none. */
 export type SaasRotatorChange = { name?: string; credential?: string; credential_expires_at?: number | null };
+/** A certificate from a public ACME CA, renewed by roll; keys link to it (`public_cert`, managed). Never a credential, the EAB key or the private key. `status`: `pending` until the first order, `failing` while the last one failed (`last_error`). `renews_at`: when the next renewal is due (0 once one was asked for: it is ordered now). */
+export type PublicCert = { id: string; name: string; directory_url: string; domains: string[]; dns_provider: "cloudflare"; eab_kid?: string; rotate_days?: number; status: "pending" | "issued" | "failing"; serial?: string; not_after?: number; issued_at?: number; renews_at?: number; last_error?: string; failed_at?: number; created_at: number; created_by: string };
+/** `directory_url`: Let's Encrypt (production or staging), ZeroSSL, Google Trust Services, or one the operator allows; `dns_credential`: the DNS provider's API token (Cloudflare: Zone DNS edit on the names' zones); `eab_*`: External Account Binding, for CAs that ask (ZeroSSL, Google); `rotate_days`: default two thirds of the certificate's lifetime, at most the lifetime less 14 days. */
+export type NewPublicCert = { name: string; directory_url: string; domains: string[]; dns_provider: "cloudflare"; dns_credential: string; eab_kid?: string; eab_hmac_key?: string; rotate_days?: number };
+/** New `domains` or a new `dns_credential` order a new certificate at once; `rotate_days: null` goes back to the default. */
+export type PublicCertChange = { name?: string; domains?: string[]; dns_credential?: string; rotate_days?: number | null };
 /** A Kubernetes cluster whose service accounts get short-lived tokens per lease (dynamic `kubernetes` links); the admin token and the CA stay sealed. */
 export type KubernetesCluster = { id: string; name: string; api_url: string; has_ca: boolean; created_at: number; created_by: string };
 /** `token`: a service account token that may create tokens; `ca_pem`: the cluster's CA, when it isn't publicly trusted. */
