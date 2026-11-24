@@ -88,6 +88,14 @@ CREATE TABLE IF NOT EXISTS shares (
     revoked INTEGER NOT NULL DEFAULT 0,
     opened_day INTEGER
 ) WITHOUT ROWID;
+-- The notes guests left through a share link (their reviews on the change).
+CREATE TABLE IF NOT EXISTS guest_notes (
+    preview_id TEXT NOT NULL,
+    share_id TEXT NOT NULL,
+    review_id TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (preview_id, review_id)
+);
 CREATE TABLE IF NOT EXISTS visit_tickets (
     hash TEXT PRIMARY KEY,
     preview_id TEXT NOT NULL,
@@ -468,6 +476,9 @@ pub const VISITORS: usize = 8;
 pub struct LiveShare {
     pub id: String,
     pub ends: i64,
+    pub label: String,
+    /// Its visitors may leave notes.
+    pub notes: bool,
     /// Who made it (`usr_…`: a person, or the person behind their token); none for the operator.
     pub maker: Option<String>,
     /// When its maker was last asked whether they still may.
@@ -823,6 +834,13 @@ impl Store {
         }
         if !db.has_column("shares", "maker_checked")? {
             db.add_column("shares", "maker_checked", "INTEGER NOT NULL DEFAULT 0")?;
+        }
+        // Who a share link is for, and whether its visitors may leave notes (as guests).
+        if !db.has_column("shares", "label")? {
+            db.add_column("shares", "label", "TEXT NOT NULL DEFAULT ''")?;
+        }
+        if !db.has_column("shares", "notes")? {
+            db.add_column("shares", "notes", "INTEGER NOT NULL DEFAULT 0")?;
         }
         if !db.has_column("previews", "idled")? {
             db.add_column("previews", "idled", "INTEGER NOT NULL DEFAULT 0")?;
@@ -1364,7 +1382,7 @@ impl Store {
             if let Some((project, change, head)) = gone {
                 emit(c, now, "deleted", &project, id, change.as_deref(), &serde_json::json!({ "head": head }))?;
             }
-            for t in ["resources", "services", "pinned", "pinned_data", "restore_points", "shares", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "previews"] {
+            for t in ["resources", "services", "pinned", "pinned_data", "restore_points", "shares", "guest_notes", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -3074,7 +3092,8 @@ impl Store {
     /// A link that opens the preview until `expires_at` (Vercel's shareable links), on a token of
     /// its own: only its SHA-256 is kept, so the token is in the answer once. At most
     /// [`SHARES_MAX`] live ones.
-    pub fn create_share(&self, id: &str, expires_at: i64, by: &str, maker: Option<&str>) -> Result<(crate::Share, String)> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_share(&self, id: &str, expires_at: i64, by: &str, maker: Option<&str>, label: &str, notes: bool) -> Result<(crate::Share, String)> {
         let now = self.now_ms()?;
         let token = format!("rps_{}", new_token());
         let sid = format!("shr_{}", &new_token()[..12]);
@@ -3084,17 +3103,20 @@ impl Store {
             if live as usize >= SHARES_MAX {
                 return Err(Error::Conflict(format!("the preview has {SHARES_MAX} live share links: revoke one first")));
             }
-            c.execute("INSERT INTO shares (id, preview_id, hash, expires_at, created_by, created_at, maker, maker_checked) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", params![sid, id, hash, expires_at, by, now, maker, now])?;
+            c.execute(
+                "INSERT INTO shares (id, preview_id, hash, expires_at, created_by, created_at, maker, maker_checked, label, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![sid, id, hash, expires_at, by, now, maker, now, label, notes as i64],
+            )?;
             Ok::<_, Error>(())
         })?;
-        Ok((crate::Share { id: sid, expires_at, created_by: by.to_string(), created_at: now, revoked: false }, token))
+        Ok((crate::Share { id: sid, expires_at, created_by: by.to_string(), created_at: now, revoked: false, label: label.to_string(), notes }, token))
     }
 
     /// The preview's share links, newest first (never their tokens).
     pub fn shares(&self, id: &str) -> Result<Vec<crate::Share>> {
         Ok(self.db.read(|c| {
-            c.query("SELECT id, expires_at, created_by, created_at, revoked FROM shares WHERE preview_id = ? ORDER BY created_at DESC", [id], |r| {
-                Ok(crate::Share { id: r.get(0)?, expires_at: r.get(1)?, created_by: r.get(2)?, created_at: r.get(3)?, revoked: r.get::<_, i64>(4)? != 0 })
+            c.query("SELECT id, expires_at, created_by, created_at, revoked, label, notes FROM shares WHERE preview_id = ? ORDER BY created_at DESC", [id], |r| {
+                Ok(crate::Share { id: r.get(0)?, expires_at: r.get(1)?, created_by: r.get(2)?, created_at: r.get(3)?, revoked: r.get::<_, i64>(4)? != 0, label: r.get(5)?, notes: r.get::<_, i64>(6)? != 0 })
             })
         })?)
     }
@@ -3112,12 +3134,27 @@ impl Store {
         let now = self.now_ms()?;
         Ok(self.db.read(|c| {
             c.query_row(
-                "SELECT id, expires_at, maker, maker_checked FROM shares WHERE preview_id = ? AND hash = ? AND revoked = 0 AND expires_at > ?",
+                "SELECT id, expires_at, maker, maker_checked, label, notes FROM shares WHERE preview_id = ? AND hash = ? AND revoked = 0 AND expires_at > ?",
                 params![id, bypass_hash(token), now],
-                |r| Ok(LiveShare { id: r.get(0)?, ends: r.get(1)?, maker: r.get(2)?, maker_checked: r.get(3)? }),
+                |r| Ok(LiveShare { id: r.get(0)?, ends: r.get(1)?, maker: r.get(2)?, maker_checked: r.get(3)?, label: r.get(4)?, notes: r.get::<_, i64>(5)? != 0 }),
             )
             .optional()
         })?)
+    }
+
+    /// How many notes guests left through share link `share` since `since`.
+    pub fn guest_notes_since(&self, id: &str, share: &str, since: i64) -> Result<usize> {
+        Ok(self.db.read(|c| c.query_row("SELECT COUNT(*) FROM guest_notes WHERE preview_id = ? AND share_id = ? AND at > ?", params![id, share, since], |r| r.get::<_, i64>(0)))? as usize)
+    }
+
+    pub fn add_guest_note(&self, id: &str, share: &str, review: &str, at: i64) -> Result<()> {
+        self.db.write(|c| c.execute("INSERT INTO guest_notes (preview_id, share_id, review_id, at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING", params![id, share, review, at]).map(drop))?;
+        Ok(())
+    }
+
+    /// The reviews guests left through share link `share`.
+    pub fn guest_note_ids(&self, id: &str, share: &str) -> Result<std::collections::HashSet<String>> {
+        Ok(self.db.read(|c| c.query("SELECT review_id FROM guest_notes WHERE preview_id = ? AND share_id = ?", params![id, share], |r| r.get::<_, String>(0)))?.into_iter().collect())
     }
 
     /// A share link's maker was just asked about (and still may).

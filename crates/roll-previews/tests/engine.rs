@@ -2379,7 +2379,7 @@ async fn a_pages_notes_by_its_environment_name() {
     e.engine.resolve_note(&p.id, "rv_Too big", "bob").await.unwrap();
     assert!(e.engine.notes_for(&env_name, "/").await.unwrap().is_empty());
     // Said on the change as bob, so its pull request and the note's Slack thread hear it.
-    assert_eq!(*e.code.resolved.lock(), [("chg_n".to_string(), "rv_Too big".to_string(), "bob".to_string())]);
+    assert_eq!(*e.code.comments.lock(), [("chg_n".to_string(), "**Reply on the preview** · `rv_Too big`\n\nResolved.".to_string(), "bob".to_string())]);
     assert_eq!(e.engine.open_notes(&p.id).await.unwrap().len(), 1);
     assert!(e.engine.resolve_note(&p.id, "rv_someone else's", "bob").await.is_err());
 }
