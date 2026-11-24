@@ -99,6 +99,10 @@ pub struct Settings {
     /// A feedback button on the pages of people who came in through roll (link access, or a team
     /// session): it pins a note to an element and posts it on the change, from roll.
     pub feedback: bool,
+    /// Mail about notes (Vercel's comment notifications): a new note to the change's author, a
+    /// reply or a resolve to the note's author, each to their own address while they may open
+    /// the project's previews. Not to guests, nor to whoever wrote it.
+    pub note_mail: bool,
     /// Feature flags a reviewer sets for their own view from that button's toolbar (Vercel's
     /// Flags Explorer): each a name and its options, at most [`MAX_FLAGS`]. The choice reaches the
     /// services as the `x-roll-flags` header (`name=value`, comma-joined), only what this rule
@@ -525,6 +529,7 @@ impl Default for Settings {
             egress_forks: EgressRule::Roll,
             data_at: None,
             feedback: true,
+            note_mail: true,
             flags: Vec::new(),
             oidc_audiences: Vec::new(),
             warm: true,
