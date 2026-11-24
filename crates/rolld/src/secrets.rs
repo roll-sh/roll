@@ -430,6 +430,7 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
         tracing::error!("roll secrets is unavailable: {why}");
     }
     let web_url = std::env::var("ROLL_WEB_URL").ok().filter(|u| !u.trim().is_empty());
+    let notify = Notify { accounts: people.accounts.clone(), code: people.code.clone() };
     // Syncs' webhooks go to private addresses only where roll code's may (local development).
     let allow_private = args.code_webhook_allow_private.unwrap_or(open);
     let opts = roll_secrets::Options { keyring, key_source, links: links(api.clone()), syncs: syncs::kinds(api.clone(), allow_private), open, trust_forwarded_for: args.code_trust_forwarded_for, web_url, deliver: Some(Arc::new(syncs::AuditDeliver::new(allow_private, api))),
@@ -444,6 +445,7 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     // Opening blocks on the database.
     let secrets = Arc::new(tokio::task::block_in_place(|| Secrets::open(&target, pg, workspace.clone(), opts))?);
     gateways.set_secrets(secrets.clone());
+    secrets.set_notifier(Arc::new(notify));
     // How many reads of values a token or a person makes a minute on this node (0: no limit).
     if let Ok(n) = std::env::var("ROLL_SECRETS_READS_PER_MINUTE") {
         secrets.set_reads_per_minute(n.trim().parse().map_err(|_| anyhow::anyhow!("ROLL_SECRETS_READS_PER_MINUTE is a number of reads a minute (0: no limit), not {n:?}"))?);
@@ -507,6 +509,23 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     // rows), and deliveries outside it (notices, syncs, sinks), so a slow platform holds up neither.
     sweeper(secrets.clone(), "local", Secrets::sweep_local);
     sweeper(secrets.clone(), "outbound", Secrets::sweep_outbound);
+    // People's notifications (docs/secrets.md, "Being told"): one worker on each node, every 5 s;
+    // each subscription is claimed in a write, so two nodes never send one event.
+    let s = secrets.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let s = s.clone();
+            match tokio::task::spawn_blocking(move || s.sweep_notifications()).await {
+                Ok(Ok((_, failed))) if failed > 0 => tracing::info!(failed, "roll secrets: some notifications weren't sent yet"),
+                Ok(Ok(_)) | Ok(Err(Error::Unavailable(_))) => {}
+                Ok(Err(e)) => tracing::warn!("roll secrets: notifying failed: {e}"),
+                Err(e) => tracing::warn!("roll secrets: notifying panicked: {e}"),
+            }
+        }
+    });
     // Syncs a change marked due, within seconds rather than at the next 30 s sweep.
     let s = secrets.clone();
     tokio::spawn(async move {
@@ -1270,6 +1289,39 @@ impl roll_secrets::health::CodeRefs for CodeRefs {
             }
             Some(found)
         })
+    }
+}
+
+/// Where roll secrets' notifications go (docs/secrets.md, "Being told"): a channel through one of
+/// roll code's chat installs, only the person's own roll code owner's, or mail to the person's own
+/// account address. Called from the worker's blocking thread.
+struct Notify {
+    accounts: Arc<roll_accounts::Accounts>,
+    code: Option<Arc<code_control::Code>>,
+}
+
+impl roll_secrets::Notifier for Notify {
+    fn may_use(&self, user: &str, platform: &str, install: &str) -> roll_secrets::Result<bool> {
+        let Some(code) = &self.code else { return Ok(false) };
+        let Some((owner, on)) = code.chat_install_owner(install).map_err(Error::Internal)? else { return Ok(false) };
+        if on != platform {
+            return Ok(false);
+        }
+        let mine = self.accounts.code_owner_id(user).map_err(|e| Error::Internal(e.to_string()))?;
+        Ok(mine.as_deref() == Some(owner.as_str()))
+    }
+
+    fn mail_on(&self) -> bool {
+        self.accounts.mail_available()
+    }
+
+    fn chat(&self, install: &str, channel: &str, text: &str) -> roll_secrets::Result<()> {
+        let code = self.code.as_ref().ok_or_else(|| Error::Link("roll code isn't running on this server".into()))?;
+        tokio::runtime::Handle::current().block_on(code.post_access_notice(install, channel, text)).map_err(Error::Link)
+    }
+
+    fn mail(&self, user: &str, subject: &str, text: &str) -> roll_secrets::Result<()> {
+        tokio::runtime::Handle::current().block_on(self.accounts.mail_user(user, subject, text)).map_err(|e| Error::Link(e.to_string()))
     }
 }
 
