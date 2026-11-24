@@ -400,9 +400,7 @@ How it works:
     association, and from roll's own API when the caller may comment but not write (a public
     repo's reader);
   - roll previews' fork previews (`!trusted`): the preview, its error groups, traces and spans,
-    route times and logs;
-  - preview notes left by a share link's guests (`guest:<name>`, #911; marked by roll previews,
-    asked for 2026-11-24).
+    route times and logs.
 - In lockdown, every result has the `title`, `body`, `description`, `message`, `text`, `line`,
   `lines` (each line, so the list keeps its shape), `sample`, `name`, `note` and `selector` of
   those records replaced
