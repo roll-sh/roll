@@ -2383,6 +2383,9 @@ impl Apps {
         let Ok(all) = self.db(move |s| s.minutes(&sid, &e, now - back)).await else { return };
         let all: Vec<_> = all.into_iter().filter(|r| r.minute < now).collect();
         let rows: Vec<_> = all.iter().filter(|r| r.minute >= now - 5).cloned().collect();
+        if let Some(last) = rows.iter().filter(|r| r.minute == now - 1).map(|r| r.requests).next() {
+            self.judge_attack(&l.service, &l.env, &tpl.deployment, last).await;
+        }
         let mut firing: Vec<(&'static str, serde_json::Value)> = Vec::new();
         if a.memory_pct > 0 && rows.len() >= 5 {
             let share = |r: &crate::store::MinuteRow| r.memory_bytes as f64 / r.instances.max(1) as f64 / (limit_mb as f64 * 1048576.0) * 100.0;
