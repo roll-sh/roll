@@ -16712,6 +16712,18 @@
      "array",
      "null"
     ]
+   },
+   "next": {
+    "type": [
+     "string",
+     "null"
+    ]
+   },
+   "requests": {
+    "type": [
+     "array",
+     "null"
+    ]
    }
   },
   "type": "object"
