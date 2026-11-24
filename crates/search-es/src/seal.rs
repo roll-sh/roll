@@ -60,7 +60,7 @@ impl Sealer {
     /// new secret gives new tokens.
     pub fn site_token(&self, owner: &str, site: &str) -> String {
         use hmac::Mac;
-        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&self.site_key).expect("HMAC takes any key length");
+        let mut mac = <hmac::Hmac<sha2::Sha256> as hmac::Mac>::new_from_slice(&self.site_key).expect("HMAC takes any key length");
         mac.update(owner.as_bytes());
         mac.update(&[0]);
         mac.update(site.as_bytes());

@@ -8605,6 +8605,7 @@ dependencies = [
  "futures-util",
  "hickory-resolver",
  "hkdf",
+ "hmac 0.12.1",
  "html5ever",
  "indexmap",
  "itoa",
