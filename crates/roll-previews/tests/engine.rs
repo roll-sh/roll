@@ -504,9 +504,9 @@ async fn a_secret_value_its_pages_serve_is_named_on_its_record() {
     assert!(said.len() == 1 && said[0].contains("STRIPE_KEY in /assets/app.js") && !said[0].contains("sk_test"), "{said:?}");
 }
 
-/// A fork's preview is marked `outside`, and so are its error groups: its title and what its code
-/// wrote are text from people who can't push, which roll MCP's lockdown keeps from a model; a
-/// trusted preview isn't.
+/// A fork's preview is marked `outside`, and so are its error groups and its logs (its traces,
+/// spans and routes too): its title and what its code wrote are text from people who can't push,
+/// which roll MCP's lockdown keeps from a model; a trusted preview isn't.
 #[tokio::test]
 async fn a_forks_preview_and_its_errors_are_marked_outside() {
     use tower::ServiceExt;
@@ -528,6 +528,7 @@ async fn a_forks_preview_and_its_errors_are_marked_outside() {
     e.engine.store.update(&p.id, |r| r.trusted = false).unwrap();
     assert_eq!(get(format!("/v1/previews/{}", p.id)).await["outside"], json!(true));
     assert_eq!(get(format!("/v1/previews/{}/errors?minutes=360", p.id)).await["groups"][0]["outside"], json!(true));
+    assert_eq!(get(format!("/v1/previews/{}/logs", p.id)).await["outside"], json!(true), "its log lines too");
 }
 
 /// A preview's errors are its services' groups, newest first, named by service, with a secret its
