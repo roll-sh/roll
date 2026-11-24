@@ -1129,6 +1129,10 @@ pub struct PageCheck {
     /// Paint in the lab.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step_ms: Option<u32>,
+    /// What its change against the baseline is ([`crate::visual::compare`]'s signature): pages
+    /// with the same one changed the same way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_group: Option<String>,
 }
 
 /// What a page's session found besides its picture: the first page's checks, for another page.
@@ -1204,6 +1208,11 @@ pub struct PageReview {
     /// It moves by itself: the difference may be only that (`github.hide` names what moves).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unstable: bool,
+    /// Its change's group (Percy's grouped diffs): the pages it shares one with changed the
+    /// same way, and are accepted together (`…/visual/accept {group}`). Only when another page
+    /// shares it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
