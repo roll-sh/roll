@@ -1,0 +1,16 @@
+[package]
+name = "search-lucene"
+description = "roll search: readers for the Lucene 9 and 10 index files an Elasticsearch snapshot holds (segment infos, compound files, field infos, stored fields, live docs, numeric doc values, flat vectors), for restoring Elasticsearch snapshots; no I/O"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+crc32fast.workspace = true
+miniz_oxide.workspace = true
+thiserror.workspace = true
+zstd.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

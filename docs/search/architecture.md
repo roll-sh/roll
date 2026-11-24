@@ -54,6 +54,7 @@ branch instantly and keep their data on object storage.
 | `search-index`    | one shard's engine: in-memory indexing buffer, refresh, segment flush and merges, deletes and updates, the query/weight/scorer model, BM25, collectors, highlighting |
 | `search-aggs`     | aggregations over doc values: buckets, metrics, pipelines, with Elasticsearch's semantics and response shapes |
 | `search-painless` | the Painless scripting language: parser, type checker, compiler to a compact bytecode, VM, and the script contexts Elasticsearch exposes |
+| `search-lucene`   | readers for the Lucene 9 and 10 files of an Elasticsearch snapshot (segment infos, compound files, field infos, stored fields, live docs, numeric doc values, flat vectors), as hostile input, for restoring Elasticsearch's snapshots |
 | `search-store`    | durability and storage: the write-ahead log (group commit to object storage), segment upload, per-shard manifests, the local cache, branching and garbage collection |
 | `search-es`       | Elasticsearch semantics: mappings, settings, index templates, aliases, the Query DSL, the document and search APIs, `_cat`, cluster and node APIs, errors with Elasticsearch's types and texts |
 | `search-embed`    | the built-in embedding model, multilingual-e5-small: XLM-RoBERTa tokenizer, BERT encoder, mean pooling and normalization on the CPU (`gemm`, one thread per worker), reading two files; no other I/O |
@@ -62,8 +63,8 @@ branch instantly and keep their data on object storage.
 | `search-yaml`     | a runner for Elasticsearch's YAML REST test format, usable against any URL (roll or a real Elasticsearch) |
 | `rolld`           | runs everything on one node (`crates/rolld/src/search.rs`) |
 
-`search-analysis`, `search-codec`, `search-painless` and `search-embed` depend on nothing else in
-roll search. `search-index` builds on codec and analysis; `search-aggs` on index; `search-es` on
+`search-analysis`, `search-codec`, `search-painless`, `search-embed` and `search-lucene` depend on
+nothing else in roll search. `search-index` builds on codec and analysis; `search-aggs` on index; `search-es` on
 all of them but `search-embed` (it sees the node's model through
 `xpack::inference::local::Embedder`); `search-server` on es, store and embed; `search-control` on
 server.
@@ -332,22 +333,34 @@ AES-256-GCM under a key derived from the deployment's `ROLL_SECRET_KEY` (rolld; 
 reads the same variable), a fresh nonce per value and the value's kind as associated data. They
 travel sealed through cluster states, snapshots and branches, and are opened only to send a
 request or to answer that secret's own read API; a node with another key refuses to open them
-without naming either. With no key they are stored as given, as Elasticsearch does without
-`xpack.watcher.encrypt_sensitive_data`. ES|QL data sources still refuse S3 secrets, as
+without naming either. With no key they are refused, unless the node opts in for local
+development (`--search-allow-unsealed-secrets`): then they are stored as given, as Elasticsearch
+does without `xpack.watcher.encrypt_sensitive_data`. ES|QL data sources still refuse S3 secrets, as
 Elasticsearch does without cluster state encryption. Users' passwords are hashes and API keys
 are kept as hashes, never sealed.
 
 A cluster's own admin password, which roll's control plane keeps in its catalog
 (`search_clusters.password`), is sealed in the same way and bound to its row: the associated
 data is `search_cluster_password:<cluster id>`. It is opened only as the row is read, to give
-the node the cluster's credentials and to return the password once, on create and on
-rotation. A branch or a rotation seals a password under its own row's id; a restore keeps
-the cluster's id and so its seal. A row written in the clear (before the deployment had a key)
-is sealed and rewritten the first time it's read. A sealed password that the node can't open
-fails that read: the error names the cluster, but neither the value nor the key. With no
-`ROLL_SECRET_KEY` (local development), passwords are stored as given, like every secret that
-search keeps. `Debug` output of a cluster, a node's credentials and a presented
-`Authorization` header prints `<redacted>` in place of the secret.
+the node the cluster's credentials and to return the password once, on create and on rotation. A
+branch or a rotation seals a password under its own row's id; a restore keeps the cluster's id
+and so its seal. It can't be a hash: it's revealed to the cluster's people (`POST
+/v1/search/clusters/{id}/password`), given to the node in the cluster's spec, and roll calls the
+cluster with it. A password is never stored in the clear. With no `ROLL_SECRET_KEY`, a single
+node seals passwords under a key of its own, made once at `<home>/search/key` (48 random
+characters, mode 0600) and read back on later starts (it goes wherever `search.db` goes, backups
+included: the catalog's passwords don't open without it); once the node is given
+`ROLL_SECRET_KEY`, that key only opens what it sealed, and the catalog seals those passwords
+again with the deployment's key as it opens. A fleet, whose catalog is the shared system
+database, refuses to start search without `ROLL_SECRET_KEY`, since every node opens every
+cluster's password. Rows an earlier version wrote in the clear are sealed as the catalog opens,
+in one write that leaves nothing of them behind (`code_sql::Db::write_erasing`: on SQLite the
+freed pages are zeroed and the WAL is checkpointed and truncated; on Postgres it's an ordinary
+write, and the old row versions go when vacuum reuses their pages). A row an older node writes
+in the clear later is sealed the same way the first time it's read. A sealed password that the
+node can't open fails that read: the error names the cluster, but neither the value nor the key.
+`Debug` output of a cluster, a node's credentials and a presented `Authorization` header prints
+`<redacted>` in place of the secret.
 
 ## Client addresses and IP allowlists
 
@@ -521,6 +534,32 @@ allowlist (a preview's branch included); change it like any setting.
   `If-Match`/`If-None-Match`. Only S3 lists dangling uploads. An `azure` repository's reads go
   where `location_mode` says (primary, secondary, either first), writes to the primary;
   `secondary_only` is read-only.
+- **Repositories Elasticsearch wrote** (`api/snapshots/elastic.rs`, `elastic_restore.rs`). A
+  location whose base path holds Elasticsearch's `index.latest` (roll's own are under `roll/`)
+  is read only, its snapshots listed from its `index-N` and `SnapshotInfo` blobs into the
+  cluster's copy (marked `elastic`); each read decides again, so a location that loses
+  `index.latest` drops that copy (checked again inside the state update) and is roll's. The
+  other way round, a roll bucket repository reads its prefix's contents first
+  (`Bucket::contents`): someone else's repository there (an `index.latest` that isn't roll's;
+  without one, root `snap-`/`meta-` blobs, `index-0`, an `index-N` that isn't gzip, or a key
+  under `indices/` of a shape roll doesn't write) refuses registration, reads, writes,
+  `_verify` and `_analyze` (the scan of `indices/`, and of uploads in parts, stops at the first
+  foreign key or after 10,000 of roll's; uploads in progress count on S3 and Azure, not GCS);
+  `index-N` is the commit and `index.latest` moves after it only from the version read
+  (`put_if`; changed meanwhile, it's read again: another roll writer's behind is moved on from,
+  one past it built on it, someone else's takes `index-N` back out with a conditional delete and
+  its shard files go; a failed move is a warning, the generation two back goes only after a
+  move, and an `index.latest` 8 generations behind is moved to the generation read before a
+  commit, or stops commits); a failed snapshot deletes only its own shard files, when the data
+  shows it isn't recorded (chunks are named by segment and may be another snapshot's: they go
+  with `_cleanup`); `_cleanup` deletes, and aborts uploads of, only
+  keys of roll's own shapes, nothing without repository data. A restore creates each index from Elasticsearch's index
+  metadata as `PUT <index>` would (no templates), then a task reads each shard's Lucene files
+  through `search-lucene` on a blocking thread (ranged reads in 8 MiB windows across a file's
+  `.partN` blobs, throttled like any restore; checksums checked as files stream; what is kept
+  charged to the `request` breaker) and hands live documents over a bounded channel to be
+  indexed like writes. The restore's state is in each index's recovery source, so a new owner
+  restores an unfinished index again when it opens the cluster.
 - **Credentials.** Elasticsearch takes a client's secure settings from its keystore; a roll
   tenant has none, so they come with the repository's settings (`s3`: `access_key`,
   `secret_key`, `session_token`; `gcs`: `credentials_file`, the service account key file's

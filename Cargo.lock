@@ -8629,6 +8629,7 @@ dependencies = [
  "search-analysis",
  "search-codec",
  "search-index",
+ "search-lucene",
  "search-painless",
  "search-test-support",
  "serde_json",
@@ -8662,6 +8663,17 @@ dependencies = [
  "smallvec",
  "thiserror 2.0.21",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "search-lucene"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "miniz_oxide 0.9.1",
+ "serde_json",
+ "thiserror 2.0.21",
+ "zstd 0.14.3",
 ]
 
 [[package]]

@@ -1757,6 +1757,8 @@ static ROWS: &[Row] = &[
     row("DELETE", "/v1/apps/services/{id}/environments/{env}/forms/{form}/submissions/{sub}", "apps", D, one(PG, "service")).env(EnvFrom::Param("env")),
     // `copy_from` copies another environment's values into this one: reveal there too.
     row("PATCH", "/v1/apps/services/{id}/environments/{env}/variables", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).copies_from(CopyFrom::Body("copy_from")),
+    // What its last week says about its settings: settings and usage, never a value.
+    row("GET", "/v1/apps/services/{id}/environments/{env}/advice", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     // What the next deploy changes: names of variables and settings, never a value.
     row("GET", "/v1/apps/services/{id}/environments/{env}/pending", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     // A job is a command run with the environment's variables: its output can be them.

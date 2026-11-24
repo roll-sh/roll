@@ -39,6 +39,41 @@ pub const KINDS: &[Kind] = &[
     Kind { kind: "token", list: "access_list_tokens", read: "access_get_token", param: "id", id: &["id"], page: Some("/dashboard/access/tokens/{}") },
 ];
 
+/// The tools whose answer is one resource of a kind with a page: its read and the tool that makes
+/// it. The answer links to the page ([`page_link`]).
+pub const ONE: &[(&str, &str)] = &[
+    ("workspace_get_project", "project"),
+    ("workspace_create_project", "project"),
+    ("apps_get_service", "service"),
+    ("apps_create_service", "service"),
+    ("postgres_get_project", "postgres"),
+    ("postgres_create_project", "postgres"),
+    ("redis_get_database", "redis"),
+    ("redis_create_database", "redis"),
+    ("nosql_get_database", "nosql"),
+    ("nosql_create_database", "nosql"),
+    ("search_get_cluster", "search"),
+    ("search_create_cluster", "search"),
+    ("storage_get_bucket", "bucket"),
+    ("storage_create_bucket", "bucket"),
+    ("streams_get", "stream"),
+    ("streams_create", "stream"),
+    ("queues_create_vhost", "vhost"),
+    ("access_get_token", "token"),
+];
+
+/// The dashboard page of the resource `tool` answered with `answer`, as MCP's `resource_link`
+/// (2025-06-18): what the agent gives the person to open. `None` for any other tool, an answer
+/// without the kind's id, or no dashboard address (`web`).
+pub fn page_link(tool: &str, answer: &Value, web: &str) -> Option<Value> {
+    let (_, kind) = ONE.iter().find(|(t, _)| *t == tool)?;
+    let k = KINDS.iter().find(|k| k.kind == *kind)?;
+    let id = k.id.iter().find_map(|f| answer[*f].as_str()).filter(|id| !id.is_empty())?;
+    let uri = page_url(k, id, web)?;
+    let name = answer["name"].as_str().filter(|n| !n.is_empty()).unwrap_or(id);
+    Some(json!({ "type": "resource_link", "uri": uri, "name": id, "title": format!("{name} ({}) in the roll dashboard", k.kind), "mimeType": "text/html" }))
+}
+
 /// A dashboard page and the read that shows what it shows: `path` is the page's path up to its
 /// first value (exact when `exact`), `args` fills the read's arguments from the path's segments
 /// after it and the query (`None`: not a page of one thing).
@@ -247,6 +282,27 @@ mod tests {
         for nothing in ["https://roll.sh/dashboard/apps/visit?service=svc_1", "https://roll.sh/dashboard/storage/-/iam", "https://roll.sh/dashboard/code/acme", "https://roll.sh/dashboard/access", "https://roll.sh/dashboard/access/approvals", "https://roll.sh/dashboard/access/approvalsx?id=a", "file:///dashboard/apps/x"] {
             assert!(resolve(nothing).is_none(), "{nothing}");
         }
+    }
+
+    /// An answer about one resource links to its page: each tool names a kind with a page, its
+    /// answer (as the sweep recorded real ones) carries the kind's id, and the link read back is that
+    /// resource. Other tools, answers without the id and a dashboard with no address link nothing.
+    #[test]
+    fn one_resources_answer_links_its_page() {
+        let schemas: Value = serde_json::from_str(include_str!("output-schemas.json")).unwrap();
+        for (tool, kind) in ONE {
+            assert!(crate::tools::all().iter().any(|t| t.name == *tool), "{tool}");
+            let k = KINDS.iter().find(|k| k.kind == *kind && k.page.is_some()).unwrap_or_else(|| panic!("{kind} has no page"));
+            assert!(k.id.iter().any(|f| schemas[*tool]["properties"].get(*f).is_some()), "{tool}'s answer has no {:?}", k.id);
+        }
+        let link = page_link("apps_create_service", &json!({ "id": "svc_1", "name": "web" }), "https://roll.sh/").unwrap();
+        assert_eq!(link, json!({ "type": "resource_link", "uri": "https://roll.sh/dashboard/apps/svc_1", "name": "svc_1", "title": "web (service) in the roll dashboard", "mimeType": "text/html" }));
+        assert_eq!(resolve(link["uri"].as_str().unwrap()).map(|(p, a)| (p.read, a)), Some(("apps_get_service", json!({ "service": "svc_1" }))));
+        let bucket = page_link("storage_get_bucket", &json!({ "name": "logs" }), "https://roll.sh").unwrap();
+        assert_eq!(bucket["uri"], "https://roll.sh/dashboard/storage/logs");
+        assert!(page_link("apps_list_services", &json!({ "id": "svc_1" }), "https://roll.sh").is_none());
+        assert!(page_link("apps_get_service", &json!({ "error": "no" }), "https://roll.sh").is_none());
+        assert!(page_link("apps_get_service", &json!({ "id": "svc_1" }), "").is_none());
     }
 
     #[test]

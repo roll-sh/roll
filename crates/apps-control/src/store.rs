@@ -891,7 +891,7 @@ pub struct Pruned {
     pub image: Option<String>,
 }
 
-const DEPLOY_COLS: &str = "id, service, env, status, cause, revision, message, image, plan, rollback_of, error, created_at, started_at, finished_at, ready_ms, run, vars_hash, actor, pruned_at, error_detail";
+const DEPLOY_COLS: &str = "id, service, env, status, cause, revision, message, image, plan, rollback_of, error, created_at, started_at, finished_at, ready_ms, run, vars_hash, actor, pruned_at, error_detail, image_bytes";
 
 fn json<T: serde::de::DeserializeOwned>(s: &str) -> code_sql::Result<T> {
     serde_json::from_str(s).map_err(|e| code_sql::Error::Conversion(e.to_string()))
@@ -1028,10 +1028,12 @@ fn deploy_row(r: &code_sql::Row<'_>) -> code_sql::Result<Deployment> {
         vars_hash: r.get(16)?,
         actor: r.get(17)?,
         pruned_at: r.get(18)?,
+        image_bytes: r.get(20)?,
         vulnerabilities: None,
         error_detail,
         fix,
         steps: Vec::new(),
+        build_steps: Vec::new(),
         approved_by: Vec::new(),
         url: None,
     })
@@ -1078,6 +1080,9 @@ impl Store {
         db.add_column("env_access", "password_hash", "TEXT")?;
         // Visitors a provider signs in (`access.sso`), as JSON.
         db.add_column("env_access", "sso", "TEXT")?;
+        // A deployment's image's size, where the runtime says (Fly's release sizes).
+        db.add_column("deployments", "image_bytes", "INTEGER")?;
+        db.add_column("deployments", "build_steps", "TEXT")?;
         // Paths whose CORS preflights pass the gate (`access.preflight`), as JSON.
         db.add_column("env_access", "preflight", "TEXT")?;
         // Services let in with roll's token for them (`access.callers`), as JSON.
@@ -1799,7 +1804,7 @@ impl Store {
                 )?;
             }
             c.execute(
-                &format!("INSERT INTO deployments ({DEPLOY_COLS}, upload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, ?, ?, ?, NULL, NULL, ?)"),
+                &format!("INSERT INTO deployments ({DEPLOY_COLS}, upload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, ?, ?, ?, NULL, NULL, NULL, ?)"),
                 params![
                     id,
                     service,
@@ -1839,11 +1844,28 @@ impl Store {
             .ok_or_else(|| Error::NotFound(format!("no deployment {id}")))
     }
 
+    /// A deployment's image's size.
+    pub fn set_image_bytes(&self, id: &str, bytes: u64) -> Result<()> {
+        self.db.execute("UPDATE deployments SET image_bytes = ? WHERE id = ?", params![bytes as i64, id])?;
+        Ok(())
+    }
+
     /// That a deployment's step began (the first time counts).
     pub fn mark_step(&self, deployment: &str, step: &str) -> Result<()> {
         let now = self.now()?;
         self.db.execute("INSERT INTO deploy_steps (deployment, step, at) VALUES (?, ?, ?) ON CONFLICT (deployment, step) DO NOTHING", params![deployment, step, now])?;
         Ok(())
+    }
+
+    /// Its build's steps ([`crate::build_steps`]), as JSON.
+    pub fn set_build_steps(&self, id: &str, steps: &str) -> Result<()> {
+        self.db.execute("UPDATE deployments SET build_steps = ? WHERE id = ?", params![steps, id])?;
+        Ok(())
+    }
+
+    pub fn build_steps(&self, id: &str) -> Result<Vec<crate::build_steps::BuildStep>> {
+        let j: Option<String> = self.db.query_row("SELECT build_steps FROM deployments WHERE id = ?", [id], |r| r.get(0)).optional()?.flatten();
+        Ok(j.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default())
     }
 
     pub fn steps(&self, deployment: &str) -> Result<Vec<Step>> {

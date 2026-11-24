@@ -102,6 +102,44 @@ impl Apps {
     }
 }
 
+impl Apps {
+    /// The route alerts past their thresholds (`alert.route`), from the access log's last five
+    /// minutes: `(label, "errors" | "latency", data)`.
+    pub(crate) async fn judge_routes(self: &Arc<Self>, service: &str, env: &str, alerts: &[crate::model::RouteAlert]) -> Vec<(String, &'static str, Value)> {
+        let since = code_sql::now_ms() - 5 * 60_000;
+        let (lines, _) = self.logs.read(&format!("http:{service}/{env}"), |_| true, Some(since), None, MAX_LINES).await;
+        let mut counted: Vec<Group> = alerts.iter().map(|_| Group::default()).collect();
+        for l in &lines {
+            let Ok(v) = serde_json::from_str::<Value>(&l.text) else { continue };
+            let (Some(method), Some(path), Some(status)) = (v["method"].as_str(), v["path"].as_str(), v["status"].as_u64()) else { continue };
+            let route = route_of(path);
+            for (a, g) in alerts.iter().zip(counted.iter_mut()) {
+                if a.matches(method, &route) {
+                    g.requests += 1;
+                    g.errors += u64::from(status >= 500);
+                    g.ms.push(v["ms"].as_u64().unwrap_or(0).min(u32::MAX as u64) as u32);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for (a, mut g) in alerts.iter().zip(counted) {
+            if g.requests < 20 {
+                continue;
+            }
+            let label = a.label();
+            if a.error_pct > 0 && g.errors * 100 >= a.error_pct as u64 * g.requests {
+                out.push((label.clone(), "errors", json!({ "route": a.route, "method": a.method, "kind": "errors", "value": g.errors * 100 / g.requests, "threshold": a.error_pct, "requests": g.requests })));
+            }
+            g.ms.sort_unstable();
+            let p95 = g.ms.get(((g.ms.len() as f64 * 0.95).ceil() as usize).saturating_sub(1)).copied().unwrap_or(0);
+            if a.p95_ms > 0 && p95 >= a.p95_ms {
+                out.push((label, "latency", json!({ "route": a.route, "method": a.method, "kind": "latency", "value": p95, "threshold": a.p95_ms, "requests": g.requests })));
+            }
+        }
+        out
+    }
+}
+
 /// A visitor: a day, an address and a user agent (counted, never kept).
 type Visitor = (i64, String, String);
 /// Views and the visitors that made them.

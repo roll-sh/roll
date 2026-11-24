@@ -139,7 +139,8 @@ export interface Preview {
     required: boolean;
     head: string;
     /** Each page that differs (`path` `""`: the first page) and who accepted it at this head: the change is accepted once every one is. */
-    pages: { path: string; percent: number; by: string | null; at: number | null; unstable?: boolean }[];
+    /** `group`: the pages changed the same way share one (accepted together with `…/visual/accept {group}`). */
+    pages: { path: string; percent: number; by: string | null; at: number | null; unstable?: boolean; group?: string | null }[];
   } | null;
   /** It also has a phone-width screenshot. */
   phone_screenshot?: boolean;
@@ -225,6 +226,10 @@ export interface PreviewShare {
   created_by: string;
   created_at: number;
   revoked: boolean;
+  /** Who it's for (`""`: not said). */
+  label: string;
+  /** Its visitors may leave notes on the pages, as `guest:<name>`. */
+  notes: boolean;
 }
 
 /** Another page of the first service: errors while it loaded, its change since the screenshot at
@@ -239,9 +244,11 @@ export interface PageCheck {
   a11y?: { issues: A11yIssue[]; lang: boolean; title: boolean; seo?: PageSeo | null } | null;
   links?: { checked: number; broken: { path: string; status: number }[] } | null;
   /** Against main's page at the same path. */
-  against?: { a11y_added: number | null; links_added: number | null; seo_added: number | null; text: TextDiff | null } | null;
+  against?: { a11y_added: number | null; links_added: number | null; seo_added: number | null; text: TextDiff | null; step_ms?: number | null } | null;
   /** A page state's step that found nothing (the state taken as it was then). */
   step?: string | null;
+  /** A page state's slowest click or typing to the next paint (ms): INP in the lab. */
+  step_ms?: number | null;
 }
 
 /** A page state (`github.states`): a page of the first service's, reached by its steps. */
@@ -583,12 +590,13 @@ export const previewsApi = {
   /** As the person signed in (a session, never a token): a one-use URL into a team-access preview's page `to` (one of its service URLs), good for a minute. */
   visit: (id: string, to: string) => call<{ url: string }>("POST", `${one(id)}/visit`, { to }),
   acceptRegressions: (id: string, head?: string) => call<Preview>("POST", `${one(id)}/regressions/accept`, head ? { head } : {}),
-  acceptVisual: (id: string, head?: string, path?: string) =>
-    call<Preview>("POST", `${one(id)}/visual/accept`, { ...(head ? { head } : {}), ...(path !== undefined ? { path } : {}) }),
+  acceptVisual: (id: string, head?: string, path?: string, group?: string) =>
+    call<Preview>("POST", `${one(id)}/visual/accept`, { ...(head ? { head } : {}), ...(path !== undefined ? { path } : {}), ...(group ? { group } : {}) }),
   /** Its share links (never their tokens). */
   shares: (id: string) => call<PreviewShare[]>("GET", `${one(id)}/shares`),
   /** A link for someone outside the team, open for `hours`; `url` is in this answer only. */
-  share: (id: string, hours: number) => call<PreviewShare & { url: string }>("POST", `${one(id)}/shares`, { hours }),
+  share: (id: string, hours: number, opts: { label?: string; notes?: boolean } = {}) =>
+    call<PreviewShare & { url: string }>("POST", `${one(id)}/shares`, { hours, label: opts.label ?? "", notes: opts.notes ?? false }),
   unshare: (id: string, share: string) => call<void>("DELETE", `${one(id)}/shares/${encodeURIComponent(share)}`),
   /** Its own variables, over the project's `env`. */
   vars: (id: string) => call<{ vars: Record<string, string> }>("GET", `${one(id)}/env`),

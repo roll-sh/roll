@@ -114,7 +114,8 @@ const PROMPTS: &[Prompt] = &[
                  flows (syncs, shares, imports, leases, placeholders), the services that read it (services), copies \
                  in agents' sandboxes (sandboxes), who read it lately (readers), and people who revealed it and have \
                  lost access since (knew: the strongest reason to rotate). A managed key reported leaked may already \
-                 be rotating by itself: check secrets_list_rotations (a rotation via leak) before planning one, and if \
+                 be rotating by itself (only where whoever reported it may write, and at most once an hour per key): \
+                 check secrets_list_rotations (a rotation via leak) before planning one, and if \
                  it has, don't rotate it again; see it finished, then go on to what reads it. Give me a plan before doing anything: \
                  rotate it with secrets_rotate (a managed link rotates where it lives; a key from another provider \
                  is rotated there first and then stored with secrets_set), redeploy each of reach's services with \

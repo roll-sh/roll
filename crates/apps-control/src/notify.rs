@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// What a target can ask for; a new one gets the two that need someone.
-pub const EVENTS: [&str; 38] = [
+pub const EVENTS: [&str; 39] = [
     "deploy.started",
     "deploy.failed",
     "deploy.base_updated",
@@ -38,6 +38,7 @@ pub const EVENTS: [&str; 38] = [
     "alert.latency",
     "alert.capacity",
     "alert.log",
+    "alert.route",
     "cron.failed",
     "job.failed",
     "domain.active",
@@ -59,7 +60,7 @@ pub const EVENTS: [&str; 38] = [
     // Every `audit.*` entry (who changed what), for a SIEM's webhook; never an on-call page.
     "audit",
 ];
-const DEFAULT_EVENTS: [&str; 26] = ["check.down", "heartbeat.missed", "alert.slo", "alert.anomaly", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.spike", "spend.limit", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"];
+const DEFAULT_EVENTS: [&str; 27] = ["check.down", "heartbeat.missed", "alert.slo", "alert.anomaly", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.spike", "spend.limit", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "alert.route", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"];
 /// Whether a target with `events` hears an event: its own kind, or for a resolution, the alert's
 /// (whoever heard an alert hears it clear; there's nothing else to ask for).
 fn wants(events: &[String], kind: &str, data: &Value, oncall: bool) -> bool {
@@ -479,6 +480,17 @@ impl Apps {
                 ),
             ),
             "alert.errors" => (format!("{what}: errors"), format!("{}% of its {} requests in five minutes answered 5xx (the alert is at {}%).", e.data["value"], e.data["requests"], e.data["threshold"])),
+            "alert.route" => {
+                let route = match e.data["method"].as_str() {
+                    Some(m) => format!("{m} {}", e.data["route"].as_str().unwrap_or("")),
+                    None => e.data["route"].as_str().unwrap_or("a route").to_string(),
+                };
+                if e.data["kind"] == "latency" {
+                    (format!("{what}: {route} is slow"), format!("Its p95 on {route} reached {} ms over {} requests in five minutes (the alert is at {} ms).", e.data["value"], e.data["requests"], e.data["threshold"]))
+                } else {
+                    (format!("{what}: {route} is failing"), format!("{}% of its {} requests to {route} in five minutes answered 5xx (the alert is at {}%).", e.data["value"], e.data["requests"], e.data["threshold"]))
+                }
+            }
             "alert.latency" => (format!("{what}: slow"), format!("Its p95 latency reached {} ms (the alert is at {} ms).", e.data["value"], e.data["threshold"])),
             "alert.capacity" => (format!("{what}: at capacity"), format!("{}% of its {} requests in five minutes found all {} instances busy ({} requests each at once). Raise its max instances (`roll apps set --max`) or its concurrency, or make it answer faster (the alert is at {}%).", e.data["value"], e.data["requests"], e.data["max_instances"], e.data["concurrency"], e.data["threshold"])),
             "heartbeat.missed" => (
@@ -532,6 +544,7 @@ impl Apps {
                     Some("alert.latency") => "latency",
                     Some("alert.capacity") => "capacity",
                     Some("alert.log") => "log",
+                    Some("alert.route") => e.data["route"].as_str().unwrap_or("a route"),
                     Some("check.down") => "uptime check",
                     _ => "an",
                 };

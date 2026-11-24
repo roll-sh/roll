@@ -65,6 +65,12 @@ export function describe(e: AppEvent): string {
       return `saw a job fail${where}${d.exit_code != null ? ` (exit ${String(d.exit_code)})` : ""}`;
     case "alert.metric":
       return `alerted: ${String(d.metric ?? "a metric")} at ${String(d.value ?? "")} (${d.above != null ? `above ${String(d.above)}` : `below ${String(d.below ?? "")}`} for ${String(d.minutes ?? "")} minutes)${where}`;
+    case "alert.route": {
+      const route = `${d.method ? `${String(d.method)} ` : ""}${String(d.route ?? "")}`;
+      return d.kind === "latency"
+        ? `alerted: ${route} at p95 ${String(d.value ?? "")} ms (the alert is at ${String(d.threshold ?? "")} ms)${where}`
+        : `alerted: ${route} answered ${String(d.value ?? "")}% 5xx (the alert is at ${String(d.threshold ?? "")}%)${where}`;
+    }
     case "alert.memory":
     case "alert.cpu":
     case "alert.errors":
@@ -85,6 +91,7 @@ export function describe(e: AppEvent): string {
     case "error.new":
       return `saw a new error${where}: ${String(d.name ?? "an error")}`;
     case "alert.resolved":
+      if (d.alert === "alert.route") return `cleared the ${d.method ? `${String(d.method)} ` : ""}${String(d.route ?? "")} ${d.kind === "latency" ? "latency" : "5xx"} alert${where}`;
       return `cleared the ${String(d.alert ?? "alert.").slice(6)} alert${where}`;
     case "domain.active":
       return `put ${String(d.hostname)} live${where}`;
@@ -106,20 +113,21 @@ export function describe(e: AppEvent): string {
   }
 }
 
-/** A service's audit trail: who changed what (variables by name, never their values). */
+/** A service's audit log: who changed what (variables by name, never their values), the people's
+ *  part of its events (the Events tab has the rest). */
 export function ActivityPanel({ service }: { service: string }) {
   const [events, setEvents] = useState<AppEvent[] | null>(null);
   useEffect(() => {
     appsApi.activity(service).then(setEvents, () => setEvents([]));
   }, [service]);
   return (
-    <Panel title="Activity">
+    <Panel title="Audit log">
       {events === null ? (
         <p className="px-5 py-4 text-[13px] text-subtle">
           <span className="shimmer">Loading…</span>
         </p>
       ) : events.length === 0 ? (
-        <p className="px-5 py-4 text-[13px] text-muted">Nothing changed yet. Settings, variables, environments, domains and links show here (90 days).</p>
+        <p className="px-5 py-4 text-[13px] text-muted">Nothing changed yet. Who changed settings, variables, environments, domains and links shows here (90 days); the Events tab has deploys, alerts and the rest.</p>
       ) : (
         <ul className="max-h-80 divide-y divide-line overflow-auto">
           {events.map((e) => {

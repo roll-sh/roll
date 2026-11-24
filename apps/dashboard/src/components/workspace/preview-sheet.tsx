@@ -420,9 +420,20 @@ export function PreviewSheet({
             )}
             {p.visual_review && p.visual_review.state === "changed" && p.visual_review.pages.length > 1 && (
               <ul className="mt-1 space-y-0.5 text-[11.5px]" aria-label="Pages to review">
-                {p.visual_review.pages.map((pg) => (
+                {p.visual_review.pages.map((pg, i, all) => (
                   <li key={pg.path} className="flex min-w-0 items-center gap-2">
                     <span className="truncate font-mono text-[11px] text-muted">{pageLabel(pg.path)}</span>
+                    {pg.group && all.findIndex((x) => x.group === pg.group) === i && !pg.by && (
+                      <button
+                        type="button"
+                        disabled={busy !== null || gone}
+                        title="These pages changed the same way (Percy's grouped diffs): accept them together"
+                        onClick={() => run(`accept:group:${pg.group}`, () => previewsApi.acceptVisual(p.id, p.visual_review?.head, undefined, pg.group ?? undefined))}
+                        className="shrink-0 rounded px-1.5 text-[11px] text-accent hover:underline disabled:opacity-40"
+                      >
+                        {busy === `accept:group:${pg.group}` ? "Accepting…" : `Accept the ${all.filter((x) => x.group === pg.group).length} changed the same way`}
+                      </button>
+                    )}
                     <span className="shrink-0 font-mono text-[11px] tabular-nums text-subtle">{Math.max(pg.percent, 0.1).toFixed(1)}%</span>
                     {pg.unstable && <span className="shrink-0 text-subtle" title="Two captures a second apart differ: the difference may be only that">moves by itself</span>}
                     {pg.by ? (
@@ -666,6 +677,8 @@ function Shares({ id }: { id: string }) {
   const [made, setMade] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [label, setLabel] = useState("");
+  const [notes, setNotes] = useState(true);
   useEffect(() => {
     let live = true;
     previewsApi.shares(id).then(
@@ -694,13 +707,25 @@ function Shares({ id }: { id: string }) {
     <>
       <Label>Share</Label>
       <p className="text-[11.5px] text-subtle">A link for someone outside the team, open until it ends. Revoke it any time.</p>
+      <input
+        value={label}
+        onChange={(e) => setLabel(e.target.value)}
+        maxLength={60}
+        placeholder="Who it's for (optional), e.g. Acme's review"
+        aria-label="Who the link is for"
+        className="h-7 w-full rounded-md border border-line-2 bg-canvas px-2 text-[11.5px] outline-none placeholder:text-subtle focus:border-accent/60"
+      />
+      <label className="flex items-center gap-1.5 text-[11.5px] text-muted">
+        <input type="checkbox" checked={notes} onChange={(e) => setNotes(e.target.checked)} />
+        They may leave notes on the pages (as guests, with a name)
+      </label>
       <div className="flex gap-1.5">
         {[
           [24, "For a day"],
           [168, "For a week"],
-        ].map(([hours, label]) => (
-          <button key={hours} type="button" className={small} disabled={busy} onClick={() => void act(async () => setMade((await previewsApi.share(id, hours as number)).url))}>
-            {label}
+        ].map(([hours, text]) => (
+          <button key={hours} type="button" className={small} disabled={busy} onClick={() => void act(async () => setMade((await previewsApi.share(id, hours as number, { label, notes })).url))}>
+            {text}
           </button>
         ))}
       </div>
@@ -719,8 +744,11 @@ function Shares({ id }: { id: string }) {
         <ul className="space-y-1">
           {open.map((x) => (
             <li key={x.id} className="flex items-center gap-2 text-[11.5px]">
-              <span className="font-mono text-subtle">{x.id}</span>
-              <span className="min-w-0 flex-1 truncate text-muted">until {new Date(x.expires_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</span>
+              <span className="font-mono text-subtle">{x.label || x.id}</span>
+              <span className="min-w-0 flex-1 truncate text-muted">
+                until {new Date(x.expires_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+                {x.notes ? " · takes notes" : ""}
+              </span>
               <button type="button" className="text-muted hover:text-danger disabled:opacity-40" disabled={busy} onClick={() => void act(() => previewsApi.unshare(id, x.id))}>
                 Revoke
               </button>
@@ -1037,15 +1065,28 @@ function ChecksHeading({ p }: { p: Preview }) {
 }
 
 /** Another page's checks (the first page's, read on it too), with what's new against main's. */
+/** A state's slowest step against main's, when it's slower by a noticeable margin (more than
+ * 200 ms to the next paint, INP's "good", and half again main's). */
+export function stepSlower(now: number | null | undefined, main: number | null | undefined): string | null {
+  if (now == null || now <= 200 || (main != null && now < main * 1.5 + 50)) return null;
+  return main != null ? `Its slowest step takes ${now} ms to paint, ${main} ms on main.` : `Its slowest step takes ${now} ms to paint.`;
+}
+
 function PageChecks({ page, branch }: { page: PageCheck; branch: string }) {
   const new_ = (n: number | null | undefined) => (n == null ? "" : n === 0 ? " (none new)" : ` (${n} new)`);
   const a11y = page.a11y ? a11yWords(page.a11y) : [];
   const seo = page.a11y?.seo ? seoWords(page.a11y.seo) : [];
   const broken = page.links?.broken ?? [];
-  if (!page.step && !a11y.length && !seo.length && !broken.length && !page.against?.text?.added_n && !page.against?.text?.removed_n) return null;
+  const slow = stepSlower(page.step_ms, page.against?.step_ms);
+  if (!page.step && !slow && !a11y.length && !seo.length && !broken.length && !page.against?.text?.added_n && !page.against?.text?.removed_n) return null;
   return (
     <div className="mb-1.5 space-y-0.5 text-[11.5px]">
       {page.step && <p className="break-words text-danger">Its steps stopped at {page.step}: taken as it was then.</p>}
+      {slow && (
+        <p className="text-soft" title="Its slowest click or typing, to the next paint (Interaction to Next Paint, in roll's browser)">
+          {slow}
+        </p>
+      )}
       {broken.length > 0 && (
         <p className="break-words text-danger">
           {broken.length} broken {broken.length === 1 ? "link" : "links"}: <span className="font-mono text-[11px]">{broken.map((b) => `${b.path} ${b.status || "no answer"}`).join(", ")}</span>
