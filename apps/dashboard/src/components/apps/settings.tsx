@@ -54,6 +54,7 @@ interface Form {
   timeout: string;
   retries: string;
   min: string;
+  floors: string;
   max: string;
   concurrency: string;
   queue: string;
@@ -176,6 +177,7 @@ export function formOf(s: Service): Form {
     timeout: str(s.run.timeout_s),
     retries: str(s.run.retries),
     min: str(s.run.min_instances),
+    floors: (s.run.schedule_scale ?? []).flatMap(floorLines).join("\n"),
     max: str(s.run.max_instances),
     concurrency: str(s.run.concurrency),
     queue: str(s.run.queue_s),
@@ -300,6 +302,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.timeout !== before.timeout) run.timeout_s = num(f.timeout);
   if (f.retries !== before.retries) run.retries = num(f.retries);
   if (f.min !== before.min) run.min_instances = num(f.min);
+  if (f.floors !== before.floors) run.schedule_scale = floorRules(f.floors);
   if (f.max !== before.max) run.max_instances = num(f.max);
   if (f.concurrency !== before.concurrency) run.concurrency = num(f.concurrency);
   if (f.queue !== before.queue) run.queue_s = num(f.queue);
@@ -403,6 +406,27 @@ export function metricAlerts(text: string): MetricAlert[] {
       const value = Number(m[3]);
       return { name: m[1], ...(m[2] === ">" ? { above: value } : { below: value }), ...(m[4] ? { minutes: Number(m[4]) } : {}), ...(m[5] ? { sum: true } : {}) };
     });
+}
+
+type Floor = NonNullable<Run["schedule_scale"]>[number];
+
+/** A floor by the clock as Settings writes it, a line a window: `mon 08:00..fri 18:00=3 Europe/Berlin`. */
+export function floorLines(r: Floor): string[] {
+  return r.windows.map((w) => `${w.from}..${w.to}=${r.min_instances}${r.timezone ? ` ${r.timezone}` : ""}`);
+}
+
+/** `FROM..TO=N [ZONE]` lines as `run.schedule_scale`, windows with the same floor and zone as one
+ *  rule (a line it can't read goes as a window with no end, for the API to refuse whole). */
+export function floorRules(text: string): Floor[] {
+  const rules: Floor[] = [];
+  for (const l of text.split("\n").map((x) => x.trim()).filter(Boolean)) {
+    const m = /^(.+?)\.\.(.+?)=(\d+)(?:\s+(\S+))?$/.exec(l);
+    const [from, to, n, timezone] = m ? [m[1].trim(), m[2].trim(), Number(m[3]), m[4]] : [l, "", 0, undefined];
+    const same = rules.find((r) => r.min_instances === n && r.timezone === timezone);
+    if (same) same.windows.push({ from, to });
+    else rules.push({ windows: [{ from, to }], min_instances: n, ...(timezone ? { timezone } : {}) });
+  }
+  return rules;
 }
 
 /** A route alert as Settings writes it: `POST /api/checkout 5xx >= 2% p95 >= 800ms`. */
@@ -751,6 +775,9 @@ export function SettingsTab({
               </Field>
               <Field label="Max instances" hint={form.volumeMount ? "1 with a volume" : undefined}>
                 {t("max", "3")}
+              </Field>
+              <Field label="Floors by the clock" hint="from..to=instances, one a line, a time zone after it (UTC if none): at least that many in each weekly window">
+                <textarea value={form.floors} onChange={(e) => set("floors", e.target.value)} rows={2} placeholder="mon 08:00..fri 18:00=3 Europe/Berlin" className={`${input} w-full font-mono text-[12px]`} spellCheck={false} />
               </Field>
               {web && (
                 <>
@@ -1219,7 +1246,7 @@ function Section({ id, title, children }: { id: string; title: string; children:
  *  narrow one; the project's own panels apart, under its name. */
 function SectionNav({ sections, project }: { sections: [string, string][]; project: [string, string][] }) {
   const reduced = useReducedMotion();
-  const all = [...sections, ...project, ["activity", "Activity"], ["duplicate", "Duplicate"], ["danger", "Danger zone"]] as [string, string][];
+  const all = [...sections, ...project, ["activity", "Audit log"], ["duplicate", "Duplicate"], ["danger", "Danger zone"]] as [string, string][];
   const ids = all.map(([id]) => id).join(" ");
   const [current, setCurrent] = useState(all[0][0]);
   // Until then, the observer doesn't move the mark off a section just clicked.
@@ -1276,7 +1303,7 @@ function SectionNav({ sections, project }: { sections: [string, string][]; proje
       <p className="mt-3 hidden px-2 text-[11px] text-subtle lg:block">The project</p>
       <ul className="contents lg:mt-0.5 lg:flex lg:flex-col lg:gap-0.5">{project.map(link)}</ul>
       <ul className="contents lg:mt-3 lg:flex lg:flex-col lg:gap-0.5">
-        {link(["activity", "Activity"])}
+        {link(["activity", "Audit log"])}
         {link(["duplicate", "Duplicate"])}
         {link(["danger", "Danger zone"])}
       </ul>
