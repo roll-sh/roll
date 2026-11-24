@@ -619,11 +619,15 @@ ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview points "$PV" | grep
 psql_app "CREATE TABLE after_the_point (id int)" >/dev/null
 TR0=$(now_ms)
 api POST "/v1/previews/$PV/restore-points/$POINT/restore" >/dev/null
+# Put back: the line is looked for in the whole activity (the services' lines come after it),
+# and the preview settled, ready or asleep (its services slept for it; a visit wakes them).
+PUT_BACK=""
 for _ in $(seq 1 240); do
-  api GET "/v1/previews/$PV/activity" | jq_ "any('back as restore point' in a['message'] for a in d[:10])" | grep -q True && [ "$(api GET "/v1/previews/$PV" | jq_ "d['state']")" = ready ] && break
+  api GET "/v1/previews/$PV/activity" | jq_ "any('back as restore point' in a['message'] for a in d)" | grep -q True && case "$(api GET "/v1/previews/$PV" | jq_ "d['state']")" in ready|sleeping) true;; *) false;; esac && PUT_BACK=yes && break
   sleep 0.5
 done
 RESTORE_MS=$(( $(now_ms) - TR0 ))
+[ -n "$PUT_BACK" ] || { echo "the restore point should be put back and the preview settled (ready or asleep)"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:12]]"; exit 1; }
 RESTORED=$(psql_app "SELECT coalesce(to_regclass('public.after_the_point')::text, 'gone') || ' ' || (SELECT email FROM users WHERE id = 1)")
 [ "$RESTORED" = "gone $APP_MASKED" ] || { echo "putting the point back should drop what came after it, still masked, on the same DATABASE_URL: $RESTORED"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:8]]"; exit 1; }
 api DELETE "/v1/previews/$PV/restore-points/$POINT" >/dev/null
