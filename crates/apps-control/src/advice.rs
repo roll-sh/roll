@@ -17,7 +17,12 @@ impl Apps {
     /// `set` the body of `PUT …/environments/{env}` that acts on it.
     pub async fn advice(self: &Arc<Self>, service: &str, env: &str) -> Result<Value> {
         let (svc, row) = self.service_env(service, env).await?;
-        let run = svc.for_env(&row).map_or(svc.run.clone(), |s| s.run);
+        // What runs: the live deployment's settings (roll.toml's `[app.run]` among them), else
+        // what the next deploy would take.
+        let run = match row.active.clone() {
+            Some(dep) => self.db(move |s| s.deployment(&dep)).await?.run,
+            None => svc.for_env(&row).map_or(svc.run.clone(), |s| s.run),
+        };
         let since = code_sql::now_ms() / 60_000 - DAYS * 24 * 60;
         let (sid, e) = (service.to_string(), env.to_string());
         let rows = self.db(move |s| s.minutes(&sid, &e, since)).await?;
@@ -47,8 +52,9 @@ impl Apps {
             let to = (run.max_instances + run.max_instances.div_ceil(2)).min(100);
             out.push(json!({ "kind": "max_instances", "message": format!("{turned} requests found all {} instances busy this week", run.max_instances), "set": { "run": { "max_instances": to } } }));
         }
-        // Kept warm through idle hours: what those minutes cost, as a month.
-        if run.min_instances > 0 {
+        // Kept warm through idle hours: what those minutes cost, as a month. Only a web service
+        // sleeps (a worker answers no requests and always runs one).
+        if run.min_instances > 0 && run.kind == crate::model::RunType::Web {
             let idle: Vec<_> = up.iter().filter(|r| r.requests == 0).collect();
             if idle.len() * 10 >= up.len() * 8 {
                 let p = self.cfg.prices;

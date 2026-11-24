@@ -1384,6 +1384,8 @@ previews are listed once those products are on.
 | `apps_list_domains` | An environment's domains. | `GET /v1/apps/services/{service}/environments/{env}/domains` |
 | `apps_add_domain` | Point a domain at an environment. | `POST /v1/apps/services/{service}/environments/{env}/domains` |
 | `apps_remove_domain` | Remove a domain. | `DELETE /v1/apps/services/{service}/environments/{env}/domains/{host}` |
+| `apps_visitors` | Who's signed in to a sign-in-gated environment now: each session's id, who, how, the entry that let them in. | `GET /v1/apps/services/{service}/environments/{env}/visitors` |
+| `apps_end_visit` | End one visitor's session in a sign-in-gated environment now. | `DELETE /v1/apps/services/{service}/environments/{env}/visitors/{visitor}` |
 | `apps_update_domain` | Redirect a domain to another hostname of the environment, or serve another port on it. | `PATCH /v1/apps/services/{service}/environments/{env}/domains/{host}` |
 | `apps_preview_domain` | A project's preview domain: the wildcard its preview environments answer under. | `GET /v1/apps/projects/{project}/preview-domain` |
 | `apps_set_preview_domain` | Give a project's previews a wildcard of its own (answers the DNS record). | `POST /v1/apps/projects/{project}/preview-domain` |
