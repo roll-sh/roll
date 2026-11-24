@@ -277,10 +277,11 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
     once per level per month and budget (raising the budget alerts afresh). It's recorded after it's queued, so a
     crash repeats one rather than losing it, and every live preview's activity says so.
   - `max_bytes` (10 GiB by default) is a cap on the bytes a preview's branches and its earlier
-    pushes' copies own. A preview over the cap goes to sleep with `error` and stays asleep: a
-    wake (`POST …/wake`, the sheet) is a 409 and a visit doesn't start it (roll apps' services
-    included, which a visit to roll apps wouldn't ask previews about), until resetting it
-    brings it back under or the cap is raised. `a_preview_over_its_size_cap_stays_asleep`.
+    pushes' copies own. A preview over the cap goes to sleep with `error` and stays asleep until
+    resetting it brings it back under or the cap is raised: a wake (`POST …/wake`, the sheet) is
+    a 409, roll apps' services included, and a visit doesn't start its own services. A visit to a
+    roll apps service still wakes it there (roll apps doesn't ask previews; Next).
+    `a_preview_over_its_size_cap_stays_asleep`.
 
 ### Converging
 
