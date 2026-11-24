@@ -1502,6 +1502,22 @@ pub enum CasCmd {
         /// The longest a certificate lives (days, 397 at most; 90 by default).
         #[arg(long)]
         max_days: Option<u32>,
+        /// An intermediate under your own root: prints its CSR (or writes it to --csr) for the root
+        /// to sign; it signs nothing until `roll secrets cas chain` installs the certificate.
+        #[arg(long)]
+        intermediate: bool,
+        /// Where an intermediate's CSR goes (stdout by default).
+        #[arg(long, requires = "intermediate")]
+        csr: Option<std::path::PathBuf>,
+    },
+    /// Install an intermediate's certificate signed by your root (PEM file), with the certificates
+    /// above it up to the root: the CA becomes active.
+    Chain {
+        id: String,
+        certificate: std::path::PathBuf,
+        /// The certificates above it, up to and including the root (PEM file).
+        #[arg(long)]
+        chain: Option<std::path::PathBuf>,
     },
     /// Print a CA's certificate (PEM), for clients to trust.
     Cert { id: String },
@@ -3378,8 +3394,8 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     println!("{}  {:<16} {}{}  up to {} days", s(&a["id"]), s(&a["name"]), domains.join(","), if a["allow_ip"] == true { " +IPs" } else { "" }, a["max_days"]);
                 }
             }
-            CasCmd::Add { name, domains, allow_ip, max_days } => {
-                let mut body = json!({ "name": name, "domains": domains, "allow_ip": allow_ip });
+            CasCmd::Add { name, domains, allow_ip, max_days, intermediate, csr } => {
+                let mut body = json!({ "name": name, "domains": domains, "allow_ip": allow_ip, "intermediate": intermediate });
                 if let Some(d) = max_days {
                     body["max_days"] = json!(d);
                 }
@@ -3387,7 +3403,28 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 if json_out {
                     return print(&v);
                 }
+                if intermediate {
+                    match csr {
+                        Some(path) => std::fs::write(&path, s(&v["csr"])).with_context(|| format!("writing {}", path.display()))?,
+                        None => print!("{}", s(&v["csr"])),
+                    }
+                    eprintln!("Made {} ({}), pending: have your root sign its CSR, then `roll secrets cas chain {} cert.pem --chain root.pem`.", s(&v["name"]), s(&v["id"]), s(&v["name"]));
+                    return Ok(());
+                }
                 println!("Made {} ({}): link TLS_CERT, TLS_KEY and TLS_CA to it with options.names; `roll secrets cas cert {}` prints what clients trust.", s(&v["name"]), s(&v["id"]), s(&v["id"]));
+            }
+            CasCmd::Chain { id, certificate, chain } => {
+                let read = |p: &std::path::Path| std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()));
+                let mut body = json!({ "certificate": read(&certificate)? });
+                if let Some(p) = chain {
+                    body["chain"] = json!(read(&p)?);
+                }
+                let v = c.call(Method::PUT, &format!("{}/cas/{}/chain", c.base(), enc(&ca_id(&c, &id).await?)), Some(body)).await?;
+                if json_out {
+                    return print(&v);
+                }
+                let domains: Vec<&str> = v["domains"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                println!("{} is active: it signs for {}; its certificates come with the chain up to your root (ca_chain, TLS_CA_CHAIN).", s(&v["name"]), domains.join(", "));
             }
             CasCmd::Cert { id } => {
                 let v = c.call(Method::GET, &format!("{}/cas", c.base()), None).await?;

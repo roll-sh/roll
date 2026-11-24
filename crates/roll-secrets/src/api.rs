@@ -140,6 +140,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/ssh-cas/{{id}}/sign-host"), post(sign_host_key))
         .route(&format!("{P}/ssh-cas/{{id}}/sign-user"), post(sign_user_key))
         .route(&format!("{P}/cas/{{id}}/sign"), post(sign_csr))
+        .route(&format!("{P}/cas/{{id}}/chain"), axum::routing::put(install_chain))
         .route(&format!("{P}/cas/{{id}}/certificates"), get(ca_certificates))
         .route(&format!("{P}/cas/{{id}}/revoke"), post(revoke_certificate))
         .route(&format!("{P}/cas/{{id}}/acme"), get(acme_settings).patch(set_acme))
@@ -1665,6 +1666,11 @@ async fn sign_host_key(State(s): S, Who(c): Who, Path((project, id)): Path<(Stri
 async fn delete_ssh_ca(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
     blocking(s, move |s| s.delete_ssh_ca(&project, &id, &c)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn install_chain(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let req: crate::pki::Chain = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.install_chain(&project, &id, req, &c)).await?))
 }
 
 async fn sign_csr(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
