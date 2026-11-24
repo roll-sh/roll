@@ -666,6 +666,8 @@ function Shares({ id }: { id: string }) {
   const [made, setMade] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [label, setLabel] = useState("");
+  const [notes, setNotes] = useState(true);
   useEffect(() => {
     let live = true;
     previewsApi.shares(id).then(
@@ -694,13 +696,25 @@ function Shares({ id }: { id: string }) {
     <>
       <Label>Share</Label>
       <p className="text-[11.5px] text-subtle">A link for someone outside the team, open until it ends. Revoke it any time.</p>
+      <input
+        value={label}
+        onChange={(e) => setLabel(e.target.value)}
+        maxLength={60}
+        placeholder="Who it's for (optional), e.g. Acme's review"
+        aria-label="Who the link is for"
+        className="h-7 w-full rounded-md border border-line-2 bg-canvas px-2 text-[11.5px] outline-none placeholder:text-subtle focus:border-accent/60"
+      />
+      <label className="flex items-center gap-1.5 text-[11.5px] text-muted">
+        <input type="checkbox" checked={notes} onChange={(e) => setNotes(e.target.checked)} />
+        They may leave notes on the pages (as guests, with a name)
+      </label>
       <div className="flex gap-1.5">
         {[
           [24, "For a day"],
           [168, "For a week"],
-        ].map(([hours, label]) => (
-          <button key={hours} type="button" className={small} disabled={busy} onClick={() => void act(async () => setMade((await previewsApi.share(id, hours as number)).url))}>
-            {label}
+        ].map(([hours, text]) => (
+          <button key={hours} type="button" className={small} disabled={busy} onClick={() => void act(async () => setMade((await previewsApi.share(id, hours as number, { label, notes })).url))}>
+            {text}
           </button>
         ))}
       </div>
@@ -719,8 +733,11 @@ function Shares({ id }: { id: string }) {
         <ul className="space-y-1">
           {open.map((x) => (
             <li key={x.id} className="flex items-center gap-2 text-[11.5px]">
-              <span className="font-mono text-subtle">{x.id}</span>
-              <span className="min-w-0 flex-1 truncate text-muted">until {new Date(x.expires_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</span>
+              <span className="font-mono text-subtle">{x.label || x.id}</span>
+              <span className="min-w-0 flex-1 truncate text-muted">
+                until {new Date(x.expires_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+                {x.notes ? " · takes notes" : ""}
+              </span>
               <button type="button" className="text-muted hover:text-danger disabled:opacity-40" disabled={busy} onClick={() => void act(() => previewsApi.unshare(id, x.id))}>
                 Revoke
               </button>
