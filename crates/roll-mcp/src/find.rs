@@ -355,10 +355,12 @@ mod tests {
         assert_eq!(change["uri"], "https://roll.sh/dashboard/code/acme/api/changes/12");
         assert_eq!(resolve(change["uri"].as_str().unwrap()).map(|(p, a)| (p.read, a)), Some(("code_get_change", json!({ "change": "acme/api#12" }))));
         assert!(page_link("code_get_change", &json!({ "repo": "acme/api" }), "https://roll.sh").is_none());
-        // Each tool exists: roll's own, or one roll code fronts (docs/mcp.md lists every tool).
-        let docs = include_str!("../../../docs/mcp.md");
+        // Each tool exists: roll's own, or one roll code fronts (docs/code/mcp.md lists them without
+        // the `code_` rolld puts before each).
+        let code = include_str!("../../../docs/code/mcp.md");
         for (tool, _) in PLACES {
-            assert!(crate::tools::all().iter().any(|t| t.name == *tool) || docs.contains(&format!("`{tool}`")), "{tool}");
+            let fronted = tool.strip_prefix("code_").is_some_and(|n| code.contains(&format!("| `{n}` |")));
+            assert!(crate::tools::all().iter().any(|t| t.name == *tool) || fronted, "{tool}");
         }
     }
 
