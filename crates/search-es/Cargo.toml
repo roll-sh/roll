@@ -64,6 +64,12 @@ sha2.workspace = true
 hkdf.workspace = true
 # Telling "no such name" from a resolver that failed (the reindex deny names).
 hickory-resolver.workspace = true
+# The web crawler (`xpack::entsearch::sync::crawler`): pages parsed as browsers parse them into an
+# arena DOM, and sitemaps read without a tree or entities.
+html5ever.workspace = true
+psl.workspace = true
+regex-automata.workspace = true
+quick-xml.workspace = true
 tokio.workspace = true
 # The `postgresql` connector (`xpack::entsearch::sync::postgres`): TLS through rustls with ring.
 tokio-postgres.workspace = true

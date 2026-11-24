@@ -848,6 +848,47 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
   bind the same way as inference keys (#134): the value is revealed as the caller, written
   sealed, and a `search-connector` sync of roll secrets pushes it again on rotation.
 
+## Web crawler
+
+A website gets in through a native connector whose `service_type` is `roll_web_crawler`
+(`search-es` `xpack/entsearch/sync/crawler/`; the design is [crawler.md](crawler.md)). A crawl is a
+full sync on the connector runner above, so jobs, schedules, slots, cancel, counters, sealed
+credentials and branches' adoption all apply unchanged; the crawler adds:
+
+- **Configuration**: the simple fields (`urls`, `sitemap_urls`, limits, `auth_origin` and the
+  sealed `auth_header` or basic auth) in `configuration`, and a JSON subset of Open Crawler's
+  config (domains, seed and sitemap URLs, crawl rules, `exclude_tags`, limits) in
+  `filtering.advanced_snippet`, validated against the node's ceilings (`roll.crawler.limits.<key>`)
+  when the draft is validated and again when a crawl starts. `roll search crawler import` turns an
+  Open Crawler YAML file into both.
+- **A crawl**: robots.txt of every domain (RFC 9309, token `roll-crawler`), sitemaps (two index
+  levels, gzip), then a breadth-first frontier by depth bounded by `url_queue_size_limit`, with a
+  visited set of 64-bit hashes. Each URL, and each redirect hop, is checked against the domains,
+  the URL limits, `roll.crawler.blocked_hosts`, the crawl rules and robots.txt before it is fetched.
+- **Fetching** (`fetch.rs`): through roll's one egress check (`egress.rs`: its resolver, deny
+  lists and readiness gate, as connectors and reindex use), no proxy, no
+  automatic redirects, the credential only on requests to exactly `auth_origin` over https and never
+  after a hop to another origin, bodies capped at 10 MiB of decompressed bytes, headers at 64 KiB,
+  10 s connect and socket and 60 s request timeouts racing the job's cancel, one request at a time
+  per origin spaced by the larger of `Crawl-delay` and `roll.crawler.min_request_interval`, and
+  every byte counted against `roll.connectors.max_bytes_per_second`.
+- **Pages** (`html.rs`): `html5ever` builds an arena DOM charged per node and text run to the
+  request breaker as it is built (a page over the breaker is one failed document), failed as soon
+  as it nests more than 512 elements deep, parsed off the async workers against a deadline, and
+  read without recursion; nothing in a page runs. Documents keep Open Crawler's fields and ids.
+- **Purge**: only a full crawl that ends `completed` deletes, and only for proof that a page is
+  gone; errors and outage-like signs (redirects, non-HTML bodies, empty pages, a robots.txt that
+  disallows everything) keep a document for three full crawls in a row and a week, and a crawl
+  that didn't refresh most of the index or of an origin, or whose re-checked redirects mostly led
+  to one URL, deletes nothing there (`force_purge` lifts this once). Deciding whether URLs may be
+  fetched has a 30-second budget a crawl.
+- **Unverified domains** (all of them until domain verification lands): 1,000 URLs a crawl, a
+  second between requests to one site across every crawl on the node, 4 crawls a day per connector
+  and per owner and site, a site being a registrable domain by the public suffix list
+  (`crawler/hosts.rs`, node memory outside cluster state; verification moves it to roll's
+  catalogue, fleet-wide) (`roll.crawler.unverified.*`). `roll.crawler.enabled`
+  turns crawlers off on a node.
+
 ## On the fleet (roll cloud)
 
 Search runs on the same rolld fleet as every other product (docs/cloud/README.md): no image,

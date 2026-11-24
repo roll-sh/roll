@@ -44,6 +44,7 @@ PUT /v1/previews/projects/{project}/settings access         who may open a proje
 PUT /v1/previews/projects/{project}/settings secrets        which roll secrets environment previews read, production's included: a person's
 PUT /v1/previews/projects/{project}/settings env            values every preview's services get, API keys among them: a person's (keys go in roll secrets)
 PUT /v1/previews/projects/{project}/settings env_for        per-branch variable values, API keys among them: a person's (as env)
+PUT /v1/previews/projects/{project}/settings oidc_audiences which clouds a preview's code gets roll's word for (a cloud session): a person's, as egress
 PUT /v1/previews/projects/{project}/settings egress         what previews' code may reach outside roll: a person's
 PUT /v1/previews/projects/{project}/settings egress_hosts   hosts outside roll previews' code may reach: a person's
 PUT /v1/previews/projects/{project}/settings egress_forks   what a fork's preview may reach: a person's

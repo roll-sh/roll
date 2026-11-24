@@ -454,6 +454,8 @@ export interface PreviewSettings {
   data_at?: string | null;
   /** A feedback button on its pages for people who came in through roll (link access, or a team session). */
   feedback: boolean;
+  /** Feature flags a reviewer sets for their own view from the page's toolbar. */
+  flags?: { name: string; options: string[] }[];
   /** Variables for a family of branches: a branch glob → `{name: value}`, over `env`. */
   env_for: Record<string, Record<string, string>>;
   /** Wake the change's services as soon as a new head is deployed (a warm first visit). */
@@ -560,6 +562,8 @@ export async function screenshotUrl(id: string, previous = false, phone = false,
 }
 
 export const previewsApi = {
+  browse: (id: string, resource: string, table?: string) =>
+    call<Browse>("GET", `${one(id)}/data/${encodeURIComponent(resource)}${table ? `?table=${encodeURIComponent(table)}` : ""}`),
   /** Newest first. */
   list: (filter: { project?: string; state?: PreviewState } = {}) => call<Preview[]>("GET", `/v1/previews${query(filter)}`),
   get: (id: string) => call<Preview>("GET", one(id)),
@@ -720,6 +724,10 @@ export function followShell(id: string, sh: string, opts: ScreenHandlers): () =>
 
 /** A resource as the reset body and the settings name it. */
 export const resourceId = (r: Pick<PreviewResource, "kind" | "parent">) => `${r.kind}:${r.parent}`;
+
+/** A look at a data branch (`GET …/data/{resource}`): its tables, or a table's first rows, read as
+ * the branch's own role. */
+export type Browse = { tables: { name: string; rows: number }[] } | { table: string; columns: string[]; rows: (string | null)[][]; more: boolean };
 
 /** Work in progress: the list polls quickly while any preview is in one of these. */
 export const BUSY: ReadonlySet<PreviewState> = new Set(["creating", "updating", "deleting"]);

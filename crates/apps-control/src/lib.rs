@@ -15,6 +15,8 @@
 pub mod api;
 pub mod challenge;
 pub mod bots;
+pub mod attacks;
+pub mod attack_mode;
 pub mod backups;
 pub mod browser;
 pub mod moving;
@@ -1829,6 +1831,7 @@ impl Apps {
         };
         let (sid, e) = (r.service.clone(), r.name.clone());
         let rotated = self.db(move |s| s.runtime_config_rotated(&sid, &e)).await?;
+        let attack = self.attack(&r.service, &r.name).await?;
         let firewall_hits: Vec<u32> = match self.lives.lock().get(&env_key(&r.service, &r.name)) {
             Some(l) if !r.firewall.is_empty() => r.firewall.iter().map(|f| l.hits(f.fingerprint())).collect(),
             _ => Vec::new(),
@@ -1874,6 +1877,8 @@ impl Apps {
             },
             maintenance: r.maintenance.clone().map(|m| crate::model::Maintenance { message: Some(m).filter(|m| !m.is_empty()) }),
             paused: r.paused,
+            attack_mode: attack.mode,
+            challenge_until: attack.until.filter(|u| *u > code_sql::now_ms()),
             held_after: r.held_by.clone().filter(|h| h != crate::deploy::MANUAL_HOLD),
             held: r.held_by.as_deref() == Some(crate::deploy::MANUAL_HOLD),
             pages: r.pages.clone(),
@@ -2032,7 +2037,7 @@ impl Apps {
     pub async fn put_environment_by(self: &Arc<Self>, service: &str, env: &str, body: Value, by: Option<String>) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "approvals", "badge", "closed_by", "data", "scheduled"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "approvals", "badge", "closed_by", "data", "scheduled", "attack_mode", "challenge_until"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -2056,6 +2061,24 @@ impl Apps {
             None => None,
             Some(Value::Bool(b)) => Some(*b),
             Some(_) => return Err(Error::BadRequest("paused is a boolean".into())),
+        };
+        // Attack mode: when it goes on by itself, and on by hand until a time (null: off).
+        let attack_mode: Option<Option<crate::attack_mode::AttackMode>> = match o.get("attack_mode") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(v) => {
+                let m: crate::attack_mode::AttackMode = serde_json::from_value(v.clone()).map_err(|e| Error::BadRequest(format!("attack_mode: {e}")))?;
+                m.check()?;
+                Some(Some(m))
+            }
+        };
+        let challenge_until: Option<Option<i64>> = match o.get("challenge_until") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(v) => match v.as_i64() {
+                Some(t) if t > code_sql::now_ms() && t <= code_sql::now_ms() + crate::attack_mode::MAX_AHEAD_MS => Some(Some(t)),
+                _ => return Err(Error::BadRequest("challenge_until is a time (unix ms) within the next 24 hours, or null to end it".into())),
+            },
         };
         // One DNS label under the project's preview domain, or null.
         let preview_label: Option<Option<String>> = match o.get("preview_host") {
@@ -2531,6 +2554,17 @@ impl Apps {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_firewall(&sid, &e, &rules)).await?;
             self.live(service, env).forget_gate();
+            self.changed(service);
+        }
+        if attack_mode.is_some() || challenge_until.is_some() {
+            let mut a = self.attack(service, env).await?;
+            if let Some(m) = attack_mode {
+                a.mode = m;
+            }
+            if let Some(u) = challenge_until {
+                a.until = u;
+            }
+            self.set_attack(service, env, a).await?;
             self.changed(service);
         }
         // Instances are made from the next deploy on with it (a network of their own, the proxy's
@@ -4273,7 +4307,8 @@ impl Apps {
         // What the live deployment's roll.toml adds: only ever tighter (`live::Gate`).
         let file = file.map(|f| f.resolve(&row.name, row.ephemeral)).unwrap_or_default();
         // The environment's challenge key, made the first time a rule needs it (every node reads the same).
-        let challenge_key = match row.firewall.iter().chain(&file.firewall).any(|r| r.action == crate::model::FirewallAction::Challenge) {
+        let attack = self.attack(&live.service, &live.env).await?;
+        let challenge_key = match row.firewall.iter().chain(&file.firewall).any(|r| r.action == crate::model::FirewallAction::Challenge) || attack != Default::default() {
             true => {
                 let (k, v) = (format!("challenge_key:{}/{}", live.service, live.env), crate::model::random(32));
                 Some(self.db(move |s| s.state_or(&k, &v)).await?.into_bytes())
@@ -4290,7 +4325,7 @@ impl Apps {
             pages: row.pages,
             preview: row.ephemeral,
             headers: row.headers,
-            routes: row.routes, traces, vitals: row.vitals, challenge_key, split: row.split, mirror: row.mirror, snippets: snippets_of(&row.snippets),
+            routes: row.routes, traces, vitals: row.vitals, challenge_key, attack_until: attack.until, split: row.split, mirror: row.mirror, snippets: snippets_of(&row.snippets),
             redirects: row.redirects.as_deref().map(crate::site_rules::EnvRedirects::parse).filter(|r| !r.is_empty()).map(Arc::new) });
         live.set_gate(g.clone(), seen);
         Ok(g)

@@ -1855,6 +1855,12 @@ pub struct Environment {
     /// person deploys, redeploys or promotes, or resumes them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub held_after: Option<String>,
+    /// When attack mode goes on by itself ([`crate::attack_mode`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attack_mode: Option<crate::attack_mode::AttackMode>,
+    /// Attack mode is on until then (unix ms): every request without a pass gets the challenge.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub challenge_until: Option<i64>,
     /// A person holds its deploys (`PUT … {held: true}`): pushes, hooks and tag moves build to
     /// `ready` (a web service without a volume) for them to put live, or wait.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -2011,6 +2017,10 @@ pub struct FirewallRule {
     /// `tools`, `verified`, `spoofed`; any of them matches.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bots: Vec<String>,
+    /// Kinds of attack from roll's managed patterns ([`crate::attacks`]): `scanners`,
+    /// `traversal`, `sqli`, `xss`, `rce`; any of them matches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attacks: Vec<String>,
 }
 
 /// A named part of a request a firewall rule reads ([`FirewallRule::header`]): there, or there
@@ -2053,6 +2063,8 @@ pub struct Asked<'a> {
     pub method: &'a str,
     /// As [`normal_path`] gives it.
     pub path: &'a str,
+    /// As it came, still encoded ([`crate::attacks`] reads how it was spelt).
+    pub raw_path: &'a str,
     pub user_agent: &'a str,
     /// The address the fleet vouches for.
     pub ip: Option<std::net::IpAddr>,
@@ -2156,8 +2168,13 @@ impl FirewallRule {
         }
         self.bots.sort();
         self.bots.dedup();
-        if self.path.is_none() && self.methods.is_empty() && self.user_agent.is_none() && self.ips.is_empty() && self.header.is_none() && self.cookie.is_none() && self.query.is_none() && self.bots.is_empty() {
-            return bad("a rule matches on a path, methods, a user agent, addresses, a header, a cookie, a query parameter or bots");
+        if self.attacks.len() > crate::attacks::KINDS.len() || self.attacks.iter().any(|b| !crate::attacks::KINDS.contains(&b.as_str())) {
+            return bad("attacks are any of scanners, traversal, sqli, xss, rce");
+        }
+        self.attacks.sort();
+        self.attacks.dedup();
+        if self.path.is_none() && self.methods.is_empty() && self.user_agent.is_none() && self.ips.is_empty() && self.header.is_none() && self.cookie.is_none() && self.query.is_none() && self.bots.is_empty() && self.attacks.is_empty() {
+            return bad("a rule matches on a path, methods, a user agent, addresses, a header, a cookie, a query parameter, bots or attacks");
         }
         if self.action == FirewallAction::Challenge && !self.methods.is_empty() && self.methods.iter().any(|m| m != "GET") {
             return bad("a challenge is a page a browser opens: GET only");
@@ -2203,7 +2220,8 @@ impl FirewallRule {
             m.takes(pairs.iter().filter(|(k, _)| *k == m.name).map(|(_, v)| v.as_str()))
         });
         let bots_ok = self.bots.is_empty() || a.bot.is_some_and(|b| self.bots.iter().any(|k| b.is(k)));
-        path_ok && method_ok && ua_ok && ip_ok && header_ok && cookie_ok && query_ok && bots_ok
+        // Last: the dearest to read.
+        path_ok && method_ok && ua_ok && ip_ok && header_ok && cookie_ok && query_ok && bots_ok && (self.attacks.is_empty() || crate::attacks::matches(&self.attacks, a))
     }
 
     /// A limit's client by its `key` (a header's or cookie's value, hashed: never kept as it

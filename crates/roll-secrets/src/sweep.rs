@@ -409,7 +409,8 @@ impl Secrets {
                 let issued = provider.issue(&link.r#ref, &cred, &link, &format!("roll secrets {slug} {key} (rotated)"), None)?;
                 let now = self.db.now_ms()?;
                 let handle = issued.handle.clone();
-                let new_state = seal_parts(&dek, project, &issued.parts, issued.handle, now);
+                let parts = issued.parts.clone();
+                let new_state = seal_parts(&dek, project, issued, now);
                 let res = self.db.write(|c| {
                     let env = envs::by_slug(c, project, slug)?;
                     // The claim: the credential is still the one this rotation replaces. If another
@@ -434,7 +435,7 @@ impl Secrets {
                     let mut items = vec![];
                     for (p, k, l, _) in sharing {
                         let l: Link = serde_json::from_str(&l).map_err(|_| Error::Internal("a stored link isn't JSON".into()))?;
-                        let v = issued.parts.get(&l.field).cloned().ok_or_else(|| Error::Link(format!("{} didn't issue {}", l.kind, l.field)))?;
+                        let v = parts.get(&l.field).cloned().ok_or_else(|| Error::Link(format!("{} didn't issue {}", l.kind, l.field)))?;
                         items.push(Item { path: p, key: k, owner: String::new(), action: ItemAction::Set { value: Some(v), comment: None, tags: None, link: None, link_state: Some(new_state.clone()), expires_at: None } });
                     }
                     let keys: Vec<String> = items.iter().map(|i| i.key.clone()).collect();

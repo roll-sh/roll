@@ -2377,6 +2377,42 @@ async fn traffic_unusual_for_the_hour_is_an_anomaly() {
     assert!(events("alert.resolved").await.iter().any(|e| e["data"]["alert"] == "alert.anomaly"));
 }
 
+/// Attack mode: on by itself once a minute's requests reach its threshold (said as
+/// `attack.mode`), every visitor without a pass then gets the challenge page while a rule that
+/// denies still denies; on and off by hand with `challenge_until`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_flood_turns_attack_mode_on_until_it_ends() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "shop", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let h = host(&call(&w.api, "GET", &base, None).await.1["url"]);
+    let get = |path: &'static str| {
+        let (public, h) = (w.public.clone(), h.clone());
+        async move { public.oneshot(Request::get(path).header("host", h.as_str()).body(Body::empty()).unwrap()).await.unwrap().status() }
+    };
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"attack_mode": {"per_minute": 5}}))).await.0, StatusCode::BAD_REQUEST, "at least 10 a minute");
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"challenge_until": code_sql::now_ms() + 48 * 3_600_000}))).await.0, StatusCode::BAD_REQUEST, "a day ahead at most");
+    let (st, e) = call(&w.api, "PUT", &base, Some(json!({"attack_mode": {"per_minute": 100, "minutes": 10}, "firewall": [{"action": "deny", "path": "/admin/*"}]}))).await;
+    assert_eq!((st, &e["attack_mode"]), (StatusCode::OK, &json!({"per_minute": 100, "minutes": 10})), "{e}");
+    assert_eq!(get("/").await, StatusCode::OK, "off until a flood");
+    // A minute of 150 requests: on by itself, for ten minutes.
+    let now = code_sql::now_ms() / 60_000;
+    w.apps.store.put_minutes(&id, "production", &[apps_control::store::MinuteRow { minute: now - 1, requests: 150, instances: 1, ..Default::default() }]).unwrap();
+    w.apps.judge_alerts(&w.apps.live(&id, "production")).await;
+    let e = call(&w.api, "GET", &base, None).await.1;
+    let until = e["challenge_until"].as_i64().unwrap_or_else(|| panic!("{e}"));
+    assert!((until - code_sql::now_ms() - 600_000).abs() < 60_000, "{e}");
+    let said = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1;
+    assert!(said["events"].as_array().unwrap().iter().any(|x| x["kind"] == "attack.mode" && x["data"]["requests"] == 150), "{said}");
+    assert_eq!(get("/").await, StatusCode::FORBIDDEN, "the challenge page");
+    assert_eq!(get("/admin/x").await, StatusCode::FORBIDDEN, "a deny still denies");
+    // Ended by hand.
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"challenge_until": null}))).await.0, StatusCode::OK);
+    assert_eq!(get("/").await, StatusCode::OK);
+    assert!(call(&w.api, "GET", &base, None).await.1.get("challenge_until").is_none());
+}
+
 /// Five minutes of 5xx answers past the alert's share make one `alert.errors` event; more of the
 /// same don't make another until it clears.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -4978,6 +5014,13 @@ async fn a_request_naming_an_earlier_deployment_goes_to_it() {
     let (st, d3) = call(&w.api, "POST", &format!("{base}/deploys/{first}/rollback"), Some(json!({}))).await;
     assert!(st.is_success(), "{d3}");
     let d3 = settled(&w, &id, "production", d3["id"].as_str().unwrap()).await;
+    // Once its proxy answers from it (a moment after the store says it's live).
+    for _ in 0..100 {
+        if ask("/", &[("sec-fetch-dest", "document")]).await.0 == d3["id"] {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     assert_eq!(ask("/api", &[("x-deployment-id", "nb_0a1b2c3d")]).await.0, d3["id"], "{d3}");
 }
 
@@ -6935,6 +6978,12 @@ async fn firewall_rules_decide_in_order() {
     assert_eq!(ask("66.249.66.1:5000", "/", &gb).await, StatusCode::OK, "a verified crawler passes a challenge");
     assert_eq!(ask("66.249.66.1:5000", "/", &[("user-agent", "Mozilla/5.0 (compatible; Amazonbot/0.1)")]).await, StatusCode::FORBIDDEN, "an AI crawler gets the page");
     assert_eq!(ask("198.51.100.1:5000", "/", &gb).await, StatusCode::FORBIDDEN, "a claimed one gets the page");
+    // Managed attack patterns, in any encoding; an ordinary request goes on.
+    call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "deny", "attacks": ["traversal", "sqli", "scanners"]}]}))).await;
+    assert_eq!(req("GET", "/download?file=%252e%252e%252fetc%252fpasswd", "curl").await, StatusCode::FORBIDDEN, "double-encoded ../");
+    assert_eq!(req("GET", "/items?id=1%27%20UNION%20SELECT%20password", "curl").await, StatusCode::FORBIDDEN);
+    assert_eq!(req("GET", "/.env", "curl").await, StatusCode::FORBIDDEN);
+    assert_eq!(req("GET", "/items?id=12&sort=name", "curl").await, StatusCode::OK);
     // A rule tried before it blocks: `log` counts and goes on; each rule's last 24 hours.
     call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "log", "path": "/wp-*"}, {"action": "deny", "path": "/wp-admin/*"}]}))).await;
     assert_eq!(req("GET", "/wp-login.php", "curl").await, StatusCode::OK, "logged, let in");

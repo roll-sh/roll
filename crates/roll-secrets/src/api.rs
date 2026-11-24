@@ -120,7 +120,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/rotators/{{id}}"), axum::routing::delete(delete_rotator).patch(update_rotator))
         .route(&format!("{P}/rotators/{{id}}/rotate-secret"), post(rotate_rotator_secret))
         .route(&format!("{P}/saas"), get(saas_rotators).post(add_saas_rotator))
-        .route(&format!("{P}/saas/{{id}}"), axum::routing::delete(delete_saas_rotator))
+        .route(&format!("{P}/saas/{{id}}"), axum::routing::delete(delete_saas_rotator).patch(update_saas_rotator))
         .route(&format!("{P}/transit"), get(transit_keys).post(add_transit_key))
         .route(&format!("{P}/transit/{{name}}"), axum::routing::patch(config_transit_key).delete(delete_transit_key))
         .route(&format!("{P}/transit/{{name}}/rotate"), post(rotate_transit_key))
@@ -1544,6 +1544,11 @@ async fn saas_rotators(State(s): S, Who(c): Who, Path(project): Path<String>) ->
 async fn add_saas_rotator(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
     let n: crate::saas::NewSaasRotator = body(&b)?;
     Ok(created(blocking(s, move |s| s.add_saas_rotator(&project, n, &c)).await?))
+}
+
+async fn update_saas_rotator(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let ch: crate::saas::SaasRotatorChange = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.update_saas_rotator(&project, &id, ch, &c)).await?))
 }
 
 async fn delete_saas_rotator(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {

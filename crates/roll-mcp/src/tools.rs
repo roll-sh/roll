@@ -1317,7 +1317,9 @@ static TOOLS: &[Tool] = &[
         b("maintenance", Ty::Any, "true, {message} or false: answer a maintenance page instead of the app"),
         b("allow_ips", Ty::Arr, "Only these addresses get in: [cidr or {cidr, description}]"),
         b("rate_limit", Ty::Obj, "{per_minute, burst?}: requests a client address may make"),
-        b("firewall", Ty::Arr, "[{action: allow|deny|limit|challenge|log, path?, methods?, user_agent?, ips? (cidrs), header?|cookie?|query? ({name, contains?}), bots? (ai, search, preview, tools, verified, spoofed: roll's lists of crawlers, assistants' fetchers, link previews and HTTP tools; verified: a crawler its operator's DNS vouches for; spoofed: one claiming such a name from elsewhere), per_minute?, burst?, key? (limit's client: ip, header:<name> or cookie:<name>)}], first match wins; limit holds a client to per_minute (1-100000) on what it matches; challenge lets in a browser that passed a proof of work this hour (GET only), and a verified search engine; log only counts what it matches (the environment's firewall_hits) and goes on, to try a rule before it blocks"),
+        b("firewall", Ty::Arr, "[{action: allow|deny|limit|challenge|log, path?, methods?, user_agent?, ips? (cidrs), header?|cookie?|query? ({name, contains?}), bots? (ai, search, preview, tools, verified, spoofed: roll's lists of crawlers, assistants' fetchers, link previews and HTTP tools; verified: a crawler its operator's DNS vouches for; spoofed: one claiming such a name from elsewhere), attacks? (scanners, traversal, sqli, xss, rce: roll's managed patterns for probes of left-out files and scanners, ../ in any encoding, SQL injection, script in the request, shell in a parameter), per_minute?, burst?, key? (limit's client: ip, header:<name> or cookie:<name>)}], first match wins; limit holds a client to per_minute (1-100000) on what it matches; challenge lets in a browser that passed a proof of work this hour (GET only), and a verified search engine; log only counts what it matches (the environment's firewall_hits) and goes on, to try a rule before it blocks"),
+        bnull("attack_mode", Ty::Obj, "{per_minute, minutes?}: once a minute's requests reach per_minute, every visitor without a pass gets the challenge page for minutes (5-1440, default 60); null: never by itself"),
+        bnull("challenge_until", Ty::Int, "Attack mode on by hand until this time (unix ms, within 24 hours); null ends it"),
         bnull("routes", Ty::Arr, "[{path, service}] (at most 20): a path (a prefix ends in *) another service of the project answers, by name; clear it for none"),
         bnull("redirects", Ty::Str, "its own redirects on any service, _redirects lines: `/old /new 308`, `/blog/* /posts/:splat` (301 unless 302, 303, 307 or 308); clear it for none"),
         bnull("egress", Ty::Any, "{mode: roll|open, hosts?}: roll lets its code reach roll and only these hosts (at most 20, *. for subdomains), from the next deploy; clear it for open"),
@@ -1663,6 +1665,7 @@ static TOOLS: &[Tool] = &[
     t("previews_list_notes", "A preview's notes", "Notes people left on a preview's pages through its feedback button and nobody has resolved yet: page, element, what they said, who, when (the latest 500).", "previews", "GET", "/v1/previews/{id}/notes", &[req("id", "Preview id")]),
     t("previews_resolve_note", "Resolve a preview note", "Mark a note left on a preview page's feedback button as dealt with, so the page stops listing it (after fixing what it asked).", "previews", "POST", "/v1/previews/{id}/notes/{note}/resolve", &[req("id", "Preview id"), req("note", "Note id from previews_list_notes")]),
     t("previews_screenshot", "Screenshot a preview", "A preview's page as an image the agent can look at; diff against the base or the previous deploy, another page, or the phone view.", "previews", "GET", "/v1/previews/{id}/screenshot", &[req("id", "Preview id"), q("diff", Ty::Str, "base or previous: highlight what changed"), q("page", Ty::Str, "Path of the page (default /)"), q("view", Ty::Str, "phone for a phone-sized view")]),
+    t("previews_fetch", "Read a preview's page", "One page of a preview's service read through roll, as a visitor gets it, without making a share link: its status, a few headers (content-type, location, cache-control, content-length) and its text, masked as the preview's logs are (null when it isn't text, cut at 256 KiB with truncated). For checking what a change does to a page or an API answer; head for the status alone. A roll apps service answers 409 (read it at its own URL). A page can show copies of production's people: reveal.", "previews", "GET", "/v1/previews/{id}/fetch", &[req("id", "Preview id"), qreq("path", "The page's path, from / (up to 200 characters; no #, quotes or spaces)"), q("service", Ty::Str, "Which of the preview's services (default: its first)"), q("head", Ty::Bool, "Only the status and headers (HEAD)")]),
     t("previews_share", "Share a preview", "A link for someone outside the team to open a preview for some hours (its token is in this answer only; anyone with the link gets in).", "previews", "POST", "/v1/previews/{id}/shares", &[req("id", "Preview id"), breq("hours", Ty::Int, "How long the link works")]),
     t("previews_revoke_share", "Revoke a share link", "Stop a preview's share link at once (who it's shared with: previews_list_shares).", "previews", "DELETE", "/v1/previews/{id}/shares/{share}", &[req("id", "Preview id"), req("share", "Share id")]),
     t("previews_settings", "Preview settings", "A project's preview rules: which branches get one, how long they live, private or not, budgets (previews_set_rules changes the operational ones; an admin's).", "previews", "GET", "/v1/previews/projects/{project}/settings", &[req("project", "Workspace project")]),
@@ -1691,6 +1694,7 @@ static TOOLS: &[Tool] = &[
             b("max_bytes", Ty::Int, "At most this much branched data"),
             b("max_usd_month", Ty::Num, "New previews wait once the month's cost reaches it (0: no cap)"),
             b("feedback", Ty::Bool, "A feedback button on its pages for people who came in through roll"),
+            b("flags", Ty::Arr, "[{name, options}]: feature flags a reviewer may set for their own view from the page's toolbar (sent as x-roll-flags)"),
             b("warm", Ty::Bool, "Wake the services as soon as a new head is deployed"),
             b("crons", Ty::Bool, "Scheduled work (roll apps' crons, scheduled commands and calls) runs in previews too; off by default: deployed, schedule off"),
             b("browser_checks", Ty::Str, "Production's browser checks on each preview head: report (shown), check (the roll/browser-checks status) or required (also keeps a change from landing)"),
@@ -1743,15 +1747,21 @@ mod tests {
     /// The top-level field names of a contract's body column: each `{ a?, b: string, c?: {…} }`
     /// outside parentheses (a body can be one shape `or` another; prose in parentheses is skipped).
     fn body_fields(body: &str) -> Vec<String> {
-        let (mut out, mut parens, mut braces) = (Vec::new(), 0usize, 0usize);
+        body_shapes(body).into_iter().map(|(name, _)| name).collect()
+    }
+
+    /// [`body_fields`] with each field's type as the contract writes it (`{ a?, b: { c, d } }`: `b`'s
+    /// is `{ c, d }`).
+    fn body_shapes(body: &str) -> Vec<(String, String)> {
+        let (mut out, mut parens, mut braces): (Vec<(String, String)>, usize, usize) = (Vec::new(), 0, 0);
         for (i, c) in body.char_indices() {
             match c {
                 '(' if braces == 0 => parens += 1,
                 ')' if braces == 0 => parens = parens.saturating_sub(1),
                 '{' => {
                     if braces == 0 && parens == 0 {
-                        for f in shape_fields(&body[i..]) {
-                            if !out.contains(&f) {
+                        for f in shape_typed(&body[i..]) {
+                            if !out.iter().any(|(n, _)| *n == f.0) {
                                 out.push(f);
                             }
                         }
@@ -1767,6 +1777,11 @@ mod tests {
 
     /// The top-level field names of the shape `body` starts with.
     fn shape_fields(body: &str) -> Vec<String> {
+        shape_typed(body).into_iter().map(|(name, _)| name).collect()
+    }
+
+    /// The top-level fields of the shape `body` starts with, each with its type (what follows `:`).
+    fn shape_typed(body: &str) -> Vec<(String, String)> {
         let (mut depth, mut segs, mut cur) = (0usize, Vec::new(), String::new());
         for c in body[1..].chars() {
             match c {
@@ -1780,9 +1795,7 @@ mod tests {
                 }
                 _ => {}
             }
-            if depth == 0 {
-                cur.push(c);
-            }
+            cur.push(c);
         }
         segs.push(cur);
         segs.iter()
@@ -1790,9 +1803,14 @@ mod tests {
                 let seg = seg.trim();
                 let name: String = seg.chars().take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_').collect();
                 let rest = seg[name.len()..].trim_start_matches('?').trim_start();
-                (!name.is_empty() && name.starts_with(|c: char| c.is_ascii_lowercase()) && (rest.is_empty() || rest.starts_with(':'))).then_some(name)
+                (!name.is_empty() && name.starts_with(|c: char| c.is_ascii_lowercase()) && (rest.is_empty() || rest.starts_with(':'))).then(|| (name, rest.trim_start_matches(':').trim().to_string()))
             })
             .collect()
+    }
+
+    /// The keys of the object a field's type holds (`{ a, b }[] | null`: a and b), if it holds one.
+    fn nested_keys(ty: &str) -> Vec<String> {
+        ty.find('{').map(|i| shape_fields(&ty[i..])).unwrap_or_default()
     }
 
     /// The body a contract names by type (`` `EnvironmentPut` ``): its `type X = { … }` in the same
@@ -1852,7 +1870,7 @@ mod tests {
                 Some((w.next()?.to_string(), norm(w.next()?), w.next()?.to_string()))
             })
             .collect();
-        let (mut missing, mut taken) = (Vec::new(), std::collections::HashSet::new());
+        let (mut missing, mut taken, mut vague) = (Vec::new(), std::collections::HashSet::new(), Vec::new());
         for (doc, prefix) in CONTRACTS {
             for line in doc.lines() {
                 let Some(rest) = line.strip_prefix("| `") else { continue };
@@ -1880,7 +1898,20 @@ mod tests {
                 if tools.is_empty() {
                     continue;
                 }
-                let body = if matches!(method, "POST" | "PUT" | "PATCH") { body_fields(&named_body(doc, &body).unwrap_or_else(|| body.clone())) } else { Vec::new() };
+                let shapes = if matches!(method, "POST" | "PUT" | "PATCH") { body_shapes(&named_body(doc, &body).unwrap_or_else(|| body.clone())) } else { Vec::new() };
+                // An object a tool takes names each of its keys in the argument's description, so a
+                // key the product adds inside it (a firewall rule's `attacks`) isn't unknown to agents.
+                for (field, ty) in &shapes {
+                    let keys = nested_keys(ty);
+                    for p in tools.iter().flat_map(|t| t.params.iter().filter(|p| p.name == *field).map(move |p| (t.name, p))) {
+                        let words: std::collections::HashSet<&str> = p.1.desc.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).collect();
+                        let lacking: Vec<&String> = keys.iter().filter(|k| !words.contains(k.as_str())).collect();
+                        if !lacking.is_empty() {
+                            vague.push(format!("{} {field} ({method} {path}): {lacking:?}", p.0));
+                        }
+                    }
+                }
+                let body: Vec<String> = shapes.into_iter().map(|(n, _)| n).collect();
                 for field in body.into_iter().chain(queries.iter().cloned()) {
                     if tools.iter().any(|t| t.params.iter().any(|p| p.name == field)) {
                         taken.insert((method.to_string(), norm(&path), field));
@@ -1892,6 +1923,7 @@ mod tests {
             }
         }
         assert!(missing.is_empty(), "body fields and query parameters a route's contract lists that its tool doesn't take: add each to the tool in tools.rs, or `METHOD route field  why` to crates/roll-mcp/src/no-field.txt:\n{}", missing.join("\n"));
+        assert!(vague.is_empty(), "object arguments whose description doesn't name every key the contract gives them: name each in the argument's description in tools.rs:\n{}", vague.join("\n"));
         let stale: Vec<String> = listed.iter().filter(|l| taken.contains(l)).map(|(m, r, f)| format!("{m} {r} {f}")).collect();
         assert!(stale.is_empty(), "no-field.txt lines for fields a tool takes now: remove them:\n{}", stale.join("\n"));
         assert_eq!(body_fields("{ from, message?, expect?: string, files?: {[name]: path | null} }"), ["from", "message", "expect", "files"]);

@@ -173,6 +173,33 @@ impl Brancher for Postgres {
         Ok(Some((pg_schema_lines(&self.0, s(&from["endpoint"]["id"]), None).await?, pg_schema_lines(&self.0, s(&b["endpoint"]["id"]), role).await?)))
     }
 
+    /// Its tables (as its own role sees them), or one's first rows, read-only, as its own role.
+    async fn browse(&self, parent: &str, branch: &str, table: Option<&str>) -> anyhow::Result<Option<roll_previews::Browse>> {
+        let p = self.0.get(&format!("/v1/projects/{}", seg(parent))).await?;
+        let b = p["branches"].as_array().and_then(|bs| bs.iter().find(|b| b["id"] == branch).cloned()).ok_or_else(|| anyhow::anyhow!("no Postgres branch {branch}"))?;
+        anyhow::ensure!(!b["parent_id"].is_null(), "{branch} isn't a branch of {parent}");
+        let ep = s(&b["endpoint"]["id"]).ok_or_else(|| anyhow::anyhow!("Postgres branch {branch} has no endpoint"))?;
+        anyhow::ensure!(b["app_connection_uri"].is_string(), "Postgres branch {branch} has no role of its own yet");
+        let role = s(&b["id"]).unwrap_or_default();
+        let list = pg_read_as(&self.0, &ep, &role, BROWSE_TABLES_SQL).await?;
+        let tables: Vec<roll_previews::BrowseTable> = list["rows"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|r| Some(roll_previews::BrowseTable { name: r[0].as_str()?.to_string(), rows: r[1].as_str().and_then(|n| n.parse().ok()).unwrap_or(0).max(0) }))
+            .collect();
+        let Some(table) = table else { return Ok(Some(roll_previews::Browse::Tables { tables })) };
+        // Only a table it listed: a name is quoted, never run.
+        anyhow::ensure!(tables.iter().any(|t| t.name == table), "no table {table} the branch's role can read");
+        let v = pg_read_as(&self.0, &ep, &role, &browse_rows_sql(table).ok_or_else(|| anyhow::anyhow!("{table} isn't schema.table"))?).await?;
+        let cell = |c: &Value| c.as_str().map(|s| s.chars().take(200).collect::<String>());
+        let mut rows: Vec<Vec<Option<String>>> = v["rows"].as_array().into_iter().flatten().map(|r| r.as_array().into_iter().flatten().map(cell).collect()).collect();
+        let more = rows.len() > roll_previews::BROWSE_ROWS;
+        rows.truncate(roll_previews::BROWSE_ROWS);
+        let columns = v["columns"].as_array().into_iter().flatten().filter_map(|c| c.as_str().map(str::to_string)).collect();
+        Ok(Some(roll_previews::Browse::Rows { table: table.to_string(), columns, rows, more }))
+    }
+
     /// The branch's lines alone, as `schema` reads them (as its own role), the parent untouched.
     async fn branch_schema(&self, parent: &str, branch: &str) -> anyhow::Result<Option<Vec<String>>> {
         let p = self.0.get(&format!("/v1/projects/{}", seg(parent))).await?;
@@ -898,6 +925,30 @@ if (!mask(ctx._source, params.path, 0, params.rule, ctx._id)) { ctx.op = 'noop';
 /// type, nested ones by path (`field users.address.city text`) and multi-fields too. Bounded.
 /// One Postgres endpoint's schema lines (`SCHEMA_SQL`), as `role` when given (a branch's own),
 /// with only the catalog's names in reach.
+/// The tables a branch's role can read, with about how many rows each holds, at most 200.
+const BROWSE_TABLES_SQL: &str = "SELECT n.nspname || '.' || c.relname, c.reltuples::bigint::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+     WHERE c.relkind IN ('r', 'p', 'v', 'm') AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg_toast%' \
+     AND has_table_privilege(c.oid, 'SELECT') ORDER BY 1 LIMIT 200";
+
+/// A table's first rows (one more than are shown: whether there are more), its name quoted
+/// (`schema.table`, split at the first dot).
+fn browse_rows_sql(table: &str) -> Option<String> {
+    let (schema, name) = table.split_once('.')?;
+    let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
+    (!schema.is_empty() && !name.is_empty()).then(|| format!("SELECT * FROM {}.{} LIMIT {}", q(schema), q(name), roll_previews::BROWSE_ROWS + 1))
+}
+
+/// `sql` on endpoint `ep` as `role`, in a read-only transaction of at most 5 s, with only the
+/// catalog in its path: its result (the one before the commit's).
+async fn pg_read_as(api: &Api, ep: &str, role: &str, sql: &str) -> anyhow::Result<Value> {
+    let q = format!(
+        "BEGIN READ ONLY; SET LOCAL ROLE \"{}\"; SET LOCAL search_path = pg_catalog, pg_temp; SET LOCAL statement_timeout = '5s'; {sql}; COMMIT",
+        role.replace('"', "\"\"")
+    );
+    let v = api.post(&format!("/v1/endpoints/{}/query", seg(ep)), json!({ "sql": q })).await?;
+    v["results"].as_array().and_then(|r| r.iter().rev().find(|x| x["columns"].as_array().is_some_and(|c| !c.is_empty())).cloned()).ok_or_else(|| anyhow::anyhow!("the branch answered nothing"))
+}
+
 async fn pg_schema_lines(api: &Api, ep: Option<String>, role: Option<String>) -> anyhow::Result<Vec<String>> {
     let ep = ep.ok_or_else(|| anyhow::anyhow!("a Postgres branch without an endpoint"))?;
     let set_role = role.map(|r| format!("SET ROLE \"{}\"; ", r.replace('"', "\"\""))).unwrap_or_default();
@@ -1299,6 +1350,14 @@ mod tests {
     /// no original value is left in `_source`, `_terms_enum` or a terms aggregation on the
     /// `.keyword`, for a text field, an address inside an array of objects, a field under a dotted
     /// key and an index whose name has a dot; the parent keeps every original.
+    /// A browsed table's name is quoted, never run: one with quotes stays one identifier.
+    #[test]
+    fn a_browsed_tables_name_is_quoted() {
+        assert_eq!(super::browse_rows_sql("public.users").as_deref(), Some("SELECT * FROM \"public\".\"users\" LIMIT 51"));
+        assert_eq!(super::browse_rows_sql("a\"b.c; DROP TABLE x").as_deref(), Some("SELECT * FROM \"a\"\"b\".\"c; DROP TABLE x\" LIMIT 51"));
+        assert!(super::browse_rows_sql("users").is_none());
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_masked_search_branch_shows_no_original_value() {
         use roll_previews::ports::Brancher as _;

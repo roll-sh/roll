@@ -724,7 +724,7 @@ impl LinkProvider for Postgres {
             ("role_user".to_string(), Value::new(role.clone())),
             ("role_password".to_string(), Value::new(password)),
         ]);
-        Ok(Issued { parts, handle: json!({ "role": role, "endpoint": endpoint }) })
+        Ok(Issued { expires_at: None, parts, handle: json!({ "role": role, "endpoint": endpoint }) })
     }
     /// A decoy role (docs/secrets.md, "Decoys"): named and passworded as `issue`'s roles are, in
     /// the root branch's connection string. roll Postgres keeps no password for it: the proxy
@@ -867,7 +867,7 @@ impl LinkProvider for Stream {
             ("password".to_string(), text(&k, "/secret")?),
             ("properties".to_string(), text(&k, "/connect/properties")?),
         ]);
-        Ok(Issued { parts, handle: json!({ "username": username.expose() }) })
+        Ok(Issued { expires_at: None, parts, handle: json!({ "username": username.expose() }) })
     }
     fn revoke(&self, r#ref: &str, h: &Json) -> roll_secrets::Result<()> {
         let Some(u) = h["username"].as_str() else { return Ok(()) };
@@ -908,7 +908,7 @@ impl LinkProvider for Bucket {
         let k = self.0.call(Method::POST, "/v1/storage/keys", Some(json!({ "name": label.chars().take(64).collect::<String>(), "permission": permission, "buckets": [r#ref] })))?;
         let id = text(&k, "/id")?;
         let parts = BTreeMap::from([("access_key_id".to_string(), id.clone()), ("secret_access_key".to_string(), text(&k, "/secret_access_key")?)]);
-        Ok(Issued { parts, handle: json!({ "id": id.expose() }) })
+        Ok(Issued { expires_at: None, parts, handle: json!({ "id": id.expose() }) })
     }
     fn revoke(&self, _: &str, h: &Json) -> roll_secrets::Result<()> {
         let Some(id) = h["id"].as_str() else { return Ok(()) };
@@ -1062,7 +1062,7 @@ impl LinkProvider for Queue {
             ("username".to_string(), Value::new(user.clone())),
             ("password".to_string(), Value::new(password)),
         ]);
-        Ok(Issued { parts, handle: json!({ "user": user }) })
+        Ok(Issued { expires_at: None, parts, handle: json!({ "user": user }) })
     }
     /// Deletes the user, which closes its connections and drops its permissions.
     fn revoke(&self, _: &str, h: &Json) -> roll_secrets::Result<()> {
@@ -1214,7 +1214,7 @@ impl LinkProvider for Search {
             let made = k["access"].as_str().map_or("a key without its access".to_string(), |a| format!("a {a} key on {}", k["indices"]));
             return Err(Error::Link(format!("roll search made {made}, not the {access} key asked for: refused (and deleted)")));
         }
-        Ok(Issued { parts: search_parts(&k)?, handle: json!({ "id": id.expose() }) })
+        Ok(Issued { expires_at: None, parts: search_parts(&k)?, handle: json!({ "id": id.expose() }) })
     }
     /// A field the cluster's flavor doesn't issue (an API key from OpenSearch, a user from
     /// Elasticsearch) is refused when the link is written. A build of roll search that doesn't
@@ -1727,9 +1727,10 @@ impl apps_control::integrations::SecretSource for ForApps {
     async fn issue(&self, project: &str, service: &str, env: &str, aud: &str, ttl: std::time::Duration) -> anyhow::Result<Option<String>> {
         let (secrets, ws) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting: try again in a moment"))?;
         let subject = roll_secrets::Subject::App { project: project.to_string(), service: service.to_string(), env: env.to_string() };
-        let aud = aud.to_string();
+        let (aud, service) = (aud.to_string(), service.to_string());
         tokio::task::spawn_blocking(move || {
-            let roll_secrets::Subject::App { project, service, .. } = &subject;
+            let project = subject.project().to_string();
+            let (project, service) = (&project, &service);
             let p = ws.get(roll_workspace::Scope::All, project).map_err(|e| anyhow::anyhow!("{e}"))?;
             if !ws.trusts(&p, roll_workspace::Kind::Service, service) {
                 anyhow::bail!("project {project} doesn't stand for {service}, so roll signs no token for it");
@@ -3090,7 +3091,7 @@ mod tests {
         let opts = roll_secrets::Options { keyring: Ok(roll_secrets::Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: None, sts: None, outside: None, github: None, clouds: Some(clouds), workloads: None, directory: None, gateways: None };
         let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
         let apps = super::ForApps::default();
-        apps.set(secrets.clone(), ws);
+        apps.set(secrets.clone(), ws.clone());
         let ttl = std::time::Duration::from_secs(900);
         let token = apps.issue(&operators, "svc_web", "production", "sts.amazonaws.com", ttl).await.unwrap().expect("a token");
         use base64::Engine as _;
@@ -3110,6 +3111,17 @@ mod tests {
         let claims: Json = serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token.split('.').nth(1).unwrap()).unwrap()).unwrap();
         assert_eq!((claims["sub"].clone(), claims["environment"].clone()), (json!(format!("roll-apps:{operators}:svc_web:pv-vetted")), json!("pv-vetted")));
         assert!(apps.issue(&operators, "svc_web", "nowhere", "sts.amazonaws.com", ttl).await.is_err());
+        // A preview's own service (roll previews' `roll.toml` services, `PreviewIssuer`): a subject
+        // of its own in the preview's environment, for a repo the project stands for; a fork's
+        // preview gets none.
+        use roll_previews::ports::Issuer as _;
+        let previews = crate::previews::PreviewIssuer { secrets: secrets.clone(), workspace: ws };
+        let token = previews.issue(&operators, "acme/web", "pv_vetted", "web", "sts.amazonaws.com", ttl).await.unwrap().expect("a vetted preview's service's token");
+        let claims: Json = serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token.split('.').nth(1).unwrap()).unwrap()).unwrap();
+        assert_eq!((claims["sub"].clone(), claims["environment"].clone(), claims["preview"].clone()), (json!(format!("roll-previews:{operators}:pv_vetted:web")), json!("pv-vetted"), json!(true)));
+        let refused = previews.issue(&operators, "acme/web", "pv_fork", "web", "sts.amazonaws.com", ttl).await.unwrap_err();
+        assert!(refused.to_string().contains("untrusted preview"), "{refused}");
+        assert!(previews.issue(&adas, "acme/web", "pv_vetted", "web", "sts.amazonaws.com", ttl).await.is_err(), "a person's project stands only for its own repos");
     }
 
     /// A customer's key wraps a project's data key: Encrypt and Decrypt name the key and carry the
