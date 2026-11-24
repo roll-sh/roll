@@ -1259,6 +1259,21 @@ pub enum SaasCmd {
         #[arg(long = "credential-expires")]
         credential_expires: Option<String>,
     },
+    /// Change a registration in place: its name, when its credential ends, or the credential
+    /// itself (`--credential-stdin`: read from stdin, never an argument), checked with the vendor
+    /// before it replaces the old one. Linked keys keep working; their next rotation uses it.
+    Update {
+        id: String,
+        #[arg(long)]
+        name: Option<String>,
+        /// Read a new credential from stdin.
+        #[arg(long = "credential-stdin")]
+        credential_stdin: bool,
+        /// When the credential ends at the vendor: a date (2027-03-31), RFC 3339, how long from
+        /// now (90d), or never. A new credential without it has no end date.
+        #[arg(long = "credential-expires")]
+        credential_expires: Option<String>,
+    },
     Rm { id: String },
 }
 
@@ -3150,6 +3165,33 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     return print(&v);
                 }
                 println!("Added {} ({}): link a key to its secret (and id), managed, to have roll issue and rotate it.", s(&v["name"]), s(&v["id"]));
+            }
+            SaasCmd::Update { id, name, credential_stdin, credential_expires } => {
+                let mut body = json!({});
+                if let Some(n) = name {
+                    body["name"] = json!(n);
+                }
+                if let Some(e) = credential_expires.as_deref() {
+                    body["credential_expires_at"] = json!(expiry(e)?);
+                }
+                // The vendor credential mints keys: never an argument.
+                let mut credential = zeroize::Zeroizing::new(String::new());
+                if credential_stdin {
+                    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                        eprint!("The new credential roll issues keys with, then Enter and Ctrl-D: ");
+                    }
+                    std::io::stdin().read_to_string(&mut credential).context("reading the credential from stdin")?;
+                    body["credential"] = json!(credential.trim());
+                }
+                if body.as_object().is_some_and(|o| o.is_empty()) {
+                    anyhow::bail!("nothing to change: --name, --credential-stdin or --credential-expires");
+                }
+                let v = c.call(Method::PATCH, &format!("{}/saas/{}", c.base(), enc(&id)), Some(body)).await?;
+                if json_out {
+                    return print(&v);
+                }
+                let ends = v["credential_expires_at"].as_i64().map(|t| format!("; the credential expires {}", day(t))).unwrap_or_default();
+                println!("Updated {} ({}){ends}", s(&v["name"]), s(&v["id"]));
             }
             SaasCmd::Rm { id } => {
                 c.call(Method::DELETE, &format!("{}/saas/{}", c.base(), enc(&id)), None).await?;
