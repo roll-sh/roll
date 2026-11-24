@@ -3218,6 +3218,11 @@ impl Store {
         })?)
     }
 
+    /// The mail about a preview's notes still to send: `(to, attempts)`.
+    pub fn pending_tells(&self, id: &str) -> Result<Vec<(String, i64)>> {
+        Ok(self.db.read(|c| c.query("SELECT to_handle, attempts FROM note_tells WHERE preview_id = ? ORDER BY to_handle", [id], |r| Ok((r.get(0)?, r.get(1)?))))?)
+    }
+
     /// A tell sent (or nobody to tell): gone. Not sent: tried again at `next_at`, or given up.
     pub fn tell_done(&self, id: &str, retry_at: Option<i64>) -> Result<()> {
         self.db.write(|c| match retry_at {
