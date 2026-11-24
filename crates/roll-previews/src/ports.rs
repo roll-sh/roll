@@ -985,6 +985,13 @@ pub trait Visitors: Send + Sync {
     fn names_of(&self, _user: &str) -> anyhow::Result<Vec<String>> {
         Ok(Vec::new())
     }
+    /// Mail the person whose roll handle is `handle` about `project`'s preview, to their own
+    /// address, when they may still open its previews ([`Visitors::maker_reaches`]): `false`
+    /// when there's nobody to tell (no such account, no address, no longer on the project, mail
+    /// not set up). An error is worth trying again. Called off the async workers.
+    fn mail(&self, _handle: &str, _project: &str, _subject: &str, _text: &str) -> anyhow::Result<bool> {
+        Ok(false)
+    }
 }
 
 /// A project's secrets, per environment (roll secrets; docs/secrets.md).

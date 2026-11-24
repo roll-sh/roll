@@ -88,6 +88,18 @@ CREATE TABLE IF NOT EXISTS shares (
     revoked INTEGER NOT NULL DEFAULT 0,
     opened_day INTEGER
 ) WITHOUT ROWID;
+-- Mail about notes still to send (`Engine::tend_tells`): claimed by `next_at`, dropped once sent.
+CREATE TABLE IF NOT EXISTS note_tells (
+    id TEXT PRIMARY KEY,
+    preview_id TEXT NOT NULL,
+    review_id TEXT NOT NULL,
+    to_handle TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    text TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_at INTEGER NOT NULL,
+    UNIQUE (review_id, to_handle)
+);
 -- The notes guests left through a share link (their reviews on the change).
 CREATE TABLE IF NOT EXISTS guest_notes (
     preview_id TEXT NOT NULL,
@@ -1387,7 +1399,7 @@ impl Store {
             if let Some((project, change, head)) = gone {
                 emit(c, now, "deleted", &project, id, change.as_deref(), &serde_json::json!({ "head": head }))?;
             }
-            for t in ["resources", "services", "pinned", "pinned_data", "restore_points", "shares", "guest_notes", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "previews"] {
+            for t in ["resources", "services", "pinned", "pinned_data", "restore_points", "shares", "guest_notes", "note_tells", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -3174,6 +3186,45 @@ impl Store {
             )
             .optional()
         })?)
+    }
+
+    /// Mail to send about review `review` (once per review and person).
+    pub fn add_tell(&self, id: &str, review: &str, to: &str, subject: &str, text: &str) -> Result<()> {
+        let now = self.now_ms()?;
+        self.db.write(|c| {
+            c.execute(
+                "INSERT INTO note_tells (id, preview_id, review_id, to_handle, subject, text, next_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                params![format!("tel_{}", &new_token()[..12]), id, review, to, subject, text, now],
+            )
+            .map(drop)
+        })?;
+        Ok(())
+    }
+
+    /// Up to `n` tells that are due, each claimed for `hold` ms (another node doesn't send it
+    /// meanwhile): `(id, preview, to, subject, text, attempts)`.
+    pub fn claim_tells(&self, n: usize, hold: i64) -> Result<Vec<(String, String, String, String, String, i64)>> {
+        let now = self.now_ms()?;
+        Ok(self.db.write(|c| {
+            let due: Vec<(String, String, String, String, String, i64)> = c.query(
+                "SELECT id, preview_id, to_handle, subject, text, attempts FROM note_tells WHERE next_at <= ? ORDER BY next_at LIMIT ?",
+                params![now, n as i64],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            )?;
+            for d in &due {
+                c.execute("UPDATE note_tells SET next_at = ? WHERE id = ?", params![now + hold, d.0])?;
+            }
+            Ok::<_, Error>(due)
+        })?)
+    }
+
+    /// A tell sent (or nobody to tell): gone. Not sent: tried again at `next_at`, or given up.
+    pub fn tell_done(&self, id: &str, retry_at: Option<i64>) -> Result<()> {
+        self.db.write(|c| match retry_at {
+            None => c.execute("DELETE FROM note_tells WHERE id = ?", [id]).map(drop),
+            Some(at) => c.execute("UPDATE note_tells SET attempts = attempts + 1, next_at = ? WHERE id = ?", params![at, id]).map(drop),
+        })?;
+        Ok(())
     }
 
     /// How many notes guests left through share link `share` since `since`.

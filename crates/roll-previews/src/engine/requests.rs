@@ -479,6 +479,61 @@ impl Engine {
         Ok(review)
     }
 
+    /// A review just made on `change` by `by` (`body`): a note tells `change_author`, a reply
+    /// tells `note_author` (the note's), "Resolved." saying who resolved it (Vercel's comment
+    /// notifications). Not to a guest (no account), nor to whoever wrote it, nor when the
+    /// project's `note_mail` is off. Queued: [`Engine::tend_tells`] sends it.
+    pub fn tell_on_review(&self, change: &str, review: &str, by: &str, body: &str, change_author: &str, note_author: Option<&str>) -> Result<()> {
+        use code_control::review::preview_note;
+        let Some(r) = self.store.row_by_change(change)? else { return Ok(()) };
+        if !self.store.settings(&r.project_id)?.note_mail {
+            return Ok(());
+        }
+        let page = |path: &str| format!("{}{path}", self.store.services(&r.id).ok().and_then(|s| s.into_iter().next()).map(|s| s.url).unwrap_or_default().trim_end_matches('/'));
+        let (to, subject, text) = if let Some((path, _, note)) = preview_note::parse(body) {
+            (change_author.to_string(), format!("{by} left a note on {}'s preview", r.repo), format!("{by} left a note on {} of your change's preview:\n\n{note}\n\nAnswer it in roll, on the change, or on the page itself.", page(&path)))
+        } else if let Some((_, reply)) = preview_note::parse_reply(body) {
+            let Some(author) = note_author else { return Ok(()) };
+            let what = if reply == crate::notes::RESOLVED { format!("{by} resolved your note") } else { format!("{by} replied to your note") };
+            (author.to_string(), format!("{what} on {}'s preview", r.repo), if reply == crate::notes::RESOLVED { format!("{what} on the preview of {}.", r.repo) } else { format!("{what}:\n\n{reply}") })
+        } else {
+            return Ok(());
+        };
+        let to = to.trim_start_matches('@');
+        if to.is_empty() || to == "github" || to.starts_with("guest:") || to.eq_ignore_ascii_case(by) {
+            return Ok(());
+        }
+        self.store.add_tell(&r.id, review, to, &subject, &text)
+    }
+
+    /// Send the mail about notes that's due (a few at a time; each claimed first, so one node
+    /// sends it): to the person's own address while they may open the project's previews. One
+    /// that can't go now is tried again (1, 5, 30 minutes), then given up.
+    pub async fn tend_tells(&self) {
+        let Some(visitors) = self.visitors.get().cloned() else { return };
+        let due = match self.store.claim_tells(20, 120_000) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(error = %e, "previews: reading the mail about notes");
+                return;
+            }
+        };
+        for (id, preview, to, subject, text, attempts) in due {
+            let Ok(project) = self.store.row(&preview).map(|r| r.project_id) else {
+                let _ = self.store.tell_done(&id, None);
+                continue;
+            };
+            let v = visitors.clone();
+            let sent = tokio::task::spawn_blocking(move || v.mail(&to, &project, &subject, &text)).await;
+            let retry = match sent {
+                Ok(Ok(_)) => None,
+                _ if attempts >= 2 => None,
+                _ => Some(self.store.now_ms().unwrap_or(0) + [60_000, 300_000, 1_800_000][attempts.clamp(0, 2) as usize]),
+            };
+            let _ = self.store.tell_done(&id, retry);
+        }
+    }
+
     /// The notes on `path` a guest of share link `share` sees: only those left through it.
     pub async fn guest_notes_of(&self, id: &str, share: &str, path: &str) -> anyhow::Result<Vec<crate::notes::Note>> {
         let mine = self.store.guest_note_ids(id, share)?;
