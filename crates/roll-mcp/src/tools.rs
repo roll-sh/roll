@@ -421,7 +421,7 @@ fn secrets_area(method: &str, path: &str) -> Area {
         ["projects", s, ..] => match *s {
             "grid" | "compare" | "required" | "shared" | "suggestions" | "links" | "value-requests" => "values",
             "audit" | "health" | "leaks" | "shares" | "rotations" | "backup" | "unstored" => "security",
-            "transit" | "leases" | "cas" | "ssh-cas" | "atlas-projects" | "aws-roles" | "aws-users" | "cloud-accounts" | "directories" | "gateways" | "github-apps"
+            "transit" | "leases" | "cas" | "ssh-cas" | "public-certs" | "atlas-projects" | "aws-roles" | "aws-users" | "cloud-accounts" | "directories" | "gateways" | "github-apps"
             | "kubernetes" | "outside-databases" | "rotators" | "saas" | "snowflake-accounts" | "syncs" => "integrations",
             "placeholders" => "security",
             _ => return Area::Unplaced,
@@ -526,6 +526,7 @@ fn preview_settled(v: &Value) -> bool {
 
 /// A job that ended (roll apps' `succeeded`, `failed`, `skipped`, `timed_out`, `canceled`):
 /// anything but `running`.
+/// A job's or a cron run's status (they share their states): over once it isn't running.
 fn job_over(v: &Value) -> bool {
     v["status"].as_str().is_some_and(|s| s != "running")
 }
@@ -1257,6 +1258,8 @@ static TOOLS: &[Tool] = &[
     t("secrets_list_ssh_cas", "List SSH certificate authorities", "A project's SSH CAs: their public keys, principals and limits (never a private key; adding one is the project admin's, in the dashboard).", "secrets", "GET", "/v1/secrets/projects/{project}/ssh-cas", &[req("project", "Workspace project")]),
     t("secrets_totp", "Get a one-time code", "The current one-time code (TOTP) from a secret that holds an authenticator seed, and how long it lasts: a reveal, asked for like reading a value. The seed itself is never returned.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/totp", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder")]),
     t("secrets_list_saas", "List SaaS rotators", "A project's rotators for third-party API keys: each one's vendor (SendGrid, Twilio, Okta, Entra, Auth0, GitLab, OpenAI, Datadog, Cloudflare, Databricks, Confluent) and the account or app it rotates for (never a credential; adding one is the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/saas", &[SECRET_PROJECT]),
+    t("secrets_list_public_certs", "List publicly trusted certificates", "A project's certificates from public ACME CAs (Let's Encrypt, ZeroSSL, Google Trust Services): names, CA, DNS provider, status (pending, issued, failing), serial, end and next renewal, and why the last order failed (never a credential or a private key; adding one is the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/public-certs", &[SECRET_PROJECT]),
+    t("secrets_renew_public_cert", "Renew a public certificate", "Order a new certificate for a project's public certificate now: roll orders it in the background (minutes) and rotates every key linked to it once the CA issues it (rotation.succeeded, or rotation.failed and the reason in secrets_list_public_certs).", "secrets", "POST", "/v1/secrets/projects/{project}/public-certs/{id}/renew", &[SECRET_PROJECT, req("id", "Public certificate id (pcr_…)")]).open_world(),
     t("secrets_list_kubernetes", "List Kubernetes clusters", "The Kubernetes clusters a project issues service-account tokens for: names, API servers, and whether calls trust the cluster's own CA (never a token or the CA; adding one is the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/kubernetes", &[SECRET_PROJECT]),
     t("secrets_list_github_apps", "List GitHub Apps", "A project's GitHub Apps that short-lived installation tokens come from: app and installation ids, repositories and permissions (never the private key; adding one is the project admin's, in the dashboard).", "secrets", "GET", "/v1/secrets/projects/{project}/github-apps", &[req("project", "Workspace project")]),
     t("secrets_list_directories", "List LDAP and Active Directory servers", "A project's directories whose account passwords roll rotates and where dynamic users are made: URL, flavor, bind DN, managed accounts, groups and the gateway it's reached through (never the bind password; adding one is the project admin's, in the dashboard).", "secrets", "GET", "/v1/secrets/projects/{project}/directories", &[SECRET_PROJECT]),
@@ -1557,9 +1560,19 @@ static TOOLS: &[Tool] = &[
     t("apps_analytics", "Web analytics", "An environment's page views and visitors from its access log (no script, no cookie) over the last minutes (default 1440): top pages, referring sites, countries and a series.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/analytics", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back (default 1440)")]),
     t("apps_list_cron_runs", "Cron runs", "A cron service's runs, newest first.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/runs", &[SERVICE, ENV]),
     t("apps_get_cron_run", "Get a cron run", "One cron run: its status, exit code, start and end.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/runs/{run}", &[SERVICE, ENV, req("run", "Run id")]),
+    t(
+        "apps_wait_cron_run",
+        "Wait for a cron run to finish",
+        "A cron run once it ends (succeeded, failed, skipped, timed out or canceled), with its exit code. A client that runs MCP tasks gets a task that waits as long as it takes; otherwise this answers the status now (call again to keep waiting).",
+        "apps",
+        "GET",
+        "/v1/apps/services/{service}/environments/{env}/runs/{run}",
+        &[SERVICE, ENV, req("run", "Run id (apps_run_cron's)")],
+    )
+    .until(job_over),
     t("apps_cron_run_logs", "A cron run's logs", "A cron run's output (its lines in the environment's log).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/runs/{run}/logs", &[SERVICE, ENV, req("run", "Run id"), q("tail", Ty::Int, "Last lines")]),
     t("apps_cancel_cron_run", "Cancel a cron run", "Stop a running cron run (production is a \"deploy\" action).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/runs/{run}/cancel", &[SERVICE, ENV, req("run", "Run id")]),
-    t("apps_run_cron", "Run a cron now", "Run a cron service's job now (in production this is a deploy action).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/runs", &[SERVICE, ENV]),
+    t("apps_run_cron", "Run a cron now", "Run a cron service's job now (in production this is a deploy action); apps_wait_cron_run follows the run it answers to its end.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/runs", &[SERVICE, ENV]),
     t("apps_signing", "Image signing rule", "A project's signing keys (cosign public keys) and whether its image services must be signed by one of them to deploy.", "apps", "GET", "/v1/apps/projects/{project}/signing", &[req("project", "Workspace project")]),
     t(
         "apps_set_signing",
@@ -1620,6 +1633,8 @@ static TOOLS: &[Tool] = &[
     t("apps_form_submissions", "Read form submissions", "What people sent through a site's form, newest first: each submission's id, time and fields. People's own data: every read is audited.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/forms/{form}/submissions", &[SERVICE, ENV, req("form", "Form name"), q("limit", Ty::Int, "At most (1-200, default 50)"), q("before", Ty::Str, "A submission's id: the page after it")]).outside(&["fields"]),
     t("apps_delete_form_submission", "Delete a form submission", "Delete one submission for good (someone asked to be forgotten, or spam). Audited.", "apps", "DELETE", "/v1/apps/services/{service}/environments/{env}/forms/{form}/submissions/{submission}", &[SERVICE, ENV, req("form", "Form name"), req("submission", "Submission id")]),
     t("apps_rollback", "Roll back a deployment", "Roll an environment back to an earlier deploy, with the variables it went live with (keep_variables: true keeps today's). With no_traffic and variables: a view of that deploy at its own URL with some of the environment's variables given values of its own (another copy of the data), never put live.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/rollback", &[SERVICE, ENV, req("deploy", "Deploy id"), b("keep_variables", Ty::Bool, "Keep the variables as they are now"), b("no_traffic", Ty::Bool, "With variables: a view at its own URL, nothing switches"), b("variables", Ty::Obj, "With no_traffic: {NAME: value} for some of the environment's own variables (sealed, never listed)"), OVERRIDE]),
+    t("apps_pin_deploy", "Pin a deployment", "Keep a deployment from pruning (its image stays, so rolling back to it stays instant), until unpinned.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/pin", &[SERVICE, ENV, req("deploy", "The deployment's id (dep_…)")]),
+    t("apps_unpin_deploy", "Unpin a deployment", "Let a pinned deployment be pruned again, as the environment's kept deployments are.", "apps", "DELETE", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/pin", &[SERVICE, ENV, req("deploy", "The deployment's id (dep_…)")]),
     t("apps_rollback_previous", "Roll back to the last deploy", "Put back the deploy that was live before this one, with its variables (keep_variables: true keeps today's).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/rollback", &[SERVICE, ENV, b("keep_variables", Ty::Bool, "Keep the variables as they are now")]),
     t("apps_logs", "Service logs", "Recent logs of a service's environment, or with http its requests (method, path, status, ms): the quickest way to find failing or slow ones.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/logs", &[
         SERVICE,

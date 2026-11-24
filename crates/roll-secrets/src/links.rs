@@ -322,6 +322,9 @@ impl crate::Secrets {
         if let Some(provider) = self.links.0.get(crate::saas::KIND) {
             out.extend(self.saas_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::saas::KIND.into(), fields: provider.fields_for(&id), r#ref: id, name }));
         }
+        if let Some(provider) = self.links.0.get(crate::public_certs::KIND) {
+            out.extend(self.public_cert_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::public_certs::KIND.into(), fields: provider.fields_for(&id), r#ref: id, name }));
+        }
         if let Some(provider) = self.links.0.get(crate::outside::KIND) {
             out.extend(self.outside_db_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::outside::KIND.into(), r#ref: id.clone(), name, fields: provider.fields_for(&id) }));
         }
