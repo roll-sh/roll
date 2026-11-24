@@ -95,6 +95,13 @@ impl EnvSource for Engine {
                 set(&mut env, k, v);
             }
         }
+        // roll's word for it, to a cloud the project's rules name (Vercel's OIDC federation): an
+        // address of its own on roll, a trusted preview's only.
+        if let Some(vars) = self.oidc_vars(&r, &s, name)? {
+            for (k, v) in vars {
+                set(&mut env, k, v);
+            }
+        }
         set(&mut env, "ROLL_PREVIEW", r.id.clone());
         set(&mut env, "ROLL_PREVIEW_URL", url);
         for other in &services {

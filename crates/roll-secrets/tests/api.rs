@@ -150,6 +150,8 @@ struct FakeKeyVendors {
     made: std::sync::atomic::AtomicU32,
     bodies: Mutex<Vec<Value>>,
     refuse: std::sync::atomic::AtomicBool,
+    /// The admin credential each GitLab request came with.
+    gitlab_admins: Mutex<Vec<String>>,
 }
 
 const GITLAB_TOKENS: &str = "https://gitlab.example.com/api/v4/projects/acme%2Fweb/access_tokens";
@@ -170,7 +172,8 @@ impl FakeKeyVendors {
         use std::sync::atomic::Ordering::Relaxed;
         let header = |name: &str| headers.iter().find(|(k, _)| *k == name).map(|(_, v)| v.expose().to_string()).unwrap_or_default();
         let (vendor, rest, authorized) = if let Some(rest) = url.strip_prefix(GITLAB_TOKENS) {
-            ("gitlab", rest, header("private-token") == "fake-gitlab-admin")
+            self.gitlab_admins.lock().unwrap().push(header("private-token"));
+            ("gitlab", rest, ["fake-gitlab-admin", "fake-gitlab-admin-2"].contains(&header("private-token").as_str()))
         } else if let Some(rest) = url.strip_prefix(OPENAI_ACCOUNTS) {
             ("openai", rest, header("authorization") == "Bearer fake-openai-admin")
         } else if let Some(rest) = url.strip_prefix(CLOUDFLARE_TOKENS) {
@@ -3212,6 +3215,42 @@ async fn keys_a_vendor_ends_rotate_before_that_and_health_warns_of_them_and_of_t
 }
 
 #[tokio::test]
+async fn a_saas_rotators_credential_is_replaced_in_place_and_the_next_rotation_uses_it() {
+    let api = Api::new().await;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    let day = 86_400_000;
+    let target = json!({ "host": "gitlab.example.com", "project": "acme/web", "scopes": ["read_api"], "access_level": 20, "expires_days": 90 });
+    let r = key_vendor(&api, "gitlab", target, "fake-gitlab-admin", "GITLAB_TOKEN", json!({ "rotate_days": 60 })).await;
+    let at = format!("/saas/{}", r["id"].as_str().unwrap());
+    let last_admin = || api.sent.10.gitlab_admins.lock().unwrap().last().cloned().unwrap();
+    let expiring = |health: &Value| -> Vec<String> { health.as_array().unwrap().iter().filter(|f| f["issue"] == "expiring" && f["environment"] == "").map(|f| f["key"].as_str().unwrap().to_string()).collect() };
+
+    // A credential the vendor refuses changes nothing: the old one stays, dated as it was.
+    let (s, e) = api.call(Method::PATCH, &at, Some(json!({ "credential": "fake-gitlab-wrong", "credential_expires_at": now + 10 * day, "name": "gl-ops" }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("gitlab answered 401") && !e.to_string().contains("fake-gitlab-wrong"), "{e}");
+    let kept = &api.ok(Method::GET, "/saas", None).await[0];
+    assert!(kept["name"] == "gitlab" && kept.get("credential_expires_at").is_none(), "{kept}");
+    api.ok(Method::POST, "/environments/production/secrets/GITLAB_TOKEN/rotate", None).await;
+    assert_eq!(last_admin(), "fake-gitlab-admin");
+
+    // A good one is checked, swapped in place (the link stays), and the next rotation uses it.
+    let patched = api.ok(Method::PATCH, &at, Some(json!({ "credential": "fake-gitlab-admin-2", "credential_expires_at": now + 10 * day, "name": "gl-ops" }))).await;
+    assert!(patched["id"] == r["id"] && patched["name"] == "gl-ops" && patched["credential_expires_at"] == now + 10 * day && !patched.to_string().contains("fake-gitlab-admin"), "{patched}");
+    assert_eq!(expiring(&api.ok(Method::GET, "/health", None).await), ["gl-ops"], "health warns of the new credential's end");
+    api.ok(Method::POST, "/environments/production/secrets/GITLAB_TOKEN/rotate", None).await;
+    assert_eq!((last_admin().as_str(), api.values("production", "/").await["values"]["GITLAB_TOKEN"].clone()), ("fake-gitlab-admin-2", json!("fake-gitlab-token-3")));
+    // Retired keys are revoked through the new credential too.
+    end_grace(&api).await;
+    assert_eq!((api.sent.10.live.lock().unwrap().clone(), last_admin()), (vec!["3".to_string()], "fake-gitlab-admin-2".to_string()));
+
+    // Moving the date moves health; audited, never with the credential.
+    api.ok(Method::PATCH, &at, Some(json!({ "credential_expires_at": now + 100 * day }))).await;
+    assert!(expiring(&api.ok(Method::GET, "/health", None).await).is_empty());
+    let audit = api.ok(Method::GET, "/audit", None).await;
+    assert!(audit.to_string().contains("changed SaaS rotator gl-ops's credential expiry") && !audit.to_string().contains("fake-gitlab-admin-2"), "{audit}");
+}
+
+#[tokio::test]
 async fn openai_service_account_keys_rotate_and_a_leaked_one_is_revoked_at_once() {
     let api = Api::new().await;
     key_vendor(&api, "openai", json!({ "project_id": "proj_rollfake" }), "fake-openai-admin", "OPENAI_API_KEY", json!({})).await;
@@ -6153,6 +6192,42 @@ async fn roll_signs_an_apps_instance_a_token_for_an_hour_at_most() {
     assert_eq!(issued.len(), 1, "{audit}");
     assert_eq!((issued[0]["actor"].as_str(), issued[0]["environment"].as_str()), (Some("app:svc_web"), Some("production")));
     assert!(!audit.to_string().contains(tokens[0].as_str()), "never the token");
+}
+
+/// A preview's own service (roll previews' `roll.toml` services) gets roll's word under a subject of
+/// its own, never an app's, in the preview's environment; a fork's preview (untrusted) gets nothing,
+/// decided here from the environment's own flag; each is audited as the preview's service, never
+/// the token.
+#[tokio::test]
+async fn a_previews_service_gets_a_token_of_its_own_and_a_forks_none() {
+    let api = Api::new().await;
+    for (slug, trusted) in [("pv-vetted1", true), ("pv-fork1", false)] {
+        api.ok(Method::POST, "/environments", Some(json!({ "slug": slug, "base": "production", "trusted": trusted }))).await;
+    }
+    // A standard environment a person named like a preview's.
+    api.ok(Method::POST, "/environments", Some(json!({ "slug": "pv-std1" }))).await;
+    let (s, p) = (api.secrets.clone(), api.project.clone());
+    let (vetted, fork, standard) = tokio::task::spawn_blocking(move || {
+        let sub = |preview: &str| roll_secrets::Subject::Preview { project: p.clone(), preview: preview.into(), service: "web".into() };
+        let hour = std::time::Duration::from_secs(3600);
+        (s.issue(sub("pv_vetted1"), "sts.amazonaws.com", 2 * hour), s.issue(sub("pv_fork1"), "sts.amazonaws.com", hour), s.issue(sub("pv_std1"), "sts.amazonaws.com", hour))
+    })
+    .await
+    .unwrap();
+    assert!(matches!(fork, Err(roll_secrets::Error::Forbidden(_))), "{fork:?}");
+    assert!(matches!(standard, Err(roll_secrets::Error::NotFound(_))), "a standard environment is no preview's: {standard:?}");
+    let token = vetted.unwrap();
+    let jwks = api.ok(Method::GET, "/v1/secrets/oidc/jwks", None).await;
+    let (_, claims, signed) = roll_token(&jwks, &token);
+    assert!(signed);
+    let sub = format!("roll-previews:{}:pv_vetted1:web", api.project);
+    assert_eq!(claims["sub"], json!(sub));
+    assert_eq!((claims["environment"].clone(), claims["preview"].clone(), claims["preview_id"].clone()), (json!("pv-vetted1"), json!(true), json!("pv_vetted1")));
+    assert_eq!(claims["exp"].as_i64().unwrap() - claims["iat"].as_i64().unwrap(), 3600, "an hour at most");
+    assert!(matches!(roll_secrets::Subject::parse(&sub), Some(roll_secrets::Subject::Preview { .. })));
+    let audit = api.ok(Method::GET, "/audit", None).await;
+    assert!(audit.as_array().unwrap().iter().any(|a| a["action"] == "oidc.issue" && a["actor"] == "preview:pv_vetted1:web"), "{audit}");
+    assert!(!audit.to_string().contains(token.as_str()), "never the token");
 }
 
 #[tokio::test]

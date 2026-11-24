@@ -164,6 +164,7 @@ PATCH /v1/secrets/projects/{project}/rotators/{id}                             a
 POST /v1/secrets/projects/{project}/rotators/{id}/rotate-secret                an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/saas                                       an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/saas/{id}                                an outside integration's setup: an admin's, with its credentials
+PATCH /v1/secrets/projects/{project}/saas/{id}                                 an outside integration's setup: an admin's, with its credentials (a credential, a person's call)
 POST /v1/secrets/projects/{project}/shares                                     answers or sets a credential
 POST /v1/secrets/projects/{project}/snowflake-accounts                         an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/snowflake-accounts/{id}                  an outside integration's setup: an admin's, with its credentials

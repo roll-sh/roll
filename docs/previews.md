@@ -1635,6 +1635,22 @@ land on the change.
   team session, through roll), from the change's feedback reviews (`roll_previews::notes` reads back the shape the
   dashboard posts and nothing else; dismissed ones don't show), the latest 50. Each note says
   who and when, and outlines its element on hover; all of it is text, never HTML.
+- A preview's own services get roll's word for a cloud (Vercel's OIDC federation; roll apps'
+  `pv-` services have their own, "Instances' identity"): with `oidc_audiences` (clouds' relying
+  parties, `sts.amazonaws.com`, a GCP pool provider; at most 5), each `roll.toml` service of a
+  trusted preview gets `ROLL_OIDC_URL` (an address of its own on roll, derived from the preview,
+  the service and the store's key, masked in what the preview shows) and `ROLL_OIDC_AUDIENCE` (the
+  first). A `GET` (`?aud=` one of the list; the first when not given) answers `{token, expires_at}`:
+  roll secrets' issuer's token, an hour long, `sub = roll-previews:<project>:<preview>:<service>`,
+  with `project`, `preview_id`, `service`, `environment` (`pv-<id>`) and `preview: true` among its
+  claims, so a trust written for an app's subject never matches it. An audience the rules don't
+  name is a 403, an address that isn't one a 404; a token is answered again for a minute per
+  service and audience, and masked in the preview's output once issued. roll secrets refuses a
+  fork's preview itself (from its environment's own `trusted`), and rolld asks that the project
+  stands for the service's repo. A cloud trusts one preview's service by its `sub`; trusting a
+  service across a project's previews (`roll-previews:<project>:*:<service>` as a condition) is the
+  customer's call, and roll writes no such trust. `oidc_audiences` is a person's rule (roll MCP
+  doesn't set it). `a_previews_service_gets_roll_s_word_for_a_named_cloud_only`.
 - A reviewer sets the project's feature flags for their own view (Vercel's Flags Explorer): with
   `flags` (`[{name, options}]`, at most 20, each name and option 1-60 letters, digits, `-`, `_` or
   `.`), the page's toolbar gets "Flags": each flag a choice (the app's own, or one of its
@@ -1893,6 +1909,7 @@ type Settings = {
   visual_review: "off" | "check" | "required";   // the roll/visual review; required also blocks landing in roll ("off")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
   flags?: {name: string; options: string[]}[]; // feature flags a reviewer sets for their own view from that button's toolbar (x-roll-flags)
+  oidc_audiences?: string[];          // clouds a trusted preview's own services may have roll's OIDC token for (ROLL_OIDC_URL), at most 5
   egress: "open" | "roll";            // what its services' code may reach: anything ("open"), or only roll's products on a network with no route out (see "Egress")
   egress_hosts?: string[];            // with "roll" (or egress_forks "roll", for forks): hosts outside roll still reachable through its egress proxy (api.stripe.com, *.sentry.io; at most 20)
   egress_forks: "roll" | "open";      // what a fork's preview reaches when egress is "open" (default "roll")
@@ -2582,22 +2599,22 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Feature flags on a preview, in review** (Vercel's Flags Explorer): per-preview values, and a reviewer's
-   own override from the page's toolbar.
+1. **A workload identity for `roll.toml` services, in review** (Vercel's OIDC federation): roll apps' `pv-`
+   instances have one; runtime services don't.
 2. **Restore points for a preview's data** (Neon's snapshots): save the branches now, put them back
    after a test run.
-3. **A workload identity for `roll.toml` services** (Vercel's OIDC federation): roll apps' `pv-`
-   instances have one; runtime services don't.
-4. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+3. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-5. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+4. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-6. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-7. **Watch: pg-control's recovery to a time seconds old** (unowned).
+6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-24, later: feature flags a reviewer sets for their own view (#861: the toolbar's Flags, `x-roll-flags`).
 
 Landed 2026-11-24: a data branch looked at from the sheet (#858: its tables and first rows, as the branch's own role; live, `public.users` masked).
 

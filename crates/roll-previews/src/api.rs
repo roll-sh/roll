@@ -43,6 +43,9 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}/screenshot.png", get(screenshot_link))
         .route("/v1/previews/{id}/reset", post(reset))
         .route("/v1/previews/{id}/data/{resource}", get(browse_data))
+        // roll's word for a preview's own service: the address is its credential (rolld's gate
+        // lets it through, as the trace intake).
+        .route("/v1/previews/{id}/oidc/{token}", get(oidc_token))
         // These act on running services, which live on the preview's holder in a cluster.
         .merge(
             Router::new()
@@ -881,6 +884,17 @@ async fn bridge(socket: axum::extract::ws::WebSocket, mut f: crate::engine::shel
     // `f` lives as long as the bridge: it holds the service awake.
     let ended = f.ended.clone();
     bridge_io(socket, &mut f.io, ended).await;
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OidcQuery {
+    aud: Option<String>,
+}
+
+async fn oidc_token(AxState(e): S, Path((id, token)): Path<(String, String)>, Query(q): Query<OidcQuery>) -> crate::Result<Json<crate::OidcToken>> {
+    check_id(&id)?;
+    Ok(Json(e.oidc(&id, &token, q.aud.as_deref()).await?))
 }
 
 #[derive(serde::Deserialize)]

@@ -1855,6 +1855,12 @@ pub struct Environment {
     /// person deploys, redeploys or promotes, or resumes them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub held_after: Option<String>,
+    /// When attack mode goes on by itself ([`crate::attack_mode`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attack_mode: Option<crate::attack_mode::AttackMode>,
+    /// Attack mode is on until then (unix ms): every request without a pass gets the challenge.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub challenge_until: Option<i64>,
     /// A person holds its deploys (`PUT … {held: true}`): pushes, hooks and tag moves build to
     /// `ready` (a web service without a volume) for them to put live, or wait.
     #[serde(skip_serializing_if = "std::ops::Not::not")]

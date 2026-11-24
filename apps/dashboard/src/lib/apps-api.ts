@@ -603,6 +603,10 @@ export interface EnvironmentDiff {
 }
 
 export interface EnvironmentPut {
+  /** Attack mode by itself: once a minute's requests reach per_minute, a challenge for every visitor without a pass for minutes; null: never by itself. */
+  attack_mode?: { per_minute: number; minutes?: number } | null;
+  /** Attack mode on by hand until then (unix ms, within 24 hours); null ends it. */
+  challenge_until?: number | null;
   /** false: its schedules don't run (deploys and runs still do). */
   scheduled?: boolean;
   /** Data of its own: a branch of each Postgres and Redis database it links (admin); null goes back. */
@@ -802,6 +806,10 @@ export interface Environment extends EnvironmentSummary {
   firewall?: FirewallRule[];
   /** Requests each rule matched in the last 24 hours, in their order. */
   firewall_hits?: number[];
+  /** When attack mode goes on by itself. */
+  attack_mode?: { per_minute: number; minutes: number };
+  /** Attack mode is on until then (unix ms). */
+  challenge_until?: number;
   /** Headers its answers carry. */
   headers?: HeaderRule[];
   /** Paths another service of the project answers. */
@@ -1323,6 +1331,7 @@ export interface NotifyTarget {
 
 export type NotifyEvent =
   | "alert.anomaly"
+  | "attack.mode"
   | "deploy.failed"
   | "deploy.base_updated"
   | "rollout.waiting"

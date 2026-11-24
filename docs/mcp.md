@@ -160,7 +160,9 @@ through the gate as the caller. Those lists are quiet: one that would ask a pers
 as `roll_find:<tool>`. The operator's inspector sees `roll_find`'s own call and answer, and hidden
 text in names is made visible as in every answer. `?tools=` and `exclude_tools=` pick or drop it. Matches come exact first, then by
 prefix, then by part, at most 25. Each says its kind, id, name and `read: {tool, arguments}`, the
-ordinary tool that goes on from it. A list that refused or failed is in `skipped`. A link is
+ordinary tool that goes on from it, and, where the kind has a dashboard page, its `url` there (on
+the dashboard's address, `web_url`) to give a person, as Linear's and GitHub's results link theirs.
+A match's `url` pasted back into `roll_find` is the same read (a test holds every kind to it). A list that refused or failed is in `skipped`. A link is
 read at once with the tool that shows its page, as the agent would call it, approvals included:
 a project, a service, a repo (its changes) or one change (`code_get_change` on `owner/repo#N`),
 a Redis, NoSQL or search database, a bucket, a token (`/dashboard/access/tokens/<id>`, or its
