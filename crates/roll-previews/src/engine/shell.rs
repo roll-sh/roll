@@ -305,6 +305,32 @@ impl Drop for Swap {
     }
 }
 
+/// An agent's run on a page (`POST …/try`; roll MCP's `previews_try`): the page's status, the
+/// step that found nothing, its visible text and what went wrong, masked; its picture is
+/// `GET …/try/{run}/screenshot`.
+#[derive(serde::Serialize)]
+pub struct TryRun {
+    pub run: String,
+    pub status: u16,
+    pub step_failed: Option<String>,
+    pub text: String,
+    pub errors: Vec<String>,
+}
+
+/// Runs going at once for one preview, at most (each starts a browser).
+pub const TRIES_AT_ONCE: usize = 2;
+/// How long a run's picture is kept.
+pub const TRY_KEPT_MS: i64 = 5 * 60_000;
+
+/// A preview's place among its runs going, given back when dropped.
+struct Going(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for Going {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// A page of a preview's service as an agent reads it through roll (`GET …/fetch`; roll MCP's
 /// `previews_fetch`).
 #[derive(serde::Serialize)]
@@ -321,6 +347,51 @@ pub struct FetchedPage {
 }
 
 impl Engine {
+    /// `POST …/{id}/try`: the service's page at `path` in a browser, `steps` taken on it (a page
+    /// state's steps, 10 at most), stateless: what it showed after, masked as its logs are. Two at
+    /// a time per preview, each holding one of the node's screenshot slots; typed text is never
+    /// kept or said.
+    pub async fn try_page(self: &Arc<Self>, id: &str, service: Option<&str>, path: &str, steps: &[crate::settings::Step]) -> Result<TryRun> {
+        if !crate::settings::page_path_ok(path) {
+            return Err(Error::BadRequest("path: a path of the service's own, starting with / (up to 200 characters, no #, quotes or spaces)".into()));
+        }
+        if steps.len() > crate::settings::MAX_STEPS || !steps.iter().all(crate::settings::step_ok) {
+            return Err(Error::BadRequest(format!("steps: at most {} of click, type, press (a key from the list) or wait (up to 5 s)", crate::settings::MAX_STEPS)));
+        }
+        let svc = self.files_service(id, service)?;
+        let count = self.tries_going.lock().entry(id.to_string()).or_default().clone();
+        if count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= TRIES_AT_ONCE {
+            count.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            return Err(Error::Conflict(format!("{TRIES_AT_ONCE} runs are going for this preview: try again in a moment")));
+        }
+        let _going = Going(count);
+        let _slot = tokio::time::timeout(std::time::Duration::from_secs(30), self.shooting.clone().acquire_owned()).await.map_err(|_| Error::Conflict("the node's browsers are all busy: try again in a moment".into()))?.map_err(|e| Error::Internal(e.to_string()))?;
+        let t = match self.apps.try_page(id, &svc, path, steps).await {
+            Ok(Some(t)) => t,
+            Ok(None) => return Err(Error::Conflict(format!("{svc} can't be driven here yet (a roll apps service: next)"))),
+            Err(e) => return Err(Error::Conflict(self.mask_text(id, &format!("{e:#}")).await?)),
+        };
+        let values = self.masks(id).await?;
+        let mask = |s: &str| code_preview::runner::mask(s, &values);
+        let run = format!("try_{}", crate::new_id().trim_start_matches("pv_"));
+        if let Some(png) = t.png {
+            let now = self.store.now_ms()?;
+            let mut kept = self.tries.lock();
+            kept.retain(|_, (_, at, _)| now - *at < TRY_KEPT_MS);
+            if kept.len() >= 200 {
+                kept.clear();
+            }
+            kept.insert(run.clone(), (id.to_string(), now, png));
+        }
+        Ok(TryRun { run, status: t.status, step_failed: t.step_failed.map(|s| mask(&s)), text: mask(&t.text), errors: t.errors.iter().map(|e| mask(e)).collect() })
+    }
+
+    /// `GET …/{id}/try/{run}/screenshot`: a run's picture, for [`TRY_KEPT_MS`].
+    pub fn try_screenshot(&self, id: &str, run: &str) -> Result<Vec<u8>> {
+        let now = self.store.now_ms()?;
+        self.tries.lock().get(run).filter(|(p, at, _)| p == id && now - *at < TRY_KEPT_MS).map(|(_, _, png)| png.clone()).ok_or_else(|| Error::NotFound("no such run (its picture is kept 5 minutes)".into()))
+    }
+
     /// `GET …/{id}/fetch?path=&service=&head=`: one page of the service read through roll's own
     /// way in (no link token or share link made), its text masked as the preview's logs are.
     pub async fn fetch(self: &Arc<Self>, id: &str, service: Option<&str>, path: &str, head: bool) -> Result<FetchedPage> {

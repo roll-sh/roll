@@ -1457,6 +1457,22 @@ egress included, removed with each connection. `a_shell_in_a_previews_service_is
 live preview's container through `roll preview shell` and reads its `ROLL_PREVIEW` back, puts a
 file in with `roll preview cp` and brings it back, and reads the service through `roll preview
 forward` (no relay left after).
+An agent drives a page too (GitHub Copilot's coding agent with Playwright; roll MCP's
+`previews_try` and `previews_try_screenshot`): `POST …/try` `{service?, path, steps}` loads the
+service's page in a browser in its network (locked down as a screenshot is) and takes the steps,
+a page state's (`click`, `type`, `press`, `wait`; 10 at most, 15 s), stateless: nothing is held
+between calls, so an agent sends the whole way to a state each time. It answers `{run, status,
+step_failed?, text, errors}`: the page's status, the step that found nothing ("click #nope:
+nothing matched"), its visible text after the steps (its own line breaks kept, cut at 40,000
+characters) and what went wrong on the way (uncaught errors, failed requests, 20 at most), masked
+as its logs are. Its picture is `GET …/try/{run}/screenshot` (`image/png`, kept 5 minutes on the
+preview's holder; another preview's id gets a 404), asked for only when the text isn't enough.
+Two runs at a time per preview (a third is a 409), each taking one of the node's screenshot
+slots; typed text is never kept or said by previews. Both are `reveal` (its clicks can change the
+preview's own data). A roll apps service's comes next (a 409 now). Checked in the screenshot
+image (a click changed "0 items" to "1 item", a missing selector named, a failed request listed)
+and live in `scripts/preview-cost.sh`. `an_agents_run_on_a_page_answers_what_it_showed_masked`,
+`a_runs_answer_is_bounded`.
 A data branch can be looked at from the sheet too (Neon's Tables, Supabase's table editor): a
 Postgres branch's "Tables" lists the tables its own role can read (with about how many rows), and
 one's first 50 rows, cells as text cut at 200 characters (`…/data/{kind:parent}?table=`). It's
@@ -1813,6 +1829,8 @@ previews in it), the operator and admins see every project.
 | `GET /v1/previews/{id}/files?service=&path=` | | `application/x-tar`: what's at `path` (absolute) in the running `roll.toml` service, started if it sleeps (`docker cp`), `x-roll-service` naming it; 404 before any of the answer when nothing is there; said in the activity ("ana copied /app/out.csv out of web"). Admin, as the shell is (it reads anything the service keeps); a roll apps service's is 409 (roll apps' own `…/files` on `pv-`). Runs on the preview's holder |
 | `GET /v1/previews/{id}/forward?service=&port=` | WebSocket | one TCP connection to `port` in the running `roll.toml` service, any port it listens on (a debugger's, an admin's), published or not: a relay (busybox `nc`, `alpine:3.20`, 32 MiB, no capabilities) in the service's network namespace, removed with the connection; binary both ways, an empty message a half-close, as roll apps' tunnel (`roll preview forward`). The service is held awake while connections are open; at most 32 a preview (409); said in the activity once an hour per person, service and port. Admin; a roll apps service's is 409 (roll apps' own tunnel). Runs on the preview's holder (roll-cluster forwards the upgrade) |
 | `GET /v1/previews/{id}/fetch?path=&service=&head=` | `{service, path, url, status, headers: {content-type?, location?, cache-control?, content-length?}, body: string \| null, truncated}` | one page of a `roll.toml` service read through roll's own way in (no link token or share link), `GET` or `HEAD` (`head=true`); its text masked as its logs are, `null` when not text, cut at 256 KiB (`truncated`); `url` never carries a token; a roll apps service's page through roll apps' proxy as a link visitor (a team-access one's answers its 401); `reveal` (roll MCP's `previews_fetch`; `roll preview fetch`) |
+| `POST /v1/previews/{id}/try` | `{service?, path, steps}` (a page state's steps, 10 at most) | `{run, status, step_failed?, text, errors}`: the page in a browser after the steps, masked; two at a time per preview (409); `reveal` (roll MCP's `previews_try`) |
+| `GET /v1/previews/{id}/try/{run}/screenshot` | | `image/png`, the run's picture, kept 5 minutes; `reveal` (roll MCP's `previews_try_screenshot`) |
 | `GET /v1/previews/{id}/data/{resource}?table=` | | `{tables: [{name, rows}]}` (its tables, as its own role sees them, at most 200) or, with `table`, `{table, columns, rows: (string \| null)[][], more}` (the first 50 rows, cells cut at 200 characters); `resource` is `kind:parent`; read as the branch's own role, read-only, 5 s at most; 409 for a branch not ready or masked yet and for a kind with no way to show it yet (Postgres only for now); `reveal` |
 | `POST /v1/previews/{id}/otlp/{token}/v1/traces` | OTLP/HTTP traces: protobuf or JSON (`Content-Type`), gzip or not, at most 8 MiB | `{"partialSuccess": {}}`; 404 for anything but the preview's own token (derived from its id with the store's key, as its SMTP password is). Public in rolld's gate: the token in the path is the credential. A service gets it as `OTEL_EXPORTER_OTLP_ENDPOINT` when the project's `traces` is on. Spans are kept on the preview's holder, in memory: its newest 20,000, for 6 hours |
 | `GET /v1/previews/{id}/traces?minutes=` | | `{ minutes, traces: [{ trace, name, service, start_ms, ms, spans, error }] }`: its recent traces (5 to 360 minutes, 60 by default), newest first, at most 100, the root span's name masked as logs are |
@@ -2627,22 +2645,22 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **What the reviewer did, with a feedback note, in review** (Jam's user actions): the last 20
-   steps before the note, no typed value; and the note's form found again after #861.
-2. **Agents driving the preview in a browser** (GitHub Copilot's Playwright): a session an agent
-   steps through, with roll MCP.
-3. **Restore points for a preview's data** (Neon's snapshots): save the branches now, put them back
+1. **Agents driving the preview in a browser, in review** (GitHub Copilot's Playwright): `POST
+   …/try`, stateless steps and their picture (roll MCP's `previews_try`); roll apps services next.
+2. **Restore points for a preview's data** (Neon's snapshots): save the branches now, put them back
    after a test run.
-4. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+3. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-5. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+4. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-6. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-7. **Watch: pg-control's recovery to a time seconds old** (unowned).
+6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-24, morning, later: a note says what the reviewer did before it, and the note's form works again after #861 (#879, the toolbar now driven in a browser live).
 
 Landed 2026-11-24, morning: screenshot modes (#877: dark, a language, a time zone), and the sheet's pictures of every page kind.
 

@@ -896,6 +896,14 @@ impl roll_previews::ports::Apps for Services {
         self.runtime.forward(preview, service, port).await
     }
 
+    /// A `roll.toml` service's page in a browser, its steps taken (roll apps' services: next).
+    async fn try_page(&self, preview: &str, service: &str, path: &str, steps: &[roll_previews::settings::Step]) -> anyhow::Result<Option<roll_previews::ports::Tried>> {
+        if self.apps.find(preview, service).await?.is_some() {
+            return Ok(None);
+        }
+        self.runtime.try_page(preview, service, path, steps).await
+    }
+
     /// A `roll.toml` service's page, read through the runtime (roll apps' services answer at their
     /// own URL, on `pv-…`).
     async fn fetch(&self, preview: &str, service: &str, url: &str, access: Option<&str>, path: &str, head: bool) -> anyhow::Result<Option<roll_previews::ports::Fetched>> {

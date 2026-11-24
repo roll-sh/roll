@@ -1821,6 +1821,10 @@ static ROWS: &[Row] = &[
     // visitors see, which can be copies of production's people (masked or not): reveal, as its
     // mail is.
     row("GET", "/v1/previews/{id}/fetch", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // An agent's run on a page (roll MCP's `previews_try`): what the page shows, as a visitor
+    // through roll sees it; its clicks can change the preview's own data: reveal.
+    row("POST", "/v1/previews/{id}/try", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("GET", "/v1/previews/{id}/try/{run}/screenshot", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // A look at a preview's data branch (its tables, a table's first rows): copies of
     // production's (masked or not): reveal.
     row("GET", "/v1/previews/{id}/data/{resource}", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),

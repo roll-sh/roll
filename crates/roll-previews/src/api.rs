@@ -64,6 +64,9 @@ pub fn router(engine: Arc<Engine>) -> Router {
                 .route("/v1/previews/{id}/shell/sessions/{sh}/resize", post(shell_resize))
                 .route("/v1/previews/{id}/forward", get(forward))
                 .route("/v1/previews/{id}/swap", get(swap))
+                // An agent's run on a page (roll MCP's `previews_try`): the browser runs here.
+                .route("/v1/previews/{id}/try", post(try_page))
+                .route("/v1/previews/{id}/try/{run}/screenshot", get(try_screenshot))
                 // A page read through roll (roll MCP's `previews_fetch`): its services are here.
                 .route("/v1/previews/{id}/fetch", get(fetch_page))
                 // A preview's spans, kept on its holder: the intake (its token the credential) and the reads.
@@ -948,6 +951,27 @@ struct FetchQuery {
 async fn fetch_page(AxState(e): S, Path(id): Path<String>, Query(q): Query<FetchQuery>) -> crate::Result<Json<crate::engine::shell::FetchedPage>> {
     check_id(&id)?;
     Ok(Json(e.fetch(&id, q.service.as_deref(), &q.path, q.head).await?))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TryBody {
+    service: Option<String>,
+    path: String,
+    #[serde(default)]
+    steps: Vec<crate::settings::Step>,
+}
+
+/// A service's page in a browser, steps taken on it (stateless), for an agent checking its change.
+async fn try_page(AxState(e): S, Path(id): Path<String>, Json(b): Json<TryBody>) -> crate::Result<Json<crate::engine::shell::TryRun>> {
+    check_id(&id)?;
+    Ok(Json(e.try_page(&id, b.service.as_deref(), &b.path, &b.steps).await?))
+}
+
+async fn try_screenshot(AxState(e): S, Path((id, run)): Path<(String, String)>) -> crate::Result<Response> {
+    check_id(&id)?;
+    let png = e.try_screenshot(&id, &run)?;
+    Ok(([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "private, no-store")], png).into_response())
 }
 
 #[derive(serde::Deserialize)]
