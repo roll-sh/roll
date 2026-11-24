@@ -7,8 +7,8 @@
 //!
 //! Requests go out through rolld ([`Deliver::request`]): HTTPS to a public address, no redirects,
 //! the answer bounded, a timeout. Hosts are the vendors' own, except Okta's and Auth0's tenant
-//! domains, a self-managed GitLab's host and a Databricks workspace's, which are checked as
-//! hostnames and then go through the same guard; Datadog's site is one of its documented ones. The credential is
+//! domains, a self-managed GitLab's host, a Databricks workspace's, a SonarQube Server's and a
+//! Jenkins controller's, which are checked as hostnames and then go through the same guard; Datadog's site is one of its documented ones. The credential is
 //! sealed with the project's data key, bound to the registration's vendor and target, so a row
 //! pointed somewhere else no longer opens. Errors name the vendor and the status, never what a
 //! vendor answered.
@@ -127,6 +127,46 @@ pub enum Vendor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         environment: Option<String>,
     },
+    /// The credential is a user token of the user whose tokens rotate (on a Server, one that may
+    /// run analysis for the kind that rotates), on SonarQube Cloud (`sonarcloud.io`, user tokens
+    /// only) or a SonarQube Server `host`. Each key is a new token of `kind` with a name of its own
+    /// (SonarQube revokes by name); the old one is revoked after the grace period.
+    Sonarqube {
+        #[serde(default = "sonarcloud")]
+        host: String,
+        #[serde(default)]
+        kind: SonarToken,
+        /// The project a `project_analysis` token analyses (its key).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        /// Each token's lifetime in days (none: it lives until revoked, unless the server caps it).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expires_days: Option<u16>,
+    },
+    /// The credential is an API token of `user` on the Jenkins controller `host` (Jenkins lets only
+    /// a user make their own). Each key is a new API token of `user`, checked to work before it's
+    /// kept; the old one is revoked after the grace period.
+    Jenkins { host: String, user: String },
+}
+
+/// Which of SonarQube's tokens a registration rotates.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SonarToken {
+    /// A user token: the user's own permissions.
+    #[default]
+    User,
+    /// A global analysis token: runs analysis on any project the user may analyse (Server only).
+    GlobalAnalysis,
+    /// A project analysis token: runs analysis on `project` only (Server only).
+    ProjectAnalysis,
+}
+
+/// SonarQube Cloud's host; any other is a SonarQube Server.
+const SONARCLOUD: &str = "sonarcloud.io";
+
+fn sonarcloud() -> String {
+    SONARCLOUD.into()
 }
 
 fn databricks_days() -> u16 {
@@ -181,6 +221,8 @@ impl Vendor {
             Vendor::Cloudflare { .. } => "cloudflare",
             Vendor::Databricks { .. } => "databricks",
             Vendor::Confluent { .. } => "confluent",
+            Vendor::Sonarqube { .. } => "sonarqube",
+            Vendor::Jenkins { .. } => "jenkins",
         }
     }
 
@@ -270,6 +312,24 @@ impl Vendor {
                     return bad("a confluent target is {owner: the service account or user (sa-…, u-…), resource?: lkc-… or another resource (none: a Cloud API key), environment?: env-… (with resource)}");
                 }
             }
+            Vendor::Sonarqube { host, kind, project, expires_days } => {
+                *host = host.trim().to_ascii_lowercase();
+                let project_ok = match (*kind, project.as_deref()) {
+                    (SonarToken::ProjectAnalysis, Some(p)) => sonar_project(p),
+                    (SonarToken::ProjectAnalysis, None) => false,
+                    (_, p) => p.is_none(),
+                };
+                let cloud_ok = host.as_str() != SONARCLOUD || *kind == SonarToken::User;
+                if !hostname(host) || !project_ok || !cloud_ok || !expires_days.is_none_or(|d| (1..=730).contains(&d)) {
+                    return bad("a sonarqube target is {host?: sonarcloud.io or your SonarQube Server's host, kind?: \"user\" (default) | \"global_analysis\" | \"project_analysis\" (analysis tokens on a Server only), project?: the project's key (project_analysis only), expires_days?: 1-730 (none: no end)}");
+                }
+            }
+            Vendor::Jenkins { host, user } => {
+                *host = host.trim().to_ascii_lowercase();
+                if !hostname(host) || !jenkins_user(user) {
+                    return bad("a jenkins target is {host: the controller's host (ci.example.com), user: the Jenkins user whose API tokens rotate}");
+                }
+            }
         }
         Ok(self)
     }
@@ -292,6 +352,10 @@ impl Vendor {
             Vendor::Databricks { host, .. } => host.clone(),
             Vendor::Confluent { owner, resource: Some(r), .. } => format!("{owner} on {r}"),
             Vendor::Confluent { owner, .. } => format!("{owner} (Cloud API keys)"),
+            Vendor::Sonarqube { host, project: Some(p), .. } => format!("analysis tokens of {p} on {host}"),
+            Vendor::Sonarqube { host, kind: SonarToken::GlobalAnalysis, .. } => format!("global analysis tokens on {host}"),
+            Vendor::Sonarqube { host, .. } => format!("user tokens on {host}"),
+            Vendor::Jenkins { host, user } => format!("{user}'s API tokens on {host}"),
         }
     }
 
@@ -302,11 +366,13 @@ impl Vendor {
     }
 
     /// Days each key lives at the vendor, when the vendor ends it by itself: GitLab's
-    /// `expires_days`, Databricks' `lifetime_days`, Entra's two years. The rest live until revoked.
+    /// `expires_days`, Databricks' `lifetime_days`, SonarQube's `expires_days` when set, Entra's two
+    /// years. The rest live until revoked.
     fn lifetime_days(&self) -> Option<u64> {
         match self {
             Vendor::Gitlab { expires_days, .. } => Some(u64::from(*expires_days)),
             Vendor::Databricks { lifetime_days, .. } => Some(u64::from(*lifetime_days)),
+            Vendor::Sonarqube { expires_days, .. } => expires_days.map(u64::from),
             Vendor::Entra { .. } => Some(ENTRA_DAYS),
             _ => None,
         }
@@ -333,6 +399,8 @@ impl Vendor {
             Vendor::Cloudflare { .. } => ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_API_TOKEN_ID"),
             Vendor::Databricks { .. } => ("DATABRICKS_TOKEN", "DATABRICKS_TOKEN_ID"),
             Vendor::Confluent { .. } => ("CONFLUENT_API_SECRET", "CONFLUENT_API_KEY"),
+            Vendor::Sonarqube { .. } => ("SONAR_TOKEN", "SONAR_TOKEN_NAME"),
+            Vendor::Jenkins { .. } => ("JENKINS_API_TOKEN", "JENKINS_API_TOKEN_ID"),
         };
         FIELDS.iter().cloned().zip([secret, id]).map(|(f, suggest)| Field { suggest, ..f }).collect()
     }
@@ -355,6 +423,16 @@ fn id_ok(s: &str) -> bool {
 /// A GitLab project or group: its numeric id, or its full path (`group/sub/project`).
 fn gitlab_path(s: &str) -> bool {
     s.len() <= 1024 && s.split('/').all(|seg| !seg.is_empty() && seg.len() <= 255 && seg != "." && seg != ".." && seg.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)))
+}
+
+/// A SonarQube project key: letters, digits, `-_.:`, not only digits.
+fn sonar_project(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 400 && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_.:".contains(c)) && !s.chars().all(|c| c.is_ascii_digit())
+}
+
+/// A Jenkins user id as it goes in a URL path (`@` encoded where it's used).
+fn jenkins_user(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 128 && s != "." && s != ".." && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_.@".contains(c))
 }
 
 fn guid(s: &str) -> bool {
@@ -792,6 +870,60 @@ pub(crate) fn issue(d: &dyn Deliver, vendor: &Vendor, credential: &Value, label:
             let a: A = parse(vendor, step, &answer.unwrap_or_default())?;
             (a.spec.secret, a.id)
         }
+        Vendor::Sonarqube { host, kind, project, expires_days } => {
+            #[derive(Deserialize)]
+            struct A {
+                token: Value,
+            }
+            // SonarQube keeps one token per name and revokes by name: each gets a name of its own,
+            // which is its id.
+            let name = format!("{}-{}", label.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' }).take(40).collect::<String>(), names::new_id("", 10).trim_start_matches('_'));
+            let kind = match kind {
+                SonarToken::User => "USER_TOKEN",
+                SonarToken::GlobalAnalysis => "GLOBAL_ANALYSIS_TOKEN",
+                SonarToken::ProjectAnalysis => "PROJECT_ANALYSIS_TOKEN",
+            };
+            let day = expires_days.map(in_days);
+            let date = day.map(|day| format!("{:04}-{:02}-{:02}", day.year(), u8::from(day.month()), day.day()));
+            let mut pairs = vec![("name", name.as_str()), ("type", kind)];
+            if let Some(p) = project {
+                pairs.push(("projectKey", p.as_str()));
+            }
+            if let Some(date) = &date {
+                pairs.push(("expirationDate", date.as_str()));
+            }
+            let answer = send(d, vendor, step, "POST", &format!("https://{host}/api/user_tokens/generate"), &[("authorization", &sonar_auth(credential))], Some((FORM_TYPE, &form(&pairs))), false)?;
+            let a: A = parse(vendor, step, &answer.unwrap_or_default())?;
+            // Ended as that day starts (UTC), the earliest SonarQube might.
+            expires_at = day.map(|day| day.midnight().assume_utc().unix_timestamp() * 1000);
+            (a.token, name)
+        }
+        Vendor::Jenkins { host, user } => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Data {
+                token_uuid: String,
+                token_value: Value,
+            }
+            #[derive(Deserialize)]
+            struct A {
+                data: Data,
+            }
+            let auth = jenkins_auth(user, credential);
+            let crumb = jenkins_crumb(d, vendor, &auth, step)?;
+            let mut headers = vec![("authorization", &auth)];
+            headers.extend(crumb.iter().map(|(h, v)| (h.as_str(), v)));
+            let answer = send(d, vendor, step, "POST", &format!("{}/generateNewToken", jenkins_tokens(host, user)), &headers, Some((FORM_TYPE, &form(&[("newTokenName", &label)]))), false)?;
+            let a: A = parse(vendor, step, &answer.unwrap_or_default())?;
+            let uuid = key_id(vendor, a.data.token_uuid)?;
+            // The new token must work before roll keeps it (and, later, revokes the old one): one
+            // that doesn't is taken back, and the rotation fails with the old token in place.
+            if let Err(e) = jenkins_whoami(d, vendor, &jenkins_auth(user, &a.data.token_value), "verifying the new token") {
+                let _ = revoke(d, vendor, credential, &json!({ "id": uuid }));
+                return Err(e);
+            }
+            (a.data.token_value, uuid)
+        }
     };
     if secret.expose().is_empty() {
         return Err(Error::Link(format!("{} answered an empty secret", vendor.name())));
@@ -857,6 +989,16 @@ pub(crate) fn revoke(d: &dyn Deliver, vendor: &Vendor, credential: &Value, handl
         Vendor::Confluent { .. } => {
             send(d, vendor, step, "DELETE", &format!("{CONFLUENT_KEYS}/{id}"), &[("authorization", &confluent_auth(credential)?)], None, true)?;
         }
+        Vendor::Sonarqube { host, .. } => {
+            send(d, vendor, step, "POST", &format!("https://{host}/api/user_tokens/revoke"), &[("authorization", &sonar_auth(credential))], Some((FORM_TYPE, &form(&[("name", id)]))), true)?;
+        }
+        Vendor::Jenkins { host, user } => {
+            let auth = jenkins_auth(user, credential);
+            let crumb = jenkins_crumb(d, vendor, &auth, step)?;
+            let mut headers = vec![("authorization", &auth)];
+            headers.extend(crumb.iter().map(|(h, v)| (h.as_str(), v)));
+            send(d, vendor, step, "POST", &format!("{}/revoke", jenkins_tokens(host, user)), &headers, Some((FORM_TYPE, &form(&[("tokenUuid", id)]))), true)?;
+        }
         Vendor::Auth0 { .. } => unreachable!("returned above"),
     }
     Ok(())
@@ -919,11 +1061,73 @@ pub(crate) fn probe(d: &dyn Deliver, vendor: &Vendor, credential: &Value) -> Res
         Vendor::Confluent { owner, .. } => {
             send(d, vendor, step, "GET", &format!("{CONFLUENT_KEYS}?spec.owner={owner}&page_size=1"), &[("authorization", &confluent_auth(credential)?)], None, false)?;
         }
+        Vendor::Sonarqube { host, .. } => {
+            // The credential's own user's tokens: what generating and revoking act on.
+            send(d, vendor, step, "GET", &format!("https://{host}/api/user_tokens/search"), &[("authorization", &sonar_auth(credential))], None, false)?;
+        }
+        Vendor::Jenkins { user, .. } => {
+            jenkins_whoami(d, vendor, &jenkins_auth(user, credential), step)?;
+        }
     }
     Ok(())
 }
 
 const CONFLUENT_KEYS: &str = "https://api.confluent.cloud/iam/v2/api-keys";
+
+/// SonarQube's basic auth: the token as the login, no password (every Server version and Cloud).
+fn sonar_auth(credential: &Value) -> Value {
+    use base64::Engine;
+    Value::new(format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{}:", credential.expose()))))
+}
+
+/// Jenkins' basic auth: `user` and one of their API tokens.
+fn jenkins_auth(user: &str, token: &Value) -> Value {
+    use base64::Engine;
+    Value::new(format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{user}:{}", token.expose()))))
+}
+
+/// `user`'s API token actions on the controller `host`.
+fn jenkins_tokens(host: &str, user: &str) -> String {
+    format!("https://{host}/user/{}/descriptorByName/jenkins.security.ApiTokenProperty", user.replace('@', "%40"))
+}
+
+/// That `auth` signs in as the registration's user: Jenkins answers `whoami` for anyone, anonymous
+/// included, so the name is what counts.
+fn jenkins_whoami(d: &dyn Deliver, vendor: &Vendor, auth: &Value, step: &str) -> Result<()> {
+    let Vendor::Jenkins { host, user } = vendor else { unreachable!("only Jenkins has whoami") };
+    #[derive(Deserialize)]
+    struct A {
+        name: String,
+        #[serde(default)]
+        anonymous: bool,
+    }
+    let answer = send(d, vendor, step, "GET", &format!("https://{host}/whoami/api/json"), &[("authorization", auth)], None, false)?;
+    let a: A = parse(vendor, step, &answer.unwrap_or_default())?;
+    if a.anonymous || !a.name.eq_ignore_ascii_case(user) {
+        return Err(Error::Link(format!("jenkins didn't sign this token in as {user} {step}")));
+    }
+    Ok(())
+}
+
+/// Jenkins' CSRF crumb for a POST, as `(header, value)`; none where the controller issues none
+/// (404). Requests signed with an API token take it whether or not they need it.
+fn jenkins_crumb(d: &dyn Deliver, vendor: &Vendor, auth: &Value, step: &str) -> Result<Option<(String, Value)>> {
+    let Vendor::Jenkins { host, .. } = vendor else { unreachable!("only Jenkins has crumbs") };
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct A {
+        crumb: Value,
+        crumb_request_field: String,
+    }
+    let Some(answer) = send(d, vendor, step, "GET", &format!("https://{host}/crumbIssuer/api/json"), &[("authorization", auth)], None, true)? else { return Ok(None) };
+    let a: A = parse(vendor, step, &answer)?;
+    let field_ok = !a.crumb_request_field.is_empty() && a.crumb_request_field.len() <= 64 && a.crumb_request_field.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    let crumb_ok = !a.crumb.expose().is_empty() && a.crumb.expose().len() <= 256 && a.crumb.expose().chars().all(|c| c.is_ascii_graphic());
+    if !field_ok || !crumb_ok {
+        return Err(Error::Link(format!("jenkins answered a crumb roll can't send {step}")));
+    }
+    Ok(Some((a.crumb_request_field.to_ascii_lowercase(), a.crumb)))
+}
 
 /// A Cloudflare registration's tokens: the user's, or the account's.
 fn cloudflare_tokens(vendor: &Vendor) -> String {
