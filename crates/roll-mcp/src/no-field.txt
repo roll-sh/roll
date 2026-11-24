@@ -22,8 +22,6 @@ GET /v1/apps/services/{id}/environments/{env}/runs/{run}/logs follow            
 GET /v1/apps/services/{id}/environments/{env}/jobs/{job}/logs follow               a live stream (server-sent events): a tool answers once
 GET /v1/previews/{id}/logs follow                                                  a live stream (server-sent events): a tool answers once
 GET /v1/apps/services/{id}/environments/{env}/metrics format                       Prometheus text for a scraper; the tool answers JSON
-GET /v1/secrets/projects/{project}/environments/{env}/requests limit            paging (answers {requests, next}): roll MCP maps it next
-GET /v1/secrets/projects/{project}/environments/{env}/requests before           paging: a page's next (above); roll MCP maps it next
 GET /v1/secrets/projects/{project}/audit format                                    a CSV export for people; the tool answers JSON rows
 GET /v1/secrets/projects/{project}/environments/{env}/values format                a file to write (dotenv, docker, kubernetes…); the tool answers JSON (roll secrets export writes files)
 GET /v1/secrets/projects/{project}/environments/{env}/values name                  only with format=kubernetes (above)
