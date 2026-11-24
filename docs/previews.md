@@ -1760,8 +1760,13 @@ land on the change.
   choices aren't taken (the button keeps how many characters, never what). Roll's own browser
   does it, so the page's code still can't forge the picture. The crop says how it was taken
   (`crop_as` in the notes list, `X-Roll-Crop-As` on the picture: "390x844, after 2 steps";
-  the sheet's "As they saw it"). Its engine is Chromium's: a WebKit-only bug isn't shown yet.
-  `a_note_says_how_its_reviewer_saw_the_page`; live, a phone note after a click.
+  the sheet's "As they saw it"). In their browser's engine too (the note's "Safari 18 on iOS"):
+  every browser on iOS is WebKit at a phone's size, Safari elsewhere WebKit, Firefox Firefox;
+  those crops go to the other browsers' run (`browsers.js`, Playwright; it runs for them even
+  without `github.browsers`), the same viewport and steps, a 512 KiB picture at most, only for
+  a note asked; the label names the engine ("WebKit, 390x844, after 1 step"). Chromium's run
+  takes the rest. `a_note_says_how_its_reviewer_saw_the_page`; live, a Safari-on-iOS note after
+  a click, cropped in WebKit.
 - The open notes reach the pull request (Vercel's comments): the preview's own comment, updated
   in place, lists them (newest first, at most 10), each with its page, who and what as plain
   words (one line, markdown escaped: a note can't link, embed an image, mention or close
@@ -2738,10 +2743,10 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A note that shows what the reviewer saw, in review** (Jam's recordings): roll's browser
-   crops the note's element at the reviewer's viewport after their clicks and keys. Next for it:
-   in their browser's engine (WebKit for Safari, through the browsers run), and their typing
-   where the button can say what without saying the value (a field's length, a choice's index).
+1. **A note in its reviewer's engine, in review** (Jam's recordings): a Safari or Firefox
+   reviewer's note cropped in WebKit or Firefox through the other browsers' run. Next for it:
+   their typing where the button can say what without the value (a field's length, a choice's
+   index).
 2. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
    is kept only where the product puts a branch back in place, keeping its id (their delete
    guards check it); each needs its control plane's reset `from`, as pg-control's.
@@ -2762,6 +2767,9 @@ Ranked by what a person notices first. Done so far:
 
 
 
+
+
+Landed 2026-11-24, evening, later: a note's element cropped as its reviewer saw it (#932: their viewport, after their clicks).
 
 Landed 2026-11-24, evening: the first page in its visual group (#926), and a note's people told by mail (#929).
 
