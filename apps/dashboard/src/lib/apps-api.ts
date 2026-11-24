@@ -1635,7 +1635,7 @@ export const appsApi = {
   disconnectGitHub: (id: string) => call<Service>("DELETE", `${svc(id)}/github`),
   putEnvironment: (id: string, e: string, body: EnvironmentPut) => call<Environment>("PUT", env(id, e), body),
   /** A one-use way into a sign-in-gated environment, as the signed-in person: the URL to go on to. */
-  visit: (id: string, e: string, to: string) => call<{ url: string }>("POST", `${env(id, e)}/visit`, { to }),
+  visit: (id: string, e: string, to: string, state: string) => call<{ url: string }>("POST", `${env(id, e)}/visit`, { to, state }),
   removeEnvironment: (id: string, e: string) => call<null>("DELETE", env(id, e)),
 
   deploy: (id: string, e: string, body: NewDeploy = {}) => call<Deployment>("POST", `${env(id, e)}/deploys`, body),

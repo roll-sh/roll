@@ -291,14 +291,16 @@ needs the person signed in (`intent: "link"`).
 A product may gate what it serves on GitHub or Google vouching for someone who has no account
 here (roll apps' `access.sso`). `GET /v1/accounts/oauth/{provider}/visit?r=<request>&orgs=1`
 (public; `r` is the product's own request, at most 2048 URL-safe characters, kept as it came)
-starts the same flow as a sign-in, with the same browser-binding cookie, state, PKCE and checks,
-but as a visit (`intent` `visit`, or `visit_orgs` when `orgs=1` asks GitHub for `read:org` too).
+starts the same flow as a sign-in, with a browser-binding cookie of its own (`roll_visit_oauth`,
+so a visit and a sign-in to roll in two tabs don't undo each other), the same state, PKCE and
+checks, but as a visit (`intent` `visit`, or `visit_orgs` when `orgs=1` asks GitHub for `read:org` too).
 The callback reads the verified email (and for `visit_orgs`, the logins of the organisations from
 `GET /user/orgs`, the first 100) and hands them, with `r`, to the `VisitGate` rolld set
 (`Accounts::set_visit_gate`): its answer is where the browser goes (303), or why not, shown on a
-403 page of roll's own (never the dashboard's sign-in, and never an `?error=` redirect). No
+403 page of roll's own (never the dashboard's sign-in, and never an `?error=` redirect; a callback
+that comes back with the visit's cookie and no sign-in's, whatever went wrong, is a visit's). No
 account is made, no session is issued, no identity is linked, and nothing is recorded as a
-sign-in. `Accounts::visit_url` builds the start's URL for a product.
+sign-in. Google's `hd` (the Workspace domain) goes with the email. `Accounts::visit_url` builds the start's URL for a product.
 
 ### SSO (a company's OpenID Connect provider)
 
