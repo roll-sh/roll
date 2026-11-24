@@ -9,16 +9,35 @@ use crate::{Error, Result, Secrets, audit};
 use code_sql::params;
 
 impl Secrets {
-    /// Every project's links of `kind`, as `(project, ref, since)`, once each: `since` is the
-    /// earliest any of those rows was written (unix ms), so a caller can tell a resource made after
-    /// the link from the one it was made against.
+    /// Every project's links of `kind`, as `(project, ref, since)`, once each: `since` is when the
+    /// earliest of those rows was first written with the link it has now (unix ms: its earliest
+    /// version carrying that link, so a comment or tags edit, or a rollback, doesn't move it), so a
+    /// caller can tell a resource made after the link from the one it was made against. A row with
+    /// no such version counts as written at 0. Read a page at a time.
     pub fn link_refs(&self, kind: &str) -> Result<Vec<(String, String, i64)>> {
-        let rows: Vec<(String, String, i64)> = self.db.read(|c| c.query("SELECT project_id, link, updated_at FROM secrets WHERE link IS NOT NULL", params![], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?;
+        const PAGE: i64 = 500;
         let mut out: std::collections::BTreeMap<(String, String), i64> = std::collections::BTreeMap::new();
-        for (project, link, at) in rows {
-            let Some(l) = serde_json::from_str::<Link>(&link).ok().filter(|l| l.kind == kind) else { continue };
-            let since = out.entry((project, l.r#ref)).or_insert(at);
-            *since = (*since).min(at);
+        let mut after = String::new();
+        loop {
+            let rows: Vec<(String, String, String, Option<i64>)> = self.db.read(|c| {
+                c.query(
+                    "SELECT s.id, s.project_id, s.link, (SELECT MIN(v.at) FROM versions v WHERE v.secret_id = s.id AND v.link = s.link) FROM secrets s \
+                     WHERE s.link IS NOT NULL AND s.id > ? ORDER BY s.id LIMIT ?",
+                    params![after, PAGE],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+            })?;
+            let last = rows.len() < PAGE as usize;
+            for (id, project, link, at) in rows {
+                after = id;
+                let Some(l) = serde_json::from_str::<Link>(&link).ok().filter(|l| l.kind == kind) else { continue };
+                let at = at.unwrap_or(0);
+                let since = out.entry((project, l.r#ref)).or_insert(at);
+                *since = (*since).min(at);
+            }
+            if last {
+                break;
+            }
         }
         Ok(out.into_iter().map(|((project, r), since)| (project, r, since)).collect())
     }

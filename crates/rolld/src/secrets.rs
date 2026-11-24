@@ -1508,6 +1508,14 @@ impl roll_workspace::Owners for People {
             _ => Some(r#ref.to_string()),
         }
     }
+    /// A search cluster with an owner is a person's (a project's has none). A node that can't read
+    /// it says so (a move then waits for one that can).
+    fn has_person_owner(&self, kind: roll_workspace::Kind, r#ref: &str) -> bool {
+        match kind {
+            roll_workspace::Kind::Search => self.search.as_ref().is_none_or(|s| !matches!(s.store.owner_of(r#ref), Ok(None | Some(None)))),
+            _ => false,
+        }
+    }
 }
 
 /// After a product's own route changes a resource's credential (a password reset, a restore),

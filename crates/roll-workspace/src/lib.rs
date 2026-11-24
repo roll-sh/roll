@@ -227,6 +227,21 @@ pub type BeforeDelete = Box<dyn Fn(&Deleting<'_>) -> std::result::Result<(), Ref
 /// restore meanwhile). Quick and read-only; it may be asked again if the write re-runs.
 pub type InDelete = Box<dyn Fn(&str, &[(String, String)]) -> std::result::Result<(), Refusal> + Send + Sync>;
 
+/// Asked inside a project restore's transaction, after its members and groups are back, about each
+/// home its project kept, as `(kind, ref, project)`: whether it comes back ([`HomeBack`]). Quick and
+/// read-only; it may be asked again if the write re-runs. A [`Refusal`] stops the restore.
+pub type InRestore = Box<dyn Fn(Kind, &str, &str) -> std::result::Result<HomeBack, Refusal> + Send + Sync>;
+
+/// What [`InRestore`] says of a kept home.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HomeBack {
+    Yes,
+    /// It goes with the deleted project's other kept rows.
+    No,
+    /// Only if this person is an admin or owner of the restored project.
+    IfManagedBy(String),
+}
+
 /// Called after a project is deleted, outside the transaction (roll secrets keeps its secrets for
 /// a recovery window).
 pub type OnDelete = Box<dyn Fn(&Deleting<'_>) + Send + Sync>;
@@ -250,6 +265,13 @@ pub trait Owners: Send + Sync {
         let _ = kind;
         Some(r#ref.to_string())
     }
+    /// Whether `kind ref` (by its id) belongs to a person, not to a project: a home that holds one
+    /// is still being settled (from before members, or a hand-over not done yet), so only that
+    /// person or the operator moves it. Default: nothing is.
+    fn has_person_owner(&self, kind: Kind, r#ref: &str) -> bool {
+        let _ = (kind, r#ref);
+        false
+    }
 }
 
 /// The workspace store.
@@ -265,6 +287,7 @@ pub struct Workspace {
     on_event: std::sync::RwLock<Vec<members::OnEvent>>,
     on_homed: std::sync::RwLock<Vec<members::OnHomed>>,
     in_delete: std::sync::RwLock<Vec<InDelete>>,
+    in_restore: std::sync::RwLock<Vec<InRestore>>,
 }
 
 impl Workspace {
@@ -303,7 +326,7 @@ impl Workspace {
         })?;
         // Members came after owners: every project's maker is its owner.
         db.migrate("workspace-members", members::migrate)?;
-        Ok(Workspace { db, before_delete: Default::default(), on_delete: Default::default(), owners: Default::default(), people: Default::default(), grants: Default::default(), web_url: Default::default(), on_event: Default::default(), on_homed: Default::default(), in_delete: Default::default() })
+        Ok(Workspace { db, before_delete: Default::default(), on_delete: Default::default(), owners: Default::default(), people: Default::default(), grants: Default::default(), web_url: Default::default(), on_event: Default::default(), on_homed: Default::default(), in_delete: Default::default(), in_restore: Default::default() })
     }
 
     /// Every project `scope` sees, with its resources, oldest first.
@@ -493,7 +516,7 @@ impl Workspace {
             }
             // Its homes come back where nothing else holds one: what a product does when something
             // gets a home back runs for those.
-            homes = c.query(
+            let kept: Vec<(String, String)> = c.query(
                 "SELECT kind, ref FROM deleted_homes d WHERE project_id = ? AND NOT EXISTS (SELECT 1 FROM homes h WHERE h.kind = d.kind AND h.ref = d.ref)",
                 [id],
                 |r| Ok((r.get(0)?, r.get(1)?)),
@@ -508,6 +531,14 @@ impl Workspace {
             members::bring_back(c, id)?;
             // Groups' roles too, except those of groups deleted since (each in the audit log).
             groups::bring_back(c, id, now)?;
+            // Each kept home a product lets come back, decided here with the project's members
+            // back, so nothing can act on a home in between (the rest go with the kept rows).
+            for (kind, r#ref) in kept {
+                if self.home_comes_back(c, id, &kind, &r#ref)? {
+                    members::bring_back_home(c, id, &kind, &r#ref)?;
+                    homes.push((kind, r#ref));
+                }
+            }
             forget_deleted_rows(c, id)?;
             load(c, id)
         })?;
@@ -520,6 +551,23 @@ impl Workspace {
         }
         self.run_events();
         Ok(p)
+    }
+
+    /// Whether every [`InRestore`] lets `kind ref`'s kept home in `project` come back.
+    fn home_comes_back(&self, c: &code_sql::Conn<'_>, project: &str, kind: &str, r#ref: &str) -> Result<bool> {
+        let Ok(k) = Kind::parse(kind) else { return Ok(true) };
+        for f in self.in_restore.read().expect("in_restore").iter() {
+            match f(k, r#ref, project).map_err(Error::Refused)? {
+                HomeBack::Yes => {}
+                HomeBack::No => return Ok(false),
+                HomeBack::IfManagedBy(user) => {
+                    if !matches!(groups::effective_role(c, project, &user)?, Some(roll_auth::roles::Role::Admin | roll_auth::roles::Role::Owner)) {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+        Ok(true)
     }
 
     /// Stop keeping a deleted project (a product purged what it kept of it).
@@ -540,6 +588,11 @@ impl Workspace {
     /// may bring it back.
     pub fn trusts_deleted(&self, project: &Project, kind: Kind, r#ref: &str) -> bool {
         project.owner.is_empty() || self.trusted_when_deleted(&project.id, &project.owner, kind, r#ref)
+    }
+
+    /// Ask `f` inside each project restore's transaction about each kept home ([`InRestore`]).
+    pub fn in_restore(&self, f: InRestore) {
+        self.in_restore.write().expect("in_restore").push(f);
     }
 
     /// Ask `f` inside each project delete's transaction ([`InDelete`]): a [`Refusal`] stops it.

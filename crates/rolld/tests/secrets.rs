@@ -489,6 +489,8 @@ async fn a_search_link_made_by_name_is_kept_by_id_at_the_next_start() {
     let db = rusqlite::Connection::open(home.path().join("secrets.db")).unwrap();
     let n = db.execute("UPDATE secrets SET link = replace(link, ?1, ?2) WHERE project_id = ?3", [format!("\"ref\":\"{id}\""), "\"ref\":\"named\"".to_string(), project.clone()]).unwrap();
     assert_eq!(n, 1);
+    // Its versions carry that link too, as an old link's did from when it was written.
+    db.execute("UPDATE versions SET link = (SELECT s.link FROM secrets s WHERE s.id = versions.secret_id) WHERE project_id = ?1 AND link IS NOT NULL", [&project]).unwrap();
     drop(db);
     let r = Rolld::start_in(home.clone(), "search", false, &[], "/v1/info").await;
     let p = Project { rolld: &r, id: project };
@@ -509,8 +511,8 @@ async fn a_search_link_made_by_name_is_kept_by_id_at_the_next_start() {
 /// A link by name is kept by id only for a cluster the project trusts that existed when the link
 /// was written: once the name is freed, a project developer's own cluster that takes it (on the
 /// canvas, not at home there) isn't trusted, and a cluster at home there that was made, or
-/// restored, after the link's last write isn't the one it meant. Either way the link stays by
-/// name (and fails).
+/// restored, after the link was first written isn't the one it meant, even once a comment edit
+/// has written the row since. Either way the link stays by name (and fails).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_search_link_by_name_is_never_rekeyed_to_a_cluster_that_took_the_name_later() {
     let home = Arc::new(tempfile::tempdir().unwrap());
@@ -545,11 +547,22 @@ async fn a_search_link_by_name_is_never_rekeyed_to_a_cluster_that_took_the_name_
         c
     };
     let (secrets, search, ws) = (open(home.path().join("secrets.db")), open(home.path().join("search").join("search.db")), open(home.path().join("workspace.db")));
-    // Stopped: the link names "logs", as an old one did, and was last written long after the
-    // cluster now called that was made (only trust decides). The project is a person's, and the
-    // cluster is one of its developers' own.
-    let n = secrets.execute("UPDATE secrets SET link = replace(link, ?1, '\"ref\":\"logs\"'), updated_at = 9999999999999 WHERE project_id = ?2 AND key = 'ELASTICSEARCH_URL'", [format!("\"ref\":\"{first}\""), project.clone()]).unwrap();
+    // A key's link as it is now, as first written at `at` (unix ms): its versions carry it from then.
+    let written = |key: &str, at: i64| {
+        let n = secrets
+            .execute(
+                "UPDATE versions SET link = (SELECT s.link FROM secrets s WHERE s.id = versions.secret_id), at = ?1 WHERE secret_id = (SELECT id FROM secrets WHERE project_id = ?2 AND key = ?3)",
+                rusqlite::params![at, project, key],
+            )
+            .unwrap();
+        assert!(n >= 1);
+    };
+    // Stopped: the link names "logs", as an old one did, and was written long after the cluster
+    // now called that was made (only trust decides). The project is a person's, and the cluster
+    // is one of its developers' own.
+    let n = secrets.execute("UPDATE secrets SET link = replace(link, ?1, '\"ref\":\"logs\"') WHERE project_id = ?2 AND key = 'ELASTICSEARCH_URL'", [format!("\"ref\":\"{first}\""), project.clone()]).unwrap();
     assert_eq!(n, 1);
+    written("ELASTICSEARCH_URL", 9_999_999_999_999);
     ws.execute("UPDATE projects SET owner = 'usr_ada' WHERE id = ?1", [&project]).unwrap();
     for (user, role) in [("usr_ada", "owner"), ("usr_dev", "developer")] {
         ws.execute("INSERT INTO members (project_id, user_id, role, environments, added_by, added_at) VALUES (?1, ?2, ?3, NULL, 'operator', 0)", [project.as_str(), user, role]).unwrap();
@@ -559,8 +572,9 @@ async fn a_search_link_by_name_is_never_rekeyed_to_a_cluster_that_took_the_name_
     let control_ref = || secrets.query_row("SELECT link FROM secrets WHERE project_id = ?1 AND key = 'ZZ_URL'", [&project], |r| r.get::<_, String>(0)).unwrap();
     // Before each start, the control names its cluster by name again.
     let control_by_name = || {
-        let n = secrets.execute("UPDATE secrets SET link = replace(link, ?1, '\"ref\":\"zz\"'), updated_at = 9999999999999 WHERE project_id = ?2 AND key = 'ZZ_URL'", [format!("\"ref\":\"{control}\""), project.clone()]).unwrap();
+        let n = secrets.execute("UPDATE secrets SET link = replace(link, ?1, '\"ref\":\"zz\"') WHERE project_id = ?2 AND key = 'ZZ_URL'", [format!("\"ref\":\"{control}\""), project.clone()]).unwrap();
         assert_eq!(n, 1);
+        written("ZZ_URL", 9_999_999_999_999);
     };
     // The start's pass over the links, through the control it rekeys after the link under test.
     let decided = || {
@@ -574,14 +588,21 @@ async fn a_search_link_by_name_is_never_rekeyed_to_a_cluster_that_took_the_name_
     let r = Rolld::start_in(home.clone(), "search", false, &[], "/v1/info").await;
     decided();
     assert!(link_ref().contains("\"ref\":\"logs\""), "not rekeyed to a cluster the project doesn't trust: {}", link_ref());
-    // At home in the project (trusted), but made after the link's last write.
+    // At home in the project (trusted), but made after the link was written.
     r.call(reqwest::Method::PUT, &format!("/v1/workspace/projects/{project}/homes/search/{taken}"), None).await;
     drop(r);
-    secrets.execute("UPDATE secrets SET updated_at = 1000 WHERE project_id = ?1 AND key = 'ELASTICSEARCH_URL'", [&project]).unwrap();
+    written("ELASTICSEARCH_URL", 1000);
     control_by_name();
     let r = Rolld::start_in(home.clone(), "search", false, &[], "/v1/info").await;
     decided();
     assert!(link_ref().contains("\"ref\":\"logs\""), "not rekeyed to a cluster made after the link: {}", link_ref());
+    // A comment edit writes the row now, keeping its link: the link is no newer for it.
+    r.post(&format!("/v1/secrets/projects/{project}/environments/production/changes"), json!({ "ops": [{ "op": "set", "key": "ELASTICSEARCH_URL", "comment": "edited" }] })).await;
+    drop(r);
+    control_by_name();
+    let r = Rolld::start_in(home.clone(), "search", false, &[], "/v1/info").await;
+    decided();
+    assert!(link_ref().contains("\"ref\":\"logs\""), "not rekeyed after a comment edit: {}", link_ref());
     drop(r);
     // Made before it, but restored after it.
     search.execute("UPDATE search_clusters SET created_at = 0, restored_at = 2 WHERE id = ?1", [&taken]).unwrap();

@@ -801,6 +801,8 @@ pub struct Control {
     on_branch: OnceLock<OnBranch>,
     /// Told of each cluster purged for good ([`Control::on_purged`]).
     on_purged: OnceLock<OnPurged>,
+    /// Told of each cluster that came back to life ([`Control::on_revived`]).
+    on_revived: OnceLock<OnPurged>,
     /// Whether a remote link's maker may still administer its target ([`Control::set_link_makers`]).
     pub(crate) link_makers: OnceLock<crate::remotes::LinkMakers>,
 }
@@ -911,6 +913,7 @@ impl Control {
             secret_refs,
             on_branch: OnceLock::new(),
             on_purged: OnceLock::new(),
+            on_revived: OnceLock::new(),
             link_makers: OnceLock::new(),
         });
         // Nothing can load before the node is handed out, so the hook always finds the control.
@@ -1033,6 +1036,19 @@ impl Control {
     /// keeps a project's trust in it). A delete kept for restoring isn't a purge. Once.
     pub fn on_purged(&self, f: OnPurged) {
         let _ = self.on_purged.set(f);
+    }
+
+    /// Tell `f` of each cluster that's live again after something else could see it gone: a
+    /// delete that failed (un-hidden) or a restore, once it's committed (rolld: a project deleted
+    /// meanwhile keeps no home for it). Once.
+    pub fn on_revived(&self, f: OnPurged) {
+        let _ = self.on_revived.set(f);
+    }
+
+    fn revived(&self, id: &str) {
+        if let Some(f) = self.on_revived.get() {
+            f(id);
+        }
     }
 
     /// A person made `branch` of `parent` through the API ([`Control::on_branch`]). The
@@ -1620,6 +1636,7 @@ impl Control {
                     tracing::warn!(cluster = c.name, error = %e, "un-hiding a search cluster after a failed delete failed");
                 }
                 self.apply_spec(&c.name).await;
+                self.revived(&c.id);
             }
         }
         r
@@ -1774,6 +1791,7 @@ impl Control {
                 return Err(over(o));
             }
         }
+        self.revived(&d.cluster.id);
         // Credentials revoked while it was deleted, before anything else (the sweep retries a
         // failure).
         self.apply_revokes(&d.cluster.id).await;

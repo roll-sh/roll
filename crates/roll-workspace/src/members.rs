@@ -800,6 +800,8 @@ impl Workspace {
         // A person makes a project the home of only what's their own (`Owners`): their grant's rules
         // can name any resource, so they prove nothing about whose it is.
         let owns = actor.user.as_deref().is_none_or(|u| self.owned_by(u, kind, r#ref));
+        // A person's own resource at home in a project (one being settled) moves only with them.
+        let persons = !owns && self.owners.get().is_some_and(|o| o.has_person_owner(kind, r#ref));
         let now = self.db.now_ms()?;
         let changed = self.db.write(|c| {
             owner_of(c, actor.scope(), project)?;
@@ -814,6 +816,9 @@ impl Workspace {
                         && !matches!(crate::groups::effective_role(c, &from, user)?, Some(Role::Admin | Role::Owner))
                     {
                         return Err(Error::Forbidden(format!("{} {} is at home in another project: only its admins move it", kind.as_str(), r#ref)));
+                    }
+                    if persons {
+                        return Err(Error::Forbidden(format!("{} {} is still a person's own: only they or the operator move its home", kind.as_str(), r#ref)));
                     }
                     c.execute("UPDATE homes SET project_id = ?, set_by = ?, set_at = ? WHERE kind = ? AND ref = ?", params![project, actor.id, now, kind.as_str(), r#ref])?;
                 }
@@ -852,6 +857,25 @@ impl Workspace {
         })?)
     }
 
+    /// [`Workspace::homes`] a page at a time: up to `limit` homes of `kind` after the ref `after`.
+    pub fn homes_page(&self, kind: Kind, after: &str, limit: i64) -> Result<Vec<HomeRow>> {
+        Ok(self.db.read(|c| {
+            c.query("SELECT ref, project_id, set_by, set_at FROM homes WHERE kind = ? AND ref > ? ORDER BY ref LIMIT ?", params![kind.as_str(), after, limit], |r| {
+                Ok(HomeRow { r#ref: r.get(0)?, project: r.get(1)?, set_by: r.get(2)?, set_at: r.get(3)? })
+            })
+        })?)
+    }
+
+    /// `kind ref`'s home, if it has one.
+    pub fn home_row(&self, kind: Kind, r#ref: &str) -> Result<Option<HomeRow>> {
+        Ok(self.db.read(|c| {
+            c.query_row("SELECT ref, project_id, set_by, set_at FROM homes WHERE kind = ? AND ref = ?", [kind.as_str(), r#ref], |r| {
+                Ok(HomeRow { r#ref: r.get(0)?, project: r.get(1)?, set_by: r.get(2)?, set_at: r.get(3)? })
+            })
+            .optional()
+        })?)
+    }
+
     /// Every home in `project`, as `(kind, ref)`.
     pub fn homes_of_project(&self, project: &str) -> Result<Vec<(String, String)>> {
         self.db.read(|c| homes_of(c, project))
@@ -861,12 +885,17 @@ impl Workspace {
     /// earliest it was placed or made a home (unix ms): what a product checks is still the id it
     /// stood for.
     pub fn refs_of(&self, kind: Kind) -> Result<Vec<(String, i64)>> {
+        self.refs_page(kind, "", i64::MAX)
+    }
+
+    /// [`Workspace::refs_of`] a page at a time: up to `limit` refs after `after`.
+    pub fn refs_page(&self, kind: Kind, after: &str, limit: i64) -> Result<Vec<(String, i64)>> {
         let k = kind.as_str();
         Ok(self.db.read(|c| {
             c.query(
-                "SELECT ref, MIN(at) FROM (SELECT ref, added_at AS at FROM resources WHERE kind = ?1 UNION ALL SELECT ref, added_at FROM deleted_resources WHERE kind = ?1 \
-                 UNION ALL SELECT ref, set_at FROM homes WHERE kind = ?1 UNION ALL SELECT ref, set_at FROM deleted_homes WHERE kind = ?1) t GROUP BY ref ORDER BY ref",
-                params![k],
+                "SELECT ref, MIN(at) FROM (SELECT ref, added_at AS at FROM resources WHERE kind = ?1 AND ref > ?2 UNION ALL SELECT ref, added_at FROM deleted_resources WHERE kind = ?1 AND ref > ?2 \
+                 UNION ALL SELECT ref, set_at FROM homes WHERE kind = ?1 AND ref > ?2 UNION ALL SELECT ref, set_at FROM deleted_homes WHERE kind = ?1 AND ref > ?2) t GROUP BY ref ORDER BY ref LIMIT ?3",
+                params![k, after, limit],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
         })?)
@@ -899,6 +928,21 @@ impl Workspace {
     pub fn drop_home(&self, kind: Kind, r#ref: &str, project: &str) -> Result<()> {
         self.db.write(|c| c.execute("DELETE FROM homes WHERE kind = ? AND ref = ? AND project_id = ?", [kind.as_str(), r#ref, project]).map(|_| ()))?;
         Ok(())
+    }
+
+    /// The operator's: `kind ref` came back to life (a delete that failed, a restore) after the
+    /// project it was at home in was deleted. If it has no home now, the homes deleted projects
+    /// keep of it go, so it's no one's but the operator's and no restore hands it back. The
+    /// projects those homes were in.
+    pub fn drop_kept_homes(&self, kind: Kind, r#ref: &str) -> Result<Vec<String>> {
+        self.db.write(|c| {
+            if c.query_row("SELECT 1 FROM homes WHERE kind = ? AND ref = ?", [kind.as_str(), r#ref], |r| r.get::<_, i64>(0)).optional()?.is_some() {
+                return Ok(Vec::new());
+            }
+            let projects: Vec<String> = c.query("SELECT project_id FROM deleted_homes WHERE kind = ? AND ref = ? ORDER BY project_id", [kind.as_str(), r#ref], |r| r.get(0))?;
+            c.execute("DELETE FROM deleted_homes WHERE kind = ? AND ref = ?", [kind.as_str(), r#ref])?;
+            Ok::<_, Error>(projects)
+        })
     }
 
     /// The operator's: what deleted projects keep of `kind ref` (places and homes, for their
@@ -1205,7 +1249,15 @@ pub(crate) fn bring_back(c: &Conn<'_>, project: &str) -> Result<()> {
         "INSERT INTO members (project_id, user_id, role, environments, added_by, added_at) SELECT project_id, user_id, role, environments, added_by, added_at FROM deleted_members WHERE project_id = ? ON CONFLICT (project_id, user_id) DO NOTHING",
         [project],
     )?;
-    c.execute("INSERT INTO homes (kind, ref, project_id, set_by, set_at) SELECT kind, ref, project_id, set_by, set_at FROM deleted_homes WHERE project_id = ? ON CONFLICT (kind, ref) DO NOTHING", [project])?;
+    Ok(())
+}
+
+/// One kept home of a deleted project back (its restore decided it comes back).
+pub(crate) fn bring_back_home(c: &Conn<'_>, project: &str, kind: &str, r#ref: &str) -> Result<()> {
+    c.execute(
+        "INSERT INTO homes (kind, ref, project_id, set_by, set_at) SELECT kind, ref, project_id, set_by, set_at FROM deleted_homes WHERE project_id = ? AND kind = ? AND ref = ? ON CONFLICT (kind, ref) DO NOTHING",
+        [project, kind, r#ref],
+    )?;
     Ok(())
 }
 

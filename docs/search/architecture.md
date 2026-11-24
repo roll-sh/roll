@@ -379,33 +379,47 @@ evaluator and search's catalogue rows. search adds no role checks of its own.
   its home and has no owner: it's the project's, so whoever made it loses it when they leave
   the project. Any cluster homed now is handed to the project this way (rolld's `on_homed`): a
   person's own one homed by hand (`PUT …/homes`), a branch a person makes, which takes its
-  parent's home, or a home said again. A home that comes back with its project's restore is
-  settled as what's kept from before is (below), since nobody decided it now. A create is
+  parent's home, or a home said again. A home being settled (the cluster still a person's own)
+  moves only with that person or the operator (403 for anyone else, its project's admins too),
+  and a branch of such a cluster takes no home: it's that person's as well. A project's restore
+  brings a kept home back only for a cluster that's the project's, one whose hand-over to that
+  project is owed, or one whose owner is an admin or owner there once its members are back. That's
+  decided inside the restore's transaction; the rest go with its kept rows, and those that come
+  back are settled as what's kept from before is (below). A create is
   its maker's until its home hands it over, so a placement that fails leaves it theirs, never no
   one's. Canvases and homes keep a cluster by its id, never a name another cluster could take
   once it's gone (a name is resolved as it's placed or homed, and an owner answers for ids only; a
   node without roll search places none). rolld puts what's kept from before right at every start,
-  and the homes again every five minutes:
+  before its API listens, and the homes again every five minutes. On a fleet only the node
+  holding the singleton lease `search:homes` runs these passes, reading a page of rows at a time:
   - a ref kept by a name becomes the id of the cluster that name names, if that cluster existed,
     and wasn't restored, since before the ref was placed or homed; otherwise its places and homes
     go, deleted projects' too;
   - a homed cluster with an owner who's an admin or owner of the project is handed over, as is
     one whose hand-over was decided when its home was set and failed (recorded as owed in
-    `search_handovers` before it's done, never inferred from times);
-  - any other home of an owned cluster goes (that home only, in that project), and is reported;
+    `search_handovers` before it's done, never inferred from times). That record is search's,
+    written after the workspace's commit: a crash in between loses it, and then the home is
+    dropped at the next pass and the cluster stays its owner's (it fails closed);
+  - any other home of an owned cluster goes (that home only, in that project), logged at warn with
+    the cluster's id;
   - a roll secrets search link by a name (the provider once took names, and now refuses them) is
     rewritten to the id that name names, when that cluster is on the link's project's canvas, the
     project trusts it (`Workspace::trusts`, as links are written), and it was made and last
-    restored no later than the link (`Secrets::rekey_links`, audited as `link.rekey`). Any other stays as it is
-    and keeps failing visibly. Only the current versions are rewritten: older versions of a secret
-    keep the cluster's name in their link, so rolling a key back to a version from before the
-    rekey brings the name back, and it fails visibly until it's linked by id again.
+    restored no later than the link was first written as it is now: its earliest version carrying
+    that link, so editing a comment or tags doesn't move it (`Secrets::link_refs`). The rewrite is
+    `Secrets::rekey_links`, audited as `link.rekey`. Any other link stays as it is and keeps
+    failing visibly. Only the current versions are rewritten; older versions keep the name in
+    their link, and rolling back to one is refused (400), as writing any link by a name is: link
+    the key by id again instead.
 
   A stranger's cluster dropped on the project's canvas reaches nobody through it, and a purged
   cluster leaves every canvas. A project still home to live clusters can't be deleted (409); when
   that can't be read, or on a node without roll search, the delete is answered 503. Inside the
 delete's transaction, a home made in the project meanwhile, or one whose cluster came alive
-meanwhile (a restore), refuses it too (409, try again).
+meanwhile (a restore), refuses it too (409, try again). That check reads search's catalog on its
+own, so the other half is search's: a cluster that comes back to life (a failed delete, a
+restore) after its home project was deleted anyway keeps no home there, and is the operator's
+(`Workspace::drop_kept_homes`).
 
   | role | what they may do to the project's clusters |
   | --- | --- |
