@@ -82,6 +82,8 @@ export interface Build {
   watch?: string[];
   /** A single-page app (a page path with no file answers index.html); unset: detected. */
   spa?: boolean;
+  /** Where a static build's files are (Netlify's publish directory): a Node app with one is served as a static site. */
+  output?: string;
   /** The Dockerfile's stage to build (a multi-stage one whose last stage isn't what runs). */
   target?: string;
   /** System packages the generated Dockerfile installs (apt, or apk on Alpine): `ffmpeg`, `chromium`. */

@@ -33,6 +33,23 @@ fn clean(s: &str) -> Option<&str> {
     (!s.is_empty() && !s.contains(char::is_whitespace) && !s.contains(['\r', '\n', '#'])).then_some(s)
 }
 
+/// Where a static build's files are, as the platform's own file says: netlify.toml's `[build]
+/// publish`, else vercel.json's `outputDirectory` (with which file said so). A path that would
+/// leave the tree is no answer.
+pub fn publish_dir(tree: &dyn crate::Tree) -> Option<(String, &'static str)> {
+    let text = |f: &str| tree.read(f).and_then(|b| String::from_utf8(b).ok());
+    let clean = |d: &str| {
+        let d = d.trim().trim_start_matches("./").trim_end_matches('/');
+        crate::tree::valid(d).then(|| d.to_string())
+    };
+    let netlify = text("netlify.toml").and_then(|t| t.parse::<toml::Table>().ok()).and_then(|t| t.get("build")?.get("publish")?.as_str().and_then(clean));
+    if let Some(d) = netlify {
+        return Some((d, "netlify.toml's publish"));
+    }
+    let vercel = text("vercel.json").and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v["outputDirectory"].as_str().and_then(clean));
+    vercel.map(|d| (d, "vercel.json's outputDirectory"))
+}
+
 /// `netlify.toml`'s redirects and headers.
 pub fn from_netlify(text: &str) -> Converted {
     let mut out = Converted::default();
