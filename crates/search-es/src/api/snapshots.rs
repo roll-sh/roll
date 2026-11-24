@@ -49,10 +49,14 @@ use std::sync::Arc;
 
 mod analyze;
 mod cloud;
+mod elastic;
+mod elastic_restore;
 mod refs;
 mod s3;
 mod transfer;
 pub use analyze::analyze_repository;
+pub use elastic::decode_id as decode_elasticsearch_id;
+pub use elastic_restore::{ShardView as RestoringShard, resume as resume_elasticsearch_restores};
 pub use s3::ALLOW_PRIVATE as S3_ALLOW_PRIVATE;
 pub(crate) use cloud::{AZURE_CONTAINER, seal_stored_secrets};
 
@@ -79,9 +83,14 @@ pub struct SnapshotData {
     /// Each repository's bucket traffic here, by name: throttles and counters.
     io: parking_lot::Mutex<std::collections::HashMap<String, Arc<transfer::RepoIo>>>,
     /// The cluster's `indices.recovery.max_bytes_per_sec`, which restores also pay.
-    recovery: transfer::RateLimiter,
+    recovery: Arc<transfer::RateLimiter>,
     /// Repositories' resolved credential references, kept while their digests stay the same.
     refs: refs::KeptRefs,
+    /// Restores from repositories Elasticsearch wrote, running here.
+    elastic: elastic_restore::Running,
+    /// The repository data last parsed of each Elasticsearch repository, by location: a
+    /// generation is written once, so the same generation isn't read and parsed again.
+    elastic_data: parking_lot::Mutex<std::collections::HashMap<String, elastic::CachedData>>,
 }
 
 impl SnapshotData {
@@ -91,6 +100,12 @@ impl SnapshotData {
         transfer::apply_rates(&io, &r.settings);
         self.recovery.set(transfer::recovery_rate(st));
         io
+    }
+
+    /// The shards of index `uuid` while a restore from an Elasticsearch repository fills them
+    /// (`_recovery`).
+    pub fn elastic_shards(&self, uuid: &str) -> Option<Vec<elastic_restore::ShardView>> {
+        self.elastic.progress(uuid).map(|p| p.iter().map(|s| s.view()).collect())
     }
 
     /// `_nodes/stats` `repositories.<name>`.
@@ -553,7 +568,11 @@ fn validate_repository_name(name: &str) -> EsResult<()> {
 
 /// `path.repo` of the node.
 fn repo_paths(ctx: &Ctx) -> Vec<String> {
-    ctx.cluster.config.node_setting("path.repo").map(|v| v.split(',').map(|p| p.trim().trim_end_matches('/').to_string()).filter(|p| !p.is_empty()).collect()).unwrap_or_default()
+    cluster_repo_paths(ctx.cluster)
+}
+
+fn cluster_repo_paths(cluster: &crate::Cluster) -> Vec<String> {
+    cluster.config.node_setting("path.repo").map(|v| v.split(',').map(|p| p.trim().trim_end_matches('/').to_string()).filter(|p| !p.is_empty()).collect()).unwrap_or_default()
 }
 
 /// `Environment.resolveRepoDir`: a relative location resolves under the first `path.repo`; an
@@ -701,6 +720,9 @@ pub fn validate_default_repository(md: &Metadata, value: &str) -> EsResult<()> {
 pub async fn put_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
     ctx.validate_timeouts()?;
     let name = ctx.path_param("repository").unwrap_or_default().to_string();
+    let registered_name = name.clone();
+    // Registered again, maybe elsewhere: what was kept of its Elasticsearch data goes.
+    elastic::forget(ctx.cluster, &name);
     let verify = ctx.bool_param("verify", true)?;
     let body = ctx.body_map()?.unwrap_or_default();
     let ty = body.get("type").map(Value::to_es_string);
@@ -727,7 +749,10 @@ pub async fn put_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
     if repo.settings.get("readonly").is_none() && crate::branch::inherited_location(ctx.cluster, &ctx.state(), &repo) {
         repo.settings.set("readonly", "true");
     }
-    let registering = name.clone();
+    // A location where someone else keeps a repository under roll's prefix isn't registered.
+    if repo.in_bucket() && verify {
+        s3::refuse_foreign(ctx.cluster, &name, &repo, false).await?;
+    }
     // A bucket is checked once registered (a write, a read and a delete); a repository that
     // fails stays registered, as on Elasticsearch, and the error is the answer.
     let registered = (repo.in_bucket() && verify).then(|| (name.clone(), repo.clone()));
@@ -753,13 +778,33 @@ pub async fn put_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
             Ok(())
         })
         .await?;
-    refs::forget(ctx.cluster, &registering);
+    // Without `verify`, nothing is read or written at registration, as on Elasticsearch.
+    if !verify {
+        return Reply::acknowledged();
+    }
+    // A repository Elasticsearch wrote is read only: its snapshots list from its own data, and
+    // no test object goes into it.
+    if elastic_repository(ctx, &registered_name).await? {
+        return Reply::acknowledged();
+    }
     // The snapshots already in the bucket show from now on.
     if let Some((name, repo)) = registered {
         s3::verify(ctx.cluster, &name, &repo).await?;
         s3::refresh(ctx.cluster, &name, &repo).await?;
     }
     Reply::acknowledged()
+}
+
+/// Whether repository `name` holds a repository Elasticsearch wrote ([`elastic`]), reading its
+/// data into the cluster's copy first.
+async fn elastic_repository(ctx: &Ctx<'_>, name: &str) -> EsResult<bool> {
+    let Some(r) = ctx.state().metadata.repositories.get(name).cloned() else { return Ok(false) };
+    Ok(elastic::sync(ctx.cluster, name, &r).await?.is_some())
+}
+
+/// What writing to a repository Elasticsearch wrote answers.
+fn elastic_read_only(name: &str, what: &str) -> EsError {
+    repository_exception(name, format!("cannot {what} in a readonly repository: Elasticsearch wrote this repository, and roll never writes where Elasticsearch keeps its snapshots"))
 }
 
 /// Repository `name` when it is roll's default repository.
@@ -857,6 +902,9 @@ pub async fn delete_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
         })
         .await?;
     refs::forget_unregistered(ctx.cluster, &ctx.state());
+    // What is kept of the data of Elasticsearch repositories no longer registered.
+    let st = ctx.state();
+    ctx.cluster.snapshot_data.elastic_data.lock().retain(|_, c| st.metadata.repositories.contains_key(c.repo()));
     Reply::acknowledged()
 }
 
@@ -890,7 +938,9 @@ pub async fn verify_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
     if !st.metadata.repositories.contains_key(name) {
         return Err(repository_missing(name));
     }
-    if let Some(r) = s3::bucket_repository(&st, name) {
+    if elastic_repository(ctx, name).await? {
+        // Read: its data is there; nothing is written to check it.
+    } else if let Some(r) = s3::bucket_repository(&st, name) {
         s3::verify(ctx.cluster, name, &r).await?;
     }
     let node = &ctx.cluster.node;
@@ -904,12 +954,19 @@ pub async fn verify_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
 pub async fn cleanup_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
     ctx.validate_timeouts()?;
     let name = ctx.path_param("repository").unwrap_or_default();
-    let r = {
+    {
         let st = ctx.state();
         let Some(r) = st.metadata.repositories.get(name) else { return Err(repository_missing(name)) };
         if r.read_only() {
             return Err(repository_exception(name, "cannot run cleanup on readonly repository"));
         }
+    }
+    if elastic_repository(ctx, name).await? {
+        return Err(elastic_read_only(name, "run cleanup"));
+    }
+    let r = {
+        let st = ctx.state();
+        let Some(r) = st.metadata.repositories.get(name) else { return Err(repository_missing(name)) };
         r.clone()
     };
     let (bytes, blobs) = match r.in_bucket() {
@@ -1071,6 +1128,9 @@ pub async fn create(ctx: &Ctx<'_>) -> EsResult<Reply> {
     }
     let _ = expand;
     validate_snapshot_name(&repo, &snap)?;
+    if elastic_repository(ctx, &repo).await? {
+        return Err(elastic_read_only(&repo, "create snapshot"));
+    }
     let now = ctx.now_ms;
     let r2 = repo.clone();
     let uuid = random_uuid();
@@ -1080,9 +1140,14 @@ pub async fn create(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let build = move |st: &mut ClusterState| {
             let Some(r) = st.metadata.repositories.get(&r2).cloned() else { return Err(repository_missing(&r2)) };
             if r.read_only() {
-                return Err(EsError::illegal_argument(format!("[{r2}] cannot create snapshot in a readonly repository")));
+                return Err(repository_exception(&r2, "cannot create snapshot in a readonly repository"));
             }
             let key = r.location_key();
+            // A copy of Elasticsearch's that arrived after the check above: roll's snapshot never
+            // joins it.
+            if st.metadata.repository_data.get(&key).is_some_and(|d| d.elastic) {
+                return Err(elastic_read_only(&r2, "create snapshot"));
+            }
             if st.metadata.repository_data.get(&key).is_some_and(|d| d.find(&snap).is_some()) {
                 return Err(EsError::new(400, "snapshot_name_already_in_use_exception", format!(
                     "[{r2}:{snap}] Invalid snapshot name [{snap}], snapshot with the same name already exists"
@@ -1219,9 +1284,24 @@ const STATES: &[&str] = &["IN_PROGRESS", "SUCCESS", "FAILED", "PARTIAL", "INCOMP
 /// `GET _snapshot/{repository}/{snapshot}`.
 pub async fn get(ctx: &Ctx<'_>) -> EsResult<Reply> {
     ctx.validate_timeouts()?;
-    let repos = match_repositories(&ctx.state().metadata, &ctx.list_param("repository").unwrap_or_default())?;
-    // A bucket's snapshots may come from other clusters: its data is read first.
+    // OpenSearch's `GetSnapshotsRequest` names one repository, taken literally (checked on
+    // OpenSearch 3.9.0: `_all`, `a,b` and `*` are each `[...] missing`).
+    let repos = if ctx.cluster.dialect == crate::Dialect::OpenSearch {
+        let name = ctx.path_param("repository").unwrap_or_default();
+        if !ctx.state().metadata.repositories.contains_key(name) {
+            return Err(repository_missing(name));
+        }
+        vec![name.to_string()]
+    } else {
+        match_repositories(&ctx.state().metadata, &ctx.list_param("repository").unwrap_or_default())?
+    };
+    // A bucket's snapshots may come from other clusters: its data is read first. One that can't
+    // be read fails the request, as on Elasticsearch 9.5.5 (whose response has no per-repository
+    // failures).
     for name in &repos {
+        if elastic_repository(ctx, name).await? {
+            continue;
+        }
         if let Some(r) = s3::bucket_repository(&ctx.state(), name) {
             s3::refresh(ctx.cluster, name, &r).await?;
         }
@@ -1325,12 +1405,18 @@ pub async fn delete(ctx: &Ctx<'_>) -> EsResult<Reply> {
     ctx.bool_param("wait_for_completion", true)?;
     let repo = ctx.path_param("repository").unwrap_or_default().to_string();
     let snaps = ctx.list_param("snapshot").unwrap_or_default();
+    if elastic_repository(ctx, &repo).await? {
+        return Err(elastic_read_only(&repo, "delete snapshots"));
+    }
     let snapshot_data = &ctx.cluster.snapshot_data;
     let bucket = s3::bucket_repository(&ctx.state(), &repo);
     let repo_name = repo.clone();
     let apply = move |st: &mut ClusterState| {
             let Some(r) = st.metadata.repositories.get(&repo).cloned() else { return Err(repository_missing(&repo)) };
             let key = r.location_key();
+            if st.metadata.repository_data.get(&key).is_some_and(|d| d.elastic) {
+                return Err(elastic_read_only(&repo, "delete snapshots"));
+            }
             let mut data = st.metadata.repository_data.get(&key).map(|d| (**d).clone()).unwrap_or_default();
             for p in snaps.iter().filter(|p| !p.contains('*') && *p != "_all") {
                 if data.find(p).is_none() {
@@ -1568,6 +1654,9 @@ pub async fn clone(ctx: &Ctx<'_>) -> EsResult<Reply> {
     if ctx.state().metadata.repositories.get(&repo).is_some_and(|r| r.read_only()) {
         return Err(repository_exception(&repo, "cannot create snapshot in a readonly repository"));
     }
+    if elastic_repository(ctx, &repo).await? {
+        return Err(elastic_read_only(&repo, "create snapshot"));
+    }
     let bucket = s3::bucket_repository(&ctx.state(), &repo);
     let durable = ctx.cluster.engine.snapshot_storage().filter(|_| bucket.is_none());
     let _taking = durable.as_ref().map(|_| ctx.cluster.snapshot_data.taking(&target_uuid));
@@ -1596,6 +1685,9 @@ pub async fn clone(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let apply = move |st: &mut ClusterState| {
             let Some(r) = st.metadata.repositories.get(&repo).cloned() else { return Err(repository_missing(&repo)) };
             let key = r.location_key();
+            if st.metadata.repository_data.get(&key).is_some_and(|d| d.elastic) {
+                return Err(elastic_read_only(&repo, "create snapshot"));
+            }
             let mut data = st.metadata.repository_data.get(&key).map(|d| (**d).clone()).unwrap_or_default();
             let Some(src) = data.find(&source).cloned() else { return Err(snapshot_missing(&repo, &source)) };
             if data.find(&target).is_some() {
@@ -1709,6 +1801,26 @@ pub async fn restore(ctx: &Ctx<'_>) -> EsResult<Reply> {
         (Some(p), r) => Some((regex::Regex::new(p).map_err(|e| EsError::illegal_argument(e.to_string()))?, r.clone().unwrap_or_default())),
         _ => None,
     };
+    let partial = body.get("partial").map(|v| crate::units::parse_bool(&v.to_es_string())).transpose()?.unwrap_or(false);
+    // A snapshot Elasticsearch wrote restores from its own files.
+    if let Some(r) = ctx.state().metadata.repositories.get(&repo).cloned()
+        && elastic::open(ctx.cluster, &repo, &r).await?.is_some()
+    {
+        let req = elastic_restore::Request {
+            repo,
+            snap,
+            wait,
+            patterns,
+            ignore_unavailable,
+            include_global_state,
+            include_aliases,
+            partial,
+            rename,
+            index_settings,
+            ignore_settings,
+        };
+        return elastic_restore::restore(ctx, req, r).await;
+    }
     let now = ctx.now_ms;
     // A bucket's snapshot may come from another cluster: its data is read first.
     let bucket = match s3::bucket_repository(&ctx.state(), &repo) {
@@ -2180,6 +2292,9 @@ pub async fn verify_integrity(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let _ = ctx.bool_param("verify_blob_contents", false)?;
     if !ctx.state().metadata.repositories.contains_key(&name) {
         return Err(repository_missing(&name));
+    }
+    if elastic_repository(ctx, &name).await? {
+        return Err(EsError::illegal_argument(format!("[{name}] holds a repository Elasticsearch wrote: check its integrity on Elasticsearch")));
     }
     let now = crate::time::now_millis();
     let bucket = s3::bucket_repository(&ctx.state(), &name);

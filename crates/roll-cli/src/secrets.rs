@@ -799,6 +799,13 @@ pub enum Secrets {
         #[arg(value_parser = ["on", "off"])]
         state: String,
     },
+    /// What a leaked managed key does ("When a value leaks"): `managed` rotates it at once, with
+    /// no grace; `off` reports it, with a Rotate button. With no argument, the current setting.
+    /// Setting it is an admin's.
+    Leaks {
+        #[arg(value_parser = ["managed", "off"])]
+        rotate: Option<String>,
+    },
     /// When each key was last read and changed, and which are stale or unused.
     Insights {
         /// Only keys not read in the last 90 days.
@@ -3996,6 +4003,19 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             match v["validity_checks"].as_str() {
                 Some("on") => println!("Credentials found in code are checked with their providers"),
                 _ => println!("Credentials found in code aren't checked"),
+            }
+        }
+        Secrets::Leaks { rotate } => {
+            let v = match rotate {
+                Some(rotate) => c.call(Method::PATCH, &c.base(), Some(json!({ "leaks": { "rotate": rotate } }))).await?,
+                None => c.call(Method::GET, &c.base(), None).await?,
+            };
+            if json_out {
+                return print(&json!({ "leaks": v["leaks"] }));
+            }
+            match v["leaks"]["rotate"].as_str() {
+                Some("managed") => println!("A leaked managed key rotates at once, with no grace (leaks.rotate = managed)"),
+                _ => println!("A leaked key is reported with a Rotate button; nothing rotates on its own (leaks.rotate = off)"),
             }
         }
         Secrets::Insights { unused } => {

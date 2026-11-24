@@ -2218,11 +2218,116 @@ the rest are skipped by the tests' own prerequisites.
   `_verify` write, read and delete a test object before answering (500
   `repository_verification_exception` when the bucket can't be reached; the repository stays
   registered, as on Elasticsearch). Its layout is roll's own
-  (`<base_path>/roll/`), so Elasticsearch can't read roll's snapshots nor roll Elasticsearch's;
-  `_cleanup` deletes what no snapshot references, `_verify_integrity` checks every shard
+  (`<base_path>/roll/`), so Elasticsearch can't read roll's snapshots (roll reads Elasticsearch's:
+  below). Someone else's repository under that prefix (an `index.latest` that isn't a decimal
+  generation; without one, `snap-` or `meta-` blobs at its root, an `index-0`, a newest
+  `index-N` that isn't roll's gzip, or anything under `indices/` roll doesn't name so, finished
+  or still being uploaded (an S3 upload in parts, an Azure blob with uncommitted blocks; GCS
+  can't list resumable uploads in progress, so Elasticsearch's first blob still going up there
+  isn't seen), such as the shard files of Elasticsearch's first snapshot before it's finalized;
+  the scan stops at the first such key, or after 10,000 of roll's own) is never
+  read or written: `PUT` with `verify` refuses to register the repository, and reads,
+  snapshots, `_verify`, `_analyze` and `_cleanup` answer 500 `repository_exception` (so does
+  listing snapshots across repositories that include it, as Elasticsearch fails such a
+  listing; the OpenSearch dialect lists one repository named exactly, as OpenSearch does, so
+  `_all`, a list or a pattern is 404 `repository_missing_exception`). Writing `index-N` commits
+  a snapshot: when `index.latest` can't be moved after it, the snapshot stays (readers find it
+  past `index.latest`, or from the newest `index-N` listed when the generation it names is
+  gone) and the request answers with a warning, as Elasticsearch only logs it; once
+  `index.latest` lags 8 generations, the next commit first moves it to the newest generation,
+  and when that fails too nothing more is committed until it moves.
+  `index.latest` is only ever replaced at the version roll read: another roll writer's written
+  meanwhile is moved on from (or, when it's already past, built on this snapshot), and someone
+  else's takes roll's `index-N` back out (a delete conditional on what roll wrote) and fails it
+  instead of being overwritten. A snapshot that fails deletes its own shard files once the
+  repository data shows it isn't there; its chunks, named by segment and so possibly uploaded
+  by a snapshot taken at the same time, are left to `_cleanup`, which keeps every generation
+  readers may start from;
+  `_cleanup` deletes what no snapshot references, and only objects of the names roll writes
+  (`index-N` from 1, `tests-<uuid>`, its shard files and chunks under `indices/`; nothing when
+  the bucket holds no repository data), and aborts only its own dangling uploads,
+  `_verify_integrity` checks every shard
   snapshot is in the bucket. Not supported: `chunk_size`, `server_side_encryption`,
   `canned_acl`, `storage_class` (accepted, not applied), throttling of bucket traffic, `gcs` and
   `azure`.
+- Restoring snapshots Elasticsearch wrote (`api/snapshots/elastic.rs`, `elastic_restore.rs`,
+  the Lucene readers in `search-lucene`). Register the location Elasticsearch snapshots to (an
+  `fs` directory under `path.repo`, or the `s3`, `gcs` or `azure` bucket and `base_path`, with
+  read credentials) and run Elasticsearch's own `POST _snapshot/{repo}/{snapshot}/_restore`; no
+  network route to the old cluster is needed (reindex from remote is the live path). A
+  repository whose base path holds Elasticsearch's `index.latest` is Elasticsearch's, unless roll
+  keeps snapshots there (snapshots recorded for the location, or a bucket's `roll/`), which stay
+  roll's whatever someone puts beside them. Whose it is is decided each time it's read: a
+  location whose `index.latest` is gone (wiped to be reused) is roll's again, and the snapshots
+  listed from it go:
+  - **Listing** (`GET _snapshot/{repo}/_all`, `_cat/snapshots`) answers from its `index-N` and
+    each snapshot's `SnapshotInfo` (`snap-<uuid>.dat`): names, uuids, states, indices, data
+    streams, times, shard counts, metadata. `_status` reports one small file per shard (the
+    shard snapshots aren't read for it).
+  - **Read only, whatever the registration says**: creating, deleting or cloning snapshots,
+    `_cleanup`, `_analyze` and `_verify_integrity` are refused, `PUT` with `verify` and `_verify`
+    read it without writing a test object. Nothing is ever written where Elasticsearch keeps its
+    snapshots.
+  - **Restoring** indexes every live document again from `_source`, with its `_id` (decoded from
+    Elasticsearch's Lucene encoding), routing, `_seq_no`, `_version` and `_primary_term` (their
+    doc values), as a task (`cluster:admin/snapshot/restore`), one shard after another;
+    `_recovery` and `_cat/recovery` show each shard's files and bytes as they're read (type
+    `SNAPSHOT`, stage `INDEX` then `DONE`). `indices`, `ignore_unavailable`, `rename_pattern` and
+    `rename_replacement`, `include_aliases`, `partial`, `index_settings` and
+    `ignore_index_settings` apply as on Elasticsearch, and `include_global_state` restores the
+    snapshot's component and index templates, legacy templates, ingest pipelines and lifecycle
+    policies one by one through the APIs that set them (as the requester; those Elasticsearch
+    manages itself, `_meta.managed`, and dot-names are left out); what roll refuses is reported
+    in a `Warning` header and the rest goes on.
+  - **Formats**: segments Lucene 9 and 10 wrote (Elasticsearch 8.0 to 9.x; checked against
+    8.19.7 and 9.5.5): segment infos, compound files, `Lucene94FieldInfos` (and Lucene 9.0 to
+    9.3's `Lucene90FieldInfos`), stored fields in
+    LZ4 (`index.codec: default`), DEFLATE (`best_compression` before 8.14) and Elasticsearch's
+    zstd (`best_compression` since 8.14), live docs, `Lucene90` numeric doc values for soft
+    deletes and sequence numbers, `Lucene99` flat vectors. Shard snapshots' files in parts
+    (`chunk_size`), small files kept inside the shard snapshot, metadata compressed or not.
+  - **Refused, per index, with the reason** (`partial: true` restores the others; without it
+    nothing is restored): no stored `_source` (`_source.enabled: false`, synthetic `_source`,
+    `index.mode` `logsdb` or `time_series` unless they store it), a `sparse_vector` or
+    `rank_vectors` field Elasticsearch 9 may have left out of `_source`, dense vectors left out
+    of `_source` inside nested objects, an index roll's index creation refuses (its mapping or a
+    setting; the error names it). Refused for the whole shard: segments Lucene 8 or older wrote
+    (Elasticsearch 7.x indices never merged since, named as such), doc values for soft deletes in a format other than `Lucene90`, any file whose
+    checksum doesn't match.
+  - **What differs**: `_source` is the one Elasticsearch stored, byte for byte, except that the
+    dense vectors Elasticsearch 9 leaves out of it (`index.mapping.exclude_source_vectors`) are
+    read from the vector files and appended (shortest `float` text, as Elasticsearch prints
+    them; cosine vectors, which Elasticsearch keeps normalized, multiplied back by the magnitude
+    it keeps in `<field>._magnitude`); fields `_source.excludes` left out don't come back (the restore warns). Sequence
+    numbers, versions and primary terms are Elasticsearch's, so the next write of a document
+    gets the next version; `index.uuid`, `index.creation_date` and `index.version.created` are
+    the restoring cluster's, and the settings Elasticsearch set for its cluster (allocation,
+    blocks, lifecycle, `index.store.*`, the made-by-the-cluster ones) are dropped with a warning,
+    as the migration from a live cluster drops them; `index.mapping.exclude_source_vectors` is set
+    explicitly to what the index had. Data streams restore as their backing indices (the data
+    stream itself isn't recreated), and feature states aren't restored. At most one such restore
+    runs per cluster (a second answers 503 `concurrent_snapshot_execution_exception`) and two per
+    node; a restore is a full reindex, at roll's indexing rate (docs/search/README.md, "Next").
+  - **Hostile input**: everything is read as a tenant's bytes. No allocation is sized from a count
+    or length in a file (counts are bounded by the bytes present, lengths checked before
+    anything is copied), every CodecUtil checksum is checked (large files as they stream), a
+    stored fields chunk may not decompress past `http.max_content_length` plus 1 MiB nor have
+    more than 64 compressed blocks a piece, metadata blobs are capped before (64 MiB) and after
+    (256 MiB) inflating, SMILE nesting at 100 levels and its numbers at 1,000 digits (Jackson's
+    limit), doc values and vector ordinals must name documents of the segment in order, sequence
+    numbers must be in `[0, 2^62)` and primary terms and versions at least 1, and what is read
+    (metadata as read, inflated and parsed; the doc values and vector ordinals kept per segment,
+    at most 512 MiB; read windows; every document from when it is read until it is indexed) is
+    charged to the `request` breaker. A repository's `index-N` is parsed once per generation. Blob
+    names that become keys or paths are checked. Reads pay `max_restore_bytes_per_sec` and
+    `indices.recovery.max_bytes_per_sec`; the task obeys cancellation between documents.
+  - **On the fleet**, the restore runs on the cluster's owner and its writes are logged and fenced
+    like any write; each index's recovery source records the restore, and an owner that opens a
+    cluster with one still running restores those indices again from the start (the documents
+    already there are written again under the same ids; one deleted on roll meanwhile comes back
+    once its tombstone is gone), or records why it can't; a task that stops on a panic marks its
+    indices failed. The old owner's task isn't stopped; its writes fail the write-ahead log's
+    ownership check like every write of a node that lost the cluster.
 - Searchable snapshots mount through the snapshot restore API, so a mounted index holds its own
   copy of the snapshot's documents (as `full_copy` does), not one that reads the snapshot's
   segments: roll's snapshots already share segments with the index they were taken of, but a

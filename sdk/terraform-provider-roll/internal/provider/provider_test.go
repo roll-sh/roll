@@ -45,6 +45,32 @@ type fakeRolld struct {
 	// Folder policies by env:path, and every environment policy body written.
 	folders  map[string]map[string]any
 	policies []map[string]any
+	// The project's own settings ("": roll's default) and every PATCH body sent to it.
+	leakRotate  string
+	historyDays any
+	patches     []map[string]any
+}
+
+// projectSettings serves GET and PATCH /v1/secrets/projects/prj_a as roll does.
+func (f *fakeRolld) projectSettings(r *http.Request, write func(int, any)) {
+	if r.Method == http.MethodPatch {
+		var b map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		f.patches = append(f.patches, b)
+		if l, ok := b["leaks"].(map[string]any); ok {
+			f.leakRotate, _ = l["rotate"].(string)
+		}
+		if d, ok := b["history_days"]; ok {
+			f.historyDays = d
+		}
+		write(200, b)
+		return
+	}
+	rotate := f.leakRotate
+	if rotate == "" {
+		rotate = "off"
+	}
+	write(200, map[string]any{"project": "prj_a", "environments": []any{}, "history_days": f.historyDays, "validity_checks": "off", "leaks": map[string]any{"rotate": rotate}})
 }
 
 // settings serves …/required and …/kms: one value per project.
@@ -352,6 +378,10 @@ func (f *fakeRolld) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/.well-known/oauth-authorization-server" {
 		write(200, map[string]any{"issuer": api, "token_endpoint": api + "/v1/access/oauth/token"})
+		return
+	}
+	if r.URL.Path == "/v1/secrets/projects/prj_a" {
+		f.projectSettings(r, write)
 		return
 	}
 	if r.URL.Path == "/v1/secrets/projects/prj_a/required" || r.URL.Path == "/v1/secrets/projects/prj_a/kms" {

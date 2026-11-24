@@ -1279,13 +1279,56 @@ pub struct Alerts {
     /// default.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub anomaly: bool,
+    /// One route's 5xx share or p95 over the five minutes (Cloud Monitoring's path filters, a
+    /// checkout that fails while the rest is fine): `alert.route`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<RouteAlert>,
 }
 
 impl Default for Alerts {
     fn default() -> Self {
-        Alerts { memory_pct: 90, error_pct: 5, p95_ms: 0, capacity_pct: 10, log_match: None, log_count: 10, cpu_pct: 0, metrics: Vec::new(), anomaly: false }
+        Alerts { memory_pct: 90, error_pct: 5, p95_ms: 0, capacity_pct: 10, log_match: None, log_count: 10, cpu_pct: 0, metrics: Vec::new(), anomaly: false, routes: Vec::new() }
     }
 }
+
+/// An alert on one route: a route group as the Routes view shows it (`/users/:id/orders`; a path
+/// is folded the same way), or every route under a prefix (`/api/*`), for one method or all.
+/// Judged from the access log's last five minutes, with 20 requests at least.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RouteAlert {
+    pub route: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    /// 5xx answers at or above this share of its requests (0, off).
+    #[serde(default)]
+    pub error_pct: u8,
+    /// Its p95 at or above this (0, off).
+    #[serde(default)]
+    pub p95_ms: u32,
+}
+
+impl RouteAlert {
+    /// Whether a request of `method` to the route group `route` is one of its.
+    pub fn matches(&self, method: &str, route: &str) -> bool {
+        let ours = match self.route.strip_suffix("/*") {
+            Some(prefix) => route == prefix || route.strip_prefix(prefix).is_some_and(|r| r.starts_with('/')) || prefix.is_empty(),
+            None => route == self.route,
+        };
+        ours && self.method.as_deref().is_none_or(|m| m.eq_ignore_ascii_case(method))
+    }
+
+    /// How events and the alert's state name it: `POST /api/checkout`, or the route alone.
+    pub fn label(&self) -> String {
+        match &self.method {
+            Some(m) => format!("{m} {}", self.route),
+            None => self.route.clone(),
+        }
+    }
+}
+
+/// The most route alerts a service has.
+pub const MAX_ROUTE_ALERTS: usize = 10;
 
 /// An alert on one of the app's own gauges: its value now (each series' newest point of the
 /// last minute, the largest, or their sum with `sum`) above or below a threshold in `minutes`
@@ -1393,6 +1436,24 @@ impl Run {
             if self.alerts.metrics[..i].iter().any(|o| o.name == m.name && o.sum == m.sum) {
                 return Err(Error::BadRequest(format!("alerts.metrics names {} twice", m.name)));
             }
+        }
+        if self.alerts.routes.len() > MAX_ROUTE_ALERTS {
+            return Err(Error::BadRequest(format!("alerts.routes is at most {MAX_ROUTE_ALERTS} alerts")));
+        }
+        for r in &mut self.alerts.routes {
+            // A path folds as the Routes view folds it (`/users/42` is `/users/:id`); a prefix keeps its `/*`.
+            r.route = match r.route.strip_suffix("/*") {
+                Some(p) => format!("{}/*", crate::traffic::route_of(p).trim_end_matches('/')),
+                None => crate::traffic::route_of(&r.route),
+            };
+            r.method = r.method.take().map(|m| m.to_ascii_uppercase());
+            let method_ok = r.method.as_deref().is_none_or(|m| !m.is_empty() && m.len() <= 16 && m.bytes().all(|b| b.is_ascii_uppercase()));
+            if !method_ok || r.error_pct > 100 || (r.error_pct == 0 && r.p95_ms == 0) {
+                return Err(Error::BadRequest("alerts.routes[] is a route (`/api/checkout`, `/users/:id`, `/api/*`), an optional method, and error_pct (1–100) or p95_ms".into()));
+            }
+        }
+        if let Some(r) = self.alerts.routes.iter().enumerate().find_map(|(i, r)| self.alerts.routes[..i].iter().any(|o| o.label() == r.label()).then_some(r)) {
+            return Err(Error::BadRequest(format!("alerts.routes names {} twice", r.label())));
         }
         if self.alerts.log_match.as_ref().is_some_and(|m| m.trim().is_empty() || m.len() > 200) || !(1..=10_000).contains(&self.alerts.log_count) {
             return Err(Error::BadRequest("alerts.log_match is 1–200 characters, alerts.log_count 1–10000".into()));
@@ -3072,6 +3133,10 @@ pub struct Deployment {
     /// single deployment's GET; the list leaves them out.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<Step>,
+    /// Its build's steps (the Dockerfile's, sending the context, exporting the image) with how
+    /// long each took and whether its cache answered, on a single deployment's GET.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub build_steps: Vec<crate::build_steps::BuildStep>,
     /// Who approved putting it live, where the environment asks for approvals; on a single
     /// deployment's GET.
     #[serde(skip_serializing_if = "Vec::is_empty")]

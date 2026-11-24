@@ -139,7 +139,8 @@ export interface Preview {
     required: boolean;
     head: string;
     /** Each page that differs (`path` `""`: the first page) and who accepted it at this head: the change is accepted once every one is. */
-    pages: { path: string; percent: number; by: string | null; at: number | null; unstable?: boolean }[];
+    /** `group`: the pages changed the same way share one (accepted together with `…/visual/accept {group}`). */
+    pages: { path: string; percent: number; by: string | null; at: number | null; unstable?: boolean; group?: string | null }[];
   } | null;
   /** It also has a phone-width screenshot. */
   phone_screenshot?: boolean;
@@ -589,8 +590,8 @@ export const previewsApi = {
   /** As the person signed in (a session, never a token): a one-use URL into a team-access preview's page `to` (one of its service URLs), good for a minute. */
   visit: (id: string, to: string) => call<{ url: string }>("POST", `${one(id)}/visit`, { to }),
   acceptRegressions: (id: string, head?: string) => call<Preview>("POST", `${one(id)}/regressions/accept`, head ? { head } : {}),
-  acceptVisual: (id: string, head?: string, path?: string) =>
-    call<Preview>("POST", `${one(id)}/visual/accept`, { ...(head ? { head } : {}), ...(path !== undefined ? { path } : {}) }),
+  acceptVisual: (id: string, head?: string, path?: string, group?: string) =>
+    call<Preview>("POST", `${one(id)}/visual/accept`, { ...(head ? { head } : {}), ...(path !== undefined ? { path } : {}), ...(group ? { group } : {}) }),
   /** Its share links (never their tokens). */
   shares: (id: string) => call<PreviewShare[]>("GET", `${one(id)}/shares`),
   /** A link for someone outside the team, open for `hours`; `url` is in this answer only. */
