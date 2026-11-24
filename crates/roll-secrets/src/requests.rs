@@ -196,6 +196,7 @@ fn plan(c: &Conn<'_>, dek: &Dek, env: &EnvRow, items: &[Item]) -> Result<Vec<Ite
         let (what, to_fp) = match (&i.action, &cur) {
             (ItemAction::Delete, None) => return Err(Error::NotFound(format!("no secret {} in {}:{}", i.key, env.slug, i.path))),
             (ItemAction::Delete, Some(_)) => (vec!["deleted".to_string()], None),
+            (ItemAction::Set { value: None, link: None | Some(None), .. }, None) => return Err(Error::BadRequest(format!("{}: a new secret needs a value", i.key))),
             (ItemAction::Set { value, comment, tags, link, expires_at, .. }, cur) => {
                 let fp = match (link, value) {
                     (Some(Some(l)), _) if l.mode != crate::Mode::Managed => Some(dek.fingerprint(&l.fingerprint())),

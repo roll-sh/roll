@@ -1634,6 +1634,36 @@ async fn references_imports_and_personal_values_resolve_and_cycles_are_reported(
 }
 
 #[tokio::test]
+async fn a_set_without_a_value_changes_only_a_key_that_is_there() {
+    let api = Api::new().await;
+    api.set("staging", "TOKEN", "t0ken").await;
+    // A wrong name, folder or type makes no empty key shadowing the real one: in a batch too.
+    for (url, body) in [
+        ("/environments/staging/secrets/TOKNE", json!({ "comment": "the api token" })),
+        ("/environments/staging/secrets/TOKEN?path=/api", json!({ "comment": "the api token" })),
+        ("/environments/staging/secrets/TOKEN", json!({ "comment": "the api token", "type": "personal" })),
+        ("/environments/staging/changes", json!({ "ops": [{ "op": "set", "key": "TOKEN", "type": "personal", "tags": ["api"] }] })),
+    ] {
+        let method = if url.ends_with("/changes") { Method::POST } else { Method::PUT };
+        let (s, v) = api.call(method, url, Some(body)).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{url}: {v}");
+        assert!(v.to_string().contains("a new secret needs a value"), "{v}");
+    }
+    assert_eq!(api.values("staging", "/").await["values"], json!({ "TOKEN": "t0ken" }));
+    for path in ["/", "/api"] {
+        let list = api.ok(Method::GET, &format!("/environments/staging/secrets?path={path}"), None).await;
+        let own: Vec<_> = list.as_array().unwrap().iter().filter(|s| s["source"]["kind"] == "own").map(|s| (s["key"].clone(), s["type"].clone())).collect();
+        assert_eq!(own, if path == "/" { vec![(json!("TOKEN"), json!("shared"))] } else { vec![] }, "{path}: {list}");
+    }
+
+    // On the key that's there, only its comment changes.
+    api.ok(Method::PUT, "/environments/staging/secrets/TOKEN", Some(json!({ "comment": "the api token" }))).await;
+    let s = api.ok(Method::GET, "/environments/staging/secrets/TOKEN", None).await;
+    assert_eq!((s["comment"].as_str(), s["version"].as_i64()), (Some("the api token"), Some(2)));
+    assert_eq!(api.values("staging", "/").await["values"], json!({ "TOKEN": "t0ken" }));
+}
+
+#[tokio::test]
 async fn ephemeral_environments_inherit_their_base_and_go_by_label_or_expiry() {
     let api = Api::new().await;
     api.set("staging", "API", "https://staging").await;
