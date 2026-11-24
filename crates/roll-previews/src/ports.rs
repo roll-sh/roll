@@ -450,6 +450,11 @@ pub trait Source: Send + Sync {
     async fn feedback(&self, _change: &str) -> anyhow::Result<Vec<crate::notes::Note>> {
         Ok(Vec::new())
     }
+    /// A comment on the change (a `comment` review) with `body`, made as `by`: a resolve said as
+    /// the note's reply, a guest's note. Its review's id; `None` where this source can't.
+    async fn comment(&self, _change: &str, _body: &str, _by: &str) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
     /// The git commit of a changeset.
     async fn git_commit(&self, _repo: &str, _revision: &str) -> anyhow::Result<Option<String>> {
         Ok(None)

@@ -447,6 +447,12 @@ async fn approve(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extens
 #[serde(deny_unknown_fields)]
 struct ShareBody {
     hours: u32,
+    /// Who it's for (shown with the link, and with a guest's note).
+    #[serde(default)]
+    label: String,
+    /// Its visitors may leave notes on the pages (as `guest:<name>`).
+    #[serde(default)]
+    notes: bool,
 }
 
 async fn shares(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Vec<crate::Share>>> {
@@ -466,7 +472,7 @@ async fn share(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extensio
     // Whose link it is: the person signed in, or the person behind a token (an operator's: none).
     let maker = who.as_ref().map(|axum::Extension(u)| u.user.clone()).or_else(|| grant.and_then(|axum::Extension(g)| g.user.map(|u| u.to_string())));
     let by = who.map(|axum::Extension(u)| u.handle).unwrap_or_else(|| "operator".into());
-    let (share, url) = blocking(e, move |e| e.share(&id, s.hours, &by, maker.as_deref())).await?;
+    let (share, url) = blocking(e, move |e| e.share(&id, s.hours, &by, maker.as_deref(), &s.label, s.notes)).await?;
     let mut v = serde_json::to_value(&share).unwrap_or_default();
     v["url"] = json!(url);
     Ok((StatusCode::CREATED, Json(v)).into_response())

@@ -278,6 +278,8 @@ export type ChangeRequest = {
   applied_seq: number | null;
   /** What it does instead of changing keys: a protected environment's delete, kept for the recovery window once applied, or a leaked key's rotation (its one item), with no grace for the leaked credential. */
   action?: "delete_environment" | "rotate";
+  /** What applying it did instead: a leak's rotation whose key was already on another credential says `already rotated (…)` and issued nothing. */
+  outcome?: string;
 };
 /** Something that stops working when an environment goes: a value elsewhere in the project that references it (`key`), or a folder here or in another project (`project`) that imports from it. Names only. */
 /** What stops working when an environment goes: a key referencing it, a folder importing it, a roll apps service or agents sandbox reading it, a sync of it, or an identity or token whose scope names it.
@@ -425,6 +427,25 @@ export type SecretsEvent = { seq: number; at: number; kind: SecretsEventKind; en
 /** `latest: true` answers no events and the head (never with `after`); `limit` 1–500 (100). */
 export type EventsQuery = { after?: number; limit?: number; kinds?: (SecretsEventKind | `${string}.*`)[]; environment?: string; latest?: boolean };
 export type EventPage = { events: SecretsEvent[]; next: number };
+/** Where a person's notifications go (docs/secrets.md, "Being told"): a channel through one of their own roll code chat installs, or their own account's address (never one named). */
+export type NotificationChannel = { slack: { install: string; channel: string } } | { discord: { install: string; channel: string } } | { email: "own" };
+/** `kinds` left out (or empty) is every kind; `environment` only that one's events. */
+export type NewNotification = { kinds?: (SecretsEventKind | `${string}.*`)[]; environment?: string; channel: NotificationChannel };
+/** A person's own subscription to a project's events. `disabled` once they can no longer read the project or use the install (`error` says which); `error` on an active one is the last delivery given up on. */
+export type SecretsNotification = {
+  id: string;
+  project: string;
+  user: string;
+  kinds: string[];
+  environment?: string;
+  channel: NotificationChannel;
+  state: "active" | "disabled";
+  error?: string;
+  error_at?: number;
+  delivered: number;
+  delivered_at?: number;
+  created_at: number;
+};
 /** An audit stream to a SIEM: signed batches of new rows, in order. */
 /** `format`: how a batch goes (`roll` signed JSON; `splunk`, `datadog` and `bearer` carry a token that is never shown). */
 export type SinkFormat = "roll" | "splunk" | "datadog" | "bearer";

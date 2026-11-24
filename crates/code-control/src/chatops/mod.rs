@@ -107,6 +107,22 @@ CREATE TABLE IF NOT EXISTS chat_threads (
     UNIQUE (install_id, channel, thread_ts)
 );
 CREATE INDEX IF NOT EXISTS chat_threads_agent ON chat_threads (machine_id, thread);
+-- A Slack thread a preview note was posted as (`slack.note`): replies there are the note's replies.
+CREATE TABLE IF NOT EXISTS chat_notes (
+    id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    install_id TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    thread_ts TEXT NOT NULL,
+    -- The note (its review) and its change.
+    note TEXT NOT NULL,
+    change_id TEXT NOT NULL,
+    automation_id TEXT NOT NULL,
+    run_as TEXT,
+    created_at INTEGER NOT NULL,
+    UNIQUE (install_id, channel, thread_ts),
+    UNIQUE (install_id, note)
+);
 CREATE TABLE IF NOT EXISTS chat_requests (
     id TEXT PRIMARY KEY,
     binding_id TEXT NOT NULL,
@@ -414,6 +430,7 @@ pub(crate) fn delete_install(code: &Code, install_id: &str) -> Result<()> {
     code.db.write(|c| {
         c.execute("DELETE FROM chat_requests WHERE binding_id IN (SELECT id FROM chat_threads WHERE install_id = ?)", [install_id])?;
         c.execute("DELETE FROM chat_threads WHERE install_id = ?", [install_id])?;
+        c.execute("DELETE FROM chat_notes WHERE install_id = ?", [install_id])?;
         c.execute("DELETE FROM chat_actions WHERE install_id = ? AND state = 'pending'", [install_id])?;
         c.execute("DELETE FROM chat_installs WHERE id = ?", [install_id])?;
         Ok(())
@@ -577,6 +594,56 @@ pub(crate) fn set_card(code: &Code, id: &str, ts: Option<&str>, state: Option<&s
         params![ts, state, by, id],
     )?;
     Ok(())
+}
+
+// ── notes' threads ──
+
+/// A Slack thread a preview note was posted as, and who its replies are made as.
+#[derive(Clone, Debug)]
+pub(crate) struct NoteBinding {
+    pub owner_id: String,
+    pub channel: String,
+    pub thread_ts: String,
+    pub note: String,
+    pub change_id: String,
+    pub automation_id: String,
+    pub run_as: Option<String>,
+}
+
+const NOTE_COLS: &str = "owner_id, channel, thread_ts, note, change_id, automation_id, run_as";
+
+fn note_row(r: &code_sql::Row<'_>) -> code_sql::Result<NoteBinding> {
+    Ok(NoteBinding { owner_id: r.get(0)?, channel: r.get(1)?, thread_ts: r.get(2)?, note: r.get(3)?, change_id: r.get(4)?, automation_id: r.get(5)?, run_as: r.get(6)? })
+}
+
+/// Bind the thread at `thread_ts` to `note` (once per install and note: the first post wins).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn bind_note(code: &Code, owner_id: &str, install_id: &str, channel: &str, thread_ts: &str, note: &str, change_id: &str, automation: &AutomationId, run_as: Option<&str>) -> Result<()> {
+    code.db.sql().execute(
+        "INSERT INTO chat_notes (id, owner_id, install_id, channel, thread_ts, note, change_id, automation_id, run_as, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT DO NOTHING",
+        params![new_id("chn"), owner_id, install_id, channel, thread_ts, note, change_id, automation.0, run_as, code_sql::now_ms()],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn note_at(code: &Code, install_id: &str, channel: &str, thread_ts: &str) -> Result<Option<NoteBinding>> {
+    Ok(code.db.sql().query_row(&format!("SELECT {NOTE_COLS} FROM chat_notes WHERE install_id = ? AND channel = ? AND thread_ts = ?"), params![install_id, channel, thread_ts], note_row).optional()?)
+}
+
+pub(crate) fn note_thread(code: &Code, install_id: &str, note: &str) -> Result<Option<NoteBinding>> {
+    Ok(code.db.sql().query_row(&format!("SELECT {NOTE_COLS} FROM chat_notes WHERE install_id = ? AND note = ?"), params![install_id, note], note_row).optional()?)
+}
+
+/// A reply from a note's Slack thread, made on its change as the binding's automation (what the
+/// preview's page lists under the note). `(transient, why)` when it couldn't be.
+pub(crate) async fn reply_to_note(code: &Arc<Code>, b: &NoteBinding, body: String) -> std::result::Result<(), (bool, String)> {
+    let Some(owner) = code.db.owner_by_id(&b.owner_id).map_err(|e| (true, e.to_string()))? else { return Err((false, "the owner is gone".into())) };
+    let me = crate::agents::automations::OwnerRef { id: owner.id.clone(), name: owner.name.clone() };
+    let automation = AutomationId(b.automation_id.clone());
+    let path = format!("/v1/code/changes/{}/reviews", b.change_id);
+    let a = code.automation_api(&me, &automation, b.run_as.as_deref(), Method::POST, &path, Some(json!({ "verdict": "comment", "body": body }))).await;
+    if a.ok() { Ok(()) } else { Err((a.transient(), a.error())) }
 }
 
 // ── acting as the automation ──

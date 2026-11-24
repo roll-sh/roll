@@ -453,6 +453,12 @@ impl Secrets {
                     }
                     let event = crate::events::Event::new(crate::events::Kind::RotationSucceeded, data);
                     crate::audit::record_event(c, self.keys()?, project, caller, "secrets.rotation_succeeded", Some(slug), Some(&path), &[key.to_string()], &format!("rotated {key} to version {version}"), now, event)?;
+                    // A leak's rotation request still waiting for this credential has nothing
+                    // left to do: the leaked one is retired now, with its grace.
+                    if caller.principal == ROTATION {
+                        let leaked = old.as_ref().map_or_else(|| format!("key:{path}:{key}"), |o| format!("cred:{o}"));
+                        crate::requests::close_superseded(c, self.keys()?, project, &env, &leaked, version, caller, now)?;
+                    }
                     if let (None, Some(h)) = (&old, state.as_ref().and_then(|s| s.get("handle"))) {
                         retire(c, &env, &link, h, &caller.principal, now + link.grace_minutes() as i64 * 60_000, now)?;
                     }

@@ -473,6 +473,16 @@ async fn traces_sent_by_instances_read_back() {
     let proxy = spans.iter().find(|s| s["service"] == "roll" && s["name"] == "GET /items/:id").unwrap_or_else(|| panic!("{one}"));
     assert_eq!((proxy["parent"].as_str(), proxy["span"].as_str()), (Some("00f067aa0ba902b7"), seen.split('-').nth(2)), "{one}");
     assert!(spans.iter().any(|s| s["name"] == "roll wake" && s["parent"] == proxy["span"]), "a cold start's wait: {one}");
+    // Its access line names the trace (the line opens its waterfall).
+    let mut access = Vec::new();
+    for _ in 0..50 {
+        access = w.apps.logs.follow(&format!("http:{id}/production"), 50).0.into_iter().map(|l| l.text).collect::<Vec<_>>();
+        if access.iter().any(|l| l.contains(&format!("\"trace\":\"{client_trace}\""))) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(access.iter().any(|l| l.contains(&format!("\"trace\":\"{client_trace}\""))), "the access line carries its trace: {access:?}");
     // Logs into the environment's own log (its level and trace id readable there), metrics as
     // series: a counter's rate a second.
     let logs = json!({ "resourceLogs": [{ "resource": { "attributes": [{ "key": "service.name", "value": { "stringValue": "api" } }] }, "scopeLogs": [{ "logRecords": [
@@ -1146,6 +1156,7 @@ async fn an_image_service_scales_to_zero_and_wakes_on_the_first_request() {
     let (svc, d) = image_service(&w, "web", json!({"port": 80})).await;
     assert_eq!(d["status"], "active", "{d}");
     assert!(d["image"].as_str().unwrap().contains("@sha256:"), "pinned by digest: {d}");
+    assert_eq!(d["image_bytes"], 48 << 20, "its image's size: {d}");
     let id = svc["id"].as_str().unwrap();
     let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await;
     assert_eq!(env["state"], "stopped", "health-checked at deploy, then back to zero: {env}");
@@ -1159,6 +1170,9 @@ async fn an_image_service_scales_to_zero_and_wakes_on_the_first_request() {
     assert!(!body["forwarded_host"].as_str().unwrap().is_empty());
     let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await;
     assert_eq!(env["state"], "running");
+    // The cold start, in parts: the container up, then the app until it answered.
+    let cold = &env["last_cold_start"];
+    assert!(cold["ms"].as_u64() == Some(cold["runtime_ms"].as_u64().unwrap() + cold["app_ms"].as_u64().unwrap()) || cold["ms"].as_u64().unwrap().abs_diff(cold["runtime_ms"].as_u64().unwrap() + cold["app_ms"].as_u64().unwrap()) <= 1, "{env}");
     // Idle: suspended, then stopped by the reaper; nothing metered while asleep.
     let live = w.apps.live(id, "production");
     live.backdate(Duration::from_secs(31));
@@ -2215,6 +2229,10 @@ async fn changes_are_an_audit_trail_without_values() {
     let kinds: Vec<&str> = all.as_array().unwrap().iter().map(|e| e["kind"].as_str().unwrap()).collect();
     assert!(kinds.contains(&"deploy.active") && kinds.contains(&"audit.settings"), "{kinds:?}");
     assert!(!all.to_string().contains("sk-s3cr3t"));
+    // The next page back: older than the one before it, none of what came first.
+    let newest = all[0]["seq"].as_i64().unwrap();
+    let (_, back) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/activity?all=1&before={newest}"), None).await;
+    assert!(back.as_array().unwrap().iter().all(|e| e["seq"].as_i64() < Some(newest)) && back.as_array().unwrap().len() == all.as_array().unwrap().len() - 1, "{back}");
 }
 
 /// An environment's own redirects (Vercel's project redirects) on any service: exact paths and
@@ -2497,6 +2515,29 @@ async fn traffic_unusual_for_the_hour_is_an_anomaly() {
     w.apps.store.put_minutes(&id, "production", &(1..=10).map(|i| minute(now - i, 100)).collect::<Vec<_>>()).unwrap();
     w.apps.judge_alerts(&live).await;
     assert!(events("alert.resolved").await.iter().any(|e| e["data"]["alert"] == "alert.anomaly"));
+}
+
+/// Right-sizing advice (Cloud Run's recommender): memory near its limit is one to raise, a warm
+/// instance idle most of the week one to let sleep (with the month's saving), each with the body
+/// that acts on it; nothing before there's an hour to read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_environments_week_says_what_to_change() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80, "min_instances": 1, "memory_mb": 512})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    assert_eq!(call(&w.api, "GET", &format!("{env}/advice"), None).await.1["advice"], json!([]), "nothing to read yet");
+    let now = code_sql::now_ms() / 60_000;
+    let minute = |m: i64, requests: i64| apps_control::store::MinuteRow { minute: m, requests, instances: 1, memory_bytes: 470 << 20, cpu: 1.0, ..Default::default() };
+    w.apps.store.put_minutes(&id, "production", &(1..=180).map(|i| minute(now - i, if i % 20 == 0 { 3 } else { 0 })).collect::<Vec<_>>()).unwrap();
+    let (st, a) = call(&w.api, "GET", &format!("{env}/advice"), None).await;
+    let kinds: Vec<&str> = a["advice"].as_array().unwrap().iter().map(|x| x["kind"].as_str().unwrap()).collect();
+    assert_eq!((st, kinds.clone()), (StatusCode::OK, vec!["memory", "min_instances"]), "{a}");
+    assert_eq!(a["advice"][0]["set"], json!({"run": {"memory_mb": 768}}), "{a}");
+    assert!(a["advice"][1]["saving_usd_month"].as_f64() > Some(0.0), "{a}");
+    // Its body acts on it.
+    assert_eq!(call(&w.api, "PUT", &env, Some(a["advice"][1]["set"].clone())).await.0, StatusCode::OK);
+    assert_eq!(call(&w.api, "GET", &env, None).await.1["run"]["min_instances"], 0);
 }
 
 /// Attack mode: on by itself once a minute's requests reach its threshold (said as
@@ -5529,6 +5570,16 @@ async fn a_crashing_worker_restarts_and_its_crash_loop_is_one_event() {
     let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await;
     assert_eq!(env["crash_loop"]["crashes"], 3, "{env}");
     assert!(env["crash_loop"]["last_error"].as_str().unwrap().contains("137"), "{env}");
+    // Each crash is an event of its own too, with its reason (not only the loop).
+    let mut crashed = Vec::new();
+    for _ in 0..100 {
+        crashed = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "instance.crashed").cloned().collect();
+        if crashed.len() >= 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(crashed.len() >= 3 && crashed[0]["data"]["reason"].as_str().unwrap_or("").contains("137"), "{crashed:?}");
     let mut sent = Vec::new();
     for _ in 0..100 {
         sent = got.lock().iter().filter(|b| b["type"] == "crash_loop").cloned().collect();
@@ -6631,6 +6682,16 @@ async fn a_web_service_scales_on_its_latency() {
     let (_, log) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/logs?tail=50"), None).await;
     assert!(scaled, "a second instance for its p95: {log}");
     assert!(log.to_string().contains("scaled out: p95 at"), "{log}");
+    // An event, with from, to and why (Render's scaling events).
+    let mut out = Value::Null;
+    for _ in 0..100 {
+        out = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1["events"].as_array().unwrap().iter().find(|e| e["kind"] == "scale.out").cloned().unwrap_or(Value::Null);
+        if !out.is_null() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(out["data"]["to"].as_u64() > out["data"]["from"].as_u64() && out["data"]["reason"].as_str().unwrap_or("").starts_with("p95 at"), "{out}");
 }
 
 /// `run.cpu_target` and `run.memory_target`: a web service whose instances stay over the target

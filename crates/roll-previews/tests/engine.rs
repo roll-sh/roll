@@ -2378,8 +2378,46 @@ async fn a_pages_notes_by_its_environment_name() {
     assert_eq!(e.engine.open_notes(&p.id).await.unwrap().iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), ["rv_Too big", "rv_Typo"], "every page's, with ids");
     e.engine.resolve_note(&p.id, "rv_Too big", "bob").await.unwrap();
     assert!(e.engine.notes_for(&env_name, "/").await.unwrap().is_empty());
+    // Said on the change as bob, so its pull request and the note's Slack thread hear it.
+    assert_eq!(*e.code.comments.lock(), [("chg_n".to_string(), "**Reply on the preview** · `rv_Too big`\n\nResolved.".to_string(), "bob".to_string())]);
     assert_eq!(e.engine.open_notes(&p.id).await.unwrap().len(), 1);
     assert!(e.engine.resolve_note(&p.id, "rv_someone else's", "bob").await.is_err());
+}
+
+/// A guest's note through a share link that takes notes: on the change as `guest:<name>`, its
+/// words inert for a pull request, the link's label said; a link that takes none refuses; ten an
+/// hour per link; a guest sees only their link's notes.
+#[tokio::test]
+async fn a_share_links_guest_leaves_notes_as_a_guest() {
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_g", 5));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_g").unwrap().unwrap();
+    let live = |notes: bool, label: &str| {
+        let (_, url) = e.engine.share(&p.id, 2, "ada", None, label, notes).unwrap();
+        let token = url.split("roll_share=").nth(1).unwrap().to_string();
+        e.engine.store.share_live(&p.id, &token).unwrap().unwrap()
+    };
+    let (open, closed) = (live(true, "Acme's review"), live(false, ""));
+    let note = roll_previews::notes::GuestNote { name: "Ada <script>".into(), path: "/pricing".into(), selector: "button.buy".into(), note: "Ping @team ![x](https://t.example/p.gif) <b>here</b>".into(), viewport: "390x844".into(), ..Default::default() };
+    e.engine.guest_note(&p.id, &open, &note).await.unwrap();
+    let (change, body, by) = e.code.comments.lock()[0].clone();
+    assert_eq!((change.as_str(), by.as_str()), ("chg_g", "guest:Ada script"), "no handle has a colon: never a team member");
+    assert!(body.starts_with("**Feedback on the preview** · [`/pricing`](") && body.contains("· `button.buy`\n\nPing @\u{200b}team !\u{200b}[x](https://t.example/p.gif) &lt;b&gt;here&lt;/b&gt;\n\n"), "{body}");
+    assert!(body.contains("390x844 viewport") && body.contains("a guest, through the share link \"Acme's review\""), "{body}");
+    assert_eq!(roll_previews::notes::parse(&body).map(|(path, sel, _)| (path, sel)), Some(("/pricing".to_string(), "button.buy".to_string())), "read back as a note");
+    assert!(matches!(e.engine.guest_note(&p.id, &closed, &note).await, Err(roll_previews::Error::Forbidden(_))), "a link that takes no notes");
+    for _ in 1..roll_previews::notes::GUEST_PER_HOUR {
+        e.engine.guest_note(&p.id, &open, &note).await.unwrap();
+    }
+    assert!(matches!(e.engine.guest_note(&p.id, &open, &note).await, Err(roll_previews::Error::Conflict(_))), "ten an hour per link");
+    // What a guest sees: their link's notes only.
+    let theirs = roll_previews::notes::Note { id: "rv_c1".into(), path: "/pricing".into(), selector: "button.buy".into(), note: "Too small".into(), by: "guest:Ada".into(), at: 1, replies: Vec::new(), crop: false };
+    let team = roll_previews::notes::Note { id: "rv_team".into(), by: "bob".into(), ..theirs.clone() };
+    e.code.feedback.lock().insert("chg_g".into(), vec![theirs, team]);
+    let seen: Vec<String> = e.engine.guest_notes_of(&p.id, &open.id, "/pricing").await.unwrap().into_iter().map(|n| n.id).collect();
+    assert_eq!(seen, ["rv_c1"]);
+    assert!(e.engine.guest_notes_of(&p.id, &closed.id, "/pricing").await.unwrap().is_empty());
 }
 
 /// A start's dynamic credentials (roll secrets' leases) live as long as it runs: renewed near

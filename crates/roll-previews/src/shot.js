@@ -400,12 +400,16 @@ const MODES = (() => {
   }
 })();
 const KEYS = { Enter: 13, Escape: 27, Tab: 9, ArrowDown: 40, ArrowUp: 38, ArrowLeft: 37, ArrowRight: 39, Space: 32, Backspace: 8 };
+// A click's or a typing's time to the next paint (its handlers' work and the frame after them:
+// most of what Interaction to Next Paint counts, in the lab; the browser's own Event Timing
+// counts only a person's input), the slowest one of a state's steps kept in the checks' world.
+const PAINTED = "requestAnimationFrame(() => setTimeout(() => { globalThis.__rollStepMs = Math.max(globalThis.__rollStepMs || 0, performance.now() - t0); }, 0));";
 const step = async (sessionId, s, until) => {
   const left = () => Math.max(until - Date.now(), 0);
   const check = (params, sid) => Promise.race([checkIn(params, sid), sleep(left()).then(() => null)]);
   const sel = (x) => JSON.stringify(String(x));
   if (typeof s.click === "string") {
-    const r = await check({ expression: `(() => { const el = document.querySelector(${sel(s.click)}); if (!el) return false; el.scrollIntoView({ block: "center" }); el.click(); return true; })()`, returnByValue: true }, sessionId);
+    const r = await check({ expression: `(() => { const el = document.querySelector(${sel(s.click)}); if (!el) return false; el.scrollIntoView({ block: "center" }); const t0 = performance.now(); el.click(); ${PAINTED} return true; })()`, returnByValue: true }, sessionId);
     return r?.result?.value === true ? null : `click ${s.click}: nothing matched`;
   }
   if (Array.isArray(s.type) && s.type.length === 2) {
@@ -414,7 +418,7 @@ const step = async (sessionId, s, until) => {
       expression: `(() => { const el = document.querySelector(${sel(target)}); if (!el || !("value" in el)) return false; el.focus();
         const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
         Object.getOwnPropertyDescriptor(proto, "value").set.call(el, ${sel(text)});
-        el.dispatchEvent(new Event("input", { bubbles: true })); el.dispatchEvent(new Event("change", { bubbles: true })); return true; })()`,
+        const t0 = performance.now(); el.dispatchEvent(new Event("input", { bubbles: true })); el.dispatchEvent(new Event("change", { bubbles: true })); ${PAINTED} return true; })()`,
       returnByValue: true,
     }, sessionId);
     return r?.result?.value === true ? null : `type ${target}: nothing to type into`;
@@ -681,7 +685,9 @@ const tryIt = async (sessionId) => {
       await sleep(300);
       // A state's steps, at most 10, 15 s in all; the first that fails ends them.
       let stepFailed = null;
+      let stepMs = null;
       if (state) {
+        await checkIn({ expression: "globalThis.__rollStepMs = 0", returnByValue: true }, sessionId).catch(() => null);
         const until = Date.now() + 15000;
         for (const s of (Array.isArray(state.steps) ? state.steps : []).slice(0, 10)) {
           if (Date.now() > until) break;
@@ -690,6 +696,8 @@ const tryIt = async (sessionId) => {
           await sleep(150);
         }
         await sleep(300);
+        const slowest = await checkIn({ expression: "globalThis.__rollStepMs || 0", returnByValue: true }, sessionId).catch(() => null);
+        if (typeof slowest?.result?.value === "number" && slowest.result.value > 0) stepMs = Math.round(slowest.result.value);
       }
       await still(sessionId);
       const shot = await send("Page.captureScreenshot", { format: "png" }, sessionId);
@@ -702,6 +710,7 @@ const tryIt = async (sessionId) => {
         await send("Emulation.setTimezoneOverride", { timezoneId: "" }, sessionId).catch(() => null);
       }
       if (stepFailed) page.step = stepFailed;
+      if (stepMs != null) page.step_ms = stepMs;
       // The same checks as the first page's, each bounded in time.
       const value = async (expression, wait) => {
         const r = await Promise.race([check({ expression, awaitPromise: !!wait, returnByValue: true }, sessionId), sleep(wait || 5000).then(() => null)]);

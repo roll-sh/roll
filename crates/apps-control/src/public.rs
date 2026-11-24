@@ -2630,6 +2630,10 @@ impl Access {
         if let Some(d) = self.deployment.lock().as_deref() {
             line["deployment"] = serde_json::json!(d);
         }
+        // The proxy's span's trace: the line opens its waterfall (Cloud Run's Logs Explorer).
+        if let Some(p) = &self.span {
+            line["trace"] = serde_json::json!(p.trace);
+        }
         s.mark(&mut line);
         self.log.line(line.to_string());
         if let Some(p) = &self.span {

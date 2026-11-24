@@ -1567,6 +1567,11 @@ static ROWS: &[Row] = &[
     // asks the caller's `Grant` for each event's environment (and for `environment=`'s), so a token
     // limited to some environments reads only theirs.
     row("GET", "/v1/secrets/projects/{project}/events", "secrets", R, one(&["project"], "project")).filters_itself(),
+    // A person's own notifications of those events (docs/secrets.md, "Being told"): whoever may read
+    // the project may be told of what they read; secrets asks their rights again for every event
+    // it sends, and lists or deletes only their own (all of the project's for its admins).
+    row("*", "/v1/secrets/projects/{project}/notifications", "secrets", R, one(&["project"], "project")),
+    row("*", "/v1/secrets/projects/{project}/notifications/", "secrets", R, one(&["project"], "project")),
     // Checking the audit log's chain answers where it breaks, never what a row says.
     row("GET", "/v1/secrets/projects/{project}/audit/verify", "secrets", R, one(&["project"], "project")),
     row("*", "/v1/secrets/projects/{project}/audit/sinks", "secrets", ADMIN, one(&["project"], "project")).reveals(&["secret"]),
@@ -1747,6 +1752,8 @@ static ROWS: &[Row] = &[
     row("DELETE", "/v1/apps/services/{id}/environments/{env}/forms/{form}/submissions/{sub}", "apps", D, one(PG, "service")).env(EnvFrom::Param("env")),
     // `copy_from` copies another environment's values into this one: reveal there too.
     row("PATCH", "/v1/apps/services/{id}/environments/{env}/variables", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).copies_from(CopyFrom::Body("copy_from")),
+    // What its last week says about its settings: settings and usage, never a value.
+    row("GET", "/v1/apps/services/{id}/environments/{env}/advice", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     // What the next deploy changes: names of variables and settings, never a value.
     row("GET", "/v1/apps/services/{id}/environments/{env}/pending", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     // A job is a command run with the environment's variables: its output can be them.

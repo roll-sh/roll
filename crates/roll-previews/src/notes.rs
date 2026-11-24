@@ -36,8 +36,83 @@ pub struct Reply {
 
 pub const MAX_REPLIES: usize = 20;
 
-const HEAD: &str = "**Feedback on the preview** · ";
-const REPLY: &str = "**Reply on the preview** · ";
+/// The reply a resolve leaves on the note (roll's Resolve, [`crate::Engine::resolve_note`]).
+pub const RESOLVED: &str = "Resolved.";
+
+/// Notes an hour one share link's guests may leave.
+pub const GUEST_PER_HOUR: usize = 10;
+
+/// A note a guest sent from the page's button (`POST /__roll/notes`), as the page said it.
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestNote {
+    pub name: String,
+    pub path: String,
+    #[serde(default)]
+    pub selector: String,
+    pub note: String,
+    #[serde(default)]
+    pub viewport: String,
+    #[serde(default)]
+    pub steps: Vec<String>,
+    #[serde(default)]
+    pub errors: Vec<String>,
+    #[serde(default)]
+    pub requests: Vec<String>,
+}
+
+/// A guest's words made inert where a pull request shows them: no mention (`@` breaks), no
+/// image, no HTML, no fence breaking out of a code span.
+pub fn inert(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_control() || *c == '\n')
+        .collect::<String>()
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('@', "@\u{200b}")
+        .replace("![", "!\u{200b}[")
+}
+
+/// One line for a code span: printable, no backtick, at most `n` characters.
+fn span(s: &str, n: usize) -> String {
+    s.chars().filter(|c| !c.is_control() && *c != '`').take(n).collect()
+}
+
+/// A guest note's author (`guest:<name>`: no handle has a colon) and its review body, in the
+/// dashboard's shape (`preview-feedback.tsx`'s `feedbackBody`), so roll reads it back as a
+/// note. `url` is the preview's first service's; `label` the share link's.
+pub fn guest_body(n: &GuestNote, url: &str, preview: &str, label: &str) -> Result<(String, String), String> {
+    let name: String = n.name.chars().filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '.' | '-' | '_' | '\'')).take(40).collect::<String>().trim().to_string();
+    if name.is_empty() {
+        return Err("a guest's note needs their name".into());
+    }
+    let note = n.note.trim();
+    if note.is_empty() || note.chars().count() > 4000 {
+        return Err("a note is 1 to 4,000 characters".into());
+    }
+    let path: String = format!("/{}", n.path.trim_start_matches('/')).chars().filter(|c| !c.is_whitespace() && !"()<>[]`".contains(*c)).take(300).collect();
+    let selector = span(&n.selector, 200);
+    let place = if url.is_empty() { format!("`{path}`") } else { format!("[`{path}`]({}{path})", url.trim_end_matches('/')) };
+    let viewport = Some(n.viewport.as_str()).filter(|v| v.split_once('x').is_some_and(|(w, h)| !w.is_empty() && !h.is_empty() && w.bytes().chain(h.bytes()).all(|b| b.is_ascii_digit())));
+    let via = if label.trim().is_empty() { "a share link".to_string() } else { format!("the share link \"{}\"", span(label, 60)) };
+    let meta: Vec<String> = [viewport.map(|v| format!("{v} viewport")), Some(format!("roll preview {preview}")), Some(format!("a guest, through {}", inert(&via)))].into_iter().flatten().collect();
+    let mut body = format!("{}{place}{}\n\n{}\n\n<sub>{}</sub>", code_control::review::preview_note::HEAD, if selector.is_empty() { String::new() } else { format!(" · `{selector}`") }, inert(note), meta.join(" · "));
+    let did: Vec<String> = n.steps.iter().take(20).enumerate().map(|(i, x)| format!("{}. `{}`", i + 1, span(x, 160))).collect();
+    let lines: Vec<String> = n.errors.iter().take(5).map(|e| format!("- error: `{}`", span(e, 200))).chain(n.requests.iter().take(5).map(|r| format!("- `{}`", span(r, 200)))).collect();
+    if !did.is_empty() || !lines.is_empty() {
+        let summary: Vec<String> = [(did.len(), "step"), (n.errors.len().min(5), "error"), (n.requests.len().min(5), "failed request")]
+            .into_iter()
+            .filter(|(k, _)| *k > 0)
+            .map(|(k, w)| format!("{k} {w}{}", if k == 1 { "" } else { "s" }))
+            .collect();
+        let parts: Vec<String> = [if did.is_empty() { String::new() } else { format!("What they did:\n\n{}", did.join("\n")) }, lines.join("\n")].into_iter().filter(|p| !p.is_empty()).collect();
+        body = format!("{body}\n\n<details><summary>On the page: {}</summary>\n\n{}\n\n</details>", summary.join(", "), parts.join("\n\n"));
+    }
+    Ok((format!("guest:{name}"), body))
+}
+
+/// The bodies' shapes are roll code's (chat ops carries notes to Slack and back too).
+pub use code_control::review::preview_note::{parse, parse_reply};
 
 /// A change's comment review, as notes are read from it.
 pub struct Comment {
@@ -68,30 +143,6 @@ pub fn thread(comments: impl IntoIterator<Item = Comment>) -> Vec<Note> {
     notes
 }
 
-/// The note a reply's body answers, and the reply, if it is one.
-pub fn parse_reply(body: &str) -> Option<(String, String)> {
-    let (first, rest) = body.split_once("\n\n")?;
-    let id = first.strip_prefix(REPLY)?.strip_prefix('`')?.strip_suffix('`')?;
-    let reply = rest.trim();
-    let id_ok = (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
-    (id_ok && !reply.is_empty()).then(|| (id.to_string(), reply.chars().take(2000).collect()))
-}
-
-/// The page, the element and the note of a feedback review's body, if it is one.
-pub fn parse(body: &str) -> Option<(String, String, String)> {
-    let (first, rest) = body.split_once("\n\n")?;
-    let first = first.strip_prefix(HEAD)?;
-    // `[`/path`](url)` or `` `/path` ``, then ` · `selector``.
-    let mut parts = first.splitn(2, " · ");
-    let place = parts.next()?;
-    let path = place.strip_prefix("[`").and_then(|p| p.split_once("`]")).map(|(p, _)| p).or_else(|| place.strip_prefix('`').and_then(|p| p.strip_suffix('`')))?;
-    let selector = parts.next().and_then(|s| s.strip_prefix('`')?.strip_suffix('`')).unwrap_or("");
-    let note = rest.rsplit_once("\n\n<sub>").map_or(rest, |(n, _)| n).trim();
-    if !path.starts_with('/') || note.is_empty() {
-        return None;
-    }
-    Some((path.to_string(), selector.to_string(), note.chars().take(2000).collect()))
-}
 
 #[cfg(test)]
 mod tests {

@@ -891,7 +891,7 @@ pub struct Pruned {
     pub image: Option<String>,
 }
 
-const DEPLOY_COLS: &str = "id, service, env, status, cause, revision, message, image, plan, rollback_of, error, created_at, started_at, finished_at, ready_ms, run, vars_hash, actor, pruned_at, error_detail";
+const DEPLOY_COLS: &str = "id, service, env, status, cause, revision, message, image, plan, rollback_of, error, created_at, started_at, finished_at, ready_ms, run, vars_hash, actor, pruned_at, error_detail, image_bytes";
 
 fn json<T: serde::de::DeserializeOwned>(s: &str) -> code_sql::Result<T> {
     serde_json::from_str(s).map_err(|e| code_sql::Error::Conversion(e.to_string()))
@@ -1028,6 +1028,7 @@ fn deploy_row(r: &code_sql::Row<'_>) -> code_sql::Result<Deployment> {
         vars_hash: r.get(16)?,
         actor: r.get(17)?,
         pruned_at: r.get(18)?,
+        image_bytes: r.get(20)?,
         vulnerabilities: None,
         error_detail,
         fix,
@@ -1078,6 +1079,8 @@ impl Store {
         db.add_column("env_access", "password_hash", "TEXT")?;
         // Visitors a provider signs in (`access.sso`), as JSON.
         db.add_column("env_access", "sso", "TEXT")?;
+        // A deployment's image's size, where the runtime says (Fly's release sizes).
+        db.add_column("deployments", "image_bytes", "INTEGER")?;
         // Paths whose CORS preflights pass the gate (`access.preflight`), as JSON.
         db.add_column("env_access", "preflight", "TEXT")?;
         // Services let in with roll's token for them (`access.callers`), as JSON.
@@ -1720,11 +1723,12 @@ impl Store {
     /// A service's audit trail (`audit.*` events), newest first.
     /// A service's events, newest first: the audit trail (what people changed), or (`all`) every
     /// kind (deploys, failures, crash loops, alerts, domains) as one timeline.
-    pub fn activity(&self, service: &str, limit: usize, all: bool) -> Result<Vec<Event>> {
+    /// `before`: only events older than that one's `seq` (the next page back).
+    pub fn activity(&self, service: &str, limit: usize, all: bool, before: Option<i64>) -> Result<Vec<Event>> {
         let only = if all { "" } else { " AND kind LIKE 'audit.%'" };
         Ok(self.db.query(
-            &format!("SELECT seq, at, kind, service, env, deployment, data FROM events WHERE service = ?{only} ORDER BY seq DESC LIMIT ?"),
-            params![service, limit.clamp(1, 500) as i64],
+            &format!("SELECT seq, at, kind, service, env, deployment, data FROM events WHERE service = ?{only} AND seq < ? ORDER BY seq DESC LIMIT ?"),
+            params![service, before.unwrap_or(i64::MAX), limit.clamp(1, 500) as i64],
             |r| {
                 let data: String = r.get(6)?;
                 Ok(Event { seq: r.get(0)?, at: r.get(1)?, kind: r.get(2)?, service: r.get(3)?, environment: r.get(4)?, deployment: r.get(5)?, data: serde_json::from_str(&data).unwrap_or(serde_json::Value::Null) })
@@ -1798,7 +1802,7 @@ impl Store {
                 )?;
             }
             c.execute(
-                &format!("INSERT INTO deployments ({DEPLOY_COLS}, upload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, ?, ?, ?, NULL, NULL, ?)"),
+                &format!("INSERT INTO deployments ({DEPLOY_COLS}, upload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, ?, ?, ?, NULL, NULL, NULL, ?)"),
                 params![
                     id,
                     service,
@@ -1836,6 +1840,12 @@ impl Store {
             .query_row(&format!("SELECT {DEPLOY_COLS} FROM deployments WHERE id = ?"), [id], deploy_row)
             .optional()?
             .ok_or_else(|| Error::NotFound(format!("no deployment {id}")))
+    }
+
+    /// A deployment's image's size.
+    pub fn set_image_bytes(&self, id: &str, bytes: u64) -> Result<()> {
+        self.db.execute("UPDATE deployments SET image_bytes = ? WHERE id = ?", params![bytes as i64, id])?;
+        Ok(())
     }
 
     /// That a deployment's step began (the first time counts).
