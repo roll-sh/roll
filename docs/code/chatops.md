@@ -90,6 +90,9 @@ so a retried action sends the same command once.
 
 - `chat_threads` binds a chat thread (Slack's `thread_ts`, or Discord's status message) to an
   agent thread (machine and thread) and to the automation (and `run_as`) it acts as.
+- `chat_notes` binds a Slack thread to a preview note (its review and change) and the
+  automation (and `run_as`) its replies are made as: a message there is the note's reply, never a
+  steer or a trigger event.
 - `chat_requests` ties each posted request card to the agent's request. A click is checked
   against its card, its card's binding, and the install it came from (a card is only answered
   from the workspace it was posted in). The click reads the request from the mirror: one that is
@@ -120,6 +123,7 @@ items) are the built-in `code` trigger's (docs/code/automations.md).
 | `slack.post` / `slack.reply` / `slack.dm` | Post text or Block Kit (`blocks`, whose strings are templates) to a channel, the event's thread, or a person. Posted once per run and step (`chat_marks`). |
 | `slack.update` | Edit a message an earlier step posted (`ts`). |
 | `slack.status` | Follow an agent thread in Slack: the live status message, request cards, the binding. Waits (thread records wake the run) until the thread's work ends; 48 h timeout. Output `channel, ts, thread_ts, status, title, change, failed`. |
+| `slack.note` | On a change's `review` event: a note left on its preview's pages (docs/previews.md, "Feedback on the preview page") is posted to `channel` as its own message, once, and its thread is bound to the note (`chat_notes`). A reply in the thread, from someone the install allows, becomes the note's reply on the change ("— <their Slack name>, in Slack"), made as the automation through the API; a reply on the page goes into the thread, and so does resolving the note (its review dismissed). Replies from Slack aren't posted back; other reviews are left alone. Output `posted, channel, ts, note`. |
 | `slack.notify` | A notice about an agent (by default the agent event's thread) to a channel or a DM: the status card, and cards with buttons for what it waits on. Bound, so a reply steers. |
 | `discord.post`, `discord.status`, `discord.notify` | The same for Discord. Requests are replies to the status message, and the status has a Reply button. |
 | `github.comment` | Comment on an issue or pull request (the event's by default). Made once per run and step. |

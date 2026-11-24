@@ -1749,6 +1749,16 @@ land on the change.
   naming any other review joins nothing), so it reaches the pull request as a GitHub review like
   the note did. The page lists the replies under their note, as text, and `roll preview notes`
   under each note too (live: a reply listed under its note).
+- Notes as Slack threads (Vercel's comments in Slack), both ways, through roll code's chat ops
+  (docs/code/chatops.md): the "Preview notes as Slack threads" automation template (trigger
+  `code` on `review` events, step `slack.note` with a channel) posts each new note as a message
+  (the page, linked to the preview, the element, the note quoted) and binds its thread to the
+  note (`chat_notes`). A message in that thread, from someone the Slack install allows, becomes
+  the note's reply on the change, signed "— Ada, in Slack" (the person's Slack name), made as
+  the automation through roll's API; a reply made on the page goes into the thread, and
+  resolving the note says so there. What came from Slack is never posted back to it, and a
+  note is posted once. The note's format is roll code's (`code_control::review::preview_note`,
+  read back by `roll_previews::notes`). `preview_notes_are_slack_threads_both_ways`.
 - Previews deployed on roll apps go through apps' own proxy, which adds it for its link
   visitors only: under team access (apps' `signed_in` environments) they get none yet.
 - Public previews don't get it (anyone could see the button), and a branch's preview has no
