@@ -2473,17 +2473,18 @@ async fn a_notes_people_are_told_by_mail() {
     let _ = e.engine.visitors.set(mailbox.clone());
     let note = "**Feedback on the preview** · `/cart`\n\nThe total is wrong";
     let reply = |text: &str| format!("**Reply on the preview** · `rv_n`\n\n{text}");
+    // A reader who can't push (a public repo's) mails nobody, however many notes they write.
+    let p = e.engine.store.row_by_change("chg_m").unwrap().unwrap();
+    e.engine.tell_on_review("chg_m", "rv_o", "mallory", note, "carol", None, true).unwrap();
+    assert!(e.engine.store.pending_tells(&p.id).unwrap().is_empty(), "nothing for an outside reader's note");
     e.engine.tell_on_review("chg_m", "rv_n", "bob", note, "carol", None, false).unwrap();
     e.engine.tell_on_review("chg_m", "rv_n", "bob", note, "carol", None, false).unwrap();
     e.engine.tell_on_review("chg_m", "rv_r1", "carol", &reply("Fixed in the next push"), "carol", Some("bob"), false).unwrap();
     e.engine.tell_on_review("chg_m", "rv_r2", "bob", &reply("Thanks"), "carol", Some("bob"), false).unwrap();
     e.engine.tell_on_review("chg_m", "rv_r3", "carol", &reply("Resolved."), "carol", Some("guest:Ada"), false).unwrap();
     e.engine.tell_on_review("chg_m", "rv_x", "bob", "LGTM", "carol", None, false).unwrap();
-    // A reader who can't push (a public repo's) mails nobody, however many notes they write.
-    e.engine.tell_on_review("chg_m", "rv_o", "mallory", note, "carol", None, true).unwrap();
     e.engine.tend_tells().await;
     // One went; the other couldn't, and waits for its retry, one attempt counted.
-    let p = e.engine.store.row_by_change("chg_m").unwrap().unwrap();
     let (sent, waiting) = (mailbox.0.lock().clone(), e.engine.store.pending_tells(&p.id).unwrap());
     assert_eq!((sent.len(), waiting.len()), (1, 1), "the note's and the reply's, once each: {sent:?} {waiting:?}");
     let mut both: Vec<&str> = sent.iter().map(|(to, _)| to.as_str()).chain(waiting.iter().map(|(to, _)| to.as_str())).collect();
