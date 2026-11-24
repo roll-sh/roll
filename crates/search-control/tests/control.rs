@@ -2284,8 +2284,11 @@ struct MockBucket {
     /// What another writer puts in `index.latest` just before the next write of it lands.
     latest_race: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
     /// The next new `index-N` write says it arrived (the first), then waits for the second.
-    hold_index: Arc<std::sync::Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>>,
+    hold_index: Arc<std::sync::Mutex<Option<MockHold>>>,
 }
+
+/// A held write in a [`MockBucket`]: told it arrived, then waits to be released.
+type MockHold = (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>);
 
 /// A multipart upload in a [`MockBucket`]: its key and parts by number.
 type MockUpload = (String, std::collections::BTreeMap<u32, Vec<u8>>);
