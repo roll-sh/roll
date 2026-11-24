@@ -74,13 +74,36 @@ const APIS: &[&str] = &[
     "search_application.search", "info", "ping", "security.authenticate",
 ];
 
+/// The end customer a derived key's request is for ([`super::derived`]): its user and the rate
+/// it asked for (its share of the parent's when `None`).
+pub type User<'a> = Option<(&'a str, Option<u64>)>;
+
 /// Charges a browser key's items to its rate limits (the node's, `search_server::browser`).
 pub trait ItemCharge: Send + Sync {
-    /// Charges `n` more items to browser key `key_id` from `client`, all or none; `Err`: refused,
-    /// retry after that many seconds.
-    fn charge(&self, key_id: &str, client: Option<std::net::IpAddr>, n: u64) -> Result<(), u64>;
+    /// Charges `n` more items to browser key `key_id` (for `user`, a derived key's) from
+    /// `client`, all or none; `Err`: refused, retry after that many seconds.
+    fn charge(&self, key_id: &str, user: User<'_>, client: Option<std::net::IpAddr>, n: u64) -> Result<(), u64>;
     /// Gives back the token the request's admission took: it is refused before its body is parsed.
-    fn refund(&self, key_id: &str, client: Option<std::net::IpAddr>);
+    fn refund(&self, key_id: &str, user: User<'_>, client: Option<std::net::IpAddr>);
+}
+
+/// Refuses a name a browser key (or a key derived from one) can't be limited to: not an index
+/// name or a `*` pattern of them, every index (`*`), hidden or system indices, another cluster's.
+pub fn check_index_name(n: &str) -> Result<(), String> {
+    if n.is_empty() || n.len() > 255 || n.contains([',', ' ', '"', '\\', '/', '?', '#']) || n.starts_with(['-', '+', '_']) {
+        return Err(format!("indices: {n:?} isn't an index name or pattern"));
+    }
+    if n.chars().all(|c| c == '*') {
+        return Err(format!("indices: {n:?} would reach every index, hidden ones included: name the indices or a pattern of them"));
+    }
+    if n.starts_with('.') {
+        return Err(format!("indices: {n:?} is a hidden or system index: a browser key can't reach those"));
+    }
+    // `alias:index` names an index of a remote cluster (cross-cluster search).
+    if n.contains(':') {
+        return Err(format!("indices: {n:?}: browser keys can't search across clusters"));
+    }
+    Ok(())
 }
 
 impl std::fmt::Debug for dyn ItemCharge {
@@ -201,6 +224,10 @@ pub fn check(ctx: &Ctx) -> EsResult<()> {
     if !APIS.contains(&api) {
         return Err(refused(format!("[{}]", ctx.api.name())));
     }
+    // A derived key only searches: not even `_security/_authenticate`.
+    if api == "security.authenticate" && derived_of(ctx).is_some() {
+        return Err(refused(format!("[{}] (a derived key's)", ctx.api.name())));
+    }
     Ok(())
 }
 
@@ -243,12 +270,19 @@ pub fn check_parsed(p: &Policy, src: &crate::search_source::SearchSource, scroll
     Ok(())
 }
 
-/// The browser key a request authenticated as, with its policy and client address.
-fn key_of<'c>(ctx: &'c Ctx) -> Option<(Policy, &'c str, Option<std::net::IpAddr>)> {
+/// What a derived key adds, when the request's principal is one.
+fn derived_of<'c>(ctx: &'c Ctx) -> Option<&'c super::derived::DerivedAuth> {
+    let super::AuthKind::ApiKey(k) = &ctx.principal.get()?.kind else { return None };
+    k.derived.as_deref()
+}
+
+/// The browser key a request authenticated as, with its policy, user and client address.
+fn key_of<'c>(ctx: &'c Ctx) -> Option<(Policy, &'c str, User<'c>, Option<std::net::IpAddr>)> {
     let p = policy(ctx)?;
     let super::AuthKind::ApiKey(k) = &ctx.principal.get()?.kind else { return None };
     let client = ctx.request.header(super::audit::CLIENT_ADDRESS_HEADER).and_then(|a| a.parse().ok());
-    Some((p, k.id.as_str(), client))
+    let user = k.derived.as_deref().and_then(|d| d.user.as_deref().map(|u| (u, d.per_minute)));
+    Some((p, k.id.as_str(), user, client))
 }
 
 fn too_many(ctx: &Ctx, retry_after: u64, why: String) -> EsError {
@@ -263,12 +297,12 @@ fn over_max_items(ctx: &Ctx, p: &Policy, n: usize) -> EsError {
 /// count alone (`at_least`: half its lines), before any line is parsed: nothing ran, so the token
 /// its admission took goes back.
 pub fn check_item_lines(ctx: &Ctx, at_least: usize) -> EsResult<()> {
-    let Some((p, key, client)) = key_of(ctx) else { return Ok(()) };
+    let Some((p, key, user, client)) = key_of(ctx) else { return Ok(()) };
     if at_least <= p.max_items {
         return Ok(());
     }
     if let Some(charge) = &ctx.cluster.config.item_charge {
-        charge.refund(key, client);
+        charge.refund(key, user, client);
     }
     Err(over_max_items(ctx, &p, at_least))
 }
@@ -278,11 +312,11 @@ pub fn check_item_lines(ctx: &Ctx, at_least: usize) -> EsResult<()> {
 /// or more than its limits have left, is a 429 with `Retry-After`; the parse already ran, so
 /// the admission's token stays paid.
 pub fn charge_items(ctx: &Ctx, n: usize) -> EsResult<()> {
-    let Some((p, key, client)) = key_of(ctx) else { return Ok(()) };
+    let Some((p, key, user, client)) = key_of(ctx) else { return Ok(()) };
     if n > p.max_items {
         return Err(over_max_items(ctx, &p, n));
     }
-    charge_n(ctx, key, client, n.saturating_sub(1) as u64, || format!("its [{n}] items exceed"))
+    charge_n(ctx, key, user, client, n.saturating_sub(1) as u64, || format!("its [{n}] items exceed"))
 }
 
 /// Charges `n` items of work a browser key's request asks for besides its searches (inference
@@ -290,14 +324,14 @@ pub fn charge_items(ctx: &Ctx, n: usize) -> EsResult<()> {
 /// 429 with `Retry-After` past them. What the request already ran (its admission, its other
 /// `_msearch` items) stays paid: nothing is given back.
 pub fn charge_work(ctx: &Ctx, what: &str, n: u64) -> EsResult<()> {
-    let Some((_, key, client)) = key_of(ctx) else { return Ok(()) };
-    charge_n(ctx, key, client, n, || format!("its {what} ([{n}] items) exceeds"))
+    let Some((_, key, user, client)) = key_of(ctx) else { return Ok(()) };
+    charge_n(ctx, key, user, client, n, || format!("its {what} ([{n}] items) exceeds"))
 }
 
-fn charge_n(ctx: &Ctx, key: &str, client: Option<std::net::IpAddr>, n: u64, what: impl FnOnce() -> String) -> EsResult<()> {
+fn charge_n(ctx: &Ctx, key: &str, user: User<'_>, client: Option<std::net::IpAddr>, n: u64, what: impl FnOnce() -> String) -> EsResult<()> {
     let Some(charge) = &ctx.cluster.config.item_charge else { return Ok(()) };
     if n == 0 {
         return Ok(());
     }
-    charge.charge(key, client, n).map_err(|retry_after| too_many(ctx, retry_after, format!("{} what API key [{key}] has left of its rate limits", what())))
+    charge.charge(key, user, client, n).map_err(|retry_after| too_many(ctx, retry_after, format!("{} what API key [{key}] has left of its rate limits", what())))
 }
