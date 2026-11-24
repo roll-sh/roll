@@ -185,15 +185,16 @@ impl SyncTarget for FakeCertSync {
 /// Audit deliveries, kept instead of sent; an OIDC issuer's keys, served; vendors' APIs; a
 /// Snowflake account's SQL API; MongoDB Atlas's Admin API; and STS, answering AWS identities'
 /// logins with the caller set in `.8`; the providers validity checks ask (`.9`); and GitLab's,
-/// OpenAI's and Datadog's key APIs (`.10`).
+/// OpenAI's, Datadog's and the other SaaS vendors' key APIs (`.10`).
 #[derive(Default)]
 struct Sent(Mutex<Vec<Value>>, Mutex<Option<Value>>, std::sync::atomic::AtomicBool, Mutex<Option<(String, String)>>, Mutex<BTreeMap<(String, String), Value>>, Mutex<Vendors>, FakeSnowflake, FakeAtlas, Mutex<FakeStsLogin>, FakeProviders, FakeKeyVendors);
 
 /// A self-managed GitLab's access tokens for project `acme/web`, OpenAI's service accounts in one
 /// project, Datadog's keys on its EU site, an account's Cloudflare API tokens, a Databricks
-/// workspace's tokens and Confluent Cloud's API keys, as their docs describe them, each taking only
-/// its admin credential (all obviously fake): the key ids live, every request body, and whether the
-/// admin credentials still work (`refuse`).
+/// workspace's tokens, Confluent Cloud's API keys, a SonarQube Server's and SonarQube Cloud's
+/// tokens and a Jenkins user's API tokens, as their docs describe them, each taking only its admin
+/// credential (all obviously fake): the key ids live, every request body, and whether the admin
+/// credentials still work (`refuse`).
 #[derive(Default)]
 struct FakeKeyVendors {
     live: Mutex<Vec<String>>,
@@ -202,6 +203,9 @@ struct FakeKeyVendors {
     refuse: std::sync::atomic::AtomicBool,
     /// The admin credential each GitLab request came with.
     gitlab_admins: Mutex<Vec<String>>,
+    /// Jenkins' API tokens by uuid, and whether new ones fail to sign in (`unverified`).
+    jenkins_tokens: Mutex<BTreeMap<String, String>>,
+    jenkins_unverified: std::sync::atomic::AtomicBool,
 }
 
 const GITLAB_TOKENS: &str = "https://gitlab.example.com/api/v4/projects/acme%2Fweb/access_tokens";
@@ -210,6 +214,35 @@ const DATADOG_API: &str = "https://api.datadoghq.eu/api/v2/";
 const CLOUDFLARE_TOKENS: &str = "https://api.cloudflare.com/client/v4/accounts/rollfakeaccount/tokens";
 const DATABRICKS_TOKENS: &str = "https://dbc-rollfake.cloud.databricks.com/api/2.0/token/";
 const CONFLUENT_KEYS: &str = "https://api.confluent.cloud/iam/v2/api-keys";
+const SONAR_TOKENS: &str = "https://sonar.example.com/api/user_tokens/";
+const SONARCLOUD_TOKENS: &str = "https://sonarcloud.io/api/user_tokens/";
+const JENKINS: &str = "https://jenkins.example.com/";
+const JENKINS_TOKENS: &str = "user/roll-bot/descriptorByName/jenkins.security.ApiTokenProperty/";
+
+/// A form body as JSON: `{name: value}`.
+fn form_json(b: &str) -> Value {
+    let dec = |s: &str| {
+        let s = s.replace('+', " ");
+        let (mut out, b) = (Vec::new(), s.as_bytes());
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'%' && i + 2 < b.len() {
+                out.push(u8::from_str_radix(&s[i + 1..i + 3], 16).unwrap());
+                i += 3;
+            } else {
+                out.push(b[i]);
+                i += 1;
+            }
+        }
+        String::from_utf8(out).unwrap()
+    };
+    Value::Object(b.split('&').filter(|p| !p.is_empty()).map(|p| p.split_once('=').unwrap_or((p, ""))).map(|(k, v)| (dec(k), json!(dec(v)))).collect())
+}
+
+fn basic(pair: &str) -> String {
+    use base64::Engine;
+    format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(pair))
+}
 
 /// The Cloudflare template's policies, as Cloudflare answers them (permission groups named too).
 fn cloudflare_policies(named: bool) -> Value {
@@ -218,9 +251,44 @@ fn cloudflare_policies(named: bool) -> Value {
 }
 
 impl FakeKeyVendors {
+    /// A Jenkins controller with one user, `roll-bot`, signing in with its API tokens; its POSTs
+    /// take the CSRF crumb.
+    fn jenkins(&self, method: &str, rest: &str, auth: &str, crumb: &str, body: Value) -> (u16, Value) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let mut tokens = self.jenkins_tokens.lock().unwrap();
+        let signed_in = !self.refuse.load(Relaxed) && (auth == basic("roll-bot:fake-jenkins-admin") || tokens.values().any(|t| auth == basic(&format!("roll-bot:{t}"))));
+        match (method, rest) {
+            ("GET", "whoami/api/json") if signed_in => (200, json!({ "_class": "hudson.security.WhoAmI", "anonymous": false, "authenticated": true, "name": "roll-bot" })),
+            _ if !signed_in => (401, Value::Null),
+            ("GET", "crumbIssuer/api/json") => (200, json!({ "_class": "hudson.security.csrf.DefaultCrumbIssuer", "crumb": "fakejenkinscrumb", "crumbRequestField": "Jenkins-Crumb" })),
+            ("POST", _) if crumb != "fakejenkinscrumb" => (403, Value::Null),
+            ("POST", r) if r == format!("{JENKINS_TOKENS}generateNewToken") => {
+                let n = self.made.fetch_add(1, Relaxed) + 1;
+                self.bodies.lock().unwrap().push(body.clone());
+                let uuid = format!("00000000-0000-4000-8000-{n:012}");
+                let value = format!("fake-jenkins-token-{n}");
+                self.live.lock().unwrap().push(uuid.clone());
+                if !self.jenkins_unverified.load(Relaxed) {
+                    tokens.insert(uuid.clone(), value.clone());
+                }
+                (200, json!({ "status": "ok", "data": { "tokenName": body["newTokenName"], "tokenUuid": uuid, "tokenValue": value } }))
+            }
+            ("POST", r) if r == format!("{JENKINS_TOKENS}revoke") => {
+                let uuid = body["tokenUuid"].as_str().unwrap().to_string();
+                tokens.remove(&uuid);
+                self.live.lock().unwrap().retain(|k| *k != uuid);
+                (200, json!({ "status": "ok" }))
+            }
+            _ => (404, Value::Null),
+        }
+    }
+
     fn answer(&self, method: &str, url: &str, headers: &[(&str, &Secret)], body: Option<(&str, &Secret)>) -> Option<(u16, Value)> {
         use std::sync::atomic::Ordering::Relaxed;
         let header = |name: &str| headers.iter().find(|(k, _)| *k == name).map(|(_, v)| v.expose().to_string()).unwrap_or_default();
+        if let Some(rest) = url.strip_prefix(JENKINS) {
+            return Some(self.jenkins(method, rest, &header("authorization"), &header("jenkins-crumb"), body.map(|(_, b)| form_json(b.expose())).unwrap_or(Value::Null)));
+        }
         let (vendor, rest, authorized) = if let Some(rest) = url.strip_prefix(GITLAB_TOKENS) {
             self.gitlab_admins.lock().unwrap().push(header("private-token"));
             ("gitlab", rest, ["fake-gitlab-admin", "fake-gitlab-admin-2"].contains(&header("private-token").as_str()))
@@ -230,6 +298,8 @@ impl FakeKeyVendors {
             ("cloudflare", rest, header("authorization") == "Bearer fake-cf-admin")
         } else if let Some(rest) = url.strip_prefix(DATABRICKS_TOKENS) {
             ("databricks", rest, header("authorization") == "Bearer fake-dbx-admin")
+        } else if let Some(rest) = url.strip_prefix(SONAR_TOKENS).or_else(|| url.strip_prefix(SONARCLOUD_TOKENS)) {
+            ("sonarqube", rest, header("authorization") == basic("fake-sonar-admin:"))
         } else if let Some(rest) = url.strip_prefix(CONFLUENT_KEYS) {
             use base64::Engine;
             ("confluent", rest, header("authorization") == format!("Basic {}", base64::engine::general_purpose::STANDARD.encode("FAKECONFLUENTADMIN:fake-confluent-admin")))
@@ -240,9 +310,12 @@ impl FakeKeyVendors {
         if !authorized || self.refuse.load(Relaxed) {
             return Some((if vendor == "datadog" { 403 } else { 401 }, json!({ "message": "401 Unauthorized" })));
         }
-        let body: Value = body.map(|(t, b)| {
-            assert_eq!(t, "application/json");
-            serde_json::from_str(b.expose()).unwrap()
+        let body: Value = body.map(|(t, b)| match t {
+            "application/x-www-form-urlencoded" => form_json(b.expose()),
+            t => {
+                assert_eq!(t, "application/json");
+                serde_json::from_str(b.expose()).unwrap()
+            }
         }).unwrap_or(Value::Null);
         let mut live = self.live.lock().unwrap();
         let made = || {
@@ -255,6 +328,22 @@ impl FakeKeyVendors {
             ("gitlab", "GET", "?per_page=1") | ("openai", "GET", "?limit=1") => (200, json!([])),
             ("datadog", "GET", "api_keys?page%5Bsize%5D=1" | "current_user/application_keys?page%5Bsize%5D=1") | ("confluent", "GET", "?spec.owner=sa-rollfake&page_size=1") => (200, json!({ "data": [] })),
             ("databricks", "GET", "list") => (200, json!({ "token_infos": [] })),
+            ("sonarqube", "GET", "search") => (200, json!({ "login": "roll-bot", "userTokens": [] })),
+            ("sonarqube", "POST", "generate") => {
+                let name = body["name"].as_str().unwrap().to_string();
+                if live.contains(&name) {
+                    return Some((400, json!({ "errors": [{ "msg": "A user token with this name already exists" }] })));
+                }
+                let n = made();
+                live.push(name.clone());
+                (200, json!({ "login": "roll-bot", "name": name, "token": format!("squ_fakesonar{n}"), "type": body["type"], "projectKey": body["projectKey"] }))
+            }
+            ("sonarqube", "POST", "revoke") => {
+                let name = body["name"].as_str().unwrap().to_string();
+                let found = live.contains(&name);
+                live.retain(|k| *k != name);
+                (if found { 204 } else { 404 }, Value::Null)
+            }
             // The template, read at registration and before each new token.
             ("cloudflare", "GET", "/tmplrollfake") => {
                 (200, json!({ "success": true, "errors": [], "result": { "id": "tmplrollfake", "name": "template", "status": "disabled", "policies": cloudflare_policies(true), "condition": { "request.ip": { "in": ["192.0.2.0/24"] } } } }))
@@ -1993,6 +2082,9 @@ async fn an_open_request_behind_200_others_still_lists_and_pages_cover_them_all(
 
     let listed = api.ok(Method::GET, "/environments/production/requests?state=open", None).await;
     assert_eq!(listed.as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap()).collect::<Vec<_>>(), [open.as_str()]);
+    // A state no request has is a mistake, not an empty list.
+    let (s, e) = api.call(Method::GET, "/environments/production/requests?state=opened", None).await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("open, approved, rejected, applied, closed, stale"), "{s} {e}");
 
     let (mut seen, mut before) = (Vec::new(), String::new());
     loop {
@@ -3705,6 +3797,74 @@ async fn confluent_api_keys_rotate_for_the_same_owner_and_resource() {
     assert_eq!(pair(api.values("production", "/").await), (json!("CONFLUENTFAKE2"), json!("fake-confluent-secret-2")));
     end_grace(&api).await;
     assert_eq!(*api.sent.10.live.lock().unwrap(), ["CONFLUENTFAKE2"]);
+}
+
+#[tokio::test]
+async fn sonarqube_tokens_rotate_and_the_old_one_is_revoked_after_the_grace_period() {
+    let api = Api::new().await;
+    for (target, why) in [
+        (json!({ "host": "10.0.0.1" }), "a server's host is a hostname"),
+        (json!({ "kind": "project_analysis", "project": "acme-web" }), "SonarQube Cloud has user tokens only"),
+        (json!({ "host": "sonar.example.com", "kind": "project_analysis" }), "a project analysis token names its project"),
+    ] {
+        let (s, _) = api.call(Method::POST, "/saas", Some(json!({ "name": "sq", "vendor": "sonarqube", "target": target, "credential": "x" }))).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{why}");
+    }
+    let target = json!({ "host": "sonar.example.com", "kind": "project_analysis", "project": "acme:web", "expires_days": 90 });
+    key_vendor(&api, "sonarqube", target, "fake-sonar-admin", "SONAR_TOKEN", json!({ "rotate_days": 60 })).await;
+    assert_eq!(api.values("production", "/").await["values"]["SONAR_TOKEN"], "squ_fakesonar1");
+    let body = api.sent.10.bodies.lock().unwrap()[0].clone();
+    assert!(body["type"] == "PROJECT_ANALYSIS_TOKEN" && body["projectKey"] == "acme:web" && body["expirationDate"].as_str().is_some_and(|d| d.len() == 10), "{body}");
+
+    // Each token has a name of its own (SonarQube revokes by name); the old one lasts the grace period.
+    api.ok(Method::POST, "/environments/production/secrets/SONAR_TOKEN/rotate", None).await;
+    assert_eq!(api.values("production", "/").await["values"]["SONAR_TOKEN"], "squ_fakesonar2");
+    let live = api.sent.10.live.lock().unwrap().clone();
+    assert!(live.len() == 2 && live[0] != live[1], "{live:?}");
+    end_grace(&api).await;
+    assert_eq!(*api.sent.10.live.lock().unwrap(), [live[1].clone()]);
+
+    // SonarQube Cloud, the default host: user tokens.
+    let cloud = api.ok(Method::POST, "/saas", Some(json!({ "name": "sq-cloud", "vendor": "sonarqube", "credential": "fake-sonar-admin" }))).await;
+    api.ok(Method::PUT, "/environments/production/secrets/SONAR_CLOUD_TOKEN", Some(json!({ "link": { "kind": "saas", "ref": cloud["id"], "field": "secret", "mode": "managed" } }))).await;
+    assert_eq!(api.values("production", "/").await["values"]["SONAR_CLOUD_TOKEN"], "squ_fakesonar3");
+    assert_eq!(api.sent.10.bodies.lock().unwrap()[2]["type"], "USER_TOKEN");
+}
+
+#[tokio::test]
+async fn jenkins_api_tokens_are_verified_before_the_old_one_is_revoked() {
+    let api = Api::new().await;
+    let (s, _) = api.call(Method::POST, "/saas", Some(json!({ "name": "ci", "vendor": "jenkins", "target": { "host": "jenkins.example.com:8443", "user": "roll-bot" }, "credential": "x" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "a controller's host is a hostname");
+    key_vendor(&api, "jenkins", json!({ "host": "jenkins.example.com", "user": "roll-bot" }), "fake-jenkins-admin", "JENKINS_API_TOKEN", json!({})).await;
+    assert_eq!(api.values("production", "/").await["values"]["JENKINS_API_TOKEN"], "fake-jenkins-token-1");
+    let first = "00000000-0000-4000-8000-000000000001";
+    let second = "00000000-0000-4000-8000-000000000002";
+    api.ok(Method::POST, "/environments/production/secrets/JENKINS_API_TOKEN/rotate", None).await;
+    assert_eq!(api.values("production", "/").await["values"]["JENKINS_API_TOKEN"], "fake-jenkins-token-2");
+    assert_eq!(*api.sent.10.live.lock().unwrap(), [first, second]);
+    end_grace(&api).await;
+    assert_eq!(*api.sent.10.live.lock().unwrap(), [second]);
+
+    // A new token that doesn't sign in is taken back: the token in use stays, and the scheduled
+    // rotation is rotation.failed.
+    api.sent.10.jenkins_unverified.store(true, std::sync::atomic::Ordering::Relaxed);
+    let p = api.project.clone();
+    api.db
+        .write(move |c| {
+            let state: String = c.query_row("SELECT link_state FROM secrets WHERE project_id = ? AND key = 'JENKINS_API_TOKEN'", [p.as_str()], |r| r.get(0))?;
+            let mut state: Value = serde_json::from_str(&state).unwrap();
+            state["issued_at"] = json!(0);
+            c.execute("UPDATE secrets SET link_state = ?, link = replace(link, '\"mode\":\"managed\"', '\"mode\":\"managed\",\"options\":{\"rotate_days\":1}') WHERE project_id = ? AND key = 'JENKINS_API_TOKEN'", [state.to_string().as_str(), p.as_str()])
+        })
+        .unwrap();
+    let start = api.ok(Method::GET, "/events?latest=1", None).await["next"].as_i64().unwrap();
+    let s = api.secrets.clone();
+    tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
+    let events = api.ok(Method::GET, &format!("/events?after={start}&kinds=rotation.failed"), None).await;
+    assert!(events["events"][0]["key"] == "JENKINS_API_TOKEN" && events.to_string().contains("jenkins answered 401 verifying the new token"), "{events}");
+    assert_eq!(api.values("production", "/").await["values"]["JENKINS_API_TOKEN"], "fake-jenkins-token-2", "the token in use stays");
+    assert_eq!(*api.sent.10.live.lock().unwrap(), [second], "the unverified token was revoked");
 }
 
 #[tokio::test]
