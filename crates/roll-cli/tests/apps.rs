@@ -147,6 +147,12 @@ async fn settings_through_the_cli() {
     let svc = t.json(&["set", "-s", "site", "-p", "acme", "--start", "none", "--alert-log", "none"]).await;
     assert!(svc["run"].get("start").is_none() && svc["run"]["alerts"].get("log_match").is_none(), "{svc}");
     assert_eq!(svc["run"]["alerts"]["p95_ms"], 800, "{svc}");
+    // A route alert, the capacity alert, a floor by the clock, the queue, and any setting as JSON.
+    let svc = t.json(&["set", "-s", "site", "-p", "acme", "--alert-route", "post /checkout 5xx>=2%", "--alert-capacity", "20", "--floor", "mon 08:00..fri 18:00=1", "--floor-timezone", "Europe/Berlin", "--queue", "5", "--set", "concurrency=40"]).await;
+    let run = &svc["run"];
+    assert_eq!(run["alerts"]["routes"], serde_json::json!([{"route": "/checkout", "method": "POST", "error_pct": 2, "p95_ms": 0}]), "{svc}");
+    assert_eq!((run["alerts"]["capacity_pct"].as_u64(), run["alerts"]["p95_ms"].as_u64(), run["queue_s"].as_u64(), run["concurrency"].as_u64()), (Some(20), Some(800), Some(5), Some(40)), "{svc}");
+    assert_eq!(run["schedule_scale"], serde_json::json!([{"windows": [{"from": "mon 08:00", "to": "fri 18:00"}], "timezone": "Europe/Berlin", "min_instances": 1}]), "{svc}");
     // A copy: the settings and own variables, a sealed one named instead of copied.
     t.ok(&["vars", "-s", "site", "-p", "acme", "MODE=prod", "KEY=sk-1", "--seal", "KEY"]).await;
     let copy = t.json(&["duplicate", "site-copy", "-s", "site", "-p", "acme"]).await;

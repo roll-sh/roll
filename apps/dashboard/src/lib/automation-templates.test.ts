@@ -14,7 +14,7 @@ const SOURCES = Object.fromEntries(CHATOPS_CATALOG.triggers.map((t) => [t.source
 const STEPS = Object.fromEntries(CHATOPS_CATALOG.steps.map((s) => [s.kind, s.config as { properties: Record<string, unknown>; required?: string[] }]));
 
 /** Fields a template can't fill: only the owner knows them (their own Slack member id). */
-const OWNER_FILLS: Record<string, string[]> = { "slack.notify": ["to"], "slack.post": ["channel"] };
+const OWNER_FILLS: Record<string, string[]> = { "slack.notify": ["to"], "slack.post": ["channel"], "slack.note": ["channel"] };
 
 const isBuiltIn = (k: string): k is BuiltInStepKind => (STEP_KINDS as readonly string[]).includes(k);
 
@@ -30,7 +30,7 @@ describe("chat ops' automation templates", () => {
   it("are in the gallery, once each", () => {
     const ids = TEMPLATES.map((t) => t.id);
     expect(new Set(ids).size).toBe(ids.length);
-    expect(CHATOPS_TEMPLATES.map((t) => t.id)).toEqual(["slack-roll-command", "github-mention-pr", "check-failed-fix", "slack-agent-needs-me", "slack-reaction-handoff", "slack-preview-ready"]);
+    expect(CHATOPS_TEMPLATES.map((t) => t.id)).toEqual(["slack-roll-command", "github-mention-pr", "check-failed-fix", "slack-agent-needs-me", "slack-reaction-handoff", "slack-preview-ready", "slack-preview-notes"]);
     for (const t of CHATOPS_TEMPLATES) expect(TEMPLATES).toContain(t);
   });
 

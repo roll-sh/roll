@@ -212,6 +212,43 @@ async fn with_screenshots_a_baseline_of_the_default_branch_is_kept_to_compare_ch
     assert_eq!(e.engine.store.row_by_change("chg_1").unwrap().map(|r| r.desired), Some(Desired::Active), "the change's preview came back with its repo");
 }
 
+/// Pages changed the same way against main's (Percy's grouped diffs), the first page included,
+/// share a group, accepted together; a page changed another way is left to review on its own.
+#[tokio::test]
+async fn pages_changed_the_same_way_are_accepted_together() {
+    let e = env(json!({ "enabled": true, "visual_review": "check", "github": { "screenshot": true } }));
+    let png = |paint: &dyn Fn(u32, u32) -> u8| {
+        let mut out = Vec::new();
+        image::RgbaImage::from_fn(20, 20, |x, y| { let v = paint(x, y); image::Rgba([v, v, v, 255]) }).write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).unwrap();
+        out
+    };
+    *e.apps.shot.lock() = Some(png(&|_, _| 0));
+    e.code.open(change("chg_v", 1));
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let chg = e.engine.store.row_by_change("chg_v").unwrap().unwrap();
+    let base = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.change_id.is_none()).unwrap();
+    let paths: Vec<String> = ["/a", "/b", "/c"].map(String::from).to_vec();
+    let shots = |paint: &dyn Fn(&str, u32, u32) -> u8| paths.iter().map(|p| roll_previews::ports::PageShot { path: p.clone(), png: png(&|x, y| paint(p, x, y)), errors: 0, report: Default::default() }).collect::<Vec<_>>();
+    e.engine.store.set_screenshot(&base.id, "cs_main", &png(&|_, _| 0), None, None).unwrap();
+    e.engine.store.set_page_shots(&base.id, "cs_main", &shots(&|_, _, _| 0), &paths).unwrap();
+    // The first page, /a and /b gain the same light bar at the top; /c a different one, lower
+    // and grey.
+    e.engine.store.set_screenshot(&chg.id, "cs_v1", &png(&|_, y| if y <= 3 { 255 } else { 0 }), None, None).unwrap();
+    e.engine.store.set_page_shots(&chg.id, "cs_v1", &shots(&|p, _, y| match (p, y) { ("/c", 10..=13) => 128, ("/c", _) => 0, (_, 0..=3) => 255, _ => 0 }), &paths).unwrap();
+    e.engine.store.compare_with_base(&chg.id, &base.id, "main", None).unwrap();
+    let review = || e.engine.store.preview(&chg.id).unwrap().visual_review.unwrap();
+    let groups: Vec<(String, Option<String>)> = review().pages.iter().map(|p| (p.path.clone(), p.group.clone())).collect();
+    let a = groups.iter().find(|(p, _)| p == "/a").and_then(|(_, g)| g.clone()).expect("/a in a group");
+    assert_eq!(groups.iter().find(|(p, _)| p.is_empty()).map(|(_, g)| g.clone()), Some(Some(a.clone())), "the first page changed the same way: {groups:?}");
+    assert_eq!(groups.iter().find(|(p, _)| p == "/b").map(|(_, g)| g.clone()), Some(Some(a.clone())), "/b changed the same way: {groups:?}");
+    assert_eq!(groups.iter().find(|(p, _)| p == "/c").map(|(_, g)| g.clone()), Some(None), "a change of its own: {groups:?}");
+    assert!(e.engine.accept_visual(&chg.id, "ada", &[], true, None, Some("cs_v1"), Some("group:nothex")).await.is_err());
+    e.engine.accept_visual(&chg.id, "ada", &[], true, None, Some("cs_v1"), Some(&format!("group:{a}"))).await.unwrap();
+    let waiting: Vec<String> = review().pages.iter().filter(|p| p.by.is_none()).map(|p| p.path.clone()).collect();
+    assert_eq!(waiting, ["/c"], "the three accepted at once; /c still waits");
+}
+
 #[tokio::test]
 async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     let e = env(json!({ "enabled": true, "visual_review": "check", "github": { "screenshot": true } }));
@@ -2378,8 +2415,47 @@ async fn a_pages_notes_by_its_environment_name() {
     assert_eq!(e.engine.open_notes(&p.id).await.unwrap().iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), ["rv_Too big", "rv_Typo"], "every page's, with ids");
     e.engine.resolve_note(&p.id, "rv_Too big", "bob").await.unwrap();
     assert!(e.engine.notes_for(&env_name, "/").await.unwrap().is_empty());
+    // Said on the change as bob, so its pull request and the note's Slack thread hear it.
+    assert_eq!(*e.code.comments.lock(), [("chg_n".to_string(), "**Reply on the preview** · `rv_Too big`\n\nResolved.".to_string(), "bob".to_string(), false)]);
     assert_eq!(e.engine.open_notes(&p.id).await.unwrap().len(), 1);
     assert!(e.engine.resolve_note(&p.id, "rv_someone else's", "bob").await.is_err());
+}
+
+/// A guest's note through a share link that takes notes: on the change as `guest:<name>`, its
+/// words inert for a pull request, the link's label said; a link that takes none refuses; ten an
+/// hour per link; a guest sees only their link's notes.
+#[tokio::test]
+async fn a_share_links_guest_leaves_notes_as_a_guest() {
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_g", 5));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_g").unwrap().unwrap();
+    let live = |notes: bool, label: &str| {
+        let (_, url) = e.engine.share(&p.id, 2, "ada", None, label, notes).unwrap();
+        let token = url.split("roll_share=").nth(1).unwrap().to_string();
+        e.engine.store.share_live(&p.id, &token).unwrap().unwrap()
+    };
+    let (open, closed) = (live(true, "Acme's review"), live(false, ""));
+    let note = roll_previews::notes::GuestNote { name: "Ada <script>".into(), path: "/pricing".into(), selector: "button.buy".into(), note: "Ping @team ![x](https://t.example/p.gif) <b>here</b>".into(), viewport: "390x844".into(), ..Default::default() };
+    e.engine.guest_note(&p.id, &open, &note).await.unwrap();
+    let (change, body, by, outside) = e.code.comments.lock()[0].clone();
+    assert_eq!((change.as_str(), by.as_str()), ("chg_g", "guest:Ada script"), "no handle has a colon: never a team member");
+    assert!(outside, "a guest's words are outside the team's, on the review too (MCP's lockdown)");
+    assert!(body.starts_with("**Feedback on the preview** · [`/pricing`](") && body.contains("· `button.buy`\n\nPing @\u{200b}team !\u{200b}[x](https://t.example/p.gif) &lt;b&gt;here&lt;/b&gt;\n\n"), "{body}");
+    assert!(body.contains("390x844 viewport") && body.contains("a guest, through the share link \"Acme's review\""), "{body}");
+    assert_eq!(roll_previews::notes::parse(&body).map(|(path, sel, _)| (path, sel)), Some(("/pricing".to_string(), "button.buy".to_string())), "read back as a note");
+    assert!(matches!(e.engine.guest_note(&p.id, &closed, &note).await, Err(roll_previews::Error::Forbidden(_))), "a link that takes no notes");
+    for _ in 1..roll_previews::notes::GUEST_PER_HOUR {
+        e.engine.guest_note(&p.id, &open, &note).await.unwrap();
+    }
+    assert!(matches!(e.engine.guest_note(&p.id, &open, &note).await, Err(roll_previews::Error::Conflict(_))), "ten an hour per link");
+    // What a guest sees: their link's notes only.
+    let theirs = roll_previews::notes::Note { id: "rv_c1".into(), path: "/pricing".into(), selector: "button.buy".into(), note: "Too small".into(), by: "guest:Ada".into(), at: 1, replies: Vec::new(), crop: false };
+    let team = roll_previews::notes::Note { id: "rv_team".into(), by: "bob".into(), ..theirs.clone() };
+    e.code.feedback.lock().insert("chg_g".into(), vec![theirs, team]);
+    let seen: Vec<String> = e.engine.guest_notes_of(&p.id, &open.id, "/pricing").await.unwrap().into_iter().map(|n| n.id).collect();
+    assert_eq!(seen, ["rv_c1"]);
+    assert!(e.engine.guest_notes_of(&p.id, &closed.id, "/pricing").await.unwrap().is_empty());
 }
 
 /// A start's dynamic credentials (roll secrets' leases) live as long as it runs: renewed near

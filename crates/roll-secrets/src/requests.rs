@@ -63,6 +63,31 @@ pub struct Request {
     /// applied as [`Secrets::rotate_leaked`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
+    /// What applying it did instead of what it asked: a leak's rotation whose credential was
+    /// already replaced says `already rotated (…)` and issued nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+}
+
+/// One page of `GET …/requests` (with `limit` or `before`; without either the answer is
+/// `requests` alone, as before paging).
+#[derive(Debug, Serialize)]
+pub struct RequestPage {
+    pub requests: Vec<Request>,
+    /// `before` for the next page (`<at>:<id>`); absent at the end.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next: Option<String>,
+}
+
+/// SQL pages one call reads at most when folder reach hides rows, before it answers `next`.
+const REQUEST_PAGES: usize = 10;
+
+fn parse_cursor(s: &str) -> Result<(i64, String)> {
+    s.split_once(':').and_then(|(at, id)| Some((at.parse().ok()?, id.to_string()))).filter(|(_, id)| !id.is_empty()).ok_or_else(|| Error::BadRequest("before is a page's next".into()))
+}
+
+fn cursor_of(c: Option<&(i64, String)>) -> Option<String> {
+    c.map(|(at, id)| format!("{at}:{id}"))
 }
 
 /// A request that deletes its environment.
@@ -119,9 +144,10 @@ struct RequestRow {
     reviews: String,
     applied_seq: Option<i64>,
     action: Option<String>,
+    outcome: Option<String>,
 }
 
-const COLUMNS: &str = "id, env_id, path, message, by, at, base_seq, state, ops, items, reviews, applied_seq, action";
+const COLUMNS: &str = "id, env_id, path, message, by, at, base_seq, state, ops, items, reviews, applied_seq, action, outcome";
 
 fn request_row(r: &code_sql::Row<'_>) -> code_sql::Result<RequestRow> {
     Ok(RequestRow {
@@ -137,6 +163,7 @@ fn request_row(r: &code_sql::Row<'_>) -> code_sql::Result<RequestRow> {
         reviews: r.get(10)?,
         applied_seq: r.get(11)?,
         action: r.get(12)?,
+        outcome: r.get(13)?,
     })
 }
 
@@ -167,6 +194,7 @@ fn view(c: &Conn<'_>, env: &EnvRow, r: RequestRow, st: &Standing) -> Result<Requ
         reviews,
         applied_seq: r.applied_seq,
         action: r.action,
+        outcome: r.outcome,
     })
 }
 
@@ -239,14 +267,53 @@ fn plan(c: &Conn<'_>, dek: &Dek, env: &EnvRow, items: &[Item]) -> Result<Vec<Ite
 }
 
 impl Secrets {
-    pub fn requests(&self, project: &str, slug: &str, state: Option<&str>, caller: &Caller) -> Result<Vec<Request>> {
+    /// An environment's requests, newest first: up to `limit` (1-200, default 200) the caller may
+    /// read, from before `before` (a page's `next`). `next` is set when more may follow. `state`
+    /// filters in SQL; folder reach after it, so a page is read again (at most
+    /// [`REQUEST_PAGES`] times) until it holds `limit` requests or the list ends.
+    pub fn requests(&self, project: &str, slug: &str, state: Option<&str>, before: Option<&str>, limit: Option<i64>, caller: &Caller) -> Result<RequestPage> {
         let st = self.standing(project, slug, None);
         caller.need(Action::Read, &Scope::env(project, slug))?;
         self.project(project)?;
+        let limit = limit.unwrap_or(200);
+        if !(1..=200).contains(&limit) {
+            return Err(Error::BadRequest("limit is 1 to 200".into()));
+        }
+        let start = before.map(parse_cursor).transpose()?;
         self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
-            let rows = c.query(&format!("SELECT {COLUMNS} FROM requests WHERE env_id = ? ORDER BY at DESC LIMIT 200"), [&env.id], request_row)?;
-            rows.into_iter().filter(|r| state.is_none_or(|s| r.state == s) && caller.allows(Action::Read, &Scope::at(project, slug, &r.path))).map(|r| view(c, &env, r, &st)).collect::<Result<_>>()
+            let mut cursor = start.clone();
+            let mut out = Vec::new();
+            for _ in 0..REQUEST_PAGES {
+                let mut sql = format!("SELECT {COLUMNS} FROM requests WHERE env_id = ?");
+                let mut args = vec![code_sql::Value::Text(env.id.clone())];
+                if let Some(s) = state {
+                    sql.push_str(" AND state = ?");
+                    args.push(code_sql::Value::Text(s.into()));
+                }
+                if let Some((at, id)) = &cursor {
+                    sql.push_str(" AND (at < ? OR (at = ? AND id < ?))");
+                    args.extend([code_sql::Value::Int(*at), code_sql::Value::Int(*at), code_sql::Value::Text(id.clone())]);
+                }
+                sql.push_str(&format!(" ORDER BY at DESC, id DESC LIMIT {limit}"));
+                let rows = c.query(&sql, args, request_row)?;
+                let last_page = (rows.len() as i64) < limit;
+                let n = rows.len();
+                for (i, r) in rows.into_iter().enumerate() {
+                    cursor = Some((r.at, r.id.clone()));
+                    if caller.allows(Action::Read, &Scope::at(project, slug, &r.path)) {
+                        out.push(view(c, &env, r, &st)?);
+                        if out.len() as i64 == limit {
+                            let next = if last_page && i + 1 == n { None } else { cursor_of(cursor.as_ref()) };
+                            return Ok(RequestPage { requests: out, next });
+                        }
+                    }
+                }
+                if last_page {
+                    return Ok(RequestPage { requests: out, next: None });
+                }
+            }
+            Ok(RequestPage { requests: out, next: cursor_of(cursor.as_ref()) })
         })
     }
 
@@ -380,7 +447,7 @@ impl Secrets {
             }
             let base_seq: i64 = c.query_row("SELECT seq FROM projects WHERE project_id = ?", [project], |r| r.get(0))?;
             c.execute(
-                &format!("INSERT INTO requests ({COLUMNS}, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, '[]', NULL, NULL, ?)"),
+                &format!("INSERT INTO requests ({COLUMNS}, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, '[]', NULL, NULL, NULL, ?)"),
                 params![id, env.id, path, message, caller.principal, now, base_seq, json(&ops).into_bytes(), json(&diff), project],
             )?;
             let keys: Vec<String> = diff.iter().map(|d| d.key.clone()).collect();
@@ -590,7 +657,7 @@ impl Secrets {
             }
             let base_seq: i64 = c.query_row("SELECT seq FROM projects WHERE project_id = ?", [project], |r| r.get(0))?;
             c.execute(
-                &format!("INSERT INTO requests ({COLUMNS}, project_id) VALUES (?, ?, '/', ?, ?, ?, ?, 'open', ?, '[]', '[]', NULL, ?, ?)"),
+                &format!("INSERT INTO requests ({COLUMNS}, project_id) VALUES (?, ?, '/', ?, ?, ?, ?, 'open', ?, '[]', '[]', NULL, ?, NULL, ?)"),
                 params![id, env.id, message, caller.principal, now, base_seq, "[]".as_bytes().to_vec(), DELETE_ENVIRONMENT, project],
             )?;
             audit::record(c, self.keys()?, project, caller, "request.open", Some(&env.slug), Some("/"), &[], &format!("opened {id}: delete the environment {}", env.slug), now)?;
@@ -605,16 +672,17 @@ impl Secrets {
 
     /// A leaked key's rotation as a change request, in the leak's write (`c`): the environment, or
     /// the key's folder, needs approvals, and a rotation is a change like any other there. Its
-    /// one item is the key, `rotated`; nothing is issued until it's applied.
+    /// one item is the key, `rotated`; nothing is issued until it's applied, and only while the
+    /// key is still on `credential`, the one that leaked.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn open_rotate_request(&self, c: &Conn<'_>, project: &str, env: &EnvRow, path: &str, key: &str, by: &Caller, now: i64) -> Result<String> {
+    pub(crate) fn open_rotate_request(&self, c: &Conn<'_>, project: &str, env: &EnvRow, path: &str, key: &str, credential: &str, by: &Caller, now: i64) -> Result<String> {
         let id = names::new_id("req", 12);
         let message = format!("rotate {key}: its value leaked");
         let item = ItemDiff { key: key.to_string(), path: path.to_string(), kind: SecretType::Shared, what: vec!["rotated".into()], from_fp: None, to_fp: None };
         let base_seq: i64 = c.query_row("SELECT seq FROM projects WHERE project_id = ?", [project], |r| r.get(0))?;
         c.execute(
-            &format!("INSERT INTO requests ({COLUMNS}, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, '[]', NULL, ?, ?)"),
-            params![id, env.id, path, message, by.principal, now, base_seq, "[]".as_bytes().to_vec(), json(&[item]), ROTATE, project],
+            &format!("INSERT INTO requests ({COLUMNS}, project_id, credential) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, '[]', NULL, ?, NULL, ?, ?)"),
+            params![id, env.id, path, message, by.principal, now, base_seq, "[]".as_bytes().to_vec(), json(&[item]), ROTATE, project, credential],
         )?;
         let keys = [key.to_string()];
         let event = crate::events::Event::new(crate::events::Kind::RequestPending, serde_json::json!({ "request": id, "type": "change" }));
@@ -628,12 +696,14 @@ impl Secrets {
     }
 
     /// Apply an approved rotation request: claimed (marked applied) in a write, then rotated
-    /// outside it; a rotation that fails gives the request back as it was.
+    /// outside it; a rotation that fails gives the request back as it was. A key no longer on the
+    /// credential that leaked was rotated meanwhile: the request is applied as `already rotated`,
+    /// and nothing is issued (the credential it's on now never leaked).
     fn apply_rotate(&self, project: &str, slug: &str, r: RequestRow, bypass: bool, st: &Standing, caller: &Caller) -> Result<Request> {
         let item = from_json::<Vec<ItemDiff>>(&r.items).into_iter().next().ok_or_else(|| Error::Internal("a rotation request names no key".into()))?;
         let id = r.id.clone();
         let now = self.db.now_ms()?;
-        self.db.write(|c| {
+        let superseded = self.db.write(|c| {
             let env = envs::by_slug(c, project, slug)?;
             let current = load(c, &env, &id)?;
             if current.state != r.state {
@@ -643,16 +713,27 @@ impl Secrets {
             if !met && !bypass {
                 return Err(Error::Conflict("approval_required", format!("{id} doesn't have the approvals what it changes needs")));
             }
-            c.execute("UPDATE requests SET state = 'applied' WHERE id = ? AND state = ?", [id.as_str(), r.state.as_str()])?;
+            let outcome = superseded_by(c, &env, &id, &item.path, &item.key)?.map(|version| format!("already rotated ({} is on another credential since the leak, at version {version})", item.key));
+            c.execute("UPDATE requests SET state = 'applied', outcome = ? WHERE id = ? AND state = ?", params![outcome, id, r.state])?;
             if bypass && !met {
                 audit::record(c, self.keys()?, project, caller, "approval.bypass", Some(slug), Some(&r.path), &[], &format!("applied {id} without approval"), now)?;
             }
-            Ok(())
+            if let Some(outcome) = &outcome {
+                audit::record(c, self.keys()?, project, caller, "request.apply", Some(slug), Some(&r.path), std::slice::from_ref(&item.key), &format!("applied {id}: {outcome}; nothing issued"), now)?;
+            }
+            Ok::<_, Error>(outcome.is_some())
         })?;
+        if superseded {
+            return self.request(project, slug, &id, caller);
+        }
         match self.rotate_leaked(project, slug, &item.path, &item.key, caller) {
             Ok(applied) => {
                 let seq = applied.change.map(|c| c.seq);
-                self.db.write(|c| c.execute("UPDATE requests SET applied_seq = ? WHERE id = ?", params![seq, id]))?;
+                // A leak rotation like a report's: the key isn't rotated for a leak again within the hour.
+                self.db.write(|c| {
+                    c.execute("UPDATE requests SET applied_seq = ? WHERE id = ?", params![seq, id])?;
+                    c.execute("UPDATE leak_rotations SET state = 'rotated', at = ? WHERE request_id = ?", params![now, id])
+                })?;
             }
             Err(e) => {
                 self.db.write(|c| c.execute("UPDATE requests SET state = ? WHERE id = ? AND state = 'applied'", [r.state.as_str(), id.as_str()]))?;
@@ -717,4 +798,41 @@ impl Secrets {
         });
         Standing { roles, counts }
     }
+}
+
+/// The credential a leak's rotation request names (kept on the request; from its
+/// `leak_rotations` claim for one opened before requests kept it).
+fn leaked_credential(c: &Conn<'_>, id: &str) -> Result<Option<String>> {
+    Ok(c.query_row("SELECT COALESCE(credential, (SELECT l.credential FROM leak_rotations l WHERE l.request_id = requests.id)) FROM requests WHERE id = ?", [id], |r| r.get::<_, Option<String>>(0)).optional()?.flatten())
+}
+
+/// The key's version when it's on another credential than the one rotation request `id` names
+/// as leaked (it rotated meanwhile); `None` while it's still on it, or nothing can tell.
+fn superseded_by(c: &Conn<'_>, env: &EnvRow, id: &str, path: &str, key: &str) -> Result<Option<i64>> {
+    let Some(leaked) = leaked_credential(c, id)? else { return Ok(None) };
+    let row: Option<(Option<String>, Option<String>, i64)> = c.query_row("SELECT link, link_state, version FROM secrets WHERE env_id = ? AND path = ? AND key = ? AND owner = ''", [&env.id, path, key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+    let Some((link, state, version)) = row else { return Ok(None) };
+    let now = crate::leaks::credential_of("", link.as_deref(), state.as_deref(), path, key);
+    Ok((now.as_deref() != Some(leaked.as_str())).then_some(version))
+}
+
+/// A scheduled rotation (in its write, `c`) replaced `leaked`: every leak's rotation request still
+/// waiting for it is applied as `already rotated`, with nothing issued, so approving one later
+/// can't cut the new credential with no grace.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn close_superseded(c: &Conn<'_>, keys: &crate::crypto::Keyring, project: &str, env: &EnvRow, leaked: &str, version: i64, by: &Caller, now: i64) -> Result<()> {
+    let waiting: Vec<(String, String, String)> = c.query(
+        "SELECT id, path, items FROM requests WHERE env_id = ? AND action = ? AND state IN ('open', 'approved')
+           AND COALESCE(credential, (SELECT l.credential FROM leak_rotations l WHERE l.request_id = requests.id)) = ?",
+        params![env.id, ROTATE, leaked],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    for (id, path, items) in waiting {
+        let keys_of: Vec<String> = from_json::<Vec<ItemDiff>>(&items).into_iter().map(|i| i.key).collect();
+        let outcome = format!("already rotated (scheduled, to version {version})");
+        c.execute("UPDATE requests SET state = 'applied', outcome = ? WHERE id = ? AND state IN ('open', 'approved')", params![outcome, id])?;
+        let event = crate::events::Event::new(crate::events::Kind::RequestDecided, serde_json::json!({ "request": id, "type": "change", "state": "applied" }));
+        audit::record_event(c, keys, project, by, "request.apply", Some(&env.slug), Some(&path), &keys_of, &format!("applied {id}: {outcome}; nothing issued"), now, event)?;
+    }
+    Ok(())
 }

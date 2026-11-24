@@ -205,6 +205,13 @@ pub async fn analyze_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
     if repo.read_only() {
         return Err(EsError::illegal_argument(format!("repository [{name}] is read-only")));
     }
+    // Nothing is written where Elasticsearch, or anyone else, keeps a repository.
+    if super::elastic::open(ctx.cluster, &name, &repo).await?.is_some() {
+        return Err(super::elastic_read_only(&name, "analyze"));
+    }
+    if repo.in_bucket() {
+        s3::refuse_foreign(ctx.cluster, &name, &repo, true).await?;
+    }
     let mut rng = SplitMix(p.seed as u64);
     let mut sizes = blob_sizes(p.blob_count, p.max_total.bytes(), p.max_blob.bytes());
     rng.shuffle(&mut sizes);

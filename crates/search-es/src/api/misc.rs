@@ -59,36 +59,47 @@ pub fn recovery(ctx: &Ctx) -> EsResult<Reply> {
     let st = ctx.state();
     let node = &ctx.cluster.node;
     let mut out = Map::new();
-    if active_only {
-        return Reply::ok(Value::Obj(out));
-    }
+    let pct = |done: u64, total: u64| if total == 0 { "0.0%".to_string() } else { format!("{:.1}%", done as f64 * 100.0 / total as f64) };
     for n in names {
         let idx = &st.metadata.indices[&n];
         let created = idx.creation_date();
-        // A restored index recovered its shards (one small file each) from the snapshot.
+        // A restored index recovered its shards (one small file each) from the snapshot; one
+        // restoring from an Elasticsearch repository shows each shard's files as they're read.
         let restored = idx.recovery_source.as_ref().filter(|_| !idx.is_closed());
-        let (files, bytes, pct) = if restored.is_some() { (1, 225, "100.0%") } else { (0, 0, "0.0%") };
+        let live = ctx.cluster.snapshot_data.elastic_shards(&idx.uuid);
+        if active_only && live.is_none() {
+            continue;
+        }
         let shards: Vec<Value> = (0..idx.number_of_shards())
             .map(|s| {
+                let view = live.as_ref().and_then(|l| l.get(s as usize));
+                let (files, bytes, stage, start, stop) = match view {
+                    Some(v) => (v.files, v.bytes, v.stage, if v.start_ms > 0 { v.start_ms } else { created }, if v.stop_ms > 0 { v.stop_ms } else { crate::time::now_millis() }),
+                    None if restored.is_some() => ((1, 1), (225, 225), "DONE", created, created),
+                    None => ((0, 0), (0, 0), "DONE", created, created),
+                };
+                let (files, bytes) = ((files.0 as i64, files.1 as i64), (bytes.0 as i64, bytes.1 as i64));
+                let fpct = if view.is_none() && restored.is_some() { "100.0%".to_string() } else { pct(files.0 as u64, files.1 as u64) };
+                let bpct = if view.is_none() && restored.is_some() { "100.0%".to_string() } else { pct(bytes.0 as u64, bytes.1 as u64) };
                 obj! {
                     "id" => s,
                     "type" => if restored.is_some() { "SNAPSHOT" } else if idx.is_closed() { "EXISTING_STORE" } else { "EMPTY_STORE" },
-                    "stage" => "DONE",
+                    "stage" => stage,
                     "primary" => true,
-                    "start_time_in_millis" => created,
-                    "stop_time_in_millis" => created,
-                    "total_time_in_millis" => 0,
+                    "start_time_in_millis" => start,
+                    "stop_time_in_millis" => stop,
+                    "total_time_in_millis" => (stop - start).max(0),
                     "source" => restored.map(|r| Value::Obj((**r).clone())).unwrap_or_else(|| obj! {}),
                     "target" => obj! {
                         "id" => node.id.clone(), "host" => node.host.clone(), "transport_address" => node.transport_address.clone(),
                         "ip" => node.ip.clone(), "name" => node.name.clone(),
                     },
                     "index" => obj! {
-                        "size" => obj! { "total_in_bytes" => bytes, "reused_in_bytes" => 0, "recovered_in_bytes" => bytes, "recovered_from_snapshot_in_bytes" => 0, "percent" => pct },
+                        "size" => obj! { "total_in_bytes" => bytes.1, "reused_in_bytes" => 0, "recovered_in_bytes" => bytes.0, "recovered_from_snapshot_in_bytes" => 0, "percent" => bpct.clone() },
                         "files" => if detailed {
-                            obj! { "total" => files, "reused" => 0, "recovered" => files, "percent" => pct, "details" => Value::Arr(Vec::new()) }
+                            obj! { "total" => files.1, "reused" => 0, "recovered" => files.0, "percent" => fpct.clone(), "details" => Value::Arr(Vec::new()) }
                         } else {
-                            obj! { "total" => files, "reused" => 0, "recovered" => files, "percent" => pct }
+                            obj! { "total" => files.1, "reused" => 0, "recovered" => files.0, "percent" => fpct.clone() }
                         },
                         "total_time_in_millis" => 0,
                         "source_throttle_time_in_millis" => 0,

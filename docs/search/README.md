@@ -477,8 +477,10 @@ Elasticsearch-flavor.
   Revoking the key on the remote (`DELETE _security/api_key`) cuts the link; `DELETE …/remotes/
   {alias}` removes the settings and credentials and revokes a key roll made, and so does deleting
   the cluster for good (at once with no retention, else when its restore window ends). A cluster
-  holds credentials for at most 20 remotes (409 past that). Without `ROLL_SECRET_KEY` (local
-  development) credentials are stored as given, as every secret search keeps.
+  holds credentials for at most 20 remotes (409 past that). Clusters' own passwords are never
+  stored in the clear: without `ROLL_SECRET_KEY` a single node seals them under a key of its own
+  (`<home>/search/key`), and a fleet needs the key (architecture.md, "Multi-tenancy and
+  authentication").
 - **Execution**: the remote's part runs on the remote cluster's owner node through roll's own
   in-process call or signed fleet forward (`Control::on_owner`, `cluster::to_owner`), never over
   the public endpoint, so neither cluster's IP allowlist applies to it: a client the local
@@ -1264,7 +1266,8 @@ deterministic (#396).
    (records, synonyms, rules) mapped onto indices, synonym sets and query rules, a Typesense
    and Meilisearch import (their dump formats onto indices and settings), and catch-up and cutover
    (AWS OpenSearch Migration Assistant's capture and replay): a copy is one point in time today, so
-   writes made during the copy are lost unless the client double-writes.
+   writes made during the copy are lost unless the client double-writes. Offline, with no route
+   to the old cluster: its snapshots restore on roll from the bucket they're in (item 9, #652).
 3. **One memory account per request** (landed: Painless per execution in #591, af195cbbe, after
    four reviews: each execution holds at most `--search-script-memory-mb`, and once-per-document
    scripts charge the `request` breaker; the node-wide body budget in #601; ES|QL and aggregations
@@ -1411,24 +1414,23 @@ deterministic (#396).
    storage (branches copy them, they go with the cluster). And the `s3` repository type: a bucket
    the tenant names, reached through `roll_net::PublicOnly`, credentials sealed apart from the
    settings and never shown, snapshots uploaded as documents per segment (incremental), so
-   another cluster restores them (docs/search/architecture.md, "Snapshots"). Left: `_analyze`
-   against a real bucket (it plans and answers without touching one), multipart uploads and a
-   `chunk_size` setting (a chunk is ~8 MiB; one object per chunk), the `gcs` and `azure` types,
-   `max_snapshot_bytes_per_sec`/`max_restore_bytes_per_sec` throttling of bucket traffic, and
-   credentials from roll secrets instead of the repository's settings (landed in #361: `roll://ENV/KEY`
-   references, the maker checked again on every use). Restoring from a snapshot Elasticsearch wrote:
-   in progress (read-only foreign repositories, `_source` read from the Lucene stored fields and
-   reindexed). It means reading Elasticsearch's repository
-   (`index-N`, `snap-*.dat`, `meta-*.dat`, shard `index-*`/`snap-*.dat`: SMILE inside Lucene
-   codec headers, DEFLATE-compressed) and each shard's Lucene files (segment infos, field infos,
-   compound files, LZ4/DEFLATE stored fields for `_id`, `_routing`, `_source`, numeric doc values
-   for `_seq_no`, `_primary_term`, `_version`, live docs, flat vectors for excluded source
-   vectors; Lucene 9 and 10 codecs for 8.x and 9.x snapshots), all as hostile input, then
-   re-indexing every document from `_source`: about 4,000 lines and Elasticsearch-made fixtures,
-   and a restore that is a full reindex. Indices without a stored `_source` (synthetic source,
-   the logsdb and time-series default, `_source.enabled: false`) can't come back that way.
-   Decided 2026-11-17: not now. A live cluster moves by reindex from remote (item 2: today it
-   can't, over HTTPS); build it once tenants ask to move by backup alone.
+   another cluster restores them (docs/search/architecture.md, "Snapshots"); multipart uploads,
+   `chunk_size`, throttling and a real `_analyze` (#237); credentials from roll secrets (#361:
+   `roll://ENV/KEY` references, the maker checked again on every use). And restoring snapshots Elasticsearch
+   wrote (#652, compatibility.md "Restoring snapshots Elasticsearch wrote"): a team on Elastic
+   Cloud or its own Elasticsearch registers the bucket (or `fs` directory) it already snapshots
+   to and runs Elasticsearch's own `_restore`, with no network route to the old cluster. Such a
+   repository is read only whatever its registration says; listing answers from its own
+   metadata; a restore reads each shard's Lucene files (Lucene 9 and 10: Elasticsearch 8.0 to
+   9.x, LZ4, DEFLATE and zstd stored fields, soft deletes, sequence numbers and versions from doc
+   values, vectors Elasticsearch 9 leaves out of `_source` from the flat vector files), all as
+   hostile input, and indexes every live document again from `_source` as a task `_recovery`
+   follows. Indices without a stored `_source` are refused by name and reason (`partial`
+   restores the rest). Measured: 1M documents (~200 bytes, 2 shards, from an `fs` repository) restored in 22.8 s, 43,900 docs/s (a release build into an in-memory cluster on lane b's 12 build CPUs at nice 19, one run). Left of
+   the restore: segments Lucene 8 wrote (Elasticsearch 7.x indices never merged since), data streams themselves (their backing indices restore), `sparse_vector`
+   and `rank_vectors` values and nested dense vectors that Elasticsearch 9 left out of `_source`,
+   `_status` file counts from the shard snapshots, and resuming after a takeover from the shard
+   reached rather than from the start of each index.
 10. **Relevance tuning by MCP and Terraform**: `/v1/search` serves synonyms sets, query rulesets
    (and `_test`), writing an index's settings and `_explain` (the routes table), and `roll search`
    has `synonyms`, `rules`, `indices settings` and `explain` and makes `read` and `append` keys on

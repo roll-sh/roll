@@ -44,10 +44,15 @@
 //! - `site_crawls`: when each owner crawled each site it hasn't verified, for the daily limit of
 //!   unverified sites, counted across the fleet (rows older than a day are dropped as it's read).
 //!
-//! A cluster's password is sealed in its row under the deployment's key ([`Store::seal_passwords`]:
-//! rolld's `ROLL_SECRET_KEY`), bound to the cluster's id, and opened as the row is read. A row
-//! still holding one in the clear (written before sealing) is sealed as it's read. Without a key
-//! (local development) passwords are stored as given, like every secret search keeps.
+//! A cluster's password is sealed in its row, bound to the cluster's id, and opened as the row is
+//! read. The key is the deployment's (rolld's `ROLL_SECRET_KEY`), or on a single node without one
+//! a key of the node's own (`crate::control::node_key`); a store can't be made without one, so a
+//! password is never stored as given. Rows an earlier version wrote in the clear are sealed as the
+//! store opens, in a write that leaves nothing of them in the file or its WAL
+//! (`Db::write_erasing`), and any a node of an older version writes later are sealed as read.
+//! Passwords a node's own key sealed are sealed again with the deployment's once it has one.
+//! It can't be hashed: it's revealed to its cluster's people, given to the node in the cluster's
+//! spec, and roll calls the cluster with it.
 //!
 //! The schema is created with `CREATE … IF NOT EXISTS` (`Db::ensure_schema`: on Postgres under
 //! an advisory lock, since nodes start together); it reads the `search.db` files the earlier
@@ -62,7 +67,7 @@ use search_server::metrics::Stats;
 use serde::{Deserialize, Serialize};
 
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 #[derive(Clone, Serialize)]
 pub struct SearchCluster {
@@ -290,8 +295,11 @@ const LIVE: &str = "deleting = 0 AND deleted_at IS NULL";
 
 pub struct Store {
     db: Db,
-    /// Seals clusters' passwords in their rows ([`Store::seal_passwords`]); unset: as given.
-    sealer: OnceLock<Arc<Sealer>>,
+    /// Seals clusters' passwords in their rows.
+    sealer: Arc<Sealer>,
+    /// The key passwords were sealed with before `sealer` (a node's own, once the deployment's
+    /// is set): it only opens them, and they're sealed again with `sealer`.
+    former: Option<Arc<Sealer>>,
 }
 
 /// What a cluster's sealed password is bound to: its row, so a password can't be moved into
@@ -520,26 +528,29 @@ const GIB: f64 = (1u64 << 30) as f64;
 
 impl Store {
     /// `search.db` at `path` (a fresh Postgres schema instead when `code-sql`'s test database
-    /// variable is set, so the tests run on both).
-    pub fn open(path: &Path) -> anyhow::Result<Self> {
-        Self::with_db(Db::open_or_test(&code_sql::Target::Sqlite(path.to_path_buf()), "search")?)
+    /// variable is set, so the tests run on both), clusters' passwords sealed with `sealer`.
+    /// Passwords sealed with `former` are sealed again with `sealer` as it opens.
+    pub fn open(path: &Path, sealer: Arc<Sealer>, former: Option<Arc<Sealer>>) -> anyhow::Result<Self> {
+        Self::with_db(Db::open_or_test(&code_sql::Target::Sqlite(path.to_path_buf()), "search")?, sealer, former)
     }
 
-    /// A catalog of its own in a temporary file (tests; nodes of one process share it).
+    /// A catalog of its own in a temporary file, under a key of its own (tests; nodes of one
+    /// process share it).
     pub fn memory() -> anyhow::Result<Self> {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("roll-search-catalog-{}-{}-{n}", std::process::id(), crate::meter::now_ms()));
         std::fs::create_dir_all(&dir)?;
-        Self::open(&dir.join("search.db"))
+        Self::open(&dir.join("search.db"), crate::control::node_key(&dir)?, None)
     }
 
-    /// The catalog every node of a fleet shares: schema `search` of the system database.
-    pub fn postgres(url: &str, opts: code_sql::PgOptions) -> anyhow::Result<Self> {
-        Self::with_db(Db::connect(url, "search", opts)?)
+    /// The catalog every node of a fleet shares: schema `search` of the system database, its
+    /// passwords sealed with the deployment's key (`sealer`), which every node has.
+    pub fn postgres(url: &str, opts: code_sql::PgOptions, sealer: Arc<Sealer>) -> anyhow::Result<Self> {
+        Self::with_db(Db::connect(url, "search", opts)?, sealer, None)
     }
 
-    fn with_db(db: Db) -> anyhow::Result<Self> {
+    fn with_db(db: Db, sealer: Arc<Sealer>, former: Option<Arc<Sealer>>) -> anyhow::Result<Self> {
         db.ensure_schema(SCHEMA)?;
         db.add_column("search_clusters", "loaded_on", "TEXT")?;
         // Intervals before inference was metered had none.
@@ -584,51 +595,73 @@ impl Store {
         db.ensure_schema("CREATE INDEX IF NOT EXISTS search_crawler_sites_owner ON search_crawler_sites (owner, site)")?;
         // Catalogs written before `code-sql` lack nothing but may lack the index on parents
         // (created above); their extra columns (`seq`) and tables (`search_tombstones`) are unused.
-        Ok(Self { db, sealer: OnceLock::new() })
+        let store = Self { db, sealer, former };
+        // Passwords an earlier version kept in the clear (it had no key, or wrote them before
+        // sealing) or sealed with the former key, deleted clusters' too.
+        let rows: Vec<(String, String)> = store.db.read(|x| x.query("SELECT id, password FROM search_clusters", (), |r| Ok((r.get(0)?, r.get(1)?))))?;
+        let stale: Vec<_> = rows.into_iter().filter_map(|(id, stored)| Some((store.stale(&id, &stored)?, id, stored))).collect();
+        let n = store.reseal(stale.iter().map(|(plain, id, stored)| (id.as_str(), plain.as_str(), stored.as_str())))?;
+        if n > 0 {
+            tracing::info!(clusters = n, "sealed clusters' passwords stored in the clear or under the former key");
+        }
+        Ok(store)
     }
 
-    /// Seals clusters' passwords under the deployment's key from now on (rolld:
-    /// `ROLL_SECRET_KEY`), each bound to its cluster's id; rows written in the clear before are
-    /// sealed as they're read. The first sealer given stays.
-    pub fn seal_passwords(&self, sealer: Arc<Sealer>) {
-        let _ = self.sealer.set(sealer);
+    /// The password of cluster `id` if its row keeps it (`stored`) other than sealed with
+    /// [`Store::sealer`]: in the clear, or sealed with the former key.
+    fn stale(&self, id: &str, stored: &str) -> Option<String> {
+        if !is_sealed(stored) {
+            return Some(stored.to_string());
+        }
+        if self.sealer.open_text(&password_kind(id), stored).is_some() {
+            return None;
+        }
+        self.former.as_ref()?.open_text(&password_kind(id), stored)
+    }
+
+    /// Seals the passwords of `rows` (id, password, what its row held when read) with
+    /// [`Store::sealer`], only where a row still holds what was read (a rotation since keeps its
+    /// own), in one write that leaves nothing of what they held in the file
+    /// (`Db::write_erasing`; on Postgres an ordinary write). How many it sealed.
+    fn reseal<'a>(&self, rows: impl IntoIterator<Item = (&'a str, &'a str, &'a str)>) -> anyhow::Result<usize> {
+        let sealed: Vec<(&str, String, &str)> = rows.into_iter().map(|(id, plain, stored)| (id, self.sealer.seal_text(&password_kind(id), plain), stored)).collect();
+        if sealed.is_empty() {
+            return Ok(0);
+        }
+        Ok(self.db.write_erasing(|x| {
+            let mut n = 0;
+            for (id, sealed, stored) in &sealed {
+                n += x.execute("UPDATE search_clusters SET password = ?2 WHERE id = ?1 AND password = ?3", params![id, sealed, stored])?;
+            }
+            Ok::<_, code_sql::Error>(n)
+        })?)
     }
 
     /// `c`'s password as its row keeps it.
     fn stored_password(&self, c: &SearchCluster) -> String {
-        match self.sealer.get() {
-            Some(s) => s.seal_text(&password_kind(&c.id), &c.password),
-            None => c.password.clone(),
-        }
+        self.sealer.seal_text(&password_kind(&c.id), &c.password)
     }
 
     /// Opens the passwords of clusters just read. A row still holding its password in the clear
-    /// is sealed in one write, only where it still holds what was read (a rotation since keeps
-    /// its own). A sealed password this node can't open (no key, another key) fails the read,
+    /// (a node of an older version wrote it since this one opened) is sealed as at open
+    /// ([`Store::reseal`]). A sealed password this node can't open (another key) fails the read,
     /// naming the cluster, never the value.
     fn reveal<'a>(&self, clusters: impl IntoIterator<Item = &'a mut SearchCluster>) -> anyhow::Result<()> {
-        let sealer = self.sealer.get();
         let mut legacy = Vec::new();
         for c in clusters {
-            if is_sealed(&c.password) {
-                let Some(plain) = sealer.and_then(|s| s.open_text(&password_kind(&c.id), &c.password)) else {
-                    anyhow::bail!("cluster {}'s password is sealed under another key than this node's (ROLL_SECRET_KEY unset or changed)", c.id);
-                };
+            if is_sealed(&c.password)
+                && let Some(plain) = self.sealer.open_text(&password_kind(&c.id), &c.password)
+            {
                 c.password = plain;
-            } else if let Some(s) = sealer {
-                legacy.push((c.id.clone(), s.seal_text(&password_kind(&c.id), &c.password), c.password.clone()));
+                continue;
             }
+            let Some(plain) = self.stale(&c.id, &c.password) else {
+                anyhow::bail!("cluster {}'s password is sealed under another key than this node's (ROLL_SECRET_KEY, or without it the node's own key, changed)", c.id);
+            };
+            legacy.push((c.id.clone(), plain.clone(), std::mem::replace(&mut c.password, plain)));
         }
-        if !legacy.is_empty() {
-            let r = self.db.write(|x| {
-                for (id, sealed, plain) in &legacy {
-                    x.execute("UPDATE search_clusters SET password = ?2 WHERE id = ?1 AND password = ?3", params![id, sealed, plain])?;
-                }
-                Ok::<_, code_sql::Error>(())
-            });
-            if let Err(e) = r {
-                tracing::warn!(clusters = legacy.len(), error = %e, "sealing clusters' passwords failed: they stay in the clear until read again");
-            }
+        if let Err(e) = self.reseal(legacy.iter().map(|(id, plain, stored)| (id.as_str(), plain.as_str(), stored.as_str()))) {
+            tracing::warn!(clusters = legacy.len(), error = %e, "sealing clusters' passwords failed: they stay in the clear until read again");
         }
         Ok(())
     }
@@ -1768,7 +1801,7 @@ mod tests {
         if std::env::var(code_sql::TEST_DATABASE_ENV).is_ok_and(|v| !v.is_empty()) {
             return;
         }
-        let s = Store::open(&path).unwrap();
+        let s = Store::open(&path, Sealer::from_secret("0123456789abcdef0123456789abcdef").unwrap(), None).unwrap();
         let old = s.by_name("old").await.unwrap().unwrap();
         assert_eq!((old.id.as_str(), old.owner.as_deref()), ("srch_o", None), "an earlier cluster is the operator's");
         s.delete("srch_o").await.unwrap();
@@ -1776,30 +1809,56 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// With a key, a password is sealed in its row and bound to it; a row written in the clear
-    /// is sealed as it's read.
+    /// A password is sealed in its row and bound to it. A row an earlier version wrote in the
+    /// clear, long since in the database file, is sealed as the store opens, and nothing of it
+    /// stays in the file or its WAL; one written in the clear later is sealed as it's read; one
+    /// sealed with a node's own key is sealed again with the deployment's once it has one.
     #[tokio::test]
-    async fn passwords_are_sealed_in_their_rows() {
-        let s = Store::memory().unwrap();
-        let stored = |id: &str| s.db.read(|x| x.query_row("SELECT password FROM search_clusters WHERE id = ?1", params![id], |r| r.get::<_, String>(0))).unwrap();
-        // Written before the node had a key: in the clear.
-        s.insert(&cluster("srch_l", "legacy"), Caps::NONE).await.unwrap();
-        assert_eq!(stored("srch_l"), "pw");
-        s.seal_passwords(Sealer::from_secret("0123456789abcdef0123456789abcdef").unwrap());
+    async fn passwords_are_sealed_in_their_rows_and_nothing_stays_in_the_file() {
+        if std::env::var(code_sql::TEST_DATABASE_ENV).is_ok_and(|v| !v.is_empty()) {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("search.db");
+        let key = || Sealer::from_secret("0123456789abcdef0123456789abcdef").unwrap();
+        let s = Store::open(&path, key(), None).unwrap();
+        let stored = |s: &Store, id: &str| s.db.read(|x| x.query_row("SELECT password FROM search_clusters WHERE id = ?1", params![id], |r| r.get::<_, String>(0))).unwrap();
         let mut c = cluster("srch_s", "sealed");
         c.password = "hunter2-hunter2".into();
         s.insert(&c, Caps::NONE).await.unwrap();
-        assert!(is_sealed(&stored("srch_s")) && !stored("srch_s").contains("hunter2"));
+        assert!(is_sealed(&stored(&s, "srch_s")) && !stored(&s, "srch_s").contains("hunter2"));
+        assert_eq!(s.get("srch_s").await.unwrap().unwrap().password, "hunter2-hunter2");
+        // What an earlier version wrote in the clear, checkpointed into the file itself.
+        let mut l = cluster("srch_l", "legacy");
+        l.password = "plain-legacy-pw-77".into();
+        s.insert(&l, Caps::NONE).await.unwrap();
+        s.db.write_erasing(|x| x.execute("UPDATE search_clusters SET password = 'plain-legacy-pw-77' WHERE id = 'srch_l'", ())).unwrap();
+        let found = |f: &str| std::fs::read(dir.path().join(f)).unwrap_or_default().windows(18).any(|w| w == b"plain-legacy-pw-77");
+        assert!(found("search.db"), "the premise: it's in the file");
+        drop(s);
+
+        let s = Store::open(&path, key(), None).unwrap();
+        let sealed = stored(&s, "srch_l");
+        assert!(is_sealed(&sealed), "sealed as the store opens");
+        for f in ["search.db", "search.db-wal"] {
+            assert!(!found(f), "the clear password in {f}");
+        }
+        assert_eq!(s.list().await.unwrap().iter().map(|c| c.password.as_str()).collect::<Vec<_>>(), ["hunter2-hunter2", "plain-legacy-pw-77"]);
+        assert_eq!(stored(&s, "srch_l"), sealed, "sealed once");
+        // Written in the clear by an older node since: sealed on its first read.
+        s.db.write(|x| x.execute("UPDATE search_clusters SET password = 'pw' WHERE id = 'srch_l'", ())).unwrap();
+        assert_eq!(s.by_name("legacy").await.unwrap().unwrap().password, "pw");
+        assert!(is_sealed(&stored(&s, "srch_l")), "sealed on its first read");
+        // Given the deployment's key later, a node opens what its own key sealed, and seals it
+        // again with the deployment's as it opens.
+        drop(s);
+        let deployment = Sealer::from_secret("the-deployments-own-key-0123456789abcdef").unwrap();
+        let s = Store::open(&path, deployment.clone(), Some(key())).unwrap();
+        assert!(deployment.open_text(&password_kind("srch_s"), &stored(&s, "srch_s")).is_some(), "sealed again as it opens");
         assert_eq!(s.get("srch_s").await.unwrap().unwrap().password, "hunter2-hunter2");
 
-        assert_eq!(s.by_name("legacy").await.unwrap().unwrap().password, "pw");
-        let migrated = stored("srch_l");
-        assert!(is_sealed(&migrated), "sealed on its first read");
-        assert_eq!(s.list().await.unwrap().iter().map(|c| c.password.as_str()).collect::<Vec<_>>(), ["pw", "hunter2-hunter2"]);
-        assert_eq!(stored("srch_l"), migrated, "sealed once");
-
         // Another cluster's sealed password doesn't open in this row.
-        let moved = stored("srch_s");
+        let moved = stored(&s, "srch_s");
         s.db.write(|x| x.execute("UPDATE search_clusters SET password = ?2 WHERE id = ?1", params!["srch_l", moved])).unwrap();
         let e = s.get("srch_l").await.unwrap_err().to_string();
         assert!(e.contains("srch_l") && !e.contains("hunter2"), "{e}");

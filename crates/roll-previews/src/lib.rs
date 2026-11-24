@@ -1088,6 +1088,10 @@ pub struct Share {
     pub created_by: String,
     pub created_at: i64,
     pub revoked: bool,
+    /// Who it's for, as its maker wrote it (`""`: not said).
+    pub label: String,
+    /// Its visitors may leave notes on the preview's pages (as `guest:<name>`).
+    pub notes: bool,
 }
 
 /// How much a preview's page changed between the screenshots of two heads.
@@ -1121,6 +1125,14 @@ pub struct PageCheck {
     /// A page state's step that found nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step: Option<String>,
+    /// A page state's slowest click or typing, to the next paint (ms): Interaction to Next
+    /// Paint in the lab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_ms: Option<u32>,
+    /// What its change against the baseline is ([`crate::visual::compare`]'s signature): pages
+    /// with the same one changed the same way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_group: Option<String>,
 }
 
 /// What a page's session found besides its picture: the first page's checks, for another page.
@@ -1136,6 +1148,9 @@ pub struct PageReport {
     /// taken as it was then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step: Option<String>,
+    /// Its slowest step's time to the next paint (ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_ms: Option<u32>,
 }
 
 /// A page's checks against main's page at the same path.
@@ -1145,6 +1160,9 @@ pub struct PageAgainst {
     pub links_added: Option<u32>,
     pub seo_added: Option<u32>,
     pub text: Option<TextDiff>,
+    /// Main's same state's slowest step to the next paint (ms), when both timed one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_ms: Option<u32>,
 }
 
 impl PageReport {
@@ -1155,6 +1173,7 @@ impl PageReport {
             links_added: self.links.as_ref().zip(main.links.as_ref()).map(|(a, b)| a.added_since(b)),
             seo_added: self.a11y.as_ref().and_then(|a| a.seo.as_ref()).zip(main.a11y.as_ref().and_then(|a| a.seo.as_ref())).map(|(a, b)| a.added_since(b)),
             text: self.text.as_deref().zip(main.text.as_deref()).map(|(now, then)| crate::visual::text_diff(then, now)),
+            step_ms: main.step_ms.filter(|_| self.step_ms.is_some()),
         }
     }
 }
@@ -1189,6 +1208,11 @@ pub struct PageReview {
     /// It moves by itself: the difference may be only that (`github.hide` names what moves).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unstable: bool,
+    /// Its change's group (Percy's grouped diffs): the pages it shares one with changed the
+    /// same way, and are accepted together (`…/visual/accept {group}`). Only when another page
+    /// shares it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

@@ -208,6 +208,10 @@ pub trait Runtime: Send + Sync {
     async fn image_id(&self, _image: &str) -> Option<String> {
         None
     }
+    /// A local image's size in bytes, where the runtime can say.
+    async fn image_bytes(&self, _image: &str) -> Option<u64> {
+        None
+    }
     async fn verify_signature(&self, pinned: &str, keys: &[String], login: Option<&RegistryLogin>) -> anyhow::Result<usize> {
         crate::registry::Registry::new(None)?.verify_cosign(pinned, keys, login).await
     }

@@ -102,6 +102,8 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route("/v1/secrets/audit/key/rotate", post(rotate_audit_key))
         .route(&format!("{P}/audit"), get(audit))
         .route(&format!("{P}/events"), get(events))
+        .route(&format!("{P}/notifications"), get(notifications).post(create_notification))
+        .route(&format!("{P}/notifications/{{id}}"), axum::routing::delete(delete_notification))
         .route(&format!("{P}/audit/verify"), get(verify_audit))
         .route(&format!("{P}/audit/sinks"), get(sinks).post(create_sink))
         .route(&format!("{P}/audit/sinks/{{id}}"), axum::routing::delete(delete_sink))
@@ -1104,7 +1106,11 @@ async fn import_dotenv(State(s): S, Who(c): Who, Path((project, env)): Path<(Str
 }
 
 async fn requests(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q) -> crate::Result<Response> {
-    Ok(ok(blocking(s, move |s| s.requests(&project, &env, q.get("state").map(String::as_str), &c)).await?))
+    let limit = int(&q, "limit")?;
+    let paged = limit.is_some() || q.contains_key("before");
+    let page = blocking(s, move |s| s.requests(&project, &env, q.get("state").map(String::as_str), q.get("before").map(String::as_str), limit, &c)).await?;
+    // Without `limit` or `before`, the array it answered before paging.
+    Ok(if paged { ok(page) } else { ok(page.requests) })
 }
 
 async fn open_request(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
@@ -1388,6 +1394,22 @@ async fn audit(State(s): S, Who(c): Who, Path(project): Path<String>, Query(q): 
 
 async fn verify_audit(State(s): S, Who(c): Who, Path(project): Path<String>, Query(q): Query<crate::audit::VerifyQuery>) -> crate::Result<Response> {
     Ok(ok(blocking(s, move |s| s.verify_audit(&project, q, &c)).await?))
+}
+
+/// `GET …/notifications`: the caller's own (a project admin's: all of the project's).
+async fn notifications(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.notifications(&project, &c)).await?))
+}
+
+/// `POST …/notifications`: tell the caller of the project's events (notifications.rs).
+async fn create_notification(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::NewNotification = body(&b)?;
+    Ok(created(blocking(s, move |s| s.create_notification(&project, n, &c)).await?))
+}
+
+async fn delete_notification(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_notification(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn sinks(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {

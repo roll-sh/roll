@@ -250,7 +250,7 @@ impl LogHub {
     }
 
     pub fn sink(self: &Arc<Self>, key: impl Into<String>, stream: Stream) -> LogSink {
-        LogSink { hub: self.clone(), key: Arc::from(key.into()), stream, instance: None, deployment: None, redact: None }
+        LogSink { hub: self.clone(), key: Arc::from(key.into()), stream, instance: None, deployment: None, redact: None, steps: None }
     }
 
     /// From now on `key`'s lines have `deployment`'s secret `values` taken out, with the values of
@@ -569,6 +569,8 @@ pub struct LogSink {
     deployment: Option<Arc<str>>,
     /// Never written: a secret the lines may hold (a build's cache namespace), shown as `…`.
     redact: Option<Arc<str>>,
+    /// A build's steps, read from its lines as written ([`crate::build_steps`]).
+    steps: Option<Arc<parking_lot::Mutex<crate::build_steps::BuildSteps>>>,
 }
 
 impl LogSink {
@@ -594,6 +596,11 @@ impl LogSink {
         LogSink { redact: (!secret.is_empty()).then(|| secret.into()), ..self.clone() }
     }
 
+    /// The same sink, reading a build's steps from what it writes.
+    pub fn collecting(&self, steps: Arc<parking_lot::Mutex<crate::build_steps::BuildSteps>>) -> LogSink {
+        LogSink { steps: Some(steps), ..self.clone() }
+    }
+
     pub fn line(&self, text: impl AsRef<str>) {
         let mut text = text.as_ref().trim_end_matches(['\r', '\n']).to_string();
         if let Some(r) = &self.redact {
@@ -609,6 +616,9 @@ impl LogSink {
             }
             text.truncate(cut);
             text.push('…');
+        }
+        if let Some(s) = &self.steps {
+            s.lock().feed(&text);
         }
         let app = matches!(self.stream, Stream::Stdout | Stream::Stderr);
         let trace = if app { self.hub.trace_of(&self.key, &self.instance, self.stream, &text) } else { None };

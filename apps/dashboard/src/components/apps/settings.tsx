@@ -1,7 +1,7 @@
 import { Trash2 } from "lucide-react";
 import { useReducedMotion } from "@roll/brand";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { appsApi, SERVICE_NAME, type Build, type Environment, type MetricAlert, type Prices, type PushState, type Reset, type Run, type Service, type ServicePatch, type Source } from "@/lib/apps-api";
+import { appsApi, SERVICE_NAME, type Build, type Environment, type MetricAlert, type RouteAlert, type Prices, type PushState, type Reset, type Run, type Service, type ServicePatch, type Source } from "@/lib/apps-api";
 import { Field, Segmented } from "../redis/shared";
 import { btn, Confirm, danger, input, Panel, panel, primary } from "../ui";
 import { Link } from "@/components/link";
@@ -54,6 +54,7 @@ interface Form {
   timeout: string;
   retries: string;
   min: string;
+  floors: string;
   max: string;
   concurrency: string;
   queue: string;
@@ -88,6 +89,7 @@ interface Form {
   alertCpu: string;
   /** Alerts on its own gauges, one a line (`queue_depth > 100 for 5m`). */
   alertMetrics: string;
+  alertRoutes: string;
   alertAnomaly: boolean;
   rolloutSteps: string;
   rolloutStep: string;
@@ -175,6 +177,7 @@ export function formOf(s: Service): Form {
     timeout: str(s.run.timeout_s),
     retries: str(s.run.retries),
     min: str(s.run.min_instances),
+    floors: (s.run.schedule_scale ?? []).flatMap(floorLines).join("\n"),
     max: str(s.run.max_instances),
     concurrency: str(s.run.concurrency),
     queue: str(s.run.queue_s),
@@ -205,6 +208,7 @@ export function formOf(s: Service): Form {
     alertLogCount: str(s.run.alerts?.log_count ?? 10),
     alertCpu: str(s.run.alerts?.cpu_pct ?? 0),
     alertMetrics: (s.run.alerts?.metrics ?? []).map(metricAlertLine).join("\n"),
+    alertRoutes: (s.run.alerts?.routes ?? []).map(routeAlertLine).join("\n"),
     alertAnomaly: !!s.run.alerts?.anomaly,
     rolloutSteps: (s.run.rollout?.steps ?? []).join(", "),
     rolloutStep: str(s.run.rollout?.step_s),
@@ -298,6 +302,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.timeout !== before.timeout) run.timeout_s = num(f.timeout);
   if (f.retries !== before.retries) run.retries = num(f.retries);
   if (f.min !== before.min) run.min_instances = num(f.min);
+  if (f.floors !== before.floors) run.schedule_scale = floorRules(f.floors);
   if (f.max !== before.max) run.max_instances = num(f.max);
   if (f.concurrency !== before.concurrency) run.concurrency = num(f.concurrency);
   if (f.queue !== before.queue) run.queue_s = num(f.queue);
@@ -317,8 +322,9 @@ export function patchOf(s: Service, f: Form): ServicePatch {
     run.oidc_audiences = list.length ? list : null;
   }
   if (f.memoryTarget !== before.memoryTarget) run.memory_target = num(f.memoryTarget);
-  if (f.alertMemory !== before.alertMemory || f.alertErrors !== before.alertErrors || f.alertP95 !== before.alertP95 || f.alertCapacity !== before.alertCapacity || f.alertLog !== before.alertLog || f.alertLogCount !== before.alertLogCount || f.alertCpu !== before.alertCpu || f.alertMetrics !== before.alertMetrics || f.alertAnomaly !== before.alertAnomaly)
+  if (f.alertMemory !== before.alertMemory || f.alertErrors !== before.alertErrors || f.alertP95 !== before.alertP95 || f.alertCapacity !== before.alertCapacity || f.alertLog !== before.alertLog || f.alertLogCount !== before.alertLogCount || f.alertCpu !== before.alertCpu || f.alertMetrics !== before.alertMetrics || f.alertAnomaly !== before.alertAnomaly || f.alertRoutes !== before.alertRoutes)
     run.alerts = {
+      routes: routeAlerts(f.alertRoutes),
       ...(f.alertAnomaly ? { anomaly: true } : {}),
       cpu_pct: Number(f.alertCpu) || 0,
       metrics: metricAlerts(f.alertMetrics),
@@ -399,6 +405,48 @@ export function metricAlerts(text: string): MetricAlert[] {
       if (!m) return { name: l };
       const value = Number(m[3]);
       return { name: m[1], ...(m[2] === ">" ? { above: value } : { below: value }), ...(m[4] ? { minutes: Number(m[4]) } : {}), ...(m[5] ? { sum: true } : {}) };
+    });
+}
+
+type Floor = NonNullable<Run["schedule_scale"]>[number];
+
+/** A floor by the clock as Settings writes it, a line a window: `mon 08:00..fri 18:00=3 Europe/Berlin`. */
+export function floorLines(r: Floor): string[] {
+  return r.windows.map((w) => `${w.from}..${w.to}=${r.min_instances}${r.timezone ? ` ${r.timezone}` : ""}`);
+}
+
+/** `FROM..TO=N [ZONE]` lines as `run.schedule_scale`, windows with the same floor and zone as one
+ *  rule (a line it can't read goes as a window with no end, for the API to refuse whole). */
+export function floorRules(text: string): Floor[] {
+  const rules: Floor[] = [];
+  for (const l of text.split("\n").map((x) => x.trim()).filter(Boolean)) {
+    const m = /^(.+?)\.\.(.+?)=(\d+)(?:\s+(\S+))?$/.exec(l);
+    const [from, to, n, timezone] = m ? [m[1].trim(), m[2].trim(), Number(m[3]), m[4]] : [l, "", 0, undefined];
+    const same = rules.find((r) => r.min_instances === n && r.timezone === timezone);
+    if (same) same.windows.push({ from, to });
+    else rules.push({ windows: [{ from, to }], min_instances: n, ...(timezone ? { timezone } : {}) });
+  }
+  return rules;
+}
+
+/** A route alert as Settings writes it: `POST /api/checkout 5xx >= 2% p95 >= 800ms`. */
+export function routeAlertLine(r: RouteAlert): string {
+  return `${r.method ? `${r.method} ` : ""}${r.route}${r.error_pct ? ` 5xx >= ${r.error_pct}%` : ""}${r.p95_ms ? ` p95 >= ${r.p95_ms}ms` : ""}`;
+}
+
+/** Lines of `[METHOD] /route` with `5xx >= n%` and/or `p95 >= nms`, as `alerts.routes` (a line it
+ *  can't read goes as its route with no threshold, for the API to refuse whole, never dropped). */
+export function routeAlerts(text: string): RouteAlert[] {
+  return text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => {
+      const m = /^(?:([A-Za-z]+)\s+)?(\/\S*)((?:\s+(?:5xx\s*>=?\s*\d+\s*%|p95\s*>=?\s*\d+\s*ms))+)$/.exec(l);
+      if (!m) return { route: l };
+      const errors = /5xx\s*>=?\s*(\d+)/.exec(m[3]);
+      const p95 = /p95\s*>=?\s*(\d+)/.exec(m[3]);
+      return { route: m[2], ...(m[1] ? { method: m[1].toUpperCase() } : {}), ...(errors ? { error_pct: Number(errors[1]) } : {}), ...(p95 ? { p95_ms: Number(p95[1]) } : {}) };
     });
 }
 
@@ -728,6 +776,9 @@ export function SettingsTab({
               <Field label="Max instances" hint={form.volumeMount ? "1 with a volume" : undefined}>
                 {t("max", "3")}
               </Field>
+              <Field label="Floors by the clock" hint="from..to=instances, one a line, a time zone after it (UTC if none): at least that many in each weekly window">
+                <textarea value={form.floors} onChange={(e) => set("floors", e.target.value)} rows={2} placeholder="mon 08:00..fri 18:00=3 Europe/Berlin" className={`${input} w-full font-mono text-[12px]`} spellCheck={false} />
+              </Field>
               {web && (
                 <>
                   <Field label="Concurrency" hint="requests in flight per instance">
@@ -853,6 +904,9 @@ export function SettingsTab({
                 </Field>
                 <Field label="Alert: p95 latency (ms)" hint="in three of five minutes; 0 off">
                   {t("alertP95", "0")}
+                </Field>
+                <Field label="Alerts on one route" hint="[method] /route (as Routes shows it, or /api/*) with 5xx >= n% and/or p95 >= n ms, one a line; over five minutes">
+                  <textarea value={form.alertRoutes} onChange={(e) => set("alertRoutes", e.target.value)} rows={2} placeholder="POST /api/checkout 5xx >= 2% p95 >= 800ms" className={`${input} w-full font-mono text-[12px]`} spellCheck={false} />
                 </Field>
                 <Field label="Metrics from its log" hint="name: pattern, one a line; each minute, the lines holding it (any case) as a gauge">
                   <textarea value={form.logMetrics} onChange={(e) => set("logMetrics", e.target.value)} rows={2} placeholder="payments_failed: payment failed" className={`${input} w-full font-mono text-[12px]`} spellCheck={false} />
@@ -1192,7 +1246,7 @@ function Section({ id, title, children }: { id: string; title: string; children:
  *  narrow one; the project's own panels apart, under its name. */
 function SectionNav({ sections, project }: { sections: [string, string][]; project: [string, string][] }) {
   const reduced = useReducedMotion();
-  const all = [...sections, ...project, ["activity", "Activity"], ["duplicate", "Duplicate"], ["danger", "Danger zone"]] as [string, string][];
+  const all = [...sections, ...project, ["activity", "Audit log"], ["duplicate", "Duplicate"], ["danger", "Danger zone"]] as [string, string][];
   const ids = all.map(([id]) => id).join(" ");
   const [current, setCurrent] = useState(all[0][0]);
   // Until then, the observer doesn't move the mark off a section just clicked.
@@ -1249,7 +1303,7 @@ function SectionNav({ sections, project }: { sections: [string, string][]; proje
       <p className="mt-3 hidden px-2 text-[11px] text-subtle lg:block">The project</p>
       <ul className="contents lg:mt-0.5 lg:flex lg:flex-col lg:gap-0.5">{project.map(link)}</ul>
       <ul className="contents lg:mt-3 lg:flex lg:flex-col lg:gap-0.5">
-        {link(["activity", "Activity"])}
+        {link(["activity", "Audit log"])}
         {link(["duplicate", "Duplicate"])}
         {link(["danger", "Danger zone"])}
       </ul>
