@@ -1451,7 +1451,10 @@ From a 2026-11-24 gap review (every tool run as an agent would against a fresh r
    onto the tool when it lands.
 3. **Coming from the sibling threads, mapped as they land:** roll previews' restore points (#897):
    mapped in #901. roll apps' `apps_fetch` (#890) is read by `debug_failing_service` and
-   `ship_from_chat`.
+   `ship_from_chat`. roll previews' share `label` and guest `notes` (#911, gating): mapped onto
+   `previews_share` in #911 itself, on this thread's suggestion. roll secrets' requests cursor
+   (`before`/`next`, `state` in the query): `secrets_list_requests` takes it when it lands, and its
+   `state` becomes a choice then.
 4. **After #808 (roll search on members) lands:** `Tool::within_session`'s comment (a create that names a project is held within the person's session now; listing stays as it is) and the members sentence in "With a scoped token" naming search. Waiting on its merge commit.
 5. **More quotes before creating something billable** (Supabase's form, PlanetScale's `confirm`): apps' is `apps_quote` (roll apps #835 on this thread's suggestion; `ship_a_service` and `ship_from_chat` ask it first, #840). Next: Postgres projects and search clusters, as their threads add a quote route.
 6. **MCP Events: more feeds.** All three delivery modes are on main (poll #692, webhook #703,
@@ -1666,9 +1669,10 @@ From a 2026-11-24 gap review (every tool run as an agent would against a fresh r
    machine was the cause. A test-side deadline, not more retries in production, stays the fix. (The 2026-11-18 turn's combined
    gate passed without them: #208, #209, #210, #225, #226, #231, #236 and #239 landed as one gated
    tree, main 53b939213.) roll-cluster's `postgres::a_dead_nodes_keys_move_to_their_preferred_live_node`
-   and `postgres::draining_hands_everything_over` failed in two `pnpm test:code` runs on
-   2026-11-24 at load 85-92 and passed alone each time (6 of 6, three runs, at load 92): they
-   lose only beside the other suites.
+   and `postgres::draining_hands_everything_over` (and, once, `a_pinned_node_id_waits_for_its_previous_incarnation`
+   and `every_node_routes_a_key_to_the_same_owner`) failed in three `pnpm test:code` runs on
+   2026-11-24 at load 85-105 and passed alone each time (6 of 6, three runs each, at load 92-105):
+   they lose only beside the other suites.
 32. **Enterprise sign-in (#210), what's left:** a live check with a real provider's ID-JAG (Okta's
    Cross App Access sandbox needs an account: the review pack's decision 5). The draft names the
    tenant `tenant`; a provider whose assertions say it another way (Entra's own tokens use `tid`)
