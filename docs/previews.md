@@ -1752,6 +1752,16 @@ land on the change.
   naming any other review joins nothing), so it reaches the pull request as a GitHub review like
   the note did. The page lists the replies under their note, as text, and `roll preview notes`
   under each note too (live: a reply listed under its note).
+- Notes as Slack threads (Vercel's comments in Slack), both ways, through roll code's chat ops
+  (docs/code/chatops.md): the "Preview notes as Slack threads" automation template (trigger
+  `code` on `review` events, step `slack.note` with a channel) posts each new note as a message
+  (the page, linked to the preview, the element, the note quoted) and binds its thread to the
+  note (`chat_notes`). A message in that thread, from someone the Slack install allows, becomes
+  the note's reply on the change, signed "— Ada, in Slack" (the person's Slack name), made as
+  the automation through roll's API, and a reply made on the page goes into the thread. What
+  came from Slack is never posted back to it, and a note is posted once. Resolving a note isn't
+  said in its thread yet (a resolve is roll previews' own record, not a review event). The note's format is roll code's (`code_control::review::preview_note`,
+  read back by `roll_previews::notes`). `preview_notes_are_slack_threads_both_ways`.
 - Previews deployed on roll apps go through apps' own proxy, which adds it for its link
   visitors only: under team access (apps' `signed_in` environments) they get none yet.
 - Public previews don't get it (anyone could see the button), and a branch's preview has no
@@ -2676,14 +2686,10 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Notes as Slack threads** (Vercel's comments synced to Slack), two ways: a `slack.note` step
-   in roll code's chat ops posts a preview note (a `review` event whose body is a note) to a
-   channel as its own message, with the page, the element and a link, and binds that thread to
-   the note (`chat_threads`); a reply in the thread becomes the note's reply on the change
-   (`**Reply on the preview**`, through `Code::automation_api`, the person's Slack name kept), and
-   a reply on the page goes into the thread. A dashboard template sets it up. Stacked changes
-   need nothing of their own: a stacked change's head holds the ones below it, and a feature
-   split across repos previews as one by its branch name.
+1. **Notes as Slack threads, in review** (Vercel's comments synced to Slack): `slack.note` and
+   the "Preview notes as Slack threads" template, both ways (a note posted, replies in its
+   thread made the note's replies, the page's replies in the thread). Next for it: a resolve
+   said in the thread (a resolve is roll previews' own record, so previews would emit it).
 2. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
    is kept only where the product puts a branch back in place, keeping its id (their delete
    guards check it); each needs its control plane's reset `from`, as pg-control's.
