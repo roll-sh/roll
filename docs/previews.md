@@ -2744,7 +2744,7 @@ Ranked by what a person notices first. Done so far:
 
 
 
-Landed 2026-11-24, afternoon, later: guests' notes outside the team's for MCP's lockdown (#916), and pages changed the same way grouped and accepted together (#919; the first page in them with #920's change).
+Landed 2026-11-24, afternoon, later: guests' notes outside the team's for MCP's lockdown (#916), and pages changed the same way grouped and accepted together (#919; the first page in them with #926).
 
 Landed 2026-11-24, afternoon: a page state's steps timed to the next paint (#915, INP in the lab, against main's).
 
