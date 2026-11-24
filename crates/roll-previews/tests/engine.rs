@@ -2519,7 +2519,7 @@ async fn a_share_links_guest_leaves_notes_as_a_guest() {
     let (change, body, by, outside) = e.code.comments.lock()[0].clone();
     assert_eq!((change.as_str(), by.as_str()), ("chg_g", "guest:Ada script"), "no handle has a colon: never a team member");
     assert!(outside, "a guest's words are outside the team's, on the review too (MCP's lockdown)");
-    assert!(body.starts_with("**Feedback on the preview** · [`/pricing`](") && body.contains("· `button.buy`\n\nPing @\u{200b}team !\u{200b}[x](https://t.example/p.gif) &lt;b&gt;here&lt;/b&gt;\n\n"), "{body}");
+    assert!(body.starts_with("**Feedback on the preview** · [`/pricing`](") && body.contains("· `button.buy`\n\nPing @\u{200b}team !\u{200b}[x]\u{200b}(https://t.example/p.gif) &lt;b&gt;here&lt;/b&gt;\n\n"), "{body}");
     assert!(body.contains("390x844 viewport") && body.contains("a guest, through the share link \"Acme's review\""), "{body}");
     assert_eq!(roll_previews::notes::parse(&body).map(|(path, sel, _)| (path, sel)), Some(("/pricing".to_string(), "button.buy".to_string())), "read back as a note");
     assert!(matches!(e.engine.guest_note(&p.id, &closed, &note).await, Err(roll_previews::Error::Forbidden(_))), "a link that takes no notes");
