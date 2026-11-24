@@ -173,7 +173,22 @@ impl Apps {
             }
         };
         let client = crate::net::client(self.cfg.allow_private, Duration::from_secs(c.timeout_s as u64));
-        let res = client.get(&at).header(reqwest::header::USER_AGENT, "roll-uptime/1.0 (from outside)").send().await.map_err(|e| {
+        // roll's own check, as the others are (a run's token: attack mode or a challenge doesn't
+        // turn it away), and only over HTTPS.
+        let token = at.starts_with("https://").then(|| {
+            let t = crate::model::random(32);
+            self.check_tokens.lock().insert(t.clone(), (service.to_string(), env.to_string()));
+            t
+        });
+        let mut get = client.get(&at).header(reqwest::header::USER_AGENT, "roll-uptime/1.0 (from outside)");
+        if let Some(t) = &token {
+            get = get.header("x-roll-check", t);
+        }
+        let sent = get.send().await;
+        if let Some(t) = &token {
+            self.check_tokens.lock().remove(t);
+        }
+        let res = sent.map_err(|e| {
             // What failed (DNS, TLS, the connection), from the error's own chain.
             let mut why = e.to_string();
             let mut src = std::error::Error::source(&e);

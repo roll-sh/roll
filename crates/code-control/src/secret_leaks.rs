@@ -132,8 +132,8 @@ pub struct InHistory {
 /// What a change's added lines hold, per head.
 #[derive(Default)]
 pub(crate) struct LeakFacts {
-    /// (key, environment) of every secret whose value it adds.
-    leaks: Vec<(String, String)>,
+    /// Every secret whose value it adds.
+    leaks: Vec<crate::FoundLeak>,
     /// The credentials it adds that roll secrets doesn't hold, in order (placeholders left out;
     /// the allow-list is applied when they're shown, as it can change without the change moving).
     pub(crate) unstored: Vec<Unstored>,
@@ -233,9 +233,9 @@ impl Code {
         let found = if candidates.is_empty() { Ok(Vec::new()) } else { secrets.leaks(&r.full_name(), candidates).await };
         match found {
             Ok(found) => {
-                let stored: HashSet<usize> = found.iter().map(|(i, ..)| *i).collect();
-                let mut leaks: Vec<(String, String)> = found.into_iter().map(|(_, key, env, _)| (key, env)).collect();
-                leaks.sort();
+                let stored: HashSet<usize> = found.iter().map(|l| l.index).collect();
+                let mut leaks: Vec<crate::FoundLeak> = found.into_iter().map(|l| crate::FoundLeak { index: 0, ..l }).collect();
+                leaks.sort_by(|a, b| (&a.key, &a.environment, &a.folder).cmp(&(&b.key, &b.environment, &b.folder)));
                 leaks.dedup();
                 let unstored: Vec<Added> = added.into_iter().zip(at).filter(|(_, i)| !stored.contains(i)).map(|(a, _)| a).collect();
                 // Only the repo's own changes: a fork's would make the notice an oracle for whether
@@ -293,13 +293,19 @@ impl Code {
         }
         let Ok(Some(head)) = self.store.resolve(&r.id, &c.head) else { return Vec::new() };
         let Some((_, leaks)) = self.leak_facts.get(&(r.id.clone(), head)) else { return Vec::new() };
-        let mut by_key: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-        for (key, env) in leaks.leaks.iter() {
-            by_key.entry(key).or_default().push(env);
+        let mut by_key: BTreeMap<&str, Vec<&crate::FoundLeak>> = BTreeMap::new();
+        for l in leaks.leaks.iter() {
+            by_key.entry(&l.key).or_default().push(l);
         }
         by_key
             .into_iter()
-            .map(|(key, envs)| Blocker::secret("secret_leak", format!("adds the value of {key} ({}): rotate it and remove it from the change", envs.join(", ")), key, envs.iter().map(|e| e.to_string()).collect()))
+            .map(|(key, found)| {
+                let mut envs: Vec<String> = found.iter().map(|l| l.environment.clone()).collect();
+                envs.dedup();
+                let mut rotate: Vec<crate::model::RotateAt> = found.iter().filter(|l| l.rotatable).map(|l| crate::model::RotateAt { environment: l.environment.clone(), folder: l.folder.clone() }).collect();
+                rotate.dedup();
+                Blocker { rotate, ..Blocker::secret("secret_leak", format!("adds the value of {key} ({}): rotate it and remove it from the change", envs.join(", ")), key, envs) }
+            })
             .collect()
     }
 
@@ -434,9 +440,9 @@ impl Code {
         }
         let cands = acc.candidates();
         for (b, chunk) in cands.chunks(SCAN_BATCH).enumerate() {
-            for (i, key, environment, folder) in secrets.leaks(&r.full_name(), chunk.to_vec()).await? {
-                for (path, line) in acc.places.get(b * SCAN_BATCH + i).into_iter().flatten() {
-                    scan.found.push(Found { key: key.clone(), environment: environment.clone(), folder: folder.clone(), path: path.clone(), line: *line });
+            for l in secrets.leaks(&r.full_name(), chunk.to_vec()).await? {
+                for (path, line) in acc.places.get(b * SCAN_BATCH + l.index).into_iter().flatten() {
+                    scan.found.push(Found { key: l.key.clone(), environment: l.environment.clone(), folder: l.folder.clone(), path: path.clone(), line: *line });
                 }
             }
         }
@@ -489,9 +495,9 @@ impl Code {
         }
         let cands = acc.candidates();
         for (b, chunk) in cands.chunks(SCAN_BATCH).enumerate() {
-            for (i, key, environment, folder) in secrets.leaks(&r.full_name(), chunk.to_vec()).await? {
-                for (changeset, path) in acc.places.get(b * SCAN_BATCH + i).into_iter().flatten() {
-                    scan.history.push(InHistory { key: key.clone(), environment: environment.clone(), folder: folder.clone(), changeset: changeset.clone(), path: path.clone() });
+            for l in secrets.leaks(&r.full_name(), chunk.to_vec()).await? {
+                for (changeset, path) in acc.places.get(b * SCAN_BATCH + l.index).into_iter().flatten() {
+                    scan.history.push(InHistory { key: l.key.clone(), environment: l.environment.clone(), folder: l.folder.clone(), changeset: changeset.clone(), path: path.clone() });
                 }
             }
         }

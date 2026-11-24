@@ -5029,7 +5029,7 @@
               }
             }
           },
-          "description": "`{ to }`"
+          "description": "`{ to, state }` (`state`: the SHA-256 the environment's host sent with its redirect, `?state=`: the ticket opens only in the browser holding that state's cookie; 400 without it)"
         },
         "responses": {
           "200": {

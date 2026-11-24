@@ -1051,6 +1051,28 @@ impl apps_control::integrations::Visitors for AccountsVisitors {
     }
 }
 
+/// Where an `access.sso` environment's visitors start signing in: roll-accounts' sign-in as a
+/// visit (no account of roll's comes of it).
+pub struct AccountsSignIn(pub Arc<roll_accounts::Accounts>);
+
+impl apps_control::integrations::VisitorSignIn for AccountsSignIn {
+    fn start_url(&self, provider: &str, request: &str, orgs: bool) -> Option<String> {
+        self.0.visit_url(provider, request, orgs)
+    }
+}
+
+/// Where roll-accounts sends a visitor a provider vouched for: roll apps checks them against the
+/// environment's `sso.allow` and opens their session.
+pub struct AppsVisitGate(pub Arc<apps_control::Apps>);
+
+#[async_trait::async_trait]
+impl roll_accounts::VisitGate for AppsVisitGate {
+    async fn admit(&self, request: &str, who: &roll_accounts::Visitor) -> Result<String, String> {
+        let v = apps_control::integrations::SsoVisitor { provider: who.provider.clone(), subject: who.subject.clone(), email: who.email.clone(), orgs: who.orgs.clone(), hosted_domain: who.hosted_domain.clone() };
+        self.0.admit_visitor(request, &v).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

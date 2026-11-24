@@ -120,7 +120,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/rotators/{{id}}"), axum::routing::delete(delete_rotator).patch(update_rotator))
         .route(&format!("{P}/rotators/{{id}}/rotate-secret"), post(rotate_rotator_secret))
         .route(&format!("{P}/saas"), get(saas_rotators).post(add_saas_rotator))
-        .route(&format!("{P}/saas/{{id}}"), axum::routing::delete(delete_saas_rotator))
+        .route(&format!("{P}/saas/{{id}}"), axum::routing::delete(delete_saas_rotator).patch(update_saas_rotator))
         .route(&format!("{P}/transit"), get(transit_keys).post(add_transit_key))
         .route(&format!("{P}/transit/{{name}}"), axum::routing::patch(config_transit_key).delete(delete_transit_key))
         .route(&format!("{P}/transit/{{name}}/rotate"), post(rotate_transit_key))
@@ -140,6 +140,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/ssh-cas/{{id}}/sign-host"), post(sign_host_key))
         .route(&format!("{P}/ssh-cas/{{id}}/sign-user"), post(sign_user_key))
         .route(&format!("{P}/cas/{{id}}/sign"), post(sign_csr))
+        .route(&format!("{P}/cas/{{id}}/chain"), axum::routing::put(install_chain))
         .route(&format!("{P}/cas/{{id}}/certificates"), get(ca_certificates))
         .route(&format!("{P}/cas/{{id}}/revoke"), post(revoke_certificate))
         .route(&format!("{P}/cas/{{id}}/acme"), get(acme_settings).patch(set_acme))
@@ -309,16 +310,18 @@ async fn overview(State(s): S, Who(c): Who, Path(project): Path<String>) -> crat
         let previews = envs.iter().filter(|e| e.kind == crate::envs::Kind::Ephemeral).count();
         let history_days = s.history_days(&project)?;
         let validity_checks = if s.validity_checks(&project)? { "on" } else { "off" };
+        let leaks = json!({ "rotate": s.leak_rotate(&project)? });
         // What deleting the workspace project would take with it, and for how long it's recoverable.
         let deletion = s.deletion(&project)?;
-        Ok(json!({ "project": project, "environments": envs, "previews": previews, "history_days": history_days, "validity_checks": validity_checks, "deletion": deletion }))
+        Ok(json!({ "project": project, "environments": envs, "previews": previews, "history_days": history_days, "validity_checks": validity_checks, "leaks": leaks, "deletion": deletion }))
     })
     .await?;
     Ok(ok(v))
 }
 
-/// `{history_days?, validity_checks?}`: how long old values are kept (`null`: for good), and
-/// whether credentials found in code are checked with their providers (`"on"` or `"off"`).
+/// `{history_days?, validity_checks?, leaks?}`: how long old values are kept (`null`: for good),
+/// whether credentials found in code are checked with their providers (`"on"` or `"off"`), and
+/// what a leaked managed key does (`{rotate: "managed" | "off"}`).
 async fn project_settings(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
     let mut o: serde_json::Map<String, serde_json::Value> = body(&b)?;
     let days = match o.remove("history_days") {
@@ -334,11 +337,25 @@ async fn project_settings(State(s): S, Who(c): Who, Path(project): Path<String>,
         }),
         None => None,
     };
+    let leaks = match o.remove("leaks") {
+        Some(v) => {
+            let mut l = match v {
+                serde_json::Value::Object(l) => l,
+                _ => return Err(Error::BadRequest("leaks is {rotate: \"managed\" | \"off\"}".into())),
+            };
+            let rotate = l.remove("rotate").and_then(|r| r.as_str().and_then(crate::leaks::LeakRotate::parse));
+            match (rotate, l.keys().next()) {
+                (Some(r), None) => Some(r),
+                _ => return Err(Error::BadRequest("leaks is {rotate: \"managed\" | \"off\"}".into())),
+            }
+        }
+        None => None,
+    };
     if let Some(k) = o.keys().next() {
         return Err(Error::BadRequest(format!("unknown field {k}")));
     }
-    if days.is_none() && checks.is_none() {
-        return Err(Error::BadRequest("nothing to change: history_days, validity_checks".into()));
+    if days.is_none() && checks.is_none() && leaks.is_none() {
+        return Err(Error::BadRequest("nothing to change: history_days, validity_checks, leaks".into()));
     }
     let v = blocking(s, move |s| {
         let mut out = serde_json::Map::new();
@@ -347,6 +364,9 @@ async fn project_settings(State(s): S, Who(c): Who, Path(project): Path<String>,
         }
         if let Some(on) = checks {
             out.insert("validity_checks".into(), json!(if s.set_validity_checks(&project, on, &c)? { "on" } else { "off" }));
+        }
+        if let Some(rotate) = leaks {
+            out.insert("leaks".into(), json!({ "rotate": s.set_leak_rotate(&project, rotate, &c)? }));
         }
         Ok(out)
     })
@@ -1391,13 +1411,16 @@ async fn delete_sink(State(s): S, Who(c): Who, Path((project, id)): Path<(String
 #[serde(deny_unknown_fields)]
 struct Scan {
     candidates: Vec<String>,
+    /// The text was published: what it matches is a leak ("When a value leaks").
+    #[serde(default)]
+    leaked: bool,
 }
 
 async fn scan_leaks(State(s): S, Who(c): Who, Path(project): Path<String>, headers: HeaderMap, b: Bytes) -> crate::Result<Response> {
-    let Scan { candidates } = body(&b)?;
+    let Scan { candidates, leaked } = body(&b)?;
     // A credential guard's check of what a tool call would write (roll MCP): audited apart.
     let guard = headers.get("x-roll-guard").is_some_and(|v| v.as_bytes() == b"1");
-    Ok(ok(blocking(s, move |s| s.scan_as(&project, &candidates, &c, guard)).await?))
+    Ok(ok(blocking(s, move |s| s.scan_as(&project, &candidates, &c, guard, leaked)).await?))
 }
 
 async fn all_health(State(s): S, Who(c): Who) -> crate::Result<Response> {
@@ -1522,6 +1545,11 @@ async fn saas_rotators(State(s): S, Who(c): Who, Path(project): Path<String>) ->
 async fn add_saas_rotator(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
     let n: crate::saas::NewSaasRotator = body(&b)?;
     Ok(created(blocking(s, move |s| s.add_saas_rotator(&project, n, &c)).await?))
+}
+
+async fn update_saas_rotator(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let ch: crate::saas::SaasRotatorChange = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.update_saas_rotator(&project, &id, ch, &c)).await?))
 }
 
 async fn delete_saas_rotator(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
@@ -1660,6 +1688,11 @@ async fn sign_host_key(State(s): S, Who(c): Who, Path((project, id)): Path<(Stri
 async fn delete_ssh_ca(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
     blocking(s, move |s| s.delete_ssh_ca(&project, &id, &c)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn install_chain(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let req: crate::pki::Chain = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.install_chain(&project, &id, req, &c)).await?))
 }
 
 async fn sign_csr(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {

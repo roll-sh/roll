@@ -38,6 +38,7 @@ pub fn router(accounts: Arc<Accounts>) -> Router {
         .route("/v1/accounts/email/verify", post(email_verify))
         .route("/v1/accounts/oauth/{provider}/start", post(oauth_start))
         .route("/v1/accounts/oauth/{provider}/callback", get(oauth_callback))
+        .route("/v1/accounts/oauth/{provider}/visit", get(oauth_visit))
         .route("/v1/accounts/signin/totp", post(signin_totp))
         .route("/v1/accounts/signin/recovery", post(signin_recovery))
         .route("/v1/accounts/signin/passkey/options", post(signin_passkey_options))
@@ -360,6 +361,24 @@ async fn oauth_start(State(a): S, me: Me, Path(p): Path<String>, b: Bytes) -> Re
 }
 
 #[derive(Deserialize)]
+struct VisitStart {
+    r: String,
+    #[serde(default)]
+    orgs: Option<String>,
+}
+
+/// A visitor's sign-in (roll apps' `access.sso`): straight on to the provider, with the browser
+/// bound as a sign-in's is. No session of roll's comes of it.
+async fn oauth_visit(State(a): S, Path(p): Path<String>, Query(q): Query<VisitStart>) -> Result<Response> {
+    let p = provider(&p)?;
+    let orgs = q.orgs.as_deref() == Some("1");
+    let started = blocking(&a, move |a| a.oauth_visit_start(p, &q.r, orgs)).await?;
+    let mut resp = (StatusCode::SEE_OTHER, [(header::LOCATION, HeaderValue::from_str(&started.url).map_err(|e| Error::Internal(e.to_string()))?)]).into_response();
+    resp.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(with_cookies(resp, [cookie(&a, a.config.visit_cookie(), &started.browser, 10 * 60_000)]))
+}
+
+#[derive(Deserialize)]
 struct Callback {
     code: Option<String>,
     state: Option<String>,
@@ -368,14 +387,19 @@ struct Callback {
 
 async fn oauth_callback(State(a): S, me: Me, ip: Ip, Path(p): Path<String>, Query(q): Query<Callback>, headers: HeaderMap) -> Response {
     let who = Who::of(ip, &headers).person(me);
+    // A visitor's sign-in (its own cookie, and no sign-in to roll under way): its failures are
+    // roll's page for them, whatever happened.
+    let visit = roll_auth::cookie(&headers, a.config.visit_cookie()).map(str::to_string);
+    let signin = roll_auth::cookie(&headers, a.config.oauth_cookie()).map(str::to_string);
+    let fallback = if visit.is_some() && signin.is_none() { crate::oauth::VISIT_BACK } else { "/signin" };
     // No provider, or no code (the person said no at the provider): no sign-in happened to record.
-    let Some(p) = Provider::parse(&p) else { return finish_redirect(&a, &headers, Err(Error::NotFound("no such provider".into())), "/signin".into(), false, "", &who).await };
+    let Some(p) = Provider::parse(&p) else { return finish_redirect(&a, &headers, Err(Error::NotFound("no such provider".into())), fallback.into(), false, "", &who).await };
     let (Some(code), Some(state)) = (q.code, q.state) else {
         let _ = q.error;
-        return finish_redirect(&a, &headers, Err(Error::BadRequest("the provider".into(), Some("provider"))), "/signin".into(), false, "", &who).await;
+        return finish_redirect(&a, &headers, Err(Error::BadRequest("the provider".into(), Some("provider"))), fallback.into(), false, "", &who).await;
     };
-    let browser = roll_auth::cookie(&headers, a.config.oauth_cookie()).map(str::to_string);
-    let (done, back) = a.oauth_callback(p, &code, &state, browser).await;
+    let (done, back) = a.oauth_callback(p, &code, &state, [signin, visit]).await;
+    let back = if done.is_err() && back == "/signin" { fallback.to_string() } else { back };
     finish_redirect(&a, &headers, done, back, false, p.as_str(), &who).await
 }
 
@@ -397,19 +421,22 @@ async fn finish_redirect(a: &Arc<Accounts>, headers: &HeaderMap, done: Result<Fi
             detail: serde_json::json!({ "method": crate::audit::clean_id(method), "refused": refused }),
         })
     };
+    let visit = back == crate::oauth::VISIT_BACK;
     match &done {
         Err(_) if method.is_empty() => {}
+        // A visitor isn't signing in to roll: nothing of an account's to record.
+        _ if visit => {}
         // A signed-in person's flow that failed was a link of theirs.
         Err(e) if who.person.is_some() => link(false, crate::audit::status_of(e), Some(e.redirect_code())),
         Err(e) => a.record_sign_in(None, method, Some(e), false, who),
         Ok(Finished::Linked { .. }) => link(true, 200, None),
         Ok(Finished::SignIn { user, new: Some(new), .. }) => a.record_new(user, new, method, who),
-        Ok(Finished::SignIn { .. }) => {}
+        Ok(Finished::SignIn { .. }) | Ok(Finished::Visit { .. }) => {}
     }
     let web = a.config.web_url.clone();
     let redirect = |to: String, cookies: Vec<HeaderValue>| {
         let mut resp = (StatusCode::SEE_OTHER, [(header::LOCATION, HeaderValue::from_str(&to).unwrap_or(HeaderValue::from_static("/")))]).into_response();
-        resp.headers_mut().append(header::SET_COOKIE, cookie(a, a.config.oauth_cookie(), "", 0));
+        resp.headers_mut().append(header::SET_COOKIE, cookie(a, if visit { a.config.visit_cookie() } else { a.config.oauth_cookie() }, "", 0));
         with_cookies(resp, cookies)
     };
     let fail = |back: &str, code: &str| {
@@ -417,7 +444,21 @@ async fn finish_redirect(a: &Arc<Accounts>, headers: &HeaderMap, done: Result<Fi
         redirect(format!("{web}{back}{sep}error={code}"), Vec::new())
     };
     match done {
+        // A visitor turned away: roll's own page (they have no account to sign in to).
+        Err(e) if visit => {
+            let why = match &e {
+                Error::Forbidden(m, _) => m.clone(),
+                Error::BadRequest(_, Some("state")) => "The sign-in expired or came from another browser. Open the page again.".into(),
+                _ => "The sign-in didn't work. Open the page again.".into(),
+            };
+            let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
+            let page = format!("<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width\"><title>Not allowed</title><body style=\"font:15px system-ui;max-width:32rem;margin:15vh auto;padding:0 1rem\"><h1 style=\"font-size:20px\">You can't open this</h1><p>{}</p>", esc(&why));
+            let mut resp = (StatusCode::FORBIDDEN, [(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-store")], page).into_response();
+            resp.headers_mut().append(header::SET_COOKIE, cookie(a, a.config.visit_cookie(), "", 0));
+            resp
+        }
         Err(e) => fail(&back, e.redirect_code()),
+        Ok(Finished::Visit { to }) => redirect(to, Vec::new()),
         Ok(Finished::Linked { return_to }) => redirect(format!("{web}{return_to}"), Vec::new()),
         Ok(Finished::SignIn { user, return_to, sid, .. }) => {
             let ua = user_agent(headers);

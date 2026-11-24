@@ -305,7 +305,46 @@ impl Drop for Swap {
     }
 }
 
+/// A page of a preview's service as an agent reads it through roll (`GET …/fetch`; roll MCP's
+/// `previews_fetch`).
+#[derive(serde::Serialize)]
+pub struct FetchedPage {
+    pub service: String,
+    pub path: String,
+    /// The service's link, never with its token.
+    pub url: String,
+    pub status: u16,
+    pub headers: std::collections::BTreeMap<String, String>,
+    /// Its text, masked as its logs are; `None` when it isn't text.
+    pub body: Option<String>,
+    pub truncated: bool,
+}
+
 impl Engine {
+    /// `GET …/{id}/fetch?path=&service=&head=`: one page of the service read through roll's own
+    /// way in (no link token or share link made), its text masked as the preview's logs are.
+    pub async fn fetch(self: &Arc<Self>, id: &str, service: Option<&str>, path: &str, head: bool) -> Result<FetchedPage> {
+        if !crate::settings::page_path_ok(path) {
+            return Err(Error::BadRequest("path: a path of the service's own, starting with / (up to 200 characters, no #, quotes or spaces)".into()));
+        }
+        let svc = self.files_service(id, service)?;
+        let url = self.store.services(id)?.into_iter().find(|s| s.name == svc).map(|s| s.url).unwrap_or_default();
+        // A private preview's link token: roll apps' gate takes it as a visitor's cookie.
+        let access = self.store.access(id)?.filter(|a| a.required()).map(|a| a.token);
+        let f = match self.apps.fetch(id, &svc, &url, access.as_deref(), path, head).await {
+            Ok(Some(f)) => f,
+            Ok(None) => return Err(Error::Conflict(format!("{svc} can't be read through roll here"))),
+            Err(e) => return Err(Error::Conflict(self.mask_text(id, &format!("{e:#}")).await?)),
+        };
+        let headers: std::collections::BTreeMap<String, String> = f.headers.into_iter().collect();
+        let text = headers.get("content-type").is_none_or(|t| ["text/", "json", "xml", "javascript"].iter().any(|k| t.contains(k)));
+        let body = match String::from_utf8(f.body) {
+            Ok(s) if text && !head => Some(self.mask_text(id, &s).await?),
+            _ => None,
+        };
+        Ok(FetchedPage { service: svc, path: path.to_string(), url, status: f.status, headers, body, truncated: f.truncated })
+    }
+
     /// `GET …/{id}/swap?service=` (`roll preview swap`): `service` held for `who`'s laptop, one
     /// laptop at a time; roll apps' services are roll apps' to serve.
     pub async fn swap(self: &Arc<Self>, id: &str, service: Option<&str>, who: &str) -> Result<Swap> {

@@ -21,6 +21,7 @@ const EVENTS: { value: NotifyEvent; label: string }[] = [
   { value: "alert.latency", label: "Latency alert" },
   { value: "alert.capacity", label: "At capacity" },
   { value: "alert.anomaly", label: "Unusual for the hour" },
+  { value: "attack.mode", label: "Attack mode on" },
   { value: "alert.slo", label: "Error budget burning" },
   { value: "alert.log", label: "Log alert" },
   { value: "error.new", label: "New error" },

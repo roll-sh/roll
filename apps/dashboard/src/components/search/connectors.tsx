@@ -6,7 +6,7 @@ import { ago, btn, ErrorNote, Panel } from "../ui";
 import { Empty, errText, LoadError, useLoad } from "./relevance-shared";
 
 /** The connectors roll runs syncs for (Elastic-managed ones of these services). */
-const RUN_BY_ROLL = ["postgresql", "s3"];
+const RUN_BY_ROLL = ["postgresql", "s3", "roll_web_crawler"];
 
 type Connector = {
   id: string;

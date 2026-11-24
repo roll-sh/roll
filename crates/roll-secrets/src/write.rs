@@ -5,7 +5,7 @@ use crate::access::{Action, Caller, Scope};
 use crate::crypto::{Dek, value_aad};
 use crate::envs::{self, EnvRow};
 use crate::events::{Event, Kind};
-use crate::links::{Link, Mode};
+use crate::links::{Issued, Link, Mode};
 use crate::{Error, Result, Secrets, Value, audit, from_json, json, names};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
@@ -616,7 +616,10 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, mac: &crate::Keyring, env: &EnvRow,
                         (None, _) if link_now.as_ref().is_some_and(|l| l.mode == Mode::Managed) => {
                             return Err(Error::Internal(format!("{}: the managed credential wasn't issued", item.key)));
                         }
-                        (None, _) => Some(Value::default()),
+                        // Without a value a set only changes a key that's here: a wrong name, path
+                        // or type would otherwise make an empty one that shadows the real value.
+                        (None, None) => return Err(Error::BadRequest(format!("{}: a new secret needs a value", item.key))),
+                        (None, Some(_)) => Some(Value::default()),
                     },
                 };
                 let fp = match (&link_now, &stored_value) {
@@ -633,8 +636,10 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, mac: &crate::Keyring, env: &EnvRow,
                 let weak = stored_value.as_ref().and_then(|v| crate::strength::weakness(&item.key, v.expose()));
                 // By the value only: a link's secret field is health's to judge (it asks the provider).
                 let public = crate::strength::browser_exposure(&item.key, stored_value.as_ref().map(|v| v.expose()), None);
-                // Unless the writer said: a new certificate's own date, else the date it had.
-                let expires_now = expires_at.unwrap_or_else(|| value.as_ref().and_then(|v| certificate_expiry(v.expose())).or_else(|| cur.as_ref().and_then(|c| c.expires_at)));
+                // Unless the writer said: a new certificate's own date, or the date the vendor ends a
+                // credential just issued, else the date it had.
+                let issued_end = link_state.as_ref().and_then(|s| s.get("expires_at")).and_then(Json::as_i64);
+                let expires_now = expires_at.unwrap_or_else(|| value.as_ref().and_then(|v| certificate_expiry(v.expose())).or(issued_end).or_else(|| cur.as_ref().and_then(|c| c.expires_at)));
                 let mut what = vec![];
                 match &cur {
                     None => what.push("added".to_string()),
@@ -918,8 +923,8 @@ impl Secrets {
                         match self.provider_for(&link.kind, &link.r#ref).and_then(|p| p.issue(&link.r#ref, &cred, &link, &label, None)) {
                             Ok(i) => {
                                 out.fresh.push(Fresh { kind: link.kind.clone(), r#ref: link.r#ref.clone(), handle: i.handle.clone() });
-                                let state = seal_parts(&dek, project, &i.parts, i.handle, self.db.now_ms()?);
-                                (i.parts, state)
+                                let parts = i.parts.clone();
+                                (parts, seal_parts(&dek, project, i, self.db.now_ms()?))
                             }
                             Err(e) => {
                                 result = Err(e);
@@ -1410,12 +1415,18 @@ pub(crate) fn state_at(c: &Conn<'_>, env_id: &str, seq: i64) -> Result<Vec<State
 }
 
 /// A managed credential's parts sealed into its link state.
-pub(crate) fn seal_parts(dek: &Dek, project: &str, parts: &BTreeMap<String, Value>, handle: Json, now: i64) -> Json {
+/// An issued credential's link state: its parts sealed, its handle, when it was issued and when
+/// the vendor ends it ([`Issued::expires_at`], which becomes the key's `expires_at`).
+pub(crate) fn seal_parts(dek: &Dek, project: &str, issued: Issued, now: i64) -> Json {
     let id = names::new_id("crd", 16);
-    let plain: BTreeMap<&str, &str> = parts.iter().map(|(k, v)| (k.as_str(), v.expose())).collect();
+    let plain: BTreeMap<&str, &str> = issued.parts.iter().map(|(k, v)| (k.as_str(), v.expose())).collect();
     let plain = Value::new(serde_json::to_string(&plain).expect("JSON"));
     let sealed = STANDARD.encode(dek.seal(&format!("roll-secrets:credential:{project}:{id}"), &plain));
-    serde_json::json!({ "credential": id, "handle": handle, "issued_at": now, "sealed": sealed })
+    let mut state = serde_json::json!({ "credential": id, "handle": issued.handle, "issued_at": now, "sealed": sealed });
+    if let Some(t) = issued.expires_at {
+        state["expires_at"] = t.into();
+    }
+    state
 }
 
 pub(crate) fn open_parts(dek: &Dek, project: &str, state: &Json) -> Result<BTreeMap<String, Value>> {

@@ -97,7 +97,7 @@ POST /v1/search/clusters/{id}/request                                          t
 POST /v1/search/clusters/{id}/unload                                           the operator's (health, migrations, process control)
 GET /v1/secrets/gateways/{id}/connect                                          interactive (a shell, files, a forward): an admin's, live
 GET /v1/secrets/health                                                         the operator's (health, migrations, process control)
-PATCH /v1/secrets/projects/{project}                                           a person's call: how long old versions are kept (shortening it deletes history)
+PATCH /v1/secrets/projects/{project}                                           a person's call: how long old versions are kept (shortening it deletes history), and whether leaked keys rotate on their own
 POST /v1/secrets/projects/{project}/atlas-projects                             an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/atlas-projects/{id}                      an outside integration's setup: an admin's, with its credentials
 * /v1/secrets/projects/{project}/audit/sinks                                   an outside integration's setup: an admin's, with its credentials
@@ -116,6 +116,7 @@ DELETE /v1/secrets/projects/{project}/cas/{id}                                 a
 PATCH /v1/secrets/projects/{project}/cas/{id}/acme                             an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/cas/{id}/acme/eab                          an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/cas/{id}/acme/eab/{eab}                  an outside integration's setup: an admin's, with its credentials
+PUT /v1/secrets/projects/{project}/cas/{id}/chain                              a person's call: installing a CA chain
 POST /v1/secrets/projects/{project}/cas/{id}/revoke                            an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/cas/{id}/sign                              an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/cloud-accounts                             an outside integration's setup: an admin's, with its credentials
@@ -163,6 +164,7 @@ PATCH /v1/secrets/projects/{project}/rotators/{id}                             a
 POST /v1/secrets/projects/{project}/rotators/{id}/rotate-secret                an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/saas                                       an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/saas/{id}                                an outside integration's setup: an admin's, with its credentials
+PATCH /v1/secrets/projects/{project}/saas/{id}                                 an outside integration's setup: an admin's, with its credentials (a credential, a person's call)
 POST /v1/secrets/projects/{project}/shares                                     answers or sets a credential
 POST /v1/secrets/projects/{project}/snowflake-accounts                         an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/snowflake-accounts/{id}                  an outside integration's setup: an admin's, with its credentials

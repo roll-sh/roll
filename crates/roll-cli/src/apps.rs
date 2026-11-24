@@ -1363,6 +1363,11 @@ pub enum AppsCmd {
         /// in, then back); its link, if it has one, stops.
         #[arg(long, conflicts_with_all = ["open", "private"])]
         signed_in: bool,
+        /// Only people GitHub or Google vouches for get in, whether roll's or not:
+        /// `github:@acme.com,org:acme` or `google:@acme.com,ada@x.com` (a domain, an email, a
+        /// GitHub organisation).
+        #[arg(long, value_name = "PROVIDER:ALLOW", conflicts_with_all = ["open", "private", "signed_in"])]
+        sso: Option<String>,
         /// Maintenance: its public names answer roll's page (with this note, if given) and
         /// nothing wakes.
         #[arg(long, value_name = "NOTE", num_args = 0..=1, default_missing_value = "", conflicts_with = "serve")]
@@ -1400,8 +1405,8 @@ pub enum AppsCmd {
         /// A firewall rule, in order (the first match decides): `deny /admin/*`,
         /// `deny method=DELETE,PUT`, `allow /admin/health`, `deny ip=203.0.113.0/24`,
         /// `deny header=X-Bot`, `deny cookie=beta:1`, `deny query=debug`, `deny bots=ai,spoofed`
-        /// (roll's lists: ai, search, preview, tools, verified, spoofed), `deny ua=BadBot` (ua=
-        /// last). Repeatable; the rules replace the ones it has.
+        /// (roll's lists: ai, search, preview, tools, verified, spoofed), `log attacks=sqli,xss`
+        /// (roll's patterns: scanners, traversal, sqli, xss, rce), `deny ua=BadBot` (ua= last). Repeatable; the rules replace the ones it has.
         #[arg(long = "firewall", value_name = "RULE", conflicts_with = "no_firewall")]
         firewall: Vec<String>,
         /// No firewall rules.
@@ -5029,7 +5034,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, data, wait_for_ci, run, follow_tag, redeploy_on_secrets, vitals, egress, egress_host, private, open, signed_in, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, route, no_routes, redirects, no_redirects, error_page, maintenance_page, roll_pages, freeze, unfreeze, rotate_config, set } => {
+        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, data, wait_for_ci, run, follow_tag, redeploy_on_secrets, vitals, egress, egress_host, private, open, signed_in, sso, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, route, no_routes, redirects, no_redirects, error_page, maintenance_page, roll_pages, freeze, unfreeze, rotate_config, set } => {
             let svc = service(api, &target).await?;
             if rotate_config {
                 let e = api.post(&format!("{}/config/rotate", env_path(&svc, &target.env)), json!({})).await?;
@@ -5077,6 +5082,10 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             if signed_in {
                 body.insert("access".into(), json!({ "signed_in": true }));
+            }
+            if let Some(s) = sso {
+                let (provider, allow) = s.split_once(':').ok_or_else(|| anyhow::anyhow!("--sso is PROVIDER:ALLOW, as github:@acme.com,org:acme"))?;
+                body.insert("access".into(), json!({ "sso": { "provider": provider, "allow": allow.split(',').map(str::trim).filter(|a| !a.is_empty()).collect::<Vec<_>>() } }));
             }
             if let Some(mode) = egress {
                 body.insert("egress".into(), json!({ "mode": mode, "hosts": egress_host }));
@@ -5269,7 +5278,7 @@ pub(crate) fn new_token() -> String {
 /// A firewall rule as typed: `<allow|deny> [/path] [method=A,B] [ua=the rest of the line]`.
 fn firewall_rule(line: &str) -> anyhow::Result<Value> {
     let mut words = line.split_whitespace();
-    let action = words.next().filter(|a| ["allow", "deny", "limit", "challenge"].contains(a)).ok_or_else(|| anyhow::anyhow!("a firewall rule starts with allow, deny, limit or challenge: {line:?}"))?;
+    let action = words.next().filter(|a| ["allow", "deny", "limit", "challenge", "log"].contains(a)).ok_or_else(|| anyhow::anyhow!("a firewall rule starts with allow, deny, limit, challenge or log: {line:?}"))?;
     let mut rule = json!({ "action": action });
     // `limit N[:BURST] …`: N a minute a client through the rule.
     if action == "limit" {
@@ -5299,10 +5308,12 @@ fn firewall_rule(line: &str) -> anyhow::Result<Value> {
             rule["key"] = json!(k);
         } else if let Some(b) = w.strip_prefix("bots=") {
             rule["bots"] = json!(b.split(',').filter(|b| !b.is_empty()).collect::<Vec<_>>());
+        } else if let Some(b) = w.strip_prefix("attacks=") {
+            rule["attacks"] = json!(b.split(',').filter(|b| !b.is_empty()).collect::<Vec<_>>());
         } else if w.starts_with('/') {
             rule["path"] = json!(w);
         } else {
-            anyhow::bail!("{w:?} in {line:?}: a path (/…), method=…, ip=…, header=…, cookie=…, query=…, key=…, bots=…, or ua=…");
+            anyhow::bail!("{w:?} in {line:?}: a path (/…), method=…, ip=…, header=…, cookie=…, query=…, key=…, bots=…, attacks=…, or ua=…");
         }
     }
     Ok(rule)

@@ -58,7 +58,9 @@ export type NewEnvironment = {
 /** `validity_checks`: whether credentials found in code are checked with their providers (docs/secrets.md, "Is it live?"). */
 /** What deleting the workspace project takes from roll secrets (`holds`: `null` for nothing), and how many days it stays recoverable. */
 export type Deletion = { window_days: number; holds: string | null };
-export type Overview = { project: string; environments: Environment[]; previews: number; history_days: number | null; validity_checks: "on" | "off"; deletion: Deletion };
+/** What a leaked managed key does (docs/secrets.md, "When a value leaks"): `managed` rotates it at once, `off` only reports it. */
+export type LeakRotate = "managed" | "off";
+export type Overview = { project: string; environments: Environment[]; previews: number; history_days: number | null; validity_checks: "on" | "off"; leaks: { rotate: LeakRotate }; deletion: Deletion };
 /** A credential to check: a found value and, for an AWS access key id, the secret access key next to it. */
 export type ValidityProbe = { value: string; pair?: string | null };
 /** What a credential's provider said: never its value. `invalid` is revoked, deleted or never real. */
@@ -274,8 +276,8 @@ export type ChangeRequest = {
   /** What it must pass: the environment's policy (no `path`) and each folder policy covering a key it changes. */
   gates: { path?: string; approvals: number; approvers?: string[]; approved: number }[];
   applied_seq: number | null;
-  /** What it does instead of changing keys: a protected environment's delete, kept for the recovery window once applied. */
-  action?: "delete_environment";
+  /** What it does instead of changing keys: a protected environment's delete, kept for the recovery window once applied, or a leaked key's rotation (its one item), with no grace for the leaked credential. */
+  action?: "delete_environment" | "rotate";
 };
 /** Something that stops working when an environment goes: a value elsewhere in the project that references it (`key`), or a folder here or in another project (`project`) that imports from it. Names only. */
 /** What stops working when an environment goes: a key referencing it, a folder importing it, a roll apps service or agents sandbox reading it, a sync of it, or an identity or token whose scope names it.
@@ -492,8 +494,13 @@ export type TransitKey = { id: string; name: string; latest_version: number; min
 /** A certificate a CA signed for a CSR (`POST …/cas/{id}/sign`): the device keeps its key. */
 /** A certificate a CA signed and that hasn't expired (`GET …/cas/{id}/certificates`). */
 export type CaCertificate = { serial: string; names: string[]; source: "csr" | "link" | "acme"; not_after: number; issued_at: number; issued_by: string; revoked_at?: number };
-export type SignedCertificate = { certificate: string; ca: string; serial: string; names: string[]; not_after: number };
-export type Ca = { id: string; name: string; certificate: string; domains: string[]; allow_ip: boolean; max_days: number; created_at: number; created_by: string };
+/** `ca_chain`: the CA's certificate and, for an intermediate, every one above it up to the root (PEM). */
+export type SignedCertificate = { certificate: string; ca: string; ca_chain: string; serial: string; names: string[]; not_after: number };
+/**
+ * A project's CA. An intermediate (`intermediate: true`) is `pending` (no `certificate`, signs nothing) with a `csr` for the
+ * customer's root to sign, then `active` once `PUT …/cas/{id}/chain` installs it, with `ca_chain` up to the root.
+ */
+export type Ca = { id: string; name: string; certificate: string; status: "active" | "pending"; intermediate: boolean; csr?: string; ca_chain?: string; domains: string[]; allow_ip: boolean; max_days: number; created_at: number; created_by: string };
 /** An ACME External Account Binding on a CA: what an account made with it may order (`names`: each takes every name under it; none: the CA's whole policy). */
 export type AcmeBinding = { id: string; label: string; names: string[] | null; expires_at: number | null; created_at: number; created_by: string; revoked_at: number | null; revoked_by: string | null; used_at: number | null; accounts: number };
 /** A CA's ACME directory, whether its bindings' names are pre-authorized (no challenge), the challenges it validates and its bindings (`GET …/cas/{id}/acme`). */
@@ -540,9 +547,12 @@ export type GitHubApp = { id: string; name: string; app_id: number; installation
 export type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 /** A vendor roll issues and revokes keys at itself (`saas` links): its account, never the credential. */
 export type SaasVendor = "sendgrid" | "twilio" | "okta" | "entra" | "auth0" | "gitlab" | "openai" | "datadog" | "cloudflare" | "databricks" | "confluent";
-export type SaasRotator = { id: string; name: string; vendor: SaasVendor; target: Record<string, unknown>; created_at: number; created_by: string };
-/** `credential` is sealed at once and never answered. */
-export type NewSaasRotator = { name: string; vendor: SaasVendor; target: Record<string, unknown>; credential: string };
+/** `credential_expires_at`: when the registered credential ends at the vendor (ms), if the admin gave it; health warns two weeks before. */
+export type SaasRotator = { id: string; name: string; vendor: SaasVendor; target: Record<string, unknown>; credential_expires_at?: number; created_at: number; created_by: string };
+/** `credential` is sealed at once and never answered; `credential_expires_at` (ms, in the future) is when it ends at the vendor. */
+export type NewSaasRotator = { name: string; vendor: SaasVendor; target: Record<string, unknown>; credential: string; credential_expires_at?: number };
+/** `PATCH …/saas/{id}`: a new `credential` is checked with the vendor before it replaces the old one (linked keys keep working); `credential_expires_at: null` clears the date, and a new credential without one has none. */
+export type SaasRotatorChange = { name?: string; credential?: string; credential_expires_at?: number | null };
 /** A Kubernetes cluster whose service accounts get short-lived tokens per lease (dynamic `kubernetes` links); the admin token and the CA stay sealed. */
 export type KubernetesCluster = { id: string; name: string; api_url: string; has_ca: boolean; created_at: number; created_by: string };
 /** `token`: a service account token that may create tokens; `ca_pem`: the cluster's CA, when it isn't publicly trusted. */

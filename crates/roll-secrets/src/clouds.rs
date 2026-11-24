@@ -198,7 +198,7 @@ impl LinkProvider for Provider {
         // The lease's TTL and a few minutes' margin, within an hour (the clouds' default cap).
         let lifetime = ((ttl_minutes.unwrap_or(60) + 5) * 60).min(3600) as u32;
         let (token, expires_at) = exchange(&self.clouds, &self.db, &self.keys, &project, &account, lifetime).map_err(|why| Error::Link(format!("{} didn't give roll a token for {name}: {why}", account.kind())))?;
-        Ok(Issued { parts: BTreeMap::from([("access_token".to_string(), token)]), handle: json!({ "expires_at": expires_at }) })
+        Ok(Issued { expires_at: None, parts: BTreeMap::from([("access_token".to_string(), token)]), handle: json!({ "expires_at": expires_at }) })
     }
 
     /// A cloud's access token can't be ended early: it ends at its own expiry.

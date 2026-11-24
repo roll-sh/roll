@@ -1467,6 +1467,7 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/projects/{project}/saas", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/saas", "secrets", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/saas/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("PATCH", "/v1/secrets/projects/{project}/saas/{id}", "secrets", ADMIN, one(&["project"], "project")),
     // Lists only the keys the caller's grant reaches (`Grants::reaches_key`, each key's name as
     // its index), so a rule limited to some keys sees those.
     row("GET", "/v1/secrets/projects/{project}/transit", "secrets", R, one(&["project"], "project")).filters_index(),
@@ -1488,6 +1489,7 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/projects/{project}/cas", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/cas", "secrets", ADMIN, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/cas/{id}/sign", "secrets", W, one(&["project"], "project")),
+    row("PUT", "/v1/secrets/projects/{project}/cas/{id}/chain", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/cas/{id}/certificates", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/cas/{id}/revoke", "secrets", W, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/cas/{id}", "secrets", ADMIN, one(&["project"], "project")),
@@ -1813,6 +1815,13 @@ static ROWS: &[Row] = &[
     // A laptop's process standing in for a preview's service (`roll preview swap`): it gets the
     // preview's requests, its visitors' included: admin, as the shell is.
     row("GET", "/v1/previews/{id}/swap", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // A page of a preview's service read through roll (roll MCP's `previews_fetch`): what its
+    // visitors see, which can be copies of production's people (masked or not): reveal, as its
+    // mail is.
+    row("GET", "/v1/previews/{id}/fetch", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // A look at a preview's data branch (its tables, a table's first rows): copies of
+    // production's (masked or not): reveal.
+    row("GET", "/v1/previews/{id}/data/{resource}", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     row("PUT", "/v1/previews/{id}/files", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // The mail a preview's services sent, caught and never delivered (previews-next): it can hold
     // copies of production's people, so reveal, as the preview's env is.

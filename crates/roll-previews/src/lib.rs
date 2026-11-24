@@ -236,6 +236,34 @@ pub struct GrewSpan {
     pub main_ms: u64,
 }
 
+/// A token of roll's issuer for a preview's own service (`GET …/oidc/{token}`): Vercel's OIDC
+/// federation's, for a cloud's trust.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct OidcToken {
+    pub token: String,
+    /// Unix seconds.
+    pub expires_at: i64,
+}
+
+/// A look at a data branch as a reviewer sees it from the sheet (Neon's Tables): its tables, or a
+/// table's first rows, read as the branch's own role and read-only (`GET …/data/{resource}`).
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum Browse {
+    Rows { table: String, columns: Vec<String>, rows: Vec<Vec<Option<String>>>, more: bool },
+    Tables { tables: Vec<BrowseTable> },
+}
+
+/// A table of a branch: its name (`schema.table`) and about how many rows it holds.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct BrowseTable {
+    pub name: String,
+    pub rows: i64,
+}
+
+/// The most rows a look at a table shows.
+pub const BROWSE_ROWS: usize = 50;
+
 /// One of a preview's secret values in what its pages served (Netlify's secrets scan): which, by
 /// the name the preview gets it as (never the value), and where.
 #[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
@@ -344,6 +372,11 @@ pub struct Preview {
     /// paths the project's path filters ignore (`None`: they run `head`).
     pub runs: Option<String>,
     pub trusted: bool,
+    /// A fork's preview (code from someone who can't push): its title, and anything its code
+    /// wrote, are outside text, which roll MCP's lockdown keeps from a model (`outside: true`, as
+    /// roll code marks a fork's change).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub outside: bool,
     pub desired: Desired,
     pub state: State,
     pub error: Option<String>,

@@ -371,7 +371,7 @@ const PROMPTS: &[Prompt] = &[
     Prompt {
         name: "review_preview",
         title: "Review a preview",
-        description: "Whether a change's preview is ready to land: its schema changes, new errors, routes slower than main, its pages against the base, and people's notes.",
+        description: "Whether a change's preview is ready to land: its schema changes, new errors, routes slower than main, its pages against the base and as they answer, and people's notes.",
         args: &[Arg { name: "preview", description: "Preview id", required: true }],
         needs: &["previews_wait", "previews_get", "previews_logs", "previews_errors", "previews_routes", "previews_screenshot", "previews_list_notes"],
         text: |a| {
@@ -379,10 +379,12 @@ const PROMPTS: &[Prompt] = &[
                 "Review preview {}. Call previews_wait first. If it failed, read previews_logs (the deploy's first) and \
                  tell me why. If it's awaiting_approval, a writer has to approve-run its head first: say so and stop. Once \
                  it's ready: previews_get for what it branched and its schema_changes (flag a dropped table or column, \
-                 or a NOT NULL column with no default on a table that has rows); previews_errors for errors in it; \
+                 or a NOT NULL column with no default on a table that has rows; previews_tables on a table it changed, if you \
+                 have it, for what the rows hold now); previews_errors for errors in it; \
                  previews_routes for routes slower than in main's preview (call out a p95 more than 20% slower, and \
                  open one of its slow traces with previews_get_trace if you have it); previews_screenshot with diff=base \
-                 on the pages the change touches, and look at each image; previews_list_notes for what people left on \
+                 on the pages the change touches, and look at each image; previews_fetch on those pages (and the API \
+                 paths it changed) for their status and what they answer, if you have it; previews_list_notes for what people left on \
                  its pages. Tell me whether it's ready to land, with the evidence for each problem. Don't resolve \
                  notes, refresh, reset or delete the preview without asking me.",
                 a("preview")

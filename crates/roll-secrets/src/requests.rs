@@ -59,13 +59,17 @@ pub struct Request {
     pub gates: Vec<GateView>,
     pub applied_seq: Option<i64>,
     /// What it does instead of changing keys: `delete_environment` (a protected environment's
-    /// delete, applied as [`Secrets::forget_environment`]).
+    /// delete, applied as [`Secrets::forget_environment`]) or `rotate` (a leaked key's rotation,
+    /// applied as [`Secrets::rotate_leaked`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
 }
 
 /// A request that deletes its environment.
 pub(crate) const DELETE_ENVIRONMENT: &str = "delete_environment";
+/// A request that rotates its one key's managed credential (a leak in an environment that needs
+/// approvals, "When a value leaks"), applied through the rotate path with no grace.
+pub(crate) const ROTATE: &str = "rotate";
 
 #[derive(Debug, Serialize)]
 pub struct GateView {
@@ -196,6 +200,7 @@ fn plan(c: &Conn<'_>, dek: &Dek, env: &EnvRow, items: &[Item]) -> Result<Vec<Ite
         let (what, to_fp) = match (&i.action, &cur) {
             (ItemAction::Delete, None) => return Err(Error::NotFound(format!("no secret {} in {}:{}", i.key, env.slug, i.path))),
             (ItemAction::Delete, Some(_)) => (vec!["deleted".to_string()], None),
+            (ItemAction::Set { value: None, link: None | Some(None), .. }, None) => return Err(Error::BadRequest(format!("{}: a new secret needs a value", i.key))),
             (ItemAction::Set { value, comment, tags, link, expires_at, .. }, cur) => {
                 let fp = match (link, value) {
                     (Some(Some(l)), _) if l.mode != crate::Mode::Managed => Some(dek.fingerprint(&l.fingerprint())),
@@ -486,6 +491,9 @@ impl Secrets {
         if r.action.as_deref() == Some(DELETE_ENVIRONMENT) {
             return self.apply_env_delete(project, slug, r, bypass, &st, caller);
         }
+        if r.action.as_deref() == Some(ROTATE) {
+            return self.apply_rotate(project, slug, r, bypass, &st, caller);
+        }
         let ops: Vec<StoredOp> = serde_json::from_slice(&r.ops).map_err(|_| Error::Internal("a request's operations aren't JSON".into()))?;
         let mut items = Vec::with_capacity(ops.len());
         for (n, o) in ops.iter().enumerate() {
@@ -593,6 +601,65 @@ impl Secrets {
             }
             view(c, &env, load(c, &env, &id)?, &st)
         })
+    }
+
+    /// A leaked key's rotation as a change request, in the leak's write (`c`): the environment, or
+    /// the key's folder, needs approvals, and a rotation is a change like any other there. Its
+    /// one item is the key, `rotated`; nothing is issued until it's applied.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn open_rotate_request(&self, c: &Conn<'_>, project: &str, env: &EnvRow, path: &str, key: &str, by: &Caller, now: i64) -> Result<String> {
+        let id = names::new_id("req", 12);
+        let message = format!("rotate {key}: its value leaked");
+        let item = ItemDiff { key: key.to_string(), path: path.to_string(), kind: SecretType::Shared, what: vec!["rotated".into()], from_fp: None, to_fp: None };
+        let base_seq: i64 = c.query_row("SELECT seq FROM projects WHERE project_id = ?", [project], |r| r.get(0))?;
+        c.execute(
+            &format!("INSERT INTO requests ({COLUMNS}, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, '[]', NULL, ?, ?)"),
+            params![id, env.id, path, message, by.principal, now, base_seq, "[]".as_bytes().to_vec(), json(&[item]), ROTATE, project],
+        )?;
+        let keys = [key.to_string()];
+        let event = crate::events::Event::new(crate::events::Kind::RequestPending, serde_json::json!({ "request": id, "type": "change" }));
+        audit::record_event(c, self.keys()?, project, by, "request.open", Some(&env.slug), Some(path), &keys, &format!("opened {id}: {message}"), now, event)?;
+        let notify: Option<i64> = c.query_row("SELECT 1 FROM environments WHERE id = ? AND notify_url IS NOT NULL", [&env.id], |r| r.get(0)).optional()?;
+        if notify.is_some() {
+            let link = self.web_url.as_ref().map(|w| format!("{}/dashboard/projects/{project}/secrets?env={}", w.trim_end_matches('/'), env.slug));
+            crate::notices::queue(c, project, &env.id, &env.slug, &id, &by.principal, &message, &keys, link, now)?;
+        }
+        Ok(id)
+    }
+
+    /// Apply an approved rotation request: claimed (marked applied) in a write, then rotated
+    /// outside it; a rotation that fails gives the request back as it was.
+    fn apply_rotate(&self, project: &str, slug: &str, r: RequestRow, bypass: bool, st: &Standing, caller: &Caller) -> Result<Request> {
+        let item = from_json::<Vec<ItemDiff>>(&r.items).into_iter().next().ok_or_else(|| Error::Internal("a rotation request names no key".into()))?;
+        let id = r.id.clone();
+        let now = self.db.now_ms()?;
+        self.db.write(|c| {
+            let env = envs::by_slug(c, project, slug)?;
+            let current = load(c, &env, &id)?;
+            if current.state != r.state {
+                return Err(Error::Conflict("conflict", format!("{id} is {} now", current.state)));
+            }
+            let met = crate::folder_policy::satisfied(&request_gates(c, &env, &current)?, &from_json::<Vec<Review>>(&current.reviews), &current.by, st);
+            if !met && !bypass {
+                return Err(Error::Conflict("approval_required", format!("{id} doesn't have the approvals what it changes needs")));
+            }
+            c.execute("UPDATE requests SET state = 'applied' WHERE id = ? AND state = ?", [id.as_str(), r.state.as_str()])?;
+            if bypass && !met {
+                audit::record(c, self.keys()?, project, caller, "approval.bypass", Some(slug), Some(&r.path), &[], &format!("applied {id} without approval"), now)?;
+            }
+            Ok(())
+        })?;
+        match self.rotate_leaked(project, slug, &item.path, &item.key, caller) {
+            Ok(applied) => {
+                let seq = applied.change.map(|c| c.seq);
+                self.db.write(|c| c.execute("UPDATE requests SET applied_seq = ? WHERE id = ?", params![seq, id]))?;
+            }
+            Err(e) => {
+                self.db.write(|c| c.execute("UPDATE requests SET state = ? WHERE id = ? AND state = 'applied'", [r.state.as_str(), id.as_str()]))?;
+                return Err(e);
+            }
+        }
+        self.request(project, slug, &id, caller)
     }
 
     /// Apply an approved request to delete its environment: the environment is kept for the

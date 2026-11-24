@@ -133,6 +133,11 @@ fn databricks_days() -> u16 {
     90
 }
 
+/// An Entra password's lifetime when none is asked for (Microsoft's default: two years).
+const ENTRA_DAYS: u64 = 730;
+/// How long before a vendor ends a key roll rotates it at the latest (health's `expiring` window).
+const EXPIRY_MARGIN_DAYS: u64 = crate::insights::EXPIRING_DAYS as u64;
+
 /// Which of Datadog's keys a registration rotates.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -296,6 +301,24 @@ impl Vendor {
         matches!(self, Vendor::Okta { .. } | Vendor::Auth0 { .. })
     }
 
+    /// Days each key lives at the vendor, when the vendor ends it by itself: GitLab's
+    /// `expires_days`, Databricks' `lifetime_days`, Entra's two years. The rest live until revoked.
+    fn lifetime_days(&self) -> Option<u64> {
+        match self {
+            Vendor::Gitlab { expires_days, .. } => Some(u64::from(*expires_days)),
+            Vendor::Databricks { lifetime_days, .. } => Some(u64::from(*lifetime_days)),
+            Vendor::Entra { .. } => Some(ENTRA_DAYS),
+            _ => None,
+        }
+    }
+
+    /// The longest `rotate_days` a key of `lifetime_days` may have: rotated two weeks before it
+    /// ends (before health's `expiring` would show it, with a weekly `rotate_window`'s wait
+    /// covered), or at half its life when it lives under four weeks. Zero: too short to rotate.
+    fn rotate_within(lifetime_days: u64) -> u64 {
+        if lifetime_days >= 2 * EXPIRY_MARGIN_DAYS { lifetime_days - EXPIRY_MARGIN_DAYS } else { lifetime_days / 2 }
+    }
+
     fn fields(&self) -> Vec<Field> {
         let (secret, id) = match self {
             Vendor::Sendgrid { .. } => ("SENDGRID_API_KEY", "SENDGRID_API_KEY_ID"),
@@ -344,6 +367,10 @@ pub struct SaasRotator {
     pub name: String,
     #[serde(flatten)]
     pub vendor: Vendor,
+    /// When the registered credential itself ends at the vendor (unix ms), as the admin said:
+    /// health warns two weeks before. Only the date; never the credential.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_expires_at: Option<i64>,
     pub created_at: i64,
     pub created_by: String,
 }
@@ -357,6 +384,56 @@ pub struct NewSaasRotator {
     pub target: Json,
     /// Sealed at once; never answered, logged or audited.
     pub credential: Value,
+    /// When `credential` ends at the vendor (unix ms; a GitLab or Databricks token's expiry, an
+    /// Entra client secret's end date), for health's `expiring` and `expired`.
+    #[serde(default)]
+    pub credential_expires_at: Option<i64>,
+}
+
+/// `PATCH …/saas/{id}`: a new name, a replacement credential, or when it ends. The vendor and
+/// target stay (another account is another registration).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SaasRotatorChange {
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The replacement, checked with the vendor as registering checks one, then sealed in the old
+    /// one's place; never answered, logged or audited.
+    #[serde(default)]
+    pub credential: Option<Value>,
+    /// Absent: unchanged, except that a new credential drops the old one's date (it was that
+    /// credential's end); `null`: no date.
+    #[serde(default, deserialize_with = "some")]
+    pub credential_expires_at: Option<Option<i64>>,
+}
+
+fn some<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> std::result::Result<Option<T>, D::Error> {
+    T::deserialize(d).map(Some)
+}
+
+fn check_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.len() > 64 || !name.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c)) {
+        return Err(Error::BadRequest("a SaaS rotator's name is letters, digits, - and _ (64 at most)".into()));
+    }
+    Ok(())
+}
+
+/// The credential as kept: trimmed, one line.
+fn check_credential<'a>(vendor: &Vendor, credential: &'a Value) -> Result<&'a str> {
+    let credential = credential.expose().trim();
+    if credential.is_empty() || credential.len() > 4096 || credential.contains(['\r', '\n']) {
+        return Err(Error::BadRequest(format!("credential is the {} credential roll issues keys with, one line", vendor.name())));
+    }
+    Ok(credential)
+}
+
+fn check_expiry(at: Option<i64>, now: i64) -> Result<()> {
+    if let Some(t) = at
+        && !(now..=names::MAX_TIME).contains(&t)
+    {
+        return Err(Error::BadRequest("credential_expires_at is when the credential ends, a future time in ms since 1970".into()));
+    }
+    Ok(())
 }
 
 /// Bound to the vendor and target too: a row pointed at another host doesn't open.
@@ -443,6 +520,23 @@ impl LinkProvider for Provider {
     fn exclusive_for(&self, r#ref: &str) -> bool {
         self.vendor(r#ref).is_some_and(|v| v.exclusive())
     }
+
+    /// A vendor that ends its keys by itself: the link rotates them before that, or the key
+    /// would stop working at the vendor with nothing in roll noticing.
+    fn check(&self, link: &Link) -> Result<()> {
+        let Some(vendor) = self.vendor(&link.r#ref) else { return Ok(()) };
+        let Some(life) = vendor.lifetime_days() else { return Ok(()) };
+        let v = vendor.name();
+        let most = Vendor::rotate_within(life);
+        if most == 0 {
+            return Err(Error::BadRequest(format!("{v} keys from this rotator end after {life} day: too soon to rotate one before it ends (register it with a longer lifetime)")));
+        }
+        match link.rotate_days() {
+            Some(d) if d <= most => Ok(()),
+            Some(d) => Err(Error::BadRequest(format!("rotate_days is {d}, but {v} ends these keys after {life} days: at most {most}, so roll replaces each one before it stops working"))),
+            None => Err(Error::BadRequest(format!("{v} ends these keys after {life} days: set rotate_days (at most {most}) so roll replaces each one before it stops working"))),
+        }
+    }
 }
 
 // ── the vendors' APIs ──
@@ -517,6 +611,9 @@ fn key_id(vendor: &Vendor, id: String) -> Result<String> {
 pub(crate) fn issue(d: &dyn Deliver, vendor: &Vendor, credential: &Value, label: &str) -> Result<Issued> {
     let label = short(label);
     let step = "issuing a key";
+    let days_ms = |days: u64| now_ms() + days as i64 * 86_400_000;
+    // When the vendor ends the key by itself.
+    let mut expires_at = None;
     let (secret, id): (Value, String) = match vendor {
         Vendor::Sendgrid { scopes } => {
             #[derive(Deserialize)]
@@ -559,11 +656,15 @@ pub(crate) fn issue(d: &dyn Deliver, vendor: &Vendor, credential: &Value, label:
             struct A {
                 key_id: String,
                 secret_text: Value,
+                #[serde(default)]
+                end_date_time: Option<String>,
             }
             let token = token(d, vendor, credential)?;
             let body = Value::new(json!({ "passwordCredential": { "displayName": label } }).to_string());
             let answer = send(d, vendor, step, "POST", &format!("https://graph.microsoft.com/v1.0/applications/{object_id}/addPassword"), &[("authorization", &bearer(&token))], Some((JSON_TYPE, &body)), false)?;
             let a: A = parse(vendor, step, &answer.unwrap_or_default())?;
+            // The end Microsoft gave it (a tenant's policy may shorten the default two years).
+            expires_at = Some(a.end_date_time.as_deref().and_then(utc_ms).unwrap_or_else(|| days_ms(ENTRA_DAYS)));
             (a.secret_text, a.key_id)
         }
         Vendor::Auth0 { domain, app_client_id, .. } => {
@@ -582,9 +683,12 @@ pub(crate) fn issue(d: &dyn Deliver, vendor: &Vendor, credential: &Value, label:
                 id: u64,
                 token: Value,
             }
-            let body = json!({ "name": label, "scopes": scopes, "access_level": access_level, "expires_at": in_days(*expires_days) });
+            let day = in_days(*expires_days);
+            let body = json!({ "name": label, "scopes": scopes, "access_level": access_level, "expires_at": format!("{:04}-{:02}-{:02}", day.year(), u8::from(day.month()), day.day()) });
             let answer = send(d, vendor, step, "POST", &gitlab_tokens(vendor), &[("private-token", credential)], Some((JSON_TYPE, &Value::new(body.to_string()))), false)?;
             let a: A = parse(vendor, step, &answer.unwrap_or_default())?;
+            // GitLab ends it as that day starts (UTC).
+            expires_at = Some(day.midnight().assume_utc().unix_timestamp() * 1000);
             (a.token, a.id.to_string())
         }
         Vendor::Openai { project_id } => {
@@ -651,6 +755,9 @@ pub(crate) fn issue(d: &dyn Deliver, vendor: &Vendor, credential: &Value, label:
             #[derive(Deserialize)]
             struct Info {
                 token_id: String,
+                /// Unix ms; -1 for a token that doesn't end.
+                #[serde(default)]
+                expiry_time: Option<i64>,
             }
             #[derive(Deserialize)]
             struct A {
@@ -660,6 +767,7 @@ pub(crate) fn issue(d: &dyn Deliver, vendor: &Vendor, credential: &Value, label:
             let body = Value::new(json!({ "comment": label, "lifetime_seconds": u64::from(*lifetime_days) * 86_400 }).to_string());
             let answer = send(d, vendor, step, "POST", &format!("https://{host}/api/2.0/token/create"), &[("authorization", &bearer(credential))], Some((JSON_TYPE, &body)), false)?;
             let a: A = parse(vendor, step, &answer.unwrap_or_default())?;
+            expires_at = Some(a.token_info.expiry_time.filter(|t| *t > 0).unwrap_or_else(|| days_ms(u64::from(*lifetime_days))));
             (a.token_value, a.token_info.token_id)
         }
         Vendor::Confluent { owner, resource, environment } => {
@@ -692,7 +800,7 @@ pub(crate) fn issue(d: &dyn Deliver, vendor: &Vendor, credential: &Value, label:
     let id = key_id(vendor, id)?;
     // Auth0 replaced the old secret already: there's nothing to revoke later.
     let handle = if matches!(vendor, Vendor::Auth0 { .. }) { json!({}) } else { json!({ "id": id }) };
-    Ok(Issued { parts: BTreeMap::from([("secret".to_string(), secret), ("id".to_string(), Value::new(id))]), handle })
+    Ok(Issued { parts: BTreeMap::from([("secret".to_string(), secret), ("id".to_string(), Value::new(id))]), handle, expires_at })
 }
 
 /// Revoke a key [`issue`] made; one that's already gone is revoked.
@@ -872,9 +980,27 @@ fn gitlab_tokens(vendor: &Vendor) -> String {
 }
 
 /// The date `days` from now (UTC), as GitLab's `expires_at` takes it.
-fn in_days(days: u16) -> String {
-    let d = (time::OffsetDateTime::now_utc() + time::Duration::days(i64::from(days))).date();
-    format!("{:04}-{:02}-{:02}", d.year(), u8::from(d.month()), d.day())
+fn in_days(days: u16) -> time::Date {
+    (time::OffsetDateTime::now_utc() + time::Duration::days(i64::from(days))).date()
+}
+
+fn now_ms() -> i64 {
+    (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64
+}
+
+/// A UTC time as Microsoft Graph writes it (`2028-11-23T10:24:31.123Z`), as unix ms; `None` for
+/// anything else.
+fn utc_ms(s: &str) -> Option<i64> {
+    let s = s.strip_suffix('Z').unwrap_or(s);
+    let (date, clock) = s.split_once('T')?;
+    let clock = clock.split('.').next()?;
+    let num = |p: &str| p.parse::<u16>().ok();
+    let d: Vec<u16> = date.split('-').map(num).collect::<Option<_>>()?;
+    let t: Vec<u16> = clock.split(':').map(num).collect::<Option<_>>()?;
+    let ([y, m, day], [h, min, sec]) = (d.as_slice(), t.as_slice()) else { return None };
+    let date = time::Date::from_calendar_date(i32::from(*y), time::Month::try_from(u8::try_from(*m).ok()?).ok()?, u8::try_from(*day).ok()?).ok()?;
+    let at = date.with_hms(u8::try_from(*h).ok()?, u8::try_from(*min).ok()?, u8::try_from(*sec).ok()?).ok()?;
+    Some(at.assume_utc().unix_timestamp() * 1000)
 }
 
 /// Datadog's two headers' values from `<API key>:<application key>`.
@@ -899,15 +1025,17 @@ impl Secrets {
     pub fn saas_rotators(&self, project: &str, caller: &Caller) -> Result<Vec<SaasRotator>> {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
-        let rows: Vec<(String, String, String, String, i64, String)> = self.db.read(|c| {
-            Ok::<_, Error>(c.query("SELECT id, name, vendor, target, created_at, created_by FROM saas_rotators WHERE project_id = ? ORDER BY name", [project], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+        // (id, name, vendor, target, credential_expires_at, created_at, created_by)
+        type Row = (String, String, String, String, Option<i64>, i64, String);
+        let rows: Vec<Row> = self.db.read(|c| {
+            Ok::<_, Error>(c.query("SELECT id, name, vendor, target, credential_expires_at, created_at, created_by FROM saas_rotators WHERE project_id = ? ORDER BY name", [project], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
             })?)
         })?;
         rows.into_iter()
-            .map(|(id, name, vendor, target, created_at, created_by)| {
+            .map(|(id, name, vendor, target, credential_expires_at, created_at, created_by)| {
                 let vendor = Vendor::parse(&vendor, serde_json::from_str(&target).unwrap_or(Json::Null))?;
-                Ok(SaasRotator { id, name, vendor, created_at, created_by })
+                Ok(SaasRotator { id, name, vendor, credential_expires_at, created_at, created_by })
             })
             .collect()
     }
@@ -918,14 +1046,11 @@ impl Secrets {
         if self.deliver.is_none() {
             return Err(Error::BadRequest("SaaS rotators aren't on this server".into()));
         }
-        if n.name.is_empty() || n.name.len() > 64 || !n.name.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c)) {
-            return Err(Error::BadRequest("a SaaS rotator's name is letters, digits, - and _ (64 at most)".into()));
-        }
+        check_name(&n.name)?;
         let vendor = Vendor::parse(&n.vendor, n.target)?.checked()?;
-        let credential = n.credential.expose().trim();
-        if credential.is_empty() || credential.len() > 4096 || credential.contains(['\r', '\n']) {
-            return Err(Error::BadRequest(format!("credential is the {} credential roll issues keys with, one line", vendor.name())));
-        }
+        let credential = check_credential(&vendor, &n.credential)?;
+        let now = self.db.now_ms()?;
+        check_expiry(n.credential_expires_at, now)?;
         let dek = self.project(project)?;
         // Asked of the vendor before anything is kept (outside any transaction).
         let deliver = self.deliver.clone().ok_or_else(|| Error::BadRequest("SaaS rotators aren't on this server".into()))?;
@@ -933,19 +1058,94 @@ impl Secrets {
         let id = names::new_id("sas", 16);
         let target = vendor.target().to_string();
         let sealed = dek.seal(&aad(project, &id, vendor.name(), &target), &Value::new(credential));
-        let now = self.db.now_ms()?;
-        let r = SaasRotator { id: id.clone(), name: n.name, vendor, created_at: now, created_by: caller.made_by().to_string() };
+        let r = SaasRotator { id: id.clone(), name: n.name, vendor, credential_expires_at: n.credential_expires_at, created_at: now, created_by: caller.made_by().to_string() };
         self.db.write(|c| {
             if c.query_row("SELECT 1 FROM saas_rotators WHERE project_id = ? AND name = ?", [project, &r.name], |_| Ok(())).optional()?.is_some() {
                 return Err(Error::Conflict("exists", format!("a SaaS rotator named {} exists", r.name)));
             }
             c.execute(
-                "INSERT INTO saas_rotators (id, project_id, name, vendor, target, credential, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                params![id, project, r.name, r.vendor.name(), target, sealed, now, r.created_by],
+                "INSERT INTO saas_rotators (id, project_id, name, vendor, target, credential, credential_expires_at, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![id, project, r.name, r.vendor.name(), target, sealed, r.credential_expires_at, now, r.created_by],
             )?;
             audit::record(c, self.keys()?, project, caller, "saas.add", None, None, &[], &format!("added SaaS rotator {} ({}, {})", r.name, r.vendor.name(), r.vendor.label()), now)
         })?;
         Ok(r)
+    }
+
+    fn saas_rotator(&self, project: &str, id: &str) -> Result<SaasRotator> {
+        type Row = (String, String, String, Option<i64>, i64, String);
+        let row: Option<Row> = self.db.read(|c| {
+            Ok::<_, Error>(
+                c.query_row("SELECT name, vendor, target, credential_expires_at, created_at, created_by FROM saas_rotators WHERE id = ? AND project_id = ?", [id, project], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+                })
+                .optional()?,
+            )
+        })?;
+        let (name, vendor, target, credential_expires_at, created_at, created_by) = row.ok_or_else(|| Error::NotFound(format!("no SaaS rotator {id}")))?;
+        let vendor = Vendor::parse(&vendor, serde_json::from_str(&target).unwrap_or(Json::Null))?;
+        Ok(SaasRotator { id: id.to_string(), name, vendor, credential_expires_at, created_at, created_by })
+    }
+
+    /// Change a registration in place: its name, when its credential ends, or the credential
+    /// itself, checked with the vendor first (outside the write) as registering checks one. Links
+    /// keep working: every issue and revocation from then on, retired keys' included, uses the new
+    /// credential. A credential the vendor refuses changes nothing.
+    pub fn update_saas_rotator(&self, project: &str, id: &str, ch: SaasRotatorChange, caller: &Caller) -> Result<SaasRotator> {
+        caller.need(Action::Admin, &Scope::project(project))?;
+        let deliver = self.deliver.clone().ok_or_else(|| Error::BadRequest("SaaS rotators aren't on this server".into()))?;
+        let dek = self.project(project)?;
+        let r = self.saas_rotator(project, id)?;
+        if let Some(n) = &ch.name {
+            check_name(n)?;
+        }
+        let now = self.db.now_ms()?;
+        if let Some(at) = ch.credential_expires_at {
+            check_expiry(at, now)?;
+        }
+        let target = r.vendor.target().to_string();
+        let sealed = match &ch.credential {
+            Some(credential) => {
+                let credential = check_credential(&r.vendor, credential)?;
+                probe(deliver.as_ref(), &r.vendor, &Value::new(credential)).map_err(|e| Error::BadRequest(format!("roll couldn't use this credential: {e}")))?;
+                Some(dek.seal(&aad(project, id, r.vendor.name(), &target), &Value::new(credential)))
+            }
+            None => None,
+        };
+        // A new credential's end isn't the old one's.
+        let expires_at = ch.credential_expires_at.or(sealed.as_ref().map(|_| None));
+        let mut changed: Vec<&str> = vec![];
+        self.db.write(|c| {
+            changed.clear();
+            // Sealed for this vendor and target: the row must still be the one checked.
+            let row: Option<(String, String, String)> = c.query_row("SELECT name, vendor, target FROM saas_rotators WHERE id = ? AND project_id = ?", [id, project], |x| Ok((x.get(0)?, x.get(1)?, x.get(2)?))).optional()?;
+            let (name, vendor, now_target) = row.ok_or_else(|| Error::NotFound(format!("no SaaS rotator {id}")))?;
+            if vendor != r.vendor.name() || now_target != target {
+                return Err(Error::Conflict("changed", format!("SaaS rotator {name} changed meanwhile: try again")));
+            }
+            if let Some(n) = ch.name.as_ref().filter(|n| **n != name) {
+                if c.query_row("SELECT 1 FROM saas_rotators WHERE project_id = ? AND name = ?", [project, n.as_str()], |_| Ok(())).optional()?.is_some() {
+                    return Err(Error::Conflict("exists", format!("a SaaS rotator named {n} exists")));
+                }
+                c.execute("UPDATE saas_rotators SET name = ? WHERE id = ?", [n.as_str(), id])?;
+                changed.push("name");
+            }
+            if let Some(sealed) = &sealed {
+                c.execute("UPDATE saas_rotators SET credential = ? WHERE id = ?", params![sealed, id])?;
+                changed.push("credential");
+            }
+            if let Some(at) = expires_at
+                && at != r.credential_expires_at
+            {
+                c.execute("UPDATE saas_rotators SET credential_expires_at = ? WHERE id = ?", params![at, id])?;
+                changed.push("credential expiry");
+            }
+            if !changed.is_empty() {
+                audit::record(c, self.keys()?, project, caller, "saas.update", None, None, &[], &format!("changed SaaS rotator {name}'s {} ({}, {})", changed.join(", "), r.vendor.name(), r.vendor.label()), now)?;
+            }
+            Ok(())
+        })?;
+        self.saas_rotator(project, id)
     }
 
     /// Delete a SaaS rotator no key links to and no retired key waits on.
@@ -958,6 +1158,18 @@ impl Secrets {
             crate::rotators::in_use(c, project, KIND, id, &name)?;
             c.execute("DELETE FROM saas_rotators WHERE id = ?", [id])?;
             audit::record(c, self.keys()?, project, caller, "saas.delete", None, None, &[], &format!("deleted SaaS rotator {name}"), now)
+        })
+    }
+
+    /// The project's SaaS rotators whose registered credential ends before `before` (unix ms), as
+    /// (name, vendor, when): health's `expiring` and `expired`.
+    pub(crate) fn saas_credentials_ending(&self, project: &str, before: i64) -> Result<Vec<(String, String, i64)>> {
+        self.db.read(|c| {
+            Ok(c.query(
+                "SELECT name, vendor, credential_expires_at FROM saas_rotators WHERE project_id = ? AND credential_expires_at IS NOT NULL AND credential_expires_at < ? ORDER BY credential_expires_at, name",
+                params![project, before],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
         })
     }
 
@@ -1017,9 +1229,11 @@ mod tests {
         let guid = "11111111-2222-3333-4444-555555555555";
         let entra = Vendor::Entra { tenant: "contoso.onmicrosoft.com".into(), client_id: guid.into(), object_id: guid.into() };
         let token = (200, r#"{"access_token":"tok","token_type":"Bearer","expires_in":3599}"#);
-        let sent = run(vec![token, (200, r#"{"keyId":"k-1","secretText":"entra-secret"}"#), token, (404, "{}")], |d| {
+        let sent = run(vec![token, (200, r#"{"keyId":"k-1","secretText":"entra-secret","endDateTime":"2028-11-23T10:24:31.1234567Z"}"#), token, (404, "{}")], |d| {
             let i = issue(d, &entra, &cred, "label").unwrap();
             assert_eq!((i.parts["secret"].expose(), i.parts["id"].expose()), ("entra-secret", "k-1"));
+            // The end Microsoft gave the password: the key's expiry.
+            assert_eq!(i.expires_at, Some(1_858_587_871_000));
             revoke(d, &entra, &cred, &i.handle).unwrap();
         });
         assert_eq!(sent[0], format!("POST https://login.microsoftonline.com/contoso.onmicrosoft.com/oauth2/v2.0/token [] client_id={guid}&client_secret=c%26s%3D1&scope=https%3A%2F%2Fgraph.microsoft.com%2F.default&grant_type=client_credentials"));

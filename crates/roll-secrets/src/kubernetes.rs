@@ -479,7 +479,7 @@ impl LinkProvider for Provider {
         if let Some(m) = made {
             handle["made"] = json!(m);
         }
-        Ok(Issued { parts, handle })
+        Ok(Issued { expires_at: None, parts, handle })
     }
 
     /// A generated account's objects are deleted (binding, role, account): its tokens end with

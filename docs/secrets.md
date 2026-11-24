@@ -218,9 +218,13 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
 `sdk/terraform-provider-roll` manages roll secrets as code, as Doppler's and Infisical's providers
 do. It speaks the same HTTP API as the CLI and the clients, with a roll token or the operator's.
 
-- **`roll_secrets_environment`** ensures an environment (`PUT …/environments/{env}`) and sets its name
-  and whether it's protected. The policy is only written when `protected` changes, so approvers and
-  a notify URL set in the dashboard stay. Destroying one passes its confirmation.
+- **`roll_secrets_environment`** ensures an environment (`PUT …/environments/{env}`) and sets its name,
+  whether it's protected, and its `approvals` and `approvers`. The policy is only written when one of
+  those changes; approvals and approvers left out of the configuration stay as the dashboard set
+  them, and the notify URL is never touched. Destroying one passes its confirmation.
+- **`roll_secrets_folder_policy`** is a folder's change policy (`PUT …/folder-policies?path=`):
+  `environment`, `path`, `approvals` (1 by default) and `approvers`, changed in place; imported by
+  `prj_…/<environment>/<path without its leading />`.
 - **`roll_secret`** is one key in a folder: a value, or a `link` to a resource on the canvas. On
   refresh it reads the stored value back (`resolve=false`, references as written; the token needs
   `reveal`), so a change made outside Terraform shows in the plan. A key that only shows through a
@@ -259,6 +263,10 @@ do. It speaks the same HTTP API as the CLI and the clients, with a roll token or
   - **`roll_secrets_aws_role`** and **`roll_secrets_aws_user`**: both change in place (`PATCH`),
     except a user's IAM user name.
   - **`roll_secrets_cloud_account`**: `cloud = "gcp"` or `"azure"`, with that cloud's fields.
+  - **`roll_secrets_saas_rotator`**: `vendor`, `target` (JSON, `jsonencode({…})`; roll's defaults
+    and lowercased hosts aren't a change), `credential_wo` and `credential_expires_at` (RFC 3339).
+    Bumping `credential_wo_version` replaces the credential in place (`PATCH …/saas/{id}`), as do a
+    new name and a new date; another vendor or target replaces the registration.
 
   Sinks, Apps and accounts have no `PATCH`, so every attribute replaces them.
 - **Project settings**, imported by `prj_…`:
@@ -1169,7 +1177,10 @@ certificate, a trial token. A secret's optional `expires_at` (ms; set in any wri
 operation, `null` clears it, leaving it out keeps it) records that date. It's versioned like the
 comment, so history, rollback, promote, change requests and backups carry it, and a new value
 keeps the date until someone changes it, except a certificate: a new value holding PEM
-certificates is dated by the earliest `notAfter` among them, unless the write gives a date. Insights add `expires_at` and `expiring` (within 14 days,
+certificates is dated by the earliest `notAfter` among them, unless the write gives a date, and a
+managed key a vendor ends by itself is dated by the vendor's end for each credential roll issues (a
+GitLab token's `expires_at`, a Databricks token's lifetime, an Entra password's `endDateTime`; see
+"SaaS rotators"). Insights add `expires_at` and `expiring` (within 14 days,
 or past); the grid and the environment's list show a clock, with the days left inside two weeks
 and "expired" in red after. The daily notice above lists expiring and expired keys too (names and
 dates only), for any environment with a notify URL, limit or not. Like
@@ -1220,7 +1231,9 @@ policy, as projects made before new ones started with it protected: checks, sand
 untrusted previews may read it and nothing there needs approval; the detail names what reaches it,
 owners, admins and developers who name it by handle, and the checks and sandboxes that resolved it
 in the last 90 days from the audit log; `key` is empty; nothing changes it but an admin, the
-dashboard's "Protect production" setting `{"protected": true, "approvals": 0}`), `expired`, `rotation_failing` (a managed key's scheduled rotation fails: the
+dashboard's "Protect production" setting `{"protected": true, "approvals": 0}`), `expired` (a
+key past its `expires_at`, or a SaaS rotator whose registered credential has ended:
+`environment` empty, `key` its name), `rotation_failing` (a managed key's scheduled rotation fails: the
 database, vendor, product or rotator refused or didn't answer; the detail says why, the old
 credential keeps working, and the sweeper tries again; cleared by the next rotation that works),
 `revoke_failing` (a credential roll retired, or a lease that ended, that it couldn't revoke yet: it
@@ -1231,7 +1244,10 @@ in one run, for an operator's maintenance window, and fails if one does), `missi
 imports and base), `exposed` (a protected value also in an unprotected environment), `public`,
 `weak`, `unplaced` (a key bound to hosts without a `header` or `query`, from before a placement
 was required: a trusted reader's placeholder may ride in any header, and an untrusted consumer's
-doesn't swap; see "Using a key without seeing it"), `expiring`, `certificate_expiring` (a certificate a project CA signed for a CSR that ends
+doesn't swap; see "Using a key without seeing it"), `expiring` (within two weeks: a key's
+`expires_at`, so a vendor's key roll hasn't rotated in time, or a SaaS rotator's
+`credential_expires_at`, listed by its name with `environment` empty, never with the credential),
+`certificate_expiring` (a certificate a project CA signed for a CSR that ends
 within two weeks: links' certificates are replaced by roll, a CSR's only by whoever asked; `key` is
 its names, `path` its CA), `operator_made` (a sync or a workload identity made as the
 operator account: "made by the operator account: re-save to bind it to a person". Before makers
@@ -1363,11 +1379,14 @@ A link is `{kind, ref, field, mode, options}`:
       deploy, or a wake that resolves at runtime, fails;
     - agents sandboxes copying from it: they lose those values;
     - its syncs, which stop: the copies they pushed stay at their targets until removed there;
-    - workload identities and roll-access tokens whose scope names it (their names only for a
-      project admin; anyone else sees that one is there);
+    - workload identities and roll-access tokens whose scope names it and that reach it, judged as
+      reach judges them (a person's own token only within their own projects, so another person's
+      "every project, `staging`" token isn't named here); their names only for a project admin,
+      and anyone else sees that one is there;
   - a protected environment whose policy asks for approvals (`approvals` ≥ 1) is deleted through a
     change request with those approvals and every folder policy in it (`"action":
-    "delete_environment"`, answered 202 `{request}`), exactly as deleting one of its folders is;
+    "delete_environment"`, answered 202 `{request}`; a leaked key's rotation is the other action,
+    `"rotate"`, "When a value leaks"), exactly as deleting one of its folders is;
     applying it (`delete` there) is the delete, and an admin's `bypass` is audited as any other.
     With `approvals: 0` (a new project's `production`) the confirmed delete is direct;
   - one write decides: it checks again that the environment may go (no ephemeral environment based
@@ -1515,7 +1534,7 @@ use stays) and is retried, as any failed rotation or revocation is.
 
 For the vendors below, roll speaks the vendor's own API, so there's no endpoint to write. A project
 registers a vendor credential roll may issue and revoke keys with (`POST …/saas {name, vendor,
-target, credential}`, `admin`; `roll secrets saas add NAME --vendor sendgrid`, the credential on
+target, credential, credential_expires_at?}`, `admin`; `roll secrets saas add NAME --vendor sendgrid`, the credential on
 stdin), and a key linked to it in `managed` mode (`{kind: "saas", ref: "sas_…", field: "secret" |
 "id", mode: "managed"}`, from the dashboard's Link a resource too) gets a fresh vendor secret on
 every rotation. It works as a rotator does: it rotates every `rotate_days` or on demand, and the
@@ -1524,6 +1543,40 @@ the key's or secret's id at the vendor (plain). Keys of one environment linked t
 registration share one issue: linking `TWILIO_API_KEY` to `id` and `TWILIO_API_SECRET` to `secret`
 gives one Twilio key. Each rotation is `rotation.succeeded` on the events feed, and a scheduled one
 the vendor refuses is `rotation.failed` (and `rotation_failing` in health), as for every managed key.
+
+**Keys a vendor ends by itself rotate before that.** GitLab ends each token after `expires_days`,
+Databricks after `lifetime_days`, and Entra a password after Microsoft's two years. A link to one
+of those needs `rotate_days`, at most the lifetime less 14 days (half the lifetime below 28 days),
+refused at link time otherwise (`gitlab ends these keys after 90 days: set rotate_days (at most
+76)…`). The margin is health's `expiring` window: a rotation on schedule (a weekly `rotate_window`'s
+wait included) replaces each key before health would warn of it, so `expiring` on such a key means
+its rotation is late or failing. Each issued key carries the vendor's end as its `expires_at` (the
+day GitLab ends the token, as that day starts in UTC; Databricks' `expiry_time`; Entra's
+`endDateTime`, which a tenant's policy may make shorter than two years), so health lists it under
+`expiring` two weeks before and `expired` after, like any dated key. A lifetime too short to rotate
+in (one day) is refused at link time. Okta's client secrets, and the other vendors' keys, live
+until revoked.
+
+**The registered credential ends too.** A GitLab access token, an Entra client secret and a
+Databricks token roll signs in with all have an end date of their own. Give it as
+`credential_expires_at` (ms; `--credential-expires YYYY-MM-DD` on the CLI, "Credential expires" in
+the dashboard; a date in the past is refused) and health lists the registration under `expiring`
+two weeks before (`its gitlab credential expires 2026-12-03: after that roll can't issue or revoke
+its keys`) and `expired` after, by name: never the credential. The list answers the date.
+
+**Replacing the credential in place.** Before it ends, give the registration a new one: `PATCH
+…/saas/{id} {credential?, credential_expires_at?, name?}` (`admin`; `roll secrets saas update
+sas_… --credential-stdin --credential-expires 2027-12-31`, the credential on stdin; the key button,
+"Replace credential", in the dashboard). A new credential is checked with the vendor exactly as
+registering checks one (below), outside any transaction, then sealed bound to the registration's
+vendor and target and swapped in by one write. One the vendor refuses is a 400 that changes nothing:
+the old credential stays in use. Keys linked to the registration keep working, and every issue and
+revocation from then on (a retired key's, after its grace period, included) uses the new one. The
+vendor and target never change in place: another account is another registration. A new credential
+without `credential_expires_at` has no end date (the old date was the old credential's); `null`
+clears the date. Each change is one `saas.update` row in the audit log naming what changed (name,
+credential, credential expiry), never the value. It's not an event on the feed: `access.changed` is
+about who may change what (an environment's protection, a folder's policy), and nothing else fits.
 
 Registering checks the credential with the vendor first, read only, so a credential the vendor
 refuses, or one that can't manage keys, is refused at once (400, naming the vendor and the status)
@@ -1563,14 +1616,17 @@ instead of at the first rotation:
   so a second environment linking the same registration is refused (409 `in_use`): register the
   app once per environment, or link one environment. Okta also refuses a new secret while the app
   already has two; a rotation then fails and shows in health.
-- Entra passwords get Microsoft's default lifetime (two years); set `rotate_days` below it.
+- Entra passwords get Microsoft's default lifetime (two years, or less where the tenant's policy
+  says): a link rotates within 716 days, and each key's `expires_at` is the `endDateTime` Microsoft
+  answered.
 - **GitLab tokens are made new, not rotated in place.** GitLab's rotate endpoint
   (`POST …/access_tokens/{id}/rotate`) revokes the old token the moment it answers, so every
   consumer still holding it would fail until it reloads. roll makes a new token with the same
   scopes and role instead, and revokes the old one after `grace_minutes`, as for every other
   vendor. Each token is a new bot member of the project or group, which GitLab removes with the
   token. A token expires after `expires_days` (GitLab needs a date; an instance may cap it lower
-  than 365): set `rotate_days` below it. `host` is a hostname (no IP literal, no port).
+  than 365): a link's `rotate_days` is at most `expires_days` less 14 (351 by default). `host` is a
+  hostname (no IP literal, no port).
 - **OpenAI keys belong to service accounts.** Each rotation adds a service account to the project
   and keeps its key; revoking deletes the account, which ends the key. For a key that leaked,
   rotate it, then end the retired key's lease (`DELETE …/leases/{id}`, or Revoke in the
@@ -1589,8 +1645,8 @@ instead of at the first rotation:
   cloud takes them, and every consumer (the CLI, SDKs, JDBC/ODBC, `DATABRICKS_TOKEN`) uses one
   as is; a service principal's OAuth secret is account-level, and each consumer must exchange it
   for a token. A new token belongs to the credential's identity, so register a service principal's
-  token. Each lasts `lifetime_days` (a workspace may cap it lower): set `rotate_days` below it.
-  `host` is a hostname (no IP literal, no port).
+  token. Each lasts `lifetime_days` (a workspace may cap it lower): a link's `rotate_days` is at
+  most `lifetime_days` less 14 (76 by default). `host` is a hostname (no IP literal, no port).
 - **Confluent: link `CONFLUENT_API_KEY` to `id` and `CONFLUENT_API_SECRET` to `secret`.** They
   share one key, and a new one can take a moment to work on a cluster: keep `grace_minutes` above
   a few minutes.
@@ -2408,7 +2464,17 @@ Other roll products get tokens from the same issuer, in process only (no route s
 `Secrets::issue(subject, aud, ttl)`. The first is roll apps: each instance of a service gets one
 (as Vercel's OIDC federation gives each deployment), so an app logs in to a cloud, or to roll
 secrets, with no key of its own (docs/apps/README.md; apps delivers the token to its instances).
-- **Subjects.** `Subject::App {project, service, env}` is `sub =
+- **Subjects.** `Subject::Preview {project, preview, service}` is a preview's own service's (roll
+  previews' `roll.toml` services, docs/previews.md): `sub = roll-previews:<project>:<preview>:<service>`,
+  in the preview's environment (`pv-<id>`), with the claims `project`, `preview_id`, `service`,
+  `environment` and `preview: true`. Its prefix is never an app's, so a trust on an app's subject
+  can't match a preview; roll writes no trust that matches every preview of a service (a customer
+  who wants one writes a condition on `roll-previews:<project>:*:<service>` themselves). It's
+  refused here for an untrusted preview, decided from its environment's own `trusted`, and for any
+  environment that isn't a preview's (a standard one named `pv-…` gets none); rolld's
+  `PreviewIssuer` asks that the project stands for the service's repo; each issue is audited as
+  `preview:<preview>:<service>`, never the token (`a_previews_service_gets_a_token_of_its_own_and_a_forks_none`).
+  `Subject::App {project, service, env}` is `sub =
   roll-apps:<project>:<service>:<env>`, plus the claims `project`, `service` and `environment` for
   clouds' attribute mapping (GCP's `attribute.service = assertion.service`; AWS and Azure match
   `sub`). The project and the service are ids (a-z, 0-9,
@@ -2637,7 +2703,8 @@ TLS certificates for services (mTLS between them), with no CA to run.
   certificate (`GET …/cas`, `roll secrets cas cert NAME`) is what clients trust. It carries name
   constraints: only its domains, and IP addresses only where allowed (otherwise excluded), so a
   client that trusts it trusts nothing else.
-- The link kind `pki` has `certificate`, `private_key` and `ca` (one credential, PEM), with the
+- The link kind `pki` has `certificate`, `private_key`, `ca` and `ca_chain` (one credential, PEM; `ca_chain`
+  is the issuing CA's certificate and every one above it up to the root), with the
   certificate's names in `options.names` (a list, or comma-separated; the dashboard's Link dialog
   asks): DNS names under the CA's domains, a wildcard one level under one, or IP addresses where
   allowed; anything else is refused, naming the domains. `dynamic` gives each lease its own
@@ -2654,7 +2721,7 @@ TLS certificates for services (mTLS between them), with no CA to run.
   read) are taken: usages, lifetime (30 days, or the CA's `max_days` if shorter, by default; 5
   minutes to `max_days`) and everything else are the CA's own, whatever the CSR asks (being a CA
   itself, signing code). The CSR's key must match its signature (a P-384 key signed with SHA-384,
-  not SHA-256). It answers `{certificate, ca, serial, names, not_after}`. Checked with
+  not SHA-256). It answers `{certificate, ca, ca_chain, serial, names, not_after}`. Checked with
   OpenSSL's CSRs (P-256 and RSA): `openssl verify -x509_strict` passes against the CA.
 - Every certificate a CA signs is listed until it expires (`GET …/cas/{id}/certificates`: serial,
   names, `csr`, `link` or `acme`, its end, who asked, when it was revoked; `roll secrets cas certs NAME`).
@@ -2686,6 +2753,29 @@ TLS certificates for services (mTLS between them), with no CA to run.
   it expires. One CA keeps at most 10,000 certificates from CSRs valid at once. Serials are
   random, positive and never start with a zero byte, so the serial a client shows is the one to
   revoke.
+- **An intermediate under the customer's own root**, as Infisical and Vault chain theirs, for a
+  team whose root stays offline or in AWS Private CA: `POST …/cas {…, intermediate: true}` (`roll
+  secrets cas add NAME --domain svc.internal --intermediate`, which writes the CSR to stdout or
+  `--csr FILE`) makes the key exactly as for a root and answers `status: "pending"` with a `csr`
+  (PEM): the CA's subject, `CA:TRUE` with a path length of 0, `keyCertSign` and `cRLSign`, and its
+  name constraints. A pending CA signs nothing (links, CSRs, ACME, CRL and OCSP all refuse).
+  `PUT …/cas/{id}/chain {certificate, chain?}` (admin, audited; `roll secrets cas chain NAME
+  cert.pem [--chain chain.pem]`) installs what the root signed: `certificate` is the CA's own,
+  `chain` every certificate above it up to and including the self-signed root, in any order (10 at
+  most; 64 KiB and 256 KiB). It's taken only if the certificate carries the CA's key, is a CA's
+  (`basicConstraints CA:TRUE`, `keyCertSign` and `cRLSign`, since roll signs its leaves' CRLs), is
+  valid now, and verifies through certificates that are CAs, valid now and allow the path's length,
+  up to a self-signed root. Name constraints are taken as signed: the CA's domains narrow to what
+  the certificate and every issuer below the root permit (a root that signs `prod.svc.internal`
+  for a CA asked for `svc.internal` gives a CA for `prod.svc.internal`), IP addresses stay only if
+  every one is permitted, and what a policy can't say (part of a domain excluded, subject-name
+  limits) is refused. The same route renews an active intermediate (the same key, a new
+  certificate; it only narrows). Every certificate it issues answers `ca_chain` (the link field
+  `ca_chain`, `TLS_CA_CHAIN`; `…/sign`'s answer; ACME serves the leaf then the chain), and never
+  outlives it: links and CSRs are clamped to its end, a CSR asking for longer is refused naming
+  the date, and a managed link's `rotate_days` is at most half of `max_days` or of what's left of
+  the intermediate, whichever is shorter. CRLs and OCSP stay roll's, signed by the intermediate.
+  Checked with webpki: a leaf verifies against the root through roll's intermediate.
 
 ### ACME
 Each CA is an ACME server (RFC 8555), as Vault's PKI is: cert-manager, certbot, Caddy and lego get
@@ -3308,9 +3398,10 @@ cluster, instead of a key pasted into it: the Inference tab's "A roll secret", o
   copied count: a key of the folder that doesn't resolve for an untrusted read (`${production.X}`,
   production being protected, or a reference to a deleted environment) stops nothing that didn't
   copy it, and a copied one that doesn't resolve is left unset and named with why
-  (`secrets_unset`). An environment deleted but still in its recovery window holds the sandbox's
-  create and start (they wait), so recovering it brings the values back; once it's purged, the
-  sandbox starts without them (`secrets_dropped`). A sandbox made before
+  (`secrets_unset`). An environment deleted but still in its recovery window, or one of a project
+  deleted but still in its window, holds the sandbox's create and start (they wait), so recovering
+  it brings the values back; once it's purged or the window has closed, the sandbox starts without
+  them (`secrets_dropped`). A sandbox made before
   `secrets_from` was kept only has its maker asked whether they can still act (`maker_acts`), and
   keeps what it was made with; delete it and make another to get fresh reads
   (docs/code/http-api.md, "Sandboxes").
@@ -3378,6 +3469,59 @@ the change`. The blocker names keys and environments, never the value or the lin
 - **Way around.** Rotate the secret and remove the value from the change. For a false positive, an
   admin lands with `bypass` (on a queue repo, the queue bypass; on a direct-land repo, the bypass of
   review rules, which now covers `secret_leak` too), audited as `secret_leak_bypass`.
+
+#### When a value leaks
+
+A value found where it shouldn't be is a leak whether or not the change ever lands: the change is
+pushed, and whoever can read the repo has it. roll's own tokens are revoked when they leak
+(`Access::revoke_leaked`). A *managed* key (a link roll issues and rotates: a database login, an
+IAM user's keys, Atlas, Snowflake, the SaaS rotators) can be rotated by roll too, since roll
+holds its rotator. Rotating one is what GitGuardian's remediation playbooks and AWS + GitGuardian's
+webhook design do.
+
+- **What counts as found.** A roll code change's added lines and a repo scan ("Leaked secrets don't
+  land"), and `POST …/leaks` with `leaked: true` (the caller's text was published: a paste, a
+  public repo, an outside scanner's report; it matches only values the caller may reveal). A plain
+  scan (`roll secrets scan`, a pre-commit hook, roll MCP's guard) is text that hasn't left yet, so
+  it reports values and never rotates. GitHub's secret scanning reports only roll's own token
+  formats, which roll-access revokes. A live link stores no value, so its value can't be matched in
+  text. Its resource's credential is rotated through the same route (`…/rotate`), by hand.
+- **The event.** Each folder that leaked gets `secret.leaked` in the project that holds the value.
+  It goes out once a day for the same keys and place, and also whenever a rotation starts. It
+  carries `rotatable: true` when roll can rotate one of the keys, meaning a shared managed link.
+  A person's personal value, a plain value, and a live or dynamic link are never rotatable.
+- **`leaks.rotate`, a project setting** (`PATCH /v1/secrets/projects/{project}
+  {leaks: {rotate}}`, an admin's, audited as `leaks.rotate`; Settings, "Leaked keys"):
+  - **`off`** (the default, and every existing project's): nothing rotates. The change's
+    `secret_leak` blocker lists where the key can be rotated (`rotate: [{environment, folder}]`),
+    and the dashboard gives it a Rotate button. The button calls `…/secrets/{key}/rotate` as the
+    person who clicks it, with their own rights (`write` there).
+  - **`managed`:** each leaked managed credential rotates at once, through the same rotate path as
+    `…/rotate` and the schedule, with **no grace**. The leaked value is the old one, so the old
+    credential is retired now and revoked as soon as the new one is stored. A failed revoke goes to
+    the sweeper and is retried a minute later. Whatever still holds the old value stops working
+    until it reads again.
+- **Where approvals are needed.** A leak never rotates a key in an environment, or a folder, that
+  needs approvals (a protected environment with `approvals` ≥ 1, or a folder policy). Instead it
+  opens a change request for the rotation (`action: "rotate"`, its one item the key, `rotated`),
+  and the event says so (`requests`). Nothing is issued until the request is applied with its
+  approvals. Applying it rotates the key with no grace, as above. A rotation that fails then leaves
+  the request as it was.
+- **Once.** A credential is claimed in `leak_rotations` (by environment and credential id) in the
+  same write as the event, before anything is issued. So one leak rotates it once, on one node,
+  however often the change is read again. After the rotation the stored value differs, so the old
+  one no longer matches. A rotation that failed, or whose node stopped, is claimed again when the
+  same value is found an hour later or more. A rotation waiting in a change request isn't: its
+  reviewers decide.
+- **Audit and events.** The rotation is `secrets.rotation_succeeded` by `roll:leaks`, with
+  `rotation.succeeded` carrying `via: "leak"` and `grace_minutes: 0`, and the value change before
+  it is `secret.changed` via `rotation`. A failure is `secrets.rotation_failed`, with
+  `rotation.failed` `{reason, via: "leak"}`, and health's `rotation_failing` until a rotation
+  works. Events, logs and errors name keys, folders and the provider's step, never a value.
+- **Default for new projects.** `off`. A rotation with no grace cuts every consumer that hasn't
+  read the new value. A change that's blocked from landing has leaked only to the repo's readers,
+  so the team's call is often right there. A project whose repos are public, or whose consumers
+  re-read on a change (`roll run --watch`, the SDKs' watchers, roll apps), should turn it on.
 
 #### Credentials roll doesn't hold
 
@@ -3911,6 +4055,8 @@ through roll's server) and imported as one change:
 DOPPLER_TOKEN=dp.st…  roll secrets import --from doppler --source shop/prd -e production
 VAULT_ADDR=https://vault.example VAULT_TOKEN=hvs…  roll secrets import --from vault --source secret/shop -e production
 INFISICAL_TOKEN=…  roll secrets import --from infisical --source <workspace id>/prod/api -e production
+DOPPLER_TOKEN=dp.st…  roll secrets import --from doppler --source shop --all-environments --create-environments --dry-run
+INFISICAL_TOKEN=…  roll secrets import --from infisical --source <workspace id> --all-environments --recursive --map prod=production
 VAULT_ADDR=… VAULT_TOKEN=…  roll secrets import --from vault --source secret/shop --recursive -e production
 roll secrets import --from aws --source prod/shop/ -e production      # your aws CLI's profile or SSO
 ```
@@ -3978,6 +4124,51 @@ Doppler config, a Vault path, an Infisical environment) into its roll environmen
 each, reported per environment. The dashboard's import dialog shows these commands, since a browser
 can't call the other manager's API. Doppler's own `DOPPLER_*` keys are left out; numbers and booleans come in as their text. Hosts
 come from the managers' own settings (`DOPPLER_API_HOST`, `VAULT_ADDR`, `INFISICAL_API_URL`).
+
+#### Doppler and Infisical: structure, references and comments
+
+Doppler and Infisical come in with their structure, not only their values:
+
+| | Doppler | Infisical |
+| --- | --- | --- |
+| Reads | `GET /v3/configs/config/secrets` (each key's `raw` value and `note`; dynamic and Doppler's managed secrets left out) | `GET /api/v3/secrets/raw` with `expandSecretReferences=false` per folder, `GET /api/v2/folders`, `GET /api/v2/secret-imports` |
+| Environments | `--all-environments`: every config `GET /v3/configs` lists | `--all-environments`: every environment the project lists (`GET /api/v1/projects/{id}`; older servers' `/api/v1/workspace/{id}`) |
+| Folders | none (a config is flat) | the source's folder; `--recursive`: every folder under it, each into its own folder under `--path` (8 levels, 2,000 folders at most). Without it, the folders under it are reported as left out. |
+| Comments | a key's note → its comment | a key's comment → its comment |
+| Imports | none | secret imports → folder imports ("Imports"), in reverse order (Infisical's bottom-most import wins, roll's first). A replication (it copies values), and an import of an environment or folder that isn't imported in this run, are reported and left out. |
+
+- **Environments.** `--all-environments` puts each into the `--map` entry naming it, else into the
+  roll environment of its own name, lowercased with `_` as `-` (`dev_api` → `dev-api`). A roll
+  environment that doesn't exist stops the import before anything is written, naming it, unless
+  `--create-environments` creates it. With `--map` or `--all-environments`, `--source` is the
+  project alone (Doppler's project, Infisical's workspace id).
+- **References stay references.** Values are read raw, so a value that follows another key still
+  follows it in roll, instead of being a copy of what it computes to today:
+
+  | Doppler | Infisical | roll |
+  | --- | --- | --- |
+  | `${KEY}` | `${KEY}` | `${KEY}` (the same folder) |
+  | `${CONFIG.KEY}`, or `${PROJECT.CONFIG.KEY}` naming this project | `${env.KEY}`, `${env.folder.sub.KEY}` | `${target.KEY}` or `${target.folder.KEY}`: the roll environment that config or environment goes into in this run, and the folder where it lands under `--path` |
+  | `${PROJECT.CONFIG.KEY}` of another project | `${@project.env.KEY}` | none: roll references stay in their project |
+
+  A reference roll can't hold (another project, an environment not imported in this run, a folder
+  outside the imported one, a `$` right before it) is never dropped: that key comes in as the value
+  it computes to today (Doppler's `computed`, Infisical's expanded value), and the import names the
+  key and the reason, never the value. Text roll would read as a reference is written `$${…}`, so
+  it stays text. A reference into another environment needs `reveal` there, as any does.
+- **Read before written.** Every environment and folder is read before anything is written. A key
+  the token can't read (Doppler's `restricted`, Infisical's hidden values) stops it, naming the
+  key; Infisical's personal overrides are left out. Each answer is read up to 16 MiB, with no
+  redirects, so a token never goes to another host, self-hosted Infisical included. At most 50
+  environments and 10,000 keys at once.
+- **Writes.** Each folder is one change through the same import as a file, so a protected
+  environment refuses it, or opens a change request with `--request`. Folder imports are added
+  after the folder's own (never replacing them), and on a protected environment only an admin sets
+  them.
+- **`--dry-run`** prints the tree: each environment and where it goes (`(new)`, or missing), each
+  folder with its key names, which keys become references and to what, which come in as their
+  current value and why, each folder import, and what's left out. Names only, never a value. It
+  writes nothing and creates no environment.
 
 ```
 infisical export --env=prod --format=json > prod.json   &&  roll secrets import prod.json -e production
@@ -5575,6 +5766,13 @@ webhooks, with a `project` argument; docs/mcp.md, "Events"). It answers
 answers `{events: [], next}` at the head, for a follower that starts from now. `limit` is 1–500
 (default 100).
 
+The dashboard's Events tab (`components/secrets/events.tsx`, `lib/secrets-events.ts`) is a person's
+view of it. It opens at `?latest=1` and polls after that `next` every 5 s while it's in view,
+following each `next` as answered. The feed only reads forward, so the tab goes back by windows of
+chain rows before the oldest row it holds: `after=hi-w` up to `hi`. A window of 500 rows or fewer is
+answered whole. A wider one whose `next` falls short of `hi` is narrowed and read again, so no
+events are skipped. The kind chips and the environment filter are `kinds=` and `environment=`.
+
 **The cursor.** An event is an audit row that carries one (`audit.event`, `audit.event_data`), so
 `seq` is the row's number in the project's chain ("Tamper evidence"): taken from `audit_heads` in
 the row's own write, under the head's row lock (on Postgres a second writer waits for it, or loses a
@@ -5621,10 +5819,10 @@ roll-workspace's records, not secrets' audit rows: they're the workspace's own f
 | --- | --- | --- |
 | `secret.changed` | a change added, changed, linked or rotated stored values (a change that only edits comments, tags or expiry isn't one) | `via`, `change` (its number in the history), `version` (one key) or `versions` (`{key: version}`), `keys` when the row names more (the change's other keys only had their metadata edited or were deleted), `deleted` (keys the same change deleted), `folders` (a change across folders) |
 | `secret.deleted` | a change only deleted keys (a folder's delete too) | `via`, `change`, `version` or `versions` (the delete's), `folders` (a change across folders) |
-| `secret.leaked` | a stored value turned up in a roll code repository (a change's added lines or a scan; in the project holding the value, once a day for the same keys and repo), or GitHub's secret scanning found a placeholder (`secrets.placeholders.end`) | `repo` (and `project`, the repo's, when the value came from another's shared folder), or `placeholder`, `consumer`, `reason` |
+| `secret.leaked` | a stored value turned up in a roll code repository (a change's added lines or a scan) or in text reported published (`POST …/leaks` with `leaked: true`), in the project holding the value, once a day for the same keys and place and whenever a rotation of them starts ("When a value leaks"); or GitHub's secret scanning found a placeholder (`secrets.placeholders.end`) | `repo` (and `project`, the repo's, when the value came from another's shared folder) or `reported: true`, with `rotatable` (roll can rotate one of the keys), `rotating` (the keys `leaks.rotate = managed` rotates now) and `requests` (the change requests opened for their rotation where approvals are needed); or `placeholder`, `consumer`, `reason` |
 | `scan.finding` | `roll secrets scan` or roll MCP's credential guard (`POST …/leaks`) matched values: a row per folder | `candidates`, `matched`, `guard` |
-| `rotation.failed` | a managed key's scheduled rotation failed: once as a failing run starts (health's `rotation_failing` until one works) | `reason` |
-| `rotation.succeeded` | a rotation worked, scheduled or `--now`: a managed key's new credential (the row right after its `secret.changed` via `rotation`, in the same transaction), or a live link's resource credential reset | `mode` (`managed` or `live`), `scheduled`, `version` and `change` (managed), `sharing` (the keys holding the same credential, when more than one) |
+| `rotation.failed` | a managed key's scheduled rotation failed: once as a failing run starts (health's `rotation_failing` until one works); a leaked key's rotation failed | `reason`, `via: "leak"` (a leak's) |
+| `rotation.succeeded` | a rotation worked, scheduled, `--now` or for a leak: a managed key's new credential (the row right after its `secret.changed` via `rotation`, in the same transaction), or a live link's resource credential reset | `mode` (`managed` or `live`), `scheduled`, `version` and `change` (managed), `sharing` (the keys holding the same credential, when more than one), `via: "leak"` and `grace_minutes: 0` (a leak's: the leaked credential revoked at once) |
 | `request.pending` | a change request or a secret request opened | `request`, `type` (`change` or `value`), `expires_at` (a secret request's) |
 | `request.decided` | a change request approved or rejected (once its state moves) or closed; a secret request answered or cancelled | `request`, `type`, `state` |
 | `sync.failed` | a sync's push failed | `sync`, `target`, `reason` |
@@ -5814,8 +6012,8 @@ isn't in the workspace is 404.
 | --- | --- | --- |
 | `GET /v1/secrets/health` | | `{ok, key: "env"\|"kms"\|"file"\|"shares"\|"missing", resealed: "all"\|number\|null, customer_managed, issuer_pulled: {kid, pulled_at, detail}[], links: string[], syncs: string[]}` (`links`, `syncs`: the kinds registered; `issuer_pulled`: issuer keys an emergency rotation pulled in the last 30 days) |
 | `GET`, `POST /v1/secrets/unseal` | `{share}` (`POST`) | `{sealed, have?, need?, error?}`: a sealed node's progress (public; see "Starting sealed"); 429 with `Retry-After` past the limits |
-| `GET` | | `{project, environments: Environment[], previews: number, history_days: number \| null, validity_checks: "on" \| "off", deletion: {window_days, holds: string \| null}}` (`deletion`: what deleting the workspace project takes with it, as its refusal says it, and how many days it stays recoverable) |
-| `PATCH` | `{history_days?, validity_checks?: "on" \| "off"}` | what changed, as given (`admin`; validity checks audited as `validity.checks`) |
+| `GET` | | `{project, environments: Environment[], previews: number, history_days: number \| null, validity_checks: "on" \| "off", leaks: {rotate: "managed" \| "off"}, deletion: {window_days, holds: string \| null}}` (`deletion`: what deleting the workspace project takes with it, as its refusal says it, and how many days it stays recoverable; `leaks.rotate`: "When a value leaks") |
+| `PATCH` | `{history_days?, validity_checks?: "on" \| "off", leaks?: {rotate: "managed" \| "off"}}` | what changed, as given (`admin`; validity checks audited as `validity.checks`, leak rotation as `leaks.rotate`) |
 | `GET /grid?path=` | | `Grid` |
 | `GET /environments` | | `Environment[]` in order |
 | `POST /environments` | `NewEnvironment` | 201 `Environment` |
@@ -5847,7 +6045,7 @@ isn't in the workspace is 404.
 | `PUT /environments/{env}/exports?path=` | `{project}[]` | `Export[]` (admin) |
 | `GET /environments/{env}/secrets?path=` | | `Secret[]` (own, imported, inherited; no values) |
 | `GET /environments/{env}/secrets/{key}?path=&type=` | | `Secret` |
-| `PUT /environments/{env}/secrets/{key}?path=` | `SetSecret` | `Written`; 409 `stale` when `if_version` isn't the key's version |
+| `PUT /environments/{env}/secrets/{key}?path=` | `SetSecret` | `Written`; 409 `stale` when `if_version` isn't the key's version; without `value` (or `link`) it only changes a key already at that path and type, else a 400 "a new secret needs a value" (`""` is a value; a batch's sets too) |
 | `DELETE /environments/{env}/secrets/{key}?path=&type=&if_version=` | | `Written`; 409 `stale` when `if_version` isn't the key's version |
 | `GET /environments/{env}/secrets/{key}/value?path=&resolve=` | | `{value, problems}` |
 | `POST /environments/{env}/decoys` | `NewDecoy` | 201 `Secret` (admin, signed in or the operator; 403 for any token; a new key, never its value; 409 `exists` when the key is there; "Decoys") |
@@ -5920,7 +6118,7 @@ isn't in the workspace is 404.
 | `DELETE /audit/sinks/{id}` | | 204 |
 | `GET /v1/secrets/findings` | | `{project, project_name, findings: Finding[]}[]`: every project's findings the caller may read, projects with none left out |
 | `GET /health?code=` | | `Finding[]`, worst first: every standard environment's findings the caller may read (`read` on the project) |
-| `POST /leaks` | `{candidates: string[]}` (at most 20,000); header `X-Roll-Guard: 1` from a credential guard (roll MCP's check of what a tool call would write), audited as `secrets.guard` instead of `secrets.scan`; rolld keeps the header only on a request roll MCP's guard tool makes in process, and removes anyone else's | `{index, key, environment, path}[]`: candidates that are values the caller may reveal (`read` on the project) |
+| `POST /leaks` | `{candidates: string[], leaked?: boolean}` (at most 20,000; `leaked`: the text was published, so what it matches is a leak, answered as in "When a value leaks", 400 with the guard header); header `X-Roll-Guard: 1` from a credential guard (roll MCP's check of what a tool call would write), audited as `secrets.guard` instead of `secrets.scan`; rolld keeps the header only on a request roll MCP's guard tool makes in process, and removes anyone else's | `{index, key, environment, path}[]`: candidates that are values the caller may reveal (`read` on the project) |
 | `POST /validity` | `{credentials: {value, pair?}[]}` (at most 200; `pair`: an AWS access key id's secret access key) | `{validity_checks: "on" \| "off", results: Checked[]}`, one per credential in order (`write` on the project); while checks are off, `results` is empty and nothing is asked. `Checked` is `{fingerprint, kind, result: "live" \| "invalid" \| "unknown", account?, checked_at?, why?, rotator?: "aws-iam" \| "github-app"}` ("Is it live?") |
 | `GET /unstored/{fingerprint}` | | `Checked`: a credential's last check (`read`; 404 when it hasn't been checked) |
 | `GET /kms` | | `{key: string \| null}`: the customer-managed key wrapping the project's data key (admin) |
@@ -5941,8 +6139,9 @@ isn't in the workspace is 404.
 | `PATCH /rotators/{id}` | `{name?, url?}` | `Rotator` (`admin`; a new URL is checked first) |
 | `POST /rotators/{id}/rotate-secret` | | `Rotator & {secret}` (`admin`; the new signing secret, shown once) |
 | `GET /saas` | | `SaasRotator[]` (`read` on the project; never the credential) |
-| `POST /saas` | `{name, vendor, target, credential}` | 201 `SaasRotator` (`admin`; never the credential) |
+| `POST /saas` | `{name, vendor, target, credential, credential_expires_at?}` (`credential_expires_at`: when the credential ends at the vendor, ms, in the future) | 201 `SaasRotator` (`admin`; never the credential; `credential_expires_at` when given) |
 | `DELETE /saas/{id}` | | 204; 409 while a key links to it or a retired key waits (`admin`) |
+| `PATCH /saas/{id}` | `SaasRotatorChange` | `SaasRotator` (`admin`; a new `credential` is checked with the vendor first, read only, and a refused one is a 400 that changes nothing; never the credential) |
 | `GET /outside-databases` | | `OutsideDatabase[]` (`read` on the project; never the URL) |
 | `POST /outside-databases` | `{name, url, roles?: [a, b], group?, ca?, gateway?}` | 201 `OutsideDatabase` (`admin`; connects and checks the roles first: 400 with the server's reason) |
 | `DELETE /outside-databases/{id}` | | 204; 409 while a key links to it or a retired password waits (`admin`) |
@@ -5976,14 +6175,15 @@ isn't in the workspace is 404.
 | `GET /v1/secrets/audit/jwks` | | `{keys, legacy, pulled}` (public): the audit log's digest keys (Ed25519 JWKs, retired ones too, never pulled ones), the issuer keys whose legacy digests count (RSA JWKs), and `[{kid, pulled_at}]` for keys pulled in an emergency, either kind. What `audit verify --file` takes |
 | `POST /v1/secrets/audit/key/rotate` | `{now?, retire?}` | `{kid, pulled, signed}` (the operator's): a new digest key signs now and the previous one retires. `{now: true, retire: kid}` (both or neither): `kid` is pulled too, and every project's chain is signed under the new key before the answer (`signed`, how many); 404 for a kid not roll's or pulled already |
 | `GET /cas` | | `Ca[]` (`read` on the project; certificates, never keys) |
-| `POST /cas` | `{name, domains, allow_ip?, max_days?}` | 201 `Ca` (`admin`) |
+| `POST /cas` | `{name, domains, allow_ip?, max_days?, intermediate?}` | 201 `Ca` (`admin`): `{id, name, certificate, status, intermediate, csr?, ca_chain?, domains, allow_ip, max_days, created_at, created_by}`; an intermediate is `pending` with an empty `certificate` and its `csr` |
+| `PUT /cas/{id}/chain` | `{certificate, chain?}` | `Ca`, now `active` with `ca_chain` (`admin`, audited); 400 for a certificate that isn't for the CA's key, isn't a CA's (`keyCertSign`, `cRLSign`), isn't valid now, or doesn't chain to a self-signed root; 409 for a root CA |
 | `DELETE /cas/{id}` | | 204; 409 while a key links to it (`admin`) |
 | `GET /cas/{id}/certificates` | | `CaCertificate[]`: `{serial, names, source, not_after, issued_at, issued_by, revoked_at?}`, what it signed that hasn't expired, newest first (`read`) |
 | `POST /cas/{id}/revoke` | `{serial}` | 204; 404 for a serial it didn't sign or that has expired (`write`, audited) |
 | `GET /v1/secrets/crl/{id}` | | the CA's CRL, DER (`application/pkix-crl`) or `?format=pem`; no token |
 | `POST /v1/secrets/ocsp/{id}` | an OCSP request (DER) | an OCSP response (`application/ocsp-response`); no token |
 | `GET /v1/secrets/ocsp/{id}/{request}` | | the same, the request base64 and URL-encoded (RFC 6960 A.1); no token |
-| `POST /cas/{id}/sign` | `{csr, days?, ttl_minutes?}` | `{certificate, ca, serial, names, not_after}` (`write`, audited); 400 for a name outside the policy or a lifetime past `max_days` |
+| `POST /cas/{id}/sign` | `{csr, days?, ttl_minutes?}` | `{certificate, ca, ca_chain, serial, names, not_after}` (`write`, audited); 400 for a name outside the policy, a lifetime past `max_days` or the CA's own end, or a pending CA |
 | `GET /cas/{id}/acme` | | `{directory, pre_authorize, challenges, bindings: AcmeBinding[]}` (`read`; `challenges` is `http-01`, `dns-01` and `tls-alpn-01`, or none without rolld's checks); a binding is `{id, label, names, expires_at, created_at, created_by, revoked_at, revoked_by, used_at, accounts}` |
 | `PATCH /cas/{id}/acme` | `{pre_authorize}` | the same (`admin`, audited) |
 | `POST /cas/{id}/acme/eab` | `{label?, names?, days?}` | 201 `AcmeBinding` with `key_id`, `hmac_key` (base64url, this answer only) and `directory` (`admin`, audited) |
@@ -5998,7 +6198,7 @@ isn't in the workspace is 404.
 | `POST /v1/secrets/acme/{ca}/order/{id}/finalize` | JWS of `{csr}` | the order, `valid`; `orderNotReady`, `badCSR` (names other than the order's), `unauthorized` (a name the CA's policy or the binding no longer takes) |
 | `POST /v1/secrets/acme/{ca}/authz/{id}` | JWS: empty or `{status: "deactivated"}` | the authorization and its challenges |
 | `POST /v1/secrets/acme/{ca}/chall/{id}` | JWS: empty, or `{}` to validate now | the challenge, `valid` or `invalid` with its `error` |
-| `POST /v1/secrets/acme/{ca}/cert/{serial}` | JWS, empty | `application/pem-certificate-chain`: the certificate, then the CA's |
+| `POST /v1/secrets/acme/{ca}/cert/{serial}` | JWS, empty | `application/pem-certificate-chain`: the certificate, then the CA's chain (an intermediate's up to its root) |
 | `POST /v1/secrets/acme/{ca}/revoke-cert` | JWS (`kid`, or the certificate's key as `jwk`) of `{certificate, reason?}` | 200; on the CRL at once; `alreadyRevoked` |
 | `POST /v1/secrets/acme/{ca}/key-change` | JWS wrapping the new key's JWS of `{account, oldKey}` | the account; 409 and `Location` if another account has the new key |
 | `GET /ssh-cas` | | `SshCa[]` (`read` on the project; public keys, never private ones) |
@@ -6099,7 +6299,10 @@ type ProjectFindings = { project: string; project_name: string; findings: Findin
 type Finding = { issue: "decoy_used" | "production_unprotected" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "unplaced" | "operator_made" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy }; // decoy: on decoy_used only (an admin's session's or the operator's), the key's Decoy
 type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; rotate_window: string | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
-type SaasRotator = { id: string; name: string; vendor: "sendgrid" | "twilio" | "okta" | "entra" | "auth0" | "gitlab" | "openai" | "datadog" | "cloudflare" | "databricks" | "confluent"; target: Record<string, unknown>; created_at: number; created_by: string };
+type SaasRotator = { id: string; name: string; vendor: "sendgrid" | "twilio" | "okta" | "entra" | "auth0" | "gitlab" | "openai" | "datadog" | "cloudflare" | "databricks" | "confluent"; target: Record<string, unknown>; credential_expires_at?: number; created_at: number; created_by: string };
+// PATCH …/saas/{id}: the vendor and target stay. `credential_expires_at`: absent keeps it (a new
+// credential drops the old one's), null clears it, ms in the future sets it.
+type SaasRotatorChange = { name?: string; credential?: string; credential_expires_at?: number | null };
 type KubernetesCluster = { id: string; name: string; api_url: string; has_ca: boolean; created_at: number; created_by: string };
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
 type NewValueRequest = { keys: string[]; note?: string; ttl_minutes?: number /* 5–43200, default 10080 */; answers?: number /* 1–10, default 1 */ };
@@ -6436,6 +6639,34 @@ The bench's consumer is an in-process one whose maker is the operator; a token o
 adds roll-access's grant lookup or the accounts' and workspace's.
 
 ## Next
+
+**State, 2026-11-24 06:10.** The thirty-sixth review is done: #830 (99cb3b05e; Cloudflare, Databricks, Confluent) and #825 (the fresh-project production test) landed.
+
+The thirty-seventh product review (2026-11-23, cold, read only, against efafbcac6) found one live bug, low-medium: an environment's deletion preview named every roll-access token on the server whose rule was "every project, environment `<slug>`". Landed since, each with main's CI green, most after a check of the merged tree:
+- #847 (4d73111dd): items 1 and 9. The preview names only tokens that reach the project, judged as reach does (one shared `token_actions`) and narrowed before resolving. A sandbox copying from a deleted, recoverable project keeps its values.
+- #836 (a8a5eb3b4): item 2. An agents machine's `roll://` key is sent as refused only on a refusal; anything else retries with backoff.
+- #844 (c0af796a8): item 3. The events cursor moves to the head past filtered rows (an index on kinds), and a folder-scoped reader sees a change across folders, trimmed to its folders.
+- #881 (3f5aaf25b): item 4. With `leaks.rotate: managed`, a leaked managed key rotates at once without grace, once per credential. A change request opens instead where approvals are needed. With `off`, the event says `rotatable` and roll code offers a Rotate button.
+- #872 (c6dcb2ae7): item 5a. A CA can be an intermediate under the customer's own root (CSR, then `PUT …/cas/{id}/chain`), with name constraints narrowed and leaves carrying the chain.
+- #857 (528cae7d6): item 6. Vendor-side expiry is tracked (GitLab, Databricks, Entra), `rotate_days` must beat it, and Health warns on a registration's own `credential_expires_at`.
+- #850 (63a7ff4a3): item 7. `roll secrets mount .env` is a FIFO served from the CLI, never a file on disk.
+- #856 (c4afb6c56): item 8, first half. An Events tab in the dashboard, live, with kind and environment filters sent to the server.
+- #876 (9f3c36324): item 10. Doppler's references stay references, and Infisical and Doppler bring whole projects with folders, comments and a dry run.
+- #867 (fa9400fe0): item 11. `PATCH …/saas/{id}` replaces a registration's credential in place, plus Terraform's `roll_secrets_saas_rotator` (`credential_wo`), `roll_secrets_folder_policy`, and approvals on environments.
+
+With other threads:
+- previews' #865 (8d0ddeda7): `Subject::Preview`, roll's issuer for a trusted preview's own services, reviewed here (preview subjects need an ephemeral environment);
+- search's #808 (in flight): creates naming a project are held to the person's session in roll-access's shared evaluator, and our search link refuses a cluster whose owner isn't in its home project;
+- roll workspace's events feed #813 (8b2470590) for roll MCP's `workspace.event`.
+
+In flight:
+- item 5b, certificate syncs to ACM, Key Vault and Cloudflare;
+- a value-less set never creating a secret (roll MCP's finding);
+- `roll secrets mount` serving one copy per open, however slow the reader.
+
+Left:
+- item 5c, an ACME client for public CAs;
+- item 8's second half, "notify me" by Slack or email.
 
 **State, 2026-11-23 16:50.** The thirty-fifth review is done: item 6B (#763, 5583dfbfd; `Reference::parse` moved into `crates/roll-secrets-ref`, so agent-proto, the `roll` binary and the gateway don't link roll-secrets) and 6C (#794, dbb4d65af; a refused upstream key fails closed without trying another key of that provider) landed. Also #778, the 05:20 entry below.
 

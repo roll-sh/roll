@@ -885,7 +885,7 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                     let found = match inspect_call(ctx, find::NAME, &args).await {
                         Some(refused) => refused,
                         None => {
-                            let found = find::run(&args, has, |tool, a, quiet| {
+                            let found = find::run(&args, &ctx.m.config.web_url, has, |tool, a, quiet| {
                                 let ctx = ctx.clone();
                                 async move { call_as(&ctx, tool, a, quiet.then_some(find::NAME)).await }
                             });
@@ -1428,7 +1428,7 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: Option<&str>) -
     // In lockdown, an outside record's text never reaches the model: withheld in the structured
     // answer, and the text block (a fronted set may write its own) rebuilt from what's left.
     if ctx.lockdown && lockdown::withhold(&mut result["structuredContent"]) + lockdown::withhold_fields(&mut result["structuredContent"], outside) > 0 {
-        let text = cut(text::render(&result["structuredContent"]), true);
+        let text = text::fit(text::render(&result["structuredContent"]));
         if let Some(content) = result["content"].as_array_mut() {
             content.retain(|c| c["type"] != "text");
             content.insert(0, json!({ "type": "text", "text": text }));
@@ -1775,7 +1775,7 @@ async fn outcome(tool: &str, resp: Response) -> Value {
         // Compact: a model reads JSON without its indentation, which is about a third of a
         // pretty-printed answer's tokens (and leaves more under the cut); a list of objects as a
         // table, which names its columns once.
-        Some(v) => (cut(text::render(&v), true), if v.is_object() { v } else { json!({ "items": v }) }),
+        Some(v) => (text::fit(text::render(&v)), if v.is_object() { v } else { json!({ "items": v }) }),
         None if bytes.is_empty() => ("done".to_string(), json!({ "ok": true })),
         None => match std::str::from_utf8(&bytes) {
             Ok(s) => (cut(s.to_string(), false), json!({ "content_type": ct, "bytes": bytes.len() })),

@@ -42,6 +42,10 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}/mail/{mail}", get(mail_raw))
         .route("/v1/previews/{id}/screenshot.png", get(screenshot_link))
         .route("/v1/previews/{id}/reset", post(reset))
+        .route("/v1/previews/{id}/data/{resource}", get(browse_data))
+        // roll's word for a preview's own service: the address is its credential (rolld's gate
+        // lets it through, as the trace intake).
+        .route("/v1/previews/{id}/oidc/{token}", get(oidc_token))
         // These act on running services, which live on the preview's holder in a cluster.
         .merge(
             Router::new()
@@ -60,6 +64,8 @@ pub fn router(engine: Arc<Engine>) -> Router {
                 .route("/v1/previews/{id}/shell/sessions/{sh}/resize", post(shell_resize))
                 .route("/v1/previews/{id}/forward", get(forward))
                 .route("/v1/previews/{id}/swap", get(swap))
+                // A page read through roll (roll MCP's `previews_fetch`): its services are here.
+                .route("/v1/previews/{id}/fetch", get(fetch_page))
                 // A preview's spans, kept on its holder: the intake (its token the credential) and the reads.
                 .route("/v1/previews/{id}/otlp/{token}/v1/traces", post(otlp_traces).layer(axum::extract::DefaultBodyLimit::max(8 << 20)))
                 .route("/v1/previews/{id}/traces", get(traces))
@@ -588,9 +594,9 @@ async fn screenshot(AxState(e): S, Path(id): Path<String>, Query(q): Query<std::
     // `page=/pricing`: another of the project's pages (`github.pages`), at the desktop width.
     let page = q.get("page").cloned();
     if let Some(p) = &page
-        && ((crate::settings::page_entry(p).is_none() && crate::settings::width_entry(p).is_none()) || phone)
+        && (!crate::settings::page_key_ok(p) || phone)
     {
-        return Err(Error::BadRequest("page: a path from github.pages, or @<width> from github.widths (desktop only)".into()));
+        return Err(Error::BadRequest("page: one of its pages (a path, @<width>, state:, browser:, mode: or story:; desktop only)".into()));
     }
     // `diff=base|previous`: where this one differs from the baseline's or the one before (the
     // same view and page), as a picture.
@@ -712,7 +718,26 @@ struct ErrorsQuery {
 async fn errors(AxState(e): S, Path(id): Path<String>, Query(q): Query<ErrorsQuery>) -> crate::Result<Json<Value>> {
     check_id(&id)?;
     let minutes = crate::engine::error_span(q.minutes.unwrap_or(60));
-    Ok(Json(json!({ "minutes": minutes, "groups": e.errors(&id, minutes).await? })))
+    let mut v = json!({ "minutes": minutes, "groups": e.errors(&id, minutes).await? });
+    mark_outside(&e, &id, &mut v, Some("groups"));
+    Ok(Json(v))
+}
+
+/// A fork's preview's words (its code wrote them: errors, log lines, spans, routes) marked as
+/// outside text, which roll MCP's lockdown keeps from a model: each object of `v`'s list `key`,
+/// or `v` itself.
+fn mark_outside(e: &crate::Engine, id: &str, v: &mut Value, key: Option<&str>) {
+    if !e.store.row(id).is_ok_and(|r| !r.trusted) {
+        return;
+    }
+    match key {
+        Some(k) => {
+            for o in v[k].as_array_mut().into_iter().flatten().filter(|o| o.is_object()) {
+                o["outside"] = json!(true);
+            }
+        }
+        None => v["outside"] = json!(true),
+    }
 }
 
 /// How many errors its services wrote in the span (`{minutes, count}`): a list's rows, with
@@ -845,17 +870,23 @@ struct TracesQuery {
 
 async fn traces(AxState(e): S, Path(id): Path<String>, Query(q): Query<TracesQuery>) -> crate::Result<Json<Value>> {
     check_id(&id)?;
-    Ok(Json(e.traces(&id, q.minutes.unwrap_or(60)).await?))
+    let mut v = e.traces(&id, q.minutes.unwrap_or(60)).await?;
+    mark_outside(&e, &id, &mut v, Some("traces"));
+    Ok(Json(v))
 }
 
 async fn routes(AxState(e): S, Path(id): Path<String>, Query(q): Query<TracesQuery>) -> crate::Result<Json<Value>> {
     check_id(&id)?;
-    Ok(Json(e.routes(&id, q.minutes.unwrap_or(60)).await?))
+    let mut v = e.routes(&id, q.minutes.unwrap_or(60)).await?;
+    mark_outside(&e, &id, &mut v, Some("routes"));
+    Ok(Json(v))
 }
 
 async fn trace(AxState(e): S, Path((id, t)): Path<(String, String)>) -> crate::Result<Json<Value>> {
     check_id(&id)?;
-    Ok(Json(e.trace(&id, &t).await?))
+    let mut v = e.trace(&id, &t).await?;
+    mark_outside(&e, &id, &mut v, Some("spans"));
+    Ok(Json(v))
 }
 
 #[derive(serde::Deserialize)]
@@ -878,6 +909,45 @@ async fn bridge(socket: axum::extract::ws::WebSocket, mut f: crate::engine::shel
     // `f` lives as long as the bridge: it holds the service awake.
     let ended = f.ended.clone();
     bridge_io(socket, &mut f.io, ended).await;
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OidcQuery {
+    aud: Option<String>,
+}
+
+async fn oidc_token(AxState(e): S, Path((id, token)): Path<(String, String)>, Query(q): Query<OidcQuery>) -> crate::Result<Json<crate::OidcToken>> {
+    check_id(&id)?;
+    Ok(Json(e.oidc(&id, &token, q.aud.as_deref()).await?))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BrowseQuery {
+    table: Option<String>,
+}
+
+/// A look at one of the preview's data branches (its tables, or a table's first rows).
+async fn browse_data(AxState(e): S, Path((id, resource)): Path<(String, String)>, Query(q): Query<BrowseQuery>) -> crate::Result<Json<crate::Browse>> {
+    check_id(&id)?;
+    Ok(Json(e.browse(&id, &resource, q.table.as_deref()).await?))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FetchQuery {
+    path: String,
+    service: Option<String>,
+    #[serde(default)]
+    head: bool,
+}
+
+/// One page of a preview's service, read through roll's own way in: for an agent checking its
+/// change (roll MCP's `previews_fetch`) without anyone making a share link.
+async fn fetch_page(AxState(e): S, Path(id): Path<String>, Query(q): Query<FetchQuery>) -> crate::Result<Json<crate::engine::shell::FetchedPage>> {
+    check_id(&id)?;
+    Ok(Json(e.fetch(&id, q.service.as_deref(), &q.path, q.head).await?))
 }
 
 #[derive(serde::Deserialize)]
@@ -1007,7 +1077,9 @@ async fn logs(AxState(e): S, Path(id): Path<String>, Query(q): Query<LogsQuery>)
     let lines = q.lines.unwrap_or(200).clamp(1, 2000);
     if !matches!(q.follow.as_deref(), Some("1" | "true" | "yes")) {
         let (service, lines) = e.logs(&id, q.service.as_deref(), lines).await?;
-        return Ok(Json(json!({ "service": service, "lines": lines })).into_response());
+        let mut v = json!({ "service": service, "lines": lines });
+        mark_outside(&e, &id, &mut v, None);
+        return Ok(Json(v).into_response());
     }
     use axum::response::sse::{Event, KeepAlive, Sse};
     let (service, rx) = e.follow(&id, q.service.as_deref(), lines).await?;

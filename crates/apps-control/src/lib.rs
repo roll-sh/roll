@@ -15,6 +15,9 @@
 pub mod api;
 pub mod challenge;
 pub mod bots;
+pub mod attacks;
+pub mod attack_mode;
+pub mod visitor_token;
 pub mod backups;
 pub mod browser;
 pub mod moving;
@@ -293,6 +296,8 @@ pub struct Apps {
     pushers: push::Pushers,
     /// Who may still open a project's environments ([`Apps::set_visitors`]).
     pub(crate) visitors: std::sync::OnceLock<Arc<dyn integrations::Visitors>>,
+    /// Where visitors a provider vouches for start signing in (`access.sso`); none: not here.
+    pub(crate) visitor_sign_in: std::sync::OnceLock<Arc<dyn integrations::VisitorSignIn>>,
     /// Log drains whose batch came back (the drainer sends the next).
     drain_done: Arc<Mutex<Vec<String>>>,
     /// Projects whose drains changed on this node: the drainer reads theirs again (only theirs).
@@ -429,6 +434,11 @@ pub struct Apps {
     pub(crate) edge_noted: Mutex<std::collections::HashSet<String>>,
     /// Crawlers' addresses checked against their operators' DNS ([`bots`]).
     pub(crate) bots_verified: bots::Verified,
+    /// Projects' keys for their visitors' tokens, and the tokens made ([`visitor_token`]).
+    pub(crate) visitor_keys: Mutex<HashMap<String, (Vec<u8>, String)>>,
+    pub(crate) visitor_tokens: Mutex<HashMap<String, (String, i64)>>,
+    /// The key visitors' sign-in requests are signed with, once read ([`visit`]).
+    pub(crate) sso_key: Mutex<Option<Vec<u8>>>,
     /// Password tries per environment and client, in the last ten minutes ([`password`]).
     pub(crate) password_tries: Mutex<HashMap<password::Client, (i64, u32)>>,
     /// Shells open over HTTP (the dashboard's terminal), by id.
@@ -686,6 +696,7 @@ impl Apps {
             explain_failed: Mutex::new(HashMap::new()),
             pushers: push::Pushers::default(),
             visitors: std::sync::OnceLock::new(),
+            visitor_sign_in: std::sync::OnceLock::new(),
             drain_done: Arc::new(Mutex::new(Vec::new())),
             drains_dirty: Mutex::new(Default::default()),
             preview_lines,
@@ -748,6 +759,9 @@ impl Apps {
             edge_key: Mutex::new(None),
             edge_noted: Mutex::new(Default::default()),
             bots_verified: Default::default(),
+            visitor_keys: Mutex::new(HashMap::new()),
+            visitor_tokens: Mutex::new(HashMap::new()),
+            sso_key: Mutex::new(None),
             password_tries: Mutex::new(HashMap::new()),
             looping: Mutex::new(std::collections::HashSet::new()),
             metric_streaks: Mutex::new(std::collections::HashMap::new()),
@@ -1816,6 +1830,7 @@ impl Apps {
         };
         let gate = self.access(&r.service, &r.name).await?;
         let (private, signed_in, password) = (gate.is_some(), gate.as_ref().is_some_and(|a| a.signed_in), gate.as_ref().is_some_and(|a| a.password_hash.is_some()));
+        let sso = gate.as_ref().and_then(|a| a.sso.clone());
         let (sid, e) = (r.service.clone(), r.name.clone());
         let waiting_for_ci = self.db(move |s| s.ci_waits()).await?.into_iter().find(|(w, _)| w.service == sid && w.env == e).map(|(w, _)| w.sha);
         let (sid, e) = (r.service.clone(), r.name.clone());
@@ -1829,6 +1844,11 @@ impl Apps {
         };
         let (sid, e) = (r.service.clone(), r.name.clone());
         let rotated = self.db(move |s| s.runtime_config_rotated(&sid, &e)).await?;
+        let attack = self.attack(&r.service, &r.name).await?;
+        let firewall_hits: Vec<u32> = match self.lives.lock().get(&env_key(&r.service, &r.name)) {
+            Some(l) if !r.firewall.is_empty() => r.firewall.iter().map(|f| l.hits(f.fingerprint())).collect(),
+            _ => Vec::new(),
+        };
         Ok(Environment {
             summary,
             service: r.service.clone(),
@@ -1840,6 +1860,7 @@ impl Apps {
             udp: udp_port.filter(|_| svc.run.udp && svc.run.public && !private && !r.egress.closed()).map(|p| format!("{}:{p}", self.cfg.tcp_host)),
             private,
             signed_in,
+            sso,
             password,
             next_run_at,
             schedules: self.schedule_states(&svc, &r).await,
@@ -1870,12 +1891,15 @@ impl Apps {
             },
             maintenance: r.maintenance.clone().map(|m| crate::model::Maintenance { message: Some(m).filter(|m| !m.is_empty()) }),
             paused: r.paused,
+            attack_mode: attack.mode,
+            challenge_until: attack.until.filter(|u| *u > code_sql::now_ms()),
             held_after: r.held_by.clone().filter(|h| h != crate::deploy::MANUAL_HOLD),
             held: r.held_by.as_deref() == Some(crate::deploy::MANUAL_HOLD),
             pages: r.pages.clone(),
             allow_ips: r.allow_ips.clone(),
             rate_limit: r.rate_limit,
             firewall: r.firewall.clone(),
+            firewall_hits,
             headers: r.headers.clone(),
             routes: r.routes.clone(),
             redirects: r.redirects.clone(),
@@ -2027,7 +2051,7 @@ impl Apps {
     pub async fn put_environment_by(self: &Arc<Self>, service: &str, env: &str, body: Value, by: Option<String>) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "approvals", "badge", "closed_by", "data", "scheduled"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "approvals", "badge", "closed_by", "data", "scheduled", "attack_mode", "challenge_until"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -2051,6 +2075,24 @@ impl Apps {
             None => None,
             Some(Value::Bool(b)) => Some(*b),
             Some(_) => return Err(Error::BadRequest("paused is a boolean".into())),
+        };
+        // Attack mode: when it goes on by itself, and on by hand until a time (null: off).
+        let attack_mode: Option<Option<crate::attack_mode::AttackMode>> = match o.get("attack_mode") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(v) => {
+                let m: crate::attack_mode::AttackMode = serde_json::from_value(v.clone()).map_err(|e| Error::BadRequest(format!("attack_mode: {e}")))?;
+                m.check()?;
+                Some(Some(m))
+            }
+        };
+        let challenge_until: Option<Option<i64>> = match o.get("challenge_until") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(v) => match v.as_i64() {
+                Some(t) if t > code_sql::now_ms() && t <= code_sql::now_ms() + crate::attack_mode::MAX_AHEAD_MS => Some(Some(t)),
+                _ => return Err(Error::BadRequest("challenge_until is a time (unix ms) within the next 24 hours, or null to end it".into())),
+            },
         };
         // One DNS label under the project's preview domain, or null.
         let preview_label: Option<Option<String>> = match o.get("preview_host") {
@@ -2314,7 +2356,7 @@ impl Apps {
             None => None,
             Some(Value::Null) => Some(None),
             Some(Value::Object(a)) => {
-                if let Some(k) = a.keys().find(|k| !["token", "bypass_sha256", "signed_in", "password"].contains(&k.as_str())) {
+                if let Some(k) = a.keys().find(|k| !["token", "bypass_sha256", "signed_in", "password", "sso"].contains(&k.as_str())) {
                     return Err(Error::BadRequest(format!("access.{k} isn't a field")));
                 }
                 let signed_in = match a.get("signed_in") {
@@ -2328,10 +2370,18 @@ impl Apps {
                     Some(Value::String(p)) if (8..=200).contains(&p.chars().count()) => Some(crate::password::hash(p).await.map_err(Error::Internal)?),
                     Some(_) => return Err(Error::BadRequest("access.password is 8–200 characters".into())),
                 };
+                // People a provider vouches for, roll's or not.
+                let sso = match a.get("sso") {
+                    None | Some(Value::Null) => None,
+                    Some(v) => Some(serde_json::from_value::<crate::model::Sso>(v.clone()).map_err(|e| Error::BadRequest(format!("access.sso: {e}")))?.check()?),
+                };
+                if sso.is_some() && self.visitor_sign_in.get().is_none() {
+                    return Err(Error::Conflict("signing visitors in through a provider needs roll's accounts on this node".into()));
+                }
                 let token = match a.get("token") {
-                    None | Some(Value::Null) if signed_in || password.is_some() => None,
+                    None | Some(Value::Null) if signed_in || password.is_some() || sso.is_some() => None,
                     Some(Value::String(t)) if (20..=200).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)) => Some(t.as_str()),
-                    _ => return Err(Error::BadRequest("access.token is 20–200 of A-Z, a-z, 0-9, - and _ (or access.signed_in is true, or there's a password)".into())),
+                    _ => return Err(Error::BadRequest("access.token is 20–200 of A-Z, a-z, 0-9, - and _ (or access.signed_in is true, or there's a password or sso)".into())),
                 };
                 if signed_in && self.cfg.web_url.is_none() {
                     return Err(Error::Conflict("signing in needs roll's dashboard address on this node (web_url)".into()));
@@ -2341,9 +2391,9 @@ impl Apps {
                     Some(Value::String(h)) if h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()) => Some(h.to_ascii_lowercase()),
                     Some(_) => return Err(Error::BadRequest("access.bypass_sha256 is a SHA-256 in hex".into())),
                 };
-                Some(Some(Access { token_hash: token.map(crate::public::token_hash), bypass_hash: bypass, signed_in, password_hash: password }))
+                Some(Some(Access { token_hash: token.map(crate::public::token_hash), bypass_hash: bypass, signed_in, password_hash: password, sso }))
             }
-            Some(_) => return Err(Error::BadRequest("access is {token?, signed_in?, password?, bypass_sha256?} or null".into())),
+            Some(_) => return Err(Error::BadRequest("access is {token?, signed_in?, password?, sso?, bypass_sha256?} or null".into())),
         };
         // A new environment may start with another's variables (cloning staging from production).
         let variables_from = match o.get("variables_from") {
@@ -2526,6 +2576,17 @@ impl Apps {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_firewall(&sid, &e, &rules)).await?;
             self.live(service, env).forget_gate();
+            self.changed(service);
+        }
+        if attack_mode.is_some() || challenge_until.is_some() {
+            let mut a = self.attack(service, env).await?;
+            if let Some(m) = attack_mode {
+                a.mode = m;
+            }
+            if let Some(u) = challenge_until {
+                a.until = u;
+            }
+            self.set_attack(service, env, a).await?;
             self.changed(service);
         }
         // Instances are made from the next deploy on with it (a network of their own, the proxy's
@@ -4268,7 +4329,8 @@ impl Apps {
         // What the live deployment's roll.toml adds: only ever tighter (`live::Gate`).
         let file = file.map(|f| f.resolve(&row.name, row.ephemeral)).unwrap_or_default();
         // The environment's challenge key, made the first time a rule needs it (every node reads the same).
-        let challenge_key = match row.firewall.iter().chain(&file.firewall).any(|r| r.action == crate::model::FirewallAction::Challenge) {
+        let attack = self.attack(&live.service, &live.env).await?;
+        let challenge_key = match row.firewall.iter().chain(&file.firewall).any(|r| r.action == crate::model::FirewallAction::Challenge) || attack != Default::default() {
             true => {
                 let (k, v) = (format!("challenge_key:{}/{}", live.service, live.env), crate::model::random(32));
                 Some(self.db(move |s| s.state_or(&k, &v)).await?.into_bytes())
@@ -4285,7 +4347,7 @@ impl Apps {
             pages: row.pages,
             preview: row.ephemeral,
             headers: row.headers,
-            routes: row.routes, traces, vitals: row.vitals, challenge_key, split: row.split, mirror: row.mirror, snippets: snippets_of(&row.snippets),
+            routes: row.routes, traces, vitals: row.vitals, challenge_key, attack_until: attack.until, split: row.split, mirror: row.mirror, snippets: snippets_of(&row.snippets),
             redirects: row.redirects.as_deref().map(crate::site_rules::EnvRedirects::parse).filter(|r| !r.is_empty()).map(Arc::new) });
         live.set_gate(g.clone(), seen);
         Ok(g)
@@ -4325,6 +4387,11 @@ impl Apps {
     /// Who may still open a project's environments (roll-accounts). Set once.
     pub fn set_visitors(&self, v: Arc<dyn integrations::Visitors>) {
         let _ = self.visitors.set(v);
+    }
+
+    /// Where visitors a provider vouches for start signing in (roll-accounts). Set once.
+    pub fn set_visitor_sign_in(&self, v: Arc<dyn integrations::VisitorSignIn>) {
+        let _ = self.visitor_sign_in.set(v);
     }
 
     /// How email reaches people (roll-accounts' mailer). Set once.

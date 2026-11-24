@@ -42,6 +42,9 @@ type fakeRolld struct {
 	// The project's required keys, and the KMS key wrapping its data key ("": none).
 	required []any
 	kms      string
+	// Folder policies by env:path, and every environment policy body written.
+	folders  map[string]map[string]any
+	policies []map[string]any
 }
 
 // settings serves …/required and …/kms: one value per project.
@@ -191,6 +194,20 @@ func (f *fakeRolld) rest(w http.ResponseWriter, r *http.Request, kind string, it
 			delete(items[id], "url")
 			items[id]["host"] = host(u)
 		}
+		if kind == "saas" {
+			// A new credential is sealed, never listed; a null date is no date (and a new
+			// credential without one drops the old one's).
+			if c, ok := b["credential"].(string); ok {
+				f.received = append(f.received, c)
+				delete(items[id], "credential")
+				if _, dated := b["credential_expires_at"]; !dated {
+					delete(items[id], "credential_expires_at")
+				}
+			}
+			if v, ok := b["credential_expires_at"]; ok && v == nil {
+				delete(items[id], "credential_expires_at")
+			}
+		}
 		write(200, items[id])
 	case r.Method == http.MethodPost && kind == "rotators" && items[id] != nil && action == "rotate-secret":
 		answer := map[string]any{"secret": fmt.Sprintf("whsec_rotated_%d", len(f.received))}
@@ -234,6 +251,25 @@ func (f *fakeRolld) rest(w http.ResponseWriter, r *http.Request, kind string, it
 		case "github-apps":
 			f.received = append(f.received, b["private_key"].(string))
 			delete(b, "private_key")
+		case "saas":
+			f.received = append(f.received, b["credential"].(string))
+			delete(b, "credential")
+			// As roll keeps a target: hosts lowercased, GitLab's defaults filled in.
+			t, _ := b["target"].(map[string]any)
+			if t == nil {
+				t = map[string]any{}
+			}
+			if h, ok := t["host"].(string); ok {
+				t["host"] = strings.ToLower(h)
+			}
+			if b["vendor"] == "gitlab" {
+				for k, v := range map[string]any{"host": "gitlab.com", "access_level": 40, "expires_days": 365} {
+					if t[k] == nil {
+						t[k] = v
+					}
+				}
+			}
+			b["target"] = t
 		case "aws-roles":
 			if b["trust"] == nil {
 				b["trust"] = "external_id"
@@ -322,7 +358,7 @@ func (f *fakeRolld) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.settings(r, write)
 		return
 	}
-	for _, kind := range []string{"identities", "syncs", "cas", "ssh-cas", "transit", "outside-databases", "rotators", "audit/sinks", "github-apps", "aws-roles", "aws-users", "cloud-accounts"} {
+	for _, kind := range []string{"identities", "syncs", "cas", "ssh-cas", "transit", "outside-databases", "rotators", "audit/sinks", "github-apps", "aws-roles", "aws-users", "cloud-accounts", "saas"} {
 		if r.URL.Path == "/v1/secrets/projects/prj_a/"+kind || strings.HasPrefix(r.URL.Path, "/v1/secrets/projects/prj_a/"+kind+"/") {
 			items := map[string]map[string]map[string]any{"identities": f.identities, "syncs": f.syncs}[kind]
 			if items == nil {
@@ -366,7 +402,18 @@ func (f *fakeRolld) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			e.Name = body["name"].(string)
 			write(200, e)
 		case r.Method == http.MethodPut:
-			e.Protected = body["protected"].(bool)
+			// As roll's PUT …/policy: approvals 1 when protected and left out, approvers none.
+			e.Protected, e.Approvals, e.Approvers = body["protected"].(bool), 0, []string{}
+			if a, ok := body["approvals"].(float64); ok {
+				e.Approvals = int64(a)
+			} else if e.Protected {
+				e.Approvals = 1
+			}
+			approvers, _ := body["approvers"].([]any)
+			for _, a := range approvers {
+				e.Approvers = append(e.Approvers, a.(string))
+			}
+			f.policies = append(f.policies, body)
 			write(200, e)
 		case r.Method == http.MethodDelete:
 			if e.Protected && r.URL.Query().Get("confirm") != env {
@@ -377,6 +424,43 @@ func (f *fakeRolld) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			write(204, nil)
 		default:
 			write(200, e)
+		}
+		return
+	}
+	if parts[1] == "folder-policies" {
+		folder := r.URL.Query().Get("path")
+		if folder != "/" {
+			folder = strings.TrimSuffix(folder, "/")
+		}
+		if f.folders == nil {
+			f.folders = map[string]map[string]any{}
+		}
+		switch r.Method {
+		case http.MethodPut:
+			if body["approvals"] == nil {
+				body["approvals"] = 1
+			}
+			if body["approvers"] == nil {
+				body["approvers"] = []any{}
+			}
+			p := map[string]any{"path": folder, "approvals": body["approvals"], "approvers": body["approvers"], "created_at": 1, "created_by": "operator"}
+			f.folders[env+":"+folder] = p
+			write(200, p)
+		case http.MethodDelete:
+			if f.folders[env+":"+folder] == nil {
+				write(404, map[string]string{"error": "no folder policy " + folder})
+				return
+			}
+			delete(f.folders, env+":"+folder)
+			write(204, nil)
+		default:
+			list := []map[string]any{}
+			for k, p := range f.folders {
+				if strings.HasPrefix(k, env+":") {
+					list = append(list, p)
+				}
+			}
+			write(200, list)
 		}
 		return
 	}

@@ -1,5 +1,5 @@
 import { useLocation, useNavigate } from "@tanstack/react-router";
-import { ArrowLeftRight, ChevronRight, FileKey, HeartPulse, KeyRound, LayoutGrid, Lock, Plug, RefreshCw, ScrollText, Settings2, ShieldCheck, type LucideIcon } from "lucide-react";
+import { ArrowLeftRight, ChevronRight, FileKey, HeartPulse, KeyRound, LayoutGrid, Lock, Plug, Radio, RefreshCw, ScrollText, Settings2, ShieldCheck, type LucideIcon } from "lucide-react";
 import { createContext, useContext, useEffect, useMemo, type ReactNode } from "react";
 import { Link } from "@/components/link";
 import { secretsApi, type Environment, type Link as SecretLink, type Required, type SecretsApi } from "@/lib/secrets-api";
@@ -16,6 +16,7 @@ import { AuditView } from "./audit";
 import { CompareView } from "./compare";
 import { EnvView } from "./env-view";
 import { EnvironmentsView } from "./environments";
+import { EventsView } from "./events";
 import { FindKey } from "./find";
 import { HealthView } from "./health";
 import { OverviewGrid } from "./grid";
@@ -23,7 +24,7 @@ import { CredentialsView, KeysView } from "./panels";
 import { SyncsView } from "./syncs";
 import { button, ErrorNote, useLoad } from "./ui";
 
-export type View = "overview" | "health" | "compare" | "environments" | "access" | "syncs" | "credentials" | "keys" | "audit";
+export type View = "overview" | "health" | "compare" | "environments" | "access" | "syncs" | "credentials" | "keys" | "events" | "audit";
 
 type Ctx = {
   project: WorkspaceProject;
@@ -37,6 +38,8 @@ type Ctx = {
   historyDays: number | null;
   /** Whether credentials found in code are checked with their providers. */
   validityChecks: "on" | "off";
+  /** What a leaked managed key does: rotated at once, or only reported. */
+  leakRotate: "managed" | "off";
   search: Search;
   /** Goes to the surface with these search params (`env`, `path`, `view`, `key`, `tab`…). */
   go: (next: Search, replace?: boolean) => void;
@@ -88,6 +91,7 @@ function Surface({ project, search }: { project: WorkspaceProject; search: Searc
     reloadEnvs: overview.reload,
     historyDays: overview.data?.history_days ?? null,
     validityChecks: overview.data?.validity_checks ?? "off",
+    leakRotate: overview.data?.leaks?.rotate ?? "off",
     search,
     go: (next, replace) => navigate({ href: secretsHref(project.id, next), replace }),
     resourceName: (l) => ws.inventory.get(resourceKey({ kind: l.kind as never, ref: l.ref }))?.name ?? l.ref,
@@ -97,7 +101,7 @@ function Surface({ project, search }: { project: WorkspaceProject; search: Searc
   };
 
   const env = search.env ? envs.find((e) => e.slug === search.env) : undefined;
-  const view: View = (["health", "compare", "environments", "access", "syncs", "credentials", "keys", "audit"] as const).find((v) => v === search.view) ?? "overview";
+  const view: View = (["health", "compare", "environments", "access", "syncs", "credentials", "keys", "events", "audit"] as const).find((v) => v === search.view) ?? "overview";
   // A link to a panel that has moved tabs (`?view=syncs#transit-keys`, from before Syncs was split) goes to its tab.
   const hash = useLocation({ select: (l) => l.hash });
   const moved = movedPanel(search.view, hash);
@@ -126,6 +130,7 @@ function Surface({ project, search }: { project: WorkspaceProject; search: Searc
   else if (view === "syncs") body = <SyncsView />;
   else if (view === "credentials") body = <CredentialsView />;
   else if (view === "keys") body = <KeysView />;
+  else if (view === "events") body = <EventsView />;
   else if (view === "audit") body = <AuditView />;
   else body = <OverviewGrid />;
 
@@ -182,6 +187,7 @@ function ViewsBar({ env, view }: { env: string | null; view: View | null }) {
     { view: "syncs", label: "Syncs", Icon: RefreshCw },
     { view: "credentials", label: "Credentials", Icon: Plug },
     { view: "keys", label: "Keys & certificates", Icon: FileKey },
+    { view: "events", label: "Events", Icon: Radio },
     { view: "audit", label: "Audit", Icon: ScrollText },
   ];
   return (

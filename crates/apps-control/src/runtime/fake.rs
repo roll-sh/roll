@@ -355,7 +355,7 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
             let request_start = req.headers().get("x-request-start").and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
             // What roll hands an edge function (`crate::edge`).
             let edge: serde_json::Map<String, serde_json::Value> = ["x-edge-path", "x-edge-next"].iter().filter_map(|h| Some((h.to_string(), req.headers().get(*h)?.to_str().ok()?.into()))).collect();
-            let mut r = (status, axum::Json(serde_json::json!({ "instance": name, "deployment": dep, "port": port, "path": req.uri().path(), "vars": vars, "forwarded_host": host, "cookie": cookie, "version": version, "te": te, "traceparent": traceparent, "edge": edge, "request_start": request_start }))).into_response();
+            let mut r = (status, axum::Json(serde_json::json!({ "instance": name, "deployment": dep, "port": port, "path": req.uri().path(), "vars": vars, "forwarded_host": host, "cookie": cookie, "version": version, "te": te, "traceparent": traceparent, "edge": edge, "request_start": request_start, "visitor": req.headers().get("x-roll-visitor").and_then(|v| v.to_str().ok()), "visitor_jwt": req.headers().get("x-roll-visitor-jwt").and_then(|v| v.to_str().ok()) }))).into_response();
             if let Some(c) = cache {
                 r.headers_mut().insert(axum::http::header::CACHE_CONTROL, c);
                 let seg = req.uri().path().trim_start_matches('/').split('/').next().unwrap_or("").to_string();

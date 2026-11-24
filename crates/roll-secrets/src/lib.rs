@@ -607,6 +607,9 @@ impl Secrets {
             Ok(())
         })?;
         db.add_column("projects", "validity_checks", "INTEGER")?;
+        // What a leaked managed key does (leaks.rs): `managed` rotates it, `off` (NULL) reports it.
+        db.add_column("projects", "leak_rotate", "TEXT")?;
+        db.ensure_schema(leaks::SCHEMA)?;
         db.ensure_schema(alerts::SCHEMA)?;
         db.ensure_schema(decoys::SCHEMA)?;
         db.ensure_schema(intercept::SCHEMA)?;
@@ -618,8 +621,12 @@ impl Secrets {
         db.ensure_schema(placeholders::SCHEMA)?;
         db.ensure_schema(rotators::SCHEMA)?;
         db.ensure_schema(saas::SCHEMA)?;
+        db.add_column("saas_rotators", "credential_expires_at", "INTEGER")?;
         db.ensure_schema(transit::SCHEMA)?;
         db.ensure_schema(pki::SCHEMA)?;
+        // An intermediate CA (pki.rs): its CSR while it's pending, then the certificates above it.
+        db.add_column("cas", "csr", "TEXT")?;
+        db.add_column("cas", "chain", "TEXT")?;
         // ACME on a CA (acme.rs): whether its bindings' names are pre-authorized.
         db.ensure_schema(acme::SCHEMA)?;
         db.add_column("cas", "acme_preauthorize", "INTEGER")?;

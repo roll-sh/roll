@@ -1562,6 +1562,11 @@ pub fn search_partitions(parts: &[Partition], w: &dyn Weight, collector: &mut dy
             return Err(e);
         }
         leaf.finish().map_err(interrupted)?;
+        // and one while the leaf flushed what it buffered (aggregations collect their last
+        // batch here: a `top_hits` sort script's failure)
+        if let Some(e) = take_deferred_error() {
+            return Err(interrupted(e));
+        }
     }
     Ok(())
 }

@@ -2244,6 +2244,18 @@ impl Store {
         Ok(hex::encode(&m.finalize().into_bytes()[..16]))
     }
 
+    /// A preview's service's address for roll's OIDC issuer (`ROLL_OIDC_URL`), derived from its id
+    /// and name with the store's key: one service's never gets another's tokens.
+    pub fn oidc_token(&self, id: &str, service: &str) -> Result<String> {
+        use hmac::Mac;
+        let mut m = hmac::Hmac::<sha2::Sha256>::new_from_slice(&self.signing_key()?).map_err(|e| Error::Internal(e.to_string()))?;
+        m.update(b"oidc:");
+        m.update(id.as_bytes());
+        m.update(b":");
+        m.update(service.as_bytes());
+        Ok(hex::encode(&m.finalize().into_bytes()[..16]))
+    }
+
     /// Whether `user`/`password` are a live preview's SMTP sign-in (compared in constant time).
     pub fn mail_signs_in(&self, user: &str, password: &str) -> Result<bool> {
         let Ok(r) = self.row(user) else { return Ok(false) };
@@ -3319,6 +3331,7 @@ impl Store {
             head: r.head,
             reaches: settings.egress_for(r.trusted),
             trusted: r.trusted,
+            outside: !r.trusted,
             desired: r.desired,
             state: r.state,
             error: r.error,

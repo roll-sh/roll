@@ -845,6 +845,16 @@ impl Runtime {
     /// they came in through roll ([`ThroughRoll`]: the link's cookie, or a team session), the
     /// preview is a change's, the rules have `feedback` on and roll's dashboard is known. The
     /// note is posted there, by whoever is signed in to roll, as them.
+    /// The project's flags a reviewer may set (`flags`).
+    fn flags_of(&self, preview: &str) -> Vec<crate::settings::FlagRule> {
+        self.store.row(preview).ok().and_then(|r| self.store.settings(&r.project_id).ok()).map(|s| s.flags).unwrap_or_default()
+    }
+
+    /// A reviewer's cookie as the services' header, by the project's rule.
+    fn flags_header(&self, preview: &str, cookie: &str) -> Option<String> {
+        crate::settings::flags_header(&self.flags_of(preview), cookie)
+    }
+
     fn feedback_target(&self, preview: &str, req: &Request) -> Option<String> {
         let web = self.cfg.dashboard.as_deref()?;
         req.extensions().get::<ThroughRoll>()?;
@@ -1284,8 +1294,15 @@ fn add_feedback(resp: Response) -> Response {
 }
 
 /// The feedback button's script, sending notes to `target` (the preview in roll's dashboard).
-fn feedback_script(target: &str) -> Response {
-    let js = include_str!("feedback.js").replace("__ROLL_TARGET__", &serde_json::to_string(target).unwrap_or_else(|_| "\"\"".into()));
+/// The toolbar's cookie: a reviewer's own flags (`name:value|…`).
+const FLAGS_COOKIE: &str = "roll_flags";
+/// The header the services get them in (`name=value,…`).
+const FLAGS_HEADER: HeaderName = HeaderName::from_static("x-roll-flags");
+
+fn feedback_script(target: &str, flags: &[crate::settings::FlagRule]) -> Response {
+    let js = include_str!("feedback.js")
+        .replace("__ROLL_TARGET__", &serde_json::to_string(target).unwrap_or_else(|_| "\"\"".into()))
+        .replace("__ROLL_FLAGS__", &serde_json::to_string(flags).unwrap_or_else(|_| "[]".into()));
     ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8"), (header::CACHE_CONTROL, "private, max-age=300")], js).into_response()
 }
 
@@ -1646,6 +1663,37 @@ impl Apps for Runtime {
         Ok(true)
     }
 
+    async fn fetch(&self, preview: &str, service: &str, _url: &str, _access: Option<&str>, path: &str, head: bool) -> anyhow::Result<Option<crate::ports::Fetched>> {
+        use futures::StreamExt;
+        let me = self.me.upgrade().ok_or_else(|| anyhow::anyhow!("the preview runtime is stopping"))?;
+        let host = self.store.service_host(preview, service)?.ok_or_else(|| anyhow::anyhow!("no service {service}"))?;
+        let req = Request::builder()
+            .method(if head { axum::http::Method::HEAD } else { axum::http::Method::GET })
+            .uri(path)
+            .header(header::HOST, format!("{host}.{}", self.cfg.domain))
+            .header(header::ACCEPT, "text/html,application/json,text/plain;q=0.9,*/*;q=0.5")
+            .header(header::ACCEPT_ENCODING, "identity")
+            .body(Body::empty())?;
+        let resp = me.proxy(preview, service, req, false).await;
+        let status = resp.status().as_u16();
+        const SHOWN: [&str; 4] = ["content-type", "location", "cache-control", "content-length"];
+        let headers = SHOWN.iter().filter_map(|h| resp.headers().get(*h).and_then(|v| v.to_str().ok()).map(|v| (h.to_string(), v.chars().take(500).collect()))).collect();
+        let mut body = Vec::new();
+        let mut truncated = false;
+        let mut stream = resp.into_body().into_data_stream();
+        while let Some(chunk) = stream.next().await {
+            let Ok(chunk) = chunk else { break };
+            let room = crate::ports::FETCH_MAX - body.len();
+            if chunk.len() > room {
+                body.extend_from_slice(&chunk[..room]);
+                truncated = true;
+                break;
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(Some(crate::ports::Fetched { status, headers, body, truncated }))
+    }
+
     fn swap(&self, preview: &str, service: &str, to: Option<crate::ports::Laptop>) {
         let key = (preview.to_string(), service.to_string());
         match to {
@@ -1845,7 +1893,7 @@ impl Runtime {
         let pages: Vec<&String> = opts
             .pages
             .iter()
-            .filter(|p| crate::settings::page_path_ok(p) || crate::settings::width_entry(p).is_some() || crate::settings::state_entry(p).is_some())
+            .filter(|p| crate::settings::page_path_ok(p) || crate::settings::width_entry(p).is_some() || crate::settings::state_entry(p).is_some() || crate::settings::mode_entry(p).is_some())
             .take(crate::settings::MAX_PAGES)
             .collect();
         args.extend(["--env".into(), format!("PAGES={}", serde_json::to_string(&pages)?)]);
@@ -1863,6 +1911,11 @@ impl Runtime {
                 .collect();
         if !states.is_empty() {
             args.extend(["--env".into(), format!("STATES={}", serde_json::to_string(&states)?)]);
+        }
+        // Each mode's emulation, by name (`shot.js` takes the first page in it).
+        let modes: std::collections::BTreeMap<&str, &crate::settings::ModeRule> = opts.modes.iter().map(|m| (m.name.as_str(), m)).collect();
+        if !modes.is_empty() {
+            args.extend(["--env".into(), format!("MODES={}", serde_json::to_string(&modes)?)]);
         }
         let endpoints: Vec<&String> = opts.endpoints.iter().filter(|p| crate::settings::page_path_ok(p)).take(crate::settings::MAX_ENDPOINTS).collect();
         if !endpoints.is_empty() {
@@ -2435,10 +2488,17 @@ async fn serve(rt: Arc<Runtime>, preview: String, service: String, mut req: Requ
     let target = rt.feedback_target(&preview, &req);
     // The link's token is roll's: the app never sees it, whichever way they came in.
     take_cookies(&mut req, &format!("roll_access_{preview}"));
+    // A reviewer's own flags (the toolbar's cookie): what the project's rule names, as a header,
+    // and only that (a header a visitor sent is dropped).
+    let chosen = take_cookies(&mut req, FLAGS_COOKIE).pop();
+    req.headers_mut().remove(FLAGS_HEADER);
+    if let Some(h) = chosen.and_then(|c| rt.flags_header(&preview, &c)).and_then(|h| HeaderValue::from_str(&h).ok()) {
+        req.headers_mut().insert(FLAGS_HEADER, h);
+    }
     if req.uri().path() == FEEDBACK_PATH
         && let Some(t) = &target
     {
-        return feedback_script(t);
+        return feedback_script(t, &rt.flags_of(&preview));
     }
     if req.uri().path() == FEEDBACK_NOTES_PATH && target.is_some() {
         let path = req.uri().query().unwrap_or("").split('&').filter_map(|kv| kv.split_once('=')).find(|(k, _)| *k == "path").map(|(_, v)| percent_decode(v)).unwrap_or_default();
@@ -2732,6 +2792,113 @@ mod tests {
         assert!(swapped.ends_with("laptop saw /cart web-pr1-shop.preview.test bypass=false"), "{swapped}");
         rt.swap(&row.id, "web", None);
         assert!(get().await.ends_with("\r\n\r\ncontainer"), "given back");
+    }
+
+    /// A page read through roll's own way in (`GET …/fetch`): past the preview's gate (no token
+    /// asked), only the headers worth seeing, the body cut at its cap and said so.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_page_read_through_roll_passes_the_gate_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&code_sql::Target::Sqlite(dir.path().join("p.db")), Default::default()).unwrap());
+        let new = crate::store::New {
+            project_id: "prj_1".into(),
+            key: "pr1".into(),
+            project_name: "shop".into(),
+            repo: "acme/web".into(),
+            change_id: Some("chg_1".into()),
+            branch: None,
+            number: Some(1),
+            title: "t".into(),
+            github_pr: Some(1),
+            head: "cs_1".into(),
+            trusted: true,
+            state: crate::State::Ready,
+            expires_at: None,
+            created_by: "roll".into(),
+        };
+        let (row, _) = store.create(&new).unwrap();
+        store.want_service(&row.id, "web", "acme/web", "cs_1", 512, &|h| format!("http://{h}.preview.test")).unwrap();
+        let rt = Runtime::new(RuntimeConfig { domain: "preview.test".into(), ..RuntimeConfig::default() }, Arc::new(code_preview::docker::Docker), Arc::new(NoTrees), store);
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        rt.pretend_running(&row.id, "web", upstream.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = upstream.accept().await else { return };
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let n = s.read(&mut buf).await.unwrap_or(0);
+                    let big = String::from_utf8_lossy(&buf[..n]).contains("GET /big ");
+                    let body = if big { "x".repeat(crate::ports::FETCH_MAX + 10) } else { "<h1>Cart</h1>".to_string() };
+                    let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nSet-Cookie: s=1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
+                });
+            }
+        });
+        // Link access (the default): a visitor without the token gets a 401; roll reads the page.
+        let page = rt.fetch(&row.id, "web", "", None, "/cart", false).await.unwrap().unwrap();
+        assert_eq!((page.status, String::from_utf8_lossy(&page.body).to_string(), page.truncated), (200, "<h1>Cart</h1>".to_string(), false));
+        assert!(page.headers.iter().any(|(k, v)| k == "content-type" && v == "text/html") && !page.headers.iter().any(|(k, _)| k == "set-cookie"), "{:?}", page.headers);
+        let big = rt.fetch(&row.id, "web", "", None, "/big", false).await.unwrap().unwrap();
+        assert_eq!((big.body.len(), big.truncated), (crate::ports::FETCH_MAX, true));
+    }
+
+    /// A reviewer's flags (the toolbar's cookie) reach the service as `x-roll-flags`, only what
+    /// the project's rule names; the cookie never does, nor a header a visitor sent.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reviewers_flags_reach_the_service_as_a_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&code_sql::Target::Sqlite(dir.path().join("p.db")), Default::default()).unwrap());
+        let new = crate::store::New {
+            project_id: "prj_1".into(),
+            key: "pr1".into(),
+            project_name: "shop".into(),
+            repo: "acme/web".into(),
+            change_id: Some("chg_1".into()),
+            branch: None,
+            number: Some(1),
+            title: "t".into(),
+            github_pr: Some(1),
+            head: "cs_1".into(),
+            trusted: true,
+            state: crate::State::Ready,
+            expires_at: None,
+            created_by: "roll".into(),
+        };
+        let (row, _) = store.create(&new).unwrap();
+        store.want_service(&row.id, "web", "acme/web", "cs_1", 512, &|h| format!("http://{h}.preview.test")).unwrap();
+        let flags = vec![crate::settings::FlagRule { name: "new-checkout".into(), options: vec!["off".into(), "on".into()] }];
+        store.put_settings("prj_1", &crate::Settings { access: crate::settings::Access::Public, flags, ..Default::default() }).unwrap();
+        let rt = Runtime::new(RuntimeConfig { domain: "preview.test".into(), ..RuntimeConfig::default() }, Arc::new(code_preview::docker::Docker), Arc::new(NoTrees), store);
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        rt.pretend_running(&row.id, "web", upstream.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = upstream.accept().await else { return };
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let n = s.read(&mut buf).await.unwrap_or(0);
+                    let head = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+                    let flags = head.lines().find_map(|l| l.strip_prefix("x-roll-flags: ")).unwrap_or("none").trim().to_string();
+                    let body = format!("flags {flags} cookie {}", head.contains("roll_flags"));
+                    let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
+                });
+            }
+        });
+        let app = axum::Router::new().fallback(|| async { "api" }).layer(axum::middleware::from_fn_with_state(rt.clone(), route));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let get = |headers: &str| {
+            let req = format!("GET / HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\n{headers}Connection: close\r\n\r\n");
+            async move {
+                let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+                s.write_all(req.as_bytes()).await.unwrap();
+                let mut out = String::new();
+                s.read_to_string(&mut out).await.unwrap();
+                out
+            }
+        };
+        assert!(get("Cookie: a=1; roll_flags=new-checkout:on|theme:dark\r\n").await.ends_with("flags new-checkout=on cookie false"));
+        assert!(get("x-roll-flags: theme=dark\r\n").await.ends_with("flags none cookie false"), "a visitor's own header is dropped");
     }
 
     /// Skew protection: a request naming an earlier push (its header, `?dpl=`, or the cookie its

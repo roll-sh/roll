@@ -1053,3 +1053,148 @@ async fn envs_rm_previews_and_says_what_happened_and_envs_recover_brings_one_bac
     ok(&api, &[], &["secrets", "-p", "shop", "envs", "recover", "staging"], None).await;
     assert!(ok(&api, &[], &["secrets", "-p", "shop", "-e", "staging", "get", "HOST"], None).await.contains("db.internal"));
 }
+
+/// A fake vendor API on a local port, answering only `Bearer <token>`.
+async fn fake_api(token: &'static str, routes: axum::Router) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let host = format!("http://{}", listener.local_addr().unwrap());
+    let auth = move |req: axum::extract::Request, next: axum::middleware::Next| async move {
+        use axum::response::IntoResponse;
+        if req.headers().get("authorization").and_then(|v| v.to_str().ok()) != Some(format!("Bearer {token}").as_str()) {
+            return axum::http::StatusCode::UNAUTHORIZED.into_response();
+        }
+        next.run(req).await
+    };
+    let app = routes.layer(axum::middleware::from_fn(auth));
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    host
+}
+
+type Q = axum::extract::Query<std::collections::HashMap<String, String>>;
+
+/// Doppler's raw values (fake answering its documented shape): a reference to another config
+/// arrives as roll's reference to the environment that config is mapped to, so it follows it; one
+/// to a config that isn't imported comes in as its computed value, said by name, never by value.
+#[tokio::test]
+async fn doppler_references_arrive_as_references_to_the_mapped_environment() {
+    use serde_json::json;
+    let Server { api, _dir: _d, .. } = start().await;
+    let doppler = fake_api(
+        "dp.st.fake",
+        axum::Router::new().route(
+            "/v3/configs/config/secrets",
+            axum::routing::get(|axum::extract::Query(q): Q| async move {
+                let s = |raw: &str, computed: &str, note: &str| json!({ "raw": raw, "computed": computed, "note": note, "rawVisibility": { "type": "masked" } });
+                axum::Json(match q["config"].as_str() {
+                    "dev" => json!({ "secrets": { "HOST": s("fake-dev-host", "fake-dev-host", "the dev database"), "DOPPLER_CONFIG": s("dev", "dev", "") } }),
+                    _ => json!({ "secrets": { "DB_HOST": s("${dev.HOST}", "fake-dev-host", ""), "MIXED": s("x-${stg.TOKEN}", "x-fake-staged-token", "") } }),
+                })
+            }),
+        ),
+    )
+    .await;
+    let env = [("DOPPLER_API_HOST", doppler.as_str()), ("DOPPLER_TOKEN", "dp.st.fake")];
+    let o = roll(&api, &env, &["secrets", "-p", "shop", "import", "--from", "doppler", "--source", "shop", "--map", "dev=development,prd=production"], None).await;
+    assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
+    assert!(o.stdout.contains("dev → development: 1 value") && o.stdout.contains("prd → production: 2 values"), "{}", o.stdout);
+    assert!(o.stderr.contains("MIXED") && o.stderr.contains("stg isn't imported"), "{}", o.stderr);
+    assert!(!format!("{}{}", o.stdout, o.stderr).contains("fake-"), "no value printed: {}{}", o.stdout, o.stderr);
+
+    let at = |e: &'static str| ["secrets", "-p", "shop", "-e", e];
+    let raw = ok(&api, &[], &[&at("production")[..], &["get", "DB_HOST", "--raw"]].concat(), None).await;
+    assert_eq!(raw.trim(), "${development.HOST}");
+    ok(&api, &[], &[&at("development")[..], &["set", "HOST=fake-moved-host"]].concat(), None).await;
+    let follows = ok(&api, &[], &[&at("production")[..], &["get", "DB_HOST"]].concat(), None).await;
+    assert_eq!(follows.trim(), "fake-moved-host", "it follows development");
+    let flat = ok(&api, &[], &[&at("production")[..], &["get", "MIXED", "--raw"]].concat(), None).await;
+    assert_eq!(flat.trim(), "x-fake-staged-token");
+    let listed = ok(&api, &[], &[&["--json"][..], &at("development")[..], &["ls"]].concat(), None).await;
+    assert!(listed.contains("the dev database") && !listed.contains("DOPPLER_CONFIG"), "Doppler's note is the key's comment: {listed}");
+}
+
+/// A whole Infisical project (fake answering its documented shapes): `--dry-run` prints the tree
+/// and writes nothing, never a value; then `--all-environments --recursive` brings both
+/// environments with their nested folders, references, comments and secret imports.
+#[tokio::test]
+async fn infisical_brings_a_whole_project_with_its_folders_and_a_dry_run_writes_nothing() {
+    use serde_json::json;
+    let Server { api, _dir: _d, .. } = start().await;
+    let infisical = fake_api(
+        "st.fake-infisical",
+        axum::Router::new()
+            .route("/api/v1/projects/ws-fake", axum::routing::get(|| async { axum::Json(json!({ "project": { "environments": [{ "slug": "dev", "name": "Development" }, { "slug": "qa", "name": "QA" }] } })) }))
+            .route(
+                "/api/v2/folders",
+                axum::routing::get(|axum::extract::Query(q): Q| async move {
+                    let names: &[&str] = match q["path"].as_str() {
+                        "/" => &["api"],
+                        "/api" => &["db"],
+                        _ => &[],
+                    };
+                    axum::Json(json!({ "folders": names.iter().map(|n| json!({ "id": n, "name": n })).collect::<Vec<_>>() }))
+                }),
+            )
+            .route(
+                "/api/v3/secrets/raw",
+                axum::routing::get(|axum::extract::Query(q): Q| async move {
+                    assert_eq!(q["expandSecretReferences"], "false", "raw values");
+                    let s = |k: &str, v: &str, comment: &str| json!({ "secretKey": k, "secretValue": v, "secretComment": comment, "type": "shared" });
+                    let list = match (q["environment"].as_str(), q["secretPath"].as_str()) {
+                        ("dev", "/") => vec![s("REGION", "fake-region-1", "where it runs")],
+                        ("dev", "/api") => vec![s("API_URL", "https://fake-api.example", "")],
+                        ("dev", "/api/db") => vec![s("PASS", "fake-dev-pass", ""), json!({ "secretKey": "PASS", "secretValue": "fake-personal", "type": "personal" })],
+                        ("qa", "/api") => vec![s("QA_URL", "https://fake-qa.example", "")],
+                        ("qa", "/api/db") => vec![s("DB_PASS", "${dev.api.db.PASS}", "")],
+                        _ => vec![],
+                    };
+                    axum::Json(json!({ "secrets": list }))
+                }),
+            )
+            .route(
+                "/api/v2/secret-imports",
+                axum::routing::get(|axum::extract::Query(q): Q| async move {
+                    let list = match (q["environment"].as_str(), q["path"].as_str()) {
+                        ("qa", "/") => json!([
+                            { "id": "i1", "position": 1, "importPath": "/", "importEnv": { "slug": "dev", "name": "Development", "id": "e1" }, "isReplication": false },
+                            { "id": "i2", "position": 2, "importPath": "/api", "importEnv": { "slug": "dev", "name": "Development", "id": "e1" }, "isReplication": true }
+                        ]),
+                        _ => json!([]),
+                    };
+                    axum::Json(json!({ "message": "ok", "secretImports": list }))
+                }),
+            ),
+    )
+    .await;
+    let env = [("INFISICAL_API_URL", infisical.as_str()), ("INFISICAL_TOKEN", "st.fake-infisical")];
+    let import = |extra: &'static [&'static str]| [&["secrets", "-p", "shop", "import", "--from", "infisical", "--source", "ws-fake", "--all-environments", "--recursive", "--map", "dev=development", "--create-environments"][..], extra].concat();
+
+    let dry = roll(&api, &env, &import(&["--dry-run"]), None).await;
+    assert_eq!(dry.code, Some(0), "{}{}", dry.stdout, dry.stderr);
+    for want in ["dev → development", "qa → qa (new)", "/api/db: 1 key", "DB_PASS  (references development.api.db.PASS)", "REGION  (with its comment)", "imports development:/", "left out: the import of dev:/api: a replication", "Dry run: nothing imported (5 keys in 6 folders of 2 environments)"] {
+        assert!(dry.stdout.contains(want), "{want}: {}", dry.stdout);
+    }
+    assert!(!format!("{}{}", dry.stdout, dry.stderr).contains("fake-"), "no value printed: {}{}", dry.stdout, dry.stderr);
+    let envs = ok(&api, &[], &["secrets", "-p", "shop", "envs", "ls"], None).await;
+    assert!(!envs.contains("qa"), "no environment made: {envs}");
+    let nothing = roll(&api, &[], &["secrets", "-p", "shop", "-e", "development", "get", "REGION"], None).await;
+    assert_ne!(nothing.code, Some(0), "nothing written: {}", nothing.stdout);
+
+    let o = roll(&api, &env, &import(&[]), None).await;
+    assert_eq!(o.code, Some(0), "{}{}", o.stdout, o.stderr);
+    assert!(o.stdout.contains("Created qa") && !format!("{}{}", o.stdout, o.stderr).contains("fake-"), "{}{}", o.stdout, o.stderr);
+    let get = |e: &'static str, path: &'static str, key: &'static str, raw: bool| {
+        let args = [&["secrets", "-p", "shop", "-e", e, "--path", path, "get", key][..], if raw { &["--raw"][..] } else { &[][..] }].concat();
+        let api = api.clone();
+        async move { ok(&api, &[], &args, None).await.trim().to_string() }
+    };
+    assert_eq!(get("development", "/api", "API_URL", false).await, "https://fake-api.example");
+    assert_eq!(get("development", "/api/db", "PASS", false).await, "fake-dev-pass", "the shared value, not a personal override");
+    assert_eq!(get("qa", "/api", "QA_URL", false).await, "https://fake-qa.example");
+    assert_eq!(get("qa", "/api/db", "DB_PASS", true).await, "${development.api.db.PASS}");
+    assert_eq!(get("qa", "/api/db", "DB_PASS", false).await, "fake-dev-pass");
+    // qa's root imports development's, as Infisical's did.
+    let region = ok(&api, &[], &["run", "-p", "shop", "-e", "qa", "--allow-unresolved", "--no-mask", "--", "sh", "-c", "echo $REGION"], None).await;
+    assert_eq!(region.trim(), "fake-region-1");
+    let listed = ok(&api, &[], &["--json", "secrets", "-p", "shop", "-e", "development", "ls"], None).await;
+    assert!(listed.contains("where it runs"), "Infisical's comment is the key's comment: {listed}");
+}

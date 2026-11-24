@@ -10,32 +10,33 @@ use serde_json::{Value, json};
 
 pub const NAME: &str = "roll_find";
 
-/// A kind of resource: the tool that lists them, and the tool that reads one (with the argument it
-/// takes, filled from the first of `id` an item has).
+/// A kind of resource: the tool that lists them, the tool that reads one (with the argument it
+/// takes, filled from the first of `id` an item has), and its dashboard page (`{}` is the id).
 pub struct Kind {
     pub kind: &'static str,
     pub list: &'static str,
     pub read: &'static str,
     pub param: &'static str,
     pub id: &'static [&'static str],
+    pub page: Option<&'static str>,
 }
 
 pub const KINDS: &[Kind] = &[
-    Kind { kind: "project", list: "workspace_list_projects", read: "workspace_get_project", param: "id", id: &["id"] },
-    Kind { kind: "service", list: "apps_list_services", read: "apps_get_service", param: "service", id: &["id"] },
-    Kind { kind: "repo", list: "code_list_repos", read: "code_list_changes", param: "repo", id: &["full_name"] },
-    Kind { kind: "postgres", list: "postgres_list_projects", read: "postgres_get_project", param: "project", id: &["id"] },
-    Kind { kind: "redis", list: "redis_list_databases", read: "redis_get_database", param: "database", id: &["id"] },
-    Kind { kind: "nosql", list: "nosql_list_databases", read: "nosql_get_database", param: "database", id: &["id"] },
-    Kind { kind: "search", list: "search_list_clusters", read: "search_get_cluster", param: "cluster", id: &["id"] },
-    Kind { kind: "bucket", list: "storage_list_buckets", read: "storage_get_bucket", param: "bucket", id: &["name"] },
-    Kind { kind: "stream", list: "streams_list", read: "streams_get", param: "stream", id: &["id"] },
-    Kind { kind: "vhost", list: "queues_list_vhosts", read: "queues_list_queues", param: "vhost", id: &["name"] },
-    Kind { kind: "function", list: "tasks_list_functions", read: "tasks_get_function", param: "id", id: &["id"] },
-    Kind { kind: "task queue", list: "tasks_list_queues", read: "tasks_get_queue", param: "name", id: &["name"] },
-    Kind { kind: "topic", list: "tasks_list_topics", read: "tasks_get_topic", param: "name", id: &["name"] },
-    Kind { kind: "preview", list: "previews_list", read: "previews_get", param: "id", id: &["id"] },
-    Kind { kind: "token", list: "access_list_tokens", read: "access_get_token", param: "id", id: &["id"] },
+    Kind { kind: "project", list: "workspace_list_projects", read: "workspace_get_project", param: "id", id: &["id"], page: Some("/dashboard/projects/{}") },
+    Kind { kind: "service", list: "apps_list_services", read: "apps_get_service", param: "service", id: &["id"], page: Some("/dashboard/apps/{}") },
+    Kind { kind: "repo", list: "code_list_repos", read: "code_list_changes", param: "repo", id: &["full_name"], page: Some("/dashboard/code/{}") },
+    Kind { kind: "postgres", list: "postgres_list_projects", read: "postgres_get_project", param: "project", id: &["id"], page: Some("/dashboard/databases?project={}") },
+    Kind { kind: "redis", list: "redis_list_databases", read: "redis_get_database", param: "database", id: &["id"], page: Some("/dashboard/redis/{}") },
+    Kind { kind: "nosql", list: "nosql_list_databases", read: "nosql_get_database", param: "database", id: &["id"], page: Some("/dashboard/nosql/{}") },
+    Kind { kind: "search", list: "search_list_clusters", read: "search_get_cluster", param: "cluster", id: &["id"], page: Some("/dashboard/search/{}") },
+    Kind { kind: "bucket", list: "storage_list_buckets", read: "storage_get_bucket", param: "bucket", id: &["name"], page: Some("/dashboard/storage/{}") },
+    Kind { kind: "stream", list: "streams_list", read: "streams_get", param: "stream", id: &["id"], page: Some("/dashboard/streams?stream={}") },
+    Kind { kind: "vhost", list: "queues_list_vhosts", read: "queues_list_queues", param: "vhost", id: &["name"], page: Some("/dashboard/queues/queues?vhost={}") },
+    Kind { kind: "function", list: "tasks_list_functions", read: "tasks_get_function", param: "id", id: &["id"], page: None },
+    Kind { kind: "task queue", list: "tasks_list_queues", read: "tasks_get_queue", param: "name", id: &["name"], page: None },
+    Kind { kind: "topic", list: "tasks_list_topics", read: "tasks_get_topic", param: "name", id: &["name"], page: None },
+    Kind { kind: "preview", list: "previews_list", read: "previews_get", param: "id", id: &["id"], page: None },
+    Kind { kind: "token", list: "access_list_tokens", read: "access_get_token", param: "id", id: &["id"], page: Some("/dashboard/access/tokens/{}") },
 ];
 
 /// A dashboard page and the read that shows what it shows: `path` is the page's path up to its
@@ -49,14 +50,16 @@ pub struct Page {
     pub args: fn(&[String], &Query) -> Option<Value>,
     /// How the page reads, for a person (the error that lists the pages it knows).
     pub shape: &'static str,
+    /// First segments that are the dashboard's own pages there, never an id (`/dashboard/apps/visit`).
+    pub not: &'static [&'static str],
 }
 
 /// A link's query, by name.
 pub type Query = std::collections::HashMap<String, String>;
 
 pub static PAGES: &[Page] = &[
-    Page { path: "/dashboard/projects/", exact: false, kind: "project", read: "workspace_get_project", args: |s, _| Some(json!({ "id": s.first()? })), shape: "/dashboard/projects/<id>" },
-    Page { path: "/dashboard/apps/", exact: false, kind: "service", read: "apps_get_service", args: |s, _| Some(json!({ "service": s.first()? })), shape: "/dashboard/apps/<id>" },
+    Page { path: "/dashboard/projects/", exact: false, kind: "project", read: "workspace_get_project", args: |s, _| Some(json!({ "id": s.first()? })), shape: "/dashboard/projects/<id>", not: &[] },
+    Page { path: "/dashboard/apps/", exact: false, kind: "service", read: "apps_get_service", args: |s, _| Some(json!({ "service": s.first()? })), shape: "/dashboard/apps/<id>", not: &["visit"] },
     // A change's page reads the change (`owner/repo#N`); a repo's, its changes.
     Page {
         path: "/dashboard/code/",
@@ -64,19 +67,22 @@ pub static PAGES: &[Page] = &[
         kind: "change",
         read: "code_get_change",
         args: |s, _| (s.len() >= 4 && s[2] == "changes" && s[3].bytes().all(|b| b.is_ascii_digit())).then(|| json!({ "change": format!("{}/{}#{}", s[0], s[1], s[3]) })),
-        shape: "/dashboard/code/<owner>/<repo>/changes/<n>",
+        shape: "/dashboard/code/<owner>/<repo>/changes/<n>", not: &[],
     },
-    Page { path: "/dashboard/code/", exact: false, kind: "repo", read: "code_list_changes", args: |s, _| (s.len() >= 2).then(|| json!({ "repo": format!("{}/{}", s[0], s[1]) })), shape: "/dashboard/code/<owner>/<repo>" },
-    Page { path: "/dashboard/redis/", exact: false, kind: "redis", read: "redis_get_database", args: |s, _| Some(json!({ "database": s.first()? })), shape: "/dashboard/redis/<id>" },
-    Page { path: "/dashboard/nosql/", exact: false, kind: "nosql", read: "nosql_get_database", args: |s, _| Some(json!({ "database": s.first()? })), shape: "/dashboard/nosql/<id>" },
-    Page { path: "/dashboard/search/", exact: false, kind: "search", read: "search_get_cluster", args: |s, _| Some(json!({ "cluster": s.first()? })), shape: "/dashboard/search/<id>" },
-    Page { path: "/dashboard/storage/", exact: false, kind: "bucket", read: "storage_get_bucket", args: |s, _| Some(json!({ "bucket": s.first()? })), shape: "/dashboard/storage/<bucket>" },
-    Page { path: "/dashboard/access/tokens/", exact: false, kind: "token", read: "access_get_token", args: |s, _| Some(json!({ "id": s.first()? })), shape: "/dashboard/access/tokens/<id>" },
+    Page { path: "/dashboard/code/", exact: false, kind: "repo", read: "code_list_changes", args: |s, _| (s.len() >= 2).then(|| json!({ "repo": format!("{}/{}", s[0], s[1]) })), shape: "/dashboard/code/<owner>/<repo>", not: &[] },
+    Page { path: "/dashboard/redis/", exact: false, kind: "redis", read: "redis_get_database", args: |s, _| Some(json!({ "database": s.first()? })), shape: "/dashboard/redis/<id>", not: &[] },
+    Page { path: "/dashboard/nosql/", exact: false, kind: "nosql", read: "nosql_get_database", args: |s, _| Some(json!({ "database": s.first()? })), shape: "/dashboard/nosql/<id>", not: &[] },
+    Page { path: "/dashboard/search/", exact: false, kind: "search", read: "search_get_cluster", args: |s, _| Some(json!({ "cluster": s.first()? })), shape: "/dashboard/search/<id>", not: &[] },
+    Page { path: "/dashboard/storage/", exact: false, kind: "bucket", read: "storage_get_bucket", args: |s, _| Some(json!({ "bucket": s.first()? })), shape: "/dashboard/storage/<bucket>", not: &["-"] },
+    Page { path: "/dashboard/access/tokens/", exact: false, kind: "token", read: "access_get_token", args: |s, _| Some(json!({ "id": s.first()? })), shape: "/dashboard/access/tokens/<id>", not: &[] },
     // A token's audit names it in the query; an approval's page too (read now, no wait).
-    Page { path: "/dashboard/access/audit", exact: true, kind: "token", read: "access_get_token", args: |_, q| Some(json!({ "id": q.get("grant")? })), shape: "/dashboard/access/audit?grant=<id>" },
-    Page { path: "/dashboard/access/approvals", exact: true, kind: "approval", read: "access_wait_approval", args: |_, q| Some(json!({ "approval_id": q.get("id")?, "wait": 0 })), shape: "/dashboard/access/approvals?id=<id>" },
-    Page { path: "/dashboard/queues/queues/", exact: false, kind: "queue", read: "queues_get_queue", args: |s, _| (s.len() >= 2).then(|| json!({ "vhost": s[0], "queue": s[1] })), shape: "/dashboard/queues/queues/<vhost>/<queue>" },
-    Page { path: "/dashboard/queues/queues", exact: true, kind: "vhost", read: "queues_list_queues", args: |_, q| Some(json!({ "vhost": q.get("vhost")? })), shape: "/dashboard/queues/queues?vhost=<vhost>" },
+    Page { path: "/dashboard/access/audit", exact: true, kind: "token", read: "access_get_token", args: |_, q| Some(json!({ "id": q.get("grant")? })), shape: "/dashboard/access/audit?grant=<id>", not: &[] },
+    Page { path: "/dashboard/access/approvals", exact: true, kind: "approval", read: "access_wait_approval", args: |_, q| Some(json!({ "approval_id": q.get("id")?, "wait": 0 })), shape: "/dashboard/access/approvals?id=<id>", not: &[] },
+    Page { path: "/dashboard/queues/queues/", exact: false, kind: "queue", read: "queues_get_queue", args: |s, _| (s.len() >= 2).then(|| json!({ "vhost": s[0], "queue": s[1] })), shape: "/dashboard/queues/queues/<vhost>/<queue>", not: &[] },
+    // Postgres and streams keep their selection in the query (`?project=`, `?stream=`).
+    Page { path: "/dashboard/databases", exact: true, kind: "postgres", read: "postgres_get_project", args: |_, q| Some(json!({ "project": q.get("project")? })), shape: "/dashboard/databases?project=<id>", not: &[] },
+    Page { path: "/dashboard/streams", exact: true, kind: "stream", read: "streams_get", args: |_, q| Some(json!({ "stream": q.get("stream")? })), shape: "/dashboard/streams?stream=<id>", not: &[] },
+    Page { path: "/dashboard/queues/queues", exact: true, kind: "vhost", read: "queues_list_queues", args: |_, q| Some(json!({ "vhost": q.get("vhost")? })), shape: "/dashboard/queues/queues?vhost=<vhost>", not: &[] },
 ];
 
 /// The fields a name is matched on.
@@ -105,7 +111,7 @@ pub fn resolve(link: &str) -> Option<(&'static Page, Value)> {
     PAGES.iter().find_map(|p| {
         let rest = if p.exact { (path == p.path).then_some("")? } else { path.strip_prefix(p.path)? };
         let segments: Vec<String> = rest.split('/').filter(|s| !s.is_empty()).map(|s| percent_encoding::percent_decode_str(s).decode_utf8_lossy().into_owned()).collect();
-        if segments.iter().any(String::is_empty) {
+        if segments.iter().any(String::is_empty) || segments.first().is_some_and(|f| p.not.contains(&f.as_str())) {
             return None;
         }
         (p.args)(&segments, &query).map(|a| (p, a))
@@ -126,16 +132,29 @@ fn rank(item: &Value, q: &str) -> Option<u8> {
     }).min()
 }
 
-/// One match: what it is, its id and name, and the read that goes on from it.
-fn found(k: &Kind, item: &Value) -> Option<Value> {
+/// One match: what it is, its id and name, the read that goes on from it, and its dashboard page
+/// for a person (`web`: the dashboard's origin; none when roll doesn't know it).
+fn found(k: &Kind, item: &Value, web: &str) -> Option<Value> {
     let id = k.id.iter().find_map(|f| item[*f].as_str())?;
     let name = ["name", "full_name", "title"].iter().find_map(|f| item[*f].as_str()).unwrap_or(id);
-    Some(json!({ "kind": k.kind, "id": id, "name": name, "read": { "tool": k.read, "arguments": { k.param: id } } }))
+    let mut m = json!({ "kind": k.kind, "id": id, "name": name, "read": { "tool": k.read, "arguments": { k.param: id } } });
+    if let Some(url) = page_url(k, id, web) {
+        m["url"] = json!(url);
+    }
+    Some(m)
+}
+
+/// `k`'s dashboard page for `id` on `web`: each part of the id encoded (a repo's `owner/name` keeps
+/// its `/`).
+pub fn page_url(k: &Kind, id: &str, web: &str) -> Option<String> {
+    let page = k.page.filter(|_| !web.is_empty())?;
+    let id: Vec<String> = id.split('/').map(|p| percent_encoding::utf8_percent_encode(p, crate::tools::SEGMENT).to_string()).collect();
+    Some(format!("{}{}", web.trim_end_matches('/'), page.replace("{}", &id.join("/"))))
 }
 
 /// Run `roll_find`: `call(tool, args, quiet)` calls a tool as the caller, `has(tool)` says whether
 /// the connection has it.
-pub async fn run<C, F>(args: &Value, has: impl Fn(&str) -> bool, call: C) -> Value
+pub async fn run<C, F>(args: &Value, web: &str, has: impl Fn(&str) -> bool, call: C) -> Value
 where
     C: Fn(&'static str, Value, bool) -> F,
     F: std::future::Future<Output = Option<Value>>,
@@ -168,7 +187,7 @@ where
         match answer {
             Some(r) if r["isError"] != true => {
                 for item in items(&r["structuredContent"]) {
-                    if let (Some(rank), Some(m)) = (rank(item, &q), found(k, item)) {
+                    if let (Some(rank), Some(m)) = (rank(item, &q), found(k, item, web)) {
                         matches.push((rank, m));
                     }
                 }
@@ -185,7 +204,11 @@ where
     let text = if matches.is_empty() {
         format!("nothing named like {query:?} in what this connection can list")
     } else {
-        matches.iter().map(|m| format!("{} {} ({}): {} {}", m["kind"].as_str().unwrap_or(""), m["name"].as_str().unwrap_or(""), m["id"].as_str().unwrap_or(""), m["read"]["tool"].as_str().unwrap_or(""), m["read"]["arguments"])).collect::<Vec<_>>().join("\n")
+        matches.iter().map(|m| {
+            let url = m["url"].as_str().map(|u| format!(" {u}")).unwrap_or_default();
+            // A name and an id as JSON strings: what someone else named a thing can't pass for a line.
+            format!("{} {} ({}): {} {}{url}", m["kind"].as_str().unwrap_or(""), m["name"], m["id"], m["read"]["tool"].as_str().unwrap_or(""), m["read"]["arguments"])
+        }).collect::<Vec<_>>().join("\n")
     };
     let structured = json!({ "matches": matches, "more": more, "skipped": skipped });
     json!({ "content": [{ "type": "text", "text": text }], "structuredContent": structured, "isError": false })
@@ -221,9 +244,32 @@ mod tests {
         assert_eq!(read("https://roll.sh/dashboard/access/audit?grant=tok_1&product=x"), Some(("access_get_token", json!({ "id": "tok_1" }))));
         assert_eq!(read("https://roll.sh/dashboard/queues/queues/%2F/orders"), Some(("queues_get_queue", json!({ "vhost": "/", "queue": "orders" }))));
         assert_eq!(read("https://roll.sh/dashboard/queues/queues?vhost=prod"), Some(("queues_list_queues", json!({ "vhost": "prod" }))));
-        for nothing in ["https://roll.sh/dashboard/code/acme", "https://roll.sh/dashboard/access", "https://roll.sh/dashboard/access/approvals", "https://roll.sh/dashboard/access/approvalsx?id=a", "file:///dashboard/apps/x"] {
+        for nothing in ["https://roll.sh/dashboard/apps/visit?service=svc_1", "https://roll.sh/dashboard/storage/-/iam", "https://roll.sh/dashboard/code/acme", "https://roll.sh/dashboard/access", "https://roll.sh/dashboard/access/approvals", "https://roll.sh/dashboard/access/approvalsx?id=a", "file:///dashboard/apps/x"] {
             assert!(resolve(nothing).is_none(), "{nothing}");
         }
+    }
+
+    #[test]
+    fn no_read_it_makes_reveals() {
+        // roll_find's answer is the read's, and the inspector judges it by roll_find's name: so no
+        // read it makes may be one that reveals a credential.
+        let all = crate::tools::all();
+        for read in KINDS.iter().map(|k| k.read).chain(PAGES.iter().map(|p| p.read)).filter(|r| !r.starts_with("code_")) {
+            let t = all.iter().find(|t| t.name == read).unwrap();
+            assert!(!t.actions().contains(&roll_auth::scope::Action::Reveal), "{read} reveals");
+        }
+    }
+
+    #[test]
+    fn a_matchs_page_reads_back_as_that_match() {
+        // A match's link, pasted back, is the same read with the same arguments.
+        for k in KINDS.iter().filter(|k| k.page.is_some()) {
+            let id = if k.kind == "repo" { "acme/web app" } else { "x_1 é" };
+            let url = page_url(k, id, "https://roll.example/").unwrap();
+            let (page, args) = resolve(&url).unwrap_or_else(|| panic!("{url}"));
+            assert_eq!((page.read, args), (k.read, json!({ k.param: id })), "{url}");
+        }
+        assert!(page_url(&KINDS[0], "prj_1", "").is_none(), "no dashboard known, no link");
     }
 
     #[test]

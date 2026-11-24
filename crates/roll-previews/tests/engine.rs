@@ -422,6 +422,60 @@ async fn a_previews_metrics_are_what_its_running_services_use() {
     assert!(matches!(e.engine.metrics("pv_nope").await, Err(roll_previews::Error::NotFound(_))));
 }
 
+/// A trusted preview's own services get roll's word for the clouds the project names
+/// (`oidc_audiences`): an address of their own (`ROLL_OIDC_URL`) answering a token for a named
+/// audience, as the service it is (another audience is a 403, an address that isn't one a 404),
+/// answered again for a minute rather than signed again.
+#[tokio::test]
+async fn a_previews_service_gets_roll_s_word_for_a_named_cloud_only() {
+    use roll_previews::ports::EnvSource;
+    struct FakeIssuer(std::sync::Mutex<Vec<(String, String, String)>>);
+    #[async_trait::async_trait]
+    impl roll_previews::ports::Issuer for FakeIssuer {
+        async fn issue(&self, _project: &str, _repo: &str, preview: &str, service: &str, aud: &str, _ttl: std::time::Duration) -> anyhow::Result<Option<String>> {
+            self.0.lock().unwrap().push((preview.into(), service.into(), aud.into()));
+            Ok(Some(format!("jwt-for-{service}-{aud}")))
+        }
+    }
+    let e = env(json!({ "enabled": true, "oidc_audiences": ["sts.amazonaws.com", "roll"] }));
+    let issuer = Arc::new(FakeIssuer(std::sync::Mutex::new(Vec::new())));
+    let _ = e.engine.issuer.set(issuer.clone());
+    e.code.open(change("chg_oi", 9));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_oi").unwrap().unwrap();
+    let web = e.engine.store.services(&p.id).unwrap()[0].name.clone();
+    let (_, vars) = EnvSource::env(e.engine.as_ref(), &p.id, &web).await.unwrap();
+    let var = |k: &str| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    let url = var("ROLL_OIDC_URL").expect("an address of its own");
+    assert!(url.starts_with(&format!("http://127.0.0.1:7070/v1/previews/{}/oidc/", p.id)) && var("ROLL_OIDC_AUDIENCE").as_deref() == Some("sts.amazonaws.com"), "{url}");
+    let token = url.rsplit('/').next().unwrap();
+    assert_eq!(e.engine.oidc(&p.id, token, None).await.unwrap().token, format!("jwt-for-{web}-sts.amazonaws.com"));
+    assert_eq!(e.engine.oidc(&p.id, token, Some("roll")).await.unwrap().token, format!("jwt-for-{web}-roll"));
+    assert!(matches!(e.engine.oidc(&p.id, token, Some("storage.googleapis.com")).await, Err(roll_previews::Error::Forbidden(_))));
+    assert!(matches!(e.engine.oidc(&p.id, "0123abcd", None).await, Err(roll_previews::Error::NotFound(_))));
+    e.engine.oidc(&p.id, token, None).await.unwrap();
+    assert_eq!(issuer.0.lock().unwrap().len(), 2, "a minute's token answered again, not signed again");
+}
+
+/// A look at a data branch from the sheet (Neon's Tables): a ready Postgres branch's tables and a
+/// table's rows, through the product as the branch's own role; a kind with no way to show it yet
+/// is a 409, and a data branch the preview doesn't have a 404.
+#[tokio::test]
+async fn a_previews_data_branch_is_looked_at_from_the_sheet() {
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_db", 8));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_db").unwrap().unwrap();
+    let res = e.engine.store.resources(&p.id).unwrap();
+    let id = |k: Kind| res.iter().find(|r| r.kind == k).map(|r| format!("{}:{}", r.kind.as_str(), r.parent)).unwrap();
+    let tables = e.engine.browse(&p.id, &id(Kind::Postgres), None).await.unwrap();
+    assert!(matches!(&tables, roll_previews::Browse::Tables { tables } if tables[0].name == "public.users"), "{tables:?}");
+    let rows = e.engine.browse(&p.id, &id(Kind::Postgres), Some("public.users")).await.unwrap();
+    assert!(matches!(&rows, roll_previews::Browse::Rows { rows, .. } if rows[0][0].as_deref().is_some_and(|v| v.ends_with(".invalid"))), "{rows:?}");
+    assert!(matches!(e.engine.browse(&p.id, &id(Kind::Redis), None).await, Err(roll_previews::Error::Conflict(_))));
+    assert!(matches!(e.engine.browse(&p.id, "postgres:nope", None).await, Err(roll_previews::Error::NotFound(_))));
+}
+
 /// A secret value its pages serve (Netlify's secrets scan) is named on its record and in its
 /// activity, with where, never the value; one meant for the browser (`NEXT_PUBLIC_…`) or a user
 /// name isn't.
@@ -448,6 +502,33 @@ async fn a_secret_value_its_pages_serve_is_named_on_its_record() {
     assert_eq!(served(&e), [roll_previews::ServedSecret { key: "STRIPE_KEY".into(), path: "/assets/app.js".into() }]);
     let said: Vec<String> = e.engine.store.activity(&p.id).unwrap().into_iter().map(|a| a.message).filter(|m| m.contains("serve secret values")).collect();
     assert!(said.len() == 1 && said[0].contains("STRIPE_KEY in /assets/app.js") && !said[0].contains("sk_test"), "{said:?}");
+}
+
+/// A fork's preview is marked `outside`, and so are its error groups and its logs (its traces,
+/// spans and routes too): its title and what its code wrote are text from people who can't push,
+/// which roll MCP's lockdown keeps from a model; a trusted preview isn't.
+#[tokio::test]
+async fn a_forks_preview_and_its_errors_are_marked_outside() {
+    use tower::ServiceExt;
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_out", 3));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_out").unwrap().unwrap();
+    let web = e.engine.store.services(&p.id).unwrap()[0].name.clone();
+    let group = roll_previews::ErrorGroup { service: String::new(), fingerprint: "aa".into(), kind: "line".into(), title: "x".into(), count: 1, first_seen: 1, last_seen: 2, sample: "x".into(), trace: None };
+    e.apps.errors.lock().insert(web, vec![group]);
+    let get = |path: String| {
+        let router = roll_previews::api::router(e.engine.clone());
+        async move {
+            let resp = router.oneshot(axum::http::Request::get(path).body(axum::body::Body::empty()).unwrap()).await.unwrap();
+            serde_json::from_slice::<serde_json::Value>(&axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap()).unwrap()
+        }
+    };
+    assert!(get(format!("/v1/previews/{}", p.id)).await.get("outside").is_none());
+    e.engine.store.update(&p.id, |r| r.trusted = false).unwrap();
+    assert_eq!(get(format!("/v1/previews/{}", p.id)).await["outside"], json!(true));
+    assert_eq!(get(format!("/v1/previews/{}/errors?minutes=360", p.id)).await["groups"][0]["outside"], json!(true));
+    assert_eq!(get(format!("/v1/previews/{}/logs", p.id)).await["outside"], json!(true), "its log lines too");
 }
 
 /// A preview's errors are its services' groups, newest first, named by service, with a secret its
@@ -1903,6 +1984,33 @@ async fn a_service_that_didnt_change_keeps_its_pages() {
     e.engine.pass().await.unwrap();
     taken(&e.apps, "web", web_before + 1).await;
     assert_eq!(runs("web"), web_before + 1, "after a reset its pages are taken again");
+}
+
+/// The first page in the project's modes (`github.modes`: dark, another language): each a page of
+/// its own (`mode:<name>`), kept and served by the sheet's picture route, as a state's page is.
+#[tokio::test]
+async fn the_first_page_in_each_mode_is_a_page_of_its_own() {
+    use tower::ServiceExt;
+    let e = env(json!({ "enabled": true, "github": { "screenshot": true, "modes": [{ "name": "dark", "color_scheme": "dark" }], "states": [{ "name": "tab", "page": "/", "steps": [{ "press": "Tab" }] }] } }));
+    let mut png = Vec::new();
+    image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    *e.apps.shot.lock() = Some(png);
+    e.code.open(change("chg_md", 3));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_md").unwrap().unwrap();
+    let pages = |e: &Env| e.engine.store.preview(&p.id).unwrap().pages.iter().map(|x| x.path.clone()).collect::<Vec<_>>();
+    for _ in 0..3000 {
+        if pages(&e).contains(&"mode:dark".to_string()) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(pages(&e).contains(&"mode:dark".to_string()), "{:?}", pages(&e));
+    for key in ["mode:dark", "state:tab"] {
+        let req = axum::http::Request::get(format!("/v1/previews/{}/screenshot?page={key}", p.id)).body(axum::body::Body::empty()).unwrap();
+        let resp = roll_previews::api::router(e.engine.clone()).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200, "the sheet's picture of {key}");
+    }
 }
 
 /// A Storybook another service serves (`github.storybook`): its stories are pages of their own
