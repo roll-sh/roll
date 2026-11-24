@@ -239,6 +239,7 @@ type Build = {
    *  wins over it. */
   watch?: string[];
   spa?: boolean;            // a single-page app (a page path with no file answers index.html); unset: detected
+  output?: string;          // where a static build's files are, relative to the build's root (Netlify's publish directory): a Node app with one is built and that directory served as a static site; unset: detected (a generator's own, netlify.toml's publish, vercel.json's outputDirectory)
   target?: string;          // the tree's own Dockerfile's stage to build (--target): letters, digits, _ - . (64 at most)
   /** System packages the generated Dockerfile installs, apt (or apk on Alpine) in every stage built on an image:
    *  at most 50 names of lowercase letters, digits and + - . : = ~ _; refused for a static site and a

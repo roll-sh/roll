@@ -406,6 +406,10 @@
           "type": "boolean",
           "description": "A single-page app: unknown paths answer index.html."
         },
+        "output": {
+          "type": "string",
+          "description": "Where a static build's files are (dist, out, public): a Node app with one is served as a static site."
+        },
         "run": {
           "$ref": "#/definitions/run"
         },
@@ -552,6 +556,9 @@
         "spa": {
           "$ref": "#/definitions/settings/properties/spa"
         },
+        "output": {
+          "$ref": "#/definitions/settings/properties/output"
+        },
         "packages": {
           "$ref": "#/definitions/settings/properties/packages"
         },
@@ -610,6 +617,9 @@
         },
         "spa": {
           "$ref": "#/definitions/settings/properties/spa"
+        },
+        "output": {
+          "$ref": "#/definitions/settings/properties/output"
         },
         "packages": {
           "$ref": "#/definitions/settings/properties/packages"

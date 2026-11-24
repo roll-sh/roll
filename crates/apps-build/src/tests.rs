@@ -103,6 +103,37 @@ fn next_on_pnpm() {
     );
 }
 
+/// Static site generators each publish their own directory, and a set output directory (or the
+/// platform file's) is the site whatever was detected.
+#[test]
+fn site_generators_publish_their_own_directory() {
+    let site = |deps: &str, build: &str, extra: &[(&str, &str)]| {
+        let pkg = format!(r#"{{"scripts": {{"build": "{build}", "start": "dev-server"}}, "dependencies": {{{deps}}}}}"#);
+        let mut files = vec![("package.json", pkg.as_str())];
+        files.extend_from_slice(extra);
+        let p = detect(&files);
+        assert_eq!(p.provider, Provider::Static, "{deps}: {:?}", p.notes);
+        p
+    };
+    has(&site(r#""@docusaurus/core": "3.9.0""#, "docusaurus build", &[]), &["COPY --from=build /app/build /site"]);
+    has(&site(r#""@11ty/eleventy": "3.1.0""#, "eleventy", &[]), &["COPY --from=build /app/_site /site"]);
+    has(&site(r#""vitepress": "1.6.0""#, "vitepress build docs", &[]), &["COPY --from=build /app/docs/.vitepress/dist /site"]);
+    let angular = r#"{"projects": {"shop": {"architect": {"build": {"options": {"outputPath": "dist/shop"}}}}}}"#;
+    has(&site(r#""@angular/core": "20.0.0", "@angular/build": "20.0.0""#, "ng build", &[("angular.json", angular)]), &["COPY --from=build /app/dist/shop/browser /site"]);
+    // A server app with build.output, or with netlify.toml's publish: its files are the site.
+    let express = r#"{"scripts": {"build": "node gen.js"}, "dependencies": {"express": "5.0.0"}}"#;
+    let set = plan(&tree(&[("package.json", express)]), &Overrides { output: s("./out/"), ..Overrides::default() }).unwrap();
+    assert_eq!(set.provider, Provider::Static);
+    has(&set, &["COPY --from=build /app/out /site"]);
+    let generated = r#"{"scripts": {"build": "node gen.js"}}"#;
+    let netlify = detect(&[("package.json", generated), ("netlify.toml", "[build]\npublish = \"public/\"\n")]);
+    has(&netlify, &["COPY --from=build /app/public /site"]);
+    assert!(netlify.notes.iter().any(|n| n.contains("netlify.toml's publish")), "{:?}", netlify.notes);
+    // A server framework's netlify.toml (Next.js publishes .next) isn't a site.
+    let next = r#"{"scripts": {"build": "next build"}, "dependencies": {"next": "16.0.0"}}"#;
+    assert_ne!(detect(&[("package.json", next), ("netlify.toml", "[build]\npublish = \".next\"\n")]).provider, Provider::Static);
+}
+
 #[test]
 fn vite_on_yarn_is_a_static_site() {
     let p = detect(&[
