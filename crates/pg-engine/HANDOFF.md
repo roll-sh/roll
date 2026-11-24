@@ -15481,6 +15481,68 @@ failed: all passed.
 Not this round's: roll's `VACUUM (VERBOSE)` sends none of PostgreSQL's INFO lines (agent 205's
 note, still open).
 
+## Short write transactions, round 18: a compaction's filter bits for keys the adopted file holds; the standing table; the L0 merge again (agent 313)
+
+BENCH.md "Short write transactions, round 18" has the counts. Plain dist builds (`tools/dist.sh`), b0 =
+the head (`8f3876dab`'s tree), its PGO build pgob0 (`tools/dist-pgo.sh`); work-in-progress builds with
+measuring switches read from the environment (not in any commit), so both arms of a pair ran one
+binary. Harness `~/.cache/a313/bench` (306's), the in-process probe `~/.cache/a313/patches/a313_probe.rs`
+(306's, with a three-source case).
+
+**Where the head stands** (brief item 1, one run a cell, lane A at 1-2.2 foreign cores on the
+server CPUs). The five statements alone sum to 430.2k user instructions a transaction on the plain
+build (connection threads 310.7k, flush thread 119.5k) and 399.5k on the PGO build (247.8k / 151.7k);
+round 15's PostgreSQL 18.6 363k, pgrust 402k. TPC-B-like whole: plain 446.6k at 8 clients, 499.6k at
+32; PGO 334.8k and 311.1k (PostgreSQL 320-326k, pgrust 386-391k at 32, round 11). These are 10 s
+windows: a compaction in the window or not moves the flush column by 100k+ (the fixed-count runs
+below are the gates). What is left is mostly the flush thread: ~100k a transaction at 32 clients
+over a 160k-transaction run, 18% of it (zstd ~1/3 of that, `SstWriter::add`, `zip_entries`); the
+connection threads' profile is flat (no item over 2%).
+
+**What changed** (one commit, `storage/mod.rs`, `storage/sst.rs`). A compaction's output that copies
+blocks of an L1 input takes that file's bloom filter (`SstWriter::adopt`) and, at its end, sets the
+bits of every key it wrote itself (`copied_bloom`): for a big table's UPDATEs, every row of each block
+written again, about 45% of the table's rows each compaction (round 14), all of them keys the adopted
+filter has. The compaction now says which L1 input an entry came from (`Compacted::entry`'s `from`: the
+L1 source's current file, in the merge loop and in `zip_entries`, whose callback now gets the side an
+entry came from), and the writer keeps those keys' hashes apart (`SstWriter::add_from`: `known`, of
+one file at a time). When the output adopted that file, their bits are not set again; for a filter
+made anew (no file adopted, a file without a filter, or the adopted one too full: the fallback reads
+the copied blocks' keys) they are added as before. The filter is the same bits as before: the skipped
+ones are set already. Keys of another L1 file than the one adopted, and every L0 key (a newer version
+or a new row), are set as before.
+
+**Measured** (BENCH "round 18"): 160k TPC-B-like transactions at 32 clients, the merge switched off
+(the head's compactions), two alternating pairs: 589.8k -> 575.3k and 583.9k -> 569.1k user
+instructions a transaction (-2.5% both; pair 2's base run made one L1 compaction fewer), the flush
+thread 111.1k -> 100.5k in the pair with equal compactions; `bloom_set` (1.64% of the run) gone from
+the profile. Not gated on PGO (no inlining or function-boundary aim).
+
+Verification: `tools/quick-check.sh` with `QC_CHECKED=1` and `QC_TESTS="crash_ctids big_tables"` on
+`33b97131f` (this commit on `8f3876dab`): 24 test binaries, clippy 16 warnings, none new in a changed
+file, 413 tests in 20 binaries (the lib's unit tests with the compaction and copied-block tests,
+crash_ctids, big_tables, golden, wire among them), the same 413 built `--profile verify-checked`,
+`crash_random` seeds 1-3 x 2 rounds and `power_cut_at_every_point`, regress 51,148 / 51,150 (0 newly
+differing), isolation 1,647 / 1,648, pg_dump_tap 14,609. `tools/crash-binary.py` seeds 1-3 (7 rounds
+each) against n4, a plain dist build with all of this round's code (this commit, the overlay list of
+cand/a313-3 and the L0 merge): all ok (7 kill rounds and a clean shutdown each, every acknowledged
+transaction found, sums equal). Rebased onto `83a21ef3f` (as cand/a313-2; cand/a313 is this on `8f3876dab`), with
+cand/a313-3's commit on top: `tools/quick-check.sh` as above on `9ba0f74a8`, all green with 28 test
+binaries, 436 tests in 24 binaries and the same counts of the reference suites (a first run's regress
+step failed to start: the reference container had been stopped by the machine's idle timer).
+
+**The L0 merge, gated a third time: still not landed** (`~/.cache/a305/patches/l0-merge-3f0f6d320.patch`,
+applied unchanged). On top of the overlay list (cand/a313-3, which lowers a newer entry's cost inside
+a range read), across the write cycle, merge against no merge on one binary: select-only -2.2%,
+-1.4%, -3.1%; the 100-row read +1.2%, +0.5%, +0.7%; the 1,000-row +1.5%, +1.2%, +1.2% (three pairs,
+the first on an earlier form of the list; round 17 without the list +2.6% / +3.2%). The gate (every
+read level or better in every pair) fails. The write side measured again (480k transactions, one
+pair): 546.1k -> 492.3k user instructions a transaction (-9.9%), L1 compactions 13 -> 4. Why reads
+still pay: the merge keeps L0's entries about three times as many flushes before they go to L1, so a
+read meets about three times as many newer versions; in a 1,000-row range of the TPC-B cycle they lie
+about one to a block of L1, where a newer entry still costs ~2k user instructions in process against
+~220 for a row (cand/a313-3's part below has where).
+
 ## Short write transactions, round 17: a range read's run goes on between newer versions; the L0 merge gated again (agent 306)
 
 BENCH.md "Short write transactions, round 17" has the counts. Plain dist builds (`tools/dist.sh`):

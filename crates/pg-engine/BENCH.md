@@ -688,6 +688,94 @@ Per query peaks in the 22 (MB, `bench --mem-cgroup`): q01 357-360, q02-q09 368-3
 q11 467, q12 389-395, q13 448-456, q14 448-456, q15 421-425, q16 415-420, q17-q22 380-420 (q18 410-420).
 `MIMALLOC_PURGE_DELAY=0` on pgbench -i: peak 634.7, end 34.2 MB (default: 674-726, end 174-202).
 
+## Short write transactions, round 18: the standing table, a compaction's filter bits, the L0 merge again (2026-11-24, agent 313)
+
+HANDOFF "Short write transactions, round 18" has what changed. Plain dist builds (`tools/dist.sh`):
+**b0** = `7e6df5f9c` (the tree of `8f3876dab`, cand/a306 landed); **pgob0** = `tools/dist-pgo.sh` of it
+(profile staleness 0.00%); **n1**-**n4** = b0 + this round's work in progress with measuring switches
+read from the environment (`A313_NO_MERGE`: no L0 merge; `A313_OLD`: no overlay list), one binary for
+both arms of a pair: n2 = `d58c55bc9` (the bloom commit on the list's first form and the L0 merge), n4 =
+`5a3c1780c` (the list in its last form, the bloom commit, the L0 merge). Harness `~/.cache/a313/bench`
+(306's, with `epair.sh`: one alternating pair on one binary by switch, and `ppair2.sh` for `probe.sh`).
+One table or pair a `tools/lane.sh` hold; lanes A and B carried 4.9-6.8 foreign cores of their 8 CPUs
+in every hold (over the 1.0 rule in all): the gates are on user instructions, cycles and tps readings.
+
+### Standing table (brief item 1; lane A, one run a cell, `-D scale=32` on every `-f` script)
+
+10 s cells after `pgbench -i -s 32`; conn / flush: the connection threads' user instructions (`perf stat
+--per-thread --no-inherit`) and the rest of the cgroup's (the flush thread). PostgreSQL 18.6's and
+pgrust's rows: round 15's (BENCH "Short write transactions, round 15", agent 299's table) stand.
+
+| statement | clients | build | tps | p99 ms | user instr | conn / flush | user cycles | kernel instr | yields | foreign |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| BEGIN; END | 8 | roll b0 (plain) | 41,131 | 1.569 | 23,368 | 23,366 / 2 | 47,400 | 78,846 | 0.000 | 1.61 |
+| BEGIN; END | 8 | roll pgob0 (PGO) | 47,423 | 0.472 | 17,175 | 17,161 / 14 | 26,239 | 77,310 | 0.000 | 1.39 |
+| INSERT history | 8 | roll b0 (plain) | 17,431 | 3.141 | 51,449 | 48,019 / 3,430 | 140,147 | 70,168 | 0.348 | 2.24 |
+| INSERT history | 8 | roll pgob0 (PGO) | 25,664 | 1.759 | 42,007 | 39,610 / 2,397 | 91,249 | 70,786 | 0.325 | 1.76 |
+| UPDATE tellers | 8 | roll b0 (plain) | 13,686 | 3.365 | 101,343 | 73,476 / 27,867 | 255,484 | 77,639 | 0.943 | 1.94 |
+| UPDATE tellers | 8 | roll pgob0 (PGO) | 19,298 | 2.065 | 58,881 | 58,739 / 142 | 146,100 | 74,615 | 0.999 | 1.78 |
+| UPDATE branches | 8 | roll b0 (plain) | 13,266 | 3.489 | 75,904 | 75,462 / 442 | 232,794 | 79,219 | 0.981 | 2.15 |
+| UPDATE branches | 8 | roll pgob0 (PGO) | 17,873 | 3.085 | 73,104 | 59,222 / 13,882 | 154,996 | 78,318 | 0.970 | 1.83 |
+| UPDATE accounts | 8 | roll b0 (plain) | 10,236 | 4.325 | 178,178 | 90,346 / 87,832 | 378,938 | 92,601 | 0.973 | 2.03 |
+| UPDATE accounts | 8 | roll pgob0 (PGO) | 12,583 | 5.117 | 208,341 | 73,082 / 135,259 | 311,274 | 92,933 | 0.803 | 1.81 |
+| SELECT accounts | 8 | roll b0 (plain) | 47,380 | 0.401 | 39,762 | 39,732 / 30 | 108,344 | 38,966 | 0.000 | 1.17 |
+| SELECT accounts | 8 | roll pgob0 (PGO) | 48,856 | 0.534 | 35,111 | 35,131 / -20 | 77,420 | 41,397 | 0.000 | 1.73 |
+| TPC-B-like | 8 | roll b0 (plain) | 4,387 | 7.135 | 446,637 | 300,957 / 145,680 | 1,161,947 | 348,390 | 2.327 | 1.29 |
+| TPC-B-like | 8 | roll pgob0 (PGO) | 3,948 | 9.619 | 334,811 | 242,431 / 92,380 | 824,728 | 353,882 | 1.670 | 1.97 |
+| TPC-B-like | 32 | roll b0 (plain) | 4,686 | 26.791 | 499,646 | 321,875 / 177,771 | 1,350,110 | 352,414 | 3.153 | 0.95 |
+| TPC-B-like | 32 | roll pgob0 (PGO) | 4,232 | 33.114 | 311,120 | 277,558 / 33,562 | 975,667 | 373,630 | 2.973 | 1.62 |
+
+Sums of the five one-statement rows (BEGIN/END, INSERT history, the three UPDATEs; SELECT apart):
+plain 430.2k (conn 310.7k, flush 119.5k), PGO 399.5k (conn 247.8k, flush 151.7k); round 15: roll
+524k (its base), PostgreSQL 363k, pgrust 402k. TPC-B-like whole: plain 446.6k / 499.6k (8 / 32
+clients), PGO 334.8k / 311.1k; PostgreSQL 320-326k and pgrust 386-391k at 32 clients (round 11).
+The flush column moves with whether a compaction falls in a 10 s window (UPDATE tellers' flush 27.9k
+plain against 0.1k PGO; TPC-B at 32 clients 177.8k against 33.6k): the fixed-count runs below are the
+write gates. The PGO build's TPC-B rows are under pgrust's and about PostgreSQL's here, its
+statements' sum about pgrust's; the gap left is the flush thread's (the plain fixed-count runs
+below: ~100 k a transaction at 32 clients, 18% of the run).
+
+A flat profile of the TPC-B 8-client cell (plain b0, period 2,000,003, `instructions:u`): roll-conn
+72.7%, roll-flush 27.3%; the flush thread's zstd 8.6% of all, `SstWriter::add` 3.5%, `zip_entries`
+2.7%, `bloom_set` 2.6%; the connection threads' largest items each under 2% (`Block::seek` 1.8%,
+`Lps::settle` 1.7%, mimalloc ~4% together, the server loop 1.4%, zstd decompression 1.3%).
+
+### A compaction's keys from the file whose filter it adopted (n1 -> n2, lane A, `fixed.sh`)
+
+160k TPC-B-like transactions at 32 clients, both builds with `A313_NO_MERGE=1` (every L0 compaction
+into L1, as on the head); the cgroup's counts over the run a transaction, the flush thread's share from
+a flat profile of the run:
+
+| pair | build | L1 compactions | user instr | flush thread | conn | user cycles | foreign |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 1 | n1 | 6 | 589,825 | 111.1k (18.8%) | 475.8k | 1,776,235 | 6.77 |
+| 1 | n2 | 6 | 575,302 (-2.5%) | 100.5k (17.5%) | 471.9k | 1,724,638 | 6.77 |
+| 2 | n2 | 6 | 569,131 | 102.0k (17.9%) | 464.1k | 1,772,205 | 6.23 |
+| 2 | n1 | 5 | 583,855 | 83.8k (14.4%) | 497.0k | 1,831,714 | 6.23 |
+
+Pair 2's n1 run made one compaction fewer and still read 2.5% more. `bloom_set` was 1.64% of n1's
+run (9.7k a transaction) and is out of n2's top symbols. Not gated on PGO (no inlining or function
+boundary aim: the compaction's per-entry path takes one more argument).
+
+### The L0 merge on the overlay list (n3, n4; `cycle.sh` and `fixed.sh`, lane A)
+
+`cycle.sh` (34 rounds of 7,040 TPC-B transactions at 32 clients, after each 2 s of each read at 8
+clients; user instructions a read), one binary, `A313_NO_MERGE=1` against the merge:
+
+| pair | build | events | select-only | 100-row BETWEEN | 1,000-row BETWEEN | foreign |
+|---|---|---|---:|---:|---:|---:|
+| 1 | n1, no merge | 26 flushes, 7 compactions | 48,428 | 334,344 | 2,170,578 | 6.04 |
+| 1 | n1, merge | 26 flushes, 9 merges, 3 compactions | 47,365 (-2.2%) | 338,444 (+1.2%) | 2,203,345 (+1.5%) | 6.04 |
+| 1 | n3, no merge | 26 flushes, 7 compactions | 48,016 | 336,178 | 2,171,585 | 5.53 |
+| 1 | n3, merge | 27 flushes, 9 merges, 3 compactions | 47,349 (-1.4%) | 337,892 (+0.5%) | 2,197,927 (+1.2%) | 5.53 |
+| 2 | n4, merge | 26 flushes, 9 merges, 3 compactions | 46,831 | 339,626 | 2,203,947 | 5.65 |
+| 2 | n4, no merge | 27 flushes, 8 compactions | 48,330 (merge -3.1%) | 337,385 (merge +0.7%) | 2,176,934 (merge +1.2%) | 5.65 |
+
+Round 17's pair (without the list): +2.6% / +3.2%. The write side on n3, 480k transactions at 32
+clients, one pair (4.89 foreign cores): no merge 546,148 user instructions a transaction (13 L1
+compactions, flush thread 97.1k, md2 write bytes 4,196), merge 492,281 (-9.9%; 4 compactions and 18
+L0 merges, flush thread 62.7k, 3,650 bytes), user cycles 1.42 M -> 1.38 M, tps 4,281 / 4,257.
+
 ## Short write transactions, round 17: a range read's run between newer versions; the L0 merge again (2026-11-24, agent 306)
 
 HANDOFF "Short write transactions, round 17" has what changed. Plain dist builds (`tools/dist.sh`):
