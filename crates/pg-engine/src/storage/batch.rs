@@ -205,6 +205,11 @@ impl RowBatch {
         self.ents.push(Ent { key_end: (start + n) as u32, buf, off: off as u32, len: len as u32 });
     }
 
+    /// A row whose value is `bufs[buf][off..off + len]` (`buf_index`).
+    pub fn push_at(&mut self, key: &[u8], buf: u32, off: usize, len: usize) {
+        self.push_ent(key, buf, off, len);
+    }
+
     /// A row whose value is `v`.
     pub fn push(&mut self, key: &[u8], v: Bytes) {
         let len = v.len();
