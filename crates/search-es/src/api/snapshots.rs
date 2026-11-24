@@ -80,6 +80,8 @@ pub struct SnapshotData {
     /// Snapshots being taken here, as `GET _snapshot` and `_status` show them until they are
     /// recorded (Elasticsearch's `SnapshotsInProgress`).
     running: parking_lot::Mutex<Vec<Arc<Running>>>,
+    /// Told whenever a snapshot stops running here (a deletion waits for them).
+    running_ended: tokio::sync::Notify,
     /// Each repository's bucket traffic here, by name: throttles and counters.
     io: parking_lot::Mutex<std::collections::HashMap<String, Arc<transfer::RepoIo>>>,
     /// The cluster's `indices.recovery.max_bytes_per_sec`, which restores also pay.
@@ -160,6 +162,7 @@ struct RunningGuard<'a> {
 impl Drop for RunningGuard<'_> {
     fn drop(&mut self) {
         self.data.running.lock().retain(|r| !Arc::ptr_eq(r, &self.entry));
+        self.data.running_ended.notify_waiters();
     }
 }
 
@@ -231,6 +234,18 @@ impl SnapshotData {
         let entry = Arc::new(Running { repo: repo.to_string(), snapshot, shards: parking_lot::Mutex::new(shards) });
         g.push(entry.clone());
         Ok(RunningGuard { data: self, entry })
+    }
+
+    /// Waits until no snapshot runs in repository `repo` here.
+    async fn idle(&self, repo: &str) {
+        loop {
+            // Asked for before looking, so an end between the two isn't missed.
+            let ended = self.running_ended.notified();
+            if self.running_in(repo, None).is_empty() {
+                return;
+            }
+            ended.await;
+        }
     }
 
     /// The snapshots running in repository `repo` that it hasn't recorded yet.
@@ -537,6 +552,12 @@ pub(crate) const INVALID_CHARS_TEXT: &str = "[ , \", *, \\, <, |, ,, >, /, ?]";
 
 fn repository_exception(name: &str, msg: impl std::fmt::Display) -> EsError {
     EsError::new(500, "repository_exception", format!("[{name}] {msg}"))
+}
+
+/// The generation after `g`: none past [`s3::GENERATION_MAX`], so readers and writers never
+/// overflow.
+fn next_generation(g: i64) -> EsResult<i64> {
+    g.checked_add(1).filter(|n| *n <= s3::GENERATION_MAX).ok_or_else(|| EsError::illegal_state(format!("the repository is at generation [{g}], the last there is")))
 }
 
 fn repository_missing(name: &str) -> EsError {
@@ -1211,7 +1232,7 @@ pub async fn create(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 shard_files,
             };
             let mut data = st.metadata.repository_data.get(&key).map(|d| (**d).clone()).unwrap_or_else(|| RepositoryData { uuid: random_uuid(), ..Default::default() });
-            data.generation += 1;
+            data.generation = next_generation(data.generation)?;
             let snapshot = Arc::new(snapshot);
             data.snapshots.push(snapshot.clone());
             st.metadata.repository_data.insert(key, Arc::new(data));
@@ -1408,10 +1429,22 @@ pub async fn delete(ctx: &Ctx<'_>) -> EsResult<Reply> {
     if elastic_repository(ctx, &repo).await? {
         return Err(elastic_read_only(&repo, "delete snapshots"));
     }
+    // As Elasticsearch's: a deletion waits for the snapshots running in the repository, which
+    // may reuse what it would delete (checked again as it's committed).
     let snapshot_data = &ctx.cluster.snapshot_data;
-    let bucket = s3::bucket_repository(&ctx.state(), &repo);
-    let repo_name = repo.clone();
-    let apply = move |st: &mut ClusterState| {
+    let raced = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let deleted = loop {
+        snapshot_data.idle(&repo).await;
+        raced.store(false, std::sync::atomic::Ordering::SeqCst);
+        let (repo, snaps, started) = (repo.clone(), snaps.clone(), raced.clone());
+        let bucket = s3::bucket_repository(&ctx.state(), &repo);
+        let repo_name = repo.clone();
+        let apply = move |st: &mut ClusterState| {
+            // One started since the wait: this attempt stops, and waits again.
+            if !snapshot_data.running_in(&repo, None).is_empty() {
+                started.store(true, std::sync::atomic::Ordering::SeqCst);
+                return Err(EsError::new(503, "concurrent_snapshot_execution_exception", format!("[{repo}] a snapshot started")));
+            }
             let Some(r) = st.metadata.repositories.get(&repo).cloned() else { return Err(repository_missing(&repo)) };
             let key = r.location_key();
             if st.metadata.repository_data.get(&key).is_some_and(|d| d.elastic) {
@@ -1434,15 +1467,20 @@ pub async fn delete(ctx: &Ctx<'_>) -> EsResult<Reply> {
             snapshot_data.check_not_restoring(&repo, &gone)?;
             let gone: Vec<String> = gone.into_iter().map(|(_, u)| u).collect();
             data.snapshots.retain(|s| !snaps.iter().any(|p| p == "_all" || glob_match(p, &s.name)));
-            data.generation += 1;
+            data.generation = next_generation(data.generation)?;
             if !data.uuid.is_empty() {
                 st.metadata.repository_data.insert(key, Arc::new(data));
             }
             Ok(gone)
         };
-    let deleted = match &bucket {
-        Some(r) => s3::delete(ctx, &repo_name, r, apply).await?,
-        None => ctx.cluster.update(apply).await?,
+        let out = match &bucket {
+            Some(r) => s3::delete(ctx, &repo_name, r, apply).await,
+            None => ctx.cluster.update(apply).await,
+        };
+        match out {
+            Err(_) if raced.load(std::sync::atomic::Ordering::SeqCst) => continue,
+            out => break out?,
+        }
     };
     for uuid in &deleted {
         ctx.cluster.snapshot_data.forget(uuid);
@@ -1729,7 +1767,7 @@ pub async fn clone(ctx: &Ctx<'_>) -> EsResult<Reply> {
             };
             let ids = (src.uuid.clone(), cloned.uuid.clone(), cloned.indices.clone());
             data.snapshots.push(Arc::new(cloned));
-            data.generation += 1;
+            data.generation = next_generation(data.generation)?;
             st.metadata.repository_data.insert(key, Arc::new(data));
             saving_ref.store(true, std::sync::atomic::Ordering::Relaxed);
             Ok(ids)

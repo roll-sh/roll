@@ -498,22 +498,31 @@ async fn esql_and_a_migration_work_across_nodes() {
 }
 
 /// A connector sync running when its cluster's owner drains isn't left `in_progress` for the
-/// stale check: the owner records it `suspended`, and the next owner resumes it at once.
+/// stale check: the owner records it `suspended` and stops it, and the next owner resumes it at
+/// once. It runs exactly once across the hand-over: the first owner's run lets go of its
+/// source, and the next owner's connects once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_drain_hands_a_running_sync_to_the_next_owner() {
     use tokio::io::AsyncReadExt;
     // A Postgres that holds the first owner's sync: silent until `hang` is cleared, then it
-    // closes every connection (the resumed sync fails at once, on the next owner).
+    // closes every connection (the resumed sync fails at once, on the next owner). `held`
+    // counts the connections it holds open, until their client lets go.
     let hang = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let held = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let pg = listener.local_addr().unwrap();
-    let (h, n) = (hang.clone(), connections.clone());
+    let (h, n, open) = (hang.clone(), connections.clone(), held.clone());
     tokio::spawn(async move {
         while let Ok((mut s, _)) = listener.accept().await {
             n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if h.load(std::sync::atomic::Ordering::SeqCst) {
-                tokio::spawn(async move { s.read_to_end(&mut Vec::new()).await });
+                let open = open.clone();
+                open.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let _ = s.read_to_end(&mut Vec::new()).await;
+                    open.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                });
             }
         }
     });
@@ -541,6 +550,10 @@ async fn a_drain_hands_a_running_sync_to_the_next_owner() {
     })
     .await
     .expect("the sync runs on the owner");
+    // `in_progress` comes before the sync dials: the hand-over starts once it holds the source.
+    eventually(20, async || (held.load(std::sync::atomic::Ordering::SeqCst) == 1, ()))
+        .await
+        .expect("the first owner's sync holds its source");
 
     let key = search_control::cluster::key("sync");
     let (owner, other) = if a.cluster.owns(&key) { (&a, &b) } else { (&b, &a) };
@@ -553,7 +566,12 @@ async fn a_drain_hands_a_running_sync_to_the_next_owner() {
     })
     .await
     .expect("the next owner resumes the sync");
-    assert!(connections.load(std::sync::atomic::Ordering::SeqCst) >= 2, "the sync ran again: {v}");
+    // Exactly once: the first owner's run stopped and let go of its source, and the next owner
+    // connected once.
+    eventually(20, async || (held.load(std::sync::atomic::Ordering::SeqCst) == 0, ()))
+        .await
+        .expect("the first owner's run let go of its source");
+    assert_eq!(connections.load(std::sync::atomic::Ordering::SeqCst), 2, "the sync ran again once: {v}");
     assert!(!v["error"].as_str().unwrap_or_default().contains("stopped checking in"), "{v}");
     assert!(other.cluster.owns(&key));
 }

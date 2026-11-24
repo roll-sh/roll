@@ -32,6 +32,7 @@ interface Form {
   target: string;
   install: string;
   build: string;
+  output: string;
   buildStart: string;
   /** Watch paths, comma-separated. */
   watch: string;
@@ -161,6 +162,7 @@ export function formOf(s: Service): Form {
     target: str(s.build.target),
     install: str(s.build.install),
     build: str(s.build.build),
+    output: s.build.output ?? "",
     buildStart: str(s.build.start),
     watch: (s.build.watch ?? []).join(", "),
     packages: (s.build.packages ?? []).join(" "),
@@ -274,6 +276,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.target !== before.target) build.target = text(f.target);
   if (f.install !== before.install) build.install = text(f.install);
   if (f.build !== before.build) build.build = text(f.build);
+  if (f.output !== before.output) build.output = text(f.output);
   if (f.buildStart !== before.buildStart) build.start = text(f.buildStart);
   if (f.watch !== before.watch) {
     const list = f.watch.split(/[,\n]/).map((p) => p.trim()).filter(Boolean);
@@ -632,6 +635,9 @@ export function SettingsTab({
                 {t("install", "detected")}
               </Field>
               <Field label="Build command">{t("build", "detected")}</Field>
+              <Field label="Output directory" hint="a static build's files (dist, out, public): served as a static site">
+                {t("output", "detected")}
+              </Field>
               <Field label="Image's start command" hint="baked into the image at the build">
                 {t("buildStart", "detected")}
               </Field>
