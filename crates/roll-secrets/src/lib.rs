@@ -607,6 +607,9 @@ impl Secrets {
             Ok(())
         })?;
         db.add_column("projects", "validity_checks", "INTEGER")?;
+        // What a leaked managed key does (leaks.rs): `managed` rotates it, `off` (NULL) reports it.
+        db.add_column("projects", "leak_rotate", "TEXT")?;
+        db.ensure_schema(leaks::SCHEMA)?;
         db.ensure_schema(alerts::SCHEMA)?;
         db.ensure_schema(decoys::SCHEMA)?;
         db.ensure_schema(intercept::SCHEMA)?;

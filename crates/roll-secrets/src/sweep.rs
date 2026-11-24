@@ -312,16 +312,30 @@ impl Secrets {
     /// Rotate a managed link's credential (with every secret that shares it), or a live link's
     /// resource credential. A rotation doesn't need approval on a protected environment.
     pub fn rotate(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller) -> Result<Applied> {
-        let out = self.rotate_now(project, slug, path, key, caller);
+        let out = self.rotate_now(project, slug, path, key, caller, false);
         if out.is_ok() {
-            self.note_rotation(project, slug, path, key, None);
+            self.note_rotation(project, slug, path, key, None, false);
         }
         out
     }
 
-    /// A scheduled rotation's failure, kept on the key for health (`rotation_failing`) until one
-    /// succeeds; `None` clears it.
-    fn note_rotation(&self, project: &str, slug: &str, path: &str, key: &str, failure: Option<&str>) {
+    /// A leaked key's rotation ("When a value leaks"): [`Secrets::rotate`] with no grace for the
+    /// leaked credential, which is revoked as soon as its replacement is stored (a failed revoke
+    /// is the sweeper's, at once); `rotation.succeeded` says `via: leak`. Its caller checks the
+    /// environment's approvals first: a rotation itself never asks for them.
+    pub(crate) fn rotate_leaked(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller) -> Result<Applied> {
+        let out = self.rotate_now(project, slug, path, key, caller, true);
+        match &out {
+            Ok(_) => self.note_rotation(project, slug, path, key, None, true),
+            Err(e) => self.note_rotation(project, slug, path, key, Some(&e.to_string()), true),
+        }
+        out
+    }
+
+    /// A scheduled or leaked key's rotation's failure, kept on the key for health
+    /// (`rotation_failing`) until one succeeds; `None` clears it. A scheduled one is an event as a
+    /// failing run starts, a leak's every time (`via: leak`).
+    fn note_rotation(&self, project: &str, slug: &str, path: &str, key: &str, failure: Option<&str>, leak: bool) {
         crate::metrics::Counters::add(if failure.is_some() { &self.counters.rotation_failures } else { &self.counters.rotations }, 1);
         let now = self.db.now_ms().unwrap_or_default();
         let failure = failure.map(|f| f.chars().take(300).collect::<String>());
@@ -334,11 +348,19 @@ impl Secrets {
                 "UPDATE secrets SET rotation_error = ?, rotation_failed_at = ? WHERE project_id = ? AND path = ? AND key = ? AND owner = '' AND env_id = (SELECT id FROM environments WHERE project_id = ? AND slug = ? AND forgotten_at IS NULL)",
                 params![failure, at, project, path, key, project, slug],
             )?;
-            // The feed hears of a failing run once, as it starts (health lists it until one works).
-            if let (Some(why), Some(None)) = (&failure, was) {
-                let event = crate::events::Event::new(crate::events::Kind::RotationFailed, serde_json::json!({ "reason": why }));
+            // The feed hears of a failing run once, as it starts (health lists it until one works),
+            // and of every leak's.
+            if let Some(why) = &failure
+                && (leak || was == Some(None))
+            {
                 let keys = [key.to_string()];
-                crate::audit::record_event(c, self.keys()?, project, &Caller::consumer("roll:rotations"), "secrets.rotation_failed", Some(slug), Some(path), &keys, &format!("{key}'s scheduled rotation failed: {why}"), now, event)?;
+                let (event, by, summary) = if leak {
+                    (serde_json::json!({ "reason": why, "via": "leak" }), crate::leaks::LEAKS, format!("{key} leaked, and rotating it failed: {why}"))
+                } else {
+                    (serde_json::json!({ "reason": why }), "roll:rotations", format!("{key}'s scheduled rotation failed: {why}"))
+                };
+                let event = crate::events::Event::new(crate::events::Kind::RotationFailed, event);
+                crate::audit::record_event(c, self.keys()?, project, &Caller::consumer(by), "secrets.rotation_failed", Some(slug), Some(path), &keys, &summary, now, event)?;
             }
             Ok::<_, Error>(())
         });
@@ -347,7 +369,7 @@ impl Secrets {
         }
     }
 
-    fn rotate_now(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller) -> Result<Applied> {
+    fn rotate_now(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller, leak: bool) -> Result<Applied> {
         let path = names::path(path)?;
         caller.need(Action::Write, &Scope::at(project, slug, &path))?;
         let dek = self.project(project)?;
@@ -372,7 +394,11 @@ impl Secrets {
                 }
                 // Every folder that links it live reads a new value now: their digests move.
                 self.source_changed(&link.kind, &link.r#ref)?;
-                let event = crate::events::Event::new(crate::events::Kind::RotationSucceeded, serde_json::json!({ "mode": "live", "scheduled": caller.principal == ROTATION }));
+                let mut data = serde_json::json!({ "mode": "live", "scheduled": caller.principal == ROTATION });
+                if leak {
+                    data["via"] = serde_json::json!("leak");
+                }
+                let event = crate::events::Event::new(crate::events::Kind::RotationSucceeded, data);
                 self.audit_now_event(project, caller, "secrets.rotate", Some(slug), Some(&path), &[key.to_string()], &format!("rotated {} {}'s credential", link.kind, link.r#ref), Some(event));
                 Ok(Applied { change: None, items: vec![], warnings: vec![], request: None })
             }
@@ -421,15 +447,36 @@ impl Secrets {
                     if keys.len() > 1 {
                         data["sharing"] = serde_json::json!(keys);
                     }
+                    if leak {
+                        data["via"] = serde_json::json!("leak");
+                        data["grace_minutes"] = serde_json::json!(0);
+                    }
                     let event = crate::events::Event::new(crate::events::Kind::RotationSucceeded, data);
                     crate::audit::record_event(c, self.keys()?, project, caller, "secrets.rotation_succeeded", Some(slug), Some(&path), &[key.to_string()], &format!("rotated {key} to version {version}"), now, event)?;
                     if let (None, Some(h)) = (&old, state.as_ref().and_then(|s| s.get("handle"))) {
                         retire(c, &env, &link, h, &caller.principal, now + link.grace_minutes() as i64 * 60_000, now)?;
                     }
-                    Ok::<_, Error>(r)
+                    // A leaked credential gets no grace: its retirement (above, or the change's
+                    // own) is due now, and revoked once this commits.
+                    let due: Vec<String> = match state.as_ref().and_then(|s| s.get("handle")).filter(|_| leak) {
+                        Some(h) => {
+                            let h = crate::json(h);
+                            c.execute("UPDATE leases SET expires_at = ? WHERE env_id = ? AND kind = 'retired' AND revoked_at IS NULL AND handle = ?", params![now, env.id, h])?;
+                            c.query("SELECT id FROM leases WHERE env_id = ? AND kind = 'retired' AND revoked_at IS NULL AND handle = ?", params![env.id, h], |r| r.get(0))?
+                        }
+                        None => vec![],
+                    };
+                    Ok::<_, Error>((r, due))
                 });
                 match res {
-                    Ok((change, items)) => Ok(Applied { change: Some(change), items, warnings: vec![], request: None }),
+                    Ok(((change, items), due)) => {
+                        for id in due {
+                            if let Err(e) = self.revoke_one(&id) {
+                                tracing::warn!(%project, env = %slug, %key, "revoking a leaked credential failed (the sweeper retries): {e}");
+                            }
+                        }
+                        Ok(Applied { change: Some(change), items, warnings: vec![], request: None })
+                    }
                     Err(e) => {
                         let _ = provider.revoke(&link.r#ref, &handle);
                         let _ = env;
@@ -514,7 +561,7 @@ impl Secrets {
                 Err(e) => {
                     out.failed += 1;
                     tracing::warn!(%project, env = %slug, %key, "a scheduled rotation failed: {e}");
-                    self.note_rotation(&project, &slug, &path, &key, Some(&e.to_string()));
+                    self.note_rotation(&project, &slug, &path, &key, Some(&e.to_string()), false);
                 }
             }
         }
