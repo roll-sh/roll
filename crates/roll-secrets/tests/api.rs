@@ -6165,15 +6165,18 @@ async fn a_previews_service_gets_a_token_of_its_own_and_a_forks_none() {
     for (slug, trusted) in [("pv-vetted1", true), ("pv-fork1", false)] {
         api.ok(Method::POST, "/environments", Some(json!({ "slug": slug, "base": "production", "trusted": trusted }))).await;
     }
+    // A standard environment a person named like a preview's.
+    api.ok(Method::POST, "/environments", Some(json!({ "slug": "pv-std1" }))).await;
     let (s, p) = (api.secrets.clone(), api.project.clone());
-    let (vetted, fork) = tokio::task::spawn_blocking(move || {
+    let (vetted, fork, standard) = tokio::task::spawn_blocking(move || {
         let sub = |preview: &str| roll_secrets::Subject::Preview { project: p.clone(), preview: preview.into(), service: "web".into() };
         let hour = std::time::Duration::from_secs(3600);
-        (s.issue(sub("pv_vetted1"), "sts.amazonaws.com", 2 * hour), s.issue(sub("pv_fork1"), "sts.amazonaws.com", hour))
+        (s.issue(sub("pv_vetted1"), "sts.amazonaws.com", 2 * hour), s.issue(sub("pv_fork1"), "sts.amazonaws.com", hour), s.issue(sub("pv_std1"), "sts.amazonaws.com", hour))
     })
     .await
     .unwrap();
     assert!(matches!(fork, Err(roll_secrets::Error::Forbidden(_))), "{fork:?}");
+    assert!(matches!(standard, Err(roll_secrets::Error::NotFound(_))), "a standard environment is no preview's: {standard:?}");
     let token = vetted.unwrap();
     let jwks = api.ok(Method::GET, "/v1/secrets/oidc/jwks", None).await;
     let (_, claims, signed) = roll_token(&jwks, &token);

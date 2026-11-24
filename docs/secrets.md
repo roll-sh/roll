@@ -2447,7 +2447,8 @@ secrets, with no key of its own (docs/apps/README.md; apps delivers the token to
   `environment` and `preview: true`. Its prefix is never an app's, so a trust on an app's subject
   can't match a preview; roll writes no trust that matches every preview of a service (a customer
   who wants one writes a condition on `roll-previews:<project>:*:<service>` themselves). It's
-  refused here for an untrusted preview, decided from its environment's own `trusted`; rolld's
+  refused here for an untrusted preview, decided from its environment's own `trusted`, and for any
+  environment that isn't a preview's (a standard one named `pv-…` gets none); rolld's
   `PreviewIssuer` asks that the project stands for the service's repo; each issue is audited as
   `preview:<preview>:<service>`, never the token (`a_previews_service_gets_a_token_of_its_own_and_a_forks_none`).
   `Subject::App {project, service, env}` is `sub =

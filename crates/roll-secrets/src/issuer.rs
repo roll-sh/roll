@@ -528,6 +528,11 @@ impl crate::Secrets {
         if e.expires_at.is_some_and(|t| t <= now) {
             return Err(Error::NotFound(format!("no environment {env}")));
         }
+        // A preview's own service acts only in a preview's (ephemeral) environment: a standard one a
+        // person named `pv-…` (slugs don't reserve it) never gets a `preview: true` token.
+        if matches!(subject, Subject::Preview { .. }) && e.kind != crate::envs::Kind::Ephemeral {
+            return Err(Error::NotFound(format!("no preview environment {env}")));
+        }
         if e.kind == crate::envs::Kind::Ephemeral && !e.trusted {
             return Err(Error::Forbidden(format!("{env} is an untrusted preview (code nobody vetted): roll signs no token for it")));
         }
