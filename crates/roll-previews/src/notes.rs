@@ -40,6 +40,9 @@ pub struct Seen {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub steps: Vec<crate::settings::Step>,
+    /// Their browser's engine when it isn't Chromium's ([`crate::settings::BROWSERS`]): every
+    /// browser on iOS is WebKit at a phone's size, Safari elsewhere WebKit, Firefox Firefox.
+    pub browser: Option<String>,
 }
 
 impl Seen {
@@ -48,6 +51,20 @@ impl Seen {
         let mut seen = Seen::default();
         if let Some(sub) = body.split("<sub>").nth(1).and_then(|s| s.split("</sub>").next()) {
             for part in sub.split(" · ") {
+                // `Safari 18 on iOS`, `Firefox 133 on Windows` (the button's `browserOf`).
+                if let Some((name, os)) = part.split_once(" on ")
+                    && name.split_once(' ').is_some_and(|(_, v)| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+                {
+                    seen.browser = if os == "iOS" {
+                        Some("webkit-phone".into())
+                    } else if name.starts_with("Safari ") {
+                        Some("webkit".into())
+                    } else if name.starts_with("Firefox ") {
+                        Some("firefox".into())
+                    } else {
+                        None
+                    };
+                }
                 if let Some((w, h)) = part.strip_suffix(" viewport").and_then(|v| v.split_once('x'))
                     && let (Ok(w), Ok(h)) = (w.parse::<u32>(), h.parse::<u32>())
                     && (320..=2560).contains(&w)
@@ -80,13 +97,19 @@ impl Seen {
         seen
     }
 
-    /// What a crop taken this way says it is: the viewport, and the steps taken first.
+    /// What a crop taken this way says it is: the engine when not Chromium's, the viewport, and
+    /// the steps taken first.
     pub fn label(&self) -> Option<String> {
         let (w, h) = (self.width?, self.height?);
+        let engine = match self.browser.as_deref() {
+            Some("webkit" | "webkit-phone") => "WebKit, ",
+            Some("firefox") => "Firefox, ",
+            _ => "",
+        };
         Some(match self.steps.len() {
-            0 => format!("{w}x{h}"),
-            1 => format!("{w}x{h}, after 1 step"),
-            n => format!("{w}x{h}, after {n} steps"),
+            0 => format!("{engine}{w}x{h}"),
+            1 => format!("{engine}{w}x{h}, after 1 step"),
+            n => format!("{engine}{w}x{h}, after {n} steps"),
         })
     }
 }
@@ -232,9 +255,9 @@ mod tests {
         assert_eq!(parse("**Feedback on the preview** · [`/x`](u)\n\n"), None, "no note");
     }
 
-    /// How the reviewer saw the page, from the note's own words: their viewport, and their
-    /// clicks and keys after their last page change (the last 10), never typing or a choice,
-    /// nor a selector roll's checks refuse; a viewport out of bounds is none.
+    /// How the reviewer saw the page, from the note's own words: their viewport, their browser's
+    /// engine, and their clicks and keys after their last page change (the last 10), never typing
+    /// or a choice, nor a selector roll's checks refuse; a viewport out of bounds is none.
     #[test]
     fn a_note_says_how_its_reviewer_saw_the_page() {
         use crate::settings::Step;
@@ -242,7 +265,13 @@ mod tests {
         let seen = super::Seen::of(body);
         assert_eq!((seen.width, seen.height), (Some(390), Some(844)));
         assert_eq!(seen.steps, [Step::Click("li:nth-of-type(2) > button".into()), Step::Click("input.gift".into()), Step::Press("Escape".into())], "only what came after the page change");
-        assert_eq!(seen.label().as_deref(), Some("390x844, after 3 steps"));
+        assert_eq!(seen.browser.as_deref(), Some("webkit-phone"), "every browser on iOS is WebKit at a phone's size");
+        assert_eq!(seen.label().as_deref(), Some("WebKit, 390x844, after 3 steps"));
+        let engine = |sub: &str| super::Seen::of(&format!("**Feedback on the preview** · `/`\n\nx\n\n<sub>{sub}</sub>")).browser;
+        assert_eq!(engine("1280x800 viewport · Firefox 133 on Windows"), Some("firefox".into()));
+        assert_eq!(engine("1280x800 viewport · Safari 18 on macOS"), Some("webkit".into()));
+        assert_eq!(engine("390x844 viewport · Chrome 131 on iOS"), Some("webkit-phone".into()), "Chrome on iOS is WebKit");
+        assert_eq!(engine("1280x800 viewport · Chrome 131 on macOS"), None, "Chromium's: roll's own run");
         assert_eq!(super::Seen::of("**Feedback on the preview** · `/`\n\nx\n\n<sub>99999x1 viewport</sub>"), super::Seen::default(), "a viewport out of bounds is none");
     }
 
