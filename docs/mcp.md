@@ -400,13 +400,14 @@ How it works:
     association, and from roll's own API when the caller may comment but not write (a public
     repo's reader);
   - roll previews' fork previews (`!trusted`): the preview, its error groups, traces and spans,
-    route times and logs;
+    route times and logs, and its pages as `previews_fetch` and `previews_try` read them (the
+    body, text, console errors and headers);
   - roll previews' notes and replies from a share link's guests (`by` `guest:…`, in
     `GET /v1/previews/{id}/notes`), and the reviews those notes are on the change (made with an
     outside origin, so roll code's review tools mark them too).
 - In lockdown, every result has the `title`, `body`, `description`, `message`, `text`, `line`,
-  `lines` (each line, so the list keeps its shape), `sample`, `name`, `note`, `selector` and
-  `path` of those records replaced with a notice, wherever they sit in the answer: a fork's code
+  `lines` (each line, so the list keeps its shape), `sample`, `name`, `note`, `selector`,
+  `path`, `errors` and `headers` (each value, so names stay) of those records replaced with a notice, wherever they sit in the answer: a fork's code
   chooses its log lines, error samples and route and span names as much as its title. A share
   link guest's name is theirs too: their `by` (`guest:<name>`) keeps only `guest:` and the notice. (An `agent_feedback` alert names its
   connection in `connection`, a person's choice, which stays.)
@@ -1449,14 +1450,10 @@ gaps are in how results read and how roll is distributed):
 From a 2026-11-24 gap review (every tool run as an agent would against a fresh rolld with
 `mcp-sweep.py --report`, 1,161 calls, plus probes with scoped tokens):
 
-1. **A review of #907–#933 (this PR).** An independent review of the nine PRs' combined diff
-   found no high or medium issue. Fixed here: lockdown withholds a share link guest's `path` and
-   the name in their `by` too, not only the note; `severity` takes `unknown` as its route does; an
-   optional choice sent empty passes, as routes read it; a choice is asked for in a form only once
-   no id the call needs is missing. Kept on purpose: choices publish each route's canonical values
-   only (no `scylladb`, `match` or `AllKeys-LRU`), so a model picks the canonical one. Clean:
-   refusals' parsing, token rules' resources, a refused member's text (strangers still get 404),
-   links' encoding, error objects.
+1. **A fork's pages in lockdown (this PR).** roll previews marks a fork preview's `try` and `fetch`
+   answers outside (its fifth review); lockdown withheld their `text` and `body` but not the
+   page's console `errors` or its response `headers`, both the fork's code's words. Both are
+   withheld now (headers by value, names kept).
 2. **Paging is the products'.** No list route takes a cursor (approvals take `limit` only). History
    and logs are all capped (a `LIMIT`, the latest N, or a retention window), so nothing grows
    without bound there; the lists of things people make are whole (buckets, queues, topics,
@@ -1534,7 +1531,7 @@ From a 2026-11-24 gap review (every tool run as an agent would against a fresh r
    stateless and search mode (`?tools=search`) covers clients that can't take the list; "remember this browser"; a preset that reveals development's values without asking
    (#354); a connection-level `?project=` (only a token's rules bound a project; a default that
    some tools can't honour would look like a boundary).
-15. **Landed 2026-11-23 and 24:** `secrets_list_requests` pages (`limit`, `before`; roll secrets #927) and its `state` is a choice (#933); a deploy's and a change's answers link to their pages (#931); an answer about one resource links to its dashboard page (`resource_link`, #928); 24 more fixed sets as choices, and a test that keeps values out of prose (#920); a refused member hears the weakest role that may and who changes roles (#914); lockdown withholds guests' notes and the leak prompt says when a report rotates (#917); a missing required choice asked for in a form, as a missing id is (#912); tool arguments with a fixed set as JSON Schema `enum`, checked before the call; three proses were short of their route's set (#910); refusals that say why: search's error objects, token rules' resources, axum's body rejections; a cut answer naming its tool's filters; the sweep's `--report` (#907, from the 2026-11-24 gap review); `workspace.event` (#817); MCP Apps views that refresh themselves (#820); `roll_find`, any resource by name, part of its id or a pasted dashboard link (#821), its page table (#845) and search mode (#849); `ship_from_chat` (#826); review fixes for #814–#826 (#832: lookups held by `agents_ask`, the inspector on `roll_find`, approvals only from the gate); lists answered as tables (#838: 20+ rows about 40% smaller); the ship prompts quote first (#840); `secrets_list_saas`'s eleven vendors (#843); the field test reading named body types, 46 fields mapped or explained (#854), and object arguments naming every key (#862); `previews_fetch` on roll previews #852 (#859); review fixes for #838–#868 (#871); `roll_find` links matches (#864) and reads Postgres and streams links, which now carry their selection (#878); `previews_tables` (#883); a browser step's typed text redacted from the audit (#887); `previews_try` and `previews_try_screenshot`, an agent driving a preview's page (#892); `respond_to_leaked_secret` checks for a rotation roll already started (#891).
+15. **Landed 2026-11-23 and 24:** fixes from a review of #907–#933: lockdown withholds a guest's path and name, `unknown` severity, empty optional choices, choice forms after ids (#940); `secrets_list_requests` pages (`limit`, `before`; roll secrets #927) and its `state` is a choice (#933); a deploy's and a change's answers link to their pages (#931); an answer about one resource links to its dashboard page (`resource_link`, #928); 24 more fixed sets as choices, and a test that keeps values out of prose (#920); a refused member hears the weakest role that may and who changes roles (#914); lockdown withholds guests' notes and the leak prompt says when a report rotates (#917); a missing required choice asked for in a form, as a missing id is (#912); tool arguments with a fixed set as JSON Schema `enum`, checked before the call; three proses were short of their route's set (#910); refusals that say why: search's error objects, token rules' resources, axum's body rejections; a cut answer naming its tool's filters; the sweep's `--report` (#907, from the 2026-11-24 gap review); `workspace.event` (#817); MCP Apps views that refresh themselves (#820); `roll_find`, any resource by name, part of its id or a pasted dashboard link (#821), its page table (#845) and search mode (#849); `ship_from_chat` (#826); review fixes for #814–#826 (#832: lookups held by `agents_ask`, the inspector on `roll_find`, approvals only from the gate); lists answered as tables (#838: 20+ rows about 40% smaller); the ship prompts quote first (#840); `secrets_list_saas`'s eleven vendors (#843); the field test reading named body types, 46 fields mapped or explained (#854), and object arguments naming every key (#862); `previews_fetch` on roll previews #852 (#859); review fixes for #838–#868 (#871); `roll_find` links matches (#864) and reads Postgres and streams links, which now carry their selection (#878); `previews_tables` (#883); a browser step's typed text redacted from the audit (#887); `previews_try` and `previews_try_screenshot`, an agent driving a preview's page (#892); `respond_to_leaked_secret` checks for a rotation roll already started (#891).
 16. **Landed 2026-11-22 morning:** operator policy for agent connections: `agents_ask` and
    `mcp_lockdown` / `mcp_read_only` (#678), and `oauth_clients`, the OAuth clients that may connect,
    checked at consent, at every token and on every request, nothing revoked (#680). SQL sessions name who sent them (`application_name`: `roll tok_…`, so `postgres_activity` tells
