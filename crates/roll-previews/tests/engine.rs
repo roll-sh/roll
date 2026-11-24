@@ -212,7 +212,6 @@ async fn with_screenshots_a_baseline_of_the_default_branch_is_kept_to_compare_ch
     assert_eq!(e.engine.store.row_by_change("chg_1").unwrap().map(|r| r.desired), Some(Desired::Active), "the change's preview came back with its repo");
 }
 
-<<<<<<< HEAD
 /// Pages changed the same way against main's (Percy's grouped diffs), the first page included,
 /// share a group, accepted together; a page changed another way is left to review on its own.
 #[tokio::test]
@@ -250,44 +249,6 @@ async fn pages_changed_the_same_way_are_accepted_together() {
     assert_eq!(waiting, ["/c"], "the three accepted at once; /c still waits");
 }
 
-||||||| e2b7039823
-=======
-/// Pages changed the same way against main's (Percy's grouped diffs) share a group, accepted
-/// together; a page changed another way is left to review on its own.
-#[tokio::test]
-async fn pages_changed_the_same_way_are_accepted_together() {
-    let e = env(json!({ "enabled": true, "visual_review": "check", "github": { "screenshot": true } }));
-    let png = |paint: &dyn Fn(u32, u32) -> u8| {
-        let mut out = Vec::new();
-        image::RgbaImage::from_fn(20, 20, |x, y| { let v = paint(x, y); image::Rgba([v, v, v, 255]) }).write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).unwrap();
-        out
-    };
-    *e.apps.shot.lock() = Some(png(&|_, _| 0));
-    e.code.open(change("chg_v", 1));
-    e.engine.pass().await.unwrap();
-    e.engine.pass().await.unwrap();
-    let chg = e.engine.store.row_by_change("chg_v").unwrap().unwrap();
-    let base = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.change_id.is_none()).unwrap();
-    let paths: Vec<String> = ["/a", "/b", "/c"].map(String::from).to_vec();
-    let shots = |paint: &dyn Fn(&str, u32, u32) -> u8| paths.iter().map(|p| roll_previews::ports::PageShot { path: p.clone(), png: png(&|x, y| paint(p, x, y)), errors: 0, report: Default::default() }).collect::<Vec<_>>();
-    e.engine.store.set_screenshot(&base.id, "cs_main", &png(&|_, _| 0), None, None).unwrap();
-    e.engine.store.set_page_shots(&base.id, "cs_main", &shots(&|_, _, _| 0), &paths).unwrap();
-    // /a and /b gain the same light bar at the top; /c a different one, lower and grey.
-    e.engine.store.set_screenshot(&chg.id, "cs_v1", &png(&|_, _| 0), None, None).unwrap();
-    e.engine.store.set_page_shots(&chg.id, "cs_v1", &shots(&|p, _, y| match (p, y) { ("/c", 10..=13) => 128, ("/c", _) => 0, (_, 0..=3) => 255, _ => 0 }), &paths).unwrap();
-    e.engine.store.compare_with_base(&chg.id, &base.id, "main", None).unwrap();
-    let review = || e.engine.store.preview(&chg.id).unwrap().visual_review.unwrap();
-    let groups: Vec<(String, Option<String>)> = review().pages.iter().map(|p| (p.path.clone(), p.group.clone())).collect();
-    let a = groups.iter().find(|(p, _)| p == "/a").and_then(|(_, g)| g.clone()).expect("/a in a group");
-    assert_eq!(groups.iter().find(|(p, _)| p == "/b").map(|(_, g)| g.clone()), Some(Some(a.clone())), "/b changed the same way: {groups:?}");
-    assert_eq!(groups.iter().find(|(p, _)| p == "/c").map(|(_, g)| g.clone()), Some(None), "a change of its own: {groups:?}");
-    assert!(e.engine.accept_visual(&chg.id, "ada", &[], true, None, Some("cs_v1"), Some("group:nothex")).await.is_err());
-    e.engine.accept_visual(&chg.id, "ada", &[], true, None, Some("cs_v1"), Some(&format!("group:{a}"))).await.unwrap();
-    let waiting: Vec<String> = review().pages.iter().filter(|p| p.by.is_none()).map(|p| p.path.clone()).collect();
-    assert_eq!(waiting, ["/c"], "the two accepted at once; /c still waits");
-}
-
->>>>>>> origin/main
 #[tokio::test]
 async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     let e = env(json!({ "enabled": true, "visual_review": "check", "github": { "screenshot": true } }));
