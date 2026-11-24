@@ -16,6 +16,7 @@ mod docker;
 mod dotnet;
 pub mod edge;
 mod elixir;
+pub mod expects;
 pub mod functions;
 mod gleam;
 mod golang;
@@ -131,6 +132,10 @@ pub struct Plan {
     /// make and link them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub uses: Vec<Datastore>,
+    /// The variables the repo says it needs ([`expects`]: its `.env.example`'s names), so New
+    /// service asks for them before the first deploy and a deploy says which are still unset.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variables: Vec<String>,
     /// The Procfile's `release:` (Heroku's release phase): the pre-deploy command when the
     /// service sets none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -381,6 +386,10 @@ pub fn plan(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
         p.uses.push(store);
         p.notes.push(format!("{why}: it uses {}", store.label()));
     }
+    if let Some((file, names)) = expects::expected(tree) {
+        p.notes.push(format!("{file} names {} variable(s) it expects", names.len()));
+        p.variables = names;
+    }
     if overrides.otel {
         if own_dockerfile {
             p.notes.push("otel: no agent added to the tree's own Dockerfile (start one of its own; roll's OTEL_* variables point it at roll)".into());
@@ -584,6 +593,7 @@ impl Draft {
             notes,
             spa: false,
             uses: Vec::new(),
+            variables: Vec::new(),
             release: None,
             crons: Vec::new(),
             functions: Vec::new(),

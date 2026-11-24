@@ -888,6 +888,8 @@ export interface Plan {
   spa?: boolean;
   /** Datastores the code has client libraries for (New service offers to make and link them). */
   uses?: ("postgres" | "redis")[];
+  /** The variables its `.env.example` (or `.env.sample`, `.env.template`, `.env.dist`, `example.env`) names: asked for before the first deploy. */
+  variables?: string[];
   /** A static site's function directories (`netlify/functions`, `api`) the `functions` builder runs. */
   functions?: string[];
   /** A static site's edge functions: run before its files on their paths by its `-fn` service. */
