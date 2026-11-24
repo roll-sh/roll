@@ -2686,14 +2686,10 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Notes as Slack threads** (Vercel's comments synced to Slack), two ways: a `slack.note` step
-   in roll code's chat ops posts a preview note (a `review` event whose body is a note) to a
-   channel as its own message, with the page, the element and a link, and binds that thread to
-   the note (`chat_threads`); a reply in the thread becomes the note's reply on the change
-   (`**Reply on the preview**`, through `Code::automation_api`, the person's Slack name kept), and
-   a reply on the page goes into the thread. A dashboard template sets it up. Stacked changes
-   need nothing of their own: a stacked change's head holds the ones below it, and a feature
-   split across repos previews as one by its branch name.
+1. **Notes as Slack threads, in review** (Vercel's comments synced to Slack): `slack.note` and
+   the "Preview notes as Slack threads" template, both ways (a note posted, replies in its
+   thread made the note's replies, the page's replies in the thread). Next for it: a resolve
+   said in the thread (a resolve is roll previews' own record, so previews would emit it).
 2. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
    is kept only where the product puts a branch back in place, keeping its id (their delete
    guards check it); each needs its control plane's reset `from`, as pg-control's.
