@@ -100,7 +100,7 @@ pub use found::{FoundStored, FoundTarget};
 pub use links::{Link, LinkProvider, Links, Mode, Planted};
 pub use metrics::Metrics;
 pub use read::{Delta, Followed, Grid, Held, Linked, Problem, Secret, Source, Values, Version};
-pub use requests::{Request, RequestValue, Review, Verdict};
+pub use requests::{Request, RequestPage, RequestValue, Review, Verdict};
 pub use exports::Export;
 pub use decoys::{Decoy, NewDecoy};
 pub use identities::{Identity, IdentityKind, Login, NewIdentity, Proof};
@@ -594,6 +594,8 @@ impl Secrets {
         db.add_column("environments", "purge_at", "INTEGER")?;
         // What a change request does besides changing keys: `delete_environment` (requests.rs).
         db.add_column("requests", "action", "TEXT")?;
+        // Listing requests by state (`GET …/requests?state=`) pages in SQL, newest first.
+        db.ensure_schema("CREATE INDEX IF NOT EXISTS requests_env_state ON requests (env_id, state, at, id);")?;
         // Deleted before the window: already erased, waiting only for revocations.
         db.migrate("secrets-deleted-before-the-window", |c| {
             c.execute("UPDATE projects SET closed_at = forgotten_at, purged_at = forgotten_at WHERE forgotten_at IS NOT NULL AND purge_at IS NULL", ())?;
@@ -641,6 +643,8 @@ impl Secrets {
         // An intermediate CA (pki.rs): its CSR while it's pending, then the certificates above it.
         db.add_column("cas", "csr", "TEXT")?;
         db.add_column("cas", "chain", "TEXT")?;
+        // An intermediate installed without name constraints within its domains (pki.rs).
+        db.add_column("cas", "unconstrained", "INTEGER")?;
         // ACME on a CA (acme.rs): whether its bindings' names are pre-authorized.
         db.ensure_schema(acme::SCHEMA)?;
         db.add_column("cas", "acme_preauthorize", "INTEGER")?;

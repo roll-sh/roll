@@ -1065,6 +1065,10 @@ impl apps_control::integrations::VisitorSignIn for AccountsSignIn {
     fn start_url(&self, provider: &str, request: &str, orgs: bool) -> Option<String> {
         self.0.visit_url(provider, request, orgs)
     }
+
+    fn vouches(&self, connection: &str, email: &str) -> bool {
+        self.0.sso_vouches(connection, email)
+    }
 }
 
 /// Where roll-accounts sends a visitor a provider vouched for: roll apps checks them against the
@@ -1074,8 +1078,12 @@ pub struct AppsVisitGate(pub Arc<apps_control::Apps>);
 #[async_trait::async_trait]
 impl roll_accounts::VisitGate for AppsVisitGate {
     async fn admit(&self, request: &str, who: &roll_accounts::Visitor) -> Result<String, String> {
-        let v = apps_control::integrations::SsoVisitor { provider: who.provider.clone(), subject: who.subject.clone(), email: who.email.clone(), orgs: who.orgs.clone(), hosted_domain: who.hosted_domain.clone() };
+        let v = apps_control::integrations::SsoVisitor { provider: who.provider.clone(), subject: who.subject.clone(), email: who.email.clone(), orgs: who.orgs.clone(), hosted_domain: who.hosted_domain.clone(), groups: who.groups.clone() };
         self.0.admit_visitor(request, &v).await
+    }
+
+    async fn plausible(&self, request: &str) -> bool {
+        self.0.visit_request_ok(request).await
     }
 }
 

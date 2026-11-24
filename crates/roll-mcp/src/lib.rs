@@ -203,6 +203,7 @@ async fn seen_by(State(m): State<Mcp>, axum::extract::Path(id): axum::extract::P
         ip: None,
         url_elicitation: false,
         form_elicitation: false,
+        links: false,
         modern: false,
         toolsets: None,
         readonly: false,
@@ -241,7 +242,7 @@ async fn toolset_costs(State(m): State<Mcp>, ext: Extensions) -> Response {
     if !caller {
         return unauthorized(&m.config);
     }
-    let ctx = Ctx { m, headers: HeaderMap::new(), principal: Principal::Operator, ip: None, session: None, url_elicitation: false, form_elicitation: false, modern: false, toolsets: None, readonly: false, search: false, lockdown: false, pick: Default::default(), tasks: false, ui: false, client: None, as_user: false, names: Default::default() };
+    let ctx = Ctx { m, headers: HeaderMap::new(), principal: Principal::Operator, ip: None, session: None, url_elicitation: false, form_elicitation: false, links: false, modern: false, toolsets: None, readonly: false, search: false, lockdown: false, pick: Default::default(), tasks: false, ui: false, client: None, as_user: false, names: Default::default() };
     let mut by: std::collections::BTreeMap<String, (usize, usize, usize)> = Default::default();
     for t in ctx.tools() {
         let e = by.entry(t["_meta"]["roll/product"].as_str().unwrap_or("code").to_string()).or_default();
@@ -497,8 +498,10 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         .or_else(|| headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).and_then(roll_access::evaluate::client_name))
         .map(Arc::from);
     let form_elicitation = modern && modern::form_elicitation(&messages[0]);
+    // Dates compare as text: 2025-06-18 brought `resource_link` content.
+    let links = modern || header_version.as_deref().is_some_and(|v| v >= "2025-06-18");
     let session = roll_auth::SessionGrant::on(&ext).cloned();
-    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, session, url_elicitation, form_elicitation, modern, toolsets, readonly, search, lockdown, pick, tasks, ui, client, names: Default::default() });
+    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, session, url_elicitation, form_elicitation, links, modern, toolsets, readonly, search, lockdown, pick, tasks, ui, client, names: Default::default() });
     // A call that asked for progress, from a client that takes a stream: answered as one, with
     // progress until the answer (MCP's `notifications/progress`).
     // 2026-07-28's long-lived channel for list changes (SEP-2575): an open stream of its own.
@@ -655,6 +658,9 @@ struct Ctx {
     url_elicitation: bool,
     /// A 2026-07-28 client that fills in forms: a call missing an id asks for it (`ask`).
     form_elicitation: bool,
+    /// The client speaks 2025-06-18 or later: an answer about one resource links to its dashboard
+    /// page as a `resource_link` (older clients don't know that content type).
+    links: bool,
     /// A modern request (2026-07-28): served on its own, its answers marked as that revision's.
     modern: bool,
     /// The products whose tools are listed (`None`: every product's).
@@ -690,6 +696,7 @@ impl Ctx {
             session,
             url_elicitation: self.url_elicitation,
             form_elicitation: self.form_elicitation,
+            links: self.links,
             modern: self.modern,
             toolsets: self.toolsets.clone(),
             readonly: self.readonly,
@@ -1449,6 +1456,15 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: Option<&str>) -
             content.retain(|c| c["type"] != "text");
             content.insert(0, json!({ "type": "text", "text": text }));
         }
+    }
+    // An answer about one resource links to its page, for the person the agent works for.
+    if ctx.links
+        && !quiet
+        && result["isError"] != true
+        && let Some(link) = find::page_link(name, &result["structuredContent"], &ctx.m.config.web_url)
+        && let Some(content) = result["content"].as_array_mut()
+    {
+        content.push(link);
     }
     if !quiet {
         result = finish_result(ctx, name, result).await;

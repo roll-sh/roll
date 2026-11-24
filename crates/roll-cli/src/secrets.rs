@@ -799,6 +799,13 @@ pub enum Secrets {
         #[arg(value_parser = ["on", "off"])]
         state: String,
     },
+    /// What a leaked managed key does ("When a value leaks"): `managed` rotates it at once, with
+    /// no grace; `off` reports it, with a Rotate button. With no argument, the current setting.
+    /// Setting it is an admin's.
+    Leaks {
+        #[arg(value_parser = ["managed", "off"])]
+        rotate: Option<String>,
+    },
     /// When each key was last read and changed, and which are stale or unused.
     Insights {
         /// Only keys not read in the last 90 days.
@@ -947,8 +954,14 @@ pub enum Syncs {
     },
     /// Push it now, every key.
     Run { id: String },
+    /// Delete a sync. What it pushed stays at the target, unless --remove (certificate syncs:
+    /// deletes the certificate and private key there first, and keeps the sync if that fails).
     #[command(alias = "remove")]
-    Rm { id: String },
+    Rm {
+        id: String,
+        #[arg(long)]
+        remove: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1527,6 +1540,10 @@ pub enum CasCmd {
         /// The certificates above it, up to and including the root (PEM file).
         #[arg(long)]
         chain: Option<std::path::PathBuf>,
+        /// Take a certificate without name constraints within the CA's domains: only for a root
+        /// that constrains this CA elsewhere (shown on the CA, audited, asked at every renewal).
+        #[arg(long)]
+        unconstrained: bool,
     },
     /// Print a CA's certificate (PEM), for clients to trust.
     Cert { id: String },
@@ -3435,9 +3452,12 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 }
                 println!("Made {} ({}): link TLS_CERT, TLS_KEY and TLS_CA to it with options.names; `roll secrets cas cert {}` prints what clients trust.", s(&v["name"]), s(&v["id"]), s(&v["id"]));
             }
-            CasCmd::Chain { id, certificate, chain } => {
+            CasCmd::Chain { id, certificate, chain, unconstrained } => {
                 let read = |p: &std::path::Path| std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()));
                 let mut body = json!({ "certificate": read(&certificate)? });
+                if unconstrained {
+                    body["unconstrained"] = json!(true);
+                }
                 if let Some(p) = chain {
                     body["chain"] = json!(read(&p)?);
                 }
@@ -3996,6 +4016,19 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             match v["validity_checks"].as_str() {
                 Some("on") => println!("Credentials found in code are checked with their providers"),
                 _ => println!("Credentials found in code aren't checked"),
+            }
+        }
+        Secrets::Leaks { rotate } => {
+            let v = match rotate {
+                Some(rotate) => c.call(Method::PATCH, &c.base(), Some(json!({ "leaks": { "rotate": rotate } }))).await?,
+                None => c.call(Method::GET, &c.base(), None).await?,
+            };
+            if json_out {
+                return print(&json!({ "leaks": v["leaks"] }));
+            }
+            match v["leaks"]["rotate"].as_str() {
+                Some("managed") => println!("A leaked managed key rotates at once, with no grace (leaks.rotate = managed)"),
+                _ => println!("A leaked key is reported with a Rotate button; nothing rotates on its own (leaks.rotate = off)"),
             }
         }
         Secrets::Insights { unused } => {
@@ -4742,9 +4775,13 @@ async fn syncs(c: &Client<'_>, cmd: Syncs, json_out: bool) -> anyhow::Result<()>
             let v = c.call(Method::POST, &format!("{base}/{}/run", enc(&id)), None).await?;
             println!("{} is {}{}", id, s(&v["status"]), v["error"].as_str().map(|e| format!(": {e}")).unwrap_or_default());
         }
-        Syncs::Rm { id } => {
-            c.call(Method::DELETE, &format!("{base}/{}", enc(&id)), None).await?;
-            println!("Removed {id} (what it pushed stays at the target)");
+        Syncs::Rm { id, remove } => {
+            let q = if remove { "?remove=true" } else { "" };
+            c.call(Method::DELETE, &format!("{base}/{}{q}", enc(&id)), None).await?;
+            match remove {
+                true => println!("Removed {id} and the certificate it pushed"),
+                false => println!("Removed {id} (what it pushed stays at the target)"),
+            }
         }
     }
     Ok(())

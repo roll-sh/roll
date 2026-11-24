@@ -137,10 +137,12 @@ impl SyncTarget for FakeSync {
 type CertPushed = (String, String, String, Option<String>, Option<String>);
 
 /// A fake certificate platform (`aws-acm`'s shape): the first push makes `arn:fake:1`, later ones
-/// replace what they're given.
+/// replace what they're given; what it was asked to delete, refused while `in_use`.
 #[derive(Default)]
 struct FakeCertSync {
     pushes: Mutex<Vec<CertPushed>>,
+    removed: Mutex<Vec<String>>,
+    in_use: std::sync::atomic::AtomicBool,
 }
 
 impl SyncTarget for FakeCertSync {
@@ -169,6 +171,14 @@ impl SyncTarget for FakeCertSync {
         let aws = p.aws.map(|s| s.access_key_id.expose().to_string());
         self.pushes.lock().unwrap().push((c.certificate.expose().into(), c.private_key.expose().into(), c.chain.expose().into(), remote.map(String::from), aws));
         Ok(remote.unwrap_or("arn:fake:1").to_string())
+    }
+    fn remove_certificate(&self, _: &Value, p: &Push<'_>, remote: &str) -> roll_secrets::Result<()> {
+        assert!(p.aws.is_some(), "signed in as the sync's role");
+        if self.in_use.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(roll_secrets::Error::Conflict("in_use", format!("fake-cert: {remote} is in use")));
+        }
+        self.removed.lock().unwrap().push(remote.to_string());
+        Ok(())
     }
 }
 
@@ -1962,6 +1972,42 @@ async fn protected_environments_take_change_requests_that_another_principal_appr
     }
 }
 
+/// An open request behind 200 newer ones still lists under `state=open`, and paging with `next`
+/// reaches every request once.
+#[tokio::test]
+async fn an_open_request_behind_200_others_still_lists_and_pages_cover_them_all() {
+    let api = Api::new().await;
+    api.set("production", "KEY", "old").await;
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "approvals": 1 }))).await;
+    let r = api.ok(Method::POST, "/environments/production/requests", Some(json!({ "message": "rotate", "ops": [{ "op": "set", "key": "KEY", "value": "new" }] }))).await;
+    let open = r["id"].as_str().unwrap().to_string();
+    let id = open.clone();
+    api.db
+        .write(move |c| {
+            for n in 1..=204i64 {
+                c.execute("INSERT INTO requests (id, project_id, env_id, path, message, by, at, base_seq, state, ops, items, reviews, applied_seq, action) SELECT ?, project_id, env_id, path, message, by, at + ?, base_seq, 'applied', ops, items, reviews, 1, action FROM requests WHERE id = ?", code_sql::params![format!("req_applied{n:03}"), n, id.as_str()])?;
+            }
+            Ok::<_, code_sql::Error>(())
+        })
+        .unwrap();
+
+    let listed = api.ok(Method::GET, "/environments/production/requests?state=open", None).await;
+    assert_eq!(listed.as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap()).collect::<Vec<_>>(), [open.as_str()]);
+
+    let (mut seen, mut before) = (Vec::new(), String::new());
+    loop {
+        let page = api.ok(Method::GET, &format!("/environments/production/requests?limit=50{before}"), None).await;
+        seen.extend(page["requests"].as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap().to_string()));
+        match page["next"].as_str() {
+            Some(next) => before = format!("&before={next}"),
+            None => break,
+        }
+    }
+    assert_eq!(seen.len(), 205);
+    assert_eq!(seen.iter().collect::<std::collections::BTreeSet<_>>().len(), 205, "each request once");
+    assert_eq!(seen.last(), Some(&open), "newest first");
+}
+
 #[tokio::test]
 async fn a_token_reaches_only_its_environments_folders_and_actions() {
     let api = Api::new().await;
@@ -2586,6 +2632,20 @@ async fn a_certificate_sync_pushes_a_pki_keys_certificate_on_issue_and_each_rota
         let line = key.lines().nth(1).unwrap();
         assert!(!everything.contains(line), "a private key in the audit or events");
     }
+
+    // Deleting it with remove=true deletes the certificate at the target first; while the target
+    // refuses (in use), the sync stays with its error.
+    api.certs.in_use.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (s, e) = api.call(Method::DELETE, &format!("/syncs/{id}?remove=true"), None).await;
+    assert!(s == StatusCode::CONFLICT && e["error"].as_str().unwrap().contains("in use"), "{e}");
+    let kept = api.ok(Method::GET, "/syncs", None).await;
+    assert!(kept["syncs"][0]["id"] == id.as_str() && kept["syncs"][0]["error"].as_str().unwrap().contains("arn:fake:1"), "{kept}");
+    api.certs.in_use.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(api.call(Method::DELETE, &format!("/syncs/{id}?remove=true"), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(*api.certs.removed.lock().unwrap(), ["arn:fake:1"]);
+    assert!(api.ok(Method::GET, "/syncs", None).await["syncs"].as_array().unwrap().is_empty());
+    let audit = api.ok(Method::GET, "/audit?action=sync.delete", None).await.to_string();
+    assert!(audit.contains(&format!("deleted fake-cert sync {id} and removed arn:fake:1 from the target")), "{audit}");
 }
 
 #[tokio::test]
@@ -3508,6 +3568,47 @@ async fn a_saas_rotators_credential_is_replaced_in_place_and_the_next_rotation_u
     assert!(audit.to_string().contains("changed SaaS rotator gl-ops's credential expiry") && !audit.to_string().contains("fake-gitlab-admin-2"), "{audit}");
 }
 
+/// The 38th review's item 4: replacing a registration's credential makes it the replacer's. Its
+/// links act at the replacer's rights from then on: the old maker's removal no longer stops them,
+/// and the replacer's does. A rename keeps the maker.
+#[tokio::test]
+async fn a_saas_credential_replacement_moves_the_maker_to_whoever_replaced_it() {
+    let api = Api::new().await;
+    let p = api.project.clone();
+    for (handle, email) in [("cat", "cat@example.com"), ("bob", "bob@example.com")] {
+        let (_, inv) = api.call(Method::POST, &format!("/v1/workspace/projects/{p}/invites"), Some(json!({ "email": email, "role": "admin" }))).await;
+        let token = inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string();
+        assert_eq!(api.signed_in(handle, false, Method::POST, &format!("/v1/workspace/invites/{token}/accept"), None).await.0, StatusCode::OK);
+    }
+    let target = json!({ "host": "gitlab.example.com", "project": "acme/web", "scopes": ["read_api"], "access_level": 20, "expires_days": 90 });
+    let (s, r) = api.signed_in("cat", false, Method::POST, &format!("/v1/secrets/projects/{p}/saas"), Some(json!({ "name": "gl", "vendor": "gitlab", "target": target, "credential": "fake-gitlab-admin" }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{r}");
+    api.ok(Method::PUT, "/environments/production/secrets/GITLAB_TOKEN", Some(json!({ "link": { "kind": "saas", "ref": r["id"], "field": "secret", "mode": "managed", "options": { "rotate_days": 60 } } }))).await;
+    let at = format!("/v1/secrets/projects/{p}/saas/{}", r["id"].as_str().unwrap());
+    let rotate = || api.call(Method::POST, "/environments/production/secrets/GITLAB_TOKEN/rotate", None);
+    let last_admin = || api.sent.10.gitlab_admins.lock().unwrap().last().cloned().unwrap();
+
+    // Bob swaps in his own credential: the registration is his now, and a rename keeps it so.
+    let (s, b) = api.signed_in("bob", false, Method::PATCH, &at, Some(json!({ "credential": "fake-gitlab-admin-2" }))).await;
+    assert!(s.is_success() && b["created_by"] == "usr_bob", "{s} {b}");
+    let renamed = api.ok(Method::PATCH, &at, Some(json!({ "name": "gl-ops" }))).await;
+    assert_eq!(renamed["created_by"], "usr_bob", "{renamed}");
+    let audit = api.ok(Method::GET, "/audit", None).await.to_string();
+    assert!(audit.contains("maker moved from usr_cat to usr_bob") && !audit.contains("fake-gitlab-admin-2"), "{audit}");
+
+    // Cat leaves: nothing of hers acts here any more, and Bob's credential keeps rotating.
+    assert_eq!(api.call(Method::DELETE, &format!("/v1/workspace/projects/{p}/members/usr_cat"), None).await.0, StatusCode::NO_CONTENT);
+    let (s, e) = rotate().await;
+    assert!(s.is_success(), "{s} {e}");
+    assert_eq!(last_admin(), "fake-gitlab-admin-2");
+    // Bob leaves: his credential stops acting through roll at once.
+    let issued = api.values("production", "/").await["values"]["GITLAB_TOKEN"].clone();
+    assert_eq!(api.call(Method::DELETE, &format!("/v1/workspace/projects/{p}/members/usr_bob"), None).await.0, StatusCode::NO_CONTENT);
+    let (s, e) = rotate().await;
+    assert!(!s.is_success() && e.to_string().contains("usr_bob"), "{s} {e}");
+    assert_eq!(api.values("production", "/").await["values"]["GITLAB_TOKEN"], issued, "the old value stands");
+}
+
 #[tokio::test]
 async fn openai_service_account_keys_rotate_and_a_leaked_one_is_revoked_at_once() {
     let api = Api::new().await;
@@ -4420,8 +4521,23 @@ async fn an_intermediate_ca_issues_under_the_customers_own_root() {
     let inter = intermediate(30, "prod.svc.internal").signed_by(&spki, &root_issuer).unwrap();
     let (s, e) = api.call(Method::PUT, &chain_at, Some(json!({ "certificate": inter.pem() }))).await;
     assert!(s == StatusCode::BAD_REQUEST && e["error"].as_str().unwrap().contains("doesn't reach a self-signed root"), "{e}");
+    // A signer that dropped the CSR's name constraints (AWS's plain subordinate templates, openssl
+    // ca's default) is refused, saying so; an admin takes it for a root that constrains elsewhere,
+    // and the CA says so. Each install is checked again.
+    let mut bare = intermediate(30, "svc.internal");
+    bare.name_constraints = None;
+    let bare = bare.signed_by(&spki, &root_issuer).unwrap();
+    let (s, e) = api.call(Method::PUT, &chain_at, Some(json!({ "certificate": bare.pem(), "chain": root_cert.pem() }))).await;
+    let why = e["error"].as_str().unwrap_or_default();
+    assert!(s == StatusCode::BAD_REQUEST && why.contains("has no name constraints") && why.contains("copy_extensions = copy") && why.contains("unconstrained: true"), "{e}");
+    let loose = api.ok(Method::PUT, &chain_at, Some(json!({ "certificate": bare.pem(), "chain": root_cert.pem(), "unconstrained": true }))).await;
+    assert_eq!((loose["status"].as_str(), &loose["unconstrained"]), (Some("active"), &json!(true)));
+    let audit = api.ok(Method::GET, "/audit?action=ca.chain", None).await.to_string();
+    assert!(audit.contains("no name constraints within those domains (unconstrained: true)"), "{audit}");
+    let (s, _) = api.call(Method::PUT, &chain_at, Some(json!({ "certificate": bare.pem(), "chain": root_cert.pem() }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "a renewal without name constraints asks again");
     let ca = api.ok(Method::PUT, &chain_at, Some(json!({ "certificate": inter.pem(), "chain": root_cert.pem() }))).await;
-    assert_eq!((ca["status"].as_str(), ca["domains"].clone()), (Some("active"), json!(["prod.svc.internal"])));
+    assert_eq!((ca["status"].as_str(), ca["domains"].clone(), &ca["unconstrained"]), (Some("active"), json!(["prod.svc.internal"]), &json!(false)));
     assert!(ca.get("csr").is_none() && ca["ca_chain"].as_str().unwrap().ends_with(&root_cert.pem()));
     // A leaf never outlives the intermediate, and comes with the chain.
     let (s, e) = api.call(Method::POST, &format!("/cas/{id}/sign"), Some(json!({ "csr": leaf_csr, "days": 60 }))).await;

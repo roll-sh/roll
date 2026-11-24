@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// What a target can ask for; a new one gets the two that need someone.
-pub const EVENTS: [&str; 39] = [
+pub const EVENTS: [&str; 41] = [
     "deploy.started",
     "deploy.failed",
     "deploy.base_updated",
@@ -57,6 +57,9 @@ pub const EVENTS: [&str; 39] = [
     "scale.out",
     "scale.in",
     "instance.crashed",
+    // Who signed in to a gated environment, and who was turned away (for a SIEM; not by default).
+    "visit.admitted",
+    "visit.denied",
     // Every `audit.*` entry (who changed what), for a SIEM's webhook; never an on-call page.
     "audit",
 ];
@@ -469,6 +472,22 @@ impl Apps {
                 };
                 (format!("{what}: {name} is {op} {t}"), format!("Its {name} was {} ({op} {t}) for {} minutes running.", e.data["value"], e.data["minutes"]))
             }
+            "alert.slo" if e.data["route"].is_string() => {
+                let route = match e.data["method"].as_str() {
+                    Some(m) => format!("{m} {}", e.data["route"].as_str().unwrap_or("")),
+                    None => e.data["route"].as_str().unwrap_or("").to_string(),
+                };
+                (
+                    format!("{what}: {route}'s error budget is burning"),
+                    format!(
+                        "{route}'s {} objective ({}%) is spending its error budget {}× as fast as it lasts, over the last {} and the minutes since.",
+                        e.data["indicator"].as_str().unwrap_or("availability"),
+                        e.data["objective"],
+                        e.data["burn_rate"],
+                        if e.data["window"] == "1h" { "hour" } else { "six hours" }
+                    ),
+                )
+            }
             "alert.slo" => (
                 format!("{what}: its error budget is burning"),
                 format!(
@@ -522,6 +541,8 @@ impl Apps {
                 format!("{what}: scaled {} to {} instances", if e.kind == "scale.out" { "out" } else { "in" }, e.data["to"]),
                 format!("From {} instances: {}.", e.data["from"], e.data["reason"].as_str().unwrap_or("")),
             ),
+            "visit.admitted" => (format!("{what}: {} signed in", e.data["who"].as_str().unwrap_or("someone")), format!("Signed in through {} to the gated environment.", e.data["how"].as_str().unwrap_or("roll"))),
+            "visit.denied" => (format!("{what}: {} was turned away", e.data["who"].as_str().unwrap_or("someone")), format!("{} vouched for them, but the environment's access doesn't let them in.", e.data["how"].as_str().unwrap_or("A provider"))),
             "instance.crashed" => (format!("{what}: an instance crashed"), format!("It stopped because {}. Another starts in its place.", e.data["reason"].as_str().unwrap_or("it exited"))),
             "attack.mode" => (
                 format!("{what}: attack mode is on"),
@@ -539,6 +560,7 @@ impl Apps {
                     Some("alert.cpu") => "CPU",
                     Some("alert.metric") => e.data["metric"].as_str().unwrap_or("a metric"),
                     Some("alert.errors") => "errors",
+                    Some("alert.slo") if e.data["route"].is_string() => e.data["route"].as_str().unwrap_or("a route"),
                     Some("alert.slo") => "error budget burn",
                     Some("alert.anomaly") => "unusual behaviour",
                     Some("alert.latency") => "latency",
@@ -657,21 +679,32 @@ impl Apps {
 /// nothing to page about.
 fn oncall_of(e: &Event) -> Option<(bool, String, &'static str)> {
     let key = |k: &str| format!("roll:{}/{}/{k}", e.service, e.environment);
+    // One incident per route (and kind) or metric: one clearing never closes another's, nor the
+    // service's own objective's.
+    let which = |alert: &str, d: &Value| -> String {
+        let route = || format!("{}{}", d["method"].as_str().map(|m| format!("{m} ")).unwrap_or_default(), d["route"].as_str().unwrap_or(""));
+        match alert {
+            "alert.slo" if d["route"].is_string() => format!("alert.slo/{}", route()),
+            "alert.route" => format!("alert.route/{}/{}", route(), d["kind"].as_str().unwrap_or("")),
+            "alert.metric" => format!("alert.metric/{}", d["metric"].as_str().unwrap_or("")),
+            a => a.to_string(),
+        }
+    };
     Some(match e.kind.as_str() {
         // A check's or heartbeat's own incident, by its name: two checks are two pages.
         "alert.resolved" if e.data["alert"] == "check.down" => (false, key(&format!("check.down/{}", e.data["check"].as_str()?)), "info"),
         "alert.resolved" if e.data["alert"] == "heartbeat.missed" => (false, key(&format!("heartbeat.missed/{}", e.data["heartbeat"].as_str()?)), "info"),
-        "alert.resolved" => (false, key(e.data["alert"].as_str()?), "info"),
+        "alert.resolved" => (false, key(&which(e.data["alert"].as_str()?, &e.data)), "info"),
         "check.down" => (true, key(&format!("check.down/{}", e.data["check"].as_str()?)), "error"),
         "heartbeat.missed" => (true, key(&format!("heartbeat.missed/{}", e.data["heartbeat"].as_str()?)), "error"),
         // A deploy that worked closes the failed one's.
         "deploy.active" => (false, key("deploy.failed"), "info"),
         "domain.active" => return None,
         "crash_loop" | "spend.limit" => (true, key(&e.kind), "critical"),
-        "deploy.failed" | "alert.errors" | "alert.slo" | "cron.failed" | "job.failed" | "volume.backup_failed" | "domain.tls_failed" | "domain.expired" => (true, key(&e.kind), "error"),
+        "deploy.failed" | "alert.errors" | "alert.slo" | "cron.failed" | "job.failed" | "volume.backup_failed" | "domain.tls_failed" | "domain.expired" => (true, key(&which(&e.kind, &e.data)), "error"),
         "form.submitted" => (true, format!("{}/{}", key(&e.kind), e.data["submission"].as_str().unwrap_or("")), "info"),
         "test" => (true, format!("roll:test:{}", e.at), "info"),
-        _ => (true, key(&e.kind), "warning"),
+        _ => (true, key(&which(&e.kind, &e.data)), "warning"),
     })
 }
 
@@ -746,6 +779,23 @@ mod tests {
         assert!(super::wants(&ev(&["audit"]), "audit.variables", &data, false));
         assert!(!super::wants(&ev(&["audit"]), "audit.variables", &data, true), "never an on-call page");
         assert!(!super::wants(&super::DEFAULT_EVENTS.map(String::from), "audit.variables", &data, false), "not by default");
+    }
+
+    #[test]
+    fn a_routes_incident_is_its_own() {
+        let ev = |kind: &str, data: serde_json::Value| crate::model::Event { seq: 1, at: 1, kind: kind.into(), service: "svc_a".into(), environment: "production".into(), deployment: None, data };
+        let key = |e: crate::model::Event| super::oncall_of(&e).map(|(open, k, _)| (open, k));
+        let route = serde_json::json!({ "route": "/checkout/:id", "method": "POST" });
+        // A route's burn and its clearing are one incident, apart from the service's own.
+        let opened = key(ev("alert.slo", route.clone())).unwrap();
+        let mut resolved = route.clone();
+        resolved["alert"] = "alert.slo".into();
+        assert_eq!(key(ev("alert.resolved", resolved)).unwrap(), (false, opened.1.clone()));
+        assert_ne!(opened.1, key(ev("alert.slo", serde_json::json!({}))).unwrap().1);
+        // Each route alert's kind, and each metric, is its own too.
+        let kind = |k: &str| key(ev("alert.route", serde_json::json!({ "route": "/a", "kind": k }))).unwrap().1;
+        assert_ne!(kind("errors"), kind("latency"));
+        assert_ne!(key(ev("alert.metric", serde_json::json!({ "metric": "a" }))).unwrap().1, key(ev("alert.metric", serde_json::json!({ "metric": "b" }))).unwrap().1);
     }
 
     #[test]

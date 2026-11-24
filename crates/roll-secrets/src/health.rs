@@ -52,6 +52,12 @@ pub enum Issue {
     /// in. Re-saving it from a person's session binds it to them. `key` is the sync's or the
     /// identity's id (the identity's `environment` and `path` are empty).
     OperatorMade,
+    /// A sync that signs in to AWS, Google or Azure with a cloud key stored in roll where it could
+    /// sign in without one (the project's AWS role, workload identity federation, a federated
+    /// credential: docs/secrets.md, "Syncing without a cloud key"). A recommendation: the key
+    /// works, but it can leak, expire and needs rotating. `key` is the sync's id, `detail` what to
+    /// use instead.
+    StoredCloudKey,
     /// Its value stops working outside roll within two weeks (a credential a vendor ends by
     /// itself, such as a GitLab token, that roll hasn't rotated by then), or a SaaS rotator's
     /// registered credential does (`credential_expires_at`; `key` its name, `environment` empty).
@@ -371,6 +377,20 @@ impl Secrets {
         for (env, path, id, kind) in syncs {
             if caller.allows(Action::Read, &Scope::at(project, &env, &path)) {
                 out.push(Finding { issue: Issue::OperatorMade, environment: env, path, key: id, detail: format!("{kind} sync made by the operator account: re-save it (make it again) from a person's session to bind it to them"), owner: None, decoy: None });
+            }
+        }
+        // Syncs that keep a cloud key where they could sign in without one.
+        let all: Vec<(String, String, String, String, String)> = self.db.read(|c| {
+            c.query("SELECT e.slug, s.path, s.id, s.kind, s.target FROM syncs s JOIN environments e ON e.id = s.env_id AND e.forgotten_at IS NULL WHERE s.project_id = ? ORDER BY s.id", [project], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+        })?;
+        for (env, path, id, kind, target) in all {
+            let target: serde_json::Value = serde_json::from_str(&target).unwrap_or_default();
+            let Some((instead, keys)) = self.syncs.get(&kind).ok().and_then(|t| Some((t.stored_cloud_key(&target)?, t.credentials(&target)))) else { continue };
+            if caller.allows(Action::Read, &Scope::at(project, &env, &path)) {
+                let detail = format!("{kind} sync signs in with a cloud key stored in roll ({}): {instead}, and delete the key (\"Syncing without a cloud key\")", keys.join(", "));
+                out.push(Finding { issue: Issue::StoredCloudKey, environment: env, path, key: id, detail, owner: None, decoy: None });
             }
         }
         if caller.allows(Action::Read, &Scope::whole(project)) {

@@ -287,6 +287,10 @@ pub enum AppsCmd {
         /// The build command, over the detected one.
         #[arg(long)]
         build_command: Option<String>,
+        /// Where a static build's files are (`dist`, `out`, `public`): served as a static site;
+        /// `none` goes back to detecting it.
+        #[arg(long, value_name = "DIR")]
+        output: Option<String>,
         /// The start command baked into the image at the build (`--start` runs over it, no
         /// rebuild).
         #[arg(long)]
@@ -374,7 +378,8 @@ pub enum AppsCmd {
         /// A cron service's failed run is tried again this many times (0–5), after a backoff.
         #[arg(long)]
         retries: Option<u8>,
-        /// A volume, `<mount>:<size in GB>` (`/data:5`); `none` removes it.
+        /// A volume, `<mount>:<size in GB>` (`/data:5`), `:shared` after it for every instance to
+        /// mount (many instances, overlapping deploys); `none` removes it.
         #[arg(long)]
         volume: Option<String>,
         /// Deploy a push only when it touches these paths (comma-separated, gitignore-style);
@@ -501,6 +506,40 @@ pub enum AppsCmd {
         /// goes live (`critical`, `high`, `medium`, `low`); `none`: never.
         #[arg(long, value_parser = ["critical", "high", "medium", "low", "none"])]
         block_on: Option<String>,
+        /// At max instances, a request that finds every instance at its concurrency waits up to
+        /// this many seconds (1–60) for one, then gets a 429; 0: it goes to the least busy.
+        #[arg(long, value_name = "SECONDS")]
+        queue: Option<u32>,
+        /// Alert when this share of five minutes' requests found every instance busy at max
+        /// instances (0 off; default 10).
+        #[arg(long, value_name = "PERCENT")]
+        alert_capacity: Option<u8>,
+        /// An alert on one route, `[METHOD] /route 5xx>=N% p95>=Nms` (a route as `roll apps
+        /// routes` names it, or `/api/*`); again for more, `none` for none.
+        #[arg(long, value_name = "RULE")]
+        alert_route: Vec<String>,
+        /// A page loaded before a deploy keeps its deployment for a day (`true`), or talks to
+        /// what's live (`false`).
+        #[arg(long)]
+        skew_protection: Option<bool>,
+        /// With an objective: a rollout step fails past this burn rate (default 14.4); 0: the default.
+        #[arg(long, value_name = "RATE")]
+        rollout_slo_burn: Option<f64>,
+        /// A rollout step fails when the new deployment's p95 is this many percent above the old
+        /// one's; 0 off.
+        #[arg(long, value_name = "PERCENT")]
+        rollout_p95: Option<u32>,
+        /// A floor by the clock, `FROM..TO=N` (`--floor 'mon 08:00..fri 18:00=3'`): at least N
+        /// instances in that weekly window; again for more, `none` for none.
+        #[arg(long, value_name = "FROM..TO=N")]
+        floor: Vec<String>,
+        /// With `--floor`: the time zone its windows are in (`Europe/Berlin`; default UTC).
+        #[arg(long, value_name = "ZONE", requires = "floor")]
+        floor_timezone: Option<String>,
+        /// Any other run setting, as JSON (docs/apps/http-api.md's `Run`): `--set
+        /// 'sidecars=[{"name":"redis","image":"redis:7"}]'`, `--set queue_s=null`.
+        #[arg(long = "set", value_name = "FIELD=JSON")]
+        set: Vec<String>,
     },
     /// A copy of the service in its project (Railway's Duplicate): its source, build and run
     /// settings, links and production's own variables. Sealed variables are never shown, so
@@ -1073,11 +1112,19 @@ pub enum AppsCmd {
         #[arg(long, default_value = "requests")]
         sort: String,
     },
-    /// Who changed what in the service (settings, variables by name, domains, links), newest
-    /// first.
-    Activity {
+    /// The service's events, newest first (Render's Events, the dashboard's Events tab): deploys,
+    /// failures, crash loops, alerts, scaling, domains, and who changed what (`--changes` for
+    /// only that: settings, variables by name, domains, links).
+    #[command(alias = "activity")]
+    Events {
         #[command(flatten)]
         target: Target,
+        /// Only who changed what (the Settings tab's Audit log).
+        #[arg(long)]
+        changes: bool,
+        /// Events before this one (its `seq`): the page after the last one shown.
+        #[arg(long, value_name = "SEQ")]
+        before: Option<i64>,
     },
     /// The project as roll.toml (Fly's `fly config save`): its services, the settings that differ
     /// from a new one's, and the databases they link; variables by name only. Printed, or
@@ -3193,10 +3240,10 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, alert_cpu, alert_metric, alert_anomaly, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, build_size, submodules, submodule_repos, lfs, otel, rollout, rollout_step, rollout_errors, rollout_manual, rollout_checks, overlap, h2c, health_grpc, scale, public, drain, cpu_target, busy_cpu, memory_target, latency_target, oidc_audience, push, restart, restart_tries, affinity, tcp, udp, rollback_on_crash, rebuild_on_base, block_on } => {
+        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, output, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, alert_cpu, alert_metric, alert_anomaly, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, build_size, submodules, submodule_repos, lfs, otel, rollout, rollout_step, rollout_errors, rollout_manual, rollout_checks, overlap, h2c, health_grpc, scale, public, drain, cpu_target, busy_cpu, memory_target, latency_target, oidc_audience, push, restart, restart_tries, affinity, tcp, udp, rollback_on_crash, rebuild_on_base, block_on, queue, alert_capacity, alert_route, skew_protection, rollout_slo_burn, rollout_p95, floor, floor_timezone, set } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
-            let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() || rollout_manual.is_some() || rollout_checks.is_some() || overlap.is_some() {
+            let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() || rollout_manual.is_some() || rollout_checks.is_some() || overlap.is_some() || rollout_slo_burn.is_some() || rollout_p95.is_some() {
                 let mut r = svc["run"]["rollout"].as_object().cloned().unwrap_or_default();
                 match rollout.as_deref() {
                     None => {}
@@ -3223,6 +3270,13 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 if let Some(o) = overlap {
                     r.insert("overlap".into(), json!(o));
                 }
+                // 0 is the setting's default: left out.
+                if let Some(b) = rollout_slo_burn {
+                    if b == 0.0 { r.remove("slo_burn") } else { r.insert("slo_burn".into(), json!(b)) };
+                }
+                if let Some(p) = rollout_p95 {
+                    if p == 0 { r.remove("p95_pct") } else { r.insert("p95_pct".into(), json!(p)) };
+                }
                 Some(Value::Object(r))
             } else {
                 None
@@ -3231,9 +3285,15 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 None => None,
                 Some("none") => Some(Value::Null),
                 Some(v) => {
-                    let (mount, size) = v.rsplit_once(':').ok_or_else(|| anyhow::anyhow!("--volume is <mount>:<size in GB>, like /data:5"))?;
+                    // `:shared` after it: every instance mounts it.
+                    let (v, shared) = v.strip_suffix(":shared").map_or((v, false), |v| (v, true));
+                    let (mount, size) = v.rsplit_once(':').ok_or_else(|| anyhow::anyhow!("--volume is <mount>:<size in GB>[:shared], like /data:5"))?;
                     let size: u32 = size.parse().map_err(|_| anyhow::anyhow!("--volume's size is a whole number of GB"))?;
-                    Some(json!({ "mount": mount, "size_gb": size }))
+                    let mut vol = json!({ "mount": mount, "size_gb": size });
+                    if shared {
+                        vol["shared"] = json!(true);
+                    }
+                    Some(vol)
                 }
             };
             // `none` is a text setting's default (null in the PATCH).
@@ -3297,7 +3357,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     build.insert("packages".into(), json!(names));
                 }
             }
-            for (k, v) in [("builder", builder.map(Value::from)), ("dockerfile", text(dockerfile)), ("target", text(stage)), ("install", text(install)), ("build", text(build_command)), ("start", text(build_start))] {
+            for (k, v) in [("builder", builder.map(Value::from)), ("dockerfile", text(dockerfile)), ("target", text(stage)), ("install", text(install)), ("build", text(build_command)), ("output", text(output)), ("start", text(build_start))] {
                 if let Some(v) = v {
                     build.insert(k.into(), v);
                 }
@@ -3306,13 +3366,17 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 body.insert("build".into(), Value::Object(build));
             }
             // The service's alerts with what was given replaced (the API takes them whole).
-            let alerts = if alert_memory.is_some() || alert_errors.is_some() || alert_p95.is_some() || alert_log.is_some() || alert_log_count.is_some() || alert_cpu.is_some() || !alert_metric.is_empty() || alert_anomaly.is_some() {
+            let alerts = if alert_memory.is_some() || alert_errors.is_some() || alert_p95.is_some() || alert_log.is_some() || alert_log_count.is_some() || alert_cpu.is_some() || !alert_metric.is_empty() || alert_anomaly.is_some() || alert_capacity.is_some() || !alert_route.is_empty() {
                 let mut a = svc["run"]["alerts"].as_object().cloned().unwrap_or_default();
+                if !alert_route.is_empty() {
+                    let rules = alert_route.iter().filter(|r| *r != "none").map(|r| route_alert(r)).collect::<anyhow::Result<Vec<_>>>()?;
+                    a.insert("routes".into(), Value::Array(rules));
+                }
                 if !alert_metric.is_empty() {
                     let rules = alert_metric.iter().filter(|r| *r != "none").map(|r| metric_alert(r)).collect::<anyhow::Result<Vec<_>>>()?;
                     a.insert("metrics".into(), Value::Array(rules));
                 }
-                for (k, v) in [("memory_pct", alert_memory.map(Value::from)), ("error_pct", alert_errors.map(Value::from)), ("p95_ms", alert_p95.map(Value::from)), ("log_count", alert_log_count.map(Value::from)), ("cpu_pct", alert_cpu.map(Value::from))] {
+                for (k, v) in [("memory_pct", alert_memory.map(Value::from)), ("error_pct", alert_errors.map(Value::from)), ("p95_ms", alert_p95.map(Value::from)), ("log_count", alert_log_count.map(Value::from)), ("cpu_pct", alert_cpu.map(Value::from)), ("capacity_pct", alert_capacity.map(Value::from))] {
                     if let Some(v) = v {
                         a.insert(k.into(), v);
                     }
@@ -3391,6 +3455,13 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 ("rollback_on_crash", rollback_on_crash.map(Value::from)),
                 ("rebuild_on_base", rebuild_on_base.map(Value::from)),
                 ("block_on", block_on.map(|b| if b == "none" { Value::Null } else { Value::from(b) })),
+                ("queue_s", queue.map(|q| if q == 0 { Value::Null } else { Value::from(q) })),
+                ("skew_protection", skew_protection.map(Value::from)),
+                ("schedule_scale", match floor.as_slice() {
+                    [] => None,
+                    f if f.iter().any(|x| x == "none") => Some(json!([])),
+                    f => Some(Value::Array(f.iter().map(|r| floor_rule(r, floor_timezone.as_deref())).collect::<anyhow::Result<Vec<_>>>()?)),
+                }),
                 ("scale", match scale.as_deref() {
                     None => None,
                     Some("none") => Some(Value::Null),
@@ -3408,6 +3479,11 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 if let Some(v) = v {
                     run.insert(k.into(), v);
                 }
+            }
+            for s in &set {
+                let (k, v) = s.split_once('=').ok_or_else(|| anyhow::anyhow!("--set is FIELD=JSON (--set 'sidecars=[{{\"name\":\"redis\",\"image\":\"redis:7\"}}]')"))?;
+                let v: Value = serde_json::from_str(v).map_err(|e| anyhow::anyhow!("--set {k}: its value is JSON ({e}); a string is quoted: --set '{k}=\"…\"'"))?;
+                run.insert(k.trim().to_string(), v);
             }
             if !run.is_empty() {
                 body.insert("run".into(), Value::Object(run));
@@ -4668,13 +4744,22 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Activity { target } => {
+        AppsCmd::Events { target, changes, before } => {
             let svc = service(api, &target).await?;
-            let v = api.get(&format!("/v1/apps/services/{}/activity", enc(&s(&svc["id"])))).await?;
+            let mut q = vec![];
+            if !changes {
+                q.push("all=1".to_string());
+            }
+            if let Some(b) = before {
+                q.push(format!("before={b}"));
+            }
+            let qs = if q.is_empty() { String::new() } else { format!("?{}", q.join("&")) };
+            let v = api.get(&format!("/v1/apps/services/{}/activity{qs}", enc(&s(&svc["id"])))).await?;
             if !json_out {
                 for e in v.as_array().into_iter().flatten() {
                     let t = e["at"].as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default();
-                    let who = e["data"]["actor"].as_str().unwrap_or("someone");
+                    // roll's own events have no actor.
+                    let who = e["data"]["actor"].as_str().unwrap_or(if s(&e["kind"]).starts_with("audit.") { "someone" } else { "roll" });
                     let what = s(&e["kind"]).trim_start_matches("audit.").to_string();
                     let env = e["environment"].as_str().filter(|x| !x.is_empty()).map(|x| format!(" ({x})")).unwrap_or_default();
                     let mut detail = e["data"].clone();
@@ -5397,6 +5482,45 @@ fn internal_rewritten(v: &str, host: &str, local: &str) -> Option<String> {
 }
 
 /// `--alert-metric`: `name>100` or `name<1`, then ` for 5m` and ` sum`, as an `alerts.metrics` entry.
+/// `--alert-route`'s `[METHOD] /route 5xx>=N% p95>=Nms` as one of `alerts.routes`.
+fn route_alert(rule: &str) -> anyhow::Result<Value> {
+    let bad = || anyhow::anyhow!("--alert-route is [METHOD] /route with 5xx>=N% and/or p95>=Nms: {rule}");
+    let mut words = rule.split_whitespace().peekable();
+    let method = words.next_if(|w| !w.starts_with('/'));
+    let route = words.next().filter(|r| r.starts_with('/')).ok_or_else(bad)?;
+    let mut out = json!({ "route": route });
+    if let Some(m) = method {
+        out["method"] = json!(m.to_ascii_uppercase());
+    }
+    // `5xx >= 2%` and `5xx>=2%` alike.
+    let rest: String = words.collect::<Vec<_>>().join("").replace(">=", ">");
+    for part in rest.split_inclusive(['%', 's']).filter(|p| !p.is_empty()) {
+        if let Some(n) = part.strip_prefix("5xx>").and_then(|n| n.strip_suffix('%')) {
+            out["error_pct"] = json!(n.parse::<u8>().map_err(|_| bad())?);
+        } else if let Some(n) = part.strip_prefix("p95>").and_then(|n| n.strip_suffix("ms")) {
+            out["p95_ms"] = json!(n.parse::<u32>().map_err(|_| bad())?);
+        } else {
+            return Err(bad());
+        }
+    }
+    if out.get("error_pct").is_none() && out.get("p95_ms").is_none() {
+        return Err(bad());
+    }
+    Ok(out)
+}
+
+/// `--floor`'s `FROM..TO=N` as one of `schedule_scale`.
+fn floor_rule(rule: &str, timezone: Option<&str>) -> anyhow::Result<Value> {
+    let bad = || anyhow::anyhow!("--floor is FROM..TO=N, like 'mon 08:00..fri 18:00=3': {rule}");
+    let (span, n) = rule.rsplit_once('=').ok_or_else(bad)?;
+    let (from, to) = span.split_once("..").ok_or_else(bad)?;
+    let mut out = json!({ "windows": [{ "from": from.trim(), "to": to.trim() }], "min_instances": n.trim().parse::<u32>().map_err(|_| bad())? });
+    if let Some(tz) = timezone {
+        out["timezone"] = json!(tz);
+    }
+    Ok(out)
+}
+
 fn metric_alert(rule: &str) -> anyhow::Result<Value> {
     let bad = || anyhow::anyhow!("--alert-metric is name>N or name<N, with \" for 1m\"–\" for 5m\" and \" sum\" after it: {rule}");
     let (head, rest) = rule.trim().split_once(' ').map_or((rule.trim(), ""), |(h, r)| (h, r));

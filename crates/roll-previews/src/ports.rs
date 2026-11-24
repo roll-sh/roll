@@ -372,6 +372,17 @@ pub struct CropAsk {
     pub note: String,
     pub path: String,
     pub selector: String,
+    /// As the reviewer saw it: their viewport, and their steps on the page first.
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
+    #[serde(default)]
+    pub steps: Vec<crate::settings::Step>,
+    /// In this engine ([`crate::settings::BROWSERS`]) rather than Chromium's: the other browsers'
+    /// run takes it.
+    #[serde(default)]
+    pub browser: Option<String>,
 }
 
 /// What a screenshot run takes: the project's other pages, and what it blanks first.
@@ -984,6 +995,13 @@ pub trait Visitors: Send + Sync {
     /// refuses the accept (an author isn't let through because their names couldn't be read).
     fn names_of(&self, _user: &str) -> anyhow::Result<Vec<String>> {
         Ok(Vec::new())
+    }
+    /// Mail the person whose roll handle is `handle` about `project`'s preview, to their own
+    /// address, when they may still open its previews ([`Visitors::maker_reaches`]): `false`
+    /// when there's nobody to tell (no such account, no address, no longer on the project, mail
+    /// not set up). An error is worth trying again. Called off the async workers.
+    fn mail(&self, _handle: &str, _project: &str, _subject: &str, _text: &str) -> anyhow::Result<bool> {
+        Ok(false)
     }
 }
 

@@ -3302,6 +3302,23 @@ async fn an_s3_repository_bounds_and_checks_what_a_bucket_holds() {
     expect("committed while the other waited", second, 200, "SUCCESS");
     expect("refused after the other committed", first, 500, "concurrent modification");
     expect("the committed one restores", e.es(&u, &p, reqwest::Method::POST, "/_snapshot/backup/second/_restore?wait_for_completion=true", Some(json!({"rename_pattern": "docs", "rename_replacement": "second"}))).await, 200, "second");
+    // Deleting a snapshot waits for those running in the repository: `third`, held as it
+    // commits and reusing `second`'s new segment, is recorded before `second` goes, and keeps it.
+    let (arrived, release) = (Arc::new(tokio::sync::Notify::new()), Arc::new(tokio::sync::Notify::new()));
+    *bucket.hold_index.lock().unwrap() = Some((arrived.clone(), release.clone()));
+    let third = es(reqwest::Method::PUT, "/_snapshot/backup/third?wait_for_completion=true", Some(json!({"indices": "docs"})));
+    let deleting = async {
+        arrived.notified().await;
+        let released = async {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            release.notify_one();
+        };
+        tokio::join!(es(reqwest::Method::DELETE, "/_snapshot/backup/second", None), released).0
+    };
+    let (third, deleted) = tokio::join!(third, deleting);
+    expect("taken while a deletion waited", third, 200, "SUCCESS");
+    expect("deleted after it", deleted, 200, "acknowledged");
+    expect("restores what it reused", e.es(&u, &p, reqwest::Method::POST, "/_snapshot/backup/third/_restore?wait_for_completion=true", Some(json!({"rename_pattern": "docs", "rename_replacement": "third"}))).await, 200, "third");
     // Another program's upload in parts under `indices/` makes a location someone else's.
     bucket.uploads.lock().unwrap().insert("es-upload".into(), ("parts/roll/indices/Xq/0/__e".into(), Default::default()));
     let parts = json!({"type": "s3", "settings": {"bucket": "backups", "base_path": "parts", "endpoint": endpoint, "path_style_access": true}});

@@ -420,9 +420,20 @@ export function PreviewSheet({
             )}
             {p.visual_review && p.visual_review.state === "changed" && p.visual_review.pages.length > 1 && (
               <ul className="mt-1 space-y-0.5 text-[11.5px]" aria-label="Pages to review">
-                {p.visual_review.pages.map((pg) => (
+                {p.visual_review.pages.map((pg, i, all) => (
                   <li key={pg.path} className="flex min-w-0 items-center gap-2">
                     <span className="truncate font-mono text-[11px] text-muted">{pageLabel(pg.path)}</span>
+                    {pg.group && all.findIndex((x) => x.group === pg.group) === i && !pg.by && (
+                      <button
+                        type="button"
+                        disabled={busy !== null || gone}
+                        title="These pages changed the same way (Percy's grouped diffs): accept them together"
+                        onClick={() => run(`accept:group:${pg.group}`, () => previewsApi.acceptVisual(p.id, p.visual_review?.head, undefined, pg.group ?? undefined))}
+                        className="shrink-0 rounded px-1.5 text-[11px] text-accent hover:underline disabled:opacity-40"
+                      >
+                        {busy === `accept:group:${pg.group}` ? "Accepting…" : `Accept the ${all.filter((x) => x.group === pg.group).length} changed the same way`}
+                      </button>
+                    )}
                     <span className="shrink-0 font-mono text-[11px] tabular-nums text-subtle">{Math.max(pg.percent, 0.1).toFixed(1)}%</span>
                     {pg.unstable && <span className="shrink-0 text-subtle" title="Two captures a second apart differ: the difference may be only that">moves by itself</span>}
                     {pg.by ? (
@@ -1322,15 +1333,15 @@ function NoteThread({ previewId, change, review, where, onDone }: { previewId: s
   const [state, setState] = useState<"idle" | "busy" | "done">("idle");
   const [error, setError] = useState<string | null>(null);
   // What the note is about, as the next screenshot run cropped it from the page.
-  const [crop, setCrop] = useState<string | null>(null);
+  const [crop, setCrop] = useState<{ url: string; as: string | null } | null>(null);
   useEffect(() => {
     let url: string | null = null;
     let live = true;
     noteCropUrl(previewId, review).then(
-      (u) => {
-        url = u;
-        if (live) setCrop(u);
-        else if (u) URL.revokeObjectURL(u);
+      (c) => {
+        url = c?.url ?? null;
+        if (live) setCrop(c);
+        else if (url) URL.revokeObjectURL(url);
       },
       () => {},
     );
@@ -1366,7 +1377,12 @@ function NoteThread({ previewId, change, review, where, onDone }: { previewId: s
     <div className="rounded-lg border border-line-2 bg-raised px-2.5 py-2 text-[11.5px] inset-shadow-highlight">
       <p className="text-muted">A note on the preview's page</p>
       {note && <p className="mt-1 break-words text-fg">{note}</p>}
-      {crop && <img src={crop} alt="The part of the page the note is about" className="mt-1.5 max-h-48 max-w-full rounded-md border border-line-2" />}
+      {crop && (
+        <figure className="mt-1.5">
+          <img src={crop.url} alt="The part of the page the note is about" className="max-h-48 max-w-full rounded-md border border-line-2" />
+          {crop.as && <figcaption className="mt-0.5 font-mono text-[10.5px] text-subtle">As they saw it: {crop.as}</figcaption>}
+        </figure>
+      )}
       {replies.map((r) => (
         <div key={r.id} className="mt-1.5 border-l border-line-2 pl-2">
           <p className="text-subtle">{r.by}</p>

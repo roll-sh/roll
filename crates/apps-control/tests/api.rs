@@ -684,10 +684,11 @@ async fn a_provider_signs_visitors_in_by_their_domain_or_organisation() {
     let state = hd["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_string();
     assert!(st == StatusCode::FOUND && start.starts_with("https://api.roll.test/v1/accounts/oauth/github/visit?r=") && start.ends_with("&orgs=1"), "{start}");
     let request = start.split("r=").nth(1).unwrap().trim_end_matches("&orgs=1").to_string();
-    let who = |email: &str, orgs: &[&str]| apps_control::integrations::SsoVisitor { provider: "github".into(), subject: "7".into(), email: email.into(), orgs: orgs.iter().map(|o| o.to_string()).collect(), hosted_domain: None };
+    let who = |email: &str, orgs: &[&str]| apps_control::integrations::SsoVisitor { provider: "github".into(), subject: "7".into(), email: email.into(), orgs: orgs.iter().map(|o| o.to_string()).collect(), hosted_domain: None, groups: vec![] };
     // Turned away: someone else, a tampered request, another provider's sign-in.
     let no = w.apps.admit_visitor(&request, &who("eve@evil.example", &["other"])).await.unwrap_err();
     assert!(no.contains("eve@evil.example"), "{no}");
+    assert!(w.apps.admit_visitor(&request, &who("eve@evil.example", &["other"])).await.is_err());
     let mut forged = request.clone();
     forged.replace_range(0..2, "AA");
     assert!(w.apps.admit_visitor(&forged, &who("ann@acme.com", &[])).await.is_err());
@@ -729,9 +730,31 @@ async fn a_provider_signs_visitors_in_by_their_domain_or_organisation() {
     let bob = w.apps.admit_visitor(&request, &who("bob@elsewhere.example", &["roll-sh"])).await.unwrap();
     let bob = bob.split_once(&h).map(|(_, p)| p.trim_start_matches(|c: char| c == ':' || c.is_ascii_digit()).to_string()).unwrap();
     assert_eq!(get(bob, None).await.0, StatusCode::UNAUTHORIZED, "only in the browser it began in");
+    // Who's signed in, the log of who came and who was turned away (once in ten minutes each),
+    // and signing one person out: their session ends now.
+    let again = w.apps.admit_visitor(&request, &who("ann@acme.com", &[])).await.unwrap();
+    let again = again.split_once(&h).map(|(_, p)| p.trim_start_matches(|c: char| c == ':' || c.is_ascii_digit()).to_string()).unwrap();
+    let (_, hd) = get(again, Some(state.clone())).await;
+    let ann_session = hd["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_string();
+    assert_eq!(get("/".into(), Some(ann_session.clone())).await.0, StatusCode::OK);
+    let (_, vs) = call(&w.api, "GET", &format!("{env}/visitors"), None).await;
+    let ann = vs.as_array().unwrap().iter().find(|v| v["who"] == "ann@acme.com").cloned().unwrap_or_else(|| panic!("{vs}"));
+    assert_eq!((ann["how"].as_str(), ann["entry"].as_str()), (Some("github"), Some("@acme.com")), "{vs}");
+    let (_, ev) = call(&w.api, "GET", "/v1/apps/events?after=0", None).await;
+    let count = |k: &str| ev["events"].as_array().unwrap().iter().filter(|e| e["kind"] == k).count();
+    assert_eq!((count("visit.denied"), count("visit.admitted") >= 2), (1, true), "{ev}");
+    assert_eq!(call(&w.api, "DELETE", &format!("{env}/visitors/{}", ann["id"].as_str().unwrap()), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(get("/".into(), Some(ann_session)).await.0, StatusCode::FOUND, "signed out from the dashboard");
+    assert_eq!(call(&w.api, "DELETE", &format!("{env}/visitors/0123456789abcdef"), None).await.0, StatusCode::NOT_FOUND);
     // With Google, a domain's entry needs the account to be that Workspace domain's.
     let g = apps_control::model::Sso { provider: "google".into(), allow: vec!["@acme.com".into()] };
-    assert_eq!((g.admits("ann@acme.com", &[], None), g.admits("ann@acme.com", &[], Some("acme.com"))), (None, Some("@acme.com")));
+    assert_eq!((g.admits("ann@acme.com", &[], None, &[]), g.admits("ann@acme.com", &[], Some("acme.com"), &[])), (None, Some("@acme.com")));
+    // An organisation's own provider: a group counts for that organisation's people only (group
+    // names aren't unique between organisations), and names its domain.
+    let o = apps_control::model::Sso { provider: "sso".into(), allow: vec!["group:Eng Team@acme.com".into()] }.check().unwrap();
+    let eng = vec!["eng team".to_string()];
+    assert_eq!((o.admits("ann@acme.com", &[], None, &eng), o.admits("eve@evil.example", &[], None, &eng), o.admits("bob@acme.com", &[], None, &[])), (Some("group:eng team@acme.com"), None, None));
+    assert!(apps_control::model::Sso { provider: "sso".into(), allow: vec!["group:eng".into()] }.check().is_err(), "a group names its organisation's domain");
     // `@acme.com` gone from allow: Ann's session ends.
     call(&w.api, "PUT", &env, Some(json!({"access": {"sso": {"provider": "github", "allow": ["org:roll-sh"]}}}))).await;
     assert_eq!(get("/".into(), Some(session)).await.0, StatusCode::FOUND, "back to signing in");
@@ -2578,6 +2601,51 @@ async fn a_flood_turns_attack_mode_on_until_it_ends() {
     assert!(call(&w.api, "GET", &base, None).await.1.get("challenge_until").is_none());
 }
 
+/// One route's own objective (`slo.routes`) is judged on that route's minutes: its burn is
+/// `alert.slo` naming the route while the service's own objective holds, once, and the report
+/// shows the route against its window.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_objective_for_one_route_burns_on_its_own() {
+    let w = world().await;
+    let slo = json!({"objective": 99.0, "routes": [{"route": "/checkout/42", "method": "post", "objective": 99.9}]});
+    let (svc, _) = image_service(&w, "shop", json!({"port": 80, "min_instances": 1, "slo": slo})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}");
+    let (_, s) = call(&w.api, "GET", &base, None).await;
+    assert_eq!(s["run"]["slo"]["routes"], json!([{"route": "/checkout/:id", "method": "POST", "objective": 99.9}]), "folded as Routes folds it: {s}");
+    let twice = json!({"run": {"slo": {"objective": 99.0, "routes": [{"route": "/a", "objective": 99.9}, {"route": "/a", "objective": 99.5}]}}});
+    assert_eq!(call(&w.api, "PATCH", &base, Some(twice)).await.0, StatusCode::BAD_REQUEST);
+    let events = |kind: &'static str| {
+        let api = &w.api;
+        async move {
+            let (_, ev) = call(api, "GET", "/v1/apps/events?after=0", None).await;
+            ev["events"].as_array().unwrap().iter().filter(|e| e["kind"] == kind).cloned().collect::<Vec<Value>>()
+        }
+    };
+    // 2% of its checkouts failed every minute of the last hour (the service's own minutes are
+    // clean): 20 times as fast as a 99.9% objective's budget lasts.
+    let live = w.apps.live(&id, "production");
+    for _ in 0..100 {
+        let now = code_sql::now_ms() / 60_000;
+        let rows: Vec<_> = (1..=60).map(|i| ("POST /checkout/:id".to_string(), apps_control::store::MinuteRow { minute: now - i, requests: 100, errors: 2, ..Default::default() })).collect();
+        w.apps.store.put_route_minutes(&id, "production", &rows).unwrap();
+        w.apps.judge_alerts(&live).await;
+        if !events("alert.slo").await.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    w.apps.judge_alerts(&live).await;
+    let fired = events("alert.slo").await;
+    assert_eq!(fired.len(), 1, "{fired:?}");
+    assert_eq!(fired[0]["data"], json!({"indicator": "availability", "burn_rate": 20.0, "window": "1h", "objective": 99.9, "route": "/checkout/:id", "method": "POST"}));
+    let (_, r) = call(&w.api, "GET", &format!("{base}/environments/production/slo"), None).await;
+    assert!(r["burning"].is_null(), "the service's own objective holds: {r}");
+    let route = &r["routes"][0];
+    // (A loaded machine can cross into the next minute and write one more.)
+    assert!(route["availability"]["bad"].as_i64() >= Some(120) && route["burning"]["window"] == "1h", "{r}");
+}
+
 /// An alert on one route (`alert.route`) fires on that route's 5xx share while the service as a
 /// whole is fine, once, and clears naming the route; routes are folded as Routes folds them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2770,6 +2838,13 @@ async fn an_slo_shows_its_budget_and_a_fast_burn_alerts() {
     let kinds: Vec<&str> = ev["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "alert.slo" || e["data"]["alert"] == "alert.slo").map(|e| e["kind"].as_str().unwrap()).collect();
     assert_eq!(kinds, ["alert.slo", "alert.resolved"], "{ev}");
     assert_eq!(call(&w.api, "GET", &format!("{env}/slo"), None).await.1["burning"], Value::Null);
+    // Minutes past the cutoff are rolled up into hours, which the window still counts.
+    let total = || async { call(&w.api, "GET", &format!("{env}/slo"), None).await.1["availability"]["total"].as_i64().unwrap() };
+    let old = code_sql::now_ms() / 60_000 - 3 * 24 * 60;
+    w.apps.store.put_minutes(&id, "production", &(0..60).map(|i| minute(old - i, 1)).collect::<Vec<_>>()).unwrap();
+    let with_old = total().await;
+    w.apps.store.prune_metrics(old + 60).unwrap();
+    assert_eq!(total().await, with_old, "an hour's rollup counts as its minutes did");
 }
 
 /// The app's own Prometheus endpoint (Fly's `[metrics]`): scraped on each running instance,

@@ -390,11 +390,18 @@ struct AcceptBody {
     head: Option<String>,
     /// One page only (`visual_review.pages[].path`: `""` the first page). Left out: every page.
     path: Option<String>,
+    /// Every page changed the same way (`visual_review.pages[].group`).
+    group: Option<String>,
 }
 
 async fn accept_visual(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>, b: Bytes) -> crate::Result<Json<Preview>> {
     check_id(&id)?;
-    let AcceptBody { head: seen, path } = if b.is_empty() { AcceptBody::default() } else { body::<AcceptBody>(&b)? };
+    let AcceptBody { head: seen, path, group } = if b.is_empty() { AcceptBody::default() } else { body::<AcceptBody>(&b)? };
+    let path = match (path, group) {
+        (Some(_), Some(_)) => return Err(Error::BadRequest("a page or a group, not both".into())),
+        (None, Some(g)) => Some(format!("group:{g}")),
+        (p, None) => p,
+    };
     // The person behind a token too: their own token doesn't let an author accept their change.
     let aliases = aliases_of(&e, who.as_ref().map(|u| &u.0)).await?;
     // A signed-in person who can write to the change's repo in roll code (an admin can).
@@ -527,8 +534,13 @@ async fn notes(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<serd
 async fn note_crop(AxState(e): S, Path((id, note)): Path<(String, String)>) -> crate::Result<Response> {
     check_id(&id)?;
     e.store.row(&id)?;
-    let png = e.store.note_crop(&id, &note)?.ok_or_else(|| Error::NotFound("no picture of that note's element yet".into()))?;
-    Ok(([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "private, max-age=3600")], png).into_response())
+    let (png, seen) = e.store.note_crop(&id, &note)?.ok_or_else(|| Error::NotFound("no picture of that note's element yet".into()))?;
+    let mut resp = ([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "private, max-age=3600")], png).into_response();
+    // Taken as its reviewer saw it: how (`390x844, after 2 steps`).
+    if let Some(v) = seen.and_then(|s| axum::http::HeaderValue::from_str(&s).ok()) {
+        resp.headers_mut().insert(axum::http::HeaderName::from_static("x-roll-crop-as"), v);
+    }
+    Ok(resp)
 }
 
 /// Resolve a note left on the preview's page (its review's id): the page stops listing it.
@@ -683,7 +695,7 @@ async fn screenshot_link(AxState(e): S, Path(id): Path<String>, Query(q): Query<
             return Ok(None);
         }
         if let Some(n) = &note {
-            return e.store.note_crop(&id, n);
+            return Ok(e.store.note_crop(&id, n)?.map(|(png, _)| png));
         }
         if variant.is_none() {
             return Ok(e.store.screenshot(&id)?.map(|(_, png)| png));

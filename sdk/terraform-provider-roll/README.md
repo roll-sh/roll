@@ -149,6 +149,13 @@ resource "roll_secrets_kms_key" "cmk" {
   key = "arn:aws:kms:eu-west-1:123456789012:key/…"
 }
 
+# The project's own settings; one left out keeps roll's.
+resource "roll_secrets_project" "shop" {
+  leak_rotate     = "managed"   # a leaked managed key rotates at once ("When a value leaks")
+  history_days    = 365         # 0 keeps old values forever
+  validity_checks = "on"
+}
+
 # roll apps: a service, a variable, a custom domain, an environment, a link and a notification
 # target (docs/apps/http-api.md).
 resource "roll_app_service" "web" {
@@ -346,6 +353,8 @@ provider "elasticstack" {
   them so, and an import reads them so). Destroying it requires nothing.
 - `roll_secrets_kms_key` checks roll can use the key when it's set; destroying it unwraps the data
   key, so KMS must still answer.
+- `roll_secrets_project` writes only the settings that differ from roll's, and destroying it leaves
+  them (and the project) as they are.
 
 - A notification target's URL is never read back, and a new URL is a new target. A webhook's
   signing secret is in `.secret` from when it's made. Filters left out are the defaults.

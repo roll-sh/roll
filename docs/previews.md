@@ -1753,6 +1753,20 @@ land on the change.
   list says `crop`, and the sheet shows it with the note, as does the change page's review
   timeline in roll (beside the note's review).
   `a_notes_element_is_cropped_by_the_next_screenshot`.
+  As its reviewer saw it (Jam's recordings, without trusting the reviewer's browser): a note
+  says the reviewer's viewport and their last steps (#879), so roll's browser takes it at that
+  viewport (a phone's emulated as one) after taking their clicks again (checking a box is one)
+  and Enter or Escape, from their last page change on, the last 10, 10 s at most; typing and
+  choices aren't taken (the button keeps how many characters, never what). Roll's own browser
+  does it, so the page's code still can't forge the picture. The crop says how it was taken
+  (`crop_as` in the notes list, `X-Roll-Crop-As` on the picture: "390x844, after 2 steps";
+  the sheet's "As they saw it"). In their browser's engine too (the note's "Safari 18 on iOS"):
+  every browser on iOS is WebKit at a phone's size, Safari elsewhere WebKit, Firefox Firefox;
+  those crops go to the other browsers' run (`browsers.js`, Playwright; it runs for them even
+  without `github.browsers`), the same viewport and steps, a 512 KiB picture at most, only for
+  a note asked; the label names the engine ("WebKit, 390x844, after 1 step"). Chromium's run
+  takes the rest. `a_note_says_how_its_reviewer_saw_the_page`; live, a Safari-on-iOS note after
+  a click, cropped in WebKit.
 - The open notes reach the pull request (Vercel's comments): the preview's own comment, updated
   in place, lists them (newest first, at most 10), each with its page, who and what as plain
   words (one line, markdown escaped: a note can't link, embed an image, mention or close
@@ -1766,6 +1780,16 @@ land on the change.
   naming any other review joins nothing), so it reaches the pull request as a GitHub review like
   the note did. The page lists the replies under their note, as text, and `roll preview notes`
   under each note too (live: a reply listed under its note).
+- People are told by mail (Vercel's comment notifications; `note_mail`, on unless turned off):
+  a new note goes to the change's author, a reply to the note's author, and a resolve to the
+  note's author ("bob resolved your note"), each to their own address through roll's accounts
+  (`Accounts::mail_user`, never an address a caller names), and only while they may open the
+  project's previews (as a share link's maker must). Never to a guest (no account), nor to
+  whoever wrote it. roll code tells previews of each review as it's made
+  (`PreviewBackend::reviewed`, after its event); previews keeps what to send (`note_tells`, once
+  per review and person) and its loop sends it, each claimed first so one node does, tried
+  again after 1 and 5 minutes when it couldn't go. GitHub tells a mirrored pull request's
+  people already; this is for a roll-only change. `a_notes_people_are_told_by_mail`.
 - Notes as Slack threads (Vercel's comments in Slack), both ways, through roll code's chat ops
   (docs/code/chatops.md): the "Preview notes as Slack threads" automation template (trigger
   `code` on `review` events, step `slack.note` with a channel) posts each new note as a message
@@ -1867,14 +1891,14 @@ previews in it), the operator and admins see every project.
 | `POST /v1/previews/{id}/visit` | `{to}` (a URL at one of the preview's service hosts) | `{url}`: a one-use way into a team-access preview (`access: "team"`) at `to`, good for a minute, for a person signed in to roll (a session; a token is a 403). 400 when the project's previews aren't `team` or `to` isn't the preview's; 403 for a person who may not open the project. Operator-only in the permissions catalogue: no grant ever gives one |
 | `POST /v1/previews/{id}/keep` | `{hours}` (0–720; 0 releases) | `Preview`: kept past its TTL until then (`kept_until`); a landed or closed change still ends it |
 | `GET /v1/previews/{id}/notes` | | `{notes: [{id, path, selector, note, by, at, replies: [{id, note, by, at}], crop}]}`: the notes left on its pages that nobody has resolved, every page's (the latest 500); `crop`: a picture of its element is kept |
-| `GET /v1/previews/{id}/notes/{note}/crop` | | `image/png`: the note's element as a screenshot run cropped it from its page; 404 until one has |
+| `GET /v1/previews/{id}/notes/{note}/crop` | | `image/png`: the note's element as a screenshot run cropped it from its page (`X-Roll-Crop-As`: how, when as its reviewer saw it); 404 until one has |
 | `POST /v1/previews/{id}/notes/{note}/resolve` | | `{resolved}`: a note on the preview's page (its review's id) resolved, so the page stops listing it; 404 for a note that isn't the change's |
 | `GET /v1/previews/{id}/mail` | | `{mail: [{id, at, from, to, subject, size}]}`: what its services sent, caught (newest first, the last 50) |
 | `GET /v1/previews/{id}/mail/{mail}` | | One caught message as sent, as `text/plain` (never rendered) |
 | `GET /v1/previews/{id}/connect` | | `{branches: [{kind, parent, vars}]}`: each data branch's connection as its services get it, the branch's own credentials (a Postgres branch's role, never the parent's or a superuser's), read from the products each time; 409 while it's being deleted |
 | `GET /v1/previews/{id}/qr.png` | `service?` | The preview's link with its access (`share_url`, or that service's) as a QR code PNG, to open on a phone; `Cache-Control: no-store` (it carries the token); 404 with no link yet |
 | `POST /v1/previews/{id}/regressions/accept` | `{head?}` (the push looked at; a newer one is a 409) | `Preview`: its regressions against main accepted at its head (`regressions_accepted`), the change reported again. Not by the change's author; a `required` rule's only by a person (403 for a token). 400 for a branch's preview. Admin on the preview's project |
-| `POST /v1/previews/{id}/visual/accept` | `{head?, path?}` (the screenshot's looked at, `visual_review.head`; `path`: that page only, `""` the first, else every page) | `Preview`: how a change's pages look at its latest screenshot is accepted (`visual_review`, `roll/visual`); 404 for a page it has no screenshot of; 409 with no screenshot yet, 400 for a branch's preview, 403 from the change's author (under any name they go by) or from a token or the operator's token when the review is required, 409 when the change's author isn't known or `head` isn't the latest screenshot's (a newer one came in) |
+| `POST /v1/previews/{id}/visual/accept` | `{head?, path?, group?}` (the screenshot's looked at, `visual_review.head`; `path`: that page only, `""` the first; `group`: every page changed the same way, `visual_review.pages[].group`; else every page) | `Preview`: how a change's pages look at its latest screenshot is accepted (`visual_review`, `roll/visual`); 404 for a page it has no screenshot of; 409 with no screenshot yet, 400 for a branch's preview, 403 from the change's author (under any name they go by) or from a token or the operator's token when the review is required, 409 when the change's author isn't known or `head` isn't the latest screenshot's (a newer one came in) |
 | `GET /v1/previews/{id}/logs?service=&lines=` | | `{service, lines: string[]}`, masked: every value the preview got from roll secrets, the project's `env` and the preview's own variables, and its branches' credentials (a password, key or token, a URL's password) are `***`, as checks' output is (each line of 6 characters or more). A preview's code, a fork's too, can print what it was given, and anyone who reads the preview reads its logs. 409 when what they must hide can't be read. A seed's, release's or teardown's output (the preview's error, a teardown's in the pull request's comment), what its page said in a screenshot run (its errors and failed requests, broken links, words, markup and API operations: the comment's "What went wrong") and the hosts its egress proxy refused (a name is its code's to choose) are masked the same way (a picture can't be: a page that renders a secret shows it). Masking matches values as written, so code that prints a secret encoded (base64, hex) gets it through, as with every log masker (GitHub Actions' too). It hides what a preview shows, not what its code sends: with egress open (the default) its code reaches the internet, DNS included. Under "Roll only" it can't: the preview's network is `--internal`, where Docker's embedded DNS doesn't forward outside names (SERVFAIL; checked on Docker 29.9) and no resolver is reachable, and the egress proxy checks a name against `egress_hosts` before it resolves it, so `<secret>.attacker.example` is never looked up; on roll apps, every variable previews sets in the `pv-` environment is sealed, so apps' own logs hide it and its API never returns it (`…/connect` and `…/env` reveal them) |
 | `GET /v1/previews/{id}/logs?service=&lines=&follow=1` | | `text/event-stream`: `event: service` (its name), then one event per line, the last `lines` first and then as they come; a line the service wrote on stderr is `event: stderr` (a stdout one the default event; `roll preview logs -f` writes them to its own stderr and stdout). `docker logs -f` for `roll.toml` services; for others the tail is read every 2 s (2,000 lines wide after the first read) and only new lines are sent, with a line saying so when some were missed. Runs on the preview's holder; the stream ends when the client goes |
 | `POST /v1/previews/{id}/shell/sessions` | `{ service?, cols?, rows? }` (the preview's first service without one; 120×32) | 201 `{ id }`: a login shell (bash where the image has it, else sh) in the running `roll.toml` service's container, started or thawed if it sleeps (up to 60 s), kept awake while the shell is open, its opener in the activity ("ana opened a shell in web"). At most 4 a preview (409); a roll apps service's is 409 (its own shell is on its `pv-` environment in roll apps). Runs on the preview's holder. A terminal isn't masked: it's an admin's, as roll apps' shells are, and reaches what the service does (the preview's branches and variables, never a parent's) |
@@ -1998,6 +2022,7 @@ type Settings = {
   access: "link" | "team" | "public"; // "link": a preview's URLs need its link; "team": a person signed in to roll who may open the project
   visual_review: "off" | "check" | "required";   // the roll/visual review; required also blocks landing in roll ("off")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
+  note_mail: boolean;                 // mail about notes: a new one to the change's author, a reply or resolve to the note's (true)
   flags?: {name: string; options: string[]}[]; // feature flags a reviewer sets for their own view from that button's toolbar (x-roll-flags)
   oidc_audiences?: string[];          // clouds a trusted preview's own services may have roll's OIDC token for (ROLL_OIDC_URL), at most 5
   egress: "open" | "roll";            // what its services' code may reach: anything ("open"), or only roll's products on a network with no route out (see "Egress")
@@ -2146,6 +2171,16 @@ type Settings = {
     next push each accepted page that looks exactly as it did (the first page at both widths,
     each other page) keeps its acceptance, as Chromatic carries accepted baselines forward, so
     only the pages the push changed are asked about again.
+    Pages changed the same way are grouped (Percy's grouped diffs: one header change shows on
+    every page, width, browser, state and story): each other page's change against the
+    baseline's is the area that differs, as it was and as it is, each an 8 × 8 average hash with
+    its brightness, digested to 12 hex characters (`visual::compare`, in the same pass as the
+    percent). Pages under review that share one carry it (`visual_review.pages[].group`, only
+    when two or more do); the sheet offers "Accept the 4 changed the same way" on the first of
+    them, and `…/visual/accept {group}` (`roll preview accept --group`) accepts them in one
+    transaction. The first page joins its group by its desktop picture (its signature on the
+    screenshot's row).
+    `the_same_change_on_two_pages_has_one_signature`, `pages_changed_the_same_way_are_accepted_together`.
     A project can set a visual threshold (`github.visual_threshold`, a percent up to 50, as
     Chromatic's `diffThreshold` and Percy's sensitivity): a page that differs from the
     baseline's by less doesn't count as changed for the review, and a push that moves a page by
@@ -2708,35 +2743,39 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Interaction to next paint, in review** (Vercel's Speed Insights): a page state's clicks and
-   typing timed to the next paint (`step_ms`) beside main's same state, said on the sheet when
-   past 200 ms and half again main's. Visitors' own numbers (field data from the toolbar's
-   script) next.
-2. **A note that shows what the reviewer saw** (Jam's recordings, Netlify's markup): today a
-   note carries a selector, the last steps, errors and failed requests, and roll's own browser
-   crops the element later at desktop width; a phone-only or Safari-only bug has no picture.
-   The question is what a visitor's own capture can be trusted for (the page's code could forge
-   it): a short replay with inputs masked and a size cap, labelled as the reviewer's.
-3. **A note's author told of replies and its resolve** (Vercel's notifications): GitHub tells a
-   mirrored pull request's people; a roll-only change's reviewer hears nothing. Where it lands
-   (roll's notices, email through accounts, a Slack DM through chat ops) is the question.
-4. **Grouped visual changes** (Percy's grouped diffs, Chromatic's accept all): one header change
-   is a separate Accept per page, width, browser, state and story.
-5. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
+1. **A note in its reviewer's engine, in review** (Jam's recordings): a Safari or Firefox
+   reviewer's note cropped in WebKit or Firefox through the other browsers' run. Next for it:
+   their typing where the button can say what without the value (a field's length, a choice's
+   index).
+2. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
    is kept only where the product puts a branch back in place, keeping its id (their delete
    guards check it); each needs its control plane's reset `from`, as pg-control's.
-6. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+3. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-7. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+4. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-8. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-9. **Watch: pg-control's recovery to a time seconds old** (unowned).
+6. **Watch: pg-control's recovery to a time seconds old** (unowned).
 
 
+
+
+
+
+
+
+
+Landed 2026-11-24, evening, later: a note's element cropped as its reviewer saw it (#932: their viewport, after their clicks).
+
+Landed 2026-11-24, evening: the first page in its visual group (#926), and a note's people told by mail (#929).
+
+Landed 2026-11-24, afternoon, later: guests' notes outside the team's for MCP's lockdown (#916), and pages changed the same way grouped and accepted together (#919; the first page in them with #926).
+
+Landed 2026-11-24, afternoon: a page state's steps timed to the next paint (#915, INP in the lab, against main's).
 
 Landed 2026-11-24, early afternoon: notes from people outside the team (#911: a share link's guests, `guest:<name>`).
 
