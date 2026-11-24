@@ -809,6 +809,17 @@ async fn roll_secrets_recover_brings_a_deleted_project_back_by_name() {
     assert!(roll(&api, &[], &["secrets", "recover", "shop"], None).await.code != Some(0), "nothing left to recover");
 }
 
+/// `leaks.rotate` from the CLI ("When a value leaks"): off by default, set and read back.
+#[tokio::test]
+async fn roll_secrets_leaks_sets_and_shows_leak_rotation() {
+    let Server { api, .. } = start().await;
+    assert!(ok(&api, &[], &["secrets", "-p", "shop", "leaks"], None).await.contains("leaks.rotate = off"));
+    assert!(ok(&api, &[], &["secrets", "-p", "shop", "leaks", "managed"], None).await.contains("leaks.rotate = managed"));
+    let shown = ok(&api, &[], &["--json", "secrets", "-p", "shop", "leaks"], None).await;
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&shown).unwrap()["leaks"]["rotate"], "managed", "{shown}");
+    assert!(roll(&api, &[], &["secrets", "-p", "shop", "leaks", "always"], None).await.code != Some(0));
+}
+
 /// `roll secrets agent` on port 0 for `shop`'s production, with `env` set (its login): its address
 /// once it listens, and what it has logged so far.
 struct LocalAgent {

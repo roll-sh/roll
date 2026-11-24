@@ -1090,7 +1090,9 @@ impl Secrets {
     /// Change a registration in place: its name, when its credential ends, or the credential
     /// itself, checked with the vendor first (outside the write) as registering checks one. Links
     /// keep working: every issue and revocation from then on, retired keys' included, uses the new
-    /// credential. A credential the vendor refuses changes nothing.
+    /// credential. A new credential also makes the caller the registration's maker (its links act at
+    /// the caller's rights now); a name or expiry change keeps the maker. A credential the vendor
+    /// refuses changes nothing.
     pub fn update_saas_rotator(&self, project: &str, id: &str, ch: SaasRotatorChange, caller: &Caller) -> Result<SaasRotator> {
         caller.need(Action::Admin, &Scope::project(project))?;
         let deliver = self.deliver.clone().ok_or_else(|| Error::BadRequest("SaaS rotators aren't on this server".into()))?;
@@ -1130,9 +1132,14 @@ impl Secrets {
                 c.execute("UPDATE saas_rotators SET name = ? WHERE id = ?", [n.as_str(), id])?;
                 changed.push("name");
             }
+            // A new credential is the registration made anew: it acts at its replacer's rights
+            // from now on, never at the old maker's.
+            let mut maker = None;
             if let Some(sealed) = &sealed {
-                c.execute("UPDATE saas_rotators SET credential = ? WHERE id = ?", params![sealed, id])?;
+                let old: String = c.query_row("SELECT created_by FROM saas_rotators WHERE id = ?", [id], |x| x.get(0))?;
+                c.execute("UPDATE saas_rotators SET credential = ?, created_by = ? WHERE id = ?", params![sealed, caller.made_by(), id])?;
                 changed.push("credential");
+                maker = Some(old);
             }
             if let Some(at) = expires_at
                 && at != r.credential_expires_at
@@ -1141,7 +1148,8 @@ impl Secrets {
                 changed.push("credential expiry");
             }
             if !changed.is_empty() {
-                audit::record(c, self.keys()?, project, caller, "saas.update", None, None, &[], &format!("changed SaaS rotator {name}'s {} ({}, {})", changed.join(", "), r.vendor.name(), r.vendor.label()), now)?;
+                let moved = maker.map(|old| format!("; its maker moved from {old} to {}", caller.made_by())).unwrap_or_default();
+                audit::record(c, self.keys()?, project, caller, "saas.update", None, None, &[], &format!("changed SaaS rotator {name}'s {} ({}, {}){moved}", changed.join(", "), r.vendor.name(), r.vendor.label()), now)?;
             }
             Ok(())
         })?;
