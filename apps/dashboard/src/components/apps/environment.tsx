@@ -680,6 +680,24 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
               aria-label="Firewall rules, one a line"
               className={`${input} mt-2 w-full font-mono text-[12px]`}
             />
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-line pt-3">
+              <p className="text-[12px] text-muted">
+                {env.challenge_until
+                  ? `Attack mode is on until ${new Date(env.challenge_until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}: every visitor without a pass gets the challenge page.`
+                  : env.attack_mode
+                    ? `Attack mode goes on by itself past ${env.attack_mode.per_minute.toLocaleString()} requests a minute, for ${env.attack_mode.minutes} minutes.`
+                    : "Attack mode: a challenge for every visitor without a pass, for an hour (set attack_mode to have it go on by itself)."}
+              </p>
+              <button
+                className={btn}
+                disabled={busy}
+                onClick={() =>
+                  runner.run("attack mode", () => appsApi.putEnvironment(service.id, env.name, { challenge_until: env.challenge_until ? null : Date.now() + 3_600_000 }))
+                }
+              >
+                {env.challenge_until ? "End attack mode" : "Attack mode for an hour"}
+              </button>
+            </div>
           </div>
         )}
 

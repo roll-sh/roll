@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// What a target can ask for; a new one gets the two that need someone.
-pub const EVENTS: [&str; 33] = [
+pub const EVENTS: [&str; 34] = [
     "deploy.failed",
     "deploy.base_updated",
     "rollout.waiting",
@@ -51,6 +51,7 @@ pub const EVENTS: [&str; 33] = [
     "deploy.vulnerable",
     "alert.slo",
     "alert.anomaly",
+    "attack.mode",
     // Every `audit.*` entry (who changed what), for a SIEM's webhook; never an on-call page.
     "audit",
 ];
@@ -500,6 +501,15 @@ impl Apps {
                     _ => (format!("{what}: slower than usual"), format!("p95 {v} ms in the last hour, where this hour of the week is usually {usual} ms.")),
                 }
             }
+            "attack.mode" => (
+                format!("{what}: attack mode is on"),
+                format!(
+                    "{} requests in a minute (its threshold is {}): every visitor without a pass gets the challenge page until {}. End it early with `challenge_until: null`.",
+                    e.data["requests"],
+                    e.data["per_minute"],
+                    e.data["until"].as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(|d| d.format("%H:%M UTC").to_string()).unwrap_or_default()
+                ),
+            ),
             "volume.backup_failed" => (format!("{what}: volume backup failed"), format!("The daily backup of its volume failed: {}. The last one that worked is still there.", e.data["error"].as_str().unwrap_or("no reason given"))),
             "alert.resolved" => {
                 let which = match e.data["alert"].as_str() {

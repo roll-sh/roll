@@ -406,8 +406,10 @@ pub struct Gate {
     pub traces: bool,
     /// Its pages carry roll's Web Vitals tag.
     pub vitals: bool,
-    /// Its challenge rules' key ([`crate::challenge`]), when it has such a rule.
+    /// Its challenge rules' key ([`crate::challenge`]), when it has such a rule or attack mode.
     pub challenge_key: Option<Vec<u8>>,
+    /// Attack mode is on until then (unix ms; [`crate::attack_mode`]).
+    pub attack_until: Option<i64>,
     /// Its split test.
     pub split: Option<crate::model::Split>,
     /// Where a share of its bodiless requests is copied.
