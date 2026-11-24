@@ -442,6 +442,8 @@ mod tests {
         assert_eq!(names(key), Some(("Jx2kq3Z0RkKp1M7m0nQv".into(), "shop".into())));
     }
 
+    /// Before the signature is checked, from the bytes alone, and all with one answer (an
+    /// unknown field is refused once the signature verifies: the control tests).
     #[test]
     fn malformed_keys_are_refused_from_their_bytes() {
         let ok = sign("rdks_x", r#"{"key":"k","cluster":"c","exp":1}"#);
@@ -449,13 +451,13 @@ mod tests {
         for bad in [
             sign("rdks_x", r#"{"key":"k","cluster":"c","exp":1}{"exp":9}"#),
             sign("rdks_x", r#"{"key":"k","key":"j","cluster":"c","exp":1}"#),
-            sign("rdks_x", r#"{"key":"k","cluster":"c","exp":1,"alg":"none"}"#),
             sign("rdks_x", r#"["key"]"#),
             ok.replacen("rdk1.", "rdk2.", 1),
             format!("{ok}="),
             format!("{}{}", ok, "A".repeat(MAX_TOKEN_BYTES)),
         ] {
-            assert!(split(&bad).is_err(), "{bad}");
+            let e = split(&bad).err().expect(&bad);
+            assert_eq!(e.reason(), unverified().reason(), "{bad}");
         }
     }
 }
