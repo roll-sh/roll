@@ -58,6 +58,8 @@ GET /v1/previews/{id}/errors/count                                             t
 GET /v1/previews/{id}/files                                                    interactive (a shell, files, a forward): an admin's, live
 PUT /v1/previews/{id}/files                                                    interactive (a shell, files, a forward): an admin's, live
 GET /v1/previews/{id}/forward                                                  interactive (a shell, files, a forward): an admin's, live
+POST /v1/previews/{id}/try                                                     no tool yet: roll MCP maps it as previews_try
+GET /v1/previews/{id}/try/{run}/screenshot                                     no tool yet: roll MCP maps it as previews_try_screenshot
 GET /v1/previews/{id}/data/{resource}                                          no tool yet: agents query a branch with postgres_query on its endpoint
 GET /v1/previews/{id}/swap                                                     interactive (a laptop's process standing in for a service): an admin's, live
 GET /v1/previews/{id}/notes/{note}/crop                                        the dashboard's (a note's image)

@@ -508,6 +508,43 @@ const stories = async (sessionId) => {
   }
   fs.writeFileSync(process.env.OUT + ".stories.json", JSON.stringify(out));
 };
+// A run an agent asked for ($TRY: {path, steps}; roll previews' `…/try`): the page loaded, its
+// steps taken as a page state's are (10 at most, 15 s), then its picture to $OUT, and to
+// $OUT.try.json its status, the step that found nothing, its visible text (its own line breaks
+// kept) and what went wrong on the way.
+const tryIt = async (sessionId) => {
+  let t = {};
+  try {
+    t = JSON.parse(process.env.TRY);
+  } catch {}
+  const path = typeof t.path === "string" && /^\/(?!\/)[^\s#"'`\\]{0,199}$/.test(t.path) ? t.path : "/";
+  let status = 0;
+  listeners.add((m) => {
+    if (m.method === "Network.responseReceived" && m.params?.type === "Document" && !status) status = m.params.response?.status || 0;
+  });
+  const done = once("Page.loadEventFired");
+  await send("Page.navigate", { url: new URL(path, process.env.URL).href }, sessionId);
+  await Promise.race([done, sleep(15000)]);
+  await sleep(300);
+  let stepFailed = null;
+  const until = Date.now() + 15000;
+  for (const s of (Array.isArray(t.steps) ? t.steps : []).slice(0, 10)) {
+    if (Date.now() > until) break;
+    stepFailed = await step(sessionId, s || {}, until);
+    if (stepFailed) break;
+    await sleep(150);
+  }
+  await sleep(300);
+  await still(sessionId);
+  const shot = await send("Page.captureScreenshot", { format: "png" }, sessionId).catch(() => null);
+  if (shot) fs.writeFileSync(process.env.OUT, Buffer.from(shot.data, "base64"));
+  const r = await check({ expression: `JSON.stringify(document.body ? String(document.body.innerText || "").slice(0, 40000) : "")`, returnByValue: true }, sessionId);
+  let text = "";
+  try {
+    text = JSON.parse(r?.result?.value || '""');
+  } catch {}
+  fs.writeFileSync(process.env.OUT + ".try.json", JSON.stringify({ status, step_failed: stepFailed, text, errors: [...errors, ...failed].slice(0, 20) }));
+};
 (async () => {
   const { targetId } = await send("Target.createTarget", { url: "about:blank" });
   const { sessionId } = await send("Target.attachToTarget", { targetId, flatten: true });
@@ -553,6 +590,11 @@ const stories = async (sessionId) => {
   await send("Page.addScriptToEvaluateOnNewDocument", { source: VITALS, worldName: WORLD }, sessionId).catch(() => null);
   if (process.env.STORIES) {
     await stories(sessionId);
+    chrome.kill();
+    process.exit(0);
+  }
+  if (process.env.TRY) {
+    await tryIt(sessionId);
     chrome.kill();
     process.exit(0);
   }
