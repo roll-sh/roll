@@ -2179,7 +2179,8 @@ impl Node {
                 Presented::Derived(token) => {
                     use search_es::xpack::security::derived;
                     let loaded = derived::names(token).and_then(|(_, cluster)| self.get_loaded(&cluster));
-                    let why = loaded.and_then(|l| derived::authenticate(&l.cluster, token).err()).and_then(|e| {
+                    let refused = derived::malformed(token).or_else(|| loaded.and_then(|l| derived::authenticate(&l.cluster, token).err()));
+                    let why = refused.and_then(|e| {
                         e.meta().iter().find(|(k, _)| k == "additional_unsuccessful_credentials").and_then(|(_, v)| v.as_str()).map(str::to_string)
                     });
                     unauthorized(ANONYMOUS_REFUSED.into()).with_meta("additional_unsuccessful_credentials", why.unwrap_or_else(|| "API key: derived key refused".into()))

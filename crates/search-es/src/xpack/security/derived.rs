@@ -151,6 +151,11 @@ fn split(token: &str) -> EsResult<Token<'_>> {
     Ok(Token { signed, mac, claims })
 }
 
+/// Why a derived key can't even be read (`None`: it can, and its cluster verifies it).
+pub fn malformed(token: &str) -> Option<EsError> {
+    split(token).err()
+}
+
 /// The parent key id and cluster name a derived key names, read without verifying it (to route
 /// it to its cluster, which verifies it).
 pub fn names(token: &str) -> Option<(String, String)> {
