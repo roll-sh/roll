@@ -38,7 +38,7 @@ func (n noneOf) CheckPlan(_ context.Context, req plancheck.CheckPlanRequest, res
 }
 
 // A rotator, audit sinks, a GitHub App, an AWS role and IAM user, GCP and Azure accounts, the
-// required keys and the KMS key, as code: made, changed in place where roll can, imported, destroyed,
+// required keys, the KMS key and the project's settings, as code: made, changed in place where roll can, imported, destroyed,
 // and no credential sent in (the App's private key, the SIEM's token, the token in the rotator's
 // URL) in the plan or the state.
 func TestMoreRegistrationsAsCode(t *testing.T) {
@@ -123,6 +123,9 @@ resource "roll_secrets_required_keys" "all" {
 resource "roll_secrets_kms_key" "cmk" {
   key = "arn:aws:kms:eu-west-1:123456789012:key/fake-%[2]d"
 }
+resource "roll_secrets_project" "settings" {
+  leak_rotate = "managed"
+}
 `, srv.URL, round, required)
 	}
 	credentials := noneOf{fakePrivateKey, fakeHECToken, fakeHookToken}
@@ -172,6 +175,18 @@ resource "roll_secrets_kms_key" "cmk" {
 					resource.TestCheckNoResourceAttr("roll_secrets_cloud_account.gcp", "scope"),
 					resource.TestCheckResourceAttr("roll_secrets_required_keys.all", "keys.#", "2"),
 					resource.TestCheckResourceAttr("roll_secrets_kms_key.cmk", "id", "prj_a"),
+					resource.TestCheckResourceAttr("roll_secrets_project.settings", "leak_rotate", "managed"),
+					resource.TestCheckResourceAttr("roll_secrets_project.settings", "history_days", "0"),
+					resource.TestCheckResourceAttr("roll_secrets_project.settings", "validity_checks", "off"),
+					func(*terraform.State) error {
+						f.mu.Lock()
+						defer f.mu.Unlock()
+						// Only what differs from roll's is written, and only once.
+						if f.leakRotate != "managed" || len(f.patches) != 1 || len(f.patches[0]) != 1 {
+							return fmt.Errorf("leak rotation %q, patches %v", f.leakRotate, f.patches)
+						}
+						return nil
+					},
 					sentButNotKept,
 				),
 			},
@@ -210,6 +225,7 @@ resource "roll_secrets_kms_key" "cmk" {
 			imported("roll_secrets_cloud_account.azure"),
 			imported("roll_secrets_required_keys.all"),
 			imported("roll_secrets_kms_key.cmk"),
+			imported("roll_secrets_project.settings"),
 		},
 		CheckDestroy: func(*terraform.State) error {
 			f.mu.Lock()

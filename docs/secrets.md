@@ -274,6 +274,10 @@ do. It speaks the same HTTP API as the CLI and the clients, with a roll token or
     keep one per project; destroying it requires nothing.
   - **`roll_secrets_kms_key`** is the customer-managed key (`PUT`/`DELETE …/kms`): a new ARN changes
     in place, and destroying it unwraps the data key.
+  - **`roll_secrets_project`** is the project's own settings (`PATCH /v1/secrets/projects/{project}`):
+    `leak_rotate` (`managed` or `off`), `history_days` (0 keeps old values forever) and
+    `validity_checks` (`on` or `off`). One left out keeps roll's; only what differs from roll's is
+    written, and destroying it leaves them as they are.
 - **Without values in the state** (Terraform 1.10 and 1.11+), as Vault's and AWS' providers allow:
   - **`ephemeral "roll_secrets_values"`** reads an environment for one run, never into the plan or
     the state; it feeds another provider's configuration or a write-only argument. Strict: a key
@@ -3096,6 +3100,7 @@ roll secrets events  [--kinds K,…] [--env ENV] [--after SEQ] [--follow]   # th
 roll secrets syncs   ls | add KIND --target name=value… | run ID | rm ID
 roll secrets sinks   ls | add URL [--from-start] [--format splunk|datadog|bearer] (token on stdin) | rm ID
 roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
+roll secrets leaks   [managed|off]           # leaks.rotate ("When a value leaks"); no argument shows it
 roll secrets insights [--unused]             roll secrets shares [--revoke ID]
 roll secrets leases  [--renew ID | --revoke ID]
 roll secrets databases ls | add NAME [--role A --role B] [--group G] [--ca FILE] (admin URL on stdin) | rm ID
@@ -3546,7 +3551,8 @@ webhook design do.
   carries `rotatable: true` when roll can rotate one of the keys, meaning a shared managed link.
   A person's personal value, a plain value, and a live or dynamic link are never rotatable.
 - **`leaks.rotate`, a project setting** (`PATCH /v1/secrets/projects/{project}
-  {leaks: {rotate}}`, an admin's, audited as `leaks.rotate`; Settings, "Leaked keys"):
+  {leaks: {rotate}}`, an admin's, audited as `leaks.rotate`; Settings, "Leaked keys";
+  `roll secrets leaks managed|off`; Terraform's `roll_secrets_project` `leak_rotate`):
   - **`off`** (the default, and every existing project's): nothing rotates. The change's
     `secret_leak` blocker lists where the key can be rotated (`rotate: [{environment, folder}]`),
     and the dashboard gives it a Rotate button. The button calls `…/secrets/{key}/rotate` as the
@@ -6264,7 +6270,7 @@ isn't in the workspace is 404.
 | `GET /saas` | | `SaasRotator[]` (`read` on the project; never the credential) |
 | `POST /saas` | `{name, vendor, target, credential, credential_expires_at?}` (`credential_expires_at`: when the credential ends at the vendor, ms, in the future) | 201 `SaasRotator` (`admin`; never the credential; `credential_expires_at` when given) |
 | `DELETE /saas/{id}` | | 204; 409 while a key links to it or a retired key waits (`admin`) |
-| `PATCH /saas/{id}` | `SaasRotatorChange` | `SaasRotator` (`admin`; a new `credential` is checked with the vendor first, read only, and a refused one is a 400 that changes nothing; never the credential) |
+| `PATCH /saas/{id}` | `SaasRotatorChange` | `SaasRotator` (`admin`; a new `credential` is checked with the vendor first, read only, and a refused one is a 400 that changes nothing; a new `credential` makes the caller the registration's `created_by`, so its links act at the replacer's rights from then on, and the audit row names both; a name or date change keeps the maker; never the credential) |
 | `GET /outside-databases` | | `OutsideDatabase[]` (`read` on the project; never the URL) |
 | `POST /outside-databases` | `{name, url, roles?: [a, b], group?, ca?, gateway?}` | 201 `OutsideDatabase` (`admin`; connects and checks the roles first: 400 with the server's reason) |
 | `DELETE /outside-databases/{id}` | | 204; 409 while a key links to it or a retired password waits (`admin`) |
