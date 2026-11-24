@@ -1753,6 +1753,15 @@ land on the change.
   list says `crop`, and the sheet shows it with the note, as does the change page's review
   timeline in roll (beside the note's review).
   `a_notes_element_is_cropped_by_the_next_screenshot`.
+  As its reviewer saw it (Jam's recordings, without trusting the reviewer's browser): a note
+  says the reviewer's viewport and their last steps (#879), so roll's browser takes it at that
+  viewport (a phone's emulated as one) after taking their clicks again (checking a box is one)
+  and Enter or Escape, from their last page change on, the last 10, 10 s at most; typing and
+  choices aren't taken (the button keeps how many characters, never what). Roll's own browser
+  does it, so the page's code still can't forge the picture. The crop says how it was taken
+  (`crop_as` in the notes list, `X-Roll-Crop-As` on the picture: "390x844, after 2 steps";
+  the sheet's "As they saw it"). Its engine is Chromium's: a WebKit-only bug isn't shown yet.
+  `a_note_says_how_its_reviewer_saw_the_page`; live, a phone note after a click.
 - The open notes reach the pull request (Vercel's comments): the preview's own comment, updated
   in place, lists them (newest first, at most 10), each with its page, who and what as plain
   words (one line, markdown escaped: a note can't link, embed an image, mention or close
@@ -1877,7 +1886,7 @@ previews in it), the operator and admins see every project.
 | `POST /v1/previews/{id}/visit` | `{to}` (a URL at one of the preview's service hosts) | `{url}`: a one-use way into a team-access preview (`access: "team"`) at `to`, good for a minute, for a person signed in to roll (a session; a token is a 403). 400 when the project's previews aren't `team` or `to` isn't the preview's; 403 for a person who may not open the project. Operator-only in the permissions catalogue: no grant ever gives one |
 | `POST /v1/previews/{id}/keep` | `{hours}` (0–720; 0 releases) | `Preview`: kept past its TTL until then (`kept_until`); a landed or closed change still ends it |
 | `GET /v1/previews/{id}/notes` | | `{notes: [{id, path, selector, note, by, at, replies: [{id, note, by, at}], crop}]}`: the notes left on its pages that nobody has resolved, every page's (the latest 500); `crop`: a picture of its element is kept |
-| `GET /v1/previews/{id}/notes/{note}/crop` | | `image/png`: the note's element as a screenshot run cropped it from its page; 404 until one has |
+| `GET /v1/previews/{id}/notes/{note}/crop` | | `image/png`: the note's element as a screenshot run cropped it from its page (`X-Roll-Crop-As`: how, when as its reviewer saw it); 404 until one has |
 | `POST /v1/previews/{id}/notes/{note}/resolve` | | `{resolved}`: a note on the preview's page (its review's id) resolved, so the page stops listing it; 404 for a note that isn't the change's |
 | `GET /v1/previews/{id}/mail` | | `{mail: [{id, at, from, to, subject, size}]}`: what its services sent, caught (newest first, the last 50) |
 | `GET /v1/previews/{id}/mail/{mail}` | | One caught message as sent, as `text/plain` (never rendered) |
@@ -2729,13 +2738,12 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A note's people told by mail, in review** (Vercel's comment notifications): a new note to
+1. **A note that shows what the reviewer saw, in review** (Jam's recordings): roll's browser
+   crops the note's element at the reviewer's viewport after their clicks and keys. Next for it:
+   in their browser's engine (WebKit for Safari, through the browsers run), and their typing
+   where the button can say what without saying the value (a field's length, a choice's index).
+2. **A note's people told by mail, in review** (Vercel's comment notifications): a new note to
    the change's author, a reply or a resolve to the note's, through roll's accounts (`note_mail`).
-2. **A note that shows what the reviewer saw** (Jam's recordings, Netlify's markup): today a
-   note carries a selector, the last steps, errors and failed requests, and roll's own browser
-   crops the element later at desktop width; a phone-only or Safari-only bug has no picture.
-   The question is what a visitor's own capture can be trusted for (the page's code could forge
-   it): a short replay with inputs masked and a size cap, labelled as the reviewer's.
 3. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
    is kept only where the product puts a branch back in place, keeping its id (their delete
    guards check it); each needs its control plane's reset `from`, as pg-control's.
@@ -2754,6 +2762,9 @@ Ranked by what a person notices first. Done so far:
 
 
 
+
+
+Landed 2026-11-24, evening: the first page in its visual group (#926), and a note's people told by mail (#929).
 
 Landed 2026-11-24, afternoon, later: guests' notes outside the team's for MCP's lockdown (#916), and pages changed the same way grouped and accepted together (#919; the first page in them with #926).
 
