@@ -2692,7 +2692,8 @@ TLS certificates for services (mTLS between them), with no CA to run.
   certificate (`GET …/cas`, `roll secrets cas cert NAME`) is what clients trust. It carries name
   constraints: only its domains, and IP addresses only where allowed (otherwise excluded), so a
   client that trusts it trusts nothing else.
-- The link kind `pki` has `certificate`, `private_key` and `ca` (one credential, PEM), with the
+- The link kind `pki` has `certificate`, `private_key`, `ca` and `ca_chain` (one credential, PEM; `ca_chain`
+  is the issuing CA's certificate and every one above it up to the root), with the
   certificate's names in `options.names` (a list, or comma-separated; the dashboard's Link dialog
   asks): DNS names under the CA's domains, a wildcard one level under one, or IP addresses where
   allowed; anything else is refused, naming the domains. `dynamic` gives each lease its own
@@ -2709,7 +2710,7 @@ TLS certificates for services (mTLS between them), with no CA to run.
   read) are taken: usages, lifetime (30 days, or the CA's `max_days` if shorter, by default; 5
   minutes to `max_days`) and everything else are the CA's own, whatever the CSR asks (being a CA
   itself, signing code). The CSR's key must match its signature (a P-384 key signed with SHA-384,
-  not SHA-256). It answers `{certificate, ca, serial, names, not_after}`. Checked with
+  not SHA-256). It answers `{certificate, ca, ca_chain, serial, names, not_after}`. Checked with
   OpenSSL's CSRs (P-256 and RSA): `openssl verify -x509_strict` passes against the CA.
 - Every certificate a CA signs is listed until it expires (`GET …/cas/{id}/certificates`: serial,
   names, `csr`, `link` or `acme`, its end, who asked, when it was revoked; `roll secrets cas certs NAME`).
@@ -2741,6 +2742,29 @@ TLS certificates for services (mTLS between them), with no CA to run.
   it expires. One CA keeps at most 10,000 certificates from CSRs valid at once. Serials are
   random, positive and never start with a zero byte, so the serial a client shows is the one to
   revoke.
+- **An intermediate under the customer's own root**, as Infisical and Vault chain theirs, for a
+  team whose root stays offline or in AWS Private CA: `POST …/cas {…, intermediate: true}` (`roll
+  secrets cas add NAME --domain svc.internal --intermediate`, which writes the CSR to stdout or
+  `--csr FILE`) makes the key exactly as for a root and answers `status: "pending"` with a `csr`
+  (PEM): the CA's subject, `CA:TRUE` with a path length of 0, `keyCertSign` and `cRLSign`, and its
+  name constraints. A pending CA signs nothing (links, CSRs, ACME, CRL and OCSP all refuse).
+  `PUT …/cas/{id}/chain {certificate, chain?}` (admin, audited; `roll secrets cas chain NAME
+  cert.pem [--chain chain.pem]`) installs what the root signed: `certificate` is the CA's own,
+  `chain` every certificate above it up to and including the self-signed root, in any order (10 at
+  most; 64 KiB and 256 KiB). It's taken only if the certificate carries the CA's key, is a CA's
+  (`basicConstraints CA:TRUE`, `keyCertSign` and `cRLSign`, since roll signs its leaves' CRLs), is
+  valid now, and verifies through certificates that are CAs, valid now and allow the path's length,
+  up to a self-signed root. Name constraints are taken as signed: the CA's domains narrow to what
+  the certificate and every issuer below the root permit (a root that signs `prod.svc.internal`
+  for a CA asked for `svc.internal` gives a CA for `prod.svc.internal`), IP addresses stay only if
+  every one is permitted, and what a policy can't say (part of a domain excluded, subject-name
+  limits) is refused. The same route renews an active intermediate (the same key, a new
+  certificate; it only narrows). Every certificate it issues answers `ca_chain` (the link field
+  `ca_chain`, `TLS_CA_CHAIN`; `…/sign`'s answer; ACME serves the leaf then the chain), and never
+  outlives it: links and CSRs are clamped to its end, a CSR asking for longer is refused naming
+  the date, and a managed link's `rotate_days` is at most half of `max_days` or of what's left of
+  the intermediate, whichever is shorter. CRLs and OCSP stay roll's, signed by the intermediate.
+  Checked with webpki: a leaf verifies against the root through roll's intermediate.
 
 ### ACME
 Each CA is an ACME server (RFC 8555), as Vault's PKI is: cert-manager, certbot, Caddy and lego get
@@ -6040,14 +6064,15 @@ isn't in the workspace is 404.
 | `GET /v1/secrets/audit/jwks` | | `{keys, legacy, pulled}` (public): the audit log's digest keys (Ed25519 JWKs, retired ones too, never pulled ones), the issuer keys whose legacy digests count (RSA JWKs), and `[{kid, pulled_at}]` for keys pulled in an emergency, either kind. What `audit verify --file` takes |
 | `POST /v1/secrets/audit/key/rotate` | `{now?, retire?}` | `{kid, pulled, signed}` (the operator's): a new digest key signs now and the previous one retires. `{now: true, retire: kid}` (both or neither): `kid` is pulled too, and every project's chain is signed under the new key before the answer (`signed`, how many); 404 for a kid not roll's or pulled already |
 | `GET /cas` | | `Ca[]` (`read` on the project; certificates, never keys) |
-| `POST /cas` | `{name, domains, allow_ip?, max_days?}` | 201 `Ca` (`admin`) |
+| `POST /cas` | `{name, domains, allow_ip?, max_days?, intermediate?}` | 201 `Ca` (`admin`): `{id, name, certificate, status, intermediate, csr?, ca_chain?, domains, allow_ip, max_days, created_at, created_by}`; an intermediate is `pending` with an empty `certificate` and its `csr` |
+| `PUT /cas/{id}/chain` | `{certificate, chain?}` | `Ca`, now `active` with `ca_chain` (`admin`, audited); 400 for a certificate that isn't for the CA's key, isn't a CA's (`keyCertSign`, `cRLSign`), isn't valid now, or doesn't chain to a self-signed root; 409 for a root CA |
 | `DELETE /cas/{id}` | | 204; 409 while a key links to it (`admin`) |
 | `GET /cas/{id}/certificates` | | `CaCertificate[]`: `{serial, names, source, not_after, issued_at, issued_by, revoked_at?}`, what it signed that hasn't expired, newest first (`read`) |
 | `POST /cas/{id}/revoke` | `{serial}` | 204; 404 for a serial it didn't sign or that has expired (`write`, audited) |
 | `GET /v1/secrets/crl/{id}` | | the CA's CRL, DER (`application/pkix-crl`) or `?format=pem`; no token |
 | `POST /v1/secrets/ocsp/{id}` | an OCSP request (DER) | an OCSP response (`application/ocsp-response`); no token |
 | `GET /v1/secrets/ocsp/{id}/{request}` | | the same, the request base64 and URL-encoded (RFC 6960 A.1); no token |
-| `POST /cas/{id}/sign` | `{csr, days?, ttl_minutes?}` | `{certificate, ca, serial, names, not_after}` (`write`, audited); 400 for a name outside the policy or a lifetime past `max_days` |
+| `POST /cas/{id}/sign` | `{csr, days?, ttl_minutes?}` | `{certificate, ca, ca_chain, serial, names, not_after}` (`write`, audited); 400 for a name outside the policy, a lifetime past `max_days` or the CA's own end, or a pending CA |
 | `GET /cas/{id}/acme` | | `{directory, pre_authorize, challenges, bindings: AcmeBinding[]}` (`read`; `challenges` is `http-01`, `dns-01` and `tls-alpn-01`, or none without rolld's checks); a binding is `{id, label, names, expires_at, created_at, created_by, revoked_at, revoked_by, used_at, accounts}` |
 | `PATCH /cas/{id}/acme` | `{pre_authorize}` | the same (`admin`, audited) |
 | `POST /cas/{id}/acme/eab` | `{label?, names?, days?}` | 201 `AcmeBinding` with `key_id`, `hmac_key` (base64url, this answer only) and `directory` (`admin`, audited) |
@@ -6062,7 +6087,7 @@ isn't in the workspace is 404.
 | `POST /v1/secrets/acme/{ca}/order/{id}/finalize` | JWS of `{csr}` | the order, `valid`; `orderNotReady`, `badCSR` (names other than the order's), `unauthorized` (a name the CA's policy or the binding no longer takes) |
 | `POST /v1/secrets/acme/{ca}/authz/{id}` | JWS: empty or `{status: "deactivated"}` | the authorization and its challenges |
 | `POST /v1/secrets/acme/{ca}/chall/{id}` | JWS: empty, or `{}` to validate now | the challenge, `valid` or `invalid` with its `error` |
-| `POST /v1/secrets/acme/{ca}/cert/{serial}` | JWS, empty | `application/pem-certificate-chain`: the certificate, then the CA's |
+| `POST /v1/secrets/acme/{ca}/cert/{serial}` | JWS, empty | `application/pem-certificate-chain`: the certificate, then the CA's chain (an intermediate's up to its root) |
 | `POST /v1/secrets/acme/{ca}/revoke-cert` | JWS (`kid`, or the certificate's key as `jwk`) of `{certificate, reason?}` | 200; on the CRL at once; `alreadyRevoked` |
 | `POST /v1/secrets/acme/{ca}/key-change` | JWS wrapping the new key's JWS of `{account, oldKey}` | the account; 409 and `Location` if another account has the new key |
 | `GET /ssh-cas` | | `SshCa[]` (`read` on the project; public keys, never private ones) |
