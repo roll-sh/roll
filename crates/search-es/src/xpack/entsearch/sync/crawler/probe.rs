@@ -1,12 +1,14 @@
 //! `crawl-test`: one URL through the crawler's own path, writing nothing. The connector's
-//! configuration (or, with none, a crawl of that URL's site) gives the plan; the origin's
-//! robots.txt is read, the URL decided as a crawl decides it, fetched through the same client and
-//! egress check with redirects followed by hand (each hop decided, the credential kept to its
-//! origin), and parsed as a crawl parses it. The answer is what would be indexed, which of the
+//! configuration (or, with none, a crawl of that URL's site) gives the plan; each origin's
+//! robots.txt is read before anything on it is decided, the URL decided as a crawl decides it,
+//! fetched through the same client and egress check with redirects followed by hand (each hop
+//! decided, the credential kept to its origin), and parsed as a crawl parses it. Every request
+//! waits for its site's turn, as a crawl's do (`hosts::turn`, at the unverified gap), and none is
+//! made while crawlers are off on the node. The answer is what would be indexed, which of the
 //! page's links would be queued, and why anything would be skipped; it never holds the
 //! credential and is capped at [`MAX_ANSWER`].
 
-use super::config::{self, Fields, L};
+use super::config::{self, Fields, Plan, L};
 use super::fetch::Fetcher;
 use super::robots::Robots;
 use super::url::Link;
@@ -40,6 +42,10 @@ impl Verdict {
 /// Runs `crawl-test` for `url` on `cluster`, with connector `connector`'s configuration (it must
 /// be a `roll_web_crawler`) or a crawl of the URL's site.
 pub async fn test(cluster: &Cluster, connector: Option<&str>, url: &str) -> Result<Value, String> {
+    if !super::enabled(|k| cluster.config.node_setting(k)) {
+        return Err(format!("web crawlers are turned off on this node ({})", super::ENABLED));
+    }
+    let floor = super::unverified_floor(|k| cluster.config.node_setting(k));
     let egress = crate::egress::Egress::of_cluster(cluster, super::super::ALLOW_PRIVATE);
     let link = Link::parse(url, None).ok_or_else(|| format!("[{url}] isn't an http or https URL"))?;
     let (fields, advanced, values) = match connector {
@@ -69,15 +75,14 @@ pub async fn test(cluster: &Cluster, connector: Option<&str>, url: &str) -> Resu
     answer.insert("url".into(), link.as_str().into());
 
     // robots.txt of the URL's origin, when the URL is on the crawl.
-    let mut robots: HashMap<String, Robots> = HashMap::new();
+    let mut robots = Robotses { fetcher: &fetcher, blocked: &blocked, auth_origin: auth_origin.as_deref(), floor, got: HashMap::new() };
     if let Some(d) = plan.domain(&link) {
-        let (r, read) = fetch_robots(&fetcher, &d.origin, auth_origin.as_deref()).await;
+        let read = robots.load(&plan, &link).await?;
+        let r = &robots.got[&d.origin];
         answer.insert("robots".into(), obj! { "origin" => d.origin.clone(), "read" => read, "allows" => r.allows(&link.request_uri()), "crawl_delay" => r.crawl_delay.map_or(Value::Null, Value::from) });
-        robots.insert(d.origin.clone(), r);
     }
-    let verdict = |l: &Link| decide(&plan, &fetcher, &blocked, &robots, l);
     let rule = |l: &Link| plan.domain(l).and_then(|d| d.rule_for(l)).map(|r| r.describe.clone());
-    let v = verdict(&link);
+    let v = decide(&plan, &fetcher, &blocked, &robots.got, &link);
     answer.insert("verdict".into(), v.as_str().into());
     if let Some(r) = rule(&link) {
         answer.insert("rule".into(), r.into());
@@ -90,6 +95,7 @@ pub async fn test(cluster: &Cluster, connector: Option<&str>, url: &str) -> Resu
     let max = plan.limits.usize(L::ResponseSize);
     let (mut at, mut clean, mut hops) = (link.clone(), true, Vec::new());
     let resp = loop {
+        super::polite_turn(&at, floor).await?;
         let r = match fetcher.get(&at, clean, max).await {
             Ok(r) => r,
             Err(f) => {
@@ -106,7 +112,9 @@ pub async fn test(cluster: &Cluster, connector: Option<&str>, url: &str) -> Resu
             answer.insert("error".into(), "too many redirects, or one to nowhere".into());
             break r;
         };
-        let nv = verdict(&next);
+        // A hop to another of the crawl's origins is decided with that origin's robots.txt.
+        robots.load(&plan, &next).await?;
+        let nv = decide(&plan, &fetcher, &blocked, &robots.got, &next);
         hops.push(obj! { "from" => at.as_str(), "status" => r.status as i64, "to" => next.as_str(), "verdict" => nv.as_str() });
         if nv != Verdict::Allowed {
             answer.insert("redirects".into(), Value::Arr(hops));
@@ -152,11 +160,13 @@ pub async fn test(cluster: &Cluster, connector: Option<&str>, url: &str) -> Resu
     if let Some(c) = &page.canonical {
         answer.insert("canonical".into(), c.as_str().into());
     }
-    let links: Vec<Value> = if page.nofollow {
-        Vec::new()
-    } else {
-        page.follow.iter().take(LINKS_SHOWN).map(|l| obj! { "url" => l.as_str(), "verdict" => verdict(l).as_str() }).collect()
-    };
+    let mut links: Vec<Value> = Vec::new();
+    if !page.nofollow {
+        for l in page.follow.iter().take(LINKS_SHOWN) {
+            robots.load(&plan, l).await?;
+            links.push(obj! { "url" => l.as_str(), "verdict" => decide(&plan, &fetcher, &blocked, &robots.got, l).as_str() });
+        }
+    }
     let more = page.follow.len().saturating_sub(LINKS_SHOWN);
     let indexed = !page.noindex && !(page.title.is_empty() && page.body.is_empty());
     answer.insert("indexed".into(), indexed.into());
@@ -191,32 +201,58 @@ pub async fn test(cluster: &Cluster, connector: Option<&str>, url: &str) -> Resu
     Ok(out)
 }
 
-/// An origin's robots.txt, as a crawl reads it (redirects within the site, at most five), and
-/// what was found: `ok`, `missing` (a 4xx: everything allowed) or `unreachable` (nothing is).
-async fn fetch_robots(fetcher: &Fetcher, origin: &str, auth_origin: Option<&str>) -> (Robots, &'static str) {
-    let Some(mut at) = Link::parse(&format!("{origin}/robots.txt"), None) else { return (Robots::unreachable(), "unreachable") };
-    let site = super::hosts::site_of(&at);
-    let mut clean = true;
-    let started = Instant::now();
-    for _ in 0..=5 {
-        if super::hosts::site_of(&at) != site || started.elapsed() > Duration::from_secs(60) {
-            break;
+/// The robots.txt of each origin `crawl-test` meets, read once.
+struct Robotses<'a> {
+    fetcher: &'a Fetcher,
+    blocked: &'a [String],
+    auth_origin: Option<&'a str>,
+    floor: Duration,
+    got: HashMap<String, Robots>,
+}
+
+impl Robotses<'_> {
+    /// Reads the robots.txt of `link`'s origin when it is one of `plan`'s and not read yet; what
+    /// was found: `ok`, `missing` (a 4xx: everything allowed), `unreachable` (nothing is), or
+    /// `read` (before).
+    async fn load(&mut self, plan: &Plan, link: &Link) -> Result<&'static str, String> {
+        let Some(d) = plan.domain(link) else { return Ok("off the crawl") };
+        if self.got.contains_key(&d.origin) {
+            return Ok("read");
         }
-        let Ok(resp) = fetcher.get(&at, clean, super::robots::MAX_BYTES).await else { break };
-        if (300..400).contains(&resp.status) {
-            let Some(next) = resp.location.as_deref().and_then(|l| Link::parse(l, Some(at.url()))) else { break };
-            clean &= auth_origin == Some(at.origin().as_str());
-            at = next;
-            continue;
-        }
-        let r = robots_of(&resp);
-        let read = match resp.status {
-            200..=299 => "ok",
-            429 => "unreachable",
-            400..=499 => "missing",
-            _ => "unreachable",
-        };
-        return (r, read);
+        let (r, read) = self.fetch(&d.origin).await?;
+        self.got.insert(d.origin.clone(), r);
+        Ok(read)
     }
-    (Robots::unreachable(), "unreachable")
+
+    /// An origin's robots.txt, as a crawl reads it (redirects within the site, at most five,
+    /// never to a blocked or refused host), each request in the site's turn.
+    async fn fetch(&self, origin: &str) -> Result<(Robots, &'static str), String> {
+        let Some(mut at) = Link::parse(&format!("{origin}/robots.txt"), None) else { return Ok((Robots::unreachable(), "unreachable")) };
+        let site = super::hosts::site_of(&at);
+        let mut clean = true;
+        let started = Instant::now();
+        for _ in 0..=5 {
+            let host = super::plain_host(&at);
+            let blocked = self.fetcher.refused(&at) || self.blocked.iter().any(|b| host == *b || host.ends_with(&format!(".{b}")));
+            if blocked || super::hosts::site_of(&at) != site || started.elapsed() > Duration::from_secs(60) {
+                break;
+            }
+            super::polite_turn(&at, self.floor).await?;
+            let Ok(resp) = self.fetcher.get(&at, clean, super::robots::MAX_BYTES).await else { break };
+            if (300..400).contains(&resp.status) {
+                let Some(next) = resp.location.as_deref().and_then(|l| Link::parse(l, Some(at.url()))) else { break };
+                clean &= self.auth_origin == Some(at.origin().as_str());
+                at = next;
+                continue;
+            }
+            let read = match resp.status {
+                200..=299 => "ok",
+                429 => "unreachable",
+                400..=499 => "missing",
+                _ => "unreachable",
+            };
+            return Ok((robots_of(&resp), read));
+        }
+        Ok((Robots::unreachable(), "unreachable"))
+    }
 }

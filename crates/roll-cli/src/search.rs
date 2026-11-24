@@ -76,17 +76,18 @@ pub enum Crawler {
         #[arg(long)]
         connector: Option<String>,
     },
-    /// Verify a site (its registrable domain) for the crawler's higher limits: prints the DNS
-    /// TXT record or file to publish; `--check` then checks it.
+    /// Verify a site for the crawler's higher limits: a domain by a DNS TXT record (every origin
+    /// on it), or a URL's origin by the file that origin serves (that origin alone). Prints what
+    /// to publish; `--check` then checks it.
     Verify {
         cluster: String,
-        /// A domain or URL of the site.
+        /// A domain (`example.com`), or a URL (`https://docs.example.com`) for one origin.
         domain: String,
         /// Check for the token now, instead of starting.
         #[arg(long)]
         check: bool,
     },
-    /// The sites the cluster's owner verified, or started verifying.
+    /// The domains and origins the cluster's owner verified, or started verifying.
     Sites { cluster: String },
 }
 

@@ -262,7 +262,7 @@ impl Search {
     /// in the system database and acknowledgements once writes are in object storage.
     #[allow(clippy::too_many_arguments)]
     /// `open`: the daemon enforces no operator token (one person's own node).
-    pub async fn start(home: &Path, args: &SearchArgs, storage: &StorageConfig, public_host: &str, node: &str, cluster: &Arc<roll_cluster::Cluster>, system_database: Option<&str>, db_connections: usize, public: Option<&crate::edge::Public>, secret_key: Option<&str>, open: bool) -> anyhow::Result<Self> {
+    pub async fn start(home: &Path, args: &SearchArgs, storage: &StorageConfig, public_host: &str, node: &str, cluster: &Arc<roll_cluster::Cluster>, system_database: Option<&str>, db_connections: usize, public: Option<&crate::edge::Public>, secret_key: Option<&str>, open: bool, fleet_names: &[String]) -> anyhow::Result<Self> {
         let mut cfg = SearchConfig::local(home.join("search"));
         let fleet = (cluster.backend_name() != "memory").then(|| cluster.clone());
         cfg.node_name = node.to_string();
@@ -356,6 +356,11 @@ impl Search {
         // A name under the clusters' wildcard: where `<anything>.<domain>` leads.
         names.extend(cfg.domain.as_deref().map(|d| format!("roll-reindex-probe.{d}")));
         names.extend(cfg.public_url.as_deref().and_then(|u| reqwest::Url::parse(u).ok()).and_then(|u| u.host_str().map(str::to_string)));
+        // Every product's names (`served_names`), for the web crawler alone: it never fetches
+        // roll by any of them, and other outbound calls' deny lists don't grow.
+        if !fleet_names.is_empty() {
+            cfg.node_settings.push((search_control::CRAWLER_FLEET_NAMES.to_string(), fleet_names.join(",")));
+        }
         // Resolved again on every connection (every 30s at most), so the check follows them.
         cfg.node_settings.push((search_control::EGRESS_DENY_NAMES.to_string(), names.join(",")));
         // And their addresses now, for literals (which never reach the resolver).

@@ -6,9 +6,10 @@ import { ConnectorsTab } from "./connectors";
 
 const esJson = vi.hoisted(() => vi.fn());
 const crawlTest = vi.hoisted(() => vi.fn());
+const request = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/search-api", async (orig) => {
   const real = await orig<typeof import("@/lib/search-api")>();
-  return { ...real, esJson, searchApi: { ...real.searchApi, crawlTest } };
+  return { ...real, esJson, searchApi: { ...real.searchApi, crawlTest, request } };
 });
 
 const cluster = { id: "c1", name: "shop", url: "https://shop.search.example", flavor: "elasticsearch" } as unknown as SearchCluster;
@@ -62,8 +63,10 @@ it("opens a Postgres connector in the console, never shows its password, and fol
   expect(container).not.toHaveTextContent(PASSWORD);
 });
 
-it("tests a URL from the empty state, then makes it a crawler and starts its first crawl", async () => {
+it("tests a URL from the empty state, then makes it a crawler under a free id and starts its first crawl", async () => {
   const user = userEvent.setup();
+  // `docs-example-com` is another connector's already: the new one takes the next id.
+  request.mockImplementation(async (_id: string, _method: string, path: string) => (path === "/_connector/docs-example-com" ? { status: 200, body: "{}" } : { status: 404, body: "{}" }));
   esJson.mockImplementation(async (_id: string, method: string, path: string) => {
     if (method === "GET") return { results: [] };
     if (method === "PUT" || method === "POST") return {};
@@ -90,7 +93,8 @@ it("tests a URL from the empty state, then makes it a crawler and starts its fir
   expect(screen.getByText(/1 link would be queued, 1 skipped/)).toBeInTheDocument();
 
   await user.click(screen.getByRole("button", { name: /crawl into content-docs-example-com/i }));
-  expect(esJson).toHaveBeenCalledWith("c1", "PUT", "/_connector/docs-example-com", { index_name: "content-docs-example-com", is_native: true, service_type: "roll_web_crawler", name: "docs-example-com" });
-  expect(esJson).toHaveBeenCalledWith("c1", "PUT", "/_connector/docs-example-com/_configuration", { values: { urls: "https://docs.example.com/" } });
-  expect(esJson).toHaveBeenCalledWith("c1", "POST", "/_connector/_sync_job", { id: "docs-example-com", job_type: "full", trigger_method: "on_demand" });
+  expect(esJson).not.toHaveBeenCalledWith("c1", "PUT", "/_connector/docs-example-com", expect.anything());
+  expect(esJson).toHaveBeenCalledWith("c1", "PUT", "/_connector/docs-example-com-2", { index_name: "content-docs-example-com-2", is_native: true, service_type: "roll_web_crawler", name: "docs-example-com-2" });
+  expect(esJson).toHaveBeenCalledWith("c1", "PUT", "/_connector/docs-example-com-2/_configuration", { values: { urls: "https://docs.example.com/" } });
+  expect(esJson).toHaveBeenCalledWith("c1", "POST", "/_connector/_sync_job", { id: "docs-example-com-2", job_type: "full", trigger_method: "on_demand" });
 });

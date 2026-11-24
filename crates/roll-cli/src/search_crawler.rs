@@ -272,7 +272,12 @@ pub async fn test(api: &Api, as_json: bool, cluster: &str, url: &str, connector:
 /// `roll search crawler verify`: starts verifying a site (what to publish), or checks it.
 pub async fn verify(api: &Api, as_json: bool, cluster: &str, domain: &str, check: bool) -> anyhow::Result<()> {
     let c = find(api, cluster).await?;
-    let mut v = api.post(&cluster_path(&c, "site-verifications"), json!({ "domain": domain })).await?;
+    // A URL is one origin, proven by the file it serves; anything else a domain, by DNS.
+    let body = match domain.contains("://") {
+        true => json!({ "origin": domain }),
+        false => json!({ "domain": domain }),
+    };
+    let mut v = api.post(&cluster_path(&c, "site-verifications"), body).await?;
     if check {
         let site = urlencoding::encode(&s(&v["site"])).into_owned();
         v = api.post(&cluster_path(&c, &format!("site-verifications/{site}/check")), json!({})).await?;
@@ -281,13 +286,15 @@ pub async fn verify(api: &Api, as_json: bool, cluster: &str, domain: &str, check
         println!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
     }
-    println!("site       {}\nstatus     {}", s(&v["site"]), s(&v["status"]));
+    println!("site       {} ({})\nstatus     {}", s(&v["site"]), s(&v["kind"]), s(&v["status"]));
     if let Some(e) = v["error"].as_str().filter(|_| v["status"] != "verified") {
         println!("error      {e}");
     }
     if v["status"] != "verified" {
-        println!("publish    a DNS TXT record on {}: {}", s(&v["dns"]["name"]), s(&v["dns"]["value"]));
-        println!("   or      the file {} holding {}", s(&v["file"]["url"]), s(&v["file"]["content"]));
+        match v["dns"].is_object() {
+            true => println!("publish    a DNS TXT record on {}: {} (verifies every origin on the domain)", s(&v["dns"]["name"]), s(&v["dns"]["value"])),
+            false => println!("publish    {} holding {}, served by that origin itself (verifies that origin alone)", s(&v["file"]["url"]), s(&v["file"]["content"])),
+        }
         println!("then       roll search crawler verify {cluster} {} --check", s(&v["site"]));
     }
     Ok(())
@@ -302,7 +309,7 @@ pub async fn sites(api: &Api, as_json: bool, cluster: &str) -> anyhow::Result<()
         return Ok(());
     }
     for x in v["verifications"].as_array().into_iter().flatten() {
-        println!("{:<32} {:<9} {}", s(&x["site"]), s(&x["status"]), x["proof"].as_str().unwrap_or("-"));
+        println!("{:<40} {:<7} {}", s(&x["site"]), s(&x["kind"]), s(&x["status"]));
     }
     Ok(())
 }

@@ -1,6 +1,6 @@
 import { Check, Globe, Play, ShieldCheck } from "lucide-react";
 import { useState } from "react";
-import { type CrawlTest, esJson, type SearchCluster, searchApi, type SiteVerification } from "@/lib/search-api";
+import { type CrawlTest, esJson, esReason, type SearchCluster, searchApi, type SiteVerification } from "@/lib/search-api";
 import { btn, input } from "../ui";
 import { errText } from "./relevance-shared";
 
@@ -35,10 +35,22 @@ export function crawlerName(url: string): string {
   );
 }
 
+/** A connector id no connector has: `name`, else `name-2`, `name-3`… (a PUT would replace one). */
+async function freeConnectorId(clusterId: string, name: string): Promise<string> {
+  for (let i = 1; i <= 20; i++) {
+    const id = i === 1 ? name : `${name}-${i}`;
+    const r = await searchApi.request(clusterId, "GET", `/_connector/${encodeURIComponent(id)}`);
+    if (r.status === 404) return id;
+    if (r.status >= 400) throw new Error(esReason(r.body, r.status));
+  }
+  throw new Error(`connectors ${name} to ${name}-20 exist already: make this one in the console`);
+}
+
 /**
- * "Crawl a site": a URL is tested through the crawler's own path (`crawl-test`, nothing written),
- * then becomes a `roll_web_crawler` connector and its first crawl. Unverified sites get the small
- * limits; the site can be verified here too.
+ * "Crawl a site": a URL is tested through the crawler's own path (`crawl-test`: nothing stored,
+ * real requests sent), then becomes a `roll_web_crawler` connector and its first crawl.
+ * Unverified sites get the small limits; the URL's domain (by DNS) or just its origin (by a file
+ * it serves) can be verified here too.
  */
 export function CrawlSite({ cluster, onCreated }: { cluster: SearchCluster; onCreated: () => void }) {
   const [url, setUrl] = useState("");
@@ -66,8 +78,8 @@ export function CrawlSite({ cluster, onCreated }: { cluster: SearchCluster; onCr
     if (r) setResult(r);
   };
   const create = async () => {
-    const name = crawlerName(url);
     const done = await run("create", async () => {
+      const name = await freeConnectorId(cluster.id, crawlerName(url));
       await esJson(cluster.id, "PUT", `/_connector/${encodeURIComponent(name)}`, { index_name: `content-${name}`, is_native: true, service_type: "roll_web_crawler", name });
       await esJson(cluster.id, "PUT", `/_connector/${encodeURIComponent(name)}/_configuration`, { values: { urls: url.trim() } });
       await esJson(cluster.id, "POST", "/_connector/_sync_job", { id: name, job_type: "full", trigger_method: "on_demand" });
@@ -75,8 +87,15 @@ export function CrawlSite({ cluster, onCreated }: { cluster: SearchCluster; onCr
     });
     if (done) onCreated();
   };
-  const verify = async () => {
-    const v = await run("verify", () => searchApi.verifySite(cluster.id, url.trim()));
+  const verify = async (kind: "domain" | "origin") => {
+    const target = url.trim();
+    let host = target;
+    try {
+      host = new URL(target).hostname;
+    } catch {
+      // Not a URL: the text as typed.
+    }
+    const v = await run("verify", () => searchApi.verifySite(cluster.id, kind === "domain" ? { domain: host } : { origin: target }));
     if (v) setVerification(v);
   };
   const check = async () => {
@@ -148,11 +167,17 @@ export function CrawlSite({ cluster, onCreated }: { cluster: SearchCluster; onCr
             <button onClick={create} disabled={busy !== null || result.verdict !== "allowed" || result.indexed === false} className={btn}>
               <Play className="size-3.5" /> {busy === "create" ? <span className="shimmer">Creating…</span> : `Crawl into content-${crawlerName(url)}`}
             </button>
-            <button onClick={verify} disabled={busy !== null} className={btn}>
-              <ShieldCheck className="size-3.5" /> Verify the site
+            <button onClick={() => verify("domain")} disabled={busy !== null} className={btn}>
+              <ShieldCheck className="size-3.5" /> Verify the domain
+            </button>
+            <button onClick={() => verify("origin")} disabled={busy !== null} className={btn}>
+              <ShieldCheck className="size-3.5" /> Verify this origin
             </button>
           </div>
-          <p className="text-[12px] text-subtle">Until the site is verified, a crawl takes 1,000 URLs at most, a second apart, 4 times a day.</p>
+          <p className="text-[12px] text-subtle">
+            Until it is verified, a crawl takes 1,000 URLs at most, a second apart, 4 times a day. A domain is verified with a DNS record and covers
+            every host on it; an origin with a file it serves, and covers that origin alone.
+          </p>
         </div>
       )}
       {verification && (
@@ -160,17 +185,22 @@ export function CrawlSite({ cluster, onCreated }: { cluster: SearchCluster; onCr
           <p>
             <span className="font-medium">{verification.site}</span>{" "}
             <span className={verification.status === "verified" ? "text-accent" : "text-muted"}>{verification.status}</span>
-            {verification.proof && <span className="text-subtle"> · by {verification.proof === "dns" ? "DNS" : "file"}</span>}
+            <span className="text-subtle"> · {verification.kind === "domain" ? "the domain, by DNS" : "this origin, by its file"}</span>
           </p>
           {verification.status !== "verified" && (
             <>
-              <p className="text-[12px] text-muted">Publish one of these, then check:</p>
-              <p className="font-mono text-[12px]">
-                TXT {verification.dns.name} “{verification.dns.value}”
+              <p className="text-[12px] text-muted">
+                {verification.kind === "domain" ? "Add this DNS record, then check:" : "Serve this file from the origin itself (no redirect to another origin), then check:"}
               </p>
-              <p className="font-mono text-[12px]">
-                {verification.file.url} → {verification.file.content}
-              </p>
+              {verification.kind === "domain" ? (
+                <p className="font-mono text-[12px]">
+                  TXT {verification.dns.name} “{verification.dns.value}”
+                </p>
+              ) : (
+                <p className="font-mono text-[12px]">
+                  {verification.file.url} → {verification.file.content}
+                </p>
+              )}
               {verification.error && <p className="text-[12px] text-danger">{verification.error}</p>}
               <div>
                 <button onClick={check} disabled={busy !== null} className={btn}>

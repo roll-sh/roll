@@ -1460,11 +1460,13 @@ deterministic (#396).
    connector roll runs (`roll_web_crawler`, on #318's runner) taking Open Crawler's config, fields
    and ids, robots.txt always honoured, fetching through roll's one egress check with redirects
    checked hop by hop and the credential bound to one origin, a purge that outages can't empty,
-   and `roll search crawler import`; then domain verification (a DNS TXT record or the well-known
-   file per owner and site, re-checked every 30 days, the verified limits, and the daily count of
-   unverified crawls in the fleet's catalogue), `crawl-test` (one URL through the crawler's path,
-   writing nothing) with its MCP tools and `roll search crawler test`/`verify`/`sites`, the
-   dashboard's "crawl a site" box in the Connectors tab, and the fleet's own names blocked. Left
+   and `roll search crawler import`; then site verification per owner (a domain by a DNS TXT
+   record, covering every origin on it, or one origin by the well-known file it serves; re-checked
+   every 30 days with retries, the verified limits, and the daily count of unverified crawls in
+   the fleet's catalogue), `crawl-test` (one URL through the crawler's path, storing nothing,
+   rate-limited per owner) with its MCP tools and `roll search crawler test`/`verify`/`sites`, the
+   dashboard's "crawl a site" box in the Connectors tab, and every product's names blocked
+   (`roll.crawler.fleet_names`). Left
    (phase 3): extraction rules (CSS selectors on the arena DOM), incremental crawls with
    `If-Modified-Since`, and the docs preset; charset detection beyond UTF-8, fetching several
    origins at once, and per-site politeness by address rather than name are open too.

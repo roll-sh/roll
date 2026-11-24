@@ -34,8 +34,9 @@
 //!   list of top queries and of queries with no results. A slot is replaced when its time comes
 //!   round again; an index whose analytics go off or that is deleted loses its rows.
 //!
-//! - `site_verifications`: one row per owner and site (registrable domain) the owner asked to
-//!   verify for the web crawler: its token, how it was proven and when it was last checked
+//! - `site_verifications`: one row per owner and domain or origin the owner asked to verify for
+//!   the web crawler: its kind (`domain`, by DNS, covering every origin on it; `origin`, by the
+//!   file that origin serves, covering it alone), token, state, and when it is checked next
 //!   (docs/search/crawler.md, "Domain verification"). An owner is the clusters' (`owner`, or
 //!   `(no owner)` for the operator's), so every cluster and connector of theirs shares them.
 //! - `site_crawls`: when each owner crawled each site it hasn't verified, for the daily limit of
@@ -573,10 +574,11 @@ impl Store {
         )?;
         // The web crawler's verified sites and unverified crawls (`crate::sites`).
         db.ensure_schema(
-            "CREATE TABLE IF NOT EXISTS search_site_verifications (owner TEXT NOT NULL, site TEXT NOT NULL, token TEXT NOT NULL, origin TEXT NOT NULL, status TEXT NOT NULL, proof TEXT, error TEXT, created_at INTEGER NOT NULL, verified_at INTEGER, checked_at INTEGER, PRIMARY KEY (owner, site))",
+            "CREATE TABLE IF NOT EXISTS search_site_verifications (owner TEXT NOT NULL, site TEXT NOT NULL, kind TEXT NOT NULL, token TEXT NOT NULL, status TEXT NOT NULL, error TEXT, failures INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, verified_at INTEGER, lapsed_at INTEGER, checked_at INTEGER, due_at INTEGER, claimed_at INTEGER, PRIMARY KEY (owner, site))",
         )?;
         db.ensure_schema("CREATE TABLE IF NOT EXISTS search_site_crawls (owner TEXT NOT NULL, site TEXT NOT NULL, at INTEGER NOT NULL)")?;
         db.ensure_schema("CREATE INDEX IF NOT EXISTS search_site_crawls_by ON search_site_crawls (owner, site, at)")?;
+        db.ensure_schema("CREATE INDEX IF NOT EXISTS search_site_verifications_due ON search_site_verifications (due_at)")?;
         // Catalogs written before `code-sql` lack nothing but may lack the index on parents
         // (created above); their extra columns (`seq`) and tables (`search_tombstones`) are unused.
         Ok(Self { db, sealer: OnceLock::new() })
@@ -1001,15 +1003,26 @@ impl Store {
         Ok(())
     }
 
-    /// Owner `owner`'s verification of `site`: a new one with `token` (pending), or the one it
-    /// has (its token kept, so a record published once keeps working).
-    pub async fn start_verification(&self, owner: &str, site: &str, origin: &str, token: &str, now: i64) -> anyhow::Result<SiteVerification> {
+    /// Owner `owner`'s verification of `site` (a domain or an origin, of `kind`): a new one with
+    /// `token` (pending), or the one it has (its token kept, so a record published once keeps
+    /// working). `None`: the owner has [`MAX_PENDING`] pending already. Pending rows older than
+    /// [`PENDING_FOR`] are dropped first.
+    pub async fn start_verification(&self, owner: &str, site: &str, kind: &str, token: &str, now: i64) -> anyhow::Result<Option<SiteVerification>> {
         Ok(self.db.write(|x| {
+            x.execute("DELETE FROM search_site_verifications WHERE owner = ?1 AND status = 'pending' AND created_at < ?2", params![owner, now - PENDING_FOR])?;
+            let had = x.query_row(&format!("SELECT {VERIFY_COLS} FROM search_site_verifications WHERE owner = ?1 AND site = ?2"), params![owner, site], verification_row).optional()?;
+            if had.is_some() {
+                return Ok::<_, code_sql::Error>(had);
+            }
+            let pending: i64 = x.query_row("SELECT COUNT(*) FROM search_site_verifications WHERE owner = ?1 AND status = 'pending'", params![owner], |r| r.get(0))?;
+            if pending >= MAX_PENDING {
+                return Ok(None);
+            }
             x.execute(
-                "INSERT INTO search_site_verifications (owner, site, token, origin, status, created_at) VALUES (?1, ?2, ?3, ?4, 'pending', ?5) ON CONFLICT (owner, site) DO NOTHING",
-                params![owner, site, token, origin, now],
+                "INSERT INTO search_site_verifications (owner, site, kind, token, status, created_at) VALUES (?1, ?2, ?3, ?4, 'pending', ?5) ON CONFLICT (owner, site) DO NOTHING",
+                params![owner, site, kind, token, now],
             )?;
-            x.query_row(&format!("SELECT {VERIFY_COLS} FROM search_site_verifications WHERE owner = ?1 AND site = ?2"), params![owner, site], verification_row)
+            x.query_row(&format!("SELECT {VERIFY_COLS} FROM search_site_verifications WHERE owner = ?1 AND site = ?2"), params![owner, site], verification_row).optional()
         })?)
     }
 
@@ -1021,18 +1034,19 @@ impl Store {
         Ok(self.db.read(|x| x.query(&format!("SELECT {VERIFY_COLS} FROM search_site_verifications WHERE owner = ?1 ORDER BY site"), params![owner], verification_row))?)
     }
 
-    /// A check's outcome: `proof` when it held (verified now), else `error` (a verified site
-    /// whose check fails is unverified again).
-    pub async fn record_check(&self, owner: &str, site: &str, proof: Option<&str>, error: Option<&str>, now: i64) -> anyhow::Result<()> {
-        self.db.write(|x| match proof {
-            Some(p) => x.execute(
-                "UPDATE search_site_verifications SET status = 'verified', proof = ?3, error = NULL, verified_at = COALESCE(verified_at, ?4), checked_at = ?4 WHERE owner = ?1 AND site = ?2",
-                params![owner, site, p, now],
-            ),
-            None => x.execute(
-                "UPDATE search_site_verifications SET status = CASE WHEN status = 'verified' THEN 'lapsed' ELSE status END, error = ?3, verified_at = CASE WHEN status = 'verified' THEN NULL ELSE verified_at END, checked_at = ?4 WHERE owner = ?1 AND site = ?2",
-                params![owner, site, error.unwrap_or_default(), now],
-            ),
+    /// A check's outcome (`Err`: why it failed), and when the next is due ([`after_check`]).
+    /// Clears the check's claim.
+    pub async fn record_check(&self, owner: &str, site: &str, outcome: std::result::Result<(), &str>, now: i64) -> anyhow::Result<()> {
+        self.db.write(|x| {
+            let Some(v) = x.query_row(&format!("SELECT {VERIFY_COLS} FROM search_site_verifications WHERE owner = ?1 AND site = ?2"), params![owner, site], verification_row).optional()? else {
+                return Ok::<_, code_sql::Error>(());
+            };
+            let n = after_check(&v, outcome.is_ok(), now);
+            x.execute(
+                "UPDATE search_site_verifications SET status = ?3, error = ?4, failures = ?5, verified_at = ?6, lapsed_at = ?7, checked_at = ?8, due_at = ?9, claimed_at = NULL WHERE owner = ?1 AND site = ?2",
+                params![owner, site, n.status, outcome.err(), n.failures, n.verified_at, n.lapsed_at, now, n.due_at],
+            )?;
+            Ok(())
         })?;
         Ok(())
     }
@@ -1041,23 +1055,26 @@ impl Store {
         Ok(self.db.write(|x| x.execute("DELETE FROM search_site_verifications WHERE owner = ?1 AND site = ?2", params![owner, site]))? > 0)
     }
 
-    /// Of `sites`, those `owner` has verified.
-    pub async fn verified_sites(&self, owner: &str, sites: &[String]) -> anyhow::Result<Vec<String>> {
-        let all: Vec<String> = self.db.read(|x| x.query("SELECT site FROM search_site_verifications WHERE owner = ?1 AND status = 'verified'", params![owner], |r| r.get(0)))?;
-        Ok(sites.iter().filter(|s| all.contains(s)).cloned().collect())
+    /// `owner`'s verifications that hold (`verified`, though a re-check may be retrying): each
+    /// key and its kind.
+    pub async fn verified_sites(&self, owner: &str) -> anyhow::Result<Vec<(String, String)>> {
+        Ok(self.db.read(|x| x.query("SELECT site, kind FROM search_site_verifications WHERE owner = ?1 AND status = 'verified'", params![owner], |r| Ok((r.get(0)?, r.get(1)?))))?)
     }
 
-    /// Verified sites last checked before `before`, claimed for a re-check (their `checked_at`
-    /// moves to `now` in the same write, so two nodes don't both re-check one): at most `max`.
-    pub async fn claim_rechecks(&self, before: i64, now: i64, max: i64) -> anyhow::Result<Vec<SiteVerification>> {
+    /// Verifications due a re-check at `now`, claimed for one (`claimed_at`, in the same write,
+    /// so two nodes don't both check one; a claim older than [`CLAIM_FOR`] is taken again, so a
+    /// node that died mid-check delays it, never skips it): at most `max`. Expired pending rows
+    /// are dropped on the way.
+    pub async fn claim_rechecks(&self, now: i64, max: i64) -> anyhow::Result<Vec<SiteVerification>> {
         Ok(self.db.write(|x| {
+            x.execute("DELETE FROM search_site_verifications WHERE status = 'pending' AND created_at < ?1", params![now - PENDING_FOR])?;
             let due: Vec<SiteVerification> = x.query(
-                &format!("SELECT {VERIFY_COLS} FROM search_site_verifications WHERE status = 'verified' AND (checked_at IS NULL OR checked_at < ?1) ORDER BY checked_at LIMIT ?2"),
-                params![before, max],
+                &format!("SELECT {VERIFY_COLS} FROM search_site_verifications WHERE due_at IS NOT NULL AND due_at <= ?1 AND (claimed_at IS NULL OR claimed_at < ?2) ORDER BY due_at LIMIT ?3"),
+                params![now, now - CLAIM_FOR, max],
                 verification_row,
             )?;
             for v in &due {
-                x.execute("UPDATE search_site_verifications SET checked_at = ?3 WHERE owner = ?1 AND site = ?2", params![v.owner, v.site, now])?;
+                x.execute("UPDATE search_site_verifications SET claimed_at = ?3 WHERE owner = ?1 AND site = ?2", params![v.owner, v.site, now])?;
             }
             Ok::<_, code_sql::Error>(due)
         })?)
@@ -1780,38 +1797,124 @@ mod tests {
     }
 }
 
-/// An owner's verification of a site, for the web crawler.
+/// How long a verification holds before it is checked again.
+pub const RECHECK_AFTER: i64 = 30 * DAY;
+/// After a verified row's check fails, when it is tried again: once per entry, then it lapses.
+const RETRY_AFTER: [i64; 3] = [HOUR, 6 * HOUR, DAY];
+/// How long a lapsed verification is still re-checked (daily), so a short outage on the site
+/// doesn't cost its owner the verification.
+const LAPSED_RECHECKS_FOR: i64 = 7 * DAY;
+/// How long a re-check's claim keeps other nodes off it.
+const CLAIM_FOR: i64 = 10 * 60_000;
+/// How long a verification stays pending (never checked successfully) before it is dropped, and
+/// how many one owner may have pending.
+pub const PENDING_FOR: i64 = 7 * DAY;
+pub const MAX_PENDING: i64 = 100;
+const HOUR: i64 = 3_600_000;
+const DAY: i64 = 24 * HOUR;
+
+/// A verification's state after a check.
+#[derive(Debug, PartialEq)]
+struct AfterCheck {
+    status: &'static str,
+    failures: i64,
+    verified_at: Option<i64>,
+    lapsed_at: Option<i64>,
+    due_at: Option<i64>,
+}
+
+/// What a check (`ok` or not) at `now` makes of `v`: a pass verifies it (due again in
+/// [`RECHECK_AFTER`]); a verified row's failure is retried ([`RETRY_AFTER`]) before it lapses; a
+/// lapsed row is re-checked daily for [`LAPSED_RECHECKS_FOR`]; a pending row is checked only when
+/// someone asks.
+fn after_check(v: &SiteVerification, ok: bool, now: i64) -> AfterCheck {
+    if ok {
+        let verified_at = Some(v.verified_at.filter(|_| v.status == "verified").unwrap_or(now));
+        return AfterCheck { status: "verified", failures: 0, verified_at, lapsed_at: None, due_at: Some(now + RECHECK_AFTER) };
+    }
+    match v.status.as_str() {
+        "verified" => match RETRY_AFTER.get(v.failures.max(0) as usize) {
+            Some(wait) => AfterCheck { status: "verified", failures: v.failures + 1, verified_at: v.verified_at, lapsed_at: None, due_at: Some(now + wait) },
+            None => AfterCheck { status: "lapsed", failures: v.failures + 1, verified_at: None, lapsed_at: Some(now), due_at: Some(now + DAY) },
+        },
+        "lapsed" => {
+            let since = v.lapsed_at.unwrap_or(now);
+            let due_at = (now + DAY <= since + LAPSED_RECHECKS_FOR).then_some(now + DAY);
+            AfterCheck { status: "lapsed", failures: v.failures + 1, verified_at: None, lapsed_at: Some(since), due_at }
+        }
+        _ => AfterCheck { status: "pending", failures: 0, verified_at: None, lapsed_at: None, due_at: None },
+    }
+}
+
+/// An owner's verification of a domain or an origin, for the web crawler.
 #[derive(Clone, Debug, Serialize)]
 pub struct SiteVerification {
     pub owner: String,
+    /// A registrable domain (`kind` `domain`) or an origin, `scheme://host[:port]` (`origin`).
     pub site: String,
+    pub kind: String,
     pub token: String,
-    /// Where its file is read from (`https://<site>`, or a local test site's origin).
-    pub origin: String,
-    /// `pending`, `verified`, or `lapsed` (verified once, then a re-check failed).
+    /// `pending`, `verified`, or `lapsed` (verified once, then its re-checks kept failing).
     pub status: String,
-    /// `dns` or `file`, once verified.
-    pub proof: Option<String>,
     /// Why the last check failed.
     pub error: Option<String>,
+    /// Checks failed in a row.
+    pub failures: i64,
     pub created_at: i64,
     pub verified_at: Option<i64>,
+    pub lapsed_at: Option<i64>,
     pub checked_at: Option<i64>,
+    /// When it is checked again by itself (`None`: only when someone asks).
+    pub due_at: Option<i64>,
 }
 
-const VERIFY_COLS: &str = "owner, site, token, origin, status, proof, error, created_at, verified_at, checked_at";
+const VERIFY_COLS: &str = "owner, site, kind, token, status, error, failures, created_at, verified_at, lapsed_at, checked_at, due_at";
 
 fn verification_row(r: &Row) -> code_sql::Result<SiteVerification> {
     Ok(SiteVerification {
         owner: r.get(0)?,
         site: r.get(1)?,
-        token: r.get(2)?,
-        origin: r.get(3)?,
+        kind: r.get(2)?,
+        token: r.get(3)?,
         status: r.get(4)?,
-        proof: r.get(5)?,
-        error: r.get(6)?,
+        error: r.get(5)?,
+        failures: r.get(6)?,
         created_at: r.get(7)?,
         verified_at: r.get(8)?,
-        checked_at: r.get(9)?,
+        lapsed_at: r.get(9)?,
+        checked_at: r.get(10)?,
+        due_at: r.get(11)?,
     })
+}
+
+#[cfg(test)]
+mod site_tests {
+    use super::*;
+
+    /// A verified site's failed re-checks are retried before it lapses, a lapsed one is re-checked
+    /// for a week, and a pass restores it.
+    #[test]
+    fn rechecks_retry_then_lapse_then_stop() {
+        let mut v = SiteVerification { owner: "o".into(), site: "example.com".into(), kind: "domain".into(), token: "t".into(), status: "verified".into(), error: None, failures: 0, created_at: 0, verified_at: Some(5), lapsed_at: None, checked_at: None, due_at: None };
+        let mut now = 1_000;
+        let apply = |v: &mut SiteVerification, ok: bool, now: i64| {
+            let n = after_check(v, ok, now);
+            (v.status, v.failures, v.verified_at, v.lapsed_at, v.due_at) = (n.status.to_string(), n.failures, n.verified_at, n.lapsed_at, n.due_at);
+        };
+        for wait in RETRY_AFTER {
+            apply(&mut v, false, now);
+            assert_eq!((v.status.as_str(), v.due_at, v.verified_at), ("verified", Some(now + wait), Some(5)));
+            now += wait;
+        }
+        apply(&mut v, false, now);
+        assert_eq!((v.status.as_str(), v.lapsed_at), ("lapsed", Some(now)));
+        let lapsed = now;
+        while let Some(due) = v.due_at {
+            now = due;
+            apply(&mut v, false, now);
+        }
+        assert!(now <= lapsed + LAPSED_RECHECKS_FOR && now > lapsed + LAPSED_RECHECKS_FOR - 2 * DAY, "re-checked for a week: {}", (now - lapsed) / DAY);
+        apply(&mut v, true, now);
+        assert_eq!((v.status.as_str(), v.failures, v.verified_at, v.due_at), ("verified", 0, Some(now), Some(now + RECHECK_AFTER)));
+    }
 }

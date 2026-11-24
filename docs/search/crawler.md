@@ -191,50 +191,71 @@ fetches. Algolia verifies a domain before crawling it, and so does roll. The dif
 unverified domain can still be crawled, within small limits, so the first crawl in the dashboard
 works in a minute:
 
-| | Unverified domain | Verified domain |
+| | Unverified origin | Verified origin |
 |---|---|---|
 | URLs per crawl | 1,000 | `max_unique_url_count`, up to the operator's ceiling |
 | Interval between requests | at least 1 s | at least `roll.crawler.min_request_interval` |
 | Crawls per day | 4, per owner and site | by schedule |
 
-What is verified is a site: a registrable domain by the public suffix list (`docs.example.com`
-is `example.com`'s; each `*.github.io` is its own). The owner proves control in one of two ways:
+What a verification covers depends on how it is proven, as with Google Search Console's domain
+and URL-prefix properties:
 
-- a DNS TXT record `roll-site-verification=<token>` on the site, or
-- the file `/.well-known/roll-site-verification.txt` on the site holding the token, read over
-  https through the crawler's own fetch path and egress check. Redirects are followed only
-  within the site: a token served from another site proves nothing.
+- **A domain** (a registrable domain by the public suffix list: `docs.example.com` is
+  `example.com`'s, each `*.github.io` is its own) is proven by a DNS TXT record
+  `roll-site-verification=<token>` on it, and covers every origin on it, any host, scheme or port.
+- **An origin** (`https://host[:port]`, exactly) is proven by the file
+  `/.well-known/roll-site-verification.txt` holding the token, served by that origin itself: read
+  through the crawler's own fetch path and egress check, with redirects followed only within the
+  origin. It covers that origin alone. Controlling one host or port of a domain (a taken-over
+  `blog.example.com`, a service on `example.com:8443`) proves nothing about its others.
 
 The token and the verification belong to the cluster's owner (the person, or the operator for
 clusters without one), not to one cluster: every cluster and connector of theirs shares them,
 and a new cluster or connector starts nothing over. A crawl gets the verified limits when every
-site it covers is verified; otherwise the unverified ones. A verification is re-checked every 30
-days (claimed in the catalogue first, so one node of a fleet checks it), and one whose re-check
-fails lapses back to the unverified limits.
+origin it covers is verified, by its own file or its domain's record; otherwise the unverified
+ones. The daily count of unverified crawls is per owner and site, so another host of the same
+domain doesn't buy more.
+
+A verification is re-checked every 30 days (claimed in the catalogue first, so one node of a fleet
+checks it; the claim is kept apart from the result, so a node that dies mid-check only delays it).
+A failed re-check is retried after 1 hour, 6 hours and a day before the verification lapses to the
+unverified limits, and a lapsed one is re-checked daily for a week, so a short outage costs
+nothing. Pending verifications (never proven) are dropped after 7 days, and an owner can have at
+most 100 pending (409 past that).
 
 Verifications, like each owner's crawls of unverified sites (the daily limit), are kept in roll's
 catalogue (`search-control`: SQLite, or the fleet's shared Postgres), not in a cluster's state,
 so a tenant can't write one through the cluster's API and the count holds across the fleet. The
 owner node reads them when a crawl starts (`ClusterConfig::sites`). The routes act for the
-cluster's owner and sit under the cluster, routed to its owner and classified in roll-access as
-`read` (list) and `write` (the rest) on the cluster:
+cluster's owner and sit under the cluster (routed to its owner). In roll-access they're decided
+on search as a whole (`read` to list, `write` for the rest), not on the cluster in the path: they
+change what every one of the owner's clusters gets, so a grant on one cluster can't drop them.
 
-- `GET /v1/search/clusters/{id}/site-verifications`: the owner's sites, each with the DNS record
-  and file that prove it;
-- `POST /v1/search/clusters/{id}/site-verifications` `{"domain": …}`: starts one, answering the
-  token (the same token again for a site already started);
+- `GET /v1/search/clusters/{id}/site-verifications`: the owner's domains and origins, each with
+  the DNS record or file that proves it and when it is checked next;
+- `POST /v1/search/clusters/{id}/site-verifications` `{"domain": …}` or `{"origin": …}`: starts
+  one, answering what to publish (the same token again for one already started);
 - `POST /v1/search/clusters/{id}/site-verifications/{site}/check`: checks now;
 - `DELETE /v1/search/clusters/{id}/site-verifications/{site}`.
 
 They're MCP tools (`search_list_site_verifications`, `search_verify_site`,
 `search_check_site_verification`, `search_delete_site_verification`) and
-`roll search crawler verify <cluster> <domain> [--check]` and `roll search crawler sites <cluster>`.
+`roll search crawler verify <cluster> <domain-or-url> [--check]` (a URL verifies its origin) and
+`roll search crawler sites <cluster>`.
+
+Checks and `crawl-test` make roll send requests, so they're held like a crawl's: refused while
+crawlers are off on the node, each request in the site's turn at the unverified interval (shared
+with every crawl on the node), and at most 10 a minute per owner on a node (429 past that).
 
 `roll.crawler.enabled` (a node setting, on by default) lets an operator stop every crawler on a
 node. `roll.crawler.blocked_hosts` refuses hosts outright, so an abuse report can be acted on in
-minutes. The names the node serves (`roll.egress.deny_names`, which rolld fills with the fleet's
-own public names) are blocked the same way, so a crawl never fetches roll itself, by name as well
-as by the egress check's addresses.
+minutes. The fleet's own names are blocked the same way, so a crawl never fetches roll itself, by
+name as well as by the egress check's addresses: rolld puts every product's public, edge and
+internal names in `roll.crawler.fleet_names` (the edge's domains, the dashboard, roll apps', roll
+code's and its previews', storage's, NoSQL's and Alternator's, search's, and the advertised and
+internal hosts; `served_names.rs`, where a test fails on a name argument left out). That list is
+the crawler's alone, so other outbound calls' deny lists don't grow; `roll.egress.deny_names` (and
+its old name, `roll.reindex.remote.deny_names`) is honoured too.
 
 ## Documents
 
@@ -370,10 +391,11 @@ one request per origin. Crawls share the node's connector slots.
 
 Algolia's URL tester is how people debug extraction. roll's version is
 `POST /v1/search/clusters/{id}/crawl-test` with `{"url": …, "connector"?: …}`. It is routed
-to the cluster's owner, and classified in roll-access as `read` on the cluster, because it fetches
-but writes nothing. It fetches one URL with the connector's configuration (or, with none, as a
+to the cluster's owner, and classified in roll-access as `write` on the cluster: it stores
+nothing, but it makes roll send requests (held as checks are; see above). It fetches one URL with the connector's configuration (or, with none, as a
 crawl of the URL's site would) through the crawler's own path (the same plan, egress check,
-robots.txt reading, verdicts, redirects, credential rules and parsing) and answers four things:
+robots.txt reading of every origin it meets, verdicts, redirects, credential rules and parsing)
+and answers four things:
 
 - the robots.txt verdict and the crawl rule that decided;
 - the redirect chain;
@@ -384,8 +406,8 @@ The credential is used only by the fetch's rules above, and never appears in the
 is capped at 1 MiB (the body shown is cut at 64 KiB). It is a tool in roll's MCP
 (`search_crawl_test`) and `roll search crawler test <cluster> <url> [--connector <id>]`. The
 dashboard's Connectors tab has a URL box that calls it: its "crawl a site" empty state tests a
-URL, then makes it a `roll_web_crawler` connector and starts the first crawl, and offers to
-verify the site.
+URL, then makes it a `roll_web_crawler` connector under an id no connector has and starts the
+first crawl, and offers to verify the URL's domain (DNS) or just its origin (the file).
 
 ## Metering and usage
 
@@ -412,7 +434,11 @@ to see why pages are missing.
 | Crawl rules, robots.txt (RFC 9309's examples), URL normalisation and ids (Open Crawler's vectors), and directive parsing | unit tests in `xpack/entsearch/sync/crawler/` |
 | A crawl end to end against a fixture site served by the test on loopback (`allow_private_hosts`): sitemaps, canonical URLs, nofollow, redirects off-domain, a credential not sent after a cross-origin redirect, purge with a 503 window, and incremental with 304 | `crates/search-es/tests/` beside #318's sync tests |
 | Hostile pages: a compression bomb, a million-node page under a small breaker, an endless calendar, and a sitemap with entities | the same file, one test each |
-| `crawl-test` answering, verification by the well-known file (a redirect off the site refused), and the higher limits once verified | `search-control/tests/control.rs` (`crawler_sites_verified_for_higher_limits`), against a fixture site on loopback |
+| `crawl-test` answering; an origin verified by its file (a redirect to another port refused), the higher limits for that origin only | `search-control/tests/control.rs` (`crawler_sites_verified_for_higher_limits`), against a fixture site on loopback |
+| One owner's verification gives another owner nothing | the same file (`crawler_verifications_are_the_owners`) |
+| The daily limit of unverified crawls is the owner's, across connectors, in the catalogue | the same file (`crawler_daily_limit_is_the_owners_across_connectors`) |
+| Re-checks retried, then lapsed, then re-checked for a week | unit test in `search-control/src/store.rs` |
+| Every rolld argument naming a host roll serves reaches `roll.crawler.fleet_names` | unit test in `rolld/src/served_names.rs` |
 | The routes' catalogue rows; the MCP tools | `rolld/tests/auth.rs`; docs/mcp.md and `pnpm test:mcp-sweep` |
 | The dashboard's crawl box | `apps/dashboard/src/components/search/connectors.test.tsx` |
 | `roll search crawler import` | `roll-cli/tests/search.rs` |

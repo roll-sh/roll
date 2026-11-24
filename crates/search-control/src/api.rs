@@ -810,23 +810,31 @@ async fn create_browser_key(State(c): State<AppState>, Path(id): Path<String>, J
     Ok(Json(c.create_browser_key(&id, k).await?))
 }
 
-/// `GET /v1/search/clusters/{id}/site-verifications`: the sites the cluster's owner verified, or
-/// started verifying, for the web crawler (every cluster of one owner shares them).
+/// `GET /v1/search/clusters/{id}/site-verifications`: the domains and origins the cluster's owner
+/// verified, or started verifying, for the web crawler (every cluster of one owner shares them).
 async fn site_verifications(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
     let d = c.get(&id).await?;
     Ok(Json(c.site_verifications(&d).await?))
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NewVerification {
-    domain: String,
+    domain: Option<String>,
+    origin: Option<String>,
 }
 
-/// `POST /v1/search/clusters/{id}/site-verifications` `{domain}`: the site (registrable domain)
-/// and the token to publish, as a DNS TXT record or the well-known file.
+/// `POST /v1/search/clusters/{id}/site-verifications` `{domain}` or `{origin}`: a domain (proven
+/// by a DNS TXT record, covering every origin on it) or one origin (proven by the file it serves,
+/// covering it alone), and the token to publish.
 async fn start_site_verification(State(c): State<AppState>, Path(id): Path<String>, Json(b): Json<NewVerification>) -> ApiResult<Value> {
     let d = c.get(&id).await?;
-    Ok(Json(c.start_site_verification(&d, &b.domain).await?))
+    let (text, origin) = match (b.domain, b.origin) {
+        (Some(t), None) => (t, false),
+        (None, Some(t)) => (t, true),
+        _ => return Err(ControlError::Invalid("give domain (verified by DNS) or origin (verified by its file), not both".into())),
+    };
+    Ok(Json(c.start_site_verification(&d, &text, origin).await?))
 }
 
 /// `POST /v1/search/clusters/{id}/site-verifications/{site}/check`: checks for the token now.

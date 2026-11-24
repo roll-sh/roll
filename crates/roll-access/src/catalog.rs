@@ -1390,15 +1390,17 @@ static ROWS: &[Row] = &[
     row("PUT", "/v1/search/clusters/{id}/query_rules/{ruleset}", "search", W, one(PG, "cluster")),
     row("DELETE", "/v1/search/clusters/{id}/query_rules/{ruleset}", "search", W, one(PG, "cluster")),
     row("POST", "/v1/search/clusters/{id}/query_rules/{ruleset}/test", "search", R, one(PG, "cluster")),
-    // The web crawler's sites (verified for the cluster's owner) and its URL test. Starting,
-    // checking or dropping a verification changes the limits the owner's crawls get, so it's
-    // write; the token it answers is meant to be published (DNS or the site), not a credential.
-    // `crawl-test` fetches one URL and writes nothing: read.
-    row("GET", "/v1/search/clusters/{id}/site-verifications", "search", R, one(PG, "cluster")),
-    row("POST", "/v1/search/clusters/{id}/site-verifications", "search", W, one(PG, "cluster")),
-    row("DELETE", "/v1/search/clusters/{id}/site-verifications/{site}", "search", W, one(PG, "cluster")),
-    row("POST", "/v1/search/clusters/{id}/site-verifications/{site}/check", "search", W, one(PG, "cluster")),
-    row("POST", "/v1/search/clusters/{id}/crawl-test", "search", R, one(PG, "cluster")),
+    // The web crawler's verified domains and origins are the cluster owner's, shared by every
+    // one of its clusters, so they're decided on search as a whole (the owner's), not on the
+    // cluster in the path: a grant on one cluster can't drop what all the others' crawls rely
+    // on. Starting, checking or dropping one changes the limits the owner's crawls get: write.
+    // The token it answers is meant to be published (DNS or the origin), not a credential.
+    row("GET", "/v1/search/clusters/{id}/site-verifications", "search", R, Tgt::Product),
+    row("POST", "/v1/search/clusters/{id}/site-verifications", "search", W, Tgt::Product),
+    row("DELETE", "/v1/search/clusters/{id}/site-verifications/{site}", "search", W, Tgt::Product),
+    row("POST", "/v1/search/clusters/{id}/site-verifications/{site}/check", "search", W, Tgt::Product),
+    // `crawl-test` stores nothing, but it makes roll send requests to a site: write.
+    row("POST", "/v1/search/clusters/{id}/crawl-test", "search", W, one(PG, "cluster")),
     // ── secrets (feature/roll-secrets, docs/secrets.md) ──
     // The caller and its grant's project (`roll run`), and health: any grant.
     row("GET", "/v1/secrets/whoami", "secrets", R, Tgt::AnyGrant),

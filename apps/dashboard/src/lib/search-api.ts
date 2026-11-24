@@ -300,17 +300,19 @@ export interface CrawlTest {
   links_not_shown?: number;
 }
 
-/** A site the cluster's owner verified (or started verifying) for the crawler's higher limits. */
-export interface SiteVerification {
+/**
+ * A domain or origin the cluster's owner verified (or started verifying) for the crawler's higher
+ * limits: a domain by a DNS TXT record (every origin on it), an origin by the file it serves
+ * itself (that origin alone).
+ */
+export type SiteVerification = {
   site: string;
   status: "pending" | "verified" | "lapsed";
-  proof: "dns" | "file" | null;
   error: string | null;
   verified_at: number | null;
   checked_at: number | null;
-  dns: { name: string; type: "TXT"; value: string };
-  file: { url: string; content: string };
-}
+  next_check_at: number | null;
+} & ({ kind: "domain"; dns: { name: string; type: "TXT"; value: string } } | { kind: "origin"; file: { url: string; content: string } });
 
 /** The role `access: "data"` keys carry (search-control's `link_role`). */
 export const DATA_ROLE = "roll_link";
@@ -351,7 +353,8 @@ export const searchApi = {
   /** One URL through the web crawler's path, writing nothing (with a connector's configuration, or none). */
   crawlTest: (id: string, url: string, connector?: string) => call<CrawlTest>("POST", `${cl(id)}/crawl-test`, { url, connector }),
   siteVerifications: (id: string) => call<{ verifications: SiteVerification[] }>("GET", `${cl(id)}/site-verifications`),
-  verifySite: (id: string, domain: string) => call<SiteVerification>("POST", `${cl(id)}/site-verifications`, { domain }),
+  /** Starts verifying a domain (by DNS) or one origin (by its file). */
+  verifySite: (id: string, what: { domain: string } | { origin: string }) => call<SiteVerification>("POST", `${cl(id)}/site-verifications`, what),
   checkSite: (id: string, site: string) => call<SiteVerification>("POST", `${cl(id)}/site-verifications/${encodeURIComponent(site)}/check`, {}),
   /** The remote clusters roll holds credentials for (never wakes the cluster, never the key). */
   remotes: (id: string) => call<{ remotes: RemoteLink[] }>("GET", `${cl(id)}/remotes`),
