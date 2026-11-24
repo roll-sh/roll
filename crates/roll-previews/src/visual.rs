@@ -21,22 +21,73 @@ fn decode(png: &[u8]) -> Option<RgbaImage> {
 /// The share of pixels (0.0–1.0) that differ between `before` and `after`; the area one has and
 /// the other doesn't counts as changed. `None` when either isn't a PNG it can read.
 pub fn changed(before: &[u8], after: &[u8]) -> Option<f64> {
+    compare(before, after).map(|(share, _)| share)
+}
+
+/// [`changed`], and what the change is (Percy's grouped diffs): the area that differs, as it
+/// was and as it is, each reduced to an 8 × 8 average hash. Two pages changed the same way (a
+/// header's new logo on every page, at every width and in every browser where it lands alike)
+/// have the same signature, so a reviewer accepts them once. `None` for the signature when
+/// nothing differs.
+pub fn compare(before: &[u8], after: &[u8]) -> Option<(f64, Option<String>)> {
     let (a, b) = (decode(before)?, decode(after)?);
-    let (w, h) = (a.width().max(b.width()) as u64, a.height().max(b.height()) as u64);
+    let (w, h) = (a.width().max(b.width()), a.height().max(b.height()));
     if w == 0 || h == 0 {
-        return Some(0.0);
+        return Some((0.0, None));
     }
     let (cw, ch) = (a.width().min(b.width()), a.height().min(b.height()));
-    let mut differ: u64 = w * h - cw as u64 * ch as u64;
+    let mut differ: u64 = w as u64 * h as u64 - cw as u64 * ch as u64;
+    // The changed area's box: what only one of them has is in it.
+    let mut bbox = if (w, h) != (cw, ch) { Some((if w > cw { cw } else { 0 }, if h > ch { ch } else { 0 }, w, h)) } else { None };
+    let mut grow = |x: u32, y: u32| {
+        bbox = Some(match bbox {
+            None => (x, y, x + 1, y + 1),
+            Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1)),
+        });
+    };
     for y in 0..ch {
         for x in 0..cw {
             let (p, q) = (a.get_pixel(x, y).0, b.get_pixel(x, y).0);
             if p.iter().zip(q.iter()).any(|(m, n)| m.abs_diff(*n) > TOLERANCE) {
                 differ += 1;
+                grow(x, y);
             }
         }
     }
-    Some(differ as f64 / (w * h) as f64)
+    let share = differ as f64 / (w as u64 * h as u64) as f64;
+    Some((share, bbox.map(|r| format!("{:016x}{:016x}", average_hash(&a, r), average_hash(&b, r)))))
+}
+
+/// An 8 × 8 average hash of `img` inside `(x0, y0, x1, y1)` (clipped to it): each cell's
+/// brightness against the mean.
+fn average_hash(img: &RgbaImage, (x0, y0, x1, y1): (u32, u32, u32, u32)) -> u64 {
+    let (x1, y1) = (x1.min(img.width()), y1.min(img.height()));
+    if x0 >= x1 || y0 >= y1 {
+        return 0;
+    }
+    let mut cells = [0f64; 64];
+    for (i, cell) in cells.iter_mut().enumerate() {
+        let (cx, cy) = ((i % 8) as u32, (i / 8) as u32);
+        let (ax, bx) = (x0 + (x1 - x0) * cx / 8, x0 + ((x1 - x0) * (cx + 1) / 8).max((x1 - x0) * cx / 8 + 1));
+        let (ay, by) = (y0 + (y1 - y0) * cy / 8, y0 + ((y1 - y0) * (cy + 1) / 8).max((y1 - y0) * cy / 8 + 1));
+        let (mut sum, mut n) = (0f64, 0f64);
+        // At most 32 × 32 samples a cell: a whole-page change costs no more than a small one.
+        let (sx, sy) = (((bx - ax) / 32).max(1), ((by - ay) / 32).max(1));
+        let mut y = ay;
+        while y < by.min(y1) {
+            let mut x = ax;
+            while x < bx.min(x1) {
+                let p = img.get_pixel(x, y).0;
+                sum += 0.299 * p[0] as f64 + 0.587 * p[1] as f64 + 0.114 * p[2] as f64;
+                n += 1.0;
+                x += sx;
+            }
+            y += sy;
+        }
+        *cell = if n > 0.0 { sum / n } else { 0.0 };
+    }
+    let mean = cells.iter().sum::<f64>() / 64.0;
+    cells.iter().enumerate().fold(0u64, |h, (i, c)| if *c > mean { h | (1 << i) } else { h })
 }
 
 /// The diff's largest picture: a screenshot is a viewport (1280 × 800, a phone's 780 × 1688), and

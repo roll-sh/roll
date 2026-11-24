@@ -346,12 +346,12 @@ fn write_page_shots(c: &Conn<'_>, id: &str, head: &str, rows: &[PageShotRow], wa
             Some((prev_head, prev_png)) => c.execute(
                 "INSERT INTO page_shots (preview_id, path, head, png, prev_head, prev_png, change_bp, errors, report) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT (preview_id, path) DO UPDATE SET head = excluded.head, png = excluded.png, prev_head = excluded.prev_head, prev_png = excluded.prev_png, \
-                 change_bp = excluded.change_bp, errors = excluded.errors, base_bp = NULL, report = excluded.report, against = NULL",
+                 change_bp = excluded.change_bp, errors = excluded.errors, base_bp = NULL, base_sig = NULL, report = excluded.report, against = NULL",
                 params![id, path, head, png, prev_head, prev_png, change_bp, errors, report],
             )?,
             None => c.execute(
                 "INSERT INTO page_shots (preview_id, path, head, png, errors, report) VALUES (?, ?, ?, ?, ?, ?) \
-                 ON CONFLICT (preview_id, path) DO UPDATE SET head = excluded.head, png = excluded.png, errors = excluded.errors, base_bp = NULL, report = excluded.report, against = NULL",
+                 ON CONFLICT (preview_id, path) DO UPDATE SET head = excluded.head, png = excluded.png, errors = excluded.errors, base_bp = NULL, base_sig = NULL, report = excluded.report, against = NULL",
                 params![id, path, head, png, errors, report],
             )?,
         };
@@ -837,6 +837,10 @@ impl Store {
             db.add_column("shares", "maker_checked", "INTEGER NOT NULL DEFAULT 0")?;
         }
         // Who a share link is for, and whether its visitors may leave notes (as guests).
+        // What a page's change against the baseline is (`visual::compare`'s signature).
+        if !db.has_column("page_shots", "base_sig")? {
+            db.add_column("page_shots", "base_sig", "TEXT")?;
+        }
         if !db.has_column("shares", "label")? {
             db.add_column("shares", "label", "TEXT NOT NULL DEFAULT ''")?;
         }
@@ -1958,8 +1962,20 @@ impl Store {
             crate::visual::changed(&b, &a).map(|f| (f * 10_000.0).round() as i64)
         };
         let (change, phone) = (bp(Some(&ours.png), Some(&theirs.png)), bp(ours.phone.as_ref(), theirs.phone.as_ref()));
-        // The other pages, each against the baseline's page at the same path.
-        let page_bps: Vec<(String, Option<i64>)> = ours.pages.iter().map(|(path, png)| (path.clone(), bp(Some(png), theirs.pages.get(path)))).collect();
+        // The other pages, each against the baseline's page at the same path, with what the
+        // change is (pages changed the same way are grouped for review).
+        let compared = |a: &String, b: Option<&String>| -> Option<(i64, Option<String>)> {
+            let (a, b) = (b64e.decode(a).ok()?, b64e.decode(b?).ok()?);
+            crate::visual::compare(&b, &a).map(|(f, sig)| ((f * 10_000.0).round() as i64, sig))
+        };
+        let page_bps: Vec<(String, Option<i64>, Option<String>)> = ours
+            .pages
+            .iter()
+            .map(|(path, png)| match compared(png, theirs.pages.get(path)) {
+                Some((bp, sig)) => (path.clone(), Some(bp), sig),
+                None => (path.clone(), None, None),
+            })
+            .collect();
         // Each other page's checks against main's page at the same path.
         let report = |m: &std::collections::BTreeMap<String, String>, p: &str| m.get(p).and_then(|r| serde_json::from_str::<crate::PageReport>(r).ok());
         let page_against: Vec<(String, Option<String>)> = ours
@@ -1985,8 +2001,8 @@ impl Store {
                  base_links = ?, base_api = ?, base_api_breaking = ?, base_api_unread = ? WHERE preview_id = ?",
                 params![base, branch, change, phone, theirs.head, theirs.speed, theirs.a11y, theirs.health, text, theirs.links, api, api_breaking, api_unread, id],
             )?;
-            for (path, bp) in &page_bps {
-                c.execute("UPDATE page_shots SET base_bp = ? WHERE preview_id = ? AND path = ?", params![bp, id, path])?;
+            for (path, bp, sig) in &page_bps {
+                c.execute("UPDATE page_shots SET base_bp = ?, base_sig = ? WHERE preview_id = ? AND path = ?", params![bp, sig, id, path])?;
             }
             for (path, against) in &page_against {
                 c.execute("UPDATE page_shots SET against = ? WHERE preview_id = ? AND path = ?", params![against, id, path])?;
@@ -2116,19 +2132,19 @@ impl Store {
 
     /// The other pages' screenshots, by path: how each changed and compares with the baseline's.
     pub fn page_checks(&self, id: &str) -> Result<Vec<crate::PageCheck>> {
-        type Raw = (String, i64, Option<String>, Option<i64>, Option<i64>, Option<String>, Option<String>);
+        type Raw = (String, i64, Option<String>, Option<i64>, Option<i64>, Option<String>, Option<String>, Option<String>);
         let rows: Vec<Raw> = self.db.read(|c| {
-            c.query("SELECT path, errors, prev_head, change_bp, base_bp, report, against FROM page_shots WHERE preview_id = ? ORDER BY path", [id], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+            c.query("SELECT path, errors, prev_head, change_bp, base_bp, report, against, base_sig FROM page_shots WHERE preview_id = ? ORDER BY path", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?))
             })
         })?;
         Ok(rows
             .into_iter()
-            .map(|(path, errors, since, change, base, report, against)| {
+            .map(|(path, errors, since, change, base, report, against, sig)| {
                 let report: crate::PageReport = report.and_then(|r| serde_json::from_str(&r).ok()).unwrap_or_default();
-                (path, errors, since, change, base, report, against.and_then(|a| serde_json::from_str(&a).ok()))
+                (path, errors, since, change, base, report, against.and_then(|a| serde_json::from_str(&a).ok()), sig)
             })
-            .map(|(path, errors, since, change, base, report, against)| crate::PageCheck {
+            .map(|(path, errors, since, change, base, report, against, sig)| crate::PageCheck {
                 path,
                 errors: errors as u32,
                 since: since.filter(|_| change.is_some()),
@@ -2140,6 +2156,7 @@ impl Store {
                 unstable: report.unstable,
                 step: report.step,
                 step_ms: report.step_ms,
+                base_group: sig.filter(|_| base.is_some()),
             })
             .collect())
     }
@@ -2222,7 +2239,10 @@ impl Store {
             .map(|(path, percent)| {
                 let a = accepted(path);
                 let unstable = if path.is_empty() { first_unstable } else { pages.iter().any(|p| p.path == *path && p.unstable) };
-                crate::PageReview { path: path.clone(), percent: *percent, by: a.as_ref().map(|(by, _)| by.clone()), at: a.map(|(_, at)| at), unstable }
+                // Its group, when another page under review shares it.
+                let sig = pages.iter().find(|p| p.path == *path).and_then(|p| p.base_group.clone());
+                let group = sig.filter(|g| changed.iter().filter(|(q, _)| pages.iter().any(|p| p.path == *q && p.base_group.as_ref() == Some(g))).count() > 1).map(|g| g[..12].to_string());
+                crate::PageReview { path: path.clone(), percent: *percent, by: a.as_ref().map(|(by, _)| by.clone()), at: a.map(|(_, at)| at), unstable, group }
             })
             .collect();
         let percent = changed.iter().map(|(_, p)| *p).fold(0.0_f64, f64::max);
