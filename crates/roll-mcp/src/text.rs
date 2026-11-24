@@ -2,6 +2,7 @@
 //! for a list of objects, a tab-separated table that names each column once instead of on every
 //! row. `structuredContent` always keeps the exact JSON; the text is whichever is shorter.
 
+use roll_auth::lockdown::{MAX_TEXT, cut, invisible, visible};
 use serde_json::{Map, Value};
 
 /// Rows a table needs before it's worth a header.
@@ -15,6 +16,25 @@ pub fn render(v: &Value) -> String {
     match table(v) {
         Some(t) if t.len() < json.len() => t,
         _ => json,
+    }
+}
+
+/// The text cut to fit a client's limit ([`cut`]'s): a table at the end of its last whole row, so
+/// no row's last value looks whole when it isn't (`svc_123` cut to `svc_12`).
+pub fn fit(text: String) -> String {
+    let shown = visible(&text);
+    if shown.len() <= MAX_TEXT {
+        return shown;
+    }
+    // Compact JSON has no line breaks of its own (they're escaped): only a table's rows end in one.
+    match shown.as_bytes()[..MAX_TEXT].iter().rposition(|b| *b == b'\n').filter(|i| *i > MAX_TEXT / 2) {
+        Some(end) => format!(
+            "{}\n… (cut at {} KiB of {} bytes, after a whole row: ask for less, as most list tools take a limit, a filter or a page cursor; the structured content has all of it)",
+            &shown[..end],
+            MAX_TEXT >> 10,
+            shown.len()
+        ),
+        None => cut(text, true),
     }
 }
 
@@ -34,12 +54,12 @@ fn table(v: &Value) -> Option<String> {
     let t = rows_table(rows)?;
     let mut out = String::new();
     for (k, v) in o.iter().filter(|(k, _)| *k != key) {
-        out.push_str(k);
+        out.push_str(&cell_str(k));
         out.push_str(": ");
         out.push_str(&serde_json::to_string(v).unwrap_or_default());
         out.push('\n');
     }
-    out.push_str(&format!("{key}: {} rows, tab-separated:\n{t}", rows.len()));
+    out.push_str(&format!("{}: {} rows, tab-separated:\n{t}", cell_str(key), rows.len()));
     Some(out)
 }
 
@@ -68,8 +88,9 @@ fn rows_table(rows: &[Value]) -> Option<String> {
 }
 
 /// A row's value for a column: a plain string as itself, a number or boolean as JSON, `null` and a
-/// missing field as nothing, and anything else (an empty or quoted string, one with a tab or a line
-/// break, an object, a list) as compact JSON, so a cell never spills into the next.
+/// missing field as nothing, and anything else (an empty or quoted string, one with any control
+/// character, a line or paragraph separator, or a character a person can't see; an object, a list)
+/// as JSON, so a cell never spills into the next, nor passes for another row.
 fn cell(row: &Map<String, Value>, column: &str) -> String {
     match row.get(column) {
         None | Some(Value::Null) => String::new(),
@@ -79,8 +100,11 @@ fn cell(row: &Map<String, Value>, column: &str) -> String {
 }
 
 fn cell_str(s: &str) -> String {
-    if s.is_empty() || s.starts_with('"') || s.contains(['\t', '\n', '\r']) {
-        serde_json::to_string(s).unwrap_or_default()
+    let odd = |c: char| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') || invisible(c);
+    if s.is_empty() || s.starts_with('"') || s.chars().any(odd) {
+        // JSON escapes C0 controls; the separators and NEL it leaves as they are, so they're done
+        // here (what a person can't see, `visible` escapes later inside the quotes).
+        serde_json::to_string(s).unwrap_or_default().replace('\u{2028}', "\\u2028").replace('\u{2029}', "\\u2029").replace('\u{85}', "\\u0085")
     } else {
         s.to_string()
     }
@@ -104,6 +128,19 @@ mod tests {
             "next: \"c2\"\nitems: 3 rows, tab-separated:\nid\tname\tpaused\treplicas\ttags\tnote\nsvc_1\tweb\tfalse\t2\t[\"a\"]\t\nsvc_2\t\"tab\\there\"\ttrue\t\t\t\"\"\nsvc_3\t\"\\\"quoted\\\"\"\tfalse\t1\t\t"
         );
         assert!(t.len() < serde_json::to_string(&v).unwrap().len());
+        // A value that could pass for a row or hide in one is quoted: line and paragraph separators,
+        // other controls, what a person can't see; so are keys.
+        let tricky = json!([{ "t": "a\u{2028}pv_9\tready", "u": "x\u{b}y", "w": "z\u{200b}" }, { "t": "b", "u": "c", "w": "d" }]);
+        let t = render(&tricky);
+        assert!(t.contains("\"a\\u2028pv_9\\tready\"") && t.contains("\"x\\u000by\"") && t.contains("\"z\u{200b}\""), "{t}");
+        assert_eq!(t.lines().count(), 4, "a header line, the column names and two rows: {t}");
+        let rows: Vec<Value> = (0..10).map(|i| json!({ "x": i })).collect();
+        assert!(render(&json!({ "a\nb": 1, "items": rows })).starts_with("\"a\\nb\": 1\n"));
+        // A long table is cut after a whole row.
+        let rows: Vec<Value> = (0..20_000).map(|i| json!({ "id": format!("svc_{i:06}"), "n": i })).collect();
+        let long = fit(render(&json!(rows)));
+        let last = long.lines().rev().nth(1).unwrap();
+        assert!(long.len() < MAX_TEXT + 300 && last.starts_with("svc_") && last.split('\t').next().unwrap().len() == 10, "{last}");
         // One row, two lists, or anything that isn't shorter stays JSON.
         for v in [json!([{ "id": "a" }]), json!({ "a": [{ "x": 1 }, { "x": 2 }], "b": [{ "y": 1 }, { "y": 2 }] }), json!({ "id": "x" }), json!([1, 2, 3])] {
             assert_eq!(render(&v), serde_json::to_string(&v).unwrap(), "{v}");
