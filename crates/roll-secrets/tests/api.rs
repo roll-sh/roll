@@ -132,6 +132,46 @@ impl SyncTarget for FakeSync {
     }
 }
 
+/// What a fake certificate platform got: certificate, private key, chain, the id it was given,
+/// and the AWS session's key id it signed in with.
+type CertPushed = (String, String, String, Option<String>, Option<String>);
+
+/// A fake certificate platform (`aws-acm`'s shape): the first push makes `arn:fake:1`, later ones
+/// replace what they're given.
+#[derive(Default)]
+struct FakeCertSync {
+    pushes: Mutex<Vec<CertPushed>>,
+}
+
+impl SyncTarget for FakeCertSync {
+    fn kind(&self) -> &str {
+        "fake-cert"
+    }
+    fn label(&self) -> &str {
+        "Fake certificates"
+    }
+    fn fields(&self) -> &[SyncField] {
+        &[]
+    }
+    fn certificate(&self) -> bool {
+        true
+    }
+    fn aws_role(&self, target: &Value) -> Option<String> {
+        target["role"].as_str().map(String::from)
+    }
+    fn check(&self, _: &str, _: &Resources, _: &Value) -> roll_secrets::Result<()> {
+        Ok(())
+    }
+    fn push(&self, _: &Value, _: &Push<'_>) -> roll_secrets::Result<()> {
+        Err(roll_secrets::Error::BadRequest("certificates only".into()))
+    }
+    fn push_certificate(&self, _: &Value, p: &Push<'_>, c: &roll_secrets::syncs::Certificate, remote: Option<&str>) -> roll_secrets::Result<String> {
+        let aws = p.aws.map(|s| s.access_key_id.expose().to_string());
+        self.pushes.lock().unwrap().push((c.certificate.expose().into(), c.private_key.expose().into(), c.chain.expose().into(), remote.map(String::from), aws));
+        Ok(remote.unwrap_or("arn:fake:1").to_string())
+    }
+}
+
 /// Audit deliveries, kept instead of sent; an OIDC issuer's keys, served; vendors' APIs; a
 /// Snowflake account's SQL API; MongoDB Atlas's Admin API; and STS, answering AWS identities'
 /// logins with the caller set in `.8`; the providers validity checks ask (`.9`); and GitLab's,
@@ -1321,6 +1361,7 @@ struct Api {
     fake: Arc<Fake>,
     pg: Arc<FakePg>,
     sync: Arc<FakeSync>,
+    certs: Arc<FakeCertSync>,
     clouds: Arc<FakeClouds>,
     outside: Arc<Outside>,
     directory: Arc<FakeDirectory>,
@@ -1343,6 +1384,8 @@ impl Api {
         let sync = Arc::new(FakeSync::default());
         let mut syncs = Syncs::default();
         syncs.register(sync.clone());
+        let certs = Arc::new(FakeCertSync::default());
+        syncs.register(certs.clone());
         let sent = Arc::new(Sent::default());
         let people = Arc::new(People::default());
         let kms = Arc::new(FakeKms::default());
@@ -1368,7 +1411,7 @@ impl Api {
             _ => Ok(()),
         }));
         let router = roll_workspace::router(ws.clone()).merge(roll_secrets::router(secrets.clone())).layer(axum::middleware::from_fn_with_state(gate.clone(), fake_gate));
-        let mut api = Api { sent, gate, kms, sts, ws: ws.clone(), ws_db, people, router, secrets, db, fake, pg, sync, outside, directory, github, clouds, project: String::new(), _dir: dir };
+        let mut api = Api { sent, gate, kms, sts, ws: ws.clone(), ws_db, people, router, secrets, db, fake, pg, sync, certs, outside, directory, github, clouds, project: String::new(), _dir: dir };
         let (_, p) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "shop" }))).await;
         api.project = p["id"].as_str().unwrap().to_string();
         api
@@ -2492,6 +2535,57 @@ async fn a_sync_pushes_each_change_once_removes_deleted_keys_and_is_audited() {
     api.secrets.sweep().unwrap();
     let (values, changed, _) = pushes(3);
     assert_eq!((values["REF"].as_str(), changed), ("db.two/x", vec!["REF".to_string()]));
+}
+
+#[tokio::test]
+async fn a_certificate_sync_pushes_a_pki_keys_certificate_on_issue_and_each_rotation_to_the_same_target() {
+    let api = Api::new().await;
+    api.secrets.set_public_api("https://roll.example".into());
+    // It signs in as a project AWS role, assumed for each push.
+    *api.sts.pinned.lock().unwrap() = Some(format!("roll-secrets:{}", api.project));
+    api.ok(Method::POST, "/aws-roles", Some(json!({ "name": "certs", "role_arn": "arn:aws:iam::123456789012:role/roll" }))).await;
+    let ca = api.ok(Method::POST, "/cas", Some(json!({ "name": "internal", "domains": ["svc.internal"] }))).await;
+    let link = json!({ "kind": "pki", "ref": ca["id"], "field": "certificate", "mode": "managed", "options": { "names": "api.svc.internal", "rotate_days": 7 } });
+    api.ok(Method::PUT, "/environments/production/secrets/TLS_CERT", Some(json!({ "link": link }))).await;
+    api.set("production", "PLAIN", "fake-plain-value").await;
+    // Only one managed pki key of its own folder, never in an untrusted environment.
+    let sync = |env: &str, keys: Value| json!({ "environment": env, "kind": "fake-cert", "target": { "role": "certs" }, "keys": keys });
+    for keys in [json!(["PLAIN"]), json!(["TLS_CERT", "PLAIN"]), Value::Null] {
+        let (s, e) = api.call(Method::POST, "/syncs", Some(sync("production", keys))).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
+    }
+    api.ok(Method::POST, "/environments", Some(json!({ "slug": "pr-1", "base": "production" }))).await;
+    let (s, e) = api.call(Method::POST, "/syncs", Some(sync("pr-1", json!(["TLS_CERT"])))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e["error"].as_str().unwrap().contains("untrusted"), "{e}");
+    let made = api.ok(Method::POST, "/syncs", Some(sync("production", json!(["TLS_CERT"])))).await;
+    let id = made["id"].as_str().unwrap().to_string();
+
+    // On issue: the certificate the key holds, its private key and chain.
+    assert_eq!(api.secrets.sweep_due_syncs().unwrap(), (1, 0));
+    let pushes = || api.certs.pushes.lock().unwrap().clone();
+    let first = pushes()[0].clone();
+    assert_eq!(first.0, api.values("production", "/").await["values"]["TLS_CERT"].as_str().unwrap());
+    assert!(first.1.starts_with("-----BEGIN PRIVATE KEY-----") && first.2 == ca["certificate"].as_str().unwrap(), "{first:?}");
+    assert_eq!((first.3.as_deref(), first.4.as_deref().is_some_and(|k| k.starts_with("ASIA"))), (None, true));
+    assert_eq!(api.ok(Method::GET, "/syncs", None).await["syncs"][0]["remote_id"], "arn:fake:1");
+    api.secrets.sweep().unwrap();
+    assert_eq!(pushes().len(), 1, "an unchanged certificate isn't pushed again");
+
+    // On rotation: the new certificate, to the same target.
+    api.ok(Method::POST, "/environments/production/secrets/TLS_CERT/rotate", None).await;
+    assert_eq!(api.secrets.sweep_due_syncs().unwrap(), (1, 0));
+    let second = pushes()[1].clone();
+    assert!(second.0 != first.0 && second.1 != first.1);
+    assert_eq!(second.3.as_deref(), Some("arn:fake:1"), "replacing what the first push made");
+
+    // The private keys reached only the platform: not the audit log, not the events.
+    let audit = api.ok(Method::GET, &format!("/audit?actor=sync:{id}"), None).await;
+    assert_eq!((audit[0]["action"].as_str(), audit[0]["keys"].clone()), (Some("sync.push"), json!(["TLS_CERT"])));
+    let everything = format!("{}{}", api.ok(Method::GET, "/audit", None).await, api.ok(Method::GET, "/events", None).await);
+    for key in [&first.1, &second.1] {
+        let line = key.lines().nth(1).unwrap();
+        assert!(!everything.contains(line), "a private key in the audit or events");
+    }
 }
 
 #[tokio::test]

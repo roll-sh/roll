@@ -4688,7 +4688,9 @@ async fn syncs(c: &Client<'_>, cmd: Syncs, json_out: bool) -> anyhow::Result<()>
             for x in v["syncs"].as_array().into_iter().flatten() {
                 let when = x["last_synced_at"].as_i64().map(ago).unwrap_or_else(|| "never".into());
                 let err = x["error"].as_str().map(|e| format!("  ({e})")).unwrap_or_default();
-                println!("{}  {:<10} {}:{:<10} {:<8} {} keys, {when}{err}", s(&x["id"]), s(&x["kind"]), s(&x["environment"]), s(&x["path"]), s(&x["status"]), x["synced"]);
+                // A certificate kind's: what the target calls the certificate.
+                let remote = x["remote_id"].as_str().map(|r| format!("  -> {r}")).unwrap_or_default();
+                println!("{}  {:<10} {}:{:<10} {:<8} {} keys, {when}{remote}{err}", s(&x["id"]), s(&x["kind"]), s(&x["environment"]), s(&x["path"]), s(&x["status"]), x["synced"]);
             }
             let kinds: Vec<String> = v["kinds"].as_array().into_iter().flatten().map(|k| s(&k["kind"])).collect();
             eprintln!("Kinds: {}", kinds.join(", "));
