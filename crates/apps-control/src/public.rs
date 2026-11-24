@@ -1558,19 +1558,25 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
         return by("challenge", r);
     }
-    if !ours && !(gate.firewall.is_empty() && gate.file_firewall.is_empty()) {
+    let attacked = gate.attack_until.is_some_and(|u| code_sql::now_ms() < u);
+    if !ours && (attacked || !(gate.firewall.is_empty() && gate.file_firewall.is_empty())) {
         let path = crate::model::normal_path(req.uri().path());
         let ip = crate::live::client_ip(client.as_deref());
         // Who the client is, only when a rule asks (a crawler's claim costs DNS lookups).
-        let asks = gate.firewall.iter().chain(gate.file_firewall.iter()).any(|r| !r.bots.is_empty() || r.action == crate::model::FirewallAction::Challenge);
+        let asks = attacked || gate.firewall.iter().chain(gate.file_firewall.iter()).any(|r| !r.bots.is_empty() || r.action == crate::model::FirewallAction::Challenge);
         let bot = match asks {
             true => crate::bots::identify(&apps.bots_verified, apps.deps.resolver.as_ref(), &ua, ip).await,
             false => None,
         };
         let asked = crate::model::Asked { method: req.method().as_str(), path: &path, raw_path: req.uri().path(), user_agent: &ua, ip, headers: req.headers(), query: req.uri().query(), bot };
         let mut hits = Vec::new();
-        let verdict = gate.firewall_verdict(&asked, &mut hits);
+        let mut verdict = gate.firewall_verdict(&asked, &mut hits);
         apps.live(service, env).count_hits(&hits);
+        // Attack mode: nothing gets in without a pass, whatever a rule would let in (a deny
+        // still denies).
+        if attacked && matches!(verdict, crate::live::Verdict::Allow | crate::live::Verdict::Limit(..)) {
+            verdict = crate::live::Verdict::Challenge;
+        }
         match verdict {
             crate::live::Verdict::Allow => {}
             // A browser with this hour's pass goes on (the cookie is roll's: the app never sees it);

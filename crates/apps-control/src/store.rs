@@ -4508,6 +4508,11 @@ impl Store {
         Ok(self.db.write(|c| c.execute("INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING", [key, value]))? == 1)
     }
 
+    /// `key`'s value, if it has one.
+    pub fn state(&self, key: &str) -> Result<Option<String>> {
+        self.db.read(|c| Ok(c.query_row("SELECT value FROM state WHERE key = ?", [key], |r| r.get::<_, String>(0)).optional()?))
+    }
+
     /// `key` removed: whether it was there (one caller gets true, on any node).
     pub fn take_state(&self, key: &str) -> Result<bool> {
         Ok(self.db.write(|c| c.execute("DELETE FROM state WHERE key = ?", [key]))? > 0)
