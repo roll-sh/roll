@@ -472,16 +472,24 @@ impl Engine {
         }
         let r = self.store.row(id)?;
         let change = r.change_id.clone().ok_or_else(|| Error::BadRequest("only a change's preview has notes".into()))?;
-        let now = self.store.now_ms()?;
-        if self.store.guest_notes_since(id, &share.id, now - 3_600_000)? >= crate::notes::GUEST_PER_HOUR {
-            return Err(Error::Conflict(format!("{} notes an hour through one share link: try again later", crate::notes::GUEST_PER_HOUR)));
-        }
         let url = self.store.services(id)?.into_iter().next().map(|s| s.url).unwrap_or_default();
         let (by, body) = crate::notes::guest_body(n, &url, id, &share.label).map_err(Error::BadRequest)?;
+        // Its place in the hour's ten, taken in one write before the note is made: posts at once
+        // can't all pass the count.
+        let slot = self.store.take_guest_slot(id, &share.id, crate::notes::GUEST_PER_HOUR)?.ok_or_else(|| Error::Conflict(format!("{} notes an hour through one share link: try again later", crate::notes::GUEST_PER_HOUR)))?;
         // A guest's words: outside the team, wherever the review is read (MCP's lockdown).
-        let review = self.source.comment(&change, &body, &by, true).await.map_err(|e| Error::Internal(format!("{e:#}")))?;
-        let review = review.ok_or_else(|| Error::Conflict("this preview's change takes no notes".into()))?;
-        self.store.add_guest_note(id, &share.id, &review, now)?;
+        let made = self.source.comment(&change, &body, &by, true).await;
+        let review = match made {
+            Ok(Some(r)) => r,
+            Ok(None) | Err(_) => {
+                let _ = self.store.drop_guest_slot(id, &slot);
+                return Err(match made {
+                    Err(e) => Error::Internal(format!("{e:#}")),
+                    _ => Error::Conflict("this preview's change takes no notes".into()),
+                });
+            }
+        };
+        self.store.fill_guest_slot(id, &slot, &review)?;
         self.store.log(id, &format!("{by} left a note through share link {}", share.id))?;
         Ok(review)
     }
@@ -490,8 +498,14 @@ impl Engine {
     /// tells `note_author` (the note's), "Resolved." saying who resolved it (Vercel's comment
     /// notifications). Not to a guest (no account), nor to whoever wrote it, nor when the
     /// project's `note_mail` is off. Queued: [`Engine::tend_tells`] sends it.
-    pub fn tell_on_review(&self, change: &str, review: &str, by: &str, body: &str, change_author: &str, note_author: Option<&str>) -> Result<()> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn tell_on_review(&self, change: &str, review: &str, by: &str, body: &str, change_author: &str, note_author: Option<&str>, outside: bool) -> Result<()> {
         use code_control::review::preview_note;
+        // A reader who can't push mails nobody (else any public repo's reader could fill an
+        // author's inbox); a share link's guest's note is previews' own, made within its limit.
+        if outside && !by.starts_with("guest:") {
+            return Ok(());
+        }
         let Some(r) = self.store.row_by_change(change)? else { return Ok(()) };
         if !self.store.settings(&r.project_id)?.note_mail {
             return Ok(());
