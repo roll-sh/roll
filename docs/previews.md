@@ -1474,8 +1474,8 @@ to 256 KiB, masked as its logs are, so an agent checks the page its change touch
 making a share link. It goes through the runtime's own proxy past the preview's gate (no token
 asked or answered), to the preview's own service only, `GET` or `HEAD`, with no body; it's
 `reveal`, as its mail is (a page can show copies of production's people). A roll apps service's
-page is read through roll apps' own proxy, by its host on the node's own listener (on a fleet,
-forwarded to wherever its instance runs), as a visitor who came in by the preview's link: its
+page is read through roll apps' own proxy, by its host on the node's apps listener
+(`--apps-listen`; on a fleet, forwarded to wherever its instance runs), as a visitor who came in by the preview's link: its
 token as the cookie roll apps' gate takes, never in the answer (live: `scripts/preview-apps.sh`).
 A team-access preview's roll apps service takes only signed-in people, so it answers its 401.
 `a_page_read_through_roll_passes_the_gate_bounded`.
