@@ -725,6 +725,25 @@ async fn a_provider_signs_visitors_in_by_their_domain_or_organisation() {
     // `@acme.com` gone from allow: Ann's session ends.
     call(&w.api, "PUT", &env, Some(json!({"access": {"sso": {"provider": "github", "allow": ["org:roll-sh"]}}}))).await;
     assert_eq!(get("/".into(), Some(session)).await.0, StatusCode::FOUND, "back to signing in");
+    // CORS preflights to the paths it names reach the app past the gate; nothing else does.
+    let (st, e) = call(&w.api, "PUT", &env, Some(json!({"preflight": ["/api/*"]}))).await;
+    assert_eq!((st, &e["preflight"]), (StatusCode::OK, &json!(["/api/*"])), "{e}");
+    let options = |path: &'static str, preflight: bool| {
+        let mut r = Request::builder().method("OPTIONS").uri(path).header("host", h.as_str()).header("origin", "https://app.acme.com");
+        if preflight {
+            r = r.header("access-control-request-method", "POST");
+        }
+        let public = w.public.clone();
+        async move { public.oneshot(r.body(Body::empty()).unwrap()).await.unwrap().status() }
+    };
+    assert_eq!(options("/api/orders", true).await, StatusCode::OK, "to the app");
+    assert_eq!(options("/admin", true).await, StatusCode::UNAUTHORIZED, "another path meets the gate");
+    assert_eq!(options("/api/orders", false).await, StatusCode::UNAUTHORIZED, "an OPTIONS that isn't a preflight meets the gate");
+    // Its owner reads a page past the gate (an agent checking what it deployed).
+    let (st, page) = call(&w.api, "GET", &format!("{env}/fetch?path=/pages/home%3Fx%3D1"), None).await;
+    let body: Value = serde_json::from_str(page["body"].as_str().unwrap_or("")).unwrap_or(Value::Null);
+    assert_eq!((st, page["status"].as_u64(), &body["path"], &page["truncated"]), (StatusCode::OK, Some(200), &json!("/pages/home"), &json!(false)), "{page}");
+    assert_eq!(call(&w.api, "GET", &format!("{env}/fetch?path=//evil.example/"), None).await.0, StatusCode::BAD_REQUEST);
 }
 
 /// Signing in to an environment: a page load with no session goes to roll's dashboard; a person

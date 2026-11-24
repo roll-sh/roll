@@ -208,6 +208,29 @@ impl Apps {
         Ok(format!("{}{PATH}?ticket={token}&to={}", self.origin(host), q(&local_path(to))))
     }
 
+    /// `GET …/environments/{env}/fetch?path=&head=&deployment=`: one of its pages as roll's own
+    /// call reads it (past its gates; run on the owner): `{status, url, headers, body, truncated}`,
+    /// the body as text, at most 256 KiB.
+    pub async fn fetch_page(self: &Arc<Self>, service: &str, env: &str, path: &str, head: bool, deployment: Option<&str>) -> Result<serde_json::Value> {
+        if !path.starts_with('/') || path.starts_with("//") || path.len() > 2048 || path.bytes().any(|b| b.is_ascii_control()) {
+            return Err(Error::BadRequest("path is a path on the environment (/…), at most 2048 characters".into()));
+        }
+        if let Some(d) = deployment {
+            self.deployment(service, env, d).await?;
+        }
+        let (sid, e) = (service.to_string(), env.to_string());
+        let row = self.db(move |s| s.environment(&sid, &e)).await?;
+        let host = format!("{}.{}", row.slug, self.cfg.domain);
+        let (status, headers, body, truncated) = crate::public::call_fetch(self.clone(), service, env, &host, path, head, deployment, 256 * 1024).await.map_err(Error::Unavailable)?;
+        let mut shown = serde_json::Map::new();
+        for h in ["content-type", "content-length", "location", "cache-control", "x-roll-by"] {
+            if let Some(v) = headers.get(h).and_then(|v| v.to_str().ok()) {
+                shown.insert(h.into(), serde_json::json!(v));
+            }
+        }
+        Ok(serde_json::json!({ "status": status, "url": format!("{}{path}", self.origin(&host)), "headers": shown, "body": String::from_utf8_lossy(&body), "truncated": truncated }))
+    }
+
     /// A visitor signing out: their session (`token`) ends on every node at its next look.
     pub(crate) async fn end_visit(self: &Arc<Self>, token: &str) {
         let hash = crate::public::token_hash(token);
