@@ -473,6 +473,7 @@ fn hook_row(r: &code_sql::Row<'_>) -> code_sql::Result<Hook> {
 pub const VISITORS: usize = 8;
 
 /// A live share link, as [`Store::share_live`] finds it.
+#[derive(Clone, Debug)]
 pub struct LiveShare {
     pub id: String,
     pub ends: i64,
