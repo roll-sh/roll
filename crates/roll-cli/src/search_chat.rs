@@ -13,7 +13,6 @@ use clap::Subcommand;
 use serde_json::{Value, json};
 
 #[derive(clap::Args)]
-#[command(args_conflicts_with_subcommands = true)]
 pub struct Chat {
     #[command(subcommand)]
     pub cmd: Option<ChatCmd>,

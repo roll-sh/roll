@@ -298,7 +298,7 @@ fn head_of<B>(req: &Request<B>) -> EsRequest {
         let mut value = String::from_utf8_lossy(v.as_bytes()).into_owned();
         // OpenAI SDKs send an API key as Bearer: on chat's OpenAI-compatible routes it is read
         // as the `ApiKey` it is, here, so admission (a browser key's rate limits) sees it too.
-        if k == hyper::header::AUTHORIZATION
+        if k.as_str() == "authorization"
             && let Some(a) = search_es::xpack::chat::openai::authorization_for(path, &value)
         {
             value = a;

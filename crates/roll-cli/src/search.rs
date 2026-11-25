@@ -51,6 +51,7 @@ pub enum Search {
     Inference(Inference),
     /// Answers with citations from a chat profile: `roll search chat <cluster> <profile>
     /// "question"`, or `roll search chat profiles list|create|delete`.
+    #[command(args_conflicts_with_subcommands = true)]
     Chat(crate::search_chat::Chat),
     /// Web crawlers: `roll_web_crawler` connectors that crawl a site into an index.
     #[command(subcommand)]

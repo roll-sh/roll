@@ -175,8 +175,9 @@ async fn an_answer_cites_the_documents_it_retrieved() {
     // Streamed: the sources first, the text as it comes, then the citations.
     let (s, _, sse) = call(&c, "POST", "/_roll/chat/help/_answer", r#"{"question":"How do I reset my password?","stream":true}"#).await;
     assert_eq!(s, 200);
+    // (One read of the upstream is one `delta`, however many chunks it held.)
     let events: Vec<&str> = sse.lines().filter_map(|l| l.strip_prefix("event: ")).collect();
-    assert_eq!(events, ["sources", "delta", "delta", "done"], "{sse}");
+    assert!(events.len() >= 3 && events[0] == "sources" && events[events.len() - 1] == "done" && events[1..events.len() - 1].iter().all(|e| *e == "delta"), "{sse}");
     assert!(sse.contains(r#""cited":[1]"#), "{sse}");
 
     // OpenAI's chat completions: model names the profile; sources ride in `roll`.
@@ -257,6 +258,7 @@ async fn a_document_cannot_steer_retrieval_or_the_prompt() {
     doc(&c, "docs", "evil", &format!(r#"{{"title":"Reset","body":"{evil}","tenant":"a"}}"#)).await;
     assert_eq!(call(&c, "PUT", "/secrets", r#"{"mappings":{"properties":{"body":{"type":"text"}}}}"#).await.0, 200);
     doc(&c, "secrets", "s1", r#"{"body":"launch codes 0000-SECRET"}"#).await;
+    seen.lock().unwrap().clear();
     let (s, v, _) = call(&c, "POST", "/_roll/chat/help/_answer", r#"{"question":"How do I reset my password?"}"#).await;
     assert_eq!(s, 200, "{v:?}");
     assert!(v.get("sources").and_then(Value::as_array).unwrap().iter().all(|s| s.get("_index").and_then(Value::as_str) == Some("docs")));
