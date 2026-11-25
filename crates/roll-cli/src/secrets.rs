@@ -934,7 +934,7 @@ pub(crate) const HELP_GROUPS: &[(&str, &[&str])] = &[
     (
         "Operations",
         &[
-            "health", "insights", "events", "audit", "sinks", "backup", "backup-schedule", "restore", "keygen", "recover", "purge", "retention", "leaks", "validity-checks", "decoy", "kms", "key", "unseal",
+            "health", "insights", "events", "audit", "sinks", "backup", "backup-schedule", "restore", "keygen", "recover", "purge", "retention", "leaks", "breakglass", "validity-checks", "decoy", "kms", "key", "unseal",
             "issuer", "policy",
         ],
     ),
