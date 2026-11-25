@@ -475,8 +475,14 @@ impl Engine {
             self.read_usage(r, now).await?;
         }
         if let Some(bytes) = self.over_cap(&r.id, s.max_bytes)? {
+            // Down, and kept down where a visit would wake it by itself (roll apps).
+            self.store.set_runtime_fact(&r.id, "held_down", Some(&true))?;
             for svc in self.store.services(&r.id)? {
                 self.apps.sleep(&r.id, &svc.name).await;
+                if let Err(e) = self.apps.hold_down(&r.id, &svc.name, true).await {
+                    warn!(preview = %r.id, service = %svc.name, error = %e, "previews: keeping a capped preview's service down (tried again next pass)");
+                    self.store.update(&r.id, |row| row.next_at = 0)?;
+                }
             }
             let msg = format!("its branches hold {bytes} bytes, over the project's max_bytes ({}): reset it to start again", s.max_bytes);
             let row = self.store.update(&r.id, |row| {
@@ -486,6 +492,13 @@ impl Engine {
             })?;
             self.report(row).await;
             return Ok(());
+        }
+        // Under its cap again (a reset, a raised cap): what was kept down may wake.
+        if self.store.runtime_fact::<bool>(&r.id, "held_down")?.is_some() {
+            for svc in self.store.services(&r.id)? {
+                self.apps.hold_down(&r.id, &svc.name, false).await.map_err(|e| anyhow::anyhow!("letting {} wake again: {e:#}", svc.name))?;
+            }
+            self.store.set_runtime_fact::<bool>(&r.id, "held_down", None)?;
         }
 
         // 3. The secrets environment: its base, the project's overrides, the branches' URLs.

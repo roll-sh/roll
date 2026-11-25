@@ -5,6 +5,8 @@ mod local_agent;
 mod mount;
 mod vm_login;
 mod repo;
+#[cfg(windows)]
+pub mod service;
 
 use crate::Api;
 use anyhow::{Context, bail};
@@ -229,8 +231,7 @@ mod setup {
     }
 
     fn file() -> Option<PathBuf> {
-        let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-        Some(base.join("roll").join("secrets.json"))
+        Some(crate::sys::config_base().ok()?.join("roll").join("secrets.json"))
     }
 
     pub fn load() -> File {
@@ -2667,6 +2668,9 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 }
                 // Staged names are the repo's already; a walked file's is made relative to its top.
                 let rel = if staged { name.clone() } else { std::fs::canonicalize(name).ok().and_then(|p| p.strip_prefix(&root).ok().map(|p| p.to_string_lossy().into_owned())).unwrap_or_else(|| name.clone()) };
+                // The allow-list's globs are `/`-separated (Windows' paths aren't).
+                #[cfg(windows)]
+                let rel = rel.replace('\\', "/");
                 if code_review::glob::any(&allow.paths, &rel) {
                     continue;
                 }
@@ -5260,12 +5264,17 @@ fn read_hidden(prompt: &str) -> anyhow::Result<String> {
     std::io::stderr().flush()?;
     // SAFETY: tcgetattr fills the termios we own; tcsetattr takes it by pointer, and the guard
     // restores the original on the same descriptor.
+    #[cfg(unix)]
     struct Restore(libc::termios);
+    #[cfg(unix)]
     impl Drop for Restore {
         fn drop(&mut self) {
             unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.0) };
         }
     }
+    #[cfg(windows)]
+    let _guard = crate::sys::console::EchoOff::new().context("can't turn off the terminal's echo")?;
+    #[cfg(unix)]
     let _guard = unsafe {
         let mut t: libc::termios = std::mem::zeroed();
         if libc::tcgetattr(libc::STDIN_FILENO, &mut t) != 0 {
@@ -5290,7 +5299,12 @@ fn write_private(path: &std::path::Path, text: &str) -> anyhow::Result<()> {
     o.write(true).create_new(true);
     #[cfg(unix)]
     o.mode(0o600);
-    o.open(path).with_context(|| format!("creating {} (it mustn't exist yet)", path.display()))?.write_all(text.as_bytes())?;
+    #[cfg(windows)]
+    crate::sys::acl::exclusive(&mut o);
+    let mut f = o.open(path).with_context(|| format!("creating {} (it mustn't exist yet)", path.display()))?;
+    #[cfg(windows)]
+    crate::sys::acl::private(&f).with_context(|| format!("making {} private", path.display()))?;
+    f.write_all(text.as_bytes())?;
     Ok(())
 }
 
@@ -5517,7 +5531,10 @@ async fn edit(c: &Client<'_>, env: &str, request: bool, json_out: bool) -> anyho
     let dir = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).filter(|d| d.is_dir()).unwrap_or_else(std::env::temp_dir);
     let file = tempfile::Builder::new().prefix("roll-secrets-").suffix(".env").tempfile_in(dir)?;
     std::fs::write(file.path(), &text)?;
-    let editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).unwrap_or_else(|_| "vi".into());
+    let editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).unwrap_or_else(|_| (if cfg!(windows) { "notepad" } else { "vi" }).into());
+    #[cfg(windows)]
+    let status = crate::sys::shell(&format!("{editor} \"{}\"", file.path().display())).status().with_context(|| format!("running {editor}"))?;
+    #[cfg(not(windows))]
     let status = std::process::Command::new("sh").arg("-c").arg(format!("{editor} \"$1\"")).arg("sh").arg(file.path()).status().with_context(|| format!("running {editor}"))?;
     anyhow::ensure!(status.success(), "{editor} exited with {status}: nothing applied");
     let edited = std::fs::read_to_string(file.path())?;
@@ -5938,7 +5955,14 @@ fn replace_private(path: &str, text: &str) -> anyhow::Result<()> {
     o.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
-    let written = o.open(&tmp).and_then(|mut f| f.write_all(text.as_bytes()).and_then(|_| f.sync_all())).and_then(|_| std::fs::rename(&tmp, target));
+    #[cfg(windows)]
+    crate::sys::acl::exclusive(&mut o);
+    let written = o.open(&tmp).and_then(|mut f| {
+        #[cfg(windows)]
+        crate::sys::acl::private(&f)?;
+        f.write_all(text.as_bytes()).and_then(|_| f.sync_all())
+    });
+    let written = written.and_then(|_| std::fs::rename(&tmp, target));
     if written.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
@@ -5996,7 +6020,11 @@ async fn render_watch(c: &Client<'_>, env: &str, file: &str, tpl: &str, out: &st
                 text = next;
                 eprintln!("roll secrets render: {which} changed, wrote {out}");
                 if let Some(cmd) = exec {
-                    match tokio::process::Command::new("sh").arg("-c").arg(cmd).status().await {
+                    #[cfg(windows)]
+                    let ran = tokio::process::Command::from(crate::sys::shell(cmd)).status().await;
+                    #[cfg(not(windows))]
+                    let ran = tokio::process::Command::new("sh").arg("-c").arg(cmd).status().await;
+                    match ran {
                         Ok(st) if st.success() => {}
                         Ok(st) => eprintln!("roll secrets render: {cmd} exited with {st}"),
                         Err(e) => eprintln!("roll secrets render: running {cmd}: {e}"),
@@ -6920,7 +6948,7 @@ pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
     if streams.any() {
         return run_masked(&r, &env, streams).await;
     }
-    let mut cmd = std::process::Command::new(&r.command[0]);
+    let mut cmd = std::process::Command::new(crate::sys::program(&r.command[0]));
     cmd.args(&r.command[1..]).envs(env.into_iter().map(|v| (v.name, v.value)));
     #[cfg(unix)]
     {
@@ -6928,10 +6956,18 @@ pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
         let e = cmd.exec();
         bail!("running {}: {e}", r.command[0]);
     }
+    // Windows has no exec: the command runs as roll's child (its environment still by name), and
+    // roll waits for it through the console's events.
     #[cfg(not(unix))]
     {
-        let status = cmd.status().with_context(|| format!("running {}", r.command[0]))?;
-        std::process::exit(status.code().unwrap_or(1));
+        let mut child = tokio::process::Command::from(cmd).spawn().with_context(|| format!("running {}", r.command[0]))?;
+        let mut signals = crate::mask::Signals::new()?;
+        loop {
+            tokio::select! {
+                status = child.wait() => crate::mask::exit_as(status?),
+                sig = signals.next() => crate::mask::Signals::pass(&mut child, sig),
+            }
+        }
     }
 }
 
@@ -6966,7 +7002,15 @@ pub async fn ssh_command(api: &Api, a: Ssh) -> anyhow::Result<()> {
         f.write(true).create_new(true);
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(&mut f, 0o600);
-        f.open(&id).and_then(|mut file| file.write_all(key.as_bytes())).context("writing the key")?;
+        #[cfg(windows)]
+        crate::sys::acl::exclusive(&mut f);
+        f.open(&id)
+            .and_then(|mut file| {
+                #[cfg(windows)]
+                crate::sys::acl::private(&file)?;
+                file.write_all(key.as_bytes())
+            })
+            .context("writing the key")?;
         std::fs::write(&cert_path, format!("{}\n", cert.trim())).context("writing the certificate")?;
         id
     };
@@ -6997,25 +7041,16 @@ pub async fn ssh_command(api: &Api, a: Ssh) -> anyhow::Result<()> {
 /// output), exiting as it did. Signals are passed on ([`crate::mask::Signals`]).
 async fn run_masked(r: &Run, env: &[Var], streams: crate::mask::Streams) -> anyhow::Result<()> {
     let mut run = spawn_masked(r, env, streams)?;
-    #[cfg(unix)]
-    {
-        let mut signals = crate::mask::Signals::new()?;
-        loop {
-            tokio::select! {
-                status = run.child.wait() => {
-                    let status = status?;
-                    run.drain().await;
-                    crate::mask::exit_as(status);
-                }
-                sig = signals.next() => crate::mask::Signals::pass(&run.child, sig),
+    let mut signals = crate::mask::Signals::new()?;
+    loop {
+        tokio::select! {
+            status = run.child.wait() => {
+                let status = status?;
+                run.drain().await;
+                crate::mask::exit_as(status);
             }
+            sig = signals.next() => crate::mask::Signals::pass(&mut run.child, sig),
         }
-    }
-    #[cfg(not(unix))]
-    {
-        let status = run.child.wait().await?;
-        run.drain().await;
-        crate::mask::exit_as(status);
     }
 }
 
@@ -7039,18 +7074,10 @@ async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<Var>, mut leases: 
     let every = std::time::Duration::from_secs(r.interval.max(1));
     // Dynamic credentials outlive their first lease: renewed every 10 minutes while it runs.
     let mut renew = tokio::time::interval_at(tokio::time::Instant::now() + RENEW_EVERY, RENEW_EVERY);
-    #[cfg(unix)]
     let mut signals = crate::mask::Signals::new()?;
     loop {
         let mut run = spawn_masked(r, &env, streams)?;
         loop {
-            #[cfg(unix)]
-            let signal = signals.next();
-            #[cfg(not(unix))]
-            let signal = async {
-                let _ = tokio::signal::ctrl_c().await;
-                0
-            };
             tokio::select! {
                 status = run.child.wait() => {
                     let status = status?;
@@ -7058,15 +7085,7 @@ async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<Var>, mut leases: 
                     crate::mask::exit_as(status);
                 }
                 // Passed on: the command's exit ends roll.
-                sig = signal => {
-                    #[cfg(unix)]
-                    crate::mask::Signals::pass(&run.child, sig);
-                    #[cfg(not(unix))]
-                    {
-                        let _ = sig;
-                        stop(&mut run.child).await;
-                    }
-                }
+                sig = signals.next() => crate::mask::Signals::pass(&mut run.child, sig),
                 _ = renew.tick(), if !leases.is_empty() => {
                     for l in &leases {
                         if let Err(e) = c.call(Method::POST, &format!("{l}/renew"), None).await {
@@ -7110,7 +7129,7 @@ async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<Var>, mut leases: 
 /// How often `roll run --watch` renews its dynamic credentials' leases.
 const RENEW_EVERY: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// SIGTERM, and SIGKILL if it hasn't exited after 10 seconds.
+/// SIGTERM, and SIGKILL if it hasn't exited after 10 seconds (on Windows, TerminateProcess at once).
 async fn stop(child: &mut tokio::process::Child) {
     #[cfg(unix)]
     if let Some(pid) = child.id() {
