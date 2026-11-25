@@ -681,6 +681,8 @@ export interface EnvironmentPut {
   vitals?: boolean;
   /** How long its logs are kept (null: 7 days). */
   log_retention_days?: 7 | 30 | 90 | null;
+  /** Days its built deployments stay to roll back to past the newest ten (1–90); null: only those. */
+  keep_days?: number | null;
   /** Approvals a deployment needs before it goes live (0 or null: none). */
   approvals?: number | null;
   /** A deploy status badge anyone may load. */
@@ -808,6 +810,8 @@ export interface Environment extends EnvironmentSummary {
   vitals?: boolean;
   /** Days its logs are kept: 7 (default), 30 or 90; a preview's are 7. */
   log_retention_days?: number;
+  /** Days its built deployments stay to roll back to past the newest ten. */
+  keep_days?: number;
   /** People other than a deployment's author who approve it before it goes live (0–3). */
   approvals?: number;
   /** Its deploy status badge (an SVG for a README), when it has one. */
@@ -1743,6 +1747,12 @@ export const appsApi = {
   buildLog: (id: string, e: string, d: string, q: LogQuery = {}) => call<LogLine[]>("GET", `${dep(id, e, d)}/logs${qs({ tail: q.tail })}`),
   /** `keepVariables`: its image with the variables as they are now (after a rotated secret), not as they were then. */
   /** Keep a deployment from pruning (`on`), or let it go again. */
+  /** A folder upload's files as deployed (kept until it's pruned). */
+  source: (id: string, e: string, d: string) => call<{ files: { path: string; bytes: number; link?: string }[]; truncated: boolean }>("GET", `${dep(id, e, d)}/source`),
+  /** One of them: its text when it's UTF-8 and at most 1 MiB. */
+  sourceFile: (id: string, e: string, d: string, path: string) => call<{ path: string; bytes: number; text?: string }>("GET", `${dep(id, e, d)}/source${qs({ path })}`),
+  /** A static build's files as served, or one of them (`path`). */
+  output: (id: string, e: string, d: string, path?: string) => call<{ files?: { path: string; bytes: number }[]; truncated?: boolean; path?: string; bytes?: number; text?: string }>("GET", `${dep(id, e, d)}/output${qs({ path })}`),
   pin: (id: string, e: string, d: string, on: boolean) => call<Deployment>(on ? "POST" : "DELETE", `${dep(id, e, d)}/pin`),
   rollback: (id: string, e: string, d: string, keepVariables = false) => call<Deployment>("POST", `${dep(id, e, d)}/rollback`, keepVariables ? { keep_variables: true } : undefined),
   /** Back to the one live before what runs (the server walks back through rollbacks). */

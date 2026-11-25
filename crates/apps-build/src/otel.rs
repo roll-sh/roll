@@ -10,8 +10,12 @@
 //!   `auto_instrumentation` directory linked at [`PYTHON_PATH`], whose `sitecustomize` starts it
 //!   when that's on `PYTHONPATH` (what `opentelemetry-instrument` does).
 //!
-//! Other languages (Java's agent wants a pinned jar and its checksum) and the tree's own
-//! Dockerfile are said and left alone.
+//! - Java, Scala and Clojure: OpenTelemetry's Java agent jar, fetched by the Dockerfile from Maven
+//!   Central and checked against its SHA-256 ([`JAVA_AGENT_SHA256`]), at [`JAVA_AGENT`], started
+//!   by `JAVA_TOOL_OPTIONS=-javaagent:…`.
+//!
+//! Other languages (.NET's needs its native profiler) and the tree's own Dockerfile are said and
+//! left alone.
 
 use crate::Provider;
 
@@ -24,6 +28,11 @@ pub const NODE_REQUIRE: &str = "/opt/roll-otel/node_modules/@opentelemetry/auto-
 pub const PYTHON_PACKAGES: &str = "opentelemetry-distro==0.48b0 opentelemetry-exporter-otlp==1.27.0 setuptools==75.8.0";
 /// Where its `auto_instrumentation` directory is linked (in the virtualenv the image copies).
 pub const PYTHON_PATH: &str = "/opt/venv/roll-otel";
+/// The Java agent, pinned: its URL (Maven Central's) and SHA-256 (Maven Central's too).
+pub const JAVA_AGENT_URL: &str = "https://repo1.maven.org/maven2/io/opentelemetry/javaagent/opentelemetry-javaagent/2.33.1/opentelemetry-javaagent-2.33.1.jar";
+pub const JAVA_AGENT_SHA256: &str = "e43a270df53c6f423e0ab157be9c27ccc01d5dc3232e162fe54777573db2f149";
+/// Where it is in the image that runs.
+pub const JAVA_AGENT: &str = "/opt/roll-otel/opentelemetry-javaagent.jar";
 
 /// `dockerfile` with the agent installed, and which one; or why not.
 pub fn add(dockerfile: &str, provider: Provider) -> Result<(String, &'static str), String> {
@@ -42,6 +51,9 @@ pub fn add(dockerfile: &str, provider: Provider) -> Result<(String, &'static str
             ),
             "python",
         ),
+        // In the image that runs, checked before it's kept. 755: BuildKit gives the directory it
+        // makes the same mode, and the app's user must get through it.
+        Provider::Java | Provider::Scala | Provider::Clojure => (last_from + 1, format!("ADD --chmod=755 --checksum=sha256:{JAVA_AGENT_SHA256} {JAVA_AGENT_URL} {JAVA_AGENT}"), "java"),
         other => return Err(format!("otel: no zero-code agent for {other:?} yet (an SDK of its own still sends to roll)")),
     };
     let mut out: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
@@ -67,6 +79,10 @@ mod tests {
         let (df, kind) = add(py, Provider::Python).unwrap();
         assert_eq!(kind, "python");
         assert!(df.contains("requirements.txt\nRUN if /opt/venv/bin/python -m pip"), "{df}");
+        let jvm = "FROM maven:3-eclipse-temurin-21 AS build\nRUN mvn package\nFROM eclipse-temurin:21-jre\nCOPY --from=build /app/target/app.jar /app/app.jar\n";
+        let (df, kind) = add(jvm, Provider::Java).unwrap();
+        assert_eq!(kind, "java");
+        assert!(df.contains(&format!("FROM eclipse-temurin:21-jre\nADD --chmod=755 --checksum=sha256:{JAVA_AGENT_SHA256} ")), "{df}");
         assert!(add(node, Provider::Go).is_err());
     }
 }

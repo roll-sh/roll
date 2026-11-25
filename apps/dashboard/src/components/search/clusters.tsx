@@ -314,7 +314,7 @@ function CreateCluster({
   onCancel: () => void;
 }) {
   const [name, setName] = useState("");
-  const [settings, setSettings] = useState<SearchSettings>({ ...info.defaults });
+  const [settings, setSettings] = useState<SearchSettings>({ ...info.defaults, protected: false });
   const valid = NAME_RE.test(name);
   return (
     <form

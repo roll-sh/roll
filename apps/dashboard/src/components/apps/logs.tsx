@@ -9,13 +9,31 @@ import { usePageVisible } from "./live";
 const MAX_LINES = 5000;
 
 /** The environment's runtime log, live: every instance's stdout and stderr, filterable, pausable. */
-export function RuntimeLogs({ service, env, onGroup, retentionDays = 7 }: { service: string; env: string; onGroup?: () => void; retentionDays?: number }) {
+export function RuntimeLogs({
+  service,
+  env,
+  onGroup,
+  retentionDays = 7,
+  initialFilter,
+  initialDays,
+  onSearch,
+}: {
+  service: string;
+  env: string;
+  onGroup?: () => void;
+  retentionDays?: number;
+  /** A search from the URL: run once as the tab opens. */
+  initialFilter?: string;
+  initialDays?: number;
+  /** A search ran (its filter and range): the page keeps them in its URL. */
+  onSearch?: (filter: string, days: number) => void;
+}) {
   const [lines, setLines] = useState<LogLine[]>([]);
   // A request's trace, opened from its line.
   const [trace, setTrace] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const [paused, setPaused] = useState(false);
-  const [filter, setFilter] = useState("");
+  const [filter, setFilter] = useState(initialFilter ?? "");
   const [instance, setInstance] = useState("");
   // Only what the app says is at this level or worse (lines that say none are left out).
   const [level, setLevel] = useState<LogLevel | "">("");
@@ -32,7 +50,7 @@ export function RuntimeLogs({ service, env, onGroup, retentionDays = 7 }: { serv
   const [found, setFound] = useState<{ q?: string; where?: string; before?: number; by?: string; lines: LogLine[]; truncated: boolean; error?: string } | null>(null);
   const [searching, setSearching] = useState(false);
   // How far back a search reads: up to what the environment keeps (its log retention).
-  const [days, setDays] = useState(Math.min(7, retentionDays));
+  const [days, setDays] = useState(Math.min(initialDays ?? 7, Math.max(7, retentionDays)));
   const span = days === 1 ? "day" : `${days} days`;
   const read = async (q: { q?: string; where?: string; before?: number; by?: string }) => {
     setSearching(true);
@@ -49,8 +67,20 @@ export function RuntimeLogs({ service, env, onGroup, retentionDays = 7 }: { serv
   const search = () => {
     // Field terms (`level:error user_id:42`) are the API's `where`; the other words its text search.
     const { where, words } = splitFilter(filter);
-    if (where || words) void read({ ...(words ? { q: words } : {}), ...(where ? { where } : {}) });
+    if (where || words) {
+      onSearch?.(filter, days);
+      void read({ ...(words ? { q: words } : {}), ...(where ? { where } : {}) });
+    }
   };
+  // A search the URL brought: once, as the tab opens.
+  const opened = useRef(false);
+  useEffect(() => {
+    if (opened.current || !initialFilter?.trim()) return;
+    opened.current = true;
+    search();
+    // Only the first render's filter: later edits search when asked.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const at = (t: number) => new Date(t).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   // Lines keep arriving while paused; the view shows them on resume.
   const buffer = useRef<LogLine[]>([]);

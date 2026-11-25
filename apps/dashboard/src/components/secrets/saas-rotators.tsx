@@ -105,6 +105,15 @@ const VENDORS: Record<SaasVendor, { label: string; credential: string; fields: T
       { name: "user", label: "Jenkins user", placeholder: "deploy-bot" },
     ],
   },
+  salesforce: {
+    label: "Salesforce",
+    credential: "Consumer key:secret of another external client app",
+    fields: [
+      { name: "domain", label: "My Domain host", placeholder: "acme.my.salesforce.com" },
+      { name: "app_id", label: "External client app id", placeholder: "0xI…" },
+      { name: "consumer_id", label: "OAuth consumer id", placeholder: "888…" },
+    ],
+  },
 };
 
 /** What's shown of a target: its values, never the credential (the API doesn't have it to give). */
@@ -196,7 +205,7 @@ export function SaasRotators() {
       }
     >
       <p className="mb-2 text-[11.5px] text-muted">
-        roll issues keys at SendGrid, Twilio, Okta, Entra, Auth0, GitLab, OpenAI, Datadog, Cloudflare, Databricks, Confluent, SonarQube or Jenkins itself, with a credential you register here, and revokes the old key after the grace period. Auth0 replaces a secret at once, so it has no grace period. Link a key to one from Link a resource. GitLab, Databricks and Entra end their keys by themselves (SonarQube too, with an expiry): a link to one rotates at least two weeks before that.
+        roll issues keys at SendGrid, Twilio, Okta, Entra, Auth0, GitLab, OpenAI, Datadog, Cloudflare, Databricks, Confluent, SonarQube, Jenkins or Salesforce itself, with a credential you register here, and revokes the old key after the grace period. Auth0 replaces a secret at once, so it has no grace period; Salesforce ends the old key when it promotes the new one, at the end of the grace period. Link a key to one from Link a resource. GitLab, Databricks and Entra end their keys by themselves (SonarQube too, with an expiry, and Salesforce a staged key after 30 days): a link to one rotates at least two weeks before that.
       </p>
       <ErrorNote error={error ?? list.error} onDismiss={error ? () => setError(null) : undefined} className="mb-2" />
       {adding && (

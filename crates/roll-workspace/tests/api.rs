@@ -368,6 +368,46 @@ async fn homes_are_kept_only_for_ids_never_given_out_again() {
     assert!(!api.ws.trusts(&project, roll_workspace::Kind::Bucket, "acme-prod"));
 }
 
+/// A home whose resource is still a person's own (from before members, or a hand-over not done
+/// yet) gives its project nothing, and moves only with that person or the operator: an owner of
+/// both projects can't move it to have the other project trust it.
+#[tokio::test]
+async fn a_home_still_a_persons_own_grants_nothing_and_moves_only_with_them() {
+    let api = Api::new();
+    api.ws.set_owners(std::sync::Arc::new(OwnedByX));
+    let mut ids = Vec::new();
+    for name in ["f", "g"] {
+        let (_, p) = api.call_as(Some("usr_ada"), Method::POST, "/v1/workspace/projects", Some(json!({ "name": name }))).await;
+        ids.push(p["id"].as_str().unwrap().to_string());
+    }
+    let (f, g) = (&ids[0], &ids[1]);
+    let (s, e) = api.call(Method::PUT, &format!("/v1/workspace/projects/{f}/homes/search/cl_x"), None).await;
+    assert_eq!(s, StatusCode::OK, "{e}");
+    let project = api.ws.get(roll_workspace::Scope::All, f).unwrap();
+    assert!(!api.ws.trusts(&project, roll_workspace::Kind::Search, "cl_x"), "an unsettled home grants nothing");
+    let (s, e) = api.call_as(Some("usr_ada"), Method::PUT, &format!("/v1/workspace/projects/{g}/homes/search/cl_x"), None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{e}");
+    assert_eq!(api.ws.home_of(roll_workspace::Kind::Search, "cl_x").unwrap().as_deref(), Some(f.as_str()));
+    // The operator moves it (what it does with it then is the product's: a hand-over).
+    let (s, e) = api.call(Method::PUT, &format!("/v1/workspace/projects/{g}/homes/search/cl_x"), None).await;
+    assert_eq!(s, StatusCode::OK, "{e}");
+}
+
+/// `cl_x` is `usr_x`'s own, a person's.
+struct OwnedByX;
+
+impl roll_workspace::Owners for OwnedByX {
+    fn trusts(&self, user: &str, kind: roll_workspace::Kind, r#ref: &str) -> bool {
+        self.owns(user, kind, r#ref)
+    }
+    fn owns(&self, user: &str, _: roll_workspace::Kind, r#ref: &str) -> bool {
+        user == "usr_x" && r#ref == "cl_x"
+    }
+    fn has_person_owner(&self, _: roll_workspace::Kind, r#ref: &str) -> bool {
+        r#ref == "cl_x"
+    }
+}
+
 /// roll-access as far as an invite's inviter goes: the operator's token `tok_ci`, every rule, until
 /// it's revoked.
 #[derive(Default)]

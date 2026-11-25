@@ -11,6 +11,15 @@
 //!   lifetime less 14 days, half of it below 28 days), or at once when asked. Every key linked to
 //!   it then rotates through the managed-link path (`rotation.succeeded`, a new version, syncs); a
 //!   renewal that fails is `rotation.failed` on each of them, and health's `rotation_failing`.
+//! - A leak of a linked key's private key revokes its certificate at the CA at once
+//!   (`keyCompromise`, through the project's account), then renews; `…/revoke` does the same by
+//!   hand. The certificate a renewal replaced stays sealed on the registration (`previous_*`) until
+//!   it ends, so it can still be revoked. Asking happens in a write; the CA is asked outside it,
+//!   claimed by one node; a revocation the CA didn't take yet is retried by the job, and is
+//!   health's `revoke_failing` meanwhile.
+//! - Renewals people (and tools) ask for are capped per registration: one an hour, three a week
+//!   (a leak's is exempt from the weekly count), so a loop can't spend the CA's limit for the
+//!   names (Let's Encrypt: 5 per exact set a week) and block the renewal a leak needs.
 //! - The ACME account is one per project and directory, made on the first order (with the
 //!   registration's External Account Binding where the CA asks for one), and kept sealed. Neither it,
 //!   the DNS credential, the EAB key nor the certificate's private key is ever answered, logged or
@@ -49,6 +58,10 @@ CREATE TABLE IF NOT EXISTS public_certs (
     failed_at INTEGER,
     created_at INTEGER NOT NULL,
     created_by TEXT NOT NULL,
+    previous_certificate BLOB,
+    previous_serial TEXT,
+    previous_not_after INTEGER,
+    asked_renewals TEXT,
     UNIQUE (project_id, name)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS public_cert_accounts (
@@ -58,7 +71,26 @@ CREATE TABLE IF NOT EXISTS public_cert_accounts (
     created_at INTEGER NOT NULL,
     PRIMARY KEY (project_id, directory)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS public_cert_revocations (
+    cert_id TEXT NOT NULL,
+    serial TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    directory TEXT NOT NULL,
+    certificate BLOB NOT NULL,
+    not_after INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    asked_by TEXT NOT NULL,
+    asked_at INTEGER NOT NULL,
+    revoked_at INTEGER,
+    claimed_until INTEGER,
+    last_error TEXT,
+    failed_at INTEGER,
+    PRIMARY KEY (cert_id, serial)
+) WITHOUT ROWID;
 ";
+
+/// The columns a registration gained after it shipped (lib.rs adds them to an older table).
+pub(crate) const ADDED: &[(&str, &str)] = &[("previous_certificate", "BLOB"), ("previous_serial", "TEXT"), ("previous_not_after", "INTEGER"), ("asked_renewals", "TEXT")];
 
 pub(crate) const KIND: &str = "public_cert";
 
@@ -82,6 +114,54 @@ const RETRY_MS: i64 = 60 * 60_000;
 const JOB: &str = "roll:rotation";
 /// The margin health's `expiring` warns in: a renewal comes before it.
 const MARGIN_DAYS: u64 = crate::insights::EXPIRING_DAYS as u64;
+const HOUR_MS: i64 = 3_600_000;
+const WEEK_MS: i64 = 7 * 86_400_000;
+/// Asked-for renewals a registration may have in a week (a leak's aside).
+const WEEKLY_RENEWALS: usize = 3;
+/// How long a revocation the CA didn't take waits before the job asks again.
+const REVOKE_RETRY_MS: i64 = 5 * 60_000;
+
+/// Why a certificate is revoked (RFC 5280's reasons a subscriber may give; Let's Encrypt takes
+/// these five).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum RevokeReason {
+    #[default]
+    Unspecified,
+    /// Its private key was exposed: a leak's revocation. Let's Encrypt also refuses that key for
+    /// later certificates.
+    KeyCompromise,
+    AffiliationChanged,
+    Superseded,
+    CessationOfOperation,
+}
+
+impl RevokeReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RevokeReason::Unspecified => "unspecified",
+            RevokeReason::KeyCompromise => "keyCompromise",
+            RevokeReason::AffiliationChanged => "affiliationChanged",
+            RevokeReason::Superseded => "superseded",
+            RevokeReason::CessationOfOperation => "cessationOfOperation",
+        }
+    }
+
+    fn parse(s: &str) -> Option<RevokeReason> {
+        serde_json::from_value(Json::String(s.to_string())).ok()
+    }
+
+    /// RFC 5280's CRLReason code.
+    pub fn code(self) -> u8 {
+        match self {
+            RevokeReason::Unspecified => 0,
+            RevokeReason::KeyCompromise => 1,
+            RevokeReason::AffiliationChanged => 3,
+            RevokeReason::Superseded => 4,
+            RevokeReason::CessationOfOperation => 5,
+        }
+    }
+}
 
 /// How the names are proven: a DNS provider roll writes `_acme-challenge` TXT records with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,6 +216,16 @@ pub struct Ordered {
     pub account: Option<Value>,
 }
 
+/// What rolld's ACME client is asked to revoke.
+pub struct Revoke<'a> {
+    pub directory: &'a str,
+    /// The project's account on this CA (the one that ordered the certificate).
+    pub account: &'a Value,
+    /// The certificate (DER).
+    pub certificate: &'a [u8],
+    pub reason: RevokeReason,
+}
+
 /// rolld's ACME client: orders over its guarded client (public addresses, no redirects), proving
 /// names through the DNS provider's API.
 pub trait PublicCa: Send + Sync {
@@ -145,6 +235,10 @@ pub trait PublicCa: Send + Sync {
     fn check(&self, dns: DnsProvider, credential: &Value, names: &[String]) -> std::result::Result<(), String>;
     /// Order a certificate (blocks, minutes at most). Errors never hold a credential.
     fn order(&self, order: Order<'_>) -> std::result::Result<Ordered, String>;
+    /// Revoke a certificate the account ordered (blocks; one already revoked counts as revoked),
+    /// answering the reason the CA took: `unspecified` from a CA that takes `keyCompromise` only
+    /// when the certificate's own key signs. Errors never hold a credential.
+    fn revoke(&self, revoke: Revoke<'_>) -> std::result::Result<RevokeReason, String>;
 }
 
 /// A registration, as listed: never a credential, the EAB key or the certificate's key.
@@ -175,8 +269,40 @@ pub struct PublicCert {
     pub last_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failed_at: Option<i64>,
+    /// The certificate the last renewal replaced, kept until it ends so it can still be revoked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_serial: Option<String>,
+    /// Revocations of its certificates that haven't ended, newest first.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub revocations: Vec<Revocation>,
     pub created_at: i64,
     pub created_by: String,
+}
+
+/// A certificate roll revoked, or is still asking the CA to.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct Revocation {
+    pub serial: String,
+    pub reason: RevokeReason,
+    /// `revoked`, or `pending` (the CA hasn't taken it yet: roll asks again every few minutes).
+    pub state: &'static str,
+    pub asked_at: i64,
+    pub asked_by: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revoked_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+/// `POST …/public-certs/{id}/revoke`: which certificate (`current`, the default, or `previous`)
+/// and why (default `unspecified`).
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct RevokeRequest {
+    #[serde(default)]
+    pub serial: Option<String>,
+    #[serde(default)]
+    pub reason: Option<RevokeReason>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -387,7 +513,9 @@ impl LinkProvider for Provider {
         Ok(Issued { parts, handle: json!({ "serial": serial }), expires_at: not_after })
     }
 
-    /// The certificate stays valid until it ends; nothing to take back at the CA.
+    /// A renewal leaves the certificate it replaces valid until it ends (and kept, as
+    /// `previous_*`): only a leak or `…/revoke` takes one back at the CA
+    /// ([`Secrets::revoke_public_cert`]), which needs the project's account, not this handle.
     fn revoke(&self, _: &str, _: &Json) -> Result<()> {
         Ok(())
     }
@@ -421,9 +549,11 @@ struct Row {
     failed_at: Option<i64>,
     created_at: i64,
     created_by: String,
+    previous_serial: Option<String>,
+    previous_not_after: Option<i64>,
 }
 
-const COLUMNS: &str = "id, project_id, name, directory, domains, dns_provider, eab_kid, rotate_days, CASE WHEN certificate IS NULL THEN 0 ELSE 1 END, serial, not_before, not_after, issued_at, renew_requested, last_error, failed_at, created_at, created_by";
+const COLUMNS: &str = "id, project_id, name, directory, domains, dns_provider, eab_kid, rotate_days, CASE WHEN certificate IS NULL THEN 0 ELSE 1 END, serial, not_before, not_after, issued_at, renew_requested, last_error, failed_at, created_at, created_by, previous_serial, previous_not_after";
 
 fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
     let domains: String = r.get(4)?;
@@ -447,6 +577,8 @@ fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
         failed_at: r.get(15)?,
         created_at: r.get(16)?,
         created_by: r.get(17)?,
+        previous_serial: r.get(18)?,
+        previous_not_after: r.get(19)?,
     })
 }
 
@@ -464,7 +596,12 @@ impl Row {
         }
     }
 
-    fn public(&self) -> PublicCert {
+    /// The previous certificate's serial while it hasn't ended.
+    fn previous(&self, now: i64) -> Option<&str> {
+        self.previous_serial.as_deref().filter(|_| self.previous_not_after.is_some_and(|t| t > now))
+    }
+
+    fn public(&self, now: i64, revocations: Vec<Revocation>) -> PublicCert {
         let status = match (self.has_cert, self.last_error.is_some()) {
             (_, true) => "failing",
             (true, false) => "issued",
@@ -485,10 +622,52 @@ impl Row {
             renews_at: self.has_cert.then(|| self.due_at()),
             last_error: self.last_error.clone(),
             failed_at: self.failed_at,
+            previous_serial: self.previous(now).map(String::from),
+            revocations,
             created_at: self.created_at,
             created_by: self.created_by.clone(),
         }
     }
+}
+
+/// When a renewal asked for now may come instead, if it can't now: one an hour, and three a week
+/// of those not asked for a leak. A leak's is exempt from the weekly count, and held back within
+/// the hour only by another leak's (a person's renewal just before a leak doesn't hold up the
+/// certificate that replaces the leaked key). `asked`: (when, for a leak), the last week's.
+fn renewal_cap(asked: &[(i64, bool)], now: i64, leak: bool) -> Option<i64> {
+    let hourly = asked.iter().filter(|(at, l)| *at > now - HOUR_MS && (*l || !leak)).map(|(at, _)| at + HOUR_MS).max();
+    if hourly.is_some() || leak {
+        return hourly;
+    }
+    let mut week: Vec<i64> = asked.iter().filter(|(at, l)| !l && *at > now - WEEK_MS).map(|(at, _)| *at).collect();
+    week.sort();
+    (week.len() >= WEEKLY_RENEWALS).then(|| week[week.len() - WEEKLY_RENEWALS] + WEEK_MS)
+}
+
+fn day_time(ms: i64) -> String {
+    let t = time::OffsetDateTime::from_unix_timestamp(ms.div_euclid(1000)).unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
+    format!("{} {:02}:{:02} UTC", t.date(), t.hour(), t.minute())
+}
+
+/// The leaf's DER from its PEM.
+fn leaf_der(pem: &str) -> Result<Vec<u8>> {
+    x509_parser::pem::Pem::iter_from_buffer(pem.as_bytes()).filter_map(|p| p.ok()).find(|p| p.label == "CERTIFICATE").map(|p| p.contents).ok_or_else(|| Error::Internal("a stored public certificate has no certificate".into()))
+}
+
+/// The serial of the certificate a key linked to a public certificate holds (its link state's
+/// handle), read in a write: a leak's event names what it revokes.
+pub(crate) fn held_serial(link: Option<&str>, state: Option<&str>) -> Option<(String, String)> {
+    let link: Link = serde_json::from_str(link?).ok()?;
+    if link.kind != KIND {
+        return None;
+    }
+    let state: Json = serde_json::from_str(state?).ok()?;
+    Some((link.r#ref, state.get("handle")?.get("serial")?.as_str()?.to_string()))
+}
+
+/// Whether registration `id`'s certificate `serial` was revoked: a rotation off it says so.
+pub(crate) fn revoked(c: &code_sql::Conn<'_>, id: &str, serial: &str) -> Result<bool> {
+    Ok(c.query_row("SELECT 1 FROM public_cert_revocations WHERE cert_id = ? AND serial = ? AND revoked_at IS NOT NULL", [id, serial], |_| Ok(())).optional()?.is_some())
 }
 
 impl Secrets {
@@ -505,11 +684,38 @@ impl Secrets {
         self.db.read(|c| c.query_row(&format!("SELECT {COLUMNS} FROM public_certs WHERE id = ? AND project_id = ?"), [id, project], row).optional())?.ok_or_else(|| Error::NotFound(format!("no public certificate {id}")))
     }
 
+    /// A registration as answered: with its revocations of certificates that haven't ended.
+    fn public_cert(&self, project: &str, id: &str) -> Result<PublicCert> {
+        let r = self.public_cert_row(project, id)?;
+        let now = self.db.now_ms()?;
+        Ok(r.public(now, self.revocations(project, Some(id), now)?.remove(id).unwrap_or_default()))
+    }
+
+    /// Revocations of certificates that haven't ended, by registration, newest first.
+    fn revocations(&self, project: &str, id: Option<&str>, now: i64) -> Result<BTreeMap<String, Vec<Revocation>>> {
+        type R = (String, String, String, i64, String, Option<i64>, Option<String>);
+        let rows: Vec<R> = self.db.read(|c| {
+            c.query(
+                "SELECT cert_id, serial, reason, asked_at, asked_by, revoked_at, last_error FROM public_cert_revocations WHERE project_id = ? AND (? = '' OR cert_id = ?) AND not_after > ? ORDER BY asked_at DESC, serial",
+                params![project, id.unwrap_or_default(), id.unwrap_or_default(), now],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+            )
+        })?;
+        let mut out: BTreeMap<String, Vec<Revocation>> = BTreeMap::new();
+        for (cert, serial, reason, asked_at, asked_by, revoked_at, last_error) in rows {
+            let state = if revoked_at.is_some() { "revoked" } else { "pending" };
+            out.entry(cert).or_default().push(Revocation { serial, reason: RevokeReason::parse(&reason).unwrap_or_default(), state, asked_at, asked_by, revoked_at, last_error: last_error.filter(|_| revoked_at.is_none()) });
+        }
+        Ok(out)
+    }
+
     pub fn public_certs(&self, project: &str, caller: &Caller) -> Result<Vec<PublicCert>> {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
         let rows = self.db.read(|c| c.query(&format!("SELECT {COLUMNS} FROM public_certs WHERE project_id = ? ORDER BY name"), [project], row))?;
-        Ok(rows.iter().map(Row::public).collect())
+        let now = self.db.now_ms()?;
+        let mut revoked = self.revocations(project, None, now)?;
+        Ok(rows.iter().map(|r| r.public(now, revoked.remove(&r.id).unwrap_or_default())).collect())
     }
 
     /// Register a public certificate. The DNS credential is checked first (it may edit each name's
@@ -551,7 +757,7 @@ impl Secrets {
             )?;
             audit::record(c, self.keys()?, project, caller, "public_cert.add", None, None, &[], &format!("added public certificate {} for {} from {directory}", n.name, domains.join(", ")), now)
         })?;
-        Ok(self.public_cert_row(project, &id)?.public())
+        self.public_cert(project, &id)
     }
 
     /// Change a registration in place. New domains or a new DNS credential (checked first, as
@@ -620,26 +826,183 @@ impl Secrets {
             }
             Ok(())
         })?;
-        Ok(self.public_cert_row(project, id)?.public())
+        self.public_cert(project, id)
     }
 
-    /// Order a new certificate now (the background job's next pass), as a linked key's rotation,
-    /// a leak of its private key, or `…/public-certs/{id}/renew` asks.
+    /// Order a new certificate now (the background job's next pass), as a linked key's rotation
+    /// or `…/public-certs/{id}/renew` asks: at most one an hour and three a week (a 429 saying
+    /// when), since each one spends the CA's limit for the names.
     pub fn renew_public_cert(&self, project: &str, id: &str, caller: &Caller) -> Result<PublicCert> {
         caller.need(Action::Write, &Scope::project(project))?;
         self.project(project)?;
-        self.request_renewal(project, id, caller)?;
-        Ok(self.public_cert_row(project, id)?.public())
+        self.request_renewal(project, id, caller, false)?;
+        self.public_cert(project, id)
     }
 
-    pub(crate) fn request_renewal(&self, project: &str, id: &str, caller: &Caller) -> Result<()> {
+    /// Ask the job for a new certificate, under [`renewal_cap`]. `urgent`: a leak's (or a
+    /// revocation's) renewal, exempt from the weekly count, and nothing to do while one is
+    /// already on its way (its certificate has a new key too).
+    pub(crate) fn request_renewal(&self, project: &str, id: &str, caller: &Caller, urgent: bool) -> Result<()> {
         let now = self.db.now_ms()?;
         self.db.write(|c| {
-            let name: String = c.query_row("SELECT name FROM public_certs WHERE id = ? AND project_id = ?", [id, project], |x| x.get(0)).optional()?.ok_or_else(|| Error::NotFound(format!("no public certificate {id}")))?;
-            c.execute("UPDATE public_certs SET renew_requested = 1, failed_at = NULL WHERE id = ?", [id])?;
+            let row: Option<(String, Option<String>, i64)> = c.query_row("SELECT name, asked_renewals, renew_requested FROM public_certs WHERE id = ? AND project_id = ?", [id, project], |x| Ok((x.get(0)?, x.get(1)?, x.get(2)?))).optional()?;
+            let (name, asked, requested) = row.ok_or_else(|| Error::NotFound(format!("no public certificate {id}")))?;
+            if urgent && requested != 0 {
+                return Ok(());
+            }
+            let mut asked: Vec<(i64, bool)> = asked.and_then(|a| serde_json::from_str(&a).ok()).unwrap_or_default();
+            asked.retain(|(at, _)| *at > now - WEEK_MS);
+            if let Some(next) = renewal_cap(&asked, now, urgent) {
+                let why = if next - now > HOUR_MS { format!("{WEEKLY_RENEWALS} renewals were asked for this week") } else { "a renewal was asked for within the hour".to_string() };
+                return Err(Error::TooMany(format!("public certificate {name}: {why}, and each spends the CA's limit for these names (Let's Encrypt issues 5 a week): ask again after {}", day_time(next))));
+            }
+            asked.push((now, urgent));
+            c.execute("UPDATE public_certs SET renew_requested = 1, failed_at = NULL, asked_renewals = ? WHERE id = ?", params![crate::json(&asked), id])?;
             audit::record(c, self.keys()?, project, caller, "public_cert.renew", None, None, &[], &format!("asked for a new certificate for public certificate {name}"), now)
         })
     }
+
+    /// `POST …/public-certs/{id}/revoke` (admin): revoke its current certificate (then renew it,
+    /// as a leak's revocation does) or the previous one, at the CA now.
+    pub fn revoke_public_cert(&self, project: &str, id: &str, req: RevokeRequest, caller: &Caller) -> Result<PublicCert> {
+        caller.need(Action::Admin, &Scope::project(project))?;
+        self.project(project)?;
+        let r = self.public_cert_row(project, id)?;
+        let now = self.db.now_ms()?;
+        let which = req.serial.as_deref().unwrap_or("current");
+        let serial = match which {
+            "current" => r.serial.clone().ok_or_else(|| Error::BadRequest(format!("public certificate {} has no certificate yet", r.name)))?,
+            "previous" => r.previous(now).map(String::from).ok_or_else(|| Error::BadRequest(format!("public certificate {} has no previous certificate that hasn't ended", r.name)))?,
+            other => return Err(Error::BadRequest(format!("serial is current or previous, not {other:?}"))),
+        };
+        let reason = req.reason.unwrap_or_default();
+        let revoked = self.revoke_serial(project, id, &serial, reason, caller);
+        // A revoked certificate in use is a broken one: its replacement comes at once.
+        if which == "current" {
+            self.request_renewal(project, id, caller, true)?;
+        }
+        revoked?;
+        self.public_cert(project, id)
+    }
+
+    /// Revoke registration `id`'s certificate `serial` (its current or previous one): asked for
+    /// in a write (once: asking again for one revoked is a no-op), then claimed and sent to the CA
+    /// outside it. `Ok`: revoked. An error leaves it pending: the job asks again.
+    pub(crate) fn revoke_serial(&self, project: &str, id: &str, serial: &str, reason: RevokeReason, caller: &Caller) -> Result<()> {
+        let ca = self.public_ca()?.clone();
+        let dek = self.project(project)?;
+        let r = self.public_cert_row(project, id)?;
+        let now = self.db.now_ms()?;
+        let column = if r.serial.as_deref() == Some(serial) {
+            "certificate"
+        } else if r.previous(now) == Some(serial) {
+            "previous_certificate"
+        } else {
+            return Err(Error::BadRequest(format!("{serial} isn't public certificate {}'s current or previous certificate (or it has ended)", r.name)));
+        };
+        let not_after = if column == "certificate" { r.not_after } else { r.previous_not_after }.unwrap_or_default();
+        if not_after <= now {
+            return Err(Error::BadRequest(format!("certificate {serial} has ended: nothing to revoke")));
+        }
+        let sealed: Option<Vec<u8>> = self.db.read(|c| c.query_row(&format!("SELECT {column} FROM public_certs WHERE id = ? AND COALESCE({}, '') = ?", if column == "certificate" { "serial" } else { "previous_serial" }), [id, serial], |x| x.get(0)).optional())?.flatten();
+        let sealed = sealed.ok_or_else(|| Error::Conflict("stale", format!("public certificate {} was renewed meanwhile", r.name)))?;
+        let stored = dek.open(&aad(project, id, "certificate"), &sealed)?;
+        let s: Stored = serde_json::from_str(stored.expose()).map_err(|_| Error::Internal("a stored public certificate isn't JSON".into()))?;
+        let der = leaf_der(&s.certificate)?;
+        let by = caller.principal.clone();
+        self.db.write(|c| {
+            let n = c.execute(
+                "INSERT INTO public_cert_revocations (cert_id, serial, project_id, directory, certificate, not_after, reason, asked_by, asked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (cert_id, serial) DO NOTHING",
+                params![id, serial, project, r.directory, der, not_after, reason.as_str(), by, now],
+            )?;
+            if n == 1 {
+                audit::record(c, self.keys()?, project, caller, "public_cert.revoke", None, None, &[], &format!("asked to revoke public certificate {}'s certificate {serial} ({})", r.name, reason.as_str()), now)?;
+            }
+            Ok::<_, Error>(())
+        })?;
+        match self.send_revocation(ca.as_ref(), id, serial)? {
+            Sent::Revoked | Sent::Held => Ok(()),
+            Sent::Failed(why) => Err(Error::Link(format!("the CA didn't revoke public certificate {}'s certificate {serial} yet (roll asks again every few minutes): {why}", r.name))),
+        }
+    }
+
+    /// Claim a pending revocation and send it to the CA through the project's account; keep the
+    /// outcome (and audit it).
+    fn send_revocation(&self, ca: &dyn PublicCa, id: &str, serial: &str) -> Result<Sent> {
+        let now = self.db.now_ms()?;
+        type Pending = (String, String, Vec<u8>, String, Option<i64>);
+        let pending: Option<Pending> = self.db.write(|c| {
+            let p: Option<Pending> = c
+                .query_row("SELECT project_id, directory, certificate, reason, revoked_at FROM public_cert_revocations WHERE cert_id = ? AND serial = ?", [id, serial], |x| Ok((x.get(0)?, x.get(1)?, x.get(2)?, x.get(3)?, x.get(4)?)))
+                .optional()?;
+            let claimed = c.execute("UPDATE public_cert_revocations SET claimed_until = ? WHERE cert_id = ? AND serial = ? AND revoked_at IS NULL AND (claimed_until IS NULL OR claimed_until <= ?)", params![now + CLAIM_MS, id, serial, now])? == 1;
+            Ok::<_, Error>(p.filter(|p| p.4.is_some() || claimed))
+        })?;
+        let Some((project, directory, der, reason, revoked_at)) = pending else { return Ok(Sent::Held) };
+        if revoked_at.is_some() {
+            return Ok(Sent::Revoked);
+        }
+        let reason = RevokeReason::parse(&reason).unwrap_or_default();
+        let name: String = self.db.read(|c| c.query_row("SELECT name FROM public_certs WHERE id = ?", [id], |x| x.get(0)).optional())?.unwrap_or_else(|| id.to_string());
+        let outcome = (|| {
+            let dek = self.project(&project)?;
+            let account: Option<Vec<u8>> = self.db.read(|c| c.query_row("SELECT credentials FROM public_cert_accounts WHERE project_id = ? AND directory = ?", [&project, &directory], |x| x.get(0)).optional())?;
+            let account = dek.open(&account_aad(&project, &directory), &account.ok_or_else(|| Error::Link(format!("no ACME account on {directory} for this project")))?)?;
+            ca.revoke(Revoke { directory: &directory, account: &account, certificate: &der, reason }).map_err(Error::Link)
+        })();
+        let now = self.db.now_ms()?;
+        let caller = Caller::consumer(JOB);
+        match outcome {
+            Ok(took) => {
+                self.db.write(|c| {
+                    c.execute("UPDATE public_cert_revocations SET revoked_at = ?, reason = ?, claimed_until = NULL, last_error = NULL, failed_at = NULL WHERE cert_id = ? AND serial = ?", params![now, took.as_str(), id, serial])?;
+                    audit::record(c, self.keys()?, &project, &caller, "public_cert.revoked", None, None, &[], &format!("{directory} revoked public certificate {name}'s certificate {serial} ({})", took.as_str()), now)
+                })?;
+                Ok(Sent::Revoked)
+            }
+            Err(e) => {
+                let why: String = e.to_string().chars().take(300).collect();
+                self.db.write(|c| {
+                    c.execute("UPDATE public_cert_revocations SET claimed_until = NULL, last_error = ?, failed_at = ? WHERE cert_id = ? AND serial = ?", params![why, now, id, serial])?;
+                    audit::record(c, self.keys()?, &project, &caller, "public_cert.revoke_failed", None, None, &[], &format!("revoking public certificate {name}'s certificate {serial} failed: {why}"), now)
+                })?;
+                Ok(Sent::Failed(why))
+            }
+        }
+    }
+
+    /// The job's retries of revocations the CA didn't take: each a few minutes after it failed.
+    /// The first failure of each is `rotation.failed` on the keys linked to its registration.
+    fn retry_revocations(&self, ca: &dyn PublicCa, out: &mut crate::Swept) -> Result<()> {
+        let now = self.db.now_ms()?;
+        let due: Vec<(String, String, String, bool)> = self.db.read(|c| {
+            c.query(
+                &format!(
+                    "SELECT cert_id, serial, project_id, CASE WHEN failed_at IS NULL THEN 0 ELSE 1 END FROM public_cert_revocations WHERE revoked_at IS NULL AND not_after > ? AND (claimed_until IS NULL OR claimed_until <= ?) AND (failed_at IS NULL OR failed_at <= ?) AND {} ORDER BY asked_at LIMIT 5",
+                    crate::deleted::live("project_id")
+                ),
+                params![now, now, now - REVOKE_RETRY_MS],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? != 0)),
+            )
+        })?;
+        for (id, serial, project, failed_before) in due {
+            match self.send_revocation(ca, &id, &serial)? {
+                Sent::Revoked => out.rotated += 1,
+                Sent::Held => {}
+                Sent::Failed(why) => {
+                    out.failed += 1;
+                    tracing::warn!(%project, cert = %id, %serial, "revoking a public certificate failed (retried): {why}");
+                    if !failed_before {
+                        for (slug, path, key) in self.public_cert_keys(&project, &id)? {
+                            self.note_rotation(&project, &slug, &path, &key, Some(&format!("revoking certificate {serial} failed (roll keeps trying): {why}")), false);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
 
     /// Delete a registration no key links to (its certificates stay valid until they end).
     pub fn delete_public_cert(&self, project: &str, id: &str, caller: &Caller) -> Result<()> {
@@ -671,8 +1034,14 @@ impl Secrets {
     pub fn sweep_public_certs(&self) -> Result<crate::Swept> {
         let mut out = crate::Swept::default();
         let Some(ca) = self.public_ca.get().cloned() else { return Ok(out) };
+        // Revocations first: a compromised key is worse than a late renewal.
+        self.retry_revocations(ca.as_ref(), &mut out)?;
         let now = self.db.now_ms()?;
         let rows = self.db.read(|c| c.query(&format!("SELECT {COLUMNS} FROM public_certs WHERE (claimed_until IS NULL OR claimed_until <= ?) AND {}", crate::deleted::live("project_id")), [now], row))?;
+        // A replaced certificate that ended has nothing left to revoke.
+        if rows.iter().any(|r| r.previous_serial.is_some() && r.previous(now).is_none()) {
+            self.db.write(|c| c.execute("UPDATE public_certs SET previous_certificate = NULL, previous_serial = NULL, previous_not_after = NULL WHERE previous_not_after <= ?", [now]))?;
+        }
         for r in rows.into_iter().filter(|r| r.due_at() <= now).take(5) {
             match self.order_public_cert(ca.as_ref(), &r) {
                 Ok(true) => out.rotated += 1,
@@ -791,7 +1160,8 @@ impl Secrets {
         let end = time::OffsetDateTime::from_unix_timestamp(leaf.not_after / 1000).map(|t| t.date().to_string()).unwrap_or_default();
         self.db.write(|c| {
             c.execute(
-                "UPDATE public_certs SET certificate = ?, serial = ?, not_before = ?, not_after = ?, issued_at = ?, renew_requested = 0, claimed_until = NULL, last_error = NULL, failed_at = NULL WHERE id = ?",
+                // The certificate it replaces stays (sealed) until it ends: it may still need revoking.
+                "UPDATE public_certs SET previous_certificate = certificate, previous_serial = serial, previous_not_after = not_after, certificate = ?, serial = ?, not_before = ?, not_after = ?, issued_at = ?, renew_requested = 0, claimed_until = NULL, last_error = NULL, failed_at = NULL WHERE id = ?",
                 params![sealed, leaf.serial, leaf.not_before, leaf.not_after, now, r.id],
             )?;
             audit::record(c, self.keys()?, &r.project, &caller, "public_cert.issued", None, None, &[], &format!("{} issued public certificate {} (serial {}, until {end})", r.directory, r.name, leaf.serial), now)
@@ -812,9 +1182,33 @@ impl Secrets {
     }
 }
 
+/// What became of a revocation sent to the CA.
+enum Sent {
+    Revoked,
+    /// Another node holds it (claimed), or it's gone.
+    Held,
+    Failed(String),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renewals_asked_for_are_capped() {
+        let (h, now) = (HOUR_MS, 100 * WEEK_MS);
+        assert_eq!(renewal_cap(&[], now, false), None);
+        // One an hour, whoever asked.
+        assert_eq!(renewal_cap(&[(now - h / 2, false)], now, false), Some(now + h / 2));
+        assert_eq!(renewal_cap(&[(now - h / 2, true)], now, false), Some(now + h / 2));
+        // Three a week, a leak's aside.
+        let week = [(now - 5 * 86_400_000, false), (now - 3 * 86_400_000, false), (now - 2 * h, false)];
+        assert_eq!(renewal_cap(&week, now, false), Some(now - 5 * 86_400_000 + WEEK_MS));
+        assert_eq!(renewal_cap(&week, now, true), None, "a leak's renewal isn't held by the weekly count");
+        // A leak's isn't held by a person's renewal just before it, but isn't repeatable within the hour.
+        assert_eq!(renewal_cap(&[(now - h / 2, false)], now, true), None);
+        assert_eq!(renewal_cap(&[(now - h / 2, true)], now, true), Some(now + h / 2));
+    }
 
     #[test]
     fn names_and_renewals() {

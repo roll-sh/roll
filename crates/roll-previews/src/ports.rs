@@ -258,6 +258,9 @@ pub struct Shot {
     /// values in ([`crate::served_secrets`]); never kept.
     #[serde(default, with = "png_b64::pairs")]
     pub bodies: Vec<(String, Vec<u8>)>,
+    /// What its sign-in said (`github.login`): "signed in", or the step it stopped at.
+    #[serde(default)]
+    pub login: Option<String>,
 }
 
 /// PNG bytes as base64 in JSON (a [`Shot`] from another node).
@@ -407,6 +410,25 @@ pub struct ShotOptions {
     pub stories: Option<String>,
     /// The first page's modes (`github.modes`): `mode:<name>` in `pages`.
     pub modes: Vec<crate::settings::ModeRule>,
+    /// The app's sign-in before the pages (`github.login`, a trusted preview's), its typed
+    /// variables resolved.
+    #[serde(default)]
+    pub login: Option<Login>,
+}
+
+/// A screenshot run's sign-in (`github.login`) with its `$NAME`s in place: it may hold a
+/// password, so it goes to the browser only through its own container's stdin, and `Debug`
+/// says only its page.
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct Login {
+    pub page: String,
+    pub steps: Vec<crate::settings::Step>,
+}
+
+impl std::fmt::Debug for Login {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Login").field("page", &self.page).field("steps", &self.steps.len()).finish_non_exhaustive()
+    }
 }
 
 /// One more page of a [`Shot`]: its path, its PNG, and what went wrong while it loaded.

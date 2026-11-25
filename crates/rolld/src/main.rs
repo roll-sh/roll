@@ -509,6 +509,8 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
                 redis.as_ref().map(|r| r.control.clone()),
                 apps_secrets.clone(),
                 products_api.clone(),
+                // apps' search links read and issue as roll secrets' do (`SearchGuard`).
+                search.as_ref().map(|s| std::sync::Arc::new(secrets::SearchGuard { workspace: workspace.clone(), search: s.control.clone() })),
                 !auth.enforcing(),
             )
             .await?,
@@ -673,6 +675,33 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     accounts.set_directory(std::sync::Arc::new(workspace::Directory(workspace.clone())));
     let people = secrets::People { accounts, code: code.as_ref().map(|c| c.code.clone()), search: search.as_ref().map(|s| s.control.clone()) };
     workspace.set_owners(std::sync::Arc::new(people.clone()));
+    // The homes and links passes run on one node of a fleet at a time (a singleton lease).
+    let search_leads: search::Leads = {
+        let (cl, clustered) = (cluster.clone(), cluster.backend_name() != "memory");
+        std::sync::Arc::new(move || !clustered || cl.singleton("search:homes"))
+    };
+    // A search branch stays in the project its parent is at home in (docs/members.md): the
+    // members who could branch it reach the copy, and no other project gains it.
+    if let Some(s) = &search {
+        s.control.on_branch(search::home_branches(workspace.clone()));
+        // A home hands a cluster to its project; a project home to clusters isn't deleted.
+        search::members(&s.control, &workspace);
+        // A remote link works only while whoever linked it may still administer its target, as
+        // roll-access decides it now (a removed or demoted member's links stop at once).
+        let a = access.clone();
+        s.control.set_link_makers(std::sync::Arc::new(move |maker, target| a.person_reaches(maker, "search", "cluster", target, roll_auth::scope::Action::Admin)));
+        // A purged cluster leaves every canvas and its home (its id is never given out again).
+        let ws = workspace.clone();
+        s.control.on_purged(Box::new(move |id| {
+            if let Err(e) = ws.forget_resource(roll_workspace::Kind::Search, id) {
+                tracing::warn!(cluster = id, error = %e, "taking a purged search cluster off its projects failed");
+            }
+        }));
+    } else {
+        // Search runs on other nodes of the fleet: this one places and homes no cluster (it can't
+        // tell an id from a name) and leaves deleting a project home to some to them.
+        search::members_off(&workspace);
+    }
     // Members' handles and addresses, and invite links to the dashboard (docs/members.md).
     workspace.set_people(std::sync::Arc::new(people.clone()));
     workspace.set_web_url(&args.web_url);
@@ -680,6 +709,28 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     // Gateways into private networks: their links follow leases on the node's cluster.
     let gateways = secrets::gateway::Gateways::new(cluster.clone(), access.clone() as std::sync::Arc<dyn roll_auth::Grants>, args.code_webhook_allow_private.unwrap_or(!auth.enforcing()));
     let secrets = secrets::open(&args, &home, workspace.clone(), !auth.enforcing(), products_api.clone(), access.clone(), people, gateways.clone())?;
+    // What canvases, homes and roll secrets' links kept of search clusters from before is put
+    // right (docs/search/architecture.md, "Who sees a cluster"): the canvases first, before the
+    // API listens (below), so no request acts on a home from before; then the links, which look
+    // the clusters up on them.
+    if let Some(s) = &search {
+        let (c, ws, leads) = (s.control.clone(), workspace.clone(), search_leads.clone());
+        let led = tokio::task::spawn_blocking(move || {
+            let led = leads();
+            if led {
+                search::fix_homes(&c, &ws);
+            }
+            led
+        })
+        .await
+        .unwrap_or(false);
+        if led {
+            let (c, ws, sec) = (s.control.clone(), workspace.clone(), secrets.clone());
+            tokio::task::spawn_blocking(move || search::fix_links(&c, &ws, &sec));
+        }
+        // Both again every few minutes.
+        search::passes(&s.control, &workspace, &secrets, search_leads.clone());
+    }
     if let Some(p) = &postgres {
         secrets::tell_postgres_decoys(&p.control, secrets.clone());
     }

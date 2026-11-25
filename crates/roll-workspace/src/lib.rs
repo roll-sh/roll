@@ -25,7 +25,7 @@ pub mod members;
 
 pub use events::{EventPage, EventsQuery, FeedEvent};
 pub use groups::{Counts, Group, GroupMember, GroupOp, GroupRole};
-pub use members::{Actor, Invite, Member, MemberEvent, People, Person};
+pub use members::{Actor, HomeRow, Homed, Invite, Member, MemberEvent, People, Person, TrustBasis};
 
 use code_sql::{Db, OptionalExtension, Target, params};
 use serde::Serialize;
@@ -222,6 +222,26 @@ pub struct Refusal {
 /// project holds secrets, unless a secrets admin confirms).
 pub type BeforeDelete = Box<dyn Fn(&Deleting<'_>) -> std::result::Result<(), Refusal> + Send + Sync>;
 
+/// Asked inside a project delete's transaction with the homes in the project then, as
+/// `(kind, ref)`: a product refuses one whose resource came alive since [`BeforeDelete`] asked (a
+/// restore meanwhile). Quick and read-only; it may be asked again if the write re-runs.
+pub type InDelete = Box<dyn Fn(&str, &[(String, String)]) -> std::result::Result<(), Refusal> + Send + Sync>;
+
+/// Asked inside a project restore's transaction, after its members and groups are back, about each
+/// home its project kept, as `(kind, ref, project)`: whether it comes back ([`HomeBack`]). Quick and
+/// read-only; it may be asked again if the write re-runs. A [`Refusal`] stops the restore.
+pub type InRestore = Box<dyn Fn(Kind, &str, &str) -> std::result::Result<HomeBack, Refusal> + Send + Sync>;
+
+/// What [`InRestore`] says of a kept home.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HomeBack {
+    Yes,
+    /// It goes with the deleted project's other kept rows.
+    No,
+    /// Only if this person is an admin or owner of the restored project.
+    IfManagedBy(String),
+}
+
 /// Called after a project is deleted, outside the transaction (roll secrets keeps its secrets for
 /// a recovery window).
 pub type OnDelete = Box<dyn Fn(&Deleting<'_>) + Send + Sync>;
@@ -238,6 +258,20 @@ pub trait Owners: Send + Sync {
     /// admin account is no wider here (docs/members.md, "The canvas rule"). No default: each
     /// implementer says it.
     fn owns(&self, user: &str, kind: Kind, r#ref: &str) -> bool;
+    /// The ref `kind ref` goes by for good: a name resolved to its product's id (a search cluster
+    /// by name), so canvases and homes never keep a name a later resource could take. `None`: no
+    /// such resource, or one this node can't resolve (refused). Default: the ref as given.
+    fn canonical(&self, kind: Kind, r#ref: &str) -> Option<String> {
+        let _ = kind;
+        Some(r#ref.to_string())
+    }
+    /// Whether `kind ref` (by its id) belongs to a person, not to a project: a home that holds one
+    /// is still being settled (from before members, or a hand-over not done yet), so only that
+    /// person or the operator moves it. Default: nothing is.
+    fn has_person_owner(&self, kind: Kind, r#ref: &str) -> bool {
+        let _ = (kind, r#ref);
+        false
+    }
 }
 
 /// The workspace store.
@@ -251,6 +285,9 @@ pub struct Workspace {
     grants: std::sync::OnceLock<std::sync::Arc<dyn roll_auth::Grants>>,
     web_url: std::sync::OnceLock<String>,
     on_event: std::sync::RwLock<Vec<members::OnEvent>>,
+    on_homed: std::sync::RwLock<Vec<members::OnHomed>>,
+    in_delete: std::sync::RwLock<Vec<InDelete>>,
+    in_restore: std::sync::RwLock<Vec<InRestore>>,
 }
 
 impl Workspace {
@@ -289,7 +326,7 @@ impl Workspace {
         })?;
         // Members came after owners: every project's maker is its owner.
         db.migrate("workspace-members", members::migrate)?;
-        Ok(Workspace { db, before_delete: Default::default(), on_delete: Default::default(), owners: Default::default(), people: Default::default(), grants: Default::default(), web_url: Default::default(), on_event: Default::default() })
+        Ok(Workspace { db, before_delete: Default::default(), on_delete: Default::default(), owners: Default::default(), people: Default::default(), grants: Default::default(), web_url: Default::default(), on_event: Default::default(), on_homed: Default::default(), in_delete: Default::default(), in_restore: Default::default() })
     }
 
     /// Every project `scope` sees, with its resources, oldest first.
@@ -417,12 +454,23 @@ impl Workspace {
     /// ([`Workspace::restore`]); its pending invites end.
     pub fn delete(&self, scope: Scope<'_>, id: &str, request: &axum::http::request::Parts) -> Result<()> {
         let project = self.get(scope, id)?;
+        // The homes the products' hooks were asked about: one made meanwhile (a create placed in
+        // the project between them and this write) wasn't, so the delete is refused, never left
+        // with something that lost its owner to a project that's gone.
+        let homes_asked = self.homes_of_project(id)?;
         for f in self.before_delete.read().expect("before_delete").iter() {
             f(&Deleting { project: &project, request }).map_err(Error::Refused)?;
         }
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             owner_of(c, scope, id)?;
+            let homes_now = members::homes_of(c, id)?;
+            if homes_now.iter().any(|h| !homes_asked.contains(h)) {
+                return Err(Error::Conflict(format!("something got a home in project {id} while it was being deleted: try again")));
+            }
+            for f in self.in_delete.read().expect("in_delete").iter() {
+                f(id, &homes_now).map_err(Error::Refused)?;
+            }
             let old: Vec<String> = c.query("SELECT id FROM deleted_projects WHERE deleted_at < ? OR id = ?", params![now - KEEP_DELETED_DAYS * 86_400_000, id], |r| r.get(0))?;
             for p in &old {
                 forget_deleted_rows(c, p)?;
@@ -460,10 +508,19 @@ impl Workspace {
     /// as it is.
     pub fn restore(&self, id: &str) -> Result<Project> {
         let now = self.db.now_ms()?;
+        let mut homes: Vec<(String, String)> = Vec::new();
         let p = self.db.write(|c| {
+            homes.clear();
             if c.query_row("SELECT 1 FROM projects WHERE id = ?", [id], |r| r.get::<_, i64>(0)).optional()?.is_some() {
                 return load(c, id);
             }
+            // Its homes come back where nothing else holds one: what a product does when something
+            // gets a home back runs for those.
+            let kept: Vec<(String, String)> = c.query(
+                "SELECT kind, ref FROM deleted_homes d WHERE project_id = ? AND NOT EXISTS (SELECT 1 FROM homes h WHERE h.kind = d.kind AND h.ref = d.ref)",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
             let (owner, name): (String, String) = c.query_row("SELECT owner, name FROM deleted_projects WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?.ok_or_else(|| not_found(id))?;
             name_free(c, &owner, &name, None).map_err(|_| Error::Conflict(format!("a project named {name} exists now: rename it, then restore this one")))?;
             c.execute(&format!("INSERT INTO projects ({PROJECT_COLUMNS}) SELECT {PROJECT_COLUMNS} FROM deleted_projects WHERE id = ?"), [id])?;
@@ -474,11 +531,43 @@ impl Workspace {
             members::bring_back(c, id)?;
             // Groups' roles too, except those of groups deleted since (each in the audit log).
             groups::bring_back(c, id, now)?;
+            // Each kept home a product lets come back, decided here with the project's members
+            // back, so nothing can act on a home in between (the rest go with the kept rows).
+            for (kind, r#ref) in kept {
+                if self.home_comes_back(c, id, &kind, &r#ref)? {
+                    members::bring_back_home(c, id, &kind, &r#ref)?;
+                    homes.push((kind, r#ref));
+                }
+            }
             forget_deleted_rows(c, id)?;
             load(c, id)
         })?;
+        for (kind, r#ref) in &homes {
+            if let Ok(kind) = Kind::parse(kind) {
+                for f in self.on_homed.read().expect("on_homed").iter() {
+                    f(kind, r#ref, id, members::Homed::Restored);
+                }
+            }
+        }
         self.run_events();
         Ok(p)
+    }
+
+    /// Whether every [`InRestore`] lets `kind ref`'s kept home in `project` come back.
+    fn home_comes_back(&self, c: &code_sql::Conn<'_>, project: &str, kind: &str, r#ref: &str) -> Result<bool> {
+        let Ok(k) = Kind::parse(kind) else { return Ok(true) };
+        for f in self.in_restore.read().expect("in_restore").iter() {
+            match f(k, r#ref, project).map_err(Error::Refused)? {
+                HomeBack::Yes => {}
+                HomeBack::No => return Ok(false),
+                HomeBack::IfManagedBy(user) => {
+                    if !matches!(groups::effective_role(c, project, &user)?, Some(roll_auth::roles::Role::Admin | roll_auth::roles::Role::Owner)) {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+        Ok(true)
     }
 
     /// Stop keeping a deleted project (a product purged what it kept of it).
@@ -501,6 +590,16 @@ impl Workspace {
         project.owner.is_empty() || self.trusted_when_deleted(&project.id, &project.owner, kind, r#ref)
     }
 
+    /// Ask `f` inside each project restore's transaction about each kept home ([`InRestore`]).
+    pub fn in_restore(&self, f: InRestore) {
+        self.in_restore.write().expect("in_restore").push(f);
+    }
+
+    /// Ask `f` inside each project delete's transaction ([`InDelete`]): a [`Refusal`] stops it.
+    pub fn in_delete(&self, f: InDelete) {
+        self.in_delete.write().expect("in_delete").push(f);
+    }
+
     /// Ask `f` before each project is deleted, outside the transaction: a [`Refusal`] stops it.
     pub fn before_delete(&self, f: BeforeDelete) {
         self.before_delete.write().expect("before_delete").push(f);
@@ -521,10 +620,21 @@ impl Workspace {
         project.owner.is_empty() || self.trusted_by_members(&project.id, &project.owner, kind, r#ref)
     }
 
+    /// The ref `kind ref` is kept by ([`Owners::canonical`]): its id where the product names it by
+    /// one; a ref the product doesn't know is refused (404).
+    pub fn canonical(&self, kind: Kind, r#ref: &str) -> Result<String> {
+        match self.owners.get() {
+            None => Ok(r#ref.to_string()),
+            Some(o) => o.canonical(kind, r#ref).ok_or_else(|| Error::NotFound(format!("no {} {ref:?} here", kind.as_str()))),
+        }
+    }
+
     /// Whether [`Owners`] says `kind ref` is `user`'s own (their repo, their search cluster): what a
     /// person may put on a canvas, or make a project the home of.
     pub fn owned_by(&self, user: &str, kind: Kind, r#ref: &str) -> bool {
-        self.owners.get().is_some_and(|o| o.owns(user, kind, r#ref))
+        // By the id it goes by (a name is resolved first; the owner answers for ids only).
+        let Ok(r#ref) = self.canonical(kind, r#ref) else { return false };
+        self.owners.get().is_some_and(|o| o.owns(user, kind, &r#ref))
     }
 
     /// Run `f` after each project is deleted, outside the transaction.
@@ -537,6 +647,8 @@ impl Workspace {
     /// project.
     pub fn place(&self, scope: Scope<'_>, id: &str, kind: Kind, r#ref: &str, x: f64, y: f64) -> Result<Resource> {
         check_ref(r#ref)?;
+        let canonical = self.canonical(kind, r#ref)?;
+        let r#ref = canonical.as_str();
         if !x.is_finite() || !y.is_finite() {
             return Err(Error::BadRequest("x and y must be finite numbers".into()));
         }
@@ -569,6 +681,9 @@ impl Workspace {
 
     /// Take a resource out of project `id`.
     pub fn remove(&self, scope: Scope<'_>, id: &str, kind: Kind, r#ref: &str) -> Result<()> {
+        // By its id where it's known; a ref that no longer resolves is taken off as it's kept.
+        let canonical = self.canonical(kind, r#ref).unwrap_or_else(|_| r#ref.to_string());
+        let r#ref = canonical.as_str();
         self.db.write(|c| {
             owner_of(c, scope, id)?;
             let n = c.execute("DELETE FROM resources WHERE project_id = ? AND kind = ? AND ref = ?", [id, kind.as_str(), r#ref])?;

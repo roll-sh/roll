@@ -330,7 +330,8 @@ pub enum Preview {
     },
     /// Drive a service's page in a browser through roll, as an agent does (roll MCP's
     /// `previews_try`): the steps follow the path, each a verb and its words (`click <selector>`,
-    /// `type <selector> <text>`, `press <key>`, `wait <ms>`; 10 at most), and it prints the page's
+    /// `type <selector> <text>`, `choose <selector> <n>`, `press <key>`, `wait <ms>`; 10 at most),
+    /// and it prints the page's
     /// status, what went wrong and its text after them; --out saves its picture. Options go before
     /// the path: `roll preview try pv_… /login type '#email' ada@example.com press Enter`.
     Try {
@@ -438,16 +439,16 @@ async fn shell(api: &Api, preview: &str, service: Option<&str>) -> anyhow::Resul
     ended
 }
 
-/// A project by id or name.
 /// The API with `X-Roll-Project` naming `project`: what roll-access decides a create by (a member's
 /// role there, a token's rule); previews refuses one whose body names another project.
-fn in_project(api: &Api, project: &str) -> Api {
+pub(crate) fn in_project(api: &Api, project: &str) -> Api {
     let mut headers = api.headers.clone();
     headers.push(("x-roll-project".into(), project.into()));
     Api { base: api.base.clone(), http: api.http.clone(), key: api.key.clone(), headers, login: api.login.clone() }
 }
 
-async fn project_id(api: &Api, p: &str) -> anyhow::Result<String> {
+/// A project by id or name.
+pub(crate) async fn project_id(api: &Api, p: &str) -> anyhow::Result<String> {
     if p.starts_with("prj_") {
         return Ok(p.to_string());
     }
@@ -913,7 +914,8 @@ async fn look(api: &Api, preview: Option<&str>, change: Option<&str>) -> anyhow:
 }
 
 /// `a.b=v` into `{"a": {"b": v}}`; `v` as JSON when it parses, else a string.
-/// `try`'s words as steps: each verb takes its own number of words (`type` two, the others one).
+/// `try`'s words as steps: each verb takes its own number of words (`type` and `choose` two, the
+/// others one).
 fn try_steps(words: &[String]) -> anyhow::Result<Vec<Value>> {
     let mut steps = Vec::new();
     let mut w = words.iter();
@@ -923,11 +925,16 @@ fn try_steps(words: &[String]) -> anyhow::Result<Vec<Value>> {
             "click" => json!({ "click": next("a selector")? }),
             "type" => json!({ "type": [next("a selector")?, next("the text")?] }),
             "press" => json!({ "press": next("a key")? }),
+            "choose" => {
+                let sel = next("a selector")?;
+                let n = next("the option's place (from 1)")?;
+                json!({ "choose": [sel, n.parse::<u32>().map_err(|_| anyhow::anyhow!("choose takes the option's place (from 1), not {n:?}"))?] })
+            }
             "wait" => {
                 let ms = next("milliseconds")?;
                 json!({ "wait": ms.parse::<u32>().map_err(|_| anyhow::anyhow!("wait takes milliseconds, not {ms:?}"))? })
             }
-            other => bail!("{other:?} isn't a step: click, type, press or wait"),
+            other => bail!("{other:?} isn't a step: click, type, choose, press or wait"),
         });
     }
     Ok(steps)
@@ -1692,8 +1699,8 @@ mod tests {
     #[test]
     fn try_words_are_steps_in_order() {
         let w = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-        let steps = try_steps(&w(&["type", "#email", "ada@example.com", "click", "form button", "press", "Enter", "wait", "500"])).unwrap();
-        assert_eq!(steps, vec![json!({ "type": ["#email", "ada@example.com"] }), json!({ "click": "form button" }), json!({ "press": "Enter" }), json!({ "wait": 500 })]);
+        let steps = try_steps(&w(&["type", "#email", "ada@example.com", "choose", "#size", "2", "click", "form button", "press", "Enter", "wait", "500"])).unwrap();
+        assert_eq!(steps, vec![json!({ "type": ["#email", "ada@example.com"] }), json!({ "choose": ["#size", 2] }), json!({ "click": "form button" }), json!({ "press": "Enter" }), json!({ "wait": 500 })]);
         assert!(try_steps(&w(&["type", "#email"])).is_err() && try_steps(&w(&["hover", "a"])).is_err() && try_steps(&w(&["wait", "soon"])).is_err());
     }
 

@@ -120,6 +120,28 @@ fn site_generators_publish_their_own_directory() {
     has(&site(r#""vitepress": "1.6.0""#, "vitepress build docs", &[]), &["COPY --from=build /app/docs/.vitepress/dist /site"]);
     let angular = r#"{"projects": {"shop": {"architect": {"build": {"options": {"outputPath": "dist/shop"}}}}}}"#;
     has(&site(r#""@angular/core": "20.0.0", "@angular/build": "20.0.0""#, "ng build", &[("angular.json", angular)]), &["COPY --from=build /app/dist/shop/browser /site"]);
+    // MkDocs: its requirements installed (or mkdocs alone), `mkdocs build`, the site served.
+    let docs = detect(&[("mkdocs.yml", "site_name: Docs\n"), ("requirements.txt", "mkdocs-material==9.6\n")]);
+    assert_eq!((docs.provider, docs.framework.as_deref(), docs.build.as_deref()), (Provider::Static, Some("mkdocs"), Some("mkdocs build")), "{:?}", docs.notes);
+    has(&docs, &["pip install -r requirements.txt && pip install mkdocs", "mkdocs build", "COPY --from=build /app/site /site"]);
+    let bare = detect(&[("mkdocs.yml", "site_name: Docs\n"), ("docs/index.md", "# Hi\n")]);
+    // An app keeping its docs' mkdocs.yml is the app.
+    assert_ne!(detect(&[("mkdocs.yml", "site_name: Docs\n"), ("requirements.txt", "starlette\nmkdocs\n"), ("main.py", "")]).provider, Provider::Static);
+    has(&bare, &["pip install mkdocs", "COPY --from=build /app/site /site"]);
+    // Hugo and Zola: their binary pinned per architecture and checked, the site built into public.
+    let hugo = detect(&[("hugo.toml", "baseURL = 'https://x/'\n"), ("content/_index.md", "# Hi\n"), ("package.json", "{}")]);
+    assert_eq!((hugo.provider, hugo.framework.as_deref(), hugo.build.as_deref()), (Provider::Static, Some("hugo"), Some("hugo --minify")), "{:?}", hugo.notes);
+    has(&hugo, &["ARG TARGETARCH", "sha256sum -c -", "hugo_extended_0.169.0_linux-$a.tar.gz", "COPY --from=build /app/public /site"]);
+    let zola = detect(&[("config.toml", "base_url = \"https://x\"\n"), ("templates/index.html", "<p>hi</p>"), ("content/_index.md", "+++\n+++\n")]);
+    // A server app's config.toml isn't a site's: Go's with baseURL, Flask's with base_url and templates.
+    assert_ne!(detect(&[("go.mod", "module x\n"), ("main.go", "package main"), ("config.toml", "baseURL = 'https://api'\n")]).provider, Provider::Static);
+    assert_ne!(detect(&[("requirements.txt", "flask\n"), ("app.py", ""), ("config.toml", "base_url = 'x'\n"), ("templates/a.html", ""), ("content/a.md", "")]).framework.as_deref(), Some("zola"));
+    assert_eq!((zola.framework.as_deref(), zola.build.as_deref()), (Some("zola"), Some("zola build")));
+    has(&zola, &["x86_64-unknown-linux-gnu", "COPY --from=build /app/public /site"]);
+    // Jekyll: bundled, a production `jekyll build`, its _site served.
+    let blog = detect(&[("Gemfile", "source 'https://rubygems.org'\ngem 'jekyll', '~> 4.4'\n"), ("_config.yml", "title: Blog\n")]);
+    assert_eq!((blog.provider, blog.framework.as_deref()), (Provider::Static, Some("jekyll")), "{:?}", blog.notes);
+    has(&blog, &["JEKYLL_ENV=production bundle exec jekyll build", "COPY --from=build /app/_site /site"]);
     // A server app with build.output, or with netlify.toml's publish: its files are the site.
     let express = r#"{"scripts": {"build": "node gen.js"}, "dependencies": {"express": "5.0.0"}}"#;
     let set = plan(&tree(&[("package.json", express)]), &Overrides { output: s("./out/"), ..Overrides::default() }).unwrap();
