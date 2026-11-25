@@ -438,6 +438,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         None => req.headers().get(axum::http::header::USER_AGENT).and_then(|v| v.to_str().ok()).and_then(client_name),
     };
     if !ctx.grant.ip_allow.is_empty() {
+        // A list that doesn't parse matches no address.
         let nets = crate::store::parse_ip_allow(&ctx.grant.ip_allow).unwrap_or_default();
         if !ip.is_some_and(|ip| nets.iter().any(|n| n.contains(&ip))) {
             ctx.audit(None, None, None, "deny", None, StatusCode::FORBIDDEN);

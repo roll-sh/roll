@@ -852,7 +852,11 @@ async fn error_count(AxState(e): S, Path(id): Path<String>, Query(q): Query<Erro
 
 async fn requests(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Value>> {
     check_id(&id)?;
-    Ok(Json(json!({ "requests": e.requests(&id).await? })))
+    let mut v = json!({ "requests": e.requests(&id).await? });
+    // A fork's page asks for whatever paths its code chooses, in roll's own browser too (MCP's
+    // lockdown, as its routes).
+    mark_outside(&e, &id, &mut v, Some("requests"));
+    Ok(Json(v))
 }
 
 /// A service's last lines; with `follow`, server-sent events: `event: service` (its name), then
@@ -1253,12 +1257,20 @@ async fn logs(AxState(e): S, Path(id): Path<String>, Query(q): Query<LogsQuery>)
 
 async fn activity(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Value>> {
     check_id(&id)?;
-    blocking(e, move |e| {
+    let (e2, id2) = (e.clone(), id.clone());
+    let mut v = blocking(e, move |e| {
         e.store.row(&id)?;
         Ok(json!(e.store.activity(&id)?))
     })
-    .await
-    .map(Json)
+    .await?;
+    // A fork's activity quotes its code: the hosts it tried to reach, a failed build's first line
+    // (MCP's lockdown).
+    if e2.store.row(&id2).is_ok_and(|r| !r.trusted) {
+        for a in v.as_array_mut().into_iter().flatten() {
+            a["outside"] = json!(true);
+        }
+    }
+    Ok(Json(v))
 }
 
 async fn visitors(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Value>> {

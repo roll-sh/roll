@@ -254,6 +254,8 @@ pub struct Loaded {
     rate: Mutex<Option<Arc<RateLimiter>>>,
     /// Browser keys' rate limits ([`crate::browser`]), counted here on the cluster's owner.
     browser: crate::browser::Limiter,
+    /// Browser keys' requests and refusals not handed on yet ([`Node::take_observations`]).
+    browser_usage: crate::browser::Usage,
     bytes: Arc<ByteBudget>,
     requests: AtomicU64,
     /// `requests` as last reported by [`Node::take_request_counts`].
@@ -284,6 +286,11 @@ impl Loaded {
     /// (`ClusterSpec::catalog_id`), or its name on a node without a catalog.
     pub fn id(&self) -> &str {
         self.cluster.config.catalog_id.as_deref().unwrap_or(&self.name)
+    }
+
+    /// Counts a browser key's request (`request`: a new one) or its refusal ([`crate::browser::Usage`]).
+    fn count_browser(&self, id: &str, request: bool, why: Option<crate::browser::Reason>, user: Option<&str>, origin: Option<&str>) {
+        self.browser_usage.count(crate::metrics::minute_of(std::time::SystemTime::now()), id, request, why, user, origin);
     }
 
     /// Requests served since the cluster loaded.
@@ -344,11 +351,16 @@ pub struct Observed {
     pub slow: Vec<search_es::slowlog::Entry>,
     /// Search analytics: buckets, and the indices whose analytics went (their kept rows go).
     pub analytics: search_es::analytics::Taken,
+    /// Browser keys' usage ([`crate::browser::Usage`]): key id, unix minute, what it saw.
+    pub browser: Vec<(String, u64, crate::browser::KeyStats)>,
 }
+
+/// Browser key minutes an unloaded cluster keeps for the next pass (the oldest go first).
+const MAX_UNOBSERVED_BROWSER: usize = crate::browser::MAX_KEYS_COUNTED * 16;
 
 impl Observed {
     pub fn is_empty(&self) -> bool {
-        self.minutes.is_empty() && self.slow.is_empty() && self.analytics.is_empty()
+        self.minutes.is_empty() && self.slow.is_empty() && self.analytics.is_empty() && self.browser.is_empty()
     }
 
     /// Adds `o` (newer) to this.
@@ -356,12 +368,20 @@ impl Observed {
         self.minutes.extend(o.minutes);
         self.slow.extend(o.slow);
         self.analytics.extend(o.analytics);
+        self.browser.extend(o.browser);
         let over = self.slow.len().saturating_sub(search_es::slowlog::MAX_ENTRIES);
         self.slow.drain(..over);
+        let over = self.browser.len().saturating_sub(MAX_UNOBSERVED_BROWSER);
+        self.browser.drain(..over);
     }
 
     fn take_from(l: &Loaded) -> Observed {
-        Observed { minutes: l.metrics.take().into_iter().map(|(m, s)| (m, *s)).collect(), slow: l.cluster.engine.slowlog.take(), analytics: l.cluster.analytics.take() }
+        Observed {
+            minutes: l.metrics.take().into_iter().map(|(m, s)| (m, *s)).collect(),
+            slow: l.cluster.engine.slowlog.take(),
+            analytics: l.cluster.analytics.take(),
+            browser: l.browser_usage.take(),
+        }
     }
 }
 
@@ -451,12 +471,15 @@ pub struct Lease {
     bytes: Reservation,
     dialect: Dialect,
     /// Who the node authenticated with the cluster's own credentials (the owner, `elastic`, or
-    /// a credential's user); search-es trusts it ([`search_es::xpack::security::AUTHENTICATED_HEADER`]).
+    /// a credential's user); search-es trusts it ([`search_es::rest::Verified::ClusterUser`]).
     user: Option<Arc<str>>,
     /// Credentials the cluster's own security verified instead (a native user, API key or
     /// access token, [`auth::native_authorization`]): the `Authorization` header the request
     /// runs with, so search-es authenticates and authorizes it as that principal.
     native_auth: Option<String>,
+    /// A derived browser key the node verified: its identity, handed to search-es in place of
+    /// the key ([`search_es::rest::Verified::Derived`]).
+    derived: Option<Arc<search_es::xpack::security::derived::VerifiedKey>>,
     /// A linked remote cluster's request from roll itself ([`search_es::remote::links`]):
     /// the remote access it carries, the only copy search-es sees.
     link: Option<String>,
@@ -598,9 +621,12 @@ impl Lease {
     /// answered, or, for an answer it streams, when the stream ends ([`Lease::hold`]).
     pub async fn serve(self, req: EsRequest) -> EsResponse {
         let kind = crate::metrics::Kind::of(&req.method, &req.uri);
-        let head = EsRequest { method: req.method.clone(), uri: req.uri.clone(), headers: Vec::new(), body: bytes::Bytes::new() };
+        let head = EsRequest { verified: None, method: req.method.clone(), uri: req.uri.clone(), headers: Vec::new(), body: bytes::Bytes::new() };
         let since = self.since.unwrap_or_else(Instant::now);
         let resp = self.handle(req).await;
+        if self.browser.is_some() && crate::browser::is_policy_refusal(resp.status, &resp.body) {
+            self.browser_refused(crate::browser::Reason::Policy, None);
+        }
         if resp.stream.is_none() {
             self.loaded.metrics.record(std::time::SystemTime::now(), kind, resp.status, Some(since.elapsed()));
             return resp;
@@ -632,20 +658,33 @@ impl Lease {
     /// caller records its metrics: [`Lease::serve`]).
     async fn handle(&self, mut req: EsRequest) -> EsResponse {
         use search_es::remote::links::REMOTE_ACCESS_HEADER;
-        use search_es::xpack::security::AUTHENTICATED_HEADER;
-        // Only the node may say who authenticated, and only roll's own calls are a remote
-        // cluster's.
-        req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(AUTHENTICATED_HEADER) && !k.eq_ignore_ascii_case(REMOTE_ACCESS_HEADER));
+        use search_es::rest::Verified;
+        // Who authenticated is said only here, on the request in process (no header can say
+        // it); only roll's own calls are a remote cluster's.
+        req.verified = None;
+        req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(REMOTE_ACCESS_HEADER));
         if let Some(a) = &self.link {
             req.headers.push((REMOTE_ACCESS_HEADER.to_string(), a.clone()));
         }
         if let Some(u) = &self.user {
-            req.headers.push((AUTHENTICATED_HEADER.to_string(), u.to_string()));
+            req.verified = Some(Verified::ClusterUser(u.clone()));
+        } else if let Some(d) = &self.derived {
+            // Verified once, here: the cluster runs it as what was verified, never the key again.
+            req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case("authorization"));
+            req.verified = Some(Verified::Derived(d.clone()));
         } else if let Some(h) = &self.native_auth {
             req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case("authorization"));
             req.headers.push(("authorization".to_string(), h.clone()));
         }
         self.run(req).await
+    }
+
+    /// Counts a refusal of an admitted browser key's request in the key's usage (`origin`: the
+    /// page's).
+    pub fn browser_refused(&self, why: crate::browser::Reason, origin: Option<&str>) {
+        if let Some(b) = &self.browser {
+            self.loaded.count_browser(&b.id, false, Some(why), None, origin);
+        }
     }
 
     /// Counts a request the cluster's limits refused (429) in its metrics.
@@ -684,7 +723,7 @@ impl Lease {
             // Only reads of async results can change them; only those keep what an error
             // response needs (no copy on the search path).
             let err_req = reads_async_results(&req.uri)
-                .then(|| EsRequest { method: req.method.clone(), uri: req.uri.clone(), headers: req.headers.clone(), body: bytes::Bytes::new() });
+                .then(|| EsRequest { verified: None, method: req.method.clone(), uri: req.uri.clone(), headers: req.headers.clone(), body: bytes::Bytes::new() });
             let resp = search_es::rest::handle_shared_admitted(&loaded.cluster, req, admitted).await;
             // A read that kept an async result longer (`keep_alive`) or opened a SQL cursor:
             // Elasticsearch answers once the new expiration is stored, so the read is
@@ -711,7 +750,7 @@ impl Lease {
             }
             return resp;
         }
-        let err_req = EsRequest { method: req.method.clone(), uri: req.uri.clone(), headers: req.headers.clone(), body: bytes::Bytes::new() };
+        let err_req = EsRequest { verified: None, method: req.method.clone(), uri: req.uri.clone(), headers: req.headers.clone(), body: bytes::Bytes::new() };
         let resp = search_es::rest::handle_shared_admitted(&loaded.cluster, req, admitted).await;
         drop(self.fair.lock().take());
         // Async results the request stored go to `.async-search`, acknowledged with it.
@@ -868,33 +907,37 @@ struct BrowserAuth {
     id: String,
     limit: crate::browser::KeyLimit,
     user: Option<(String, u64)>,
+    /// A derived key's verified identity ([`search_es::rest::Verified::Derived`]): the cluster
+    /// runs the request as it without verifying the key again.
+    derived: Option<Arc<search_es::xpack::security::derived::VerifiedKey>>,
 }
 
 /// What a browser key `p` authenticated as may do on `loaded` (`Ok(None)`: not a browser key):
 /// its id and rate limit. `Err`: a browser key of another cluster, which a branch (or a
 /// point-in-time branch from before a revoke) copied with its security: refused as an unknown
-/// key; or a derived key sent from a page it doesn't name, or naming one the cluster's CORS
-/// doesn't allow (that would widen its parent).
-fn browser_key(loaded: &Loaded, p: &search_es::xpack::security::Principal, req: &EsRequest) -> Result<Option<BrowserAuth>, ()> {
+/// key; or (`Err(Some(key id))`) a derived key sent from a page it doesn't name, or naming one
+/// the cluster's CORS doesn't allow (that would widen its parent).
+fn browser_key(loaded: &Loaded, p: &search_es::xpack::security::Principal, req: &EsRequest) -> Result<Option<BrowserAuth>, Option<String>> {
     let search_es::xpack::security::AuthKind::ApiKey(k) = &p.kind else { return Ok(None) };
     // A derived key's parent is always a browser key (`derived::authenticate` checks it).
-    let not_browser = if k.derived.is_some() { Err(()) } else { Ok(None) };
+    let not_browser = if k.derived.is_some() { Err(None) } else { Ok(None) };
     let Some(meta) = search_es::xpack::security::api_keys::metadata(&loaded.cluster, &k.id) else { return not_browser };
     let Some(b) = meta.get(crate::browser::METADATA) else { return not_browser };
     let spec = loaded.spec();
     match (b.get("cluster").and_then(|v| v.as_str()), spec.catalog_id.as_deref()) {
         (Some(made_for), Some(id)) if made_for == id => {}
-        _ => return Err(()),
+        _ => return Err(None),
     }
     let Some(limit) = key_limit(loaded, &k.id) else { return not_browser };
     let mut user = None;
     if let Some(d) = &k.derived {
         if !d.origins.is_empty() {
+            let refused = || Err(Some(k.id.clone()));
             let mut origins = Vec::with_capacity(d.origins.len());
             for o in &d.origins {
-                let o = crate::cors::normalize_origin(o).map_err(|_| ())?;
+                let Ok(o) = crate::cors::normalize_origin(o) else { return refused() };
                 if !spec.cors.as_ref().is_some_and(|c| c.allows(&o, None)) {
-                    return Err(());
+                    return refused();
                 }
                 origins.push(o);
             }
@@ -902,12 +945,45 @@ fn browser_key(loaded: &Loaded, p: &search_es::xpack::security::Principal, req: 
             if let Some(o) = req.header("origin")
                 && !origins.iter().any(|a| a == o)
             {
-                return Err(());
+                return refused();
             }
         }
         user = d.user.clone().map(|u| (u, search_es::xpack::security::derived::user_share(limit.per_minute, d.per_minute)));
     }
-    Ok(Some(BrowserAuth { id: k.id.clone(), limit, user }))
+    let derived = k.derived.as_deref().map(|d| Arc::new(search_es::xpack::security::derived::VerifiedKey { key: k.id.clone(), auth: d.clone() }));
+    Ok(Some(BrowserAuth { id: k.id.clone(), limit, user, derived }))
+}
+
+/// Counts a browser key's request its cluster turned away before admitting it
+/// ([`crate::browser::Usage`]): `browser`, what [`browser_key`] said of the principal the
+/// credentials authenticated as (`None`: they didn't: an expired, revoked or wrongly signed key,
+/// counted under the key it names when that is one of the cluster's browser keys). Roll's own
+/// requests aren't counted.
+fn count_browser_refusal(loaded: &Loaded, presented: &Presented, claim: Option<&auth::Claim>, browser: Option<Result<Option<BrowserAuth>, Option<String>>>, req: &EsRequest, origin: Origin) {
+    use crate::browser::Reason;
+    if matches!(origin, Origin::Internal) {
+        return;
+    }
+    let (id, why) = match browser {
+        Some(Err(Some(id))) => (id, Reason::Origin),
+        Some(_) => return,
+        None => {
+            let named = match presented {
+                Presented::ApiKey { .. } => claim.and_then(|c| c.api_key_id.clone()),
+                Presented::Derived(token) => search_es::xpack::security::derived::claimed_parent(token),
+                _ => None,
+            };
+            let Some(id) = named else { return };
+            let ours = search_es::xpack::security::api_keys::metadata(&loaded.cluster, &id)
+                .and_then(|m| m.get(crate::browser::METADATA)?.get("cluster")?.as_str().map(str::to_string))
+                .is_some_and(|made_for| loaded.spec().catalog_id.as_deref() == Some(made_for.as_str()));
+            if !ours {
+                return;
+            }
+            (id, Reason::Invalid)
+        }
+    };
+    loaded.count_browser(&id, true, Some(why), None, req.header("origin"));
 }
 
 /// Browser key `key_id`'s body cap: its `limits.max_body_bytes`, else
@@ -940,7 +1016,10 @@ impl search_es::xpack::security::browser::ItemCharge for Charger {
         let Some(limit) = key_limit(&l, key_id) else { return Ok(()) };
         let ceiling = l.spec().browser_per_minute.unwrap_or(crate::browser::DEFAULT_CLUSTER_PER_MINUTE);
         let user = user.map(|(u, asked)| (u, search_es::xpack::security::derived::user_share(limit.per_minute, asked)));
-        l.browser.check(key_id, client, user, limit, ceiling, n)
+        l.browser.check(key_id, client, user, limit, ceiling, n).map_err(|(wait, why)| {
+            l.count_browser(key_id, false, Some(why), user.map(|(u, _)| u), None);
+            wait
+        })
     }
 
     fn refund(&self, key_id: &str, user: search_es::xpack::security::browser::User<'_>, client: Option<std::net::IpAddr>) {
@@ -1355,6 +1434,7 @@ impl Node {
             closed: AtomicBool::new(false),
             rate: Mutex::new(rate),
             browser: Default::default(),
+            browser_usage: Default::default(),
             bytes,
             requests: AtomicU64::new(0),
             metered: AtomicU64::new(0),
@@ -1826,10 +1906,11 @@ impl Node {
             out.analytics.cleared = o.analytics.cleared.clone();
             out.analytics.enabled = o.analytics.enabled.clone();
             out.analytics.hours = o.analytics.hours.clone();
+            out.browser.extend(o.browser.iter().cloned());
         }
         if let Some(l) = self.get_loaded(name).filter(|l| l.id() == id) {
             let analytics = search_es::analytics::Taken { hours: l.cluster.analytics.peek(), ..Default::default() };
-            out.extend(Observed { minutes: l.metrics.peek(), slow: l.cluster.engine.slowlog.peek(), analytics });
+            out.extend(Observed { minutes: l.metrics.peek(), slow: l.cluster.engine.slowlog.peek(), analytics, browser: l.browser_usage.peek() });
             // Loaded here: which indices have analytics on now decides what reads may show.
             out.analytics.enabled = Some(l.cluster.analytics.enabled_names());
         }
@@ -2236,9 +2317,13 @@ impl Node {
             if let Some(c) = &claim
                 && !auth::verify(&spec, c)
             {
-                let Some(Ok(k)) = native_principal(&loaded).map(|p| browser_key(&loaded, &p, req)) else {
-                    self.audit_refusal(name, spec.dialect, Some(&*loaded), req, &presented, Some(c));
-                    return Err(failed().into());
+                let k = match native_principal(&loaded).map(|p| browser_key(&loaded, &p, req)) {
+                    Some(Ok(k)) => k,
+                    refused => {
+                        count_browser_refusal(&loaded, &presented, Some(c), refused, req, origin);
+                        self.audit_refusal(name, spec.dialect, Some(&*loaded), req, &presented, Some(c));
+                        return Err(failed().into());
+                    }
                 };
                 key_limit = k;
                 via_native = true;
@@ -2253,6 +2338,7 @@ impl Node {
             if let Ok(mut lease) = self.pin(loaded, spec.dialect) {
                 if via_native {
                     lease.native_auth = native.clone();
+                    lease.derived = key_limit.as_ref().and_then(|b: &BrowserAuth| b.derived.clone());
                     lease.link = link.clone();
                 } else {
                     lease.user = claim.as_ref().map(authenticated_user);
@@ -2293,9 +2379,13 @@ impl Node {
             })?;
             let mut key_limit = None;
             if via_native {
-                let Some(Ok(k)) = native_principal(&loaded).map(|p| browser_key(&loaded, &p, req)) else {
-                    self.audit_refusal(name, dialect, Some(&*loaded), req, &presented, claim.as_ref());
-                    return Err(failed().into());
+                let k = match native_principal(&loaded).map(|p| browser_key(&loaded, &p, req)) {
+                    Some(Ok(k)) => k,
+                    refused => {
+                        count_browser_refusal(&loaded, &presented, claim.as_ref(), refused, req, origin);
+                        self.audit_refusal(name, dialect, Some(&*loaded), req, &presented, claim.as_ref());
+                        return Err(failed().into());
+                    }
                 };
                 key_limit = k;
             }
@@ -2303,6 +2393,7 @@ impl Node {
                 Ok(mut lease) => {
                     if via_native {
                         lease.native_auth = native.clone();
+                        lease.derived = key_limit.as_ref().and_then(|b: &BrowserAuth| b.derived.clone());
                         lease.link = link.clone();
                     } else {
                         lease.user = claim.as_ref().map(authenticated_user);
@@ -2344,6 +2435,7 @@ impl Node {
             dialect,
             user: None,
             native_auth: None,
+            derived: None,
             link: None,
             since: None,
             browser: None,
@@ -2364,10 +2456,19 @@ impl Node {
     /// Applies the cluster's request rate to a pinned request, then a browser key's own
     /// (`key`, per key and per client address; roll's own requests aren't counted).
     fn admitted(&self, mut lease: Lease, req: &EsRequest, key: Option<BrowserAuth>, origin: Origin) -> Result<Lease, Refused> {
+        use crate::browser::Reason;
+        // A browser key's request, counted in its usage (roll's own aren't).
+        let counted = key.as_ref().filter(|_| !matches!(origin, Origin::Internal));
+        let count = |why: Option<Reason>| {
+            if let Some(k) = counted {
+                lease.loaded.count_browser(&k.id, true, why, k.user.as_ref().map(|(u, _)| u.as_str()), req.header("origin"));
+            }
+        };
         let rate = lease.loaded.rate.lock();
         if let Some(r) = &*rate
             && !r.try_take()
         {
+            count(Some(Reason::Cluster));
             Lease::refused(&lease.loaded, req);
             return Err(Refused::Rejected(Rejected {
                 error: EsError::too_many_requests(format!(
@@ -2381,14 +2482,15 @@ impl Node {
             }));
         }
         drop(rate);
-        if let Some(BrowserAuth { id, limit, user }) = key {
+        if let Some(BrowserAuth { id, limit, user, .. }) = key {
             let ip = match origin {
                 Origin::Client(ip) => Some(ip),
                 Origin::Internal => return Ok(lease),
                 Origin::Unknown => None,
             };
             let ceiling = lease.loaded.spec().browser_per_minute.unwrap_or(crate::browser::DEFAULT_CLUSTER_PER_MINUTE);
-            if let Err(retry_after) = lease.loaded.browser.check(&id, ip, user.as_ref().map(|(u, n)| (u.as_str(), *n)), limit, ceiling, 1) {
+            if let Err((retry_after, why)) = lease.loaded.browser.check(&id, ip, user.as_ref().map(|(u, n)| (u.as_str(), *n)), limit, ceiling, 1) {
+                lease.loaded.count_browser(&id, true, Some(why), user.as_ref().map(|(u, _)| u.as_str()), req.header("origin"));
                 Lease::refused(&lease.loaded, req);
                 let error = EsError::too_many_requests(format!(
                     "rejected execution of REST request [{} {}]: API key [{id}] exceeds its rate of [{}] requests per minute{}{}",
@@ -2406,6 +2508,7 @@ impl Node {
             let mif = lease.loaded.spec().max_in_flight as u64;
             let per_cluster = (mif / 4).max(4).min(mif / 2);
             if !lease.loaded.browser.enter(&id, limit.max_concurrent, per_cluster) {
+                lease.loaded.count_browser(&id, true, Some(Reason::Concurrency), user.as_ref().map(|(u, _)| u.as_str()), req.header("origin"));
                 // Refused: the token its admission took goes back.
                 lease.loaded.browser.refund(&id, ip, user.as_ref().map(|(u, _)| u.as_str()), limit, 1);
                 Lease::refused(&lease.loaded, req);
@@ -2415,6 +2518,7 @@ impl Node {
                 ));
                 return Err(Refused::Throttled(Rejected { error, dialect: lease.dialect }, 1));
             }
+            lease.loaded.count_browser(&id, true, None, user.as_ref().map(|(u, _)| u.as_str()), None);
             let max_body = browser_body_cap(&lease.loaded, &id);
             lease.browser = Some(BrowserCharge { id, max_body });
         }

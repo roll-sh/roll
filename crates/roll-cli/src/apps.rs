@@ -158,6 +158,10 @@ pub enum Domains {
     /// Add a custom domain and print the DNS record it needs.
     Add {
         hostname: String,
+        /// Its www pair too (`www.example.com` for `example.com`, or the other way round),
+        /// redirecting to it, as Vercel and Render add both.
+        #[arg(long)]
+        www: bool,
         #[command(flatten)]
         target: Target,
     },
@@ -372,7 +376,7 @@ pub enum AppsCmd {
         /// Idle seconds before it's stopped.
         #[arg(long, value_name = "SECONDS")]
         sleep_after: Option<u32>,
-        /// A cron run's limit; a web service's request limit (unanswered by then is a 504).
+        /// A cron run's limit (default 3600); a web service's request limit to its answer's head (default 300; unanswered by then is a 504).
         #[arg(long, value_name = "SECONDS")]
         timeout: Option<u32>,
         /// A cron service's failed run is tried again this many times (0–5), after a backoff.
@@ -885,8 +889,13 @@ pub enum AppsCmd {
         #[arg(long)]
         from: String,
         /// Only this deployment (the one you tested): refused if `--from` runs another now.
-        #[arg(long, value_name = "DEPLOYMENT")]
+        #[arg(long, value_name = "DEPLOYMENT", conflicts_with = "all_services")]
         expect: Option<String>,
+        /// Every service of the project (Heroku Pipelines' promote): each one's deployment live
+        /// in `--from` now, listed first, then promoted through its own call with that
+        /// deployment as its `expect`; a service with nothing live there is skipped and said.
+        #[arg(long)]
+        all_services: bool,
         #[command(flatten)]
         target: Target,
     },
@@ -1357,6 +1366,33 @@ pub enum AppsCmd {
         #[arg(long)]
         remove: bool,
     },
+    /// What the environment's last week says to change (right-sizing, the dashboard's Usage
+    /// advice): memory near its limit, CPU at its ceiling, requests turned away, idle floors.
+    Advice {
+        #[command(flatten)]
+        target: Target,
+    },
+    /// What a service run so would cost at most, before it's made (`POST /v1/apps/quote`).
+    Quote {
+        /// vCPU (0.25–8).
+        #[arg(long)]
+        cpu: Option<f64>,
+        /// Memory in MB (256–16384).
+        #[arg(long)]
+        memory: Option<u32>,
+        /// Instances always running (0 sleeps when idle).
+        #[arg(long)]
+        min: Option<u32>,
+        #[arg(long)]
+        max: Option<u32>,
+    },
+    /// A deployment's signed SLSA provenance (what built its image, from what): the statement,
+    /// or with `--json` the DSSE envelope to check with `cosign verify-blob-attestation`.
+    Provenance {
+        deployment: String,
+        #[command(flatten)]
+        target: Target,
+    },
     /// This month's use and what it costs.
     Usage {
         #[command(flatten)]
@@ -1637,6 +1673,19 @@ async fn deleted_service(api: &Api, t: &Target) -> anyhow::Result<Option<Value>>
         [] => Ok(None),
         [one] => Ok(Some((*one).clone())),
         _ => bail!("{} deleted services are named {key}: pass its id (`roll apps restore --list`)", found.len()),
+    }
+}
+
+/// The other half of `example.com` / `www.example.com` (an apex as the server tells one).
+fn www_pair(h: &str) -> Option<String> {
+    let apex = |h: &str| {
+        let labels: Vec<&str> = h.split('.').collect();
+        labels.len() == 2 || (labels.len() == 3 && ["co", "com", "org", "net", "ac", "gov", "edu"].contains(&labels[1]))
+    };
+    match h.strip_prefix("www.") {
+        Some(rest) if apex(rest) => Some(rest.to_string()),
+        _ if !h.starts_with("*.") && apex(h) => Some(format!("www.{h}")),
+        _ => None,
     }
 }
 
@@ -2882,9 +2931,22 @@ pub async fn domains(api: &Api, json_out: bool, d: Domains) -> anyhow::Result<()
             }
             v
         }
-        Domains::Add { hostname, target } => {
+        Domains::Add { hostname, www, target } => {
             let svc = service(api, &target).await?;
             let v = api.post(&format!("{}/domains", env_path(&svc, &target.env)), json!({ "hostname": hostname })).await?;
+            let pair = match www {
+                true => Some(www_pair(&s(&v["hostname"])).ok_or_else(|| anyhow::anyhow!("--www pairs an apex (example.com) with its www. name: {} is neither", s(&v["hostname"])))?),
+                false => None,
+            };
+            if let Some(p) = &pair {
+                let w = api.post(&format!("{}/domains", env_path(&svc, &target.env)), json!({ "hostname": p })).await?;
+                api.call(reqwest::Method::PATCH, &format!("{}/domains/{}", env_path(&svc, &target.env), enc(p)), Some(json!({ "redirect_to": s(&v["hostname"]) }))).await?;
+                if !json_out {
+                    println!("Added {p}, redirecting to {}: point it at roll too:", s(&v["hostname"]));
+                    println!("  CNAME  {p}  →  {}", s(&w["target"]));
+                    println!("  TXT    _roll-challenge.{p}  \"{}\"", s(&w["token"]));
+                }
+            }
             if !json_out {
                 println!("Added {}. Point it at roll:", s(&v["hostname"]));
                 println!("  CNAME  {}  →  {}", s(&v["hostname"]), s(&v["target"]));
@@ -4260,7 +4322,54 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             dep
         }
-        AppsCmd::Promote { from, expect, target } => {
+        AppsCmd::Promote { from, expect, all_services: true, target } => {
+            let _ = expect;
+            let svc = service(api, &target).await?;
+            let all = api.get(&format!("/v1/apps/projects/{}/services", enc(&s(&svc["project"])))).await?;
+            // What each runs in `from` now, read once: what's promoted is exactly what was listed.
+            let mut plan = Vec::new();
+            for one in all.as_array().into_iter().flatten() {
+                let live = match api.get(&env_path(one, &from)).await {
+                    Ok(e) => e["active"]["id"].as_str().map(str::to_string),
+                    Err(_) => None,
+                };
+                if !json_out {
+                    match &live {
+                        Some(d) => println!("{:<24} {from} {d} → {}", s(&one["name"]), target.env),
+                        None => println!("{:<24} nothing live in {from}: skipped", s(&one["name"])),
+                    }
+                }
+                if let Some(d) = live {
+                    plan.push((one.clone(), d));
+                }
+            }
+            let (mut out, mut failed) = (Vec::new(), 0);
+            for (one, d) in &plan {
+                let r = api.post(&format!("{}/promote", env_path(one, &target.env)), json!({ "from": from, "expect": d })).await;
+                if !json_out {
+                    match &r {
+                        Ok(dep) => println!("{:<24} promoted: {}", s(&one["name"]), s(&dep["id"])),
+                        Err(err) => println!("{:<24} failed: {err:#}", s(&one["name"])),
+                    }
+                }
+                failed += r.is_err() as usize;
+                out.push(match r {
+                    Ok(dep) => json!({ "service": one["id"], "deployment": dep }),
+                    Err(err) => json!({ "service": one["id"], "error": format!("{err:#}") }),
+                });
+            }
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            }
+            if failed > 0 {
+                bail!("{failed} of {} services weren't promoted to {}", out.len(), target.env);
+            }
+            if plan.is_empty() {
+                bail!("nothing is live in {from} in this project");
+            }
+            return Ok(());
+        }
+        AppsCmd::Promote { from, expect, all_services: false, target } => {
             let svc = service(api, &target).await?;
             let dep = api.post(&format!("{}/promote", env_path(&svc, &target.env)), json!({ "from": from, "expect": expect })).await?;
             if !json_out {
@@ -5117,6 +5226,65 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 println!("this month  ${:.2}{}", v["month_usd"].as_f64().unwrap_or(0.0), if v["capped"] == true { "  (paused: at its limit)" } else { "" });
                 println!("alert       {}", usd("alert_usd"));
                 println!("hard limit  {}", usd("hard_usd"));
+                return Ok(());
+            }
+            v
+        }
+        AppsCmd::Advice { target } => {
+            let svc = service(api, &target).await?;
+            let v = api.get(&format!("{}/advice", env_path(&svc, &target.env))).await?;
+            if !json_out {
+                let all = v["advice"].as_array().cloned().unwrap_or_default();
+                if all.is_empty() {
+                    println!("nothing to change: {} minutes of the last {} days read", v["minutes"], v["days"]);
+                }
+                for a in &all {
+                    let saving = a["saving_usd_month"].as_f64().map(|u| format!(" (saves ≈ ${u:.2} a month)")).unwrap_or_default();
+                    println!("{}: {}{saving}", s(&a["kind"]), s(&a["message"]));
+                    if let Some(run) = a["set"]["run"].as_object() {
+                        println!("  set: {}", run.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" "));
+                    }
+                }
+                return Ok(());
+            }
+            v
+        }
+        AppsCmd::Quote { cpu, memory, min, max } => {
+            let mut run = serde_json::Map::new();
+            for (k, v) in [("cpu", cpu.map(|c| json!(c))), ("memory_mb", memory.map(|m| json!(m))), ("min_instances", min.map(|m| json!(m))), ("max_instances", max.map(|m| json!(m)))] {
+                if let Some(v) = v {
+                    run.insert(k.into(), v);
+                }
+            }
+            let v = api.post("/v1/apps/quote", json!({ "run": run })).await?;
+            if !json_out {
+                let usd = |k: &str| v[k].as_f64().map(|u| format!("${u:.4}")).unwrap_or_else(|| "-".into());
+                println!("an instance-hour {}, idle {}", usd("instance_hour"), usd("idle_hour"));
+                println!("a month: ${:.2} at least, ${:.2} at most{}", v["month"]["least"].as_f64().unwrap_or(0.0), v["month"]["most"].as_f64().unwrap_or(0.0), if v["scales_to_zero"] == true { " (asleep when idle costs nothing)" } else { "" });
+                if let Some(n) = v["note"].as_str().filter(|n| !n.is_empty()) {
+                    println!("{n}");
+                }
+                return Ok(());
+            }
+            v
+        }
+        AppsCmd::Provenance { deployment, target } => {
+            let svc = service(api, &target).await?;
+            let v = api.get(&format!("{}/deploys/{}/provenance", env_path(&svc, &target.env), enc(&deployment))).await?;
+            if !json_out {
+                use base64::Engine;
+                let statement: Value = base64::engine::general_purpose::STANDARD.decode(v["payload"].as_str().unwrap_or_default()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+                for sub in statement["subject"].as_array().into_iter().flatten() {
+                    println!("image     {}@sha256:{}", s(&sub["name"]), s(&sub["digest"]["sha256"]));
+                }
+                let pred = &statement["predicate"];
+                println!("builder   {}", s(&pred["runDetails"]["builder"]["id"]));
+                println!("build     {}", s(&pred["buildDefinition"]["buildType"]));
+                for d in pred["buildDefinition"]["resolvedDependencies"].as_array().into_iter().flatten() {
+                    let digest = d["digest"].as_object().and_then(|o| o.iter().next()).map(|(k, v)| format!(" {k}:{}", v.as_str().unwrap_or(""))).unwrap_or_default();
+                    println!("from      {}{digest}", s(&d["uri"]));
+                }
+                println!("signed    {} (--json for the DSSE envelope)", v["signatures"].as_array().map_or(0, Vec::len));
                 return Ok(());
             }
             v

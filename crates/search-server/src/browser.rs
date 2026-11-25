@@ -25,10 +25,20 @@
 //! **Concurrency.** Browser requests running at once are capped per key (`max_concurrent`,
 //! default 4) and per cluster (a quarter of the cluster's `max_in_flight`, at least 4 but never
 //! more than half), so the owner's own clients always have permits left.
+//!
+//! **Usage** ([`Usage`]; Algolia's per-key usage and logs). The owner counts each browser key's
+//! requests and refusals, by [`Reason`], in memory: atomics for the minute in progress, and
+//! for a derived key's `user` and a refused request's `Origin` a bounded top list
+//! ([`MAX_TRACKED`] while counting, [`TOP`] kept). No request body, query or address is kept.
+//! The metering pass hands the minutes on with the cluster's other observations
+//! (`Node::take_observations`), and the catalog keeps them in the metrics' rings; a takeover
+//! starts from what was handed on.
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 /// The key of an API key's `metadata` that makes it a browser key.
@@ -137,8 +147,8 @@ pub struct Limiter {
 impl Limiter {
     /// Charges `n` tokens to a request of key `id` from `ip` (for `user` at its rate per minute,
     /// a derived key's) under the cluster's `ceiling` (per minute); `Err`: refused, retry after
-    /// that many seconds. A refused request takes nothing.
-    pub fn check(&self, id: &str, ip: Option<IpAddr>, user: Option<(&str, u64)>, limit: KeyLimit, ceiling: u64, n: u64) -> Result<(), u64> {
+    /// that many seconds, and the bucket that waits longest. A refused request takes nothing.
+    pub fn check(&self, id: &str, ip: Option<IpAddr>, user: Option<(&str, u64)>, limit: KeyLimit, ceiling: u64, n: u64) -> Result<(), (u64, Reason)> {
         let now = Instant::now();
         let need = n.max(1) as f64;
         let mut cluster = self.cluster.lock();
@@ -147,7 +157,7 @@ impl Limiter {
         let mut users = self.users.lock();
         let mut waits = Vec::new();
         let c = cluster.get_or_insert_with(|| Bucket::new(ceiling, now));
-        waits.push(c.refill(ceiling, now, need));
+        waits.push((c.refill(ceiling, now, need), Reason::Cluster));
         let mut nets = Vec::new();
         if let (Some(per_ip), Some(ip)) = (limit.per_ip_per_minute, ip) {
             // A network's share: never past a quarter of the key's or the cluster's limit (nor
@@ -161,19 +171,28 @@ impl Limiter {
                 };
                 let k = (id.to_string(), width as u8, net);
                 room(&mut addresses, &k, now);
-                waits.push(addresses.entry(k.clone()).or_insert_with(|| Bucket::new(per, now)).refill(per, now, need));
+                waits.push((addresses.entry(k.clone()).or_insert_with(|| Bucket::new(per, now)).refill(per, now, need), Reason::Address));
                 nets.push(k);
             }
         }
         room(&mut keys, &id.to_string(), now);
-        waits.push(keys.entry(id.to_string()).or_insert_with(|| Bucket::new(limit.per_minute, now)).refill(limit.per_minute, now, need));
+        waits.push((keys.entry(id.to_string()).or_insert_with(|| Bucket::new(limit.per_minute, now)).refill(limit.per_minute, now, need), Reason::Key));
         let user = user.map(|(u, per)| ((id.to_string(), u.to_string()), per));
         if let Some((k, per)) = &user {
             room(&mut users, k, now);
-            waits.push(users.entry(k.clone()).or_insert_with(|| Bucket::new(*per, now)).refill(*per, now, need));
+            waits.push((users.entry(k.clone()).or_insert_with(|| Bucket::new(*per, now)).refill(*per, now, need), Reason::User));
         }
-        if let Some(wait) = waits.iter().filter_map(|w| w.err()).max() {
-            return Err(wait);
+        // The first of the longest waits: the bucket that holds the request back.
+        let mut refused: Option<(u64, Reason)> = None;
+        for (w, why) in &waits {
+            if let Err(wait) = w
+                && refused.is_none_or(|(r, _)| *wait > r)
+            {
+                refused = Some((*wait, *why));
+            }
+        }
+        if let Some(r) = refused {
+            return Err(r);
         }
         if let Some(b) = user.and_then(|(k, _)| users.get_mut(&k)) {
             b.tokens -= need;
@@ -254,6 +273,318 @@ fn room<K: std::hash::Hash + Eq + Clone>(map: &mut HashMap<K, Bucket>, key: &K, 
     }
 }
 
+/// Why a browser key's request was refused: a 429 (the first five) or another refusal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reason {
+    /// The key's own rate.
+    Key = 0,
+    /// Its rate per client address (or network).
+    Address = 1,
+    /// A derived key's user's share of it.
+    User = 2,
+    /// Requests running at once: the key's `max_concurrent`, or the cluster's browser share.
+    Concurrency = 3,
+    /// The cluster's browser ceiling, which every browser key draws from.
+    Cluster = 4,
+    /// A page whose `Origin` the cluster's CORS (or a derived key's `origins`) doesn't allow.
+    Origin = 5,
+    /// What the key's policy refuses: an API, a query or a parameter, more items than its
+    /// `max_items`.
+    Policy = 6,
+    /// A body over the key's `max_body_bytes`.
+    BodyTooLarge = 7,
+    /// An expired, revoked or wrongly signed key (or a derived key its parent refuses).
+    Invalid = 8,
+}
+
+pub const REASONS: [Reason; 9] =
+    [Reason::Key, Reason::Address, Reason::User, Reason::Concurrency, Reason::Cluster, Reason::Origin, Reason::Policy, Reason::BodyTooLarge, Reason::Invalid];
+
+impl Reason {
+    pub fn name(self) -> &'static str {
+        match self {
+            Reason::Key => "key_rate",
+            Reason::Address => "address_rate",
+            Reason::User => "user_rate",
+            Reason::Concurrency => "concurrency",
+            Reason::Cluster => "cluster_ceiling",
+            Reason::Origin => "origin",
+            Reason::Policy => "policy",
+            Reason::BodyTooLarge => "body_too_large",
+            Reason::Invalid => "invalid_key",
+        }
+    }
+
+    /// A 429.
+    pub fn throttles(self) -> bool {
+        (self as usize) < 5
+    }
+}
+
+/// What the engine's browser policy refusals say (`search_es::xpack::security::browser`: an API,
+/// a query or parameter, one of the key's `max_…` limits), told apart in the answer of an
+/// admitted request: the engine refuses where it has the request parsed, deep inside it.
+const POLICY_MARKERS: [&[u8]; 5] =
+    [b"isn't available to a browser key", b"for a browser key", b"(the key's max_", b"; the key's max_", b"'search.allow_expensive_queries' is set to false"];
+
+/// Whether an admitted browser key's answer is a refusal of its policy ([`Reason::Policy`]).
+pub fn is_policy_refusal(status: u16, body: &[u8]) -> bool {
+    matches!(status, 400 | 429) && body.len() <= 64 * 1024 && POLICY_MARKERS.iter().any(|m| body.windows(m.len()).any(|w| w == *m))
+}
+
+/// Users and origins a bucket keeps, most requests first.
+pub const TOP: usize = 10;
+/// Users and origins counted per key and minute before the least counted makes room
+/// (Space-Saving: the newcomer starts from its count, so a frequent one is never missed).
+pub const MAX_TRACKED: usize = 64;
+/// Browser keys counted per loaded cluster (a cluster has at most 20; revoked and expired ones
+/// still count their refusals).
+pub const MAX_KEYS_COUNTED: usize = 64;
+/// The longest origin kept, in bytes (normalized `scheme://host[:port]`).
+pub const MAX_ORIGIN_BYTES: usize = 255;
+/// Finished minutes a key keeps until they are taken; past it, the oldest two merge.
+const MAX_PENDING: usize = 16;
+
+/// One browser key's usage over a bucket (a minute, an hour, a range).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct KeyStats {
+    /// Every request the key made, refused ones too.
+    pub requests: u64,
+    /// Refusals, by [`Reason`].
+    pub refused: [u64; REASONS.len()],
+    /// A derived key's users: requests and 429s, most requests first, at most [`TOP`].
+    pub users: Vec<(String, u64, u64)>,
+    /// Origins of refused requests, most first, at most [`TOP`].
+    pub origins: Vec<(String, u64)>,
+}
+
+impl KeyStats {
+    pub fn is_empty(&self) -> bool {
+        self.requests == 0 && self.refused.iter().all(|n| *n == 0)
+    }
+
+    pub fn throttled(&self) -> u64 {
+        REASONS.iter().filter(|r| r.throttles()).map(|r| self.refused[*r as usize]).sum()
+    }
+
+    /// Adds `o` to this, keeping the [`TOP`] users and origins.
+    pub fn merge(&mut self, o: &KeyStats) {
+        self.requests += o.requests;
+        for (a, b) in self.refused.iter_mut().zip(o.refused) {
+            *a += b;
+        }
+        let mut users: HashMap<String, (u64, u64)> = self.users.drain(..).map(|(u, r, t)| (u, (r, t))).collect();
+        for (u, r, t) in &o.users {
+            let e = users.entry(u.clone()).or_default();
+            e.0 += r;
+            e.1 += t;
+        }
+        self.users = top(users.into_iter().map(|(u, (r, t))| (u, r, t)), |x| (x.1, x.2), |x| &x.0);
+        let mut origins: HashMap<String, u64> = self.origins.drain(..).collect();
+        for (o, n) in &o.origins {
+            *origins.entry(o.clone()).or_default() += n;
+        }
+        self.origins = top(origins.into_iter(), |x| (x.1, 0), |x| &x.0);
+    }
+
+    /// As the catalog keeps it, and as the usage route answers it.
+    pub fn to_json(&self) -> serde_json::Value {
+        let mut refused = serde_json::Map::new();
+        for r in REASONS {
+            refused.insert(r.name().into(), self.refused[r as usize].into());
+        }
+        serde_json::json!({
+            "requests": self.requests,
+            "throttled": self.throttled(),
+            "refused": refused,
+            "users": self.users.iter().map(|(u, r, t)| serde_json::json!({ "user": u, "requests": r, "throttled": t })).collect::<Vec<_>>(),
+            "origins": self.origins.iter().map(|(o, n)| serde_json::json!({ "origin": o, "refused": n })).collect::<Vec<_>>(),
+        })
+    }
+
+    pub fn encode(&self) -> String {
+        self.to_json().to_string()
+    }
+
+    /// What [`KeyStats::encode`] wrote (anything else reads as nothing), bounded as kept.
+    pub fn decode(s: &str) -> KeyStats {
+        let v: serde_json::Value = serde_json::from_str(s).unwrap_or_default();
+        let n = |v: &serde_json::Value| v.as_u64().unwrap_or(0);
+        let mut k = KeyStats { requests: n(&v["requests"]), ..Default::default() };
+        for r in REASONS {
+            k.refused[r as usize] = n(&v["refused"][r.name()]);
+        }
+        let list = |f: &str| v[f].as_array().cloned().unwrap_or_default().into_iter().take(TOP);
+        k.users = list("users").filter_map(|u| Some((u["user"].as_str()?.to_string(), n(&u["requests"]), n(&u["throttled"])))).collect();
+        k.origins = list("origins").filter_map(|o| Some((o["origin"].as_str()?.to_string(), n(&o["refused"])))).collect();
+        k
+    }
+}
+
+/// The [`TOP`] of `items` by `count`, ties by name.
+fn top<T>(items: impl Iterator<Item = T>, count: impl Fn(&T) -> (u64, u64), name: impl Fn(&T) -> &String) -> Vec<T> {
+    let mut v: Vec<T> = items.collect();
+    v.sort_by(|a, b| count(b).cmp(&count(a)).then_with(|| name(a).cmp(name(b))));
+    v.truncate(TOP);
+    v
+}
+
+/// A refused request's `Origin` as kept: normalized, at most [`MAX_ORIGIN_BYTES`] (`None`:
+/// not an origin).
+pub fn kept_origin(o: &str) -> Option<String> {
+    let mut o = crate::cors::normalize_origin(o).ok()?;
+    if o.len() > MAX_ORIGIN_BYTES {
+        let mut end = MAX_ORIGIN_BYTES;
+        while !o.is_char_boundary(end) {
+            end -= 1;
+        }
+        o.truncate(end);
+    }
+    Some(o)
+}
+
+/// Adds `by` to `name`'s count in `map`, making room Space-Saving's way when it is full.
+fn bump<V: Copy + Default + Ord>(map: &mut HashMap<String, V>, name: &str, by: impl Fn(&mut V)) {
+    if !map.contains_key(name) && map.len() >= MAX_TRACKED {
+        let Some((least, v)) = map.iter().min_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0))).map(|(k, v)| (k.clone(), *v)) else { return };
+        map.remove(&least);
+        map.insert(name.to_string(), v);
+    }
+    by(map.entry(name.to_string()).or_default());
+}
+
+#[derive(Default)]
+struct Detail {
+    /// The minute `counts` and the lists below are of.
+    minute: u64,
+    users: HashMap<String, (u64, u64)>,
+    origins: HashMap<String, u64>,
+    /// Finished minutes, oldest first.
+    done: Vec<(u64, KeyStats)>,
+}
+
+struct KeyUsage {
+    /// `Detail::minute`, read without the lock.
+    minute: AtomicU64,
+    requests: AtomicU64,
+    refused: [AtomicU64; REASONS.len()],
+    detail: Mutex<Detail>,
+}
+
+impl KeyUsage {
+    /// The minute in progress, as counted so far, its counters emptied (`take`) or not.
+    fn current(&self, d: &mut Detail, take: bool) -> KeyStats {
+        let read = |a: &AtomicU64| if take { a.swap(0, Ordering::Relaxed) } else { a.load(Ordering::Relaxed) };
+        let mut k = KeyStats { requests: read(&self.requests), ..Default::default() };
+        for (i, a) in self.refused.iter().enumerate() {
+            k.refused[i] = read(a);
+        }
+        let (users, origins) = if take { (std::mem::take(&mut d.users), std::mem::take(&mut d.origins)) } else { (d.users.clone(), d.origins.clone()) };
+        k.users = top(users.into_iter().map(|(u, (r, t))| (u, r, t)), |x| (x.1, x.2), |x| &x.0);
+        k.origins = top(origins.into_iter(), |x| (x.1, 0), |x| &x.0);
+        k
+    }
+
+    /// Moves the minute in progress to the finished ones when `minute` is another.
+    fn roll(&self, d: &mut Detail, minute: u64) {
+        if d.minute == minute {
+            return;
+        }
+        let k = self.current(d, true);
+        if !k.is_empty() {
+            d.done.push((d.minute, k));
+            if d.done.len() > MAX_PENDING {
+                let (_, oldest) = d.done.remove(0);
+                d.done[0].1.merge(&oldest);
+            }
+        }
+        d.minute = minute;
+        self.minute.store(minute, Ordering::Release);
+    }
+}
+
+/// One loaded cluster's browser key usage not handed on yet (the module docs, "Usage").
+#[derive(Default)]
+pub struct Usage {
+    keys: RwLock<HashMap<String, Arc<KeyUsage>>>,
+}
+
+impl Usage {
+    fn key(&self, id: &str, minute: u64) -> Option<Arc<KeyUsage>> {
+        if let Some(k) = self.keys.read().get(id) {
+            return Some(k.clone());
+        }
+        let mut keys = self.keys.write();
+        if !keys.contains_key(id) && keys.len() >= MAX_KEYS_COUNTED {
+            return None;
+        }
+        let k = keys.entry(id.to_string()).or_insert_with(|| {
+            Arc::new(KeyUsage {
+                minute: AtomicU64::new(minute),
+                requests: AtomicU64::new(0),
+                refused: Default::default(),
+                detail: Mutex::new(Detail { minute, ..Default::default() }),
+            })
+        });
+        Some(k.clone())
+    }
+
+    /// Counts a request of browser key `id` at unix minute `minute` (`request`: a new one;
+    /// otherwise a refusal of one counted already), refused for `why`, for a derived key's
+    /// `user`, from the page `origin` (kept only for a refusal).
+    pub fn count(&self, minute: u64, id: &str, request: bool, why: Option<Reason>, user: Option<&str>, origin: Option<&str>) {
+        let Some(k) = self.key(id, minute) else { return };
+        let origin = why.and(origin).and_then(kept_origin);
+        if user.is_some() || origin.is_some() || k.minute.load(Ordering::Acquire) != minute {
+            let mut d = k.detail.lock();
+            k.roll(&mut d, minute);
+            if let Some(u) = user {
+                let throttled = why.is_some_and(Reason::throttles);
+                bump(&mut d.users, u, |(r, t)| {
+                    *r += u64::from(request);
+                    *t += u64::from(throttled);
+                });
+            }
+            if let Some(o) = &origin {
+                bump(&mut d.origins, o, |n| *n += 1);
+            }
+        }
+        if request {
+            k.requests.fetch_add(1, Ordering::Relaxed);
+        }
+        if let Some(r) = why {
+            k.refused[r as usize].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Takes every key's minutes, oldest first (the one in progress too: the catalog adds
+    /// them up, so the rest of it comes with the next take).
+    pub fn take(&self) -> Vec<(String, u64, KeyStats)> {
+        self.read(true)
+    }
+
+    /// Copies of what [`Usage::take`] would take.
+    pub fn peek(&self) -> Vec<(String, u64, KeyStats)> {
+        self.read(false)
+    }
+
+    fn read(&self, take: bool) -> Vec<(String, u64, KeyStats)> {
+        let keys: Vec<(String, Arc<KeyUsage>)> = self.keys.read().iter().map(|(id, k)| (id.clone(), k.clone())).collect();
+        let mut out = Vec::new();
+        for (id, k) in keys {
+            let mut d = k.detail.lock();
+            let done = if take { std::mem::take(&mut d.done) } else { d.done.clone() };
+            out.extend(done.into_iter().map(|(m, s)| (id.clone(), m, s)));
+            let minute = d.minute;
+            let cur = k.current(&mut d, take);
+            if !cur.is_empty() {
+                out.push((id.clone(), minute, cur));
+            }
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,15 +602,15 @@ mod tests {
         assert!(l.check("k", Some(a), None, lim, 100, 1).is_ok());
         assert!(l.check("k", Some(a), None, lim, 100, 1).is_ok());
         // The address is out; another network still has the key's last token.
-        assert_eq!(l.check("k", Some(a), None, lim, 100, 1), Err(30));
+        assert_eq!(l.check("k", Some(a), None, lim, 100, 1), Err((30, Reason::Address)));
         assert!(l.check("k", Some(b), None, lim, 100, 1).is_ok());
         // Now the key is out: refused, and nothing is taken.
-        assert_eq!(l.check("k", Some(b), None, lim, 100, 1), Err(20));
+        assert_eq!(l.check("k", Some(b), None, lim, 100, 1), Err((20, Reason::Key)));
         // Every key draws from the cluster's ceiling.
         let c = Limiter::default();
         assert!(c.check("k1", Some(a), None, lim, 2, 1).is_ok());
         assert!(c.check("k2", Some(b), None, lim, 2, 1).is_ok());
-        assert_eq!(c.check("k3", Some(b), None, lim, 2, 1), Err(30), "a ceiling of two a minute, both taken");
+        assert_eq!(c.check("k3", Some(b), None, lim, 2, 1), Err((30, Reason::Cluster)), "a ceiling of two a minute, both taken");
     }
 
     #[test]
@@ -319,5 +650,27 @@ mod tests {
         assert!(!l.enter("c", 2, 3), "the cluster's three");
         l.leave("a");
         assert!(l.enter("c", 2, 3));
+    }
+
+    #[test]
+    fn usage_counts_by_key_reason_and_user_and_keeps_the_top() {
+        let u = Usage::default();
+        for i in 0..(MAX_TRACKED as u64 + 5) {
+            u.count(7, "k", true, None, Some(&format!("u{i}")), None);
+        }
+        for _ in 0..3 {
+            u.count(7, "k", true, Some(Reason::User), Some("heavy"), Some("https://Shop.example.com:443/"));
+        }
+        u.count(8, "k", true, Some(Reason::Invalid), None, Some("not an origin"));
+        let got = u.take();
+        assert_eq!(got.iter().map(|(k, m, s)| (k.as_str(), *m, s.requests)).collect::<Vec<_>>(), [("k", 7, MAX_TRACKED as u64 + 8), ("k", 8, 1)]);
+        let m7 = &got[0].2;
+        assert_eq!((m7.refused[Reason::User as usize], m7.throttled()), (3, 3));
+        assert_eq!(m7.users.len(), TOP);
+        assert_eq!(m7.users[0].0, "heavy", "a frequent user is never pushed out: {:?}", m7.users);
+        assert_eq!(m7.origins, [("https://shop.example.com".to_string(), 3)]);
+        assert!(got[1].2.origins.is_empty());
+        assert_eq!(KeyStats::decode(&m7.encode()), *m7);
+        assert!(u.take().is_empty(), "taken once");
     }
 }

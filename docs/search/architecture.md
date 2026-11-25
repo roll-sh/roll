@@ -493,7 +493,8 @@ signed, never through the public endpoint, so the remote's allowlist doesn't app
 the local cluster's has already admitted the client): a client the local cluster admits reads the
 remote's data within the key's access, whatever the remote's own allowlist says. Only these calls may carry the link's
 `x-roll-remote-access` header, which lets a `cross_cluster` key authenticate: the node drops it
-from every request with another origin (`Lease::handle`), as it drops `x-roll-authenticated-user`.
+from every request with another origin (`Lease::handle`); who authenticated is never a header at
+all (`search_es::rest::Verified`, set on the request in process).
 A link's search may ask for its aggregations partially reduced (`x-roll-partial-aggs`, honored
 only for a cross-cluster key's request): the remote answers `search-aggs`' `wire` encoding of its
 `Aggs` tree in an internal field, and the local cluster does the final reduce. The encoding names
@@ -662,8 +663,11 @@ allowlist (a preview's branch included); change it like any setting.
   through `search-lucene` on a blocking thread (ranged reads in 8 MiB windows across a file's
   `.partN` blobs, throttled like any restore; checksums checked as files stream; what is kept
   charged to the `request` breaker) and hands live documents over a bounded channel to be
-  indexed like writes. The restore's state is in each index's recovery source, so a new owner
-  restores an unfinished index again when it opens the cluster.
+  indexed like writes. The restore's state is in each index's recovery source, with the shards it
+  finished (each recorded once its writes are durable: `ShardLog::durable`, the WAL's ack a
+  request waits for), so a new owner resumes an unfinished index from the first shard not
+  finished when it opens the cluster. Data streams matched by the request come back with their
+  backing indices from the snapshot's global metadata, created in the same state update.
 - **Credentials.** Elasticsearch takes a client's secure settings from its keystore; a roll
   tenant has none, so they come with the repository's settings (`s3`: `access_key`,
   `secret_key`, `session_token`; `gcs`: `credentials_file`, the service account key file's
