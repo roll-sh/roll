@@ -835,80 +835,112 @@ mod public_certs {
         x509_parser::pem::Pem::iter_from_buffer(pem.as_bytes()).map(|p| p.unwrap().contents).collect()
     }
 
+    /// Pebble, challtestsrv and the stand-in for Cloudflare, and rolld ordering from them; `None`
+    /// (skipped) without Docker. `tag` keeps two tests' containers apart.
+    struct Pebble {
+        // rolld stops before the containers go.
+        r: Rolld,
+        started: Started,
+        directory: String,
+        ca_file: std::path::PathBuf,
+        fake: FakeCloudflare,
+    }
+
+    impl Pebble {
+        async fn start(tag: &str) -> Option<Pebble> {
+            if !std::env::var("ROLL_SECRETS_DOCKER").is_ok_and(|v| v == "1") || docker(&["info"]).is_err() {
+                eprintln!("public certificates: skipped (Pebble runs in Docker; ROLL_SECRETS_DOCKER=1 runs it)");
+                return None;
+            }
+            for image in [PEBBLE, CHALLTESTSRV] {
+                if docker(&["image", "inspect", image]).is_err() {
+                    docker(&["pull", "-q", image]).unwrap();
+                }
+            }
+            let pid = std::process::id();
+            let started = Started { ca: format!("roll-secrets-acme-{pid}-{tag}-pebble"), dns: format!("roll-secrets-acme-{pid}-{tag}-dns"), network: format!("roll-secrets-acme-{pid}-{tag}") };
+            docker(&["network", "create", &started.network]).unwrap();
+            docker(&["run", "-d", "--name", &started.dns, "--network", &started.network, "-p", "127.0.0.1::8055", CHALLTESTSRV, "-defaultIPv6", "", "-defaultIPv4", "127.0.0.1"]).unwrap();
+            let dns_addr = format!("{}:8053", started.dns);
+            docker(&[
+                "run", "-d", "--name", &started.ca, "--network", &started.network, "-p", "127.0.0.1::14000", "-p", "127.0.0.1::15000",
+                "-e", "PEBBLE_VA_NOSLEEP=1", "-e", "PEBBLE_WFE_NONCEREJECT=0", "-e", "PEBBLE_AUTHZREUSE=0",
+                PEBBLE, "-config", "test/config/pebble-config-external-account-bindings.json", "-dnsserver", &dns_addr,
+            ])
+            .unwrap();
+            let home = Arc::new(tempfile::tempdir().unwrap());
+            let ca_file = home.path().join("pebble.minica.pem");
+            docker(&["cp", &format!("{}:/test/certs/pebble.minica.pem", started.ca), ca_file.to_str().unwrap()]).unwrap();
+            let directory = format!("https://localhost:{}/dir", published(&started.ca, "14000/tcp"));
+            let management = format!("http://127.0.0.1:{}", published(&started.dns, "8055/tcp"));
+            for i in 0.. {
+                if logs(&started.ca).contains("Listening on") && logs(&started.dns).contains("management server") {
+                    break;
+                }
+                assert!(i < 200, "Pebble didn't come up: {}", logs(&started.ca));
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            let fake = FakeCloudflare { management, records: Arc::default(), http: reqwest::Client::new() };
+            let api = axum::Router::new()
+                .route("/zones", axum::routing::get(zones))
+                .route("/zones/{zone}/dns_records", axum::routing::post(create))
+                .route("/zones/{zone}/dns_records/{id}", axum::routing::delete(remove))
+                .with_state(fake.clone());
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let cf_url = format!("http://{}", l.local_addr().unwrap());
+            tokio::spawn(async move { axum::serve(l, api).await });
+
+            let env = [
+                ("ROLL_SECRETS_ACME_ALLOW", directory.as_str()),
+                ("ROLL_SECRETS_ACME_CA_FILE", ca_file.to_str().unwrap()),
+                ("ROLL_SECRETS_ACME_PROPAGATION_S", "0"),
+                ("ROLL_CLOUDFLARE_API", cf_url.as_str()),
+                // Pebble and the stand-in are on loopback.
+                ("ROLL_CODE_WEBHOOK_ALLOW_PRIVATE", "1"),
+            ];
+            let r = Rolld::start_in(home.clone(), "search", false, &env, "/v1/info").await;
+            Some(Pebble { started, r, directory, ca_file, fake })
+        }
+
+        /// Pebble's management API (HTTPS, its own root).
+        async fn management(&self, path: &str) -> Value {
+            let http = reqwest::Client::builder().add_root_certificate(reqwest::Certificate::from_pem(&std::fs::read(&self.ca_file).unwrap()).unwrap()).build().unwrap();
+            let a = http.get(format!("https://localhost:{}{path}", published(&self.started.ca, "15000/tcp"))).send().await.unwrap();
+            let text = a.text().await.unwrap();
+            serde_json::from_str(&text).unwrap_or(Value::String(text))
+        }
+
+        /// Register `domains` in `p` and wait for the job's first certificate.
+        async fn issued(&self, p: &Project<'_>, domains: &[&str]) -> (String, Value) {
+            let base = format!("/v1/secrets/projects/{}/public-certs", p.id);
+            let new = json!({ "name": "web", "directory_url": self.directory, "domains": domains, "dns_provider": "cloudflare", "dns_credential": DNS_TOKEN, "eab_kid": "kid-1", "eab_hmac_key": EAB_KEY });
+            let cert = self.r.post(&base, new).await;
+            assert_eq!(cert["status"], "pending", "{cert}");
+            let id = cert["id"].as_str().unwrap().to_string();
+            (id, wait_for(&self.r, &base, "issued", None).await)
+        }
+    }
+
+    /// The registration once it's `want` (and, given `serial`, holds another certificate): the
+    /// background job orders every 5 seconds.
+    async fn wait_for(r: &Rolld, base: &str, want: &str, serial: Option<String>) -> Value {
+        for _ in 0..240 {
+            let l = r.get(base).await;
+            if l[0]["status"] == want && (serial.is_none() || l[0]["serial"].as_str() != serial.as_deref()) {
+                return l[0].clone();
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        panic!("public certificate never {want}: {}", r.get(base).await);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn public_certificates_come_from_pebble_over_dns01_renew_and_an_unproven_name_is_rotation_failed() {
-        if !std::env::var("ROLL_SECRETS_DOCKER").is_ok_and(|v| v == "1") || docker(&["info"]).is_err() {
-            eprintln!("public certificates: skipped (Pebble runs in Docker; ROLL_SECRETS_DOCKER=1 runs it)");
-            return;
-        }
-        for image in [PEBBLE, CHALLTESTSRV] {
-            if docker(&["image", "inspect", image]).is_err() {
-                docker(&["pull", "-q", image]).unwrap();
-            }
-        }
-        let pid = std::process::id();
-        let started = Started { ca: format!("roll-secrets-acme-{pid}-pebble"), dns: format!("roll-secrets-acme-{pid}-dns"), network: format!("roll-secrets-acme-{pid}") };
-        docker(&["network", "create", &started.network]).unwrap();
-        docker(&["run", "-d", "--name", &started.dns, "--network", &started.network, "-p", "127.0.0.1::8055", CHALLTESTSRV, "-defaultIPv6", "", "-defaultIPv4", "127.0.0.1"]).unwrap();
-        let dns_addr = format!("{}:8053", started.dns);
-        docker(&[
-            "run", "-d", "--name", &started.ca, "--network", &started.network, "-p", "127.0.0.1::14000", "-p", "127.0.0.1::15000",
-            "-e", "PEBBLE_VA_NOSLEEP=1", "-e", "PEBBLE_WFE_NONCEREJECT=0", "-e", "PEBBLE_AUTHZREUSE=0",
-            PEBBLE, "-config", "test/config/pebble-config-external-account-bindings.json", "-dnsserver", &dns_addr,
-        ])
-        .unwrap();
-        let home = Arc::new(tempfile::tempdir().unwrap());
-        let ca_file = home.path().join("pebble.minica.pem");
-        docker(&["cp", &format!("{}:/test/certs/pebble.minica.pem", started.ca), ca_file.to_str().unwrap()]).unwrap();
-        let directory = format!("https://localhost:{}/dir", published(&started.ca, "14000/tcp"));
-        let management = format!("http://127.0.0.1:{}", published(&started.dns, "8055/tcp"));
-        for i in 0.. {
-            if logs(&started.ca).contains("Listening on") && logs(&started.dns).contains("management server") {
-                break;
-            }
-            assert!(i < 200, "Pebble didn't come up: {}", logs(&started.ca));
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        let fake = FakeCloudflare { management, records: Arc::default(), http: reqwest::Client::new() };
-        let api = axum::Router::new()
-            .route("/zones", axum::routing::get(zones))
-            .route("/zones/{zone}/dns_records", axum::routing::post(create))
-            .route("/zones/{zone}/dns_records/{id}", axum::routing::delete(remove))
-            .with_state(fake.clone());
-        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let cf_url = format!("http://{}", l.local_addr().unwrap());
-        tokio::spawn(async move { axum::serve(l, api).await });
-
-        let env = [
-            ("ROLL_SECRETS_ACME_ALLOW", directory.as_str()),
-            ("ROLL_SECRETS_ACME_CA_FILE", ca_file.to_str().unwrap()),
-            ("ROLL_SECRETS_ACME_PROPAGATION_S", "0"),
-            ("ROLL_CLOUDFLARE_API", cf_url.as_str()),
-            // Pebble and the stand-in are on loopback.
-            ("ROLL_CODE_WEBHOOK_ALLOW_PRIVATE", "1"),
-        ];
-        let r = Rolld::start_in(home.clone(), "search", false, &env, "/v1/info").await;
-        let p = Project::new(&r).await;
+        let Some(pebble) = Pebble::start("order").await else { return };
+        let (r, fake) = (&pebble.r, &pebble.fake);
+        let p = Project::new(r).await;
         let base = format!("/v1/secrets/projects/{}/public-certs", p.id);
-        let new = json!({ "name": "web", "directory_url": directory, "domains": ["www.roll-acme.test", "*.roll-acme.test"], "dns_provider": "cloudflare", "dns_credential": DNS_TOKEN, "eab_kid": "kid-1", "eab_hmac_key": EAB_KEY });
-        let cert = r.post(&base, new).await;
-        assert_eq!(cert["status"], "pending", "{cert}");
-        let id = cert["id"].as_str().unwrap().to_string();
-        // The background job orders it (every 5 seconds).
-        let wait_for = |want: &'static str, serial: Option<String>| {
-            let (r, base) = (&r, base.clone());
-            async move {
-                for _ in 0..240 {
-                    let l = r.get(&base).await;
-                    if l[0]["status"] == want && (serial.is_none() || l[0]["serial"].as_str() != serial.as_deref()) {
-                        return l[0].clone();
-                    }
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                }
-                panic!("public certificate never {want}: {}", r.get(&base).await);
-            }
-        };
-        let issued = wait_for("issued", None).await;
+        let (id, issued) = pebble.issued(&p, &["www.roll-acme.test", "*.roll-acme.test"]).await;
         let keys = [("TLS_CERT", "certificate", "managed"), ("TLS_KEY", "private_key", "managed"), ("TLS_CA_CHAIN", "ca_chain", "managed")];
         let ops: Vec<Value> = keys.iter().map(|(key, field, mode)| json!({ "op": "set", "key": key, "link": { "kind": "public_cert", "ref": id, "field": field, "mode": mode } })).collect();
         r.post(&format!("/v1/secrets/projects/{}/environments/production/changes", p.id), json!({ "ops": ops })).await;
@@ -934,8 +966,7 @@ mod public_certs {
         let key = p.value("TLS_KEY").await;
         let pair = rcgen::KeyPair::from_pem(&key).unwrap();
         assert_eq!(leaf.public_key().subject_public_key.data.as_ref(), rcgen::PublicKeyData::der_bytes(&pair), "the key is the certificate's");
-        let root_pem = reqwest::Client::builder().add_root_certificate(reqwest::Certificate::from_pem(&std::fs::read(&ca_file).unwrap()).unwrap()).build().unwrap()
-            .get(format!("https://localhost:{}/roots/0", published(&started.ca, "15000/tcp"))).send().await.unwrap().text().await.unwrap();
+        let root_pem = pebble.management("/roots/0").await.as_str().unwrap().to_string();
         let mut path: Vec<Vec<u8>> = vec![leaf_der.clone()];
         path.extend(ders(&chain_pem));
         path.extend(ders(&root_pem));
@@ -950,7 +981,7 @@ mod public_certs {
 
         // A renewal (the same account): a new certificate, and the linked keys rotate to it.
         r.post(&format!("{base}/{id}/renew"), json!({})).await;
-        wait_for("issued", issued["serial"].as_str().map(String::from)).await;
+        wait_for(r, &base, "issued", issued["serial"].as_str().map(String::from)).await;
         for _ in 0..40 {
             if p.value("TLS_CERT").await != leaf_pem {
                 break;
@@ -966,12 +997,55 @@ mod public_certs {
         let start = r.get(&format!("{events}?latest=1")).await["next"].as_i64().unwrap();
         let in_use = p.value("TLS_CERT").await;
         r.call(reqwest::Method::PATCH, &format!("{base}/{id}"), Some(json!({ "domains": ["www.roll-acme.test", "www.unproven-acme.test"] }))).await;
-        let failing = wait_for("failing", None).await;
+        let failing = wait_for(r, &base, "failing", None).await;
         assert!(failing["last_error"].as_str().unwrap().contains("unproven-acme.test"), "{failing}");
         let failed = r.get(&format!("{events}?after={start}&kinds=rotation.failed")).await;
         assert_eq!(failed["events"].as_array().unwrap().len(), 3, "{failed}");
         assert_eq!(p.value("TLS_CERT").await, in_use);
-        drop(r);
-        drop(started);
+    }
+
+    /// A leaked `TLS_KEY`, reported published by someone who may write and reveal there: its
+    /// certificate is revoked at Pebble (`keyCompromise`, through the project's account) before
+    /// the key gets a new one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_leaked_public_certificate_key_is_revoked_at_pebble_and_replaced() {
+        let Some(pebble) = Pebble::start("leak").await else { return };
+        let r = &pebble.r;
+        let p = Project::new(r).await;
+        let (id, issued) = pebble.issued(&p, &["leak.roll-acme.test"]).await;
+        let serial = issued["serial"].as_str().unwrap().to_string();
+        let ops: Vec<Value> = [("TLS_CERT", "certificate"), ("TLS_KEY", "private_key")].iter().map(|(key, field)| json!({ "op": "set", "key": key, "link": { "kind": "public_cert", "ref": id, "field": field, "mode": "managed" } })).collect();
+        r.post(&format!("/v1/secrets/projects/{}/environments/production/changes", p.id), json!({ "ops": ops })).await;
+        r.call(reqwest::Method::PATCH, &format!("/v1/secrets/projects/{}", p.id), Some(json!({ "leaks": { "rotate": "managed" } }))).await;
+        let status = pebble.management(&format!("/cert-status-by-serial/{serial}")).await;
+        assert!(status["Status"].as_str().is_some_and(|s| s.eq_ignore_ascii_case("valid")), "{status}");
+
+        // A writer reports the key published.
+        let rules = json!([{ "product": "secrets", "resources": [{ "project": p.id }], "environments": ["production"], "actions": { "read": "allow", "write": "allow", "reveal": "allow" } }]);
+        let token = r.post("/v1/access/tokens", json!({ "name": "writer", "rules": rules })).await["token"].as_str().unwrap().to_string();
+        let (leaked_cert, leaked_key) = (p.value("TLS_CERT").await, p.value("TLS_KEY").await);
+        let events = format!("/v1/secrets/projects/{}/events", p.id);
+        let start = r.get(&format!("{events}?latest=1")).await["next"].as_i64().unwrap();
+        let a = r.http.post(format!("{}/v1/secrets/projects/{}/leaks", r.api, p.id)).bearer_auth(&token).json(&json!({ "candidates": [leaked_key], "leaked": true })).send().await.unwrap();
+        assert!(a.status().is_success(), "{}", a.text().await.unwrap());
+
+        // Revoked at the CA at once, then replaced.
+        let status = pebble.management(&format!("/cert-status-by-serial/{serial}")).await;
+        assert!(status["Status"].as_str().is_some_and(|s| s.eq_ignore_ascii_case("revoked")), "{status}");
+        wait_for(r, &format!("/v1/secrets/projects/{}/public-certs", p.id), "issued", Some(serial.clone())).await;
+        for _ in 0..40 {
+            if p.value("TLS_KEY").await != leaked_key {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        assert_ne!(p.value("TLS_KEY").await, leaked_key, "a new key");
+        assert_ne!(p.value("TLS_CERT").await, leaked_cert);
+        let listed = r.get(&format!("/v1/secrets/projects/{}/public-certs", p.id)).await;
+        assert_eq!((&listed[0]["revocations"][0]["serial"], &listed[0]["revocations"][0]["reason"], &listed[0]["revocations"][0]["state"]), (&json!(serial), &json!("keyCompromise"), &json!("revoked")), "{listed}");
+        let seen = r.get(&format!("{events}?after={start}&kinds=secret.leaked,rotation.succeeded")).await;
+        let seen = seen["events"].as_array().unwrap();
+        assert!(seen.iter().any(|e| e["kind"] == "secret.leaked" && e["data"]["revoking"] == json!([serial])), "{seen:?}");
+        assert!(seen.iter().any(|e| e["kind"] == "rotation.succeeded" && e["data"]["revoked"] == json!(serial)), "{seen:?}");
     }
 }

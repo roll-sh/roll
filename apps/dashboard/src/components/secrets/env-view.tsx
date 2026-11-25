@@ -59,6 +59,8 @@ export function EnvView({ env }: { env: Environment }) {
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const anchor = useRef<string | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
+  /** A write a 409 `confirm_required` held back: linking a public certificate whose key a protected environment shares. */
+  const [confirming, setConfirming] = useState<Pending | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<{ text: string; warnings: string[] } | null>(null);
   const filter = useRef<HTMLInputElement>(null);
@@ -125,6 +127,7 @@ export function EnvView({ env }: { env: Environment }) {
       return true;
     } catch (e) {
       if (needsApproval(e)) setPending({ batch, why: e.message, label: done });
+      else if ((e as { code?: string }).code === "confirm_required") setConfirming({ batch, why: errorText(e), label: done });
       else setError(errorText(e));
       // Someone changed it since it was shown: show what's there now.
       if ((e as { code?: string }).code === "stale") refresh();
@@ -279,6 +282,25 @@ export function EnvView({ env }: { env: Environment }) {
                 open.reload();
               }}
             />
+          )}
+          {confirming && (
+            <div className="fade-in flex flex-wrap items-start gap-x-3 gap-y-1.5 rounded-lg border border-line bg-panel px-3 py-2 text-[12px]" role="alert">
+              <span className="min-w-0 flex-1 text-muted">{confirming.why}</span>
+              <button
+                className="text-accent hover:underline"
+                onClick={() => {
+                  const c = confirming;
+                  setConfirming(null);
+                  const confirm = [...new Set(c.batch.ops.flatMap((o) => (o.op === "set" && o.link?.kind === "public_cert" ? [o.link.ref] : [])))].join(",");
+                  void write(() => api.batch(env.slug, { ...c.batch, confirm }), c.batch, c.label);
+                }}
+              >
+                Link anyway
+              </button>
+              <button onClick={() => setConfirming(null)} className="text-subtle hover:text-fg">
+                Cancel
+              </button>
+            </div>
           )}
           {note && (
             <div className="fade-in flex items-start gap-2 text-[12px] text-muted" role="status">

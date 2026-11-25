@@ -8545,6 +8545,8 @@ struct FakeCa {
     root_key: rcgen::KeyPair,
     root_pem: String,
     orders: Mutex<Vec<(Vec<String>, bool)>>,
+    /// (serial, reason) of each certificate revoked.
+    revoked: Mutex<Vec<(String, roll_secrets::public_certs::RevokeReason)>>,
 }
 
 impl FakeCa {
@@ -8554,7 +8556,7 @@ impl FakeCa {
         root.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         root.distinguished_name.push(rcgen::DnType::CommonName, "roll fake public root");
         let root_pem = root.self_signed(&root_key).unwrap().pem();
-        FakeCa { root, root_key, root_pem, orders: Mutex::default() }
+        FakeCa { root, root_key, root_pem, orders: Mutex::default(), revoked: Mutex::default() }
     }
 }
 
@@ -8596,6 +8598,13 @@ impl roll_secrets::public_certs::PublicCa for FakeCa {
         (p.not_before, p.not_after) = (now - time::Duration::hours(1), now + time::Duration::days(90));
         let leaf = p.signed_by(&key, &rcgen::Issuer::from_params(&self.root, &self.root_key)).unwrap();
         Ok(roll_secrets::public_certs::Ordered { chain: Secret::new(format!("{}{}", leaf.pem(), self.root_pem)), private_key: Secret::new(key.serialize_pem()), account })
+    }
+
+    fn revoke(&self, r: roll_secrets::public_certs::Revoke<'_>) -> Result<roll_secrets::public_certs::RevokeReason, String> {
+        assert_eq!(r.account.expose(), r#"{"fake":"account"}"#, "the account that ordered it");
+        let (_, x) = x509_parser::parse_x509_certificate(r.certificate).map_err(|e| e.to_string())?;
+        self.revoked.lock().unwrap().push((x.raw_serial_as_string().replace(':', ""), r.reason));
+        Ok(r.reason)
     }
 }
 
@@ -8673,6 +8682,19 @@ async fn public_certificates_are_ordered_in_the_background_renewed_and_a_failed_
     sweep().await;
     assert_ne!(api.values("production", "/").await["values"]["TLS_KEY"], before);
 
+    // That was a renewal asked for: another within the hour is a 429 saying when, since each one
+    // spends the CA's weekly limit for these names.
+    let (s, e) = api.call(Method::POST, &format!("/public-certs/{id}/renew"), None).await;
+    assert!(s == StatusCode::TOO_MANY_REQUESTS && e.to_string().contains("ask again after"), "{s} {e}");
+
+    // The certificate a renewal replaced is kept until it ends, so it can still be revoked.
+    let listed = api.ok(Method::GET, "/public-certs", None).await;
+    let previous = listed[0]["previous_serial"].as_str().expect("the replaced certificate").to_string();
+    assert_ne!(listed[0]["serial"].as_str(), Some(previous.as_str()));
+    let revoked = api.ok(Method::POST, &format!("/public-certs/{id}/revoke"), Some(json!({ "serial": "previous", "reason": "superseded" }))).await;
+    assert_eq!((&revoked["revocations"][0]["serial"], &revoked["revocations"][0]["state"]), (&json!(previous), &json!("revoked")), "{revoked}");
+    assert_eq!(*ca.revoked.lock().unwrap(), [(previous.clone(), roll_secrets::public_certs::RevokeReason::Superseded)]);
+
     // A name the DNS records don't prove: the renewal fails, as rotation.failed on its keys and in
     // health, and the certificate in use stays.
     let in_use = api.values("production", "/").await["values"]["TLS_CERT"].clone();
@@ -8689,6 +8711,16 @@ async fn public_certificates_are_ordered_in_the_background_renewed_and_a_failed_
     assert_eq!(api.values("production", "/").await["values"]["TLS_CERT"], in_use);
     // Linked keys hold it.
     assert_eq!(api.call(Method::DELETE, &format!("/public-certs/{id}"), None).await.0, StatusCode::CONFLICT);
+
+    // Production's private key linked into staging, which isn't protected, would be readable
+    // there: only when confirmed, and health says so.
+    let (s, e) = api.call(Method::PUT, "/environments/staging/secrets/TLS_KEY", Some(link("private_key"))).await;
+    assert!(s == StatusCode::CONFLICT && e.to_string().contains("confirm_required"), "{s} {e}");
+    let mut confirmed = link("private_key");
+    confirmed["confirm"] = json!(id);
+    api.ok(Method::PUT, "/environments/staging/secrets/TLS_KEY", Some(confirmed)).await;
+    let health = api.ok(Method::GET, "/health", None).await;
+    assert!(health.as_array().unwrap().iter().any(|f| f["issue"] == "exposed" && f["environment"] == "production" && f["key"] == "TLS_KEY" && f["detail"].as_str().unwrap().contains("staging")), "{health}");
 }
 
 /// What rolld's notifier would send, recorded: chat posts and mails. Only `usr_bob` may use a chat
