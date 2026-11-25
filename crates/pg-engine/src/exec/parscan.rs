@@ -9,7 +9,7 @@
 use super::Row;
 use super::kernel::K;
 use crate::error::{Error, Result, internal};
-use crate::storage::batch::{FillRows, RowBatch};
+use crate::storage::batch::{FillRows, LazyRows, RowBatch};
 use crate::txn::TxnScan;
 use crate::types::Value;
 use std::collections::VecDeque;
@@ -912,6 +912,33 @@ impl<'a> Pre<'a> {
         true
     }
 
+    /// `decode` of rows of column blocks left unmade (`lazy`, storage format 5): their columns
+    /// copied from the blocks (`cols::decode_cols_lazy`). (Its own function: `decode`
+    /// compiles as before format 5.)
+    #[inline(never)]
+    fn decode_lazy(&mut self, lazy: &LazyRows, rows: std::ops::Range<usize>) {
+        use super::vector::Tri;
+        let n = rows.len();
+        self.odd.clear();
+        self.odd.resize(n, true);
+        if crate::storage::cols::decode_cols_lazy(lazy, rows, &self.plan.need, self.types, &self.missing, &mut self.cols).is_ok() {
+            self.odd.fill(false);
+            for c in self.cols.cols.iter().flatten() {
+                for (r, _) in &c.odd {
+                    self.odd[*r as usize] = true;
+                }
+            }
+        }
+        self.sel.clear();
+        self.sel.extend((0..n as u32).filter(|r| !self.odd[*r as usize]));
+        self.tri.clear();
+        self.tri.resize(n, Tri::T);
+        if let Some(f) = &self.plan.filter {
+            f.eval(&self.cols, &self.sel, &mut self.tri);
+        }
+        self.live_set = false;
+    }
+
     /// `decode` of `n` rows for a plan that reads no column and has no filter (count(*)'s):
     /// nothing of the rows is read, every one decided. (Apart from `decode`: its loop is the
     /// scans' hot one.)
@@ -987,8 +1014,11 @@ impl<'a> Pre<'a> {
     }
 
     /// What each row of `rows` comes to (`fate`), into `skip` (`Reader::next_row_with`).
-    fn mark(&mut self, b: &RowBatch, rows: std::ops::Range<usize>, skip: &mut Vec<u8>) {
-        self.decode(b, rows.clone());
+    fn mark(&mut self, b: &RowBatch, lazy: Option<&LazyRows>, rows: std::ops::Range<usize>, skip: &mut Vec<u8>) {
+        match lazy {
+            Some(l) if !l.is_empty() => self.decode_lazy(l, rows.clone()),
+            _ => self.decode(b, rows.clone()),
+        }
         self.fates(skip);
         let n = skip.iter().filter(|s| **s == DROP).count();
         self.off = !self.worth(rows.len(), n as u64);
@@ -1051,11 +1081,54 @@ struct Reader<'c> {
     /// What each row of `batch` from `skip_from` on comes to (`Pre::fate`).
     skip: Vec<u8>,
     skip_from: usize,
+    /// The batch's rows of column blocks left unmade (storage format 5: a fill whose source
+    /// has them, `FillRows::lazy`): `Pre` decodes their columns from the blocks; a row is
+    /// made before it is read by index (`LazyRows::make`). None: every row is made.
+    lazy: Option<Box<LazyRows>>,
+}
+
+impl Drop for Reader<'_> {
+    /// The rows left unmade made: the batch is read on by the next reader of the chunk.
+    fn drop(&mut self) {
+        if let Some(l) = &mut self.lazy
+            && !l.is_empty()
+        {
+            let from = self.batch.pos();
+            l.make(self.batch, from, &|_| true);
+        }
+    }
+}
+
+/// A reader's fill leaving the rows of column blocks unmade: all of the batch's rows or none
+/// (a batch with others, a memtable's or an L0 file's among them, has its rows made: the
+/// columns of unmade rows are copied from their blocks only where every row is one,
+/// `cols::decode_cols_lazy`).
+#[cold]
+#[inline(never)]
+fn fill_lazy(f: &mut Box<dyn FillRows>, batch: &mut RowBatch, lazy: &mut LazyRows) -> Result<()> {
+    lazy.clear();
+    let r = f.fill_lazy(batch, lazy, FILL);
+    if !lazy.is_empty() && lazy.rows() != batch.len() {
+        lazy.make_all(batch);
+    }
+    r
+}
+
+/// After `Pre::mark` of the rows from `from` on: those it doesn't drop made (all of them
+/// when it turned itself off, `off`: the row path reads every row after).
+#[cold]
+#[inline(never)]
+fn make_marked(lazy: &mut LazyRows, batch: &mut RowBatch, from: usize, skip: &[u8], off: bool) {
+    lazy.make(batch, from, &|i| off || skip.get(i - from).is_none_or(|f| *f != DROP));
 }
 
 impl<'c> Reader<'c> {
     fn new(src: &'c mut Source, batch: &'c mut RowBatch, left: usize) -> Reader<'c> {
-        Reader { src, batch, cur: None, left, done: false, skip: Vec::new(), skip_from: 0 }
+        let lazy = match &*src {
+            Source::Fill(f) if f.lazy() => Some(Box::default()),
+            _ => None,
+        };
+        Reader { src, batch, cur: None, left, done: false, skip: Vec::new(), skip_from: 0, lazy }
     }
 
     /// Whether the rows come a batch at a time (`next_run`).
@@ -1072,7 +1145,11 @@ impl<'c> Reader<'c> {
         }
         if self.batch.remaining() == 0 {
             self.batch.clear();
-            if let Err(e) = f.fill(self.batch, FILL) {
+            let r = match &mut self.lazy {
+                None => f.fill(self.batch, FILL),
+                Some(l) => fill_lazy(f, self.batch, l),
+            };
+            if let Err(e) = r {
                 return Some(Err(e));
             }
             if self.batch.is_empty() {
@@ -1106,7 +1183,18 @@ impl<'c> Reader<'c> {
                 if self.batch.remaining() == 0 {
                     self.batch.clear();
                     self.skip.clear();
-                    if let Err(e) = f.fill(self.batch, FILL) {
+                    let r = match &mut self.lazy {
+                        None => f.fill(self.batch, FILL),
+                        Some(l) => {
+                            let r = fill_lazy(f, self.batch, l);
+                            // (Without `Pre` every row is read by index.)
+                            if pre.is_none() {
+                                l.make_all(self.batch);
+                            }
+                            r
+                        }
+                    };
+                    if let Err(e) = r {
                         return Some(Err(e));
                     }
                     if self.batch.is_empty() {
@@ -1119,7 +1207,12 @@ impl<'c> Reader<'c> {
                     if !(self.skip_from..self.skip_from + self.skip.len()).contains(&i) {
                         self.skip.clear();
                         self.skip_from = i;
-                        pre.mark(self.batch, i..self.batch.len(), &mut self.skip);
+                        pre.mark(self.batch, self.lazy.as_deref(), i..self.batch.len(), &mut self.skip);
+                        if let Some(l) = &mut self.lazy
+                            && !l.is_empty()
+                        {
+                            make_marked(l, self.batch, i, &self.skip, pre.off);
+                        }
                     }
                     let fate = self.skip[i - self.skip_from];
                     *passed = fate == PASSED;
@@ -2109,7 +2202,10 @@ fn partial_chunk<'d>(
                 return (false, pa);
             }
             match pre.plan.reads || pre.plan.filter.is_some() {
-                true => pre.decode(scan.batch, run.clone()),
+                true => match scan.lazy.as_deref() {
+                    Some(l) if !l.is_empty() => pre.decode_lazy(l, run.clone()),
+                    _ => pre.decode(scan.batch, run.clone()),
+                },
                 false => pre.decode_none(run.len()),
             }
             let pa_run = run.len();
@@ -2125,6 +2221,13 @@ fn partial_chunk<'d>(
             }
             pre.eval_nums();
             pre.fates(&mut fates);
+            // (The rows of column blocks the row path reads made, of this run.)
+            if let Some(l) = &mut scan.lazy
+                && !l.is_empty()
+            {
+                let r = run.clone();
+                l.make(scan.batch, r.start, &|i| i < r.end && fates[i - r.start] != DROP);
+            }
             let mut taken = 0;
             for (r, i) in run.enumerate() {
                 use super::vector::Tri;
@@ -2481,7 +2584,10 @@ impl ParScan {
                     self.results.push_back(rx);
                     let mut rd = Reader::new(c, batch, INLINE_SLICE);
                     run_rows(&mut rd, out, d, &|| false, scratch, lazy, None);
-                    if rd.done {
+                    // (The reader dropped first: it makes the rows it left unmade.)
+                    let done = rd.done;
+                    drop(rd);
+                    if done {
                         *cur = None;
                     }
                 }
