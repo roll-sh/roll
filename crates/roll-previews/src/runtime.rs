@@ -2673,6 +2673,8 @@ fn crops_env(asks: &[crate::ports::CropAsk]) -> Vec<serde_json::Value> {
     let steps_ok = |c: &crate::ports::CropAsk| {
         c.steps.iter().all(|s| match s {
             crate::settings::Step::Click(sel) => crate::settings::selector_ok(sel),
+            // Typing only as roll writes it for a note: `x`s as many as theirs, never words.
+            crate::settings::Step::Type(sel, text) => crate::settings::selector_ok(sel) && (1..=200).contains(&text.len()) && text.bytes().all(|b| b == b'x'),
             crate::settings::Step::Press(k) => matches!(k.as_str(), "Enter" | "Escape"),
             _ => false,
         })
@@ -3158,10 +3160,16 @@ mod tests {
     fn crops_carry_how_their_reviewers_saw_the_page() {
         use crate::settings::Step;
         let ask = |note: &str, browser: Option<&str>, steps: Vec<Step>| crate::ports::CropAsk { note: note.into(), path: "/cart".into(), selector: "button.pay".into(), width: Some(390), height: Some(844), steps, browser: browser.map(String::from) };
-        let env = crops_env(&[ask("rv_1", None, vec![Step::Click("li > button".into()), Step::Press("Escape".into())]), ask("rv_2", Some("webkit-phone"), vec![]), ask("rv_3", None, vec![Step::Click("a[href='//x']{".into())])]);
-        assert_eq!(env[0], serde_json::json!({ "note": "rv_1", "path": "/cart", "selector": "button.pay", "width": 390, "height": 844, "steps": [{ "click": "li > button" }, { "press": "Escape" }] }));
-        assert_eq!(env.len(), 2, "WebKit's is the other browsers' run's");
+        let env = crops_env(&[
+            ask("rv_1", None, vec![Step::Click("li > button".into()), Step::Type("#coupon".into(), "xxxx".into()), Step::Press("Escape".into())]),
+            ask("rv_2", Some("webkit-phone"), vec![]),
+            ask("rv_3", None, vec![Step::Click("a[href='//x']{".into())]),
+            ask("rv_5", None, vec![Step::Type("#coupon".into(), "SAVE10".into())]),
+        ]);
+        assert_eq!(env[0], serde_json::json!({ "note": "rv_1", "path": "/cart", "selector": "button.pay", "width": 390, "height": 844, "steps": [{ "click": "li > button" }, { "type": ["#coupon", "xxxx"] }, { "press": "Escape" }] }));
+        assert_eq!(env.len(), 3, "WebKit's is the other browsers' run's");
         assert_eq!(env[1]["steps"], serde_json::json!([]), "a step its checks refuse: none of them");
+        assert_eq!(env[2]["steps"], serde_json::json!([]), "typing only as roll writes it (x's), never words");
         assert!(crops_env(&[ask("rv_4", Some("firefox"), vec![])]).is_empty());
     }
 
