@@ -154,7 +154,7 @@ pub(crate) async fn note(allow_private: bool, host: &Host, login: (&str, &str), 
     let enc = |v: &str| percent_encoding::utf8_percent_encode(v, percent_encoding::NON_ALPHANUMERIC).to_string();
     let (base, payload) = match host {
         Host::GitLab { api, project } => (format!("{api}/projects/{}/merge_requests/{number}/notes", enc(project)), json!({ "body": body })),
-        Host::Bitbucket { api, workspace, repo } => (format!("{api}/repositories/{workspace}/{repo}/pullrequests/{number}/comments"), json!({ "content": { "raw": body } })),
+        Host::Bitbucket { api, workspace, repo } => (format!("{api}/repositories/{}/{}/pullrequests/{number}/comments", enc(workspace), enc(repo)), json!({ "content": { "raw": body } })),
     };
     let auth = |r: reqwest::RequestBuilder| match host {
         Host::GitLab { .. } => r.header("PRIVATE-TOKEN", login.1),

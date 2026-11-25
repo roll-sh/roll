@@ -1290,9 +1290,6 @@ impl Apps {
         link.repo.eq_ignore_ascii_case(&format!("{owner}/{repo}")).then_some((app, link.installation, owner, repo))
     }
 
-    /// The repository a Git URL service fetches from: through roll's GitHub App when it's
-    /// connected (a short-lived installation token), else with its login when the login is for
-    /// this URL's host (a login never goes to another host).
     /// roll previews' commit status on a Git URL service's GitLab or Bitbucket repository, with
     /// its Git login, sent only to its source's own host (`ci_hosts`). `false` when it has no
     /// login or its host is neither (GitHub's goes through roll's GitHub App). On the service's
@@ -1329,6 +1326,9 @@ impl Apps {
         Ok(Some(ci_hosts::note(self.cfg.allow_private, &host, login, number, body, existing).await?))
     }
 
+    /// The repository a Git URL service fetches from: through roll's GitHub App when it's
+    /// connected (a short-lived installation token), else with its login when the login is for
+    /// this URL's host (a login never goes to another host).
     pub(crate) async fn git_remote<'a>(self: &Arc<Self>, service: &str, url: &'a str) -> git_source::Remote<'a> {
         if let Some((app, installation, owner, repo)) = self.github_for(service, url).await {
             match app.git_login(installation, &owner, &repo).await {
