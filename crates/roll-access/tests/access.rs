@@ -3086,3 +3086,53 @@ async fn an_agent_sends_feedback() {
     assert_eq!(d.call(&token, Method::POST, "/v1/access/feedback", Some(note)).await.0, StatusCode::TOO_MANY_REQUESTS, "20 an hour");
     assert_eq!(d.call(&token, Method::POST, "/v1/access/feedback", Some(json!({ "task": "", "actual": "x" }))).await.0, StatusCode::BAD_REQUEST);
 }
+
+/// What a product asks to list the tokens that may reach one project (roll secrets' reach): every
+/// all-projects rule for it, every rule naming the project by slug or id (temporary ones too), and
+/// no other token, whatever the number of tokens. Tokens made before the index get theirs on start.
+#[tokio::test(flavor = "multi_thread")]
+async fn naming_lists_only_tokens_whose_rules_can_name_a_project() {
+    use roll_access::store::{GrantChange, NewGrant, Store};
+    let dir = tempfile::tempdir().unwrap();
+    let db = test_db(dir.path().join("naming.db"), "naming");
+    let store = Store::new(db.clone()).unwrap();
+    let scope = |rules: Value| serde_json::from_value::<roll_auth::scope::Scope>(rules).unwrap();
+    let rule = |product: &str, resources: Value| json!({ "product": product, "resources": resources, "actions": { "read": "allow" } });
+    let make = |name: &str, rules: Value| store.create(&NewGrant { name: name.into(), rules: scope(rules), ..Default::default() }, roll_auth::GrantKind::Token, "operator", None, None).unwrap().0.id;
+    let every = make("every project", json!([rule("secrets", json!("*"))]));
+    let any_product = make("any product, this one", json!([rule("*", json!([{ "project": "prj_a" }]))]));
+    let by_slug = make("by slug", json!([rule("postgres", json!("*")), rule("secrets", json!([{ "project": "web" }]))]));
+    let by_id = make("by id", json!([rule("secrets", json!([{ "id": "prj_a" }]))]));
+    let moved = make("moved here", json!([rule("secrets", json!([{ "project": "other" }]))]));
+    let for_a_while = make("for a while", json!([rule("secrets", json!([{ "project": "other" }]))]));
+    let revoked = make("revoked", json!([rule("secrets", json!("*"))]));
+    make("another project", json!([rule("secrets", json!([{ "project": "other" }]))]));
+    make("another product", json!([rule("postgres", json!([{ "project": "prj_a" }]))]));
+    let moved_away = make("moved away", json!([rule("secrets", json!([{ "project": "web" }]))]));
+    store.update(&moved_away, &GrantChange { rules: Some(scope(json!([rule("secrets", json!([{ "project": "other" }]))]))), ..Default::default() }).unwrap();
+    store.update(&moved, &GrantChange { rules: Some(scope(json!([rule("secrets", json!([{ "id": "prj_a" }]))]))), ..Default::default() }).unwrap();
+    let until = code_sql::now_ms() + 3_600_000;
+    store.remember(&for_a_while, &serde_json::from_value(rule("secrets", json!([{ "project": "web" }]))).unwrap(), Some(until), "apr_1").unwrap();
+    store.revoke(&revoked).unwrap();
+    let mut want = vec![every, any_product, by_slug, by_id, moved, for_a_while];
+    want.sort();
+    let named = |store: &Store| {
+        let mut both: Vec<String> = store.naming("secrets", "web").unwrap().into_iter().map(|g| g.id).collect();
+        both.extend(store.naming("secrets", "prj_a").unwrap().into_iter().map(|g| g.id));
+        both.sort();
+        both.dedup();
+        both
+    };
+    assert_eq!(named(&store), want);
+    let ids = |list: Vec<roll_access::store::Grant>| list.into_iter().map(|g| g.name).collect::<Vec<_>>();
+    assert_eq!(ids(store.naming("secrets", "nowhere").unwrap()), vec!["every project"], "only all-projects rules name a project nothing names");
+    // Tokens from before the index: a start gives them theirs.
+    db.write(|c| {
+        c.execute("DELETE FROM grant_names", ())?;
+        c.execute("UPDATE grants SET named = NULL", ())
+    })
+    .unwrap();
+    assert_eq!(ids(store.naming("secrets", "web").unwrap()), Vec::<String>::new());
+    drop(store);
+    assert_eq!(named(&Store::new(db).unwrap()), want);
+}
