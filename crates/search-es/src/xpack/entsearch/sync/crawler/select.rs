@@ -16,8 +16,9 @@
 //! (inherited from the parent) and whether it matched an earlier sibling (carried from the
 //! previous one), so a combinator is one bit test and nothing backtracks. What a condition costs
 //! depends on the element (its attributes, their lengths), so the walk counts the bytes it
-//! touches and asks its caller whether to stop at every element and after every [`STEP`] of
-//! them ([`Selectors::select`]): a page's attributes can't hold a match past its deadline.
+//! touches (and 64 per element) and asks its caller whether to stop at the start and after every
+//! [`STEP`] of them ([`Selectors::select`]): a page's attributes can't hold a match past its
+//! deadline, and the clock isn't read per element.
 //! Attribute values are compared in place, and ` i` folds ASCII only, as Selectors Level 4
 //! defines it.
 
@@ -31,6 +32,8 @@ pub const MAX_COMPOUNDS: usize = 32;
 pub const MAX_SIMPLE: usize = 16;
 /// Bytes of attributes a match touches between two asks of its caller's `stop`.
 pub const STEP: u64 = 64 << 10;
+/// What looking at one element costs, in the same units.
+const ELEMENT_COST: u64 = 64;
 
 /// A parsed selector list.
 #[derive(Debug, Clone)]
@@ -127,13 +130,6 @@ impl Work<'_> {
         }
         Ok(())
     }
-
-    fn ask(&mut self) -> Result<(), TimedOut> {
-        match (self.stop)() {
-            true => Err(TimedOut),
-            false => Ok(()),
-        }
-    }
 }
 
 fn eq(a: &[u8], b: &[u8], fold: bool) -> bool {
@@ -183,10 +179,11 @@ impl Selectors {
 
     /// The elements of `elements` (in document order, each with its parent's and previous
     /// sibling's position in the slice) the list matches, in document order. `stop` is asked at
-    /// every element and after every [`STEP`] bytes of attributes touched, and ends the walk
-    /// ([`TimedOut`]) when it says so.
+    /// the start and after every [`STEP`] of work (an element costs 64, an attribute byte touched
+    /// one), and ends the walk ([`TimedOut`]) when it says so.
     pub fn select(&self, elements: &[(Element<'_>, Option<usize>, Option<usize>)], mut stop: impl FnMut() -> bool) -> Result<Vec<usize>, TimedOut> {
-        let mut work = Work { used: 0, next: STEP, stop: &mut stop };
+        // The first spend asks at once; then every STEP.
+        let mut work = Work { used: 0, next: 0, stop: &mut stop };
         // Bit offsets of each selector's compounds in one word.
         let mut offsets = Vec::with_capacity(self.list.len());
         let mut n = 0u32;
@@ -197,7 +194,9 @@ impl Selectors {
         let (mut matched, mut above, mut before) = (vec![0u32; elements.len()], vec![0u32; elements.len()], vec![0u32; elements.len()]);
         let mut out = Vec::new();
         for (k, (el, parent, prev)) in elements.iter().enumerate() {
-            work.ask()?;
+            // An element costs as much as 64 bytes touched: the clock is read once per STEP of
+            // work, not per element.
+            work.spend(ELEMENT_COST)?;
             let at_parent = parent.map_or(0, |p| matched[p]);
             let inherited = parent.map_or(0, |p| matched[p] | above[p]);
             let at_prev = prev.map_or(0, |q| matched[q]);
@@ -625,7 +624,7 @@ mod tests {
             asked > 3
         });
         assert_eq!(r, Err(TimedOut), "stopped inside the one element");
-        assert!(asked < 10, "asked {asked} times: at the element, then every {STEP} bytes");
+        assert!(asked < 10, "asked {asked} times: at the start, then every {STEP} bytes");
         let fold = [("lang", "EN-us")];
         let el = vec![(Element { tag: "p", attrs: &fold, is_root: true, is_empty: true, index: 1, count: 1, type_index: 1, type_count: 1 }, None, None)];
         assert_eq!(Selectors::parse("[lang|=en i]").unwrap().select(&el, || false), Ok(vec![0]));

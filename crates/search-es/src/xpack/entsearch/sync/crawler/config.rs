@@ -151,7 +151,7 @@ pub enum UrlFilter {
     Begins(String),
     Ends(String),
     Contains(String),
-    Regex(regex::Regex),
+    Regex(regex_automata::meta::Regex),
 }
 
 /// One extraction rule: the field it fills, from what, and how.
@@ -169,7 +169,7 @@ pub struct Extraction {
 /// (each match's first group, or the whole match).
 pub enum Source {
     Html(super::select::Selectors),
-    Url(regex::Regex),
+    Url(regex_automata::meta::Regex),
 }
 
 impl Ruleset {
@@ -180,7 +180,7 @@ impl Ruleset {
                 UrlFilter::Begins(p) => path.starts_with(p.as_str()),
                 UrlFilter::Ends(p) => path.ends_with(p.as_str()),
                 UrlFilter::Contains(p) => path.contains(p.as_str()),
-                UrlFilter::Regex(r) => r.is_match(path),
+                UrlFilter::Regex(r) => r.is_match(path.as_bytes()),
             })
     }
 }
@@ -298,19 +298,33 @@ fn compile_rule(origin: &str, r: &Value, at: &str, size_limit: usize) -> Result<
     Ok(CrawlRule { allow, dfa, describe: format!("{} {} {pattern}", if allow { "allow" } else { "deny" }, text("type")?) })
 }
 
-/// An extraction regex within its `share` of the rules' memory (half for its program, half for
-/// its lazy DFA's cache).
-fn regex_of(pattern: &str, at: &str, share: usize) -> Result<regex::Regex, String> {
+/// An extraction regex within its `share` of the rules' memory. Every engine the meta regex may
+/// build is held inside it: the NFA and the one-pass table a quarter each (a one-pass table that
+/// would be larger isn't built: the PikeVM runs instead), the lazy DFA's cache an eighth (one
+/// forward, one reverse), no bounded backtracker (its table) and no full DFA; and what it built
+/// is checked against the share. Unicode is off, as for crawl rules: URLs are ASCII, Open
+/// Crawler's Ruby `\w` is ASCII, and a Unicode class would take most of a share by itself.
+fn regex_of(pattern: &str, at: &str, share: usize) -> Result<regex_automata::meta::Regex, String> {
+    use regex_automata::{meta, util::syntax};
     if pattern.len() > MAX_PATTERN {
         return Err(format!("{at}'s pattern is longer than {MAX_PATTERN} bytes"));
     }
     if needs_backtracking(pattern) {
         return Err(format!("{at}'s regex [{pattern}] uses look-around or a backreference, which roll's linear-time regex engine doesn't run"));
     }
-    regex::RegexBuilder::new(pattern).size_limit(share / 2).dfa_size_limit(share / 2).build().map_err(|e| match e {
-        regex::Error::CompiledTooBig(_) => format!("{at}'s regex [{pattern}] needs more than its share of the rules' memory ({} KiB): simplify it", share >> 10),
-        e => format!("{at}'s regex [{pattern}] doesn't compile: {e}"),
-    })
+    let too_big = || format!("{at}'s regex [{pattern}] needs more than its share of the rules' memory ({} KiB): simplify it", share >> 10);
+    let re = meta::Builder::new()
+        .configure(meta::Config::new().nfa_size_limit(Some(share / 4)).onepass_size_limit(Some(share / 4)).hybrid_cache_capacity(share / 8).backtrack(false).dfa(false))
+        .syntax(syntax::Config::new().unicode(false).utf8(false))
+        .build(pattern)
+        .map_err(|e| match e.size_limit() {
+            Some(_) => too_big(),
+            None => format!("{at}'s regex [{pattern}] doesn't compile: {e}"),
+        })?;
+    if re.memory_usage() > share {
+        return Err(too_big());
+    }
+    Ok(re)
 }
 
 /// The regexes `snippet`'s extraction rulesets hold (`regex` URL filters and `url` rules).
@@ -689,7 +703,23 @@ mod tests {
         assert!(plan_of(&snippet(10, 20, "^/blog/[0-9]+$")).is_ok(), "200 small regexes fit");
         let e = plan_of(&snippet(11, 19, "^/blog/[0-9]+$")).err().unwrap();
         assert!(e.contains("209 regexes"), "{e}");
-        let e = plan_of(&snippet(10, 20, "\\\\w{100}")).err().unwrap();
+        // A pattern that fits alone but not within a share of 200.
+        let big = "x[a-z]{1,2000}";
+        assert!(plan_of(&snippet(1, 1, big)).is_ok(), "alone, it fits");
+        let e = plan_of(&snippet(10, 20, big)).err().unwrap();
         assert!(e.contains("share of the rules' memory"), "{e}");
+        // ASCII classes, as Ruby's: a `\w` takes little of a share.
+        assert!(plan_of(&snippet(10, 20, "^/\\\\w+/[0-9]+$")).is_ok(), "an ASCII \\w fits 200 times");
+        // A capture group around a long literal of many distinct bytes: the one-pass table it
+        // would need (states times byte classes) isn't built past its quarter of the share, so
+        // every regex stays within its share.
+        let lit: String = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_~".chars().cycle().take(500).collect();
+        let rules = vec![format!(r#"{{"action":"extract","field_name":"f","selector":"^/({lit})","join_as":"string","source":"url"}}"#); 100].join(",");
+        let p = plan_of(&obj(&format!(r#"{{"domains":[{{"url":"https://example.com","extraction_rulesets":[{{"rules":[{rules}]}}]}}]}}"#))).unwrap();
+        let share = RULES_BYTES / 100;
+        for r in &p.domains[0].extraction[0].rules {
+            let Source::Url(re) = &r.from else { panic!("a url rule") };
+            assert!(re.memory_usage() <= share, "{} > {share}", re.memory_usage());
+        }
     }
 }

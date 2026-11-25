@@ -354,14 +354,18 @@ advanced snippet (and carried over by `roll search crawler import`):
   `data-elastic-name` fields, and a later rule's over an earlier one's.
 - Per page, a rule takes at most 100 values of 32 KiB each, and all its rules together 1 MiB,
   charged to the request breaker as they're taken. The text of the elements rules pick shares one
-  budget of node visits per page (four per node of the page), so rules picking nested elements
-  can't walk a subtree again and again. Past the 1 MiB or the visits, the page's remaining rules
+  budget of node visits per page (four per node of the page; a node's text costs one more per KiB
+  and each child queued one, and text is taken word by word only as far as there's room), so rules
+  picking nested elements can't walk a subtree again and again, nor copy a huge text node. Past the 1 MiB or the visits, the page's remaining rules
   are dropped: the page is indexed with what was extracted, and the job's metadata counts the
   pages (`extraction_rules_dropped_page_count`; `crawl-test` answers `extraction_rules_dropped`).
 - A crawl has at most 100 rulesets and 100 rules, a ruleset at most 20 URL filters, and the crawl
   at most 200 regexes in its rules (`regex` filters and `url` rules). They share the crawl rules'
   10 MiB: every regex, a crawl rule's or an extraction rule's, gets an equal share, and one that
-  needs more fails validation.
+  needs more fails validation. An extraction regex's engines are all held inside its share: the
+  NFA and the one-pass table a quarter each (a larger one-pass table isn't built), the lazy DFA's
+  caches an eighth, no backtracker and no full DFA, and what was built is measured against it.
+  Regexes are ASCII (Unicode off), as Open Crawler's Ruby `\w` is and URLs are.
 
 `html` selectors are CSS Selectors Level 3 without what needs more than an element's ancestors and
 earlier siblings (`crawler/select.rs`, roll's own): types, `#id`, `.class`, attribute selectors
@@ -376,8 +380,9 @@ ancestor and from its previous sibling which matched an earlier sibling, so ever
 bit test and nothing backtracks. What a condition costs depends on the attribute it reads, so the
 match counts the bytes it touches; attribute values are compared in place, and ` i` folds ASCII
 only (Selectors Level 4's definition), allocating nothing. The deadline is checked between rules,
-at every element a selector looks at, after every 64 KiB of attributes touched (so one huge
-attribute can't hold a match), and as an element's text is gathered: a page whose rules can't
+at the start of a match and after every 64 KiB of its work (an element counts as 64 bytes, and
+each attribute byte touched as one, so one huge attribute can't hold a match and the clock isn't
+read per element), and as an element's text is gathered: a page whose rules can't
 finish by its parse deadline fails, `crawl-test`'s too. `url` selectors and `regex` filters are regexes with the same linear-time engine
 as crawl rules (no look-around or backreferences).
 
@@ -519,7 +524,8 @@ to see why pages are missing.
 | The derived token is the same after a delete and a new start | `search-control/tests/control.rs` (`crawler_verifications_are_each_clusters`) |
 | Extraction rules end to end: a URL filter, `extract` as a string and an array, `set`, a URL group | `crates/search-es/tests/crawler.rs` (`extraction_rules_fill_fields`) |
 | Selector parsing bounds and one-pass matching; a huge attribute on a page of a few elements meets the deadline | unit tests in `crawler/select.rs` |
-| Extraction regexes share the crawl rules' budget (too many, or too big for their share, are refused) | unit test in `crawler/config.rs` |
+| Extraction regexes share the crawl rules' budget (too many, or too big for their share, are refused; a capture group's one-pass table stays within it; ASCII `\w`) | unit test in `crawler/config.rs` |
+| A rule whose hits nest spends a page's text visits: later rules are dropped and counted, earlier fields stay | unit test in `crawler/html.rs` |
 | A tenant change carries no proof across owners | `search-control/tests/control.rs` (`crawler_site_tokens_follow_the_clusters_project`) |
 | The routes' catalogue rows; the MCP tools | `rolld/tests/auth.rs`; docs/mcp.md and `pnpm test:mcp-sweep` |
 | The dashboard's crawl box | `apps/dashboard/src/components/search/connectors.test.tsx` |

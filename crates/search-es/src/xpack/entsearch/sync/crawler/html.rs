@@ -400,17 +400,20 @@ enum TextStop {
 /// The nodes a page's extraction rules may still visit, and their deadline.
 struct Visits {
     left: u64,
-    since: u32,
+    since: u64,
     deadline: std::time::Instant,
 }
 
 impl Visits {
-    fn visit(&mut self) -> Result<(), TextStop> {
-        if self.left == 0 {
+    /// Spends `n` visits (a node, a KiB of its text, a child queued); the deadline is read every
+    /// 1,024 of them.
+    fn visit(&mut self, n: u64) -> Result<(), TextStop> {
+        if n > self.left {
+            self.left = 0;
             return Err(TextStop::Visits);
         }
-        self.left -= 1;
-        self.since += 1;
+        self.left -= n;
+        self.since += n;
         if self.since >= 1024 {
             self.since = 0;
             if std::time::Instant::now() >= self.deadline {
@@ -513,19 +516,31 @@ impl Dom {
             Space,
         }
         let mut out = String::new();
+        let cap = max + 1024;
         let mut stack = vec![Step::Node(from, 0, true)];
+        // `s` squished onto `out` word by word, never past `cap`: a huge text node is read only as
+        // far as there's room, and never copied whole.
         let push = |out: &mut String, s: &str| {
-            let s = squish(s);
-            if !s.is_empty() {
-                out.push_str(&s);
+            for (n, w) in s.split_whitespace().enumerate() {
+                if out.len() >= cap {
+                    return;
+                }
+                if n > 0 {
+                    out.push(' ');
+                }
+                let mut room = (cap - out.len()).min(w.len());
+                while !w.is_char_boundary(room) {
+                    room -= 1;
+                }
+                out.push_str(&w[..room]);
             }
         };
         while let Some(step) = stack.pop() {
-            if out.len() > max + 1024 {
+            if out.len() >= cap {
                 break;
             }
             if let Some(v) = visits.as_deref_mut() {
-                v.visit()?;
+                v.visit(1)?;
             }
             let (i, depth, include) = match step {
                 Step::Space => {
@@ -539,6 +554,10 @@ impl Dom {
             match &self.nodes[i].data {
                 Data::Text(t) => {
                     if include {
+                        // A node's text costs a visit per KiB.
+                        if let Some(v) = visits.as_deref_mut() {
+                            v.visit(t.len().min(cap) as u64 / 1024)?;
+                        }
                         push(&mut out, t);
                     }
                     continue;
@@ -555,6 +574,9 @@ impl Dom {
                         continue;
                     }
                     if let Some(c) = attrs.iter().find(|a| &*a.name.local == "content") {
+                        if let Some(v) = visits.as_deref_mut() {
+                            v.visit(c.value.len().min(cap) as u64 / 1024)?;
+                        }
                         push(&mut out, &c.value);
                     }
                 }
@@ -575,6 +597,10 @@ impl Dom {
             while c != NONE {
                 kids.push(c);
                 c = self.nodes[c].next;
+            }
+            // Each child queued costs a visit too.
+            if let Some(v) = visits.as_deref_mut() {
+                v.visit(kids.len() as u64)?;
             }
             for k in kids.into_iter().rev() {
                 stack.push(Step::Node(k, depth + 1, mode(k)));
@@ -795,8 +821,9 @@ impl Dom {
                     (!hits.is_empty(), values)
                 }
                 Source::Url(re) => {
-                    let s = url.as_str();
-                    let values: Vec<String> = re.captures_iter(s).take(MAX_MATCHES).filter_map(|c| c.get(1).or_else(|| c.get(0))).map(|m| m.as_str().to_string()).filter(|v| !v.is_empty()).collect();
+                    // A URL is ASCII: any span of it is a string.
+                    let s = url.as_str().as_bytes();
+                    let values: Vec<String> = re.captures_iter(s).take(MAX_MATCHES).filter_map(|c| c.get_group(1).or_else(|| c.get_group(0))).map(|m| String::from_utf8_lossy(&s[m.range()]).into_owned()).filter(|v| !v.is_empty()).collect();
                     (re.is_match(s), values)
                 }
             };
@@ -918,5 +945,32 @@ mod tests {
         }
         let p = read(&format!("<p>top</p>{}deep", "<div>".repeat(MAX_DEPTH - 8)), &[]);
         assert_eq!(p.body, "top deep");
+    }
+
+    /// A page's text visits are shared by its rules: a rule whose hits nest spends them, it and
+    /// the rules after it are dropped (counted), and the fields of the rules before stay.
+    #[test]
+    fn extraction_visits_run_out_on_a_later_rule() {
+        let html = format!(r#"<html><body><p class="a">kept</p>{}{}{}</body></html>"#, "<div>".repeat(100), "<i></i>".repeat(3000), "</div>".repeat(100));
+        let snippet = crate::json::parse(
+            r#"{"domains":[{"url":"https://e.com","extraction_rulesets":[{"rules":[
+                {"action":"extract","field_name":"first","selector":"p.a","join_as":"string","source":"html"},
+                {"action":"extract","field_name":"nested","selector":"div","join_as":"array","source":"html"},
+                {"action":"extract","field_name":"third","selector":"p.a","join_as":"string","source":"html"}]}]}]}"#
+                .as_bytes(),
+        )
+        .unwrap()
+        .unwrap();
+        let plan = super::super::config::plan(
+            &super::super::config::Fields { urls: vec!["https://e.com/".into()], sitemap_urls: vec![], sitemap_discovery: true, max_crawl_depth: None, max_unique_url_count: None },
+            Some(&snippet),
+            &super::super::config::Ceilings::new(|_| None, 3_600_000),
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let (dom, mut held) = parse(&html, Reservation::new(search_aggs::memory::MemoryBudget::new(u64::MAX)), deadline).unwrap();
+        let (fields, dropped) = dom.extract(&Link::parse("https://e.com/x", None).unwrap(), &plan.domains[0].extraction, &mut held, deadline).unwrap();
+        assert_eq!(fields, vec![("first".to_string(), Extracted::One("kept".into()))]);
+        assert_eq!(dropped, 2, "the nested rule and the one after it");
     }
 }
