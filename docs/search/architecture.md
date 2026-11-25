@@ -427,7 +427,7 @@ restore) after its home project was deleted anyway keeps no home there, and is t
   | role | what they may do to the project's clusters |
   | --- | --- |
   | viewer | read: settings, indices, documents, searches, metrics, logs, analytics |
-  | developer | as viewer, plus write (documents, indices, mappings, synonyms, branches, restores) and reveal (`read` and `append` API keys, browser keys) |
+  | developer | as viewer, plus write (documents, indices, mappings, synonyms, branches, restores) and reveal (`read` API keys, `append` ones (which need write too), browser keys) |
   | admin, owner | everything: settings, the console, `data` and `admin` API keys, the admin password, remotes, migrations, deletes, creates in the project |
 
   A cluster has no environments, but it can be protected as a whole (`protected`, as other
