@@ -738,6 +738,7 @@ impl Secrets {
             if there.is_none() {
                 return Ok(false);
             }
+            crate::guardrails::read(c)?.machine_hours(hours)?;
             c.execute("INSERT INTO machine_chains (chain, identity, project_id, hours, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?)", params![made.chain, id, project, hours, now, by])?;
             audit::record(c, self.keys()?, project, caller, "identity.bootstrap", None, None, &[], &format!("made a bootstrap token for identity {} (chain {}, {minutes} min, credentials of {hours} h)", i.name, made.chain), now)?;
             Ok::<_, Error>(true)
@@ -776,7 +777,7 @@ impl Secrets {
             return Err(Error::Forbidden(format!("identity {} doesn't log in from this address", i.name)));
         }
         let workloads = self.workloads.clone().ok_or_else(denied)?;
-        let hours = self.chain_for(&*workloads, &i.id, secret)?;
+        let hours = self.floors()?.cap_hours(self.chain_for(&*workloads, &i.id, secret)?);
         let next = match workloads.redeem(secret, from_bootstrap, ip.as_deref(), hours)? {
             crate::Step::Live(next) => next,
             crate::Step::Reused { chain } => return Err(self.reused(&project, &i, &chain, ip)),

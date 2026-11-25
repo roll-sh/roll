@@ -6344,7 +6344,10 @@ replaces it, and a floor left out has none:
   secrets on each make, each change of rules or lifetime, and each rotation
   (`Access::lifetime_cap`), on top of its own `max_days` (docs/permissions.md). A token that never
   expires is refused under it, and so is a gateway's long-lived token (log the gateway in through
-  a workload identity instead). Workload identities' logins last 60 minutes at most anyway.
+  a workload identity instead). Workload identities' logins last 60 minutes at most anyway. A
+  machine identity's bootstrap token whose credentials would live longer is refused, and each
+  machine credential issued after the policy (an exchange or a refresh) lives at most `d` days,
+  whatever its chain was made with.
 
 Each write the policy covers reads it in its own transaction, on the request as parsed. A write
 that would go, or stay, below a floor answers 403 naming the policy and the floor: `roll secrets'

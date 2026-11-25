@@ -127,6 +127,20 @@ impl Guardrails {
         Ok(())
     }
 
+    /// A machine identity's credentials of `hours` (a new bootstrap chain): within `max_token_days`.
+    pub(crate) fn machine_hours(&self, hours: u32) -> Result<()> {
+        match self.max_token_days {
+            Some(d) if hours > d * 24 => Err(below(&format!("a token with a secrets rule lives at most {d} day{}, so a machine credential at most {} hours", plural(d.into()), d * 24))),
+            _ => Ok(()),
+        }
+    }
+
+    /// The hours of a machine credential issued now: a chain made before the floor comes back
+    /// within it.
+    pub(crate) fn cap_hours(&self, hours: u32) -> u32 {
+        self.max_token_days.map_or(hours, |d| hours.min(d * 24))
+    }
+
     fn summary(&self) -> String {
         let mut floors = vec![];
         if let Some(n) = self.production_approvals {
