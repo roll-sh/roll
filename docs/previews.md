@@ -1116,7 +1116,9 @@ thirty-fourth review found them in the clear.
     (roll search's #988), so the masking's writes send `X-Roll-Unembedded: drop`. The masked text
     stays unembedded, and the real values' chunks and embeddings go, with no provider called. An
     app's own writes to such a field on a preview's branch need the endpoint's key set on the
-    branch; without it they're a 400.
+    branch (`_inference/{task}/{id}/_update`, or the Inference tab's "A roll secret"); without it
+    they're a 400 ("this branch doesn't have the parent's provider key; set it on the branch").
+    Endpoints that need no key (E5 on the node, the preconfigured ones) are unaffected.
   - Other products: a `seed` anonymises the rows instead.
   - **Suggestions** (as Tonic's and Neon's anonymisation tools name columns that look personal):
     `GET /v1/previews/projects/{project}/mask-suggestions` reads the columns of every Postgres,
