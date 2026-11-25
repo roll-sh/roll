@@ -629,13 +629,19 @@ pub struct GitReport {
     /// A service that isn't on roll's GitHub App (GitLab, Bitbucket): its report goes through
     /// roll apps, with the service's Git login, on its holder (a fleet hop when that's another
     /// node).
-    pub elsewhere: Option<(Arc<dyn super::fleet::Report>, Option<Arc<roll_cluster::Cluster>>)>,
+    pub elsewhere: Option<ThroughApps>,
+}
+
+/// roll apps' reports on this node, and the fleet that finds a service's holder.
+pub struct ThroughApps {
+    pub local: Arc<dyn super::fleet::Report>,
+    pub cluster: Option<Arc<roll_cluster::Cluster>>,
 }
 
 impl GitReport {
     async fn through_apps(&self, service: &str, ask: Value) -> anyhow::Result<Value> {
-        let Some((local, cluster)) = &self.elsewhere else { return Ok(Value::Null) };
-        super::fleet::report(cluster.as_ref(), local.as_ref(), service, ask).await
+        let Some(t) = &self.elsewhere else { return Ok(Value::Null) };
+        super::fleet::report(t.cluster.as_ref(), t.local.as_ref(), service, ask).await
     }
 }
 

@@ -230,7 +230,7 @@ pub fn start(
         // Its pushes to branches of a Git URL service: those branches' previews.
         a.set_git_pushes(Arc::new(services::GitPushes(Arc::downgrade(&engine))));
         // And their status and pull request comment, where the code lives (roll's GitHub App).
-        let _ = engine.git_report.set(Arc::new(services::GitReport { api: api.clone(), code: code.code.clone(), elsewhere: Some((Arc::new(services::AppsReport(a.clone())), clustered.then(|| cluster.clone()))) }));
+        let _ = engine.git_report.set(Arc::new(services::GitReport { api: api.clone(), code: code.code.clone(), elsewhere: Some(services::ThroughApps { local: Arc::new(services::AppsReport(a.clone())), cluster: clustered.then(|| cluster.clone()) }) }));
         // roll.toml services' output to the project's log drains that take previews'.
         let _ = engine.drains.set(Arc::new(services::AppsDrains { apps: a.clone(), wanted: Default::default() }));
     }
