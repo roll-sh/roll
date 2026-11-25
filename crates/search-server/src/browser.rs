@@ -10,7 +10,11 @@
 //! - with `per_ip_per_minute`, the key's for the client's address at three widths: the address
 //!   (an IPv6 /64, which one host usually holds), its /56 and its /48 (IPv4: /32, /24, /16), at 1,
 //!   4 and 16 times the per-address limit, the wider two never past a quarter of the key's or the
-//!   cluster's limit, so one network can't take more than a quarter of either.
+//!   cluster's limit, so one network can't take more than a quarter of either;
+//! - for a key derived from it with a `user` ([`search_es::xpack::security::derived`]), that
+//!   user's: its share of the key's limit (a quarter, or less when the derived key asks for
+//!   less). A derived key pays everything its parent would besides: the parent's limit is the
+//!   ceiling of all its derived keys together.
 //!
 //! An empty bucket answers 429 (`es_rejected_execution_exception`, as Elasticsearch rejects work
 //! it can't take) with `Retry-After`. The buckets live in memory on the cluster's owner, per
@@ -124,19 +128,23 @@ pub struct Limiter {
     keys: Mutex<HashMap<String, Bucket>>,
     /// By key, width (0: the address, 1: /56, 2: /48) and network.
     addresses: Mutex<HashMap<(String, u8, IpAddr), Bucket>>,
+    /// Derived keys' users, by parent key and user.
+    users: Mutex<HashMap<(String, String), Bucket>>,
     /// Browser requests running: all of them, and by key.
     running: Mutex<(u64, HashMap<String, u64>)>,
 }
 
 impl Limiter {
-    /// Charges `n` tokens to a request of key `id` from `ip` under the cluster's `ceiling` (per
-    /// minute); `Err`: refused, retry after that many seconds. A refused request takes nothing.
-    pub fn check(&self, id: &str, ip: Option<IpAddr>, limit: KeyLimit, ceiling: u64, n: u64) -> Result<(), u64> {
+    /// Charges `n` tokens to a request of key `id` from `ip` (for `user` at its rate per minute,
+    /// a derived key's) under the cluster's `ceiling` (per minute); `Err`: refused, retry after
+    /// that many seconds. A refused request takes nothing.
+    pub fn check(&self, id: &str, ip: Option<IpAddr>, user: Option<(&str, u64)>, limit: KeyLimit, ceiling: u64, n: u64) -> Result<(), u64> {
         let now = Instant::now();
         let need = n.max(1) as f64;
         let mut cluster = self.cluster.lock();
         let mut addresses = self.addresses.lock();
         let mut keys = self.keys.lock();
+        let mut users = self.users.lock();
         let mut waits = Vec::new();
         let c = cluster.get_or_insert_with(|| Bucket::new(ceiling, now));
         waits.push(c.refill(ceiling, now, need));
@@ -159,8 +167,16 @@ impl Limiter {
         }
         room(&mut keys, &id.to_string(), now);
         waits.push(keys.entry(id.to_string()).or_insert_with(|| Bucket::new(limit.per_minute, now)).refill(limit.per_minute, now, need));
+        let user = user.map(|(u, per)| ((id.to_string(), u.to_string()), per));
+        if let Some((k, per)) = &user {
+            room(&mut users, k, now);
+            waits.push(users.entry(k.clone()).or_insert_with(|| Bucket::new(*per, now)).refill(*per, now, need));
+        }
         if let Some(wait) = waits.iter().filter_map(|w| w.err()).max() {
             return Err(wait);
+        }
+        if let Some(b) = user.and_then(|(k, _)| users.get_mut(&k)) {
+            b.tokens -= need;
         }
         c.tokens -= need;
         for k in &nets {
@@ -176,7 +192,7 @@ impl Limiter {
 
     /// Gives back `n` tokens [`Limiter::check`] took for key `id` from `ip` (a request whose
     /// further items couldn't be paid: a refused request costs nothing).
-    pub fn refund(&self, id: &str, ip: Option<IpAddr>, limit: KeyLimit, n: u64) {
+    pub fn refund(&self, id: &str, ip: Option<IpAddr>, user: Option<&str>, limit: KeyLimit, n: u64) {
         let n = n as f64;
         let give = |b: &mut Bucket| b.tokens = (b.tokens + n).min(b.per_minute as f64);
         if let Some(c) = self.cluster.lock().as_mut() {
@@ -191,6 +207,11 @@ impl Limiter {
             }
         }
         if let Some(b) = self.keys.lock().get_mut(id) {
+            give(b);
+        }
+        if let Some(u) = user
+            && let Some(b) = self.users.lock().get_mut(&(id.to_string(), u.to_string()))
+        {
             give(b);
         }
     }
@@ -247,27 +268,27 @@ mod tests {
         let lim = lim(3, 2);
         let a: IpAddr = "203.0.113.1".parse().unwrap();
         let b: IpAddr = "198.51.100.2".parse().unwrap();
-        assert!(l.check("k", Some(a), lim, 100, 1).is_ok());
-        assert!(l.check("k", Some(a), lim, 100, 1).is_ok());
+        assert!(l.check("k", Some(a), None, lim, 100, 1).is_ok());
+        assert!(l.check("k", Some(a), None, lim, 100, 1).is_ok());
         // The address is out; another network still has the key's last token.
-        assert_eq!(l.check("k", Some(a), lim, 100, 1), Err(30));
-        assert!(l.check("k", Some(b), lim, 100, 1).is_ok());
+        assert_eq!(l.check("k", Some(a), None, lim, 100, 1), Err(30));
+        assert!(l.check("k", Some(b), None, lim, 100, 1).is_ok());
         // Now the key is out: refused, and nothing is taken.
-        assert_eq!(l.check("k", Some(b), lim, 100, 1), Err(20));
+        assert_eq!(l.check("k", Some(b), None, lim, 100, 1), Err(20));
         // Every key draws from the cluster's ceiling.
         let c = Limiter::default();
-        assert!(c.check("k1", Some(a), lim, 2, 1).is_ok());
-        assert!(c.check("k2", Some(b), lim, 2, 1).is_ok());
-        assert_eq!(c.check("k3", Some(b), lim, 2, 1), Err(30), "a ceiling of two a minute, both taken");
+        assert!(c.check("k1", Some(a), None, lim, 2, 1).is_ok());
+        assert!(c.check("k2", Some(b), None, lim, 2, 1).is_ok());
+        assert_eq!(c.check("k3", Some(b), None, lim, 2, 1), Err(30), "a ceiling of two a minute, both taken");
     }
 
     #[test]
     fn a_request_costs_a_token_per_item() {
         let l = Limiter::default();
-        assert!(l.check("k", None, lim(10, 10), 1000, 7).is_ok());
-        assert!(l.check("k", None, lim(10, 10), 1000, 4).is_err(), "3 tokens left can't cover 4 items");
-        assert!(l.check("k", None, lim(10, 10), 1000, 3).is_ok());
-        assert!(l.check("k", None, lim(10, 10), 1000, 11).is_err(), "more items than the key's burst");
+        assert!(l.check("k", None, None, lim(10, 10), 1000, 7).is_ok());
+        assert!(l.check("k", None, None, lim(10, 10), 1000, 4).is_err(), "3 tokens left can't cover 4 items");
+        assert!(l.check("k", None, None, lim(10, 10), 1000, 3).is_ok());
+        assert!(l.check("k", None, None, lim(10, 10), 1000, 11).is_err(), "more items than the key's burst");
     }
 
     #[test]
@@ -275,17 +296,17 @@ mod tests {
         // One /64 is one address.
         let l = Limiter::default();
         let k = lim(10_000, 2);
-        assert!(l.check("k", Some("2001:db8:1:2::1".parse().unwrap()), k, 10_000, 1).is_ok());
-        assert!(l.check("k", Some("2001:db8:1:2:ffff::9".parse().unwrap()), k, 10_000, 1).is_ok());
-        assert!(l.check("k", Some("2001:db8:1:2:abcd::77".parse().unwrap()), k, 10_000, 1).is_err(), "the same /64");
+        assert!(l.check("k", Some("2001:db8:1:2::1".parse().unwrap()), None, k, 10_000, 1).is_ok());
+        assert!(l.check("k", Some("2001:db8:1:2:ffff::9".parse().unwrap()), None, k, 10_000, 1).is_ok());
+        assert!(l.check("k", Some("2001:db8:1:2:abcd::77".parse().unwrap()), None, k, 10_000, 1).is_err(), "the same /64");
         // Many /64s of one /56 share its 4x: 8 requests, then throttled.
         let l = Limiter::default();
-        let ok = (0..64u16).filter(|i| l.check("k", Some(format!("2001:db8:1:{i:x}::1").parse().unwrap()), k, 10_000, 1).is_ok()).count();
+        let ok = (0..64u16).filter(|i| l.check("k", Some(format!("2001:db8:1:{i:x}::1").parse().unwrap()), None, k, 10_000, 1).is_ok()).count();
         assert_eq!(ok, 8, "a /56 gets 4 times one address's limit");
         // A /48's share of the key is at most a quarter.
         let l = Limiter::default();
         let k = lim(40, 10);
-        let ok = (0..16u16).filter(|i| l.check("k", Some(format!("2001:db8:7:{:x}00::1", i).parse().unwrap()), k, 10_000, 1).is_ok()).count();
+        let ok = (0..16u16).filter(|i| l.check("k", Some(format!("2001:db8:7:{:x}00::1", i).parse().unwrap()), None, k, 10_000, 1).is_ok()).count();
         assert_eq!(ok, 10, "a quarter of the key's 40");
     }
 

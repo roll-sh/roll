@@ -28,6 +28,7 @@
 pub mod actions;
 pub mod api_keys;
 pub mod browser;
+pub mod derived;
 pub mod audit;
 pub mod dls;
 pub mod opensearch;
@@ -86,6 +87,8 @@ pub struct ApiKeyAuth {
     /// A linked remote cluster's request (`cross_cluster` key, [`api_keys::authenticate_link`]):
     /// who it was sent for.
     pub remote: Option<Box<RemoteUser>>,
+    /// A key derived from this one ([`derived`]): what narrows it.
+    pub derived: Option<Box<derived::DerivedAuth>>,
 }
 
 /// The user a linked remote cluster's request was sent for.
@@ -144,6 +147,7 @@ impl Principal {
                 limited_by,
                 cross_cluster: false,
                 remote: None,
+                derived: None,
             })),
             ..Principal::owner()
         }
@@ -391,6 +395,9 @@ pub fn authenticate_header(cluster: &Cluster, header: &str, uri: &str) -> EsResu
         return users::authenticate_password(cluster, user, password).ok_or_else(|| unauthorized(format!("unable to authenticate user [{user}] for REST request [{uri}]")));
     }
     if scheme.eq_ignore_ascii_case("apikey") {
+        if derived::is_derived(value) {
+            return derived::authenticate(cluster, value);
+        }
         return api_keys::authenticate(cluster, value);
     }
     if scheme.eq_ignore_ascii_case("bearer") {
@@ -426,6 +433,9 @@ pub fn authenticate_native(cluster: &Cluster, header: &str) -> Option<Principal>
         return users::authenticate_password(cluster, user, password);
     }
     if scheme.eq_ignore_ascii_case("apikey") {
+        if derived::is_derived(value) {
+            return derived::authenticate(cluster, value).ok();
+        }
         return api_keys::authenticate(cluster, value).ok();
     }
     if scheme.eq_ignore_ascii_case("bearer") {
@@ -592,6 +602,10 @@ pub fn effective(file: &FileRoles, st: &crate::meta::ClusterState, p: &Principal
         AuthKind::ApiKey(a) => {
             let (role_descriptors, limited_by) = (&a.role_descriptors, &a.limited_by);
             let limited = permissions_of_descriptors(limited_by);
+            // A derived key: one more set every permission must pass.
+            if let Some(d) = &a.derived {
+                also.push(permissions_of_descriptors(&d.narrowing));
+            }
             if role_descriptors.as_object().is_none_or(|m| m.is_empty()) {
                 (limited, None)
             } else {

@@ -201,6 +201,23 @@ impl Tool {
         &PREPARED[self.name].definition
     }
 
+    /// What a call of it could need a person for ([`AskScope`]).
+    pub fn ask_scope(&self) -> &'static AskScope {
+        &PREPARED[self.name].asks
+    }
+
+    /// Built while [`PREPARED`] is (so from `find_actions`, never `actions`, which reads it).
+    fn find_asks(&self) -> AskScope {
+        let Some(found) = catalog::by_path(self.method, &self.sample_path()) else { return AskScope::default() };
+        let row = found.row;
+        // A body decides it (a `build` makes an apps write a deploy, SQL can be admin): any action.
+        let mut actions = if matches!(row.act, catalog::Act::Body(_) | catalog::Act::Raw(_)) && self.fixed.is_none() { Action::ALL.to_vec() } else { self.find_actions() };
+        if row.admin_if_field.is_some() && !actions.contains(&Action::Admin) {
+            actions.push(Action::Admin);
+        }
+        AskScope { actions, others: row.lends.is_some() || row.copies_from.is_some() }
+    }
+
     fn find_actions(&self) -> Vec<Action> {
         let Some(found) = catalog::by_path(self.method, &self.sample_path()) else { return Vec::new() };
         match found.row.act {
@@ -311,10 +328,13 @@ impl Tool {
                 }
                 continue;
             };
-            // An optional one left empty is no choice, as its routes read it (some clients fill every
-            // field they have).
+            // An optional one left empty is left out (some clients fill every field they have; most
+            // routes refuse an empty value rather than reading it as none).
+            if matches!(p.ty, Ty::Choice(_)) && !p.required && v.as_str() == Some("") {
+                continue;
+            }
             if let Ty::Choice(values) = p.ty
-                && !v.as_str().is_some_and(|s| values.contains(&s) || (s.is_empty() && !p.required))
+                && !v.as_str().is_some_and(|s| values.contains(&s))
             {
                 return Err(format!("{}: {} is one of {} (not {v})", self.name, p.name, values.join(", ")));
             }
@@ -501,6 +521,15 @@ const IDEMPOTENCY: P = P { name: "idempotency_key", ty: Ty::Str, at: At::Header(
 /// binds the header into its approval), audited by roll apps as `freeze.overridden`.
 const OVERRIDE: P = P { name: "override", ty: Ty::Bool, at: At::Header("x-roll-override"), required: false, desc: "Go past the environment's deploy freeze: an admin's call (a token that may only deploy can't), audited" };
 const IN_PROJECT: P = P { name: "workspace_project", ty: Ty::Str, at: At::Header("x-roll-project"), required: false, desc: "Workspace project (prj_…) to put the new resource in" };
+
+/// What a call of a tool could need a person for: the actions its route can be decided as (every
+/// one where its body decides), and whether it reaches another product's resources too (what it
+/// lends or copies from), whose rules and policy can ask as well.
+#[derive(Clone, Debug, Default)]
+pub struct AskScope {
+    pub actions: Vec<Action>,
+    pub others: bool,
+}
 
 const fn t(name: &'static str, title: &'static str, description: &'static str, product: &'static str, method: &'static str, path: &'static str, params: &'static [P]) -> Tool {
     Tool { name, title, description, product, method, path, params, fixed: None, wrap: None, hint: Hint::Auto, until: None, outside: &[], published: false, open_world: false, bodiless: false, one_of: &[] }
@@ -1811,13 +1840,14 @@ pub fn all() -> &'static [Tool] {
 /// every tool, on every `tools/list`, cost ~43 ms a call with every product on.
 struct Prepared {
     actions: Vec<Action>,
+    asks: AskScope,
     open: bool,
     within: bool,
     definition: Value,
 }
 
 static PREPARED: std::sync::LazyLock<std::collections::HashMap<&'static str, Prepared>> = std::sync::LazyLock::new(|| {
-    TOOLS.iter().map(|t| (t.name, Prepared { actions: t.find_actions(), open: t.find_open(), within: t.find_within(), definition: t.build_definition() })).collect()
+    TOOLS.iter().map(|t| (t.name, Prepared { actions: t.find_actions(), asks: t.find_asks(), open: t.find_open(), within: t.find_within(), definition: t.build_definition() })).collect()
 });
 
 #[cfg(test)]
@@ -1845,7 +1875,8 @@ mod tests {
         assert!(call("abort").is_ok());
         assert!(call("").is_err(), "a required choice can't be empty");
         let vulns = super::all().iter().find(|t| t.name == "apps_deploy_vulnerabilities").unwrap();
-        assert!(vulns.request(&serde_json::json!({ "service": "svc_1", "env": "production", "deploy": "dpl_1", "severity": "" })).is_ok(), "an optional one may be");
+        let empty = vulns.request(&serde_json::json!({ "service": "svc_1", "env": "production", "deploy": "dpl_1", "severity": "" })).unwrap();
+        assert!(!empty.uri.contains("severity"), "an optional one left empty is left out: {}", empty.uri);
     }
 
     /// A choice copies its set from the product that takes it: a value the product adds has to
@@ -1960,6 +1991,20 @@ mod tests {
         // Every choice is read from its product: a new one joins the list above.
         let unread: Vec<String> = super::all().iter().flat_map(|t| t.params.iter().filter(|p| matches!(p.ty, Ty::Choice(_)) && !covered.contains(&(t.name, p.name))).map(move |p| format!("{}.{}", t.name, p.name))).collect();
         assert!(unread.is_empty(), "choices not read from their product here: {unread:?}");
+    }
+
+    /// Whether a call can wait for a person is judged on everything it can be decided as: a body
+    /// that decides (a `build` makes an apps update a deploy) counts every action, a field that
+    /// makes it admin counts admin, and what it lends from another product (a link to a Postgres
+    /// database) counts that product's rules too. Its listed actions alone missed both.
+    #[test]
+    fn a_call_that_can_wait_is_judged_on_all_it_can_be() {
+        let scope = |n: &str| super::all().iter().find(|t| t.name == n).unwrap().ask_scope().clone();
+        let update = scope("apps_update_service");
+        assert!(update.actions.contains(&Action::Deploy) && !super::all().iter().find(|t| t.name == "apps_update_service").unwrap().actions().contains(&Action::Deploy), "{update:?}");
+        assert!(scope("apps_link").others, "a link lends another product's resource");
+        let plain = scope("postgres_list_projects");
+        assert_eq!((plain.actions.as_slice(), plain.others), (&[Action::Read][..], false));
     }
 
     /// `secrets_list_saas` names every vendor roll secrets rotates for: the list is prose, and new

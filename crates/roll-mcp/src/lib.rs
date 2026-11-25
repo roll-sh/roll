@@ -725,14 +725,17 @@ impl Ctx {
     /// anything else" short of rules that allow all of them everywhere, or the policy's
     /// `agents_ask` covering one (it holds MCP calls whatever the token allows). The operator's
     /// never do (the gate doesn't judge them). `policy` is read once per listing.
-    fn might_ask(&self, product: &str, actions: &[Action], policy: Option<&roll_access::Policy>) -> bool {
+    fn might_ask(&self, product: &str, scope: &tools::AskScope, policy: Option<&roll_access::Policy>) -> bool {
         use roll_auth::scope::{Effect, Resources};
         let Principal::Grant(g) = &self.principal else { return false };
-        let rules = || g.scope.0.iter().filter(|r| r.product == "*" || r.product == product);
-        let asks = rules().any(|r| actions.iter().any(|a| r.actions.get(a) == Some(&Effect::Ask)));
-        let everywhere = |a: &Action| rules().any(|r| r.actions.get(a) == Some(&Effect::Allow) && r.resources == Resources::All && r.environments.is_none() && r.paths.is_none() && !r.unprotected);
-        let otherwise = g.ask_otherwise && !actions.iter().all(everywhere);
-        asks || otherwise || policy.is_some_and(|p| actions.iter().any(|a| p.agent_asks(product, *a, None)))
+        let actions = &scope.actions;
+        // What it lends or copies from another product is decided on that product too: any rule.
+        let rules = || g.scope.0.iter().filter(|r| scope.others || r.product == "*" || r.product == product);
+        let asks = rules().any(|r| actions.iter().any(|a| r.actions.get(a) == Some(&Effect::Ask)) || (scope.others && r.actions.values().any(|e| *e == Effect::Ask)));
+        let everywhere = |a: &Action| g.scope.0.iter().filter(|r| r.product == "*" || r.product == product).any(|r| r.actions.get(a) == Some(&Effect::Allow) && r.resources == Resources::All && r.environments.is_none() && r.paths.is_none() && !r.unprotected);
+        let otherwise = g.ask_otherwise && (scope.others || !actions.iter().all(everywhere));
+        let held = policy.is_some_and(|p| if scope.others { !p.agents_ask.is_empty() } else { actions.iter().any(|a| p.agent_asks(product, *a, None)) });
+        asks || otherwise || held
     }
 
     /// A person's own token reaches only what their session can (`USER_REACH`).
@@ -811,10 +814,10 @@ impl Ctx {
         // tool (roll code's) takes it wherever any of the connection's could.
         let policy = self.m.config.access.as_ref().map(|a| a.policy_now());
         let roll: std::collections::HashMap<&str, &tools::Tool> = tools::all().iter().map(|t| (t.name, t)).collect();
-        let any = roll.values().any(|t| self.might_ask(t.product, &t.actions(), policy.as_ref()));
+        let any = roll.values().any(|t| self.might_ask(t.product, t.ask_scope(), policy.as_ref()));
         for t in &mut out {
             let asks = match t["name"].as_str().and_then(|n| roll.get(n)) {
-                Some(tool) => self.might_ask(tool.product, &tool.actions(), policy.as_ref()),
+                Some(tool) => self.might_ask(tool.product, tool.ask_scope(), policy.as_ref()),
                 None => any,
             };
             if !asks && let Some(p) = t["inputSchema"]["properties"].as_object_mut() {

@@ -680,7 +680,7 @@ async fn roll_run_watch_reads_a_change_through_a_delta() {
             }
         }
     };
-    let _roll = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll"))
+    let mut roll = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll"))
         .args(["run", "-p", "shop", "-e", "production", "--watch", "--interval", "1", "--no-mask", "--", "sh", "-c", r#"echo "$A $B" >> "$SEEN"; while :; do sleep 0.05; done"#])
         .env("ROLL_API_URL", &s.api)
         .env("SEEN", &seen_at)
@@ -701,6 +701,11 @@ async fn roll_run_watch_reads_a_change_through_a_delta() {
     let filter = roll_secrets::AuditFilter { action: Some("secrets.export".into()), ..Default::default() };
     let reads = s.secrets.audit(&project, filter, &roll_secrets::Caller::operator()).unwrap();
     assert_eq!(reads[0].keys, ["A"], "{}", reads[0].summary);
+    // Stopped as a person stops it, so it stops its command: a killed roll leaves the command
+    // running forever, holding whatever it inherited (a gate's build lock, once).
+    // SAFETY: kill(2) on the roll process this test started.
+    unsafe { libc::kill(roll.id().unwrap() as libc::pid_t, libc::SIGTERM) };
+    tokio::time::timeout(Duration::from_secs(10), roll.wait()).await.expect("roll exits with its command").unwrap();
 }
 
 /// A token reaches what it's told to, for 90 days: no environment named is refused (or the
@@ -1104,12 +1109,20 @@ async fn a_mounts_readers_each_get_a_whole_copy_and_a_read_roll_doesnt_answer_sa
     let token = ok(&s.api, &[], &["secrets", "-p", "shop", "tokens", "create", "mount", "--for-env", "production"], None).await.trim().to_string();
     let env_file = s._dir.path().join(".env");
     let (_child, log, _logging) = mount(&s, &token, &env_file, &["--ttl", "0"]).await;
-    // Each read takes 300 ms at roll; the others open while the first is being served.
+    // Each read takes 300 ms at roll; the others open while the first is being served. Each opens
+    // once the mount has put a new pipe at the path for the one before (two opens before that share
+    // a pipe, as docs/secrets.md says; a busy machine can take longer than any fixed pause).
     s.polls.values_slow.store(300, Ordering::SeqCst);
+    let pipe_id = || std::fs::symlink_metadata(&env_file).map(|m| std::os::unix::fs::MetadataExt::ino(&m)).ok();
     let mut reads = Vec::new();
     for _ in 0..4 {
+        let before = pipe_id();
         reads.push(read_pipe(&env_file));
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let started = std::time::Instant::now();
+        while pipe_id() == before {
+            assert!(started.elapsed() < std::time::Duration::from_secs(10), "the mount puts a new pipe at the path: {}", log.lock().unwrap());
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
     }
     for text in futures::future::join_all(reads).await {
         assert_eq!(text, whole, "{}", log.lock().unwrap());

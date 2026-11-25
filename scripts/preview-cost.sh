@@ -951,6 +951,9 @@ RESHAPED=$(api GET "/v1/previews/$PV" | jq_ "' | '.join('%s %s' % (c['path'], c.
 TRY=$(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" --json preview try "$PV" --service web --out "$HOME_DIR/try.png" / press Tab)
 TRY_SAID=$(echo "$TRY" | jq_ "'%s %s' % (d['status'], 'preview of change 1' in d['text'])")
 [ "$TRY_SAID" = "200 True" ] || { echo "an agent's run should answer the page's status and text: ${TRY:0:300}"; exit 1; }
+# Signed in first as the screenshots are (github.login): the same stop at #nope, said in its answer.
+TRY_LOGIN=$(echo "$TRY" | jq_ "d.get('login') or ''")
+[ "$TRY_LOGIN" = "signing in stopped at type #nope: nothing to type into: the page is the signed-out one" ] || { echo "an agent's run should sign in first and say where it stopped: $TRY_LOGIN"; exit 1; }
 head -c 8 "$HOME_DIR/try.png" | od -An -c | has "P   N   G" || { echo "the run's picture should be a PNG"; exit 1; }
 FB_LINK=$(api GET "/v1/previews/$PV" | jq_ "[x for x in d['services'] if x['name'] == 'web'][0]['share_url']")
 FB_SAID=$(docker run --rm --name roll-previews-fbtest --network host -e LINK="$FB_LINK" -v "$ROOT/scripts/preview-cost/feedback-check.js:/w/check.js:ro" roll-previews-shot:1.64.1 sh -c 'NODE_PATH=$(npm root -g) node /w/check.js' 2>&1 | tail -1)
