@@ -379,7 +379,10 @@ evaluator and search's catalogue rows. search adds no role checks of its own.
   its home and has no owner: it's the project's, so whoever made it loses it when they leave
   the project. Any cluster homed now is handed to the project this way (rolld's `on_homed`): a
   person's own one homed by hand (`PUT …/homes`), a branch a person makes, which takes its
-  parent's home, or a home said again. A home being settled (the cluster still a person's own)
+  parent's home, or a home said again. A branch goes only in its parent's project: a create that
+  names another one in `X-Roll-Project` is refused (400), and a branch that can't be homed there
+  isn't made (it's deleted again, 503), so a copy of a project's data never lands in another
+  project or stays its maker's. A home being settled (the cluster still a person's own)
   moves only with that person or the operator (403 for anyone else, its project's admins too),
   and a branch of such a cluster takes no home: it's that person's as well. A project's restore
   brings a kept home back only for a cluster that's the project's, one whose hand-over to that

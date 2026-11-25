@@ -643,6 +643,22 @@ async fn bodies_in_flight_are_held_to_the_node_budget() {
 
 /// A person's clusters and always-on clusters are capped (`--search-max-*-per-person`); branches
 /// count toward the parent's owner, and the operator and admins aren't held to it.
+/// A person's branch that the workspace can't put in its parent's project isn't made: the create
+/// answers 503 and the branch is gone, never left its maker's.
+#[tokio::test]
+async fn a_branch_that_cant_be_homed_with_its_parent_isnt_made() {
+    use reqwest::Method;
+    let e = env().await;
+    e.control.on_branch(Box::new(|_, _| Err("the workspace can't be written".into())));
+    let (s, v) = e.call_as("alice", Method::POST, "/v1/search/clusters", Some(json!({ "name": "orders" }))).await;
+    assert_eq!(s, 200, "{v}");
+    for (path, body) in [("/v1/search/clusters/orders/branches", json!({ "name": "copy" })), ("/v1/search/clusters", json!({ "name": "copy", "parent": "orders" }))] {
+        let (s, v) = e.call_as("alice", Method::POST, path, Some(body)).await;
+        assert_eq!(s, 503, "{path}: {v}");
+        assert_eq!(e.call_as("alice", Method::GET, "/v1/search/clusters/copy", None).await.0, 404, "{path}: the branch is gone");
+    }
+}
+
 #[tokio::test]
 async fn people_are_held_to_their_cluster_caps() {
     use reqwest::Method;

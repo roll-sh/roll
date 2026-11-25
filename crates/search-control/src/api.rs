@@ -48,6 +48,7 @@ impl IntoResponse for ControlError {
             ControlError::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             ControlError::Forbidden(_) => StatusCode::FORBIDDEN,
             ControlError::Busy(_) => StatusCode::TOO_MANY_REQUESTS,
+            ControlError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             ControlError::Internal(e) => {
                 tracing::warn!(error = %e, "search control error");
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -447,7 +448,7 @@ struct CreateReq {
     opts: ClusterOptions,
 }
 
-async fn create(State(c): State<AppState>, caller: Caller, method: Method, headers: HeaderMap, body: bytes::Bytes) -> Result<Response, ControlError> {
+async fn create(State(c): State<AppState>, caller: Caller, method: Method, headers: HeaderMap, ext: Extensions, body: bytes::Bytes) -> Result<Response, ControlError> {
     let r: CreateReq = serde_json::from_slice(&body).map_err(|e| ControlError::Invalid(format!("invalid request: {e}")))?;
     // A person's cluster is theirs as it's made. Made in a workspace project (`X-Roll-Project`),
     // the gate then makes the project its home, which hands it to the project (rolld's
@@ -458,6 +459,14 @@ async fn create(State(c): State<AppState>, caller: Caller, method: Method, heade
             // A branch is cut on the node holding the parent, which commits it first. It is the
             // parent owner's. Branching copies the parent's indices: it takes write there.
             let parent = caller.get_to(&c, p, roll_auth::scope::Action::Write).await?;
+            // A branch goes only in its parent's project (rolld puts it there): a project the
+            // request names (the gate puts a create there too) must be that one, or another
+            // project's members would reach a copy of this one's data.
+            if let Some(roll_auth::InProject(named)) = ext.get::<roll_auth::InProject>()
+                && c.home_of(&parent.id)?.as_deref() != Some(named.as_str())
+            {
+                return Err(ControlError::Invalid(format!("a branch of {} is made only in its parent's project: name that project in X-Roll-Project, or none", parent.name)));
+            }
             // The owner gets the parent checked here by its id: a cluster that took its name in
             // between is never branched in its place.
             let mut forwarded: Value = serde_json::from_slice(&body).map_err(|e| ControlError::Invalid(format!("invalid request: {e}")))?;
@@ -470,7 +479,7 @@ async fn create(State(c): State<AppState>, caller: Caller, method: Method, heade
             }
             let d = c.branch(&parent, &r.name, r.at, r.opts, caller.user(), caller.caps(&c)).await?;
             if !caller.is_all() {
-                c.branched(&parent, &d);
+                c.branched(&parent, &d).await?;
             }
             d
         }
@@ -513,7 +522,7 @@ async fn branch(State(c): State<AppState>, caller: Caller, Path(id): Path<String
     }
     let d = c.branch(&parent, &r.name, r.at, r.opts, caller.user(), caller.caps(&c)).await?;
     if !caller.is_all() {
-        c.branched(&parent, &d);
+        c.branched(&parent, &d).await?;
     }
     Ok(Json(view(&c, &caller, d, true).await?).into_response())
 }
