@@ -626,6 +626,10 @@ fn subcommand_name() -> Option<String> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     reset_sigpipe();
+    // The local agent as a Windows service: its login, from the file only it and the
+    // Administrators may open, before the flags read the environment.
+    #[cfg(windows)]
+    secrets::service::load_login()?;
     let matches = match Cli::command().try_get_matches() {
         Ok(m) => m,
         // `roll code` promises agents 2 = land conflict and 3 = no work, so its usage errors

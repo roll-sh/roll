@@ -4,6 +4,8 @@
 mod local_agent;
 mod mount;
 mod repo;
+#[cfg(windows)]
+pub mod service;
 
 use crate::Api;
 use anyhow::{Context, bail};

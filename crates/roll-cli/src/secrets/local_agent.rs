@@ -37,9 +37,10 @@ pub struct LocalAgent {
     /// extension's; 0 picks a free one and prints it.
     #[arg(long, env = "ROLL_AGENT_PORT", default_value_t = 2773)]
     port: u16,
-    /// The file holding what requests send in `X-Roll-Token`; made with a random value (0600) when
-    /// it doesn't exist. Default: `$XDG_RUNTIME_DIR/roll/agent-token`. `ROLL_AGENT_TOKEN` gives the
-    /// value itself instead.
+    /// The file holding what requests send in `X-Roll-Token`; made with a random value (0600; on
+    /// Windows, this user and the Administrators) when it doesn't exist. Default:
+    /// `$XDG_RUNTIME_DIR/roll/agent-token` (Windows: `%LOCALAPPDATA%\roll\agent-token`).
+    /// `ROLL_AGENT_TOKEN` gives the value itself instead.
     #[arg(long, env = "ROLL_AGENT_TOKEN_FILE", value_name = "FILE")]
     token_file: Option<std::path::PathBuf>,
     /// Folders read before the agent answers: `production:/,staging:/api`.
@@ -53,6 +54,26 @@ pub struct LocalAgent {
     /// How many folders are kept; past it, the one read longest ago goes. 0: no cap.
     #[arg(long, env = "ROLL_CACHE_SIZE", default_value_t = 1000)]
     cache_size: usize,
+    /// Windows: install the agent as a service that starts with the machine, with these flags, as
+    /// its own account (`NT SERVICE\<name>`), logged in with this command's `ROLL_TOKEN` or
+    /// `ROLL_IDENTITY`, its files under `%ProgramData%\roll\agent`. Run it as an administrator.
+    /// (Linux: a systemd unit, docs/secrets.md "A local agent".)
+    #[arg(long)]
+    install_service: bool,
+    /// Windows: stop and remove the service, and its login.
+    #[arg(long, conflicts_with = "install_service")]
+    uninstall_service: bool,
+    /// The Windows service's name.
+    #[arg(long, default_value = "roll-secrets-agent", value_name = "NAME")]
+    service_name: String,
+    /// With `--install-service`: an account that may read the token file besides the
+    /// Administrators and the service (the app's: `IIS AppPool\shop`, `.\shop`). Repeatable.
+    #[arg(long, value_name = "ACCOUNT", requires = "install_service")]
+    token_reader: Vec<String>,
+    /// Run under Windows' service control manager (what `--install-service` puts on the service's
+    /// command line).
+    #[arg(long = "windows-service", hide = true, value_name = "NAME")]
+    windows_service: Option<String>,
 }
 
 /// The header every request carries (the Lambda extension's).
@@ -66,6 +87,60 @@ const RETRY: Duration = Duration::from_secs(5);
 const RENEW_EVERY: Duration = super::RENEW_EVERY;
 
 pub async fn run(api: &Api, args: &super::AtArgs, a: LocalAgent) -> anyhow::Result<()> {
+    if a.install_service || a.uninstall_service || a.windows_service.is_some() {
+        return service(api, args, a).await;
+    }
+    serve(api, args, a, None).await
+}
+
+/// The agent as a Windows service: installing it, removing it, or running under the service
+/// control manager (`super::service`).
+#[cfg(windows)]
+async fn service(api: &Api, args: &super::AtArgs, a: LocalAgent) -> anyhow::Result<()> {
+    use super::service::{Install, Scm, install, uninstall};
+    if a.uninstall_service {
+        return uninstall(&a.service_name);
+    }
+    if let Some(name) = a.windows_service.clone() {
+        let scm = Scm::start(&name).await?;
+        let res = serve(api, args, a, Some(&scm)).await;
+        if let Err(e) = &res {
+            eprintln!("roll secrets agent: {e:#}");
+        }
+        scm.stopped(res.is_err());
+        return res;
+    }
+    crate::fallback::duration_ms(&a.ttl).context("--ttl")?;
+    // The login works and names a project before anything is installed.
+    let (at, project) = locate(api, args).await?;
+    install(Install {
+        name: &a.service_name,
+        api: &api.base,
+        project: &project,
+        env: (at.from.1 != Source::Default).then_some(at.env.as_str()),
+        path: (at.from.2 != Source::Default).then_some(at.path.as_str()),
+        port: a.port,
+        ttl: &a.ttl,
+        cache_size: a.cache_size,
+        prefetch: &a.prefetch,
+        token_file: a.token_file.as_deref(),
+        readers: &a.token_reader,
+    })
+}
+
+#[cfg(not(windows))]
+async fn service(_: &Api, _: &super::AtArgs, _: LocalAgent) -> anyhow::Result<()> {
+    anyhow::bail!("--install-service and --uninstall-service are for Windows: on Linux, run the agent from a systemd unit (docs/secrets.md, \"A local agent\")")
+}
+
+/// The scm: the service control manager the agent runs under, told when it listens and stopping
+/// it.
+#[cfg(windows)]
+type Scm<'a> = Option<&'a super::service::Scm>;
+#[cfg(not(windows))]
+type Scm<'a> = Option<&'a std::convert::Infallible>;
+
+async fn serve(api: &Api, args: &super::AtArgs, a: LocalAgent, scm: Scm<'_>) -> anyhow::Result<()> {
     let token = request_token(a.token_file.as_deref())?;
     let ttl = Duration::from_millis(crate::fallback::duration_ms(&a.ttl).context("--ttl")?.max(0) as u64);
     let (at, project) = locate(api, args).await?;
@@ -100,8 +175,17 @@ pub async fn run(api: &Api, args: &super::AtArgs, a: LocalAgent) -> anyhow::Resu
         .layer(axum::middleware::from_fn_with_state(agent.clone(), guard))
         .with_state(agent);
     eprintln!("roll secrets agent {}: listening on {addr} for {} ({project})", env!("CARGO_PKG_VERSION"), at.label.as_deref().unwrap_or(&project));
+    #[cfg(windows)]
+    if let Some(scm) = scm {
+        scm.running();
+    }
     axum::serve(listener, router)
-        .with_graceful_shutdown(async {
+        .with_graceful_shutdown(async move {
+            #[cfg(windows)]
+            if scm.is_some() {
+                return super::service::Scm::stopping().await;
+            }
+            let _ = scm;
             let _ = tokio::signal::ctrl_c().await;
         })
         .await?;
@@ -122,7 +206,7 @@ fn request_token(file: Option<&std::path::Path>) -> anyhow::Result<String> {
     }
     let file = match file {
         Some(f) => f.to_path_buf(),
-        None => std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()).map(|d| std::path::PathBuf::from(d).join("roll").join("agent-token")).context("where's the request token? --token-file FILE (made when it doesn't exist) or ROLL_AGENT_TOKEN")?,
+        None => default_token_file().context("where's the request token? --token-file FILE (made when it doesn't exist) or ROLL_AGENT_TOKEN")?,
     };
     match std::fs::read_to_string(&file) {
         Ok(t) => {
@@ -138,11 +222,21 @@ fn request_token(file: Option<&std::path::Path>) -> anyhow::Result<String> {
                 std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
             }
             super::write_private(&file, &format!("{t}\n"))?;
-            eprintln!("roll secrets agent: made {} (0600); requests send its contents in X-Roll-Token", file.display());
+            let only = if cfg!(windows) { "this user and the Administrators only" } else { "0600" };
+            eprintln!("roll secrets agent: made {} ({only}); requests send its contents in X-Roll-Token", file.display());
             Ok(t)
         }
         Err(e) => Err(e).with_context(|| format!("reading {}", file.display())),
     }
+}
+
+/// `$XDG_RUNTIME_DIR/roll/agent-token`; on Windows, `%LOCALAPPDATA%\roll\agent-token`.
+fn default_token_file() -> Option<std::path::PathBuf> {
+    let var = |k: &str| std::env::var_os(k).filter(|d| !d.is_empty()).map(std::path::PathBuf::from);
+    let dir = var("XDG_RUNTIME_DIR");
+    #[cfg(windows)]
+    let dir = dir.or_else(|| var("LOCALAPPDATA"));
+    Some(dir?.join("roll").join("agent-token"))
 }
 
 /// One environment's folder.
