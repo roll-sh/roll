@@ -58,7 +58,7 @@ impl Engine {
             self.store.add_point_data(id, label, by, at, &d)?;
         }
         let saved = self.store.restore_points(id)?.into_iter().find(|p| p.id == point);
-        let Some(saved) = saved else { return Err(Error::Conflict("nothing to save: restore points hold Postgres branches, and this preview has none ready".into())) };
+        let Some(saved) = saved else { return Err(Error::Conflict("nothing to save: restore points hold Postgres and NoSQL branches, and this preview has none ready".into())) };
         self.store.log(id, &format!("{by} saved restore point {point}{} ({})", if label.is_empty() { String::new() } else { format!(" \"{label}\"") }, saved.data.join(", ")))?;
         Ok(saved)
     }
