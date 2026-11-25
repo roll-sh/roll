@@ -1504,6 +1504,13 @@ a credential never drops data.
 
 | `search` | `url`, `host`, `port`, `username` | a credential of its own with data access only (no keys or users; `"access": "data"`), or narrower with the options `permission` (`read`: searches and reads; `append`: adds to named data streams only, Elasticsearch flavor) and `names` (index names or patterns, a list or a comma-separated string; a data key on names gets none of the cluster's templates, pipelines or lifecycle policies); a key roll search doesn't say is the access and indices asked for, whatever else it says or if it says nothing, is deleted and refused, credential `key`: on an Elasticsearch cluster `api_key` (`Authorization: ApiKey …`), on an OpenSearch one an internal user, `user` (`<user>@<cluster>`, which the node routes) and `password`; a link to the field the cluster's flavor doesn't issue is refused when written, and switching a cluster's flavor carries no credential across (link the other fields again); an OpenSearch cluster's fields are offered and suggested under the names its clients read (`OPENSEARCH_URL`, `_HOST`, `_PORT`, `OPENSEARCH_USERNAME`/`_PASSWORD` for its user, `OPENSEARCH_CLUSTER` for the cluster's name); a dynamic one expires by itself 5 minutes after its lease | no (never the cluster's password) |
 
+A link keeps its resource by the id it goes by for good. Search links written while the provider
+still took a cluster's name are rewritten to the id at rolld's start (`Secrets::link_refs`,
+`Secrets::rekey_links`, docs/search/architecture.md "Who sees a cluster"): only current versions,
+in one write per project and name, audited as the operator's `link.rekey` with the keys it moved
+(never a value), fingerprints kept. Rolling a key back to a version that names the cluster by
+name is refused (400), as any link by a name is.
+
 roll apps' services have a workspace kind (`service`, `svc_…`); they consume secrets (an app's
 variables, `app:<svc>`) rather than issue credentials, so they have no link provider. Products
 without a link provider yet (tasks) join by registering one. Queues have no owners, so a person's
