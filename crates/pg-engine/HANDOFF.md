@@ -15481,7 +15481,7 @@ failed: all passed.
 Not this round's: roll's `VACUUM (VERBOSE)` sends none of PostgreSQL's INFO lines (agent 205's
 note, still open).
 
-## Short write transactions, round 18: a compaction's filter bits for keys the adopted file holds; the standing table; the L0 merge again (agent 313)
+## Short write transactions, round 18: a compaction's filter bits for keys the adopted file holds; a range read's newer versions taken in its runs' loop; the standing table; the L0 merge again (agent 313)
 
 BENCH.md "Short write transactions, round 18" has the counts. Plain dist builds (`tools/dist.sh`), b0 =
 the head (`8f3876dab`'s tree), its PGO build pgob0 (`tools/dist-pgo.sh`); work-in-progress builds with
@@ -15531,6 +15531,86 @@ cand/a313-3's commit on top: `tools/quick-check.sh` as above on `9ba0f74a8`, all
 binaries, 436 tests in 24 binaries and the same counts of the reference suites (a first run's regress
 step failed to start: the reference container had been stopped by the machine's idle timer).
 
+**The overlay list (cand/a313-3, on cand/a313-2; brief item 2).** A range read's merging scan
+(`Scan::fill_batch_with`) took a newer version in its range (an UPDATE's, in a memtable or an L0
+file, over the table in L1) by stopping the L1 run there, `overlay` or three rounds of `position`,
+and setting the run up again: in process (306's probe, a verify build) a newer entry cost 2.8-4.9k
+user instructions against ~220 for a row, spread over `Cursor::head` / `fill`, `Merge::min`, the run's
+setup, re-ranking, `zip_rows` tried when runs got short, and the stop-checking run loop itself
+(`run_rows_to::<true>`, ~8-15 instructions a row more than the stop-free one, taken for every block
+while any other source had a head anywhere ahead).
+
+What changed (one commit, `storage/mod.rs`, `storage/sst.rs`, `storage/batch.rs`):
+
+- `Scan::gather`: when the run's source is the merge's oldest (L1, or the oldest L0 file without
+  L1) and the others' next entry is in its current block, the other ranked sources' entries ahead
+  are read into a list without moving them (a memtable's buffer, read on to its full size first;
+  a file's current block through a position of its own), up to 128 entries, merged by key from
+  each source's run (`sst::Overlay`, keys in fixed 56-byte buffers as the run makes its own). Where
+  a source's entries at hand end (a file's block, a memtable's buffer not read to the end), or the
+  scan's end, the list has its limit: entries at or past it are left out and the run stops there.
+  A deletion, an out-of-line value under `resolve`, a derived value or a key over 32 bytes: no list
+  (`position` as before), and none under range deletions or while a dead-range hint is looked for.
+- `Block::run_rows` takes the list (`ov`): its stop is the list's next entry; at the stop
+  (`Overlay::take`, out of line) the entries up to the run's entry are taken: a version at or
+  before the snapshot of a key after the last row pushed is pushed (value referenced in its
+  block or memtable buffer), anything else passed; the run's entry is then passed when it is an
+  older version of that key (`Skip`), taken when below the next stop (`Row`), or the run ends
+  (`Stop`: past the limit, or the batch full). A run entry newer than the list's (a block newer
+  than a source of the list) comes first and the list's version is passed after it.
+- The runs go on into the oldest source's next block with the same list (`Cursor::block_done`,
+  `fill`, the head taken as the entries after it, `run_into`'s `pushed`), and `Scan::ungather`
+  moves each source past what was taken or passed (a file's to the position it was read to when
+  all of it was taken) and ranks them again, once.
+- A block whose last key is below the others' heads (or, with a list, below its next entry) runs
+  the stop-free loop; with a list, the rest of a block past its last entry there runs with no stop.
+  This holds without a list too: any read with a newer version ahead in its range ran every block
+  before it through the stop-checking loop.
+
+Rows, their order, the versions read and the merge's state after are as before; the probe's hashes
+of keys and values are equal in every case. Test `storage::tests::runs_take_newer_versions_in_their_loop`:
+a table in L1, sparse newer versions in two L0 files and the memtable (some of the same rows in two of
+them), the model's reads (`check_at`: whole scans, batches of 1-64, ranges ending inside blocks,
+point reads) at five pinned snapshots, from one that sees none of the newer versions to all, with
+one the memtable's newest are past; and that runs took list entries. (Unpinned, its first form
+failed on the hot range's rows, which are kept trimmed to the gc horizon, not on the list.)
+
+**Measured** (BENCH "Short write transactions, round 18", the overlay rows):
+
+- In process (verify build, the old path by a switch in the same binary), user instructions a
+  read: 100-row with 10 newer versions in an L0 file 68.6k -> 50.4k, in the memtable 72.8k -> 55.4k,
+  in both 82.7k -> 58.7k; 1,000-row with 10 in an L0 file 264.3k -> 242.2k, with 100 531.6k ->
+  426.7k, in the memtable 593.1k -> 414.6k, in both 713.6k -> 473.9k; none 222k both; 100-row with
+  every row newer 209.6k -> 214.1k (+2.1%) and 262.3k -> 265.9k (+1.4%), the one case it loses.
+- Server, controlled (306's `probe.sh`, lane B, two pairs b0 -> n4 with the merge off): 100-row
+  ranges with 10 newer versions each in the memtable -5.8% and -3.6%, 1,000-row with 100 -6.9% and
+  -6.2%; the other cells -1.8% to +1.7% (the base read 327.6k and 319.7k in its two runs of one cell).
+- Across the TPC-B write cycle (`cycle.sh`, lane A, one pair b0 -> n4 with the merge off):
+  select-only +0.8%, 100-row -1.7%, 1,000-row +0.4% (level: its newer versions lie about one to an
+  L1 block). TPC-H SF1 (one pair): q01 +0.05%, q06 +0.3%, hashes equal; the bulk script's COPY,
+  scans, INSERT ... SELECT and UPDATE level, row checks equal. On the PGO build (its
+  run loop and stops are out-of-line calls and instances of their own, so gated there too):
+  `tools/dist-pgo.sh` of the candidate (its own profile, staleness 0) against pgob0, one probe pair
+  (lane B): 100-row with 10 newer -4.0%, 1,000-row with 100 -6.7%, the other cells +0.2% to +0.7%.
+  The candidate built with pgob0's profile instead (its 11 changed hot functions without data, 3% of
+  the hot counts) lost 1.9-3.6% even where no list is made: that build measures the profile, not the
+  change.
+
+What is left of a newer entry: in a 1,000-row read with one to a block, ~2.0k user instructions in
+process (from ~4.9k), mostly the stop-checking loop over the block it is in and the list's set-up
+per range; with every few rows newer, ~1.3k. Going on: a run loop whose stop check costs nothing
+when the next stop is far (a count of rows to it instead of the key compare), and the memtable's
+values pushed without a `Bytes` clone each.
+
+Verification of cand/a313-3: `tools/quick-check.sh` with `QC_CHECKED=1` and `QC_TESTS="crash_ctids big_tables parallel_scan heap_order_scan pk_clustered stored_filters"`
+on `b6906769a` (on cand/a313): 28 test binaries, clippy 16 warnings, none new in a changed file, 435 tests
+in 24 binaries (the lib's unit tests with the new one, the storage binaries, big_tables, crash_ctids,
+parallel_scan, heap_order_scan, pk_clustered, stored_filters, golden, wire among them), the same 435 built
+`--profile verify-checked`, `crash_random` seeds 1-3 x 2 rounds and `power_cut_at_every_point`, regress
+51,148 / 51,150 (0 newly differing), isolation 1,647 / 1,648, pg_dump_tap 14,609; `tools/crash-binary.py`
+as above (n4 holds this code). Rebased onto `83a21ef3f`: the same, all green, on `9ba0f74a8` (436 tests
+in 24 binaries, plain and `verify-checked`).
+
 **The L0 merge, gated a third time: still not landed** (`~/.cache/a305/patches/l0-merge-3f0f6d320.patch`,
 applied unchanged). On top of the overlay list (cand/a313-3, which lowers a newer entry's cost inside
 a range read), across the write cycle, merge against no merge on one binary: select-only -2.2%,
@@ -15541,7 +15621,7 @@ pair): 546.1k -> 492.3k user instructions a transaction (-9.9%), L1 compactions 
 still pay: the merge keeps L0's entries about three times as many flushes before they go to L1, so a
 read meets about three times as many newer versions; in a 1,000-row range of the TPC-B cycle they lie
 about one to a block of L1, where a newer entry still costs ~2k user instructions in process against
-~220 for a row (cand/a313-3's part below has where).
+~220 for a row (cand/a313-3's part above has where).
 
 ## Short write transactions, round 17: a range read's run goes on between newer versions; the L0 merge gated again (agent 306)
 

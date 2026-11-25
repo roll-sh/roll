@@ -688,7 +688,7 @@ Per query peaks in the 22 (MB, `bench --mem-cgroup`): q01 357-360, q02-q09 368-3
 q11 467, q12 389-395, q13 448-456, q14 448-456, q15 421-425, q16 415-420, q17-q22 380-420 (q18 410-420).
 `MIMALLOC_PURGE_DELAY=0` on pgbench -i: peak 634.7, end 34.2 MB (default: 674-726, end 174-202).
 
-## Short write transactions, round 18: the standing table, a compaction's filter bits, the L0 merge again (2026-11-24, agent 313)
+## Short write transactions, round 18: the standing table, a compaction's filter bits, the overlay list, the L0 merge again (2026-11-24, agent 313)
 
 HANDOFF "Short write transactions, round 18" has what changed. Plain dist builds (`tools/dist.sh`):
 **b0** = `7e6df5f9c` (the tree of `8f3876dab`, cand/a306 landed); **pgob0** = `tools/dist-pgo.sh` of it
@@ -775,6 +775,75 @@ Round 17's pair (without the list): +2.6% / +3.2%. The write side on n3, 480k tr
 clients, one pair (4.89 foreign cores): no merge 546,148 user instructions a transaction (13 L1
 compactions, flush thread 97.1k, md2 write bytes 4,196), merge 492,281 (-9.9%; 4 compactions and 18
 L0 merges, flush thread 62.7k, 3,650 bytes), user cycles 1.42 M -> 1.38 M, tps 4,281 / 4,257.
+
+### The overlay list (cand/a313-3)
+
+In process (verify build of the lib's tests, 306's probe `~/.cache/a313/patches/a313_probe.rs` with a
+case of three sources: n rows of each of 64 ranges updated, every other one into an L0 file and the
+rest left in the memtable). User instructions a read; "old" is the same binary with the list switched
+off (it has the stop-free blocks below the others' heads, which both paths share; the head before
+them read 270.4k for the 1,000-row L0 case with 10); the final form (o11; 2,000 reads a case, same
+hashes of keys and values in every case):
+
+| where | rows | newer a range | old | list |
+|---|---:|---:|---:|---:|
+| L0 file | 100 | 0 | 33,959 | 34,076 |
+| L0 file | 100 | 10 | 68,555 | 50,359 (-26.5%) |
+| L0 file | 100 | 100 | 209,631 | 214,076 (+2.1%) |
+| L0 file | 1,000 | 0 | 221,182 | 222,149 |
+| L0 file | 1,000 | 10 | 264,298 | 242,196 (-8.4%) |
+| L0 file | 1,000 | 100 | 531,578 | 426,709 (-19.7%) |
+| memtable | 100 | 10 | 72,788 | 55,423 (-23.9%) |
+| memtable | 100 | 100 | 262,330 | 265,920 (+1.4%) |
+| memtable | 1,000 | 10 | 265,908 | 247,154 (-7.1%) |
+| memtable | 1,000 | 100 | 593,108 | 414,579 (-30.1%) |
+| both | 100 | 10 | 82,710 | 58,674 (-29.1%) |
+| both | 1,000 | 10 | 269,675 | 248,822 (-7.7%) |
+| both | 1,000 | 100 | 713,583 | 473,865 (-33.6%) |
+
+Forms measured on the way, dropped: taking the others' heads in place and going on without a list
+(level: the cost was not in `position`); a list per L1 block (sparse entries -4%, but a newer L0 file's
+block leading the merge gathered L1's rows: -31% to +16%); sorting the list (14k a 100-row read
+with two sources: merged from the sources' runs instead); the rest of a block past the list handed to
+the stop-free loop (+0.3% to +2.4% everywhere: dropped).
+
+Server, controlled (`probe.sh`: `pgbench -i -s 32`, CHECKPOINT, 64 fixed 100-row and 64 fixed 1,000-row
+ranges; none, then 10 and then 100 rows of each updated and left in the memtable; 3 s of each read at 8
+clients), lane B, b0 against n4 with `A313_NO_MERGE=1`, user instructions a read:
+
+| pair | read | none | 10 newer | 100 newer | foreign |
+|---|---|---:|---:|---:|---:|
+| 1 | 100-row, b0 -> n4 | 327,644 -> 321,759 | 358,074 -> 337,291 (-5.8%) | 507,442 -> 507,905 | 6.50 |
+| 1 | 1,000-row | 2,115,544 -> 2,114,427 | 2,155,801 -> 2,152,040 | 2,421,509 -> 2,254,946 (-6.9%) | 6.50 |
+| 2 | 100-row, n4 first | 319,724 -> 321,387 | 349,168 -> 336,764 (-3.6%) | 498,671 -> 507,340 (+1.7%) | 6.65 |
+| 2 | 1,000-row | 2,095,766 -> 2,114,171 (+0.9%) | 2,136,867 -> 2,152,120 (+0.7%) | 2,402,292 -> 2,254,421 (-6.2%) | 6.65 |
+
+Across the TPC-B write cycle (`cycle.sh`, lane A, 6.04 foreign cores, b0 -> n4 with the merge off, 26
+flushes and 7 compactions each): select-only 47,962 -> 48,351, 100-row 337,465 -> 331,866 (-1.7%),
+1,000-row 2,161,418 -> 2,169,624 (+0.4%); one pair before on n1 (the list's first form, old path by
+switch): 335,640 -> 336,497 and 2,178,169 -> 2,168,855.
+
+On the PGO build (lane B, 5.60 foreign cores, `probe.sh`, one pair): pgob0 against the candidate's
+`tools/dist-pgo.sh` (commit `b6906769a`, its own profile, staleness 0.00%), user instructions a read:
+
+| read | none | 10 newer | 100 newer |
+|---|---:|---:|---:|
+| 100-row | 255,647 -> 256,186 (+0.2%) | 281,907 -> 270,762 (-4.0%) | 400,661 -> 403,296 (+0.7%) |
+| 1,000-row | 1,634,255 -> 1,641,025 (+0.4%) | 1,676,815 -> 1,682,409 (+0.3%) | 1,907,252 -> 1,778,767 (-6.7%) |
+
+The candidate built with pgob0's profile (`--profdata`; its 11 changed hot functions without data,
+3.03% of the hot counts) against pgob0, one pair (5.99 foreign cores): +3.6% / +1.9% with no newer
+versions, -1.2% / +1.3% with 10, +5.3% / -6.0% with 100: the profile's loss, not the change's.
+
+TPC-H SF1 (lane C, 6.68 foreign cores, one pair, b0 -> n4 with the merge off, 2 GB cache, 3 runs a
+query in one window; loaded by b0): q01 7,375,482,799 -> 7,378,966,828 user instructions a run
+(+0.05%), q06 5,008,883,426 -> 5,023,406,068 (+0.3%), hashes equal. The bulk script (lane C, 2.0-4.0
+foreign cores, 1M rows, user instructions a step, G): copy_in 6.400 / 6.405, copy_out 3.083 / 3.084,
+insert_select 4.426 / 4.432, update_half 11.613 / 11.605, count_after 0.363 / 0.364, row checks equal;
+delete_quarter 4.169 / 4.047 and vacuum 4.616 / 4.804 move with the background compactions in their
+windows (the list switched off in n4 in a second run: delete_quarter 4.411 against 4.112 on, b0 again
+3.934); ANALYZE read 0.468 on b0's first run and 1.002-1.004 on every run after it, b0's second
+included.
 
 ## Short write transactions, round 17: a range read's run between newer versions; the L0 merge again (2026-11-24, agent 306)
 
