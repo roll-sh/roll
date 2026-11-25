@@ -630,6 +630,7 @@ async fn blockers_keep_changes_out_of_the_queue() {
     assert_eq!(u["run_approved"], true);
     assert!(!kinds(&u).contains(&"untrusted".to_string()));
     // Queued, it's still the fork's words (MCP's lockdown withholds its title and output).
+    a.ok("POST", &format!("/v1/code/changes/{}/checks", id(&u)), Some(json!({ "name": "ci", "status": "success" }))).await;
     a.ok("POST", &format!("/v1/code/changes/{}/enqueue", id(&u)), None).await;
     let q = queue(&a).await;
     let entry = q["entries"].as_array().into_iter().flatten().chain(q["recent"].as_array().into_iter().flatten()).find(|e| e["change"] == u["id"]).cloned();
