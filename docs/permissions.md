@@ -1095,7 +1095,10 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   `X-Roll-User` and sets `X-Roll-Agent`.
 - The operator's policy (`/v1/access/policy`, `roll token policy`) caps every grant's lifetime
   (`max_days`) and can require that every grant expires; a grant made or changed after must fit,
-  OAuth connections included (GitHub's organisation token policies, Cloudflare's TTLs).
+  OAuth connections included (GitHub's organisation token policies, Cloudflare's TTLs). A
+  product may cap tokens that reach it more tightly (`Access::lifetime_cap`): roll secrets'
+  policy's `max_token_days` caps every grant with a `secrets` or `*` rule (docs/secrets.md,
+  "Guardrails"), refused as a 403 naming that policy.
   `max_idle_days` stops a grant nobody has used for that long (since its last use, or since it was
   made): an unused credential is risk with nothing to show for it. The evaluator reads the policy at
   most every 10 seconds, so a change reaches every node within that.

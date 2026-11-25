@@ -278,6 +278,10 @@ do. It speaks the same HTTP API as the CLI and the clients, with a roll token or
     `leak_rotate` (`managed` or `off`), `history_days` (0 keeps old values forever) and
     `validity_checks` (`on` or `off`). One left out keeps roll's; only what differs from roll's is
     written, and destroying it leaves them as they are.
+- **`roll_secrets_policy`** is roll secrets' policy ("Guardrails"; `PUT /v1/secrets/policy`, the
+  operator's token or an admin's), one per server, imported by `policy`: `production_approvals`,
+  `leaks_rotate` (`managed`), `sync_kinds`, `no_stored_cloud_keys` and `max_token_days`. It owns
+  the whole policy, so a floor left out has none, and destroying it removes every floor.
 - **Without values in the state** (Terraform 1.10 and 1.11+), as Vault's and AWS' providers allow:
   - **`ephemeral "roll_secrets_values"`** reads an environment for one run, never into the plan or
     the state; it feeds another provider's configuration or a write-only argument. Strict: a key
@@ -1230,7 +1234,10 @@ is one click.
 `GET …/health` (`roll secrets health`, the dashboard's Health view) is every finding above in
 every standard environment and folder at once, worst first, so none waits on someone opening the
 right folder: `decoy_used` (a decoy key's credential was used; only the project's admins see it, signed in or
-the operator, see Decoys), `production_unprotected` (the project's `production` has no protection
+the operator, see Decoys), `off_policy` (the project is below roll secrets' policy, "Guardrails": its `production`
+(`key` empty), its `leaks.rotate` (`environment` and `key` empty), or a sync of a kind the policy
+leaves out or storing a cloud key under `no_stored_cloud_keys` (`key` the sync's id; such a sync
+isn't also `stored_cloud_key`); the detail says the floor and how far it is), `production_unprotected` (the project's `production` has no protection
 policy, as projects made before new ones started with it protected: checks, sandboxes and
 untrusted previews may read it and nothing there needs approval; the detail names what reaches it,
 owners, admins and developers who name it by handle, and the checks and sandboxes that resolved it
@@ -3318,6 +3325,7 @@ roll secrets atlas   ls | add NAME --group-id ID --client-id ID [--user A --user
 roll secrets aws-users ls | add NAME USER --role ROLE | rm ID
 roll secrets clouds  ls | add-gcp NAME --audience A --service-account SA | add-azure NAME --tenant T --client-id C [--scope S] | rm ID
 roll secrets issuer rotate [--now --retire KID]   # the operator's: the next key now; --now --retire pulls a leaked one
+roll secrets policy get | set [--production-approvals N] [--leaks-managed] [--sync-kinds K,…] [--no-stored-cloud-keys] [--max-token-days D]   # the operator's ("Guardrails"); set replaces it
 roll secrets kubernetes-clusters ls | add NAME API_URL [--ca FILE] (admin token on stdin) | rm ID
 roll secrets cas     ls | add NAME --domain D… [--allow-ip] [--max-days N] | cert ID | sign ID [CSR|-] [--days N] [--chain]
                      | certs ID | revoke ID SERIAL | rm ID
@@ -3772,7 +3780,8 @@ webhook design do.
   A person's personal value, a plain value, and a live or dynamic link are never rotatable.
 - **`leaks.rotate`, a project setting** (`PATCH /v1/secrets/projects/{project}
   {leaks: {rotate}}`, an admin's, audited as `leaks.rotate`; Settings, "Leaked keys";
-  `roll secrets leaks managed|off`; Terraform's `roll_secrets_project` `leak_rotate`):
+  `roll secrets leaks managed|off`; Terraform's `roll_secrets_project` `leak_rotate`; held at
+`managed`, and new projects born so, under roll secrets' policy, "Guardrails"):
   - **`off`** (the default, and every existing project's): nothing rotates. The change's
     `secret_leak` blocker lists where the key can be rotated (`rotate: [{environment, folder}]`),
     and the dashboard gives it a Rotate button. The button calls `…/secrets/{key}/rotate` as the
@@ -6078,7 +6087,8 @@ as `{text, content, project, environment, request: {id, by, message, keys}, link
 never values; Slack markup in `text` is escaped and Discord mentions are off, since the message is
 the requester's). Notices aren't signed: an incoming webhook's URL is its own credential, and the
 notice carries nothing a receiver should act on without opening the request in roll.
-**A new project's `production` starts protected with `approvals: 0`.** Protected means developers'
+**A new project's `production` starts protected with `approvals: 0`** (or at roll secrets'
+policy's `production_approvals`, "Guardrails"). Protected means developers'
 default, checks, sandboxes and untrusted previews never reach it, and deleting it takes
 `?confirm=production` (with `approvals` ≥ 1 the delete is a change request too). With
 `approvals: 0`, whoever may write there (an owner, an admin, a
@@ -6135,6 +6145,49 @@ an admin of `/payments` approves for `/payments`' gate, never for a protected en
 that aren't met is audited. Backups carry folder policies, and a restore sets them last. Only who
 may change what is per folder: reading (untrusted readers, exposure in health) stays the
 environment's.
+
+### Guardrails
+
+Every floor above is a project's own, and each project's admin can lower it. **Guardrails** are
+one server-wide policy of floors that every project may only tighten, as `.roll/review.yaml` only
+tightens a repo's settings (Infisical's project templates and governance models, AWS's SCPs over
+Secrets Manager, Doppler's workplace-wide environment rules). `PUT /v1/secrets/policy` (the
+operator, or an admin account; `roll secrets policy set`, Terraform's `roll_secrets_policy`)
+replaces it, and a floor left out has none:
+
+- `production_approvals: n` (0–10): every project's `production` stays protected with at least
+  `n` approvals. A `PUT …/environments/production/policy` below it is refused, and so are deleting
+  `production` and renaming it away; renaming an environment onto `production` needs it to meet
+  the floor first. A restore brings a backup's lower `production` back at the floor.
+- `leaks_rotate: "managed"`: every project's `leaks.rotate` stays `managed`.
+- `sync_kinds: [kind…]`: the only sync kinds a project may make through roll secrets (`[]`: none).
+  A product's own syncs (roll search's inference endpoints) aren't a project's choice and aren't
+  covered. Each name must be a kind this server offers.
+- `no_stored_cloud_keys: true`: no new sync signs in to AWS, Google or Azure with a key stored in
+  roll where it could sign in without one (the project's AWS role, workload identity federation, a
+  federated credential: "Syncing without a cloud key").
+- `max_token_days: d` (1–3650): a roll-access token whose rules reach roll secrets (a `secrets`
+  rule, or `*`) lives at most `d` days. roll-access makes and changes every token, so it asks roll
+  secrets on each make, each change of rules or lifetime, and each rotation
+  (`Access::lifetime_cap`), on top of its own `max_days` (docs/permissions.md). A token that never
+  expires is refused under it, and so is a gateway's long-lived token (log the gateway in through
+  a workload identity instead). Workload identities' logins last 60 minutes at most anyway.
+
+Each write the policy covers reads it in its own transaction, on the request as parsed. A write
+that would go, or stay, below a floor answers 403 naming the policy and the floor: `roll secrets'
+policy (GET /v1/secrets/policy): production stays protected with at least 1 approval; a project
+may only tighten it`.
+
+- **New projects are born at the floors.** Their `production` is protected with
+  `production_approvals` approvals, and their `leaks.rotate` is `managed` when the policy says so.
+  A `production` environment made later is born the same way.
+- **Existing projects aren't rewritten.** Each project's Health lists how far it is from the
+  policy (`off_policy`), and the next write to each setting must meet it.
+- **Who sees it.** Setting the policy is audited in every project's log (`policy.set`, the floors
+  as its summary). `GET /v1/secrets/policy` is the operator's and admin accounts' too, and the
+  dashboard's Health view shows them the floors read-only. A member sees each floor in a refusal
+  and in Health. roll MCP has no tool for it: changing a floor for every project is a person's
+  call.
 
 ### Audit log
 
@@ -6640,6 +6693,8 @@ isn't in the workspace is 404.
 | `DELETE /github-apps/{id}` | | 204; 409 while a key links to it or a lease holds a token (`admin`) |
 | `GET /v1/secrets/oidc/.well-known/openid-configuration` | | roll's issuer's discovery document (public) |
 | `GET /v1/secrets/oidc/jwks` | | roll's issuer's public keys (public; served without clouds too, for the audit log's legacy digests): the key signing, the next one before it signs, the one it replaced until that one's tokens expire |
+| `GET /v1/secrets/policy` | | `Guardrails` (the operator's, or an admin account's): `{production_approvals: number \| null, leaks_rotate: "managed" \| null, sync_kinds: string[] \| null, no_stored_cloud_keys: boolean, max_token_days: number \| null, updated_at: number \| null, updated_by: string \| null}` ("Guardrails") |
+| `PUT /v1/secrets/policy` | `{production_approvals?, leaks_rotate?, sync_kinds?, no_stored_cloud_keys?, max_token_days?}` | `Guardrails` (the operator's, or an admin account's): replaces the policy, a field left out having no floor; 400 for an unknown sync kind or a number out of range; audited in every project as `policy.set`. A write below a floor anywhere else answers 403 naming it |
 | `POST /v1/secrets/issuer/rotate` | `{now?, retire?}` | `{kid, signs_from, pulled}` (the operator's): the next issuer key, published now, signing two days later; the one already waiting, if any. `{now: true, retire: kid}` (both or neither): a new key signs now and `kid` leaves the JWKS at once (`pulled`), and the digest keys' `legacy` list; 404 for a kid not in it |
 | `GET /v1/secrets/audit/jwks` | | `{keys, legacy, pulled}` (public): the audit log's digest keys (Ed25519 JWKs, retired ones too, never pulled ones), the issuer keys whose legacy digests count (RSA JWKs), and `[{kid, pulled_at}]` for keys pulled in an emergency, either kind. What `audit verify --file` takes |
 | `POST /v1/secrets/audit/key/rotate` | `{now?, retire?}` | `{kid, pulled, signed}` (the operator's): a new digest key signs now and the previous one retires. `{now: true, retire: kid}` (both or neither): `kid` is pulled too, and every project's chain is signed under the new key before the answer (`signed`, how many); 404 for a kid not roll's or pulled already |
