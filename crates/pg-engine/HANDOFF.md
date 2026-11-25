@@ -22216,6 +22216,113 @@ Measuring notes for whoever repeats it:
 - Two fixed-count TPC-B runs of the same binary read 494 k and 425 k user instructions a
   transaction (304 saw the same: the counts follow the throughput a run reaches).
 
+## Storage format 5 against format 4: where the default flip stands (kept current by each step, agent 311)
+
+One binary (the current step's plain dist build), two data directories: one made without column
+blocks (format 4), one with `ROLL_COLBLOCKS=1` (format 5), each TPC-H SF1 loaded by that binary
+and closed cleanly; user instructions of the engine's cgroup, one run of each form on lane C (A
+and B for point and range reads), 3 runs a query after a warm-up of the 22 (`~/.cache/a311/
+ftable.sh`, `ftsum.py`). The switch is off by default and stays so until every row here is level
+or better. Now (step 2, first piece, on `def0eaf98`; 319's round 16 made format 4's q20 -35% and
+q02 -13%):
+
+| | format 4 | format 5 | |
+|---|---|---|---|
+| TPC-H q01 (G) | 7.317 | 5.238 | -28.4% |
+| TPC-H q02 (G) | 2.280 | 2.772 | +21.6% |
+| TPC-H q03 (G) | 4.118 | 4.643 | +12.7% |
+| TPC-H q04 (G) | 1.350 | 1.774 | +31.5% |
+| TPC-H q05 (G) | 2.816 | 3.416 | +21.3% |
+| TPC-H q06 (G) | 3.381 | 3.473 | +2.7% |
+| TPC-H q07 (G) | 3.528 | 4.274 | +21.1% |
+| TPC-H q08 (G) | 1.450 | 1.959 | +35.1% |
+| TPC-H q09 (G) | 7.839 | 8.857 | +13.0% |
+| TPC-H q10 (G) | 5.554 | 5.850 | +5.3% |
+| TPC-H q11 (G) | 0.836 | 0.920 | +10.1% |
+| TPC-H q12 (G) | 5.879 | 3.993 | -32.1% |
+| TPC-H q13 (G) | 4.103 | 4.575 | +11.5% |
+| TPC-H q14 (G) | 1.389 | 1.751 | +26.1% |
+| TPC-H q15 (G) | 2.299 | 2.421 | +5.3% |
+| TPC-H q16 (G) | 2.884 | 2.883 | -0.0% |
+| TPC-H q17 (G) | 2.867 | 2.819 | -1.6% |
+| TPC-H q18 (G) | 15.574 | 25.493 | +63.7% |
+| TPC-H q19 (G) | 0.474 | 0.781 | +64.9% |
+| TPC-H q20 (G) | 0.890 | 1.355 | +52.2% |
+| TPC-H q21 (G) | 5.256 | 6.018 | +14.5% |
+| TPC-H q22 (G) | 0.623 | 1.017 | +63.1% |
+| TPC-H, the 22 (G) | 82.71 | 96.28 | +16.4% |
+| VmHWM over the 22 (MB) | 1,643 | 1,396 | -15.0% |
+| TPC-H SF1 load (user G) | 697.8 | 739.1 | +5.9% |
+| load VmHWM (MB) | 1,365 | 1,389 | +1.7% |
+| store on disk (MB) | 584.0 | 543.3 | -7.0% |
+| bulk copy_in (G) | 6.406 | 6.407 | +0.0% |
+| bulk create_index (G) | 3.732 | 3.734 | +0.1% |
+| bulk create_unique_index (G) | 2.670 | 2.675 | +0.2% |
+| bulk copy_out (G) | 2.359 | 2.359 | +0.0% |
+| bulk insert_select (G) | 4.434 | 4.454 | +0.5% |
+| bulk update_half (G) | 11.608 | 11.606 | -0.0% |
+| bulk delete_quarter (G) | 7.788 | 8.730 | +12.1% |
+| bulk vacuum (G) | 1.720 | 1.862 | +8.3% |
+| bulk analyze (G) | 0.473 | 0.665 | +40.7% |
+| bulk count_after (G) | 0.360 | 0.295 | -18.3% |
+| bulk seq_count (G) | 0.175 | 0.177 | +1.1% |
+| bulk seq_sum (G) | 0.324 | 0.274 | -15.4% |
+| bulk count_star (G) | 0.175 | 0.177 | +1.2% |
+| bulk sum_a (G) | 0.324 | 0.274 | -15.5% |
+| range read, 100 rows (instructions / read) | 572,082 | 629,484 | +10.0% |
+| point select (instructions / select) | 63,256 | 65,244 | +3.1% |
+
+What is left, by cause (profiles of format 5's worst queries):
+- **Rows made for consumers that read rows.** q18's +64%: parscan's row path (rows of a run the
+  batch kernels can't aggregate go to `partial_row`, which decodes them again from bytes) is 28%
+  of its samples in `ColDir::rows_into`. q20's +52%, q19, q22, q02, q08: the serial executor's
+  row-at-a-time scans (`ScanNode::next_heap_ordered`, `next_raw_ref`, `emit`, nested loops'
+  inner scans) make whole rows (`Scan::next` -> `Block::col_rows`). Format 4 hands those
+  consumers the stored bytes for nothing. The way out is consumers that take columns: the serial
+  path 319 is reworking (batches from the scan, only the plan's columns), then the row path
+  reading `Pre`'s columns; format 5 plugs into the same column sets (`need`, the projection).
+- **Keyed fetches** (319's 2.4k instructions a key, q02 / q11 / q14 / q20): a column block keeps
+  format 4's entries and restarts, so its seek costs what format 4's does; only the row made after
+  it differs (made of the columns read where the caller says which: `Lookup::reads`,
+  `read_cols`). A key column searched directly (a fixed-width array of a block's row keys,
+  binary-searched by words, no varint decode) would make the seek itself cheaper: not built yet.
+- **Maintenance**: DELETE +12%, VACUUM +8.3%, ANALYZE +41% (their scans make rows), the load
+  +5.9% (the encoder and its check): step 3.
+
+## Storage format 5: column blocks, step 2, first piece: rows made a column at a time, of the columns read (agent 311)
+
+On step 1 and 319's round 16 (`def0eaf98`), format 5 only; format 4's paths as they were. The table above ("where the
+default flip stands") has format 5 against format 4 after it.
+- **Rows made a column at a time** (`ColDir::rows_into`): a run of rows' lengths summed a column
+  at a time, then each column's values written where they go, one loop per layout (fixed widths
+  copied by a constant length, no call per value), the rows into one buffer, the rows' cursors on
+  the stack. `LazyRows::make` / `make_cols`, `Block::col_rows` and a single row (`ColDir::row`)
+  go this way; before, `ColDir::value` took ~120 instructions a value.
+- **Rows of the columns read**, the others NULL: a lookup's multi-get (`Lookup::reads`: the
+  columns decoded and those `StoredCmps` compares, `mark_cols`; `PointReader::get_sorted_cols`,
+  the rows made after every seek, a block's run at a time); a heap fetch after an index
+  (`Scan::read_cols` / `TxnScan::read_cols`, set by `ScanNode::fetch_dense_ref` from `need`, the
+  projection and the filter: none for row marks, DML, tracked tables, index-only or
+  access-method scans); parscan's reader (`Reader::for_decode`: `Decode::need`, which covers
+  every column its row path reads from the bytes). A masked row's batch entry gets its length as
+  made.
+- Tests: `column_blocks_read_as_rows` also reads a scan with `read_cols` (the masked columns as
+  whole rows read, the others NULL in column blocks' rows, asserted).
+
+**Switch off against `def0eaf98`** (plain dist, two pairs; lane C 4.0, lane B 5-7 foreign cores):
+q01 0.00%, q02 -0.04 / -0.03%, q03 +0.03 / -0.30%, q06 0.00%, q07 -0.38 / -0.40%, q09 -0.45 /
+-0.43%, q10 -0.01 / 0.00%, q15 0.00%, q20 +0.13 / -0.06%, q21 -0.03 / -0.18%; count(*) / sum
+steps -0.02 to +0.02%; 313's probe ranges -0.06 to +0.14%, select-only -0.37 to +0.24% in the
+phases with newer versions (-4% / +12% without: noise).
+
+**Quick-check** (`QC_CHECKED=1`) on these commits, switch off: tests 445 passed in 25 binaries
+(`query_spill` among them), the checked build's 445, crash seeds 1-3 x 2 and the power cut, regress
+51,148 / 51,150 0 newly differing, isolation 1,647 / 1,648, pg_dump 14,609. With `ROLL_COLBLOCKS=1
+ROLL_MEMTABLE_BYTES=1048576` (the diagnostic commit on top): the same counts; this run covers 318's
+spilling aggregates over column blocks (ordered aggregates' input sorted through extsort,
+`query_spill` and regress), which step 1's switch-on runs predate; regress's engine wrote **6,480
+column blocks** (of 20,436, 208 compactions).
+
 ## Storage format 5: column blocks, stage 1 (agents 303, 311)
 
 Agent 282's prototype (HANDOFF "Storage format 5: column blocks, a prototype", branch

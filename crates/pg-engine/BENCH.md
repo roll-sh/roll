@@ -704,6 +704,57 @@ not run again. With two PGO builds' ~0.9% spread, p1's total is 75.1-76.5 G: 0.8
 | q22 | 0.54 | **0.54** | 0.62 | 0.59 | 1.13 | 0.92x |
 | the 22 | 86.17 | **75.83** | 83.25 | 86.56 | 160.37 | 0.88x pgrust |
 
+## Storage format 5 against format 4, step 2 first piece (2026-11-25, agent 311)
+
+HANDOFF "Storage format 5 against format 4: where the default flip stands". Binary `s11` (step 2's
+first piece on `def0eaf98`, plain dist); each form loaded by it.
+
+| | format 4 | format 5 | |
+|---|---|---|---|
+| TPC-H q01 (G) | 7.317 | 5.238 | -28.4% |
+| TPC-H q02 (G) | 2.280 | 2.772 | +21.6% |
+| TPC-H q03 (G) | 4.118 | 4.643 | +12.7% |
+| TPC-H q04 (G) | 1.350 | 1.774 | +31.5% |
+| TPC-H q05 (G) | 2.816 | 3.416 | +21.3% |
+| TPC-H q06 (G) | 3.381 | 3.473 | +2.7% |
+| TPC-H q07 (G) | 3.528 | 4.274 | +21.1% |
+| TPC-H q08 (G) | 1.450 | 1.959 | +35.1% |
+| TPC-H q09 (G) | 7.839 | 8.857 | +13.0% |
+| TPC-H q10 (G) | 5.554 | 5.850 | +5.3% |
+| TPC-H q11 (G) | 0.836 | 0.920 | +10.1% |
+| TPC-H q12 (G) | 5.879 | 3.993 | -32.1% |
+| TPC-H q13 (G) | 4.103 | 4.575 | +11.5% |
+| TPC-H q14 (G) | 1.389 | 1.751 | +26.1% |
+| TPC-H q15 (G) | 2.299 | 2.421 | +5.3% |
+| TPC-H q16 (G) | 2.884 | 2.883 | -0.0% |
+| TPC-H q17 (G) | 2.867 | 2.819 | -1.6% |
+| TPC-H q18 (G) | 15.574 | 25.493 | +63.7% |
+| TPC-H q19 (G) | 0.474 | 0.781 | +64.9% |
+| TPC-H q20 (G) | 0.890 | 1.355 | +52.2% |
+| TPC-H q21 (G) | 5.256 | 6.018 | +14.5% |
+| TPC-H q22 (G) | 0.623 | 1.017 | +63.1% |
+| TPC-H, the 22 (G) | 82.71 | 96.28 | +16.4% |
+| VmHWM over the 22 (MB) | 1,643 | 1,396 | -15.0% |
+| TPC-H SF1 load (user G) | 697.8 | 739.1 | +5.9% |
+| load VmHWM (MB) | 1,365 | 1,389 | +1.7% |
+| store on disk (MB) | 584.0 | 543.3 | -7.0% |
+| bulk copy_in (G) | 6.406 | 6.407 | +0.0% |
+| bulk create_index (G) | 3.732 | 3.734 | +0.1% |
+| bulk create_unique_index (G) | 2.670 | 2.675 | +0.2% |
+| bulk copy_out (G) | 2.359 | 2.359 | +0.0% |
+| bulk insert_select (G) | 4.434 | 4.454 | +0.5% |
+| bulk update_half (G) | 11.608 | 11.606 | -0.0% |
+| bulk delete_quarter (G) | 7.788 | 8.730 | +12.1% |
+| bulk vacuum (G) | 1.720 | 1.862 | +8.3% |
+| bulk analyze (G) | 0.473 | 0.665 | +40.7% |
+| bulk count_after (G) | 0.360 | 0.295 | -18.3% |
+| bulk seq_count (G) | 0.175 | 0.177 | +1.1% |
+| bulk seq_sum (G) | 0.324 | 0.274 | -15.4% |
+| bulk count_star (G) | 0.175 | 0.177 | +1.2% |
+| bulk sum_a (G) | 0.324 | 0.274 | -15.5% |
+| range read, 100 rows (instructions / read) | 572,082 | 629,484 | +10.0% |
+| point select (instructions / select) | 63,256 | 65,244 | +3.1% |
+
 ## Storage format 5, stage 1: column blocks behind a switch (2026-11-25, agents 303, 311)
 
 HANDOFF "Storage format 5: column blocks, stage 1". The head `8f3876dab` (**h**) and step 1 on it
