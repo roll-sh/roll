@@ -413,6 +413,10 @@ pub struct ShotOptions {
     pub stories: Option<String>,
     /// The first page's modes (`github.modes`): `mode:<name>` in `pages`.
     pub modes: Vec<crate::settings::ModeRule>,
+    /// The paths the change touched since the default branch, for its stories (`stories`): the
+    /// ones it touched are taken first.
+    #[serde(default)]
+    pub changed: Vec<String>,
     /// The app's sign-in before the pages (`github.login`, a trusted preview's), its typed
     /// variables resolved.
     #[serde(default)]
