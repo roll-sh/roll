@@ -157,7 +157,9 @@ async fn transport_sessions_and_protocol() {
     }
     assert_eq!(c.rpc("ping", json!({})).await["result"], json!({}));
     assert_eq!(c.rpc("nope/method", json!({})).await["error"]["code"], -32601);
-    assert_eq!(c.rpc("tools/call", json!({ "name": "rm_rf", "arguments": {} })).await["error"]["code"], -32602);
+    // A tool it doesn't have is a tool error the model reads (SEP-2145), not a protocol error.
+    let unknown = c.rpc("tools/call", json!({ "name": "rm_rf", "arguments": {} })).await;
+    assert_eq!((unknown["result"]["isError"].as_bool(), unknown["result"]["structuredContent"]["code"].as_str()), (Some(true), Some("unknown_tool")), "{unknown}");
     assert_eq!(c.rpc("tools/call", json!({ "name": "log", "arguments": "x" })).await["error"]["code"], -32602);
     // Bad JSON and a wrong jsonrpc version.
     let req = Request::builder().method("POST").uri(MCP).header("mcp-session-id", c.session.clone().unwrap()).body(Body::from("{oops")).unwrap();
@@ -323,7 +325,7 @@ async fn protocol_edges() {
     let v = c.rpc("tools/call", json!({ "name": "queue_status" })).await;
     assert_eq!(v["result"]["isError"], true);
     assert!(v["result"]["content"][0]["text"].as_str().unwrap().contains("repo is required"), "{v}");
-    assert_eq!(c.rpc("tools/call", json!({})).await["error"]["code"], -32602);
+    assert_eq!(c.rpc("tools/call", json!({})).await["result"]["isError"], true);
     assert_eq!(c.rpc("tools/call", json!({ "name": "log", "arguments": [1] })).await["error"]["code"], -32602);
     // Another supported protocol version than the session's is fine.
     let (s, _, _) = c.post(ping(3), &[("mcp-protocol-version", "2024-11-05")]).await;

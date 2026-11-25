@@ -12,8 +12,8 @@
 //!   the same token the session started with. Sessions live in control.db (`mcp_sessions`), so
 //!   one started through any node of a cluster works through every other, and survives restarts;
 //!   one idle for [`SESSION_IDLE_S`] ends.
-//! - Tool failures (a 4xx from the API) are tool results with `isError: true`; protocol problems
-//!   are JSON-RPC errors. A land that conflicts or is blocked is a normal result
+//! - Tool failures (a 4xx from the API) and a tool it doesn't have are tool results with
+//!   `isError: true`; protocol problems are JSON-RPC errors. A land that conflicts or is blocked is a normal result
 //!   (`status: "conflict" | "blocked"`): it's an outcome agents act on, not a failure.
 //! - Requests with an `Origin` header (browsers) must come from the web app or the API itself,
 //!   so a page can't drive a local daemon (DNS rebinding).
@@ -329,8 +329,11 @@ async fn process(m: &Mcp, headers: &HeaderMap, lockdown: bool, messages: Vec<Val
             "tools/call" => {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
                 let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+                // A tool it doesn't have is a tool error the model reads, as the official SDKs answer
+                // it (SEP-2145); arguments that aren't an object stay a protocol error.
                 if !tools().iter().any(|t| t["name"] == name) {
-                    rpc_error(id, -32602, format!("unknown tool {name:?}"))
+                    let text = format!("unknown tool {name:?}");
+                    rpc_result(id, json!({ "content": [{ "type": "text", "text": text }], "structuredContent": { "error": text, "code": "unknown_tool" }, "isError": true }))
                 } else if !args.is_object() {
                     rpc_error(id, -32602, "arguments must be an object")
                 } else {
