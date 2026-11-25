@@ -19,14 +19,20 @@ pub struct Usage {
 }
 
 /// A branch as the product made it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Branched {
     /// The branch's product id.
     pub r#ref: String,
     /// What the product hands out only once (a stream's SASL secret, a queue user's password, a
     /// bucket key's secret), kept with the branch so services can be given it again. Never
-    /// returned by the API.
+    /// returned by the API, nor printed.
     pub kept: Option<String>,
+}
+
+impl std::fmt::Debug for Branched {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Branched").field("ref", &self.r#ref).field("kept", &self.kept.as_ref().map(|_| "<redacted>")).finish()
+    }
 }
 
 impl Branched {

@@ -333,15 +333,21 @@ applications). A web page calls a cluster directly, with no backend of its own i
   expiry (what's left of it), and for a derivable one a signing secret of the branch's own,
   never the parent's (a 409 on a cluster that isn't a branch). The keys and secrets are in that
   answer only, and asking again revokes the ones it made before, so a retried branch keeps one
-  set. roll previews asks for them when it branches a search cluster, hands them to the
-  preview's services as `ROLL_SEARCH_BROWSER_KEYS` (JSON: `name`, `id`, `api_key` and
-  `signing_secret` for each) and, when the parent has exactly one, `ROLL_SEARCH_BROWSER_KEY`,
+  set; a copy that fails midway revokes what it made. `…/from-parent` asks `admin` (it revokes)
+  and `reveal` (it answers keys). `…/from-parent/prune` (`admin`) revokes the copies whose
+  parent key was revoked, expired or rotated since (a copy records its parent key's secret
+  generation; lists show `secret_generation`), the ids it revoked. roll previews asks for them
+  when it branches a search cluster, hands them to the preview's services as
+  `ROLL_SEARCH_BROWSER_KEYS` (JSON: `name`, `id`, `api_key` and `signing_secret` for each; the
+  one to read) and, only while the parent has exactly one, `ROLL_SEARCH_BROWSER_KEY`,
   `ROLL_SEARCH_BROWSER_KEY_ID` and `ROLL_SEARCH_SIGNING_SECRET` (environment values, as the
-  branch's data key is: never argv, never a log); it sets the branch's allowed origins to its
-  parent's plus the preview's pages (its services' URLs and its earlier pushes' pinned ones,
-  set again only when they change; a parent without CORS leaves the branch's off), and revokes
-  the keys before the branch is deleted, as it revokes its data key (a deleted cluster is
-  restorable with its keys). `crates/search-control/tests/control.rs`
+  branch's data key is: never argv, never a log, masked as it is). After each deploy it sets
+  the branch's allowed origins to its parent's plus the preview's pages (its services' and
+  pinned heads' URLs, normalised as allowed origins are; a pinned head with its own copy, that
+  copy's), off when the parent's are, and prunes stale copies (at most once a minute: listing
+  keys wakes both clusters); and it revokes the branch's copies (every one, recorded or not)
+  before the branch is deleted, as it revokes its data key (a deleted cluster is restorable with
+  its keys). `crates/search-control/tests/control.rs`
   `browser_search_works_on_a_preview_branch` and rolld's
   `a_search_branch_gets_browser_keys_of_its_own_for_the_previews_pages` cover it.
 - *Keys derived without a call to roll* (Algolia's `generateSecuredApiKey`, Typesense's

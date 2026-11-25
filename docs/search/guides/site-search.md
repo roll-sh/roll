@@ -391,17 +391,21 @@ preview's own URLs. The preview's services get them as `ROLL_SEARCH_BROWSER_KEYS
 entry per key: `name`, `id`, `api_key` and, for a derivable one, `signing_secret`), and when
 production has exactly one browser key, as `ROLL_SEARCH_BROWSER_KEY`,
 `ROLL_SEARCH_BROWSER_KEY_ID` and `ROLL_SEARCH_SIGNING_SECRET`, beside `ELASTICSEARCH_URL`.
-Have your build take the key from there when it's set, and the production key otherwise:
+Read `ROLL_SEARCH_BROWSER_KEYS`: the one-key variables go as soon as production has a second
+browser key. Previews' environment rules don't interpolate, so the build reads it itself, and
+takes the production key when it isn't set:
 
 ```js
-// The key the page ships: the preview's own when roll previews set one.
-const KEY = process.env.ROLL_SEARCH_BROWSER_KEY ?? process.env.NEXT_PUBLIC_SEARCH_KEY
+// The key the page ships: the preview's own (by the production key's name) when roll previews
+// set them.
+const own = JSON.parse(process.env.ROLL_SEARCH_BROWSER_KEYS ?? '[]').find((k) => k.name === 'site')
+const KEY = own?.api_key ?? process.env.NEXT_PUBLIC_SEARCH_KEY
 const CLUSTER = process.env.ELASTICSEARCH_URL ?? 'https://docs.search.…'
 ```
 
-A backend that derives keys does the same with `ROLL_SEARCH_BROWSER_KEY_ID` and
-`ROLL_SEARCH_SIGNING_SECRET`, and names the branch's cluster in what it signs. The keys are
-revoked when the preview's branch goes.
+A backend that derives keys takes its entry's `id` and `signing_secret` the same way, and names
+the branch's cluster in what it signs. The keys are revoked when the preview's branch goes, and
+a copy of a production key that's revoked or rotated stops working on the preview's next deploy.
 
 ### Or keep a backend
 
