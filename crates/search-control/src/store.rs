@@ -142,12 +142,24 @@ pub struct SearchCluster {
     /// default reaches what isn't protected). Set on create (default off) and by an admin's
     /// `PATCH`; clusters from before it are protected; a branch never is.
     pub protected: bool,
+    /// The workspace project it was handed to (its home there), as rolld records it
+    /// ([`Store::set_project`]); `None` while it has none, or until the homes pass records it.
+    #[serde(skip)]
+    pub project_id: Option<String>,
 }
 
 impl SearchCluster {
     /// Whose per-person caps count it: its owner, else who made it in a project.
     pub fn counted_toward(&self) -> Option<&str> {
         self.owner.as_deref().or(self.made_by.as_deref())
+    }
+
+    /// Whose it is for what's counted and shared across a tenant's clusters (the crawler's site
+    /// verifications, their tokens and limits, connector slots, embedding turns): its home
+    /// project (`prj_…`), else its person owner (`usr_…`), else, for one made in a project and not
+    /// recorded there yet, the cluster itself (`srch_…`). `None`: the operator's own.
+    pub fn tenant(&self) -> Option<String> {
+        self.project_id.clone().or_else(|| self.owner.clone()).or_else(|| self.made_by.as_ref().map(|_| self.id.clone()))
     }
 }
 
@@ -422,10 +434,10 @@ CREATE INDEX IF NOT EXISTS search_suggestions_due ON search_suggestions (due_at)
 "#;
 
 const COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
-                    parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, ip_allowlist, cors, browser_per_minute, inherit_pending, reindex_whitelist, made_by, protected";
+                    parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, ip_allowlist, cors, browser_per_minute, inherit_pending, reindex_whitelist, made_by, protected, project_id";
 /// What lookups read: [`COLS`] and where the cluster is loaded.
 const READ_COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
-                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, loaded_on, own_bytes, wake_at, restored_at, ip_allowlist, cors, browser_per_minute, inherit_pending, reindex_whitelist, made_by, protected";
+                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, loaded_on, own_bytes, wake_at, restored_at, ip_allowlist, cors, browser_per_minute, inherit_pending, reindex_whitelist, made_by, protected, project_id";
 /// What deleted clusters' reads add to [`READ_COLS`].
 const DELETED_COLS: &str = "deleted_name, deleted_at, purge_at, stored_as, name";
 
@@ -464,16 +476,17 @@ fn row(r: &Row) -> code_sql::Result<SearchCluster> {
         reindex_whitelist: serde_json::from_str(&r.get::<_, String>(25)?).unwrap_or_default(),
         made_by: r.get(26)?,
         protected: r.get(27)?,
+        project_id: r.get(28)?,
     })
 }
 
 fn deleted_row(r: &Row) -> code_sql::Result<DeletedCluster> {
     let mut c = row(r)?;
-    // [`DELETED_COLS`] follow [`READ_COLS`]' 28 (0-27).
-    c.name = r.get(28)?;
+    // [`DELETED_COLS`] follow [`READ_COLS`]' 29 (0-28).
+    c.name = r.get(29)?;
     c.loaded_on = None;
     c.wake_at = None;
-    Ok(DeletedCluster { cluster: c, deleted_at: r.get(29)?, purge_at: r.get(30)?, stored_as: r.get(31)?, reserved: r.get(32)? })
+    Ok(DeletedCluster { cluster: c, deleted_at: r.get(30)?, purge_at: r.get(31)?, stored_as: r.get(32)?, reserved: r.get(33)? })
 }
 
 /// What the catalog keeps of an index's query suggestions (`crate::suggestions`): its settings
@@ -605,6 +618,8 @@ impl Store {
         // Clusters from before members' roles reached them are protected (fail closed: no member
         // reached them then); a new one says ([`SearchCluster::protected`]).
         db.add_column("search_clusters", "protected", "INTEGER NOT NULL DEFAULT 1")?;
+        // The project a cluster was handed to (rolld's homes; [`SearchCluster::tenant`]).
+        db.add_column("search_clusters", "project_id", "TEXT")?;
         // Hand-overs to a workspace project decided (a home set) and not done yet
         // ([`Store::owe_handover`]).
         db.ensure_schema("CREATE TABLE IF NOT EXISTS search_handovers (cluster_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, at INTEGER NOT NULL)")?;
@@ -635,6 +650,14 @@ impl Store {
         db.ensure_schema("CREATE INDEX IF NOT EXISTS search_site_crawls_by ON search_site_crawls (owner, site, at)")?;
         db.ensure_schema("CREATE INDEX IF NOT EXISTS search_crawler_sites_due ON search_crawler_sites (due_at)")?;
         db.ensure_schema("CREATE INDEX IF NOT EXISTS search_crawler_sites_owner ON search_crawler_sites (owner, site)")?;
+        // Before tenants, every cluster without an owner (all of every project's) shared the key
+        // `(no owner)`, and so one token per site: those verifications and counts go once, and
+        // their clusters verify again under their own key ([`SearchCluster::tenant`]).
+        db.migrate("search-crawler-sites-tenants", |c| {
+            c.execute("DELETE FROM search_crawler_sites WHERE owner = '(no owner)'", params![])?;
+            c.execute("DELETE FROM search_site_crawls WHERE owner = '(no owner)'", params![])?;
+            Ok(())
+        })?;
         // Catalogs written before `code-sql` lack nothing but may lack the index on parents
         // (created above); their extra columns (`seq`) and tables (`search_tombstones`) are unused.
         let store = Self { db, sealer, former };
@@ -721,7 +744,7 @@ impl Store {
                 return Ok(Inserted::Over(over));
             }
             x.execute(
-                &format!("INSERT INTO search_clusters ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)"),
+                &format!("INSERT INTO search_clusters ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)"),
                 params![
                     c.id,
                     c.name,
@@ -746,7 +769,8 @@ impl Store {
                     c.inherit_pending,
                     whitelist_json(&c.reindex_whitelist),
                     c.made_by,
-                    c.protected
+                    c.protected,
+                    c.project_id
                 ],
             )
             .map(|_| Inserted::Yes)
@@ -804,6 +828,18 @@ impl Store {
         Ok(self.db.read(|x| {
             x.query_row(&format!("SELECT id FROM search_clusters WHERE (id = ?1 AND deleting = 0) OR (name = ?1 AND {LIVE}) ORDER BY id = ?1 DESC LIMIT 1"), params![id_or_name], |r| r.get(0)).optional()
         })?)
+    }
+
+    /// Record the workspace project cluster `id` was handed to (`None`: it has no home there any
+    /// more), when that changed: the key its tenant's verifications and limits go by
+    /// ([`SearchCluster::tenant`]). Whether it wrote.
+    pub fn set_project(&self, id: &str, project: Option<&str>) -> anyhow::Result<bool> {
+        // Read first: the homes pass asks for every home, and nearly all are recorded already.
+        let now: Option<Option<String>> = self.db.read(|x| x.query_row("SELECT project_id FROM search_clusters WHERE id = ?1", params![id], |r| r.get(0)).optional())?;
+        if now.is_none_or(|p| p.as_deref() == project) {
+            return Ok(false);
+        }
+        Ok(self.db.write(|x| x.execute("UPDATE search_clusters SET project_id = ?2 WHERE id = ?1 AND COALESCE(project_id, '') <> COALESCE(?2, '')", params![id, project]))? > 0)
     }
 
     /// Whether cluster `id` is protected ([`SearchCluster::protected`]), synchronously (roll's
@@ -1700,6 +1736,7 @@ mod tests {
             inherit_pending: false,
             reindex_whitelist: Vec::new(),
             protected: false,
+            project_id: None,
         }
     }
 

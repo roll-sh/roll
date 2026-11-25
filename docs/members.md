@@ -113,8 +113,9 @@ The product's resolver sets `Resource.protected` beside `Resource.environment`:
 - apps: `production`;
 - previews: never protected;
 - search: a cluster has no environments, and is protected as a whole when it says so
-  (`protected`: set on create or by an admin's `PATCH`; clusters made before members are; a branch
-  never is), through `Resolvers::protected_whole`.
+  (`protected`: set on create or by an admin's `PATCH`; clusters made before members are, until an
+  admin opens them; a new branch never is, and can't be made so), through
+  `Resolvers::protected_whole`.
 
 A resource whose protection isn't known never matches an `unprotected` rule, and neither does an
 environment named `production`, whatever its product says (`roll_auth::scope::PRODUCTION`): a

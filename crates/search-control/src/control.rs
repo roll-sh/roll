@@ -507,7 +507,8 @@ pub fn spec_for(c: &SearchCluster) -> ClusterSpec {
         }
     });
     spec.catalog_id = Some(c.id.clone());
-    spec.owner = c.owner.clone();
+    // What node-wide fairness and the crawler's site limits count by: its tenant.
+    spec.owner = c.tenant();
     // Only until its first load has marked what it inherited: a branch made before marking
     // existed, or one already marked, runs its jobs as its own.
     spec.branch_of = c.parent_id.clone().filter(|_| c.inherit_pending);
@@ -1218,6 +1219,7 @@ impl Control {
             inherit_pending: false,
             reindex_whitelist: Vec::new(),
             protected: false,
+            project_id: None,
         }
     }
 
@@ -1316,8 +1318,9 @@ impl Control {
             },
             o,
         )?;
-        // Never protected, whatever the parent is or the options say (a preview's copy).
-        let c = SearchCluster { protected: false, ..c };
+        // Never protected, whatever the parent is or the options say (a preview's copy); in a
+        // project only once its home there is recorded (rolld's homes).
+        let c = SearchCluster { protected: false, project_id: None, ..c };
         self.check(&c)?;
         self.check_free(name).await?;
         // Refused by a cap before anything is copied (the insert's count, in its transaction,
@@ -1413,6 +1416,10 @@ impl Control {
     /// cluster always-on past the owner's `caps.always_on` is refused (409).
     pub async fn update(&self, id: &str, o: ClusterOptions, caps: Caps) -> Result<SearchCluster> {
         self.update_with(id, caps, move |c| {
+            // A branch is never protected (one from before the mark may be: it can be opened).
+            if c.parent_id.is_some() && o.protected == Some(true) {
+                return Err(ControlError::Invalid(format!("protected: {} is a branch, and a branch is never protected", c.name)));
+            }
             *c = Self::apply(c.clone(), o)?;
             Ok(())
         })
@@ -2730,6 +2737,7 @@ mod tests {
             inherit_pending: false,
             reindex_whitelist: vec!["es.example.com:443".into()],
             protected: false,
+            project_id: None,
         };
         let s = spec_for(&c);
         assert!(s.ip_allowlist.contains("::ffff:203.0.113.9".parse().unwrap()) && !s.ip_allowlist.is_open());

@@ -434,8 +434,9 @@ restore) after its home project was deleted anyway keeps no home there, and is t
   products protect production): then only admins and owners change its data, and a developer
   only reads it (`Resolvers::protected_whole`, read per cluster; unreadable counts as protected).
   A new cluster isn't protected unless its creator says (`protected` on create); an admin changes
-  it with `PATCH`; clusters made before members are protected (nobody's role reached them then);
-  a branch never is, whatever its parent. A developer's default reaches an unprotected one. A
+  it with `PATCH`; clusters made before members are protected (nobody's role reached them then),
+  branches too, until an admin opens them; a new branch never is, whatever its parent, and
+  `protected: true` on a branch is refused (400). A developer's default reaches an unprotected one. A
   bulk that deletes, `delete_by_query`, a lifecycle setting and a `data` key (its role deletes
   indices and sets lifecycle policies) are `delete`, which only admins and owners have.
 - **Anyone else** gets 404 for the cluster, worded as for one that doesn't exist (the name they

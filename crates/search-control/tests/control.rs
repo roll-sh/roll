@@ -5122,6 +5122,32 @@ impl Env {
     }
 }
 
+/// A cluster's site verifications and their tokens belong to its tenant: its home project, else its
+/// person owner. Two clusters of one project share a site's token (a record published once
+/// proves it for both); clusters of two projects never do, so neither reuses the other's proof.
+#[tokio::test]
+async fn crawler_site_tokens_follow_the_clusters_project() {
+    let e = crawler_env(&[]).await;
+    let mut ids = Vec::new();
+    for name in ["a-one", "a-two", "b-one"] {
+        ids.push(e.post("/v1/search/clusters", json!({"name": name})).await["id"].as_str().unwrap().to_string());
+    }
+    // Handed to their projects, as rolld records a home.
+    for (id, project) in [(&ids[0], "prj_a"), (&ids[1], "prj_a"), (&ids[2], "prj_b")] {
+        e.control.store.set_project(id, Some(project)).unwrap();
+    }
+    let token = |id: String| {
+        let e = &e;
+        async move {
+            let v = e.post(&format!("/v1/search/clusters/{id}/site-verifications"), json!({"domain": "docs.example.com"})).await;
+            v["dns"]["value"].as_str().unwrap_or_else(|| panic!("{v}")).to_string()
+        }
+    };
+    let (a1, a2, b1) = (token(ids[0].clone()).await, token(ids[1].clone()).await, token(ids[2].clone()).await);
+    assert_eq!(a1, a2, "one project's clusters share the site's token");
+    assert_ne!(a1, b1, "another project's cluster gets its own");
+}
+
 /// A site of six pages on loopback.
 async fn six_page_site() -> FakeSite {
     let site = FakeSite::start().await;

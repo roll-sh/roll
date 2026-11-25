@@ -902,6 +902,79 @@ async fn a_strangers_home_from_before_is_dropped_never_handed_over() {
     assert_eq!(owner_of(&c2).as_deref(), Some("usr_x"), "and never handed over");
 }
 
+/// A protected search cluster is changed only by its project's admins and owners: made protected
+/// in a project, a developer there can't write it (403) until an admin opens it (`PATCH
+/// protected: false`); and a branch of a protected cluster is never protected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_developer_writes_a_search_cluster_only_while_it_isnt_protected() {
+    let home = tempfile::tempdir().unwrap();
+    let env = vec![
+        ("ROLL_ADMIN_TOKEN", TOKEN.to_string()),
+        ("ROLL_DASHBOARD_ORIGIN", DASHBOARD.to_string()),
+        ("ROLL_PRODUCTS", "search".to_string()),
+        ("ROLL_ACCOUNTS_OUTBOX", home.path().join("outbox").display().to_string()),
+    ];
+    let mut cmd = rolld(home.path(), &[], &env);
+    let started = common::on_any_port(&mut cmd, common::LISTENERS, home.path());
+    let mut child = cmd.stdout(Stdio::null()).spawn().expect("rolld starts");
+    let api = started.addrs(&mut child).await.url("api");
+    let _d = Rolld(child);
+    let http = reqwest::Client::builder().timeout(Duration::from_secs(30)).build().unwrap();
+    let up = std::time::Instant::now();
+    while !http.get(format!("{api}/v1/info")).bearer_auth(TOKEN).send().await.is_ok_and(|r| r.status().is_success()) {
+        assert!(up.elapsed() < Duration::from_secs(60), "rolld didn't answer");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let mut people = Vec::new();
+    for email in ["ada@example.com", "bob@example.com"] {
+        let cookie = sign_in(&http, &api, &home.path().join("outbox"), email).await;
+        let session: serde_json::Value = http.get(format!("{api}/v1/accounts/session")).header("cookie", &cookie).send().await.unwrap().json().await.unwrap();
+        people.push((cookie, session["csrf"].as_str().unwrap().to_string()));
+    }
+    let does = |who: usize, method: reqwest::Method, path: String, body: Option<serde_json::Value>, project: Option<&str>| {
+        let (cookie, csrf) = &people[who];
+        let mut req = http.request(method, format!("{api}{path}")).header("cookie", cookie).header("origin", DASHBOARD).header("x-roll-csrf", csrf);
+        if let Some(p) = project {
+            req = req.header("x-roll-project", p);
+        }
+        if let Some(b) = body {
+            req = req.json(&b);
+        }
+        async move {
+            let r = req.send().await.unwrap();
+            let status = r.status().as_u16();
+            (status, r.json::<serde_json::Value>().await.unwrap_or_default())
+        }
+    };
+    let (ada, bob) = (0, 1);
+    let (s, p) = does(ada, reqwest::Method::POST, "/v1/workspace/projects".into(), Some(serde_json::json!({ "name": "shop" })), None).await;
+    assert_eq!(s, 201, "{p}");
+    let project = p["id"].as_str().unwrap().to_string();
+    let (s, inv) = does(ada, reqwest::Method::POST, format!("/v1/workspace/projects/{project}/invites"), Some(serde_json::json!({ "email": "bob@example.com", "role": "developer" })), None).await;
+    assert_eq!(s, 201, "{inv}");
+    let token = inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string();
+    assert_eq!(does(bob, reqwest::Method::POST, format!("/v1/workspace/invites/{token}/accept"), None, None).await.0, 200);
+    // Made protected in the project: Bob, a developer there, reads it but doesn't write it.
+    let (s, c) = does(ada, reqwest::Method::POST, "/v1/search/clusters".into(), Some(serde_json::json!({ "name": "orders", "protected": true })), Some(&project)).await;
+    assert_eq!((s, c["protected"].as_bool()), (200, Some(true)), "{c}");
+    let cluster = format!("/v1/search/clusters/{}", c["id"].as_str().unwrap());
+    assert_eq!(does(bob, reqwest::Method::GET, cluster.clone(), None, None).await.0, 200, "a developer reads a protected cluster");
+    let branch = |name: &str| Some(serde_json::json!({ "name": name }));
+    let (s, v) = does(bob, reqwest::Method::POST, format!("{cluster}/branches"), branch("bobs"), None).await;
+    assert_eq!(s, 403, "a developer doesn't write a protected cluster: {v}");
+    // Opened by Ada, an owner there: Bob writes it.
+    let (s, v) = does(ada, reqwest::Method::PATCH, cluster.clone(), Some(serde_json::json!({ "protected": false })), None).await;
+    assert_eq!((s, v["protected"].as_bool()), (200, Some(false)), "{v}");
+    let (s, v) = does(bob, reqwest::Method::POST, format!("{cluster}/branches"), branch("bobs"), None).await;
+    assert_eq!(s, 200, "a developer writes an unprotected cluster: {v}");
+    // Protected again, its branch isn't, and can't be made so.
+    assert_eq!(does(ada, reqwest::Method::PATCH, cluster.clone(), Some(serde_json::json!({ "protected": true })), None).await.0, 200);
+    let (s, b) = does(ada, reqwest::Method::POST, format!("{cluster}/branches"), branch("adas"), None).await;
+    assert_eq!((s, b["protected"].as_bool()), (200, Some(false)), "a branch is never protected: {b}");
+    let (s, v) = does(ada, reqwest::Method::PATCH, format!("/v1/search/clusters/{}", b["id"].as_str().unwrap()), Some(serde_json::json!({ "protected": true })), None).await;
+    assert_eq!(s, 400, "{v}");
+}
+
 #[test]
 fn refuses_to_listen_off_loopback_without_a_token() {
     let home = tempfile::tempdir().unwrap();

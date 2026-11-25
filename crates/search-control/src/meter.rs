@@ -377,6 +377,7 @@ mod tests {
                     inherit_pending: false,
                     reindex_whitelist: Vec::new(),
                     protected: false,
+                    project_id: None,
                 },
                 crate::store::Caps::NONE,
             )
