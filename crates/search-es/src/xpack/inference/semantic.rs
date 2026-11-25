@@ -11,6 +11,31 @@ use crate::xpack::inference::TaskType;
 /// Elastic's hosted inference service falls back to ELSER on ML nodes).
 pub const DEFAULT_INFERENCE_ID: &str = ".elser-2-elasticsearch";
 
+/// A write's opt-in, on a branch, to keep a `semantic_text` field's new text unembedded when its
+/// endpoint came from the parent without its provider key (`drop`): roll previews' masking. The
+/// field's earlier chunks and embeddings go too (they embed the text it had, the real values a
+/// mask hides), so it doesn't match semantically on the branch. Without it such a write fails
+/// with [`super::Endpoint::secret`]'s error; elsewhere, and for an endpoint that can embed, the
+/// header does nothing.
+pub const UNEMBEDDED_HEADER: &str = "X-Roll-Unembedded";
+
+tokio::task_local! {
+    /// Set while a request with [`UNEMBEDDED_HEADER`]`: drop` runs on a branch.
+    static DROP_UNEMBEDDED: ();
+}
+
+/// Runs `f` (request `req`'s handling on `cluster`) with [`UNEMBEDDED_HEADER`] honoured when
+/// it says `drop` and the cluster is a branch ([`crate::branch::is_branch`]).
+pub async fn honour_unembedded<F: std::future::Future>(cluster: &crate::cluster::Cluster, req: &crate::rest::EsRequest, f: F) -> F::Output {
+    let asked = req.header(UNEMBEDDED_HEADER).is_some_and(|v| v.trim().eq_ignore_ascii_case("drop"));
+    if asked && crate::branch::is_branch(cluster, &cluster.state()) { DROP_UNEMBEDDED.scope((), f).await } else { f.await }
+}
+
+/// Whether the running write may leave a field unembedded ([`honour_unembedded`]).
+fn drops_unembedded() -> bool {
+    DROP_UNEMBEDDED.try_with(|_| ()).is_ok()
+}
+
 /// What a field's embeddings are: the task, and for dense ones their shape.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelSettings {
@@ -495,6 +520,9 @@ pub async fn infer_documents(cluster: &crate::cluster::Cluster, docs: &[(&Mappin
     // Inputs per endpoint, in document order.
     let mut by_endpoint: Vec<(String, Vec<Input>)> = Vec::new();
     let mut endpoints: std::collections::HashMap<String, super::Endpoint> = std::collections::HashMap::new();
+    // Needs left unembedded on the write's say-so ([`UNEMBEDDED_HEADER`]): no entry at all.
+    let mut dropped = vec![false; needs.len()];
+    let drop_unembedded = drops_unembedded();
     for (n, need) in needs.iter().enumerate() {
         if out[need.doc].is_err() {
             continue;
@@ -506,6 +534,10 @@ pub async fn infer_documents(cluster: &crate::cluster::Cluster, docs: &[(&Mappin
                 continue;
             }
         };
+        if drop_unembedded && ep.lacks_inherited_key() {
+            dropped[n] = true;
+            continue;
+        }
         let chunking = need.chunking.clone().or_else(|| ep.chunking.clone());
         endpoints.insert(need.inference_id.clone(), ep);
         let inputs = match by_endpoint.iter_mut().find(|(id, _)| *id == need.inference_id) {
@@ -592,6 +624,9 @@ pub async fn infer_documents(cluster: &crate::cluster::Cluster, docs: &[(&Mappin
     }
     for (n, need) in needs.iter().enumerate() {
         let Ok(entries) = &mut out[need.doc] else { continue };
+        if dropped[n] {
+            continue;
+        }
         let Some(ep) = endpoints.get(&need.inference_id) else { continue };
         let mut inference = Map::new();
         inference.insert("inference_id".into(), need.inference_id.clone().into());
