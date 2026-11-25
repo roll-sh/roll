@@ -13,6 +13,12 @@ use serde_json::Value;
 pub const WITHHELD: &str = "[withheld: written by someone who can't push to this repo (lockdown)]";
 /// What a field a tool marks as anyone's to write (`Tool::outside`) says instead.
 pub const WITHHELD_SENT: &str = "[withheld: sent by someone outside, e.g. through a site's form (lockdown)]";
+/// What an outside picture (a fork's page, as roll's browser took it) says instead: a page can
+/// show any words, so a picture of one is its code's text too.
+pub const WITHHELD_PICTURE: &str = "[withheld: a picture of a page whose code comes from someone who can't push to this repo (lockdown)]";
+/// Set by a product on an answer that isn't JSON (a picture) when it shows an outside record (a
+/// fork's preview): JSON answers say `"outside": true` instead.
+pub const OUTSIDE_HEADER: &str = "x-roll-outside";
 /// The fields of an outside record that hold its author's text: a fork's preview also carries its
 /// code's own words as log `line`s (or a `lines` list), an error group's `sample` and a span's or
 /// route's `name`; a preview note from a share link's guest its `note`, and the page `path` and
