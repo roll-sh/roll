@@ -1865,18 +1865,19 @@ impl Session {
     ) -> Result<Arc<BoundQuery>> {
         self.ensure_txn();
         // (A binding that left its PL/pgSQL calls for planning is only an analysis: a plan
-        // to run is bound again, running them. Nor is one kept or reused while the statement's
-        // snapshot doesn't read every index (`reads_every_index`): a plan with an index it
-        // can't read would read nothing through it, one without an index would stick.)
-        let (version, role, keeps) = {
+        // to run is bound again, running them. Nor is one kept or reused for a cursor, or
+        // while the statement's snapshot doesn't read every index (`reads_every_index`): a
+        // plan with an index it can't read would read nothing through it, one without an index
+        // would stick. Then `version` is UNKEPT, which no kept binding has.)
+        const UNKEPT: u64 = u64::MAX;
+        let (version, role) = {
             let t = self.txn.as_ref().unwrap().borrow();
             let (v, r) = t.with_catalog(|cat| (cat.version, self.state.current_role(cat)));
-            (v, r, !cursor && t.reads_every_index())
+            (if !cursor && t.reads_every_index() { v } else { UNKEPT }, r)
         };
         let path = self.state.shared_search_path();
         let who = (role, self.state.settings.borrow().hot().row_security);
-        if keeps
-            && let Some((v, sp, w, b)) = &*p.bound.lock()
+        if let Some((v, sp, w, b)) = &*p.bound.lock()
             && *v == version
             && *sp == path
             && *w == who
@@ -1968,7 +1969,7 @@ impl Session {
                 Arc::new(self.txn.as_ref().unwrap().borrow().with_catalog(|cat| plandeps::Deps::of(cat, &b)))
             });
         }
-        if keeps {
+        if version != UNKEPT {
             *p.bound.lock() = Some((version, path, who, b.clone()));
         }
         Ok(b)
