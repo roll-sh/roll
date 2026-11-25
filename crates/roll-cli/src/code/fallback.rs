@@ -21,6 +21,40 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
+#[cfg(unix)]
+use agent_host::github;
+
+/// agent-host (and its GitHub client) builds on Linux and macOS only: on Windows the fallback
+/// says so where it would open the pull request.
+#[cfg(not(unix))]
+mod github {
+    pub struct PullRequest<'a> {
+        pub web_url: &'a str,
+        pub owner: &'a str,
+        pub repo: &'a str,
+        pub head: &'a str,
+        pub base: &'a str,
+        pub title: &'a str,
+        pub body: &'a str,
+    }
+
+    pub fn host(web_url: &str) -> String {
+        web_url.to_string()
+    }
+
+    pub async fn token(_: &str) -> anyhow::Result<String> {
+        anyhow::bail!("queuing work on GitHub while roll is down runs on Linux and macOS (or WSL), not on Windows yet: try again once roll is back")
+    }
+
+    pub fn git_env(_: &str) -> Vec<(&'static str, String)> {
+        vec![]
+    }
+
+    pub async fn open_pull_request(_: &str, _: &PullRequest<'_>) -> anyhow::Result<(u64, String)> {
+        token("").await.map(|_| (0, String::new()))
+    }
+}
+
 /// roll answered nothing useful within the retry budget (connection refused, 502/503/504).
 #[derive(Debug)]
 pub(super) struct Unreachable {
@@ -71,11 +105,7 @@ fn dir() -> anyhow::Result<PathBuf> {
     if let Some(p) = std::env::var_os("ROLL_CODE_STATE_DIR").filter(|p| !p.is_empty()) {
         return Ok(PathBuf::from(p));
     }
-    let base = match std::env::var_os("XDG_CONFIG_HOME").filter(|p| !p.is_empty()) {
-        Some(x) => PathBuf::from(x),
-        None => agent_host::config::user_home().context("HOME isn't set")?.join(".config"),
-    };
-    Ok(base.join("roll").join("code"))
+    Ok(crate::sys::config_base()?.join("roll").join("code"))
 }
 
 fn read<T: for<'de> Deserialize<'de> + Default>(name: &str) -> T {
@@ -135,7 +165,7 @@ pub(super) async fn queue(c: &Client<'_>, json_out: bool, spec: &Spec, land: boo
         Some(None) => bail!("{down}. {} is a native roll repo, so there's nothing to fall back to: try again once roll is back", spec.full()),
         None => bail!("{down}. This machine hasn't seen {} reach roll yet, so it doesn't know whether it's on GitHub: try again once roll is back", spec.full()),
     };
-    let token = agent_host::github::token(&agent_host::github::host(&linked.url)).await?;
+    let token = github::token(&github::host(&linked.url)).await?;
     let mut b = [0u8; 4];
     getrandom::fill(&mut b).expect("system randomness");
     let id = hex_id(b);
@@ -147,7 +177,7 @@ pub(super) async fn queue(c: &Client<'_>, json_out: bool, spec: &Spec, land: boo
         c.api.base,
         if land { "" } else { " and someone lands it" }
     );
-    let pr = agent_host::github::PullRequest {
+    let pr = github::PullRequest {
         web_url: &linked.url,
         owner: &linked.owner,
         repo: &linked.repo,
@@ -156,7 +186,7 @@ pub(super) async fn queue(c: &Client<'_>, json_out: bool, spec: &Spec, land: boo
         title,
         body: &pr_body,
     };
-    let (pr, url) = agent_host::github::open_pull_request(&token, &pr).await?;
+    let (pr, url) = github::open_pull_request(&token, &pr).await?;
     let intent = Intent {
         id,
         api: c.api.base.clone(),
@@ -186,7 +216,7 @@ pub(super) async fn queue(c: &Client<'_>, json_out: bool, spec: &Spec, land: boo
 /// with no hooks and no prompts.
 fn git(dir: &Path, token: &str, args: &[&str], stdin: Option<&[u8]>, env: &[(&str, &str)]) -> anyhow::Result<String> {
     let mut cmd = std::process::Command::new("git");
-    cmd.current_dir(dir).args(args).envs(agent_host::github::git_env(token)).env("GIT_CONFIG_NOSYSTEM", "1").stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+    cmd.current_dir(dir).args(args).envs(github::git_env(token)).env("GIT_CONFIG_NOSYSTEM", "1").stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     for (k, v) in env {

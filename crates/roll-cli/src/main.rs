@@ -30,6 +30,7 @@ mod secrets;
 mod apps;
 mod aws_login;
 mod login;
+mod sys;
 
 /// roll — serverless infrastructure.
 #[derive(Parser)]

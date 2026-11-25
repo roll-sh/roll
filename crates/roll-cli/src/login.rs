@@ -48,11 +48,7 @@ struct Saved {
 }
 
 fn logins_path() -> anyhow::Result<PathBuf> {
-    let base = match std::env::var_os("XDG_CONFIG_HOME").filter(|p| !p.is_empty()) {
-        Some(x) => PathBuf::from(x),
-        None => PathBuf::from(std::env::var_os("HOME").filter(|h| !h.is_empty()).context("HOME isn't set")?).join(".config"),
-    };
-    Ok(base.join("roll").join("logins.json"))
+    Ok(crate::sys::config_base()?.join("roll").join("logins.json"))
 }
 
 /// The roll commands go to when neither `ROLL_API_URL` nor `--api` names one: the only login's
@@ -109,17 +105,25 @@ fn load() -> anyhow::Result<BTreeMap<String, Saved>> {
     }
 }
 
-/// Write the logins readable only by this user (written aside and renamed into place).
+/// Write the logins readable only by this user (written aside and renamed into place). On Windows
+/// the file is under `%APPDATA%`, which only the user (and the machine's administrators) can open.
 fn save(all: &BTreeMap<String, Saved>) -> anyhow::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     let path = logins_path()?;
     let dir = path.parent().context("the config path has no directory")?;
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).with_context(|| format!("creating {}", dir.display()))?;
+    private_dir(dir).with_context(|| format!("creating {}", dir.display()))?;
     // A fresh file of our own: never one someone left there, never through a symlink, 0600 even
     // when a umask or an old file would say otherwise.
     let tmp = dir.join(format!(".logins.json.{}", random(9)));
-    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&tmp).with_context(|| format!("writing {}", tmp.display()))?;
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut f = o.open(&tmp).with_context(|| format!("writing {}", tmp.display()))?;
+    #[cfg(unix)]
     f.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
     f.write_all(serde_json::to_string_pretty(all)?.as_bytes())?;
     f.sync_all()?;
@@ -133,27 +137,35 @@ struct Lock(std::fs::File);
 
 impl Lock {
     fn take() -> anyhow::Result<Lock> {
-        use std::os::fd::AsRawFd;
-        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
         let path = logins_path()?.with_file_name("logins.lock");
         if let Some(dir) = path.parent() {
-            std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+            private_dir(dir)?;
         }
-        let f = std::fs::OpenOptions::new().write(true).create(true).truncate(false).mode(0o600).open(&path).with_context(|| format!("opening {}", path.display()))?;
-        // SAFETY: the descriptor is open for the call; flock only takes the lock.
-        if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            bail!("locking {}: {}", path.display(), std::io::Error::last_os_error());
-        }
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+        let f = o.open(&path).with_context(|| format!("opening {}", path.display()))?;
+        // flock(2) on Linux and macOS, LockFileEx on Windows.
+        f.lock().with_context(|| format!("locking {}", path.display()))?;
         Ok(Lock(f))
     }
 }
 
 impl Drop for Lock {
     fn drop(&mut self) {
-        use std::os::fd::AsRawFd;
-        // SAFETY: as above; the lock also goes when the file closes.
-        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+        // The lock also goes when the file closes.
+        let _ = self.0.unlock();
     }
+}
+
+/// `dir` and its parents, 0700 where they're made (on Windows, as the parent's ACL says).
+fn private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    let mut b = std::fs::DirBuilder::new();
+    b.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+    b.create(dir)
 }
 
 fn now_ms() -> i64 {
@@ -298,14 +310,7 @@ fn pasted_lines() -> tokio::sync::mpsc::UnboundedReceiver<String> {
 }
 
 fn hostname() -> String {
-    let mut buf = [0u8; 256];
-    // SAFETY: the buffer is valid for its length; the name is NUL-terminated within it.
-    let ok = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0;
-    let end = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
-    match std::str::from_utf8(&buf[..end]) {
-        Ok(h) if ok && !h.is_empty() => h.chars().take(40).collect(),
-        _ => "this machine".into(),
-    }
+    crate::sys::hostname().map(|h| h.chars().take(40).collect()).unwrap_or_else(|| "this machine".into())
 }
 
 /// The endpoints `/.well-known/oauth-authorization-server` names.

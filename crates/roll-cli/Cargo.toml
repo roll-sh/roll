@@ -25,7 +25,6 @@ sha2.workspace = true
 roll-secrets-chain.workspace = true
 # `roll secrets import --from doppler|infisical`: roll's own key, folder and slug rules.
 roll-secrets-ref.workspace = true
-agent-host.workspace = true
 apps-build.workspace = true
 # `roll apps cp`: files to and from an instance as tar (Docker's `docker cp`).
 tar.workspace = true
@@ -80,6 +79,11 @@ roll-keyshares.workspace = true
 # `roll secrets scan`: the credential detectors and the allow-list's globs roll code's landings use.
 roll-auth.workspace = true
 code-review.workspace = true
+
+# `roll agent up` (the daemon: PTYs, process groups) and `roll code`'s GitHub fallback: Linux and
+# macOS only. On Windows they say so.
+[target.'cfg(unix)'.dependencies]
+agent-host.workspace = true
 
 [dev-dependencies]
 # `tests/apps.rs`: roll apps in process on its fake runtime.
