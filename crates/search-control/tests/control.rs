@@ -5316,6 +5316,7 @@ fn algolia_records(index: &str) -> Vec<Value> {
             json!({ "objectID": "3", "name": "Mug", "brand": "Acme", "popularity": 10, "price": 8.0, "internal_cost": 2 }),
         ],
         "big" => (0..400).map(|i| json!({ "objectID": format!("b{i}"), "text": "x".repeat(280) })).collect(),
+        "flaky" => (0..300).map(|i| json!({ "objectID": format!("f{i}"), "n": i })).collect(),
         "hostile" => vec![json!({ "objectID": "h1", "name": "plain", "_id": "evil", "_routing": "r" })],
         _ => Vec::new(),
     }
@@ -5358,7 +5359,7 @@ async fn saas_handle(method: axum::http::Method, uri: axum::http::Uri, headers: 
             })),
             ("GET", ["indexes", "products_price_asc", "settings"]) => ok(json!({ "ranking": ["asc(price)", "typo", "words", "custom"], "primary": "products" })),
             ("GET", ["indexes", "products_popular", "settings"]) => ok(json!({ "customRanking": ["desc(popularity)"], "primary": "products" })),
-            ("GET", ["indexes", "big", "settings"]) => ok(json!({})),
+            ("GET", ["indexes", "big" | "flaky", "settings"]) => ok(json!({})),
             ("GET", ["indexes", "hostile", "settings"]) => ok(json!({
                 "searchableAttributes": ["_source", "name", "{{x}}"],
                 "customRanking": ["desc(_id)", "asc({{x}})", "asc()"],
@@ -5367,6 +5368,14 @@ async fn saas_handle(method: axum::http::Method, uri: axum::http::Uri, headers: 
                 "attributeForDistinct": "_routing",
             })),
             ("POST", ["indexes", index, "browse"]) => {
+                if *index == "flaky" {
+                    let seen = body["cursor"].as_str().map_or_else(|| format!("first-{}", body["hitsPerPage"]), str::to_string);
+                    FLAKY_BROWSES.lock().unwrap().push(seen.clone());
+                    // The third page fails once, as a source's blip would.
+                    if seen == "c200-100" && !FLAKY_FAILED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(json!({ "message": "try again" }))).into_response();
+                    }
+                }
                 let all = algolia_records(index);
                 let size = body["hitsPerPage"].as_u64().map(|n| n as usize);
                 let (from, size) = match body["cursor"].as_str() {
@@ -5393,7 +5402,9 @@ async fn saas_handle(method: axum::http::Method, uri: axum::http::Uri, headers: 
             ("POST", ["indexes", "products", "rules", "search"]) => ok(json!({ "nbHits": 3, "hits": [
                 { "objectID": "pin-mug", "conditions": [{ "pattern": "kettle", "anchoring": "is" }], "consequence": { "promote": [{ "objectID": "3", "position": 0 }] } },
                 { "objectID": "hide-teapot", "conditions": [{ "pattern": "brew", "anchoring": "contains" }], "consequence": { "hide": [{ "objectID": "2" }] } },
-                { "objectID": "filter-acme", "conditions": [{ "pattern": "acme", "anchoring": "is" }], "consequence": { "params": { "filters": "brand:Acme" } } },
+                { "objectID": "filter-acme", "conditions": [{ "pattern": "acme", "anchoring": "is" }], "consequence": { "params": { "filters": "brand:Acme", "aroundLatLng": "1,2" } } },
+                { "objectID": "rewrite-chai", "conditions": [{ "pattern": "chai", "anchoring": "is" }], "consequence": { "params": { "query": { "edits": [{ "type": "replace", "delete": "chai", "insert": "teapot" }] } } } },
+                { "objectID": "pin-teapot-filtered", "conditions": [{ "pattern": "pot", "anchoring": "is" }], "consequence": { "promote": [{ "objectID": "2", "position": 0 }], "filterPromotes": true } },
             ] })),
             // 600 rules that each pin and hide: 1,200 query rules, past the 1,000 a search applies.
             ("POST", ["indexes", "big", "rules", "search"]) => {
@@ -5409,11 +5420,14 @@ async fn saas_handle(method: axum::http::Method, uri: axum::http::Uri, headers: 
             _ => (StatusCode::NOT_FOUND, axum::Json(json!({ "message": "not found" }))).into_response(),
         };
     }
-    if matches!(seg[0], "collections" | "debug") {
+    if matches!(seg[0], "collections" | "debug" | "synonym_sets" | "curation_sets") {
         if header("x-typesense-api-key") != TYPESENSE_KEY {
             return refuse(header("x-typesense-api-key"));
         }
-        let schema = json!({ "name": "books", "num_documents": 3, "default_sorting_field": "year", "fields": [
+        if seg.get(1) == Some(&"live") {
+            return live_collection(&seg[2..], uri.query().unwrap_or_default());
+        }
+        let schema = json!({ "name": "books", "num_documents": 3, "default_sorting_field": "year", "synonym_sets": ["common"], "curation_sets": ["promos"], "fields": [
             { "name": "title", "type": "string" },
             { "name": "author", "type": "string", "facet": true },
             { "name": "year", "type": "int32", "sort": true },
@@ -5423,6 +5437,9 @@ async fn saas_handle(method: axum::http::Method, uri: axum::http::Uri, headers: 
         ] });
         return match &seg[..] {
             ["debug"] => ok(json!({ "state": 1, "version": "28.0" })),
+            // Typesense 29's synonym sets and 30's curation sets, which the schema names.
+            ["synonym_sets", "common"] => ok(json!({ "name": "common", "items": [{ "id": "lit", "synonyms": ["literature", "letters"] }] })),
+            ["curation_sets", "promos"] => ok(json!({ "name": "promos", "items": [{ "id": "pin-ulysses", "rule": { "query": "modern", "match": "exact" }, "includes": [{ "id": "b3", "position": 1 }] }] })),
             ["collections"] => ok(json!([schema])),
             ["collections", "books"] => ok(schema),
             ["collections", "books", "documents", "export"] => {
@@ -5475,6 +5492,33 @@ async fn saas_handle(method: axum::http::Method, uri: axum::http::Uri, headers: 
             ok(json!({ "results": movies.iter().skip(offset).take(limit).collect::<Vec<_>>(), "offset": offset, "limit": limit, "total": movies.len() }))
         }
         _ => (StatusCode::NOT_FOUND, axum::Json(json!({ "message": "Index not found" }))).into_response(),
+    }
+}
+
+/// The fake Algolia `flaky` index's browse requests (`first-<size>` or the cursor), and whether
+/// its third page has failed yet.
+static FLAKY_BROWSES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+static FLAKY_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The fake Typesense `live` collection, which a test changes, and its exports' queries.
+static LIVE: std::sync::Mutex<Vec<Value>> = std::sync::Mutex::new(Vec::new());
+static LIVE_EXPORTS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Typesense's `live` collection: its schema and its export, which takes `filter_by` on
+/// `updated_at` (`updated_at:>=<n>`).
+fn live_collection(rest: &[&str], query: &str) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let docs = LIVE.lock().unwrap().clone();
+    match rest {
+        [] => axum::Json(json!({ "name": "live", "num_documents": docs.len(), "fields": [{ "name": "title", "type": "string" }, { "name": "updated_at", "type": "int64" }] })).into_response(),
+        ["documents", "export"] => {
+            LIVE_EXPORTS.lock().unwrap().push(query.to_string());
+            let since = query.strip_prefix("filter_by=").map(percent_decode).and_then(|f| f.strip_prefix("updated_at:>=").and_then(|n| n.parse::<i64>().ok()));
+            let text: String = docs.iter().filter(|d| since.is_none_or(|t| d["updated_at"].as_i64().unwrap_or(0) >= t)).map(|d| format!("{d}\n")).collect();
+            text.into_response()
+        }
+        ["synonyms"] => axum::Json(json!({ "synonyms": [] })).into_response(),
+        ["overrides"] => axum::Json(json!({ "overrides": [] })).into_response(),
+        _ => axum::http::StatusCode::NOT_FOUND.into_response(),
     }
 }
 
@@ -5531,12 +5575,18 @@ async fn importing_from_algolia() {
     let planned = e.post("/v1/search/clusters/shop/migrate", json!({ "source": source, "indices": [{ "index": "products" }], "dry_run": true })).await;
     let row = &planned["indices"][0];
     let skipped = not_mapped(row);
-    for s in ["s4", "filter-acme", "ranking: typo, geo, words, filters, proximity, attribute, exact"] {
+    for s in ["s4", "ranking: typo, geo, words, filters, proximity, attribute, exact"] {
         assert!(skipped.iter().any(|n| n == s), "{s} not mapped: {planned}");
     }
+    // A rule that filters (and sets a parameter roll doesn't take) is a template of its own; the
+    // parameter is listed.
+    let not_mapped_reason = |name: &str| row["plan"]["not_mapped"].as_array().unwrap().iter().find(|n| n["name"] == name).map(|n| n["reason"].as_str().unwrap().to_string());
+    assert!(not_mapped_reason("filter-acme").is_some_and(|r| r.contains("aroundLatLng")), "{planned}");
+    let templates: Vec<&str> = row["plan"]["rule_templates"].as_array().unwrap().iter().map(|t| t["template"].as_str().unwrap()).collect();
+    assert_eq!(templates, ["products-search-rule-filter-acme", "products-search-rule-rewrite-chai"], "{planned}");
     assert!(skipped.iter().any(|n| n.starts_with("decompoundedAttributes")), "{planned}");
     assert!(!skipped.iter().any(|n| n.starts_with("highlightPreTag")), "display settings aren't listed: {planned}");
-    assert_eq!((row["plan"]["synonyms"].as_u64(), row["plan"]["rules"].as_u64(), row["task"].as_str()), (Some(4), Some(2), None), "{planned}");
+    assert_eq!((row["plan"]["synonyms"].as_u64(), row["plan"]["rules"].as_u64(), row["task"].as_str()), (Some(4), Some(3), None), "{planned}");
     assert!(row["plan"]["notes"].as_array().unwrap().iter().any(|n| n.as_str().is_some_and(|n| n.contains("rules_query"))), "{planned}");
     assert_eq!(e.shop("HEAD", "/products", None).await.0, 404, "a dry run makes nothing");
 
@@ -5581,6 +5631,21 @@ async fn importing_from_algolia() {
     // `rules_query`.
     assert_eq!(search("Kettle").await, ["1"]);
     assert_eq!(search_with(json!({ "query": "Kettle", "rules_query": "kettle" })).await, ["3", "1"]);
+    // `filters` filters the results; an ordinary pin shows anyway (Algolia's default), a
+    // `filterPromotes` rule's pin only when it matches.
+    let brewer = json!({ "term": { "brand.keyword": "Brewer" } });
+    let acme = json!({ "term": { "brand.keyword": "Acme" } });
+    assert_eq!(search_with(json!({ "query": "kettle", "filters": brewer })).await, ["3"]);
+    assert_eq!(search("pot").await, ["2"]);
+    assert!(search_with(json!({ "query": "pot", "filters": acme })).await.is_empty());
+    // The rules' templates: Algolia's filter, and its query edit applied to the pattern.
+    let rule_search = async |template: &str, q: &str| {
+        let (s, v) = e.shop("POST", "/products/_search/template", Some(json!({ "id": template, "params": { "query": q } }))).await;
+        assert_eq!(s, 200, "{v}");
+        v["hits"]["hits"].as_array().unwrap().iter().map(|h| h["_id"].as_str().unwrap().to_string()).collect::<Vec<_>>()
+    };
+    assert_eq!(rule_search("products-search-rule-filter-acme", "teapot kettle").await, ["1"]);
+    assert_eq!(rule_search("products-search-rule-rewrite-chai", "chai").await, ["2"]);
 
     // Names that can't reach a mapping or the template are left out and listed, never failing
     // the index: metadata fields (also in the records), `{{`, an empty `asc()`.
@@ -5631,9 +5696,11 @@ async fn importing_from_typesense() {
     let (_, syn) = e.shop("GET", "/_synonyms/books-synonyms", None).await;
     let mut rules: Vec<&str> = syn["synonyms_set"].as_array().unwrap().iter().map(|r| r["synonyms"].as_str().unwrap()).collect();
     rules.sort();
-    assert_eq!(rules, ["novel, book", "scifi => scifi, science fiction"], "{syn}");
+    // The collection's own synonyms and its synonym set's; its overrides and its curation set's.
+    assert_eq!(rules, ["literature, letters", "novel, book", "scifi => scifi, science fiction"], "{syn}");
     let (_, qr) = e.shop("GET", "/_query_rules/books-rules", None).await;
-    assert_eq!(qr["rules"].as_array().map(Vec::len), Some(2), "{qr}");
+    let ids: Vec<&str> = qr["rules"].as_array().unwrap().iter().map(|r| r["rule_id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["pin-emma", "pin-emma-exclude", "pin-ulysses"], "{qr}");
     let (_, found) = e.shop("POST", "/books/_search/template", Some(json!({ "id": "books-search", "params": { "query": "classic" } }))).await;
     let ids: Vec<&str> = found["hits"]["hits"].as_array().unwrap().iter().map(|h| h["_id"].as_str().unwrap()).collect();
     assert_eq!(ids, ["b2"], "{found}");
@@ -5769,4 +5836,73 @@ async fn saas_sources_are_guarded() {
         let (s, v) = e.call(reqwest::Method::POST, "/v1/search/clusters/shop/migrate/inspect", Some(json!({ "source": source }))).await;
         assert!(s == 400 && v["error"].as_str().is_some_and(|m| m.starts_with("couldn't reach")), "{source}: {v}");
     }
+}
+
+/// A copy that stopped part way (the source failed a page) resumes from its last page when the
+/// index is picked again: its place is in the index's `_meta.roll_import`, the pages before it
+/// aren't read again, and every record ends up copied once.
+#[tokio::test]
+async fn a_stopped_saas_copy_resumes_from_its_last_page() {
+    let (e, _) = saas_env(&[]).await;
+    let source = json!({ "kind": "algolia", "app_id": "TESTAPP", "api_key": ALGOLIA_KEY });
+    let started = e.post("/v1/search/clusters/shop/migrate", json!({ "source": source, "indices": [{ "index": "flaky" }], "size": 100 })).await;
+    let t = e.task_done(started["indices"][0]["task"].as_str().unwrap_or_else(|| panic!("{started}"))).await;
+    assert!(t["error"].is_object() && t["response"].is_null(), "{t}");
+    let (_, m) = e.shop("GET", "/flaky/_mapping", None).await;
+    let copy = &m["flaky"]["mappings"]["_meta"]["roll_import"]["copy"];
+    assert_eq!((copy["state"].as_str(), copy["position"].clone()), (Some("stopped"), json!({ "cursor": "c200-100" })), "{m}");
+
+    let again = e.post("/v1/search/clusters/shop/migrate", json!({ "source": source, "indices": [{ "index": "flaky" }], "size": 100 })).await;
+    assert!(again["indices"][0]["resumed"].is_string(), "{again}");
+    let t = e.task_done(again["indices"][0]["task"].as_str().unwrap()).await;
+    assert_eq!(t["response"]["created"].as_u64(), Some(100), "{t}");
+    let (_, n) = e.shop("GET", "/flaky/_count", None).await;
+    assert_eq!(n["count"], 300, "{n}");
+    let browses = FLAKY_BROWSES.lock().unwrap().clone();
+    assert_eq!(browses.iter().filter(|b| *b == "first-100").count(), 1, "the first page was read again: {browses:?}");
+    let (_, m) = e.shop("GET", "/flaky/_mapping", None).await;
+    assert_eq!(m["flaky"]["mappings"]["_meta"]["roll_import"]["copy"]["state"], "done", "{m}");
+}
+
+/// After the copy, a catch-up reads what changed at the source: with `since_attribute`, only
+/// the records changed since the copy started (Typesense's `filter_by`), the changed and the new
+/// one written; without it, every record, none written because none differs. Cutover then moves
+/// the alias to the copy in one step.
+#[tokio::test]
+async fn catching_up_and_cutting_over() {
+    *LIVE.lock().unwrap() = (1..=3).map(|i| json!({ "id": format!("l{i}"), "title": format!("item {i}"), "updated_at": 1000 })).collect();
+    let (e, fake) = saas_env(&[]).await;
+    let source = json!({ "kind": "typesense", "host": fake, "api_key": TYPESENSE_KEY });
+    let started = e.post("/v1/search/clusters/shop/migrate", json!({ "source": source, "indices": [{ "index": "live", "dest": "live-v1" }] })).await;
+    e.task_done(started["indices"][0]["task"].as_str().unwrap_or_else(|| panic!("{started}"))).await;
+
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    {
+        let mut docs = LIVE.lock().unwrap();
+        docs[1] = json!({ "id": "l2", "title": "changed", "updated_at": now });
+        docs.push(json!({ "id": "l4", "title": "new", "updated_at": now }));
+    }
+    let pick = json!([{ "index": "live", "dest": "live-v1" }]);
+    let caught = e.post("/v1/search/clusters/shop/migrate", json!({ "source": source, "indices": pick, "step": "catch_up", "since_attribute": "updated_at" })).await;
+    assert_eq!(caught["indices"][0]["method"], "since_attribute", "{caught}");
+    let t = e.task_done(caught["indices"][0]["task"].as_str().unwrap_or_else(|| panic!("{caught}"))).await;
+    assert_eq!((t["response"]["created"].as_u64(), t["response"]["updated"].as_u64()), (Some(1), Some(1)), "{t}");
+    assert!(LIVE_EXPORTS.lock().unwrap().last().is_some_and(|q| q.starts_with("filter_by=updated_at%3A%3E%3D")), "{:?}", LIVE_EXPORTS.lock().unwrap());
+    let (_, doc) = e.shop("GET", "/live-v1/_doc/l2", None).await;
+    assert_eq!(doc["_source"]["title"], "changed", "{doc}");
+
+    let full = e.post("/v1/search/clusters/shop/migrate", json!({ "source": source, "indices": pick, "step": "catch_up" })).await;
+    let t = e.task_done(full["indices"][0]["task"].as_str().unwrap_or_else(|| panic!("{full}"))).await;
+    assert_eq!((t["response"]["noops"].as_u64(), t["response"]["created"].as_u64(), t["response"]["updated"].as_u64()), (Some(4), Some(0), Some(0)), "{t}");
+    let (_, m) = e.shop("GET", "/live-v1/_mapping", None).await;
+    assert!(m["live-v1"]["mappings"]["_meta"]["roll_import"]["caught_up_ms"].is_i64(), "{m}");
+
+    // Cutover needs no key: no source is called.
+    let keyless = json!({ "kind": "typesense", "host": fake });
+    let cut = e.post("/v1/search/clusters/shop/migrate", json!({ "source": keyless, "indices": [{ "index": "live", "dest": "live-v1", "alias": "live" }], "step": "cutover" })).await;
+    assert_eq!(cut["indices"][0]["alias"], "live", "{cut}");
+    let (_, a) = e.shop("GET", "/_alias/live", None).await;
+    assert_eq!(index_names(&a), ["live-v1"], "{a}");
+    let (_, n) = e.shop("GET", "/live/_count", None).await;
+    assert_eq!(n["count"], 4, "{n}");
 }
