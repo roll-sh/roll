@@ -2083,6 +2083,10 @@ pub struct Environment {
     /// Days its logs (output, requests, traces, events and Vitals) are kept: 7 (the default),
     /// 30 or 90 (Railway's, Render's longer retention); a preview's are 7.
     pub log_retention_days: u32,
+    /// Days its built deployments are kept to roll back to, past the newest ten (Vercel's
+    /// retention): none younger is pruned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_days: Option<u32>,
     /// Its deploys are reported to the Git host (commit statuses, GitHub Deployments); false:
     /// someone else reports them (roll previews, for its `pv-` environments: one voice on a
     /// pull request).

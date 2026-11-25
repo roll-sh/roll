@@ -329,7 +329,7 @@ function Conditions({ service, env, runner, go }: { service: Service; env: Envir
 }
 
 /** `/dashboard/apps/$id`: a service, one environment at a time. */
-export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; env?: string; tab?: string }) {
+export function ServicePage({ id, env: envParam, tab: tabParam, logQuery, logBack }: { id: string; env?: string; tab?: string; logQuery?: string; logBack?: string }) {
   const navigate = useNavigate();
   const ws = useWorkspace();
   const tab: ServiceTab = SERVICE_TABS.includes(tabParam as ServiceTab) ? (tabParam as ServiceTab) : "deployments";
@@ -364,6 +364,15 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
     const s = q.toString();
     runner.setError(null);
     void navigate({ href: `/dashboard/apps/${encodeURIComponent(id)}${s ? `?${s}` : ""}`, replace: true });
+  };
+  // A Logs search in the URL (`?tab=logs&q=…&back=30`), so a teammate opens the same one.
+  const logUrl = (q: string, days: number) => {
+    const p = new URLSearchParams();
+    if (envParam && envParam !== PRODUCTION) p.set("env", envParam);
+    p.set("tab", "logs");
+    if (q.trim()) p.set("q", q.trim());
+    if (days !== 7) p.set("back", String(days));
+    void navigate({ href: `/dashboard/apps/${encodeURIComponent(id)}?${p.toString()}`, replace: true });
   };
 
   const service = data?.service;
@@ -701,7 +710,7 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
         ) : tab === "deployments" ? (
           <Deployments service={service.id} name={service.name} env={env!} deploys={data.deploys} runner={runner} own={service.run.type === "web" && !(service.run.volume && !service.run.volume.shared)} upload={service.source.kind === "upload"} explains={service.source.kind === "repo"} />
         ) : tab === "logs" ? (
-          <RuntimeLogs service={service.id} env={envName} retentionDays={env?.log_retention_days ?? 7} onGroup={() => go({ tab: "metrics" })} />
+          <RuntimeLogs service={service.id} env={envName} retentionDays={env?.log_retention_days ?? 7} initialFilter={logQuery} initialDays={Number(logBack) || undefined} onSearch={logUrl} onGroup={() => go({ tab: "metrics" })} />
         ) : tab === "metrics" ? (
           <MetricsTab service={service.id} env={envName} memoryMb={service.run.memory_mb} maxInstances={service.run.max_instances} cpus={service.run.cpu} latencyTarget={service.run.latency_target_ms} />
         ) : tab === "variables" ? (
