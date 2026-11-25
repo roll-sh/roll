@@ -212,6 +212,16 @@ pub fn index_entry_key_into(out: &mut Vec<u8>, t: &Table, ix: &Index, keyvals: &
     out.extend_from_slice(&dkey[8..]);
 }
 
+/// `index_entry_key_into` of the key values `keyvals` gives (a DELETE's, read in place).
+pub fn index_entry_key_of<'v>(out: &mut Vec<u8>, t: &Table, ix: &Index, keyvals: impl Iterator<Item = &'v Value>, dkey: &[u8], colls: &[Option<KeyColl>]) {
+    crate::storage::keys::put_u32(out, t.oid);
+    crate::storage::keys::put_u32(out, ix.id);
+    for (i, (v, c)) in keyvals.zip(&ix.columns).enumerate() {
+        encode_index_value(out, v, c.desc, c.nulls_first, colls.get(i).and_then(Option::as_ref));
+    }
+    out.extend_from_slice(&dkey[8..]);
+}
+
 /// Prefix of index entries with exactly these key values (for uniqueness checks): equal
 /// under the columns' collations.
 pub fn index_value_prefix(t: &Table, ix: &Index, keyvals: &[Value], colls: &[Option<KeyColl>]) -> Vec<u8> {
@@ -5785,6 +5795,76 @@ impl Node for ScanNode {
         }
     }
 
+    /// A plain sequential scan's rows with their keys (a DELETE's source), as `next` would
+    /// return them: as stored where its filter is decided over the stored values (or it has
+    /// none) and nothing is out of line, else as `emit` makes them.
+    fn each_keyed(&mut self, f: &mut dyn FnMut(&[u8], super::Stored<'_>) -> Result<()>, ctx: &ExecCtx) -> Result<Option<()>> {
+        let p = &self.plan;
+        if self.par.is_some()
+            || self.emitted > 0
+            || ctx.instrumented()
+            || p.limit.is_some()
+            || !p.with_key
+            || self.secondary
+            || self.ios
+            || self.ios_cols.is_some()
+            || self.am.is_some()
+            || self.keys.is_some()
+            || self.only.is_some()
+            || self.sample.is_some()
+            || self.point
+            || self.implied
+            || p.index.is_some()
+            || !matches!(p.access, Access::Seq | Access::Unplanned)
+            || p.mark.is_some()
+            || p.sys
+            || !matches!(self.stat, StatTarget::Off | StatTarget::Seq(_))
+            || super::sizing::tracked(p.table.oid)
+            || p.table.columns.iter().any(|c| c.virtual_gen)
+            || predicate_locked(&p.table, ctx)
+        {
+            return Ok(None);
+        }
+        self.par_tried = true;
+        let filtered = p.filter.is_some();
+        loop {
+            ctx.check()?;
+            if !self.next_raw_ref(ctx)? {
+                return Ok(Some(()));
+            }
+            // (The row borrowed from the batch while `f` reads it, as `next` makes its rows.)
+            let (rb, one) = (std::mem::take(&mut self.rb), self.one.take());
+            let (key, bytes) = match &one {
+                Some((k, v)) => (&k[..], &v[..]),
+                None => rb.peek().expect("a row handed out"),
+            };
+            let pass = match crate::storage::toast::has_external(bytes) {
+                true => None,
+                false if filtered => self.filter_kernel(bytes, None, ctx),
+                false => Some(true),
+            };
+            let r = match pass {
+                Some(pass) => {
+                    self.count_row(ctx);
+                    if !pass {
+                        ctx.filtered(self.key);
+                        Ok(())
+                    } else {
+                        self.emitted += 1;
+                        f(key, super::Stored::Bytes(bytes))
+                    }
+                }
+                None => match self.emit(key, bytes, ctx) {
+                    Ok(Some(row)) => f(key, super::Stored::Row(row)),
+                    Ok(None) => Ok(()),
+                    Err(e) => Err(e),
+                },
+            };
+            self.rb = rb;
+            r?;
+        }
+    }
+
     /// A plain index scan's rows (`picks`) as `next` returns them, each offered as its stored
     /// values (`pick`). Its parallel workers are tried first, as `next` tries them (None when
     /// they run: `next` reads their rows).
@@ -6765,6 +6845,13 @@ pub fn lock_row_with(
     if !got {
         return Ok(Locked::Skip);
     }
+    after_lock(t, key, mode, later, ctx)
+}
+
+/// What `lock_row_with` returns for row `key` once its lock is taken. (Inline: in
+/// `lock_row_with` as it was before a bulk DELETE's batches called it too.)
+#[inline(always)]
+pub fn after_lock(t: &Table, key: &[u8], mode: RowLockMode, later: bool, ctx: &ExecCtx) -> Result<Locked> {
     let txn = ctx.txn.borrow();
     // Changed by a later command of this transaction (TM_SelfModified): skipped.
     if later

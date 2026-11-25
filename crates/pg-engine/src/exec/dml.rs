@@ -1648,6 +1648,25 @@ fn delete_index_entries(
         {
             continue;
         }
+        // (A deferred entry of an index of columns made from the row's values in place, as
+        // `index_values` would take them: no list of values a row.)
+        if defer
+            && bix.keys.iter().all(|k| matches!(k, Expr::Col(i, _) if *i < row.len()))
+            && bix.index.columns.iter().all(|c| c.opclass < crate::catalog::FIRST_USER_OID)
+        {
+            if let Some(p) = &bix.predicate
+                && !eval_bool(p, row, ctx)?
+            {
+                continue;
+            }
+            let vals = bix.keys.iter().map(|k| match k {
+                Expr::Col(i, _) => &row[*i],
+                _ => unreachable!(),
+            });
+            let put = |k: &mut Vec<u8>| super::scan::index_entry_key_of(k, t, &bix.index, vals, dkey, &bix.colls);
+            ctx.txn.borrow_mut().defer_entry_delete_with(put)?;
+            continue;
+        }
         if let Some(vals) = index_values(bix, row, ctx)? {
             let k = index_entry_key(t, &bix.index, &vals, dkey, &bix.colls);
             if defer {
@@ -6248,6 +6267,110 @@ pub struct DeleteNode {
     /// deferring statement, which nothing reads them in before it ends, counts them as each
     /// call of `next` returns.
     uncounted: Vec<(u32, i64)>,
+    /// Its rows go in batches (`BulkDelete`), taken when it starts.
+    bulk: Option<BulkDelete>,
+}
+
+/// A DELETE whose rows nothing reads but its own index entries' deletes (`DeleteNode::
+/// defers_entries`; no AFTER ROW trigger, foreign key, transition table, inheritance tree,
+/// foreign table, view, join or predicate locks): its scan hands it each row as
+/// stored with its key (`Node::each_keyed`), and it takes them in batches as INSERT … SELECT
+/// does its rows: their row locks in one trip to the lock manager where nothing can conflict
+/// (a row another transaction holds, or one the transaction holds the usual way, waits as it
+/// does alone, in its place), their locks marked an update's or delete's in one more, the
+/// size model once, and only its index entries' columns decoded.
+struct BulkDelete {
+    /// The columns the table's index entries read (their keys, expressions and predicates).
+    need: Vec<bool>,
+    /// The table's column types, and none stored as NULL (`stored_tuple_len`'s).
+    types: Vec<DataType>,
+    none: Vec<bool>,
+    /// The TOAST relation is locked (`sizing::deleted_rows`).
+    toast_locked: std::cell::Cell<bool>,
+    /// The batch: each row's key and stored bytes, one after the other, and where each ends.
+    buf: Vec<u8>,
+    ends: Vec<(u32, u32)>,
+}
+
+/// The rows a bulk DELETE's batch takes.
+const BULK_DELETE_BATCH: usize = 256;
+
+/// Rows deleted in batches (`BulkDelete`), for tests.
+pub static BULK_DELETE_ROWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+impl BulkDelete {
+    fn of(plan: &DeletePlan, defer_entries: bool, seen: bool, capture: bool, ctx: &ExecCtx) -> Option<BulkDelete> {
+        let t = &plan.table;
+        // (Only a sequential scan of the table hands its rows with their keys: `each_keyed`.)
+        let seq = matches!(&*plan.source, crate::sql::plan::Plan::Scan(s)
+            if s.index.is_none() && matches!(s.access, crate::sql::plan::Access::Seq | crate::sql::plan::Access::Unplanned));
+        if !seq
+            || !defer_entries
+            || seen
+            || capture
+            || plan.view
+            || plan.inh
+            || plan.sys
+            || !plan.members.is_empty()
+            || t.foreign.is_some()
+            || trigger::wants_after(&plan.triggers, tt::DELETE, ctx)
+            || (!t.temporary && ctx.txn.borrow().serializable_tracked())
+        {
+            return None;
+        }
+        let mut need = vec![false; t.columns.len()];
+        for bix in &plan.indexes {
+            if !super::scan::stores_entries(bix) {
+                continue;
+            }
+            for e in bix.keys.iter().chain(&bix.predicate) {
+                if !super::need::mark(e, &mut need) {
+                    return None;
+                }
+            }
+        }
+        Some(BulkDelete {
+            need,
+            types: t.columns.iter().map(|c| c.ty.clone()).collect(),
+            none: vec![false; t.columns.len()],
+            toast_locked: std::cell::Cell::new(false),
+            buf: Vec::new(),
+            ends: Vec::with_capacity(BULK_DELETE_BATCH),
+        })
+    }
+
+    fn push(&mut self, key: &[u8], bytes: &[u8]) {
+        self.buf.extend_from_slice(key);
+        let k = self.buf.len() as u32;
+        self.buf.extend_from_slice(bytes);
+        self.ends.push((k, self.buf.len() as u32));
+    }
+
+    /// Row `i`'s key and stored bytes.
+    fn row(&self, i: usize) -> (&[u8], &[u8]) {
+        let start = if i == 0 { 0 } else { self.ends[i - 1].1 as usize };
+        let (k, e) = self.ends[i];
+        (&self.buf[start..k as usize], &self.buf[k as usize..e as usize])
+    }
+
+    fn clear(&mut self) {
+        self.buf.clear();
+        self.ends.clear();
+    }
+
+    /// Whether row `i`'s stored values went out of line in its tuple (`sizing::toast_gone_old`,
+    /// sized from its stored bytes where they size it: under the threshold, none did).
+    fn toast_gone(&self, t: &Table, bytes: &[u8], ctx: &ExecCtx) -> Result<bool> {
+        let data = super::scan::row_data(bytes)?;
+        // (`toast::encode` keeps a value whose encoding is under 128 bytes in line.)
+        let fits = |_: usize, _: u8, bytes: usize| bytes < 128;
+        if crate::storage::row::stored_tuple_len_with(data, &self.types, &self.none, fits)
+            .is_some_and(|len| len <= super::sizing::TOAST_THRESHOLD)
+        {
+            return Ok(false);
+        }
+        Ok(super::sizing::toast_gone_old(t, &decode_table_row(t, bytes)?, ctx))
+    }
 }
 
 impl DeleteNode {
@@ -6286,7 +6409,9 @@ impl DeleteNode {
         let source = super::nodes::open(&plan.source, ctx)?;
         let seen = (!rows_once(&plan.source)).then(Default::default);
         let defer_entries = Self::defers_entries(&plan, ctx);
+        let bulk = BulkDelete::of(&plan, defer_entries, seen.is_some(), capture, ctx);
         Ok(DeleteNode {
+            bulk,
             defer_entries,
             uncounted: Vec::new(),
             plan,
@@ -6383,200 +6508,365 @@ impl DeleteNode {
     }
 
     fn next_rows(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
-        let n = self.plan.table.columns.len();
         if self.done {
             return Ok(None);
         }
+        if let Some(bulk) = self.bulk.take()
+            && self.delete_bulk(bulk, ctx)?
+        {
+            return self.finish(ctx);
+        }
         loop {
             ctx.check()?;
-            let Some(mut src) = self.source.next(ctx)? else {
-                self.done = true;
-                crate::ext::postgres_fdw::modify::flush_pending(ctx)?;
-                crate::ext::postgres_fdw::modify::forget_member_rows();
-                if self.defer_entries {
-                    ctx.txn.borrow_mut().flush_entry_deletes()?;
-                    // (Before the AFTER triggers, which may read them.)
-                    self.count_deleted(ctx);
-                }
-                if self.plan.inh {
-                    trigger::batch(ctx, || self.finish_tree(ctx))?;
-                } else if !self.deferred {
-                    trigger::batch(ctx, || {
-                        self.end(ctx, false)?;
-                        self.end(ctx, true)
-                    })?;
-                }
-                return Ok(None);
+            let Some(src) = self.source.next(ctx)? else {
+                return self.finish(ctx);
             };
-            if self.plan.view {
-                let t = self.plan.table.clone();
-                let old: Row = src[..n].to_vec();
-                if trigger::instead(&self.plan.triggers, &t, tt::DELETE, Some(&old), None, ctx)?
-                    .is_none()
-                {
-                    continue;
-                }
-                ctx.processed.set(ctx.processed.get() + 1);
-                if self.plan.returning.is_empty() {
-                    continue;
-                }
-                let src = with_old_new(src, self.plan.old_new, Some(&old), None);
-                return Ok(Some(eval_all(&self.plan.returning, &src, ctx)?));
+            if let Some(r) = self.delete_one(src, ctx)? {
+                return Ok(Some(r));
             }
-            let dkey = key_of(&src[n])?;
-            // (A member row its remote statement deleted already, `FdwPushdown::direct`.)
-            if crate::ext::postgres_fdw::direct::is_member_key(&dkey) {
-                if self.plan.returning.is_empty() {
-                    continue;
-                }
-                return Ok(Some(eval_all(&self.plan.returning, &src, ctx)?));
-            }
-            // The row is deleted from the table it is in: the one named, or a member.
-            let member = member_at(&self.plan.members, |m| m.table.oid, &dkey);
-            let (t, triggers, indexes, map, owner) = match member {
-                Some(m) => {
-                    let mm = &self.plan.members[m];
-                    (&mm.table, &mm.triggers, &mm.indexes, Some(&mm.map[..]), Owner::Member(m))
-                }
-                None => (
-                    &self.plan.table,
-                    &self.plan.triggers,
-                    &self.plan.indexes,
-                    None,
-                    Owner::Root,
-                ),
-            };
-            let t = t.clone();
-            if self.seen.as_mut().is_some_and(|s| !s.insert(dkey.clone())) {
-                continue;
-            }
-            let before = trigger::any(triggers, true, true, tt::DELETE, ctx);
-            // (A deferring DELETE runs nothing that writes while it runs, and reads each row
-            // once: no row it meets was written by it or by a later command.)
-            match if self.defer_entries { SelfModified::No } else { self_modified(&dkey, ctx) } {
-                SelfModified::No => {}
-                SelfModified::ByThis => continue,
-                // (Found locking the row for its BEFORE triggers: GetTupleForTrigger's.)
-                SelfModified::ByLater => {
-                    return Err(triggered_change(if before { "updated" } else { "deleted" }));
-                }
-            }
-            let mode = super::scan::lock_mode(RowMark::Update);
-            let old: Row = match super::scan::lock_row_with(&t, &dkey, mode, Wait::Block, Xltw::Delete, !self.defer_entries, ctx)? {
-                Locked::Skip => continue,
-                Locked::Same => match map {
-                    Some(map) => member_row(&t, map, &src, &dkey, ctx)?,
-                    None => src[..n].to_vec(),
-                },
-                Locked::Newer(bytes) => {
-                    let fresh = decode_table_row(&t, &bytes)?;
-                    let named = match map {
-                        Some(map) => crate::sql::plan::row_as_parent(map, &fresh),
-                        None => fresh.clone(),
-                    };
-                    if let Some(f) = &self.plan.recheck
-                        && !eval_bool(f, &named, ctx)?
-                    {
-                        continue;
+        }
+    }
+
+    /// The statement's rows in batches (`BulkDelete`), where its source hands them with their
+    /// keys: false when it can't (nothing was read).
+    fn delete_bulk(&mut self, mut bulk: BulkDelete, ctx: &ExecCtx) -> Result<bool> {
+        let mut source = std::mem::replace(&mut self.source, Box::new(super::nodes::VecNode::new(Vec::new())));
+        let r = source.each_keyed(
+            &mut |key, row| match row {
+                super::Stored::Bytes(bytes) => {
+                    bulk.push(key, bytes);
+                    if bulk.ends.len() >= BULK_DELETE_BATCH {
+                        self.delete_batch(&mut bulk, ctx)?;
                     }
-                    // (A TID scan's condition, on the new version's TID.)
-                    if let Some(tid) = super::scan::stored_tid(&bytes)
-                        && super::scan::tid_recheck(&self.plan.source, t.oid, tid, ctx)? == Some(false)
-                    {
-                        continue;
+                    Ok(())
+                }
+                // (A row decoded: those before it first, in their order.)
+                super::Stored::Row(src) => {
+                    self.delete_batch(&mut bulk, ctx)?;
+                    self.delete_one(src, ctx).map(|_| ())
+                }
+                super::Stored::Cols(..) => Err(crate::error::internal("a scan's columns for a DELETE")),
+            },
+            ctx,
+        );
+        self.source = source;
+        match r? {
+            Some(()) => {
+                self.delete_batch(&mut bulk, ctx)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Delete the batch's rows, in their order, as `delete_one` deletes each.
+    fn delete_batch(&mut self, bulk: &mut BulkDelete, ctx: &ExecCtx) -> Result<()> {
+        let r = self.delete_batch_rows(bulk, ctx);
+        bulk.clear();
+        r
+    }
+
+    fn delete_batch_rows(&mut self, bulk: &mut BulkDelete, ctx: &ExecCtx) -> Result<()> {
+        let n = bulk.ends.len();
+        if n == 0 {
+            return Ok(());
+        }
+        ctx.check()?;
+        let t = self.plan.table.clone();
+        let mode = super::scan::lock_mode(RowMark::Update);
+        ctx.txn.borrow_mut().output_cid();
+        let keys: Vec<&[u8]> = (0..n).map(|i| bulk.row(i).0).collect();
+        // Locked in their order: those nothing can conflict with in one trip, the next one
+        // alone (it may wait), and so on. A row locked: unchanged since the snapshot, or its
+        // newer version (READ COMMITTED: deleted if it still passes the recheck).
+        let mut gone: Vec<usize> = Vec::with_capacity(n);
+        let mut newer: Vec<(usize, Row)> = Vec::new();
+        let mut i = 0;
+        while i < n {
+            let fast = ctx.txn.borrow_mut().lock_rows_compact(keys[i..].iter().copied(), mode);
+            let upto = i + fast;
+            while i < n {
+                let locked = if i < upto {
+                    super::scan::after_lock(&t, keys[i], mode, false, ctx)?
+                } else if i == upto {
+                    super::scan::lock_row_with(&t, keys[i], mode, Wait::Block, Xltw::Delete, false, ctx)?
+                } else {
+                    break;
+                };
+                match locked {
+                    Locked::Skip => {}
+                    Locked::Same => gone.push(i),
+                    Locked::Newer(bytes) => {
+                        let fresh = decode_table_row(&t, &bytes)?;
+                        let keep = match &self.plan.recheck {
+                            Some(f) => eval_bool(f, &fresh, ctx)?,
+                            None => true,
+                        };
+                        if keep {
+                            newer.push((gone.len(), fresh));
+                            gone.push(i);
+                        }
                     }
-                    src.splice(0..n, named);
-                    fresh
+                }
+                i += 1;
+            }
+        }
+        if gone.is_empty() {
+            return Ok(());
+        }
+        let gone_keys: Vec<&[u8]> = gone.iter().map(|&i| keys[i]).collect();
+        // heap_delete sets their xmax: writers of their unique keys wait for us now.
+        ctx.txn.borrow_mut().rows_modified(gone_keys.iter().copied());
+        let indexes = &self.plan.indexes;
+        let mut was_gone = |j: usize| -> Result<bool> {
+            if bulk.toast_locked.get() {
+                return Ok(false);
+            }
+            let g = match newer.iter().find(|(at, _)| *at == j) {
+                Some((_, fresh)) => super::sizing::toast_gone_old(&t, fresh, ctx),
+                None => bulk.toast_gone(&t, bulk.row(gone[j]).1, ctx)?,
+            };
+            bulk.toast_locked.set(g);
+            Ok(g)
+        };
+        super::sizing::deleted_rows(&t, indexes, &gone_keys, &mut was_gone, ctx)?;
+        // (Row logging starts with the transaction's id, which its first write takes: asked
+        // once the batch's rows are locked.)
+        let logged = crate::repl::log::logs_delete(&t, ctx);
+        let mut next_newer = newer.iter().peekable();
+        for (j, &i) in gone.iter().enumerate() {
+            let (key, bytes) = bulk.row(i);
+            let fresh = match next_newer.peek() {
+                Some((at, fresh)) if *at == j => {
+                    next_newer.next();
+                    Some(fresh)
+                }
+                _ => None,
+            };
+            let decoded;
+            let old: &[Value] = match fresh {
+                Some(f) => f,
+                None => {
+                    decoded = super::scan::decode_table_row_need(&t, bytes, &bulk.need)?;
+                    &decoded
                 }
             };
-            if before && !trigger::before_delete(triggers, &t, &old, ctx)? {
-                continue;
+            // (A row as stored has nothing out of line; a newer version may.)
+            match fresh {
+                Some(f) => super::toast::delete_row(key.to_vec(), Some(f), &mut ctx.txn.borrow_mut(), true)?,
+                None => ctx.txn.borrow_mut().defer_entry_delete_with(|k| k.extend_from_slice(key))?,
             }
-            // (Only a BEFORE trigger, run since the check above, can have changed it.)
-            match if before { self_modified(&dkey, ctx) } else { SelfModified::No } {
-                SelfModified::No => {}
-                SelfModified::ByThis => continue,
-                SelfModified::ByLater => return Err(triggered_change("deleted")),
+            if logged {
+                match fresh {
+                    Some(f) => crate::repl::log::delete(&t, f, ctx)?,
+                    None => crate::repl::log::delete(&t, &decode_table_row(&t, bytes)?, ctx)?,
+                }
             }
+            delete_index_entries(&t, indexes, old, key, true, ctx)?;
+        }
+        match self.uncounted.iter_mut().find(|u| u.0 == t.oid) {
+            Some(u) => u.1 += gone.len() as i64,
+            None => self.uncounted.push((t.oid, gone.len() as i64)),
+        }
+        ctx.processed.set(ctx.processed.get() + gone.len() as u64);
+        BULK_DELETE_ROWS.fetch_add(gone.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// The source's rows are done: the statement's deferred deletes go in, then its AFTER
+    /// triggers fire.
+    fn finish(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+        self.done = true;
+        crate::ext::postgres_fdw::modify::flush_pending(ctx)?;
+        crate::ext::postgres_fdw::modify::forget_member_rows();
+        if self.defer_entries {
+            ctx.txn.borrow_mut().flush_entry_deletes()?;
+            // (Before the AFTER triggers, which may read them.)
+            self.count_deleted(ctx);
+        }
+        if self.plan.inh {
+            trigger::batch(ctx, || self.finish_tree(ctx))?;
+        } else if !self.deferred {
+            trigger::batch(ctx, || {
+                self.end(ctx, false)?;
+                self.end(ctx, true)
+            })?;
+        }
+        Ok(None)
+    }
+
+    /// Delete the source's row `src` (its columns, then its key): what RETURNING makes of
+    /// it, if anything.
+    fn delete_one(&mut self, mut src: Row, ctx: &ExecCtx) -> Result<Option<Row>> {
+        let n = self.plan.table.columns.len();
+        if self.plan.view {
+            let t = self.plan.table.clone();
+            let old: Row = src[..n].to_vec();
+            if trigger::instead(&self.plan.triggers, &t, tt::DELETE, Some(&old), None, ctx)?
+                .is_none()
             {
-                // (A postgres_fdw table's statement returns what RETURNING and AFTER ROW
-                // triggers read.)
-                let back = t.foreign.is_some().then(|| {
-                    let exprs: Vec<&Expr> = self.plan.returning.iter().collect();
-                    let n = self.plan.table.columns.len();
-                    crate::ext::postgres_fdw::modify::Back::of(&t, &crate::ext::postgres_fdw::modify::tgtypes(triggers), tt::DELETE, &exprs, self.plan.sys.then_some(n + 1))
-                        .with_old_new(&t, self.plan.old_new.as_ref(), &exprs)
-                });
-                match back {
-                    Some(back) if crate::ext::postgres_fdw::scan::is_postgres_fdw(&ctx.catalog(), &t) => {
-                        foreign_delete_returning(&t, &dkey, back, map, &mut src, ctx)?
-                    }
-                    back => {
-                        let _back = back.and_then(crate::ext::postgres_fdw::modify::with_back);
-                        delete_row_with(&t, indexes, &dkey, &old, self.defer_entries, ctx)?;
-                        if self.defer_entries {
-                            match self.uncounted.iter_mut().find(|u| u.0 == t.oid) {
-                                Some(u) => u.1 += 1,
-                                None => self.uncounted.push((t.oid, 1)),
-                            }
+                return Ok(None);
+            }
+            ctx.processed.set(ctx.processed.get() + 1);
+            if self.plan.returning.is_empty() {
+                return Ok(None);
+            }
+            let src = with_old_new(src, self.plan.old_new, Some(&old), None);
+            return Ok(Some(eval_all(&self.plan.returning, &src, ctx)?));
+        }
+        let dkey = key_of(&src[n])?;
+        // (A member row its remote statement deleted already, `FdwPushdown::direct`.)
+        if crate::ext::postgres_fdw::direct::is_member_key(&dkey) {
+            if self.plan.returning.is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(eval_all(&self.plan.returning, &src, ctx)?));
+        }
+        // The row is deleted from the table it is in: the one named, or a member.
+        let member = member_at(&self.plan.members, |m| m.table.oid, &dkey);
+        let (t, triggers, indexes, map, owner) = match member {
+            Some(m) => {
+                let mm = &self.plan.members[m];
+                (&mm.table, &mm.triggers, &mm.indexes, Some(&mm.map[..]), Owner::Member(m))
+            }
+            None => (
+                &self.plan.table,
+                &self.plan.triggers,
+                &self.plan.indexes,
+                None,
+                Owner::Root,
+            ),
+        };
+        let t = t.clone();
+        if self.seen.as_mut().is_some_and(|s| !s.insert(dkey.clone())) {
+            return Ok(None);
+        }
+        let before = trigger::any(triggers, true, true, tt::DELETE, ctx);
+        // (A deferring DELETE runs nothing that writes while it runs, and reads each row
+        // once: no row it meets was written by it or by a later command.)
+        match if self.defer_entries { SelfModified::No } else { self_modified(&dkey, ctx) } {
+            SelfModified::No => {}
+            SelfModified::ByThis => return Ok(None),
+            // (Found locking the row for its BEFORE triggers: GetTupleForTrigger's.)
+            SelfModified::ByLater => {
+                return Err(triggered_change(if before { "updated" } else { "deleted" }));
+            }
+        }
+        let mode = super::scan::lock_mode(RowMark::Update);
+        let old: Row = match super::scan::lock_row_with(&t, &dkey, mode, Wait::Block, Xltw::Delete, !self.defer_entries, ctx)? {
+            Locked::Skip => return Ok(None),
+            Locked::Same => match map {
+                Some(map) => member_row(&t, map, &src, &dkey, ctx)?,
+                None => src[..n].to_vec(),
+            },
+            Locked::Newer(bytes) => {
+                let fresh = decode_table_row(&t, &bytes)?;
+                let named = match map {
+                    Some(map) => crate::sql::plan::row_as_parent(map, &fresh),
+                    None => fresh.clone(),
+                };
+                if let Some(f) = &self.plan.recheck
+                    && !eval_bool(f, &named, ctx)?
+                {
+                    return Ok(None);
+                }
+                // (A TID scan's condition, on the new version's TID.)
+                if let Some(tid) = super::scan::stored_tid(&bytes)
+                    && super::scan::tid_recheck(&self.plan.source, t.oid, tid, ctx)? == Some(false)
+                {
+                    return Ok(None);
+                }
+                src.splice(0..n, named);
+                fresh
+            }
+        };
+        if before && !trigger::before_delete(triggers, &t, &old, ctx)? {
+            return Ok(None);
+        }
+        // (Only a BEFORE trigger, run since the check above, can have changed it.)
+        match if before { self_modified(&dkey, ctx) } else { SelfModified::No } {
+            SelfModified::No => {}
+            SelfModified::ByThis => return Ok(None),
+            SelfModified::ByLater => return Err(triggered_change("deleted")),
+        }
+        {
+            // (A postgres_fdw table's statement returns what RETURNING and AFTER ROW
+            // triggers read.)
+            let back = t.foreign.is_some().then(|| {
+                let exprs: Vec<&Expr> = self.plan.returning.iter().collect();
+                let n = self.plan.table.columns.len();
+                crate::ext::postgres_fdw::modify::Back::of(&t, &crate::ext::postgres_fdw::modify::tgtypes(triggers), tt::DELETE, &exprs, self.plan.sys.then_some(n + 1))
+                    .with_old_new(&t, self.plan.old_new.as_ref(), &exprs)
+            });
+            match back {
+                Some(back) if crate::ext::postgres_fdw::scan::is_postgres_fdw(&ctx.catalog(), &t) => {
+                    foreign_delete_returning(&t, &dkey, back, map, &mut src, ctx)?
+                }
+                back => {
+                    let _back = back.and_then(crate::ext::postgres_fdw::modify::with_back);
+                    delete_row_with(&t, indexes, &dkey, &old, self.defer_entries, ctx)?;
+                    if self.defer_entries {
+                        match self.uncounted.iter_mut().find(|u| u.0 == t.oid) {
+                            Some(u) => u.1 += 1,
+                            None => self.uncounted.push((t.oid, 1)),
                         }
                     }
                 }
             }
-            if self.plan.inh {
-                if trigger::any(triggers, true, false, tt::DELETE, ctx) {
-                    self.ordered.push((
-                        owner,
-                        AfterRow {
-                            event: tt::DELETE,
-                            old: Some(old.clone()),
-                            ..Default::default()
-                        },
-                    ));
-                }
-                if self.trans {
-                    self.captured.push(AfterRow {
-                        event: tt::DELETE,
-                        old: Some(match map {
-                            Some(map) => crate::sql::plan::row_as_parent(map, &old),
-                            None => old.clone(),
-                        }),
-                        ..Default::default()
-                    });
-                }
-            } else {
-                if trigger::wants_after(triggers, tt::DELETE, ctx) {
-                    self.after.push(AfterRow {
-                        event: tt::DELETE,
-                        old: Some(old.clone()),
-                        ..Default::default()
-                    });
-                }
-                if self.capture {
-                    self.after.push(AfterRow {
-                        event: tt::DELETE | trigger::CAPTURE,
-                        old: Some(old.clone()),
-                        ..Default::default()
-                    });
-                }
-            }
-            ctx.processed.set(ctx.processed.get() + 1);
-            if self.plan.returning.is_empty() {
-                continue;
-            }
-            // The deleted version's xmax is this transaction.
-            if self.plan.sys && src.len() > n + 4 {
-                let xid = ctx.txn.borrow_mut().cur_xid();
-                src[n + 4] = Value::Oid(xid as u32);
-            }
-            let old = image(
-                &src,
-                n,
-                self.plan.old_new.is_some_and(|o| o.sys).then_some(n + 1),
-            );
-            let src = with_old_new(src, self.plan.old_new, Some(&old), None);
-            return Ok(Some(eval_all(&self.plan.returning, &src, ctx)?));
         }
+        if self.plan.inh {
+            if trigger::any(triggers, true, false, tt::DELETE, ctx) {
+                self.ordered.push((
+                    owner,
+                    AfterRow {
+                        event: tt::DELETE,
+                        old: Some(old.clone()),
+                        ..Default::default()
+                    },
+                ));
+            }
+            if self.trans {
+                self.captured.push(AfterRow {
+                    event: tt::DELETE,
+                    old: Some(match map {
+                        Some(map) => crate::sql::plan::row_as_parent(map, &old),
+                        None => old.clone(),
+                    }),
+                    ..Default::default()
+                });
+            }
+        } else {
+            if trigger::wants_after(triggers, tt::DELETE, ctx) {
+                self.after.push(AfterRow {
+                    event: tt::DELETE,
+                    old: Some(old.clone()),
+                    ..Default::default()
+                });
+            }
+            if self.capture {
+                self.after.push(AfterRow {
+                    event: tt::DELETE | trigger::CAPTURE,
+                    old: Some(old.clone()),
+                    ..Default::default()
+                });
+            }
+        }
+        ctx.processed.set(ctx.processed.get() + 1);
+        if self.plan.returning.is_empty() {
+            return Ok(None);
+        }
+        // The deleted version's xmax is this transaction.
+        if self.plan.sys && src.len() > n + 4 {
+            let xid = ctx.txn.borrow_mut().cur_xid();
+            src[n + 4] = Value::Oid(xid as u32);
+        }
+        let old = image(
+            &src,
+            n,
+            self.plan.old_new.is_some_and(|o| o.sys).then_some(n + 1),
+        );
+        let src = with_old_new(src, self.plan.old_new, Some(&old), None);
+        Ok(Some(eval_all(&self.plan.returning, &src, ctx)?))
     }
 }
 

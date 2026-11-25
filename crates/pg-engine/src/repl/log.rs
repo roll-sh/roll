@@ -671,6 +671,11 @@ pub fn logs_inserts(t: &Table, ctx: &ExecCtx) -> bool {
     capturing(ctx) && logged(t)
 }
 
+/// Whether `delete` logs a row of `t` now.
+pub fn logs_delete(t: &Table, ctx: &ExecCtx) -> bool {
+    capturing(ctx) && logged(t)
+}
+
 fn capturing(ctx: &ExecCtx) -> bool {
     ctx.txn.borrow().log.is_some()
 }

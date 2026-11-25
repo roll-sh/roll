@@ -612,6 +612,8 @@ impl Database {
             log: None,
             copy_batch: None,
             entry_deletes: Vec::new(),
+            entry_deletes_keys: Vec::new(),
+            entry_deletes_owned: Vec::new(),
             entry_deletes_bytes: 0,
             entry_deletes_direct: None,
             rdels: Vec::new(),
@@ -1253,8 +1255,12 @@ pub struct TxnState {
     /// set before the transaction has an id, so not in `log`).
     pub(crate) copy_batch: Option<(u32, u32)>,
     /// Index entries the running statement deleted, going in together at its end
-    /// (`defer_entry_delete`), with about how many bytes they hold.
-    entry_deletes: Vec<Vec<u8>>,
+    /// (`defer_entry_delete`): where each ends in `entry_deletes_keys`, which holds them
+    /// one after the other, and those handed over as they were made; about how many bytes
+    /// they hold.
+    entry_deletes: Vec<(u32, u32)>,
+    entry_deletes_keys: Vec<u8>,
+    entry_deletes_owned: Vec<Vec<u8>>,
     entry_deletes_bytes: usize,
     /// How the statement's earlier batch of them went in (true: as a run).
     entry_deletes_direct: Option<bool>,
@@ -2987,7 +2993,29 @@ impl TxnState {
             return self.delete(key);
         }
         self.entry_deletes_bytes += key.len() + 32;
-        self.entry_deletes.push(key);
+        self.entry_deletes_owned.push(key);
+        self.entry_deletes_due()
+    }
+
+    /// `defer_entry_delete` of the key `put` appends to the buffer it is given (the
+    /// statement's keys' own: no allocation a key).
+    pub fn defer_entry_delete_with(&mut self, put: impl FnOnce(&mut Vec<u8>)) -> Result<()> {
+        if self.read_only || !self.savepoints.is_empty() {
+            let mut key = Vec::new();
+            put(&mut key);
+            return self.delete(key);
+        }
+        let start = self.entry_deletes_keys.len();
+        put(&mut self.entry_deletes_keys);
+        let end = self.entry_deletes_keys.len();
+        self.entry_deletes_bytes += end - start + 32;
+        self.entry_deletes.push((start as u32, end as u32));
+        self.entry_deletes_due()
+    }
+
+    /// The deferred deletes go in as a run once they hold half the write buffer's bytes (at
+    /// most 32 MB).
+    fn entry_deletes_due(&mut self) -> Result<()> {
         let run_bytes = (self.db.store.txn_spill_bytes() / 2).min(32 << 20);
         if self.entry_deletes_bytes >= run_bytes {
             self.put_entry_deletes()?;
@@ -3004,20 +3032,41 @@ impl TxnState {
     }
 
     fn put_entry_deletes(&mut self) -> Result<()> {
-        let mut keys = std::mem::take(&mut self.entry_deletes);
+        // (Every statement's start asks: mostly none.)
+        if self.entry_deletes.is_empty() && self.entry_deletes_owned.is_empty() {
+            self.entry_deletes_bytes = 0;
+            return Ok(());
+        }
+        let keys = std::mem::take(&mut self.entry_deletes);
+        let buf = std::mem::take(&mut self.entry_deletes_keys);
+        let mut owned = std::mem::take(&mut self.entry_deletes_owned);
+        let r = self.put_entry_deletes_of(&mut owned, &keys, &buf);
+        // (Their room kept for the statement's next ones.)
+        (self.entry_deletes, self.entry_deletes_keys, self.entry_deletes_owned) = (keys, buf, owned);
+        self.entry_deletes.clear();
+        self.entry_deletes_keys.clear();
+        self.entry_deletes_owned.clear();
+        r
+    }
+
+    fn put_entry_deletes_of(&mut self, owned: &mut Vec<Vec<u8>>, keys: &[(u32, u32)], buf: &[u8]) -> Result<()> {
         let bytes = std::mem::take(&mut self.entry_deletes_bytes);
-        if keys.is_empty() {
+        if keys.is_empty() && owned.is_empty() {
             return Ok(());
         }
         // (A few go into the buffer: below a megabyte, or a 64th of the buffer's size, a run
         // isn't worth a file, as the sink's aren't.)
         if bytes < (self.db.store.txn_spill_bytes() / 64).min(1 << 20) && self.entry_deletes_direct.is_none() {
-            for k in keys {
+            for k in owned.drain(..) {
                 self.delete(k)?;
+            }
+            for k in keys.iter() {
+                self.delete(buf[k.0 as usize..k.1 as usize].to_vec())?;
             }
             return Ok(());
         }
-        sort_by_key_after(&mut keys, 0, |k| k.as_slice());
+        let mut keys: Vec<&[u8]> = owned.iter().map(Vec::as_slice).chain(keys.iter().map(|r| &buf[r.0 as usize..r.1 as usize])).collect();
+        sort_by_key_after(&mut keys, 0, |k| k);
         let direct = match self.entry_deletes_direct {
             Some(d) => d,
             // (Each index's entries start with its table's and its own id: 8 bytes.)
@@ -3036,7 +3085,7 @@ impl TxnState {
         self.entry_deletes_direct = Some(direct);
         if !direct {
             for k in keys {
-                self.delete(k)?;
+                self.delete(k.to_vec())?;
             }
             return Ok(());
         }
@@ -4052,6 +4101,30 @@ impl TxnState {
         let holder = self.holder();
         self.table_used = true;
         self.db.locks.mark_row_modified(key, self.id, holder);
+    }
+
+    /// `row_modified` of each of `keys`, in one trip to the lock manager.
+    pub fn rows_modified<'k>(&mut self, keys: impl IntoIterator<Item = &'k [u8]>) {
+        let holder = self.holder();
+        self.table_used = true;
+        self.db.locks.mark_rows_modified(keys, self.id, holder);
+    }
+
+    /// `lock_row` of a bulk statement's next rows `keys` of a table, in their order, in one
+    /// trip to the lock manager where nothing can conflict: past the transaction's first row
+    /// locks, those its compact set takes at once (`LockManager::lock_rows_compact`). Returns
+    /// how many it locked: the row after them is for `lock_row`, which may wait.
+    pub fn lock_rows_compact<'k>(&mut self, keys: impl IntoIterator<Item = &'k [u8]>, mode: RowLockMode) -> usize {
+        if self.row_locks.len() < bulklocks::compact_after() {
+            return 0;
+        }
+        let holder = self.holder();
+        self.table_used = true;
+        let n = self.db.locks.lock_rows_compact(keys, holder, self.id, self.lock_proc(), mode);
+        if n > 0 && !self.xact_locks.contains(&holder) {
+            self.xact_locks.push(holder);
+        }
+        n
     }
 
     /// The (sub)transaction (lock id) of another backend updating or deleting row `key`.

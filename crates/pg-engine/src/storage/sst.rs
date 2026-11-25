@@ -510,7 +510,7 @@ fn bloom_set(bloom: &mut [u8], nbits: FastMod, h: u64) {
 /// Whether a user key is a secondary index's entry (a relation's prefix whose index id isn't
 /// 0, `keys::index_prefix`): read by scans of its index's ranges, never looked up alone by
 /// a reader that a bloom filter would spare a block.
-fn index_entry(uk: &[u8]) -> bool {
+pub(crate) fn index_entry(uk: &[u8]) -> bool {
     uk.len() >= 8 && uk[..4] != [0; 4] && uk[4..8] != [0; 4]
 }
 

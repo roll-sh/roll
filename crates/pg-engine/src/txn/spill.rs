@@ -215,19 +215,41 @@ impl Runs {
 
     /// `write_fresh` of deletions: `keys` in order, each once, all of command `cid` at
     /// journal place `ts` (a statement's deferred index entry and row deletes, `Txn::
-    /// put_entry_deletes`): a linkable run of tombstones (format 2, not compressed: a
+    /// put_entry_deletes`): linkable runs of tombstones (format 2, not compressed: a
     /// compaction drops them soon), read here as deletions of `cid` (`SstReader::retagged`).
-    pub fn write_deletes(&mut self, keys: &mut dyn Iterator<Item = Vec<u8>>, cid: u32, ts: u64) -> Result<()> {
+    /// A run a table's or index's keys (their first 8 bytes), as a load's sink writes them:
+    /// one of an index's entries has no bloom filter (index reads are prefix scans; its
+    /// entries aren't hashed for one), the others keep theirs for point reads.
+    pub fn write_deletes(&mut self, keys: &mut dyn Iterator<Item = &[u8]>, cid: u32, ts: u64) -> Result<()> {
         crate::storage::durable::create_dir_all(&self.dir)?;
+        let mut keys = keys.peekable();
+        while keys.peek().is_some() {
+            self.write_delete_run(&mut keys, cid, ts)?;
+        }
+        Ok(())
+    }
+
+    /// `write_deletes`' run of the next keys' table or index.
+    fn write_delete_run(&mut self, keys: &mut std::iter::Peekable<&mut dyn Iterator<Item = &[u8]>>, cid: u32, ts: u64) -> Result<()> {
         let id = self.next_id;
         self.next_id += 1;
         let mut w = SstWriter::create_run(&self.dir, id, false)?;
-        let mut segs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
         // (Each key with its version made in one buffer: no allocation per key. A key of 16 to
         // 32 bytes, a row's or an index entry's, by fixed copies: not a call to memcpy each.)
         let (mut key, version) = (Vec::new(), (!ts).to_be_bytes());
         let mut short = [0u8; 40];
-        for k in keys {
+        let Some(first) = keys.next() else { return Ok(()) };
+        let mut prefix = [0u8; 8];
+        let whole = first.len() >= 8;
+        if whole {
+            prefix.copy_from_slice(&first[..8]);
+        }
+        if whole && crate::storage::sst::index_entry(first) {
+            w.index_run();
+        }
+        let mut last = first;
+        let mut next = Some(first);
+        while let Some(k) = next.take() {
             let n = k.len();
             let key: &[u8] = if (16..=32).contains(&n) {
                 short[..16].copy_from_slice(&k[..16]);
@@ -236,7 +258,7 @@ impl Runs {
                 &short[..n + 8]
             } else {
                 key.clear();
-                key.extend_from_slice(&k);
+                key.extend_from_slice(k);
                 key.extend_from_slice(&version);
                 &key
             };
@@ -244,11 +266,10 @@ impl Runs {
                 w.abandon();
                 return Err(err);
             }
-            // (The table's and index's ids: 8 bytes.)
-            match segs.last_mut() {
-                Some(g) if g.0.get(..8) == k.get(..8) => g.1 = k,
-                _ => segs.push((k.clone(), k)),
-            }
+            last = k;
+            // (The run ends with its table's or index's keys: the next has other first 8 bytes.
+            // Keys under 8 bytes go with the others, in one run.)
+            next = keys.next_if(|k| !whole || (k.len() >= 8 && k[..8] == prefix));
         }
         if w.entries() == 0 {
             w.abandon();
@@ -257,7 +278,8 @@ impl Runs {
         let meta = w.finish()?;
         let r = SstReader::open(&self.dir, meta, self.cache.clone())?.retagged(cid);
         r.mark_obsolete();
-        self.segs.insert(r.meta.id, segs);
+        let first = r.meta.first_key[..r.meta.first_key.len() - 8].to_vec();
+        self.segs.insert(r.meta.id, vec![(first, last.to_vec())]);
         self.add_file(Arc::new(r), true)
     }
 

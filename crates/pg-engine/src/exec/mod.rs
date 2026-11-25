@@ -132,6 +132,16 @@ pub trait Node {
         Ok(None)
     }
 
+    /// The rows `next` would return, in its order, each handed to `f` with its data key: as
+    /// stored (`Stored::Bytes`) where `next` would only have counted and decoded it (its
+    /// filter decided over the stored values, nothing out of line), else decoded as `next`
+    /// makes it (`Stored::Row`, the key after the columns). A plain sequential scan with its
+    /// key, under a DELETE (`DeleteNode`'s batches). None: this node can't, and nothing was
+    /// read.
+    fn each_keyed(&mut self, _f: &mut dyn FnMut(&[u8], Stored<'_>) -> Result<()>, _ctx: &ExecCtx) -> Result<Option<()>> {
+        Ok(None)
+    }
+
     /// The rows `next` would return, in its order, handed to `f` as the stored values of the
     /// columns they are (`Stored::Cols`) by a node that can (a plain index scan, and the
     /// projections over one that keep its columns as they are: what a query's rows go to the

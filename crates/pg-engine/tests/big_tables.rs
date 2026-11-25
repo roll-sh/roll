@@ -1145,3 +1145,85 @@ fn copy_into_fresh_unique_index_waits_for_writers() {
         run(&mut s, "TRUNCATE fu");
     }
 }
+
+/// A DELETE nothing reads the rows of goes in batches (`dml::BulkDelete`): its rows locked a
+/// batch at a time where nothing can conflict, one another transaction holds waited for in
+/// its place, one another transaction changed meanwhile rechecked (READ COMMITTED), one it
+/// deleted skipped. A snapshot from before reads every row; the counts, dead tuples, sizes,
+/// TIDs of the rows inserted after and index-only reads are a DELETE's one row at a time
+/// (an AFTER ROW trigger's, its index entries deferred as well), modelled and past the model.
+#[test]
+fn bulk_delete_batches() {
+    let dir = tempfile::tempdir().unwrap();
+    let eng = with_txn_spill_bytes(1 << 20, || open(dir.path()));
+    let batched = || pg_engine::exec::dml::BULK_DELETE_ROWS.load(Ordering::Relaxed);
+    for max in [500, 400_000] {
+        with_max_versions(max, || {
+            let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+            for t in ["bd_a", "bd_b"] {
+                run(&mut s, &format!("CREATE TABLE {t} (id int PRIMARY KEY, a int NOT NULL, b text) WITH (autovacuum_enabled = off);
+                     CREATE INDEX {t}_a ON {t} (a) WHERE a > 1;
+                     INSERT INTO {t} SELECT g, g % 7, 'v' || g FROM generate_series(1, 6000) g;
+                     UPDATE {t} SET b = b || 'u' WHERE id % 2 = 0;
+                     SELECT pg_stat_force_next_flush();
+                     VACUUM ANALYZE {t}"));
+            }
+            run(&mut s, "CREATE FUNCTION bd_noop() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RETURN NULL; END$$;
+                 CREATE TRIGGER bd_b_after AFTER DELETE ON bd_b FOR EACH ROW EXECUTE FUNCTION bd_noop()");
+            // Another transaction holds row 4006 (a = 2), past the first 2,048 rows the DELETE
+            // locks one at a time; changes row 4503 (a = 2) to a = 1 (out of the DELETE's
+            // condition) and deletes row 4510, both after it.
+            let mut w = eng.connect(2, "postgres", "postgres", "t").unwrap();
+            let mut old = eng.connect(3, "postgres", "postgres", "t").unwrap();
+            run(&mut old, "BEGIN ISOLATION LEVEL REPEATABLE READ");
+            let before = rows(&mut old, "SELECT count(*), sum(id), sum(a) FROM bd_a");
+            for t in ["bd_a", "bd_b"] {
+                run(&mut w, &format!("BEGIN;\nUPDATE {t} SET b = 'w' WHERE id = 4006;\nUPDATE {t} SET a = 1 WHERE id = 4503;\nDELETE FROM {t} WHERE id = 4510"));
+                let (e2, n) = (eng.clone(), batched());
+                let sql = format!("DELETE FROM {t} WHERE a >= 2");
+                let del = std::thread::spawn(move || {
+                    with_max_versions(max, || {
+                        let mut c = e2.connect(4, "postgres", "postgres", "t").unwrap();
+                        let r = c.query(&sql).map_err(|e| format!("{e:?}"))?;
+                        Ok::<_, String>(format!("{:?}", r.last().map(|r| &r.tag)))
+                    })
+                });
+                for _ in 0..400 {
+                    if rows(&mut s, "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock'") == ["[Int8(1)]"] {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                run(&mut w, "SELECT pg_stat_force_next_flush();\nCOMMIT");
+                // (4,285 rows of a >= 2, less 4503 and 4510.)
+                let tag = del.join().unwrap().unwrap();
+                assert!(tag.contains("DELETE 4283"), "{t}: {tag}");
+                // (Other tests' DELETEs count too: only bd_a's rows are known to be among them.)
+                if t == "bd_a" {
+                    assert!(batched() >= n + 4283, "{t}");
+                }
+                assert_eq!(rows(&mut s, &format!("SELECT count(*) FROM {t} WHERE id IN (4006, 4503, 4510)")), ["[Int8(1)]"]);
+            }
+            assert_eq!(rows(&mut old, "SELECT count(*), sum(id), sum(a) FROM bd_a"), before);
+            run(&mut old, "COMMIT");
+            let same = |s: &mut Session, q: &str| {
+                let a = rows(s, &q.replace("TBL", "bd_a"));
+                assert_eq!(a, rows(s, &q.replace("TBL", "bd_b")), "{max}: {q}");
+            };
+            same(&mut s, "SELECT n_tup_del, n_dead_tup, n_live_tup FROM pg_stat_user_tables WHERE relname = 'TBL'");
+            run(&mut s, "VACUUM bd_a;\nVACUUM bd_b;\nINSERT INTO bd_a SELECT g, g % 7, 'n' FROM generate_series(10001, 10500) g;\nINSERT INTO bd_b SELECT g, g % 7, 'n' FROM generate_series(10001, 10500) g");
+            // (Past the model a row's TID is its table's estimate's, by its key: compared where
+            // the model places them.)
+            if max > 500 {
+                same(&mut s, "SELECT md5(string_agg(ctid::text, ',' ORDER BY id)), count(*), sum(a) FROM TBL");
+            }
+            same(&mut s, "SELECT count(*), sum(id), sum(a), sum(length(b)) FROM TBL");
+            same(&mut s, "SELECT pg_relation_size('TBL'), pg_relation_size('TBL_a'), pg_relation_size('TBL_pkey'), relpages, reltuples FROM pg_class WHERE relname = 'TBL'");
+            // (Index-only scans read the entries past the model.)
+            if max == 500 {
+                same_both_ways(&mut s, &["SELECT count(*), sum(a) FROM bd_a WHERE a > 1", "SELECT count(*), sum(id) FROM bd_a WHERE id > 0"]);
+            }
+            run(&mut s, "DROP TABLE bd_a;\nDROP TABLE bd_b;\nDROP FUNCTION bd_noop()");
+        });
+    }
+}

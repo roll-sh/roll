@@ -1621,6 +1621,69 @@ impl LockManager {
         }
     }
 
+    /// `lock_row` of a bulk statement's next rows, in their order, under one hold of the
+    /// table: each row that `lock_row`'s compact path would take at once (no hold in the main
+    /// table, compact sets of this transaction alone, its one segment `holder`'s with its
+    /// transaction id) goes into that segment in `mode`, or is held at least that strongly
+    /// there already. Stops at the first row that can't go that way (for `lock_row`, which
+    /// may wait for it) and returns how many it took.
+    pub fn lock_rows_compact<'k>(
+        &self,
+        rows: impl IntoIterator<Item = &'k [u8]>,
+        holder: u64,
+        owner: u64,
+        proc: u64,
+        mode: RowLockMode,
+    ) -> usize {
+        let mut s = self.state.lock();
+        if s.bulk.keys().any(|&o| o != owner) {
+            return 0;
+        }
+        if let Some(pid) = pid_of(proc)
+            && s.pids.get(&proc) != Some(&pid)
+        {
+            s.pids.insert(proc, pid);
+        }
+        let State { rows: main, bulk, .. } = &mut *s;
+        let Some(b) = bulk.get_mut(&owner) else { return 0 };
+        let [g] = &mut b.segs[..] else { return 0 };
+        if g.holder != holder || g.xid == 0 {
+            return 0;
+        }
+        let (mut n, mut new) = (0, 0u64);
+        for row in rows {
+            // (`get`, not `contains_key`: the one `lock_row` calls stays inline there.)
+            if main.get(row).is_some() {
+                break;
+            }
+            let mut prior = None;
+            if !g.rows.upsert(row, |t| {
+                prior = t;
+                t.unwrap_or(row_tag(mode, false))
+            }) {
+                break;
+            }
+            match prior.map(|t| untag(t).0) {
+                None => new += 1,
+                Some(m) if m >= mode => {}
+                // (A weaker hold of ours: promoted by `lock_row`.)
+                Some(_) => break,
+            }
+            n += 1;
+        }
+        COMPACT_HOLDS.fetch_add(new, Ordering::Relaxed);
+        n
+    }
+
+    /// `mark_row_modified` of rows `rows`, each held by `holder` of transaction `owner`, under
+    /// one hold of the table.
+    pub fn mark_rows_modified<'k>(&self, rows: impl IntoIterator<Item = &'k [u8]>, owner: u64, holder: u64) {
+        let mut s = self.state.lock();
+        for row in rows {
+            Self::mark_modified(&mut s, row, owner, holder);
+        }
+    }
+
     /// GetLockConflicts: the transactions (owners) of other backends than `proc` holding
     /// heavyweight lock `key` in a mode conflicting with `mode`.
     pub fn conflicting_owners(&self, key: &[u8], mode: LockMode, proc: u64) -> Vec<u64> {
@@ -1738,8 +1801,12 @@ impl LockManager {
     /// tuple's xmax is no longer lock-only): other writers' checks of its unique keys wait
     /// for it to end. (Its hold of `holder`'s, else any of the transaction's.)
     pub fn mark_row_modified(&self, row: &[u8], owner: u64, holder: u64) {
-        let mut s = self.state.lock();
-        let State { rows, bulk, .. } = &mut *s;
+        Self::mark_modified(&mut self.state.lock(), row, owner, holder);
+    }
+
+    #[inline(always)]
+    fn mark_modified(s: &mut State, row: &[u8], owner: u64, holder: u64) {
+        let State { rows, bulk, .. } = s;
         let modified = |t: u8| row_tag(untag(t).0, true);
         let mut main = rows.get_mut(row);
         // The hold of `holder`'s: in the main table, else in its compact set.

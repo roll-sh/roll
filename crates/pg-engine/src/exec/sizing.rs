@@ -3630,6 +3630,86 @@ pub fn deleted(t: &Table, indexes: &[BoundIndex], key: &[u8], old: &[Value], ctx
     Ok(())
 }
 
+/// `deleted` of a bulk DELETE's rows `keys` (each locked), in their order, with the model's
+/// lock taken once: the table's model checked once, its rows' tuples deleted under one write
+/// lock (their kept xmax records after it). Past the model, `gone(i)` says whether row `i`'s
+/// values went out of line in its tuple (`toast_gone`), asked of each row until one has, as
+/// the TOAST relation is locked then.
+pub fn deleted_rows(
+    t: &Table,
+    indexes: &[BoundIndex],
+    keys: &[&[u8]],
+    gone: &mut dyn FnMut(usize) -> Result<bool>,
+    ctx: &ExecCtx,
+) -> Result<()> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+    if !ensure(t, indexes, ctx)? {
+        if t.toast != 0 {
+            for i in 0..keys.len() {
+                if gone(i)? {
+                    lock_toast(t, ctx)?;
+                    break;
+                }
+            }
+        }
+        for key in keys {
+            estlocks::replaced(t, key, None, ctx)?;
+        }
+        return Ok(());
+    }
+    let db = &ctx.sess.db;
+    // toast_delete: a row with out-of-line values opens the TOAST relation.
+    let external = t.toast != 0
+        && (db.relfiles.of(t.oid).read().toast.get(&t.oid))
+            .is_some_and(|tt| keys.iter().any(|k| tt.rows.get(*k).is_some_and(|e| !e.is_empty())));
+    if external {
+        lock_toast(t, ctx)?;
+    }
+    let xid = ctx.txn.borrow_mut().cur_xid();
+    let xids = db.xids();
+    let v = vis_of(xids, t, ctx);
+    let mut kept: Vec<(usize, Tid, u64)> = Vec::new();
+    {
+        let mut rf = db.relfiles.of(t.oid).write();
+        let RelFiles { heaps, toast, .. } = &mut *rf;
+        for (i, key) in keys.iter().enumerate() {
+            if let Some(heap) = heaps.get_mut(&t.oid) {
+                let mut had = None;
+                let mut replace = |at: Tid, o: &heapsim::Tup| {
+                    if o.xmax != 0 {
+                        had = Some((at, o.xmin));
+                    }
+                    replaced(o, xid, RowLockMode::Update, &v, ctx)
+                };
+                heap.delete_cid(key, xid, &v, &mut replace);
+                if let Some((at, xmin)) = had {
+                    kept.push((i, at, xmin));
+                }
+            }
+            if let Some(exts) = toast.get(&t.oid).and_then(|tt| tt.rows.get(*key)) {
+                delete_toast(heaps, t.toast, exts, xid, &v);
+            }
+        }
+    }
+    // (Their kept xmax records go, and those kept while the table was too big to model.)
+    let mut txn = ctx.txn.borrow_mut();
+    for (i, at, xmin) in kept {
+        txn.put_state(crate::txn::multixact::xmax_key(t.oid, keys[i], at), None)?;
+        txn.put_state(crate::txn::multixact::est_xmax_key(t.oid, keys[i], xmin), None)?;
+    }
+    Ok(())
+}
+
+/// Whether a deleted row's values `old` went out of line in its tuple (heap_toast_delete
+/// has values to delete: `deleted` locks the TOAST relation).
+pub fn toast_gone_old(t: &Table, old: &[Value], ctx: &ExecCtx) -> bool {
+    // (`toast_gone` without a new row; not a call of it, which UPDATE's and COPY's sizing
+    // take inline.)
+    old.iter().any(may_toast) && !layout(t, old, ctx, &HashSet::new()).1.is_empty()
+}
+
 /// Where the heap model has row `key`'s latest version, one another transaction is writing
 /// included (a wait for that transaction names it). None when the table isn't modelled.
 pub fn modelled_tid(table: u32, key: &[u8], ctx: &ExecCtx) -> Option<Tid> {
