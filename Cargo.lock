@@ -7408,6 +7408,7 @@ dependencies = [
  "pg-storage",
  "regex",
  "reqwest",
+ "ring",
  "roll-access",
  "roll-auth",
  "roll-cluster",
