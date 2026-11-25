@@ -21740,9 +21740,15 @@ both orders, b0 against n6): **the 22 91.62 -> 83.25 G (-9.13 / -9.12%)**, q15 4
 -9.2%, q03 / q12 -1.5%, q01 -0.9%; q14 +0.7% (9 M), q11 +0.2%, the rest within +-0.6%. Every
 result hash equal to b0's and PostgreSQL's; the 22 plans' EXPLAIN identical to b0's; peak memory
 over the pass level (1,587-1,605 MB). The pairs repeated within 0.1 point a query. Earlier builds
-and the inlining's cost before it was fixed: BENCH. PGO: one `tools/dist-pgo.sh` build of this
-code (the inlining changed, so the shipped build is gated too) was running at hand-in; its pass of
-the 22 beside the standing's PGO figures comes in a later candidate's docs.
+and the inlining's cost before it was fixed: BENCH. **PGO** (the inlining changed, so the shipped build
+is gated too): one `tools/dist-pgo.sh` build of `8a183986a` (its own training; profile staleness 0
+of 2,912 hot functions; instrumented build 2,513 s, training 597 s, optimised build 2,007 s) and
+one pass of the 22 beside plain n6 in one hold: **75.83 G** (plain 83.25, -8.9%), every hash equal;
+with two PGO builds' ~0.9% spread, **75.1-76.5 G against the standing's roll PGO 86.17 and
+pgrust's 86.56 (0.87-0.88x)**, the brief's 82 G cleared by the whole range. Under PGO q15 2.22 G
+and q06 3.20 G now lead pgrust and PostgreSQL; q10 5.17 G is 1.19x pgrust (from 1.62x), q21 4.80
+G 1.02x (from 1.32x), q04 1.21 G 1.20x PostgreSQL (from 1.57x), q05 2.41 G 1.42x (from 1.61x).
+Still behind the better of the two on 16 of the 22 (17 in the standing; q13 level at 3.63 G).
 
 **Verification** (`tools/quick-check.sh` with `QC_CHECKED=1` and `parallel_scan`, on `8a183986a`
 rebased on origin's `7a11af253`): clippy 16 warnings, none new in a changed file; 454 tests in 28

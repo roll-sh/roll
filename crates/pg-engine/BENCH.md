@@ -443,6 +443,40 @@ b0's.
 - Peak anon+shmem over the pass 1,587-1,605 MB on both builds (the key set: 241k keys of 16 bytes
   for q15, about 910k for q06, freed with the scan).
 
+### PGO (2026-11-25)
+
+**p1** is `tools/dist-pgo.sh --out` of the candidate rebased on origin's `7a11af253` (`8a183986a`;
+its own training, profile staleness 0 of 2,912 hot functions), one pass of the 22 beside plain n6
+in one hold (lane.sh 7.2 foreign cores, the pass's own 3.2-3.5), every hash equal. The standing's
+columns (roll PGO of `57d194f69`, pgrust, PostgreSQL 18.6) are BENCH "Standing, 2026-11-24"'s,
+not run again. With two PGO builds' ~0.9% spread, p1's total is 75.1-76.5 G: 0.87-0.88x pgrust.
+
+| query | standing PGO (G) | p1 PGO (G) | n6 plain (G) | pgrust | PostgreSQL | p1 ÷ best other |
+|---|---:|---:|---:|---:|---:|---:|
+| q01 | 7.35 | **7.26** | 7.31 | 6.76 | 45.22 | 1.07x |
+| q02 | 2.24 | **2.23** | 2.63 | 1.03 | 1.16 | 2.16x |
+| q03 | 3.69 | **3.69** | 4.12 | 3.52 | 4.07 | 1.05x |
+| q04 | 1.58 | **1.21** | 1.35 | 1.54 | 1.01 | 1.20x |
+| q05 | 2.73 | **2.41** | 2.81 | 1.69 | 1.98 | 1.42x |
+| q06 | 4.98 | **3.20** | 3.36 | 5.76 | 4.84 | 0.66x |
+| q07 | 3.00 | **3.05** | 3.53 | 3.31 | 2.57 | 1.19x |
+| q08 | 1.20 | **1.21** | 1.41 | 1.14 | 0.93 | 1.31x |
+| q09 | 6.73 | **6.78** | 7.81 | 14.35 | 13.12 | 0.52x |
+| q10 | 7.01 | **5.17** | 5.54 | 4.33 | 6.58 | 1.19x |
+| q11 | 0.72 | **0.72** | 0.83 | 0.39 | 0.38 | 1.91x |
+| q12 | 5.86 | **5.88** | 5.87 | 8.93 | 8.73 | 0.67x |
+| q13 | 3.61 | **3.63** | 4.10 | 3.63 | 6.83 | 1.00x |
+| q14 | 1.19 | **1.19** | 1.39 | 0.68 | 1.12 | 1.74x |
+| q15 | 4.60 | **2.22** | 2.30 | 2.95 | 3.16 | 0.75x |
+| q16 | 2.47 | **2.39** | 2.87 | 1.79 | 3.60 | 1.34x |
+| q17 | 4.36 | **2.79** | 2.85 | 2.22 | 4.60 | 1.25x |
+| q18 | 14.53 | **13.89** | 15.46 | 16.22 | 41.14 | 0.86x |
+| q19 | 0.44 | **0.43** | 0.47 | 0.41 | 0.40 | 1.08x |
+| q20 | 1.12 | **1.12** | 1.37 | 0.62 | 0.44 | 2.56x |
+| q21 | 6.21 | **4.80** | 5.25 | 4.71 | 7.38 | 1.02x |
+| q22 | 0.54 | **0.54** | 0.62 | 0.59 | 1.13 | 0.92x |
+| the 22 | 86.17 | **75.83** | 83.25 | 86.56 | 160.37 | 0.88x pgrust |
+
 ## Analytic CPU, round 14: correlated SubPlans run once a parameter value (2026-11-24, agent 314)
 
 HANDOFF "Analytic CPU, round 14" has what changed. Lane C, the TPC-H SF1 data and harness of
