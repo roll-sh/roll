@@ -318,6 +318,64 @@ The last against PGO, select-only at 8 clients, 3 alternating pairs: user instru
 31,777 -> 32,105 / 31,587 -> 34,607 / 34,026 -> 31,978, user cycles 69,268 -> 69,872 / 68,855 ->
 72,931 / 69,927 -> 68,111 (foreign 1.25-1.88): no direction, dropped.
 
+## Query memory, round 1: ordered aggregates within work_mem (2026-11-25, agent 318)
+
+HANDOFF "Query memory, round 1" has what changed and the audit of every row-holding node. Plain
+dist builds (`tools/dist.sh`): **b0** origin's `aaa096e02`; **n4** `cand/a318`'s code commit on it
+(n2, n3: earlier states of it; TPC-H and point selects were measured on n3, whose code differs
+from n4's only in the grouping without groups that sorted its input for no aggregate). PostgreSQL 18.6 by digest,
+same harness and settings (2 GB cache, work_mem 4 MB).
+
+### Peak memory a query (lane C, `~/.cache/a318/bench/mem.sh`)
+
+A fresh server, `t (id int, a int, s text)`: 1M rows `(g, g * 7919 % 1000003, md5(g::text))`,
+VACUUM ANALYZE, a count(*); then each query alone, wrapped in `md5(row::text)`. MB of the
+server cgroup's anon+shmem: peak during the query (sampled every 0.05 s) less the level before
+it. temp = temp files the query added in pg_stat_database.
+
+| query | b0 | n4 (two runs) | PostgreSQL 18.6 | temp MB: n4 / PostgreSQL |
+|---|---|---|---|---|
+| `md5(string_agg(ctid::text, ',' ORDER BY id))` (the bulk harness's check) | 364.3 | 29.8, 16.6 | 25.2 | 26.0 / 22.1 |
+| `string_agg(s, ',' ORDER BY a)`, `array_agg(id ORDER BY s)` | 453.6 | 112.3, 112.3 | 117.2 | 101.3 / 101.3 |
+| `array_agg(DISTINCT a ORDER BY a DESC)` | 332.1 | 68.4, 72.4 | 55.9 | 12.1 / 12.1 |
+| `percentile_cont(0.5)`, `percentile_disc(array[0.1, 0.9])`, `mode()` WITHIN GROUP | 521.9 | 58.5, 58.5 | 20.7 | 61.2 / 61.2 |
+| `string_agg(s, ',' ORDER BY a)` by `id % 10`, then string_agg of those | 353.0 | 124.0, 133.2 | 79.0 | 91.3 / 54.2 |
+| `ORDER BY s` (a plain Sort, control) | 12.5 | 12.2, 12.6 | 10.3 | 47.1 / 47.1 |
+
+Earlier states: n2 (whole rows in table order, ORDER BY keys repeated, a sort for no aggregate)
+wrote 54.1 MB for the harness, 30.2 for DISTINCT, 108.3 for the ordered sets; n3 (all but the last)
+26.0, 24.1, 108.3. The grouped query writes more than PostgreSQL
+(91.3 against 54.2 MB; not looked into).
+
+At 2M rows (n2 / PostgreSQL): 60.3 / 48.0, 204.6 / 232.5, 67.9 / 50.8, 62.2 / 20.9, 274.8 / 156.1,
+13.9 / 30.3: the DISTINCT, ordered-set and Sort rows stay put; the others grow with their results
+(a 2M-value string_agg), as PostgreSQL's do. Result hashes: b0, n2 and PostgreSQL equal on all six
+at 1M rows; at 2M equal but the two-aggregate query, whose ORDER BY a has ties there and which
+PostgreSQL 18.6 runs as a parallel plan (Gather Merge over three worker sorts); each of its two
+aggregates alone and the two in the other order match. n3 and n4 give the same hashes. Walls aren't
+compared (2.2-7.4 foreign cores on the lane).
+
+### When the input fits: TPC-H and point selects (plain dist, b0 against n3)
+
+TPC-H SF1 (lane C, agent 316's `tpair.sh` copied, QS = q01 q03 q09 q13 q18; a fresh server on a
+copy of the data, a warm-up, each query once in its own perf window; G user instructions of the
+server's cgroup). Two pairs, both orders; foreign load 1.4-1.95 cores, so instructions only.
+
+| query | b0 | n3 | n3 / b0 |
+|---|---|---|---|
+| q01 | 7.3782 / 7.3781 | 7.3783 / 7.3777 | +0.001%, -0.005% |
+| q03 | 4.1848 / 4.1841 | 4.1842 / 4.1840 | -0.014%, -0.001% |
+| q09 | 7.8151 / 7.8159 | 7.8184 / 7.8136 | +0.043%, -0.029% |
+| q13 | 4.1215 / 4.1230 | 4.1223 / 4.1227 | +0.021%, -0.009% |
+| q18 | 15.5859 / 15.5744 | 15.5909 / 15.5887 | +0.032%, +0.092% |
+
+Hashes equal. q18's b0 runs differ by 0.07% between themselves.
+
+Point select over the wire (lane A, `~/.cache/a318/bench/ps.sh`: 100,000-row oltp table, one
+client, (I30 s - I10 s) / (ops30 - ops10) of the server's cgroup): 54,633 -> 54,874 (n2), 55,815
+<- 56,440 (n3 first), 55,969 -> 53,588: +0.4%, +1.1%, -4.3%, foreign load 2.2-3.6 cores; b0 alone
+ranges 54.6-56.0 k. Noise: no aggregate runs in a point select.
+
 ## Bulk writes, round 27: COPY out's floats and text, index builds' key columns; the DELETE's compaction measured (2026-11-25, agent 315)
 
 HANDOFF "Bulk writes, round 27" has what changed. Lane C, agent 314's standing harness (one server

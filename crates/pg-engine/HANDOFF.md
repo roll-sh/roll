@@ -14908,6 +14908,91 @@ the loop. (2) The ring's per-block cost: three hash lookups a recycled block (`e
 looks the key up twice and then removes it). One `entry` would do. It is worth about 0.4% on
 scan-bound queries at small caches.
 
+## Query memory, round 1: ordered aggregates' input within work_mem; the executor's row-holding nodes audited (agent 318)
+
+**The audit** (work_mem 4 MB default; "spills" = past work_mem its rows go to a temporary file
+counted in pg_stat_database / log_temp_files, as PostgreSQL's node does):
+
+| node | PostgreSQL 18.6 | roll before | roll now |
+|---|---|---|---|
+| Sort (full) | tuplesort, spills | `extsort`, spills | same |
+| Sort with a LIMIT above (top-N) | bounded heap | bounded heap | same |
+| Incremental Sort | a tuplesort per group, spills | each group sorted in memory, **the whole output collected** (`incremental_sort_rows`) | left |
+| Hash Aggregate | spills (13+) | `hashspill`, spills (not with a presorted DISTINCT / ORDER BY aggregate, not when groups come in sorted order) | same |
+| Group Aggregate's input Sort (DISTINCT / ORDER BY aggregates, order-sensitive groups) | Sort node, spills | **whole input in a Vec, sorted in memory** | `extsort` (`nodes::sort_all`), spills |
+| An ordered / DISTINCT aggregate's own sort (the second and later ones; ordered-set aggregates) | a tuplesort per aggregate and group, spills | **every row in a Vec per group** | `extsort` per aggregate and group, spills (`Buffered::Sort`) |
+| percentile_cont / percentile_disc / mode | read the sorted tuplesort | **every value in the accumulator** | only the values the fractions read (`Accum::sorted_count`); mode streams its runs |
+| DISTINCT aggregate with ORDER BY | adjacent dedup of the sorted input | **hash set of every value** | a set of one run of equal keys when the keys are the arguments |
+| DISTINCT aggregate without ORDER BY (not count/sum/avg) | sorted, spills | every row in a Vec, sorted in memory | left (its comparison isn't a SortKey's) |
+| count / sum / avg (DISTINCT x) | sorted, spills | **hash set of the distinct values** (`hash_distinct`) | left |
+| hypothetical-set aggregates (rank() WITHIN GROUP ...) | tuplesort | every row in a Vec | left (rare) |
+| A grouping's groups in sorted order (GroupAggregate) | one group at a time | every group's state until the input ends | left |
+| Grouping sets | sorts / hash tables, spill | **whole input buffered** | left |
+| Hash Join build | batches, spills | `hashjoin` batches, spills | same |
+| WindowAgg | tuplestore per partition, spills | **whole input (or partition) in a Vec**; `WinStore` only accounts PostgreSQL's | left: the largest left |
+| Materialize / Nested Loop inner side | tuplestore, spills | **inner rows in an Rc<Vec>** | left |
+| Memoize | hash_mem LRU | hash_mem LRU | same |
+| CTE scan | tuplestore, spills | `tuplestore`, spills | same |
+| Set operations (hashed) | hash table, no spill (planner avoids) | hash tables, both sides collected | left |
+| Set operations (sorted) | Sort nodes, spill | both sides collected and sorted in memory | left |
+| Recursive Union | tuplestores spill; UNION's hash table doesn't | working table and seen set in memory | left |
+| Hashed DISTINCT / Unique over Sort | HashAggregate (spills) / Sort (spills) | hash map / all rows sorted in memory | left |
+| lookup stages, parallel scans | n/a | bounded by their batch / part sizes | same |
+
+**What changed** (`exec/agg.rs`, `exec/nodes.rs`; no format, storage or plan change):
+- A grouping's input Sort (the first DISTINCT / ORDER BY aggregate's order, or the order a
+  GroupAggregate shows its groups in) collected every row and sorted them in memory. It now runs
+  through `extsort` as a Sort node does (`nodes::sort_all`): within work_mem in memory, past it
+  runs on disk merged as they are read, counted in temp_files / temp_bytes / log_temp_files.
+  The rows are held with only the columns the grouping reads, in the order PostgreSQL's input
+  target list has them (the grouping keys' columns, then each aggregate's direct arguments,
+  arguments, ORDER BY and FILTER columns at their first appearance), which is what its sort tuple
+  counts. A user-defined aggregate keeps whole rows.
+- Every other aggregate with an ORDER BY (the second and later ones, ordered-set aggregates,
+  DISTINCT with ORDER BY) kept each group's rows in a Vec. Now each is an `ExtSort` per aggregate
+  and group, made at its first row (`Buffered::Sort`, `SortBuf`), with nodeAgg's tuple: the
+  arguments, then the ORDER BY keys that aren't one of them (so `array_agg(x ORDER BY x)` is a
+  one-column sort, as PostgreSQL's datum sort). In memory the rows come out in the same order as
+  the old pg_qsort over the same comparisons; spilled, in tuplesort's merge order.
+- percentile_cont / percentile_disc are told how many values come (`Accum::sorted_count`) and keep
+  only those at the positions their fractions read; mode() keeps its current and longest runs.
+- A DISTINCT aggregate whose arguments are all ORDER BY keys keeps the values of one run of equal
+  keys to compare with (equal arguments come in one run), not every value seen.
+- Hypothetical-set aggregates and DISTINCT aggregates without ORDER BY keep the in-memory Vec.
+- A grouping without groups no longer sorts its input for an aggregate that doesn't read it
+  presorted (ordered sets, DISTINCT with ORDER BY): PostgreSQL's plan has no Sort there.
+
+**Measured** (BENCH "Query memory, round 1"; plain dist; lane C; the server cgroup's peak
+anon+shmem over its level before the query, MB, work_mem 4 MB; 1M rows (id, a, s = md5 text)):
+the bulk harness's `md5(string_agg(ctid::text, ',' ORDER BY id))` 364.3 -> 16.6-29.8 (two
+runs; PostgreSQL 25.2), two ordered aggregates 453.6 -> 112.3 (117.2), `array_agg(DISTINCT a ORDER BY a DESC)`
+332.1 -> 68.4 (55.9), percentile_cont / percentile_disc / mode 521.9 -> 58.5 (20.7), grouped
+string_agg 353.0 -> 124.0 (79.0); a plain Sort 12.5 / 12.2 (10.3). Temp bytes are PostgreSQL's
+on four of the six (the harness's 26.0 MB against 22.1; the grouped query 91.3 against 54.2). At 2M rows (an earlier state, n2) the bounded ones stay
+put (DISTINCT 67.9, ordered-set 62.2, Sort 13.9) and the rest grow with their results' size, as
+PostgreSQL's do (harness 60.3 against 48.0). Every result hash equals PostgreSQL's but one: at
+2M rows with ties in the ORDER BY key, the two-aggregate query, which PostgreSQL runs as a
+parallel plan (Gather Merge over three worker sorts) whose tie order depends on the workers'
+split. When the input fits in work_mem nothing is slower: TPC-H q01, q03, q09, q13, q18 two pairs
+each within 0.1% user instructions (q18 +0.03 / +0.09%, its b0-to-b0 spread 0.07%), hashes equal;
+point select over the wire +0.4, +1.1, -4.3% in three pairs (b0 against itself 54.6-56.0 k
+instructions a query: lane A had 2.2-3.6 foreign cores; the changed code isn't on its path).
+
+**Left** (largest exposure first): WindowAgg's input (whole input or partition in a Vec; its
+`WinStore` only counts PostgreSQL's tuplestore), Materialize / Nested Loop inner rows, Incremental
+Sort's collected output, a GroupAggregate's groups held until the input ends, count/sum/avg
+(DISTINCT x)'s hash set (`hash_distinct`), grouping sets' buffered input, sorted set operations and
+Unique-over-Sort sorting in memory, the Recursive Union's tables. The aggregate's presort has no
+EXPLAIN ANALYZE "Sort Method" of its own (the synthesized Sort node keeps the estimate).
+
+**Verification:** `tools/quick-check.sh` with `QC_CHECKED=1` on `a3beab811` (the code commit on
+`aaa096e02`): Clippy 16 warnings, none new in a changed file; 383 tests in 10 binaries (query_spill's
+new cases among them), again built `--profile verify-checked` (383 passed); regress 51,148 / 51,150,
+0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed. `query_spill`'s
+`spills_match_memory_and_clean_up` now runs on a 64 MiB thread, as a session's: its new queries'
+plans overflowed the test thread's 2 MiB in a debug build (in `explain::Builder::convert`, the
+planner's model of the plan, not the executor).
+
 ## Memory, round 2: parallel index builds' lists, where the other peaks are (agent 308, 2026-11-24)
 
 BENCH.md "Memory, round 2" has the tables. Plain dist builds (`tools/dist.sh`): **h**, origin's
