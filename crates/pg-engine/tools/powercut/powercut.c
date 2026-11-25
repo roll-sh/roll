@@ -397,7 +397,7 @@ int close(int fd) {
 REAL(closedir, int, DIR *);
 int closedir(DIR *d) {
 	if (!real_closedir) real_closedir = dlsym(RTLD_NEXT, "closedir");
-	int fd = d ? dirfd(d) : -1;
+	int fd = dirfd(d);
 	if (watched(fd)) {
 		pthread_mutex_lock(&mu);
 		fd_ino[fd] = 0;
