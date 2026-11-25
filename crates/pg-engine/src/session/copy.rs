@@ -2263,7 +2263,7 @@ fn push_int(out: &mut String, n: i64) {
 /// control character, backslash or delimiter) as it is.
 fn text_escape_into(out: &mut String, s: &str, delim: char) {
     let plain = |b: &u8| *b >= 0x20 && *b != b'\\' && *b != 0x7f && (!delim.is_ascii() || *b != delim as u8);
-    if delim.is_ascii() && s.as_bytes().iter().all(plain) {
+    if delim.is_ascii() && (plain_ascii(s.as_bytes(), delim as u8) || s.as_bytes().iter().all(plain)) {
         out.push_str(s);
         return;
     }
@@ -2283,6 +2283,32 @@ fn text_escape_into(out: &mut String, s: &str, delim: char) {
             c => out.push(c),
         }
     }
+}
+
+/// Whether `s` is ASCII with nothing COPY's text format escapes (a control character,
+/// backslash, DEL or the delimiter `delim`): eight bytes at a time. (Text that isn't, the
+/// byte at a time check of `text_escape_into`.)
+#[inline]
+fn plain_ascii(s: &[u8], delim: u8) -> bool {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+    // (Whether some byte of `x` is 0, or below `n`, n <= 128: exact for the word as a whole.)
+    let below = |x: u64, n: u8| x.wrapping_sub(ONES * n as u64) & !x & HIGH;
+    let bad = |x: u64| (x & HIGH) | below(x, 0x20) | below(x ^ (ONES * 0x7f), 1) | below(x ^ (ONES * b'\\' as u64), 1) | below(x ^ (ONES * delim as u64), 1);
+    let n = s.len();
+    if n < 8 {
+        return s.iter().all(|&b| (0x20..0x7f).contains(&b) && b != b'\\' && b != delim);
+    }
+    let word = |i: usize| u64::from_le_bytes(s[i..i + 8].try_into().unwrap());
+    let mut i = 0;
+    while i + 8 <= n {
+        if bad(word(i)) != 0 {
+            return false;
+        }
+        i += 8;
+    }
+    // (The last bytes in the word that ends with them.)
+    i == n || bad(word(n - 8)) == 0
 }
 
 /// CopyAttributeOutCSV; `single`: the row's only column (where `\.` alone on its line
@@ -2631,24 +2657,36 @@ impl<'a> CopyLines<'a> {
             return Ok(None);
         }
         let numeric_ok = !matches!(f.delimiter, '-' | '+' | 'I' | 'N');
-        let mut line = String::with_capacity(64);
+        let mut dbuf = [0u8; 4];
+        let delim = f.delimiter.encode_utf8(&mut dbuf).as_bytes();
+        // (Text of ASCII alone with nothing to escape goes in as its bytes, `plain_ascii`; a
+        // delimiter that isn't ASCII, which no such text holds, checked as a backslash.)
+        let dbyte = if f.delimiter.is_ascii() { f.delimiter as u8 } else { b'\\' };
+        let mut line: Vec<u8> = Vec::with_capacity(64);
         for (i, c) in self.cols.iter().enumerate() {
             if i > 0 {
-                line.push(f.delimiter);
+                line.extend_from_slice(delim);
             }
             match (crate::storage::row::read_stored(data, &mut pos)?, &c.ty) {
-                (V::Null, _) => line.push_str(&f.null),
-                (V::Int(n), DataType::Int2 | DataType::Int4 | DataType::Int8) if numeric_ok => push_int(&mut line, n),
-                (V::Float8(x), DataType::Float8) if numeric_ok => crate::types::text::push_float8(&mut line, x, self.fmt.extra_float_digits),
+                (V::Null, _) => line.extend_from_slice(f.null.as_bytes()),
+                (V::Int(n), DataType::Int2 | DataType::Int4 | DataType::Int8) if numeric_ok => {
+                    line.extend_from_slice(itoa::Buffer::new().format(n).as_bytes())
+                }
+                (V::Float8(x), DataType::Float8) if numeric_ok => crate::types::text::push_float8_bytes(&mut line, x, self.fmt.extra_float_digits),
+                (V::Text(s), DataType::Text | DataType::Varchar(_)) if plain_ascii(s, dbyte) => line.extend_from_slice(s),
                 (V::Text(s), DataType::Text | DataType::Varchar(_)) => match std::str::from_utf8(s) {
-                    Ok(s) => text_escape_into(&mut line, s, f.delimiter),
+                    Ok(s) => {
+                        let mut t = String::with_capacity(s.len() + 8);
+                        text_escape_into(&mut t, s, f.delimiter);
+                        line.extend_from_slice(t.as_bytes());
+                    }
                     Err(_) => return Ok(None),
                 },
                 _ => return Ok(None),
             }
         }
-        line.push('\n');
-        Ok(Some(line.into_bytes()))
+        line.push(b'\n');
+        Ok(Some(line))
     }
 
     /// The binary trailer (with the signature, when no row carried it).
@@ -2835,4 +2873,32 @@ fn binary_copy_in(
         done = p;
     }
     Ok((done, ended))
+}
+
+#[cfg(test)]
+mod tests {
+    /// `plain_ascii` is the byte at a time check, for every length to 40 and bytes from the
+    /// ones it looks for.
+    #[test]
+    fn plain_ascii_is_the_byte_check() {
+        let pool = [b'a', b'Z', b' ', b'~', b'\\', b'\t', 0x1f, 0x7f, 0x80, 0xc3, 0xff, b',', b'|', 0];
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        for n in 0..40 {
+            for _ in 0..400 {
+                let s: Vec<u8> = (0..n)
+                    .map(|_| {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 7;
+                        seed ^= seed << 17;
+                        // (Mostly plain, so the words before a bad byte are checked too.)
+                        if seed.is_multiple_of(8) { pool[(seed >> 8) as usize % pool.len()] } else { b'a' + (seed >> 16) as u8 % 26 }
+                    })
+                    .collect();
+                for delim in *b"\t,|" {
+                    let want = s.iter().all(|&b| (0x20..0x7f).contains(&b) && b != b'\\' && b != delim);
+                    assert_eq!(super::plain_ascii(&s, delim), want, "{s:?} {delim}");
+                }
+            }
+        }
+    }
 }

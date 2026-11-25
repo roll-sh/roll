@@ -398,10 +398,83 @@ pub fn format_float8(v: f64, extra: i32) -> String {
     s
 }
 
+/// Ryu's text of `v` (`s`: nonzero, finite) when it is float8out's with extra_float_digits
+/// above 0, else None. Ryu writes fixed notation for decimal exponents -5 to 15 and float8out
+/// for -4 to 14; between them the two texts are the same but for Ryu's ".0" after an integer,
+/// and but for a decimal exactly on the midpoint to a neighbouring float, which Ryu may take
+/// and Postgres doesn't (`is_midpoint`): only one ending in 5 can be, ruled out here by
+/// `is_midpoint`'s divisibility test or left to the caller. (An integer below 10^15 is the
+/// float itself, never a midpoint.)
+#[inline]
+fn pg_fixed(s: &str) -> Option<&str> {
+    let b = s.as_bytes();
+    let body = match b.first() {
+        Some(b'-') => &b[1..],
+        _ => b,
+    };
+    let point = body.iter().position(|&c| c == b'.')?;
+    let n = body.len();
+    // (Scientific: "1.234e33".)
+    if body[point + 1..].contains(&b'e') {
+        return None;
+    }
+    if point == 1 && body[0] == b'0' {
+        // (0.0000ddd: a decimal exponent below -4.)
+        if n >= 6 && body[2..6] == *b"0000" {
+            return None;
+        }
+    } else if point > 15 {
+        return None;
+    }
+    if n == point + 2 && body[n - 1] == b'0' {
+        return Some(&s[..s.len() - 2]);
+    }
+    if body[n - 1] == b'5' {
+        // (The digits m times 10^-f, f the fraction's: a dyadic midpoint only if 5^f divides m,
+        // 17 digits or fewer.)
+        let f = (n - point - 1) as u32;
+        let mut m = 0u64;
+        for &c in body.iter().filter(|&&c| c != b'.') {
+            m = m * 10 + (c - b'0') as u64;
+        }
+        if f <= 27 && m.is_multiple_of(5u64.pow(f)) {
+            return None;
+        }
+    }
+    Some(s)
+}
+
+/// `format_float8(v, extra)` appended to `out`: Ryu's text as it is where it is float8out's
+/// (`pg_fixed`: fixed notation, nearly every float in use), else `push_float8_parsed`.
+pub fn push_float8(out: &mut String, v: f64, extra: i32) {
+    if extra > 0 && v.is_finite() && v != 0.0 {
+        let mut buf = ryu::Buffer::new();
+        if let Some(t) = pg_fixed(buf.format_finite(v)) {
+            out.push_str(t);
+            return;
+        }
+    }
+    push_float8_parsed(out, v, extra)
+}
+
+/// `push_float8` into bytes (a COPY line).
+pub fn push_float8_bytes(out: &mut Vec<u8>, v: f64, extra: i32) {
+    if extra > 0 && v.is_finite() && v != 0.0 {
+        let mut buf = ryu::Buffer::new();
+        if let Some(t) = pg_fixed(buf.format_finite(v)) {
+            out.extend_from_slice(t.as_bytes());
+            return;
+        }
+    }
+    let mut s = String::new();
+    push_float8_parsed(&mut s, v, extra);
+    out.extend_from_slice(s.as_bytes());
+}
+
 /// `format_float8(v, extra)` appended to `out`. The shortest digits of a float that can't be
 /// on a midpoint (`is_midpoint`'s quick rule: a binary exponent under 2 and a last digit other
 /// than 5, nearly every float) go straight from Ryu's text into `out`; the rest as before.
-pub fn push_float8(out: &mut String, v: f64, extra: i32) {
+fn push_float8_parsed(out: &mut String, v: f64, extra: i32) {
     if extra <= 0 || !v.is_finite() || v == 0.0 {
         out.push_str(&if extra > 0 { format_float_shortest(v, false) } else { format_g(v, (15 + extra).max(1) as usize) });
         return;
@@ -2832,6 +2905,37 @@ mod tests {
         assert_eq!(format_float8(0.1 + 0.2, 1), "0.30000000000000004");
         assert_eq!(format_float8(0.1 + 0.2, 0), "0.3");
         assert_eq!(format_float8(1e20, 0), "1e+20");
+    }
+
+    /// Ryu's text taken as it is (`pg_fixed`) is what the parsed path writes: decimals by a
+    /// fraction (1/7 ends in 5 often), multiples of 0.05, both ends of the fixed range,
+    /// integers ending in 5, random floats.
+    #[test]
+    fn float8_ryu_text_is_the_parsed() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut vals: Vec<f64> = Vec::new();
+        for i in 1..20_000i64 {
+            vals.extend([i as f64 / 7.0, i as f64 * 0.05, i as f64 * 5.0, (i as f64 + 0.5) * 1e-4, i as f64 * 1e10 + 0.5]);
+        }
+        for e in -6..17 {
+            let p = 10f64.powi(e);
+            vals.extend([p, p * 1.5, p * 2.5, f64::from_bits(p.to_bits() - 1), f64::from_bits(p.to_bits() + 1)]);
+        }
+        for _ in 0..100_000 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            vals.push(f64::from_bits(seed));
+            vals.push((seed >> 11) as f64 / (1u64 << 53) as f64 * 10f64.powi((seed & 31) as i32 - 8));
+        }
+        for v in vals.into_iter().flat_map(|v| [v, -v]) {
+            let (mut a, mut b, mut c) = (String::new(), String::new(), Vec::new());
+            push_float8(&mut a, v, 1);
+            push_float8_parsed(&mut b, v, 1);
+            push_float8_bytes(&mut c, v, 1);
+            assert_eq!(a, b, "{v:e}");
+            assert_eq!(c, b.as_bytes(), "{v:e}");
+        }
     }
 
     #[test]
