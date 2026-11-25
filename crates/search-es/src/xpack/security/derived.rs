@@ -609,7 +609,17 @@ mod tests {
             let token = |cluster: &str| sign("rdks_t", &format!(r#"{{"key":"{id}","cluster":"{cluster}","exp":{exp}}}"#));
             let mine = authenticate(&c, &token(name));
             if catalog.is_some() {
-                assert!(mine.is_ok_and(|p| matches!(&p.kind, AuthKind::ApiKey(a) if a.derived.is_some())), "named for this cluster");
+                let p = mine.expect("named for this cluster");
+                let AuthKind::ApiKey(a) = &p.kind else { panic!("an API key") };
+                let v = VerifiedKey { key: id.to_string(), auth: a.derived.as_deref().expect("narrowed").clone() };
+                assert!(verified(&c, &v).is_ok(), "as the node verified it");
+                let stale = VerifiedKey { auth: DerivedAuth { exp: exp - 3600, ..v.auth.clone() }, ..v.clone() };
+                assert!(verified(&c, &stale).is_err(), "expired since");
+                // A rotation after the node's check stops the rest of the request too.
+                let body = r#"{"metadata":{"roll_browser":{"cluster":"srch_1","indices":["i"],"rate_limit":{"per_minute":100},"derive":{"secret":"rdks_u","generation":2}}}}"#;
+                let (s, r) = call(&c, "PUT", &format!("/_security/api_key/{id}"), body).await;
+                assert_eq!(s, 200, "{r}");
+                assert!(verified(&c, &v).is_err(), "its secret rotated since");
             } else {
                 assert!(mine.is_err(), "no catalog id to bind the secret to");
             }

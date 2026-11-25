@@ -1200,6 +1200,7 @@ async fn derived_keys_narrow_their_parent_and_die_with_it() {
         (sign(&secret, with("filter", json!({"script": {"script": "true"}}))), plain_only),
         // Expanding terms, built as the owner's filter, needs the parent's allow_expensive_queries.
         (sign(&secret, with("filter", json!({"bool": {"filter": [{"prefix": {"tenant": "ac"}}]}}))), "allow_expensive_queries"),
+        (sign(&secret, with("filter", json!({"range": {"tenant.keyword": {"gte": "a"}}}))), "a range on a text or keyword field"),
         (sign(&secret, with("exp", json!(unix_now() + 2 * 86_400))), "ahead"),
         (sign(&secret, with("exp", json!(unix_now() - 120))), "expired"),
         (sign(&secret, json!({"key": pid, "cluster": "shop", "exp": exp, "user": "acme", "rate_limit": {"per_minute": 101}})), "share"),

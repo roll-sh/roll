@@ -361,8 +361,10 @@ applications). A web page calls a cluster directly, with no backend of its own i
     query; then Elasticsearch's role-query check and the cluster's own parse; nothing that
     expands terms (`prefix`, `wildcard`, the prefix match queries, `simple_query_string`,
     `fuzziness`, `max_expansions`) unless the parent's `limits.allow_expensive_queries`, since
-    its expansions aren't capped as a browser key's own queries' are; a `range` on a `keyword`
-    field stays allowed, as in a role's query), a `user` (an end
+    its expansions aren't capped as a browser key's own queries' are; nor, without it, a
+    `range` on a field an index the key reaches maps as text or a keyword (its terms are walked,
+    as Elasticsearch's `search.allow_expensive_queries: false` refuses), read from the mappings on
+    each request), a `range` on numbers and dates staying allowed, a `user` (an end
     customer, Algolia's `userToken`),
     `origins` and `rate_limit: {"per_minute": n}` (the user's). Unknown fields, duplicate keys and
     trailing bytes are refused. It goes wherever a browser key goes (`Authorization: ApiKey
@@ -378,10 +380,13 @@ applications). A web page calls a cluster directly, with no backend of its own i
     the parent's, the parent's application only, the filter as above at most 24 levels deep, a
     `rate_limit` at most a user's share, origins the cluster's CORS allows), each refusal a 401
     naming the field, never a value from the key. The key is verified once per request, nothing
-    cached: the owner node verifies it and runs the request as what it verified (the parent's id
-    and the narrowing, in a header only the node sets, as it says who authenticated with the
-    cluster's own credentials), and the cluster checks only that the parent is still live. A
-    revoke or rotation holds from the next request.
+    cached: the owner node verifies it and hands the request to the cluster with what it verified
+    (the parent's id, the narrowing, the key's expiry and the generation of the secret that
+    signed it) on the request in process (`search_es::rest::Verified`, as it says who
+    authenticated with the cluster's own credentials): no header carries either, so nothing a
+    client sends can claim them. The cluster checks only that the parent is still live, its
+    secret still that generation and the key unexpired, on the request and every internal call
+    it makes, so a revoke, rotation or expiry holds even inside a running request.
   - *What it may do* is its parent's, narrowed: the principal is the parent's API key with one
     more set of role descriptors every permission must also pass (the derived indices with
     `read`, the derived filter as their document-level `query`), so the indices intersect and
