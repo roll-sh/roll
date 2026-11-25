@@ -21,12 +21,17 @@
 //! ([`search_es::xpack::security::derived`]). It is kept in the key's `metadata.roll_browser.derive`,
 //! sealed for the cluster and the key ([`search_es::xpack::security::derived::seal_kind`]), and
 //! a rotate replaces it, which refuses every key derived under the old one.
+//!
+//! **Usage** (Algolia's per-key usage and logs): the owner node counts each key's requests and
+//! refusals by reason ([`search_server::browser::Usage`]), the metering pass keeps them in the
+//! catalog's rings (`Store::record_browser_usage`), and [`Control::browser_key_usage`] reads
+//! them back with what the node hasn't handed on yet.
 
 use super::{Control, ControlError, Result, connection_of};
 use base64::Engine;
 use search_es::EsRequest;
 use search_es::xpack::security::derived::{self, DERIVE};
-use search_server::browser::{MAX_PER_MINUTE, METADATA};
+use search_server::browser::{KeyStats, MAX_PER_MINUTE, METADATA, REASONS};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -369,6 +374,86 @@ impl Control {
         Ok(keys)
     }
 
+    /// [`Control::browser_keys`], each with its usage over the last 24 hours (the hour in
+    /// progress and the 23 before): requests, 429s and other refusals.
+    pub async fn browser_keys_with_usage(&self, id: &str) -> Result<Vec<Value>> {
+        let mut keys = self.browser_keys(id).await?;
+        if keys.is_empty() {
+            return Ok(keys);
+        }
+        let c = self.get(id).await?;
+        let now = super::now();
+        let since = now - now.rem_euclid(3600) - 23 * 3600;
+        let mut by_key: std::collections::HashMap<String, KeyStats> = std::collections::HashMap::new();
+        for (k, _, s) in self.store.browser_usage_since(&c.id, None, 3600, since).await? {
+            by_key.entry(k).or_default().merge(&s);
+        }
+        for (k, minute, s) in self.node.peek_observations(&c.name, &c.id).browser {
+            if minute.min(i64::MAX as u64 / 60) as i64 * 60 >= since {
+                by_key.entry(k).or_default().merge(&s);
+            }
+        }
+        for k in &mut keys {
+            let s = k["id"].as_str().and_then(|id| by_key.get(id)).cloned().unwrap_or_default();
+            k["usage_24h"] = summary(&s);
+        }
+        Ok(keys)
+    }
+
+    /// Browser key `key_id`'s usage over `window` (`1h`: minutes; `24h`: 15-minute points from
+    /// the minute ring; `14d`: 2-hour points from the hour ring): its buckets in the catalog plus what this node
+    /// counted since the last metering pass, points only where it made requests, and totals with
+    /// its top users (derived keys') and refused origins.
+    pub async fn browser_key_usage(&self, id: &str, key_id: &str, window: &str) -> Result<Value> {
+        let c = self.get(id).await?;
+        let Some(r) = super::MetricsRange::parse(window) else {
+            return Err(ControlError::Invalid(format!("window must be 1h, 24h or 14d, not {window}")));
+        };
+        if !self.browser_keys(id).await?.iter().any(|k| k["id"].as_str() == Some(key_id)) {
+            return Err(ControlError::NotFound(format!("no browser key {key_id} on cluster {}", c.name)));
+        }
+        let now = super::now();
+        let to = now - now.rem_euclid(r.step);
+        let from = to - (r.points - 1) * r.step;
+        let mut buckets: std::collections::BTreeMap<i64, KeyStats> = std::collections::BTreeMap::new();
+        let mut add = |at: i64, s: &KeyStats| {
+            if at >= from {
+                buckets.entry(at - at.rem_euclid(r.step)).or_default().merge(s);
+            }
+        };
+        for (_, at, s) in self.store.browser_usage_since(&c.id, Some(key_id), r.res, from).await? {
+            add(at, &s);
+        }
+        // Not flushed yet: what the cluster's owner (here) counted since the last pass.
+        for (_, minute, s) in self.node.peek_observations(&c.name, &c.id).browser.iter().filter(|(k, _, _)| k == key_id) {
+            add((*minute).min(i64::MAX as u64 / 60) as i64 * 60, s);
+        }
+        let mut total = KeyStats::default();
+        let points: Vec<Value> = buckets
+            .iter()
+            .filter(|(_, s)| !s.is_empty())
+            .map(|(at, s)| {
+                total.merge(s);
+                let mut p = summary(s);
+                p["at"] = json!(at);
+                p
+            })
+            .collect();
+        let mut totals = summary(&total);
+        let full = total.to_json();
+        totals["users"] = full["users"].clone();
+        totals["origins"] = full["origins"].clone();
+        Ok(json!({
+            "key": key_id,
+            "window": window,
+            "step_s": r.step,
+            "from": from,
+            "to": to + r.step,
+            "points": points,
+            "totals": totals,
+        }))
+    }
+
     /// Revokes browser key `key_id` of cluster `id` (`NotFound`: no such browser key, any other
     /// key of the cluster, or a deleted cluster, whose keys can't be told apart until it is
     /// restored).
@@ -399,7 +484,18 @@ impl Control {
         if !is_browser {
             return Err(none());
         }
-        self.delete_key_on(&c, key_id).await.map(|()| Revoked::Now)
+        self.delete_key_on(&c, key_id).await?;
+        // Its usage goes with it (a revoked key's refusals are no one's to read).
+        if let Err(e) = self.store.delete_browser_usage(&c.id, key_id).await {
+            tracing::warn!(cluster = c.id, error = %e, "dropping a revoked browser key's usage failed");
+        }
+        Ok(Revoked::Now)
     }
 }
 
+/// A bucket's requests, 429s (`throttled`), other refusals, and both by reason.
+fn summary(s: &KeyStats) -> Value {
+    let full = s.to_json();
+    let refused: u64 = REASONS.iter().filter(|r| !r.throttles()).map(|r| s.refused[*r as usize]).sum();
+    json!({ "requests": s.requests, "throttled": s.throttled(), "refused": refused, "reasons": full["refused"] })
+}
