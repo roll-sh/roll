@@ -401,14 +401,6 @@ pub fn authenticate_header(cluster: &Cluster, header: &str, uri: &str) -> EsResu
         return api_keys::authenticate(cluster, value);
     }
     if scheme.eq_ignore_ascii_case("bearer") {
-        // OpenAI SDKs send an API key as Bearer (`crate::xpack::chat::openai`).
-        let path = uri.split('?').next().unwrap_or(uri);
-        if crate::xpack::chat::openai::bearer_is_api_key(path, value) {
-            if derived::is_derived(value) {
-                return derived::authenticate(cluster, value);
-            }
-            return api_keys::authenticate(cluster, value);
-        }
         return tokens::authenticate_bearer(cluster, value);
     }
     // Other schemes present no credentials Elasticsearch's realms understand.
