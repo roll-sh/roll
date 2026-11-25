@@ -137,6 +137,9 @@ percent-encoding = "2"
 urlencoding = "2"
 tempfile = "3"
 libc = "0.2"
+# roll-cli on Windows: the console, file ACLs and the local agent as a service (already in the
+# lock through tokio and others).
+windows-sys = "0.61"
 md-5 = "0.11"
 # TCP keepalives on connections roll opens itself (search connectors' Postgres sources).
 socket2 = "0.6"

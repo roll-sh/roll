@@ -21,7 +21,6 @@ use anyhow::{Context, bail, ensure};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 /// The first entry of every bundle.
@@ -97,7 +96,9 @@ fn pack_dir(b: &mut tar::Builder<impl Write>, root: &Path, rel: &Path, budget: &
         let rel = rel.join(&name);
         let path = root.join(&rel);
         let meta = fs::symlink_metadata(&path)?;
-        let tar_path = format!("{TREE}{}", rel.to_str().with_context(|| format!("{} isn't UTF-8", rel.display()))?);
+        // `/` between names on every platform (Windows' paths use `\\`).
+        let names: Vec<&str> = rel.iter().map(|n| n.to_str().with_context(|| format!("{} isn't UTF-8", rel.display()))).collect::<anyhow::Result<_>>()?;
+        let tar_path = format!("{TREE}{}", names.join("/"));
         budget.entry()?;
         if meta.file_type().is_symlink() {
             let target = fs::read_link(&path)?;
@@ -111,7 +112,7 @@ fn pack_dir(b: &mut tar::Builder<impl Write>, root: &Path, rel: &Path, budget: &
             pack_dir(b, root, &rel, budget)?;
         } else if meta.is_file() {
             budget.bytes(meta.len())?;
-            let mode = if meta.permissions().mode() & 0o111 != 0 { 0o755 } else { 0o644 };
+            let mode = if executable(&meta) { 0o755 } else { 0o644 };
             let mut h = tar::Header::new_gnu();
             h.set_entry_type(tar::EntryType::Regular);
             h.set_mode(mode);
@@ -227,7 +228,10 @@ pub fn unpack(input: impl Read, tree: &Path, env_out: &Path, limits: Limits) -> 
                     Some(l) => PathBuf::from(String::from_utf8(l).context("a symlink's target isn't UTF-8")?),
                     None => entry.link_name()?.with_context(|| format!("{}: a symlink without a target", rel.display()))?.into_owned(),
                 };
+                #[cfg(unix)]
                 std::os::unix::fs::symlink(&target, &dest).with_context(|| format!("{}: already exists", rel.display()))?;
+                #[cfg(not(unix))]
+                bail!("{}: a symlink ({}), which this platform's bundles don't unpack", rel.display(), target.display());
             }
             other => bail!("{}: {other:?} entries aren't allowed in a tree", rel.display()),
         }
@@ -269,16 +273,36 @@ fn parents(root: &Path, rel: &Path) -> anyhow::Result<()> {
 /// Write a new file (`O_EXCL`, so neither an existing file nor a symlink is ever opened), at most
 /// `room` bytes.
 fn write_new(path: &Path, r: &mut impl Read, mode: u32, room: u64) -> anyhow::Result<u64> {
-    let mut f = OpenOptions::new().write(true).create_new(true).mode(mode).open(path).context("already exists")?;
+    let mut o = OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, mode);
+    let mut f = o.open(path).context("already exists")?;
     let n = io::copy(&mut r.take(room.saturating_add(1)), &mut f)?;
     ensure!(n <= room, "larger than allowed");
-    f.set_permissions(fs::Permissions::from_mode(mode))?;
+    #[cfg(unix)]
+    f.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(mode))?;
+    #[cfg(not(unix))]
+    let _ = mode;
     Ok(n)
+}
+
+/// Whether anyone may run the file.
+#[cfg(unix)]
+fn executable(meta: &fs::Metadata) -> bool {
+    std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o111 != 0
+}
+
+/// Windows has no such bit.
+#[cfg(not(unix))]
+fn executable(_: &fs::Metadata) -> bool {
+    false
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     fn env() -> BTreeMap<String, String> {
         [("A".to_string(), "it's \"quoted\" $HOME".to_string()), ("ROLL_REPO".into(), "acme/web".into())].into()

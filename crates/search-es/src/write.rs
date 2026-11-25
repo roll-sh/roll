@@ -463,20 +463,7 @@ fn check_target(st: &ClusterState, t: &Target, args: &WriteArgs, expr: &str) -> 
     if t.index.is_closed() {
         return Err(EsError::closed_index(&t.index.name, &t.index.uuid));
     }
-    check_writable(&t.index)
-}
-
-/// Whether documents of `idx` may be written: its write blocks, and a restore from an
-/// Elasticsearch snapshot still filling it (Elasticsearch's shards take no writes while they
-/// recover: the restore's documents come with their own sequence numbers, which a write in
-/// between would take first, and a delete in between would come back with a resumed restore).
-/// Every write of a document asks it (`check_target`, [`apply_index`], [`apply_delete`]: by-query
-/// runs reach the last two directly); the restore's own [`CopyTarget`] doesn't.
-pub(crate) fn check_writable(idx: &IndexMeta) -> EsResult<()> {
-    crate::meta::blocks::check(std::iter::once(idx), crate::meta::blocks::Level::Write)?;
-    if idx.recovery_source.as_ref().and_then(|rs| rs.get("roll_elastic")).and_then(|e| e.get("state")).and_then(|v| v.as_str()) == Some("running") {
-        return Err(EsError::new(503, "unavailable_shards_exception", format!("[{}][0] primary shard is not active: the index is being restored from a snapshot", idx.name)));
-    }
+    crate::meta::blocks::check(std::iter::once(t.index.as_ref()), crate::meta::blocks::Level::Write)?;
     Ok(())
 }
 
@@ -997,7 +984,6 @@ pub fn apply_index(p: Prepared, args: &WriteArgs, auto_id: bool, id: &str) -> Es
     if args.if_seq_no.is_some() && seq_no_disabled(&p.index) {
         return Err(seq_no_unsupported(&p.index, p.shard.id, "o_c_c_not_supported_exception", "Optimistic concurrency control is"));
     }
-    check_writable(&p.index)?;
     let mut op = IndexOp::new(p.doc);
     op.op_type = if args.create { OpType::Create } else { OpType::Index };
     op.version = args.version;
@@ -1070,8 +1056,6 @@ pub fn apply_delete(cluster: &Cluster, idx: &Arc<IndexMeta>, id: &str, routing: 
         return Err(crate::engine::tsdb::invalid_id(idx, id));
     }
     let st = cluster.state();
-    // As the index is now: a by-query run holds the metadata it started with.
-    check_writable(st.metadata.indices.get(&idx.name).filter(|i| i.uuid == idx.uuid).unwrap_or(idx))?;
     let engine = cluster.engine.index(cluster, &st, idx)?;
     let shard_id = crate::meta::routing::shard_for(idx, id, routing);
     let shard = engine.shard(shard_id);
@@ -1329,12 +1313,5 @@ impl<'c> CopyTarget<'c> {
     /// Makes the copies searchable.
     pub fn finish(self) -> EsResult<()> {
         self.de.refresh_all()
-    }
-
-    /// Every shard's log (none in memory): what's indexed so far is durable once each one's
-    /// [`crate::engine::ShardLog::durable`] resolves, as a request's acknowledgement waits for.
-    /// Wait on them with the target dropped (it isn't `Sync`).
-    pub fn logs(&self) -> Vec<Arc<dyn crate::engine::ShardLog>> {
-        (0..self.dst.number_of_shards()).filter_map(|n| self.de.shard(n).log.clone()).collect()
     }
 }

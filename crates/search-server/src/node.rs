@@ -178,6 +178,15 @@ pub struct NodeConfig {
     /// Resolves the credential references clusters' snapshot repositories name
     /// (`search_es::secret_refs`); `None`: they're refused.
     pub secret_refs: Option<search_es::secret_refs::Resolver>,
+    /// Where branches' states were copied from (`search_es::ClusterConfig::lineage`); `None`:
+    /// nowhere readable.
+    pub lineages: Option<Arc<dyn Lineages>>,
+}
+
+/// The states a branch's state may have been copied from, by its parent's catalog id
+/// ([`search_es::seal::Lineage`]): read only when a branch's secrets need telling apart.
+pub trait Lineages: Send + Sync + std::fmt::Debug {
+    fn of(&self, parent: &str) -> Arc<dyn search_es::seal::Lineage>;
 }
 
 impl NodeConfig {
@@ -214,6 +223,7 @@ impl Default for NodeConfig {
             audit: crate::audit::AuditConfig::default(),
             embedder: None,
             secret_refs: None,
+            lineages: None,
         }
     }
 }
@@ -1487,6 +1497,8 @@ impl Node {
         cfg.owner = spec.owner.clone();
         cfg.secret_refs = self.cfg.secret_refs.clone();
         cfg.branch_of = spec.branch_of.clone();
+        cfg.parent = spec.parent.clone();
+        cfg.lineage = spec.parent.as_deref().and_then(|p| self.cfg.lineages.as_ref().map(|l| l.of(p)));
         // Snapshot contents are durable only with object storage behind the cluster.
         cfg.default_repository = self.cfg.default_repository.clone().filter(|_| data_store.is_some());
         cfg.file_service_tokens = self.reads_file_service_tokens(&spec.name);
@@ -1505,8 +1517,13 @@ impl Node {
         Box::pin(search_es::branch::mark_inherited(&cluster)).await.map_err(|e| anyhow::anyhow!("marking what the branch inherited: {}", e.reason()))?;
         // Secrets a node without a key kept in the clear are sealed now that this one has one.
         match Box::pin(search_es::seal::seal_leftovers(&cluster)).await {
-            Ok(0) => {}
-            Ok(n) => tracing::info!(cluster = spec.name, records = n, "sealed secrets stored in the clear"),
+            Ok(l) if l.changed == 0 => {}
+            Ok(l) => {
+                tracing::info!(cluster = spec.name, records = l.changed, "sealed the cluster's secrets stored in the clear or not bound to it");
+                if !l.taken.is_empty() {
+                    tracing::info!(cluster = spec.name, taken = ?l.taken, "took out of a branch the secrets it copied from its parent");
+                }
+            }
             Err(e) => tracing::warn!(cluster = spec.name, error = %e.reason(), "sealing secrets stored in the clear failed"),
         }
         Box::pin(search_es::xpack::entsearch::sync::adopt_existing(&cluster)).await.map_err(|e| anyhow::anyhow!("pausing the connectors from before roll ran syncs: {}", e.reason()))?;

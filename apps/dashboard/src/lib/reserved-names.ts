@@ -14,6 +14,7 @@ export const RESERVED_NAMES = [
   "_next",
   "_serverfn",
   "install.sh",
+  "install.ps1",
   // Web conventions.
   "api",
   "robots.txt",

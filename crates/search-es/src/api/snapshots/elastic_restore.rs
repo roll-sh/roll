@@ -2,16 +2,6 @@
 //! shard is read from the snapshot's Lucene files (`search_lucene`) and indexed again from its
 //! `_source`, with its `_id`, routing, sequence number, version and primary term.
 //!
-//! - **Data streams.** Patterns match the snapshot's data streams as well as its indices; a data
-//!   stream matched comes back with all its backing indices, its definition read from the
-//!   snapshot's global metadata (kept there whatever `include_global_state` was, as Elasticsearch
-//!   does): generation, flags, `_meta`, lifecycle, settings. Renamed, every backing index is
-//!   renamed as `RestoreService.renameIndex` renames it (the pattern applied after `.ds-`, so
-//!   `.ds-<new name>-…`); one whose name is taken is refused, and so is a backing index two
-//!   data streams claim; a pattern matching only backing indices restores them as indices. Its
-//!   template comes back with the global state. System data streams and indices, failure store
-//!   indices and data stream aliases aren't restored. Writes to an index wait for its restore
-//!   (503 while it runs, by-query runs' too: `write::check_writable`).
 //! - **Plan.** Each index's metadata (settings, mappings, aliases) becomes a create-index
 //!   request, checked as `PUT <index>` checks one (no templates apply, as on Elasticsearch).
 //!   Settings the cluster that made the index set, shard allocation, blocks, lifecycle and
@@ -25,12 +15,10 @@
 //!   documents handed over a bounded channel and indexed like any write, so they're logged and
 //!   fenced as writes are on the fleet. `_recovery` and `_cat/recovery` show each shard's files
 //!   and bytes as they're read. The task obeys cancellation between documents.
-//! - **Takeover.** The restore's state is kept in each index's recovery source, with the shards
-//!   it finished, each recorded only once its documents are durable (`ShardLog::durable`): an
-//!   owner that opens a cluster with a restore still running resumes each index from the first
-//!   shard not recorded (a task cancelled because the cluster leaves the node, handed over or
-//!   the node stopping, leaves it running: `TaskInfo::leaving`; that shard's documents already indexed are indexed again under the
-//!   same ids; none is skipped), and one whose repository is gone records the failure. A document deleted on roll while its index was being restored comes
+//! - **Takeover.** The restore's state is kept in each index's recovery source: an owner that
+//!   opens a cluster with a restore still running starts that index's restore again (documents
+//!   already indexed are indexed again under the same ids), and one whose repository is gone
+//!   records the failure. A document deleted on roll while its index was being restored comes
 //!   back on such a restart once its tombstone is gone (deletions aren't recorded apart: an index
 //!   is meant to be used once its restore is done). The previous owner's task isn't stopped from
 //!   here; its writes fail at the write-ahead log's ownership check (`log.check()` in
@@ -57,7 +45,7 @@ use super::*;
 use crate::write::{CopyTarget, DocCopy};
 use bytes::Bytes;
 use search_lucene::segment::{self, Files, Limits};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering};
 
 /// Restores from Elasticsearch repositories running on the node at once.
@@ -81,7 +69,7 @@ pub(super) struct Request {
     pub(super) include_global_state: bool,
     pub(super) include_aliases: bool,
     pub(super) partial: bool,
-    pub(super) rename: Option<super::rename::Rename>,
+    pub(super) rename: Option<(regex::Regex, String)>,
     pub(super) index_settings: Settings,
     pub(super) ignore_settings: Vec<String>,
 }
@@ -235,10 +223,7 @@ fn mapping_of(meta: &Value) -> Option<Map> {
 
 /// Plans index `name` of the snapshot from its metadata: `Err(reason)` when it can't be
 /// restored.
-/// `target`: the name it's restored under when set (a data stream's backing index, named after
-/// the data stream's own new name), else `name` through the request's rename.
-fn plan_index(req: &Request, name: &str, meta: &Value, index_id: &str, target: Option<&str>) -> EsResult<Result<Planned, String>> {
-    let backing = target.is_some();
+fn plan_index(req: &Request, name: &str, meta: &Value, index_id: &str) -> EsResult<Result<Planned, String>> {
     let meta = meta.get(name).or_else(|| meta.as_object().filter(|o| o.len() == 1).and_then(|o| o.values().next())).ok_or_else(|| EsError::internal("index metadata without the index"))?;
     let raw = Settings::from_json(meta.get("settings").unwrap_or(&Value::Null)).unwrap_or_default();
     let shards = raw.get("index.number_of_shards").and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
@@ -289,10 +274,9 @@ fn plan_index(req: &Request, name: &str, meta: &Value, index_id: &str, target: O
             return Ok(Err(format!("the values of [{path}] may have been left out of _source (index.mapping.exclude_source_vectors), and roll can't read them back")));
         }
     }
-    let target = match (target, &req.rename) {
-        (Some(t), _) => t.to_string(),
-        (None, Some(r)) => r.apply(name)?,
-        (None, None) => name.to_string(),
+    let target = match &req.rename {
+        Some((re, rep)) => re.replace_all(name, rep.as_str()).into_owned(),
+        None => name.to_string(),
     };
     let mut settings = Settings::new();
     let mut dropped = Vec::new();
@@ -314,13 +298,8 @@ fn plan_index(req: &Request, name: &str, meta: &Value, index_id: &str, target: O
     let aliases = req.include_aliases.then(|| meta.get("aliases").cloned()).flatten().filter(|a| a.as_object().is_some_and(|o| !o.is_empty()));
     let mut mappings = mapping;
     if let Some(m) = &mut mappings {
-        // A data stream's backing index keeps the timestamp its documents need (Elasticsearch's
-        // own bookkeeping, set on every backing index); an index restored on its own drops it.
-        if backing {
-            m.insert("_data_stream_timestamp".into(), obj! { "enabled" => true });
-        } else {
-            m.shift_remove("_data_stream_timestamp");
-        }
+        // Elasticsearch's own bookkeeping in a mapping.
+        m.shift_remove("_data_stream_timestamp");
     }
     Ok(Ok(Planned { source: name.to_string(), target, index_id: index_id.to_string(), shards, settings, mappings, aliases, vectors, notes }))
 }
@@ -363,7 +342,7 @@ fn create_planned(st: &mut ClusterState, req: &Request, snapshot_uuid: &str, p: 
         "roll_elastic".into(),
         obj! {
             "state" => "running", "snapshot_uuid" => snapshot_uuid.to_string(), "index_id" => p.index_id.clone(),
-            "shards" => p.shards as i64, "vectors" => Value::from(p.vectors.clone()), "done" => Value::Arr(Vec::new()),
+            "shards" => p.shards as i64, "vectors" => Value::from(p.vectors.clone()),
         },
     );
     idx.recovery_source = Some(Arc::new(rs));
@@ -372,96 +351,14 @@ fn create_planned(st: &mut ClusterState, req: &Request, snapshot_uuid: &str, p: 
     Ok(())
 }
 
-/// A data stream of the snapshot to restore (Elasticsearch's `DataStream` in its global
-/// metadata, `data_stream.data_stream.<name>`).
-struct Stream {
-    source: String,
-    target: String,
-    def: Value,
-    /// Its backing indices in the snapshot, oldest first (the last is the write index).
-    backing: Vec<String>,
-}
-
-/// What backing index `index` (in the snapshot) is restored as: Elasticsearch's
-/// `RestoreService.renameIndex`, the rename applied to what follows `.ds-` in a `.ds-` name and
-/// to the whole name otherwise (a shrunk, downsampled or added backing index).
-fn backing_target(rename: &Option<super::rename::Rename>, index: &str) -> EsResult<String> {
-    let Some(r) = rename else { return Ok(index.to_string()) };
-    Ok(match index.strip_prefix(".ds-") {
-        Some(rest) => format!(".ds-{}", r.apply(rest)?),
-        None => r.apply(index)?,
-    })
-}
-
-impl Stream {
-    /// The data stream as roll keeps it, its backing indices under `targets`. Failure store
-    /// indices aren't restored, and a restored data stream isn't a follower's.
-    fn to_meta(&self, targets: Vec<String>) -> EsResult<crate::meta::data_streams::DataStream> {
-        let d = &self.def;
-        let flag = |k: &str, or: bool| d.get(k).and_then(Value::as_bool).unwrap_or(or);
-        Ok(crate::meta::data_streams::DataStream {
-            name: self.target.clone(),
-            indices: targets,
-            generation: d.get("generation").and_then(Value::as_i64).filter(|g| *g > 0).unwrap_or(1) as u64,
-            meta: d.get("_meta").and_then(Value::as_object).cloned(),
-            hidden: flag("hidden", false),
-            system: flag("system", false),
-            replicated: false,
-            allow_custom_routing: flag("allow_custom_routing", false),
-            index_mode: d.get("index_mode").and_then(Value::as_str).map(str::to_string),
-            lifecycle: d.get("lifecycle").cloned(),
-            rollover_on_write: flag("rollover_on_write", false),
-            failure_indices: Vec::new(),
-            failure_rollover_on_write: true,
-            options: d.get("data_stream_options").cloned(),
-            settings: Settings::from_json(d.get("settings").unwrap_or(&Value::Null))?,
-            mappings: d.get("mappings").and_then(Value::as_object).cloned(),
-        })
-    }
-}
-
-/// The definitions of the data streams in Elasticsearch's global metadata, by name.
-fn stream_defs(g: &Value) -> Map {
-    let g = g.get("meta-data").unwrap_or(g);
-    g.pointer(&["data_stream", "data_stream"]).and_then(Value::as_object).cloned().unwrap_or_default()
-}
-
-/// Refuses a data stream whose name is taken (as Elasticsearch refuses an index whose name is).
-fn check_stream_free(st: &ClusterState, req: &Request, snapshot_uuid: &str, stream: &Stream) -> EsResult<()> {
-    if st.metadata.data_streams.contains_key(&stream.target) {
-        return Err(restore_error(&req.repo, &req.snap, snapshot_uuid, format!(
-            "cannot restore data stream [{}] because a data stream with the same name already exists in the cluster. Delete it, or restore it under a different name by providing a rename pattern and replacement name",
-            stream.target
-        )));
-    }
-    Ok(())
-}
-
-/// Refuses restoring an index under a name that is a backing index of a data stream here (a
-/// closed one would be replaced under the data stream, losing its documents).
-fn check_not_backing(st: &ClusterState, req: &Request, snapshot_uuid: &str, target: &str) -> EsResult<()> {
-    if let Some(ds) = st.metadata.data_stream_of(target) {
-        return Err(restore_error(&req.repo, &req.snap, snapshot_uuid, format!("cannot restore index [{target}] because it's a backing index of data stream [{}]", ds.name)));
-    }
-    Ok(())
-}
-
 /// Global state items: their API path and body, from Elasticsearch's global metadata.
 fn global_items(g: &Value) -> Vec<(String, String, Value)> {
     let g = g.get("meta-data").unwrap_or(g);
     let managed = |v: &Value| v.pointer(&["_meta", "managed"]).and_then(Value::as_bool) == Some(true);
-    // Elasticsearch 9 keeps when a template was made and changed in it; its own `PUT` doesn't take
-    // them (they're set as it's put).
-    let body = |t: &Value| {
-        let mut t = t.as_object().cloned().unwrap_or_default();
-        t.shift_remove("created_date_millis");
-        t.shift_remove("modified_date_millis");
-        Value::Obj(t)
-    };
     let mut out = Vec::new();
     for (name, t) in g.pointer(&["component_template", "component_template"]).and_then(Value::as_object).into_iter().flatten() {
         if !managed(t) && !name.starts_with('.') {
-            out.push((format!("component template [{name}]"), format!("/_component_template/{}", crate::xpack::enc(name)), body(t)));
+            out.push((format!("component template [{name}]"), format!("/_component_template/{}", crate::xpack::enc(name)), t.clone()));
         }
     }
     for (name, p) in g.pointer(&["index_lifecycle", "policies"]).and_then(Value::as_object).into_iter().flatten() {
@@ -480,7 +377,7 @@ fn global_items(g: &Value) -> Vec<(String, String, Value)> {
     }
     for (name, t) in g.pointer(&["index_template", "index_template"]).and_then(Value::as_object).into_iter().flatten() {
         if !managed(t) && !name.starts_with('.') {
-            out.push((format!("index template [{name}]"), format!("/_index_template/{}", crate::xpack::enc(name)), body(t)));
+            out.push((format!("index template [{name}]"), format!("/_index_template/{}", crate::xpack::enc(name)), t.clone()));
         }
     }
     for (name, t) in g.get("templates").and_then(Value::as_object).into_iter().flatten() {
@@ -516,106 +413,33 @@ pub(super) async fn restore(ctx: &Ctx<'_>, req: Request, r: Arc<Repository>) -> 
     if !matches!(record.state.as_str(), "SUCCESS" | "PARTIAL") {
         return Err(restore_error(&req.repo, &req.snap, &s.uuid, format!("unsupported snapshot state [{}]", record.state)));
     }
-    // Which indices and data streams: patterns match both, as on Elasticsearch, and a data
-    // stream brings all its backing indices (a pattern matching only backing indices restores
-    // them as indices). Lists from the snapshot are a tenant's: membership goes through sets.
-    let in_snapshot: HashSet<&str> = record.indices.iter().map(String::as_str).collect();
-    let mut own: indexmap::IndexSet<String> = indexmap::IndexSet::new();
-    let mut streams_wanted: indexmap::IndexSet<String> = indexmap::IndexSet::new();
+    // Which indices.
+    let mut selected: Vec<String> = Vec::new();
     if req.patterns.is_empty() || req.patterns.iter().any(|p| p == "_all" || p == "*") {
-        own = record.indices.iter().filter(|i| !i.starts_with('.')).cloned().collect();
-        streams_wanted = record.data_streams.iter().filter(|d| !d.starts_with('.')).cloned().collect();
+        selected = record.indices.iter().filter(|i| !i.starts_with('.')).cloned().collect();
     } else {
         for p in &req.patterns {
             if let Some(ex) = p.strip_prefix('-') {
-                own.retain(|i| !glob_match(ex, i));
-                streams_wanted.retain(|d| !glob_match(ex, d));
+                selected.retain(|i| !glob_match(ex, i));
                 continue;
             }
             let hits: Vec<String> = record.indices.iter().filter(|i| glob_match(p, i)).cloned().collect();
-            let stream_hits: Vec<String> = record.data_streams.iter().filter(|d| glob_match(p, d)).cloned().collect();
-            if hits.is_empty() && stream_hits.is_empty() && !p.contains('*') && !req.ignore_unavailable {
+            if hits.is_empty() && !p.contains('*') && !req.ignore_unavailable {
                 return Err(restore_error(&req.repo, &req.snap, &s.uuid, format!("index [{p}] not found")));
             }
-            own.extend(hits);
-            streams_wanted.extend(stream_hits);
-        }
-    }
-    let mut notes: Vec<String> = Vec::new();
-    // System indices come back only with their feature state, as on Elasticsearch.
-    own.retain(|i| {
-        let system = crate::meta::names::is_system_index(i);
-        if system {
-            notes.push(format!("index [{i}] not restored: a system index comes back only with its feature state"));
-        }
-        !system
-    });
-    // Global metadata: data streams' definitions (kept in it whatever `include_global_state`
-    // was, as Elasticsearch does), and the global state when asked for.
-    let global = if !streams_wanted.is_empty() || (req.include_global_state && record.include_global_state) {
-        elastic::read_blob(ctx.cluster, &src, &format!("meta-{}.dat", s.uuid), "metadata", &mut elastic::base64_binary).await?.map(|(g, _held)| g)
-    } else {
-        None
-    };
-    if global.is_none() && !streams_wanted.is_empty() {
-        let why = format!("the snapshot's global metadata ([meta-{}.dat]), which holds its data streams, is missing", s.uuid);
-        if own.is_empty() {
-            return Err(restore_error(&req.repo, &req.snap, &s.uuid, format!("cannot restore data streams {:?}: {why}", streams_wanted.iter().collect::<Vec<_>>())));
-        }
-        notes.push(format!("data streams not restored: {why}"));
-    }
-    let defs = global.as_ref().map(stream_defs).unwrap_or_default();
-    let mut streams: Vec<Stream> = Vec::new();
-    // Each backing index belongs to one data stream: a snapshot saying otherwise is damaged.
-    let mut owner_of: HashMap<String, String> = HashMap::new();
-    for name in &streams_wanted {
-        let Some(def) = defs.get(name) else {
-            if global.is_some() {
-                notes.push(format!("data stream [{name}] not restored: the snapshot holds no definition of it"));
-            }
-            continue;
-        };
-        if def.get("system").and_then(Value::as_bool) == Some(true) {
-            notes.push(format!("data stream [{name}] not restored: a system data stream comes back only with its feature state"));
-            continue;
-        }
-        let backing: Vec<String> = def.get("indices").and_then(Value::as_array).into_iter().flatten().filter_map(|i| i.get("index_name").and_then(Value::as_str).map(str::to_string)).collect();
-        if backing.is_empty() || backing.iter().any(|b| !in_snapshot.contains(b.as_str())) {
-            notes.push(format!("data stream [{name}] not restored: its backing indices aren't all in the snapshot"));
-            continue;
-        }
-        for b in &backing {
-            if let Some(other) = owner_of.insert(b.clone(), name.clone())
-                && other != *name
-            {
-                return Err(restore_error(&req.repo, &req.snap, &s.uuid, format!("the snapshot is damaged: index [{b}] is a backing index of both data streams [{other}] and [{name}]")));
+            for h in hits {
+                if !selected.contains(&h) {
+                    selected.push(h);
+                }
             }
         }
-        if def.get("failure_indices").and_then(Value::as_array).is_some_and(|f| !f.is_empty()) {
-            notes.push(format!("data stream [{name}]: its failure store isn't restored"));
-        }
-        let target = match &req.rename {
-            Some(r) => r.apply(name)?,
-            None => name.clone(),
-        };
-        crate::meta::data_streams::validate_name(&target)?;
-        streams.push(Stream { source: name.clone(), target, def: def.clone(), backing });
     }
-    if global.as_ref().and_then(|g| g.get("meta-data").unwrap_or(g).pointer(&["data_stream", "data_stream_aliases"])).and_then(Value::as_object).is_some_and(|a| !a.is_empty()) && !streams.is_empty() {
-        notes.push("data stream aliases aren't restored".into());
-    }
-    // The indices to plan: those asked for, then each data stream's backing indices.
-    let mut selected: indexmap::IndexSet<String> = own.clone();
-    for stream in &streams {
-        selected.extend(stream.backing.iter().cloned());
-    }
-    // Plans from each index's metadata (a data stream's backing indices named after it).
+    // Plans from each index's metadata.
     let mut planned = Vec::new();
     let mut refused: Vec<(String, String)> = Vec::new();
     for name in &selected {
         let (meta, id) = index_metadata(ctx, &src, &data, &s, name).await?;
-        let target = owner_of.contains_key(name.as_str()).then(|| backing_target(&req.rename, name)).transpose()?;
-        match plan_index(&req, name, &meta, &id, target.as_deref())? {
+        match plan_index(&req, name, &meta, &id)? {
             Ok(p) => {
                 crate::meta::names::validate_index_name(&p.target)?;
                 planned.push(p);
@@ -628,7 +452,6 @@ pub(super) async fn restore(ctx: &Ctx<'_>, req: Request, r: Arc<Repository>) -> 
         let mut st = (*ctx.state()).clone();
         let mut kept = Vec::new();
         for p in planned {
-            check_not_backing(&st, &req, &s.uuid, &p.target)?;
             match create_planned(&mut st, &req, &s.uuid, &p, ctx.now_ms) {
                 Ok(()) => kept.push(p),
                 Err(e) if e.kind == "snapshot_restore_exception" => return Err(e),
@@ -636,28 +459,12 @@ pub(super) async fn restore(ctx: &Ctx<'_>, req: Request, r: Arc<Repository>) -> 
             }
         }
         planned = kept;
-        // A data stream comes back whole or not at all; the backing indices of one that doesn't
-        // aren't left behind either (unless asked for on their own).
-        let planned_sources: HashSet<String> = planned.iter().map(|p| p.source.clone()).collect();
-        let mut orphans: HashSet<String> = HashSet::new();
-        streams.retain(|stream| {
-            let whole = stream.backing.iter().all(|b| planned_sources.contains(b));
-            if !whole {
-                notes.push(format!("data stream [{}] not restored: not all of its backing indices can be, so none is", stream.source));
-                orphans.extend(stream.backing.iter().filter(|b| !own.contains(*b)).cloned());
-            }
-            whole
-        });
-        planned.retain(|p| !orphans.contains(&p.source));
-        for stream in &streams {
-            check_stream_free(&st, &req, &s.uuid, stream)?;
-        }
     }
     if !refused.is_empty() && !req.partial {
         let list: Vec<String> = refused.iter().map(|(i, why)| format!("index [{i}]: {why}")).collect();
         return Err(restore_error(&req.repo, &req.snap, &s.uuid, format!("cannot restore {}; set [partial] to restore the other indices", list.join("; "))));
     }
-    notes.extend(refused.iter().map(|(i, why)| format!("index [{i}] not restored: {why}")));
+    let mut notes: Vec<String> = refused.iter().map(|(i, why)| format!("index [{i}] not restored: {why}")).collect();
     for p in &planned {
         notes.extend(p.notes.iter().cloned());
     }
@@ -670,8 +477,8 @@ pub(super) async fn restore(ctx: &Ctx<'_>, req: Request, r: Arc<Repository>) -> 
     if req.include_global_state {
         if !record.include_global_state {
             notes.push("the snapshot holds no global state".into());
-        } else if let Some(g) = &global {
-            for (what, path, body) in global_items(g) {
+        } else if let Some((g, _held)) = elastic::read_blob(ctx.cluster, &src, &format!("meta-{}.dat", s.uuid), "metadata", &mut elastic::base64_binary).await? {
+            for (what, path, body) in global_items(&g) {
                 if let Err(e) = crate::xpack::internal::call_as(ctx, ctx.cluster, "PUT", &path, Some(&body)).await {
                     notes.push(format!("{what} not restored: {}", e.reason()));
                 }
@@ -694,30 +501,11 @@ pub(super) async fn restore(ctx: &Ctx<'_>, req: Request, r: Arc<Repository>) -> 
         index_settings: Settings::new(),
         ignore_settings: Vec::new(),
     };
-    // Each data stream with its backing indices, as restored.
-    let mut stream_copy: Vec<(Stream, Vec<String>)> = Vec::new();
-    for st in &streams {
-        let targets = st.backing.iter().map(|b| backing_target(&req.rename, b)).collect::<EsResult<_>>()?;
-        stream_copy.push((Stream { source: st.source.clone(), target: st.target.clone(), def: st.def.clone(), backing: st.backing.clone() }, targets));
-    }
     ctx.cluster
         .update(move |st| {
             for p in &plan_copy {
-                check_not_backing(st, &req_for_update, &snap_uuid, &p.target)?;
                 create_planned(st, &req_for_update, &snap_uuid, p, now)?;
             }
-            for (stream, targets) in &stream_copy {
-                check_stream_free(st, &req_for_update, &snap_uuid, stream)?;
-                // Its backing indices are the ones this restore just created, no other data
-                // stream's.
-                for t in targets {
-                    if !st.metadata.indices.contains_key(t) || st.metadata.data_stream_of(t).is_some() {
-                        return Err(restore_error(&req_for_update.repo, &req_for_update.snap, &snap_uuid, format!("cannot restore data stream [{}]: its backing index [{t}] isn't one this restore creates", stream.target)));
-                    }
-                }
-                st.metadata.data_streams.insert(stream.target.clone(), Arc::new(stream.to_meta(targets.clone())?));
-            }
-            st.check_unique_names()?;
             Ok(())
         })
         .await?;
@@ -728,7 +516,7 @@ pub(super) async fn restore(ctx: &Ctx<'_>, req: Request, r: Arc<Repository>) -> 
         let Some(idx) = st.metadata.indices.get(&p.target) else { continue };
         let progress: Arc<Vec<ShardProgress>> = Arc::new((0..p.shards).map(|_| ShardProgress::default()).collect());
         ctx.cluster.snapshot_data.elastic.progress.lock().insert(idx.uuid.clone(), progress.clone());
-        jobs.push(IndexJob { target: idx.clone(), index_id: p.index_id.clone(), shards: p.shards, vectors: p.vectors.clone(), progress, finished: AtomicBool::new(false), done: Vec::new() });
+        jobs.push(IndexJob { target: idx.clone(), index_id: p.index_id.clone(), shards: p.shards, vectors: p.vectors.clone(), progress, finished: AtomicBool::new(false) });
     }
     let total: i64 = planned.iter().map(|p| p.shards as i64).sum();
     let targets: Vec<String> = planned.iter().map(|p| p.target.clone()).collect();
@@ -742,7 +530,7 @@ pub(super) async fn restore(ctx: &Ctx<'_>, req: Request, r: Arc<Repository>) -> 
         cancellable: true,
         cancelled: None,
     });
-    let stop = Stop::of(ctx.cluster, guard.id);
+    let cancelled = ctx.cluster.tasks.get(guard.id).map(|t| t.cancelled).unwrap_or_default();
     // The restore runs in a task of its own, the request only waiting for it (if asked to): a
     // client that goes away drops the wait, never the restore half way.
     let outcome = match ctx.cluster.handle() {
@@ -753,7 +541,7 @@ pub(super) async fn restore(ctx: &Ctx<'_>, req: Request, r: Arc<Repository>) -> 
                 let guard = cluster.tasks.adopt(id);
                 let busy = Busy(&cluster.snapshot_data.elastic);
                 // A failure is recorded in each index's recovery source (`set_state`).
-                let out = supervise(cluster.clone(), job, stop).await;
+                let out = supervise(cluster.clone(), job, cancelled).await;
                 drop(busy);
                 drop(guard);
                 out
@@ -765,7 +553,7 @@ pub(super) async fn restore(ctx: &Ctx<'_>, req: Request, r: Arc<Repository>) -> 
         }
         // Without background work (an embedded cluster): in the request.
         None => {
-            let out = run(ctx.cluster, &job, &stop).await;
+            let out = run(ctx.cluster, &job, &cancelled).await;
             drop(guard);
             drop(busy);
             out
@@ -807,120 +595,6 @@ struct IndexJob {
     progress: Arc<Vec<ShardProgress>>,
     /// Its outcome is recorded (`done` or `failed`).
     finished: AtomicBool,
-    /// Shards a previous owner finished ([`finished_shards`]): a resumed restore skips them.
-    done: Vec<u32>,
-}
-
-/// The shards of a restore its recovery source records as finished (`roll_elastic.done`), each
-/// once and in range: those whose documents were durable before the record was written.
-fn finished_shards(e: &Value, shards: u32) -> Vec<u32> {
-    let mut out: Vec<u32> = e.get("done").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_i64).filter(|n| (0..shards as i64).contains(n)).map(|n| n as u32).collect();
-    out.sort_unstable();
-    out.dedup();
-    out
-}
-
-/// Records shard `shard` of index `index` finished in its recovery source (the index of that
-/// name only while it's the one restored), once its documents are durable: a new owner resumes
-/// from the next one, never skipping one whose documents it doesn't have.
-async fn record_shard_done(cluster: &crate::Cluster, index: &IndexMeta, shard: u32) -> EsResult<()> {
-    let (name, uuid) = (index.name.clone(), index.uuid.clone());
-    cluster
-        .update(move |st| {
-            let Some(idx) = st.metadata.indices.get(&name).filter(|i| i.uuid == uuid) else { return Ok(()) };
-            let mut idx = (**idx).clone();
-            if let Some(rs) = &idx.recovery_source {
-                let mut rs = (**rs).clone();
-                if let Some(Value::Obj(e)) = rs.get_mut("roll_elastic") {
-                    let mut done: Vec<Value> = e.get("done").and_then(Value::as_array).cloned().unwrap_or_default();
-                    if !done.iter().any(|d| d.as_i64() == Some(shard as i64)) {
-                        done.push(Value::from(shard as i64));
-                    }
-                    e.insert("done".into(), Value::Arr(done));
-                }
-                idx.recovery_source = Some(Arc::new(rs));
-            }
-            st.metadata.indices.insert(name, Arc::new(idx));
-            Ok(())
-        })
-        .await
-}
-
-/// Test hook (search-control's takeover test, through the `test-hooks` feature only its
-/// dev-dependency turns on): the shards restores start, in order, and a shard after whose
-/// record a restore stops for good, as on a node killed there.
-#[cfg(feature = "test-hooks")]
-#[doc(hidden)]
-#[derive(Default)]
-pub struct TestHook {
-    pub started: std::sync::Mutex<Vec<(String, u32)>>,
-    pub stop_after: std::sync::Mutex<Option<(String, u32)>>,
-    pub stopped: tokio::sync::Notify,
-}
-
-#[cfg(feature = "test-hooks")]
-impl TestHook {
-    fn stops_after(&self, index: &str, shard: u32) -> bool {
-        let mut stop = self.stop_after.lock().unwrap();
-        let here = stop.as_ref().is_some_and(|(i, s)| i == index && *s == shard);
-        if here {
-            *stop = None;
-        }
-        here
-    }
-}
-
-#[cfg(feature = "test-hooks")]
-#[doc(hidden)]
-pub static TEST_HOOK: std::sync::OnceLock<TestHook> = std::sync::OnceLock::new();
-
-/// [`TestHook`]: shard `shard` of `index` starts.
-fn hook_started(_index: &str, _shard: u32) {
-    #[cfg(feature = "test-hooks")]
-    if let Some(h) = TEST_HOOK.get() {
-        h.started.lock().unwrap().push((_index.to_string(), _shard));
-    }
-}
-
-/// [`TestHook`]: shard `shard` of `index` is recorded finished; the restore never goes on when
-/// the hook stops it here.
-async fn hook_finished(_index: &str, _shard: u32) {
-    #[cfg(feature = "test-hooks")]
-    if let Some(h) = TEST_HOOK.get()
-        && h.stops_after(_index, _shard)
-    {
-        h.stopped.notify_one();
-        std::future::pending::<()>().await;
-    }
-}
-
-/// Records shard `shard` of `index` finished once every document it indexed is durable (its
-/// shards' logs acknowledged them): a takeover resumes after it.
-async fn shard_finished(cluster: &crate::Cluster, index: &Arc<IndexMeta>, shard: u32) -> EsResult<()> {
-    // The copy target isn't `Sync`: dropped before the wait.
-    let logs = CopyTarget::new(cluster, index)?.logs();
-    for log in logs {
-        log.durable().await?;
-    }
-    record_shard_done(cluster, index, shard).await
-}
-
-/// What stops a restore's task: its cancellation, and why ([`crate::cluster::TaskInfo::leaving`]).
-#[derive(Clone, Default)]
-struct Stop {
-    cancelled: Arc<AtomicBool>,
-    leaving: Arc<AtomicBool>,
-}
-
-impl Stop {
-    fn of(cluster: &crate::Cluster, task: u64) -> Stop {
-        cluster.tasks.get(task).map(|t| Stop { cancelled: t.cancelled, leaving: t.leaving }).unwrap_or_default()
-    }
-
-    /// Whether `e` is the restore stopping because the cluster leaves this node, not a failure.
-    fn left(&self, e: &EsError) -> bool {
-        e.kind == "task_cancelled_exception" && self.cancelled.load(Ordering::SeqCst) && self.leaving.load(Ordering::SeqCst)
-    }
 }
 
 struct Job {
@@ -958,9 +632,9 @@ async fn set_state(cluster: &crate::Cluster, index: &IndexMeta, state: &str, fai
 /// Runs [`run`] in a task of its own: when that task panics, the indices it hadn't finished are
 /// marked failed before this returns (and so before the caller lets another restore start), or
 /// every later owner would start them again.
-async fn supervise(cluster: Arc<crate::Cluster>, job: Arc<Job>, stop: Stop) -> EsResult<i64> {
+async fn supervise(cluster: Arc<crate::Cluster>, job: Arc<Job>, cancelled: Arc<AtomicBool>) -> EsResult<i64> {
     let (c, j) = (cluster.clone(), job.clone());
-    match tokio::spawn(async move { run(&c, &j, &stop).await }).await {
+    match tokio::spawn(async move { run(&c, &j, &cancelled).await }).await {
         Ok(out) => out,
         // Cancelled with the runtime (the node stopping): the indices stay restoring, for the
         // next owner to resume.
@@ -977,24 +651,12 @@ async fn supervise(cluster: Arc<crate::Cluster>, job: Arc<Job>, stop: Stop) -> E
 }
 
 /// Fills every index of `job`: the shards that failed (the first failure ends the restore).
-async fn run(cluster: &crate::Cluster, job: &Job, stop: &Stop) -> EsResult<i64> {
+async fn run(cluster: &crate::Cluster, job: &Job, cancelled: &Arc<AtomicBool>) -> EsResult<i64> {
     let _permit = POOL.acquire().await.map_err(|e| EsError::internal(e.to_string()))?;
     for ix in &job.indices {
         let result = async {
             for shard in 0..ix.shards {
-                if ix.done.contains(&shard) {
-                    // Finished by a previous owner: shown done (its counts stayed there).
-                    let p = &ix.progress[shard as usize];
-                    let now = crate::time::now_millis();
-                    p.start_ms.store(now, Ordering::Relaxed);
-                    p.stop_ms.store(now, Ordering::Relaxed);
-                    p.stage.store(2, Ordering::Relaxed);
-                    continue;
-                }
-                hook_started(&ix.target.name, shard);
-                restore_shard(cluster, job, ix, shard, &stop.cancelled).await?;
-                shard_finished(cluster, &ix.target, shard).await?;
-                hook_finished(&ix.target.name, shard).await;
+                restore_shard(cluster, job, ix, shard, cancelled).await?;
             }
             CopyTarget::new(cluster, &ix.target)?.finish()
         }
@@ -1004,15 +666,6 @@ async fn run(cluster: &crate::Cluster, job: &Job, stop: &Stop) -> EsResult<i64> 
             Ok(()) => {
                 set_state(cluster, &ix.target, "done", None).await;
                 ix.finished.store(true, Ordering::SeqCst);
-            }
-            // Stopped because the cluster leaves this node (a drain, a rebalance, the node
-            // stopping): the indices stay restoring, and the next owner resumes them after their
-            // finished shards. Any other failure, during an unload too, is recorded.
-            Err(e) if stop.left(&e) => {
-                for later in &job.indices {
-                    cluster.snapshot_data.elastic.progress.lock().remove(&later.target.uuid);
-                }
-                return Err(e);
             }
             Err(e) => {
                 set_state(cluster, &ix.target, "failed", Some(e.reason().to_string())).await;
@@ -1449,9 +1102,8 @@ async fn restore_shard(cluster: &crate::Cluster, job: &Job, ix: &IndexJob, shard
 /// repositories its indices record as still running (the previous owner stopped mid-way).
 pub fn resume(cluster: &Arc<crate::Cluster>) {
     let st = cluster.state();
-    // (repository, snapshot, snapshot uuid) → (index, its id in the repository, shards, vectors,
-    // shards already finished).
-    type Unfinished = HashMap<(String, String, String), Vec<(Arc<IndexMeta>, String, u32, Vec<String>, Vec<u32>)>>;
+    // (repository, snapshot, snapshot uuid) → (index, its id in the repository, shards, vectors).
+    type Unfinished = HashMap<(String, String, String), Vec<(Arc<IndexMeta>, String, u32, Vec<String>)>>;
     let mut by_snapshot: Unfinished = HashMap::new();
     for idx in st.metadata.indices.values() {
         let Some(rs) = &idx.recovery_source else { continue };
@@ -1463,8 +1115,7 @@ pub fn resume(cluster: &Arc<crate::Cluster>) {
         let key = (s(rs, "repository"), s(rs, "snapshot"), e.get("snapshot_uuid").and_then(Value::as_str).unwrap_or_default().to_string());
         let vectors = e.get("vectors").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
         let shards = e.get("shards").and_then(Value::as_i64).unwrap_or(idx.number_of_shards() as i64) as u32;
-        let done = finished_shards(e, shards);
-        by_snapshot.entry(key).or_default().push((idx.clone(), e.get("index_id").and_then(Value::as_str).unwrap_or_default().to_string(), shards, vectors, done));
+        by_snapshot.entry(key).or_default().push((idx.clone(), e.get("index_id").and_then(Value::as_str).unwrap_or_default().to_string(), shards, vectors));
     }
     for ((repo, snap, uuid), indices) in by_snapshot {
         let cluster = cluster.clone();
@@ -1492,10 +1143,10 @@ pub fn resume(cluster: &Arc<crate::Cluster>) {
             }
             let _busy = Busy(&cluster.snapshot_data.elastic);
             let mut jobs = Vec::new();
-            for (idx, index_id, shards, vectors, done) in indices {
+            for (idx, index_id, shards, vectors) in indices {
                 let progress: Arc<Vec<ShardProgress>> = Arc::new((0..shards).map(|_| ShardProgress::default()).collect());
                 cluster.snapshot_data.elastic.progress.lock().insert(idx.uuid.clone(), progress.clone());
-                jobs.push(IndexJob { target: idx, index_id, shards, vectors, progress, finished: AtomicBool::new(false), done });
+                jobs.push(IndexJob { target: idx, index_id, shards, vectors, progress, finished: AtomicBool::new(false) });
             }
             let job = Arc::new(Job { src: Arc::new(src), snapshot: uuid, name: snap.clone(), indices: jobs });
             let guard = cluster.tasks.start(crate::cluster::NewTask {
@@ -1507,8 +1158,8 @@ pub fn resume(cluster: &Arc<crate::Cluster>) {
                 cancellable: true,
                 cancelled: None,
             });
-            let stop = Stop::of(&cluster, guard.id);
-            let _ = supervise(cluster.clone(), job, stop).await;
+            let cancelled = cluster.tasks.get(guard.id).map(|t| t.cancelled).unwrap_or_default();
+            let _ = supervise(cluster.clone(), job, cancelled).await;
             drop(guard);
         });
     }
@@ -1517,150 +1168,6 @@ pub fn resume(cluster: &Arc<crate::Cluster>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A resumed restore skips the shards recorded finished, each once and only those in range
-    /// (a record a tenant could have written is never trusted further).
-    #[test]
-    fn a_resumed_restore_skips_only_finished_shards() {
-        let e = obj! { "done" => Value::Arr(vec![Value::from(2), Value::from(0), Value::from(2), Value::from(7), Value::from(-1), Value::from("1")]) };
-        assert_eq!(finished_shards(&e, 4), vec![0, 2]);
-        assert!(finished_shards(&obj! { "state" => "running" }, 4).is_empty());
-    }
-
-    /// A log whose `durable` waits until the test releases it (a permit per call).
-    struct HeldLog {
-        waiting: tokio::sync::Notify,
-        release: tokio::sync::Semaphore,
-    }
-
-    impl Default for HeldLog {
-        fn default() -> HeldLog {
-            HeldLog { waiting: tokio::sync::Notify::new(), release: tokio::sync::Semaphore::new(0) }
-        }
-    }
-
-    impl crate::engine::ShardLog for HeldLog {
-        fn append(&self, _: &crate::engine::LoggedOp<'_>) -> EsResult<()> {
-            Ok(())
-        }
-
-        fn durable(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = EsResult<()>> + Send + '_>> {
-            Box::pin(async move {
-                self.waiting.notify_one();
-                self.release.acquire().await.unwrap().forget();
-                Ok(())
-            })
-        }
-    }
-
-    struct HeldStorage(Arc<HeldLog>);
-
-    impl crate::engine::ShardStorage for HeldStorage {
-        fn open(&self, uuid: &str, shard: u32, schema: search_index::Schema) -> EsResult<search_index::Shard> {
-            crate::engine::MemoryShards.open(uuid, shard, schema)
-        }
-
-        fn log(&self, _: &str, _: u32) -> Option<Arc<dyn crate::engine::ShardLog>> {
-            Some(self.0.clone())
-        }
-    }
-
-    async fn call(c: &crate::Cluster, method: &str, uri: &str, body: &str) -> (u16, Value) {
-        let req = if body.is_empty() { crate::rest::EsRequest::new(method, uri) } else { crate::rest::EsRequest::json(method, uri, body.to_string()) };
-        let r = crate::rest::handle(c, req).await;
-        (r.status, crate::json::parse(&r.body).ok().flatten().unwrap_or_default())
-    }
-
-    /// A cluster whose shards' logs are `held`'s, with `settings` (node settings).
-    async fn held_cluster(held: &Arc<HeldLog>, settings: &[(&str, String)]) -> Arc<crate::Cluster> {
-        let mut cfg = crate::cluster::ClusterConfig::new("c");
-        cfg.node_settings.extend(settings.iter().map(|(k, v)| (k.to_string(), v.clone())));
-        let mut c = crate::Cluster::open(cfg, Arc::new(crate::cluster::MemoryStore::new())).await.unwrap();
-        c.engine = crate::engine::Engine::with_storage(Arc::new(HeldStorage(held.clone())));
-        Arc::new(c)
-    }
-
-    /// Records index `name` as being restored (no shard finished).
-    async fn mark_restoring(c: &crate::Cluster, name: &str) {
-        let name = name.to_string();
-        c.update(move |st| {
-            let mut idx = (**st.metadata.indices.get(&name).unwrap()).clone();
-            let mut rs = Map::new();
-            rs.insert("roll_elastic".into(), obj! { "state" => "running", "shards" => idx.number_of_shards() as i64, "done" => Value::Arr(Vec::new()) });
-            idx.recovery_source = Some(Arc::new(rs));
-            st.metadata.indices.insert(name, Arc::new(idx));
-            Ok(())
-        })
-        .await
-        .unwrap();
-    }
-
-    /// Index `name`'s restore record: its state and the shards it finished.
-    fn restore_record(c: &crate::Cluster, name: &str) -> (Option<String>, Vec<u32>) {
-        let st = c.state();
-        let e = st.metadata.indices.get(name).and_then(|i| i.recovery_source.clone()).and_then(|rs| rs.get("roll_elastic").cloned()).unwrap();
-        (e.get("state").and_then(Value::as_str).map(str::to_string), finished_shards(&e, 64))
-    }
-
-    /// A shard is recorded finished only once its log says what it indexed is durable: a new
-    /// owner never skips a shard whose documents it doesn't have.
-    #[tokio::test]
-    async fn a_shard_is_recorded_finished_only_once_its_documents_are_durable() {
-        let held = Arc::new(HeldLog::default());
-        let c = held_cluster(&held, &[]).await;
-        assert_eq!(call(&c, "PUT", "/i", r#"{"settings":{"number_of_shards":2}}"#).await.0, 200);
-        mark_restoring(&c, "i").await;
-        let target = c.state().metadata.indices.get("i").cloned().unwrap();
-        let task = tokio::spawn({
-            let c = c.clone();
-            async move { shard_finished(&c, &target, 1).await }
-        });
-        held.waiting.notified().await;
-        assert!(restore_record(&c, "i").1.is_empty(), "recorded before its documents were durable");
-        // Each shard's log is waited on in turn.
-        held.release.add_permits(1);
-        held.waiting.notified().await;
-        assert!(restore_record(&c, "i").1.is_empty(), "recorded before every shard's log was durable");
-        held.release.add_permits(1);
-        task.await.unwrap().unwrap();
-        assert_eq!(restore_record(&c, "i").1, vec![1]);
-    }
-
-    /// A node stopping cancels its tasks as leaving (`TaskRegistry::cancel_all`, SIGTERM): a
-    /// restore it stops stays running, with the shards it finished, for the next owner.
-    #[tokio::test]
-    async fn a_node_stopping_leaves_its_restore_running() {
-        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/es-snapshots");
-        let held = Arc::new(HeldLog::default());
-        let c = held_cluster(&held, &[("path.repo", fixtures.display().to_string())]).await;
-        assert_eq!(call(&c, "PUT", "/_snapshot/es", r#"{"type":"fs","settings":{"location":"es-9.5.5"}}"#).await.0, 200);
-        let restore = tokio::spawn({
-            let c = c.clone();
-            async move { call(&c, "POST", "/_snapshot/es/snap-1/_restore?wait_for_completion=true", r#"{"indices":"mixed"}"#).await }
-        });
-        // Shard 0 is indexed; the node stops while it's made durable.
-        held.waiting.notified().await;
-        assert!(c.tasks.cancel_all() >= 1);
-        held.release.add_permits(64);
-        let (s, v) = restore.await.unwrap();
-        assert!(s >= 400, "{v:?}");
-        assert_eq!(restore_record(&c, "mixed"), (Some("running".into()), vec![0]));
-    }
-
-    /// Nothing deletes documents of an index a restore is still filling: a delete-by-query
-    /// reaches each document past the write checks of a request, and fails on every one.
-    #[tokio::test]
-    async fn a_delete_by_query_waits_for_the_restore() {
-        let c = held_cluster(&Arc::new(HeldLog::default()), &[]).await;
-        for i in 0..3 {
-            assert_eq!(call(&c, "PUT", &format!("/i/_doc/{i}?refresh=true"), r#"{"n":1}"#).await.0, 201);
-        }
-        mark_restoring(&c, "i").await;
-        let (_, v) = call(&c, "POST", "/i/_delete_by_query?refresh=true", r#"{"query":{"match_all":{}}}"#).await;
-        let failures = v.get("failures").and_then(Value::as_array).map_or(0, Vec::len);
-        assert!(v.get("deleted").and_then(Value::as_i64) == Some(0) && failures > 0, "{v:?}");
-        assert_eq!(call(&c, "GET", "/i/_count", "").await.1.get("count").and_then(Value::as_i64), Some(3));
-    }
 
     #[test]
     fn vectors_go_back_at_the_end_keeping_the_source_bytes() {
@@ -1704,12 +1211,12 @@ mod tests {
             ignore_settings: vec![],
         };
         let meta = |settings: Value, mapping: Value| obj! { "i" => obj! { "settings" => settings, "mappings" => Value::Arr(vec![obj! { "_doc" => mapping }]) } };
-        let refused = |m: Value| plan_index(&req, "i", &m, "id", None).unwrap().err();
+        let refused = |m: Value| plan_index(&req, "i", &m, "id").unwrap().err();
         assert!(refused(meta(obj! { "index.number_of_shards" => "1" }, obj! { "_source" => obj! { "enabled" => false } })).unwrap().contains("enabled: false"));
         assert!(refused(meta(obj! { "index.mapping.source.mode" => "synthetic" }, obj! {})).unwrap().contains("synthetic"));
         assert!(refused(meta(obj! { "index.mode" => "logsdb" }, obj! {})).unwrap().contains("logsdb"));
         assert!(refused(meta(obj! { "index.mode" => "logsdb", "index.mapping.source.mode" => "stored" }, obj! {})).is_none());
-        let p = plan_index(&req, "i", &meta(obj! { "index.number_of_shards" => "2", "index.uuid" => "x", "index.version.created" => "9111000" }, obj! { "properties" => obj! { "v" => obj! { "type" => "dense_vector" } }, "_source" => obj! { "excludes" => Value::from(vec!["secret".to_string()]) } }), "id", None).unwrap().unwrap();
+        let p = plan_index(&req, "i", &meta(obj! { "index.number_of_shards" => "2", "index.uuid" => "x", "index.version.created" => "9111000" }, obj! { "properties" => obj! { "v" => obj! { "type" => "dense_vector" } }, "_source" => obj! { "excludes" => Value::from(vec!["secret".to_string()]) } }), "id").unwrap().unwrap();
         assert_eq!((p.shards, p.vectors.clone()), (2, vec!["v".to_string()]));
         assert!(p.settings.get("index.uuid").is_none() && p.notes.iter().any(|n| n.contains("secret")) && p.notes.iter().any(|n| n.contains("index.uuid")));
     }

@@ -310,6 +310,10 @@ pub fn authenticate(ctx: &Ctx) -> EsResult<()> {
     let req = ctx.request;
     // A linked remote cluster's request: the node keeps the header only on roll's own calls.
     if let Some(access) = req.header(crate::remote::links::REMOTE_ACCESS_HEADER) {
+        // Cross-cluster keys are Elasticsearch's ([`es_credentials`]).
+        if !es_credentials(ctx.cluster) {
+            return Err(opensearch::unauthorized());
+        }
         let key = req.header("authorization").and_then(|h| {
             let h = h.trim();
             let (scheme, value) = h.split_once(' ')?;
@@ -395,17 +399,36 @@ pub fn authenticate_header(cluster: &Cluster, header: &str, uri: &str) -> EsResu
         }
         return users::authenticate_password(cluster, user, password).ok_or_else(|| unauthorized(format!("unable to authenticate user [{user}] for REST request [{uri}]")));
     }
-    if scheme.eq_ignore_ascii_case("apikey") {
+    if scheme.eq_ignore_ascii_case("apikey") || scheme.eq_ignore_ascii_case("bearer") {
+        if !es_credentials(cluster) {
+            return Err(opensearch::unauthorized());
+        }
+        if scheme.eq_ignore_ascii_case("bearer") {
+            return tokens::authenticate_bearer(cluster, value);
+        }
         if derived::is_derived(value) {
             return derived::authenticate(cluster, value);
         }
         return api_keys::authenticate(cluster, value);
     }
-    if scheme.eq_ignore_ascii_case("bearer") {
-        return tokens::authenticate_bearer(cluster, value);
-    }
     // Other schemes present no credentials Elasticsearch's realms understand.
     Ok(Principal::owner())
+}
+
+/// roll's own revocation of a key the cluster's other flavor made (`DELETE …/keys/{key}` after
+/// a switch of flavor): with it, `DELETE _security/api_key` (`ids`) removes the internal users
+/// and roles roll made for OpenSearch keys and links ([`opensearch::KEY_USER_PREFIXES`]), and
+/// `DELETE _plugins/_security/api/internalusers/{id}` invalidates Elasticsearch API key `id` and
+/// touches no user. The node drops it from every request but roll's own (`search-server`'s
+/// REST port, the control plane's console), so a revoked key stays revoked across a switch back.
+pub const DORMANT_KEY_HEADER: &str = "x-roll-dormant-key";
+
+/// Whether the cluster takes Elasticsearch's own credentials: API keys (cross-cluster ones
+/// too), access tokens and service account tokens. OpenSearch has none of them, so an
+/// Elasticsearch-flavor cluster's, kept in its state across a switch of flavor, never sign in
+/// to it (a switch back finds them as they were; `DELETE …/keys/{key}` revokes one meanwhile).
+fn es_credentials(cluster: &Cluster) -> bool {
+    cluster.dialect == crate::cluster::Dialect::Elasticsearch
 }
 
 /// Authenticates credentials a node could not verify against the cluster's own credentials
@@ -433,13 +456,13 @@ pub fn authenticate_native(cluster: &Cluster, header: &str) -> Option<Principal>
         }
         return users::authenticate_password(cluster, user, password);
     }
-    if scheme.eq_ignore_ascii_case("apikey") {
+    if scheme.eq_ignore_ascii_case("apikey") && es_credentials(cluster) {
         if derived::is_derived(value) {
             return derived::authenticate(cluster, value).ok();
         }
         return api_keys::authenticate(cluster, value).ok();
     }
-    if scheme.eq_ignore_ascii_case("bearer") {
+    if scheme.eq_ignore_ascii_case("bearer") && es_credentials(cluster) {
         return tokens::authenticate_bearer(cluster, value).ok();
     }
     None
@@ -449,7 +472,7 @@ pub fn authenticate_native(cluster: &Cluster, header: &str) -> Option<Principal>
 /// header): a `cross_cluster` key of this cluster only.
 pub fn authenticate_native_link(cluster: &Cluster, header: &str, access: &str) -> Option<Principal> {
     let (scheme, value) = header.trim().split_once(' ')?;
-    if !scheme.eq_ignore_ascii_case("apikey") {
+    if !scheme.eq_ignore_ascii_case("apikey") || !es_credentials(cluster) {
         return None;
     }
     api_keys::authenticate_link(cluster, value.trim(), access).ok()
@@ -467,6 +490,9 @@ pub struct Effective {
     /// what its data stream is (`IndicesPermission`'s `IndexResource`). Failure store indices
     /// are not: they need the failure store's own privileges.
     pub parents: std::collections::HashMap<String, String>,
+    /// Aliases over watch records (`.watcher-history-*`), with those indices: a grant of the
+    /// alias reaches them only when one reaches the indices too ([`privileges::grant_names`]).
+    pub history_aliases: std::collections::HashMap<String, Vec<String>>,
 }
 
 impl Effective {
@@ -486,6 +512,12 @@ impl Effective {
     pub fn allows_index(&self, action: &str, index: &str) -> bool {
         let restricted = privileges::is_restricted(index);
         let parent = self.parents.get(index);
+        // Through an alias over watch records: the records themselves too.
+        if let Some(behind) = self.history_aliases.get(index)
+            && !behind.iter().all(|i| self.allows(|p| p.allows_index(action, i, privileges::is_restricted(i))))
+        {
+            return false;
+        }
         self.allows(|p| p.allows_index(action, index, restricted) || parent.is_some_and(|ds| p.allows_index(action, ds, privileges::is_restricted(ds))))
     }
 
@@ -506,6 +538,11 @@ impl Effective {
     }
 
     pub fn has_index_privilege(&self, privilege: &str, index: &str) -> bool {
+        if let Some(behind) = self.history_aliases.get(index)
+            && !behind.iter().all(|i| self.allows(|p| p.has_index_privilege(privilege, i)))
+        {
+            return false;
+        }
         self.allows(|p| p.has_index_privilege(privilege, index))
     }
 
@@ -621,12 +658,64 @@ pub fn effective(file: &FileRoles, st: &crate::meta::ClusterState, p: &Principal
         _ => (permissions_of_roles(file, st, &p.roles), None),
     };
     let parents = st.metadata.data_streams.values().flat_map(|d| d.indices.iter().map(|i| (i.clone(), d.name.clone()))).collect();
-    Effective { own, limited_by, also, parents }
+    let mut history_aliases: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for (name, idx) in st.metadata.indices.iter().filter(|(n, _)| privileges::is_watch_history(n)) {
+        for alias in idx.aliases.keys() {
+            history_aliases.entry(alias.clone()).or_default().push(name.clone());
+        }
+    }
+    Effective { own, limited_by, also, parents, history_aliases }
 }
 
 /// Read APIs whose wildcard index expressions Elasticsearch expands to the indices the user
 /// may read (`IndicesAndAliasesResolver`) instead of failing on the others.
-const NARROWED: &[&str] = &["search", "count", "field_caps", "async_search.submit", "eql.search", "search_template", "open_point_in_time", "knn_search", "indices.get", "cat.indices"];
+/// And every other API whose request is `IndicesRequest.Replaceable` there: the by-query APIs,
+/// whose scan resolves the request's own `expand_wildcards` (hidden indices too), and the index
+/// admin and monitoring APIs a monitoring agent or index tool calls over `*`. They answer for the
+/// indices authorized; an index named explicitly that isn't is still a 403.
+const NARROWED: &[&str] = &[
+    "search",
+    "count",
+    "field_caps",
+    "async_search.submit",
+    "eql.search",
+    "search_template",
+    "open_point_in_time",
+    "knn_search",
+    "indices.get",
+    "cat.indices",
+    "update_by_query",
+    "delete_by_query",
+    "indices.get_settings",
+    "indices.get_mapping",
+    "indices.get_field_mapping",
+    "indices.stats",
+    "indices.refresh",
+    "indices.flush",
+    "indices.forcemerge",
+    "indices.segments",
+    "indices.recovery",
+    "indices.clear_cache",
+    "indices.get_alias",
+    "indices.exists_alias",
+    "indices.validate_query",
+    "cat.shards",
+    "cat.aliases",
+    "cat.recovery",
+    "cat.count",
+];
+
+/// The read APIs the OpenSearch plugin checks over every index their wildcards reach, refusing
+/// the request when one isn't permitted ([`check_all`]; `do_not_fail_on_forbidden` is off by
+/// default). The rest of [`NARROWED`] takes the generic check for OpenSearch principals, as it
+/// did, but for `_cat/shards`, which lists hidden indices by default: narrowed, so it neither
+/// refuses a data user nor lists what the check never saw.
+const OS_WHOLE: &[&str] = &["search", "count", "field_caps", "async_search.submit", "eql.search", "search_template", "open_point_in_time", "knn_search", "indices.get", "cat.indices"];
+
+/// Whether `api` narrows its wildcards for principal `p` ([`NARROWED`], [`OS_WHOLE`]).
+fn narrows(p: &Principal, api: &str) -> bool {
+    NARROWED.contains(&api) && (p.os().is_none() || api == "cat.shards")
+}
 
 /// The indices options [`narrow`] expands an API's wildcards with (before its parameters).
 fn narrow_defaults(api: &str) -> crate::meta::resolve::IndicesOptions {
@@ -634,6 +723,10 @@ fn narrow_defaults(api: &str) -> crate::meta::resolve::IndicesOptions {
     match api {
         "indices.get" => IndicesOptions::STRICT_EXPAND_OPEN,
         "cat.indices" => IndicesOptions::STRICT_EXPAND,
+        "cat.shards" => IndicesOptions::STRICT_EXPAND_HIDDEN,
+        // `GetAliasesRequest`: open and closed indices, `_cat/aliases` hidden ones too.
+        "indices.get_alias" | "indices.exists_alias" => IndicesOptions { expand_closed: true, ..IndicesOptions::STRICT_EXPAND_OPEN },
+        "cat.aliases" => IndicesOptions { expand_closed: true, expand_hidden: true, ..IndicesOptions::STRICT_EXPAND_OPEN },
         _ => IndicesOptions::LENIENT_EXPAND_OPEN,
     }
 }
@@ -788,7 +881,7 @@ fn authorize_action(ctx: &Ctx) -> EsResult<Option<String>> {
             let action = if ctx.api.name() == "create" { "indices:data/write/index" } else { action.as_str() };
             return if eff.allows_index(action, &name) { Ok(None) } else { Err(denied(p, action, None)) };
         }
-        if scope == Scope::Index && NARROWED.contains(&ctx.api.name()) {
+        if scope == Scope::Index && OS_WHOLE.contains(&ctx.api.name()) {
             let defaults = narrow_defaults(ctx.api.name());
             let opts = ctx.indices_options(defaults).unwrap_or(defaults);
             return check_all(ctx, p, &eff, &action, crate::api::index_expressions(ctx), &opts).map(|_| None);
@@ -825,7 +918,7 @@ fn authorize_action(ctx: &Ctx) -> EsResult<Option<String>> {
             crate::search::check_pit_without_indices(ctx, true)?;
             authorize_pit(ctx, p, &eff, &action, &pit_of(ctx).unwrap_or_default())
         }
-        Scope::Index if NARROWED.contains(&ctx.api.name()) => narrow(ctx, p, &eff, &action),
+        Scope::Index if narrows(p, ctx.api.name()) => narrow(ctx, p, &eff, &action),
         // Composite requests: their items are authorized as they run (`authorize_writes`,
         // `authorize_gets`, each search of an msearch).
         Scope::Index if COMPOSITE.contains(&ctx.api.name()) => {
@@ -950,7 +1043,7 @@ pub fn check_mapping_update(ctx: &Ctx, idx: &crate::meta::IndexMeta) -> EsResult
     const BWC: &[&str] = &["index", "create", "create_doc", "write"];
     fn bwc<'a>(perm: &'a Permission, index: &str, restricted: bool) -> Option<&'a privileges::IndexGrant> {
         perm.indices.iter().find(|g| {
-            (!restricted || g.allow_restricted) && g.names.iter().any(|n| privileges::index_pattern_matches(n, index)) && g.privileges.iter().any(|x| BWC.contains(&x.as_str()))
+            (!restricted || g.allow_restricted) && privileges::grant_names(g, index) && g.privileges.iter().any(|x| BWC.contains(&x.as_str()))
         })
     }
     // OpenSearch updates mappings for a write as the node, without checking the user.
@@ -1366,11 +1459,16 @@ fn request_indices(ctx: &Ctx) -> Vec<String> {
     if api == "search_application.search" {
         exprs.extend(ctx.path_param("name").map(str::to_string));
     }
+    // Wildcards as the request expands them (`expand_wildcards=all` reaches hidden indices).
+    let default = crate::meta::resolve::IndicesOptions::LENIENT_EXPAND_OPEN;
+    let opts = ctx.indices_options(default).unwrap_or(default);
     if exprs.is_empty() {
+        if opts.expand_hidden {
+            return crate::meta::resolve::resolve(&st, &["_all".to_string()], &opts, ctx.now_ms).unwrap_or_default();
+        }
         return st.metadata.indices.keys().filter(|k| !k.starts_with('.')).cloned().collect();
     }
     let mut out = Vec::new();
-    let opts = crate::meta::resolve::IndicesOptions::LENIENT_EXPAND_OPEN;
     for e in exprs {
         if e.contains('*') || e == "_all" {
             if let Ok(names) = crate::meta::resolve::resolve(&st, std::slice::from_ref(&e), &opts, ctx.now_ms) {

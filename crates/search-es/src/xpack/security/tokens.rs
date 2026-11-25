@@ -95,6 +95,10 @@ fn stored_user(p: &Principal) -> Value {
 
 /// The user a grant (`grant_type: password | access_token`) names, authenticated.
 pub fn grant_principal(cluster: &Cluster, body: &Value, action: &str) -> EsResult<Principal> {
+    // Elasticsearch's users and tokens: none sign in to an OpenSearch-flavor cluster.
+    if !super::es_credentials(cluster) {
+        return Err(super::opensearch::unauthorized());
+    }
     match body.get("grant_type").and_then(Value::as_str) {
         Some("password") => {
             let user = body.get("username").map(Value::to_es_string).unwrap_or_default();
