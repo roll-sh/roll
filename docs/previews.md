@@ -2035,7 +2035,7 @@ type Preview = {
   slower_routes?: { branch: string; routes: { name: string; count: number; p50_ms: number; main_p50_ms: number; grew?: GrewSpan | null; budget_ms?: number | null }[] } | null;
   new_errors?: { branch: string; total: number; errors: { service: string; title: string }[] } | null;
   served_secrets?: { key: string; path: string }[]; // its secret values its pages serve at its head: names and where, never values
-  skipped?: { pages?: string[]; stories?: number; first_stories?: string[] }; // what its latest screenshot run left out at its head: pages past a run's ten, stories it didn't take (the first 10 by id)
+  skipped?: { pages?: string[]; stories?: number; first_stories?: string[]; by_files?: true }; // what its latest screenshot run left out at its head: pages past a run's ten, stories it didn't take (the first 10 by id); by_files: it chose them by the change's files alone, its Storybook serving no module graph (--stats-json)
   regressions?: "check" | "required" | null;
   regressions_accepted?: { head: string; by: string; at: number } | null;
   regressions_compared?: boolean;     // compared with main's preview at its head (errors; routes too with traces)
@@ -2850,8 +2850,9 @@ comments, Render and Railway, Neon, Chromatic and Percy, Signadot, Jam.
 2. **The stories a change touched, by the module graph, in review**: a story that imports a changed
    file from anywhere comes after those whose own file changed (Storybook's `preview-stats.json`
    when the build has it; files alone without), and a built Storybook's stories run live in a
-   real browser for the first time. Next for it: a `storybook dev` server has no stats file, so
-   say on the sheet when a run ordered by files alone.
+   real browser for the first time (#1014). In review: a run that chose by files alone (no stats
+   file, as from `storybook dev`) and left stories says so on the sheet (`skipped.by_files`),
+   with how to give it the graph.
 3. **A note in one click, in review**: the button's note opens a small window of roll's with its
    form alone, which posts and closes (`/dashboard/previews/note`); a phone keeps the dashboard
    in a tab. Next for it: a reply and a resolve from the page the same way.
