@@ -141,10 +141,15 @@ async fn run(ctx: Arc<Ctx>, access: Arc<roll_access::Access>, hash: String, mut 
     loop {
         tokio::select! {
             done = &mut job => {
-                let Some(result) = done.ok().flatten() else {
-                    let error = json!({ "code": -32602, "message": format!("unknown tool {name:?}") }).to_string();
-                    save(TaskUpdate { status: "failed", status_message: None, input: None, result: None, error: Some(&error) }).await;
-                    return;
+                let result = match done {
+                    Ok(Some(result)) => result,
+                    // Not a tool of this connection's: a tool error, as a call outside a task answers.
+                    Ok(None) => crate::unknown_tool(&ctx, &name),
+                    Err(_) => {
+                        let error = json!({ "code": -32603, "message": "the call stopped before it answered" }).to_string();
+                        save(TaskUpdate { status: "failed", status_message: None, input: None, result: None, error: Some(&error) }).await;
+                        return;
+                    }
                 };
                 let s = &result["structuredContent"];
                 if let Some(approval) = crate::waiting_approval(s) {
