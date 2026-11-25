@@ -430,6 +430,12 @@ async fn search_mode_finds_and_runs_through_the_same_checks() {
     // The audit log names the tool that ran, not the run tool.
     let log = d.audit_until(|l| l.as_array().is_some_and(|a| a.iter().any(|e| e["tool"] == "postgres_list_projects" && !e["grant_id"].is_null()))).await;
     assert!(!log.as_array().unwrap().iter().any(|e| e["tool"].as_str().is_some_and(|t| t.starts_with("roll_"))), "{log}");
+    // A tool this token ran lately is listed beside search mode's own, and runs directly; one it
+    // may not use isn't, whatever it ran.
+    let listed = names(&rpc(at(""), "tools/list", json!({})).await);
+    assert!(listed.contains(&"postgres_list_projects".into()) && !listed.contains(&"postgres_delete_project".into()), "{listed:?}");
+    let direct = rpc(at(""), "tools/call", json!({ "name": "postgres_list_projects", "arguments": {} })).await;
+    assert_eq!(direct["isError"].as_bool(), Some(false), "{direct}");
 }
 
 /// The operator's policy holds every token's MCP to lockdown and to reading, whatever its URL asks
