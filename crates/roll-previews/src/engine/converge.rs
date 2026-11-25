@@ -1067,20 +1067,10 @@ impl Engine {
         let stories = storybook.as_ref().filter(|(svc, _)| *svc == first.name).map(|(_, at)| at.clone());
         let opts_crops = crops.clone();
         // The app's sign-in first, a trusted preview's only (`github.login`).
-        let login = match self.store.settings(&r.project_id).ok().and_then(|s| s.github.login) {
-            None => None,
-            Some(_) if !r.trusted => {
-                let _ = self.store.log(&r.id, "screenshots taken signed out: a fork's preview signs in with nothing (its code would get what's typed)");
-                None
-            }
-            Some(rule) => match self.login_for(r, &rule).await {
-                Ok(l) => Some(l),
-                Err(e) => {
-                    let _ = self.store.log(&r.id, &format!("screenshots taken signed out: {e:#}"));
-                    None
-                }
-            },
-        };
+        let (login, why_not) = self.run_login(r).await;
+        if let Some(why) = why_not {
+            let _ = self.store.log(&r.id, &format!("screenshots taken signed out: {why}"));
+        }
         let signs_in = login.is_some();
         let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone(), openapi, endpoints, states, browsers, crops, stories, modes, login };
         let started = std::time::Instant::now();
@@ -1097,6 +1087,8 @@ impl Engine {
         match taken {
             Ok(Some(mut shot)) => {
                 self.check_served(r, &mut shot).await;
+                // What it left out, for this head (none clears what an earlier one said).
+                let _ = self.store.set_runtime_fact(&r.id, "skipped", Some(&crate::SkippedAt { head: r.build().to_string(), skipped: shot.skipped.clone() }));
                 // Kept under the entry that asked for each (`/pricing`, or `web:/pricing`).
                 let mut pages: Vec<crate::ports::PageShot> = shot
                     .pages

@@ -1348,7 +1348,9 @@ deterministic (#396).
    cap, a Browser search section and the site-search guide's browser page; keys derived without a call to roll in
    #954 (Algolia's `generateSecuredApiKey`, Typesense's `generateScopedSearchKey`, Meilisearch's
    tenant tokens: a derivable browser key's backend signs a short-lived, narrower key per end
-   customer, checked on the owner every request, with a per-user share of the parent's rate);
+   customer, checked on the owner every request, with a per-user share of the parent's rate;
+   in progress, `fix/search-derived-keys-2`: verified once per request, expensive filters only
+   when the parent allows them, and each end user's own context owner);
    what remains: RAG's chat limits for browser keys (item 11); browser search on previews (a branch keeps the
    parent's origins but no browser key works there: give it one and the preview's URL, roll
    previews' side); and usage and 429s per browser key in the Browser search section (Algolia's
@@ -1373,7 +1375,10 @@ deterministic (#396).
    on the same routes, records, settings, synonyms and rules mapped onto indices, synonyms sets,
    query rules and a search template, everything that doesn't map listed with why before the copy
    starts (`dry_run`), copies as reindex tasks, `roll search migrate`, and
-   [guides/migrate-from-algolia.md](guides/migrate-from-algolia.md). Elastic Cloud restores from
+   [guides/migrate-from-algolia.md](guides/migrate-from-algolia.md) (#957). In review (#993):
+   a copy that resumes from its last page, Typesense 29's synonym sets and 30's curation sets,
+   Algolia's filter and query-edit rules as search templates, and catch-up and cutover (changed
+   records read again, then an alias moved in one step). Elastic Cloud restores from
    other deployments, AWS OpenSearch Service has migration assistants, Typesense and Meilisearch
    publish Algolia importers): left, Typesense 29's synonym sets and 30's curation sets (listed as
    not read today), Algolia rule consequences beyond promote and hide (filters and query edits as
@@ -1425,6 +1430,14 @@ deterministic (#396).
    credentials, connector configuration, site verifications, migration credentials and previews'
    data keys. Next pass: caches and context stores (scroll, point in time, async results, the
    request cache, kept ES|QL results) against the opener and against a concurrent close.
+   Third pass (2026-11-25, on 9f72a7c4a): a point in time kept its opener's DLS and FLS for as
+   long as it was extended, so narrowing a role didn't reach it; the shard request cache, stored
+   `_tasks` results and compiled scripts were held to entry counts and charged to nothing; and a
+   tenant's own settings lifted the scroll and point-in-time limits, while an open context kept a
+   cluster loaded past the always-on caps. Fix in progress (`fix/search-contexts-caches`).
+   Checked and sound: async results, scroll and point-in-time ids, cross-cluster contexts, the
+   credential and analysis caches, and the metering buffers. The second pass's fix is in review
+   (#988, with previews' `X-Roll-Unembedded: drop` for masking a `semantic_text` field on a branch).
 5. **Cross-cluster search: what's left** (ES|QL across clusters landed in #504 after five reviews: each
    cluster's part on its owner, `_remote`/`_coordinator`/`_any` enrich modes, LOOKUP JOIN across clusters
    with union types refused as Elasticsearch refuses them; still different: a command inside a part after
@@ -1555,12 +1568,13 @@ deterministic (#396).
    the restore: segments Lucene 8 wrote (Elasticsearch 7.x indices never merged since), data streams themselves (their backing indices restore), `sparse_vector`
    and `rank_vectors` values and nested dense vectors that Elasticsearch 9 left out of `_source`,
    `_status` file counts from the shard snapshots, and resuming after a takeover from the shard
-   reached rather than from the start of each index. Also left: a snapshot that starts after a DELETE is written to
-   the bucket but before the cluster's copy of the repository data updates may still take the
-   deleted snapshot as its base (`_cleanup` has the same window). In progress (`fix/search-snapshot-followups`):
-   a snapshot DELETE waits for running snapshots that build on it, as Elasticsearch does, a cap on
-   repository generations, and unreferenced chunks of failed snapshots removed by the next
-   snapshot of their shard.
+   reached rather than from the start of each index. Landed since: a snapshot DELETE waits for
+   running snapshots that build on it, as Elasticsearch does, and a cap on repository generations
+   (#941); deletions and `_cleanup` show as running, so a snapshot starting meanwhile waits for
+   them rather than take a removed snapshot as its base (#995). In progress
+   (`feature/search-es-restore-2`): data streams restored whole, and a restore resumed after a
+   takeover from the shard it reached.
+   Chunks of failed snapshots stay until `_cleanup` (compatibility.md says why).
 10. **Relevance tuning by MCP and Terraform**: `/v1/search` serves synonyms sets, query rulesets
    (and `_test`), writing an index's settings and `_explain` (the routes table), and `roll search`
    has `synonyms`, `rules`, `indices settings` and `explain` and makes `read` and `append` keys on
@@ -1598,9 +1612,10 @@ deterministic (#396).
    count of unverified crawls in the fleet's catalogue), `crawl-test` (one URL through the crawler's path, storing nothing,
    rate-limited per owner) with its MCP tools and `roll search crawler test`/`verify`/`sites`, the
    dashboard's "crawl a site" box in the Connectors tab, and every product's names blocked
-   (`roll.crawler.fleet_names`). Left: a verification token derived from the owner and the site
-   (HMAC), so a published record keeps working after the owner's last row for it goes; then
-   (phase 3) extraction rules (CSS selectors on the arena DOM), incremental crawls with
+   (`roll.crawler.fleet_names`). In review (#990): a verification token derived from the
+   tenant and the site (HMAC), so a published record keeps working after the last row for it
+   goes, and extraction rules (Open Crawler's `extraction_rulesets`: CSS selectors on the arena
+   DOM, matched in one pass under the page's deadline). Left (phase 3): incremental crawls with
    `If-Modified-Since`, and the docs preset; charset detection beyond UTF-8, fetching several
    origins at once, and per-site politeness by address rather than name are open too.
 14. **Semantic search on OpenSearch-flavor clusters** (design in

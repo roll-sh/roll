@@ -3523,6 +3523,26 @@ async fn an_s3_repository_bounds_and_checks_what_a_bucket_holds() {
     expect("taken while a deletion waited", third, 200, "SUCCESS");
     expect("deleted after it", deleted, 200, "acknowledged");
     expect("restores what it reused", e.es(&u, &p, reqwest::Method::POST, "/_snapshot/backup/third/_restore?wait_for_completion=true", Some(json!({"rename_pattern": "docs", "rename_replacement": "third"}))).await, 200, "third");
+    // The other way round: a snapshot starting while a deletion runs waits for it. `fourth`
+    // alone holds a new segment; with its DELETE held as it commits, `fifth` starts, and doesn't
+    // take `fourth` as its base (it would reuse that segment's chunks as they go).
+    assert_eq!(es(reqwest::Method::PUT, "/docs/_doc/fresher?refresh=true", Some(json!({"n": 3}))).await.0, 201);
+    expect("fourth", es(reqwest::Method::PUT, "/_snapshot/backup/fourth?wait_for_completion=true", Some(json!({"indices": "docs"}))).await, 200, "SUCCESS");
+    let (arrived, release) = (Arc::new(tokio::sync::Notify::new()), Arc::new(tokio::sync::Notify::new()));
+    *bucket.hold_index.lock().unwrap() = Some((arrived.clone(), release.clone()));
+    let deleting = es(reqwest::Method::DELETE, "/_snapshot/backup/fourth", None);
+    let starting = async {
+        arrived.notified().await;
+        let released = async {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            release.notify_one();
+        };
+        tokio::join!(es(reqwest::Method::PUT, "/_snapshot/backup/fifth?wait_for_completion=true", Some(json!({"indices": "docs"}))), released).0
+    };
+    let (deleted, fifth) = tokio::join!(deleting, starting);
+    expect("deleted while a snapshot waited", deleted, 200, "acknowledged");
+    expect("taken after it", fifth, 200, "SUCCESS");
+    expect("restores without the deleted base", e.es(&u, &p, reqwest::Method::POST, "/_snapshot/backup/fifth/_restore?wait_for_completion=true", Some(json!({"rename_pattern": "docs", "rename_replacement": "fifth"}))).await, 200, "fifth");
     // Another program's upload in parts under `indices/` makes a location someone else's.
     bucket.uploads.lock().unwrap().insert("es-upload".into(), ("parts/roll/indices/Xq/0/__e".into(), Default::default()));
     let parts = json!({"type": "s3", "settings": {"bucket": "backups", "base_path": "parts", "endpoint": endpoint, "path_style_access": true}});
