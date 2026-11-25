@@ -710,10 +710,10 @@ unit's `Environment=` (and `roll run`'s, and every `roll secrets` command's: the
   Akeyless' Universal Identity does:
   1. A **machine identity** (`POST …/identities {name, kind: "machine", environments, actions,
      ttl_minutes?, allowed_ips?}`, `roll secrets identities add racks --machine --for-env
-     production`): the scope its machines' logins get.
+     production`, or the dashboard's New identity → Machine): the scope its machines' logins get.
   2. A **bootstrap token** per machine (`POST …/identities/{id}/bootstrap {minutes?,
-     allowed_ips?, credential_hours?}`, `roll secrets identities bootstrap idn_…`; admin, made by a
-     person): `rlbt_…`, shown once, single-use, valid for `minutes` (1–60, default 10), and from
+     allowed_ips?, credential_hours?}`, `roll secrets identities bootstrap idn_…`, or the
+     dashboard's Access → Workload identities → Machines; admin, made by a person): `rlbt_…`, shown once, single-use, valid for `minutes` (1–60, default 10), and from
      `allowed_ips` only if given. Hand it to the machine's provisioning (cloud-init, Ansible,
      a USB stick), never to a repository.
   3. On the machine, `ROLL_IDENTITY=idn_…` with `ROLL_BOOTSTRAP_TOKEN` (or
@@ -767,7 +767,8 @@ Tests: `crates/roll-cli/tests/secrets.rs` (`the_local_agent_answers_only_request
 identity login's renewal is `relogin_tests` in `crates/roll-cli/src/secrets.rs`, which the agent
 shares. Bootstrap tokens over HTTP:
 `a_bootstrap_token_is_exchanged_once_and_a_spent_credential_ends_its_machine` in
-`crates/rolld/tests/secrets.rs`; their chains in roll-access:
+`crates/rolld/tests/secrets.rs` (with the machines list and an admin's revoke); the dashboard's
+bootstrap token, shown once, in `apps/dashboard/src/components/secrets/secrets-bootstrap.test.tsx`; their chains in roll-access:
 `a_spent_bootstrap_token_or_machine_credential_ends_its_chain` in `crates/roll-access/tests/access.rs`.
 ## Customer-managed keys
 A project's data key can be wrapped once more by a KMS key in the customer's own AWS account, as
@@ -4260,7 +4261,8 @@ refuses any push whose new commits add a value of the project, whoever pushes it
   lets the push through. It's still scanned, and roll records it as `secrets.scan.breakglass`,
   with the keys it found, in the project's audit log. When roll can't be reached, the push still
   goes through and the hook says roll couldn't record it.
-- **Its token.** `roll secrets -p <project> tokens create pre-receive --scan-only` makes a token
+- **Its token.** `roll secrets -p <project> tokens create pre-receive --scan-only` (or the
+  dashboard's Access → New token → Scan-only, which labels such tokens `scan-only`) makes a token
   that has only `scan`, in every environment unless `--for-env` names some. It can't read a name
   or reveal a value. Give the hook `ROLL_API_URL`, `ROLL_TOKEN` and `ROLL_PROJECT` (the project's
   `prj_…` id: a scan-only token can't look a name up).
