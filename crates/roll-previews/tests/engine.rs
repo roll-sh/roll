@@ -2504,6 +2504,7 @@ async fn a_notes_people_are_told_by_mail() {
 /// whichever way it's woken (the API, a visit's start) until the cap is raised or it's reset.
 #[tokio::test]
 async fn a_preview_over_its_size_cap_stays_asleep() {
+    use roll_previews::ports::EnvSource;
     let e = env(json!({ "enabled": true, "max_bytes": 1 << 20 }));
     e.code.open(change("chg_cap", 4));
     for _ in 0..3 {
