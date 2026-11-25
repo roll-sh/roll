@@ -1403,7 +1403,7 @@ fn served_bodies(line: Option<&str>) -> Vec<(String, Vec<u8>)> {
 /// A story's PNG, at most (one clipped to what it renders).
 const STORY_MAX: usize = 256 << 10;
 /// A stories run's output: its report, and its PNGs as base64.
-const STORIES_OUTPUT_MAX: usize = crate::settings::MAX_STORIES * STORY_MAX * 4 / 3 + (64 << 10);
+const STORIES_OUTPUT_MAX: usize = crate::settings::MAX_STORIES * (STORY_MAX * 4 / 3 + 8000) + (64 << 10);
 /// A stories run, at most (its own 100 s, and the browser's start).
 const STORIES_FOR: Duration = Duration::from_secs(150);
 
@@ -1434,6 +1434,8 @@ fn story_shots<'a>(said: &str, pngs: impl Iterator<Item = &'a str>) -> (Vec<crat
         id: String,
         #[serde(default)]
         errors: u32,
+        #[serde(default)]
+        a11y: Option<serde_json::Value>,
     }
     #[derive(Default, serde::Deserialize)]
     struct Run {
@@ -1455,7 +1457,9 @@ fn story_shots<'a>(said: &str, pngs: impl Iterator<Item = &'a str>) -> (Vec<crat
         if !crate::settings::story_id_ok(&s.id) || !png.starts_with(b"\x89PNG") || png.len() > STORY_MAX || out.iter().any(|p| p.path == path) {
             continue;
         }
-        out.push(crate::ports::PageShot { path, png, errors: s.errors.min(10_000), report: Default::default() });
+        // Read as a page's is (the same bounds): compared with main's same story like a page's.
+        let report = crate::PageReport { a11y: s.a11y.and_then(|a| crate::PageA11y::parse(&serde_json::json!({ "a11y": a }).to_string())), ..Default::default() };
+        out.push(crate::ports::PageShot { path, png, errors: s.errors.min(10_000), report });
     }
     (out, skipped)
 }
@@ -3347,9 +3351,11 @@ mod tests {
         use base64::Engine as _;
         let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
         let (png, junk, big) = (b64(b"\x89PNG\r\n\x1a\n..."), b64(b"not a png"), b64(&[b"\x89PNG".as_slice(), &vec![0u8; STORY_MAX]].concat()));
-        let said = r#"{"stories":[{"id":"button--primary","errors":2},{"id":"../x--y"},{"id":"button--primary"},{"id":"card--empty"},{"id":"card--big"},{"id":"card--full"}],"left":12,"first_left":["button--danger","../evil"]}"#;
+        let said = r#"{"stories":[{"id":"button--primary","errors":2,"a11y":{"issues":[{"kind":"color-contrast","count":2,"first":"<button>","impact":"serious"}],"lang":true,"title":true}},{"id":"../x--y"},{"id":"button--primary"},{"id":"card--empty"},{"id":"card--big"},{"id":"card--full"}],"left":12,"first_left":["button--danger","../evil"]}"#;
         let pngs = [&png, &png, &png, &junk, &big, &png];
         let (shots, left) = story_shots(said, pngs.iter().map(|s| s.as_str()));
+        // A story's accessibility as a page's (axe's rules, its language and title).
+        assert_eq!(shots[0].report.a11y.as_ref().map(|a| a.problems()), Some(2), "{:?}", shots[0].report.a11y);
         let got: Vec<(String, u32)> = shots.into_iter().map(|p| (p.path, p.errors)).collect();
         assert_eq!(got, [("story:button--primary".to_string(), 2), ("story:card--full".to_string(), 0)]);
         assert_eq!((left.stories, left.first_stories), (12, vec!["button--danger".to_string()]), "what it didn't take, by ids it could name");

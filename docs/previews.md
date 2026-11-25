@@ -2302,7 +2302,11 @@ type Settings = {
     root holds something (3 s at most), and captured clipped to what it rendered (an 8 px margin,
     at most 1280 by 2000; 256 KiB a PNG), 100 s in all. Each is a page of its own (`story:<id>`,
     "Stories" on the sheet, labelled `button / primary`), with what went wrong while it rendered,
-    compared with main's same story and reviewed like a page. A story gone from Storybook goes
+    compared with main's same story and reviewed like a page. Each is checked with axe as a page
+    is (Chromatic's accessibility tests: its rules, its language and title), while more than 30 s
+    of the run are left so a big Storybook still gets its pictures, 8 KB of it at most; what it
+    adds against main's same story counts like a page's (`a11y_added`). Live: the live
+    Storybook's stories carry it. A story gone from Storybook goes
     from the preview. The index is the preview's code's: an id Storybook wouldn't make
     (`components-button--primary`) is dropped. A Storybook on another service is kept with that
     service's pages while it runs what it ran (TurboSnap), and taken at once when the rule is
