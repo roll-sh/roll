@@ -1,17 +1,28 @@
 name: release-cli
 
-# Builds the `roll` CLI for Linux and macOS (x86_64 and aarch64) when a `cli-v*` tag is pushed,
-# and publishes the tarballs and their SHA256SUMS as a GitHub release, which
-# apps/dashboard/public/install.sh (https://roll.sh/install.sh) installs from.
+# Builds the `roll` CLI for Linux, macOS and Windows (x86_64 and aarch64) when a `cli-v*` tag is
+# pushed, and publishes the tarballs, the Windows zips and their SHA256SUMS as a GitHub release,
+# which apps/dashboard/public/install.sh (https://roll.sh/install.sh) and install.ps1
+# (https://roll.sh/install.ps1) install from, with the winget and Scoop manifests filled in for it
+# (deploy/cli/render.sh).
+#
+# `windows-check` (cargo check for Windows) runs on pull requests that touch roll-cli and on a
+# dispatch without a tag, which builds and publishes nothing. It isn't part of the merge gate (ci.yml).
 
 on:
   push:
     tags: ['cli-v*']
+  pull_request:
+    paths:
+      - 'crates/roll-cli/**'
+      - 'crates/roll-fetch/**'
+      - '.github/workflows/release-cli.yml'
   workflow_dispatch:
     inputs:
       tag:
-        description: 'An existing cli-v* tag to (re)build'
-        required: true
+        description: 'An existing cli-v* tag to (re)build and publish (empty: only the Windows check)'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -25,7 +36,26 @@ env:
   TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
+  windows-check:
+    if: github.event_name != 'push'
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-check
+      - name: cargo check
+        shell: bash
+        run: cargo check --locked -p roll-cli --target x86_64-pc-windows-msvc
+
   build:
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
     strategy:
       fail-fast: false
       matrix:
@@ -38,6 +68,10 @@ jobs:
             runner: macos-15-intel
           - target: aarch64-apple-darwin
             runner: macos-14
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     steps:
@@ -57,28 +91,39 @@ jobs:
         shell: bash
         run: |
           bin=target/${{ matrix.target }}/release/roll
+          [[ ${{ matrix.target }} != *windows* ]] || bin=$bin.exe
           "$bin" --version
           "$bin" agent --help >/dev/null
+          "$bin" secrets agent --help >/dev/null
           if [[ "$("$bin" --version)" != *" ${TAG#cli-v}" ]]; then
             echo "::warning::$TAG builds $("$bin" --version) (the workspace version); the release is named after the tag"
           fi
       - name: Package
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/roll dist/roll
           strip dist/roll || true
           tar -C dist -czf roll-${{ matrix.target }}.tar.gz roll
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path target/${{ matrix.target }}/release/roll.exe -DestinationPath roll-${{ matrix.target }}.zip
       - uses: actions/upload-artifact@v4
         with:
           name: roll-${{ matrix.target }}
-          path: roll-${{ matrix.target }}.tar.gz
+          path: roll-${{ matrix.target }}.*
           if-no-files-found: error
 
   release:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
+          sparse-checkout: deploy/cli
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -87,8 +132,10 @@ jobs:
       - name: Checksums
         run: |
           cd artifacts
-          sha256sum roll-*.tar.gz > SHA256SUMS
+          sha256sum roll-*.tar.gz roll-*.zip > SHA256SUMS
           cat SHA256SUMS
+      - name: winget and Scoop manifests
+        run: deploy/cli/render.sh "$TAG" artifacts/SHA256SUMS artifacts
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -98,5 +145,5 @@ jobs:
             gh release upload "$TAG" artifacts/* --clobber
           else
             gh release create "$TAG" artifacts/* --title "roll CLI ${TAG#cli-v}" \
-              --notes "Install with \`curl -fsSL https://roll.sh/install.sh | sh\` (checks SHA256SUMS), or download a tarball below."
+              --notes "Install with \`curl -fsSL https://roll.sh/install.sh | sh\`, or on Windows \`irm https://roll.sh/install.ps1 | iex\` (both check SHA256SUMS), or download a tarball or zip below. \`roll.json\` is the Scoop manifest (\`scoop install <its URL>\`); \`roll-winget.zip\` holds the winget manifests."
           fi

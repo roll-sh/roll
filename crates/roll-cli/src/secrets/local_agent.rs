@@ -133,14 +133,14 @@ async fn service(_: &Api, _: &super::AtArgs, _: LocalAgent) -> anyhow::Result<()
     anyhow::bail!("--install-service and --uninstall-service are for Windows: on Linux, run the agent from a systemd unit (docs/secrets.md, \"A local agent\")")
 }
 
-/// The scm: the service control manager the agent runs under, told when it listens and stopping
-/// it.
+/// The Windows service control manager the agent runs under, if it does: told when the agent
+/// listens, and stopping it.
 #[cfg(windows)]
-type Scm<'a> = Option<&'a super::service::Scm>;
+type Manager<'a> = Option<&'a super::service::Scm>;
 #[cfg(not(windows))]
-type Scm<'a> = Option<&'a std::convert::Infallible>;
+type Manager<'a> = Option<&'a std::convert::Infallible>;
 
-async fn serve(api: &Api, args: &super::AtArgs, a: LocalAgent, scm: Scm<'_>) -> anyhow::Result<()> {
+async fn serve(api: &Api, args: &super::AtArgs, a: LocalAgent, scm: Manager<'_>) -> anyhow::Result<()> {
     let token = request_token(a.token_file.as_deref())?;
     let ttl = Duration::from_millis(crate::fallback::duration_ms(&a.ttl).context("--ttl")?.max(0) as u64);
     let (at, project) = locate(api, args).await?;

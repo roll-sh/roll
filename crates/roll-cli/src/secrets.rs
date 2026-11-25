@@ -2567,6 +2567,9 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 }
                 // Staged names are the repo's already; a walked file's is made relative to its top.
                 let rel = if staged { name.clone() } else { std::fs::canonicalize(name).ok().and_then(|p| p.strip_prefix(&root).ok().map(|p| p.to_string_lossy().into_owned())).unwrap_or_else(|| name.clone()) };
+                // The allow-list's globs are `/`-separated (Windows' paths aren't).
+                #[cfg(windows)]
+                let rel = rel.replace('\\', "/");
                 if code_review::glob::any(&allow.paths, &rel) {
                     continue;
                 }
