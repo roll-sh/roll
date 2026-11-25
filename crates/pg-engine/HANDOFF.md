@@ -21854,13 +21854,24 @@ orders, b1 against n4): **the 22 83.42 -> 82.56 G (-1.03 / -1.04%)**, q20 1.368 
 (-35.0%), q02 2.629 -> 2.279 G (-13.3%), q07 -0.7%, q16 -0.4%, the rest within +-0.2%. Every
 result hash equal to b1's and PostgreSQL's; the 22 plans' EXPLAIN identical; peak memory over the
 pass level. In process: point select 36,411.8 user instructions on both, short transaction -0.7%
-(and -5.4% in a pair whose 10 s run was disturbed). PGO: PGO.
+(and -5.4% in a pair whose 10 s run was disturbed). **PGO**: one `tools/dist-pgo.sh` build of
+cand/a319's head (`925f10d93`, profile staleness 0 of 2,991 hot functions) and one pass of the
+22 beside plain n4: **75.15 G** (plain 82.58), every hash equal; with the PGO spread 74.5-75.8 G
+against pgrust's 86.57 (0.86-0.88x) and round 15's 75.83. q20 0.78 G is 1.77x PostgreSQL's 0.44
+(from 2.56x), q02 1.97 G 1.91x pgrust's 1.03 (from 2.16x); behind the better of the two on 15 of
+the 22 (16 in round 15; q13 3.61 against pgrust's 3.63).
 
 **Dropped**: `IndexChunk` (a parallel bitmap or index chunk's row fetches) through the batched
 `Store::get_sorted` in place of `get_versions`: q14 -0.35% in one pair, +0.08% in the next, the
 others within 0.15% (`~/.cache/a319/patches/dropped-indexchunk-get-sorted.patch`). Reading the
 filter-only chunks on the executor's thread (inline) instead of the workers: level (q02 / q20
-+0.4..0.6%, q17 unchanged), not kept.
++0.4..0.6%, q17 unchanged), not kept. A projection asking its input for rows of just the columns
+its expressions read when some are computed (`ProjectNode::narrow_input`, the expressions
+remapped; it asked only when all were columns): q11 +3.05 / +3.06%, q14 +0.5 / +0.8%, the rest
+level (n5 against n4, two pairs of the 22). The nested loop's picked row (`Cols::col` of the outer
+/ inner pair per column, in `NestLoopNode::step`, `Value::clone` called) cost more than the
+16-value `concat_rows` it replaced; a pick by precomputed (side, column) slices is what to try
+(`~/.cache/a319/patches/dropped-project-narrows-input.patch`).
 
 **Tests**: golden `a319_index_filter_rest` (recorded from PostgreSQL 18.6: q20's SubPlan shape,
 partial index conditions with NULLs, OR, casts, a range bound, the same queries without the index);

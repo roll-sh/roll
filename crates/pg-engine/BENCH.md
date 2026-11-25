@@ -497,11 +497,49 @@ the pass 1,601 / 1,603 MB.
   (n3 keeps those serial: q17 -0.01%). **n2** against n1 (one pair, ten queries): the filter-only
   chunks read on the executor's thread (inline) q02 +0.44%, q20 +0.55%, q17 -0.02%; and
   `IndexChunk`'s fetches through `Store::get_sorted` q14 -0.35% (+0.08% against b0 in n3's pair),
-  the rest within 0.17%: both dropped.
+  the rest within 0.17%: both dropped. **n5** against n4 (two pairs of the 22): a projection's
+  input making rows of just the columns its computed expressions read, q11 +3.05 / +3.06%, q14
+  +0.50 / +0.78%, the rest within +-0.2% (q16 -4.1% in one pair, -0.15% in the other): dropped.
 - In process (the `bench` example, 1 client, a fresh 100,000-row database a run, (I30 s - I10 s) /
   (ops30 - ops10), lane A, 6.2-6.6 foreign cores): point select 36,411.8 / 36,411.8 user
   instructions (b1 / n4), short transaction 262.3 k / 248.1 k then (n4 first) 261.9 k / 260.2 k
   (-0.7%, the first pair's n4 10 s run had a third of the others' ops).
+
+### PGO (2026-11-25)
+
+**p1** is `tools/dist-pgo.sh --out` of cand/a319's head `925f10d93` (on origin's `7ecca8b18`; its
+own training, profile staleness 0 of 2,991 hot functions; instrumented build 2,760 s, training
+738 s, optimised build 2,430 s), one pass of the 22 beside plain n4 in one hold (lane.sh 6.9
+foreign cores, the pass's own 0.8), every hash equal. "a316 p1" is round 15's PGO pass; pgrust
+and PostgreSQL 18.6 are BENCH "Standing, 2026-11-24"'s, not run again. With two PGO builds' ~0.9%
+spread, p1's total is 74.5-75.8 G: 0.86-0.88x pgrust.
+
+| query | a316 p1 PGO (G) | p1 PGO (G) | n4 plain (G) | pgrust | PostgreSQL | p1 ÷ best other |
+|---|---:|---:|---:|---:|---:|---:|
+| q01 | 7.26 | **7.29** | 7.31 | 6.76 | 45.22 | 1.08x |
+| q02 | 2.23 | **1.97** | 2.28 | 1.03 | 1.16 | 1.91x |
+| q03 | 3.69 | **3.66** | 4.13 | 3.52 | 4.07 | 1.04x |
+| q04 | 1.21 | **1.21** | 1.35 | 1.54 | 1.01 | 1.19x |
+| q05 | 2.41 | **2.41** | 2.81 | 1.69 | 1.98 | 1.43x |
+| q06 | 3.20 | **3.21** | 3.38 | 5.76 | 4.84 | 0.66x |
+| q07 | 3.05 | **3.02** | 3.51 | 3.31 | 2.57 | 1.18x |
+| q08 | 1.21 | **1.21** | 1.41 | 1.14 | 0.93 | 1.30x |
+| q09 | 6.78 | **6.79** | 7.81 | 14.35 | 13.12 | 0.52x |
+| q10 | 5.17 | **5.13** | 5.55 | 4.33 | 6.58 | 1.19x |
+| q11 | 0.72 | **0.72** | 0.83 | 0.39 | 0.38 | 1.89x |
+| q12 | 5.88 | **5.92** | 5.88 | 8.93 | 8.73 | 0.68x |
+| q13 | 3.63 | **3.61** | 4.11 | 3.63 | 6.83 | 1.00x |
+| q14 | 1.19 | **1.19** | 1.38 | 0.68 | 1.12 | 1.75x |
+| q15 | 2.22 | **2.23** | 2.31 | 2.95 | 3.16 | 0.76x |
+| q16 | 2.39 | **2.34** | 2.88 | 1.79 | 3.60 | 1.31x |
+| q17 | 2.79 | **2.73** | 2.86 | 2.22 | 4.60 | 1.23x |
+| q18 | 13.89 | **13.97** | 15.57 | 16.22 | 41.14 | 0.86x |
+| q19 | 0.43 | **0.43** | 0.47 | 0.41 | 0.40 | 1.07x |
+| q20 | 1.12 | **0.78** | 0.89 | 0.62 | 0.44 | 1.77x |
+| q21 | 4.80 | **4.78** | 5.26 | 4.71 | 7.38 | 1.01x |
+| q22 | 0.54 | **0.54** | 0.62 | 0.59 | 1.13 | 0.92x |
+| the 22 | 75.81 | **75.15** | 82.58 | 86.57 | 160.39 | 0.87x pgrust |
+
 
 ## Analytic CPU, round 15: dense bitmaps read by key, probes before the walk (2026-11-25, agent 316)
 
