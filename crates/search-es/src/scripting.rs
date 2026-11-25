@@ -26,6 +26,27 @@ impl Default for ScriptService {
     }
 }
 
+/// The cluster's `request` breaker as what its compiled scripts are charged to.
+struct Breaker(Arc<search_aggs::memory::MemoryBudget>);
+
+impl search_painless::MemoryCharge for Breaker {
+    fn try_reserve(&self, bytes: u64) -> bool {
+        self.0.try_reserve(bytes)
+    }
+
+    fn release(&self, bytes: u64) {
+        self.0.release(bytes);
+    }
+}
+
+impl ScriptService {
+    /// Charges the compiled-script cache to `budget` (the cluster's `request` breaker) from now
+    /// on; the cache holds at most its [`search_painless::Settings::cache_max_bytes`].
+    pub fn charge_to(&self, budget: Arc<search_aggs::memory::MemoryBudget>) {
+        self.engine.charge_to(Arc::new(Breaker(budget)));
+    }
+}
+
 impl std::fmt::Debug for ScriptService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("ScriptService")

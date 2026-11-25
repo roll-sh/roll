@@ -107,6 +107,9 @@ pub fn authenticate_link(cluster: &Cluster, value: &str, access: &str) -> EsResu
     let access = crate::json::parse(access.as_bytes()).ok().flatten().unwrap_or(Value::Null);
     let roles = access.get("roles").and_then(Value::as_array).cloned().ok_or_else(|| EsError::illegal_argument("invalid remote access header"))?;
     let who = access.get("who").and_then(Value::as_str).unwrap_or("user []").to_string();
+    let cluster = access.get("cluster").and_then(Value::as_str).unwrap_or_default();
+    // A linking cluster that names no owner yet: its `who` is the best name it gave.
+    let owner = format!("{cluster}/{}", access.get("owner").and_then(Value::as_str).unwrap_or(&who));
     Ok(Principal {
         username: k.get("username").map(Value::to_es_string).unwrap_or_default(),
         roles: Vec::new(),
@@ -122,7 +125,7 @@ pub fn authenticate_link(cluster: &Cluster, value: &str, access: &str) -> EsResu
             role_descriptors: k.get("role_descriptors").cloned().unwrap_or_else(Value::object),
             limited_by: Value::object(),
             cross_cluster: true,
-            remote: Some(Box::new(super::RemoteUser { roles, who })),
+            remote: Some(Box::new(super::RemoteUser { roles, who, owner })),
             derived: None,
         })),
     })

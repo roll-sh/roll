@@ -219,3 +219,34 @@ async fn request_runtime_fields_apply_to_alias_filters() {
     let (s, v) = call(&c, "POST", "/reds/_search", &search, None).await;
     assert_eq!((s, hits(&v), global_count(&v)), (200, 2, Some(2)), "{}", v.to_json());
 }
+
+/// A search on a point in time reads under its reader's role as it is now, as Elasticsearch's
+/// do: a role query or field restriction added after the point in time opened applies to its
+/// next search, and a role that lost the index can't search it.
+#[tokio::test]
+async fn a_point_in_time_reads_under_its_readers_current_role() {
+    let c = Cluster::in_memory("pit-rs").await;
+    for (m, u, b) in [
+        ("PUT", "/p", r#"{"mappings":{"properties":{"team":{"type":"keyword"},"secret":{"type":"keyword"}}}}"#),
+        ("PUT", "/p/_doc/1?refresh=true", r#"{"team":"red","secret":"s1"}"#),
+        ("PUT", "/p/_doc/2?refresh=true", r#"{"team":"blue","secret":"s2"}"#),
+        ("PUT", "/_security/role/r", r#"{"indices":[{"names":["p"],"privileges":["read"]}]}"#),
+        ("PUT", "/_security/user/r", r#"{"password":"r-password-1","roles":["r"]}"#),
+    ] {
+        assert!(call(&c, m, u, b, None).await.0 < 300, "{m} {u}");
+    }
+    let (s, v) = call(&c, "POST", "/p/_pit?keep_alive=1h", "", Some("r")).await;
+    assert_eq!(s, 200, "{}", v.to_json());
+    let search = format!(r#"{{"pit":{{"id":"{}","keep_alive":"1h"}}}}"#, v.get("id").and_then(Value::as_str).unwrap());
+    let (s, v) = call(&c, "POST", "/_search", &search, Some("r")).await;
+    assert_eq!((s, hits(&v)), (200, 2), "{}", v.to_json());
+    let role = r#"{"indices":[{"names":["p"],"privileges":["read"],"query":{"term":{"team":"red"}},"field_security":{"grant":["team"]}}]}"#;
+    assert_eq!(call(&c, "PUT", "/_security/role/r", role, None).await.0, 200);
+    let (s, v) = call(&c, "POST", "/_search", &search, Some("r")).await;
+    let text = v.to_json();
+    assert_eq!((s, hits(&v)), (200, 1), "the role query added since: {text}");
+    assert!(!text.contains("s1") && !text.contains("s2"), "a field removed since: {text}");
+    assert_eq!(call(&c, "PUT", "/_security/role/r", r#"{"indices":[{"names":["other"],"privileges":["read"]}]}"#, None).await.0, 200);
+    let (s, v) = call(&c, "POST", "/_search", &search, Some("r")).await;
+    assert_eq!((s, v.pointer(&["error", "type"]).and_then(Value::as_str)), (403, Some("security_exception")), "{}", v.to_json());
+}

@@ -307,14 +307,15 @@ impl Loaded {
         self.bytes.used()
     }
 
-    /// Whether state that lives only in memory still needs the cluster loaded: an open scroll
-    /// or point in time not yet expired, or a running task.
+    /// Whether work that lives only in memory still needs the cluster loaded: a running task.
+    /// Running OpenSearch jobs (ISM steps) and connector syncs write through the cluster like
+    /// requests do.
+    ///
+    /// Open scrolls and points in time don't pin it: their keep-alive is the client's to choose,
+    /// so a cluster idle past its own unload goes and its contexts with it, and a later page
+    /// answers `search_context_missing_exception`, as after an Elasticsearch node restart.
     fn pinned(&self) -> bool {
-        // Open contexts' searchers live only in memory: pinned exactly until the last one is
-        // closed or expires.
-        // Running OpenSearch jobs (ISM steps) and connector syncs write through the cluster like
-        // requests do.
-        self.cluster.contexts.latest_expiry().is_some() || !self.cluster.tasks.is_empty() || self.cluster.jobs.busy() || self.cluster.xpack.connector_syncs.busy()
+        !self.cluster.tasks.is_empty() || self.cluster.jobs.busy() || self.cluster.xpack.connector_syncs.busy()
     }
 }
 
@@ -1566,7 +1567,7 @@ impl Node {
         }
         self.hooks.unloading(&loaded.cluster).await;
         // Failed logins the node refuses while it sleeps are recorded as it last asked.
-        self.audit.remember(name, search_es::xpack::security::audit::snapshot(&loaded.cluster));
+        self.audit.remember(name, loaded.spec().catalog_id.as_deref(), search_es::xpack::security::audit::snapshot(&loaded.cluster));
         if flush
             && loaded.data.is_some()
             && let Err(e) = loaded.cluster.sync_async_results().await
@@ -1897,7 +1898,7 @@ impl Node {
             return evicted;
         }
         // Clusters holding scrolls or points in time go last.
-        sizes.sort_by_key(|(l, _)| (l.pinned(), l.last_used.load(Ordering::SeqCst)));
+        sizes.sort_by_key(|(l, _)| (l.pinned() || l.cluster.contexts.latest_expiry().is_some(), l.last_used.load(Ordering::SeqCst)));
         for (l, r) in sizes {
             if !over(total) {
                 break;
@@ -2237,7 +2238,7 @@ impl Node {
                 && !auth::verify(&spec, c)
             {
                 let Some(Ok(k)) = native_principal(&loaded).map(|p| browser_key(&loaded, &p, req)) else {
-                    self.audit_refusal(name, spec.dialect, Some(&*loaded), req, &presented, Some(c));
+                    self.audit_refusal(name, &spec, Some(&*loaded), req, &presented, Some(c));
                     return Err(failed().into());
                 };
                 key_limit = k;
@@ -2274,7 +2275,7 @@ impl Node {
             && !auth::verify(&spec, c)
         {
             if native.is_none() {
-                self.audit_refusal(name, spec.dialect, None, req, &presented, Some(c));
+                self.audit_refusal(name, &spec, None, req, &presented, Some(c));
                 return Err(failed().into());
             }
             via_native = true;
@@ -2294,7 +2295,7 @@ impl Node {
             let mut key_limit = None;
             if via_native {
                 let Some(Ok(k)) = native_principal(&loaded).map(|p| browser_key(&loaded, &p, req)) else {
-                    self.audit_refusal(name, dialect, Some(&*loaded), req, &presented, claim.as_ref());
+                    self.audit_refusal(name, &spec, Some(&*loaded), req, &presented, claim.as_ref());
                     return Err(failed().into());
                 };
                 key_limit = k;
@@ -2317,7 +2318,7 @@ impl Node {
     /// Records in cluster `name`'s audit log that the node refused `req`'s credentials: as the
     /// loaded cluster asks, or as it last asked when it was loaded here (its defaults if never).
     /// Only a Basic user name is read from the credentials.
-    fn audit_refusal(&self, name: &str, dialect: Dialect, loaded: Option<&Loaded>, req: &EsRequest, presented: &Presented, claim: Option<&auth::Claim>) {
+    fn audit_refusal(&self, name: &str, spec: &ClusterSpec, loaded: Option<&Loaded>, req: &EsRequest, presented: &Presented, claim: Option<&auth::Claim>) {
         use search_es::xpack::security::audit;
         let user = match presented {
             Presented::Basic { user, .. } => Some(claim.and_then(|c| c.user.clone()).unwrap_or_else(|| user.clone())),
@@ -2325,7 +2326,7 @@ impl Node {
         };
         let snap = match loaded {
             Some(l) => audit::snapshot(&l.cluster),
-            None => self.audit.remembered(name).unwrap_or_else(|| Arc::new(audit::Snapshot::defaults(dialect, name, &stable_node_id(name), &self.cfg.node_name))),
+            None => self.audit.remembered(name, spec.catalog_id.as_deref()).unwrap_or_else(|| Arc::new(audit::Snapshot::defaults(spec.dialect, name, &stable_node_id(name), &self.cfg.node_name))),
         };
         audit::failed_login(&audit::AuditLog(self.audit.clone()), &snap, req, user.as_deref());
     }
@@ -2754,52 +2755,11 @@ mod tests {
         assert!(n.take_request_counts().is_empty());
     }
 
+    /// An open scroll doesn't keep its cluster loaded past its idle unload (its keep-alive is
+    /// the client's to choose): the cluster unloads, and the next page finds no context, as
+    /// after an Elasticsearch node restart.
     #[tokio::test]
-    async fn open_scrolls_keep_their_cluster_loaded() {
-        let (n, _) = node(NodeConfig { idle_unload: Some(Duration::from_millis(40)), unload_memory_only: true, ..NodeConfig::default() });
-        let send = |method: &str, uri: &str, body: &str, who: (&str, &str)| {
-            let mut r = EsRequest::json(method, uri, body.to_string());
-            r.headers.push(("Authorization".into(), basic(who.0, who.1)));
-            let n = n.clone();
-            async move { n.handle(r).await }
-        };
-        let c1 = ("c1", "pw1");
-        assert_eq!(send("PUT", "/i/_doc/1?refresh=true", r#"{"f":1}"#, c1).await.status, 201);
-        assert_eq!(send("PUT", "/i/_doc/2?refresh=true", r#"{"f":2}"#, c1).await.status, 201);
-        let r = send("GET", "/i/_search?scroll=1m&size=1", "", c1).await;
-        assert_eq!(r.status, 200);
-        let id = r.body_json().get("_scroll_id").and_then(|v| v.as_str()).unwrap().to_string();
-        // c2 has nothing open: it unloads; c1 holds a scroll for a minute.
-        assert_eq!(send("GET", "/", "", ("c2", "pw2")).await.status, 200);
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while n.get_loaded("c2").is_some() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("c2 unloads");
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(n.get_loaded("c1").is_some(), "a cluster with an open scroll stays loaded");
-        let r = send("POST", "/_search/scroll", &format!(r#"{{"scroll":"1m","scroll_id":"{id}"}}"#), c1).await;
-        assert_eq!(r.status, 200, "{:?}", r.body_json());
-        assert_eq!(r.body_json().pointer(&["hits", "hits"]).and_then(|v| v.as_array()).map(|a| a.len()), Some(1));
-        // Once its last scroll is closed, the cluster idles out as usual (no need to wait for
-        // the keep-alive).
-        let r = send("DELETE", "/_search/scroll", &format!(r#"{{"scroll_id":"{id}"}}"#), c1).await;
-        assert_eq!(r.status, 200, "{:?}", r.body_json());
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while n.get_loaded("c1").is_some() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("c1 unloads once its scroll expired");
-    }
-
-    /// A point in time pins its cluster until it is closed or its keep alive passes, whichever
-    /// comes first; nothing waits for the longest keep alive ever given.
-    #[tokio::test]
-    async fn points_in_time_pin_until_closed_or_expired() {
+    async fn open_scrolls_go_with_their_cluster() {
         let (n, _) = node(NodeConfig { idle_unload: Some(Duration::from_millis(40)), unload_memory_only: true, ..NodeConfig::default() });
         let send = |method: &str, uri: &str, body: &str| {
             let mut r = EsRequest::json(method, uri, body.to_string());
@@ -2807,29 +2767,21 @@ mod tests {
             let n = n.clone();
             async move { n.handle(r).await }
         };
-        let gone = |n: Arc<Node>| async move {
-            tokio::time::timeout(Duration::from_secs(5), async {
-                while n.get_loaded("c1").is_some() {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .is_ok()
-        };
         assert_eq!(send("PUT", "/i/_doc/1?refresh=true", r#"{"f":1}"#).await.status, 201);
-        // Closed explicitly: unloads right after, though the keep alive is an hour.
-        let r = send("POST", "/i/_pit?keep_alive=1h", "").await;
+        assert_eq!(send("PUT", "/i/_doc/2?refresh=true", r#"{"f":2}"#).await.status, 201);
+        let r = send("GET", "/i/_search?scroll=1h&size=1", "").await;
         assert_eq!(r.status, 200);
-        let id = r.body_json().get("id").and_then(|v| v.as_str()).unwrap().to_string();
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(n.get_loaded("c1").is_some(), "an open point in time keeps its cluster loaded");
-        assert_eq!(send("DELETE", "/_pit", &format!(r#"{{"id":"{id}"}}"#)).await.status, 200);
-        assert!(gone(n.clone()).await, "unloads once the point in time is closed");
-        // Expired: unloads once the (short) keep alive passed, without a close.
-        assert_eq!(send("POST", "/i/_pit?keep_alive=300ms", "").await.status, 200);
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        assert!(n.get_loaded("c1").is_some());
-        assert!(gone(n.clone()).await, "unloads once the keep alive passed");
+        let id = r.body_json().get("_scroll_id").and_then(|v| v.as_str()).unwrap().to_string();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while n.get_loaded("c1").is_some() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("c1 unloads though its scroll's keep-alive is an hour");
+        let r = send("POST", "/_search/scroll", &format!(r#"{{"scroll":"1m","scroll_id":"{id}"}}"#)).await;
+        assert_eq!(r.status, 404, "{:?}", r.body_json());
+        assert!(r.body_json().to_json().contains("search_context_missing_exception"), "{:?}", r.body_json());
     }
 
     #[tokio::test]

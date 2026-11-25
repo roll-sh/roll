@@ -255,10 +255,12 @@ async fn one_tenants_kept_results_leave_room_for_anothers_aggregation() {
     let (s, v) = call(&b, "POST", "/ids/_search", Some(TERMS_IDS)).await;
     let cause = parent_refusal(s, &v);
     assert_eq!(at(cause, "bytes_limit").as_i64(), Some(1 << 30), "B's own limit, not the node's free memory: {v:?}");
-    // Deleting A's results gives their memory back.
+    // Deleting A's results gives their memory back (and clearing B's request cache, which
+    // holds the small aggregation's result, gives back B's).
     for id in ids {
         assert_eq!(call(&a, "DELETE", &format!("/_query/async/{id}"), None).await.0, 200);
     }
+    assert_eq!(call(&b, "POST", "/_cache/clear", None).await.0, 200);
     assert_eq!(node.used(), 0);
 }
 
@@ -393,4 +395,34 @@ async fn bulk_documents_prepared_ahead_are_charged_and_never_fail_the_request() 
     assert_eq!(at(&stats, "nodes.*.breakers.request.tripped").as_i64(), Some(0), "{stats:?}");
     assert_eq!(at(&stats, "nodes.*.breakers.parent.tripped").as_i64(), Some(0), "{stats:?}");
     assert_eq!(node.used(), 0);
+}
+
+/// The shard request cache's entries are charged to the `request` breaker while they are kept,
+/// as much as the index stats say they hold, and `_cache/clear` gives it all back.
+#[tokio::test]
+async fn request_cache_entries_are_charged_until_cleared() {
+    let c = Cluster::in_memory("request-cache").await;
+    call(&c, "PUT", "/r", Some(br#"{"mappings":{"properties":{"k":{"type":"keyword"}}}}"#)).await;
+    let mut bulk = String::new();
+    for i in 0..200 {
+        bulk.push_str(&format!("{{\"index\":{{}}}}\n{{\"k\":\"k{i}\"}}\n"));
+    }
+    assert_eq!(call(&c, "POST", "/r/_bulk?refresh=true", Some(bulk.as_bytes())).await.0, 200);
+    let agg = br#"{"size":0,"aggs":{"k":{"terms":{"field":"k","size":200}}}}"#;
+    for _ in 0..2 {
+        assert_eq!(call(&c, "POST", "/r/_search", Some(agg)).await.0, 200);
+    }
+    // (the request breaker's bytes, the cache's bytes, its hits)
+    async fn held(c: &Cluster) -> (Option<i64>, Option<i64>, Option<i64>) {
+        let (_, stats) = call(c, "GET", "/_nodes/stats/breaker?filter_path=nodes.*.breakers.request", None).await;
+        let (_, idx) = call(c, "GET", "/r/_stats/request_cache", None).await;
+        (at(&stats, "nodes.*.breakers.request.estimated_size_in_bytes").as_i64(), at(&idx, "_all.total.request_cache.memory_size_in_bytes").as_i64(), at(&idx, "_all.total.request_cache.hit_count").as_i64())
+    }
+    let (breaker, cache, hits) = held(&c).await;
+    assert_eq!(hits, Some(1));
+    // Two hundred buckets: more than a fixed guess per entry.
+    assert!(cache.unwrap_or(0) > 4096, "{cache:?}");
+    assert_eq!(breaker, cache, "the cache's bytes are the breaker's");
+    assert_eq!(call(&c, "POST", "/r/_cache/clear", None).await.0, 200);
+    assert_eq!(held(&c).await, (Some(0), Some(0), Some(1)));
 }

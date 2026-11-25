@@ -1261,9 +1261,23 @@ Checked against Elasticsearch 9.5.5 (captures in
   bytes.`). Async search also enforces `search.max_async_search_response_size` (10mb) on a kept
   response, with Elasticsearch's error. Elasticsearch 9.5.5 applies no such limit to ES|QL.
 - Cross-cluster scroll and point-in-time contexts hold their parts' buffered hits on `request`,
-  at what they hold in memory, for as long as they live (`keep_alive`); local contexts hold only
-  shard searchers. Their number is bounded by `search.max_open_scroll_context` (500) and their
-  memory by the cluster's share of the node's budget (below).
+  at what they hold in memory, for as long as they live (`keep_alive`); local contexts hold
+  shard searchers, charged 64 KiB per shard they hold. Their number is bounded by
+  `search.max_open_scroll_context` (500) and their memory by the cluster's share of the node's
+  budget (below). A tenant's `search.max_keep_alive`, `search.max_open_scroll_context` (and
+  OpenSearch's `point_in_time.max_keep_alive`, `search.max_open_pit_context`) read as written but
+  can't raise the limits past their defaults (24h, 500 scrolls, 300 points in time). Contexts
+  don't keep a cluster loaded: one idle past its unload drops them, and a later page answers
+  `search_context_missing_exception`, as after an Elasticsearch node restart.
+- A point in time keeps only its alias filters: each search on it applies its reader's document
+  and field level security as the roles are then, as Elasticsearch does (a scroll keeps its
+  opener's, as Elasticsearch's scroll context does).
+- The shard request cache charges each entry what it holds (its aggregations and key) to
+  `request` until it goes, and the cluster's entries together hold at most
+  `indices.requests.cache.size` (1% of the node's budget), the least recently used going first.
+  Stored `_tasks` results hold at most 64 MiB per cluster on `request` (a by-query result keeps
+  its first 100 `failures`, with `failures_truncated` counting the rest), and compiled scripts
+  at most 32 MiB.
 - roll's differences in the `request` breaker, because one node serves many clusters:
   - everything charged to it (aggregations, ES|QL, kept results and contexts, buffered
     `_msearch` responses, snapshot transfers) is also charged to the node's budget, which only
