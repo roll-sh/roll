@@ -849,7 +849,10 @@ impl Control {
             return Err(ControlError::Invalid(format!("size is at most {PAGE_DOCS} for Algolia (its browse pages)")));
         }
         let dry = req.dry_run.unwrap_or(false);
-        let _slot = self.control_slot(&c)?;
+        // The cluster's migration slot, shared with each index's setup task: it frees once this
+        // call and every setup it started have ended, so a dropped request can't let a second
+        // migration start beside a setup still running.
+        let slot = std::sync::Arc::new(self.control_slot(&c)?);
         let deadline = tokio::time::Instant::now() + crate::migrate::DEADLINE;
         let client = self.saas_client(&spec, Some(crate::migrate::DEFINITION_LIMIT)).await?;
         let mut names = self.roll_names(&c).await?;
@@ -869,9 +872,15 @@ impl Control {
                 Ok(Ok(Step::Done(v))) => v,
                 Ok(Ok(Step::Ready(ready))) => {
                     // Made and started past the deadline, in a task the request can't drop.
-                    let (me, c2, spec2, size, rps) = (self.arc(), c.clone(), spec.clone(), req.size, req.requests_per_second);
+                    let (me, c2, spec2, size, rps, held) = (self.arc(), c.clone(), spec.clone(), req.size, req.requests_per_second, slot.clone());
                     let joined = match me {
-                        Some(me) => tokio::spawn(async move { me.finish_one(&c2, &spec2, *ready, size, rps).await }).await.ok(),
+                        Some(me) => tokio::spawn(async move {
+                            let done = me.finish_one(&c2, &spec2, *ready, size, rps).await;
+                            drop(held);
+                            done
+                        })
+                        .await
+                        .ok(),
                         None => None,
                     };
                     match joined {
