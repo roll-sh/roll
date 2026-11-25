@@ -333,7 +333,7 @@ impl Engine {
             .resources
             .iter()
             .filter_map(|res| Kind::of_workspace(res.kind).map(|k| (k, res.r#ref.clone())))
-            .filter_map(|(k, parent)| s.mode_of(k, &parent).map(|m| (k, parent, m)))
+            .filter_map(|(k, parent)| s.mode_for(k, &parent, r.trusted).map(|m| (k, parent, m)))
             .collect();
         // A resource whose rule changed (branch ↔ schema) is branched again in its new mode: a
         // project that moves to structure-only stops keeping full copies at once.

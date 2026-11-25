@@ -870,8 +870,9 @@ NOSQL_COPY_MASK=$(api GET /v1/nosql/databases | jq_ "[x.get('masking', {}).get('
 OWN_DATA="$OWN_DATA, NoSQL its own and masked"
 
 # Screenshots stayed on through the pushes: the page's change since the head before is known.
+# (A run at a new head took 79 s under load 58 on 2026-11-25, its stories with it: up to 5 min.)
 VISUAL=""
-for _ in $(seq 1 120); do
+for _ in $(seq 1 600); do
   VISUAL=$(api GET "/v1/previews/$PV" | jq_ "('%s%% since %s' % (d['visual_change']['percent'], d['visual_change']['since'][:10])) if d.get('visual_change') else ''")
   [ -n "$VISUAL" ] && break
   sleep 0.5
