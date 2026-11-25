@@ -22479,3 +22479,124 @@ That is more than a small change in the shared txn/scan code, so it is left.
    doesn't move its xmin as PostgreSQL's does; tables past the heap model never get the flag.
 4. Agent 310's difference 2 stays: snapshots older than an index's commit plan without it,
    where PostgreSQL uses it (results equal).
+
+## Point selects: what the snapshot / DDL fixes cost, and the code a read runs through (agent 317, 2026-11-25)
+
+Base `9efd42d19` (the head before agent 310), "head" `83a21ef3f` (agents 310 and 312 landed, and
+314's SubPlan memo). Harness `~/.cache/a317/inproc/` (agent 312's in-process bench, plus Intel
+PT); builds plain dist (`tools/dist.sh --example bench`). Lane A read 6-8 foreign cores all night:
+no cycle number here is usable, instruction counts are.
+
+### A count that can tell 0.1%
+
+312's pairs (process-wide `perf stat instructions:u`, (I30 s - I10 s) / (ops30 - ops10)) can't:
+five A/A pairs of the base binary against a copy of itself read -0.14, +0.07, -0.03, -0.20,
+-0.15% (with the load's compactions finished first, the last two, no better). A symbol diff of
+two `perf record` profiles of the same binary moved +-30..70 instructions per symbol and +0.66%
+in total (background threads' zstd, the allocator, sampling).
+
+`ptrec.sh` / `ptdec.sh` / `ptins.py` / `insdiff.py` count exactly instead: an Intel PT trace
+(`perf record -e intel_pt//u -p`, 100 ms, 5 s into a 1-client point_select run on a fresh
+100,000-row database) decoded instruction by instruction (`perf script --itrace=i1i`), the client
+thread only (the session runs on it), over 400 whole selects (from one entry of the bench's
+per-op check, `ReadCheck::check_inproc`, to the 401st). Per function the counts are the same to
+the instruction in every run, except:
+- mimalloc's slow paths (`_mi_malloc_generic`, `mi_find_page`, ...): about 26 or about 74
+  instructions a select, by the heap's state, in every build (bimodal);
+- the read itself (`Block::seek` +-20: the ids read differ).
+"Stable code" below is the sum over the other functions: what the code adds, without that noise.
+Totals of three base runs: 36,443 / 36,423 / 36,295 instructions a select.
+
+### Part 1: the cost, and what is left
+
+| build | stable code vs base (instructions / select) | where |
+|---|---|---|
+| head `83a21ef3f` | **+110 (+0.30%)** | `bound_as` +50, `lock_some` +26, the two new `TxnState` fields' drops +15 (one an out-of-line drop glue call), `with_search_path` +15 and libc +10 (314's `subplan_memo` map, built and copied with every statement's `ExecCtx`), `run_query` +5 |
+| + kept-plan check in `bound_as`'s borrow, `reads_every_index` one inlined branch | +84 (before the rebase on 314) | |
+| + one box for `DdlReads` and the set-aside snapshot; `refresh_from` | +57 (before the rebase) | `lock_some` +26 -> +8, drops +15 -> +5 |
+| + `bound_as`'s keep decision as a sentinel version | +65 (after the rebase: 314's +25 in) | `bound_as` +34 -> +26 |
+| + SubPlans' state in one lazy box | +45 | `with_search_path` -17 below base, but its drop glue +17 |
+| + that box's drop behind one inlined test (`cand/a317`) | **+37 (+0.10%)** | `bound_as` +26, `run_query` +9, `lock_some` +8, drops +10, `planned_as` +3; `with_search_path` -17 |
+
+Whole client thread, `cand/a317` against the base: 36,322 / 36,360 (mean -0.13%, the allocator in
+its cheaper state). 312's process-wide pairs, base against `cand/a317` (7.4-7.9 foreign cores):
++0.42, -0.05, -0.05% (median -0.05%).
+
+What changed (no behaviour change: `reads_every_index`, `every_index_at` and the refreshes after a
+lock decide as before):
+- `Txn::reads_every_index` is `#[inline]` one test (`ddl_reads` none and `IndexSince::pending`
+  false), its snapshot-time part `#[cold]` out of line; `bound_as` reads it inside the
+  transaction borrow it already takes, and folds "keep / reuse the binding" into the catalog
+  version it compares (`UNKEPT`, a version no kept binding has): the reuse tests nothing more
+  than before agent 312. (Cursors: not kept, as 312 made it.)
+- `DdlReads` holds the snapshot `begin_latest_reads` sets aside (`latest`), so `TxnState` has one
+  box where it had two (its drop tests one pointer); `end_latest_reads` drops the box when
+  nothing else is in it. `every_index_at`'s fast tests look at `stale` (the box now exists during
+  every DDL statement that reads the newest rows).
+- `lock_relation` compares a granted lock's mode with `refresh_from` (SHARE; ACCESS SHARE while
+  `begin_latest_reads` runs) and does both refreshes out of line (`refresh_after_lock`), one
+  compare where it had two tests.
+- `ExecCtx`: correlated SubPlans' kept trees and 314's memo in one `SubplansBox` (a
+  `RefCell<Option<ManuallyDrop<Box<Subplans>>>>` with an inlined `Drop`), made by the first
+  SubPlan run: a statement sets one pointer and its drop tests it, where it initialised, copied
+  and dropped two maps.
+
+What is left of the +37: `bound_as`'s test itself (8 instructions: the `ddl_reads` test and the
+two dependent loads to `pending`), register spills around it, and alignment: the dist build's
+`-x86-branches-within-32B-boundaries` pads jumps with NOPs that execute (bound_as had 14 NOPs a
+select at the base, 12-24 in the candidates), so any code change moves a few instructions either
+way in the functions around it (`run_query` +9 is that: its source didn't change).
+
+Checks (on `a768fc880`, rebased on `7a11af253`): `tools/quick-check.sh` with `QC_CHECKED=1` and
+`QC_TESTS=twophase`: clippy 16 warnings, none new in a changed file; 442 tests in 25 binaries
+(`wire`'s protocol cases and `twophase` among them), and again built `verify-checked`; crash seeds
+1-3 x 2 and power_cut_at_every_point; regress 51,148 / 51,150, 0 newly differing; isolation
+1,647 / 1,648; pg_dump_tap 14,609 passed. The snapshot / DDL specs (roll-ddl-snapshot-reads-latest,
+-validation-snapshots, -reads-waited-writes, -after-lock-waits, roll-prepared-ddl-snapshots,
+roll-index-checkxmin, roll-concurrent-create, roll-detach-finalize-snapshots) against PostgreSQL
+18.6 live (`PGISOLATION_ONLY`): 8 / 8 specs, 63 / 63 permutations.
+
+### Part 2: the code a point select runs through
+
+Measured with Intel PT branch traces (`inproc/pt.sh` in process, `bench/ptsrv.sh` +
+`ptsrvdec.sh` on a server under `pgbench -S -M prepared -c 8`, one server CPU traced, decoded for
+the server's pid), `inproc/ptcov.py`: each taken branch's target to the next branch's source is
+code executed; distinct 64-byte lines and 4 kB pages over the window (what has to be warm in the
+i-cache and iTLB).
+
+| build | lines (KiB) | 4 kB pages | functions | pages with < 8 of 64 lines used |
+|---|---|---|---|---|
+| plain, in process (`bench`) | 2,486 (155) | 266 | 323 | 152 |
+| plain, server | 2,617 (164) | 269 | 316 | 149 |
+| PGO as shipped, server | 2,161 (135) | 168 | 104 | 86 |
+| PGO, `-z keep-text-section-prefix` | 2,026 (127) | 163 | 104 | 90 |
+| PGO, + `-enable-split-machine-functions` | 2,010 (126) | 152 | 107 | 78 |
+
+All of a read's hot code would fit in about 39 pages, and the L1 iTLB has 128 entries. What
+spreads it is the number of distinct functions, each on a page of its own somewhere in 36-38 MB
+of text, not their size. The plain build's functions touched total 539 KiB, of which 155 are
+executed. Big functions run for a few lines each (`eval_here` 5 of 418 lines, `commit_in` 11 of
+367, `dispatch` 15 of 321, `parse_value_ex` 8 of 213, `put_entry_deletes` 5 of 191), but each
+costs one page whatever its size. In the PGO build, the point select's ~104 (inlined) functions
+sit across the 7.9 MB `.text.hot` (lld merges `.text.hot.*` into `.text` in input order unless
+told to keep the prefix, and the shipped build doesn't).
+
+**Measured and dropped:**
+- The PGO build's hot code packed (`-z keep-text-section-prefix`, alone and with LLVM's machine
+  function splitting; `~/.cache/a317/patches/dropped-pgo-hot-layout.patch`). Tested by
+  relinking one build's objects (lld `--reproduce` through a linker wrapper,
+  `~/.cache/a317/linkwrap.sh` / `relink.sh`: the relink without flags is byte-identical). The
+  split build is +1.7 MB of text. Pages went 168 -> 163 -> 152. The split build in 3 pairs,
+  select-only at 8 clients against the PGO build: user instructions per read +1.03 / +9.56 /
+  -6.02%, cycles +0.87 / +5.92 / -2.60% (foreign 1.25-1.88): no direction.
+- 301's hot-function ordering for the plain build stays dropped. Ordering the 316-323 functions
+  a read touches packs whole functions: about 539 KiB, ~135 pages, still over the iTLB's 128,
+  with no hot/cold split (that needs a profile).
+
+**Left:** fewer distinct functions on the path is the lever both builds share: the session's
+per-statement steps (`run_query`, `bind_message`, `execute_portal_here`, `finish_txn`,
+`planned_as`, `bound_as`, `ensure_txn`, `begin_in`, `begin_statement`, `first_snap`,
+`release_locks`, `finish_xid`, pgstat's `report` / `end_xact_counts`, `Settings::end_transaction`,
+the `TxnState` / `ExecCtx` drops) are ~60 functions of ~10-120 executed lines each. Merging them
+into fewer, denser ones is a refactor to gate on cycles, which the loaded lanes didn't allow
+tonight (6-8 foreign cores on lane A all night).

@@ -285,6 +285,39 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Point selects: the snapshot / DDL fixes' cost; the code a read runs through (2026-11-25, agent 317)
+
+HANDOFF "Point selects: what the snapshot / DDL fixes cost" has the method and what changed.
+Exact instructions per point select of the in-process client thread (Intel PT, 400 whole
+selects per trace, `~/.cache/a317/inproc/`), plain dist `bench`, base `9efd42d19` (before agent
+310). "Stable code": the functions whose counts don't vary between runs (all but mimalloc's slow
+paths, bimodal ~26 / ~74 a select, and the read's own `Block::seek`, +-20).
+
+| build | totals of 2-4 runs | stable code vs base |
+|---|---|---|
+| base `9efd42d19` | 36,443 / 36,423 / 36,295 | |
+| head `83a21ef3f` (310, 312, 314 in) | 36,398 / 36,442 / 36,401 | +110 (+0.30%) |
+| `cand/a317` | 36,322 / 36,360 | +37 (+0.10%) |
+
+Process-wide pairs (agent 312's harness, `perf stat` of the process, (I30 - I10) / (ops30 -
+ops10), lane A at 7.4-7.9 foreign cores): base against `cand/a317` +0.42, -0.05, -0.05% (median
+-0.05%). The same harness's A/A pairs of the base binary: -0.14, +0.07, -0.03, -0.20, -0.15%.
+
+Code a point select runs (Intel PT branch traces; distinct 64-byte lines and 4 kB pages over the
+window):
+
+| build | lines | 4 kB pages | functions |
+|---|---|---|---|
+| plain, in process | 2,486 | 266 | 323 |
+| plain, server (`pgbench -S -M prepared -c 8`) | 2,617 | 269 | 316 |
+| PGO, server | 2,161 | 168 | 104 |
+| PGO + `-z keep-text-section-prefix` (dropped) | 2,026 | 163 | 104 |
+| PGO + that + `-enable-split-machine-functions` (dropped) | 2,010 | 152 | 107 |
+
+The last against PGO, select-only at 8 clients, 3 alternating pairs: user instructions per read
+31,777 -> 32,105 / 31,587 -> 34,607 / 34,026 -> 31,978, user cycles 69,268 -> 69,872 / 68,855 ->
+72,931 / 69,927 -> 68,111 (foreign 1.25-1.88): no direction, dropped.
+
 ## Bulk writes, round 27: COPY out's floats and text, index builds' key columns; the DELETE's compaction measured (2026-11-25, agent 315)
 
 HANDOFF "Bulk writes, round 27" has what changed. Lane C, agent 314's standing harness (one server
