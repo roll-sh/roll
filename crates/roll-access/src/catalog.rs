@@ -1631,6 +1631,8 @@ static ROWS: &[Row] = &[
     row("*", "/v1/secrets/projects/{project}/identities/", "secrets", ADMIN, one(&["project"], "project")),
     // Pinning an issuer's keys decides which tokens log in as the identity: the identity's admin.
     row("PUT", "/v1/secrets/projects/{project}/identities/{id}/jwks", "secrets", ADMIN, one(&["project"], "project")),
+    // A machine identity's bootstrap token: the identity's admin, and the answer is a credential.
+    row("POST", "/v1/secrets/projects/{project}/identities/{id}/bootstrap", "secrets", ADMIN, one(&["project"], "project")).reveals(&["secret"]),
     // Renewing a lease extends a credential whoever could read it holds.
     row("POST", "/v1/secrets/projects/{project}/leases/{id}/renew", "secrets", REVEAL, one(&["project"], "project")),
     // Ending a credential only takes access away: whoever could reveal it may.

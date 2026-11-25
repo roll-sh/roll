@@ -94,7 +94,10 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/identities"), get(identities).post(create_identity))
         .route(&format!("{P}/identities/{{id}}"), axum::routing::delete(delete_identity).patch(update_identity))
         .route(&format!("{P}/identities/{{id}}/jwks"), axum::routing::put(set_identity_keys))
+        .route(&format!("{P}/identities/{{id}}/bootstrap"), post(create_bootstrap))
         .route("/v1/secrets/login", post(login))
+        .route("/v1/secrets/login/bootstrap", post(login_bootstrap))
+        .route("/v1/secrets/login/refresh", post(login_refresh))
         .route("/v1/secrets/oidc/.well-known/openid-configuration", get(oidc_discovery))
         .route("/v1/secrets/oidc/jwks", get(oidc_jwks))
         .route("/v1/secrets/issuer/rotate", post(rotate_issuer))
@@ -1247,6 +1250,38 @@ struct LoginBody {
     token: Option<String>,
     /// An AWS identity's signed `sts:GetCallerIdentity` (aws_identity.rs).
     aws: Option<crate::aws_identity::SignedRequest>,
+    /// A machine identity's machine credential (`rlmc_…`).
+    machine: Option<String>,
+}
+
+/// A machine identity's bootstrap token (`token`) or current machine credential (`credential`).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MachineBody {
+    identity: String,
+    token: Option<String>,
+    credential: Option<String>,
+}
+
+async fn create_bootstrap(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::NewBootstrap = if b.is_empty() { Default::default() } else { body(&b)? };
+    Ok(secret_response(created(blocking(s, move |s| s.create_bootstrap(&project, &id, n, &c)).await?)))
+}
+
+/// A bootstrap token for the machine's first machine credential (public: the token is the credential).
+async fn login_bootstrap(State(s): S, parts: Parts, b: Bytes) -> crate::Result<Response> {
+    let m: MachineBody = body(&b)?;
+    let token = m.token.filter(|_| m.credential.is_none()).ok_or_else(|| Error::BadRequest("an exchange carries the bootstrap token (token)".into()))?;
+    let ip = s.client_ip(&parts);
+    Ok(secret_response(ok(blocking(s, move |s| s.machine_credential(&m.identity, &token, true, ip)).await?)))
+}
+
+/// A machine credential for the next one (public: the credential is the credential).
+async fn login_refresh(State(s): S, parts: Parts, b: Bytes) -> crate::Result<Response> {
+    let m: MachineBody = body(&b)?;
+    let credential = m.credential.filter(|_| m.token.is_none()).ok_or_else(|| Error::BadRequest("a refresh carries the current machine credential (credential)".into()))?;
+    let ip = s.client_ip(&parts);
+    Ok(secret_response(ok(blocking(s, move |s| s.machine_credential(&m.identity, &credential, false, ip)).await?)))
 }
 
 /// A workload's OIDC token for a short-lived scoped token (public: the token is the credential).
@@ -1311,10 +1346,11 @@ async fn delete_cloud_account(State(s): S, Who(c): Who, Path((project, id)): Pat
 
 async fn login(State(s): S, parts: Parts, b: Bytes) -> crate::Result<Response> {
     let l: LoginBody = body(&b)?;
-    let proof = match (l.token, l.aws) {
-        (Some(t), None) => crate::Proof::Oidc(t),
-        (None, Some(a)) => crate::Proof::Aws(a),
-        _ => return Err(Error::BadRequest("a login carries a token (OIDC) or aws (a signed GetCallerIdentity)".into())),
+    let proof = match (l.token, l.aws, l.machine) {
+        (Some(t), None, None) => crate::Proof::Oidc(t),
+        (None, Some(a), None) => crate::Proof::Aws(a),
+        (None, None, Some(m)) => crate::Proof::Machine(m),
+        _ => return Err(Error::BadRequest("a login carries a token (OIDC), aws (a signed GetCallerIdentity) or machine (a machine credential)".into())),
     };
     let ip = s.client_ip(&parts);
     Ok(secret_response(ok(blocking(s, move |s| s.login(&l.identity, proof, ip)).await?)))

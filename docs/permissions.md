@@ -1136,6 +1136,34 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   revoked or left to end. It makes and changes no tokens (`403`): what it made would be a
   credential nobody set up. The product that minted it stops it with `Access::revoke_workload(id,
   why)` (its identity deleted): only a workload grant, with why and an audit row. Their requests are audited as any token's, and each mint is a row.
+- **Bootstrap tokens and machine credentials** (`crates/roll-access/src/store/bootstrap.rs`) are
+  secret zero for a machine with no platform identity (bare metal, on premises), as Akeyless'
+  Universal Identity and Vault's AppRole `secret_id` are. roll secrets' machine identities use them
+  (docs/secrets.md, "On a VM"); nothing else does.
+  - **A bootstrap token** (`rlbt_…`, `Access::mint_bootstrap`) is a workload grant with no rules:
+    single-use, 1 to 60 minutes, optionally bound to addresses (`ip_allow`), owned as a workload
+    token is (refused while its owner can't sign in). Its id names its **chain**.
+  - **Exchanging it** (`Access::redeem`) spends it and makes a **machine credential** (`rlmc_…`): a
+    workload grant with no rules either, of the chain, for 1 to 720 hours, bound to the bootstrap
+    token's addresses. The machine exchanges that credential the same way at half its life: the new
+    one is made and the old one spent in one write. A credential only logs its machine in
+    (`Access::present_machine`), and the token its login gets (`Access::mint_workload_via`) joins the
+    chain; that mint is refused once the credential isn't live, in the same write.
+  - **Neither opens anything at the gate**: their secrets are of their own kinds (`bootstrap`,
+    `machine`), which `Store::by_secret` never answers, so a request bearing one is a 401. Both carry
+    a checksum, are in `SECRET_PREFIXES` and are kept as their SHA-256 only, and every use is looked
+    up in the store: nothing is cached.
+  - **A spent one presented again ends the chain.** A spent secret is kept (`revoked_why = 'spent'`)
+    until it would have ended. Presenting it (a second exchange of a bootstrap token, a replaced
+    credential used to log in or to exchange) means a copy exists somewhere: every live grant of the
+    chain is revoked in the same write (the current credential and every login's token), whichever
+    side used the copy first. The audit log has a `reused` row (`decision: "revoke"`) and the
+    operator's feed a `secret_revoked` alert. A presentation from an address the grant isn't bound to,
+    of the wrong kind, or after it ended is refused and changes nothing.
+  - **Leaked**, either is revoked with its whole chain, as a token is (below).
+  - `Access::revoke_chain(chain, why)` ends a chain (roll secrets: the identity deleted, disabled or
+    cut off). Chains are listed with `?kind=workload`, and go a day after their last secret would
+    have ended.
 - `last_used_at` and `last_used_ip` are written at most once a minute per grant.
 
 ### Tighten to what it used

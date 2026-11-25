@@ -88,7 +88,7 @@ mod write;
 pub mod unseal;
 pub mod validity;
 
-pub use access::{Action, Approval, Caller, Minted, People, Person, Scope, Workloads, PREVIEWS};
+pub use access::{Action, Approval, Caller, Chained, Minted, People, Person, Scope, Step, Workloads, PREVIEWS};
 pub use api::router;
 pub use crypto::{Keyring, Value};
 pub use audit::{AuditEntry, AuditFilter, VerifyQuery};
@@ -104,7 +104,7 @@ pub use read::{Delta, Followed, Grid, Held, Linked, Problem, Secret, Source, Val
 pub use requests::{Request, RequestPage, RequestValue, Review, Verdict};
 pub use exports::Export;
 pub use decoys::{Decoy, NewDecoy};
-pub use identities::{Identity, IdentityKind, Login, NewIdentity, Proof};
+pub use identities::{Identity, IdentityKind, Login, MachineSecret, NewBootstrap, NewIdentity, Proof};
 pub use issuer::Subject;
 pub use required::Required;
 pub use shares::{NewShare, Peek, Share};
