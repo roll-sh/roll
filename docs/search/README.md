@@ -1587,7 +1587,7 @@ deterministic (#396).
    `/_roll/openai/v1/chat/completions` (Bearer API keys), browser keys' own `limits.chat` (turns,
    tokens in and out and concurrency per key and per derived key's user; #358's keys still can't
    call `_inference`), `roll search chat`, `search_chat`, and the Playground's "Save as profile".
-   Left: answers' token usage in the cluster's usage totals, the `openai` client in Docker, the
+   Left: chat tokens in the cluster's usage totals (rag.md, "Metering"), the `openai` client in Docker, the
    retrieval fixture, and phase 3 (memory, query rewriting, OpenSearch's processor).
 12. **The first query in a minute** (the guides landed in #604; sample data and a guided first
    query landed (#658): one click loads 1,000 generated products or 2,000 ECS log lines on the

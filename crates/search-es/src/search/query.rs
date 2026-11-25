@@ -1225,8 +1225,12 @@ impl<'a> QueryCtx<'a> {
     }
 
     fn nested_query(&self, n: &crate::query::joining::Nested) -> EsResult<QueryRef> {
-        // `NestedQueryBuilder.doToQuery`: block joins are expensive.
-        if !self.allows_expensive() {
+        // `NestedQueryBuilder.doToQuery`: block joins are expensive. A `semantic_text` field's own
+        // chunks (what a `semantic` query, or a match on the field, rewrites to) join nothing
+        // between documents and are bounded by the field's chunks, so a browser key's policy lets
+        // them through; the cluster's own setting still holds.
+        let own_chunks = n.path.strip_suffix(".inference.chunks").and_then(|f| self.table.get(f)).is_some_and(|f| f.ty == "semantic_text");
+        if !self.allows_expensive() && !(own_chunks && self.allow_expensive) {
             return Err(EsError::new(400, "exception", "[joining] queries cannot be executed when 'search.allow_expensive_queries' is set to false."));
         }
         let Some(o) = self.table.objects.get(&n.path).cloned() else {

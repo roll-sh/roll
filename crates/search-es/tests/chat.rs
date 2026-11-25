@@ -262,9 +262,10 @@ async fn a_document_cannot_steer_retrieval_or_the_prompt() {
     let (s, v, _) = call(&c, "POST", "/_roll/chat/help/_answer", r#"{"question":"How do I reset my password?"}"#).await;
     assert_eq!(s, 200, "{v:?}");
     assert!(v.get("sources").and_then(Value::as_array).unwrap().iter().all(|s| s.get("_index").and_then(Value::as_str) == Some("docs")));
-    // One embedding of the question and one completion: nothing the document said ran.
-    let calls: Vec<String> = seen.lock().unwrap().iter().map(|(p, _)| p.clone()).collect();
-    assert_eq!(calls.iter().filter(|p| p.ends_with("/embeddings")).count(), 1, "{calls:?}");
+    // Only the question was embedded, and one completion asked: nothing the document said ran.
+    let calls: Vec<(String, Value)> = seen.lock().unwrap().clone();
+    let embedded: Vec<String> = calls.iter().filter(|(p, _)| p.ends_with("/embeddings")).map(|(_, b)| b.get("input").map(Value::to_json).unwrap_or_default()).collect();
+    assert!(!embedded.is_empty() && embedded.iter().all(|i| i == r#"["How do I reset my password?"]"#), "{embedded:?}");
     let sent = chats(&seen);
     assert_eq!(sent.len(), 1);
     let user = message(&sent[0], -1);

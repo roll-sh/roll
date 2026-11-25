@@ -65,9 +65,16 @@ what the best of the four products does:
 - **Workflows.** `_answer`, the OpenAI route and its model list run in the
   `search_application_query` workflow, so a key restricted to it chats over its application; it
   is refused a profile over an index (403).
-- **Left for later:** each answer's provider-reported `usage` is in the answer but not yet added
-  to the cluster's usage totals in search-control; the official `openai` Python client in Docker
-  against a node; the help-center retrieval fixture; query rewriting and memory (phase 3).
+- **Metering.** An answer is metered as every inference call is today: one request, and the
+  embedding pool's CPU when retrieval embeds with roll's E5 (`search-control/src/pricing.rs`).
+  Provider tokens aren't metered for any endpoint (the provider bills them); each answer reports
+  its own (`usage`, the provider's count or roll's estimate). Adding chat tokens to the cluster's
+  usage totals is the first token metering: a per-cluster counter in search-es, the node taking
+  it each metering pass (unloaded clusters' too, as `take_request_counts` does), two
+  `search_usage` columns (SQLite and Postgres), and the usage route, CLI and docs. Scheduled
+  separately.
+- **Left for later:** the official `openai` Python client in Docker against a node; the
+  help-center retrieval fixture; query rewriting and memory (phase 3).
 
 ## Where roll is today
 
