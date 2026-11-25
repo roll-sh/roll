@@ -21806,6 +21806,83 @@ Not done, found:
 - Subquery Scan widths (remove_unused_subquery_outputs' NULLs at their types' widths), memoize:8,
   subselect:19 rows, the catalog plans (bloat), as agent 288 left them.
 
+## Analytic CPU, round 16: reordered heaps' filter-only scans through chunks, index filters less what the key range applies (agent 319)
+
+Round 15 (316) left roll PGO behind the better of pgrust and PostgreSQL on 16 of the 22, the
+largest ratios q20 2.56x, q02 2.16x, q11 1.91x, q14 1.74x, q05 1.42x, most of them serial plans.
+Base **b1** is origin's `342917576` (cand/a316-2 landed); BENCH "Analytic CPU, round 16" has the
+tables. Profiles (`instructions:upp`, period 2,000,003, LBR) of q20, q02, q11, q14 found two
+serial-path costs worth taking:
+
+- **A sequential scan of a reordered heap with only a filter above it read every row twice.**
+  TPC-H's part (and customer, supplier) have rows a COPY put in earlier pages' free space, so
+  their heap order isn't key order. `start_parallel` sent such a scan to the serial path unless
+  work above it (probes, lookups, aggregation) was pushed into the workers: there
+  `next_heap_ordered` reads the table once for the TIDs (`heaporder::displaced`), again in heap
+  order, and `emit` makes each row the filter can't decide over its stored values. q20's outer
+  `Seq Scan on part` (`p_name LIKE 'forest%'`) was 17% of q20 in `next_heap_ordered` alone, q02's
+  `part` scan under its Gather (`p_type LIKE '%BRASS' AND p_size = 15`, the hash join's outer
+  side) 10% of q02. Round 15 of the executor (219) had made `DisplacedFill` for exactly these
+  heaps (the displaced rows the heap model names fetched by key and put in place within chunks
+  of keys) but kept it to scans with work above them.
+- **An index scan's filter repeats its index conditions, and one with an outer value has no
+  kernel.** q20's SubPlan runs 8,332 index scans of `lineitem_l_partkey_l_suppkey_idx` with the
+  filter `l_partkey = <outer> AND l_suppkey = <outer> AND l_shipdate >= .. AND l_shipdate < ..`;
+  `kernel::compile` takes no `Expr::Outer`, so every fetched row (62k) was decoded up to its
+  filter's columns and the whole filter run by `eval` (eval 4%, the decode and its allocations
+  ~9% of q20). `filter_implied` (whole filters the key range applies exactly) didn't apply.
+
+**What changed** (`exec/scan.rs`, `exec/kernel.rs`):
+- `start_parallel`: a reordered heap whose displaced rows the model lists (`displaced_inserts`)
+  runs through the chunks (`DisplacedFill`) with only a filter above it too, the rows and their
+  order the serial scan's. Not where the filter is all stored-value comparisons
+  (`StoredCmps::covers`, a side-effect-free `StoredCmps::of`): the serial path decides every row
+  on its first read there, and working out the displaced rows cost more (q17's
+  `p_brand = .. AND p_container = ..`: +2.2% through the chunks, kept serial). A heap whose
+  displaced rows aren't listed stays as before (serial, or listed and sorted for work above).
+- `ScanNode::rest` (`filter_rest_plan`, `implied_conjuncts`: `filter_implied_plan`'s test made per
+  conjunct): an index scan whose key range applies some of its filter's conjuncts exactly
+  checks its rows against the others only (at the statement's snapshot, not under a row mark,
+  as `implied`), for its kernel, stored-value comparisons, prefilter columns and `eval`. Decided
+  once per plan with `implied` and `point` (`plan_decided`). Debug builds check the conjuncts left
+  out on every row returned (those alone: the others may have effects, golden `a9_rule_plans`'
+  `a9_snoop` NOTICE came twice in the checked build when the whole filter was checked). A READ COMMITTED recheck of a newer locked version still uses the whole
+  filter.
+
+**Measured** (BENCH "Analytic CPU, round 16", plain dist, user instructions a run, pairs in both
+orders, b1 against n4): **the 22 83.42 -> 82.56 G (-1.03 / -1.04%)**, q20 1.368 -> 0.890 G
+(-35.0%), q02 2.629 -> 2.279 G (-13.3%), q07 -0.7%, q16 -0.4%, the rest within +-0.2%. Every
+result hash equal to b1's and PostgreSQL's; the 22 plans' EXPLAIN identical; peak memory over the
+pass level. In process: point select 36,411.8 user instructions on both, short transaction -0.7%
+(and -5.4% in a pair whose 10 s run was disturbed). PGO: PGO.
+
+**Dropped**: `IndexChunk` (a parallel bitmap or index chunk's row fetches) through the batched
+`Store::get_sorted` in place of `get_versions`: q14 -0.35% in one pair, +0.08% in the next, the
+others within 0.15% (`~/.cache/a319/patches/dropped-indexchunk-get-sorted.patch`). Reading the
+filter-only chunks on the executor's thread (inline) instead of the workers: level (q02 / q20
++0.4..0.6%, q17 unchanged), not kept.
+
+**Tests**: golden `a319_index_filter_rest` (recorded from PostgreSQL 18.6: q20's SubPlan shape,
+partial index conditions with NULLs, OR, casts, a range bound, the same queries without the index);
+`parallel_scan::inserts_into_free_space_through_chunks` gains a filter-only scan (a LIKE the
+stored-value comparisons don't decide) checked to read through the displaced chunks with the
+serial scan's rows and order.
+
+**Left** (plain n4 against the standing's pgrust / PostgreSQL PGO figures):
+- q20 0.89 G against PostgreSQL's 0.44: the SubPlan is 60% of it now, its row fetches by key
+  (`get_sorted`, ~2.4k instructions a key: `Block::seek`'s varint decode and byte compares,
+  agent 311's block forms) and its 8,332 index seeks (`read_entries`, 9%); the `part` scan's
+  chunks 20% (`Pre::decode` of `p_name` for the LIKE: a prefix LIKE over the stored bytes would
+  take it).
+- q02 2.28 against 1.03: the build side's 158,720 partsupp fetches by `ps_suppkey` (`get_sorted`
+  18%), the hash table's size accounting per row (`workmem::data_len` 6%) and spill encoding
+  (`encode_value`, `Files::save` 7%), the SubPlan 10%.
+- q11 0.83 against 0.38: the same fetches (19%), the nested loop's joined rows (`concat_rows`,
+  `project_moving` 10%), numeric multiply and sum (11%).
+- q14 1.39 against 0.68: the part rows the workers decode and send for the hash build
+  (`Decode::row_with` 16%, `Narrow::shrink`, the table's inserts 13%); the lineitem bitmap fetches
+  (13.5%).
+
 ## Analytic CPU, round 15: dense bitmaps read by key, probes before the walk (agent 316)
 
 The standing (BENCH "Standing, 2026-11-24") had roll PGO 0.5% under pgrust on the TPC-H total and

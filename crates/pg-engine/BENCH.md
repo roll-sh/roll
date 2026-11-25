@@ -447,6 +447,62 @@ DELETE and VACUUM, 75.2 MB after VACUUM FULL (its bloat for these statements: 91
 | whole script without the three `string_agg(ctid::text ... ORDER BY id)` checks | 255.6 (UPDATE) | 359.5 |
 | the highest step's own peak, with the checks | 301 (n2 382, CHECKPOINT after the last check) | - |
 
+## Analytic CPU, round 16: reordered heaps' filter-only scans through chunks, index filters less what the key range applies (2026-11-25, agent 319)
+
+HANDOFF "Analytic CPU, round 16" has what changed. Lane C, TPC-H SF1 (loaded by b0, agent 316's
+cand/a316-2 head `85b5d21de`), agent 316's harness copied to `~/.cache/a319/bench/` (`tpair.sh`:
+per build a fresh server on a copy of the data, a warm-up run of each query, then each query once
+in its own perf window of the server's cgroup), plain dist builds (`tools/dist.sh`): **b1**
+origin's `342917576` (cand/a316-2 landed), **n4** the candidate. One pair a hold, b1 n4 then n4
+b1; lane.sh read 5.9-7.1 foreign cores, the pairs' own 0.8-0.9 (no pair met the 1.0 rule):
+instructions decide. Every result hash equal to b1's and to PostgreSQL's (the standing's), the
+22 plans' EXPLAIN (COSTS OFF) identical to b0's (round 15's, PostgreSQL's), peak anon+shmem over
+the pass 1,601 / 1,603 MB.
+
+| query | b1 / n4 pair 1 (G) | n4 / b1 pair 2 (G) | % per pair |
+|---|---|---|---|
+| q01 | 7.311 / 7.310 | 7.310 / 7.310 | -0.01, +0.00 |
+| q02 | 2.629 / 2.279 | 2.278 / 2.630 | -13.33, -13.35 |
+| q03 | 4.121 / 4.121 | 4.121 / 4.121 | +0.00, -0.00 |
+| q04 | 1.351 / 1.351 | 1.351 / 1.351 | -0.00, -0.01 |
+| q05 | 2.815 / 2.814 | 2.814 / 2.814 | -0.03, -0.01 |
+| q06 | 3.378 / 3.378 | 3.378 / 3.378 | +0.01, -0.01 |
+| q07 | 3.533 / 3.509 | 3.509 / 3.532 | -0.69, -0.67 |
+| q08 | 1.408 / 1.408 | 1.408 / 1.408 | +0.01, -0.01 |
+| q09 | 7.807 / 7.809 | 7.809 / 7.803 | +0.01, +0.07 |
+| q10 | 5.534 / 5.546 | 5.540 / 5.546 | +0.21, -0.11 |
+| q11 | 0.833 / 0.835 | 0.833 / 0.833 | +0.21, -0.02 |
+| q12 | 5.878 / 5.877 | 5.878 / 5.877 | -0.01, +0.01 |
+| q13 | 4.105 / 4.104 | 4.105 / 4.104 | -0.01, +0.01 |
+| q14 | 1.387 / 1.387 | 1.387 / 1.387 | +0.05, +0.00 |
+| q15 | 2.306 / 2.306 | 2.306 / 2.306 | -0.00, -0.01 |
+| q16 | 2.885 / 2.872 | 2.873 / 2.883 | -0.44, -0.35 |
+| q17 | 2.858 / 2.856 | 2.859 / 2.859 | -0.06, +0.01 |
+| q18 | 15.562 / 15.560 | 15.545 / 15.545 | -0.02, -0.00 |
+| q19 | 0.474 / 0.474 | 0.474 / 0.474 | +0.01, +0.01 |
+| q20 | 1.368 / 0.890 | 0.890 / 1.368 | -34.98, -34.98 |
+| q21 | 5.258 / 5.258 | 5.258 / 5.258 | +0.00, +0.01 |
+| q22 | 0.623 / 0.624 | 0.623 / 0.623 | +0.01, +0.02 |
+| all | 83.42 / 82.56 | 82.55 / 83.41 | -1.03, -1.04 |
+
+- q20 -35.0% (1.368 -> 0.890 G): its outer `Seq Scan on part` (`p_name LIKE 'forest%'`) through
+  the displaced chunks instead of `next_heap_ordered`'s two reads, and its SubPlan's 8,332 index
+  scans checking `l_shipdate` only, by stored-value comparisons, not `eval` over a decoded row.
+  q02 -13.3%: its `part` scan (the hash join's outer side) through the chunks. q07 -0.7%, q16
+  -0.4%: customer / supplier / part scans the same way. The rest within +-0.2%.
+- Earlier builds on b0 (`85b5d21de`, the same data, one hold a pair): **n1** (both changes, every
+  filter-only reordered scan through the chunks) q20 -34.9 / -35.0%, q02 -13.1 / -13.4%, but q17
+  +2.3 / +2.2%: its Hash's `part` scan (`p_brand = .. AND p_container = ..`) was cheaper serial,
+  where `StoredCmps` decides each row on the first read, than `displaced_inserts` and the chunks
+  (n3 keeps those serial: q17 -0.01%). **n2** against n1 (one pair, ten queries): the filter-only
+  chunks read on the executor's thread (inline) q02 +0.44%, q20 +0.55%, q17 -0.02%; and
+  `IndexChunk`'s fetches through `Store::get_sorted` q14 -0.35% (+0.08% against b0 in n3's pair),
+  the rest within 0.17%: both dropped.
+- In process (the `bench` example, 1 client, a fresh 100,000-row database a run, (I30 s - I10 s) /
+  (ops30 - ops10), lane A, 6.2-6.6 foreign cores): point select 36,411.8 / 36,411.8 user
+  instructions (b1 / n4), short transaction 262.3 k / 248.1 k then (n4 first) 261.9 k / 260.2 k
+  (-0.7%, the first pair's n4 10 s run had a third of the others' ops).
+
 ## Analytic CPU, round 15: dense bitmaps read by key, probes before the walk (2026-11-25, agent 316)
 
 HANDOFF "Analytic CPU, round 15" has what changed. Lane C, TPC-H SF1 (loaded by b0), agent 314's
