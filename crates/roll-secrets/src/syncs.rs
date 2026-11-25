@@ -527,7 +527,12 @@ impl Secrets {
         let secret = target.signed().then(|| Value::new(names::new_id("whsec", 40)));
         let sealed = secret.as_ref().map(|s| dek.seal(&secret_aad(project, &id), s));
         let now = self.db.now_ms()?;
+        // A product's own syncs aren't a project's choice: roll secrets' policy covers the rest.
+        let stored_cloud_key = target.stored_cloud_key(&n.target);
         self.db.write(|c| {
+            if !internal {
+                crate::guardrails::read(c)?.sync(&n.kind, stored_cloud_key)?;
+            }
             let env = envs::by_slug(c, project, &n.environment)?;
             let count: i64 = c.query_row("SELECT COUNT(*) FROM syncs WHERE project_id = ?", [project], |r| r.get(0))?;
             if count >= PER_PROJECT {

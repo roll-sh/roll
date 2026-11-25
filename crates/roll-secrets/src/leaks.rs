@@ -42,7 +42,7 @@ const CAPPED: &str = "rotated within the hour";
 pub(crate) const LEAKS: &str = "roll:leaks";
 
 /// What a project does when one of its managed keys leaks (`leaks.rotate`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LeakRotate {
     /// Rotated at once, with no grace for the leaked credential.
@@ -212,6 +212,7 @@ impl Secrets {
         self.project(project)?;
         let now = self.db.now_ms()?;
         self.db.write(|c| {
+            crate::guardrails::read(c)?.leaks(rotate)?;
             c.execute("UPDATE projects SET leak_rotate = ? WHERE project_id = ?", params![rotate.as_str(), project])?;
             let summary = match rotate {
                 LeakRotate::Managed => "leaked managed keys rotate at once, with no grace for the leaked credential",

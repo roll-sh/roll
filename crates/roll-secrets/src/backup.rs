@@ -252,8 +252,11 @@ impl Secrets {
                 }
             }
         }
+        // A production below roll secrets' policy comes back at its floor (guardrails.rs).
+        let floor = self.floors()?.production_approvals.unwrap_or(0);
         for e in order.iter().filter(|e| e.protected) {
-            let p = envs::Policy { protected: true, approvals: Some(e.approvals), approvers: Some(e.approvers.clone()), notify_url: None };
+            let approvals = if e.slug == crate::PRODUCTION { e.approvals.max(floor) } else { e.approvals };
+            let p = envs::Policy { protected: true, approvals: Some(approvals), approvers: Some(e.approvers.clone()), notify_url: None };
             if let Err(err) = self.set_policy(project, &e.slug, p, caller) {
                 warnings.push(format!("{} policy: {err}", e.slug));
             }
