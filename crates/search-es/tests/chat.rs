@@ -225,8 +225,9 @@ async fn a_browser_keys_answer_is_narrowed_by_its_filter() {
     for k in [other, none] {
         let (s, v, _, _) = call_with(&c, Some(&format!("ApiKey {k}")), "POST", "/_roll/chat/help/_answer", r#"{"question":"How do I reset it?"}"#).await;
         assert!(s == 400 && v.pointer(&["error", "reason"]).and_then(Value::as_str).unwrap_or_default().contains("isn't available to a browser key"), "{s} {v:?}");
+        // Refused by its roles (403) before the browser policy would (400): either way, no model.
         let (s, _, _, _) = call_with(&c, Some(&format!("ApiKey {k}")), "POST", "/_inference/chat_completion/chat/_stream", r#"{"messages":[{"role":"user","content":"hi"}]}"#).await;
-        assert_eq!(s, 400);
+        assert!(matches!(s, 400 | 403), "{s}");
     }
     assert!(seen.lock().unwrap().is_empty(), "a refused key's request reached a model");
 }
