@@ -640,7 +640,7 @@ impl ColDir {
     /// Row `r`'s bytes as format 2 stores them, onto `out` (`rows_into` of the one row: a
     /// column's layout matched once, no push per value).
     pub fn row(&self, d: &[u8], r: usize, out: &mut Vec<u8>) {
-        self.rows_into(d, &[r as u32], None, out, &mut Vec::with_capacity(1));
+        self.rows_into(d, &[r as u32], None, out, &mut Vec::new());
     }
 
     /// Every row's bytes, in order (`vlen` of them).
@@ -661,7 +661,8 @@ impl ColDir {
         let read = |c: usize| mask.is_none_or(|m| m.get(c) == Some(&true));
         // (Per row its length, then where its next byte goes.)
         let hdr = 1 + varint_len(self.ncols as u64);
-        let mut at: Vec<usize> = rows
+        // (On the stack for a few rows: a lookup's run is often one row.)
+        let mut at: smallvec::SmallVec<[usize; 8]> = rows
             .iter()
             .map(|&r| {
                 let r = r as usize;
