@@ -16,7 +16,7 @@ pub use device::{DEVICE_TTL_MS, DeviceRequest, normalize_user_code, show_user_co
 mod tasks;
 mod machine;
 mod bootstrap;
-pub use bootstrap::{BOOTSTRAP_MINUTES, BOOTSTRAP_PREFIX, ChainSecret, Issued, MACHINE_HOURS, MACHINE_PREFIX, Machine, Presented};
+pub use bootstrap::{BOOTSTRAP_MINUTES, BOOTSTRAP_PREFIX, ChainSecret, ChainState, Issued, MACHINE_HOURS, MACHINE_PREFIX, Machine, Presented};
 pub use machine::{CLIENT_SECRET_PREFIX, ClientKey, ListedClient, MachineClient, TrustedIdentity};
 pub use tasks::{McpTask, TASK_STALE_MS, TASK_TTL_MS, TASKS_PER_OWNER, TaskUpdate, iso};
 

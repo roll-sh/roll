@@ -159,6 +159,50 @@ impl Store {
     }
 }
 
+/// Where a machine's chain stands, for its identity's list of machines: its newest bootstrap
+/// token or machine credential, read as it is now (no secret).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainState {
+    pub chain: String,
+    /// `waiting` (a bootstrap token not exchanged yet), `live` (a machine credential in use),
+    /// `ended` (nothing presented before it ended) or `revoked`.
+    pub state: &'static str,
+    /// When its newest machine credential was made (the exchange, or the last replacement).
+    pub refreshed_at: Option<i64>,
+    pub expires_at: Option<i64>,
+    pub revoked_at: Option<i64>,
+    pub revoked_why: Option<String>,
+}
+
+impl Store {
+    /// Where each of `chains` stands; one the store no longer holds is left out.
+    pub fn chain_states(&self, chains: &[String]) -> Result<Vec<ChainState>> {
+        let now = code_sql::now_ms();
+        type Row = (String, i64, Option<i64>, Option<i64>, Option<String>);
+        self.db.read(|c| {
+            let mut out = vec![];
+            for chain in chains {
+                let row: Option<Row> = c
+                    .query_row(
+                        "SELECT s.kind, s.created_at, g.expires_at, g.revoked_at, g.revoked_why FROM grant_secrets s JOIN grants g ON g.id = s.grant_id WHERE g.chain = ? AND s.kind IN ('bootstrap', 'machine') ORDER BY s.created_at DESC, s.kind DESC LIMIT 1",
+                        [chain],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                    )
+                    .optional()?;
+                let Some((kind, made, expires_at, revoked_at, why)) = row else { continue };
+                let state = match (&revoked_at, expires_at) {
+                    (Some(_), _) => "revoked",
+                    (None, Some(e)) if e > now => if kind == "bootstrap" { "waiting" } else { "live" },
+                    _ => "ended",
+                };
+                out.push(ChainState { chain: chain.clone(), state, refreshed_at: (kind == "machine").then_some(made), expires_at, revoked_at, revoked_why: why });
+            }
+            Ok::<_, code_sql::Error>(out)
+        })
+        .map_err(Error::from)
+    }
+}
+
 /// A chain's grant and its secret, inside a write. Its rules are none: it opens nothing.
 #[allow(clippy::too_many_arguments)]
 fn insert(c: &code_sql::Conn<'_>, id: &str, name: &str, until: i64, ip: &str, created_by: &str, user: Option<&str>, chain: &str, now: i64, secret: &str, kind: ChainSecret) -> code_sql::Result<()> {

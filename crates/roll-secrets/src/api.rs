@@ -99,6 +99,8 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/identities/{{id}}"), axum::routing::delete(delete_identity).patch(update_identity))
         .route(&format!("{P}/identities/{{id}}/jwks"), axum::routing::put(set_identity_keys))
         .route(&format!("{P}/identities/{{id}}/bootstrap"), post(create_bootstrap))
+        .route(&format!("{P}/identities/{{id}}/machines"), get(identity_machines))
+        .route(&format!("{P}/identities/{{id}}/machines/{{chain}}"), axum::routing::delete(revoke_machine))
         .route("/v1/secrets/login", post(login))
         .route("/v1/secrets/login/bootstrap", post(login_bootstrap))
         .route("/v1/secrets/login/refresh", post(login_refresh))
@@ -1294,6 +1296,15 @@ struct MachineBody {
 async fn create_bootstrap(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
     let n: crate::NewBootstrap = if b.is_empty() { Default::default() } else { body(&b)? };
     Ok(secret_response(created(blocking(s, move |s| s.create_bootstrap(&project, &id, n, &c)).await?)))
+}
+
+async fn identity_machines(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.identity_machines(&project, &id, &c)).await?))
+}
+
+async fn revoke_machine(State(s): S, Who(c): Who, Path((project, id, chain)): Path<(String, String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.revoke_machine(&project, &id, &chain, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// A bootstrap token for the machine's first machine credential (public: the token is the credential).

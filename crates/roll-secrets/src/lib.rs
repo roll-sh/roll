@@ -90,7 +90,7 @@ mod write;
 pub mod unseal;
 pub mod validity;
 
-pub use access::{Action, Approval, Caller, Chained, Minted, People, Person, Scope, Step, Workloads, PREVIEWS};
+pub use access::{Action, Approval, Caller, ChainState, Chained, Minted, People, Person, Scope, Step, Workloads, PREVIEWS};
 pub use api::router;
 pub use crypto::{Keyring, Value};
 pub use audit::{AuditEntry, AuditFilter, VerifyQuery};

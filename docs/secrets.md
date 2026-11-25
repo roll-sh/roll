@@ -737,9 +737,11 @@ unit's `Environment=` (and `roll run`'s, and every `roll secrets` command's: the
   same token left in the environment isn't exchanged again (the file remembers its SHA-256); a new
   one there is, and replaces the file. A credential that wasn't replaced before it ended (the
   machine was off longer than `credential_hours`) needs a new bootstrap token too. The audit log has
-  `identity.bootstrap`, `identity.bootstrap.exchange`, `identity.machine.refresh` and
-  `identity.machine.reused`; deleting, disabling or cutting off the identity revokes all its
-  machines. The bootstrap tokens and credentials are roll-access grants (docs/permissions.md,
+  `identity.bootstrap`, `identity.bootstrap.exchange`, `identity.machine.refresh`,
+  `identity.machine.reused` and `identity.machine.revoke`; deleting, disabling or cutting off the
+  identity revokes all its machines. `GET …/identities/{id}/machines` lists them (the chain, when
+  its credential was last replaced, live or revoked), and `DELETE …/machines/{chain}` revokes one,
+  as the dashboard's identities page does. The bootstrap tokens and credentials are roll-access grants (docs/permissions.md,
   "Bootstrap tokens and machine credentials"), looked up on every use, and open nothing but these
   logins.
 
@@ -6937,6 +6939,8 @@ isn't in the workspace is 404.
 | `PATCH /identities/{id}` | `{disabled}` | `Identity` (admin; a person's): `false` enables one a cut-off disabled, `true` disables it and revokes its live logins |
 | `PUT /identities/{id}/jwks` | `{jwks}` | `Identity` (admin; a person's): its pinned keys replaced, its id kept (400 for an `aws` or `machine` one) |
 | `POST /identities/{id}/bootstrap` | `{minutes?, allowed_ips?, credential_hours?}` | 201 `{identity, chain, secret, expires_at}` (admin; a person's; a `machine` identity's single-use `rlbt_…`, "On a VM") |
+| `GET /identities/{id}/machines` | | `MachineChain[]` newest first (admin): `{chain, state, credential_hours, created_at, created_by, refreshed_at, expires_at, revoked_at, revoked_why}`, `state` `waiting` (its bootstrap token not exchanged yet), `live`, `ended` or `revoked`; never a secret |
+| `DELETE /identities/{id}/machines/{chain}` | | 204 (admin, audited as `identity.machine.revoke`): the machine's credential and its logins' tokens revoked at once; it needs a new bootstrap token |
 | `POST /v1/secrets/login` | `{identity, token}`, `{identity, aws: {method, url, headers, body}}` or `{identity, machine}` | `{token, expires_at, project, identity}` (public; `aws`: a signed `GetCallerIdentity`, "AWS IAM"; `machine`: a machine credential) |
 | `POST /v1/secrets/login/bootstrap` | `{identity, token}` | `{identity, chain, secret, expires_at, refresh_at}` (public: a bootstrap token for a machine credential, `rlmc_…`; 401 for one used already, which revokes its machine) |
 | `POST /v1/secrets/login/refresh` | `{identity, credential}` | as `…/login/bootstrap` (public: the current machine credential for the next; the one presented is spent) |

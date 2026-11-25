@@ -156,6 +156,8 @@ DELETE /v1/secrets/projects/{project}/identities/{id}                          a
 PATCH /v1/secrets/projects/{project}/identities/{id}                           an outside integration's setup: an admin's, with its credentials
 PUT /v1/secrets/projects/{project}/identities/{id}/jwks                        an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/identities/{id}/bootstrap                  answers or sets a credential (a machine's bootstrap token)
+GET /v1/secrets/projects/{project}/identities/{id}/machines                    an outside integration's setup: an admin's, with its credentials
+DELETE /v1/secrets/projects/{project}/identities/{id}/machines/{chain}         a person's call (approving, accepting, cutting off)
 * /v1/secrets/projects/{project}/kms                                           an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/kubernetes                                 an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/kubernetes/{id}                          an outside integration's setup: an admin's, with its credentials
