@@ -225,6 +225,7 @@ export function LogView({
   onGroup,
   onBlock,
   onTrace,
+  onContext,
 }: {
   lines: LogLine[];
   columns?: boolean;
@@ -235,6 +236,8 @@ export function LogView({
   onBlock?: (ip: string) => Promise<unknown>;
   /** A request line's trace, opened (shown as "trace" beside it). */
   onTrace?: (trace: string) => void;
+  /** A line's neighbours, read around its time (a search's hit: "context" beside it). */
+  onContext?: (line: LogLine) => void;
 }) {
   const box = useRef<HTMLDivElement>(null);
   const [stuck, setStuck] = useState(true);
@@ -269,7 +272,7 @@ export function LogView({
               </button>
             )}
             {shown.map(({ line, more }, i) => (
-              <LogRow key={keys[i]} line={line} more={more} columns={columns} onGroup={onGroup} onBlock={onBlock} onTrace={onTrace} />
+              <LogRow key={keys[i]} line={line} more={more} columns={columns} onGroup={onGroup} onBlock={onBlock} onTrace={onTrace} onContext={onContext} />
             ))}
           </>
         )}
@@ -301,9 +304,9 @@ export function logKeys(lines: LogLine[]): string[] {
   });
 }
 
-const LogRow = memo(function LogRow({ line: l, more, columns, onGroup, onBlock, onTrace }: { line: LogLine; more: LogLine[]; columns: boolean; onGroup?: () => void; onBlock?: (ip: string) => Promise<unknown>; onTrace?: (trace: string) => void }) {
+const LogRow = memo(function LogRow({ line: l, more, columns, onGroup, onBlock, onTrace, onContext }: { line: LogLine; more: LogLine[]; columns: boolean; onGroup?: () => void; onBlock?: (ip: string) => Promise<unknown>; onTrace?: (trace: string) => void; onContext?: (line: LogLine) => void }) {
   return (
-    <div className="flex gap-3 px-3 hover:bg-fg/[0.03]">
+    <div className="group/row flex gap-3 px-3 hover:bg-fg/[0.03]">
       <span className="shrink-0 text-subtle tabular-nums select-none">{clock(l.t)}</span>
       {columns && (
         <span className="w-24 shrink-0 truncate text-subtle select-none" title={l.instance ?? l.stream}>
@@ -319,6 +322,11 @@ const LogRow = memo(function LogRow({ line: l, more, columns, onGroup, onBlock, 
         {l.stream === "http" ? <AccessText text={l.text} onBlock={onBlock} onTrace={onTrace} /> : l.text}
         {more.length > 0 && <TraceMore more={more} onGroup={onGroup} />}
       </span>
+      {onContext && (
+        <button type="button" className="shrink-0 text-[11px] text-subtle opacity-0 select-none hover:text-fg group-hover/row:opacity-100 focus-visible:opacity-100" onClick={() => onContext(l)} title="The lines around this one">
+          context
+        </button>
+      )}
     </div>
   );
 },
