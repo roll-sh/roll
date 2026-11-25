@@ -40,6 +40,7 @@ type searchClusterAnswer struct {
 	MaxInFlight             int64    `json:"max_in_flight"`
 	MaxBodyMB               int64    `json:"max_body_mb"`
 	DestructiveRequiresName bool     `json:"destructive_requires_name"`
+	Protected               bool     `json:"protected"`
 	IPAllowlist             []ipRule `json:"ip_allowlist"`
 	URL                     string   `json:"url"`
 	Username                string   `json:"username"`
@@ -110,6 +111,7 @@ type searchClusterModel struct {
 	MaxInFlight             types.Int64  `tfsdk:"max_in_flight"`
 	MaxBodyMB               types.Int64  `tfsdk:"max_body_mb"`
 	DestructiveRequiresName types.Bool   `tfsdk:"destructive_requires_name"`
+	Protected               types.Bool   `tfsdk:"protected"`
 	IPAllowlist             types.List   `tfsdk:"ip_allowlist"`
 	Endpoint                types.String `tfsdk:"endpoint"`
 	Username                types.String `tfsdk:"username"`
@@ -147,6 +149,8 @@ func (r *searchClusterResource) Schema(_ context.Context, _ resource.SchemaReque
 			"max_in_flight":             schema.Int64Attribute{Optional: true, Computed: true, PlanModifiers: keepInt, Description: "Requests at once, 1-4096 (as many more queue; beyond that, 429)."},
 			"max_body_mb":               schema.Int64Attribute{Optional: true, Computed: true, PlanModifiers: keepInt, Description: "http.max_content_length in MiB, 1-2047."},
 			"destructive_requires_name": schema.BoolAttribute{Optional: true, Computed: true, PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()}, Description: "The default of action.destructive_requires_name."},
+			"protected": schema.BoolAttribute{Optional: true, Computed: true, PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
+				Description: "Only the project's admins and owners change its data (its developers only read it). Changing it is an admin's; new clusters aren't, unless set."},
 			"ip_allowlist": schema.ListNestedAttribute{
 				Optional: true, Computed: true, Default: listdefault.StaticValue(types.ListValueMust(ipRuleType, []attr.Value{})),
 				Description: "Who may reach the endpoint (at most 64 entries); empty, the default, admits anyone. roll's API and the dashboard aren't filtered.",
@@ -257,6 +261,9 @@ func (r *searchClusterResource) options(ctx context.Context, m *searchClusterMod
 	if !m.DestructiveRequiresName.IsNull() && !m.DestructiveRequiresName.IsUnknown() {
 		body["destructive_requires_name"] = m.DestructiveRequiresName.ValueBool()
 	}
+	if !m.Protected.IsNull() && !m.Protected.IsUnknown() {
+		body["protected"] = m.Protected.ValueBool()
+	}
 	if !m.IPAllowlist.IsUnknown() {
 		allow := []ipRule{}
 		for _, x := range m.rules(ctx, d) {
@@ -287,6 +294,7 @@ func (m *searchClusterModel) fill(ctx context.Context, s *searchClusterAnswer, i
 	m.IdleTimeoutS, m.AlwaysOn = types.Int64Value(s.IdleTimeoutS), types.BoolValue(s.IdleTimeoutS == 0)
 	m.MaxInFlight, m.MaxBodyMB = types.Int64Value(s.MaxInFlight), types.Int64Value(s.MaxBodyMB)
 	m.DestructiveRequiresName = types.BoolValue(s.DestructiveRequiresName)
+	m.Protected = types.BoolValue(s.Protected)
 	m.Endpoint, m.Username, m.Status = types.StringValue(s.URL), types.StringValue(s.Username), types.StringValue(s.Status.State)
 	if s.Password != "" {
 		m.Password = types.StringValue(s.Password)

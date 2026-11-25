@@ -53,6 +53,38 @@ pub(crate) fn local_path(p: &str) -> String {
     format!("/{}", out.trim_start_matches('/'))
 }
 
+/// [`Engine::share_visit`], on the store: a link with a maker due to be asked about again needs
+/// the engine (`engine`), and isn't let in without one.
+pub(crate) async fn share_visit(store: &crate::store::Store, engine: Option<&std::sync::Arc<Engine>>, preview: &str, token: &str, recheck: std::time::Duration) -> Option<crate::store::LiveShare> {
+    let live = store.share_live(preview, token).ok().flatten()?;
+    let (share, maker_checked) = (live.id.clone(), live.maker_checked);
+    let Some(maker) = live.maker.clone() else { return Some(live) };
+    let now = store.now_ms().ok()?;
+    if maker_checked > now - recheck.as_millis() as i64 {
+        return Some(live);
+    }
+    let project = store.row(preview).ok()?.project_id;
+    let e = engine?.clone();
+    let reaches = tokio::task::spawn_blocking(move || e.maker_reaches(&maker, &project)).await.unwrap_or(false);
+    if reaches {
+        let _ = store.share_maker_checked(&share, now);
+        return Some(live);
+    }
+    let by = store.shares(preview).ok().and_then(|all| all.into_iter().find(|s| s.id == share)).map(|s| s.created_by).unwrap_or_default();
+    if store.revoke_share(preview, &share).is_ok() {
+        let _ = store.log(preview, &format!("{by}'s share link ended: they may no longer open the project's previews"));
+    }
+    None
+}
+
+/// Share link `token` of `preview` was followed: who did isn't known (nobody signed in), only
+/// that it was, once a day.
+pub(crate) fn share_followed(store: &crate::store::Store, preview: &str, token: &str) {
+    if let Ok(now) = store.now_ms() {
+        let _ = store.share_opened(preview, token, now.div_euclid(86_400_000), now);
+    }
+}
+
 impl Engine {
     /// Whether `user`, signed in as roll session `session`, may (still) open `project`'s
     /// previews: no while nothing says ([`Engine::visitors`] unset). It reads roll's accounts:
@@ -66,6 +98,25 @@ impl Engine {
     /// operator makes links). It reads roll's accounts: call it off the async workers.
     pub fn maker_reaches(&self, user: &str, project: &str) -> bool {
         self.visitors.get().is_none_or(|v| v.maker_reaches(user, project))
+    }
+
+    /// Share link `token` of `preview`, if it's live: not revoked or past, and its maker may still
+    /// open the project's previews, asked again (off the async workers: it reads roll's accounts)
+    /// once last asked `recheck` ago. One whose maker may not ends now, said in the preview's
+    /// activity. Every request through a link asks (previews' proxy, and roll apps' for the
+    /// previews it serves), so a revoked one stops at once.
+    pub async fn share_visit(self: &std::sync::Arc<Self>, preview: &str, token: &str, recheck: std::time::Duration) -> Option<crate::store::LiveShare> {
+        share_visit(&self.store, Some(self), preview, token, recheck).await
+    }
+
+    /// Share link `token` of `preview` was followed ([`share_followed`]).
+    pub fn share_followed(&self, preview: &str, token: &str) {
+        share_followed(&self.store, preview, token);
+    }
+
+    /// The preview a roll apps environment (`pv-<id>`) is.
+    pub fn preview_of_env(env: &str) -> Option<String> {
+        env.strip_prefix("pv-").filter(|id| !id.is_empty()).map(|id| format!("pv_{id}"))
     }
 
     /// `POST /v1/previews/{id}/visit {to}`, as a person signed in to roll (`session`, their roll

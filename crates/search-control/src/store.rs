@@ -108,9 +108,14 @@ pub struct SearchCluster {
     /// When a sleeping cluster's next background job is due (ms; its node wakes it then).
     #[serde(skip)]
     pub wake_at: Option<i64>,
-    /// The signed-in person (`usr_…`) whose cluster it is; `None` for the operator's and admins'.
-    /// Set on create, kept by branches, never changed.
+    /// The signed-in person (`usr_…`) whose cluster it is; `None` for the operator's and admins',
+    /// and for one made in a workspace project (the project's, through its home). Set on create,
+    /// kept by branches, never changed.
     pub owner: Option<String>,
+    /// Who made it, when it has no owner but a person made it (in a workspace project): what the
+    /// per-person caps count it toward. Never a source of trust: it reaches them nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub made_by: Option<String>,
     /// When it was last restored after a delete (Unix seconds): its point-in-time history
     /// starts again there.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -133,6 +138,29 @@ pub struct SearchCluster {
     /// reindex from remote may read; empty: none. roll's migration adds the host it reads.
     /// Branches start with their parent's.
     pub reindex_whitelist: Vec<String>,
+    /// Only a project's admins and owners change its data (docs/members.md: a developer's
+    /// default reaches what isn't protected). Set on create (default off) and by an admin's
+    /// `PATCH`; clusters from before it are protected; a branch never is.
+    pub protected: bool,
+    /// The workspace project it was handed to (its home there), as rolld records it
+    /// ([`Store::set_project`]); `None` while it has none, or until the homes pass records it.
+    #[serde(skip)]
+    pub project_id: Option<String>,
+}
+
+impl SearchCluster {
+    /// Whose per-person caps count it: its owner, else who made it in a project.
+    pub fn counted_toward(&self) -> Option<&str> {
+        self.owner.as_deref().or(self.made_by.as_deref())
+    }
+
+    /// Whose it is for what's counted and shared across a tenant's clusters (the crawler's site
+    /// verifications, their tokens and limits, connector slots, embedding turns): its home
+    /// project (`prj_…`), else its person owner (`usr_…`), else, for one made in a project and not
+    /// recorded there yet, the cluster itself (`srch_…`). `None`: the operator's own.
+    pub fn tenant(&self) -> Option<String> {
+        self.project_id.clone().or_else(|| self.owner.clone()).or_else(|| self.made_by.as_ref().map(|_| self.id.clone()))
+    }
 }
 
 impl std::fmt::Debug for SearchCluster {
@@ -201,6 +229,11 @@ pub struct RemoteLink {
     /// roll made the key (revoked when the link goes); else the person gave it.
     pub minted: bool,
     pub created_at: i64,
+    /// Who linked it: `operator`, or a person (`usr_…`) whose rights it holds by: it works only
+    /// while they may still administer the target ([`crate::Control::set_link_makers`]). `None`:
+    /// linked before makers were kept, when both clusters had to have one owner.
+    #[serde(skip)]
+    pub made_by: Option<String>,
 }
 
 impl std::fmt::Debug for RemoteLink {
@@ -217,10 +250,10 @@ impl std::fmt::Debug for RemoteLink {
     }
 }
 
-const REMOTE_COLS: &str = "cluster_id, alias, target_id, key_id, credentials, minted, created_at";
+const REMOTE_COLS: &str = "cluster_id, alias, target_id, key_id, credentials, minted, created_at, made_by";
 
 fn remote_row(r: &Row) -> code_sql::Result<RemoteLink> {
-    Ok(RemoteLink { cluster_id: r.get(0)?, alias: r.get(1)?, target_id: r.get(2)?, key_id: r.get(3)?, credentials: r.get(4)?, minted: r.get(5)?, created_at: r.get(6)? })
+    Ok(RemoteLink { cluster_id: r.get(0)?, alias: r.get(1)?, target_id: r.get(2)?, key_id: r.get(3)?, credentials: r.get(4)?, minted: r.get(5)?, created_at: r.get(6)?, made_by: r.get(7)? })
 }
 
 /// One entry of a cluster's IP allowlist.
@@ -352,8 +385,16 @@ pub enum Recorded {
     Full,
 }
 
+/// A cluster's owner, when it was made and when it was last restored (Unix seconds), as
+/// [`Store::owner_and_made`] reads them.
+pub type OwnerAndMade = (Option<String>, i64, Option<i64>);
+
 /// The clusters a person owns, as [`Store::list_owned`] lists them.
 const OWNED: &str = "deleting = 0 AND deleted_at IS NULL AND owner = ?1";
+
+/// The live clusters a person's caps count: the ones they own, and the ones they made in a
+/// workspace project (no owner).
+const COUNTED: &str = "deleting = 0 AND deleted_at IS NULL AND COALESCE(owner, made_by) = ?1";
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS search_clusters (
@@ -393,10 +434,10 @@ CREATE INDEX IF NOT EXISTS search_suggestions_due ON search_suggestions (due_at)
 "#;
 
 const COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
-                    parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, ip_allowlist, cors, browser_per_minute, inherit_pending, reindex_whitelist";
+                    parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, ip_allowlist, cors, browser_per_minute, inherit_pending, reindex_whitelist, made_by, protected, project_id";
 /// What lookups read: [`COLS`] and where the cluster is loaded.
 const READ_COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
-                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, loaded_on, own_bytes, wake_at, restored_at, ip_allowlist, cors, browser_per_minute, inherit_pending, reindex_whitelist";
+                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, loaded_on, own_bytes, wake_at, restored_at, ip_allowlist, cors, browser_per_minute, inherit_pending, reindex_whitelist, made_by, protected, project_id";
 /// What deleted clusters' reads add to [`READ_COLS`].
 const DELETED_COLS: &str = "deleted_name, deleted_at, purge_at, stored_as, name";
 
@@ -433,16 +474,19 @@ fn row(r: &Row) -> code_sql::Result<SearchCluster> {
         inherit_pending: r.get(24)?,
         // Unreadable, nothing is whitelisted (reindex from remote refuses every host).
         reindex_whitelist: serde_json::from_str(&r.get::<_, String>(25)?).unwrap_or_default(),
+        made_by: r.get(26)?,
+        protected: r.get(27)?,
+        project_id: r.get(28)?,
     })
 }
 
 fn deleted_row(r: &Row) -> code_sql::Result<DeletedCluster> {
     let mut c = row(r)?;
-    // [`DELETED_COLS`] follow [`READ_COLS`]' 26 (0-25).
-    c.name = r.get(26)?;
+    // [`DELETED_COLS`] follow [`READ_COLS`]' 29 (0-28).
+    c.name = r.get(29)?;
     c.loaded_on = None;
     c.wake_at = None;
-    Ok(DeletedCluster { cluster: c, deleted_at: r.get(27)?, purge_at: r.get(28)?, stored_as: r.get(29)?, reserved: r.get(30)? })
+    Ok(DeletedCluster { cluster: c, deleted_at: r.get(30)?, purge_at: r.get(31)?, stored_as: r.get(32)?, reserved: r.get(33)? })
 }
 
 /// What the catalog keeps of an index's query suggestions (`crate::suggestions`): its settings
@@ -569,6 +613,17 @@ impl Store {
         // Clusters made before it whitelist no remote, as Elasticsearch's default.
         db.add_column("search_clusters", "reindex_whitelist", "TEXT NOT NULL DEFAULT '[]'")?;
         db.ensure_schema("CREATE INDEX IF NOT EXISTS search_clusters_owner ON search_clusters (owner, created_at)")?;
+        // Who made a cluster in a workspace project (no owner), for their caps.
+        db.add_column("search_clusters", "made_by", "TEXT")?;
+        // Clusters from before members' roles reached them are protected (fail closed: no member
+        // reached them then); a new one says ([`SearchCluster::protected`]).
+        db.add_column("search_clusters", "protected", "INTEGER NOT NULL DEFAULT 1")?;
+        // The project a cluster was handed to (rolld's homes; [`SearchCluster::tenant`]).
+        db.add_column("search_clusters", "project_id", "TEXT")?;
+        // Hand-overs to a workspace project decided (a home set) and not done yet
+        // ([`Store::owe_handover`]).
+        db.ensure_schema("CREATE TABLE IF NOT EXISTS search_handovers (cluster_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, at INTEGER NOT NULL)")?;
+        db.ensure_schema("CREATE INDEX IF NOT EXISTS search_clusters_made_by ON search_clusters (made_by) WHERE made_by IS NOT NULL")?;
         // Deleted clusters kept for restoring.
         db.add_column("search_clusters", "deleted_at", "INTEGER")?;
         db.add_column("search_clusters", "purge_at", "INTEGER")?;
@@ -585,6 +640,8 @@ impl Store {
         db.ensure_schema(
             "CREATE TABLE IF NOT EXISTS search_remotes (cluster_id TEXT NOT NULL, alias TEXT NOT NULL, target_id TEXT NOT NULL, key_id TEXT NOT NULL, credentials TEXT NOT NULL, minted INTEGER NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (cluster_id, alias))",
         )?;
+        // Who linked a remote (links made before hold only between clusters of one owner).
+        db.add_column("search_remotes", "made_by", "TEXT")?;
         // The web crawler's verified sites and unverified crawls (`crate::sites`).
         db.ensure_schema(
             "CREATE TABLE IF NOT EXISTS search_crawler_sites (cluster_id TEXT NOT NULL, site TEXT NOT NULL, owner TEXT NOT NULL, kind TEXT NOT NULL, token TEXT NOT NULL, status TEXT NOT NULL, error TEXT, failures INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, verified_at INTEGER, lapsed_at INTEGER, checked_at INTEGER, due_at INTEGER, claimed_at INTEGER, PRIMARY KEY (cluster_id, site))",
@@ -593,6 +650,14 @@ impl Store {
         db.ensure_schema("CREATE INDEX IF NOT EXISTS search_site_crawls_by ON search_site_crawls (owner, site, at)")?;
         db.ensure_schema("CREATE INDEX IF NOT EXISTS search_crawler_sites_due ON search_crawler_sites (due_at)")?;
         db.ensure_schema("CREATE INDEX IF NOT EXISTS search_crawler_sites_owner ON search_crawler_sites (owner, site)")?;
+        // Before tenants, every cluster without an owner (all of every project's) shared the key
+        // `(no owner)`, and so one token per site: those verifications and counts go once, and
+        // their clusters verify again under their own key ([`SearchCluster::tenant`]).
+        db.migrate("search-crawler-sites-tenants", |c| {
+            c.execute("DELETE FROM search_crawler_sites WHERE owner = '(no owner)'", params![])?;
+            c.execute("DELETE FROM search_site_crawls WHERE owner = '(no owner)'", params![])?;
+            Ok(())
+        })?;
         // Catalogs written before `code-sql` lack nothing but may lack the index on parents
         // (created above); their extra columns (`seq`) and tables (`search_tombstones`) are unused.
         let store = Self { db, sealer, former };
@@ -673,13 +738,13 @@ impl Store {
     pub async fn insert(&self, c: &SearchCluster, caps: Caps) -> anyhow::Result<Inserted> {
         let password = self.stored_password(c);
         let r = self.db.write(|x| {
-            if let Some(owner) = &c.owner
+            if let Some(owner) = c.counted_toward()
                 && let Some(over) = over_caps(x, owner, c.idle_timeout_s, caps)?
             {
                 return Ok(Inserted::Over(over));
             }
             x.execute(
-                &format!("INSERT INTO search_clusters ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)"),
+                &format!("INSERT INTO search_clusters ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)"),
                 params![
                     c.id,
                     c.name,
@@ -702,7 +767,10 @@ impl Store {
                     cors_json(&c.cors),
                     c.browser_per_minute,
                     c.inherit_pending,
-                    whitelist_json(&c.reindex_whitelist)
+                    whitelist_json(&c.reindex_whitelist),
+                    c.made_by,
+                    c.protected,
+                    c.project_id
                 ],
             )
             .map(|_| Inserted::Yes)
@@ -725,14 +793,14 @@ impl Store {
     pub async fn update(&self, c: &SearchCluster, caps: Caps) -> anyhow::Result<Result<(), Over>> {
         let password = self.stored_password(c);
         Ok(self.db.write(|x| {
-            if let Some(owner) = &c.owner
+            if let Some(owner) = c.counted_toward()
                 && let Some(over) = over_always_on(x, owner, Some(&c.id), c.idle_timeout_s, caps)?
             {
                 return Ok(Err(over));
             }
             x.execute(
                 "UPDATE search_clusters SET flavor = ?2, password = ?3, idle_timeout_s = ?4, max_in_flight = ?5, max_body_mb = ?6,
-                 destructive_requires_name = ?7, password_rotated_at = ?8, ip_allowlist = ?9, cors = ?10, browser_per_minute = ?11, reindex_whitelist = ?12 WHERE id = ?1",
+                 destructive_requires_name = ?7, password_rotated_at = ?8, ip_allowlist = ?9, cors = ?10, browser_per_minute = ?11, reindex_whitelist = ?12, protected = ?13 WHERE id = ?1",
                 params![
                     c.id,
                     c.flavor,
@@ -745,7 +813,8 @@ impl Store {
                     allowlist_json(&c.ip_allowlist),
                     cors_json(&c.cors),
                     c.browser_per_minute,
-                    whitelist_json(&c.reindex_whitelist)
+                    whitelist_json(&c.reindex_whitelist),
+                    c.protected
                 ],
             )?;
             Ok::<_, code_sql::Error>(Ok(()))
@@ -761,12 +830,85 @@ impl Store {
         })?)
     }
 
+    /// Record the workspace project cluster `id` was handed to (`None`: it has no home there any
+    /// more), when that changed: the key its tenant's verifications and limits go by
+    /// ([`SearchCluster::tenant`]). Whether it wrote.
+    pub fn set_project(&self, id: &str, project: Option<&str>) -> anyhow::Result<bool> {
+        // Read first: the homes pass asks for every home, and nearly all are recorded already.
+        let now: Option<Option<String>> = self.db.read(|x| x.query_row("SELECT project_id FROM search_clusters WHERE id = ?1", params![id], |r| r.get(0)).optional())?;
+        if now.is_none_or(|p| p.as_deref() == project) {
+            return Ok(false);
+        }
+        Ok(self.db.write(|x| x.execute("UPDATE search_clusters SET project_id = ?2 WHERE id = ?1 AND COALESCE(project_id, '') <> COALESCE(?2, '')", params![id, project]))? > 0)
+    }
+
+    /// Whether cluster `id` is protected ([`SearchCluster::protected`]), synchronously (roll's
+    /// access rules): `None` when there is no such cluster (live or kept for restoring).
+    pub fn protected_of(&self, id: &str) -> anyhow::Result<Option<bool>> {
+        Ok(self.db.read(|x| x.query_row("SELECT protected FROM search_clusters WHERE id = ?1 AND deleting = 0", params![id], |r| r.get(0)).optional())?)
+    }
+
     /// Whose cluster `id_or_name` is, synchronously (rolld's workspace owners): `None` when there
     /// is no such cluster, `Some(None)` for the operator's.
     pub fn owner_of(&self, id_or_name: &str) -> anyhow::Result<Option<Option<String>>> {
         Ok(self.db.read(|x| {
             x.query_row(&format!("SELECT owner FROM search_clusters WHERE (id = ?1 OR name = ?1) AND {LIVE} ORDER BY id = ?1 DESC LIMIT 1"), params![id_or_name], |r| r.get(0)).optional()
         })?)
+    }
+
+    /// The ids of the clusters the signed-in person `owner` owns, synchronously (roll's access rules:
+    /// a person's own clusters are theirs, whatever their projects): live ones, and deleted ones
+    /// kept for restoring.
+    pub fn owned_ids(&self, owner: &str) -> anyhow::Result<Vec<String>> {
+        Ok(self.db.read(|x| x.query("SELECT id FROM search_clusters WHERE owner = ?1 AND deleting = 0", params![owner], |r| r.get(0)))?)
+    }
+
+    /// Whose cluster `id` is, when it was made and when it was last restored (Unix seconds), live
+    /// or kept for restoring, synchronously (rolld's workspace pass): `None` when there's no such
+    /// cluster, an owner of `None` for one that has none.
+    pub fn owner_and_made(&self, id: &str) -> anyhow::Result<Option<OwnerAndMade>> {
+        Ok(self.db.read(|x| {
+            x.query_row("SELECT owner, created_at, restored_at FROM search_clusters WHERE id = ?1 AND deleting = 0", params![id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()
+        })?)
+    }
+
+    /// Cluster `id` (live or kept for restoring) is its workspace project's from now on (it got a
+    /// home there): its owner becomes who made it (`made_by`, for their caps), and it has no
+    /// owner, so leaving the project ends their access. Synchronously (the workspace's
+    /// `on_homed`). Whether it had an owner to hand over.
+    pub fn disown(&self, id: &str) -> anyhow::Result<bool> {
+        let n = self.db.write(|x| {
+            let n = x.execute("UPDATE search_clusters SET made_by = COALESCE(made_by, owner), owner = NULL WHERE id = ?1 AND owner IS NOT NULL", params![id])?;
+            // Owed no more.
+            x.execute("DELETE FROM search_handovers WHERE cluster_id = ?1", params![id])?;
+            Ok::<_, code_sql::Error>(n)
+        })?;
+        Ok(n > 0)
+    }
+
+    /// Cluster `id` is owed to workspace project `project` (its home was set there): recorded
+    /// before [`Store::disown`] does it, which clears it, so a hand-over that fails is done later
+    /// (rolld's homes pass) rather than forgotten. Synchronously.
+    pub fn owe_handover(&self, id: &str, project: &str) -> anyhow::Result<()> {
+        let at = crate::meter::now_ms();
+        self.db.write(|x| {
+            x.execute(
+                "INSERT INTO search_handovers (cluster_id, project_id, at) VALUES (?1, ?2, ?3) ON CONFLICT (cluster_id) DO UPDATE SET project_id = excluded.project_id, at = excluded.at",
+                params![id, project, at],
+            )
+        })?;
+        Ok(())
+    }
+
+    /// The project cluster `id` is owed to, if a hand-over was decided and isn't done. Synchronously.
+    pub fn owed_handover(&self, id: &str) -> anyhow::Result<Option<String>> {
+        Ok(self.db.read(|x| x.query_row("SELECT project_id FROM search_handovers WHERE cluster_id = ?1", params![id], |r| r.get(0)).optional())?)
+    }
+
+    /// Whether `id` is a cluster's id in any state (live, being deleted, kept for restoring).
+    /// Synchronously.
+    pub fn is_cluster_id(&self, id: &str) -> anyhow::Result<bool> {
+        Ok(self.db.read(|x| x.query_row("SELECT 1 FROM search_clusters WHERE id = ?1", params![id], |r| r.get::<_, i64>(0)).optional())?.is_some())
     }
 
     async fn one(&self, filter: &str, arg: &str) -> anyhow::Result<Option<SearchCluster>> {
@@ -957,7 +1099,7 @@ impl Store {
     pub async fn finish_restore(&self, id: &str, claim: &str, at: i64, caps: Caps) -> anyhow::Result<Result<bool, Over>> {
         Ok(self.db.write(|x| {
             let row: Option<(Option<String>, i64)> = x
-                .query_row("SELECT owner, idle_timeout_s FROM search_clusters WHERE id = ?1 AND claim = ?2 AND deleted_at IS NOT NULL", params![id, claim], |r| {
+                .query_row("SELECT COALESCE(owner, made_by), idle_timeout_s FROM search_clusters WHERE id = ?1 AND claim = ?2 AND deleted_at IS NOT NULL", params![id, claim], |r| {
                     Ok((r.get(0)?, r.get(1)?))
                 })
                 .optional()?;
@@ -1201,9 +1343,9 @@ impl Store {
         Ok(self.db.write(|x| {
             let old = x.query_row(&format!("SELECT {REMOTE_COLS} FROM search_remotes WHERE cluster_id = ?1 AND alias = ?2"), params![r.cluster_id, r.alias], remote_row).optional()?;
             x.execute(
-                "INSERT INTO search_remotes (cluster_id, alias, target_id, key_id, credentials, minted, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
-                 ON CONFLICT (cluster_id, alias) DO UPDATE SET target_id = excluded.target_id, key_id = excluded.key_id, credentials = excluded.credentials, minted = excluded.minted, created_at = excluded.created_at",
-                params![r.cluster_id, r.alias, r.target_id, r.key_id, r.credentials, r.minted, r.created_at],
+                "INSERT INTO search_remotes (cluster_id, alias, target_id, key_id, credentials, minted, created_at, made_by) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+                 ON CONFLICT (cluster_id, alias) DO UPDATE SET target_id = excluded.target_id, key_id = excluded.key_id, credentials = excluded.credentials, minted = excluded.minted, created_at = excluded.created_at, made_by = excluded.made_by",
+                params![r.cluster_id, r.alias, r.target_id, r.key_id, r.credentials, r.minted, r.created_at, r.made_by],
             )?;
             Ok::<_, code_sql::Error>(old)
         })?)
@@ -1535,7 +1677,7 @@ impl Store {
 /// Whether one more cluster of `owner` (with `idle_timeout_s`) is past one of `caps`.
 fn over_caps(x: &code_sql::Conn<'_>, owner: &str, idle_timeout_s: i64, caps: Caps) -> code_sql::Result<Option<Over>> {
     if caps.clusters > 0 {
-        let count: i64 = x.query_row(&format!("SELECT COUNT(*) FROM search_clusters WHERE {OWNED}"), params![owner], |r| r.get(0))?;
+        let count: i64 = x.query_row(&format!("SELECT COUNT(*) FROM search_clusters WHERE {COUNTED}"), params![owner], |r| r.get(0))?;
         if count >= caps.clusters {
             return Ok(Some(Over::Clusters { cap: caps.clusters, count }));
         }
@@ -1553,7 +1695,7 @@ fn over_always_on(x: &code_sql::Conn<'_>, owner: &str, id: Option<&str>, idle_ti
             return Ok(None);
         }
     }
-    let count: i64 = x.query_row(&format!("SELECT COUNT(*) FROM search_clusters WHERE {OWNED} AND idle_timeout_s = 0"), params![owner], |r| r.get(0))?;
+    let count: i64 = x.query_row(&format!("SELECT COUNT(*) FROM search_clusters WHERE {COUNTED} AND idle_timeout_s = 0"), params![owner], |r| r.get(0))?;
     Ok((count >= caps.always_on).then_some(Over::AlwaysOn { cap: caps.always_on, count }))
 }
 
@@ -1595,12 +1737,15 @@ mod tests {
             loaded_on: None,
             wake_at: None,
             owner: None,
+            made_by: None,
             restored_at: None,
             ip_allowlist: Vec::new(),
             cors: None,
             browser_per_minute: None,
             inherit_pending: false,
             reindex_whitelist: Vec::new(),
+            protected: false,
+            project_id: None,
         }
     }
 
@@ -1823,6 +1968,7 @@ mod tests {
         let s = Store::open(&path, Sealer::from_secret("0123456789abcdef0123456789abcdef").unwrap(), None).unwrap();
         let old = s.by_name("old").await.unwrap().unwrap();
         assert_eq!((old.id.as_str(), old.owner.as_deref()), ("srch_o", None), "an earlier cluster is the operator's");
+        assert!(old.protected, "an earlier cluster is protected (no member reached it then)");
         s.delete("srch_o").await.unwrap();
         all(&s).await;
         let _ = std::fs::remove_dir_all(&dir);

@@ -213,10 +213,13 @@ and URL-prefix properties:
 A verification belongs to one cluster: its status, the limits it gives, its re-checks and its
 lapse are that cluster's, and a crawl gets the verified limits when every origin it covers is
 verified in its own cluster, by the origin's file or its domain's record; otherwise the
-unverified ones. The token is the owner's (the person's, or the operator's for clusters without
-one) for the site, the same in each of their clusters, so once it is published, verifying the
-site in another of their clusters is one check that passes at once. Another owner gets a token of
-their own. Every connector of a cluster shares its verifications. The daily count of unverified
+unverified ones. The token is the cluster's tenant's for the site (`SearchCluster::tenant`: the
+workspace project it's at home in, else the person who owns it, else the cluster alone until its
+project is recorded; the operator's for the operator's own clusters), the same in each of their
+clusters, so once it is published, verifying the site in another of their clusters is one check
+that passes at once. Another tenant gets a token of its own: two projects never share one. The
+"owner" below is that tenant. Verifications kept from before tenants under the operator's key
+were dropped once (every project's clusters shared it), and their clusters verify again. Every connector of a cluster shares its verifications. The daily count of unverified
 crawls is the owner's, per site, so neither another cluster nor another host of the same domain
 buys more. Deleting a cluster deletes its verifications (when it is tombstoned, purged or deleted
 outright); a restored cluster starts without them and checks again.

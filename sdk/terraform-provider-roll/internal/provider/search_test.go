@@ -39,7 +39,7 @@ type fakeSearch struct {
 type fakeCluster struct {
 	id, name, flavor, password string
 	idle, maxInFlight, maxBody int64
-	drn                        bool
+	drn, protected             bool
 	allow                      []map[string]any
 	loaded                     bool
 	keys                       map[string]bool // id → invalidated
@@ -57,7 +57,7 @@ func (c *fakeCluster) view(withPassword bool) map[string]any {
 	}
 	v := map[string]any{
 		"id": c.id, "name": c.name, "region": "local", "flavor": c.flavor, "idle_timeout_s": c.idle, "max_in_flight": c.maxInFlight,
-		"max_body_mb": c.maxBody, "destructive_requires_name": c.drn, "ip_allowlist": c.allow, "owner": "usr_1", "parent_id": nil,
+		"max_body_mb": c.maxBody, "destructive_requires_name": c.drn, "protected": c.protected, "ip_allowlist": c.allow, "owner": "usr_1", "parent_id": nil,
 		"url": "https://" + c.name + ".search.roll.example", "host": c.name + ".search.roll.example", "port": 443, "username": c.name,
 		"status": state, "parent_name": nil, "branches": []any{},
 	}
@@ -95,6 +95,9 @@ func (f *fakeSearch) apply(c *fakeCluster, b map[string]any) string {
 	}
 	if v, ok := b["destructive_requires_name"].(bool); ok {
 		c.drn = v
+	}
+	if v, ok := b["protected"].(bool); ok {
+		c.protected = v
 	}
 	if list, ok := b["ip_allowlist"].([]any); ok {
 		c.allow = []map[string]any{}

@@ -15,6 +15,9 @@
 #   STOP_BEFORE_LAND=1 scripts/preview-cost.sh --keep   # and the preview with it (to look at it)
 #   STOP_AT=against scripts/preview-cost.sh --keep      # main's preview and the change's running, compared
 set -euo pipefail
+# Whether its input matches, read whole first: a `… | grep -q` stops reading at its match, and
+# with pipefail the writer's next write to the closed pipe fails the step though it matched.
+has() { local all; all=$(cat); grep -q "$@" <<< "$all"; }
 # The ports: <P>070 for the API and so on (27 unless PREVIEW_E2E_PORTS says another two digits).
 P=${PREVIEW_E2E_PORTS:-27}
 
@@ -181,7 +184,7 @@ T1=$(now_ms)
 P=$(api GET "/v1/previews/$PV")
 echo "$P" | python3 -m json.tool > "$HOME_DIR/preview.json"
 # Ready only once its health path answered (roll.toml `health = "/"`).
-api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]" | grep -q "is healthy (/: 200)" || { echo "the service's health check should have passed before ready"; exit 1; }
+api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]" | has "is healthy (/: 200)" || { echo "the service's health check should have passed before ready"; exit 1; }
 # What CI outside GitHub does: wait for the change's preview, take the URL it prints.
 WAITED=$(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview wait --change "$CHG" --timeout 60)
 [ "$WAITED" = "$(echo "$P" | jq_ "d['url']")" ] || { echo "roll preview wait printed $WAITED"; exit 1; }
@@ -258,7 +261,7 @@ say "visit it: cold start"
 T2=$(now_ms)
 BODY=$(curl -sS -L -c "$JAR" -b "$JAR" -H "Host: $HOST" "http://$API/?$QUERY" --max-time 120)
 T3=$(now_ms)
-echo "$BODY" | grep -q "preview of change 1" || { echo "unexpected body: $BODY"; tail -30 "$HOME_DIR/rolld.log"; exit 1; }
+echo "$BODY" | has "preview of change 1" || { echo "unexpected body: $BODY"; tail -30 "$HOME_DIR/rolld.log"; exit 1; }
 T4=$(now_ms); curl -sS -o /dev/null -b "$JAR" -H "Host: $HOST" "http://$API/"; T5=$(now_ms)
 # Never indexed: the service's page through roll says so, and so does the 401 without the link.
 ROBOTS=$(curl -sS -o /dev/null -D - -b "$JAR" -H "Host: $HOST" "http://$API/" | tr -d '\r' | sed -n 's/^x-robots-tag: //Ip')
@@ -276,7 +279,7 @@ METRICS=$(curl -sS "http://$API/v1/previews/$PV/metrics" | python3 -c "import js
 # (Read whole first: `grep -q` stops at its match, and with pipefail the CLI's next write to the
 # closed pipe would fail the step once there are enough requests.)
 REQS=$(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview requests "$PV")
-echo "$REQS" | grep -q " 200 GET    /  " || { echo "roll preview requests should list GET / 200: $(echo "$REQS" | head -3)"; exit 1; }
+echo "$REQS" | has " 200 GET    /  " || { echo "roll preview requests should list GET / 200: $(echo "$REQS" | head -3)"; exit 1; }
 [ -z "$(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview requests "$PV" --errors)" ] || { echo "roll preview requests --errors should list only 4xx and 5xx"; exit 1; }
 # The service's DATABASE_URL is the branch's own role, which can't read the WAL (where the pages
 # from before the mask are) and isn't a superuser.
@@ -288,8 +291,8 @@ PG_NAMES=$(python3 -c 'import sys,urllib.parse as u; e=dict(l.split("=",1) for l
 [ "$PG_NAMES" = ok ] || { echo "the service's PGUSER/PGPASSWORD should be the branch's: $PG_NAMES"; exit 1; }
 FOLLOWED=$(python3 -c 'import sys,urllib.parse as u; e=dict(l.split("=",1) for l in sys.stdin.read().splitlines() if "=" in l); p=u.urlsplit(e.get("DATABASE_URL","")); s=e.get("STAGING_PGPASS"); print("ok" if s and s==u.unquote(p.password or "") else "STAGING_PGPASS is %s" % ("unset" if s is None else "not the branch'"'"'s password"))' <<<"$APP_ENV")
 [ "$FOLLOWED" = ok ] || { echo "a secrets link to the branched parent should give the branch's password: $FOLLOWED"; exit 1; }
-echo "$APP_ENV" | grep -qx 'PAYMENTS_KEY=sk_test_from_staging_42' || { echo "roll://staging/PAYMENTS_TEST_KEY should be staging's value: $(echo "$APP_ENV" | grep '^PAYMENTS_KEY=' | cut -c1-40)"; exit 1; }
-echo "$APP_ENV" | grep -qxF 'GREETING=hello ${USER}' || { echo "a plain value's \${ should stay as it is: $(echo "$APP_ENV" | grep '^GREETING=')"; exit 1; }
+echo "$APP_ENV" | has -x 'PAYMENTS_KEY=sk_test_from_staging_42' || { echo "roll://staging/PAYMENTS_TEST_KEY should be staging's value: $(echo "$APP_ENV" | grep '^PAYMENTS_KEY=' | cut -c1-40)"; exit 1; }
+echo "$APP_ENV" | has -xF 'GREETING=hello ${USER}' || { echo "a plain value's \${ should stay as it is: $(echo "$APP_ENV" | grep '^GREETING=')"; exit 1; }
 # Its tasks tenant's own webhook signing keys (roll apps' `tasks` link names them), not production's:
 # its deliveries verify.
 BRANCH_TASKS=$(echo "$P" | jq_ "[r['ref'] for r in d['resources'] if r['kind']=='tasks'][0]")
@@ -317,7 +320,7 @@ case "$APP_DB" in postgres://br_*) ;; *) echo "the service's DATABASE_URL should
 # Its mail goes to roll's catcher, signed in as the preview, never to the provider production
 # uses: the key is gone, and what it sends is caught and listed (sent here as its service would).
 ENVTXT=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt")
-echo "$ENVTXT" | grep -q '^SENDGRID_API_KEY=' && { echo "a preview's service shouldn't get the mail provider's key"; exit 1; }
+echo "$ENVTXT" | has '^SENDGRID_API_KEY=' && { echo "a preview's service shouldn't get the mail provider's key"; exit 1; }
 SMTP_USER=$(echo "$ENVTXT" | sed -n 's/^SMTP_USER=//p'); SMTP_PASSWORD=$(echo "$ENVTXT" | sed -n 's/^SMTP_PASSWORD=//p'); SMTP_PORT=$(echo "$ENVTXT" | sed -n 's/^SMTP_PORT=//p')
 [ "$SMTP_USER" = "$PV" ] && [ "$(echo "$ENVTXT" | sed -n 's/^SMTP_HOST=//p')" = host.docker.internal ] || { echo "the service's SMTP should be roll's catcher, as the preview: $SMTP_USER"; exit 1; }
 python3 - "$SMTP_PORT" "$SMTP_USER" "$SMTP_PASSWORD" <<'PY'
@@ -335,7 +338,7 @@ except smtplib.SMTPAuthenticationError:
 PY
 MAIL=$(api GET "/v1/previews/$PV/mail" | jq_ "'%s to %s' % (d['mail'][0]['subject'], ','.join(d['mail'][0]['to'])) if d.get('mail') else ''")
 [ "$MAIL" = "Your order to ada@corp.example" ] || { echo "the preview's mail should be caught and listed: $MAIL"; exit 1; }
-ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview mail "$PV" | grep -q "to ada@corp.example  Your order" || { echo "roll preview mail should list it"; exit 1; }
+ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview mail "$PV" | has "to ada@corp.example  Your order" || { echo "roll preview mail should list it"; exit 1; }
 # A reviewer's connection from a laptop (`roll preview connect`): the same role, never the parent's.
 CONNECT=$(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview connect "$PV" --kind postgres | sed -n 's/^DATABASE_URL=//p')
 case "$CONNECT" in postgres://br_*) ;; *) echo "roll preview connect should hand out the branch's own role, not ${CONNECT%%@*}…"; exit 1;; esac
@@ -410,23 +413,23 @@ wait "$FPID" 2>/dev/null || true
 grep -q "event: service" "$FOLLOW" && grep -q "pushed-log-line" "$FOLLOW" || { echo "the followed log should carry the request:"; cat "$FOLLOW"; exit 1; }
 # Python's server writes its request lines on stderr: the followed log says so (`event: stderr`,
 # before the event's `data:` line, so a client acting on each line knows its stream).
-grep -B1 "pushed-log-line" "$FOLLOW" | grep -q "^event: stderr" || { echo "the request's line came on stderr and should say so:"; cat "$FOLLOW"; exit 1; }
+grep -B1 "pushed-log-line" "$FOLLOW" | has "^event: stderr" || { echo "the request's line came on stderr and should say so:"; cat "$FOLLOW"; exit 1; }
 # CI's way in: the project's bypass secret in a header (no cookie); a wrong one is refused.
 BYPASS=$(api POST "/v1/previews/projects/$PRJ/bypass" | jq_ "d['secret']")
 [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $HOST" -H "x-roll-preview-bypass: $BYPASS" "http://$API/")" = 200 ] || { echo "the bypass secret should open the preview"; exit 1; }
 [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $HOST" -H "x-roll-preview-bypass: rpb_wrong" "http://$API/")" = 401 ] || { echo "a wrong bypass secret should be 401"; exit 1; }
 # The feedback button: on the page a visitor through roll opens, and its script from the same host.
-curl -sS -b "$JAR" -H "Host: $HOST" -H "Accept: text/html" "http://$API/" | grep -q '/__roll/feedback.js' || { echo "the page should carry the feedback button"; exit 1; }
+curl -sS -b "$JAR" -H "Host: $HOST" -H "Accept: text/html" "http://$API/" | has '/__roll/feedback.js' || { echo "the page should carry the feedback button"; exit 1; }
 [ "$(curl -s -o /dev/null -w '%{content_type}' -b "$JAR" -H "Host: $HOST" "http://$API/__roll/feedback.js")" = "text/javascript; charset=utf-8" ] || { echo "the feedback script should load from the preview's host"; exit 1; }
 # A note posted from the button (a comment review in the button's shape) is listed on its page.
 NOTE_BODY='**Feedback on the preview** · [`/`](http://x/) · `body > h1`\n\nThe heading is cut off\n\n<sub>roll preview</sub>'
 api POST "/v1/code/changes/$CHG/reviews" "{\"verdict\":\"comment\",\"body\":\"$NOTE_BODY\"}" >/dev/null
 NOTES=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/__roll/feedback.json?path=%2F")
-echo "$NOTES" | grep -q "The heading is cut off" || { echo "the page's notes should list the feedback: $NOTES"; exit 1; }
+echo "$NOTES" | has "The heading is cut off" || { echo "the page's notes should list the feedback: $NOTES"; exit 1; }
 # Resolved (what the page's Resolve opens roll to do), it folds away there.
 NOTE_ID=$(echo "$NOTES" | jq_ "d[0]['id']")
 [ "$(api GET "/v1/previews/$PV/notes" | jq_ "[n['id'] for n in d['notes']]")" = "['$NOTE_ID']" ] || { echo "the preview's open notes should list the page's, with its id"; exit 1; }
-ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview notes "$PV" | grep -q "^$NOTE_ID  / body > h1  by .*: The heading is cut off" || { echo "roll preview notes should list it: $(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview notes "$PV")"; exit 1; }
+ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview notes "$PV" | has "^$NOTE_ID  / body > h1  by .*: The heading is cut off" || { echo "roll preview notes should list it: $(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview notes "$PV")"; exit 1; }
 # A reply to it (the sheet's Reply: a comment review naming the note) is listed under it on the page.
 api POST "/v1/code/changes/$CHG/reviews" "{\"verdict\":\"comment\",\"body\":\"**Reply on the preview** · \`$NOTE_ID\`\\n\\nWhich width?\"}" >/dev/null
 REPLIES=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/__roll/feedback.json?path=%2F" | jq_ "[r['note'] for n in d for r in n.get('replies', [])]")
@@ -449,7 +452,7 @@ api DELETE "/v1/previews/$PV/shares/$SHARE_ID" >/dev/null
 GSHARE=$(api POST "/v1/previews/$PV/shares" '{"hours":1,"label":"Acme review","notes":true}')
 GJAR="$HOME_DIR/cookies-guest"
 curl -s -o /dev/null -c "$GJAR" -H "Host: $HOST" "http://$API/?$(echo "$GSHARE" | jq_ "d['url'].split('/?')[1]")"
-curl -sS -b "$GJAR" -H "Host: $HOST" "http://$API/__roll/feedback.js" | grep -q "const GUEST = true;" || { echo "a link that takes notes should give its guest the button in guest mode"; exit 1; }
+curl -sS -b "$GJAR" -H "Host: $HOST" "http://$API/__roll/feedback.js" | has "const GUEST = true;" || { echo "a link that takes notes should give its guest the button in guest mode"; exit 1; }
 GNOTE='{"name":"Ada","path":"/","selector":"h1","note":"Hi @team, the title is cut off","viewport":"390x844"}'
 [ "$(curl -s -o /dev/null -w '%{http_code}' -b "$GJAR" -H "Host: $HOST" -H "Origin: http://evil.example" -H 'content-type: application/json' -d "$GNOTE" "http://$API/__roll/notes")" = 403 ] || { echo "another site's page should post no note"; exit 1; }
 GUEST_ID=$(curl -sS -b "$GJAR" -H "Host: $HOST" -H "Origin: http://$HOST" -H 'content-type: application/json' -d "$GNOTE" "http://$API/__roll/notes" | jq_ "d['id']")
@@ -468,7 +471,7 @@ say "a shell in the preview's service (roll preview shell): what's typed runs in
 # Keys from a pipe (no terminal, so no raw mode), the screen on stdout until the shell's `exit`.
 SCREEN=$(printf 'echo "seen $ROLL_PREVIEW"; exit\r' | ROLL_API_URL="http://$API" timeout 60 "$ROOT/target/debug/roll" preview shell "$PV" --service web 2>&1) || { echo "roll preview shell failed: $SCREEN"; exit 1; }
 case "$SCREEN" in *"seen $PV"*) ;; *) echo "the shell should run in the service's container with its variables: $SCREEN"; exit 1;; esac
-api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]" | grep -q "opened a shell in web" || { echo "the activity should say a shell was opened"; exit 1; }
+api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]" | has "opened a shell in web" || { echo "the activity should say a shell was opened"; exit 1; }
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://$API/v1/previews/$PV/shell/sessions" -H 'content-type: application/json' -d '{"service":"nope"}')" = 404 ] || { echo "a shell in a service the preview hasn't should be 404"; exit 1; }
 
 say "files in and out of the preview's service (roll preview cp)"
@@ -478,18 +481,18 @@ ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview cp "$PV" "$HOME_DIR
 ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview cp "$PV" :/tmp/fixture.txt "$HOME_DIR/back.txt" --service web >/dev/null || { echo "roll preview cp should bring the file back"; exit 1; }
 [ "$(cat "$HOME_DIR/back.txt" 2>/dev/null)" = "fixture for $PV" ] || { echo "the file brought back should be the one put in: $(cat "$HOME_DIR/back.txt" 2>/dev/null)"; exit 1; }
 [ "$(curl -s -o /dev/null -w '%{http_code}' "http://$API/v1/previews/$PV/files?service=web&path=/nothing/here")" = 404 ] || { echo "nothing at a path should be 404"; exit 1; }
-api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]" | grep -q "copied files into web at /tmp" || { echo "the activity should say files were copied in"; exit 1; }
+api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]" | has "copied files into web at /tmp" || { echo "the activity should say files were copied in"; exit 1; }
 
 say "a port of the preview's service on this machine (roll preview forward), from inside it"
 # (`P` is the preview's JSON by now: the port block from the environment.)
 FWD_PORT=${PREVIEW_E2E_PORTS:-27}977
 ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview forward "$PV" 8000 --service web --local-port "$FWD_PORT" 2>/dev/null &
 FWD_PID=$!
-for _ in $(seq 1 50); do ss -ltn | grep -q ":$FWD_PORT " && break; sleep 0.2; done
+for _ in $(seq 1 50); do ss -ltn | has ":$FWD_PORT " && break; sleep 0.2; done
 FWDED=$(curl -s --max-time 30 "http://127.0.0.1:$FWD_PORT/env.txt" | grep -c "^ROLL_PREVIEW=$PV$" || true)
 kill "$FWD_PID" 2>/dev/null || true; wait "$FWD_PID" 2>/dev/null || true
 [ "$FWDED" = 1 ] || { echo "the forwarded port should reach the service from inside it: $FWDED"; exit 1; }
-api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]" | grep -q "forwarded port 8000 of web" || { echo "the activity should say the port was forwarded"; exit 1; }
+api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]" | has "forwarded port 8000 of web" || { echo "the activity should say the port was forwarded"; exit 1; }
 for _ in $(seq 1 30); do [ "$(docker ps -aq --filter name=roll-previews-fwd- | wc -l)" = 0 ] && break; sleep 0.5; done
 [ "$(docker ps -aq --filter name=roll-previews-fwd- | wc -l)" = 0 ] || { echo "a forward's relay should go with its connection"; exit 1; }
 
@@ -518,13 +521,13 @@ for _ in $(seq 1 100); do
   sleep 0.2
 done
 [ -n "$BACK" ] && [ "$BACK" != "from the laptop" ] || { echo "given back, the container should answer again: $BACK"; exit 1; }
-api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]" | grep -q "swapped web for a process on their machine" || { echo "the activity should say web was swapped"; exit 1; }
+api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d]" | has "swapped web for a process on their machine" || { echo "the activity should say web was swapped"; exit 1; }
 
 say "a page read through roll (roll preview fetch, roll MCP's previews_fetch): no link token asked or answered"
 FETCHED=$(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview fetch "$PV" /index.html --service web 2>/dev/null)
 CONTAINER_PAGE=$(curl -s --max-time 10 -b "$JAR" -H "Host: $HOST" "http://$API/index.html")
 [ -n "$FETCHED" ] && [ "$FETCHED" = "$CONTAINER_PAGE" ] || { echo "roll preview fetch should read the page as the container serves it: '$FETCHED' vs '$CONTAINER_PAGE'"; exit 1; }
-api GET "/v1/previews/$PV/fetch?path=/index.html&service=web" | grep -q "roll_access" && { echo "a fetched page's answer must carry no token"; exit 1; }
+api GET "/v1/previews/$PV/fetch?path=/index.html&service=web" | has "roll_access" && { echo "a fetched page's answer must carry no token"; exit 1; }
 
 say "traces: with the project's traces on, the service gets OpenTelemetry's variables, spans it posts are the preview's traces, and an error naming one opens it"
 api PUT "/v1/previews/projects/$PRJ/settings" '{"traces":true}' >/dev/null
@@ -629,7 +632,7 @@ say "a restore point (roll preview points): saved, a table made after it, put ba
 psql_app() { docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB" -Atc "$1" 2>&1 | head -1; }
 POINT=$(api POST "/v1/previews/$PV/restore-points" '{"label":"before the live check"}' | jq_ "d['id']")
 case "$POINT" in rp_*) ;; *) echo "a restore point should be saved: $POINT"; exit 1;; esac
-ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview points "$PV" | grep -q "$POINT" || { echo "roll preview points should list $POINT"; exit 1; }
+ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview points "$PV" | has "$POINT" || { echo "roll preview points should list $POINT"; exit 1; }
 psql_app "CREATE TABLE after_the_point (id int)" >/dev/null
 TR0=$(now_ms)
 api POST "/v1/previews/$PV/restore-points/$POINT/restore" >/dev/null
@@ -637,7 +640,7 @@ api POST "/v1/previews/$PV/restore-points/$POINT/restore" >/dev/null
 # and the preview settled, ready or asleep (its services slept for it; a visit wakes them).
 PUT_BACK=""
 for _ in $(seq 1 240); do
-  api GET "/v1/previews/$PV/activity" | jq_ "any('back as restore point' in a['message'] for a in d)" | grep -q True && case "$(api GET "/v1/previews/$PV" | jq_ "d['state']")" in ready|sleeping) true;; *) false;; esac && PUT_BACK=yes && break
+  api GET "/v1/previews/$PV/activity" | jq_ "any('back as restore point' in a['message'] for a in d)" | has True && case "$(api GET "/v1/previews/$PV" | jq_ "d['state']")" in ready|sleeping) true;; *) false;; esac && PUT_BACK=yes && break
   sleep 0.5
 done
 RESTORE_MS=$(( $(now_ms) - TR0 ))
@@ -937,12 +940,12 @@ RESHAPED=$(api GET "/v1/previews/$PV" | jq_ "' | '.join('%s %s' % (c['path'], c.
 # The feedback button driven in a real browser (Playwright's image, which the run built by now):
 # in through the preview's link, an element picked and a note written; what it opens roll with
 # names the page, the element and the note. Nothing else drives the page's toolbar end to end.
-# An agent's run on the page (roll MCP's previews_try): a step taken in a browser, the text after
-# it and its picture by the run's id.
-TRY=$(api POST "/v1/previews/$PV/try" '{"service":"web","path":"/","steps":[{"press":"Tab"}]}')
+# An agent's run on the page (roll MCP's previews_try, `roll preview try`): a step taken in a
+# browser, the text after it and its picture by the run's id.
+TRY=$(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" --json preview try "$PV" --service web --out "$HOME_DIR/try.png" / press Tab)
 TRY_SAID=$(echo "$TRY" | jq_ "'%s %s' % (d['status'], 'preview of change 1' in d['text'])")
 [ "$TRY_SAID" = "200 True" ] || { echo "an agent's run should answer the page's status and text: ${TRY:0:300}"; exit 1; }
-curl -sf "http://$API/v1/previews/$PV/try/$(echo "$TRY" | jq_ "d['run']")/screenshot" -o "$HOME_DIR/try.png" && head -c 8 "$HOME_DIR/try.png" | od -An -c | grep -q "P   N   G" || { echo "the run's picture should be a PNG"; exit 1; }
+head -c 8 "$HOME_DIR/try.png" | od -An -c | has "P   N   G" || { echo "the run's picture should be a PNG"; exit 1; }
 FB_LINK=$(api GET "/v1/previews/$PV" | jq_ "[x for x in d['services'] if x['name'] == 'web'][0]['share_url']")
 FB_SAID=$(docker run --rm --name roll-previews-fbtest --network host -e LINK="$FB_LINK" -v "$ROOT/scripts/preview-cost/feedback-check.js:/w/check.js:ro" roll-previews-shot:1.64.1 sh -c 'NODE_PATH=$(npm root -g) node /w/check.js' 2>&1 | tail -1)
 case "$FB_SAID" in "/ · "*"a"*" · a live note") ;; *) echo "the page's feedback button should open roll with the page, the element and the note: $FB_SAID"; exit 1;; esac
@@ -951,7 +954,7 @@ case "$FB_SAID" in "/ · "*"a"*" · a live note") ;; *) echo "the page's feedbac
 SERVED=$(api GET "/v1/previews/$PV" | jq_ "' '.join(sorted(set('%s@%s' % (x['key'], x['path']) for x in d.get('served_secrets') or [])))")
 case " $SERVED " in *" DATABASE_URL@/env.txt "*) ;; *) echo "the preview's record should name DATABASE_URL in /env.txt: $SERVED"; exit 1;; esac
 SERVED_PW=$(echo "$APP_DB" | sed -nE 's#^postgres://[^:]+:([^@]+)@.*#\1#p')
-[ -n "$SERVED_PW" ] && api GET "/v1/previews/$PV" | grep -qF "$SERVED_PW" && { echo "the record must never carry a served value"; exit 1; }
+[ -n "$SERVED_PW" ] && api GET "/v1/previews/$PV" | has -F "$SERVED_PW" && { echo "the record must never carry a served value"; exit 1; }
 case "$WORDS" in "+['preview of change 1"*"-['main']") ;; *) echo "the page's words should be compared with main's: $WORDS"; exit 1;; esac
 MAIN_LOAD=$(api GET "/v1/previews/$PV" | jq_ "d['base_change'].get('load_ms')")
 case "$MAIN_LOAD" in [0-9]*) ;; *) echo "the comparison with main should carry main's load time: $MAIN_LOAD"; exit 1;; esac
@@ -1074,7 +1077,7 @@ if [ "${STOP_AT:-}" = against ]; then
   exit 0
 fi
 # Turned off, it goes.
-OFF=$(api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"baseline":false}}'); echo "$OFF" | grep -q "\"baseline\":false" || { echo "turning the baseline off: $OFF"; exit 1; }
+OFF=$(api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"baseline":false}}'); echo "$OFF" | has "\"baseline\":false" || { echo "turning the baseline off: $OFF"; exit 1; }
 for _ in $(seq 1 120); do
   [ "$(api GET "/v1/previews?project=$PRJ" | jq_ "len(d)")" = 1 ] && break
   sleep 0.5
@@ -1134,7 +1137,7 @@ FROZEN_STATE=$(api GET "/v1/previews/$PV" | jq_ "[s['state'] for s in d['service
 [ "$FROZEN_STATE" = sleeping ] || { echo "a frozen service should read as sleeping: $FROZEN_STATE"; exit 1; }
 ID_FROZEN=$(docker inspect -f '{{.Id}}' "$CONT2")
 T6=$(now_ms); BODY2=$(curl -sS -b "$JAR2" -H "Host: $HOST2" "http://$API/" --max-time 60); T7=$(now_ms)
-echo "$BODY2" | grep -q "preview of change 1" || { echo "the thawed service should answer: $BODY2"; exit 1; }
+echo "$BODY2" | has "preview of change 1" || { echo "the thawed service should answer: $BODY2"; exit 1; }
 [ "$(docker inspect -f '{{.Id}} {{.State.Running}} {{.State.Paused}}' "$CONT2")" = "$ID_FROZEN true false" ] || { echo "the visit should thaw the same container, not start another"; exit 1; }
 [ $((T7 - T6)) -lt 1500 ] || { echo "a thaw should answer within 1.5 s, not $((T7 - T6)) ms"; exit 1; }
 
@@ -1156,7 +1159,7 @@ for _ in $(seq 1 120); do
 done
 case "$NETS" in *roll-previews-net-*) ;; *) echo "with egress roll the service should run on the preview's own network: $NETS"; exit 1;; esac
 BODY3=$(curl -sS -b "$JAR2" -H "Host: $HOST2" "http://$API/" --max-time 60)
-echo "$BODY3" | grep -q "preview of change 1" || { echo "the service on its own network should still be served through roll: $BODY3"; exit 1; }
+echo "$BODY3" | has "preview of change 1" || { echo "the service on its own network should still be served through roll: $BODY3"; exit 1; }
 OUT_AFTER=$(docker exec "$CONT2" python -c "$REACH" 2>&1 || true); OUT_AFTER=$(echo "$OUT_AFTER" | tail -1)
 case "$OUT_AFTER" in *unreachable*|*Errno*|*timed*) ;; *) echo "with egress roll the service shouldn't reach the internet: $OUT_AFTER"; exit 1;; esac
 # Its screenshot is still taken there (the browser in the service's own network: nothing is

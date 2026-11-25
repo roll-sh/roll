@@ -33,7 +33,7 @@
   addEventListener("change", (e) => {
     const t = e.target;
     if (mine(e) || !(t instanceof Element)) return;
-    const kind = t.type === "checkbox" || t.type === "radio" ? (t.checked ? "check" : "uncheck") : t.localName === "select" ? "choose in" : `type ${String(t.value || "").length} characters in`;
+    const kind = t.type === "checkbox" || t.type === "radio" ? (t.checked ? "check" : "uncheck") : t.localName === "select" ? (t.multiple ? "choose in" : `choose option ${t.selectedIndex + 1} in`) : `type ${String(t.value || "").length} characters in`;
     step(`${kind} ${sel(t)}`);
   }, true);
   addEventListener("submit", (e) => { if (!mine(e)) step(`submit ${sel(e.target)}`); }, true);

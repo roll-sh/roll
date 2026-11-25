@@ -76,6 +76,11 @@ pub struct Batch {
     /// Fail with `stale` if the environment changed after this change.
     #[serde(default)]
     pub if_seq: Option<i64>,
+    /// Go ahead with what a 409 `confirm_required` named: the public certificates (ids, comma
+    /// separated) whose private key this change shares between a protected environment and one
+    /// that isn't ([`Secrets::check_shared_certs`]).
+    #[serde(default)]
+    pub confirm: Option<String>,
 }
 
 /// Each op's `if_version`, by its item's index (each op makes one item, in order).
@@ -1144,14 +1149,77 @@ impl Secrets {
         names::message(&message)?;
         let items = items(&path, &b.ops, caller)?;
         self.check_items(project, env, &items, caller)?;
+        self.check_shared_certs(project, env, &items, b.confirm.as_deref())?;
         let expect = expectations(&b.ops)?;
         self.commit_with(project, env, items, &expect, via, &message, b.if_seq, false, caller)
     }
 
+    /// Every key and environment linked to one public certificate gets the same certificate and
+    /// private key. Linking one into an environment that isn't protected while a protected one has
+    /// it (with its private key), or into a protected one while one that isn't holds its key,
+    /// shares the protected environment's key: only with `confirm` naming it (a 409
+    /// `confirm_required` otherwise). Health lists what's shared already (`exposed`).
+    fn check_shared_certs(&self, project: &str, env: &str, items: &[Item], confirm: Option<&str>) -> Result<()> {
+        let mut linking: BTreeMap<&str, bool> = BTreeMap::new();
+        for i in items {
+            if let ItemAction::Set { link: Some(Some(l)), .. } = &i.action
+                && l.kind == crate::public_certs::KIND
+            {
+                *linking.entry(l.r#ref.as_str()).or_default() |= l.field == "private_key";
+            }
+        }
+        if linking.is_empty() {
+            return Ok(());
+        }
+        let (here, others) = self.db.read(|c| {
+            let here = envs::by_slug(c, project, env)?;
+            let others: Vec<(String, String, i64)> = c.query(
+                "SELECT s.link, e.slug, e.protected FROM secrets s JOIN environments e ON e.id = s.env_id AND e.forgotten_at IS NULL WHERE s.project_id = ? AND s.owner = '' AND s.env_id <> ? AND s.link LIKE ?",
+                params![project, here.id, format!("%\"kind\":\"{}\"%", crate::public_certs::KIND)],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+            Ok::<_, Error>((here, others))
+        })?;
+        for (r, private) in linking {
+            if confirm.is_some_and(|c| c.split(',').any(|x| x.trim() == r)) {
+                continue;
+            }
+            let mut shared: BTreeSet<&str> = BTreeSet::new();
+            for (link, slug, protected) in &others {
+                let Ok(l) = serde_json::from_str::<Link>(link) else { continue };
+                if l.r#ref != r {
+                    continue;
+                }
+                let exposes = if here.protected { *protected == 0 && l.field == "private_key" } else { private && *protected != 0 };
+                if exposes {
+                    shared.insert(slug.as_str());
+                }
+            }
+            if shared.is_empty() {
+                continue;
+            }
+            let name = self.provider_for(crate::public_certs::KIND, r).ok().and_then(|p| p.name(r)).unwrap_or_else(|| r.to_string());
+            let list = shared.into_iter().collect::<Vec<_>>().join(", ");
+            let why = if here.protected {
+                format!("public certificate {name}'s private key is also linked into {list}, which isn't protected: linking it into {env} makes {env}'s key readable there")
+            } else {
+                format!("public certificate {name} is linked into {list}, which is protected: its private key in {env} makes {list}'s key readable here")
+            };
+            return Err(Error::Conflict("confirm_required", format!("{why} (every key linked to one public certificate gets the same key). Give {env} a public certificate of its own, or send confirm: \"{r}\" to link it anyway")));
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn set_secret(&self, project: &str, env: &str, path: &str, key: &str, op: Op, message: Option<String>, caller: &Caller) -> Result<Written> {
+        self.set_secret_confirmed(project, env, path, key, op, message, None, caller)
+    }
+
+    /// [`Self::set_secret`], with a batch's `confirm`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_secret_confirmed(&self, project: &str, env: &str, path: &str, key: &str, op: Op, message: Option<String>, confirm: Option<String>, caller: &Caller) -> Result<Written> {
         let path = names::path(path)?;
-        let a = self.batch(project, env, Batch { path: Some(path.clone()), message, ops: vec![op], if_seq: None }, caller)?;
+        let a = self.batch(project, env, Batch { path: Some(path.clone()), message, ops: vec![op], if_seq: None, confirm }, caller)?;
         let kind = a.items.first().map(|d| d.kind).unwrap_or_default();
         let secret = self.secret(project, env, &path, key, Some(kind), caller).ok();
         Ok(Written { change: a.change, secret, warnings: a.warnings })

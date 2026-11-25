@@ -3,9 +3,10 @@
 //! environment) and the visitor came in through roll (the environment's access cookie), a page
 //! the app serves gets `<script src="/__roll/feedback.js" defer>` before `</body>`, and that
 //! script is served from the preview's own host. It holds no credential: it opens roll's
-//! dashboard, where the signed-in person posts the note on the change. The script and the
-//! tagger are roll previews' (`roll-previews/src/feedback.js`, `runtime.rs` `Tagger`), kept equal
-//! until one copy serves both (docs/apps/README.md, "With the other platform branches").
+//! dashboard, where the signed-in person posts the note on the change. The script is roll
+//! previews' own (`roll-previews/src/feedback.js`: what went wrong on the page and what the
+//! reviewer did go with a note), without what only previews' proxy serves (share links' guests,
+//! a reviewer's flags); the tagger is a copy of previews' `runtime.rs` `Tagger`.
 
 use axum::body::Body;
 use axum::http::{HeaderValue, StatusCode, header};
@@ -16,10 +17,14 @@ use futures::StreamExt;
 pub const PATH: &str = "/__roll/feedback.js";
 /// What's been said about a page (`?path=`), for the button's list.
 pub const NOTES: &str = "/__roll/feedback.json";
+/// Where a share link's guest posts a note (roll previews' `GUEST_NOTE_PATH`).
+pub const GUEST_NOTE: &str = "/__roll/notes";
+/// The biggest note a guest posts.
+const GUEST_NOTE_MAX: usize = 64 << 10;
 /// The most a list holds.
 const MAX_NOTES: usize = 200;
 const TAG: &[u8] = b"<script src=\"/__roll/feedback.js\" defer></script>";
-const SCRIPT: &str = include_str!("../assets/feedback.js");
+const SCRIPT: &str = include_str!("../../roll-previews/src/feedback.js");
 
 /// Adds the tag to a page as it streams: before the first `</body>` (matched across chunks, in
 /// any case), or at the end of a page without one. Memory stays one chunk.
@@ -115,31 +120,68 @@ fn inject(resp: Response, tag: Bytes, close: &'static [u8], at_end: bool, person
     Response::from_parts(parts, Body::from_stream(stream))
 }
 
-/// The button's script, sending notes to `target` (the preview in roll's dashboard).
-/// The notes on the page `query`'s `path` names (the path only, at most 2 KiB), from roll
-/// previews: `no-store`, at most [`MAX_NOTES`]; 404 without previews, 502 when it fails (the
-/// button then shows no list).
-pub async fn notes(notes: Option<std::sync::Arc<dyn crate::integrations::FeedbackNotes>>, env: &str, query: Option<&str>) -> Response {
-    let Some(n) = notes else { return StatusCode::NOT_FOUND.into_response() };
-    let path = query
+/// The page `query`'s `path` names (the path only, at most 2 KiB).
+fn page_path(query: Option<&str>) -> Option<String> {
+    query
         .unwrap_or("")
         .split('&')
         .find_map(|p| p.strip_prefix("path="))
         .map(|p| percent_encoding::percent_decode_str(p).decode_utf8_lossy().into_owned())
-        .filter(|p| p.starts_with('/') && p.len() <= 2048);
-    let Some(path) = path else { return (StatusCode::BAD_REQUEST, "path is the page's path").into_response() };
+        .filter(|p| p.starts_with('/') && p.len() <= 2048)
+}
+
+fn listed(mut list: Vec<crate::integrations::Note>) -> Response {
+    let over = list.len().saturating_sub(MAX_NOTES);
+    list.drain(..over);
+    ([(header::CACHE_CONTROL, "no-store")], axum::Json(list)).into_response()
+}
+
+/// The notes on the page `query`'s `path` names, from roll previews: `no-store`, at most
+/// [`MAX_NOTES`]; 404 without previews, 502 when it fails (the button then shows no list).
+pub async fn notes(notes: Option<std::sync::Arc<dyn crate::integrations::FeedbackNotes>>, env: &str, query: Option<&str>) -> Response {
+    let Some(n) = notes else { return StatusCode::NOT_FOUND.into_response() };
+    let Some(path) = page_path(query) else { return (StatusCode::BAD_REQUEST, "path is the page's path").into_response() };
     match tokio::time::timeout(std::time::Duration::from_secs(5), n.notes(env, &path)).await {
-        Ok(Ok(mut list)) => {
-            let over = list.len().saturating_sub(MAX_NOTES);
-            list.drain(..over);
-            ([(header::CACHE_CONTROL, "no-store")], axum::Json(list)).into_response()
-        }
+        Ok(Ok(list)) => listed(list),
         _ => StatusCode::BAD_GATEWAY.into_response(),
     }
 }
 
-pub fn script(target: &str) -> Response {
-    let js = SCRIPT.replace("__ROLL_TARGET__", &serde_json::to_string(target).unwrap_or_else(|_| "\"\"".into()));
+/// What a share link's guest sees on the page: the notes left through their link only.
+pub async fn guest_notes(shares: Option<std::sync::Arc<dyn crate::integrations::PreviewShares>>, env: &str, token: &str, query: Option<&str>) -> Response {
+    let Some(s) = shares else { return StatusCode::NOT_FOUND.into_response() };
+    let Some(path) = page_path(query) else { return (StatusCode::BAD_REQUEST, "path is the page's path").into_response() };
+    match tokio::time::timeout(std::time::Duration::from_secs(5), s.notes(env, token, &path)).await {
+        Ok(list) => listed(list),
+        Err(_) => StatusCode::BAD_GATEWAY.into_response(),
+    }
+}
+
+/// A share link's guest's note from the page's button (`POST /__roll/notes`): JSON from the
+/// preview's own pages (its origin), 64 KiB at most, posted on the change by roll previews.
+pub async fn guest_note(shares: Option<std::sync::Arc<dyn crate::integrations::PreviewShares>>, env: &str, token: &str, req: axum::extract::Request) -> Response {
+    let Some(s) = shares else { return StatusCode::NOT_FOUND.into_response() };
+    let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
+    let origin = req.headers().get(header::ORIGIN).and_then(|h| h.to_str().ok()).unwrap_or("");
+    let json = req.headers().get(header::CONTENT_TYPE).and_then(|h| h.to_str().ok()).is_some_and(|t| t.starts_with("application/json"));
+    if !json || host.is_empty() || origin.split_once("://").map(|(_, h)| h) != Some(host.as_str()) {
+        return (StatusCode::FORBIDDEN, "notes come from the preview's own pages").into_response();
+    }
+    let Ok(body) = axum::body::to_bytes(req.into_body(), GUEST_NOTE_MAX).await else { return (StatusCode::PAYLOAD_TOO_LARGE, "a note is 64 KiB at most").into_response() };
+    match s.note(env, token, &body).await {
+        Ok(id) => (StatusCode::CREATED, axum::Json(serde_json::json!({ "id": id }))).into_response(),
+        Err((status, why)) => (StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY), why).into_response(),
+    }
+}
+
+/// The button's script, sending notes to `target` (the preview in roll's dashboard), or, for a
+/// share link's guest (`guest`), posting them from the page (they aren't told where roll is).
+pub fn script(target: &str, guest: bool) -> Response {
+    let target = if guest { "" } else { target };
+    let js = SCRIPT
+        .replace("__ROLL_TARGET__", &serde_json::to_string(target).unwrap_or_else(|_| "\"\"".into()))
+        .replace("__ROLL_GUEST__", if guest { "true" } else { "false" })
+        .replace("__ROLL_FLAGS__", "[]");
     ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8"), (header::CACHE_CONTROL, "private, max-age=300")], js).into_response()
 }
 

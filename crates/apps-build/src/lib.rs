@@ -18,6 +18,7 @@ pub mod edge;
 mod elixir;
 pub mod expects;
 pub mod functions;
+mod generators;
 mod gleam;
 mod golang;
 mod java;
@@ -449,9 +450,11 @@ fn detect(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
         return docker::plan(tree, &o);
     }
     type Detect = fn(&dyn Tree, &Overrides) -> Result<Option<Draft>, Error>;
-    const PROVIDERS: [Detect; 15] = [
+    const PROVIDERS: [Detect; 16] = [
         // Before Node: a Deno project's deno.json decides, a package.json beside it notwithstanding.
         deno::detect,
+        // A Hugo or Zola site's config decides too (a theme's package.json is its CSS tooling).
+        generators::detect,
         node::detect,
         python::detect,
         golang::detect,

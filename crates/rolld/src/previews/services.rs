@@ -626,6 +626,51 @@ pub trait Reach: Send + Sync {
 pub struct GitReport {
     pub api: Api,
     pub code: std::sync::Arc<code_control::Code>,
+    /// A service that isn't on roll's GitHub App (GitLab, Bitbucket): its report goes through
+    /// roll apps, with the service's Git login, on its holder (a fleet hop when that's another
+    /// node).
+    pub elsewhere: Option<ThroughApps>,
+}
+
+/// roll apps' reports on this node, and the fleet that finds a service's holder.
+pub struct ThroughApps {
+    pub local: Arc<dyn super::fleet::Report>,
+    pub cluster: Option<Arc<roll_cluster::Cluster>>,
+}
+
+impl GitReport {
+    async fn through_apps(&self, service: &str, ask: Value) -> anyhow::Result<Value> {
+        let Some(t) = &self.elsewhere else { return Ok(Value::Null) };
+        super::fleet::report(t.cluster.as_ref(), t.local.as_ref(), service, ask).await
+    }
+}
+
+/// roll apps' GitLab and Bitbucket reports for a service, on this node.
+pub struct AppsReport(pub Arc<apps_control::Apps>);
+
+#[async_trait]
+impl super::fleet::Report for AppsReport {
+    async fn report(&self, service: &str, ask: &Value) -> anyhow::Result<Value> {
+        if let Some(st) = ask.get("status") {
+            let state = match st["state"].as_str() {
+                Some("pending") => "pending",
+                Some("success") => "success",
+                Some("error") => "error",
+                _ => "failure",
+            };
+            let status = apps_control::integrations::CommitStatus {
+                context: "roll/preview".into(),
+                state,
+                description: st["description"].as_str().unwrap_or("").chars().take(140).collect(),
+                target_url: st["target_url"].as_str().map(str::to_string),
+            };
+            let sha = st["sha"].as_str().ok_or_else(|| anyhow::anyhow!("a status names its commit"))?;
+            return Ok(json!(self.0.commit_status(service, sha, &status).await?));
+        }
+        let n = ask.get("note").ok_or_else(|| anyhow::anyhow!("expected a status or a note"))?;
+        let (Some(repo), Some(number), Some(body)) = (n["repo"].as_str(), n["number"].as_u64(), n["body"].as_str()) else { anyhow::bail!("a note names its repo, number and body") };
+        Ok(json!(self.0.pull_request_note(service, repo, number, body, n["existing"].as_u64()).await?))
+    }
 }
 
 impl GitReport {
@@ -645,13 +690,19 @@ impl GitReport {
 #[async_trait]
 impl roll_previews::ports::GitReport for GitReport {
     async fn status(&self, service: &str, sha: &str, state: &str, description: &str, target_url: Option<&str>) -> anyhow::Result<bool> {
-        let Some((installation, owner, repo)) = self.connection(service).await? else { return Ok(false) };
+        let Some((installation, owner, repo)) = self.connection(service).await? else {
+            let ask = json!({ "status": { "sha": sha, "state": state, "description": description, "target_url": target_url } });
+            return Ok(self.through_apps(service, ask).await?.as_bool() == Some(true));
+        };
         self.code.github_commit_status(installation, &owner, &repo, sha, state, "roll/preview", description, target_url).await.map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(true)
     }
 
     async fn comment(&self, service: &str, pull_repo: &str, number: u64, body: &str, existing: Option<u64>) -> anyhow::Result<Option<u64>> {
-        let Some((installation, owner, repo)) = self.connection(service).await? else { return Ok(None) };
+        let Some((installation, owner, repo)) = self.connection(service).await? else {
+            let ask = json!({ "note": { "repo": pull_repo, "number": number, "body": body, "existing": existing } });
+            return Ok(self.through_apps(service, ask).await?.as_u64());
+        };
         // Connected to another repository since (its source moved): this number isn't its.
         if !format!("{owner}/{repo}").eq_ignore_ascii_case(pull_repo) {
             return Ok(None);
@@ -706,6 +757,55 @@ impl apps_control::integrations::FeedbackNotes for Notes {
             .into_iter()
             .map(|n| apps_control::integrations::Note { path: n.path, selector: n.selector, note: n.note, by: n.by, at: n.at })
             .collect())
+    }
+}
+
+/// roll apps' proxy takes a preview's share links through the engine, as previews' own does
+/// (`Engine::share_visit`, the maker asked again as often).
+pub struct Shares(pub std::sync::Weak<roll_previews::Engine>);
+
+impl Shares {
+    async fn visit(&self, env: &str, token: &str) -> Option<(Arc<roll_previews::Engine>, String, roll_previews::store::LiveShare)> {
+        let engine = self.0.upgrade()?;
+        let preview = roll_previews::Engine::preview_of_env(env)?;
+        let live = engine.share_visit(&preview, token, roll_previews::runtime::RuntimeConfig::default().visitor_recheck).await?;
+        Some((engine, preview, live))
+    }
+}
+
+#[async_trait]
+impl apps_control::integrations::PreviewShares for Shares {
+    async fn live(&self, env: &str, token: &str, followed: bool) -> Option<apps_control::integrations::Share> {
+        let (engine, preview, live) = self.visit(env, token).await?;
+        if followed {
+            engine.share_followed(&preview, token);
+        }
+        Some(apps_control::integrations::Share { ends_ms: live.ends, notes: live.notes })
+    }
+
+    async fn note(&self, env: &str, token: &str, body: &[u8]) -> Result<String, (u16, String)> {
+        let Some((engine, preview, live)) = self.visit(env, token).await else { return Err((401, "this share link has ended".into())) };
+        let Ok(note) = serde_json::from_slice::<roll_previews::notes::GuestNote>(body) else { return Err((400, "expected {name, path, selector?, note, …}".into())) };
+        engine.guest_note(&preview, &live, &note).await.map_err(|e| {
+            let status = match &e {
+                roll_previews::Error::BadRequest(_) => 400,
+                roll_previews::Error::Forbidden(_) => 403,
+                roll_previews::Error::Conflict(_) => 429,
+                _ => 502,
+            };
+            (status, e.to_string())
+        })
+    }
+
+    async fn notes(&self, env: &str, token: &str, path: &str) -> Vec<apps_control::integrations::Note> {
+        let Some((engine, preview, live)) = self.visit(env, token).await else { return Vec::new() };
+        engine
+            .guest_notes_of(&preview, &live.id, path)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|n| apps_control::integrations::Note { path: n.path, selector: n.selector, note: n.note, by: n.by, at: n.at })
+            .collect()
     }
 }
 

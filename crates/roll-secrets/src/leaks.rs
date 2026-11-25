@@ -309,6 +309,18 @@ impl Secrets {
                 if !now_rotating.is_empty() {
                     data["rotating"] = json!(now_rotating.iter().map(|(_, _, k)| k).collect::<Vec<_>>());
                     summary = format!("{} found in {place}: roll rotates it now (leaks.rotate is managed); remove it", keys.join(", "));
+                    // A public certificate's key: its certificate is revoked at the CA first.
+                    let mut revoking = vec![];
+                    for (env_id, _, key) in &now_rotating {
+                        let row: Option<(Option<String>, Option<String>)> = c.query_row("SELECT link, link_state FROM secrets WHERE env_id = ? AND path = ? AND key = ? AND owner = ''", [env_id.as_str(), path, key.as_str()], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+                        if let Some((_, serial)) = row.and_then(|(l, s)| crate::public_certs::held_serial(l.as_deref(), s.as_deref())) {
+                            revoking.push(serial);
+                        }
+                    }
+                    if !revoking.is_empty() {
+                        summary = format!("{summary}; its certificate {} is revoked at the CA first (keyCompromise)", revoking.join(", "));
+                        data["revoking"] = json!(revoking);
+                    }
                 }
                 if !requested.is_empty() {
                     data["requests"] = json!(requested);
