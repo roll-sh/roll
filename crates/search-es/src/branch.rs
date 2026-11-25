@@ -17,18 +17,35 @@
 //! - pauses every SLM policy (`_roll.inherited`; `last_failure` says why): it doesn't run or
 //!   apply its retention until the branch puts the policy again.
 //! - deactivates every watch, as `_watcher/watch/{id}/_deactivate` does; activating one is the
-//!   branch owner's decision. Its passwords and `Authorization` headers are sealed to the parent
-//!   (`xpack::watcher::http`), so they don't open on the branch until it gives them again.
+//!   branch owner's decision. Its secrets (passwords, credential headers, URLs:
+//!   `xpack::watcher::http`) are taken out, so it can't call the parent's webhooks until the
+//!   branch puts the watch again ([`inherited_watch`], [`adopt_watch`]).
 //! - records the connectors, so syncs that read a source with stored credentials stay paused
 //!   on the branch ([`inherited_connector`]): no job of theirs becomes due or starts there until
 //!   the branch puts the connector again or writes its configuration ([`adopt_connector`]).
+//! - removes the connector and Fleet secret stores' entries (`_connector/_secret`,
+//!   `_fleet/secret`: connectors' API keys, Fleet outputs' passwords) and takes out inference
+//!   endpoints' keys.
 //!
-//! Inference endpoints come with the branch and keep working there, their sealed keys included: a
-//! branch is where people try changes on real data, `semantic_text` fields included. Nothing
-//! that updates the parent's key afterwards (a roll secret's `search-inference` sync names the
-//! parent's id) reaches the branch, so a rotated or deleted key lives on in the branch's copy
-//! until the branch's owner deletes the endpoint or the provider revokes the key (docs/secrets.md,
-//! "roll search's inference endpoints").
+//! A branch's people aren't necessarily the parent's (a branch-scoped token, the branch's own
+//! password, a preview's data key), so the parent's secrets stay the parent's: every secret a
+//! cluster stores is sealed bound to the cluster ([`crate::seal::bind`]) and doesn't open in the
+//! branch's copy, and what the branch inherited holds [`crate::seal::INHERITED`] in its place.
+//! That also keeps a point-in-time branch from holding a key the parent has since rotated or
+//! deleted. Inference endpoints come with the branch without their keys: one that calls a
+//! provider answers "this branch doesn't have the parent's provider key; set it on the branch"
+//! without calling it, until the branch's owner updates the endpoint with a key of its own
+//! (`_inference/{task}/{id}/_update`, or the Inference tab's "A roll secret"). roll secrets'
+//! `search-inference` sync names the parent's id and doesn't reach the branch; no key is given
+//! to a branch on its own, since it may not be one roll secrets would give it. Endpoints that
+//! need no key (E5 on the node, the preconfigured ones) keep working. A write that would embed
+//! with such an endpoint fails the same way, unless it opts to keep the text unembedded and drop
+//! the field's old embeddings (`X-Roll-Unembedded: drop`, roll previews' masking:
+//! [`crate::xpack::inference::semantic::UNEMBEDDED_HEADER`]).
+//!
+//! Branches marked before this rule, and branches made before marking existed
+//! ([`crate::ClusterConfig::parent`]), get the same as they open: [`crate::seal::seal_leftovers`]
+//! takes out every secret that doesn't open as the branch's own.
 //!
 //! Everything else that runs on a schedule (ILM and ISM, data stream lifecycle, transforms,
 //! rollups) works inside the branch's own indices and keeps running; the steps of theirs that
@@ -88,11 +105,35 @@ pub fn inherited_connector(cluster: &Cluster, st: &ClusterState, id: &str) -> bo
     marker(cluster, st).is_some_and(|m| listed(m, "connectors", id))
 }
 
+/// Whether the cluster is a branch: its host says so ([`crate::ClusterConfig::parent`],
+/// [`crate::ClusterConfig::branch_of`]), or it marked what it inherited.
+pub fn is_branch(cluster: &Cluster, st: &ClusterState) -> bool {
+    cluster.config.parent.is_some() || cluster.config.branch_of.is_some() || marker(cluster, st).is_some()
+}
+
+/// Whether watch `id` came with the branch and wasn't put since: its secrets are the parent's.
+/// On a branch that has no list of them (made before marking), every watch.
+pub fn inherited_watch(cluster: &Cluster, st: &ClusterState, id: &str) -> bool {
+    match marker(cluster, st) {
+        Some(m) => listed(m, "watches", id),
+        None => is_branch(cluster, st),
+    }
+}
+
 /// Makes connector `id` the branch's own (it was put again, or its configuration written): its
 /// syncs run on the branch from now on.
 pub fn adopt_connector(st: &mut ClusterState, id: &str, now_ms: i64) -> EsResult<()> {
+    adopt(st, "connectors", id, now_ms)
+}
+
+/// Makes watch `id` the branch's own (it was put again): its secrets are the branch's.
+pub fn adopt_watch(st: &mut ClusterState, id: &str, now_ms: i64) -> EsResult<()> {
+    adopt(st, "watches", id, now_ms)
+}
+
+fn adopt(st: &mut ClusterState, list: &str, id: &str, now_ms: i64) -> EsResult<()> {
     let Some(Value::Obj(mut m)) = st.metadata.xpack.get(FAMILY, ID).cloned() else { return Ok(()) };
-    let Some(Value::Arr(list)) = m.get_mut("connectors") else { return Ok(()) };
+    let Some(Value::Arr(list)) = m.get_mut(list) else { return Ok(()) };
     let before = list.len();
     list.retain(|x| x.as_str() != Some(id));
     if list.len() == before {
@@ -134,6 +175,9 @@ pub async fn mark_inherited(cluster: &Cluster) -> EsResult<()> {
             let watches: Vec<(String, Value)> = st.metadata.xpack.iter(crate::xpack::watcher::WATCHES).map(|(k, v)| (k.clone(), v.clone())).collect();
             for (id, w) in &watches {
                 let Value::Obj(mut w) = w.clone() else { continue };
+                if let Some(inner) = w.get("watch").map(crate::xpack::watcher::parse::inherited_watch) {
+                    w.insert("watch".into(), inner);
+                }
                 let mut status = w.get("status").and_then(Value::as_object).cloned().unwrap_or_default();
                 status.insert("state".into(), obj! { "active" => false, "timestamp" => crate::xpack::watcher::exec::fmt_ms(now) });
                 w.insert("status".into(), Value::Obj(status));
@@ -144,6 +188,15 @@ pub async fn mark_inherited(cluster: &Cluster) -> EsResult<()> {
                 store::put(st, crate::xpack::watcher::WATCHES, id, Value::Obj(w), now)?;
             }
             let connectors: Vec<Value> = st.metadata.xpack.iter(crate::xpack::entsearch::connectors::CONNECTORS).map(|(k, _)| Value::from(k.clone())).collect();
+            // The parent's secrets: the stores' entries go, endpoints keep their settings.
+            store::clear(st, crate::xpack::entsearch::connectors::SECRETS);
+            store::clear(st, crate::xpack::fleet::SECRETS);
+            let keys: Vec<(String, Value)> = st.metadata.xpack.iter(crate::xpack::inference::SECRETS).map(|(k, v)| (k.clone(), v.clone())).collect();
+            for (id, rec) in keys {
+                let Value::Obj(m) = rec else { continue };
+                let none = m.into_iter().map(|(k, v)| (k, if v.is_null() { v } else { Value::from(crate::seal::INHERITED) })).collect();
+                store::put(st, crate::xpack::inference::SECRETS, &id, Value::Obj(none), now)?;
+            }
             let m = obj! {
                 "cluster" => me,
                 "parent" => parent,

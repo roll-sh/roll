@@ -523,6 +523,9 @@ function Form({
             <Choice value={s.egress_forks ?? "roll"} options={["roll", "open"]} onChange={(v) => set("egress_forks", v)} labels={{ roll: "Roll only", open: "Anything" }} />
           </Field>
         )}
+        <Field group label="A fork's preview's data" note="A pull request from a fork runs only once a writer approves its head, and masks hide only the columns you named. Structure only by default: its branches have your tables without their rows (Redis, buckets and search are left out).">
+          <Choice value={s.data_forks ?? "schema"} options={["schema", "same"]} onChange={(v) => set("data_forks", v)} labels={{ schema: "Structure only", same: "Same as yours" }} />
+        </Field>
         {(s.egress === "roll" || (s.egress_forks ?? "roll") === "roll") && (
           <Field group label="Allowed outside hosts" note="With roll only (for every preview, or a fork's), the hosts outside roll its code may still reach, through a proxy that refuses anything else (api.stripe.com, or *.sentry.io for its subdomains). What it refused is in the preview's activity.">
             <input value={egressHosts} onChange={(e) => setEgressHosts(e.target.value)} placeholder="api.stripe.com, *.sentry.io" className={`${field} h-8 w-full font-mono text-[12px]`} spellCheck={false} />

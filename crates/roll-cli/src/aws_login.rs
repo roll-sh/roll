@@ -95,7 +95,7 @@ fn profile_name() -> String {
 }
 
 fn home_file(var: &str, rel: &str) -> Option<std::path::PathBuf> {
-    env(var).map(Into::into).or_else(|| env("HOME").map(|h| std::path::Path::new(&h).join(rel)))
+    env(var).map(Into::into).or_else(|| crate::sys::home().map(|h| h.join(rel)))
 }
 
 fn config_file() -> Option<std::path::PathBuf> {

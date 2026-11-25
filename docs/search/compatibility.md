@@ -524,6 +524,22 @@ repository is refused as on Elasticsearch ("cannot create snapshot in a readonly
 The `watcher` suite's webhooks and `http` inputs call the node itself: its test cluster sets
 `roll.watcher.allow_private_hosts` (a roll-only option in `extended.txt`), which nothing else does.
 
+A watch's HTTP requests keep their secrets sealed (architecture.md, "Secrets a cluster stores"):
+`GET _watcher/watch`, `_execute` and the records in `.watcher-history-*` show `::es_redacted::`
+for the password, every header but `Content-Type`, `Content-Length`, `Content-Encoding`,
+`Accept`/`Accept-*`, `User-Agent`, `Cache-Control` and `If-*`, the URL's path and params, and a body
+that names a credential (`routing_key`, `token`, `password`, …). Elasticsearch shows only the
+password and `Authorization` redacted. So a watch read back with `GET` and put again unchanged is
+refused (400 `found a redacted value in field [path]`) unless the update says `if_seq_no` and
+goes to the same scheme, host and port, when each redacted value keeps the stored one, as the
+password does on Elasticsearch. The watcher suites pass as before (89 and 9).
+
+Watch records (`.watcher-history-*`) are reached only by a grant that names them (`.watch*`,
+`.watcher-history-*`, Elasticsearch's watcher roles) or that allows restricted indices, through an
+alias too: on Elasticsearch a grant of `*` reaches them. `_update_by_query` drops a
+`semantic_text` field's embeddings when its script changes the field's text, as `_update` does,
+so they're made again from the new text, never left embedding the old one.
+
 The security audit log (README, "Audit log") writes Elasticsearch's entries: event names, field
 names and order, and the shapes of `security_config_change` entries (`put_user` with
 `has_password`, `put_role` with the normalized `role_descriptor`, `create_apikey` with its

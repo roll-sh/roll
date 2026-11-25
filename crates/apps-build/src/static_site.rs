@@ -17,7 +17,7 @@ const MAX_CONFIG: usize = 64 << 10;
 /// `_redirects` and `_headers` (as those lines; the configs themselves never go into the image),
 /// with notes on what was taken and left out. None: neither says anything.
 pub(crate) fn config_rules(tree: &dyn Tree, notes: &mut Vec<String>) -> Option<String> {
-    let (mut redirects, mut headers) = (String::new(), String::new());
+    let (mut redirects, mut headers, mut site) = (String::new(), String::new(), String::new());
     for (name, convert) in [("netlify.toml", crate::site_configs::from_netlify as fn(&str) -> crate::site_configs::Converted), ("vercel.json", crate::site_configs::from_vercel)] {
         let Some(text) = tree.read(name).filter(|t| t.len() <= MAX_CONFIG) else { continue };
         let c = convert(&String::from_utf8_lossy(&text));
@@ -28,8 +28,12 @@ pub(crate) fn config_rules(tree: &dyn Tree, notes: &mut Vec<String>) -> Option<S
         for why in c.skipped.iter().take(20) {
             notes.push(format!("not taken from {why}"));
         }
+        if !c.site.is_empty() {
+            notes.push(format!("{name}: {}", c.site.lines().collect::<Vec<_>>().join(", ")));
+        }
         redirects.push_str(&c.redirects);
         headers.push_str(&c.headers);
+        site.push_str(&c.site);
     }
     // printf's own escapes, in single quotes: no line break, quote or `%` reaches the Dockerfile.
     let quoted = |s: &str| format!("'{}'", s.replace('\\', "\\\\").replace('%', "%%").replace('\n', "\\n").replace('\r', "").replace('\'', "'\\''"));
@@ -39,6 +43,10 @@ pub(crate) fn config_rules(tree: &dyn Tree, notes: &mut Vec<String>) -> Option<S
     }
     if !headers.is_empty() {
         cmds.push(format!("printf {} >> {ROOT}/_headers", quoted(&format!("\n{headers}"))));
+    }
+    // The site's own settings (`trailingSlash`, `cleanUrls`): roll's file, never served.
+    if !site.is_empty() {
+        cmds.push(format!("printf {} >> {ROOT}/_roll", quoted(&site)));
     }
     (!cmds.is_empty()).then(|| cmds.join(" && "))
 }

@@ -239,15 +239,19 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   is now and put back later, after a test run, a demo or an agent changed it. `POST
   …/restore-points` `{label?}` saves one: a copy-on-write branch of each branch whose product
   puts a branch back in place (`Brancher::restores`: Postgres, pg-control's reset with `from`,
-  so the branch keeps its endpoint, `DATABASE_URL` and role), at most 3 per preview. `POST
+  so the branch keeps its endpoint, `DATABASE_URL` and role; NoSQL, a zero-copy branch cut at a
+  whole second, put back by NoSQL's point-in-time restore of the preview's own branch to that
+  second, in place with the same id, endpoint and credentials, within its 7 days of history:
+  what was written in the fraction of a second before saving isn't in the point), at most 3 per
+  preview. `POST
   …/restore-points/{point}/restore` puts the data back on the next converge, as a reset does:
   the services sleep meanwhile, and the seed doesn't run again (the point holds what it made).
   A point is masked as the branch was. New masking rules delete the points masked by the old
   ones, and a point is never put back under rules other than its own. A resource moving to
   structure-only, or no longer wanted, takes its points with it, and the preview's deletion
   deletes them all. Saving and putting back say who asked in its activity. Products that only
-  copy (Redis, search) aren't saved: putting their copy in would change the branch's id, which
-  their delete guards check. The sheet's Data branches has them (Save now, Restore, Delete);
+  copy (Redis, search, streams) aren't saved: putting their copy in would change the branch's id,
+  which their delete guards check (Next). The sheet's Data branches has them (Save now, Restore, Delete);
   `roll preview points <id> [--save [label] | --restore <point> | --delete <point>]`. Checked
   live in `scripts/preview-cost.sh` (a table made after the point is gone once it's put
   back, on the same `DATABASE_URL`). Its services sleep for it and, as after a reset, the preview
@@ -279,9 +283,13 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   - `max_bytes` (10 GiB by default) is a cap on the bytes a preview's branches and its earlier
     pushes' copies own. A preview over the cap goes to sleep with `error` and stays asleep until
     resetting it brings it back under or the cap is raised: a wake (`POST …/wake`, the sheet) is
-    a 409, roll apps' services included, and a visit doesn't start its own services. A visit to a
-    roll apps service still wakes it there (roll apps doesn't ask previews; Next).
-    `a_preview_over_its_size_cap_stays_asleep`.
+    a 409, roll apps' services included, and a visit doesn't start its own services. Its roll
+    apps services are kept down there too: their `pv-` environments are paused (`PUT …
+    {paused: true}`, Render's Suspend), so a visit gets roll apps' "Paused" page and wakes
+    nothing, deploys and jobs wait. Under the cap again, its next converge or a wake resumes
+    them (only what previews paused: `held_down`). Live: `scripts/preview-apps.sh` caps a
+    preview's 2 MiB Redis copy at 1 MiB, a visit to its service answers 503, and a wake under a
+    raised cap lifts the pause. `a_preview_over_its_size_cap_stays_asleep`.
 
 ### Converging
 
@@ -788,6 +796,14 @@ previews' code may reach:
   `egress_forks`, which holds only its server. A policy of the page's own still applies (a
   browser keeps both); a navigation away isn't something a policy can stop. Previews' own proxy
   only so far: roll apps' for its forks is next (Next). `runtime::tests::service_hosts_reach_their_containers`.
+- `data_forks`: what a fork's preview's data is. It's `"schema"` by default: its branches hold the
+  structure without the rows (Postgres' schema, NoSQL's tables, streams' topics, queues' and
+  tasks' definitions), whatever the project's own previews get, and a kind that can't be
+  structure-only (Redis, buckets, search) is left out, its variables blank. A fork's code is
+  approved to run, not read for what it does with the rows it can see, and masks only hide the
+  columns someone named. `"same"` gives it what the project's own previews get, masked the same.
+  A fork's seed still fills its structure. Changing it reaches a fork's existing previews at their
+  next converge, which makes their branches again. `a_forks_preview_gets_the_datas_structure_only`.
 - `egress_forks`: what a fork's preview reaches when `egress` is `"open"`. It's `"roll"` by
   default, with `egress_hosts` still allowed through the proxy; `"open"` lets it reach what the
   project's own previews do. A fork's head runs only once a writer approves it, but an approval
@@ -1936,7 +1952,7 @@ previews in it), the operator and admins see every project.
 | `POST /v1/previews/{id}/wake` | | `Preview`: start its services now |
 | `POST /v1/previews/{id}/reset` | `{resources?: ["postgres:prj_…"]}` | `Preview`: re-branch from the parents |
 | `GET /v1/previews/{id}/restore-points` | | `{points: [{id, label, by, at, data}], max}`: oldest first, `data` the resources it holds (`postgres:prj_…`) |
-| `POST /v1/previews/{id}/restore-points` | `{label?}` (one line, 60 characters at most) | 201 `{id, label, by, at, data}`: its Postgres data saved now; 409 while it isn't ready, past `max`, or with nothing to save |
+| `POST /v1/previews/{id}/restore-points` | `{label?}` (one line, 60 characters at most) | 201 `{id, label, by, at, data}`: its Postgres and NoSQL data saved now; 409 while it isn't ready, past `max`, or with nothing to save |
 | `POST /v1/previews/{id}/restore-points/{point}/restore` | | `Preview`: the data put back as the point left it, on its next converge (no seed); `delete`, as a reset is |
 | `DELETE /v1/previews/{id}/restore-points/{point}` | | 204 |
 | `GET /v1/previews/{id}/screenshot` | | `image/png`: the first service's page at the preview's head (404 when it has none); `?previous=1` the one before, `?view=phone` at a phone's width, `?base=1` the default branch's preview's, `?page=/pricing` another of `github.pages`, `?diff=base` or `?diff=previous` where it differs from that one or the one before (the page faded, changed pixels marked red) |
@@ -2041,7 +2057,7 @@ type Preview = {
   slower_routes?: { branch: string; routes: { name: string; count: number; p50_ms: number; main_p50_ms: number; grew?: GrewSpan | null; budget_ms?: number | null }[] } | null;
   new_errors?: { branch: string; total: number; errors: { service: string; title: string }[] } | null;
   served_secrets?: { key: string; path: string }[]; // its secret values its pages serve at its head: names and where, never values
-  skipped?: { pages?: string[]; stories?: number; first_stories?: string[] }; // what its latest screenshot run left out at its head: pages past a run's ten, stories it didn't take (the first 10 by id)
+  skipped?: { pages?: string[]; stories?: number; first_stories?: string[]; by_files?: true }; // what its latest screenshot run left out at its head: pages past a run's ten, stories it didn't take (the first 10 by id); by_files: it chose them by the change's files alone, its Storybook serving no module graph (--stats-json)
   regressions?: "check" | "required" | null;
   regressions_accepted?: { head: string; by: string; at: number } | null;
   regressions_compared?: boolean;     // compared with main's preview at its head (errors; routes too with traces)
@@ -2086,6 +2102,7 @@ type Settings = {
   egress: "open" | "roll";            // what its services' code may reach: anything ("open"), or only roll's products on a network with no route out (see "Egress")
   egress_hosts?: string[];            // with "roll" (or egress_forks "roll", for forks): hosts outside roll still reachable through its egress proxy (api.stripe.com, *.sentry.io; at most 20)
   egress_forks: "roll" | "open";      // what a fork's preview reaches when egress is "open" (default "roll")
+  data_forks: "schema" | "same";      // a fork's preview's data: its structure without rows (default), or what the project's own get
   warm: boolean;                      // wake the change's services as soon as a new head is deployed (true)
   crons: boolean;                     // roll apps' crons and scheduled commands run on their schedule in previews (false)
   regressions: "off" | "check" | "required";   // roll/regressions against main's preview: posted (check), or a blocker (required) ("off")
@@ -2308,7 +2325,11 @@ type Settings = {
     root holds something (3 s at most), and captured clipped to what it rendered (an 8 px margin,
     at most 1280 by 2000; 256 KiB a PNG), 100 s in all. Each is a page of its own (`story:<id>`,
     "Stories" on the sheet, labelled `button / primary`), with what went wrong while it rendered,
-    compared with main's same story and reviewed like a page. A story gone from Storybook goes
+    compared with main's same story and reviewed like a page. Each is checked with axe as a page
+    is (Chromatic's accessibility tests: its rules, its language and title), while more than 30 s
+    of the run are left so a big Storybook still gets its pictures, 8 KB of it at most; what it
+    adds against main's same story counts like a page's (`a11y_added`). Live: the live
+    Storybook's stories carry it. A story gone from Storybook goes
     from the preview. The index is the preview's code's: an id Storybook wouldn't make
     (`components-button--primary`) is dropped. A Storybook on another service is kept with that
     service's pages while it runs what it ran (TurboSnap), and taken at once when the rule is
@@ -2852,23 +2873,24 @@ comments, Render and Railway, Neon, Chromatic and Percy, Signadot, Jam.
 2. **The stories a change touched, by the module graph, in review**: a story that imports a changed
    file from anywhere comes after those whose own file changed (Storybook's `preview-stats.json`
    when the build has it; files alone without), and a built Storybook's stories run live in a
-   real browser for the first time. Next for it: a `storybook dev` server has no stats file, so
-   say on the sheet when a run ordered by files alone.
+   real browser for the first time (#1014). In review: a run that chose by files alone (no stats
+   file, as from `storybook dev`) and left stories says so on the sheet (`skipped.by_files`),
+   with how to give it the graph.
 3. **A note in one click, in review**: the button's note opens a small window of roll's with its
    form alone, which posts and closes (`/dashboard/previews/note`); a phone keeps the dashboard
    in a tab. Next for it: a reply and a resolve from the page the same way.
 4. **Sleeping previews cost the control plane, in review**: a settled sleeping preview converges
    whole hourly (`settled_every`), its usage read alone every 5 minutes in between. Next for it:
    a running preview that's settled could do the same between its health and route reads.
-5. **A fork's preview on roll apps**: its services' pages the same Content-Security-Policy as on
-   previews' own proxy (roll apps' proxy adds it for a `pv-` environment previews marks
-   untrusted), and a `data_forks` rule (a fork's data `schema` unless the project says
-   otherwise), as `egress_forks` is for its server.
-6. **A capped preview's roll apps service**: a visit to it still wakes it there (roll apps wakes
-   it itself); previews tells roll apps to keep it down while it's over its cap.
-7. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
-   is kept only where the product puts a branch back in place, keeping its id (their delete
-   guards check it); each needs its control plane's reset `from`, as pg-control's.
+5. **A fork's preview on roll apps, in review**: a `data_forks` rule, a fork's data its structure
+   only unless the project says `same`. Its services' pages get the same Content-Security-Policy
+   as on previews' own proxy from roll apps' proxy (its #1032; previews' live check in review).
+6. **A capped preview's roll apps service, in review**: its `pv-` environment paused while the
+   preview's over its cap, resumed under it.
+7. **Restore points for the products that only copy**: NoSQL's in review (its point-in-time
+   restore in place, to the second its point was cut at). Redis, search and streams: a point is
+   kept only where the product puts a branch back in place, keeping its id (their delete guards
+   check it); each needs its control plane's reset `from`, as pg-control's.
 8. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start

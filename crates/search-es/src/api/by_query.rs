@@ -1349,7 +1349,16 @@ pub async fn update_by_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
                                     }
                                     continue;
                                 }
-                                Op::Index(src, _, _, _, _) => Bytes::from(src),
+                                // `semantic_text` fields whose text the script changed lose their
+                                // embeddings, as `_update` drops them: embedded again as the
+                                // document is written, never left embedding the old text.
+                                Op::Index(src, _, _, _, _) => {
+                                    let src = Bytes::from(src);
+                                    match d.source.as_deref().and_then(|old| crate::xpack::inference::semantic::drop_stale(&d.index.mapping, old, &src)) {
+                                        Some(b) => b,
+                                        None => src,
+                                    }
+                                }
                             },
                             None => d.source.clone().unwrap_or_else(|| Bytes::from_static(b"{}")),
                         };

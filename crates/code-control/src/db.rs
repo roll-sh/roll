@@ -87,6 +87,14 @@ CREATE TABLE IF NOT EXISTS changes (
 CREATE INDEX IF NOT EXISTS changes_repo_state ON changes (repo_id, state, number);
 CREATE INDEX IF NOT EXISTS changes_branch ON changes (repo_id, branch);
 CREATE INDEX IF NOT EXISTS changes_work ON changes (work_item);
+-- Changesets someone who can't push wrote (MCP's lockdown, `Code::outside_at`): what a fork's
+-- pull request brought in (each import's new commits), an untrusted change's own writes, and the
+-- queue's tips built on one. Kept for good: a revision stays its author's after a revise.
+CREATE TABLE IF NOT EXISTS outside_changesets (
+    repo_id TEXT NOT NULL,
+    changeset TEXT NOT NULL,
+    PRIMARY KEY (repo_id, changeset)
+);
 CREATE TABLE IF NOT EXISTS change_revisions (
     change_id TEXT NOT NULL,
     revision INTEGER NOT NULL,
@@ -501,6 +509,14 @@ impl Db {
         // Old tokens get an id (idempotent: only rows without one), then ids are unique.
         sql.execute("UPDATE owner_tokens SET id = 'tok_' || substr(hash, 1, 14) WHERE id IS NULL", ())?;
         sql.ensure_schema("CREATE UNIQUE INDEX IF NOT EXISTS owner_tokens_id ON owner_tokens (id)")?;
+        // Databases from before `outside_changesets`: every revision of an untrusted change is one.
+        sql.migrate("outside_changesets_from_revisions", |c| {
+            c.execute(
+                "INSERT INTO outside_changesets (repo_id, changeset) SELECT c.repo_id, r.head FROM change_revisions r JOIN changes c ON c.id = r.change_id WHERE c.trusted = 0 ON CONFLICT (repo_id, changeset) DO NOTHING",
+                (),
+            )?;
+            Ok(())
+        })?;
         // `required_checks` was the queue's old name.
         sql.execute("UPDATE repos SET land_policy = 'queue' WHERE land_policy = 'required_checks'", ())?;
         Ok(Db { sql })
@@ -1257,10 +1273,30 @@ impl Db {
         Ok(ahead as u64 + 1)
     }
 
-    /// The heads of a repo's changes from outside it (a fork's pull requests, `trusted = 0`), the
-    /// newest `limit`, in any state: what a read at a revision checks (MCP's lockdown).
-    pub fn untrusted_heads(&self, repo_id: &str, limit: usize) -> Result<Vec<String>> {
-        Ok(self.sql.query("SELECT head FROM changes WHERE repo_id = ? AND trusted = 0 ORDER BY number DESC LIMIT ?", params![repo_id, crate::db::limit(limit)], |r| r.get(0))?)
+    /// Records `changesets` (`cs_…`) as written by someone who can't push (MCP's lockdown).
+    pub fn mark_outside(&self, repo_id: &str, changesets: &[String]) -> Result<()> {
+        if changesets.is_empty() {
+            return Ok(());
+        }
+        self.write(|c| {
+            for cs in changesets {
+                c.execute("INSERT INTO outside_changesets (repo_id, changeset) VALUES (?, ?) ON CONFLICT (repo_id, changeset) DO NOTHING", params![repo_id, cs])?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Which of `changesets` (`cs_…`) someone who can't push wrote.
+    pub fn outside_of(&self, repo_id: &str, changesets: &[String]) -> Result<std::collections::HashSet<String>> {
+        let mut out = std::collections::HashSet::new();
+        for chunk in changesets.chunks(200) {
+            let marks = vec!["?"; chunk.len()].join(", ");
+            let mut args: Vec<String> = vec![repo_id.to_string()];
+            args.extend(chunk.iter().cloned());
+            let rows: Vec<String> = self.sql.query(&format!("SELECT changeset FROM outside_changesets WHERE repo_id = ? AND changeset IN ({marks})"), args, |r| r.get(0))?;
+            out.extend(rows);
+        }
+        Ok(out)
     }
 
     /// An open (or queued) change whose head is `head`.

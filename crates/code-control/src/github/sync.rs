@@ -130,7 +130,7 @@ async fn import(code: &Arc<Code>, hub: &Hub, repo_id: &str) -> Result<()> {
     let prs = hub.client.list_pull_requests(link.installation_id, &link.owner, &link.repo, "open").await.map_err(gh)?;
     let drafts: Vec<ChangeDraft> = prs.iter().map(mapping::pull_request_draft).collect();
     let missing: Vec<String> = drafts.iter().map(|d| d.head_sha.clone()).collect();
-    ensure_commits(code, hub, &r, &link, &missing).await?;
+    let _ = ensure_commits(code, hub, &r, &link, &missing).await?;
     for d in &drafts {
         if let Err(e) = upsert_pr(code, hub, &r, &link, d).await {
             tracing::warn!(repo = %r.full_name(), pr = d.github_pr, error = %e, "importing pull request");
@@ -186,7 +186,9 @@ fn topo_order(commits: Vec<(ObjectId, Bytes)>) -> Vec<Bytes> {
 }
 
 /// Fetch commits roll doesn't have yet (anything GitHub can reach), with what they need.
-async fn ensure_commits(code: &Code, hub: &Hub, r: &RepoRow, link: &Link, shas: &[String]) -> Result<()> {
+/// Fetch `shas` (and what they need) from GitHub into the store: the changesets it made (`cs_…`),
+/// none when nothing was missing.
+async fn ensure_commits(code: &Code, hub: &Hub, r: &RepoRow, link: &Link, shas: &[String]) -> Result<Vec<String>> {
     let mut wants = Vec::new();
     for s in shas {
         let Some(oid) = oid_hex(s) else { continue };
@@ -195,7 +197,7 @@ async fn ensure_commits(code: &Code, hub: &Hub, r: &RepoRow, link: &Link, shas: 
         }
     }
     if wants.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let haves: Vec<ObjectId> = code.store.refs(&r.id)?.iter().map(|i| ObjectId(i.commit.0)).collect();
     let (url, creds) = credentials(hub, link).await?;
@@ -210,14 +212,30 @@ async fn ensure_commits(code: &Code, hub: &Hub, r: &RepoRow, link: &Link, shas: 
     }
     let mut objects = rest;
     objects.extend(topo_order(commits).into_iter().map(|d| (Kind::Commit, d)));
-    code.store.import_git(&r.id, objects).await?;
-    Ok(())
+    let report = code.store.import_git(&r.id, objects).await?;
+    Ok(report.commits.iter().map(|(_, cs)| cs_id(cs)).collect())
 }
 
 async fn changeset_for(code: &Code, hub: &Hub, r: &RepoRow, link: &Link, sha: &str) -> Result<ChangesetId> {
-    ensure_commits(code, hub, r, link, &[sha.to_string()]).await?;
+    changeset_and_new(code, hub, r, link, sha).await.map(|(cs, _)| cs)
+}
+
+/// [`changeset_for`], and the changesets fetching it made.
+async fn changeset_and_new(code: &Code, hub: &Hub, r: &RepoRow, link: &Link, sha: &str) -> Result<(ChangesetId, Vec<String>)> {
+    let new = ensure_commits(code, hub, r, link, &[sha.to_string()]).await?;
     let oid = oid_hex(sha).ok_or_else(|| Error::Invalid(format!("bad commit id {sha}")))?;
-    code.store.changeset_of_git(&r.id, &oid)?.ok_or_else(|| Error::NotFound(format!("commit {sha}")))
+    let cs = code.store.changeset_of_git(&r.id, &oid)?.ok_or_else(|| Error::NotFound(format!("commit {sha}")))?;
+    Ok((cs, new))
+}
+
+/// A fork's pull request's head: what fetching it brought in is the fork's (MCP's lockdown),
+/// every commit of it, not just the head.
+async fn fork_changeset(code: &Code, hub: &Hub, r: &RepoRow, link: &Link, sha: &str, fork: bool) -> Result<ChangesetId> {
+    let (cs, new) = changeset_and_new(code, hub, r, link, sha).await?;
+    if fork {
+        code.db.mark_outside(&r.id, &new)?;
+    }
+    Ok(cs)
 }
 
 // ── work items and changes from issues and PRs ──
@@ -326,7 +344,7 @@ pub(crate) async fn upsert_pr(code: &Code, hub: &Hub, r: &RepoRow, link: &Link, 
     let title: String = d.title.chars().take(300).collect();
     let id = match (d.state, existing) {
         (PrState::Open, None) => {
-            let cs = changeset_for(code, hub, r, link, &d.head_sha).await?;
+            let cs = fork_changeset(code, hub, r, link, &d.head_sha, !same_repo).await?;
             let input = json!({
                 "title": title,
                 "body": d.body,
@@ -339,7 +357,7 @@ pub(crate) async fn upsert_pr(code: &Code, hub: &Hub, r: &RepoRow, link: &Link, 
             code.create_change_as(r, &Caller::Admin, &input, branch, same_repo).await?.id
         }
         (PrState::Open, Some(c)) => {
-            let cs = changeset_for(code, hub, r, link, &d.head_sha).await?;
+            let cs = fork_changeset(code, hub, r, link, &d.head_sha, !same_repo).await?;
             if c.state == ChangeState::Closed {
                 code.db.set_change_state(&c.id, ChangeState::Open, None, None)?;
             }
@@ -407,7 +425,7 @@ pub(super) async fn handle_push(code: &Arc<Code>, hub: &Hub, r: &RepoRow, link: 
         return match &p.after {
             None => Ok(code.store.update_ref(&r.id, &name, Expect::Any, None).await?),
             Some(after) => {
-                ensure_commits(code, hub, r, link, std::slice::from_ref(after)).await?;
+                let _ = ensure_commits(code, hub, r, link, std::slice::from_ref(after)).await?;
                 let oid = oid_hex(after).ok_or_else(|| Error::Invalid(format!("bad object id {after}")))?;
                 match code.store.changeset_of_git(&r.id, &oid)? {
                     Some(cs) => Ok(code.store.update_ref(&r.id, &name, Expect::Any, Some(cs)).await?),
