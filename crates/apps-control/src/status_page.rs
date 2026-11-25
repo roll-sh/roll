@@ -121,20 +121,28 @@ impl Apps {
         }
     }
 
-    /// The open incidents a check or heartbeat opened that nothing will close any more: its
-    /// check or heartbeat gone, off the page, its environment paused or in maintenance, its
-    /// service deleted. Resolved by the service's owner (anyone's, for a deleted one).
     /// Scheduled maintenances whose window began (now `maintenance`) or ended (`resolved`),
-    /// each said on its page as an update. Run with [`Self::status_sweep`], every minute.
+    /// each said on its page as an update. Run with [`Self::status_sweep`], every minute, on one
+    /// node (`singleton:apps:maintenance`), and each step written only from the state it
+    /// expects, so a node that raced it or a person's update in between makes no second step.
     pub(crate) async fn maintenance_pass(self: &Arc<Self>, now: i64) {
+        if !self.deps.cluster.singleton("apps:maintenance") {
+            return;
+        }
         let Ok(due) = self.db(move |s| s.due_maintenance(now)).await else { return };
         for (project, id, next) in due {
-            let text = if next == "maintenance" { "The scheduled maintenance has begun." } else { "The scheduled maintenance is over." };
-            let _ = self.db(move |s| s.update_incident(&project, Some(&id), None, next, text, now)).await;
-            self.status_cache.forget();
+            let (from, text) = if next == "maintenance" { ("scheduled", "The scheduled maintenance has begun.") } else { ("maintenance", "The scheduled maintenance is over.") };
+            // One that hasn't begun yet and is already over goes straight to resolved.
+            let from = if next == "resolved" { None } else { Some(from) };
+            if self.db(move |s| s.advance_maintenance(&project, &id, from, next, text, now)).await.unwrap_or(false) {
+                self.status_cache.forget();
+            }
         }
     }
 
+    /// The open incidents a check or heartbeat opened that nothing will close any more: its
+    /// check or heartbeat gone, off the page, its environment paused or in maintenance, its
+    /// service deleted. Resolved by the service's owner (anyone's, for a deleted one).
     pub(crate) async fn status_sweep(self: &Arc<Self>, services: &[crate::store::ServiceRow]) {
         let Ok(open) = self.db(|s| s.open_auto_incidents()).await else { return };
         let mut by_project: std::collections::HashMap<String, Vec<String>> = Default::default();
@@ -234,6 +242,14 @@ impl Apps {
     /// `resolved` closes it.
     pub async fn update_incident(self: &Arc<Self>, project: &str, id: &str, body: Value) -> Result<()> {
         let (_, state, text) = incident_fields(&body, false)?;
+        // Under way is a scheduled maintenance's: an incident without a window would say
+        // "Under scheduled maintenance" with nothing to end it.
+        if state == "maintenance" {
+            let (p, i) = (project.to_string(), id.to_string());
+            if !self.db(move |s| s.incident_has_window(&p, &i)).await? {
+                return Err(Error::BadRequest("maintenance is a scheduled maintenance's state: post one with state scheduled, starts_at and ends_at".into()));
+            }
+        }
         let (p, i, at) = (project.to_string(), id.to_string(), code_sql::now_ms());
         match self.db(move |s| s.update_incident(&p, Some(&i), None, &state, &text, at)).await? {
             true => {

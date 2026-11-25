@@ -709,6 +709,14 @@ impl Runtime for Docker {
         docker(&["image", "inspect", "-f", "{{.Size}}", image]).await.ok().and_then(|s| s.trim().parse().ok())
     }
 
+    async fn image_ports(&self, image: &str) -> Vec<u16> {
+        let Ok(text) = docker(&["image", "inspect", "-f", "{{json .Config.ExposedPorts}}", image]).await else { return Vec::new() };
+        let v: serde_json::Value = serde_json::from_str(text.trim()).unwrap_or_default();
+        let mut ports: Vec<u16> = v.as_object().into_iter().flatten().filter_map(|(k, _)| k.strip_suffix("/tcp").and_then(|p| p.parse().ok())).collect();
+        ports.sort();
+        ports
+    }
+
     async fn image_id(&self, image: &str) -> Option<String> {
         docker(&["image", "inspect", "-f", "{{.Id}}", image]).await.ok().map(|s| s.trim().to_string()).filter(|s| s.starts_with("sha256:"))
     }
