@@ -459,6 +459,42 @@ impl Template {
         &self.source
     }
 
+    /// Every tag the template holds, in order, nested ones after their section's: its kind
+    /// (`value` an escaped `{{x}}`, `raw` an unescaped `{{{x}}}` or `{{&x}}`, `section`,
+    /// `inverted`, `toJson`, `join`, `url`) and its name. Comments aren't tags. For callers that
+    /// build templates from data and allow only some tags.
+    pub fn tags(&self) -> Vec<(&'static str, String)> {
+        let mut out = Vec::new();
+        let mut stack: Vec<&[Code]> = vec![&self.codes];
+        while let Some(cs) = stack.pop() {
+            for c in cs {
+                match &c.kind {
+                    Kind::Write(_) | Kind::Comment => {}
+                    Kind::Value { name, encoded: true } => out.push(("value", name.clone())),
+                    Kind::Value { name, encoded: false } => out.push(("raw", name.clone())),
+                    Kind::Section { name, codes } => {
+                        out.push(("section", name.clone()));
+                        stack.push(codes);
+                    }
+                    Kind::Inverted { name, codes } => {
+                        out.push(("inverted", name.clone()));
+                        stack.push(codes);
+                    }
+                    Kind::ToJson { var } => out.push(("toJson", var.clone())),
+                    Kind::Join { var, codes, .. } => {
+                        out.push(("join", var.clone()));
+                        stack.push(codes);
+                    }
+                    Kind::Url { codes } => {
+                        out.push(("url", String::new()));
+                        stack.push(codes);
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Renders with JSON params (converted like Elasticsearch parses them: `HashMap`s).
     pub fn render_json(&self, params: &serde_json::Value) -> Result<String, ScriptError> {
         let run = || {

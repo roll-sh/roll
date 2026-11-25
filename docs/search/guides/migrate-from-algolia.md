@@ -104,6 +104,51 @@ await client.searchTemplate({ index: "products", id: "products-search", params }
 
 The review lists every mapped rule in a note that says this.
 
+### Filter the results
+
+Pass one Elasticsearch query as `filters` to filter what the template returns (facet filters,
+ranges, anything a `bool` filter takes):
+
+```json
+{"id": "products-search", "params": {"query": "kettle", "filters": {"term": {"brand.keyword": "Acme"}}}}
+```
+
+Build `filters` in your backend, as an object. Never pass a string or an object that came from the
+browser: whoever sends `filters` decides what the search may return.
+
+Pins follow Algolia's rule: a rule's promoted records show whatever the filters say, unless the
+rule set `filterPromotes`, whose pins show only when they match the filters too (they're kept in
+their own rulesets, `<index>-rules-filtered`).
+
+### Rules that filter or rewrite the query
+
+Elasticsearch's query rules only pin and exclude documents, and a Mustache template can't compare
+the query with a pattern. So an Algolia rule whose consequence sets `params.filters`,
+`facetFilters`, `numericFilters` or a `query` (a new query, or edits) becomes a search template
+of its own, `<index>-search-rule-<rule>`: the default template with the rule's filter added and
+its query used. The review, and the index's `_meta.roll_import.rule_templates`, list each with
+its condition (`anchoring` and `pattern`). Your client picks the template when the query meets
+the condition:
+
+```js
+const rules = (await client.indices.getMapping({ index: "products" })).products.mappings._meta.roll_import.rule_templates;
+const hit = rules.find((r) => (r.anchoring === "is" ? q === r.pattern : r.anchoring === "contains" ? q.includes(r.pattern) : false));
+await client.searchTemplate({ index: "products", id: hit?.template ?? "products-search", params: { query: q } });
+```
+
+Query edits (`remove`, `replace`) are applied to the pattern when the rule's anchoring is `is`,
+where the query's text is known; on other anchorings they're listed. Algolia's filter syntax
+maps to Elasticsearch queries: `attr:value` and `attr:"a value"` (on the exact field), `attr <
+10` and the other comparisons, `attr:10 TO 20`, `AND`, `OR`, `NOT` and parentheses; facet and
+numeric filter lists (inner lists are ORs, a leading `-` negates). A facet value stays as written
+(`zip:02139`). Filter scores, optional filters, a filter with `{` or `}`, and lists of more than
+100 entries are listed.
+
+Every template roll builds is checked before it's stored: it must compile as Mustache and hold
+only roll's own tags (`query`, `rules_query`, `context`, `filters`), stay under 65,535 bytes, and
+keep a rule's filter under 1,024 clauses. A template that fails isn't made, and the review says
+why.
+
 Plain searches work too. The index's default fields (`index.query.default_field`) are the
 source's searchable attributes, so a `multi_match` or `query_string` without `fields` searches
 them with the same weights. The synonyms apply to every search, through the index's search
@@ -135,6 +180,8 @@ analyzer.
 | Rules: conditions | Query rule criteria on the query text, lowercased: `is` is `exact`, `startsWith` is `prefix`, `endsWith` is `suffix`, `contains` is `contains`, no pattern is `always`. A `context` is a criterion on the search's `context`. Matching is case-sensitive (see [above](#query-rules-match-the-text-as-sent)). |
 | Rules: `promote` | A `pinned` rule. Pinned documents go to the top in their order (positions aren't kept, noted). |
 | Rules: `hide` | An `exclude` rule (`<rule>-exclude`). |
+| Rules: `filterPromotes` | The rule's pins in `<index>-rules-filtered`, which apply inside the template's `filters`. |
+| Rules: `params.filters`, `facetFilters`, `numericFilters`, `query` | A search template of the rule's own (see [above](#rules-that-filter-or-rewrite-the-query)). Other parameters are listed. |
 | Replicas | Sorts on the one index, each a search template `<index>-search-<replica>` (see below). |
 
 #### Replicas
@@ -167,6 +214,8 @@ sorts no differently from its primary is listed as not mapped.
 | Overrides: `rule.query` with `match` | Criteria `exact` or `contains` on the query text. |
 | Overrides: `includes` | A `pinned` rule (in position order). |
 | Overrides: `excludes` | An `exclude` rule. |
+| Synonym sets (Typesense 29: `synonym_sets` in the schema, `/synonym_sets/<name>`) | Read with the collection's own synonyms, mapped the same way. |
+| Curation sets (Typesense 30: `curation_sets` in the schema, `/curation_sets/<name>`) | Read with the collection's own overrides, mapped the same way. |
 
 ### Meilisearch
 
@@ -192,10 +241,11 @@ Each of these is listed in the review, with the reason, when the source sets it:
   `proximity`, `attribute`, `exactness`) have no Elasticsearch equivalent. roll ranks by BM25
   relevance, then by the custom ranking as a sort. Expect the order of results to differ
   somewhat: try the queries that matter on a [branch](../README.md) and tune the template.
-- **Algolia rule consequences other than promote and hide**: `params` (filters, query edits,
-  search parameters), `userData`, `filterPromotes`, validity periods, and conditions with a
-  `{facet:…}` placeholder or on filters. A rule that only does these isn't made. A rule that
-  also promotes or hides keeps those parts, and the rest is listed.
+- **Algolia rule consequences roll can't say**: search parameters other than filters and the
+  query (`aroundLatLng`, `hitsPerPage` …), query edits on a pattern that isn't `is`, filter
+  scores, `userData` (no query rule returns data: keep it in your client), validity periods, and
+  conditions with a `{facet:…}` placeholder or on filters. A rule keeps whatever else it does,
+  and the rest is listed.
 - **Typesense overrides that filter, sort or rewrite** (`filter_by`, `sort_by`,
   `replace_query`, dynamic `{placeholder}` queries, `tags`, effective dates, `metadata`).
 - **Algolia placeholder synonyms**, which match a token in records.
@@ -238,17 +288,70 @@ Limits, each listed when it's reached:
   `roll.reindex.remote.buffer_limit`) is refused rather than read: lower the batch size.
 - A cluster runs at most 2 copies at once (and its owner and the node have limits too). Copies
   past them wait, and the dashboard and `--wait` start them as others end.
-- A copy stops at the first page roll can't write, as Elasticsearch's reindex does. To run it
-  again, pick the same index of the same source (application or URL) with the same copy name:
-  roll copies into the index the earlier attempt made (it's marked `_meta.roll_import`),
-  overwriting documents by id. Documents deleted on the source since aren't deleted on roll.
+- A copy stops at the first page roll can't write, as Elasticsearch's reindex does, and when
+  the source fails a page or the copy is cancelled. It saves its place in the index's
+  `_meta.roll_import` (every 5 seconds while it runs, and when it stops), never a key. Pick the
+  same index of the same source (application or URL) with the same copy name, and the copy
+  resumes there (`full: true`, `--full` or a fresh name copies everything again):
+  - Algolia from its `browse` cursor after the last page written;
+  - Meilisearch from its offset;
+  - Typesense from the line after the last one written. The export has no cursor, so the lines
+    before it are read again and passed over, not written.
+
+  A copy that resumed from an offset or a line can miss records: if the source deleted records
+  below that point meanwhile, the later ones moved down past it. So after such a resume, roll
+  refuses a catch-up with `since_attribute` until one catch-up without it (every record compared)
+  has run, and the refusal says why. A copy from before copies kept their place starts over.
 - A source that sends a cursor it sent before, or more than twice the documents it said it
   holds, is stopped.
 - The search analyzer runs case and accent folding, then the synonyms, then stop words and
   plurals; the review builds it, so a synonym it can't parse shows up there, before anything is
   made.
-- A copy is one point in time. Writes made to the source while it runs may be missed: copy
-  again before you switch, or write to both until the switch.
+- A copy is one point in time: writes made to the source while it runs may be missed. Catch up
+  before you switch (below).
+
+## Catch up and cut over
+
+Once the copy is done, keep the source in use while you check roll, then move over:
+
+1. **Catch up** as often as you like (`"step": "catch_up"`, `--catch-up`, the row's **Catch up**
+   in the dashboard). It reads the source again from the time the copy (or the last catch-up)
+   started, less 5 minutes for clocks that differ, compares each page with what roll holds, and
+   writes only the documents that differ. The task counts them as created, updated, and unchanged
+   (`noops`).
+2. **Stop writing to the source**, then catch up one last time.
+3. **Cut over** (`"step": "cutover"`, `--cutover`, **Cut over**): an alias, the source's index
+   name unless you name another, moves to the copy in one step, from whatever index held it.
+   Clients that search the alias now search the copy. No key is needed: roll doesn't call the
+   source. When indices that aren't roll's imports hold the alias (your own, maybe with a filter
+   or routing), the cutover names them and refuses unless you give `alias` yourself. The answer
+   then lists them as `taken_from_other_indices`. One call moves each alias once.
+
+How much a catch-up reads depends on what the source lets roll ask:
+
+| Source | With `since_attribute` (a numeric attribute your records set when they change) | Without |
+| --- | --- | --- |
+| Algolia | `browse` with `numericFilters: ["<attr> >= <time>"]`: only changed records | Every record, compared |
+| Typesense | the export with `filter_by=<attr>:>=<time>` | Every record, compared |
+| Meilisearch | documents with `filter=<attr> >= <time>` (the attribute must be filterable) | Every record, compared |
+
+`since_unit` says whether the attribute counts seconds (`s`, the default) or milliseconds
+(`ms`) since the epoch. Before a filtered catch-up starts, roll checks that its copy's records
+hold the attribute as numbers of that unit (around 1e9 for seconds, 1e12 for milliseconds), then
+asks the source how many records match. When none does, no task starts, the answer says so, and
+the catch-up time doesn't move. A source that can't filter on the attribute also reads as none:
+Algolia without it in `numericAttributesForFiltering` (when that's set), or Meilisearch without
+it in `filterableAttributes`.
+
+What no catch-up can do:
+
+- **Deletes.** None of the three tells roll what was deleted, so records deleted at the source
+  stay on roll. Delete them on roll yourself, or copy again into a fresh index.
+- **Records changed without touching the attribute.** With `since_attribute`, a record whose
+  attribute wasn't updated isn't read. Without one, every record is read, and changes are found
+  by comparing.
+- **Writes after the last catch-up.** Only a catch-up after the source stops taking writes
+  leaves nothing behind.
 
 ## Security
 

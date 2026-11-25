@@ -151,40 +151,61 @@ pub(crate) async fn plan(f: &mut Fetch<'_>, name: &str) -> Result<Plan, String> 
         p.notes.push("Typesense names the searched fields per request (query_by): the index's default fields are every indexed string field".into());
     }
 
-    // Synonyms: the collection's own (Typesense 28 and older); synonym sets are listed.
-    match f.get_opt(&format!("/collections/{e}/synonyms")).await? {
-        Some(v) => {
-            let all = v["synonyms"].as_array().cloned().unwrap_or_default();
-            if all.len() > MAX_SYNONYMS {
-                p.skip("synonym", format!("{} more", all.len() - MAX_SYNONYMS), format!("an index brings at most {MAX_SYNONYMS} synonyms"));
-            }
-            for s in all.iter().take(MAX_SYNONYMS) {
-                synonym_into(&mut p, s);
-            }
-        }
-        None => {
-            for set in schema["synonym_sets"].as_array().into_iter().flatten().filter_map(Value::as_str) {
-                p.skip("synonym", set, "Typesense synonym sets aren't read yet: copy its rules into the synonyms set");
-            }
+    // Synonyms: the collection's own (Typesense 28 and older) and the synonym sets its schema
+    // names (29 and later); curations likewise: its overrides and its curation sets (30).
+    let mut syns: Vec<Value> = f.get_opt(&format!("/collections/{e}/synonyms")).await?.and_then(|v| v["synonyms"].as_array().cloned()).unwrap_or_default();
+    for set in capped(&mut p, "synonym", names(&schema["synonym_sets"])) {
+        match f.get_opt(&format!("/synonym_sets/{}", urlencoding::encode(&set))).await? {
+            Some(v) => syns.extend(items(&v, &["items", "synonyms"])),
+            None => p.skip("synonym", set, "the synonym set the schema names doesn't exist on the server"),
         }
     }
-    match f.get_opt(&format!("/collections/{e}/overrides")).await? {
-        Some(v) => {
-            let all = v["overrides"].as_array().cloned().unwrap_or_default();
-            if all.len() > MAX_RULES {
-                p.skip("rule", format!("{} more", all.len() - MAX_RULES), "an index brings at most 1,000 rules (10 rulesets of 100)");
-            }
-            for o in all.iter().take(MAX_RULES) {
-                override_into(&mut p, o);
-            }
+    if syns.len() > MAX_SYNONYMS {
+        p.skip("synonym", format!("{} more", syns.len() - MAX_SYNONYMS), format!("an index brings at most {MAX_SYNONYMS} synonyms"));
+    }
+    for s in syns.iter().take(MAX_SYNONYMS) {
+        synonym_into(&mut p, s);
+    }
+    let mut curations: Vec<Value> = f.get_opt(&format!("/collections/{e}/overrides")).await?.and_then(|v| v["overrides"].as_array().cloned()).unwrap_or_default();
+    for set in capped(&mut p, "rule", names(&schema["curation_sets"])) {
+        match f.get_opt(&format!("/curation_sets/{}", urlencoding::encode(&set))).await? {
+            Some(v) => curations.extend(items(&v, &["items", "curations", "overrides"])),
+            None => p.skip("rule", set, "the curation set the schema names doesn't exist on the server"),
         }
-        None => {
-            for set in schema["curation_sets"].as_array().into_iter().flatten().filter_map(Value::as_str) {
-                p.skip("rule", set, "Typesense curation sets aren't read yet");
-            }
-        }
+    }
+    if curations.len() > MAX_RULES {
+        p.skip("rule", format!("{} more", curations.len() - MAX_RULES), "an index brings at most 1,000 rules (10 rulesets of 100)");
+    }
+    for o in curations.iter().take(MAX_RULES) {
+        override_into(&mut p, o);
     }
     Ok(p)
+}
+
+/// The names a schema field lists (`synonym_sets`, `curation_sets`).
+fn names(v: &Value) -> Vec<String> {
+    v.as_array().into_iter().flatten().filter_map(|x| x.as_str().map(str::to_string)).collect()
+}
+
+/// The most synonym or curation sets one schema brings.
+const MAX_SETS: usize = 20;
+
+/// The first [`MAX_SETS`] of a schema's sets; the rest are listed.
+fn capped(p: &mut Plan, kind: &str, sets: Vec<String>) -> Vec<String> {
+    if sets.len() > MAX_SETS {
+        for extra in &sets[MAX_SETS..] {
+            p.skip(kind, extra.clone(), format!("a collection brings at most {MAX_SETS} sets of each kind"));
+        }
+    }
+    sets.into_iter().take(MAX_SETS).collect()
+}
+
+/// A set's entries, under whichever of `keys` the server's version uses (or the set itself, a list).
+fn items(v: &Value, keys: &[&str]) -> Vec<Value> {
+    if let Some(a) = v.as_array() {
+        return a.clone();
+    }
+    keys.iter().find_map(|k| v[*k].as_array().cloned()).unwrap_or_default()
 }
 
 /// A Typesense synonym: multi-way, or one-way from its `root`.
@@ -244,5 +265,5 @@ fn override_into(p: &mut Plan, o: &Value) {
     if !rest.is_empty() {
         p.skip("rule", id.clone(), format!("its includes and excludes are mapped, not {}", rest.join(", ")));
     }
-    push_rules(p, &id, crit, pins, hides);
+    push_rules(p, &id, crit, pins, hides, false);
 }
