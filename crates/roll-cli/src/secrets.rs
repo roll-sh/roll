@@ -886,6 +886,57 @@ pub enum Secrets {
     Mount(mount::Mount),
 }
 
+/// `roll secrets --help`'s headings, each subcommand under one, the most used first. clap lists a
+/// command's subcommands under one heading only, so [`grouped_help`] writes these into the
+/// template; a test fails on a subcommand with no heading.
+pub(crate) const HELP_GROUPS: &[(&str, &[&str])] = &[
+    ("Everyday", &["setup", "ls", "get", "set", "rm", "edit", "import", "export", "render", "check", "scan", "doctor", "find", "totp", "mount", "agent"]),
+    ("Environments and changes", &["envs", "history", "diff", "promote", "rollback", "requests", "expire", "required"]),
+    ("Access", &["tokens", "identities", "reach", "share", "shares", "open", "request", "imports", "exports", "bind", "unbind"]),
+    (
+        "Resources and rotation",
+        &[
+            "rotate", "rotations", "leases", "databases", "aws-roles", "aws-users", "clouds", "saas", "cas", "ssh-cas", "transit", "github-apps", "kubernetes-clusters", "directories", "snowflake", "atlas",
+            "gateways",
+        ],
+    ),
+    ("Syncs", &["syncs", "kubernetes"]),
+    (
+        "Operations",
+        &[
+            "health", "insights", "events", "audit", "sinks", "backup", "backup-schedule", "restore", "keygen", "recover", "purge", "retention", "leaks", "validity-checks", "decoy", "kms", "key", "unseal",
+            "issuer",
+        ],
+    ),
+];
+
+/// `roll secrets`' help with its subcommands under [`HELP_GROUPS`]' headings, written from the
+/// subcommands themselves (their names and first lines), laid out as clap lays out its own list.
+/// One without a heading still shows, under "Other".
+pub fn grouped_help(cmd: clap::Command) -> clap::Command {
+    use std::fmt::Write as _;
+    let styles = cmd.get_styles();
+    let (header, literal) = (styles.get_header(), styles.get_literal());
+    let subs: Vec<&clap::Command> = cmd.get_subcommands().filter(|s| !s.is_hide_set()).collect();
+    let width = subs.iter().map(|s| s.get_name().len()).max().unwrap_or(0);
+    let mut groups: Vec<(&str, Vec<&clap::Command>)> = HELP_GROUPS
+        .iter()
+        .map(|(heading, names)| (*heading, names.iter().filter_map(|n| subs.iter().find(|s| s.get_name() == *n).copied()).collect()))
+        .collect();
+    let other: Vec<&clap::Command> = subs.iter().filter(|s| !HELP_GROUPS.iter().any(|(_, names)| names.contains(&s.get_name()))).copied().collect();
+    groups.push(("Other", other));
+    let mut t = String::from("{before-help}{about-with-newline}\n{usage-heading} {usage}\n");
+    for (heading, list) in groups.iter().filter(|(_, l)| !l.is_empty()) {
+        let _ = write!(t, "\n{header}{heading}:{header:#}\n");
+        for s in list {
+            let about = s.get_about().map(|a| a.to_string()).unwrap_or_default();
+            let _ = writeln!(t, "  {literal}{:width$}{literal:#}  {about}", s.get_name());
+        }
+    }
+    let _ = write!(t, "\n{header}Options:{header:#}\n{{options}}{{after-help}}");
+    cmd.help_template(t)
+}
+
 #[derive(Subcommand)]
 pub enum IssuerCmd {
     /// Start a rotation: the next key is published now and signs two days later. With `--now
