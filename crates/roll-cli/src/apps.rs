@@ -2382,7 +2382,10 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
     let git = git_head(&dir);
     let svc = match (&u.target.service, &link) {
         (Some(_), _) => service(api, &u.target).await?,
-        (None, Some(l)) => api.get(&format!("/v1/apps/services/{}", enc(&s(&l["service"])))).await?,
+        (None, Some(l)) => api.get(&format!("/v1/apps/services/{}", enc(&s(&l["service"])))).await.map_err(|e| {
+            // Linked to a service that's gone: say what brings it back or links another.
+            anyhow::anyhow!("{e:#}\nthis directory is linked (.roll/app.json) to {}, which isn't there: `roll apps restore -s {}` if it was deleted in the last 48 hours, or `roll apps use <name>` to link another", s(&l["service"]), s(&l["service"]))
+        })?,
         (None, None) => {
             // Read here first: a tree nothing builds makes no service (a roll.toml `[app]` can
             // name its builder, so with one it's only said).
@@ -2405,7 +2408,10 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
                     None => s(&api.post("/v1/workspace/projects", json!({ "name": name })).await?["id"]),
                 },
             };
-            let svc = api.post("/v1/apps/services", json!({ "project": project, "name": name, "source": { "kind": "upload" } })).await?;
+            let svc = api.post("/v1/apps/services", json!({ "project": project, "name": name, "source": { "kind": "upload" } })).await.map_err(|e| {
+                // Another machine already made it: link to it rather than make a second.
+                anyhow::anyhow!("{e:#}\nif that's this directory's service made from another machine, `roll apps use {name} -p {project}` links it here")
+            })?;
             eprintln!("made service {} in project {}", s(&svc["name"]), project);
             // What the code talks to, said once: roll apps links the database's variables in.
             let tree = apps_build::DirTree::new(&dir);

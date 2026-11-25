@@ -2236,6 +2236,29 @@ impl Store {
         })
     }
 
+    /// A scheduled maintenance's next step, in one write: only while it's still `from` (any
+    /// open state for None), its update appended with it. False: it moved on meanwhile.
+    pub fn advance_maintenance(&self, project: &str, id: &str, from: Option<&str>, to: &str, text: &str, at: i64) -> Result<bool> {
+        self.db.write(|c| {
+            let Some((state, updates)): Option<(String, String)> = c.query_row("SELECT state, updates FROM status_incidents WHERE project = ? AND id = ? AND resolved_at IS NULL AND scheduled_from IS NOT NULL", params![project, id], |r| Ok((r.get(0)?, r.get(1)?))).optional()? else {
+                return Ok(false);
+            };
+            if from.is_some_and(|f| f != state) {
+                return Ok(false);
+            }
+            let mut list: Vec<serde_json::Value> = serde_json::from_str(&updates).unwrap_or_default();
+            list.push(serde_json::json!({ "at": at, "state": to, "text": text }));
+            let resolved = (to == "resolved").then_some(at);
+            c.execute("UPDATE status_incidents SET state = ?, updates = ?, resolved_at = COALESCE(?, resolved_at) WHERE id = ? AND state = ?", params![to, serde_json::to_string(&list).expect("JSON"), resolved, id, state])?;
+            Ok(true)
+        })
+    }
+
+    /// Whether an incident is a scheduled maintenance (it has a window).
+    pub fn incident_has_window(&self, project: &str, id: &str) -> Result<bool> {
+        Ok(self.db.query("SELECT 1 FROM status_incidents WHERE project = ? AND id = ? AND scheduled_from IS NOT NULL", params![project, id], |_| Ok(()))?.len() == 1)
+    }
+
     /// Scheduled maintenances whose window has begun or ended by `now`: (project, id, its next
     /// state: `maintenance` once it began, `resolved` once it's over).
     pub fn due_maintenance(&self, now: i64) -> Result<Vec<(String, String, &'static str)>> {
