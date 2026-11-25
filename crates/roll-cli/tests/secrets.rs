@@ -111,8 +111,67 @@ struct Server {
     _dir: tempfile::TempDir,
 }
 
+/// roll-access's workload logins as `roll secrets` sees them: a login's token goes in `Tokens`, so
+/// the gate knows it, and machine identities' chains are roll-access's own store's.
+struct Logins {
+    tokens: Tokens,
+    store: roll_access::store::Store,
+}
+
+impl roll_secrets::Workloads for Logins {
+    fn mint(&self, name: &str, rule: roll_auth::scope::Rule, _: Option<Vec<String>>, minutes: u32, _: Option<&str>) -> roll_secrets::Result<roll_secrets::Minted> {
+        let mut t = self.tokens.lock().unwrap();
+        let (secret, id) = (format!("rlt_login{}", t.len()), format!("tok_login{}", t.len()));
+        t.insert(secret.clone(), roll_auth::Grant { ask_otherwise: false, user: None, id: id.clone().into(), name: name.to_string().into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(roll_auth::scope::Scope(vec![rule])) });
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+        Ok(roll_secrets::Minted { id, secret, expires_at: now + i64::from(minutes) * 60_000 })
+    }
+    fn revoke(&self, id: &str) -> roll_secrets::Result<()> {
+        self.tokens.lock().unwrap().retain(|_, g| &*g.id != id);
+        Ok(())
+    }
+    fn revoke_many(&self, _: &[String], _: &str, _: &str) -> roll_secrets::Result<()> {
+        Ok(())
+    }
+    fn bootstrap(&self, name: &str, ip_allow: Option<Vec<String>>, minutes: u32, _: Option<&str>) -> roll_secrets::Result<roll_secrets::Chained> {
+        let i = self.store.create_bootstrap(name, minutes, &ip_allow.unwrap_or_default(), "operator", None).unwrap();
+        Ok(roll_secrets::Chained { chain: i.chain, secret: i.secret, issued_at: i.issued_at, expires_at: i.expires_at })
+    }
+    fn chain_of(&self, secret: &str) -> roll_secrets::Result<Option<String>> {
+        Ok(self.store.chain_of(secret).unwrap())
+    }
+    fn redeem(&self, secret: &str, from_bootstrap: bool, _: Option<&str>, hours: u32) -> roll_secrets::Result<roll_secrets::Step<roll_secrets::Chained>> {
+        use roll_access::store::{ChainSecret, Presented};
+        match self.store.redeem(secret, if from_bootstrap { ChainSecret::Bootstrap } else { ChainSecret::Machine }, None, hours) {
+            Ok(Presented::Live(i)) => Ok(roll_secrets::Step::Live(roll_secrets::Chained { chain: i.chain, secret: i.secret, issued_at: i.issued_at, expires_at: i.expires_at })),
+            Ok(Presented::Reused { chain }) => Ok(roll_secrets::Step::Reused { chain }),
+            Err(e) => Err(roll_secrets::Error::Unauthorized(e.to_string())),
+        }
+    }
+    fn machine(&self, secret: &str, _: Option<&str>) -> roll_secrets::Result<roll_secrets::Step<(String, String)>> {
+        match self.store.machine(secret, None) {
+            Ok(roll_access::store::Presented::Live(m)) => Ok(roll_secrets::Step::Live((m.grant, m.chain))),
+            Ok(roll_access::store::Presented::Reused { chain }) => Ok(roll_secrets::Step::Reused { chain }),
+            Err(e) => Err(roll_secrets::Error::Unauthorized(e.to_string())),
+        }
+    }
+    fn mint_via(&self, name: &str, rule: roll_auth::scope::Rule, ip_allow: Option<Vec<String>>, minutes: u32, owner: Option<&str>, _: &str) -> roll_secrets::Result<roll_secrets::Minted> {
+        self.mint(name, rule, ip_allow, minutes, owner)
+    }
+}
+
 async fn start() -> Server {
+    start_with(false).await
+}
+
+/// With workload identities' logins ([`Logins`]) when `logins`.
+async fn start_with(logins: bool) -> Server {
     let dir = tempfile::tempdir().unwrap();
+    let tokens = Tokens::default();
+    let workloads: Option<Arc<dyn roll_secrets::Workloads>> = logins.then(|| {
+        let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("access.db")), "access").unwrap();
+        Arc::new(Logins { tokens: tokens.clone(), store: roll_access::store::Store::new(db).unwrap() }) as Arc<dyn roll_secrets::Workloads>
+    });
     let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
     let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
     ws.create("", "shop", "", None).unwrap();
@@ -134,7 +193,7 @@ async fn start() -> Server {
         github: None,
         kms: None,
         sts: None,
-        workloads: None,
+        workloads,
         gateways: None,
     };
     let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
@@ -143,7 +202,6 @@ async fn start() -> Server {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
     let projects = ws.clone();
-    let tokens = Tokens::default();
     let polls = Arc::new(Polls::default());
     let access = axum::Router::new().route("/v1/access/tokens", axum::routing::post(create_token)).with_state(tokens.clone());
     let router = roll_workspace::router(ws).merge(roll_secrets::router(served)).merge(access).layer(axum::middleware::from_fn_with_state(tokens.clone(), gate)).layer(axum::middleware::from_fn_with_state(polls.clone(), flaky_digest));
@@ -837,6 +895,66 @@ async fn roll_secrets_leaks_sets_and_shows_leak_rotation() {
     assert!(roll(&api, &[], &["secrets", "-p", "shop", "leaks", "always"], None).await.code != Some(0));
 }
 
+/// A git server's pre-receive hook (`scan --pre-receive`) in a real bare repository: a new branch
+/// without values goes through, a push adding a production value is refused naming the key, never
+/// the value, with a scan-only token that can't reveal production, and `-o breakglass` lets it
+/// through, audited.
+// The hook calls the server in this process while the test waits on git: two threads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pre_receive_hook_refuses_a_push_adding_a_production_value_with_a_scan_only_token() {
+    let Server { api, projects, .. } = start().await;
+    let value = "fake-Pg9xQ2vLm7RtZk4WbN8s";
+    ok(&api, &[], &["secrets", "-p", "shop", "-e", "production", "set", &format!("DATABASE_URL={value}")], None).await;
+    let made: serde_json::Value = serde_json::from_str(&ok(&api, &[], &["--json", "secrets", "-p", "shop", "tokens", "create", "pre-receive", "--scan-only"], None).await).unwrap();
+    let rule = &made["grant"]["rules"][0];
+    assert_eq!((rule["actions"].clone(), rule.get("environments")), (serde_json::json!({ "scan": "allow" }), None), "{made}");
+    let token = made["token"].as_str().unwrap().to_string();
+    let prj = projects.list(roll_workspace::Scope::All).unwrap().into_iter().find(|p| p.name == "shop").unwrap().id;
+    let hook_env = [("ROLL_TOKEN", token.as_str()), ("ROLL_PROJECT", prj.as_str())];
+    let read = roll(&api, &hook_env, &["secrets", "-e", "production", "get", "DATABASE_URL"], None).await;
+    assert!(read.code != Some(0) && !read.stdout.contains(value), "a scan-only token reveals nothing: {}", read.stderr);
+
+    let dir = tempfile::tempdir().unwrap();
+    let (server, work) = (dir.path().join("server.git"), dir.path().join("work"));
+    let git = |at: &std::path::Path, args: &[&str]| {
+        let mut cmd = std::process::Command::new("git");
+        cmd.current_dir(at).args(["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "init.defaultBranch=main"]).args(args).env("ROLL_API_URL", &api);
+        for (k, v) in hook_env {
+            cmd.env(k, v);
+        }
+        cmd.output().unwrap()
+    };
+    assert!(git(dir.path(), &["init", "-q", "--bare", "server.git"]).status.success());
+    assert!(git(&server, &["config", "receive.advertisePushOptions", "true"]).status.success());
+    let hook = server.join("hooks/pre-receive");
+    std::fs::write(&hook, format!("#!/bin/sh\nexec '{}' secrets scan --pre-receive\n", env!("CARGO_BIN_EXE_roll"))).unwrap();
+    std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    assert!(git(dir.path(), &["init", "-q", "work"]).status.success());
+    let commit = |file: &str, text: &str| {
+        std::fs::write(work.join(file), text).unwrap();
+        assert!(git(&work, &["add", file]).status.success());
+        assert!(git(&work, &["commit", "-qm", file]).status.success());
+    };
+    let push = |extra: &[&str]| {
+        let o = git(&work, &[&["push"][..], extra, &[server.to_str().unwrap(), "main"]].concat());
+        (o.status.success(), String::from_utf8_lossy(&o.stderr).into_owned())
+    };
+
+    commit("README.md", "# shop\nHOST=db.internal\n");
+    let (passed, said) = push(&[]);
+    assert!(passed, "a new branch without values goes through: {said}");
+
+    commit("config.env", "PORT=3000\nDATABASE_URL=fake-Pg9xQ2vLm7RtZk4WbN8s\n");
+    let (passed, said) = push(&[]);
+    assert!(!passed && said.contains("config.env:2  DATABASE_URL (production)") && said.contains("refused"), "{said}");
+    assert!(!said.contains(value), "the value never shows: {said}");
+
+    let (passed, said) = push(&["-o", "breakglass"]);
+    assert!(passed && said.contains("breakglass"), "{said}");
+    let audit: serde_json::Value = reqwest::get(format!("{api}/v1/secrets/projects/{prj}/audit?action=secrets.scan.breakglass")).await.unwrap().json().await.unwrap();
+    assert_eq!(audit[0]["keys"], serde_json::json!(["DATABASE_URL"]), "{audit}");
+}
+
 /// `roll secrets agent` on port 0 for `shop`'s production, with `env` set (its login): its address
 /// once it listens, and what it has logged so far.
 struct LocalAgent {
@@ -980,6 +1098,118 @@ async fn a_revoked_logins_local_agent_answers_a_refusal_within_one_poll() {
     let (status, body) = read().await;
     assert_eq!(status, 403, "{body}");
     assert!(body.contains("refused the agent's login") && !body.contains("fake-"), "{body}");
+}
+
+/// A Compute Engine metadata server: the instance's identity token for the audience asked, signed
+/// by `key` as Google's (a service account's numeric id as the subject), only with
+/// `Metadata-Flavor: Google`; and the audiences it was asked for.
+async fn fake_gce(key: Arc<Signer>) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+    use axum::extract::{Query, State};
+    use axum::http::{HeaderMap, StatusCode};
+    type Asked = Arc<std::sync::Mutex<Vec<String>>>;
+    async fn identity(State((key, asked)): State<(Arc<Signer>, Asked)>, h: HeaderMap, Query(q): Query<std::collections::HashMap<String, String>>) -> (StatusCode, [(&'static str, &'static str); 1], String) {
+        if h.get("metadata-flavor").is_none_or(|v| v != "Google") || q.get("format").map(String::as_str) != Some("full") {
+            return (StatusCode::FORBIDDEN, [("metadata-flavor", "Google")], String::new());
+        }
+        let audience = q["audience"].clone();
+        asked.lock().unwrap().push(audience.clone());
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let claims = serde_json::json!({ "iss": "https://accounts.google.com", "aud": audience, "sub": "104000000000000000001", "email": "web@fake-project.iam.gserviceaccount.com", "iat": now, "exp": now + 3600 });
+        (StatusCode::OK, [("metadata-flavor", "Google")], key.sign(claims))
+    }
+    let asked = Asked::default();
+    let app = axum::Router::new().route("/computeMetadata/v1/instance/service-accounts/default/identity", axum::routing::get(identity)).with_state((key, asked.clone()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let host = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (host, asked)
+}
+
+/// An ES256 key, as an issuer's.
+struct Signer(ring::signature::EcdsaKeyPair);
+
+impl Signer {
+    fn new() -> Signer {
+        use ring::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair};
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
+        Signer(EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &rng).unwrap())
+    }
+    fn jwks(&self) -> String {
+        use ring::signature::KeyPair;
+        let p = self.0.public_key().as_ref();
+        serde_json::json!({ "keys": [{ "kty": "EC", "crv": "P-256", "kid": "k1", "use": "sig", "x": b64(&p[1..33]), "y": b64(&p[33..65]) }] }).to_string()
+    }
+    fn sign(&self, claims: serde_json::Value) -> String {
+        let signed = format!("{}.{}", b64(serde_json::json!({ "alg": "ES256", "kid": "k1", "typ": "JWT" }).to_string().as_bytes()), b64(claims.to_string().as_bytes()));
+        let sig = self.0.sign(&ring::rand::SystemRandom::new(), signed.as_bytes()).unwrap();
+        format!("{signed}.{}", b64(sig.as_ref()))
+    }
+}
+
+fn b64(b: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
+}
+
+/// On a GCE VM, the agent logs in with `ROLL_IDENTITY_KIND=gcp`: the instance's identity token from
+/// the metadata server (a fake one at `GCE_METADATA_HOST`), asked for the server's URL as the
+/// audience, then serves a folder. Google signs for everyone, so the identity names one service
+/// account exactly.
+#[tokio::test]
+async fn the_local_agent_on_a_gce_vm_logs_in_with_the_metadata_servers_identity_token() {
+    let s = start_with(true).await;
+    ok(&s.api, &[], &["secrets", "-p", "shop", "-e", "production", "set", "GREETING=fake-hello"], None).await;
+    let key = Arc::new(Signer::new());
+    let jwks = s._dir.path().join("google-jwks.json");
+    std::fs::write(&jwks, key.jwks()).unwrap();
+    let add = |subject: &'static str| ["secrets", "-p", "shop", "identities", "add", "gce", "--issuer", "https://accounts.google.com", "--subject", subject, "--jwks", jwks.to_str().unwrap(), "--for-env", "production"];
+    assert_ne!(roll(&s.api, &[], &add("1040*"), None).await.code, Some(0), "a shared issuer's subject names one account");
+    let made = roll(&s.api, &[], &add("104000000000000000001"), None).await;
+    assert_eq!(made.code, Some(0), "{}", made.stderr);
+    let id = made.stdout.trim().to_string();
+    let (host, asked) = fake_gce(key).await;
+    let a = local_agent(&s, &[("ROLL_IDENTITY", &id), ("ROLL_IDENTITY_KIND", "gcp"), ("GCE_METADATA_HOST", &host)]).await;
+    let res = reqwest::Client::new().get(format!("{}/secrets/GREETING", a.url)).header("X-Roll-Token", &a.token).send().await.unwrap();
+    assert_eq!(res.status(), 200);
+    assert_eq!(res.text().await.unwrap(), "fake-hello");
+    assert_eq!(asked.lock().unwrap().first(), Some(&s.api), "the server's URL is the audience");
+    assert!(!a.log.lock().unwrap().contains("eyJ"), "no token in the log");
+}
+
+/// On bare metal, `roll` exchanges the bootstrap token once for a machine credential kept 0600 in
+/// the state directory and logs in with it; the token still set doesn't exchange again. Past half
+/// its life, the next run replaces it, and the old one stops working.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_bootstrap_token_becomes_a_machine_credential_kept_on_disk_and_replaced_at_half_life() {
+    use std::os::unix::fs::PermissionsExt;
+    let s = start_with(true).await;
+    ok(&s.api, &[], &["secrets", "-p", "shop", "-e", "production", "set", "GREETING=fake-hello"], None).await;
+    let id = ok(&s.api, &[], &["secrets", "-p", "shop", "identities", "add", "racks", "--machine", "--for-env", "production"], None).await.trim().to_string();
+    let token = ok(&s.api, &[], &["secrets", "-p", "shop", "identities", "bootstrap", &id], None).await.trim().to_string();
+    assert!(token.starts_with("rlbt_"));
+    let state = s._dir.path().join("state");
+    let state_dir = state.to_str().unwrap().to_string();
+    let env = [("ROLL_IDENTITY", id.as_str()), ("ROLL_BOOTSTRAP_TOKEN", token.as_str()), ("STATE_DIRECTORY", state_dir.as_str())];
+    let get = || ok(&s.api, &env, &["secrets", "-p", "shop", "-e", "production", "get", "GREETING"], None);
+    assert_eq!(get().await.trim(), "fake-hello");
+    let file = state.join(format!("machine-{id}.json"));
+    assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+    let kept: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    let first = kept["credential"].as_str().unwrap().to_string();
+    assert!(first.starts_with("rlmc_") && !kept.to_string().contains(&token), "{kept}");
+    assert_eq!(get().await.trim(), "fake-hello", "the same bootstrap token isn't exchanged again");
+
+    // Past half its life: the next run replaces it.
+    let mut aged = kept.clone();
+    aged["refresh_at"] = serde_json::json!(0);
+    std::fs::write(&file, aged.to_string()).unwrap();
+    assert_eq!(get().await.trim(), "fake-hello");
+    let next: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert!(next["credential"].as_str().unwrap() != first && next["refresh_at"].as_i64().unwrap() > 0, "{next}");
+    let old = reqwest::Client::new().post(format!("{}/v1/secrets/login", s.api)).json(&serde_json::json!({ "identity": id, "machine": first })).send().await.unwrap();
+    assert_eq!(old.status(), 401, "the old one stops");
 }
 
 /// `roll secrets mount` of shop's production at `env_file` with `token`, once it serves, and its

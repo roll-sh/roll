@@ -480,18 +480,41 @@ const ROOT_BOX = `JSON.stringify((() => {
   return x2 > x1 && y2 > y1 ? { x: x1, y: y1, w: x2 - x1, h: y2 - y1 } : null;
 })())`;
 // touched-first: start
-// Stories the change touched first (Chromatic's TurboSnap, without a bundler's graph): a story
-// whose own file the change changed, then one beside a file it changed (its component, its
-// styles), then the rest in the index's order. `changed` are paths in the repo; a story's
-// `importPath` is its project's (`./src/Button.stories.tsx`), so a path matches by its end.
-const touchedFirst = (listed, changed) => {
-  const norm = (p) => String(p || "").replace(/^\.\//, "").replace(/^\/+/, "");
+// Stories the change touched first (Chromatic's TurboSnap): a story whose own file the change
+// changed, then one that imports a changed file from anywhere (through the bundler's module
+// graph, `stats`: Storybook's `--stats-json`, `preview-stats.json`, each module's `name` and the
+// `reasons` that import it), then one beside a file it changed (its component, its styles), then
+// the rest in the index's order. `changed` are paths in the repo; a story's `importPath` and a
+// module's name are its project's (`./src/Button.stories.tsx`), so a path matches by its end.
+// The graph is the preview's code's: it only orders, and its walk is bounded.
+const touchedFirst = (listed, changed, stats) => {
+  const norm = (p) => String(p || "").replace(/ \+ \d+ modules?$/, "").replace(/[?#].*$/, "").replace(/^\.\//, "").replace(/^\/+/, "");
   const ends = (path, tail) => !!tail && (path === tail || path.endsWith("/" + tail));
   const dir = (p) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
+  const touched = (name) => changed.some((c) => ends(c, name));
+  // Who imports whom, at most 200,000 edges; then up from what the change touched.
+  const importers = new Map();
+  let edges = 0;
+  const modules = Array.isArray(stats?.modules) ? stats.modules.slice(0, 50000) : [];
+  for (const m of modules) {
+    const names = [m?.name, ...(Array.isArray(m?.modules) ? m.modules.slice(0, 200).map((x) => x?.name) : [])].map(norm).filter(Boolean);
+    for (const r of Array.isArray(m?.reasons) ? m.reasons.slice(0, 1000) : []) {
+      const by = norm(r?.moduleName);
+      if (!by || ++edges > 200000) continue;
+      for (const n of names) (importers.get(n) || importers.set(n, new Set()).get(n)).add(by);
+    }
+  }
+  const reached = new Set([...importers.keys()].filter(touched));
+  for (const queue = [...reached]; queue.length && reached.size < 50000; ) {
+    for (const by of importers.get(queue.pop()) || []) {
+      if (!reached.has(by)) reached.add(by), queue.push(by);
+    }
+  }
   const score = (e) => {
     const own = norm(e.importPath);
     if (!own) return 0;
-    if (changed.some((c) => ends(c, own))) return 2;
+    if (touched(own)) return 3;
+    if (reached.has(own)) return 2;
     const d = dir(own);
     return d && changed.some((c) => ends(dir(c), d)) ? 1 : 0;
   };
@@ -520,8 +543,17 @@ const stories = async (sessionId) => {
       if (entries.length) break;
     } catch {}
   }
+  // Its module graph, when it was built with `--stats-json` (only worth reading for a change).
+  let stats = null;
+  if (CHANGED.length) {
+    try {
+      const r = await fetch(new URL("preview-stats.json", base), { signal: AbortSignal.timeout(15000) });
+      const text = r.ok && Number(r.headers.get("content-length") || 0) <= 64 << 20 ? await r.text() : "";
+      if (text && text.length <= 64 << 20) stats = JSON.parse(text);
+    } catch {}
+  }
   // The ones the change touched first, so the 40 a run takes are those that matter.
-  const listed = touchedFirst(entries.filter((e) => e && typeof e.id === "string" && STORY_ID.test(e.id) && (e.type == null || e.type === "story")), CHANGED);
+  const listed = touchedFirst(entries.filter((e) => e && typeof e.id === "string" && STORY_ID.test(e.id) && (e.type == null || e.type === "story")), CHANGED, stats);
   const picked = listed.slice(0, 40);
   const out = [];
   const until = Date.now() + 100000;

@@ -136,6 +136,47 @@ export interface BrowserKey {
   derivable?: boolean;
   /** When its signing secret was made (unix seconds). */
   secret_rotated_at?: number;
+  /** Its use over the last 24 hours (the hour in progress and the 23 before). */
+  usage_24h?: BrowserUsageSummary;
+}
+
+/** Why the owner node refused a browser key's request: the first five are 429s. */
+export type BrowserRefusal =
+  | "key_rate"
+  | "address_rate"
+  | "user_rate"
+  | "concurrency"
+  | "cluster_ceiling"
+  | "origin"
+  | "policy"
+  | "body_too_large"
+  | "invalid_key";
+
+/** A browser key's requests over a bucket: `throttled` counts 429s, `refused` the other refusals, `reasons` both. */
+export interface BrowserUsageSummary {
+  requests: number;
+  throttled: number;
+  refused: number;
+  reasons: Partial<Record<BrowserRefusal, number>>;
+}
+
+export type BrowserUsageWindow = "1h" | "24h" | "14d";
+
+/** `GET /v1/search/clusters/{id}/browser-keys/{key}/usage`: points only where the key made requests. */
+export interface BrowserKeyUsage {
+  key: string;
+  window: BrowserUsageWindow;
+  step_s: number;
+  /** Unix seconds: the first point's start, and the end of the last. */
+  from: number;
+  to: number;
+  points: (BrowserUsageSummary & { at: number })[];
+  totals: BrowserUsageSummary & {
+    /** A derived key's end customers, most requests first (at most 10). */
+    users: { user: string; requests: number; throttled: number }[];
+    /** Pages whose requests were refused, most first (at most 10). */
+    origins: { origin: string; refused: number }[];
+  };
 }
 
 /** A new browser key: `api_key` (sent as `Authorization: ApiKey …`) and a derivable key's `signing_secret` are shown once. */
@@ -370,6 +411,8 @@ export const searchApi = {
   createBrowserKey: (id: string, k: BrowserKeyRequest) => call<NewBrowserKey>("POST", `${cl(id)}/browser-keys`, k),
   revokeBrowserKey: (id: string, key: string) => call<null>("DELETE", `${cl(id)}/browser-keys/${encodeURIComponent(key)}`),
   rotateBrowserKeySecret: (id: string, key: string) => call<RotatedSigningSecret>("POST", `${cl(id)}/browser-keys/${encodeURIComponent(key)}/rotate`),
+  browserKeyUsage: (id: string, key: string, window: BrowserUsageWindow) =>
+    call<BrowserKeyUsage>("GET", `${cl(id)}/browser-keys/${encodeURIComponent(key)}/usage?window=${window}`),
   /** One URL through the web crawler's path, writing nothing (with a connector's configuration, or none). */
   crawlTest: (id: string, url: string, connector?: string) => call<CrawlTest>("POST", `${cl(id)}/crawl-test`, { url, connector }),
   siteVerifications: (id: string) => call<{ verifications: SiteVerification[] }>("GET", `${cl(id)}/site-verifications`),

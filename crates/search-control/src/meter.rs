@@ -273,7 +273,8 @@ impl Meter {
     }
 
     /// Stores what the node observed of cluster `id` since the last pass: its minutes of
-    /// request metrics and its slow log entries. A cluster deleted meanwhile is skipped.
+    /// request metrics, its slow log entries, search analytics and browser keys' usage. A
+    /// cluster deleted meanwhile is skipped.
     pub async fn observe(&self, id: &str, o: search_server::Observed) -> anyhow::Result<()> {
         if o.is_empty() {
             return Ok(());
@@ -283,7 +284,8 @@ impl Meter {
         let entries: Vec<(i64, String)> = o.slow.iter().map(|e| (e.at_ms, e.to_json().to_string())).collect();
         self.store.record_slowlog(&c.id, &entries).await?;
         let a = &o.analytics;
-        self.store.record_analytics(&c.id, &a.cleared, a.enabled.as_deref(), &a.hours).await
+        self.store.record_analytics(&c.id, &a.cleared, a.enabled.as_deref(), &a.hours).await?;
+        self.store.record_browser_usage(&c.id, &o.browser, crate::control::now()).await
     }
 
     /// The index count a cluster had when it unloaded (consumed).
