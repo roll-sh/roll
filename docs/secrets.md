@@ -40,6 +40,9 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    roll login https://roll.example.com
    ```
 
+   On Windows, in PowerShell: `irm https://roll.sh/install.ps1 | iex` (or winget and Scoop, "On
+   Windows" below).
+
    The consent screen starts from the `development` preset, where revealing a value asks you first:
    the first `roll run` prints where to approve it and waits.
 2. **Pick a project and its environments.** A workspace project has `development`, `staging` and
@@ -212,6 +215,35 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
 9. **When something goes wrong**: `roll secrets history`, `roll secrets rollback --at 2h`, the
    audit log (`roll secrets audit`, or streamed to your SIEM), and `roll secrets share KEY` to hand
    one value to someone outside roll through a link that works once.
+
+### On Windows
+
+`roll` builds for Windows on x86_64 and ARM64 (`x86_64-pc-windows-msvc`,
+`aarch64-pc-windows-msvc`; `.github/workflows/release-cli.yml` publishes their zips next to the
+tarballs, and checks the x86_64 build on every pull request that touches `crates/roll-cli`).
+
+- **Installing.** `irm https://roll.sh/install.ps1 | iex` puts `roll.exe` in
+  `%LOCALAPPDATA%\Programs\roll` and on your PATH, after checking it against the release's
+  `SHA256SUMS` as `install.sh` does (a mismatch installs nothing). For a server, from an
+  administrator's PowerShell, `& ([scriptblock]::Create((irm https://roll.sh/install.ps1))) -System`
+  installs into `%ProgramFiles%\roll` for every account. Each release also carries a Scoop manifest
+  (`scoop install https://github.com/roll-sh/roll/releases/download/cli-v<version>/roll.json`) and
+  winget's manifests (`roll-winget.zip`, `RollSh.Roll`, from the templates in `deploy/cli`).
+- **What works as on Linux**: `roll login` (the logins in `%APPDATA%\roll\logins.json`, which
+  only you and the Administrators may open), `roll run` with masking and `--watch`, `roll secrets
+  scan` and `render`, every other `roll secrets` command, and `roll secrets agent`, which can be a
+  service ("A local agent"). A file roll keeps private (the agent's token file, `render`'s output,
+  an `ssh` key) gets an access list of you and the Administrators before its first byte is
+  written: the 0600 of Windows.
+- **`roll run`**: Windows has no exec, so the command is always roll's child, its environment
+  still set by name (never on its command line), and roll exits with its exit code. Ctrl-C and
+  Ctrl-Break reach the command from the console themselves, so roll doesn't pass them on; closing
+  the console, logging off or shutting down ends the command (Windows has no SIGTERM to pass).
+  `--watch` restarts the command by ending it at once rather than after a SIGTERM.
+- **What refuses, and says so**: `roll secrets mount` (a named pipe on Windows can't be opened as a
+  file: run the tool with `roll run` instead), `roll agent login` and `roll agent up` (roll code
+  agents' daemon runs on Linux and macOS, or in WSL; `roll agent automation` works), and `roll
+  code`'s queuing on GitHub while roll is down.
 
 ## Terraform
 
@@ -508,7 +540,8 @@ to install. An app moves between it and the Lambda extension unchanged:
   `Cache-Control: no-store`.
 - **The request token.** Every request but `/health` carries `X-Roll-Token` (the extension's header)
   with the contents of `--token-file` (`ROLL_AGENT_TOKEN_FILE`; by default
-  `$XDG_RUNTIME_DIR/roll/agent-token`), which the agent makes with 32 random bytes, 0600, when it
+  `$XDG_RUNTIME_DIR/roll/agent-token`; Windows: `%LOCALAPPDATA%\roll\agent-token`), which the agent
+  makes with 32 random bytes, 0600 (on Windows: you and the Administrators), when it
   doesn't exist (`ROLL_AGENT_TOKEN` gives the value itself instead). Without it, or with another,
   the answer is a 401 that says nothing more. A server-side request forgery in the app (a URL it
   fetches for a user) can make it ask `127.0.0.1:2773` but can't add the header, so it reads
@@ -602,6 +635,36 @@ The app reads as on Lambda, with the header from the file:
 curl -sH "X-Roll-Token: $(cat /run/roll/agent-token)" http://127.0.0.1:2773/secrets/DATABASE_URL
 ```
 
+**On Windows**, `roll secrets agent --install-service`, from an administrator's terminal, installs
+the agent as a service that starts with the machine and is restarted 5 s after a failure, as the
+unit above does. It runs as its own virtual account (`NT SERVICE\roll-secrets-agent`, never
+LocalSystem; `--service-name` picks another name) with the flags given, and its files are in
+`%ProgramData%\roll\agent`, which only the Administrators and the service may open:
+
+- `agent-token`, the request token, readable by the service and the accounts `--token-reader`
+  names (the app's: `--token-reader "IIS AppPool\shop"`), never by every user. An existing one is
+  kept and its access list set again.
+- `<name>.login`, the login this command was run with: `ROLL_TOKEN`, or a workload identity's
+  `ROLL_IDENTITY` and what it logs in with ("On a VM" below: `ROLL_IDENTITY_KIND=azure` and
+  `ROLL_OIDC_AUDIENCE` on an Azure VM, a bootstrap token on bare metal; a `ROLL_OIDC_TOKEN_FILE`
+  must be readable by the service's account). The service reads it before anything else, so its
+  command line names only the project, the environment and the flags. A machine identity's
+  credential is kept next to it (`<name>.machine.json`).
+- `<name>.log`, the agent's stderr (which never holds a value).
+
+```powershell
+$env:ROLL_TOKEN = "rlt_…"   # roll secrets tokens create agent --for-env production
+roll --api https://api.roll.example secrets -p shop -e production agent --install-service --prefetch production:/ --token-reader "IIS AppPool\shop"
+sc.exe query roll-secrets-agent
+roll secrets agent --uninstall-service      # stops it and deletes its login; the token file stays
+```
+
+The service runs `roll.exe` from where it is, so install roll for the machine first (`install.ps1
+-System`, `winget install --scope machine`, `scoop install -g`): a `roll.exe` in your profile is
+refused, since the service's account can't read it (`crates/roll-cli/src/secrets/service.rs`; its
+command line's quoting is `a_windows_service_command_line_keeps_each_argument_whole` in `sys.rs`,
+and `release-cli.yml`'s `windows-check` builds it).
+
 ### On a VM
 A VM logs in as itself, with no long-lived token on its disk. Each platform's way, in the agent's
 unit's `Environment=` (and `roll run`'s, and every `roll secrets` command's: they share the login,
@@ -654,8 +717,9 @@ unit's `Environment=` (and `roll run`'s, and every `roll secrets` command's: the
      (`POST /v1/secrets/login/bootstrap {identity, token}`) for a **machine credential** (`rlmc_…`,
      `credential_hours` long, 1–720, default 24), which the CLI keeps in
      `machine-<identity>.json` (0600, in a 0700 directory) under systemd's `$STATE_DIRECTORY`, else
-     `$XDG_STATE_HOME/roll`, else `~/.local/state/roll` (`ROLL_MACHINE_CREDENTIAL_FILE` names
-     another), and logs in with it (`POST /v1/secrets/login {identity, machine}`).
+     `$XDG_STATE_HOME/roll` (Windows: `%LOCALAPPDATA%\roll`, readable by you and the
+     Administrators), else `~/.local/state/roll` (`ROLL_MACHINE_CREDENTIAL_FILE` names another),
+     and logs in with it (`POST /v1/secrets/login {identity, machine}`).
   4. Every login after reads the file. Past half its life, the credential is replaced
      (`POST /v1/secrets/login/refresh {identity, credential}`): a new one is made, the old one is
      spent, and the file is written whole (a temporary file renamed over it). Replacing and logging
@@ -3585,7 +3649,9 @@ npx prisma migrate dev                            # in another: reads .env as us
   documents this for older Vite) would see its own read as a change and loop. Run it with `roll run
   -- npm run dev` instead (the values in its environment, no file at all), or don't have it watch
   `.env`.
-- Not on Windows (no named pipe a tool can open as a file): `roll run` there.
+- Not on Windows, where a named pipe can't be opened as a file: `roll secrets mount` refuses there
+  and says so; run the tool with `roll run -- <command>` (the values in its environment, no file),
+  which Windows builds have ("On Windows").
 
 ### Docker builds and Compose
 
@@ -4197,6 +4263,10 @@ exec roll secrets scan --pre-receive
 - **Self-managed GitLab.** Put the script in Gitaly's global server hooks directory
   (`custom_hooks_dir`'s `pre-receive.d/`) for every repository, or set it on one repository with
   `gitaly hooks set` (GitLab's "Server hooks").
+- **A Windows git server** (Git for Windows behind OpenSSH or IIS): git runs hooks with its own
+  `sh`, so the script above works as it is, with `roll.exe` on that `sh`'s `PATH` (no `chmod`).
+  The quarantine variables are git's own and only git reads them, so Windows paths in them change
+  nothing for roll.
 - **Plain git.** `hooks/pre-receive` in the bare repository, as above.
 
 GitHub.com and GitLab.com don't run custom pre-receive hooks: there, the GitHub Action's

@@ -1,0 +1,34 @@
+{
+    "version": "{{VERSION}}",
+    "description": "roll's command-line interface (roll run, roll secrets, roll code, roll apps)",
+    "homepage": "https://github.com/roll-sh/roll",
+    "license": "Unknown",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/roll-sh/roll/releases/download/{{TAG}}/roll-x86_64-pc-windows-msvc.zip",
+            "hash": "{{SHA256_X86_64}}"
+        },
+        "arm64": {
+            "url": "https://github.com/roll-sh/roll/releases/download/{{TAG}}/roll-aarch64-pc-windows-msvc.zip",
+            "hash": "{{SHA256_AARCH64}}"
+        }
+    },
+    "bin": "roll.exe",
+    "checkver": {
+        "github": "https://github.com/roll-sh/roll",
+        "regex": "/releases/tag/cli-v([\\d.]+)"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/roll-sh/roll/releases/download/cli-v$version/roll-x86_64-pc-windows-msvc.zip"
+            },
+            "arm64": {
+                "url": "https://github.com/roll-sh/roll/releases/download/cli-v$version/roll-aarch64-pc-windows-msvc.zip"
+            }
+        },
+        "hash": {
+            "url": "https://github.com/roll-sh/roll/releases/download/cli-v$version/SHA256SUMS"
+        }
+    }
+}

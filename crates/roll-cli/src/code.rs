@@ -502,6 +502,7 @@ fn file_entry(local: &Path) -> anyhow::Result<Value> {
         bail!("{} is not a file", local.display());
     }
     let data = std::fs::read(local)?;
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut entry = match String::from_utf8(data) {
         Ok(text) => json!({ "content": text }),
         Err(e) => json!({ "content_b64": base64::engine::general_purpose::STANDARD.encode(e.into_bytes()) }),
