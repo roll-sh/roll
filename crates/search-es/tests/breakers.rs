@@ -395,32 +395,54 @@ async fn bulk_documents_prepared_ahead_are_charged_and_never_fail_the_request() 
     assert_eq!(node.used(), 0);
 }
 
-/// The shard request cache's entries are charged to the `request` breaker while they are kept,
-/// as much as the index stats say they hold, and `_cache/clear` gives it all back.
+/// Two clusters on one node share its cache budget: what fits is cached, outside the `request`
+/// breaker; what doesn't fit is answered uncached; together they never hold more than the
+/// budget, and `_cache/clear` gives it all back.
 #[tokio::test]
-async fn request_cache_entries_are_charged_until_cleared() {
-    let c = Cluster::in_memory("request-cache").await;
-    call(&c, "PUT", "/r", Some(br#"{"mappings":{"properties":{"k":{"type":"keyword"}}}}"#)).await;
-    let mut bulk = String::new();
-    for i in 0..200 {
-        bulk.push_str(&format!("{{\"index\":{{}}}}\n{{\"k\":\"k{i}\"}}\n"));
+async fn clusters_share_the_nodes_cache_budget() {
+    let caches = search_es::breaker::MemoryBudget::new(32 << 10);
+    let mut clusters = Vec::new();
+    for (name, keys) in [("small", 20), ("large", 2000)] {
+        let mut cfg = ClusterConfig::new(name);
+        cfg.cache_memory = Some(caches.clone());
+        let c = Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap();
+        call(&c, "PUT", "/r", Some(br#"{"mappings":{"properties":{"k":{"type":"keyword"}}}}"#)).await;
+        let mut bulk = String::new();
+        for i in 0..keys {
+            bulk.push_str(&format!("{{\"index\":{{}}}}\n{{\"k\":\"k{i}\"}}\n"));
+        }
+        assert_eq!(call(&c, "POST", "/r/_bulk?refresh=true", Some(bulk.as_bytes())).await.0, 200);
+        clusters.push((c, keys));
     }
-    assert_eq!(call(&c, "POST", "/r/_bulk?refresh=true", Some(bulk.as_bytes())).await.0, 200);
-    let agg = br#"{"size":0,"aggs":{"k":{"terms":{"field":"k","size":200}}}}"#;
-    for _ in 0..2 {
-        assert_eq!(call(&c, "POST", "/r/_search", Some(agg)).await.0, 200);
-    }
-    // (the request breaker's bytes, the cache's bytes, its hits)
-    async fn held(c: &Cluster) -> (Option<i64>, Option<i64>, Option<i64>) {
-        let (_, stats) = call(c, "GET", "/_nodes/stats/breaker?filter_path=nodes.*.breakers.request", None).await;
+    // (the request breaker's bytes, the cache's bytes, its hits, the limit node stats show)
+    async fn held(c: &Cluster) -> (Option<i64>, Option<i64>, Option<i64>, Option<i64>) {
+        let (_, stats) = call(c, "GET", "/_nodes/stats/breaker,indices?filter_path=nodes.*.breakers.request,nodes.*.indices.request_cache", None).await;
         let (_, idx) = call(c, "GET", "/r/_stats/request_cache", None).await;
-        (at(&stats, "nodes.*.breakers.request.estimated_size_in_bytes").as_i64(), at(&idx, "_all.total.request_cache.memory_size_in_bytes").as_i64(), at(&idx, "_all.total.request_cache.hit_count").as_i64())
+        (
+            at(&stats, "nodes.*.breakers.request.estimated_size_in_bytes").as_i64(),
+            at(&idx, "_all.total.request_cache.memory_size_in_bytes").as_i64(),
+            at(&idx, "_all.total.request_cache.hit_count").as_i64(),
+            at(&stats, "nodes.*.indices.request_cache.limit_size_in_bytes").as_i64(),
+        )
     }
-    let (breaker, cache, hits) = held(&c).await;
-    assert_eq!(hits, Some(1));
-    // Two hundred buckets: more than a fixed guess per entry.
-    assert!(cache.unwrap_or(0) > 4096, "{cache:?}");
-    assert_eq!(breaker, cache, "the cache's bytes are the breaker's");
-    assert_eq!(call(&c, "POST", "/r/_cache/clear", None).await.0, 200);
-    assert_eq!(held(&c).await, (Some(0), Some(0), Some(1)));
+    let mut answers = Vec::new();
+    for (c, keys) in &clusters {
+        let agg = format!(r#"{{"size":0,"aggs":{{"k":{{"terms":{{"field":"k","size":{keys}}}}}}}}}"#);
+        for _ in 0..2 {
+            let (s, v) = call(c, "POST", "/r/_search", Some(agg.as_bytes())).await;
+            assert_eq!(s, 200, "{v:?}");
+            assert_eq!(at(&v, "aggregations.k.buckets").as_array().map(Vec::len), Some(*keys as usize));
+            assert!(caches.used() <= 32 << 10, "{}", caches.used());
+        }
+        answers.push(held(c).await);
+    }
+    let (small, large) = (answers[0], answers[1]);
+    assert_eq!((small.0, small.2, small.3), (Some(0), Some(1), Some(32 << 10)), "cached, outside the request breaker: {small:?}");
+    assert!(small.1.unwrap_or(0) > 0, "{small:?}");
+    assert_eq!((large.0, large.1, large.2), (Some(0), Some(0), Some(0)), "too large for the node's cache budget: answered uncached: {large:?}");
+    assert_eq!(caches.used(), small.1.unwrap() as u64);
+    for (c, _) in &clusters {
+        assert_eq!(call(c, "POST", "/r/_cache/clear", None).await.0, 200);
+    }
+    assert_eq!(caches.used(), 0);
 }

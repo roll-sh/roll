@@ -264,7 +264,7 @@ impl Breakers {
     fn usages(&self) -> [(&'static str, i64); 5] {
         [
             ("fielddata", 0),
-            ("request", request_held(&self.request).min(i64::MAX as u64) as i64),
+            ("request", self.request.used().min(i64::MAX as u64) as i64),
             ("inflight_requests", (self.in_flight.load(Ordering::Relaxed) as f64 * IN_FLIGHT_OVERHEAD) as i64),
             ("model_inference", 0),
             ("eql_sequence", 0),
@@ -305,27 +305,6 @@ impl Breakers {
             (parent, (self.parent_tripped.load(Ordering::Relaxed) + self.request.parent_tripped()) as i64),
         )
     }
-}
-
-/// What a cluster's `request` breaker holds: its requests' reservations and its caches'
-/// ([`try_hold_cache`]).
-pub fn request_held(b: &MemoryBudget) -> u64 {
-    b.used().saturating_add(b.held_elsewhere())
-}
-
-/// Charges `bytes` of a cache (the shard request cache, compiled scripts) to a cluster's
-/// `request` breaker `b` when its limit has room, and otherwise charges nothing (a cache caches
-/// nothing then, and trips nothing). Only the cluster's own limit sees them, not the node's
-/// budget for requests: there nothing would make them give way to another cluster's request.
-/// The node counts them as the cluster's resident memory instead (and unloads idle clusters to
-/// make room). Elasticsearch charges its caches to no breaker at all.
-pub fn try_hold_cache(b: &MemoryBudget, bytes: u64) -> bool {
-    b.try_add_held_elsewhere(bytes)
-}
-
-/// Gives back what [`try_hold_cache`] charged.
-pub fn release_cache(b: &MemoryBudget, bytes: u64) {
-    b.sub_held_elsewhere(bytes);
 }
 
 /// Bytes reserved on a breaker, given back when dropped (a request's accounting is released

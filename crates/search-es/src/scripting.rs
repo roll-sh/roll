@@ -26,25 +26,25 @@ impl Default for ScriptService {
     }
 }
 
-/// The cluster's `request` breaker as what its compiled scripts are charged to (a cache:
-/// [`crate::breaker::try_hold_cache`]).
-struct Breaker(Arc<search_aggs::memory::MemoryBudget>);
+/// The cluster's cache budget ([`crate::Cluster::cache_memory`]) as what its compiled scripts
+/// are charged to.
+struct CacheMemory(Arc<search_aggs::memory::MemoryBudget>);
 
-impl search_painless::MemoryCharge for Breaker {
+impl search_painless::MemoryCharge for CacheMemory {
     fn try_reserve(&self, bytes: u64) -> bool {
-        crate::breaker::try_hold_cache(&self.0, bytes)
+        self.0.try_reserve(bytes)
     }
 
     fn release(&self, bytes: u64) {
-        crate::breaker::release_cache(&self.0, bytes);
+        self.0.release(bytes);
     }
 }
 
 impl ScriptService {
-    /// Charges the compiled-script cache to `budget` (the cluster's `request` breaker) from now
-    /// on; the cache holds at most its [`search_painless::Settings::cache_max_bytes`].
+    /// Charges the compiled-script cache to `budget` (the cluster's cache budget) from now on;
+    /// the cache holds at most its [`search_painless::Settings::cache_max_bytes`].
     pub fn charge_to(&self, budget: Arc<search_aggs::memory::MemoryBudget>) {
-        self.engine.charge_to(Arc::new(Breaker(budget)));
+        self.engine.charge_to(Arc::new(CacheMemory(budget)));
     }
 }
 

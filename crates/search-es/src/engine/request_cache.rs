@@ -8,11 +8,10 @@
 //! since the hand last passed it gets another round), so a new entry pushes out the least
 //! recently used ones wherever they are, as Elasticsearch's node-wide LRU does.
 //!
-//! The charge is the cluster's own ([`crate::breaker::try_hold_cache`]): its entries count
-//! against its `request` limit, but not in the node's budget for requests, where nothing would
-//! make them give way to another cluster's request. The node counts them as the cluster's
-//! resident memory instead (`resident_bytes`), which it makes room in by unloading idle clusters.
-//! Elasticsearch charges its request cache to no breaker at all (it is heap, bounded by its size).
+//! The charge goes to the cluster's cache budget ([`crate::Cluster::cache_memory`]), a child of
+//! the node's: caches are outside request admission (Elasticsearch charges its request cache
+//! to no breaker), and every cluster's together hold at most the node's cache budget. An entry
+//! that doesn't fit isn't cached, as one past the cluster's own cap isn't.
 
 use parking_lot::Mutex;
 use search_aggs::memory::MemoryBudget;
@@ -32,7 +31,7 @@ pub type Entry = Arc<dyn Any + Send + Sync>;
 pub struct Budget {
     cap: u64,
     used: AtomicU64,
-    /// The cluster's `request` breaker (`None`: nothing charged, tests and private engines).
+    /// The cluster's cache budget (`None`: nothing charged, tests and private engines).
     breaker: Option<Arc<MemoryBudget>>,
     /// Entries in the order they were stored: (shard, key, the entry's sequence number).
     ring: Mutex<VecDeque<(Weak<Shard>, String, u64)>>,
@@ -75,7 +74,7 @@ impl Budget {
         }
         self.used.fetch_sub(bytes, Ordering::Relaxed);
         if let Some(b) = &self.breaker {
-            crate::breaker::release_cache(b, bytes);
+            b.release(bytes);
         }
     }
 
@@ -92,14 +91,14 @@ impl Budget {
     }
 
     /// Reserves `bytes` under the cap and on the breaker: `false` (nothing reserved) when either
-    /// has no room. A cache is memory to spare: a full breaker caches nothing and trips nothing.
+    /// has no room. A cache is memory to spare: a full budget caches nothing and trips nothing.
     fn reserve(&self, bytes: u64) -> bool {
         let fits = self.used.try_update(Ordering::Relaxed, Ordering::Relaxed, |u| u.checked_add(bytes).filter(|n| *n <= self.cap)).is_ok();
         if !fits {
             return false;
         }
         if let Some(b) = &self.breaker
-            && !crate::breaker::try_hold_cache(b, bytes)
+            && !b.try_reserve(bytes)
         {
             self.used.fetch_sub(bytes, Ordering::Relaxed);
             return false;
@@ -295,14 +294,14 @@ mod tests {
         // Full: "2" (unused) goes, "1" (hit) stays.
         assert!(b.insert("4".into(), entry(), 100));
         assert!(a.contains("1") && !b.contains("2") && a.contains("3") && b.contains("4"));
-        assert_eq!((budget.used(), breaker.held_elsewhere()), (300, 300));
+        assert_eq!((budget.used(), breaker.used()), (300, 300));
         assert_eq!(b.evictions(), 1);
         // Larger than the cap: never stored.
         assert!(!a.insert("5".into(), entry(), 301));
         a.clear();
-        assert_eq!((budget.used(), breaker.held_elsewhere()), (100, 100));
+        assert_eq!((budget.used(), breaker.used()), (100, 100));
         drop(b);
-        assert_eq!((budget.used(), breaker.held_elsewhere()), (0, 0));
+        assert_eq!((budget.used(), breaker.used()), (0, 0));
         // Many shards, each cleared again and again: the ring keeps no more dead places than
         // live ones (plus some slack), without walking it on every insert.
         let shards: Vec<ShardCache> = (0..8).map(|_| ShardCache::new(budget.clone())).collect();

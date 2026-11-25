@@ -157,6 +157,11 @@ pub struct ClusterConfig {
     /// limit is held to [`crate::breaker::REQUEST_MAX_LIMIT`] of it ([`crate::breaker::Breakers::node`]).
     /// `None`: the `request` breaker alone.
     pub request_memory: Option<std::sync::Arc<search_aggs::memory::MemoryBudget>>,
+    /// The node's budget for caches (the shard request cache, compiled scripts), shared by every
+    /// cluster on the node and set by its operator: the parent of the cluster's
+    /// [`Cluster::cache_memory`]. Outside request admission, so caches never crowd out requests,
+    /// and bounded, so together they never take more than it. `None`: the cluster's own caps.
+    pub cache_memory: Option<std::sync::Arc<search_aggs::memory::MemoryBudget>>,
     /// Without a [`ClusterConfig::sealer`], store the secrets clients give in the clear rather
     /// than refuse them ([`crate::seal`]): local development and tests only.
     pub unsealed_secrets: bool,
@@ -191,6 +196,7 @@ impl ClusterConfig {
             embedder: None,
             secret_refs: None,
             request_memory: None,
+            cache_memory: None,
             unsealed_secrets: false,
             reindex_node: None,
         }
@@ -238,6 +244,9 @@ pub struct Cluster {
     pub scripts: Arc<crate::scripting::ScriptService>,
     /// The shard request cache's cap and charge ([`crate::engine::request_cache`]).
     pub request_cache: Arc<crate::engine::request_cache::Budget>,
+    /// What the cluster's caches (request cache, compiled scripts) hold, charged to the node's
+    /// cache budget ([`ClusterConfig::cache_memory`]).
+    pub cache_memory: Arc<search_aggs::memory::MemoryBudget>,
     /// Open scrolls and points in time.
     pub contexts: crate::search::contexts::Contexts,
     /// Scrolls and points in time over linked remote clusters ([`crate::remote::contexts`]).
@@ -732,18 +741,21 @@ impl Cluster {
         // Kept async results count against what this cluster's requests may hold.
         let xpack = crate::xpack::Runtime::default();
         xpack.results.charge_to(breakers.request_budget().clone());
-        // And stored task results, and compiled scripts.
+        // And stored task results.
         let tasks = TaskRegistry::default();
         tasks.charge_to(breakers.request_budget().clone());
+        // Caches aren't requests (Elasticsearch charges them to no breaker): they are charged to
+        // the cluster's cache budget, a child of the node's ([`ClusterConfig::cache_memory`]).
+        let cache_memory = search_aggs::memory::MemoryBudget::with_parent(u64::MAX, config.cache_memory.clone());
         let scripts = Arc::new(crate::scripting::ScriptService::default());
-        scripts.charge_to(breakers.request_budget().clone());
-        // So do the request cache's entries, together at most `indices.requests.cache.size` (a
-        // static node setting: 1% of the node's budget for requests by default, as
-        // Elasticsearch's is 1% of its heap).
+        scripts.charge_to(cache_memory.clone());
+        // The request cache's entries hold at most `indices.requests.cache.size` (a static node
+        // setting: 1% of the node's budget for requests by default, as Elasticsearch's is 1% of
+        // its heap), and what the node's cache budget has room for.
         let request_cache = {
             let heap = config.request_memory.as_ref().map_or_else(|| crate::breaker::Breakers::node_budget(None).limit(), |b| b.limit()).min(i64::MAX as u64) as i64;
             let size = config.node_setting("indices.requests.cache.size").and_then(|v| crate::breaker::memory_size(v, heap)).unwrap_or_else(|| (heap.max(0) / 100) as u64);
-            Arc::new(crate::engine::request_cache::Budget::new(size, Some(breakers.request_budget().clone())))
+            Arc::new(crate::engine::request_cache::Budget::new(size, Some(cache_memory.clone())))
         };
         Ok(Cluster {
             analytics,
@@ -771,6 +783,7 @@ impl Cluster {
             engine: Default::default(),
             scripts,
             request_cache,
+            cache_memory,
             contexts: Default::default(),
             ccs_contexts: Default::default(),
             ingest: Default::default(),
@@ -797,12 +810,6 @@ impl Cluster {
         self.jobs.kick(self);
         // Restores from Elasticsearch repositories a previous owner left running go on here.
         crate::api::snapshots::resume_elasticsearch_restores(self);
-    }
-
-    /// What its caches hold (the shard request cache, compiled scripts): charged to its own
-    /// `request` limit only ([`crate::breaker::try_hold_cache`]); its node counts them resident.
-    pub fn cache_bytes(&self) -> u64 {
-        self.request_cache.used() + self.scripts.engine.cache_bytes()
     }
 
     /// A strong handle for background work, when enabled.

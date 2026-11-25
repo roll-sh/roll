@@ -1274,16 +1274,18 @@ Checked against Elasticsearch 9.5.5 (captures in
 - A point in time keeps only its alias filters: each search on it applies its reader's document
   and field level security as the roles are then, as Elasticsearch does (a scroll keeps its
   opener's, as Elasticsearch's scroll context does).
-- The shard request cache charges each entry what it holds (its aggregations and key) to the
-  cluster's `request` limit until it goes, and the cluster's entries together hold at most
-  `indices.requests.cache.size` (1% of the node's budget), the least recently used going first.
-  Searches on a point in time don't use it. Compiled scripts hold at most 32 MiB, charged the
-  same way. Both are caches: they count against their own cluster's limit only, and the node
-  counts them as the cluster's resident memory (unloading idle clusters to make room), not in
-  its budget for requests, where they would never give way to another cluster's request
-  (Elasticsearch charges its caches to no breaker). Stored `_tasks` results hold at most 64 MiB
-  per cluster on `request` and the node's budget (a by-query result keeps its first 100
-  `failures`, with `failures_truncated` counting the rest).
+- The shard request cache charges each entry what it holds (its aggregations and key) until it
+  goes, and the cluster's entries together hold at most `indices.requests.cache.size` (1% of the
+  node's budget), the least recently used going first. Searches on a point in time don't use
+  it. Compiled scripts hold at most 32 MiB per cluster. Both are caches, charged to no breaker
+  (as in Elasticsearch) but to the node's cache budget, which every cluster's caches share: 2%
+  of the node's budget (`cache_memory`), taken out of its budget for requests, so caches never
+  crowd out requests and requests, residents and caches together stay within the node's
+  memory. An entry that doesn't fit is answered uncached. Node stats show the request cache's
+  limit (`indices.request_cache.limit_size_in_bytes`: the cluster's cap within the node's cache
+  budget). Stored `_tasks` results hold at most 64 MiB per cluster on `request` and the node's
+  budget (a by-query result keeps its first 100 `failures`, with `failures_truncated` counting
+  the rest).
 - roll's differences in the `request` breaker, because one node serves many clusters:
   - everything charged to it (aggregations, ES|QL, kept results and contexts, buffered
     `_msearch` responses, snapshot transfers) is also charged to the node's budget, which only

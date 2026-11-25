@@ -89,20 +89,6 @@ impl MemoryBudget {
         self.elsewhere.load(Ordering::Relaxed)
     }
 
-    /// Adds `bytes` to what is held elsewhere when this budget's own limit has room for them
-    /// (what it holds included), and otherwise does nothing: memory its limit covers that the
-    /// parent never sees (a child's caches, which the node counts as resident instead).
-    pub fn try_add_held_elsewhere(&self, bytes: u64) -> bool {
-        let limit = self.limit();
-        let used = self.used();
-        self.elsewhere.try_update(Ordering::Relaxed, Ordering::Relaxed, |e| e.checked_add(bytes).filter(|n| n.saturating_add(used) <= limit)).is_ok()
-    }
-
-    /// Takes `bytes` back from what is held elsewhere.
-    pub fn sub_held_elsewhere(&self, bytes: u64) {
-        let _ = self.elsewhere.try_update(Ordering::Relaxed, Ordering::Relaxed, |e| Some(e.saturating_sub(bytes)));
-    }
-
     pub fn used(&self) -> u64 {
         self.used.load(Ordering::Relaxed)
     }

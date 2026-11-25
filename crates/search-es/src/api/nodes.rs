@@ -752,7 +752,7 @@ pub fn breaker_stats(cluster: &Cluster, st: &crate::meta::ClusterState, m: &Node
         .map(|(name, limit_default, overhead)| match name {
             "request" => {
                 let b = cluster.breakers.request(cluster, st);
-                (name, b.limit().min(i64::MAX as u64) as i64, overhead, crate::breaker::request_held(&b) as i64, b.tripped() as i64)
+                (name, b.limit().min(i64::MAX as u64) as i64, overhead, b.used() as i64, b.tripped() as i64)
             }
             "inflight_requests" => (name, limit("network.breaker.inflight_requests.limit", "100%"), overhead, in_flight, in_flight_tripped),
             "parent" => (name, limit("indices.breaker.total.limit", "95%"), overhead, parent, parent_tripped),
@@ -828,6 +828,13 @@ fn node_indices_stats(ctx: &Ctx) -> EsResult<Value> {
     put_vectors(&mut idx, &node_vectors);
     for i in &open {
         crate::api::indices::add_index_stats(ctx.cluster, i, &mut idx, None);
+    }
+    // The most the cluster's request cache may hold: its own cap, within the node's cache
+    // budget (Elasticsearch's node cache holds `indices.requests.cache.size`). What it holds is
+    // the cluster's own `memory_size_in_bytes`, never other tenants'.
+    if let Some(Value::Obj(rc)) = idx.as_object_mut().and_then(|o| o.get_mut("request_cache")) {
+        let node = ctx.cluster.cache_memory.parent().map_or(u64::MAX, |p| p.limit());
+        rc.insert("limit_size_in_bytes".into(), Value::from(ctx.cluster.request_cache.cap().min(node).min(i64::MAX as u64) as i64));
     }
     if let Some(o) = idx.as_object_mut() {
         if os {

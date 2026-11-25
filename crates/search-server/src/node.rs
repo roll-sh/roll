@@ -143,6 +143,10 @@ pub struct NodeConfig {
     /// `circuit_breaking_exception`. `None`: no node budget for loaded clusters, and half of the
     /// host's memory for residents and requests.
     pub memory_budget: Option<u64>,
+    /// What every cluster's caches (shard request caches, compiled scripts) may hold together,
+    /// in bytes, taken out of the node's budget for requests (`None`: 2% of it). Outside request
+    /// admission, so caches never crowd out requests: an entry that doesn't fit isn't cached.
+    pub cache_memory: Option<u64>,
     /// Memory documents being inverted may add to the indexing buffers of every cluster at once
     /// (`search_index::buffer::AnalysisBudget`); past it a document is refused with a 429
     /// `circuit_breaking_exception`. `None`: a quarter of `memory_budget`, or 1 GiB without one.
@@ -208,6 +212,7 @@ impl Default for NodeConfig {
             lease_ttl: DEFAULT_LEASE_TTL,
             max_in_flight_bytes: None,
             memory_budget: None,
+            cache_memory: None,
             max_analysis_bytes: None,
             unload_memory_only: false,
             snapshot_leftover_grace: search_es::api::snapshots::LEFTOVER_GRACE,
@@ -424,6 +429,10 @@ pub struct Node {
     /// [`search_es::breaker::Breakers::node_budget`]). The reaper tells it what clusters hold
     /// resident ([`Node::enforce_memory`]); requests get the rest.
     pub request_memory: Arc<search_es::breaker::MemoryBudget>,
+    /// What every cluster's caches hold together ([`NodeConfig::cache_memory`]): the parent of
+    /// each cluster's cache budget, its limit taken out of [`Node::request_memory`]'s, so
+    /// requests, residents and caches together stay within the node's budget.
+    pub cache_memory: Arc<search_es::breaker::MemoryBudget>,
     /// Request body bytes in flight across clusters (`NodeConfig::max_in_flight_bytes`).
     body_bytes: Arc<ByteBudget>,
     /// Memory documents being inverted may add to every cluster's buffers at once
@@ -1092,11 +1101,16 @@ impl Node {
         };
         let audit = crate::audit::AuditLogs::new(stores.data(), cfg.audit.clone());
         let request_memory = search_es::breaker::Breakers::node_budget(cfg.memory_budget);
+        let node_limit = request_memory.limit();
+        let cache_limit = cfg.cache_memory.unwrap_or(node_limit / 50).min(node_limit);
+        request_memory.set_limit(node_limit - cache_limit);
+        let cache_memory = search_es::breaker::MemoryBudget::new(cache_limit);
         // Reindex from remote's own budgets are part of the node's: children of it.
         let reindex = search_es::api::remote::RemoteNode::from_settings_under(&cfg.node_settings, Some(request_memory.clone()));
         Arc::new(Node {
             audit,
             request_memory,
+            cache_memory,
             body_bytes: ByteBudget::new(cfg.max_in_flight_bytes.unwrap_or(usize::MAX)),
             analysis: search_index::buffer::AnalysisBudget::new(cfg.analysis_limit()),
             reindex,
@@ -1425,6 +1439,7 @@ impl Node {
         cfg.file_service_tokens = self.reads_file_service_tokens(&spec.name);
         cfg.audit = Some(search_es::xpack::security::audit::AuditLog(self.audit.clone()));
         cfg.request_memory = Some(self.request_memory.clone());
+        cfg.cache_memory = Some(self.cache_memory.clone());
         cfg.reindex_node = Some(self.reindex.clone());
         let mut cluster = Cluster::open(cfg, store).await?;
         *cluster.reindex_whitelist.write() = spec.reindex_whitelist.clone();
@@ -1901,11 +1916,6 @@ impl Node {
                 }
             }
         }
-        // Its caches are the cluster's resident memory too (charged to its own `request` limit
-        // only, [`search_es::breaker::try_hold_cache`]): unloading it gives them back.
-        for (l, r) in sizes.iter_mut() {
-            *r += l.cluster.cache_bytes();
-        }
         let mut evicted = Vec::new();
         // One budget: what the clusters and the node's embedding model (its batches included)
         // hold resident leaves the rest to requests.
@@ -1914,7 +1924,8 @@ impl Node {
         let Some(budget) = self.cfg.memory_budget else { return evicted };
         // Residents and requests share the budget, and requests can't be evicted: idle clusters
         // make room for both.
-        let over = |total: u64| total.saturating_add(self.request_memory.used()).saturating_add(room) > budget;
+        // Caches hold at most their own budget, outside requests' (taken out of it).
+        let over = |total: u64| total.saturating_add(self.request_memory.used()).saturating_add(self.cache_memory.used()).saturating_add(room) > budget;
         if !over(total) {
             return evicted;
         }
