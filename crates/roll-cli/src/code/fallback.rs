@@ -28,6 +28,7 @@ use agent_host::github;
 /// says so where it would open the pull request.
 #[cfg(not(unix))]
 mod github {
+    #[allow(dead_code)]
     pub struct PullRequest<'a> {
         pub web_url: &'a str,
         pub owner: &'a str,

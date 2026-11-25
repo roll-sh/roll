@@ -17,6 +17,7 @@
 use clap::Subcommand;
 
 #[derive(Subcommand)]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub enum Agent {
     /// Connect this machine to roll: shows a code to confirm in the dashboard.
     Login {
