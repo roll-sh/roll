@@ -1131,7 +1131,7 @@ fn origin_of(url: &str) -> Option<String> {
 
 /// When each search branch's copies of its parent's browser keys were last checked against the
 /// parent ([`Search::serve`]): at most once a minute, as listing keys wakes both clusters.
-static PRUNED: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashMap<String, std::time::Instant>>> = std::sync::LazyLock::new(Default::default);
+static PRUNED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>> = std::sync::LazyLock::new(Default::default);
 
 /// What a search branch's own browser keys are kept as, and the variable the preview reads them
 /// from ([`Search::kept_for`]).
@@ -1335,7 +1335,7 @@ impl Brancher for Search {
         }
         if has_keys {
             let due = {
-                let mut last = PRUNED.lock();
+                let mut last = PRUNED.lock().unwrap_or_else(|e| e.into_inner());
                 let now = std::time::Instant::now();
                 match last.get(branch) {
                     Some(t) if now.duration_since(*t) < std::time::Duration::from_secs(60) => false,
