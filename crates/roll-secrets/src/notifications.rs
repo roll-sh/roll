@@ -51,6 +51,12 @@ const HOLD_MS: i64 = 2 * 60_000;
 const RETRY_MS: [i64; 2] = [60_000, 5 * 60_000];
 /// Events a subscription is sent per pass: a burst arrives over a few passes, not at once.
 const PER_PASS: i64 = 20;
+/// Subscriptions a pass takes, the longest waiting first.
+const TAKE: i64 = 200;
+/// Messages a pass sends, and how long one subscription's sends may take in it: the rest go on
+/// the next pass, so no subscription holds a pass.
+const SENDS_PER_PASS: usize = 200;
+const TURN_MS: i64 = 10_000;
 /// Subscriptions per person per project.
 const MAX_PER_PERSON: i64 = 20;
 /// The longest message sent.
@@ -295,16 +301,21 @@ impl Secrets {
         let due: Vec<Due> = self.db.read(|c| {
             c.query(
                 "SELECT n.id, n.project_id, n.user_id, n.kinds, n.environment, n.channel, n.install, n.target, n.cursor, n.tries FROM notifications n
-                 WHERE n.state = 'active' AND n.running_until <= ? AND n.retry_at <= ?
-                 AND EXISTS (SELECT 1 FROM audit_heads h WHERE h.project_id = n.project_id AND h.seq > n.cursor) LIMIT 200",
-                params![now, now],
+                 WHERE n.state = 'active' AND n.due_at <= ? AND n.running_until <= ? AND n.retry_at <= ?
+                 AND EXISTS (SELECT 1 FROM audit_heads h WHERE h.project_id = n.project_id AND h.seq > n.cursor) ORDER BY n.due_at LIMIT ?",
+                params![now, now, now, TAKE],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?)),
             )
         })?;
         let (mut sent, mut failed) = (0, 0);
         for (id, project, user, kinds, environment, platform, install, target, cursor, tries) in due {
-            let mut hold = now + HOLD_MS;
-            if self.db.write(|c| c.execute("UPDATE notifications SET running_until = ? WHERE id = ? AND running_until <= ? AND cursor = ? AND state = 'active'", params![hold, id, now, cursor]))? != 1 {
+            if sent >= SENDS_PER_PASS {
+                break;
+            }
+            // Taken: behind every subscription taken before it on the next pass.
+            let taken = self.db.now_ms()?;
+            let mut hold = taken + HOLD_MS;
+            if self.db.write(|c| c.execute("UPDATE notifications SET running_until = ?, due_at = ? WHERE id = ? AND running_until <= ? AND cursor = ? AND state = 'active'", params![hold, taken, id, taken, cursor]))? != 1 {
                 continue;
             }
             let release = |hold: i64| -> Result<usize> { Ok(self.db.write(|c| c.execute("UPDATE notifications SET running_until = 0 WHERE id = ? AND running_until = ?", params![id, hold]))?) };
@@ -364,8 +375,15 @@ impl Secrets {
             let name = self.workspace.get(roll_workspace::Scope::All, &project).map(|p| p.name).unwrap_or_else(|_| project.clone());
             let (mut at, mut stopped) = (cursor, false);
             for e in &page.events {
+                let t = self.db.now_ms()?;
+                if sent >= SENDS_PER_PASS || t >= taken + TURN_MS {
+                    // The rest on the next pass; what's sent stays sent.
+                    release(hold)?;
+                    stopped = true;
+                    break;
+                }
                 // The delivery's claim: still ours, the cursor where we left it.
-                let next_hold = self.db.now_ms()? + HOLD_MS;
+                let next_hold = t + HOLD_MS;
                 if self.db.write(|c| c.execute("UPDATE notifications SET running_until = ? WHERE id = ? AND running_until = ? AND cursor = ? AND state = 'active'", params![next_hold, id, hold, at]))? != 1 {
                     stopped = true;
                     break;
@@ -393,7 +411,7 @@ impl Secrets {
                             self.db.write(|c| c.execute("UPDATE notifications SET cursor = ?, tries = 0, error = ?, error_at = ?, running_until = 0 WHERE id = ? AND running_until = ?", params![e.seq, why, t, id, hold]))?;
                         } else {
                             let wait = RETRY_MS[tries as usize - 1];
-                            self.db.write(|c| c.execute("UPDATE notifications SET tries = ?, error = ?, error_at = ?, retry_at = ?, running_until = 0 WHERE id = ? AND running_until = ?", params![tries, why, t, t + wait, id, hold]))?;
+                            self.db.write(|c| c.execute("UPDATE notifications SET tries = ?, error = ?, error_at = ?, retry_at = ?, due_at = ?, running_until = 0 WHERE id = ? AND running_until = ?", params![tries, why, t, t + wait, t + wait, id, hold]))?;
                         }
                         stopped = true;
                         break;
