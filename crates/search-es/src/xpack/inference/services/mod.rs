@@ -465,6 +465,16 @@ impl Service {
         }
     }
 
+    /// Whether [`Service::stream_chat`] serves it: a chat completion with a system message (what
+    /// `crate::xpack::chat` needs).
+    pub fn streams_chat(self) -> bool {
+        match self {
+            Service::OpenAi | Service::Anthropic | Service::AzureOpenAi | Service::VertexAi | Service::Mistral | Service::DeepSeek | Service::HuggingFace => true,
+            Service::Test(k) => k == test::Kind::Streaming,
+            _ => false,
+        }
+    }
+
     /// A streamed chat completion (the unified API's chunks), its upstream answer open.
     pub async fn stream_chat(self, cluster: &Cluster, ep: &Endpoint, body: &Value, timeout: Duration) -> EsResult<Streaming> {
         match self {

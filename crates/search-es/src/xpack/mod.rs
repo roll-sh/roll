@@ -17,6 +17,7 @@
 pub mod async_results;
 pub mod async_search;
 pub mod autoscaling;
+pub mod chat;
 pub mod downsample;
 pub mod enrich;
 pub mod entsearch;
@@ -80,6 +81,8 @@ pub struct Runtime {
     pub connector_syncs: entsearch::sync::Syncs,
     /// What the audit log records, as of a state version ([`security::audit::snapshot`]).
     pub audit: parking_lot::Mutex<Option<(u64, std::sync::Arc<security::audit::Snapshot>)>>,
+    /// Chat answers' limits ([`chat::limits`]).
+    pub chat: std::sync::Arc<chat::limits::Limiter>,
 }
 
 /// The `_nodes` header plus the node, as the cache-clearing APIs answer.
@@ -290,6 +293,12 @@ handlers! { ctx;
     InferenceInference | InferenceTextEmbedding | InferenceSparseEmbedding | InferenceRerank | InferenceCompletion | InferenceEmbedding => inference::infer(ctx).await,
     InferenceStreamCompletion | InferenceChatCompletionUnified => inference::stream_route(ctx).await,
     InferencePutRegionPolicy => inference::region::put(ctx).await,
+    RollChatPutProfile => chat::put(ctx).await,
+    RollChatGetProfile => chat::get(ctx),
+    RollChatDeleteProfile => chat::delete(ctx).await,
+    RollChatAnswer => chat::answer(ctx).await,
+    RollChatCompletions => chat::openai::completions(ctx).await,
+    RollChatModels => chat::openai::models(ctx),
     InferenceGetRegionPolicy => inference::region::get(ctx),
     InferenceDeleteRegionPolicy => inference::region::delete(ctx).await,
     MlPutDataFrameAnalytics => ml::dfa::put(ctx).await,

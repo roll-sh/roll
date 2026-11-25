@@ -401,6 +401,14 @@ pub fn authenticate_header(cluster: &Cluster, header: &str, uri: &str) -> EsResu
         return api_keys::authenticate(cluster, value);
     }
     if scheme.eq_ignore_ascii_case("bearer") {
+        // OpenAI SDKs send an API key as Bearer (`crate::xpack::chat::openai`).
+        let path = uri.split('?').next().unwrap_or(uri);
+        if crate::xpack::chat::openai::bearer_is_api_key(path, value) {
+            if derived::is_derived(value) {
+                return derived::authenticate(cluster, value);
+            }
+            return api_keys::authenticate(cluster, value);
+        }
         return tokens::authenticate_bearer(cluster, value);
     }
     // Other schemes present no credentials Elasticsearch's realms understand.
@@ -664,7 +672,10 @@ tokio::task_local! {
 /// `Workflow`s: the workflow a REST API starts (`WorkflowResolver`).
 fn workflow_of(api: &str) -> Option<&'static str> {
     match api {
-        "search_application.search" => Some("search_application_query"),
+        // roll's chat answers run a search application's search too (docs/search/rag.md): a
+        // key restricted to the workflow runs the profiles over its application
+        // (`crate::xpack::chat::run` refuses it a profile over an index).
+        "search_application.search" | "roll.chat.answer" | "roll.chat.completions" | "roll.chat.models" => Some("search_application_query"),
         _ => None,
     }
 }
@@ -674,6 +685,14 @@ fn workflow_of(api: &str) -> Option<&'static str> {
 pub fn in_workflow<F: std::future::Future>(ctx: &Ctx<'_>, f: F) -> impl std::future::Future<Output = F::Output> {
     let w = WORKFLOW.try_with(|w| *w).unwrap_or_else(|_| workflow_of(ctx.api.name()));
     WORKFLOW.scope(w, f)
+}
+
+/// Whether the request's principal is an API key restricted to workflows
+/// (`restriction.workflows`), by its own role descriptors or a derived key's narrowing.
+pub fn workflow_restricted(ctx: &Ctx) -> bool {
+    let Some(AuthKind::ApiKey(a)) = ctx.principal.get().map(|p| &p.kind) else { return false };
+    let restricted = |v: &Value| v.as_object().is_some_and(|m| m.values().any(|d| d.pointer(&["restriction", "workflows"]).is_some()));
+    restricted(&a.role_descriptors) || a.derived.as_ref().is_some_and(|d| restricted(&d.narrowing))
 }
 
 /// An API key whose role descriptors restrict it to workflows (`restriction.workflows`) may

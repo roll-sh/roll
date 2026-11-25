@@ -310,7 +310,7 @@ fn check(dict: Option<&Value>, params: &Map) -> EsResult<()> {
 
 /// Renders the template. `_render_query` validates the merged params against the dictionary,
 /// `_search` only the request's (as Elasticsearch does).
-fn render(ctx: &Ctx, app: &Value, req: &Map, validate_merged: bool) -> EsResult<Value> {
+pub(crate) fn render(ctx: &Ctx, app: &Value, req: &Map, validate_merged: bool) -> EsResult<Value> {
     let params = merged_params(app, req);
     let dict = app.pointer(&["template", "dictionary"]);
     if validate_merged {

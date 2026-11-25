@@ -67,13 +67,49 @@ impl Streaming {
                 Box::pin(futures::stream::iter([Bytes::from(out)]))
             }
             Streaming::Live { opened, decode } => {
-                let state = Live { opened, decode, reader: Reader::default(), id, task, done: false };
-                Box::pin(futures::stream::unfold(state, |mut s| async move {
-                    let piece = s.step().await?;
+                let state = Live { opened, decode, reader: Reader::default(), id, done: false };
+                Box::pin(futures::stream::unfold(state, move |mut s| async move {
+                    let piece = match s.values().await? {
+                        Ok(values) => {
+                            let mut out = String::new();
+                            values.iter().for_each(|v| message(&mut out, &v.to_json()));
+                            if s.done {
+                                message(&mut out, "[DONE]");
+                            }
+                            Bytes::from(out)
+                        }
+                        Err(e) => Bytes::from(error_event(task, &e)),
+                    };
                     Some((piece, s))
                 }))
             }
         }
+    }
+
+    /// The answer's decoded events as they come, for roll's own use of a stream (the chat
+    /// engine, `crate::xpack::chat`): each item is what one read of the upstream made; an error
+    /// ends it. Bounded as [`Streaming::into_sse`] is.
+    pub fn into_values(self, id: String) -> Values {
+        match self {
+            Streaming::Ready(events) => Values { live: None, ready: Some(events) },
+            Streaming::Live { opened, decode } => Values { live: Some(Live { opened, decode, reader: Reader::default(), id, done: false }), ready: None },
+        }
+    }
+}
+
+/// A stream's decoded events ([`Streaming::into_values`]); dropping it closes the upstream.
+pub struct Values {
+    live: Option<Live>,
+    ready: Option<Vec<Value>>,
+}
+
+impl Values {
+    /// The next read's events (`None`: the stream ended; an `Err` ends it too).
+    pub async fn next(&mut self) -> Option<EsResult<Vec<Value>>> {
+        if let Some(r) = self.ready.take() {
+            return Some(Ok(r));
+        }
+        self.live.as_mut()?.values().await
     }
 }
 
@@ -82,51 +118,39 @@ struct Live {
     decode: Decode,
     reader: Reader,
     id: String,
-    task: TaskType,
+    /// The upstream's body ended or failed: nothing more comes.
     done: bool,
 }
 
 impl Live {
-    /// The next piece of the answer: the events one read of the upstream made, or its end.
-    async fn step(&mut self) -> Option<Bytes> {
+    /// The events the next read of the upstream made (skipping reads that made none), the
+    /// last events at its end (`done` is then set), or the error that ends it.
+    async fn values(&mut self) -> Option<EsResult<Vec<Value>>> {
         if self.done {
             return None;
         }
         loop {
             let piece = match next(&mut self.opened, &self.id).await {
                 Ok(p) => p,
-                Err(e) => return Some(self.fail(&e)),
+                Err(e) => {
+                    self.done = true;
+                    return Some(Err(e));
+                }
             };
             let Some(piece) = piece else {
                 self.done = true;
                 let rest = self.reader.finish();
-                let mut out = String::new();
-                if !rest.is_empty() {
-                    match (self.decode)(&rest) {
-                        Ok(values) => values.iter().for_each(|v| message(&mut out, &v.to_json())),
-                        Err(e) => return Some(self.fail(&e)),
-                    }
+                return Some(if rest.is_empty() { Ok(Vec::new()) } else { (self.decode)(&rest) });
+            };
+            match self.reader.feed(&piece, &self.id).and_then(|events| if events.is_empty() { Ok(vec![]) } else { (self.decode)(&events) }) {
+                Ok(v) if v.is_empty() => continue,
+                Ok(v) => return Some(Ok(v)),
+                Err(e) => {
+                    self.done = true;
+                    return Some(Err(e));
                 }
-                message(&mut out, "[DONE]");
-                return Some(Bytes::from(out));
-            };
-            let values = match self.reader.feed(&piece, &self.id).and_then(|events| if events.is_empty() { Ok(vec![]) } else { (self.decode)(&events) }) {
-                Ok(v) => v,
-                Err(e) => return Some(self.fail(&e)),
-            };
-            if values.is_empty() {
-                continue;
             }
-            let mut out = String::new();
-            values.iter().for_each(|v| message(&mut out, &v.to_json()));
-            return Some(Bytes::from(out));
         }
-    }
-
-    /// The error event that ends the stream.
-    fn fail(&mut self, e: &EsError) -> Bytes {
-        self.done = true;
-        Bytes::from(error_event(self.task, e))
     }
 }
 

@@ -328,7 +328,7 @@ pub async fn serve_front(listener: tokio::net::TcpListener, control: Arc<crate::
 async fn rest(c: Arc<crate::Control>, req: axum::extract::Request) -> axum::response::Response {
     let node = c.node.clone();
     let fleet = c.cluster_leases().map(|l| l.cluster().clone());
-    let name = fleet.as_ref().and_then(|_| search_server::auth::cluster_named(req.headers(), node.domain()));
+    let name = fleet.as_ref().and_then(|_| search_server::auth::cluster_named(req.headers(), req.uri().path(), node.domain()));
     let (Some(cluster), Some(name)) = (fleet, name) else { return local(node, req).await };
     let original = req.uri().clone();
     let pq = original.path_and_query().map_or("/", |p| p.as_str());
