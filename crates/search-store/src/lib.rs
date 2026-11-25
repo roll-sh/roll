@@ -1065,6 +1065,18 @@ impl Store {
         bail!("the latest state of cluster [{cluster}] kept disappearing while being read")
     }
 
+    /// The oldest retained cluster state (`None` if the cluster has none).
+    pub async fn read_cluster_oldest(&self, cluster: &str) -> anyhow::Result<Option<ClusterState>> {
+        keys::validate_cluster(cluster)?;
+        for v in self.list_versions(&keys::state_prefix(cluster), ".json.zst").await? {
+            // Retention may remove the oldest meanwhile: the next is then the oldest.
+            if let Some(s) = self.get_state(cluster, v).await? {
+                return Ok(Some(s));
+            }
+        }
+        Ok(None)
+    }
+
     /// Every retained cluster state, oldest first.
     pub async fn read_cluster_history(&self, cluster: &str) -> anyhow::Result<Vec<ClusterState>> {
         keys::validate_cluster(cluster)?;

@@ -720,9 +720,33 @@ pub fn mtermvectors(ctx: &Ctx) -> EsResult<Reply> {
             items.push((default_index.clone(), Some(i.to_string()), None, base.clone()));
         }
     }
+    // Documents are read per shard, each shard request authorized on the names its documents
+    // were asked by (the request itself only by its action, as a multi get); one that doesn't
+    // resolve fails on its own first.
+    let denied: Vec<Option<EsError>> = if crate::xpack::security::checks_items(ctx) {
+        let resolved: Vec<Option<(String, (String, u32))>> = items
+            .iter()
+            .map(|(index, id, _, opts)| {
+                let index = index.as_deref().unwrap_or_default();
+                let idx = crate::api::document::single_index(ctx, index).ok()?;
+                let routing = opts.get("routing").map(Value::to_es_string);
+                Some((index.to_string(), (idx.name.clone(), crate::meta::routing::shard_for(&idx, id.as_deref().unwrap_or(""), routing.as_deref()))))
+            })
+            .collect();
+        let docs: Vec<(String, (String, u32))> = resolved.iter().flatten().cloned().collect();
+        let mut checked = crate::xpack::security::authorize_term_vectors(ctx, &docs).into_iter();
+        resolved.iter().map(|r| r.as_ref().and_then(|_| checked.next().flatten())).collect()
+    } else {
+        Vec::new()
+    };
     let mut out = Vec::new();
-    for (index, id, doc, opts) in items {
+    for (n, (index, id, doc, opts)) in items.into_iter().enumerate() {
         let index = index.unwrap_or_default();
+        if let Some(e) = denied.get(n).cloned().flatten() {
+            let shown = crate::api::document::single_index(ctx, &index).map(|i| i.name.clone()).unwrap_or(index);
+            out.push(obj! { "_index" => shown, "_id" => id.unwrap_or_default(), "error" => crate::opensearch::item_error(ctx, &e, true) });
+            continue;
+        }
         // `TransportMultiTermVectorsAction` resolves aliases itself, with its own message.
         let r = termvectors_one(ctx, &index, id.as_deref(), doc.as_ref(), &opts).map_err(|e| {
             let reason = e.reason().to_string();

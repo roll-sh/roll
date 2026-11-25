@@ -43,6 +43,7 @@ pub use search_es::breaker::request_max_limit;
 pub use search_es::xpack::entsearch::sync::ALLOW_PRIVATE as CONNECTORS_ALLOW_PRIVATE;
 /// Node setting that lets inference endpoints reach private addresses (local development, tests).
 pub use search_es::xpack::inference::http::ALLOW_PRIVATE as INFERENCE_ALLOW_PRIVATE;
+pub use search_es::xpack::inference::semantic::UNEMBEDDED_HEADER;
 pub use search_es::api::remote::ALLOW_PRIVATE as REINDEX_ALLOW_PRIVATE;
 pub use search_es::api::remote::MAX_DURATION as REINDEX_MAX_DURATION;
 /// Node setting: the URL roll calls for every Algolia application (tests; an operator's proxy).

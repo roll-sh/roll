@@ -1,0 +1,17 @@
+# winget's locale manifest.
+PackageIdentifier: RollSh.Roll
+PackageVersion: {{VERSION}}
+PackageLocale: en-US
+Publisher: roll
+PublisherUrl: https://roll.sh
+PackageName: roll
+PackageUrl: https://github.com/roll-sh/roll
+License: See the repository
+ShortDescription: roll's command-line interface (roll run, roll secrets, roll code, roll apps)
+Moniker: roll
+Tags:
+  - secrets
+  - cli
+ReleaseNotesUrl: https://github.com/roll-sh/roll/releases/tag/{{TAG}}
+ManifestType: defaultLocale
+ManifestVersion: 1.9.0

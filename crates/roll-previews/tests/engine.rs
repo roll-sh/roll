@@ -267,7 +267,7 @@ async fn a_screenshot_run_says_what_it_left_out() {
     let mut png = Vec::new();
     image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 0, 255])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
     *e.apps.shot.lock() = Some(png);
-    let left = roll_previews::Skipped { pages: vec!["/old".into()], stories: 12, first_stories: vec!["button--danger".into()] };
+    let left = roll_previews::Skipped { pages: vec!["/old".into()], stories: 12, first_stories: vec!["button--danger".into()], ..Default::default() };
     *e.apps.skipped.lock() = left.clone();
     e.code.open(change("chg_cut", 4));
     for _ in 0..3 {
