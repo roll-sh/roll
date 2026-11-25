@@ -4561,13 +4561,13 @@ secret key is, open the archive there, and write nothing:
   `--latest-from-bucket`, the schedule's newest, read through `GET …/backup/latest` still sealed)
   compares it with the live project (`POST …/backup/verify`, admin, audited `backup.verify`):
   counts of environments, keys, registrations, identities and syncs; key names missing, changed
-  (value, link or comments compared by fingerprint, here and never answered) or added since;
+  (value or link compared by fingerprint, here and never answered) or added since;
   registrations missing or changed (key, certificate, credential); settings that differ; and the
   registrations a backup doesn't carry. A sensitive key's value isn't in a backup, so it's never
   compared.
 - `roll secrets restore shop.backup --key … --dry-run` asks the same of the project it would load
-  into: what it would bring back, which registrations it would keep as they are, and whether the
-  project still has keys (then it fails, as the restore would).
+  into: what it would bring back, whether that project has registrations already (one by the same
+  name is kept as it is), and whether it still has keys (then it fails, as the restore would).
 
 **Scheduled backups** (Vault's automated snapshots, Akeyless' DR): `PUT …/backup/schedule
 {bucket, recipient, every_hours?, keep?}` (admin; default every 24 h, keeping 30, at most 500) writes the same

@@ -3769,9 +3769,8 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     n("identities"),
                     n("syncs")
                 );
-                let kept: Vec<String> = r["registrations"]["changed"].as_array().into_iter().flatten().map(s).collect();
-                if !kept.is_empty() {
-                    println!("Kept as they are (this project has one by that name): {}", kept.join(", "));
+                if r["registrations"]["live"].as_u64().unwrap_or(0) > 0 {
+                    println!("{} has {} registrations already: one of the same name is kept as it is, not restored.", c.project, r["registrations"]["live"]);
                 }
                 let left_out: Vec<String> = r["left_out"].as_array().into_iter().flatten().map(s).collect();
                 if !left_out.is_empty() {

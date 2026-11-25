@@ -616,20 +616,20 @@ impl Secrets {
         }
         let live = self.archive(project)?;
         let live_keys: usize = self.db.read(|c| Ok::<_, Error>(c.query_row("SELECT COUNT(*) FROM secrets WHERE project_id = ?", [project], |r| r.get::<_, i64>(0))? as usize))?;
-        let envs = |a: &Archive| a.environments.iter().map(|e| (e.slug.clone(), fingerprint(&(&e.base, &e.labels, e.protected, e.approvals, &e.approvers, &e.folders)))).collect();
-        let keys = |a: &Archive| {
+        let envs = |a: &Archive| -> BTreeMap<String, [u8; 32]> { a.environments.iter().map(|e| (e.slug.clone(), fingerprint(&(&e.base, &e.labels, e.protected, e.approvals, &e.approvers, &e.folders)))).collect() };
+        let keys = |a: &Archive| -> BTreeMap<String, [u8; 32]> {
             a.environments
                 .iter()
                 .flat_map(|e| e.secrets.iter().map(move |s| (key_label(&e.slug, &s.path, &s.key), fingerprint(&(s.link.as_ref().map(Link::fingerprint), &s.value)))))
                 .collect()
         };
-        let registrations = |a: &Archive| {
+        let registrations = |a: &Archive| -> BTreeMap<String, [u8; 32]> {
             let mut out: BTreeMap<String, [u8; 32]> = a.registrations.iter().map(|r| (registration_label(r), fingerprint(&(&r.columns, &r.sealed, &r.certificates)))).collect();
             out.extend(a.encryption_keys.iter().map(|k| (format!("encryption key {}", k.name), fingerprint(&k.versions))));
             out
         };
-        let identities = |a: &Archive| a.identities.iter().map(|r| (format!("identity {}", r.text("name")), fingerprint(&r.columns))).collect();
-        let syncs = |a: &Archive| {
+        let identities = |a: &Archive| -> BTreeMap<String, [u8; 32]> { a.identities.iter().map(|r| (format!("identity {}", r.text("name")), fingerprint(&r.columns))).collect() };
+        let syncs = |a: &Archive| -> BTreeMap<String, [u8; 32]> {
             a.syncs
                 .iter()
                 .map(|r| {

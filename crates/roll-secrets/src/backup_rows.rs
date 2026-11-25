@@ -193,17 +193,18 @@ pub(crate) fn export(c: &Conn<'_>, t: &Table, project: &str, dek: &Dek, now: i64
     })?;
     let mut out = vec![];
     for row in rows {
-        let mut row = row.into_iter();
-        let id = match row.next() {
+        let mut cells = row.into_iter();
+        let id = match cells.next() {
             Some(Cell::Text(id)) => id,
             _ => return Err(Error::Internal(format!("a {} row without an id", t.table))),
         };
         let mut r = Row { kind: t.kind.to_string(), id, columns: Columns::new(), sealed: BTreeMap::new(), certificates: vec![] };
-        for (column, v) in t.plain.iter().zip(row.by_ref()) {
+        for column in t.plain {
+            let v = cells.next().unwrap_or(Cell::Null);
             r.columns.insert(column.to_string(), to_json(t.table, column, v)?);
         }
-        for ((column, aad), v) in t.sealed.iter().zip(row) {
-            if let Cell::Blob(ct) = v {
+        for (column, aad) in t.sealed {
+            if let Some(Cell::Blob(ct)) = cells.next() {
                 r.sealed.insert(column.to_string(), dek.open(&aad(project, &r.id, &r.columns), &ct)?);
             }
         }
@@ -227,15 +228,15 @@ pub(crate) fn import(c: &Conn<'_>, t: &Table, project: &str, id: &str, by: &str,
     let mut columns = vec!["id", "project_id", "created_at", "created_by"];
     let mut values = vec![Cell::Text(id.into()), Cell::Text(project.into()), Cell::Int(now), Cell::Text(by.into())];
     for (column, v) in extra {
-        columns.push(column);
+        columns.push(*column);
         values.push(v.clone());
     }
     for column in t.plain.iter().filter(|p| !extra.iter().any(|(e, _)| e == *p)) {
-        columns.push(column);
+        columns.push(*column);
         values.push(to_cell(t.what, column, r.columns.get(*column))?);
     }
     for (column, aad) in t.sealed {
-        columns.push(column);
+        columns.push(*column);
         values.push(r.sealed.get(*column).map_or(Cell::Null, |v| Cell::Blob(dek.seal(&aad(project, id, &r.columns), v))));
     }
     let marks = vec!["?"; columns.len()].join(", ");
