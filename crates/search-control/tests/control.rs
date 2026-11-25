@@ -1890,6 +1890,86 @@ async fn narrowed_keys() {
     assert_eq!(e.es(ku, kp, reqwest::Method::POST, "/private/_search", Some(json!({}))).await.0, 403);
 }
 
+/// A reindex reads its source as its caller searches it and writes each document as its caller
+/// would: a data key on `tenant-a-*` copies within its indices only, on either flavor, whether
+/// the other index is the source, the destination, or where a script moves a document. On
+/// Elasticsearch, a role with `read` on the source and `write` on the destination reindexes
+/// (no cluster privilege), and copies only what its document and field level security shows.
+#[tokio::test]
+async fn reindex_reads_and_writes_as_its_caller() {
+    let e = env().await;
+    let e = &e;
+    let call = |k: &Value, m: reqwest::Method, path: &str, b: Option<Value>| {
+        let path = path.to_string();
+        let k = k.clone();
+        async move {
+            match k["api_key"].as_str() {
+                Some(key) => as_key(e, key, m, &path, b).await,
+                None => e.es(k["username"].as_str().unwrap(), k["password"].as_str().unwrap(), m, &path, b).await,
+            }
+        }
+    };
+    let reindex = |src: &str, dest: &str| json!({"source": {"index": src}, "dest": {"index": dest}});
+    for flavor in ["elasticsearch", "opensearch"] {
+        let name = format!("rx-{flavor}");
+        let c = e.post("/v1/search/clusters", json!({"name": name, "flavor": flavor})).await;
+        let owner = json!({"username": c["username"], "password": c["password"]});
+        for (path, doc) in [("/tenant-a-1/_doc/1", json!({"t": "a"})), ("/tenant-b/_doc/1", json!({"t": "b"})), ("/.watcher-history-18-2026.11.25/_doc/1", json!({"w": 1}))] {
+            let (s, v) = call(&owner, reqwest::Method::PUT, &format!("{path}?refresh=true"), Some(doc)).await;
+            assert!(s < 300, "{flavor} {path}: {s} {v}");
+        }
+        let count = |index: &str| {
+            let owner = owner.clone();
+            let index = index.to_string();
+            async move { call(&owner, reqwest::Method::GET, &format!("/{index}/_count"), None).await.1["count"].as_i64().unwrap_or(0) }
+        };
+        let key = e.post(&format!("/v1/search/clusters/{name}/keys"), json!({"name": "a", "access": "data", "indices": ["tenant-a-*"]})).await;
+        let post = |p: &str, b: Value| call(&key, reqwest::Method::POST, p, Some(b));
+        let (s, v) = post("/_reindex?refresh=true", reindex("tenant-b", "tenant-a-copy")).await;
+        assert_eq!(s, 403, "{flavor}: reading tenant-b: {v}");
+        let (s, v) = post("/_reindex?refresh=true", reindex("tenant-a-1", "tenant-b")).await;
+        assert_eq!(s, 403, "{flavor}: writing tenant-b: {v}");
+        let moved = json!({"source": {"index": "tenant-a-1"}, "dest": {"index": "tenant-a-moved"}, "script": {"source": "ctx._index = 'tenant-b'; ctx._id = 'x'"}});
+        let (s, v) = post("/_reindex?refresh=true", moved).await;
+        assert_eq!(s, 403, "{flavor}: a script's move into tenant-b: {v}");
+        let deletes = json!({"source": {"index": "tenant-a-1"}, "dest": {"index": "tenant-b"}, "script": {"source": "ctx.op = 'delete'"}});
+        let (s, v) = post("/_reindex?refresh=true", deletes).await;
+        assert_eq!(s, 403, "{flavor}: a script's delete in tenant-b: {v}");
+        assert_eq!(count("tenant-b").await, 1, "{flavor}: tenant-b untouched");
+        // A restricted index: never read (Elasticsearch narrows the wildcard away, OpenSearch
+        // refuses it), never written.
+        let (s, v) = post("/_reindex?refresh=true", reindex(".watcher-history-*", "tenant-a-w")).await;
+        assert!(s == 403 || (s == 200 && v["created"] == 0), "{flavor}: reading .watcher-history-*: {s} {v}");
+        let (s, v) = post("/_reindex?refresh=true", reindex("tenant-a-1", ".watcher-history-18-2026.11.25")).await;
+        assert_eq!(s, 403, "{flavor}: writing .watcher-history: {v}");
+        assert_eq!(count("tenant-a-w").await, 0, "{flavor}");
+        // Within its indices it reindexes.
+        let (s, v) = post("/_reindex?refresh=true", reindex("tenant-a-1", "tenant-a-copy")).await;
+        assert_eq!((s, &v["created"]), (200, &json!(1)), "{flavor}: {v}");
+    }
+    // Elasticsearch: `read` on the source with a document and a field restriction, `write` on
+    // the destination.
+    let name = "rx-elasticsearch";
+    let request = format!("/v1/search/clusters/{name}/request");
+    let console = |m: &str, p: &str, b: Value| e.post(&request, json!({"method": m, "path": p, "body": b}));
+    let bulk = "{\"index\":{\"_index\":\"src\",\"_id\":\"1\"}}\n{\"title\":\"open\",\"public\":true,\"secret\":\"s1\"}\n\
+                {\"index\":{\"_index\":\"src\",\"_id\":\"2\"}}\n{\"title\":\"closed\",\"public\":false,\"secret\":\"s2\"}\n";
+    assert_eq!(console("POST", "/_bulk?refresh=true", Value::String(bulk.into())).await["status"], 200);
+    assert_eq!(console("PUT", "/dst", json!({})).await["status"], 200);
+    let role = json!({"indices": [
+        {"names": ["src"], "privileges": ["read"], "query": {"term": {"public": true}}, "field_security": {"grant": ["title", "public"]}},
+        {"names": ["dst"], "privileges": ["write"]}
+    ]});
+    let r = console("POST", "/_security/api_key", json!({"name": "mover", "role_descriptors": {"r": role}})).await;
+    let v = body(&r);
+    use base64::Engine;
+    let mover = json!({"api_key": base64::engine::general_purpose::STANDARD.encode(format!("{}@{name}:{}", v["id"].as_str().unwrap(), v["api_key"].as_str().unwrap()))});
+    let (s, v) = call(&mover, reqwest::Method::POST, "/_reindex?refresh=true", Some(reindex("src", "dst"))).await;
+    assert_eq!((s, &v["created"]), (200, &json!(1)), "only the visible document: {v}");
+    let doc = body(&console("GET", "/dst/_doc/1", Value::Null).await);
+    assert_eq!(doc["_source"], json!({"title": "open", "public": true}), "without the hidden field: {doc}");
+}
+
 /// Relevance tuning through `/v1/search`: a synonyms set a search then uses, a query ruleset that
 /// pins a document, an index's settings (roll's suggestions on; a private setting refused) and
 /// one document's explanation.

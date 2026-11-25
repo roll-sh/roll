@@ -1376,6 +1376,34 @@ async fn a_sleeping_previews_usage_is_read_without_a_whole_converge() {
     assert!(row.state == State::Sleeping && row.error.as_deref().is_some_and(|x| x.contains("max_bytes")), "{:?} {:?}", row.state, row.error);
 }
 
+/// A fork's preview gets its data's structure, never its rows (`data_forks`, `schema` by
+/// default), so what the masks miss can't reach a fork's code; a kind that can't be
+/// structure-only is left out. A project may give forks what its own previews get.
+#[tokio::test]
+async fn a_forks_preview_gets_the_datas_structure_only() {
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_own", 4));
+    e.code.open(ChangeInfo { trusted: false, approved: true, ..change("chg_fk", 5) });
+    for _ in 0..2 {
+        e.engine.pass().await.unwrap();
+    }
+    let modes = |c: &str| {
+        let p = e.engine.store.row_by_change(c).unwrap().unwrap();
+        let mut m: Vec<String> = e.engine.store.resources(&p.id).unwrap().into_iter().map(|r| format!("{} {}", r.kind.as_str(), r.mode.as_str())).collect();
+        m.sort();
+        (p.id, m)
+    };
+    assert_eq!(modes("chg_own").1, ["postgres branch", "redis branch"]);
+    let (fork, m) = modes("chg_fk");
+    assert_eq!(m, ["postgres schema"], "a fork's: the structure, and no Redis copy");
+    e.engine.store.put_settings(&e.project, &roll_previews::Settings { enabled: true, data_forks: roll_previews::settings::DataForks::Same, ..Default::default() }).unwrap();
+    e.engine.refresh(&fork).unwrap();
+    for _ in 0..2 {
+        e.engine.pass().await.unwrap();
+    }
+    assert_eq!(modes("chg_fk").1, ["postgres branch", "redis branch"], "`same`: what the project's own get");
+}
+
 #[tokio::test]
 async fn previews_wait_once_the_month_s_budget_is_spent() {
     let e = env(json!({ "enabled": true, "max_usd_month": 0.015 }));
