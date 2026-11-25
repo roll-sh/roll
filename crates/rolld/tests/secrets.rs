@@ -952,6 +952,16 @@ async fn a_bootstrap_token_is_exchanged_once_and_a_spent_credential_ends_its_mac
     assert_eq!(login(secret(&two)).await.0, 200, "the new credential works");
     assert_eq!(login(secret(&one)).await.0, 401, "the old one stops");
     assert_eq!(login(secret(&two)).await.0, 401, "and, spent but used again, it ended the machine");
+
+    // The identity's machines, newest first and never a secret; an admin revokes one.
+    let (_, three) = exchange(secret(&r.post(&format!("{p}/identities/{id}/bootstrap"), json!({})).await)).await;
+    let machines = r.get(&format!("{p}/identities/{id}/machines")).await;
+    let states: Vec<(&str, &str)> = machines.as_array().unwrap().iter().map(|m| (m["chain"].as_str().unwrap(), m["state"].as_str().unwrap())).collect();
+    assert_eq!(states, [(three["chain"].as_str().unwrap(), "live"), (two["chain"].as_str().unwrap(), "revoked"), (first["chain"].as_str().unwrap(), "revoked")], "{machines}");
+    assert!(machines[0]["refreshed_at"].is_i64() && !machines.to_string().contains("rlmc_") && !machines.to_string().contains("rlbt_"), "{machines}");
+    r.call(reqwest::Method::DELETE, &format!("{p}/identities/{id}/machines/{}", three["chain"].as_str().unwrap()), None).await;
+    assert_eq!(login(secret(&three)).await.0, 401, "a revoked machine's credential stops at once");
+    assert_eq!(r.get(&format!("{p}/identities/{id}/machines")).await[0]["state"], "revoked");
 }
 
 /// Invite `ada@example.com` with the operator's token and sign in by email code (from the
