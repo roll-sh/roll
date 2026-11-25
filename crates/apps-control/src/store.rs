@@ -828,6 +828,15 @@ pub struct MinuteRow {
     pub over_capacity: i64,
 }
 
+/// What a deployments list is narrowed to (`…/deploys?status=&actor=&q=`).
+#[derive(Clone, Debug, Default)]
+pub struct DeployFilter {
+    pub status: Option<String>,
+    pub actor: Option<String>,
+    /// In its message, or the start of its commit.
+    pub q: Option<String>,
+}
+
 /// A visitor's session: `(hash, user, login, created_at, expires_at)`.
 pub type VisitSession = (String, String, Option<String>, Option<i64>, i64);
 
@@ -1925,11 +1934,36 @@ impl Store {
 
     /// Newest first; `before` (ms): only those made before then (the next page).
     pub fn deployments(&self, service: &str, env: &str, limit: usize, before: Option<i64>) -> Result<Vec<Deployment>> {
-        Ok(self.db.query(
-            &format!("SELECT {DEPLOY_COLS} FROM deployments WHERE service = ? AND env = ? AND created_at < ? ORDER BY created_at DESC, id DESC LIMIT ?"),
-            params![service, env, before.unwrap_or(i64::MAX), limit as i64],
-            deploy_row,
-        )?)
+        self.deployments_where(service, Some(env), limit, before, &DeployFilter::default())
+    }
+
+    /// A service's deployments, newest first: one environment's or all of them, narrowed by
+    /// `f` (in the database, so a page is `limit` matches).
+    pub fn deployments_where(&self, service: &str, env: Option<&str>, limit: usize, before: Option<i64>, f: &DeployFilter) -> Result<Vec<Deployment>> {
+        let mut sql = format!("SELECT {DEPLOY_COLS} FROM deployments WHERE service = ? AND created_at < ?");
+        let mut args: Vec<code_sql::Value> = vec![code_sql::Value::Text(service.into()), code_sql::Value::Int(before.unwrap_or(i64::MAX))];
+        if let Some(e) = env {
+            sql.push_str(" AND env = ?");
+            args.push(code_sql::Value::Text(e.into()));
+        }
+        if let Some(s) = &f.status {
+            sql.push_str(" AND status = ?");
+            args.push(code_sql::Value::Text(s.clone()));
+        }
+        if let Some(a) = &f.actor {
+            sql.push_str(" AND actor = ?");
+            args.push(code_sql::Value::Text(a.clone()));
+        }
+        if let Some(q) = &f.q {
+            // Its message or its commit, as typed (`%` and `_` are themselves).
+            let esc = q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+            sql.push_str(" AND (message LIKE ? ESCAPE '\\' OR revision LIKE ? ESCAPE '\\')");
+            args.push(code_sql::Value::Text(format!("%{esc}%")));
+            args.push(code_sql::Value::Text(format!("{esc}%")));
+        }
+        sql.push_str(" ORDER BY created_at DESC, id DESC LIMIT ?");
+        args.push(code_sql::Value::Int(limit as i64));
+        Ok(self.db.query(&sql, args, deploy_row)?)
     }
 
     /// A service's deployments past what's kept, marked pruned in one transaction: what's kept
