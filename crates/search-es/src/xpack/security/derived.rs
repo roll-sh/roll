@@ -134,6 +134,12 @@ fn unverified() -> EsError {
     super::unauthorized_credentials("API key: derived key refused")
 }
 
+/// The parent key a derived key names, unverified (anyone may write any id): only to count a
+/// refused key under its parent's usage when that is one of the cluster's browser keys.
+pub fn claimed_parent(token: &str) -> Option<String> {
+    split(token).ok()?.claims.get("key").and_then(Value::as_str).map(str::to_string)
+}
+
 /// Splits and parses a derived key, bounded by its own bytes: one JSON object, no trailing
 /// bytes, no duplicate keys.
 fn split(token: &str) -> EsResult<Token<'_>> {
