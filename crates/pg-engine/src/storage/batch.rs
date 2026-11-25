@@ -149,17 +149,18 @@ impl LazyRows {
     #[inline(never)]
     pub fn make(&mut self, batch: &mut RowBatch, from: usize, keep: &dyn Fn(usize) -> bool) {
         let mut left = Vec::with_capacity(self.runs.len());
-        let mut at = Vec::new();
+        let (mut at, mut rows, mut ends) = (Vec::new(), Vec::new(), Vec::new());
         for run in std::mem::take(&mut self.runs) {
             let blk = self.block(run.buf).clone();
             let (a, n) = (run.at as usize, run.n as usize);
-            let mut buf = Vec::with_capacity(batch.ents[a..a + n].iter().map(|e| e.len as usize).sum());
             at.clear();
+            rows.clear();
+            ends.clear();
             for j in 0..n {
                 let i = a + j;
                 if i >= from && keep(i) {
-                    at.push((i, buf.len()));
-                    blk.row_into(run.row as usize + j, &mut buf);
+                    at.push(i);
+                    rows.push(run.row + j as u32);
                     continue;
                 }
                 // (Left unmade: the run of them goes on, or one starts.)
@@ -171,12 +172,18 @@ impl LazyRows {
             if at.is_empty() {
                 continue;
             }
+            // (The run's rows made a column at a time, into one buffer.)
+            let mut buf = Vec::with_capacity(at.iter().map(|&i| batch.ents[i].len as usize).sum());
+            blk.rows_into(&rows, None, &mut buf, &mut ends);
             let b = batch.bufs.len() as u32;
             batch.bufs.push(Bytes::from(buf));
-            for &(i, o) in &at {
+            let mut o = 0;
+            for (&i, &end) in at.iter().zip(&ends) {
                 let e = &mut batch.ents[i];
+                debug_assert_eq!(end - o, e.len as usize);
                 e.buf = b;
                 e.off = o as u32;
+                o = end;
             }
         }
         self.runs = left;
