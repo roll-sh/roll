@@ -212,6 +212,34 @@ async fn with_screenshots_a_baseline_of_the_default_branch_is_kept_to_compare_ch
     assert_eq!(e.engine.store.row_by_change("chg_1").unwrap().map(|r| r.desired), Some(Desired::Active), "the change's preview came back with its repo");
 }
 
+/// A preview's browsers' containers cost what services' do, by their GiB-hours: its screenshot
+/// runs (every container's own time) are in its month's cost, and so in the project's budget.
+#[tokio::test]
+async fn a_previews_browser_runs_are_in_its_cost() {
+    let e = env(json!({ "enabled": true, "github": { "screenshot": true, "baseline": false } }));
+    let mut png = Vec::new();
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 0, 255])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    *e.apps.shot.lock() = Some(png);
+    // An hour of a 1 GiB browser's time.
+    *e.apps.container_ms.lock() = 3_600_000;
+    e.code.open(change("chg_runs", 4));
+    for _ in 0..3 {
+        e.engine.pass().await.unwrap();
+    }
+    for _ in 0..3000 {
+        if !e.engine.shooting() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let p = e.engine.store.row_by_change("chg_runs").unwrap().unwrap();
+    let cost = e.engine.store.preview(&p.id).unwrap().cost;
+    let rate = roll_previews::cost::Rates::default().usd_per_container_gib_hour;
+    let runs = e.apps.shots.lock().iter().filter(|x| **x == p.id).count() as f64;
+    assert!(runs >= 1.0 && (cost.runs_usd - rate * runs).abs() < 1e-9, "an hour a run at the containers' rate: {cost:?} ({runs} runs)");
+    assert!(cost.month_to_date_usd >= cost.runs_usd, "and in its month: {cost:?}");
+}
+
 /// What a screenshot run left out (pages past a run's ten, stories past forty) is on the record
 /// for its head and goes to roll code with the report, never dropped quietly.
 #[tokio::test]

@@ -93,6 +93,27 @@ pub enum Search {
         /// Follow the copies until they end.
         #[arg(long)]
         wait: bool,
+        /// Copy a stopped copy again from the start instead of resuming it.
+        #[arg(long)]
+        full: bool,
+        /// After the copy: read again what changed at the source since it (or the last
+        /// catch-up) started, writing only what differs.
+        #[arg(long, conflicts_with_all = ["cutover", "dry_run", "full"])]
+        catch_up: bool,
+        /// With --catch-up: a numeric attribute the records set when they change (only those
+        /// changed since are read; without it every record is read and compared).
+        #[arg(long, requires = "catch_up")]
+        since_attribute: Option<String>,
+        /// --since-attribute's unit: s (the default) or ms.
+        #[arg(long, requires = "since_attribute")]
+        since_unit: Option<String>,
+        /// Move an alias to each copy in one step (the source's index name unless --alias); no
+        /// key is needed.
+        #[arg(long, conflicts_with_all = ["dry_run", "full"])]
+        cutover: bool,
+        /// With --cutover: the alias to move.
+        #[arg(long, requires = "cutover")]
+        alias: Option<String>,
     },
     /// Keys a web page ships: derive one from a derivable browser key, here, with no call to roll.
     #[command(subcommand)]
@@ -800,8 +821,9 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
         Search::Crawler(Crawler::Test { cluster, url, connector }) => return crate::search_crawler::test(api, as_json, &cluster, &url, connector.as_deref()).await,
         Search::Crawler(Crawler::Verify { cluster, domain, check }) => return crate::search_crawler::verify(api, as_json, &cluster, &domain, check).await,
         Search::Crawler(Crawler::Sites { cluster }) => return crate::search_crawler::sites(api, as_json, &cluster).await,
-        Search::Migrate { cluster, from, host, app_id, username, api_key_env, api_key_stdin, indices, dry_run, size, requests_per_second, wait } => {
-            let args = crate::search_migrate::Args { cluster, from, host, app_id, username, api_key_env, api_key_stdin, indices, dry_run, size, rps: requests_per_second, wait };
+        Search::Migrate { cluster, from, host, app_id, username, api_key_env, api_key_stdin, indices, dry_run, size, requests_per_second, wait, full, catch_up, since_attribute, since_unit, cutover, alias } => {
+            let step = if catch_up { Some("catch_up") } else if cutover { Some("cutover") } else { None };
+            let args = crate::search_migrate::Args { cluster, from, host, app_id, username, api_key_env, api_key_stdin, indices, dry_run, size, rps: requests_per_second, wait, full, step, since_attribute, since_unit, alias };
             return crate::search_migrate::run(api, as_json, args).await;
         }
         Search::Inference(cmd) => match cmd {

@@ -1086,6 +1086,14 @@ impl Engine {
             Ok(Some(mut shot)) => self.mask_shot(&r.id, &mut shot).await.map(|()| Some(shot)).map_err(|e| anyhow::anyhow!("reading what its page mustn't show: {e}")),
             other => other,
         };
+        // What its browsers' containers ran for (the whole run's time where it didn't finish).
+        let ran_ms = match &taken {
+            Ok(Some(shot)) => shot.container_ms,
+            _ => started.elapsed().as_millis() as u64,
+        };
+        if let Err(e) = self.store.add_run_usage(&r.id, crate::runtime::BROWSER_GIB, ran_ms as i64) {
+            warn!(preview = %r.id, error = %e, "previews: a screenshot run's cost");
+        }
         if signs_in && let Ok(Some(shot)) = &taken {
             let said = shot.login.as_deref().unwrap_or("its sign-in said nothing");
             let _ = self.store.log(&r.id, &format!("screenshots: {said}"));
@@ -1233,6 +1241,7 @@ impl Engine {
             let opts = crate::ports::ShotOptions { pages: paths.iter().filter(|p| **p != "/").map(|p| p.to_string()).collect(), hide: hide.to_vec(), stories, ..Default::default() };
             match self.apps.screenshot(&r.id, svc, &opts).await {
                 Ok(Some(mut shot)) => {
+                    let _ = self.store.add_run_usage(&r.id, crate::runtime::BROWSER_GIB, shot.container_ms as i64);
                     if let Err(e) = self.mask_shot(&r.id, &mut shot).await {
                         let _ = self.store.log(&r.id, &format!("{svc}'s pages weren't kept: {e}"));
                         continue;
@@ -1349,7 +1358,12 @@ impl Engine {
             egress_hosts: s.egress_hosts.clone(),
         };
         self.store.log(&r.id, &format!("{what}: {}", job.run.lines().next().unwrap_or("")))?;
+        let started = std::time::Instant::now();
         let ran = self.apps.seed(&run).await;
+        // Its container's time, at its memory: the preview's cost (`max_usd_month` caps it).
+        if let Err(e) = self.store.add_run_usage(&r.id, job.memory_mb as f64 / 1024.0, started.elapsed().as_millis() as i64) {
+            warn!(preview = %r.id, error = %e, "previews: a job's cost");
+        }
         for l in &leases {
             if let Err(e) = self.secrets.revoke(&r.project_id, l).await {
                 warn!(preview = %r.id, lease = %l, error = %e, "previews: revoking a job's dynamic credential (it expires by itself)");

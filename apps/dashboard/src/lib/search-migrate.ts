@@ -101,6 +101,11 @@ export interface SaasPlan {
   search_template: string;
   /** Algolia replicas, each a search template with its sort. */
   sort_templates?: Record<string, string>;
+  /** Rulesets of Algolia rules with `filterPromotes` (their pins match the search's `filters`). */
+  filtered_rulesets?: string[];
+  /** Algolia rules that filter or rewrite the query: search with `template` when the query
+   * meets the rule's condition. */
+  rule_templates?: { rule: string; anchoring: string; pattern: string; template: string }[];
   not_mapped: NotMapped[];
   not_mapped_more: number;
   /** What mapped with a difference worth knowing. */
@@ -127,11 +132,26 @@ export interface MigrateStarted {
   /** `dry_run`: the index exists from an earlier copy, which a start copies into again. */
   restart?: boolean;
   note?: string;
+  /** A stopped copy resumed: from where (`dry_run`: `resume`). */
+  resumed?: string;
+  resume?: string;
+  /** `catch_up` or `cutover` (a copy when absent). */
+  step?: "catch_up" | "cutover";
+  /** A catch-up: how it reads (`since_attribute`, or `compare`: every record). */
+  method?: "since_attribute" | "compare";
+  /** A cutover: the alias moved, and the indices it left. */
+  alias?: string;
+  previous?: string[];
 }
 
 export interface MigrateRequest {
   source: MigrateSource;
-  indices: { index: string; dest?: string }[];
+  indices: { index: string; dest?: string; alias?: string; full?: boolean }[];
+  /** `copy` (the default: resumes a stopped copy), `catch_up` or `cutover`. */
+  step?: "copy" | "catch_up" | "cutover";
+  /** `catch_up`: a numeric attribute the records set when they change. */
+  since_attribute?: string;
+  since_unit?: "s" | "ms";
   requests_per_second?: number;
   size?: number;
   /** Algolia, Typesense, Meilisearch: answer each index's plan, making nothing. */
@@ -396,6 +416,29 @@ export function notMappedGroups(plan: SaasPlan): { kind: NotMapped["kind"]; item
 /** How many things didn't map, the ones past the listed ones included. */
 export function notMappedCount(plan: SaasPlan): number {
   return plan.not_mapped.length + plan.not_mapped_more;
+}
+
+/** What an Algolia, Typesense or Meilisearch copy's row offers next: resume a copy that
+ * stopped, or, once it's done, catch up and cut over; nothing while it runs. */
+export function nextSteps(row: MigrateStarted, state: TaskState | undefined): "resume" | "after" | null {
+  if (!row.plan && !row.step) return null;
+  if (row.step === "cutover") return null;
+  if (state === "done") return "after";
+  if (state === "failed" || state === "cancelled" || state === "lost") return row.step === "catch_up" ? "after" : "resume";
+  return null;
+}
+
+/** `rows` with the one for `result`'s index and copy replaced by it (a resume, a catch-up, a
+ * cutover), the plan kept when the new answer has none. */
+export function replaceRow(rows: MigrateStarted[], result: MigrateStarted): MigrateStarted[] {
+  return rows.map((r) => (r.index === result.index && r.dest === result.dest ? { ...result, plan: result.plan ?? r.plan } : r));
+}
+
+/** Why a catch-up's timestamp attribute can't be sent, or `null` (empty: every record is read). */
+export function sinceProblem(attr: string): string | null {
+  const a = attr.trim();
+  if (!a) return null;
+  return /^[\p{L}\p{N}_.@-]+$/u.test(a) ? null : "An attribute name: letters, digits, _ . - @.";
 }
 
 /** Dropped settings grouped by reason, in the order they first appear. */

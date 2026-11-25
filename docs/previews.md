@@ -1398,8 +1398,14 @@ own rates (the same ones its usage page shows).
   costs nothing.
 - **Active**, per hour: the services' containers (memory GiB-hours), Postgres compute units
   while connected, and Redis memory while loaded.
-- Every preview shows `cost: {sleeping_usd_month, active_usd_hour, month_to_date_usd}`, and the
-  project shows the total.
+- **Runs**: its browsers' and jobs' containers by their GiB-hours at the same rate: screenshot
+  runs (each container's own time, side by side: Chromium's, the other browsers', the stories'; a
+  run that doesn't finish counts its whole time), another service's run, agents' runs (`try`),
+  and seed, release and teardown jobs at their `memory_mb` (`run_usage`, this month's). They're
+  in `month_to_date_usd`, so `max_usd_month` caps them too, and said apart as `runs_usd`.
+  `a_previews_browser_runs_are_in_its_cost`.
+- Every preview shows `cost: {sleeping_usd_month, active_usd_hour, month_to_date_usd, runs_usd}`,
+  and the project shows the total.
 
 ### Measured on this machine
 
@@ -1993,7 +1999,7 @@ type Preview = {
   url: string | null;                 // the first service's URL
   share_url: string | null;           // url with its access token (link access; plain otherwise): the one to hand out
   services: Service[]; resources: Resource[];
-  cost: { sleeping_usd_month: number; active_usd_hour: number; month_to_date_usd: number; bytes: number };
+  cost: { sleeping_usd_month: number; active_usd_hour: number; month_to_date_usd: number; runs_usd: number; bytes: number }; // runs_usd: of month_to_date, its browsers' and jobs' containers
   schema_changes: string[] | null;    // "+ …"/"- …" against the parents, once read at `head`; null: not known
   schema_risks?: string[];            // what in them would hurt production when it lands (dropped tables and columns, type changes, NOT NULL)
   kept_until: number | null;          // kept past its TTL until then (POST …/keep)
@@ -2809,17 +2815,14 @@ Ranked by what a person notices first. Done so far:
 Ranked again after a sixth product review (2026-11-25), against Vercel's and Netlify's previews and
 comments, Render and Railway, Neon, Chromatic and Percy, Signadot, Jam.
 
-1. **The stories a change touched first, in review**: a run's 40 stories are those whose file
-   the change changed, then those beside a file it changed, then the rest (`touchedFirst` in
-   `shot.js`). Next for it: a bundler's module graph (Storybook's `--stats-json`) for stories that
-   import a changed file from elsewhere.
+1. **Browser runs and jobs in the cost, in review**: screenshot runs (every engine, stories, another
+   service's), agents' runs and seed, release and teardown jobs count by their containers'
+   GiB-hours in `month_to_date_usd` (`runs_usd` apart), so `max_usd_month` caps them. Next for
+   it: builds (a `roll.toml` image built for a preview), which still cost nothing on the record.
 2. **Signed in to a page that really sits behind a login, live**: screenshots, every engine and
    `try` sign in (`github.login`, landed); the live check proves the stdin path and the stop at
    a missing field, not a page that only answers once signed in.
-3. **Browser runs and jobs in the cost**: `cost_of` counts branches, compute and services'
-   memory-hours, not the screenshot runs (three engines, stories, crops, `try`), builds or seed,
-   release and teardown jobs; meter their container-seconds into `spent_usd`, so `max_usd_month`
-   caps them too.
+3. **The stories a change touched, by the module graph**: #1005 takes stories by their own file and the files beside them first; one that imports a changed file from elsewhere waits for Storybook's `--stats-json`.
 4. **A note in one click**: a team note opens the whole dashboard in a tab to post; a small popup
    that posts and closes (Vercel's comments post in place).
 5. **Sleeping previews cost the control plane**: every settled preview goes through a whole
@@ -2852,6 +2855,8 @@ comments, Render and Railway, Neon, Chromatic and Percy, Signadot, Jam.
 
 
 
+
+Landed 2026-11-25, noon: the stories a change touched taken first (#1005).
 
 Landed 2026-11-25, late morning: what a screenshot run left out, said (#997: `skipped` on the record, the sheet and the comment); a branch's `PGOPTIONS` and `PGSSLMODE` (#999, found by roll apps' review).
 

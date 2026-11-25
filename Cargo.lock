@@ -8555,6 +8555,7 @@ dependencies = [
  "search-embed",
  "search-es",
  "search-index",
+ "search-painless",
  "search-server",
  "search-store",
  "serde",
