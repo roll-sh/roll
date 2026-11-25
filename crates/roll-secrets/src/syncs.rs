@@ -668,6 +668,9 @@ impl Secrets {
         } else if !caller.allows(Action::Admin, &scope) {
             caller.need(self.sync_needs(&r.info.kind), &scope)?;
         }
+        // One restored from a backup has no maker: whoever resumes it (an admin, as it's paused
+        // with a reason) becomes it (backup.rs).
+        let maker = if !change.paused && r.info.created_by.is_empty() { self.maker_of(caller)? } else { String::new() };
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             let what = match change.paused {
@@ -676,7 +679,7 @@ impl Secrets {
                     "paused"
                 }
                 false => {
-                    c.execute("UPDATE syncs SET paused_at = NULL, paused_why = NULL, checked_at = NULL, retry_at = 0 WHERE id = ?", [id])?;
+                    c.execute("UPDATE syncs SET paused_at = NULL, paused_why = NULL, checked_at = NULL, retry_at = 0, created_by = CASE WHEN created_by = '' THEN ? ELSE created_by END WHERE id = ?", params![maker, id])?;
                     "resumed"
                 }
             };
