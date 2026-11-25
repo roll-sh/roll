@@ -1315,14 +1315,10 @@ impl<'c> CopyTarget<'c> {
         self.de.refresh_all()
     }
 
-    /// Resolves once every copy indexed so far is durable in each shard's log, as a request's
-    /// acknowledgement waits for (in memory: at once).
-    pub async fn durable(&self) -> EsResult<()> {
-        for n in 0..self.dst.number_of_shards() {
-            if let Some(log) = self.de.shard(n).log.clone() {
-                log.durable().await?;
-            }
-        }
-        Ok(())
+    /// Every shard's log (none in memory): what's indexed so far is durable once each one's
+    /// [`crate::engine::ShardLog::durable`] resolves, as a request's acknowledgement waits for.
+    /// Wait on them with the target dropped (it isn't `Sync`).
+    pub fn logs(&self) -> Vec<Arc<dyn crate::engine::ShardLog>> {
+        (0..self.dst.number_of_shards()).filter_map(|n| self.de.shard(n).log.clone()).collect()
     }
 }

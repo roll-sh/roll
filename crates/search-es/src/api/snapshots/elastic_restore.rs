@@ -844,7 +844,10 @@ async fn run(cluster: &crate::Cluster, job: &Job, cancelled: &Arc<AtomicBool>) -
                 }
                 restore_shard(cluster, job, ix, shard, cancelled).await?;
                 // Recorded only once what it indexed is durable: a takeover resumes after it.
-                CopyTarget::new(cluster, &ix.target)?.durable().await?;
+                let logs = CopyTarget::new(cluster, &ix.target)?.logs();
+                for log in logs {
+                    log.durable().await?;
+                }
                 record_shard_done(cluster, &ix.target, shard).await?;
             }
             CopyTarget::new(cluster, &ix.target)?.finish()
