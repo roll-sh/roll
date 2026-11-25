@@ -279,6 +279,8 @@ pub struct Apps {
     capped_refresh: tokio::sync::Mutex<()>,
     /// roll previews' notes for a preview's feedback button ([`Apps::set_feedback_notes`]).
     notes: std::sync::OnceLock<Arc<dyn integrations::FeedbackNotes>>,
+    /// roll previews' share links for a preview's host ([`Apps::set_preview_shares`]).
+    shares: std::sync::OnceLock<Arc<dyn integrations::PreviewShares>>,
     /// Where a name under a project's preview domain no environment holds goes (roll previews).
     preview_router: std::sync::OnceLock<Arc<dyn integrations::PreviewRouter>>,
     /// roll previews' branch pushes ([`Apps::set_git_pushes`]).
@@ -691,6 +693,7 @@ impl Apps {
             capped: Mutex::new(Default::default()),
             capped_refresh: tokio::sync::Mutex::new(()),
             notes: std::sync::OnceLock::new(),
+            shares: std::sync::OnceLock::new(),
             preview_router: std::sync::OnceLock::new(),
             pushes: std::sync::OnceLock::new(),
             github: std::sync::OnceLock::new(),
@@ -4425,6 +4428,16 @@ impl Apps {
 
     pub(crate) fn feedback_notes(&self) -> Option<Arc<dyn integrations::FeedbackNotes>> {
         self.notes.get().cloned()
+    }
+
+    /// Where a preview environment's host checks a share link (roll previews, once it's on this
+    /// node). Set once.
+    pub fn set_preview_shares(&self, shares: Arc<dyn integrations::PreviewShares>) {
+        let _ = self.shares.set(shares);
+    }
+
+    pub(crate) fn preview_shares(&self) -> Option<Arc<dyn integrations::PreviewShares>> {
+        self.shares.get().cloned()
     }
 
     /// Where names under a project's preview domain that no environment holds go (roll previews'

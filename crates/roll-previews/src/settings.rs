@@ -360,7 +360,7 @@ pub fn story_id_ok(id: &str) -> bool {
 /// engine).
 pub const BROWSERS: [&str; 3] = ["firefox", "webkit", "webkit-phone"];
 
-pub use code_preview::config::{MAX_STATES, MAX_STEPS, STEP_KEYS, StateRule, Step, state_entry, state_name_ok, step_ok};
+pub use code_preview::config::{MAX_OPTION, MAX_STATES, MAX_STEPS, STEP_KEYS, StateRule, Step, state_entry, state_name_ok, step_ok};
 
 /// A feature flag a reviewer may set for their own view (`flags`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

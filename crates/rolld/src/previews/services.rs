@@ -709,6 +709,55 @@ impl apps_control::integrations::FeedbackNotes for Notes {
     }
 }
 
+/// roll apps' proxy takes a preview's share links through the engine, as previews' own does
+/// (`Engine::share_visit`, the maker asked again as often).
+pub struct Shares(pub std::sync::Weak<roll_previews::Engine>);
+
+impl Shares {
+    async fn visit(&self, env: &str, token: &str) -> Option<(Arc<roll_previews::Engine>, String, roll_previews::store::LiveShare)> {
+        let engine = self.0.upgrade()?;
+        let preview = roll_previews::Engine::preview_of_env(env)?;
+        let live = engine.share_visit(&preview, token, roll_previews::runtime::RuntimeConfig::default().visitor_recheck).await?;
+        Some((engine, preview, live))
+    }
+}
+
+#[async_trait]
+impl apps_control::integrations::PreviewShares for Shares {
+    async fn live(&self, env: &str, token: &str, followed: bool) -> Option<apps_control::integrations::Share> {
+        let (engine, preview, live) = self.visit(env, token).await?;
+        if followed {
+            engine.share_followed(&preview, token);
+        }
+        Some(apps_control::integrations::Share { ends_ms: live.ends, notes: live.notes })
+    }
+
+    async fn note(&self, env: &str, token: &str, body: &[u8]) -> Result<String, (u16, String)> {
+        let Some((engine, preview, live)) = self.visit(env, token).await else { return Err((401, "this share link has ended".into())) };
+        let Ok(note) = serde_json::from_slice::<roll_previews::notes::GuestNote>(body) else { return Err((400, "expected {name, path, selector?, note, …}".into())) };
+        engine.guest_note(&preview, &live, &note).await.map_err(|e| {
+            let status = match &e {
+                roll_previews::Error::BadRequest(_) => 400,
+                roll_previews::Error::Forbidden(_) => 403,
+                roll_previews::Error::Conflict(_) => 429,
+                _ => 502,
+            };
+            (status, e.to_string())
+        })
+    }
+
+    async fn notes(&self, env: &str, token: &str, path: &str) -> Vec<apps_control::integrations::Note> {
+        let Some((engine, preview, live)) = self.visit(env, token).await else { return Vec::new() };
+        engine
+            .guest_notes_of(&preview, &live.id, path)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|n| apps_control::integrations::Note { path: n.path, selector: n.selector, note: n.note, by: n.by, at: n.at })
+            .collect()
+    }
+}
+
 /// roll apps' own (`Apps::reachable`): the instance's container and port, its lease held.
 /// roll apps' log drains, for previews' services on roll's runtime: whether a project's take
 /// previews' output is read again after [`DRAINS_FOR`].

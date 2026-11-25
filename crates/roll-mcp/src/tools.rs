@@ -1263,7 +1263,7 @@ static TOOLS: &[Tool] = &[
     t("secrets_list_cas", "List certificate authorities", "A project's own certificate authorities: their public certificates, domains and limits (never a CA's key; adding one is the project admin's, in the dashboard).", "secrets", "GET", "/v1/secrets/projects/{project}/cas", &[req("project", "Workspace project")]),
     t("secrets_list_ssh_cas", "List SSH certificate authorities", "A project's SSH CAs: their public keys, principals and limits (never a private key; adding one is the project admin's, in the dashboard).", "secrets", "GET", "/v1/secrets/projects/{project}/ssh-cas", &[req("project", "Workspace project")]),
     t("secrets_totp", "Get a one-time code", "The current one-time code (TOTP) from a secret that holds an authenticator seed, and how long it lasts: a reveal, asked for like reading a value. The seed itself is never returned.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/totp", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder")]),
-    t("secrets_list_saas", "List SaaS rotators", "A project's rotators for third-party API keys: each one's vendor (SendGrid, Twilio, Okta, Entra, Auth0, GitLab, OpenAI, Datadog, Cloudflare, Databricks, Confluent, SonarQube, Jenkins) and the account or app it rotates for (never a credential; adding one is the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/saas", &[SECRET_PROJECT]),
+    t("secrets_list_saas", "List SaaS rotators", "A project's rotators for third-party API keys: each one's vendor (SendGrid, Twilio, Okta, Entra, Auth0, GitLab, OpenAI, Datadog, Cloudflare, Databricks, Confluent, SonarQube, Jenkins, Salesforce) and the account or app it rotates for (never a credential; adding one is the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/saas", &[SECRET_PROJECT]),
     t("secrets_list_public_certs", "List publicly trusted certificates", "A project's certificates from public ACME CAs (Let's Encrypt, ZeroSSL, Google Trust Services): names, CA, DNS provider, status (pending, issued, failing), serial, end and next renewal, and why the last order failed (never a credential or a private key; adding one is the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/public-certs", &[SECRET_PROJECT]),
     t("secrets_renew_public_cert", "Renew a public certificate", "Order a new certificate for a project's public certificate now: roll orders it in the background (minutes) and rotates every key linked to it once the CA issues it (rotation.succeeded, or rotation.failed and the reason in secrets_list_public_certs).", "secrets", "POST", "/v1/secrets/projects/{project}/public-certs/{id}/renew", &[SECRET_PROJECT, req("id", "Public certificate id (pcr_…)")]).open_world(),
     t("secrets_list_kubernetes", "List Kubernetes clusters", "The Kubernetes clusters a project issues service-account tokens for: names, API servers, and whether calls trust the cluster's own CA (never a token or the CA; adding one is the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/kubernetes", &[SECRET_PROJECT]),
@@ -1839,6 +1839,74 @@ mod tests {
         assert!(call("").is_err(), "a required choice can't be empty");
         let vulns = super::all().iter().find(|t| t.name == "apps_deploy_vulnerabilities").unwrap();
         assert!(vulns.request(&serde_json::json!({ "service": "svc_1", "env": "production", "deploy": "dpl_1", "severity": "" })).is_ok(), "an optional one may be");
+    }
+
+    /// A choice copies its set from the product that takes it: a value the product adds has to
+    /// reach the tool, or roll's MCP refuses it before the route ever sees it. Each set is read
+    /// from the product's own names (its `as_str` or table), or from roll-auth's types.
+    #[test]
+    fn choices_match_their_products() {
+        // The quoted values in `src` between `from` and the first `to` after it.
+        fn quoted(src: &str, from: &str, to: &str, pattern: &str) -> Vec<String> {
+            let body = src.split(from).nth(1).and_then(|r| r.split(to).next()).unwrap_or_else(|| panic!("{from} moved"));
+            let mut out: Vec<String> = body.match_indices(pattern).map(|(i, m)| body[i + m.len()..].split('"').next().unwrap().to_string()).collect();
+            out.sort();
+            out.dedup();
+            out
+        }
+        let arms = |src: &str, from: &str| quoted(src, from, "\n}\n", "=> \"");
+        let workspace = arms(include_str!("../../roll-workspace/src/lib.rs"), "impl Kind {");
+        let links = arms(include_str!("../../apps-control/src/model.rs"), "impl LinkKind {");
+        // A list of string literals: every other piece between quotes.
+        let model = include_str!("../../apps-control/src/model.rs");
+        let list = model.split("pub const DRAIN_FORMATS").nth(1).and_then(|r| r.split("];").next()).expect("DRAIN_FORMATS moved");
+        let drains: Vec<String> = list.split('"').skip(1).step_by(2).map(str::to_string).collect();
+        let evictions = quoted(include_str!("../../redis-engine/src/config.rs"), "const POLICIES", "];", "(\"");
+        let messages = arms(include_str!("../../tasks/src/model.rs"), "impl MsgState {");
+        let runs = arms(include_str!("../../tasks/src/model.rs"), "impl RunStatus {");
+        let previews = arms(include_str!("../../roll-previews/src/lib.rs"), "impl State {");
+        let exchanges = quoted(include_str!("../../mq-core/src/exchange.rs"), "fn name(", "\n    }\n", "=> \"");
+        let roles: Vec<String> = roll_auth::roles::Role::ALL.iter().map(|r| r.as_str().to_string()).collect();
+        let actions: Vec<String> = roll_auth::scope::Action::ALL.iter().map(|a| a.as_str().to_string()).collect();
+        let sets: Vec<(&str, &str, Vec<String>)> = vec![
+            ("workspace_place_resource", "kind", workspace.clone()),
+            ("workspace_remove_resource", "kind", workspace),
+            ("apps_link", "kind", links.clone()),
+            ("apps_unlink", "kind", links),
+            ("apps_add_drain", "format", drains),
+            ("redis_create_database", "eviction_policy", evictions.clone()),
+            ("redis_update_database", "eviction_policy", evictions),
+            ("tasks_list_messages", "state", messages),
+            ("tasks_list_runs", "status", runs),
+            ("previews_list", "state", previews),
+            ("queues_declare_exchange", "type", exchanges),
+            ("workspace_invite_member", "role", roles.clone()),
+            ("workspace_set_member_role", "role", roles.clone()),
+            ("workspace_set_group_role", "role", roles.into_iter().filter(|r| r != "owner").collect()),
+            ("access_request_access", "action", actions),
+        ];
+        for (tool, param, mut want) in sets {
+            want.sort();
+            let t = super::all().iter().find(|t| t.name == tool).unwrap_or_else(|| panic!("{tool}"));
+            let Some(Ty::Choice(values)) = t.params.iter().find(|p| p.name == param).map(|p| p.ty) else { panic!("{tool}.{param} isn't a choice") };
+            let mut got: Vec<String> = values.iter().map(|v| v.to_string()).collect();
+            got.sort();
+            assert_eq!(got, want, "{tool}.{param}: its choice (left) isn't the product's set (right)");
+        }
+    }
+
+    /// `secrets_list_saas` names every vendor roll secrets rotates for: the list is prose, and new
+    /// vendors kept landing without it (SonarQube and Jenkins, then Salesforce).
+    #[test]
+    fn the_saas_tool_names_every_vendor() {
+        let saas = include_str!("../../roll-secrets/src/saas.rs");
+        // `Vendor::name`'s arms: each vendor's own name.
+        let names = saas.split("pub fn name(&self) -> &'static str {").nth(1).and_then(|r| r.split("\n    }\n").next()).expect("Vendor::name moved");
+        let said = super::all().iter().find(|t| t.name == "secrets_list_saas").unwrap().description.to_lowercase();
+        let vendors: Vec<&str> = names.match_indices(" { .. } => \"").map(|(i, m)| names[i + m.len()..].split('"').next().unwrap()).collect();
+        assert!(vendors.len() >= 14, "the vendor list moved: {vendors:?}");
+        let missing: Vec<&&str> = vendors.iter().filter(|v| !said.contains(**v)).collect();
+        assert!(missing.is_empty(), "secrets_list_saas doesn't name {missing:?}");
     }
 
     /// An argument described only as its values ("a, b or c") is a [`Ty::Choice`] with the route's

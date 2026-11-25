@@ -223,6 +223,8 @@ pub fn start(
     // roll apps' proxy lists a preview page's notes from the engine (`Engine::notes_for`).
     if let Some(a) = &apps_for_notes {
         a.set_feedback_notes(Arc::new(services::Notes(Arc::downgrade(&engine))));
+        // And a preview's share links, checked at every request as previews' proxy checks them.
+        a.set_preview_shares(Arc::new(services::Shares(Arc::downgrade(&engine))));
         // A project's own preview domain: names apps' ingress doesn't hold go to previews' router.
         a.set_preview_router(Arc::new(services::DomainRouter(runtime.clone())));
         // Its pushes to branches of a Git URL service: those branches' previews.
