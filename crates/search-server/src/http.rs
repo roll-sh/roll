@@ -553,8 +553,9 @@ async fn answer<B: RequestBody>(
     es.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(CLIENT_ADDRESS_HEADER));
     // Who wrote a repository's roll secrets references: only roll's control plane says it (its
     // own requests, forwarded signed from another node), never a client.
+    // Nor roll's revocation of a key from before a switch of flavor.
     if !matches!(origin, Origin::Internal) {
-        es.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(search_es::secret_refs::MAKER_HEADER));
+        es.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(search_es::secret_refs::MAKER_HEADER) && !k.eq_ignore_ascii_case(search_es::xpack::security::DORMANT_KEY_HEADER));
     }
     if let Origin::Client(ip) = origin {
         es.headers.push((CLIENT_ADDRESS_HEADER.to_string(), crate::allow::canonical(ip).to_string()));

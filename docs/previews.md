@@ -2057,7 +2057,7 @@ type Preview = {
   slower_routes?: { branch: string; routes: { name: string; count: number; p50_ms: number; main_p50_ms: number; grew?: GrewSpan | null; budget_ms?: number | null }[] } | null;
   new_errors?: { branch: string; total: number; errors: { service: string; title: string }[] } | null;
   served_secrets?: { key: string; path: string }[]; // its secret values its pages serve at its head: names and where, never values
-  skipped?: { pages?: string[]; stories?: number; first_stories?: string[] }; // what its latest screenshot run left out at its head: pages past a run's ten, stories it didn't take (the first 10 by id)
+  skipped?: { pages?: string[]; stories?: number; first_stories?: string[]; by_files?: true }; // what its latest screenshot run left out at its head: pages past a run's ten, stories it didn't take (the first 10 by id); by_files: it chose them by the change's files alone, its Storybook serving no module graph (--stats-json)
   regressions?: "check" | "required" | null;
   regressions_accepted?: { head: string; by: string; at: number } | null;
   regressions_compared?: boolean;     // compared with main's preview at its head (errors; routes too with traces)
@@ -2325,7 +2325,11 @@ type Settings = {
     root holds something (3 s at most), and captured clipped to what it rendered (an 8 px margin,
     at most 1280 by 2000; 256 KiB a PNG), 100 s in all. Each is a page of its own (`story:<id>`,
     "Stories" on the sheet, labelled `button / primary`), with what went wrong while it rendered,
-    compared with main's same story and reviewed like a page. A story gone from Storybook goes
+    compared with main's same story and reviewed like a page. Each is checked with axe as a page
+    is (Chromatic's accessibility tests: its rules, its language and title), while more than 30 s
+    of the run are left so a big Storybook still gets its pictures, 8 KB of it at most; what it
+    adds against main's same story counts like a page's (`a11y_added`). Live: the live
+    Storybook's stories carry it. A story gone from Storybook goes
     from the preview. The index is the preview's code's: an id Storybook wouldn't make
     (`components-button--primary`) is dropped. A Storybook on another service is kept with that
     service's pages while it runs what it ran (TurboSnap), and taken at once when the rule is
@@ -2869,8 +2873,9 @@ comments, Render and Railway, Neon, Chromatic and Percy, Signadot, Jam.
 2. **The stories a change touched, by the module graph, in review**: a story that imports a changed
    file from anywhere comes after those whose own file changed (Storybook's `preview-stats.json`
    when the build has it; files alone without), and a built Storybook's stories run live in a
-   real browser for the first time. Next for it: a `storybook dev` server has no stats file, so
-   say on the sheet when a run ordered by files alone.
+   real browser for the first time (#1014). In review: a run that chose by files alone (no stats
+   file, as from `storybook dev`) and left stories says so on the sheet (`skipped.by_files`),
+   with how to give it the graph.
 3. **A note in one click, in review**: the button's note opens a small window of roll's with its
    form alone, which posts and closes (`/dashboard/previews/note`); a phone keeps the dashboard
    in a tab. Next for it: a reply and a resolve from the page the same way.

@@ -617,6 +617,9 @@ case "$SHOT" in *PNG) ;; *) echo "the screenshot should be a PNG: $SHOT"; exit 1
 # the module graph) taken, the 40th listed left and said.
 LEFT=$(api GET "/v1/previews/$PV" | jq_ "(lambda k: '%s %s' % (k.get('stories'), k.get('first_stories')))(d.get('skipped') or {})")
 [ "$LEFT" = "1 ['s40--one']" ] || { echo "the stories run should take Deep's through the module graph and leave the 40th: $LEFT"; exit 1; }
+# Each story checked with axe as a page is (Chromatic's accessibility tests): its record says so.
+STORY_A11Y=$(api GET "/v1/previews/$PV" | jq_ "[(x.get('a11y') or {}).get('lang') for x in d['pages'] if x['path'] == 'story:deep--one']")
+[ "$STORY_A11Y" = "[True]" ] || { echo "a story's page should carry its accessibility, as a page's does: $STORY_A11Y"; exit 1; }
 # Signed in first (github.login): its $GREETING put in by roll and handed to the browser through
 # its container's stdin. The page has no #nope, so the run says where it stopped, never what it
 # would have typed.

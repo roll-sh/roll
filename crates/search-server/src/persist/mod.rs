@@ -267,8 +267,10 @@ pub struct ShardState {
     commit: tokio::sync::Mutex<Commit>,
     /// The shard's WAL registration once attached.
     wal: RwLock<Option<WalShard>>,
-    /// Operations the WAL doesn't have yet, and the LSN of the newest it has.
-    backlog: Backlog,
+    /// Operations logged while not attached (or refused by the WAL), appended later.
+    pending: Mutex<Vec<(i64, Vec<u8>)>>,
+    /// LSN of the last record appended (0: none this run).
+    lsn: AtomicU64,
     /// Record bytes logged since the last full commit…
     log_bytes: AtomicU64,
     /// …when the first of them was (ms since the cluster's epoch + 1; 0: none)…
@@ -292,7 +294,8 @@ impl ShardState {
             dir,
             commit: tokio::sync::Mutex::new(commit),
             wal: RwLock::new(None),
-            backlog: Backlog::default(),
+            pending: Mutex::new(Vec::new()),
+            lsn: AtomicU64::new(0),
             log_bytes: AtomicU64::new(0),
             log_since: AtomicU64::new(0),
             next_check: AtomicU64::new(CHECK_EVERY),
@@ -304,57 +307,7 @@ impl ShardState {
     }
 
     fn has_pending(&self) -> bool {
-        !self.backlog.pending.lock().is_empty()
-    }
-}
-
-/// A shard's operations logged while the WAL couldn't take them (the shard not attached yet,
-/// or an append the WAL refused: an attached shard keeps them too, in order, for the next
-/// append), and the LSN of the newest record the WAL has (0: none this run). Read together
-/// under the lock ([`Backlog::settled`]), nothing pending means `lsn` covers every operation
-/// the shard logged before: [`Backlog::append`] holds the lock until it does.
-#[derive(Default)]
-struct Backlog {
-    pending: Mutex<Vec<(i64, Vec<u8>)>>,
-    lsn: AtomicU64,
-}
-
-impl Backlog {
-    fn push(&self, seq_no: i64, op: Vec<u8>) {
-        self.pending.lock().push((seq_no, op));
-    }
-
-    fn clear(&self) {
-        self.pending.lock().clear();
-    }
-
-    /// The WAL took a record directly, at `lsn`.
-    fn appended(&self, lsn: u64) {
-        self.lsn.fetch_max(lsn, Ordering::SeqCst);
-    }
-
-    fn lsn(&self) -> u64 {
-        self.lsn.load(Ordering::SeqCst)
-    }
-
-    /// Hands what's pending to `append` (the WAL's `append_many`), holding the lock until
-    /// `lsn` covers it, so nobody finds it gone before the WAL has it. The LSN it got (`None`:
-    /// nothing was pending); on an error everything stays pending, in order.
-    fn append(&self, append: impl FnOnce(&[(i64, Vec<u8>)]) -> anyhow::Result<u64>) -> anyhow::Result<Option<u64>> {
-        let mut pending = self.pending.lock();
-        if pending.is_empty() {
-            return Ok(None);
-        }
-        let lsn = append(&pending[..])?;
-        self.lsn.fetch_max(lsn, Ordering::SeqCst);
-        pending.clear();
-        Ok(Some(lsn))
-    }
-
-    /// The newest LSN, when nothing is pending (`None`: something still is).
-    fn settled(&self) -> Option<u64> {
-        let pending = self.pending.lock();
-        pending.is_empty().then(|| self.lsn.load(Ordering::SeqCst))
+        !self.pending.lock().is_empty()
     }
 }
 
@@ -1078,7 +1031,7 @@ impl ClusterData {
         if !self.any_async.load(Ordering::SeqCst) {
             return self.last_lsn.load(Ordering::SeqCst);
         }
-        self.all_shards().iter().filter(|s| s.request.load(Ordering::Relaxed)).map(|s| s.backlog.lsn()).max().unwrap_or(0)
+        self.all_shards().iter().filter(|s| s.request.load(Ordering::Relaxed)).map(|s| s.lsn.load(Ordering::SeqCst)).max().unwrap_or(0)
     }
 
     /// A request that finished after the cluster was closed under it: its writes may be
@@ -1183,7 +1136,7 @@ impl ClusterData {
     async fn drain(&self, st: &ShardState) -> Result<(), PersistError> {
         let mut c = st.commit.lock().await;
         if c.deleted {
-            st.backlog.clear();
+            st.pending.lock().clear();
             return Ok(());
         }
         if c.detached || self.closed.load(Ordering::SeqCst) {
@@ -1194,21 +1147,26 @@ impl ClusterData {
         self.append_pending(st)
     }
 
-    /// Appends the shard's backlog ([`Backlog::append`]: nobody acknowledges, or reports
-    /// durable, ahead of the WAL).
     fn append_pending(&self, st: &ShardState) -> Result<(), PersistError> {
-        let appended = st.backlog.append(|ops| {
-            let g = st.wal.read();
-            g.as_ref().expect("attached").append_many(ops)
-        });
-        match appended {
+        let ops = std::mem::take(&mut *st.pending.lock());
+        if ops.is_empty() {
+            return Ok(());
+        }
+        let g = st.wal.read();
+        let w = g.as_ref().expect("attached");
+        match w.append_many(&ops) {
             Ok(lsn) => {
-                if let Some(lsn) = lsn {
-                    self.last_lsn.fetch_max(lsn, Ordering::SeqCst);
-                }
+                st.lsn.fetch_max(lsn, Ordering::SeqCst);
+                self.last_lsn.fetch_max(lsn, Ordering::SeqCst);
                 Ok(())
             }
-            Err(e) => Err(self.classify(e)),
+            Err(e) => {
+                drop(g);
+                let mut p = st.pending.lock();
+                let later = std::mem::replace(&mut *p, ops);
+                p.extend(later);
+                Err(self.classify(e))
+            }
         }
     }
 
@@ -1266,20 +1224,20 @@ impl ClusterData {
         match g.as_ref() {
             Some(w) => match w.append_parts(seq_no, &parts) {
                 Ok(lsn) => {
-                    st.backlog.appended(lsn);
+                    st.lsn.fetch_max(lsn, Ordering::SeqCst);
                     self.last_lsn.fetch_max(lsn, Ordering::SeqCst);
                 }
                 Err(e) => {
                     drop(g);
                     // Applied but not logged: keep it for the next append, and fail the write.
-                    st.backlog.push(seq_no, parts.concat());
+                    st.pending.lock().push((seq_no, parts.concat()));
                     self.has_pending.store(true, Ordering::SeqCst);
                     return Err(self.classify(e).to_es(&self.cluster));
                 }
             },
             None => {
                 drop(g);
-                st.backlog.push(seq_no, parts.concat());
+                st.pending.lock().push((seq_no, parts.concat()));
                 self.has_pending.store(true, Ordering::SeqCst);
             }
         }
@@ -1548,7 +1506,7 @@ impl ClusterData {
             let mut c = s.commit.lock().await;
             c.deleted = true;
             *s.wal.write() = None;
-            s.backlog.clear();
+            s.pending.lock().clear();
             c.recovery = None;
             if let Err(e) = self.store.delete_shard(&self.cluster, &s.id).await {
                 tracing::warn!(cluster = self.cluster, shard = %s.id, error = %e, "deleting a shard of a deleted index failed");
@@ -1735,28 +1693,6 @@ impl ShardLog for OpLog {
             self.st.flush_wanted.store(true, Ordering::SeqCst);
             d.flush_wanted.store(true, Ordering::SeqCst);
         }
-    }
-
-    /// The shard's records appended (those kept while it wasn't attached first) and
-    /// acknowledged as a request's are: the WAL's ack, a valid lease, and ownership when checked.
-    fn durable(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = EsResult<()>> + Send + '_>> {
-        Box::pin(async move {
-            let d = self.data()?;
-            if d.closed.load(Ordering::SeqCst) {
-                return Err(EsError::new(503, "cluster_block_exception", format!("cluster [{}] was unloaded before the writes were made durable", d.cluster)));
-            }
-            // Nothing pending and the newest LSN, read together ([`Backlog::settled`]).
-            let lsn = loop {
-                if let Some(lsn) = self.st.backlog.settled() {
-                    break lsn;
-                }
-                d.drain(&self.st).await.map_err(|e| e.to_es(&d.cluster))?;
-            };
-            if lsn > d.acked_lsn.load(Ordering::SeqCst) {
-                d.acknowledge(lsn).await.map_err(|e| e.to_es(&d.cluster))?;
-            }
-            Ok(())
-        })
     }
 }
 
@@ -2032,45 +1968,4 @@ pub fn resident_bytes(cluster: &Cluster) -> u64 {
             s.buffer_bytes + s.segment_memory_bytes + s.segment_heap_bytes + s.version_map_bytes
         })
         .sum()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::Backlog;
-    use std::sync::Arc;
-    use std::sync::mpsc::{RecvTimeoutError, channel};
-    use std::time::Duration;
-
-    /// While the WAL takes a shard's backlog, nobody finds the backlog empty with an LSN that
-    /// doesn't cover it yet (`OpLog::durable` would report a restore's documents durable
-    /// before the WAL had them).
-    #[test]
-    fn nothing_pending_means_the_lsn_covers_it() {
-        let b = Arc::new(Backlog::default());
-        b.push(1, vec![1]);
-        let (entered, wait_entered) = channel();
-        let (release, wait_release) = channel::<()>();
-        let appender = std::thread::spawn({
-            let b = b.clone();
-            move || {
-                b.append(|ops| {
-                    assert_eq!(ops.len(), 1);
-                    entered.send(()).unwrap();
-                    wait_release.recv().unwrap();
-                    Ok(7)
-                })
-                .unwrap()
-            }
-        });
-        wait_entered.recv().unwrap();
-        let (seen, wait_seen) = channel();
-        std::thread::spawn({
-            let b = b.clone();
-            move || seen.send(b.settled()).unwrap()
-        });
-        assert_eq!(wait_seen.recv_timeout(Duration::from_millis(300)), Err(RecvTimeoutError::Timeout), "settled while the WAL was taking the backlog");
-        release.send(()).unwrap();
-        assert_eq!(appender.join().unwrap(), Some(7));
-        assert_eq!(wait_seen.recv().unwrap(), Some(7));
-    }
 }

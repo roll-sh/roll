@@ -1,0 +1,8 @@
+# winget's version manifest for the roll CLI. A template: the release (`.github/workflows/release-cli.yml`)
+# fills in {{VERSION}} with deploy/cli/render.sh and attaches the result as roll-winget.zip, ready
+# to submit to microsoft/winget-pkgs (manifests/r/RollSh/Roll/<version>/).
+PackageIdentifier: RollSh.Roll
+PackageVersion: {{VERSION}}
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.9.0
