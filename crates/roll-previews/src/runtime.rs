@@ -2029,6 +2029,14 @@ impl Runtime {
         if !crops.is_empty() {
             args.extend(["--env".into(), format!("CROPS={}", serde_json::to_string(&crops)?)]);
         }
+        // The app's sign-in (`github.login`, a trusted preview's, its variables in place): the
+        // first line of the container's stdin, into a file of its own that `shot.js` reads and
+        // removes; never a command line, an environment variable or the record.
+        let login = opts.login.as_ref().filter(|l| crate::settings::page_path_ok(&l.page) && !l.steps.is_empty() && l.steps.len() <= crate::settings::MAX_STEPS && l.steps.iter().all(crate::settings::step_ok));
+        let mut input = login.map(serde_json::to_vec).transpose()?.unwrap_or_default();
+        input.push(b'\n');
+        input.extend_from_slice(AXE_JS.as_bytes());
+        args.extend(["--env".into(), "LOGIN_FILE=/tmp/login.json".into()]);
         // The PNG on the first line, the timings (if the command wrote them) on the second, the
         // phone-width PNG (if it took one) on the third, then the other pages: what each said,
         // and their PNGs a line each.
@@ -2037,7 +2045,7 @@ impl Runtime {
             "sh".into(),
             "-c".into(),
             format!(
-                "cat > /tmp/axe.js; {} >/dev/null 2>&1 && base64 -w0 /tmp/s.png && echo && (cat /tmp/s.png.json 2>/dev/null || true) && echo && (base64 -w0 /tmp/s.png.phone.png 2>/dev/null || true) \
+                "IFS= read -r L; printf '%s' \"$L\" > /tmp/login.json; L=; cat > /tmp/axe.js; {} >/dev/null 2>&1 && base64 -w0 /tmp/s.png && echo && (cat /tmp/s.png.json 2>/dev/null || true) && echo && (base64 -w0 /tmp/s.png.phone.png 2>/dev/null || true) \
                  && echo && (cat /tmp/s.png.pages.json 2>/dev/null || true) && for n in 0 1 2 3 4 5 6 7 8 9; do echo; base64 -w0 /tmp/s.png.$n.png 2>/dev/null || true; done \
                  && echo && (cat /tmp/s.png.crops.json 2>/dev/null || true) && for n in 0 1 2 3 4 5 6 7 8 9; do echo; base64 -w0 /tmp/s.png.crop.$n.png 2>/dev/null || true; done \
                  && echo && (cat /tmp/s.png.bodies.json 2>/dev/null || true)",
@@ -2067,7 +2075,7 @@ impl Runtime {
                 None => None,
             }
         };
-        let (run, (more, browsers_ms), stories) = tokio::join!(tokio::time::timeout(within, docker_with_input(&argv, AXE_JS.as_bytes(), SHOT_OUTPUT_MAX)), browsers_run, stories_run);
+        let (run, (more, browsers_ms), stories) = tokio::join!(tokio::time::timeout(within, docker_with_input(&argv, &input, SHOT_OUTPUT_MAX)), browsers_run, stories_run);
         let out = match run {
             Ok(Ok(out)) => out,
             // Its container outlives a docker CLI that gave up on it (too much output).
@@ -2109,6 +2117,8 @@ impl Runtime {
             pages: page_shots(&pages, said, page_lines.into_iter()),
             crops: note_crops(&asked, crops_said, crop_lines.into_iter()),
             bodies,
+            // What `shot.js` said of the sign-in (its own words, never the page's), one line.
+            login: serde_json::from_str::<serde_json::Value>(speed).ok().and_then(|v| v["login"].as_str().map(|s| s.chars().take(200).collect())),
         };
         // The other browsers', best effort: Chromium's screenshot stands.
         match more {

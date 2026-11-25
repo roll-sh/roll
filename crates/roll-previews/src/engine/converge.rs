@@ -1066,7 +1066,23 @@ impl Engine {
         let crops = self.crops_wanted(r).await;
         let stories = storybook.as_ref().filter(|(svc, _)| *svc == first.name).map(|(_, at)| at.clone());
         let opts_crops = crops.clone();
-        let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone(), openapi, endpoints, states, browsers, crops, stories, modes };
+        // The app's sign-in first, a trusted preview's only (`github.login`).
+        let login = match self.store.settings(&r.project_id).ok().and_then(|s| s.github.login) {
+            None => None,
+            Some(_) if !r.trusted => {
+                let _ = self.store.log(&r.id, "screenshots taken signed out: a fork's preview signs in with nothing (its code would get what's typed)");
+                None
+            }
+            Some(rule) => match self.login_for(r, &rule).await {
+                Ok(l) => Some(l),
+                Err(e) => {
+                    let _ = self.store.log(&r.id, &format!("screenshots taken signed out: {e:#}"));
+                    None
+                }
+            },
+        };
+        let signs_in = login.is_some();
+        let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone(), openapi, endpoints, states, browsers, crops, stories, modes, login };
         let started = std::time::Instant::now();
         // The page's words are its code's: what it was given is masked before they're kept (and
         // reach the pull request's comment); a run whose masks can't be read fails as a run.
@@ -1074,6 +1090,10 @@ impl Engine {
             Ok(Some(mut shot)) => self.mask_shot(&r.id, &mut shot).await.map(|()| Some(shot)).map_err(|e| anyhow::anyhow!("reading what its page mustn't show: {e}")),
             other => other,
         };
+        if signs_in && let Ok(Some(shot)) = &taken {
+            let said = shot.login.as_deref().unwrap_or("its sign-in said nothing");
+            let _ = self.store.log(&r.id, &format!("screenshots: {said}"));
+        }
         match taken {
             Ok(Some(mut shot)) => {
                 self.check_served(r, &mut shot).await;
