@@ -25,6 +25,12 @@ pub struct Args {
     pub size: Option<u32>,
     pub rps: Option<f64>,
     pub wait: bool,
+    pub full: bool,
+    /// `catch_up` or `cutover` (a copy when `None`).
+    pub step: Option<&'static str>,
+    pub since_attribute: Option<String>,
+    pub since_unit: Option<String>,
+    pub alias: Option<String>,
 }
 
 /// The environment variable a source's key is read from unless `--api-key-env` says.
@@ -68,7 +74,7 @@ fn source(a: &Args) -> anyhow::Result<Value> {
         src["password"] = json!(std::env::var("ELASTICSEARCH_PASSWORD").context("set ELASTICSEARCH_PASSWORD to the user's password")?);
     } else if let Some(k) = key {
         src["api_key"] = json!(k);
-    } else if matches!(from, "algolia" | "typesense") {
+    } else if matches!(from, "algolia" | "typesense") && a.step != Some("cutover") {
         bail!("set {} to the source's API key (or use --api-key-env / --api-key-stdin)", a.api_key_env.as_deref().unwrap_or(key_var(from)));
     }
     Ok(src)
@@ -121,7 +127,25 @@ pub async fn run(api: &Api, as_json: bool, a: Args) -> anyhow::Result<()> {
         }
         return Ok(());
     }
-    let mut body = json!({ "source": src, "indices": picks(&a.indices) });
+    let mut indices = picks(&a.indices);
+    for p in &mut indices {
+        if a.full {
+            p["full"] = json!(true);
+        }
+        if let Some(al) = &a.alias {
+            p["alias"] = json!(al);
+        }
+    }
+    let mut body = json!({ "source": src, "indices": indices });
+    if let Some(step) = a.step {
+        body["step"] = json!(step);
+    }
+    if let Some(at) = &a.since_attribute {
+        body["since_attribute"] = json!(at);
+    }
+    if let Some(u) = &a.since_unit {
+        body["since_unit"] = json!(u);
+    }
     if let Some(n) = a.size {
         body["size"] = json!(n);
     }
@@ -136,8 +160,11 @@ pub async fn run(api: &Api, as_json: bool, a: Args) -> anyhow::Result<()> {
     if !as_json {
         for r in &rows {
             let what = match (&r["task"], &r["error"], r["queued"] == true) {
-                (Value::String(t), _, _) => format!("copying (task {t})"),
                 (_, Value::String(e), _) => format!("failed: {e}"),
+                _ if r["alias"].is_string() => format!("alias {} points here ({})", s(&r["alias"]), s(&r["note"])),
+                (Value::String(t), _, _) if a.step == Some("catch_up") => format!("catching up (task {t}, {})", s(&r["method"])),
+                (Value::String(t), _, _) if r["resumed"].is_string() => format!("resuming from {} (task {t})", s(&r["resumed"])),
+                (Value::String(t), _, _) => format!("copying (task {t})"),
                 (_, _, true) => format!("waiting: {}", s(&r["reason"])),
                 _ if a.dry_run => "plan".to_string(),
                 _ => "?".to_string(),

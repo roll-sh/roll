@@ -1460,6 +1460,17 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: Option<&str>) -
     }
     // In lockdown, an outside record's text never reaches the model: withheld in the structured
     // answer, and the text block (a fronted set may write its own) rebuilt from what's left.
+    // An outside answer that isn't JSON goes the same way, whole: a picture (a fork's page can
+    // show any words) or a text (a fork's caught mail).
+    if ctx.lockdown && result["structuredContent"]["outside"] == true && let Some(ct) = result["structuredContent"]["content_type"].as_str() {
+        let notice = if ct.starts_with("image/") { lockdown::WITHHELD_PICTURE } else { lockdown::WITHHELD };
+        let s = &mut result["structuredContent"];
+        if let Some(o) = s.as_object_mut() {
+            o.remove("content_b64");
+        }
+        s["withheld"] = json!(notice);
+        result["content"] = json!([{ "type": "text", "text": notice }]);
+    }
     if ctx.lockdown && lockdown::withhold(&mut result["structuredContent"]) + lockdown::withhold_fields(&mut result["structuredContent"], outside) > 0 {
         let text = text::fit(text::render(&result["structuredContent"]), narrowing.as_deref());
         if let Some(content) = result["content"].as_array_mut() {
@@ -1787,6 +1798,8 @@ pub(crate) fn waiting_approval(s: &Value) -> Option<&str> {
 async fn outcome(tool: &str, narrowing: Option<&[&str]>, resp: Response) -> Value {
     let status = resp.status();
     let ct = resp.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    // A picture of an outside record (a fork's page): lockdown withholds it as it does text.
+    let outside = resp.headers().contains_key(lockdown::OUTSIDE_HEADER);
     let bytes = axum::body::to_bytes(resp.into_body(), MAX_ANSWER).await.unwrap_or_default();
     let json: Option<Value> = if ct.starts_with("application/json") || ct.is_empty() { serde_json::from_slice(&bytes).ok() } else { None };
     if !status.is_success() {
@@ -1833,16 +1846,30 @@ async fn outcome(tool: &str, narrowing: Option<&[&str]>, resp: Response) -> Valu
         Some(v) => (text::fit(text::render(&v), narrowing), if v.is_object() { v } else { json!({ "items": v }) }),
         None if bytes.is_empty() => ("done".to_string(), json!({ "ok": true })),
         None => match std::str::from_utf8(&bytes) {
-            Ok(s) => (cut(s.to_string(), false), json!({ "content_type": ct, "bytes": bytes.len() })),
+            Ok(s) => {
+                let mut structured = json!({ "content_type": ct, "bytes": bytes.len() });
+                if outside {
+                    structured["outside"] = json!(true);
+                }
+                (cut(s.to_string(), false), structured)
+            }
             Err(_) => {
                 use base64::Engine;
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
                 // An image the agent can look at (a preview's screenshot): MCP's image content.
                 if IMAGES.contains(&ct.as_str()) && bytes.len() <= MAX_IMAGE {
                     let text = format!("a {ct} image, {} bytes", bytes.len());
-                    return json!({ "content": [{ "type": "text", "text": text }, { "type": "image", "data": b64, "mimeType": ct }], "structuredContent": { "content_type": ct, "bytes": bytes.len() }, "isError": false });
+                    let mut structured = json!({ "content_type": ct, "bytes": bytes.len() });
+                    if outside {
+                        structured["outside"] = json!(true);
+                    }
+                    return json!({ "content": [{ "type": "text", "text": text }, { "type": "image", "data": b64, "mimeType": ct }], "structuredContent": structured, "isError": false });
                 }
-                (format!("{} bytes of {ct} (base64 in structuredContent.content_b64)", bytes.len()), json!({ "content_type": ct, "bytes": bytes.len(), "content_b64": b64 }))
+                let mut structured = json!({ "content_type": ct, "bytes": bytes.len(), "content_b64": b64 });
+                if outside {
+                    structured["outside"] = json!(true);
+                }
+                (format!("{} bytes of {ct} (base64 in structuredContent.content_b64)", bytes.len()), structured)
             }
         },
     };

@@ -104,6 +104,9 @@ pub const SCREENSHOT_IMAGE: &str = "mcr.microsoft.com/playwright:v1.64.1-noble";
 /// (`shot.js`, in `$ROLL_SHOT_JS`). A command of an operator's own only needs to write `$OUT`.
 pub const SCREENSHOT_COMMAND: &str = r#"CHROME="$(ls -d /ms-playwright/chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell | head -1)" node -e "$ROLL_SHOT_JS""#;
 const SHOT_JS: &str = include_str!("shot.js");
+/// A browser's container's memory (`shot_args`, the other browsers', the stories', `try`'s): what
+/// its running time costs, as a preview container's GiB-hours.
+pub const BROWSER_GIB: f64 = 1.0;
 /// The screenshot image with `playwright-core` added (Firefox and WebKit are in the base image,
 /// but only Playwright drives them): built once per node from [`BROWSERS_DOCKERFILE`] when a
 /// project asks for other browsers (`github.browsers`).
@@ -2082,12 +2085,21 @@ impl Runtime {
         };
         // Its Storybook's stories, in a run of their own alongside (`github.storybook`).
         let stories_run = async {
-            match opts.stories.as_deref().filter(|p| crate::settings::page_path_ok(p) && p.ends_with('/')) {
-                Some(at) => Some(self.stories_in(name, port, at).await),
+            let started = std::time::Instant::now();
+            let r = match opts.stories.as_deref().filter(|p| crate::settings::page_path_ok(p) && p.ends_with('/')) {
+                Some(at) => Some(self.stories_in(name, port, at, &opts.changed).await),
                 None => None,
-            }
+            };
+            (r, started.elapsed().as_millis() as u64)
         };
-        let (run, (more, browsers_ms), stories) = tokio::join!(tokio::time::timeout(within, docker_with_input(&argv, input, SHOT_OUTPUT_MAX)), browsers_run, stories_run);
+        // Each container's own time (they run side by side): what the run costs.
+        let chromium_run = async {
+            let started = std::time::Instant::now();
+            let r = tokio::time::timeout(within, docker_with_input(&argv, input, SHOT_OUTPUT_MAX)).await;
+            (r, started.elapsed().as_millis() as u64)
+        };
+        let ((run, chromium_ms), (more, browsers_ms), (stories, stories_ms)) = tokio::join!(chromium_run, browsers_run, stories_run);
+        let container_ms = chromium_ms + if more.is_some() { browsers_ms } else { 0 } + if stories.is_some() { stories_ms } else { 0 };
         let out = match run {
             Ok(Ok(out)) => out,
             // Its container outlives a docker CLI that gave up on it (too much output).
@@ -2132,6 +2144,7 @@ impl Runtime {
             // What `shot.js` said of the sign-in (its own words, never the page's), one line.
             login: serde_json::from_str::<serde_json::Value>(speed).ok().and_then(|v| v["login"].as_str().map(|s| s.chars().take(200).collect())),
             skipped: crate::Skipped { pages: cut, ..Default::default() },
+            container_ms,
         };
         // The other browsers', best effort: Chromium's screenshot stands.
         match more {
@@ -2160,10 +2173,23 @@ impl Runtime {
     /// A service's Storybook stories (`github.storybook`; Chromatic's stories), served at `at`: a
     /// run of their own in its network, locked down as the screenshot's is, each story a page
     /// (`story:<id>`).
-    async fn stories_in(&self, name: &str, port: u16, at: &str) -> anyhow::Result<(Vec<crate::ports::PageShot>, crate::Skipped)> {
+    async fn stories_in(&self, name: &str, port: u16, at: &str, changed: &[String]) -> anyhow::Result<(Vec<crate::ports::PageShot>, crate::Skipped)> {
         let shot = format!("roll-previews-story-{}", name.trim_start_matches("roll-previews-"));
         let mut args = shot_args(&shot, name, port);
         args.extend(["--env".into(), format!("STORIES={at}")]);
+        // What the change touched, so its stories go first: as many paths as fit in 64 KiB.
+        let mut fit = Vec::new();
+        let mut size = 0;
+        for p in changed.iter().filter(|p| p.len() <= 400 && !p.chars().any(char::is_control)) {
+            size += p.len() + 4;
+            if size > 64 << 10 {
+                break;
+            }
+            fit.push(p);
+        }
+        if !fit.is_empty() {
+            args.extend(["--env".into(), format!("STORIES_CHANGED={}", serde_json::to_string(&fit)?)]);
+        }
         args.extend([
             self.cfg.screenshot_image.clone(),
             "sh".into(),
@@ -3290,6 +3316,27 @@ mod tests {
         assert_eq!(step_ms(r#"[{"path":"/pricing","step_ms":120.4}]"#), [Some(120)]);
         assert_eq!(step_ms(r#"[{"path":"/pricing","step_ms":1e12}]"#), [None]);
         assert_eq!(step_ms(r#"[{"path":"/pricing","step_ms":-3}]"#), [None]);
+    }
+
+    /// A run's stories put the ones the change touched first: a story whose own file changed,
+    /// then one that imports a changed file through the module graph (Storybook's
+    /// `--stats-json`), then one beside a changed file, then the rest in the index's order
+    /// (Chromatic's TurboSnap); a repo's path matches a project's by its end, and the repo's root
+    /// by nothing. `shot.js`'s own function, run by `node`.
+    #[test]
+    fn stories_the_change_touched_go_first() {
+        let src = SHOT_JS.split("// touched-first: start").nth(1).and_then(|s| s.split("// touched-first: end").next()).expect("the function");
+        let entries = r#"[{"id":"a--1","importPath":"./src/A.stories.tsx"},{"id":"b--1","importPath":"./src/b/B.stories.tsx"},{"id":"c--1","importPath":"./src/c/C.stories.tsx"},{"id":"d--1"},{"id":"e--1","importPath":"./src/e/E.stories.tsx"}]"#;
+        let changed = r#"["web/src/c/C.stories.tsx","web/src/b/B.tsx","README.md","web/lib/deep.ts"]"#;
+        // E's story imports E, which imports lib/deep.ts (one of a concatenated module's); a cycle on the way.
+        let stats = r#"{"modules":[{"name":"./lib/index.ts + 1 modules","modules":[{"name":"./lib/deep.ts"}],"reasons":[{"moduleName":"./src/e/E.tsx"},{"moduleName":"./lib/index.ts"}]},{"name":"./src/e/E.tsx","reasons":[{"moduleName":"./src/e/E.stories.tsx?story"}]}]}"#;
+        let order = |stats: &str| {
+            let out = std::process::Command::new("node").arg("-e").arg(format!("{src}\nconsole.log(touchedFirst({entries}, {changed}, {stats}).map((e) => e.id).join(','))")).output().expect("node");
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        assert_eq!(order(stats), "c--1,e--1,b--1,a--1,d--1");
+        assert_eq!(order("null"), "c--1,b--1,a--1,d--1,e--1", "without a graph, by files alone");
     }
 
     /// A stories run's report is the preview's code's: each story once, by an id Storybook would

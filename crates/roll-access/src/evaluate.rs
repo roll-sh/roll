@@ -1024,10 +1024,22 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
             _ => own_kind,
         };
         let (a, s, w, product) = (access.clone(), scope.clone(), within_scope, row.product);
+        // The route's own resource as the gate decided it, its indices included: the gate let the
+        // request do what it needs there (allowed or approved), so the product sees it, and any
+        // other action on it is decided on the same indices. A token limited to some indices of a
+        // cluster reaches the cluster in them, never the whole of it.
+        let decided = match &target {
+            Target::One(r) if r.product == product && r.id.is_some() => Some((r.clone(), needs.clone())),
+            _ => None,
+        };
         // The request's own: projects' trust is read once however many it's asked about.
         let memo = std::sync::Mutex::new(crate::TrustMemo::default());
         parts.extensions.insert(roll_auth::Reach(Arc::new(move |id: &str, act: Action| {
-            let r = a.resource_with(true, product, kind, id, &mut memo.lock().unwrap_or_else(|e| e.into_inner()));
+            let r = match decided.as_ref().filter(|(r, _)| r.id.as_deref() == Some(id)) {
+                Some((_, needs)) if act == Action::Read || needs.contains(&act) => return true,
+                Some((r, _)) => r.clone(),
+                None => a.resource_with(true, product, kind, id, &mut memo.lock().unwrap_or_else(|e| e.into_inner())),
+            };
             let t = Target::One(r);
             s.outcome(&t, act) == Outcome::Allow && w.as_ref().is_none_or(|w| w.outcome(&t, act) == Outcome::Allow)
         })));

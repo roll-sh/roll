@@ -479,6 +479,57 @@ const ROOT_BOX = `JSON.stringify((() => {
   }
   return x2 > x1 && y2 > y1 ? { x: x1, y: y1, w: x2 - x1, h: y2 - y1 } : null;
 })())`;
+// touched-first: start
+// Stories the change touched first (Chromatic's TurboSnap): a story whose own file the change
+// changed, then one that imports a changed file from anywhere (through the bundler's module
+// graph, `stats`: Storybook's `--stats-json`, `preview-stats.json`, each module's `name` and the
+// `reasons` that import it), then one beside a file it changed (its component, its styles), then
+// the rest in the index's order. `changed` are paths in the repo; a story's `importPath` and a
+// module's name are its project's (`./src/Button.stories.tsx`), so a path matches by its end.
+// The graph is the preview's code's: it only orders, and its walk is bounded.
+const touchedFirst = (listed, changed, stats) => {
+  const norm = (p) => String(p || "").replace(/ \+ \d+ modules?$/, "").replace(/[?#].*$/, "").replace(/^\.\//, "").replace(/^\/+/, "");
+  const ends = (path, tail) => !!tail && (path === tail || path.endsWith("/" + tail));
+  const dir = (p) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
+  const touched = (name) => changed.some((c) => ends(c, name));
+  // Who imports whom, at most 200,000 edges; then up from what the change touched.
+  const importers = new Map();
+  let edges = 0;
+  const modules = Array.isArray(stats?.modules) ? stats.modules.slice(0, 50000) : [];
+  for (const m of modules) {
+    const names = [m?.name, ...(Array.isArray(m?.modules) ? m.modules.slice(0, 200).map((x) => x?.name) : [])].map(norm).filter(Boolean);
+    for (const r of Array.isArray(m?.reasons) ? m.reasons.slice(0, 1000) : []) {
+      const by = norm(r?.moduleName);
+      if (!by || ++edges > 200000) continue;
+      for (const n of names) (importers.get(n) || importers.set(n, new Set()).get(n)).add(by);
+    }
+  }
+  const reached = new Set([...importers.keys()].filter(touched));
+  for (const queue = [...reached]; queue.length && reached.size < 50000; ) {
+    for (const by of importers.get(queue.pop()) || []) {
+      if (!reached.has(by)) reached.add(by), queue.push(by);
+    }
+  }
+  const score = (e) => {
+    const own = norm(e.importPath);
+    if (!own) return 0;
+    if (touched(own)) return 3;
+    if (reached.has(own)) return 2;
+    const d = dir(own);
+    return d && changed.some((c) => ends(dir(c), d)) ? 1 : 0;
+  };
+  return listed.map((e, i) => [score(e), i, e]).sort((a, b) => b[0] - a[0] || a[1] - b[1]).map((x) => x[2]);
+};
+// touched-first: end
+// The paths the change touched ($STORIES_CHANGED, roll's: the repo's, since the default branch).
+const CHANGED = (() => {
+  try {
+    const c = JSON.parse(process.env.STORIES_CHANGED || "[]");
+    return Array.isArray(c) ? c.filter((p) => typeof p === "string").slice(0, 2000) : [];
+  } catch {
+    return [];
+  }
+})();
 const stories = async (sessionId) => {
   const base = new URL(process.env.STORIES, process.env.URL);
   let entries = [];
@@ -492,7 +543,18 @@ const stories = async (sessionId) => {
       if (entries.length) break;
     } catch {}
   }
-  const picked = entries.filter((e) => e && typeof e.id === "string" && STORY_ID.test(e.id) && (e.type == null || e.type === "story")).slice(0, 40);
+  // Its module graph, when it was built with `--stats-json` (only worth reading for a change).
+  let stats = null;
+  if (CHANGED.length) {
+    try {
+      const r = await fetch(new URL("preview-stats.json", base), { signal: AbortSignal.timeout(15000) });
+      const text = r.ok && Number(r.headers.get("content-length") || 0) <= 64 << 20 ? await r.text() : "";
+      if (text && text.length <= 64 << 20) stats = JSON.parse(text);
+    } catch {}
+  }
+  // The ones the change touched first, so the 40 a run takes are those that matter.
+  const listed = touchedFirst(entries.filter((e) => e && typeof e.id === "string" && STORY_ID.test(e.id) && (e.type == null || e.type === "story")), CHANGED, stats);
+  const picked = listed.slice(0, 40);
   const out = [];
   const until = Date.now() + 100000;
   for (const e of picked) {
@@ -520,7 +582,6 @@ const stories = async (sessionId) => {
     out.push({ id: e.id, errors: errors.length + failed.length - before });
   }
   // And what it didn't take (past the first 40, or out of its time), so roll can say so.
-  const listed = entries.filter((e) => e && typeof e.id === "string" && STORY_ID.test(e.id) && (e.type == null || e.type === "story"));
   const left = listed.filter((e) => !out.some((o) => o.id === e.id)).map((e) => e.id);
   fs.writeFileSync(process.env.OUT + ".stories.json", JSON.stringify({ stories: out, left: left.length, first_left: left.slice(0, 10) }));
 };

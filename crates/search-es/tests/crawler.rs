@@ -505,3 +505,36 @@ async fn a_sitemap_declaring_entities_isnt_read() {
     assert_eq!((at(&job, "status").as_str(), num(&job, "indexed_document_count"), num(&job, "metadata.sitemap_error_count")), (Some("completed"), 1, 1), "{job:?}");
     assert_eq!(site.hits("/from-entity-sitemap"), 0);
 }
+
+/// Extraction rules (Open Crawler's `extraction_rulesets`): on pages a ruleset's URL filter takes,
+/// a CSS selector's text as a string or an array, a `set` value when a selector finds anything,
+/// and a group of the URL; pages the filter doesn't take get none of it, and no rule replaces the
+/// fields every page has.
+#[tokio::test]
+async fn extraction_rules_fill_fields() {
+    let site = Site::start().await;
+    site.page("/", r#"<title>Home</title><a href="/blog/first-post">post</a> <a href="/about">about</a>"#);
+    let post = r#"<title>First post</title><article><h1>First post</h1><p class="byline">by <span class="author">Ada</span></p>
+        <ul class="tags"><li>rust</li><li class="hidden">draft</li><li>search</li></ul><p>Text.</p></article>"#;
+    site.page("/blog/first-post", post);
+    site.page("/about", r#"<title>About</title><article><p class="byline"><span class="author">Not a post</span></p></article>"#);
+    let c = cluster(&[]).await;
+    let snippet = format!(
+        r#"{{"domains":[{{"url":"{}","extraction_rulesets":[{{"url_filters":[{{"type":"begins","pattern":"/blog"}}],"rules":[
+            {{"action":"extract","field_name":"author","selector":"article .byline > span.author","join_as":"string","source":"html"}},
+            {{"action":"extract","field_name":"tags","selector":"ul.tags li:not(.hidden)","join_as":"array","source":"html"}},
+            {{"action":"set","field_name":"section","selector":"article","value":"blog","join_as":"string","source":"html"}},
+            {{"action":"extract","field_name":"slug","selector":"/blog/([a-z-]+)","join_as":"string","source":"url"}}
+        ]}}]}}]}}"#,
+        site.url("").trim_end_matches('/')
+    );
+    crawler(&c, &format!(r#"{{"urls":"{}"}}"#, site.url("/")), Some(&snippet)).await;
+    let job = crawl(&c).await;
+    assert_eq!((at(&job, "status").as_str(), num(&job, "indexed_document_count")), (Some("completed"), 3), "{job:?}");
+    let p = doc(&c, &site.url("/blog/first-post")).await.expect("the post is indexed");
+    assert_eq!(at(&p, "author").as_str(), Some("Ada"), "{p:?}");
+    assert_eq!(at(&p, "tags").as_array().map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>()), Some(vec!["rust", "search"]), "{p:?}");
+    assert_eq!((at(&p, "section").as_str(), at(&p, "slug").as_str(), at(&p, "title").as_str()), (Some("blog"), Some("first-post"), Some("First post")), "{p:?}");
+    let about = doc(&c, &site.url("/about")).await.expect("about is indexed");
+    assert!(about.get("author").is_none() && about.get("section").is_none(), "the filter takes /blog only: {about:?}");
+}
