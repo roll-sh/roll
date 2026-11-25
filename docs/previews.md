@@ -2778,45 +2778,46 @@ Ranked by what a person notices first. Done so far:
 Ranked again after a sixth product review (2026-11-25), against Vercel's and Netlify's previews and
 comments, Render and Railway, Neon, Chromatic and Percy, Signadot, Jam.
 
-1. **A fork's preview's pages can't send what they show elsewhere, in review**: a
-   Content-Security-Policy on its pages (its own hosts only). Next for it: roll apps' proxy the
-   same for a fork's services there, and a `data_forks` rule (a fork's data `schema` unless the
-   project says otherwise), as `egress_forks` is for its server.
-2. **The `max_bytes` cap holds, in review**: a wake and a visit's start refuse a preview over its
-   cap (its earlier pushes' copies counted, as converge counts them). Next for it: a visit to a
-   roll apps service of a capped preview (roll apps wakes it itself).
-3. **Signed in to the app**: pages, states, crops, endpoint timings and `try` all start from a
+1. **Signed in to the app**: pages, states, crops, endpoint timings and `try` all start from a
    fresh browser, so a page behind the app's own login screenshots its login page (Percy and
-   Chromatic capture with a saved login). A `github.login` step list (its password a `roll://`
-   reference), run once per screenshot run, its cookies used by every page and browser.
-4. **Coverage cut silently**: at most 40 stories and 10 pages, and nothing says what was left
+   Chromatic capture with a saved login). The plan: `github.login` ({page, steps}, as a state's),
+   whose `type` text may be `$NAME`, a variable of the preview's own environment (its resolved
+   secrets), substituted by the engine at the run and handed to the browser as a file, never argv
+   or the record. It runs once per screenshot run in each engine before the pages, its cookies kept
+   for every page, state, crop and timing (and `try`'s). Only on a trusted preview: a fork's code
+   would receive what's typed, so its run says it skipped the login. Its text masked wherever the
+   page's words are shown.
+2. **Coverage cut silently**: at most 40 stories and 10 pages, and nothing says what was left
    out; `skipped` (how many, which) on the run, the sheet and the comment; then stories chosen
    by what the change touched (Chromatic's TurboSnap).
-5. **Browser runs and jobs in the cost**: `cost_of` counts branches, compute and services'
+3. **Browser runs and jobs in the cost**: `cost_of` counts branches, compute and services'
    memory-hours, not the screenshot runs (three engines, stories, crops, `try`), builds or seed,
    release and teardown jobs; meter their container-seconds into `spent_usd`, so `max_usd_month`
    caps them too.
-6. **GitLab and Bitbucket merge requests**: previews are made from their events, but only
-   GitHub hears back (`GitReport`); a commit status and one note edited in place, with roll apps'
-   GitLab token.
-7. **A note in one click**: a team note opens the whole dashboard in a tab to post; a small popup
+4. **A note in one click**: a team note opens the whole dashboard in a tab to post; a small popup
    that posts and closes (Vercel's comments post in place).
-8. **Sleeping previews cost the control plane**: every settled preview goes through a whole
+5. **Sleeping previews cost the control plane**: every settled preview goes through a whole
    converge every 5 minutes (secrets' links and digests, usage of every branch); a usage-only
    pass for settled ones, counted per sleeping preview in the live run.
-9. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
+6. **A fork's preview on roll apps**: its services' pages the same Content-Security-Policy as on
+   previews' own proxy (roll apps' proxy adds it for a `pv-` environment previews marks
+   untrusted), and a `data_forks` rule (a fork's data `schema` unless the project says
+   otherwise), as `egress_forks` is for its server.
+7. **A capped preview's roll apps service**: a visit to it still wakes it there (roll apps wakes
+   it itself); previews tells roll apps to keep it down while it's over its cap.
+8. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
    is kept only where the product puts a branch back in place, keeping its id (their delete
    guards check it); each needs its control plane's reset `from`, as pg-control's.
-10. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+9. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-11. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+10. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-12. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+11. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-13. **Watch: pg-control's recovery to a time seconds old** (unowned).
+12. **Watch: pg-control's recovery to a time seconds old** (unowned).
 
 
 
@@ -2825,6 +2826,13 @@ comments, Render and Railway, Neon, Chromatic and Percy, Signadot, Jam.
 
 
 
+
+Landed 2026-11-25, night: the fifth review's security fixes (#943); roll apps on par (#947: one
+feedback button); `note_mail` in the page and `roll preview try` (#948); share links on the
+previews roll apps serves (#952); a note's typing (#953) and choices (#955: a `choose` step) taken
+again for its crop; a fork's preview's pages kept to its own hosts (#963: a Content-Security-Policy);
+a preview over its `max_bytes` stays asleep (#964); GitLab and Bitbucket merge requests hear back
+(#967).
 
 Landed 2026-11-24, night: a note's element cropped in its reviewer's engine (#938: WebKit for Safari and iOS, Firefox; their viewport, after their clicks).
 
