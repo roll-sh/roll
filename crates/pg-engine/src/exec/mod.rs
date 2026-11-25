@@ -456,7 +456,7 @@ pub struct ExecCtx<'a> {
     enclosing_cache: RefCell<HashMap<usize, (Vec<Rc<Row>>, Rc<Vec<Row>>)>>,
     /// What correlated SubPlans keep between their runs in the statement (`Subplans`),
     /// made by the first one: a statement without one sets one pointer, not two maps.
-    subplans: RefCell<Option<Box<Subplans>>>,
+    subplans: SubplansBox,
     pub ctes: RefCell<HashMap<usize, Rc<RefCell<nodes::CteState>>>>,
     pub work: RefCell<HashMap<usize, Rc<Vec<Row>>>>,
     /// Shared with child contexts: a COMMIT inside a procedure starts a new transaction time.
@@ -841,6 +841,24 @@ struct Subplans {
     memo: HashMap<usize, SubplanMemo>,
 }
 
+/// `ExecCtx::subplans`: its drop is one test of the pointer, inlined, the box's own out of
+/// line (an `Option<Box<_>>` field's drop glue is a call every statement makes).
+struct SubplansBox(RefCell<Option<std::mem::ManuallyDrop<Box<Subplans>>>>);
+
+impl Drop for SubplansBox {
+    #[inline]
+    fn drop(&mut self) {
+        #[cold]
+        #[inline(never)]
+        fn drop_subplans(b: std::mem::ManuallyDrop<Box<Subplans>>) {
+            drop(std::mem::ManuallyDrop::into_inner(b));
+        }
+        if let Some(b) = self.0.get_mut().take() {
+            drop_subplans(b);
+        }
+    }
+}
+
 /// A correlated SubPlan's rows by its parameters' values (`ExecCtx::memo_rows`): None when
 /// its plan can't be remembered so.
 struct SubplanMemo {
@@ -1045,7 +1063,7 @@ impl<'a> ExecCtx<'a> {
             case_vals: RefCell::new(Vec::new()),
             subq_cache: RefCell::new(HashMap::default()),
             enclosing_cache: RefCell::new(HashMap::default()),
-            subplans: RefCell::new(None),
+            subplans: SubplansBox(RefCell::new(None)),
             ctes: RefCell::new(HashMap::default()),
             work: RefCell::new(HashMap::default()),
             txn_time: Rc::new(Cell::new(txn_time)),
@@ -1180,7 +1198,7 @@ impl<'a> ExecCtx<'a> {
             case_vals: RefCell::new(Vec::new()),
             subq_cache: RefCell::new(HashMap::default()),
             enclosing_cache: RefCell::new(HashMap::default()),
-            subplans: RefCell::new(None),
+            subplans: SubplansBox(RefCell::new(None)),
             ctes: RefCell::new(HashMap::default()),
             work: RefCell::new(HashMap::default()),
             txn_time: self.txn_time.clone(),
@@ -1687,7 +1705,7 @@ impl<'a> ExecCtx<'a> {
 
     /// `subplans`, made now if no SubPlan made it yet.
     fn subplans(&self) -> std::cell::RefMut<'_, Subplans> {
-        std::cell::RefMut::map(self.subplans.borrow_mut(), |s| &mut **s.get_or_insert_with(Default::default))
+        std::cell::RefMut::map(self.subplans.0.borrow_mut(), |s| &mut ***s.get_or_insert_with(|| std::mem::ManuallyDrop::new(Box::default())))
     }
 
     /// The rows of subquery `s` (its parameters, if any, evaluated over `row`).
