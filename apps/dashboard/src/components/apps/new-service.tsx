@@ -67,6 +67,8 @@ export function NewServiceSheet({
   // Any public Git URL instead (GitHub, GitLab…): no app to install, no mirror.
   const [gitUrl, setGitUrl] = useState("");
   const [gitBranch, setGitBranch] = useState("");
+  // A roll code repo's branch to follow (Vercel's, Render's import): its default when empty.
+  const [repoBranch, setRepoBranch] = useState("");
   const [root, setRoot] = useState("");
   const [image, setImage] = useState("");
   const [regUser, setRegUser] = useState("");
@@ -266,7 +268,8 @@ export function NewServiceSheet({
         ...fresh.map((r) => ({ kind: LINKABLE[r.kind]!, ref: r.ref })),
         ...linkable.filter((v) => links.has(resourceKey(v)) && !freshKeys.has(resourceKey(v))).map((v) => ({ kind: LINKABLE[v.kind]!, ref: v.ref })),
       ];
-      const branch = source.kind === "git" && gitBranch.trim() ? { branch: gitBranch.trim() } : {};
+      const picked = source.kind === "git" ? gitBranch.trim() : source.kind === "repo" ? repoBranch.trim() : "";
+      const branch = picked ? { branch: picked } : {};
       const s = await appsApi.create({ project: project.id, name, source, ...branch, ...(run ? { run } : {}), ...variables, ...registry, ...(chosen.length ? { links: chosen } : {}), ...spot });
       onCreated(s);
     } catch (e) {
@@ -317,6 +320,14 @@ export function NewServiceSheet({
                   </option>
                 ))}
               </select>
+            )}
+            {repo && !gitUrl.trim() && (
+              <>
+                <Label>
+                  Branch <span className="font-normal">optional; production follows it</span>
+                </Label>
+                <input value={repoBranch} onChange={(e) => setRepoBranch(e.target.value)} placeholder="its default branch" aria-label="Repository branch" className={field} spellCheck={false} />
+              </>
             )}
             <FromGithub
               onPicked={(full) => {
@@ -453,9 +464,9 @@ export function NewServiceSheet({
             {kind === "web" && (
               <>
                 <Label>
-                  Port <span className="font-normal">{from === "repo" && plan?.plan ? `detected ${plan.plan.port}` : "default 8080"}</span>
+                  Port <span className="font-normal">{from === "repo" && plan?.plan ? `detected ${plan.plan.port}` : from === "image" ? "default: the one the image exposes" : "default 8080"}</span>
                 </Label>
-                <input value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))} placeholder={String(plan?.plan?.port ?? 8080)} inputMode="numeric" className={field} />
+                <input value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))} placeholder={from === "image" ? "its EXPOSE" : String(plan?.plan?.port ?? 8080)} inputMode="numeric" className={field} />
                 <Label>
                   Health check path <span className="font-normal">optional; none: the port accepting</span>
                 </Label>
