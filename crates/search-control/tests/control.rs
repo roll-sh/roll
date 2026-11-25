@@ -3354,6 +3354,12 @@ async fn an_opensearch_flavor_takes_no_elasticsearch_credentials() {
     assert_eq!(r.status().as_u16(), 404, "{}", r.text().await.unwrap_or_default());
     let (s, v) = e.call(Method::DELETE, &format!("/v1/search/clusters/flip/keys/{}", roll["id"].as_str().unwrap()), None).await;
     assert!(s < 300, "revoking an Elasticsearch key on OpenSearch: {s} {v}");
+    // A data user's `_cat/shards` on OpenSearch answers for what it may see, hidden indices
+    // (the security index) left out, rather than refusing it.
+    let os = e.post("/v1/search/clusters/flip/keys", json!({"name": "os-data", "access": "data"})).await;
+    let r = e.http.get(format!("{}/_cat/shards?format=json", e.es)).basic_auth(os["username"].as_str().unwrap(), os["password"].as_str()).send().await.unwrap();
+    let (s, body) = (r.status().as_u16(), r.text().await.unwrap_or_default());
+    assert!(s == 200 && !body.contains("opendistro_security"), "{s} {body}");
     switch("elasticsearch").await;
     assert_eq!(status(roll_key).await, 401, "revoked on OpenSearch, still revoked");
     assert_eq!(status(user_key).await, 200, "a key nobody revoked works again");
@@ -3399,8 +3405,15 @@ async fn a_wildcard_key_reaches_no_watch_history() {
     assert_eq!((s, &v["total"]), (200, &json!(1)), "only the key's own index: {v}");
     let (s, v) = as_key(Method::POST, "/*/_delete_by_query?expand_wildcards=all&refresh=true", Some(json!({"query": {"term": {"leaked": true}}}))).await;
     assert_eq!((s, &v["total"]), (200, &json!(1)), "{v}");
-    let (s, v) = as_key(Method::GET, "/*/_settings?expand_wildcards=all", None).await;
-    assert_eq!(s, 403, "hidden indices the key may not read: {v}");
+    // Replaceable requests answer for the indices the key may act on, as on Elasticsearch.
+    for path in ["/*/_settings?expand_wildcards=all", "/_stats?expand_wildcards=open,hidden", "/_mapping?expand_wildcards=all", "/_segments?expand_wildcards=all", "/_cat/aliases?format=json"] {
+        let (s, v) = as_key(Method::GET, path, None).await;
+        assert!(s == 200 && !v.to_string().contains(".watcher-history") && !v.to_string().contains("hist-alias"), "{path}: {s} {v}");
+    }
+    let (s, v) = as_key(Method::POST, "/_refresh?expand_wildcards=all", None).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = as_key(Method::GET, &format!("/{history}/_settings"), None).await;
+    assert_eq!(s, 403, "named explicitly: {v}");
     let (s, v) = as_key(Method::GET, "/_cat/shards?format=json", None).await;
     assert!(s == 200 && !v.to_string().contains(".watcher-history"), "{s} {v}");
     let (s, v) = as_key(Method::POST, "/hist-alias/_search", Some(json!({}))).await;

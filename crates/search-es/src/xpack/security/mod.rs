@@ -651,9 +651,10 @@ pub fn effective(file: &FileRoles, st: &crate::meta::ClusterState, p: &Principal
 
 /// Read APIs whose wildcard index expressions Elasticsearch expands to the indices the user
 /// may read (`IndicesAndAliasesResolver`) instead of failing on the others.
-/// The by-query APIs too (`IndicesRequest.Replaceable`): their scan resolves the request's own
-/// `expand_wildcards`, hidden indices included, so only the indices authorized may be in it.
-/// `_cat/shards` lists hidden indices by default.
+/// And every other API whose request is `IndicesRequest.Replaceable` there: the by-query APIs,
+/// whose scan resolves the request's own `expand_wildcards` (hidden indices too), and the index
+/// admin and monitoring APIs a monitoring agent or index tool calls over `*`. They answer for the
+/// indices authorized; an index named explicitly that isn't is still a 403.
 const NARROWED: &[&str] = &[
     "search",
     "count",
@@ -667,8 +668,36 @@ const NARROWED: &[&str] = &[
     "cat.indices",
     "update_by_query",
     "delete_by_query",
+    "indices.get_settings",
+    "indices.get_mapping",
+    "indices.get_field_mapping",
+    "indices.stats",
+    "indices.refresh",
+    "indices.flush",
+    "indices.forcemerge",
+    "indices.segments",
+    "indices.recovery",
+    "indices.clear_cache",
+    "indices.get_alias",
+    "indices.exists_alias",
+    "indices.validate_query",
     "cat.shards",
+    "cat.aliases",
+    "cat.recovery",
+    "cat.count",
 ];
+
+/// The read APIs the OpenSearch plugin checks over every index their wildcards reach, refusing
+/// the request when one isn't permitted ([`check_all`]; `do_not_fail_on_forbidden` is off by
+/// default). The rest of [`NARROWED`] takes the generic check for OpenSearch principals, as it
+/// did, but for `_cat/shards`, which lists hidden indices by default: narrowed, so it neither
+/// refuses a data user nor lists what the check never saw.
+const OS_WHOLE: &[&str] = &["search", "count", "field_caps", "async_search.submit", "eql.search", "search_template", "open_point_in_time", "knn_search", "indices.get", "cat.indices"];
+
+/// Whether `api` narrows its wildcards for principal `p` ([`NARROWED`], [`OS_WHOLE`]).
+fn narrows(p: &Principal, api: &str) -> bool {
+    NARROWED.contains(&api) && (p.os().is_none() || api == "cat.shards")
+}
 
 /// The indices options [`narrow`] expands an API's wildcards with (before its parameters).
 fn narrow_defaults(api: &str) -> crate::meta::resolve::IndicesOptions {
@@ -677,6 +706,9 @@ fn narrow_defaults(api: &str) -> crate::meta::resolve::IndicesOptions {
         "indices.get" => IndicesOptions::STRICT_EXPAND_OPEN,
         "cat.indices" => IndicesOptions::STRICT_EXPAND,
         "cat.shards" => IndicesOptions::STRICT_EXPAND_HIDDEN,
+        // `GetAliasesRequest`: open and closed indices, `_cat/aliases` hidden ones too.
+        "indices.get_alias" | "indices.exists_alias" => IndicesOptions { expand_closed: true, ..IndicesOptions::STRICT_EXPAND_OPEN },
+        "cat.aliases" => IndicesOptions { expand_closed: true, expand_hidden: true, ..IndicesOptions::STRICT_EXPAND_OPEN },
         _ => IndicesOptions::LENIENT_EXPAND_OPEN,
     }
 }
@@ -831,7 +863,7 @@ fn authorize_action(ctx: &Ctx) -> EsResult<Option<String>> {
             let action = if ctx.api.name() == "create" { "indices:data/write/index" } else { action.as_str() };
             return if eff.allows_index(action, &name) { Ok(None) } else { Err(denied(p, action, None)) };
         }
-        if scope == Scope::Index && NARROWED.contains(&ctx.api.name()) {
+        if scope == Scope::Index && OS_WHOLE.contains(&ctx.api.name()) {
             let defaults = narrow_defaults(ctx.api.name());
             let opts = ctx.indices_options(defaults).unwrap_or(defaults);
             return check_all(ctx, p, &eff, &action, crate::api::index_expressions(ctx), &opts).map(|_| None);
@@ -868,7 +900,7 @@ fn authorize_action(ctx: &Ctx) -> EsResult<Option<String>> {
             crate::search::check_pit_without_indices(ctx, true)?;
             authorize_pit(ctx, p, &eff, &action, &pit_of(ctx).unwrap_or_default())
         }
-        Scope::Index if NARROWED.contains(&ctx.api.name()) => narrow(ctx, p, &eff, &action),
+        Scope::Index if narrows(p, ctx.api.name()) => narrow(ctx, p, &eff, &action),
         // Composite requests: their items are authorized as they run (`authorize_writes`,
         // `authorize_gets`, each search of an msearch).
         Scope::Index if COMPOSITE.contains(&ctx.api.name()) => {

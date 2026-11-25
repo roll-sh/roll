@@ -136,6 +136,18 @@ impl Links for ControlLinks {
     }
 }
 
+/// A linked remote's request without the headers only roll says: credentials (the key goes on
+/// after), the host, a repository's maker (only `Control::put_repository`), and roll's revocation
+/// of a key from before a switch of flavor.
+fn link_headers(req: &mut EsRequest) {
+    req.headers.retain(|(k, _)| {
+        !k.eq_ignore_ascii_case("authorization")
+            && !k.eq_ignore_ascii_case("host")
+            && !k.eq_ignore_ascii_case(search_es::secret_refs::MAKER_HEADER)
+            && !k.eq_ignore_ascii_case(search_es::xpack::security::DORMANT_KEY_HEADER)
+    });
+}
+
 impl Control {
     /// Opens a remote's sealed credentials (`None`: sealed under another key, or tampered with).
     fn open_remote_credentials(&self, row: &RemoteLink) -> Option<String> {
@@ -146,13 +158,7 @@ impl Control {
     /// owner (here, or forwarded signed): roll's own call, which the target's IP allowlist
     /// doesn't filter and which wakes it.
     async fn send_link(&self, t: &SearchCluster, key_id: &str, secret: &str, mut req: EsRequest) -> EsResponse {
-        // A repository's maker is said only by `Control::put_repository`.
-        req.headers.retain(|(k, _)| {
-            !k.eq_ignore_ascii_case("authorization")
-                && !k.eq_ignore_ascii_case("host")
-                && !k.eq_ignore_ascii_case(search_es::secret_refs::MAKER_HEADER)
-                && !k.eq_ignore_ascii_case(search_es::xpack::security::DORMANT_KEY_HEADER)
-        });
+        link_headers(&mut req);
         let token = base64::engine::general_purpose::STANDARD.encode(format!("{key_id}@{}:{secret}", t.name));
         req.headers.push(("Authorization".into(), format!("ApiKey {token}")));
         self.on_owner(&t.name, req).await
@@ -316,6 +322,18 @@ impl Control {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A linked remote's request carries none of the headers only roll says, whoever sent them.
+    #[test]
+    fn link_requests_drop_rolls_own_headers() {
+        let mut req = EsRequest::new("DELETE", "/_security/api_key");
+        for k in ["Authorization", "Host", search_es::secret_refs::MAKER_HEADER, "X-Roll-Dormant-Key", "Content-Type"] {
+            req.headers.push((k.to_string(), "x".into()));
+        }
+        link_headers(&mut req);
+        let kept: Vec<&str> = req.headers.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(kept, ["Content-Type"]);
+    }
 
     #[test]
     fn targets() {

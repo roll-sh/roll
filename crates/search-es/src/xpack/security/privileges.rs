@@ -543,7 +543,15 @@ pub fn is_watch_history(index: &str) -> bool {
 
 /// Restricted indices: the security indices and other internal indices roles must opt into.
 pub fn is_restricted(index: &str) -> bool {
-    index.starts_with(".security") || index == super::opensearch::INDEX || index.starts_with(".async-search") || index.starts_with(".fleet-") || index.starts_with(".connector-secrets")
+    // `.tasks` holds other principals' task results; `.synonyms-2` (`.synonyms`) the synonym
+    // sets: system indices, so restricted in Elasticsearch.
+    index.starts_with(".security")
+        || index == super::opensearch::INDEX
+        || index.starts_with(".async-search")
+        || index.starts_with(".fleet-")
+        || index.starts_with(".connector-secrets")
+        || index == ".tasks"
+        || index.starts_with(".synonyms")
 }
 
 #[cfg(test)]
