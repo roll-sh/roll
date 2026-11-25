@@ -860,6 +860,12 @@ pub enum Secrets {
         #[command(subcommand)]
         cmd: IssuerCmd,
     },
+    /// roll secrets' policy (the operator's, or an admin account's): floors every project may only
+    /// tighten (docs/secrets.md, "Guardrails").
+    Policy {
+        #[command(subcommand)]
+        cmd: PolicyCmd,
+    },
     /// Serve the environment's values to apps on this machine from 127.0.0.1, cached and kept
     /// current, as the Lambda extension does (a sidecar or a unit; docs/secrets.md, "A local agent").
     Agent(local_agent::LocalAgent),
@@ -875,6 +881,31 @@ pub enum Secrets {
     /// instead, or keep the pipe out of the directory it watches (Vite's `envDir`). Not on Windows:
     /// use `roll run` there.
     Mount(mount::Mount),
+}
+
+#[derive(Subcommand)]
+pub enum PolicyCmd {
+    /// The floors, and who set them when.
+    Get,
+    /// Replace the policy: a floor left out has none. Nothing existing is rewritten; Health lists
+    /// each project's distance (`off_policy`).
+    Set {
+        /// Every project's production stays protected with at least this many approvals (0–10).
+        #[arg(long)]
+        production_approvals: Option<i64>,
+        /// Every project's leaks.rotate stays managed.
+        #[arg(long)]
+        leaks_managed: bool,
+        /// The only sync kinds a project may make, comma-separated (`""` for none).
+        #[arg(long, value_delimiter = ',')]
+        sync_kinds: Option<Vec<String>>,
+        /// No sync stores a cloud key for AWS, Google or Azure where it could sign in without one.
+        #[arg(long)]
+        no_stored_cloud_keys: bool,
+        /// The longest a token with a secrets rule may live, in days.
+        #[arg(long)]
+        max_token_days: Option<u32>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2100,6 +2131,55 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             println!("{} signs now; {pulled} left the JWKS. Update any cloud trust or verifier that pinned {pulled}.", s(&v["kid"]));
         } else {
             println!("{} is published and signs from {}", s(&v["kid"]), chrono::DateTime::from_timestamp_millis(v["signs_from"].as_i64().unwrap_or(0)).map(|t| t.to_rfc3339()).unwrap_or_default());
+        }
+        return Ok(());
+    }
+    // roll secrets' policy binds every project.
+    if let Secrets::Policy { cmd } = &cmd {
+        let v = match cmd {
+            PolicyCmd::Get => api.get("/v1/secrets/policy").await?,
+            PolicyCmd::Set { production_approvals, leaks_managed, sync_kinds, no_stored_cloud_keys, max_token_days } => {
+                let kinds = sync_kinds.as_ref().map(|ks| ks.iter().map(|k| k.trim()).filter(|k| !k.is_empty()).collect::<Vec<_>>());
+                let body = json!({
+                    "production_approvals": production_approvals,
+                    "leaks_rotate": leaks_managed.then_some("managed"),
+                    "sync_kinds": kinds,
+                    "no_stored_cloud_keys": no_stored_cloud_keys,
+                    "max_token_days": max_token_days,
+                });
+                api.call(Method::PUT, "/v1/secrets/policy", Some(body)).await?
+            }
+        };
+        if json_out {
+            println!("{}", serde_json::to_string_pretty(&v)?);
+            return Ok(());
+        }
+        let mut floors = vec![];
+        if let Some(n) = v["production_approvals"].as_i64() {
+            floors.push(format!("production protected with at least {n} approval{}", if n == 1 { "" } else { "s" }));
+        }
+        if v["leaks_rotate"] == "managed" {
+            floors.push("leaks.rotate managed".into());
+        }
+        if let Some(ks) = v["sync_kinds"].as_array() {
+            let ks: Vec<&str> = ks.iter().filter_map(Value::as_str).collect();
+            floors.push(format!("sync kinds: {}", if ks.is_empty() { "none".to_string() } else { ks.join(", ") }));
+        }
+        if v["no_stored_cloud_keys"] == true {
+            floors.push("no stored cloud keys for AWS, Google or Azure".into());
+        }
+        if let Some(d) = v["max_token_days"].as_i64() {
+            floors.push(format!("tokens with a secrets rule live at most {d} days"));
+        }
+        if floors.is_empty() {
+            println!("No floors: each project sets its own");
+        } else {
+            for f in floors {
+                println!("{f}");
+            }
+        }
+        if let (Some(by), Some(at)) = (v["updated_by"].as_str(), v["updated_at"].as_i64()) {
+            println!("Set by {by} on {}", day(at));
         }
         return Ok(());
     }
@@ -3672,7 +3752,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Revoked {id}");
             }
         },
-        Secrets::Keygen { .. } | Secrets::Key(_) | Secrets::Unseal { .. } | Secrets::Find { .. } | Secrets::Recover { .. } | Secrets::Doctor | Secrets::Health { all: true, .. } | Secrets::Issuer { .. } | Secrets::Agent(_) | Secrets::Mount(_) => unreachable!("handled before a project is picked"),
+        Secrets::Keygen { .. } | Secrets::Key(_) | Secrets::Unseal { .. } | Secrets::Find { .. } | Secrets::Recover { .. } | Secrets::Doctor | Secrets::Health { all: true, .. } | Secrets::Issuer { .. } | Secrets::Policy { .. } | Secrets::Agent(_) | Secrets::Mount(_) => unreachable!("handled before a project is picked"),
         Secrets::Backup { to, out } => {
             let v = c.call(Method::POST, &format!("{}/backup", c.base()), Some(json!({ "recipient": to }))).await?;
             let text = serde_json::to_string_pretty(&v)?;
