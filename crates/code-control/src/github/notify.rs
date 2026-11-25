@@ -688,6 +688,9 @@ fn page_checks(e: &crate::model::PreviewEnvironment) -> Option<String> {
         summary.push(format!("serves {}", plural(e.served_secrets.len() as u64, "secret value", "secret values")));
         details.push_str(&served_line(&e.served_secrets));
     }
+    if let Some(s) = e.skipped.as_ref().filter(|s| !s.pages.is_empty() || s.stories > 0) {
+        details.push_str(&skipped_line(s));
+    }
     if let Some(v) = &e.visual_change {
         summary.push(if v.percent <= 0.0 { "unchanged since the push before".into() } else { format!("changed {} since the push before", pct(v.percent)) });
         details.push_str(&visual_line(v));
@@ -972,6 +975,23 @@ pub fn preview_comment_for(p: Option<&Preview>, marker: &str, teardown: Option<&
     out
 }
 
+/// What its screenshot run left out: the pages past a run's ten and the stories it didn't take,
+/// each in a code span nothing in it can close (story ids are the preview's code's).
+fn skipped_line(s: &crate::model::PreviewSkipped) -> String {
+    let span = |t: &str| format!("`{}`", t.chars().filter(|c| !c.is_control() && *c != '`').take(200).collect::<String>());
+    let mut parts = Vec::new();
+    if !s.pages.is_empty() {
+        let pages: Vec<String> = s.pages.iter().take(10).map(|p| span(p)).collect();
+        parts.push(format!("{} (a run takes ten pages)", pages.join(", ")));
+    }
+    if s.stories > 0 {
+        let first: Vec<String> = s.first_stories.iter().take(10).map(|p| span(p)).collect();
+        let more = if (s.stories as usize) > first.len() { ", …" } else { "" };
+        parts.push(format!("{} ({}{more})", plural(s.stories as u64, "story", "stories"), first.join(", ")));
+    }
+    format!("**Not taken:** {}.\n\n", parts.join("; "))
+}
+
 /// Its secret values its pages serve: each by the name it's given as, and where (never the
 /// value), each in a code span nothing in it can close.
 fn served_line(served: &[crate::model::PreviewServedSecret]) -> String {
@@ -1195,6 +1215,7 @@ mod preview_tests {
             slower_routes: None,
             new_errors: None,
             served_secrets: Vec::new(),
+            skipped: None,
             base_change: None,
             diff_url: None,
             pages: Vec::new(),
@@ -1288,6 +1309,9 @@ mod preview_tests {
         assert_eq!(links_line(&links), "**Broken links** (of 4 checked on its first page): `/gone` 404, `/slow` no answer.\n\n");
         let served = [crate::model::PreviewServedSecret { key: "STRIPE_KEY`".into(), path: "/app.js`x".into() }];
         assert_eq!(served_line(&served), "**Secret values in what it serves:** `STRIPE_KEY` in `/app.jsx`. Anyone who opens the preview can read them: rotate them, and keep them out of the browser's code.\n\n");
+        // What its run left out, each in a span its own text can't close (story ids are the preview's code's).
+        let skipped = crate::model::PreviewSkipped { pages: vec!["/old".into()], stories: 12, first_stories: vec!["button`--x".into()] };
+        assert_eq!(skipped_line(&skipped), "**Not taken:** `/old` (a run takes ten pages); 12 stories (`button--x`, …).\n\n");
         // In the comment, one folded block whose summary is counts only.
         let mut e = p.environment.clone().unwrap();
         (e.page_health, e.page_a11y, e.base_change, e.visual_change, e.page_speed) = (Some(h(2, 1)), Some(a), Some(b), Some(v(12.34)), Some(sp(1200, Some(900))));

@@ -519,7 +519,10 @@ const stories = async (sessionId) => {
     fs.writeFileSync(`${process.env.OUT}.story.${out.length}.png`, Buffer.from(shot.data, "base64"));
     out.push({ id: e.id, errors: errors.length + failed.length - before });
   }
-  fs.writeFileSync(process.env.OUT + ".stories.json", JSON.stringify(out));
+  // And what it didn't take (past the first 40, or out of its time), so roll can say so.
+  const listed = entries.filter((e) => e && typeof e.id === "string" && STORY_ID.test(e.id) && (e.type == null || e.type === "story"));
+  const left = listed.filter((e) => !out.some((o) => o.id === e.id)).map((e) => e.id);
+  fs.writeFileSync(process.env.OUT + ".stories.json", JSON.stringify({ stories: out, left: left.length, first_left: left.slice(0, 10) }));
 };
 // A run an agent asked for ($TRY: {path, steps}; roll previews' `…/try`): the page loaded, its
 // steps taken as a page state's are (10 at most, 15 s), then its picture to $OUT, and to

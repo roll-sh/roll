@@ -261,6 +261,9 @@ pub struct Shot {
     /// What its sign-in said (`github.login`): "signed in", or the step it stopped at.
     #[serde(default)]
     pub login: Option<String>,
+    /// What it left out (pages past a run's ten, stories it didn't take).
+    #[serde(default)]
+    pub skipped: crate::Skipped,
 }
 
 /// PNG bytes as base64 in JSON (a [`Shot`] from another node).
