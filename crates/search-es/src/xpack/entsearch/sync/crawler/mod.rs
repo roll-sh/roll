@@ -77,6 +77,8 @@ pub const PRESET: &str = "preset";
 pub const FIELD_ETAG: &str = "http_etag";
 pub const FIELD_LAST_MODIFIED: &str = "http_last_modified";
 pub const FIELD_DEPTH: &str = "crawl_depth";
+/// The digest of the configuration a document was made with (`config::Domain::fingerprint`).
+pub const FIELD_FINGERPRINT: &str = "crawl_fingerprint";
 
 /// The mappings of an index a crawl creates (crawler.md, "Documents"); with the docs preset, its
 /// records' (crawler.md, "The docs preset").
@@ -109,7 +111,7 @@ pub fn mappings(docs: bool) -> Value {
             ("url", t("keyword")), ("url_host", t("keyword")), ("url_path", t("keyword")), ("url_scheme", t("keyword")),
             ("url_path_dir1", t("keyword")), ("url_path_dir2", t("keyword")), ("url_path_dir3", t("keyword")),
             ("last_crawled_at", t("date")), ("url_port", t("long")),
-            (FIELD_ETAG, stored("keyword")), (FIELD_LAST_MODIFIED, stored("keyword")), (FIELD_DEPTH, stored("integer")),
+            (FIELD_ETAG, stored("keyword")), (FIELD_LAST_MODIFIED, stored("keyword")), (FIELD_DEPTH, stored("integer")), (FIELD_FINGERPRINT, stored("keyword")),
         ] {
             m.insert(k.into(), v);
         }
@@ -1049,15 +1051,22 @@ impl Crawl<'_, '_> {
     }
 
     /// The validators the document of `link` holds (its records' first, with the docs preset),
-    /// if it has one: the crawl asks for the page conditionally then.
+    /// if it has one made with the configuration the crawl has now (its fingerprint): the crawl
+    /// asks for the page conditionally then. Made with another (rules, tags, the preset's
+    /// selectors or limits changed since), the page is read in full again.
     async fn stored_validators(&self, link: &Link) -> Option<fetch::Validators> {
+        let now = &self.plan.domain(link)?.fingerprint;
         let id = match self.plan.docs {
             Some(_) => record_id(link, 0),
             None => link.id(),
         };
-        let path = format!("/{}/_doc/{}?_source_includes={FIELD_ETAG},{FIELD_LAST_MODIFIED}", enc(&self.sink.index), enc(&id));
+        let path = format!("/{}/_doc/{}?_source_includes={FIELD_ETAG},{FIELD_LAST_MODIFIED},{FIELD_FINGERPRINT}", enc(&self.sink.index), enc(&id));
         let doc = internal::call(self.sink.cluster, "GET", &path, None).await.ok()?;
-        let v = fetch::Validators::of_document(doc.get("_source")?);
+        let source = doc.get("_source")?;
+        if source.get(FIELD_FINGERPRINT).and_then(Value::as_str) != Some(now.as_str()) {
+            return None;
+        }
+        let v = fetch::Validators::of_document(source);
         (!v.is_empty()).then_some(v)
     }
 
@@ -1141,6 +1150,7 @@ impl Crawl<'_, '_> {
         self.indexed.insert(at.hash64());
         *self.indexed_by_origin.entry(at.origin()).or_default() += 1;
         let primary = at;
+        let fingerprint = self.plan.domain(&primary).map(|d| d.fingerprint.clone()).unwrap_or_default();
         let crawl = |d: &mut Map| {
             if let Some(e) = &validators.etag {
                 d.insert(FIELD_ETAG.into(), e.clone().into());
@@ -1149,6 +1159,7 @@ impl Crawl<'_, '_> {
                 d.insert(FIELD_LAST_MODIFIED.into(), m.clone().into());
             }
             d.insert(FIELD_DEPTH.into(), (depth as i64).into());
+            d.insert(FIELD_FINGERPRINT.into(), fingerprint.clone().into());
         };
         let docs: Vec<(String, Map)> = match self.plan.docs.is_some() {
             false => {

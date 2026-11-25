@@ -431,10 +431,16 @@ each page's validators in its document, as fields of its own:
 - `http_etag` and `http_last_modified`: the `ETag` and `Last-Modified` of the response the
   document was read from, kept only when they can be sent back as they came (visible ASCII, at most
   256 bytes);
-- `crawl_depth`: the link depth the crawl found the page at.
+- `crawl_depth`: the link depth the crawl found the page at;
+- `crawl_fingerprint`: a digest of the configuration the document was made with, everything a
+  page's document depends on besides the page: the domain's extraction rulesets and
+  `exclude_tags`, the preset and its `docs` selectors, `full_html_extraction_enabled`, the limits
+  a page is cut to (`max_title_size` and the other size and count limits), and the version of
+  roll's own extraction.
 
 Every crawl asks for a page whose document holds validators with `If-None-Match` and
-`If-Modified-Since`, on the request for that URL only: never on a redirect's next hop, so a
+`If-Modified-Since`, when the document's fingerprint is the configuration's now (after a change,
+the page is read in full again and its document made anew), on the request for that URL only: never on a redirect's next hop, so a
 validator goes back only to the URL that gave it, with the credential still under "Fetching"'s
 rules. A 304 leaves the document exactly as it was: nothing is extracted, nothing is written, and
 its `last_crawled_at` stays the time it was last read. It counts as seen, so the purge keeps it
@@ -483,7 +489,11 @@ A record has `id` (the page's id, `-`, its position), `url` (the page's URL plus
 `weight.position`, the page's `title`, the URL fields, `last_crawled_at`, the validators, and the
 page's extracted fields (which never replace a record's own). A new index gets the records'
 mappings, and the cluster gets a stored search template `<index>-docs-search` when it has none of
-that name: a `bool_prefix` `multi_match` over the hierarchy (higher levels weigh more) and the
+that name (a crawl never changes an existing index's mappings, so a connector switched to the
+preset keeps its index's: `hierarchy.*` and the records' other fields get dynamic mappings, and the
+template's boosts and sort still work on them only as far as those allow; give it a new index
+instead, as `roll search crawler create --preset docs` and the dashboard's crawl box do): a
+`bool_prefix` `multi_match` over the hierarchy (higher levels weigh more) and the
 content, sorted by score then weight, highlighted, with `query` and `size` (10) as its parameters:
 
 ```

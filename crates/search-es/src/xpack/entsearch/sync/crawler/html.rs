@@ -451,7 +451,7 @@ const RESERVED: &[&str] = &[
     "url", "url_host", "url_path", "url_path_dir1", "url_path_dir2", "url_path_dir3", "url_port", "url_scheme", "full_html", "_id",
     // roll's: the crawl's own fields (a docs record's own fields come before a page's, so they
     // need no entry here).
-    "http_etag", "http_last_modified", "crawl_depth",
+    "http_etag", "http_last_modified", "crawl_depth", "crawl_fingerprint",
 ];
 const MAX_FIELDS: usize = 100;
 /// Tags whose content isn't text (Open Crawler's `NON_CONTENT_TAGS`).

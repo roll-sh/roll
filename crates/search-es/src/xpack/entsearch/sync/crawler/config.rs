@@ -136,6 +136,32 @@ pub struct Domain {
     pub rules: Vec<CrawlRule>,
     pub exclude_tags: Vec<String>,
     pub extraction: std::sync::Arc<Vec<Ruleset>>,
+    /// What a page of this domain's document depends on besides the page ([`fingerprint`]):
+    /// kept in each document, so a page is asked for conditionally only while it matches.
+    pub fingerprint: String,
+}
+
+/// Changes when roll's own extraction changes what a page becomes (the fields, the docs
+/// preset's defaults or records), so the documents made before are read again.
+const EXTRACTION_VERSION: u32 = 1;
+
+/// The limits a page's reading cuts to ([`super::html`]).
+const EXTRACTION_LIMITS: &[L] = &[L::TitleSize, L::BodySize, L::KeywordsSize, L::DescriptionSize, L::ElasticTagSize, L::IndexedLinks, L::Headings, L::ExtractedLinks];
+
+/// A digest of everything a page's document depends on besides the page itself: the domain's
+/// extraction rulesets and `exclude_tags` as configured, the preset and its `docs` selectors,
+/// `full_html_extraction_enabled`, the limits a page is cut to, and [`EXTRACTION_VERSION`].
+fn fingerprint(rulesets: &Value, exclude: &Value, docs: Option<&Value>, preset: Option<&str>, full_html: bool, limits: &Limits) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    let cut: Vec<String> = EXTRACTION_LIMITS.iter().map(|l| limits.get(*l).to_string()).collect();
+    let docs = docs.map_or_else(|| "null".to_string(), Value::to_json);
+    for part in [EXTRACTION_VERSION.to_string(), rulesets.to_json(), exclude.to_json(), docs, preset.unwrap_or("").to_string(), full_html.to_string(), cut.join(",")] {
+        // Each part's length first, so no two configurations run together into one text.
+        h.update((part.len() as u64).to_be_bytes());
+        h.update(part.as_bytes());
+    }
+    h.finalize()[..16].iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// An extraction ruleset (Open Crawler's `extraction_rulesets[]`): its rules apply to a page whose
@@ -547,6 +573,8 @@ pub fn plan(fields: &Fields, snippet: Option<&Value>, ceilings: &Ceilings) -> Re
     let mut sitemaps = Vec::new();
     let mut full_html = false;
     let mut docs_given: Option<&Value> = None;
+    // Each domain's extraction configuration as written: its rulesets and its exclude_tags.
+    let mut extraction_raw: std::collections::HashMap<String, (Value, Value)> = std::collections::HashMap::new();
     // Every domain's rules share one budget.
     let total_rules: usize = snippet.and_then(|s| s.get("domains")).and_then(Value::as_array).map_or(0, |ds| ds.iter().filter_map(|d| d.get("crawl_rules").and_then(Value::as_array)).map(Vec::len).sum());
     if total_rules > MAX_RULES {
@@ -564,7 +592,7 @@ pub fn plan(fields: &Fields, snippet: Option<&Value>, ceilings: &Ceilings) -> Re
         match domains.iter().position(|d| d.origin == origin) {
             Some(i) => i,
             None => {
-                domains.push(Domain { origin, rules: Vec::new(), exclude_tags: Vec::new(), extraction: Default::default() });
+                domains.push(Domain { origin, rules: Vec::new(), exclude_tags: Vec::new(), extraction: Default::default(), fingerprint: String::new() });
                 domains.len() - 1
             }
         }
@@ -595,6 +623,13 @@ pub fn plan(fields: &Fields, snippet: Option<&Value>, ceilings: &Ceilings) -> Re
                         let url = d.get("url").and_then(Value::as_str).ok_or_else(|| format!("[{at}] needs a [url]"))?;
                         let origin = domain_origin(url).map_err(|e| format!("[{at}.url]: {e}"))?;
                         let di = add_domain(&mut domains, origin.clone());
+                        let raw = extraction_raw.entry(origin.clone()).or_insert((Value::Null, Value::Null));
+                        if let Some(r) = d.get("extraction_rulesets") {
+                            raw.0 = r.clone();
+                        }
+                        if let Some(t) = d.get("exclude_tags") {
+                            raw.1 = t.clone();
+                        }
                         let mut own_seeds = Vec::new();
                         if let Some(s) = d.get("seed_urls") {
                             for u in strings(s, &format!("[{at}.seed_urls]"), MAX_LISTED)? {
@@ -660,6 +695,10 @@ pub fn plan(fields: &Fields, snippet: Option<&Value>, ceilings: &Ceilings) -> Re
         Some("docs") => Some(std::sync::Arc::new(docs)),
         Some(p) => return Err(format!("[preset] is [{p}]: roll's crawler has one preset, [docs] (or none)")),
     };
+    for d in &mut domains {
+        let (rulesets, exclude) = extraction_raw.get(&d.origin).cloned().unwrap_or((Value::Null, Value::Null));
+        d.fingerprint = fingerprint(&rulesets, &exclude, docs_given, fields.preset.as_deref(), full_html, &limits);
+    }
     Ok(Plan { domains, seeds, sitemaps, sitemap_discovery: fields.sitemap_discovery, limits, full_html, docs })
 }
 

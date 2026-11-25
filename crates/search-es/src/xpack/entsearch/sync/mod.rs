@@ -808,8 +808,6 @@ fn enc(name: &str) -> String {
     crate::s3::uri_encode(name, true)
 }
 
-/// Creates the connector's index when it doesn't exist (with `create`'s body), never changing an
-/// existing one's mappings.
 /// A docs crawl's search template (`<index>-docs-search`, [`crawler::docs_template`]), made when
 /// the cluster has none of that name: one the user changed is left as it is.
 async fn ensure_docs_template(cluster: &Cluster, index: &str) -> Result<(), Stop> {
@@ -820,6 +818,8 @@ async fn ensure_docs_template(cluster: &Cluster, index: &str) -> Result<(), Stop
     internal::call(cluster, "PUT", &path, Some(&crawler::docs_template())).await.map(|_| ()).map_err(|e| Stop::Failed(format!("creating the docs search template for [{index}] failed: {}", e.reason())))
 }
 
+/// Creates the connector's index when it doesn't exist (with `create`'s body), never changing an
+/// existing one's mappings.
 async fn ensure_index(cluster: &Cluster, index: &str, create: Option<Value>) -> Result<(), Stop> {
     let path = format!("/{}", enc(index));
     match internal::call(cluster, "GET", &path, None).await {

@@ -36,13 +36,20 @@ export function crawlerName(url: string): string {
   );
 }
 
-/** A connector id no connector has: `name`, else `name-2`, `name-3`… (a PUT would replace one). */
-async function freeConnectorId(clusterId: string, name: string): Promise<string> {
+/**
+ * A connector id no connector has: `name`, else `name-2`, `name-3`… (a PUT would replace one).
+ * `newIndex`: its index (`content-<id>`) mustn't exist either, as the docs preset's records need
+ * their own mappings and a crawl never changes an existing index's.
+ */
+async function freeConnectorId(clusterId: string, name: string, newIndex = false): Promise<string> {
+  const free = async (path: string) => {
+    const r = await searchApi.request(clusterId, "GET", path);
+    if (r.status !== 404 && r.status >= 400) throw new Error(esReason(r.body, r.status));
+    return r.status === 404;
+  };
   for (let i = 1; i <= 20; i++) {
     const id = i === 1 ? name : `${name}-${i}`;
-    const r = await searchApi.request(clusterId, "GET", `/_connector/${encodeURIComponent(id)}`);
-    if (r.status === 404) return id;
-    if (r.status >= 400) throw new Error(esReason(r.body, r.status));
+    if ((await free(`/_connector/${encodeURIComponent(id)}`)) && (!newIndex || (await free(`/content-${encodeURIComponent(id)}`)))) return id;
   }
   throw new Error(`connectors ${name} to ${name}-20 exist already: make this one in the console`);
 }
@@ -81,7 +88,7 @@ export function CrawlSite({ cluster, onCreated }: { cluster: SearchCluster; onCr
   };
   const create = async () => {
     const done = await run("create", async () => {
-      const name = await freeConnectorId(cluster.id, crawlerName(url));
+      const name = await freeConnectorId(cluster.id, crawlerName(url), docs);
       await esJson(cluster.id, "PUT", `/_connector/${encodeURIComponent(name)}`, { index_name: `content-${name}`, is_native: true, service_type: "roll_web_crawler", name });
       await esJson(cluster.id, "PUT", `/_connector/${encodeURIComponent(name)}/_configuration`, { values: docs ? { urls: url.trim(), preset: "docs" } : { urls: url.trim() } });
       await esJson(cluster.id, "POST", "/_connector/_sync_job", { id: name, job_type: "full", trigger_method: "on_demand" });
@@ -171,7 +178,7 @@ export function CrawlSite({ cluster, onCreated }: { cluster: SearchCluster; onCr
             <input type="checkbox" checked={docs} onChange={(e) => setDocs(e.target.checked)} className="mt-0.5 accent-accent" />
             <span>
               A documentation site: one record per section (its headings as lvl0 to lvl6, its text, the URL with the section's #anchor), with a
-              search-as-you-type template, as DocSearch builds them.
+              search-as-you-type template, as DocSearch builds them. It goes in a new index: an existing index keeps its mappings.
             </span>
           </label>
           <div className="mt-1 flex flex-wrap items-center gap-2">

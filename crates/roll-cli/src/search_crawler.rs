@@ -250,11 +250,17 @@ pub async fn create(api: &Api, as_json: bool, cluster: &str, url: &str, connecto
     if es_request(api, &c, "GET", &format!("/_connector/{path}"), None).await.is_ok() {
         bail!("a connector [{id}] exists already: pass --connector with another id");
     }
+    let preset = preset.map(preset_of).transpose()?;
+    // A crawl never changes an index's mappings: the docs preset's records need an index of
+    // their own.
+    if preset == Some("docs") && es_request(api, &c, "GET", &format!("/{}", urlencoding::encode(&index)), None).await.is_ok() {
+        bail!("the index [{index}] exists already and keeps its mappings (the docs preset's hierarchy.* fields would get dynamic ones): pass --connector with another id, for a new index");
+    }
     es_request(api, &c, "PUT", &format!("/_connector/{path}"), Some(json!({ "index_name": index, "is_native": true, "service_type": "roll_web_crawler", "name": id }))).await?;
     let mut values = serde_json::Map::new();
     values.insert("urls".into(), json!(url));
     if let Some(p) = preset {
-        values.insert("preset".into(), json!(preset_of(p)?));
+        values.insert("preset".into(), json!(p));
     }
     es_request(api, &c, "PUT", &format!("/_connector/{path}/_configuration"), Some(json!({ "values": values }))).await?;
     let job = es_request(api, &c, "POST", "/_connector/_sync_job", Some(json!({ "id": id, "job_type": "full", "trigger_method": "on_demand" }))).await?;

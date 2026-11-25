@@ -594,6 +594,16 @@ async fn unchanged_pages_answer_304_and_stay() {
     assert_eq!((at(&job, "status").as_str(), num(&job, "deleted_document_count")), (Some("completed"), 0), "{job:?}");
     assert!(doc(&c, &site.url("/b")).await.is_some());
     assert!(num(&job, "metadata.not_modified_count") >= 2, "{job:?}");
+
+    // A configuration change reaches unchanged pages: they're read in full and made anew.
+    let rules = format!(
+        r#"{{"domains":[{{"url":"{}","extraction_rulesets":[{{"rules":[{{"action":"set","field_name":"kind","selector":"title","value":"page","join_as":"string","source":"html"}}]}}]}}]}}"#,
+        site.url("").trim_end_matches('/')
+    );
+    set_snippet(&c, &rules).await;
+    let job = crawl(&c).await;
+    assert_eq!(num(&job, "metadata.not_modified_count"), 0, "{job:?}");
+    assert_eq!(at(&doc(&c, &site.url("/")).await.unwrap(), "kind").as_str(), Some("page"), "re-extracted with the new rules");
 }
 
 /// The docs preset: a documentation page becomes one record per section, its hierarchy from the
@@ -638,4 +648,7 @@ async fn the_docs_preset_makes_section_records() {
     assert!(!t.contains("Navigation text") && !t.contains("Footer text"), "{t}");
     let (s, v, t) = call(&c, "POST", "/content-site/_search/template", Some(r#"{"id":"content-site-docs-search","params":{"query":"configu"}}"#)).await;
     assert_eq!((s, at(&v, "hits.hits.0._source.anchor").as_str()), (200, Some("configure")), "{t}");
+    // The query is JSON-escaped into the template, as Elasticsearch's mustache does.
+    let (s, v, t) = call(&c, "POST", "/_render/template", Some(r#"{"id":"content-site-docs-search","params":{"query":"a \"b\" \\c"}}"#)).await;
+    assert_eq!((s, at(&v, "template_output.query.multi_match.query").as_str()), (200, Some(r#"a "b" \c"#)), "{t}");
 }

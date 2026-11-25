@@ -1708,9 +1708,10 @@ taken over by roll's crawler. Where roll's differs ([crawler.md](crawler.md)):
   without `:has()`, states, pseudo-elements or escapes (each refused at validation), and a rule's
   text is gathered as the body's is, not Jsoup's `text()`.
 - **Conditional requests and incremental crawls** are roll's: Open Crawler has neither. Each
-  document keeps its page's `ETag` and `Last-Modified` (`http_etag`, `http_last_modified`) and the
-  link depth it was found at (`crawl_depth`), and every crawl asks for the page again with
-  `If-None-Match` and `If-Modified-Since`. A 304 leaves the document as it was (its
+  document keeps its page's `ETag` and `Last-Modified` (`http_etag`, `http_last_modified`), the
+  link depth it was found at (`crawl_depth`) and a digest of the extraction configuration it was
+  made with (`crawl_fingerprint`), and every crawl asks for the page again with `If-None-Match` and
+  `If-Modified-Since` while the digest matches (a configuration change reads every page in full). A 304 leaves the document as it was (its
   `last_crawled_at` is when it was last read) and counts as seen (`metadata.not_modified_count`);
   the purge's re-check asks the same way and follows the links of a page that changed. An
   `incremental` job crawls the same way and deletes nothing.
