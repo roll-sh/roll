@@ -2621,22 +2621,30 @@ async fn a_notes_people_are_told_by_mail() {
 }
 
 /// A preview whose data grows past the project's `max_bytes` goes to sleep, and stays asleep
-/// whichever way it's woken (the API, a visit's start) until the cap is raised or it's reset.
+/// whichever way it's woken (the API, a visit's start, roll apps' own wake on a visit: its
+/// services are kept down there) until the cap is raised or it's reset.
 #[tokio::test]
 async fn a_preview_over_its_size_cap_stays_asleep() {
     use roll_previews::ports::EnvSource;
-    let e = env(json!({ "enabled": true, "max_bytes": 1 << 20 }));
+    let e = env(json!({ "enabled": true }));
     e.code.open(change("chg_cap", 4));
     for _ in 0..3 {
         e.engine.pass().await.unwrap();
     }
     let p = e.engine.store.row_by_change("chg_cap").unwrap().unwrap();
+    let cap = |max: u64| e.engine.store.put_settings(&e.project, &e.engine.store.settings(&e.project).unwrap().patched(&json!({ "max_bytes": max })).unwrap()).unwrap();
+    cap(1 << 20);
+    e.engine.refresh(&p.id).unwrap();
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row(&p.id).unwrap();
     assert!(p.state == State::Sleeping && p.error.as_deref().is_some_and(|m| m.contains("max_bytes")), "two 1 MiB branches over a 1 MiB cap: {:?} {:?}", p.state, p.error);
+    let held = |down: bool| e.apps.held.lock().iter().filter(|(id, _, d)| *id == p.id && *d == down).count();
+    assert!(held(true) >= 1 && held(false) == 0, "its services kept down where a visit would wake them: {:?}", e.apps.held.lock());
     assert!(matches!(e.engine.wake(&p.id).await, Err(roll_previews::Error::Conflict(_))), "not woken by the API");
     assert!(e.engine.env(&p.id, "web").await.is_err(), "nor started by a visit");
-    let s = e.engine.store.settings(&e.project).unwrap().patched(&json!({ "max_bytes": 1u64 << 30 })).unwrap();
-    e.engine.store.put_settings(&e.project, &s).unwrap();
+    cap(1 << 30);
     e.engine.wake(&p.id).await.unwrap();
+    assert_eq!(held(false), held(true), "let wake again: {:?}", e.apps.held.lock());
 }
 
 /// A guest's note through a share link that takes notes: on the change as `guest:<name>`, its

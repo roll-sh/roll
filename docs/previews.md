@@ -279,9 +279,13 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   - `max_bytes` (10 GiB by default) is a cap on the bytes a preview's branches and its earlier
     pushes' copies own. A preview over the cap goes to sleep with `error` and stays asleep until
     resetting it brings it back under or the cap is raised: a wake (`POST …/wake`, the sheet) is
-    a 409, roll apps' services included, and a visit doesn't start its own services. A visit to a
-    roll apps service still wakes it there (roll apps doesn't ask previews; Next).
-    `a_preview_over_its_size_cap_stays_asleep`.
+    a 409, roll apps' services included, and a visit doesn't start its own services. Its roll
+    apps services are kept down there too: their `pv-` environments are paused (`PUT …
+    {paused: true}`, Render's Suspend), so a visit gets roll apps' "Paused" page and wakes
+    nothing, deploys and jobs wait. Under the cap again, its next converge or a wake resumes
+    them (only what previews paused: `held_down`). Live: `scripts/preview-apps.sh` caps a
+    preview's 2 MiB Redis copy at 1 MiB, a visit to its service answers 503, and a wake under a
+    raised cap lifts the pause. `a_preview_over_its_size_cap_stays_asleep`.
 
 ### Converging
 
@@ -2841,8 +2845,8 @@ comments, Render and Railway, Neon, Chromatic and Percy, Signadot, Jam.
    previews' own proxy (roll apps' proxy adds it for a `pv-` environment previews marks
    untrusted), and a `data_forks` rule (a fork's data `schema` unless the project says
    otherwise), as `egress_forks` is for its server.
-6. **A capped preview's roll apps service**: a visit to it still wakes it there (roll apps wakes
-   it itself); previews tells roll apps to keep it down while it's over its cap.
+6. **A capped preview's roll apps service, in review**: its `pv-` environment paused while the
+   preview's over its cap, resumed under it.
 7. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
    is kept only where the product puts a branch back in place, keeping its id (their delete
    guards check it); each needs its control plane's reset `from`, as pg-control's.
