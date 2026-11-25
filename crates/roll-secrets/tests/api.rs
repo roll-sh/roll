@@ -3796,10 +3796,10 @@ async fn an_outside_databases_new_admin_url_moves_the_maker_to_whoever_set_it() 
     assert!(s == StatusCode::CREATED && d["created_by"] == "usr_cat", "{s} {d}");
     api.ok(Method::PUT, "/environments/production/secrets/DB_PASSWORD", Some(json!({ "link": { "kind": "outside_database", "ref": d["id"], "field": "password", "mode": "managed" } }))).await;
     let at = format!("/v1/secrets/projects/{p}/outside-databases/{}", d["id"].as_str().unwrap());
-    let (s, b) = api.signed_in("bob", false, Method::PATCH, &at, Some(json!({ "url": "postgres://admin:hunter3@db.example:5432/app" }))).await;
+    let (s, b) = api.signed_in("bob", false, Method::PATCH, &at, Some(json!({ "url": "postgres://admin:hunter2@db.example:5432/app?sslmode=require" }))).await;
     assert!(s.is_success() && b["created_by"] == "usr_bob", "{s} {b}");
     let audit = api.ok(Method::GET, "/audit", None).await.to_string();
-    assert!(audit.contains("maker moved from usr_cat to usr_bob") && !audit.contains("hunter3"), "{audit}");
+    assert!(audit.contains("maker moved from usr_cat to usr_bob") && !audit.contains("hunter2"), "{audit}");
     // Bob leaves: the URL he set stops acting through roll at once, though Cat is still an admin.
     assert_eq!(api.call(Method::DELETE, &format!("/v1/workspace/projects/{p}/members/usr_bob"), None).await.0, StatusCode::NO_CONTENT);
     let (s, e) = api.call(Method::POST, "/environments/production/secrets/DB_PASSWORD/rotate", None).await;
