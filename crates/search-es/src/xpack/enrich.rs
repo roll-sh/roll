@@ -82,6 +82,14 @@ pub async fn put_policy(ctx: &Ctx<'_>) -> EsResult<Reply> {
     // Source indices must resolve, like the policy's validation search.
     let names: Vec<String> = indices.as_array().into_iter().flatten().map(Value::to_es_string).collect();
     internal::call(ctx.cluster, "GET", &format!("/{}/_mapping", enc(&names.join(","))), None).await?;
+    // The policy's executions read its sources as the system (`EnrichPolicyRunner`): whoever
+    // stores it must be able to read them (`TransportPutEnrichPolicyAction`'s privileges check,
+    // and its message).
+    let resolved = crate::meta::resolve::resolve(&ctx.state(), &names, &crate::meta::resolve::IndicesOptions::LENIENT_EXPAND_OPEN, ctx.now_ms).unwrap_or_default();
+    let explicit: Vec<String> = names.iter().filter(|n| !n.contains('*')).cloned().collect();
+    if !crate::xpack::security::allows_indices(ctx, "indices:data/read/search", &resolved) || !crate::xpack::security::allows_indices(ctx, "indices:data/read/search", &explicit) {
+        return Err(EsError::security(403, format!("unable to store policy because no indices match with the specified index patterns [{}]", names.join(", "))));
+    }
     let mut cfgm = Map::new();
     cfgm.insert(ty.into(), Value::Obj(out));
     let policy = obj! { "config" => Value::Obj(cfgm) };
