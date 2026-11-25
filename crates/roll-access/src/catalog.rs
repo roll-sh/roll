@@ -1746,6 +1746,11 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/approve", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
     // Every environment's deployments of a service (a preview's among them).
     row("GET", "/v1/apps/services/{id}/deploys", "apps", R, one(PG, "service")),
+    // A folder upload's files as deployed (never the environment a bundle carries, nor a file
+    // named as a secret): source can hold credentials all the same, so it's revealed, not read.
+    row("GET", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/source", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
+    // A static build's files as served (what anyone can fetch from its URL, unless it's gated).
+    row("GET", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/output", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     // Keeping a deployment from pruning changes nothing that runs.
     row("POST", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/pin", "apps", W, one(PG, "service")).env(EnvFrom::Param("env")),
     row("DELETE", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/pin", "apps", W, one(PG, "service")).env(EnvFrom::Param("env")),

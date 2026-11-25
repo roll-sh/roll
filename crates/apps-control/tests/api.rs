@@ -2949,6 +2949,18 @@ async fn an_edge_function_runs_before_a_site_or_a_service() {
     let d: Value = serde_json::from_slice(&w.api.clone().oneshot(req).await.unwrap().into_body().collect().await.unwrap().to_bytes()).unwrap();
     let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
     assert_eq!(d["plan"]["edge"][0]["paths"], json!(["/admin/*"]), "{d}");
+    // Its source, as deployed: the files listed and one read back (a bundle's environment never).
+    let src = format!("/v1/apps/services/{id}/environments/production/deploys/{}/source", d["id"].as_str().unwrap());
+    let (_, list) = call(&w.api, "GET", &src, None).await;
+    let paths: Vec<&str> = list["files"].as_array().unwrap_or_else(|| panic!("{list}")).iter().map(|f| f["path"].as_str().unwrap()).collect();
+    assert_eq!(paths, ["index.html", "netlify/edge-functions/auth.ts"], "{list}");
+    assert_eq!(call(&w.api, "GET", &format!("{src}?path=index.html"), None).await.1["text"], "<h1>hi</h1>");
+    assert_eq!(call(&w.api, "GET", &format!("{src}?path=../env"), None).await.0, StatusCode::BAD_REQUEST);
+    // And what the static build serves, from its site's own index.
+    let out = src.replace("/source", "/output");
+    let (_, files) = call(&w.api, "GET", &out, None).await;
+    assert!(files["files"].as_array().unwrap_or_else(|| panic!("{files}")).iter().any(|f| f["path"] == "index.html"), "{files}");
+    assert!(call(&w.api, "GET", &format!("{out}?path=index.html"), None).await.1["text"].as_str().is_some_and(|t| !t.is_empty()), "the served page's text");
     let h = host(&call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await.1["url"]);
     let get = |path: String, host: String| {
         let public = w.public.clone();
@@ -3589,9 +3601,10 @@ async fn roll_up_deploys_an_uploaded_tree_and_cron_runs_on_demand() {
     let d: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
     let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
     assert_eq!((d["status"].as_str(), d["trigger"].as_str(), d["plan"]["provider"].as_str()), (Some("active"), Some("upload"), Some("static")), "{d}");
-    // The image is the deployment's now; the uploaded tree isn't kept.
+    // The image is the deployment's now; the uploaded tree is kept only as its source (until the
+    // deployment is pruned), never read by a build again.
     let uploads = w.apps.cfg.home.join("apps/uploads");
-    assert!(std::fs::read_dir(&uploads).map(|mut d| d.next().is_none()).unwrap_or(true), "the upload is deleted after its build");
+    assert_eq!(std::fs::read_dir(&uploads).map(|d| d.count()).unwrap_or(0), 1, "the upload kept as the deployment's source");
     // A variable changes: a redeploy runs the same image with it, no upload and no build.
     let base = format!("/v1/apps/services/{id}/environments/production");
     call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"GREETING": "hej", "FAKE_ECHO": "GREETING"}}))).await;
@@ -6264,6 +6277,14 @@ async fn a_deploy_waits_for_another_persons_approval() {
     let (st, again) = as_person("POST", format!("{env}/deploys/{dep}/approve"), Some("usr_bob"), json!({})).await;
     assert_eq!((st, &again["live"]), (StatusCode::OK, &Value::Null), "{again}");
     assert_eq!(call(&w.api, "GET", &env, None).await.1["active"]["id"], json!(live));
+    // A service whose volume every instance shares waits the same way (its deploy runs beside
+    // the live one); one written by one instance can't wait, and says so.
+    let (cms, _) = image_service(&w, "cms", json!({"port": 80, "volume": {"mount": "/data", "size_gb": 1, "shared": true}})).await;
+    let (cid, cenv) = (cms["id"].as_str().unwrap().to_string(), format!("/v1/apps/services/{}/environments/production", cms["id"].as_str().unwrap()));
+    assert_eq!(call(&w.api, "PUT", &cenv, Some(json!({"approvals": 1}))).await.0, StatusCode::OK);
+    let (st, d) = as_person("POST", format!("{cenv}/deploys"), Some("usr_ada"), json!({})).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{d}");
+    assert_eq!(settled(&w, &cid, "production", d["id"].as_str().unwrap()).await["status"], "ready");
 }
 
 /// A status badge (Netlify's): off, a 404; on, an SVG saying the environment is live, cached a
@@ -8351,7 +8372,17 @@ async fn a_builds_otel_agent_starts_while_traces_are_on() {
     call(&w.api, "PUT", &env, Some(json!({"traces": true}))).await;
     let (_, r) = call(&w.api, "POST", &format!("{env}/redeploy"), Some(json!({}))).await;
     assert_eq!(settled(&w, &id, "production", r["id"].as_str().unwrap()).await["status"], "active");
-    assert_eq!(node_options().await, Some(format!("--max-old-space-size=256 --require {}", apps_build::otel::NODE_REQUIRE)));
+    // The live template moves to the new deployment a moment after it settles on a loaded host.
+    let want = Some(format!("--max-old-space-size=256 --require {}", apps_build::otel::NODE_REQUIRE));
+    let mut got = None;
+    for _ in 0..100 {
+        got = node_options().await;
+        if got == want {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(got, want);
 }
 
 /// A Git URL service's Git LFS objects (`build.lfs`): asked of its LFS server, checked against the

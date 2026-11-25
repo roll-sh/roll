@@ -125,12 +125,17 @@ fn site_generators_publish_their_own_directory() {
     assert_eq!((docs.provider, docs.framework.as_deref(), docs.build.as_deref()), (Provider::Static, Some("mkdocs"), Some("mkdocs build")), "{:?}", docs.notes);
     has(&docs, &["pip install -r requirements.txt && pip install mkdocs", "mkdocs build", "COPY --from=build /app/site /site"]);
     let bare = detect(&[("mkdocs.yml", "site_name: Docs\n"), ("docs/index.md", "# Hi\n")]);
+    // An app keeping its docs' mkdocs.yml is the app.
+    assert_ne!(detect(&[("mkdocs.yml", "site_name: Docs\n"), ("requirements.txt", "starlette\nmkdocs\n"), ("main.py", "")]).provider, Provider::Static);
     has(&bare, &["pip install mkdocs", "COPY --from=build /app/site /site"]);
     // Hugo and Zola: their binary pinned per architecture and checked, the site built into public.
     let hugo = detect(&[("hugo.toml", "baseURL = 'https://x/'\n"), ("content/_index.md", "# Hi\n"), ("package.json", "{}")]);
     assert_eq!((hugo.provider, hugo.framework.as_deref(), hugo.build.as_deref()), (Provider::Static, Some("hugo"), Some("hugo --minify")), "{:?}", hugo.notes);
     has(&hugo, &["ARG TARGETARCH", "sha256sum -c -", "hugo_extended_0.169.0_linux-$a.tar.gz", "COPY --from=build /app/public /site"]);
-    let zola = detect(&[("config.toml", "base_url = \"https://x\"\n"), ("templates/index.html", "<p>hi</p>")]);
+    let zola = detect(&[("config.toml", "base_url = \"https://x\"\n"), ("templates/index.html", "<p>hi</p>"), ("content/_index.md", "+++\n+++\n")]);
+    // A server app's config.toml isn't a site's: Go's with baseURL, Flask's with base_url and templates.
+    assert_ne!(detect(&[("go.mod", "module x\n"), ("main.go", "package main"), ("config.toml", "baseURL = 'https://api'\n")]).provider, Provider::Static);
+    assert_ne!(detect(&[("requirements.txt", "flask\n"), ("app.py", ""), ("config.toml", "base_url = 'x'\n"), ("templates/a.html", ""), ("content/a.md", "")]).framework.as_deref(), Some("zola"));
     assert_eq!((zola.framework.as_deref(), zola.build.as_deref()), (Some("zola"), Some("zola build")));
     has(&zola, &["x86_64-unknown-linux-gnu", "COPY --from=build /app/public /site"]);
     // Jekyll: bundled, a production `jekyll build`, its _site served.
