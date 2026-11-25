@@ -27,7 +27,7 @@ pub const OUTSIDE_HEADER: &str = "x-roll-outside";
 /// data branch's `table`, `columns` and `rows` (each value, so a table keeps its shape); and a
 /// file or a diff at a fork's revision in roll code, its `content` and each file's `patch`; and
 /// what running its code said: a check's `summary`, a queue entry's `output` and `error`.
-const TEXT: [&str; 25] = [
+const TEXT: [&str; 26] = [
     "title", "body", "description", "message", "text", "line", "lines", "sample", "name", "note", "selector", "path", "errors", "headers", "subject", "from", "to", "table", "columns", "rows", "content", "patch", "summary", "output", "error", "email",
 ];
 /// What an outside record holds that's its own too: a change's `checks` ran its code, so what they
