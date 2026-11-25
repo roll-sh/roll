@@ -85,49 +85,40 @@ pub struct DerivedAuth {
     pub per_minute: Option<u64>,
     /// Pages it may be sent from (as written: the node normalizes and checks them).
     pub origins: Vec<String>,
+    /// When it stops working (unix seconds).
+    pub exp: i64,
+    /// The generation of the parent's secret that signed it: a rotation after its verification
+    /// stops the rest of its request too ([`verified`]).
+    pub generation: i64,
 }
 
-/// What the node passes in [`super::DERIVED_HEADER`] for a derived key it verified (key id
-/// `key_id`): the parent's id and what narrows it, never the key or anything secret.
-pub fn verified_header(key_id: &str, d: &DerivedAuth) -> String {
-    let mut m = crate::json::Map::new();
-    m.insert("key".into(), key_id.into());
-    m.insert("id".into(), d.id.clone().into());
-    m.insert("narrowing".into(), d.narrowing.clone());
-    if let Some(u) = &d.user {
-        m.insert("user".into(), u.clone().into());
-    }
-    if let Some(n) = d.per_minute.and_then(|n| i64::try_from(n).ok()) {
-        m.insert("per_minute".into(), n.into());
-    }
-    m.insert("origins".into(), Value::Arr(d.origins.iter().map(|o| Value::from(o.as_str())).collect()));
-    Value::Obj(m).to_json()
+/// A derived key the node verified on this request ([`crate::rest::Verified::Derived`]): its
+/// parent's id and what it may do, never the key or anything secret.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VerifiedKey {
+    pub key: String,
+    pub auth: DerivedAuth,
 }
 
-/// The principal of a derived key the node verified on this request ([`verified_header`]): it
-/// isn't verified again, but its parent must still be a live derivable browser key, so a revoke
-/// between the node's check and the engine's holds.
-pub fn verified(cluster: &Cluster, header: &str) -> EsResult<Principal> {
-    let v = crate::json::parse(header.as_bytes()).ok().flatten().ok_or_else(unverified)?;
-    let key_id = v.get("key").and_then(Value::as_str).ok_or_else(unverified)?;
+/// The principal of a derived key the node verified on this request: it isn't verified again,
+/// but its parent must still be a live derivable browser key whose secret is still the one that
+/// signed it, and the key unexpired, so a revoke, a rotation or an expiry between the node's
+/// check and any of the request's internal calls holds.
+pub fn verified(cluster: &Cluster, v: &VerifiedKey) -> EsResult<Principal> {
     let st = cluster.state();
-    let Some(k) = st.metadata.xpack.get(KEYS, key_id) else { return Err(unverified()) };
+    let Some(k) = st.metadata.xpack.get(KEYS, &v.key) else { return Err(unverified()) };
+    let now_ms = crate::time::now_millis();
+    let generation = k.pointer(&["metadata", METADATA, DERIVE]).filter(|d| !d.is_null()).map(|d| d.get("generation").and_then(Value::as_i64).unwrap_or(0));
     if k.get("invalidated").and_then(Value::as_bool) == Some(true)
-        || k.get("expiration").and_then(Value::as_i64).is_some_and(|e| e <= crate::time::now_millis())
-        || k.pointer(&["metadata", METADATA, DERIVE]).is_none_or(Value::is_null)
+        || k.get("expiration").and_then(Value::as_i64).is_some_and(|e| e <= now_ms)
+        || generation != Some(v.auth.generation)
+        || v.auth.exp.saturating_add(SKEW_S) < now_ms / 1000
     {
         return Err(unverified());
     }
-    let derived = DerivedAuth {
-        id: v.get("id").and_then(Value::as_str).unwrap_or_default().to_string(),
-        narrowing: v.get("narrowing").cloned().ok_or_else(unverified)?,
-        user: v.get("user").and_then(Value::as_str).map(str::to_string),
-        per_minute: v.get("per_minute").and_then(Value::as_i64).and_then(|n| u64::try_from(n).ok()),
-        origins: v.get("origins").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default(),
-    };
-    let mut p = super::api_keys::principal_of(key_id, k);
+    let mut p = super::api_keys::principal_of(&v.key, k);
     if let AuthKind::ApiKey(a) = &mut p.kind {
-        a.derived = Some(Box::new(derived));
+        a.derived = Some(Box::new(v.auth.clone()));
     }
     Ok(p)
 }
@@ -271,7 +262,8 @@ pub fn authenticate(cluster: &Cluster, token: &str) -> EsResult<Principal> {
     if c.as_object().is_some_and(|m| m.keys().any(|k| !FIELDS.contains(&k.as_str()))) {
         return Err(refused(format!("a field it doesn't know: only {}", FIELDS.join(", "))));
     }
-    let mut derived = narrowed(c, browser, k, now_ms / 1000)?;
+    let mut derived = narrowed(&st, c, browser, k, now_ms / 1000)?;
+    derived.generation = browser.pointer(&[DERIVE, "generation"]).and_then(Value::as_i64).unwrap_or(0);
     derived.id = <sha2::Sha256 as sha2::Digest>::digest(t.signed.as_bytes())[..16].iter().map(|b| format!("{b:02x}")).collect();
     let mut p = super::api_keys::principal_of(key_id, k);
     if let AuthKind::ApiKey(a) = &mut p.kind {
@@ -305,6 +297,41 @@ fn expands(q: &Value) -> bool {
     }
 }
 
+/// The fields the `range` queries of filter `q` (a [`plain_filter`]) test.
+fn range_fields<'a>(q: &'a Value, out: &mut Vec<&'a str>) {
+    let Some((kind, body)) = q.as_object().and_then(|m| m.iter().next()) else { return };
+    let children: Vec<&'a Value> = match kind.as_str() {
+        "range" => {
+            out.extend(body.as_object().into_iter().flat_map(|m| m.keys()).filter(|k| !matches!(k.as_str(), "boost" | "_name")).map(String::as_str));
+            return;
+        }
+        "bool" => ["must", "should", "filter", "must_not"].iter().filter_map(|k| body.get(k)).collect(),
+        "constant_score" => body.get("filter").into_iter().collect(),
+        "nested" => body.get("query").into_iter().collect(),
+        _ => return,
+    };
+    for c in children {
+        match c {
+            Value::Arr(a) => a.iter().for_each(|q| range_fields(q, out)),
+            q => range_fields(q, out),
+        }
+    }
+}
+
+/// Whether an index the key reaches (`reach`: the names and patterns its narrowing grants,
+/// matched against index names and aliases) maps one of `fields` as a string (text, keyword
+/// and their kin): a range over them walks the terms between its bounds, as Elasticsearch's
+/// `search.allow_expensive_queries: false` refuses. Read from the mappings as they are on each
+/// request, so a field mapped later is caught then.
+fn string_range(st: &crate::meta::ClusterState, fields: &[&str], reach: &[String]) -> bool {
+    const STRINGS: &[&str] = &["text", "match_only_text", "keyword", "wildcard", "version", "flattened", "alias"];
+    if fields.is_empty() {
+        return false;
+    }
+    let reached = |i: &crate::meta::IndexMeta| reach.iter().any(|n| super::privileges::glob(n, &i.name) || i.aliases.keys().any(|a| super::privileges::glob(n, a)));
+    st.metadata.indices.values().filter(|i| reached(i)).any(|i| fields.iter().any(|f| i.mapping.lookup(f).is_some_and(|m| STRINGS.contains(&m.type_name()))))
+}
+
 /// Whether `q` is a filter a derived key may carry: queries on the document itself, combined
 /// with `bool`, `constant_score` and `nested`. Nothing that reads another document or index
 /// (terms lookups, indexed shapes, `more_like_this`, joins, `percolate`), runs Painless
@@ -334,7 +361,7 @@ fn plain_filter(q: &Value) -> bool {
 
 /// Checks a signed payload's fields against its parent (`browser`, its `metadata.roll_browser`;
 /// `k`, the stored key), refusing any that would widen it.
-fn narrowed(c: &Value, browser: &Value, k: &Value, now_s: i64) -> EsResult<DerivedAuth> {
+fn narrowed(st: &crate::meta::ClusterState, c: &Value, browser: &Value, k: &Value, now_s: i64) -> EsResult<DerivedAuth> {
     let exp = c.get("exp").and_then(Value::as_i64).ok_or_else(|| refused("[exp] (unix seconds) is required"))?;
     if exp.saturating_add(SKEW_S) < now_s {
         return Err(refused("expired"));
@@ -377,6 +404,7 @@ fn narrowed(c: &Value, browser: &Value, k: &Value, now_s: i64) -> EsResult<Deriv
             (None, None) => return Err(refused("its parent reaches nothing")),
         },
     };
+    let reach: Vec<String> = names.iter().filter_map(Value::as_str).map(str::to_string).collect();
     let mut group = obj! { "names" => Value::Arr(names), "privileges" => crate::arr!["read"] };
     match c.get("filter") {
         None | Some(Value::Null) => {}
@@ -387,8 +415,15 @@ fn narrowed(c: &Value, browser: &Value, k: &Value, now_s: i64) -> EsResult<Deriv
             if !plain_filter(f) {
                 return Err(refused("[filter]: only queries on the document itself (term, terms of values, range, exists, match… in bool, constant_score or nested): no lookups, joins, scripts, templates or wrapped queries"));
             }
-            if !super::browser::Policy::of(browser).allow_expensive_queries && expands(f) {
-                return Err(refused("[filter]: expanding terms (prefix, wildcard, the prefix match queries, simple_query_string, fuzziness, max_expansions) needs its parent's limits.allow_expensive_queries"));
+            if !super::browser::Policy::of(browser).allow_expensive_queries {
+                if expands(f) {
+                    return Err(refused("[filter]: expanding terms (prefix, wildcard, the prefix match queries, simple_query_string, fuzziness, max_expansions) needs its parent's limits.allow_expensive_queries"));
+                }
+                let mut fields = Vec::new();
+                range_fields(f, &mut fields);
+                if string_range(st, &fields, &reach) {
+                    return Err(refused("[filter]: a range on a text or keyword field (its terms are walked, as a prefix's are) needs its parent's limits.allow_expensive_queries"));
+                }
             }
             // As a role's query is checked when it's put, then as the cluster will build it.
             if super::users::check_role_query(&f.to_json()).is_err() || crate::query::parse_stored(f).is_err() {
@@ -437,7 +472,7 @@ fn narrowed(c: &Value, browser: &Value, k: &Value, now_s: i64) -> EsResult<Deriv
         }
         Some(_) => return Err(refused(format!("[origins]: 1 to {MAX_ORIGINS} origins"))),
     };
-    Ok(DerivedAuth { id: String::new(), narrowing: obj! { "roll_derived" => descriptor }, user, per_minute, origins })
+    Ok(DerivedAuth { id: String::new(), narrowing: obj! { "roll_derived" => descriptor }, user, per_minute, origins, exp, generation: 0 })
 }
 
 /// The stored key `k` with its signing secret redacted ([`REDACTED`]), as the API key APIs

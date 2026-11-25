@@ -25,6 +25,8 @@ pub type Call<'a> = Pin<Box<dyn Future<Output = EsResult<Value>> + Send + 'a>>;
 pub struct Caller {
     /// The headers that make an internal call that client.
     headers: Vec<(String, String)>,
+    /// What the node verified it as ([`crate::rest::Verified`]), carried onto the call.
+    verified: Option<crate::rest::Verified>,
     /// Its document and field level security (`None`: it reads documents unrestricted).
     pub security: Option<crate::xpack::security::dls::ReadSecurity>,
 }
@@ -101,7 +103,7 @@ pub fn principal_of(u: &Value) -> Option<crate::xpack::security::Principal> {
             remote: None,
             derived: a.get("narrowing").map(|n| {
                 let id = a.get("derived_id").and_then(Value::as_str).unwrap_or_default().to_string();
-                Box::new(crate::xpack::security::derived::DerivedAuth { id, narrowing: n.clone(), user: None, per_minute: None, origins: Vec::new() })
+                Box::new(crate::xpack::security::derived::DerivedAuth { id, narrowing: n.clone(), user: None, per_minute: None, origins: Vec::new(), exp: i64::MAX, generation: 0 })
             }),
         })),
         None => crate::xpack::security::AuthKind::Realm,
@@ -164,11 +166,7 @@ pub const SYSTEM_HEADER: &str = "x-roll-internal-system";
 
 /// The principal an internal request without credentials runs as ([`as_principal`]).
 pub fn acting_principal(req: &EsRequest) -> Option<crate::xpack::security::Principal> {
-    if req.header("authorization").is_some()
-        || req.header(crate::xpack::security::AUTHENTICATED_HEADER).is_some()
-        || req.header(crate::xpack::security::DERIVED_HEADER).is_some()
-        || req.header(SYSTEM_HEADER).is_some()
-    {
+    if req.header("authorization").is_some() || req.verified.is_some() || req.header(SYSTEM_HEADER).is_some() {
         return None;
     }
     ACTING.try_with(Clone::clone).ok()
@@ -186,18 +184,20 @@ impl Caller {
     /// The client of `ctx`, a superuser too: for calls whose result belongs to whoever sent
     /// them (a point in time or scroll is bound to its opener).
     pub fn client(ctx: &crate::rest::Ctx<'_>) -> Option<Caller> {
-        use crate::xpack::security::{AUTHENTICATED_HEADER, DERIVED_HEADER, INDEX_SCOPE_HEADER, RUN_AS_HEADER};
+        use crate::xpack::security::{INDEX_SCOPE_HEADER, RUN_AS_HEADER};
         ctx.principal.get()?;
-        // The headers that made it this principal: the node's authentication (narrowed to some
-        // indices on a per-index route) or the client's credentials, and its run-as user.
-        // A linked remote cluster's request keeps its remote access too (only roll's own calls
-        // reach here with it), or its key alone would be refused.
-        let headers = [AUTHENTICATED_HEADER, DERIVED_HEADER, INDEX_SCOPE_HEADER, "Authorization", RUN_AS_HEADER, crate::remote::links::REMOTE_ACCESS_HEADER]
+        // What made it this principal: the node's verification (the cluster's own credentials,
+        // narrowed to some indices on a per-index route, or a derived key) or the client's
+        // credentials, and its run-as user. A linked remote cluster's request keeps its remote
+        // access too (only roll's own calls reach here with it), or its key alone would be
+        // refused.
+        let verified = ctx.request.verified.clone();
+        let headers = [INDEX_SCOPE_HEADER, "Authorization", RUN_AS_HEADER, crate::remote::links::REMOTE_ACCESS_HEADER]
             .into_iter()
-            .filter(|h| *h != "Authorization" || ctx.request.header(AUTHENTICATED_HEADER).is_none())
+            .filter(|h| *h != "Authorization" || verified.is_none())
             .filter_map(|h| ctx.request.header(h).map(|v| (h.to_string(), v.to_string())))
             .collect();
-        Some(Caller { headers, security: crate::xpack::security::dls::ReadSecurity::of(ctx) })
+        Some(Caller { headers, verified, security: crate::xpack::security::dls::ReadSecurity::of(ctx) })
     }
 }
 
@@ -234,6 +234,7 @@ pub fn call<'a>(cluster: &'a Cluster, method: &str, uri: &str, body: Option<&Val
     Box::pin(async move {
         if let Some(c) = caller() {
             req.headers.extend(c.headers);
+            req.verified = c.verified;
         }
         send(cluster, req).await
     })
@@ -266,16 +267,14 @@ pub fn call_as<'a>(ctx: &crate::rest::Ctx<'_>, cluster: &'a Cluster, method: &st
         req.body = bytes::Bytes::from(b.to_json());
         req.headers.push(("Content-Type".into(), "application/json".into()));
     }
-    if ctx.request.header(crate::xpack::security::AUTHENTICATED_HEADER).is_none()
+    if ctx.request.verified.is_none()
         && let Some(a) = ctx.request.header("authorization")
     {
         req.headers.push(("Authorization".into(), a.to_string()));
     }
+    req.verified = ctx.request.verified.clone();
     if let Some(user) = ctx.request.header(crate::xpack::security::RUN_AS_HEADER) {
         req.headers.push((crate::xpack::security::RUN_AS_HEADER.into(), user.to_string()));
-    }
-    if let Some(d) = ctx.request.header(crate::xpack::security::DERIVED_HEADER) {
-        req.headers.push((crate::xpack::security::DERIVED_HEADER.into(), d.to_string()));
     }
     if let Some(access) = ctx.request.header(crate::remote::links::REMOTE_ACCESS_HEADER) {
         req.headers.push((crate::remote::links::REMOTE_ACCESS_HEADER.into(), access.to_string()));
@@ -296,6 +295,7 @@ pub fn call_ndjson<'a>(cluster: &'a Cluster, method: &str, uri: &str, body: Stri
         // As the caller too ([`call`]): a bulk write is authorized per item as the client.
         if let Some(c) = caller() {
             req.headers.extend(c.headers);
+            req.verified = c.verified;
         }
         let resp = crate::rest::handle(cluster, req).await;
         let v = crate::json::parse(&resp.body).ok().flatten().unwrap_or(Value::Null);
