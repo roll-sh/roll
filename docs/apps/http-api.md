@@ -275,7 +275,7 @@ type Build = {
    *  (`opentelemetry-distro`, bootstrapped, by PYTHONPATH's sitecustomize), the JVM's (Java,
    *  Scala, Clojure: OpenTelemetry's Java agent, by JAVA_TOOL_OPTIONS' -javaagent) and .NET 8 and
    *  later's (its automatic instrumentation: the CORECLR_* profiler variables, unless the app
-   *  names a profiler of its own, and DOTNET_STARTUP_HOOKS), pinned and checksummed; started only
+   *  names a profiler of its own or sets CORECLR_ENABLE_PROFILING, and DOTNET_STARTUP_HOOKS), pinned and checksummed; started only
    *  while the environment's traces are on, joined to the app's own value; the plan's `otel`
    *  says which. None in the tree's own Dockerfile or another language (a note says so). */
   otel?: boolean;

@@ -3315,7 +3315,8 @@ impl Apps {
         let (sid, e) = (svc.id.clone(), env.name.clone());
         let (links, own_data, branches) = self.db(move |s| Ok((s.links_minted(&sid)?, s.env_data(&sid, &e)?, s.env_branches(&sid, &e)?))).await?;
         let mut branch_notices = Vec::new();
-        let mut derived = BTreeSet::new();
+        // A Postgres link's parts, each with the URL it was read from.
+        let mut derived: BTreeMap<String, String> = BTreeMap::new();
         // The resources it links itself: in an environment with data of its own, each is its
         // branch or left out, so roll secrets' links to them are left out too.
         let own_links: BTreeSet<(&'static str, String)> = links.iter().filter(|l| l.0 != LinkKind::Service).map(|l| (l.0.as_str(), l.1.clone())).collect();
@@ -3347,7 +3348,7 @@ impl Apps {
                     // Another service's names are the project network's: nothing to rewrite.
                     let mut vs: Vec<(String, String)> = vs.into_iter().map(|(k, v)| if kind == LinkKind::Service { (k, v) } else { let v = self.deps.runtime.reach(&v); (k, v) }).collect();
                     // From the URL the instance reaches.
-                    derived.extend(integrations::pg_parts(kind, &mut vs).into_iter().map(|k| format!("{prefix}{k}")));
+                    derived.extend(integrations::pg_parts(kind, &mut vs).into_iter().map(|k| (format!("{prefix}{k}"), format!("{prefix}DATABASE_URL"))));
                     for (k, v) in vs {
                         vars.insert(format!("{prefix}{k}"), (v, "link"));
                     }
@@ -3533,8 +3534,8 @@ impl Apps {
                 Some("python") => joined("PYTHONPATH", apps_build::otel::PYTHON_PATH, ":", true, &mut vars),
                 Some("java") => joined("JAVA_TOOL_OPTIONS", &format!("-javaagent:{}", apps_build::otel::JAVA_AGENT), " ", false, &mut vars),
                 // The runtime loads one profiler: an app that names its own (another vendor's
-                // agent) keeps it, and roll's isn't started.
-                Some("dotnet") if !vars.get("CORECLR_PROFILER").is_some_and(|(v, _)| !v.trim().is_empty()) => {
+                // agent), or says whether profiling is on, keeps its choice, and roll's isn't started.
+                Some("dotnet") if !["CORECLR_PROFILER", "CORECLR_ENABLE_PROFILING"].iter().any(|k| vars.get(*k).is_some_and(|(v, _)| !v.trim().is_empty())) => {
                     for (k, v) in apps_build::otel::DOTNET_VARS {
                         vars.insert(k.into(), (v.into(), "roll"));
                     }
@@ -3547,8 +3548,18 @@ impl Apps {
         let sources = vars.iter().map(|(k, (_, s))| (k.clone(), *s)).collect();
         // A placeholder the service's own variable of the same name replaced isn't one.
         placeholders.retain(|k, _| vars.get(k).is_some_and(|(_, s)| *s == "secret"));
-        // A part the service's own variable of the same name replaced isn't one.
-        derived.retain(|k| vars.get(k).is_some_and(|(_, s)| *s == "link"));
+        // A part the service's own variable of the same name replaced isn't one; and when its URL
+        // was replaced (the service's own, roll secrets'), its parts would name another database
+        // than the URL the instance gets: left out.
+        let link_set = |vars: &BTreeMap<String, (String, &'static str)>, k: &str| vars.get(k).is_some_and(|(_, s)| *s == "link");
+        let gone: Vec<String> = derived.iter().filter(|(_, url)| !link_set(&vars, url)).map(|(k, _)| k.clone()).collect();
+        for k in &gone {
+            if link_set(&vars, k) {
+                vars.remove(k);
+            }
+            derived.remove(k);
+        }
+        let derived: BTreeSet<String> = derived.into_keys().filter(|k| link_set(&vars, k)).collect();
         Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources, unresolved, refused, ref_texts, sealed, from_secrets, plain_secrets, notices, placeholders, derived })
     }
 

@@ -643,8 +643,8 @@ export function Dockerfile({ text, generated }: { text: string; generated: boole
 /**
  * A new roll code repo from a code starter (Vercel's Clone): made private, with the starter's
  * files as its first commit, then picked like any repo, so the service follows its default branch
- * and the first deploy is that commit. Pressed again after a failure, a repo it made with no
- * commits yet gets them; one with commits is someone's, and is refused.
+ * and the first deploy is that commit. Pressed again after a failure, the private native repo it
+ * made, with no commits yet, gets them; any other repo of that name is refused.
  */
 function FromStarter({ onPicked }: { onPicked: (fullName: string) => void }) {
   const [owners, setOwners] = useState<Owner[]>([]);
@@ -683,8 +683,9 @@ function FromStarter({ onPicked }: { onPicked: (fullName: string) => void }) {
       try {
         made = await codeApi.createRepo({ owner, name: repoName, visibility: "private", source: "native", description: `Started from roll's ${starter.name} starter` });
       } catch (e) {
-        const had = e instanceof ApiError && e.status === 409 ? await codeApi.repo(`${owner}/${repoName}`) : null;
-        if (!had || had.head) throw e;
+        const had = e instanceof ApiError && e.status === 409 ? await codeApi.repo(`${owner}/${repoName}`).catch(() => null) : null;
+        // Only what a press before made: native, private, not importing, still empty.
+        if (!had || had.head || had.source !== "native" || had.import || had.visibility !== "private") throw e;
         made = had;
       }
       const landed = await codeApi.land(made.full_name, { base: null, message: `Start ${repoName} from roll's ${starter.name} starter`, files: starterFiles(starter, repoName) });

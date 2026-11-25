@@ -983,6 +983,8 @@ service"), and a call the issuer gives no token for is `cron.failed` saying so. 
   streams, queues and NoSQL. A link injects the resource's connection variables (`DATABASE_URL`
   with its parts as libpq reads them, Railway's `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`,
   `PGDATABASE`, plus `PGOPTIONS` and `PGSSLMODE` from its query, for apps that take no URL;
+  left out when the service's own `DATABASE_URL`, or roll secrets', replaces the link's, so
+  they never name another database than the URL;
   `REDIS_URL`, `ELASTICSEARCH_URL` and `ELASTICSEARCH_API_KEY` or an OpenSearch-flavor cluster's
   `OPENSEARCH_URL`, `OPENSEARCH_USERNAME` and `OPENSEARCH_PASSWORD`, `S3_*`, `KAFKA_*`, `AMQP_URL`,
   `CASSANDRA_*`), named with the resource's prefix
@@ -1968,8 +1970,9 @@ makes a private roll code repo and lands the starter's files as its first commit
 with no base). The repo is then picked like any other, so the service follows its default branch
 and its first deploy is that commit; from then on every landing deploys it. A starter is one JSON
 file in the dashboard (`apps/dashboard/src/lib/starters/*.json`), the repo's name filled in where
-it says `{{name}}`. Pressed again after a failure, a repo it made that has no commits yet gets
-them; a repo of that name with commits is refused. `every_code_starter_has_a_plan` (apps-build)
+it says `{{name}}` as package.json and go.mod take it (lowercase, no leading or trailing `.`,
+`_` or `-`). Pressed again after a failure, the repo it made (native, private, not importing,
+still empty) gets them; any other repo of that name is refused. `every_code_starter_has_a_plan` (apps-build)
 checks that each is detected as its framework with a start command and no settings, and
 `new-service.test.tsx` covers the flow. Each starter was also built and answered in a real build.
 
@@ -2555,11 +2558,12 @@ architecture, checks it against its SHA-256 and unpacks it, and the image that r
 `/opt/roll-otel/dotnet` (16 MB once the debug symbols are dropped). While traces are on it
 starts through the runtime's profiler variables (`CORECLR_ENABLE_PROFILING`, `CORECLR_PROFILER`,
 `CORECLR_PROFILER_PATH`) and its startup hook, first in `DOTNET_STARTUP_HOOKS`. The runtime loads
-one profiler, so an app that sets `CORECLR_PROFILER` itself (another vendor's agent) keeps its
-own and roll's isn't started. Checked in a real build: an ASP.NET app's requests reach OTLP as
+one profiler, so an app that sets `CORECLR_PROFILER` itself (another vendor's agent) or
+`CORECLR_ENABLE_PROFILING` (on or off) keeps its choice, and roll's isn't started. Checked in a real build: an ASP.NET app's requests reach OTLP as
 traces and metrics. Older .NET, Alpine images and the tree's own Dockerfile get a note instead.
 `api.rs::a_builds_otel_agent_starts_while_traces_are_on` and `otel::tests` cover it; the pinned
-Node, Python and .NET agents are checked by a real build in `docker.rs`.
+Node, Python and .NET agents are checked by a real build in `docker.rs` (.NET's with its native
+profiler mapped into the process, since a wrong profiler path only logs).
 
 The endpoint is a sealed
 variable: its token is in no answer, the instances still get it. The address is the apps

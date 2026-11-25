@@ -1841,6 +1841,11 @@ async fn a_link_puts_its_variables_in_the_instances() {
     let (st, body) = visit_deployment(&w, &host(&svc["environments"][0]["url"]), r["id"].as_str().unwrap()).await;
     assert_eq!(st, StatusCode::OK, "{body}");
     assert_eq!(body["vars"], json!({"DATABASE_URL": "postgres://app:pw@db.roll.test:5432/main", "ORDERS_DATABASE_URL": "postgres://app:pw@db.roll.test:5432/orders", "ORDERS_PGHOST": "db.roll.test", "ORDERS_PGPASSWORD": "pw", "ORDERS_PGDATABASE": "orders", "LOGS_ELASTICSEARCH_API_KEY": "key0-secret"}));
+    // The service's own URL in place of the link's: the link's parts go with it (they'd name
+    // another database); the other link's stay.
+    call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"DATABASE_URL": "postgres://u:p@elsewhere:5432/x"}}))).await;
+    let (_, v) = call(&w.api, "GET", &format!("{base}/variables/values"), None).await;
+    assert!(v.get("PGHOST").is_none() && v.get("PGPASSWORD").is_none() && v["ORDERS_PGHOST"] == "db.roll.test", "{v}");
     // Unlinking revokes them, and so does deleting the service.
     assert_eq!(call(&w.api, "DELETE", &format!("{links}/search/logs"), None).await.0, StatusCode::NO_CONTENT);
     call(&w.api, "PUT", &format!("{links}/search/logs"), Some(json!({}))).await;
