@@ -83,6 +83,8 @@ pub fn stored_user(p: &crate::xpack::security::Principal) -> Option<Value> {
         if let (Some(d), Some(k)) = (&a.derived, k.as_object_mut()) {
             k.insert("narrowing".into(), d.narrowing.clone());
             k.insert("derived_id".into(), d.id.clone().into());
+            k.insert("derived_exp".into(), d.exp.into());
+            k.insert("derived_generation".into(), d.generation.into());
         }
         m.insert("api_key".into(), k);
     }
@@ -103,7 +105,11 @@ pub fn principal_of(u: &Value) -> Option<crate::xpack::security::Principal> {
             remote: None,
             derived: a.get("narrowing").map(|n| {
                 let id = a.get("derived_id").and_then(Value::as_str).unwrap_or_default().to_string();
-                Box::new(crate::xpack::security::derived::DerivedAuth { id, narrowing: n.clone(), user: None, per_minute: None, origins: Vec::new(), exp: i64::MAX, generation: 0 })
+                // As it was verified: a job run past its expiry or its secret's rotation is
+                // refused ([`principal_problem`]); one kept without them, never run.
+                let exp = a.get("derived_exp").and_then(Value::as_i64).unwrap_or(0);
+                let generation = a.get("derived_generation").and_then(Value::as_i64).unwrap_or(-1);
+                Box::new(crate::xpack::security::derived::DerivedAuth { id, narrowing: n.clone(), user: None, per_minute: None, origins: Vec::new(), exp, generation })
             }),
         })),
         None => crate::xpack::security::AuthKind::Realm,
@@ -141,6 +147,18 @@ pub fn principal_problem(cluster: &Cluster, p: &crate::xpack::security::Principa
         }
         if k.get("expiration").and_then(Value::as_i64).is_some_and(|exp| exp <= crate::time::now_millis()) {
             return Some(format!("{key} has expired"));
+        }
+        // A key derived from it holds only while it's unexpired and its parent's secret is still
+        // the one that signed it.
+        if let Some(d) = &a.derived {
+            use crate::xpack::security::{browser::METADATA, derived::DERIVE};
+            let generation = k.pointer(&["metadata", METADATA, DERIVE]).filter(|d| !d.is_null()).map(|d| d.get("generation").and_then(Value::as_i64).unwrap_or(0));
+            if generation != Some(d.generation) {
+                return Some(format!("{key} signs no longer with the secret its derived key was signed with"));
+            }
+            if d.exp.saturating_add(crate::xpack::security::derived::SKEW_S) < crate::time::now_millis() / 1000 {
+                return Some(format!("{key} derived a key that has expired"));
+            }
         }
         return None;
     }

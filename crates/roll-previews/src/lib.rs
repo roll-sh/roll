@@ -285,6 +285,11 @@ pub struct Skipped {
     /// The first of those stories, by id (10 at most).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub first_stories: Vec<String>,
+    /// The change's stories were chosen by its files alone: its Storybook served no module graph
+    /// (`preview-stats.json`, `--stats-json`; a `storybook dev` server has none), so a story that
+    /// imports a changed file from elsewhere may be among those left.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub by_files: bool,
 }
 
 fn is_zero(n: &u32) -> bool {

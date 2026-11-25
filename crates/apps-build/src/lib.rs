@@ -20,6 +20,8 @@ pub mod expects;
 pub mod functions;
 mod generators;
 mod gleam;
+mod swift;
+mod dart;
 mod golang;
 mod java;
 mod node;
@@ -218,6 +220,10 @@ pub enum Provider {
     Scala,
     Clojure,
     Gleam,
+    /// Swift's executables, Vapor's served ([`swift`]).
+    Swift,
+    /// Dart servers ([`dart`]).
+    Dart,
     /// A root `start.sh` ([`shell`]).
     Shell,
     Static,
@@ -231,7 +237,7 @@ pub enum Error {
         "couldn't tell how to build this: found no Dockerfile, package.json, deno.json, \
          requirements.txt, pyproject.toml, go.mod, Cargo.toml, Gemfile, composer.json, index.php, \
          pom.xml, build.gradle, a .csproj, mix.exs, build.sbt, project.clj, deps.edn, gleam.toml, \
-         index.html or start.sh at the root{0}; add a Dockerfile or set the \
+         Package.swift, pubspec.yaml, index.html or start.sh at the root{0}; add a Dockerfile or set the \
          root directory"
     )]
     NothingDetected(String),
@@ -450,7 +456,7 @@ fn detect(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
         return docker::plan(tree, &o);
     }
     type Detect = fn(&dyn Tree, &Overrides) -> Result<Option<Draft>, Error>;
-    const PROVIDERS: [Detect; 16] = [
+    const PROVIDERS: [Detect; 18] = [
         // Before Node: a Deno project's deno.json decides, a package.json beside it notwithstanding.
         deno::detect,
         // A Hugo or Zola site's config decides too (a theme's package.json is its CSS tooling).
@@ -467,6 +473,8 @@ fn detect(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
         scala::detect,
         clojure::detect,
         gleam::detect,
+        swift::detect,
+        dart::detect,
         // A static site first: one with a dev-only start.sh beside its index.html stays served
         // as files (no instance), as it was before start.sh was built.
         static_site::detect,
@@ -500,9 +508,7 @@ fn detect(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
 /// What the root holds that roll doesn't build yet, said with the error: `" (found mix.exs:
 /// Elixir)"`, or nothing.
 fn found(tree: &dyn Tree) -> String {
-    const KNOWN: [(&str, &str); 6] = [
-        ("pubspec.yaml", "Dart"),
-        ("Package.swift", "Swift"),
+    const KNOWN: [(&str, &str); 4] = [
         ("stack.yaml", "Haskell"),
         ("CMakeLists.txt", "C or C++ (CMake)"),
         ("Makefile", "make"),
