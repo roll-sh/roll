@@ -1440,6 +1440,35 @@
         "x-roll-action": "read"
       }
     },
+    "/v1/apps/services/{id}/deploys": {
+      "get": {
+        "description": "Answers `Deployment[]`: every environment's (previews' too), as above.",
+        "operationId": "getServicesIdDeploys",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`Deployment[]`: every environment's (previews' too), as above"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List deploys",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
+      }
+    },
     "/v1/apps/services/{id}/environments": {
       "get": {
         "description": "Answers `Environment[]`.",
@@ -1873,7 +1902,7 @@
     },
     "/v1/apps/services/{id}/environments/{env}/deploys": {
       "get": {
-        "description": "Answers `Deployment[]`, newest first, 100 at most; `before` (unix ms, the last one's `created_at`): the next page.",
+        "description": "Answers `Deployment[]`, newest first, 100 at most; `before` (unix ms, the last one's `created_at`): the next page; `status` (`queued`, `building`, `deploying`, `ready`, `active`, `inactive`, `failed`, `canceled`, `removed`), `actor` (exactly the deploy's) and `q` (in its message, or the start of its commit; 1–200) narrow it in the database, so a page is 100 matches.",
         "operationId": "getServicesIdEnvironmentsEnvDeploys",
         "parameters": [
           {
@@ -1895,7 +1924,7 @@
         ],
         "responses": {
           "200": {
-            "description": "`Deployment[]`, newest first, 100 at most; `before` (unix ms, the last one's `created_at`): the next page"
+            "description": "`Deployment[]`, newest first, 100 at most; `before` (unix ms, the last one's `created_at`): the next page; `status` (`queued`, `building`, `deploying`, `ready`, `active`, `inactive`, `failed`, `canceled`, `removed`), `actor` (exactly the deploy's) and `q` (in its message, or the start of its commit; 1–200) narrow it in the database, so a page is 100 matches"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
