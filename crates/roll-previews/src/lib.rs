@@ -272,6 +272,38 @@ pub struct ServedSecret {
     pub path: String,
 }
 
+/// What a screenshot run left out (Chromatic says what it didn't snapshot): the pages past a
+/// run's [`settings::MAX_PAGES`] (the project's, the repo's `roll.toml`, widths, modes and states
+/// together), and Storybook's stories it didn't take (past [`settings::MAX_STORIES`], or out of
+/// its time), with the first few of them.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, serde::Deserialize)]
+pub struct Skipped {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pages: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub stories: u32,
+    /// The first of those stories, by id (10 at most).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub first_stories: Vec<String>,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+impl Skipped {
+    pub fn is_empty(&self) -> bool {
+        self.pages.is_empty() && self.stories == 0
+    }
+}
+
+/// [`Skipped`] at a head (`skipped`, a runtime fact).
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct SkippedAt {
+    pub head: String,
+    pub skipped: Skipped,
+}
+
 /// What a preview's pages served, looked in at a head (`served_secrets`, a runtime fact).
 #[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub struct ServedSecrets {
@@ -460,6 +492,10 @@ pub struct Preview {
     /// Its secret values its pages served at its head, by name and path (never the value).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub served_secrets: Vec<ServedSecret>,
+    /// What its latest screenshot run left out at its head (pages past a run's ten, stories past
+    /// forty or out of time), so a cut list is never a silent one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<Skipped>,
     /// The project's rule for regressions against main's (`check`, `required`), when it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub regressions: Option<String>,

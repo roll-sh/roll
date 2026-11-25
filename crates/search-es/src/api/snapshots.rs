@@ -82,6 +82,13 @@ pub struct SnapshotData {
     running: parking_lot::Mutex<Vec<Arc<Running>>>,
     /// Told whenever a snapshot stops running here (a deletion waits for them).
     running_ended: tokio::sync::Notify,
+    /// Deletions and cleanups running here, by repository (Elasticsearch's
+    /// `SnapshotDeletionsInProgress` and `RepositoryCleanupInProgress`): a snapshot starts in a
+    /// repository only while none runs there, or it could take as its base a snapshot one is
+    /// removing, or upload what one is about to call unreferenced. Kept under `running`'s lock.
+    deleting: parking_lot::Mutex<Vec<String>>,
+    /// Told whenever a deletion or cleanup ends here (a snapshot starting waits for them).
+    deletion_ended: tokio::sync::Notify,
     /// Each repository's bucket traffic here, by name: throttles and counters.
     io: parking_lot::Mutex<std::collections::HashMap<String, Arc<transfer::RepoIo>>>,
     /// The cluster's `indices.recovery.max_bytes_per_sec`, which restores also pay.
@@ -166,6 +173,23 @@ impl Drop for RunningGuard<'_> {
     }
 }
 
+/// Marks a deletion or cleanup as running in a repository while alive.
+struct DeletionGuard<'a> {
+    data: &'a SnapshotData,
+    repo: String,
+}
+
+impl Drop for DeletionGuard<'_> {
+    fn drop(&mut self) {
+        let mut d = self.data.deleting.lock();
+        if let Some(i) = d.iter().position(|r| *r == self.repo) {
+            d.remove(i);
+        }
+        drop(d);
+        self.data.deletion_ended.notify_waiters();
+    }
+}
+
 /// A running restore: `(restore uuid, repository, snapshot name)`.
 type Restoring = (String, String, String);
 
@@ -215,10 +239,14 @@ impl SnapshotData {
     }
 
     /// Shows `planned` (state `IN_PROGRESS`) as running in repository `repo` until the guard
-    /// drops. Fails when a snapshot of that name is already running there
-    /// (`SnapshotsServiceUtils.ensureSnapshotNameNotRunning`).
-    fn start_running(&self, repo: &str, planned: &Snapshot, st: &ClusterState) -> EsResult<RunningGuard<'_>> {
+    /// drops; `None` while a deletion or cleanup runs there (wait for it with
+    /// [`SnapshotData::no_deletion`], then plan again). Fails when a snapshot of that name is
+    /// already running there (`SnapshotsServiceUtils.ensureSnapshotNameNotRunning`).
+    fn start_running(&self, repo: &str, planned: &Snapshot, st: &ClusterState) -> EsResult<Option<RunningGuard<'_>>> {
         let mut g = self.running.lock();
+        if self.deleting.lock().iter().any(|r| r == repo) {
+            return Ok(None);
+        }
         if g.iter().any(|r| r.repo == repo && r.snapshot.name == planned.name) {
             let snap = &planned.name;
             return Err(EsError::new(400, "snapshot_name_already_in_use_exception", format!(
@@ -233,15 +261,42 @@ impl SnapshotData {
         let snapshot = Snapshot { state: "IN_PROGRESS".into(), end_ms: 0, successful_shards: 0, shard_files: Default::default(), ..planned.clone() };
         let entry = Arc::new(Running { repo: repo.to_string(), snapshot, shards: parking_lot::Mutex::new(shards) });
         g.push(entry.clone());
-        Ok(RunningGuard { data: self, entry })
+        Ok(Some(RunningGuard { data: self, entry }))
     }
 
-    /// Waits until no snapshot runs in repository `repo` here.
-    async fn idle(&self, repo: &str) {
+    /// Waits until no snapshot runs in repository `repo` here, then shows a deletion running
+    /// there until the guard drops: snapshots starting meanwhile wait for it.
+    async fn begin_deletion(&self, repo: &str) -> DeletionGuard<'_> {
         loop {
             // Asked for before looking, so an end between the two isn't missed.
             let ended = self.running_ended.notified();
-            if self.running_in(repo, None).is_empty() {
+            {
+                let g = self.running.lock();
+                if !g.iter().any(|r| r.repo == repo) {
+                    self.deleting.lock().push(repo.to_string());
+                    return DeletionGuard { data: self, repo: repo.to_string() };
+                }
+            }
+            ended.await;
+        }
+    }
+
+    /// `_cleanup`: refused while a snapshot runs in repository `repo` (as Elasticsearch
+    /// refuses it), else shown as running there until the guard drops.
+    fn begin_cleanup(&self, repo: &str) -> EsResult<DeletionGuard<'_>> {
+        let g = self.running.lock();
+        if g.iter().any(|r| r.repo == repo) {
+            return Err(EsError::illegal_state(format!("Cannot cleanup [{repo}] - a snapshot is currently running")));
+        }
+        self.deleting.lock().push(repo.to_string());
+        Ok(DeletionGuard { data: self, repo: repo.to_string() })
+    }
+
+    /// Waits until no deletion or cleanup runs in repository `repo` here.
+    async fn no_deletion(&self, repo: &str) {
+        loop {
+            let ended = self.deletion_ended.notified();
+            if !self.deleting.lock().iter().any(|r| r == repo) {
                 return;
             }
             ended.await;
@@ -1245,12 +1300,15 @@ pub async fn create(ctx: &Ctx<'_>) -> EsResult<Reply> {
         }
         return Reply::ok(obj! { "snapshot" => snapshot_info(ctx, Some(&repo), &snapshot, true, true, false) });
     }
-    // Planned against the current state, the snapshot shows as running until it is recorded.
-    let (planned, running) = {
+    // Planned against the current state, the snapshot shows as running until it is recorded;
+    // it starts once no deletion runs in the repository (planned again after one).
+    let (planned, running) = loop {
+        ctx.cluster.snapshot_data.no_deletion(&repo).await;
         let st = ctx.state();
         let planned = build.clone()(&mut (*st).clone())?;
-        let running = ctx.cluster.snapshot_data.start_running(&repo, &planned, &st)?;
-        (planned, running)
+        if let Some(running) = ctx.cluster.snapshot_data.start_running(&repo, &planned, &st)? {
+            break (planned, running);
+        }
     };
     let snapshot = match ctx.cluster.engine.snapshot_storage() {
         Some(store) => {
@@ -1430,21 +1488,14 @@ pub async fn delete(ctx: &Ctx<'_>) -> EsResult<Reply> {
         return Err(elastic_read_only(&repo, "delete snapshots"));
     }
     // As Elasticsearch's: a deletion waits for the snapshots running in the repository, which
-    // may reuse what it would delete (checked again as it's committed).
+    // may reuse what it would delete, and shows as running until it's done (chunks included),
+    // so a snapshot starting meanwhile waits for it rather than take a removed one as its base.
     let snapshot_data = &ctx.cluster.snapshot_data;
-    let raced = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let deleted = loop {
-        snapshot_data.idle(&repo).await;
-        raced.store(false, std::sync::atomic::Ordering::SeqCst);
-        let (repo, snaps, started) = (repo.clone(), snaps.clone(), raced.clone());
+    let _deleting = snapshot_data.begin_deletion(&repo).await;
+    let deleted = {
         let bucket = s3::bucket_repository(&ctx.state(), &repo);
         let repo_name = repo.clone();
         let apply = move |st: &mut ClusterState| {
-            // One started since the wait: this attempt stops, and waits again.
-            if !snapshot_data.running_in(&repo, None).is_empty() {
-                started.store(true, std::sync::atomic::Ordering::SeqCst);
-                return Err(EsError::new(503, "concurrent_snapshot_execution_exception", format!("[{repo}] a snapshot started")));
-            }
             let Some(r) = st.metadata.repositories.get(&repo).cloned() else { return Err(repository_missing(&repo)) };
             let key = r.location_key();
             if st.metadata.repository_data.get(&key).is_some_and(|d| d.elastic) {
@@ -1473,13 +1524,9 @@ pub async fn delete(ctx: &Ctx<'_>) -> EsResult<Reply> {
             }
             Ok(gone)
         };
-        let out = match &bucket {
-            Some(r) => s3::delete(ctx, &repo_name, r, apply).await,
-            None => ctx.cluster.update(apply).await,
-        };
-        match out {
-            Err(_) if raced.load(std::sync::atomic::Ordering::SeqCst) => continue,
-            out => break out?,
+        match &bucket {
+            Some(r) => s3::delete(ctx, &repo_name, r, apply).await?,
+            None => ctx.cluster.update(apply).await?,
         }
     };
     for uuid in &deleted {

@@ -253,6 +253,18 @@ export function PreviewSheet({
                 </ul>
               </div>
             )}
+            {p.skipped && (!!p.skipped.pages?.length || !!p.skipped.stories) && (
+              <p className="text-[11.5px] text-subtle">
+                Not taken in its last screenshot run:{" "}
+                {[
+                  p.skipped.pages?.length ? `${p.skipped.pages.join(", ")} (a run takes ten pages)` : "",
+                  p.skipped.stories ? `${p.skipped.stories === 1 ? "1 story" : `${p.skipped.stories} stories`}${p.skipped.first_stories?.length ? ` (${p.skipped.first_stories.join(", ")}${p.skipped.stories > p.skipped.first_stories.length ? ", …" : ""})` : ""}` : "",
+                ]
+                  .filter(Boolean)
+                  .join("; ")}
+                .
+              </p>
+            )}
             {!!p.browser_checks?.length && (
               <>
                 <Label>Browser checks</Label>

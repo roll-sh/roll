@@ -1,0 +1,12 @@
+{
+  "id": "next",
+  "name": "Next.js",
+  "blurb": "A React app, rendered on the server",
+  "files": {
+    "package.json": "{\n  \"name\": \"{{name}}\",\n  \"private\": true,\n  \"scripts\": {\n    \"dev\": \"next dev\",\n    \"build\": \"next build\",\n    \"start\": \"next start\"\n  },\n  \"dependencies\": {\n    \"next\": \"^16.4.6\",\n    \"react\": \"^19.3.1\",\n    \"react-dom\": \"^19.3.1\"\n  }\n}\n",
+    "app/layout.js": "export const metadata = { title: \"{{name}}\" };\n\nexport default function RootLayout({ children }) {\n  return (\n    <html lang=\"en\">\n      <body style={{ fontFamily: \"system-ui, sans-serif\", margin: \"4rem auto\", maxWidth: 640, padding: \"0 1rem\" }}>{children}</body>\n    </html>\n  );\n}\n",
+    "app/page.js": "export default function Home() {\n  return (\n    <main>\n      <h1>{{name}}</h1>\n      <p>Edit app/page.js and land it: roll deploys every change.</p>\n    </main>\n  );\n}\n",
+    ".gitignore": "node_modules/\n.env*\n.next/\n",
+    "README.md": "# {{name}}\n\nA Next.js app, started from roll's Next.js starter. Every landing on its default branch deploys it.\n\nRun it on your computer:\n\n```sh\nnpm install\nnpm run dev\n```\n"
+  }
+}

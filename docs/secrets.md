@@ -3094,6 +3094,11 @@ the names with dns-01, renews them, and keys link to the result.
     a new version, `rotation.succeeded` on the events feed, and syncs pushing it on, a certificate
     sync to ACM, Key Vault or Cloudflare included ("Getting certificates where TLS terminates"). A key a node didn't
     reach (it stopped halfway) is rotated on the next pass.
+  - The pass looks only at registrations whose keys may be behind: a certificate newer than the one
+    every key was last rolled to (`rolled_serial`), a key linked in the last 2 minutes (it may have
+    taken the certificate before a renewal), or every 15 minutes anyway. It reads that project's
+    keys, and one node at a time rolls them (a hold on `rolled_at`). A server without an issued
+    certificate reads no key at all.
   - A renewal that fails is `rotation.failed` on every linked key, and health's `rotation_failing`,
     until one works. The certificate in use keeps working until it ends.
   - `POST …/public-certs/{id}/renew` (`write`; `secrets_renew_public_cert` over MCP) and a linked
@@ -6287,8 +6292,11 @@ caller's own (every one in the project for an admin of it), and `DELETE …/noti
 removes one of theirs (an admin, any). Creating and removing one is in the audit log.
 
 Delivery follows the feed as any follower does. A subscription keeps a cursor, starting at the
-head when it's made. One worker on each node (`Secrets::sweep_notifications`, every 5 s) claims a
-subscription in a write (a hold, compare-and-swap on its cursor). It reads the events after the
+head when it's made. One worker on each node (`Secrets::sweep_notifications`, every 5 s) takes up
+to 200 subscriptions with new events, the longest waiting first (`due_at`: when each was last taken,
+or its retry), and claims each in a write (a hold, compare-and-swap on its cursor). A pass sends at
+most 200 messages, and one subscription at most 20 events or 10 seconds of sending; the rest go on
+the next pass, so no subscription holds a pass or starves the others. It reads the events after the
 cursor through the feed itself, as the person is now (`person_caller`: their session's grant at that
 moment, an admin's account as the operator), so every event is asked of their rights exactly as the
 feed asks a reader. Each delivery is claimed in its own write before it's sent, and the send is
@@ -6900,8 +6908,9 @@ audit(id INTEGER PK, project_id, at, actor, action, env_id, path, keys, summary,
 audit_heads(project_id PK, seq, hash, at, digest_seq, digest_at, start_seq, mac)  -- mac: HMAC under ROLL_SECRET_KEY
 event_marks(project_id, mark, at, PRIMARY KEY (project_id, mark))  -- events written once a day
 notifications(id PK, project_id, user_id, kinds, environment, channel, install, target, cursor, state,
-      error, error_at, tries, running_until, retry_at, delivered, delivered_at, created_at)
-      -- a person's own subscription to the feed ("Being told"); cursor: the feed's next, as answered
+      error, error_at, tries, running_until, retry_at, delivered, delivered_at, created_at, due_at)
+      -- a person's own subscription to the feed ("Being told"); cursor: the feed's next, as answered;
+      -- due_at: when it was last taken or retries, a pass takes the oldest first (index on active rows)
 audit_keys(kid PK, sealed_dek, private BLOB, x, legacy, created_at, retired_at, pulled_at)
       -- the digest key (Ed25519): private sealed with kid + legacy as AAD, wiped when pulled;
       -- legacy: issuer kids whose RS256 digests from before it count

@@ -8718,6 +8718,24 @@ async fn public_certificates_are_ordered_in_the_background_renewed_and_a_failed_
     let pushed = api.certs.pushes.lock().unwrap().clone();
     assert_eq!((pushed.len(), pushed[1].0.as_str(), pushed[1].3.as_deref()), (2, v["TLS_CERT"].as_str().unwrap(), Some("arn:fake:1")), "the renewed certificate, to the same target");
 
+    // A key linked as a renewal came in may have taken the certificate before it: the next pass
+    // rolls it (as a key a node stopped short of).
+    api.ok(Method::PUT, "/environments/staging/secrets/TLS_CERT", Some(link("certificate"))).await;
+    let staging = || {
+        let p = api.project.clone();
+        api.db.read(move |c| c.query_row("SELECT s.link_state, p.serial FROM secrets s JOIN environments e ON e.id = s.env_id JOIN public_certs p ON p.project_id = s.project_id WHERE s.project_id = ? AND e.slug = 'staging' AND s.key = 'TLS_CERT'", [&p], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))).unwrap()
+    };
+    let (state, serial) = staging();
+    let mut state: Value = serde_json::from_str(&state).unwrap();
+    assert_eq!(state["handle"]["serial"].as_str(), Some(serial.as_str()));
+    state["handle"]["serial"] = json!("fake-serial-before");
+    let p = api.project.clone();
+    api.db.write(move |c| c.execute("UPDATE secrets SET link_state = ? WHERE project_id = ? AND key = 'TLS_CERT' AND env_id IN (SELECT id FROM environments WHERE project_id = ? AND slug = 'staging')", code_sql::params![state.to_string(), p, p])).unwrap();
+    sweep().await;
+    let (state, serial) = staging();
+    assert_eq!(serde_json::from_str::<Value>(&state).unwrap()["handle"]["serial"].as_str(), Some(serial.as_str()), "rolled to the current certificate");
+    api.ok(Method::DELETE, "/environments/staging/secrets/TLS_CERT", None).await;
+
     // A key's rotation asks for a new certificate; the job brings it.
     let r = api.ok(Method::POST, "/environments/production/secrets/TLS_KEY/rotate", None).await;
     assert!(r["warnings"][0].as_str().unwrap().contains("ordering a new certificate"), "{r}");
@@ -8890,4 +8908,40 @@ async fn a_subscriber_is_told_of_production_changes_once_and_never_a_value() {
         assert!(values.iter().all(|v| !t.contains(v)), "{t}");
         assert!(t.split(|c: char| !c.is_ascii_hexdigit()).all(|w| w.len() < 32), "{t}");
     }
+}
+
+/// A pass takes the subscriptions that have waited longest first: on a busy server, the ones past
+/// a pass's limit are served on the next pass, not starved by the same first ones every time.
+#[tokio::test]
+async fn every_due_subscription_is_served_within_two_passes() {
+    let api = Api::new().await;
+    let fake = Arc::new(FakeNotifier::default());
+    api.secrets.set_notifier(fake.clone());
+    let (_, p) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "busy" }))).await;
+    let team = p["id"].as_str().unwrap().to_string();
+    let at = |rest: &str| format!("/v1/secrets/projects/{team}{rest}");
+    let (s, n) = api.as_ada(Method::POST, &at("/notifications"), Some(json!({ "kinds": ["secret.changed"], "channel": { "email": "own" } }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{n}");
+    // 250 in all, as many people's would be (one person has at most 20).
+    let id = n["id"].as_str().unwrap().to_string();
+    api.db
+        .write(move |c| {
+            for i in 0..249 {
+                c.execute(
+                    "INSERT INTO notifications (id, project_id, user_id, kinds, environment, channel, install, target, cursor, state, error, error_at, tries, running_until, retry_at, delivered, delivered_at, created_at)
+                     SELECT ?, project_id, user_id, kinds, environment, channel, install, target, cursor, state, error, error_at, tries, running_until, retry_at, delivered, delivered_at, created_at FROM notifications WHERE id = ?",
+                    code_sql::params![format!("ntf_busy{i:03}"), id],
+                )?;
+            }
+            Ok::<_, code_sql::Error>(())
+        })
+        .unwrap();
+    // Every one has something new before each pass.
+    for value in ["fake-busy-value-1", "fake-busy-value-2"] {
+        api.as_ada(Method::PUT, &at("/environments/production/secrets/DB_PASSWORD"), Some(json!({ "value": value }))).await;
+        api.secrets.sweep_notifications().unwrap();
+    }
+    let p = team.clone();
+    let starved: i64 = api.db.read(move |c| c.query_row("SELECT COUNT(*) FROM notifications WHERE project_id = ? AND delivered = 0", [&p], |r| r.get(0))).unwrap();
+    assert_eq!(starved, 0, "every subscription told within two passes ({} mails)", fake.mails.lock().unwrap().len());
 }

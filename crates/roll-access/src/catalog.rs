@@ -178,13 +178,14 @@ fn search_parent(b: &Value) -> Vec<Lent> {
     b.get("parent").and_then(Value::as_str).map(|p| Lent { kind: "search".into(), r#ref: p.into(), action: Action::Write }).into_iter().collect()
 }
 
-/// A search API key's action, by what the key may do: `reveal` for a `read` or `append` key; `delete`
-/// for a `data` key, whose role manages indices and lifecycle policies (it deletes indices, runs
+/// A search API key's action, by what the key may do: `reveal` for a `read` key; `write` for an
+/// `append` one, which adds documents; `delete` for a `data` key, whose role manages indices and lifecycle policies (it deletes indices, runs
 /// delete-by-query, sets ILM); `admin` for an `admin` one, the default, or anything else (it fails
 /// closed). Each answers the key, so search asks `reveal` too (the row's `capable`).
 fn search_key_action(b: &Value) -> Action {
     match b.get("access").and_then(Value::as_str) {
-        Some("read" | "append") => Action::Reveal,
+        Some("read") => Action::Reveal,
+        Some("append") => Action::Write,
         Some("data") => Action::Delete,
         _ => Action::Admin,
     }
@@ -1350,7 +1351,8 @@ static ROWS: &[Row] = &[
     // An API key: its secret is in the answer, so search refuses it to a grant that can't reveal
     // too (`capable`). The action is what the key may do (`search_key_action`): `admin` access
     // (the default) is everything the cluster's own user may do, as the console is; a `data` key
-    // deletes indices and sets lifecycle policies (`delete`); `read` and `append` keys are reveal.
+    // deletes indices and sets lifecycle policies (`delete`); an `append` key adds documents
+    // (`write`); a `read` key is reveal.
     row("POST", "/v1/search/clusters/{id}/keys", "search", Act::Body(search_key_action), one(PG, "cluster")).capable(&[Action::Reveal]),
     row("DELETE", "/v1/search/clusters/{id}/keys/{key}", "search", ADMIN, one(PG, "cluster")),
     // Keys a web page ships (read-only, rate limited): the new key's secret is in the answer;
@@ -1358,6 +1360,8 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/search/clusters/{id}/browser-keys", "search", R, one(PG, "cluster")),
     row("POST", "/v1/search/clusters/{id}/browser-keys", "search", REVEAL, one(PG, "cluster")),
     row("DELETE", "/v1/search/clusters/{id}/browser-keys/{key}", "search", ADMIN, one(PG, "cluster")),
+    // A derivable browser key's new signing secret: a credential, in the answer.
+    row("POST", "/v1/search/clusters/{id}/browser-keys/{key}/rotate", "search", REVEAL, one(PG, "cluster")),
     // A snapshot repository, the only way its credentials can be roll secrets references: it
     // changes the cluster as the console does; roll secrets checks `reveal` on each reference
     // itself (search_control::secret_refs).
