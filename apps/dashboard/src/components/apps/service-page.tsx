@@ -699,9 +699,9 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
             )}
           </p>
         ) : tab === "deployments" ? (
-          <Deployments service={service.id} name={service.name} env={env!} deploys={data.deploys} runner={runner} own={service.run.type === "web" && !service.run.volume} upload={service.source.kind === "upload"} explains={service.source.kind === "repo"} />
+          <Deployments service={service.id} name={service.name} env={env!} deploys={data.deploys} runner={runner} own={service.run.type === "web" && !(service.run.volume && !service.run.volume.shared)} upload={service.source.kind === "upload"} explains={service.source.kind === "repo"} />
         ) : tab === "logs" ? (
-          <RuntimeLogs service={service.id} env={envName} onGroup={() => go({ tab: "metrics" })} />
+          <RuntimeLogs service={service.id} env={envName} retentionDays={env?.log_retention_days ?? 7} onGroup={() => go({ tab: "metrics" })} />
         ) : tab === "metrics" ? (
           <MetricsTab service={service.id} env={envName} memoryMb={service.run.memory_mb} maxInstances={service.run.max_instances} cpus={service.run.cpu} latencyTarget={service.run.latency_target_ms} />
         ) : tab === "variables" ? (

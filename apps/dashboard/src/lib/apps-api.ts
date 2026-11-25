@@ -24,6 +24,13 @@ export interface Sso {
   allow: string[];
 }
 
+/** What a deploys list is narrowed to. */
+export interface DeployFilter {
+  status?: DeployStatus;
+  actor?: string;
+  q?: string;
+}
+
 /** One session in a sign-in-gated environment (`…/visitors`). */
 export interface Visitor {
   id: string;
@@ -1719,7 +1726,10 @@ export const appsApi = {
 
   deploy: (id: string, e: string, body: NewDeploy = {}) => call<Deployment>("POST", `${env(id, e)}/deploys`, body),
   /** Newest first, 100 at most; `before` (the last one's `created_at`): the page after it. */
-  deploys: (id: string, e: string, before?: number) => call<Deployment[]>("GET", `${env(id, e)}/deploys${qs({ before })}`),
+  /** An environment's deploys, newest first, narrowed by state, who made them, or their message or commit (`q`). */
+  deploys: (id: string, e: string, before?: number, f: DeployFilter = {}) => call<Deployment[]>("GET", `${env(id, e)}/deploys${qs({ before, ...f })}`),
+  /** Every environment's deploys of a service, narrowed the same way. */
+  serviceDeploys: (id: string, before?: number, f: DeployFilter = {}) => call<Deployment[]>("GET", `${svc(id)}/deploys${qs({ before, ...f })}`),
   deployment: (id: string, e: string, d: string) => call<Deployment>("GET", dep(id, e, d)),
   /** What a repo deployment brings over the live one (for the live one, the one before it). */
   commits: (id: string, e: string, d: string) => call<DeployCommits>("GET", `${dep(id, e, d)}/commits`),

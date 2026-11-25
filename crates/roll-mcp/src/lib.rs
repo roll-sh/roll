@@ -720,13 +720,19 @@ impl Ctx {
         }
     }
 
-    /// Whether a call of this connection's can wait for a person: a rule that asks, or "ask for
-    /// anything else". The operator's never do (the gate doesn't judge them).
-    fn can_ask(&self) -> bool {
-        match &self.principal {
-            Principal::Operator => false,
-            Principal::Grant(g) => g.ask_otherwise || g.scope.0.iter().any(|r| r.actions.values().any(|e| *e == roll_auth::scope::Effect::Ask)),
-        }
+    /// Whether a call of this tool (its product, its candidate actions) can wait for a person, so
+    /// it takes `approval`: a rule of the token's that asks for one of its actions, "ask for
+    /// anything else" short of rules that allow all of them everywhere, or the policy's
+    /// `agents_ask` covering one (it holds MCP calls whatever the token allows). The operator's
+    /// never do (the gate doesn't judge them). `policy` is read once per listing.
+    fn might_ask(&self, product: &str, actions: &[Action], policy: Option<&roll_access::Policy>) -> bool {
+        use roll_auth::scope::{Effect, Resources};
+        let Principal::Grant(g) = &self.principal else { return false };
+        let rules = || g.scope.0.iter().filter(|r| r.product == "*" || r.product == product);
+        let asks = rules().any(|r| actions.iter().any(|a| r.actions.get(a) == Some(&Effect::Ask)));
+        let everywhere = |a: &Action| rules().any(|r| r.actions.get(a) == Some(&Effect::Allow) && r.resources == Resources::All && r.environments.is_none() && r.paths.is_none() && !r.unprotected);
+        let otherwise = g.ask_otherwise && !actions.iter().all(everywhere);
+        asks || otherwise || policy.is_some_and(|p| actions.iter().any(|a| p.agent_asks(product, *a, None)))
     }
 
     /// A person's own token reaches only what their session can (`USER_REACH`).
@@ -800,14 +806,19 @@ impl Ctx {
     /// Every tool this caller can use, as `tools/list` shows it.
     fn tools(&self) -> Vec<Value> {
         let mut out: Vec<Value> = self.usable_tools().into_iter().map(std::borrow::Cow::into_owned).collect();
-        // A connection no person is ever asked about has no use for the approval argument (a
-        // model reads every tool's schema): the operator's, and a token whose rules only allow.
-        // Fronted sets' tools take it too.
-        if !self.can_ask() {
-            for t in &mut out {
-                if let Some(p) = t["inputSchema"]["properties"].as_object_mut() {
-                    p.remove("approval");
-                }
+        // Only a tool whose calls can wait for a person takes the approval argument: a model reads
+        // every schema, and on all 500-odd tools it was ~13k tokens a listing. A fronted set's
+        // tool (roll code's) takes it wherever any of the connection's could.
+        let policy = self.m.config.access.as_ref().map(|a| a.policy_now());
+        let roll: std::collections::HashMap<&str, &tools::Tool> = tools::all().iter().map(|t| (t.name, t)).collect();
+        let any = roll.values().any(|t| self.might_ask(t.product, &t.actions(), policy.as_ref()));
+        for t in &mut out {
+            let asks = match t["name"].as_str().and_then(|n| roll.get(n)) {
+                Some(tool) => self.might_ask(tool.product, &tool.actions(), policy.as_ref()),
+                None => any,
+            };
+            if !asks && let Some(p) = t["inputSchema"]["properties"].as_object_mut() {
+                p.remove("approval");
             }
         }
         out
