@@ -1360,6 +1360,12 @@ async fn old_deployments_are_pruned_past_what_an_environment_keeps() {
     let last = page.as_array().unwrap().last().unwrap()["created_at"].as_i64().unwrap();
     let (_, older) = call(&w.api, "GET", &format!("{base}?before={last}"), None).await;
     assert!(older.as_array().unwrap().is_empty() && page.as_array().unwrap().len() == 7, "{page}");
+    // Narrowed in the database: the two that failed, by state or across every environment.
+    let (_, failed) = call(&w.api, "GET", &format!("{base}?status=failed"), None).await;
+    assert!(failed.as_array().unwrap().len() == 2 && failed.as_array().unwrap().iter().all(|d| d["status"] == "failed"), "{failed}");
+    let (_, all) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/deploys?status=failed"), None).await;
+    assert_eq!(all.as_array().unwrap().len(), 2, "{all}");
+    assert_eq!(call(&w.api, "GET", &format!("{base}?status=done"), None).await.0, StatusCode::BAD_REQUEST);
     // Pruned once: a second pass removes nothing again; unpinned, it's pruned as the rest are.
     w.apps.prune().await;
     assert_eq!(w.fake.removed.lock().len(), removed.len());
@@ -5429,6 +5435,7 @@ async fn a_previews_pages_carry_the_feedback_button_for_its_link_visitors() {
     let (st, js) = get("/__roll/feedback.js", "*/*").await;
     assert_eq!(st, StatusCode::OK);
     assert!(js.contains("https://roll.test/dashboard/projects/") && js.contains("previews?preview=abc"), "the note goes to the preview in roll");
+    assert!(!js.contains("__ROLL_") && js.contains("fb_steps"), "roll previews' own button, every blank filled (one left is a syntax error)");
     assert!(!get("/", "application/json").await.1.contains("feedback.js"), "an API call isn't a page");
     // What's been said about a page, from roll previews: none before it's on this node.
     assert_eq!(get("/__roll/feedback.json?path=%2Fpricing", "*/*").await.0, StatusCode::NOT_FOUND);

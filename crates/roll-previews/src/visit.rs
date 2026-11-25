@@ -349,7 +349,7 @@ mod tests {
         assert_eq!(visit("/hello", "application/json", Some(&session)).await.0, 401);
         assert_ne!(store.access(&id).unwrap().unwrap().token, token, "leaving link access replaces the link's token");
         // Share links and the CI bypass still open it.
-        let (_, link) = engine.share(&id, 1, "ada", Some("usr_ada"), "", false).unwrap();
+        let (_, link) = engine.share(&id, 1, "ada", Some("usr_ada"), "", false).await.unwrap();
         let link = link.strip_prefix(&format!("http://{host}")).unwrap();
         let (status, _, cookie, _) = visit(link, "text/html", None).await;
         assert_eq!(status, 302);

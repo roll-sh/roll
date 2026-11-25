@@ -179,8 +179,12 @@ A tool that has roll reach an address the caller chose says so with MCP's `openW
 (`Tool::open_world`): publishing a task to a URL, a topic's endpoints, schedules and retries that
 deliver, running the app's own functions, adding or testing a notification or a log drain, a
 service from a Git URL or an image and its deploys, a sandbox (a public image, the internet by
-default) and the commands run in it, and a managed secret's rotation at its vendor.
-Every other tool's domain is roll's own (`false`). Search mode's `roll_run` is open-world when any
+default) and the commands run in it, a managed secret's rotation at its vendor or a public
+certificate's renewal at its CA, a plan or an import read from a public Git URL, a custom or
+preview domain's DNS check, and search's crawl tests and site checks.
+Every other tool's domain is roll's own (`false`). A tool that takes an outside address (`url`,
+`origin`, `domain`, `host`, `git`…) is open-world or names in a test why it reaches
+nothing (a filter, a stored setting). Search mode's `roll_run` is open-world when any
 tool it may run is; `roll_run_read` never is.
 
 ### Inspector
@@ -509,10 +513,13 @@ Still waiting, the result is not an error:
 
 The agent tells the user, then calls the same tool again with the same arguments (`"approval":
 "apr_…"` too, though the same call finds its approval without it). That waits again and runs the
-call once it's approved. Only a connection a person can be asked about is offered the `approval`
-argument: a token with an `ask` rule, or one that asks for anything else (the operator's and a
-token that only allows never wait, and drop it from every schema: 92 → 73 KB of what a model reads
-with every product on). An approval runs exactly the request it was asked for (same method, path
+call once it's approved. Only a tool whose call can wait for a person takes the `approval`
+argument: one of its actions is `ask` in the token's rules, or the token asks for anything else
+and its rules don't allow all of them everywhere, or the policy's `agents_ask` covers one (it holds
+an agent's calls whatever the token allows). The operator's tools and a token's plainly allowed
+ones drop it (92 → 73 KB of what a model reads with every product on when a connection never
+asks; per tool since 2026-11-25, so a token that reads freely and asks before deleting carries it
+on its deletes only). A fronted set's tools (roll code's) take it wherever any tool could. An approval runs exactly the request it was asked for (same method, path
 and body), once, and asking the same thing again waits on the same approval rather than making
 another. `access_wait_approval` waits for a decision without running anything. A denied call
 fails with the user's reason.
@@ -909,7 +916,7 @@ product's new route can't go without a decision (as `prefix-reviewed.txt` does f
 catalogue). A line may name a route an open PR is about to add, so that PR lands green.
 
 Arguments are checked against each tool's JSON Schema (closed: unknown arguments are refused).
-Every tool also takes `approval` (see [Approvals](#approvals)). Creating tools take
+A tool whose call can wait for a person also takes `approval` (see [Approvals](#approvals)). Creating tools take
 `workspace_project`, the workspace project the new resource goes in; a token limited to projects
 needs it. A `null` argument is left out, as if it weren't sent (some clients fill every field they
 don't use with one). A tool with fields its route clears (an environment's `egress` or `routes`, a
@@ -1170,6 +1177,11 @@ previews are listed once those products are on.
 | `search_put_query_ruleset` | Create a query ruleset or replace its rules (destructive). | `PUT /v1/search/clusters/{cluster}/query_rules/{ruleset}` |
 | `search_delete_query_ruleset` | Delete a query ruleset. | `DELETE /v1/search/clusters/{cluster}/query_rules/{ruleset}` |
 | `search_test_query_ruleset` | Which of a ruleset's rules match these criteria. | `POST /v1/search/clusters/{cluster}/query_rules/{ruleset}/test` |
+| `search_crawl_test` | One URL through the web crawler's path, storing nothing but sending real requests (10 a minute per owner): what would be indexed and why anything would be skipped (write). | `POST /v1/search/clusters/{cluster}/crawl-test` |
+| `search_list_site_verifications` | The domains and origins the cluster verified for its web crawlers (each cluster's own; the token is the owner's). | `GET /v1/search/clusters/{cluster}/site-verifications` |
+| `search_verify_site` | Start verifying a domain (DNS TXT: every origin on it) or one origin (its well-known file, served by itself: that origin alone). | `POST /v1/search/clusters/{cluster}/site-verifications` |
+| `search_check_site_verification` | Check a site's token now: verified, or why not. | `POST /v1/search/clusters/{cluster}/site-verifications/{site}/check` |
+| `search_delete_site_verification` | Drop a site's verification. | `DELETE /v1/search/clusters/{cluster}/site-verifications/{site}` |
 | `search_refresh` | Make what was just indexed searchable now. | `POST /v1/search/clusters/{cluster}/indices/{index}/refresh` |
 | `search_analyze` | The tokens an index's analyzer makes of some text (read). | `POST /v1/search/clusters/{cluster}/indices/{index}/analyze` |
 | `search_add_document` | Index a document under a new id. | `POST /v1/search/clusters/{cluster}/indices/{index}/docs` |
@@ -1289,7 +1301,8 @@ previews are listed once those products are on.
 | `apps_set_environment` | Create or change an environment: branch, run settings, following an image tag, waiting for CI. | `PUT /v1/apps/services/{service}/environments/{env}` |
 | `apps_update_service` | Change a service's name, source, build or run settings (run takes `alerts {memory_pct, error_pct, p95_ms}`). | `PATCH /v1/apps/services/{service}` |
 | `apps_deploy` | Deploy a service to an environment: a git revision of its repo, or an image (production deploys are "deploy" actions). `override: true` goes past a deploy freeze, as do `apps_redeploy`'s, `apps_promote`'s and `apps_rollback`'s: sent as `X-Roll-Override: 1`, which roll-access makes `admin` (a deploy token can't) and binds into an approval. | `POST /v1/apps/services/{service}/environments/{env}/deploys` |
-| `apps_list_deploys` | An environment's deploys, newest first. | `GET /v1/apps/services/{service}/environments/{env}/deploys` |
+| `apps_list_deploys` | An environment's deploys, newest first, narrowed by state, who made them or their message and commit. | `GET /v1/apps/services/{service}/environments/{env}/deploys` |
+| `apps_service_deploys` | Every environment's deploys of a service, newest first, narrowed the same way. | `GET /v1/apps/services/{service}/deploys` |
 | `apps_deploy_logs` | A deploy's build and release log. | `GET /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/logs` |
 | `apps_promote` | Deploy another environment's running image into this one (`expect`: the deployment you checked, 409 if it moved). | `POST /v1/apps/services/{service}/environments/{env}/promote` |
 | `apps_cancel_deploy` | Stop a deploy that hasn't gone live. | `POST /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/cancel` |
@@ -1461,9 +1474,11 @@ gaps are in how results read and how roll is distributed):
 From a 2026-11-24 gap review (every tool run as an agent would against a fresh rolld with
 `mcp-sweep.py --report`, 1,161 calls, plus probes with scoped tokens):
 
-1. **Sibling follow-ups as they land (this PR).** roll secrets #956's two SaaS vendors
-   (SonarQube, Jenkins) named in `secrets_list_saas`; it also answers an unknown requests `state`
-   with a 400 now, so the route agrees with the tool's choice (#933).
+1. **`approval` only where a call can wait (this PR).** Every tool of a connection that could
+   ever ask carried the `approval` argument (~100 bytes of schema each, ~13k tokens over 500-odd
+   tools), and a token whose rules only allow lost it even when the policy's `agents_ask` holds its
+   calls. It's per tool now: an `ask` rule for one of its actions, "ask for anything else" short of
+   rules that allow them all everywhere, or `agents_ask` covering one.
 2. **Paging is the products'.** No list route takes a cursor (approvals take `limit` only). History
    and logs are all capped (a `LIMIT`, the latest N, or a retention window), so nothing grows
    without bound there; the lists of things people make are whole (buckets, queues, topics,
@@ -1543,7 +1558,7 @@ From a 2026-11-24 gap review (every tool run as an agent would against a fresh r
    stateless and search mode (`?tools=search`) covers clients that can't take the list; "remember this browser"; a preset that reveals development's values without asking
    (#354); a connection-level `?project=` (only a token's rules bound a project; a default that
    some tools can't honour would look like a boundary).
-15. **Landed 2026-11-23 and 24:** `apps_wait_cron_run`, a cron run started now followed to its end; every route that answers 202 has a wait but a secrets environment delete that becomes a change request (#958); the sweep reads back every dashboard link it's answered (#951); the sweep checks choice forms live (15 tools), and a call's cost measured: 3.3 ms over its route and `tools/list` 141 ms for 517 tools in a debug build, 6.5 ms at p50 in release as "Toolsets" records, so nothing is cached (#946); lockdown withholds a fork page's console errors and header values (#944); fixes from a review of #907–#933: lockdown withholds a guest's path and name, `unknown` severity, empty optional choices, choice forms after ids (#940); `secrets_list_requests` pages (`limit`, `before`; roll secrets #927) and its `state` is a choice (#933); a deploy's and a change's answers link to their pages (#931); an answer about one resource links to its dashboard page (`resource_link`, #928); 24 more fixed sets as choices, and a test that keeps values out of prose (#920); a refused member hears the weakest role that may and who changes roles (#914); lockdown withholds guests' notes and the leak prompt says when a report rotates (#917); a missing required choice asked for in a form, as a missing id is (#912); tool arguments with a fixed set as JSON Schema `enum`, checked before the call; three proses were short of their route's set (#910); refusals that say why: search's error objects, token rules' resources, axum's body rejections; a cut answer naming its tool's filters; the sweep's `--report` (#907, from the 2026-11-24 gap review); `workspace.event` (#817); MCP Apps views that refresh themselves (#820); `roll_find`, any resource by name, part of its id or a pasted dashboard link (#821), its page table (#845) and search mode (#849); `ship_from_chat` (#826); review fixes for #814–#826 (#832: lookups held by `agents_ask`, the inspector on `roll_find`, approvals only from the gate); lists answered as tables (#838: 20+ rows about 40% smaller); the ship prompts quote first (#840); `secrets_list_saas`'s eleven vendors (#843); the field test reading named body types, 46 fields mapped or explained (#854), and object arguments naming every key (#862); `previews_fetch` on roll previews #852 (#859); review fixes for #838–#868 (#871); `roll_find` links matches (#864) and reads Postgres and streams links, which now carry their selection (#878); `previews_tables` (#883); a browser step's typed text redacted from the audit (#887); `previews_try` and `previews_try_screenshot`, an agent driving a preview's page (#892); `respond_to_leaked_secret` checks for a rotation roll already started (#891).
+15. **Landed 2026-11-23 and 24:** open-world marks on `apps_plan` and the domain checks, and a test that keeps a tool taking an outside address marked or explained (#965); `secrets_list_saas` names SonarQube and Jenkins (#961); roll search #888 (site verification per cluster, crawl tests) mapped by its thread; `apps_wait_cron_run`, a cron run started now followed to its end; every route that answers 202 has a wait but a secrets environment delete that becomes a change request (#958); the sweep reads back every dashboard link it's answered (#951); the sweep checks choice forms live (15 tools), and a call's cost measured: 3.3 ms over its route and `tools/list` 141 ms for 517 tools in a debug build, 6.5 ms at p50 in release as "Toolsets" records, so nothing is cached (#946); lockdown withholds a fork page's console errors and header values (#944); fixes from a review of #907–#933: lockdown withholds a guest's path and name, `unknown` severity, empty optional choices, choice forms after ids (#940); `secrets_list_requests` pages (`limit`, `before`; roll secrets #927) and its `state` is a choice (#933); a deploy's and a change's answers link to their pages (#931); an answer about one resource links to its dashboard page (`resource_link`, #928); 24 more fixed sets as choices, and a test that keeps values out of prose (#920); a refused member hears the weakest role that may and who changes roles (#914); lockdown withholds guests' notes and the leak prompt says when a report rotates (#917); a missing required choice asked for in a form, as a missing id is (#912); tool arguments with a fixed set as JSON Schema `enum`, checked before the call; three proses were short of their route's set (#910); refusals that say why: search's error objects, token rules' resources, axum's body rejections; a cut answer naming its tool's filters; the sweep's `--report` (#907, from the 2026-11-24 gap review); `workspace.event` (#817); MCP Apps views that refresh themselves (#820); `roll_find`, any resource by name, part of its id or a pasted dashboard link (#821), its page table (#845) and search mode (#849); `ship_from_chat` (#826); review fixes for #814–#826 (#832: lookups held by `agents_ask`, the inspector on `roll_find`, approvals only from the gate); lists answered as tables (#838: 20+ rows about 40% smaller); the ship prompts quote first (#840); `secrets_list_saas`'s eleven vendors (#843); the field test reading named body types, 46 fields mapped or explained (#854), and object arguments naming every key (#862); `previews_fetch` on roll previews #852 (#859); review fixes for #838–#868 (#871); `roll_find` links matches (#864) and reads Postgres and streams links, which now carry their selection (#878); `previews_tables` (#883); a browser step's typed text redacted from the audit (#887); `previews_try` and `previews_try_screenshot`, an agent driving a preview's page (#892); `respond_to_leaked_secret` checks for a rotation roll already started (#891).
 16. **Landed 2026-11-22 morning:** operator policy for agent connections: `agents_ask` and
    `mcp_lockdown` / `mcp_read_only` (#678), and `oauth_clients`, the OAuth clients that may connect,
    checked at consent, at every token and on every request, nothing revoked (#680). SQL sessions name who sent them (`application_name`: `roll tok_…`, so `postgres_activity` tells
