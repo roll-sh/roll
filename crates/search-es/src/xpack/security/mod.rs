@@ -870,17 +870,24 @@ fn authorize_action(ctx: &Ctx) -> EsResult<Option<String>> {
 }
 
 /// The `indices:admin/refresh` an OpenSearch user's `refresh=true` by-query request runs as the
-/// user once its documents are written (the plugin denies it then, after the writes).
-pub fn check_refresh(ctx: &Ctx) -> EsResult<()> {
+/// user once its documents are written (the plugin denies it then, after the writes): on the
+/// request's indices, or on `written` (a reindex: the indices it wrote to).
+pub fn check_refresh(ctx: &Ctx, written: Option<&[String]>) -> EsResult<()> {
     const REFRESH: &str = "indices:admin/refresh";
     let Some(p) = ctx.principal.get().filter(|p| !p.is_superuser() && p.os().is_some()) else { return Ok(()) };
     let eff = effective(&file_roles(ctx.cluster), &ctx.state(), p);
-    if request_indices(ctx).iter().all(|i| eff.allows_index(REFRESH, i)) { Ok(()) } else { Err(denied(p, REFRESH, None)) }
+    let indices = match written {
+        Some(w) => w.to_vec(),
+        None => request_indices(ctx),
+    };
+    if indices.iter().all(|i| eff.allows_index(REFRESH, i)) { Ok(()) } else { Err(denied(p, REFRESH, None)) }
 }
 
 /// APIs Elasticsearch authorizes by action name only (`RBACEngine.shouldAuthorizeIndexActionNameOnly`):
-/// the request when any role grants its action on some index, its items one by one.
-const COMPOSITE: &[&str] = &["bulk", "mget", "msearch", "msearch_template"];
+/// the request when any role grants its action on some index, its items one by one. A
+/// reindex's items are its source's search and each write to its destination
+/// (`by_query::reindex`), both as the caller.
+const COMPOSITE: &[&str] = &["bulk", "mget", "msearch", "msearch_template", "reindex"];
 
 /// What a bulk item (or a single document request) writes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

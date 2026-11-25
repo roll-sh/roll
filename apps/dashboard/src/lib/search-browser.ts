@@ -4,7 +4,7 @@
  * Origins are checked as `search_server::cors` checks them, so the form refuses what the API would.
  */
 
-import type { BrowserKey } from "./search-api";
+import type { BrowserKey, BrowserKeyUsage, BrowserRefusal } from "./search-api";
 
 /**
  * An allowed origin as written (`*`, `/regex/` or `scheme://host[:port]`), kept as a browser sends
@@ -128,4 +128,45 @@ search.addWidgets([searchBox({ container: "#q" }), hits({ container: "#hits" })]
 search.start();
 `;
   }
+}
+
+const REFUSALS: { reason: BrowserRefusal; label: string; throttles: boolean }[] = [
+  { reason: "key_rate", label: "key's rate", throttles: true },
+  { reason: "address_rate", label: "per-address rate", throttles: true },
+  { reason: "user_rate", label: "per-user rate", throttles: true },
+  { reason: "concurrency", label: "too many at once", throttles: true },
+  { reason: "cluster_ceiling", label: "cluster ceiling", throttles: true },
+  { reason: "origin", label: "origin not allowed", throttles: false },
+  { reason: "policy", label: "policy", throttles: false },
+  { reason: "body_too_large", label: "body too large", throttles: false },
+  { reason: "invalid_key", label: "expired or invalid key", throttles: false },
+];
+
+/** A browser key's usage as the sparkline draws it: one value a step from `from` to `to` (steps without requests are 0), and the refusals by reason, most first. */
+export function usageSeries(u: BrowserKeyUsage): {
+  requests: number[];
+  throttled: number[];
+  reasons: { reason: BrowserRefusal; label: string; throttles: boolean; count: number }[];
+} {
+  const step = Math.max(1, u.step_s);
+  const n = Math.max(1, Math.min(400, Math.round((u.to - u.from) / step)));
+  const requests = new Array<number>(n).fill(0);
+  const throttled = new Array<number>(n).fill(0);
+  for (const p of u.points) {
+    const i = Math.floor((p.at - u.from) / step);
+    if (i < 0 || i >= n) continue;
+    requests[i] += p.requests;
+    throttled[i] += p.throttled;
+  }
+  const reasons = REFUSALS.map((r) => ({ ...r, count: u.totals.reasons[r.reason] ?? 0 }))
+    .filter((r) => r.count > 0)
+    .sort((a, b) => b.count - a.count);
+  return { requests, throttled, reasons };
+}
+
+/** A count in a few characters: 950, 1.2k, 3.4M. */
+export function shortCount(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
 }

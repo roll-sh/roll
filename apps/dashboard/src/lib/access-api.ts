@@ -7,7 +7,7 @@
 import { withSession } from "./code-token";
 import { apiHeaders, call, ROLL_API } from "./roll-api";
 
-export const ACTIONS = ["read", "write", "delete", "reveal", "deploy", "admin"] as const;
+export const ACTIONS = ["read", "write", "delete", "reveal", "deploy", "admin", "scan"] as const;
 export type Action = (typeof ACTIONS)[number];
 export type Effect = "allow" | "ask";
 
@@ -962,6 +962,7 @@ export const ACTION_HELP: Record<Action, string> = {
   reveal: "See passwords, keys and secret values",
   deploy: "Land on main, deploy to production",
   admin: "Manage keys, users, settings and tokens",
+  scan: "Ask whether text holds a secret value, never see one (roll secrets' pre-receive hook)",
 };
 
 /** "Postgres · read, write, delete (ask) · in project prj_x · development". */
