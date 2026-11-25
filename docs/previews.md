@@ -1744,7 +1744,9 @@ land on the change.
   place) with the page's path (never its query, which can hold a token):
   `/dashboard/previews/note?preview={id}&fb_path=…&fb_selector=…&fb_note=…`, the note's form
   alone. Posted, it closes, and the page reads its list of notes again when it has the focus
-  back. On a phone's width it opens the preview's sheet in roll's dashboard in a tab instead
+  back. The Reply and Resolve of a note it lists open the same window with that note's thread
+  alone (`fb_reply`/`fb_resolve`; Vercel's threads answer in place), which closes once the note
+  is resolved. On a phone's width it opens the preview's sheet in roll's dashboard in a tab instead
   (`/dashboard/projects/{project}/previews?preview={id}&fb_…`). Either opens with `noopener`, so
   the page gets no handle on roll's window, and the preview's origin never holds a roll
   credential: the person, signed in to roll there (a sign-in comes back to the form), reads the
