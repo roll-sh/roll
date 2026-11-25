@@ -1180,7 +1180,7 @@ static TOOLS: &[Tool] = &[
     t(
         "search_create_cluster",
         "Create a search cluster",
-        "A new Elasticsearch-compatible cluster (or a branch of one with parent, at a time with at). Its password comes back once, to tokens that may reveal.",
+        "A new Elasticsearch-compatible cluster (or a branch of one with parent, at a time with at; a branch goes in its parent's project, so give it no other workspace_project). Its password comes back once, to tokens that may reveal.",
         "search",
         "POST",
         "/v1/search/clusters",
