@@ -28,6 +28,23 @@ pub fn document_reads(v: &Value) -> Vec<DocumentRead> {
     out
 }
 
+impl DocumentRead {
+    /// Whether it reads documents of other indices than the one searched (a terms lookup, an
+    /// indexed shape, a stored percolated document, `more_like_this` documents), which their
+    /// reader must be allowed to read where they run.
+    pub fn reads_elsewhere(self) -> bool {
+        matches!(self, DocumentRead::TermsLookup | DocumentRead::IndexedShape | DocumentRead::Percolate { indexed: true } | DocumentRead::MoreLikeThisDocuments)
+    }
+}
+
+/// Whether a request section kept as JSON (aggregations, a retriever, knn's filters) reads
+/// documents of other indices ([`DocumentRead::reads_elsewhere`]).
+pub fn reads_elsewhere(m: &crate::json::Map) -> bool {
+    let mut out = Vec::new();
+    m.values().for_each(|v| walk(v, &mut out));
+    out.into_iter().any(DocumentRead::reads_elsewhere)
+}
+
 fn walk(v: &Value, out: &mut Vec<DocumentRead>) {
     // A field of the query's body whose value is an object holding `key`.
     let field_holds = |c: &Value, keys: &[&str]| c.as_object().is_some_and(|m| m.values().any(|x| x.as_object().is_some_and(|o| keys.iter().any(|k| o.contains_key(*k)))));

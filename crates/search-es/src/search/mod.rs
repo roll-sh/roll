@@ -1951,7 +1951,12 @@ fn cacheable(req: &SearchRequest, t: &Target) -> bool {
     // (any percolate and any document item, from the parsed request's text), in the request or
     // its alias filter, never use the cache.
     let filter = format!("{:?}", t.filter);
-    !READS_OTHER_DOCUMENTS.iter().any(|p| text.contains(p) || filter.contains(p))
+    if READS_OTHER_DOCUMENTS.iter().any(|p| text.contains(p) || filter.contains(p)) {
+        return false;
+    }
+    // The sections kept as JSON, parsed per shard (aggregations: a `filter` with a lookup).
+    let json = src.aggs.iter().chain(src.retriever.iter()).chain(src.highlight.iter()).chain(src.knn.iter());
+    !json.into_iter().any(crate::query::reads::reads_elsewhere)
 }
 
 /// How the parsed queries that read other documents print ([`cacheable`]).
