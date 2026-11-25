@@ -379,6 +379,9 @@ impl Code {
                 "number": c.as_ref().map(|c| c.number),
                 "title": c.as_ref().map(|c| c.title.clone()),
                 "author": c.as_ref().map(|c| c.author.clone()),
+                // A fork's change (approved to run): its title and what its checks printed are its
+                // author's (MCP's lockdown).
+                "outside": c.as_ref().is_some_and(|c| c.outside),
                 "position": position,
                 "lane": e.lane,
                 "state": e.state,
