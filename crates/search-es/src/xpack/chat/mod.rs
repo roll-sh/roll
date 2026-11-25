@@ -786,7 +786,7 @@ fn text_fields(ctx: &Ctx, expr: &str) -> (Vec<String>, Vec<String>) {
             match m {
                 Mapper::Object(c) => walk(c, &path, sem, text),
                 Mapper::Field(f) if f.ty == "semantic_text" && !sem.contains(&path) => sem.push(path),
-                Mapper::Field(f) if matches!(f.ty.as_str(), "text" | "match_only_text") && !text.contains(&path) => text.push(path),
+                Mapper::Field(f) if (f.ty == "text" || f.ty == "match_only_text") && !text.contains(&path) => text.push(path),
                 _ => {}
             }
         }
