@@ -19,8 +19,9 @@ pub(crate) async fn version(c: &Client) -> Option<String> {
     v.value.get("version").and_then(search_es::json::Value::as_str).map(|s| s.chars().take(64).collect())
 }
 
-/// Turns a `geopoint`'s `[lat, lng]` at `field` into Elasticsearch's `{lat, lon}` (its array
-/// form is `[lon, lat]`), arrays of them too.
+/// Turns a `geopoint`'s `[lat, lng]` at the dotted `field` into Elasticsearch's `{lat, lon}`
+/// (its array form is `[lon, lat]`), arrays of them too, through objects and arrays of objects
+/// on the way (`store.loc`, `stores[].loc`).
 pub(crate) fn geo_point(doc: &mut search_es::json::Value, field: &str) {
     use search_es::json::{Map, Value as V};
     fn one(v: &mut V) {
@@ -34,11 +35,25 @@ pub(crate) fn geo_point(doc: &mut search_es::json::Value, field: &str) {
             *v = V::Obj(m);
         }
     }
-    let Some(v) = doc.as_object_mut().and_then(|m| m.get_mut(field)) else { return };
-    match v {
-        V::Arr(a) if a.iter().all(|x| matches!(x, V::Arr(_))) => a.iter_mut().for_each(one),
-        v => one(v),
+    fn at(v: &mut V, path: &[&str]) {
+        match (v, path) {
+            (V::Arr(a), _) if !path.is_empty() => a.iter_mut().for_each(|x| at(x, path)),
+            (V::Obj(m), [first, rest @ ..]) => {
+                let Some(v) = m.get_mut(*first) else { return };
+                if rest.is_empty() {
+                    match v {
+                        V::Arr(a) if a.iter().all(|x| matches!(x, V::Arr(_))) => a.iter_mut().for_each(one),
+                        v => one(v),
+                    }
+                } else {
+                    at(v, rest);
+                }
+            }
+            _ => {}
+        }
     }
+    let path: Vec<&str> = field.split('.').collect();
+    at(doc, &path);
 }
 
 /// A Typesense field type as an Elasticsearch mapping (`None`: left to dynamic mapping).

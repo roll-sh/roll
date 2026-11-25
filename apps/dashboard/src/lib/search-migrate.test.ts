@@ -1,7 +1,7 @@
 // Tests of the dashboard's migration from Elasticsearch or OpenSearch (vitest).
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { aliasOffer, defaultDest, destProblem, displayHost, droppedByReason, mergeStarted, notMappedCount, notMappedGroups, partial, queuedPicks, queueRetryDelay, retryableStart, shouldStartQueued, sourceFrom, sourceProblem, taskPoll, taskProgress, type MigrateStarted, type SaasPlan, type SourceForm } from "./search-migrate";
+import { aliasOffer, defaultDest, destProblem, displayHost, droppedByReason, mergeStarted, migrateRefusal, notMappedCount, notMappedGroups, partial, plainHttpWarning, queuedPicks, queueRetryDelay, retryableStart, shouldStartQueued, sourceFrom, sourceProblem, taskPoll, taskProgress, type MigrateStarted, type SaasPlan, type SourceForm } from "./search-migrate";
 
 const form = (f: Partial<SourceForm>): SourceForm => ({ host: "https://es.example:9243", auth: "api_key", apiKey: "", username: "", password: "", ...f });
 
@@ -113,4 +113,11 @@ test("Algolia, Typesense and Meilisearch send their own fields, and only those",
   const plan = { not_mapped: [{ kind: "rule", name: "r1", reason: "x" }, { kind: "setting", name: "ranking", reason: "y" }], not_mapped_more: 3 } as SaasPlan;
   assert.deepEqual(notMappedGroups(plan).map((g) => g.kind), ["setting", "rule"]);
   assert.equal(notMappedCount(plan), 5);
+
+  // A key sent over plain http is said to be readable; https and Algolia say nothing.
+  assert.match(plainHttpWarning(form({ kind: "meilisearch", host: "http://ms.example:7700" })) ?? "", /unencrypted/);
+  assert.equal(plainHttpWarning(form({ kind: "typesense", host: "https://x.a1.typesense.net" })), null);
+  assert.equal(plainHttpWarning(form({ kind: "elasticsearch", host: "http://es.example" })), null);
+  assert.match(migrateRefusal(403, "forbidden"), /admin/);
+  assert.equal(migrateRefusal(400, "bad"), "bad");
 });

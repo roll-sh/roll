@@ -749,17 +749,21 @@ facets and sort attributes as `keyword` sub-fields, Typesense's typed fields, `o
 primary key as `_id`), `index.query.default_field` with the source's weights, an analysis chain
 (case and accents folded, a plural stemmer for `ignorePlurals`, search-time stop words and a
 `synonym_graph` filter reading the synonyms set `<dest>-synonyms`), query rulesets
-`<dest>-rules[-n]` (pins and hides on a query pattern), and a stored mustache template
-`<dest>-search` (`multi_match` with `fuzziness` and `bool_prefix`, the `rule` query, sorts,
-collapse) plus one per Algolia replica. Everything that didn't map is listed with why
+`<dest>-rules[-n]` (pins and hides on a query pattern; at most 1,000, the rest listed), and a
+stored mustache template `<dest>-search` (`multi_match` with `fuzziness` and `bool_prefix`, the
+`rule` query matching `rules_query` or else `query`, sorts, collapse) plus one per Algolia replica.
+The search chain is folding, synonyms, stop words, plurals (the review builds it with `_analyze`);
+metadata-field names and names the template can't carry are left out and listed. Everything that didn't map is listed with why
 (`not_mapped`, at most 500 entries and a count) and caveats in `notes`; `dry_run` answers the plan
 and makes nothing. The copy is a task registered in the cluster's `_tasks` as
 `indices:data/write/reindex` (progress, cancel and the node's unload as for a reindex), holding one
 of the node's reindex-from-remote task slots; it reads one page at a time (Algolia's `browse`
 cursor, Meilisearch's offset pages, the Typesense export line by line with no line past the
 node's answer limit), charged to the reindex budget, and writes each with `_bulk` before reading
-the next; it stops at a page that fails, as reindex does. Picking the same index again copies into
-the index an earlier attempt made (its `_meta.roll_import`), overwriting by id. The key is held in
+the next; it stops at a page that fails, as reindex does. Picking the same index of the same
+source again copies into the index an earlier attempt made (its `_meta.roll_import` names the
+product, the application or URL, and the index), overwriting by id; the index's objects are made
+in a task of their own, past the call's deadline, and undone if one fails. The key is held in
 memory by the request and its tasks only; descriptions name the application id or the host.
 `crates/search-control/tests/control.rs` `importing_from_algolia`, `importing_from_typesense`,
 `importing_from_meilisearch`, `saas_keys_are_never_shown` and `a_saas_page_past_the_bound_is_refused`

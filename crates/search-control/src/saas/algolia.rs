@@ -118,13 +118,15 @@ fn languages(v: &Value, settings: &Value) -> Vec<String> {
 async fn all(f: &mut Fetch<'_>, path: &str, max: usize) -> Result<(Vec<Value>, u64), String> {
     let mut out = Vec::new();
     let mut total = 0;
+    // Pages of 100 keep each answer small (rules can be large) under the node's answer limit.
+    const PAGE: usize = 100;
     for page in 0.. {
-        let v = f.post(path, &json!({ "query": "", "page": page, "hitsPerPage": 1000 })).await?;
+        let v = f.post(path, &json!({ "query": "", "page": page, "hitsPerPage": PAGE })).await?;
         total = v["nbHits"].as_u64().unwrap_or(total);
         let hits = v["hits"].as_array().cloned().unwrap_or_default();
         let n = hits.len();
         out.extend(hits.into_iter().take(max - out.len()));
-        if n < 1000 || out.len() >= max {
+        if n < PAGE || out.len() >= max {
             break;
         }
     }

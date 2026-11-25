@@ -2,13 +2,14 @@
 //! page, each page written with `_bulk` before the next is read, its progress on the task's
 //! [`Live`] counters ([`super`] registers the task and runs [`Copy::run`] in the background).
 
-use super::{algolia, typesense, LABEL, MAX_ID_BYTES};
+use super::{algolia, typesense, LABEL, MAX_ID_BYTES, META};
 use crate::control::Control;
 use crate::store::SearchCluster;
 use search_es::api::by_query::{Live, Status};
 use search_es::api::remote::{self, Client, Lines};
 use search_es::EsRequest;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// The most bytes of documents one `_bulk` carries (the Typesense export's batches).
@@ -24,7 +25,7 @@ pub(super) fn response(live: &Live, started: std::time::Instant) -> search_es::j
 /// Where a copy reads its documents.
 pub(super) enum Reader {
     /// `POST /1/indexes/{index}/browse`, then its `cursor` until there's none.
-    Algolia { index: String, cursor: Option<String>, first: bool, done: bool },
+    Algolia { index: String, cursor: Option<String>, first: bool, done: bool, seen: HashSet<u64> },
     /// `GET /collections/{c}/documents/export`, line by line.
     Typesense { collection: String, lines: Option<Box<Lines>>, geo: Vec<String> },
     /// `GET /indexes/{uid}/documents?offset&limit` until a page comes back short.
@@ -39,6 +40,10 @@ pub(super) struct Copy {
     pub dest: String,
     pub size: u32,
     pub total: Option<u64>,
+    /// Documents read so far, and how many the source first said it holds: one that sends
+    /// far more is stopped.
+    pub read: u64,
+    pub stated: Option<u64>,
 }
 
 /// A page made into a `_bulk` body, charged while held.
@@ -83,6 +88,12 @@ impl Copy {
             }
             if docs == 0 {
                 continue;
+            }
+            // A cancel that came while the page was read: nothing more is written.
+            if live.cancelled() {
+                let why = live.cancel_reason();
+                live.update(|s| s.canceled = Some(why));
+                break;
             }
             let body: bytes::Bytes = batch.body.into_bytes().into();
             let path = format!("/{}/_bulk", urlencoding::encode(&self.dest));
@@ -137,7 +148,7 @@ impl Copy {
         let mut failures = Vec::new();
         let mut docs = 0u64;
         match &mut self.reader {
-            Reader::Algolia { index, cursor, first, done } => {
+            Reader::Algolia { index, cursor, first, done, seen } => {
                 if *done {
                     return Ok(None);
                 }
@@ -150,15 +161,19 @@ impl Copy {
                 let page = self.client.post(&format!("/1/indexes/{}/browse", algolia::enc(index)), &req.to_string()).await?;
                 if let Some(n) = page.value.get("nbHits").and_then(search_es::json::Value::as_number).and_then(|n| n.as_i64()).and_then(|n| u64::try_from(n).ok()) {
                     live.update(|s| s.total = s.total.max(n));
+                    self.stated.get_or_insert(n);
                 }
-                let sent = req["cursor"].as_str();
                 match page.value.get("cursor").and_then(search_es::json::Value::as_str) {
-                    Some(c) if sent == Some(c) => return Err(search_es::EsError::illegal_state("Algolia's browse cursor didn't move")),
+                    // A cursor seen before would read the same pages again, forever.
+                    Some(c) if !seen.insert(hash(c)) => return Err(search_es::EsError::illegal_state("Algolia's browse cursor came back to a page it already read")),
                     Some(c) if c.len() <= MAX_CURSOR => *cursor = Some(c.to_string()),
                     Some(_) => return Err(search_es::EsError::illegal_state("Algolia's browse cursor is longer than roll keeps")),
                     None => *done = true,
                 }
-                for hit in page.value.get("hits").and_then(search_es::json::Value::as_array).map(Vec::as_slice).unwrap_or_default() {
+                let hits = page.value.get("hits").and_then(search_es::json::Value::as_array).map(Vec::as_slice).unwrap_or_default();
+                self.read += hits.len() as u64;
+                past_total(self.read, self.stated)?;
+                for hit in hits {
                     push_doc(hit, &self.id_field, &self.dest, DECORATIONS, &mut body, &mut held, &mut failures, &mut docs)?;
                 }
             }
@@ -172,6 +187,12 @@ impl Copy {
                     *done = true;
                 }
                 *offset += hits.len() as u64;
+                self.read += hits.len() as u64;
+                if let Some(n) = page.value.get("total").and_then(search_es::json::Value::as_number).and_then(|n| n.as_i64()).and_then(|n| u64::try_from(n).ok()) {
+                    live.update(|s| s.total = s.total.max(n));
+                    self.stated.get_or_insert(n);
+                }
+                past_total(self.read, self.stated)?;
                 for hit in hits {
                     push_doc(hit, &self.id_field, &self.dest, &[], &mut body, &mut held, &mut failures, &mut docs)?;
                 }
@@ -187,6 +208,8 @@ impl Copy {
                 let l = lines.as_mut().expect("set");
                 while docs < u64::from(self.size) && body.len() < BATCH_BYTES {
                     let Some(line) = l.next().await? else { break };
+                    self.read += 1;
+                    past_total(self.read, self.stated)?;
                     held.add(3 * line.len() as u64, LABEL)?;
                     let Some(mut doc) = search_es::json::parse(&line).ok().flatten() else {
                         failures.push(failure(&self.dest, "", "a line of the export isn't a JSON document"));
@@ -229,7 +252,7 @@ fn push_doc(doc: &search_es::json::Value, id_field: &str, dest: &str, skip: &[&s
     body.push_str(&serde_json::to_string(&id).expect("a string renders"));
     body.push_str("}}\n{");
     let mut first = true;
-    for (k, v) in m.iter().filter(|(k, _)| !skip.contains(&k.as_str())) {
+    for (k, v) in m.iter().filter(|(k, _)| !skip.contains(&k.as_str()) && !META.contains(&k.as_str())) {
         if !std::mem::take(&mut first) {
             body.push(',');
         }
@@ -240,6 +263,24 @@ fn push_doc(doc: &search_es::json::Value, id_field: &str, dest: &str, skip: &[&s
     body.push_str("}\n");
     held.add((body.len() - start) as u64, LABEL)?;
     *docs += 1;
+    Ok(())
+}
+
+/// A short hash of a cursor, to tell one already seen.
+fn hash(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
+
+/// Refuses to read on once a source has sent more than twice the documents it said it holds
+/// (and a page's worth more): its pages would never end.
+fn past_total(read: u64, stated: Option<u64>) -> search_es::EsResult<()> {
+    let Some(total) = stated else { return Ok(()) };
+    if read > 2 * total + u64::from(super::PAGE_DOCS) {
+        return Err(search_es::EsError::illegal_state(format!("the source sent {read} documents after saying it holds {total}: stopped")));
+    }
     Ok(())
 }
 

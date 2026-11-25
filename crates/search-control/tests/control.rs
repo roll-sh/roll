@@ -4977,6 +4977,7 @@ fn algolia_records(index: &str) -> Vec<Value> {
             json!({ "objectID": "3", "name": "Mug", "brand": "Acme", "popularity": 10, "price": 8.0, "internal_cost": 2 }),
         ],
         "big" => (0..400).map(|i| json!({ "objectID": format!("b{i}"), "text": "x".repeat(280) })).collect(),
+        "hostile" => vec![json!({ "objectID": "h1", "name": "plain", "_id": "evil", "_routing": "r" })],
         _ => Vec::new(),
     }
 }
@@ -5010,6 +5011,7 @@ async fn saas_handle(method: axum::http::Method, uri: axum::http::Uri, headers: 
                 "ranking": ["typo", "geo", "words", "filters", "proximity", "attribute", "exact", "custom"],
                 "typoTolerance": true,
                 "ignorePlurals": true,
+                "removeStopWords": ["en"],
                 "unretrievableAttributes": ["internal_cost"],
                 "replicas": ["products_price_asc", "virtual(products_popular)"],
                 "decompoundedAttributes": { "de": ["name"] },
@@ -5018,6 +5020,13 @@ async fn saas_handle(method: axum::http::Method, uri: axum::http::Uri, headers: 
             ("GET", ["indexes", "products_price_asc", "settings"]) => ok(json!({ "ranking": ["asc(price)", "typo", "words", "custom"], "primary": "products" })),
             ("GET", ["indexes", "products_popular", "settings"]) => ok(json!({ "customRanking": ["desc(popularity)"], "primary": "products" })),
             ("GET", ["indexes", "big", "settings"]) => ok(json!({})),
+            ("GET", ["indexes", "hostile", "settings"]) => ok(json!({
+                "searchableAttributes": ["_source", "name", "{{x}}"],
+                "customRanking": ["desc(_id)", "asc({{x}})", "asc()"],
+                "attributesToRetrieve": ["{{evil}}", "name"],
+                "distinct": true,
+                "attributeForDistinct": "_routing",
+            })),
             ("POST", ["indexes", index, "browse"]) => {
                 let all = algolia_records(index);
                 let size = body["hitsPerPage"].as_u64().map(|n| n as usize);
@@ -5040,12 +5049,23 @@ async fn saas_handle(method: axum::http::Method, uri: axum::http::Uri, headers: 
                 { "objectID": "s2", "type": "onewaysynonym", "input": "cup", "synonyms": ["mug"] },
                 { "objectID": "s3", "type": "altcorrection1", "word": "tea", "corrections": ["teapot"] },
                 { "objectID": "s4", "type": "placeholder", "placeholder": "<size>", "replacements": ["small", "large"] },
+                { "objectID": "s5", "type": "synonym", "synonyms": ["it", "information technology"] },
             ] })),
             ("POST", ["indexes", "products", "rules", "search"]) => ok(json!({ "nbHits": 3, "hits": [
                 { "objectID": "pin-mug", "conditions": [{ "pattern": "kettle", "anchoring": "is" }], "consequence": { "promote": [{ "objectID": "3", "position": 0 }] } },
                 { "objectID": "hide-teapot", "conditions": [{ "pattern": "brew", "anchoring": "contains" }], "consequence": { "hide": [{ "objectID": "2" }] } },
                 { "objectID": "filter-acme", "conditions": [{ "pattern": "acme", "anchoring": "is" }], "consequence": { "params": { "filters": "brand:Acme" } } },
             ] })),
+            // 600 rules that each pin and hide: 1,200 query rules, past the 1,000 a search applies.
+            ("POST", ["indexes", "big", "rules", "search"]) => {
+                let (page, per) = (body["page"].as_u64().unwrap_or(0) as usize, body["hitsPerPage"].as_u64().unwrap_or(20) as usize);
+                let hits: Vec<Value> = (0..600)
+                    .skip(page * per)
+                    .take(per)
+                    .map(|i| json!({ "objectID": format!("r{i}"), "conditions": [{ "pattern": format!("q{i}"), "anchoring": "is" }], "consequence": { "promote": [{ "objectID": "b1", "position": 0 }], "hide": [{ "objectID": "b2" }] } }))
+                    .collect();
+                ok(json!({ "nbHits": 600, "hits": hits }))
+            }
             ("POST", [_, _, "synonyms" | "rules", "search"]) => ok(json!({ "nbHits": 0, "hits": [] })),
             _ => (StatusCode::NOT_FOUND, axum::Json(json!({ "message": "not found" }))).into_response(),
         };
@@ -5059,6 +5079,7 @@ async fn saas_handle(method: axum::http::Method, uri: axum::http::Uri, headers: 
             { "name": "author", "type": "string", "facet": true },
             { "name": "year", "type": "int32", "sort": true },
             { "name": "loc", "type": "geopoint" },
+            { "name": "store.loc", "type": "geopoint" },
             { "name": "cover", "type": "image" },
         ] });
         return match &seg[..] {
@@ -5068,7 +5089,7 @@ async fn saas_handle(method: axum::http::Method, uri: axum::http::Uri, headers: 
             ["collections", "books", "documents", "export"] => {
                 let lines = [
                     json!({ "id": "b1", "title": "Dune", "author": "Herbert", "year": 1965, "loc": [48.85, 2.35] }),
-                    json!({ "id": "b2", "title": "Emma", "author": "Austen", "year": 1815, "loc": [51.5, -0.12] }),
+                    json!({ "id": "b2", "title": "Emma", "author": "Austen", "year": 1815, "loc": [51.5, -0.12], "store": { "loc": [48.2, 16.37] } }),
                     json!({ "id": "b3", "title": "Ulysses", "author": "Joyce", "year": 1922, "loc": [53.35, -6.26] }),
                 ];
                 // In pieces, a line split across them, as a stream comes.
@@ -5105,7 +5126,7 @@ async fn saas_handle(method: axum::http::Method, uri: axum::http::Uri, headers: 
             "displayedAttributes": ["*"], "searchableAttributes": ["title", "overview"],
             "filterableAttributes": ["genres"], "sortableAttributes": ["year"],
             "rankingRules": ["words", "typo", "proximity", "attribute", "sort", "exactness", "year:desc"],
-            "stopWords": ["the"], "synonyms": { "sf": ["science fiction"] }, "distinctAttribute": null,
+            "stopWords": ["the"], "synonyms": { "sf": ["science fiction"], "the matrix": ["matrix"] }, "distinctAttribute": null,
             "typoTolerance": { "enabled": true, "minWordSizeForTypos": { "oneTypo": 5, "twoTypos": 9 }, "disableOnWords": [], "disableOnAttributes": [] },
             "separatorTokens": [], "nonSeparatorTokens": [], "dictionary": ["J. R. R."], "proximityPrecision": "byWord", "embedders": {},
         })),
@@ -5176,7 +5197,8 @@ async fn importing_from_algolia() {
     }
     assert!(skipped.iter().any(|n| n.starts_with("decompoundedAttributes")), "{planned}");
     assert!(!skipped.iter().any(|n| n.starts_with("highlightPreTag")), "display settings aren't listed: {planned}");
-    assert_eq!((row["plan"]["synonyms"].as_u64(), row["plan"]["rules"].as_u64(), row["task"].as_str()), (Some(3), Some(2), None), "{planned}");
+    assert_eq!((row["plan"]["synonyms"].as_u64(), row["plan"]["rules"].as_u64(), row["task"].as_str()), (Some(4), Some(2), None), "{planned}");
+    assert!(row["plan"]["notes"].as_array().unwrap().iter().any(|n| n.as_str().is_some_and(|n| n.contains("rules_query"))), "{planned}");
     assert_eq!(e.shop("HEAD", "/products", None).await.0, 404, "a dry run makes nothing");
 
     let started = e.post("/v1/search/clusters/shop/migrate", json!({ "source": source, "indices": [{ "index": "products" }], "size": 2 })).await;
@@ -5197,7 +5219,8 @@ async fn importing_from_algolia() {
     let (_, syn) = e.shop("GET", "/_synonyms/products-synonyms", None).await;
     let mut rules: Vec<&str> = syn["synonyms_set"].as_array().unwrap().iter().map(|r| r["synonyms"].as_str().unwrap()).collect();
     rules.sort();
-    assert_eq!(rules, ["cup => cup, mug", "kettle, boiler", "tea => tea, teapot"], "{syn}");
+    // `it` is an English stop word: the synonyms are parsed before stop words go.
+    assert_eq!(rules, ["cup => cup, mug", "it, information technology", "kettle, boiler", "tea => tea, teapot"], "{syn}");
     let (_, qr) = e.shop("GET", "/_query_rules/products-rules", None).await;
     let kinds: Vec<(&str, &str)> = qr["rules"].as_array().unwrap().iter().map(|r| (r["rule_id"].as_str().unwrap(), r["type"].as_str().unwrap())).collect();
     assert_eq!(kinds, [("pin-mug", "pinned"), ("hide-teapot-exclude", "exclude")], "{qr}");
@@ -5205,15 +5228,35 @@ async fn importing_from_algolia() {
 
     // The template: a typo still finds the kettle, the rule pins the mug first, `boiler` is a
     // synonym, and `brew` hides the teapot.
-    let search = async |q: &str| {
-        let (s, v) = e.shop("POST", "/products/_search/template", Some(json!({ "id": "products-search", "params": { "query": q } }))).await;
+    let search_with = async |params: Value| {
+        let (s, v) = e.shop("POST", "/products/_search/template", Some(json!({ "id": "products-search", "params": params }))).await;
         assert_eq!(s, 200, "{v}");
         v["hits"]["hits"].as_array().unwrap().iter().map(|h| h["_id"].as_str().unwrap().to_string()).collect::<Vec<_>>()
     };
+    let search = async |q: &str| search_with(json!({ "query": q })).await;
     assert_eq!(search("kettle").await, ["3", "1"]);
     assert_eq!(search("ketle").await, ["1"]);
     assert_eq!(search("boiler").await, ["1"]);
     assert!(!search("brew teapot").await.contains(&"2".to_string()));
+    // Rules match the text as sent: "Kettle" pins nothing, unless its lowercased form comes as
+    // `rules_query`.
+    assert_eq!(search("Kettle").await, ["1"]);
+    assert_eq!(search_with(json!({ "query": "Kettle", "rules_query": "kettle" })).await, ["3", "1"]);
+
+    // Names that can't reach a mapping or the template are left out and listed, never failing
+    // the index: metadata fields (also in the records), `{{`, an empty `asc()`.
+    let started = e.post("/v1/search/clusters/shop/migrate", json!({ "source": source, "indices": [{ "index": "hostile" }] })).await;
+    let row = &started["indices"][0];
+    let t = e.task_done(row["task"].as_str().unwrap_or_else(|| panic!("{started}"))).await;
+    assert_eq!(t["response"]["created"].as_u64(), Some(1), "{t}");
+    let skipped = not_mapped(row);
+    for s in ["attribute: _id", "attribute: _routing", "attribute: {{evil}}", "customRanking: asc()", "searchable attribute: _source", "searchable attribute: {{x}}"] {
+        assert!(skipped.iter().any(|n| n == s), "{s} not mapped: {started}");
+    }
+    let (_, doc) = e.shop("GET", "/hostile/_doc/h1", None).await;
+    assert_eq!(doc["_source"], json!({ "objectID": "h1", "name": "plain" }), "{doc}");
+    let (s, v) = e.shop("POST", "/hostile/_search/template", Some(json!({ "id": "hostile-search", "params": { "query": "plain" } }))).await;
+    assert_eq!((s, v["hits"]["total"]["value"].as_u64()), (200, Some(1)), "{v}");
 }
 
 /// Typesense into roll: the schema's types mapped (a facet as a keyword sub-field, a geopoint's
@@ -5242,6 +5285,8 @@ async fn importing_from_typesense() {
     );
     let (_, doc) = e.shop("GET", "/books/_doc/b2", None).await;
     assert_eq!(doc["_source"]["loc"], json!({ "lat": 51.5, "lon": -0.12 }), "{doc}");
+    assert_eq!(doc["_source"]["store"]["loc"], json!({ "lat": 48.2, "lon": 16.37 }), "{doc}");
+    assert_eq!(p["store"]["properties"]["loc"]["type"], "geo_point", "{m}");
     let (_, near) = e.shop("POST", "/books/_search", Some(json!({ "query": { "geo_distance": { "distance": "50km", "loc": { "lat": 51.5, "lon": -0.1 } } } }))).await;
     assert_eq!(near["hits"]["hits"][0]["_id"], "b2", "{near}");
     let (_, syn) = e.shop("GET", "/_synonyms/books-synonyms", None).await;
@@ -5280,6 +5325,8 @@ async fn importing_from_meilisearch() {
     assert_eq!(s["films"]["settings"]["index.query.default_field"], json!(["title^2", "overview"]), "{s}");
     let (_, syn) = e.shop("GET", "/_synonyms/films-synonyms", None).await;
     assert_eq!(syn["synonyms_set"][0]["synonyms"], "sf => sf, science fiction", "{syn}");
+    // `the` is a stop word: the rule still builds (synonyms are parsed before stop words go).
+    assert_eq!(syn["synonyms_set"][1]["synonyms"], "the matrix => the matrix, matrix", "{syn}");
     // `year:desc` sorts after relevance: two equal matches come newest first.
     let (_, found) = e.shop("POST", "/films/_search/template", Some(json!({ "id": "films-search", "params": { "query": "the sf" } }))).await;
     let ids: Vec<&str> = found["hits"]["hits"].as_array().unwrap().iter().map(|h| h["_id"].as_str().unwrap()).collect();
@@ -5351,6 +5398,13 @@ async fn a_saas_page_past_the_bound_is_refused() {
     let (e, _) = saas_env(&[(search_es::api::remote::BUFFER_LIMIT, "64kb")]).await;
     let source = json!({ "kind": "algolia", "app_id": "TESTAPP", "api_key": ALGOLIA_KEY });
     let started = e.post("/v1/search/clusters/shop/migrate", json!({ "source": source, "indices": [{ "index": "big" }] })).await;
+    // 1,200 query rules from 600: the first 1,000 in 10 rulesets, the rest listed; the template
+    // still searches.
+    let plan = &started["indices"][0]["plan"];
+    assert_eq!((plan["rules"].as_u64(), plan["rulesets"].as_array().map(Vec::len)), (Some(1000), Some(10)), "{started}");
+    assert!(plan["not_mapped"].as_array().unwrap().iter().any(|n| n["reason"].as_str().is_some_and(|r| r.starts_with("past the 1000 query rules"))), "{started}");
+    let (s, v) = e.shop("POST", "/big/_search/template", Some(json!({ "id": "big-search", "params": { "query": "q1" } }))).await;
+    assert_eq!(s, 200, "{v}");
     let t = e.task_done(started["indices"][0]["task"].as_str().unwrap_or_else(|| panic!("{started}"))).await;
     assert!(t["error"]["reason"].as_str().is_some_and(|r| r.contains("too large")), "{t}");
     assert!(t["error"]["caused_by"]["reason"].as_str().is_some_and(|r| r.ends_with("for the configured buffer limit [65536]")), "{t}");
@@ -5359,4 +5413,21 @@ async fn a_saas_page_past_the_bound_is_refused() {
     assert_eq!(again["indices"][0]["restarted"], true, "{again}");
     let t = e.task_done(again["indices"][0]["task"].as_str().unwrap()).await;
     assert_eq!(t["response"]["created"].as_u64(), Some(400), "{t}");
+}
+
+/// The SaaS sources go through the guard: a Typesense or Meilisearch URL at a private or
+/// link-local address, and an operator's Algolia URL there, are refused unless the node allows
+/// private addresses, and the answer doesn't say which.
+#[tokio::test]
+async fn saas_sources_are_guarded() {
+    let e = env_with(|c| c.node_settings.push((search_control::MIGRATE_ALGOLIA_URL.into(), "http://127.0.0.1:9".into()))).await;
+    e.post("/v1/search/clusters", json!({ "name": "shop" })).await;
+    for source in [
+        json!({ "kind": "typesense", "host": "http://127.0.0.1:8108", "api_key": "k" }),
+        json!({ "kind": "meilisearch", "host": "http://169.254.169.254" }),
+        json!({ "kind": "algolia", "app_id": "APP", "api_key": "k" }),
+    ] {
+        let (s, v) = e.call(reqwest::Method::POST, "/v1/search/clusters/shop/migrate/inspect", Some(json!({ "source": source }))).await;
+        assert!(s == 400 && v["error"].as_str().is_some_and(|m| m.starts_with("couldn't reach")), "{source}: {v}");
+    }
 }

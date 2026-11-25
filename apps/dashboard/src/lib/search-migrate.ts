@@ -201,6 +201,21 @@ export function sourceProblem(f: SourceForm): string | null {
   return null;
 }
 
+/** Why a key would cross the network readable, or `null`: a Typesense or Meilisearch URL over
+ * plain `http://`. */
+export function plainHttpWarning(f: SourceForm): string | null {
+  const kind = f.kind ?? "elasticsearch";
+  if (kind !== "typesense" && kind !== "meilisearch") return null;
+  return /^http:\/\//i.test(f.host.trim()) ? "This URL is plain http: the API key crosses the network unencrypted. Use https:// if the server has it." : null;
+}
+
+/** What the panel says when roll refuses a review or a start: both need `admin` on the
+ * cluster (they add the source to the cluster and start copies as its own user). */
+export function migrateRefusal(status: number | undefined, message: string): string {
+  if (status === 403) return "Reviewing and starting a migration need admin on this cluster: they create indices and start copies as the cluster's own user. Ask someone with admin, or sign in with a token that has it.";
+  return message;
+}
+
 /** The URL roll will call, as the server normalizes it (a scheme and a port), for display. */
 export function displayHost(host: string): string {
   const h = host.trim().replace(/\/+$/, "");

@@ -13,9 +13,11 @@ import {
   LOST,
   mergeStarted,
   migrateApi,
+  migrateRefusal,
   notMappedCount,
   notMappedGroups,
   partial,
+  plainHttpWarning,
   queuedPicks,
   QUEUED_RETRY_MS,
   queueRetryDelay,
@@ -193,7 +195,7 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
       const r = await migrateApi.start(cluster.id, { source: sourceFrom(form), indices: picked(), size: sizeNum, dry_run: true });
       setPlans(r.indices);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(migrateRefusal(e instanceof ApiError ? e.status : undefined, e instanceof Error ? e.message : String(e)));
     } finally {
       setBusy(null);
     }
@@ -217,7 +219,7 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
       setAliases(offers);
       onChanged();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(migrateRefusal(e instanceof ApiError ? e.status : undefined, e instanceof Error ? e.message : String(e)));
     } finally {
       setBusy(null);
     }
@@ -381,6 +383,7 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
                 )}
               </div>
             )}
+            {plainHttpWarning(form) && <p className="text-[12px] text-danger">{plainHttpWarning(form)}</p>}
             {form.auth === "api_key" && (
               <div className="space-y-1">
                 <Field label="API key">

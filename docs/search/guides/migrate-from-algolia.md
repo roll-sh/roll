@@ -82,6 +82,28 @@ curl -u shop:$PASSWORD "$URL/products/_search/template" -H 'Content-Type: applic
 A rule with an Algolia context matches only when the search passes it: add
 `"context": "mobile"` to `params`.
 
+### Query rules match the text as sent
+
+Elasticsearch's query rules compare the search text exactly, byte for byte, and roll keeps
+Elasticsearch's behaviour. Algolia, Typesense and Meilisearch normalize the query first, so the
+same rule behaves differently in two ways:
+
+- **Case.** The rules' patterns are stored lowercased, so a pin on `iphone` doesn't fire for
+  "iPhone" unless the text reaches the rule lowercased.
+- **`contains` is a substring test.** A rule on `shoe` with `contains` fires for "horseshoes"
+  too. Algolia matches whole words.
+
+The template matches rules against `rules_query` when you pass it, and against `query`
+otherwise. Mustache can't lowercase, so send the lowercased text yourself:
+
+```js
+// InstantSearch through Searchkit, or any client: one extra parameter.
+const params = { query: q, rules_query: q.toLowerCase().trim() };
+await client.searchTemplate({ index: "products", id: "products-search", params });
+```
+
+The review lists every mapped rule in a note that says this.
+
 Plain searches work too. The index's default fields (`index.query.default_field`) are the
 source's searchable attributes, so a `multi_match` or `query_string` without `fields` searches
 them with the same weights. The synonyms apply to every search, through the index's search
@@ -101,7 +123,7 @@ analyzer.
 | `typoTolerance`, `minWordSizefor1Typo`, `minWordSizefor2Typos` | `fuzziness: AUTO:4,8` (Algolia's word sizes) in the template; off when typo tolerance is off. |
 | `queryType: prefixLast` (the default) | `multi_match` of type `bool_prefix`: the last word matches as a prefix. `prefixNone` turns it off. |
 | `ignorePlurals` | A plural-only stemmer (`minimal_english`, `minimal_french`, `minimal_german`, `minimal_portuguese`, or the light stemmer of Spanish, Italian, Swedish, Finnish, Russian, Norwegian; `dutch`) for the first language. |
-| `removeStopWords` | Elasticsearch's stop word list for each language (`_english_` …), at search time. |
+| `removeStopWords` | Elasticsearch's stop word list for each language (`_english_` …), at search time, after the synonyms: a synonym that holds a stop word (`it, information technology`) still works. |
 | Accents and case | Folded at index and search time (`asciifolding`, `lowercase`), as Algolia does. |
 | `unretrievableAttributes` | `_source.excludes`: still searchable, never returned. Excluded fields can't be copied again from roll. |
 | `attributesToRetrieve` | `_source` in the template. |
@@ -110,7 +132,7 @@ analyzer.
 | Synonyms: `synonym` | `a, b, c` in the synonyms set `<index>-synonyms`. |
 | `onewaysynonym` | `input => input, s1, s2` (the input still matches itself). |
 | `altcorrection1`, `altcorrection2` | One-way synonyms. Their corrections aren't ranked as typos (noted). |
-| Rules: conditions | Query rule criteria on the query text: `is` is `exact`, `startsWith` is `prefix`, `endsWith` is `suffix`, `contains` is `contains`, no pattern is `always`. A `context` is a criterion on the search's `context`. |
+| Rules: conditions | Query rule criteria on the query text, lowercased: `is` is `exact`, `startsWith` is `prefix`, `endsWith` is `suffix`, `contains` is `contains`, no pattern is `always`. A `context` is a criterion on the search's `context`. Matching is case-sensitive (see [above](#query-rules-match-the-text-as-sent)). |
 | Rules: `promote` | A `pinned` rule. Pinned documents go to the top in their order (positions aren't kept, noted). |
 | Rules: `hide` | An `exclude` rule (`<rule>-exclude`). |
 | Replicas | Sorts on the one index, each a search template `<index>-search-<replica>` (see below). |
@@ -191,9 +213,19 @@ Each of these is listed in the review, with the reason, when the source sets it:
 - **Anything else** a source sets that changes what matches or how it ranks, by name. Display
   settings (highlight tags, snippets, facet value counts) aren't listed: they're the client's.
 
-Limits, each listed when it's reached: 10,000 synonyms per index (one synonyms set), 1,000 rules
-per index (10 rulesets of 100, Elasticsearch's limit), 100 documents per pinned or excluded
-rule, and the sorts of 20 Algolia replicas.
+- **Attribute names Elasticsearch can't take**: its metadata fields (`_id`, `_source`,
+  `_routing` …) are left out of the mappings and out of the copied documents, and a name the
+  search template can't carry (one with `{`, `}`, `"`, a space, an empty `asc()`) is left out of
+  the template's fields, sorts and `_source`.
+
+Limits, each listed when it's reached:
+
+- 10,000 synonyms per index (one synonyms set).
+- 1,000 query rules per index: one search applies 10 rulesets of 100. A source rule makes one
+  query rule for its promotions and one for its hides, for each of its conditions, so 600
+  Algolia rules that both promote and hide make 1,200, and the last 200 are listed.
+- 100 documents per pinned or excluded rule.
+- The sorts of 20 Algolia replicas.
 
 ## How the copy runs
 
@@ -207,9 +239,14 @@ rule, and the sorts of 20 Algolia replicas.
 - A cluster runs at most 2 copies at once (and its owner and the node have limits too). Copies
   past them wait, and the dashboard and `--wait` start them as others end.
 - A copy stops at the first page roll can't write, as Elasticsearch's reindex does. To run it
-  again, pick the same index with the same copy name: roll copies into the index the earlier
-  attempt made (it's marked `_meta.roll_import`), overwriting documents by id. Documents
-  deleted on the source since aren't deleted on roll.
+  again, pick the same index of the same source (application or URL) with the same copy name:
+  roll copies into the index the earlier attempt made (it's marked `_meta.roll_import`),
+  overwriting documents by id. Documents deleted on the source since aren't deleted on roll.
+- A source that sends a cursor it sent before, or more than twice the documents it said it
+  holds, is stopped.
+- The search analyzer runs case and accent folding, then the synonyms, then stop words and
+  plurals; the review builds it, so a synonym it can't parse shows up there, before anything is
+  made.
 - A copy is one point in time. Writes made to the source while it runs may be missed: copy
   again before you switch, or write to both until the switch.
 
@@ -222,5 +259,8 @@ rule, and the sorts of 20 Algolia replicas.
 - The key is sent in the request body, used for that request and the copies it starts, and held
   in memory only while they run. An error never quotes what the source answered (its status and
   error type at most), so a source can't echo the key back to you through roll.
-- `migrate` needs `admin` on the cluster in a scoped token, `inspect` needs `write`
-  ([../README.md](../README.md)).
+- `migrate` (and so the review, its `dry_run`) needs `admin` on the cluster in a scoped token,
+  `inspect` needs `write` ([../README.md](../README.md)). The dashboard says so when it's
+  refused.
+- A Typesense or Meilisearch URL over plain `http://` sends the key unencrypted: the
+  dashboard warns before you list.
