@@ -456,21 +456,39 @@ impl Search {
 /// from the project's own cluster, so the project trusts it as it trusts the parent
 /// (docs/members.md, "The canvas rule"). A parent with no home leaves the branch without one.
 /// A parent that's still a person's own (a home being settled) gives its branch no home: the
-/// branch is that person's too, never something the project is handed.
+/// branch is that person's too, never something the project is handed. A branch that can't be
+/// homed there isn't made: the hook's error undoes it (`Control::branched`, 503).
 pub fn home_branches(workspace: std::sync::Arc<roll_workspace::Workspace>) -> search_control::control::OnBranch {
     Box::new(move |parent, branch| {
         let kind = roll_workspace::Kind::Search;
         if parent.owner.is_some() {
-            return;
+            return Ok(());
         }
         let home = || -> roll_workspace::Result<()> {
             let Some(project) = workspace.home_of(kind, &parent.id)? else { return Ok(()) };
             workspace.place(roll_workspace::Scope::All, &project, kind, &branch.id, 0.0, 0.0)?;
-            workspace.set_home(&roll_workspace::Actor::operator(), &project, kind, &branch.id, true)
+            workspace.set_home(&roll_workspace::Actor::operator(), &project, kind, &branch.id, true)?;
+            // Only there: anything else holding its home would be another project's.
+            match workspace.home_of(kind, &branch.id)? {
+                Some(p) if p == project => Ok(()),
+                other => Err(roll_workspace::Error::Conflict(format!("its home is {other:?}, not {project}"))),
+            }
         };
-        if let Err(e) = blocking(home) {
-            tracing::warn!(branch = branch.name, error = %e, "putting a search branch in its parent's project failed");
-        }
+        // Not homed there, the branch isn't made at all (search deletes it): a copy of the
+        // project's data never stays its maker's, nor goes in a project a request names.
+        blocking(home).map_err(|e| {
+            tracing::warn!(branch = branch.name, error = %e, "putting a search branch in its parent's project failed: it's undone");
+            e.to_string()
+        })
+    })
+}
+
+/// Where a search cluster is at home in the workspace, for search to check a branch's project.
+pub fn home_of(workspace: std::sync::Arc<roll_workspace::Workspace>) -> search_control::control::HomeOf {
+    let weak = std::sync::Arc::downgrade(&workspace);
+    Box::new(move |id| {
+        let Some(ws) = weak.upgrade() else { return Err("the workspace is gone".into()) };
+        blocking(|| ws.home_of(roll_workspace::Kind::Search, id)).map_err(|e| e.to_string())
     })
 }
 

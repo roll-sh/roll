@@ -13,6 +13,7 @@ import {
   LOST,
   mergeStarted,
   migrateApi,
+  nextSteps,
   migrateRefusal,
   notMappedCount,
   notMappedGroups,
@@ -21,8 +22,10 @@ import {
   queuedPicks,
   QUEUED_RETRY_MS,
   queueRetryDelay,
+  replaceRow,
   retryableStart,
   shouldStartQueued,
+  sinceProblem,
   SOURCES,
   sourceFrom,
   sourceProblem,
@@ -55,6 +58,9 @@ interface Pick {
 }
 
 type AliasState = { alias: string; busy?: boolean; done?: boolean; error?: string };
+/** What a SaaS copy's row holds for its next step: the key again (the panel drops it once a
+ * copy starts), a catch-up's timestamp attribute, the cutover's alias. */
+type NextState = { key: string; since: string; alias: string; busy?: boolean; error?: string };
 
 const KIND_WORDS: Record<string, string> = { setting: "Settings", field: "Fields", replica: "Replicas", synonym: "Synonyms", rule: "Rules" };
 
@@ -129,6 +135,7 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
   const [started, setStarted] = useState<MigrateStarted[] | null>(null);
   const [progress, setProgress] = useState<Record<string, TaskProgress>>({});
   const [aliases, setAliases] = useState<Record<string, AliasState>>({});
+  const [next, setNext] = useState<Record<string, NextState>>({});
   /** Partial copies being deleted (`true`) or deleted (`"done"`), or why the delete failed. */
   const [removed, setRemoved] = useState<Record<string, true | "done" | string>>({});
   const taken = useMemo(() => new Set(existing), [existing]);
@@ -332,6 +339,35 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
       onChanged();
     } catch (e) {
       setRemoved((x) => ({ ...x, [dest]: e instanceof Error ? e.message : String(e) }));
+    }
+  };
+
+  const nextOf = (s: MigrateStarted): NextState => next[s.index] ?? { key: "", since: "", alias: s.index };
+  const setNextOf = (s: MigrateStarted, patch: Partial<NextState>) => setNext((x) => ({ ...x, [s.index]: { ...nextOf(s), ...x[s.index], ...patch } }));
+
+  /** Resumes a stopped copy, catches a done one up, or cuts over to it. */
+  const runStep = async (s: MigrateStarted, step: "copy" | "catch_up" | "cutover") => {
+    const n = nextOf(s);
+    setNextOf(s, { busy: true, error: undefined });
+    try {
+      const source = sourceFrom({ ...form, apiKey: step === "cutover" ? "" : n.key || form.apiKey });
+      const r = await migrateApi.start(cluster.id, {
+        source,
+        indices: [{ index: s.index, dest: s.dest, ...(step === "cutover" ? { alias: n.alias.trim() || s.index } : {}) }],
+        step,
+        ...(step === "catch_up" && n.since.trim() ? { since_attribute: n.since.trim() } : {}),
+        size: sizeNum,
+      });
+      const row = r.indices[0];
+      if (row?.error) setNextOf(s, { busy: false, error: row.error });
+      else {
+        setStarted((rows) => (rows && row ? replaceRow(rows, row) : rows));
+        // The key leaves the page again.
+        setNextOf(s, { busy: false, key: "" });
+        onChanged();
+      }
+    } catch (e) {
+      setNextOf(s, { busy: false, error: migrateRefusal(e instanceof ApiError ? e.status : undefined, e instanceof Error ? e.message : String(e)) });
     }
   };
 
@@ -583,7 +619,10 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
           <div className="space-y-3" aria-live="polite">
             {started.map((s) => {
               const pr = s.task ? progress[s.task] : undefined;
-              const state = s.queued ? "queued" : s.error ? "failed" : (pr?.state ?? "running");
+              // A row with no task (a cutover's) is done when it answered without an error.
+              const state = s.queued ? "queued" : s.error ? "failed" : !s.task ? "done" : (pr?.state ?? "running");
+              const after = nextSteps(s, state === "queued" ? undefined : state);
+              const n = nextOf(s);
               const width = state === "done" ? 100 : pr?.fraction != null ? Math.round(pr.fraction * 100) : 0;
               const a = aliases[s.index];
               const groups = droppedByReason(s.dropped ?? []);
@@ -621,7 +660,44 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
                   )}
                   {(s.error || pr?.error) && <p className="break-words font-mono text-[11px] text-danger">{s.error ?? pr?.error}</p>}
                   {s.note && <p className="text-[12px] text-muted">{s.note}</p>}
-                  {s.plan && <PlanSummary plan={s.plan} />}
+                  {s.plan && !s.step && <PlanSummary plan={s.plan} />}
+                  {after && (
+                    <div className="space-y-2 border-t border-line pt-2 text-[12px]">
+                      <p className="text-muted">
+                        {after === "resume"
+                          ? "Resume the copy from its last page (roll kept its place), or delete the partial copy."
+                          : "Catch up with what changed at the source since the copy started, then cut over: an alias moves to the copy in one step."}
+                      </p>
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        {!form.apiKey && kind !== "meilisearch" && (
+                          <input type="password" value={n.key} onChange={(e) => setNextOf(s, { key: e.target.value })} placeholder="API key again" aria-label={`API key for ${s.index}`} className={`${input} py-1 font-mono text-[12px]`} autoComplete="off" spellCheck={false} />
+                        )}
+                        {after === "after" && (
+                          <input value={n.since} onChange={(e) => setNextOf(s, { since: e.target.value })} placeholder="updated_at (optional)" aria-label={`Timestamp attribute for ${s.index}`} className={`${input} py-1 font-mono text-[12px]`} spellCheck={false} />
+                        )}
+                      </div>
+                      {after === "after" && sinceProblem(n.since) && <p className="text-danger">{sinceProblem(n.since)}</p>}
+                      <div className="flex flex-wrap items-center gap-2">
+                        {after === "resume" ? (
+                          <button onClick={() => runStep(s, "copy")} disabled={n.busy || (!form.apiKey && kind !== "meilisearch" && !n.key.trim())} className={btn}>
+                            Resume
+                          </button>
+                        ) : (
+                          <>
+                            <button onClick={() => runStep(s, "catch_up")} disabled={n.busy || !!sinceProblem(n.since) || (!form.apiKey && kind !== "meilisearch" && !n.key.trim())} className={btn}>
+                              Catch up
+                            </button>
+                            <input value={n.alias} onChange={(e) => setNextOf(s, { alias: e.target.value })} aria-label={`Alias for ${s.dest}`} className={`${input} w-40 py-1 font-mono text-[12px]`} spellCheck={false} />
+                            <button onClick={() => runStep(s, "cutover")} disabled={n.busy || !n.alias.trim()} className={btn}>
+                              Cut over
+                            </button>
+                          </>
+                        )}
+                        {n.busy && <span className="shimmer text-subtle">Asking roll…</span>}
+                      </div>
+                      {n.error && <p className="break-words text-danger">{n.error}</p>}
+                    </div>
+                  )}
                   {s.task && state !== "queued" && partial(state) && (
                     <div className="flex flex-wrap items-center gap-2 text-[12px]">
                       {removed[s.dest] === "done" ? (
@@ -654,7 +730,7 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
                       </ul>
                     </details>
                   )}
-                  {a && state === "done" && (
+                  {a && state === "done" && !s.plan && !s.step && (
                     <div className="flex flex-wrap items-center gap-2 border-t border-line pt-2 text-[12px]">
                       {a.done ? (
                         <span className="text-muted">
