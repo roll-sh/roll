@@ -574,7 +574,7 @@ done
 
 say "a screenshot of the service (github.screenshot), once per head"
 # And /pricing, which the test service doesn't have (a 404 page, one failed request).
-api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true,"pages":["/pricing","web:/","wiki:/"],"widths":[768],"hide":[".clock"],"budget":{"load_ms":60000},"openapi":"/openapi.json","endpoints":["/openapi.json","/env.txt"],"states":[{"name":"tab","page":"/","steps":[{"press":"Tab"},{"click":"body"}]}],"browsers":["firefox","webkit-phone"]}}' >/dev/null
+api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true,"pages":["/pricing","web:/","wiki:/"],"widths":[768],"hide":[".clock"],"budget":{"load_ms":60000},"openapi":"/openapi.json","endpoints":["/openapi.json","/env.txt"],"states":[{"name":"tab","page":"/","steps":[{"press":"Tab"},{"click":"body"}]}],"browsers":["firefox","webkit-phone"],"login":{"page":"/","steps":[{"type":["#nope","$GREETING"]}]}}}' >/dev/null
 # roll keeps a preview of the default branch (github.baseline): the change's screenshots are
 # compared with its.
 MAINPV=""
@@ -593,6 +593,12 @@ done
 curl -sS -o "$HOME_DIR/screenshot.png" "http://$API/v1/previews/$PV/screenshot"
 SHOT=$(python3 -c "import sys; b=open(sys.argv[1],'rb').read(); print(f'{len(b)} bytes, PNG' if b[:4]==b'\x89PNG' else 'not a PNG')" "$HOME_DIR/screenshot.png")
 case "$SHOT" in *PNG) ;; *) echo "the screenshot should be a PNG: $SHOT"; exit 1;; esac
+# Signed in first (github.login): its $GREETING put in by roll and handed to the browser through
+# its container's stdin. The page has no #nope, so the run says where it stopped, never what it
+# would have typed.
+LOGIN_SAID=$(api GET "/v1/previews/$PV/activity" | jq_ "next((a['message'] for a in d if a['message'].startswith('screenshots: ')), '')")
+[ "$LOGIN_SAID" = "screenshots: signing in stopped at type #nope: nothing to type into: its pages are the signed-out ones" ] || { echo "the sign-in should run before the pages and say where it stopped: $LOGIN_SAID"; exit 1; }
+api GET "/v1/previews/$PV/activity" | has -F 'hello ${USER}' && { echo "the sign-in's typed value must never be said"; exit 1; }
 # The same load timed the page (shot.js over the DevTools pipe).
 SPEED=$(api GET "/v1/previews/$PV" | jq_ "('load %s ms, first byte %s ms, %s bytes' % (d['page_speed']['now']['load_ms'], d['page_speed']['now']['ttfb_ms'], d['page_speed']['now']['bytes'])) if d.get('page_speed') and d['page_speed']['now']['load_ms'] > 0 else ''")
 [ -n "$SPEED" ] || { echo "the screenshot's load should have timed the page"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:6]]"; exit 1; }
