@@ -50,7 +50,7 @@ def main():
                            ('trunc', b'truncated?'), ('big', b'0123456789'), ('mv', b'm')):
             with open(os.path.join(root, name), 'wb') as f:
                 f.write(data)
-        pc = rebuild.PowerCut(root, os.path.join(t, 'state'), lib)
+        pc = rebuild.PowerCut(root, os.path.join(t, 'state'), lib, sys.executable)
         os.makedirs(pc.state)
         env = dict(os.environ, **pc.env())
         subprocess.check_call([sys.executable, '-I', '-c', CHILD, root], env=env)

@@ -350,8 +350,8 @@ def cut(state, mode='drop', seed=0, keep_old=None):
 class PowerCut:
     """One watched run: set up the state dir, the environment for the process, and the cut."""
 
-    def __init__(self, root, state, lib):
-        self.root, self.state, self.lib = os.path.realpath(root), state, lib
+    def __init__(self, root, state, lib, exe):
+        self.root, self.state, self.lib, self.exe = os.path.realpath(root), state, lib, os.path.realpath(exe)
 
     def env(self):
         """Snapshot the tree (its power-on state) and give the process's environment."""
@@ -364,7 +364,7 @@ class PowerCut:
         save_snapshot(snapshot(self.root), os.path.join(self.state, 'power-on.json'))
         if os.stat(self.state).st_dev != os.stat(self.root).st_dev:
             raise ToolError(f'{self.state} and {self.root} are on different filesystems')
-        return {'LD_PRELOAD': self.lib,
+        return {'LD_PRELOAD': self.lib, 'POWERCUT_EXE': self.exe,
                 'POWERCUT': f'{self.root}:{os.path.join(self.state, "grave")}:{os.path.join(self.state, "log")}'}
 
     def cut(self, mode, seed, keep_old=None):

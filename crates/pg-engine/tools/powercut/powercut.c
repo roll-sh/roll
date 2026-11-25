@@ -4,6 +4,7 @@
  *
  *     POWERCUT=<root>:<grave>:<log>
  *
+ * and POWERCUT_EXE=<the program's path> (realpath: only that executable records).
  * <root> the directory to watch (absolute, no symlinks), <grave> a directory on the same
  * filesystem outside it, <log> the record (appended). Nothing is buffered in the process: each
  * record is one write(2) to <log>, so a SIGKILL keeps all of them (the host's page cache), and
@@ -152,10 +153,14 @@ __attribute__((constructor)) static void init(void) {
 	strcpy(grave, g);
 	root_len = strlen(root);
 	while (root_len > 1 && root[root_len - 1] == '/') root[--root_len] = 0;
-	/* Children (a program the server runs) inherit the variable but not this process's
-	 * tables: they write nothing under the root; leave them out of the record. */
-	unsetenv("POWERCUT");
-	unsetenv("LD_PRELOAD");
+	/* Only the program named by POWERCUT_EXE records: not a wrapper that execs it (taskset),
+	 * not a program it runs (which inherits the variables but not this process's tables). */
+	const char *want = getenv("POWERCUT_EXE");
+	char exe[PATH_MAX];
+	ssize_t en = readlink("/proc/self/exe", exe, sizeof exe - 1);
+	if (!want || en < 0) return;
+	exe[en] = 0;
+	if (strcmp(exe, want)) return;
 	logfd = real_open(l, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
 	if (logfd < 0) die("open the log");
 	/* Keep the log's fd out of the way of the program's own numbering. */
