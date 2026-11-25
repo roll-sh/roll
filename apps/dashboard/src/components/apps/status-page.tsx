@@ -1,8 +1,60 @@
 import { ExternalLink } from "lucide-react";
 import { useEffect, useState } from "react";
-import { appsApi, type StatusPage } from "@/lib/apps-api";
-import { input, Panel, primary } from "../ui";
-import { SureButton, type Runner } from "./shared";
+import { appsApi, type Incident, type IncidentState, type StatusPage } from "@/lib/apps-api";
+import { btn, input, Panel, primary } from "../ui";
+import { since, SureButton, type Runner } from "./shared";
+
+const STATES: IncidentState[] = ["investigating", "identified", "monitoring", "resolved"];
+
+/** The page's incidents, newest first: each open one updated here (a state and what visitors
+ *  should know; `resolved` closes it), as the API and `roll apps status-page` do. */
+function Incidents({ project, incidents, runner, reload }: { project: string; incidents: Incident[]; runner: Runner; reload: () => void }) {
+  const [draft, setDraft] = useState<Record<string, { state: IncidentState; text: string }>>({});
+  if (!incidents.length) return null;
+  return (
+    <ul className="divide-y divide-line border-t border-line">
+      {incidents.map((i) => {
+        const d = draft[i.id] ?? { state: i.state === "investigating" ? "identified" : i.state, text: "" };
+        const open = i.state !== "resolved";
+        return (
+          <li key={i.id} className="space-y-2 px-5 py-3 text-[12.5px]">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="min-w-0 flex-1 truncate text-fg">{i.title}</span>
+              <span className={open ? "text-accent" : "text-muted"}>{i.state}</span>
+              <span className="text-subtle">{i.automatic ? "opened by its check" : "posted"} {since(i.started_at)}</span>
+            </div>
+            {i.updates.length > 0 && <p className="text-[12px] text-muted">{i.updates[i.updates.length - 1]!.text}</p>}
+            {open && (
+              <form
+                className="flex flex-wrap items-center gap-2"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void runner.run(`incident:${i.id}`, () => appsApi.updateIncident(project, i.id, { state: d.state, text: d.text.trim() }).then(() => true)).then((r) => {
+                    if (!r) return;
+                    setDraft((x) => ({ ...x, [i.id]: { state: d.state, text: "" } }));
+                    reload();
+                  });
+                }}
+              >
+                <select value={d.state} onChange={(e) => setDraft((x) => ({ ...x, [i.id]: { ...d, state: e.target.value as IncidentState } }))} aria-label={`${i.title}'s state`} className={`${input} w-36 text-[12px]`}>
+                  {STATES.map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
+                </select>
+                <input value={d.text} onChange={(e) => setDraft((x) => ({ ...x, [i.id]: { ...d, text: e.target.value } }))} placeholder="What's changed" aria-label={`${i.title}'s update`} maxLength={2000} className={`${input} min-w-56 flex-1 text-[12px]`} />
+                <button type="submit" className={btn} disabled={runner.busy !== null || !d.text.trim()}>
+                  Post update
+                </button>
+              </form>
+            )}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
 
 /**
  * A project's status page (Better Stack's, Instatus'): its uptime checks and heartbeats, up or
@@ -13,8 +65,13 @@ export function StatusPagePanel({ project, projectName, runner }: { project: str
   const [page, setPage] = useState<StatusPage | null | undefined>(undefined);
   const [title, setTitle] = useState("");
   const [incident, setIncident] = useState({ title: "", text: "" });
+  const [incidents, setIncidents] = useState<Incident[]>([]);
+  const reload = () => void appsApi.incidents(project).then(setIncidents, () => setIncidents([]));
   useEffect(() => {
-    appsApi.statusPage(project).then(setPage, () => setPage(null));
+    appsApi.statusPage(project).then((p) => {
+      setPage(p);
+      if (p) reload();
+    }, () => setPage(null));
   }, [project]);
   const busy = runner.busy !== null;
   const save = (t: string) => runner.run("status-page", async () => setPage(await appsApi.putStatusPage(project, { title: t.trim() || undefined })));
@@ -37,7 +94,11 @@ export function StatusPagePanel({ project, projectName, runner }: { project: str
           className="flex flex-wrap items-center gap-2 border-t border-line px-5 py-4"
           onSubmit={(e) => {
             e.preventDefault();
-            void runner.run("incident", () => appsApi.postIncident(project, incident)).then((r) => r && setIncident({ title: "", text: "" }));
+            void runner.run("incident", () => appsApi.postIncident(project, incident)).then((r) => {
+              if (!r) return;
+              setIncident({ title: "", text: "" });
+              reload();
+            });
           }}
         >
           <input value={incident.title} onChange={(e) => setIncident({ ...incident, title: e.target.value })} placeholder="An incident's title (slow checkouts)" aria-label="Incident title" maxLength={120} className={`${input} min-w-48 flex-1 text-[12px]`} />
@@ -45,9 +106,10 @@ export function StatusPagePanel({ project, projectName, runner }: { project: str
           <button type="submit" className={primary} disabled={busy || !incident.title.trim() || !incident.text.trim()}>
             Post an incident
           </button>
-          <span className="w-full text-[12px] text-muted">Checks going down and heartbeats missed open and close their own; post updates through the API (`…/incidents/&#123;id&#125;/updates`).</span>
+          <span className="w-full text-[12px] text-muted">Checks going down and heartbeats missed open and close their own.</span>
         </form>
       )}
+      {page && <Incidents project={project} incidents={incidents} runner={runner} reload={reload} />}
       {!page && (
         <form
           className="flex flex-wrap items-center gap-2 px-5 py-4"

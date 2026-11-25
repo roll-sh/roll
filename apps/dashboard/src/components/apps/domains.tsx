@@ -62,8 +62,20 @@ function PortField({ port, busy, onSave }: { port?: number; busy: boolean; onSav
   );
 }
 
+/** A zone's apex (`example.com`, `example.co.uk`), as the server tells a TXT-proved one: its
+ *  `www.` is the pair Vercel and Render offer with it. */
+const SECOND_LEVEL = ["co", "com", "org", "net", "ac", "gov", "edu"];
+const isApex = (h: string) => {
+  const labels = h.split(".");
+  return labels.length === 2 || (labels.length === 3 && SECOND_LEVEL.includes(labels[1]!));
+};
+/** The other half of `example.com` / `www.example.com`, when `h` is one of them. */
+export const wwwPair = (h: string): string | null => (h.startsWith("www.") && isApex(h.slice(4)) ? h.slice(4) : !h.startsWith("*.") && isApex(h) ? `www.${h}` : null);
+
 export function DomainsTab({ service, env, runner }: { service: string; env: Environment; runner: Runner }) {
   const [host, setHost] = useState("");
+  // Its www pair, added beside it and redirecting to it (Vercel's and Render's).
+  const [pairToo, setPairToo] = useState(true);
   // Renaming the generated name: what's typed, while the field is open.
   const [rename, setRename] = useState<string | null>(null);
   const [renamed, setRenamed] = useState(false);
@@ -84,8 +96,19 @@ export function DomainsTab({ service, env, runner }: { service: string; env: Env
   const targets = env.domains.filter((d) => d.status === "active");
   const valid = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(host.trim());
 
+  const h = host.trim();
+  const pair = valid ? wwwPair(h) : null;
+  const pairNew = pair && !env.domains.some((d) => d.hostname === pair) ? pair : null;
   const add = async () => {
-    if (await runner.run("domain", () => appsApi.addDomain(service, env.name, host.trim()))) setHost("");
+    const done = await runner.run("domain", async () => {
+      await appsApi.addDomain(service, env.name, h);
+      if (pairNew && pairToo) {
+        await appsApi.addDomain(service, env.name, pairNew);
+        await appsApi.redirectDomain(service, env.name, pairNew, h);
+      }
+      return true;
+    });
+    if (done) setHost("");
   };
 
   return (
@@ -252,6 +275,12 @@ export function DomainsTab({ service, env, runner }: { service: string; env: Env
           <button type="submit" className={primary} disabled={!valid || runner.busy !== null}>
             Add domain
           </button>
+          {pairNew && (
+            <label className="flex w-full items-center gap-2 text-[12px] text-muted">
+              <input type="checkbox" checked={pairToo} onChange={(e) => setPairToo(e.target.checked)} />
+              Also add <span className="font-mono text-fg">{pairNew}</span>, redirecting to {h}
+            </label>
+          )}
         </form>
       </section>
     </div>
