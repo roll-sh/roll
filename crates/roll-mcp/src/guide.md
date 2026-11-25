@@ -6,7 +6,7 @@ roll runs serverless Postgres, Redis, storage, streams, queues, tasks, NoSQL, so
 ## Before you act
 
 Read `roll://access/me`. It says, in words, what your connection may do: which products, which
-actions (read, write, delete, reveal, deploy, admin), on which resources and environments, and what
+actions (read, write, delete, reveal, deploy, admin, scan), on which resources and environments, and what
 happens to everything else (refused, or asked of a person). `tools/list` shows only the tools you
 can use at all; a tool being listed doesn't mean every resource is allowed.
 

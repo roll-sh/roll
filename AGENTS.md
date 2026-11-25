@@ -355,7 +355,9 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     is its client (change both together). `crates/roll-secrets` is the store, crypto and router
     (`/v1/secrets`); `crates/roll-secrets-chain` is the audit log's hash chain and signed digests (no
     I/O; `roll secrets audit verify --file` uses it offline); `crates/rolld/src/secrets.rs` mounts it and implements the link providers;
-    `roll secrets …` and `roll run` are `crates/roll-cli/src/secrets.rs`. Runtime clients:
+    `roll secrets …` and `roll run` are `crates/roll-cli/src/secrets.rs`. `roll` builds for Windows
+    too (docs/secrets.md, "On Windows"): a `cfg(unix)` path in roll-cli gets a Windows equivalent or
+    a clear refusal, and `release-cli.yml`'s `windows-check` must pass. Runtime clients:
     `packages/secrets` (TypeScript), `sdk/go/secrets` (Go, standard library only),
     `sdk/python/roll_secrets` (Python, `cryptography` only for sealed resolves),
     `sdk/java/secrets` (Java 17, the JDK only),

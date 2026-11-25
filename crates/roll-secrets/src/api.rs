@@ -113,6 +113,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/audit/sinks"), get(sinks).post(create_sink))
         .route(&format!("{P}/audit/sinks/{{id}}"), axum::routing::delete(delete_sink))
         .route(&format!("{P}/leaks"), post(scan_leaks))
+        .route(&format!("{P}/scan"), post(scan_only))
         .route(&format!("{P}/validity"), post(check_validity))
         .route(&format!("{P}/unstored/{{fingerprint}}"), get(unstored))
         .route(&format!("{P}/health"), get(project_health))
@@ -1499,6 +1500,21 @@ async fn scan_leaks(State(s): S, Who(c): Who, Path(project): Path<String>, heade
     // A credential guard's check of what a tool call would write (roll MCP): audited apart.
     let guard = headers.get("x-roll-guard").is_some_and(|v| v.as_bytes() == b"1");
     Ok(ok(blocking(s, move |s| s.scan_as(&project, &candidates, &c, guard, leaked)).await?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScanOnly {
+    candidates: Vec<String>,
+    /// The push it checks goes through anyway (a pre-receive hook's `breakglass` push option).
+    #[serde(default)]
+    breakglass: bool,
+}
+
+/// A scanner's check (the `scan` right): which whole candidates are values, never a value.
+async fn scan_only(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let ScanOnly { candidates, breakglass } = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.scan_only(&project, &candidates, &c, breakglass)).await?))
 }
 
 async fn all_health(State(s): S, Who(c): Who) -> crate::Result<Response> {

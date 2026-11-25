@@ -5,6 +5,8 @@ mod local_agent;
 mod mount;
 mod vm_login;
 mod repo;
+#[cfg(windows)]
+pub mod service;
 
 use crate::Api;
 use anyhow::{Context, bail};
@@ -229,8 +231,7 @@ mod setup {
     }
 
     fn file() -> Option<PathBuf> {
-        let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-        Some(base.join("roll").join("secrets.json"))
+        Some(crate::sys::config_base().ok()?.join("roll").join("secrets.json"))
     }
 
     pub fn load() -> File {
@@ -481,6 +482,20 @@ pub enum Secrets {
         /// (default: a name from its variable or kind) and print what to replace it with.
         #[arg(long, value_name = "[KEY=]FILE:LINE", conflicts_with_all = ["paths", "staged"])]
         store: Option<String>,
+        /// A git server's pre-receive hook: read `old new ref` lines on stdin and refuse a push
+        /// whose new commits add a value of the project. A scan-only token (`tokens create
+        /// --scan-only`) is enough. `git push -o breakglass` lets one through, audited.
+        #[arg(long, conflicts_with_all = ["paths", "staged", "store", "allow_unstored"])]
+        pre_receive: bool,
+        /// With --pre-receive: how long it may take (`4s`, `1500ms`; default 4s, inside GitHub
+        /// Enterprise Server's 5 s).
+        #[arg(long, value_name = "DURATION", requires = "pre_receive")]
+        budget: Option<String>,
+        /// With --pre-receive: let a push through when the scan can't finish (the budget ran out,
+        /// the push is too big, roll didn't answer). Default: refuse it. A value found is always
+        /// refused.
+        #[arg(long, requires = "pre_receive")]
+        fail_open: bool,
     },
     /// Pull the environment's folder into Kubernetes with External Secrets Operator: makes a token
     /// for it and prints the token's Secret, a SecretStore and an ExternalSecret (`| kubectl apply -f -`).
@@ -884,6 +899,57 @@ pub enum Secrets {
     /// instead, or keep the pipe out of the directory it watches (Vite's `envDir`). Not on Windows:
     /// use `roll run` there.
     Mount(mount::Mount),
+}
+
+/// `roll secrets --help`'s headings, each subcommand under one, the most used first. clap lists a
+/// command's subcommands under one heading only, so [`grouped_help`] writes these into the
+/// template; a test fails on a subcommand with no heading.
+pub(crate) const HELP_GROUPS: &[(&str, &[&str])] = &[
+    ("Everyday", &["setup", "ls", "get", "set", "rm", "edit", "import", "export", "render", "check", "scan", "doctor", "find", "totp", "mount", "agent"]),
+    ("Environments and changes", &["envs", "history", "diff", "promote", "rollback", "requests", "expire", "required"]),
+    ("Access", &["tokens", "identities", "reach", "share", "shares", "open", "request", "imports", "exports", "bind", "unbind"]),
+    (
+        "Resources and rotation",
+        &[
+            "rotate", "rotations", "leases", "databases", "aws-roles", "aws-users", "clouds", "saas", "cas", "ssh-cas", "transit", "github-apps", "kubernetes-clusters", "directories", "snowflake", "atlas",
+            "gateways",
+        ],
+    ),
+    ("Syncs", &["syncs", "kubernetes"]),
+    (
+        "Operations",
+        &[
+            "health", "insights", "events", "audit", "sinks", "backup", "backup-schedule", "restore", "keygen", "recover", "purge", "retention", "leaks", "validity-checks", "decoy", "kms", "key", "unseal",
+            "issuer",
+        ],
+    ),
+];
+
+/// `roll secrets`' help with its subcommands under [`HELP_GROUPS`]' headings, written from the
+/// subcommands themselves (their names and first lines), laid out as clap lays out its own list.
+/// One without a heading still shows, under "Other".
+pub fn grouped_help(cmd: clap::Command) -> clap::Command {
+    use std::fmt::Write as _;
+    let styles = cmd.get_styles();
+    let (header, literal) = (styles.get_header(), styles.get_literal());
+    let subs: Vec<&clap::Command> = cmd.get_subcommands().filter(|s| !s.is_hide_set()).collect();
+    let width = subs.iter().map(|s| s.get_name().len()).max().unwrap_or(0);
+    let mut groups: Vec<(&str, Vec<&clap::Command>)> = HELP_GROUPS
+        .iter()
+        .map(|(heading, names)| (*heading, names.iter().filter_map(|n| subs.iter().find(|s| s.get_name() == *n).copied()).collect()))
+        .collect();
+    let other: Vec<&clap::Command> = subs.iter().filter(|s| !HELP_GROUPS.iter().any(|(_, names)| names.contains(&s.get_name()))).copied().collect();
+    groups.push(("Other", other));
+    let mut t = String::from("{before-help}{about-with-newline}\n{usage-heading} {usage}\n");
+    for (heading, list) in groups.iter().filter(|(_, l)| !l.is_empty()) {
+        let _ = write!(t, "\n{header}{heading}:{header:#}\n");
+        for s in list {
+            let about = s.get_about().map(|a| a.to_string()).unwrap_or_default();
+            let _ = writeln!(t, "  {literal}{:width$}{literal:#}  {about}", s.get_name());
+        }
+    }
+    let _ = write!(t, "\n{header}Options:{header:#}\n{{options}}{{after-help}}");
+    cmd.help_template(t)
 }
 
 #[derive(Subcommand)]
@@ -1715,9 +1781,13 @@ pub enum Tokens {
         /// Folders it reaches (default: all).
         #[arg(long = "for-path")]
         paths: Vec<String>,
-        /// read, reveal, write, delete, admin (default: read and reveal).
+        /// read, reveal, write, delete, admin, scan (default: read and reveal).
         #[arg(long = "action")]
         actions: Vec<String>,
+        /// A scanner's token (a pre-receive hook's): only `scan`, which asks whether text holds a
+        /// value and never sees one, in every environment unless `--for-env` names some.
+        #[arg(long, conflicts_with_all = ["actions", "all_environments"])]
+        scan_only: bool,
         /// Days until it expires (default: 90).
         #[arg(long)]
         ttl_days: Option<i64>,
@@ -2272,6 +2342,15 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
     if let Secrets::Unseal { status, nodes } = cmd {
         return unseal(api, status, nodes).await;
     }
+    // A pre-receive hook runs on the git server, with a scan-only token: the project is all it needs.
+    if let Secrets::Scan { pre_receive: true, budget, fail_open, .. } = &cmd {
+        let project = project(api, args.project.as_deref()).await?;
+        let budget = match budget {
+            Some(b) => duration_ms(b)?,
+            None => std::time::Duration::from_secs(4),
+        };
+        return pre_receive(api, &project, budget, *fail_open).await;
+    }
     let (at, project) = locate(api, &args).await?;
     let c = Client { project, api, at };
     let env = c.env(&c.at.env);
@@ -2571,7 +2650,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 bail!("{} doesn't match {template}", c.at.env);
             }
         }
-        Secrets::Scan { paths, staged, allow_unstored, store } => {
+        Secrets::Scan { paths, staged, allow_unstored, store, .. } => {
             if let Some(spec) = store {
                 return store_credential(&c, &env, &spec, json_out).await;
             }
@@ -2589,6 +2668,9 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 }
                 // Staged names are the repo's already; a walked file's is made relative to its top.
                 let rel = if staged { name.clone() } else { std::fs::canonicalize(name).ok().and_then(|p| p.strip_prefix(&root).ok().map(|p| p.to_string_lossy().into_owned())).unwrap_or_else(|| name.clone()) };
+                // The allow-list's globs are `/`-separated (Windows' paths aren't).
+                #[cfg(windows)]
+                let rel = rel.replace('\\', "/");
                 if code_review::glob::any(&allow.paths, &rel) {
                     continue;
                 }
@@ -3673,8 +3755,17 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     println!("{}  {:<20} envs {}  paths {}  {}  {}", s(&t["id"]), s(&t["name"]), list(&rule["environments"]), list(&rule["paths"]), actions, state);
                 }
             }
-            Tokens::Create { name, envs, all_environments, paths, actions, ttl_days, no_expiry, allow_ips } => {
-                let actions = if actions.is_empty() { vec!["read".to_string(), "reveal".to_string()] } else { actions };
+            Tokens::Create { name, envs, all_environments, paths, actions, scan_only, ttl_days, no_expiry, allow_ips } => {
+                let actions = if scan_only {
+                    vec!["scan".to_string()]
+                } else if actions.is_empty() {
+                    vec!["read".to_string(), "reveal".to_string()]
+                } else {
+                    actions
+                };
+                // A scanner checks pushes against every environment's values (production's
+                // first) and can read none of them.
+                let all_environments = all_environments || (scan_only && envs.is_empty());
                 let mut rule = json!({ "product": "secrets", "resources": [{ "project": c.project }], "actions": actions.iter().map(|a| (a.clone(), json!("allow"))).collect::<serde_json::Map<_, _>>() });
                 // Least privilege: the API reads a rule without environments as all of them, so
                 // the CLI always says which, and all only when asked.
@@ -3703,7 +3794,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 }
                 let v = c.call(Method::POST, "/v1/access/tokens", Some(body)).await?;
                 // On stderr, so a script that reads the token or the JSON still sees them.
-                if all_environments {
+                if all_environments && !scan_only {
                     eprintln!("warning: it reaches every environment, protected ones and ones made later included");
                 }
                 if no_expiry {
@@ -5173,12 +5264,17 @@ fn read_hidden(prompt: &str) -> anyhow::Result<String> {
     std::io::stderr().flush()?;
     // SAFETY: tcgetattr fills the termios we own; tcsetattr takes it by pointer, and the guard
     // restores the original on the same descriptor.
+    #[cfg(unix)]
     struct Restore(libc::termios);
+    #[cfg(unix)]
     impl Drop for Restore {
         fn drop(&mut self) {
             unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.0) };
         }
     }
+    #[cfg(windows)]
+    let _guard = crate::sys::console::EchoOff::new().context("can't turn off the terminal's echo")?;
+    #[cfg(unix)]
     let _guard = unsafe {
         let mut t: libc::termios = std::mem::zeroed();
         if libc::tcgetattr(libc::STDIN_FILENO, &mut t) != 0 {
@@ -5203,7 +5299,12 @@ fn write_private(path: &std::path::Path, text: &str) -> anyhow::Result<()> {
     o.write(true).create_new(true);
     #[cfg(unix)]
     o.mode(0o600);
-    o.open(path).with_context(|| format!("creating {} (it mustn't exist yet)", path.display()))?.write_all(text.as_bytes())?;
+    #[cfg(windows)]
+    crate::sys::acl::exclusive(&mut o);
+    let mut f = o.open(path).with_context(|| format!("creating {} (it mustn't exist yet)", path.display()))?;
+    #[cfg(windows)]
+    crate::sys::acl::private(&f).with_context(|| format!("making {} private", path.display()))?;
+    f.write_all(text.as_bytes())?;
     Ok(())
 }
 
@@ -5430,7 +5531,10 @@ async fn edit(c: &Client<'_>, env: &str, request: bool, json_out: bool) -> anyho
     let dir = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).filter(|d| d.is_dir()).unwrap_or_else(std::env::temp_dir);
     let file = tempfile::Builder::new().prefix("roll-secrets-").suffix(".env").tempfile_in(dir)?;
     std::fs::write(file.path(), &text)?;
-    let editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).unwrap_or_else(|_| "vi".into());
+    let editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).unwrap_or_else(|_| (if cfg!(windows) { "notepad" } else { "vi" }).into());
+    #[cfg(windows)]
+    let status = crate::sys::shell(&format!("{editor} \"{}\"", file.path().display())).status().with_context(|| format!("running {editor}"))?;
+    #[cfg(not(windows))]
     let status = std::process::Command::new("sh").arg("-c").arg(format!("{editor} \"$1\"")).arg("sh").arg(file.path()).status().with_context(|| format!("running {editor}"))?;
     anyhow::ensure!(status.success(), "{editor} exited with {status}: nothing applied");
     let edited = std::fs::read_to_string(file.path())?;
@@ -5851,7 +5955,14 @@ fn replace_private(path: &str, text: &str) -> anyhow::Result<()> {
     o.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
-    let written = o.open(&tmp).and_then(|mut f| f.write_all(text.as_bytes()).and_then(|_| f.sync_all())).and_then(|_| std::fs::rename(&tmp, target));
+    #[cfg(windows)]
+    crate::sys::acl::exclusive(&mut o);
+    let written = o.open(&tmp).and_then(|mut f| {
+        #[cfg(windows)]
+        crate::sys::acl::private(&f)?;
+        f.write_all(text.as_bytes()).and_then(|_| f.sync_all())
+    });
+    let written = written.and_then(|_| std::fs::rename(&tmp, target));
     if written.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
@@ -5909,7 +6020,11 @@ async fn render_watch(c: &Client<'_>, env: &str, file: &str, tpl: &str, out: &st
                 text = next;
                 eprintln!("roll secrets render: {which} changed, wrote {out}");
                 if let Some(cmd) = exec {
-                    match tokio::process::Command::new("sh").arg("-c").arg(cmd).status().await {
+                    #[cfg(windows)]
+                    let ran = tokio::process::Command::from(crate::sys::shell(cmd)).status().await;
+                    #[cfg(not(windows))]
+                    let ran = tokio::process::Command::new("sh").arg("-c").arg(cmd).status().await;
+                    match ran {
                         Ok(st) if st.success() => {}
                         Ok(st) => eprintln!("roll secrets render: {cmd} exited with {st}"),
                         Err(e) => eprintln!("roll secrets render: running {cmd}: {e}"),
@@ -6084,6 +6199,268 @@ fn line_candidates(line: &str, out: &mut std::collections::HashSet<String>) {
     if let Some(i) = trimmed.find(['=', ':']) {
         let rhs = trimmed[i + 1..].trim().trim_end_matches([',', ';']).trim();
         add(['"', '\'', '`'].iter().find_map(|q| rhs.strip_prefix(*q).and_then(|s| s.strip_suffix(*q))).unwrap_or(rhs));
+    }
+}
+
+/// `4s`, `1500ms` or a number of seconds.
+fn duration_ms(s: &str) -> anyhow::Result<std::time::Duration> {
+    let bad = || anyhow::anyhow!("{s}: a duration like 4s or 1500ms");
+    let ms = if let Some(n) = s.strip_suffix("ms") {
+        n.parse::<u64>().map_err(|_| bad())?
+    } else {
+        s.strip_suffix('s').unwrap_or(s).parse::<u64>().map_err(|_| bad())?.checked_mul(1000).ok_or_else(bad)?
+    };
+    anyhow::ensure!((1..=600_000).contains(&ms), "{s}: between 1ms and 10 minutes");
+    Ok(std::time::Duration::from_millis(ms))
+}
+
+/// The most `old new ref` input a pre-receive hook reads.
+const PUSH_INPUT_MAX: u64 = 1 << 20;
+/// The most of `git log -p` a pre-receive scan reads, and the most candidate bytes it keeps.
+const PUSH_PATCH_MAX: u64 = 256 << 20;
+const PUSH_CANDIDATES_MAX: usize = 32 << 20;
+/// Lines longer than this are skipped, as roll code's scans skip them.
+const PUSH_LINE_MAX: usize = 4096;
+/// The places one candidate is reported at.
+const PUSH_PLACES_MAX: usize = 20;
+
+/// A value a push adds: where, and which key it is.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct PushHit {
+    file: String,
+    line: usize,
+    commit: String,
+    key: String,
+    environment: String,
+    path: String,
+}
+
+/// `roll secrets scan --pre-receive` (docs/secrets.md, "On the git server: a pre-receive hook").
+/// git runs the hook with the pushed objects in quarantine (`GIT_QUARANTINE_PATH`,
+/// `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`); the git it runs inherits them,
+/// so it reads the new commits before any ref points at them. Commits reachable from an existing
+/// ref were checked when they came, so only the rest are read (`--not --all`): a new branch's own
+/// commits, an update's new ones, nothing for a deletion. Each commit's added lines (a merge's:
+/// those new against every parent) are cut into candidates as `roll secrets scan` cuts them and
+/// checked with `POST …/scan`, which a scan-only token may call: it answers which are values,
+/// never a value.
+async fn pre_receive(api: &Api, project: &str, budget: std::time::Duration, fail_open: bool) -> anyhow::Result<()> {
+    let mut input = String::new();
+    std::io::stdin().take(PUSH_INPUT_MAX + 1).read_to_string(&mut input).context("reading the push's `old new ref` lines")?;
+    anyhow::ensure!(input.len() as u64 <= PUSH_INPUT_MAX, "more than {PUSH_INPUT_MAX} bytes of ref updates");
+    let hex = |s: &str| matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit());
+    let mut news: Vec<String> = vec![];
+    for line in input.lines().filter(|l| !l.trim().is_empty()) {
+        let mut f = line.split_whitespace();
+        let (Some(old), Some(new), Some(_)) = (f.next(), f.next(), f.next()) else { bail!("not an `old new ref` line: {line}") };
+        anyhow::ensure!(hex(old) && hex(new), "not an `old new ref` line: {line}");
+        // A deletion adds nothing.
+        if new.bytes().any(|b| b != b'0') && !news.iter().any(|n| n == new) {
+            news.push(new.to_string());
+        }
+    }
+    let breakglass = push_option("breakglass");
+    let base = format!("/v1/secrets/projects/{}", enc(project));
+    let hits = std::sync::Mutex::new(Vec::<PushHit>::new());
+    let ran = tokio::time::timeout(budget, scan_push(api, &base, &news, breakglass, &hits)).await;
+    let mut hits = hits.into_inner().unwrap_or_else(|p| p.into_inner());
+    hits.sort();
+    hits.dedup();
+    let unfinished = match ran {
+        Ok(Ok(true)) => None,
+        Ok(Ok(false)) => Some("the push is bigger than a scan reads".to_string()),
+        Ok(Err(e)) => Some(format!("{e:#}")),
+        Err(_) => Some(format!("it ran out of its {} ms budget", budget.as_millis())),
+    };
+    for h in &hits {
+        let folder = if h.path == "/" { String::new() } else { format!(" {}", h.path) };
+        eprintln!("{}:{}  {} ({}{folder}) in {}", h.file, h.line, h.key, h.environment, &h.commit[..h.commit.len().min(12)]);
+    }
+    if breakglass {
+        let recorded = if unfinished.is_none() { "roll recorded it" } else { "roll couldn't record it" };
+        eprintln!("roll secrets: let through with breakglass ({recorded}){}", if hits.is_empty() { String::new() } else { format!(": rotate {}", if hits.len() == 1 { "it" } else { "them" }) });
+        return Ok(());
+    }
+    if !hits.is_empty() {
+        let (what, it) = if hits.len() == 1 { ("a value of this project".to_string(), "it") } else { (format!("{} values of this project", hits.len()), "them") };
+        bail!("this push adds {what}: refused. Remove {it} from the commits and rotate {it} if they went anywhere else; `git push -o breakglass` lets the push through (audited)");
+    }
+    if let Some(why) = unfinished {
+        if fail_open {
+            eprintln!("roll secrets: the push wasn't fully scanned ({why}); let through (--fail-open)");
+            return Ok(());
+        }
+        bail!("the push wasn't fully scanned ({why}): refused (the hook fails closed; --fail-open lets such a push through, `git push -o breakglass` lets this one)");
+    }
+    Ok(())
+}
+
+/// Whether the pusher gave push option `name` (`git push -o <name>`; the server repo needs
+/// `receive.advertisePushOptions`).
+fn push_option(name: &str) -> bool {
+    let n: usize = std::env::var("GIT_PUSH_OPTION_COUNT").ok().and_then(|n| n.parse().ok()).unwrap_or(0);
+    (0..n.min(100)).any(|i| std::env::var(format!("GIT_PUSH_OPTION_{i}")).is_ok_and(|v| v == name))
+}
+
+/// Read what `news` adds and check it, pushing each value found into `hits` as it's found (so a
+/// budget that runs out still reports them). `Ok(false)`: a bound stopped the read first.
+async fn scan_push(api: &Api, base: &str, news: &[String], breakglass: bool, hits: &std::sync::Mutex<Vec<PushHit>>) -> anyhow::Result<bool> {
+    let mut by: std::collections::HashMap<String, Vec<(String, usize, String)>> = Default::default();
+    let mut kept = 0usize;
+    let mut complete = true;
+    if !news.is_empty() {
+        complete = read_pushed(news, |file, line, commit, text| {
+            let mut found = std::collections::HashSet::new();
+            line_candidates(text, &mut found);
+            for c in found.into_iter().filter(|c| c.chars().count() >= 16) {
+                let len = c.len();
+                let places = by.entry(c).or_insert_with(|| {
+                    kept += len;
+                    vec![]
+                });
+                if places.len() < PUSH_PLACES_MAX {
+                    places.push((file.to_string(), line, commit.to_string()));
+                }
+            }
+            kept <= PUSH_CANDIDATES_MAX
+        })
+        .await?;
+    }
+    let all: Vec<String> = by.keys().cloned().collect();
+    // A breakglass push is recorded even when it adds nothing to check.
+    let chunks: Vec<&[String]> = if all.is_empty() && breakglass { vec![&[][..]] } else { all.chunks(20_000).collect() };
+    for chunk in chunks {
+        let v = api.call(Method::POST, &format!("{base}/scan"), Some(json!({ "candidates": chunk, "breakglass": breakglass }))).await?;
+        for f in v.as_array().into_iter().flatten() {
+            let Some(cand) = f["index"].as_u64().and_then(|i| chunk.get(i as usize)) else { continue };
+            let mut h = hits.lock().unwrap_or_else(|p| p.into_inner());
+            for (file, line, commit) in &by[cand] {
+                h.push(PushHit { file: file.clone(), line: *line, commit: commit.clone(), key: s(&f["key"]), environment: s(&f["environment"]), path: s(&f["path"]) });
+            }
+        }
+    }
+    Ok(complete)
+}
+
+/// Each line the commits reachable from `news` and from no ref add, as `(file, line, commit,
+/// text)`: `git log -p --cc -U0`, read in bounded pieces (a line over [`PUSH_LINE_MAX`] is
+/// skipped, at most [`PUSH_PATCH_MAX`] read). `each` answers false to stop. `Ok(false)`: stopped
+/// by a bound before the end.
+async fn read_pushed(news: &[String], mut each: impl FnMut(&str, usize, &str, &str) -> bool) -> anyhow::Result<bool> {
+    use tokio::io::AsyncReadExt;
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.args(["-c", "core.quotePath=false", "log", "-p", "--cc", "-U0", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--format=%x00%H"])
+        .args(news)
+        .args(["--not", "--all", "--"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = cmd.spawn().context("running git (the hook runs in the repository)")?;
+    let mut out = child.stdout.take().context("git's output")?;
+    let mut err = child.stderr.take().context("git's errors")?;
+    let errs = tokio::spawn(async move {
+        let mut b = vec![];
+        let _ = (&mut err).take(64 << 10).read_to_end(&mut b).await;
+        // The rest is dropped, so git never waits on a full pipe.
+        let _ = tokio::io::copy(&mut err, &mut tokio::io::sink()).await;
+        String::from_utf8_lossy(&b).trim().to_string()
+    });
+    let mut diff = PatchLines::default();
+    let (mut buf, mut line, mut long, mut read) = (vec![0u8; 64 << 10], Vec::with_capacity(PUSH_LINE_MAX), false, 0u64);
+    let mut stopped = false;
+    'read: loop {
+        let n = out.read(&mut buf).await.context("reading git's output")?;
+        if n == 0 {
+            break;
+        }
+        read += n as u64;
+        if read > PUSH_PATCH_MAX {
+            stopped = true;
+            break;
+        }
+        for &b in &buf[..n] {
+            if b == b'\n' {
+                if !long && !diff.line(&line, &mut each) {
+                    stopped = true;
+                    break 'read;
+                }
+                line.clear();
+                long = false;
+            } else if line.len() < PUSH_LINE_MAX {
+                line.push(b);
+            } else {
+                long = true;
+            }
+        }
+    }
+    if stopped {
+        let _ = child.kill().await;
+        return Ok(false);
+    }
+    if !line.is_empty() && !long {
+        diff.line(&line, &mut each);
+    }
+    let status = child.wait().await.context("waiting for git")?;
+    if !status.success() {
+        bail!("git log: {}", errs.await.unwrap_or_default());
+    }
+    Ok(true)
+}
+
+/// Where `git log -p --cc -U0` is: the commit, the file, and the next line's number in it.
+#[derive(Default)]
+struct PatchLines {
+    commit: String,
+    file: Option<String>,
+    /// In a hunk: how many parents its lines have a column for (2 and more: a merge's).
+    cols: usize,
+    next: usize,
+}
+
+impl PatchLines {
+    fn line(&mut self, raw: &[u8], each: &mut impl FnMut(&str, usize, &str, &str) -> bool) -> bool {
+        if let Some(rest) = raw.strip_prefix(b"\0") {
+            self.commit = String::from_utf8_lossy(rest).into_owned();
+            (self.file, self.cols) = (None, 0);
+            return true;
+        }
+        if raw.starts_with(b"diff ") {
+            (self.file, self.cols) = (None, 0);
+            return true;
+        }
+        if raw.starts_with(b"@@") {
+            let at = raw.iter().take_while(|b| **b == b'@').count();
+            let head = String::from_utf8_lossy(raw);
+            let start = head.split_whitespace().find_map(|t| t.strip_prefix('+')).and_then(|t| t.split(',').next()).and_then(|n| n.parse::<usize>().ok());
+            match start {
+                Some(n) if at >= 2 => (self.cols, self.next) = (at - 1, n),
+                _ => self.cols = 0,
+            }
+            return true;
+        }
+        if self.cols == 0 {
+            // A file's header: `+++ b/path` names what the lines are added to.
+            if let Some(name) = raw.strip_prefix(b"+++ ") {
+                let name = String::from_utf8_lossy(name);
+                self.file = name.strip_prefix("b/").map(str::to_string);
+            }
+            return true;
+        }
+        if raw.first() == Some(&b'\\') || raw.len() < self.cols {
+            return true;
+        }
+        let (marks, text) = raw.split_at(self.cols);
+        if marks.contains(&b'-') {
+            return true;
+        }
+        let at = self.next;
+        self.next += 1;
+        // Added against every parent: a merge's lines from one side were checked in that side's commits.
+        match &self.file {
+            Some(file) if marks.iter().all(|m| *m == b'+') => each(file, at, &self.commit, &String::from_utf8_lossy(text)),
+            _ => true,
+        }
     }
 }
 
@@ -6571,7 +6948,7 @@ pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
     if streams.any() {
         return run_masked(&r, &env, streams).await;
     }
-    let mut cmd = std::process::Command::new(&r.command[0]);
+    let mut cmd = std::process::Command::new(crate::sys::program(&r.command[0]));
     cmd.args(&r.command[1..]).envs(env.into_iter().map(|v| (v.name, v.value)));
     #[cfg(unix)]
     {
@@ -6579,10 +6956,18 @@ pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
         let e = cmd.exec();
         bail!("running {}: {e}", r.command[0]);
     }
+    // Windows has no exec: the command runs as roll's child (its environment still by name), and
+    // roll waits for it through the console's events.
     #[cfg(not(unix))]
     {
-        let status = cmd.status().with_context(|| format!("running {}", r.command[0]))?;
-        std::process::exit(status.code().unwrap_or(1));
+        let mut child = tokio::process::Command::from(cmd).spawn().with_context(|| format!("running {}", r.command[0]))?;
+        let mut signals = crate::mask::Signals::new()?;
+        loop {
+            tokio::select! {
+                status = child.wait() => crate::mask::exit_as(status?),
+                sig = signals.next() => crate::mask::Signals::pass(&mut child, sig),
+            }
+        }
     }
 }
 
@@ -6617,7 +7002,15 @@ pub async fn ssh_command(api: &Api, a: Ssh) -> anyhow::Result<()> {
         f.write(true).create_new(true);
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(&mut f, 0o600);
-        f.open(&id).and_then(|mut file| file.write_all(key.as_bytes())).context("writing the key")?;
+        #[cfg(windows)]
+        crate::sys::acl::exclusive(&mut f);
+        f.open(&id)
+            .and_then(|mut file| {
+                #[cfg(windows)]
+                crate::sys::acl::private(&file)?;
+                file.write_all(key.as_bytes())
+            })
+            .context("writing the key")?;
         std::fs::write(&cert_path, format!("{}\n", cert.trim())).context("writing the certificate")?;
         id
     };
@@ -6648,25 +7041,16 @@ pub async fn ssh_command(api: &Api, a: Ssh) -> anyhow::Result<()> {
 /// output), exiting as it did. Signals are passed on ([`crate::mask::Signals`]).
 async fn run_masked(r: &Run, env: &[Var], streams: crate::mask::Streams) -> anyhow::Result<()> {
     let mut run = spawn_masked(r, env, streams)?;
-    #[cfg(unix)]
-    {
-        let mut signals = crate::mask::Signals::new()?;
-        loop {
-            tokio::select! {
-                status = run.child.wait() => {
-                    let status = status?;
-                    run.drain().await;
-                    crate::mask::exit_as(status);
-                }
-                sig = signals.next() => crate::mask::Signals::pass(&run.child, sig),
+    let mut signals = crate::mask::Signals::new()?;
+    loop {
+        tokio::select! {
+            status = run.child.wait() => {
+                let status = status?;
+                run.drain().await;
+                crate::mask::exit_as(status);
             }
+            sig = signals.next() => crate::mask::Signals::pass(&mut run.child, sig),
         }
-    }
-    #[cfg(not(unix))]
-    {
-        let status = run.child.wait().await?;
-        run.drain().await;
-        crate::mask::exit_as(status);
     }
 }
 
@@ -6690,18 +7074,10 @@ async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<Var>, mut leases: 
     let every = std::time::Duration::from_secs(r.interval.max(1));
     // Dynamic credentials outlive their first lease: renewed every 10 minutes while it runs.
     let mut renew = tokio::time::interval_at(tokio::time::Instant::now() + RENEW_EVERY, RENEW_EVERY);
-    #[cfg(unix)]
     let mut signals = crate::mask::Signals::new()?;
     loop {
         let mut run = spawn_masked(r, &env, streams)?;
         loop {
-            #[cfg(unix)]
-            let signal = signals.next();
-            #[cfg(not(unix))]
-            let signal = async {
-                let _ = tokio::signal::ctrl_c().await;
-                0
-            };
             tokio::select! {
                 status = run.child.wait() => {
                     let status = status?;
@@ -6709,15 +7085,7 @@ async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<Var>, mut leases: 
                     crate::mask::exit_as(status);
                 }
                 // Passed on: the command's exit ends roll.
-                sig = signal => {
-                    #[cfg(unix)]
-                    crate::mask::Signals::pass(&run.child, sig);
-                    #[cfg(not(unix))]
-                    {
-                        let _ = sig;
-                        stop(&mut run.child).await;
-                    }
-                }
+                sig = signals.next() => crate::mask::Signals::pass(&mut run.child, sig),
                 _ = renew.tick(), if !leases.is_empty() => {
                     for l in &leases {
                         if let Err(e) = c.call(Method::POST, &format!("{l}/renew"), None).await {
@@ -6761,7 +7129,7 @@ async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<Var>, mut leases: 
 /// How often `roll run --watch` renews its dynamic credentials' leases.
 const RENEW_EVERY: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// SIGTERM, and SIGKILL if it hasn't exited after 10 seconds.
+/// SIGTERM, and SIGKILL if it hasn't exited after 10 seconds (on Windows, TerminateProcess at once).
 async fn stop(child: &mut tokio::process::Child) {
     #[cfg(unix)]
     if let Some(pid) = child.id() {

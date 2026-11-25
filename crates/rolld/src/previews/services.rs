@@ -340,6 +340,15 @@ impl roll_previews::ports::Apps for RollApps {
         }
     }
 
+    /// The `pv-` environment paused (Render's Suspend): a visit gets roll apps' "Paused" page and
+    /// wakes nothing until it's resumed.
+    async fn hold_down(&self, preview: &str, service: &str, down: bool) -> anyhow::Result<()> {
+        if let Some((id, env)) = self.find(preview, service).await? {
+            self.api.call(Method::PUT, &Self::env_path(&id, &env), Some(json!({ "paused": down }))).await?;
+        }
+        Ok(())
+    }
+
     async fn remove(&self, preview: &str, service: &str) -> anyhow::Result<()> {
         if let Some((id, env)) = self.find(preview, service).await? {
             // Gone already counts as done; anything else is retried.
@@ -920,6 +929,10 @@ impl roll_previews::ports::Apps for Services {
         } else {
             self.apps.sleep(preview, service).await
         }
+    }
+
+    async fn hold_down(&self, preview: &str, service: &str, down: bool) -> anyhow::Result<()> {
+        if self.local(preview, service) { Ok(()) } else { self.apps.hold_down(preview, service, down).await }
     }
 
     async fn remove(&self, preview: &str, service: &str) -> anyhow::Result<()> {

@@ -325,6 +325,41 @@ done
 T6=$(now_ms)
 PROD_AFTER=$(curl -sS -H "Host: $PROD_HOST" "http://127.0.0.1:${PORTS}080/" --max-time 120)
 [ "$PROD_AFTER" = "preview of change 1" ] || { echo "production should serve the preview's build after the promote: $PROD_AFTER"; exit 1; }
+say "over its size cap: its pv- environment paused on roll apps (a visit wakes nothing), let wake again once under"
+# 2 MiB into the preview's Redis branch, a 1 MiB cap, and its usage read again (a refresh).
+python3 - "$(api GET "/v1/redis/databases/$BRANCH" | jq_ "d['redis_url']")" <<'PY2'
+import socket, sys, urllib.parse
+u = urllib.parse.urlparse(sys.argv[1])
+s = socket.create_connection((u.hostname, u.port))
+cmd = lambda *a: b"*%d\r\n" % len(a) + b"".join(b"$%d\r\n%s\r\n" % (len(x), x) for x in a)
+def answers(n):
+    got = b""
+    while got.count(b"\r\n") < n:
+        more = s.recv(65536)
+        assert more, "the connection closed: %r" % got[:200]
+        got += more
+    assert not got.startswith(b"-") and b"\r\n-" not in got, got[:200]
+# Signed in first (Redis won't read a long value from a client that isn't), then 32 values of 64 KiB.
+s.sendall(cmd(b"AUTH", u.username.encode(), urllib.parse.unquote(u.password).encode()))
+answers(1)
+s.sendall(b"".join(cmd(b"SET", b"big:%d" % i, b"x" * (64 << 10)) for i in range(32)))
+answers(32)
+PY2
+api PUT "/v1/previews/projects/$PRJ/settings" '{"max_bytes":1048576}' >/dev/null
+api POST "/v1/previews/$PV/refresh" >/dev/null
+PAUSED=""
+for _ in $(seq 1 240); do
+  PAUSED=$(api GET "/v1/apps/services/$SVC/environments/$ENV" | jq_ "d.get('paused') is True")
+  [ "$PAUSED" = True ] && break
+  sleep 0.5
+done
+[ "$PAUSED" = True ] || { echo "a capped preview's pv- environment should be paused on roll apps: $(api GET "/v1/previews/$PV" | jq_ "(d['state'], d.get('error'))")"; exit 1; }
+PV_HOST=$(api GET "/v1/apps/services/$SVC/environments/$ENV" | jq_ "d.get('url') or ''" | sed -E 's#^https?://##; s#/.*##; s#:.*##')
+CAPPED=$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $PV_HOST" "http://127.0.0.1:${PORTS}080/" --max-time 30)
+[ "$CAPPED" = 503 ] || { echo "a visit to a capped preview's roll apps service should wake nothing: HTTP $CAPPED"; exit 1; }
+api PUT "/v1/previews/projects/$PRJ/settings" '{"max_bytes":10737418240}' >/dev/null
+api POST "/v1/previews/$PV/wake" >/dev/null
+[ "$(api GET "/v1/apps/services/$SVC/environments/$ENV" | jq_ "d.get('paused') is True")" = False ] || { echo "a preview under its cap again should let its pv- environment wake"; exit 1; }
 say "land"
 api POST "/v1/code/changes/$CHG/land" '{}' >/dev/null
 for _ in $(seq 1 120); do N=$(api GET "/v1/previews?project=$PRJ" | jq_ "len(d)"); [ "$N" = 0 ] && break; sleep 0.5; done

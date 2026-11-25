@@ -29,4 +29,21 @@ describe("DomainsTab", () => {
     await userEvent.click(screen.getByRole("button", { name: /verify/i }));
     await waitFor(() => expect(api.verifyDomain).toHaveBeenCalledWith("svc_1", "production", "shop.example.com"));
   });
+
+  it("adds an apex's www too, redirecting to the apex, unless it's unticked", async () => {
+    api.addDomain.mockReset().mockResolvedValue({});
+    api.redirectDomain.mockReset().mockResolvedValue({});
+    render(<DomainsTab service="svc_1" env={env([])} runner={runner} />);
+    await userEvent.type(screen.getByPlaceholderText(/www\.example\.com/), "example.co.uk");
+    expect(screen.getByRole("checkbox")).toBeChecked();
+    await userEvent.click(screen.getByRole("button", { name: /add domain/i }));
+    await waitFor(() => expect(api.redirectDomain).toHaveBeenCalledWith("svc_1", "production", "www.example.co.uk", "example.co.uk"));
+    expect(api.addDomain.mock.calls.map((c) => c[2])).toEqual(["example.co.uk", "www.example.co.uk"]);
+    api.addDomain.mockClear();
+    await userEvent.type(screen.getByPlaceholderText(/www\.example\.com/), "shop.com");
+    await userEvent.click(screen.getByRole("checkbox"));
+    await userEvent.click(screen.getByRole("button", { name: /add domain/i }));
+    await waitFor(() => expect(api.addDomain).toHaveBeenCalledTimes(1));
+    expect(api.addDomain).toHaveBeenCalledWith("svc_1", "production", "shop.com");
+  });
 });

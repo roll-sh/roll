@@ -4,7 +4,7 @@
 /// app's own routes. Mirrors `apps/dashboard/src/lib/reserved-names.ts`; change both together.
 pub const RESERVED: &[&str] = &[
     // Routes and files in apps/dashboard/src/routes and public/, and the app's own paths.
-    "dashboard", "icon.svg", "favicon.ico", "_next", "_serverfn", "install.sh",
+    "dashboard", "icon.svg", "favicon.ico", "_next", "_serverfn", "install.sh", "install.ps1",
     // Web conventions.
     "api", "robots.txt", "sitemap.xml", "manifest.json", "manifest.webmanifest", ".well-known", "opengraph-image",
     "twitter-image", "apple-icon", "static", "assets", "public",
