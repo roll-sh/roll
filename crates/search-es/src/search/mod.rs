@@ -1942,8 +1942,20 @@ fn cacheable(req: &SearchRequest, t: &Target) -> bool {
         return false;
     }
     let text = format!("{src:?}");
-    !(text.contains("now") || text.contains("Script") || text.contains("random"))
+    if text.contains("now") || text.contains("Script") || text.contains("random") {
+        return false;
+    }
+    // A query reading other documents is authorized as its reader where the lookup runs, which
+    // a hit skips, and the key doesn't hold who asked (Elasticsearch rewrites lookups as the user
+    // before it keys): terms lookups, `percolate`, indexed shapes and `more_like_this` documents
+    // (any percolate and any document item, from the parsed request's text), in the request or
+    // its alias filter, never use the cache.
+    let filter = format!("{:?}", t.filter);
+    !READS_OTHER_DOCUMENTS.iter().any(|p| text.contains(p) || filter.contains(p))
 }
+
+/// How the parsed queries that read other documents print ([`cacheable`]).
+const READS_OTHER_DOCUMENTS: &[&str] = &["Some(TermsLookup", "Indexed {", "Percolate {", "MltItem {"];
 
 fn request_cache_key(req: &SearchRequest, t: &Target) -> String {
     // The mapping and analysis settings decide how the request's queries are built

@@ -1494,6 +1494,13 @@ async fn lookups_are_authorized_where_they_run() {
 
         let (s, v) = search(json!({"query": lookup("mine")})).await;
         assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(1)), "{name}: a lookup into the reader's own index: {v}");
+        // The request cache holds no lookup's answer: the owner's cached aggregation isn't
+        // served to a reader who may not make its lookup.
+        let cached = json!({"size": 0, "aggs": {"params": {"filter": lookup("secret")}}});
+        let (s, v) = e.es(&admin, &pw, Method::POST, "/mine/_search?request_cache=true", Some(cached.clone())).await;
+        assert_eq!((s, v["aggregations"]["params"]["doc_count"].as_i64()), (200, Some(1)), "{name}: {v}");
+        let (s, v) = e.es(&ann, ann_pw, Method::POST, "/mine/_search?request_cache=true", Some(cached)).await;
+        refused("the owner's cached lookup", s, &v);
         for agg in ["document", "params"] {
             let (s, v) = search(json!({"size": 0, "aggs": {agg: {"filter": lookup("secret")}}})).await;
             refused(&format!("an aggregation named {agg}"), s, &v);
