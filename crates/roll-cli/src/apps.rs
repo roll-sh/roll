@@ -616,6 +616,18 @@ pub enum AppsCmd {
         /// Let a pinned deployment be pruned again.
         #[arg(long, value_name = "DEPLOYMENT", conflicts_with_all = ["commits", "vulnerabilities", "explain", "sbom"])]
         unpin: Option<String>,
+        /// Only deploys in this state (`failed`, `active`, `ready`…).
+        #[arg(long)]
+        status: Option<String>,
+        /// Only deploys this person, token or commit author made.
+        #[arg(long)]
+        actor: Option<String>,
+        /// Only deploys whose message holds this, or whose commit starts with it.
+        #[arg(long, value_name = "TEXT")]
+        search: Option<String>,
+        /// Every environment's deploys of the service, not one environment's.
+        #[arg(long)]
+        every_env: bool,
     },
     /// Its objective (`run.slo`) against its window: what met it, the error budget left, and
     /// whether it's burning fast.
@@ -4011,9 +4023,12 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             json!({ "url": url })
         }
-        AppsCmd::Deploys { target, commits: None, .. } => {
+        AppsCmd::Deploys { target, commits: None, status, actor, search, every_env, .. } => {
             let svc = service(api, &target).await?;
-            let v = api.get(&format!("{}/deploys", env_path(&svc, &target.env))).await?;
+            let q: Vec<String> = [("status", status), ("actor", actor), ("q", search)].into_iter().filter_map(|(k, v)| v.map(|v| format!("{k}={}", enc(&v)))).collect();
+            let qs = if q.is_empty() { String::new() } else { format!("?{}", q.join("&")) };
+            let path = if every_env { format!("/v1/apps/services/{}/deploys{qs}", enc(&s(&svc["id"]))) } else { format!("{}/deploys{qs}", env_path(&svc, &target.env)) };
+            let v = api.get(&path).await?;
             if !json_out {
                 for d in v.as_array().into_iter().flatten() {
                     let rev = d["revision"].as_str().map(|r| &r[..r.len().min(8)]).unwrap_or("-").to_string();

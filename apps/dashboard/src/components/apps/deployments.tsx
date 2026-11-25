@@ -1,7 +1,7 @@
 import { HorizonMark } from "@roll/brand";
 import { Check, CircleHelp, ExternalLink, Pin, PinOff, Rocket, RotateCcw, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { appsApi, FUNCTION_ROUTES, runFunctions, deploymentUrl, followChanges, followLog, formatMs, isPending, shortSha, stepDurations, TRIGGER_LABEL, type BuildStep, type Deployment, type DeployCommits, type Environment, type Explanation, type LogLine, type ScanSummary, type Vulnerability } from "@/lib/apps-api";
+import { appsApi, FUNCTION_ROUTES, runFunctions, deploymentUrl, followChanges, followLog, formatMs, isPending, shortSha, stepDurations, TRIGGER_LABEL, type BuildStep, type Deployment, type DeployStatus, type DeployCommits, type Environment, type Explanation, type LogLine, type ScanSummary, type Vulnerability } from "@/lib/apps-api";
 import { btn, panel } from "../ui";
 import { PlanDetails } from "./new-service";
 import { usePageVisible } from "./live";
@@ -105,8 +105,28 @@ export function Deployments({
       setMore("idle");
     }
   };
+  // Narrowed by state or a word of its message or commit: the API's page of matches, in place of
+  // the list until cleared.
+  const [status, setStatus] = useState<DeployStatus | "">("");
+  const [q, setQ] = useState("");
+  const [filtered, setFiltered] = useState<Deployment[] | null>(null);
+  useEffect(() => {
+    if (!status && !q.trim()) return setFiltered(null);
+    let live = true;
+    const t = setTimeout(() => {
+      appsApi.deploys(service, env.name, undefined, { ...(status ? { status } : {}), ...(q.trim() ? { q: q.trim() } : {}) }).then(
+        (d) => live && setFiltered(d),
+        () => live && setFiltered([]),
+      );
+    }, 250);
+    return () => {
+      live = false;
+      clearTimeout(t);
+    };
+  }, [service, env.name, status, q, deploys]);
+  const rows = filtered ?? list;
   // The newest opens by itself, so a deploy that just started shows its build.
-  const shown = list?.find((d) => d.id === open) ?? list?.[0] ?? null;
+  const shown = rows?.find((d) => d.id === open) ?? rows?.[0] ?? null;
   const activeId = env.active?.id ?? null;
   const now = Date.now();
 
@@ -130,12 +150,23 @@ export function Deployments({
     {upload && <FolderDeploy service={service} env={env.name} onDeployed={(d) => void runner.run("upload", async () => d)} />}
     <div className="grid gap-4 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]">
       <section className={`${panel} overflow-hidden`}>
+        <div className="flex items-center gap-2 border-b border-line px-4 py-2">
+          <select value={status} onChange={(e) => setStatus(e.target.value as DeployStatus | "")} aria-label="State" className="h-7 rounded-md border border-line bg-panel px-1.5 text-[12px] outline-none">
+            <option value="">every state</option>
+            <option value="failed">failed</option>
+            <option value="active">live</option>
+            <option value="ready">ready</option>
+            <option value="inactive">replaced</option>
+            <option value="canceled">canceled</option>
+          </select>
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="message or commit" aria-label="Search deploys" className="h-7 min-w-0 flex-1 rounded-md border border-line bg-panel px-2 text-[12px] outline-none" />
+        </div>
         <label className="flex items-center gap-1.5 border-b border-line px-4 py-2 text-[12px] text-muted" title="Off: a rollback brings the variables back as they were when it was live">
           <input type="checkbox" checked={keepVars} onChange={(e) => setKeepVars(e.target.checked)} />
           Rollbacks keep today's variables
         </label>
         <ul className="divide-y divide-line">
-          {list!.map((d) => {
+          {rows!.map((d) => {
             const active = d.id === activeId;
             const selected = shown?.id === d.id;
             return (
@@ -243,7 +274,7 @@ export function Deployments({
             );
           })}
         </ul>
-        {deploys.length >= PAGE && more !== "done" && (
+        {!filtered && deploys.length >= PAGE && more !== "done" && (
           <div className="border-t border-line px-4 py-2.5">
             <button type="button" className={btn} disabled={more === "loading"} onClick={() => void loadOlder()}>
               {more === "loading" ? <span className="shimmer">Loading…</span> : "Older deployments"}
