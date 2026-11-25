@@ -1185,13 +1185,17 @@ pub(super) async fn create<B>(ctx: &Ctx<'_>, repo: &str, r: &Repository, uuid: &
 where
     B: FnOnce(&mut ClusterState) -> EsResult<Arc<Snapshot>> + Clone + Send,
 {
-    let bucket = refresh(ctx.cluster, repo, r).await?;
     let key = r.location_key();
-    let (planned, running) = {
+    // It starts once no deletion or cleanup runs in the repository, planned against the data
+    // one left (read again after it).
+    let (bucket, planned, running) = loop {
+        ctx.cluster.snapshot_data.no_deletion(repo).await;
+        let bucket = refresh(ctx.cluster, repo, r).await?;
         let st = ctx.state();
         let planned = build.clone()(&mut (*st).clone())?;
-        let running = ctx.cluster.snapshot_data.start_running(repo, &planned, &st)?;
-        (planned, running)
+        if let Some(running) = ctx.cluster.snapshot_data.start_running(repo, &planned, &st)? {
+            break (bucket, planned, running);
+        }
     };
     let _taking = ctx.cluster.snapshot_data.taking(uuid);
     let mut uploaded = Vec::new();
@@ -1410,12 +1414,12 @@ pub(super) async fn present_shards(ctx: &Ctx<'_>, repo: &str, r: &Repository) ->
 
 /// `_cleanup`: `(bytes, objects)` deleted.
 pub(super) async fn cleanup(ctx: &Ctx<'_>, repo: &str, r: &Repository) -> EsResult<(u64, u64)> {
+    // Refused while a snapshot runs, and shown as running until done: a snapshot starting
+    // meanwhile waits rather than upload what this would call unreferenced.
+    let _cleaning = ctx.cluster.snapshot_data.begin_cleanup(repo)?;
     let bucket = Bucket::open(ctx.cluster, repo, r).await?;
     let latest = bucket.read_data().await?;
     store_copy(ctx.cluster, r, latest.clone()).await?;
-    if !ctx.cluster.snapshot_data.running_in(repo, None).is_empty() {
-        return Err(EsError::illegal_state(format!("Cannot cleanup [{repo}] - a snapshot is currently running")));
-    }
     // With no repository data read, nothing under the prefix is known to be roll's.
     let Some(data) = latest else { return Ok((0, 0)) };
     bucket.cleanup(&data).await
