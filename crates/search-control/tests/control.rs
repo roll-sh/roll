@@ -1437,6 +1437,73 @@ async fn filtered_api_key(e: &Env) -> String {
     base64::engine::general_purpose::STANDARD.encode(format!("{}@shop:{}", v["id"].as_str().unwrap(), v["api_key"].as_str().unwrap()))
 }
 
+/// Lookups are authorized where they run, as the reader, whatever hides them from the body's
+/// scan: a reader of `mine` reads nothing of `secret` through a `lookup` runtime field named
+/// `document` or a terms lookup in an aggregation named `document` or `params`, nor through its
+/// own API key's templated role query; an alias filter can't hold a lookup. A lookup into
+/// `mine` still works. Both dialects, where they have the feature.
+#[tokio::test]
+async fn lookups_are_authorized_where_they_run() {
+    use base64::Engine;
+    use reqwest::Method;
+    let e = env().await;
+    let lookup = |index: &str| json!({"terms": {"n": {"index": index, "id": "1", "path": "ids"}}});
+    for (name, flavor) in [("lk", "elasticsearch"), ("lk-os", "opensearch")] {
+        let c = e.post("/v1/search/clusters", json!({"name": name, "flavor": flavor})).await;
+        let (admin, pw) = creds(&c);
+        let (role_path, role, user_path, user) = match flavor {
+            "elasticsearch" => (
+                "/_security/role/m",
+                json!({"cluster": ["manage_own_api_key"], "indices": [{"names": ["mine", "mine-*"], "privileges": ["read", "manage"]}]}),
+                "/_security/user/ann",
+                json!({"password": "ann-password-1", "roles": ["m"]}),
+            ),
+            _ => (
+                "/_plugins/_security/api/roles/m",
+                json!({"index_permissions": [{"index_patterns": ["mine", "mine-*"], "allowed_actions": ["indices_all"]}]}),
+                "/_plugins/_security/api/internalusers/ann",
+                json!({"password": "Zq9#vLx2!pRt7mWk", "opendistro_security_roles": ["m"]}),
+            ),
+        };
+        for (path, body) in [
+            ("/secret/_doc/1?refresh=true", json!({"k": "a", "v": "hidden-value", "ids": ["1"]})),
+            ("/mine", json!({"mappings": {"properties": {"k": {"type": "keyword"}, "n": {"type": "keyword"}}}})),
+            ("/mine/_doc/1?refresh=true", json!({"k": "a", "n": "1", "ids": ["1"]})),
+            (role_path, role),
+            (user_path, user.clone()),
+        ] {
+            let (s, v) = e.es(&admin, &pw, Method::PUT, path, Some(body)).await;
+            assert!(s == 200 || s == 201, "{name} {path}: {v}");
+        }
+        let ann = format!("ann@{name}");
+        let ann_pw = user["password"].as_str().unwrap();
+        let search = |body: Value| e.es(&ann, ann_pw, Method::POST, "/mine/_search", Some(body));
+        let refused = |what: &str, s: u16, v: &Value| assert!(s >= 400 && !v.to_string().contains("hidden-value"), "{name} {what}: {s} {v}");
+
+        let (s, v) = search(json!({"query": lookup("mine")})).await;
+        assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(1)), "{name}: a lookup into the reader's own index: {v}");
+        for agg in ["document", "params"] {
+            let (s, v) = search(json!({"size": 0, "aggs": {agg: {"filter": lookup("secret")}}})).await;
+            refused(&format!("an aggregation named {agg}"), s, &v);
+        }
+        let (s, v) = e.es(&ann, ann_pw, Method::POST, "/_aliases", Some(json!({"actions": [{"add": {"index": "mine", "alias": "mine-f", "filter": lookup("secret")}}]}))).await;
+        assert_eq!((s, v["error"]["reason"].as_str()), (400, Some("failed to parse filter for alias [mine-f]")), "{name}: {v}");
+        if flavor != "elasticsearch" {
+            continue;
+        }
+        let runtime = json!({"runtime_mappings": {"document": {"type": "lookup", "target_index": "secret", "input_field": "k", "target_field": "k", "fetch_fields": ["v"]}}, "fields": ["document"]});
+        let (s, v) = search(runtime).await;
+        refused("a lookup runtime field named document", s, &v);
+        let template = json!({"template": {"source": lookup("secret").to_string()}});
+        let (s, k) = e.es(&ann, ann_pw, Method::POST, "/_security/api_key", Some(json!({"name": "t", "role_descriptors": {"r": {"indices": [{"names": ["mine"], "privileges": ["read"], "query": template}]}}}))).await;
+        assert_eq!(s, 200, "{k}");
+        let key = base64::engine::general_purpose::STANDARD.encode(format!("{}@{name}:{}", k["id"].as_str().unwrap(), k["api_key"].as_str().unwrap()));
+        let (s, v) = as_key(&e, &key, Method::POST, "/mine/_search", Some(json!({}))).await;
+        refused("a templated role query's lookup", s, &v);
+        assert!(v.to_string().contains("terms query with terms lookup isn't supported as part of a role query"), "{v}");
+    }
+}
+
 /// Term vectors of a document a key's filter hides are "not found", as its get is.
 #[tokio::test]
 async fn term_vectors_of_a_hidden_document_are_not_found() {

@@ -1470,7 +1470,7 @@ fn lookup_walk(v: &Value, parent: Option<&str>, out: &mut Vec<(&'static str, Str
                 }
             }
             if matches!(parent, Some("like" | "unlike")) && let Some(i) = s("_index") {
-                out.push((GET, i.to_string()));
+                out.push((crate::search::LOOKUP_TERM_VECTORS, i.to_string()));
             }
             if s("type") == Some("lookup") && let Some(i) = s("target_index") {
                 out.push((SEARCH, i.to_string()));

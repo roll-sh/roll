@@ -582,10 +582,19 @@ pub fn parse_role(name: &str, v: &Value, api_key: bool) -> EsResult<Value> {
 /// `percolate` (in compound queries too).
 pub(super) fn check_role_query(text: &str) -> EsResult<()> {
     let Some(v) = crate::json::parse(text.as_bytes())? else { return Ok(()) };
+    // A template is checked once rendered, for the user it runs for (`dls`), as Elasticsearch
+    // checks it.
     if v.get("template").is_some() {
         return Ok(());
     }
     crate::query::parse_query(&v, Some(text.as_bytes()), &[])?;
+    verify_role_query(&v)
+}
+
+/// `DLSRoleQueryValidator.verifyRoleQuery`: a role query reads no other document (no terms
+/// lookup, indexed shape or percolated document) and no other document of its index (no
+/// `has_child`, `has_parent`).
+pub(super) fn verify_role_query(v: &Value) -> EsResult<()> {
     fn walk(v: &Value) -> EsResult<()> {
         let Some((kind, body)) = v.as_object().and_then(|m| m.iter().next()) else { return Ok(()) };
         let refuse = |what: &str| Err(EsError::illegal_argument(format!("{what} query isn't supported as part of a role query")));
@@ -607,7 +616,7 @@ pub(super) fn check_role_query(text: &str) -> EsResult<()> {
         };
         nested.into_iter().try_for_each(walk)
     }
-    walk(&v)
+    walk(v)
 }
 
 /// A role's `global` (configurable cluster) privileges, stored as Elasticsearch prints them

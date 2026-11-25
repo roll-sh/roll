@@ -31,6 +31,11 @@ pub fn validate_filter(alias: &str, filter: &Value) -> Result<(), EsError> {
         return Err(failed());
     };
     match crate::query::parse_stored(filter) {
+        // `AliasValidator.validateAliasFilter` rewrites the filter with no client: a query that
+        // fetches another document to rewrite (a terms lookup, a percolated or indexed shape
+        // document) can't be an alias's. `more_like_this` reads its documents when it runs, as
+        // the reader.
+        Ok(_) if fetches_to_rewrite(filter) => Err(failed().caused_by(EsError::illegal_state("async actions are left after rewrite"))),
         Ok(_) => Ok(()),
         Err(e) => {
             if uses_any(filter, OPENSEARCH_QUERIES) {
@@ -38,6 +43,25 @@ pub fn validate_filter(alias: &str, filter: &Value) -> Result<(), EsError> {
             }
             Err(failed().caused_by(e))
         }
+    }
+}
+
+/// Whether a query fetches a document to rewrite: a `terms` lookup, `percolate` of an indexed
+/// document, a `geo_shape` or `shape` query's `indexed_shape`, at any depth.
+fn fetches_to_rewrite(v: &Value) -> bool {
+    let fields = |c: &Value, f: &dyn Fn(&crate::json::Map) -> bool| c.as_object().is_some_and(|m| m.values().any(|x| x.as_object().is_some_and(f)));
+    match v {
+        Value::Obj(m) => m.iter().any(|(k, c)| {
+            let here = match k.as_str() {
+                "terms" => fields(c, &|o| o.contains_key("index") || o.contains_key("id") || o.contains_key("path")),
+                "percolate" => c.get("index").is_some() || c.get("id").is_some(),
+                "geo_shape" | "shape" => fields(c, &|o| o.contains_key("indexed_shape")),
+                _ => false,
+            };
+            here || fetches_to_rewrite(c)
+        }),
+        Value::Arr(a) => a.iter().any(fetches_to_rewrite),
+        _ => false,
     }
 }
 

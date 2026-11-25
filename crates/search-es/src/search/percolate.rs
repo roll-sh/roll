@@ -170,7 +170,7 @@ fn indexed_document(ctx: &QueryCtx, p: &Percolate) -> EsResult<Value> {
     let missing = || EsError::resource_not_found(format!("indexed document [{index}/{id}] couldn't be found"));
     let Some(meta) = crate::write::resolve_existing(ctx.st, &index) else { return Err(EsError::index_not_found(&index)) };
     // Read as the request's reader may read it (its document and field level security).
-    let (version, src) = super::lookup_source(ctx, &meta, &id, p.routing.as_deref())?.ok_or_else(missing)?;
+    let (version, src) = super::lookup_source(ctx, super::LOOKUP_GET, &index, &meta, &id, p.routing.as_deref())?.ok_or_else(missing)?;
     if p.version.is_some_and(|v| v != version) {
         return Err(EsError::new(409, "version_conflict_engine_exception", format!("[{id}]: version conflict, current version [{version}] is different than the one provided [{}]", p.version.unwrap_or(0))));
     }

@@ -1938,7 +1938,7 @@ fn cacheable(req: &SearchRequest, t: &Target) -> bool {
     // writes the cache: its answers depend on what it may read, here and in every index its
     // queries look documents up in, which the key can't hold (Elasticsearch disables the cache
     // in similar cases, e.g. templated role queries).
-    if t.security.is_some() {
+    if t.security.as_ref().is_some_and(|s| s.restricts_anything()) {
         return false;
     }
     let text = format!("{src:?}");
@@ -3738,6 +3738,13 @@ fn lookup_fields_of_hit(cluster: &Cluster, src: &SearchSource, table: &Arc<crate
             Some(Value::Arr(a)) => a,
             _ => Vec::new(),
         };
+        // The lookups are the reader's searches of `target_index` (`LookupRuntimeFieldType`'s,
+        // sent as the user).
+        if let Some(s) = security
+            && !values.is_empty()
+        {
+            s.authorize(cluster, "indices:data/read/search", &target_index)?;
+        }
         let mut found = Vec::new();
         for v in values {
             let body = obj! {
@@ -4815,15 +4822,24 @@ fn complete_completion_options(cluster: &Cluster, st: &ClusterState, req: &Searc
 
 /// Whether document `id` of `shard` matches `q` (document level security of a get): the shard
 /// is refreshed first, so a realtime get of a document not yet searchable is judged too.
-/// Document `id` of `idx` as a query reads it on behalf of its request (a `percolate` query's
-/// or an `indexed_shape`'s document): `None` when it's missing or the reader's document level
-/// security hides it, else its version and `_source` (`None`: not stored) without the fields
-/// the reader's field level security hides, as a get by the reader answers.
-pub(crate) fn lookup_source(ctx: &QueryCtx, idx: &Arc<IndexMeta>, id: &str, routing: Option<&str>) -> EsResult<Option<(i64, Option<Value>)>> {
+/// Elasticsearch's get for the user: a terms lookup's, `percolate`'s or `indexed_shape`'s.
+pub(crate) const LOOKUP_GET: &str = "indices:data/read/get";
+/// `more_like_this`'s documents, fetched as the user's multi term vectors request (its per shard
+/// request's action).
+pub(crate) const LOOKUP_TERM_VECTORS: &str = "indices:data/read/mtv[shard]";
+
+/// Document `id` of `idx` as a query reads it on behalf of its request (a terms lookup's,
+/// `percolate`'s, `more_like_this`'s or an `indexed_shape`'s document): the reader's read of it
+/// by `requested` (the name the query gave), authorized as `action` where it runs, as
+/// Elasticsearch's request for the user is ([`LOOKUP_GET`], [`LOOKUP_TERM_VECTORS`]). `None`
+/// when it's missing or the reader's document level security hides it, else its version and
+/// `_source` (`None`: not stored) without the fields the reader's field level security hides,
+/// as a get by the reader answers.
+pub(crate) fn lookup_source(ctx: &QueryCtx, action: &str, requested: &str, idx: &Arc<IndexMeta>, id: &str, routing: Option<&str>) -> EsResult<Option<(i64, Option<Value>)>> {
     use crate::xpack::security::dls::READ;
+    let sec = ctx.security.read_lookup(ctx.cluster, action, requested)?;
     let engine = ctx.cluster.engine.index(ctx.cluster, ctx.st, idx)?;
     let shard = engine.shard(crate::meta::routing::shard_for(idx, id, routing));
-    let sec = ctx.security.read_as()?;
     let Some(doc) = shard.shard.get(id.as_bytes(), true).map_err(crate::engine::convert::index_error)? else { return Ok(None) };
     let fields = match sec.map(|s| s.documents(ctx.cluster, READ, &idx.name)).transpose()?.flatten() {
         None => doc.fields,

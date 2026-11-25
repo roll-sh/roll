@@ -115,6 +115,18 @@ impl Reader {
         }
     }
 
+    /// A lookup in `index` (the name it was asked by) as the reader ([`ReadSecurity::authorize`]),
+    /// then the restrictions to read it under; an error for [`Reader::Unset`].
+    ///
+    /// [`ReadSecurity::authorize`]: crate::xpack::security::dls::ReadSecurity::authorize
+    pub fn read_lookup(&self, cluster: &crate::cluster::Cluster, action: &str, index: &str) -> EsResult<Option<&crate::xpack::security::dls::ReadSecurity>> {
+        let sec = self.read_as()?;
+        if let Some(s) = sec {
+            s.authorize(cluster, action, index)?;
+        }
+        Ok(sec)
+    }
+
     /// The restrictions to read under; an error for [`Reader::Unset`].
     pub fn read_as(&self) -> EsResult<Option<&crate::xpack::security::dls::ReadSecurity>> {
         match self {
