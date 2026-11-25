@@ -5304,6 +5304,17 @@ impl TxnScan {
     /// a call (they are read only for the rows a reader takes); else rows as `next` gives
     /// them, only one when it puts values back.
     pub fn fill_batch(&mut self, batch: &mut crate::storage::batch::RowBatch, max: usize) -> Result<()> {
+        self.fill_batch_in::<false>(batch, max, None)
+    }
+
+    /// `fill_batch`, the store's rows of column blocks (storage format 5) left unmade into
+    /// `lazy` (`FillRows::fill_lazy`).
+    pub fn fill_batch_lazy(&mut self, batch: &mut crate::storage::batch::RowBatch, lazy: &mut crate::storage::batch::LazyRows, max: usize) -> Result<()> {
+        self.fill_batch_in::<true>(batch, max, Some(lazy))
+    }
+
+    #[inline(always)]
+    fn fill_batch_in<const L: bool>(&mut self, batch: &mut crate::storage::batch::RowBatch, max: usize, lazy: Option<&mut crate::storage::batch::LazyRows>) -> Result<()> {
         let resolving = self.resolve && self.src.is_some();
         let o = &mut self.inner;
         if o.upper_head.is_none() && !o.upper_done {
@@ -5329,9 +5340,15 @@ impl TxnScan {
                             true => reader.splice(k, &v, None),
                             false => Ok(v),
                         };
-                        s.fill_batch_with(batch, target - batch.len(), Some(put_back))?;
+                        match L {
+                            true => s.fill_batch_lazy(batch, target - batch.len(), Some(put_back), lazy.expect("lazy rows"))?,
+                            false => s.fill_batch_with(batch, target - batch.len(), Some(put_back))?,
+                        }
                     }
-                    _ => s.fill_batch(batch, target - batch.len())?,
+                    _ => match L {
+                        true => s.fill_batch_lazy(batch, target - batch.len(), None, lazy.expect("lazy rows"))?,
+                        false => s.fill_batch(batch, target - batch.len())?,
+                    },
                 }
             }
             return Ok(());
@@ -5348,6 +5365,14 @@ impl TxnScan {
 impl crate::storage::batch::FillRows for TxnScan {
     fn fill(&mut self, b: &mut crate::storage::batch::RowBatch, max: usize) -> Result<()> {
         self.fill_batch(b, max)
+    }
+
+    fn lazy(&self) -> bool {
+        matches!(&self.inner.lower, Lower::Store(s) if s.has_cols())
+    }
+
+    fn fill_lazy(&mut self, b: &mut crate::storage::batch::RowBatch, lazy: &mut crate::storage::batch::LazyRows, max: usize) -> Result<()> {
+        self.fill_batch_lazy(b, lazy, max)
     }
 }
 

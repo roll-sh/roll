@@ -136,6 +136,7 @@ impl DeadRanges {
 
     /// A scan at snapshot `ts` found nothing visible in [start, live): kept as a hint unless
     /// a commit since `ts` wrote into the range (or the log doesn't reach back that far).
+    #[inline(always)]
     pub(super) fn record(&self, start: &[u8], live: &[u8], ts: u64) {
         if start >= live {
             return;
