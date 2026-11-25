@@ -14,6 +14,8 @@
 //!   `statusCode`), `rewrites` (`source`, `destination`: a rewrite, 200) and `headers`
 //!   (`source`, `headers: [{key, value}]`). A `:name` segment stays one; `:name*`, `:name+` and
 //!   `(.*)` at the end take the rest (`:splat`), and `$1` in a destination is it.
+//!   `trailingSlash` and `cleanUrls` are the site's own settings (`site`: the `_roll` file's
+//!   `trailing_slash = true|false` and `clean_urls = true` lines, apps-control's `SiteRules`).
 
 use serde_json::Value;
 
@@ -22,6 +24,8 @@ use serde_json::Value;
 pub struct Converted {
     pub redirects: String,
     pub headers: String,
+    /// The site's own settings, as `_roll` lines (`trailing_slash = true`).
+    pub site: String,
     pub skipped: Vec<String>,
 }
 
@@ -209,10 +213,14 @@ pub fn from_vercel(text: &str) -> Converted {
             }
         }
     }
-    for k in ["trailingSlash", "routes"] {
-        if v.get(k).is_some() {
-            out.skipped.push(format!("vercel.json {k}"));
-        }
+    if let Some(t) = v["trailingSlash"].as_bool() {
+        out.site.push_str(&format!("trailing_slash = {t}\n"));
+    }
+    if v["cleanUrls"] == true {
+        out.site.push_str("clean_urls = true\n");
+    }
+    if v.get("routes").is_some() {
+        out.skipped.push("vercel.json routes".into());
     }
     out
 }
@@ -237,7 +245,9 @@ mod tests {
         );
         assert_eq!(v.redirects, "/old/:slug /new/:slug 308\n/blog/* https://blog.example/:splat 307\n/app/* /index.html 200\n/api/* service:api/:splat 200\n");
         assert_eq!(v.headers, "/assets/*\n  Cache-Control: public, max-age=31536000, immutable\n");
-        assert_eq!(v.skipped, vec!["vercel.json redirect: /re/(\\d+) → /x (a pattern _redirects can't say)".to_string(), "vercel.json trailingSlash".to_string()]);
+        assert_eq!(v.skipped, vec!["vercel.json redirect: /re/(\\d+) → /x (a pattern _redirects can't say)".to_string()]);
+        assert_eq!(v.site, "trailing_slash = false\n");
+        assert_eq!(from_vercel(r#"{"cleanUrls": true, "trailingSlash": true}"#).site, "trailing_slash = true\nclean_urls = true\n");
         let n = from_netlify("[[redirects]]\nfrom = \"/docs/*\"\nto = \"/guide/:splat\"\n\n[[redirects]]\nfrom = \"/x\"\nto = \"/y\"\nconditions = { Country = [\"us\", \"ca\"], Language = [\"en\"] }\n\n[[redirects]]\nfrom = \"/z\"\nto = \"/w\"\nconditions = { Role = [\"admin\"] }\n\n[[headers]]\nfor = \"/*\"\n[headers.values]\nX-Frame-Options = \"DENY\"\n");
         assert_eq!((n.redirects.as_str(), n.headers.as_str(), n.skipped.len()), ("/docs/* /guide/:splat 301\n/x /y 301 Country=us,ca Language=en\n", "/*\n  X-Frame-Options: DENY\n", 1), "a Role= condition is left out");
         let v = from_vercel(r#"{ "rewrites": [{ "source": "/beta/(.*)", "destination": "https://beta.example.com/$1", "has": [{ "type": "cookie", "key": "beta" }] }, { "source": "/x", "destination": "/y", "has": [{ "type": "header", "key": "x-a" }] }] }"#);

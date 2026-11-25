@@ -175,7 +175,7 @@ fn rules(tar: &std::path::Path, files: &HashMap<String, (u64, u64)>) -> std::io:
         // A line that isn't UTF-8 is skipped, not the site.
         Ok(Some(String::from_utf8_lossy(&b).into_owned()))
     };
-    Ok(crate::site_rules::SiteRules::parse(read("_redirects")?.as_deref(), read("_headers")?.as_deref()))
+    Ok(crate::site_rules::SiteRules::parse(read("_redirects")?.as_deref(), read("_headers")?.as_deref()).with_settings(read("_roll")?.as_deref()))
 }
 
 /// The forms a site's HTML files mark ([`crate::forms::site_forms`]), read out of its tar.
@@ -207,7 +207,13 @@ pub fn exists(site: &Site, path: &str) -> bool {
 /// `/about`'s `about.html` (not `/about/`'s: its relative links would point inside it).
 fn clean<'a>(site: &'a Site, path: &str) -> Option<&'a str> {
     let p = path.trim_start_matches('/');
-    (!p.is_empty() && !p.ends_with('/')).then(|| site.files.get_key_value(&format!("{p}.html")).map(|(k, _)| k.as_str())).flatten()
+    // With trailing slashes on, `/about/` is the page `about.html` is.
+    let p = match site.rules.trailing_slash {
+        Some(true) => p.strip_suffix('/').unwrap_or(p),
+        _ if p.ends_with('/') => return None,
+        _ => p,
+    };
+    (!p.is_empty()).then(|| site.files.get_key_value(&format!("{p}.html")).map(|(k, _)| k.as_str())).flatten()
 }
 
 /// A site's key: its image's digest (hex, no `sha256:`), or for an image built here and named
@@ -499,6 +505,37 @@ pub fn needs_slash(site: &Site, path: &str) -> bool {
     !p.is_empty() && !p.ends_with('/') && !site.files.contains_key(p) && site.files.contains_key(&format!("{p}/index.html"))
 }
 
+/// Where a path that isn't a page's canonical one redirects (308), by the site's settings
+/// (Vercel's `cleanUrls` and `trailingSlash`): `/about.html` to `/about`, a page to its form
+/// with or without the slash; unset, only a directory gains its slash ([`needs_slash`]). None:
+/// it's served as it is.
+pub fn canonical(site: &Site, path: &str) -> Option<String> {
+    let p = path.trim_start_matches('/');
+    let exists = |k: &str| site.files.contains_key(k);
+    let slash = |page: &str| match site.rules.trailing_slash {
+        Some(true) => format!("/{page}/"),
+        _ => format!("/{page}"),
+    };
+    if site.rules.clean_urls && exists(p) {
+        if p == "index.html" {
+            return Some("/".into());
+        }
+        if let Some(dir) = p.strip_suffix("/index.html") {
+            return Some(slash(dir).replace("//", "/"));
+        }
+        if let Some(page) = p.strip_suffix(".html") {
+            return Some(slash(page));
+        }
+    }
+    let page = |q: &str| !q.is_empty() && !q.rsplit('/').next().unwrap_or("").contains('.') && (exists(&format!("{q}.html")) || exists(&format!("{q}/index.html")));
+    match site.rules.trailing_slash {
+        Some(true) if !p.is_empty() && !p.ends_with('/') && !exists(p) && page(p) => Some(format!("/{p}/")),
+        Some(false) if p.ends_with('/') && page(p.trim_end_matches('/')) => Some(format!("/{}", p.trim_end_matches('/'))),
+        None if needs_slash(site, path) => Some(format!("/{p}/")),
+        _ => None,
+    }
+}
+
 /// What a request path is in a site: the file, the directory's `index.html`, else (`spa`: a
 /// page path, no extension) the site's `index.html` as a 200, else its `404.html` as a 404.
 pub fn resolve<'a>(site: &'a Site, path: &str, spa: bool) -> Option<(&'a str, u16)> {
@@ -581,6 +618,19 @@ mod tests {
         assert!(!needs_slash(&site, "/about") && !needs_slash(&site, "/") && !needs_slash(&site, "/index.html"), "a file, or the root, isn't a directory");
         site.files.insert("docs/index.html".into(), (0, 1));
         assert!(needs_slash(&site, "/docs") && !needs_slash(&site, "/docs/"), "a directory is asked for with its slash");
+        // Unset: only a directory gains its slash.
+        assert_eq!((canonical(&site, "/docs"), canonical(&site, "/about"), canonical(&site, "/about.html")), (Some("/docs/".into()), None, None));
+        // Vercel's cleanUrls: the .html goes.
+        site.rules.clean_urls = true;
+        assert_eq!((canonical(&site, "/about.html"), canonical(&site, "/docs/index.html"), canonical(&site, "/index.html")), (Some("/about".into()), Some("/docs".into()), Some("/".into())));
+        // trailingSlash: true, every page ends in one and is served there.
+        site.rules.trailing_slash = Some(true);
+        assert_eq!((canonical(&site, "/about"), canonical(&site, "/docs"), canonical(&site, "/about.html"), canonical(&site, "/about/")), (Some("/about/".into()), Some("/docs/".into()), Some("/about/".into()), None));
+        assert_eq!(resolve(&site, "/about/", false), Some(("about.html", 200)));
+        assert_eq!(canonical(&site, "/assets/app.js"), None, "a file is never a page");
+        // trailingSlash: false, none does.
+        site.rules.trailing_slash = Some(false);
+        assert_eq!((canonical(&site, "/docs/"), canonical(&site, "/docs"), canonical(&site, "/")), (Some("/docs".into()), None, None));
         assert!(exists(&site, "/about"), "so a rewrite never hides it");
         assert_eq!(key(&format!("nginx@sha256:{}", "A".repeat(64))), Some("a".repeat(64)));
     }

@@ -876,6 +876,12 @@ pub trait Apps: Send + Sync {
     async fn spent_usd(&self, _preview: &str, _service: &str) -> Option<f64> {
         None
     }
+    /// Keep a service down where its backend wakes it by itself (roll apps wakes its own on a
+    /// visit: its `pv-` environment paused), `true` while the preview is over its size cap and
+    /// `false` once it isn't. roll's runtime refuses a capped preview's start itself.
+    async fn hold_down(&self, _preview: &str, _service: &str, _down: bool) -> anyhow::Result<()> {
+        Ok(())
+    }
     /// What the service uses right now, `(cores, resident bytes)`: `None` when it isn't running
     /// (or the backend can't tell).
     async fn metrics(&self, _preview: &str, _service: &str) -> Option<(f64, u64)> {

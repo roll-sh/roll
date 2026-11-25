@@ -1334,11 +1334,13 @@ async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &cr
             skew_ok &= status == 200;
             crate::sites::resolve(&site, &to, false).filter(|(_, s)| *s == 200).map(|(n, _)| (n, status))
         }
-        None if crate::sites::needs_slash(&site, &path) => {
+        None if let Some(to) = crate::sites::canonical(&site, &path) => {
             done(308, 0);
+            // The canonical path, percent-encoded again, with the query kept.
+            let to = percent_encoding::utf8_percent_encode(&to, crate::site_rules::SPLAT).to_string();
             let to = match req.query.as_deref() {
-                Some(q) => format!("{}/?{q}", req.path),
-                None => format!("{}/", req.path),
+                Some(q) => format!("{to}?{q}"),
+                None => to,
             };
             let mut r = Response::new(Body::empty());
             *r.status_mut() = StatusCode::PERMANENT_REDIRECT;
