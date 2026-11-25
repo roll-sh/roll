@@ -59,7 +59,6 @@ GET /v1/previews/{id}/files                                                    i
 PUT /v1/previews/{id}/files                                                    interactive (a shell, files, a forward): an admin's, live
 GET /v1/previews/{id}/forward                                                  interactive (a shell, files, a forward): an admin's, live
 GET /v1/previews/{id}/swap                                                     interactive (a laptop's process standing in for a service): an admin's, live
-GET /v1/previews/{id}/notes/{note}/crop                                        the dashboard's (a note's image)
 GET /v1/previews/{id}/qr.png                                                   the dashboard's (a QR code)
 POST /v1/previews/{id}/regressions/accept                                      a person's call (approving, accepting, cutting off)
 POST /v1/previews/{id}/shell/sessions                                          interactive (a shell, files, a forward): an admin's, live
@@ -112,6 +111,8 @@ PATCH /v1/secrets/projects/{project}/aws-users/{id}                            a
 POST /v1/secrets/projects/{project}/backup                                     a person's call: it seals every value to a recipient key the caller picks
 DELETE /v1/secrets/projects/{project}/backup/schedule                          a person's call: stopping a project's backups
 PUT /v1/secrets/projects/{project}/backup/schedule                             a person's call: it seals every value to a recipient key the caller picks
+GET /v1/secrets/projects/{project}/backup/latest                               a person's call: a sealed backup only its recipient's secret key opens (roll secrets backup verify)
+POST /v1/secrets/projects/{project}/backup/verify                              a person's call: it takes an opened backup, every value of the project in the clear
 POST /v1/secrets/projects/{project}/cas                                        an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/cas/{id}                                 an outside integration's setup: an admin's, with its credentials
 PATCH /v1/secrets/projects/{project}/cas/{id}/acme                             an outside integration's setup: an admin's, with its credentials

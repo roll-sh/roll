@@ -318,6 +318,8 @@ pub struct FakeApps {
     pub removed: Mutex<Vec<(String, String)>>,
     /// What each service uses, by name (unset: not running).
     pub metrics: Mutex<HashMap<String, (f64, u64)>>,
+    /// What roll apps billed each service's environment this month (None: roll runs it).
+    pub spent: Mutex<Option<f64>>,
     /// Each service's errors, by name.
     /// Each service's error groups, by `preview/service` or by service for every preview.
     pub errors: Mutex<HashMap<String, Vec<roll_previews::ErrorGroup>>>,
@@ -448,6 +450,9 @@ impl Apps for FakeApps {
     }
     async fn metrics(&self, _: &str, service: &str) -> Option<(f64, u64)> {
         self.metrics.lock().get(service).copied()
+    }
+    async fn spent_usd(&self, _: &str, _: &str) -> Option<f64> {
+        *self.spent.lock()
     }
     async fn browser_checks(&self, _: &str, service: &str) -> Option<Vec<roll_previews::ports::BrowserCheckResult>> {
         self.browser.lock().get(service).cloned()

@@ -1,5 +1,7 @@
 # Metabase: dashboards and questions over your data (metabase.com). Its own settings live in a
-# roll Postgres database; connect the databases it reads from its admin pages.
+# roll Postgres database; connect the databases it reads from its admin pages. Its JVM takes
+# minutes to start and its alerts and subscriptions run only while it's up, so it stays up
+# (min_instances = 1), its heap three quarters of the memory.
 [apps.metabase]
 image = "metabase/metabase:v0.56.x"
 port = 3000
@@ -8,8 +10,10 @@ links = ["db"]
 health_path = "/api/health"
 health_timeout_s = 300
 memory_mb = 2048
+min_instances = 1
 [apps.metabase.variables]
 MB_DB_CONNECTION_URI = "${{ DATABASE_URL }}"
 MB_SITE_URL = "${{ ROLL_PUBLIC_URL }}"
+JAVA_OPTS = "-XX:MaxRAMPercentage=75"
 [databases.db]
 kind = "postgres"

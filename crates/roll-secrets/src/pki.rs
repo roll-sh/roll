@@ -150,7 +150,7 @@ const FIELDS: &[Field] = &[
     Field { field: "ca_chain", label: "CA chain", modes: &[Mode::Dynamic, Mode::Managed], secret: false, suggest: "TLS_CA_CHAIN", credential: Some("cert") },
 ];
 
-fn aad(project: &str, id: &str) -> String {
+pub(crate) fn aad(project: &str, id: &str) -> String {
     format!("roll-secrets:pki:{project}:{id}:key")
 }
 
@@ -161,7 +161,7 @@ pub(crate) fn is_domain(d: &str) -> bool {
 }
 
 impl Policy {
-    fn check(&mut self) -> Result<()> {
+    pub(crate) fn check(&mut self) -> Result<()> {
         for d in &mut self.domains {
             *d = d.trim().trim_end_matches('.').to_ascii_lowercase();
         }

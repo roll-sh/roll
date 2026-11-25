@@ -86,7 +86,12 @@ TOML='[preview]\nimage = \"'"$IMAGE"'\"\nrun = \"env > env.txt && python -m http
 # The service's API, as an OpenAPI document (github.openapi): the change removes one operation and adds one.
 OPENAPI_MAIN='{\"paths\":{\"/users\":{\"get\":{\"parameters\":[{\"name\":\"limit\",\"in\":\"query\",\"schema\":{\"type\":\"integer\"}}]}},\"/users/{id}\":{\"delete\":{}}}}'
 OPENAPI_CHG='"openapi.json":{"content":"{\"paths\":{\"/users\":{\"get\":{\"parameters\":[{\"name\":\"limit\",\"in\":\"query\",\"required\":true,\"schema\":{\"type\":\"integer\"}}]}},\"/orders\":{\"post\":{}}}}"}'
-api POST /v1/code/repos/acme/web/land "{\"message\":\"init\",\"files\":{\"roll.toml\":{\"content\":\"$TOML\"},\"index.html\":{\"content\":\"main\"},\"openapi.json\":{\"content\":\"$OPENAPI_MAIN\"}}}" >/dev/null
+# A page that answers only once signed in (github.login, live): /login.html sets its cookie when
+# what's typed is the service's own GREETING (from its env.txt), and /account.html says which.
+LOGIN_HTML='<!doctype html><html lang="en"><title>Sign in</title><input id="who" aria-label="Who"><script>const x = new XMLHttpRequest(); x.open("GET", "/env.txt", false); x.send(); const want = x.responseText.split("\n"); document.getElementById("who").addEventListener("input", (e) => { if (want.includes("GREETING=" + e.target.value)) document.cookie = "signed=1; path=/"; });</script>'
+ACCOUNT_HTML='<!doctype html><html lang="en"><title>Account</title><p id="state"></p><script>document.getElementById("state").textContent = document.cookie.split("; ").includes("signed=1") ? "signed in" : "signed out";</script>'
+as_json() { python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$1"; }
+api POST /v1/code/repos/acme/web/land "{\"message\":\"init\",\"files\":{\"roll.toml\":{\"content\":\"$TOML\"},\"index.html\":{\"content\":\"main\"},\"openapi.json\":{\"content\":\"$OPENAPI_MAIN\"},\"login.html\":{\"content\":$(as_json "$LOGIN_HTML")},\"account.html\":{\"content\":$(as_json "$ACCOUNT_HTML")}}}" >/dev/null
 # A second service, from a second repo (its default branch in every preview): its pages too.
 api POST /v1/code/repos '{"owner":"acme","name":"wiki","source":"native"}' >/dev/null
 api POST /v1/code/repos/acme/wiki/land "{\"message\":\"init\",\"files\":{\"roll.toml\":{\"content\":\"$TOML\"},\"index.html\":{\"content\":\"the wiki\"}}}" >/dev/null
@@ -974,6 +979,12 @@ TRY_SAID=$(echo "$TRY" | jq_ "'%s %s' % (d['status'], 'preview of change 1' in d
 TRY_LOGIN=$(echo "$TRY" | jq_ "d.get('login') or ''")
 [ "$TRY_LOGIN" = "signing in stopped at type #nope: nothing to type into: the page is the signed-out one" ] || { echo "an agent's run should sign in first and say where it stopped: $TRY_LOGIN"; exit 1; }
 head -c 8 "$HOME_DIR/try.png" | od -An -c | has "P   N   G" || { echo "the run's picture should be a PNG"; exit 1; }
+# Signed in for real: the page behind the sign-in answers as signed in only when roll typed the
+# preview's own GREETING into /login.html (its cookie kept for the run's page), never echoing it.
+api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"login":{"page":"/login.html","steps":[{"type":["#who","$GREETING"]}]}}}' >/dev/null
+TRY_IN=$(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" --json preview try "$PV" --service web /account.html)
+TRY_IN_SAID=$(echo "$TRY_IN" | jq_ "'%s | %s' % (d.get('login'), d['text'].strip())")
+[ "$TRY_IN_SAID" = "signed in through /login.html first | signed in" ] || { echo "a run behind the sign-in should see the signed-in page: ${TRY_IN:0:300}"; exit 1; }
 FB_LINK=$(api GET "/v1/previews/$PV" | jq_ "[x for x in d['services'] if x['name'] == 'web'][0]['share_url']")
 FB_SAID=$(docker run --rm --name roll-previews-fbtest --network host -e LINK="$FB_LINK" -v "$ROOT/scripts/preview-cost/feedback-check.js:/w/check.js:ro" roll-previews-shot:1.64.1 sh -c 'NODE_PATH=$(npm root -g) node /w/check.js' 2>&1 | tail -1)
 case "$FB_SAID" in "/ · "*"a"*" · a live note") ;; *) echo "the page's feedback button should open roll with the page, the element and the note: $FB_SAID"; exit 1;; esac
