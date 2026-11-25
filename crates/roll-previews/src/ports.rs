@@ -740,6 +740,9 @@ pub struct Tried {
     pub step_failed: Option<String>,
     pub text: String,
     pub errors: Vec<String>,
+    /// What its sign-in said (`github.login`), when it signed in first.
+    #[serde(default)]
+    pub login: Option<String>,
 }
 
 pub trait ShellIo: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
@@ -972,8 +975,9 @@ pub trait Apps: Send + Sync {
         Ok(None)
     }
     /// `path` of the service in a browser, `steps` taken on it (a page state's steps), in the
-    /// service's network (`…/try`). `None` where this backend can't.
-    async fn try_page(&self, _preview: &str, _service: &str, _path: &str, _steps: &[crate::settings::Step]) -> anyhow::Result<Option<Tried>> {
+    /// service's network (`…/try`), signed in first with `login` when it's given (a trusted
+    /// preview's `github.login`). `None` where this backend can't.
+    async fn try_page(&self, _preview: &str, _service: &str, _path: &str, _steps: &[crate::settings::Step], _login: Option<&crate::ports::Login>) -> anyhow::Result<Option<Tried>> {
         Ok(None)
     }
     /// `path` of the service, read through roll's own way in, `GET` or `HEAD`: the runtime's own

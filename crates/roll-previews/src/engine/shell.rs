@@ -315,6 +315,10 @@ pub struct TryRun {
     pub step_failed: Option<String>,
     pub text: String,
     pub errors: Vec<String>,
+    /// How its sign-in went (`github.login`): signed in first, where it stopped, or why it
+    /// didn't (a fork's preview). None when the project has none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub login: Option<String>,
 }
 
 /// Runs going at once for one preview, at most (each starts a browser).
@@ -366,7 +370,10 @@ impl Engine {
         }
         let _going = Going(count);
         let _slot = tokio::time::timeout(std::time::Duration::from_secs(30), self.shooting.clone().acquire_owned()).await.map_err(|_| Error::Conflict("the node's browsers are all busy: try again in a moment".into()))?.map_err(|e| Error::Internal(e.to_string()))?;
-        let t = match self.apps.try_page(id, &svc, path, steps).await {
+        // Signed in first, as the screenshots are (a trusted preview's `github.login`).
+        let row = self.store.row(id)?;
+        let (login, why_not) = self.run_login(&row).await;
+        let t = match self.apps.try_page(id, &svc, path, steps, login.as_ref()).await {
             Ok(Some(t)) => t,
             Ok(None) => return Err(Error::Conflict(format!("{svc} can't be driven here (a roll apps instance roll can't join: Fargate)"))),
             Err(e) => return Err(Error::Conflict(self.mask_text(id, &format!("{e:#}")).await?)),
@@ -383,7 +390,8 @@ impl Engine {
             }
             kept.insert(run.clone(), (id.to_string(), now, png));
         }
-        Ok(TryRun { run, status: t.status, step_failed: t.step_failed.map(|s| mask(&s)), text: mask(&t.text), errors: t.errors.iter().map(|e| mask(e)).collect() })
+        let login = why_not.map(|w| format!("signed out: {w}")).or(t.login).map(|s| mask(&s));
+        Ok(TryRun { run, status: t.status, step_failed: t.step_failed.map(|s| mask(&s)), text: mask(&t.text), errors: t.errors.iter().map(|e| mask(e)).collect(), login })
     }
 
     /// `GET …/{id}/try/{run}/screenshot`: a run's picture, for [`TRY_KEPT_MS`].

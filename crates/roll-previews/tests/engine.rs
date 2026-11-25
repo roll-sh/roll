@@ -212,9 +212,10 @@ async fn with_screenshots_a_baseline_of_the_default_branch_is_kept_to_compare_ch
     assert_eq!(e.engine.store.row_by_change("chg_1").unwrap().map(|r| r.desired), Some(Desired::Active), "the change's preview came back with its repo");
 }
 
-/// A trusted preview's screenshots sign in to the app first (`github.login`), a `$NAME` typed as
-/// the preview's own secret's value (which `Debug` never shows), and the activity says how it
-/// went; a fork's are taken signed out, which it says, its code never given what's typed.
+/// A trusted preview's screenshots and agents' runs (`try`) sign in to the app first
+/// (`github.login`), a `$NAME` typed as the preview's own secret's value (which `Debug` never
+/// shows), and the activity or the run's answer says how it went; a fork's are taken signed out,
+/// which they say, its code never given what's typed.
 #[tokio::test]
 async fn screenshots_sign_in_first_on_a_trusted_preview() {
     let login = json!({ "page": "/login", "steps": [{ "type": ["#email", "qa@acme.dev"] }, { "type": ["#password", "$E2E_PASSWORD"] }, { "press": "Enter" }] });
@@ -243,6 +244,15 @@ async fn screenshots_sign_in_first_on_a_trusted_preview() {
     assert!(said(&ours.id).iter().any(|m| m == "screenshots: signed in through /login before its pages"), "{:?}", said(&ours.id));
     assert!(asked(&fork.id).is_none(), "a fork's run signs in with nothing");
     assert!(said(&fork.id).iter().any(|m| m.starts_with("screenshots taken signed out: a fork's preview")), "{:?}", said(&fork.id));
+    // An agent's run the same way.
+    *e.apps.tried.lock() = Some(roll_previews::ports::Tried { status: 200, text: "Dashboard".into(), ..Default::default() });
+    let run = e.engine.try_page(&ours.id, None, "/account", &[]).await.unwrap();
+    let l = e.apps.try_logins.lock().last().cloned().flatten().expect("signed in");
+    assert_eq!(l.steps[1], roll_previews::settings::Step::Type("#password".into(), "hunter2-from-staging".into()));
+    assert_eq!(run.login.as_deref(), Some("signed in through /login first"));
+    let run = e.engine.try_page(&fork.id, None, "/account", &[]).await.unwrap();
+    assert!(e.apps.try_logins.lock().last().cloned().flatten().is_none(), "a fork's run signs in with nothing");
+    assert!(run.login.as_deref().is_some_and(|l| l.starts_with("signed out: a fork's preview")), "{:?}", run.login);
 }
 
 /// Pages changed the same way against main's (Percy's grouped diffs), the first page included,

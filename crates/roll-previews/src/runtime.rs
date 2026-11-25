@@ -1366,6 +1366,7 @@ fn tried(out: &str) -> crate::ports::Tried {
         step_failed: said["step_failed"].as_str().map(|s| line(s, 200)),
         text: said["text"].as_str().unwrap_or("").chars().filter(|c| !c.is_control() || *c == '\n').take(40_000).collect(),
         errors: said["errors"].as_array().into_iter().flatten().filter_map(|e| e.as_str().map(|e| line(e, 300))).take(20).collect(),
+        login: said["login"].as_str().map(|s| line(s, 200)),
     }
 }
 /// The line of what a run's pages served (`$OUT.bodies.json`: 8 MiB as base64, and JSON).
@@ -1643,7 +1644,7 @@ impl Runtime {
 
     /// An agent's run (`…/try`) in container `name`'s network, locked down as a screenshot is: the
     /// page at `path`, `steps` taken, then what the browser saw ([`tried`]).
-    pub async fn try_in(&self, name: &str, port: u16, path: &str, steps: &[crate::settings::Step]) -> anyhow::Result<crate::ports::Tried> {
+    pub async fn try_in(&self, name: &str, port: u16, path: &str, steps: &[crate::settings::Step], login: Option<&crate::ports::Login>) -> anyhow::Result<crate::ports::Tried> {
         if code_preview::docker::docker(&["image", "inspect", "--format", "{{.Id}}", &self.cfg.screenshot_image]).await.is_err() {
             code_preview::docker::docker(&["pull", "--quiet", &self.cfg.screenshot_image]).await?;
         }
@@ -1652,13 +1653,15 @@ impl Runtime {
         let mut args = shot_args(&shot, name, port);
         // The steps (typed text among them) go on stdin, never a command line (`ps`, `docker
         // inspect`): written to a file in the container's own /tmp.
-        let asked = serde_json::to_vec(&serde_json::json!({ "path": path, "steps": steps }))?;
-        args.extend(["--env".into(), "TRY=1".into(), "--env".into(), "TRY_FILE=/tmp/try.json".into()]);
+        // The sign-in first (`login_json`), then the run's own.
+        let mut asked = login_json(login)?;
+        asked.extend(serde_json::to_vec(&serde_json::json!({ "path": path, "steps": steps }))?);
+        args.extend(["--env".into(), "TRY=1".into(), "--env".into(), "TRY_FILE=/tmp/try.json".into(), "--env".into(), "LOGIN_FILE=/tmp/login.json".into()]);
         args.extend([
             self.cfg.screenshot_image.clone(),
             "sh".into(),
             "-c".into(),
-            format!("cat > /tmp/try.json; {} >/dev/null 2>&1; (base64 -w0 /tmp/s.png 2>/dev/null || true) && echo && (cat /tmp/s.png.try.json 2>/dev/null || true)", self.cfg.screenshot_command),
+            format!("IFS= read -r L; printf '%s' \"$L\" > /tmp/login.json; L=; cat > /tmp/try.json; {} >/dev/null 2>&1; (base64 -w0 /tmp/s.png 2>/dev/null || true) && echo && (cat /tmp/s.png.try.json 2>/dev/null || true)", self.cfg.screenshot_command),
         ]);
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
         let out = match tokio::time::timeout(TRY_FOR, docker_with_input(&argv, asked, SCREENSHOT_MAX * 4 / 3 + SHOT_REPORT_MAX)).await {
@@ -1916,9 +1919,9 @@ impl Apps for Runtime {
         Ok(Some((status, first)))
     }
 
-    async fn try_page(&self, preview: &str, service: &str, path: &str, steps: &[crate::settings::Step]) -> anyhow::Result<Option<crate::ports::Tried>> {
+    async fn try_page(&self, preview: &str, service: &str, path: &str, steps: &[crate::settings::Step], login: Option<&crate::ports::Login>) -> anyhow::Result<Option<crate::ports::Tried>> {
         let Some((name, port)) = self.running_target(preview, service).await? else { return Ok(None) };
-        self.try_in(&name, port, path, steps).await.map(Some)
+        self.try_in(&name, port, path, steps, login).await.map(Some)
     }
 
     async fn screenshot(&self, preview: &str, service: &str, opts: &crate::ports::ShotOptions) -> anyhow::Result<Option<crate::ports::Shot>> {
@@ -2706,7 +2709,12 @@ async fn serve(rt: Arc<Runtime>, preview: String, service: String, mut req: Requ
 /// its shell writes to a file of the container's own that the browser's script reads and
 /// removes: never a command line, an environment variable or the record. An empty line for none.
 fn login_line(opts: &crate::ports::ShotOptions) -> anyhow::Result<Vec<u8>> {
-    let login = opts.login.as_ref().filter(|l| crate::settings::page_path_ok(&l.page) && !l.steps.is_empty() && l.steps.len() <= crate::settings::MAX_STEPS && l.steps.iter().all(crate::settings::step_ok));
+    login_json(opts.login.as_ref())
+}
+
+/// [`login_line`] for one sign-in (`try`'s too).
+fn login_json(login: Option<&crate::ports::Login>) -> anyhow::Result<Vec<u8>> {
+    let login = login.filter(|l| crate::settings::page_path_ok(&l.page) && !l.steps.is_empty() && l.steps.len() <= crate::settings::MAX_STEPS && l.steps.iter().all(crate::settings::step_ok));
     let mut line = login.map(serde_json::to_vec).transpose()?.unwrap_or_default();
     line.push(b'\n');
     Ok(line)
