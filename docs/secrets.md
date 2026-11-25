@@ -516,7 +516,8 @@ to install. An app moves between it and the Lambda extension unchanged:
   AWS's agent refuses it. `/health` needs no token, so a probe can ask it, and says only `ok` and the version.
 - **Logging in.** As every `roll secrets` command does: a workload identity (`ROLL_IDENTITY`) with
   the platform's OIDC token in a file it refreshes (`ROLL_OIDC_TOKEN_FILE`: Kubernetes' projected
-  service account token, ECS's or EC2's web identity token, GitHub's), read again at each login. The
+  service account token, ECS's or EC2's web identity token, GitHub's), read again at each login; a
+  VM's own identity from its metadata server, or a machine credential ("On a VM", below). The
   login renews itself a quarter of its life before it ends, and logs in again at once on a 401;
   a login that fails leaves the current one in use while it lasts. `ROLL_TOKEN` (a scoped token)
   works too, for development. An identity that's a preview's or a sandbox's reads as untrusted:
@@ -601,10 +602,103 @@ The app reads as on Lambda, with the header from the file:
 curl -sH "X-Roll-Token: $(cat /run/roll/agent-token)" http://127.0.0.1:2773/secrets/DATABASE_URL
 ```
 
+### On a VM
+A VM logs in as itself, with no long-lived token on its disk. Each platform's way, in the agent's
+unit's `Environment=` (and `roll run`'s, and every `roll secrets` command's: they share the login,
+`crates/roll-cli/src/secrets/vm_login.rs`):
+
+- **AWS EC2.** `ROLL_IDENTITY=idn_…` of an AWS identity for the instance profile's role ("AWS IAM"
+  below): the CLI signs a `GetCallerIdentity` with the instance's credentials from IMDSv2. Nothing
+  else to set.
+- **Google Compute Engine.** `ROLL_IDENTITY=idn_…` and `ROLL_IDENTITY_KIND=gcp`. Each login asks the
+  metadata server for the instance's service account identity token
+  (`http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=…&format=full`,
+  with `Metadata-Flavor: Google`; `GCE_METADATA_HOST` overrides the host, as Google's libraries let
+  it) and logs in with it. The identity's issuer is `https://accounts.google.com`; Google signs for
+  everyone, so its subject is the service account's numeric unique id, exactly (`gcloud iam
+  service-accounts describe web@acme.iam.gserviceaccount.com --format='value(uniqueId)'`). Narrow
+  further with `--claim email=web@acme.iam.gserviceaccount.com`, or a `/google/compute_engine/…`
+  claim (`format=full` adds the project, zone and instance).
+
+  ```sh
+  roll secrets identities add web --issuer https://accounts.google.com --subject 104…1 --for-env production
+  ```
+- **Azure VM.** `ROLL_IDENTITY=idn_…` and `ROLL_IDENTITY_KIND=azure`. Each login asks the instance
+  metadata service for the VM's managed identity token
+  (`http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=…`, with
+  `Metadata: true`; `ROLL_AZURE_CLIENT_ID` picks a user-assigned identity) and logs in with it.
+  Entra issues tokens only for a resource it knows: register an application with an Application ID
+  URI (`api://roll-secrets`), give the identity that audience, and set `ROLL_OIDC_AUDIENCE` to it on
+  the VM. The issuer is the tenant's, `https://sts.windows.net/<tenant id>/` (or
+  `https://login.microsoftonline.com/<tenant id>/v2.0` when the application asks for v2 tokens), and
+  every identity in the tenant shares it, so the subject is the managed identity's object id,
+  exactly.
+
+  ```sh
+  roll secrets identities add web --issuer https://sts.windows.net/<tenant id>/ \
+    --subject <object id> --audience api://roll-secrets --for-env production
+  ```
+- **Bare metal and on premises: a bootstrap token.** No platform vouches for the machine, so an
+  admin does, once per machine, and the machine then keeps its own short-lived credential, as
+  Akeyless' Universal Identity does:
+  1. A **machine identity** (`POST …/identities {name, kind: "machine", environments, actions,
+     ttl_minutes?, allowed_ips?}`, `roll secrets identities add racks --machine --for-env
+     production`): the scope its machines' logins get.
+  2. A **bootstrap token** per machine (`POST …/identities/{id}/bootstrap {minutes?,
+     allowed_ips?, credential_hours?}`, `roll secrets identities bootstrap idn_…`; admin, made by a
+     person): `rlbt_…`, shown once, single-use, valid for `minutes` (1–60, default 10), and from
+     `allowed_ips` only if given. Hand it to the machine's provisioning (cloud-init, Ansible,
+     a USB stick), never to a repository.
+  3. On the machine, `ROLL_IDENTITY=idn_…` with `ROLL_BOOTSTRAP_TOKEN` (or
+     `ROLL_BOOTSTRAP_TOKEN_FILE`): the first login exchanges the token
+     (`POST /v1/secrets/login/bootstrap {identity, token}`) for a **machine credential** (`rlmc_…`,
+     `credential_hours` long, 1–720, default 24), which the CLI keeps in
+     `machine-<identity>.json` (0600, in a 0700 directory) under systemd's `$STATE_DIRECTORY`, else
+     `$XDG_STATE_HOME/roll`, else `~/.local/state/roll` (`ROLL_MACHINE_CREDENTIAL_FILE` names
+     another), and logs in with it (`POST /v1/secrets/login {identity, machine}`).
+  4. Every login after reads the file. Past half its life, the credential is replaced
+     (`POST /v1/secrets/login/refresh {identity, credential}`): a new one is made, the old one is
+     spent, and the file is written whole (a temporary file renamed over it). Replacing and logging
+     in hold a lock on the file, so the agent and a `roll run` on one machine never present a spent
+     one. A replacement that gets no answer leaves the current credential in use while it lasts.
+
+  **A spent token or credential presented again revokes the machine.** A second exchange of the
+  bootstrap token, or a replaced credential used again, is a 401, and every credential of that
+  machine and every token its logins got is revoked at once: whoever copied it, the thief or the
+  machine, the next use of the copy ends both. The machine then needs a new bootstrap token. The
+  same token left in the environment isn't exchanged again (the file remembers its SHA-256); a new
+  one there is, and replaces the file. A credential that wasn't replaced before it ended (the
+  machine was off longer than `credential_hours`) needs a new bootstrap token too. The audit log has
+  `identity.bootstrap`, `identity.bootstrap.exchange`, `identity.machine.refresh` and
+  `identity.machine.reused`; deleting, disabling or cutting off the identity revokes all its
+  machines. The bootstrap tokens and credentials are roll-access grants (docs/permissions.md,
+  "Bootstrap tokens and machine credentials"), looked up on every use, and open nothing but these
+  logins.
+
+  ```ini
+  [Service]
+  Environment=ROLL_API_URL=https://api.roll.example ROLL_IDENTITY=idn_…
+  # Only for the first start; a new token re-enrolls the machine.
+  EnvironmentFile=-/etc/roll/bootstrap.env
+  ExecStart=/usr/local/bin/roll secrets -p shop -e production agent --token-file /run/roll/agent-token
+  User=shop
+  StateDirectory=roll
+  RuntimeDirectory=roll
+  ```
+
+The Go and Python clients log in with OIDC tokens and AWS only, not yet with `gcp`, `azure` or a
+machine credential.
+
 Tests: `crates/roll-cli/tests/secrets.rs` (`the_local_agent_answers_only_requests_that_carry_its_token`,
 `a_change_reaches_the_local_agents_cache_through_the_digest`,
-`a_revoked_logins_local_agent_answers_a_refusal_within_one_poll`); the identity login's renewal is
-`relogin_tests` in `crates/roll-cli/src/secrets.rs`, which the agent shares.
+`a_revoked_logins_local_agent_answers_a_refusal_within_one_poll`,
+`the_local_agent_on_a_gce_vm_logs_in_with_the_metadata_servers_identity_token`,
+`a_bootstrap_token_becomes_a_machine_credential_kept_on_disk_and_replaced_at_half_life`); the
+identity login's renewal is `relogin_tests` in `crates/roll-cli/src/secrets.rs`, which the agent
+shares. Bootstrap tokens over HTTP:
+`a_bootstrap_token_is_exchanged_once_and_a_spent_credential_ends_its_machine` in
+`crates/rolld/tests/secrets.rs`; their chains in roll-access:
+`a_spent_bootstrap_token_or_machine_credential_ends_its_chain` in `crates/roll-access/tests/access.rs`.
 ## Customer-managed keys
 A project's data key can be wrapped once more by a KMS key in the customer's own AWS account, as
 Infisical's external KMS does (`PUT …/kms {key: "arn:aws:kms:…"}`, `roll secrets kms set ARN`;
@@ -5462,8 +5556,9 @@ action:
 | `delete` | a secret, an environment, ephemeral environments by label, a lease |
 | `admin` | rename or reorder environments, protection and approval policy, reviewing a request, syncs (create, delete, run), tokens and identities (listing too), audit sinks, revoking another's one-time share, exports (sharing a folder with another project), imports from another project, purge and retention, required keys (setting), making a trusted preview |
 
-`POST /v1/secrets/login` (workload identities) and the one-time share links (`/v1/secrets/shares/…`)
-are public: the OIDC token, or the key in the link, is the credential.
+`POST /v1/secrets/login` (workload identities, and machines' `/login/bootstrap` and `/login/refresh`)
+and the one-time share links (`/v1/secrets/shares/…`) are public: the OIDC token, the bootstrap token
+or machine credential, or the key in the link, is the credential.
 
 Values are returned only by the `reveal` routes, so the gate can classify a request without reading
 its body. A route that touches a second resource (the source of a promote, a reference into another
@@ -5992,8 +6087,9 @@ minutes.
 - **The CLI.** With `ROLL_IDENTITY=idn_…` and no `ROLL_TOKEN`, `roll secrets …` and `roll run` log
   in by themselves, with the token from `ROLL_OIDC_TOKEN`, `ROLL_OIDC_TOKEN_FILE` (a Kubernetes
   projected service account token), Azure Pipelines' own endpoint (`SYSTEM_ACCESSTOKEN` mapped
-  into the step: "Azure Pipelines" above) or GitHub Actions' own endpoint (`permissions: id-token: write`;
-  audience `ROLL_OIDC_AUDIENCE`, default the server's URL):
+  into the step: "Azure Pipelines" above), GitHub Actions' own endpoint (`permissions: id-token: write`;
+  audience `ROLL_OIDC_AUDIENCE`, default the server's URL), or a VM's metadata server
+  (`ROLL_IDENTITY_KIND=gcp` or `azure`, the same audience; "On a VM"):
 
   ```sh
   roll secrets identities add deploy --github acme/web --claim ref=refs/heads/main --for-env production
@@ -6630,10 +6726,13 @@ isn't in the workspace is 404.
 | `DELETE /placeholders/{id}` | | 204 (`delete` in its folder); 409 when it's already ended |
 | `GET /identities` | | `Identity[]` (admin) |
 | `POST /identities` | `NewIdentity` | 201 `Identity` |
-| `DELETE /identities/{id}` | | 204 (its tokens revoked) |
+| `DELETE /identities/{id}` | | 204 (its tokens, and a machine identity's machines, revoked) |
 | `PATCH /identities/{id}` | `{disabled}` | `Identity` (admin; a person's): `false` enables one a cut-off disabled, `true` disables it and revokes its live logins |
-| `PUT /identities/{id}/jwks` | `{jwks}` | `Identity` (admin; a person's): its pinned keys replaced, its id kept (400 for an `aws` one) |
-| `POST /v1/secrets/login` | `{identity, token}` or `{identity, aws: {method, url, headers, body}}` | `{token, expires_at, project, identity}` (public; `aws`: a signed `GetCallerIdentity`, "AWS IAM") |
+| `PUT /identities/{id}/jwks` | `{jwks}` | `Identity` (admin; a person's): its pinned keys replaced, its id kept (400 for an `aws` or `machine` one) |
+| `POST /identities/{id}/bootstrap` | `{minutes?, allowed_ips?, credential_hours?}` | 201 `{identity, chain, secret, expires_at}` (admin; a person's; a `machine` identity's single-use `rlbt_…`, "On a VM") |
+| `POST /v1/secrets/login` | `{identity, token}`, `{identity, aws: {method, url, headers, body}}` or `{identity, machine}` | `{token, expires_at, project, identity}` (public; `aws`: a signed `GetCallerIdentity`, "AWS IAM"; `machine`: a machine credential) |
+| `POST /v1/secrets/login/bootstrap` | `{identity, token}` | `{identity, chain, secret, expires_at, refresh_at}` (public: a bootstrap token for a machine credential, `rlmc_…`; 401 for one used already, which revokes its machine) |
+| `POST /v1/secrets/login/refresh` | `{identity, credential}` | as `…/login/bootstrap` (public: the current machine credential for the next; the one presented is spent) |
 | `GET /audit?env=&key=&actor=&action=&before=&since=&limit=&digests=&format=` | | `AuditEntry[]` newest first, or CSV/JSONL with `format`; `digests=false` leaves out `audit.digest` rows |
 | `GET /events?after=&limit=&kinds=&environment=&latest=` | | `{events: SecretsEvent[], next}` in commit order after the cursor (`limit` 1–500, default 100; `kinds` comma-separated, a family as `request.*` (`secret.*` is `secret.changed`, `secret.deleted` and `secret.leaked`), 400 for an unknown one; `environment` needs read there); `latest=1` answers `{events: [], next}` at the head, 400 with `after` ("Events") |
 | `GET /required` | | `Required[]` |

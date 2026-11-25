@@ -89,6 +89,9 @@ const AZURE_DEVOPS: &str = "https://vstoken.dev.azure.com/";
 /// Microsoft Entra's v2.0 issuer: one per tenant (`https://login.microsoftonline.com/<tenant>/v2.0`),
 /// signing for every app and identity in it, Azure DevOps' newer service connections among them.
 const ENTRA: (&str, &str) = ("https://login.microsoftonline.com/", "/v2.0");
+/// Entra's v1.0 issuer (`https://sts.windows.net/<tenant>/`): an Azure VM's managed identity's
+/// tokens from IMDS, for every app and identity in the tenant too.
+const ENTRA_V1: &str = "https://sts.windows.net/";
 
 /// Why an identity for `issuer` with `subject` would let other tenants in, if it would: a shared
 /// issuer's subject must name one tenant literally. Not optional: every identity is checked.
@@ -102,7 +105,8 @@ pub fn open_to_others(issuer: &str, subject: &str) -> Option<&'static str> {
         let one = !org.is_empty() && !subject.contains('*') && (named("p://") || named("sc://"));
         return (!one).then_some("p://<organization>/<project>/<pipeline> or sc://<organization>/<project>/<service connection>, exactly (Azure Pipelines' sub)");
     }
-    if issuer.strip_prefix(ENTRA.0).and_then(|r| r.strip_suffix(ENTRA.1)).is_some_and(|t| !t.is_empty() && !t.contains('/')) && subject.contains('*') {
+    let v1 = issuer.strip_prefix(ENTRA_V1).map(|t| t.trim_end_matches('/')).is_some_and(|t| !t.is_empty() && !t.contains('/'));
+    if (v1 || issuer.strip_prefix(ENTRA.0).and_then(|r| r.strip_suffix(ENTRA.1)).is_some_and(|t| !t.is_empty() && !t.contains('/'))) && subject.contains('*') {
         return Some("the token's sub exactly (Microsoft Entra's: an Azure DevOps service connection's /eid1/…/sc/<organization id>/<connection id>)");
     }
     SHARED.iter().find(|(i, ..)| *i == issuer).filter(|(_, prefix, owner_name, _)| !pinned(subject, prefix, *owner_name)).map(|(.., shape)| *shape)
@@ -362,7 +366,9 @@ impl Keys {
     /// Verify `jwt`'s signature, issuer, audience and times at `now_s` (Unix seconds), with the
     /// issuer's published keys, or with `pinned` (a JWKS) when the identity carries its own.
     pub fn verify(&self, get: Option<&dyn Fetch>, pinned: Option<&str>, jwt: &Jwt<'_>, issuer: &str, audience: &str, now_s: i64) -> Result<()> {
-        if jwt.str("iss") != Some(issuer) {
+        // Identities keep their issuer without a trailing `/`; Entra's v1 tokens (an Azure VM's
+        // managed identity, `https://sts.windows.net/<tenant>/`) carry one.
+        if jwt.str("iss").map(|i| i.trim_end_matches('/')) != Some(issuer.trim_end_matches('/')) {
             return Err(invalid("the identity token is from another issuer"));
         }
         let matching = |keys: &[Key]| {
@@ -586,6 +592,8 @@ mod tests {
         assert!(open_to_others(ado, "p://acme/shop/*").is_some() && open_to_others(ado, "p://acme/shop").is_some() && open_to_others(ado, "repo:acme/web:*").is_some());
         let entra = "https://login.microsoftonline.com/00000000-0000-0000-0000-00000000c0d2/v2.0";
         assert!(open_to_others(entra, "/eid1/c/pub/t/dGVzdA/a/dGVzdA/sc/org-1/sc-1").is_none() && open_to_others(entra, "/eid1/*").is_some());
+        let vm = "https://sts.windows.net/00000000-0000-0000-0000-00000000c0d2";
+        assert!(open_to_others(vm, "00000000-0000-0000-0000-0000000000e1").is_none() && open_to_others(vm, "*").is_some());
     }
 
     #[test]
