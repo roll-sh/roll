@@ -1320,8 +1320,9 @@ pub enum AppsCmd {
     },
     /// The project's status page: shown (its address and incidents); made or changed (`--title`,
     /// `--item SERVICE/ENV/check:NAME` or `…/heartbeat:NAME`: every check and heartbeat without
-    /// one); taken down (`--delete`). An incident posted (`--incident TITLE --text …`) or updated
-    /// (`--update ID --state resolved --text …`).
+    /// one); taken down (`--delete`). An incident posted (`--incident TITLE --text …`; a
+    /// maintenance with `--starts` and `--ends`, RFC 3339) or updated (`--update ID --state
+    /// resolved --text …`).
     StatusPage {
         #[command(flatten)]
         target: Target,
@@ -1335,11 +1336,17 @@ pub enum AppsCmd {
         incident: Option<String>,
         #[arg(long, value_name = "ID", conflicts_with_all = ["title", "item"])]
         update: Option<String>,
-        #[arg(long, value_parser = ["investigating", "identified", "monitoring", "resolved"])]
+        #[arg(long, value_parser = ["investigating", "identified", "monitoring", "maintenance", "resolved"])]
         state: Option<String>,
         /// What it says (public: the page and its feed show it).
         #[arg(long)]
         text: Option<String>,
+        /// A scheduled maintenance's start (RFC 3339, `2026-12-01T02:00:00Z`): shown ahead, and
+        /// roll begins and ends it.
+        #[arg(long, requires_all = ["incident", "ends"])]
+        starts: Option<String>,
+        #[arg(long, requires = "starts")]
+        ends: Option<String>,
     },
     /// The project's spend limits this month: show them, or set `--alert` and `--hard` (dollars;
     /// `0` removes one). At the hard limit its services stop until it's raised.
@@ -5129,7 +5136,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 v
             }
         }
-        AppsCmd::StatusPage { target, title, item, delete, incident, update, state, text } => {
+        AppsCmd::StatusPage { target, title, item, delete, incident, update, state, text, starts, ends } => {
             let svc = service(api, &target).await?;
             let path = format!("/v1/apps/projects/{}/status-page", enc(&s(&svc["project"])));
             if delete {
@@ -5140,6 +5147,12 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 let mut b = json!({ "title": t, "text": text });
                 if let Some(st) = state {
                     b["state"] = json!(st);
+                }
+                if let (Some(f), Some(u)) = (&starts, &ends) {
+                    let ms = |t: &str| chrono::DateTime::parse_from_rfc3339(t).map(|d| d.timestamp_millis()).map_err(|e| anyhow::anyhow!("{t}: {e} (RFC 3339, like 2026-12-01T02:00:00Z)"));
+                    b["state"] = json!("scheduled");
+                    b["starts_at"] = json!(ms(f)?);
+                    b["ends_at"] = json!(ms(u)?);
                 }
                 api.post(&format!("{path}/incidents"), b).await?
             } else if let Some(id) = update {

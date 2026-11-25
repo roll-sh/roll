@@ -3390,6 +3390,7 @@ impl Apps {
         if now - self.status_swept.load(std::sync::atomic::Ordering::Relaxed) >= 60_000 {
             self.status_swept.store(now, std::sync::atomic::Ordering::Relaxed);
             self.status_sweep(&services).await;
+            self.maintenance_pass(now).await;
         }
         let unscheduled = self.db(|s| s.unscheduled()).await.unwrap_or_default();
         for svc in services.into_iter().filter(|s| s.run.kind == RunType::Cron && self.owns(&s.id) && !self.capped(&s.id)) {

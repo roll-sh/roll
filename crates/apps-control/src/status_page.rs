@@ -124,6 +124,17 @@ impl Apps {
     /// The open incidents a check or heartbeat opened that nothing will close any more: its
     /// check or heartbeat gone, off the page, its environment paused or in maintenance, its
     /// service deleted. Resolved by the service's owner (anyone's, for a deleted one).
+    /// Scheduled maintenances whose window began (now `maintenance`) or ended (`resolved`),
+    /// each said on its page as an update. Run with [`Self::status_sweep`], every minute.
+    pub(crate) async fn maintenance_pass(self: &Arc<Self>, now: i64) {
+        let Ok(due) = self.db(move |s| s.due_maintenance(now)).await else { return };
+        for (project, id, next) in due {
+            let text = if next == "maintenance" { "The scheduled maintenance has begun." } else { "The scheduled maintenance is over." };
+            let _ = self.db(move |s| s.update_incident(&project, Some(&id), None, next, text, now)).await;
+            self.status_cache.forget();
+        }
+    }
+
     pub(crate) async fn status_sweep(self: &Arc<Self>, services: &[crate::store::ServiceRow]) {
         let Ok(open) = self.db(|s| s.open_auto_incidents()).await else { return };
         let mut by_project: std::collections::HashMap<String, Vec<String>> = Default::default();
@@ -213,7 +224,8 @@ impl Apps {
         }
         let (title, state, text) = incident_fields(&body, true)?;
         let (p, at) = (project.to_string(), code_sql::now_ms());
-        let id = self.db(move |s| s.open_incident(&p, &title, &state, &text, None, at)).await?.expect("a person's always opens");
+        let window = maintenance_window(&body, &state, at)?;
+        let id = self.db(move |s| s.open_incident_in(&p, &title, &state, &text, None, at, window)).await?.expect("a person's always opens");
         self.status_cache.forget();
         Ok(json!({ "id": id }))
     }
@@ -321,11 +333,28 @@ impl Apps {
     }
 }
 
+/// A scheduled maintenance's window from `starts_at` and `ends_at` (unix ms): in the future, at
+/// most 90 days ahead and a week long. Only a new `scheduled` incident has one.
+fn maintenance_window(body: &Value, state: &str, now: i64) -> Result<Option<(i64, i64)>> {
+    let (from, until) = (body.get("starts_at").and_then(Value::as_i64), body.get("ends_at").and_then(Value::as_i64));
+    if state != "scheduled" {
+        return match (from, until) {
+            (None, None) => Ok(None),
+            _ => Err(Error::BadRequest("starts_at and ends_at are a scheduled maintenance's (state scheduled)".into())),
+        };
+    }
+    match (from, until) {
+        (Some(f), Some(u)) if f > now && f <= now + 90 * 86_400_000 && u > f && u - f <= 7 * 86_400_000 => Ok(Some((f, u))),
+        _ => Err(Error::BadRequest("a scheduled maintenance takes starts_at (in the next 90 days) and ends_at (after it, at most a week later), unix ms".into())),
+    }
+}
+
 /// An incident's or update's fields: `title` (a new one's), `state` (investigating, identified,
-/// monitoring, resolved) and `text`, each bounded, as text.
+/// monitoring, resolved; a new one also `scheduled`, an update also `maintenance`) and `text`,
+/// each bounded, as text.
 fn incident_fields(body: &Value, new: bool) -> Result<(String, String, String)> {
     let o = body.as_object().cloned().unwrap_or_default();
-    let allowed: &[&str] = if new { &["title", "state", "text"] } else { &["state", "text"] };
+    let allowed: &[&str] = if new { &["title", "state", "text", "starts_at", "ends_at"] } else { &["state", "text"] };
     if let Some(k) = o.keys().find(|k| !allowed.contains(&k.as_str())) {
         return Err(Error::BadRequest(format!("unknown field {k}")));
     }
@@ -340,7 +369,9 @@ fn incident_fields(body: &Value, new: bool) -> Result<(String, String, String)> 
     let state = match o.get("state").and_then(Value::as_str) {
         None if new => "investigating".to_string(),
         Some(s @ ("investigating" | "identified" | "monitoring" | "resolved")) => s.to_string(),
-        _ => return Err(Error::BadRequest("state is investigating, identified, monitoring or resolved".into())),
+        Some("scheduled") if new => "scheduled".to_string(),
+        Some("maintenance") if !new => "maintenance".to_string(),
+        _ => return Err(Error::BadRequest("state is investigating, identified, monitoring or resolved (a new incident's may be scheduled, an update's maintenance)".into())),
     };
     Ok((title, state, text_of("text", 2000, true)?))
 }
@@ -366,11 +397,26 @@ pub(crate) async fn serve(apps: Arc<Apps>, page: Page, path: &str) -> Response {
     }
     let all_up = rows.iter().all(|r| r.up != Some(false));
     let clock = |ms: i64| chrono::DateTime::from_timestamp_millis(ms).map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default();
-    let mut history = String::new();
+    let (mut history, mut planned) = (String::new(), String::new());
     for i in incidents {
         let open = i["resolved_at"].is_null();
         let ups: String = i["updates"].as_array().into_iter().flatten().rev().map(|u| format!("<p><b>{}</b> · {}<br>{}</p>", crate::public::escape(u["state"].as_str().unwrap_or("")), clock(u["at"].as_i64().unwrap_or(0)), crate::public::escape(u["text"].as_str().unwrap_or("")))).collect();
-        history.push_str(&format!("<article class=\"{}\"><h2>{}</h2>{ups}</article>", if open { "inc open" } else { "inc" }, crate::public::escape(i["title"].as_str().unwrap_or(""))));
+        // A maintenance says its window; one still ahead is listed apart, before the incidents.
+        let window = match (i["scheduled"]["from"].as_i64(), i["scheduled"]["until"].as_i64()) {
+            (Some(f), Some(u)) => format!("<p class=when>{} – {}</p>", clock(f), clock(u)),
+            _ => String::new(),
+        };
+        let class = match (i["state"].as_str(), open) {
+            (Some("scheduled" | "maintenance"), true) => "inc maint",
+            (_, true) => "inc open",
+            _ => "inc",
+        };
+        let article = format!("<article class=\"{class}\"><h2>{}</h2>{window}{ups}</article>", crate::public::escape(i["title"].as_str().unwrap_or("")));
+        if i["state"] == "scheduled" {
+            planned.push_str(&article);
+        } else {
+            history.push_str(&article);
+        }
     }
     let esc = crate::public::escape;
     let mut list = String::new();
@@ -399,11 +445,20 @@ pub(crate) async fn serve(apps: Arc<Apps>, page: Page, path: &str) -> Response {
          li{{border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:0 0 12px}}.row{{display:flex;justify-content:space-between;gap:12px;margin:0 0 10px}}\
          .up{{color:var(--accent)}}.down{{color:var(--danger)}}.none{{color:var(--muted)}}.bars{{display:flex;gap:2px}}.bars i{{flex:1;height:28px;border-radius:2px;background:var(--none)}}\
          .bars i.g{{background:var(--accent)}}.bars i.b{{background:var(--danger)}}.foot{{display:flex;justify-content:space-between;color:var(--muted);font-size:12px;margin-top:6px}}\
-         .inc{{border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:0 0 12px}}.inc.open{{border-color:var(--danger)}}.inc h2{{font-size:14px;margin:0 0 6px}}.inc p{{color:var(--muted);margin:6px 0 0}}\
-         h3{{font-size:13px;font-weight:600;margin:28px 0 10px}}footer{{color:var(--muted);font-size:12px;margin-top:24px}}</style><link rel=alternate type=application/atom+xml href=/feed.xml><main><h1>{t}</h1><p class=all>{all}</p><ul>{list}</ul>{hist}<footer>Kept by roll · <a href=/feed.xml style=color:inherit>feed</a></footer></main>",
+         .inc{{border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:0 0 12px}}.inc.open{{border-color:var(--danger)}}.inc.maint{{border-color:var(--accent)}}.inc .when{{color:var(--fg);margin:0 0 6px}}.inc h2{{font-size:14px;margin:0 0 6px}}.inc p{{color:var(--muted);margin:6px 0 0}}\
+         h3{{font-size:13px;font-weight:600;margin:28px 0 10px}}footer{{color:var(--muted);font-size:12px;margin-top:24px}}</style><link rel=alternate type=application/atom+xml href=/feed.xml><main><h1>{t}</h1><p class=all>{all}</p>{plan}<ul>{list}</ul>{hist}<footer>Kept by roll · <a href=/feed.xml style=color:inherit>feed</a></footer></main>",
         hist = if history.is_empty() { String::new() } else { format!("<h3>Incidents</h3>{history}") },
+        plan = if planned.is_empty() { String::new() } else { format!("<h3>Scheduled maintenance</h3>{planned}") },
         t = esc(&page.title),
-        all = if rows.is_empty() { "Nothing to show yet." } else if all_up { "Everything is up." } else { "Something is down." },
+        all = if rows.is_empty() {
+            "Nothing to show yet."
+        } else if !all_up {
+            "Something is down."
+        } else if incidents.iter().any(|i| i["state"] == "maintenance" && i["resolved_at"].is_null()) {
+            "Under scheduled maintenance."
+        } else {
+            "Everything is up."
+        },
     );
     (StatusCode::OK, [(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "public, max-age=30")], html).into_response()
 }

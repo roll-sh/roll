@@ -1112,6 +1112,10 @@ impl Store {
         // A `roll://` secret's maker (roll secrets' runtime binding: who chose it).
         db.add_column("git_auth", "secret_maker", "TEXT")?;
         db.add_column("domains", "tls_error", "TEXT")?;
+        // A scheduled maintenance's window (unix ms): its start moves it to `maintenance`, its
+        // end resolves it.
+        db.add_column("status_incidents", "scheduled_from", "INTEGER")?;
+        db.add_column("status_incidents", "scheduled_until", "INTEGER")?;
         db.add_column("domains", "verified_at", "INTEGER")?;
         db.add_column("env_access", "bypass_hash", "TEXT")?;
         db.add_column("env_access", "signed_in", "INTEGER NOT NULL DEFAULT 0")?;
@@ -2161,6 +2165,12 @@ impl Store {
     /// An incident opened: a person's, or one a check or heartbeat opened (`auto_key`: one open
     /// at a time per key, a second open of the same key is none).
     pub fn open_incident(&self, project: &str, title: &str, state: &str, text: &str, auto_key: Option<&str>, at: i64) -> Result<Option<String>> {
+        self.open_incident_in(project, title, state, text, auto_key, at, None)
+    }
+
+    /// [`Self::open_incident`], a scheduled maintenance with its window (`from`, `until`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_incident_in(&self, project: &str, title: &str, state: &str, text: &str, auto_key: Option<&str>, at: i64, window: Option<(i64, i64)>) -> Result<Option<String>> {
         let id = format!("inc_{}", crate::model::random(12).to_ascii_lowercase());
         let updates = serde_json::to_string(&[serde_json::json!({ "at": at, "state": state, "text": text })]).expect("JSON");
         self.db.write(|c| {
@@ -2170,7 +2180,10 @@ impl Store {
                 return Ok(None);
             }
             let resolved = (state == "resolved").then_some(at);
-            c.execute("INSERT INTO status_incidents (id, project, title, state, started_at, resolved_at, auto_key, updates) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", params![id, project, title, state, at, resolved, auto_key, updates])?;
+            c.execute(
+                "INSERT INTO status_incidents (id, project, title, state, started_at, resolved_at, auto_key, updates, scheduled_from, scheduled_until) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![id, project, title, state, at, resolved, auto_key, updates, window.map(|w| w.0), window.map(|w| w.1)],
+            )?;
             Ok(Some(id.clone()))
         })
     }
@@ -2199,11 +2212,15 @@ impl Store {
     /// A project's incidents since `since` (unix ms) or still open, newest first.
     pub fn incidents(&self, project: &str, since: i64) -> Result<Vec<serde_json::Value>> {
         Ok(self.db.query(
-            "SELECT id, title, state, started_at, resolved_at, auto_key, updates FROM status_incidents WHERE project = ? AND (started_at >= ? OR resolved_at IS NULL) ORDER BY started_at DESC LIMIT 200",
+            "SELECT id, title, state, started_at, resolved_at, auto_key, updates, scheduled_from, scheduled_until FROM status_incidents WHERE project = ? AND (started_at >= ? OR resolved_at IS NULL) ORDER BY started_at DESC LIMIT 200",
             params![project, since],
             |r| {
                 let updates: String = r.get(6)?;
-                Ok(serde_json::json!({ "id": r.get::<_, String>(0)?, "title": r.get::<_, String>(1)?, "state": r.get::<_, String>(2)?, "started_at": r.get::<_, i64>(3)?, "resolved_at": r.get::<_, Option<i64>>(4)?, "automatic": r.get::<_, Option<String>>(5)?.is_some(), "updates": serde_json::from_str::<serde_json::Value>(&updates).unwrap_or(serde_json::Value::Null) }))
+                let window = match (r.get::<_, Option<i64>>(7)?, r.get::<_, Option<i64>>(8)?) {
+                    (Some(from), Some(until)) => serde_json::json!({ "from": from, "until": until }),
+                    _ => serde_json::Value::Null,
+                };
+                Ok(serde_json::json!({ "id": r.get::<_, String>(0)?, "title": r.get::<_, String>(1)?, "state": r.get::<_, String>(2)?, "started_at": r.get::<_, i64>(3)?, "resolved_at": r.get::<_, Option<i64>>(4)?, "automatic": r.get::<_, Option<String>>(5)?.is_some(), "updates": serde_json::from_str::<serde_json::Value>(&updates).unwrap_or(serde_json::Value::Null), "scheduled": window }))
             },
         )?)
     }
@@ -2217,6 +2234,19 @@ impl Store {
             c.execute("DELETE FROM status_incidents WHERE project = ?", [project])?;
             Ok(())
         })
+    }
+
+    /// Scheduled maintenances whose window has begun or ended by `now`: (project, id, its next
+    /// state: `maintenance` once it began, `resolved` once it's over).
+    pub fn due_maintenance(&self, now: i64) -> Result<Vec<(String, String, &'static str)>> {
+        Ok(self.db.query(
+            "SELECT project, id, state, scheduled_until FROM status_incidents WHERE resolved_at IS NULL AND scheduled_from IS NOT NULL AND ((state = 'scheduled' AND scheduled_from <= ?) OR (state = 'maintenance' AND scheduled_until <= ?))",
+            params![now, now],
+            |r| {
+                let (state, until): (String, i64) = (r.get(2)?, r.get(3)?);
+                Ok((r.get(0)?, r.get(1)?, if state == "scheduled" && until > now { "maintenance" } else { "resolved" }))
+            },
+        )?)
     }
 
     /// Every project's open incidents that a check or heartbeat opened: (project, its key).
