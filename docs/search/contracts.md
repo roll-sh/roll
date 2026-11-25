@@ -1587,9 +1587,9 @@ saves it on its first wake so `cluster_uuid` stays the same too. Wakes keep ever
 in memory: `_stats`/`_nodes/stats` counters restart from zero, and documents indexed but not yet refreshed are
 searchable after the wake (as after an Elasticsearch restart). Stored task results (`wait_for_completion=false`) live in
 the `.tasks` index and survive. A state change on an instance that unloaded meanwhile (forced unload) answers 503
-`cluster_block_exception`, never 2xx. Requests the node authenticated with the cluster's own credentials carry
-`x-roll-authenticated-user` (search-es `xpack::security::AUTHENTICATED_HEADER`: the credential's user or `elastic`);
-client-sent copies are stripped. Credentials that are not the cluster's own may belong to the cluster's security
+`cluster_block_exception`, never 2xx. Requests the node authenticated with the cluster's own credentials, or with a derived browser
+key, carry what it verified on the request in process (search-es `rest::Verified`: `ClusterUser` with the credential's
+user or `elastic`, `Derived` with the key's parent and narrowing), never in a header, so a client can't claim it. Credentials that are not the cluster's own may belong to the cluster's security
 (native or file-realm users, API keys, access tokens): `auth::native_authorization` turns the claim into the header a
 client would send to Elasticsearch (`<user>@<cluster>` / `<key id>@<cluster>` lose the qualifier; Bearer only when
 routed by host), the loaded cluster checks it with `search_es::xpack::security::authenticate_native` (never the owner

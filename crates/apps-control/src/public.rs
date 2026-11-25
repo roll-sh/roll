@@ -1334,6 +1334,19 @@ async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &cr
             skew_ok &= status == 200;
             crate::sites::resolve(&site, &to, false).filter(|(_, s)| *s == 200).map(|(n, _)| (n, status))
         }
+        None if crate::sites::needs_slash(&site, &path) => {
+            done(308, 0);
+            let to = match req.query.as_deref() {
+                Some(q) => format!("{}/?{q}", req.path),
+                None => format!("{}/", req.path),
+            };
+            let mut r = Response::new(Body::empty());
+            *r.status_mut() = StatusCode::PERMANENT_REDIRECT;
+            if let Ok(v) = HeaderValue::from_str(&to) {
+                r.headers_mut().insert(header::LOCATION, v);
+            }
+            return r;
+        }
         None => crate::sites::resolve(&site, &path, tpl.spa),
     };
     // A fingerprinted file the live site doesn't have may be an earlier deployment's, asked for by
@@ -1695,6 +1708,12 @@ pub(crate) async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment:
     }
     if deployment.is_some() || gate.as_ref().is_some_and(|g| g.preview) {
         r.headers_mut().insert("x-robots-tag", HeaderValue::from_static("noindex"));
+    }
+    // A fork's preview's pages: its policy beside the page's own (a browser enforces both).
+    if let Some(csp) = gate.as_ref().and_then(|g| g.fork_csp.clone())
+        && r.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|t| t.starts_with("text/html"))
+    {
+        r.headers_mut().append(header::CONTENT_SECURITY_POLICY, csp);
     }
     r
 }

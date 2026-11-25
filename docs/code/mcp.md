@@ -39,8 +39,9 @@ HTTP API.
 
 Lockdown (`?lockdown=1` on the URL, or `X-MCP-Lockdown: 1`), as GitHub's MCP server and roll's own
 `/v1/mcp` have it: text written by someone who can't push to the repo (an issue anyone opened, a
-fork's pull request, a stranger's comment on a review thread) comes back as a notice instead, while
-ids and states stay. Use it for an agent that holds write tools and reads public repos; the owner
+fork's pull request, a stranger's comment on a review thread, and what a fork's change holds: its
+files, tree, blame, log, changesets, compares and code search at its revisions) comes back as a
+notice instead, while ids and states stay. A team's own branches and changes read as they are. Use it for an agent that holds write tools and reads public repos; the owner
 page's "Connect an agent" panel puts it in the snippet it gives (the URL quoted for the shell). The
 function is `roll_auth::lockdown`, shared with `/v1/mcp`. Lockdown or not, characters a person
 can't see and a model reads (tag characters, zero-width and bidi controls, variation selectors) are
