@@ -1010,16 +1010,21 @@ fails the start with the reason rather than falling back.
 What previews keeps that's a credential is sealed with the deployment key (`ROLL_SECRET_KEY`,
 AES-256-GCM, as roll's reviewer keys are), each bound to its row: a preview's own variables (to
 the preview), the rules' pasted `env`/`env_for` values (to the project, scope and name; a
-`roll://` reference isn't a secret and stays as it is) and the screenshot links' signing key. They
+`roll://` reference isn't a secret and stays as it is), the screenshot links' signing key, and
+what a branch's product handed out once (`kept`: a stream's SASL secret, a queue user's password,
+a bucket key's secret, a search branch's keys; to the preview, the resource and the earlier push
+or restore point it's a copy for; roll search's review of #1054 found it in the clear). They
 open inside the store as they're read. With no key, a pasted value is refused (400, naming
 `ROLL_SECRET_KEY`), never written in the clear; the signing key is then this process's own, kept
-in memory only (its links stop at a restart: local development). A database from before is sealed
+in memory only (its links stop at a restart: local development); a branch's `kept` is written as
+it is, since its services need it (local development too). A database from before is sealed
 the moment the key comes (`Store::set_sealer`), in one write with SQLite's `secure_delete` on and
 the WAL checkpointed and truncated after it, so nothing of the old values stays readable in the
 file, its free pages or its `-wal` (`credentials_are_sealed_at_rest_and_nothing_stays_in_the_file`,
 on an upgraded database). On Postgres (a fleet's control database) the rewrite is an ordinary
 write: the old row versions stay as dead tuples until autovacuum reuses their pages (`VACUUM FULL`
-on `settings`, `previews` and `keys` removes them at once). Either way, backups and WAL archives
+on `settings`, `previews`, `keys`, `resources`, `pinned_data` and `restore_points` removes them at
+once). Either way, backups and WAL archives
 taken before the key came still hold the clear values: rotate or expire them. Roll secrets'
 thirty-fourth review found them in the clear.
 

@@ -782,6 +782,13 @@ fn vars_aad(id: &str) -> String {
     format!("preview-vars:{id}")
 }
 
+/// What a branch's product handed out once (`kept`: a stream's SASL secret, a queue user's
+/// password, a search branch's keys), bound to its row: the preview, the resource, and the
+/// earlier push or restore point it's a copy for (`""` for the live branch).
+fn kept_aad(id: &str, kind: Kind, parent: &str, of: &str) -> String {
+    format!("preview-kept:{id}:{}:{parent}:{of}", kind.as_str())
+}
+
 fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
     let desired: String = r.get(11)?;
     let state: String = r.get(12)?;
@@ -1047,8 +1054,9 @@ impl Store {
     }
 
     /// The deployment key, from now on: what's kept in the clear from before (the rules' pasted
-    /// values, previews' own variables, the screenshot links' key) is sealed in one write that
-    /// leaves nothing of it in the file (`write_erasing`).
+    /// values, previews' own variables, the screenshot links' key, what branches' products
+    /// handed out once) is sealed in one write that leaves nothing of it in the file
+    /// (`write_erasing`).
     pub fn set_sealer(&self, sealer: std::sync::Arc<dyn crate::ports::Sealer>) -> Result<()> {
         if self.sealer.set(sealer).is_err() {
             return Ok(());
@@ -1067,7 +1075,17 @@ impl Store {
         let vars: Vec<(String, String)> = vars.into_iter().map(|(id, plain)| (id.clone(), sealer.seal(&vars_aad(&id), &plain))).collect();
         let key: Option<String> = self.db.read(|c| c.query_row("SELECT value FROM keys WHERE name = 'screenshots' AND value NOT LIKE 'v1:%'", (), |r| r.get(0)).optional())?;
         let key = key.map(|k| sealer.seal(SIGNING_AAD, &k));
-        if rules.is_empty() && vars.is_empty() && key.is_none() {
+        // `kept` of the live branches, earlier pushes' copies and restore points: (table, its
+        // copy's column, preview, copy, kind, parent, sealed).
+        let mut kept: Vec<(&str, &str, String, String, String, String, String)> = Vec::new();
+        for (table, of) in [("resources", "''"), ("pinned_data", "revision"), ("restore_points", "point")] {
+            let rows: Vec<(String, String, String, String, String)> = self.db.read(|c| c.query(&format!("SELECT preview_id, {of}, kind, parent, kept FROM {table} WHERE kept IS NOT NULL AND kept NOT LIKE 'v1:%'"), (), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))))?;
+            for (id, copy, k, parent, plain) in rows {
+                let Ok(kind) = Kind::parse(&k) else { continue };
+                kept.push((table, of, id.clone(), copy.clone(), k, parent.clone(), sealer.seal(&kept_aad(&id, kind, &parent, &copy), &plain)));
+            }
+        }
+        if rules.is_empty() && vars.is_empty() && key.is_none() && kept.is_empty() {
             return Ok(());
         }
         self.db.write_erasing(|c| {
@@ -1079,6 +1097,13 @@ impl Store {
             }
             if let Some(k) = &key {
                 c.execute("UPDATE keys SET value = ? WHERE name = 'screenshots'", [k.as_str()])?;
+            }
+            for (table, _, id, copy, kind, parent, sealed) in &kept {
+                match *table {
+                    "resources" => c.execute("UPDATE resources SET kept = ? WHERE preview_id = ? AND kind = ? AND parent = ?", params![sealed, id, kind, parent])?,
+                    "pinned_data" => c.execute("UPDATE pinned_data SET kept = ? WHERE preview_id = ? AND revision = ? AND kind = ? AND parent = ?", params![sealed, id, copy, kind, parent])?,
+                    _ => c.execute("UPDATE restore_points SET kept = ? WHERE preview_id = ? AND point = ? AND kind = ? AND parent = ?", params![sealed, id, copy, kind, parent])?,
+                };
             }
             Ok::<_, Error>(())
         })
@@ -1551,8 +1576,40 @@ impl Store {
 
     // ── resources ──
 
+    /// `kept` sealed at rest with ROLL_SECRET_KEY where this node has it (an unsealed previews
+    /// database then holds none of the products' credentials); plain without a key, as before.
+    fn seal_kept(&self, aad: &str, kept: &Option<String>) -> Option<String> {
+        match (kept, self.sealer.get()) {
+            (Some(v), Some(s)) if !v.starts_with("v1:") => Some(s.seal(aad, v)),
+            _ => kept.clone(),
+        }
+    }
+
+    /// `kept` as stored: sealed (`v1:…`, bound to its row), or plain from before it was sealed
+    /// (sealed again at its row's next write). Sealed without this node having the key is an
+    /// error: a service started without it would fail later and less plainly.
+    fn open_kept(&self, aad: &str, kept: Option<String>) -> Result<Option<String>> {
+        match kept {
+            Some(v) if v.starts_with("v1:") => {
+                let s = self.sealer.get().ok_or_else(|| Error::Internal("a branch's credentials are sealed with ROLL_SECRET_KEY, which this node doesn't have".into()))?;
+                Ok(Some(s.open(aad, &v).ok_or_else(|| Error::Internal("a branch's credentials don't open with this ROLL_SECRET_KEY".into()))?))
+            }
+            v => Ok(v),
+        }
+    }
+
+    fn opened(&self, id: &str, rows: Vec<ResourceRow>) -> Result<Vec<ResourceRow>> {
+        rows.into_iter()
+            .map(|mut r| {
+                r.kept = self.open_kept(&kept_aad(id, r.kind, &r.parent, ""), r.kept.take())?;
+                Ok(r)
+            })
+            .collect()
+    }
+
     pub fn resources(&self, id: &str) -> Result<Vec<ResourceRow>> {
-        Ok(self.db.read(|c| c.query(&format!("SELECT {RESOURCE_COLUMNS} FROM resources WHERE preview_id = ? ORDER BY kind, parent"), [id], resource_row))?)
+        let rows = self.db.read(|c| c.query(&format!("SELECT {RESOURCE_COLUMNS} FROM resources WHERE preview_id = ? ORDER BY kind, parent"), [id], resource_row))?;
+        self.opened(id, rows)
     }
 
     /// Make the preview's resource rows `wanted`: add the missing ones (pending), keep the rest.
@@ -1568,7 +1625,7 @@ impl Store {
                 )?;
             }
             let all = c.query(&format!("SELECT {RESOURCE_COLUMNS} FROM resources WHERE preview_id = ?"), [id], resource_row)?;
-            Ok::<_, Error>(all.into_iter().filter(|r| !wanted.iter().any(|(k, p, _)| *k == r.kind && *p == r.parent)).collect())
+            self.opened(id, all.into_iter().filter(|r| !wanted.iter().any(|(k, p, _)| *k == r.kind && *p == r.parent)).collect())
         })
     }
 
@@ -1578,14 +1635,18 @@ impl Store {
             let old = c
                 .query_row(&format!("SELECT {RESOURCE_COLUMNS} FROM resources WHERE preview_id = ? AND kind = ? AND parent = ?"), params![id, kind.as_str(), parent], resource_row)
                 .optional()?;
-            let Some(old) = old else { return Ok(()) };
+            let Some(mut old) = old else { return Ok(()) };
+            let aad = kept_aad(id, kind, parent, "");
+            let stored = old.kept.clone();
+            old.kept = self.open_kept(&aad, old.kept.take())?;
             let mut r = old.clone();
             f(&mut r);
             if r != old {
+                let kept = if r.kept == old.kept { stored.clone() } else { self.seal_kept(&aad, &r.kept) };
                 c.execute(
                     "UPDATE resources SET mode = ?, ref = ?, state = ?, error = ?, bytes = ?, usd_month = ?, usd_hour = ?, spent_usd = ?, kept = ?, updated_at = ? \
                      WHERE preview_id = ? AND kind = ? AND parent = ?",
-                    params![r.mode.as_str(), r.r#ref, r.state.as_str(), r.error, r.bytes, r.usd_month, r.usd_hour, r.spent_usd, r.kept, now, id, kind.as_str(), parent],
+                    params![r.mode.as_str(), r.r#ref, r.state.as_str(), r.error, r.bytes, r.usd_month, r.usd_hour, r.spent_usd, kept, now, id, kind.as_str(), parent],
                 )?;
             }
             Ok::<_, Error>(())
@@ -2885,12 +2946,18 @@ impl Store {
 
     /// The data kept for earlier pushes: a snapshot of a branch per head ([`PinnedData`]).
     pub fn pinned_data(&self, id: &str) -> Result<Vec<PinnedData>> {
-        Ok(self.db.read(|c| {
+        let rows = self.db.read(|c| {
             c.query("SELECT revision, kind, parent, name, ref, kept, source FROM pinned_data WHERE preview_id = ? ORDER BY at", [id], |r| {
                 let kind: String = r.get(1)?;
                 Ok(PinnedData { revision: r.get(0)?, kind: Kind::parse(&kind).unwrap_or(Kind::Postgres), parent: r.get(2)?, name: r.get(3)?, r#ref: r.get(4)?, kept: r.get(5)?, source: r.get(6)? })
             })
-        })?)
+        })?;
+        rows.into_iter()
+            .map(|mut d| {
+                d.kept = self.open_kept(&kept_aad(id, d.kind, &d.parent, &d.revision), d.kept.take())?;
+                Ok(d)
+            })
+            .collect()
     }
 
     pub fn add_pinned_data(&self, id: &str, d: &PinnedData) -> Result<()> {
@@ -2899,7 +2966,7 @@ impl Store {
             c.execute(
                 "INSERT INTO pinned_data (preview_id, revision, kind, parent, name, ref, kept, at, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT (preview_id, revision, kind, parent) DO UPDATE SET name = excluded.name, ref = excluded.ref, kept = excluded.kept, source = excluded.source",
-                params![id, d.revision, d.kind.as_str(), d.parent, d.name, d.r#ref, d.kept, now, d.source],
+                params![id, d.revision, d.kind.as_str(), d.parent, d.name, d.r#ref, self.seal_kept(&kept_aad(id, d.kind, &d.parent, &d.revision), &d.kept), now, d.source],
             )?;
             Ok::<_, Error>(())
         })
@@ -2947,7 +3014,7 @@ impl Store {
 
     /// The branches restore points hold: `point`'s, or every one's.
     pub fn point_data(&self, id: &str, point: Option<&str>) -> Result<Vec<PointData>> {
-        Ok(self.db.read(|c| {
+        let rows = self.db.read(|c| {
             c.query(
                 "SELECT point, kind, parent, name, ref, kept, source, mask FROM restore_points WHERE preview_id = ? AND (? IS NULL OR point = ?) ORDER BY at",
                 params![id, point, point],
@@ -2956,7 +3023,13 @@ impl Store {
                     Ok(PointData { point: r.get(0)?, kind: Kind::parse(&kind).unwrap_or(Kind::Postgres), parent: r.get(2)?, name: r.get(3)?, r#ref: r.get(4)?, kept: r.get(5)?, source: r.get(6)?, mask: r.get(7)? })
                 },
             )
-        })?)
+        })?;
+        rows.into_iter()
+            .map(|mut d| {
+                d.kept = self.open_kept(&kept_aad(id, d.kind, &d.parent, &d.point), d.kept.take())?;
+                Ok(d)
+            })
+            .collect()
     }
 
     pub fn add_point_data(&self, id: &str, label: &str, by: &str, at: i64, d: &PointData) -> Result<()> {
@@ -2964,7 +3037,7 @@ impl Store {
             c.execute(
                 "INSERT INTO restore_points (preview_id, point, label, by, at, kind, parent, name, ref, kept, source, mask) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT (preview_id, point, kind, parent) DO UPDATE SET name = excluded.name, ref = excluded.ref, kept = excluded.kept",
-                params![id, d.point, label, by, at, d.kind.as_str(), d.parent, d.name, d.r#ref, d.kept, d.source, d.mask],
+                params![id, d.point, label, by, at, d.kind.as_str(), d.parent, d.name, d.r#ref, self.seal_kept(&kept_aad(id, d.kind, &d.parent, &d.point), &d.kept), d.source, d.mask],
             )?;
             Ok::<_, Error>(())
         })
@@ -4014,6 +4087,11 @@ mod tests {
             .write(|c| {
                 c.execute("UPDATE settings SET json = ? WHERE project_id = 'prj_1'", [serde_json::to_string(&old).unwrap()])?;
                 c.execute("UPDATE previews SET vars = ? WHERE id = ?", params![r#"{"STRIPE_KEY":"sk_test_51Hx9"}"#, a.id])?;
+                // A stream branch's SASL secret, as its product handed it out once.
+                c.execute(
+                    "INSERT INTO resources (preview_id, kind, parent, mode, ref, state, error, bytes, usd_month, usd_hour, spent_usd, kept, updated_at) VALUES (?, ?, 'st_1', 'branch', 'st_b', 'ready', NULL, 0, 0, 0, 0, 'sasl_secret_42', 0)",
+                    params![a.id, Kind::Stream.as_str()],
+                )?;
                 c.execute("INSERT INTO keys (name, value) VALUES ('screenshots', ?) ON CONFLICT (name) DO UPDATE SET value = excluded.value", ["5c4e7f00aa11bb22"])
             })
             .unwrap();
@@ -4024,10 +4102,14 @@ mod tests {
         // Read back as written, through the key.
         assert_eq!(store.vars(&a.id).unwrap()["STRIPE_KEY"], "sk_test_51Hx9");
         assert_eq!(store.settings("prj_1").unwrap().env["TOKEN"], "tok_rules_77");
+        assert_eq!(store.resources(&a.id).unwrap()[0].kept.as_deref(), Some("sasl_secret_42"));
+        // And what a product hands out from now on.
+        store.set_resource(&a.id, Kind::Stream, "st_1", |r| r.kept = Some("sasl_secret_43".into())).unwrap();
+        assert_eq!(store.resources(&a.id).unwrap()[0].kept.as_deref(), Some("sasl_secret_43"));
         // Nothing of it in the file, its free pages or its WAL.
         for f in ["p.db", "p.db-wal"] {
             let bytes = std::fs::read(dir.path().join(f)).unwrap_or_default();
-            for v in ["sk_test_51Hx9", "tok_rules_77", "5c4e7f00aa11bb22"] {
+            for v in ["sk_test_51Hx9", "tok_rules_77", "5c4e7f00aa11bb22", "sasl_secret_42", "sasl_secret_43"] {
                 assert!(!bytes.windows(v.len()).any(|w| w == v.as_bytes()), "{v} in {f}");
             }
         }

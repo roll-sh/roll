@@ -99,6 +99,8 @@ POST /v1/search/clusters/{id}/request                                          t
 POST /v1/search/clusters/{id}/unload                                           the operator's (health, migrations, process control)
 GET /v1/secrets/gateways/{id}/connect                                          interactive (a shell, files, a forward): an admin's, live
 GET /v1/secrets/health                                                         the operator's (health, migrations, process control)
+GET /v1/secrets/policy                                                         the operator's (roll secrets' guardrails bind every project: operator-only in the catalogue; the floors show in each project's health as off_policy)
+PUT /v1/secrets/policy                                                         the operator's (roll secrets' guardrails: lowering a floor for every project is the operator's or an admin account's call, never an agent's)
 PATCH /v1/secrets/projects/{project}                                           a person's call: how long old versions are kept (shortening it deletes history), and whether leaked keys rotate on their own
 POST /v1/secrets/projects/{project}/atlas-projects                             an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/atlas-projects/{id}                      an outside integration's setup: an admin's, with its credentials
