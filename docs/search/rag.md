@@ -1,9 +1,73 @@
 # Conversational search and RAG: design
 
-`## Next` item 11 in [README.md](README.md). Status: phase 1 built (streamed inference, the
-Playground's Chat view); phases 2 and 3 are design. Depends on three open PRs, marked where it
-matters: browser keys and CORS (#358), E5 run by roll (#563), and one memory account per request
-(#549).
+`## Next` item 11 in [README.md](README.md). Status: phases 1 and 2 built (streamed inference
+and the Playground's Chat view; the `/_roll/chat` engine, the OpenAI-compatible route, browser
+keys on chat, the CLI and the MCP tool: [Phase 2 as built](#phase-2-as-built)); phase 3 is design.
+Browser keys (#358) and the request breaker (#549) are on main; retrieval embeds with the owner's
+endpoint until roll's E5 (#563) lands.
+
+## Phase 2 as built
+
+Code: `crates/search-es/src/xpack/chat/` (`mod.rs` the engine, `prompt.rs` the prompt and
+citations, `limits.rs` the costs, `openai.rs` the compatible route), routes in
+`crates/search-es/spec/roll/roll.chat.json`. Where this design left a choice open, phase 2 took
+what the best of the four products does:
+
+- **A profile retrieves from an index or a search application** (`index` or
+  `search_application`). Typesense and Meilisearch chat over a collection or index with no
+  template to write, and Elastic's Playground starts from picked indices, so a profile over an
+  index needs no mustache: roll builds `rrf` of BM25 (`multi_match`) and `semantic` over the
+  index's `semantic_text` and text fields (`query_fields` to choose), or BM25 alone when it has
+  no `semantic_text`. A profile over a search application runs its template with the question
+  as `query_param`, as designed. Either way roll sets `size`, `_source` and the highlight, and
+  drops aggregations, suggesters, `explain` and `profile` from the rendered body.
+- **Profile fields:** `index` or `search_application`, `inference_id`, `instructions` (8 KiB),
+  `query_param`, `query_fields`, `context` (`fields`, `passages`, `max_sources` 1-20 (5),
+  `max_source_bytes` 256-16,384 (4,096), `max_context_tokens` (6,000), `max_history_tokens`
+  (2,000), `max_history_turns` (20, at most 100)), `max_output_tokens` (1,024), `min_score`,
+  `max_tokens_per_day`, `timeout` (60s, at most `roll.inference.max_timeout`). The node caps
+  `roll.chat.max_context_tokens` (32,000) and `roll.chat.max_output_tokens` (4,096) apply when a
+  profile is put and again on every answer.
+- **Endpoints:** a `completion` or `chat_completion` endpoint of a service that streams a chat
+  completion with a system message (`openai`, `anthropic`, `azureopenai`, `googlevertexai`,
+  `mistral`, `deepseek`, `hugging_face`): the frame must stay a system message, never text folded
+  into the user's. Others are refused when the profile is put.
+- **Native events** are plain server-sent events: `event: sources` (`sources`, `omitted`), then
+  `event: delta` (`text`), then `event: done` (`cited`, `omitted`, `finish_reason`, `usage`) or
+  `event: error` (the cluster's error body). An error before the stream starts (a 403 of the
+  search, a limit's 429, the provider's refusal) is an ordinary answer with its status.
+- **Bounds besides the budgets:** the question 4,000 characters, `params` 16 KiB, history 100
+  turns of at most 16 KiB and 64 KiB in all (400 past them), the sources at most 256 KiB, the
+  answer 256 KiB (past it the stream ends as `length` and the upstream is closed), one deadline
+  for the whole answer, retrieval included. The search's response, the prompt (twice, for its
+  JSON) and the answer are charged to the `request` breaker while the answer runs.
+- **The OpenAI route** drops a client's `system` and `developer` messages (chat UIs send their
+  own): the profile's instructions are the only ones the model gets. `tools`, `functions`,
+  `n` > 1, logprobs, `response_format` and non-text content are 400s; sampling settings are
+  accepted and ignored (the profile's endpoint decides); `max_tokens` can only lower the cap.
+  `GET /_roll/openai/v1/models` lists the profiles the caller may run. Errors before the stream
+  are the cluster's with their status and `Retry-After` (OpenAI SDKs retry by them); a failure
+  mid-stream is OpenAI's error object as the last event.
+- **Bearer API keys.** On `/_roll/openai/` paths a Bearer value that base64-decodes to
+  `<id>:<key>` (base64 has no `_`, so never the cluster's `<name>_<password>`) or is a derived
+  key authenticates as `ApiKey`. The node rewrites the header before admission
+  (`search-server/src/http.rs`), so a browser key sent as Bearer pays its rate limits like any.
+- **Browser keys** chat through their own policy entry, `limits.chat` (in place of the
+  `chat_profiles`, `chat_cost` and `max_history_tokens` limits sketched below):
+  `{"profiles": [...], "turns_per_minute": 10, "input_tokens_per_minute": 20000,
+  "output_tokens_per_minute": 5000, "max_concurrent": 2, "max_history_turns": 10, "cost": 10}`.
+  No entry (or a profile it doesn't name) is a 400 before anything runs; the inference APIs stay
+  closed to every browser key. A key derived from one with a `user` gets a quarter of each rate
+  and one answer at once for that user. An answer charges its turn and `cost` items to the
+  key's node rate limits when it starts, its estimated prompt tokens and its whole output cap
+  before the model is called, and gives back the output it didn't use when it ends; refusals are
+  429s with `Retry-After`. The buckets are per loaded cluster, in memory, bounded.
+- **Workflows.** `_answer`, the OpenAI route and its model list run in the
+  `search_application_query` workflow, so a key restricted to it chats over its application; it
+  is refused a profile over an index (403).
+- **Left for later:** each answer's provider-reported `usage` is in the answer but not yet added
+  to the cluster's usage totals in search-control; the official `openai` Python client in Docker
+  against a node; the help-center retrieval fixture; query rewriting and memory (phase 3).
 
 ## Where roll is today
 

@@ -516,3 +516,88 @@ hits.forEach((hit, i) => console.log(\`[\${i + 1}] \${hit._index}/\${hit._id}\`)
     }
   }
 }
+
+// --- Phase 2: chat profiles (`/_roll/chat`, docs/search/rag.md) ---------------------------------
+
+/** What "view code" offers for a saved profile: its `_answer` route, or the OpenAI SDK. */
+export type ProfileCode = "answer" | "openai";
+export const PROFILE_CODES: ProfileCode[] = ["answer", "openai"];
+
+/** A profile name from an index's: lowercase letters, digits, `-`, `_` and `.`. */
+export function profileName(index: string): string {
+  const name = index.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^[^a-z0-9]+/, "").slice(0, 128);
+  return name || "chat";
+}
+
+/** The `PUT /_roll/chat/{name}` body that answers from `index` with this tab's endpoint. */
+export function profileBody(index: string, inferenceId: string, instructions: string, fields: SourceFields): Record<string, unknown> {
+  const shown = fields.title ? [fields.title] : [];
+  return {
+    index,
+    inference_id: inferenceId,
+    instructions: instructions.trim(),
+    context: { fields: shown, max_sources: MAX_SOURCES, max_context_tokens: MAX_CONTEXT_TOKENS },
+    max_output_tokens: MAX_OUTPUT_TOKENS,
+  };
+}
+
+/**
+ * A saved profile's code: `_answer` streamed with `fetch` (sources, then deltas, then the
+ * citations), or the official OpenAI Python SDK pointed at the cluster (`model` names the
+ * profile; the sources ride in the last chunk's `roll`). Answers are printed as text.
+ */
+export function profileCode(kind: ProfileCode, profile: string, question: string, target: Target): string {
+  const url = target.url.replace(/\/+$/, "");
+  const q = JSON.stringify(question || "How do I reset my password?");
+  if (kind === "openai") {
+    return `# pip install openai
+import os
+from openai import OpenAI
+
+# The cluster's OpenAI-compatible route; an API key (or a browser key whose limits.chat names
+# the profile) goes as the SDK's api_key.
+client = OpenAI(base_url=${JSON.stringify(`${url}/_roll/openai/v1`)}, api_key=os.environ["${KEY_ENV}"])
+
+stream = client.chat.completions.create(
+    model=${JSON.stringify(profile)},
+    messages=[{"role": "user", "content": ${q}}],
+    stream=True,
+)
+roll = None
+for chunk in stream:
+    if chunk.choices and chunk.choices[0].delta.content:
+        print(chunk.choices[0].delta.content, end="", flush=True)
+    roll = (chunk.model_extra or {}).get("roll") or roll
+print()
+for s in (roll or {}).get("sources", []):
+    print(f"[{s['n']}] {s['_index']}/{s['_id']}")
+`;
+  }
+  return `// Node 18+ or a browser page (fetch: EventSource can't POST)
+const URL = ${JSON.stringify(url)};
+const resp = await fetch(URL + ${JSON.stringify(`/_roll/chat/${encodeURIComponent(profile)}/_answer`)}, {
+  method: "POST",
+  headers: { Authorization: \`ApiKey \${process.env.${KEY_ENV}}\`, "Content-Type": "application/json" },
+  body: JSON.stringify({ question: ${q}, messages: [], stream: true }),
+});
+if (!resp.ok) throw new Error(await resp.text());
+const decoder = new TextDecoder();
+let buf = "";
+let sources = [];
+for await (const bytes of resp.body) {
+  buf += decoder.decode(bytes, { stream: true });
+  let cut;
+  while ((cut = buf.indexOf("\\n\\n")) >= 0) {
+    const block = buf.slice(0, cut);
+    buf = buf.slice(cut + 2);
+    const event = /^event: (.*)$/m.exec(block)?.[1];
+    const data = JSON.parse(/^data: (.*)$/m.exec(block)?.[1] ?? "null");
+    // The answer is text: render it as text, never as HTML, and link only the sources' own fields.
+    if (event === "sources") sources = data.sources;
+    else if (event === "delta") process.stdout.write(data.text);
+    else if (event === "done") console.log("\\ncited", data.cited, sources.map((s) => \`[\${s.n}] \${s._index}/\${s._id}\`));
+    else if (event === "error") throw new Error(JSON.stringify(data.error));
+  }
+}
+`;
+}

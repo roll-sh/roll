@@ -1614,6 +1614,17 @@ as given), the multimodal `embedding` task type and the new `semantic` field typ
 a `text_similarity_reranker` inside a compound retriever, its `chunk_rescorer`, and the reranker's
 explanation and profile details.
 
+### Chat (`/_roll/chat`, an extension)
+
+Elasticsearch 9.5.5 has no API that retrieves and generates in one call, so conversational
+search is roll's own, under `/_roll/` (no Elasticsearch or OpenSearch API uses it, and no index
+can be named `_roll`), served on both flavors: profiles (`PUT/GET/DELETE /_roll/chat/{name}`),
+answers with citations (`POST /_roll/chat/{name}/_answer`) and OpenAI's chat completions over
+them (`/_roll/openai/v1/chat/completions`, `/_roll/openai/v1/models`). The design and its bounds
+are [rag.md](rag.md). Retrieval runs as the caller, so a role, document and field level security
+and a browser key's filter decide what the model sees; managing profiles needs
+`manage_search_application` and `manage_inference`.
+
 ## Connectors (`_connector`)
 
 roll runs the syncs of Elastic-managed (`is_native: true`) `postgresql` and `s3` connectors

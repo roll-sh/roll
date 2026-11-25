@@ -16,6 +16,7 @@ mod queues;
 mod members;
 mod preview;
 mod search;
+mod search_chat;
 mod search_crawler;
 mod search_migrate;
 mod storage;
@@ -333,6 +334,29 @@ impl Api {
             let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
             match value["error"].as_str() {
                 Some(e) => bail!("{e}"),
+                None => bail!("{status}"),
+            }
+        }
+        Ok(res)
+    }
+
+    /// A POST of `body` whose answer is read as it comes (server-sent events): the response, once
+    /// its status is a success; else the error the answer names.
+    async fn open_post_stream(&self, path: &str, body: &Value) -> anyhow::Result<reqwest::Response> {
+        let mut req = self.http.post(format!("{}{path}", self.base)).json(body);
+        if let Some(k) = &self.bearer().await? {
+            req = req.bearer_auth(k);
+        }
+        for (k, v) in &self.headers {
+            req = req.header(k, v);
+        }
+        let res = req.send().await.with_context(|| unreachable(&self.base))?;
+        if !res.status().is_success() {
+            let status = res.status();
+            let text = res.text().await.unwrap_or_default();
+            let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+            match value["error"].as_str().or_else(|| value.pointer("/error/reason").and_then(Value::as_str)) {
+                Some(e) => bail!("{e} ({})", status.as_u16()),
                 None => bail!("{status}"),
             }
         }

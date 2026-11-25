@@ -1198,6 +1198,7 @@ previews are listed once those products are on.
 | `search_delete_by_query` | Delete every document that matches a query. | `POST /v1/search/clusters/{cluster}/indices/{index}/delete_by_query` |
 | `search_list_indices` | A cluster's indices. | `GET /v1/search/clusters/{cluster}/indices` |
 | `search_query` | Run an Elasticsearch _search body on an index. | `POST /v1/search/clusters/{cluster}/indices/{index}/search` |
+| `search_chat` | Answer a question from a chat profile's sources, with citations (the owner's model; documents quoted as data, no tools; answer and sources withheld in lockdown). | `POST /v1/search/clusters/{cluster}/chat/{profile}` |
 | `search_get_document` | A document by id. | `GET /v1/search/clusters/{cluster}/indices/{index}/docs/{doc}` |
 | `search_index_document` | Create or replace a document. | `PUT /v1/search/clusters/{cluster}/indices/{index}/docs/{doc}` |
 | `search_delete_document` | Delete a document. | `DELETE /v1/search/clusters/{cluster}/indices/{index}/docs/{doc}` |

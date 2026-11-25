@@ -97,6 +97,30 @@ pub struct Limits {
     pub allow_scripts: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_expensive_queries: Option<bool>,
+    /// Chat (docs/search/rag.md): the profiles it may run and what its answers may cost
+    /// (`search_es::xpack::chat::limits::ChatPolicy`); left out, no chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat: Option<ChatLimits>,
+}
+
+/// A browser key's chat entry.
+#[derive(Clone, Debug, Default, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatLimits {
+    pub profiles: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turns_per_minute: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens_per_minute: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens_per_minute: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_history_turns: Option<u64>,
+    /// Items an answer charges to the key's rate limits (10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<u64>,
 }
 
 /// What a revoke did.
@@ -176,6 +200,23 @@ fn reach(k: &NewBrowserKey) -> Result<Value> {
     let endpoints = l.inference_endpoints.as_deref().unwrap_or_default();
     if endpoints.len() > 16 || endpoints.iter().any(|e| e.is_empty() || e.len() > 255 || e.contains([',', ' ', '"', '\\', '/', '?', '#', '*'])) {
         return Err(ControlError::Invalid("limits: inference_endpoints, at most 16 inference endpoint ids".into()));
+    }
+    if let Some(c) = &l.chat {
+        let name_ok = |p: &String| !p.is_empty() && p.len() <= 128 && p.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_' | b'.'));
+        if c.profiles.is_empty() || c.profiles.len() > 16 || !c.profiles.iter().all(name_ok) {
+            return Err(ControlError::Invalid("limits.chat.profiles: 1 to 16 chat profile names".into()));
+        }
+        if !within(c.turns_per_minute, 1_000)
+            || !within(c.input_tokens_per_minute, 10_000_000)
+            || !within(c.output_tokens_per_minute, 1_000_000)
+            || !within(c.max_concurrent, 64)
+            || !within(c.max_history_turns, search_es::xpack::chat::limits::MAX_HISTORY_TURNS as u64)
+            || !within(c.cost, 1_000)
+        {
+            return Err(ControlError::Invalid(
+                "limits.chat: turns_per_minute 1-1000, input_tokens_per_minute 1-10000000, output_tokens_per_minute 1-1000000, max_concurrent 1-64, max_history_turns 1-100, cost 1-1000".into(),
+            ));
+        }
     }
     let mut out = json!({ "rate_limit": { "per_minute": per_minute, "per_ip_per_minute": per_ip } });
     if k.limits.is_some() {

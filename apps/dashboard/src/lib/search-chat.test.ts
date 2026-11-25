@@ -8,6 +8,9 @@ import {
   chatEvents,
   citations,
   FRAME,
+  profileBody,
+  profileCode,
+  profileName,
   sourcesOf,
   sseReader,
   type ChatHit,
@@ -167,4 +170,19 @@ test("view code composes the search and the streamed chat completion", () => {
   assert.ok(curl.includes("curl -sSN -X POST 'https://c.search.roll.sh/_inference/chat_completion/gpt/_stream'"));
   const body = curl.slice(curl.lastIndexOf("-d '") + 4, curl.lastIndexOf("'")).split("'\\''").join("'");
   assert.deepEqual(JSON.parse(body), { messages: prompt, max_completion_tokens: 1024 });
+});
+
+test("a saved profile's code calls its _answer route and the OpenAI SDK against the cluster", () => {
+  assert.equal(profileName("Help-Center_2026"), "help-center_2026");
+  assert.deepEqual(profileBody("help", "gpt", " Be brief. ", { title: "title", text: ["body"] }), {
+    index: "help",
+    inference_id: "gpt",
+    instructions: "Be brief.",
+    context: { fields: ["title"], max_sources: 5, max_context_tokens: 6000 },
+    max_output_tokens: 1024,
+  });
+  const js = profileCode("answer", "help", "reset it", target);
+  assert.ok(js.includes('fetch(URL + "/_roll/chat/help/_answer"') && js.includes('question: "reset it", messages: [], stream: true'));
+  const py = profileCode("openai", "help", "reset it", target);
+  assert.ok(py.includes('OpenAI(base_url="https://c.search.roll.sh/_roll/openai/v1"') && py.includes('model="help"') && py.includes("stream=True"));
 });

@@ -884,7 +884,8 @@ origins (browser search), once they're on main.
 | POST | `/v1/search/clusters/{id}/keys` | a new API key of the cluster `{name, expires_in_s?, access?, indices?}`: `reveal` at the gate for a `read` key, `write` for an `append` key (it adds documents), `delete` for a `data` key (its role deletes indices), `admin` for an `admin` one; each refused (403) to a grant that can't also reveal (`access`: `admin`, the default, everything the cluster's own user may do; `data`: a link's role, every index's data plus the cluster's templates, pipelines and lifecycle policies, without security, or with `indices` given those indices' data only (and `monitor`): templates, pipelines and lifecycle policies are the whole cluster's, so a narrowed key gets none; `read`: `read` and `view_index_metadata` on the indices, no cluster privilege; `append`: `create_doc` and `auto_configure` on exactly the named indices, no cluster privilege, so a log drain adds to its data streams and reads nothing. `indices`: the index names or patterns it reaches, default every index (`["*"]`); not with `admin`; no remote (`alias:…`), hidden or system (`.…`) names; `append` takes names only. An OpenSearch-flavor cluster has no `append`, its index action also overwrites, and its `read` role holds `cluster_composite_ops_ro`, which OpenSearch needs for `_msearch`, `_mget` and scrolls. roll secrets' and apps' search links ask for these through their `permission` (`read`, `append`; left out, `data`) and `names` options) → `{id, name, access, indices?, api_key, url, expires_at?}` (`access` and `indices`: what the key was made with): `api_key` is `base64(<key id>@<cluster>:<key>)` for `Authorization: ApiKey …`, in this answer only (roll secrets' managed links use it instead of sharing the password); on an OpenSearch-flavor cluster (whose clients sign in with a user) the key is an internal user of its own: `{id, name, access, username, password, url, expires_at?}` without `api_key`, `username` being `<user>@<cluster>`, refused once `expires_in_s` passes |
 | DELETE | `/v1/search/clusters/{id}/keys/{key}` | revoke it (204; 404 when it's gone). On a deleted cluster (by its id) the revoke is kept and applied by its restore (204) |
 | GET | `/v1/search/clusters/{id}/browser-keys` | `{keys}`: the browser keys that still work, newest first, each `{id, name, indices or application, filter?, rate_limit, created_at, expires_at}` (no secret). Wakes the cluster |
-| POST | `/v1/search/clusters/{id}/browser-keys` | a key a web page ships (above) `{name, indices or application, filter?, expires_in_s?, rate_limit?: {per_minute?, per_ip_per_minute?}, limits?: {max_concurrent?, max_result_window?, max_buckets?, max_items?, max_inference?, max_rerank_window?, max_body_bytes?, inference_endpoints?, allow_scripts?, allow_expensive_queries?}}` → the same fields plus `api_key` (once) and `url`. 400 on an OpenSearch-flavor cluster; 409 past 20 browser keys |
+| POST | `/v1/search/clusters/{id}/browser-keys` | a key a web page ships (above) `{name, indices or application, filter?, expires_in_s?, rate_limit?: {per_minute?, per_ip_per_minute?}, limits?: {max_concurrent?, max_result_window?, max_buckets?, max_items?, max_inference?, max_rerank_window?, max_body_bytes?, inference_endpoints?, allow_scripts?, allow_expensive_queries?, chat?: {profiles, turns_per_minute?, input_tokens_per_minute?, output_tokens_per_minute?, max_concurrent?, max_history_turns?, cost?}}}` → the same fields plus `api_key` (once) and `url`. `limits.chat` lets the key run the chat profiles it names (rag.md, "Phase 2 as built"); without it the key can't chat. 400 on an OpenSearch-flavor cluster; 409 past 20 browser keys |
+| POST | `/v1/search/clusters/{id}/chat/{profile}` | the cluster's `POST /_roll/chat/{profile}/_answer` as its owner ([rag.md](rag.md)): `{question, params?, messages?, stream?}` → `{answer, sources: [{n, _index, _id, _score, fields, passages}], cited, omitted, finish_reason, usage}`, or with `stream: true` its server-sent events (`sources`, `delta`, `done` or `error`). `read` on the cluster; `roll search chat` and the `search_chat` tool call it |
 | DELETE | `/v1/search/clusters/{id}/browser-keys/{key}` | revoke a browser key (204; 404 for any other key of the cluster; on a deleted cluster, a browser key of it is kept for the restore, which revokes it: 202) |
 | GET | `/v1/search/clusters/{id}/remotes` | the remote clusters it holds credentials for: `{remotes: [{alias, cluster, cluster_id, key_id, minted, created_at, connected}]}` (never the key) |
 | PUT | `/v1/search/clusters/{id}/remotes/{alias}` | link another cluster of the same owner as remote `alias` (above): `{cluster, skip_unavailable?, access?}` or `{cluster, skip_unavailable?, api_key}` → `{alias, cluster, cluster_id, mode, proxy_address, key_id, minted, skip_unavailable?}`; 404 for a cluster the caller can't link to, missing or not. `admin` on both clusters for roll-access |
@@ -1340,7 +1341,8 @@ deterministic (#396).
    customer, checked on the owner every request, with a per-user share of the parent's rate;
    in progress, `fix/search-derived-keys-2`: verified once per request, expensive filters only
    when the parent allows them, and each end user's own context owner);
-   what remains: RAG's chat limits for browser keys (item 11); browser search on previews (a branch keeps the
+   RAG's chat limits for browser keys landed with item 11's phase 2 (`limits.chat`);
+   what remains: browser search on previews (a branch keeps the
    parent's origins but no browser key works there: give it one and the preview's URL, roll
    previews' side); and usage and 429s per browser key in the Browser search section (Algolia's
    per-key usage and logs); Algolia's search-only and secured API keys,
@@ -1577,9 +1579,16 @@ deterministic (#396).
    `conversation=true`, Meilisearch `/chats`, OpenSearch's `retrieval_augmented_generation`
    processor). Design: [rag.md](rag.md). Phase 1 is built: streamed inference (`…/_stream` sent as
    it comes, through the node and the console route) and the Playground's Chat view with "view
-   code". Left: phase 2 (the `/_roll/chat` engine, the OpenAI-compatible route, browser key limits
-   on `_answer` (#358's keys can't call `_inference` at all), CLI and MCP) and phase 3 (memory,
-   OpenSearch's processor).
+   code". Phase 2 is built (rag.md, "Phase 2 as built"): chat profiles over an index (roll's
+   hybrid BM25 + `semantic` query) or a search application, `/_roll/chat/{name}/_answer` (JSON or
+   events, with citations naming `_index`, `_id` and the passages the model read), retrieval as
+   the caller (DLS, FLS, a browser key's filter), documents quoted as data with no tools, every
+   budget bounded and charged to the request breaker, the OpenAI-compatible
+   `/_roll/openai/v1/chat/completions` (Bearer API keys), browser keys' own `limits.chat` (turns,
+   tokens in and out and concurrency per key and per derived key's user; #358's keys still can't
+   call `_inference`), `roll search chat`, `search_chat`, and the Playground's "Save as profile".
+   Left: answers' token usage in the cluster's usage totals, the `openai` client in Docker, the
+   retrieval fixture, and phase 3 (memory, query rewriting, OpenSearch's processor).
 12. **The first query in a minute** (the guides landed in #604; sample data and a guided first
    query landed (#658): one click loads 1,000 generated products or 2,000 ECS log lines on the
    Overview of a cluster with no indices or from the Indices tab, then three queries run in place
