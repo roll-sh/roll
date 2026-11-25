@@ -137,14 +137,15 @@ pub fn scannable(c: &str) -> bool {
 /// `name=value` (`user:pass@host` its password); and each word of text with spaces. Anything else
 /// is itself.
 fn unknown_parts(c: &str) -> Vec<&str> {
-    let secret_named = |k: &str| {
-        let k = k.to_ascii_lowercase();
-        ["pass", "pwd", "secret", "token", "key", "sig", "auth", "cred", "code"].iter().any(|w| k.contains(w))
-    };
-    let named = |pairs: Vec<(&'_ str, &'_ str)>| -> Vec<&'_ str> {
+    /// The values of `pairs` whose names say they're secret, or all of them when none does.
+    fn named<'a>(pairs: Vec<(&'a str, &'a str)>) -> Vec<&'a str> {
+        let secret_named = |k: &str| {
+            let k = k.to_ascii_lowercase();
+            ["pass", "pwd", "secret", "token", "key", "sig", "auth", "cred", "code"].iter().any(|w| k.contains(w))
+        };
         let secret: Vec<&str> = pairs.iter().filter(|(k, _)| secret_named(k)).map(|(_, v)| *v).collect();
         if secret.is_empty() { pairs.into_iter().map(|(_, v)| v).collect() } else { secret }
-    };
+    }
     if c.contains(char::is_whitespace) {
         return c.split_whitespace().flat_map(unknown_parts).collect();
     }
