@@ -59,3 +59,41 @@ it("inspects a remote, copies the picked index under a new name with progress, t
   expect(search.esJson).toHaveBeenCalledWith("c1", "POST", "/_aliases", { actions: [{ add: { index: "products-v2", alias: "products" } }] });
   expect(await screen.findByText(/points at/)).toHaveTextContent("Alias products points at products-v2.");
 });
+
+it("maps an Algolia index for review before anything is made, then starts the copy", async () => {
+  const user = userEvent.setup();
+  const ALGOLIA_KEY = "algolia-admin-key-123";
+  migrateApi.inspect.mockResolvedValue({
+    remote: { host: "algolia app [APP1]", version: "", distribution: "algolia", cluster_name: null },
+    indices: [
+      { index: "products", docs: 3, size_bytes: 512, aliases: [], aliases_on_roll: [] },
+      { index: "products_price_asc", docs: 3, size_bytes: 512, aliases: [], aliases_on_roll: [], replica_of: "products" },
+    ],
+    data_streams: [],
+  });
+  const plan = {
+    id_field: "objectID", docs: 3, mappings: 3, default_fields: ["name^2"], synonyms: 2, rules: 1, search_template: "products-search",
+    not_mapped: [{ kind: "rule", name: "filter-acme", reason: "query rules pin or exclude documents; this rule only sets its params" }], not_mapped_more: 0, notes: [],
+  };
+  migrateApi.start.mockResolvedValueOnce({ indices: [{ index: "products", dest: "products", plan }] }).mockResolvedValueOnce({ indices: [{ index: "products", dest: "products", task: "n1:3", created: true, plan }] });
+  search.request.mockResolvedValue({ status: 200, body: JSON.stringify({ completed: false, task: { status: { total: 3, created: 1 } } }) });
+  const { container } = render(<MigratePanel cluster={cluster} existing={[]} onClose={() => {}} onChanged={() => {}} />);
+
+  await user.click(screen.getByRole("radio", { name: "Algolia" }));
+  await user.type(screen.getByLabelText("Application ID"), "APP1");
+  await user.type(screen.getByLabelText("API key"), ALGOLIA_KEY);
+  await user.click(screen.getByRole("button", { name: /list indices/i }));
+  expect(migrateApi.inspect).toHaveBeenCalledWith("c1", { kind: "algolia", app_id: "APP1", api_key: ALGOLIA_KEY });
+  expect(await screen.findByText("replica of products")).toBeInTheDocument();
+
+  await user.click(screen.getByLabelText("Pick products"));
+  await user.click(screen.getByRole("button", { name: "Review mapping" }));
+  expect(migrateApi.start).toHaveBeenLastCalledWith("c1", expect.objectContaining({ dry_run: true, indices: [{ index: "products", dest: "products" }] }));
+  expect(await screen.findByText("filter-acme")).toBeInTheDocument();
+  expect(screen.getByText(/1 thing didn't map/)).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "Migrate 1 index" }));
+  expect(migrateApi.start).toHaveBeenLastCalledWith("c1", expect.not.objectContaining({ dry_run: true }));
+  expect(await screen.findByText(/1 of 3 docs/)).toBeInTheDocument();
+  expect(container).not.toHaveTextContent(ALGOLIA_KEY);
+});
