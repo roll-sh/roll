@@ -15046,6 +15046,93 @@ the loop. (2) The ring's per-block cost: three hash lookups a recycled block (`e
 looks the key up twice and then removes it). One `entry` would do. It is worth about 0.4% on
 scan-bound queries at small caches.
 
+## Query memory: windows past work_mem, partitions streamed (agent 320)
+
+BENCH.md "Query memory: windows past work_mem" has the tables. Plain dist builds (`tools/dist.sh`): **b0**
+origin's `7ecca8b18`; **n6** `cand/a320-2`'s code (measured on `7ecca8b18`; rebased onto
+`5192a74c0e` without conflicts, no window code between); n1-n5 earlier states of it (below).
+
+**What changed** (`exec/window.rs`, new `exec/winstream.rs`; no plan, format or storage change):
+- A WindowAgg held its whole input (or, read a partition at a time, the whole partition) in a
+  Vec and computed it at once (`run_windows`). It still does while the partition fits, so a
+  window that fits runs the same code. While reading a partition it now sizes it as
+  PostgreSQL's tuplestore counts it (one tuple's `minimal_tuple_len` every 256th row, times 256,
+  against work_mem). Past work_mem, when its calls are ones `winstream` runs, the rest of the
+  partition is streamed: rows are read in (spooled) only as far as the current row's
+  functions and frame need, each row goes up with its results as it is computed, and rows no
+  read pointer can reach again are freed after each row. The spooling and freeing follow
+  `count_store`'s model of nodeWindowAgg's read pointers (the current row, the RANGE / GROUPS
+  frame tail kept at the peer group's end, the aggregates' frame end, each function's mark:
+  lag / lead at their offset's row, first_value at the partition's first row, last_value at the
+  frame's last, nth_value at its row, ntile / percent_rank / cume_dist the whole partition), so
+  the store goes to a temporary file where PostgreSQL's would (`StoreMem` with
+  tuplestore_trim's frees and compaction), with PostgreSQL's file size (temp_files / temp_bytes,
+  log_temp_files, temp_file_limit). On disk, a cursor per read pointer reads the file forward.
+- What streams: one window over input sorted on its partition and order keys (the Sort the
+  executor puts under a WindowAgg over a table scan, or a Sort in the plan), frames from the
+  partition's start to the current row (ROWS), its peers (RANGE / GROUPS) or the partition's end,
+  no EXCLUDE; row_number, rank, dense_rank, percent_rank, cume_dist, ntile, lag / lead with a
+  constant offset, first_value, last_value, nth_value with a constant position (no IGNORE
+  NULLS), aggregates without DISTINCT / ORDER BY. The rest computes the partition whole as
+  before.
+**Measured** (BENCH "Query memory: windows past work_mem"; lane C, `~/.cache/a320/bench/mem.sh` from agent
+318's, `mem-win.txt`; 1M rows, about 20x work_mem 4 MB; peak anon+shmem over the level before,
+MB, b0 -> n6 (PostgreSQL)): row_number 352.1 -> 32.3 (10.3), a running sum 382.7 -> 17.4
+(10.3), sum / count over 4 partitions 117.2 -> 25.9 (14.0), rank / percent_rank / cume_dist
+443.6 -> 23.9 (13.4), lag / lead 428.9 -> 12.7 (10.3), first_value / last_value by partition
+(b0 unfinished after 20 minutes) -> 17.4 (32.5); every result hash PostgreSQL's. What is left
+above PostgreSQL is mostly the rows read before a partition is known to be past work_mem (about
+work_mem of PostgreSQL's tuples, as `Value` rows) and the Sort below (318's plain Sort: 12.2
+against 10.3). Temp files as PostgreSQL's in five of six (the window's
+store spills where PostgreSQL's does: none for row_number, lag / lead and running sums; the
+whole partition for the rank set and per partition for whole-partition sums), the sixth 11
+files against 13. When the input fits nothing is slower: the window query of `winpair.sh` (20,000 rows,
+`sum(id), lag(s), rank() OVER (PARTITION BY id % 10 ORDER BY a)`, 40 runs) +0.051% / +0.046%
+user instructions (two pairs; b0 against itself 0.001%); TPC-H q01 q03 q09 q13 q15 q18 two
+pairs each against n1 (an earlier state, same code outside `window.rs`; no window in them)
+within 0.11%, at the b0-to-b0 spread agent 318 measured, hashes equal. **Not run:** the
+in-process point select pair (its client is built from each commit: two more 40-minute builds;
+a point select runs neither changed file). Not gated on a PGO build: no hot function's
+boundaries were changed on purpose (`stream_next`, `stream_rest` and the sizing are out of line).
+
+**Dropped** (each +0.2-0.5% user instructions on the window query that fits, two pairs):
+sizing every 16th row exactly (n1, +0.50%); every 256th row, decided at the window's start
+(n3, +0.22%) or once past work_mem (n4, +0.27%); and, with those, first_value / last_value /
+nth_value reading the row at their position in memory rather than every row of the frame (n4,
+n5: +0.21% with it out of the builtins' row loop; it changed `compute_partition`'s code for
+every function). That last one is a CPU fix PostgreSQL has (b0 didn't finish
+`first_value / last_value OVER (PARTITION BY id % 10 ORDER BY id)` over 1M rows in memory in 20
+minutes: every row of the frame is evaluated for each row, quadratic in a partition); its patch
+is `~/.cache/a320/patches/window-n5.diff` (`frame_values`), for a candidate of its own with a
+dispatch that leaves `compute_partition` alone.
+
+**Dropped, a nested loop's inner side past work_mem** (patch
+`~/.cache/a320/patches/nestloop-materialize-n11.diff`, over `be865dfb8`): the unparameterized
+inner side (PostgreSQL's Materialize), collected into an `Rc<Vec<Row>>`, sized while collected
+(one tuple in 256) and past work_mem put in a `Tuplestore` (`with_cols`: the join's columns),
+which spills by its own count; each outer row reads it again in chunks of 1,024 rows through the
+in-memory loop. `generate_series(1, 4) LEFT JOIN t ON t.id > g * 200000 AND t.id < g * 200000 + 5`
+over 1M rows: 116.0 -> 15.4-17.8 MB peak (PostgreSQL 8.3), one 14,000,000-byte file as
+PostgreSQL's, hashes equal; EXPLAIN ANALYZE's "Storage: Disk  Maximum Storage". Not kept: a
+join that fits (60 outer rows LEFT JOIN 20,000 by an inequality, 40 runs; b1 = `be865dfb8`
+48.868 G user instructions) stayed above the 0.1% gate in every form tried, two pairs each:
+every inner row sized +0.68%, sampled +0.41%, a variant of the inner rows for the spilled side
++0.21% (n9, n10: the refill in or out of the pair loop), the spilled paths out of line +0.11%
+(n11). The rest is in `NestLoopNode::step`'s code around the pair loop: the next try leaves
+`step` as it is and puts a spilled side behind a node of its own (a Material over the inner
+plan).
+
+**Left** (largest first): a window whose frame starts after the partition's start (sliding
+ROWS / RANGE / GROUPS offsets, moving aggregates) or has an EXCLUDE (352 MB on `ORDER BY a ROWS
+BETWEEN 5 PRECEDING AND 5 FOLLOWING`, PostgreSQL 10.2); several windows at once (sorted inside
+one node, whole input) and windows over joins, index scans or partition keys under a
+nondeterministic collation (no Sort node: the input whole); EXPLAIN ANALYZE runs the in-memory
+path (its Storage line is `count_store`'s); in-memory first_value / last_value / nth_value read
+every row of their frame (above); the rest of agent 318's list: Materialize / Nested
+Loop inner rows, Incremental Sort's output, GroupAggregate's groups, count(DISTINCT x),
+grouping sets, sorted set operations and Unique, Recursive Union, and 318's two cells above
+PostgreSQL.
+
 ## Query memory, round 1: ordered aggregates' input within work_mem; the executor's row-holding nodes audited (agent 318)
 
 **The audit** (work_mem 4 MB default; "spills" = past work_mem its rows go to a temporary file

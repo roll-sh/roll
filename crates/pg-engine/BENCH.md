@@ -318,6 +318,56 @@ The last against PGO, select-only at 8 clients, 3 alternating pairs: user instru
 31,777 -> 32,105 / 31,587 -> 34,607 / 34,026 -> 31,978, user cycles 69,268 -> 69,872 / 68,855 ->
 72,931 / 69,927 -> 68,111 (foreign 1.25-1.88): no direction, dropped.
 
+## Query memory: windows past work_mem, partitions streamed (2026-11-25, agent 320)
+
+HANDOFF "Query memory: windows past work_mem" has what changed. Plain dist builds (`tools/dist.sh`): **b0**
+origin's `7ecca8b18`; **n6** `cand/a320`'s code; n1-n5 earlier states (HANDOFF; n2: the
+streamed path as n6's, sizing every 16th row).
+PostgreSQL 18.6 by digest, same harness and settings (2 GB cache, work_mem 4 MB). Lane C read
+2.3-7.5 foreign cores in every hold: memory and instruction counts only, no walls.
+
+### Peak memory a query (lane C, `~/.cache/a320/bench/mem.sh`, agent 318's, `mem-win.txt`)
+
+A fresh server, `t (id int, a int, s text)`: 1M rows `(g, g * 7919 % 1000003, md5(g::text))`
+(about 20x work_mem), VACUUM ANALYZE, a count(*); then each query alone, wrapped in
+`md5(row::text)`. MB of the server cgroup's anon+shmem: peak during the query (sampled every
+0.05 s) less the level before it; temp = files / MB the query added in pg_stat_database (the
+Sort below the window writes one).
+
+| query (each summed or max'ed in an outer SELECT) | b0 | n2 | n6 | PostgreSQL 18.6 | temp files, MB: n6 / PostgreSQL |
+|---|---|---|---|---|---|
+| `row_number() OVER (ORDER BY a)` | 352.1 | 32.2 | 32.3 | 10.3 | 1, 12.1 / 1, 12.1 |
+| `sum(id) OVER (ORDER BY a % 100000)` (running, ties) | 382.7 | 17.3 | 17.4 | 10.3 | 1, 22.1 / 1, 18.1 |
+| `sum(id), count(*) OVER (PARTITION BY id % 4)` | 117.2 | 23.1 | 25.9 | 14.0 | 5, 32.1 / 5, 36.1 |
+| `percent_rank(), cume_dist(), rank() OVER (ORDER BY a % 1000)` | 443.6 | 25.3 | 23.9 | 13.4 | 2, 36.1 / 2, 30.1 |
+| `lag(s, 1), lead(s, 2) OVER (ORDER BY id)` | 428.9 | 12.6 | 12.7 | 10.3 | 1, 47.1 / 1, 47.1 |
+| `first_value(s), last_value(s) OVER (PARTITION BY id % 10 ORDER BY id)` | not done in 20 min | 17.6 | 17.4 | 32.5 | 11, 105.2 / 13, 106.2 |
+| `sum(id) OVER (ORDER BY a ROWS BETWEEN 5 PRECEDING AND 5 FOLLOWING)` (not streamed) | | 351.8 | 351.9 | 10.2 | 1, 18.1 / 1, 18.1 |
+
+Result hashes: b0, n2, n6 and PostgreSQL equal on every query (b0's first_value / last_value one
+not finished: quadratic, see HANDOFF). n1 (before the frame tail fix) had the lag / lead window
+spill (2 files, 98.1 MB, 13.9 MB peak).
+
+### When the input fits (plain dist, instructions)
+
+Window query (`~/.cache/a320/bench/winpair.sh`: 20,000 rows, `sum(id), lag(s), rank() OVER
+(PARTITION BY id % 10 ORDER BY a)`, 40 runs in one perf window, G user instructions of the
+server's cgroup; b0 against itself 8.3816-8.3820):
+
+| build | pairs (other / b0) | |
+|---|---|---|
+| n1 (sizing every 16th row) | 8.4235, 8.4233 / 8.3819, 8.3819 | +0.50% (dropped) |
+| n3 (every 256th; decided at the start) | 8.4001, 8.3999 / 8.3820, 8.3819 | +0.22% (dropped) |
+| n4 (decided once past work_mem) | 8.4042, 8.4044 / 8.3817, 8.3816 | +0.27% (dropped) |
+| n5 (the in-memory first / last / nth change out of the row loop) | 8.3987, 8.3991 / 8.3813, 8.3812 | +0.21% (dropped) |
+| **n6** (`compute_partition` as b0's) | 8.3861, 8.3856 / 8.3818, 8.3817 | **+0.051%, +0.046%** |
+
+TPC-H SF1 (agent 316's `tpair.sh` via 318, QS = q01 q03 q09 q13 q15 q18, one fresh server a
+pass, each query once in its own perf window), b0 against n1, two pairs both orders: q01
++0.001 / +0.001%, q03 +0.020 / -0.050%, q09 -0.003 / +0.032%, q13 +0.005 / +0.103%, q15
+-0.002 / +0.001%, q18 -0.001 / +0.107%; hashes equal. (No window in them; the second pair's
+q13 / q18 at the b0-to-b0 spread 318 measured, 0.07%.)
+
 ## Query memory, round 1: ordered aggregates within work_mem (2026-11-25, agent 318)
 
 HANDOFF "Query memory, round 1" has what changed and the audit of every row-holding node. Plain
