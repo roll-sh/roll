@@ -1486,7 +1486,7 @@ async fn lookups_are_authorized_where_they_run() {
             let (s, v) = search(json!({"size": 0, "aggs": {agg: {"filter": lookup("secret")}}})).await;
             refused(&format!("an aggregation named {agg}"), s, &v);
         }
-        let (s, v) = e.es(&ann, ann_pw, Method::POST, "/_aliases", Some(json!({"actions": [{"add": {"index": "mine", "alias": "mine-f", "filter": lookup("secret")}}]}))).await;
+        let (s, v) = e.es(&ann, ann_pw, Method::PUT, "/mine/_alias/mine-f", Some(json!({"filter": lookup("secret")}))).await;
         assert_eq!((s, v["error"]["reason"].as_str()), (400, Some("failed to parse filter for alias [mine-f]")), "{name}: {v}");
         if flavor != "elasticsearch" {
             continue;
