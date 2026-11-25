@@ -1006,6 +1006,23 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
     if !capable.is_empty() {
         parts.extensions.insert(roll_auth::Capable(capable));
     }
+    // A route that answers only the indices the grant reaches of its resource: which they are, as
+    // the gate decided it (the resource's project and all), the token's held within the person's
+    // session (a pattern counts when the session reaches it too).
+    if row.filters_index
+        && let Target::One(r) = &target
+    {
+        let mine = scope.indices_reaching(r, action);
+        let reach = match (mine, within_scope.as_ref().map(|w| w.indices_reaching(r, action))) {
+            (mine, None | Some(None)) => mine,
+            (None, Some(theirs)) => theirs,
+            (Some(mine), Some(Some(_))) => {
+                let w = within_scope.as_ref().expect("a session");
+                Some(mine.into_iter().filter(|p| w.outcome(&Target::One(roll_auth::scope::Resource { index: Some(p.clone()), filters_index: false, ..r.clone() }), action) == Outcome::Allow).collect())
+            }
+        };
+        parts.extensions.insert(roll_auth::IndexScope(reach));
+    }
     parts.extensions.insert(roll_auth::Grant {
         id: ctx.grant.id.as_str().into(),
         name: ctx.grant.name.as_str().into(),

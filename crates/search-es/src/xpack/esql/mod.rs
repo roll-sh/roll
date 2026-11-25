@@ -296,12 +296,30 @@ fn body_time_zone(ctx: &Ctx, m: &Map) -> EsResult<Option<String>> {
     }
 }
 
-/// Whether `cmds` run an `ENRICH`, in a `FORK` branch or a `FROM` subquery (or view) too.
-fn uses_enrich(cmds: &[parser::Cmd]) -> bool {
+/// The policies the `ENRICH`es of `cmds` name, in `FORK` branches and `FROM` subqueries (or
+/// views) too.
+fn enrich_policies(cmds: &[parser::Cmd]) -> Vec<String> {
+    let mut out = Vec::new();
+    for c in cmds {
+        match c {
+            parser::Cmd::Enrich { policy, .. } => out.push(parser::split_policy(policy).1.to_string()),
+            parser::Cmd::Fork { branches, .. } => branches.iter().for_each(|b| out.extend(enrich_policies(b))),
+            parser::Cmd::Union { branches, .. } => branches.iter().for_each(|b| out.extend(enrich_policies(&b.cmds))),
+            _ => {}
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Whether `cmds` read a remote cluster's index (`cluster:index`; a date math name in `<…>`
+/// isn't one), in subqueries too.
+fn names_remote(cmds: &[parser::Cmd]) -> bool {
     cmds.iter().any(|c| match c {
-        parser::Cmd::Enrich { .. } => true,
-        parser::Cmd::Fork { branches, .. } => branches.iter().any(|b| uses_enrich(b)),
-        parser::Cmd::Union { branches, .. } => branches.iter().any(|b| uses_enrich(&b.cmds)),
+        parser::Cmd::From { sources, .. } | parser::Cmd::Ts { sources, .. } => sources.iter().any(|s| !s.starts_with('<') && s.contains(':')),
+        parser::Cmd::Fork { branches, .. } => branches.iter().any(|b| names_remote(b)),
+        parser::Cmd::Union { branches, .. } => branches.iter().any(|b| names_remote(&b.cmds)),
         _ => false,
     })
 }
@@ -381,7 +399,27 @@ async fn run_query(ctx: &Ctx<'_>, req: &Request, mem: &memory::Memory) -> EsResu
     // Every `ENRICH` resolves its policy as the caller (`EnrichPolicyResolver`): `monitor_enrich`
     // here, for a local query as for a remote's part ([`ccs::admit_part`]), before the policy's
     // table, which the system reads, is loaded.
-    if uses_enrich(&q.cmds) {
+    // roll's own index-scoped principal (`/v1/search`'s ES|QL route, as a grant limited to some
+    // indices) holds no cluster privilege: an `ENRICH` reads its policy's sources there, so it
+    // needs `read` on them instead, and it reads no remote cluster.
+    let policies = enrich_policies(&q.cmds);
+    if crate::xpack::security::is_index_scoped(ctx) {
+        let st = ctx.state();
+        for name in &policies {
+            let sources = st.metadata.xpack.get(crate::xpack::enrich::POLICIES, name).and_then(|p| p.get("config")).and_then(Value::as_object).and_then(|m| m.values().next()).and_then(|c| c.get("indices")).map(|i| match i {
+                Value::Arr(a) => a.iter().map(Value::to_es_string).collect(),
+                other => vec![other.to_es_string()],
+            });
+            let Some(sources) = sources else { continue };
+            let resolved = crate::meta::resolve::resolve(&st, &sources, &crate::meta::resolve::IndicesOptions::LENIENT_EXPAND_OPEN, ctx.now_ms).unwrap_or_default();
+            if resolved.is_empty() || !crate::xpack::security::allows_indices(ctx, "indices:data/read/esql", &resolved) {
+                return Err(EsError::security(403, format!("enrich policy [{name}] reads indices this request may not read")));
+            }
+        }
+        if names_remote(&q.cmds) {
+            return Err(EsError::security(403, "this request may not read remote clusters".to_string()));
+        }
+    } else if !policies.is_empty() {
         crate::xpack::security::check_cluster_action(ctx, ccs::RESOLVE_POLICY)?;
     }
     q.locale = req.locale.clone();

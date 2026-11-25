@@ -164,6 +164,20 @@ impl Grant {
     }
 }
 
+/// In a request to a route that names none of its resource's indices but answers only what the
+/// grant reaches of it (the catalogue's `filters_index`; search's ES|QL): the indices the gate's
+/// decision reaches, as [`scope::Scope::indices_reaching`] says for the grant (and, for a person's
+/// own token, within their session). `None` in it: the whole resource. Absent: no grant (the
+/// operator's request).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexScope(pub Option<Vec<String>>);
+
+impl IndexScope {
+    pub fn on(extensions: &axum::http::Extensions) -> Option<&IndexScope> {
+        extensions.get::<IndexScope>()
+    }
+}
+
 /// In a request a person's own token made, beside its [`Grant`]: the person's session grant as it
 /// is now (docs/members.md, "Evaluation"). The token reaches only what both allow, so a product's
 /// second check asks both.

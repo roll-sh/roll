@@ -1513,6 +1513,11 @@ pub fn check_cluster_action(ctx: &Ctx, action: &str) -> EsResult<()> {
     Err(denied(p, action, None))
 }
 
+/// Whether the request runs as roll's own index-scoped principal ([`Principal::owner_scoped`]).
+pub fn is_index_scoped(ctx: &Ctx) -> bool {
+    matches!(&principal(ctx).kind, AuthKind::ApiKey(a) if a.id == INDEX_SCOPE_KEY)
+}
+
 /// Refuses unless the request's principal may run `action` on index `index` (a name, as given).
 pub fn check_index_action(ctx: &Ctx, action: &str, index: &str) -> EsResult<()> {
     if allows_indices(ctx, action, std::slice::from_ref(&index.to_string())) {

@@ -87,6 +87,12 @@ async fn as_person(mut req: axum::extract::Request, next: axum::middleware::Next
         }
         req.extensions_mut().insert(roll_auth::Operator);
         req.extensions_mut().insert(roll_auth::Grant { id: "tok_t".into(), name: "t".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(rules), user: None, ask_otherwise: false });
+        // `x-test-index-scope`: the indices the gate's decision reaches on a `filters_index` route
+        // (comma-separated patterns, `*` for the whole resource).
+        if let Some(s) = req.headers().get("x-test-index-scope").and_then(|v| v.to_str().ok()).map(str::to_string) {
+            let reach = (s != "*").then(|| s.split(',').map(str::to_string).collect());
+            req.extensions_mut().insert(roll_auth::IndexScope(reach));
+        }
     }
     let who = req.headers().get("x-test-as").and_then(|v| v.to_str().ok()).map(str::to_string);
     if let Some(who) = who {
@@ -6950,4 +6956,44 @@ async fn enrich_connectors_and_show_tables_take_the_callers_privileges() {
     assert_eq!(s, 200, "{v}");
     let names: Vec<&str> = v["rows"].as_array().unwrap().iter().filter_map(|r| r[1].as_str()).collect();
     assert!(names.contains(&"tenant-a-1") && !names.contains(&"tenant-b-src") && !names.contains(&"content-b"), "{names:?}");
+}
+
+/// `POST …/esql`, read-only ES|QL for a grant limited to `tenant-a-*`: it reads its indices, and
+/// every other index a query reads is refused, whether `FROM` names it, a `LOOKUP JOIN` or an
+/// `ENRICH` policy reads it; a field of an async or stored query is refused too.
+#[tokio::test]
+async fn esql_reads_only_the_indices_the_grant_reaches() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "esql"})).await;
+    let (owner, pw) = creds(&c);
+    for (m, path, body) in [
+        (Method::PUT, "/tenant-a-1/_doc/1?refresh=true", json!({"t": "x", "n": 1})),
+        (Method::PUT, "/tenant-b/_doc/1?refresh=true", json!({"t": "x", "secret": "s-of-b"})),
+        (Method::PUT, "/tenant-b-lookup", json!({"settings": {"index.mode": "lookup"}, "mappings": {"properties": {"t": {"type": "keyword"}, "secret": {"type": "keyword"}}}})),
+        (Method::PUT, "/tenant-b-lookup/_doc/1?refresh=true", json!({"t": "x", "secret": "s-of-b"})),
+        (Method::PUT, "/_enrich/policy/p", json!({"match": {"indices": "tenant-b", "match_field": "t", "enrich_fields": ["secret"]}})),
+        (Method::POST, "/_enrich/policy/p/_execute", json!({})),
+    ] {
+        let (s, v) = e.es(&owner, &pw, m.clone(), path, Some(body)).await;
+        assert!(s < 300, "{m} {path}: {s} {v}");
+    }
+    let rules = json!([{"product": "search", "resources": [{"id": c["id"], "index": "tenant-a-*"}], "actions": {"read": "allow"}}]).to_string();
+    let esql = |body: Value| {
+        let (e, rules) = (&e, rules.clone());
+        async move {
+            let r = e.http.post(format!("{}/v1/search/clusters/esql/esql", e.api)).header("x-test-grant", rules).header("x-test-index-scope", "tenant-a-*").json(&body).send().await.unwrap();
+            let s = r.status().as_u16();
+            let t = r.text().await.unwrap();
+            (s, serde_json::from_str::<Value>(&t).unwrap_or(Value::String(t)))
+        }
+    };
+    let (s, v) = esql(json!({"query": "FROM tenant-a-* | KEEP n"})).await;
+    assert_eq!((s, &v["values"]), (200, &json!([[1]])), "{v}");
+    for query in ["FROM tenant-b", "FROM tenant-a-1, tenant-b", "FROM tenant-a-1 | LOOKUP JOIN tenant-b-lookup ON t", "FROM tenant-a-1 | ENRICH p ON t"] {
+        let (s, v) = esql(json!({"query": query})).await;
+        assert!((s == 400 || s == 403) && !v.to_string().contains("s-of-b"), "{query}: {s} {v}");
+    }
+    let (s, v) = esql(json!({"query": "FROM tenant-a-*", "keep_on_completion": true})).await;
+    assert_eq!(s, 400, "{v}");
 }

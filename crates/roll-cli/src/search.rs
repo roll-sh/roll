@@ -20,6 +20,17 @@ pub enum Search {
         /// Request body: JSON, NDJSON for `_bulk`, `@file` to read a file, or `-` for stdin.
         body: Option<String>,
     },
+    /// Run a read-only ES|QL query, e.g. `roll search esql app 'FROM logs-* | STATS count = COUNT(*)'`:
+    /// nothing is written or kept, and every index it reads is checked against what the token
+    /// reaches.
+    Esql {
+        cluster: String,
+        /// The query: inline, `@file` or `-` for stdin.
+        query: String,
+        /// Run it as this index's reader (an index expression) instead of the cluster's.
+        #[arg(long)]
+        index: Option<String>,
+    },
     /// One index: show, create, delete, mappings, settings, search, bulk, delete by query.
     #[command(subcommand, alias = "indices")]
     Index(Index),
@@ -1117,6 +1128,15 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                 json!({ "revoked": id })
             }
         },
+        Search::Esql { cluster, query, index } => {
+            let c = find(api, &cluster).await?;
+            let id = urlencoding::encode(s(&c["id"])).into_owned();
+            let path = match &index {
+                Some(i) => format!("/v1/search/clusters/{id}/indices/{}/esql", urlencoding::encode(i)),
+                None => format!("/v1/search/clusters/{id}/esql"),
+            };
+            api.post(&path, json!({ "query": read_body(&query)? })).await?
+        }
         Search::Request { cluster, method, path, body } => {
             let c = find(api, &cluster).await?;
             // Sent as text, byte for byte (the control plane labels it JSON, or NDJSON for

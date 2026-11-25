@@ -950,6 +950,8 @@ origins (browser search), once they're on main.
 | POST | `/v1/search/clusters/{id}/indices/{index}/refresh` | `POST /<index>/_refresh` |
 | POST | `/v1/search/clusters/{id}/indices/{index}/analyze` | `POST /<index>/_analyze` (a read) |
 | POST | `/v1/search/clusters/{id}/indices/{index}/search` | `POST /<index>/_search` (reads take index expressions: `logs-*`, `a,b`) |
+| POST | `/v1/search/clusters/{id}/esql` | `POST /_query` `{query, params, columnar, filter, locale}` (`?format`, `delimiter`, `drop_null_columns`): read-only ES\|QL, synchronous, nothing kept, as the indices the caller's grant reaches (every index the query reads is checked: `FROM` and `METADATA`, `LOOKUP JOIN`, an `ENRICH` policy's sources; remote clusters refused). Elasticsearch-flavor clusters |
+| POST | `/v1/search/clusters/{id}/indices/{index}/esql` | the same, as `<index>`'s reader (an index expression) |
 | POST | `/v1/search/clusters/{id}/indices/{index}/docs` | `POST /<index>/_doc`: index a document under a new id |
 | GET, PUT, DELETE | `/v1/search/clusters/{id}/indices/{index}/docs/{doc}` | `/<index>/_doc/<id>` |
 | POST | `/v1/search/clusters/{id}/indices/{index}/bulk` | `POST /<index>/_bulk` (NDJSON) |
