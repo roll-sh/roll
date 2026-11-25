@@ -358,6 +358,7 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
         .map_err(|e| Error::Internal(e.to_string()))?;
     crate::evaluate::project_from_body(row, &mut target, c.body.as_ref()).map_err(Error::BadRequest)?;
     let mut action = row.action_with(&method, &params, c.body.as_ref(), &headers);
+    let asked = action;
     let mut outcome = if matches!(row.target, catalog::Tgt::AnyGrant) { Outcome::Allow } else { scope.outcome(&target, action) };
     if let Some((copied, _, _)) = crate::evaluate::copy_outcome(&a, row, &params, &target, (c.body.as_ref(), uri.query()), &scope).await
         && crate::evaluate::rank(copied) < crate::evaluate::rank(outcome)
@@ -370,6 +371,27 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
     {
         (outcome, action) = (l.outcome, l.action);
         about = (l.product, Some(l.id));
+    }
+    // A person's token on a member product reaches only what their session does too (their
+    // memberships now, and what they own), creates and what a request hands over from others
+    // included: the gate refuses the rest before any rule can ask, so it's a no here.
+    if person
+        && let Some(u) = user.clone()
+        && roll_auth::roles::MEMBER_PRODUCTS.contains(&row.product)
+    {
+        let product = row.product;
+        let session = blocking(a.clone(), move |a| {
+            let mut scope = (*a.session_grant(&u, None)?.scope).clone();
+            scope.0.extend(a.own_rule(product, &u));
+            Ok(scope)
+        })
+        .await?;
+        let own_create = matches!(target, Target::Create { project: None, .. }) && catalog::PERSON_OWN_UNPLACED.iter().any(|(m, r)| *m == method && *r == row.route);
+        let reaches = matches!(row.target, catalog::Tgt::AnyGrant | catalog::Tgt::List { .. } | catalog::Tgt::Product) || own_create || session.outcome(&target, asked) == Outcome::Allow;
+        let lends = crate::evaluate::lend_outcome(&a, row, &params, c.body.as_ref(), &session, true).await.is_none_or(|l| l.outcome == Outcome::Allow);
+        if !reaches || !lends {
+            return Ok(Json(json!({ "decision": "deny", "why": "the token's person can't do this themselves: a person's token reaches only what their projects and their own resources let them do", "product": row.product, "action": asked, "route": format!("{} {}", row.method, row.route) })));
+        }
     }
     if outcome == Outcome::Deny && ask_otherwise && catalog::placement(row, &params).is_none() {
         outcome = Outcome::Ask;

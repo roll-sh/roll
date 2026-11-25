@@ -745,6 +745,24 @@ async fn mcp_search_with_a_project_token() {
     let (s, found) = tool("search_query", serde_json::json!({ "cluster": "ada-alpha", "index": "notes", "query": { "match": { "t": "rolling" } } })).await;
     assert_eq!(s, 200, "{found}");
     assert_eq!(found["structuredContent"]["hits"]["total"]["value"], 2, "{found}");
+    // A token of hers limited to some indices of the cluster reaches it in those (search asks the
+    // gate's own decision, indices and all, never a 404), and no other index of it.
+    let id = made["structuredContent"]["id"].as_str().unwrap_or_else(|| panic!("{made}")).to_string();
+    let rules = serde_json::json!([{ "product": "search", "resources": [{ "id": id, "index": "notes" }], "actions": { "read": "allow" } }]);
+    let notes = as_ada(reqwest::Method::POST, "/v1/access/tokens".into(), serde_json::json!({ "name": "notes", "rules": rules })).await["token"].as_str().unwrap().to_string();
+    for (index, want) in [("notes", 200), ("other", 403)] {
+        let r = http.post(format!("{api}/v1/search/clusters/{id}/indices/{index}/search")).bearer_auth(&notes).json(&serde_json::json!({ "query": { "match_all": {} } })).send().await.unwrap();
+        assert_eq!(r.status().as_u16(), want, "{index}: {}", r.text().await.unwrap_or_default());
+    }
+    // Asked about a token of hers whose rules make clusters anywhere, roll answers as the gate
+    // does: in her project yes, in one she isn't in no.
+    let rules = serde_json::json!([{ "product": "search", "resources": "*", "actions": { "write": "allow" } }]);
+    let anywhere = as_ada(reqwest::Method::POST, "/v1/access/tokens".into(), serde_json::json!({ "name": "anywhere", "rules": rules })).await["id"].as_str().unwrap().to_string();
+    for (project, want) in [(alpha.as_str(), "allow"), ("prj_nobodys", "deny")] {
+        let check = serde_json::json!({ "method": "POST", "path": "/v1/search/clusters", "headers": { "x-roll-project": project }, "token": anywhere });
+        let c = as_ada(reqwest::Method::POST, "/v1/access/check".into(), check).await;
+        assert_eq!(c["decision"], want, "a create in {project}: {c}");
+    }
     let (s, refused) = tool("search_query", serde_json::json!({ "cluster": other, "index": "notes", "query": { "match_all": {} } })).await;
     assert_eq!(s, 403, "a cluster in another project: {refused}");
     // The web crawler's site verifications are the cluster's: its project's write starts, checks
