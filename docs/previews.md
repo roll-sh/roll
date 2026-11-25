@@ -279,9 +279,13 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   - `max_bytes` (10 GiB by default) is a cap on the bytes a preview's branches and its earlier
     pushes' copies own. A preview over the cap goes to sleep with `error` and stays asleep until
     resetting it brings it back under or the cap is raised: a wake (`POST …/wake`, the sheet) is
-    a 409, roll apps' services included, and a visit doesn't start its own services. A visit to a
-    roll apps service still wakes it there (roll apps doesn't ask previews; Next).
-    `a_preview_over_its_size_cap_stays_asleep`.
+    a 409, roll apps' services included, and a visit doesn't start its own services. Its roll
+    apps services are kept down there too: their `pv-` environments are paused (`PUT …
+    {paused: true}`, Render's Suspend), so a visit gets roll apps' "Paused" page and wakes
+    nothing, deploys and jobs wait. Under the cap again, its next converge or a wake resumes
+    them (only what previews paused: `held_down`). Live: `scripts/preview-apps.sh` caps a
+    preview's 2 MiB Redis copy at 1 MiB, a visit to its service answers 503, and a wake under a
+    raised cap lifts the pause. `a_preview_over_its_size_cap_stays_asleep`.
 
 ### Converging
 
@@ -788,6 +792,14 @@ previews' code may reach:
   `egress_forks`, which holds only its server. A policy of the page's own still applies (a
   browser keeps both); a navigation away isn't something a policy can stop. Previews' own proxy
   only so far: roll apps' for its forks is next (Next). `runtime::tests::service_hosts_reach_their_containers`.
+- `data_forks`: what a fork's preview's data is. It's `"schema"` by default: its branches hold the
+  structure without the rows (Postgres' schema, NoSQL's tables, streams' topics, queues' and
+  tasks' definitions), whatever the project's own previews get, and a kind that can't be
+  structure-only (Redis, buckets, search) is left out, its variables blank. A fork's code is
+  approved to run, not read for what it does with the rows it can see, and masks only hide the
+  columns someone named. `"same"` gives it what the project's own previews get, masked the same.
+  A fork's seed still fills its structure. Changing it reaches a fork's existing previews at their
+  next converge, which makes their branches again. `a_forks_preview_gets_the_datas_structure_only`.
 - `egress_forks`: what a fork's preview reaches when `egress` is `"open"`. It's `"roll"` by
   default, with `egress_hosts` still allowed through the proxy; `"open"` lets it reach what the
   project's own previews do. A fork's head runs only once a writer approves it, but an approval
@@ -2086,6 +2098,7 @@ type Settings = {
   egress: "open" | "roll";            // what its services' code may reach: anything ("open"), or only roll's products on a network with no route out (see "Egress")
   egress_hosts?: string[];            // with "roll" (or egress_forks "roll", for forks): hosts outside roll still reachable through its egress proxy (api.stripe.com, *.sentry.io; at most 20)
   egress_forks: "roll" | "open";      // what a fork's preview reaches when egress is "open" (default "roll")
+  data_forks: "schema" | "same";      // a fork's preview's data: its structure without rows (default), or what the project's own get
   warm: boolean;                      // wake the change's services as soon as a new head is deployed (true)
   crons: boolean;                     // roll apps' crons and scheduled commands run on their schedule in previews (false)
   regressions: "off" | "check" | "required";   // roll/regressions against main's preview: posted (check), or a blocker (required) ("off")
@@ -2860,12 +2873,11 @@ comments, Render and Railway, Neon, Chromatic and Percy, Signadot, Jam.
 4. **Sleeping previews cost the control plane, in review**: a settled sleeping preview converges
    whole hourly (`settled_every`), its usage read alone every 5 minutes in between. Next for it:
    a running preview that's settled could do the same between its health and route reads.
-5. **A fork's preview on roll apps**: its services' pages the same Content-Security-Policy as on
-   previews' own proxy (roll apps' proxy adds it for a `pv-` environment previews marks
-   untrusted), and a `data_forks` rule (a fork's data `schema` unless the project says
-   otherwise), as `egress_forks` is for its server.
-6. **A capped preview's roll apps service**: a visit to it still wakes it there (roll apps wakes
-   it itself); previews tells roll apps to keep it down while it's over its cap.
+5. **A fork's preview on roll apps, in review**: a `data_forks` rule, a fork's data its structure
+   only unless the project says `same`. Its services' pages get the same Content-Security-Policy
+   as on previews' own proxy from roll apps' proxy (its #1032; previews' live check in review).
+6. **A capped preview's roll apps service, in review**: its `pv-` environment paused while the
+   preview's over its cap, resumed under it.
 7. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
    is kept only where the product puts a branch back in place, keeping its id (their delete
    guards check it); each needs its control plane's reset `from`, as pg-control's.
