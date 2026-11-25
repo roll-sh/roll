@@ -968,7 +968,8 @@ TRY_IN_SAID=$(echo "$TRY_IN" | jq_ "'%s | %s' % (d.get('login'), d['text'].strip
 [ "$TRY_IN_SAID" = "signed in through /login.html first | signed in" ] || { echo "a run behind the sign-in should see the signed-in page: ${TRY_IN:0:300}"; exit 1; }
 FB_LINK=$(api GET "/v1/previews/$PV" | jq_ "[x for x in d['services'] if x['name'] == 'web'][0]['share_url']")
 FB_SAID=$(docker run --rm --name roll-previews-fbtest --network host -e LINK="$FB_LINK" -v "$ROOT/scripts/preview-cost/feedback-check.js:/w/check.js:ro" roll-previews-shot:1.64.1 sh -c 'NODE_PATH=$(npm root -g) node /w/check.js' 2>&1 | tail -1)
-case "$FB_SAID" in "/ · "*"a"*" · a live note") ;; *) echo "the page's feedback button should open roll with the page, the element and the note: $FB_SAID"; exit 1;; esac
+# At a desktop's width it's roll's small note window (the note's form alone).
+case "$FB_SAID" in "/dashboard/previews/note · / · "*"a"*" · a live note") ;; *) echo "the page's feedback button should open roll's note window with the page, the element and the note: $FB_SAID"; exit 1;; esac
 # Its secret values in what its pages served (the session fetched /env.txt, which this service
 # writes its environment to): named with where, never the value.
 SERVED=$(api GET "/v1/previews/$PV" | jq_ "' '.join(sorted(set('%s@%s' % (x['key'], x['path']) for x in d.get('served_secrets') or [])))")
