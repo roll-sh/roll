@@ -27,9 +27,11 @@ use crate::error::{EsError, EsResult};
 
 const PREFIX: &str = "::roll_sealed::v1:";
 
-/// Seals and opens a cluster's stored secrets.
+/// Seals and opens a cluster's stored secrets, and makes the web crawler's site verification
+/// tokens ([`Sealer::site_token`]) under a key of their own.
 pub struct Sealer {
     cipher: Aes256Gcm,
+    site_key: [u8; 32],
 }
 
 impl std::fmt::Debug for Sealer {
@@ -44,9 +46,29 @@ impl Sealer {
         if secret.trim().len() < 32 {
             return None;
         }
-        let mut key = [0u8; 32];
-        hkdf::Hkdf::<sha2::Sha256>::new(None, secret.as_bytes()).expand(b"roll search: sealed cluster secrets v1", &mut key).ok()?;
-        Some(Arc::new(Sealer { cipher: Aes256Gcm::new(&key.into()) }))
+        let hk = hkdf::Hkdf::<sha2::Sha256>::new(None, secret.as_bytes());
+        let (mut key, mut site_key) = ([0u8; 32], [0u8; 32]);
+        hk.expand(b"roll search: sealed cluster secrets v1", &mut key).ok()?;
+        hk.expand(b"roll search: crawler site verification tokens v1", &mut site_key).ok()?;
+        Some(Arc::new(Sealer { cipher: Aes256Gcm::new(&key.into()), site_key }))
+    }
+
+    /// The token `identity` publishes to verify `site` for the web crawler: HMAC-SHA256 of the
+    /// identity's length (8 bytes, big-endian), the identity and the site, under a key derived
+    /// from the secret for this alone (its own label, apart from sealing's),
+    /// base64url, its first 22 characters (132 bits). The same owner and site give the same token
+    /// for as long as the secret stays, so a published record outlives every row that named it; a
+    /// new secret gives new tokens.
+    pub fn site_token(&self, identity: &str, site: &str) -> String {
+        use hmac::Mac;
+        let mut mac = <hmac::Hmac<sha2::Sha256> as hmac::Mac>::new_from_slice(&self.site_key).expect("HMAC takes any key length");
+        // Length-prefixed, so no identity and site run into another pair's.
+        mac.update(&(identity.len() as u64).to_be_bytes());
+        mac.update(identity.as_bytes());
+        mac.update(site.as_bytes());
+        let mut t = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+        t.truncate(22);
+        t
     }
 
     fn seal(&self, kind: &str, plain: &str) -> String {

@@ -372,7 +372,7 @@ pub enum AppsCmd {
         /// Idle seconds before it's stopped.
         #[arg(long, value_name = "SECONDS")]
         sleep_after: Option<u32>,
-        /// A cron run's limit; a web service's request limit (unanswered by then is a 504).
+        /// A cron run's limit (default 3600); a web service's request limit to its answer's head (default 300; unanswered by then is a 504).
         #[arg(long, value_name = "SECONDS")]
         timeout: Option<u32>,
         /// A cron service's failed run is tried again this many times (0–5), after a backoff.
@@ -885,8 +885,13 @@ pub enum AppsCmd {
         #[arg(long)]
         from: String,
         /// Only this deployment (the one you tested): refused if `--from` runs another now.
-        #[arg(long, value_name = "DEPLOYMENT")]
+        #[arg(long, value_name = "DEPLOYMENT", conflicts_with = "all_services")]
         expect: Option<String>,
+        /// Every service of the project (Heroku Pipelines' promote): each one's deployment live
+        /// in `--from` now, listed first, then promoted through its own call with that
+        /// deployment as its `expect`; a service with nothing live there is skipped and said.
+        #[arg(long)]
+        all_services: bool,
         #[command(flatten)]
         target: Target,
     },
@@ -4260,7 +4265,54 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             dep
         }
-        AppsCmd::Promote { from, expect, target } => {
+        AppsCmd::Promote { from, expect, all_services: true, target } => {
+            let _ = expect;
+            let svc = service(api, &target).await?;
+            let all = api.get(&format!("/v1/apps/projects/{}/services", enc(&s(&svc["project"])))).await?;
+            // What each runs in `from` now, read once: what's promoted is exactly what was listed.
+            let mut plan = Vec::new();
+            for one in all.as_array().into_iter().flatten() {
+                let live = match api.get(&env_path(one, &from)).await {
+                    Ok(e) => e["active"]["id"].as_str().map(str::to_string),
+                    Err(_) => None,
+                };
+                if !json_out {
+                    match &live {
+                        Some(d) => println!("{:<24} {from} {d} → {}", s(&one["name"]), target.env),
+                        None => println!("{:<24} nothing live in {from}: skipped", s(&one["name"])),
+                    }
+                }
+                if let Some(d) = live {
+                    plan.push((one.clone(), d));
+                }
+            }
+            let (mut out, mut failed) = (Vec::new(), 0);
+            for (one, d) in &plan {
+                let r = api.post(&format!("{}/promote", env_path(one, &target.env)), json!({ "from": from, "expect": d })).await;
+                if !json_out {
+                    match &r {
+                        Ok(dep) => println!("{:<24} promoted: {}", s(&one["name"]), s(&dep["id"])),
+                        Err(err) => println!("{:<24} failed: {err:#}", s(&one["name"])),
+                    }
+                }
+                failed += r.is_err() as usize;
+                out.push(match r {
+                    Ok(dep) => json!({ "service": one["id"], "deployment": dep }),
+                    Err(err) => json!({ "service": one["id"], "error": format!("{err:#}") }),
+                });
+            }
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            }
+            if failed > 0 {
+                bail!("{failed} of {} services weren't promoted to {}", out.len(), target.env);
+            }
+            if plan.is_empty() {
+                bail!("nothing is live in {from} in this project");
+            }
+            return Ok(());
+        }
+        AppsCmd::Promote { from, expect, all_services: false, target } => {
             let svc = service(api, &target).await?;
             let dep = api.post(&format!("{}/promote", env_path(&svc, &target.env)), json!({ "from": from, "expect": expect })).await?;
             if !json_out {
