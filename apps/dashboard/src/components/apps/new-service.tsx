@@ -69,6 +69,7 @@ export function NewServiceSheet({
   const [gitBranch, setGitBranch] = useState("");
   // A roll code repo's branch to follow (Vercel's, Render's import): its default when empty.
   const [repoBranch, setRepoBranch] = useState("");
+  const [migrate, setMigrate] = useState(true);
   const [root, setRoot] = useState("");
   const [image, setImage] = useState("");
   const [regUser, setRegUser] = useState("");
@@ -226,6 +227,10 @@ export function NewServiceSheet({
   // Five fields, or a macro the server reads (`@daily`, `@hourly`…).
   const scheduleOk = kind !== "cron" || schedule.trim().split(/\s+/).length === 5 || /^@(yearly|annually|monthly|weekly|daily|midnight|hourly)$/.test(schedule.trim());
   const healthOk = !health.trim() || health.trim().startsWith("/");
+  // What the framework suggests (`fly launch`'s release command): its migrations before each
+  // deploy, offered ticked; its health route, as the health check's default.
+  const suggest = from === "repo" && plan?.key === planKey ? plan.plan?.suggest : undefined;
+  const healthPath = health.trim() || suggest?.health_path || "";
   const ready = !!source && gitOk && SERVICE_NAME.test(name) && portOk && healthOk && scheduleOk && parsed.errors.length === 0 && !busy;
 
   const create = async () => {
@@ -234,7 +239,7 @@ export function NewServiceSheet({
     setError(null);
     try {
       const variables = Object.keys(parsed.vars).length ? { variables: parsed.vars } : {};
-      const web = { ...(portN ? { port: portN } : {}), ...(health.trim() ? { health_path: health.trim() } : {}) };
+      const web = { ...(portN ? { port: portN } : {}), ...(healthPath ? { health_path: healthPath } : {}), ...(suggest?.pre_deploy && migrate ? { pre_deploy: suggest.pre_deploy } : {}) };
       const run = kind === "web" ? (Object.keys(web).length ? web : undefined) : kind === "cron" ? { type: kind, schedule: schedule.trim() } : { type: kind };
       const login = regUser.trim() && regPassword ? { username: regUser.trim(), password: regPassword } : null;
       const registry = from === "image" && login ? { registry: login } : from === "repo" && gitUrl.trim() && login ? { git_login: login } : {};
@@ -470,7 +475,15 @@ export function NewServiceSheet({
                 <Label>
                   Health check path <span className="font-normal">optional; none: the port accepting</span>
                 </Label>
-                <input value={health} onChange={(e) => setHealth(e.target.value)} placeholder="/healthz" spellCheck={false} className={`${field} font-mono ${health && !health.startsWith("/") ? "border-danger/60" : ""}`} />
+                <input value={health} onChange={(e) => setHealth(e.target.value)} placeholder={suggest?.health_path ?? "/healthz"} spellCheck={false} className={`${field} font-mono ${health && !health.startsWith("/") ? "border-danger/60" : ""}`} />
+                {suggest?.pre_deploy && (
+                  <label className="mt-2 flex items-start gap-2 text-[11.5px] text-muted">
+                    <input type="checkbox" checked={migrate} onChange={(e) => setMigrate(e.target.checked)} className="mt-0.5" />
+                    <span>
+                      Run its migrations before each deploy: <code className="font-mono text-fg">{suggest.pre_deploy}</code>
+                    </span>
+                  </label>
+                )}
               </>
             )}
             {kind === "cron" && (
