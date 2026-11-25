@@ -805,3 +805,53 @@ async fn opensearch_lists_one_repository_by_name() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A data stream restores whole from a snapshot Elasticsearch 9.5.5 wrote, as Elasticsearch
+/// restores it: asked for by its name, it comes back with its backing indices, its generation
+/// and (with global state) its template, and takes writes; renamed, its backing indices are named
+/// after its new name; a data stream of that name already here is refused; a pattern matching
+/// only backing indices restores them as indices.
+#[tokio::test]
+async fn restores_data_streams_elasticsearch_wrote() {
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/es-snapshots");
+    let expected: Value = parse(&std::fs::read(fixtures.join("es-9.5.5-datastream.expected.json")).unwrap()).unwrap().unwrap();
+    let mut cfg = ClusterConfig::new("es-restore-ds");
+    cfg.node_settings.push(("path.repo".into(), fixtures.display().to_string()));
+    let c = Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap();
+    assert_eq!(call(&c, "PUT", "/_snapshot/ds", Some(r#"{"type":"fs","settings":{"location":"es-9.5.5-datastream"}}"#)).await.0, 200);
+    let restore = |body: &'static str| call(&c, "POST", "/_snapshot/ds/snap-1/_restore?wait_for_completion=true", Some(body));
+    let backing: Vec<String> = at(&expected, "data_stream.indices").as_array().unwrap().iter().map(|i| at(i, "index_name").as_str().unwrap().to_string()).collect();
+
+    let (s, v) = restore(r#"{"indices":"events-fixture","include_global_state":true}"#).await;
+    assert_eq!(s, 200, "{v:?}");
+    let (s, v) = call(&c, "GET", "/_data_stream/events-fixture", None).await;
+    assert_eq!(s, 200, "{v:?}");
+    let ds = &at(&v, "data_streams").as_array().unwrap()[0];
+    let names: Vec<String> = at(ds, "indices").as_array().unwrap().iter().map(|i| at(i, "index_name").as_str().unwrap().to_string()).collect();
+    assert_eq!((names, at(ds, "generation").as_i64(), at(ds, "template").as_str()), (backing.clone(), Some(2), Some("events-fixture")), "{v:?}");
+    let (_, v) = call(&c, "POST", "/events-fixture/_search", Some(r#"{"size":100,"sort":[{"n":"asc"}]}"#)).await;
+    let got: Vec<(String, String, Value)> = at(&v, "hits.hits").as_array().unwrap().iter().map(|h| (at(h, "_index").as_str().unwrap().to_string(), at(h, "_id").as_str().unwrap().to_string(), at(h, "_source").clone())).collect();
+    let want: Vec<(String, String, Value)> = at(&expected, "docs").as_array().unwrap().iter().map(|h| (at(h, "_index").as_str().unwrap().to_string(), at(h, "_id").as_str().unwrap().to_string(), at(h, "_source").clone())).collect();
+    assert_eq!(got, want);
+    let (s, v) = call(&c, "POST", "/events-fixture/_doc?refresh=true", Some(r#"{"@timestamp":"2026-11-02T00:00:00Z","n":999}"#)).await;
+    assert_eq!((s, at(&v, "_index").as_str()), (201, Some(backing[1].as_str())), "{v:?}");
+
+    let (s, v) = restore(r#"{"indices":"events-fixture"}"#).await;
+    assert_eq!((s, at(&v, "error.type").as_str()), (500, Some("snapshot_restore_exception")), "{v:?}");
+
+    let (s, v) = restore(r#"{"indices":"events-fixture","rename_pattern":"events-(.+)","rename_replacement":"copy-$1"}"#).await;
+    assert_eq!(s, 200, "{v:?}");
+    let (_, v) = call(&c, "GET", "/_data_stream/copy-fixture", None).await;
+    let names: Vec<String> = at(&at(&v, "data_streams").as_array().unwrap()[0], "indices").as_array().unwrap().iter().map(|i| at(i, "index_name").as_str().unwrap().to_string()).collect();
+    assert_eq!(names, backing.iter().map(|b| b.replacen(".ds-events-fixture", ".ds-copy-fixture", 1)).collect::<Vec<_>>());
+    assert_eq!(at(&call(&c, "GET", "/copy-fixture/_count", None).await.1, "count").as_i64(), Some(40));
+    // No template matches it, and it takes writes all the same, into its write index.
+    let (s, v) = call(&c, "POST", "/copy-fixture/_doc?refresh=true", Some(r#"{"@timestamp":"2026-11-02T00:00:00Z","n":999}"#)).await;
+    assert_eq!((s, at(&v, "_index").as_str()), (201, names.last().map(String::as_str)), "{v:?}");
+
+    let (s, v) = restore(r#"{"indices":".ds-events-fixture-*","rename_pattern":"\\.ds-events-(.+)","rename_replacement":"plain-$1"}"#).await;
+    assert_eq!(s, 200, "{v:?}");
+    assert_eq!(call(&c, "GET", "/_data_stream/plain-*", None).await.1, parse(br#"{"data_streams":[]}"#).unwrap().unwrap());
+    // Hidden, as their backing indices were.
+    assert_eq!(at(&call(&c, "GET", "/plain-*/_count?expand_wildcards=all", None).await.1, "count").as_i64(), Some(40));
+}

@@ -170,6 +170,10 @@ async fn settings_through_the_cli() {
     let (code, out, err) = t.run(&["exec", "-s", "site", "-p", "acme", "--", "sh", "-c", "echo \"$MODE ${PORT:-no-port} ${KEY:-no-key} ${NODE_OPTIONS:-no-node-options}\"; exit 3"]).await;
     assert_eq!((code, out.trim()), (Some(3), "prod no-port no-key no-node-options"), "{err}");
     assert!(err.contains("not set here (sealed") && err.contains("KEY") && err.contains("steer") && err.contains("NODE_OPTIONS"), "{err}");
+    // What a size costs before it's made, and what its week says (nothing yet).
+    let q = t.json(&["quote", "--memory", "1024", "--min", "1"]).await;
+    assert!(q["month"]["least"].as_f64().is_some_and(|u| u > 0.0) && q["scales_to_zero"] == false, "{q}");
+    assert!(t.json(&["advice", "-s", "site", "-p", "acme"]).await["advice"].as_array().is_some_and(Vec::is_empty));
     // `roll up` doesn't upload to an image service: it says what deploys one.
     let (code, _, err) = t.run_up().await;
     assert!(code != Some(0) && err.contains("roll deploy"), "{err}");

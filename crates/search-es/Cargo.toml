@@ -83,6 +83,11 @@ socket2.workspace = true
 unicode-segmentation.workspace = true
 zxcvbn.workspace = true
 
+[features]
+# search-control's takeover test pauses a restore from an Elasticsearch snapshot
+# (`api::snapshots::ELASTIC_RESTORE_HOOK`); nothing else turns it on.
+test-hooks = []
+
 [build-dependencies]
 serde_json.workspace = true
 
