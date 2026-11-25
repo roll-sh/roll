@@ -507,7 +507,9 @@ export type DeletedProject = { project: string; name: string; environment?: stri
 export type Recovered = { project: string; name: string; recovered_at: number; rotated: number; rotation_failed: string[] };
 export type Place = { project: string; project_name: string; environment: string; path: string; key: string; version: number; updated_at: number; linked: boolean };
 /** One thing to fix (`GET …/health`), worst first: where, never a value. */
-export type Finding = { issue: "decoy_used" | "production_unprotected" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "unplaced" | "operator_made" | "stored_cloud_key" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy };
+export type Finding = { issue: "decoy_used" | "production_unprotected" | "off_policy" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "unplaced" | "operator_made" | "stored_cloud_key" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy };
+/** roll secrets' policy (`GET`/`PUT /v1/secrets/policy`, the operator's or an admin account's): floors every project may only tighten; `null` is no floor. */
+export type Guardrails = { production_approvals: number | null; leaks_rotate: "managed" | null; sync_kinds: string[] | null; no_stored_cloud_keys: boolean; max_token_days: number | null; updated_at: number | null; updated_by: string | null };
 /** One project's findings (`GET /v1/secrets/findings`). */
 export type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
 /** A URL roll calls to issue and revoke a value that lives outside roll (`rotator` links). */
