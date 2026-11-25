@@ -490,7 +490,8 @@ signed, never through the public endpoint, so the remote's allowlist doesn't app
 the local cluster's has already admitted the client): a client the local cluster admits reads the
 remote's data within the key's access, whatever the remote's own allowlist says. Only these calls may carry the link's
 `x-roll-remote-access` header, which lets a `cross_cluster` key authenticate: the node drops it
-from every request with another origin (`Lease::handle`), as it drops `x-roll-authenticated-user`.
+from every request with another origin (`Lease::handle`); who authenticated is never a header at
+all (`search_es::rest::Verified`, set on the request in process).
 A link's search may ask for its aggregations partially reduced (`x-roll-partial-aggs`, honored
 only for a cross-cluster key's request): the remote answers `search-aggs`' `wire` encoding of its
 `Aggs` tree in an internal field, and the local cluster does the final reduce. The encoding names
