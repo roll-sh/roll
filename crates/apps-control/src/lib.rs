@@ -1293,6 +1293,42 @@ impl Apps {
     /// The repository a Git URL service fetches from: through roll's GitHub App when it's
     /// connected (a short-lived installation token), else with its login when the login is for
     /// this URL's host (a login never goes to another host).
+    /// roll previews' commit status on a Git URL service's GitLab or Bitbucket repository, with
+    /// its Git login, sent only to its source's own host (`ci_hosts`). `false` when it has no
+    /// login or its host is neither (GitHub's goes through roll's GitHub App). On the service's
+    /// owner only (roll previews' fleet hop brings it there).
+    pub async fn commit_status(self: &Arc<Self>, service: &str, sha: &str, status: &integrations::CommitStatus) -> anyhow::Result<bool> {
+        anyhow::ensure!(self.owns(service), "the service's owner reports for it");
+        let sid = service.to_string();
+        let svc = self.db(move |s| s.service(&sid)).await?;
+        let Source::Git { url, .. } = &svc.source else { return Ok(false) };
+        let remote = self.git_remote(&svc.id, url).await;
+        let (Some(host), Some(login)) = (ci_hosts::host_of(url), remote.login()) else { return Ok(false) };
+        ci_hosts::post(self.cfg.allow_private, &host, login, sha, status).await?;
+        Ok(true)
+    }
+
+    /// roll previews' one note on a Git URL service's GitLab merge request or Bitbucket pull
+    /// request `number` of `repo` (its path), `existing` edited in place (made again when it's
+    /// gone there): its id. `None` when it has no login, its host is neither, or its source is
+    /// another repository now (a number is its repository's). On the service's owner only.
+    pub async fn pull_request_note(self: &Arc<Self>, service: &str, repo: &str, number: u64, body: &str, existing: Option<u64>) -> anyhow::Result<Option<u64>> {
+        anyhow::ensure!(self.owns(service), "the service's owner reports for it");
+        let sid = service.to_string();
+        let svc = self.db(move |s| s.service(&sid)).await?;
+        let Source::Git { url, .. } = &svc.source else { return Ok(None) };
+        let remote = self.git_remote(&svc.id, url).await;
+        let (Some(host), Some(login)) = (ci_hosts::host_of(url), remote.login()) else { return Ok(None) };
+        let path = match &host {
+            ci_hosts::Host::GitLab { project, .. } => project.clone(),
+            ci_hosts::Host::Bitbucket { workspace, repo, .. } => format!("{workspace}/{repo}"),
+        };
+        if !path.eq_ignore_ascii_case(repo.trim_end_matches(".git")) {
+            return Ok(None);
+        }
+        Ok(Some(ci_hosts::note(self.cfg.allow_private, &host, login, number, body, existing).await?))
+    }
+
     pub(crate) async fn git_remote<'a>(self: &Arc<Self>, service: &str, url: &'a str) -> git_source::Remote<'a> {
         if let Some((app, installation, owner, repo)) = self.github_for(service, url).await {
             match app.git_login(installation, &owner, &repo).await {
