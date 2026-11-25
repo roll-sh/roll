@@ -53,16 +53,17 @@ impl Sealer {
         Some(Arc::new(Sealer { cipher: Aes256Gcm::new(&key.into()), site_key }))
     }
 
-    /// The token `owner` publishes to verify `site` for the web crawler: HMAC-SHA256 of the two
-    /// under a key derived from the secret for this alone (its own label, apart from sealing's),
+    /// The token `identity` publishes to verify `site` for the web crawler: HMAC-SHA256 of
+    /// `<identity>\n<site>` under a key derived from the secret for this alone (its own label,
+    /// apart from sealing's),
     /// base64url, its first 22 characters (132 bits). The same owner and site give the same token
     /// for as long as the secret stays, so a published record outlives every row that named it; a
     /// new secret gives new tokens.
-    pub fn site_token(&self, owner: &str, site: &str) -> String {
+    pub fn site_token(&self, identity: &str, site: &str) -> String {
         use hmac::Mac;
         let mut mac = <hmac::Hmac<sha2::Sha256> as hmac::Mac>::new_from_slice(&self.site_key).expect("HMAC takes any key length");
-        mac.update(owner.as_bytes());
-        mac.update(&[0]);
+        mac.update(identity.as_bytes());
+        mac.update(b"\n");
         mac.update(site.as_bytes());
         let mut t = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
         t.truncate(22);

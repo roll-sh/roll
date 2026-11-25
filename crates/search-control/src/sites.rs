@@ -29,7 +29,9 @@ const RECHECK_BATCH: i64 = 50;
 pub const PROBES_PER_MINUTE: usize = 10;
 
 /// Whose verifications a cluster's are: its owner, or the operator's for clusters without one
-/// (as the crawler counts them: `search_es` `crawler::sync`).
+/// (as the crawler counts them: `search_es` `crawler::sync`). The one identity a cluster has for
+/// the crawler's sites: its verification tokens are derived from it (`Store::site_token`), and
+/// the daily count and pending caps are counted by it.
 pub fn owner_of(c: &SearchCluster) -> String {
     c.owner.clone().unwrap_or_else(|| "(no owner)".to_string())
 }
