@@ -76,6 +76,10 @@ enum AttrOp {
     Substring,
 }
 
+/// A match its caller stopped ([`Selectors::select`]'s `stop`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimedOut;
+
 /// What matching needs of an element.
 pub struct Element<'a> {
     pub tag: &'a str,
@@ -139,8 +143,8 @@ impl Selectors {
 
     /// The elements of `elements` (in document order, each with its parent's and previous
     /// sibling's position in the slice) the list matches, in document order. `stop` is asked
-    /// every so often and ends the walk (`Err`) when it says so.
-    pub fn select(&self, elements: &[(Element<'_>, Option<usize>, Option<usize>)], mut stop: impl FnMut() -> bool) -> Result<Vec<usize>, ()> {
+    /// every so often and ends the walk ([`TimedOut`]) when it says so.
+    pub fn select(&self, elements: &[(Element<'_>, Option<usize>, Option<usize>)], mut stop: impl FnMut() -> bool) -> Result<Vec<usize>, TimedOut> {
         // Bit offsets of each selector's compounds in one word.
         let mut offsets = Vec::with_capacity(self.list.len());
         let mut n = 0u32;
@@ -152,7 +156,7 @@ impl Selectors {
         let mut out = Vec::new();
         for (k, (el, parent, prev)) in elements.iter().enumerate() {
             if k % 1024 == 1023 && stop() {
-                return Err(());
+                return Err(TimedOut);
             }
             let at_parent = parent.map_or(0, |p| matched[p]);
             let inherited = parent.map_or(0, |p| matched[p] | above[p]);
@@ -304,16 +308,11 @@ impl Parser<'_> {
             Some(ch) if ch.is_ascii_alphabetic() => c.tag = Some(self.ident()?.to_ascii_lowercase()),
             _ => {}
         }
-        loop {
-            match self.peek() {
-                Some(b'#' | b'.' | b'[' | b':') => {
-                    let s = self.simple()?;
-                    c.simple.push(s);
-                    if c.simple.len() > MAX_SIMPLE {
-                        return Err(format!("more than {MAX_SIMPLE} conditions on one element"));
-                    }
-                }
-                _ => break,
+        while let Some(b'#' | b'.' | b'[' | b':') = self.peek() {
+            let s = self.simple()?;
+            c.simple.push(s);
+            if c.simple.len() > MAX_SIMPLE {
+                return Err(format!("more than {MAX_SIMPLE} conditions on one element"));
             }
         }
         if c.tag.is_none() && c.simple.is_empty() && !star {
