@@ -260,7 +260,13 @@ textarea{min-height:72px;resize:vertical}
       fb_requests: JSON.stringify([...failed.values()].slice(-5)),
       fb_ua: navigator.userAgent.slice(0, 300),
     });
-    window.open(`${TARGET}&${q}`, "_blank", "noopener");
+    // In a small window of roll's that posts it and closes (its form alone), the page's own list
+    // read again when this one has the focus back; the whole dashboard where a popup can't open.
+    // `noopener` either way: the page gets no handle on roll's window.
+    const NOTE = TARGET.replace(/\/dashboard\/projects\/[^/?]+\/previews\?/, "/dashboard/previews/note?");
+    const popup = matchMedia("(min-width: 640px)").matches && NOTE !== TARGET;
+    window.open(`${popup ? NOTE : TARGET}&${q}`, "_blank", popup ? "noopener,popup,width=480,height=640" : "noopener");
+    if (popup) addEventListener("focus", load, { once: true });
     reset();
   });
   // What's been said about this page already (who, what, on which element), as text only.
