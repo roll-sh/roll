@@ -42,7 +42,7 @@ const CAPPED: &str = "rotated within the hour";
 pub(crate) const LEAKS: &str = "roll:leaks";
 
 /// What a project does when one of its managed keys leaks (`leaks.rotate`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LeakRotate {
     /// Rotated at once, with no grace for the leaked credential.
@@ -371,6 +371,12 @@ impl Secrets {
                 return Err(Error::TooMany(format!("at most {limits}: try again later")));
             }
         }
+        if push.breakglass
+            && let Err(e) = self.floors()?.breakglass()
+        {
+            self.audit_now(project, caller, action, None, None, &[], &format!("refused break glass{said}: roll secrets' policy allows none"));
+            return Err(e);
+        }
         if push.breakglass && !self.breakglass(project)?.iter().any(|w| allows_breakglass(w, caller, push)) {
             self.audit_now(project, caller, action, None, None, &[], &format!("refused break glass{said}: the project's breakglass list doesn't name this token or pusher"));
             return Err(Error::Forbidden(format!("break glass isn't allowed{said} in this project: an admin names who may with `roll secrets breakglass`")));
@@ -423,6 +429,9 @@ impl Secrets {
         self.project(project)?;
         let now = self.db.now_ms()?;
         self.db.write(|c| {
+            if !who.is_empty() {
+                crate::guardrails::read(c)?.breakglass()?;
+            }
             c.execute("UPDATE projects SET breakglass = ? WHERE project_id = ?", params![(!who.is_empty()).then(|| json!(who).to_string()), project])?;
             let summary = if who.is_empty() { "no one may push past a pre-receive hook".to_string() } else { format!("may push past a pre-receive hook: {}", who.join(", ")) };
             crate::audit::record(c, self.keys()?, project, caller, "scan.breakglass", None, None, &[], &summary, now)
@@ -486,6 +495,7 @@ impl Secrets {
         self.project(project)?;
         let now = self.db.now_ms()?;
         self.db.write(|c| {
+            crate::guardrails::read(c)?.leaks(rotate)?;
             c.execute("UPDATE projects SET leak_rotate = ? WHERE project_id = ?", params![rotate.as_str(), project])?;
             let summary = match rotate {
                 LeakRotate::Managed => "leaked managed keys rotate at once, with no grace for the leaked credential",

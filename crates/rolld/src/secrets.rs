@@ -484,6 +484,7 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     let canaries = roll_secrets::validity::Canaries::parse(&std::env::var("ROLL_SECRETS_VALIDITY_CANARIES").unwrap_or_default()).map_err(|e| anyhow::anyhow!("ROLL_SECRETS_VALIDITY_CANARIES: {e}"))?;
     secrets.set_validity_settings(roll_secrets::validity::Settings { aws_live, canaries });
     tell_decoys(&access, secrets.clone());
+    cap_token_lifetimes(&access, secrets.clone());
     // ACME's http-01 and dns-01 checks: public addresses only, as webhooks.
     secrets.set_acme_checks(Arc::new(acme::Checks::new(allow_private)));
     // Publicly trusted certificates: the edge's ACME client, over a guarded client, dns-01 through
@@ -551,6 +552,21 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
         }
     });
     Ok(secrets)
+}
+
+/// roll secrets' policy caps the lifetime of roll-access tokens with a secrets rule (or every
+/// product's): roll-access makes and changes every token, so it asks on each (guardrails.rs).
+fn cap_token_lifetimes(access: &roll_access::Access, secrets: Arc<Secrets>) {
+    let cap: roll_access::LifetimeCap = Box::new(move |rules| {
+        if !rules.0.iter().any(|r| r.product == "secrets" || r.product == "*") {
+            return None;
+        }
+        secrets.token_days_cap().unwrap_or_else(|e| {
+            tracing::warn!("reading roll secrets' policy for a token's lifetime: {e}");
+            None
+        })
+    });
+    let _ = access.lifetime_cap.set(cap);
 }
 
 /// A decoy key's token was used: roll-access tells roll secrets, which raises `decoy_used` on its
@@ -2108,6 +2124,9 @@ impl roll_secrets::Workloads for Workloads {
         // On the store's blocking threads, as `mint`.
         match tokio::runtime::Handle::current().block_on(async move { access.create_grant(&ext, new).await }) {
             Ok((g, secret)) => Ok(roll_secrets::Minted { id: g.id, secret, expires_at: g.expires_at.unwrap_or_default() }),
+            Err(roll_access::Error::Forbidden(m)) if m.starts_with("roll secrets' policy") => {
+                Err(Error::Forbidden(format!("{m}: a gateway's token lasts until the gateway is deleted, so add the gateway without a token and log it in through a workload identity")))
+            }
             Err(roll_access::Error::Forbidden(_) | roll_access::Error::Unauthorized(_)) => {
                 Err(Error::Forbidden("roll couldn't tell whose this gateway's token would be: sign in, or add the gateway without a token and log it in through a workload identity".into()))
             }

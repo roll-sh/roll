@@ -7608,6 +7608,63 @@ async fn members_reach_secrets_by_their_role() {
     assert_eq!(get("bob", format!("/v1/secrets/projects/{}/environments/development/secrets", api.project)).await.0, StatusCode::NOT_FOUND);
 }
 
+/// Guardrails (docs/secrets.md): with a policy of one production approval, a project's admin
+/// can't take production back to none, Health shows a project still below it, and a new project's
+/// production is born at it.
+#[tokio::test]
+async fn a_policy_floor_holds_against_a_project_admin_and_new_projects_are_born_at_it() {
+    let api = Api::new().await;
+    let (_, p) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "before" }))).await;
+    let before = p["id"].as_str().unwrap().to_string();
+    let at = |rest: &str| format!("/v1/secrets/projects/{before}{rest}");
+    api.join(&before, "cat", "admin", None).await;
+    // Its secrets are made on first use: before the policy here.
+    let (s, e) = api.as_ada(Method::GET, &at("/environments/production"), None).await;
+    assert_eq!((s, e["approvals"].as_i64()), (StatusCode::OK, Some(0)), "{e}");
+    let policy = json!({ "production_approvals": 1 });
+    assert_eq!(api.signed_in("cat", false, Method::PUT, "/v1/secrets/policy", Some(policy.clone())).await.0, StatusCode::FORBIDDEN);
+    let set = api.ok(Method::PUT, "/v1/secrets/policy", Some(policy)).await;
+    assert_eq!((set["production_approvals"].as_i64(), set["max_token_days"].is_null()), (Some(1), true), "{set}");
+
+    // Made before the policy, it isn't rewritten: Health says how far it is.
+    let (s, h) = api.signed_in("cat", false, Method::GET, &at("/health"), None).await;
+    assert_eq!(s, StatusCode::OK, "{h}");
+    assert!(h.as_array().unwrap().iter().any(|f| f["issue"] == "off_policy" && f["environment"] == "production"), "{h}");
+    let (s, e) = api.signed_in("cat", false, Method::PUT, &at("/environments/production/policy"), Some(json!({ "protected": true, "approvals": 1 }))).await;
+    assert!(s.is_success(), "{e}");
+    let (s, e) = api.signed_in("cat", false, Method::PUT, &at("/environments/production/policy"), Some(json!({ "protected": true, "approvals": 0 }))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{e}");
+    assert!(e["error"].as_str().unwrap().contains("roll secrets' policy") && e["error"].as_str().unwrap().contains("at least 1 approval"), "{e}");
+
+    let (_, p) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "after" }))).await;
+    let after = p["id"].as_str().unwrap();
+    let (s, e) = api.as_ada(Method::GET, &format!("/v1/secrets/projects/{after}/environments/production"), None).await;
+    assert_eq!((s, e["protected"].as_bool(), e["approvals"].as_i64()), (StatusCode::OK, Some(true), Some(1)), "{e}");
+}
+
+/// A restore comes back within roll secrets' policy: a sync of a kind it rules out isn't restored,
+/// and `leaks.rotate` comes back at its floor.
+#[tokio::test]
+async fn a_restore_brings_back_nothing_below_the_policy() {
+    let api = Api::new().await;
+    api.set("staging", "PLATFORM_TOKEN", "fake-platform-token").await;
+    api.ok(Method::POST, "/syncs", Some(json!({ "environment": "staging", "kind": "fake", "target": { "name": "x", "token_key": "PLATFORM_TOKEN" } }))).await;
+    let secret = [9u8; 32];
+    let b = api.ok(Method::POST, "/backup", Some(json!({ "recipient": roll_secrets::crypto::public_key(&secret) }))).await;
+    let sealed: roll_secrets::crypto::Sealed = serde_json::from_value(b["sealed"].clone()).unwrap();
+    let archive: Value = serde_json::from_slice(&roll_secrets::crypto::open_sealed(&secret, b["context"].as_str().unwrap(), &sealed).unwrap()).unwrap();
+
+    api.ok(Method::PUT, "/v1/secrets/policy", Some(json!({ "sync_kinds": [], "leaks_rotate": "managed" }))).await;
+    let (s, e) = api.call(Method::POST, "/syncs", Some(json!({ "environment": "staging", "kind": "fake", "target": { "name": "y", "token_key": "PLATFORM_TOKEN" } }))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{e}");
+    let (_, other) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "restored" }))).await;
+    let to = |p: &str| format!("/v1/secrets/projects/{}{p}", other["id"].as_str().unwrap());
+    let r = api.ok(Method::POST, &to("/restore"), Some(archive)).await;
+    assert_eq!(r["syncs"].as_u64(), Some(0), "{r}");
+    assert!(r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("fake sync") && w.as_str().unwrap().contains("roll secrets' policy")), "{r}");
+    assert_eq!(api.ok(Method::GET, &to(""), None).await["leaks"]["rotate"], "managed");
+}
+
 /// A project as it's made, nothing protected by hand (#688): a developer on the default role works
 /// in development and staging but never reveals production, and a check (an untrusted resolve)
 /// reads staging but is refused production, even through the operator.

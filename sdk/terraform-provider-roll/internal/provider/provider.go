@@ -68,7 +68,7 @@ func (p *rollProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 
 func (p *rollProvider) Resources(context.Context) []func() resource.Resource {
 	return []func() resource.Resource{newEnvironmentResource, newSecretResource, newIdentityResource, newSyncResource, newTokenResource, newCaResource, newSshCaResource, newTransitKeyResource, newOutsideDatabaseResource,
-		newRotatorResource, newSaasRotatorResource, newFolderPolicyResource, newAuditSinkResource, newGitHubAppResource, newAwsRoleResource, newAwsUserResource, newCloudAccountResource, newRequiredKeysResource, newKmsKeyResource, newProjectResource,
+		newRotatorResource, newSaasRotatorResource, newFolderPolicyResource, newAuditSinkResource, newGitHubAppResource, newAwsRoleResource, newAwsUserResource, newCloudAccountResource, newRequiredKeysResource, newKmsKeyResource, newProjectResource, newSecretsPolicyResource,
 		newAppServiceResource, newAppVariableResource, newAppDomainResource, newAppEnvironmentResource, newAppLinkResource, newAppNotificationResource,
 		newMachineClientResource,
 		newSearchClusterResource, newSearchKeyResource, newSearchRepoResource}
