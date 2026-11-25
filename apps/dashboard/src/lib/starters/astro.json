@@ -1,0 +1,12 @@
+{
+  "id": "astro",
+  "name": "Astro",
+  "blurb": "A static site, built at deploy",
+  "files": {
+    "package.json": "{\n  \"name\": \"{{name}}\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"scripts\": {\n    \"dev\": \"astro dev\",\n    \"build\": \"astro build\",\n    \"preview\": \"astro preview\"\n  },\n  \"dependencies\": {\n    \"astro\": \"^7.4.10\"\n  }\n}\n",
+    "astro.config.mjs": "import { defineConfig } from \"astro/config\";\n\nexport default defineConfig({});\n",
+    "src/pages/index.astro": "---\nconst title = \"{{name}}\";\n---\n<html lang=\"en\">\n  <head>\n    <meta charset=\"utf-8\" />\n    <meta name=\"viewport\" content=\"width=device-width\" />\n    <title>{title}</title>\n  </head>\n  <body style=\"font-family: system-ui, sans-serif; margin: 4rem auto; max-width: 640px; padding: 0 1rem\">\n    <h1>{title}</h1>\n    <p>Edit src/pages/index.astro and land it: roll builds and serves every change.</p>\n  </body>\n</html>\n",
+    ".gitignore": "node_modules/\n.env*\ndist/\n.astro/\n",
+    "README.md": "# {{name}}\n\nAn Astro site, started from roll's Astro starter. Every landing on its default branch deploys it.\n\nRun it on your computer:\n\n```sh\nnpm install\nnpm run dev\n```\n"
+  }
+}

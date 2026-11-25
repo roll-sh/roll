@@ -1,0 +1,11 @@
+{
+  "id": "go",
+  "name": "Go",
+  "blurb": "A web server in Go's standard library",
+  "files": {
+    "go.mod": "module {{name}}\n\ngo 1.25\n",
+    "main.go": "package main\n\nimport (\n\t\"fmt\"\n\t\"log\"\n\t\"net/http\"\n\t\"os\"\n)\n\nfunc main() {\n\tmux := http.NewServeMux()\n\tmux.HandleFunc(\"GET /{$}\", func(w http.ResponseWriter, r *http.Request) {\n\t\tfmt.Fprintln(w, \"{{name}} is up\")\n\t})\n\tmux.HandleFunc(\"GET /hello/{who}\", func(w http.ResponseWriter, r *http.Request) {\n\t\tfmt.Fprintf(w, \"Hello, %s!\\n\", r.PathValue(\"who\"))\n\t})\n\t// roll gives the port to listen on.\n\tport := os.Getenv(\"PORT\")\n\tif port == \"\" {\n\t\tport = \"8080\"\n\t}\n\tlog.Fatal(http.ListenAndServe(\":\"+port, mux))\n}\n",
+    ".gitignore": ".env*\n",
+    "README.md": "# {{name}}\n\nA Go server, started from roll's Go starter. Every landing on its default branch deploys it.\n\nRun it on your computer:\n\n```sh\ngo run .\n```\n"
+  }
+}
