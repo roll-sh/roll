@@ -604,6 +604,9 @@ pub struct ResolvedVars {
     pub notices: Vec<String>,
     /// A closed environment's placeholders: each variable's binding (the hosts it's for).
     pub placeholders: BTreeMap<String, String>,
+    /// A Postgres link's parts ([`integrations::pg_parts`]): its `DATABASE_URL` says them, so
+    /// their arrival isn't a change to deploy.
+    pub derived: BTreeSet<String>,
 }
 
 impl ResolvedVars {
@@ -3312,6 +3315,7 @@ impl Apps {
         let (sid, e) = (svc.id.clone(), env.name.clone());
         let (links, own_data, branches) = self.db(move |s| Ok((s.links_minted(&sid)?, s.env_data(&sid, &e)?, s.env_branches(&sid, &e)?))).await?;
         let mut branch_notices = Vec::new();
+        let mut derived = BTreeSet::new();
         // The resources it links itself: in an environment with data of its own, each is its
         // branch or left out, so roll secrets' links to them are left out too.
         let own_links: BTreeSet<(&'static str, String)> = links.iter().filter(|l| l.0 != LinkKind::Service).map(|l| (l.0.as_str(), l.1.clone())).collect();
@@ -3340,9 +3344,11 @@ impl Apps {
             };
             match read {
                 Ok(vs) => {
+                    // Another service's names are the project network's: nothing to rewrite.
+                    let mut vs: Vec<(String, String)> = vs.into_iter().map(|(k, v)| if kind == LinkKind::Service { (k, v) } else { let v = self.deps.runtime.reach(&v); (k, v) }).collect();
+                    // From the URL the instance reaches.
+                    derived.extend(integrations::pg_parts(kind, &mut vs).into_iter().map(|k| format!("{prefix}{k}")));
                     for (k, v) in vs {
-                        // Another service's names are the project network's: nothing to rewrite.
-                        let v = if kind == LinkKind::Service { v } else { self.deps.runtime.reach(&v) };
                         vars.insert(format!("{prefix}{k}"), (v, "link"));
                     }
                 }
@@ -3541,7 +3547,9 @@ impl Apps {
         let sources = vars.iter().map(|(k, (_, s))| (k.clone(), *s)).collect();
         // A placeholder the service's own variable of the same name replaced isn't one.
         placeholders.retain(|k, _| vars.get(k).is_some_and(|(_, s)| *s == "secret"));
-        Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources, unresolved, refused, ref_texts, sealed, from_secrets, plain_secrets, notices, placeholders })
+        // A part the service's own variable of the same name replaced isn't one.
+        derived.retain(|k| vars.get(k).is_some_and(|(_, s)| *s == "link"));
+        Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources, unresolved, refused, ref_texts, sealed, from_secrets, plain_secrets, notices, placeholders, derived })
     }
 
     /// Fill the `${{ … }}` in the service's own variables ([`refs`]); what named nothing. A
@@ -3835,7 +3843,12 @@ impl Apps {
         let mut out = Vec::new();
         for (kind, r, prefix, minted) in rows {
             let names = self.link_values(&svc, kind, &r, "production", minted).await;
-            let vars = names.map(|v| v.into_iter().map(|(k, _)| format!("{prefix}{k}")).collect()).unwrap_or_default();
+            let vars = names
+                .map(|mut v| {
+                    integrations::pg_parts(kind, &mut v);
+                    v.into_iter().map(|(k, _)| format!("{prefix}{k}")).collect()
+                })
+                .unwrap_or_default();
             let opts: integrations::LinkOptions = options.get(&(kind.as_str().to_string(), r.clone())).and_then(|o| serde_json::from_str(o).ok()).unwrap_or_default();
             out.push(Link { kind, r#ref: r, prefix, vars, indices: None, access: None }.narrowed(&opts));
         }
@@ -3922,6 +3935,8 @@ impl Apps {
                 return Err(e);
             }
         };
+        let mut vars = vars;
+        integrations::pg_parts(kind, &mut vars);
         Ok(Link { kind, r#ref: r#ref.to_string(), vars: vars.into_iter().map(|(k, _)| format!("{prefix}{k}")).collect(), prefix, indices: None, access: None }.narrowed(&options))
     }
 
@@ -4853,6 +4868,8 @@ impl ResolvedVars {
             // roll's `WEB_CONCURRENCY` follows `cpu` and `memory_mb`, settings a deploy already says;
             // the service's own value is a change like any.
             .filter(|(k, _)| !(k == "WEB_CONCURRENCY" && self.sources.get(k.as_str()).copied() == Some("roll")))
+            // A Postgres link's parts follow its URL, which is hashed.
+            .filter(|(k, _)| !self.derived.contains(k))
             // A placeholder is new random text each time it's made: its binding decides.
             .map(|(k, v)| (k.clone(), self.placeholders.get(k).map(|b| format!("placeholder:{b}")).or_else(|| self.ref_texts.get(k).cloned()).unwrap_or_else(|| v.clone())))
             .collect()

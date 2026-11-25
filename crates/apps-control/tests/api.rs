@@ -1802,7 +1802,7 @@ async fn a_custom_domain_routes_once_its_dns_points_at_roll() {
 }
 
 /// A link puts its resource's variables (or credentials it made for itself, once, revoked when it
-/// goes) in the service's environment (prefixed when asked),
+/// goes) in the service's environment (prefixed when asked; a Postgres URL's parts too),
 /// and a running instance has them; a resource that doesn't exist can't be linked.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_link_puts_its_variables_in_the_instances() {
@@ -1811,9 +1811,10 @@ async fn a_link_puts_its_variables_in_the_instances() {
     let id = svc["id"].as_str().unwrap().to_string();
     let links = format!("/v1/apps/services/{id}/links");
     let (st, l) = call(&w.api, "PUT", &format!("{links}/postgres/main"), Some(json!({}))).await;
-    assert_eq!((st, &l["vars"]), (StatusCode::OK, &json!(["DATABASE_URL"])), "{l}");
+    assert_eq!((st, &l["vars"]), (StatusCode::OK, &json!(["DATABASE_URL", "PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGDATABASE"])), "{l}");
     let (_, l) = call(&w.api, "PUT", &format!("{links}/postgres/orders"), Some(json!({"prefix": "ORDERS"}))).await;
-    assert_eq!(l["vars"], json!(["ORDERS_DATABASE_URL"]), "{l}");
+    assert_eq!(l["vars"][0], "ORDERS_DATABASE_URL", "{l}");
+    assert_eq!(l["vars"].as_array().map(Vec::len), Some(6), "{l}");
     assert_eq!(call(&w.api, "PUT", &format!("{links}/postgres/nope"), Some(json!({}))).await.0, StatusCode::BAD_REQUEST);
     // A preview (an ephemeral environment) gets no resource's production variables: roll
     // previews sets the branched ones itself.
@@ -1834,12 +1835,12 @@ async fn a_link_puts_its_variables_in_the_instances() {
     let raw = [std::fs::read(w.apps.cfg.home.join("apps.db")).unwrap(), std::fs::read(w.apps.cfg.home.join("apps.db-wal")).unwrap_or_default()].concat();
     assert!(!raw.windows(11).any(|x| x == b"key0-secret"));
     let base = format!("/v1/apps/services/{id}/environments/production");
-    call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"FAKE_ECHO": "DATABASE_URL,ORDERS_DATABASE_URL,LOGS_ELASTICSEARCH_API_KEY"}}))).await;
+    call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"FAKE_ECHO": "DATABASE_URL,ORDERS_DATABASE_URL,ORDERS_PGHOST,ORDERS_PGPASSWORD,ORDERS_PGDATABASE,LOGS_ELASTICSEARCH_API_KEY"}}))).await;
     let (_, r) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
     settled(&w, &id, "production", r["id"].as_str().unwrap()).await;
     let (st, body) = visit_deployment(&w, &host(&svc["environments"][0]["url"]), r["id"].as_str().unwrap()).await;
     assert_eq!(st, StatusCode::OK, "{body}");
-    assert_eq!(body["vars"], json!({"DATABASE_URL": "postgres://app:pw@db.roll.test:5432/main", "ORDERS_DATABASE_URL": "postgres://app:pw@db.roll.test:5432/orders", "LOGS_ELASTICSEARCH_API_KEY": "key0-secret"}));
+    assert_eq!(body["vars"], json!({"DATABASE_URL": "postgres://app:pw@db.roll.test:5432/main", "ORDERS_DATABASE_URL": "postgres://app:pw@db.roll.test:5432/orders", "ORDERS_PGHOST": "db.roll.test", "ORDERS_PGPASSWORD": "pw", "ORDERS_PGDATABASE": "orders", "LOGS_ELASTICSEARCH_API_KEY": "key0-secret"}));
     // Unlinking revokes them, and so does deleting the service.
     assert_eq!(call(&w.api, "DELETE", &format!("{links}/search/logs"), None).await.0, StatusCode::NO_CONTENT);
     call(&w.api, "PUT", &format!("{links}/search/logs"), Some(json!({}))).await;

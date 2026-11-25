@@ -7,6 +7,42 @@ use crate::model::{LinkKind, TlsStatus};
 use async_trait::async_trait;
 use std::path::Path;
 
+/// A Postgres link's parts as their own variables (Railway's `PGHOST`, `PGPORT`, `PGUSER`,
+/// `PGPASSWORD`, `PGDATABASE`, and libpq's `PGOPTIONS` and `PGSSLMODE` from the URL's query: a
+/// local endpoint is chosen by `options=endpoint=…`), read from its `DATABASE_URL` as the link
+/// gives it, for apps that take no URL. Nothing for another kind, or a URL that doesn't parse; a
+/// name the link already sets keeps its value. Returns the names added.
+pub fn pg_parts(kind: LinkKind, vars: &mut Vec<(String, String)>) -> Vec<String> {
+    if kind != LinkKind::Postgres {
+        return Vec::new();
+    }
+    let Some(u) = vars.iter().find(|(k, _)| k == "DATABASE_URL").and_then(|(_, v)| url::Url::parse(v).ok()) else { return Vec::new() };
+    let dec = |s: &str| percent_encoding::percent_decode_str(s).decode_utf8_lossy().into_owned();
+    let host = u.host_str().unwrap_or_default().trim_start_matches('[').trim_end_matches(']').to_string();
+    let mut parts = vec![
+        ("PGHOST", host),
+        ("PGPORT", u.port().unwrap_or(5432).to_string()),
+        ("PGUSER", dec(u.username())),
+        ("PGPASSWORD", u.password().map(dec).unwrap_or_default()),
+        ("PGDATABASE", dec(u.path().trim_start_matches('/'))),
+    ];
+    for (k, v) in u.query_pairs() {
+        match k.as_ref() {
+            "options" => parts.push(("PGOPTIONS", v.into_owned())),
+            "sslmode" => parts.push(("PGSSLMODE", v.into_owned())),
+            _ => {}
+        }
+    }
+    let mut added = Vec::new();
+    for (k, v) in parts {
+        if !v.is_empty() && !vars.iter().any(|(have, _)| have == k) {
+            vars.push((k.to_string(), v));
+            added.push(k.to_string());
+        }
+    }
+    added
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Revision {
     /// The git commit.
@@ -731,5 +767,21 @@ impl Resolver for StaticDns {
 
     async fn ptr(&self, name: &str) -> Vec<String> {
         self.find(name, "PTR")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_postgres_urls_parts_are_libpqs_variables() {
+        let mut v = vec![("DATABASE_URL".to_string(), "postgres://roll:p%40ss@127.0.0.1:5433/main?options=endpoint%3Dep-1&sslmode=disable".to_string())];
+        assert_eq!(pg_parts(LinkKind::Postgres, &mut v).len(), 7);
+        let got: std::collections::BTreeMap<_, _> = v.into_iter().collect();
+        assert_eq!((got["PGHOST"].as_str(), got["PGPORT"].as_str(), got["PGUSER"].as_str(), got["PGPASSWORD"].as_str()), ("127.0.0.1", "5433", "roll", "p@ss"));
+        assert_eq!((got["PGDATABASE"].as_str(), got["PGOPTIONS"].as_str(), got["PGSSLMODE"].as_str()), ("main", "endpoint=ep-1", "disable"));
+        let mut redis = vec![("DATABASE_URL".to_string(), "postgres://a@b/c".to_string())];
+        assert!(pg_parts(LinkKind::Redis, &mut redis).is_empty());
     }
 }

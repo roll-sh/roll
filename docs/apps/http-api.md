@@ -764,7 +764,7 @@ type Plan = {
   source_maps?: boolean;
 };
 
-/** Wired on a node today: postgres (DATABASE_URL), redis (REDIS_URL, REDIS_REST_URL/TOKEN) and search. */
+/** Wired on a node today: postgres (DATABASE_URL and its parts: PGHOST, PGPORT, PGUSER, PGPASSWORD, PGDATABASE, PGOPTIONS, PGSSLMODE), redis (REDIS_URL, REDIS_REST_URL/TOKEN) and search. */
 type LinkKind = "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql" | "search" | "service" | "tasks";
 type Link = { kind: LinkKind; ref: string; prefix: string; vars: string[]; indices?: string[] /* a search link's key's indices */; access?: "read" | "append" };
 // `search`: `ref` is a roll search cluster (id or name). The link makes a data-only credential of

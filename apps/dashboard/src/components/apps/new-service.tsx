@@ -217,7 +217,7 @@ export function NewServiceSheet({
   const parsed = useMemo(() => parseEnv(env), [env]);
   // What its `.env.example` names that isn't set yet (a database it links sets its own URL).
   const expects = from === "repo" && plan?.key === planKey ? (plan.plan?.variables ?? []) : [];
-  const linkedUrls = new Set([...(links.size || make.size ? ["DATABASE_URL", "REDIS_URL"] : [])]);
+  const linkedUrls = new Set([...(links.size || make.size ? ["DATABASE_URL", "PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGDATABASE", "REDIS_URL"] : [])]);
   const unset = expects.filter((n) => !(n in parsed.vars) && !linkedUrls.has(n));
   const scheduleOk = kind !== "cron" || schedule.trim().split(/\s+/).length === 5;
   const healthOk = !health.trim() || health.trim().startsWith("/");
