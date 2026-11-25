@@ -1,7 +1,8 @@
 import { ChevronRight, FileText, GitBranch, Image, LoaderCircle, Plus, Terminal } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { appsApi, parseEnv, SERVICE_NAME, type Plan, type Quote, type RootCandidate, type Service, type ServiceType, type Source } from "@/lib/apps-api";
-import { codeApi, type GithubInstallation, type Owner, type Repo } from "@/lib/code-api";
+import { ApiError, codeApi, type GithubInstallation, type Owner, type Repo } from "@/lib/code-api";
+import { STARTERS, starterFiles } from "@/lib/starters";
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { freeSpot, KIND_LABEL, resourceKey, suggestName, type ResourceView } from "@/lib/workspace-resources";
 import { PlaceError, refreshInventory, useWorkspace, workspace } from "@/lib/workspace-store";
@@ -320,6 +321,12 @@ export function NewServiceSheet({
                 setRepo(full);
               }}
             />
+            <FromStarter
+              onPicked={(full) => {
+                setReload((n) => n + 1);
+                setRepo(full);
+              }}
+            />
             <Label>
               Or a Git URL <span className="font-normal">no app to install</span>
             </Label>
@@ -630,6 +637,99 @@ export function Dockerfile({ text, generated }: { text: string; generated: boole
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * A new roll code repo from a code starter (Vercel's Clone): made private, with the starter's
+ * files as its first commit, then picked like any repo, so the service follows its default branch
+ * and the first deploy is that commit. Pressed again after a failure, a repo it made with no
+ * commits yet gets them; one with commits is someone's, and is refused.
+ */
+function FromStarter({ onPicked }: { onPicked: (fullName: string) => void }) {
+  const [owners, setOwners] = useState<Owner[]>([]);
+  const [owner, setOwner] = useState("");
+  const [id, setId] = useState(STARTERS[0].id);
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    codeApi
+      .owners()
+      .then((o) => {
+        if (!alive) return;
+        setOwners(o);
+        setOwner(o[0]?.name ?? "");
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+  // Without an owner of its own the caller can't make a repo: nothing to offer.
+  if (!owners.length) return null;
+  const starter = STARTERS.find((s) => s.id === id) ?? STARTERS[0];
+  const repoName = (name.trim() || `my-${starter.id}`).toLowerCase();
+
+  const go = async () => {
+    setBusy(true);
+    setError(null);
+    setNote(null);
+    try {
+      let made: Repo;
+      try {
+        made = await codeApi.createRepo({ owner, name: repoName, visibility: "private", source: "native", description: `Started from roll's ${starter.name} starter` });
+      } catch (e) {
+        const had = e instanceof ApiError && e.status === 409 ? await codeApi.repo(`${owner}/${repoName}`) : null;
+        if (!had || had.head) throw e;
+        made = had;
+      }
+      const landed = await codeApi.land(made.full_name, { base: null, message: `Start ${repoName} from roll's ${starter.name} starter`, files: starterFiles(starter, repoName) });
+      if (landed.status !== "landed") setNote(`Its first commit is ${landed.status}: the service deploys once it lands on ${made.default_branch}.`);
+      onPicked(made.full_name);
+      setName("");
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <Label>
+        Or start from code <span className="font-normal">a new repo with a starter in it</span>
+      </Label>
+      <div className="flex gap-1.5">
+        <select value={id} onChange={(e) => setId(e.target.value)} className={`${field} min-w-0 flex-1`} aria-label="Starter">
+          {STARTERS.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.name} · {s.blurb}
+            </option>
+          ))}
+        </select>
+        {owners.length > 1 && (
+          <select value={owner} onChange={(e) => setOwner(e.target.value)} className={`${field} w-28`} aria-label="Repo owner">
+            {owners.map((o) => (
+              <option key={o.name} value={o.name}>
+                {o.name}
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
+      <div className="mt-1.5 flex gap-1.5">
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder={`my-${starter.id}`} className={`${field} min-w-0 flex-1`} spellCheck={false} aria-label="Repo name" />
+        <button type="button" onClick={() => void go()} disabled={busy || !owner} className="shrink-0 rounded-md border border-line px-2 text-[11.5px] text-fg hover:bg-fg/[0.05] disabled:opacity-50">
+          {busy ? "Creating…" : "Create repo"}
+        </button>
+      </div>
+      {note && <p className="mt-1 text-[11px] text-muted">{note}</p>}
+      {error && <p className="mt-1 text-[11px] text-danger">{error}</p>}
+    </>
   );
 }
 

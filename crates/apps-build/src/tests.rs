@@ -904,3 +904,25 @@ fn a_static_sites_functions_are_a_service_of_their_own() {
     has(&p, &["FROM node:22-slim", "COPY <<'ROLL_FUNCTIONS' /roll/functions.mjs", "--experimental-strip-types"]);
     assert!(plan(&tree(&[("index.html", "x")]), &o).is_err(), "no functions, nothing to build");
 }
+
+/// The dashboard's code starters (apps/dashboard/src/lib/starters) are each detected as the
+/// framework they're written in, with a start command or a site to serve: a starter's first deploy
+/// never needs a setting.
+#[test]
+fn every_code_starter_has_a_plan() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/dashboard/src/lib/starters");
+    let want = [("next", "next"), ("astro", "astro"), ("hono", "hono"), ("fastapi", "fastapi"), ("go", "")];
+    let mut n = 0;
+    for f in std::fs::read_dir(&dir).unwrap() {
+        let path = f.unwrap().path();
+        let s: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let id = s["id"].as_str().unwrap();
+        let files = s["files"].as_object().unwrap().iter().map(|(k, v)| (k.clone(), v.as_str().unwrap().replace("{{name}}", "my-app"))).collect();
+        let p = plan(&MapTree(files), &Overrides::default()).unwrap_or_else(|e| panic!("{id}: {e}"));
+        let framework = want.iter().find(|(w, _)| *w == id).unwrap_or_else(|| panic!("{id}: not in this test")).1;
+        assert_eq!(p.framework.as_deref().unwrap_or(""), framework, "{id}: {:?}", p.notes);
+        assert!(p.start.is_some(), "{id}: no start: {:?}", p.notes);
+        n += 1;
+    }
+    assert_eq!(n, want.len());
+}
