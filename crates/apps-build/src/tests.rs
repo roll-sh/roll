@@ -816,6 +816,17 @@ fn scala_clojure_gleam_and_a_start_script_build_and_run() {
     assert_eq!((p.provider, p.build.as_deref(), p.start.as_deref()), (Provider::Gleam, Some("gleam export erlang-shipment"), Some("/app/entrypoint.sh run")));
     has(&p, &["COPY gleam.toml manifest.toml ./", "gleam deps download", "COPY --from=build --chown=app /src/build/erlang-shipment /app"]);
     assert!(plan(&tree(&[("gleam.toml", "name = \"x\"\ntarget = \"javascript\"\n")]), &Overrides::default()).is_err());
+    // Swift: the package's executable, Vapor's served on $PORT, on its tools version's image.
+    let vapor = "// swift-tools-version:6.1\nimport PackageDescription\nlet package = Package(name: \"shop\", dependencies: [.package(url: \"https://github.com/vapor/vapor.git\", from: \"4.0.0\")], targets: [.executableTarget(name: \"App\", dependencies: [.product(name: \"Vapor\", package: \"vapor\")])])\n";
+    let p = detect(&[("Package.swift", vapor), ("Package.resolved", "{}")]);
+    assert_eq!((p.provider, p.framework.as_deref(), p.start.as_deref()), (Provider::Swift, Some("vapor"), Some("/app/App serve --env production --hostname 0.0.0.0 --port $PORT")));
+    has(&p, &["FROM swift:6.1-bookworm AS build", "COPY Package.swift Package.resolved ./", "swift build -c release --static-swift-stdlib", "FROM debian:bookworm-slim"]);
+    assert!(plan(&tree(&[("Package.swift", "// swift-tools-version:6.0\nlet package = Package(name: \"lib\", targets: [.target(name: \"Lib\")])\n")]), &Overrides::default()).is_err(), "a library has nothing to run");
+    // Dart: bin/server.dart compiled to a native executable; a Flutter app isn't a server.
+    let p = detect(&[("pubspec.yaml", "name: api\nenvironment:\n  sdk: ^3.5.0\n"), ("bin/server.dart", "void main() {}")]);
+    assert_eq!((p.provider, p.build.as_deref(), p.start.as_deref()), (Provider::Dart, Some("dart compile exe bin/server.dart -o /out/server"), Some("/app/server")));
+    has(&p, &["FROM dart:3.13 AS build", "dart pub get", "COPY --from=build --chown=app /out/server /app/server"]);
+    assert!(plan(&tree(&[("pubspec.yaml", "name: app\nflutter:\n  uses-material-design: true\n"), ("bin/server.dart", "")]), &Overrides::default()).is_err());
     // A start.sh and nothing else: bash on Debian; with a package.json beside it, Node wins.
     let p = detect(&[("start.sh", "#!/bin/bash\nexec python3 -m http.server $PORT\n")]);
     assert_eq!((p.provider, p.start.as_deref()), (Provider::Shell, Some("bash /app/start.sh")));
@@ -833,8 +844,8 @@ fn scala_clojure_gleam_and_a_start_script_build_and_run() {
 
 #[test]
 fn nothing_detected_says_what_it_did_find() {
-    let err = plan(&tree(&[("pubspec.yaml", "name: shop")]), &Overrides::default()).unwrap_err();
-    assert!(err.to_string().contains("found pubspec.yaml: Dart"), "{err}");
+    let err = plan(&tree(&[("stack.yaml", "resolver: lts-22.0")]), &Overrides::default()).unwrap_err();
+    assert!(err.to_string().contains("found stack.yaml: Haskell"), "{err}");
     let err = plan(&tree(&[("Shop.sln", "")]), &Overrides::default()).unwrap_err();
     assert!(err.to_string().contains("Shop.sln: a .NET solution"), "{err}");
 }

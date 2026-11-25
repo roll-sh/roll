@@ -263,6 +263,7 @@ export function PreviewSheet({
                   .filter(Boolean)
                   .join("; ")}
                 .
+                {p.skipped.by_files && " Its stories were chosen by the change's files alone: build Storybook with --stats-json so a story that imports a changed file is taken first."}
               </p>
             )}
             {!!p.browser_checks?.length && (

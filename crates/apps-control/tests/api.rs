@@ -10146,7 +10146,8 @@ async fn a_projects_month_reads_by_service() {
 /// A fork's preview (an ephemeral environment built closed) gets roll previews' fork policy on
 /// its pages beside their own: its own origins are the preview's environments across the
 /// project's services, so a page can't send what it shows a reviewer elsewhere. Production, and
-/// a preview that isn't closed, get none.
+/// a preview that isn't closed, get none. A preview's app's own words (errors, logs) are marked
+/// from outside for roll MCP's lockdown.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_forks_preview_pages_load_only_from_the_preview() {
     let w = world().await;
@@ -10190,4 +10191,11 @@ async fn a_forks_preview_pages_load_only_from_the_preview() {
     let csp = page(mine.split(':').next().unwrap_or_default().to_string()).await;
     assert_eq!(csp.len(), 1, "{csp:?}");
     assert!(csp[0].starts_with("default-src 'self' ") && csp[0].contains(&mine) && csp[0].contains(&theirs) && csp[0].contains("form-action 'self'") && csp[0].ends_with("base-uri 'self'"), "{csp:?}");
+    // What a preview's app wrote is marked from outside, for roll MCP's lockdown; production's isn't.
+    let (_, errors) = call(&w.api, "GET", &format!("{env}/errors"), None).await;
+    assert_eq!(errors["outside"], true, "{errors}");
+    let (_, errors) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/errors"), None).await;
+    assert!(errors.get("outside").is_none(), "{errors}");
+    let r = w.api.clone().oneshot(Request::get(format!("{env}/logs?tail=5")).body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(r.headers().get("x-roll-outside").and_then(|v| v.to_str().ok()), Some("true"));
 }

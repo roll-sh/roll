@@ -1435,6 +1435,57 @@ async fn filtered_api_key(e: &Env) -> String {
     base64::engine::general_purpose::STANDARD.encode(format!("{}@shop:{}", v["id"].as_str().unwrap(), v["api_key"].as_str().unwrap()))
 }
 
+/// An update reads the whole document and writes it back, so where a key's document or field
+/// level security restricts the index it isn't run (Elasticsearch 400, OpenSearch 500), in a
+/// bulk request too. An update by query reads as the key: only the documents it sees, without
+/// the fields it can't, which its write-back drops (as Elasticsearch's does).
+#[tokio::test]
+async fn updates_respect_document_and_field_level_security() {
+    use base64::Engine;
+    let e = env().await;
+    let e = &e;
+    e.post("/v1/search/clusters", json!({"name": "upd"})).await;
+    let console = |m: &str, p: &str, b: Value| e.post("/v1/search/clusters/upd/request", json!({"method": m, "path": p, "body": b}));
+    let bulk = "{\"index\":{\"_index\":\"x\",\"_id\":\"1\"}}\n{\"public\":true,\"note\":\"n1\",\"ssn\":\"111\"}\n\
+                {\"index\":{\"_index\":\"x\",\"_id\":\"2\"}}\n{\"public\":false,\"note\":\"n2\",\"ssn\":\"222\"}\n";
+    assert_eq!(console("POST", "/_bulk?refresh=true", Value::String(bulk.into())).await["status"], 200);
+    let key = |name: &str, grant: Value| {
+        let name = name.to_string();
+        async move {
+            let mut g = json!({"names": ["x"], "privileges": ["read", "write"]});
+            g.as_object_mut().unwrap().extend(grant.as_object().unwrap().clone());
+            let v = body(&console("POST", "/_security/api_key", json!({"name": name, "role_descriptors": {"r": {"indices": [g]}}})).await);
+            base64::engine::general_purpose::STANDARD.encode(format!("{}@upd:{}", v["id"].as_str().unwrap(), v["api_key"].as_str().unwrap()))
+        }
+    };
+    let dls = key("dls", json!({"query": {"term": {"public": true}}})).await;
+    let fls = key("fls", json!({"field_security": {"grant": ["public", "note"]}})).await;
+    let doc = |id: &str| {
+        let p = format!("/x/_doc/{id}");
+        async move { body(&console("GET", &p, Value::Null).await)["_source"].clone() }
+    };
+    // A hidden document can't be made visible.
+    let (s, v) = as_key(e, &dls, reqwest::Method::POST, "/x/_update/2", Some(json!({"script": "ctx._source.public = true"}))).await;
+    assert_eq!((s, v["error"]["reason"].as_str()), (400, Some("Can't execute an update request if field or document level security is enabled")), "{v}");
+    assert_eq!(doc("2").await["public"], false);
+    // A hidden field can't be read into a visible one, by an update or a bulk update.
+    let (s, v) = as_key(e, &fls, reqwest::Method::POST, "/x/_update/1", Some(json!({"script": "ctx._source.note = ctx._source.ssn"}))).await;
+    assert_eq!(s, 400, "{v}");
+    let item = "{\"update\":{\"_index\":\"x\",\"_id\":\"1\"}}\n{\"script\":\"ctx._source.note = ctx._source.ssn\"}\n";
+    let r = e.http.post(format!("{}/_bulk", e.es)).header("authorization", format!("ApiKey {fls}")).header("content-type", "application/x-ndjson").body(item).send().await.unwrap();
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["items"][0]["update"]["status"], 400, "{v}");
+    assert_eq!(doc("1").await["note"], "n1");
+    // An update by query sees what a search sees.
+    let (s, v) = as_key(e, &fls, reqwest::Method::POST, "/x/_update_by_query", Some(json!({"script": "ctx._source.note = ctx._source.ssn"}))).await;
+    assert_eq!((s, &v["updated"]), (200, &json!(2)), "{v}");
+    assert_eq!(doc("1").await, json!({"public": true, "note": null}), "ssn never reaches a visible field");
+    assert_eq!(console("POST", "/x/_refresh", Value::Null).await["status"], 200);
+    let (s, v) = as_key(e, &dls, reqwest::Method::POST, "/x/_update_by_query", Some(json!({"script": "ctx._source.public = true"}))).await;
+    assert_eq!((s, &v["updated"]), (200, &json!(1)), "only the visible document: {v}");
+    assert_eq!(doc("2").await["public"], false);
+}
+
 /// Term vectors of a document a key's filter hides are "not found", as its get is.
 #[tokio::test]
 async fn term_vectors_of_a_hidden_document_are_not_found() {
