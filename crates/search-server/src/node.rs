@@ -621,7 +621,7 @@ impl Lease {
         let head = EsRequest { method: req.method.clone(), uri: req.uri.clone(), headers: Vec::new(), body: bytes::Bytes::new() };
         let since = self.since.unwrap_or_else(Instant::now);
         let resp = self.handle(req).await;
-        if crate::browser::is_policy_refusal(resp.status, &resp.body) {
+        if self.browser.is_some() && crate::browser::is_policy_refusal(resp.status, &resp.body) {
             self.browser_refused(crate::browser::Reason::Policy, None);
         }
         if resp.stream.is_none() {
