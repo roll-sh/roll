@@ -324,7 +324,12 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     let mixed = roll(&api, &[], &["secrets", "key", "combine"], Some(&format!("{}\n{}\n", shares[0], shares[0]))).await;
     assert!(mixed.code != Some(0) && mixed.stdout.is_empty() && mixed.stderr.contains("given twice"), "{}", mixed.stderr);
     ok(&api, &[], &["secrets", "key", "combine", "--out", key], Some(&format!("{}\n{}\n", shares[2], shares[0]))).await;
+    // The drill, where the key is: nothing changed since, nothing written.
+    let drill = ok(&api, &[], &["secrets", "-p", "shop", "backup", "verify", file, "--key", key], None).await;
+    assert!(drill.contains("in the backup") && !drill.contains("missing here") && !drill.contains("changed since") && !drill.contains("s3cret"), "{drill}");
     projects.create("", "copy", "", None).unwrap();
+    let dry = ok(&api, &[], &["secrets", "-p", "copy", "restore", file, "--key", key, "--dry-run"], None).await;
+    assert!(dry.contains("Nothing was written"), "{dry}");
     ok(&api, &[], &["secrets", "-p", "copy", "restore", file, "--key", key], None).await;
     let restored = ok(&api, &[], &["run", "-p", "copy", "-e", "production", "--allow-unresolved", "--no-mask", "--", "sh", "-c", "echo $HOST $PASSWORD"], None).await;
     assert_eq!(restored.trim(), "db.internal s3cret");

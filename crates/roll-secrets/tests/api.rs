@@ -6142,6 +6142,10 @@ async fn a_project_backs_up_sealed_to_a_key_and_restores_into_another() {
     api.ok(Method::PUT, "/environments/development/imports?path=/", Some(json!([{ "environment": "staging", "path": "/" }]))).await;
     api.ok(Method::PUT, "/required", Some(json!([{ "key": "API", "type": "url" }]))).await;
     api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "approvals": 1 }))).await;
+    // A CA and a certificate from it: the backup carries the CA's key.
+    let ca = api.ok(Method::POST, "/cas", Some(json!({ "name": "internal", "domains": ["svc.internal"] }))).await;
+    let link = json!({ "kind": "pki", "ref": ca["id"], "field": "certificate", "mode": "managed", "options": { "names": "api.svc.internal", "rotate_days": 7 } });
+    api.ok(Method::PUT, "/environments/staging/secrets/TLS_CERT", Some(json!({ "link": link }))).await;
 
     let secret = [7u8; 32];
     let b = api.ok(Method::POST, "/backup", Some(json!({ "recipient": roll_secrets::crypto::public_key(&secret) }))).await;
@@ -6149,11 +6153,25 @@ async fn a_project_backs_up_sealed_to_a_key_and_restores_into_another() {
     let sealed: roll_secrets::crypto::Sealed = serde_json::from_value(b["sealed"].clone()).unwrap();
     let plain = roll_secrets::crypto::open_sealed(&secret, b["context"].as_str().unwrap(), &sealed).unwrap();
     let archive: Value = serde_json::from_slice(&plain).unwrap();
+    // The drill: compared with the project by name, never a value, and nothing written.
+    api.set("staging", "API", "https://staging.example").await;
+    let v = api.ok(Method::POST, "/backup/verify", Some(archive.clone())).await;
+    assert_eq!((v["keys"]["missing"].clone(), v["keys"]["changed"].clone(), v["registrations"]["missing"].clone()), (json!([]), json!(["staging:/API"]), json!([])), "{v}");
+    assert!(!v.to_string().contains("sk_live_backup") && !v.to_string().contains("PRIVATE KEY"));
 
     let (_, other) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "restored" }))).await;
     let to = |p: &str| format!("/v1/secrets/projects/{}{p}", other["id"].as_str().unwrap());
     let r = api.ok(Method::POST, &to("/restore"), Some(archive.clone())).await;
-    assert_eq!((r["secrets"].as_u64(), r["warnings"].clone()), (Some(2), json!([])));
+    assert_eq!((r["secrets"].as_u64(), r["registrations"].as_u64(), r["warnings"].clone()), (Some(3), Some(1), json!([])));
+    // The CA came back with its key, under the restorer: a certificate issued after the restore
+    // chains to the same CA certificate.
+    let restored = api.ok(Method::GET, &to("/cas"), None).await[0].clone();
+    assert!(restored["certificate"] == ca["certificate"] && restored["id"] != ca["id"], "{restored}");
+    let leaf = api.ok(Method::GET, &to("/environments/staging/values"), None).await["values"]["TLS_CERT"].as_str().unwrap().to_string();
+    let (_, leaf) = x509_parser::pem::parse_x509_pem(leaf.as_bytes()).unwrap();
+    let (_, root) = x509_parser::pem::parse_x509_pem(ca["certificate"].as_str().unwrap().as_bytes()).unwrap();
+    let (leaf, root) = (leaf.parse_x509().unwrap(), root.parse_x509().unwrap());
+    assert!(leaf.issuer() == root.subject() && leaf.verify_signature(Some(root.public_key())).is_ok());
     assert_eq!(api.ok(Method::GET, &to("/environments/production/values?path=/pay"), None).await["values"]["STRIPE"], "sk_live_backup");
     assert_eq!(api.ok(Method::GET, &to("/environments/development/values"), None).await["values"]["API"], "https://staging", "imports restored");
     assert_eq!(api.ok(Method::GET, &to("/environments/production"), None).await["protected"], true, "protection last");
