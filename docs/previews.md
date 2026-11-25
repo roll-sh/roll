@@ -1711,11 +1711,15 @@ land on the change.
   not a 200 passes through untouched. The script is served from the preview's own host, so a
   `script-src 'self'` policy allows it.
 - The script (no dependencies, in a shadow root) shows a small button; it picks an element,
-  takes a note, and opens the preview in roll's dashboard with the page's path (never its query,
-  which can hold a token)
-  (`/dashboard/projects/{project}/previews?preview={id}&fb_path=…&fb_selector=…&fb_note=…`). The
-  preview's origin never holds a roll credential: the person, signed in to roll there, reads
-  the note in the preview's sheet and posts it (nothing is posted from the link alone).
+  takes a note, and opens a small window of roll's (480 × 640, Vercel's comments posting in
+  place) with the page's path (never its query, which can hold a token):
+  `/dashboard/previews/note?preview={id}&fb_path=…&fb_selector=…&fb_note=…`, the note's form
+  alone. Posted, it closes, and the page reads its list of notes again when it has the focus
+  back. On a phone's width it opens the preview's sheet in roll's dashboard in a tab instead
+  (`/dashboard/projects/{project}/previews?preview={id}&fb_…`). Either opens with `noopener`, so
+  the page gets no handle on roll's window, and the preview's origin never holds a roll
+  credential: the person, signed in to roll there (a sign-in comes back to the form), reads the
+  note and posts it (nothing is posted from the link alone).
 - roll posts it as a `comment` review on the change ("**Feedback on the preview** · `/checkout`
   linked to the preview · `button.pay`", then the note), which reaches the pull request like any
   review. The page's own names are kept to one inert line each.
@@ -2844,8 +2848,9 @@ comments, Render and Railway, Neon, Chromatic and Percy, Signadot, Jam.
    when the build has it; files alone without), and a built Storybook's stories run live in a
    real browser for the first time. Next for it: a `storybook dev` server has no stats file, so
    say on the sheet when a run ordered by files alone.
-3. **A note in one click**: a team note opens the whole dashboard in a tab to post; a small popup
-   that posts and closes (Vercel's comments post in place).
+3. **A note in one click, in review**: the button's note opens a small window of roll's with its
+   form alone, which posts and closes (`/dashboard/previews/note`); a phone keeps the dashboard
+   in a tab. Next for it: a reply and a resolve from the page the same way.
 4. **Sleeping previews cost the control plane**: every settled preview goes through a whole
    converge every 5 minutes (secrets' links and digests, usage of every branch); a usage-only
    pass for settled ones, counted per sleeping preview in the live run.
