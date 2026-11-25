@@ -285,6 +285,97 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Point selects: the snapshot / DDL fixes' cost; the code a read runs through (2026-11-25, agent 317)
+
+HANDOFF "Point selects: what the snapshot / DDL fixes cost" has the method and what changed.
+Exact instructions per point select of the in-process client thread (Intel PT, 400 whole
+selects per trace, `~/.cache/a317/inproc/`), plain dist `bench`, base `9efd42d19` (before agent
+310). "Stable code": the functions whose counts don't vary between runs (all but mimalloc's slow
+paths, bimodal ~26 / ~74 a select, and the read's own `Block::seek`, +-20).
+
+| build | totals of 2-4 runs | stable code vs base |
+|---|---|---|
+| base `9efd42d19` | 36,443 / 36,423 / 36,295 | |
+| head `83a21ef3f` (310, 312, 314 in) | 36,398 / 36,442 / 36,401 | +110 (+0.30%) |
+| `cand/a317` | 36,322 / 36,360 | +37 (+0.10%) |
+
+Process-wide pairs (agent 312's harness, `perf stat` of the process, (I30 - I10) / (ops30 -
+ops10), lane A at 7.4-7.9 foreign cores): base against `cand/a317` +0.42, -0.05, -0.05% (median
+-0.05%). The same harness's A/A pairs of the base binary: -0.14, +0.07, -0.03, -0.20, -0.15%.
+
+Code a point select runs (Intel PT branch traces; distinct 64-byte lines and 4 kB pages over the
+window):
+
+| build | lines | 4 kB pages | functions |
+|---|---|---|---|
+| plain, in process | 2,486 | 266 | 323 |
+| plain, server (`pgbench -S -M prepared -c 8`) | 2,617 | 269 | 316 |
+| PGO, server | 2,161 | 168 | 104 |
+| PGO + `-z keep-text-section-prefix` (dropped) | 2,026 | 163 | 104 |
+| PGO + that + `-enable-split-machine-functions` (dropped) | 2,010 | 152 | 107 |
+
+The last against PGO, select-only at 8 clients, 3 alternating pairs: user instructions per read
+31,777 -> 32,105 / 31,587 -> 34,607 / 34,026 -> 31,978, user cycles 69,268 -> 69,872 / 68,855 ->
+72,931 / 69,927 -> 68,111 (foreign 1.25-1.88): no direction, dropped.
+
+## Query memory, round 1: ordered aggregates within work_mem (2026-11-25, agent 318)
+
+HANDOFF "Query memory, round 1" has what changed and the audit of every row-holding node. Plain
+dist builds (`tools/dist.sh`): **b0** origin's `aaa096e02`; **n4** `cand/a318`'s code commit on it
+(n2, n3: earlier states of it; TPC-H and point selects were measured on n3, whose code differs
+from n4's only in the grouping without groups that sorted its input for no aggregate). PostgreSQL 18.6 by digest,
+same harness and settings (2 GB cache, work_mem 4 MB).
+
+### Peak memory a query (lane C, `~/.cache/a318/bench/mem.sh`)
+
+A fresh server, `t (id int, a int, s text)`: 1M rows `(g, g * 7919 % 1000003, md5(g::text))`,
+VACUUM ANALYZE, a count(*); then each query alone, wrapped in `md5(row::text)`. MB of the
+server cgroup's anon+shmem: peak during the query (sampled every 0.05 s) less the level before
+it. temp = temp files the query added in pg_stat_database.
+
+| query | b0 | n4 (two runs) | PostgreSQL 18.6 | temp MB: n4 / PostgreSQL |
+|---|---|---|---|---|
+| `md5(string_agg(ctid::text, ',' ORDER BY id))` (the bulk harness's check) | 364.3 | 29.8, 16.6 | 25.2 | 26.0 / 22.1 |
+| `string_agg(s, ',' ORDER BY a)`, `array_agg(id ORDER BY s)` | 453.6 | 112.3, 112.3 | 117.2 | 101.3 / 101.3 |
+| `array_agg(DISTINCT a ORDER BY a DESC)` | 332.1 | 68.4, 72.4 | 55.9 | 12.1 / 12.1 |
+| `percentile_cont(0.5)`, `percentile_disc(array[0.1, 0.9])`, `mode()` WITHIN GROUP | 521.9 | 58.5, 58.5 | 20.7 | 61.2 / 61.2 |
+| `string_agg(s, ',' ORDER BY a)` by `id % 10`, then string_agg of those | 353.0 | 124.0, 133.2 | 79.0 | 91.3 / 54.2 |
+| `ORDER BY s` (a plain Sort, control) | 12.5 | 12.2, 12.6 | 10.3 | 47.1 / 47.1 |
+
+Earlier states: n2 (whole rows in table order, ORDER BY keys repeated, a sort for no aggregate)
+wrote 54.1 MB for the harness, 30.2 for DISTINCT, 108.3 for the ordered sets; n3 (all but the last)
+26.0, 24.1, 108.3. The grouped query writes more than PostgreSQL
+(91.3 against 54.2 MB; not looked into).
+
+At 2M rows (n2 / PostgreSQL): 60.3 / 48.0, 204.6 / 232.5, 67.9 / 50.8, 62.2 / 20.9, 274.8 / 156.1,
+13.9 / 30.3: the DISTINCT, ordered-set and Sort rows stay put; the others grow with their results
+(a 2M-value string_agg), as PostgreSQL's do. Result hashes: b0, n2 and PostgreSQL equal on all six
+at 1M rows; at 2M equal but the two-aggregate query, whose ORDER BY a has ties there and which
+PostgreSQL 18.6 runs as a parallel plan (Gather Merge over three worker sorts); each of its two
+aggregates alone and the two in the other order match. n3 and n4 give the same hashes. Walls aren't
+compared (2.2-7.4 foreign cores on the lane).
+
+### When the input fits: TPC-H and point selects (plain dist, b0 against n3)
+
+TPC-H SF1 (lane C, agent 316's `tpair.sh` copied, QS = q01 q03 q09 q13 q18; a fresh server on a
+copy of the data, a warm-up, each query once in its own perf window; G user instructions of the
+server's cgroup). Two pairs, both orders; foreign load 1.4-1.95 cores, so instructions only.
+
+| query | b0 | n3 | n3 / b0 |
+|---|---|---|---|
+| q01 | 7.3782 / 7.3781 | 7.3783 / 7.3777 | +0.001%, -0.005% |
+| q03 | 4.1848 / 4.1841 | 4.1842 / 4.1840 | -0.014%, -0.001% |
+| q09 | 7.8151 / 7.8159 | 7.8184 / 7.8136 | +0.043%, -0.029% |
+| q13 | 4.1215 / 4.1230 | 4.1223 / 4.1227 | +0.021%, -0.009% |
+| q18 | 15.5859 / 15.5744 | 15.5909 / 15.5887 | +0.032%, +0.092% |
+
+Hashes equal. q18's b0 runs differ by 0.07% between themselves.
+
+Point select over the wire (lane A, `~/.cache/a318/bench/ps.sh`: 100,000-row oltp table, one
+client, (I30 s - I10 s) / (ops30 - ops10) of the server's cgroup): 54,633 -> 54,874 (n2), 55,815
+<- 56,440 (n3 first), 55,969 -> 53,588: +0.4%, +1.1%, -4.3%, foreign load 2.2-3.6 cores; b0 alone
+ranges 54.6-56.0 k. Noise: no aggregate runs in a point select.
+
 ## Bulk writes, round 27: COPY out's floats and text, index builds' key columns; the DELETE's compaction measured (2026-11-25, agent 315)
 
 HANDOFF "Bulk writes, round 27" has what changed. Lane C, agent 314's standing harness (one server
@@ -356,31 +447,93 @@ DELETE and VACUUM, 75.2 MB after VACUUM FULL (its bloat for these statements: 91
 | whole script without the three `string_agg(ctid::text ... ORDER BY id)` checks | 255.6 (UPDATE) | 359.5 |
 | the highest step's own peak, with the checks | 301 (n2 382, CHECKPOINT after the last check) | - |
 
-## Storage format 5, step 2: rows made a column at a time, of the columns read (2026-11-25, agent 311)
+## Analytic CPU, round 15: dense bitmaps read by key, probes before the walk (2026-11-25, agent 316)
 
-HANDOFF "Storage format 5: column blocks, step 2, first piece". `h3` = the head `aaa096e02`, `s4` =
-step 2's first piece on step 1, plain dist; TPC-H SF1 per form as in "Storage format 5, stage 1"
-(format 4 loaded by h3, format 5 by step 1's build with `ROLL_COLBLOCKS=1`); 313's probe for range
-and point reads (`~/.cache/a313/bench/probe.sh`, scale 32, 8 clients). User instructions, lanes
-3-7 foreign cores.
+HANDOFF "Analytic CPU, round 15" has what changed. Lane C, TPC-H SF1 (loaded by b0), agent 314's
+harness copied to `~/.cache/a316/bench/` (`tpair.sh`: per build a fresh server on a copy of the
+data, a warm-up run of each query, then each query once in its own perf window of the server's
+cgroup), plain dist builds (`tools/dist.sh`): **b0** origin's `541928f40` (cand/a314-2 landed),
+**n6** the candidate. One pair a hold, b0 n6 then n6 b0; lane.sh read 4.0-5.4 foreign cores, the
+pairs' own 1.5-2.3 (no pair met the 1.0 rule): instructions decide. Every result hash equal to
+b0's and to PostgreSQL's (the standing's), and the 22 plans' EXPLAIN (COSTS OFF) identical to
+b0's.
 
-| format 5 against format 4 | step 1 | s4 |
-|---|---|---|
-| q01 / q06 / q10 | -29.1 / -39.1 / -11.6% | -29.2 / -39.0 / -12.1% |
-| q03 | +31.6% | +8.8% |
-| q07 | +39.6% | +19.7% |
-| q09 | +14.4% | +11.8% |
-| range read, 100 rows, 2 columns (instructions / read) | +23.8% | +10.4% |
-| point select | +3.6% | +4.3% |
+| query | b0 / n6 pair 1 (G) | n6 / b0 pair 2 (G) | % per pair |
+|---|---|---|---|
+| q01 | 7.375 / 7.307 | 7.307 / 7.374 | -0.92, -0.92 |
+| q02 | 2.624 / 2.624 | 2.624 / 2.624 | -0.02, -0.01 |
+| q03 | 4.182 / 4.120 | 4.119 / 4.183 | -1.49, -1.53 |
+| q04 | 1.709 / 1.349 | 1.349 / 1.709 | -21.10, -21.09 |
+| q05 | 3.097 / 2.811 | 2.810 / 3.097 | -9.24, -9.26 |
+| q06 | 5.007 / 3.364 | 3.364 / 5.005 | -32.82, -32.79 |
+| q07 | 3.532 / 3.532 | 3.532 / 3.532 | -0.00, +0.01 |
+| q08 | 1.410 / 1.409 | 1.408 / 1.409 | -0.10, -0.09 |
+| q09 | 7.808 / 7.810 | 7.808 / 7.810 | +0.02, -0.03 |
+| q10 | 7.444 / 5.539 | 5.541 / 7.444 | -25.59, -25.56 |
+| q11 | 0.832 / 0.834 | 0.834 / 0.832 | +0.23, +0.22 |
+| q12 | 5.964 / 5.873 | 5.872 / 5.964 | -1.53, -1.54 |
+| q13 | 4.120 / 4.103 | 4.103 / 4.121 | -0.41, -0.43 |
+| q14 | 1.377 / 1.386 | 1.387 / 1.378 | +0.70, +0.65 |
+| q15 | 4.654 / 2.300 | 2.300 / 4.654 | -50.58, -50.57 |
+| q16 | 2.878 / 2.865 | 2.863 / 2.879 | -0.47, -0.57 |
+| q17 | 2.875 / 2.853 | 2.853 / 2.876 | -0.77, -0.79 |
+| q18 | 15.494 / 15.458 | 15.458 / 15.480 | -0.23, -0.14 |
+| q19 | 0.476 / 0.474 | 0.474 / 0.476 | -0.53, -0.54 |
+| q20 | 1.367 / 1.367 | 1.367 / 1.367 | -0.00, +0.02 |
+| q21 | 6.763 / 5.256 | 5.255 / 6.763 | -22.29, -22.30 |
+| q22 | 0.626 / 0.623 | 0.623 / 0.626 | -0.46, -0.49 |
+| all | 91.62 / 83.25 | 83.25 / 91.60 | -9.13, -9.12 |
 
-| switch off, h3 -> s4 | pair 1 | pair 2 |
-|---|---|---|
-| q01 / q06 | -0.08 / +0.24% | -0.09 / +0.21% |
-| q03 / q07 / q09 | -0.05 / -0.25 / -0.22% | +0.14 / -0.28 / -0.21% |
-| count(*) / sums (bulk steps) | +0.14 to +0.60% | +0.14 to +0.60% |
-| probe fx100 none / 10 / 100 newer | -0.05 / +0.02 / +0.08% | +0.20 / +0.01 / +0.05% |
-| probe fx1k none / 10 / 100 newer | +0.02 / 0.00 / +0.01% | +0.05 / +0.02 / +0.03% |
-| select-only none / 10 / 100 | -1.52 / +0.15 / +0.12% | +6.06 / +0.30 / +0.19% |
+- q15 -50.6% (4.65 -> 2.30 G; pgrust PGO 2.95 in the standing), q06 -32.8%, q04 -21.1%, q05 -9.2%:
+  the dense bitmaps' rows passed over by key (q10 too, its orders side; q05's EXPLAIN shows a
+  nested loop into `orders_o_custkey_idx`, but the plan it runs reads orders through a dense
+  bitmap: `KeyedFill` is 5-6% of its profile, the rest of its gain the probes). q21 -22.3% (6.76 ->
+  5.26 G), q10 -25.6% (7.44 -> 5.54 G, both parts): the probes before the walk. q03 -1.5%, q12
+  -1.5%, q01 -0.9%: the walk inlined. q14 +0.7% (9 M: its keyed lineitem fetches and the part
+  hash; nothing it runs changed but the inlined decode), q11 +0.2%; the rest within +-0.6%.
+- Earlier builds, same pairs: **n2** (both changes, `decode_cols` and `walk_row` left to LLVM)
+  -7.27 / -7.29% on the 22 but q17 +5.7%, q12 +2.3%, q01 +2.0%, q18 +1.4% (both called, not
+  inlined: q01's decode 2,744 -> 2,978 samples); **n3** (`walk_row` inlined, the split decided
+  for the whole scan) -8.36 / -8.35%, q17 +1.1%; **n4** (`decode_cols` inlined) -8.93%.
+  **n5** against n4 (two pairs, eight queries): `KeySet::word` from two word loads, q15 -2.54 /
+  -2.54%, q06 -2.22 / -2.22%, q04 -1.09 / -1.08%, q05 -0.61 / -0.57% (kept); the split's probe
+  loop without a branch, q10 +0.94 / +0.94%, q21 +1.28 / +1.30% (dropped: n6 is n5 without it).
+- Peak anon+shmem over the pass 1,587-1,605 MB on both builds (the key set: 241k keys of 16 bytes
+  for q15, about 910k for q06, freed with the scan).
+
+### PGO (2026-11-25)
+
+**p1** is `tools/dist-pgo.sh --out` of the candidate rebased on origin's `7a11af253` (`8a183986a`;
+its own training, profile staleness 0 of 2,912 hot functions), one pass of the 22 beside plain n6
+in one hold (lane.sh 7.2 foreign cores, the pass's own 3.2-3.5), every hash equal. The standing's
+columns (roll PGO of `57d194f69`, pgrust, PostgreSQL 18.6) are BENCH "Standing, 2026-11-24"'s,
+not run again. With two PGO builds' ~0.9% spread, p1's total is 75.1-76.5 G: 0.87-0.88x pgrust.
+
+| query | standing PGO (G) | p1 PGO (G) | n6 plain (G) | pgrust | PostgreSQL | p1 ÷ best other |
+|---|---:|---:|---:|---:|---:|---:|
+| q01 | 7.35 | **7.26** | 7.31 | 6.76 | 45.22 | 1.07x |
+| q02 | 2.24 | **2.23** | 2.63 | 1.03 | 1.16 | 2.16x |
+| q03 | 3.69 | **3.69** | 4.12 | 3.52 | 4.07 | 1.05x |
+| q04 | 1.58 | **1.21** | 1.35 | 1.54 | 1.01 | 1.20x |
+| q05 | 2.73 | **2.41** | 2.81 | 1.69 | 1.98 | 1.42x |
+| q06 | 4.98 | **3.20** | 3.36 | 5.76 | 4.84 | 0.66x |
+| q07 | 3.00 | **3.05** | 3.53 | 3.31 | 2.57 | 1.19x |
+| q08 | 1.20 | **1.21** | 1.41 | 1.14 | 0.93 | 1.31x |
+| q09 | 6.73 | **6.78** | 7.81 | 14.35 | 13.12 | 0.52x |
+| q10 | 7.01 | **5.17** | 5.54 | 4.33 | 6.58 | 1.19x |
+| q11 | 0.72 | **0.72** | 0.83 | 0.39 | 0.38 | 1.91x |
+| q12 | 5.86 | **5.88** | 5.87 | 8.93 | 8.73 | 0.67x |
+| q13 | 3.61 | **3.63** | 4.10 | 3.63 | 6.83 | 1.00x |
+| q14 | 1.19 | **1.19** | 1.39 | 0.68 | 1.12 | 1.74x |
+| q15 | 4.60 | **2.22** | 2.30 | 2.95 | 3.16 | 0.75x |
+| q16 | 2.47 | **2.39** | 2.87 | 1.79 | 3.60 | 1.34x |
+| q17 | 4.36 | **2.79** | 2.85 | 2.22 | 4.60 | 1.25x |
+| q18 | 14.53 | **13.89** | 15.46 | 16.22 | 41.14 | 0.86x |
+| q19 | 0.44 | **0.43** | 0.47 | 0.41 | 0.40 | 1.08x |
+| q20 | 1.12 | **1.12** | 1.37 | 0.62 | 0.44 | 2.56x |
+| q21 | 6.21 | **4.80** | 5.25 | 4.71 | 7.38 | 1.02x |
+| q22 | 0.54 | **0.54** | 0.62 | 0.59 | 1.13 | 0.92x |
+| the 22 | 86.17 | **75.83** | 83.25 | 86.56 | 160.37 | 0.88x pgrust |
 
 ## Storage format 5, stage 1: column blocks behind a switch (2026-11-25, agents 303, 311)
 

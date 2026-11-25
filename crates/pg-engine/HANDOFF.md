@@ -14908,6 +14908,126 @@ the loop. (2) The ring's per-block cost: three hash lookups a recycled block (`e
 looks the key up twice and then removes it). One `entry` would do. It is worth about 0.4% on
 scan-bound queries at small caches.
 
+## Query memory, round 1: ordered aggregates' input within work_mem; the executor's row-holding nodes audited (agent 318)
+
+**The audit** (work_mem 4 MB default; "spills" = past work_mem its rows go to a temporary file
+counted in pg_stat_database / log_temp_files, as PostgreSQL's node does):
+
+| node | PostgreSQL 18.6 | roll before | roll now |
+|---|---|---|---|
+| Sort (full) | tuplesort, spills | `extsort`, spills | same |
+| Sort with a LIMIT above (top-N) | bounded heap | bounded heap | same |
+| Incremental Sort | a tuplesort per group, spills | each group sorted in memory, **the whole output collected** (`incremental_sort_rows`) | left |
+| Hash Aggregate | spills (13+) | `hashspill`, spills (not with a presorted DISTINCT / ORDER BY aggregate, not when groups come in sorted order) | same |
+| Group Aggregate's input Sort (DISTINCT / ORDER BY aggregates, order-sensitive groups) | Sort node, spills | **whole input in a Vec, sorted in memory** | `extsort` (`nodes::sort_all`), spills |
+| An ordered / DISTINCT aggregate's own sort (the second and later ones; ordered-set aggregates) | a tuplesort per aggregate and group, spills | **every row in a Vec per group** | `extsort` per aggregate and group, spills (`Buffered::Sort`) |
+| percentile_cont / percentile_disc / mode | read the sorted tuplesort | **every value in the accumulator** | only the values the fractions read (`Accum::sorted_count`); mode streams its runs |
+| DISTINCT aggregate with ORDER BY | adjacent dedup of the sorted input | **hash set of every value** | a set of one run of equal keys when the keys are the arguments |
+| DISTINCT aggregate without ORDER BY (not count/sum/avg) | sorted, spills | every row in a Vec, sorted in memory | left (its comparison isn't a SortKey's) |
+| count / sum / avg (DISTINCT x) | sorted, spills | **hash set of the distinct values** (`hash_distinct`) | left |
+| hypothetical-set aggregates (rank() WITHIN GROUP ...) | tuplesort | every row in a Vec | left (rare) |
+| A grouping's groups in sorted order (GroupAggregate) | one group at a time | every group's state until the input ends | left |
+| Grouping sets | sorts / hash tables, spill | **whole input buffered** | left |
+| Hash Join build | batches, spills | `hashjoin` batches, spills | same |
+| WindowAgg | tuplestore per partition, spills | **whole input (or partition) in a Vec**; `WinStore` only accounts PostgreSQL's | left: the largest left |
+| Materialize / Nested Loop inner side | tuplestore, spills | **inner rows in an Rc<Vec>** | left |
+| Memoize | hash_mem LRU | hash_mem LRU | same |
+| CTE scan | tuplestore, spills | `tuplestore`, spills | same |
+| Set operations (hashed) | hash table, no spill (planner avoids) | hash tables, both sides collected | left |
+| Set operations (sorted) | Sort nodes, spill | both sides collected and sorted in memory | left |
+| Recursive Union | tuplestores spill; UNION's hash table doesn't | working table and seen set in memory | left |
+| Hashed DISTINCT / Unique over Sort | HashAggregate (spills) / Sort (spills) | hash map / all rows sorted in memory | left |
+| lookup stages, parallel scans | n/a | bounded by their batch / part sizes | same |
+
+**What changed** (`exec/agg.rs`, `exec/nodes.rs`; no format, storage or plan change):
+- A grouping's input Sort (the first DISTINCT / ORDER BY aggregate's order, or the order a
+  GroupAggregate shows its groups in) collected every row and sorted them in memory. It now runs
+  through `extsort` as a Sort node does (`nodes::sort_all`): within work_mem in memory, past it
+  runs on disk merged as they are read, counted in temp_files / temp_bytes / log_temp_files.
+  The rows are held with only the columns the grouping reads, in the order PostgreSQL's input
+  target list has them (the grouping keys' columns, then each aggregate's direct arguments,
+  arguments, ORDER BY and FILTER columns at their first appearance), which is what its sort tuple
+  counts. A user-defined aggregate keeps whole rows.
+- Every other aggregate with an ORDER BY (the second and later ones, ordered-set aggregates,
+  DISTINCT with ORDER BY) kept each group's rows in a Vec. Now each is an `ExtSort` per aggregate
+  and group, made at its first row (`Buffered::Sort`, `SortBuf`), with nodeAgg's tuple: the
+  arguments, then the ORDER BY keys that aren't one of them (so `array_agg(x ORDER BY x)` is a
+  one-column sort, as PostgreSQL's datum sort). In memory the rows come out in the same order as
+  the old pg_qsort over the same comparisons; spilled, in tuplesort's merge order.
+- percentile_cont / percentile_disc are told how many values come (`Accum::sorted_count`) and keep
+  only those at the positions their fractions read; mode() keeps its current and longest runs.
+- A DISTINCT aggregate whose arguments are all ORDER BY keys keeps the values of one run of equal
+  keys to compare with (equal arguments come in one run), not every value seen.
+- Hypothetical-set aggregates and DISTINCT aggregates without ORDER BY keep the in-memory Vec.
+- A grouping without groups no longer sorts its input for an aggregate that doesn't read it
+  presorted (ordered sets, DISTINCT with ORDER BY): PostgreSQL's plan has no Sort there.
+
+**Measured** (BENCH "Query memory, round 1"; plain dist; lane C; the server cgroup's peak
+anon+shmem over its level before the query, MB, work_mem 4 MB; 1M rows (id, a, s = md5 text)):
+the bulk harness's `md5(string_agg(ctid::text, ',' ORDER BY id))` 364.3 -> 16.6-29.8 (two
+runs; PostgreSQL 25.2), two ordered aggregates 453.6 -> 112.3 (117.2), `array_agg(DISTINCT a ORDER BY a DESC)`
+332.1 -> 68.4 (55.9), percentile_cont / percentile_disc / mode 521.9 -> 58.5 (20.7), grouped
+string_agg 353.0 -> 124.0 (79.0); a plain Sort 12.5 / 12.2 (10.3). Temp bytes are PostgreSQL's
+on four of the six (the harness's 26.0 MB against 22.1; the grouped query 91.3 against 54.2). At 2M rows (an earlier state, n2) the bounded ones stay
+put (DISTINCT 67.9, ordered-set 62.2, Sort 13.9) and the rest grow with their results' size, as
+PostgreSQL's do (harness 60.3 against 48.0). Every result hash equals PostgreSQL's but one: at
+2M rows with ties in the ORDER BY key, the two-aggregate query, which PostgreSQL runs as a
+parallel plan (Gather Merge over three worker sorts) whose tie order depends on the workers'
+split. When the input fits in work_mem nothing is slower: TPC-H q01, q03, q09, q13, q18 two pairs
+each within 0.1% user instructions (q18 +0.03 / +0.09%, its b0-to-b0 spread 0.07%), hashes equal;
+point select over the wire +0.4, +1.1, -4.3% in three pairs (b0 against itself 54.6-56.0 k
+instructions a query: lane A had 2.2-3.6 foreign cores; the changed code isn't on its path).
+
+**Left** (largest exposure first): WindowAgg's input (whole input or partition in a Vec; its
+`WinStore` only counts PostgreSQL's tuplestore), Materialize / Nested Loop inner rows, Incremental
+Sort's collected output, a GroupAggregate's groups held until the input ends, count/sum/avg
+(DISTINCT x)'s hash set (`hash_distinct`), grouping sets' buffered input, sorted set operations and
+Unique-over-Sort sorting in memory, the Recursive Union's tables. The aggregate's presort has no
+EXPLAIN ANALYZE "Sort Method" of its own (the synthesized Sort node keeps the estimate).
+
+**Verification:** `tools/quick-check.sh` with `QC_CHECKED=1` on `a3beab811` (the code commit on
+`aaa096e02`): Clippy 16 warnings, none new in a changed file; 383 tests in 10 binaries (query_spill's
+new cases among them), again built `--profile verify-checked` (383 passed); regress 51,148 / 51,150,
+0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed. `query_spill`'s
+`spills_match_memory_and_clean_up` now runs on a 64 MiB thread, as a session's: its new queries'
+plans overflowed the test thread's 2 MiB in a debug build (in `explain::Builder::convert`, the
+planner's model of the plan, not the executor).
+
+## Bulk DELETE: where the statement's instructions go (agent 318, profiled; nothing changed)
+
+The brief's item 2 (agent 315's 3.70 G statement for 750,000 of 1M rows) was profiled, not
+changed: a batched path needs the lock manager, the size model and dml at once, more than this
+round's time with its gates. Profile: plain dist of `aaa096e02`, agent 315's bulk script
+(`~/.cache/a318/bulk/bulk.sh`, `PROF_STEP=delete_quarter`), `perf record -e instructions:upp
+--call-graph lbr` over the server cgroup, the `roll-conn` thread (the statement and its commit;
+the compaction it forces runs on `roll-flush`, not counted here). 2,629 samples: the kernel
+throttled the rate under 7.6 foreign cores, so shares only. Raw stacks:
+`~/.cache/a318/perf/del-b0.txt`.
+
+| part (inclusive, % of the thread's samples) | % |
+|---|---|
+| the scan below the DELETE (`ScanNode::next`) | 43.9 |
+| - merging the table's rows with the UPDATE's versions (`TxnScan::fill_batch`, `zip_rows` 11.0 self) | 11.1 |
+| - the filter `id % 4 = 1` (`StoredCmps::passes_with`) | 6.7 |
+| - decoding each deleted row whole (`Lazy::into_row`, `LazyBuf::read`) | 8.1 |
+| `delete_row_with` | 17.4 |
+| - index entries (`index_values`, `index_entry_key`, `defer_entry_delete`) | 8.2 |
+| - `LockManager::mark_row_modified` (a second lock-manager trip a row) | 2.9 |
+| - the size model (`layout_len` 2.0, `ensure` 1.4) | 3.4 |
+| - toast, SSI | 1.4 |
+| `lock_row_with` (`TxnState::lock_row` 5.3: the compact hold's upsert) | 6.1 |
+| the deletions' run at commit (`put_entry_deletes`: `SstWriter::add_from` 10.7, its sort 1.9) | 14.6 |
+| of which the run's bloom filter (`bloom_set`) | 3.7 |
+| unresolved (`[unknown]`) | 11-13 |
+
+Cuts in order of size: (1) decode only the columns the deletion reads (the index keys; the size
+model's `layout_len` reads all of them now, so it would have to size from the stored bytes, as
+`row_len` does for scans); (2) the lock manager twice a row (`lock_row`, then `row_modified`): one
+trip that marks the hold modified when the row is sure to go (not before a recheck that may skip
+it); (3) index entries built into one buffer per batch, not a Vec each; (4) one model lock a
+batch for `sizing::deleted` (the relfiles write lock a row now). The scan's merge with newer
+versions is the storage scan (agent 313's area).
+
 ## Memory, round 2: parallel index builds' lists, where the other peaks are (agent 308, 2026-11-24)
 
 BENCH.md "Memory, round 2" has the tables. Plain dist builds (`tools/dist.sh`): **h**, origin's
@@ -21686,6 +21806,104 @@ Not done, found:
 - Subquery Scan widths (remove_unused_subquery_outputs' NULLs at their types' widths), memoize:8,
   subselect:19 rows, the catalog plans (bloat), as agent 288 left them.
 
+## Analytic CPU, round 15: dense bitmaps read by key, probes before the walk (agent 316)
+
+The standing (BENCH "Standing, 2026-11-24") had roll PGO 0.5% under pgrust on the TPC-H total and
+behind it on 17 of the 22 queries. Base **b0** is origin's `541928f40` (cand/a314-2 landed: q17's
+SubPlan memo); BENCH "Analytic CPU, round 15" has the tables. Profiles (`instructions:upp`,
+period 2,000,003, LBR) of b0's q10, q15, q21, q02, q20, q11, q05 found two causes worth most of
+the gap, both in the parallel lineitem / orders scans:
+
+- **A dense bitmap heap scan decoded every row of the table.** `scan::dense_bitmap_scan` runs a
+  bitmap heap scan whose index entries are 1/32 of the table or more as a sequential scan with the
+  bitmap's condition added to the filter (the same rows in heap order, in parallel). It counted
+  the entries and dropped them, so each row was walked to the condition's column and decoded:
+  q15's lineitem (241k of 6M rows by `l_shipdate`: the walk 55% of q15), q06's (15%), q04's and
+  q10's orders (4% by `o_orderdate`), and q05's orders (15%: its EXPLAIN shows a nested loop into
+  `orders_o_custkey_idx`, the plan the executor runs reads them by the date bitmap, `KeyedFill`
+  5-6% of its profile now). PostgreSQL's plan is the same (Parallel Bitmap Heap Scan); its heap
+  scan reads only the bitmap's tuples.
+- **A probe that drops most rows ran after the filter's columns were decoded.** q10's lineitem
+  rows (filter `l_returnflag = 'R'`, column 8) are probed into the orders hash by `l_orderkey`
+  (column 0), which ~4% of rows hit; q21's (`l_receiptdate > l_commitdate`, columns 11-12) into
+  the Saudi suppliers by `l_suppkey` (column 2, 4%). Every row was walked to column 8 or 12
+  before the probe looked at its key.
+
+**What changed** (`exec/scan.rs`, `exec/parscan.rs`, `exec/vector.rs`, `storage/cols.rs`):
+- `dense_bitmap_scan` keeps the data keys of the entries that pass (`parscan::KeySet`: keys of one
+  length up to 24 bytes, the table's 8-byte prefix and the rest as a big-endian `u128`, sorted, at
+  most 2M keys; a bitmap of an AND or OR, other key forms or more keys keep the old path), and
+  the parallel scan's chunks read through `KeyedFill`, which passes over a row whose key isn't in
+  the set before it is decoded (one compare of words a row; the chunk's place in the set kept
+  from row to row). The bitmap's condition stays in the filter and is checked on the rows left,
+  so the rows are those of the scan before whatever the index held. The serial dense path and
+  EXPLAIN ANALYZE (never dense) are as before. `KEYED_PASSED` counts the rows passed over.
+- `Pre::decode_split`: where a scan's first stage probes a hash join on an integer column, the
+  batch filter raises no error for any row (`VB::total`: comparisons, IN lists, LIKE, IS NULL,
+  date and timestamp comparisons, their AND / OR / NOT; no arithmetic or other calls) and the
+  scan reads a column past the probe's, a run of rows is decoded up to the probe's column
+  first, the probe's bit filter and map tell which keys may have candidates, and only those rows
+  (and rows the batch can't tell) are decoded whole (`cols::decode_cols_only`) and filtered;
+  the rest are dropped as the probe would drop them. A row the probe drops is one PostgreSQL
+  drops too, and a filter that can't raise an error makes not checking it unobservable (a
+  filter with arithmetic keeps the old path: the parallel join test's division by zero). The
+  scan stops splitting once over half of its first 1,024 rows may have candidates
+  (`VPlan::splits`, shared by the chunks: q12's orders probe, which every row hits).
+  `SPLIT_PASSED` counts the rows dropped by key alone.
+- `cols::decode_cols` and the typed walk (`walk_row`) are `#[inline(always)]`: with
+  `decode_cols_only` sharing their body (`decode_cols_in`), LLVM made `decode_cols` a call per run
+  and `walk_row` a call per row (q01 +2.0%, q12 +2.3%, q17 +5.7% in the first build).
+
+**Measured** (BENCH "Analytic CPU, round 15", plain dist, user instructions a run, the pairs in
+both orders, b0 against n6): **the 22 91.62 -> 83.25 G (-9.13 / -9.12%)**, q15 4.65 -> 2.30 G
+(-50.6%), q06 -32.8%, q10 7.44 -> 5.54 G (-25.6%), q21 6.76 -> 5.26 G (-22.3%), q04 -21.1%, q05
+-9.2%, q03 / q12 -1.5%, q01 -0.9%; q14 +0.7% (9 M), q11 +0.2%, the rest within +-0.6%. Every
+result hash equal to b0's and PostgreSQL's; the 22 plans' EXPLAIN identical to b0's; peak memory
+over the pass level (1,587-1,605 MB). The pairs repeated within 0.1 point a query. Earlier builds
+and the inlining's cost before it was fixed: BENCH. **PGO** (the inlining changed, so the shipped build
+is gated too): one `tools/dist-pgo.sh` build of `8a183986a` (its own training; profile staleness 0
+of 2,912 hot functions; instrumented build 2,513 s, training 597 s, optimised build 2,007 s) and
+one pass of the 22 beside plain n6 in one hold: **75.83 G** (plain 83.25, -8.9%), every hash equal;
+with two PGO builds' ~0.9% spread, **75.1-76.5 G against the standing's roll PGO 86.17 and
+pgrust's 86.56 (0.87-0.88x)**, the brief's 82 G cleared by the whole range. Under PGO q15 2.22 G
+and q06 3.20 G now lead pgrust and PostgreSQL; q10 5.17 G is 1.19x pgrust (from 1.62x), q21 4.80
+G 1.02x (from 1.32x), q04 1.21 G 1.20x PostgreSQL (from 1.57x), q05 2.41 G 1.42x (from 1.61x).
+Still behind the better of the two on 16 of the 22 (17 in the standing; q13 level at 3.63 G).
+
+**Verification** (`tools/quick-check.sh` with `QC_CHECKED=1` and `parallel_scan`, on `8a183986a`
+rebased on origin's `7a11af253`): clippy 16 warnings, none new in a changed file; 454 tests in 28
+binaries, and again `--profile verify-checked`; crash_random seeds 1-3 x 2, power_cut_at_every_point;
+regress 51,148 / 51,150, 0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed.
+
+**Dropped**: the split's probe loop written without a branch (each row's place stored, the count
+moved by the outcome: `~/.cache/a316/patches/dropped-split-branchless-loop.patch`, its last hunk):
+q10 +0.94 / +0.94%, q21 +1.28 / +1.30% against the `extend` of a filter (n4 against n5, two
+pairs; the same patch's `KeySet::word` change, kept, gave q15 -2.54%, q06 -2.22%, q04 -1.09%,
+q05 -0.6%).
+
+**Tests** (`tests/parallel_scan.rs`): `bitmap_quals_on_entries` gains two dense bitmaps (10% and
+6% of the rows) checked against sequential scans, before and after the transaction's own DELETE
+and an UPDATE moving rows into one's range, and that rows were passed over by key;
+`parallel_joins_match_serial` gains three joins probing 7 of 97 key values, two under total
+filters on later columns (checked against the serial plan and the row path) and one whose filter
+divides by zero at a late row (the error stays).
+
+**Left** (largest gaps to pgrust's PGO figures, plain n6 here, so about 8% less PGO-built): q10
+5.54 G against 4.33 (the lineitem scan's block iteration `Block::run_rows_to` is now its largest
+part, 18%; then the probe of every row by key, the joined rows' copies and hashing for the
+customer join, the per-worker external sort); q02 2.62 against 1.03 (serial: the 158,720-row build
+side's index fetches of partsupp by `ps_suppkey`, 1.6k instructions a fetch in
+`get_sorted_snap`, each made a full row and spilled in 8 batches, as PostgreSQL's plan does);
+q05 2.81 against 1.69 (orders lookups of lineitem); q21 5.26 against 4.71 (the semi and anti
+lookups: `Block::seek`, `StoredCmps::passes_with`, `Cursor::head`); q20 1.37 against PostgreSQL's
+0.44 (the outer `Seq Scan on part` is serial, heap-ordered, ~1.7k instructions a row; the SubPlan's
+8,332 runs half the query); q11 0.83 against 0.38 (row fetches by key and the serial row path);
+q14 1.39 against 0.68 (75k keyed fetches at ~2.3k each, the part hash build). The serial dense
+bitmap path (no workers) still decodes every row: `KeyedFill` wraps only the parallel chunks.
+EXPLAIN ANALYZE of q11 shows its HashAggregate as `Batches: 1  Memory Usage: 69kB` where
+PostgreSQL 18.6 shows `Batches: 5  Memory Usage: 8241kB  Disk Usage: 664kB` (the same rows; not
+this round's).
+
 ## Analytic CPU, round 14: correlated SubPlans run once a parameter value (agent 314)
 
 The standing (above, BENCH "Standing, 2026-11-24") put TPC-H q17 at 1.96x pgrust's instructions.
@@ -21772,44 +21990,6 @@ Measuring notes for whoever repeats it:
 - Two fixed-count TPC-B runs of the same binary read 494 k and 425 k user instructions a
   transaction (304 saw the same: the counts follow the throughput a run reaches).
 
-## Storage format 5: column blocks, step 2, first piece: rows made a column at a time, of the columns read (agent 311)
-
-On step 1 (`cand/a311-2`), format 5 only (switch on); format 4's paths as they were. HANDOFF
-"Storage format 5: column blocks, stage 1" for the format; BENCH "Storage format 5, step 2" for the
-pairs.
-- **Rows made a column at a time** (`ColDir::rows_into`): a run of rows' lengths summed a column
-  at a time, then each column's values written where they go, one loop per layout (fixed widths
-  copied by a constant length, no call per value), the rows into one buffer. `LazyRows::make`,
-  `Block::col_rows` (a block's rows for a row-at-a-time reader or a compaction) and a single row
-  (`ColDir::row`: a point read's) all go this way; before, `ColDir::value` took ~120 instructions
-  a value (a layout's match and a push each): q03's extra instructions were 85% `value` / `row`.
-- **A lookup's rows of the columns it reads** (303's sketch, `wip/a303-s2`): `Lookup::reads` (the
-  columns decoded and those `StoredCmps` compares, `mark_cols`), `PointReader::get_sorted_cols`:
-  a column block's rows found by the multi-get made after every seek, a block's run at a time,
-  into one buffer, the other columns NULL.
-- **A heap fetch's rows of the columns read** (`Scan::read_cols`, `TxnScan::read_cols`, set by
-  `ScanNode::fetch_dense_ref` when its scan has column blocks): `need`, the projection (`pick`
-  offers it as stored) and the filter's columns; none (whole rows) for row marks / DML, a
-  tracked table (`emit`), an index-only or access-method scan, or no `need` / projection. A
-  masked row's batch entry gets its length as made.
-- Test: `column_blocks_read_as_rows` also reads a scan with `read_cols` (the masked columns as
-  whole rows read; the others NULL in column blocks' rows, asserted).
-
-**Format 5 against format 4** (`s4` plain dist, one binary, two data sets; step 1 for comparison):
-q03 +31.6% -> **+8.8%**, q07 +39.6% -> **+19.7%**, q09 +14.4% -> **+11.8%**, range read (100 rows of
-orders, two columns) +23.8% -> **+10.4%**, point select +3.6% -> +4.3%; q01 -29.2%, q06 -39.0%, q10
--12.1% as before.
-
-**Switch off against `aaa096e02`** (plain dist, two pairs): q01 -0.08%, q03 -0.05 / +0.14%, q07
--0.25 / -0.28%, q09 -0.22 / -0.21%, q06 +0.21-0.24% and the count(*) / sum steps +0.14-0.60% as
-step 1's (its jump padding), 313's probe ranges -0.05 to +0.20%, select-only point reads -1.5 to
-+0.3% (+6% / -1.5% in the phase without updates: noise on lane B's 6.6-6.9 foreign cores).
-
-**Left for step 2**: q07 / q09's lookups still make rows of the columns they read and then decode
-them (decode from the column block itself would skip the bytes), point selects make whole rows
-(`first_to` / `first_in_l1`: no columns known there yet), range reads of seq scans and parscan's
-row path have no mask yet.
-
 ## Storage format 5: column blocks, stage 1 (agents 303, 311)
 
 Agent 282's prototype (HANDOFF "Storage format 5: column blocks, a prototype", branch
@@ -21885,6 +22065,30 @@ regress 51,148 / 51,150 0 newly differing, isolation 1,647 / 1,648, pg_dump 14,6
 `ROLL_COLBLOCKS=1 ROLL_MEMTABLE_BYTES=1048576` (the diagnostic commit on top) the same counts,
 regress's engine writing **6,421 column blocks** (of 20,333, 211 compactions), isolation's 2,101
 of 3,536.
+
+**Rebased onto 316's split probe and keyed fill** (`cand/a311-4`, on `7ecca8b18`, measured on
+`342917576`, which differs from it only in `exec/agg.rs` / `exec/nodes.rs`): format 4 keeps 316's
+code (`decode_cols` / `decode_cols_only` inlined into `Pre::decode` / `decode_split`; `KeyedFill::
+fill`). Step 1's `#[inline(always)]` on `ColData::size` is gone: with 316's two `decode_cols_in`
+instances the head has it out of line, and inlined it grew `Pre::decode` 1,704 -> 1,993 and
+`decode_split` 3,619 -> 4,201 instructions (q01 +0.64%, sums +1.5% switch off). Format 5 gets
+316's two behaviours on its column blocks: `KeyedFill::fill_lazy` reads a column block's keys
+with its rows unmade and makes none of the keys it passes over (a kept one goes on unmade, runs
+noted at once); `Pre::decode_lazy_split` copies the columns up to the probe's from the blocks,
+then the rest only for the rows whose key may have candidates (`cols::decode_cols_lazy_only`), the
+others dropped unmade. Switch off against `342917576`, plain dist, two pairs: q01 +0.08%, q06
++0.04%, q10 -0.06 / +0.03%, q15 +0.02%, q21 +0.05 / +0.09%, count(*) +0.14 / +0.18%, sums +0.25%,
+`seq_count` +0.50% (built without the jump padding: `seq_count` +0.01%, sums -0.01 to +0.01%,
+count(*) -0.03 / +0.16%, q01 / q06 0.00%, q10 +0.08 / +0.19%, q21 +0.11 / +0.01%); 313's probe ranges -0.12 to +0.10%, select-only -0.85 to +0.49% (-6% in the
+phase without updates: noise). Format 5 against format 4 on this build: q01 -28.6%, q06 +2.1%,
+q10 +7.8%, q15 +4.9%, q21 +12.5%, q03 +36.7%, range read +23.9%: 316 made format 4's q06 -33% and
+its split probe cheap, and what format 5 now spends is making rows (q21: `ColDir::value` / `row`
+/ `LazyRows::make` 12.3k of its +7.9k samples): step 2's rows a column at a time and of the columns
+read (on `wip/a311`, to be handed in rebased onto this). Quick-check `QC_CHECKED=1` on these commits:
+tests 406, checked 406, crash seeds 1-3 x 2 and the power cut, regress 51,148 / 51,150 0 newly
+differing, isolation 1,647 / 1,648, pg_dump 14,609; with `ROLL_COLBLOCKS=1 ROLL_MEMTABLE_BYTES=
+1048576` (the diagnostic commit on top) the same, regress's engine writing **6,433 column blocks**
+(of 20,813, 210 compactions).
 
 **Rows of column blocks made where read** (step 2's first item, in this candidate): parscan's
 reader makes, after `Pre::mark`, only the rows whose fate isn't DROP (`make_marked`);
@@ -22662,3 +22866,124 @@ That is more than a small change in the shared txn/scan code, so it is left.
    doesn't move its xmin as PostgreSQL's does; tables past the heap model never get the flag.
 4. Agent 310's difference 2 stays: snapshots older than an index's commit plan without it,
    where PostgreSQL uses it (results equal).
+
+## Point selects: what the snapshot / DDL fixes cost, and the code a read runs through (agent 317, 2026-11-25)
+
+Base `9efd42d19` (the head before agent 310), "head" `83a21ef3f` (agents 310 and 312 landed, and
+314's SubPlan memo). Harness `~/.cache/a317/inproc/` (agent 312's in-process bench, plus Intel
+PT); builds plain dist (`tools/dist.sh --example bench`). Lane A read 6-8 foreign cores all night:
+no cycle number here is usable, instruction counts are.
+
+### A count that can tell 0.1%
+
+312's pairs (process-wide `perf stat instructions:u`, (I30 s - I10 s) / (ops30 - ops10)) can't:
+five A/A pairs of the base binary against a copy of itself read -0.14, +0.07, -0.03, -0.20,
+-0.15% (with the load's compactions finished first, the last two, no better). A symbol diff of
+two `perf record` profiles of the same binary moved +-30..70 instructions per symbol and +0.66%
+in total (background threads' zstd, the allocator, sampling).
+
+`ptrec.sh` / `ptdec.sh` / `ptins.py` / `insdiff.py` count exactly instead: an Intel PT trace
+(`perf record -e intel_pt//u -p`, 100 ms, 5 s into a 1-client point_select run on a fresh
+100,000-row database) decoded instruction by instruction (`perf script --itrace=i1i`), the client
+thread only (the session runs on it), over 400 whole selects (from one entry of the bench's
+per-op check, `ReadCheck::check_inproc`, to the 401st). Per function the counts are the same to
+the instruction in every run, except:
+- mimalloc's slow paths (`_mi_malloc_generic`, `mi_find_page`, ...): about 26 or about 74
+  instructions a select, by the heap's state, in every build (bimodal);
+- the read itself (`Block::seek` +-20: the ids read differ).
+"Stable code" below is the sum over the other functions: what the code adds, without that noise.
+Totals of three base runs: 36,443 / 36,423 / 36,295 instructions a select.
+
+### Part 1: the cost, and what is left
+
+| build | stable code vs base (instructions / select) | where |
+|---|---|---|
+| head `83a21ef3f` | **+110 (+0.30%)** | `bound_as` +50, `lock_some` +26, the two new `TxnState` fields' drops +15 (one an out-of-line drop glue call), `with_search_path` +15 and libc +10 (314's `subplan_memo` map, built and copied with every statement's `ExecCtx`), `run_query` +5 |
+| + kept-plan check in `bound_as`'s borrow, `reads_every_index` one inlined branch | +84 (before the rebase on 314) | |
+| + one box for `DdlReads` and the set-aside snapshot; `refresh_from` | +57 (before the rebase) | `lock_some` +26 -> +8, drops +15 -> +5 |
+| + `bound_as`'s keep decision as a sentinel version | +65 (after the rebase: 314's +25 in) | `bound_as` +34 -> +26 |
+| + SubPlans' state in one lazy box | +45 | `with_search_path` -17 below base, but its drop glue +17 |
+| + that box's drop behind one inlined test (`cand/a317`) | **+37 (+0.10%)** | `bound_as` +26, `run_query` +9, `lock_some` +8, drops +10, `planned_as` +3; `with_search_path` -17 |
+
+Whole client thread, `cand/a317` against the base: 36,322 / 36,360 (mean -0.13%, the allocator in
+its cheaper state). 312's process-wide pairs, base against `cand/a317` (7.4-7.9 foreign cores):
++0.42, -0.05, -0.05% (median -0.05%).
+
+What changed (no behaviour change: `reads_every_index`, `every_index_at` and the refreshes after a
+lock decide as before):
+- `Txn::reads_every_index` is `#[inline]` one test (`ddl_reads` none and `IndexSince::pending`
+  false), its snapshot-time part `#[cold]` out of line; `bound_as` reads it inside the
+  transaction borrow it already takes, and folds "keep / reuse the binding" into the catalog
+  version it compares (`UNKEPT`, a version no kept binding has): the reuse tests nothing more
+  than before agent 312. (Cursors: not kept, as 312 made it.)
+- `DdlReads` holds the snapshot `begin_latest_reads` sets aside (`latest`), so `TxnState` has one
+  box where it had two (its drop tests one pointer); `end_latest_reads` drops the box when
+  nothing else is in it. `every_index_at`'s fast tests look at `stale` (the box now exists during
+  every DDL statement that reads the newest rows).
+- `lock_relation` compares a granted lock's mode with `refresh_from` (SHARE; ACCESS SHARE while
+  `begin_latest_reads` runs) and does both refreshes out of line (`refresh_after_lock`), one
+  compare where it had two tests.
+- `ExecCtx`: correlated SubPlans' kept trees and 314's memo in one `SubplansBox` (a
+  `RefCell<Option<ManuallyDrop<Box<Subplans>>>>` with an inlined `Drop`), made by the first
+  SubPlan run: a statement sets one pointer and its drop tests it, where it initialised, copied
+  and dropped two maps.
+
+What is left of the +37: `bound_as`'s test itself (8 instructions: the `ddl_reads` test and the
+two dependent loads to `pending`), register spills around it, and alignment: the dist build's
+`-x86-branches-within-32B-boundaries` pads jumps with NOPs that execute (bound_as had 14 NOPs a
+select at the base, 12-24 in the candidates), so any code change moves a few instructions either
+way in the functions around it (`run_query` +9 is that: its source didn't change).
+
+Checks (on `a768fc880`, rebased on `7a11af253`): `tools/quick-check.sh` with `QC_CHECKED=1` and
+`QC_TESTS=twophase`: clippy 16 warnings, none new in a changed file; 442 tests in 25 binaries
+(`wire`'s protocol cases and `twophase` among them), and again built `verify-checked`; crash seeds
+1-3 x 2 and power_cut_at_every_point; regress 51,148 / 51,150, 0 newly differing; isolation
+1,647 / 1,648; pg_dump_tap 14,609 passed. The snapshot / DDL specs (roll-ddl-snapshot-reads-latest,
+-validation-snapshots, -reads-waited-writes, -after-lock-waits, roll-prepared-ddl-snapshots,
+roll-index-checkxmin, roll-concurrent-create, roll-detach-finalize-snapshots) against PostgreSQL
+18.6 live (`PGISOLATION_ONLY`): 8 / 8 specs, 63 / 63 permutations.
+
+### Part 2: the code a point select runs through
+
+Measured with Intel PT branch traces (`inproc/pt.sh` in process, `bench/ptsrv.sh` +
+`ptsrvdec.sh` on a server under `pgbench -S -M prepared -c 8`, one server CPU traced, decoded for
+the server's pid), `inproc/ptcov.py`: each taken branch's target to the next branch's source is
+code executed; distinct 64-byte lines and 4 kB pages over the window (what has to be warm in the
+i-cache and iTLB).
+
+| build | lines (KiB) | 4 kB pages | functions | pages with < 8 of 64 lines used |
+|---|---|---|---|---|
+| plain, in process (`bench`) | 2,486 (155) | 266 | 323 | 152 |
+| plain, server | 2,617 (164) | 269 | 316 | 149 |
+| PGO as shipped, server | 2,161 (135) | 168 | 104 | 86 |
+| PGO, `-z keep-text-section-prefix` | 2,026 (127) | 163 | 104 | 90 |
+| PGO, + `-enable-split-machine-functions` | 2,010 (126) | 152 | 107 | 78 |
+
+All of a read's hot code would fit in about 39 pages, and the L1 iTLB has 128 entries. What
+spreads it is the number of distinct functions, each on a page of its own somewhere in 36-38 MB
+of text, not their size. The plain build's functions touched total 539 KiB, of which 155 are
+executed. Big functions run for a few lines each (`eval_here` 5 of 418 lines, `commit_in` 11 of
+367, `dispatch` 15 of 321, `parse_value_ex` 8 of 213, `put_entry_deletes` 5 of 191), but each
+costs one page whatever its size. In the PGO build, the point select's ~104 (inlined) functions
+sit across the 7.9 MB `.text.hot` (lld merges `.text.hot.*` into `.text` in input order unless
+told to keep the prefix, and the shipped build doesn't).
+
+**Measured and dropped:**
+- The PGO build's hot code packed (`-z keep-text-section-prefix`, alone and with LLVM's machine
+  function splitting; `~/.cache/a317/patches/dropped-pgo-hot-layout.patch`). Tested by
+  relinking one build's objects (lld `--reproduce` through a linker wrapper,
+  `~/.cache/a317/linkwrap.sh` / `relink.sh`: the relink without flags is byte-identical). The
+  split build is +1.7 MB of text. Pages went 168 -> 163 -> 152. The split build in 3 pairs,
+  select-only at 8 clients against the PGO build: user instructions per read +1.03 / +9.56 /
+  -6.02%, cycles +0.87 / +5.92 / -2.60% (foreign 1.25-1.88): no direction.
+- 301's hot-function ordering for the plain build stays dropped. Ordering the 316-323 functions
+  a read touches packs whole functions: about 539 KiB, ~135 pages, still over the iTLB's 128,
+  with no hot/cold split (that needs a profile).
+
+**Left:** fewer distinct functions on the path is the lever both builds share: the session's
+per-statement steps (`run_query`, `bind_message`, `execute_portal_here`, `finish_txn`,
+`planned_as`, `bound_as`, `ensure_txn`, `begin_in`, `begin_statement`, `first_snap`,
+`release_locks`, `finish_xid`, pgstat's `report` / `end_xact_counts`, `Settings::end_transaction`,
+the `TxnState` / `ExecCtx` drops) are ~60 functions of ~10-120 executed lines each. Merging them
+into fewer, denser ones is a refactor to gate on cycles, which the loaded lanes didn't allow
+tonight (6-8 foreign cores on lane A all night).

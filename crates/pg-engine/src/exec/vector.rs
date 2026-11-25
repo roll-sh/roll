@@ -573,6 +573,28 @@ impl VB {
         })
     }
 
+    /// Whether the row path's condition this is raises no error for any row: comparisons of
+    /// columns and constants, without arithmetic or other calls. A row it is `Out` for is
+    /// then one the row path only decides (a value the vectors don't hold), so leaving a row
+    /// out unchecked (`parscan::Pre`'s probe misses) changes nothing observable.
+    pub fn total(&self) -> bool {
+        let plain = |v: &VN| matches!(v, VN::Col(_) | VN::Const(_));
+        match self {
+            VB::And(a) | VB::Or(a) => a.iter().all(VB::total),
+            VB::Not(a) => a.total(),
+            VB::NumCmp { args, .. } => args.iter().all(plain),
+            VB::IsNull(..)
+            | VB::Col(_)
+            | VB::Str { .. }
+            | VB::StrIn { .. }
+            | VB::Like { .. }
+            | VB::NumIn { .. }
+            | VB::IntIn { .. }
+            | VB::Instant { .. } => true,
+            VB::Call { .. } => false,
+        }
+    }
+
     /// The condition over the rows `sel` of `b`, into `out` (indexed by row).
     pub fn eval(&self, b: &ColBatch, sel: &[u32], out: &mut [Tri]) {
         match self {

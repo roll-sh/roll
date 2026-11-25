@@ -85,7 +85,6 @@ impl ColData {
 
     /// `n` slots: those it had kept as they are (every row writes its own, a NULL's and an
     /// odd row's its default: `set_default`), new ones a default.
-    #[inline(always)]
     fn size(&mut self, n: usize) {
         match self {
             ColData::I32(v) | ColData::Date(v) => v.resize(n, 0),
@@ -429,8 +428,9 @@ fn walk_plan<'a>(cols: &'a mut [Option<Col>], types: &[DataType]) -> Option<(Vec
 /// Row `r` (its stored bytes `bytes`; in block buffer `buf` at `at`, or None) walked by
 /// `steps` (`walk_plan`'s for columns `0..upto`); false: the row isn't one the walk takes
 /// (stored out of line, without some of the columns, a value it doesn't expect): the slots
-/// it wrote are reset by the caller and the general walk does the row.
-#[inline]
+/// it wrote are reset by the caller and the general walk does the row. (Inlined into the
+/// decode's loop: a call a row kept its position and slots in memory.)
+#[inline(always)]
 fn walk_row(steps: &mut [Step<'_>], r: usize, bytes: &[u8], buf: Option<(u32, usize)>, upto: usize) -> bool {
     if !matches!(bytes.first(), Some(&(ROW_HEADER | ROW_HEADER_TID))) {
         return false;
@@ -695,7 +695,7 @@ fn gather(col: &mut Col, dir: &ColDir, d: &[u8], c: usize, (r0, m, brow): (usize
 /// out of row order.
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn gather_runs(lazy: &LazyRows, rows: &std::ops::Range<usize>, len: usize, cols: &mut [Option<Col>], bufs: &mut Vec<Bytes>, own: &mut Vec<u8>, missing: &[Value], covered: &mut Vec<bool>) -> Result<bool> {
+fn gather_runs(lazy: &LazyRows, rows: &std::ops::Range<usize>, only: Option<&[u32]>, len: usize, cols: &mut [Option<Col>], bufs: &mut Vec<Bytes>, own: &mut Vec<u8>, missing: &[Value], covered: &mut Vec<bool>) -> Result<bool> {
     let mut sort_odd = false;
     let mut scratch = Vec::new();
     covered.clear();
@@ -714,22 +714,73 @@ fn gather_runs(lazy: &LazyRows, rows: &std::ops::Range<usize>, len: usize, cols:
             bufs.push(blk.data().clone());
         }
         let bi = (bufs.len() - 1) as u32;
-        let span = (a - rows.start, b - a, run.row as usize + (a - run.at as usize));
-        for (c, slot) in cols.iter_mut().enumerate() {
-            if let Some(col) = slot {
-                sort_odd |= gather(col, dir, d, c, span, bi, own, missing.get(c).unwrap_or(&null), &mut scratch)?;
+        let (lo, hi) = ((a - rows.start) as u32, (b - rows.start) as u32);
+        // (The spans of the run gathered: all of it, or `only`'s places in it, consecutive
+        // ones together.)
+        let mut spans: smallvec::SmallVec<[(u32, u32); 8]> = smallvec::SmallVec::new();
+        match only {
+            None => spans.push((lo, hi)),
+            Some(o) => {
+                let from = o.partition_point(|&r| r < lo);
+                for &r in o[from..].iter().take_while(|&&r| r < hi) {
+                    match spans.last_mut() {
+                        Some((_, e)) if *e == r => *e += 1,
+                        _ => spans.push((r, r + 1)),
+                    }
+                }
             }
         }
-        covered[a - rows.start..b - rows.start].fill(true);
+        for &(x, y) in &spans {
+            let (x, y) = (x as usize, y as usize);
+            let span = (x, y - x, run.row as usize + (x + rows.start - run.at as usize));
+            for (c, slot) in cols.iter_mut().enumerate() {
+                if let Some(col) = slot {
+                    sort_odd |= gather(col, dir, d, c, span, bi, own, missing.get(c).unwrap_or(&null), &mut scratch)?;
+                }
+            }
+            covered[x..y].fill(true);
+        }
     }
     Ok(sort_odd)
 }
 
 /// Rows `rows` of `batch` as columns into `out`: the columns `need` marks, decoded as
-/// `types` declares them, a column a row was stored without as `missing`'s value.
+/// `types` declares them, a column a row was stored without as `missing`'s value. (Inlined
+/// into the scans' decode, as it was before `decode_cols_only` shared its body: called, it
+/// cost TPC-H q17's scan 9% more.)
+#[inline(always)]
 pub fn decode_cols(
     batch: &RowBatch,
     rows: std::ops::Range<usize>,
+    need: &[bool],
+    types: &[DataType],
+    missing: &[Value],
+    out: &mut ColBatch,
+) -> Result<()> {
+    let n = rows.len() as u32;
+    decode_cols_in(batch, rows, 0..n, need, types, missing, out)
+}
+
+/// `decode_cols` of the rows `only` of the run `rows` (by their place in it, ascending): the
+/// others' rows aren't read, their slots not NULL and holding any value (not to be read).
+pub fn decode_cols_only(
+    batch: &RowBatch,
+    rows: std::ops::Range<usize>,
+    only: &[u32],
+    need: &[bool],
+    types: &[DataType],
+    missing: &[Value],
+    out: &mut ColBatch,
+) -> Result<()> {
+    decode_cols_in(batch, rows, only.iter().copied(), need, types, missing, out)
+}
+
+/// `decode_cols` of the rows `picks` (places in the run `rows`, ascending) of it.
+#[inline(always)]
+fn decode_cols_in<P: Iterator<Item = u32> + Clone>(
+    batch: &RowBatch,
+    rows: std::ops::Range<usize>,
+    picks: P,
     need: &[bool],
     types: &[DataType],
     missing: &[Value],
@@ -772,7 +823,8 @@ pub fn decode_cols(
     let mut left: Vec<u32> = Vec::new();
     let all_left = match walk_plan(cols, types) {
         Some((mut steps, strs)) => {
-            for (r, i) in rows.clone().enumerate() {
+            for r in picks.clone() {
+                let (r, i) = (r as usize, rows.start + r as usize);
                 let (bytes, inbuf) = batch.value_in(i);
                 let buf = match (strs, inbuf) {
                     (true, Some((b, at))) => {
@@ -856,8 +908,8 @@ pub fn decode_cols(
         Ok(())
     };
     if all_left {
-        for (r, i) in rows.enumerate() {
-            row(r, i)?;
+        for r in picks {
+            row(r as usize, rows.start + r as usize)?;
         }
     } else {
         for r in left {
@@ -874,6 +926,17 @@ pub fn decode_cols(
 /// Err when a row of `rows` isn't one: the reader then goes the row path, the rows made.
 #[inline(never)]
 pub fn decode_cols_lazy(lazy: &LazyRows, rows: std::ops::Range<usize>, need: &[bool], types: &[DataType], missing: &[Value], out: &mut ColBatch) -> Result<()> {
+    decode_cols_lazy_in(lazy, rows, None, need, types, missing, out)
+}
+
+/// `decode_cols_lazy` of the rows `only` of the run `rows` (places in it, ascending), as
+/// `decode_cols_only`: the others' slots hold any value (not to be read).
+#[inline(never)]
+pub fn decode_cols_lazy_only(lazy: &LazyRows, rows: std::ops::Range<usize>, only: &[u32], need: &[bool], types: &[DataType], missing: &[Value], out: &mut ColBatch) -> Result<()> {
+    decode_cols_lazy_in(lazy, rows, Some(only), need, types, missing, out)
+}
+
+fn decode_cols_lazy_in(lazy: &LazyRows, rows: std::ops::Range<usize>, only: Option<&[u32]>, need: &[bool], types: &[DataType], missing: &[Value], out: &mut ColBatch) -> Result<()> {
     let ncols = need.len().min(types.len());
     let len = rows.len();
     out.cols.resize_with(ncols.max(out.cols.len()), || None);
@@ -904,8 +967,12 @@ pub fn decode_cols_lazy(lazy: &LazyRows, rows: std::ops::Range<usize>, need: &[b
     let ColBatch { cols, bufs, own, .. } = out;
     let cols = &mut cols[..upto];
     let mut covered = Vec::new();
-    let sort_odd = gather_runs(lazy, &rows, len, cols, bufs, own, missing, &mut covered)?;
-    if !covered.iter().all(|c| *c) {
+    let sort_odd = gather_runs(lazy, &rows, only, len, cols, bufs, own, missing, &mut covered)?;
+    let all = match only {
+        None => covered.iter().all(|c| *c),
+        Some(o) => o.iter().all(|&r| covered[r as usize]),
+    };
+    if !all {
         return Err(crate::error::internal("a row of the batch isn't a column block's"));
     }
     if sort_odd {

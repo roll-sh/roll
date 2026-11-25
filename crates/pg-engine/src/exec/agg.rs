@@ -51,6 +51,9 @@ pub trait Accum {
     fn merge(&mut self, _p: Partial) -> Result<()> {
         Ok(())
     }
+    /// An ordered-set aggregate is about to be fed its sorted values, `n` of them not NULL
+    /// (it keeps only the ones its result reads).
+    fn sorted_count(&mut self, _n: u64) {}
 }
 
 pub type MakeAccum = fn(&AggInit) -> Result<Box<dyn Accum>>;
@@ -1127,8 +1130,48 @@ struct Percentile {
     fractions: Value,
     cont: bool,
     ty: T,
+    /// The count of values known before they come (`sorted_count`): only the values at the
+    /// positions the fractions read are kept (`vals`, in order of `keep`).
+    known: Option<Known>,
 }
+
+struct Known {
+    n: usize,
+    keep: Vec<usize>,
+    seen: usize,
+}
+
 impl Percentile {
+    fn new(fractions: Value, cont: bool, ty: T) -> Percentile {
+        Percentile { vals: Vec::new(), fractions, cont, ty, known: None }
+    }
+
+    /// The positions fraction `p` of `n` values reads (none for one out of range).
+    fn positions(&self, p: f64, n: usize, out: &mut Vec<usize>) {
+        if !(0.0..=1.0).contains(&p) || p.is_nan() || n == 0 {
+            return;
+        }
+        if self.cont {
+            let pos = p * (n - 1) as f64;
+            out.push(pos.floor() as usize);
+            out.push(pos.ceil() as usize);
+        } else {
+            out.push((((p * n as f64).ceil() as usize).max(1) - 1).min(n - 1));
+        }
+    }
+
+    fn count(&self) -> usize {
+        self.known.as_ref().map_or(self.vals.len(), |k| k.n)
+    }
+
+    /// The `i`th value in order.
+    fn at(&self, i: usize) -> &Value {
+        match &self.known {
+            Some(k) => &self.vals[k.keep.binary_search(&i).expect("a kept position")],
+            None => &self.vals[i],
+        }
+    }
+
     fn one(&self, p: f64) -> Result<Value> {
         if !(0.0..=1.0).contains(&p) || p.is_nan() {
             bail!(
@@ -1137,7 +1180,7 @@ impl Percentile {
                 crate::types::text::format_float8(p, 1)
             );
         }
-        let n = self.vals.len();
+        let n = self.count();
         if n == 0 {
             return Ok(Value::Null);
         }
@@ -1146,7 +1189,7 @@ impl Percentile {
             let lo = pos.floor() as usize;
             let hi = pos.ceil() as usize;
             let frac = pos - lo as f64;
-            match (&self.vals[lo], &self.vals[hi]) {
+            match (self.at(lo), self.at(hi)) {
                 (Value::Interval(a), Value::Interval(b)) => {
                     if lo == hi {
                         return Ok(Value::Interval(*a));
@@ -1167,22 +1210,47 @@ impl Percentile {
             }
         } else {
             let idx = ((p * n as f64).ceil() as usize).max(1) - 1;
-            Ok(self.vals[idx.min(n - 1)].clone())
+            Ok(self.at(idx.min(n - 1)).clone())
         }
     }
 }
 impl Accum for Percentile {
     fn add(&mut self, a: &[Value], _: &ExecCtx) -> Result<()> {
         if !a[0].is_null() {
-            self.vals.push(a[0].clone());
+            match &mut self.known {
+                Some(k) => {
+                    if k.keep.binary_search(&k.seen).is_ok() {
+                        self.vals.push(a[0].clone());
+                    }
+                    k.seen += 1;
+                }
+                None => self.vals.push(a[0].clone()),
+            }
         }
         Ok(())
+    }
+    fn sorted_count(&mut self, n: u64) {
+        let n = n as usize;
+        let mut keep = Vec::new();
+        match &self.fractions {
+            Value::Array(arr) => {
+                for v in arr.items.iter().filter(|v| !v.is_null()) {
+                    self.positions(v.as_f64().unwrap_or(0.0), n, &mut keep);
+                }
+            }
+            Value::Null => {}
+            v => self.positions(v.as_f64().unwrap_or(0.0), n, &mut keep),
+        }
+        keep.sort_unstable();
+        keep.dedup();
+        self.vals.clear();
+        self.known = Some(Known { n, keep, seen: 0 });
     }
     fn result(&self, _: &ExecCtx) -> Result<Value> {
         match &self.fractions {
             Value::Null => Ok(Value::Null),
             Value::Array(arr) => {
-                if self.vals.is_empty() {
+                if self.count() == 0 {
                     return Ok(Value::Null);
                 }
                 let items = arr
@@ -1216,28 +1284,38 @@ impl Accum for Percentile {
     }
 }
 
-struct Mode(Vec<Value>);
+/// mode(): the values come sorted; the longest run of equal ones so far (the first of
+/// the longest) and the current run, each its first value and length.
+#[derive(Default)]
+struct Mode {
+    best: Option<(Value, usize)>,
+    run: Option<(Value, usize)>,
+}
 impl Accum for Mode {
     fn add(&mut self, a: &[Value], _: &ExecCtx) -> Result<()> {
-        if !a[0].is_null() {
-            self.0.push(a[0].clone());
+        if a[0].is_null() {
+            return Ok(());
+        }
+        match &mut self.run {
+            Some((v, n)) if v.cmp_total(&a[0]) == Ordering::Equal => *n += 1,
+            run => {
+                if let Some((v, n)) = run.take()
+                    && self.best.as_ref().is_none_or(|(_, b)| n > *b)
+                {
+                    self.best = Some((v, n));
+                }
+                *run = Some((a[0].clone(), 1));
+            }
         }
         Ok(())
     }
     fn result(&self, _: &ExecCtx) -> Result<Value> {
-        let mut best: Option<(&Value, usize)> = None;
-        let mut i = 0;
-        while i < self.0.len() {
-            let mut j = i;
-            while j < self.0.len() && self.0[j].cmp_total(&self.0[i]) == Ordering::Equal {
-                j += 1;
-            }
-            if best.is_none_or(|(_, n)| j - i > n) {
-                best = Some((&self.0[i], j - i));
-            }
-            i = j;
-        }
-        Ok(best.map(|(v, _)| v.clone()).unwrap_or(Value::Null))
+        let best = match (&self.best, &self.run) {
+            (Some((b, bn)), Some((_, n))) if bn >= n => Some(b),
+            (_, Some((v, _))) => Some(v),
+            (b, None) => b.as_ref().map(|(v, _)| v),
+        };
+        Ok(best.cloned().unwrap_or(Value::Null))
     }
 }
 
@@ -1980,20 +2058,10 @@ fn register(b: &mut Builder) {
     );
     // Ordered-set: (direct args..., ordered value)
     let pc: MakeAccum = |i| {
-        Ok(Box::new(Percentile {
-            vals: Vec::new(),
-            fractions: i.direct[0].clone(),
-            cont: true,
-            ty: i.arg_types.last().cloned().unwrap_or(T::Float8),
-        }))
+        Ok(Box::new(Percentile::new(i.direct[0].clone(), true, i.arg_types.last().cloned().unwrap_or(T::Float8))))
     };
     let pd: MakeAccum = |i| {
-        Ok(Box::new(Percentile {
-            vals: Vec::new(),
-            fractions: i.direct[0].clone(),
-            cont: false,
-            ty: i.arg_types.last().cloned().unwrap_or(T::Float8),
-        }))
+        Ok(Box::new(Percentile::new(i.direct[0].clone(), false, i.arg_types.last().cloned().unwrap_or(T::Float8))))
     };
     b.add(
         "percentile_cont",
@@ -2047,7 +2115,7 @@ fn register(b: &mut Builder) {
         "mode",
         vec![AnyElement],
         Ret::Poly,
-        |_| Ok(Box::new(Mode(Vec::new()))),
+        |_| Ok(Box::new(Mode::default())),
         false,
         AggKind::OrderedSet,
     );
@@ -2216,7 +2284,7 @@ pub struct AggState {
 
 #[derive(Default)]
 struct AggExtra {
-    buffered: Option<Vec<(Vec<Value>, Vec<Value>)>>,
+    buffered: Option<Buffered>,
     /// A hypothetical-set aggregate's hypothetical row.
     hypothetical: Vec<Value>,
     /// The input arrives sorted for this aggregate (its DISTINCT / ORDER BY): rows go to
@@ -2225,6 +2293,62 @@ struct AggExtra {
     /// A DISTINCT aggregate whose result doesn't depend on its rows' order (`hash_distinct`):
     /// the values fed so far, each fed once, as they come.
     seen: Option<super::fasthash::HashSet<Value>>,
+}
+
+/// An aggregate's input rows kept for its DISTINCT / ORDER BY or ordered set until the group
+/// ends.
+enum Buffered {
+    /// Each row's arguments and sort keys (DISTINCT alone, hypothetical-set aggregates).
+    Rows(Vec<(Vec<Value>, Vec<Value>)>),
+    /// Sorted as nodeAgg's per-aggregate tuplesort sorts them, within work_mem (spilling
+    /// past it). Made at the first row.
+    Sort(Option<Box<SortBuf>>),
+}
+
+/// An aggregate's rows sorted for it: each its arguments, then the ORDER BY keys that aren't
+/// one of them (as the aggregate's input target list has its columns; an ordered set's key is
+/// its argument).
+struct SortBuf {
+    sort: super::extsort::ExtSort,
+    /// Each ORDER BY key's column in the rows.
+    keys: Vec<usize>,
+    /// The rows whose first argument isn't NULL.
+    nonnull: u64,
+}
+
+impl Buffered {
+    /// The rows of `call` kept for it: sorted within work_mem when it has an ORDER BY to
+    /// sort them by (the rows' order is then the sort's).
+    fn of(call: &AggCall) -> Buffered {
+        if call.def.kind != AggKind::Hypothetical && !call.order_by.is_empty() {
+            Buffered::Sort(None)
+        } else {
+            Buffered::Rows(Vec::new())
+        }
+    }
+
+    /// The sort of `call`'s rows.
+    fn sort(call: &AggCall, ctx: &ExecCtx) -> SortBuf {
+        use crate::sql::expr::Expr;
+        let mut types: Vec<T> = call.args.iter().map(Expr::ty).collect();
+        let cols: Vec<usize> = if call.def.kind == AggKind::OrderedSet {
+            vec![0]
+        } else {
+            call.order_by
+                .iter()
+                .map(|k| match call.args.iter().position(|a| a.same_as(&k.expr)) {
+                    Some(i) => i,
+                    None => {
+                        types.push(k.expr.ty());
+                        types.len() - 1
+                    }
+                })
+                .collect()
+        };
+        let keys: Vec<SortKey> =
+            call.order_by.iter().zip(&cols).map(|(k, &c)| SortKey { expr: Expr::Col(c, types[c].clone()), ..k.clone() }).collect();
+        SortBuf { sort: super::extsort::ExtSort::new(&keys, types, None, None, false, ctx), keys: cols, nonnull: 0 }
+    }
 }
 
 impl AggState {
@@ -2330,7 +2454,7 @@ pub fn new_state(call: &AggCall, direct: Vec<Value>) -> Result<AggState> {
     };
     let acc = (call.def.make)(&init)?;
     let buffered = if call.distinct || !call.order_by.is_empty() || call.def.kind.is_ordered() {
-        Some(Vec::new())
+        Some(Buffered::of(call))
     } else {
         None
     };
@@ -2420,7 +2544,19 @@ pub fn feed(call: &AggCall, st: &mut AggState, row: &[Value], ctx: &ExecCtx) -> 
         return st.acc.add(&args, ctx);
     }
     match &mut x.buffered {
-        Some(buf) => {
+        Some(Buffered::Sort(buf)) => {
+            let b = buf.get_or_insert_with(|| Box::new(Buffered::sort(call, ctx)));
+            let mut r = args;
+            let n = r.len();
+            for (k, &c) in call.order_by.iter().zip(&b.keys) {
+                if c >= n {
+                    r.push(eval(&k.expr, row, ctx)?);
+                }
+            }
+            b.nonnull += u64::from(!r[0].is_null());
+            b.sort.put(r, None, ctx)
+        }
+        Some(Buffered::Rows(buf)) => {
             let keys = if call.def.kind.is_ordered() {
                 args.clone()
             } else {
@@ -2497,87 +2633,161 @@ fn hypothetical(
 pub fn finish(call: &AggCall, mut st: AggState, ctx: &ExecCtx) -> Result<Value> {
     if call.def.kind == AggKind::Hypothetical {
         let x = st.extra();
-        return hypothetical(call, x.buffered.as_deref().unwrap_or_default(), &x.hypothetical, ctx);
+        let rows = match &x.buffered {
+            Some(Buffered::Rows(r)) => &r[..],
+            _ => &[],
+        };
+        return hypothetical(call, rows, &x.hypothetical, ctx);
     }
-    if let Some(mut buf) = st.extra.as_mut().and_then(|x| x.buffered.take()) {
-        // (Sorted as Postgres's tuplesort does: equal keys in its quicksort's order.)
-        if call.def.kind == AggKind::OrderedSet {
-            let key = call.order_by.first().cloned();
-            let mut f = |a: &(Vec<Value>, Vec<Value>), b: &(Vec<Value>, Vec<Value>)| match &key {
-                Some(k) => super::nodes::compare_values(&a.0[0], &b.0[0], k, ctx),
-                None => Ok(a.0[0].cmp_total(&b.0[0])),
-            };
-            let mut cmp = super::pgsort::Cmp::new(&mut f);
-            super::pgsort::pg_qsort(&mut buf, &mut cmp);
-            if let Some(e) = cmp.err {
-                return Err(e);
-            }
-        } else if !call.order_by.is_empty() {
-            let mut f = |a: &(Vec<Value>, Vec<Value>), b: &(Vec<Value>, Vec<Value>)| {
-                compare_keys(&a.1, &b.1, &call.order_by, ctx)
-            };
-            let mut cmp = super::pgsort::Cmp::new(&mut f);
-            super::pgsort::pg_qsort(&mut buf, &mut cmp);
-            if let Some(e) = cmp.err {
-                return Err(e);
-            }
-        }
-        if call.distinct {
-            let colls = nondeterministic_keys(&call.args, ctx);
-            // (Arguments under a collation that doesn't sort by bytes sort in its order.)
-            let sorts = sort_collations(&call.args, ctx);
-            let cmp = |a: &[Value], b: &[Value]| {
-                if colls.iter().all(Option::is_none) && sorts.iter().all(Option::is_none) {
-                    return cmp_rows(a, b);
+    match st.extra.as_mut().and_then(|x| x.buffered.take()) {
+        Some(Buffered::Sort(buf)) => {
+            if let Some(b) = buf {
+                let SortBuf { sort, keys: kcols, nonnull } = *b;
+                let (mut rows, _, _) = sort.finish(ctx)?;
+                let n = call.args.len();
+                if call.def.kind == AggKind::OrderedSet {
+                    st.acc.sorted_count(nonnull);
                 }
-                for (i, (x, y)) in a.iter().zip(b).enumerate() {
-                    let o = match (sorts.get(i).and_then(Option::as_ref), x.is_null() || y.is_null()) {
-                        (Some(c), false) => crate::types::collation::cmp_values(c, x, y),
-                        _ => cmp_rows(
-                            &group_key(std::slice::from_ref(x), &colls[i.min(colls.len())..]),
-                            &group_key(std::slice::from_ref(y), &colls[i.min(colls.len())..]),
-                        ),
-                    };
-                    if o != Ordering::Equal {
-                        return o;
+                let mut distinct = call.distinct.then(|| Distinct::new(&call.args, ctx));
+                // (When every argument is an ORDER BY key, equal arguments come in one run of
+                // equal keys: only the run's are kept to compare with.)
+                let runs = distinct.is_some()
+                    && call.def.kind == AggKind::Normal
+                    && call.args.iter().all(|a| call.order_by.iter().any(|k| k.expr.same_as(a)));
+                let mut prev: Option<Vec<Value>> = None;
+                while let Some(mut r) = rows.next(ctx)? {
+                    let keys: Vec<Value> = if runs { kcols.iter().map(|&c| r[c].clone()).collect() } else { Vec::new() };
+                    r.truncate(n);
+                    match &mut distinct {
+                        Some(d) => {
+                            if runs {
+                                if prev.as_ref().is_some_and(|p| compare_keys(p, &keys, &call.order_by, ctx).ok() != Some(Ordering::Equal)) {
+                                    d.new_run();
+                                }
+                                prev = Some(keys);
+                            }
+                            d.feed(r, &mut *st.acc, ctx)?
+                        }
+                        None => st.acc.add(&r, ctx)?,
                     }
                 }
-                Ordering::Equal
-            };
-            if call.order_by.is_empty() {
-                let mut f = |a: &(Vec<Value>, Vec<Value>), b: &(Vec<Value>, Vec<Value>)| {
-                    Ok(cmp(&a.0, &b.0))
-                };
-                let mut c = super::pgsort::Cmp::new(&mut f);
-                super::pgsort::pg_qsort(&mut buf, &mut c);
             }
-            // (The values seen, hashed when equality is `cmp_rows`'s, which the values'
-            // hash agrees with.)
-            let hashable = colls.iter().all(Option::is_none);
-            let mut seen_set: super::fasthash::HashSet<Vec<Value>> = Default::default();
-            let mut seen: Vec<Vec<Value>> = Vec::new();
-            for (args, _) in buf {
-                if hashable {
-                    if seen_set.contains(&args) {
-                        continue;
-                    }
-                    st.acc.add(&args, ctx)?;
-                    seen_set.insert(args);
-                    continue;
-                }
-                if seen.iter().any(|s| cmp(s, &args) == Ordering::Equal) {
-                    continue;
-                }
-                st.acc.add(&args, ctx)?;
-                seen.push(args);
-            }
-        } else {
-            for (args, _) in buf {
-                st.acc.add(&args, ctx)?;
-            }
+            return st.acc.result(ctx);
         }
+        Some(Buffered::Rows(buf)) => finish_rows(call, &mut st, buf, ctx)?,
+        None => {}
     }
     st.acc.result(ctx)
+}
+
+/// A DISTINCT aggregate's arguments fed once each (the first of equal ones), in the order
+/// they come: equal under the arguments' collations.
+struct Distinct {
+    colls: Vec<Option<KeyNorm>>,
+    sorts: Vec<Option<Arc<crate::types::collation::Collation>>>,
+    /// The values seen, hashed when equality is `cmp_rows`'s, which the values' hash
+    /// agrees with.
+    hashable: bool,
+    seen_set: super::fasthash::HashSet<Vec<Value>>,
+    seen: Vec<Vec<Value>>,
+}
+
+impl Distinct {
+    fn new(args: &[crate::sql::expr::Expr], ctx: &ExecCtx) -> Distinct {
+        let colls = nondeterministic_keys(args, ctx);
+        Distinct {
+            hashable: colls.iter().all(Option::is_none),
+            sorts: sort_collations(args, ctx),
+            colls,
+            seen_set: Default::default(),
+            seen: Vec::new(),
+        }
+    }
+
+    /// The order (and equality) of two argument lists.
+    fn cmp(&self, a: &[Value], b: &[Value]) -> Ordering {
+        let (colls, sorts) = (&self.colls, &self.sorts);
+        if colls.iter().all(Option::is_none) && sorts.iter().all(Option::is_none) {
+            return cmp_rows(a, b);
+        }
+        for (i, (x, y)) in a.iter().zip(b).enumerate() {
+            let o = match (sorts.get(i).and_then(Option::as_ref), x.is_null() || y.is_null()) {
+                (Some(c), false) => crate::types::collation::cmp_values(c, x, y),
+                _ => cmp_rows(
+                    &group_key(std::slice::from_ref(x), &colls[i.min(colls.len())..]),
+                    &group_key(std::slice::from_ref(y), &colls[i.min(colls.len())..]),
+                ),
+            };
+            if o != Ordering::Equal {
+                return o;
+            }
+        }
+        Ordering::Equal
+    }
+
+    /// The arguments seen so far can't come again.
+    fn new_run(&mut self) {
+        self.seen_set.clear();
+        self.seen.clear();
+    }
+
+    fn feed(&mut self, args: Vec<Value>, acc: &mut dyn Accum, ctx: &ExecCtx) -> Result<()> {
+        if self.hashable {
+            if !self.seen_set.contains(&args) {
+                acc.add(&args, ctx)?;
+                self.seen_set.insert(args);
+            }
+            return Ok(());
+        }
+        if !self.seen.iter().any(|s| self.cmp(s, &args) == Ordering::Equal) {
+            acc.add(&args, ctx)?;
+            self.seen.push(args);
+        }
+        Ok(())
+    }
+}
+
+/// An aggregate's rows kept in memory (`Buffered::Rows`) sorted for it and fed.
+fn finish_rows(call: &AggCall, st: &mut AggState, mut buf: Vec<(Vec<Value>, Vec<Value>)>, ctx: &ExecCtx) -> Result<()> {
+    // (Sorted as Postgres's tuplesort does: equal keys in its quicksort's order.)
+    if call.def.kind == AggKind::OrderedSet {
+        let key = call.order_by.first().cloned();
+        let mut f = |a: &(Vec<Value>, Vec<Value>), b: &(Vec<Value>, Vec<Value>)| match &key {
+            Some(k) => super::nodes::compare_values(&a.0[0], &b.0[0], k, ctx),
+            None => Ok(a.0[0].cmp_total(&b.0[0])),
+        };
+        let mut cmp = super::pgsort::Cmp::new(&mut f);
+        super::pgsort::pg_qsort(&mut buf, &mut cmp);
+        if let Some(e) = cmp.err {
+            return Err(e);
+        }
+    } else if !call.order_by.is_empty() {
+        let mut f = |a: &(Vec<Value>, Vec<Value>), b: &(Vec<Value>, Vec<Value>)| {
+            compare_keys(&a.1, &b.1, &call.order_by, ctx)
+        };
+        let mut cmp = super::pgsort::Cmp::new(&mut f);
+        super::pgsort::pg_qsort(&mut buf, &mut cmp);
+        if let Some(e) = cmp.err {
+            return Err(e);
+        }
+    }
+    if call.distinct {
+        // (Arguments under a collation that doesn't sort by bytes sort in its order.)
+        let mut d = Distinct::new(&call.args, ctx);
+        if call.order_by.is_empty() {
+            let mut f = |a: &(Vec<Value>, Vec<Value>), b: &(Vec<Value>, Vec<Value>)| Ok(d.cmp(&a.0, &b.0));
+            let mut c = super::pgsort::Cmp::new(&mut f);
+            super::pgsort::pg_qsort(&mut buf, &mut c);
+        }
+        for (args, _) in buf {
+            d.feed(args, &mut *st.acc, ctx)?;
+        }
+    } else {
+        for (args, _) in buf {
+            st.acc.add(&args, ctx)?;
+        }
+    }
+    Ok(())
 }
 
 pub fn cmp_rows(a: &[Value], b: &[Value]) -> Ordering {
@@ -3021,10 +3231,12 @@ impl AggNode {
                             && nondeterministic_keys(&a.args, ctx).iter().any(Option::is_some))
                 });
             let share = shared_states(&self.aggs, presorted_agg);
+            // (Without groups, a sort that no aggregate reads presorted orders nothing:
+            // PostgreSQL's plan has none, and each aggregate sorts its own rows.)
             let presort: Option<Vec<SortKey>> = self
                 .aggs
                 .iter()
-                .find(|a| presortable(a))
+                .find(|a| presortable(a) && (presorted_agg.is_some() || !self.groups.is_empty()))
                 .map(|a| {
                     let mut keys: Vec<SortKey> = self
                         .groups
@@ -3087,7 +3299,44 @@ impl AggNode {
                         .collect(),
                 )
             });
-            if let Some(keys) = presort {
+            // (Sorted within work_mem as the Sort below PostgreSQL's GroupAggregate is.)
+            if let Some(keys) = &presort
+                && let Some(crate::sql::plan::Plan::Agg { input: plan_in, .. }) = self.plan.as_deref()
+            {
+                // (The columns as make_group_input_target lists them: the grouping keys',
+                // then each aggregate's direct arguments, arguments, ORDER BY and FILTER, each
+                // column at its first appearance.)
+                let held = (|| {
+                    use crate::sql::expr::Expr as E;
+                    let mut cols: Vec<usize> = Vec::new();
+                    let mut ok = true;
+                    let mut add = |e: &E| {
+                        e.walk(&mut |x| match x {
+                            E::Col(i, _) => {
+                                if !cols.contains(i) {
+                                    cols.push(*i);
+                                }
+                            }
+                            E::Xml(_) | E::Srf(..) | E::Agg(..) | E::Window(..) | E::Grouping(_) => ok = false,
+                            _ => {}
+                        })
+                    };
+                    for g in &self.groups {
+                        add(g);
+                    }
+                    for a in &self.aggs {
+                        if a.user.is_some() {
+                            return None;
+                        }
+                        for e in a.direct.iter().chain(&a.args).chain(a.order_by.iter().map(|k| &k.expr)).chain(a.filter.iter()) {
+                            add(e);
+                        }
+                    }
+                    ok.then_some(cols)
+                })();
+                let types = crate::sql::paths::analyzejoins::col_types(plan_in);
+                input = super::nodes::sort_all(input, keys, types, held, ctx)?;
+            } else if let Some(keys) = presort {
                 let mut rows = Vec::new();
                 while let Some(r) = input.next(ctx)? {
                     ctx.check()?;

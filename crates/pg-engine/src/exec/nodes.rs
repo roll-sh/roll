@@ -3677,6 +3677,86 @@ fn narrow_sort(need: Option<&[bool]>, width: usize, keys: &[SortKey]) -> Option<
     })
 }
 
+/// The rows of a sort run to its end (`sort_all`), put back in their columns' places when
+/// held in another order.
+struct SortedNode {
+    out: super::extsort::Sorted,
+    /// The input's column of each held column, and the input's width.
+    held: Option<(Vec<usize>, usize)>,
+}
+
+impl Node for SortedNode {
+    fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+        Ok(match (self.out.next(ctx)?, &self.held) {
+            (Some(r), Some((cols, width))) => {
+                let mut out = vec![Value::Null; *width];
+                for (v, &c) in r.into_iter().zip(cols) {
+                    out[c] = v;
+                }
+                Some(out)
+            }
+            (r, _) => r,
+        })
+    }
+}
+
+/// `input`'s rows (of columns `types`) sorted by `keys` as the Sort PostgreSQL's plan has below
+/// a grouping runs (tuplesort: in memory within work_mem, else runs on disk merged as they are
+/// read), for the grouping's DISTINCT / ORDER BY aggregates. `held`: the input columns the
+/// grouping reads, in the order its input's target list has them (what PostgreSQL's sort tuple
+/// holds, which its memory and runs count): the rows are held with those alone. None: whole.
+pub(super) fn sort_all(
+    mut input: BoxNode,
+    keys: &[SortKey],
+    types: Vec<crate::types::DataType>,
+    held: Option<Vec<usize>>,
+    ctx: &ExecCtx,
+) -> Result<BoxNode> {
+    let width = types.len();
+    let mut place = vec![usize::MAX; width];
+    let held = held.filter(|cols| {
+        cols.iter().enumerate().all(|(p, &c)| c < width && std::mem::replace(&mut place[c], p) == usize::MAX)
+    });
+    // (The keys over the held rows, when every column they read is held.)
+    let held_keys: Option<Vec<SortKey>> = held.as_ref().and_then(|_| {
+        keys.iter()
+            .map(|k| {
+                let mut read = Vec::new();
+                (super::need::mark(&k.expr, &mut read)
+                    && read.iter().enumerate().all(|(i, &r)| !r || place.get(i).is_some_and(|&p| p != usize::MAX)))
+                .then(|| SortKey { expr: k.expr.clone().remap_cols(&|i| place[i]), ..k.clone() })
+            })
+            .collect()
+    });
+    let held = held.filter(|_| held_keys.is_some());
+    let mut sort: Option<super::extsort::ExtSort> = None;
+    let mut fits = false;
+    while let Some(mut r) = input.next(ctx)? {
+        ctx.check()?;
+        let s = match &mut sort {
+            Some(s) => s,
+            None => {
+                // (Rows of another width than the plan's types: held whole.)
+                fits = held.is_some() && r.len() == width;
+                sort.insert(match (fits, &held, &held_keys) {
+                    (true, Some(cols), Some(k)) => {
+                        let t = cols.iter().map(|&c| types[c].clone()).collect();
+                        super::extsort::ExtSort::new(k, t, None, None, false, ctx)
+                    }
+                    _ => super::extsort::ExtSort::new(keys, types.clone(), None, None, false, ctx),
+                })
+            }
+        };
+        if fits && let Some(cols) = &held {
+            r = cols.iter().map(|&c| std::mem::replace(&mut r[c], Value::Null)).collect();
+        }
+        s.put(r, None, ctx)?;
+    }
+    let Some(sort) = sort else { return Ok(Box::new(VecNode::new(Vec::new()))) };
+    let (out, _, _) = sort.finish(ctx)?;
+    Ok(Box::new(SortedNode { out, held: if fits { held.map(|c| (c, width)) } else { None } }))
+}
+
 impl SortNode {
     /// The next sorted row, widened back when held narrowed.
     fn next_out(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {

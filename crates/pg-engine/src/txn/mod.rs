@@ -622,7 +622,7 @@ impl Database {
             held: None,
             loading: None,
             ddl_reads: None,
-            latest_reads: None,
+            refresh_from: LockMode::Share,
         })
     }
 
@@ -1279,12 +1279,14 @@ pub struct TxnState {
     /// A COPY's rows held until its multi-insert batch is placed in the heap's model
     /// (`hold_rows`): its table and the rows' keys and stored bytes, without their TIDs.
     held: Option<(u32, Vec<(Vec<u8>, Vec<u8>)>)>,
-    /// What DDL that read the newest committed rows left for the rest of the transaction
-    /// (`DdlReads`).
+    /// What DDL that read the newest committed rows left for the rest of the transaction,
+    /// and the snapshot a DDL statement doing that set aside (`DdlReads`). (One box: a
+    /// transaction's drop tests one pointer.)
     ddl_reads: Option<Box<DdlReads>>,
-    /// A DDL statement reading the newest committed rows (`begin_latest_reads`): the
-    /// snapshot it set aside, given back at its end.
-    latest_reads: Option<Box<(u64, Option<SnapshotPin>)>>,
+    /// The weakest lock mode whose grant makes the statement's snapshot newer
+    /// (`lock_relation`): SHARE, or ACCESS SHARE while `begin_latest_reads` runs. (One
+    /// compare of every lock a statement takes, its usual ones weaker than SHARE.)
+    refresh_from: LockMode,
 }
 
 /// DDL reads a table as PostgreSQL's index builds (SnapshotAny: every tuple not dead to all,
@@ -1309,6 +1311,16 @@ struct DdlReads {
     fresh: Vec<(u32, usize)>,
     /// Pins of the `adopted` times, which its later statements read those tables at.
     pins: Vec<SnapshotPin>,
+    /// A DDL statement reading the newest committed rows (`begin_latest_reads`): the
+    /// snapshot it set aside, given back at its end.
+    latest: Option<(u64, Option<SnapshotPin>)>,
+}
+
+impl DdlReads {
+    /// Nothing left for the rest of the transaction, and no statement reading the newest rows.
+    fn is_empty(&self) -> bool {
+        self.adopted.is_empty() && self.stale.is_empty() && self.fresh.is_empty() && self.pins.is_empty() && self.latest.is_none()
+    }
 }
 
 /// Indexes whose entries were all made by a commit (a new index, or an index with new
@@ -1645,10 +1657,12 @@ impl TxnState {
     /// not the transaction's snapshot (a REPEATABLE READ one's left rows committed after it
     /// out of the index, and lost them in a rewrite). False: one is running already.
     pub fn begin_latest_reads(&mut self) -> bool {
-        if self.latest_reads.is_some() {
+        let d = self.ddl_reads.get_or_insert_with(Default::default);
+        if d.latest.is_some() {
             return false;
         }
-        self.latest_reads = Some(Box::new((self.snapshot_ts, self._pin.take())));
+        d.latest = Some((self.snapshot_ts, self._pin.take()));
+        self.refresh_from = LockMode::AccessShare;
         let pin = self.pin_visible();
         self.snapshot_ts = pin.ts;
         self._pin = Some(pin);
@@ -1658,11 +1672,19 @@ impl TxnState {
     /// The snapshot `begin_latest_reads` set aside is the transaction's (the statement's)
     /// again.
     pub fn end_latest_reads(&mut self) {
-        if let Some(b) = self.latest_reads.take() {
-            let (ts, pin) = *b;
-            self.snapshot_ts = ts;
-            self._pin = pin;
+        let Some(d) = &mut self.ddl_reads else { return };
+        let Some((ts, pin)) = d.latest.take() else { return };
+        if d.is_empty() {
+            self.ddl_reads = None;
         }
+        self.snapshot_ts = ts;
+        self._pin = pin;
+        self.refresh_from = LockMode::Share;
+    }
+
+    /// Whether `begin_latest_reads` is running.
+    fn latest_reads(&self) -> bool {
+        self.ddl_reads.as_ref().is_some_and(|d| d.latest.is_some())
     }
 
     /// The statement's snapshot, pinned, for `restore_snapshot` (None: it has none).
@@ -1682,14 +1704,18 @@ impl TxnState {
         }
     }
 
-    /// `begin_latest_reads` is running: reads see what committed since (`lock_relation`).
-    /// (Out of line: `lock_relation`, which every statement's locks take, stays small enough
-    /// to be inlined into them; it was not with this inside, +0.3% instructions a point
-    /// select.)
+    /// A lock of `mode` (`refresh_from` or stronger) was granted: a SHARE or stronger one
+    /// refreshes a READ COMMITTED statement's snapshot, any one a `begin_latest_reads`
+    /// statement's (what committed while it waited). (Out of line: `lock_relation`, which
+    /// every statement's locks take, stays small enough to be inlined into them; it was not
+    /// with this inside, +0.3% instructions a point select.)
     #[cold]
     #[inline(never)]
-    fn refresh_latest_reads(&mut self) {
-        if self.latest_reads.is_some() && self.db.store.visible_ts() != self.snapshot_ts {
+    fn refresh_after_lock(&mut self, mode: LockMode) {
+        if mode >= LockMode::Share {
+            self.refresh_read_committed_snapshot();
+        }
+        if self.latest_reads() && self.db.store.visible_ts() != self.snapshot_ts {
             let pin = self.pin_visible();
             self.snapshot_ts = pin.ts;
             self._pin = Some(pin);
@@ -1698,7 +1724,7 @@ impl TxnState {
 
     /// The snapshot the transaction's statements read at, outside `begin_latest_reads`.
     pub fn statement_snapshot_ts(&self) -> u64 {
-        self.latest_reads.as_ref().map_or(self.snapshot_ts, |b| b.0)
+        self.ddl_reads.as_ref().and_then(|d| d.latest.as_ref()).map_or(self.snapshot_ts, |l| l.0)
     }
 
     /// The table range [start, end) is rewritten from its newest rows (read in
@@ -1720,7 +1746,7 @@ impl TxnState {
         {
             return Ok(true);
         }
-        if self.latest_reads.is_none() || !self.db.store.changed_since(start, end, self.start_ts) {
+        if !self.latest_reads() || !self.db.store.changed_since(start, end, self.start_ts) {
             return Ok(false);
         }
         // (What it wrote there before the lock: changed since its snapshot by another
@@ -1806,12 +1832,17 @@ impl TxnState {
     /// Whether the snapshot its next statement reads at uses every index (`index_usable`):
     /// plans made otherwise leave some out, and plans made by snapshots that use them aren't
     /// its to run, so the plans kept across statements and sessions (`session::litplan`)
-    /// are neither kept nor reused then.
+    /// are neither kept nor reused then. (The usual case is one branch, inlined: no DDL of
+    /// its own that read the newest rows, and no index some snapshot leaves out.)
+    #[inline]
     pub fn reads_every_index(&self) -> bool {
-        // (The usual case before the snapshot's time is read: `every_index_at`.)
-        if self.ddl_reads.is_none() && !self.db.index_since.pending.load(Ordering::Acquire) {
-            return true;
-        }
+        (self.ddl_reads.is_none() && !self.db.index_since.pending.load(Ordering::Acquire)) || self.reads_every_index_slow()
+    }
+
+    /// `reads_every_index` when some snapshot may leave an index out: the snapshot's time.
+    #[cold]
+    #[inline(never)]
+    fn reads_every_index_slow(&self) -> bool {
         let ts = match self.isolation.txn_snapshot() && self.snapshot_fixed {
             true => self.statement_snapshot_ts(),
             false => self.db.store.visible_ts(),
@@ -1823,16 +1854,15 @@ impl TxnState {
     /// every snapshot uses every index whose indcheckxmin is set.
     pub fn every_index_at(&self, ts: u64) -> bool {
         let since = &self.db.index_since;
-        // (No DDL of its own that read the newest rows, and no index some snapshot leaves
-        // out: the usual case, one load.)
-        if self.ddl_reads.is_none() && !since.pending.load(Ordering::Acquire) {
+        // (No index of its own built from rows its snapshot doesn't see, and no index some
+        // snapshot leaves out: the usual case, one load.)
+        if !self.ddl_reads.as_ref().is_none_or(|d| d.stale.is_empty()) {
+            return false;
+        }
+        if !since.pending.load(Ordering::Acquire) || !since.pending(self.db.store.horizon_hint()) {
             return true;
         }
-        if self.ddl_reads.is_none() && !since.pending(self.db.store.horizon_hint()) {
-            return true;
-        }
-        self.ddl_reads.as_ref().is_none_or(|d| d.stale.is_empty())
-            && since.max.load(Ordering::Acquire) <= ts
+        since.max.load(Ordering::Acquire) <= ts
             && match since.check_xmin.load(Ordering::Acquire) {
                 0 => true,
                 // (Once every snapshot's xmin is past it, no snapshot leaves such an index out.)
@@ -4043,13 +4073,10 @@ impl TxnState {
         // committed meanwhile is the command's to read, as PostgreSQL's index build (SnapshotAny)
         // and table rewrite (GetLatestSnapshot) read it, not the statement's older snapshot:
         // an index built from that missed their rows, a rewrite dropped them.
-        if got && mode >= LockMode::Share {
-            self.refresh_read_committed_snapshot();
-        }
         // (A DDL statement reads what committed while it waited for any lock: ANALYZE's and
         // VACUUM's SHARE UPDATE EXCLUSIVE too, `begin_latest_reads`.)
-        if got && self.latest_reads.is_some() {
-            self.refresh_latest_reads();
+        if got && mode >= self.refresh_from {
+            self.refresh_after_lock(mode);
         }
         Ok(got)
     }

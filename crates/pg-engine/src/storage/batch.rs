@@ -85,6 +85,14 @@ impl LazyRows {
         self.runs.is_empty()
     }
 
+    /// Row `i` of the batch, when it is one left unmade: its column block and the block's row.
+    pub fn row_of(&self, i: usize) -> Option<(&Arc<super::sst::Block>, u32)> {
+        let i = i as u32;
+        let at = self.runs.partition_point(|r| r.at + r.n <= i);
+        let r = self.runs.get(at).filter(|r| r.at <= i)?;
+        Some((self.block(r.buf), r.row + (i - r.at)))
+    }
+
     /// How many rows are left unmade.
     pub fn rows(&self) -> usize {
         self.runs.iter().map(|r| r.n as usize).sum()
@@ -261,6 +269,22 @@ impl RowBatch {
     #[inline]
     fn key_start(&self, i: usize) -> usize {
         if i == 0 { 0 } else { self.ents[i - 1].key_end as usize }
+    }
+
+    /// A row left unmade (`LazyRows`): its key, the empty buffer `buf` of its column block and
+    /// its length; the caller notes its run (`LazyRows::note`).
+    pub fn push_unmade(&mut self, key: &[u8], buf: u32, len: usize) {
+        self.push_ent(key, buf, 0, len);
+    }
+
+    /// Row `i`'s key (its value not read: a row left unmade has none in the batch yet).
+    pub fn key(&self, i: usize) -> &[u8] {
+        &self.keys[self.key_start(i)..self.ents[i].key_end as usize]
+    }
+
+    /// Row `i`'s value's length.
+    pub fn value_len(&self, i: usize) -> usize {
+        self.ents[i].len as usize
     }
 
     /// Row `i`'s key and value.

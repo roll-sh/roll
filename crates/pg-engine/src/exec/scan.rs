@@ -719,6 +719,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             batch: FETCH_BATCH_MIN,
             ios_cols: None,
             am: None,
+            keyset: None,
         }));
     }
     // A GiST point_ops index scan: the rows the index's consistent and distance functions
@@ -823,6 +824,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             batch: FETCH_BATCH_MIN,
             ios_cols: None,
             am: None,
+            keyset: None,
         }));
     }
     // An index of a native access method (pgvector's ivfflat and hnsw): the rows its scan
@@ -917,6 +919,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             batch: FETCH_BATCH_MIN,
             ios_cols: None,
             am: Some(Box::new(state)),
+            keyset: None,
         }));
     }
     if s.index.is_none() && s.current_of.is_none() && s.sample.is_some() {
@@ -1080,6 +1083,7 @@ fn open_scan_as(
         batch: first_batch(s),
         ios_cols,
         am: None,
+        keyset: None,
         one_run: collation_equal_run(s),
     }))
 }
@@ -1950,7 +1954,14 @@ fn dense_bitmap_scan(
         return Ok(None);
     }
     // The bitmap's entries (index keys only, no rows read) and its condition.
-    fn entries(t: &Arc<Table>, q: &BitmapQual, ctx: &ExecCtx, counted: &mut Vec<(u32, i64)>) -> Result<Option<(f64, crate::sql::expr::Expr)>> {
+    // (`keys`: the data keys of the entries that pass, while it is Some: `KeySet`.)
+    fn entries(
+        t: &Arc<Table>,
+        q: &BitmapQual,
+        ctx: &ExecCtx,
+        counted: &mut Vec<(u32, i64)>,
+        keys: &mut Option<Option<super::parscan::KeySet>>,
+    ) -> Result<Option<(f64, crate::sql::expr::Expr)>> {
         use crate::sql::expr::Expr;
         Ok(match q {
             BitmapQual::Index { index, quals, bounds, .. } => {
@@ -1991,6 +2002,9 @@ fn dense_bitmap_scan(
                         ctx.check()?;
                         let Some(cols) = &ecols else {
                             n += batch.len() as i64;
+                            for i in 0..batch.len() {
+                                keep_key(keys, batch.get(i).1);
+                            }
                             continue;
                         };
                         for i in 0..batch.len() {
@@ -1999,6 +2013,9 @@ fn dense_bitmap_scan(
                                 && k.get(8..8 + vals.len()) == Some(vals.as_slice())
                             {
                                 n += i64::from(*pass);
+                                if *pass {
+                                    keep_key(keys, batch.get(i).1);
+                                }
                                 continue;
                             }
                             let mut pos = 8;
@@ -2017,6 +2034,9 @@ fn dense_bitmap_scan(
                                 });
                             last = decoded.then(|| (k[8..pos].to_vec(), pass));
                             n += i64::from(pass);
+                            if pass {
+                                keep_key(keys, batch.get(i).1);
+                            }
                         }
                     }
                 }
@@ -2026,8 +2046,10 @@ fn dense_bitmap_scan(
             BitmapQual::And(list) | BitmapQual::Or(list) => {
                 let mut ns = Vec::new();
                 let mut es = Vec::new();
+                // (The keys of one index's entries only.)
+                *keys = None;
                 for x in list {
-                    let Some((n, e)) = entries(t, x, ctx, counted)? else { return Ok(None) };
+                    let Some((n, e)) = entries(t, x, ctx, counted, keys)? else { return Ok(None) };
                     ns.push(n);
                     es.push(e);
                 }
@@ -2039,13 +2061,33 @@ fn dense_bitmap_scan(
             }
         })
     }
+    // The entries' data keys, kept while each is of one form (`KeySet`): None until the
+    // first, then the set, or None again once one isn't.
+    fn keep_key(keys: &mut Option<Option<super::parscan::KeySet>>, k: &[u8]) {
+        let Some(set) = keys else { return };
+        let ok = match set {
+            Some(set) => set.push(k),
+            None => super::parscan::KeySet::new(k).is_some_and(|mut s| {
+                let ok = s.push(k);
+                *set = Some(s);
+                ok
+            }),
+        };
+        if !ok {
+            *keys = None;
+        }
+    }
     let mut counted = Vec::new();
-    let Some((n, cond)) = entries(&s.table, q, ctx, &mut counted)? else {
+    let mut keys = Some(None);
+    let Some((n, cond)) = entries(&s.table, q, ctx, &mut counted, &mut keys)? else {
         return Ok(None);
     };
     if n * 32.0 < tuples {
         return Ok(None);
     }
+    // (Rows the bitmap doesn't select are passed over by their keys before they're decoded,
+    // by the workers' chunks: `KeyedFill`.)
+    let keyset = keys.flatten().map(|k| Arc::new(k.ready()));
     if super::pgstat::scan_counts(ctx) {
         for &(ix, rows) in &counted {
             super::pgstat::count_index_scan(ctx, ix);
@@ -2125,6 +2167,7 @@ fn dense_bitmap_scan(
         batch: FETCH_BATCH_MIN,
         ios_cols: None,
         am: None,
+        keyset,
     })))
 }
 
@@ -2677,6 +2720,9 @@ struct ScanNode {
     /// An ordered scan of an index of a native access method (`ext::index_am`): the rows in
     /// its order.
     am: Option<Box<crate::ext::index_am::ScanState>>,
+    /// A dense bitmap heap scan's row keys (`dense_bitmap_scan`): its parallel chunks pass
+    /// over the rows of other keys unread (`KeyedFill`).
+    keyset: Option<Arc<super::parscan::KeySet>>,
 }
 
 /// Index scans rescanned in place (`ScanNode::rescan_index`), for tests.
@@ -5253,7 +5299,11 @@ impl ScanNode {
                     .windows(2)
                     .map(|w| {
                         let s = txn.scan_snap(&w[0], &w[1], &snap);
-                        super::parscan::fill_source(if toast.is_some() { s.raw() } else { s }, bulk)
+                        let s = if toast.is_some() { s.raw() } else { s };
+                        match &self.keyset {
+                            Some(k) => super::parscan::fill_source(super::parscan::KeyedFill::new(s, k.clone()), bulk),
+                            None => super::parscan::fill_source(s, bulk),
+                        }
                     })
                     .collect(),
             };
@@ -5980,7 +6030,9 @@ impl Node for ScanNode {
             batch,
             ios_cols,
             am: _,
+            keyset,
         } = self;
+        *keyset = None;
         // (One range's buffers stay for the restart to write its key into: `ranges_again`.)
         ranges.truncate(1);
         *cur_range = 0;
@@ -7250,6 +7302,7 @@ fn keyed_scan(s: &ScanPlan, plan: ScanPlan, ix: &Index, keys: Keys, ctx: &ExecCt
         batch: FETCH_BATCH_MIN,
         ios_cols: None,
         am: None,
+        keyset: None,
     })
 }
 
