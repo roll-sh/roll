@@ -21,7 +21,7 @@ enum Manager {
     Bare,
 }
 
-pub(crate) fn detect(tree: &dyn Tree, _: &Overrides) -> Result<Option<Draft>, Error> {
+pub(crate) fn detect(tree: &dyn Tree, o: &Overrides) -> Result<Option<Draft>, Error> {
     let requirements = text(tree, "requirements.txt");
     let pyproject = match text(tree, "pyproject.toml") {
         Some(t) => {
@@ -89,7 +89,11 @@ pub(crate) fn detect(tree: &dyn Tree, _: &Overrides) -> Result<Option<Draft>, Er
     );
 
     let mut extra: Option<&str> = None;
-    let site = mkdocs && !["django", "flask", "fastapi"].iter().any(|f| has(f));
+    // Only when nothing else says how it starts: an app keeping its docs' mkdocs.yml at its root
+    // is the app (a start set, a Procfile, an entry file or a server among its dependencies).
+    let server = ["django", "flask", "fastapi", "starlette", "litestar", "aiohttp", "sanic", "quart", "streamlit", "gunicorn", "uvicorn", "tornado", "bottle", "falcon"].iter().any(|f| has(f));
+    let entry = ["main.py", "app.py", "server.py", "manage.py", "Procfile"].into_iter().any(|f| tree.exists(f));
+    let site = mkdocs && !server && !entry && o.start.is_none();
     if site {
         notes.push("mkdocs.yml: a static MkDocs site, built into site".into());
         if !has("mkdocs") {
