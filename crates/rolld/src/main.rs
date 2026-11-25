@@ -684,6 +684,8 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     // members who could branch it reach the copy, and no other project gains it.
     if let Some(s) = &search {
         s.control.on_branch(search::home_branches(workspace.clone()));
+        // A branch is made only in its parent's project: search checks a request's against it.
+        s.control.set_home_of(search::home_of(workspace.clone()));
         // A home hands a cluster to its project; a project home to clusters isn't deleted.
         search::members(&s.control, &workspace);
         // A remote link works only while whoever linked it may still administer its target, as
