@@ -535,7 +535,7 @@ async fn note_crop(AxState(e): S, Path((id, note)): Path<(String, String)>) -> c
     check_id(&id)?;
     e.store.row(&id)?;
     let (png, seen) = e.store.note_crop(&id, &note)?.ok_or_else(|| Error::NotFound("no picture of that note's element yet".into()))?;
-    let mut resp = ([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "private, max-age=3600")], png).into_response();
+    let mut resp = picture(&e, &id, png, "private, max-age=3600");
     // Taken as its reviewer saw it: how (`390x844, after 2 steps`).
     if let Some(v) = seen.and_then(|s| axum::http::HeaderValue::from_str(&s).ok()) {
         resp.headers_mut().insert(axum::http::HeaderName::from_static("x-roll-crop-as"), v);
@@ -558,23 +558,28 @@ async fn resolve_note(AxState(e): S, Path((id, note)): Path<(String, String)>, w
 /// The mail the preview's services sent, caught (newest first; the last 50).
 async fn mails(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<serde_json::Value>> {
     check_id(&id)?;
+    let (e2, id2) = (e.clone(), id.clone());
     let mail = blocking(e, move |e| {
         e.store.row(&id)?;
         e.store.mails(&id)
     })
     .await?;
-    Ok(Json(serde_json::json!({ "mail": mail })))
+    let mut v = serde_json::json!({ "mail": mail });
+    // A fork's mail is its code's words: who it's from and to, and its subject (MCP's lockdown).
+    mark_outside(&e2, &id2, &mut v, Some("mail"));
+    Ok(Json(v))
 }
 
 /// One caught message as it was sent (`message/rfc822`, shown as text, never rendered).
 async fn mail_raw(AxState(e): S, Path((id, mail)): Path<(String, String)>) -> crate::Result<Response> {
     check_id(&id)?;
+    let (e2, id2) = (e.clone(), id.clone());
     let raw = blocking(e, move |e| {
         e.store.row(&id)?;
         e.store.mail_raw(&id, &mail)?.ok_or_else(|| Error::NotFound("no such mail".into()))
     })
     .await?;
-    Ok((
+    let resp = (
         [
             (axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8"),
             (axum::http::header::CONTENT_DISPOSITION, "inline"),
@@ -582,7 +587,9 @@ async fn mail_raw(AxState(e): S, Path((id, mail)): Path<(String, String)>) -> cr
         ],
         raw,
     )
-        .into_response())
+        .into_response();
+    // A fork's mail is its code's words (MCP's lockdown).
+    Ok(outside_if_untrusted(&e2, &id2, resp))
 }
 
 /// Each data branch's connection (its own credentials), to query what the preview sees.
@@ -643,6 +650,7 @@ async fn screenshot(AxState(e): S, Path(id): Path<String>, Query(q): Query<std::
         Some(d @ ("base" | "previous")) => Some(d == "base"),
         Some(v) => return Err(Error::BadRequest(format!("diff: base or previous, not {v:?}"))),
     };
+    let (e2, id2) = (e.clone(), id.clone());
     let png = blocking(e, move |e| {
         let shot = |base: bool, previous: bool| -> crate::Result<Option<Vec<u8>>> {
             // `base=1`: the default branch's preview's, the one this was compared with (at the
@@ -669,7 +677,7 @@ async fn screenshot(AxState(e): S, Path(id): Path<String>, Query(q): Query<std::
     })
     .await?;
     match png.filter(|png| !png.is_empty()) {
-        Some(png) => Ok(([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "private, no-store")], png).into_response()),
+        Some(png) => Ok(picture(&e2, &id2, png, "private, no-store")),
         None => Err(Error::NotFound(if previous { "the preview has no earlier screenshot" } else { "the preview has no screenshot" }.into())),
     }
 }
@@ -844,7 +852,11 @@ async fn error_count(AxState(e): S, Path(id): Path<String>, Query(q): Query<Erro
 
 async fn requests(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Value>> {
     check_id(&id)?;
-    Ok(Json(json!({ "requests": e.requests(&id).await? })))
+    let mut v = json!({ "requests": e.requests(&id).await? });
+    // A fork's page asks for whatever paths its code chooses, in roll's own browser too (MCP's
+    // lockdown, as its routes).
+    mark_outside(&e, &id, &mut v, Some("requests"));
+    Ok(Json(v))
 }
 
 /// A service's last lines; with `follow`, server-sent events: `event: service` (its name), then
@@ -1023,9 +1035,15 @@ struct BrowseQuery {
 }
 
 /// A look at one of the preview's data branches (its tables, or a table's first rows).
-async fn browse_data(AxState(e): S, Path((id, resource)): Path<(String, String)>, Query(q): Query<BrowseQuery>) -> crate::Result<Json<crate::Browse>> {
+async fn browse_data(AxState(e): S, Path((id, resource)): Path<(String, String)>, Query(q): Query<BrowseQuery>) -> crate::Result<Json<Value>> {
     check_id(&id)?;
-    Ok(Json(e.browse(&id, &resource, q.table.as_deref()).await?))
+    let browse = e.browse(&id, &resource, q.table.as_deref()).await?;
+    let mut v = serde_json::to_value(&browse).map_err(|err| Error::Internal(err.to_string()))?;
+    // A fork's data branch holds what its code wrote: table and column names and values (MCP's
+    // lockdown).
+    let key = matches!(browse, crate::Browse::Tables { .. }).then_some("tables");
+    mark_outside(&e, &id, &mut v, key);
+    Ok(Json(v))
 }
 
 #[derive(serde::Deserialize)]
@@ -1070,7 +1088,22 @@ async fn try_page(AxState(e): S, Path(id): Path<String>, Json(b): Json<TryBody>)
 async fn try_screenshot(AxState(e): S, Path((id, run)): Path<(String, String)>) -> crate::Result<Response> {
     check_id(&id)?;
     let png = e.try_screenshot(&id, &run)?;
-    Ok(([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "private, no-store")], png).into_response())
+    Ok(picture(&e, &id, png, "private, no-store"))
+}
+
+/// A picture of a preview's page: an untrusted preview's (a fork's) is its code's words too, so
+/// it says it's from outside (`x-roll-outside`), which MCP's lockdown keeps from a model, as
+/// `mark_outside` does for JSON.
+fn picture(e: &crate::Engine, id: &str, png: Vec<u8>, cache: &'static str) -> Response {
+    outside_if_untrusted(e, id, ([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, cache)], png).into_response())
+}
+
+/// An answer that isn't JSON (a picture, a caught mail) from an untrusted preview says so.
+fn outside_if_untrusted(e: &crate::Engine, id: &str, mut resp: Response) -> Response {
+    if e.store.row(id).is_ok_and(|r| !r.trusted) {
+        resp.headers_mut().insert(roll_auth::lockdown::OUTSIDE_HEADER, axum::http::HeaderValue::from_static("true"));
+    }
+    resp
 }
 
 #[derive(serde::Deserialize)]
@@ -1224,12 +1257,20 @@ async fn logs(AxState(e): S, Path(id): Path<String>, Query(q): Query<LogsQuery>)
 
 async fn activity(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Value>> {
     check_id(&id)?;
-    blocking(e, move |e| {
+    let (e2, id2) = (e.clone(), id.clone());
+    let mut v = blocking(e, move |e| {
         e.store.row(&id)?;
         Ok(json!(e.store.activity(&id)?))
     })
-    .await
-    .map(Json)
+    .await?;
+    // A fork's activity quotes its code: the hosts it tried to reach, a failed build's first line
+    // (MCP's lockdown).
+    if e2.store.row(&id2).is_ok_and(|r| !r.trusted) {
+        for a in v.as_array_mut().into_iter().flatten() {
+            a["outside"] = json!(true);
+        }
+    }
+    Ok(Json(v))
 }
 
 async fn visitors(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Value>> {

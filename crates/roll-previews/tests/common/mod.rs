@@ -139,6 +139,8 @@ pub struct FakeData {
     pub branches: Mutex<HashSet<String>>,
     pub parents: HashSet<String>,
     pub made: AtomicUsize,
+    /// How many times a branch's usage was read.
+    pub usage_reads: AtomicUsize,
     pub fail_next: AtomicUsize,
     /// How many earlier-push copies to fail next.
     pub fail_snapshots: AtomicUsize,
@@ -165,6 +167,7 @@ impl FakeData {
             branches: Mutex::new(HashSet::new()),
             parents: parents.iter().map(|s| s.to_string()).collect(),
             made: AtomicUsize::new(0),
+            usage_reads: AtomicUsize::new(0),
             fail_next: AtomicUsize::new(0),
             fail_snapshots: AtomicUsize::new(0),
             fail_snapshot_deletes: AtomicUsize::new(0),
@@ -282,6 +285,7 @@ impl Brancher for FakeData {
         Ok(self.branches.lock().contains(&id).then_some(id))
     }
     async fn usage(&self, _parent: &str, _branch: &str) -> anyhow::Result<Usage> {
+        self.usage_reads.fetch_add(1, Ordering::SeqCst);
         Ok(Usage { bytes: 1 << 20, storage_usd_month: 0.001, active_usd_hour: 0.04, month_to_date_usd: 0.01 })
     }
 }
@@ -318,6 +322,8 @@ pub struct FakeApps {
     pub removed: Mutex<Vec<(String, String)>>,
     /// What each service uses, by name (unset: not running).
     pub metrics: Mutex<HashMap<String, (f64, u64)>>,
+    /// What roll apps billed each service's environment this month (None: roll runs it).
+    pub spent: Mutex<Option<f64>>,
     /// Each service's errors, by name.
     /// Each service's error groups, by `preview/service` or by service for every preview.
     pub errors: Mutex<HashMap<String, Vec<roll_previews::ErrorGroup>>>,
@@ -368,6 +374,10 @@ pub struct FakeApps {
     pub slept: Mutex<Vec<(String, String)>>,
     /// The PNG every screenshot is (unset: the backend can't take one), and the previews taken.
     pub shot: Mutex<Option<Vec<u8>>>,
+    /// What each screenshot run says it left out.
+    pub skipped: Mutex<roll_previews::Skipped>,
+    /// How long each screenshot run's containers ran.
+    pub container_ms: Mutex<u64>,
     /// The sign-in each screenshot run was asked for (`github.login`), by preview.
     pub logins: Mutex<Vec<(String, Option<roll_previews::ports::Login>)>>,
     /// What the screenshot's page logs as its first error.
@@ -444,6 +454,9 @@ impl Apps for FakeApps {
     }
     async fn metrics(&self, _: &str, service: &str) -> Option<(f64, u64)> {
         self.metrics.lock().get(service).copied()
+    }
+    async fn spent_usd(&self, _: &str, _: &str) -> Option<f64> {
+        *self.spent.lock()
     }
     async fn browser_checks(&self, _: &str, service: &str) -> Option<Vec<roll_previews::ports::BrowserCheckResult>> {
         self.browser.lock().get(service).cloned()
@@ -542,7 +555,7 @@ impl Apps for FakeApps {
         let login = opts.login.as_ref().map(|l| format!("signed in through {} before its pages", l.page));
         let crops = opts.crops.iter().filter(|c| c.selector != "#missing").map(|c| (c.note.clone(), png.clone())).collect();
         let health = self.page_says.lock().clone().map(|said| roll_previews::PageHealth { errors: 1, first_error: Some(said), failed: 0, first_failed: None, unstable: false });
-        Ok(Some(roll_previews::ports::Shot { png, speed: None, health, a11y: None, phone: None, pages, text: None, links: None, api, crops, bodies: self.served.lock().clone(), login }))
+        Ok(Some(roll_previews::ports::Shot { png, speed: None, health, a11y: None, phone: None, pages, text: None, links: None, api, crops, bodies: self.served.lock().clone(), login, skipped: self.skipped.lock().clone(), container_ms: *self.container_ms.lock() }))
     }
     async fn try_page(&self, _preview: &str, _service: &str, _path: &str, _steps: &[roll_previews::settings::Step], login: Option<&roll_previews::ports::Login>) -> anyhow::Result<Option<roll_previews::ports::Tried>> {
         self.try_logins.lock().push(login.cloned());
@@ -737,15 +750,20 @@ impl roll_previews::ports::Sealer for HexSealer {
 }
 
 pub fn env(settings: serde_json::Value) -> Env {
-    env_of(settings, false)
+    env_of(settings, false, |_| {})
+}
+
+/// [`env`] with the engine's config changed.
+pub fn env_with_config(settings: serde_json::Value, cfg: impl FnOnce(&mut Config)) -> Env {
+    env_of(settings, false, cfg)
 }
 
 /// [`env`] with a search cluster (`srch_logs`) in the project too.
 pub fn env_with_search(settings: serde_json::Value) -> Env {
-    env_of(settings, true)
+    env_of(settings, true, |_| {})
 }
 
-fn env_of(settings: serde_json::Value, with_search: bool) -> Env {
+fn env_of(settings: serde_json::Value, with_search: bool, cfg: impl FnOnce(&mut Config)) -> Env {
     let dir = tempfile::tempdir().unwrap();
     let ws = Arc::new(Workspace::open(&code_sql::Target::Sqlite(dir.path().join("ws.db")), Default::default()).unwrap());
     let p = ws.create("", "shop", "", None).unwrap();
@@ -768,8 +786,10 @@ fn env_of(settings: serde_json::Value, with_search: bool) -> Env {
     let search = FakeData::new(Kind::Search, &["srch_logs"]);
     let apps = Arc::new(FakeApps::default());
     let secrets = Arc::new(FakeSecrets::default());
+    let mut config = Config { domain: "preview.test".into(), otlp: Some("127.0.0.1:7070".into()), ..Config::default() };
+    cfg(&mut config);
     let engine = Engine::new(
-        Config { domain: "preview.test".into(), otlp: Some("127.0.0.1:7070".into()), ..Config::default() },
+        config,
         store,
         ws.clone(),
         code.clone(),

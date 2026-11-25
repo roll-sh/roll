@@ -373,7 +373,11 @@ impl Engine {
         // Signed in first, as the screenshots are (a trusted preview's `github.login`).
         let row = self.store.row(id)?;
         let (login, why_not) = self.run_login(&row).await;
-        let t = match self.apps.try_page(id, &svc, path, steps, login.as_ref()).await {
+        let started = std::time::Instant::now();
+        let tried = self.apps.try_page(id, &svc, path, steps, login.as_ref()).await;
+        // Its browser's time: the preview's cost, as a screenshot run's is.
+        let _ = self.store.add_run_usage(id, crate::runtime::BROWSER_GIB, started.elapsed().as_millis() as i64);
+        let t = match tried {
             Ok(Some(t)) => t,
             Ok(None) => return Err(Error::Conflict(format!("{svc} can't be driven here (a roll apps instance roll can't join: Fargate)"))),
             Err(e) => return Err(Error::Conflict(self.mask_text(id, &format!("{e:#}")).await?)),

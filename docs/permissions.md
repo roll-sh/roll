@@ -342,13 +342,13 @@ type Selector =
 type Product = "workspace" | "postgres" | "redis" | "storage" | "streams" | "nosql" | "queues"
   | "tasks" | "code" | "agents" | "secrets" | "apps" | "previews" | "search" | "observability"
   | "access";
-type Action = "read" | "write" | "delete" | "reveal" | "deploy" | "admin";
+type Action = "read" | "write" | "delete" | "reveal" | "deploy" | "admin" | "scan";
 ```
 
 ### Actions
 
 Every route is exactly one action on one product. Actions don't imply each other: `write` doesn't
-include `read`, and nothing includes `delete`, `reveal`, `deploy` or `admin`. The builder fills in
+include `read`, and nothing includes `delete`, `reveal`, `deploy`, `admin` or `scan`. The builder fills in
 the usual combinations, so this stays explicit without being tedious.
 
 | action | means | examples |
@@ -359,6 +359,7 @@ the usual combinations, so this stays explicit without being tedious.
 | `reveal` | see a credential or a secret value | connection strings with passwords, reset a password, API keys, storage access keys, secret values |
 | `deploy` | change production | land a change on a default branch, deploy, roll back or promote to production, bypass a merge queue |
 | `admin` | manage access and settings | IAM users and policies, API keys, stream ACLs, owner settings, webhooks, tokens (product `access`) |
+| `scan` | ask whether text holds a stored value, never see one | roll secrets' `POST …/scan` (a git server's pre-receive hook, docs/secrets.md): whole candidates of 16 characters or more only |
 
 A route whose effect depends on its body is classified from the body. Comments are stripped
 first, so they can't hide what runs, and anything that makes or changes credentials or privileges
@@ -479,7 +480,7 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   needs `reveal` allowed, or can use `POST …/keys`, which asks as any route does. The gate reads
   no console body.
 - A search API key (`POST /v1/search/clusters/{id}/keys`) is what the key may do: `reveal` when
-  its `access` is `read` or `append`, `delete` when it's `data` (its role deletes indices and sets
+  its `access` is `read`, `write` when it's `append` (it adds documents), `delete` when it's `data` (its role deletes indices and sets
   lifecycle policies), and `admin` when it's `admin` (the default, everything the cluster's own
   user may do, as the console is) or anything else. A new admin password (`POST …/password`) is
   `admin`. Both answer a credential, so search refuses them (403) to a grant that can't also
@@ -716,8 +717,12 @@ token's: the row, the resource, the rules. Making a project is the person's own
   (`Resolvers::owned_fn`; search's clusters), and the person's grant gets a rule with every action on
   each, by id.
 - A person's allowed request carries `roll_auth::Reach`: the same decision, asked about another
-  resource of the product by id, resolved the same way. search narrows lists and checks a remote
-  cluster with it.
+  resource of the product by id, resolved the same way. Asked about the route's own resource, it
+  answers the gate's decision there, its indices included: the request's actions and `read` are
+  allowed, anything else is decided on the same indices (a token limited to some indices of a
+  cluster reaches the cluster in them). search narrows lists and checks a remote cluster with it.
+- `POST /v1/access/check` decides a person's token as the gate does: held within their session,
+  and on what the request lends.
 - Session requests aren't access-log rows (they aren't a token's), allowed or refused: a refused
   session request leaves no audit row either, only its answer. Membership changes are
   (`product=workspace`: `member.invite`, `member.accept`, `member.role`, `member.remove`,
@@ -1136,6 +1141,34 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   revoked or left to end. It makes and changes no tokens (`403`): what it made would be a
   credential nobody set up. The product that minted it stops it with `Access::revoke_workload(id,
   why)` (its identity deleted): only a workload grant, with why and an audit row. Their requests are audited as any token's, and each mint is a row.
+- **Bootstrap tokens and machine credentials** (`crates/roll-access/src/store/bootstrap.rs`) are
+  secret zero for a machine with no platform identity (bare metal, on premises), as Akeyless'
+  Universal Identity and Vault's AppRole `secret_id` are. roll secrets' machine identities use them
+  (docs/secrets.md, "On a VM"); nothing else does.
+  - **A bootstrap token** (`rlbt_…`, `Access::mint_bootstrap`) is a workload grant with no rules:
+    single-use, 1 to 60 minutes, optionally bound to addresses (`ip_allow`), owned as a workload
+    token is (refused while its owner can't sign in). Its id names its **chain**.
+  - **Exchanging it** (`Access::redeem`) spends it and makes a **machine credential** (`rlmc_…`): a
+    workload grant with no rules either, of the chain, for 1 to 720 hours, bound to the bootstrap
+    token's addresses. The machine exchanges that credential the same way at half its life: the new
+    one is made and the old one spent in one write. A credential only logs its machine in
+    (`Access::present_machine`), and the token its login gets (`Access::mint_workload_via`) joins the
+    chain; that mint is refused once the credential isn't live, in the same write.
+  - **Neither opens anything at the gate**: their secrets are of their own kinds (`bootstrap`,
+    `machine`), which `Store::by_secret` never answers, so a request bearing one is a 401. Both carry
+    a checksum, are in `SECRET_PREFIXES` and are kept as their SHA-256 only, and every use is looked
+    up in the store: nothing is cached.
+  - **A spent one presented again ends the chain.** A spent secret is kept (`revoked_why = 'spent'`)
+    until it would have ended. Presenting it (a second exchange of a bootstrap token, a replaced
+    credential used to log in or to exchange) means a copy exists somewhere: every live grant of the
+    chain is revoked in the same write (the current credential and every login's token), whichever
+    side used the copy first. The audit log has a `reused` row (`decision: "revoke"`) and the
+    operator's feed a `secret_revoked` alert. A presentation from an address the grant isn't bound to,
+    of the wrong kind, or after it ended is refused and changes nothing.
+  - **Leaked**, either is revoked with its whole chain, as a token is (below).
+  - `Access::revoke_chain(chain, why)` ends a chain (roll secrets: the identity deleted, disabled or
+    cut off). Chains are listed with `?kind=workload`, and go a day after their last secret would
+    have ended.
 - `last_used_at` and `last_used_ip` are written at most once a minute per grant.
 
 ### Tighten to what it used

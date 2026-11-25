@@ -59,7 +59,6 @@ GET /v1/previews/{id}/files                                                    i
 PUT /v1/previews/{id}/files                                                    interactive (a shell, files, a forward): an admin's, live
 GET /v1/previews/{id}/forward                                                  interactive (a shell, files, a forward): an admin's, live
 GET /v1/previews/{id}/swap                                                     interactive (a laptop's process standing in for a service): an admin's, live
-GET /v1/previews/{id}/notes/{note}/crop                                        the dashboard's (a note's image)
 GET /v1/previews/{id}/qr.png                                                   the dashboard's (a QR code)
 POST /v1/previews/{id}/regressions/accept                                      a person's call (approving, accepting, cutting off)
 POST /v1/previews/{id}/shell/sessions                                          interactive (a shell, files, a forward): an admin's, live
@@ -112,6 +111,8 @@ PATCH /v1/secrets/projects/{project}/aws-users/{id}                            a
 POST /v1/secrets/projects/{project}/backup                                     a person's call: it seals every value to a recipient key the caller picks
 DELETE /v1/secrets/projects/{project}/backup/schedule                          a person's call: stopping a project's backups
 PUT /v1/secrets/projects/{project}/backup/schedule                             a person's call: it seals every value to a recipient key the caller picks
+GET /v1/secrets/projects/{project}/backup/latest                               a person's call: a sealed backup only its recipient's secret key opens (roll secrets backup verify)
+POST /v1/secrets/projects/{project}/backup/verify                              a person's call: it takes an opened backup, every value of the project in the clear
 POST /v1/secrets/projects/{project}/cas                                        an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/cas/{id}                                 an outside integration's setup: an admin's, with its credentials
 PATCH /v1/secrets/projects/{project}/cas/{id}/acme                             an outside integration's setup: an admin's, with its credentials
@@ -152,6 +153,7 @@ DELETE /v1/secrets/projects/{project}/github-apps/{id}                         a
 DELETE /v1/secrets/projects/{project}/identities/{id}                          an outside integration's setup: an admin's, with its credentials
 PATCH /v1/secrets/projects/{project}/identities/{id}                           an outside integration's setup: an admin's, with its credentials
 PUT /v1/secrets/projects/{project}/identities/{id}/jwks                        an outside integration's setup: an admin's, with its credentials
+POST /v1/secrets/projects/{project}/identities/{id}/bootstrap                  answers or sets a credential (a machine's bootstrap token)
 * /v1/secrets/projects/{project}/kms                                           an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/kubernetes                                 an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/kubernetes/{id}                          an outside integration's setup: an admin's, with its credentials
@@ -172,6 +174,7 @@ POST /v1/secrets/projects/{project}/public-certs                               a
 PATCH /v1/secrets/projects/{project}/public-certs/{id} an outside integration's setup: an admin's, with its credentials (a credential, a person's call)
 DELETE /v1/secrets/projects/{project}/public-certs/{id} an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/public-certs/{id}/revoke a person's call: takes a publicly trusted certificate back at the CA for good (a leaked key's is revoked by roll on its own)
+POST /v1/secrets/projects/{project}/scan                                       a scanner's (a git server's pre-receive hook, with a scan-only token); agents check text with secrets_scan
 POST /v1/secrets/projects/{project}/shares                                     answers or sets a credential
 POST /v1/secrets/projects/{project}/snowflake-accounts                         an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/snowflake-accounts/{id}                  an outside integration's setup: an admin's, with its credentials
@@ -221,6 +224,5 @@ GET /v1/workspace/projects/{id}/invites                                        a
 DELETE /v1/workspace/projects/{id}/invites/{invite}                            a person's call: invites are a signed-in person's (#501)
 DELETE /v1/workspace/projects/{id}/members/me                                  a person's call: leaving a project is the person's own (#501)
 GET /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files            raw bytes, not JSON: apps_sandbox_exec reads and writes files (cat, a heredoc)
-GET /v1/apps/services/{id}/environments/{env}/checks/{check}/screenshot        a PNG, not JSON: the check's state says its error and when its failure was kept
 GET /v1/apps/services/{id}/environments/{env}/checks/{check}/trace             a Playwright trace archive, not JSON: for `npx playwright show-trace`
 PUT /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files            raw bytes, not JSON: apps_sandbox_exec reads and writes files (cat, a heredoc)

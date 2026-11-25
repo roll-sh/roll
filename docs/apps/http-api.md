@@ -275,7 +275,7 @@ type Build = {
    *  (`opentelemetry-distro`, bootstrapped, by PYTHONPATH's sitecustomize), the JVM's (Java,
    *  Scala, Clojure: OpenTelemetry's Java agent, by JAVA_TOOL_OPTIONS' -javaagent) and .NET 8 and
    *  later's (its automatic instrumentation: the CORECLR_* profiler variables, unless the app
-   *  names a profiler of its own, and DOTNET_STARTUP_HOOKS), pinned and checksummed; started only
+   *  names a profiler of its own or sets CORECLR_ENABLE_PROFILING, and DOTNET_STARTUP_HOOKS), pinned and checksummed; started only
    *  while the environment's traces are on, joined to the app's own value; the plan's `otel`
    *  says which. None in the tree's own Dockerfile or another language (a note says so). */
   otel?: boolean;
@@ -293,7 +293,7 @@ type Run = {
                             // non-zero exit fails the deploy; the old one keeps serving
   schedule?: string;        // cron: five fields, in `timezone` (UTC when unset)
   timezone?: string;        // cron: an IANA zone (Europe/Budapest), its daylight saving kept; 400 for an unknown one
-  timeout_s?: number;       // cron: a run's limit (default 3600); web: a request's time to its answer's head, 1–3600, then a 504 (unset: no limit; upgrades and streams that began are the app's)
+  timeout_s?: number;       // cron: a run's limit (default 3600); web: a request's time to its answer's head, 1–3600, then a 504 (unset: 300, Cloud Run's default; upgrades and streams that began are the app's)
   retries?: number;         // cron: a failed or timed-out run is tried again this many times (0–5), after 30 s, then twice as long each time (10 min at most); each try its own run, `cron.failed` only for the last (a canceled run isn't tried again)
   min_instances: number;    // web: 0 scales to zero (default 0); worker: at least 1
   max_instances: number;    // default 3
@@ -764,7 +764,7 @@ type Plan = {
   source_maps?: boolean;
 };
 
-/** Wired on a node today: postgres (DATABASE_URL), redis (REDIS_URL, REDIS_REST_URL/TOKEN) and search. */
+/** Wired on a node today: postgres (DATABASE_URL and its parts: PGHOST, PGPORT, PGUSER, PGPASSWORD, PGDATABASE, PGOPTIONS, PGSSLMODE), redis (REDIS_URL, REDIS_REST_URL/TOKEN) and search. */
 type LinkKind = "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql" | "search" | "service" | "tasks";
 type Link = { kind: LinkKind; ref: string; prefix: string; vars: string[]; indices?: string[] /* a search link's key's indices */; access?: "read" | "append" };
 // `search`: `ref` is a roll search cluster (id or name). The link makes a data-only credential of

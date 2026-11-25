@@ -51,7 +51,7 @@ const HOLD_MS: i64 = 5 * 60_000;
 /// How long a failed push waits before the sweeper tries it again.
 const RETRY_MS: i64 = 5 * 60_000;
 /// Syncs a project may have.
-const PER_PROJECT: i64 = 50;
+pub(crate) const PER_PROJECT: i64 = 50;
 /// Pushes one sweep makes (the rest wait for the next one).
 const PER_SWEEP: usize = 20;
 /// How many syncs a sweep claims for checking at a time.
@@ -351,7 +351,7 @@ fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
 }
 
 /// The associated data of a sync's signing secret.
-fn secret_aad(project: &str, id: &str) -> String {
+pub(crate) fn secret_aad(project: &str, id: &str) -> String {
     format!("roll-secrets:sync:{project}:{id}")
 }
 
@@ -668,6 +668,9 @@ impl Secrets {
         } else if !caller.allows(Action::Admin, &scope) {
             caller.need(self.sync_needs(&r.info.kind), &scope)?;
         }
+        // One restored from a backup has no maker: whoever resumes it (an admin, as it's paused
+        // with a reason) becomes it (backup.rs).
+        let maker = if !change.paused && r.info.created_by.is_empty() { self.maker_of(caller)? } else { String::new() };
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             let what = match change.paused {
@@ -676,7 +679,7 @@ impl Secrets {
                     "paused"
                 }
                 false => {
-                    c.execute("UPDATE syncs SET paused_at = NULL, paused_why = NULL, checked_at = NULL, retry_at = 0 WHERE id = ?", [id])?;
+                    c.execute("UPDATE syncs SET paused_at = NULL, paused_why = NULL, checked_at = NULL, retry_at = 0, created_by = CASE WHEN created_by = '' THEN ? ELSE created_by END WHERE id = ?", params![maker, id])?;
                     "resumed"
                 }
             };

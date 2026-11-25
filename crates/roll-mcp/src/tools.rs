@@ -201,6 +201,23 @@ impl Tool {
         &PREPARED[self.name].definition
     }
 
+    /// What a call of it could need a person for ([`AskScope`]).
+    pub fn ask_scope(&self) -> &'static AskScope {
+        &PREPARED[self.name].asks
+    }
+
+    /// Built while [`PREPARED`] is (so from `find_actions`, never `actions`, which reads it).
+    fn find_asks(&self) -> AskScope {
+        let Some(found) = catalog::by_path(self.method, &self.sample_path()) else { return AskScope::default() };
+        let row = found.row;
+        // A body decides it (a `build` makes an apps write a deploy, SQL can be admin): any action.
+        let mut actions = if matches!(row.act, catalog::Act::Body(_) | catalog::Act::Raw(_)) && self.fixed.is_none() { Action::ALL.to_vec() } else { self.find_actions() };
+        if row.admin_if_field.is_some() && !actions.contains(&Action::Admin) {
+            actions.push(Action::Admin);
+        }
+        AskScope { actions, others: row.lends.is_some() || row.copies_from.is_some() }
+    }
+
     fn find_actions(&self) -> Vec<Action> {
         let Some(found) = catalog::by_path(self.method, &self.sample_path()) else { return Vec::new() };
         match found.row.act {
@@ -311,10 +328,13 @@ impl Tool {
                 }
                 continue;
             };
-            // An optional one left empty is no choice, as its routes read it (some clients fill every
-            // field they have).
+            // An optional one left empty is left out (some clients fill every field they have; most
+            // routes refuse an empty value rather than reading it as none).
+            if matches!(p.ty, Ty::Choice(_)) && !p.required && v.as_str() == Some("") {
+                continue;
+            }
             if let Ty::Choice(values) = p.ty
-                && !v.as_str().is_some_and(|s| values.contains(&s) || (s.is_empty() && !p.required))
+                && !v.as_str().is_some_and(|s| values.contains(&s))
             {
                 return Err(format!("{}: {} is one of {} (not {v})", self.name, p.name, values.join(", ")));
             }
@@ -449,7 +469,7 @@ fn apps_area(method: &str, path: &str) -> Area {
         ["services", "environments", "deploys", "source" | "output"] => "observe",
         ["services"] | ["services", "environments"] | ["projects", "services"] => "configure",
         ["services", "environments", s, ..] => match *s {
-            "analytics" | "app-metrics" | "errors" | "logs" | "metrics" | "routes" | "slo" | "traces" | "usage" | "vitals" | "push" | "fetch" | "advice" => "observe",
+            "analytics" | "app-metrics" | "errors" | "logs" | "metrics" | "routes" | "slo" | "traces" | "usage" | "vitals" | "push" | "fetch" | "advice" | "checks" => "observe",
             "deploys" | "promote" | "redeploy" | "rollback" | "pending" | "diff" | "jobs" | "runs" | "restart" | "sleep" | "wake" | "instances" | "cache" | "sandboxes" => "deploy",
             "private-network" => "configure",
             "visitors" if read => "observe",
@@ -501,6 +521,15 @@ const IDEMPOTENCY: P = P { name: "idempotency_key", ty: Ty::Str, at: At::Header(
 /// binds the header into its approval), audited by roll apps as `freeze.overridden`.
 const OVERRIDE: P = P { name: "override", ty: Ty::Bool, at: At::Header("x-roll-override"), required: false, desc: "Go past the environment's deploy freeze: an admin's call (a token that may only deploy can't), audited" };
 const IN_PROJECT: P = P { name: "workspace_project", ty: Ty::Str, at: At::Header("x-roll-project"), required: false, desc: "Workspace project (prj_…) to put the new resource in" };
+
+/// What a call of a tool could need a person for: the actions its route can be decided as (every
+/// one where its body decides), and whether it reaches another product's resources too (what it
+/// lends or copies from), whose rules and policy can ask as well.
+#[derive(Clone, Debug, Default)]
+pub struct AskScope {
+    pub actions: Vec<Action>,
+    pub others: bool,
+}
 
 const fn t(name: &'static str, title: &'static str, description: &'static str, product: &'static str, method: &'static str, path: &'static str, params: &'static [P]) -> Tool {
     Tool { name, title, description, product, method, path, params, fixed: None, wrap: None, hint: Hint::Auto, until: None, outside: &[], published: false, open_world: false, bodiless: false, one_of: &[] }
@@ -757,7 +786,7 @@ static TOOLS: &[Tool] = &[
         "/v1/access/requests",
         &[
             breq("product", Ty::Str, "The product, e.g. postgres, apps, secrets"),
-            breq("action", Ty::Choice(&["read", "write", "delete", "reveal", "deploy", "admin"]), "The action asked for"),
+            breq("action", Ty::Choice(&["read", "write", "delete", "reveal", "deploy", "admin", "scan"]), "The action asked for"),
             b("resource", Ty::Str, "One resource's id (every resource of the product when left out)"),
             b("environment", Ty::Str, "Only in this environment"),
             b("path", Ty::Str, "Only under this folder"),
@@ -1151,7 +1180,7 @@ static TOOLS: &[Tool] = &[
     t(
         "search_create_cluster",
         "Create a search cluster",
-        "A new Elasticsearch-compatible cluster (or a branch of one with parent, at a time with at). Its password comes back once, to tokens that may reveal.",
+        "A new Elasticsearch-compatible cluster (or a branch of one with parent, at a time with at; a branch goes in its parent's project, so name no other project for it). Its password comes back once, to tokens that may reveal.",
         "search",
         "POST",
         "/v1/search/clusters",
@@ -1162,7 +1191,8 @@ static TOOLS: &[Tool] = &[
     t("search_overview", "roll search here", "What roll search offers here: versions, the endpoint, defaults, the history window and pricing.", "search", "GET", "/v1/search", &[]),
     t("search_unlink_remote", "Unlink a remote cluster", "Stop a cluster searching another (alias:index): the remote's settings and credentials go, and a cross-cluster key roll made for it is revoked. Linking one stays the cluster admin's (no tool).", "search", "DELETE", "/v1/search/clusters/{cluster}/remotes/{alias}", &[req("cluster", "Cluster id or name"), req("alias", "The remote's alias")]).destructive(),
     t("search_revoke_key", "Revoke a cluster API key", "Revoke one of a cluster's API keys at once (404 once it's gone; on a deleted cluster the revoke is applied by its restore). Making one answers a credential, so it has no tool.", "search", "DELETE", "/v1/search/clusters/{cluster}/keys/{key}", &[req("cluster", "Cluster id or name"), req("key", "The API key's id")]).destructive(),
-    t("search_list_browser_keys", "List a cluster's browser keys", "The keys a cluster gave web pages for search from the browser that still work, newest first: name, the indices or search application each may read, its filter, rate limit and when it expires (never the key). Making one answers a credential, so it has no tool.", "search", "GET", "/v1/search/clusters/{cluster}/browser-keys", &[req("cluster", "Cluster id or name")]),
+    t("search_list_browser_keys", "List a cluster's browser keys", "The keys a cluster gave web pages for search from the browser (a site's search box) that still work, newest first: name, the indices or search application each may read, its filter, rate limit and when it expires (never the key). Making one answers a credential, so it has no tool.", "search", "GET", "/v1/search/clusters/{cluster}/browser-keys", &[req("cluster", "Cluster id or name")]),
+    t("search_browser_key_usage", "Browser key usage", "One browser key's requests, 429s by reason (key_rate, address_rate, user_rate, concurrency, cluster_ceiling) and other refusals (origin, policy, body_too_large, invalid_key) over window 1h, 24h (default) or 14d, with a derived key's top users and the top refused origins: tells a broken page, a scraper or a limit set too low apart.", "search", "GET", "/v1/search/clusters/{cluster}/browser-keys/{key}/usage", &[req("cluster", "Cluster id or name"), req("key", "Browser key id (from search_list_browser_keys)"), q("window", Ty::Choice(&["1h", "24h", "14d"]), "How far back")]),
     t("search_revoke_browser_key", "Revoke a browser key", "Revoke one of a cluster's browser keys at once: pages shipping it stop getting answers (on a deleted cluster the revoke is applied by its restore).", "search", "DELETE", "/v1/search/clusters/{cluster}/browser-keys/{key}", &[req("cluster", "Cluster id or name"), req("key", "Browser key id (from search_list_browser_keys)")]),
     t("search_list_inference_secrets", "Inference endpoints keyed by a roll secret", "A cluster's inference endpoints whose API key comes from a roll secret, with the project and key each follows (a rotated value reaches the endpoint within seconds; never the value), and the projects whose secrets it could use.", "search", "GET", "/v1/search/clusters/{cluster}/inference/secrets", &[req("cluster", "Cluster id or name")]),
     t("search_branch_cluster", "Branch a search cluster", "A copy-on-write branch of a cluster, now or at a time within its history.", "search", "POST", "/v1/search/clusters/{cluster}/branches", &[req("cluster", "Cluster id or name"), breq("name", Ty::Str, "Branch name"), b("at", Ty::Int, "Unix seconds")]),
@@ -1565,6 +1595,7 @@ static TOOLS: &[Tool] = &[
     t("apps_route_stats", "Route stats", "An environment's routes from its access log over the last minutes (5-60, default 60): requests, 5xx and 4xx errors, p50/p95/max latency per route (ids folded as :id), the busiest, most failing and slowest 50 of each. Start here when a service is slow or failing.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/routes", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back, 5-60 (default 60)")]),
     t("apps_errors", "Errors: why a service is failing", "An environment's errors over the last minutes (5-10080, default 1440), grouped (the same error once, with its count, first and last seen and a sample), the most frequent first, at most 50. Start here when a service is failing or erroring.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/errors", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back, 5-10080 (default 1440)")]),
     t("apps_push_status", "Stream push status", "An environment's run.push rules as they stand: each one's lag (records not yet delivered), delivered and dead-lettered counts, the last delivery, and failing_since and last_error when it's failing, or why nothing is delivered (off). Why a pushed stream is behind.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/push", &[SERVICE, ENV]),
+    t("apps_check_screenshot", "A browser check's failure, as it looked", "The page as it looked when an environment's browser check last failed (its check_states' failure_at says one is kept), as an image you can look at: for when the check's error doesn't show what broke. 404 when none is kept.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/checks/{check}/screenshot", &[SERVICE, ENV, req("check", "The browser check's name")]),
     t("apps_set_error_state", "Resolve, mute or reopen an error", "Triage an error group (its fingerprint from apps_errors): resolved goes quiet until it's seen again, which reopens it as a regression naming the deploy it came back in; muted stays quiet; open reopens it.", "apps", "PATCH", "/v1/apps/services/{service}/environments/{env}/errors/{fingerprint}", &[SERVICE, ENV, req("fingerprint", "The error group's fingerprint"), breq("state", Ty::Choice(&["open", "resolved", "muted"]), "The error's new state")]),
     t("apps_rotate_config", "Rotate the runtime config's address", "Give an environment's runtime config a new read token (a leaked ROLL_CONFIG_URL): the old address reads until a deploy made after the rotation is live, so redeploy to finish it. 409 while the last rotation's old address still reads.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/config/rotate", &[SERVICE, ENV]).destructive(),
     t("apps_traces", "Traces of slow requests", "An environment's recent traces (traces on), newest first, at most 100: each one's root span, service, duration, span count and whether any span failed; min_ms keeps the slow ones. apps_get_trace has one's spans.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/traces", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back (default 60)"), q("min_ms", Ty::Int, "Only traces at least this slow")]),
@@ -1737,6 +1768,7 @@ static TOOLS: &[Tool] = &[
     t("previews_list_mail", "A preview's mail (the emails it sent)", "The mail a preview's services sent, caught and never delivered: who to, subject, when (for checking a sign-up or receipt flow). It can hold production's data: reveal.", "previews", "GET", "/v1/previews/{id}/mail", &[req("id", "Preview id")]),
     t("previews_read_mail", "Read a preview's mail", "One caught message as text.", "previews", "GET", "/v1/previews/{id}/mail/{mail}", &[req("id", "Preview id"), req("mail", "Message id from previews_list_mail")]),
     t("previews_list_notes", "A preview's notes", "Notes people left on a preview's pages through its feedback button and nobody has resolved yet: page, element, what they said, who, when (the latest 500).", "previews", "GET", "/v1/previews/{id}/notes", &[req("id", "Preview id")]),
+    t("previews_note_crop", "A note's element, as its reviewer saw it", "The picture of the element a preview note is about, cropped from the page by roll's own browser at the reviewer's viewport after their last steps (previews_list_notes says crop and crop_as when there's one), as an image you can look at: what the note means by \"this\". 404 until a screenshot run has taken it.", "previews", "GET", "/v1/previews/{id}/notes/{note}/crop", &[req("id", "Preview id"), req("note", "Note id from previews_list_notes")]),
     t("previews_resolve_note", "Resolve a preview note", "Mark a note left on a preview page's feedback button as dealt with, so the page stops listing it (after fixing what it asked).", "previews", "POST", "/v1/previews/{id}/notes/{note}/resolve", &[req("id", "Preview id"), req("note", "Note id from previews_list_notes")]),
     t("previews_screenshot", "Screenshot a preview", "A preview's page as an image the agent can look at; diff against the base or the previous deploy, another page, or the phone view.", "previews", "GET", "/v1/previews/{id}/screenshot", &[req("id", "Preview id"), q("diff", Ty::Choice(&["base", "previous"]), "Highlight what changed against the base or the previous deploy"), q("page", Ty::Str, "Path of the page (default /)"), q("view", Ty::Str, "phone for a phone-sized view")]),
     t("previews_fetch", "Read a preview's page", "One page of a preview's service read through roll, as a visitor gets it, without making a share link: its status, a few headers (content-type, location, cache-control, content-length) and its text, masked as the preview's logs are (null when it isn't text, cut at 256 KiB with truncated). For checking what a change does to a page or an API answer; head for the status alone. A roll apps service is read through roll apps' own proxy as a visitor with the preview's link (a team-only preview's answers its 401 as the status). A page can show copies of production's people: reveal.", "previews", "GET", "/v1/previews/{id}/fetch", &[req("id", "Preview id"), qreq("path", "The page's path, from / (up to 200 characters; no #, quotes or spaces)"), q("service", Ty::Str, "Which of the preview's services (default: its first)"), q("head", Ty::Bool, "Only the status and headers (HEAD)")]),
@@ -1811,13 +1843,14 @@ pub fn all() -> &'static [Tool] {
 /// every tool, on every `tools/list`, cost ~43 ms a call with every product on.
 struct Prepared {
     actions: Vec<Action>,
+    asks: AskScope,
     open: bool,
     within: bool,
     definition: Value,
 }
 
 static PREPARED: std::sync::LazyLock<std::collections::HashMap<&'static str, Prepared>> = std::sync::LazyLock::new(|| {
-    TOOLS.iter().map(|t| (t.name, Prepared { actions: t.find_actions(), open: t.find_open(), within: t.find_within(), definition: t.build_definition() })).collect()
+    TOOLS.iter().map(|t| (t.name, Prepared { actions: t.find_actions(), asks: t.find_asks(), open: t.find_open(), within: t.find_within(), definition: t.build_definition() })).collect()
 });
 
 #[cfg(test)]
@@ -1845,7 +1878,8 @@ mod tests {
         assert!(call("abort").is_ok());
         assert!(call("").is_err(), "a required choice can't be empty");
         let vulns = super::all().iter().find(|t| t.name == "apps_deploy_vulnerabilities").unwrap();
-        assert!(vulns.request(&serde_json::json!({ "service": "svc_1", "env": "production", "deploy": "dpl_1", "severity": "" })).is_ok(), "an optional one may be");
+        let empty = vulns.request(&serde_json::json!({ "service": "svc_1", "env": "production", "deploy": "dpl_1", "severity": "" })).unwrap();
+        assert!(!empty.uri.contains("severity"), "an optional one left empty is left out: {}", empty.uri);
     }
 
     /// A choice copies its set from the product that takes it: a value the product adds has to
@@ -1924,6 +1958,7 @@ mod tests {
             ("search_create_cluster", "flavor", flavors.clone()),
             ("search_update_cluster", "flavor", flavors),
             ("search_cluster_metrics", "range", keys(between(include_str!("../../search-control/src/control.rs"), "impl MetricsRange {", "\n}\n"))),
+            ("search_browser_key_usage", "window", keys(between(include_str!("../../search-control/src/control.rs"), "impl MetricsRange {", "\n}\n"))),
             ("search_analytics", "range", keys(between(include_str!("../../search-control/src/analytics.rs"), "impl Range {", "\n}\n"))),
             ("secrets_create_environment", "kind", envs.clone()),
             ("secrets_ensure_environment", "kind", envs),
@@ -1960,6 +1995,20 @@ mod tests {
         // Every choice is read from its product: a new one joins the list above.
         let unread: Vec<String> = super::all().iter().flat_map(|t| t.params.iter().filter(|p| matches!(p.ty, Ty::Choice(_)) && !covered.contains(&(t.name, p.name))).map(move |p| format!("{}.{}", t.name, p.name))).collect();
         assert!(unread.is_empty(), "choices not read from their product here: {unread:?}");
+    }
+
+    /// Whether a call can wait for a person is judged on everything it can be decided as: a body
+    /// that decides (a `build` makes an apps update a deploy) counts every action, a field that
+    /// makes it admin counts admin, and what it lends from another product (a link to a Postgres
+    /// database) counts that product's rules too. Its listed actions alone missed both.
+    #[test]
+    fn a_call_that_can_wait_is_judged_on_all_it_can_be() {
+        let scope = |n: &str| super::all().iter().find(|t| t.name == n).unwrap().ask_scope().clone();
+        let update = scope("apps_update_service");
+        assert!(update.actions.contains(&Action::Deploy) && !super::all().iter().find(|t| t.name == "apps_update_service").unwrap().actions().contains(&Action::Deploy), "{update:?}");
+        assert!(scope("apps_link").others, "a link lends another product's resource");
+        let plain = scope("postgres_list_projects");
+        assert_eq!((plain.actions.as_slice(), plain.others), (&[Action::Read][..], false));
     }
 
     /// `secrets_list_saas` names every vendor roll secrets rotates for: the list is prose, and new
@@ -2474,5 +2523,54 @@ mod tests {
         }
         dangling.dedup();
         assert!(dangling.is_empty(), "these name tools roll doesn't have: {dangling:?}");
+    }
+
+    /// Every previews tool says whether its answer holds what a fork's code wrote, which roll
+    /// previews marks outside for an untrusted preview (`mark_outside`, `outside_if_untrusted`)
+    /// so lockdown withholds it, or why it holds none. Pictures, caught mail, a data branch's
+    /// rows, request paths and activity had each reached a model in lockdown unmarked.
+    #[test]
+    fn every_previews_tool_says_whether_it_holds_a_forks_words() {
+        // Marked in roll previews' api.rs (`a_forks_preview_and_its_errors_are_marked_outside`).
+        const FORK_WORDS: &[&str] = &[
+            // The preview itself (`outside: !trusted`: its title is the fork's pull request's).
+            "previews_list", "previews_get", "previews_wait", "previews_create",
+            "previews_errors", "previews_traces", "previews_get_trace", "previews_routes", "previews_logs", "previews_requests", "previews_activity",
+            "previews_list_mail", "previews_read_mail", "previews_screenshot", "previews_fetch", "previews_try", "previews_try_screenshot", "previews_note_crop", "previews_tables",
+            // A share link's guests' notes (`by` `guest:…`).
+            "previews_list_notes",
+        ];
+        const NONE: &[(&str, &str)] = &[
+            ("previews_refresh", "roll's state of it"),
+            ("previews_keep", "roll's state of it"),
+            ("previews_sleep", "roll's state of it"),
+            ("previews_wake", "roll's state of it"),
+            ("previews_delete", "roll's state of it"),
+            ("previews_reset", "roll's state of it"),
+            ("previews_share", "a link people made"),
+            ("previews_set_rules", "the project's settings"),
+            ("previews_metrics", "numbers"),
+            ("previews_usage", "costs"),
+            ("previews_mask_suggestions", "the project's own databases, not a branch"),
+            ("previews_list_shares", "links people made"),
+            ("previews_revoke_share", "a link people made"),
+            ("previews_env", "variables people set"),
+            ("previews_connect", "roll's connections to its branches"),
+            ("previews_resolve_note", "the note's id"),
+            ("previews_list_saved_data", "restore points people named"),
+            ("previews_save_data", "a restore point"),
+            ("previews_restore", "a restore point"),
+            ("previews_delete_saved_data", "a restore point"),
+            ("previews_settings", "the project's, from its default branch"),
+            ("previews_visitors", "who opened it"),
+            ("previews_list_hooks", "the project's"),
+            ("previews_delete_hook", "the project's"),
+        ];
+        let previews: Vec<&str> = all().iter().filter(|t| t.product == "previews").map(|t| t.name).collect();
+        let undecided: Vec<&&str> = previews.iter().filter(|n| !FORK_WORDS.contains(n) && !NONE.iter().any(|(t, _)| t == *n)).collect();
+        assert!(undecided.is_empty(), "say whether these answer what a fork's code wrote (mark it outside in roll previews and list it in FORK_WORDS) or why not (NONE): {undecided:?}");
+        for n in FORK_WORDS.iter().chain(NONE.iter().map(|(n, _)| n)) {
+            assert!(previews.contains(n), "{n} isn't a previews tool any more");
+        }
     }
 }

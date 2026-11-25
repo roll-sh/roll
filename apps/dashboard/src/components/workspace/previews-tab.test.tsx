@@ -6,6 +6,7 @@ import { appsApi } from "@/lib/apps-api";
 import { codeApi } from "@/lib/code-api";
 import { previewsApi, type Preview, type PreviewSettings } from "@/lib/previews-api";
 import type { WorkspaceProject } from "@/lib/workspace-api";
+import { NotePopup } from "./preview-feedback";
 import { ProjectPreviews } from "./previews";
 
 vi.mock("@/lib/previews-api", async (orig) => {
@@ -244,4 +245,20 @@ describe("the Previews tab", () => {
     expect(await screen.findByText(/This note is resolved/)).toBeInTheDocument();
     expect(done).toHaveBeenCalledOnce();
   });
+});
+
+// The preview page's button opens a small window of roll's: the note alone, posted on the change
+// as the person signed in, then the window closes (Vercel's comments post in place).
+it("posts a page's note from its own small window, then closes it", async () => {
+  api.get.mockResolvedValue(preview);
+  vi.mocked(codeApi.submitReview).mockResolvedValue({} as never);
+  const close = vi.fn();
+  render(
+    <MarkStateProvider>
+      <NotePopup preview="pv_abc" query="?preview=pv_abc&fb_path=%2Fcheckout&fb_selector=button.pay&fb_note=The+button+is+cut+off" close={close} />
+    </MarkStateProvider>,
+  );
+  await userEvent.click(await screen.findByRole("button", { name: "Post on the change" }));
+  expect(vi.mocked(codeApi.submitReview)).toHaveBeenCalledWith("chg_1", expect.objectContaining({ verdict: "comment", body: expect.stringContaining("The button is cut off") }));
+  await vi.waitFor(() => expect(close).toHaveBeenCalled(), { timeout: 3000 });
 });

@@ -10,6 +10,9 @@ pub struct Cost {
     pub active_usd_hour: f64,
     /// What it has cost since the start of the month (or since it was made).
     pub month_to_date_usd: f64,
+    /// Of that: its browsers' and jobs' containers (screenshot runs in every engine, Storybook's
+    /// stories, agents' runs, seed, release and teardown jobs), by their GiB-hours.
+    pub runs_usd: f64,
     /// Bytes its branches own.
     pub bytes: i64,
 }
@@ -36,6 +39,7 @@ impl Cost {
         self.sleeping_usd_month += o.sleeping_usd_month;
         self.active_usd_hour += o.active_usd_hour;
         self.month_to_date_usd += o.month_to_date_usd;
+        self.runs_usd += o.runs_usd;
         self.bytes += o.bytes;
     }
 
@@ -45,6 +49,7 @@ impl Cost {
         self.sleeping_usd_month = r(self.sleeping_usd_month);
         self.active_usd_hour = r(self.active_usd_hour);
         self.month_to_date_usd = r(self.month_to_date_usd);
+        self.runs_usd = r(self.runs_usd);
         self
     }
 }

@@ -176,7 +176,8 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
   the mappings naming it or its backend roles (wildcards, `and_backend_roles`); action groups
   expand to action patterns and `${user.name}`-style variables fill index patterns and DLS. The
   plugin's authorization: its 403 (`no permissions for [...] and User [...]`), the composite,
-  scroll and reindex actions checked as cluster actions, no narrowing of wildcards to permitted
+  scroll and reindex actions checked as cluster actions (then their items on their indices: a
+  reindex's search of its source and each of its writes), no narrowing of wildcards to permitted
   indices, `indices:admin/create` for writes that create an index, bulk items naming both
   actions, a by-query `refresh=true` refused after its writes, a plain `Unauthorized` 401.
   Document and field level security and masked fields (BLAKE2b with
@@ -1115,6 +1116,11 @@ Checked against Elasticsearch 9.5.5 (captures in
   document) are read as the caller, so one its filter hides is missing and hidden fields are left
   out; term vectors of a hidden document are `found: false`; `suggest` and `profile` are refused
   (400 `action_request_validation_exception`) where the caller's documents are restricted. A
+  `_reindex` is authorized as Elasticsearch authorizes it: its action by name (`write` on some
+  index), then its source searched as the caller (wildcards narrowed to what it may read, its
+  document and field level security applied, so only what it sees is copied) and each write
+  authorized as a bulk item at the index it goes to (a script's `_index` and `ctx.op = 'delete'`
+  too); a remote source is read with its own credentials. A
   stored result (async search, ES|QL, EQL, SQL, and SQL cursors) is its opener's (the API key, or
   the user and realm): anyone else gets 404 for it, its status and its delete (a cursor: unknown),
   except that `cancel_task` may delete it. One stored before owners were recorded is the
@@ -1682,7 +1688,10 @@ taken over by roll's crawler. Where roll's differs ([crawler.md](crawler.md)):
   `auth_origin` over https, never after a redirect to another origin; one per connector.
   `http_auth_allowed`, proxies and `domains[].auth` in the snippet aren't taken (the CLI import
   moves `auth` to the sealed fields).
-- **Not yet**: extraction rules (a snippet with any fails validation), XPath, incremental crawls
+- **Extraction rules** are Open Crawler's rulesets; `html` selectors are CSS Selectors Level 3
+  without `:has()`, states, pseudo-elements or escapes (each refused at validation), and a rule's
+  text is gathered as the body's is, not Jsoup's `text()`.
+- **Not yet**: XPath selectors, incremental crawls
   (an incremental job fails), binary content extraction (only `text/html` and
   `application/xhtml+xml` are indexed), `data-elastic-name` and `meta.elastic` beyond 100 fields a
   page, and `full_html` is the page as served, not Jsoup's re-serialisation. Pages are decoded as

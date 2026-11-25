@@ -48,6 +48,7 @@ impl IntoResponse for ControlError {
             ControlError::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             ControlError::Forbidden(_) => StatusCode::FORBIDDEN,
             ControlError::Busy(_) => StatusCode::TOO_MANY_REQUESTS,
+            ControlError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             ControlError::Internal(e) => {
                 tracing::warn!(error = %e, "search control error");
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -81,6 +82,7 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/browser-keys", get(browser_keys).post(create_browser_key))
         .route("/v1/search/clusters/{id}/browser-keys/{key}", axum::routing::delete(revoke_browser_key))
         .route("/v1/search/clusters/{id}/browser-keys/{key}/rotate", post(rotate_browser_key_secret))
+        .route("/v1/search/clusters/{id}/browser-keys/{key}/usage", get(browser_key_usage))
         .route("/v1/search/clusters/{id}/remotes", get(remotes))
         .route("/v1/search/clusters/{id}/remotes/{alias}", axum::routing::put(link_remote).delete(unlink_remote))
         .route("/v1/search/clusters/{id}/indices/{index}", get(index_get).put(index_create).delete(index_delete))
@@ -447,7 +449,7 @@ struct CreateReq {
     opts: ClusterOptions,
 }
 
-async fn create(State(c): State<AppState>, caller: Caller, method: Method, headers: HeaderMap, body: bytes::Bytes) -> Result<Response, ControlError> {
+async fn create(State(c): State<AppState>, caller: Caller, method: Method, headers: HeaderMap, ext: Extensions, body: bytes::Bytes) -> Result<Response, ControlError> {
     let r: CreateReq = serde_json::from_slice(&body).map_err(|e| ControlError::Invalid(format!("invalid request: {e}")))?;
     // A person's cluster is theirs as it's made. Made in a workspace project (`X-Roll-Project`),
     // the gate then makes the project its home, which hands it to the project (rolld's
@@ -458,6 +460,14 @@ async fn create(State(c): State<AppState>, caller: Caller, method: Method, heade
             // A branch is cut on the node holding the parent, which commits it first. It is the
             // parent owner's. Branching copies the parent's indices: it takes write there.
             let parent = caller.get_to(&c, p, roll_auth::scope::Action::Write).await?;
+            // A branch goes only in its parent's project (rolld puts it there): a project the
+            // request names (the gate puts a create there too) must be that one, or another
+            // project's members would reach a copy of this one's data.
+            if let Some(roll_auth::InProject(named)) = ext.get::<roll_auth::InProject>()
+                && c.home_of(&parent.id)?.as_deref() != Some(named.as_str())
+            {
+                return Err(ControlError::Invalid(format!("a branch of {} is made only in its parent's project: name that project in X-Roll-Project, or none", parent.name)));
+            }
             // The owner gets the parent checked here by its id: a cluster that took its name in
             // between is never branched in its place.
             let mut forwarded: Value = serde_json::from_slice(&body).map_err(|e| ControlError::Invalid(format!("invalid request: {e}")))?;
@@ -470,7 +480,7 @@ async fn create(State(c): State<AppState>, caller: Caller, method: Method, heade
             }
             let d = c.branch(&parent, &r.name, r.at, r.opts, caller.user(), caller.caps(&c)).await?;
             if !caller.is_all() {
-                c.branched(&parent, &d);
+                c.branched(&parent, &d).await?;
             }
             d
         }
@@ -513,7 +523,7 @@ async fn branch(State(c): State<AppState>, caller: Caller, Path(id): Path<String
     }
     let d = c.branch(&parent, &r.name, r.at, r.opts, caller.user(), caller.caps(&c)).await?;
     if !caller.is_all() {
-        c.branched(&parent, &d);
+        c.branched(&parent, &d).await?;
     }
     Ok(Json(view(&c, &caller, d, true).await?).into_response())
 }
@@ -901,7 +911,18 @@ async fn migrate(State(c): State<AppState>, Path(id): Path<String>, Json(b): Jso
 
 /// `GET /v1/search/clusters/{id}/browser-keys`: the keys web pages ship, without their secrets.
 async fn browser_keys(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
-    Ok(Json(json!({ "keys": c.browser_keys(&id).await? })))
+    Ok(Json(json!({ "keys": c.browser_keys_with_usage(&id).await? })))
+}
+
+#[derive(Deserialize)]
+struct BrowserUsageQuery {
+    window: Option<String>,
+}
+
+/// `GET /v1/search/clusters/{id}/browser-keys/{key}/usage?window=1h|24h|14d`: the key's requests,
+/// 429s and other refusals by reason over time, its top users and refused origins.
+async fn browser_key_usage(State(c): State<AppState>, Path((id, key)): Path<(String, String)>, Query(q): Query<BrowserUsageQuery>) -> ApiResult<Value> {
+    Ok(Json(c.browser_key_usage(&id, &key, q.window.as_deref().unwrap_or("24h")).await?))
 }
 
 /// `POST /v1/search/clusters/{id}/browser-keys`: a key a web page can ship (read-only, one

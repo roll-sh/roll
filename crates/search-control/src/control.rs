@@ -65,6 +65,9 @@ pub enum ControlError {
     /// Too much of something runs at once (HTTP 429): try again later.
     #[error("{0}")]
     Busy(String),
+    /// Something it depends on can't answer now (HTTP 503): try again.
+    #[error("{0}")]
+    Unavailable(String),
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -803,6 +806,8 @@ pub struct Control {
     secret_refs: Arc<crate::secret_refs::CatalogRefs>,
     /// Told of the branches people make ([`Control::on_branch`]).
     on_branch: OnceLock<OnBranch>,
+    /// The workspace project a cluster is at home in ([`Control::set_home_of`]).
+    home_of: OnceLock<HomeOf>,
     /// Told of each cluster purged for good ([`Control::on_purged`]).
     on_purged: OnceLock<OnPurged>,
     /// Told of each cluster that came back to life ([`Control::on_revived`]).
@@ -814,8 +819,12 @@ pub struct Control {
 /// Called with a purged cluster's id, once it's gone for good.
 pub type OnPurged = Box<dyn Fn(&str) + Send + Sync>;
 
-/// Called with a new branch's parent and the branch, once it's in the catalog.
-pub type OnBranch = Box<dyn Fn(&SearchCluster, &SearchCluster) + Send + Sync>;
+/// Called with a new branch's parent and the branch, once it's in the catalog; an error (why)
+/// undoes the branch ([`Control::branched`]).
+pub type OnBranch = Box<dyn Fn(&SearchCluster, &SearchCluster) -> std::result::Result<(), String> + Send + Sync>;
+
+/// The workspace project cluster `id` is at home in, if any; an error (why) when that can't be read.
+pub type HomeOf = Box<dyn Fn(&str) -> std::result::Result<Option<String>, String> + Send + Sync>;
 
 impl Control {
     pub async fn new(cfg: SearchConfig, objects: Objects) -> anyhow::Result<Arc<Self>> {
@@ -917,6 +926,7 @@ impl Control {
             leases: OnceLock::new(),
             secret_refs,
             on_branch: OnceLock::new(),
+            home_of: OnceLock::new(),
             on_purged: OnceLock::new(),
             on_revived: OnceLock::new(),
             link_makers: OnceLock::new(),
@@ -1038,6 +1048,21 @@ impl Control {
         let _ = self.on_branch.set(f);
     }
 
+    /// Where clusters are at home in the workspace (rolld), for a branch's project
+    /// ([`Control::home_of`]). Once.
+    pub fn set_home_of(&self, f: HomeOf) {
+        let _ = self.home_of.set(f);
+    }
+
+    /// The workspace project cluster `id` is at home in (none without a workspace); 503 when
+    /// that can't be read.
+    pub fn home_of(&self, id: &str) -> Result<Option<String>> {
+        match self.home_of.get() {
+            Some(f) => f(id).map_err(|e| ControlError::Unavailable(format!("can't tell which project search cluster {id} is in ({e}): try again"))),
+            None => Ok(None),
+        }
+    }
+
     /// Tell `f` of each cluster purged for good (rolld: its home and canvas places go, so nothing
     /// keeps a project's trust in it). A delete kept for restoring isn't a purge. Once.
     pub fn on_purged(&self, f: OnPurged) {
@@ -1059,10 +1084,15 @@ impl Control {
 
     /// A person made `branch` of `parent` through the API ([`Control::on_branch`]). The
     /// operator's own branches (previews' data copies) aren't told: they belong to no project.
-    pub fn branched(&self, parent: &SearchCluster, branch: &SearchCluster) {
-        if let Some(f) = self.on_branch.get() {
-            f(parent, branch);
+    /// A branch the hook can't put in its parent's project is deleted again (503): a copy of a
+    /// project's data is never left anywhere else, nor its maker's.
+    pub async fn branched(&self, parent: &SearchCluster, branch: &SearchCluster) -> Result<()> {
+        let Some(f) = self.on_branch.get() else { return Ok(()) };
+        let Err(why) = f(parent, branch) else { return Ok(()) };
+        if let Err(e) = self.delete(&branch.id).await {
+            tracing::warn!(branch = branch.name, error = %e, "deleting a search branch that couldn't be put in its parent's project failed");
         }
+        Err(ControlError::Unavailable(format!("branch {} of {} couldn't be put in its parent's project, so it wasn't made ({why}): try again", branch.name, parent.name)))
     }
 
     pub fn cluster_leases(&self) -> Option<&Arc<crate::cluster::ClusterLeases>> {

@@ -261,6 +261,13 @@ pub struct Shot {
     /// What its sign-in said (`github.login`): "signed in", or the step it stopped at.
     #[serde(default)]
     pub login: Option<String>,
+    /// What it left out (pages past a run's ten, stories it didn't take).
+    #[serde(default)]
+    pub skipped: crate::Skipped,
+    /// How long its containers ran, together (Chromium's, the other browsers', the stories'),
+    /// each of [`crate::runtime::BROWSER_GIB`]: what it costs.
+    #[serde(default)]
+    pub container_ms: u64,
 }
 
 /// PNG bytes as base64 in JSON (a [`Shot`] from another node).
@@ -410,6 +417,10 @@ pub struct ShotOptions {
     pub stories: Option<String>,
     /// The first page's modes (`github.modes`): `mode:<name>` in `pages`.
     pub modes: Vec<crate::settings::ModeRule>,
+    /// The paths the change touched since the default branch, for its stories (`stories`): the
+    /// ones it touched are taken first.
+    #[serde(default)]
+    pub changed: Vec<String>,
     /// The app's sign-in before the pages (`github.login`, a trusted preview's), its typed
     /// variables resolved.
     #[serde(default)]
@@ -858,6 +869,12 @@ pub trait Apps: Send + Sync {
     /// backend serves them itself).
     fn requests(&self, _preview: &str) -> Vec<crate::RequestLine> {
         Vec::new()
+    }
+    /// What the service's environment cost this month where something else runs and bills it
+    /// (roll apps: its `pv-` environment's builds, compute and egress at roll apps' prices), or
+    /// `None` when roll's runtime runs it and its time is counted here.
+    async fn spent_usd(&self, _preview: &str, _service: &str) -> Option<f64> {
+        None
     }
     /// What the service uses right now, `(cores, resident bytes)`: `None` when it isn't running
     /// (or the backend can't tell).

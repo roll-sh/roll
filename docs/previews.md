@@ -665,7 +665,10 @@ default) with the project's `env` overrides and the branched resources' URLs on 
   stream (`KAFKA_USERNAME`…), a bucket, Redis or a search cluster that the preview branched would
   still give the parent's (a fork's code included). The branch's values go by those names too,
   set after the secrets layer so they win (`names::with_standard`: `PG*` parsed from the branch's
-  app URI, the stream's SASL login, the search branch's key and login), and a credential the
+  app URI, `PGOPTIONS` and `PGSSLMODE` from its query too, as roll apps' Postgres link sets them
+  (roll Postgres picks the endpoint by `options=endpoint=…` on one node, so an app connecting
+  with libpq's `PG*` names needs it; no `sslmode` there is libpq's own `prefer`, never a
+  parent's and never empty, which libpq refuses), the stream's SASL login, the search branch's key and login), and a credential the
   branch has none for is blank (a NoSQL HTTP token, Kafka client properties). The roll secrets
   thread follows with the exact fix: a link to a branched parent isn't resolved at all and comes
   back as `followed`, its name filled from the branch even under a custom prefix.
@@ -709,9 +712,9 @@ default) with the project's `env` overrides and the branched resources' URLs on 
   ensure: made if missing, `replace: true` so its own keys are exactly the overrides and branch
   URLs, a removed override doesn't linger; an unchanged repeat records nothing). A different base
   or trust answers 409, and the environment is made again.
-- **It expires by itself.** `ttl_minutes` is a day, renewed by each converge (a preview converges
-  every few minutes while it exists), so a teardown that never happened leaves it for a day at
-  most; roll secrets then deletes it and revokes its leases.
+- **It expires by itself.** `ttl_minutes` is a day, renewed by each whole converge (a running
+  preview's every few minutes, a sleeping one's every hour), so a teardown that never happened
+  leaves it for a day at most; roll secrets then deletes it and revokes its leases.
 - **Keys that don't resolve are said.** A reference to nothing, or to a protected value an
   untrusted preview may not read, leaves the key out (a check would fail on it); the preview's
   activity names those keys once, again whenever the set changes.
@@ -785,6 +788,14 @@ previews' code may reach:
   `egress_forks`, which holds only its server. A policy of the page's own still applies (a
   browser keeps both); a navigation away isn't something a policy can stop. Previews' own proxy
   only so far: roll apps' for its forks is next (Next). `runtime::tests::service_hosts_reach_their_containers`.
+- `data_forks`: what a fork's preview's data is. It's `"schema"` by default: its branches hold the
+  structure without the rows (Postgres' schema, NoSQL's tables, streams' topics, queues' and
+  tasks' definitions), whatever the project's own previews get, and a kind that can't be
+  structure-only (Redis, buckets, search) is left out, its variables blank. A fork's code is
+  approved to run, not read for what it does with the rows it can see, and masks only hide the
+  columns someone named. `"same"` gives it what the project's own previews get, masked the same.
+  A fork's seed still fills its structure. Changing it reaches a fork's existing previews at their
+  next converge, which makes their branches again. `a_forks_preview_gets_the_datas_structure_only`.
 - `egress_forks`: what a fork's preview reaches when `egress` is `"open"`. It's `"roll"` by
   default, with `egress_hosts` still allowed through the proxy; `"open"` lets it reach what the
   project's own previews do. A fork's head runs only once a writer approves it, but an approval
@@ -1392,11 +1403,30 @@ A preview's cost is the sum of what its branches and services use, priced with e
 own rates (the same ones its usage page shows).
 
 - **Sleeping**, per month: the bytes each branch owns, at its product's storage rate. Compute
-  costs nothing.
+  costs nothing. Nor does it cost roll's control plane much: usage is read every 5 minutes
+  (`usage_every`), but a settled sleeping preview goes through a whole converge (roll secrets'
+  ensure, its base's links followed, every branch checked) only every hour (`settled_every`;
+  well inside its environment's 24 h lease), its usage read alone in between, as Render and
+  Vercel meter idle previews without waking them. Over its size cap on such a read, it converges
+  to sleep there. A link added to the base reaches a sleeping preview at that hourly converge
+  (rules' changes reach every preview at once). `a_sleeping_previews_usage_is_read_without_a_whole_converge`.
 - **Active**, per hour: the services' containers (memory GiB-hours), Postgres compute units
   while connected, and Redis memory while loaded.
-- Every preview shows `cost: {sleeping_usd_month, active_usd_hour, month_to_date_usd}`, and the
-  project shows the total.
+- **Runs**: its browsers' and jobs' containers by their GiB-hours at the same rate: screenshot
+  runs (each container's own time, side by side: Chromium's, the other browsers', the stories'; a
+  run that doesn't finish counts its whole time), another service's run, agents' runs (`try`),
+  and seed, release and teardown jobs at their `memory_mb` (`run_usage`, this month's). They're
+  in `month_to_date_usd`, so `max_usd_month` caps them too, and said apart as `runs_usd`.
+  `a_previews_browser_runs_are_in_its_cost`.
+- **roll apps services**: what roll apps billed their `pv-` environments this month (their
+  builds, compute and egress at roll apps' prices, from its `…/usage` since the 1st, UTC), read
+  with the branches' usage (`service_spend`). roll's runtime never runs them, so they have no
+  running time here; until 2026-11-25 their whole bill was missing from `month_to_date_usd`, and
+  `max_usd_month` couldn't hold a project whose previews run on roll apps.
+  `a_previews_roll_apps_bill_is_in_its_cost`. A `roll.toml` service builds inside its own
+  container (`run`), so its build is in its running time.
+- Every preview shows `cost: {sleeping_usd_month, active_usd_hour, month_to_date_usd, runs_usd}`,
+  and the project shows the total.
 
 ### Measured on this machine
 
@@ -1695,11 +1725,15 @@ land on the change.
   not a 200 passes through untouched. The script is served from the preview's own host, so a
   `script-src 'self'` policy allows it.
 - The script (no dependencies, in a shadow root) shows a small button; it picks an element,
-  takes a note, and opens the preview in roll's dashboard with the page's path (never its query,
-  which can hold a token)
-  (`/dashboard/projects/{project}/previews?preview={id}&fb_path=…&fb_selector=…&fb_note=…`). The
-  preview's origin never holds a roll credential: the person, signed in to roll there, reads
-  the note in the preview's sheet and posts it (nothing is posted from the link alone).
+  takes a note, and opens a small window of roll's (480 × 640, Vercel's comments posting in
+  place) with the page's path (never its query, which can hold a token):
+  `/dashboard/previews/note?preview={id}&fb_path=…&fb_selector=…&fb_note=…`, the note's form
+  alone. Posted, it closes, and the page reads its list of notes again when it has the focus
+  back. On a phone's width it opens the preview's sheet in roll's dashboard in a tab instead
+  (`/dashboard/projects/{project}/previews?preview={id}&fb_…`). Either opens with `noopener`, so
+  the page gets no handle on roll's window, and the preview's origin never holds a roll
+  credential: the person, signed in to roll there (a sign-in comes back to the form), reads the
+  note and posts it (nothing is posted from the link alone).
 - roll posts it as a `comment` review on the change ("**Feedback on the preview** · `/checkout`
   linked to the preview · `button.pay`", then the note), which reaches the pull request like any
   review. The page's own names are kept to one inert line each.
@@ -1990,7 +2024,7 @@ type Preview = {
   url: string | null;                 // the first service's URL
   share_url: string | null;           // url with its access token (link access; plain otherwise): the one to hand out
   services: Service[]; resources: Resource[];
-  cost: { sleeping_usd_month: number; active_usd_hour: number; month_to_date_usd: number; bytes: number };
+  cost: { sleeping_usd_month: number; active_usd_hour: number; month_to_date_usd: number; runs_usd: number; bytes: number }; // runs_usd: of month_to_date, its browsers' and jobs' containers
   schema_changes: string[] | null;    // "+ …"/"- …" against the parents, once read at `head`; null: not known
   schema_risks?: string[];            // what in them would hurt production when it lands (dropped tables and columns, type changes, NOT NULL)
   kept_until: number | null;          // kept past its TTL until then (POST …/keep)
@@ -2015,6 +2049,7 @@ type Preview = {
   slower_routes?: { branch: string; routes: { name: string; count: number; p50_ms: number; main_p50_ms: number; grew?: GrewSpan | null; budget_ms?: number | null }[] } | null;
   new_errors?: { branch: string; total: number; errors: { service: string; title: string }[] } | null;
   served_secrets?: { key: string; path: string }[]; // its secret values its pages serve at its head: names and where, never values
+  skipped?: { pages?: string[]; stories?: number; first_stories?: string[] }; // what its latest screenshot run left out at its head: pages past a run's ten, stories it didn't take (the first 10 by id)
   regressions?: "check" | "required" | null;
   regressions_accepted?: { head: string; by: string; at: number } | null;
   regressions_compared?: boolean;     // compared with main's preview at its head (errors; routes too with traces)
@@ -2059,6 +2094,7 @@ type Settings = {
   egress: "open" | "roll";            // what its services' code may reach: anything ("open"), or only roll's products on a network with no route out (see "Egress")
   egress_hosts?: string[];            // with "roll" (or egress_forks "roll", for forks): hosts outside roll still reachable through its egress proxy (api.stripe.com, *.sentry.io; at most 20)
   egress_forks: "roll" | "open";      // what a fork's preview reaches when egress is "open" (default "roll")
+  data_forks: "schema" | "same";      // a fork's preview's data: its structure without rows (default), or what the project's own get
   warm: boolean;                      // wake the change's services as soon as a new head is deployed (true)
   crons: boolean;                     // roll apps' crons and scheduled commands run on their schedule in previews (false)
   regressions: "off" | "check" | "required";   // roll/regressions against main's preview: posted (check), or a blocker (required) ("off")
@@ -2261,7 +2297,21 @@ type Settings = {
     Its Storybook's stories too (Chromatic's stories): with `github.storybook` (`web`, or
     `web:/storybook/` when the service serves it under a path: a static build or `storybook
     dev`), that service's run reads Storybook's index (`index.json`, Storybook 7 and later;
-    `stories.json` before), and takes the first 40 stories (docs left out) in a run of its own
+    `stories.json` before), and takes 40 stories, those the change touched first (Chromatic's
+    TurboSnap: a story whose own file the change changed since the default branch, then one that
+    imports a changed file from anywhere, then one beside a file it changed, its component or its
+    styles, then the rest in the index's order; a repo's path matches a story's `importPath` and a
+    module's name by its end; the change's own repo's paths, `$STORIES_CHANGED`, at most 64 KiB of
+    them). Who imports what comes from the bundler's module graph when the build was made with
+    `--stats-json` (Storybook's `preview-stats.json`, beside its index, as TurboSnap reads it: each
+    module's `name`, those it concatenates, and the `reasons` that import it), walked up from the
+    changed files; the graph is the preview's code's, so it only orders the stories, and its read
+    (64 MiB, 15 s) and walk (200,000 edges, 50,000 modules) are bounded. Without it, by files
+    alone. `stories_the_change_touched_go_first`. Live: a built Storybook's 41 stories in a real
+    browser, the last in its index reached through `preview-stats.json` taken and the 40th
+    listed said as left. (docs left out; the rest, and any not
+    reached in its 100 s, are said: `skipped.stories` with the first ten ids, on the sheet and in
+    the comment's **Not taken**, as are pages past a run's ten) in a run of its own
     beside the screenshot's, in the service's network and locked down the same way. Each story is
     loaded alone (`iframe.html?id=…&viewMode=story`) at the desktop width, waited for until its
     root holds something (3 s at most), and captured clipped to what it rendered (an 8 px margin,
@@ -2314,7 +2364,9 @@ type Settings = {
     too, on its holder for a roll apps instance (the signed fleet hop carries the sign-in the
     preview's node decided), and its answer's `login` says how it went ("signed in through
     /login first", the step it stopped at, or "signed out: a fork's preview…"). Not yet:
-    Storybook's stories (they rarely sit behind the app's login).
+    Storybook's stories (they rarely sit behind the app's login). Live: an agent's run on a page
+    that answers "signed in" only once `/login.html` took the preview's own `$GREETING` (its
+    cookie kept for the run's page), and the stop at a missing field in the screenshots and `try`.
     `screenshots_sign_in_first_on_a_trusted_preview`.
     Other browsers too (Percy's and Chromatic's browsers; `github.browsers`: `firefox`, `webkit`,
     and `webkit-phone`, WebKit at 390 × 844 at twice the density as a touch device, mobile
@@ -2799,41 +2851,42 @@ Ranked by what a person notices first. Done so far:
 Ranked again after a sixth product review (2026-11-25), against Vercel's and Netlify's previews and
 comments, Render and Railway, Neon, Chromatic and Percy, Signadot, Jam.
 
-1. **Signed in to the app, in review**: screenshots (every engine) and agents' runs (`try`) sign
-   in first (`github.login`, `$NAME` from the preview's environment, trusted previews only).
-   Next for it: a live check against a page that really sits behind a login (the live service
-   serves one only after a form post sets its cookie).
-2. **Coverage cut silently**: at most 40 stories and 10 pages, and nothing says what was left
-   out; `skipped` (how many, which) on the run, the sheet and the comment; then stories chosen
-   by what the change touched (Chromatic's TurboSnap).
-3. **Browser runs and jobs in the cost**: `cost_of` counts branches, compute and services'
-   memory-hours, not the screenshot runs (three engines, stories, crops, `try`), builds or seed,
-   release and teardown jobs; meter their container-seconds into `spent_usd`, so `max_usd_month`
-   caps them too.
-4. **A note in one click**: a team note opens the whole dashboard in a tab to post; a small popup
-   that posts and closes (Vercel's comments post in place).
-5. **Sleeping previews cost the control plane**: every settled preview goes through a whole
-   converge every 5 minutes (secrets' links and digests, usage of every branch); a usage-only
-   pass for settled ones, counted per sleeping preview in the live run.
-6. **A fork's preview on roll apps**: its services' pages the same Content-Security-Policy as on
-   previews' own proxy (roll apps' proxy adds it for a `pv-` environment previews marks
-   untrusted), and a `data_forks` rule (a fork's data `schema` unless the project says
-   otherwise), as `egress_forks` is for its server.
-7. **A capped preview's roll apps service**: a visit to it still wakes it there (roll apps wakes
+1. **Everything a preview runs in its cost, in review**: screenshot runs (every engine, stories,
+   another service's), agents' runs and seed, release and teardown jobs count by their
+   containers' GiB-hours (`runs_usd` apart; #1010), and roll apps services by roll apps' own bill
+   for their `pv-` environments, builds included, so `max_usd_month` caps them all.
+   With it, the sign-in proven live on a page that answers only once signed in (`try` on
+   `/account.html` behind `/login.html`; until now the live check proved only the stdin path and
+   the stop at a missing field).
+2. **The stories a change touched, by the module graph, in review**: a story that imports a changed
+   file from anywhere comes after those whose own file changed (Storybook's `preview-stats.json`
+   when the build has it; files alone without), and a built Storybook's stories run live in a
+   real browser for the first time. Next for it: a `storybook dev` server has no stats file, so
+   say on the sheet when a run ordered by files alone.
+3. **A note in one click, in review**: the button's note opens a small window of roll's with its
+   form alone, which posts and closes (`/dashboard/previews/note`); a phone keeps the dashboard
+   in a tab. Next for it: a reply and a resolve from the page the same way.
+4. **Sleeping previews cost the control plane, in review**: a settled sleeping preview converges
+   whole hourly (`settled_every`), its usage read alone every 5 minutes in between. Next for it:
+   a running preview that's settled could do the same between its health and route reads.
+5. **A fork's preview on roll apps, in review**: a `data_forks` rule, a fork's data its structure
+   only unless the project says `same`. Its services' pages get the same Content-Security-Policy
+   as on previews' own proxy from roll apps' proxy (its #1032; previews' live check in review).
+6. **A capped preview's roll apps service**: a visit to it still wakes it there (roll apps wakes
    it itself); previews tells roll apps to keep it down while it's over its cap.
-8. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
+7. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
    is kept only where the product puts a branch back in place, keeping its id (their delete
    guards check it); each needs its control plane's reset `from`, as pg-control's.
-9. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+8. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-10. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+9. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-11. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+10. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-12. **Watch: pg-control's recovery to a time seconds old** (unowned).
+11. **Watch: pg-control's recovery to a time seconds old** (unowned).
 
 
 
@@ -2842,6 +2895,14 @@ comments, Render and Railway, Neon, Chromatic and Percy, Signadot, Jam.
 
 
 
+
+Landed 2026-11-25, noon: the stories a change touched taken first (#1005).
+
+Landed 2026-11-25, late morning: what a screenshot run left out, said (#997: `skipped` on the record, the sheet and the comment); a branch's `PGOPTIONS` and `PGSSLMODE` (#999, found by roll apps' review).
+
+Landed 2026-11-25, morning: screenshots signed in to the app (#980: `github.login`, `$NAME` from
+the preview's environment, trusted previews only), in every engine (#986), and agents' runs
+(#991).
 
 Landed 2026-11-25, night: the fifth review's security fixes (#943); roll apps on par (#947: one
 feedback button); `note_mail` in the page and `roll preview try` (#948); share links on the

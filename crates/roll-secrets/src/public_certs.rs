@@ -90,8 +90,18 @@ CREATE TABLE IF NOT EXISTS public_cert_revocations (
 ) WITHOUT ROWID;
 ";
 
-/// The columns a registration gained after it shipped (lib.rs adds them to an older table).
-pub(crate) const ADDED: &[(&str, &str)] = &[("previous_certificate", "BLOB"), ("previous_serial", "TEXT"), ("previous_not_after", "INTEGER"), ("asked_renewals", "TEXT")];
+/// The columns a registration gained after it shipped (lib.rs adds them to an older table). The
+/// sweep's marks: `rolled_serial`, the serial every linked key was rolled to; `rolled_at`, when (or
+/// until when a node holds it); `linked_at`, when a key last took the certificate.
+pub(crate) const ADDED: &[(&str, &str)] = &[
+    ("previous_certificate", "BLOB"),
+    ("previous_serial", "TEXT"),
+    ("previous_not_after", "INTEGER"),
+    ("asked_renewals", "TEXT"),
+    ("rolled_serial", "TEXT"),
+    ("rolled_at", "INTEGER"),
+    ("linked_at", "INTEGER"),
+];
 
 pub(crate) const KIND: &str = "public_cert";
 
@@ -111,6 +121,16 @@ const MAX_NAMES: usize = 100;
 const CLAIM_MS: i64 = 15 * 60_000;
 /// How long a failed order waits before it's tried again (unless asked sooner).
 const RETRY_MS: i64 = 60 * 60_000;
+/// How long a node holds rolling a registration's keys to its certificate.
+const ROLL_HOLD_MS: i64 = 2 * 60_000;
+/// How long after a key took a registration's certificate its keys are looked at again: a key
+/// linked as a renewal came in may hold the certificate before it.
+const LINK_GRACE_MS: i64 = 2 * 60_000;
+/// How often a registration whose keys were all rolled is looked at again anyway.
+const RECHECK_MS: i64 = 15 * 60_000;
+
+/// A key linked to a registration: (environment, path, key, link state).
+type LinkedKey = (String, String, String, Option<String>);
 /// Who orders, renews and rotates the linked keys (the scheduled rotations' principal).
 const JOB: &str = "roll:rotation";
 /// The margin health's `expiring` warns in: a renewal comes before it.
@@ -179,7 +199,7 @@ impl DnsProvider {
         }
     }
 
-    fn parse(s: &str) -> Option<DnsProvider> {
+    pub(crate) fn parse(s: &str) -> Option<DnsProvider> {
         match s {
             "cloudflare" => Some(DnsProvider::Cloudflare),
             _ => None,
@@ -396,11 +416,11 @@ fn renew_days(rotate_days: Option<u64>, lifetime_days: u64) -> u64 {
     rotate_days.unwrap_or(lifetime_days * 2 / 3).clamp(1, most)
 }
 
-fn aad(project: &str, id: &str, what: &str) -> String {
+pub(crate) fn aad(project: &str, id: &str, what: &str) -> String {
     format!("roll-secrets:public-cert:{project}:{id}:{what}")
 }
 
-fn account_aad(project: &str, directory: &str) -> String {
+pub(crate) fn account_aad(project: &str, directory: &str) -> String {
     format!("roll-secrets:public-cert-account:{project}:{directory}")
 }
 
@@ -504,6 +524,9 @@ impl LinkProvider for Provider {
         };
         let stored = self.dek(&project)?.open(&aad(&project, r#ref, "certificate"), &sealed)?;
         let s: Stored = serde_json::from_str(stored.expose()).map_err(|_| Error::Internal("a stored public certificate isn't JSON".into()))?;
+        // The sweep looks at its keys again for a while (`LINK_GRACE_MS`).
+        let now = self.db.now_ms()?;
+        self.db.write(|c| c.execute("UPDATE public_certs SET linked_at = ? WHERE id = ?", params![now, r#ref]))?;
         let fullchain = format!("{}{}", s.certificate, s.ca_chain);
         let parts = BTreeMap::from([
             ("certificate".to_string(), Value::new(s.certificate)),
@@ -677,7 +700,7 @@ impl Secrets {
         let _ = self.public_ca.set(ca);
     }
 
-    fn public_ca(&self) -> Result<&std::sync::Arc<dyn PublicCa>> {
+    pub(crate) fn public_ca(&self) -> Result<&std::sync::Arc<dyn PublicCa>> {
         self.public_ca.get().ok_or_else(|| Error::BadRequest("publicly trusted certificates aren't on this server".into()))
     }
 
@@ -999,7 +1022,7 @@ impl Secrets {
                     out.failed += 1;
                     tracing::warn!(%project, cert = %id, %serial, "revoking a public certificate failed (retried): {why}");
                     if !failed_before {
-                        for (slug, path, key) in self.public_cert_keys(&project, &id)? {
+                        for (slug, path, key, _) in self.public_cert_keys(&project, &id)? {
                             self.note_rotation(&project, &slug, &path, &key, Some(&format!("revoking certificate {serial} failed (roll keeps trying): {why}")), false);
                         }
                     }
@@ -1058,36 +1081,52 @@ impl Secrets {
                 }
             }
         }
-        // Keys whose certificate isn't their registration's current one: just renewed, or left
-        // behind by a node that stopped halfway.
-        let behind: Vec<(String, String, String, String, String, String)> = self.db.read(|c| {
+        // Keys whose certificate isn't their registration's current one: just renewed, left behind
+        // by a node that stopped halfway, or linked as a renewal came in. Only registrations that
+        // may have one are looked at (none on a server without issued certificates), each in its
+        // own project's keys, and by one node at a time.
+        let now = self.db.now_ms()?;
+        let due: Vec<(String, String, String, Option<i64>)> = self.db.read(|c| {
             c.query(
                 &format!(
-                    "SELECT s.project_id, e.slug, s.path, s.key, s.link, s.link_state FROM secrets s JOIN environments e ON e.id = s.env_id AND e.forgotten_at IS NULL WHERE s.link LIKE ? AND s.link_state IS NOT NULL AND s.owner = '' AND {}",
-                    crate::deleted::live("s.project_id")
+                    "SELECT id, project_id, serial, rolled_at FROM public_certs WHERE serial IS NOT NULL AND COALESCE(rolled_at, 0) <= ?
+                     AND (COALESCE(rolled_serial, '') <> serial OR COALESCE(linked_at, 0) + ? >= COALESCE(rolled_at, 0) OR COALESCE(rolled_at, 0) + ? <= ?) AND {}",
+                    crate::deleted::live("project_id")
                 ),
-                [format!("%\"kind\":\"{KIND}\"%")],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+                params![now, LINK_GRACE_MS, RECHECK_MS, now],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
         })?;
-        let serials: BTreeMap<String, String> = self.db.read(|c| c.query("SELECT id, serial FROM public_certs WHERE serial IS NOT NULL", (), |r| Ok((r.get(0)?, r.get(1)?))))?.into_iter().collect();
         let mut seen = std::collections::BTreeSet::new();
-        for (project, slug, path, key, link, state) in behind {
-            let (Ok(link), Ok(state)) = (serde_json::from_str::<Link>(&link), serde_json::from_str::<Json>(&state)) else { continue };
-            let Some(current) = serials.get(&link.r#ref) else { continue };
-            let has = state.get("handle").and_then(|h| h.get("serial")).and_then(Json::as_str);
-            let cred = state.get("credential").and_then(Json::as_str).unwrap_or_default().to_string();
-            if link.kind != KIND || has == Some(current.as_str()) || !seen.insert(cred) {
+        for (id, project, serial, rolled_at) in due {
+            let hold = self.db.now_ms()? + ROLL_HOLD_MS;
+            if self.db.write(|c| c.execute("UPDATE public_certs SET rolled_at = ? WHERE id = ? AND serial = ? AND COALESCE(rolled_at, 0) = ?", params![hold, id, serial, rolled_at.unwrap_or(0)]))? != 1 {
                 continue;
             }
-            match self.rotate_stored(&project, &slug, &path, &key) {
-                Ok(_) => out.rotated += 1,
-                Err(e) => {
-                    out.failed += 1;
-                    tracing::warn!(%project, env = %slug, %key, "rotating a key to its renewed public certificate failed: {e}");
-                    self.note_rotation(&project, &slug, &path, &key, Some(&e.to_string()), false);
+            let mut rolled = true;
+            for (slug, path, key, state) in self.public_cert_keys(&project, &id)? {
+                let Some(state) = state.and_then(|s| serde_json::from_str::<Json>(&s).ok()) else { continue };
+                let has = state.get("handle").and_then(|h| h.get("serial")).and_then(Json::as_str);
+                let cred = state.get("credential").and_then(Json::as_str).unwrap_or_default().to_string();
+                if has == Some(serial.as_str()) || !seen.insert(cred) {
+                    continue;
+                }
+                match self.rotate_stored(&project, &slug, &path, &key) {
+                    Ok(_) => out.rotated += 1,
+                    Err(e) => {
+                        rolled = false;
+                        out.failed += 1;
+                        tracing::warn!(%project, env = %slug, %key, "rotating a key to its renewed public certificate failed: {e}");
+                        self.note_rotation(&project, &slug, &path, &key, Some(&e.to_string()), false);
+                    }
                 }
             }
+            // Rolled: settled until a renewal, a link or the recheck. Not: tried again next pass.
+            let done = self.db.now_ms()?;
+            self.db.write(|c| match rolled {
+                true => c.execute("UPDATE public_certs SET rolled_at = ?, rolled_serial = ? WHERE id = ? AND rolled_at = ?", params![done, serial, id, hold]),
+                false => c.execute("UPDATE public_certs SET rolled_at = ? WHERE id = ? AND rolled_at = ?", params![done, id, hold]),
+            })?;
         }
         Ok(out)
     }
@@ -1118,7 +1157,7 @@ impl Secrets {
                 });
                 // Every key it renews says so: rotation.failed, and health's rotation_failing.
                 if r.has_cert {
-                    for (slug, path, key) in self.public_cert_keys(&r.project, &r.id)? {
+                    for (slug, path, key, _) in self.public_cert_keys(&r.project, &r.id)? {
                         self.note_rotation(&r.project, &slug, &path, &key, Some(&format!("renewing public certificate {} failed: {why}", r.name)), false);
                     }
                 }
@@ -1175,16 +1214,16 @@ impl Secrets {
         Ok(())
     }
 
-    /// The keys linked to registration `id`, as (environment, path, key).
-    fn public_cert_keys(&self, project: &str, id: &str) -> Result<Vec<(String, String, String)>> {
-        let rows: Vec<(String, String, String, String)> = self.db.read(|c| {
+    /// The keys linked to registration `id`.
+    fn public_cert_keys(&self, project: &str, id: &str) -> Result<Vec<LinkedKey>> {
+        let rows: Vec<(String, LinkedKey)> = self.db.read(|c| {
             c.query(
-                "SELECT e.slug, s.path, s.key, s.link FROM secrets s JOIN environments e ON e.id = s.env_id AND e.forgotten_at IS NULL WHERE s.project_id = ? AND s.owner = '' AND s.link LIKE ? AND s.link LIKE ?",
+                "SELECT e.slug, s.path, s.key, s.link, s.link_state FROM secrets s JOIN environments e ON e.id = s.env_id AND e.forgotten_at IS NULL WHERE s.project_id = ? AND s.owner = '' AND s.link LIKE ? AND s.link LIKE ?",
                 params![project, format!("%\"kind\":\"{KIND}\"%"), format!("%\"ref\":\"{id}\"%")],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(3)?, (r.get(0)?, r.get(1)?, r.get(2)?, r.get(4)?))),
             )
         })?;
-        Ok(rows.into_iter().filter(|(_, _, _, l)| serde_json::from_str::<Link>(l).is_ok_and(|l| l.kind == KIND && l.r#ref == id)).map(|(e, p, k, _)| (e, p, k)).collect())
+        Ok(rows.into_iter().filter(|(l, _)| serde_json::from_str::<Link>(l).is_ok_and(|l| l.kind == KIND && l.r#ref == id)).map(|(_, k)| k).collect())
     }
 }
 

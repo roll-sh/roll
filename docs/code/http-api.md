@@ -133,6 +133,13 @@ GET /changesets/{id} → Changeset
 GET /compare/{base}...{head} → {base, head, changesets: ChangesetSummary[], files: FileDiff[]}
 GET /compare/{base}...{head}?format=diff → text/plain: each file's unified diff after a `diff --git a/… b/…` line
 
+A read at a revision of a change from outside the repo (a fork's pull request, `trusted: false`:
+its head or a changeset before it, off the default branch) says so for MCP's lockdown: the answer
+and its `entries`, `files` and `matches` carry `outside: true` (and a `/documents/{id}` file
+match, by the same rule), and so do the `items`, `ranges`
+and `changesets` that aren't on the default branch; `/blob` and `?format=diff` answer an
+`x-roll-outside: true` header. A team's own branches and changes don't.
+
 ChangesetSummary = {id, git_commit: sha | null, generation, parents: string[],
                     author: {name, email, time}, message, files_changed}
 Changeset = ChangesetSummary & {committer: {name, email, time}, files: FileDiff[]}
@@ -175,6 +182,7 @@ Preview = {state: "creating" | "running" | "sleeping" | "failed", url: string | 
                           expires_at?: number /* ms: when it goes (its TTL, or a keep, running out), once a day away */,
                           browser_checks?: [{service, name, state}] /* production's browser checks on this head: pending, passed or failed */,
                           served_secrets?: [{key, path}] /* its secret values its pages serve: names and where, never values */,
+                          skipped?: {pages, stories, first_stories} /* what its screenshot run left out: pages past a run's ten, stories it didn't take (ids are its code's) */,
                           browser_checks_rule?: "check" | "required" /* the project's rule: the roll/browser-checks status; required also a blocker */,
                           earlier?: [{service, head, url, own_data}] /* earlier pushes still reachable, newest first; own_data: on its own copy of the data, as its head left it (else the preview's) */,
                           visual_change?: {since, percent, phone_percent?} /* how much the first service's page changed since the screenshot at an earlier head */,

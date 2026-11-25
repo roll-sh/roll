@@ -27,7 +27,7 @@ const LIMITS: &[&str] = &[
     "max_headings_count",
     "max_elastic_tag_size",
 ];
-const DOMAIN_KEYS: &[&str] = &["url", "seed_urls", "sitemap_urls", "exclude_tags", "crawl_rules"];
+const DOMAIN_KEYS: &[&str] = &["url", "seed_urls", "sitemap_urls", "exclude_tags", "crawl_rules", "extraction_rulesets"];
 
 /// What an Open Crawler config becomes.
 #[derive(Debug)]
@@ -115,10 +115,6 @@ pub fn convert(yaml: &str, connector: Option<&str>) -> anyhow::Result<Import> {
                             }
                             k if DOMAIN_KEYS.contains(&k) => {
                                 out.insert(k.into(), dv.clone());
-                            }
-                            "extraction_rulesets" => {
-                                dropped.push(format!("domains[{i}].extraction_rulesets"));
-                                notes.push("extraction rules aren't supported by roll's crawler yet".into());
                             }
                             other => dropped.push(format!("domains[{i}].{other}")),
                         }
