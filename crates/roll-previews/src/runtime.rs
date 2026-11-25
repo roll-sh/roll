@@ -3319,16 +3319,24 @@ mod tests {
     }
 
     /// A run's stories put the ones the change touched first: a story whose own file changed,
-    /// then one beside a changed file, then the rest in the index's order (Chromatic's
-    /// TurboSnap); a repo's path matches a project's by its end, and the repo's root by nothing.
-    /// `shot.js`'s own function, run by `node`.
+    /// then one that imports a changed file through the module graph (Storybook's
+    /// `--stats-json`), then one beside a changed file, then the rest in the index's order
+    /// (Chromatic's TurboSnap); a repo's path matches a project's by its end, and the repo's root
+    /// by nothing. `shot.js`'s own function, run by `node`.
     #[test]
     fn stories_the_change_touched_go_first() {
         let src = SHOT_JS.split("// touched-first: start").nth(1).and_then(|s| s.split("// touched-first: end").next()).expect("the function");
-        let entries = r#"[{"id":"a--1","importPath":"./src/A.stories.tsx"},{"id":"b--1","importPath":"./src/b/B.stories.tsx"},{"id":"c--1","importPath":"./src/c/C.stories.tsx"},{"id":"d--1"}]"#;
-        let changed = r#"["web/src/c/C.stories.tsx","web/src/b/B.tsx","README.md"]"#;
-        let out = std::process::Command::new("node").arg("-e").arg(format!("{src}\nconsole.log(touchedFirst({entries}, {changed}).map((e) => e.id).join(','))")).output().expect("node");
-        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "c--1,b--1,a--1,d--1", "{}", String::from_utf8_lossy(&out.stderr));
+        let entries = r#"[{"id":"a--1","importPath":"./src/A.stories.tsx"},{"id":"b--1","importPath":"./src/b/B.stories.tsx"},{"id":"c--1","importPath":"./src/c/C.stories.tsx"},{"id":"d--1"},{"id":"e--1","importPath":"./src/e/E.stories.tsx"}]"#;
+        let changed = r#"["web/src/c/C.stories.tsx","web/src/b/B.tsx","README.md","web/lib/deep.ts"]"#;
+        // E's story imports E, which imports lib/deep.ts (one of a concatenated module's); a cycle on the way.
+        let stats = r#"{"modules":[{"name":"./lib/index.ts + 1 modules","modules":[{"name":"./lib/deep.ts"}],"reasons":[{"moduleName":"./src/e/E.tsx"},{"moduleName":"./lib/index.ts"}]},{"name":"./src/e/E.tsx","reasons":[{"moduleName":"./src/e/E.stories.tsx?story"}]}]}"#;
+        let order = |stats: &str| {
+            let out = std::process::Command::new("node").arg("-e").arg(format!("{src}\nconsole.log(touchedFirst({entries}, {changed}, {stats}).map((e) => e.id).join(','))")).output().expect("node");
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        assert_eq!(order(stats), "c--1,e--1,b--1,a--1,d--1");
+        assert_eq!(order("null"), "c--1,b--1,a--1,d--1,e--1", "without a graph, by files alone");
     }
 
     /// A stories run's report is the preview's code's: each story once, by an id Storybook would

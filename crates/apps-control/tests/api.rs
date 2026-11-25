@@ -2104,6 +2104,14 @@ async fn a_static_sites_form_keeps_its_submissions() {
         }
     };
     let form = "application/x-www-form-urlencoded";
+    // The site goes live a moment after its deployment settles on a loaded host: its page first.
+    for _ in 0..100 {
+        let resp = w.public.clone().oneshot(Request::get("/contact.html").header("host", &host).body(Body::empty()).unwrap()).await.unwrap();
+        if resp.status() == StatusCode::OK {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     // Sent from its page: kept, and the sender goes to its action's page.
     assert_eq!(post("/contact.html", form, "email=ana%40example.com&message=hello+there".into()).await, (StatusCode::SEE_OTHER, Some("/thanks.html".into())));
     // A bot filled the honeypot: answered the same, never kept.
