@@ -5381,7 +5381,7 @@ async fn edit(c: &Client<'_>, env: &str, request: bool, json_out: bool) -> anyho
     let dir = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).filter(|d| d.is_dir()).unwrap_or_else(std::env::temp_dir);
     let file = tempfile::Builder::new().prefix("roll-secrets-").suffix(".env").tempfile_in(dir)?;
     std::fs::write(file.path(), &text)?;
-    let editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).unwrap_or_else(|_| if cfg!(windows) { "notepad" } else { "vi" }.into());
+    let editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).unwrap_or_else(|_| (if cfg!(windows) { "notepad" } else { "vi" }).into());
     #[cfg(windows)]
     let status = crate::sys::shell(&format!("{editor} \"{}\"", file.path().display())).status().with_context(|| format!("running {editor}"))?;
     #[cfg(not(windows))]
