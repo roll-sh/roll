@@ -681,6 +681,8 @@ export interface EnvironmentPut {
   vitals?: boolean;
   /** How long its logs are kept (null: 7 days). */
   log_retention_days?: 7 | 30 | 90 | null;
+  /** Days its built deployments stay to roll back to past the newest ten (1–90); null: only those. */
+  keep_days?: number | null;
   /** Approvals a deployment needs before it goes live (0 or null: none). */
   approvals?: number | null;
   /** A deploy status badge anyone may load. */
@@ -808,6 +810,8 @@ export interface Environment extends EnvironmentSummary {
   vitals?: boolean;
   /** Days its logs are kept: 7 (default), 30 or 90; a preview's are 7. */
   log_retention_days?: number;
+  /** Days its built deployments stay to roll back to past the newest ten. */
+  keep_days?: number;
   /** People other than a deployment's author who approve it before it goes live (0–3). */
   approvals?: number;
   /** Its deploy status badge (an SVG for a README), when it has one. */
