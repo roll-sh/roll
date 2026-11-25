@@ -1447,6 +1447,71 @@ async fn term_vectors_of_a_hidden_document_are_not_found() {
     assert_eq!((s, &v["found"]), (200, &json!(false)), "{v}");
     let (s, v) = as_key(&e, &key, reqwest::Method::GET, "/products/_termvectors/1", None).await;
     assert_eq!((s, &v["found"]), (200, &json!(true)), "{v}");
+    let (s, v) = as_key(&e, &key, reqwest::Method::POST, "/_mtermvectors", Some(json!({"docs": [{"_index": "products", "_id": "2"}, {"_index": "products", "_id": "1"}]}))).await;
+    assert_eq!((s, &v["docs"][0]["found"], &v["docs"][1]["found"]), (200, &json!(false), &json!(true)), "{v}");
+}
+
+/// A reader of `tenant-a-*` reads no other index through term vectors or `_rank_eval`, on both
+/// dialects: each `_mtermvectors` item is authorized on its own index (Elasticsearch's
+/// `indices:data/read/mtv[shard]`), and the lookups of a rated request, verbatim or rendered
+/// from a template, fail that request; `_rank_eval` searches only the indices its wildcards may
+/// read, as a search does.
+#[tokio::test]
+async fn term_vectors_and_rank_eval_read_only_what_the_caller_may() {
+    use reqwest::Method;
+    let e = env().await;
+    let lookup = |index: &str| json!({"query": {"terms": {"n": {"index": index, "id": "1", "path": "ids"}}}});
+    let template = json!({"templates": [{"id": "t", "template": {"source": lookup("{{i}}")}}], "requests": [{"id": "q", "template_id": "t", "params": {"i": "tenant-b"}, "ratings": []}], "metric": {"precision": {}}});
+    for (name, flavor, role_path, role, user_path, user_body, reader) in [
+        ("tv", "elasticsearch", "/_security/role/ta", json!({"indices": [{"names": ["tenant-a-*"], "privileges": ["read"]}]}), "/_security/user/ann", json!({"password": "ann-password-1", "roles": ["ta"]}), "ann"),
+        (
+            "tv-os",
+            "opensearch",
+            "/_plugins/_security/api/roles/ta",
+            json!({"cluster_permissions": ["cluster_composite_ops_ro"], "index_permissions": [{"index_patterns": ["tenant-a-*"], "allowed_actions": ["read"]}]}),
+            "/_plugins/_security/api/internalusers/ann",
+            json!({"password": "Zq9#vLx2!pRt7mWk", "opendistro_security_roles": ["ta"]}),
+            "ann",
+        ),
+    ] {
+        let c = e.post("/v1/search/clusters", json!({"name": name, "flavor": flavor})).await;
+        let (admin, pw) = creds(&c);
+        for (path, body) in [
+            ("/tenant-a-1/_doc/1?refresh=true", json!({"t": "alpha words", "n": 1})),
+            ("/tenant-b/_doc/1?refresh=true", json!({"t": "secret words", "ids": ["1"]})),
+            (role_path, role.clone()),
+            (user_path, user_body.clone()),
+        ] {
+            let (s, v) = e.es(&admin, &pw, Method::PUT, path, Some(body)).await;
+            assert!(s == 200 || s == 201, "{name} {path}: {v}");
+        }
+        let user = format!("{reader}@{name}");
+        let user_pw = user_body["password"].as_str().unwrap();
+        let es = |method: Method, path: &str, body: Option<Value>| e.es(&user, user_pw, method, path, body);
+
+        let docs = json!({"docs": [{"_index": "tenant-a-1", "_id": "1", "fields": ["t"]}, {"_index": "tenant-b", "_id": "1", "fields": ["t"]}]});
+        for path in ["/_mtermvectors", "/tenant-a-1/_mtermvectors"] {
+            let (s, v) = es(Method::POST, path, Some(docs.clone())).await;
+            assert_eq!((s, &v["docs"][0]["found"]), (200, &json!(true)), "{name} {path}: {v}");
+            let refused = &v["docs"][1];
+            assert!(refused["error"]["type"] == "security_exception" && refused.get("term_vectors").is_none(), "{name} {path}: {v}");
+            assert!(refused["error"]["reason"].as_str().unwrap_or_default().contains("indices:data/read/mtv[shard]"), "{name} {path}: {v}");
+        }
+        assert_eq!(es(Method::GET, "/tenant-b/_termvectors/1", None).await.0, 403, "{name}");
+
+        let verbatim = json!({"requests": [{"id": "q", "request": lookup("tenant-b"), "ratings": []}], "metric": {"precision": {}}});
+        for body in [template.clone(), verbatim] {
+            let (s, v) = es(Method::POST, "/tenant-a-1/_rank_eval", Some(body)).await;
+            let error = &v["failures"]["q"]["error"];
+            assert!(s == 200 && error["type"] == "security_exception" && v["details"] == json!({}), "{name}: {v}");
+        }
+        if flavor == "elasticsearch" {
+            let all = json!({"requests": [{"id": "q", "request": {"query": {"match_all": {}}}, "ratings": []}], "metric": {"precision": {}}});
+            let (s, v) = es(Method::POST, "/tenant-*/_rank_eval", Some(all)).await;
+            let hits: Vec<&str> = v["details"]["q"]["hits"].as_array().map(|h| h.iter().filter_map(|h| h["hit"]["_index"].as_str()).collect()).unwrap_or_default();
+            assert_eq!((s, hits), (200, vec!["tenant-a-1"]), "{v}");
+        }
+    }
 }
 
 /// A stored result (async search, ES|QL, SQL) is its opener's: anyone else (here another API
@@ -3801,6 +3866,7 @@ async fn field_security_hides_a_field_on_every_read_path() {
         ("term suggester", reqwest::Method::POST, "/docs/_search", Some(json!({"suggest": {"s": {"text": "topsecretvalu", "term": {"field": "secret"}}}}))),
         ("termvectors", reqwest::Method::GET, "/docs/_termvectors/1?fields=secret", None),
         ("termvectors all", reqwest::Method::GET, "/docs/_termvectors/1", None),
+        ("mtermvectors", reqwest::Method::POST, "/_mtermvectors", Some(json!({"docs": [{"_index": "docs", "_id": "1", "fields": ["secret"]}]}))),
         ("explain", reqwest::Method::POST, "/docs/_explain/1", Some(json!({"query": {"match": {"name": "zebra"}}}))),
         ("mget", reqwest::Method::POST, "/_mget", Some(json!({"docs": [{"_index": "docs", "_id": "1"}]}))),
         ("esql", reqwest::Method::POST, "/_query", Some(json!({"query": "FROM docs"}))),
