@@ -104,6 +104,9 @@ pub const SCREENSHOT_IMAGE: &str = "mcr.microsoft.com/playwright:v1.64.1-noble";
 /// (`shot.js`, in `$ROLL_SHOT_JS`). A command of an operator's own only needs to write `$OUT`.
 pub const SCREENSHOT_COMMAND: &str = r#"CHROME="$(ls -d /ms-playwright/chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell | head -1)" node -e "$ROLL_SHOT_JS""#;
 const SHOT_JS: &str = include_str!("shot.js");
+/// A browser's container's memory (`shot_args`, the other browsers', the stories', `try`'s): what
+/// its running time costs, as a preview container's GiB-hours.
+pub const BROWSER_GIB: f64 = 1.0;
 /// The screenshot image with `playwright-core` added (Firefox and WebKit are in the base image,
 /// but only Playwright drives them): built once per node from [`BROWSERS_DOCKERFILE`] when a
 /// project asks for other browsers (`github.browsers`).
@@ -2082,12 +2085,21 @@ impl Runtime {
         };
         // Its Storybook's stories, in a run of their own alongside (`github.storybook`).
         let stories_run = async {
-            match opts.stories.as_deref().filter(|p| crate::settings::page_path_ok(p) && p.ends_with('/')) {
+            let started = std::time::Instant::now();
+            let r = match opts.stories.as_deref().filter(|p| crate::settings::page_path_ok(p) && p.ends_with('/')) {
                 Some(at) => Some(self.stories_in(name, port, at, &opts.changed).await),
                 None => None,
-            }
+            };
+            (r, started.elapsed().as_millis() as u64)
         };
-        let (run, (more, browsers_ms), stories) = tokio::join!(tokio::time::timeout(within, docker_with_input(&argv, input, SHOT_OUTPUT_MAX)), browsers_run, stories_run);
+        // Each container's own time (they run side by side): what the run costs.
+        let chromium_run = async {
+            let started = std::time::Instant::now();
+            let r = tokio::time::timeout(within, docker_with_input(&argv, input, SHOT_OUTPUT_MAX)).await;
+            (r, started.elapsed().as_millis() as u64)
+        };
+        let ((run, chromium_ms), (more, browsers_ms), (stories, stories_ms)) = tokio::join!(chromium_run, browsers_run, stories_run);
+        let container_ms = chromium_ms + if more.is_some() { browsers_ms } else { 0 } + if stories.is_some() { stories_ms } else { 0 };
         let out = match run {
             Ok(Ok(out)) => out,
             // Its container outlives a docker CLI that gave up on it (too much output).
@@ -2132,6 +2144,7 @@ impl Runtime {
             // What `shot.js` said of the sign-in (its own words, never the page's), one line.
             login: serde_json::from_str::<serde_json::Value>(speed).ok().and_then(|v| v["login"].as_str().map(|s| s.chars().take(200).collect())),
             skipped: crate::Skipped { pages: cut, ..Default::default() },
+            container_ms,
         };
         // The other browsers', best effort: Chromium's screenshot stands.
         match more {

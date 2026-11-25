@@ -370,6 +370,8 @@ pub struct FakeApps {
     pub shot: Mutex<Option<Vec<u8>>>,
     /// What each screenshot run says it left out.
     pub skipped: Mutex<roll_previews::Skipped>,
+    /// How long each screenshot run's containers ran.
+    pub container_ms: Mutex<u64>,
     /// The sign-in each screenshot run was asked for (`github.login`), by preview.
     pub logins: Mutex<Vec<(String, Option<roll_previews::ports::Login>)>>,
     /// What the screenshot's page logs as its first error.
@@ -544,7 +546,7 @@ impl Apps for FakeApps {
         let login = opts.login.as_ref().map(|l| format!("signed in through {} before its pages", l.page));
         let crops = opts.crops.iter().filter(|c| c.selector != "#missing").map(|c| (c.note.clone(), png.clone())).collect();
         let health = self.page_says.lock().clone().map(|said| roll_previews::PageHealth { errors: 1, first_error: Some(said), failed: 0, first_failed: None, unstable: false });
-        Ok(Some(roll_previews::ports::Shot { png, speed: None, health, a11y: None, phone: None, pages, text: None, links: None, api, crops, bodies: self.served.lock().clone(), login, skipped: self.skipped.lock().clone() }))
+        Ok(Some(roll_previews::ports::Shot { png, speed: None, health, a11y: None, phone: None, pages, text: None, links: None, api, crops, bodies: self.served.lock().clone(), login, skipped: self.skipped.lock().clone(), container_ms: *self.container_ms.lock() }))
     }
     async fn try_page(&self, _preview: &str, _service: &str, _path: &str, _steps: &[roll_previews::settings::Step], login: Option<&roll_previews::ports::Login>) -> anyhow::Result<Option<roll_previews::ports::Tried>> {
         self.try_logins.lock().push(login.cloned());

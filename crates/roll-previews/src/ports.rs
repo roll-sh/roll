@@ -264,6 +264,10 @@ pub struct Shot {
     /// What it left out (pages past a run's ten, stories it didn't take).
     #[serde(default)]
     pub skipped: crate::Skipped,
+    /// How long its containers ran, together (Chromium's, the other browsers', the stories'),
+    /// each of [`crate::runtime::BROWSER_GIB`]: what it costs.
+    #[serde(default)]
+    pub container_ms: u64,
 }
 
 /// PNG bytes as base64 in JSON (a [`Shot`] from another node).
