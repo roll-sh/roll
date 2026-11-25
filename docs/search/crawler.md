@@ -224,19 +224,21 @@ crawls is the owner's, per site, so neither another cluster nor another host of 
 buys more. Deleting a cluster deletes its verifications (when it is tombstoned, purged or deleted
 outright); a restored cluster starts without them and checks again.
 
-The token isn't kept anywhere but the rows: it is derived, HMAC-SHA256 of the owner and the site
-under a key used for nothing else, derived (HKDF, its own label) from the deployment key, or on a
+The token isn't kept anywhere but the rows: it is derived, HMAC-SHA256 of `<identity>\n<site>`,
+the identity being the cluster's tenant (`sites::owner_of`: its home project, else its person
+owner, else the cluster itself, or the operator's for the operator's own clusters), under a key
+used for nothing else, derived (HKDF, its own label) from the deployment key, or on a
 single node without one from the node's own key (`<home>/key`), and cut to 22 base64url characters
 (132 bits). So starting a verification again, after every row that named the site is deleted or
 expired, gives the same token, and a published record keeps working. Every check still reads the
 token from its row:
 
 - Rows made before tokens were derived keep their random token, which is published. A new row in
-  another of the owner's clusters reuses a token one of their clusters has verified with, so that
+  another of the tenant's clusters reuses a token one of their clusters has verified with, so that
   record proves the site there in one check; otherwise it takes the derived token.
 - Rotating the deployment key changes every derived token. New starts get the new one; a verified
   row keeps the token it was proven with, re-checked against it, until it lapses or is deleted,
-  and then the owner publishes the new one.
+  and then the tenant publishes the new one.
 
 A verification is re-checked every 30 days (claimed in the catalogue first, so one node of a fleet
 checks it; the claim is kept apart from the result, so a node that dies mid-check only delays it).
