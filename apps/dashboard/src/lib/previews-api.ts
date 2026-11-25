@@ -77,6 +77,8 @@ export interface PreviewCost {
   sleeping_usd_month: number;
   active_usd_hour: number;
   month_to_date_usd: number;
+  /** Of `month_to_date_usd`: its browsers' and jobs' containers (screenshot runs, stories, agents' runs, seed/release/teardown). */
+  runs_usd: number;
   bytes: number;
 }
 
