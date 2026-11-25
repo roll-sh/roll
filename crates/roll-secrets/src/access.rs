@@ -349,6 +349,57 @@ pub trait Workloads: Send + Sync {
     /// `Access::revoke_many`). All or none: an id roll-access doesn't know refuses the lot. At most
     /// [`REVOKE_MAX`] ids. Blocking.
     fn revoke_many(&self, ids: &[String], why: &str, by: &str) -> crate::Result<()>;
+    /// A machine identity's bootstrap token (roll-access's chains, docs/permissions.md "Bootstrap
+    /// tokens"): single-use, for `minutes`, from `ip_allow` only, owned by `owner` (`None`: the
+    /// operator). Its id is the chain. Blocking.
+    fn bootstrap(&self, name: &str, ip_allow: Option<Vec<String>>, minutes: u32, owner: Option<&str>) -> crate::Result<Chained> {
+        let _ = (name, ip_allow, minutes, owner);
+        Err(crate::Error::BadRequest("bootstrap tokens aren't on this server".into()))
+    }
+    /// The chain a bootstrap token or machine credential belongs to (`None`: it isn't one).
+    fn chain_of(&self, secret: &str) -> crate::Result<Option<String>> {
+        let _ = secret;
+        Ok(None)
+    }
+    /// Spend a live bootstrap token (`from_bootstrap`) or machine credential for a new machine
+    /// credential of `hours`. A spent one revokes its chain: [`Step::Reused`]. Blocking.
+    fn redeem(&self, secret: &str, from_bootstrap: bool, ip: Option<&str>, hours: u32) -> crate::Result<Step<Chained>> {
+        let _ = (secret, from_bootstrap, ip, hours);
+        Err(crate::Error::Unauthorized("bootstrap tokens aren't on this server".into()))
+    }
+    /// A live machine credential's grant and chain, to log in with (nothing is spent). A spent one
+    /// revokes its chain. Blocking.
+    fn machine(&self, secret: &str, ip: Option<&str>) -> crate::Result<Step<(String, String)>> {
+        let _ = (secret, ip);
+        Err(crate::Error::Unauthorized("machine credentials aren't on this server".into()))
+    }
+    /// [`Workloads::mint`] for a machine credential's login (`via`: its grant): the token joins its
+    /// chain and goes with it. Blocking.
+    fn mint_via(&self, name: &str, rule: roll_auth::scope::Rule, ip_allow: Option<Vec<String>>, minutes: u32, owner: Option<&str>, via: &str) -> crate::Result<Minted> {
+        let _ = (name, rule, ip_allow, minutes, owner, via);
+        Err(crate::Error::Unauthorized("machine credentials aren't on this server".into()))
+    }
+    /// End every credential and token of a chain (its identity deleted or disabled). Blocking.
+    fn revoke_chain(&self, chain: &str, why: &str) -> crate::Result<()> {
+        let _ = (chain, why);
+        Ok(())
+    }
+}
+
+/// A bootstrap token or machine credential (shown once), its chain and when it was made and ends
+/// (Unix ms).
+pub struct Chained {
+    pub chain: String,
+    pub secret: String,
+    pub issued_at: i64,
+    pub expires_at: i64,
+}
+
+/// What presenting a chain's secret came to.
+pub enum Step<T> {
+    Live(T),
+    /// It had been spent: its whole chain is revoked now.
+    Reused { chain: String },
 }
 
 /// The most grants one [`Workloads::revoke_many`] takes (roll-access's `MAX_REVOKE`).
