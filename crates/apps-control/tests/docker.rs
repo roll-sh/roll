@@ -1637,10 +1637,11 @@ class H(http.server.BaseHTTPRequestHandler):
 http.server.HTTPServer(('0.0.0.0', int(os.environ['PORT'])), H).serve_forever()
 "),
     ], "python otel True", json!({"otel": true}), traces.clone()).await;
-    // .NET's: its zip checked for the build's architecture, the runtime's startup hook loaded.
+    // .NET's: its zip checked for the build's architecture, its startup hook and native profiler
+    // both loaded (a wrong profiler path only logs).
     builds_and_answers_in(&w, "dotnet-otel", &[
         ("app.csproj", "<Project Sdk=\"Microsoft.NET.Sdk.Web\"><PropertyGroup><TargetFramework>net9.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings></PropertyGroup></Project>\n"),
-        ("Program.cs", "var app = WebApplication.CreateBuilder(args).Build();\napp.MapGet(\"/\", () => \"dotnet otel \" + AppDomain.CurrentDomain.GetAssemblies().Any(a => a.GetName().Name!.StartsWith(\"OpenTelemetry.AutoInstrumentation\")));\napp.Run();\n"),
+        ("Program.cs", "var app = WebApplication.CreateBuilder(args).Build();\napp.MapGet(\"/\", () => \"dotnet otel \" + (AppDomain.CurrentDomain.GetAssemblies().Any(a => a.GetName().Name!.StartsWith(\"OpenTelemetry.AutoInstrumentation\")) && File.ReadAllText(\"/proc/self/maps\").Contains(\"OpenTelemetry.AutoInstrumentation.Native.so\")));\napp.Run();\n"),
     ], "dotnet otel True", json!({"otel": true}), traces).await;
     w.apps.shutdown().await;
 }
