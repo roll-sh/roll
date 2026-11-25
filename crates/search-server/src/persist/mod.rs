@@ -1148,23 +1148,26 @@ impl ClusterData {
     }
 
     fn append_pending(&self, st: &ShardState) -> Result<(), PersistError> {
-        let ops = std::mem::take(&mut *st.pending.lock());
-        if ops.is_empty() {
+        // Held until `lsn` covers them: whoever finds nothing pending (under this lock) finds
+        // the shard's `lsn` past every operation it had, so it never acknowledges, or reports
+        // durable, ahead of the WAL. Only shards not attached yet take this path.
+        let mut pending = st.pending.lock();
+        if pending.is_empty() {
             return Ok(());
         }
         let g = st.wal.read();
         let w = g.as_ref().expect("attached");
-        match w.append_many(&ops) {
+        match w.append_many(&pending[..]) {
             Ok(lsn) => {
                 st.lsn.fetch_max(lsn, Ordering::SeqCst);
                 self.last_lsn.fetch_max(lsn, Ordering::SeqCst);
+                pending.clear();
                 Ok(())
             }
             Err(e) => {
+                // They stay pending, in order, for the next append.
                 drop(g);
-                let mut p = st.pending.lock();
-                let later = std::mem::replace(&mut *p, ops);
-                p.extend(later);
+                drop(pending);
                 Err(self.classify(e))
             }
         }
@@ -1703,10 +1706,18 @@ impl ShardLog for OpLog {
             if d.closed.load(Ordering::SeqCst) {
                 return Err(EsError::new(503, "cluster_block_exception", format!("cluster [{}] was unloaded before the writes were made durable", d.cluster)));
             }
-            if self.st.has_pending() {
+            // Nothing pending and the newest LSN, read together under the pending lock
+            // ([`ClusterData::append_pending`] holds it until `lsn` covers what it took).
+            let lsn = loop {
+                let (pending, lsn) = {
+                    let p = self.st.pending.lock();
+                    (!p.is_empty(), self.st.lsn.load(Ordering::SeqCst))
+                };
+                if !pending {
+                    break lsn;
+                }
                 d.drain(&self.st).await.map_err(|e| e.to_es(&d.cluster))?;
-            }
-            let lsn = self.st.lsn.load(Ordering::SeqCst);
+            };
             if lsn > d.acked_lsn.load(Ordering::SeqCst) {
                 d.acknowledge(lsn).await.map_err(|e| e.to_es(&d.cluster))?;
             }

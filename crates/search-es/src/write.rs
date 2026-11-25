@@ -464,6 +464,12 @@ fn check_target(st: &ClusterState, t: &Target, args: &WriteArgs, expr: &str) -> 
         return Err(EsError::closed_index(&t.index.name, &t.index.uuid));
     }
     crate::meta::blocks::check(std::iter::once(t.index.as_ref()), crate::meta::blocks::Level::Write)?;
+    // An index a restore from an Elasticsearch snapshot is still filling takes no writes, as
+    // Elasticsearch's shards don't while they recover: the restore's documents come with their
+    // own sequence numbers, which a write in between would take first.
+    if t.index.recovery_source.as_ref().and_then(|rs| rs.get("roll_elastic")).and_then(|e| e.get("state")).and_then(|v| v.as_str()) == Some("running") {
+        return Err(EsError::new(503, "unavailable_shards_exception", format!("[{}][0] primary shard is not active: the index is being restored from a snapshot", t.index.name)));
+    }
     Ok(())
 }
 

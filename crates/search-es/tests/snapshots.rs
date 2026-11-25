@@ -845,6 +845,9 @@ async fn restores_data_streams_elasticsearch_wrote() {
     let names: Vec<String> = at(&at(&v, "data_streams").as_array().unwrap()[0], "indices").as_array().unwrap().iter().map(|i| at(i, "index_name").as_str().unwrap().to_string()).collect();
     assert_eq!(names, backing.iter().map(|b| b.replacen(".ds-events-fixture", ".ds-copy-fixture", 1)).collect::<Vec<_>>());
     assert_eq!(at(&call(&c, "GET", "/copy-fixture/_count", None).await.1, "count").as_i64(), Some(40));
+    // No template matches it, and it takes writes all the same, into its write index.
+    let (s, v) = call(&c, "POST", "/copy-fixture/_doc?refresh=true", Some(r#"{"@timestamp":"2026-11-02T00:00:00Z","n":999}"#)).await;
+    assert_eq!((s, at(&v, "_index").as_str()), (201, names.last().map(String::as_str)), "{v:?}");
 
     let (s, v) = restore(r#"{"indices":".ds-events-fixture-*","rename_pattern":"\\.ds-events-(.+)","rename_replacement":"plain-$1"}"#).await;
     assert_eq!(s, 200, "{v:?}");

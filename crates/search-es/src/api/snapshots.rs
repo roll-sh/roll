@@ -56,7 +56,7 @@ mod s3;
 mod transfer;
 pub use analyze::analyze_repository;
 pub use elastic::decode_id as decode_elasticsearch_id;
-pub use elastic_restore::{ShardView as RestoringShard, resume as resume_elasticsearch_restores};
+pub use elastic_restore::{ShardView as RestoringShard, TEST_HOOK as ELASTIC_RESTORE_HOOK, TestHook as ElasticRestoreHook, resume as resume_elasticsearch_restores};
 pub use s3::ALLOW_PRIVATE as S3_ALLOW_PRIVATE;
 pub(crate) use cloud::{AZURE_CONTAINER, seal_stored_secrets};
 

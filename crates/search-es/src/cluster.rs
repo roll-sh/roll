@@ -393,6 +393,9 @@ pub struct TaskRegistry {
     /// Callers in [`TaskRegistry::wait_until`]: ending a task wakes `ended` only when there
     /// are any (a search ends several tasks).
     waiters: std::sync::atomic::AtomicUsize,
+    /// The cluster is leaving this node ([`crate::api::tasks::cancel_all`]): what its tasks stop
+    /// for isn't theirs to record as a failure (a restore resumes on the next owner).
+    unloading: std::sync::atomic::AtomicBool,
 }
 
 /// A finished task's record: the task as it ran and its response or failure.
@@ -429,6 +432,16 @@ impl TaskGuard<'_> {
 }
 
 impl TaskRegistry {
+    /// Marks the cluster as leaving this node: its tasks are being stopped for that.
+    pub fn mark_unloading(&self) {
+        self.unloading.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether the cluster is leaving this node ([`TaskRegistry::mark_unloading`]).
+    pub fn unloading(&self) -> bool {
+        self.unloading.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     pub fn register(&self, action: &str, description: &str, parent: Option<u64>, headers: Vec<(String, String)>) -> TaskGuard<'_> {
         self.start(NewTask { action: action.to_string().into(), description: description.to_string(), describe: None, parent, headers, cancellable: true, cancelled: None })
     }

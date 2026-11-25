@@ -688,3 +688,39 @@ async fn ilm_rolls_an_index_over_on_its_own() {
     .await
     .expect("the first document rolls the index over");
 }
+
+/// A restore from an Elasticsearch repository whose owner is killed after recording its first
+/// shard finished: the next owner resumes it from the second shard, and every document is there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_killed_owners_restore_resumes_after_its_finished_shards() {
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../search-es/tests/fixtures/es-snapshots");
+    let (a, b) = two_nodes("fleet-es-restore", |c| c.node_settings.push(("path.repo".into(), fixtures.display().to_string()))).await;
+    let hook = search_es::api::snapshots::ELASTIC_RESTORE_HOOK.get_or_init(Default::default);
+    *hook.stop_after.lock().unwrap() = Some(("mixed".into(), 0));
+    let http = reqwest::Client::new();
+    let (s, c) = call(&http, reqwest::Method::POST, format!("{}/v1/search/clusters", a.api), None, Some(json!({"name": "restore"}))).await;
+    assert_eq!(s, 200, "{c}");
+    let pw = c["password"].as_str().unwrap().to_string();
+    let es = |n: &Node, method: reqwest::Method, path: &str, body: Option<Value>| call(&http, method, format!("{}{path}", n.rest), Some(("restore", &pw)), body);
+    let (s, v) = es(&a, reqwest::Method::PUT, "/_snapshot/es", Some(json!({"type": "fs", "settings": {"location": "es-9.5.5"}}))).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = es(&a, reqwest::Method::POST, "/_snapshot/es/snap-1/_restore", Some(json!({"indices": "mixed"}))).await;
+    assert_eq!(s, 200, "{v}");
+    tokio::time::timeout(Duration::from_secs(30), hook.stopped.notified()).await.expect("the first shard is recorded finished");
+    let key = search_control::cluster::key("restore");
+    let (owner, other) = if a.cluster.owns(&key) { (&a, &b) } else { (&b, &a) };
+    owner.cluster.fault_kill();
+
+    // The next owner resumes it once its lease expires; writes wait for the restore.
+    let v = eventually(30, async || {
+        let (s, v) = es(other, reqwest::Method::PUT, "/mixed/_doc/after?routing=r&refresh=true", Some(json!({"n": 1}))).await;
+        (s == 201, v)
+    })
+    .await
+    .expect("the next owner finishes the restore");
+    assert!(other.cluster.owns(&key), "{v}");
+    let (s, v) = es(other, reqwest::Method::GET, "/mixed/_count", None).await;
+    assert_eq!((s, v["count"].as_i64()), (200, Some(52)), "{v}");
+    let started = hook.started.lock().unwrap().clone();
+    assert_eq!(started, [("mixed".to_string(), 0), ("mixed".to_string(), 1)], "the next owner restored a finished shard again");
+}
