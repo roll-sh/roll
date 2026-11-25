@@ -35,6 +35,7 @@ mod audit;
 pub mod audit_key;
 pub use roll_secrets_chain as chain;
 pub mod backup;
+mod backup_rows;
 pub mod crypto;
 pub mod dotenv;
 mod envs;
@@ -88,7 +89,7 @@ mod write;
 pub mod unseal;
 pub mod validity;
 
-pub use access::{Action, Approval, Caller, Minted, People, Person, Scope, Workloads, PREVIEWS};
+pub use access::{Action, Approval, Caller, Chained, Minted, People, Person, Scope, Step, Workloads, PREVIEWS};
 pub use api::router;
 pub use crypto::{Keyring, Value};
 pub use audit::{AuditEntry, AuditFilter, VerifyQuery};
@@ -104,7 +105,7 @@ pub use read::{Delta, Followed, Grid, Held, Linked, Problem, Secret, Source, Val
 pub use requests::{Request, RequestPage, RequestValue, Review, Verdict};
 pub use exports::Export;
 pub use decoys::{Decoy, NewDecoy};
-pub use identities::{Identity, IdentityKind, Login, NewIdentity, Proof};
+pub use identities::{Identity, IdentityKind, Login, MachineSecret, NewBootstrap, NewIdentity, Proof};
 pub use issuer::Subject;
 pub use required::Required;
 pub use shares::{NewShare, Peek, Share};
@@ -543,6 +544,9 @@ impl Secrets {
         db.add_column("audit", "event_data", "TEXT")?;
         db.ensure_schema(events::SCHEMA)?;
         db.ensure_schema(notifications::SCHEMA)?;
+        // When a subscription was last taken (or retries): a pass takes the oldest first.
+        db.add_column("notifications", "due_at", "INTEGER NOT NULL DEFAULT 0")?;
+        db.ensure_schema("CREATE INDEX IF NOT EXISTS notifications_due ON notifications (due_at) WHERE state = 'active';")?;
         // A feed filtered by kind reads an index range, not every event since its cursor (#793 made
         // every write an event).
         db.migrate("secrets-audit-event-kinds", |c| c.execute_batch("CREATE INDEX IF NOT EXISTS audit_event_kinds ON audit (project_id, event, seq) WHERE event IS NOT NULL"))?;
@@ -653,7 +657,8 @@ impl Secrets {
         db.add_column("cas", "acme_preauthorize", "INTEGER")?;
         db.ensure_schema(ssh::SCHEMA)?;
         db.ensure_schema(public_certs::SCHEMA)?;
-        // The certificate a renewal replaced, and the renewals asked for (public_certs.rs).
+        // The certificate a renewal replaced, the renewals asked for, and the sweep's marks
+        // (public_certs.rs).
         for (column, decl) in public_certs::ADDED {
             db.add_column("public_certs", column, decl)?;
         }

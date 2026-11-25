@@ -15,12 +15,17 @@ export interface Starter {
   name: string;
   /** What it is, in a few words. */
   blurb: string;
-  /** Path to content; `{{name}}` is the repo's name. */
+  /** Path to content; `{{name}}` is the repo's name as a package name ([`starterSlug`]). */
   files: Record<string, string>;
 }
 
 export const STARTERS: Starter[] = [next, astro, hono, fastapi, go];
 
+/** A repo's name as package.json and go.mod take it: lowercase, no leading or trailing `.`, `_` or `-`. */
+export const starterSlug = (name: string): string => name.toLowerCase().replace(/^[._-]+|[._-]+$/g, "") || "app";
+
 /** The starter's files for a repo named `name`. */
-export const starterFiles = (s: Starter, name: string): Record<string, { content: string }> =>
-  Object.fromEntries(Object.entries(s.files).map(([path, text]) => [path, { content: text.replaceAll("{{name}}", name) }]));
+export const starterFiles = (s: Starter, name: string): Record<string, { content: string }> => {
+  const slug = starterSlug(name);
+  return Object.fromEntries(Object.entries(s.files).map(([path, text]) => [path, { content: text.replaceAll("{{name}}", slug) }]));
+};

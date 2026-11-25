@@ -107,6 +107,8 @@ s3-server.workspace = true
 s3-store.workspace = true
 # `tests/secrets.rs`: roll secrets in process.
 roll-secrets.workspace = true
+# `tests/secrets.rs`: a fake Google's identity tokens.
+ring.workspace = true
 # `tests/search.rs` runs the `roll` binary against an in-process search control plane.
 search-control.workspace = true
 search-server.workspace = true

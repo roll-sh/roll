@@ -172,6 +172,11 @@ pub struct Usage {
 pub trait Runtime: Send + Sync {
     /// `docker`, `fargate`, `fake`.
     fn name(&self) -> &'static str;
+    /// The platform its instances run on (`linux/amd64`), when it knows: an uploaded image for
+    /// another is refused before it's started.
+    fn platform(&self) -> Option<String> {
+        None
+    }
     /// Whether a sleeping web instance's network accepted a connection since it went to sleep
     /// (its stop or suspend) or since it was last asked ([`netns`]: cheap, asked often): a
     /// caller rolld didn't see, one of the project's other services. False where the runtime
