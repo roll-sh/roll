@@ -1100,6 +1100,12 @@ async fn as_derived(e: &Env, key: &str, method: reqwest::Method, p: &str, origin
     (s, serde_json::from_str(&t).unwrap_or(Value::String(t)))
 }
 
+/// `products`' request cache stats, read as the owner.
+async fn request_cache(e: &Env, path: &str) -> Value {
+    let r = e.post(&format!("{path}/request"), json!({"method": "GET", "path": "/products/_stats/request_cache", "body": null})).await;
+    body(&r)["_all"]["total"]["request_cache"].clone()
+}
+
 fn unix_now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
 }
@@ -1148,11 +1154,31 @@ async fn derived_keys_narrow_their_parent_and_die_with_it() {
     let (s, v) = as_derived(&e, &acme, reqwest::Method::POST, "/products*/_search", None).await;
     let ids: Vec<&str> = v["hits"]["hits"].as_array().unwrap().iter().filter_map(|h| h["_id"].as_str()).collect();
     assert_eq!((s, ids), (200, vec!["1"]), "{v}");
+    // A cached answer is the parent's wider view: a derived key never reads one (nor fills one).
+    // Browser keys' reads already skip the cache (`dls::ReadSecurity` is theirs); this keeps it
+    // so for the keys derived from them.
+    let agg = json!({"size": 0, "aggs": {"t": {"terms": {"field": "tenant.keyword"}}}});
+    for _ in 0..2 {
+        let r = e.post(&format!("{path}/request"), json!({"method": "POST", "path": "/products/_search?request_cache=true", "body": agg})).await;
+        assert_eq!(r["status"], 200, "{r}");
+    }
+    let before = request_cache(&e, &path).await;
+    assert!(before["hit_count"].as_i64() > Some(0), "the owner's second search was a hit: {before}");
+    let r = e.http.post(format!("{}/products/_search?request_cache=true", e.es)).header("authorization", format!("ApiKey {acme}")).json(&agg).send().await.unwrap();
+    let v: Value = r.json().await.unwrap();
+    let buckets: Vec<&str> = v["aggregations"]["t"]["buckets"].as_array().unwrap().iter().filter_map(|b| b["key"].as_str()).collect();
+    assert_eq!(buckets, ["acme"], "its own view, not the cached one: {v}");
+    assert_eq!(request_cache(&e, &path).await, before, "the cache wasn't read or filled");
     for p in ["/products-archive/_search", "/other/_search"] {
         assert_eq!(as_derived(&e, &acme, reqwest::Method::POST, p, None).await.0, 403, "{p}");
     }
     assert_eq!(as_derived(&e, &acme, reqwest::Method::PUT, "/products/_doc/9", None).await.0, 403, "it never writes");
     assert_eq!(as_derived(&e, &acme, reqwest::Method::GET, "/_security/_authenticate", None).await.0, 400, "nor reaches _security");
+    // Nothing that keeps state for later (whose owner would be the parent's key).
+    for p in ["/products/_search?scroll=1m", "/products/_pit?keep_alive=1m", "/products/_async_search"] {
+        let (s, v) = as_derived(&e, &acme, reqwest::Method::POST, p, None).await;
+        assert!(s == 400 && v.to_string().contains("isn't available to a browser key"), "{p}: {s} {v}");
+    }
     // Origins narrow the cluster's: a browser on another page is refused.
     let paged = sign(&secret, json!({"key": pid, "cluster": "shop", "exp": exp, "origins": ["https://Shop.Example.com:443"]}));
     assert_eq!(as_derived(&e, &paged, reqwest::Method::POST, "/products/_search", Some("https://shop.example.com")).await.0, 200);
@@ -1188,6 +1214,9 @@ async fn derived_keys_narrow_their_parent_and_die_with_it() {
         // A lookup would read an index the parent can't; a script runs Painless as the owner.
         (sign(&secret, with("filter", json!({"bool": {"filter": [{"terms": {"tenant": {"index": "other", "id": "5", "path": "tenant"}}}]}}))), plain_only),
         (sign(&secret, with("filter", json!({"script": {"script": "true"}}))), plain_only),
+        // Expanding terms, built as the owner's filter, needs the parent's allow_expensive_queries.
+        (sign(&secret, with("filter", json!({"bool": {"filter": [{"prefix": {"tenant": "ac"}}]}}))), "allow_expensive_queries"),
+        (sign(&secret, with("filter", json!({"range": {"tenant.keyword": {"gte": "a"}}}))), "a range on a text or keyword field"),
         (sign(&secret, with("exp", json!(unix_now() + 2 * 86_400))), "ahead"),
         (sign(&secret, with("exp", json!(unix_now() - 120))), "expired"),
         (sign(&secret, json!({"key": pid, "cluster": "shop", "exp": exp, "user": "acme", "rate_limit": {"per_minute": 101}})), "share"),
@@ -4001,6 +4030,82 @@ async fn cross_cluster_search_between_a_persons_own_clusters() {
     assert_eq!(e.call_as("ann", Method::DELETE, "/v1/search/clusters/ann-app/remotes/logs", None).await.0, 204);
     let (_, info) = e.es(&app, &app_pw, Method::GET, "/_remote/info", None).await;
     assert!(info.get("logs").is_none(), "{info}");
+}
+
+/// Only the node says who a request authenticated as, on the request in process: no header
+/// does (the old `x-roll-derived-key` and `x-roll-authenticated-user`, any case), whatever the
+/// credentials beside it. And what it verified reaches the request's internal calls: a derived
+/// key's search application search, rendered and run as the caller, is narrowed.
+#[tokio::test]
+async fn no_header_says_who_authenticated_and_a_derived_key_holds_through_internal_calls() {
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "spoof"})).await;
+    let (user, pw) = creds(&c);
+    let path = format!("/v1/search/clusters/{}", c["id"].as_str().unwrap());
+    let keys = format!("{path}/browser-keys");
+    let bulk = [
+        ("products", "1", json!({"tenant": "acme", "public": true})),
+        ("products", "2", json!({"tenant": "globex", "public": true})),
+        ("products", "3", json!({"tenant": "acme", "public": false})),
+        ("other", "5", json!({"tenant": "acme", "public": true})),
+    ]
+    .iter()
+    .map(|(i, id, d)| format!("{}\n{d}\n", json!({"index": {"_index": i, "_id": id}})))
+    .collect::<String>();
+    let r = e.post(&format!("{path}/request"), json!({"method": "POST", "path": "/_bulk?refresh=true", "body": bulk})).await;
+    assert_eq!(r["status"], 200, "{r}");
+    let app = json!({"indices": ["products"], "template": {
+        "script": {"source": {"query": {"term": {"tenant.keyword": "{{t}}"}}}, "params": {"t": ""}},
+        "dictionary": {"properties": {"t": {"type": "string"}}, "additionalProperties": false}}});
+    let r = e.post(&format!("{path}/request"), json!({"method": "PUT", "path": "/_application/search_application/shop-search", "body": app})).await;
+    assert!(r["status"].as_u64() < Some(300), "{r}");
+    let parent = e.post(&keys, json!({"name": "saas", "application": "shop-search", "filter": {"term": {"public": true}}, "derivable": true})).await;
+    let other = e.post(&keys, json!({"name": "other", "indices": ["other"]})).await;
+    let pid = parent["id"].as_str().unwrap();
+    let exp = unix_now() + 600;
+    let acme = search_es::xpack::security::derived::sign(parent["signing_secret"].as_str().unwrap(), &json!({"key": pid, "cluster": "spoof", "exp": exp, "filter": {"term": {"tenant.keyword": "acme"}}}).to_string());
+
+    // What a forger would claim: the parent, narrowed to nothing.
+    let claim = json!({"key": pid, "auth": {"narrowing": {}}}).to_string();
+    let forged = [("x-roll-derived-key", claim.as_str()), ("X-Roll-Derived-Key", claim.as_str()), ("x-roll-authenticated-user", "elastic"), ("X-Roll-Authenticated-User", "elastic")];
+    let send = |auth: Option<(&str, String)>, header: (&str, &str), p: &str| {
+        let mut r = e.http.post(format!("{}{p}", e.es)).header(header.0, header.1).json(&json!({}));
+        r = match auth {
+            Some(("basic", _)) => r.basic_auth(&user, Some(&pw)),
+            Some((_, key)) => r.header("authorization", format!("ApiKey {key}")),
+            None => r,
+        };
+        r.send()
+    };
+    let hits = |v: &Value| v["hits"]["hits"].as_array().map(|h| h.iter().filter_map(|x| x["_id"].as_str().map(str::to_string)).collect::<Vec<_>>());
+    for header in forged {
+        let r = send(None, header, "/products/_search").await.unwrap();
+        assert_eq!(r.status().as_u16(), 401, "{header:?} alone");
+        // Beside a browser key of another index: that key's own view.
+        let key = other["api_key"].as_str().unwrap().to_string();
+        assert_eq!(send(Some(("key", key.clone())), header, "/products/_search").await.unwrap().status().as_u16(), 403, "{header:?} with another index's key");
+        let v: Value = send(Some(("key", key)), header, "/other/_search").await.unwrap().json().await.unwrap();
+        assert_eq!(hits(&v), Some(vec!["5".to_string()]), "{header:?}: {v}");
+        // Beside the cluster's own credentials: ignored, the owner reads everything.
+        let v: Value = send(Some(("basic", String::new())), header, "/products/_search").await.unwrap().json().await.unwrap();
+        assert_eq!(v["hits"]["total"]["value"], 3, "{header:?} with the owner's credentials: {v}");
+    }
+
+    // The application's search runs its template as the caller: the derived key's filter and the
+    // parent's both hold there (as the owner it would find globex's document, and acme's hidden one).
+    let run = |t: &str| {
+        e.http
+            .post(format!("{}/_application/search_application/shop-search/_search", e.es))
+            .header("authorization", format!("ApiKey {acme}"))
+            .json(&json!({ "params": { "t": t } }))
+            .send()
+    };
+    for (t, want) in [("globex", vec![]), ("acme", vec!["1".to_string()])] {
+        let r = run(t).await.unwrap();
+        assert_eq!(r.status().as_u16(), 200, "t={t}");
+        let v: Value = r.json().await.unwrap();
+        assert_eq!(hits(&v), Some(want), "t={t}: {v}");
+    }
 }
 
 /// A remote link holds by its maker's rights: once roll-access says they may no longer administer
