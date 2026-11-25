@@ -1192,6 +1192,17 @@ async fn derived_keys_narrow_their_parent_and_die_with_it() {
     let text = json!(audit).to_string();
     assert!(!text.contains("::roll_sealed::") && !text.contains(&secret), "no secret in the audit log");
 
+    // A runtime field and a flattened one on `products`, and a data stream the parent's
+    // `products*` reaches, whose backing index (`.ds-…`) no pattern names.
+    for (m, p, b) in [
+        ("PUT", "/products/_mapping", json!({"runtime": {"r": {"type": "keyword", "script": "emit('x')"}}, "properties": {"labels": {"type": "flattened"}}})),
+        ("PUT", "/_index_template/plogs", json!({"index_patterns": ["products-logs*"], "data_stream": {}, "template": {"mappings": {"properties": {"host": {"type": "keyword"}}}}})),
+        ("POST", "/products-logs/_doc?refresh=true", json!({"@timestamp": "2026-11-25T00:00:00Z", "host": "a"})),
+    ] {
+        let r = e.post(&format!("{path}/request"), json!({"method": m, "path": p, "body": b})).await;
+        assert!(r["status"].as_u64() < Some(300), "{p}: {r}");
+    }
+
     // Every widening, and every way of not being the parent's, is refused; until the signature
     // verifies, all alike.
     let unverified = "\"API key: derived key refused\"";
@@ -1215,6 +1226,9 @@ async fn derived_keys_narrow_their_parent_and_die_with_it() {
         // Expanding terms, built as the owner's filter, needs the parent's allow_expensive_queries.
         (sign(&secret, with("filter", json!({"bool": {"filter": [{"prefix": {"tenant": "ac"}}]}}))), "allow_expensive_queries"),
         (sign(&secret, with("filter", json!({"range": {"tenant.keyword": {"gte": "a"}}}))), "a range on a text or keyword field"),
+        (sign(&secret, with("filter", json!({"range": {"labels.size": {"gte": "a"}}}))), "a range on a text or keyword field"),
+        (sign(&secret, json!({"key": pid, "cluster": "shop", "exp": exp, "indices": ["products-logs"], "filter": {"range": {"host": {"gte": "a"}}}})), "a range on a text or keyword field"),
+        (sign(&secret, with("filter", json!({"term": {"r": "x"}}))), "a query on a runtime field"),
         (sign(&secret, with("exp", json!(unix_now() + 2 * 86_400))), "ahead"),
         (sign(&secret, with("exp", json!(unix_now() - 120))), "expired"),
         (sign(&secret, json!({"key": pid, "cluster": "shop", "exp": exp, "user": "acme", "rate_limit": {"per_minute": 101}})), "share"),
@@ -1514,6 +1528,57 @@ async fn filtered_api_key(e: &Env) -> String {
     base64::engine::general_purpose::STANDARD.encode(format!("{}@shop:{}", v["id"].as_str().unwrap(), v["api_key"].as_str().unwrap()))
 }
 
+/// An update reads the whole document and writes it back, so where a key's document or field
+/// level security restricts the index it isn't run (Elasticsearch 400, OpenSearch 500), in a
+/// bulk request too. An update by query reads as the key: only the documents it sees, without
+/// the fields it can't, which its write-back drops (as Elasticsearch's does).
+#[tokio::test]
+async fn updates_respect_document_and_field_level_security() {
+    use base64::Engine;
+    let e = env().await;
+    let e = &e;
+    e.post("/v1/search/clusters", json!({"name": "upd"})).await;
+    let console = |m: &str, p: &str, b: Value| e.post("/v1/search/clusters/upd/request", json!({"method": m, "path": p, "body": b}));
+    let bulk = "{\"index\":{\"_index\":\"x\",\"_id\":\"1\"}}\n{\"public\":true,\"note\":\"n1\",\"ssn\":\"111\"}\n\
+                {\"index\":{\"_index\":\"x\",\"_id\":\"2\"}}\n{\"public\":false,\"note\":\"n2\",\"ssn\":\"222\"}\n";
+    assert_eq!(console("POST", "/_bulk?refresh=true", Value::String(bulk.into())).await["status"], 200);
+    let key = |name: &str, grant: Value| {
+        let name = name.to_string();
+        async move {
+            let mut g = json!({"names": ["x"], "privileges": ["read", "write"]});
+            g.as_object_mut().unwrap().extend(grant.as_object().unwrap().clone());
+            let v = body(&console("POST", "/_security/api_key", json!({"name": name, "role_descriptors": {"r": {"indices": [g]}}})).await);
+            base64::engine::general_purpose::STANDARD.encode(format!("{}@upd:{}", v["id"].as_str().unwrap(), v["api_key"].as_str().unwrap()))
+        }
+    };
+    let dls = key("dls", json!({"query": {"term": {"public": true}}})).await;
+    let fls = key("fls", json!({"field_security": {"grant": ["public", "note"]}})).await;
+    let doc = |id: &str| {
+        let p = format!("/x/_doc/{id}");
+        async move { body(&console("GET", &p, Value::Null).await)["_source"].clone() }
+    };
+    // A hidden document can't be made visible.
+    let (s, v) = as_key(e, &dls, reqwest::Method::POST, "/x/_update/2", Some(json!({"script": "ctx._source.public = true"}))).await;
+    assert_eq!((s, v["error"]["reason"].as_str()), (400, Some("Can't execute an update request if field or document level security is enabled")), "{v}");
+    assert_eq!(doc("2").await["public"], false);
+    // A hidden field can't be read into a visible one, by an update or a bulk update.
+    let (s, v) = as_key(e, &fls, reqwest::Method::POST, "/x/_update/1", Some(json!({"script": "ctx._source.note = ctx._source.ssn"}))).await;
+    assert_eq!(s, 400, "{v}");
+    let item = "{\"update\":{\"_index\":\"x\",\"_id\":\"1\"}}\n{\"script\":\"ctx._source.note = ctx._source.ssn\"}\n";
+    let r = e.http.post(format!("{}/_bulk", e.es)).header("authorization", format!("ApiKey {fls}")).header("content-type", "application/x-ndjson").body(item).send().await.unwrap();
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["items"][0]["update"]["status"], 400, "{v}");
+    assert_eq!(doc("1").await["note"], "n1");
+    // An update by query sees what a search sees.
+    let (s, v) = as_key(e, &fls, reqwest::Method::POST, "/x/_update_by_query", Some(json!({"script": "ctx._source.note = ctx._source.ssn"}))).await;
+    assert_eq!((s, &v["updated"]), (200, &json!(2)), "{v}");
+    assert_eq!(doc("1").await, json!({"public": true, "note": null}), "ssn never reaches a visible field");
+    assert_eq!(console("POST", "/x/_refresh", Value::Null).await["status"], 200);
+    let (s, v) = as_key(e, &dls, reqwest::Method::POST, "/x/_update_by_query", Some(json!({"script": "ctx._source.public = true"}))).await;
+    assert_eq!((s, &v["updated"]), (200, &json!(1)), "only the visible document: {v}");
+    assert_eq!(doc("2").await["public"], false);
+}
+
 /// Term vectors of a document a key's filter hides are "not found", as its get is.
 #[tokio::test]
 async fn term_vectors_of_a_hidden_document_are_not_found() {
@@ -1524,6 +1589,71 @@ async fn term_vectors_of_a_hidden_document_are_not_found() {
     assert_eq!((s, &v["found"]), (200, &json!(false)), "{v}");
     let (s, v) = as_key(&e, &key, reqwest::Method::GET, "/products/_termvectors/1", None).await;
     assert_eq!((s, &v["found"]), (200, &json!(true)), "{v}");
+    let (s, v) = as_key(&e, &key, reqwest::Method::POST, "/_mtermvectors", Some(json!({"docs": [{"_index": "products", "_id": "2"}, {"_index": "products", "_id": "1"}]}))).await;
+    assert_eq!((s, &v["docs"][0]["found"], &v["docs"][1]["found"]), (200, &json!(false), &json!(true)), "{v}");
+}
+
+/// A reader of `tenant-a-*` reads no other index through term vectors or `_rank_eval`, on both
+/// dialects: each `_mtermvectors` item is authorized on its own index (Elasticsearch's
+/// `indices:data/read/mtv[shard]`), and the lookups of a rated request, verbatim or rendered
+/// from a template, fail that request; `_rank_eval` searches only the indices its wildcards may
+/// read, as a search does.
+#[tokio::test]
+async fn term_vectors_and_rank_eval_read_only_what_the_caller_may() {
+    use reqwest::Method;
+    let e = env().await;
+    let lookup = |index: &str| json!({"query": {"terms": {"n": {"index": index, "id": "1", "path": "ids"}}}});
+    let template = json!({"templates": [{"id": "t", "template": {"source": lookup("{{i}}")}}], "requests": [{"id": "q", "template_id": "t", "params": {"i": "tenant-b"}, "ratings": []}], "metric": {"precision": {}}});
+    for (name, flavor, role_path, role, user_path, user_body, reader) in [
+        ("tv", "elasticsearch", "/_security/role/ta", json!({"indices": [{"names": ["tenant-a-*"], "privileges": ["read"]}]}), "/_security/user/ann", json!({"password": "ann-password-1", "roles": ["ta"]}), "ann"),
+        (
+            "tv-os",
+            "opensearch",
+            "/_plugins/_security/api/roles/ta",
+            json!({"cluster_permissions": ["cluster_composite_ops_ro"], "index_permissions": [{"index_patterns": ["tenant-a-*"], "allowed_actions": ["read"]}]}),
+            "/_plugins/_security/api/internalusers/ann",
+            json!({"password": "Zq9#vLx2!pRt7mWk", "opendistro_security_roles": ["ta"]}),
+            "ann",
+        ),
+    ] {
+        let c = e.post("/v1/search/clusters", json!({"name": name, "flavor": flavor})).await;
+        let (admin, pw) = creds(&c);
+        for (path, body) in [
+            ("/tenant-a-1/_doc/1?refresh=true", json!({"t": "alpha words", "n": 1})),
+            ("/tenant-b/_doc/1?refresh=true", json!({"t": "secret words", "ids": ["1"]})),
+            (role_path, role.clone()),
+            (user_path, user_body.clone()),
+        ] {
+            let (s, v) = e.es(&admin, &pw, Method::PUT, path, Some(body)).await;
+            assert!(s == 200 || s == 201, "{name} {path}: {v}");
+        }
+        let user = format!("{reader}@{name}");
+        let user_pw = user_body["password"].as_str().unwrap();
+        let es = |method: Method, path: &'static str, body: Option<Value>| e.es(&user, user_pw, method, path, body);
+
+        let docs = json!({"docs": [{"_index": "tenant-a-1", "_id": "1", "fields": ["t"]}, {"_index": "tenant-b", "_id": "1", "fields": ["t"]}]});
+        for path in ["/_mtermvectors", "/tenant-a-1/_mtermvectors"] {
+            let (s, v) = es(Method::POST, path, Some(docs.clone())).await;
+            assert_eq!((s, &v["docs"][0]["found"]), (200, &json!(true)), "{name} {path}: {v}");
+            let refused = &v["docs"][1];
+            assert!(refused["error"]["type"] == "security_exception" && refused.get("term_vectors").is_none(), "{name} {path}: {v}");
+            assert!(refused["error"]["reason"].as_str().unwrap_or_default().contains("indices:data/read/mtv[shard]"), "{name} {path}: {v}");
+        }
+        assert_eq!(es(Method::GET, "/tenant-b/_termvectors/1", None).await.0, 403, "{name}");
+
+        let verbatim = json!({"requests": [{"id": "q", "request": lookup("tenant-b"), "ratings": []}], "metric": {"precision": {}}});
+        for body in [template.clone(), verbatim] {
+            let (s, v) = es(Method::POST, "/tenant-a-1/_rank_eval", Some(body)).await;
+            let error = &v["failures"]["q"]["error"];
+            assert!(s == 200 && error["type"] == "security_exception" && v["details"] == json!({}), "{name}: {v}");
+        }
+        if flavor == "elasticsearch" {
+            let all = json!({"requests": [{"id": "q", "request": {"query": {"match_all": {}}}, "ratings": []}], "metric": {"precision": {}}});
+            let (s, v) = es(Method::POST, "/tenant-*/_rank_eval", Some(all)).await;
+            let hits: Vec<&str> = v["details"]["q"]["hits"].as_array().map(|h| h.iter().filter_map(|h| h["hit"]["_index"].as_str()).collect()).unwrap_or_default();
+            assert_eq!((s, hits), (200, vec!["tenant-a-1"]), "{v}");
+        }
+    }
 }
 
 /// A stored result (async search, ES|QL, SQL) is its opener's: anyone else (here another API
@@ -4183,6 +4313,7 @@ async fn field_security_hides_a_field_on_every_read_path() {
         ("term suggester", reqwest::Method::POST, "/docs/_search", Some(json!({"suggest": {"s": {"text": "topsecretvalu", "term": {"field": "secret"}}}}))),
         ("termvectors", reqwest::Method::GET, "/docs/_termvectors/1?fields=secret", None),
         ("termvectors all", reqwest::Method::GET, "/docs/_termvectors/1", None),
+        ("mtermvectors", reqwest::Method::POST, "/_mtermvectors", Some(json!({"docs": [{"_index": "docs", "_id": "1", "fields": ["secret"]}]}))),
         ("explain", reqwest::Method::POST, "/docs/_explain/1", Some(json!({"query": {"match": {"name": "zebra"}}}))),
         ("mget", reqwest::Method::POST, "/_mget", Some(json!({"docs": [{"_index": "docs", "_id": "1"}]}))),
         ("esql", reqwest::Method::POST, "/_query", Some(json!({"query": "FROM docs"}))),

@@ -386,9 +386,13 @@ applications). A web page calls a cluster directly, with no backend of its own i
     expands terms (`prefix`, `wildcard`, the prefix match queries, `simple_query_string`,
     `fuzziness`, `max_expansions`) unless the parent's `limits.allow_expensive_queries`, since
     its expansions aren't capped as a browser key's own queries' are; nor, without it, a
-    `range` on a field an index the key reaches maps as text or a keyword (its terms are walked,
-    as Elasticsearch's `search.allow_expensive_queries: false` refuses), read from the mappings on
-    each request), a `range` on numbers and dates staying allowed, a `user` (an end
+    `range` on a field an index the key reaches maps as text or a keyword, a `flattened` field's
+    keyed subfields included (its terms are walked, as Elasticsearch's
+    `search.allow_expensive_queries: false` refuses), a `range` on numbers and dates staying
+    allowed; and never a query on a runtime field, which runs its script for every document.
+    The indices a key reaches are those its names match, by name or alias, and the backing
+    indices of the data streams (and data stream aliases) they name, their mappings read on each
+    request), a `user` (an end
     customer, Algolia's `userToken`),
     `origins` and `rate_limit: {"per_minute": n}` (the user's). Unknown fields, duplicate keys and
     trailing bytes are refused. It goes wherever a browser key goes (`Authorization: ApiKey

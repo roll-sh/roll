@@ -35,9 +35,9 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/projects/{project}/status-page` | | `{ title, url, items }`: the project's public status page; 404 without one | read |
 | `PUT /v1/apps/projects/{project}/status-page` | `{ title?: string /* 1–80, default "Status" */, items?: { service, environment?, check? \| heartbeat? }[] /* at most 50; none: every check and heartbeat of its environments */ }` | `{ title, url, items }`: made (a new public name, `status-<slug>.<domain>`) or changed (its name kept) | admin (it makes the project's service names public: a person's call, not a token's write) |
 | `DELETE /v1/apps/projects/{project}/status-page` | | 204: taken down | write |
-| `GET /v1/apps/projects/{project}/status-page/incidents` | | `{ incidents: { id, title, state, started_at, resolved_at, automatic, updates: { at, state, text }[] }[] }`: the last 90 days' and the open ones, newest first (at most 200) | read |
-| `POST /v1/apps/projects/{project}/status-page/incidents` | `{ title: string /* 1–120 */, state?: "investigating" \| "identified" \| "monitoring" \| "resolved", text: string /* 1–2000 */ }` | 201 `{ id }`: a person's incident on the page; 404 without a page | write |
-| `POST /v1/apps/projects/{project}/status-page/incidents/{iid}/updates` | `{ state, text }` | 204: an update (at most 100 an incident); `resolved` closes it | write |
+| `GET /v1/apps/projects/{project}/status-page/incidents` | | `{ incidents: { id, title, state, started_at, resolved_at, automatic, updates: { at, state, text }[], scheduled: { from, until } \| null /* a maintenance's window, ms */ }[] }`: the last 90 days' and the open ones, newest first (at most 200) | read |
+| `POST /v1/apps/projects/{project}/status-page/incidents` | `{ title: string /* 1–120 */, state?: "investigating" \| "identified" \| "monitoring" \| "resolved" \| "scheduled", text: string /* 1–2000 */, starts_at?: number, ends_at?: number /* a scheduled maintenance's window (unix ms, only with state scheduled): starts in the next 90 days, lasts at most a week; roll moves it to maintenance at its start and resolves it at its end */ }` | 201 `{ id }`: a person's incident on the page; 404 without a page | write |
+| `POST /v1/apps/projects/{project}/status-page/incidents/{iid}/updates` | `{ state, text }` (`state` as a new one's, or `maintenance`; never `scheduled`) | 204: an update (at most 100 an incident); `resolved` closes it | write |
 | `GET /v1/apps/projects/{project}/preview-domain` | | `Domain` (404: none): the project's own preview domain, a wildcard its preview environments answer under by their `preview_host`; `tls` is `none` (plain HTTP until wildcard certificates, DNS-01, are issued here) | read |
 | `POST /v1/apps/projects/{project}/preview-domain` | `{ hostname: "*.preview.acme.dev" }` (a wildcard; one a project, a new one replaces it; 409 when another project's previews or any service's domain has it) | 201 `Domain` (pending: the same CNAME, `target` its own, or `_roll-challenge` TXT a custom domain takes) | write |
 | `POST /v1/apps/projects/{project}/preview-domain/verify` | | `Domain` (active once its DNS checks out, else pending with what DNS answered) | write |
@@ -736,7 +736,7 @@ type ProjectImport = {
 type PlanRequest = { repo: string; revision?: string; root?: string } | { git: string /* a Git URL, fetched at its branch's head as its deploy would be */; branch?: string; root?: string; git_login?: { username: string; password: string } /* a private repository's */ } | { files: Record<string, string> };
 
 type Plan = {
-  provider: "dockerfile" | "deno" | "node" | "python" | "go" | "rust" | "ruby" | "php" | "java" | "dotnet" | "elixir" | "static" | "functions";
+  provider: "dockerfile" | "deno" | "node" | "python" | "go" | "rust" | "ruby" | "php" | "java" | "dotnet" | "elixir" | "scala" | "clojure" | "gleam" | "swift" | "dart" | "shell" | "static" | "functions";
   framework: string | null;  // next, django, rails, spring…
   language_version: string | null;
   install: string | null;

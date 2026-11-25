@@ -1034,6 +1034,9 @@ POST   /v1/code/agents/{owner}/automations/test TestRequest → TestResult
 GET    /v1/code/agents/{owner}/automations/runs?automation=&status=&before=&limit= → [AutomationRun]
        newest first, 50 by default, at most 200; `before` a run id (the next page)
 GET    /v1/code/agents/{owner}/automations/runs/{run} → RunDetail {run, event}
+       (a run for an issue someone who can't push opened, on a trigger that takes `anyone`'s,
+       `trusted_author: false` in its data: `event.data` and `run.event` carry `outside: true`, and
+       so does each such run's `event` in the runs lists, for MCP's lockdown)
 GET    /v1/code/agents/{owner}/automations/notices?before=&limit= → [Notice]
        the notify steps' notices, newest first (the newest 200 per owner are kept), 50 by default, at most
        200; `before` a notice's `at` (the next page). For a dashboard that wasn't open when they came.

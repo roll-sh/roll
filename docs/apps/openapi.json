@@ -1074,7 +1074,7 @@
     },
     "/v1/apps/projects/{project}/status-page/incidents": {
       "get": {
-        "description": "Answers `{ incidents: { id, title, state, started_at, resolved_at, automatic, updates: { at, state, text }[] }[] }`: the last 90 days' and the open ones, newest first (at most 200).",
+        "description": "Answers `{ incidents: { id, title, state, started_at, resolved_at, automatic, updates: { at, state, text }[], scheduled: { from, until } | null /* a maintenance's window, ms */ }[] }`: the last 90 days' and the open ones, newest first (at most 200).",
         "operationId": "getProjectsProjectStatusPageIncidents",
         "parameters": [
           {
@@ -1088,7 +1088,7 @@
         ],
         "responses": {
           "200": {
-            "description": "`{ incidents: { id, title, state, started_at, resolved_at, automatic, updates: { at, state, text }[] }[] }`: the last 90 days' and the open ones, newest first (at most 200)"
+            "description": "`{ incidents: { id, title, state, started_at, resolved_at, automatic, updates: { at, state, text }[], scheduled: { from, until } | null /* a maintenance's window, ms */ }[] }`: the last 90 days' and the open ones, newest first (at most 200)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -1121,7 +1121,7 @@
               }
             }
           },
-          "description": "`{ title: string /* 1–120 */, state?: \"investigating\" | \"identified\" | \"monitoring\" | \"resolved\", text: string /* 1–2000 */ }`"
+          "description": "`{ title: string /* 1–120 */, state?: \"investigating\" | \"identified\" | \"monitoring\" | \"resolved\" | \"scheduled\", text: string /* 1–2000 */, starts_at?: number, ends_at?: number /* a scheduled maintenance's window (unix ms, only with state scheduled): starts in the next 90 days, lasts at most a week; roll moves it to maintenance at its start and resolves it at its end */ }`"
         },
         "responses": {
           "201": {
@@ -1168,7 +1168,7 @@
               }
             }
           },
-          "description": "`{ state, text }`"
+          "description": "`{ state, text }` (`state` as a new one's, or `maintenance`; never `scheduled`)"
         },
         "responses": {
           "204": {

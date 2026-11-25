@@ -4,7 +4,8 @@ import { appsApi, type Incident, type IncidentState, type StatusPage } from "@/l
 import { btn, input, Panel, primary } from "../ui";
 import { since, SureButton, type Runner } from "./shared";
 
-const STATES: IncidentState[] = ["investigating", "identified", "monitoring", "resolved"];
+const STATES: IncidentState[] = ["investigating", "identified", "monitoring", "maintenance", "resolved"];
+const when = (ms: number) => new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 
 /** The page's incidents, newest first: each open one updated here (a state and what visitors
  *  should know; `resolved` closes it), as the API and `roll apps status-page` do. */
@@ -23,6 +24,11 @@ function Incidents({ project, incidents, runner, reload }: { project: string; in
               <span className={open ? "text-accent" : "text-muted"}>{i.state}</span>
               <span className="text-subtle">{i.automatic ? "opened by its check" : "posted"} {since(i.started_at)}</span>
             </div>
+            {i.scheduled && (
+              <p className="text-[12px] text-fg">
+                {when(i.scheduled.from)} – {when(i.scheduled.until)}
+              </p>
+            )}
             {i.updates.length > 0 && <p className="text-[12px] text-muted">{i.updates[i.updates.length - 1]!.text}</p>}
             {open && (
               <form
@@ -65,6 +71,8 @@ export function StatusPagePanel({ project, projectName, runner }: { project: str
   const [page, setPage] = useState<StatusPage | null | undefined>(undefined);
   const [title, setTitle] = useState("");
   const [incident, setIncident] = useState({ title: "", text: "" });
+  // A scheduled maintenance's window, as the browser's local time (datetime-local).
+  const [window_, setWindow] = useState<{ on: boolean; from: string; until: string }>({ on: false, from: "", until: "" });
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const reload = () => void appsApi.incidents(project).then(setIncidents, () => setIncidents([]));
   useEffect(() => {
@@ -94,18 +102,31 @@ export function StatusPagePanel({ project, projectName, runner }: { project: str
           className="flex flex-wrap items-center gap-2 border-t border-line px-5 py-4"
           onSubmit={(e) => {
             e.preventDefault();
-            void runner.run("incident", () => appsApi.postIncident(project, incident)).then((r) => {
+            const body = window_.on ? { ...incident, state: "scheduled", starts_at: new Date(window_.from).getTime(), ends_at: new Date(window_.until).getTime() } : incident;
+            void runner.run("incident", () => appsApi.postIncident(project, body)).then((r) => {
               if (!r) return;
               setIncident({ title: "", text: "" });
+              setWindow({ on: false, from: "", until: "" });
               reload();
             });
           }}
         >
           <input value={incident.title} onChange={(e) => setIncident({ ...incident, title: e.target.value })} placeholder="An incident's title (slow checkouts)" aria-label="Incident title" maxLength={120} className={`${input} min-w-48 flex-1 text-[12px]`} />
           <input value={incident.text} onChange={(e) => setIncident({ ...incident, text: e.target.value })} placeholder="What visitors should know" aria-label="Incident text" maxLength={2000} className={`${input} min-w-64 flex-[2] text-[12px]`} />
-          <button type="submit" className={primary} disabled={busy || !incident.title.trim() || !incident.text.trim()}>
-            Post an incident
+          <button type="submit" className={primary} disabled={busy || !incident.title.trim() || !incident.text.trim() || (window_.on && (!window_.from || !window_.until))}>
+            {window_.on ? "Schedule it" : "Post an incident"}
           </button>
+          <label className="flex w-full items-center gap-2 text-[12px] text-muted">
+            <input type="checkbox" checked={window_.on} onChange={(e) => setWindow({ ...window_, on: e.target.checked })} />
+            Scheduled maintenance: shown ahead, begun and over on its own
+          </label>
+          {window_.on && (
+            <div className="flex w-full flex-wrap items-center gap-2">
+              <input type="datetime-local" value={window_.from} onChange={(e) => setWindow({ ...window_, from: e.target.value })} aria-label="Maintenance starts" className={`${input} w-52 text-[12px]`} />
+              <span className="text-[12px] text-subtle">to</span>
+              <input type="datetime-local" value={window_.until} onChange={(e) => setWindow({ ...window_, until: e.target.value })} aria-label="Maintenance ends" className={`${input} w-52 text-[12px]`} />
+            </div>
+          )}
           <span className="w-full text-[12px] text-muted">Checks going down and heartbeats missed open and close their own.</span>
         </form>
       )}

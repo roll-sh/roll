@@ -21,6 +21,7 @@ import { spendOf, useWorkspace, workspace, type WorkspaceState } from "@/lib/wor
 import { useProjectServices } from "../apps/live";
 import { appsApi } from "@/lib/apps-api";
 import { FolderDeploy } from "../apps/folder-deploy";
+import { ProjectDrift } from "../apps/project-drift";
 import { TemplateList } from "../apps/deploy-repo";
 import { NewServiceSheet } from "../apps/new-service";
 import { AppShell } from "../app-shell";
@@ -182,6 +183,7 @@ function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: 
               <span className="max-md:hidden">Previews</span>
             </button>
           )}
+          <ProjectDrift project={project} />
           <Link href={`/dashboard/projects/${project.id}/secrets`} className={btn} title="This project's secrets and environment variables">
             <KeyRound className="size-3.5" />
             <span className="max-md:hidden">Secrets</span>
