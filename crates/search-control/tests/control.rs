@@ -1517,6 +1517,20 @@ async fn lookups_are_authorized_where_they_run() {
         let (s, v) = as_key(&e, &key, Method::POST, "/mine/_search", Some(json!({}))).await;
         refused("a templated role query's lookup", s, &v);
         assert!(v.to_string().contains("terms query with terms lookup isn't supported as part of a role query"), "{v}");
+        // However it's nested, a role query reads no other document: refused when stored, and
+        // when a template renders it, a get (which evaluates it) fails too.
+        let mlt = json!({"more_like_this": {"fields": ["k"], "like": [{"_index": "secret", "_id": "1"}], "min_term_freq": 1, "min_doc_freq": 1}});
+        let role_key = |q: Value| e.es(&ann, ann_pw, Method::POST, "/_security/api_key", Some(json!({"name": "q", "role_descriptors": {"r": {"indices": [{"names": ["mine"], "privileges": ["read"], "query": q}]}}})));
+        for q in [mlt.clone(), json!({"nested": {"path": "p", "query": lookup("secret")}})] {
+            let (s, v) = role_key(q.clone()).await;
+            assert_eq!(s, 400, "{q}: {v}");
+        }
+        let (s, k) = role_key(json!({"template": {"source": mlt.to_string()}})).await;
+        assert_eq!(s, 200, "{k}");
+        let key = base64::engine::general_purpose::STANDARD.encode(format!("{}@{name}:{}", k["id"].as_str().unwrap(), k["api_key"].as_str().unwrap()));
+        let (s, v) = as_key(&e, &key, Method::GET, "/mine/_doc/1", None).await;
+        refused("a get under a templated more_like_this role query", s, &v);
+        assert!(v.to_string().contains("more_like_this query with documents isn't supported as part of a role query"), "{v}");
     }
 }
 

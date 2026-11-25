@@ -592,31 +592,21 @@ pub(super) fn check_role_query(text: &str) -> EsResult<()> {
 }
 
 /// `DLSRoleQueryValidator.verifyRoleQuery`: a role query reads no other document (no terms
-/// lookup, indexed shape or percolated document) and no other document of its index (no
-/// `has_child`, `has_parent`).
+/// lookup, indexed shape, percolated document or `more_like_this` document) and no other
+/// document of its index (no `has_child`, `has_parent`), at any depth: a role query is
+/// evaluated where nothing may be read as anyone (`Reader::Unset`).
 pub(super) fn verify_role_query(v: &Value) -> EsResult<()> {
-    fn walk(v: &Value) -> EsResult<()> {
-        let Some((kind, body)) = v.as_object().and_then(|m| m.iter().next()) else { return Ok(()) };
-        let refuse = |what: &str| Err(EsError::illegal_argument(format!("{what} query isn't supported as part of a role query")));
-        let children = |keys: &[&str]| -> Vec<&Value> { keys.iter().filter_map(|k| body.get(k)).flat_map(|c| c.as_array().map(|a| a.iter().collect()).unwrap_or_else(|| vec![c])).collect() };
-        let nested = match kind.as_str() {
-            "terms" if body.as_object().is_some_and(|m| m.values().any(|f| f.as_object().is_some_and(|o| o.contains_key("index") || o.contains_key("id") || o.contains_key("path")))) => {
-                return Err(EsError::illegal_argument("terms query with terms lookup isn't supported as part of a role query"));
-            }
-            "geo_shape" if body.as_object().is_some_and(|m| m.values().any(|f| f.get("indexed_shape").is_some())) => {
-                return Err(EsError::illegal_argument("geoshape query referring to indexed shapes isn't supported as part of a role query"));
-            }
-            "has_child" | "has_parent" | "percolate" => return refuse(kind),
-            "bool" => children(&["must", "should", "filter", "must_not"]),
-            "dis_max" => children(&["queries"]),
-            "constant_score" => children(&["filter"]),
-            "function_score" => children(&["query"]),
-            "boosting" => children(&["positive", "negative"]),
-            _ => Vec::new(),
-        };
-        nested.into_iter().try_for_each(walk)
-    }
-    walk(v)
+    use crate::query::reads::DocumentRead;
+    let Some(read) = crate::query::reads::document_reads(v).into_iter().next() else { return Ok(()) };
+    let what = match read {
+        DocumentRead::TermsLookup => "terms query with terms lookup",
+        DocumentRead::IndexedShape => "geoshape query referring to indexed shapes",
+        DocumentRead::Percolate { .. } => "percolate query",
+        DocumentRead::MoreLikeThisDocuments => "more_like_this query with documents",
+        DocumentRead::HasChild => "has_child query",
+        DocumentRead::HasParent => "has_parent query",
+    };
+    Err(EsError::illegal_argument(format!("{what} isn't supported as part of a role query")))
 }
 
 /// A role's `global` (configurable cluster) privileges, stored as Elasticsearch prints them

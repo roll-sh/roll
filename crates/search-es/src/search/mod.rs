@@ -4863,10 +4863,11 @@ pub(crate) fn lookup_source(ctx: &QueryCtx, action: &str, requested: &str, idx: 
 
 /// Whether document `doc` of `searcher` matches a reader's document filter (`None`: none
 /// applies), on that searcher: the copy a request checks is the copy it reads. No request's
-/// runtime fields apply (one may be running on this thread: a `percolate` lookup's).
+/// runtime fields apply (one may be running on this thread: a `percolate` lookup's). A role
+/// query reads no other document ([`query::Reader::Unset`]), as Elasticsearch's can't.
 fn doc_allowed(cluster: &Cluster, st: &ClusterState, idx: &Arc<IndexMeta>, table: &Arc<crate::engine::fields::FieldTable>, searcher: &Searcher, doc: u32, filter: Option<&crate::query::Query>) -> EsResult<bool> {
     let Some(q) = filter else { return Ok(true) };
-    let qctx = QueryCtx::new(cluster, st, idx, table, searcher, crate::time::now_millis(), query::Reader::Unrestricted);
+    let qctx = QueryCtx::new(cluster, st, idx, table, searcher, crate::time::now_millis(), query::Reader::Unset);
     let query = qctx.for_security()?.to_filter(q)?;
     Ok(searcher.explain(&query, doc).map_err(crate::engine::convert::index_error)?.is_match())
 }
@@ -4882,7 +4883,8 @@ pub fn matches_doc(cluster: &Cluster, st: &ClusterState, idx: &Arc<IndexMeta>, e
     };
     let Some(doc) = find_doc(&searcher, id) else { return Ok(false) };
     let table = engine.table();
-    let qctx = QueryCtx::new(cluster, st, idx, &table, &searcher, crate::time::now_millis(), crate::search::query::Reader::Unrestricted);
+    // A role query reads no other document ([`query::Reader::Unset`]).
+    let qctx = QueryCtx::new(cluster, st, idx, &table, &searcher, crate::time::now_millis(), crate::search::query::Reader::Unset);
     let query = qctx.for_security()?.to_filter(q)?;
     Ok(searcher.explain(&query, doc).map_err(crate::engine::convert::index_error)?.is_match())
 }

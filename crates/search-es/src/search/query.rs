@@ -276,7 +276,8 @@ impl<'a> QueryCtx<'a> {
     /// the shard's reader, before the request); the mapping's own runtime fields still do.
     pub fn for_security(&self) -> EsResult<QueryCtx<'a>> {
         let scope = super::runtime::RuntimeScope::of_mapping(&self.cluster.scripts, self.cluster.state(), self.idx, self.table, self.shard as i32)?;
-        let mut c = QueryCtx::new(self.cluster, self.st, self.idx, self.table, self.searcher, self.now_ms, self.security.clone());
+        // A role query reads no other document (`Reader::Unset`): Elasticsearch's can't fetch.
+        let mut c = QueryCtx::new(self.cluster, self.st, self.idx, self.table, self.searcher, self.now_ms, Reader::Unset);
         c.shard = self.shard;
         // The owner's filter: a browser key's policy doesn't hold it (its `filter` is in it).
         c.owner.set(true);

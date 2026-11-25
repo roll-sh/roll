@@ -1061,6 +1061,9 @@ pub fn terms_lookup(ctx: &QueryCtx, l: &crate::query::term_level::TermsLookup) -
     let Some(idx) = names.first().and_then(|n| st.metadata.indices.get(n)).cloned() else {
         return Err(EsError::index_not_found(&l.index));
     };
+    // Authorized before the cache: a document fetched for this request is still the reader's
+    // to read only if this lookup may read it.
+    ctx.security.read_lookup(ctx.cluster, super::LOOKUP_GET, &l.index)?;
     let key = (idx.uuid.clone(), l.id.clone(), l.routing.clone());
     // Held across the fetch: shards whose query phases run in parallel fetch a document once.
     let shared = LOOKUPS.with(|c| c.borrow().clone());

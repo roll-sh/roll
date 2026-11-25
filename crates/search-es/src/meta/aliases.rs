@@ -49,20 +49,8 @@ pub fn validate_filter(alias: &str, filter: &Value) -> Result<(), EsError> {
 /// Whether a query fetches a document to rewrite: a `terms` lookup, `percolate` of an indexed
 /// document, a `geo_shape` or `shape` query's `indexed_shape`, at any depth.
 fn fetches_to_rewrite(v: &Value) -> bool {
-    let fields = |c: &Value, f: &dyn Fn(&crate::json::Map) -> bool| c.as_object().is_some_and(|m| m.values().any(|x| x.as_object().is_some_and(f)));
-    match v {
-        Value::Obj(m) => m.iter().any(|(k, c)| {
-            let here = match k.as_str() {
-                "terms" => fields(c, &|o| o.contains_key("index") || o.contains_key("id") || o.contains_key("path")),
-                "percolate" => c.get("index").is_some() || c.get("id").is_some(),
-                "geo_shape" | "shape" => fields(c, &|o| o.contains_key("indexed_shape")),
-                _ => false,
-            };
-            here || fetches_to_rewrite(c)
-        }),
-        Value::Arr(a) => a.iter().any(fetches_to_rewrite),
-        _ => false,
-    }
+    use crate::query::reads::DocumentRead;
+    crate::query::reads::document_reads(v).into_iter().any(|r| matches!(r, DocumentRead::TermsLookup | DocumentRead::IndexedShape | DocumentRead::Percolate { indexed: true }))
 }
 
 /// Whether any object key in `v` is one of `names`.
