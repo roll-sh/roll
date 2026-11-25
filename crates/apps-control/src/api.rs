@@ -692,9 +692,18 @@ async fn events(State(apps): S, Query(q): Query<EventsQuery>) -> R {
     }
     let after = q.after.unwrap_or(0);
     let limit = q.limit.unwrap_or(100);
-    let events = apps.db(move |s| s.events(after, limit)).await?;
+    let (events, envs) = apps.db(move |s| Ok((s.events(after, limit)?, s.all_environments()?))).await?;
     let next = events.last().map_or(after, |e| e.seq);
-    ok(json!({ "events": events, "next": next }))
+    // A preview's events can quote its app (a failed build's error): marked from outside, as
+    // its logs are; an environment that's gone counts as one (it fails closed).
+    let lasting: std::collections::HashSet<(String, String)> = envs.into_iter().filter(|e| !e.ephemeral).map(|e| (e.service, e.name)).collect();
+    let mut list = serde_json::to_value(&events).map_err(|e| Error::Internal(e.to_string()))?;
+    for (v, e) in list.as_array_mut().into_iter().flatten().zip(&events) {
+        if !lasting.contains(&(e.service.clone(), e.environment.clone())) {
+            mark_outside(v);
+        }
+    }
+    ok(json!({ "events": list, "next": next }))
 }
 
 /// `GET /v1/apps/services/{id}/changes`: server-sent `changed` events, one when something about
