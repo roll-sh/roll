@@ -429,10 +429,18 @@ fn check_stream_free(st: &ClusterState, req: &Request, snapshot_uuid: &str, stre
 fn global_items(g: &Value) -> Vec<(String, String, Value)> {
     let g = g.get("meta-data").unwrap_or(g);
     let managed = |v: &Value| v.pointer(&["_meta", "managed"]).and_then(Value::as_bool) == Some(true);
+    // Elasticsearch 9 keeps when a template was made and changed in it; its own `PUT` doesn't take
+    // them (they're set as it's put).
+    let body = |t: &Value| {
+        let mut t = t.as_object().cloned().unwrap_or_default();
+        t.shift_remove("created_date_millis");
+        t.shift_remove("modified_date_millis");
+        Value::Obj(t)
+    };
     let mut out = Vec::new();
     for (name, t) in g.pointer(&["component_template", "component_template"]).and_then(Value::as_object).into_iter().flatten() {
         if !managed(t) && !name.starts_with('.') {
-            out.push((format!("component template [{name}]"), format!("/_component_template/{}", crate::xpack::enc(name)), t.clone()));
+            out.push((format!("component template [{name}]"), format!("/_component_template/{}", crate::xpack::enc(name)), body(t)));
         }
     }
     for (name, p) in g.pointer(&["index_lifecycle", "policies"]).and_then(Value::as_object).into_iter().flatten() {
@@ -451,7 +459,7 @@ fn global_items(g: &Value) -> Vec<(String, String, Value)> {
     }
     for (name, t) in g.pointer(&["index_template", "index_template"]).and_then(Value::as_object).into_iter().flatten() {
         if !managed(t) && !name.starts_with('.') {
-            out.push((format!("index template [{name}]"), format!("/_index_template/{}", crate::xpack::enc(name)), t.clone()));
+            out.push((format!("index template [{name}]"), format!("/_index_template/{}", crate::xpack::enc(name)), body(t)));
         }
     }
     for (name, t) in g.get("templates").and_then(Value::as_object).into_iter().flatten() {
