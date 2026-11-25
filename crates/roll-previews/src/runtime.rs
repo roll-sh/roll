@@ -2599,7 +2599,7 @@ fn named(rt: &Runtime, req: &Request) -> Option<(String, String)> {
 }
 
 async fn serve_named(rt: Arc<Runtime>, preview: String, service: String, req: Request) -> Response {
-    let mut resp = serve(rt, preview, service, req).await;
+    let mut resp = serve(rt.clone(), preview.clone(), service, req).await;
     // Kept out of search engines, whatever the service says (as Vercel's previews are): a public
     // preview, a share link or an earlier push's URL is never what a search should land on.
     resp.headers_mut().insert(header::HeaderName::from_static("x-robots-tag"), header::HeaderValue::from_static("noindex"));
