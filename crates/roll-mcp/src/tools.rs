@@ -181,9 +181,12 @@ impl Tool {
         PREPARED.get(self.name).map_or_else(|| self.find_open(), |p| p.open)
     }
 
-    /// Whether a person's role decides it too, on top of their token's rules: one resource of a
-    /// member product, as roll-access's gate asks a person's token `within` their session (a list,
-    /// a create or the product as a whole goes on the token's rules alone).
+    /// Whether a person's role decides its listing too, on top of their token's rules: one resource
+    /// of a member product, as roll-access's gate asks a person's token `within` their session. A
+    /// list or the product as a whole goes on the token's rules alone, there as here. A create is
+    /// listed on the token's rules too, though the gate holds one that names a project within the
+    /// session: which project isn't known until the call, and a person's own unplaced one (their
+    /// search cluster) is theirs to make whatever their roles.
     pub fn within_session(&self) -> bool {
         PREPARED.get(self.name).map_or_else(|| self.find_within(), |p| p.within)
     }
