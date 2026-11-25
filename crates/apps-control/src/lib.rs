@@ -3526,6 +3526,14 @@ impl Apps {
                 Some("node") => joined("NODE_OPTIONS", &format!("--require {}", apps_build::otel::NODE_REQUIRE), " ", false, &mut vars),
                 Some("python") => joined("PYTHONPATH", apps_build::otel::PYTHON_PATH, ":", true, &mut vars),
                 Some("java") => joined("JAVA_TOOL_OPTIONS", &format!("-javaagent:{}", apps_build::otel::JAVA_AGENT), " ", false, &mut vars),
+                // The runtime loads one profiler: an app that names its own (another vendor's
+                // agent) keeps it, and roll's isn't started.
+                Some("dotnet") if !vars.get("CORECLR_PROFILER").is_some_and(|(v, _)| !v.trim().is_empty()) => {
+                    for (k, v) in apps_build::otel::DOTNET_VARS {
+                        vars.insert(k.into(), (v.into(), "roll"));
+                    }
+                    joined("DOTNET_STARTUP_HOOKS", apps_build::otel::DOTNET_HOOK, ":", true, &mut vars);
+                }
                 _ => {}
             }
         }

@@ -103,7 +103,7 @@ export interface Build {
   submodules?: boolean;
   /** The private roll code repos (owner/name) a roll code repo's submodules may come from. */
   submodule_repos?: string[];
-  /** The language's OpenTelemetry agent (Node, Python), started while traces are on. */
+  /** The language's OpenTelemetry agent (Node, Python, the JVM, .NET 8+), started while traces are on. */
   otel?: boolean;
   /** A Git URL service's Git LFS objects in place of their pointers (default: pointers as text). */
   lfs?: boolean;
