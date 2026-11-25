@@ -501,6 +501,7 @@ type EnvironmentPut = {
    *  the app's. */
   vitals?: boolean;
   log_retention_days?: 7 | 30 | 90 | null; // how long its logs are kept (null: 7); a preview's stay 7 (400)
+  keep_days?: number | null; // 1–90: its built deployments stay to roll back to that many days past the newest ten (Vercel's retention); null: only those
   scheduled?: boolean; // false: its schedules don't run (a cron service's, run.schedules' commands and calls), skipped and not made up when turned back on; deploys and POST …/runs still go; default true (roll previews turns pv- environments' off)
   data?: "branch" | null; // admin: data of its own, a branch of each Postgres and Redis database it links (made now and at each deploy for links made since; an environment's services share one), its link variables the branch's, never the database's; null goes back to them, deleting the branches no other environment uses; 400 for production and previews (roll previews branches theirs)
   closed_by?: string | null; // with egress, the operator's only (roll previews in process, or any caller on an open daemon; a token needs admin; 403 for a user's token or a signed-in person): who a closed environment's placeholders are made by (usr_… or token:…); null, no one (its keys bound to hosts withheld); unset, whoever set the egress
@@ -619,6 +620,7 @@ type Environment = EnvironmentSummary & {
   approvals?: number; // approvals a deployment needs before it goes live (absent: none)
   badge_url?: string; // its deploy status badge, when `badge` is on
   log_retention_days: number; // 7 (default), 30 or 90: its logs (output, access log, traces, metrics, events, Vitals) are kept that long, then deleted hourly by the owner; a preview's are 7
+  keep_days?: number;         // days its built deployments stay to roll back to past the newest ten (PUT keep_days)
   report: boolean; // its deploys are reported to the Git host (default true)
   preview_host?: string; // its label under the project's preview domain
   egress: { mode: "roll" | "open"; hosts: string[] }; // what its code may reach (roll: roll and the hosts)

@@ -399,6 +399,30 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
           </div>
         )}
 
+        {!env.ephemeral && (
+          <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+            <div>
+              <p className="text-[13px] font-medium">Rollbacks kept</p>
+              <p className="mt-1 text-[12px] text-muted">Its newest ten deployments stay to roll back to; these days, every one built in them too. A pinned one stays always.</p>
+            </div>
+            <select
+              aria-label="Rollbacks kept"
+              className={`${input} w-32 text-[12px]`}
+              disabled={busy}
+              value={env.keep_days ?? 0}
+              onChange={(e) => {
+                const days = Number(e.target.value);
+                runner.run("keep", () => appsApi.putEnvironment(service.id, env.name, { keep_days: days || null }));
+              }}
+            >
+              <option value={0}>the newest ten</option>
+              <option value={7}>+ 7 days</option>
+              <option value={30}>+ 30 days</option>
+              <option value={90}>+ 90 days</option>
+            </select>
+          </div>
+        )}
+
         <SnippetsRow service={service.id} env={env} runner={runner} busy={busy} />
         <ConfigRow service={service.id} env={env} runner={runner} busy={busy} />
 

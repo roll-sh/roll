@@ -1343,6 +1343,14 @@ async fn old_deployments_are_pruned_past_what_an_environment_keeps() {
         let (_, d) = call(&w.api, "POST", &base, Some(json!({}))).await;
         assert_eq!(settled(&w, &id, "production", d["id"].as_str().unwrap()).await["status"], "failed");
     }
+    // Kept by age: none younger than its environment's keep_days is pruned.
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    let (st, e) = call(&w.api, "PUT", &env, Some(json!({"keep_days": 1}))).await;
+    assert!(st == StatusCode::OK && e["keep_days"] == 1, "{e}");
+    w.apps.prune().await;
+    assert!(w.fake.removed.lock().is_empty(), "a day's deployments kept");
+    assert_eq!(call(&w.api, "PUT", &env, Some(json!({"keep_days": 0}))).await.0, StatusCode::BAD_REQUEST);
+    call(&w.api, "PUT", &env, Some(json!({"keep_days": null}))).await;
     // A pinned one is never pruned, whatever its age.
     let (st, p) = call(&w.api, "POST", &format!("{base}/{}/pin", deps[1]), None).await;
     assert!(st == StatusCode::OK && p["pinned_at"].is_i64(), "{p}");
