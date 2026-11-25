@@ -1443,10 +1443,13 @@ fn story_shots<'a>(said: &str, pngs: impl Iterator<Item = &'a str>) -> (Vec<crat
         left: u32,
         #[serde(default)]
         first_left: Vec<String>,
+        #[serde(default)]
+        by_files: bool,
     }
     let run: Run = serde_json::from_str(said.trim()).unwrap_or_default();
     // What it didn't take, as it said (its ids checked: the index is the preview's code's).
-    let skipped = crate::Skipped { pages: Vec::new(), stories: run.left.min(100_000), first_stories: run.first_left.into_iter().filter(|id| crate::settings::story_id_ok(id)).take(10).collect() };
+    // Ordered by files alone matters only for what it left.
+    let skipped = crate::Skipped { pages: Vec::new(), stories: run.left.min(100_000), first_stories: run.first_left.into_iter().filter(|id| crate::settings::story_id_ok(id)).take(10).collect(), by_files: run.by_files && run.left > 0 };
     let said = run.stories;
     let mut out: Vec<crate::ports::PageShot> = Vec::new();
     for (s, b64) in said.into_iter().zip(pngs).take(crate::settings::MAX_STORIES) {
@@ -3347,12 +3350,12 @@ mod tests {
         use base64::Engine as _;
         let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
         let (png, junk, big) = (b64(b"\x89PNG\r\n\x1a\n..."), b64(b"not a png"), b64(&[b"\x89PNG".as_slice(), &vec![0u8; STORY_MAX]].concat()));
-        let said = r#"{"stories":[{"id":"button--primary","errors":2},{"id":"../x--y"},{"id":"button--primary"},{"id":"card--empty"},{"id":"card--big"},{"id":"card--full"}],"left":12,"first_left":["button--danger","../evil"]}"#;
+        let said = r#"{"stories":[{"id":"button--primary","errors":2},{"id":"../x--y"},{"id":"button--primary"},{"id":"card--empty"},{"id":"card--big"},{"id":"card--full"}],"left":12,"first_left":["button--danger","../evil"],"by_files":true}"#;
         let pngs = [&png, &png, &png, &junk, &big, &png];
         let (shots, left) = story_shots(said, pngs.iter().map(|s| s.as_str()));
         let got: Vec<(String, u32)> = shots.into_iter().map(|p| (p.path, p.errors)).collect();
         assert_eq!(got, [("story:button--primary".to_string(), 2), ("story:card--full".to_string(), 0)]);
-        assert_eq!((left.stories, left.first_stories), (12, vec!["button--danger".to_string()]), "what it didn't take, by ids it could name");
+        assert_eq!((left.stories, left.first_stories, left.by_files), (12, vec!["button--danger".to_string()], true), "what it didn't take, by ids it could name, and that it chose by files alone");
         assert!(story_shots("not json", [png.as_str()].into_iter()).0.is_empty());
     }
 
