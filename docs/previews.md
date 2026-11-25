@@ -2337,7 +2337,9 @@ type Settings = {
     too, on its holder for a roll apps instance (the signed fleet hop carries the sign-in the
     preview's node decided), and its answer's `login` says how it went ("signed in through
     /login first", the step it stopped at, or "signed out: a fork's preview…"). Not yet:
-    Storybook's stories (they rarely sit behind the app's login).
+    Storybook's stories (they rarely sit behind the app's login). Live: an agent's run on a page
+    that answers "signed in" only once `/login.html` took the preview's own `$GREETING` (its
+    cookie kept for the run's page), and the stop at a missing field in the screenshots and `try`.
     `screenshots_sign_in_first_on_a_trusted_preview`.
     Other browsers too (Percy's and Chromatic's browsers; `github.browsers`: `firefox`, `webkit`,
     and `webkit-phone`, WebKit at 390 × 844 at twice the density as a touch device, mobile
@@ -2826,34 +2828,34 @@ comments, Render and Railway, Neon, Chromatic and Percy, Signadot, Jam.
    another service's), agents' runs and seed, release and teardown jobs count by their
    containers' GiB-hours (`runs_usd` apart; #1010), and roll apps services by roll apps' own bill
    for their `pv-` environments, builds included, so `max_usd_month` caps them all.
-2. **Signed in to a page that really sits behind a login, live**: screenshots, every engine and
-   `try` sign in (`github.login`, landed); the live check proves the stdin path and the stop at
-   a missing field, not a page that only answers once signed in.
-3. **The stories a change touched, by the module graph**: #1005 takes stories by their own file and the files beside them first; one that imports a changed file from elsewhere waits for Storybook's `--stats-json`.
-4. **A note in one click**: a team note opens the whole dashboard in a tab to post; a small popup
+   With it, the sign-in proven live on a page that answers only once signed in (`try` on
+   `/account.html` behind `/login.html`; until now the live check proved only the stdin path and
+   the stop at a missing field).
+2. **The stories a change touched, by the module graph**: #1005 takes stories by their own file and the files beside them first; one that imports a changed file from elsewhere waits for Storybook's `--stats-json`.
+3. **A note in one click**: a team note opens the whole dashboard in a tab to post; a small popup
    that posts and closes (Vercel's comments post in place).
-5. **Sleeping previews cost the control plane**: every settled preview goes through a whole
+4. **Sleeping previews cost the control plane**: every settled preview goes through a whole
    converge every 5 minutes (secrets' links and digests, usage of every branch); a usage-only
    pass for settled ones, counted per sleeping preview in the live run.
-6. **A fork's preview on roll apps**: its services' pages the same Content-Security-Policy as on
+5. **A fork's preview on roll apps**: its services' pages the same Content-Security-Policy as on
    previews' own proxy (roll apps' proxy adds it for a `pv-` environment previews marks
    untrusted), and a `data_forks` rule (a fork's data `schema` unless the project says
    otherwise), as `egress_forks` is for its server.
-7. **A capped preview's roll apps service**: a visit to it still wakes it there (roll apps wakes
+6. **A capped preview's roll apps service**: a visit to it still wakes it there (roll apps wakes
    it itself); previews tells roll apps to keep it down while it's over its cap.
-8. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
+7. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
    is kept only where the product puts a branch back in place, keeping its id (their delete
    guards check it); each needs its control plane's reset `from`, as pg-control's.
-9. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+8. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-10. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+9. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-11. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+10. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-12. **Watch: pg-control's recovery to a time seconds old** (unowned).
+11. **Watch: pg-control's recovery to a time seconds old** (unowned).
 
 
 
