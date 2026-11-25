@@ -1063,7 +1063,7 @@ pub fn terms_lookup(ctx: &QueryCtx, l: &crate::query::term_level::TermsLookup) -
     };
     // Authorized before the cache: a document fetched for this request is still the reader's
     // to read only if this lookup may read it.
-    ctx.security.read_lookup(ctx.cluster, super::LOOKUP_GET, &l.index)?;
+    ctx.security.read_lookup(ctx.st, ctx.now_ms, super::LOOKUP_GET, &l.index)?;
     let key = (idx.uuid.clone(), l.id.clone(), l.routing.clone());
     // Held across the fetch: shards whose query phases run in parallel fetch a document once.
     let shared = LOOKUPS.with(|c| c.borrow().clone());

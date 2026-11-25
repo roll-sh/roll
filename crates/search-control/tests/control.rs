@@ -1514,6 +1514,17 @@ async fn lookups_are_authorized_where_they_run() {
             refused("a terms lookup by query", s, &v);
             continue;
         }
+        // A lookup's name is checked as resolved: a failure store needs its own privilege, which
+        // `read` on `mine-*` doesn't give.
+        for (path, body) in [
+            ("/_index_template/mine-ds", Some(json!({"index_patterns": ["mine-ds*"], "data_stream": {}, "template": {"data_stream_options": {"failure_store": {"enabled": true}}}}))),
+            ("/_data_stream/mine-ds", None),
+        ] {
+            let (s, v) = e.es(&admin, &pw, Method::PUT, path, body).await;
+            assert_eq!(s, 200, "{path}: {v}");
+        }
+        let (s, v) = search(json!({"query": lookup("mine-ds::failures")})).await;
+        assert_eq!((s, v["error"]["type"].as_str()), (403, Some("security_exception")), "a failure store lookup: {v}");
         let runtime = json!({"runtime_mappings": {"document": {"type": "lookup", "target_index": "secret", "input_field": "k", "target_field": "k", "fetch_fields": ["v"]}}, "fields": ["document"]});
         let (s, v) = search(runtime).await;
         refused("a lookup runtime field named document", s, &v);

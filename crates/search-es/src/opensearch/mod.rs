@@ -354,7 +354,7 @@ pub fn add_reduce_phases(ctx: &Ctx, out: &crate::search::SearchOutcome, req: &cr
 /// under its document and field level security.
 pub fn lookup_by_query(ctx: &crate::search::query::QueryCtx, l: &crate::query::term_level::TermsLookup, q: &crate::query::Query) -> EsResult<Vec<crate::json::Value>> {
     use crate::json::Value;
-    let security = ctx.security.read_lookup(ctx.cluster, "indices:data/read/search", &l.index)?.cloned();
+    let security = ctx.security.read_lookup(ctx.st, ctx.now_ms, "indices:data/read/search", &l.index)?.cloned();
     let st = ctx.st;
     let setting = |idx: Option<&crate::meta::IndexMeta>, key: &str, default: i64| {
         idx.and_then(|i| i.settings.get(key)).and_then(|v| v.parse::<i64>().ok()).unwrap_or(default)

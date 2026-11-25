@@ -119,10 +119,10 @@ impl Reader {
     /// then the restrictions to read it under; an error for [`Reader::Unset`].
     ///
     /// [`ReadSecurity::authorize`]: crate::xpack::security::dls::ReadSecurity::authorize
-    pub fn read_lookup(&self, cluster: &crate::cluster::Cluster, action: &str, index: &str) -> EsResult<Option<&crate::xpack::security::dls::ReadSecurity>> {
+    pub fn read_lookup(&self, st: &crate::meta::ClusterState, now_ms: i64, action: &str, index: &str) -> EsResult<Option<&crate::xpack::security::dls::ReadSecurity>> {
         let sec = self.read_as()?;
         if let Some(s) = sec {
-            s.authorize(cluster, action, index)?;
+            s.authorize(st, now_ms, action, index)?;
         }
         Ok(sec)
     }

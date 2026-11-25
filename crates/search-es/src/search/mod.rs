@@ -3755,7 +3755,7 @@ fn lookup_fields_of_hit(cluster: &Cluster, src: &SearchSource, table: &Arc<crate
         if let Some(s) = security
             && !values.is_empty()
         {
-            s.authorize(cluster, "indices:data/read/search", &target_index)?;
+            s.authorize(&cluster.state(), crate::time::now_millis(), "indices:data/read/search", &target_index)?;
         }
         let mut found = Vec::new();
         for v in values {
@@ -4848,7 +4848,7 @@ pub(crate) const LOOKUP_TERM_VECTORS: &str = "indices:data/read/mtv[shard]";
 /// `_source` (`None`: not stored) without the fields the reader's field level security hides,
 /// as a get by the reader answers.
 pub(crate) fn lookup_source(ctx: &QueryCtx, action: &str, requested: &str, idx: &Arc<IndexMeta>, id: &str, routing: Option<&str>) -> EsResult<Option<(i64, Option<Value>)>> {
-    let sec = ctx.security.read_lookup(ctx.cluster, action, requested)?;
+    let sec = ctx.security.read_lookup(ctx.st, ctx.now_ms, action, requested)?;
     // The read's own document and field level security: the role entries granting `action`
     // (a role may grant gets alone, with a query of their own).
     let engine = ctx.cluster.engine.index(ctx.cluster, ctx.st, idx)?;

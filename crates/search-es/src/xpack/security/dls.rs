@@ -270,14 +270,10 @@ impl ReadSecurity {
     /// A lookup a query makes in `index` as it runs (a terms lookup's, `percolate`'s,
     /// `more_like_this`'s or `indexed_shape`'s document: `indices:data/read/get`; a `lookup`
     /// runtime field's search: `indices:data/read/search`), authorized as the reader, as
-    /// Elasticsearch sends those requests as the user. `index` is the name it was asked by; a
-    /// wildcard must hold only indices the reader may read.
-    pub fn authorize(&self, cluster: &Cluster, action: &str, index: &str) -> EsResult<()> {
-        let names = match index.contains('*') {
-            true => crate::meta::resolve::resolve(&cluster.state(), &[index.to_string()], &crate::meta::resolve::IndicesOptions::LENIENT_EXPAND_OPEN, crate::time::now_millis()).unwrap_or_default(),
-            false => vec![index.to_string()],
-        };
-        let denied: Vec<String> = names.into_iter().filter(|n| !self.0.eff.allows_index(action, n)).collect();
+    /// Elasticsearch sends those requests as the user. `index` is the name it was asked by,
+    /// checked as resolved against `st` at `now_ms` (the request's: [`super::denied_lookup`]).
+    pub fn authorize(&self, st: &crate::meta::ClusterState, now_ms: i64, action: &str, index: &str) -> EsResult<()> {
+        let denied = super::denied_lookup(&self.0.eff, st, now_ms, action, index)?;
         match denied.is_empty() {
             true => Ok(()),
             false => Err(super::denied(&self.0.principal, action, Some(&denied))),
