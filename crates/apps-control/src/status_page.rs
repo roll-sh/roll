@@ -349,9 +349,13 @@ fn maintenance_window(body: &Value, state: &str, now: i64) -> Result<Option<(i64
     }
 }
 
-/// An incident's or update's fields: `title` (a new one's), `state` (investigating, identified,
-/// monitoring, resolved; a new one also `scheduled`, an update also `maintenance`) and `text`,
-/// each bounded, as text.
+/// The states a new incident may be posted in (`scheduled`: a maintenance with its window).
+pub(crate) const NEW_STATES: [&str; 5] = ["investigating", "identified", "monitoring", "resolved", "scheduled"];
+/// The states an update may move one to (`maintenance`: a scheduled one under way).
+pub(crate) const UPDATE_STATES: [&str; 5] = ["investigating", "identified", "monitoring", "maintenance", "resolved"];
+
+/// An incident's or update's fields: `title` (a new one's), `state` ([`NEW_STATES`],
+/// [`UPDATE_STATES`]) and `text`, each bounded, as text.
 fn incident_fields(body: &Value, new: bool) -> Result<(String, String, String)> {
     let o = body.as_object().cloned().unwrap_or_default();
     let allowed: &[&str] = if new { &["title", "state", "text", "starts_at", "ends_at"] } else { &["state", "text"] };
@@ -366,12 +370,11 @@ fn incident_fields(body: &Value, new: bool) -> Result<(String, String, String)> 
         }
     };
     let title = if new { text_of("title", 120, true)? } else { String::new() };
+    let states: &[&str] = if new { &NEW_STATES } else { &UPDATE_STATES };
     let state = match o.get("state").and_then(Value::as_str) {
         None if new => "investigating".to_string(),
-        Some(s @ ("investigating" | "identified" | "monitoring" | "resolved")) => s.to_string(),
-        Some("scheduled") if new => "scheduled".to_string(),
-        Some("maintenance") if !new => "maintenance".to_string(),
-        _ => return Err(Error::BadRequest("state is investigating, identified, monitoring or resolved (a new incident's may be scheduled, an update's maintenance)".into())),
+        Some(s) if states.contains(&s) => s.to_string(),
+        _ => return Err(Error::BadRequest(format!("state is {}", states.join(", ")))),
     };
     Ok((title, state, text_of("text", 2000, true)?))
 }

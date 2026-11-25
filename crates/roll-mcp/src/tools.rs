@@ -1946,7 +1946,8 @@ mod tests {
         let envs = after(between(include_str!("../../roll-secrets/src/envs.rs"), "impl Kind {", "\n}\n"), "=> \"");
         let destinations = after(between(include_str!("../../mq-control/src/api.rs"), "destination_type must be ", ", not"), "'").into_iter().step_by(2).collect::<Vec<_>>();
         let flavors = keys(between(include_str!("../../search-control/src/control.rs"), "pub fn dialect(flavor: &str)", "\n}\n"));
-        let incidents = list(between(include_str!("../../apps-control/src/status_page.rs"), "Some(s @ (", "))"));
+        let status_page = include_str!("../../apps-control/src/status_page.rs");
+        let (new_incident, incident_update) = (list(between(status_page, "const NEW_STATES", "];")), list(between(status_page, "const UPDATE_STATES", "];")));
         let more: Vec<(&str, &str, Vec<String>)> = vec![
             ("access_request_access", "for", keys(between(include_str!("../../roll-access/src/api.rs"), "fn request_duration(", "\n}\n"))),
             ("access_list_approvals", "state", roll_access::store::APPROVAL_STATES.iter().map(|s| s.to_string()).collect()),
@@ -1971,8 +1972,8 @@ mod tests {
             ("apps_rollout", "action", variants(between(include_str!("../../apps-control/src/model.rs"), "pub enum RolloutAction {", "}"))),
             ("apps_set_error_state", "state", variants(between(include_str!("../../apps-control/src/errors.rs"), "pub enum Lifecycle {", "}"))),
             ("apps_logs", "stream", variants(between(include_str!("../../apps-control/src/logs.rs"), "pub enum Stream {", "}"))),
-            ("apps_update_incident", "state", incidents.clone()),
-            ("apps_create_incident", "state", incidents),
+            ("apps_update_incident", "state", incident_update),
+            ("apps_create_incident", "state", new_incident),
             ("apps_set_private_network", "kind", after(between(include_str!("../../apps-control/src/peering.rs"), "let kind = match o.get(\"kind\")", "};"), "Some(\"")),
             ("apps_add_notification", "kind", notification_kinds),
             ("apps_add_notification", "region", after(notify, "(\"pagerduty\", \"")),
