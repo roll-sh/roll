@@ -2156,21 +2156,24 @@ impl roll_secrets::Workloads for Workloads {
     /// Each token as roll-access answers it now: gone once revoked or expired, or (a person's own)
     /// once its person can't sign in.
     fn grants(&self) -> roll_secrets::Result<Vec<roll_auth::Grant>> {
-        self.live(|_| true)
+        let list = self.0.store.list().map_err(|e| Error::Internal(format!("listing roll-access's tokens: {e}")))?;
+        Ok(self.now(list.into_iter().filter(|g| g.revoked_at.is_none())))
     }
 
-    /// Only tokens whose rules (and rules approved for a while) can name `project` are resolved.
+    /// Only tokens whose rules (and rules approved for a while) can name `project` are read
+    /// (`Store::naming`, one indexed read whatever the number of tokens) and resolved.
     fn grants_naming(&self, project: &str) -> roll_secrets::Result<Vec<roll_auth::Grant>> {
         let names = |r: &roll_auth::scope::Rule| roll_secrets::access::rule_may_name(r, project);
-        Ok(self.live(|g| g.rules.0.iter().chain(g.temporary.iter().map(|t| &t.rule)).any(names))?.into_iter().filter(|g| g.scope.0.iter().any(names)).collect())
+        let list = self.0.store.naming("secrets", project).map_err(|e| Error::Internal(format!("listing roll-access's tokens: {e}")))?;
+        let naming = list.into_iter().filter(|g| g.rules.0.iter().chain(g.temporary.iter().map(|t| &t.rule)).any(names));
+        Ok(self.now(naming).into_iter().filter(|g| g.scope.0.iter().any(names)).collect())
     }
 }
 
 impl Workloads {
-    /// roll-access's tokens that aren't revoked and that `keep` keeps, each as its grant now.
-    fn live(&self, keep: impl Fn(&roll_access::store::Grant) -> bool) -> roll_secrets::Result<Vec<roll_auth::Grant>> {
-        let list = self.0.store.list().map_err(|e| Error::Internal(format!("listing roll-access's tokens: {e}")))?;
-        Ok(list.into_iter().filter(|g| g.revoked_at.is_none() && keep(g)).filter_map(|g| roll_auth::Grants::grant(&*self.0, &g.id)).collect())
+    /// Each of roll-access's tokens as its grant now (gone: revoked, expired, its person can't sign in).
+    fn now(&self, list: impl Iterator<Item = roll_access::store::Grant>) -> Vec<roll_auth::Grant> {
+        list.filter_map(|g| roll_auth::Grants::grant(&*self.0, &g.id)).collect()
     }
 }
 

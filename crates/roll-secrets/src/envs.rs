@@ -458,7 +458,7 @@ impl Secrets {
             let own = self.secrets(project, slug, &path, caller)?;
             ops.extend(own.into_iter().filter(|s| s.source == crate::read::Source::Own && s.kind == crate::SecretType::Shared && s.link.is_none() && !named.contains(&s.key)).map(|s| crate::Op::Delete { key: s.key, kind: None, path: None, if_version: None }));
         }
-        let change = if ops.is_empty() { None } else { self.batch(project, slug, crate::Batch { path: Some(path), message: Some("ensured".into()), ops, if_seq: None }, caller)?.change };
+        let change = if ops.is_empty() { None } else { self.batch(project, slug, crate::Batch { path: Some(path), message: Some("ensured".into()), ops, if_seq: None, confirm: None }, caller)?.change };
         let environment = self.environment(project, slug, caller)?;
         Ok(Ensured { environment, created: false, change })
     }

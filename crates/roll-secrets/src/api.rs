@@ -126,6 +126,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/public-certs"), get(public_certs).post(add_public_cert))
         .route(&format!("{P}/public-certs/{{id}}"), axum::routing::delete(delete_public_cert).patch(update_public_cert))
         .route(&format!("{P}/public-certs/{{id}}/renew"), post(renew_public_cert))
+        .route(&format!("{P}/public-certs/{{id}}/revoke"), post(revoke_public_cert))
         .route(&format!("{P}/transit"), get(transit_keys).post(add_transit_key))
         .route(&format!("{P}/transit/{{name}}"), axum::routing::patch(config_transit_key).delete(delete_transit_key))
         .route(&format!("{P}/transit/{{name}}/rotate"), post(rotate_transit_key))
@@ -619,6 +620,9 @@ struct SetBody {
     /// Check-and-set: only if the key is still at this version (0: only if it doesn't exist).
     #[serde(default)]
     if_version: Option<i64>,
+    /// What a 409 `confirm_required` asked to confirm (a batch's `confirm`).
+    #[serde(default)]
+    confirm: Option<String>,
 }
 
 fn some<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
@@ -626,9 +630,9 @@ fn some<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<O
 }
 
 async fn set_secret(State(s): S, Who(c): Who, Path((project, env, key)): Path<(String, String, String)>, Query(q): Q, b: Bytes) -> crate::Result<Response> {
-    let SetBody { value, comment, tags, kind, link, message, expires_at, if_version } = body(&b)?;
+    let SetBody { value, comment, tags, kind, link, message, expires_at, if_version, confirm } = body(&b)?;
     let op = Op::Set { key: key.clone(), value, comment, tags, kind, link, path: None, expires_at, if_version };
-    Ok(ok(blocking(s, move |s| s.set_secret(&project, &env, &path_of(&q), &key, op, message, &c)).await?))
+    Ok(ok(blocking(s, move |s| s.set_secret_confirmed(&project, &env, &path_of(&q), &key, op, message, confirm, &c)).await?))
 }
 
 async fn delete_secret(State(s): S, Who(c): Who, Path((project, env, key)): Path<(String, String, String)>, Query(q): Q) -> crate::Result<Response> {
@@ -1096,7 +1100,7 @@ async fn import_dotenv(State(s): S, Who(c): Who, Path((project, env)): Path<(Str
             .chain(removed)
             .collect();
         let message = i.message.or_else(|| Some("imported a .env file".into()));
-        let b = Batch { path: Some(path), message, ops, if_seq: i.if_seq };
+        let b = Batch { path: Some(path), message, ops, if_seq: i.if_seq, confirm: None };
         if i.request {
             let r = s.open_request(&project, &env, b, &c)?;
             return Ok(json!({ "request": r, "skipped": skipped }));
@@ -1598,6 +1602,11 @@ async fn update_public_cert(State(s): S, Who(c): Who, Path((project, id)): Path<
 
 async fn renew_public_cert(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<Response> {
     Ok((StatusCode::ACCEPTED, Json(blocking(s, move |s| s.renew_public_cert(&project, &id, &c)).await?)).into_response())
+}
+
+async fn revoke_public_cert(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let req: crate::public_certs::RevokeRequest = if b.is_empty() { Default::default() } else { body(&b)? };
+    Ok(ok(blocking(s, move |s| s.revoke_public_cert(&project, &id, req, &c)).await?))
 }
 
 async fn delete_public_cert(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
