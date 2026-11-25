@@ -106,7 +106,8 @@ impl Selectors {
         if t.len() > MAX_TEXT {
             return Err(format!("the selector is longer than {MAX_TEXT} bytes"));
         }
-        if t.starts_with('/') || t.starts_with("(/") || t.starts_with("./") || t.contains("//") {
+        // XPath starts with a path or a parenthesised one; a CSS selector never does.
+        if t.starts_with('/') || t.starts_with('(') || t.starts_with("./") || t.starts_with("../") {
             return Err(format!("[{t}] looks like XPath, which roll's crawler doesn't run yet: use a CSS selector"));
         }
         if t.contains('\\') {
