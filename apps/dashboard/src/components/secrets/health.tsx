@@ -1,7 +1,7 @@
 import { CircleCheck, Dices, FileSearch, RotateCw, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 import { Link } from "@/components/link";
-import { needsApproval, type Finding, type Op, type SecretsApi, type SetSecret } from "@/lib/secrets-api";
+import { needsApproval, secretsGuardrails, type Finding, type Guardrails, type Op, type SecretsApi, type SetSecret } from "@/lib/secrets-api";
 import { decoyUse } from "@/lib/secrets-decoy";
 import { generateValue } from "@/lib/secrets-generate";
 import { secretsHref, useSecrets } from "./secrets-page";
@@ -10,6 +10,7 @@ import { ago, card, errorText, ErrorNote, ghost, Section, sized, useLoad } from 
 const ISSUES: { issue: Finding["issue"]; title: string; what: string; serious: boolean }[] = [
   { issue: "decoy_used", title: "Decoy used", what: "Someone used a decoy key's credential (its token or database login): they found it where it was planted. Cut off whatever could reach that place, rotate the real credentials beside it, then delete the decoy and plant a new one.", serious: true },
   { issue: "production_unprotected", title: "Production isn't protected", what: "Checks, sandboxes and untrusted previews may read production, and no change there needs approval. New projects start with it protected; this one was made before. Protecting it keeps writes direct for whoever may write (no approvals until you ask for them) and keeps everything else out.", serious: true },
+  { issue: "off_policy", title: "Below roll's policy", what: "Floors roll secrets' policy sets for every project (Guardrails), which this project was made or set below. Nothing changes them for you; a write that stays below a floor is refused, so raise each to the floor or above.", serious: true },
   { issue: "expired", title: "Expired", what: "Their values stopped working outside roll, or a SaaS rotator's own credential did: roll can't issue or revoke its keys.", serious: true },
   { issue: "rotation_failing", title: "Rotation failing", what: "Their scheduled rotation fails: the database, vendor or rotator refused or didn't answer. The old credential keeps working; roll tries again.", serious: true },
   { issue: "revoke_failing", title: "Not revoked yet", what: "Credentials roll retired or that expired but couldn't revoke yet, and public certificates the CA hasn't revoked yet: they still work until it can. roll keeps trying.", serious: true },
@@ -136,9 +137,9 @@ export function HealthView() {
             <div className={`${card} divide-y divide-line`}>
               {rows.map((f) => (
                 <div key={`${f.environment}/${f.path}/${f.key}`} className="flex flex-wrap items-center gap-x-3 gap-y-0.5 px-3 py-1.5 text-[12.5px]">
-                  {f.issue === "production_unprotected" ? (
-                    <span className="text-fg">{name(f.environment)}</span>
-                  ) : f.issue === "certificate_expiring" || f.issue === "operator_made" || f.issue === "stored_cloud_key" || registration(f) ? (
+                  {f.issue === "production_unprotected" || (f.issue === "off_policy" && !f.key) ? (
+                    <span className="text-fg">{f.environment ? name(f.environment) : "Leaked keys"}</span>
+                  ) : f.issue === "certificate_expiring" || f.issue === "operator_made" || f.issue === "stored_cloud_key" || f.issue === "off_policy" || registration(f) ? (
                     <span className="flex min-w-0 items-center gap-3">
                       <span className="font-mono text-fg">{f.key}</span>
                       <span className="text-subtle">{f.issue === "certificate_expiring" ? `CA ${f.path}` : registration(f) ? (f.issue === "revoke_failing" ? "public certificate" : "SaaS rotator") : f.environment ? `${name(f.environment)}${f.path === "/" ? "" : ` ${f.path}`}` : ""}</span>
@@ -178,7 +179,39 @@ export function HealthView() {
         );
       })}
       <Rotations />
+      <GuardrailsView />
     </div>
+  );
+}
+
+/** roll secrets' policy as plain lines, `[]` when it sets no floor. */
+function guardrailLines(g: Guardrails): string[] {
+  const lines: string[] = [];
+  const n = g.production_approvals;
+  if (n !== null) lines.push(`Production stays protected with at least ${n} ${n === 1 ? "approval" : "approvals"}`);
+  if (g.leaks_rotate === "managed") lines.push("A leaked managed key rotates at once (leaks.rotate stays managed)");
+  if (g.sync_kinds) lines.push(`Syncs only of these kinds: ${g.sync_kinds.length ? g.sync_kinds.join(", ") : "none"}`);
+  if (g.no_stored_cloud_keys) lines.push("No sync stores a cloud key for AWS, Google or Azure");
+  if (g.max_token_days !== null) lines.push(`Tokens with a secrets rule live at most ${g.max_token_days} ${g.max_token_days === 1 ? "day" : "days"}`);
+  return lines;
+}
+
+/** The policy, read-only, for the operator and admin accounts (anyone else's GET is a 403: nothing shows). */
+function GuardrailsView() {
+  const policy = useLoad(() => secretsGuardrails().catch(() => null), []);
+  const lines = policy.data ? guardrailLines(policy.data) : [];
+  if (!lines.length) return null;
+  return (
+    <Section title="Guardrails">
+      <p className="mb-2 text-[11.5px] text-muted">roll secrets' policy for every project: each may tighten these floors, never go below them. Set with roll secrets policy set.</p>
+      <div className={`${card} divide-y divide-line`}>
+        {lines.map((l) => (
+          <p key={l} className="flex items-center gap-2 px-3 py-1.5 text-[12.5px] text-fg">
+            <ShieldCheck className="size-3.5 text-muted" /> {l}
+          </p>
+        ))}
+      </div>
+    </Section>
   );
 }
 

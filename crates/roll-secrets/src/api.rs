@@ -32,6 +32,8 @@ pub fn router(s: Arc<Secrets>) -> Router {
     Router::new()
         .route("/v1/secrets/health", get(health))
         .route("/v1/secrets/whoami", get(whoami))
+        // Guardrails: floors every project may only tighten (guardrails.rs).
+        .route("/v1/secrets/policy", get(guardrails).put(set_guardrails))
         .route("/v1/secrets/search", get(find))
         // Deleted projects in their recovery window (docs/secrets.md, "When a secret, an
         // environment or the project goes").
@@ -296,6 +298,18 @@ async fn health(State(s): S, Who(c): Who) -> crate::Result<Response> {
         return Err(Error::Forbidden("the deployment key's state is the operator's".into()));
     }
     Ok(ok(blocking(s, |s| s.health()).await?))
+}
+
+/// roll secrets' policy (the operator's, or an admin account's).
+async fn guardrails(State(s): S, Who(c): Who) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.guardrails(&c)).await?))
+}
+
+/// Replace the policy: `{production_approvals?, leaks_rotate?, sync_kinds?, no_stored_cloud_keys?,
+/// max_token_days?}`, a field left out having no floor.
+async fn set_guardrails(State(s): S, Who(c): Who, b: Bytes) -> crate::Result<Response> {
+    let g: crate::guardrails::Guardrails = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.set_guardrails(g, &c)).await?))
 }
 
 /// Where a key is set, across the projects the caller may read.
