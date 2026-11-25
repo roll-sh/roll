@@ -849,5 +849,6 @@ async fn restores_data_streams_elasticsearch_wrote() {
     let (s, v) = restore(r#"{"indices":".ds-events-fixture-*","rename_pattern":"\\.ds-events-(.+)","rename_replacement":"plain-$1"}"#).await;
     assert_eq!(s, 200, "{v:?}");
     assert_eq!(call(&c, "GET", "/_data_stream/plain-*", None).await.1, parse(br#"{"data_streams":[]}"#).unwrap().unwrap());
-    assert_eq!(at(&call(&c, "GET", "/plain-*/_count", None).await.1, "count").as_i64(), Some(40));
+    // Hidden, as their backing indices were.
+    assert_eq!(at(&call(&c, "GET", "/plain-*/_count?expand_wildcards=all", None).await.1, "count").as_i64(), Some(40));
 }
