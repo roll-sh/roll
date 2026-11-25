@@ -1386,6 +1386,7 @@ static TOOLS: &[Tool] = &[
         b("report", Ty::Bool, "false: its deploys post no commit status and no GitHub Deployment (something else reports them)"),
         b("scheduled", Ty::Bool, "false: its schedules (a cron's, run.schedules) don't run; deploys and runs still go"),
         b("log_retention_days", Ty::Int, "How long its logs are kept: 7 (default), 30 or 90 days (a preview's stay 7)"),
+        b("keep_days", Ty::Int, "Days its built deployments stay to roll back to, past the newest ten (1-90; null: only those)"),
         b("badge", Ty::Bool, "A deploy status badge anyone can load at /_roll/badge/<service>/<env>.svg on the apps listener"),
         b("approvals", Ty::Int, "0-3 people other than a deployment's author approve it before it goes live (admin; never a preview's)"),
         bnull("checks", Ty::Arr, "Uptime and browser checks: [{name, path, every_s? (30-3600), timeout_s?, status?, contains?, browser? (a Playwright script: the body of an async function given page, context and url; it fails by throwing), budgets? {lcp_ms, cls, ttfb_ms, kb, requests}, from? (roll, or public: over the internet as a visitor, its DNS, TLS and gates), host? (a public check's custom domain)}]; clear it for none"),
