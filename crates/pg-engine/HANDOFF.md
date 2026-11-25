@@ -10627,6 +10627,144 @@ and confirm on PGO:
 Agent 218's short-transaction stack (ten steps, `wip/a218`) was gated this way and landed: BENCH
 "Profile-guided build", part 2.
 
+## Bulk writes, round 28: a bulk DELETE's rows in batches (agent 321)
+
+BENCH "Bulk writes, round 28" has the measurements (lane C, plain dist, agent 315's bulk script with
+joined windows copied to `~/.cache/a321/bench`; `dpair.sh` runs it through the count after the
+DELETE, measuring those two steps; `tpair.sh` the single-row pair). `cand/a321`: one code commit on
+origin's `def0eaf98` (developed and measured on `7ecca8b18` and `be865dfb8`; both rebases clean). No
+format change: the same files and blocks; the DELETE's tombstones go in as
+before, in one run a table or index instead of one run for all.
+
+**What the statement did a row** (318's profile): the scan below the DELETE decoded each row whole
+(`Lazy::into_row`), then `delete_row_with` took the row's lock (`lock_row`: the lock manager's
+mutex and the compact set's upsert), marked it a delete's (`mark_row_modified`: the mutex again),
+sized it (`sizing::deleted`: `ensure`, and for a table with a TOAST relation `toast_gone`, which
+lays the whole row out to see whether a value went out of line), and deferred its row key and
+index entries, each a `Vec` (`index_values`' list of values, `index_entry_key`'s key), sorted and
+written at the end as one run with a bloom filter over all of them.
+
+**The change** (`exec/dml.rs` `BulkDelete`, `DeleteNode::delete_bulk` / `delete_batch`; `exec/scan.rs`
+`ScanNode::each_keyed`, `after_lock`; `txn/locks.rs` `lock_rows_compact`, `mark_rows_modified`;
+`txn/mod.rs` `defer_entry_delete_with`; `txn/spill.rs` `write_deletes`; `exec/sizing.rs`
+`deleted_rows`):
+- A DELETE whose entries are deferred already (`defers_entries`: no BEFORE ROW trigger, RETURNING
+  or volatile source) and that has no AFTER ROW trigger (so no foreign key action or check), no
+  transition table, no inheritance tree or partitions, no foreign table or view, no join, no
+  predicate locks (SERIALIZABLE), over a plain sequential scan, takes its
+  rows from the scan as stored with their keys (`Node::each_keyed`): a row whose filter the stored
+  values decide (`StoredCmps`, or no filter) and with nothing out of line is handed as its bytes,
+  counted as `emit` counts it; any other comes decoded as `next` makes it and goes the old way
+  (`delete_one`, the old loop body), after the batch before it. Everything else takes the old path.
+- 256 rows a batch, in their order. Their locks: one trip to the lock manager takes each row
+  `lock_row`'s compact path would take at once (past the transaction's first 2,048 row locks, no
+  hold in the main table, compact sets of this transaction alone, its one segment this holder's:
+  `lock_rows_compact`); it stops at the first row that can't go that way, which `lock_row_with`
+  takes alone (it may wait for another transaction, error, or skip), and the next trip starts
+  after it. So a row another transaction holds is waited for in its place, before any row after it
+  is locked, as before. Each locked row is then checked as `lock_row_with` checks it (`after_lock`:
+  unchanged since the snapshot, its newer version rechecked against the condition under READ
+  COMMITTED, the serialization failure under REPEATABLE READ). The rows going are marked a delete's
+  in one more trip (`mark_rows_modified`), after the checks (a row skipped by its recheck keeps a
+  lock-only hold, as before).
+- The model: `ensure` once a batch; modelled, every row's tuple deleted under one write lock of the
+  shard (their kept xmax records after it); past the model, whether a row's values went out of line
+  (the TOAST relation's lock) is asked until one has, sized from its stored bytes
+  (`stored_tuple_len_with`, each value under 128 bytes: under TOAST_THRESHOLD no value goes out of
+  line), the row decoded only where the bytes don't size it.
+- Only the columns its indexes' entries read are decoded (`decode_table_row_need` with the keys',
+  expressions' and predicates' columns). The deferred deletes go into one key buffer
+  (`defer_entry_delete_with`; a key handed as a `Vec` is kept as it is, so a single-row DELETE
+  copies nothing more); an index of plain columns encodes its entry from the row's values in
+  place (`index_entry_key_of`), without `index_values`' list.
+- At the end they are sorted as slices of that buffer and written as one run a table or index
+  (`Runs::write_deletes`, the keys' first 8 bytes, as 309's sink does): a run of one index's
+  entries has no bloom filter and hashes nothing for one (`SstWriter::index_run`: index entries
+  are never read by a point lookup, `sst::index_entry`); the row and TOAST runs keep theirs.
+- Test `big_tables::bulk_delete_batches` (6,000 rows a table, modelled and past the model): another
+  transaction holds a row past the first 2,048 locked (the DELETE waits for it; its new version is
+  rechecked and deleted), changes a row after it out of the condition (rechecked, kept) and deletes
+  one (skipped); a REPEATABLE READ snapshot from before still reads every row; `n_tup_del`, dead and
+  live tuples, sizes, `relpages` / `reltuples`, the rows' TIDs (modelled) and index-only reads
+  (past the model) as a DELETE of the same rows one at a time (an AFTER ROW trigger's path, its
+  entries deferred too). It was run against the old path through a switch as well (not kept):
+  past the model the two tables' TIDs differ on both paths (the estimate's, by key: compared only
+  where the model places rows).
+
+**Results** (BENCH "Bulk writes, round 28"; plain dist, G user instructions of the server's cgroup;
+foreign load 1.5-3.9 cores on the server CPUs in every hold, so instruction counts only, which
+repeat within 0.02%):
+- DELETE of 750,000 of 1M rows with its compaction: against the candidate's parent (b1 =
+  `be865dfb8`) 7.787 / 7.786 -> 6.724 / 6.725 (-13.6%, two pairs); against `7ecca8b18` 7.789-7.791
+  -> 6.940 with the batches alone (n1, two pairs), 6.737 with the key buffer (n2, two pairs), 6.724
+  (n4, two runs). The compaction is the same work (the same files merged: agent 315's 4.05 G), so
+  the statement went about 3.70 -> 2.67 G (-28%); pgrust's whole step is 1.54 G, PostgreSQL's 1.67
+  (the standing table's roll plain 7.740 was 5.0x pgrust's; this round's 6.72 is 4.4x). count(*)
+  after it 0.353 on both; rows, sums, the table's and indexes' sizes after the DELETE and after
+  VACUUM and the data directory as before; the step writes 54.0 -> 52.8 MB.
+- The whole script once (b1 / n5): all steps 72.019 -> 70.949 G (-1.5%), every other step within
+  0.04% (VACUUM -0.29%, ANALYZE -0.85%); rows, sums and ctid hashes equal, MB written 322.9 / 321.7
+  (the DELETE's), data directory 48 MB both, peak anon+shmem 252.0 / 250.7 MB, VmHWM 289.2 / 288.8.
+- Single-row (pgbench scale 1, one client, the server's cgroup, two pairs b1 / n5 in both orders):
+  keyed UPDATE 102,986 -> 100,164 and 102,409 -> 101,385 user instructions a transaction; keyed
+  DELETE and the row put back 249,097 -> 249,754 and 252,148 -> 251,438: level (the window holds
+  the flush thread's work, which moves a run by up to 4%).
+- `tools/crash-binary.py` seeds 1-3 (7 rounds each) against n5: ok.
+
+**Codegen kept level for other statements.** The first build with all of it (n2/n3) read CREATE
+INDEX +1.1%, CREATE UNIQUE INDEX +1.1%, UPDATE +0.23%, VACUUM +0.35%, ANALYZE +0.85%, and the
+single-row UPDATE / DELETE pair +1.2% / +2.6%. Diffing the two binaries' function sizes found four
+helpers the change gave a second caller, which LLVM then put out of line on the old paths:
+`index_entry_key_into` (the parallel index build's per-entry key: one caller before),
+`sizing::toast_gone` (UPDATE's and COPY's sizing), `HashMap::contains_key` of the lock manager's row
+table (inline in `LockManager::lock_row`), and `after_lock` split out of `lock_row_with`. Each old
+caller keeps its function as it was now (`index_entry_key_of` and `toast_gone_old` have bodies of
+their own, `lock_rows_compact` asks `get`, `after_lock` and `mark_modified` are
+`#[inline(always)]`, restoring `lock_row_with` and `mark_row_modified` to b0's sizes), and every
+function outside the DELETE's own reads b0's size again (n4: CREATE INDEX 3.013 -> 3.017, inside
+b0's 3.013-3.025, everything else to the instruction but the DELETE). A later profile of single-row
+DELETEs (`tprof.sh`) found `put_entry_deletes` taking and putting back its buffers at every
+statement's start: it returns at once when nothing is deferred.
+
+**Found by quick-check**: a DELETE that is its transaction's first write has no change log yet when
+it starts (`Txn::log` is made with the transaction's id, `Txn::xid`), so an eligibility test for
+row logging at the statement's start let a publisher's DELETE through unlogged (`logical_apply`'s
+`native_apply`, `shared_decoding_keeps_each_output`). The batch asks once its rows are locked (the
+id taken) and logs each row from its decoded bytes, as `delete_row_with` does.
+
+**The forced compaction** (brief item 4; n2's profile, `~/.cache/a321/perf/del-n2.txt`): zstd
+compression 38% of the flush thread's samples (the dictionary match finder 23%), decompression 7%,
+the merge and writer (`zip_entries`, `Compacted::entry`, `SstWriter::add_from`) about 20%, the
+output's bloom filter 2.4%. It writes the table's 750,000 live rows once: every block of the table
+holds the UPDATE's new versions and a deleted row, so there is no block it could copy (292) or drop
+whole, and the index files are only marked (their deletions alone, 275). Nothing it writes here
+needs no writing; not changed.
+
+**Left** (n2's profile of the statement's thread; shares of its samples, the kernel throttled the
+rate under 7 foreign cores):
+1. The scan: `zip_rows` merging the table with the UPDATE's versions 14.5% (storage), the
+   stored-value filter 11.5% (`StoredCmps::passes_with`, `IntOp::apply`).
+2. Writing the tombstones: `SstWriter::add_from` 12.6%, about 150 instructions an entry for 2.25M
+   entries; the sort 3.6%. A writer for runs of deletions alone (fixed-size keys, no values) could
+   take less; not built.
+3. The batch: decoding the index columns into a whole-width row 5.9% (a reused row, or the stored
+   int4 straight into the entry's encoding), the index entries 6.3%, the modified marks 3.4% (one
+   trip, but a probe a row; folding them into the lock trip when nothing committed since the
+   snapshot needs the check inside the trip), sizing from the stored bytes 2.4% (a per-statement
+   bound from the column types would skip it for most tables).
+4. Not gated on the PGO build: the batch path is new code; on the old paths every function is the
+   size it was (above).
+
+Verification: `tools/quick-check.sh` with `QC_CHECKED=1` and `QC_TESTS="big_tables crash_bulk
+storage_linked_gc"` on `c3772237e` (the code commit on `be865dfb8`): Clippy 16 warnings, none new in
+a changed file; 479 tests in 28 binaries (app_concurrency, compact_locks, logical_apply, txn_spill,
+the crash_* binaries among them), again built `--profile verify-checked`; crash_random seeds 1-3 x 2,
+power_cut_at_every_point; regress 51,148 / 51,150, 0 newly differing; isolation 1,647 / 1,648;
+pg_dump_tap 14,609 passed. After the rebase onto `def0eaf98` (agent 319's scan change, index scans'
+filter rest and reordered heaps' chunks: neither is a path `each_keyed` takes), the same on
+`b04754f60`: the same counts in every step. `tools/crash-binary.py` seeds 1-3 against n5 (the code
+on `be865dfb8`, plain dist): ok. Not gated on the PGO build (above).
+
 ## Bulk writes, round 27: COPY out's floats and text, index builds' key columns; what the DELETE costs (agent 315)
 
 BENCH "Bulk writes, round 27" has the measurements (lane C, plain dist, the 1M-row bulk script

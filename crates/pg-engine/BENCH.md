@@ -376,6 +376,81 @@ client, (I30 s - I10 s) / (ops30 - ops10) of the server's cgroup): 54,633 -> 54,
 <- 56,440 (n3 first), 55,969 -> 53,588: +0.4%, +1.1%, -4.3%, foreign load 2.2-3.6 cores; b0 alone
 ranges 54.6-56.0 k. Noise: no aggregate runs in a point select.
 
+## Bulk writes, round 28: a bulk DELETE's rows in batches (2026-11-25, agent 321)
+
+HANDOFF "Bulk writes, round 28" has what changed. Lane C, agent 315's harness copied to
+`~/.cache/a321/bench` (one server a container on the lane's server CPUs, 8 GiB, 2 GB cache, the
+1M-row `bulk1m.tsv`, joined windows: the DELETE's window runs on through the compaction it forces).
+`dpair.sh` runs the script through the count after the DELETE and measures those two steps;
+`wpair.sh` the whole script; `tpair.sh` pgbench scale 1, one client, 20,000 keyed UPDATEs and then
+20,000 transactions of a keyed DELETE and the row put back. Plain dist builds (`tools/dist.sh`):
+**b0** origin's `7ecca8b18`; **b1** origin's `be865dfb8`, the candidate's parent; **n1** the
+batches, locks and model (WIP `020130338`); **n2** with the key buffer and the column indexes' entries in place (WIP `dd54a35cd`); **n4** the candidate's code
+before its last two lines (`fa87c5578`; n3 was the first codegen fix alone); **n5** the
+candidate's code (`cand/a321`). G user instructions of the server's cgroup; every counter ran
+100% of its window. **Foreign load was over 1.0 core in every run** (1.5-3.9 cores on the server
+CPUs by the harness, 4.5-7.6 on the lane's 8 by `lane.sh`); instruction counts repeat within
+0.02% on a build regardless, cycles are a reading only.
+
+### The DELETE of 750,000 of 1M rows, with its compaction (one `tools/lane.sh` hold a pair)
+
+| pair | base | new | % |
+|---|---:|---:|---:|
+| b0 / n1 | 7.790 | 6.940 | -10.9 |
+| n1 / b0 | 7.789 | 6.940 | -10.9 |
+| b0 / n2 | 7.790 | 6.737 | -13.5 |
+| n2 / b0 | 7.791 | 6.737 | -13.5 |
+| n4 / b0 | 7.790 | 6.724 | -13.7 |
+| b1 / n5 (whole script) | 7.787 | 6.724 | -13.65 |
+| n5 / b1 | 7.786 | 6.725 | -13.6 |
+
+count(*), sum(c) after it 0.352 on every build on `7ecca8b18`, 0.353 on both on `be865dfb8`. Rows
+and sums equal; the table's and indexes' sizes after the DELETE and after VACUUM equal (102,408,192 / 166,289,408), the data directory
+46.8 / 47.9 MB both; MB written by the step 54.0 -> 52.8.
+
+### The whole script once each (b0 / n4 and b1 / n5, one hold each)
+
+| step | b0 | n4 | b1 | n5 |
+|---|---:|---:|---:|---:|
+| COPY in | 6.405 | 6.405 | 6.406 | 6.407 |
+| CREATE INDEX | 3.013 | 3.017 | 3.017 | 3.018 |
+| CREATE UNIQUE INDEX | 2.673 | 2.673 | 2.676 | 2.677 |
+| COPY out | 2.358 | 2.358 | 2.358 | 2.358 |
+| INSERT ... SELECT | 4.432 | 4.432 | 4.434 | 4.434 |
+| UPDATE half | 11.558 | 11.558 | 11.556 | 11.555 |
+| DELETE a quarter, with its compaction | 7.791 | 6.724 | 7.787 | 6.724 |
+| VACUUM | 1.720 | 1.720 | 1.720 | 1.715 |
+| ANALYZE | 0.473 | 0.473 | 0.473 | 0.469 |
+| count after | 0.352 | 0.352 | 0.353 | 0.353 |
+| TRUNCATE, DROP | 0.005 | 0.005 | 0.005 | 0.009 |
+| COPY, primary key and index | 18.301 | 18.301 | 18.305 | 18.297 |
+| COPY, index only | 12.925 | 12.924 | 12.928 | 12.933 |
+| **all steps** | 72.007 | 70.943 (-1.5%) | 72.019 | 70.949 (-1.5%) |
+
+Rows, sums and ctid hashes equal in all four; MB written 410.6 / 370.8 (all but 1.2 MB of the
+difference COPY with a primary key's: 122.3 / 83.6, when its compaction fell in the window) and
+322.9 / 321.7 (the DELETE's); data directory after 48 MB in all; peak anon+shmem 251.1 / 251.6 and
+252.0 / 250.7 MB, VmHWM 288.6 / 289.9 and 289.2 / 288.8 MB.
+CREATE INDEX's 3.017 is inside b0's own 3.013-3.025 over this round's runs. The first full build
+(n2, and n3 with only `after_lock` and `mark_modified` inline) read CREATE INDEX +0.9 / +1.1%,
+CREATE UNIQUE INDEX +1.3 / +1.1%, UPDATE +0.46 / +0.23%, ANALYZE +0.9%: HANDOFF says why.
+
+### Single-row (`tpair.sh`, user instructions a transaction, the server's cgroup)
+
+| pair | keyed UPDATE | keyed DELETE + INSERT back |
+|---|---|---|
+| b0 / n4 | 101,048 -> 101,303 | 244,868 -> 250,324 |
+| n4 / b0 | 101,903 -> 102,388 | 249,114 -> 253,863 |
+| b1 / n5 | 102,986 -> 100,164 | 249,097 -> 249,754 |
+| n5 / b1 | 102,409 -> 101,385 | 252,148 -> 251,438 |
+
+The window holds the flush thread's work too (its compactions move a run by up to 4%: b0's
+DELETE transaction read 244.9-254.9k over four runs). A profile of the DELETE transactions on b0
+and n4 (`tprof.sh`, leaf samples at a fixed period) put about +80 samples of the +1,083 in code
+this change touched (`put_entry_deletes` at every statement's start, +68; the entries' closure
+against `index_values`), the rest scattered over parsing, clock reads, pruning and decompression;
+n5 returns at once when nothing is deferred.
+
 ## Bulk writes, round 27: COPY out's floats and text, index builds' key columns; the DELETE's compaction measured (2026-11-25, agent 315)
 
 HANDOFF "Bulk writes, round 27" has what changed. Lane C, agent 314's standing harness (one server
