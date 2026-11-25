@@ -14993,6 +14993,41 @@ new cases among them), again built `--profile verify-checked` (383 passed); regr
 plans overflowed the test thread's 2 MiB in a debug build (in `explain::Builder::convert`, the
 planner's model of the plan, not the executor).
 
+## Bulk DELETE: where the statement's instructions go (agent 318, profiled; nothing changed)
+
+The brief's item 2 (agent 315's 3.70 G statement for 750,000 of 1M rows) was profiled, not
+changed: a batched path needs the lock manager, the size model and dml at once, more than this
+round's time with its gates. Profile: plain dist of `aaa096e02`, agent 315's bulk script
+(`~/.cache/a318/bulk/bulk.sh`, `PROF_STEP=delete_quarter`), `perf record -e instructions:upp
+--call-graph lbr` over the server cgroup, the `roll-conn` thread (the statement and its commit;
+the compaction it forces runs on `roll-flush`, not counted here). 2,629 samples: the kernel
+throttled the rate under 7.6 foreign cores, so shares only. Raw stacks:
+`~/.cache/a318/perf/del-b0.txt`.
+
+| part (inclusive, % of the thread's samples) | % |
+|---|---|
+| the scan below the DELETE (`ScanNode::next`) | 43.9 |
+| - merging the table's rows with the UPDATE's versions (`TxnScan::fill_batch`, `zip_rows` 11.0 self) | 11.1 |
+| - the filter `id % 4 = 1` (`StoredCmps::passes_with`) | 6.7 |
+| - decoding each deleted row whole (`Lazy::into_row`, `LazyBuf::read`) | 8.1 |
+| `delete_row_with` | 17.4 |
+| - index entries (`index_values`, `index_entry_key`, `defer_entry_delete`) | 8.2 |
+| - `LockManager::mark_row_modified` (a second lock-manager trip a row) | 2.9 |
+| - the size model (`layout_len` 2.0, `ensure` 1.4) | 3.4 |
+| - toast, SSI | 1.4 |
+| `lock_row_with` (`TxnState::lock_row` 5.3: the compact hold's upsert) | 6.1 |
+| the deletions' run at commit (`put_entry_deletes`: `SstWriter::add_from` 10.7, its sort 1.9) | 14.6 |
+| of which the run's bloom filter (`bloom_set`) | 3.7 |
+| unresolved (`[unknown]`) | 11-13 |
+
+Cuts in order of size: (1) decode only the columns the deletion reads (the index keys; the size
+model's `layout_len` reads all of them now, so it would have to size from the stored bytes, as
+`row_len` does for scans); (2) the lock manager twice a row (`lock_row`, then `row_modified`): one
+trip that marks the hold modified when the row is sure to go (not before a recheck that may skip
+it); (3) index entries built into one buffer per batch, not a Vec each; (4) one model lock a
+batch for `sizing::deleted` (the relfiles write lock a row now). The scan's merge with newer
+versions is the storage scan (agent 313's area).
+
 ## Memory, round 2: parallel index builds' lists, where the other peaks are (agent 308, 2026-11-24)
 
 BENCH.md "Memory, round 2" has the tables. Plain dist builds (`tools/dist.sh`): **h**, origin's
