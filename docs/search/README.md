@@ -1304,6 +1304,16 @@ deterministic (#396).
    authorization path, and secrets or keys a branch inherits from its parent. Only the code those
    reviews read has been checked. Every decoder, cache, context store, credential field and branch
    copy in search gets the same questions, with a test per real finding.
+   Second pass (2026-11-25, read-only on 851292fd4): what a copy of a cluster inherits and
+   every credential field. It found a branch able to read its parent's `_connector/_secret` and
+   `_fleet/secret` values (sealed by kind alone, so they opened on the copy), watch headers and
+   webhook URLs other than `Authorization` kept in the clear, and inference endpoints on a branch
+   spending the parent's provider key; the fix is in progress (`fix/search-branch-secrets`:
+   every secret store bound to its cluster, nothing a branch inherits opens there). Checked and
+   sound: cluster passwords, browser keys, remote links, `roll://` references, repository
+   credentials, connector configuration, site verifications, migration credentials and previews'
+   data keys. Next pass: caches and context stores (scroll, point in time, async results, the
+   request cache, kept ES|QL results) against the opener and against a concurrent close.
 5. **Cross-cluster search: what's left** (ES|QL across clusters landed in #504 after five reviews: each
    cluster's part on its owner, `_remote`/`_coordinator`/`_any` enrich modes, LOOKUP JOIN across clusters
    with union types refused as Elasticsearch refuses them; still different: a command inside a part after
@@ -1434,7 +1444,9 @@ deterministic (#396).
    the restore: segments Lucene 8 wrote (Elasticsearch 7.x indices never merged since), data streams themselves (their backing indices restore), `sparse_vector`
    and `rank_vectors` values and nested dense vectors that Elasticsearch 9 left out of `_source`,
    `_status` file counts from the shard snapshots, and resuming after a takeover from the shard
-   reached rather than from the start of each index. In progress (`fix/search-snapshot-followups`):
+   reached rather than from the start of each index. Also left: a snapshot that starts after a DELETE is written to
+   the bucket but before the cluster's copy of the repository data updates may still take the
+   deleted snapshot as its base (`_cleanup` has the same window). In progress (`fix/search-snapshot-followups`):
    a snapshot DELETE waits for running snapshots that build on it, as Elasticsearch does, a cap on
    repository generations, and unreferenced chunks of failed snapshots removed by the next
    snapshot of their shard.
