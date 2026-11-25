@@ -1366,6 +1366,7 @@ fn tried(out: &str) -> crate::ports::Tried {
         step_failed: said["step_failed"].as_str().map(|s| line(s, 200)),
         text: said["text"].as_str().unwrap_or("").chars().filter(|c| !c.is_control() || *c == '\n').take(40_000).collect(),
         errors: said["errors"].as_array().into_iter().flatten().filter_map(|e| e.as_str().map(|e| line(e, 300))).take(20).collect(),
+        login: said["login"].as_str().map(|s| line(s, 200)),
     }
 }
 /// The line of what a run's pages served (`$OUT.bodies.json`: 8 MiB as base64, and JSON).
@@ -1423,7 +1424,7 @@ fn shot_args(shot: &str, name: &str, port: u16) -> Vec<String> {
 /// What a stories run said (`[{id, errors}]`), and its PNGs a line each, in that order: each
 /// story once, by an id roll accepts, with a PNG of at most [`STORY_MAX`] bytes, at most
 /// [`crate::settings::MAX_STORIES`]. The run is the preview's code: nothing else is taken.
-fn story_shots<'a>(said: &str, pngs: impl Iterator<Item = &'a str>) -> Vec<crate::ports::PageShot> {
+fn story_shots<'a>(said: &str, pngs: impl Iterator<Item = &'a str>) -> (Vec<crate::ports::PageShot>, crate::Skipped) {
     use base64::Engine as _;
     #[derive(serde::Deserialize)]
     struct Said {
@@ -1431,7 +1432,19 @@ fn story_shots<'a>(said: &str, pngs: impl Iterator<Item = &'a str>) -> Vec<crate
         #[serde(default)]
         errors: u32,
     }
-    let said: Vec<Said> = serde_json::from_str(said.trim()).unwrap_or_default();
+    #[derive(Default, serde::Deserialize)]
+    struct Run {
+        #[serde(default)]
+        stories: Vec<Said>,
+        #[serde(default)]
+        left: u32,
+        #[serde(default)]
+        first_left: Vec<String>,
+    }
+    let run: Run = serde_json::from_str(said.trim()).unwrap_or_default();
+    // What it didn't take, as it said (its ids checked: the index is the preview's code's).
+    let skipped = crate::Skipped { pages: Vec::new(), stories: run.left.min(100_000), first_stories: run.first_left.into_iter().filter(|id| crate::settings::story_id_ok(id)).take(10).collect() };
+    let said = run.stories;
     let mut out: Vec<crate::ports::PageShot> = Vec::new();
     for (s, b64) in said.into_iter().zip(pngs).take(crate::settings::MAX_STORIES) {
         let path = format!("story:{}", s.id);
@@ -1441,7 +1454,7 @@ fn story_shots<'a>(said: &str, pngs: impl Iterator<Item = &'a str>) -> Vec<crate
         }
         out.push(crate::ports::PageShot { path, png, errors: s.errors.min(10_000), report: Default::default() });
     }
-    out
+    (out, skipped)
 }
 const SHOT_OUTPUT_MAX: usize = BODIES_LINE_MAX + (crate::settings::MAX_PAGES + 2) * SCREENSHOT_MAX * 4 / 3 + 3 * SHOT_REPORT_MAX + crate::store::CROPS_PER_RUN * crate::store::CROP_MAX * 4 / 3 + (64 << 10);
 
@@ -1643,7 +1656,7 @@ impl Runtime {
 
     /// An agent's run (`…/try`) in container `name`'s network, locked down as a screenshot is: the
     /// page at `path`, `steps` taken, then what the browser saw ([`tried`]).
-    pub async fn try_in(&self, name: &str, port: u16, path: &str, steps: &[crate::settings::Step]) -> anyhow::Result<crate::ports::Tried> {
+    pub async fn try_in(&self, name: &str, port: u16, path: &str, steps: &[crate::settings::Step], login: Option<&crate::ports::Login>) -> anyhow::Result<crate::ports::Tried> {
         if code_preview::docker::docker(&["image", "inspect", "--format", "{{.Id}}", &self.cfg.screenshot_image]).await.is_err() {
             code_preview::docker::docker(&["pull", "--quiet", &self.cfg.screenshot_image]).await?;
         }
@@ -1652,13 +1665,15 @@ impl Runtime {
         let mut args = shot_args(&shot, name, port);
         // The steps (typed text among them) go on stdin, never a command line (`ps`, `docker
         // inspect`): written to a file in the container's own /tmp.
-        let asked = serde_json::to_vec(&serde_json::json!({ "path": path, "steps": steps }))?;
-        args.extend(["--env".into(), "TRY=1".into(), "--env".into(), "TRY_FILE=/tmp/try.json".into()]);
+        // The sign-in first (`login_json`), then the run's own.
+        let mut asked = login_json(login)?;
+        asked.extend(serde_json::to_vec(&serde_json::json!({ "path": path, "steps": steps }))?);
+        args.extend(["--env".into(), "TRY=1".into(), "--env".into(), "TRY_FILE=/tmp/try.json".into(), "--env".into(), "LOGIN_FILE=/tmp/login.json".into()]);
         args.extend([
             self.cfg.screenshot_image.clone(),
             "sh".into(),
             "-c".into(),
-            format!("cat > /tmp/try.json; {} >/dev/null 2>&1; (base64 -w0 /tmp/s.png 2>/dev/null || true) && echo && (cat /tmp/s.png.try.json 2>/dev/null || true)", self.cfg.screenshot_command),
+            format!("IFS= read -r L; printf '%s' \"$L\" > /tmp/login.json; L=; cat > /tmp/try.json; {} >/dev/null 2>&1; (base64 -w0 /tmp/s.png 2>/dev/null || true) && echo && (cat /tmp/s.png.try.json 2>/dev/null || true)", self.cfg.screenshot_command),
         ]);
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
         let out = match tokio::time::timeout(TRY_FOR, docker_with_input(&argv, asked, SCREENSHOT_MAX * 4 / 3 + SHOT_REPORT_MAX)).await {
@@ -1916,9 +1931,9 @@ impl Apps for Runtime {
         Ok(Some((status, first)))
     }
 
-    async fn try_page(&self, preview: &str, service: &str, path: &str, steps: &[crate::settings::Step]) -> anyhow::Result<Option<crate::ports::Tried>> {
+    async fn try_page(&self, preview: &str, service: &str, path: &str, steps: &[crate::settings::Step], login: Option<&crate::ports::Login>) -> anyhow::Result<Option<crate::ports::Tried>> {
         let Some((name, port)) = self.running_target(preview, service).await? else { return Ok(None) };
-        self.try_in(&name, port, path, steps).await.map(Some)
+        self.try_in(&name, port, path, steps, login).await.map(Some)
     }
 
     async fn screenshot(&self, preview: &str, service: &str, opts: &crate::ports::ShotOptions) -> anyhow::Result<Option<crate::ports::Shot>> {
@@ -1994,12 +2009,14 @@ impl Runtime {
         let shot = format!("roll-previews-shot-{}", name.trim_start_matches("roll-previews-"));
         let mut args = shot_args(&shot, name, port);
         args.extend(["--env".into(), "AXE=/tmp/axe.js".into()]);
-        let pages: Vec<&String> = opts
+        let wanted: Vec<&String> = opts
             .pages
             .iter()
             .filter(|p| crate::settings::page_path_ok(p) || crate::settings::width_entry(p).is_some() || crate::settings::state_entry(p).is_some() || crate::settings::mode_entry(p).is_some())
-            .take(crate::settings::MAX_PAGES)
             .collect();
+        // A run takes ten; the rest are said, never dropped quietly.
+        let cut: Vec<String> = wanted.iter().skip(crate::settings::MAX_PAGES).map(|p| p.to_string()).collect();
+        let pages: Vec<&String> = wanted.into_iter().take(crate::settings::MAX_PAGES).collect();
         args.extend(["--env".into(), format!("PAGES={}", serde_json::to_string(&pages)?)]);
         let hide: Vec<&String> = opts.hide.iter().filter(|s| crate::settings::selector_ok(s)).take(crate::settings::MAX_HIDE).collect();
         args.extend(["--env".into(), format!("HIDE={}", serde_json::to_string(&hide)?)]);
@@ -2029,6 +2046,9 @@ impl Runtime {
         if !crops.is_empty() {
             args.extend(["--env".into(), format!("CROPS={}", serde_json::to_string(&crops)?)]);
         }
+        let mut input = login_line(opts)?;
+        input.extend_from_slice(AXE_JS.as_bytes());
+        args.extend(["--env".into(), "LOGIN_FILE=/tmp/login.json".into()]);
         // The PNG on the first line, the timings (if the command wrote them) on the second, the
         // phone-width PNG (if it took one) on the third, then the other pages: what each said,
         // and their PNGs a line each.
@@ -2037,7 +2057,7 @@ impl Runtime {
             "sh".into(),
             "-c".into(),
             format!(
-                "cat > /tmp/axe.js; {} >/dev/null 2>&1 && base64 -w0 /tmp/s.png && echo && (cat /tmp/s.png.json 2>/dev/null || true) && echo && (base64 -w0 /tmp/s.png.phone.png 2>/dev/null || true) \
+                "IFS= read -r L; printf '%s' \"$L\" > /tmp/login.json; L=; cat > /tmp/axe.js; {} >/dev/null 2>&1 && base64 -w0 /tmp/s.png && echo && (cat /tmp/s.png.json 2>/dev/null || true) && echo && (base64 -w0 /tmp/s.png.phone.png 2>/dev/null || true) \
                  && echo && (cat /tmp/s.png.pages.json 2>/dev/null || true) && for n in 0 1 2 3 4 5 6 7 8 9; do echo; base64 -w0 /tmp/s.png.$n.png 2>/dev/null || true; done \
                  && echo && (cat /tmp/s.png.crops.json 2>/dev/null || true) && for n in 0 1 2 3 4 5 6 7 8 9; do echo; base64 -w0 /tmp/s.png.crop.$n.png 2>/dev/null || true; done \
                  && echo && (cat /tmp/s.png.bodies.json 2>/dev/null || true)",
@@ -2067,7 +2087,7 @@ impl Runtime {
                 None => None,
             }
         };
-        let (run, (more, browsers_ms), stories) = tokio::join!(tokio::time::timeout(within, docker_with_input(&argv, AXE_JS.as_bytes(), SHOT_OUTPUT_MAX)), browsers_run, stories_run);
+        let (run, (more, browsers_ms), stories) = tokio::join!(tokio::time::timeout(within, docker_with_input(&argv, input, SHOT_OUTPUT_MAX)), browsers_run, stories_run);
         let out = match run {
             Ok(Ok(out)) => out,
             // Its container outlives a docker CLI that gave up on it (too much output).
@@ -2109,6 +2129,9 @@ impl Runtime {
             pages: page_shots(&pages, said, page_lines.into_iter()),
             crops: note_crops(&asked, crops_said, crop_lines.into_iter()),
             bodies,
+            // What `shot.js` said of the sign-in (its own words, never the page's), one line.
+            login: serde_json::from_str::<serde_json::Value>(speed).ok().and_then(|v| v["login"].as_str().map(|s| s.chars().take(200).collect())),
+            skipped: crate::Skipped { pages: cut, ..Default::default() },
         };
         // The other browsers', best effort: Chromium's screenshot stands.
         match more {
@@ -2121,7 +2144,11 @@ impl Runtime {
         }
         // The stories, best effort too.
         match stories {
-            Some(Ok(s)) => shot.pages.extend(s),
+            Some(Ok((s, left))) => {
+                shot.pages.extend(s);
+                shot.skipped.stories = left.stories;
+                shot.skipped.first_stories = left.first_stories;
+            }
             Some(Err(e)) => tracing::warn!(container = name, error = %e, "previews: Storybook's stories"),
             None => {}
         }
@@ -2133,7 +2160,7 @@ impl Runtime {
     /// A service's Storybook stories (`github.storybook`; Chromatic's stories), served at `at`: a
     /// run of their own in its network, locked down as the screenshot's is, each story a page
     /// (`story:<id>`).
-    async fn stories_in(&self, name: &str, port: u16, at: &str) -> anyhow::Result<Vec<crate::ports::PageShot>> {
+    async fn stories_in(&self, name: &str, port: u16, at: &str) -> anyhow::Result<(Vec<crate::ports::PageShot>, crate::Skipped)> {
         let shot = format!("roll-previews-story-{}", name.trim_start_matches("roll-previews-"));
         let mut args = shot_args(&shot, name, port);
         args.extend(["--env".into(), format!("STORIES={at}")]);
@@ -2207,11 +2234,13 @@ impl Runtime {
             .take(10)
             .collect();
         args.extend(["--env".into(), format!("CROPS={}", serde_json::to_string(&crops)?)]);
-        args.extend(["--env".into(), format!("ROLL_BROWSERS_JS={BROWSERS_JS}"), BROWSERS_IMAGE.into(), "sh".into(), "-c".into(), r#"node -e "$ROLL_BROWSERS_JS""#.into()]);
+        // Each browser signs in first too (`login_line`).
+        args.extend(["--env".into(), "LOGIN_FILE=/tmp/login.json".into()]);
+        args.extend(["--env".into(), format!("ROLL_BROWSERS_JS={BROWSERS_JS}"), BROWSERS_IMAGE.into(), "sh".into(), "-c".into(), r#"IFS= read -r L; printf '%s' "$L" > /tmp/login.json; L=; node -e "$ROLL_BROWSERS_JS""#.into()]);
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
         let within = Duration::from_secs(30 + 40 * browsers.len() as u64 + 25 * crops.len() as u64);
         let max = browsers.len() * (SCREENSHOT_MAX * 4 / 3 + 4096) + crops.len() * (crate::store::CROP_MAX * 4 / 3 + 4096);
-        let out = match tokio::time::timeout(within, docker_with_input(&argv, Vec::new(), max)).await {
+        let out = match tokio::time::timeout(within, docker_with_input(&argv, login_line(opts)?, max)).await {
             Ok(Ok(out)) => out,
             Ok(Err(e)) => {
                 code_preview::docker::remove(&run).await;
@@ -2692,6 +2721,22 @@ async fn serve(rt: Arc<Runtime>, preview: String, service: String, mut req: Requ
         None => rt.proxy(&preview, &service, req, feedback).await,
     };
     with_skew_cookie(resp, skew_cookie, rt.cfg.scheme == "https")
+}
+
+/// The app's sign-in a screenshot run's browsers take first (`github.login`, a trusted preview's,
+/// its variables in place; checked again), as the first line of their container's stdin, which
+/// its shell writes to a file of the container's own that the browser's script reads and
+/// removes: never a command line, an environment variable or the record. An empty line for none.
+fn login_line(opts: &crate::ports::ShotOptions) -> anyhow::Result<Vec<u8>> {
+    login_json(opts.login.as_ref())
+}
+
+/// [`login_line`] for one sign-in (`try`'s too).
+fn login_json(login: Option<&crate::ports::Login>) -> anyhow::Result<Vec<u8>> {
+    let login = login.filter(|l| crate::settings::page_path_ok(&l.page) && !l.steps.is_empty() && l.steps.len() <= crate::settings::MAX_STEPS && l.steps.iter().all(crate::settings::step_ok));
+    let mut line = login.map(serde_json::to_vec).transpose()?.unwrap_or_default();
+    line.push(b'\n');
+    Ok(line)
 }
 
 /// The notes' elements Chromium's run crops ($CROPS), checked again (they come from the preview's
@@ -3192,6 +3237,19 @@ mod tests {
         assert!(off.ends_with("\r\n\r\ncs_3") && !get("/", "Sec-Fetch-Dest: document\r\n").await.contains("__roll_dpl"), "off: {off}");
     }
 
+    /// A screenshot run's sign-in goes to its browsers as one line of stdin (an empty one for
+    /// none), checked again first: a page off the service's origin, or no steps, sends nothing.
+    #[test]
+    fn a_sign_in_is_one_line_checked_again() {
+        use crate::settings::Step;
+        let with = |page: &str, steps: Vec<Step>| crate::ports::ShotOptions { login: Some(crate::ports::Login { page: page.into(), steps }), ..Default::default() };
+        let line = login_line(&with("/login", vec![Step::Type("#pw".into(), "hunter2".into()), Step::Press("Enter".into())])).unwrap();
+        assert_eq!(String::from_utf8(line).unwrap(), "{\"page\":\"/login\",\"steps\":[{\"type\":[\"#pw\",\"hunter2\"]},{\"press\":\"Enter\"}]}\n");
+        assert_eq!(login_line(&with("//evil.example/login", vec![Step::Press("Enter".into())])).unwrap(), b"\n");
+        assert_eq!(login_line(&with("/login", vec![])).unwrap(), b"\n");
+        assert_eq!(login_line(&crate::ports::ShotOptions::default()).unwrap(), b"\n");
+    }
+
     /// Chromium's crops carry how their reviewers saw the page (viewport, steps); another
     /// engine's go to the other browsers' run; a step roll's checks refuse sends none.
     #[test]
@@ -3235,17 +3293,20 @@ mod tests {
     }
 
     /// A stories run's report is the preview's code's: each story once, by an id Storybook would
-    /// make, with a PNG within the cap; anything else is dropped.
+    /// make, with a PNG within the cap; anything else is dropped. What it didn't take is said
+    /// (how many, the first by ids Storybook would make).
     #[test]
     fn a_stories_runs_pages_are_stories_it_can_name_each_once() {
         use base64::Engine as _;
         let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
         let (png, junk, big) = (b64(b"\x89PNG\r\n\x1a\n..."), b64(b"not a png"), b64(&[b"\x89PNG".as_slice(), &vec![0u8; STORY_MAX]].concat()));
-        let said = r#"[{"id":"button--primary","errors":2},{"id":"../x--y"},{"id":"button--primary"},{"id":"card--empty"},{"id":"card--big"},{"id":"card--full"}]"#;
+        let said = r#"{"stories":[{"id":"button--primary","errors":2},{"id":"../x--y"},{"id":"button--primary"},{"id":"card--empty"},{"id":"card--big"},{"id":"card--full"}],"left":12,"first_left":["button--danger","../evil"]}"#;
         let pngs = [&png, &png, &png, &junk, &big, &png];
-        let got: Vec<(String, u32)> = story_shots(said, pngs.iter().map(|s| s.as_str())).into_iter().map(|p| (p.path, p.errors)).collect();
+        let (shots, left) = story_shots(said, pngs.iter().map(|s| s.as_str()));
+        let got: Vec<(String, u32)> = shots.into_iter().map(|p| (p.path, p.errors)).collect();
         assert_eq!(got, [("story:button--primary".to_string(), 2), ("story:card--full".to_string(), 0)]);
-        assert!(story_shots("not json", [png.as_str()].into_iter()).is_empty());
+        assert_eq!((left.stories, left.first_stories), (12, vec!["button--danger".to_string()]), "what it didn't take, by ids it could name");
+        assert!(story_shots("not json", [png.as_str()].into_iter()).0.is_empty());
     }
 
     /// A run's answer is the preview's code's: a PNG only within the cap, one printable line for

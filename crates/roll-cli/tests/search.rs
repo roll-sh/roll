@@ -424,3 +424,53 @@ async fn crawler_import_reads_an_open_crawler_config() {
     let out = e.roll_with(&["search", "crawler", "import", "site", yml.to_str().unwrap()], None).await;
     assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("both have credentials"), "{out:?}");
 }
+
+/// `roll search migrate --from meilisearch`: the source listed, a dry run naming what didn't
+/// map, then the copy followed to its end with `--wait`. The key comes from the environment and
+/// is printed nowhere.
+#[tokio::test]
+async fn migrate_from_meilisearch() {
+    const KEY: &str = "meili-cli-KEY-5550123";
+    async fn fake(uri: axum::http::Uri, headers: axum::http::HeaderMap) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        if headers.get("authorization").and_then(|v| v.to_str().ok()) != Some(&format!("Bearer {KEY}")) {
+            return (axum::http::StatusCode::FORBIDDEN, axum::Json(serde_json::json!({ "message": "invalid key" }))).into_response();
+        }
+        let docs = [serde_json::json!({ "sku": "a1", "title": "Kettle" }), serde_json::json!({ "sku": "a2", "title": "Teapot" })];
+        let v = match uri.path() {
+            "/indexes" => serde_json::json!({ "results": [{ "uid": "items", "primaryKey": "sku" }], "total": 1 }),
+            "/stats" => serde_json::json!({ "indexes": { "items": { "numberOfDocuments": 2 } } }),
+            "/version" => serde_json::json!({ "pkgVersion": "1.12.0" }),
+            "/indexes/items" => serde_json::json!({ "uid": "items", "primaryKey": "sku" }),
+            "/indexes/items/settings" => serde_json::json!({ "searchableAttributes": ["title"], "rankingRules": ["words", "typo", "proximity", "attribute", "sort", "exactness"], "dictionary": ["e.g."] }),
+            "/indexes/items/documents" => {
+                let offset: usize = uri.query().and_then(|q| q.split('&').find_map(|p| p.strip_prefix("offset="))).and_then(|n| n.parse().ok()).unwrap_or(0);
+                serde_json::json!({ "results": docs.iter().skip(offset).collect::<Vec<_>>(), "total": 2 })
+            }
+            _ => return axum::http::StatusCode::NOT_FOUND.into_response(),
+        };
+        axum::Json(v).into_response()
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let host = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, axum::Router::new().fallback(fake)).await });
+    let e = env_with(|c| c.node_settings.push((search_control::REINDEX_ALLOW_PRIVATE.into(), "true".into()))).await;
+    e.roll(&["search", "clusters", "create", "shop"]).await;
+    let roll = async |args: &[&str]| {
+        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_roll"));
+        cmd.arg("--api").arg(&e.api).args(args).env_remove("ROLL_API_URL").env("MEILISEARCH_API_KEY", KEY);
+        let out = tokio::task::spawn_blocking(move || cmd.output().unwrap()).await.unwrap();
+        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success() && !text.contains(KEY), "{args:?}: {text}");
+        text
+    };
+    let base = ["search", "migrate", "shop", "--from", "meilisearch", "--host", host.as_str()];
+    let listed = roll(&base).await;
+    assert!(listed.starts_with("items ") && listed.contains("2 docs"), "{listed}");
+    let planned = roll(&[&base[..], &["--index", "items=products", "--dry-run"][..]].concat()).await;
+    assert!(planned.contains("sku as _id") && planned.contains("not mapped: setting dictionary"), "{planned}");
+    let copied = roll(&[&base[..], &["--index", "items=products", "--size", "1", "--wait"][..]].concat()).await;
+    assert!(copied.contains("items -> products: done, 2 documents"), "{copied}");
+    let out = e.roll(&["search", "request", "shop", "GET", "/products/_doc/a2"]).await;
+    assert!(out.contains("\"title\" : \"Teapot\""), "{out}");
+}

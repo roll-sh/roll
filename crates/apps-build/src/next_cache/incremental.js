@@ -58,6 +58,11 @@ module.exports = class RollCacheHandler {
   }
 
   async set(key, data, ctx) {
+    await this.store(key, data, ctx, Date.now())
+  }
+
+  // `written` is when it was made: a tag invalidated after it makes it stale.
+  async store(key, data, ctx, written) {
     if (!data) return
     const fetchCache = isFetch(data.kind)
     const tags = [...((ctx && ctx.tags) || [])]
@@ -66,7 +71,7 @@ module.exports = class RollCacheHandler {
     const cc = ctx && ctx.cacheControl
     await put(scope(fetchCache), keyOf(fetchCache ? 'f' : 'p', key), encode(data), {
       tags,
-      written: Date.now(),
+      written,
       expire: cc && Number.isFinite(cc.expire) ? cc.expire : undefined,
     })
   }
@@ -79,7 +84,12 @@ module.exports = class RollCacheHandler {
     try {
       const found = await this.built.get(key, ctx)
       if (!found || !found.value) return null
-      await this.set(key, found.value, { tags: (ctx && ctx.tags) || [], cacheControl: found.cacheControl })
+      // Kept as made at the build, not now: a tag invalidated since (a CMS's webhook during the
+      // deploy) makes it stale, as it would any page rendered then.
+      const written = Number.isFinite(found.lastModified) ? found.lastModified : Date.now()
+      await this.store(key, found.value, { tags: (ctx && ctx.tags) || [], cacheControl: found.cacheControl }, written)
+      const hit = await get(scope(false), keyOf('p', key), [...((ctx && ctx.tags) || []), ...((ctx && ctx.softTags) || [])])
+      if (hit && hit.stale) return { lastModified: 1, value: found.value }
       return { lastModified: found.lastModified, value: found.value }
     } catch {
       return null

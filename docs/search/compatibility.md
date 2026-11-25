@@ -2249,7 +2249,9 @@ the rest are skipped by the tests' own prerequisites.
   of that shard; roll doesn't, because a snapshot running elsewhere (on another node, or a
   cluster writing the same bucket) records the chunks it uses only when it commits, so a commit
   can't tell another snapshot's chunks from leftovers. As on Elasticsearch, deleting snapshots
-  waits for the snapshots running in the repository, which may reuse what it would delete;
+  waits for the snapshots running in the repository, which may reuse what it would delete, and
+  a snapshot starting while a deletion or `_cleanup` runs there waits for it to end (a running
+  snapshot makes `_cleanup` refuse), so it never takes a removed snapshot as its base;
   `_cleanup` deletes what no snapshot references, and only objects of the names roll writes
   (`index-N` from 1, `tests-<uuid>`, its shard files and chunks under `indices/`; nothing when
   the bucket holds no repository data), and aborts only its own dangling uploads,

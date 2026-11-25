@@ -76,7 +76,12 @@ pub fn stored_user(p: &crate::xpack::security::Principal) -> Option<Value> {
     m.insert("realm_name".into(), p.realm_name.into());
     m.insert("realm_type".into(), p.realm_type.into());
     if let crate::xpack::security::AuthKind::ApiKey(a) = &p.kind {
-        m.insert("api_key".into(), crate::obj! { "id" => a.id.clone(), "name" => a.name.clone(), "role_descriptors" => a.role_descriptors.clone(), "limited_by" => a.limited_by.clone(), "cross_cluster" => a.cross_cluster });
+        let mut k = crate::obj! { "id" => a.id.clone(), "name" => a.name.clone(), "role_descriptors" => a.role_descriptors.clone(), "limited_by" => a.limited_by.clone(), "cross_cluster" => a.cross_cluster };
+        // A derived key's narrowing stays with it (browser keys start no jobs; kept regardless).
+        if let (Some(d), Some(k)) = (&a.derived, k.as_object_mut()) {
+            k.insert("narrowing".into(), d.narrowing.clone());
+        }
+        m.insert("api_key".into(), k);
     }
     Some(Value::Obj(m))
 }
@@ -93,6 +98,7 @@ pub fn principal_of(u: &Value) -> Option<crate::xpack::security::Principal> {
             limited_by: a.get("limited_by").cloned().unwrap_or(Value::Null),
             cross_cluster: a.get("cross_cluster").and_then(Value::as_bool).unwrap_or(false),
             remote: None,
+            derived: a.get("narrowing").map(|n| Box::new(crate::xpack::security::derived::DerivedAuth { narrowing: n.clone(), user: None, per_minute: None, origins: Vec::new() })),
         })),
         None => crate::xpack::security::AuthKind::Realm,
     };

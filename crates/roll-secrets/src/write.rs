@@ -1205,7 +1205,7 @@ impl Secrets {
             } else {
                 format!("public certificate {name} is linked into {list}, which is protected: its private key in {env} makes {list}'s key readable here")
             };
-            return Err(Error::Conflict("confirm_required", format!("{why} (every key linked to one public certificate gets the same key). Give {env} a public certificate of its own, or send confirm: \"{r}\" to link it anyway")));
+            return Err(Error::Conflict("confirm_required", format!("{why} (every key linked to one public certificate gets the same key). Give {env} a public certificate of its own, or a person confirms linking it anyway (confirm: \"{r}\")")));
         }
         Ok(())
     }

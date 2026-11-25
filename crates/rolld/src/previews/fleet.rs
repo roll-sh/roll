@@ -47,7 +47,7 @@ const ANSWER_BYTES: usize = 256 << 20;
 #[async_trait::async_trait]
 pub trait Shoot: Send + Sync {
     async fn shoot(&self, service: &str, env: &str, opts: &ShotOptions) -> anyhow::Result<Option<Shot>>;
-    async fn try_page(&self, service: &str, env: &str, path: &str, steps: &[Step]) -> anyhow::Result<Option<Tried>>;
+    async fn try_page(&self, service: &str, env: &str, path: &str, steps: &[Step], login: Option<&roll_previews::ports::Login>) -> anyhow::Result<Option<Tried>>;
 }
 
 /// Browser runs a node takes for other nodes at once (each a container of 1 GiB), screenshots
@@ -88,10 +88,12 @@ async fn shot(axum::extract::State(h): axum::extract::State<Arc<Holder>>, axum::
     run(&h, &ask, |service, env| h.local.shoot(service, env, &opts)).await
 }
 
-/// What a holder is asked for an agent's run: `{service, env, path, steps}`.
+/// What a holder is asked for an agent's run: `{service, env, path, steps, login?}` (the preview's
+/// node decided the sign-in; a signed hop carries it).
 async fn tried(axum::extract::State(h): axum::extract::State<Arc<Holder>>, axum::Json(ask): axum::Json<serde_json::Value>) -> axum::response::Response {
     let (Some(path), Ok(steps)) = (ask["path"].as_str(), serde_json::from_value::<Vec<Step>>(ask["steps"].clone())) else { return refused("expected {service, env, path, steps}") };
-    run(&h, &ask, |service, env| h.local.try_page(service, env, path, &steps)).await
+    let login = serde_json::from_value::<Option<roll_previews::ports::Login>>(ask["login"].clone()).ok().flatten();
+    run(&h, &ask, |service, env| h.local.try_page(service, env, path, &steps, login.as_ref())).await
 }
 
 fn refused(why: &'static str) -> axum::response::Response {
@@ -126,13 +128,13 @@ pub async fn shoot(cluster: Option<&Arc<Cluster>>, local: &dyn Shoot, service: &
 }
 
 /// An agent's run on `service`'s page in `env` (`…/try`), wherever its instance runs.
-pub async fn try_page(cluster: Option<&Arc<Cluster>>, local: &dyn Shoot, service: &str, env: &str, path: &str, steps: &[Step]) -> anyhow::Result<Option<Tried>> {
+pub async fn try_page(cluster: Option<&Arc<Cluster>>, local: &dyn Shoot, service: &str, env: &str, path: &str, steps: &[Step], login: Option<&roll_previews::ports::Login>) -> anyhow::Result<Option<Tried>> {
     if let Some(c) = cluster
         && let Some(holder) = elsewhere(c, service).await
     {
-        return on(c, &holder, TRY, serde_json::json!({ "service": service, "env": env, "path": path, "steps": steps })).await;
+        return on(c, &holder, TRY, serde_json::json!({ "service": service, "env": env, "path": path, "steps": steps, "login": login })).await;
     }
-    local.try_page(service, env, path, steps).await
+    local.try_page(service, env, path, steps, login).await
 }
 
 /// The service's holder, when that's another node.
@@ -169,11 +171,11 @@ mod tests {
     impl Shoot for Here {
         async fn shoot(&self, service: &str, env: &str, opts: &ShotOptions) -> anyhow::Result<Option<Shot>> {
             let text = format!("{} took {service} {env} {}", self.0, opts.pages.join(","));
-            Ok(Some(Shot { png: vec![137, 80, 78, 71], speed: None, health: None, a11y: None, phone: Some(vec![1, 2]), pages: Vec::new(), text: Some(text), links: None, api: None, crops: vec![("n1".into(), vec![3])] , bodies: Vec::new() }))
+            Ok(Some(Shot { png: vec![137, 80, 78, 71], speed: None, health: None, a11y: None, phone: Some(vec![1, 2]), pages: Vec::new(), text: Some(text), links: None, api: None, crops: vec![("n1".into(), vec![3])] , bodies: Vec::new(), login: None, skipped: Default::default() }))
         }
-        async fn try_page(&self, service: &str, env: &str, path: &str, steps: &[Step]) -> anyhow::Result<Option<Tried>> {
+        async fn try_page(&self, service: &str, env: &str, path: &str, steps: &[Step], login: Option<&roll_previews::ports::Login>) -> anyhow::Result<Option<Tried>> {
             let text = format!("{} tried {service} {env} {path} {}", self.0, steps.len());
-            Ok(Some(Tried { png: Some(vec![137, 80]), status: 200, step_failed: None, text, errors: vec!["boom".into()] }))
+            Ok(Some(Tried { png: Some(vec![137, 80]), status: 200, step_failed: None, text, errors: vec!["boom".into()], login: login.map(|l| format!("signed in through {}", l.page)) }))
         }
     }
 
@@ -215,8 +217,10 @@ mod tests {
         let here = shoot(Some(&a), &Here("a"), &ours, "pv-1", &opts).await.unwrap().unwrap();
         assert!(here.text.unwrap().starts_with("a took"), "a service this node holds is taken here");
         // An agent's run on its page (`…/try`) goes the same way, its answer whole.
-        let tried = try_page(Some(&a), &Here("a"), &theirs, "pv-1", "/cart", &[Step::Press("Tab".into())]).await.unwrap().unwrap();
+        let login = roll_previews::ports::Login { page: "/login".into(), steps: vec![Step::Type("#pw".into(), "hunter2".into())] };
+        let tried = try_page(Some(&a), &Here("a"), &theirs, "pv-1", "/cart", &[Step::Press("Tab".into())], Some(&login)).await.unwrap().unwrap();
         assert_eq!((tried.text, tried.png, tried.errors), (format!("b tried {theirs} pv-1 /cart 1"), Some(vec![137, 80]), vec!["boom".to_string()]), "tried on the holder");
+        assert_eq!(tried.login.as_deref(), Some("signed in through /login"), "the sign-in the preview's node decided goes with the run");
         // A report on its GitLab or Bitbucket repository: on the holder too (its Git login's use).
         let note = report(Some(&a), &Here("a"), &theirs, serde_json::json!({ "note": { "repo": "acme/site", "number": 4, "body": "x" } })).await.unwrap();
         assert_eq!(note, serde_json::json!(format!("b reported {theirs} 4")), "reported on the holder");

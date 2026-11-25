@@ -1940,7 +1940,7 @@ previews in it), the operator and admins see every project.
 | `GET /v1/previews/{id}/files?service=&path=` | | `application/x-tar`: what's at `path` (absolute) in the running `roll.toml` service, started if it sleeps (`docker cp`), `x-roll-service` naming it; 404 before any of the answer when nothing is there; said in the activity ("ana copied /app/out.csv out of web"). Admin, as the shell is (it reads anything the service keeps); a roll apps service's is 409 (roll apps' own `…/files` on `pv-`). Runs on the preview's holder |
 | `GET /v1/previews/{id}/forward?service=&port=` | WebSocket | one TCP connection to `port` in the running `roll.toml` service, any port it listens on (a debugger's, an admin's), published or not: a relay (busybox `nc`, `alpine:3.20`, 32 MiB, no capabilities) in the service's network namespace, removed with the connection; binary both ways, an empty message a half-close, as roll apps' tunnel (`roll preview forward`). The service is held awake while connections are open; at most 32 a preview (409); said in the activity once an hour per person, service and port. Admin; a roll apps service's is 409 (roll apps' own tunnel). Runs on the preview's holder (roll-cluster forwards the upgrade) |
 | `GET /v1/previews/{id}/fetch?path=&service=&head=` | `{service, path, url, status, headers: {content-type?, location?, cache-control?, content-length?}, body: string \| null, truncated}` | one page of a `roll.toml` service read through roll's own way in (no link token or share link), `GET` or `HEAD` (`head=true`); its text masked as its logs are, `null` when not text, cut at 256 KiB (`truncated`); `url` never carries a token; a roll apps service's page through roll apps' proxy as a link visitor (a team-access one's answers its 401); `reveal` (roll MCP's `previews_fetch`; `roll preview fetch`) |
-| `POST /v1/previews/{id}/try` | `{service?, path, steps}` (a page state's steps, 10 at most) | `{run, status, step_failed?, text, errors}`: the page in a browser after the steps, masked; two at a time per preview (409); `reveal` (roll MCP's `previews_try`; `roll preview try`) |
+| `POST /v1/previews/{id}/try` | `{service?, path, steps}` (a page state's steps, 10 at most) | `{run, status, step_failed?, text, errors, login?}`: the page in a browser after the steps, masked (`login`: how its `github.login` sign-in went, when the project has one); two at a time per preview (409); `reveal` (roll MCP's `previews_try`; `roll preview try`) |
 | `GET /v1/previews/{id}/try/{run}/screenshot` | | `image/png`, the run's picture, kept 5 minutes; `reveal` (roll MCP's `previews_try_screenshot`) |
 | `GET /v1/previews/{id}/data/{resource}?table=` | | `{tables: [{name, rows}]}` (its tables, as its own role sees them, at most 200) or, with `table`, `{table, columns, rows: (string \| null)[][], more}` (the first 50 rows, cells cut at 200 characters); `resource` is `kind:parent`; read as the branch's own role, read-only, 5 s at most; 409 for a branch not ready or masked yet and for a kind with no way to show it yet (Postgres only for now); `reveal` |
 | `POST /v1/previews/{id}/otlp/{token}/v1/traces` | OTLP/HTTP traces: protobuf or JSON (`Content-Type`), gzip or not, at most 8 MiB | `{"partialSuccess": {}}`; 404 for anything but the preview's own token (derived from its id with the store's key, as its SMTP password is). Public in rolld's gate: the token in the path is the credential. A service gets it as `OTEL_EXPORTER_OTLP_ENDPOINT` when the project's `traces` is on. Spans are kept on the preview's holder, in memory: its newest 20,000, for 6 hours |
@@ -2015,6 +2015,7 @@ type Preview = {
   slower_routes?: { branch: string; routes: { name: string; count: number; p50_ms: number; main_p50_ms: number; grew?: GrewSpan | null; budget_ms?: number | null }[] } | null;
   new_errors?: { branch: string; total: number; errors: { service: string; title: string }[] } | null;
   served_secrets?: { key: string; path: string }[]; // its secret values its pages serve at its head: names and where, never values
+  skipped?: { pages?: string[]; stories?: number; first_stories?: string[] }; // what its latest screenshot run left out at its head: pages past a run's ten, stories it didn't take (the first 10 by id)
   regressions?: "check" | "required" | null;
   regressions_accepted?: { head: string; by: string; at: number } | null;
   regressions_compared?: boolean;     // compared with main's preview at its head (errors; routes too with traces)
@@ -2049,7 +2050,7 @@ type Settings = {
   max_usd_month: number;              // 0: no cap; once the month's cost reaches it, new previews wait
   secrets: { base: string; allow_production: boolean };      // "development", false
   env: Record<string, string>;        // overrides every service gets
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string; endpoints?: string[]; states?: {name, page, steps}[]; modes?: {name: string; color_scheme?: "dark" | "light"; locale?: string; timezone?: string}[]; storybook?: string /* "web" or "web:/storybook/" */; browsers?: ("firefox" | "webkit" | "webkit-phone")[] };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's; endpoints: up to 5 GET paths timed against main's
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string; endpoints?: string[]; states?: {name, page, steps}[]; login?: {page, steps} /* a type step's text may be "$NAME" */; modes?: {name: string; color_scheme?: "dark" | "light"; locale?: string; timezone?: string}[]; storybook?: string /* "web" or "web:/storybook/" */; browsers?: ("firefox" | "webkit" | "webkit-phone")[] };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's; endpoints: up to 5 GET paths timed against main's
   access: "link" | "team" | "public"; // "link": a preview's URLs need its link; "team": a person signed in to roll who may open the project
   visual_review: "off" | "check" | "required";   // the roll/visual review; required also blocks landing in roll ("off")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
@@ -2261,7 +2262,9 @@ type Settings = {
     Its Storybook's stories too (Chromatic's stories): with `github.storybook` (`web`, or
     `web:/storybook/` when the service serves it under a path: a static build or `storybook
     dev`), that service's run reads Storybook's index (`index.json`, Storybook 7 and later;
-    `stories.json` before), and takes the first 40 stories (docs left out) in a run of its own
+    `stories.json` before), and takes the first 40 stories (docs left out; the rest, and any not
+    reached in its 100 s, are said: `skipped.stories` with the first ten ids, on the sheet and in
+    the comment's **Not taken**, as are pages past a run's ten) in a run of its own
     beside the screenshot's, in the service's network and locked down the same way. Each story is
     loaded alone (`iframe.html?id=…&viewMode=story`) at the desktop width, waited for until its
     root holds something (3 s at most), and captured clipped to what it rendered (an 8 px margin,
@@ -2295,6 +2298,27 @@ type Settings = {
     and half again main's (Vercel's Speed Insights' INP, without visitors' own numbers yet). A
     number the page reports is kept only when it could be a time (a minute at most). Live: the
     Tab state's click timed on both. `a_screenshot_run_s_pages_are_only_those_asked_for_each_once`.
+    Signed in to the app (Percy's and Chromatic's saved logins; `github.login`: a page of the
+    first service's and its steps, as a state's): a page behind the app's own login would
+    otherwise screenshot its login page. A `type` step's text may be `$NAME`, a variable of the
+    preview's own environment (its secrets, resolved untrusted unless the project allows
+    production and the change is trusted, without dynamic credentials; then the project's and
+    its own variables, a `roll://` reference never as text), put in by the engine at the run,
+    added to the preview's masks, and never kept. The sign-in goes to the browser as the first
+    line of its container's stdin, into a file `shot.js` reads and removes: never a command line,
+    an environment variable, a log or the record (`ports::Login`'s `Debug` says only its page).
+    The run signs in before the first page, and its cookies stay in the browser for every page,
+    state, crop and endpoint timing after it; the sign-in page's own errors count for no page.
+    The activity says how it went ("screenshots: signed in through /login before its pages", or
+    the step it stopped at). A fork's preview signs in with nothing (its code would get what's
+    typed): its screenshots are taken signed out, and its activity says so. The other browsers'
+    run signs in the same way (the same stdin line; `browsers.js` takes the steps with Playwright
+    on each browser's page before its capture or crop). An agent's run (`try`) signs in first
+    too, on its holder for a roll apps instance (the signed fleet hop carries the sign-in the
+    preview's node decided), and its answer's `login` says how it went ("signed in through
+    /login first", the step it stopped at, or "signed out: a fork's preview…"). Not yet:
+    Storybook's stories (they rarely sit behind the app's login).
+    `screenshots_sign_in_first_on_a_trusted_preview`.
     Other browsers too (Percy's and Chromatic's browsers; `github.browsers`: `firefox`, `webkit`,
     and `webkit-phone`, WebKit at 390 × 844 at twice the density as a touch device, mobile
     Safari's engine; a picture past 2 MiB is left out so the others still fit):
@@ -2778,18 +2802,14 @@ Ranked by what a person notices first. Done so far:
 Ranked again after a sixth product review (2026-11-25), against Vercel's and Netlify's previews and
 comments, Render and Railway, Neon, Chromatic and Percy, Signadot, Jam.
 
-1. **Signed in to the app**: pages, states, crops, endpoint timings and `try` all start from a
-   fresh browser, so a page behind the app's own login screenshots its login page (Percy and
-   Chromatic capture with a saved login). The plan: `github.login` ({page, steps}, as a state's),
-   whose `type` text may be `$NAME`, a variable of the preview's own environment (its resolved
-   secrets), substituted by the engine at the run and handed to the browser as a file, never argv
-   or the record. It runs once per screenshot run in each engine before the pages, its cookies kept
-   for every page, state, crop and timing (and `try`'s). Only on a trusted preview: a fork's code
-   would receive what's typed, so its run says it skipped the login. Its text masked wherever the
-   page's words are shown.
-2. **Coverage cut silently**: at most 40 stories and 10 pages, and nothing says what was left
-   out; `skipped` (how many, which) on the run, the sheet and the comment; then stories chosen
-   by what the change touched (Chromatic's TurboSnap).
+1. **Coverage that's cut says so, in review**: a screenshot run's pages past its ten (the
+   project's, the repo's `roll.toml`, widths, modes and states together) and Storybook's stories
+   it didn't take (past forty, or out of its 100 s) are `skipped` on the record for its head, a
+   line on the sheet and **Not taken** in the pull request's comment. Next for it: stories chosen
+   by what the change touched (Chromatic's TurboSnap) rather than the first forty.
+2. **Signed in to a page that really sits behind a login, live**: screenshots, every engine and
+   `try` sign in (`github.login`, landed); the live check proves the stdin path and the stop at
+   a missing field, not a page that only answers once signed in.
 3. **Browser runs and jobs in the cost**: `cost_of` counts branches, compute and services'
    memory-hours, not the screenshot runs (three engines, stories, crops, `try`), builds or seed,
    release and teardown jobs; meter their container-seconds into `spent_usd`, so `max_usd_month`
@@ -2826,6 +2846,10 @@ comments, Render and Railway, Neon, Chromatic and Percy, Signadot, Jam.
 
 
 
+
+Landed 2026-11-25, morning: screenshots signed in to the app (#980: `github.login`, `$NAME` from
+the preview's environment, trusted previews only), in every engine (#986), and agents' runs
+(#991).
 
 Landed 2026-11-25, night: the fifth review's security fixes (#943); roll apps on par (#947: one
 feedback button); `note_mail` in the page and `roll preview try` (#948); share links on the

@@ -1066,7 +1066,13 @@ impl Engine {
         let crops = self.crops_wanted(r).await;
         let stories = storybook.as_ref().filter(|(svc, _)| *svc == first.name).map(|(_, at)| at.clone());
         let opts_crops = crops.clone();
-        let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone(), openapi, endpoints, states, browsers, crops, stories, modes };
+        // The app's sign-in first, a trusted preview's only (`github.login`).
+        let (login, why_not) = self.run_login(r).await;
+        if let Some(why) = why_not {
+            let _ = self.store.log(&r.id, &format!("screenshots taken signed out: {why}"));
+        }
+        let signs_in = login.is_some();
+        let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone(), openapi, endpoints, states, browsers, crops, stories, modes, login };
         let started = std::time::Instant::now();
         // The page's words are its code's: what it was given is masked before they're kept (and
         // reach the pull request's comment); a run whose masks can't be read fails as a run.
@@ -1074,9 +1080,15 @@ impl Engine {
             Ok(Some(mut shot)) => self.mask_shot(&r.id, &mut shot).await.map(|()| Some(shot)).map_err(|e| anyhow::anyhow!("reading what its page mustn't show: {e}")),
             other => other,
         };
+        if signs_in && let Ok(Some(shot)) = &taken {
+            let said = shot.login.as_deref().unwrap_or("its sign-in said nothing");
+            let _ = self.store.log(&r.id, &format!("screenshots: {said}"));
+        }
         match taken {
             Ok(Some(mut shot)) => {
                 self.check_served(r, &mut shot).await;
+                // What it left out, for this head (none clears what an earlier one said).
+                let _ = self.store.set_runtime_fact(&r.id, "skipped", Some(&crate::SkippedAt { head: r.build().to_string(), skipped: shot.skipped.clone() }));
                 // Kept under the entry that asked for each (`/pricing`, or `web:/pricing`).
                 let mut pages: Vec<crate::ports::PageShot> = shot
                     .pages

@@ -40,7 +40,7 @@ pub fn publish_dir(tree: &dyn crate::Tree) -> Option<(String, &'static str)> {
     let text = |f: &str| tree.read(f).and_then(|b| String::from_utf8(b).ok());
     let clean = |d: &str| {
         let d = d.trim().trim_start_matches("./").trim_end_matches('/');
-        crate::tree::valid(d).then(|| d.to_string())
+        crate::tree::plain(d).then(|| d.to_string())
     };
     let netlify = text("netlify.toml").and_then(|t| t.parse::<toml::Table>().ok()).and_then(|t| t.get("build")?.get("publish")?.as_str().and_then(clean));
     if let Some(d) = netlify {

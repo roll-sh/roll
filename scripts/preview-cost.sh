@@ -574,7 +574,7 @@ done
 
 say "a screenshot of the service (github.screenshot), once per head"
 # And /pricing, which the test service doesn't have (a 404 page, one failed request).
-api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true,"pages":["/pricing","web:/","wiki:/"],"widths":[768],"hide":[".clock"],"budget":{"load_ms":60000},"openapi":"/openapi.json","endpoints":["/openapi.json","/env.txt"],"states":[{"name":"tab","page":"/","steps":[{"press":"Tab"},{"click":"body"}]}],"browsers":["firefox","webkit-phone"]}}' >/dev/null
+api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true,"pages":["/pricing","web:/","wiki:/"],"widths":[768],"hide":[".clock"],"budget":{"load_ms":60000},"openapi":"/openapi.json","endpoints":["/openapi.json","/env.txt"],"states":[{"name":"tab","page":"/","steps":[{"press":"Tab"},{"click":"body"}]}],"browsers":["firefox","webkit-phone"],"login":{"page":"/","steps":[{"type":["#nope","$GREETING"]}]}}}' >/dev/null
 # roll keeps a preview of the default branch (github.baseline): the change's screenshots are
 # compared with its.
 MAINPV=""
@@ -593,6 +593,12 @@ done
 curl -sS -o "$HOME_DIR/screenshot.png" "http://$API/v1/previews/$PV/screenshot"
 SHOT=$(python3 -c "import sys; b=open(sys.argv[1],'rb').read(); print(f'{len(b)} bytes, PNG' if b[:4]==b'\x89PNG' else 'not a PNG')" "$HOME_DIR/screenshot.png")
 case "$SHOT" in *PNG) ;; *) echo "the screenshot should be a PNG: $SHOT"; exit 1;; esac
+# Signed in first (github.login): its $GREETING put in by roll and handed to the browser through
+# its container's stdin. The page has no #nope, so the run says where it stopped, never what it
+# would have typed.
+LOGIN_SAID=$(api GET "/v1/previews/$PV/activity" | jq_ "next((a['message'] for a in d if a['message'].startswith('screenshots: ')), '')")
+[ "$LOGIN_SAID" = "screenshots: signing in stopped at type #nope: nothing to type into: its pages are the signed-out ones" ] || { echo "the sign-in should run before the pages and say where it stopped: $LOGIN_SAID"; exit 1; }
+api GET "/v1/previews/$PV/activity" | has -F 'hello ${USER}' && { echo "the sign-in's typed value must never be said"; exit 1; }
 # The same load timed the page (shot.js over the DevTools pipe).
 SPEED=$(api GET "/v1/previews/$PV" | jq_ "('load %s ms, first byte %s ms, %s bytes' % (d['page_speed']['now']['load_ms'], d['page_speed']['now']['ttfb_ms'], d['page_speed']['now']['bytes'])) if d.get('page_speed') and d['page_speed']['now']['load_ms'] > 0 else ''")
 [ -n "$SPEED" ] || { echo "the screenshot's load should have timed the page"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:6]]"; exit 1; }
@@ -945,6 +951,9 @@ RESHAPED=$(api GET "/v1/previews/$PV" | jq_ "' | '.join('%s %s' % (c['path'], c.
 TRY=$(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" --json preview try "$PV" --service web --out "$HOME_DIR/try.png" / press Tab)
 TRY_SAID=$(echo "$TRY" | jq_ "'%s %s' % (d['status'], 'preview of change 1' in d['text'])")
 [ "$TRY_SAID" = "200 True" ] || { echo "an agent's run should answer the page's status and text: ${TRY:0:300}"; exit 1; }
+# Signed in first as the screenshots are (github.login): the same stop at #nope, said in its answer.
+TRY_LOGIN=$(echo "$TRY" | jq_ "d.get('login') or ''")
+[ "$TRY_LOGIN" = "signing in stopped at type #nope: nothing to type into: the page is the signed-out one" ] || { echo "an agent's run should sign in first and say where it stopped: $TRY_LOGIN"; exit 1; }
 head -c 8 "$HOME_DIR/try.png" | od -An -c | has "P   N   G" || { echo "the run's picture should be a PNG"; exit 1; }
 FB_LINK=$(api GET "/v1/previews/$PV" | jq_ "[x for x in d['services'] if x['name'] == 'web'][0]['share_url']")
 FB_SAID=$(docker run --rm --name roll-previews-fbtest --network host -e LINK="$FB_LINK" -v "$ROOT/scripts/preview-cost/feedback-check.js:/w/check.js:ro" roll-previews-shot:1.64.1 sh -c 'NODE_PATH=$(npm root -g) node /w/check.js' 2>&1 | tail -1)

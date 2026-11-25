@@ -9,6 +9,7 @@
 //! project's data key.
 
 use crate::access::{Action, Caller, Scope};
+use crate::caller::{Registration, replace_registration_credential};
 use crate::crypto::Keyring;
 use crate::links::{Field, Issued, Link, LinkProvider, Mode};
 use crate::sinks::Deliver;
@@ -212,7 +213,9 @@ impl Secrets {
     }
 
     /// Change a rotator in place (its name, or a URL checked as adding one checks it); links,
-    /// their values and retired credentials carry on.
+    /// their values and retired credentials carry on. A new URL also makes the caller the
+    /// rotator's maker (the endpoint is what roll trusts, so it acts at their rights now); a name
+    /// change keeps the maker.
     pub fn update_rotator(&self, project: &str, id: &str, ch: RotatorChange, caller: &Caller) -> Result<Rotator> {
         caller.need(Action::Admin, &Scope::project(project))?;
         let deliver = self.deliver.as_ref().ok_or_else(|| Error::BadRequest("rotators aren't on this server".into()))?;
@@ -221,6 +224,7 @@ impl Secrets {
         if let Some(n) = &ch.name {
             check_name(n)?;
         }
+        let replacer = ch.url.as_ref().map(|_| self.replacer(caller)).transpose()?;
         let url = match ch.url.as_deref().map(str::trim) {
             Some(u) => {
                 deliver.check(u)?;
@@ -239,7 +243,8 @@ impl Secrets {
                 c.execute("UPDATE rotators SET name = ? WHERE id = ?", [n.as_str(), id])?;
                 changed.push("name");
             }
-            if let Some((host, sealed)) = &url {
+            let mut moved = String::new();
+            if let (Some((host, sealed)), Some(by)) = (&url, &replacer) {
                 // A retired credential in its grace is revoked through the rotator that issued it:
                 // a new endpoint would get handles that aren't its own (and might answer 200).
                 let waiting: i64 = c.query_row(
@@ -250,11 +255,12 @@ impl Secrets {
                 if waiting > 0 {
                     return Err(Error::Conflict("in_use", format!("{} has {waiting} retired credential(s) still to revoke through its endpoint: move it once they're revoked", r.name)));
                 }
-                c.execute("UPDATE rotators SET url = ?, host = ? WHERE id = ?", params![sealed, host, id])?;
+                moved = replace_registration_credential(c, Registration::RotatorUrl, id, sealed, by)?;
+                c.execute("UPDATE rotators SET host = ? WHERE id = ?", params![host, id])?;
                 changed.push("URL");
             }
             if !changed.is_empty() {
-                audit::record(c, self.keys()?, project, caller, "rotator.update", None, None, &[], &format!("changed rotator {}'s {}", r.name, changed.join(", ")), now)?;
+                audit::record(c, self.keys()?, project, caller, "rotator.update", None, None, &[], &format!("changed rotator {}'s {}{moved}", r.name, changed.join(", ")), now)?;
             }
             Ok(())
         })?;

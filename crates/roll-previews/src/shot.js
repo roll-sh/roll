@@ -519,13 +519,51 @@ const stories = async (sessionId) => {
     fs.writeFileSync(`${process.env.OUT}.story.${out.length}.png`, Buffer.from(shot.data, "base64"));
     out.push({ id: e.id, errors: errors.length + failed.length - before });
   }
-  fs.writeFileSync(process.env.OUT + ".stories.json", JSON.stringify(out));
+  // And what it didn't take (past the first 40, or out of its time), so roll can say so.
+  const listed = entries.filter((e) => e && typeof e.id === "string" && STORY_ID.test(e.id) && (e.type == null || e.type === "story"));
+  const left = listed.filter((e) => !out.some((o) => o.id === e.id)).map((e) => e.id);
+  fs.writeFileSync(process.env.OUT + ".stories.json", JSON.stringify({ stories: out, left: left.length, first_left: left.slice(0, 10) }));
 };
 // A run an agent asked for ($TRY: {path, steps}; roll previews' `…/try`): the page loaded, its
 // steps taken as a page state's are (10 at most, 15 s), then its picture to $OUT, and to
 // $OUT.try.json its status, the step that found nothing, its visible text (its own line breaks
 // kept) and what went wrong on the way.
+// The app's own sign-in ($LOGIN_FILE: {page, steps}, a trusted preview's, its typed values put
+// in by roll): the file goes once read, the steps taken on its page (15 s at most; the first that
+// finds nothing ends them), and what the sign-in page went through counts for no page. Where it
+// went and where it stopped, or null for none.
+const signIn = async (sessionId) => {
+  let login = null;
+  try {
+    login = JSON.parse(fs.readFileSync(process.env.LOGIN_FILE || "", "utf8"));
+  } catch {}
+  try {
+    fs.unlinkSync(process.env.LOGIN_FILE || "");
+  } catch {}
+  if (!login || typeof login.page !== "string" || !/^\/(?!\/)[^\s#"'`\\]{0,199}$/.test(login.page)) return null;
+  const at = once("Page.loadEventFired");
+  await send("Page.navigate", { url: new URL(login.page, process.env.URL).href }, sessionId);
+  await Promise.race([at, sleep(15000)]);
+  await sleep(300);
+  const until = Date.now() + 15000;
+  let stopped = null;
+  for (const s of (Array.isArray(login.steps) ? login.steps : []).slice(0, 10)) {
+    if (Date.now() > until) break;
+    stopped = await step(sessionId, s || {}, until);
+    if (stopped) break;
+    await sleep(150);
+  }
+  const page = login.page;
+  login = null;
+  // Its last step usually submits: what that loads, settled.
+  await sleep(1500);
+  errors.length = 0;
+  failed.length = 0;
+  return { page, stopped };
+};
 const tryIt = async (sessionId) => {
+  // Signed in first, as the screenshots are (`github.login`).
+  const signed = await signIn(sessionId);
   let t = {};
   try {
     t = JSON.parse(process.env.TRY_FILE ? fs.readFileSync(process.env.TRY_FILE, "utf8") : process.env.TRY);
@@ -556,7 +594,8 @@ const tryIt = async (sessionId) => {
   try {
     text = JSON.parse(r?.result?.value || '""');
   } catch {}
-  fs.writeFileSync(process.env.OUT + ".try.json", JSON.stringify({ status, step_failed: stepFailed, text, errors: [...errors, ...failed].slice(0, 20) }));
+  const login = signed && (signed.stopped ? `signing in stopped at ${signed.stopped}: the page is the signed-out one` : `signed in through ${signed.page} first`);
+  fs.writeFileSync(process.env.OUT + ".try.json", JSON.stringify({ status, step_failed: stepFailed, text, errors: [...errors, ...failed].slice(0, 20), login }));
 };
 (async () => {
   const { targetId } = await send("Target.createTarget", { url: "about:blank" });
@@ -611,6 +650,10 @@ const tryIt = async (sessionId) => {
     chrome.kill();
     process.exit(0);
   }
+  // Signed in first, so every page, state, crop and timing after it is the signed-in one: its
+  // cookies stay in this browser. What it said is the report's `login`.
+  const signed = await signIn(sessionId);
+  const loginSaid = signed && (signed.stopped ? `signing in stopped at ${signed.stopped}: its pages are the signed-out ones` : `signed in through ${signed.page} before its pages`);
   const loaded = once("Page.loadEventFired");
   await send("Page.navigate", { url: process.env.URL }, sessionId);
   await Promise.race([loaded, sleep(45000)]);
@@ -654,6 +697,7 @@ const tryIt = async (sessionId) => {
       report.a11y = JSON.parse(a11y?.result?.value || "null");
     } catch {}
   }
+  if (loginSaid) report.login = loginSaid;
   fs.writeFileSync(process.env.OUT + ".json", JSON.stringify(report));
   // The same page at a phone's width (390 × 844, at twice the density), to $OUT.phone.png. Best
   // effort: the desktop one is kept whatever happens here.

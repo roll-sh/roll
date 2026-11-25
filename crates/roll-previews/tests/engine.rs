@@ -212,6 +212,75 @@ async fn with_screenshots_a_baseline_of_the_default_branch_is_kept_to_compare_ch
     assert_eq!(e.engine.store.row_by_change("chg_1").unwrap().map(|r| r.desired), Some(Desired::Active), "the change's preview came back with its repo");
 }
 
+/// What a screenshot run left out (pages past a run's ten, stories past forty) is on the record
+/// for its head and goes to roll code with the report, never dropped quietly.
+#[tokio::test]
+async fn a_screenshot_run_says_what_it_left_out() {
+    let e = env(json!({ "enabled": true, "github": { "screenshot": true, "baseline": false } }));
+    let mut png = Vec::new();
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 0, 255])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    *e.apps.shot.lock() = Some(png);
+    let left = roll_previews::Skipped { pages: vec!["/old".into()], stories: 12, first_stories: vec!["button--danger".into()] };
+    *e.apps.skipped.lock() = left.clone();
+    e.code.open(change("chg_cut", 4));
+    for _ in 0..3 {
+        e.engine.pass().await.unwrap();
+    }
+    for _ in 0..3000 {
+        if !e.engine.shooting() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let p = e.engine.store.row_by_change("chg_cut").unwrap().unwrap();
+    assert_eq!(e.engine.store.preview(&p.id).unwrap().skipped, Some(left.clone()));
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.code.last_report("chg_cut").skipped, Some(left), "and in the report to roll code");
+}
+
+/// A trusted preview's screenshots and agents' runs (`try`) sign in to the app first
+/// (`github.login`), a `$NAME` typed as the preview's own secret's value (which `Debug` never
+/// shows), and the activity or the run's answer says how it went; a fork's are taken signed out,
+/// which they say, its code never given what's typed.
+#[tokio::test]
+async fn screenshots_sign_in_first_on_a_trusted_preview() {
+    let login = json!({ "page": "/login", "steps": [{ "type": ["#email", "qa@acme.dev"] }, { "type": ["#password", "$E2E_PASSWORD"] }, { "press": "Enter" }] });
+    let e = env(json!({ "enabled": true, "github": { "screenshot": true, "baseline": false, "login": login } }));
+    e.secrets.values.lock().push(("E2E_PASSWORD".into(), "hunter2-from-staging".into()));
+    let mut png = Vec::new();
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 0, 255])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    *e.apps.shot.lock() = Some(png);
+    e.code.open(change("chg_in", 4));
+    e.code.open(ChangeInfo { trusted: false, approved: true, ..change("chg_fork", 5) });
+    for _ in 0..3 {
+        e.engine.pass().await.unwrap();
+    }
+    for _ in 0..3000 {
+        if !e.engine.shooting() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let (ours, fork) = (e.engine.store.row_by_change("chg_in").unwrap().unwrap(), e.engine.store.row_by_change("chg_fork").unwrap().unwrap());
+    let asked = |id: &str| e.apps.logins.lock().iter().rev().find(|(p, _)| p == id).map(|(_, l)| l.clone()).expect("a screenshot run");
+    let l = asked(&ours.id).expect("signed in");
+    assert_eq!((l.page.as_str(), &l.steps[1]), ("/login", &roll_previews::settings::Step::Type("#password".into(), "hunter2-from-staging".into())));
+    assert!(!format!("{l:?}").contains("hunter2"), "never in a Debug: {l:?}");
+    let said = |id: &str| e.engine.store.activity(id).unwrap().into_iter().map(|a| a.message).collect::<Vec<_>>();
+    assert!(said(&ours.id).iter().any(|m| m == "screenshots: signed in through /login before its pages"), "{:?}", said(&ours.id));
+    assert!(asked(&fork.id).is_none(), "a fork's run signs in with nothing");
+    assert!(said(&fork.id).iter().any(|m| m.starts_with("screenshots taken signed out: a fork's preview")), "{:?}", said(&fork.id));
+    // An agent's run the same way.
+    *e.apps.tried.lock() = Some(roll_previews::ports::Tried { status: 200, text: "Dashboard".into(), ..Default::default() });
+    let run = e.engine.try_page(&ours.id, None, "/account", &[]).await.unwrap();
+    let l = e.apps.try_logins.lock().last().cloned().flatten().expect("signed in");
+    assert_eq!(l.steps[1], roll_previews::settings::Step::Type("#password".into(), "hunter2-from-staging".into()));
+    assert_eq!(run.login.as_deref(), Some("signed in through /login first"));
+    let run = e.engine.try_page(&fork.id, None, "/account", &[]).await.unwrap();
+    assert!(e.apps.try_logins.lock().last().cloned().flatten().is_none(), "a fork's run signs in with nothing");
+    assert!(run.login.as_deref().is_some_and(|l| l.starts_with("signed out: a fork's preview")), "{:?}", run.login);
+}
+
 /// Pages changed the same way against main's (Percy's grouped diffs), the first page included,
 /// share a group, accepted together; a page changed another way is left to review on its own.
 #[tokio::test]
@@ -566,7 +635,7 @@ async fn an_agents_run_on_a_page_answers_what_it_showed_masked() {
     e.code.open(change("chg_try", 4));
     e.engine.pass().await.unwrap();
     let p = e.engine.store.row_by_change("chg_try").unwrap().unwrap();
-    *e.apps.tried.lock() = Some(roll_previews::ports::Tried { png: Some(b"\x89PNG...".to_vec()), status: 200, step_failed: None, text: "Cart\nkey sk_test_51Hx9abc".into(), errors: vec!["TypeError".into()] });
+    *e.apps.tried.lock() = Some(roll_previews::ports::Tried { png: Some(b"\x89PNG...".to_vec()), status: 200, step_failed: None, text: "Cart\nkey sk_test_51Hx9abc".into(), errors: vec!["TypeError".into()], login: None });
     let call = |req: axum::http::Request<axum::body::Body>| {
         let router = roll_previews::api::router(e.engine.clone());
         async move {

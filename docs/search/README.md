@@ -326,6 +326,74 @@ applications). A web page calls a cluster directly, with no backend of its own i
   parent's security, keys included, and a point-in-time branch from before a revoke would bring a
   revoked key back. A restore keeps the cluster's id, so its keys keep working. A branch lists none
   of its parent's browser keys.
+- *Keys derived without a call to roll* (Algolia's `generateSecuredApiKey`, Typesense's
+  `generateScopedSearchKey`, Meilisearch's tenant tokens; `search_es::xpack::security::derived`).
+  A SaaS serving many end customers makes one derivable browser key (`derivable: true` on the
+  create) and its backend signs a short-lived, narrower key per end customer locally, with no
+  control-plane call and no per-cluster key count:
+  - *The parent* answers its create with a signing secret (`rdks_…`) besides its key, shown once.
+    API keys are stored hashed, so the node can't sign with the key itself: the secret is kept in
+    the key's `metadata.roll_browser.derive`, sealed under the deployment's key
+    (`search_es::seal`) with the cluster's id and the key's id as associated data: it opens only
+    for that key of that cluster (a branch's copy is refused as its browser keys are, and one
+    rebound to the branch's id or moved to another key doesn't open). The API key APIs print,
+    query and audit it as `::es_redacted::`; an update that sends that back, or leaves `derive`
+    out, keeps it (`"derive": null` removes it). roll's list says `derivable` and
+    `secret_rotated_at`, never the secret; nothing logs it. `POST …/browser-keys/{key}/rotate`
+    makes a new one (in its answer only): every key derived under the old one is refused from the
+    next request. Each secret has a `generation`, and the cluster stores a new secret only as the
+    stored one's next, inside the state update: of two rotations racing, one gets a 409 and its
+    secret is never handed out. Revoking the parent refuses all of them at once.
+  - *A derived key* is `rdk1.<payload>.<mac>`: base64url (no padding) of one JSON object, and of
+    HMAC-SHA256 over `rdk1.<payload>` keyed with the secret as written. One version, one
+    algorithm; nothing in the token picks either. The payload: `key` (the parent's id) and
+    `cluster` (its name, for routing, and the cluster checking it must be that one), `exp` (unix
+    seconds, required, at most 24 h ahead), and optionally `indices` (each one of the parent's
+    names, or a `*` pattern within one of its patterns, matched with the glob table: `logs-*`
+    covers `logs-2026*`) or `application` (the parent's own), a `filter` (one query on the
+    document itself: `term`, `terms` of values, `range`, `exists`, `ids`, `prefix`, `wildcard`,
+    the `match` family, `simple_query_string` and the geo filters, combined in `bool`,
+    `constant_score` or `nested`; it's built as the owner's filter is, outside the browser
+    policy, so nothing that reads another document or index (terms lookups, indexed shapes,
+    `more_like_this`, joins, `percolate`), runs Painless, renders a template or wraps an encoded
+    query; then Elasticsearch's role-query check and the cluster's own parse), a `user` (an end
+    customer, Algolia's `userToken`),
+    `origins` and `rate_limit: {"per_minute": n}` (the user's). Unknown fields, duplicate keys and
+    trailing bytes are refused. It goes wherever a browser key goes (`Authorization: ApiKey
+    rdk1.…`), so InstantSearch, Searchkit and Search UI need only the string.
+  - *Checked on the cluster's owner, every request*, where browser keys are: at most 4 KiB, its
+    payload parsed only from the bytes present; named for this cluster; the parent live (not
+    revoked or expired), a derivable browser key of this cluster by its catalog id (a branch's
+    copy, or a node without a catalog, has none); the mac compared in constant time with the
+    parent's current secret. Until the mac verifies, every refusal is the same 401 (`API key:
+    derived key refused`), so a key without the secret learns nothing about which clusters a
+    node holds or which keys they have. After it: `exp` within 30 s of skew, at most 24 h ahead
+    and never past the parent's expiry, and everything must narrow the parent (indices within
+    the parent's, the parent's application only, the filter as above at most 24 levels deep, a
+    `rate_limit` at most a user's share, origins the cluster's CORS allows), each refusal a 401
+    naming the field, never a value from the key. The key is verified once per request, nothing
+    cached: a revoke or rotation holds from the next request.
+  - *What it may do* is its parent's, narrowed: the principal is the parent's API key with one
+    more set of role descriptors every permission must also pass (the derived indices with
+    `read`, the derived filter as their document-level `query`), so the indices intersect and
+    the two filters AND, in every place document and field level security reach. It's a browser
+    key under its parent's policy, limits and concurrency, and doesn't even get
+    `_security/_authenticate`. With `origins`, a request whose `Origin` isn't one of them is
+    refused (curl and servers send none: origins bind browsers, as CORS does).
+  - *Rate limits*: a derived key pays everything its parent would (the cluster's ceiling, the
+    parent's own limit, its per-address limits), so the parent's limit is the ceiling of all its
+    derived keys together. A `user` gets its own bucket on top: a quarter of the parent's limit,
+    or the lower `rate_limit.per_minute` the key asks for, so one end customer can't use the
+    parent up. These limits, and `origins`, are the cluster owner node's: `search-dev` (one
+    cluster, no catalog) enforces neither for browser keys (their policy still holds there), and
+    refuses derived keys outright (no catalog id to bind their secret to).
+  - *Signing*: `apps/dashboard/src/lib/search-derive.ts` (Web Crypto, also for Node, Deno, Bun and
+    Workers), the site-search guide's Node, Python and Go snippets, and `roll search browser-keys
+    derive` (for testing; the secret from `ROLL_SEARCH_SIGNING_SECRET`). One test vector
+    (`crates/search-es/tests/fixtures/derived-key-vector.json`) is checked by the verifier, the
+    CLI and the TypeScript helper. `crates/search-control/tests/control.rs`
+    `derived_keys_narrow_their_parent_and_die_with_it` and
+    `derived_keys_share_their_parents_rate_by_user` cover the rest.
 - *A point-in-time branch takes its parent's security as it is now*, whatever key: users and their
   passwords, API keys, tokens, service tokens, roles, mappings and profiles (OpenSearch Security's
   configuration on an OpenSearch-flavor cluster) are copied from the parent's latest state into
@@ -721,8 +789,8 @@ its copy partial, with a button that deletes the partial index so it can be copi
 
 | method | path | |
 | ------ | ---- | - |
-| POST | `/v1/search/clusters/{id}/migrate/inspect` | `{source: {host, api_key? \| username?, password?}}` → `{remote: {host, version, distribution, cluster_name}, indices: [{index, health, status, docs, size_bytes, primary_size_bytes, primaries, replicas, aliases, aliases_more, aliases_on_roll, exists}], more_indices, data_streams, more_data_streams}` within 60s (`primaries`, `replicas` and `primary_size_bytes` are `null`: the listing asks only for the columns it shows, keeps only those, reads it row by row and lists the first 10,000 indices, with `more_indices` saying how many more there are; each index carries at most 20 alias names, `aliases_more` counting the rest, and at most 100 data streams are named; a listing that names one index twice is refused; everything the answer holds is charged to the control budget until it's sent, 64 KiB at a time; an answer not read within 60s is given back and its connection closed); a remote's refusal is a 400 with its status and `error.type` only (never its body), and every transport failure reads the same (`couldn't reach the remote at <host>`). The operator's rules apply, not the cluster's whitelist. One `inspect` or `migrate` runs per cluster at a time, and 4 per node (429 past them); their answers are capped (1 MiB, an index definition 4 MiB) and drawn from a slice of the node's reindex budget that tasks never use. `write` for roll-access |
-| POST | `/v1/search/clusters/{id}/migrate` | `{source, indices: [{index, dest?}], requests_per_second?, size?}` (at most 100 indices) → `{indices: [{index, dest, task, dropped: [{setting, value, reason}], aliases} \| {index, dest, error}]}`: the remote must answer (`GET /`) before its `host:port` is added to the cluster's `reindex_whitelist` (exactly that host: `normalize_host` refuses anything that isn't a DNS name or an IP literal, so no pattern gets in); then, while a reindex task slot is free, each index's copy is created and its `wait_for_completion=false` reindex started, within 60s; an index past the free slots comes back `{index, dest, queued: true, reason}` with nothing created (the dashboard starts it as earlier copies end); each row says what happened (`created`, `task`), also when the deadline cut it short, and a copy an earlier call already started counts as started; one index's failure doesn't stop the others; an index roll already has is refused, not overwritten, and an alias roll already has is dropped (`aliases.<name>`). Just after a node starts, until roll's own names have resolved once, it answers 429 "roll hasn't resolved its own addresses yet; try again shortly" (the dashboard asks again). `admin` for roll-access: it changes the cluster's whitelist and starts copies as the cluster's own user |
+| POST | `/v1/search/clusters/{id}/migrate/inspect` | `{source: {kind?, host, api_key? \| username?, password?}}` (`kind`: `elasticsearch` (the default) or `opensearch`; `algolia` takes `{kind, app_id, api_key}` instead of a host, `typesense` and `meilisearch` `{kind, host, api_key}`: their rows have `null` health and status, an Algolia replica `replica_of`, and `remote.distribution` names the product) → `{remote: {host, version, distribution, cluster_name}, indices: [{index, health, status, docs, size_bytes, primary_size_bytes, primaries, replicas, aliases, aliases_more, aliases_on_roll, exists}], more_indices, data_streams, more_data_streams}` within 60s (`primaries`, `replicas` and `primary_size_bytes` are `null`: the listing asks only for the columns it shows, keeps only those, reads it row by row and lists the first 10,000 indices, with `more_indices` saying how many more there are; each index carries at most 20 alias names, `aliases_more` counting the rest, and at most 100 data streams are named; a listing that names one index twice is refused; everything the answer holds is charged to the control budget until it's sent, 64 KiB at a time; an answer not read within 60s is given back and its connection closed); a remote's refusal is a 400 with its status and `error.type` only (never its body), and every transport failure reads the same (`couldn't reach the remote at <host>`). The operator's rules apply, not the cluster's whitelist. One `inspect` or `migrate` runs per cluster at a time, and 4 per node (429 past them); their answers are capped (1 MiB, an index definition 4 MiB) and drawn from a slice of the node's reindex budget that tasks never use. `write` for roll-access |
+| POST | `/v1/search/clusters/{id}/migrate` | `{source, indices: [{index, dest?}], requests_per_second?, size?, dry_run?}` (at most 100 indices; `dry_run` only for Algolia, Typesense and Meilisearch, whose rows are `{index, dest, plan: {id_field, docs, mappings, default_fields, synonyms, rules, synonyms_set?, rulesets?, search_template, sort_templates?, not_mapped: [{kind, name, reason}], not_mapped_more, notes}, made: [..], task}` (with `dry_run`, `{plan, mappings, settings, restart}` and nothing made; `restarted: true` when an index an earlier copy made is copied into again; their `size` is at most 1,000 for Algolia; see "From Algolia, Typesense and Meilisearch") → `{indices: [{index, dest, task, dropped: [{setting, value, reason}], aliases} \| {index, dest, error}]}`: the remote must answer (`GET /`) before its `host:port` is added to the cluster's `reindex_whitelist` (exactly that host: `normalize_host` refuses anything that isn't a DNS name or an IP literal, so no pattern gets in); then, while a reindex task slot is free, each index's copy is created and its `wait_for_completion=false` reindex started, within 60s; an index past the free slots comes back `{index, dest, queued: true, reason}` with nothing created (the dashboard starts it as earlier copies end); each row says what happened (`created`, `task`), also when the deadline cut it short, and a copy an earlier call already started counts as started; one index's failure doesn't stop the others; an index roll already has is refused, not overwritten, and an alias roll already has is dropped (`aliases.<name>`). Just after a node starts, until roll's own names have resolved once, it answers 429 "roll hasn't resolved its own addresses yet; try again shortly" (the dashboard asks again). `admin` for roll-access: it changes the cluster's whitelist and starts copies as the cluster's own user |
 
 `crates/search-es/tests/reindex_remote.rs` covers the guard against a hostile mock remote (only
 whitelisted hosts read; a redirect not followed; an oversized page refused, with and without a
@@ -736,16 +804,39 @@ routes' flow (an alias roll has left alone, the whitelist gaining exactly the re
 another host refused); the dashboard's logic is in `apps/dashboard/src/lib/search-migrate.ts`
 (tested beside it, a lost task included).
 
-Phase 2, Algolia (planned, not built): an import that reads an Algolia application through its
-REST API with an admin key the caller gives once (the same guarded client and sealing rules):
-`browse` every record of the picked indices into roll indices (`objectID` as `_id`, with
-mappings inferred from the first pages as the file import does, and Algolia's searchable
-attributes, attributes for faceting and custom ranking turned into `text`, `keyword` and numeric
-fields with `index_options` to match), its synonyms (`synonym`, `onewaysynonym`, `altcorrection`,
-`placeholder`) into roll synonym sets, its rules (conditions on a query pattern, consequences that
-promote, hide or filter) into query rules where Elasticsearch's rule criteria can say the same and
-listed as dropped where they can't, and its replicas into sorts the dashboard records for the
-browser keys. Progress, cancel and the alias switch as above.
+**From Algolia, Typesense and Meilisearch** (`search-control` `saas/`, the guide is
+[guides/migrate-from-algolia.md](guides/migrate-from-algolia.md)). The same two routes take
+`source.kind` `algolia` (`app_id`, `api_key`; the host is fixed, `https://<app>-dsn.algolia.net`,
+which the operator's `roll.migrate.algolia.url` replaces for tests or a proxy), `typesense` or
+`meilisearch` (`host`, `api_key`), through the same guarded client, control slots, deadline and
+budgets. `inspect` lists Algolia's `GET /1/indexes` (a replica carries `replica_of`), Typesense's
+`GET /collections`, Meilisearch's `GET /indexes` and `GET /stats`. `migrate` reads each picked
+index's definition (settings or schema, a few records to see the attributes' types, synonyms,
+rules, Algolia replicas' settings) into a plan: explicit mappings (searchable attributes as text,
+facets and sort attributes as `keyword` sub-fields, Typesense's typed fields, `objectID`/`id`/the
+primary key as `_id`), `index.query.default_field` with the source's weights, an analysis chain
+(case and accents folded, a plural stemmer for `ignorePlurals`, search-time stop words and a
+`synonym_graph` filter reading the synonyms set `<dest>-synonyms`), query rulesets
+`<dest>-rules[-n]` (pins and hides on a query pattern; at most 1,000, the rest listed), and a
+stored mustache template `<dest>-search` (`multi_match` with `fuzziness` and `bool_prefix`, the
+`rule` query matching `rules_query` or else `query`, sorts, collapse) plus one per Algolia replica.
+The search chain is folding, synonyms, stop words, plurals (the review builds it with `_analyze`);
+metadata-field names and names the template can't carry are left out and listed. Everything that didn't map is listed with why
+(`not_mapped`, at most 500 entries and a count) and caveats in `notes`; `dry_run` answers the plan
+and makes nothing. The copy is a task registered in the cluster's `_tasks` as
+`indices:data/write/reindex` (progress, cancel and the node's unload as for a reindex), holding one
+of the node's reindex-from-remote task slots; it reads one page at a time (Algolia's `browse`
+cursor, Meilisearch's offset pages, the Typesense export line by line with no line past the
+node's answer limit), charged to the reindex budget, and writes each with `_bulk` before reading
+the next; it stops at a page that fails, as reindex does. Picking the same index of the same
+source again copies into the index an earlier attempt made (its `_meta.roll_import` names the
+product, the application or URL, and the index), overwriting by id; the index's objects are made
+in a task of their own, past the call's deadline, and undone if one fails. The key is held in
+memory by the request and its tasks only; descriptions name the application id or the host.
+`crates/search-control/tests/control.rs` `importing_from_algolia`, `importing_from_typesense`,
+`importing_from_meilisearch`, `saas_keys_are_never_shown` and `a_saas_page_past_the_bound_is_refused`
+cover it against one fake that speaks the three APIs; `roll-cli` `tests/search.rs`
+`migrate_from_meilisearch` the CLI.
 
 **Terraform** (Elastic Cloud's `ec_deployment` and `elasticstack` providers, AWS's
 `aws_opensearch_domain`). roll's provider (`sdk/terraform-provider-roll`, its README has the
@@ -793,8 +884,8 @@ origins (browser search), once they're on main.
 | PUT | `/v1/search/clusters/{id}/remotes/{alias}` | link another cluster of the same owner as remote `alias` (above): `{cluster, skip_unavailable?, access?}` or `{cluster, skip_unavailable?, api_key}` → `{alias, cluster, cluster_id, mode, proxy_address, key_id, minted, skip_unavailable?}`; 404 for a cluster the caller can't link to, missing or not. `admin` on both clusters for roll-access |
 | DELETE | `/v1/search/clusters/{id}/remotes/{alias}` | unlink: the remote's settings and credentials go, a key roll made is revoked (204) |
 | PUT | `/v1/search/clusters/{id}/repositories/{name}` | `PUT _snapshot/{name}` (Elasticsearch's body and query: `verify`), the only way a repository's credential settings can be roll secrets references (`roll://ENV/KEY`): the caller must be able to reveal each (403 if not; 400 for a cluster no project stands for or a key that doesn't exist), and is kept as their maker (architecture.md "Snapshots") → the cluster's answer |
-| POST | `/v1/search/clusters/{id}/migrate/inspect` | list another Elasticsearch or OpenSearch's indices for a migration ("Migrating into roll" above) |
-| POST | `/v1/search/clusters/{id}/migrate` | copy picked indices' definitions and start their reindex tasks (above) |
+| POST | `/v1/search/clusters/{id}/migrate/inspect` | list another Elasticsearch, OpenSearch, Algolia, Typesense or Meilisearch's indices for a migration ("Migrating into roll" above) |
+| POST | `/v1/search/clusters/{id}/migrate` | copy (or, `dry_run`, plan) picked indices' definitions and start their copy tasks (above) |
 | GET, PUT, DELETE | `/v1/search/clusters/{id}/indices/{index}` | Elasticsearch's `GET`/`PUT`/`DELETE /<index>`: mappings, settings and aliases; create (body: `mappings`, `settings`); delete |
 | GET, PUT | `/v1/search/clusters/{id}/indices/{index}/mapping` | `GET`/`PUT /<index>/_mapping` |
 | GET, PUT | `/v1/search/clusters/{id}/indices/{index}/settings` | `GET`/`PUT /<index>/_settings`. A write names one index; the engine refuses private, internal and managed settings to it as to any client (`can not update private setting`). Turns on `index.roll.analytics.enabled` and `index.roll.suggestions.*`. A body naming a lifecycle (`index.lifecycle.*`, OpenSearch ISM's `index_state_management`) is `delete` in roll's permissions, not `write`: its policy can delete the index |
@@ -1237,11 +1328,13 @@ deterministic (#396).
 
 1. **Search from the browser** (landed in #358 after six reviews, its policy enforced in the
    engine on the parsed request: per-cluster CORS, browser keys with rate limits and their own body
-   cap, a Browser search section and the site-search guide's browser page; what remains: RAG's
-   chat limits for browser keys (item 11); keys derived without a call to roll (in progress; Algolia's
-   `generateSecuredApiKey`, Typesense's `generateScopedSearchKey`, Meilisearch's tenant tokens: a
-   SaaS signs a short-lived key per end customer from one parent key, where today it's 20 browser
-   keys a cluster and one control-plane call each); browser search on previews (a branch keeps the
+   cap, a Browser search section and the site-search guide's browser page; keys derived without a call to roll in
+   #954 (Algolia's `generateSecuredApiKey`, Typesense's `generateScopedSearchKey`, Meilisearch's
+   tenant tokens: a derivable browser key's backend signs a short-lived, narrower key per end
+   customer, checked on the owner every request, with a per-user share of the parent's rate;
+   in progress, `fix/search-derived-keys-2`: verified once per request, expensive filters only
+   when the parent allows them, and each end user's own context owner);
+   what remains: RAG's chat limits for browser keys (item 11); browser search on previews (a branch keeps the
    parent's origins but no browser key works there: give it one and the preview's URL, roll
    previews' side); and usage and 429s per browser key in the Browser search section (Algolia's
    per-key usage and logs); Algolia's search-only and secured API keys,
@@ -1261,16 +1354,22 @@ deterministic (#396).
    and never echoed, remote pages charged by what parsing builds; and the dashboard's migration
    wizard: `inspect` lists a remote cluster's indices (fetched by roll, its answer charged until
    it's sent), copies mappings, settings and aliases, reindexes with progress and switches an
-   alias when done. Elastic Cloud restores from other deployments, AWS OpenSearch Service has
-   migration assistants, Algolia and Typesense import from each other): left, Algolia's export
-   (records, synonyms, rules) mapped onto indices, synonym sets and query rules, a Typesense
-   and Meilisearch import (their dump formats onto indices and settings), and catch-up and cutover
-   (AWS OpenSearch Migration Assistant's capture and replay): a copy is one point in time today, so
-   writes made during the copy are lost unless the client double-writes. Offline, with no route
-   to the old cluster: its snapshots restore on roll from the bucket they're in (item 9, #652).
-   In progress (`feature/search-import-saas`): Algolia, Typesense and Meilisearch as migration
-   sources (records, settings mapped where they map, synonyms onto synonyms sets, rules and
-   curations onto query rules, everything that doesn't map listed with its reason).
+   alias when done. Imports from Algolia, Typesense and Meilisearch: `source.kind`
+   on the same routes, records, settings, synonyms and rules mapped onto indices, synonyms sets,
+   query rules and a search template, everything that doesn't map listed with why before the copy
+   starts (`dry_run`), copies as reindex tasks, `roll search migrate`, and
+   [guides/migrate-from-algolia.md](guides/migrate-from-algolia.md) (#957). In review (#993):
+   a copy that resumes from its last page, Typesense 29's synonym sets and 30's curation sets,
+   Algolia's filter and query-edit rules as search templates, and catch-up and cutover (changed
+   records read again, then an alias moved in one step). Elastic Cloud restores from
+   other deployments, AWS OpenSearch Service has migration assistants, Typesense and Meilisearch
+   publish Algolia importers): left, Typesense 29's synonym sets and 30's curation sets (listed as
+   not read today), Algolia rule consequences beyond promote and hide (filters and query edits as
+   a search template's rule-driven parameters), a copy that resumes from its last page rather than
+   restarting the index, and catch-up and cutover (AWS OpenSearch Migration Assistant's capture
+   and replay): a copy is one point in time today, so writes made during the copy are lost unless
+   the client double-writes. Offline, with no route to the old cluster: its snapshots restore on
+   roll from the bucket they're in (item 9, #652).
 3. **One memory account per request** (landed: Painless per execution in #591, af195cbbe, after
    four reviews: each execution holds at most `--search-script-memory-mb`, and once-per-document
    scripts charge the `request` breaker; the node-wide body budget in #601; ES|QL and aggregations
@@ -1314,6 +1413,14 @@ deterministic (#396).
    credentials, connector configuration, site verifications, migration credentials and previews'
    data keys. Next pass: caches and context stores (scroll, point in time, async results, the
    request cache, kept ES|QL results) against the opener and against a concurrent close.
+   Third pass (2026-11-25, on 9f72a7c4a): a point in time kept its opener's DLS and FLS for as
+   long as it was extended, so narrowing a role didn't reach it; the shard request cache, stored
+   `_tasks` results and compiled scripts were held to entry counts and charged to nothing; and a
+   tenant's own settings lifted the scroll and point-in-time limits, while an open context kept a
+   cluster loaded past the always-on caps. Fix in progress (`fix/search-contexts-caches`).
+   Checked and sound: async results, scroll and point-in-time ids, cross-cluster contexts, the
+   credential and analysis caches, and the metering buffers. The second pass's fix is in review
+   (#988, with previews' `X-Roll-Unembedded: drop` for masking a `semantic_text` field on a branch).
 5. **Cross-cluster search: what's left** (ES|QL across clusters landed in #504 after five reviews: each
    cluster's part on its owner, `_remote`/`_coordinator`/`_any` enrich modes, LOOKUP JOIN across clusters
    with union types refused as Elasticsearch refuses them; still different: a command inside a part after
@@ -1444,12 +1551,13 @@ deterministic (#396).
    the restore: segments Lucene 8 wrote (Elasticsearch 7.x indices never merged since), data streams themselves (their backing indices restore), `sparse_vector`
    and `rank_vectors` values and nested dense vectors that Elasticsearch 9 left out of `_source`,
    `_status` file counts from the shard snapshots, and resuming after a takeover from the shard
-   reached rather than from the start of each index. Also left: a snapshot that starts after a DELETE is written to
-   the bucket but before the cluster's copy of the repository data updates may still take the
-   deleted snapshot as its base (`_cleanup` has the same window). In progress (`fix/search-snapshot-followups`):
-   a snapshot DELETE waits for running snapshots that build on it, as Elasticsearch does, a cap on
-   repository generations, and unreferenced chunks of failed snapshots removed by the next
-   snapshot of their shard.
+   reached rather than from the start of each index. Landed since: a snapshot DELETE waits for
+   running snapshots that build on it, as Elasticsearch does, and a cap on repository generations
+   (#941); deletions and `_cleanup` show as running, so a snapshot starting meanwhile waits for
+   them rather than take a removed snapshot as its base (#995). In progress
+   (`feature/search-es-restore-2`): data streams restored whole, and a restore resumed after a
+   takeover from the shard it reached.
+   Chunks of failed snapshots stay until `_cleanup` (compatibility.md says why).
 10. **Relevance tuning by MCP and Terraform**: `/v1/search` serves synonyms sets, query rulesets
    (and `_test`), writing an index's settings and `_explain` (the routes table), and `roll search`
    has `synonyms`, `rules`, `indices settings` and `explain` and makes `read` and `append` keys on

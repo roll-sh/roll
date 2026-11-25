@@ -253,17 +253,24 @@ fn bump_policy(stats: &mut Map, id: &str, k: &str, by: i64) {
 
 /// `SnapshotLifecycleTask.maybeTakeSnapshot`: takes the policy's snapshot now and records the
 /// outcome; a scheduled run also moves the policy's schedule on. Returns the snapshot's name
-/// (`None`: the policy is gone).
+/// (`None`: the policy is gone, paused, or for a scheduled run no longer due).
 async fn execute(cluster: &Cluster, id: &str, now: i64, scheduled: bool) -> Option<String> {
-    let rec = cluster.state().metadata.xpack.get(POLICIES, id).cloned()?;
-    if crate::branch::paused_policy(&rec) {
+    // Counted before the policy is read: a scheduled run decided under a schedule the policy no
+    // longer has is either seen running or doesn't start (Elasticsearch drops a policy's
+    // trigger when the policy is updated), so whoever changes it can wait for runs to end.
+    cluster.xpack.slm_running.fetch_add(1, Ordering::SeqCst);
+    let rec = {
+        let st = cluster.state();
+        st.metadata.xpack.get(POLICIES, id).cloned().filter(|rec| !crate::branch::paused_policy(rec) && (!scheduled || policy_next(&st, rec).is_some_and(|t| t <= now)))
+    };
+    let Some(rec) = rec else {
+        finish_run(cluster, now).await;
         return None;
-    }
+    };
     let p = policy_body(&rec).clone();
     let owner = rec.pointer(&["_roll", "user"]).and_then(internal::principal_of);
     let repo = str_of(&p, "repository").to_string();
     let config = p.get("config").and_then(Value::as_object).cloned().unwrap_or_default();
-    cluster.xpack.slm_running.fetch_add(1, Ordering::SeqCst);
     let name = snapshot_name(str_of(&p, "name"), now);
     let outcome: Result<(String, i64), (String, EsError)> = match name {
         Err(e) => Err((str_of(&p, "name").to_string(), e)),
@@ -1030,9 +1037,14 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "the scheduler took {} snapshots", policy_snapshots(&c));
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        // A schedule far ahead ends the runs; retention keeps the newest two.
+        // A schedule far ahead ends the runs (one started under the old schedule ends first; one
+        // decided under it doesn't start); retention keeps the newest two.
         let (s, v) = call(&c, "PUT", "/_slm/policy/p", r#"{"schedule":"0 0 0 1 1 ? 2099","name":"<s-{now/d}>","repository":"repo","retention":{"max_count":2}}"#).await;
         assert_eq!(s, 200, "{v}");
+        while c.xpack.slm_running.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            assert!(std::time::Instant::now() < deadline, "a run didn't end");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
         // Readable times are `XContentBuilder.timeField`'s: milliseconds even when they're zero.
         let (_, v) = call(&c, "GET", "/_slm/policy/p?human", "").await;
         assert_eq!(v.pointer(&["p", "next_execution"]).and_then(Value::as_str), Some("2099-01-01T00:00:00.000Z"), "{v}");
