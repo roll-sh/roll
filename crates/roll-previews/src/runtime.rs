@@ -1673,15 +1673,18 @@ impl Runtime {
         // Two may run at once for one preview: each a container of its own.
         let shot = format!("roll-previews-try-{}", crate::new_id().trim_start_matches("pv_"));
         let mut args = shot_args(&shot, name, port);
-        args.extend(["--env".into(), format!("TRY={}", serde_json::to_string(&serde_json::json!({ "path": path, "steps": steps }))?)]);
+        // The steps (typed text among them) go on stdin, never a command line (`ps`, `docker
+        // inspect`): written to a file in the container's own /tmp.
+        let asked = serde_json::to_vec(&serde_json::json!({ "path": path, "steps": steps }))?;
+        args.extend(["--env".into(), "TRY=1".into(), "--env".into(), "TRY_FILE=/tmp/try.json".into()]);
         args.extend([
             self.cfg.screenshot_image.clone(),
             "sh".into(),
             "-c".into(),
-            format!("{} >/dev/null 2>&1; (base64 -w0 /tmp/s.png 2>/dev/null || true) && echo && (cat /tmp/s.png.try.json 2>/dev/null || true)", self.cfg.screenshot_command),
+            format!("cat > /tmp/try.json; {} >/dev/null 2>&1; (base64 -w0 /tmp/s.png 2>/dev/null || true) && echo && (cat /tmp/s.png.try.json 2>/dev/null || true)", self.cfg.screenshot_command),
         ]);
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-        let out = match tokio::time::timeout(TRY_FOR, docker_with_input(&argv, Vec::new(), SCREENSHOT_MAX * 4 / 3 + SHOT_REPORT_MAX)).await {
+        let out = match tokio::time::timeout(TRY_FOR, docker_with_input(&argv, asked, SCREENSHOT_MAX * 4 / 3 + SHOT_REPORT_MAX)).await {
             Ok(Ok(out)) => out,
             Ok(Err(e)) => {
                 code_preview::docker::remove(&shot).await;
@@ -2635,6 +2638,8 @@ async fn serve(rt: Arc<Runtime>, preview: String, service: String, mut req: Requ
     let target = rt.feedback_target(&preview, &req);
     // The link's token is roll's: the app never sees it, whichever way they came in.
     take_cookies(&mut req, &format!("roll_access_{preview}"));
+    // Nor a share link's: the preview's code (a fork's too) never holds a working outside link.
+    take_cookies(&mut req, &format!("roll_share_{preview}"));
     // A reviewer's own flags (the toolbar's cookie): what the project's rule names, as a header,
     // and only that (a header a visitor sent is dropped).
     let chosen = take_cookies(&mut req, FLAGS_COOKIE).pop();

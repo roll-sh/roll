@@ -1465,26 +1465,21 @@ deterministic (#396).
    cluster without ML nodes, the first error anyone copying Elasticsearch's docs hits; and no
    screen is named Discover.
 13. **A web crawler for site search** (design in [crawler.md](crawler.md); Elastic Open Crawler,
-   Algolia Crawler, DocSearch, Meilisearch's docs-scraper). Phase 1 landed: a native connector roll
-   runs (`roll_web_crawler`, on #318's runner) taking Open Crawler's config, fields and ids;
-   robots.txt (RFC 9309, token `roll-crawler`) always honoured; sitemaps; crawl rules with Open
-   Crawler's semantics on the linear-time `regex` crate; canonical URLs, robots meta,
-   `rel=nofollow`, `data-elastic-include`/`-exclude`; fetching through roll's one egress check (`egress.rs`) with
-   redirects checked hop by hop and the credential bound to one origin; pages parsed by
-   `html5ever` into a DOM charged to the request breaker and capped at 512 levels; a purge that
-   outages, expired logins and maintenance redirects can't empty (it's skipped when most documents
-   weren't refreshed); the limits with node ceilings; unverified-domain limits per owner and site
-   on a node; and `roll search crawler import` for an
-   Open Crawler YAML file. In review: phase 2 (#888, round 3 plus a merge of main: site
-   verification per cluster, a DNS TXT record proving a domain and a well-known file proving one
-   origin, with the owner's token shared across their clusters; `crawl-test` with a 75 s deadline,
-   its MCP tool and CLI; the dashboard's URL box and "crawl a site" empty state; the fleet's own
-   names as blocked hosts). After it: a verification token derived from the owner and the site
-   (HMAC), so a published record keeps working after its last row goes; then extraction rules (CSS selectors on the
-   arena DOM), incremental crawls with `If-Modified-Since`, and the docs preset (phase 3).
-   Charset detection beyond UTF-8, fetching several origins at once, per-site politeness by
-   address rather than name, fleet-wide per-owner limits, and seeding `roll.crawler.blocked_hosts`
-   are open too.
+   Algolia Crawler, DocSearch, Meilisearch's docs-scraper). Phases 1 and 2 landed: a native
+   connector roll runs (`roll_web_crawler`, on #318's runner) taking Open Crawler's config, fields
+   and ids, robots.txt always honoured, fetching through roll's one egress check with redirects
+   checked hop by hop and the credential bound to one origin, a purge that outages can't empty,
+   and `roll search crawler import`; then site verification per cluster with the owner's token (a
+   domain by a DNS TXT record, covering every origin on it, or one origin by the well-known file
+   it serves; re-checked every 30 days with retries, the verified limits, and the owner's daily
+   count of unverified crawls in the fleet's catalogue), `crawl-test` (one URL through the crawler's path, storing nothing,
+   rate-limited per owner) with its MCP tools and `roll search crawler test`/`verify`/`sites`, the
+   dashboard's "crawl a site" box in the Connectors tab, and every product's names blocked
+   (`roll.crawler.fleet_names`). Left: a verification token derived from the owner and the site
+   (HMAC), so a published record keeps working after the owner's last row for it goes; then
+   (phase 3) extraction rules (CSS selectors on the arena DOM), incremental crawls with
+   `If-Modified-Since`, and the docs preset; charset detection beyond UTF-8, fetching several
+   origins at once, and per-site politeness by address rather than name are open too.
 14. **Semantic search on OpenSearch-flavor clusters** (design in
    [opensearch-neural.md](opensearch-neural.md); AWS OpenSearch neural search):
    `neural`, `neural_sparse` and `agentic` are names only (`meta/aliases.rs`); ML Commons

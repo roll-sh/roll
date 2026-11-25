@@ -5010,3 +5010,259 @@ async fn a_migration_is_bounded() {
     let again = e.post("/v1/search/clusters/dst/migrate", json!({ "source": source, "indices": [{ "index": "c" }] })).await;
     assert!(again["indices"][0]["task"].is_string(), "{again}");
 }
+
+/// A fake site's answers by path: status, headers, body.
+type SiteRoutes = Arc<parking_lot::Mutex<std::collections::HashMap<String, (u16, Vec<(String, String)>, String)>>>;
+
+/// A site on loopback for the web crawler: fixed answers by path, the rest 404.
+struct FakeSite {
+    base: String,
+    routes: SiteRoutes,
+}
+
+impl FakeSite {
+    async fn start() -> FakeSite {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let routes: SiteRoutes = Arc::default();
+        let r = routes.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let r = r.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    while !buf.windows(4).any(|w| w == b"\r\n\r\n") && buf.len() < 65536 {
+                        match sock.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&buf).into_owned();
+                    let target = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+                    let (status, headers, body) = r.lock().get(&target).cloned().unwrap_or((404, vec![], "no".into()));
+                    let mut out = format!("HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
+                    for (k, v) in headers {
+                        out.push_str(&format!("{k}: {v}\r\n"));
+                    }
+                    out.push_str("\r\n");
+                    out.push_str(&body);
+                    let _ = sock.write_all(out.as_bytes()).await;
+                });
+            }
+        });
+        FakeSite { base, routes }
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}{path}", self.base)
+    }
+
+    fn set(&self, path: &str, status: u16, headers: &[(&str, &str)], body: &str) {
+        self.routes.lock().insert(path.into(), (status, headers.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(), body.into()));
+    }
+
+    fn page(&self, path: &str, html: &str) {
+        self.set(path, 200, &[("Content-Type", "text/html")], html);
+    }
+}
+
+/// A crawler test environment: the fake site's loopback allowed, the unverified limit 2 URLs.
+async fn crawler_env(extra: &[(&str, &str)]) -> Env {
+    let extra: Vec<(String, String)> = extra.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    env_with(move |c| {
+        for (k, v) in [
+            ("roll.connectors.allow_private_hosts", "true"),
+            ("roll.connectors.max_docs_per_second", "100000"),
+            ("roll.crawler.min_request_interval", "1ms"),
+            ("roll.crawler.unverified.min_request_interval", "1ms"),
+            ("roll.crawler.unverified.max_unique_url_count", "2"),
+        ] {
+            c.node_settings.push((k.into(), v.into()));
+        }
+        c.node_settings.extend(extra);
+    })
+    .await
+}
+
+impl Env {
+    /// A call that must answer 200, as `who` (`None`: the operator).
+    async fn ok_as(&self, who: Option<&str>, method: reqwest::Method, path: &str, body: Option<Value>) -> Value {
+        let (s, v) = match who {
+            Some(w) => self.call_as(w, method, path, body).await,
+            None => self.call(method, path, body).await,
+        };
+        assert_eq!(s, 200, "{path}: {v}");
+        v
+    }
+
+    /// A `roll_web_crawler` connector `connector` of `urls` on cluster `id`, made as `who`.
+    async fn crawler(&self, who: Option<&str>, id: &str, connector: &str, urls: &str) {
+        let es = |method: &str, path: String, b: Value| Some(json!({"method": method, "path": path, "body": b}));
+        let path = format!("/v1/search/clusters/{id}/request");
+        self.ok_as(who, reqwest::Method::POST, &path, es("PUT", format!("/_connector/{connector}"), json!({"index_name": format!("content-{connector}"), "is_native": true, "service_type": "roll_web_crawler"}))).await;
+        self.ok_as(who, reqwest::Method::POST, &path, es("PUT", format!("/_connector/{connector}/_configuration"), json!({"values": {"urls": urls}}))).await;
+    }
+
+    /// A full crawl of `connector` on cluster `id`, as `who`, run to its end: the job.
+    async fn crawl(&self, who: Option<&str>, id: &str, connector: &str) -> Value {
+        let path = format!("/v1/search/clusters/{id}/request");
+        let r = self.ok_as(who, reqwest::Method::POST, &path, Some(json!({"method": "POST", "path": "/_connector/_sync_job", "body": {"id": connector, "job_type": "full"}}))).await;
+        let job = body(&r)["id"].as_str().unwrap().to_string();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        loop {
+            let j = body(&self.ok_as(who, reqwest::Method::POST, &path, Some(json!({"method": "GET", "path": format!("/_connector/_sync_job/{job}")}))).await);
+            if matches!(j["status"].as_str(), Some("completed" | "error" | "canceled")) {
+                return j;
+            }
+            assert!(std::time::Instant::now() < deadline, "{j}");
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+}
+
+/// A site of six pages on loopback.
+async fn six_page_site() -> FakeSite {
+    let site = FakeSite::start().await;
+    let links: String = (1..=5).map(|i| format!(r#"<a href="/p{i}">{i}</a>"#)).collect();
+    site.page("/", &format!("<title>Home</title><p>home</p>{links}"));
+    for i in 1..=5 {
+        site.page(&format!("/p{i}"), &format!("<title>Page {i}</title><p>page {i}</p>"));
+    }
+    site
+}
+
+fn limited(j: &Value) -> (Option<&str>, Option<&str>, Option<i64>) {
+    (j["status"].as_str(), j["metadata"]["limit_reached"].as_str(), j["indexed_document_count"].as_i64())
+}
+
+/// The web crawler's sites (docs/search/crawler.md, "Domain verification"): `crawl-test` answers
+/// what a crawl would do with a URL, storing nothing; an unverified origin is crawled within the
+/// unverified limits; its owner verifies it with the file it serves (a redirect to another origin
+/// of the same server holding the token proves nothing), and the next crawl of that origin gets
+/// the higher limits, while one of another origin on the same server doesn't.
+#[tokio::test]
+async fn crawler_sites_verified_for_higher_limits() {
+    use reqwest::Method;
+    let site = six_page_site().await;
+    let other_port = FakeSite::start().await;
+    let e = crawler_env(&[]).await;
+    let id = e.post("/v1/search/clusters", json!({"name": "crawl"})).await["id"].as_str().unwrap().to_string();
+
+    // crawl-test: what the URL would give, and nothing written.
+    let t = e.post(&format!("/v1/search/clusters/{id}/crawl-test"), json!({"url": site.url("/")})).await;
+    assert_eq!((t["verdict"].as_str(), t["indexed"].as_bool(), t["document"]["title"].as_str()), (Some("allowed"), Some(true), Some("Home")), "{t}");
+    assert_eq!(t["links"].as_array().map(|l| l.iter().filter(|x| x["verdict"] == "allowed").count()), Some(5), "{t}");
+    let r = e.post(&format!("/v1/search/clusters/{id}/request"), json!({"method": "GET", "path": "/_cat/indices?format=json"})).await;
+    assert_eq!(body(&r), json!([]), "crawl-test writes nothing");
+
+    // The first crawl: unverified, so 2 URLs at most.
+    e.crawler(None, &id, "site", &site.url("/")).await;
+    assert_eq!(limited(&e.crawl(None, &id, "site").await), (Some("completed"), Some("unverified_domain_max_unique_url_count"), Some(2)));
+
+    // The origin's file. A redirect to another port holding the token is refused.
+    let v = e.post(&format!("/v1/search/clusters/{id}/site-verifications"), json!({"origin": site.url("/")})).await;
+    let (name, token) = (v["site"].as_str().unwrap().to_string(), v["file"]["content"].as_str().unwrap().to_string());
+    assert_eq!((v["status"].as_str(), v["kind"].as_str(), name.as_str()), (Some("pending"), Some("origin"), site.base.as_str()), "{v}");
+    other_port.set(verify_file(), 200, &[], &token);
+    site.set(verify_file(), 302, &[("Location", &other_port.url(verify_file()))], "");
+    let path = format!("/v1/search/clusters/{id}/site-verifications/{}/check", urlencoding::encode(&name));
+    let v = e.post(&path, json!({})).await;
+    assert!(v["status"] == "pending" && v["error"].as_str().is_some_and(|e| e.contains("another origin")), "{v}");
+    site.set(verify_file(), 200, &[], &format!("{token}\n"));
+    let v = e.post(&path, json!({})).await;
+    assert_eq!(v["status"].as_str(), Some("verified"), "{v}");
+
+    // The next crawl of that origin: verified, so every page.
+    let j = e.crawl(None, &id, "site").await;
+    assert_eq!(limited(&j), (Some("completed"), None, Some(6)), "{j}");
+    assert_eq!(j["metadata"]["verified_origins"][0].as_str(), Some(name.as_str()), "{j}");
+
+    // The same server by another name is another origin: not verified by that file.
+    let by_name = site.base.replace("127.0.0.1", "localhost");
+    e.crawler(None, &id, "by-name", &format!("{by_name}/")).await;
+    let j = e.crawl(None, &id, "by-name").await;
+    assert_eq!(limited(&j), (Some("completed"), Some("unverified_domain_max_unique_url_count"), Some(2)), "{j}");
+
+    // crawl-test and checks make roll send requests: 10 a minute per owner, then 429.
+    let mut answers = Vec::new();
+    for _ in 0..11 {
+        let (s, _) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/crawl-test"), Some(json!({"url": site.url("/")}))).await;
+        answers.push(s);
+    }
+    assert_eq!(answers.last(), Some(&429), "{answers:?}");
+}
+
+fn verify_file() -> &'static str {
+    "/.well-known/roll-site-verification.txt"
+}
+
+/// Verifications are each cluster's: the owner's other cluster isn't verified until it checks,
+/// and then passes at once with the token already published (the token is the owner's); another
+/// owner gets a token of their own and nothing from the first owner's rows.
+#[tokio::test]
+async fn crawler_verifications_are_each_clusters() {
+    use reqwest::Method;
+    let site = six_page_site().await;
+    let e = crawler_env(&[]).await;
+    let made = |who: &'static str, name: &'static str| {
+        let e = &e;
+        async move { e.ok_as(Some(who), Method::POST, "/v1/search/clusters", Some(json!({"name": name}))).await["id"].as_str().unwrap().to_string() }
+    };
+    let (x, y, bob) = (made("alice", "alice-x").await, made("alice", "alice-y").await, made("bob", "bob-crawl").await);
+    let start = |who: &'static str, id: String| {
+        let (e, origin) = (&e, site.url("/"));
+        async move { e.ok_as(Some(who), Method::POST, &format!("/v1/search/clusters/{id}/site-verifications"), Some(json!({"origin": origin}))).await }
+    };
+    let check = |who: &'static str, id: String, v: Value| {
+        let e = &e;
+        async move { e.ok_as(Some(who), Method::POST, &format!("/v1/search/clusters/{id}/site-verifications/{}/check", urlencoding::encode(v["site"].as_str().unwrap())), Some(json!({}))).await }
+    };
+    let crawled = |who: &'static str, id: String| {
+        let (e, url) = (&e, site.url("/"));
+        async move {
+            e.crawler(Some(who), &id, "site", &url).await;
+            limited(&e.crawl(Some(who), &id, "site").await).1.map(str::to_string)
+        }
+    };
+    let on_x = start("alice", x.clone()).await;
+    let token = on_x["file"]["content"].as_str().unwrap().to_string();
+    site.set(verify_file(), 200, &[], &token);
+    assert_eq!(check("alice", x.clone(), on_x).await["status"], "verified");
+    assert_eq!(crawled("alice", x.clone()).await, None, "x is verified");
+
+    // y: not verified by x's row; one check with the same token, and it is.
+    assert_eq!(crawled("alice", y.clone()).await.as_deref(), Some("unverified_domain_max_unique_url_count"));
+    let on_y = start("alice", y.clone()).await;
+    assert_eq!(on_y["file"]["content"].as_str(), Some(token.as_str()), "the owner's token: {on_y}");
+    assert_eq!(check("alice", y.clone(), on_y).await["status"], "verified");
+    assert_eq!(crawled("alice", y.clone()).await, None, "y is verified now");
+
+    // bob: nothing of alice's, and a token of his own.
+    let theirs = e.ok_as(Some("bob"), Method::GET, &format!("/v1/search/clusters/{bob}/site-verifications"), None).await;
+    assert_eq!(theirs["verifications"], json!([]));
+    assert_eq!(crawled("bob", bob.clone()).await.as_deref(), Some("unverified_domain_max_unique_url_count"));
+    assert_ne!(start("bob", bob).await["file"]["content"].as_str(), Some(token.as_str()));
+}
+
+/// The daily limit of unverified crawls is the owner's, kept in the catalogue: a second connector
+/// doesn't buy another crawl of a site, and a refusal spends nothing. Connector `two` covers a
+/// fresh site and the exhausted one (the fresh one counted first); after its refusal, a crawl of
+/// the fresh site alone runs, so neither the owner's count of it nor the connector's was spent.
+#[tokio::test]
+async fn crawler_daily_limit_is_the_owners_across_connectors() {
+    let (a, b) = (six_page_site().await, six_page_site().await);
+    // Sites are counted in order of their names (`127.0.0.1:<port>`): `fresh` is checked first.
+    let (fresh, spent) = if a.base < b.base { (a, b) } else { (b, a) };
+    let e = crawler_env(&[("roll.crawler.unverified.max_crawls_per_day", "1")]).await;
+    let id = e.post("/v1/search/clusters", json!({"name": "crawl"})).await["id"].as_str().unwrap().to_string();
+    e.crawler(None, &id, "one", &spent.url("/")).await;
+    assert_eq!(e.crawl(None, &id, "one").await["status"], "completed");
+    e.crawler(None, &id, "two", &format!("{},{}", fresh.url("/"), spent.url("/"))).await;
+    let j = e.crawl(None, &id, "two").await;
+    assert!(j["status"] == "error" && j["error"].as_str().is_some_and(|m| m.contains("at most 1 times in 24 hours by one owner")), "{j}");
+    e.crawler(None, &id, "two", &fresh.url("/")).await;
+    let j = e.crawl(None, &id, "two").await;
+    assert_eq!(j["status"], "completed", "the refused crawl spent none of the owner's or the connector's count: {j}");
+}

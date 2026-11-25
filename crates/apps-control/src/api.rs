@@ -81,6 +81,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/projects/{project}/notifications/{nid}/test", post(test_target))
         .route("/v1/apps/projects/{project}/notifications/{nid}/deliveries", get(deliveries))
         .route("/v1/apps/services/{id}/registry", put(put_registry).delete(delete_registry))
+        .route("/v1/apps/services/{id}/deploys", get(service_deploys))
         .route("/v1/apps/services/{id}/git-login", put(put_git_login).delete(delete_git_login))
         .route("/v1/apps/services/{id}/github", put(put_github).delete(delete_github))
         .route("/v1/apps/services/{id}/environments", get(environments))
@@ -97,6 +98,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/checks/{{check}}/trace"), get(check_trace))
         .route(&format!("{env}/deploys/{{dep}}/explain"), post(explain_deploy))
         .route(&format!("{env}/deploys/{{dep}}/approve"), post(approve_deploy))
+        .route(&format!("{env}/deploys/{{dep}}/pin"), post(pin_deploy).delete(unpin_deploy))
         .route(&format!("{env}/deploys/{{dep}}/rollback"), post(rollback))
         .route(&format!("{env}/deploys/{{dep}}/rollout"), post(rollout_action))
         .route(&format!("{env}/rollback"), post(rollback_previous))
@@ -821,10 +823,24 @@ async fn delete_env(State(apps): S, Path((id, env)): Path<(String, String)>, ext
 struct DeploysQuery {
     /// Made before then (unix ms; the last one's `created_at`): the next page.
     before: Option<i64>,
+    status: Option<String>,
+    actor: Option<String>,
+    /// In its message, or the start of its commit.
+    q: Option<String>,
+}
+
+impl DeploysQuery {
+    fn filter(&self) -> crate::store::DeployFilter {
+        crate::store::DeployFilter { status: self.status.clone(), actor: self.actor.clone(), q: self.q.clone() }
+    }
 }
 
 async fn deploys(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<DeploysQuery>) -> R {
-    ok(apps.deployments(&id, &env, q.before).await?)
+    ok(apps.deployments_where(&id, Some(&env), q.before, q.filter()).await?)
+}
+
+async fn service_deploys(State(apps): S, Path(id): Path<String>, Query(q): Query<DeploysQuery>) -> R {
+    ok(apps.deployments_where(&id, None, q.before, q.filter()).await?)
 }
 
 /// A person's deploy past a freeze: `X-Roll-Override: 1`, which roll-access makes `admin`
@@ -882,6 +898,18 @@ struct VulnQuery {
 #[derive(Deserialize)]
 struct ExplainQuery {
     again: Option<String>,
+}
+
+async fn pin_deploy(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, ext: Extensions) -> R {
+    let d = apps.pin_deployment(&id, &env, &dep, true).await?;
+    apps.audit("deployment.pinned", &id, &env, actor(&ext), json!({ "deployment": dep })).await;
+    ok(d)
+}
+
+async fn unpin_deploy(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, ext: Extensions) -> R {
+    let d = apps.pin_deployment(&id, &env, &dep, false).await?;
+    apps.audit("deployment.unpinned", &id, &env, actor(&ext), json!({ "deployment": dep })).await;
+    ok(d)
 }
 
 /// A deployment waiting at ready approved by a person (never a token: an agent's or a CI's

@@ -24,6 +24,13 @@ export interface Sso {
   allow: string[];
 }
 
+/** What a deploys list is narrowed to. */
+export interface DeployFilter {
+  status?: DeployStatus;
+  actor?: string;
+  q?: string;
+}
+
 /** One session in a sign-in-gated environment (`…/visitors`). */
 export interface Visitor {
   id: string;
@@ -974,6 +981,8 @@ export interface Deployment {
   ready_ms: number | null;
   /** Its image's size, where the runtime says. */
   image_bytes?: number;
+  /** When it was pinned: never pruned, so always one rollback away. */
+  pinned_at?: number;
   /** What the app or the build printed when it failed (the step, its last line): only shown here, never sent in a commit status or a notification. */
   error_detail?: string;
   /** How to fix a failure roll knows (a private image's login, more memory, a lockfile): the setting and its command. */
@@ -1717,7 +1726,10 @@ export const appsApi = {
 
   deploy: (id: string, e: string, body: NewDeploy = {}) => call<Deployment>("POST", `${env(id, e)}/deploys`, body),
   /** Newest first, 100 at most; `before` (the last one's `created_at`): the page after it. */
-  deploys: (id: string, e: string, before?: number) => call<Deployment[]>("GET", `${env(id, e)}/deploys${qs({ before })}`),
+  /** An environment's deploys, newest first, narrowed by state, who made them, or their message or commit (`q`). */
+  deploys: (id: string, e: string, before?: number, f: DeployFilter = {}) => call<Deployment[]>("GET", `${env(id, e)}/deploys${qs({ before, ...f })}`),
+  /** Every environment's deploys of a service, narrowed the same way. */
+  serviceDeploys: (id: string, before?: number, f: DeployFilter = {}) => call<Deployment[]>("GET", `${svc(id)}/deploys${qs({ before, ...f })}`),
   deployment: (id: string, e: string, d: string) => call<Deployment>("GET", dep(id, e, d)),
   /** What a repo deployment brings over the live one (for the live one, the one before it). */
   commits: (id: string, e: string, d: string) => call<DeployCommits>("GET", `${dep(id, e, d)}/commits`),
@@ -1730,6 +1742,8 @@ export const appsApi = {
   vulnerabilities: (id: string, e: string, d: string) => call<{ scan: ScanSummary | null; vulnerabilities: Vulnerability[] }>("GET", `${dep(id, e, d)}/vulnerabilities`),
   buildLog: (id: string, e: string, d: string, q: LogQuery = {}) => call<LogLine[]>("GET", `${dep(id, e, d)}/logs${qs({ tail: q.tail })}`),
   /** `keepVariables`: its image with the variables as they are now (after a rotated secret), not as they were then. */
+  /** Keep a deployment from pruning (`on`), or let it go again. */
+  pin: (id: string, e: string, d: string, on: boolean) => call<Deployment>(on ? "POST" : "DELETE", `${dep(id, e, d)}/pin`),
   rollback: (id: string, e: string, d: string, keepVariables = false) => call<Deployment>("POST", `${dep(id, e, d)}/rollback`, keepVariables ? { keep_variables: true } : undefined),
   /** Back to the one live before what runs (the server walks back through rollbacks). */
   rollbackPrevious: (id: string, e: string) => call<Deployment>("POST", `${env(id, e)}/rollback`),

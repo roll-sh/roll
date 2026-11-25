@@ -23,6 +23,7 @@ pub mod migrate;
 pub mod pricing;
 pub mod remotes;
 pub mod secret_refs;
+pub mod sites;
 pub mod store;
 pub mod suggestions;
 mod wake;
@@ -46,6 +47,7 @@ pub use search_es::api::remote::MAX_DURATION as REINDEX_MAX_DURATION;
 /// Node settings naming the addresses and names no outbound call reaches (reindex from remote,
 /// migration, connectors, inference, watches, snapshot repositories: [`search_es::egress`]).
 pub use search_es::egress::{DENY_ADDRESSES as EGRESS_DENY_ADDRESSES, DENY_NAMES as EGRESS_DENY_NAMES};
+pub use search_es::xpack::entsearch::sync::crawler::FLEET_NAMES as CRAWLER_FLEET_NAMES;
 
 /// Whether `n` is an address or network the egress deny list takes.
 pub fn egress_deny_net_ok(n: &str) -> bool {

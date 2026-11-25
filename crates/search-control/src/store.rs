@@ -34,6 +34,16 @@
 //!   list of top queries and of queries with no results. A slot is replaced when its time comes
 //!   round again; an index whose analytics go off or that is deleted loses its rows.
 //!
+//! - `crawler_sites`: one row per cluster and domain or origin verified (or being verified) for
+//!   its web crawlers: its kind (`domain`, by DNS, covering every origin on it; `origin`, by the
+//!   file that origin serves, covering it alone), token, state, and when it is checked next
+//!   (docs/search/crawler.md, "Domain verification"). The token is the owner's for the site
+//!   (`owner`: the cluster's, or `(no owner)` for the operator's), the same in each of their
+//!   clusters, so one published record proves the site for all of them; the verification and
+//!   the limits it gives are the cluster's alone. A cluster's rows go when it is deleted.
+//! - `site_crawls`: when each owner crawled each site it hasn't verified, for the daily limit of
+//!   unverified sites, counted across the fleet (rows older than a day are dropped as it's read).
+//!
 //! A cluster's password is sealed in its row, bound to the cluster's id, and opened as the row is
 //! read. The key is the deployment's (rolld's `ROLL_SECRET_KEY`), or on a single node without one
 //! a key of the node's own (`crate::control::node_key`); a store can't be made without one, so a
@@ -617,6 +627,14 @@ impl Store {
         )?;
         // Who linked a remote (links made before hold only between clusters of one owner).
         db.add_column("search_remotes", "made_by", "TEXT")?;
+        // The web crawler's verified sites and unverified crawls (`crate::sites`).
+        db.ensure_schema(
+            "CREATE TABLE IF NOT EXISTS search_crawler_sites (cluster_id TEXT NOT NULL, site TEXT NOT NULL, owner TEXT NOT NULL, kind TEXT NOT NULL, token TEXT NOT NULL, status TEXT NOT NULL, error TEXT, failures INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, verified_at INTEGER, lapsed_at INTEGER, checked_at INTEGER, due_at INTEGER, claimed_at INTEGER, PRIMARY KEY (cluster_id, site))",
+        )?;
+        db.ensure_schema("CREATE TABLE IF NOT EXISTS search_site_crawls (owner TEXT NOT NULL, site TEXT NOT NULL, at INTEGER NOT NULL)")?;
+        db.ensure_schema("CREATE INDEX IF NOT EXISTS search_site_crawls_by ON search_site_crawls (owner, site, at)")?;
+        db.ensure_schema("CREATE INDEX IF NOT EXISTS search_crawler_sites_due ON search_crawler_sites (due_at)")?;
+        db.ensure_schema("CREATE INDEX IF NOT EXISTS search_crawler_sites_owner ON search_crawler_sites (owner, site)")?;
         // Catalogs written before `code-sql` lack nothing but may lack the index on parents
         // (created above); their extra columns (`seq`) and tables (`search_tombstones`) are unused.
         let store = Self { db, sealer, former };
@@ -943,13 +961,19 @@ impl Store {
     /// Keeps a deleted cluster for restoring until `purge_at`: its name is freed at once (the
     /// row's `name` becomes `stored_as`, where its storage now is), and lookups stop seeing it.
     /// `false` when it isn't a live cluster any more (another delete won).
+    /// Its web crawlers' site verifications go at once (a restored cluster starts without them),
+    /// so nothing re-checks a deleted cluster's sites or counts its pending ones.
     pub async fn mark_deleted(&self, id: &str, stored_as: &str, at: i64, purge_at: i64) -> anyhow::Result<bool> {
         let n = self.db.write(|x| {
-            x.execute(
+            let n = x.execute(
                 "UPDATE search_clusters SET deleted_name = name, name = ?2, stored_as = ?2, deleted_at = ?3, purge_at = ?4, deleting = 0,
                  loaded_on = NULL, wake_at = NULL, claim = NULL, claimed_at = NULL WHERE id = ?1 AND deleted_at IS NULL",
                 params![id, stored_as, at, purge_at],
-            )
+            )?;
+            if n == 1 {
+                x.execute("DELETE FROM search_crawler_sites WHERE cluster_id = ?1", params![id])?;
+            }
+            Ok::<_, code_sql::Error>(n)
         })?;
         Ok(n == 1)
     }
@@ -1072,6 +1096,7 @@ impl Store {
             x.execute("DELETE FROM search_slowlog WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_analytics WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_suggestions WHERE cluster_id = ?1", params![id])?;
+            x.execute("DELETE FROM search_crawler_sites WHERE cluster_id = ?1", params![id])?;
             Ok(true)
         })?)
     }
@@ -1127,6 +1152,129 @@ impl Store {
         Ok(())
     }
 
+    /// Cluster `cluster`'s verification of `site` (a domain or an origin, of `kind`): a new one
+    /// (pending), or the one it has. Its token is `owner`'s for the site, the one their other
+    /// clusters have when they have one (so a record published once proves it everywhere), else
+    /// `token`. Refused past [`MAX_PENDING_PER_CLUSTER`] pending in the cluster or
+    /// [`MAX_PENDING`] across the owner's clusters, and for a cluster that's deleted or being
+    /// deleted (checked in the same write, so a start can't outlive a delete's sweep of its rows).
+    /// The owner's pending rows older than [`PENDING_FOR`] are dropped first.
+    pub async fn start_verification(&self, cluster: &str, owner: &str, site: &str, kind: &str, token: &str, now: i64) -> anyhow::Result<Started> {
+        Ok(self.db.write(|x| {
+            let live: Option<i64> = x.query_row("SELECT 1 FROM search_clusters WHERE id = ?1 AND deleted_at IS NULL AND deleting = 0", params![cluster], |r| r.get(0)).optional()?;
+            if live.is_none() {
+                return Ok::<_, code_sql::Error>(Started::Gone);
+            }
+            x.execute("DELETE FROM search_crawler_sites WHERE owner = ?1 AND status = 'pending' AND created_at < ?2", params![owner, now - PENDING_FOR])?;
+            if let Some(v) = x.query_row(&format!("SELECT {VERIFY_COLS} FROM search_crawler_sites WHERE cluster_id = ?1 AND site = ?2"), params![cluster, site], verification_row).optional()? {
+                return Ok(Started::Row(Box::new(v)));
+            }
+            let here: i64 = x.query_row("SELECT COUNT(*) FROM search_crawler_sites WHERE cluster_id = ?1 AND status = 'pending'", params![cluster], |r| r.get(0))?;
+            if here >= MAX_PENDING_PER_CLUSTER {
+                return Ok(Started::Full(MAX_PENDING_PER_CLUSTER, "in this cluster"));
+            }
+            let pending: i64 = x.query_row("SELECT COUNT(*) FROM search_crawler_sites WHERE owner = ?1 AND status = 'pending'", params![owner], |r| r.get(0))?;
+            if pending >= MAX_PENDING {
+                return Ok(Started::Full(MAX_PENDING, "across the owner's clusters"));
+            }
+            let theirs: Option<String> = x.query_row("SELECT token FROM search_crawler_sites WHERE owner = ?1 AND site = ?2 LIMIT 1", params![owner, site], |r| r.get(0)).optional()?;
+            x.execute(
+                "INSERT INTO search_crawler_sites (cluster_id, site, owner, kind, token, status, created_at) VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6) ON CONFLICT (cluster_id, site) DO NOTHING",
+                params![cluster, site, owner, kind, theirs.as_deref().unwrap_or(token), now],
+            )?;
+            let v = x.query_row(&format!("SELECT {VERIFY_COLS} FROM search_crawler_sites WHERE cluster_id = ?1 AND site = ?2"), params![cluster, site], verification_row)?;
+            Ok(Started::Row(Box::new(v)))
+        })?)
+    }
+
+    pub async fn verification(&self, cluster: &str, site: &str) -> anyhow::Result<Option<SiteVerification>> {
+        Ok(self.db.read(|x| x.query_row(&format!("SELECT {VERIFY_COLS} FROM search_crawler_sites WHERE cluster_id = ?1 AND site = ?2"), params![cluster, site], verification_row).optional())?)
+    }
+
+    pub async fn verifications(&self, cluster: &str) -> anyhow::Result<Vec<SiteVerification>> {
+        Ok(self.db.read(|x| x.query(&format!("SELECT {VERIFY_COLS} FROM search_crawler_sites WHERE cluster_id = ?1 ORDER BY site"), params![cluster], verification_row))?)
+    }
+
+    /// A check's outcome (`Err`: why it failed), and when the next is due ([`after_check`]).
+    /// Clears the check's claim.
+    pub async fn record_check(&self, cluster: &str, site: &str, outcome: std::result::Result<(), &str>, now: i64) -> anyhow::Result<()> {
+        self.db.write(|x| {
+            let Some(v) = x.query_row(&format!("SELECT {VERIFY_COLS} FROM search_crawler_sites WHERE cluster_id = ?1 AND site = ?2"), params![cluster, site], verification_row).optional()? else {
+                return Ok::<_, code_sql::Error>(());
+            };
+            let n = after_check(&v, outcome.is_ok(), now);
+            x.execute(
+                "UPDATE search_crawler_sites SET status = ?3, error = ?4, failures = ?5, verified_at = ?6, lapsed_at = ?7, checked_at = ?8, due_at = ?9, claimed_at = NULL WHERE cluster_id = ?1 AND site = ?2",
+                params![cluster, site, n.status, outcome.err(), n.failures, n.verified_at, n.lapsed_at, now, n.due_at],
+            )?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// A re-check that couldn't be made (the site's turn was too far off): neither a pass nor a
+    /// failure, tried again at `due_at`.
+    pub async fn defer_check(&self, cluster: &str, site: &str, due_at: i64) -> anyhow::Result<()> {
+        self.db.write(|x| x.execute("UPDATE search_crawler_sites SET due_at = ?3, claimed_at = NULL WHERE cluster_id = ?1 AND site = ?2", params![cluster, site, due_at]))?;
+        Ok(())
+    }
+
+    pub async fn delete_verification(&self, cluster: &str, site: &str) -> anyhow::Result<bool> {
+        Ok(self.db.write(|x| x.execute("DELETE FROM search_crawler_sites WHERE cluster_id = ?1 AND site = ?2", params![cluster, site]))? > 0)
+    }
+
+    /// Cluster `cluster`'s verifications that hold (`verified`, though a re-check may be
+    /// retrying): each key and its kind.
+    pub async fn verified_sites(&self, cluster: &str) -> anyhow::Result<Vec<(String, String)>> {
+        Ok(self.db.read(|x| x.query("SELECT site, kind FROM search_crawler_sites WHERE cluster_id = ?1 AND status = 'verified'", params![cluster], |r| Ok((r.get(0)?, r.get(1)?))))?)
+    }
+
+    /// Verifications due a re-check at `now` that no node holds, at most `max` (each is claimed
+    /// with [`Store::claim_recheck`] just before it is checked). Expired pending rows are dropped
+    /// on the way.
+    pub async fn due_rechecks(&self, now: i64, max: i64) -> anyhow::Result<Vec<SiteVerification>> {
+        Ok(self.db.write(|x| {
+            x.execute("DELETE FROM search_crawler_sites WHERE status = 'pending' AND created_at < ?1", params![now - PENDING_FOR])?;
+            x.query(
+                &format!("SELECT {VERIFY_COLS} FROM search_crawler_sites WHERE due_at IS NOT NULL AND due_at <= ?1 AND (claimed_at IS NULL OR claimed_at < ?2) ORDER BY due_at LIMIT ?3"),
+                params![now, now - CLAIM_FOR, max],
+                verification_row,
+            )
+        })?)
+    }
+
+    /// Claims verification `site` of `cluster` for a re-check at `now`, if it's still due and no
+    /// other node holds it (a claim older than [`CLAIM_FOR`] is taken again, so a node that died
+    /// mid-check delays it, never skips it). The result clears the claim ([`Store::record_check`]).
+    pub async fn claim_recheck(&self, cluster: &str, site: &str, now: i64) -> anyhow::Result<bool> {
+        Ok(self.db.write(|x| {
+            x.execute(
+                "UPDATE search_crawler_sites SET claimed_at = ?3 WHERE cluster_id = ?1 AND site = ?2 AND due_at IS NOT NULL AND due_at <= ?3 AND (claimed_at IS NULL OR claimed_at < ?4)",
+                params![cluster, site, now, now - CLAIM_FOR],
+            )
+        })? == 1)
+    }
+
+    /// Records a crawl of the unverified `sites` by `owner` at `now`, unless one of them already
+    /// had `per_day` in the 24 hours before: then nothing is recorded, and the answer names it and
+    /// when the next may start. One write, so two nodes can't both take the last crawl.
+    pub async fn record_site_crawl(&self, owner: &str, sites: &[String], per_day: u64, now: i64) -> anyhow::Result<Option<(String, i64)>> {
+        const DAY_MS: i64 = 86_400_000;
+        Ok(self.db.write(|x| {
+            x.execute("DELETE FROM search_site_crawls WHERE at <= ?1", params![now - DAY_MS])?;
+            for site in sites {
+                let (n, first): (i64, Option<i64>) = x.query_row("SELECT COUNT(*), MIN(at) FROM search_site_crawls WHERE owner = ?1 AND site = ?2", params![owner, site], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                if n as u64 >= per_day {
+                    return Ok::<_, code_sql::Error>(Some((site.clone(), first.unwrap_or(now) + DAY_MS)));
+                }
+            }
+            for site in sites {
+                x.execute("INSERT INTO search_site_crawls (owner, site, at) VALUES (?1, ?2, ?3)", params![owner, site, now])?;
+            }
+            Ok(None)
+        })?)
+    }
+
     /// Deletes a cluster's rows.
     pub async fn delete(&self, id: &str) -> anyhow::Result<()> {
         self.db.write(|x| {
@@ -1138,6 +1286,7 @@ impl Store {
             x.execute("DELETE FROM search_suggestions WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_storage WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_remotes WHERE cluster_id = ?1", params![id])?;
+            x.execute("DELETE FROM search_crawler_sites WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_revokes WHERE cluster_id = ?1", params![id])
         })?;
         Ok(())
@@ -1850,5 +1999,146 @@ mod tests {
         // Points past the end don't count.
         assert_eq!(integrate(&[(0, 1), (20, 100)], 10), 10.0);
         assert_eq!(integrate(&[(5, 1)], 3), 0.0);
+    }
+}
+
+/// How long a verification holds before it is checked again.
+pub const RECHECK_AFTER: i64 = 30 * DAY;
+/// After a verified row's check fails, when it is tried again: once per entry, then it lapses.
+const RETRY_AFTER: [i64; 3] = [HOUR, 6 * HOUR, DAY];
+/// How long a lapsed verification is still re-checked (daily), so a short outage on the site
+/// doesn't cost its owner the verification.
+const LAPSED_RECHECKS_FOR: i64 = 7 * DAY;
+/// How long a re-check's claim keeps other nodes off it.
+const CLAIM_FOR: i64 = 10 * 60_000;
+/// When a re-check that couldn't be made (a busy site) is tried again.
+pub const DEFER_FOR: i64 = 5 * 60_000;
+/// How long a verification stays pending (never checked successfully) before it is dropped, and
+/// how many one owner may have pending.
+pub const PENDING_FOR: i64 = 7 * DAY;
+pub const MAX_PENDING: i64 = 100;
+pub const MAX_PENDING_PER_CLUSTER: i64 = 20;
+/// A busy re-check is deferred until this long past its due interval, then counted as failed, so a
+/// site that never gives a turn can't keep a verification forever.
+pub const DEFER_UNTIL: i64 = RECHECK_AFTER + DAY;
+
+/// What [`Store::start_verification`] did.
+#[derive(Debug)]
+pub enum Started {
+    Row(Box<SiteVerification>),
+    /// Too many pending: the cap, and where it's counted.
+    Full(i64, &'static str),
+    /// The cluster is deleted or being deleted.
+    Gone,
+}
+const HOUR: i64 = 3_600_000;
+const DAY: i64 = 24 * HOUR;
+
+/// A verification's state after a check.
+#[derive(Debug, PartialEq)]
+struct AfterCheck {
+    status: &'static str,
+    failures: i64,
+    verified_at: Option<i64>,
+    lapsed_at: Option<i64>,
+    due_at: Option<i64>,
+}
+
+/// What a check (`ok` or not) at `now` makes of `v`: a pass verifies it (due again in
+/// [`RECHECK_AFTER`]); a verified row's failure is retried ([`RETRY_AFTER`]) before it lapses; a
+/// lapsed row is re-checked daily for [`LAPSED_RECHECKS_FOR`]; a pending row is checked only when
+/// someone asks.
+fn after_check(v: &SiteVerification, ok: bool, now: i64) -> AfterCheck {
+    if ok {
+        let verified_at = Some(v.verified_at.filter(|_| v.status == "verified").unwrap_or(now));
+        return AfterCheck { status: "verified", failures: 0, verified_at, lapsed_at: None, due_at: Some(now + RECHECK_AFTER) };
+    }
+    match v.status.as_str() {
+        "verified" => match RETRY_AFTER.get(v.failures.max(0) as usize) {
+            Some(wait) => AfterCheck { status: "verified", failures: v.failures + 1, verified_at: v.verified_at, lapsed_at: None, due_at: Some(now + wait) },
+            None => AfterCheck { status: "lapsed", failures: v.failures + 1, verified_at: None, lapsed_at: Some(now), due_at: Some(now + DAY) },
+        },
+        "lapsed" => {
+            let since = v.lapsed_at.unwrap_or(now);
+            let due_at = (now + DAY <= since + LAPSED_RECHECKS_FOR).then_some(now + DAY);
+            AfterCheck { status: "lapsed", failures: v.failures + 1, verified_at: None, lapsed_at: Some(since), due_at }
+        }
+        _ => AfterCheck { status: "pending", failures: 0, verified_at: None, lapsed_at: None, due_at: None },
+    }
+}
+
+/// A cluster's verification of a domain or an origin, for its web crawlers.
+#[derive(Clone, Debug, Serialize)]
+pub struct SiteVerification {
+    pub cluster_id: String,
+    /// Whose token it is (the cluster's owner).
+    pub owner: String,
+    /// A registrable domain (`kind` `domain`) or an origin, `scheme://host[:port]` (`origin`).
+    pub site: String,
+    pub kind: String,
+    pub token: String,
+    /// `pending`, `verified`, or `lapsed` (verified once, then its re-checks kept failing).
+    pub status: String,
+    /// Why the last check failed.
+    pub error: Option<String>,
+    /// Checks failed in a row.
+    pub failures: i64,
+    pub created_at: i64,
+    pub verified_at: Option<i64>,
+    pub lapsed_at: Option<i64>,
+    pub checked_at: Option<i64>,
+    /// When it is checked again by itself (`None`: only when someone asks).
+    pub due_at: Option<i64>,
+}
+
+const VERIFY_COLS: &str = "cluster_id, owner, site, kind, token, status, error, failures, created_at, verified_at, lapsed_at, checked_at, due_at";
+
+fn verification_row(r: &Row) -> code_sql::Result<SiteVerification> {
+    Ok(SiteVerification {
+        cluster_id: r.get(0)?,
+        owner: r.get(1)?,
+        site: r.get(2)?,
+        kind: r.get(3)?,
+        token: r.get(4)?,
+        status: r.get(5)?,
+        error: r.get(6)?,
+        failures: r.get(7)?,
+        created_at: r.get(8)?,
+        verified_at: r.get(9)?,
+        lapsed_at: r.get(10)?,
+        checked_at: r.get(11)?,
+        due_at: r.get(12)?,
+    })
+}
+
+#[cfg(test)]
+mod site_tests {
+    use super::*;
+
+    /// A verified site's failed re-checks are retried before it lapses, a lapsed one is re-checked
+    /// for a week, and a pass restores it.
+    #[test]
+    fn rechecks_retry_then_lapse_then_stop() {
+        let mut v = SiteVerification { cluster_id: "c".into(), owner: "o".into(), site: "example.com".into(), kind: "domain".into(), token: "t".into(), status: "verified".into(), error: None, failures: 0, created_at: 0, verified_at: Some(5), lapsed_at: None, checked_at: None, due_at: None };
+        let mut now = 1_000;
+        let apply = |v: &mut SiteVerification, ok: bool, now: i64| {
+            let n = after_check(v, ok, now);
+            (v.status, v.failures, v.verified_at, v.lapsed_at, v.due_at) = (n.status.to_string(), n.failures, n.verified_at, n.lapsed_at, n.due_at);
+        };
+        for wait in RETRY_AFTER {
+            apply(&mut v, false, now);
+            assert_eq!((v.status.as_str(), v.due_at, v.verified_at), ("verified", Some(now + wait), Some(5)));
+            now += wait;
+        }
+        apply(&mut v, false, now);
+        assert_eq!((v.status.as_str(), v.lapsed_at), ("lapsed", Some(now)));
+        let lapsed = now;
+        while let Some(due) = v.due_at {
+            now = due;
+            apply(&mut v, false, now);
+        }
+        assert!(now <= lapsed + LAPSED_RECHECKS_FOR && now > lapsed + LAPSED_RECHECKS_FOR - 2 * DAY, "re-checked for a week: {}", (now - lapsed) / DAY);
+        apply(&mut v, true, now);
+        assert_eq!((v.status.as_str(), v.failures, v.verified_at, v.due_at), ("verified", 0, Some(now), Some(now + RECHECK_AFTER)));
     }
 }
