@@ -3,7 +3,10 @@
 //! names inside it on the host, so one could retag a base image or another service's image
 //! there. Before it's loaded its names are taken out: `manifest.json`'s `RepoTags` emptied,
 //! `repositories` (the legacy names) left out, and the OCI index's name annotations removed.
-//! The image is then tagged `roll-apps-<service>:<deployment>`, as a build's is.
+//! The image is then tagged `roll-apps-<service>:<deployment>`, as a build's is. Its platform is
+//! read from the config blob the manifest names, so one built for another processor (an Apple
+//! Silicon Mac's arm64) is refused before it's started rather than failing with "exec format
+//! error".
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -11,13 +14,20 @@ use std::path::Path;
 /// The names an OCI index may carry for an image.
 const NAME_ANNOTATIONS: [&str; 2] = ["io.containerd.image.name", "org.opencontainers.image.ref.name"];
 
-/// `input` (a `docker save` archive) written to `out` without any name in it.
-pub fn untagged(input: &[u8], out: &Path) -> anyhow::Result<()> {
+/// The most bytes of a file looked at as an image config (they're a few KiB; layers aren't read).
+const CONFIG_MAX: u64 = 1 << 20;
+
+/// `input` (a `docker save` archive) written to `out` without any name in it; the image's
+/// platform (`linux/arm64`) when its config says.
+pub fn untagged(input: &[u8], out: &Path) -> anyhow::Result<Option<String>> {
     let reader: Box<dyn Read> = if input.starts_with(&[0x1f, 0x8b]) { Box::new(flate2::read::GzDecoder::new(input)) } else { Box::new(input) };
     let mut archive = tar::Archive::new(reader);
     let file = std::fs::OpenOptions::new().write(true).create_new(true).open(out)?;
     let mut builder = tar::Builder::new(std::io::BufWriter::new(file));
     let mut manifest = false;
+    // The manifest names its config; `docker save` writes the blobs first.
+    let mut config: Option<String> = None;
+    let mut platforms: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for entry in archive.entries()? {
         let mut entry = entry?;
         let path = entry.path()?.into_owned();
@@ -33,6 +43,7 @@ pub fn untagged(input: &[u8], out: &Path) -> anyhow::Result<()> {
                 let mut v: serde_json::Value = serde_json::from_slice(&text).map_err(|e| anyhow::anyhow!("{name} isn't JSON: {e}"))?;
                 if name == "manifest.json" {
                     manifest = true;
+                    config = v[0]["Config"].as_str().map(|c| c.trim_start_matches("./").to_string());
                     for m in v.as_array_mut().into_iter().flatten() {
                         m["RepoTags"] = serde_json::Value::Null;
                     }
@@ -46,6 +57,18 @@ pub fn untagged(input: &[u8], out: &Path) -> anyhow::Result<()> {
                 h.set_cksum();
                 builder.append_data(&mut h, &name, body.as_slice())?;
             }
+            _ if kind.is_file() && entry.header().size()? <= CONFIG_MAX => {
+                let mut h = entry.header().clone();
+                let mut body = Vec::new();
+                (&mut entry).take(CONFIG_MAX).read_to_end(&mut body)?;
+                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body)
+                    && v.get("rootfs").is_some()
+                    && let (Some(os), Some(arch)) = (v["os"].as_str(), v["architecture"].as_str())
+                {
+                    platforms.insert(name.clone(), format!("{os}/{arch}"));
+                }
+                builder.append_data(&mut h, &name, body.as_slice())?;
+            }
             _ => {
                 let mut h = entry.header().clone();
                 builder.append_data(&mut h, &name, &mut entry)?;
@@ -54,7 +77,7 @@ pub fn untagged(input: &[u8], out: &Path) -> anyhow::Result<()> {
     }
     anyhow::ensure!(manifest, "that isn't an image archive (`docker save`'s, with a manifest.json)");
     builder.into_inner()?.flush()?;
-    Ok(())
+    Ok(config.and_then(|c| platforms.remove(&c)))
 }
 
 /// An OCI index without the annotations that name its images, at any depth.
@@ -97,6 +120,7 @@ mod tests {
     #[test]
     fn an_archives_names_are_taken_out() {
         let input = archive(&[
+            ("blobs/sha256/c", r#"{"architecture":"arm64","os":"linux","rootfs":{"type":"layers","diff_ids":[]}}"#),
             ("manifest.json", r#"[{"Config":"blobs/sha256/c","RepoTags":["nginx:latest","roll-apps-other:x"],"Layers":["blobs/sha256/l"]}]"#),
             ("repositories", r#"{"nginx":{"latest":"c"}}"#),
             ("index.json", r#"{"manifests":[{"digest":"sha256:m","annotations":{"io.containerd.image.name":"docker.io/library/nginx:latest","org.opencontainers.image.ref.name":"latest","keep":"x"}}]}"#),
@@ -104,7 +128,8 @@ mod tests {
         ]);
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("a.tar");
-        super::untagged(&input, &out).unwrap();
+        // Its platform, from the config the manifest names.
+        assert_eq!(super::untagged(&input, &out).unwrap().as_deref(), Some("linux/arm64"));
         let mut seen = std::collections::BTreeMap::new();
         for e in tar::Archive::new(std::fs::File::open(&out).unwrap()).entries().unwrap() {
             let mut e = e.unwrap();
@@ -113,7 +138,7 @@ mod tests {
             e.read_to_string(&mut s).unwrap();
             seen.insert(name, s);
         }
-        assert!(!seen.contains_key("repositories") && seen["blobs/sha256/l"] == "layer", "{seen:?}");
+        assert!(!seen.contains_key("repositories") && seen["blobs/sha256/l"] == "layer" && seen["blobs/sha256/c"].contains("arm64"), "{seen:?}");
         assert!(!seen["manifest.json"].contains("nginx") && seen["manifest.json"].contains("blobs/sha256/l"), "{}", seen["manifest.json"]);
         assert!(!seen["index.json"].contains("nginx") && !seen["index.json"].contains("ref.name") && seen["index.json"].contains("keep"), "{}", seen["index.json"]);
         // Not an image archive at all.
