@@ -2308,8 +2308,10 @@ type Settings = {
     state, crop and endpoint timing after it; the sign-in page's own errors count for no page.
     The activity says how it went ("screenshots: signed in through /login before its pages", or
     the step it stopped at). A fork's preview signs in with nothing (its code would get what's
-    typed): its screenshots are taken signed out, and its activity says so. Not yet: the other
-    browsers' run, Storybook's stories and `try`, which start signed out (Next).
+    typed): its screenshots are taken signed out, and its activity says so. The other browsers'
+    run signs in the same way (the same stdin line; `browsers.js` takes the steps with Playwright
+    on each browser's page before its capture or crop). Not yet: Storybook's stories (they rarely
+    sit behind the app's login) and `try` (Next).
     `screenshots_sign_in_first_on_a_trusted_preview`.
     Other browsers too (Percy's and Chromatic's browsers; `github.browsers`: `firefox`, `webkit`,
     and `webkit-phone`, WebKit at 390 × 844 at twice the density as a touch device, mobile
@@ -2794,9 +2796,9 @@ Ranked by what a person notices first. Done so far:
 Ranked again after a sixth product review (2026-11-25), against Vercel's and Netlify's previews and
 comments, Render and Railway, Neon, Chromatic and Percy, Signadot, Jam.
 
-1. **Signed in to the app, in review**: the first service's run signs in first (`github.login`,
-   `$NAME` from the preview's environment, trusted previews only). Next for it: the other
-   browsers' run, `try` and a live check against a page behind a login.
+1. **Signed in to the app, in review**: the first service's run and the other browsers' sign in
+   first (`github.login`, `$NAME` from the preview's environment, trusted previews only). Next
+   for it: `try` (an agent's run signed in), and a live check against a page behind a login.
 2. **Coverage cut silently**: at most 40 stories and 10 pages, and nothing says what was left
    out; `skipped` (how many, which) on the run, the sheet and the comment; then stories chosen
    by what the change touched (Chromatic's TurboSnap).
