@@ -73,7 +73,57 @@ pub(crate) fn walk(store: &Store, repo: &str, cs: &ChangesetId, limit: usize, mu
     Ok(false)
 }
 
+/// The most untrusted changes a read at a revision checks (the newest).
+const OUTSIDE_HEADS: usize = 100;
+
+/// Marks what a read answers as an outsider's (`"outside": true`, MCP's lockdown): the answer
+/// itself and each item of its `lists`.
+pub(crate) fn mark_outside(v: &mut Value, lists: &[&str]) {
+    v["outside"] = json!(true);
+    for k in lists {
+        for item in v[*k].as_array_mut().into_iter().flatten().filter(|i| i.is_object()) {
+            item["outside"] = json!(true);
+        }
+    }
+}
+
 impl Code {
+    /// Whether what revision `cs` holds may be an outsider's (MCP's lockdown withholds it): it's
+    /// off the default branch and in a change from outside the repo (a fork's pull request: its
+    /// head, or a changeset before it). A team's own branches and changes aren't. A failed lookup
+    /// off the default branch counts as outside.
+    pub(crate) fn outside_at(&self, r: &RepoRow, cs: &ChangesetId) -> bool {
+        if self.on_default(r, cs) {
+            return false;
+        }
+        let Ok(heads) = self.db.untrusted_heads(&r.id, OUTSIDE_HEADS) else { return true };
+        heads.iter().filter_map(|h| self.store.resolve(&r.id, h).ok().flatten()).any(|h| h == *cs || self.store.is_ancestor(&r.id, cs, &h).unwrap_or(true))
+    }
+
+    /// Whether `cs` is on the default branch (landed, so a writer let it in).
+    pub(crate) fn on_default(&self, r: &RepoRow, cs: &ChangesetId) -> bool {
+        self.head(r).ok().flatten().is_some_and(|h| self.store.is_ancestor(&r.id, cs, &h).unwrap_or(false))
+    }
+
+    /// `outside_at` for a revision an answer names (`cs_…`), marking the answer and its `lists`;
+    /// `changesets` lists items named by changeset (`key`), marked only when off the default
+    /// branch (a fork's chain runs into landed history). Whether it marked.
+    pub(crate) fn mark_at(&self, r: &RepoRow, rev: Option<&str>, v: &mut Value, lists: &[&str], changesets: Option<(&str, &str)>) -> bool {
+        let Some(cs) = rev.and_then(|rev| self.store.resolve(&r.id, rev).ok().flatten()) else { return false };
+        if !self.outside_at(r, &cs) {
+            return false;
+        }
+        mark_outside(v, lists);
+        if let Some((list, key)) = changesets {
+            for item in v[list].as_array_mut().into_iter().flatten() {
+                let off = item[key].as_str().and_then(|id| self.store.resolve(&r.id, id).ok().flatten()).is_none_or(|c| !self.on_default(r, &c));
+                if off {
+                    item["outside"] = json!(true);
+                }
+            }
+        }
+        true
+    }
     pub(crate) fn resolve_rev(&self, r: &RepoRow, rev: &str) -> Result<ChangesetId> {
         self.store.resolve(&r.id, rev.trim())?.ok_or_else(|| Error::NotFound(format!("revision {rev}")))
     }

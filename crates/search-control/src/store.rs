@@ -1198,14 +1198,23 @@ impl Store {
         Ok(())
     }
 
+    /// The web crawler's verification token for `owner` and `site`, under the catalog's key (the
+    /// deployment's, or a single node's own: `search_es::seal::Sealer::site_token`).
+    pub fn site_token(&self, owner: &str, site: &str) -> String {
+        self.sealer.site_token(owner, site)
+    }
+
     /// Cluster `cluster`'s verification of `site` (a domain or an origin, of `kind`): a new one
-    /// (pending), or the one it has. Its token is `owner`'s for the site, the one their other
-    /// clusters have when they have one (so a record published once proves it everywhere), else
-    /// `token`. Refused past [`MAX_PENDING_PER_CLUSTER`] pending in the cluster or
+    /// (pending), or the one it has. A new one's token is `owner`'s for the site
+    /// ([`Store::site_token`]: derived, so it's the same after every row that named it is gone),
+    /// unless another of their clusters has the site verified with an older token (random, or
+    /// derived under a key since rotated), whose published record it then reuses. Every check
+    /// reads the row's own token. Refused past [`MAX_PENDING_PER_CLUSTER`] pending in the cluster or
     /// [`MAX_PENDING`] across the owner's clusters, and for a cluster that's deleted or being
     /// deleted (checked in the same write, so a start can't outlive a delete's sweep of its rows).
     /// The owner's pending rows older than [`PENDING_FOR`] are dropped first.
-    pub async fn start_verification(&self, cluster: &str, owner: &str, site: &str, kind: &str, token: &str, now: i64) -> anyhow::Result<Started> {
+    pub async fn start_verification(&self, cluster: &str, owner: &str, site: &str, kind: &str, now: i64) -> anyhow::Result<Started> {
+        let token = self.site_token(owner, site);
         Ok(self.db.write(|x| {
             let live: Option<i64> = x.query_row("SELECT 1 FROM search_clusters WHERE id = ?1 AND deleted_at IS NULL AND deleting = 0", params![cluster], |r| r.get(0)).optional()?;
             if live.is_none() {
@@ -1223,10 +1232,10 @@ impl Store {
             if pending >= MAX_PENDING {
                 return Ok(Started::Full(MAX_PENDING, "across the owner's clusters"));
             }
-            let theirs: Option<String> = x.query_row("SELECT token FROM search_crawler_sites WHERE owner = ?1 AND site = ?2 LIMIT 1", params![owner, site], |r| r.get(0)).optional()?;
+            let theirs: Option<String> = x.query_row("SELECT token FROM search_crawler_sites WHERE owner = ?1 AND site = ?2 AND status = 'verified' LIMIT 1", params![owner, site], |r| r.get(0)).optional()?;
             x.execute(
                 "INSERT INTO search_crawler_sites (cluster_id, site, owner, kind, token, status, created_at) VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6) ON CONFLICT (cluster_id, site) DO NOTHING",
-                params![cluster, site, owner, kind, theirs.as_deref().unwrap_or(token), now],
+                params![cluster, site, owner, kind, theirs.as_deref().unwrap_or(&token), now],
             )?;
             let v = x.query_row(&format!("SELECT {VERIFY_COLS} FROM search_crawler_sites WHERE cluster_id = ?1 AND site = ?2"), params![cluster, site], verification_row)?;
             Ok(Started::Row(Box::new(v)))

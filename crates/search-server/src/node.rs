@@ -471,12 +471,15 @@ pub struct Lease {
     bytes: Reservation,
     dialect: Dialect,
     /// Who the node authenticated with the cluster's own credentials (the owner, `elastic`, or
-    /// a credential's user); search-es trusts it ([`search_es::xpack::security::AUTHENTICATED_HEADER`]).
+    /// a credential's user); search-es trusts it ([`search_es::rest::Verified::ClusterUser`]).
     user: Option<Arc<str>>,
     /// Credentials the cluster's own security verified instead (a native user, API key or
     /// access token, [`auth::native_authorization`]): the `Authorization` header the request
     /// runs with, so search-es authenticates and authorizes it as that principal.
     native_auth: Option<String>,
+    /// A derived browser key the node verified: its identity, handed to search-es in place of
+    /// the key ([`search_es::rest::Verified::Derived`]).
+    derived: Option<Arc<search_es::xpack::security::derived::VerifiedKey>>,
     /// A linked remote cluster's request from roll itself ([`search_es::remote::links`]):
     /// the remote access it carries, the only copy search-es sees.
     link: Option<String>,
@@ -618,7 +621,7 @@ impl Lease {
     /// answered, or, for an answer it streams, when the stream ends ([`Lease::hold`]).
     pub async fn serve(self, req: EsRequest) -> EsResponse {
         let kind = crate::metrics::Kind::of(&req.method, &req.uri);
-        let head = EsRequest { method: req.method.clone(), uri: req.uri.clone(), headers: Vec::new(), body: bytes::Bytes::new() };
+        let head = EsRequest { verified: None, method: req.method.clone(), uri: req.uri.clone(), headers: Vec::new(), body: bytes::Bytes::new() };
         let since = self.since.unwrap_or_else(Instant::now);
         let resp = self.handle(req).await;
         if self.browser.is_some() && crate::browser::is_policy_refusal(resp.status, &resp.body) {
@@ -655,15 +658,20 @@ impl Lease {
     /// caller records its metrics: [`Lease::serve`]).
     async fn handle(&self, mut req: EsRequest) -> EsResponse {
         use search_es::remote::links::REMOTE_ACCESS_HEADER;
-        use search_es::xpack::security::AUTHENTICATED_HEADER;
-        // Only the node may say who authenticated, and only roll's own calls are a remote
-        // cluster's.
-        req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(AUTHENTICATED_HEADER) && !k.eq_ignore_ascii_case(REMOTE_ACCESS_HEADER));
+        use search_es::rest::Verified;
+        // Who authenticated is said only here, on the request in process (no header can say
+        // it); only roll's own calls are a remote cluster's.
+        req.verified = None;
+        req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(REMOTE_ACCESS_HEADER));
         if let Some(a) = &self.link {
             req.headers.push((REMOTE_ACCESS_HEADER.to_string(), a.clone()));
         }
         if let Some(u) = &self.user {
-            req.headers.push((AUTHENTICATED_HEADER.to_string(), u.to_string()));
+            req.verified = Some(Verified::ClusterUser(u.clone()));
+        } else if let Some(d) = &self.derived {
+            // Verified once, here: the cluster runs it as what was verified, never the key again.
+            req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case("authorization"));
+            req.verified = Some(Verified::Derived(d.clone()));
         } else if let Some(h) = &self.native_auth {
             req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case("authorization"));
             req.headers.push(("authorization".to_string(), h.clone()));
@@ -715,7 +723,7 @@ impl Lease {
             // Only reads of async results can change them; only those keep what an error
             // response needs (no copy on the search path).
             let err_req = reads_async_results(&req.uri)
-                .then(|| EsRequest { method: req.method.clone(), uri: req.uri.clone(), headers: req.headers.clone(), body: bytes::Bytes::new() });
+                .then(|| EsRequest { verified: None, method: req.method.clone(), uri: req.uri.clone(), headers: req.headers.clone(), body: bytes::Bytes::new() });
             let resp = search_es::rest::handle_shared_admitted(&loaded.cluster, req, admitted).await;
             // A read that kept an async result longer (`keep_alive`) or opened a SQL cursor:
             // Elasticsearch answers once the new expiration is stored, so the read is
@@ -742,7 +750,7 @@ impl Lease {
             }
             return resp;
         }
-        let err_req = EsRequest { method: req.method.clone(), uri: req.uri.clone(), headers: req.headers.clone(), body: bytes::Bytes::new() };
+        let err_req = EsRequest { verified: None, method: req.method.clone(), uri: req.uri.clone(), headers: req.headers.clone(), body: bytes::Bytes::new() };
         let resp = search_es::rest::handle_shared_admitted(&loaded.cluster, req, admitted).await;
         drop(self.fair.lock().take());
         // Async results the request stored go to `.async-search`, acknowledged with it.
@@ -899,6 +907,9 @@ struct BrowserAuth {
     id: String,
     limit: crate::browser::KeyLimit,
     user: Option<(String, u64)>,
+    /// A derived key's verified identity ([`search_es::rest::Verified::Derived`]): the cluster
+    /// runs the request as it without verifying the key again.
+    derived: Option<Arc<search_es::xpack::security::derived::VerifiedKey>>,
 }
 
 /// What a browser key `p` authenticated as may do on `loaded` (`Ok(None)`: not a browser key):
@@ -939,7 +950,8 @@ fn browser_key(loaded: &Loaded, p: &search_es::xpack::security::Principal, req: 
         }
         user = d.user.clone().map(|u| (u, search_es::xpack::security::derived::user_share(limit.per_minute, d.per_minute)));
     }
-    Ok(Some(BrowserAuth { id: k.id.clone(), limit, user }))
+    let derived = k.derived.as_deref().map(|d| Arc::new(search_es::xpack::security::derived::VerifiedKey { key: k.id.clone(), auth: d.clone() }));
+    Ok(Some(BrowserAuth { id: k.id.clone(), limit, user, derived }))
 }
 
 /// Counts a browser key's request its cluster turned away before admitting it
@@ -2326,6 +2338,7 @@ impl Node {
             if let Ok(mut lease) = self.pin(loaded, spec.dialect) {
                 if via_native {
                     lease.native_auth = native.clone();
+                    lease.derived = key_limit.as_ref().and_then(|b: &BrowserAuth| b.derived.clone());
                     lease.link = link.clone();
                 } else {
                     lease.user = claim.as_ref().map(authenticated_user);
@@ -2380,6 +2393,7 @@ impl Node {
                 Ok(mut lease) => {
                     if via_native {
                         lease.native_auth = native.clone();
+                        lease.derived = key_limit.as_ref().and_then(|b: &BrowserAuth| b.derived.clone());
                         lease.link = link.clone();
                     } else {
                         lease.user = claim.as_ref().map(authenticated_user);
@@ -2421,6 +2435,7 @@ impl Node {
             dialect,
             user: None,
             native_auth: None,
+            derived: None,
             link: None,
             since: None,
             browser: None,
@@ -2467,7 +2482,7 @@ impl Node {
             }));
         }
         drop(rate);
-        if let Some(BrowserAuth { id, limit, user }) = key {
+        if let Some(BrowserAuth { id, limit, user, .. }) = key {
             let ip = match origin {
                 Origin::Client(ip) => Some(ip),
                 Origin::Internal => return Ok(lease),

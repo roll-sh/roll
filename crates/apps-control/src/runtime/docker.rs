@@ -692,6 +692,15 @@ impl Runtime for Docker {
         "docker"
     }
 
+    /// This host's (the Docker Engine rolld talks to is on it).
+    fn platform(&self) -> Option<String> {
+        match std::env::consts::ARCH {
+            "x86_64" => Some("linux/amd64".into()),
+            "aarch64" => Some("linux/arm64".into()),
+            _ => None,
+        }
+    }
+
     fn can_suspend(&self) -> bool {
         true
     }
@@ -1669,6 +1678,9 @@ fn engine_config(spec: &InstanceSpec, host_port: Option<u16>, extra: &[(u16, u16
         "MemorySwap": (spec.memory_mb as i64) << 20,
         "NanoCpus": nanos(boost(spec.cpu)),
         "PidsLimit": 4096,
+        // Half its memory, not Docker's 64 MB (a headless Chrome, PyTorch's loaders): tmpfs pages
+        // count against the container's own memory limit, so it costs nothing on its own.
+        "ShmSize": (((spec.memory_mb as i64) << 20) / 2).max(64 << 20),
         "SecurityOpt": ["no-new-privileges"],
         "CapDrop": CAP_DROP,
         "RestartPolicy": {"Name": "no"},
@@ -2011,6 +2023,7 @@ mod tests {
         assert_eq!(c["Env"][0], format!("TLS_KEY={pem}"));
         assert_eq!(c["HostConfig"]["PortBindings"]["8080/tcp"][0]["HostIp"], "127.0.0.1");
         assert_eq!(c["HostConfig"]["CapDrop"][0], "NET_RAW");
+        assert_eq!(c["HostConfig"]["ShmSize"], 256i64 << 20, "half its memory in /dev/shm");
         assert_eq!(c["NetworkingConfig"]["EndpointsConfig"]["roll-apps-net-p-production"]["Aliases"][0], "web");
         assert_eq!(c["Labels"]["sh.roll.apps"], "svc_x");
         let nul = InstanceSpec { vars: vec![("A".into(), "a\0b".into())], ..spec };

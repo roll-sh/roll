@@ -415,6 +415,15 @@ impl roll_previews::ports::Apps for RollApps {
         anyhow::bail!("its build on the copy wasn't ready within a minute")
     }
 
+    /// What roll apps billed the `pv-` environment this month (its usage's days since the 1st,
+    /// UTC: builds, compute and egress at its prices). None when it can't say.
+    async fn spent_usd(&self, preview: &str, service: &str) -> Option<f64> {
+        let (id, env) = self.find(preview, service).await.ok()??;
+        let u = self.api.get(&format!("{}/usage?days=31", Self::env_path(&id, &env))).await.ok()?;
+        let first = roll_previews::store::month_start(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as i64) / 86_400_000;
+        Some(u["days"].as_array()?.iter().filter(|d| d["day"].as_i64().is_some_and(|d| d >= first)).filter_map(|d| d["usd"].as_f64()).sum())
+    }
+
     /// The `pv-` environment's latest minute (roll apps' metrics): cores, and resident bytes.
     /// None while nothing ran that minute (asleep).
     async fn metrics(&self, preview: &str, service: &str) -> Option<(f64, u64)> {
@@ -929,6 +938,10 @@ impl roll_previews::ports::Apps for Services {
 
     async fn metrics(&self, preview: &str, service: &str) -> Option<(f64, u64)> {
         if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { self.apps.metrics(preview, service).await } else { self.runtime.metrics(preview, service).await }
+    }
+
+    async fn spent_usd(&self, preview: &str, service: &str) -> Option<f64> {
+        if self.local(preview, service) { None } else { self.apps.spent_usd(preview, service).await }
     }
 
     async fn live_build(&self, preview: &str, service: &str) -> Option<roll_previews::ports::LiveBuild> {

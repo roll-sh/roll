@@ -1180,7 +1180,7 @@ static TOOLS: &[Tool] = &[
     t(
         "search_create_cluster",
         "Create a search cluster",
-        "A new Elasticsearch-compatible cluster (or a branch of one with parent, at a time with at). Its password comes back once, to tokens that may reveal.",
+        "A new Elasticsearch-compatible cluster (or a branch of one with parent, at a time with at; a branch goes in its parent's project, so name no other project for it). Its password comes back once, to tokens that may reveal.",
         "search",
         "POST",
         "/v1/search/clusters",
@@ -1768,6 +1768,7 @@ static TOOLS: &[Tool] = &[
     t("previews_list_mail", "A preview's mail (the emails it sent)", "The mail a preview's services sent, caught and never delivered: who to, subject, when (for checking a sign-up or receipt flow). It can hold production's data: reveal.", "previews", "GET", "/v1/previews/{id}/mail", &[req("id", "Preview id")]),
     t("previews_read_mail", "Read a preview's mail", "One caught message as text.", "previews", "GET", "/v1/previews/{id}/mail/{mail}", &[req("id", "Preview id"), req("mail", "Message id from previews_list_mail")]),
     t("previews_list_notes", "A preview's notes", "Notes people left on a preview's pages through its feedback button and nobody has resolved yet: page, element, what they said, who, when (the latest 500).", "previews", "GET", "/v1/previews/{id}/notes", &[req("id", "Preview id")]),
+    t("previews_note_crop", "A note's element, as its reviewer saw it", "The picture of the element a preview note is about, cropped from the page by roll's own browser at the reviewer's viewport after their last steps (previews_list_notes says crop and crop_as when there's one), as an image you can look at: what the note means by \"this\". 404 until a screenshot run has taken it.", "previews", "GET", "/v1/previews/{id}/notes/{note}/crop", &[req("id", "Preview id"), req("note", "Note id from previews_list_notes")]),
     t("previews_resolve_note", "Resolve a preview note", "Mark a note left on a preview page's feedback button as dealt with, so the page stops listing it (after fixing what it asked).", "previews", "POST", "/v1/previews/{id}/notes/{note}/resolve", &[req("id", "Preview id"), req("note", "Note id from previews_list_notes")]),
     t("previews_screenshot", "Screenshot a preview", "A preview's page as an image the agent can look at; diff against the base or the previous deploy, another page, or the phone view.", "previews", "GET", "/v1/previews/{id}/screenshot", &[req("id", "Preview id"), q("diff", Ty::Choice(&["base", "previous"]), "Highlight what changed against the base or the previous deploy"), q("page", Ty::Str, "Path of the page (default /)"), q("view", Ty::Str, "phone for a phone-sized view")]),
     t("previews_fetch", "Read a preview's page", "One page of a preview's service read through roll, as a visitor gets it, without making a share link: its status, a few headers (content-type, location, cache-control, content-length) and its text, masked as the preview's logs are (null when it isn't text, cut at 256 KiB with truncated). For checking what a change does to a page or an API answer; head for the status alone. A roll apps service is read through roll apps' own proxy as a visitor with the preview's link (a team-only preview's answers its 401 as the status). A page can show copies of production's people: reveal.", "previews", "GET", "/v1/previews/{id}/fetch", &[req("id", "Preview id"), qreq("path", "The page's path, from / (up to 200 characters; no #, quotes or spaces)"), q("service", Ty::Str, "Which of the preview's services (default: its first)"), q("head", Ty::Bool, "Only the status and headers (HEAD)")]),
@@ -2522,5 +2523,54 @@ mod tests {
         }
         dangling.dedup();
         assert!(dangling.is_empty(), "these name tools roll doesn't have: {dangling:?}");
+    }
+
+    /// Every previews tool says whether its answer holds what a fork's code wrote, which roll
+    /// previews marks outside for an untrusted preview (`mark_outside`, `outside_if_untrusted`)
+    /// so lockdown withholds it, or why it holds none. Pictures, caught mail, a data branch's
+    /// rows, request paths and activity had each reached a model in lockdown unmarked.
+    #[test]
+    fn every_previews_tool_says_whether_it_holds_a_forks_words() {
+        // Marked in roll previews' api.rs (`a_forks_preview_and_its_errors_are_marked_outside`).
+        const FORK_WORDS: &[&str] = &[
+            // The preview itself (`outside: !trusted`: its title is the fork's pull request's).
+            "previews_list", "previews_get", "previews_wait", "previews_create",
+            "previews_errors", "previews_traces", "previews_get_trace", "previews_routes", "previews_logs", "previews_requests", "previews_activity",
+            "previews_list_mail", "previews_read_mail", "previews_screenshot", "previews_fetch", "previews_try", "previews_try_screenshot", "previews_note_crop", "previews_tables",
+            // A share link's guests' notes (`by` `guest:…`).
+            "previews_list_notes",
+        ];
+        const NONE: &[(&str, &str)] = &[
+            ("previews_refresh", "roll's state of it"),
+            ("previews_keep", "roll's state of it"),
+            ("previews_sleep", "roll's state of it"),
+            ("previews_wake", "roll's state of it"),
+            ("previews_delete", "roll's state of it"),
+            ("previews_reset", "roll's state of it"),
+            ("previews_share", "a link people made"),
+            ("previews_set_rules", "the project's settings"),
+            ("previews_metrics", "numbers"),
+            ("previews_usage", "costs"),
+            ("previews_mask_suggestions", "the project's own databases, not a branch"),
+            ("previews_list_shares", "links people made"),
+            ("previews_revoke_share", "a link people made"),
+            ("previews_env", "variables people set"),
+            ("previews_connect", "roll's connections to its branches"),
+            ("previews_resolve_note", "the note's id"),
+            ("previews_list_saved_data", "restore points people named"),
+            ("previews_save_data", "a restore point"),
+            ("previews_restore", "a restore point"),
+            ("previews_delete_saved_data", "a restore point"),
+            ("previews_settings", "the project's, from its default branch"),
+            ("previews_visitors", "who opened it"),
+            ("previews_list_hooks", "the project's"),
+            ("previews_delete_hook", "the project's"),
+        ];
+        let previews: Vec<&str> = all().iter().filter(|t| t.product == "previews").map(|t| t.name).collect();
+        let undecided: Vec<&&str> = previews.iter().filter(|n| !FORK_WORDS.contains(n) && !NONE.iter().any(|(t, _)| t == *n)).collect();
+        assert!(undecided.is_empty(), "say whether these answer what a fork's code wrote (mark it outside in roll previews and list it in FORK_WORDS) or why not (NONE): {undecided:?}");
+        for n in FORK_WORDS.iter().chain(NONE.iter().map(|(n, _)| n)) {
+            assert!(previews.contains(n), "{n} isn't a previews tool any more");
+        }
     }
 }

@@ -1,0 +1,18 @@
+# Mattermost: team chat (mattermost.com), on a roll Postgres database. Uploads and plugins live on
+# the volume. The first person to sign up becomes its admin: open it and make that account first.
+[apps.mattermost]
+image = "mattermost/mattermost-team-edition:12.1.0"
+port = 8065
+links = ["db"]
+[apps.mattermost.run]
+volume = { mount = "/mattermost/data", size_gb = 5 }
+health_path = "/api/v4/system/ping"
+health_timeout_s = 240
+memory_mb = 2048
+[apps.mattermost.variables]
+MM_SQLSETTINGS_DRIVERNAME = "postgres"
+MM_SQLSETTINGS_DATASOURCE = "${{ DATABASE_URL }}"
+MM_SERVICESETTINGS_SITEURL = "${{ ROLL_PUBLIC_URL }}"
+MM_SERVICESETTINGS_LISTENADDRESS = ":8065"
+[databases.db]
+kind = "postgres"
