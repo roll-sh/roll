@@ -7,12 +7,14 @@
 
 use crate::error::{EsError, EsResult};
 
+#[derive(Clone)]
 pub struct Rename {
     re: regex::Regex,
     /// The replacement, parsed; Java reports a bad one only when it's used.
     replacement: Result<Vec<Piece>, EsError>,
 }
 
+#[derive(Clone)]
 enum Piece {
     Text(String),
     Group(usize),

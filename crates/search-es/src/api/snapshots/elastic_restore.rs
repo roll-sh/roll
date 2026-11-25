@@ -1528,10 +1528,15 @@ mod tests {
     }
 
     /// A log whose `durable` waits until the test releases it (a permit per call).
-    #[derive(Default)]
     struct HeldLog {
         waiting: tokio::sync::Notify,
         release: tokio::sync::Semaphore,
+    }
+
+    impl Default for HeldLog {
+        fn default() -> HeldLog {
+            HeldLog { waiting: tokio::sync::Notify::new(), release: tokio::sync::Semaphore::new(0) }
+        }
     }
 
     impl crate::engine::ShardLog for HeldLog {
