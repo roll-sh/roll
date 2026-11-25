@@ -487,17 +487,120 @@ pub struct KeyedFill<F> {
     at: Option<usize>,
     batch: RowBatch,
     done: bool,
+    /// `batch`'s rows of column blocks left unmade (storage format 5: `fill_lazy`).
+    lz: LazyRows,
 }
 
 impl<F> KeyedFill<F> {
     pub fn new(inner: F, set: Arc<KeySet>) -> Self {
-        KeyedFill { inner, set, at: None, batch: RowBatch::default(), done: false }
+        KeyedFill { inner, set, at: None, batch: RowBatch::default(), done: false, lz: LazyRows::default() }
+    }
+}
+
+impl<F: FillRows> KeyedFill<F> {
+    /// `fill` of a source leaving rows of column blocks unmade (storage format 5): the rows of
+    /// other keys passed over by their keys before any is made, a kept row of a column block
+    /// into `b` unmade too (noted in `lazy`).
+    #[cold]
+    #[inline(never)]
+    fn fill_keyed_lazy(&mut self, b: &mut RowBatch, lazy: &mut LazyRows, max: usize) -> Result<()> {
+        let KeyedFill { inner, set, at, batch, done, lz } = self;
+        let set = &**set;
+        let target = b.len() + max;
+        let mut passed = 0u64;
+        // (The run of unmade rows being pushed: its block, first row, rows; their buffer.)
+        let mut pend: Option<(Arc<crate::storage::sst::Block>, u32, u32)> = None;
+        let mut pbuf = 0u32;
+        while b.len() < target {
+            if batch.remaining() == 0 {
+                if *done {
+                    break;
+                }
+                batch.clear();
+                lz.clear();
+                inner.fill_lazy(batch, lz, FILL)?;
+                if batch.is_empty() {
+                    *done = true;
+                    break;
+                }
+            }
+            let (from, to) = (batch.pos(), batch.len());
+            for i in from..to {
+                let k = batch.key(i);
+                let Some(w) = KeySet::word(set.prefix, set.len, k) else {
+                    passed += 1;
+                    continue;
+                };
+                let a = match *at {
+                    Some(a) => a + set.words[a..].iter().take_while(|x| **x < w).count(),
+                    None => set.words.partition_point(|x| *x < w),
+                };
+                *at = Some(a);
+                if set.words.get(a) == Some(&w) {
+                    match lz.row_of(i) {
+                        Some((blk, row)) => {
+                            // (Rows that go on a run of the block's: noted with it at once.)
+                            let goes_on = pend.as_ref().is_some_and(|(pb, r0, n)| Arc::ptr_eq(pb, blk) && r0 + n == row);
+                            if !goes_on {
+                                if let Some((_, r0, n)) = pend.take() {
+                                    lazy.note(b, n as usize, r0);
+                                }
+                                let blk = blk.clone();
+                                pbuf = lazy.buf_of(b, &blk);
+                                pend = Some((blk, row, 0));
+                            }
+                            b.push_unmade(k, pbuf, batch.value_len(i));
+                            if let Some((_, _, n)) = &mut pend {
+                                *n += 1;
+                            }
+                        }
+                        None => {
+                            if let Some((_, r0, n)) = pend.take() {
+                                lazy.note(b, n as usize, r0);
+                            }
+                            match batch.value_in(i) {
+                                (v, Some((buf, off))) => b.push_in(k, buf, off, v.len()),
+                                (v, None) => b.push_copy(k, v),
+                            }
+                        }
+                    }
+                    if b.len() == target {
+                        if let Some((_, r0, n)) = pend.take() {
+                            lazy.note(b, n as usize, r0);
+                        }
+                        batch.set_pos(i + 1);
+                        KEYED_PASSED.fetch_add(passed, std::sync::atomic::Ordering::Relaxed);
+                        return Ok(());
+                    }
+                } else {
+                    passed += 1;
+                }
+            }
+            // (Before the next fill of `batch`: its lazy rows' blocks are about to go.)
+            if let Some((_, r0, n)) = pend.take() {
+                lazy.note(b, n as usize, r0);
+            }
+            batch.set_pos(to);
+        }
+        if let Some((_, r0, n)) = pend.take() {
+            lazy.note(b, n as usize, r0);
+        }
+        KEYED_PASSED.fetch_add(passed, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
     }
 }
 
 impl<F: FillRows> FillRows for KeyedFill<F> {
+    fn lazy(&self) -> bool {
+        self.inner.lazy()
+    }
+
+    fn fill_lazy(&mut self, b: &mut RowBatch, lazy: &mut LazyRows, max: usize) -> Result<()> {
+        self.fill_keyed_lazy(b, lazy, max)
+    }
+
     fn fill(&mut self, b: &mut RowBatch, max: usize) -> Result<()> {
-        let KeyedFill { inner, set, at, batch, done } = self;
+        let KeyedFill { inner, set, at, batch, done, .. } = self;
         let set = &**set;
         let target = b.len() + max;
         let mut passed = 0u64;
@@ -918,6 +1021,9 @@ impl<'a> Pre<'a> {
     #[inline(never)]
     fn decode_lazy(&mut self, lazy: &LazyRows, rows: std::ops::Range<usize>) {
         use super::vector::Tri;
+        if self.split.is_some() && self.decode_lazy_split(lazy, rows.clone()) {
+            return;
+        }
         let n = rows.len();
         self.odd.clear();
         self.odd.resize(n, true);
@@ -937,6 +1043,79 @@ impl<'a> Pre<'a> {
             f.eval(&self.cols, &self.sel, &mut self.tri);
         }
         self.live_set = false;
+    }
+
+    /// `decode_split` of rows of column blocks (`decode_lazy`): the columns up to the probe's
+    /// copied from the blocks, then the others for the rows whose key may have a candidate (or
+    /// that the batch can't tell) alone (`decode_cols_lazy_only`), which go to the filter and
+    /// on; the others are false (`DROP`), never made. False: nothing done.
+    #[inline(never)]
+    fn decode_lazy_split(&mut self, lazy: &LazyRows, rows: std::ops::Range<usize>) -> bool {
+        use super::vector::Tri;
+        use crate::storage::cols::ColData;
+        let (Some(pre), Some(kc), Some(p)) = (self.split.as_deref(), self.plan.probe, self.probe) else { return false };
+        let n = rows.len();
+        if crate::storage::cols::decode_cols_lazy(lazy, rows.clone(), pre, self.types, &self.missing, &mut self.cols).is_err() {
+            return false;
+        }
+        self.odd.clear();
+        self.odd.resize(n, false);
+        for c in self.cols.cols.iter().flatten() {
+            for (r, _) in &c.odd {
+                self.odd[*r as usize] = true;
+            }
+        }
+        self.whole.clear();
+        let t = &p.built;
+        let maybe = |x: i64| !t.int_span(x).is_some_and(|s| s.1 == 0);
+        match self.cols.cols.get(kc).and_then(Option::as_ref).map(|c| (&c.data, &c.nulls)) {
+            Some((ColData::I32(v), nulls)) => self.whole.extend((0..n as u32).filter(|&r| {
+                let r = r as usize;
+                self.odd[r] || (!nulls[r] && maybe(v[r] as i64))
+            })),
+            Some((ColData::I64(v), nulls)) => self.whole.extend((0..n as u32).filter(|&r| {
+                let r = r as usize;
+                self.odd[r] || (!nulls[r] && maybe(v[r]))
+            })),
+            _ => return false,
+        }
+        {
+            use std::sync::atomic::Ordering::Relaxed;
+            self.vp.split_seen.fetch_add(n as u64, Relaxed);
+            self.vp.split_whole.fetch_add(self.whole.len() as u64, Relaxed);
+            SPLIT_PASSED.fetch_add((n - self.whole.len()) as u64, Relaxed);
+            if !self.vp.splits() {
+                self.split = None;
+            }
+        }
+        // (The other columns of the rows that go on alone.)
+        self.odd.fill(false);
+        match crate::storage::cols::decode_cols_lazy_only(lazy, rows, &self.whole, &self.plan.need, self.types, &self.missing, &mut self.cols) {
+            Ok(()) => {
+                for c in self.cols.cols.iter().flatten() {
+                    for (r, _) in &c.odd {
+                        self.odd[*r as usize] = true;
+                    }
+                }
+            }
+            Err(_) => {
+                for &r in &self.whole {
+                    self.odd[r as usize] = true;
+                }
+            }
+        }
+        self.sel.clear();
+        self.sel.extend(self.whole.iter().copied().filter(|r| !self.odd[*r as usize]));
+        self.tri.clear();
+        self.tri.resize(n, Tri::F);
+        for &r in &self.whole {
+            self.tri[r as usize] = Tri::T;
+        }
+        if let Some(f) = &self.plan.filter {
+            f.eval(&self.cols, &self.sel, &mut self.tri);
+        }
+        self.live_set = false;
+        true
     }
 
     /// `decode` of `n` rows for a plan that reads no column and has no filter (count(*)'s):
