@@ -7579,6 +7579,9 @@ async fn a_policy_floor_holds_against_a_project_admin_and_new_projects_are_born_
     let before = p["id"].as_str().unwrap().to_string();
     let at = |rest: &str| format!("/v1/secrets/projects/{before}{rest}");
     api.join(&before, "cat", "admin", None).await;
+    // Its secrets are made on first use: before the policy here.
+    let (s, e) = api.as_ada(Method::GET, &at("/environments/production"), None).await;
+    assert_eq!((s, e["approvals"].as_i64()), (StatusCode::OK, Some(0)), "{e}");
     let policy = json!({ "production_approvals": 1 });
     assert_eq!(api.signed_in("cat", false, Method::PUT, "/v1/secrets/policy", Some(policy.clone())).await.0, StatusCode::FORBIDDEN);
     let set = api.ok(Method::PUT, "/v1/secrets/policy", Some(policy)).await;
