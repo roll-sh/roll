@@ -639,8 +639,8 @@ pub enum Secrets {
     #[command(subcommand)]
     Gateways(GatewaysCmd),
     /// Vendor credentials roll issues and revokes keys with (SendGrid, Twilio, Okta, Entra,
-    /// Auth0, GitLab, OpenAI, Datadog, Cloudflare, Databricks, Confluent, SonarQube, Jenkins): list, add
-    /// (the credential on stdin), remove.
+    /// Auth0, GitLab, OpenAI, Datadog, Cloudflare, Databricks, Confluent, SonarQube, Jenkins,
+    /// Salesforce): list, add (the credential on stdin), remove.
     #[command(subcommand)]
     Saas(Box<SaasCmd>),
     /// Kubernetes clusters that issue short-lived service account tokens per lease (link kind
@@ -1203,13 +1203,15 @@ pub enum SaasCmd {
     /// `--openai-project`; datadog `[--site] --key api|application [--scope…]`; cloudflare
     /// `[--account-id] --template`; databricks `--host [--lifetime-days]`; confluent `--owner
     /// [--resource [--confluent-environment]]`; sonarqube `[--host] [--sonar-kind] [--sonar-project]
-    /// [--expires-days]`; jenkins `--host --jenkins-user`. Datadog's credential is `<API
-    /// key>:<application key>`, Confluent's `KEY:SECRET`, Jenkins' an API token of the user. `--credential-expires` is when the credential itself ends at
-    /// the vendor: health warns two weeks before.
+    /// [--expires-days]`; jenkins `--host --jenkins-user`; salesforce `--domain --app-id
+    /// --consumer-id`. Datadog's credential is `<API key>:<application key>`, Confluent's
+    /// `KEY:SECRET`, Jenkins' an API token of the user, Salesforce's another external client app's
+    /// `KEY:SECRET`. `--credential-expires` is when the credential itself ends at the vendor: health
+    /// warns two weeks before.
     Add {
         name: String,
         /// sendgrid, twilio, okta, entra, auth0, gitlab, openai, datadog, cloudflare, databricks,
-        /// confluent, sonarqube or jenkins.
+        /// confluent, sonarqube, jenkins or salesforce.
         #[arg(long)]
         vendor: String,
         /// A scope each key gets: SendGrid's (none: full access), GitLab's (one at least) or a
@@ -1218,9 +1220,11 @@ pub enum SaasCmd {
         scopes: Vec<String>,
         #[arg(long)]
         account_sid: Option<String>,
-        /// Okta's org host (acme.okta.com) or Auth0's tenant domain (acme.us.auth0.com).
+        /// Okta's org host (acme.okta.com), Auth0's tenant domain (acme.us.auth0.com) or a
+        /// Salesforce org's My Domain host (acme.my.salesforce.com).
         #[arg(long)]
         domain: Option<String>,
+        /// The Okta app, or the Salesforce external client app (0xI…), whose secret rotates.
         #[arg(long)]
         app_id: Option<String>,
         #[arg(long)]
@@ -1288,6 +1292,9 @@ pub enum SaasCmd {
         /// The Jenkins user whose API tokens rotate.
         #[arg(long = "jenkins-user")]
         jenkins_user: Option<String>,
+        /// The Salesforce app's OAuth consumer whose key and secret rotate.
+        #[arg(long = "consumer-id")]
+        consumer_id: Option<String>,
         /// When the registered credential ends at the vendor: a date (2027-03-31), RFC 3339 or how
         /// long from now (90d).
         #[arg(long = "credential-expires")]
@@ -3193,7 +3200,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     println!("{}  {:<16} {:<9} {}{ends}", s(&r["id"]), s(&r["name"]), s(&r["vendor"]), target.join(" "));
                 }
             }
-            SaasCmd::Add { name, vendor, scopes, account_sid, domain, app_id, tenant, client_id, object_id, app_client_id, host, gitlab_project, gitlab_group, access_level, expires_days, openai_project, site, key, account_id, template, lifetime_days, owner, resource, confluent_environment, sonar_kind, sonar_project, jenkins_user, credential_expires } => {
+            SaasCmd::Add { name, vendor, scopes, account_sid, domain, app_id, tenant, client_id, object_id, app_client_id, host, gitlab_project, gitlab_group, access_level, expires_days, openai_project, site, key, account_id, template, lifetime_days, owner, resource, confluent_environment, sonar_kind, sonar_project, jenkins_user, consumer_id, credential_expires } => {
                 let credential_expires_at = match credential_expires.as_deref().map(expiry).transpose()? {
                     Some(None) => anyhow::bail!("--credential-expires is when the credential ends: a date, RFC 3339 or how long from now"),
                     Some(Some(t)) => Some(t),
@@ -3203,7 +3210,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 if !scopes.is_empty() {
                     target.insert("scopes".into(), json!(scopes));
                 }
-                for (k, v) in [("account_sid", account_sid), ("domain", domain), ("app_id", app_id), ("tenant", tenant), ("client_id", client_id), ("object_id", object_id), ("app_client_id", app_client_id), ("host", host), ("project", gitlab_project), ("group", gitlab_group), ("project_id", openai_project), ("site", site), ("key", key), ("account_id", account_id), ("template", template), ("owner", owner), ("resource", resource), ("environment", confluent_environment), ("kind", sonar_kind), ("project", sonar_project), ("user", jenkins_user)] {
+                for (k, v) in [("account_sid", account_sid), ("domain", domain), ("app_id", app_id), ("tenant", tenant), ("client_id", client_id), ("object_id", object_id), ("app_client_id", app_client_id), ("host", host), ("project", gitlab_project), ("group", gitlab_group), ("project_id", openai_project), ("site", site), ("key", key), ("account_id", account_id), ("template", template), ("owner", owner), ("resource", resource), ("environment", confluent_environment), ("kind", sonar_kind), ("project", sonar_project), ("user", jenkins_user), ("consumer_id", consumer_id)] {
                     if let Some(v) = v {
                         target.insert(k.into(), json!(v));
                     }
