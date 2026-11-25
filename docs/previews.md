@@ -795,7 +795,7 @@ previews' code may reach:
   page shows (rows of the repo's data) and send it to another site from their browser, around
   `egress_forks`, which holds only its server. A policy of the page's own still applies (a
   browser keeps both); a navigation away isn't something a policy can stop. Previews' own proxy
-  only so far: roll apps' for its forks is next (Next). `runtime::tests::service_hosts_reach_their_containers`.
+  and roll apps' for a fork's `pv-` environments (a closed one: roll apps' #1032 adds the same policy, its origins the same `pv-` name's hosts across the project's services and their custom domains; live in `scripts/preview-apps.sh`, the fork's pages carry it and the same repo's pull request's don't). `runtime::tests::service_hosts_reach_their_containers`.
 - `data_forks`: what a fork's preview's data is. It's `"schema"` by default: its branches hold the
   structure without the rows (Postgres' schema, NoSQL's tables, streams' topics, queues' and
   tasks' definitions), whatever the project's own previews get, and a kind that can't be
@@ -1128,6 +1128,13 @@ thirty-fourth review found them in the clear.
     `_forcemerge?only_expunge_deletes`), as Postgres masking's `VACUUM FULL` (live: the branch
     reads `[masked]` and its `_terms_enum` finds nothing, the parent reads `parent`; roll
     search's `expunging_a_branch_rewrites_the_segments_it_shares` pins the sequence).
+    A masked `semantic_text` field: a branch doesn't get its parent's inference endpoint's key
+    (roll search's #988), so the masking's writes send `X-Roll-Unembedded: drop`. The masked text
+    stays unembedded, and the real values' chunks and embeddings go, with no provider called. An
+    app's own writes to such a field on a preview's branch need the endpoint's key set on the
+    branch (`_inference/{task}/{id}/_update`, or the Inference tab's "A roll secret"); without it
+    they're a 400 ("this branch doesn't have the parent's provider key; set it on the branch").
+    Endpoints that need no key (E5 on the node, the preconfigured ones) are unaffected.
   - Other products: a `seed` anonymises the rows instead.
   - **Suggestions** (as Tonic's and Neon's anonymisation tools name columns that look personal):
     `GET /v1/previews/projects/{project}/mask-suggestions` reads the columns of every Postgres,
