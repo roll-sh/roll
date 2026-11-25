@@ -249,6 +249,9 @@ async fn a_previews_roll_apps_bill_is_in_its_cost() {
     e.code.open(change("chg_bill", 1));
     e.engine.pass().await.unwrap();
     let p = e.engine.store.row_by_change("chg_bill").unwrap().unwrap();
+    // Read with the branches' usage, once its services run (a refresh reads it again now).
+    e.engine.refresh(&p.id).unwrap();
+    e.engine.pass().await.unwrap();
     let cost = e.engine.store.preview(&p.id).unwrap().cost;
     assert!(cost.month_to_date_usd >= 2.5, "roll apps' bill in its month: {cost:?}");
     e.code.open(change("chg_bill_2", 2));
