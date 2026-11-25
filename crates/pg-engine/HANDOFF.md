@@ -21990,6 +21990,175 @@ Measuring notes for whoever repeats it:
 - Two fixed-count TPC-B runs of the same binary read 494 k and 425 k user instructions a
   transaction (304 saw the same: the counts follow the throughput a run reaches).
 
+## Storage format 5: column blocks, stage 1 (agents 303, 311)
+
+Agent 282's prototype (HANDOFF "Storage format 5: column blocks, a prototype", branch
+`proto/a282-format5`) on the head **behind a switch that is off by default**. Agent 303 built the
+switch and a first form (branch `wip/a303`, not handed in: switch off it cost q01 +0.34%, COPY TO
++0.77%, INSERT ... SELECT +0.54%); agent 311 rebuilt how format 4's paths stay as they were, made
+format 5's rows only where read, and handed step 1 in (`cand/a311`). BENCH.md "Storage format 5,
+stage 1" has the pairs.
+
+**The switch** is the data directory's, from when it is made: `StoreOptions::colblocks`, default
+`ROLL_COLBLOCKS=1` (off otherwise), kept in the manifest (`"colblocks": true`, left out when false).
+A directory keeps what it was made with whatever the environment says later (test
+`column_blocks_read_as_rows` reopens each store with the switch the other way). One made without it
+never writes a column block: its manifest stays format 4 and builds before this read it. One made
+with it writes column blocks at its L1 writes (compaction, clean close); from then its manifest says
+5 (`STORE_FORMAT` = `sst::FORMAT_COLS`) and older builds refuse it at open. The file format is 282's
+(`storage/colblock.rs`; trailer flag bit 1; footer format 5 = format 4's, a dictionary of length 0
+when none; `SstMeta::cols`). 292's block copy skips format 5 files (their `format()` differs):
+compactions rewrite them (step 3).
+
+**How format 4's code stays as it was** (agent 311; each found by diffing the plain dist builds'
+disassembly per function, `~/.cache/a311/asmdiff.py`, and per-symbol `instructions:upp` profiles):
+- `RowBatch` is format 4's, field for field. 303 kept a batch's unmade rows in a boxed field of
+  it; `ScanNode`'s row paths take the batch out and put it back per row (`mem::take(&mut
+  self.rb)`), so every row dropped a default batch, and the field's drop was 87 / 103 samples of
+  COPY TO's / INSERT ... SELECT's profiles (their +0.77% / +0.54%). The unmade rows are noted
+  beside the batch, in a `LazyRows` only parscan's `Reader` holds: `FillRows::fill_lazy` (default:
+  `fill`), `TxnScan::fill_batch_lazy`, `Scan::fill_batch_lazy`. A fill without one makes its rows
+  at its end.
+- A scan with column blocks among its sources (`Merge::cols`; looked for only in a store made
+  with the switch, `Merge::scan`, out of line) goes its own instances at one branch:
+  `fill_batch_with` is that branch, format 4's body a function of its own (`fill_batch_rows`: a
+  branch at the top of the old function changed the inlined run loop's register allocation, +3%
+  of that window's samples), the other `fill_batch_cols` (`fill_batch_in::<true>`,
+  `position::<true>`, `Merge::min_cols`, `rank_of::<true>`, `push_head::<true>`,
+  `run_into::<true>`, `Block::run_rows_to::<_, true>`). Helpers both call keep one caller per
+  instance (generic) or are inlined as their one caller had them (`prune`, `skip_deleted`,
+  `DeadRanges::record`, `ColData::size`): 303's build had those out of line, as a second caller
+  makes them.
+- Format 4's paths read values with the readers as before (`Block::value_ref_plain`,
+  `value_plain`: `run_into`, `expand`, the point reads after their `is_cols` test). The
+  column-aware ones (`value`, `value_ref`: a column block's value offsets lie past its buffer, so a
+  read misses it and only then goes the cold way) serve the row-at-a-time readers (`Scan::next`,
+  `next_value`, compaction). A returning call where a panic was changed `fill_batch_with`'s
+  registers through its inlined `run_into`.
+- `Pre::decode`, `Pre::mark` and `cols::decode_cols` are format 4's text; `decode_lazy` and
+  `decode_cols_lazy` are functions of their own. 303's generic split of `decode_cols` (one body, a
+  `MIXED` parameter) made a vector in format 4's instance too, whose drop on unwind added a landing
+  pad: `Pre::decode` grew by 30-50 instructions and its loop's jumps fell elsewhere against the
+  32-byte jump padding (q06 +0.75% -> +0.23% with them apart). `decode_cols_lazy` takes only rows
+  that are all column blocks' (it copies their columns, no walk); a fill whose batch mixes them
+  with other rows (a memtable's, an L0 file's) has its rows made at once (`fill_lazy` in parscan).
+- 306's `overlay` (a newer version taken in place after a run) runs in format 4's instance only.
+- Tried and dropped: parscan's reader paths per instance (`run_rows_in::<L>`, `partial_chunk`,
+  `next_run`, `next_row_with` generic, every lazy line behind `if L`): count / sum scans and q06
+  as without (+0.46-0.53%, +0.24%), so the simpler code stays (patch
+  `~/.cache/a311/patches/0001-WIP-a311-parscan-s-reader-paths-per-instance-run_row.patch`).
+
+**Rebased onto 313's overlay list** (`cand/a311-2` on `aaa096e02`): 313's runs take the other
+sources' entries inside the L1 run loop (`sst::Overlay`, `Scan::gather` / `ungather`). Format 4
+keeps 313's code: `Block::run_rows_to::<STOP, COL>` (313's body, its `COL = false` instances its
+`STOP` ones), the list gathered only in format 4's instance (`!C && self.merge.bounded &&
+self.gather(..)`), `run_into::<C>` with 313's `ov` / `pushed`, `ungather`'s ranks by
+`rank_of::<false>`. A column block's run takes no list (as 306's `overlay`). Measured again
+against `aaa096e02`, plain dist, two pairs (lane B 5.0-5.2, lane C 1.5-3.8 foreign cores): 313's
+probe (64 fixed 100-row and 1,000-row ranges, 0 / 10 / 100 rows of each updated in the memtable,
+8 clients, `~/.cache/a313/bench/probe.sh`) every cell within ±0.16% (fx100 -0.05 to +0.16%, fx1k
+-0.02 to +0.04%), select-only point reads ±0.3% (±4% both ways in the phase without updates:
+noise); q01 -0.07%, q06 +0.27%, count(*) / sum steps +0.04 to +0.60%. Built without the jump
+padding: q01 -0.10%, q06 -0.16%, count(*) -0.10 to -0.16%, sums -0.21 to -0.23%. Quick-check
+(`QC_CHECKED=1`) on these commits: tests 406, checked 406, crash seeds 1-3 x 2 and the power cut,
+regress 51,148 / 51,150 0 newly differing, isolation 1,647 / 1,648, pg_dump 14,609; with
+`ROLL_COLBLOCKS=1 ROLL_MEMTABLE_BYTES=1048576` (the diagnostic commit on top) the same counts,
+regress's engine writing **6,421 column blocks** (of 20,333, 211 compactions), isolation's 2,101
+of 3,536.
+
+**Rebased onto 316's split probe and keyed fill** (`cand/a311-4`, on `7ecca8b18`, measured on
+`342917576`, which differs from it only in `exec/agg.rs` / `exec/nodes.rs`): format 4 keeps 316's
+code (`decode_cols` / `decode_cols_only` inlined into `Pre::decode` / `decode_split`; `KeyedFill::
+fill`). Step 1's `#[inline(always)]` on `ColData::size` is gone: with 316's two `decode_cols_in`
+instances the head has it out of line, and inlined it grew `Pre::decode` 1,704 -> 1,993 and
+`decode_split` 3,619 -> 4,201 instructions (q01 +0.64%, sums +1.5% switch off). Format 5 gets
+316's two behaviours on its column blocks: `KeyedFill::fill_lazy` reads a column block's keys
+with its rows unmade and makes none of the keys it passes over (a kept one goes on unmade, runs
+noted at once); `Pre::decode_lazy_split` copies the columns up to the probe's from the blocks,
+then the rest only for the rows whose key may have candidates (`cols::decode_cols_lazy_only`), the
+others dropped unmade. Switch off against `342917576`, plain dist, two pairs: q01 +0.08%, q06
++0.04%, q10 -0.06 / +0.03%, q15 +0.02%, q21 +0.05 / +0.09%, count(*) +0.14 / +0.18%, sums +0.25%,
+`seq_count` +0.50% (built without the jump padding: `seq_count` +0.01%, sums -0.01 to +0.01%,
+count(*) -0.03 / +0.16%, q01 / q06 0.00%, q10 +0.08 / +0.19%, q21 +0.11 / +0.01%); 313's probe ranges -0.12 to +0.10%, select-only -0.85 to +0.49% (-6% in the
+phase without updates: noise). Format 5 against format 4 on this build: q01 -28.6%, q06 +2.1%,
+q10 +7.8%, q15 +4.9%, q21 +12.5%, q03 +36.7%, range read +23.9%: 316 made format 4's q06 -33% and
+its split probe cheap, and what format 5 now spends is making rows (q21: `ColDir::value` / `row`
+/ `LazyRows::make` 12.3k of its +7.9k samples): step 2's rows a column at a time and of the columns
+read (on `wip/a311`, to be handed in rebased onto this). Quick-check `QC_CHECKED=1` on these commits:
+tests 406, checked 406, crash seeds 1-3 x 2 and the power cut, regress 51,148 / 51,150 0 newly
+differing, isolation 1,647 / 1,648, pg_dump 14,609; with `ROLL_COLBLOCKS=1 ROLL_MEMTABLE_BYTES=
+1048576` (the diagnostic commit on top) the same, regress's engine writing **6,433 column blocks**
+(of 20,813, 210 compactions).
+
+**Rows of column blocks made where read** (step 2's first item, in this candidate): parscan's
+reader makes, after `Pre::mark`, only the rows whose fate isn't DROP (`make_marked`);
+`partial_chunk` those of its run the row path reads; all of them when `Pre` turns itself off or
+the reader ends (`Drop for Reader`). 303's build made every row of a batch: q10 on format 5 +163%
+-> -11.6%.
+
+**Where switch off stands** (against `8f3876dab`; BENCH has every cell; rebased onto `83a21ef3f`
+and measured again there, plain dist: q01 -0.08%, q06 +0.24 / +0.27%, q10 and q03 level, count(*)
++0.40-0.47%, sums +0.49-0.51%, the count after UPDATE / DELETE +0.65%, CREATE INDEX +0.09 /
++0.13%, the rest within 0.11%): plain dist, the shipped flags: q01 -0.08%, q10 -0.02%, q03 +0.14 / -0.06%, q06 **+0.23%**, COPY in / out, INSERT ...
+SELECT, UPDATE, DELETE, VACUUM within ±0.1%, CREATE INDEX +0.02-0.15%, range reads and point
+selects level, count(*) / sum scans **+0.42 to +0.54%** and the count after UPDATE / DELETE
+**+0.67%** (0.8 instructions a row, both pairs). The same two sources built without
+`dist-flags.sh`'s jump padding (`-x86-branches-within-32B-boundaries`): every cell at or under the
+head but CREATE UNIQUE INDEX (+0.14 / +0.03%) and q03 (+0.18 / -0.07%): q01 -0.08%, q06 -0.13%,
+q10 -0.05%, count(*) 0.00%, sums -0.32%, count after UPDATE / DELETE -0.29%. So what is left in
+the shipped build is the padding: the scans' functions' bytes moved (`fill_batch_rows` has one
+load less than `fill_batch_with` had, `partial_chunk` and `next_row_with` their lazy branches), and
+the NOPs in front of their loops' jumps with them. Aligning every function to 64 bytes
+(`-Cllvm-args=-align-all-functions=6`) leaves the cells where they were (the head's hot functions
+start at 0 mod 64 already; the same-code control h1 -> h1a moves nothing), so it isn't where the
+functions start but where the jumps fall inside them. Not met: the 0.1% gate on q06 and the
+count / sum scans of the shipped flags; the coordinator decides. PGO (one build each; the head's
+built twice: two builds of one commit differ by up to 2.3% on the count(*) scans, 8-10% on CREATE
+INDEX): q01 -0.23%, q06 +0.14%, q10 +0.52% (the head against itself +0.80%), q03 +0.41 / +0.48%
+(itself 0.00), COPY TO +0.33%, count(*) +2.4% (itself +1.7 to +2.3%), sums +1.54% (itself +0.94%),
+the count after UPDATE / DELETE +1.40% (itself +0.56%), COPY in, INSERT ... SELECT, UPDATE,
+VACUUM 0.2-1.2% under; so the sums, that count and q03 stand 0.5-0.8 points past one commit's
+spread.
+
+**Format 5 against format 4** (step 1's build, one binary, two data sets): q01 **-29.1%**, q06
+**-39.1%**, q10 -11.6% (303: +163%), q03 +31.6%, q07 +39.6%, q09 +14.4%; VmHWM 1,681 -> 1,431 MB
+(-14.9%); range read +23.8%, point select +3.6% (instructions per op); the store 612.3 -> 569.8 MB
+on disk (-6.9%); the TPC-H load 731.3 -> 777.8 G (+6.3%: the encoder and its check). What's left
+for format 5 is making rows from columns (q03's extra instructions are `ColDir::value` and `row`,
+14.4k and 2.5k of 17.1k samples): step 2.
+
+**Correctness**: unit tests `storage::tests::column_blocks_read_as_rows` (now also through the
+lazy rows: decoded from the blocks, a third made and read, the rest made) and 282's
+`colblock::tests::sections_give_their_rows_back`. `tools/quick-check.sh` with `QC_CHECKED=1`,
+switch off, on the candidate (`cand/a311` on `83a21ef3f`): tests 403 passed in 20 binaries, the
+checked build's 403, crash seeds 1-3 x 2 and the power cut, regress 51,148 / 51,150 units (0 newly
+differing), isolation 1,647 / 1,648, pg_dump 14,609 passed; clippy no new warning. With `ROLL_COLBLOCKS=1 ROLL_MEMTABLE_BYTES=1048576` in
+the environment, on a diagnostic commit (the candidate's code plus `ROLL_MEMTABLE_BYTES` and a column-block counter
+logged at each compaction, not handed in): tests 402, checked 402, crash seeds 1-3 x 2 and the
+power cut, regress 51,148 / 51,150 0 newly differing, isolation 1,647 / 1,648, pg_dump 14,609; the
+regress engine wrote **6,479 column blocks** (of 20,680 its column-block writers wrote, 214
+compactions), isolation's 2,450 of 4,091. (303's run with 8 MB
+memtables could not say whether any regress table reached L1.)
+
+**Step 2, started** (branch `a311-s2b`, not in this candidate): rows of a run of a column block
+made a column at a time, one loop per layout (`ColDir::rows_into`), and a lookup's multi-get making
+only the columns it reads, the others NULL (303's sketch: `Lookup::reads`, `StoredCmps::mark_cols`,
+`PointReader::get_sorted_cols`): format 5 against 4 then q03 +8.7%, q07 +19.6%, q09 +11.7%, range
+read +20.8%, point select +2.1%. Left: a range read's rows of only the columns its scan reads,
+a cheaper whole row, then step 3.
+
+**PGO head, 309's indexed COPY steps** (the coordinator's request; 309's bulk sink was not
+PGO-gated): on the head's PGO build, once, COPY into `bulkp` (a primary key and an index) 15.061 G
+user instructions, into `bulks` (an index) 10.866 G (309's plain dist 18.21 / 12.92 G).
+
+**Measuring notes**: lanes A-C carried 1.6-4.1 foreign cores through every pair (lane.sh), so
+every number is user instructions (cycles moved ±10-30% between runs of one binary). The bulk
+script prints instructions to 4 digits now (3 before: the 0.17 G count(*) steps moved in 0.6%
+steps). Builds: plain dist `tools/dist.sh`; the unpadded ones `cargo build --profile dist`
+without `dist-flags.sh`; PGO `tools/dist-pgo.sh` with the release bench client of the head
+(`PGO_CLIENT`) and training on the build CPUs. Harness under `~/.cache/a311/` (tpch/, bench/, pt/,
+seq-gate.sh, gsum.py; asmdiff.py, nopshare.py for per-function code and NOP shares).
+
 ## The shipped build: profile-guided (agent 304, 2026-11-23)
 
 **The shipped roll-engine is the PGO build, `tools/dist-pgo.sh`** (the user approved it on
