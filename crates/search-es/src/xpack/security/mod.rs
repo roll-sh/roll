@@ -703,6 +703,8 @@ const NARROWED: &[&str] = &[
     "cat.aliases",
     "cat.recovery",
     "cat.count",
+    // `RankEvalRequest` is replaceable: its searches run on the indices it was narrowed to.
+    "rank_eval",
 ];
 
 /// The read APIs the OpenSearch plugin checks over every index their wildcards reach, refusing
@@ -710,7 +712,7 @@ const NARROWED: &[&str] = &[
 /// default). The rest of [`NARROWED`] takes the generic check for OpenSearch principals, as it
 /// did, but for `_cat/shards`, which lists hidden indices by default: narrowed, so it neither
 /// refuses a data user nor lists what the check never saw.
-const OS_WHOLE: &[&str] = &["search", "count", "field_caps", "async_search.submit", "eql.search", "search_template", "open_point_in_time", "knn_search", "indices.get", "cat.indices"];
+const OS_WHOLE: &[&str] = &["search", "count", "field_caps", "async_search.submit", "eql.search", "search_template", "open_point_in_time", "knn_search", "indices.get", "cat.indices", "rank_eval"];
 
 /// Whether `api` narrows its wildcards for principal `p` ([`NARROWED`], [`OS_WHOLE`]).
 fn narrows(p: &Principal, api: &str) -> bool {
@@ -980,7 +982,7 @@ pub fn check_refresh(ctx: &Ctx, written: Option<&[String]>) -> EsResult<()> {
 /// the request when any role grants its action on some index, its items one by one. A
 /// reindex's items are its source's search and each write to its destination
 /// (`by_query::reindex`), both as the caller.
-const COMPOSITE: &[&str] = &["bulk", "mget", "msearch", "msearch_template", "reindex"];
+const COMPOSITE: &[&str] = &["bulk", "mget", "mtermvectors", "msearch", "msearch_template", "reindex"];
 
 /// What a bulk item (or a single document request) writes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1235,14 +1237,26 @@ fn denied_shards<'a>(eff: &Effective, action: &str, items: impl Iterator<Item = 
 /// The `indices:data/read/mget[shard]` checks of a multi get's documents (`(name, shard)`,
 /// names as requested): one denied name fails every document of its shard.
 pub fn authorize_gets(ctx: &Ctx, docs: &[(String, (String, u32))]) -> Vec<Option<EsError>> {
-    const SHARD: &str = "indices:data/read/mget[shard]";
+    authorize_shard_reads(ctx, "indices:data/read/mget[shard]", docs)
+}
+
+/// The `indices:data/read/mtv[shard]` checks of a multi term vectors request's documents
+/// (`TransportShardMultiTermsVectorAction`), as [`authorize_gets`]: term vectors are a
+/// document's indexed terms, read from its index.
+pub fn authorize_term_vectors(ctx: &Ctx, docs: &[(String, (String, u32))]) -> Vec<Option<EsError>> {
+    authorize_shard_reads(ctx, "indices:data/read/mtv[shard]", docs)
+}
+
+/// The `action` checks of the per-shard requests a composite read sends: one denied name
+/// fails every document of its shard.
+fn authorize_shard_reads(ctx: &Ctx, action: &str, docs: &[(String, (String, u32))]) -> Vec<Option<EsError>> {
     let Some(p) = ctx.principal.get().filter(|p| !p.is_superuser()) else { return vec![None; docs.len()] };
     let eff = effective(&file_roles(ctx.cluster), &ctx.state(), p);
     let mut out = vec![None; docs.len()];
-    for (shard, denied_on) in denied_shards(&eff, SHARD, docs.iter().enumerate().map(|(i, (n, s))| (i, s, n))) {
+    for (shard, denied_on) in denied_shards(&eff, action, docs.iter().enumerate().map(|(i, (n, s))| (i, s, n))) {
         for (i, (_, s)) in docs.iter().enumerate() {
             if s == shard {
-                out[i] = Some(denied(p, SHARD, Some(&denied_on)));
+                out[i] = Some(denied(p, action, Some(&denied_on)));
             }
         }
     }
@@ -1586,10 +1600,11 @@ const DATA_STREAM_APIS: &[&str] = &[
 ];
 
 /// APIs whose bodies are queries (and runtime mappings), scanned by [`lookup_reads`]. Search
-/// templates are checked once rendered ([`check_lookups`]).
+/// templates are checked once rendered ([`check_lookups`]), and so is each of `_rank_eval`'s
+/// requests as it runs (its lookups fail the one request, as Elasticsearch's do).
 const QUERY_APIS: &[&str] = &[
     "search", "msearch", "count", "delete_by_query", "update_by_query", "explain", "indices.validate_query", "async_search.submit", "field_caps",
-    "knn_search", "open_point_in_time", "eql.search", "terms_enum", "termvectors", "mtermvectors", "reindex", "rank_eval", "esql.query",
+    "knn_search", "open_point_in_time", "eql.search", "terms_enum", "termvectors", "mtermvectors", "reindex", "esql.query",
     "esql.async_query", "sql.query", "graph.explore", "search_mvt", "fleet.search", "fleet.msearch", "transform.preview_transform",
     "rollup.rollup_search",
 ];
