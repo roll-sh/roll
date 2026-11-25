@@ -310,6 +310,10 @@ pub fn authenticate(ctx: &Ctx) -> EsResult<()> {
     let req = ctx.request;
     // A linked remote cluster's request: the node keeps the header only on roll's own calls.
     if let Some(access) = req.header(crate::remote::links::REMOTE_ACCESS_HEADER) {
+        // Cross-cluster keys are Elasticsearch's ([`es_credentials`]).
+        if !es_credentials(ctx.cluster) {
+            return Err(opensearch::unauthorized());
+        }
         let key = req.header("authorization").and_then(|h| {
             let h = h.trim();
             let (scheme, value) = h.split_once(' ')?;
@@ -395,17 +399,36 @@ pub fn authenticate_header(cluster: &Cluster, header: &str, uri: &str) -> EsResu
         }
         return users::authenticate_password(cluster, user, password).ok_or_else(|| unauthorized(format!("unable to authenticate user [{user}] for REST request [{uri}]")));
     }
-    if scheme.eq_ignore_ascii_case("apikey") {
+    if scheme.eq_ignore_ascii_case("apikey") || scheme.eq_ignore_ascii_case("bearer") {
+        if !es_credentials(cluster) {
+            return Err(opensearch::unauthorized());
+        }
+        if scheme.eq_ignore_ascii_case("bearer") {
+            return tokens::authenticate_bearer(cluster, value);
+        }
         if derived::is_derived(value) {
             return derived::authenticate(cluster, value);
         }
         return api_keys::authenticate(cluster, value);
     }
-    if scheme.eq_ignore_ascii_case("bearer") {
-        return tokens::authenticate_bearer(cluster, value);
-    }
     // Other schemes present no credentials Elasticsearch's realms understand.
     Ok(Principal::owner())
+}
+
+/// roll's own revocation of a key the cluster's other flavor made (`DELETE …/keys/{key}` after
+/// a switch of flavor): with it, `DELETE _security/api_key` (`ids`) removes the internal users
+/// and roles roll made for OpenSearch keys and links ([`opensearch::KEY_USER_PREFIXES`]), and
+/// `DELETE _plugins/_security/api/internalusers/{id}` invalidates Elasticsearch API key `id` and
+/// touches no user. The node drops it from every request but roll's own (`search-server`'s
+/// REST port, the control plane's console), so a revoked key stays revoked across a switch back.
+pub const DORMANT_KEY_HEADER: &str = "x-roll-dormant-key";
+
+/// Whether the cluster takes Elasticsearch's own credentials: API keys (cross-cluster ones
+/// too), access tokens and service account tokens. OpenSearch has none of them, so an
+/// Elasticsearch-flavor cluster's, kept in its state across a switch of flavor, never sign in
+/// to it (a switch back finds them as they were; `DELETE …/keys/{key}` revokes one meanwhile).
+fn es_credentials(cluster: &Cluster) -> bool {
+    cluster.dialect == crate::cluster::Dialect::Elasticsearch
 }
 
 /// Authenticates credentials a node could not verify against the cluster's own credentials
@@ -433,13 +456,13 @@ pub fn authenticate_native(cluster: &Cluster, header: &str) -> Option<Principal>
         }
         return users::authenticate_password(cluster, user, password);
     }
-    if scheme.eq_ignore_ascii_case("apikey") {
+    if scheme.eq_ignore_ascii_case("apikey") && es_credentials(cluster) {
         if derived::is_derived(value) {
             return derived::authenticate(cluster, value).ok();
         }
         return api_keys::authenticate(cluster, value).ok();
     }
-    if scheme.eq_ignore_ascii_case("bearer") {
+    if scheme.eq_ignore_ascii_case("bearer") && es_credentials(cluster) {
         return tokens::authenticate_bearer(cluster, value).ok();
     }
     None
@@ -449,7 +472,7 @@ pub fn authenticate_native(cluster: &Cluster, header: &str) -> Option<Principal>
 /// header): a `cross_cluster` key of this cluster only.
 pub fn authenticate_native_link(cluster: &Cluster, header: &str, access: &str) -> Option<Principal> {
     let (scheme, value) = header.trim().split_once(' ')?;
-    if !scheme.eq_ignore_ascii_case("apikey") {
+    if !scheme.eq_ignore_ascii_case("apikey") || !es_credentials(cluster) {
         return None;
     }
     api_keys::authenticate_link(cluster, value.trim(), access).ok()
@@ -467,6 +490,9 @@ pub struct Effective {
     /// what its data stream is (`IndicesPermission`'s `IndexResource`). Failure store indices
     /// are not: they need the failure store's own privileges.
     pub parents: std::collections::HashMap<String, String>,
+    /// Aliases over watch records (`.watcher-history-*`), with those indices: a grant of the
+    /// alias reaches them only when one reaches the indices too ([`privileges::grant_names`]).
+    pub history_aliases: std::collections::HashMap<String, Vec<String>>,
 }
 
 impl Effective {
@@ -486,6 +512,12 @@ impl Effective {
     pub fn allows_index(&self, action: &str, index: &str) -> bool {
         let restricted = privileges::is_restricted(index);
         let parent = self.parents.get(index);
+        // Through an alias over watch records: the records themselves too.
+        if let Some(behind) = self.history_aliases.get(index)
+            && !behind.iter().all(|i| self.allows(|p| p.allows_index(action, i, privileges::is_restricted(i))))
+        {
+            return false;
+        }
         self.allows(|p| p.allows_index(action, index, restricted) || parent.is_some_and(|ds| p.allows_index(action, ds, privileges::is_restricted(ds))))
     }
 
@@ -506,6 +538,11 @@ impl Effective {
     }
 
     pub fn has_index_privilege(&self, privilege: &str, index: &str) -> bool {
+        if let Some(behind) = self.history_aliases.get(index)
+            && !behind.iter().all(|i| self.allows(|p| p.has_index_privilege(privilege, i)))
+        {
+            return false;
+        }
         self.allows(|p| p.has_index_privilege(privilege, index))
     }
 
@@ -621,12 +658,66 @@ pub fn effective(file: &FileRoles, st: &crate::meta::ClusterState, p: &Principal
         _ => (permissions_of_roles(file, st, &p.roles), None),
     };
     let parents = st.metadata.data_streams.values().flat_map(|d| d.indices.iter().map(|i| (i.clone(), d.name.clone()))).collect();
-    Effective { own, limited_by, also, parents }
+    let mut history_aliases: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for (name, idx) in st.metadata.indices.iter().filter(|(n, _)| privileges::is_watch_history(n)) {
+        for alias in idx.aliases.keys() {
+            history_aliases.entry(alias.clone()).or_default().push(name.clone());
+        }
+    }
+    Effective { own, limited_by, also, parents, history_aliases }
 }
 
 /// Read APIs whose wildcard index expressions Elasticsearch expands to the indices the user
 /// may read (`IndicesAndAliasesResolver`) instead of failing on the others.
-const NARROWED: &[&str] = &["search", "count", "field_caps", "async_search.submit", "eql.search", "search_template", "open_point_in_time", "knn_search", "indices.get", "cat.indices"];
+/// And every other API whose request is `IndicesRequest.Replaceable` there: the by-query APIs,
+/// whose scan resolves the request's own `expand_wildcards` (hidden indices too), and the index
+/// admin and monitoring APIs a monitoring agent or index tool calls over `*`. They answer for the
+/// indices authorized; an index named explicitly that isn't is still a 403.
+const NARROWED: &[&str] = &[
+    "search",
+    "count",
+    "field_caps",
+    "async_search.submit",
+    "eql.search",
+    "search_template",
+    "open_point_in_time",
+    "knn_search",
+    "indices.get",
+    "cat.indices",
+    "update_by_query",
+    "delete_by_query",
+    "indices.get_settings",
+    "indices.get_mapping",
+    "indices.get_field_mapping",
+    "indices.stats",
+    "indices.refresh",
+    "indices.flush",
+    "indices.forcemerge",
+    "indices.segments",
+    "indices.recovery",
+    "indices.clear_cache",
+    "indices.get_alias",
+    "indices.exists_alias",
+    "indices.validate_query",
+    "cat.shards",
+    "cat.aliases",
+    "cat.recovery",
+    "cat.count",
+    // `RankEvalRequest` is replaceable: its searches run on the indices it was narrowed to.
+    "rank_eval",
+];
+
+/// The read APIs the OpenSearch plugin checks over every index their wildcards reach, refusing
+/// the request when one isn't permitted ([`check_all`]; `do_not_fail_on_forbidden` is off by
+/// default). The rest of [`NARROWED`] takes the generic check for OpenSearch principals, as it
+/// did, but for `_cat/shards`, which lists hidden indices by default: narrowed, so it neither
+/// refuses a data user nor lists what the check never saw.
+const OS_WHOLE: &[&str] = &["search", "count", "field_caps", "async_search.submit", "eql.search", "search_template", "open_point_in_time", "knn_search", "indices.get", "cat.indices", "rank_eval"];
+
+/// Whether `api` narrows its wildcards for principal `p` ([`NARROWED`], [`OS_WHOLE`]).
+fn narrows(p: &Principal, api: &str) -> bool {
+    NARROWED.contains(&api) && (p.os().is_none() || api == "cat.shards")
+}
 
 /// The indices options [`narrow`] expands an API's wildcards with (before its parameters).
 fn narrow_defaults(api: &str) -> crate::meta::resolve::IndicesOptions {
@@ -634,6 +725,10 @@ fn narrow_defaults(api: &str) -> crate::meta::resolve::IndicesOptions {
     match api {
         "indices.get" => IndicesOptions::STRICT_EXPAND_OPEN,
         "cat.indices" => IndicesOptions::STRICT_EXPAND,
+        "cat.shards" => IndicesOptions::STRICT_EXPAND_HIDDEN,
+        // `GetAliasesRequest`: open and closed indices, `_cat/aliases` hidden ones too.
+        "indices.get_alias" | "indices.exists_alias" => IndicesOptions { expand_closed: true, ..IndicesOptions::STRICT_EXPAND_OPEN },
+        "cat.aliases" => IndicesOptions { expand_closed: true, expand_hidden: true, ..IndicesOptions::STRICT_EXPAND_OPEN },
         _ => IndicesOptions::LENIENT_EXPAND_OPEN,
     }
 }
@@ -788,7 +883,7 @@ fn authorize_action(ctx: &Ctx) -> EsResult<Option<String>> {
             let action = if ctx.api.name() == "create" { "indices:data/write/index" } else { action.as_str() };
             return if eff.allows_index(action, &name) { Ok(None) } else { Err(denied(p, action, None)) };
         }
-        if scope == Scope::Index && NARROWED.contains(&ctx.api.name()) {
+        if scope == Scope::Index && OS_WHOLE.contains(&ctx.api.name()) {
             let defaults = narrow_defaults(ctx.api.name());
             let opts = ctx.indices_options(defaults).unwrap_or(defaults);
             return check_all(ctx, p, &eff, &action, crate::api::index_expressions(ctx), &opts).map(|_| None);
@@ -825,7 +920,7 @@ fn authorize_action(ctx: &Ctx) -> EsResult<Option<String>> {
             crate::search::check_pit_without_indices(ctx, true)?;
             authorize_pit(ctx, p, &eff, &action, &pit_of(ctx).unwrap_or_default())
         }
-        Scope::Index if NARROWED.contains(&ctx.api.name()) => narrow(ctx, p, &eff, &action),
+        Scope::Index if narrows(p, ctx.api.name()) => narrow(ctx, p, &eff, &action),
         // Composite requests: their items are authorized as they run (`authorize_writes`,
         // `authorize_gets`, each search of an msearch).
         Scope::Index if COMPOSITE.contains(&ctx.api.name()) => {
@@ -887,7 +982,7 @@ pub fn check_refresh(ctx: &Ctx, written: Option<&[String]>) -> EsResult<()> {
 /// the request when any role grants its action on some index, its items one by one. A
 /// reindex's items are its source's search and each write to its destination
 /// (`by_query::reindex`), both as the caller.
-const COMPOSITE: &[&str] = &["bulk", "mget", "msearch", "msearch_template", "reindex"];
+const COMPOSITE: &[&str] = &["bulk", "mget", "mtermvectors", "msearch", "msearch_template", "reindex"];
 
 /// What a bulk item (or a single document request) writes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -950,7 +1045,7 @@ pub fn check_mapping_update(ctx: &Ctx, idx: &crate::meta::IndexMeta) -> EsResult
     const BWC: &[&str] = &["index", "create", "create_doc", "write"];
     fn bwc<'a>(perm: &'a Permission, index: &str, restricted: bool) -> Option<&'a privileges::IndexGrant> {
         perm.indices.iter().find(|g| {
-            (!restricted || g.allow_restricted) && g.names.iter().any(|n| privileges::index_pattern_matches(n, index)) && g.privileges.iter().any(|x| BWC.contains(&x.as_str()))
+            (!restricted || g.allow_restricted) && privileges::grant_names(g, index) && g.privileges.iter().any(|x| BWC.contains(&x.as_str()))
         })
     }
     // OpenSearch updates mappings for a write as the node, without checking the user.
@@ -994,15 +1089,86 @@ pub fn checks_items(ctx: &Ctx) -> bool {
     ctx.principal.get().is_some_and(|p| !p.is_superuser())
 }
 
+/// Whether the caller's document or field level security (or OpenSearch's field masking)
+/// restricts `index` for `action`, where an update would read and rewrite what it can't see:
+/// the action itself on Elasticsearch (`IndicesAccessControl` of the update or shard request),
+/// the reads on OpenSearch (the plugin's DLS and FLS are read restrictions).
+fn update_restricted(ctx: &Ctx, p: &Principal, action: &str, index: &str) -> bool {
+    let action = if p.os().is_some() { dls::READ } else { action };
+    dls::ReadSecurity::of(ctx).is_some_and(|s| s.restricts(action, index))
+}
+
+/// An update an index's document or field level security restricts for the caller isn't run:
+/// it would read the whole document and write it back (Elasticsearch's
+/// `UpdateRequestInterceptor`, 400; OpenSearch's DLS/FLS valve, 500). `index` is the index the
+/// update writes to.
+pub fn check_update(ctx: &Ctx, index: &str) -> EsResult<()> {
+    let Some(p) = ctx.principal.get().filter(|p| !p.is_superuser()) else { return Ok(()) };
+    if !update_restricted(ctx, p, "indices:data/write/update", index) {
+        return Ok(());
+    }
+    Err(update_refusal(p, "Can't execute an update request if field or document level security is enabled"))
+}
+
+fn update_refusal(p: &Principal, es_reason: &str) -> EsError {
+    if p.os().is_some() {
+        return EsError::security(500, "Update is not supported when FLS or DLS or Fieldmasking is activated");
+    }
+    EsError::security(400, es_reason)
+}
+
+/// [`check_update`] for a bulk request's update items, added to `out` (the items' errors so far):
+/// Elasticsearch fails each such update item (`BulkShardRequestInterceptor`, its error repeated
+/// as suppressed); OpenSearch fails every item of the shard request holding one.
+fn refuse_updates(ctx: &Ctx, p: &Principal, items: &[WriteItem], out: &mut [Option<EsError>]) {
+    const SHARD: &str = "indices:data/write/bulk[s]";
+    const REASON: &str = "Can't execute a bulk item request with update requests embedded if field or document level security is enabled";
+    let refused: Vec<usize> = (0..items.len()).filter(|&i| out[i].is_none() && items[i].op == WriteOp::Update && update_restricted(ctx, p, SHARD, &items[i].shard.0)).collect();
+    if refused.is_empty() {
+        return;
+    }
+    let e = update_refusal(p, REASON);
+    if p.os().is_some() {
+        for i in 0..items.len() {
+            if out[i].is_none() && refused.iter().any(|&r| items[r].shard == items[i].shard) {
+                out[i] = Some(e.clone());
+            }
+        }
+        return;
+    }
+    for i in refused {
+        out[i] = Some(e.clone().with_suppressed(vec![e.clone()]));
+    }
+}
+
 /// Elasticsearch's checks of the writes of a request whose own action was authorized by name
 /// (`TransportBulkAction`, `AuthorizationService.authorizeBulkItems`), in its order:
 /// `indices:admin/auto_create` on an index a write creates; `indices:data/write/bulk[s]` on
 /// every name written to a shard, where one denied name fails all of the shard's writes; then
 /// each write's own action on its name. The error of each denied item, `None` for the others.
 pub fn authorize_writes(ctx: &Ctx, items: &[WriteItem]) -> Vec<Option<EsError>> {
-    match ctx.principal.get().filter(|p| !p.is_superuser()) {
-        Some(p) => check_writes(p, &effective(&file_roles(ctx.cluster), &ctx.state(), p), items),
-        None => vec![None; items.len()],
+    BatchWrites::of(ctx).check(ctx, items)
+}
+
+/// The caller's permissions for [`authorize_writes`], computed once for writes sent together
+/// (a reindex batch: one bulk request in Elasticsearch) instead of once per write.
+pub struct BatchWrites<'a>(Option<(&'a Principal, Effective)>);
+
+impl<'a> BatchWrites<'a> {
+    pub fn of(ctx: &'a Ctx) -> BatchWrites<'a> {
+        BatchWrites(ctx.principal.get().filter(|p| !p.is_superuser()).map(|p| (p, effective(&file_roles(ctx.cluster), &ctx.state(), p))))
+    }
+
+    /// [`authorize_writes`] of `items`.
+    pub fn check(&self, ctx: &Ctx, items: &[WriteItem]) -> Vec<Option<EsError>> {
+        match &self.0 {
+            Some((p, eff)) => {
+                let mut out = check_writes(p, eff, items);
+                refuse_updates(ctx, p, items, &mut out);
+                out
+            }
+            None => vec![None; items.len()],
+        }
     }
 }
 
@@ -1071,14 +1237,26 @@ fn denied_shards<'a>(eff: &Effective, action: &str, items: impl Iterator<Item = 
 /// The `indices:data/read/mget[shard]` checks of a multi get's documents (`(name, shard)`,
 /// names as requested): one denied name fails every document of its shard.
 pub fn authorize_gets(ctx: &Ctx, docs: &[(String, (String, u32))]) -> Vec<Option<EsError>> {
-    const SHARD: &str = "indices:data/read/mget[shard]";
+    authorize_shard_reads(ctx, "indices:data/read/mget[shard]", docs)
+}
+
+/// The `indices:data/read/mtv[shard]` checks of a multi term vectors request's documents
+/// (`TransportShardMultiTermsVectorAction`), as [`authorize_gets`]: term vectors are a
+/// document's indexed terms, read from its index.
+pub fn authorize_term_vectors(ctx: &Ctx, docs: &[(String, (String, u32))]) -> Vec<Option<EsError>> {
+    authorize_shard_reads(ctx, "indices:data/read/mtv[shard]", docs)
+}
+
+/// The `action` checks of the per-shard requests a composite read sends: one denied name
+/// fails every document of its shard.
+fn authorize_shard_reads(ctx: &Ctx, action: &str, docs: &[(String, (String, u32))]) -> Vec<Option<EsError>> {
     let Some(p) = ctx.principal.get().filter(|p| !p.is_superuser()) else { return vec![None; docs.len()] };
     let eff = effective(&file_roles(ctx.cluster), &ctx.state(), p);
     let mut out = vec![None; docs.len()];
-    for (shard, denied_on) in denied_shards(&eff, SHARD, docs.iter().enumerate().map(|(i, (n, s))| (i, s, n))) {
+    for (shard, denied_on) in denied_shards(&eff, action, docs.iter().enumerate().map(|(i, (n, s))| (i, s, n))) {
         for (i, (_, s)) in docs.iter().enumerate() {
             if s == shard {
-                out[i] = Some(denied(p, SHARD, Some(&denied_on)));
+                out[i] = Some(denied(p, action, Some(&denied_on)));
             }
         }
     }
@@ -1366,11 +1544,16 @@ fn request_indices(ctx: &Ctx) -> Vec<String> {
     if api == "search_application.search" {
         exprs.extend(ctx.path_param("name").map(str::to_string));
     }
+    // Wildcards as the request expands them (`expand_wildcards=all` reaches hidden indices).
+    let default = crate::meta::resolve::IndicesOptions::LENIENT_EXPAND_OPEN;
+    let opts = ctx.indices_options(default).unwrap_or(default);
     if exprs.is_empty() {
+        if opts.expand_hidden {
+            return crate::meta::resolve::resolve(&st, &["_all".to_string()], &opts, ctx.now_ms).unwrap_or_default();
+        }
         return st.metadata.indices.keys().filter(|k| !k.starts_with('.')).cloned().collect();
     }
     let mut out = Vec::new();
-    let opts = crate::meta::resolve::IndicesOptions::LENIENT_EXPAND_OPEN;
     for e in exprs {
         if e.contains('*') || e == "_all" {
             if let Ok(names) = crate::meta::resolve::resolve(&st, std::slice::from_ref(&e), &opts, ctx.now_ms) {
@@ -1417,10 +1600,11 @@ const DATA_STREAM_APIS: &[&str] = &[
 ];
 
 /// APIs whose bodies are queries (and runtime mappings), scanned by [`lookup_reads`]. Search
-/// templates are checked once rendered ([`check_lookups`]).
+/// templates are checked once rendered ([`check_lookups`]), and so is each of `_rank_eval`'s
+/// requests as it runs (its lookups fail the one request, as Elasticsearch's do).
 const QUERY_APIS: &[&str] = &[
     "search", "msearch", "count", "delete_by_query", "update_by_query", "explain", "indices.validate_query", "async_search.submit", "field_caps",
-    "knn_search", "open_point_in_time", "eql.search", "terms_enum", "termvectors", "mtermvectors", "reindex", "rank_eval", "esql.query",
+    "knn_search", "open_point_in_time", "eql.search", "terms_enum", "termvectors", "mtermvectors", "reindex", "esql.query",
     "esql.async_query", "sql.query", "graph.explore", "search_mvt", "fleet.search", "fleet.msearch", "transform.preview_transform",
     "rollup.rollup_search",
 ];

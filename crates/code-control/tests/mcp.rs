@@ -848,6 +848,10 @@ async fn lockdown_withholds_outsiders_text() {
     assert!(!shut["result"]["content"][0]["text"].as_str().unwrap_or_default().contains("Ignore your instructions"), "{shut}");
     assert_eq!(content(&locked.rpc("tools/call", read("main".into())).await), "a\n");
     assert_eq!(content(&locked.rpc("tools/call", read(ch["head"].as_str().unwrap().to_string())).await), "b\n", "a team's own change");
+    // Revised, its old head stays its author's (every revision is, not just the newest).
+    let old = fork.head.clone();
+    a.code.revise_change(&r, &code_control::Caller::Admin, &fork, &json!({ "message": "v2", "files": { "a.txt": { "content": "v2\n" } } })).await.unwrap();
+    assert_eq!(content(&locked.rpc("tools/call", read(old)).await), roll_auth::lockdown::WITHHELD, "an earlier revision");
     // Its changeset and a compare to it: the message and the patch are withheld too.
     let (_, cs) = a.req("GET", &format!("/v1/code/repos/acme/pub/changesets/{}", fork.head), None, root).await;
     assert_eq!((cs["outside"].as_bool(), cs["files"][0]["outside"].as_bool()), (Some(true), Some(true)), "{cs}");
@@ -1486,7 +1490,9 @@ fn every_tool_says_whether_it_holds_an_outsiders_words() {
         "search", "fetch", "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare",
         "get_change", "list_changes", "revise_change", "update_change", "close_change", "start_preview", "enqueue_change", "set_change_lane", "queue_status",
         "list_work", "get_work", "claim_work", "heartbeat_work", "update_work", "complete_work", "release_work", "claim_agent_work",
-        "resolve_thread", "reopen_thread", "request_review",
+        "resolve_thread", "reopen_thread", "request_review", "get_commit_statuses",
+        // An automation run for an issue anyone opened (a trigger that takes `anyone`'s).
+        "list_agent_automation_runs", "get_agent_automation_run",
     ];
     const NONE: &[(&str, &str)] = &[
         ("list_repos", "repos"),
@@ -1499,7 +1505,6 @@ fn every_tool_says_whether_it_holds_an_outsiders_words() {
         ("get_review_usage", "spend"),
         ("list_ai_reviews", "roll's own reviewer's jobs: model output is data, and its approval is guarded"),
         ("request_ai_review", "a job"),
-        ("get_commit_statuses", "statuses posted with a writer's token or by GitHub for the repo's own CI"),
         ("set_commit_status", "the caller's status"),
         ("report_check", "the caller's check"),
         ("create_change", "the caller's change"),
@@ -1525,8 +1530,6 @@ fn every_tool_says_whether_it_holds_an_outsiders_words() {
         ("list_agent_automations", "the owner's agents"),
         ("save_agent_automation", "the owner's agents"),
         ("run_agent_automation", "the owner's agents"),
-        ("list_agent_automation_runs", "the owner's agents"),
-        ("get_agent_automation_run", "the owner's agents"),
         ("cancel_agent_automation_run", "the owner's agents"),
         ("retry_agent_automation_run", "the owner's agents"),
         ("enable_agent_automation", "the owner's agents"),

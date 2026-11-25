@@ -550,7 +550,12 @@ async fn redeliver_webhook(
 
 async fn statuses(State(code): S, caller: Caller, Path((owner, repo, rev)): Path<(String, String, String)>) -> Result<Json<Value>> {
     let r = code.readable(&caller, &owner, &repo)?;
-    Ok(Json(code.get_statuses(&r, &rev)?))
+    let mut v = code.get_statuses(&r, &rev)?;
+    // At a fork's revision, CI running its code (or its own workflow on GitHub) wrote these
+    // statuses' descriptions (MCP's lockdown).
+    let cs = v["changeset"].as_str().map(str::to_string);
+    code.mark_at(&r, cs.as_deref(), &mut v, &["statuses"], None);
+    Ok(Json(v))
 }
 
 async fn post_status(State(code): S, caller: Caller, Path((owner, repo, rev)): Path<(String, String, String)>, Body(b): Body) -> Result<(StatusCode, Json<Value>)> {
@@ -619,8 +624,9 @@ async fn compare(
     let (base, head) = spec.split_once("...").ok_or_else(|| Error::Invalid("compare takes base...head".into()))?;
     let mut v = code.compare_view(&r, base, head).await?;
     // A fork's head: its patches and its own changesets' messages are its author's (MCP's lockdown).
-    let to = v["head"].as_str().map(str::to_string);
-    let outside = code.mark_at(&r, to.as_deref(), &mut v, &["files"], Some(("changesets", "id")));
+    // Either side: a fork's head, or a fork's revision as the base (its lines come back removed).
+    let (to, from) = (v["head"].as_str().map(str::to_string), v["base"].as_str().map(str::to_string));
+    let outside = code.mark_at(&r, to.as_deref(), &mut v, &["files"], Some(("changesets", "id"))) || code.mark_at(&r, from.as_deref(), &mut v, &["files"], Some(("changesets", "id")));
     match q.format.as_deref() {
         None | Some("json") => Ok(Json(v).into_response()),
         Some("diff" | "patch") => {

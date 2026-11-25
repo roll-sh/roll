@@ -1,0 +1,17 @@
+# winget's installer manifest: the release's zips, each with roll.exe as a portable command.
+PackageIdentifier: RollSh.Roll
+PackageVersion: {{VERSION}}
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+  - RelativeFilePath: roll.exe
+    PortableCommandAlias: roll
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/roll-sh/roll/releases/download/{{TAG}}/roll-x86_64-pc-windows-msvc.zip
+    InstallerSha256: {{SHA256_X86_64}}
+  - Architecture: arm64
+    InstallerUrl: https://github.com/roll-sh/roll/releases/download/{{TAG}}/roll-aarch64-pc-windows-msvc.zip
+    InstallerSha256: {{SHA256_AARCH64}}
+ManifestType: installer
+ManifestVersion: 1.9.0

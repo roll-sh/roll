@@ -239,15 +239,19 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   is now and put back later, after a test run, a demo or an agent changed it. `POST
   …/restore-points` `{label?}` saves one: a copy-on-write branch of each branch whose product
   puts a branch back in place (`Brancher::restores`: Postgres, pg-control's reset with `from`,
-  so the branch keeps its endpoint, `DATABASE_URL` and role), at most 3 per preview. `POST
+  so the branch keeps its endpoint, `DATABASE_URL` and role; NoSQL, a zero-copy branch cut at a
+  whole second, put back by NoSQL's point-in-time restore of the preview's own branch to that
+  second, in place with the same id, endpoint and credentials, within its 7 days of history:
+  what was written in the fraction of a second before saving isn't in the point), at most 3 per
+  preview. `POST
   …/restore-points/{point}/restore` puts the data back on the next converge, as a reset does:
   the services sleep meanwhile, and the seed doesn't run again (the point holds what it made).
   A point is masked as the branch was. New masking rules delete the points masked by the old
   ones, and a point is never put back under rules other than its own. A resource moving to
   structure-only, or no longer wanted, takes its points with it, and the preview's deletion
   deletes them all. Saving and putting back say who asked in its activity. Products that only
-  copy (Redis, search) aren't saved: putting their copy in would change the branch's id, which
-  their delete guards check. The sheet's Data branches has them (Save now, Restore, Delete);
+  copy (Redis, search, streams) aren't saved: putting their copy in would change the branch's id,
+  which their delete guards check (Next). The sheet's Data branches has them (Save now, Restore, Delete);
   `roll preview points <id> [--save [label] | --restore <point> | --delete <point>]`. Checked
   live in `scripts/preview-cost.sh` (a table made after the point is gone once it's put
   back, on the same `DATABASE_URL`). Its services sleep for it and, as after a reset, the preview
@@ -1948,7 +1952,7 @@ previews in it), the operator and admins see every project.
 | `POST /v1/previews/{id}/wake` | | `Preview`: start its services now |
 | `POST /v1/previews/{id}/reset` | `{resources?: ["postgres:prj_…"]}` | `Preview`: re-branch from the parents |
 | `GET /v1/previews/{id}/restore-points` | | `{points: [{id, label, by, at, data}], max}`: oldest first, `data` the resources it holds (`postgres:prj_…`) |
-| `POST /v1/previews/{id}/restore-points` | `{label?}` (one line, 60 characters at most) | 201 `{id, label, by, at, data}`: its Postgres data saved now; 409 while it isn't ready, past `max`, or with nothing to save |
+| `POST /v1/previews/{id}/restore-points` | `{label?}` (one line, 60 characters at most) | 201 `{id, label, by, at, data}`: its Postgres and NoSQL data saved now; 409 while it isn't ready, past `max`, or with nothing to save |
 | `POST /v1/previews/{id}/restore-points/{point}/restore` | | `Preview`: the data put back as the point left it, on its next converge (no seed); `delete`, as a reset is |
 | `DELETE /v1/previews/{id}/restore-points/{point}` | | 204 |
 | `GET /v1/previews/{id}/screenshot` | | `image/png`: the first service's page at the preview's head (404 when it has none); `?previous=1` the one before, `?view=phone` at a phone's width, `?base=1` the default branch's preview's, `?page=/pricing` another of `github.pages`, `?diff=base` or `?diff=previous` where it differs from that one or the one before (the page faded, changed pixels marked red) |
@@ -2053,7 +2057,7 @@ type Preview = {
   slower_routes?: { branch: string; routes: { name: string; count: number; p50_ms: number; main_p50_ms: number; grew?: GrewSpan | null; budget_ms?: number | null }[] } | null;
   new_errors?: { branch: string; total: number; errors: { service: string; title: string }[] } | null;
   served_secrets?: { key: string; path: string }[]; // its secret values its pages serve at its head: names and where, never values
-  skipped?: { pages?: string[]; stories?: number; first_stories?: string[] }; // what its latest screenshot run left out at its head: pages past a run's ten, stories it didn't take (the first 10 by id)
+  skipped?: { pages?: string[]; stories?: number; first_stories?: string[]; by_files?: true }; // what its latest screenshot run left out at its head: pages past a run's ten, stories it didn't take (the first 10 by id); by_files: it chose them by the change's files alone, its Storybook serving no module graph (--stats-json)
   regressions?: "check" | "required" | null;
   regressions_accepted?: { head: string; by: string; at: number } | null;
   regressions_compared?: boolean;     // compared with main's preview at its head (errors; routes too with traces)
@@ -2321,7 +2325,11 @@ type Settings = {
     root holds something (3 s at most), and captured clipped to what it rendered (an 8 px margin,
     at most 1280 by 2000; 256 KiB a PNG), 100 s in all. Each is a page of its own (`story:<id>`,
     "Stories" on the sheet, labelled `button / primary`), with what went wrong while it rendered,
-    compared with main's same story and reviewed like a page. A story gone from Storybook goes
+    compared with main's same story and reviewed like a page. Each is checked with axe as a page
+    is (Chromatic's accessibility tests: its rules, its language and title), while more than 30 s
+    of the run are left so a big Storybook still gets its pictures, 8 KB of it at most; what it
+    adds against main's same story counts like a page's (`a11y_added`). Live: the live
+    Storybook's stories carry it. A story gone from Storybook goes
     from the preview. The index is the preview's code's: an id Storybook wouldn't make
     (`components-button--primary`) is dropped. A Storybook on another service is kept with that
     service's pages while it runs what it ran (TurboSnap), and taken at once when the rule is
@@ -2865,8 +2873,9 @@ comments, Render and Railway, Neon, Chromatic and Percy, Signadot, Jam.
 2. **The stories a change touched, by the module graph, in review**: a story that imports a changed
    file from anywhere comes after those whose own file changed (Storybook's `preview-stats.json`
    when the build has it; files alone without), and a built Storybook's stories run live in a
-   real browser for the first time. Next for it: a `storybook dev` server has no stats file, so
-   say on the sheet when a run ordered by files alone.
+   real browser for the first time (#1014). In review: a run that chose by files alone (no stats
+   file, as from `storybook dev`) and left stories says so on the sheet (`skipped.by_files`),
+   with how to give it the graph.
 3. **A note in one click, in review**: the button's note opens a small window of roll's with its
    form alone, which posts and closes (`/dashboard/previews/note`); a phone keeps the dashboard
    in a tab. Next for it: a reply and a resolve from the page the same way.
@@ -2878,9 +2887,10 @@ comments, Render and Railway, Neon, Chromatic and Percy, Signadot, Jam.
    as on previews' own proxy from roll apps' proxy (its #1032; previews' live check in review).
 6. **A capped preview's roll apps service, in review**: its `pv-` environment paused while the
    preview's over its cap, resumed under it.
-7. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
-   is kept only where the product puts a branch back in place, keeping its id (their delete
-   guards check it); each needs its control plane's reset `from`, as pg-control's.
+7. **Restore points for the products that only copy**: NoSQL's in review (its point-in-time
+   restore in place, to the second its point was cut at). Redis, search and streams: a point is
+   kept only where the product puts a branch back in place, keeping its id (their delete guards
+   check it); each needs its control plane's reset `from`, as pg-control's.
 8. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start

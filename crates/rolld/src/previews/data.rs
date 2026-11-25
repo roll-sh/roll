@@ -509,11 +509,33 @@ impl Brancher for Nosql {
         }
     }
 
-    /// A branch of the preview's own database: an earlier push's data. A NoSQL branch inherits
-    /// its parent's masking policy, so the copy reads masked as the preview's branch does (and
-    /// goes when the rules change).
+    /// A branch of the preview's own database (an earlier push's data, a restore point), cut at
+    /// a whole second, `parent_at`: what [`Self::restore`] puts the branch back to. A NoSQL branch
+    /// inherits its parent's masking policy, so the copy reads masked as the preview's branch does
+    /// (and goes when the rules change).
     async fn snapshot(&self, _parent: &str, branch: &str, name: &str) -> anyhow::Result<Option<Branched>> {
-        self.branch(branch, name, Mode::Branch).await.map(Some)
+        let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+        let body = json!({ "name": name, "at": at });
+        match self.0.post(&format!("/v1/nosql/databases/{}/branches", seg(branch)), body).await {
+            Ok(v) => Ok(Some(Branched::plain(s(&v["id"]).ok_or_else(|| anyhow::anyhow!("a database without an id"))?))),
+            Err(e) if conflict_is_ours(&e) => self.branch(branch, name, Mode::Branch).await.map(Some),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn restores(&self) -> bool {
+        true
+    }
+
+    /// In place, from the branch's own history (NoSQL's point-in-time restore, kept 7 days): back
+    /// to the second its point was cut at, the point's `parent_at`. Same id, endpoint and
+    /// credentials; the replaced state is archived by NoSQL. Only a point that's this branch's own.
+    async fn restore(&self, _parent: &str, branch: &str, _kept: Option<&str>, point: &str, _name: &str, _mode: Mode) -> anyhow::Result<Option<Branched>> {
+        let (p, b) = (self.0.get(&format!("/v1/nosql/databases/{}", seg(point))).await?, self.0.get(&format!("/v1/nosql/databases/{}", seg(branch))).await?);
+        anyhow::ensure!(!b["id"].is_null() && p["parent_id"] == b["id"], "restore point {point} isn't a copy of NoSQL database {branch}");
+        let at = p["parent_at"].as_i64().ok_or_else(|| anyhow::anyhow!("restore point {point} says no time"))?;
+        self.0.post(&format!("/v1/nosql/databases/{}/restore", seg(branch)), json!({ "at": at })).await?;
+        Ok(Some(Branched::plain(branch)))
     }
 
     async fn delete_snapshot(&self, _parent: &str, from: &str, snapshot: &str, _kept: Option<&str>, name: &str) -> anyhow::Result<()> {
@@ -1224,7 +1246,10 @@ impl Brancher for Search {
         let run = |method: &'static str, path: String, body: Option<Value>| {
             let console = console.clone();
             async move {
-                let mut req = json!({ "method": method, "path": path });
+                // A masked `semantic_text` field whose endpoint came without the parent's key keeps
+                // its masked text unembedded, the real values' embeddings dropped (roll search's
+                // `X-Roll-Unembedded`; nothing for a field that can embed).
+                let mut req = json!({ "method": method, "path": path, "headers": [[search_control::UNEMBEDDED_HEADER, "drop"]] });
                 if let Some(b) = body {
                     req["body"] = b;
                 }

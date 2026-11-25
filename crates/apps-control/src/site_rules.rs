@@ -28,7 +28,8 @@ const MAX_TARGET: usize = 4096;
 /// What a placeholder's value may hold as it is: the rest is percent-encoded, so a request's
 /// path can't turn a redirect into another host's (`\evil.com`, `//evil.com`) or add a query.
 const SEGMENT: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC.remove(b'-').remove(b'.').remove(b'_').remove(b'~');
-const SPLAT: &percent_encoding::AsciiSet = &SEGMENT.remove(b'/');
+/// A path's characters percent-encoded but its slashes kept (a splat, a redirect's Location).
+pub(crate) const SPLAT: &percent_encoding::AsciiSet = &SEGMENT.remove(b'/');
 
 /// Headers a site may not set: the response's framing (and how its body is encoded) is roll's.
 const RESERVED: [&str; 10] = ["content-length", "transfer-encoding", "connection", "keep-alive", "upgrade", "te", "trailer", "proxy-connection", "content-encoding", "content-range"];
@@ -37,6 +38,11 @@ const RESERVED: [&str; 10] = ["content-length", "transfer-encoding", "connection
 pub struct SiteRules {
     redirects: Vec<Redirect>,
     headers: Vec<(Pattern, Vec<(String, String)>)>,
+    /// `_roll`'s `trailing_slash` (Vercel's `trailingSlash`): a page's canonical path ends in a
+    /// slash (true) or never does (false); unset, a directory's does and a page's doesn't.
+    pub trailing_slash: Option<bool>,
+    /// `_roll`'s `clean_urls` (Vercel's `cleanUrls`): `/about.html` redirects to `/about`.
+    pub clean_urls: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -171,6 +177,21 @@ impl Pattern {
 }
 
 impl SiteRules {
+    /// These rules with `_roll`'s settings (`key = value` lines, what roll's build writes from
+    /// `vercel.json`; anything else in it is ignored).
+    pub fn with_settings(mut self, text: Option<&str>) -> SiteRules {
+        for line in text.unwrap_or("").lines() {
+            let Some((k, v)) = line.split_once('=') else { continue };
+            match (k.trim(), v.trim()) {
+                ("trailing_slash", "true") => self.trailing_slash = Some(true),
+                ("trailing_slash", "false") => self.trailing_slash = Some(false),
+                ("clean_urls", v) => self.clean_urls = v == "true",
+                _ => {}
+            }
+        }
+        self
+    }
+
     /// Both files' text, either of them absent.
     pub fn parse(redirects: Option<&str>, headers: Option<&str>) -> SiteRules {
         let mut rules = SiteRules::default();
@@ -416,7 +437,7 @@ fn is_exact(r: &Redirect) -> bool {
 /// its tree's root has its `netlify.toml` and `vercel.json` in it, and those can hold build
 /// settings).
 pub fn is_rules_file(path: &str) -> bool {
-    matches!(path.trim_matches('/'), "_redirects" | "_headers" | "netlify.toml" | "vercel.json")
+    matches!(path.trim_matches('/'), "_redirects" | "_headers" | "_roll" | "netlify.toml" | "vercel.json")
 }
 
 #[cfg(test)]

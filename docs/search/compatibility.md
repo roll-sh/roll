@@ -182,7 +182,11 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
   actions, a by-query `refresh=true` refused after its writes, a plain `Unauthorized` 401.
   Document and field level security and masked fields (BLAKE2b with
   `plugins.security.compliance.salt`, `::/regex/::replacement` and `::SHA-256`/`::SHA-512`
-  rules; the union over roles) by `os_security_dls.json` (16 steps). Differences: a DLS query
+  rules; the union over roles) by `os_security_dls.json` (16 steps). Where they restrict an
+  index, an update is refused (500 `security_exception` "Update is not supported when FLS or
+  DLS or Fieldmasking is activated"; in `_bulk`, every item of the shard request holding the
+  update), and an update by query writes back only what the user reads, as Elasticsearch's
+  does. Differences: a DLS query
   filters without adding OpenSearch's +1.0 to scores; masked fields are unmapped for queries
   and aggregations (OpenSearch aggregates and matches their hashes); mappings by `hosts` never
   match (roll doesn't see the client's address); `hash`es given by clients are bcrypt (as the
@@ -519,6 +523,22 @@ on one names the pause in `step_info`); its inherited watches are inactive. Clon
 repository is refused as on Elasticsearch ("cannot create snapshot in a readonly repository").
 The `watcher` suite's webhooks and `http` inputs call the node itself: its test cluster sets
 `roll.watcher.allow_private_hosts` (a roll-only option in `extended.txt`), which nothing else does.
+
+A watch's HTTP requests keep their secrets sealed (architecture.md, "Secrets a cluster stores"):
+`GET _watcher/watch`, `_execute` and the records in `.watcher-history-*` show `::es_redacted::`
+for the password, every header but `Content-Type`, `Content-Length`, `Content-Encoding`,
+`Accept`/`Accept-*`, `User-Agent`, `Cache-Control` and `If-*`, the URL's path and params, and a body
+that names a credential (`routing_key`, `token`, `password`, …). Elasticsearch shows only the
+password and `Authorization` redacted. So a watch read back with `GET` and put again unchanged is
+refused (400 `found a redacted value in field [path]`) unless the update says `if_seq_no` and
+goes to the same scheme, host and port, when each redacted value keeps the stored one, as the
+password does on Elasticsearch. The watcher suites pass as before (89 and 9).
+
+Watch records (`.watcher-history-*`) are reached only by a grant that names them (`.watch*`,
+`.watcher-history-*`, Elasticsearch's watcher roles) or that allows restricted indices, through an
+alias too: on Elasticsearch a grant of `*` reaches them. `_update_by_query` drops a
+`semantic_text` field's embeddings when its script changes the field's text, as `_update` does,
+so they're made again from the new text, never left embedding the old one.
 
 The security audit log (README, "Audit log") writes Elasticsearch's entries: event names, field
 names and order, and the shapes of `security_config_change` entries (`put_user` with
@@ -1120,7 +1140,17 @@ Checked against Elasticsearch 9.5.5 (captures in
   index), then its source searched as the caller (wildcards narrowed to what it may read, its
   document and field level security applied, so only what it sees is copied) and each write
   authorized as a bulk item at the index it goes to (a script's `_index` and `ctx.op = 'delete'`
-  too); a remote source is read with its own credentials. A
+  too); a remote source is read with its own credentials. An update reads the whole document
+  and writes it back, so where the caller's document or field level security restricts the
+  index, `_update` (an upsert too) answers 400 `security_exception` "Can't execute an update
+  request if field or document level security is enabled" and a bulk update item fails the
+  same way ("… a bulk item request with update requests embedded …", the error repeated as
+  `suppressed`, as Elasticsearch prints it), the request's other items unaffected. An update by
+  query reads as the caller, as Elasticsearch's scroll does: only the documents it sees, their
+  `_source` without the fields it can't see, and it writes them back so: those fields are
+  dropped from the documents (a script reading one gets `null`). Difference: Elasticsearch
+  refreshes a by-query `refresh=true` as the caller (403 without `maintenance`); roll refreshes
+  it as the cluster. A
   stored result (async search, ES|QL, EQL, SQL, and SQL cursors) is its opener's (the API key, or
   the user and realm): anyone else gets 404 for it, its status and its delete (a cursor: unknown),
   except that `cancel_task` may delete it. One stored before owners were recorded is the
@@ -2319,27 +2349,8 @@ the rest are skipped by the tests' own prerequisites.
     the restoring cluster's, and the settings Elasticsearch set for its cluster (allocation,
     blocks, lifecycle, `index.store.*`, the made-by-the-cluster ones) are dropped with a warning,
     as the migration from a live cluster drops them; `index.mapping.exclude_source_vectors` is set
-    explicitly to what the index had. Data streams restore as on Elasticsearch 9.5.5 (checked
-    against it): a pattern matching a data stream's name (or `*`, or no `indices`) brings it back
-    with all its backing indices, its generation, flags, `_meta`, lifecycle and settings from the
-    snapshot's global metadata whatever `include_global_state` says (its template only with the
-    global state; it takes writes without one); renamed, every backing index is renamed as
-    Elasticsearch's `RestoreService.renameIndex` renames it (the pattern applied to what follows
-    `.ds-`, so `.ds-<new name>-<date>-<generation>`); a data stream or backing index already here
-    under a target name is refused, and so is a snapshot whose data streams share a backing
-    index; a pattern matching only backing indices restores them as plain indices. With
-    `partial`, a data stream dropped (its global metadata missing, a backing index not in the
-    snapshot) takes its backing indices with it unless the request names them; a request for
-    data streams only whose global metadata is missing is an error. System data streams and
-    system indices aren't restored (a note says so). An index takes no document writes (503
-    `unavailable_shards_exception`; by-query runs fail on each document) while its restore
-    runs. Renames, on either kind of repository, need both `rename_pattern` and
-    `rename_replacement` and use Java's replacement syntax, as `RestoreService` does (`$12`
-    with two groups is group 1 then `2`, `${name}`, `\x` for `x`; a group the pattern lacks
-    fails the restore). Failure
-    store indices and data stream aliases aren't restored, nor are feature states. A restore
-    interrupted by a takeover resumes on the next owner from the first shard it hadn't finished
-    (each shard recorded finished only once its documents are durable). At most one such restore
+    explicitly to what the index had. Data streams restore as their backing indices (the data
+    stream itself isn't recreated), and feature states aren't restored. At most one such restore
     runs per cluster (a second answers 503 `concurrent_snapshot_execution_exception`) and two per
     node; a restore is a full reindex, at roll's indexing rate (docs/search/README.md, "Next").
   - **Hostile input**: everything is read as a tenant's bytes. No allocation is sized from a count
@@ -2356,12 +2367,10 @@ the rest are skipped by the tests' own prerequisites.
     names that become keys or paths are checked. Reads pay `max_restore_bytes_per_sec` and
     `indices.recovery.max_bytes_per_sec`; the task obeys cancellation between documents.
   - **On the fleet**, the restore runs on the cluster's owner and its writes are logged and fenced
-    like any write; each index's recovery source records the restore and the shards it finished,
-    and an owner that opens a cluster with one still running restores those indices again from
-    the first shard not finished (that shard's documents already there are written again under
-    the same ids; one deleted on roll meanwhile comes back once its tombstone is gone), or
-    records why it can't; a drain, a rebalance or the node stopping (SIGTERM) leaves the restore
-    running for the next owner, and any other failure is recorded; a task that stops on a panic marks its
+    like any write; each index's recovery source records the restore, and an owner that opens a
+    cluster with one still running restores those indices again from the start (the documents
+    already there are written again under the same ids; one deleted on roll meanwhile comes back
+    once its tombstone is gone), or records why it can't; a task that stops on a panic marks its
     indices failed. The old owner's task isn't stopped; its writes fail the write-ahead log's
     ownership check like every write of a node that lost the cluster.
 - Searchable snapshots mount through the snapshot restore API, so a mounted index holds its own

@@ -73,9 +73,6 @@ pub(crate) fn walk(store: &Store, repo: &str, cs: &ChangesetId, limit: usize, mu
     Ok(false)
 }
 
-/// The most untrusted changes a read at a revision checks (the newest).
-const OUTSIDE_HEADS: usize = 100;
-
 /// Marks what a read answers as an outsider's (`"outside": true`, MCP's lockdown): the answer
 /// itself and each item of its `lists`.
 pub(crate) fn mark_outside(v: &mut Value, lists: &[&str]) {
@@ -88,16 +85,16 @@ pub(crate) fn mark_outside(v: &mut Value, lists: &[&str]) {
 }
 
 impl Code {
-    /// Whether what revision `cs` holds may be an outsider's (MCP's lockdown withholds it): it's
-    /// off the default branch and in a change from outside the repo (a fork's pull request: its
-    /// head, or a changeset before it). A team's own branches and changes aren't. A failed lookup
-    /// off the default branch counts as outside.
+    /// Whether what revision `cs` holds may be an outsider's (MCP's lockdown withholds it): someone
+    /// who can't push wrote it (`outside_changesets`: what a fork's pull request brought in, an
+    /// untrusted change's writes, a queue tip built on one), and it hasn't landed since (a writer
+    /// let it onto the default branch). One indexed lookup; a team's own branches and changes
+    /// aren't in it. A failed lookup counts as outside.
     pub(crate) fn outside_at(&self, r: &RepoRow, cs: &ChangesetId) -> bool {
-        if self.on_default(r, cs) {
-            return false;
+        match self.db.outside_of(&r.id, &[cs_id(cs)]) {
+            Ok(set) => !set.is_empty() && !self.on_default(r, cs),
+            Err(_) => true,
         }
-        let Ok(heads) = self.db.untrusted_heads(&r.id, OUTSIDE_HEADS) else { return true };
-        heads.iter().filter_map(|h| self.store.resolve(&r.id, h).ok().flatten()).any(|h| h == *cs || self.store.is_ancestor(&r.id, cs, &h).unwrap_or(true))
     }
 
     /// Whether `cs` is on the default branch (landed, so a writer let it in).
@@ -115,9 +112,18 @@ impl Code {
         }
         mark_outside(v, lists);
         if let Some((list, key)) = changesets {
+            // One lookup for the list; only a fork's own changesets are checked against the default
+            // branch (each once).
+            let ids: Vec<String> = v[list].as_array().into_iter().flatten().filter_map(|i| i[key].as_str().map(str::to_string)).collect();
+            let theirs = self.db.outside_of(&r.id, &ids).unwrap_or_else(|_| ids.iter().cloned().collect());
+            let mut landed: HashMap<String, bool> = HashMap::new();
             for item in v[list].as_array_mut().into_iter().flatten() {
-                let off = item[key].as_str().and_then(|id| self.store.resolve(&r.id, id).ok().flatten()).is_none_or(|c| !self.on_default(r, &c));
-                if off {
+                let Some(id) = item[key].as_str().map(str::to_string) else { continue };
+                if !theirs.contains(&id) {
+                    continue;
+                }
+                let on = *landed.entry(id.clone()).or_insert_with(|| self.store.resolve(&r.id, &id).ok().flatten().is_some_and(|c| self.on_default(r, &c)));
+                if !on {
                     item["outside"] = json!(true);
                 }
             }

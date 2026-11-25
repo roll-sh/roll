@@ -1598,8 +1598,9 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/secrets/projects/{project}/kubernetes", "secrets", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/kubernetes/{id}", "secrets", ADMIN, one(&["project"], "project")),
     // A backup seals every environment's values to a key the caller chooses; a restore loads a
-    // whole project; a verify compares an opened backup with every value. All admin in secrets too.
-    row("POST", "/v1/secrets/projects/{project}/backup", "secrets", ADMIN, one(&["project"], "project")),
+    // whole project; a verify compares an opened backup with every value. All admin; a backup and a
+    // verify need reveal over the whole project too, which secrets asks (and `sealed` is a credential).
+    row("POST", "/v1/secrets/projects/{project}/backup", "secrets", ADMIN, one(&["project"], "project")).reveals(&["sealed"]),
     row("POST", "/v1/secrets/projects/{project}/backup/verify", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/backup/latest", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/backup/schedule", "secrets", ADMIN, one(&["project"], "project")),

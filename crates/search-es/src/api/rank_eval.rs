@@ -311,7 +311,11 @@ pub fn rank_eval(ctx: &Ctx) -> EsResult<Reply> {
     let mut details: Vec<(String, Value, f64)> = Vec::new();
     let mut failures: Vec<(String, Value)> = Vec::new();
     for (rr, req) in rated {
-        let outcome = crate::search::run(ctx, req.clone());
+        // Each request (verbatim, or as its template rendered) is checked as a search body is:
+        // the indices its lookups (terms lookups, `more_like_this` documents, indexed shapes)
+        // read are the caller's to read. A denied one fails that request (`failures`), as on
+        // Elasticsearch, where the lookup's get is refused.
+        let outcome = crate::xpack::security::check_lookups(ctx, Some(&rr.body)).and_then(|()| crate::search::run(ctx, req.clone()));
         let resp = match outcome {
             Ok(o) => crate::search::render(&o, &req),
             Err(e) => {

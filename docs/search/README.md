@@ -362,9 +362,13 @@ applications). A web page calls a cluster directly, with no backend of its own i
     expands terms (`prefix`, `wildcard`, the prefix match queries, `simple_query_string`,
     `fuzziness`, `max_expansions`) unless the parent's `limits.allow_expensive_queries`, since
     its expansions aren't capped as a browser key's own queries' are; nor, without it, a
-    `range` on a field an index the key reaches maps as text or a keyword (its terms are walked,
-    as Elasticsearch's `search.allow_expensive_queries: false` refuses), read from the mappings on
-    each request), a `range` on numbers and dates staying allowed, a `user` (an end
+    `range` on a field an index the key reaches maps as text or a keyword, a `flattened` field's
+    keyed subfields included (its terms are walked, as Elasticsearch's
+    `search.allow_expensive_queries: false` refuses), a `range` on numbers and dates staying
+    allowed; and never a query on a runtime field, which runs its script for every document.
+    The indices a key reaches are those its names match, by name or alias, and the backing
+    indices of the data streams (and data stream aliases) they name, their mappings read on each
+    request), a `user` (an end
     customer, Algolia's `userToken`),
     `origins` and `rate_limit: {"per_minute": n}` (the user's). Unknown fields, duplicate keys and
     trailing bytes are refused. It goes wherever a browser key goes (`Authorization: ApiKey
@@ -573,9 +577,9 @@ Elasticsearch-flavor.
   `seeds`) naming a cluster (its name, or its endpoint `<name>.<domain>[:port]`) works too, held
   to the same owner rule, but connects only once the remote has credentials.
 - **Credentials** are a secure setting: sealed under `ROLL_SECRET_KEY` and bound to their row
-  (cluster, alias, remote) in the catalog (`search_remotes`). A node without the key refuses an
-  `api_key` someone pasted (it would be stored in the clear) and keeps one roll made as made
-  (local development); a node that gains the key seals those rows as it starts. Never returned (`_remote/info`
+  (cluster, alias, remote) in the catalog (`search_remotes`). A single node without the key seals
+  them under its own key (`<home>/search/key`, as clusters' passwords), and sealed again with
+  `ROLL_SECRET_KEY` as it starts once it has it; never in the clear. Never returned (`_remote/info`
   shows `cluster_credentials: "::es_redacted::"`). The remote authorizes each request with the
   key's access intersected with the local user's `remote_indices` privileges for the alias (the
   cluster's own password is a superuser: everything the key allows), as Elasticsearch does.
@@ -886,7 +890,10 @@ cover it against one fake that speaks the three APIs; `roll-cli` `tests/search.r
 details) has `roll_search_cluster` (name, flavor, `always_on` or `idle_timeout_s`, limits,
 `ip_allowlist`; computed endpoint, status, version and the password from create; a new name
 makes a new cluster, a new flavor switches it in place keeping its data (links made before are
-reissued, and keys don't carry over: an API key isn't an OpenSearch user); import by id or name; destroy deletes it, restorable for
+reissued, and keys don't carry over: an API key isn't an OpenSearch user, so an OpenSearch-flavor
+cluster takes no API key, access token or service account token; a key made before a switch is
+revoked by `DELETE …/keys/{key}` whatever the flavor is now, and stays revoked across a switch
+back); import by id or name; destroy deletes it, restorable for
 `deleted_retention_s`, 7 days by default), `roll_search_api_key` (`access`, or Elasticsearch
 `role_descriptors` through the cluster's `_security/api_key`, and an `expiration`; its secret is
 sensitive, replaced on any change and after a flavor switch, revoked on destroy; also an ephemeral resource, revoked when
@@ -1377,13 +1384,12 @@ deterministic (#396).
    tenant tokens: a derivable browser key's backend signs a short-lived, narrower key per end
    customer, checked on the owner every request, with a per-user share of the parent's rate;
    then #1002: verified once per request through a typed field only the node sets, expensive
-   filters only when the parent allows them, and each end user's own context owner; in review
-   (#1025): usage and 429s per browser key by reason, with a derived key's top users);
+   filters only when the parent allows them, and each end user's own context owner; then #1025:
+   usage and 429s per browser key by reason, with a derived key's top users and the top refused
+   origins, in the Browser search section, the CLI and MCP, as Algolia shows per-key usage);
    what remains: RAG's chat limits for browser keys (item 11); browser search on previews (a branch keeps the
    parent's origins but no browser key works there: give it one and the preview's URL, roll
-   previews' side); usage and 429s per browser key, by reason, with a derived key's top users and
-   the top refused origins, in the Browser search section, the CLI and MCP (Algolia's per-key
-   usage and logs) in review (`feature/search-browser-key-usage`); Algolia's search-only and secured API keys,
+   previews' side); Algolia's search-only and secured API keys,
    Typesense's scoped keys, Meilisearch's tenant tokens, Elastic's search applications): a web
    page can't call a roll cluster today. There's no CORS (`http.cors.*` are static settings no
    tenant can set), so every site needs a backend in front of search, which is the first thing
@@ -1452,8 +1458,8 @@ deterministic (#396).
    every credential field. It found a branch able to read its parent's `_connector/_secret` and
    `_fleet/secret` values (sealed by kind alone, so they opened on the copy), watch headers and
    webhook URLs other than `Authorization` kept in the clear, and inference endpoints on a branch
-   spending the parent's provider key; the fix is in progress (`fix/search-branch-secrets`:
-   every secret store bound to its cluster, nothing a branch inherits opens there). Checked and
+   spending the parent's provider key; fixed in #988 (every secret store bound to its cluster,
+   nothing a branch inherits opens there). Checked and
    sound: cluster passwords, browser keys, remote links, `roll://` references, repository
    credentials, connector configuration, site verifications, migration credentials and previews'
    data keys. Next pass: caches and context stores (scroll, point in time, async results, the
@@ -1464,15 +1470,29 @@ deterministic (#396).
    tenant's own settings lifted the scroll and point-in-time limits, while an open context kept a
    cluster loaded past the always-on caps. Fix in progress (`fix/search-contexts-caches`).
    Checked and sound: async results, scroll and point-in-time ids, cross-cluster contexts, the
-   credential and analysis caches, and the metering buffers. The second pass's fix is in review
-   (#988, with previews' `X-Roll-Unembedded: drop` for masking a `semantic_text` field on a branch;
+   credential and analysis caches, and the metering buffers. The second pass's fix landed in #988
+   (with previews' `X-Roll-Unembedded: drop` for masking a `semantic_text` field on a branch;
    its reviews also found `_update_by_query`/`_delete_by_query` reaching hidden indices with
-   `expand_wildcards=all`, now narrowed as Elasticsearch narrows them), and the third's in review
+   `expand_wildcards=all`, now narrowed as Elasticsearch narrows them), and the third's is in review
    (#1021). Found on the way: on OpenSearch-flavor clusters `_reindex` checked neither its source
-   nor its destination, so a key limited to some indices could copy any index into its own (in
-   review, #1029: read on the source and write on each destination, as Elasticsearch requires);
-   and `_update`, bulk updates and `_update_by_query` don't honour DLS and FLS, where Elasticsearch
-   refuses them (in progress, `fix/search-update-dls-fls`).
+   nor its destination, so a key limited to some indices could copy any index into its own (fixed
+   in #1029: read on the source and write on each destination, as Elasticsearch requires);
+   `_update`, bulk updates and `_update_by_query` don't honour DLS and FLS, where Elasticsearch
+   refuses them (in progress, `fix/search-update-dls-fls`); and `.tasks` is made before it's
+   hidden, OpenSearch's `_cat/aliases` lists every alias (in progress, `fix/search-tasks-hidden`).
+   Fourth pass (2026-11-25, on main): what a request reads on the caller's behalf (lookups,
+   templates, multi-item APIs, ingest, connectors, cross-cluster calls). `_mtermvectors` never
+   authorized its items' indices, so a key limited to some indices read another's indexed terms,
+   and `_rank_eval` rendered templates without the lookup checks a search gets (in progress,
+   `fix/search-mtermvectors-rank-eval`: each item authorized as `indices:data/read/tv` under DLS
+   and FLS, rendered queries checked as a search body is). The same pass found lookups (terms,
+   `percolate`, `more_like_this`, lookup runtime fields) authorized only by a scan of the body that
+   skipped keys named `document` or `params` and never saw templated role queries or alias filters
+   (in progress, `fix/search-lookups-at-run`: each lookup authorized where it runs, as the reader);
+   and names authorized before they're resolved: `PUT {index}/_alias` taking its index from the
+   body, date math (`<.async-search>`) and `::failures` selectors checked as written, and resize
+   targets never checked (in progress, `fix/search-resolved-names`, with Elasticsearch's alias and
+   resize guards).
 5. **Cross-cluster search: what's left** (ES|QL across clusters landed in #504 after five reviews: each
    cluster's part on its owner, `_remote`/`_coordinator`/`_any` enrich modes, LOOKUP JOIN across clusters
    with union types refused as Elasticsearch refuses them; still different: a command inside a part after
@@ -1600,18 +1620,14 @@ deterministic (#396).
    hostile input, and indexes every live document again from `_source` as a task `_recovery`
    follows. Indices without a stored `_source` are refused by name and reason (`partial`
    restores the rest). Measured: 1M documents (~200 bytes, 2 shards, from an `fs` repository) restored in 22.8 s, 43,900 docs/s (a release build into an in-memory cluster on lane b's 12 build CPUs at nice 19, one run). Left of
-   the restore: segments Lucene 8 wrote (Elasticsearch 7.x indices never merged since), `sparse_vector`
+   the restore: segments Lucene 8 wrote (Elasticsearch 7.x indices never merged since), data streams themselves (their backing indices restore), `sparse_vector`
    and `rank_vectors` values and nested dense vectors that Elasticsearch 9 left out of `_source`,
-   `_status` file counts from the shard snapshots, and data stream aliases and failure stores.
-   In progress (`feature/search-es-restore-2`): data streams themselves (with their generation,
-   and their template with the global state, as Elasticsearch 9.5.5 restores them), and a restore
-   resumed after a takeover from the shard reached rather than from the start of each index.
-   Landed since: a snapshot DELETE waits for
+   `_status` file counts from the shard snapshots, and resuming after a takeover from the shard
+   reached rather than from the start of each index. Landed since: a snapshot DELETE waits for
    running snapshots that build on it, as Elasticsearch does, and a cap on repository generations
    (#941); deletions and `_cleanup` show as running, so a snapshot starting meanwhile waits for
-   them rather than take a removed snapshot as its base (#995). In review
-   (#1008): data streams restored whole, and a restore resumed after a takeover from the shard
-   it reached.
+   them rather than take a removed snapshot as its base (#995); data streams restored whole, and
+   a restore resumed after a takeover from the shard it reached (#1008).
    Chunks of failed snapshots stay until `_cleanup` (compatibility.md says why).
 10. **Relevance tuning by MCP and Terraform**: `/v1/search` serves synonyms sets, query rulesets
    (and `_test`), writing an index's settings and `_explain` (the routes table), and `roll search`

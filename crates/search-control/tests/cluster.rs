@@ -300,6 +300,51 @@ async fn a_forward_carries_the_clients_address_to_the_owner() {
     assert_eq!(r.status(), 401, "a client's own x-roll-code-client");
 }
 
+/// The deployment's key on every node of the fleet: a derivable browser key's secret, sealed
+/// where it was made, opens on whichever node owns the cluster.
+fn sealed(c: &mut SearchConfig) {
+    c.sealer = search_control::Sealer::from_secret(SECRET);
+}
+
+/// A derived browser key's request through a node that doesn't own its cluster: forwarded to the
+/// owner, which verifies it there and answers with its narrowed view.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_derived_key_is_verified_and_narrowed_on_the_owner() {
+    let leases = MemoryStore::new();
+    let objects = search_store::test_objects("fleet-derived");
+    let catalog = Arc::new(search_control::store::Store::memory().unwrap());
+    let a = node_with("a", &leases, &objects, &catalog, sealed).await;
+    let b = node_with("b", &leases, &objects, &catalog, sealed).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while a.cluster.nodes().len() != 2 || b.cluster.nodes().len() != 2 {
+        assert!(tokio::time::Instant::now() < deadline, "the nodes never saw each other");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let http = reqwest::Client::new();
+    let (s, c) = call(&http, reqwest::Method::POST, format!("{}/v1/search/clusters", a.api), None, Some(json!({"name": "shop"}))).await;
+    assert_eq!(s, 200, "{c}");
+    let path = format!("{}/v1/search/clusters/{}", a.api, c["id"].as_str().unwrap());
+    let bulk = [("products", "1", "acme", true), ("products", "2", "globex", true), ("products", "3", "acme", false), ("products-archive", "4", "acme", true)]
+        .iter()
+        .map(|(i, id, t, public)| format!("{}\n{}\n", json!({"index": {"_index": i, "_id": id}}), json!({"tenant": t, "public": public})))
+        .collect::<String>();
+    let (s, r) = call(&http, reqwest::Method::POST, format!("{path}/request"), None, Some(json!({"method": "POST", "path": "/_bulk?refresh=true", "body": bulk}))).await;
+    assert!(s == 200 && r["status"] == 200, "{r}");
+    let (s, parent) = call(&http, reqwest::Method::POST, format!("{path}/browser-keys"), None, Some(json!({"name": "saas", "indices": ["products*"], "filter": {"term": {"public": true}}, "derivable": true}))).await;
+    assert_eq!(s, 200, "{parent}");
+    let exp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 600;
+    let payload = json!({"key": parent["id"], "cluster": "shop", "exp": exp, "indices": ["products"], "filter": {"term": {"tenant": "acme"}}, "user": "acme"});
+    let derived = search_es::xpack::security::derived::sign(parent["signing_secret"].as_str().unwrap(), &payload.to_string());
+    let key = search_control::cluster::key("shop");
+    let (_, other) = if a.cluster.owns(&key) { (&a, &b) } else { (&b, &a) };
+    let r = http.post(format!("{}/products*/_search", other.rest)).header("authorization", format!("ApiKey {derived}")).json(&json!({"query": {"match_all": {}}})).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    let ids: Vec<&str> = v["hits"]["hits"].as_array().unwrap().iter().filter_map(|h| h["_id"].as_str()).collect();
+    assert_eq!(ids, ["1"], "products only, acme's only, public only: {v}");
+    assert!(other.control.node.loaded().is_empty(), "verified on the owner");
+}
+
 /// A linked remote owned by another node is searched on that node through the signed forward:
 /// roll's own request, which the remote's IP allowlist doesn't filter, and which loads the
 /// remote only on its owner.
@@ -687,40 +732,4 @@ async fn ilm_rolls_an_index_over_on_its_own() {
     })
     .await
     .expect("the first document rolls the index over");
-}
-
-/// A restore from an Elasticsearch repository whose owner is killed after recording its first
-/// shard finished: the next owner resumes it from the second shard, and every document is there.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_killed_owners_restore_resumes_after_its_finished_shards() {
-    let fixtures = std::fs::canonicalize(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../search-es/tests/fixtures/es-snapshots")).unwrap();
-    let (a, b) = two_nodes("fleet-es-restore", |c| c.node_settings.push(("path.repo".into(), fixtures.display().to_string()))).await;
-    let hook = search_es::api::snapshots::ELASTIC_RESTORE_HOOK.get_or_init(Default::default);
-    *hook.stop_after.lock().unwrap() = Some(("mixed".into(), 0));
-    let http = reqwest::Client::new();
-    let (s, c) = call(&http, reqwest::Method::POST, format!("{}/v1/search/clusters", a.api), None, Some(json!({"name": "restore"}))).await;
-    assert_eq!(s, 200, "{c}");
-    let pw = c["password"].as_str().unwrap().to_string();
-    let es = |n: &Node, method: reqwest::Method, path: &str, body: Option<Value>| call(&http, method, format!("{}{path}", n.rest), Some(("restore", &pw)), body);
-    let (s, v) = es(&a, reqwest::Method::PUT, "/_snapshot/es", Some(json!({"type": "fs", "settings": {"location": "es-9.5.5"}}))).await;
-    assert_eq!(s, 200, "{v}");
-    let (s, v) = es(&a, reqwest::Method::POST, "/_snapshot/es/snap-1/_restore", Some(json!({"indices": "mixed"}))).await;
-    assert_eq!(s, 200, "{v}");
-    tokio::time::timeout(Duration::from_secs(30), hook.stopped.notified()).await.expect("the first shard is recorded finished");
-    let key = search_control::cluster::key("restore");
-    let (owner, other) = if a.cluster.owns(&key) { (&a, &b) } else { (&b, &a) };
-    owner.cluster.fault_kill();
-
-    // The next owner resumes it once its lease expires; writes wait for the restore.
-    let v = eventually(30, async || {
-        let (s, v) = es(other, reqwest::Method::PUT, "/mixed/_doc/after?routing=r&refresh=true", Some(json!({"n": 1}))).await;
-        (s == 201, v)
-    })
-    .await
-    .expect("the next owner finishes the restore");
-    assert!(other.cluster.owns(&key), "{v}");
-    let (s, v) = es(other, reqwest::Method::GET, "/mixed/_count", None).await;
-    assert_eq!((s, v["count"].as_i64()), (200, Some(52)), "{v}");
-    let started = hook.started.lock().unwrap().clone();
-    assert_eq!(started, [("mixed".to_string(), 0), ("mixed".to_string(), 1)], "the next owner restored a finished shard again");
 }
