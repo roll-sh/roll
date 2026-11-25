@@ -80,6 +80,7 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/migrate", post(migrate))
         .route("/v1/search/clusters/{id}/browser-keys", get(browser_keys).post(create_browser_key))
         .route("/v1/search/clusters/{id}/browser-keys/{key}", axum::routing::delete(revoke_browser_key))
+        .route("/v1/search/clusters/{id}/browser-keys/{key}/rotate", post(rotate_browser_key_secret))
         .route("/v1/search/clusters/{id}/remotes", get(remotes))
         .route("/v1/search/clusters/{id}/remotes/{alias}", axum::routing::put(link_remote).delete(unlink_remote))
         .route("/v1/search/clusters/{id}/indices/{index}", get(index_get).put(index_create).delete(index_delete))
@@ -907,6 +908,12 @@ async fn browser_keys(State(c): State<AppState>, Path(id): Path<String>) -> ApiR
 /// application or named indices, an optional filter, expiry and rate limit); shown once.
 async fn create_browser_key(State(c): State<AppState>, Path(id): Path<String>, Json(k): Json<crate::control::NewBrowserKey>) -> ApiResult<Value> {
     Ok(Json(c.create_browser_key(&id, k).await?))
+}
+
+/// `POST /v1/search/clusters/{id}/browser-keys/{key}/rotate`: a derivable browser key's new
+/// signing secret, in this answer only; keys derived under the old one stop working at once.
+async fn rotate_browser_key_secret(State(c): State<AppState>, Path((id, key)): Path<(String, String)>) -> ApiResult<Value> {
+    Ok(Json(c.rotate_browser_key_secret(&id, &key).await?))
 }
 
 /// `GET /v1/search/clusters/{id}/site-verifications`: the domains and origins the cluster's owner
