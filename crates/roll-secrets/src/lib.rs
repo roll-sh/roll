@@ -652,6 +652,10 @@ impl Secrets {
         db.add_column("cas", "acme_preauthorize", "INTEGER")?;
         db.ensure_schema(ssh::SCHEMA)?;
         db.ensure_schema(public_certs::SCHEMA)?;
+        // The certificate a renewal replaced, and the renewals asked for (public_certs.rs).
+        for (column, decl) in public_certs::ADDED {
+            db.add_column("public_certs", column, decl)?;
+        }
         db.ensure_schema(aws::SCHEMA)?;
         // An audit sink's format and its SIEM's token, sealed (sinks.rs): absent is roll's own.
         db.add_column("audit_sinks", "format", "TEXT")?;

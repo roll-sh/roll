@@ -82,6 +82,7 @@ impl Secrets {
             message: Some(message.clone()),
             ops: vec![Op::Set { key: key.to_string(), value: Some(value.clone()), comment: None, tags: None, kind: None, link: None, path: None, expires_at: None, if_version: Some(0) }],
             if_seq: None,
+            confirm: None,
         };
         match self.batch(&project, &env, batch(), caller) {
             Ok(a) => Ok(FoundStored { project, environment: env, path, change: a.change.map(|c| c.seq), request: None }),

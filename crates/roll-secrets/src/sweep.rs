@@ -418,9 +418,21 @@ impl Secrets {
             }
             Mode::Dynamic => Err(Error::BadRequest(format!("{key} is dynamic: every resolve issues a fresh credential"))),
             Mode::Managed if link.kind == crate::public_certs::KIND && !stored => {
-                self.request_renewal(project, &link.r#ref, caller)?;
                 let name = provider.name(&link.r#ref).unwrap_or_else(|| link.r#ref.clone());
-                Ok(Applied { change: None, items: vec![], warnings: vec![format!("roll is ordering a new certificate for {name}: {key} gets it once the CA issues it (rotation.succeeded), within minutes")], request: None })
+                let mut warnings = vec![];
+                // A leaked private key: its certificate is revoked at the CA first (a compromised
+                // key is worse than a short gap), then renewed. The leak's claim runs this once.
+                let leaked = state.as_ref().and_then(|s| s.get("handle")).and_then(|h| h.get("serial")).and_then(Json::as_str).filter(|_| leak);
+                let revoked = leaked.map(|serial| self.revoke_serial(project, &link.r#ref, serial, crate::public_certs::RevokeReason::KeyCompromise, caller).map(|()| serial));
+                if let Some(Ok(serial)) = &revoked {
+                    warnings.push(format!("revoked {name}'s certificate {serial} at the CA"));
+                }
+                self.request_renewal(project, &link.r#ref, caller, leak)?;
+                if let Some(Err(e)) = revoked {
+                    return Err(e);
+                }
+                warnings.push(format!("roll is ordering a new certificate for {name}: {key} gets it once the CA issues it (rotation.succeeded), within minutes"));
+                Ok(Applied { change: None, items: vec![], warnings, request: None })
             }
             Mode::Managed => {
                 let cred = self.links.credential(&link).unwrap_or("default").to_string();
@@ -469,6 +481,12 @@ impl Secrets {
                     if leak {
                         data["via"] = serde_json::json!("leak");
                         data["grace_minutes"] = serde_json::json!(0);
+                    }
+                    // Off a public certificate roll revoked (a leak's, or by hand): say which.
+                    if let Some(serial) = state.as_ref().and_then(|s| s.get("handle")).and_then(|h| h.get("serial")).and_then(Json::as_str).filter(|_| link.kind == crate::public_certs::KIND)
+                        && crate::public_certs::revoked(c, &link.r#ref, serial)?
+                    {
+                        data["revoked"] = serde_json::json!(serial);
                     }
                     let event = crate::events::Event::new(crate::events::Kind::RotationSucceeded, data);
                     crate::audit::record_event(c, self.keys()?, project, caller, "secrets.rotation_succeeded", Some(slug), Some(&path), &[key.to_string()], &format!("rotated {key} to version {version}"), now, event)?;

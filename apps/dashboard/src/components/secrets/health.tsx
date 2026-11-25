@@ -12,9 +12,9 @@ const ISSUES: { issue: Finding["issue"]; title: string; what: string; serious: b
   { issue: "production_unprotected", title: "Production isn't protected", what: "Checks, sandboxes and untrusted previews may read production, and no change there needs approval. New projects start with it protected; this one was made before. Protecting it keeps writes direct for whoever may write (no approvals until you ask for them) and keeps everything else out.", serious: true },
   { issue: "expired", title: "Expired", what: "Their values stopped working outside roll, or a SaaS rotator's own credential did: roll can't issue or revoke its keys.", serious: true },
   { issue: "rotation_failing", title: "Rotation failing", what: "Their scheduled rotation fails: the database, vendor or rotator refused or didn't answer. The old credential keeps working; roll tries again.", serious: true },
-  { issue: "revoke_failing", title: "Not revoked yet", what: "Credentials roll retired or that expired but couldn't revoke yet: they still work until it can. roll keeps trying.", serious: true },
+  { issue: "revoke_failing", title: "Not revoked yet", what: "Credentials roll retired or that expired but couldn't revoke yet, and public certificates the CA hasn't revoked yet: they still work until it can. roll keeps trying.", serious: true },
   { issue: "missing", title: "Missing", what: "Required keys an environment doesn't define.", serious: true },
-  { issue: "exposed", title: "Exposed", what: "A protected environment's value, also set where more people and less vetted code read it.", serious: true },
+  { issue: "exposed", title: "Exposed", what: "A protected environment's value, also set where more people and less vetted code read it, or a public certificate whose private key is also linked there.", serious: true },
   { issue: "public", title: "In the browser", what: "Server credentials under a name a framework puts in the JavaScript it sends to every visitor (NEXT_PUBLIC_, VITE_, PUBLIC_…): rename the key, or keep the value on the server.", serious: true },
   { issue: "weak", title: "Weak", what: "Credentials easy to guess: New value replaces one with 48 random characters.", serious: false },
   { issue: "unplaced", title: "No placement", what: "Keys bound to hosts without naming the header or query parameter that carries them: a placeholder may ride in any header, one the host might echo back, and untrusted code's doesn't swap. Bind each again (Authorization: Bearer {} by default).", serious: false },
@@ -28,7 +28,8 @@ const ISSUES: { issue: Finding["issue"]; title: string; what: string; serious: b
 ];
 
 /** A SaaS rotator's own credential ending (`expired`/`expiring` with no environment): named, not a key to open or date. */
-const registration = (f: Finding) => (f.issue === "expired" || f.issue === "expiring") && !f.environment;
+/** A registration's own finding (no environment): a SaaS rotator's credential, a public certificate's revocation. */
+const registration = (f: Finding) => (f.issue === "expired" || f.issue === "expiring" || f.issue === "revoke_failing") && !f.environment;
 
 /** Everything insights flag, in every environment at once, worst first (docs/secrets.md, "Health"). */
 export function HealthView() {
@@ -140,7 +141,7 @@ export function HealthView() {
                   ) : f.issue === "certificate_expiring" || f.issue === "operator_made" || f.issue === "stored_cloud_key" || registration(f) ? (
                     <span className="flex min-w-0 items-center gap-3">
                       <span className="font-mono text-fg">{f.key}</span>
-                      <span className="text-subtle">{f.issue === "certificate_expiring" ? `CA ${f.path}` : registration(f) ? "SaaS rotator" : f.environment ? `${name(f.environment)}${f.path === "/" ? "" : ` ${f.path}`}` : ""}</span>
+                      <span className="text-subtle">{f.issue === "certificate_expiring" ? `CA ${f.path}` : registration(f) ? (f.issue === "revoke_failing" ? "public certificate" : "SaaS rotator") : f.environment ? `${name(f.environment)}${f.path === "/" ? "" : ` ${f.path}`}` : ""}</span>
                     </span>
                   ) : (
                     <Link href={secretsHref(project.id, { env: f.environment, path: f.path === "/" ? undefined : f.path, key: f.issue === "missing" ? undefined : f.key })} className="flex min-w-0 items-center gap-3 rounded transition-colors hover:text-accent">
