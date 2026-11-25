@@ -1136,7 +1136,8 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   by whoever set the identity up (none while they can't sign in), its `ip_allow` the identity's.
   The login is the authentication, so no caller is gated. Workload tokens (`kind: "workload"`)
   stay out of the token list (`?kind=workload` lists the latest 500), the checkup, the expiry
-  digest, new-network notices and the tokens' caps (10,000 live of their own, 1,000 per owner), and go a day after
+  digest, new-network notices and the tokens' caps (10,000 live of their own, 1,000 per owner; bootstrap
+  tokens and machine credentials, below, aren't counted), and go a day after
   they end. One is fixed: never edited, rotated or grown by a remembered approval (`409`), only
   revoked or left to end. It makes and changes no tokens (`403`): what it made would be a
   credential nobody set up. The product that minted it stops it with `Access::revoke_workload(id,
@@ -1165,6 +1166,17 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
     side used the copy first. The audit log has a `reused` row (`decision: "revoke"`) and the
     operator's feed a `secret_revoked` alert. A presentation from an address the grant isn't bound to,
     of the wrong kind, or after it ended is refused and changes nothing.
+  - **A lost answer is retried once.** An exchange presented again within `RETRY_GRACE_MS` (two
+    minutes) of its spending, while the credential it made has never logged in or been exchanged,
+    is the machine retrying after a lost answer (a timeout after the commit, a proxy's 502): a new
+    credential is made, and the unanswered one and the spent secret are both kept as
+    `spent, retried` in the same write, so a third presentation of either ends the chain. A thief
+    racing the machine inside the grace leaves the other side holding a spent secret, which ends
+    the chain at its next use. A login (`present_machine`) with a spent credential always ends it.
+  - **Not in the workload caps.** They open nothing and live as long as their machine, so they'd
+    fill the room every CI login shares: `MAX_WORKLOADS` and `OWNER_MAX_WORKLOADS` count only
+    workload grants with rules. Their caller caps them (roll secrets: 1,000 chains per identity,
+    counted in the write that records the chain, and 60 bootstrap tokens a minute per project).
   - **Leaked**, either is revoked with its whole chain, as a token is (below).
   - `Access::revoke_chain(chain, why)` ends a chain (roll secrets: the identity deleted, disabled or
     cut off). Chains are listed with `?kind=workload`, and go a day after their last secret would
