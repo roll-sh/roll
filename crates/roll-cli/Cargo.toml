@@ -85,6 +85,17 @@ code-review.workspace = true
 [target.'cfg(unix)'.dependencies]
 agent-host.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_Services",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 # `tests/apps.rs`: roll apps in process on its fake runtime.
 apps-control.workspace = true

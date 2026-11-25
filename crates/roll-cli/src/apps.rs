@@ -1822,7 +1822,7 @@ async fn ssh(api: &Api, env: &str, query: &str) -> anyhow::Result<()> {
         }
     });
     let _raw = term::Raw::enter();
-    let mut winch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
+    let mut winch = term::Resizes::new()?;
     let mut stdout = tokio::io::stdout();
     loop {
         tokio::select! {
@@ -1842,7 +1842,7 @@ async fn ssh(api: &Api, env: &str, query: &str) -> anyhow::Result<()> {
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                 Some(Ok(_)) => {}
             },
-            _ = winch.recv() => {
+            _ = winch.next() => {
                 if let Some((c, r)) = term::size() {
                     tx.send(Message::Text(format!("{{\"resize\":[{c},{r}]}}").into())).await?;
                 }
@@ -1889,9 +1889,52 @@ pub(crate) fn tar_of(src: &str) -> anyhow::Result<Vec<u8>> {
     Ok(body)
 }
 
+/// The local terminal on Windows: the console's ([`crate::sys::console`]).
+#[cfg(windows)]
+pub(crate) mod term {
+    pub use crate::sys::console::{Raw, size};
+
+    /// The console's size changes: Windows sends a console no signal for them, so its size is
+    /// read four times a second.
+    pub struct Resizes(Option<(u16, u16)>);
+
+    impl Resizes {
+        pub fn new() -> std::io::Result<Resizes> {
+            Ok(Resizes(size()))
+        }
+
+        /// Returns when the size has changed.
+        pub async fn next(&mut self) {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                let now = size();
+                if now != self.0 {
+                    self.0 = now;
+                    return;
+                }
+            }
+        }
+    }
+}
+
 /// The local terminal: its size, and raw mode for as long as a guard lives (`roll preview shell`
 /// uses it too).
+#[cfg(unix)]
 pub(crate) mod term {
+    /// The terminal's size changes (SIGWINCH).
+    pub struct Resizes(tokio::signal::unix::Signal);
+
+    impl Resizes {
+        pub fn new() -> std::io::Result<Resizes> {
+            Ok(Resizes(tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?))
+        }
+
+        /// Returns when the size has changed.
+        pub async fn next(&mut self) {
+            let _ = self.0.recv().await;
+        }
+    }
+
     /// Columns and rows of the terminal on stdout.
     pub fn size() -> Option<(u16, u16)> {
         let mut ws = libc::winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };

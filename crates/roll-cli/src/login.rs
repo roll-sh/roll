@@ -122,9 +122,13 @@ fn save(all: &BTreeMap<String, Saved>) -> anyhow::Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         o.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
+    #[cfg(windows)]
+    crate::sys::acl::exclusive(&mut o);
     let mut f = o.open(&tmp).with_context(|| format!("writing {}", tmp.display()))?;
     #[cfg(unix)]
     f.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    #[cfg(windows)]
+    crate::sys::acl::private(&f).with_context(|| format!("making {} private", tmp.display()))?;
     f.write_all(serde_json::to_string_pretty(all)?.as_bytes())?;
     f.sync_all()?;
     std::fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))?;
