@@ -2572,6 +2572,48 @@ async fn a_workload_gets_a_token_for_minutes() {
     d.access.store.prune(30).unwrap();
 }
 
+/// A machine's secret zero (store/bootstrap.rs): a bootstrap token is exchanged once, from its
+/// addresses only, for a machine credential that is exchanged in turn; neither opens anything at
+/// the gate. A spent one presented again ends its whole chain, the logins' tokens with it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_spent_bootstrap_token_or_machine_credential_ends_its_chain() {
+    use roll_access::store::{ChainSecret, Presented};
+    let d = Daemon::new(50);
+    let at = |ip: &str| Some(ip.parse().unwrap());
+    let within = serde_json::from_value::<roll_auth::scope::Scope>(json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }])).unwrap();
+    let new = || serde_json::from_value::<roll_access::store::NewGrant>(json!({ "name": "rack-1", "rules": [{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }] })).unwrap();
+    let live = |p: Presented<roll_access::store::Issued>| match p {
+        Presented::Live(i) => i,
+        Presented::Reused { .. } => panic!("spent"),
+    };
+
+    let boot = d.access.mint_bootstrap("rack-1", 10, vec!["10.0.0.0/8".into()], None).await.unwrap();
+    assert!(boot.secret.starts_with("rlbt_") && roll_access::checksum_ok(&boot.secret));
+    assert_eq!(d.call(&boot.secret, Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::UNAUTHORIZED, "it opens nothing");
+    assert!(matches!(d.access.redeem(&boot.secret, ChainSecret::Bootstrap, at("192.0.2.1"), 24), Err(roll_access::Error::Forbidden(_))), "not from another address, and not spent by trying");
+    let first = live(d.access.redeem(&boot.secret, ChainSecret::Bootstrap, at("10.1.2.3"), 24).unwrap());
+    assert!(first.secret.starts_with("rlmc_") && first.chain == boot.chain);
+    assert_eq!(d.call(&first.secret, Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::UNAUTHORIZED, "a credential opens nothing either");
+    let Presented::Live(m) = d.access.present_machine(&first.secret, at("10.1.2.3")).unwrap() else { panic!("live") };
+    let (_, token) = d.access.mint_workload_via(new(), &within, 15, None, Some(&m.grant)).await.unwrap();
+    assert_eq!(d.call(&token, Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::OK);
+
+    // The bootstrap token a second time: the chain ends, the login's token too, and no login after.
+    assert!(matches!(d.access.redeem(&boot.secret, ChainSecret::Bootstrap, at("10.1.2.3"), 24).unwrap(), Presented::Reused { .. }));
+    assert!(matches!(d.access.present_machine(&first.secret, at("10.1.2.3")), Err(roll_access::Error::Unauthorized(_))));
+    assert_eq!(d.call(&token, Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::UNAUTHORIZED);
+    assert!(d.access.mint_workload_via(new(), &within, 15, None, Some(&m.grant)).await.is_err());
+
+    // Replaced at half its life: the next one works, and the old one presented again ends the chain.
+    let other = d.access.mint_bootstrap("rack-2", 10, vec![], None).await.unwrap();
+    let one = live(d.access.redeem(&other.secret, ChainSecret::Bootstrap, None, 24).unwrap());
+    let two = live(d.access.redeem(&one.secret, ChainSecret::Machine, None, 24).unwrap());
+    assert!(matches!(d.access.present_machine(&two.secret, None).unwrap(), Presented::Live(_)));
+    assert!(matches!(d.access.present_machine(&one.secret, None).unwrap(), Presented::Reused { .. }));
+    assert!(d.access.present_machine(&two.secret, None).is_err());
+    d.access.store.prune(30).unwrap();
+}
+
 /// Open registration (RFC 7591) can't be flooded: a network registers at most 20 clients a minute
 /// on a node, then 429 with Retry-After.
 #[tokio::test]

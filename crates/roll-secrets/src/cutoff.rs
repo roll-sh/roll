@@ -296,6 +296,11 @@ impl Secrets {
             out.failed.extend(failed.into_iter().map(|(ids, why)| Failure { what: "logins", ids, why }));
         }
 
+        // Their machines' credentials (bootstrap chains) go too: an incident may be one of them.
+        if req.identities {
+            self.end_chains(&disable, &reason);
+        }
+
         // 4. Leases: each claimed in a write, its credential revoked outside it (as ending one).
         if req.leases {
             for l in &reach.leases {
