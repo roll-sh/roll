@@ -301,6 +301,12 @@ const JOIN_QUERIES: &[&str] = &[
     // Computed keys and arguments over two joins (TPC-H q07 / q09's shape: the joins'
     // column reorderings, projections over projections, read through by the grouping).
     "SELECT d.name, extract(year FROM date '2000-01-01' + b.g * 40) AS y, count(*), sum(b.x * (1 - d.w)) FROM big b JOIN dim d ON b.g = d.k JOIN multi m ON m.k = d.w GROUP BY 1, 2 ORDER BY 1, 2",
+    // A probe few rows pass (7 of g's 97 values) under a filter of columns after its key's:
+    // only those rows read past the key (`Pre::decode_split`, TPC-H q10's and q21's shape);
+    // a filter that can raise an error is checked on every row as before.
+    "SELECT d.name, count(*), sum(b.x), max(b.s) FROM big b JOIN dim d ON b.g = d.k + 90 WHERE b.c = 'b' AND b.s > '4' GROUP BY d.name ORDER BY 1",
+    "SELECT b.id, d.k, b.f FROM big b JOIN dim d ON b.g = d.k + 90 WHERE b.id > 400000 AND (b.s LIKE 'a%' OR b.x IS NULL) AND b.n < 30",
+    "SELECT count(*) FROM big b JOIN dim d ON b.g = d.k + 90 WHERE b.x / (b.id - 419990) > -1",
 ];
 
 #[test]
@@ -339,7 +345,12 @@ fn parallel_joins_match_serial_inner() {
     let stat_serial = seq_read(&mut s);
     s.query("SET max_parallel_workers_per_gather = 2").unwrap();
     let vrows = pg_engine::exec::parscan::VECTOR_ROWS.load(std::sync::atomic::Ordering::Relaxed);
+    let split = pg_engine::exec::parscan::SPLIT_PASSED.load(std::sync::atomic::Ordering::Relaxed);
     let parallel = run(&mut s);
+    assert!(
+        pg_engine::exec::parscan::SPLIT_PASSED.load(std::sync::atomic::Ordering::Relaxed) > split + 300_000,
+        "rows a probe dropped by their key alone"
+    );
     assert!(pg_engine::exec::parscan::pipelined() > before, "join probes ran in the workers");
     assert!(
         pg_engine::exec::parscan::VECTOR_ROWS.load(std::sync::atomic::Ordering::Relaxed) > vrows,
@@ -364,6 +375,9 @@ fn parallel_joins_match_serial_inner() {
     assert!(serial[13][0].starts_with("ERROR: integer out of range"), "{:?}", serial[13]);
     assert!(serial[14][0].starts_with("ERROR: division by zero"), "{:?}", serial[14]);
     assert!(serial[0].len() > 300, "{:?}", serial[0].len());
+    let last = JOIN_QUERIES.len() - 1;
+    assert!(serial[last][0].starts_with("ERROR: division by zero"), "{:?}", serial[last]);
+    assert!(serial[last - 1].len() > 50 && serial[last - 2].len() > 5, "{:?}", &serial[last - 2..]);
     // Probes looked up from column batches (`exec::vector`) give what the row path gives.
     let rows = pg_engine::exec::parscan::without_vectors(|| run(&mut s));
     for ((q, a), b) in JOIN_QUERIES.iter().zip(&rows).zip(&parallel) {
@@ -924,7 +938,9 @@ fn parallel_fetches_match_serial_inner() {
 /// A bitmap whose quals read only index columns of fixed-width types checks them on the
 /// index entries instead of reading each row (`scan::entry_columns`): the same rows as a
 /// sequential scan, deleted rows (committed, and the transaction's own) left out, a
-/// cross-type bound and an OR of two indexes included.
+/// cross-type bound and an OR of two indexes included. A bitmap selecting 1/32 of the rows
+/// or more is read as a scan of the table whose chunks pass over the rows of other keys
+/// (`parscan::KeyedFill`): rows the transaction's own UPDATE moved into its range included.
 #[test]
 fn bitmap_quals_on_entries() {
     on_session_thread(bitmap_quals_on_entries_inner);
@@ -947,6 +963,8 @@ fn bitmap_quals_on_entries_inner() {
         "SELECT count(*), sum(id) FROM big4 WHERE d >= date '2021-01-01' AND d < timestamp '2021-02-01 00:00'",
         "SELECT count(*) FROM big4 WHERE v < 10::bigint AND s LIKE 'a%'",
         "SELECT id FROM big4 WHERE (v = 3 OR d = date '2020-01-05') AND id < 5000 ORDER BY id",
+        "SELECT count(*), sum(id), max(s) FROM big4 WHERE v BETWEEN 100 AND 199",
+        "SELECT count(*), sum(id) FROM big4 WHERE d >= date '2021-01-01' AND d < timestamp '2021-07-01 00:00' AND s > 'c'",
     ];
     let run = |s: &mut Session, bitmap: bool| -> Vec<Vec<String>> {
         let set = if bitmap {
@@ -966,13 +984,15 @@ fn bitmap_quals_on_entries_inner() {
     };
     for own_deletes in [false, true] {
         if own_deletes {
-            s.query("BEGIN; DELETE FROM big4 WHERE v = 20 OR d = date '2021-01-10'").unwrap();
+            s.query("BEGIN; DELETE FROM big4 WHERE v = 20 OR d = date '2021-01-10'; UPDATE big4 SET v = 150 WHERE id % 13 = 0 AND v > 900").unwrap();
         }
+        let passed = pg_engine::exec::parscan::KEYED_PASSED.load(std::sync::atomic::Ordering::Relaxed);
         let (a, b) = (run(&mut s, true), run(&mut s, false));
         for ((q, a), b) in queries.iter().zip(&a).zip(&b) {
             assert_eq!(a, b, "{q}");
         }
         assert!(a[0][0].contains("Int8("), "{:?}", a[0]);
+        assert!(pg_engine::exec::parscan::KEYED_PASSED.load(std::sync::atomic::Ordering::Relaxed) > passed + 100_000, "the dense bitmaps passed rows over by key");
     }
     s.query("ROLLBACK").unwrap();
 }

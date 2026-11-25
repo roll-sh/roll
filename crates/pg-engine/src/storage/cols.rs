@@ -427,8 +427,9 @@ fn walk_plan<'a>(cols: &'a mut [Option<Col>], types: &[DataType]) -> Option<(Vec
 /// Row `r` (its stored bytes `bytes`; in block buffer `buf` at `at`, or None) walked by
 /// `steps` (`walk_plan`'s for columns `0..upto`); false: the row isn't one the walk takes
 /// (stored out of line, without some of the columns, a value it doesn't expect): the slots
-/// it wrote are reset by the caller and the general walk does the row.
-#[inline]
+/// it wrote are reset by the caller and the general walk does the row. (Inlined into the
+/// decode's loop: a call a row kept its position and slots in memory.)
+#[inline(always)]
 fn walk_row(steps: &mut [Step<'_>], r: usize, bytes: &[u8], buf: Option<(u32, usize)>, upto: usize) -> bool {
     if !matches!(bytes.first(), Some(&(ROW_HEADER | ROW_HEADER_TID))) {
         return false;
@@ -561,10 +562,42 @@ fn walk_row(steps: &mut [Step<'_>], r: usize, bytes: &[u8], buf: Option<(u32, us
 }
 
 /// Rows `rows` of `batch` as columns into `out`: the columns `need` marks, decoded as
-/// `types` declares them, a column a row was stored without as `missing`'s value.
+/// `types` declares them, a column a row was stored without as `missing`'s value. (Inlined
+/// into the scans' decode, as it was before `decode_cols_only` shared its body: called, it
+/// cost TPC-H q17's scan 9% more.)
+#[inline(always)]
 pub fn decode_cols(
     batch: &RowBatch,
     rows: std::ops::Range<usize>,
+    need: &[bool],
+    types: &[DataType],
+    missing: &[Value],
+    out: &mut ColBatch,
+) -> Result<()> {
+    let n = rows.len() as u32;
+    decode_cols_in(batch, rows, 0..n, need, types, missing, out)
+}
+
+/// `decode_cols` of the rows `only` of the run `rows` (by their place in it, ascending): the
+/// others' rows aren't read, their slots not NULL and holding any value (not to be read).
+pub fn decode_cols_only(
+    batch: &RowBatch,
+    rows: std::ops::Range<usize>,
+    only: &[u32],
+    need: &[bool],
+    types: &[DataType],
+    missing: &[Value],
+    out: &mut ColBatch,
+) -> Result<()> {
+    decode_cols_in(batch, rows, only.iter().copied(), need, types, missing, out)
+}
+
+/// `decode_cols` of the rows `picks` (places in the run `rows`, ascending) of it.
+#[inline(always)]
+fn decode_cols_in<P: Iterator<Item = u32> + Clone>(
+    batch: &RowBatch,
+    rows: std::ops::Range<usize>,
+    picks: P,
     need: &[bool],
     types: &[DataType],
     missing: &[Value],
@@ -607,7 +640,8 @@ pub fn decode_cols(
     let mut left: Vec<u32> = Vec::new();
     let all_left = match walk_plan(cols, types) {
         Some((mut steps, strs)) => {
-            for (r, i) in rows.clone().enumerate() {
+            for r in picks.clone() {
+                let (r, i) = (r as usize, rows.start + r as usize);
                 let (bytes, inbuf) = batch.value_in(i);
                 let buf = match (strs, inbuf) {
                     (true, Some((b, at))) => {
@@ -691,8 +725,8 @@ pub fn decode_cols(
         Ok(())
     };
     if all_left {
-        for (r, i) in rows.enumerate() {
-            row(r, i)?;
+        for r in picks {
+            row(r as usize, rows.start + r as usize)?;
         }
     } else {
         for r in left {

@@ -173,6 +173,19 @@ pub struct VPlan {
     /// Rows decoded and, of them, the ones the probe passed (counted where `wide` is).
     seen: std::sync::atomic::AtomicU64,
     passed: std::sync::atomic::AtomicU64,
+    /// Rows `Pre::decode_split` read and, of them, those it read whole: once over half of
+    /// 1,024 or more were, no chunk of the scan splits.
+    split_seen: std::sync::atomic::AtomicU64,
+    split_whole: std::sync::atomic::AtomicU64,
+}
+
+impl VPlan {
+    /// Whether the chunks still split their decodes (`Pre::split`).
+    fn splits(&self) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        let n = self.split_seen.load(Relaxed);
+        n < 1024 || self.split_whole.load(Relaxed) * 2 <= n
+    }
 }
 
 impl VPlan {
@@ -395,6 +408,145 @@ impl<F: FillRows> FillRows for DisplacedFill<F> {
     }
 }
 
+/// The data keys a dense bitmap's index entries point to (`scan::dense_bitmap_scan`),
+/// sorted and distinct: keys of one length sharing their first 8 bytes (the table's
+/// prefix), each kept as the big-endian word of the bytes after them (16 at most), so a
+/// row's key is tested by one compare of words.
+pub struct KeySet {
+    prefix: u64,
+    len: usize,
+    words: Vec<u128>,
+}
+
+impl KeySet {
+    /// At most this many keys (16 bytes each) are kept; a bitmap past it is checked by
+    /// its condition alone.
+    pub const MAX: usize = 1 << 21;
+
+    /// The word of `key` (None: not of the set's form, so not one of its keys): its bytes
+    /// after the prefix, the first highest, read as words of 8 (no copy call per row). Keys
+    /// of one length give words in their order.
+    #[inline]
+    fn word(prefix: u64, len: usize, key: &[u8]) -> Option<u128> {
+        let be = |at: usize| u64::from_be_bytes(key[at..at + 8].try_into().unwrap());
+        if key.len() != len || u64::from_ne_bytes(key[..8].try_into().unwrap()) != prefix {
+            return None;
+        }
+        // (`len` is 9 to 24: the bytes after the prefix are the last `n` of the key.)
+        let n = len - 8;
+        let tail = be(len - 8);
+        Some(match n {
+            ..8 => ((tail & (u64::MAX >> (64 - 8 * n))) as u128) << (128 - 8 * n),
+            8 => (tail as u128) << 64,
+            _ => (be(8) as u128) << 64 | ((tail << (8 * (16 - n))) as u128),
+        })
+    }
+
+    /// An empty set for keys of `first`'s form (None: a key too long for a word).
+    pub fn new(first: &[u8]) -> Option<KeySet> {
+        (first.len() > 8 && first.len() <= 24).then(|| KeySet { prefix: u64::from_ne_bytes(first[..8].try_into().unwrap()), len: first.len(), words: Vec::new() })
+    }
+
+    /// `key` added (false: not of the set's form, or past `MAX`: the set can't be used).
+    pub fn push(&mut self, key: &[u8]) -> bool {
+        match Self::word(self.prefix, self.len, key) {
+            Some(w) if self.words.len() < Self::MAX => {
+                self.words.push(w);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Sorted and distinct, ready to test keys against.
+    pub fn ready(mut self) -> KeySet {
+        self.words.sort_unstable();
+        self.words.dedup();
+        self
+    }
+
+    pub fn len(&self) -> usize {
+        self.words.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.words.is_empty()
+    }
+}
+
+/// Rows `KeyedFill` passed over by their keys (tests distinguish this path).
+pub static KEYED_PASSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A chunk's rows whose keys are in a `KeySet`, in the chunk's order: a dense bitmap heap
+/// scan's, read as a sequential scan, whose rows the bitmap doesn't select are passed over
+/// before they are decoded (its condition still checks the rest, as the filter).
+pub struct KeyedFill<F> {
+    inner: F,
+    set: Arc<KeySet>,
+    /// The first of the set's words not below the last key read (None: no key read yet).
+    at: Option<usize>,
+    batch: RowBatch,
+    done: bool,
+}
+
+impl<F> KeyedFill<F> {
+    pub fn new(inner: F, set: Arc<KeySet>) -> Self {
+        KeyedFill { inner, set, at: None, batch: RowBatch::default(), done: false }
+    }
+}
+
+impl<F: FillRows> FillRows for KeyedFill<F> {
+    fn fill(&mut self, b: &mut RowBatch, max: usize) -> Result<()> {
+        let KeyedFill { inner, set, at, batch, done } = self;
+        let set = &**set;
+        let target = b.len() + max;
+        let mut passed = 0u64;
+        while b.len() < target {
+            if batch.remaining() == 0 {
+                if *done {
+                    break;
+                }
+                batch.clear();
+                inner.fill(batch, FILL)?;
+                if batch.is_empty() {
+                    *done = true;
+                    break;
+                }
+            }
+            let (from, to) = (batch.pos(), batch.len());
+            for i in from..to {
+                let (k, _) = batch.get(i);
+                let Some(w) = KeySet::word(set.prefix, set.len, k) else {
+                    passed += 1;
+                    continue;
+                };
+                // (Keys come in order: the set's words below this one are passed for good.)
+                let a = match *at {
+                    Some(a) => a + set.words[a..].iter().take_while(|x| **x < w).count(),
+                    None => set.words.partition_point(|x| *x < w),
+                };
+                *at = Some(a);
+                if set.words.get(a) == Some(&w) {
+                    match batch.value_in(i) {
+                        (v, Some((buf, off))) => b.push_in(k, buf, off, v.len()),
+                        (v, None) => b.push_copy(k, v),
+                    }
+                    if b.len() == target {
+                        batch.set_pos(i + 1);
+                        KEYED_PASSED.fetch_add(passed, std::sync::atomic::Ordering::Relaxed);
+                        return Ok(());
+                    }
+                } else {
+                    passed += 1;
+                }
+            }
+            batch.set_pos(to);
+        }
+        KEYED_PASSED.fetch_add(passed, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+}
+
 /// A table's rows in [range) through `FillRows`, as a bulk read when `bulk`.
 pub fn fill_source<F: FillRows + 'static>(f: F, bulk: bool) -> Source {
     Source::Fill(if bulk { Box::new(crate::storage::batch::BulkFill(f)) } else { Box::new(f) })
@@ -441,6 +593,30 @@ struct Pre<'a> {
     /// its joined rows have, and a row of the scan's width holding them for the row at hand
     /// (the other columns NULL, as the joined row has them).
     join: Option<(Vec<usize>, Row)>,
+    /// A probe of an integer column before columns past it that the filter reads, under a
+    /// filter that raises no error (`VB::total`): the columns of `need` up to the probe's
+    /// (`decode_split`). Rows whose key has no candidate go no further: neither their other
+    /// columns walked to nor the filter checked (q10's lineitem by its order, q21's by its
+    /// supplier). None once over half of the scan's first rows may have candidates
+    /// (`VPlan::splits`).
+    split: Option<Vec<bool>>,
+    /// The rows `decode_split` reads whole (by place in the run).
+    whole: Vec<u32>,
+}
+
+/// Rows `Pre::decode_split` dropped by their probe key alone (tests distinguish the path).
+pub static SPLIT_PASSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `Pre::split`'s columns: those of `plan.need` up to its probe's, when the scan probes an
+/// integer column (no joined columns, not aggregating in the batch), its filter raises no
+/// error, and it reads a column past the probe's.
+fn split_need(d: &Decode, plan: &super::vector::AggPlan, agg: bool) -> Option<Vec<bool>> {
+    let kc = plan.probe?;
+    if agg || plan.joined.is_some() || !plan.filter.as_ref().is_none_or(super::vector::VB::total) || d.stages.is_empty() {
+        return None;
+    }
+    let upto = plan.need.iter().rposition(|n| *n)?;
+    (upto > kc).then(|| plan.need.iter().enumerate().map(|(c, &n)| n && c <= kc).collect())
 }
 
 /// For an aggregating scan whose only stage is a hash join's probe of an integer key
@@ -502,6 +678,7 @@ impl<'a> Pre<'a> {
         let plan = vp.pick().clone();
         let agg = spec.is_some() && d.stages.is_empty();
         let join = plan.joined.clone().map(|c| (c, vec![Value::Null; d.missing.len()]));
+        let split = split_need(d, &plan, agg).filter(|_| vp.splits());
         Some(Pre {
             plan,
             vp,
@@ -519,8 +696,10 @@ impl<'a> Pre<'a> {
             seen: 0,
             done: 0,
             off: false,
+            split,
             agg,
             join,
+            whole: Vec::new(),
         })
     }
 
@@ -565,7 +744,14 @@ impl<'a> Pre<'a> {
             Some(cols) => wide = make().map(|w| Arc::new(with(w, cols))),
             None => {}
         }
-        Some(VPlan { plan: Arc::new(plan), wide, seen: Default::default(), passed: Default::default() })
+        Some(VPlan {
+            plan: Arc::new(plan),
+            wide,
+            seen: Default::default(),
+            passed: Default::default(),
+            split_seen: Default::default(),
+            split_whole: Default::default(),
+        })
     }
 
     /// A run's rows the probe passed counted (its `fates`), and the next run's plan
@@ -620,6 +806,9 @@ impl<'a> Pre<'a> {
     /// Rows `rows` of `b` decoded, `odd` and `tri` (by row of the run) filled.
     fn decode(&mut self, b: &RowBatch, rows: std::ops::Range<usize>) {
         use super::vector::Tri;
+        if self.split.is_some() && self.decode_split(b, rows.clone()) {
+            return;
+        }
         let n = rows.len();
         self.odd.clear();
         self.odd.resize(n, true);
@@ -644,6 +833,83 @@ impl<'a> Pre<'a> {
             f.eval(&self.cols, &self.sel, &mut self.tri);
         }
         self.live_set = false;
+    }
+
+    /// `decode` in two steps (`split`): the columns up to the probe's, then for the rows
+    /// whose key may have a candidate (or that the batch can't tell) the rest; the others
+    /// are false (`DROP`): they would be dropped by the filter or by the probe, and the
+    /// filter raises no error. False: nothing done (the first step's decode failed, or the
+    /// rows mostly have candidates: `split` dropped), `decode` reads them as before.
+    #[inline(never)]
+    fn decode_split(&mut self, b: &RowBatch, rows: std::ops::Range<usize>) -> bool {
+        use super::vector::Tri;
+        use crate::storage::cols::ColData;
+        let (Some(pre), Some(kc), Some(p)) = (self.split.as_deref(), self.plan.probe, self.probe) else { return false };
+        let n = rows.len();
+        if crate::storage::cols::decode_cols(b, rows.clone(), pre, self.types, &self.missing, &mut self.cols).is_err() {
+            return false;
+        }
+        // (Rows the first step can't tell: read whole, the batch or the row path decides.)
+        self.odd.clear();
+        self.odd.resize(n, false);
+        for r in &self.cols.ext {
+            self.odd[*r as usize] = true;
+        }
+        for c in self.cols.cols.iter().flatten() {
+            for (r, _) in &c.odd {
+                self.odd[*r as usize] = true;
+            }
+        }
+        self.whole.clear();
+        let t = &p.built;
+        let maybe = |x: i64| !t.int_span(x).is_some_and(|s| s.1 == 0);
+        match self.cols.cols.get(kc).and_then(Option::as_ref).map(|c| (&c.data, &c.nulls)) {
+            Some((ColData::I32(v), nulls)) => self.whole.extend((0..n as u32).filter(|&r| {
+                let r = r as usize;
+                self.odd[r] || (!nulls[r] && maybe(v[r] as i64))
+            })),
+            Some((ColData::I64(v), nulls)) => self.whole.extend((0..n as u32).filter(|&r| {
+                let r = r as usize;
+                self.odd[r] || (!nulls[r] && maybe(v[r]))
+            })),
+            _ => return false,
+        }
+        {
+            use std::sync::atomic::Ordering::Relaxed;
+            self.vp.split_seen.fetch_add(n as u64, Relaxed);
+            self.vp.split_whole.fetch_add(self.whole.len() as u64, Relaxed);
+            SPLIT_PASSED.fetch_add((n - self.whole.len()) as u64, Relaxed);
+            if !self.vp.splits() {
+                self.split = None;
+            }
+        }
+        self.odd.fill(false);
+        if crate::storage::cols::decode_cols_only(b, rows, &self.whole, &self.plan.need, self.types, &self.missing, &mut self.cols).is_ok() {
+            for r in &self.cols.ext {
+                self.odd[*r as usize] = true;
+            }
+            for c in self.cols.cols.iter().flatten() {
+                for (r, _) in &c.odd {
+                    self.odd[*r as usize] = true;
+                }
+            }
+        } else {
+            for &r in &self.whole {
+                self.odd[r as usize] = true;
+            }
+        }
+        self.sel.clear();
+        self.sel.extend(self.whole.iter().copied().filter(|r| !self.odd[*r as usize]));
+        self.tri.clear();
+        self.tri.resize(n, Tri::F);
+        for &r in &self.whole {
+            self.tri[r as usize] = Tri::T;
+        }
+        if let Some(f) = &self.plan.filter {
+            f.eval(&self.cols, &self.sel, &mut self.tri);
+        }
+        self.live_set = false;
+        true
     }
 
     /// `decode` of `n` rows for a plan that reads no column and has no filter (count(*)'s):
