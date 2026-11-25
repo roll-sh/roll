@@ -1065,6 +1065,12 @@ impl Engine {
         // is the preview's first URL and its path): what each note is about, as a picture.
         let crops = self.crops_wanted(r).await;
         let stories = storybook.as_ref().filter(|(svc, _)| *svc == first.name).map(|(_, at)| at.clone());
+        // The paths the change touched, so the stories it touched are taken first (its own
+        // repo's; another repo's service takes them in the index's order).
+        let changed = match (&stories, first.repo == r.repo, r.change_id.is_some()) {
+            (Some(_), true, true) => self.source.paths(&r.repo, r.build()).await.ok().flatten().unwrap_or_default(),
+            _ => Vec::new(),
+        };
         let opts_crops = crops.clone();
         // The app's sign-in first, a trusted preview's only (`github.login`).
         let (login, why_not) = self.run_login(r).await;
@@ -1072,7 +1078,7 @@ impl Engine {
             let _ = self.store.log(&r.id, &format!("screenshots taken signed out: {why}"));
         }
         let signs_in = login.is_some();
-        let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone(), openapi, endpoints, states, browsers, crops, stories, modes, login };
+        let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone(), openapi, endpoints, states, browsers, crops, stories, modes, login, changed };
         let started = std::time::Instant::now();
         // The page's words are its code's: what it was given is masked before they're kept (and
         // reach the pull request's comment); a run whose masks can't be read fails as a run.
