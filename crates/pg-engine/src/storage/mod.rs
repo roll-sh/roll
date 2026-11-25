@@ -85,6 +85,10 @@ const PART_MIN: u64 = 256 << 10;
 /// by every snapshot (`Store::wait_unpinned`).
 const PIN_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// L0 is merged into one L0 file rather than into L1 while the L1 files it would be merged
+/// with hold more than this many times its bytes (`Store::merge_l0`).
+const L0_MERGE_RATIO: u64 = 2;
+
 /// Deletions in L0 that make a compaction due before the file count does (`deletions_due`).
 const DELETIONS_MIN: u64 = 1 << 16;
 
@@ -418,6 +422,9 @@ pub struct StoreOptions {
     /// the manifest when the directory is made: an existing directory keeps what it was made
     /// with, and one made without it stays format 4, readable by builds before format 5.
     pub colblocks: bool,
+    /// Near the L0 trigger, L0's files are merged into one L0 file while the L1 files they
+    /// would be merged with are big beside them (`Store::merge_l0`; off: always into L1).
+    pub l0_merge: bool,
 }
 
 /// `StoreOptions::colblocks`' default: `ROLL_COLBLOCKS=1`.
@@ -502,6 +509,7 @@ impl Default for StoreOptions {
             reclaim: Reclaim::default(),
             copy_blocks: true,
             colblocks: colblocks_default(),
+            l0_merge: true,
         }
     }
 }
@@ -2521,7 +2529,16 @@ impl Store {
             let before = v.l0.iter().map(|s| s.meta.max_ts).filter(|&t| t < newest).max().unwrap_or(0);
             (v.l0.len(), v.l0.iter().map(|s| s.meta.size).sum::<u64>(), newest, before)
         });
-        if n >= self.opts.l0_compaction_trigger || self.view.with(|v| deletions_due(&v.l0, &v.l1)) {
+        let due = self.view.with(|v| deletions_due(&v.l0, &v.l1));
+        // (L0 merged one file before the trigger: a read then meets no more L0 files on
+        // average than between compactions into L1, the merged file among them.)
+        if !due && n >= 2 && n + 1 >= self.opts.l0_compaction_trigger {
+            self.wait_unpinned(newest, before);
+            if self.merge_l0()? {
+                return Ok(());
+            }
+        }
+        if n >= self.opts.l0_compaction_trigger || due {
             self.wait_unpinned(newest, before);
             return self.compact();
         }
@@ -2562,6 +2579,126 @@ impl Store {
         }
     }
 
+    /// The L1 files a compaction of `l0` merges (`compact_within`): those whose range holds a
+    /// user key of an L0 file's, with where they are in `l1` (from, to) and the files of that
+    /// range it leaves in place.
+    #[allow(clippy::type_complexity)]
+    fn l1_inputs(l0: &[Arc<SstReader>], l1: &[Arc<SstReader>]) -> Result<(usize, usize, Vec<Arc<SstReader>>, Vec<Arc<SstReader>>)> {
+        // (By user key: a user key's versions are all in one L1 file.)
+        let lo = l0.iter().map(|s| user_key(&s.meta.first_key)).min().unwrap_or_default();
+        let hi = l0.iter().map(|s| user_key(&s.meta.last_key)).max().unwrap_or_default();
+        let first = l1.partition_point(|s| user_key(&s.meta.last_key) < lo);
+        let last = l1.partition_point(|s| user_key(&s.meta.first_key) <= hi).max(first);
+        // (An L0 file whose range spans many tables' files, a few catalog writes or size
+        // estimates, has keys in few of them: only those it has keys in are merged.)
+        let mut inputs = Vec::new();
+        let mut kept = Vec::new();
+        for s in &l1[first..last] {
+            let (a, b) = (user_key(&s.meta.first_key), user_key(&s.meta.last_key));
+            let mut has = false;
+            for l in l0 {
+                if l.has_user_key_in(a, b)? {
+                    has = true;
+                    break;
+                }
+            }
+            if has { inputs.push(s.clone()) } else { kept.push(s.clone()) }
+        }
+        Ok((first, last, inputs, kept))
+    }
+
+    /// One file before the L0 trigger, L0's files merged into one L0 file instead of into L1,
+    /// when the L1 files they would be merged with are big beside them (`L0_MERGE_RATIO`): a big table's
+    /// random UPDATEs meet a share of its file's blocks that grows slower than their number
+    /// (an UPDATE meets a block of ~70 rows), so every block written again in an L1
+    /// compaction serves more of them when L1 compactions come less often, while merging L0
+    /// costs its own bytes only (and drops the versions no snapshot reads of the rows updated
+    /// again: a small hot table's). Merged one file early, reads meet no more L0 files on
+    /// average than between compactions (a scan positions each). Only of flushed memtables (no ingested commit, no linked run: one range of
+    /// commit timestamps, all flushed, which the output holds as one), without range
+    /// deletions pending (they are applied by compaction). Returns whether it merged.
+    fn merge_l0(&self) -> Result<bool> {
+        let _g = self.bg.lock();
+        if self.closed.load(Ordering::Acquire) || !self.opts.l0_merge {
+            return Ok(false);
+        }
+        let view = self.view();
+        let inputs = view.l0.clone();
+        if inputs.len() < 2 || !view.rdels.is_empty() {
+            return Ok(false);
+        }
+        let flushed = self.manifest.lock().flushed_ts;
+        if inputs.iter().any(|s| s.meta.commit_ts.is_some() || s.meta.max_ts > flushed) {
+            return Ok(false);
+        }
+        let l0_bytes: u64 = inputs.iter().map(|s| s.meta.size).sum();
+        let target = self.opts.target_file_bytes;
+        if l0_bytes >= target / 2 {
+            return Ok(false);
+        }
+        let (_, _, l1, _) = Self::l1_inputs(&inputs, &view.l1)?;
+        let l1_bytes: u64 = l1.iter().map(|s| s.meta.size).sum();
+        if l1_bytes < target / 8 || l0_bytes.saturating_mul(L0_MERGE_RATIO) >= l1_bytes {
+            return Ok(false);
+        }
+        let horizon = self.gc_horizon();
+        let mut discarded = self.discard.filter();
+        let sources: Vec<Cursor> = inputs.iter().map(|s| Cursor::level_uncached(vec![s.clone()])).collect();
+        let mut merge = Merge::new(sources, Vec::new());
+        let mut w = self.l0_writer(self.next_id.fetch_add(1, Ordering::Relaxed), true)?;
+        let (mut cur, mut started, mut kept_old) = (Vec::new(), false, false);
+        while let Some(i) = merge.min()? {
+            let (k, v) = merge.sources[i].head().expect("a head entry");
+            let (uk, ts) = (user_key(k), key_ts(k));
+            if !started || !sst::short_eq(&cur, uk) {
+                started = true;
+                cur.clear();
+                cur.extend_from_slice(uk);
+                kept_old = false;
+            }
+            // (A key's versions newest first: the first at or before the horizon is kept, a
+            // deletion too, as it deletes what L1 holds; the older ones no snapshot reads.)
+            let old = ts <= horizon && std::mem::replace(&mut kept_old, true);
+            if !old
+                && !discarded.drops(uk)
+                && let Err(e) = w.add(k, v)
+            {
+                w.abandon();
+                return Err(e);
+            }
+            merge.sources[i].advance();
+        }
+        let reader = if w.entries() > 0 {
+            Some(Arc::new(SstReader::open(&self.dir, w.finish()?, self.opts.cache.clone())?))
+        } else {
+            w.abandon();
+            None
+        };
+        let ids: std::collections::HashSet<u64> = inputs.iter().map(|s| s.meta.id).collect();
+        {
+            let mut m = self.manifest.lock();
+            m.l0.retain(|s| !ids.contains(&s.id));
+            if let Some(r) = &reader {
+                let at = l0_place(&m.l0, &r.meta);
+                m.l0.insert(at, r.meta.clone());
+            }
+            m.next_id = self.next_id.load(Ordering::Relaxed);
+            write_manifest(&self.dir, &m)?;
+            let mut v = self.view.write();
+            let mut l0: Vec<_> = v.l0.iter().filter(|s| !ids.contains(&s.meta.id)).cloned().collect();
+            if let Some(r) = &reader {
+                let at = l0.partition_point(|x| x.meta.max_ts > r.meta.max_ts);
+                l0.insert(at, r.clone());
+            }
+            *v = Arc::new(View { mem: v.mem.clone(), imm: v.imm.clone(), l0, l1: v.l1.clone(), rdels: v.rdels.clone() });
+        }
+        for s in &inputs {
+            s.mark_obsolete();
+        }
+        info!(dir = %self.dir.display(), files = inputs.len(), l0_bytes, l1_bytes, "merged L0");
+        Ok(true)
+    }
+
     /// Merge L0 into L1: every L0 file with the L1 files whose range holds a user key of one
     /// of theirs (the others stay as they are, also within an L0 file's range: a new index's
     /// entries and a catalog change don't rewrite the table loaded between them, nor drop its
@@ -2583,39 +2720,7 @@ impl Store {
             return Ok(());
         }
         let inputs_l0 = view.l0.clone();
-        // (By user key: a user key's versions are all in one L1 file.)
-        let lo = inputs_l0
-            .iter()
-            .map(|s| user_key(&s.meta.first_key))
-            .min()
-            .unwrap_or_default();
-        let hi = inputs_l0
-            .iter()
-            .map(|s| user_key(&s.meta.last_key))
-            .max()
-            .unwrap_or_default();
-        let first = view
-            .l1
-            .partition_point(|s| user_key(&s.meta.last_key) < lo);
-        let last = view
-            .l1
-            .partition_point(|s| user_key(&s.meta.first_key) <= hi)
-            .max(first);
-        // (An L0 file whose range spans many tables' files, a few catalog writes or size
-        // estimates, has keys in few of them: only those it has keys in are merged.)
-        let mut inputs_l1: Vec<Arc<SstReader>> = Vec::new();
-        let mut kept: Vec<Arc<SstReader>> = Vec::new();
-        for s in &view.l1[first..last] {
-            let (a, b) = (user_key(&s.meta.first_key), user_key(&s.meta.last_key));
-            let mut has = false;
-            for l in &inputs_l0 {
-                if l.has_user_key_in(a, b)? {
-                    has = true;
-                    break;
-                }
-            }
-            if has { inputs_l1.push(s.clone()) } else { kept.push(s.clone()) }
-        }
+        let (first, last, mut inputs_l1, mut kept) = Self::l1_inputs(&inputs_l0, &view.l1)?;
         if max_l1.is_some_and(|m| inputs_l1.iter().map(|s| s.meta.size).sum::<u64>() > m) {
             return Ok(());
         }
@@ -6878,6 +6983,79 @@ mod tests {
             assert_eq!(dicts(&stores[0]), dicts(&stores[1]), "outputs keep a dictionary as a rewrite's have one");
         }
         check_at(&stores[0], &model, stores[0].visible_ts(), "copied");
+    }
+
+    /// L0 merged into one L0 file while its L1 files are big beside it (`merge_l0`): reads
+    /// at the newest timestamp and at a snapshot held across merges stay the model's, a
+    /// deletion keeps hiding what L1 holds, a hot key's old versions go, a big batch of
+    /// writes goes to L1, and a reopened store (WAL replayed past the merged file) reads the
+    /// same.
+    #[test]
+    fn l0_merges_read_as_compactions() {
+        let dir = tempfile::tempdir().unwrap();
+        let open = |l0_merge: bool| {
+            Store::open(dir.path(), StoreOptions { sync: false, background: false, target_file_bytes: 256 << 10, l0_merge, ..StoreOptions::default() }).unwrap()
+        };
+        let s = open(true);
+        let key = |i: u32| format!("tabl0001{i:06}").into_bytes();
+        let mut model: Model = BTreeMap::new();
+        let write = |s: &Arc<Store>, writes: Vec<(Vec<u8>, Option<Bytes>)>, model: &mut Model| {
+            let ts = s.commit(writes.clone(), |_| Ok(())).unwrap();
+            for (k, v) in writes {
+                model.entry(k).or_default().push((ts, v));
+            }
+        };
+        let noise = |i: u32| (u64::from(i) + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        write(&s, (0..6000).map(|i| (key(i), Some(Bytes::from(format!("v0-{i}-{:016x}{:016x}", noise(i), noise(i).rotate_left(29)))))).collect(), &mut model);
+        s.flush_memtables().unwrap();
+        s.compact().unwrap();
+        let (mut merges, mut compactions) = (0, 0);
+        let mut pin = None;
+        for round in 1..=14u32 {
+            if round == 5 {
+                pin = Some((s.visible_ts(), s.pin_visible()));
+            }
+            if round == 8 {
+                pin = None;
+            }
+            for c in 0..3u32 {
+                let mut writes: Vec<(Vec<u8>, Option<Bytes>)> = (0..6000u32)
+                    .filter(|i| round == 11 || (i.wrapping_mul(2_654_435_761) >> 5) % 97 == (round * 3 + c) % 97)
+                    .map(|i| (key(i), (i % 5 != 0).then(|| Bytes::from(format!("v{round}.{c}-{i}-{:016x}{:016x}", noise(i ^ (round << 20) ^ (c << 28)), noise(i).rotate_left(round))))))
+                    .collect();
+                writes.push((b"tabl0001hot".to_vec(), Some(Bytes::from(format!("hot{round}.{c}")))));
+                writes.sort();
+                write(&s, writes, &mut model);
+            }
+            s.flush_memtables().unwrap();
+            let (l0, l1) = (s.view().l0.len(), s.view().l1.iter().map(|f| f.meta.id).collect::<Vec<_>>());
+            s.maybe_compact().unwrap();
+            let v = s.view();
+            if v.l1.iter().map(|f| f.meta.id).collect::<Vec<_>>() != l1 {
+                assert!(l0 >= s.opts.l0_compaction_trigger && v.l0.is_empty(), "round {round}: {l0} L0 files compacted");
+                compactions += 1;
+            } else if v.l0.len() < l0 {
+                assert!(l0 + 1 >= s.opts.l0_compaction_trigger && v.l0.len() == 1, "round {round}: {l0} L0 files merged into {}", v.l0.len());
+                merges += 1;
+            }
+            assert!(v.l0.len() < s.opts.l0_compaction_trigger, "round {round}: {} L0 files", v.l0.len());
+            drop(v);
+            check_at(&s, &model, s.visible_ts(), &format!("round {round}"));
+            if let Some((ts, _)) = &pin {
+                check_at(&s, &model, *ts, &format!("round {round}, the snapshot"));
+            }
+        }
+        assert!(merges >= 3 && compactions >= 1, "{merges} merges, {compactions} compactions");
+        // Reopened without a close (the last commits replayed from the WAL), then compacted
+        // by a store that doesn't merge L0.
+        write(&s, vec![(key(7), None), (b"tabl0001hot".to_vec(), Some(Bytes::from_static(b"last")))], &mut model);
+        drop(s);
+        let s = open(false);
+        check_at(&s, &model, s.visible_ts(), "reopened");
+        s.flush_memtables().unwrap();
+        s.compact().unwrap();
+        assert!(s.view().l0.is_empty());
+        check_at(&s, &model, s.visible_ts(), "compacted");
     }
 
     #[test]
