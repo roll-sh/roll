@@ -628,6 +628,8 @@ impl Secrets {
         db.add_column("projects", "leak_rotate", "TEXT")?;
         db.ensure_schema(leaks::SCHEMA)?;
         db.ensure_schema(leaks::SCAN_COUNTS_SCHEMA)?;
+        // Who may push past a pre-receive hook (`breakglass`, leaks.rs): a JSON list; NULL is no one.
+        db.add_column("projects", "breakglass", "TEXT")?;
         // The key a leak rotation was found by (at most one an hour per key), and a rotation
         // request's leaked credential and what applying it did instead of rotating.
         db.add_column("leak_rotations", "path", "TEXT")?;

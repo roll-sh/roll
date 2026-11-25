@@ -108,13 +108,79 @@ pub const SCAN_MAX: usize = 20_000;
 
 /// The shortest candidate a scanner's check (`POST …/scan`) tries.
 pub const SCAN_MIN_LEN: usize = 16;
-/// A scanner's calls a minute, and candidates in them, per caller.
+/// A scanner's calls a minute per caller; candidates it tries a minute, per caller and per
+/// project; and an hour per project (a push is at most [`SCAN_MAX`], and a hook runs a few times
+/// a minute).
 pub const SCANS_PER_MINUTE: i64 = 60;
-pub const SCAN_CANDIDATES_PER_MINUTE: i64 = 100_000;
+pub const SCAN_CANDIDATES_PER_MINUTE: i64 = 20_000;
+pub const SCAN_CANDIDATES_PER_HOUR: i64 = 200_000;
+/// The most refs, and the longest pusher and ref, a hook's call names.
+const PUSH_REFS_MAX: usize = 100;
+const PUSHER_MAX: usize = 100;
+const REF_MAX: usize = 256;
+/// The most entries in a project's `breakglass` list.
+const BREAKGLASS_MAX: usize = 100;
 
-/// Whether a scanner's check tries `c`: at least [`SCAN_MIN_LEN`] characters, two kinds of
-/// character, and 3 bits of entropy a character (`aaaaaaaaaaaaaaaa1` and a word repeated aren't).
+/// Whether a scanner's check tries `c`: `c` and each part of it that someone who knows its shape
+/// wouldn't know ([`unknown_parts`]: a URL's password, the right side of `user:…`) are
+/// [`strong`] on their own. A match is a candidate equal to a whole value, so this is the value's
+/// own floor: `postgres://app:<guess>@db:5432/x` is never tried for a guess at a weak password,
+/// however long the known text around it.
 pub fn scannable(c: &str) -> bool {
+    strong(c) && unknown_parts(c).into_iter().all(strong)
+}
+
+/// The parts of `c` someone who knows its shape wouldn't know: a URL's password (or its user,
+/// with no password); with no user, its query's secret-named values (`key`, `token`, `sig`…; all
+/// of them when none is) or else its path's last segment; the values of a `k=v;k=v` or `k=v&k=v`
+/// list (its secret-named ones when there are any); the right side of `name:value` or
+/// `name=value` (`user:pass@host` its password); and each word of text with spaces. Anything else
+/// is itself.
+fn unknown_parts(c: &str) -> Vec<&str> {
+    let secret_named = |k: &str| {
+        let k = k.to_ascii_lowercase();
+        ["pass", "pwd", "secret", "token", "key", "sig", "auth", "cred", "code"].iter().any(|w| k.contains(w))
+    };
+    let named = |pairs: Vec<(&'_ str, &'_ str)>| -> Vec<&'_ str> {
+        let secret: Vec<&str> = pairs.iter().filter(|(k, _)| secret_named(k)).map(|(_, v)| *v).collect();
+        if secret.is_empty() { pairs.into_iter().map(|(_, v)| v).collect() } else { secret }
+    };
+    if c.contains(char::is_whitespace) {
+        return c.split_whitespace().flat_map(unknown_parts).collect();
+    }
+    if let Some((scheme, rest)) = c.split_once("://")
+        && !scheme.is_empty()
+        && scheme.chars().all(|x| x.is_ascii_alphanumeric() || "+-.".contains(x))
+    {
+        let (authority, tail) = rest.split_at(rest.find(['/', '?', '#']).unwrap_or(rest.len()));
+        if let Some((userinfo, _)) = authority.rsplit_once('@') {
+            return vec![userinfo.split_once(':').map_or(userinfo, |(_, p)| p)];
+        }
+        let tail = tail.split('#').next().unwrap_or("");
+        let (path, query) = tail.split_once('?').unwrap_or((tail, ""));
+        if !query.is_empty() {
+            return named(query.split('&').map(|kv| kv.split_once('=').unwrap_or(("", kv))).collect());
+        }
+        return vec![path.split('/').rfind(|s| !s.is_empty()).unwrap_or(c)];
+    }
+    // base64's padding isn't a `name=value`.
+    let bare = c.trim_end_matches('=');
+    if bare.contains([';', '&']) && bare.contains('=') {
+        return named(bare.split([';', '&']).filter(|f| !f.is_empty()).map(|f| f.split_once('=').unwrap_or(("", f))).collect()).into_iter().flat_map(unknown_parts).collect();
+    }
+    if let Some(i) = bare.find([':', '=']) {
+        let name = &bare[..i];
+        if !name.is_empty() && name.len() <= 64 && name.chars().all(|x| x.is_ascii_alphanumeric() || "_-.".contains(x)) {
+            let value = &c[i + 1..];
+            return unknown_parts(value.rsplit_once('@').map_or(value, |(v, _)| v));
+        }
+    }
+    vec![c]
+}
+
+/// At least [`SCAN_MIN_LEN`] characters, two kinds of character, and 3 bits of entropy a
+/// character (`aaaaaaaaaaaaaaaa1` and a word repeated aren't).
+fn strong(c: &str) -> bool {
     let n = c.chars().count();
     if !(SCAN_MIN_LEN..=4096).contains(&n) {
         return false;
@@ -146,7 +212,56 @@ CREATE TABLE IF NOT EXISTS scan_counts (
     candidates INTEGER NOT NULL,
     PRIMARY KEY (principal, minute)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS scan_project_counts (
+    project_id TEXT NOT NULL,
+    minute INTEGER NOT NULL,
+    candidates INTEGER NOT NULL,
+    PRIMARY KEY (project_id, minute)
+) WITHOUT ROWID;
 ";
+
+/// What a pre-receive hook says about the push it checks (`POST …/scan`): who pushed (as the git
+/// server tells the hook: `GITHUB_USER_LOGIN`, `GL_USERNAME`…) and to which refs. Text for the
+/// audit log; the pusher counts for nothing but the project's `breakglass` list.
+#[derive(Clone, Debug, Default)]
+pub struct Push {
+    /// The push goes through anyway (`git push -o breakglass`), if the project allows it.
+    pub breakglass: bool,
+    pub pusher: Option<String>,
+    pub refs: Vec<String>,
+}
+
+impl Push {
+    fn check(&self) -> Result<()> {
+        let plain = |s: &str, max: usize| !s.is_empty() && s.chars().count() <= max && !s.chars().any(char::is_control);
+        if self.pusher.as_deref().is_some_and(|p| !plain(p, PUSHER_MAX)) {
+            return Err(Error::BadRequest(format!("pusher is 1 to {PUSHER_MAX} printable characters")));
+        }
+        if self.refs.len() > PUSH_REFS_MAX || self.refs.iter().any(|r| !plain(r, REF_MAX)) {
+            return Err(Error::BadRequest(format!("at most {PUSH_REFS_MAX} refs, each 1 to {REF_MAX} printable characters")));
+        }
+        Ok(())
+    }
+
+    /// ` by alice to refs/heads/main, refs/heads/x`, for a summary.
+    fn said(&self) -> String {
+        let by = self.pusher.as_deref().map(|p| format!(" by {p}")).unwrap_or_default();
+        let to = if self.refs.is_empty() { String::new() } else { format!(" to {}", self.refs.join(", ")) };
+        format!("{by}{to}")
+    }
+}
+
+/// A scanner's answer (`POST …/scan`): which candidate, and the environment of the value it is;
+/// the key and folder only where the caller may also `read` (a scan-only token names no key).
+#[derive(Clone, Debug, Serialize)]
+pub struct ScanFound {
+    pub index: usize,
+    pub environment: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
 
 /// A candidate of a scan that is a stored value: its index, and where the value is.
 #[derive(Clone, Debug, Serialize)]
@@ -211,47 +326,63 @@ impl Secrets {
 
     /// A scanner's check (`POST …/scan`, the `scan` right: a pre-receive hook): which whole
     /// `candidates` are values of this project, in the environments and folders the caller may
-    /// `scan`, without `read` or `reveal`. Only candidates of [`SCAN_MIN_LEN`] characters and
-    /// fair entropy ([`scannable`]) are tried, so it can't confirm a guess at a short or simple
-    /// value; sensitive values and personal ones never match; [`SCANS_PER_MINUTE`] calls and
-    /// [`SCAN_CANDIDATES_PER_MINUTE`] candidates a minute per caller. Every call is audited
-    /// (`secrets.scan`, the keys found), never a candidate. With `breakglass` the push it checks
-    /// goes through anyway: audited as `secrets.scan.breakglass`.
-    pub fn scan_only(&self, project: &str, candidates: &[String], caller: &Caller, breakglass: bool) -> Result<Vec<Found>> {
+    /// `scan`, without `read` or `reveal`. Only [`scannable`] candidates are tried, so it can't
+    /// confirm a guess at a short or simple value, nor at a weak password inside text a guesser
+    /// knows; sensitive values and personal ones never match; [`SCANS_PER_MINUTE`] calls and
+    /// [`SCAN_CANDIDATES_PER_MINUTE`] tried candidates a minute per caller, and as many a minute
+    /// and [`SCAN_CANDIDATES_PER_HOUR`] an hour per project. A match names its key and folder only
+    /// where the caller may `read`. Every call is audited (`secrets.scan`, with the pusher and refs
+    /// the hook names and the keys found), never a candidate. A `breakglass` push goes through
+    /// anyway, audited as `secrets.scan.breakglass`, and only when the project's `breakglass`
+    /// list allows the hook's token or the pusher ([`Secrets::breakglass`]): 403 otherwise.
+    pub fn scan_only(&self, project: &str, candidates: &[String], caller: &Caller, push: &Push) -> Result<Vec<ScanFound>> {
         caller.need(Action::Scan, &Scope::project(project))?;
         if candidates.len() > SCAN_MAX {
             return Err(Error::BadRequest(format!("at most {SCAN_MAX} candidates a scan")));
         }
+        push.check()?;
         self.project(project)?;
-        let action = if breakglass { "secrets.scan.breakglass" } else { "secrets.scan" };
+        let action = if push.breakglass { "secrets.scan.breakglass" } else { "secrets.scan" };
+        let said = push.said();
+        // Only what's worth a scanner's question: a short or simple candidate, or one whose
+        // unknown part is, is never tried.
+        let tried: Vec<String> = candidates.iter().map(|c| if scannable(c) { c.clone() } else { String::new() }).collect();
+        let n = tried.iter().filter(|c| !c.is_empty()).count() as i64;
         if caller.principal != "operator" {
             let minute = self.db.now_ms()? / 60_000;
-            let n = candidates.len() as i64;
-            let (calls, total): (i64, i64) = self.db.write(|c| {
-                c.query_row(
+            let (calls, mine, project_minute, project_hour): (i64, i64, i64, i64) = self.db.write(|c| {
+                let (calls, mine) = c.query_row(
                     "INSERT INTO scan_counts (principal, minute, calls, candidates) VALUES (?, ?, 1, ?) ON CONFLICT (principal, minute) DO UPDATE SET calls = scan_counts.calls + 1, candidates = scan_counts.candidates + excluded.candidates RETURNING calls, candidates",
                     params![caller.principal, minute, n],
                     |r| Ok((r.get(0)?, r.get(1)?)),
-                )
+                )?;
+                let at = c.query_row(
+                    "INSERT INTO scan_project_counts (project_id, minute, candidates) VALUES (?, ?, ?) ON CONFLICT (project_id, minute) DO UPDATE SET candidates = scan_project_counts.candidates + excluded.candidates RETURNING candidates",
+                    params![project, minute, n],
+                    |r| r.get(0),
+                )?;
+                let hour = c.query_row("SELECT COALESCE(SUM(candidates), 0) FROM scan_project_counts WHERE project_id = ? AND minute > ?", params![project, minute - 60], |r| r.get(0))?;
+                Ok((calls, mine, at, hour))
             })?;
-            if calls > SCANS_PER_MINUTE || total > SCAN_CANDIDATES_PER_MINUTE {
-                self.audit_now(project, caller, action, None, None, &[], &format!("refused a scan of {n} candidates: over {SCANS_PER_MINUTE} scans or {SCAN_CANDIDATES_PER_MINUTE} candidates a minute"));
-                return Err(Error::TooMany(format!("at most {SCANS_PER_MINUTE} scans and {SCAN_CANDIDATES_PER_MINUTE} candidates a minute: try again in a minute")));
+            if calls > SCANS_PER_MINUTE || mine > SCAN_CANDIDATES_PER_MINUTE || project_minute > SCAN_CANDIDATES_PER_MINUTE || project_hour > SCAN_CANDIDATES_PER_HOUR {
+                let limits = format!("{SCANS_PER_MINUTE} scans and {SCAN_CANDIDATES_PER_MINUTE} candidates tried a minute per token, {SCAN_CANDIDATES_PER_MINUTE} a minute and {SCAN_CANDIDATES_PER_HOUR} an hour per project");
+                self.audit_now(project, caller, action, None, None, &[], &format!("refused a scan of {} candidates{said}: over {limits}", candidates.len()));
+                return Err(Error::TooMany(format!("at most {limits}: try again later")));
             }
         }
-        // Only what's worth a scanner's question: a short or simple candidate is never tried, so
-        // a scanner can't walk guesses at a PIN or a word through it.
-        let tried: Vec<String> = candidates.iter().map(|c| if scannable(c) { c.clone() } else { String::new() }).collect();
+        if push.breakglass && !self.breakglass(project)?.iter().any(|w| allows_breakglass(w, caller, push)) {
+            self.audit_now(project, caller, action, None, None, &[], &format!("refused break glass{said}: the project's breakglass list doesn't name this token or pusher"));
+            return Err(Error::Forbidden(format!("break glass isn't allowed{said} in this project: an admin names who may with `roll secrets breakglass`")));
+        }
         let found: Vec<Found> = self
             .matches(project, &tried, Some(&caller.principal), false)?
             .into_iter()
             .filter(|m| !m.leak.environment.contains('/') && caller.allows(Action::Scan, &Scope::at(project, &m.leak.environment, &m.leak.path)))
             .map(|m| Found { index: m.index, leak: m.leak })
             .collect();
-        let summary = format!("scanned {} candidates ({} tried): {} matched{}", candidates.len(), tried.iter().filter(|c| !c.is_empty()).count(), found.len(), if breakglass { ", let through with breakglass" } else { "" });
+        let summary = format!("scanned {} candidates ({n} tried){said}: {} matched{}", candidates.len(), found.len(), if push.breakglass { ", let through with breakglass" } else { "" });
         if found.is_empty() {
             self.audit_now(project, caller, action, None, None, &[], &summary);
-            return Ok(found);
         }
         let mut at: BTreeMap<(&str, &str), BTreeSet<String>> = BTreeMap::new();
         for f in &found {
@@ -259,16 +390,53 @@ impl Secrets {
         }
         for ((env, path), keys) in at {
             let keys: Vec<String> = keys.into_iter().collect();
-            let event = Event::new(Kind::ScanFinding, json!({ "candidates": candidates.len(), "matched": found.len(), "guard": false, "breakglass": breakglass }));
+            let event = Event::new(Kind::ScanFinding, json!({ "candidates": candidates.len(), "matched": found.len(), "guard": false, "breakglass": push.breakglass, "pusher": push.pusher }));
             self.audit_now_event(project, caller, action, Some(env), Some(path), &keys, &summary, Some(event));
         }
-        Ok(found)
+        Ok(found
+            .into_iter()
+            .map(|f| {
+                let named = caller.allows(Action::Read, &Scope::at(project, &f.leak.environment, &f.leak.path));
+                ScanFound { index: f.index, key: named.then(|| f.leak.key.clone()), path: named.then(|| f.leak.path.clone()), environment: f.leak.environment }
+            })
+            .collect())
     }
 
-    /// Minutes of scan counts that have passed (the sweeper).
+    /// Who may push past `project`'s pre-receive hooks (`git push -o breakglass`): pushers' logins
+    /// as the git server names them, `token:<id>` for every push through one hook's token, `*`
+    /// for anyone. Empty (the default): no one.
+    pub fn breakglass(&self, project: &str) -> Result<Vec<String>> {
+        let v: Option<String> = self.db.read(|c| c.query_row("SELECT breakglass FROM projects WHERE project_id = ?", [project], |r| r.get::<_, Option<String>>(0)).optional())?.flatten();
+        Ok(v.map(|v| crate::from_json(&v)).unwrap_or_default())
+    }
+
+    /// Set [`Secrets::breakglass`] (an admin's; audited as `scan.breakglass`).
+    pub fn set_breakglass(&self, project: &str, who: Vec<String>, caller: &Caller) -> Result<Vec<String>> {
+        caller.need(Action::Admin, &Scope::project(project))?;
+        if !breakglass_ok(&who) {
+            return Err(Error::BadRequest(format!("breakglass is at most {BREAKGLASS_MAX} of: a pusher's login, token:<id>, or *")));
+        }
+        let mut who = who;
+        who.sort();
+        who.dedup();
+        self.project(project)?;
+        let now = self.db.now_ms()?;
+        self.db.write(|c| {
+            c.execute("UPDATE projects SET breakglass = ? WHERE project_id = ?", params![(!who.is_empty()).then(|| json!(who).to_string()), project])?;
+            let summary = if who.is_empty() { "no one may push past a pre-receive hook".to_string() } else { format!("may push past a pre-receive hook: {}", who.join(", ")) };
+            crate::audit::record(c, self.keys()?, project, caller, "scan.breakglass", None, None, &[], &summary, now)
+        })?;
+        Ok(who)
+    }
+
+    /// Minutes of scan counts that have passed (the sweeper): a caller's last minute, a project's
+    /// last hour.
     pub(crate) fn forget_scan_counts(&self) -> Result<()> {
         let minute = self.db.now_ms()? / 60_000;
-        self.db.write(|c| c.execute("DELETE FROM scan_counts WHERE minute < ?", [minute - 1]))?;
+        self.db.write(|c| {
+            c.execute("DELETE FROM scan_counts WHERE minute < ?", [minute - 1])?;
+            c.execute("DELETE FROM scan_project_counts WHERE minute <= ?", [minute - 60])
+        })?;
         Ok(())
     }
 
@@ -515,6 +683,23 @@ impl Secrets {
         out.sort();
         out.dedup();
         Ok(out)
+    }
+}
+
+/// Whether `who` is a `breakglass` list roll takes: at most [`BREAKGLASS_MAX`] of `*`,
+/// `token:<id>` and pushers' logins.
+pub(crate) fn breakglass_ok(who: &[String]) -> bool {
+    let login = |w: &str| (1..=PUSHER_MAX).contains(&w.len()) && w.chars().all(|x| x.is_ascii_alphanumeric() || "._-@+".contains(x));
+    who.len() <= BREAKGLASS_MAX && who.iter().all(|w| w == "*" || w.strip_prefix("token:").map_or_else(|| login(w), login))
+}
+
+/// Whether `entry` of a project's `breakglass` list lets `push` through: `token:<id>` only the
+/// hook's own token, `*` anyone, anything else the pusher's login (which can't name a token).
+fn allows_breakglass(entry: &str, caller: &Caller, push: &Push) -> bool {
+    match entry {
+        "*" => true,
+        e if e.starts_with("token:") => e == caller.principal,
+        e => push.pusher.as_deref() == Some(e),
     }
 }
 
