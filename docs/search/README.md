@@ -573,9 +573,9 @@ Elasticsearch-flavor.
   `seeds`) naming a cluster (its name, or its endpoint `<name>.<domain>[:port]`) works too, held
   to the same owner rule, but connects only once the remote has credentials.
 - **Credentials** are a secure setting: sealed under `ROLL_SECRET_KEY` and bound to their row
-  (cluster, alias, remote) in the catalog (`search_remotes`). A node without the key refuses an
-  `api_key` someone pasted (it would be stored in the clear) and keeps one roll made as made
-  (local development); a node that gains the key seals those rows as it starts. Never returned (`_remote/info`
+  (cluster, alias, remote) in the catalog (`search_remotes`). A single node without the key seals
+  them under its own key (`<home>/search/key`, as clusters' passwords), and sealed again with
+  `ROLL_SECRET_KEY` as it starts once it has it; never in the clear. Never returned (`_remote/info`
   shows `cluster_credentials: "::es_redacted::"`). The remote authorizes each request with the
   key's access intersected with the local user's `remote_indices` privileges for the alias (the
   cluster's own password is a superuser: everything the key allows), as Elasticsearch does.
@@ -886,7 +886,10 @@ cover it against one fake that speaks the three APIs; `roll-cli` `tests/search.r
 details) has `roll_search_cluster` (name, flavor, `always_on` or `idle_timeout_s`, limits,
 `ip_allowlist`; computed endpoint, status, version and the password from create; a new name
 makes a new cluster, a new flavor switches it in place keeping its data (links made before are
-reissued, and keys don't carry over: an API key isn't an OpenSearch user); import by id or name; destroy deletes it, restorable for
+reissued, and keys don't carry over: an API key isn't an OpenSearch user, so an OpenSearch-flavor
+cluster takes no API key, access token or service account token; a key made before a switch is
+revoked by `DELETE …/keys/{key}` whatever the flavor is now, and stays revoked across a switch
+back); import by id or name; destroy deletes it, restorable for
 `deleted_retention_s`, 7 days by default), `roll_search_api_key` (`access`, or Elasticsearch
 `role_descriptors` through the cluster's `_security/api_key`, and an `expiration`; its secret is
 sensitive, replaced on any change and after a flavor switch, revoked on destroy; also an ephemeral resource, revoked when

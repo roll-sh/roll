@@ -105,8 +105,10 @@ pub struct ClusterSpec {
     pub catalog_id: Option<String>,
     /// Who it belongs to (`search_es::ClusterConfig::owner`), when known.
     pub owner: Option<String>,
-    /// The parent's catalog id when the cluster is a branch (`search_es::ClusterConfig::branch_of`).
+    /// The parent's catalog id on a new branch's first load (`search_es::ClusterConfig::branch_of`).
     pub branch_of: Option<String>,
+    /// The parent's catalog id on every load of a branch (`search_es::ClusterConfig::parent`).
+    pub parent: Option<String>,
     /// The cluster's own `reindex.remote.whitelist` (`host:port` patterns); `None`: the node
     /// setting's ([`search_es::Cluster::reindex_whitelist`]).
     pub reindex_whitelist: Option<Vec<String>>,
@@ -131,6 +133,7 @@ impl ClusterSpec {
             catalog_id: None,
             owner: None,
             branch_of: None,
+            parent: None,
             reindex_whitelist: None,
         }
     }

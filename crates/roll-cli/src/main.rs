@@ -30,6 +30,7 @@ mod secrets;
 mod apps;
 mod aws_login;
 mod login;
+mod sys;
 
 /// roll — serverless infrastructure.
 #[derive(Parser)]
@@ -625,6 +626,10 @@ fn subcommand_name() -> Option<String> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     reset_sigpipe();
+    // The local agent as a Windows service: its login, from the file only it and the
+    // Administrators may open, before the flags read the environment.
+    #[cfg(windows)]
+    secrets::service::load_login()?;
     let matches = match Cli::command().mut_subcommand("secrets", secrets::grouped_help).try_get_matches() {
         Ok(m) => m,
         // `roll code` promises agents 2 = land conflict and 3 = no work, so its usage errors

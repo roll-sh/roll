@@ -1098,9 +1098,10 @@ fn picture(e: &crate::Engine, id: &str, png: Vec<u8>, cache: &'static str) -> Re
     outside_if_untrusted(e, id, ([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, cache)], png).into_response())
 }
 
-/// An answer that isn't JSON (a picture, a caught mail) from an untrusted preview says so.
+/// An answer that isn't JSON (a picture, a caught mail) from an untrusted preview says so (and
+/// one whose preview can't be read now: it fails closed).
 fn outside_if_untrusted(e: &crate::Engine, id: &str, mut resp: Response) -> Response {
-    if e.store.row(id).is_ok_and(|r| !r.trusted) {
+    if !e.store.row(id).is_ok_and(|r| r.trusted) {
         resp.headers_mut().insert(roll_auth::lockdown::OUTSIDE_HEADER, axum::http::HeaderValue::from_static("true"));
     }
     resp

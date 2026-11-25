@@ -566,8 +566,13 @@ pub fn aliases(ctx: &Ctx) -> EsResult<Reply> {
     let opts = ctx.indices_options(IndicesOptions { expand_closed: true, expand_hidden: true, ..IndicesOptions::STRICT_EXPAND_OPEN })?;
     let mut t = table(ctx, columns!(ctx, ALIASES));
     let mut rows: Vec<(&str, &IndexMeta, &crate::meta::AliasMeta)> = Vec::new();
+    // The indices the security layer narrowed the request to (its principal's), when it did.
+    let narrowed: Option<Vec<&str>> = ctx.path_param("index").map(|i| i.split(',').collect());
     for idx in st.metadata.indices.values() {
         if !(if idx.is_closed() { opts.expand_closed } else { opts.expand_open }) || (idx.is_hidden() && !opts.expand_hidden) {
+            continue;
+        }
+        if narrowed.as_ref().is_some_and(|n| !n.contains(&idx.name.as_str())) {
             continue;
         }
         for (a, am) in &idx.aliases {
