@@ -658,7 +658,9 @@ roll secrets agent --uninstall-service      # stops it and deletes its login; th
 
 The service runs `roll.exe` from where it is, so install roll for the machine first (`install.ps1
 -System`, `winget install --scope machine`, `scoop install -g`): a `roll.exe` in your profile is
-refused, since the service's account can't read it (`crates/roll-cli/src/secrets/service.rs`).
+refused, since the service's account can't read it (`crates/roll-cli/src/secrets/service.rs`; its
+command line's quoting is `a_windows_service_command_line_keeps_each_argument_whole` in `sys.rs`,
+and `release-cli.yml`'s `windows-check` builds it).
 
 Tests: `crates/roll-cli/tests/secrets.rs` (`the_local_agent_answers_only_requests_that_carry_its_token`,
 `a_change_reaches_the_local_agents_cache_through_the_digest`,

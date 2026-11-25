@@ -64,6 +64,34 @@ pub fn shell(line: &str) -> std::process::Command {
     c
 }
 
+/// One argument for a Windows command line (CommandLineToArgvW's rules).
+#[cfg(any(windows, test))]
+pub fn quote(arg: &str) -> String {
+    if !arg.is_empty() && !arg.contains([' ', '\t', '"']) {
+        return arg.to_string();
+    }
+    // Backslashes are literal unless they come before a quote: then they're doubled, and the
+    // quote escaped.
+    let mut out = String::from('"');
+    let mut slashes = 0;
+    for c in arg.chars() {
+        if c == '\\' {
+            slashes += 1;
+            continue;
+        }
+        if c == '"' {
+            out.push_str(&"\\".repeat(slashes * 2 + 1));
+        } else {
+            out.push_str(&"\\".repeat(slashes));
+        }
+        out.push(c);
+        slashes = 0;
+    }
+    out.push_str(&"\\".repeat(slashes * 2));
+    out.push('"');
+    out
+}
+
 /// This machine's name, if it has one.
 pub fn hostname() -> Option<String> {
     #[cfg(unix)]
@@ -272,5 +300,19 @@ pub mod acl {
     /// Only this user and the machine's Administrators may open `file` (made with [`exclusive`]).
     pub fn private(file: &std::fs::File) -> io::Result<()> {
         set(file, &format!("D:P(A;;FA;;;{})(A;;FA;;;BA)", me()?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_windows_service_command_line_keeps_each_argument_whole() {
+        // CommandLineToArgvW's rules: a quoted argument's backslashes are literal unless they
+        // come before a quote.
+        assert_eq!(super::quote("production:/"), "production:/");
+        assert_eq!(super::quote(r"C:\Program Files\roll\roll.exe"), r#""C:\Program Files\roll\roll.exe""#);
+        assert_eq!(super::quote(r"C:\agent dir\"), r#""C:\agent dir\\""#);
+        assert_eq!(super::quote(r#"a "b""#), r#""a \"b\"""#);
+        assert_eq!(super::quote(""), r#""""#);
     }
 }

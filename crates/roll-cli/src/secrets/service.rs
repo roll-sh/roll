@@ -14,7 +14,7 @@
 //! the manager's stop or the machine's shutdown, and reports a failure (which the service's
 //! recovery restarts) when it ends with an error.
 
-use crate::sys::acl;
+use crate::sys::{acl, quote};
 use anyhow::{Context, bail};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -94,33 +94,6 @@ fn manager() -> anyhow::Result<Sc> {
         return Err(std::io::Error::last_os_error()).context("opening the service control manager (run this as an administrator)");
     }
     Ok(Sc(h))
-}
-
-/// One argument for a Windows command line (CommandLineToArgvW's rules).
-fn quote(arg: &str) -> String {
-    if !arg.is_empty() && !arg.contains([' ', '\t', '"']) {
-        return arg.to_string();
-    }
-    // Backslashes are literal unless they come before a quote: then they're doubled, and the
-    // quote escaped.
-    let mut out = String::from('"');
-    let mut slashes = 0;
-    for c in arg.chars() {
-        if c == '\\' {
-            slashes += 1;
-            continue;
-        }
-        if c == '"' {
-            out.push_str(&"\\".repeat(slashes * 2 + 1));
-        } else {
-            out.push_str(&"\\".repeat(slashes));
-        }
-        out.push(c);
-        slashes = 0;
-    }
-    out.push_str(&"\\".repeat(slashes * 2));
-    out.push('"');
-    out
 }
 
 /// What the service runs with.
