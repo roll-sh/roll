@@ -873,6 +873,43 @@ fn power_cut_keeps_only_what_was_fsynced() {
     assert_eq!(read("e").as_deref(), Some("durable"));
 }
 
+/// The cluster's files outside the stores survive a power cut once their statement returned:
+/// ALTER SYSTEM's postgresql.auto.conf (new, then replaced) and replication origins'
+/// replorigins.json were renamed into place with no fsync of the data directory (the origins'
+/// file not fsynced at all), so a cut lost the entry or left the old file (tools/crash-binary.py
+/// --power, ddl rounds, agent 325).
+#[cfg(feature = "powerloss")]
+#[test]
+fn power_cut_keeps_alter_system_and_origins() {
+    use pg_engine::repl::origin::Origins;
+    use pg_engine::sysconf::{AUTO_NAME, ServerConfig};
+    if let Ok(dir) = std::env::var("POWER_CONF_CHILD") {
+        let d = std::path::PathBuf::from(dir);
+        let conf = ServerConfig::open(Some(d.clone()), &[]);
+        conf.alter_system(Some("work_mem"), Some("8MB")).unwrap();
+        conf.alter_system(Some("work_mem"), Some("9MB")).unwrap();
+        let o = Origins::open(Some(d.clone()));
+        o.create("o1").unwrap();
+        o.create("o2").unwrap();
+        sigkill();
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let (data, shadow) = (tmp.path().join("data"), tmp.path().join("shadow"));
+    std::fs::create_dir_all(&data).unwrap();
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "power_cut_keeps_alter_system_and_origins", "--nocapture"])
+        .env("POWER_CONF_CHILD", &data)
+        .env("ROLL_POWERLOSS", format!("{}:{}", data.display(), shadow.display()))
+        .output()
+        .unwrap();
+    assert!(out.status.code().is_none(), "{}", String::from_utf8_lossy(&out.stderr));
+    pg_engine::storage::powerloss::power_cut(&data, &shadow, None).unwrap();
+    let auto = std::fs::read_to_string(data.join(AUTO_NAME)).unwrap_or_default();
+    assert!(auto.contains("work_mem = '9MB'"), "postgresql.auto.conf after the cut: {auto:?}");
+    let names: Vec<String> = Origins::open(Some(data.clone())).list().into_iter().map(|o| o.name).collect();
+    assert_eq!(names, ["o1", "o2"]);
+}
+
 /// Commits acknowledged into a WAL file the store just made (at open, and after a memtable
 /// filled and the WAL rotated) survive a power cut: the file's directory entry is durable
 /// before they are. The child commits key `k<i>` (fixed width: the store's user keys are

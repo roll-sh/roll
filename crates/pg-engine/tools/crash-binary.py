@@ -67,9 +67,10 @@ the first watched start (a clean shutdown: that state counts as durable). The ro
 through three more kinds:
   ack           0-300 us after a writer's COMMIT was acknowledged (it must be there);
   ddl           0-3 ms after the nth of a DDL sequence was sent: CREATE TABLE, INSERT, ADD
-                COLUMN, CREATE INDEX, ALTER SYSTEM, a physical replication slot, DROP TABLE of
-                the last round's table; each acknowledged step must be there (ALTER SYSTEM and
-                the slot under synchronous_commit=off too: neither is a transaction);
+                COLUMN, CREATE INDEX, ALTER SYSTEM, a physical replication slot, a replication
+                origin, DROP TABLE of the last round's table; each acknowledged step must be
+                there (ALTER SYSTEM, the slot and the origin under synchronous_commit=off too:
+                roll writes them as files, not in a transaction);
   prepare       0-2 ms after the nth two-phase message was sent (PREPARE TRANSACTION, COMMIT /
                 ROLLBACK PREPARED of TPC-B transactions on a connection of their own): an
                 acknowledged PREPARE is in pg_prepared_xacts after the restart (then committed
@@ -307,6 +308,7 @@ class Model:
         self.ddl = {}  # round -> [acked level, sent level] of its ddl_r<round> table
         self.sysval = [None, None]  # ALTER SYSTEM's value: acknowledged, sent
         self.slots = {}  # name -> 'there', 'gone' or 'either'
+        self.origins = {}  # replication origins, the same
         self.step_evt = threading.Event()  # set when the round's ddl / prepare worker sent the step asked for
         self.step_want = 0
         self.steps = 0
@@ -490,7 +492,8 @@ def ddl_worker(port, model, rng, r):
              (('d', r, 3), f'ALTER TABLE {t} ADD COLUMN x int DEFAULT {r}'),
              (('d', r, 4), f'CREATE INDEX {t}_v ON {t} (v)'),
              (('sys',), f'ALTER SYSTEM SET {SYS_GUC} = {100000 + r}'),
-             (('slot', f's_r{r}'), f"SELECT pg_create_physical_replication_slot('s_r{r}', true)")]
+             (('slot', f's_r{r}'), f"SELECT pg_create_physical_replication_slot('s_r{r}', true)"),
+             (('origin', f'o_r{r}'), f"SELECT pg_replication_origin_create('o_r{r}')")]
     steps += [(('d', p, DDL_STEPS), f'DROP TABLE ddl_r{p}') for p in prev]
     for key, sql in steps:
         with model.lock:
@@ -499,7 +502,7 @@ def ddl_worker(port, model, rng, r):
             elif key[0] == 'sys':
                 model.sysval[1] = 100000 + r
             else:
-                model.slots[key[1]] = 'either'
+                (model.slots if key[0] == 'slot' else model.origins)[key[1]] = 'either'
             model.mark(key, sent=True)
         model.step()
         try:
@@ -518,7 +521,7 @@ def ddl_worker(port, model, rng, r):
             elif key[0] == 'sys':
                 model.sysval[0] = 100000 + r
             else:
-                model.slots[key[1]] = 'there'
+                (model.slots if key[0] == 'slot' else model.origins)[key[1]] = 'there'
             model.mark(key)
         time.sleep(rng.random() * 0.02)
     model.step_evt.set()  # all of it acknowledged: a kill after the whole sequence
@@ -720,6 +723,12 @@ def check(port, model, where):
             c.query(f"SELECT pg_drop_replication_slot('{name}')")
             with model.lock:
                 model.slots[name] = 'gone'
+        with model.lock:
+            origins = [name for name, s in model.origins.items() if s == 'there']
+        for name in origins:
+            c.query(f"SELECT pg_replication_origin_drop('{name}')")
+            with model.lock:
+                model.origins[name] = 'gone'
     c.close()
     if bad:
         raise Failure(f'{where}:\n  ' + '\n  '.join(bad[:30]) + (f'\n  ... {len(bad) - 30} more' if len(bad) > 30 else ''))
@@ -734,7 +743,7 @@ def check_ddl(c, model, alive):
     bad = []
     with model.lock:
         tables, sysval, slots = {r: list(v) for r, v in model.ddl.items()}, list(model.sysval), dict(model.slots)
-    if not tables and sysval[1] is None and not slots:
+    if not tables and sysval[1] is None and not slots and not model.origins:
         return bad
     present = {r[0] for r in c.query("SELECT relname FROM pg_class WHERE relname LIKE 'ddl\\_r%' AND relkind = 'r'")[0]}
     for r, (acked, sent) in sorted(tables.items()):
@@ -771,15 +780,20 @@ def check_ddl(c, model, alive):
             bad.append(f'ALTER SYSTEM SET {SYS_GUC}: {got} after the restart, acknowledged {sysval[0]}, sent {sysval[1]}')
         with model.lock:
             model.sysval = [int(got), int(got)] if got != '-1' else [None, None]
-    if slots:
-        there = {r[0] for r in c.query("SELECT slot_name FROM pg_replication_slots WHERE slot_name LIKE 's\\_r%'")[0]}
-        for name, state in sorted(slots.items()):
+    for what, objs, q in (('replication slot', model.slots, "SELECT slot_name FROM pg_replication_slots WHERE slot_name LIKE 's\\_r%'"),
+                          ('replication origin', model.origins, "SELECT roname FROM pg_replication_origin WHERE roname LIKE 'o\\_r%'")):
+        with model.lock:
+            states = dict(objs)
+        if not states:
+            continue
+        there = {r[0] for r in c.query(q)[0]}
+        for name, state in sorted(states.items()):
             if state == 'there' and name not in there:
-                bad.append(f'replication slot {name}: its creation acknowledged, gone after the restart')
+                bad.append(f'{what} {name}: its creation acknowledged, gone after the restart')
             if state == 'gone' and name in there:
-                bad.append(f'replication slot {name}: dropped, there after the restart')
+                bad.append(f'{what} {name}: dropped, there after the restart')
             with model.lock:
-                model.slots[name] = 'there' if name in there else 'gone'
+                objs[name] = 'there' if name in there else 'gone'
     return bad
 
 
@@ -884,7 +898,7 @@ def run_round(srv, model, rng, r, kind, batch0):
         time.sleep(us / 1e6)
         what = f'{us} us after a COMMIT was acknowledged' if hit else '10 s (no COMMIT acknowledged)'
     elif kind in ('ddl', 'prepare'):
-        n = rng.randrange(1, 9 if kind == 'ddl' else 25)
+        n = rng.randrange(1, 10 if kind == 'ddl' else 25)
         us = rng.randrange(0, 3000 if kind == 'ddl' else 2000)
         model.steps, model.step_want = 0, n
         model.step_evt.clear()
@@ -895,7 +909,8 @@ def run_round(srv, model, rng, r, kind, batch0):
         act.start()
         hit = model.step_evt.wait(15)
         time.sleep(us / 1e6)
-        what = (f'{us} us after {kind} step {n} was sent' if hit else
+        what = (f'{us} us after {kind} step {n} was sent' if hit and model.steps >= n else
+                f'{us} us after all {model.steps} {kind} steps were acknowledged' if hit else
                 f'15 s ({model.steps} of {n} {kind} steps sent)')
     alive = srv.proc.poll() is None
     if alive:
