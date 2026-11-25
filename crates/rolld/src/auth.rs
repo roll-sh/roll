@@ -86,6 +86,8 @@ pub const RULES: &[Rule] = &[
     Rule { route: "/v1/secrets/health", access: Access::Credential("a roll token (rlt_…); the operator's answer") },
     // roll's issuer key signs for every project: rotating it is the operator's.
     Rule { route: "/v1/secrets/issuer", access: Access::Operator },
+    // roll secrets' policy (guardrails) binds every project: the operator's, or an admin account's.
+    Rule { route: "/v1/secrets/policy", access: Access::Operator },
     // So does the audit log's digest key, and its public keys are what exports are checked with.
     Rule { route: "/v1/secrets/audit/key", access: Access::Operator },
     Rule { route: "/v1/secrets/audit/jwks", access: Access::Public("the audit log's digest keys: public, as an export is checked against them offline") },
