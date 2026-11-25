@@ -26,16 +26,17 @@ impl Default for ScriptService {
     }
 }
 
-/// The cluster's `request` breaker as what its compiled scripts are charged to.
+/// The cluster's `request` breaker as what its compiled scripts are charged to (a cache:
+/// [`crate::breaker::try_hold_cache`]).
 struct Breaker(Arc<search_aggs::memory::MemoryBudget>);
 
 impl search_painless::MemoryCharge for Breaker {
     fn try_reserve(&self, bytes: u64) -> bool {
-        self.0.try_reserve(bytes)
+        crate::breaker::try_hold_cache(&self.0, bytes)
     }
 
     fn release(&self, bytes: u64) {
-        self.0.release(bytes);
+        crate::breaker::release_cache(&self.0, bytes);
     }
 }
 

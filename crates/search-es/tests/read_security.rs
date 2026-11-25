@@ -250,3 +250,31 @@ async fn a_point_in_time_reads_under_its_readers_current_role() {
     let (s, v) = call(&c, "POST", "/_search", &search, Some("r")).await;
     assert_eq!((s, v.pointer(&["error", "type"]).and_then(Value::as_str)), (403, Some("security_exception")), "{}", v.to_json());
 }
+
+/// A request a linked cluster sends for `user` over its cross-cluster key `auth`, with that
+/// user's `remote_indices` on `p`.
+async fn link_call(c: &Cluster, method: &str, uri: &str, body: &str, auth: &str, user: &str) -> (u16, Value) {
+    let mut req = if body.is_empty() { EsRequest::new(method, uri) } else { EsRequest::json(method, uri, body.to_string()) };
+    req.headers.push(("Authorization".into(), auth.to_string()));
+    let access = format!(r#"{{"cluster":"home","who":"user [{user}]","owner":"native:{user}","roles":[{{"r0":{{"cluster":[],"indices":[{{"names":["p"],"privileges":["read"]}}]}}}}]}}"#);
+    req.headers.push(("x-roll-remote-access".into(), access));
+    let r = search_es::handle(c, req).await;
+    (r.status, parse(&r.body).ok().flatten().unwrap_or(Value::Null))
+}
+
+/// Two users of one linked cluster (one cross-cluster key) each have their own scrolls: one
+/// opened for the first is the second's 404.
+#[tokio::test]
+async fn a_links_users_have_their_own_scrolls() {
+    let c = cluster(r#""none""#).await;
+    let (s, v) = call(&c, "POST", "/_security/cross_cluster/api_key", r#"{"name":"link","access":{"search":[{"names":["p"]}]}}"#, None).await;
+    assert_eq!(s, 200, "{}", v.to_json());
+    let auth = format!("ApiKey {}", v.get("encoded").and_then(Value::as_str).unwrap());
+    let (s, v) = link_call(&c, "POST", "/p/_search?scroll=1m", r#"{"size":1}"#, &auth, "a").await;
+    assert_eq!((s, hits(&v)), (200, 1), "{}", v.to_json());
+    let page = format!(r#"{{"scroll":"1m","scroll_id":"{}"}}"#, v.get("_scroll_id").and_then(Value::as_str).unwrap());
+    let (s, v) = link_call(&c, "POST", "/_search/scroll", &page, &auth, "b").await;
+    assert_eq!(s, 404, "another user of the link: {}", v.to_json());
+    let (s, v) = link_call(&c, "POST", "/_search/scroll", &page, &auth, "a").await;
+    assert_eq!((s, hits(&v)), (200, 1), "{}", v.to_json());
+}

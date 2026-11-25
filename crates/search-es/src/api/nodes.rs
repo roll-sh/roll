@@ -752,7 +752,7 @@ pub fn breaker_stats(cluster: &Cluster, st: &crate::meta::ClusterState, m: &Node
         .map(|(name, limit_default, overhead)| match name {
             "request" => {
                 let b = cluster.breakers.request(cluster, st);
-                (name, b.limit().min(i64::MAX as u64) as i64, overhead, b.used() as i64, b.tripped() as i64)
+                (name, b.limit().min(i64::MAX as u64) as i64, overhead, crate::breaker::request_held(&b) as i64, b.tripped() as i64)
             }
             "inflight_requests" => (name, limit("network.breaker.inflight_requests.limit", "100%"), overhead, in_flight, in_flight_tripped),
             "parent" => (name, limit("indices.breaker.total.limit", "95%"), overhead, parent, parent_tripped),

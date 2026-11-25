@@ -1940,6 +1940,11 @@ fn cacheable(req: &SearchRequest, t: &Target) -> bool {
     if req.request_cache.is_none() && t.idx.settings.get("index.requests.cache.enable") == Some("false") {
         return false;
     }
+    // A point in time (or any search on a kept searcher) reads a snapshot the key doesn't name:
+    // its entries would answer live searches after a refresh, and live entries it.
+    if t.searcher.is_some() {
+        return false;
+    }
     // A reader whose document or field level security restricts anything never reads or
     // writes the cache: its answers depend on what it may read, here and in every index its
     // queries look documents up in, which the key can't hold (Elasticsearch disables the cache
@@ -1951,12 +1956,11 @@ fn cacheable(req: &SearchRequest, t: &Target) -> bool {
     !(text.contains("now") || text.contains("Script") || text.contains("random"))
 }
 
-/// What a request cache entry is found by: a hash of its key, as 16 hex digits.
+/// What a request cache entry is found by: a hash of its key, as 16 hex digits. Persisted with
+/// a shard's warm entries, so it is xxh3 (a fixed algorithm), never the standard library's
+/// hasher, which may change with a Rust release.
 fn request_cache_hash(key: &str) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::hash::DefaultHasher::new();
-    key.hash(&mut h);
-    format!("{:016x}", h.finish())
+    format!("{:016x}", xxhash_rust::xxh3::xxh3_64(key.as_bytes()))
 }
 
 /// Whether `s` is a [`request_cache_hash`] (a persisted key of this form).

@@ -1267,17 +1267,23 @@ Checked against Elasticsearch 9.5.5 (captures in
   budget (below). A tenant's `search.max_keep_alive`, `search.max_open_scroll_context` (and
   OpenSearch's `point_in_time.max_keep_alive`, `search.max_open_pit_context`) read as written but
   can't raise the limits past their defaults (24h, 500 scrolls, 300 points in time). Contexts
-  don't keep a cluster loaded: one idle past its unload drops them, and a later page answers
-  `search_context_missing_exception`, as after an Elasticsearch node restart.
+  keep a cluster loaded until the last expires, but at most 10 minutes past its last request:
+  then an idle cluster unloads and drops them, and a later page answers
+  `search_context_missing_exception`, as after an Elasticsearch node restart. Expired contexts
+  are dropped on every round of the node's reaper, busy cluster or not.
 - A point in time keeps only its alias filters: each search on it applies its reader's document
   and field level security as the roles are then, as Elasticsearch does (a scroll keeps its
   opener's, as Elasticsearch's scroll context does).
-- The shard request cache charges each entry what it holds (its aggregations and key) to
-  `request` until it goes, and the cluster's entries together hold at most
+- The shard request cache charges each entry what it holds (its aggregations and key) to the
+  cluster's `request` limit until it goes, and the cluster's entries together hold at most
   `indices.requests.cache.size` (1% of the node's budget), the least recently used going first.
-  Stored `_tasks` results hold at most 64 MiB per cluster on `request` (a by-query result keeps
-  its first 100 `failures`, with `failures_truncated` counting the rest), and compiled scripts
-  at most 32 MiB.
+  Searches on a point in time don't use it. Compiled scripts hold at most 32 MiB, charged the
+  same way. Both are caches: they count against their own cluster's limit only, and the node
+  counts them as the cluster's resident memory (unloading idle clusters to make room), not in
+  its budget for requests, where they would never give way to another cluster's request
+  (Elasticsearch charges its caches to no breaker). Stored `_tasks` results hold at most 64 MiB
+  per cluster on `request` and the node's budget (a by-query result keeps its first 100
+  `failures`, with `failures_truncated` counting the rest).
 - roll's differences in the `request` breaker, because one node serves many clusters:
   - everything charged to it (aggregations, ES|QL, kept results and contexts, buffered
     `_msearch` responses, snapshot transfers) is also charged to the node's budget, which only

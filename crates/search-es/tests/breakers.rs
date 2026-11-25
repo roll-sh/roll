@@ -255,12 +255,10 @@ async fn one_tenants_kept_results_leave_room_for_anothers_aggregation() {
     let (s, v) = call(&b, "POST", "/ids/_search", Some(TERMS_IDS)).await;
     let cause = parent_refusal(s, &v);
     assert_eq!(at(cause, "bytes_limit").as_i64(), Some(1 << 30), "B's own limit, not the node's free memory: {v:?}");
-    // Deleting A's results gives their memory back (and clearing B's request cache, which
-    // holds the small aggregation's result, gives back B's).
+    // Deleting A's results gives their memory back.
     for id in ids {
         assert_eq!(call(&a, "DELETE", &format!("/_query/async/{id}"), None).await.0, 200);
     }
-    assert_eq!(call(&b, "POST", "/_cache/clear", None).await.0, 200);
     assert_eq!(node.used(), 0);
 }
 

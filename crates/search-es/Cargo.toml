@@ -28,6 +28,7 @@ chrono-tz.workspace = true
 # The PPL grammar bundle `_plugins/_ppl/_grammar` serves (`assets/ppl_grammar.json.gz`).
 flate2.workspace = true
 crc32fast.workspace = true
+xxhash-rust.workspace = true
 # Fixed-seed hashing of per-document lookups (field tables, the bulk fast path).
 foldhash.workspace = true
 indexmap.workspace = true

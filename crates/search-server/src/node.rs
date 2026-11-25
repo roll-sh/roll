@@ -109,6 +109,10 @@ pub struct NodeConfig {
     pub domain: Option<String>,
     /// Unload clusters idle this long (`None`: never).
     pub idle_unload: Option<Duration>,
+    /// How long past its last request a cluster's open scrolls and points in time keep it
+    /// loaded (until the last one expires, at most this): a slow exporter keeps its scroll, a
+    /// forgotten one doesn't pin its cluster for its whole keep-alive.
+    pub context_pin: Duration,
     /// `http.max_content_length`.
     pub max_body_bytes: usize,
     /// Dev mode: serve this cluster to every request, without authentication.
@@ -194,6 +198,7 @@ impl Default for NodeConfig {
             node_id: None,
             domain: None,
             idle_unload: Some(Duration::from_secs(300)),
+            context_pin: Duration::from_secs(600),
             max_body_bytes: DEFAULT_MAX_BODY,
             default_cluster: None,
             node_settings: Vec::new(),
@@ -310,12 +315,19 @@ impl Loaded {
     /// Whether work that lives only in memory still needs the cluster loaded: a running task.
     /// Running OpenSearch jobs (ISM steps) and connector syncs write through the cluster like
     /// requests do.
-    ///
-    /// Open scrolls and points in time don't pin it: their keep-alive is the client's to choose,
-    /// so a cluster idle past its own unload goes and its contexts with it, and a later page
-    /// answers `search_context_missing_exception`, as after an Elasticsearch node restart.
     fn pinned(&self) -> bool {
         !self.cluster.tasks.is_empty() || self.cluster.jobs.busy() || self.cluster.xpack.connector_syncs.busy()
+    }
+
+    /// Whether open scrolls or points in time keep the cluster loaded at `now_ms`: until the
+    /// last one expires, but at most `cap` past the cluster's last request. Their keep-alive is
+    /// the client's to choose, so one forgotten doesn't pin the cluster for all of it: past the
+    /// cap the cluster goes when idle, its contexts with it, and a later page answers
+    /// `search_context_missing_exception`, as after an Elasticsearch node restart. Expired
+    /// contexts are dropped here (every reaper tick), so their searchers and their charge on
+    /// the `request` breaker go even on a cluster that never opens or reads another one.
+    fn held_by_contexts(&self, now_ms: u64, cap: Duration) -> bool {
+        self.cluster.contexts.latest_expiry().is_some() && now_ms.saturating_sub(self.last_used.load(Ordering::SeqCst)) < cap.as_millis() as u64
     }
 }
 
@@ -1488,6 +1500,10 @@ impl Node {
         map.iter()
             .filter_map(|(k, s)| s.get().map(|l| (k, l)))
             .filter(|(_, l)| {
+                // First, so expired contexts are dropped on every tick.
+                if l.held_by_contexts(now, self.cfg.context_pin) {
+                    return false;
+                }
                 if l.pinned() {
                     l.last_used.fetch_max(now, Ordering::SeqCst);
                     return false;
@@ -1884,6 +1900,11 @@ impl Node {
                     Err(e) => tracing::warn!(cluster = &*l.name, error = %e, "committing a cluster over its memory budget failed"),
                 }
             }
+        }
+        // Its caches are the cluster's resident memory too (charged to its own `request` limit
+        // only, [`search_es::breaker::try_hold_cache`]): unloading it gives them back.
+        for (l, r) in sizes.iter_mut() {
+            *r += l.cluster.cache_bytes();
         }
         let mut evicted = Vec::new();
         // One budget: what the clusters and the node's embedding model (its batches included)
@@ -2755,12 +2776,13 @@ mod tests {
         assert!(n.take_request_counts().is_empty());
     }
 
-    /// An open scroll doesn't keep its cluster loaded past its idle unload (its keep-alive is
-    /// the client's to choose): the cluster unloads, and the next page finds no context, as
-    /// after an Elasticsearch node restart.
+    /// An open scroll keeps its cluster loaded at most `context_pin` past the last request (its
+    /// keep-alive is the client's to choose): then the cluster unloads, and the next page finds
+    /// no context, as after an Elasticsearch node restart.
     #[tokio::test]
-    async fn open_scrolls_go_with_their_cluster() {
-        let (n, _) = node(NodeConfig { idle_unload: Some(Duration::from_millis(40)), unload_memory_only: true, ..NodeConfig::default() });
+    async fn open_scrolls_pin_their_cluster_up_to_a_cap() {
+        let pin = Duration::from_millis(600);
+        let (n, _) = node(NodeConfig { idle_unload: Some(Duration::from_millis(40)), context_pin: pin, unload_memory_only: true, ..NodeConfig::default() });
         let send = |method: &str, uri: &str, body: &str| {
             let mut r = EsRequest::json(method, uri, body.to_string());
             r.headers.push(("Authorization".into(), basic("c1", "pw1")));
@@ -2772,16 +2794,50 @@ mod tests {
         let r = send("GET", "/i/_search?scroll=1h&size=1", "").await;
         assert_eq!(r.status, 200);
         let id = r.body_json().get("_scroll_id").and_then(|v| v.as_str()).unwrap().to_string();
+        let opened = std::time::Instant::now();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        if opened.elapsed() < pin {
+            assert!(n.get_loaded("c1").is_some(), "an open scroll keeps its cluster loaded for a while");
+        }
         tokio::time::timeout(Duration::from_secs(5), async {
             while n.get_loaded("c1").is_some() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
-        .expect("c1 unloads though its scroll's keep-alive is an hour");
+        .expect("c1 unloads once the cap passed, though the scroll's keep-alive is an hour");
         let r = send("POST", "/_search/scroll", &format!(r#"{{"scroll":"1m","scroll_id":"{id}"}}"#)).await;
         assert_eq!(r.status, 404, "{:?}", r.body_json());
         assert!(r.body_json().to_json().contains("search_context_missing_exception"), "{:?}", r.body_json());
+    }
+
+    /// A scroll that expires on a cluster kept busy (never idle, never paged again) still gives
+    /// its searchers' charge back: the reaper drops expired contexts on every tick.
+    #[tokio::test]
+    async fn expired_scrolls_are_dropped_on_a_busy_cluster() {
+        let (n, _) = node(NodeConfig { idle_unload: Some(Duration::from_millis(400)), unload_memory_only: true, ..NodeConfig::default() });
+        let send = |method: &str, uri: &str, body: &str| {
+            let mut r = EsRequest::json(method, uri, body.to_string());
+            r.headers.push(("Authorization".into(), basic("c1", "pw1")));
+            let n = n.clone();
+            async move { n.handle(r).await }
+        };
+        assert_eq!(send("PUT", "/i/_doc/1?refresh=true", r#"{"f":1}"#).await.status, 201);
+        assert_eq!(send("GET", "/i/_search?scroll=300ms&size=1", "").await.status, 200);
+        let held = |n: &Arc<Node>| n.get_loaded("c1").map(|l| l.cluster.breakers.request_budget().used());
+        assert!(held(&n).unwrap() > 0, "the open scroll's searchers are charged");
+        let released = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                assert_eq!(send("GET", "/", "").await.status, 200);
+                if held(&n) == Some(0) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+        })
+        .await;
+        assert!(released.is_ok(), "still charged: {:?}", held(&n));
+        assert!(n.get_loaded("c1").is_some(), "busy all along");
     }
 
     #[tokio::test]

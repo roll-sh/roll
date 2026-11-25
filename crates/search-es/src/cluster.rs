@@ -799,6 +799,12 @@ impl Cluster {
         crate::api::snapshots::resume_elasticsearch_restores(self);
     }
 
+    /// What its caches hold (the shard request cache, compiled scripts): charged to its own
+    /// `request` limit only ([`crate::breaker::try_hold_cache`]); its node counts them resident.
+    pub fn cache_bytes(&self) -> u64 {
+        self.request_cache.used() + self.scripts.engine.cache_bytes()
+    }
+
     /// A strong handle for background work, when enabled.
     pub fn handle(&self) -> Option<Arc<Cluster>> {
         self.background.get()?.upgrade()

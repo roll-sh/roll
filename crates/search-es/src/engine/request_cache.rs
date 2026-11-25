@@ -7,12 +7,18 @@
 //! the cap, the charge and one eviction order over every shard's entries (a clock: an entry hit
 //! since the hand last passed it gets another round), so a new entry pushes out the least
 //! recently used ones wherever they are, as Elasticsearch's node-wide LRU does.
+//!
+//! The charge is the cluster's own ([`crate::breaker::try_hold_cache`]): its entries count
+//! against its `request` limit, but not in the node's budget for requests, where nothing would
+//! make them give way to another cluster's request. The node counts them as the cluster's
+//! resident memory instead (`resident_bytes`), which it makes room in by unloading idle clusters.
+//! Elasticsearch charges its request cache to no breaker at all (it is heap, bounded by its size).
 
 use parking_lot::Mutex;
 use search_aggs::memory::MemoryBudget;
 use std::any::Any;
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
 /// What an entry holds beyond its key and value: its map slot, its place in the eviction
@@ -30,6 +36,9 @@ pub struct Budget {
     breaker: Option<Arc<MemoryBudget>>,
     /// Entries in the order they were stored: (shard, key, the entry's sequence number).
     ring: Mutex<VecDeque<(Weak<Shard>, String, u64)>>,
+    /// Places in `ring` whose entry is gone (removed, cleared, its shard dropped): the ring is
+    /// compacted once they outnumber the live ones.
+    dead: AtomicUsize,
     seq: AtomicU64,
 }
 
@@ -47,7 +56,7 @@ impl Default for Budget {
 
 impl Budget {
     pub fn new(cap: u64, breaker: Option<Arc<MemoryBudget>>) -> Budget {
-        Budget { cap, used: AtomicU64::new(0), breaker, ring: Mutex::new(VecDeque::new()), seq: AtomicU64::new(0) }
+        Budget { cap, used: AtomicU64::new(0), breaker, ring: Mutex::new(VecDeque::new()), dead: AtomicUsize::new(0), seq: AtomicU64::new(0) }
     }
 
     /// The most the cluster's entries may hold.
@@ -66,8 +75,20 @@ impl Budget {
         }
         self.used.fetch_sub(bytes, Ordering::Relaxed);
         if let Some(b) = &self.breaker {
-            b.release(bytes);
+            crate::breaker::release_cache(b, bytes);
         }
+    }
+
+    /// `n` places in the ring lost their entry.
+    fn died(&self, n: usize) {
+        if n > 0 {
+            self.dead.fetch_add(n, Ordering::Relaxed);
+        }
+    }
+
+    /// A dead place was taken out of the ring.
+    fn buried(&self) {
+        let _ = self.dead.try_update(Ordering::Relaxed, Ordering::Relaxed, |d| Some(d.saturating_sub(1)));
     }
 
     /// Reserves `bytes` under the cap and on the breaker: `false` (nothing reserved) when either
@@ -78,7 +99,7 @@ impl Budget {
             return false;
         }
         if let Some(b) = &self.breaker
-            && !b.try_reserve(bytes)
+            && !crate::breaker::try_hold_cache(b, bytes)
         {
             self.used.fetch_sub(bytes, Ordering::Relaxed);
             return false;
@@ -95,9 +116,15 @@ impl Budget {
         while self.used().saturating_add(bytes) > self.cap && budget > 0 {
             budget -= 1;
             let Some((shard, key, seq)) = self.ring.lock().pop_front() else { return };
-            let Some(shard) = shard.upgrade() else { continue };
+            let Some(shard) = shard.upgrade() else {
+                self.buried();
+                continue;
+            };
             let mut map = shard.map.lock();
-            let Some(slot) = map.entries.get(&key).filter(|s| s.seq == seq) else { continue };
+            let Some(slot) = map.entries.get(&key).filter(|s| s.seq == seq) else {
+                self.buried();
+                continue;
+            };
             if slot.hit.swap(false, Ordering::Relaxed) {
                 drop(map);
                 self.ring.lock().push_back((Arc::downgrade(&shard), key, seq));
@@ -111,11 +138,14 @@ impl Budget {
         }
     }
 
-    /// Drops ring places of entries that are gone, once they outnumber the live ones.
-    fn compact(&self, live: usize) {
+    /// Drops ring places of entries that are gone, once they outnumber the live ones (by every
+    /// shard's count: a walk of the ring is paid for by as many removals).
+    fn compact(&self) {
         let mut ring = self.ring.lock();
-        if ring.len() > 2 * live + 1024 {
+        let dead = self.dead.load(Ordering::Relaxed);
+        if dead > ring.len().saturating_sub(dead) + 1024 {
             ring.retain(|(s, k, seq)| s.upgrade().is_some_and(|s| s.map.lock().entries.get(k).is_some_and(|e| e.seq == *seq)));
+            self.dead.store(0, Ordering::Relaxed);
         }
     }
 }
@@ -185,18 +215,18 @@ impl ShardCache {
             return false;
         }
         let seq = self.budget.seq.fetch_add(1, Ordering::Relaxed);
-        let live = {
+        {
             let mut map = self.shard.map.lock();
             map.bytes += bytes;
             if let Some(old) = map.entries.insert(key.clone(), Slot { value, bytes, seq, hit: AtomicBool::new(false) }) {
                 // A concurrent insert of the same key won: keep one charge.
                 map.bytes -= old.bytes;
                 self.budget.release(old.bytes);
+                self.budget.died(1);
             }
-            map.entries.len()
-        };
+        }
         self.budget.ring.lock().push_back((Arc::downgrade(&self.shard), key, seq));
-        self.budget.compact(live);
+        self.budget.compact();
         true
     }
 
@@ -205,6 +235,7 @@ impl ShardCache {
         if let Some(old) = map.entries.remove(key) {
             map.bytes -= old.bytes;
             self.budget.release(old.bytes);
+            self.budget.died(1);
         }
     }
 
@@ -212,6 +243,7 @@ impl ShardCache {
     pub fn clear(&self) {
         let mut map = self.shard.map.lock();
         let bytes = std::mem::take(&mut map.bytes);
+        self.budget.died(map.entries.len());
         map.entries.clear();
         self.budget.release(bytes);
     }
@@ -263,13 +295,25 @@ mod tests {
         // Full: "2" (unused) goes, "1" (hit) stays.
         assert!(b.insert("4".into(), entry(), 100));
         assert!(a.contains("1") && !b.contains("2") && a.contains("3") && b.contains("4"));
-        assert_eq!((budget.used(), breaker.used()), (300, 300));
+        assert_eq!((budget.used(), breaker.held_elsewhere()), (300, 300));
         assert_eq!(b.evictions(), 1);
         // Larger than the cap: never stored.
         assert!(!a.insert("5".into(), entry(), 301));
         a.clear();
-        assert_eq!((budget.used(), breaker.used()), (100, 100));
+        assert_eq!((budget.used(), breaker.held_elsewhere()), (100, 100));
         drop(b);
-        assert_eq!((budget.used(), breaker.used()), (0, 0));
+        assert_eq!((budget.used(), breaker.held_elsewhere()), (0, 0));
+        // Many shards, each cleared again and again: the ring keeps no more dead places than
+        // live ones (plus some slack), without walking it on every insert.
+        let shards: Vec<ShardCache> = (0..8).map(|_| ShardCache::new(budget.clone())).collect();
+        for round in 0..2000 {
+            for (i, s) in shards.iter().enumerate() {
+                assert!(s.insert(format!("{round}-{i}"), entry(), 1));
+            }
+            shards[round % 8].clear();
+        }
+        let live: usize = shards.iter().map(|s| s.sizes().len()).sum();
+        let ring = budget.ring.lock().len();
+        assert!(ring <= 2 * live + 1024 + 8, "{ring} places for {live} entries");
     }
 }
