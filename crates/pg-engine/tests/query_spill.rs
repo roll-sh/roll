@@ -126,10 +126,23 @@ const QUERIES: &[&str] = &[
     "SELECT md5(string_agg(b || ':' || c, ',' ORDER BY b)) FROM (SELECT b, count(*) c FROM sp GROUP BY b) s",
     "SELECT md5(string_agg(t || ':' || c || ':' || s, ',' ORDER BY t)) FROM (SELECT t, count(*) c, sum(a) s FROM sp GROUP BY t) s",
     "SELECT count(*), sum(c) FROM (SELECT a, count(*) c FROM sp GROUP BY a) s",
+    // Ordered aggregates' input sorted within work_mem: the first one's below the grouping,
+    // the others' each in its own sort, DISTINCT and ordered-set ones too.
+    "SELECT md5(string_agg(t, ',' ORDER BY a DESC) || array_agg(b ORDER BY t, a)::text) FROM sp",
+    "SELECT md5(array_agg(DISTINCT b ORDER BY b DESC)::text || string_agg(t, ',' ORDER BY a)) FROM sp",
+    "SELECT md5(string_agg(x, ';' ORDER BY b)) FROM (SELECT b, string_agg(t, ',' ORDER BY a DESC) x FROM sp GROUP BY b) s",
+    "SELECT (mode() WITHIN GROUP (ORDER BY b))::text || percentile_cont(array[0, 0.37, 1]) WITHIN GROUP (ORDER BY n)::text \
+       || percentile_disc(0.5) WITHIN GROUP (ORDER BY a DESC) FROM sp",
 ];
 
 #[test]
 fn spills_match_memory_and_clean_up() {
+    // (A session's stack, as the server gives one: the plans of the ordered aggregates'
+    // queries are deep for a debug build's frames.)
+    std::thread::Builder::new().stack_size(64 << 20).spawn(spills_match_memory).unwrap().join().unwrap();
+}
+
+fn spills_match_memory() {
     let dir = tempfile::tempdir().unwrap();
     let eng = open(dir.path());
     let mut s = eng.connect(1, "postgres", "postgres", "postgres").unwrap();
