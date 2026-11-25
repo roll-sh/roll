@@ -255,7 +255,7 @@ export interface PageCheck {
 export interface PageState {
   name: string;
   page: string;
-  steps: ({ click: string } | { type: [string, string] } | { press: string } | { wait: number })[];
+  steps: ({ click: string } | { type: [string, string] } | { choose: [string, number] } | { press: string } | { wait: number })[];
 }
 
 /** How slow and heavy the first page may get (0: no limit): over it, `roll/speed` fails. */
