@@ -491,6 +491,14 @@ pub fn content_type(path: &str) -> &'static str {
     }
 }
 
+/// A directory asked for without its slash (`/docs`, with `docs/index.html` and no file `docs`):
+/// redirected to `/docs/` as Netlify, Cloudflare Pages and GitHub Pages do, so its page's relative
+/// links (`./img.png`, `../c/`) resolve inside it rather than beside it.
+pub fn needs_slash(site: &Site, path: &str) -> bool {
+    let p = path.trim_start_matches('/');
+    !p.is_empty() && !p.ends_with('/') && !site.files.contains_key(p) && site.files.contains_key(&format!("{p}/index.html"))
+}
+
 /// What a request path is in a site: the file, the directory's `index.html`, else (`spa`: a
 /// page path, no extension) the site's `index.html` as a 200, else its `404.html` as a 404.
 pub fn resolve<'a>(site: &'a Site, path: &str, spa: bool) -> Option<(&'a str, u16)> {
@@ -570,6 +578,9 @@ mod tests {
         assert_eq!(resolve(&site, "/logo.png", true), None, "a missing file stays missing");
         site.files.insert("about.html".into(), (0, 1));
         assert_eq!((resolve(&site, "/about", false), resolve(&site, "/about/", false)), (Some(("about.html", 200)), None), "a clean URL");
+        assert!(!needs_slash(&site, "/about") && !needs_slash(&site, "/") && !needs_slash(&site, "/index.html"), "a file, or the root, isn't a directory");
+        site.files.insert("docs/index.html".into(), (0, 1));
+        assert!(needs_slash(&site, "/docs") && !needs_slash(&site, "/docs/"), "a directory is asked for with its slash");
         assert!(exists(&site, "/about"), "so a rewrite never hides it");
         assert_eq!(key(&format!("nginx@sha256:{}", "A".repeat(64))), Some("a".repeat(64)));
     }

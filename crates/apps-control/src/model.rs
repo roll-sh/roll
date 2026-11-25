@@ -3789,6 +3789,14 @@ pub fn fix_for(error: &str, detail: Option<&str>) -> Option<String> {
         "`npm ci` needs a package-lock.json that matches package.json: commit one (`npm install`), or set the install command to `npm install` (Settings → Build)."
     } else if has("frozen-lockfile") || has("lockfile needs to be updated") {
         "The lockfile doesn't match package.json: run the install locally and commit the lockfile, or drop `--frozen-lockfile` from the install command (Settings → Build)."
+    } else if all.contains('\r') || has("^m") || has("\\r'") || has("\\r\"") {
+        "A script has Windows line endings (CRLF), so its `#!` line names a program that doesn't exist: convert it to LF (`dos2unix start.sh`, or `* text=auto eol=lf` in .gitattributes and `git add --renormalize .`)."
+    } else if has("exec format error") {
+        "The image is for another processor than the one it runs on (an Apple Silicon build is arm64): build it for linux/amd64 (`docker build --platform linux/amd64`), or for both with `docker buildx build --platform linux/amd64,linux/arm64`."
+    } else if has("eaddrinuse") || has("address already in use") {
+        "Something in the container already listens on its port: start one server on $PORT, and give any second process another port."
+    } else if has("permission denied") && (has(".sh") || has("exec ") || has("start script")) {
+        "The start script isn't executable: mark it (`git update-index --chmod=+x start.sh`, then land it), or start it with `sh start.sh`."
     } else if has("health check didn't pass") || has("didn't answer in time") || has("health check") && has("failed") {
         "It never answered its health check: it must listen on 0.0.0.0 at $PORT; if it boots slowly, raise the health timeout (Settings → Health, `roll apps set --health-timeout 120`)."
     } else if has("no start command") || has("nothing says how to start") || has("doesn't know how to start") {
@@ -3810,6 +3818,10 @@ mod fix_tests {
         assert!(f("it was killed (exit 137: out of memory, or a SIGKILL)", None).contains("--memory"));
         assert!(f("the health check didn't pass within 60 s", None).contains("$PORT"));
         assert!(f("the build failed (docker build exited with 1)", Some("npm ci can only install packages when your package.json and package-lock.json are in sync")).contains("package-lock.json"));
+        assert!(f("it crashed (exit 1)", Some("exec /app/server: exec format error")).contains("linux/amd64"));
+        assert!(f("it crashed (exit 127)", Some("/usr/bin/env: 'bash\r': No such file or directory")).contains("CRLF"));
+        assert!(f("it crashed (exit 1)", Some("Error: listen EADDRINUSE: address already in use :::8080")).contains("$PORT"));
+        assert!(f("it crashed (exit 126)", Some("/bin/sh: ./start.sh: Permission denied")).contains("chmod"));
         assert_eq!(super::fix_for("a reason nobody wrote down", None), None);
     }
 }
