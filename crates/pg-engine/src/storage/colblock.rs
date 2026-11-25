@@ -128,6 +128,25 @@ fn varint_len(v: u64) -> usize {
     (64 - (v | 1).leading_zeros()).div_ceil(7) as usize
 }
 
+/// `put_varint` at `o[*p..]`, `p` moved past it.
+#[inline(always)]
+fn varint_at(o: &mut [u8], p: &mut usize, mut v: u64) {
+    while v >= 0x80 {
+        o[*p] = v as u8 | 0x80;
+        *p += 1;
+        v >>= 7;
+    }
+    o[*p] = v as u8;
+    *p += 1;
+}
+
+/// The bytes of a numeric's unscaled value `x` as a row stores it: its shortest two's
+/// complement form (`i128_signed_le`).
+#[inline(always)]
+fn num_len(x: i64) -> usize {
+    (64 - (x ^ (x >> 63)).leading_zeros() + 8) as usize / 8
+}
+
 impl Ints {
     fn get(&self, d: &[u8], r: usize) -> u64 {
         self.base.wrapping_add(uint(d, self.at as usize + r * self.w as usize, self.w))
@@ -618,30 +637,199 @@ impl ColDir {
         (col.aux as usize + a, col.aux as usize + b)
     }
 
-    /// Row `r`'s bytes as format 2 stores them, onto `out`.
+    /// Row `r`'s bytes as format 2 stores them, onto `out` (`rows_into` of the one row: a
+    /// column's layout matched once, no push per value).
     pub fn row(&self, d: &[u8], r: usize, out: &mut Vec<u8>) {
-        // (Room for the row's values, each at most 1 + 2 + 8 bytes but strings: grown by those.)
-        out.reserve(24 + 11 * self.cols.len());
-        out.push(if self.tid { ROW_HEADER_TID } else { ROW_HEADER });
-        put_varint(out, self.xmin.get(d, r));
-        if self.tid {
-            put_varint(out, self.tb.get(d, r));
-            put_varint(out, self.to.get(d, r));
-        }
-        put_varint(out, self.ncols as u64);
-        for c in 0..self.ncols as usize {
-            self.value(d, c, r, out);
-        }
+        self.rows_into(d, &[r as u32], None, out, &mut Vec::with_capacity(1));
     }
 
     /// Every row's bytes, in order (`vlen` of them).
     pub fn rows(&self, d: &[u8]) -> Vec<u8> {
+        let all: Vec<u32> = (0..self.n).collect();
         let mut out = Vec::with_capacity(self.vlen as usize);
-        for r in 0..self.n as usize {
-            self.row(d, r, &mut out);
-        }
+        self.rows_into(d, &all, None, &mut out, &mut Vec::with_capacity(all.len()));
         debug_assert_eq!(out.len(), self.vlen as usize);
         out
+    }
+
+    /// Rows `rows` (in that order) as `row` makes each, onto `out`, each one's end in `out`
+    /// pushed onto `ends`: a column at a time, one loop of its layout per column (`row` takes
+    /// a value at a time, a layout's match and a push each). Each row's length first, its
+    /// place then known, so every value is written where it goes. With `mask`, a column it
+    /// doesn't mark (or past its end) NULL: rows for a reader of those columns alone.
+    pub fn rows_into(&self, d: &[u8], rows: &[u32], mask: Option<&[bool]>, out: &mut Vec<u8>, ends: &mut Vec<usize>) {
+        let read = |c: usize| mask.is_none_or(|m| m.get(c) == Some(&true));
+        // (Per row its length, then where its next byte goes.)
+        let hdr = 1 + varint_len(self.ncols as u64);
+        let mut at: Vec<usize> = rows
+            .iter()
+            .map(|&r| {
+                let r = r as usize;
+                let tid = if self.tid { varint_len(self.tb.get(d, r)) + varint_len(self.to.get(d, r)) } else { 0 };
+                hdr + varint_len(self.xmin.get(d, r)) + tid
+            })
+            .collect();
+        for c in 0..self.ncols as usize {
+            match read(c) {
+                true => self.col_lens(d, c, rows, &mut at),
+                false => at.iter_mut().for_each(|l| *l += 1),
+            }
+        }
+        let mut end = out.len();
+        for a in at.iter_mut() {
+            let len = *a;
+            *a = end;
+            end += len;
+            ends.push(end);
+        }
+        out.resize(end, 0);
+        let o = &mut out[..];
+        let first = if self.tid { ROW_HEADER_TID } else { ROW_HEADER };
+        for (p, &r) in at.iter_mut().zip(rows) {
+            let r = r as usize;
+            o[*p] = first;
+            *p += 1;
+            varint_at(o, p, self.xmin.get(d, r));
+            if self.tid {
+                varint_at(o, p, self.tb.get(d, r));
+                varint_at(o, p, self.to.get(d, r));
+            }
+            varint_at(o, p, self.ncols as u64);
+        }
+        for c in 0..self.ncols as usize {
+            match read(c) {
+                true => self.col_write(d, c, rows, o, &mut at),
+                false => at.iter_mut().for_each(|p| {
+                    o[*p] = tag::NULL;
+                    *p += 1;
+                }),
+            }
+        }
+        debug_assert!(at.iter().zip(&ends[ends.len() - rows.len()..]).all(|(a, e)| a == e));
+    }
+
+    /// `rows_into`'s lengths: column `c`'s value's bytes in each of `rows` added to `lens`.
+    fn col_lens(&self, d: &[u8], c: usize, rows: &[u32], lens: &mut [usize]) {
+        let col = &self.cols[c];
+        let at = col.at as usize;
+        // (One loop per layout, its value's length inlined in it.)
+        #[inline(always)]
+        fn each(d: &[u8], nulls: u32, rows: &[u32], lens: &mut [usize], f: impl Fn(usize) -> usize) {
+            for (l, &r) in lens.iter_mut().zip(rows) {
+                let r = r as usize;
+                *l += if is_null(d, nulls, r) { 1 } else { f(r) };
+            }
+        }
+        let nl = col.nulls;
+        match col.kind {
+            Kind::Null | Kind::Bool => lens.iter_mut().for_each(|l| *l += 1),
+            Kind::Fixed { w, .. } if nl == NONE => lens.iter_mut().for_each(|l| *l += 1 + w as usize),
+            Kind::Fixed { w, .. } => each(d, nl, rows, lens, |_| 1 + w as usize),
+            Kind::Num { scale, w } => {
+                let sl = if scale < 0x80 { 1 } else { varint_len(scale as u64) };
+                each(d, nl, rows, lens, |r| 2 + sl + num_len(sint(d, at + r * w as usize, w)))
+            }
+            Kind::Str { ow, .. } => each(d, nl, rows, lens, |r| {
+                let n = uint(d, at + (r + 1) * ow as usize, ow) as usize - uint(d, at + r * ow as usize, ow) as usize;
+                1 + varint_len(n as u64) + n
+            }),
+            Kind::Dict { .. } => each(d, nl, rows, lens, |r| {
+                let (a, b) = self.dict_span(d, c, d[at + r]);
+                1 + varint_len((b - a) as u64) + b - a
+            }),
+            Kind::Raw { ow } => each(d, nl, rows, lens, |r| uint(d, at + (r + 1) * ow as usize, ow) as usize - uint(d, at + r * ow as usize, ow) as usize),
+        }
+    }
+
+    /// `rows_into`'s values of column `c`: each of `rows`' written at its place in `o`
+    /// (`at`, moved past it), as `value` writes it.
+    fn col_write(&self, d: &[u8], c: usize, rows: &[u32], o: &mut [u8], at: &mut [usize]) {
+        let col = &self.cols[c];
+        let x = col.at as usize;
+        // (One loop per layout, its value's writer inlined in it.)
+        #[inline(always)]
+        fn each(d: &[u8], nulls: u32, rows: &[u32], o: &mut [u8], at: &mut [usize], f: impl Fn(&mut [u8], &mut usize, usize)) {
+            for (p, &r) in at.iter_mut().zip(rows) {
+                let r = r as usize;
+                if is_null(d, nulls, r) {
+                    o[*p] = tag::NULL;
+                    *p += 1;
+                } else {
+                    f(o, p, r);
+                }
+            }
+        }
+        let nl = col.nulls;
+        match col.kind {
+            Kind::Null => {
+                for p in at.iter_mut() {
+                    o[*p] = tag::NULL;
+                    *p += 1;
+                }
+            }
+            Kind::Fixed { tag: t, w } => {
+                // (The usual widths' copies of a constant length: a move each, no call.)
+                #[inline(always)]
+                fn fixed<const W: usize>(d: &[u8], nl: u32, rows: &[u32], o: &mut [u8], at: &mut [usize], t: u8, x: usize) {
+                    each(d, nl, rows, o, at, |o, p, r| {
+                        o[*p] = t;
+                        let v: [u8; W] = d[x + r * W..x + (r + 1) * W].try_into().unwrap();
+                        o[*p + 1..*p + 1 + W].copy_from_slice(&v);
+                        *p += 1 + W;
+                    })
+                }
+                match w {
+                    2 => fixed::<2>(d, nl, rows, o, at, t, x),
+                    4 => fixed::<4>(d, nl, rows, o, at, t, x),
+                    8 => fixed::<8>(d, nl, rows, o, at, t, x),
+                    _ => each(d, nl, rows, o, at, |o, p, r| {
+                        let w = w as usize;
+                        o[*p] = t;
+                        o[*p + 1..*p + 1 + w].copy_from_slice(&d[x + r * w..x + (r + 1) * w]);
+                        *p += 1 + w;
+                    }),
+                }
+            }
+            Kind::Bool => each(d, nl, rows, o, at, |o, p, r| {
+                o[*p] = d[x + r];
+                *p += 1;
+            }),
+            Kind::Num { scale, w } => each(d, nl, rows, o, at, |o, p, r| {
+                let v = sint(d, x + r * w as usize, w);
+                let len = num_len(v);
+                o[*p] = tag::NUMERIC;
+                *p += 1;
+                varint_at(o, p, scale as u64);
+                o[*p] = len as u8;
+                for (i, b) in v.to_le_bytes()[..len].iter().enumerate() {
+                    o[*p + 1 + i] = *b;
+                }
+                *p += 1 + len;
+            }),
+            Kind::Str { tag: t, ow } => each(d, nl, rows, o, at, |o, p, r| {
+                let (a, b) = (uint(d, x + r * ow as usize, ow) as usize, uint(d, x + (r + 1) * ow as usize, ow) as usize);
+                o[*p] = t;
+                *p += 1;
+                varint_at(o, p, (b - a) as u64);
+                let y = col.aux as usize;
+                o[*p..*p + b - a].copy_from_slice(&d[y + a..y + b]);
+                *p += b - a;
+            }),
+            Kind::Dict { tag: t, .. } => each(d, nl, rows, o, at, |o, p, r| {
+                let (a, b) = self.dict_span(d, c, d[x + r]);
+                o[*p] = t;
+                *p += 1;
+                varint_at(o, p, (b - a) as u64);
+                o[*p..*p + b - a].copy_from_slice(&d[a..b]);
+                *p += b - a;
+            }),
+            Kind::Raw { ow } => each(d, nl, rows, o, at, |o, p, r| {
+                let (a, b) = (uint(d, x + r * ow as usize, ow) as usize, uint(d, x + (r + 1) * ow as usize, ow) as usize);
+                let y = col.aux as usize;
+                o[*p..*p + b - a].copy_from_slice(&d[y + a..y + b]);
+                *p += b - a;
+            }),
+        }
     }
 }
 
@@ -698,6 +886,13 @@ mod tests {
                 let all: Vec<u8> = enc.concat();
                 assert_eq!(d.rows(&out), all);
                 assert_eq!(d.vlen as usize, all.len());
+                // (Some rows, out of order, onto bytes there already.)
+                let pick: Vec<u32> = [n - 1, 0, n / 2, n / 3].into_iter().map(|r| r as u32).collect();
+                let (mut got, mut ends) = (b"ab".to_vec(), Vec::new());
+                d.rows_into(&out, &pick, None, &mut got, &mut ends);
+                let want: Vec<u8> = b"ab".iter().copied().chain(pick.iter().flat_map(|&r| enc[r as usize].iter().copied())).collect();
+                assert_eq!(got, want);
+                assert_eq!(*ends.last().unwrap(), want.len());
             }
         }
         // (Rows of two column counts, or a row with values stored out of line: not a section.)

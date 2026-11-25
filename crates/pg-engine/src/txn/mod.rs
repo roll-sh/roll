@@ -5307,6 +5307,19 @@ impl TxnScan {
         self.fill_batch_in::<false>(batch, max, None)
     }
 
+    /// Whether the store's scan has column blocks among its sources (storage format 5).
+    pub fn has_cols(&self) -> bool {
+        matches!(&self.inner.lower, Lower::Store(s) if s.has_cols())
+    }
+
+    /// The store's rows of column blocks made with only the columns `mask` marks (`storage::
+    /// Scan::read_cols`).
+    pub fn read_cols(&mut self, mask: Option<Arc<[bool]>>) {
+        if let Lower::Store(s) = &mut self.inner.lower {
+            s.read_cols(mask);
+        }
+    }
+
     /// `fill_batch`, the store's rows of column blocks (storage format 5) left unmade into
     /// `lazy` (`FillRows::fill_lazy`).
     pub fn fill_batch_lazy(&mut self, batch: &mut crate::storage::batch::RowBatch, lazy: &mut crate::storage::batch::LazyRows, max: usize) -> Result<()> {

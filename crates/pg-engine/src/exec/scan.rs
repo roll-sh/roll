@@ -2511,6 +2511,30 @@ fn skip_entries(ix: &Index, scan: &crate::sql::plan::SkipScan, start: &[u8], end
     Ok(out)
 }
 
+/// The table columns a heap fetch's rows are read for: those decoded (`need`), the
+/// projection's (`pick` offers them as stored) and the filter's. A column block's rows
+/// (storage format 5) are made of these alone, the others NULL. None (whole rows): a row
+/// lock or DML's rows, a table whose rows go out whole (`sizing::tracked`, `emit`), no
+/// projection or `need` known.
+#[cold]
+#[inline(never)]
+fn read_mask(p: &ScanPlan, need: Option<&[bool]>, proj: Option<&[u32]>, other: bool) -> Option<Arc<[bool]>> {
+    if other || p.mark.is_some() || p.sys || super::sizing::tracked(p.table.oid) {
+        return None;
+    }
+    let mut mask = need?.to_vec();
+    mask.resize(p.table.columns.len(), false);
+    for &c in proj? {
+        *mask.get_mut(c as usize)? = true;
+    }
+    if let Some(f) = &p.filter
+        && !super::need::mark(f, &mut mask)
+    {
+        return None;
+    }
+    Some(Arc::from(mask))
+}
+
 struct ScanNode {
     /// The plan's address (EXPLAIN ANALYZE counts filtered rows by it).
     key: usize,
@@ -3734,6 +3758,10 @@ impl ScanNode {
             Some(it) => it,
             None => Box::new(txn.scan_snap(first, &end, &snap).raw()),
         };
+        // (Rows of column blocks, storage format 5, made of the columns read alone.)
+        if it.has_cols() {
+            it.read_cols(read_mask(&self.plan, self.need.as_deref(), self.proj.as_deref(), self.am.is_some() || self.ios_cols.is_some()));
+        }
         let mut external = false;
         'fill: while erow.len() < n {
             let had = rb.len();
