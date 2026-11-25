@@ -167,7 +167,7 @@ async fn locked(api: &Api, identity: &str, path: &Path) -> anyhow::Result<(Strin
     let now = super::now_ms();
     let mut kept = match (kept, fresh) {
         (_, Some(token)) => {
-            let k = exchange(api, identity, "bootstrap", json!({ "identity": identity, "token": token }), sha256(&token)).await?;
+            let k = exchange_retrying(api, identity, "bootstrap", json!({ "identity": identity, "token": token }), sha256(&token)).await?;
             keep(path, &k)?;
             eprintln!("roll: exchanged the bootstrap token for a machine credential, kept in {}", path.display());
             k
@@ -178,17 +178,34 @@ async fn locked(api: &Api, identity: &str, path: &Path) -> anyhow::Result<(Strin
     anyhow::ensure!(kept.expires_at > now, "the machine credential in {} has ended: the machine needs a new bootstrap token (roll secrets identities bootstrap {identity})", path.display());
     if now >= kept.refresh_at {
         let body = json!({ "identity": identity, "credential": kept.credential });
-        match exchange(api, identity, "refresh", body, kept.bootstrap.clone()).await {
-            Ok(next) => {
-                keep(path, &next)?;
-                kept = next;
-            }
-            // Not answered: the current one lasts a while yet, and the next login tries again.
-            Err(e) if super::no_answer(&e) => eprintln!("roll: replacing the machine credential failed ({e:#}); it lasts a while yet"),
-            Err(e) => return Err(e),
-        }
+        // Unanswered even when retried, the old one may be spent already (rolld kept the exchange
+        // and the answer was lost): logging in with it would end the machine, so no login now. The
+        // next run within the server's grace retries the same refresh.
+        let next = exchange_retrying(api, identity, "refresh", body, kept.bootstrap.clone()).await.map_err(|e| {
+            if super::no_answer(&e) { e.context("replacing the machine credential got no answer, so it isn't used to log in: run again within two minutes and the replacement is retried") } else { e }
+        })?;
+        keep(path, &next)?;
+        kept = next;
     }
     super::post_login(api, json!({ "identity": identity, "machine": kept.credential })).await
+}
+
+/// [`exchange`], asked again a few times while it gets no answer: rolld answers a retry of an
+/// exchange it kept (its answer lost) within two minutes with a new credential, where a later
+/// login with the spent one would end the machine (roll-access's store/bootstrap.rs).
+async fn exchange_retrying(api: &Api, identity: &str, step: &str, body: Value, bootstrap: String) -> anyhow::Result<Kept> {
+    let mut wait = std::time::Duration::from_secs(1);
+    for _ in 0..3 {
+        match exchange(api, identity, step, body.clone(), bootstrap.clone()).await {
+            Err(e) if super::no_answer(&e) => {
+                eprintln!("roll: {} got no answer ({e:#}); asking again", if step == "bootstrap" { "exchanging the bootstrap token" } else { "replacing the machine credential" });
+                tokio::time::sleep(wait).await;
+                wait *= 3;
+            }
+            done => return done,
+        }
+    }
+    exchange(api, identity, step, body, bootstrap).await
 }
 
 /// `POST /v1/secrets/login/{step}`: the next machine credential.
