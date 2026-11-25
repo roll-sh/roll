@@ -54,8 +54,7 @@ impl EnvSource for Engine {
         if resources.iter().any(|x| matches!(x.state, crate::ResourceState::Pending | crate::ResourceState::Resetting)) || (s.seed.is_some() && self.store.seed_needed(preview)?) {
             anyhow::bail!("its data is being prepared (branched, reset, seeded or masked)");
         }
-        let bytes: i64 = resources.iter().map(|x| x.bytes).sum();
-        if bytes as u64 > s.max_bytes {
+        if let Some(bytes) = self.over_cap(preview, s.max_bytes)? {
             anyhow::bail!("its branches hold {bytes} bytes, over the project's max_bytes: reset it to start again");
         }
         let spec = self
@@ -151,6 +150,32 @@ impl EnvSource for Engine {
 }
 
 impl Engine {
+    /// `github.login` with its `$NAME`s from the preview's own environment, as a start of its
+    /// would get them (its secrets without dynamic credentials, then the project's and its own
+    /// variables; a reference never as text), each masked wherever the preview's words are kept.
+    pub(super) async fn login_for(&self, r: &Row, rule: &crate::settings::LoginRule) -> anyhow::Result<crate::ports::Login> {
+        let mut steps = rule.steps.clone();
+        if !rule.names().is_empty() {
+            let s = self.store.settings(&r.project_id)?;
+            let untrusted = !(s.secrets.allow_production && r.trusted);
+            let (secrets, _, _) = self.resolve_secrets(r, untrusted, false, "login").await?;
+            let own = project_env(&s, r.branch.as_deref()).into_iter().chain(self.store.vars(&r.id)?).filter(|(_, v)| !crate::settings::is_reference(v));
+            let vars: std::collections::HashMap<String, String> = secrets.into_iter().chain(own).collect();
+            let mut used = Vec::new();
+            for st in &mut steps {
+                if let crate::settings::Step::Type(_, text) = st
+                    && let Some(name) = crate::settings::var_ref(text)
+                {
+                    let v = vars.get(name).ok_or_else(|| anyhow::anyhow!("github.login's ${name} isn't a variable of the preview's"))?.clone();
+                    used.push(v.clone());
+                    *text = v;
+                }
+            }
+            self.add_masks(&r.id, used);
+        }
+        Ok(crate::ports::Login { page: rule.page.clone(), steps })
+    }
+
     /// The runtime saw a service start, stop or fail: keep the preview's state truthful.
     pub async fn observed(&self, preview: &str, service: &str, state: ServiceState, error: Option<String>, active_ms: i64) {
         let _ = self.store.set_service(preview, service, state, None, error.as_deref());

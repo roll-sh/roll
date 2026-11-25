@@ -971,9 +971,8 @@ impl Runtime {
             && let Some(crate::store::LiveShare { ends, .. }) = self.share_live(preview, &t).await
         {
             let t = t.as_str();
+            crate::visit::share_followed(&self.store, preview, t);
             let now = self.store.now_ms().unwrap_or(ends);
-            // Who followed it isn't known (nobody signed in): that it was, once a day.
-            let _ = self.store.share_opened(preview, t, now.div_euclid(86_400_000), now);
             let left = ((ends - now) / 1000).max(1);
             return Some(self.enter(req, "roll_share", &share_cookie, t, left));
         }
@@ -1048,31 +1047,9 @@ impl Runtime {
         r
     }
 
-    /// When share link `token` of `preview` ends, if it's live: not revoked or past, and its maker
-    /// may still open the project's previews, asked again (off the async workers: it reads roll's
-    /// accounts) once last asked `visitor_recheck` ago. One whose maker may not ends now, said in
-    /// the preview's activity.
+    /// Share link `token` of `preview`, if it's live ([`Engine::share_visit`]).
     async fn share_live(&self, preview: &str, token: &str) -> Option<crate::store::LiveShare> {
-        let live = self.store.share_live(preview, token).ok().flatten()?;
-        let (share, maker_checked) = (live.id.clone(), live.maker_checked);
-        let Some(maker) = live.maker.clone() else { return Some(live) };
-        let now = self.store.now_ms().ok()?;
-        if maker_checked > now - self.cfg.visitor_recheck.as_millis() as i64 {
-            return Some(live);
-        }
-        let engine = self.engine().ok()?;
-        let project = self.store.row(preview).ok()?.project_id;
-        let e = engine.clone();
-        let reaches = tokio::task::spawn_blocking(move || e.maker_reaches(&maker, &project)).await.unwrap_or(false);
-        if reaches {
-            let _ = self.store.share_maker_checked(&share, now);
-            return Some(live);
-        }
-        let by = self.store.shares(preview).ok().and_then(|all| all.into_iter().find(|s| s.id == share)).map(|s| s.created_by).unwrap_or_default();
-        if self.store.revoke_share(preview, &share).is_ok() {
-            let _ = self.store.log(preview, &format!("{by}'s share link ended: they may no longer open the project's previews"));
-        }
-        None
+        crate::visit::share_visit(&self.store, self.engine().ok().as_ref(), preview, token, self.cfg.visitor_recheck).await
     }
 
     /// Whether `token` is a live session in `preview` whose person may still open the project
@@ -2052,6 +2029,14 @@ impl Runtime {
         if !crops.is_empty() {
             args.extend(["--env".into(), format!("CROPS={}", serde_json::to_string(&crops)?)]);
         }
+        // The app's sign-in (`github.login`, a trusted preview's, its variables in place): the
+        // first line of the container's stdin, into a file of its own that `shot.js` reads and
+        // removes; never a command line, an environment variable or the record.
+        let login = opts.login.as_ref().filter(|l| crate::settings::page_path_ok(&l.page) && !l.steps.is_empty() && l.steps.len() <= crate::settings::MAX_STEPS && l.steps.iter().all(crate::settings::step_ok));
+        let mut input = login.map(serde_json::to_vec).transpose()?.unwrap_or_default();
+        input.push(b'\n');
+        input.extend_from_slice(AXE_JS.as_bytes());
+        args.extend(["--env".into(), "LOGIN_FILE=/tmp/login.json".into()]);
         // The PNG on the first line, the timings (if the command wrote them) on the second, the
         // phone-width PNG (if it took one) on the third, then the other pages: what each said,
         // and their PNGs a line each.
@@ -2060,7 +2045,7 @@ impl Runtime {
             "sh".into(),
             "-c".into(),
             format!(
-                "cat > /tmp/axe.js; {} >/dev/null 2>&1 && base64 -w0 /tmp/s.png && echo && (cat /tmp/s.png.json 2>/dev/null || true) && echo && (base64 -w0 /tmp/s.png.phone.png 2>/dev/null || true) \
+                "IFS= read -r L; printf '%s' \"$L\" > /tmp/login.json; L=; cat > /tmp/axe.js; {} >/dev/null 2>&1 && base64 -w0 /tmp/s.png && echo && (cat /tmp/s.png.json 2>/dev/null || true) && echo && (base64 -w0 /tmp/s.png.phone.png 2>/dev/null || true) \
                  && echo && (cat /tmp/s.png.pages.json 2>/dev/null || true) && for n in 0 1 2 3 4 5 6 7 8 9; do echo; base64 -w0 /tmp/s.png.$n.png 2>/dev/null || true; done \
                  && echo && (cat /tmp/s.png.crops.json 2>/dev/null || true) && for n in 0 1 2 3 4 5 6 7 8 9; do echo; base64 -w0 /tmp/s.png.crop.$n.png 2>/dev/null || true; done \
                  && echo && (cat /tmp/s.png.bodies.json 2>/dev/null || true)",
@@ -2090,7 +2075,7 @@ impl Runtime {
                 None => None,
             }
         };
-        let (run, (more, browsers_ms), stories) = tokio::join!(tokio::time::timeout(within, docker_with_input(&argv, AXE_JS.as_bytes(), SHOT_OUTPUT_MAX)), browsers_run, stories_run);
+        let (run, (more, browsers_ms), stories) = tokio::join!(tokio::time::timeout(within, docker_with_input(&argv, input, SHOT_OUTPUT_MAX)), browsers_run, stories_run);
         let out = match run {
             Ok(Ok(out)) => out,
             // Its container outlives a docker CLI that gave up on it (too much output).
@@ -2132,6 +2117,8 @@ impl Runtime {
             pages: page_shots(&pages, said, page_lines.into_iter()),
             crops: note_crops(&asked, crops_said, crop_lines.into_iter()),
             bodies,
+            // What `shot.js` said of the sign-in (its own words, never the page's), one line.
+            login: serde_json::from_str::<serde_json::Value>(speed).ok().and_then(|v| v["login"].as_str().map(|s| s.chars().take(200).collect())),
         };
         // The other browsers', best effort: Chromium's screenshot stands.
         match more {
@@ -2622,11 +2609,39 @@ fn named(rt: &Runtime, req: &Request) -> Option<(String, String)> {
 }
 
 async fn serve_named(rt: Arc<Runtime>, preview: String, service: String, req: Request) -> Response {
-    let mut resp = serve(rt, preview, service, req).await;
+    let mut resp = serve(rt.clone(), preview.clone(), service, req).await;
     // Kept out of search engines, whatever the service says (as Vercel's previews are): a public
     // preview, a share link or an earlier push's URL is never what a search should land on.
     resp.headers_mut().insert(header::HeaderName::from_static("x-robots-tag"), header::HeaderValue::from_static("noindex"));
+    if let Some(csp) = fork_policy(&rt, &preview) {
+        resp.headers_mut().append(header::CONTENT_SECURITY_POLICY, csp);
+    }
     resp
+}
+
+/// A fork's preview (code from someone who can't push, that a writer approved to run on the
+/// repo's data): its pages may load from and send to only the preview's own hosts, so its code
+/// can't carry what a reviewer's page shows to another site from their browser (its server's
+/// reach is `egress_forks`'). Inline scripts, `eval`, `data:` and `blob:` stay allowed, so its
+/// pages run as they did; a policy of the page's own still applies too (a browser keeps both).
+/// A navigation away isn't something a policy can stop.
+fn fork_policy(rt: &Runtime, preview: &str) -> Option<HeaderValue> {
+    if rt.store.row(preview).ok()?.trusted {
+        return None;
+    }
+    let mut own: Vec<String> = rt.store.services(preview).ok()?.into_iter().filter_map(|s| origin_of(&s.url)).collect();
+    own.sort();
+    own.dedup();
+    let own = own.join(" ");
+    HeaderValue::from_str(&format!("default-src 'self' {own} 'unsafe-inline' 'unsafe-eval' data: blob:; form-action 'self' {own}; base-uri 'self'")).ok()
+}
+
+/// A URL's scheme and host (and port), when it's a plain one.
+fn origin_of(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    let host = rest.split(['/', '?', '#']).next()?;
+    let plain = matches!(scheme, "http" | "https") && !host.is_empty() && host.bytes().all(|b| b.is_ascii_alphanumeric() || b"-.:".contains(&b));
+    plain.then(|| format!("{scheme}://{host}"))
 }
 
 /// A request for a preview's service: through its gate, then to the service.
@@ -2696,6 +2711,9 @@ fn crops_env(asks: &[crate::ports::CropAsk]) -> Vec<serde_json::Value> {
     let steps_ok = |c: &crate::ports::CropAsk| {
         c.steps.iter().all(|s| match s {
             crate::settings::Step::Click(sel) => crate::settings::selector_ok(sel),
+            // Typing only as roll writes it for a note: `x`s as many as theirs, never words.
+            crate::settings::Step::Type(sel, text) => crate::settings::selector_ok(sel) && (1..=200).contains(&text.len()) && text.bytes().all(|b| b == b'x'),
+            crate::settings::Step::Choose(sel, n) => crate::settings::selector_ok(sel) && (1..=crate::settings::MAX_OPTION).contains(n),
             crate::settings::Step::Press(k) => matches!(k.as_str(), "Enter" | "Escape"),
             _ => false,
         })
@@ -2847,6 +2865,15 @@ mod tests {
         s.read_to_string(&mut out).await.unwrap();
         assert!(out.ends_with("service saw /hello"), "{out}");
         assert!(out.contains("x-robots-tag: noindex"), "never indexed, whatever the service says: {out}");
+        assert!(!out.contains("content-security-policy"), "a trusted preview's pages keep only their own policy: {out}");
+        // A fork's: its pages may load from and send to only the preview's own hosts.
+        rt.store.update(&row.id, |r| r.trusted = false).unwrap();
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        s.write_all(format!("GET /hello HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nCookie: roll_access_{}={token}\r\nConnection: close\r\n\r\n", row.id).as_bytes()).await.unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).await.unwrap();
+        assert!(out.ends_with("service saw /hello") && out.contains("content-security-policy: default-src 'self' http://web-pr1-shop.preview.test 'unsafe-inline'"), "{out}");
+        rt.store.update(&row.id, |r| r.trusted = true).unwrap();
         // Automation: the project's bypass secret in a header, which the service never sees.
         let raw = |head: String| async move {
             let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -3181,10 +3208,16 @@ mod tests {
     fn crops_carry_how_their_reviewers_saw_the_page() {
         use crate::settings::Step;
         let ask = |note: &str, browser: Option<&str>, steps: Vec<Step>| crate::ports::CropAsk { note: note.into(), path: "/cart".into(), selector: "button.pay".into(), width: Some(390), height: Some(844), steps, browser: browser.map(String::from) };
-        let env = crops_env(&[ask("rv_1", None, vec![Step::Click("li > button".into()), Step::Press("Escape".into())]), ask("rv_2", Some("webkit-phone"), vec![]), ask("rv_3", None, vec![Step::Click("a[href='//x']{".into())])]);
-        assert_eq!(env[0], serde_json::json!({ "note": "rv_1", "path": "/cart", "selector": "button.pay", "width": 390, "height": 844, "steps": [{ "click": "li > button" }, { "press": "Escape" }] }));
-        assert_eq!(env.len(), 2, "WebKit's is the other browsers' run's");
+        let env = crops_env(&[
+            ask("rv_1", None, vec![Step::Click("li > button".into()), Step::Type("#coupon".into(), "xxxx".into()), Step::Choose("#size".into(), 2), Step::Press("Escape".into())]),
+            ask("rv_2", Some("webkit-phone"), vec![]),
+            ask("rv_3", None, vec![Step::Click("a[href='//x']{".into())]),
+            ask("rv_5", None, vec![Step::Type("#coupon".into(), "SAVE10".into())]),
+        ]);
+        assert_eq!(env[0], serde_json::json!({ "note": "rv_1", "path": "/cart", "selector": "button.pay", "width": 390, "height": 844, "steps": [{ "click": "li > button" }, { "type": ["#coupon", "xxxx"] }, { "choose": ["#size", 2] }, { "press": "Escape" }] }));
+        assert_eq!(env.len(), 3, "WebKit's is the other browsers' run's");
         assert_eq!(env[1]["steps"], serde_json::json!([]), "a step its checks refuse: none of them");
+        assert_eq!(env[2]["steps"], serde_json::json!([]), "typing only as roll writes it (x's), never words");
         assert!(crops_env(&[ask("rv_4", Some("firefox"), vec![])]).is_empty());
     }
 

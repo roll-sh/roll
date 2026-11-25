@@ -295,6 +295,43 @@ pub struct GithubRule {
     /// like a page. Up to 3.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub modes: Vec<ModeRule>,
+    /// The app's own sign-in, taken before a trusted preview's screenshot run (Percy's and
+    /// Chromatic's saved logins): a page of the first service's and its steps, as a state's,
+    /// where a `type` step's text may be `$NAME`, a variable of the preview's own environment (its
+    /// secrets, the project's and its own variables), resolved by roll at the run and never kept.
+    /// The run's pages, states, crops and timings are then the signed-in ones. A fork's preview
+    /// signs in with nothing: its code would get what's typed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<LoginRule>,
+}
+
+/// `github.login`: the page the app signs in on, and the steps that do it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoginRule {
+    pub page: String,
+    pub steps: Vec<Step>,
+}
+
+impl LoginRule {
+    /// The variables its `type` steps take from the preview's environment (`$NAME`).
+    pub fn names(&self) -> Vec<&str> {
+        self.steps
+            .iter()
+            .filter_map(|s| match s {
+                Step::Type(_, t) => var_ref(t),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// `$NAME` in a login's typed text: a variable's name (A-Z, 0-9 and `_`, not starting with a
+/// digit, up to 64), which roll types in its place.
+pub fn var_ref(t: &str) -> Option<&str> {
+    let n = t.strip_prefix('$')?;
+    let ok = (1..=64).contains(&n.len()) && !n.as_bytes()[0].is_ascii_digit() && n.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_');
+    ok.then_some(n)
 }
 
 /// A mode the first page is taken in (`github.modes`): at least one of a color scheme (`dark`,
@@ -360,7 +397,7 @@ pub fn story_id_ok(id: &str) -> bool {
 /// engine).
 pub const BROWSERS: [&str; 3] = ["firefox", "webkit", "webkit-phone"];
 
-pub use code_preview::config::{MAX_STATES, MAX_STEPS, STEP_KEYS, StateRule, Step, state_entry, state_name_ok, step_ok};
+pub use code_preview::config::{MAX_OPTION, MAX_STATES, MAX_STEPS, STEP_KEYS, StateRule, Step, state_entry, state_name_ok, step_ok};
 
 /// A feature flag a reviewer may set for their own view (`flags`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -550,7 +587,7 @@ impl Default for SecretsRule {
 
 impl Default for GithubRule {
     fn default() -> Self {
-        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new(), hide: Vec::new(), budget: Budget::default(), visual_threshold: 0.0, widths: Vec::new(), openapi: None, endpoints: Vec::new(), states: Vec::new(), browsers: Vec::new(), storybook: None, modes: Vec::new() }
+        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new(), hide: Vec::new(), budget: Budget::default(), visual_threshold: 0.0, widths: Vec::new(), openapi: None, endpoints: Vec::new(), states: Vec::new(), browsers: Vec::new(), storybook: None, modes: Vec::new(), login: None }
     }
 }
 
@@ -791,6 +828,11 @@ impl Settings {
                 STEP_KEYS.join(", ")
             ));
         }
+        if let Some(l) = &self.github.login
+            && (!page_path_ok(&l.page) || l.steps.is_empty() || l.steps.len() > MAX_STEPS || !l.steps.iter().all(step_ok))
+        {
+            return bad(format!("github.login: a page of the first service's and 1 to {MAX_STEPS} steps, as a state's; a type step's text may be $NAME, a variable of the preview's"));
+        }
         let br = &self.github.browsers;
         if br.iter().enumerate().any(|(i, b)| !BROWSERS.contains(&b.as_str()) || br[..i].contains(b)) {
             return bad(format!("github.browsers: some of {}, each once (Chromium always takes the screenshot)", BROWSERS.join(", ")));
@@ -873,6 +915,12 @@ mod tests {
         assert!(!ok(serde_json::json!([{ "name": "cart", "page": "/", "steps": [{ "wait": 60000 }] }])), "a wait up to 5 s");
         assert!(!ok(serde_json::json!([{ "name": "cart", "page": "/", "steps": [{ "eval": "alert(1)" }] }])), "no other step");
         assert!(!ok(serde_json::json!([{ "name": "cart", "page": "/", "steps": [] }])), "a step at least");
+        // A sign-in the same way, its typed text a variable's name where it's a secret.
+        let login = |l: serde_json::Value| Settings::default().patched(&serde_json::json!({ "github": { "login": l } })).ok().and_then(|s| s.github.login);
+        let l = login(serde_json::json!({ "page": "/login", "steps": [{ "type": ["#email", "qa@acme.dev"] }, { "type": ["#password", "$E2E_PASSWORD"] }, { "press": "Enter" }] })).expect("a sign-in");
+        assert_eq!(l.names(), ["E2E_PASSWORD"]);
+        assert!(login(serde_json::json!({ "page": "https://evil.example/login", "steps": [{ "click": "#go" }] })).is_none() && login(serde_json::json!({ "page": "/login", "steps": [] })).is_none());
+        assert!(super::var_ref("$e2e").is_none() && super::var_ref("$1X").is_none() && super::var_ref("hunter2").is_none());
         let four: Vec<serde_json::Value> = (0..4).map(|i| serde_json::json!({ "name": format!("s{i}"), "page": "/", "steps": [{ "wait": 1 }] })).collect();
         assert!(!ok(serde_json::json!(four)), "at most 3");
         let browsers = |b: serde_json::Value| Settings::default().patched(&serde_json::json!({ "github": { "browsers": b } })).is_ok();

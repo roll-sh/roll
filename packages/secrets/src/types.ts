@@ -125,13 +125,14 @@ export type Decoy = { kind: "rlt" | "postgres"; created_at: number; created_by: 
 /** `POST …/environments/{env}/decoys`: a new key whose value is a decoy credential (`postgres`: a
  * connection string for a role of `resource`, a roll Postgres database on the project's canvas). */
 export type NewDecoy = { key: string; kind: "rlt"; path?: string } | { key: string; kind: "postgres"; resource: string; path?: string };
-/** `expires_at`: null clears it; absent keeps it. */
-export type SetSecret = { value?: string; comment?: string; tags?: string[]; type?: SecretType; link?: Link | null; message?: string; expires_at?: number | null; if_version?: number };
+/** `expires_at`: null clears it; absent keeps it. `confirm`: as a batch's. */
+export type SetSecret = { value?: string; comment?: string; tags?: string[]; type?: SecretType; link?: Link | null; message?: string; expires_at?: number | null; if_version?: number; confirm?: string };
 /** `path`: another folder for this one operation (default: the batch's). */
 export type Op =
   | { op: "set"; key: string; value?: string; comment?: string; tags?: string[]; type?: SecretType; link?: Link | null; path?: string; expires_at?: number | null; if_version?: number }
   | { op: "delete"; key: string; type?: SecretType; path?: string; if_version?: number };
-export type Batch = { path?: string; message?: string; ops: Op[]; if_seq?: number };
+/** `confirm`: the public certificate ids a 409 `confirm_required` named, to share one's private key between a protected environment and one that isn't anyway. */
+export type Batch = { path?: string; message?: string; ops: Op[]; if_seq?: number; confirm?: string };
 export type ChangeKind = "write" | "rollback" | "promote" | "rotate" | "request" | "rename";
 export type Change = { seq: number; environment: string; path: string; message: string; by: string; at: number; keys: number; kind: ChangeKind };
 /** `what`: added | changed | deleted | comment | tags | link | rotated */
@@ -586,7 +587,7 @@ export type MadeGateway = { gateway: Gateway; token?: string };
 export type GitHubApp = { id: string; name: string; app_id: number; installation_id: number; api_base: string; repositories: string[]; permissions: Record<string, string>; created_at: number; created_by: string };
 export type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 /** A vendor roll issues and revokes keys at itself (`saas` links): its account, never the credential. */
-export type SaasVendor = "sendgrid" | "twilio" | "okta" | "entra" | "auth0" | "gitlab" | "openai" | "datadog" | "cloudflare" | "databricks" | "confluent" | "sonarqube" | "jenkins";
+export type SaasVendor = "sendgrid" | "twilio" | "okta" | "entra" | "auth0" | "gitlab" | "openai" | "datadog" | "cloudflare" | "databricks" | "confluent" | "sonarqube" | "jenkins" | "salesforce";
 /** `credential_expires_at`: when the registered credential ends at the vendor (ms), if the admin gave it; health warns two weeks before. */
 export type SaasRotator = { id: string; name: string; vendor: SaasVendor; target: Record<string, unknown>; credential_expires_at?: number; created_at: number; created_by: string };
 /** `credential` is sealed at once and never answered; `credential_expires_at` (ms, in the future) is when it ends at the vendor. */
@@ -594,7 +595,12 @@ export type NewSaasRotator = { name: string; vendor: SaasVendor; target: Record<
 /** `PATCH …/saas/{id}`: a new `credential` is checked with the vendor before it replaces the old one (linked keys keep working); `credential_expires_at: null` clears the date, and a new credential without one has none. */
 export type SaasRotatorChange = { name?: string; credential?: string; credential_expires_at?: number | null };
 /** A certificate from a public ACME CA, renewed by roll; keys link to it (`public_cert`, managed). Never a credential, the EAB key or the private key. `status`: `pending` until the first order, `failing` while the last one failed (`last_error`). `renews_at`: when the next renewal is due (0 once one was asked for: it is ordered now). */
-export type PublicCert = { id: string; name: string; directory_url: string; domains: string[]; dns_provider: "cloudflare"; eab_kid?: string; rotate_days?: number; status: "pending" | "issued" | "failing"; serial?: string; not_after?: number; issued_at?: number; renews_at?: number; last_error?: string; failed_at?: number; created_at: number; created_by: string };
+export type PublicCert = { id: string; name: string; directory_url: string; domains: string[]; dns_provider: "cloudflare"; eab_kid?: string; rotate_days?: number; status: "pending" | "issued" | "failing"; serial?: string; not_after?: number; issued_at?: number; renews_at?: number; last_error?: string; failed_at?: number; previous_serial?: string; revocations?: PublicCertRevocation[]; created_at: number; created_by: string };
+export type RevokeReason = "unspecified" | "keyCompromise" | "affiliationChanged" | "superseded" | "cessationOfOperation";
+/** A certificate roll revoked (a leak's, `keyCompromise`, or by hand), or is still asking the CA to (`pending`, with why it failed). */
+export type PublicCertRevocation = { serial: string; reason: RevokeReason; state: "revoked" | "pending"; asked_at: number; asked_by: string; revoked_at?: number; last_error?: string };
+/** `serial`: `current` (the default: a new certificate is ordered at once) or `previous` (the one the last renewal replaced). */
+export type RevokePublicCert = { serial?: "current" | "previous"; reason?: RevokeReason };
 /** `directory_url`: Let's Encrypt (production or staging), ZeroSSL, Google Trust Services, or one the operator allows; `dns_credential`: the DNS provider's API token (Cloudflare: Zone DNS edit on the names' zones); `eab_*`: External Account Binding, for CAs that ask (ZeroSSL, Google); `rotate_days`: default two thirds of the certificate's lifetime, at most the lifetime less 14 days. */
 export type NewPublicCert = { name: string; directory_url: string; domains: string[]; dns_provider: "cloudflare"; dns_credential: string; eab_kid?: string; eab_hmac_key?: string; rotate_days?: number };
 /** New `domains` or a new `dns_credential` order a new certificate at once; `rotate_days: null` goes back to the default. */

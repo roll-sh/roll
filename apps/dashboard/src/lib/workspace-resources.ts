@@ -380,8 +380,9 @@ export function suggestName(kind: ResourceKind, project: string, taken: Set<stri
   return name;
 }
 
-/** Creates the resource in its product and returns its ref. */
-export async function createResource(kind: ResourceKind, name: string): Promise<string> {
+/** Creates the resource in its product and returns its ref. `projectId`: the project it's made
+ * from, for a product whose creates a member's role there decides (search). */
+export async function createResource(kind: ResourceKind, name: string, projectId?: string): Promise<string> {
   switch (kind) {
     case "postgres":
       return (await api.createProject(name)).id;
@@ -394,7 +395,7 @@ export async function createResource(kind: ResourceKind, name: string): Promise<
     case "nosql":
       return (await nosqlApi.create({ name })).id;
     case "search":
-      return (await searchApi.create(name, {})).id;
+      return (await searchApi.create(name, {}, projectId)).id;
     case "queue":
       await qapi.createVhost({ name });
       return name;

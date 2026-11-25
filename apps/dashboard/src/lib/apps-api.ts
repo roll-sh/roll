@@ -24,6 +24,13 @@ export interface Sso {
   allow: string[];
 }
 
+/** What a deploys list is narrowed to. */
+export interface DeployFilter {
+  status?: DeployStatus;
+  actor?: string;
+  q?: string;
+}
+
 /** One session in a sign-in-gated environment (`…/visitors`). */
 export interface Visitor {
   id: string;
@@ -674,6 +681,8 @@ export interface EnvironmentPut {
   vitals?: boolean;
   /** How long its logs are kept (null: 7 days). */
   log_retention_days?: 7 | 30 | 90 | null;
+  /** Days its built deployments stay to roll back to past the newest ten (1–90); null: only those. */
+  keep_days?: number | null;
   /** Approvals a deployment needs before it goes live (0 or null: none). */
   approvals?: number | null;
   /** A deploy status badge anyone may load. */
@@ -801,6 +810,8 @@ export interface Environment extends EnvironmentSummary {
   vitals?: boolean;
   /** Days its logs are kept: 7 (default), 30 or 90; a preview's are 7. */
   log_retention_days?: number;
+  /** Days its built deployments stay to roll back to past the newest ten. */
+  keep_days?: number;
   /** People other than a deployment's author who approve it before it goes live (0–3). */
   approvals?: number;
   /** Its deploy status badge (an SVG for a README), when it has one. */
@@ -1719,7 +1730,10 @@ export const appsApi = {
 
   deploy: (id: string, e: string, body: NewDeploy = {}) => call<Deployment>("POST", `${env(id, e)}/deploys`, body),
   /** Newest first, 100 at most; `before` (the last one's `created_at`): the page after it. */
-  deploys: (id: string, e: string, before?: number) => call<Deployment[]>("GET", `${env(id, e)}/deploys${qs({ before })}`),
+  /** An environment's deploys, newest first, narrowed by state, who made them, or their message or commit (`q`). */
+  deploys: (id: string, e: string, before?: number, f: DeployFilter = {}) => call<Deployment[]>("GET", `${env(id, e)}/deploys${qs({ before, ...f })}`),
+  /** Every environment's deploys of a service, narrowed the same way. */
+  serviceDeploys: (id: string, before?: number, f: DeployFilter = {}) => call<Deployment[]>("GET", `${svc(id)}/deploys${qs({ before, ...f })}`),
   deployment: (id: string, e: string, d: string) => call<Deployment>("GET", dep(id, e, d)),
   /** What a repo deployment brings over the live one (for the live one, the one before it). */
   commits: (id: string, e: string, d: string) => call<DeployCommits>("GET", `${dep(id, e, d)}/commits`),
@@ -1733,6 +1747,12 @@ export const appsApi = {
   buildLog: (id: string, e: string, d: string, q: LogQuery = {}) => call<LogLine[]>("GET", `${dep(id, e, d)}/logs${qs({ tail: q.tail })}`),
   /** `keepVariables`: its image with the variables as they are now (after a rotated secret), not as they were then. */
   /** Keep a deployment from pruning (`on`), or let it go again. */
+  /** A folder upload's files as deployed (kept until it's pruned). */
+  source: (id: string, e: string, d: string) => call<{ files: { path: string; bytes: number; link?: string }[]; truncated: boolean }>("GET", `${dep(id, e, d)}/source`),
+  /** One of them: its text when it's UTF-8 and at most 1 MiB. */
+  sourceFile: (id: string, e: string, d: string, path: string) => call<{ path: string; bytes: number; text?: string }>("GET", `${dep(id, e, d)}/source${qs({ path })}`),
+  /** A static build's files as served, or one of them (`path`). */
+  output: (id: string, e: string, d: string, path?: string) => call<{ files?: { path: string; bytes: number }[]; truncated?: boolean; path?: string; bytes?: number; text?: string }>("GET", `${dep(id, e, d)}/output${qs({ path })}`),
   pin: (id: string, e: string, d: string, on: boolean) => call<Deployment>(on ? "POST" : "DELETE", `${dep(id, e, d)}/pin`),
   rollback: (id: string, e: string, d: string, keepVariables = false) => call<Deployment>("POST", `${dep(id, e, d)}/rollback`, keepVariables ? { keep_variables: true } : undefined),
   /** Back to the one live before what runs (the server walks back through rollbacks). */

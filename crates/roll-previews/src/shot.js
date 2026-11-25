@@ -431,6 +431,15 @@ const step = async (sessionId, s, until) => {
     for (const type of [text ? "keyDown" : "rawKeyDown", "keyUp"]) await send("Input.dispatchKeyEvent", { type, key, code: s.press, windowsVirtualKeyCode: KEYS[s.press], text: type === "keyUp" ? undefined : text }, sessionId).catch(() => null);
     return null;
   }
+  if (Array.isArray(s.choose) && s.choose.length === 2 && Number.isInteger(s.choose[1])) {
+    const [target, n] = s.choose;
+    const r = await check({
+      expression: `(() => { const el = document.querySelector(${sel(target)}); if (!(el instanceof HTMLSelectElement) || ${n} < 1 || ${n} > el.options.length) return false; el.focus();
+        const t0 = performance.now(); el.selectedIndex = ${n} - 1; el.dispatchEvent(new Event("input", { bubbles: true })); el.dispatchEvent(new Event("change", { bubbles: true })); ${PAINTED} return true; })()`,
+      returnByValue: true,
+    }, sessionId);
+    return r?.result?.value === true ? null : `choose ${target}: no option ${n} there`;
+  }
   if (typeof s.wait === "number") {
     await sleep(Math.min(Math.max(s.wait, 0), 5000));
     return null;
@@ -602,6 +611,39 @@ const tryIt = async (sessionId) => {
     chrome.kill();
     process.exit(0);
   }
+  // The app's own sign-in first ($LOGIN_FILE: {page, steps}, a trusted preview's, its typed
+  // values put in by roll), so every page, state, crop and timing after it is the signed-in one:
+  // its cookies stay in this browser. The file goes once read; what the sign-in page went
+  // through isn't counted as any page's. What it said is the report's `login`.
+  let login = null;
+  try {
+    login = JSON.parse(fs.readFileSync(process.env.LOGIN_FILE || "", "utf8"));
+  } catch {}
+  try {
+    fs.unlinkSync(process.env.LOGIN_FILE || "");
+  } catch {}
+  let loginSaid = null;
+  if (login && typeof login.page === "string" && /^\/(?!\/)[^\s#"'`\\]{0,199}$/.test(login.page)) {
+    const at = once("Page.loadEventFired");
+    await send("Page.navigate", { url: new URL(login.page, process.env.URL).href }, sessionId);
+    await Promise.race([at, sleep(15000)]);
+    await sleep(300);
+    const until = Date.now() + 15000;
+    let stopped = null;
+    for (const s of (Array.isArray(login.steps) ? login.steps : []).slice(0, 10)) {
+      if (Date.now() > until) break;
+      stopped = await step(sessionId, s || {}, until);
+      if (stopped) break;
+      await sleep(150);
+    }
+    const page = login.page;
+    login = null;
+    // Its last step usually submits: what that loads, settled.
+    await sleep(1500);
+    loginSaid = stopped ? `signing in stopped at ${stopped}: its pages are the signed-out ones` : `signed in through ${page} before its pages`;
+    errors.length = 0;
+    failed.length = 0;
+  }
   const loaded = once("Page.loadEventFired");
   await send("Page.navigate", { url: process.env.URL }, sessionId);
   await Promise.race([loaded, sleep(45000)]);
@@ -645,6 +687,7 @@ const tryIt = async (sessionId) => {
       report.a11y = JSON.parse(a11y?.result?.value || "null");
     } catch {}
   }
+  if (loginSaid) report.login = loginSaid;
   fs.writeFileSync(process.env.OUT + ".json", JSON.stringify(report));
   // The same page at a phone's width (390 × 844, at twice the density), to $OUT.phone.png. Best
   // effort: the desktop one is kept whatever happens here.

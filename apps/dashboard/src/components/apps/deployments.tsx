@@ -1,7 +1,7 @@
 import { HorizonMark } from "@roll/brand";
 import { Check, CircleHelp, ExternalLink, Pin, PinOff, Rocket, RotateCcw, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { appsApi, FUNCTION_ROUTES, runFunctions, deploymentUrl, followChanges, followLog, formatMs, isPending, shortSha, stepDurations, TRIGGER_LABEL, type BuildStep, type Deployment, type DeployCommits, type Environment, type Explanation, type LogLine, type ScanSummary, type Vulnerability } from "@/lib/apps-api";
+import { appsApi, FUNCTION_ROUTES, runFunctions, deploymentUrl, followChanges, followLog, formatMs, isPending, shortSha, stepDurations, TRIGGER_LABEL, type BuildStep, type Deployment, type DeployStatus, type DeployCommits, type Environment, type Explanation, type LogLine, type ScanSummary, type Vulnerability } from "@/lib/apps-api";
 import { btn, panel } from "../ui";
 import { PlanDetails } from "./new-service";
 import { usePageVisible } from "./live";
@@ -105,8 +105,28 @@ export function Deployments({
       setMore("idle");
     }
   };
+  // Narrowed by state or a word of its message or commit: the API's page of matches, in place of
+  // the list until cleared.
+  const [status, setStatus] = useState<DeployStatus | "">("");
+  const [q, setQ] = useState("");
+  const [filtered, setFiltered] = useState<Deployment[] | null>(null);
+  useEffect(() => {
+    if (!status && !q.trim()) return setFiltered(null);
+    let live = true;
+    const t = setTimeout(() => {
+      appsApi.deploys(service, env.name, undefined, { ...(status ? { status } : {}), ...(q.trim() ? { q: q.trim() } : {}) }).then(
+        (d) => live && setFiltered(d),
+        () => live && setFiltered([]),
+      );
+    }, 250);
+    return () => {
+      live = false;
+      clearTimeout(t);
+    };
+  }, [service, env.name, status, q, deploys]);
+  const rows = filtered ?? list;
   // The newest opens by itself, so a deploy that just started shows its build.
-  const shown = list?.find((d) => d.id === open) ?? list?.[0] ?? null;
+  const shown = rows?.find((d) => d.id === open) ?? rows?.[0] ?? null;
   const activeId = env.active?.id ?? null;
   const now = Date.now();
 
@@ -130,12 +150,23 @@ export function Deployments({
     {upload && <FolderDeploy service={service} env={env.name} onDeployed={(d) => void runner.run("upload", async () => d)} />}
     <div className="grid gap-4 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]">
       <section className={`${panel} overflow-hidden`}>
+        <div className="flex items-center gap-2 border-b border-line px-4 py-2">
+          <select value={status} onChange={(e) => setStatus(e.target.value as DeployStatus | "")} aria-label="State" className="h-7 rounded-md border border-line bg-panel px-1.5 text-[12px] outline-none">
+            <option value="">every state</option>
+            <option value="failed">failed</option>
+            <option value="active">live</option>
+            <option value="ready">ready</option>
+            <option value="inactive">replaced</option>
+            <option value="canceled">canceled</option>
+          </select>
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="message or commit" aria-label="Search deploys" className="h-7 min-w-0 flex-1 rounded-md border border-line bg-panel px-2 text-[12px] outline-none" />
+        </div>
         <label className="flex items-center gap-1.5 border-b border-line px-4 py-2 text-[12px] text-muted" title="Off: a rollback brings the variables back as they were when it was live">
           <input type="checkbox" checked={keepVars} onChange={(e) => setKeepVars(e.target.checked)} />
           Rollbacks keep today's variables
         </label>
         <ul className="divide-y divide-line">
-          {list!.map((d) => {
+          {rows!.map((d) => {
             const active = d.id === activeId;
             const selected = shown?.id === d.id;
             return (
@@ -243,7 +274,7 @@ export function Deployments({
             );
           })}
         </ul>
-        {deploys.length >= PAGE && more !== "done" && (
+        {!filtered && deploys.length >= PAGE && more !== "done" && (
           <div className="border-t border-line px-4 py-2.5">
             <button type="button" className={btn} disabled={more === "loading"} onClick={() => void loadOlder()}>
               {more === "loading" ? <span className="shimmer">Loading…</span> : "Older deployments"}
@@ -276,6 +307,51 @@ function useFull(service: string, env: string, d: Deployment) {
     };
   }, [service, env, d.id, pending, visible]);
   return full;
+}
+
+/** A folder upload's files as deployed, or a static build's as served (Vercel's Source and Output
+ *  tabs): listed on opening, one shown on asking. */
+function Source({ which, service, env, d }: { which: "source" | "output"; service: string; env: string; d: Deployment }) {
+  const [files, setFiles] = useState<{ path: string; bytes: number; link?: string }[] | null>(null);
+  const [shown, setShown] = useState<{ path: string; text?: string; bytes: number } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const load = () => {
+    if (files) return;
+    (which === "source" ? appsApi.source(service, env, d.id) : appsApi.output(service, env, d.id)).then(
+      (s) => setFiles(s.files ?? []),
+      (e: unknown) => setError(e instanceof Error ? e.message : String(e)),
+    );
+  };
+  const open = (path: string) =>
+    (which === "source" ? appsApi.sourceFile(service, env, d.id, path) : appsApi.output(service, env, d.id, path)).then(
+      (f) => setShown({ path, bytes: f.bytes ?? 0, text: f.text }),
+      (e: unknown) => setError(e instanceof Error ? e.message : String(e)),
+    );
+  return (
+    <details className="mb-2 rounded-lg border border-line bg-panel text-[11.5px]" onToggle={(e) => (e.currentTarget as HTMLDetailsElement).open && load()}>
+      <summary className="cursor-pointer px-3 py-2 text-fg">{which === "source" ? "Source" : "Output"}</summary>
+      <div className="border-t border-line px-3 py-2">
+        {error && <p className="text-danger">{error}</p>}
+        {!files && !error && <p className="shimmer text-muted">Reading…</p>}
+        {files && (
+          <div className="grid gap-2 md:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
+            <ul className="max-h-64 overflow-auto font-mono">
+              {files.map((f) => (
+                <li key={f.path}>
+                  <button type="button" className={`w-full truncate text-left hover:text-fg ${shown?.path === f.path ? "text-fg" : "text-muted"}`} onClick={() => void open(f.path)} title={f.link ? `→ ${f.link}` : `${f.bytes} bytes`}>
+                    {f.path}
+                  </button>
+                </li>
+              ))}
+            </ul>
+            {shown && (
+              <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded-md bg-bg p-2 font-mono text-[11px] text-muted">{shown.text ?? `${shown.bytes} bytes, not shown (binary, or over 1 MiB)`}</pre>
+            )}
+          </div>
+        )}
+      </div>
+    </details>
+  );
 }
 
 /** A build's time by step (Vercel's, Netlify's): each step's share of the slowest, which its cache answered. */
@@ -517,6 +593,8 @@ function BuildLog({ service, env, d, explains = false }: { service: string; env:
         </ol>
       )}
       {(full?.build_steps?.length ?? 0) > 0 && <BuildSteps steps={full?.build_steps ?? []} />}
+      {d.trigger === "upload" && !d.pruned_at && <Source key={`s${d.id}`} which="source" service={service} env={env} d={d} />}
+      {d.plan?.provider === "static" && d.image && !d.pruned_at && <Source key={`o${d.id}`} which="output" service={service} env={env} d={d} />}
       <LogView
         lines={lines}
         className="h-[460px]"

@@ -74,9 +74,9 @@ impl Engine {
 
     /// [`Engine::notes_of`] by the preview's environment name (`pv-<id>`, as roll apps knows it).
     pub async fn notes_for(&self, env: &str, path: &str) -> anyhow::Result<Vec<crate::notes::Note>> {
-        match env.strip_prefix("pv-") {
-            Some(id) if !id.is_empty() => self.notes_of(&format!("pv_{id}"), path).await,
-            _ => Ok(Vec::new()),
+        match Engine::preview_of_env(env) {
+            Some(id) => self.notes_of(&id, path).await,
+            None => Ok(Vec::new()),
         }
     }
 
@@ -435,7 +435,8 @@ impl Engine {
     /// token: the answer is the only time the link is shown. Only where the preview isn't public
     /// (`access: link` or `team`); a public one needs none.
     /// `maker`: who it is (`usr_…`, a person or the person behind their token; none for the
-    /// operator): the link works only while they may still open the project's previews.
+    /// operator): the link works only while they may still open the project's previews. Where
+    /// roll apps serves the preview, its proxy asks previews about the link at every request too.
     pub fn share(&self, id: &str, hours: u32, by: &str, maker: Option<&str>, label: &str, notes: bool) -> Result<(crate::Share, String)> {
         if !(1..=KEEP_MAX_HOURS).contains(&hours) {
             return Err(Error::BadRequest(format!("hours: 1 to {KEEP_MAX_HOURS}")));
@@ -828,6 +829,13 @@ impl Engine {
         if r.desired == Desired::Deleted || matches!(r.state, State::AwaitingApproval | State::Queued | State::Deleting) {
             return Err(Error::Conflict(format!("the preview is {}: it can't be woken", r.state.as_str())));
         }
+        // Put to sleep over its size cap: it stays asleep until it's reset (or the cap raised),
+        // whichever way it's asked to wake (roll apps' services included, which previews' own
+        // start never sees).
+        let max = self.store.settings(&r.project_id)?.max_bytes;
+        if let Some(bytes) = self.over_cap(id, max)? {
+            return Err(Error::Conflict(format!("its branches hold {bytes} bytes, over the project's max_bytes ({max}): reset it, or raise max_bytes")));
+        }
         self.store.update(id, |row| {
             row.asleep = false;
             row.last_active_at = row.last_active_at.max(0);
@@ -839,6 +847,14 @@ impl Engine {
             }
         }
         self.store.preview(id)
+    }
+
+    /// The bytes a preview's data holds, when they're over `max_bytes`: its branches and its
+    /// earlier pushes' copies, as last read. Converge puts it to sleep then; a wake and a start
+    /// (a visit) refuse it until it's reset or the cap is raised.
+    pub(crate) fn over_cap(&self, id: &str, max_bytes: u64) -> Result<Option<i64>> {
+        let bytes = self.store.resources(id)?.iter().map(|x| x.bytes).sum::<i64>() + self.store.pinned_usage(id)?.iter().map(|x| x.0).sum::<i64>();
+        Ok((bytes as u64 > max_bytes).then_some(bytes))
     }
 
     /// Its latest requests through roll, newest first (on its holder, which serves them).

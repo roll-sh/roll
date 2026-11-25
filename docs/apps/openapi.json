@@ -1440,6 +1440,35 @@
         "x-roll-action": "read"
       }
     },
+    "/v1/apps/services/{id}/deploys": {
+      "get": {
+        "description": "Answers `Deployment[]`: every environment's (previews' too), as above.",
+        "operationId": "getServicesIdDeploys",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`Deployment[]`: every environment's (previews' too), as above"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List deploys",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
+      }
+    },
     "/v1/apps/services/{id}/environments": {
       "get": {
         "description": "Answers `Environment[]`.",
@@ -1873,7 +1902,7 @@
     },
     "/v1/apps/services/{id}/environments/{env}/deploys": {
       "get": {
-        "description": "Answers `Deployment[]`, newest first, 100 at most; `before` (unix ms, the last one's `created_at`): the next page.",
+        "description": "Answers `Deployment[]`, newest first, 100 at most; `before` (unix ms, the last one's `created_at`): the next page; `status` (`queued`, `building`, `deploying`, `ready`, `active`, `inactive`, `failed`, `canceled`, `removed`), `actor` (exactly the deploy's) and `q` (in its message, or the start of its commit; 1–200) narrow it in the database, so a page is 100 matches.",
         "operationId": "getServicesIdEnvironmentsEnvDeploys",
         "parameters": [
           {
@@ -1895,7 +1924,7 @@
         ],
         "responses": {
           "200": {
-            "description": "`Deployment[]`, newest first, 100 at most; `before` (unix ms, the last one's `created_at`): the next page"
+            "description": "`Deployment[]`, newest first, 100 at most; `before` (unix ms, the last one's `created_at`): the next page; `status` (`queued`, `building`, `deploying`, `ready`, `active`, `inactive`, `failed`, `canceled`, `removed`), `actor` (exactly the deploy's) and `q` (in its message, or the start of its commit; 1–200) narrow it in the database, so a page is 100 matches"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -2223,6 +2252,51 @@
         "x-roll-action": "read"
       }
     },
+    "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/output": {
+      "get": {
+        "description": "Answers as `…/source`, for a static build's files as it serves them (read from its site's index); 404 for anything but a static build, or once it's pruned.",
+        "operationId": "getServicesIdEnvironmentsEnvDeploysDepOutput",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "dep",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "as `…/source`, for a static build's files as it serves them (read from its site's index); 404 for anything but a static build, or once it's pruned"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get output",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
+      }
+    },
     "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/pin": {
       "delete": {
         "description": "Answers `Deployment`: pruned again as the kept ones are; audited.",
@@ -2509,6 +2583,51 @@
           "services"
         ],
         "x-roll-action": "read"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/source": {
+      "get": {
+        "description": "Answers `{files: {path, bytes, link?}[], truncated}` (at most 10,000), or with `path` one file `{path, bytes, text?}` (`text` when UTF-8 and at most 1 MiB): a folder upload's files as deployed, kept until the deployment is pruned (never the environment a bundle carries, nor a file named as a secret's: `.env*`, keys, `.npmrc`…, counted in `hidden`); 404 for a repo's (its commit) or an image's; two reads at once a node.",
+        "operationId": "getServicesIdEnvironmentsEnvDeploysDepSource",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "dep",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`{files: {path, bytes, link?}[], truncated}` (at most 10,000), or with `path` one file `{path, bytes, text?}` (`text` when UTF-8 and at most 1 MiB): a folder upload's files as deployed, kept until the deployment is pruned (never the environment a bundle carries, nor a file named as a secret's: `.env*`, keys, `.npmrc`…, counted in `hidden`); 404 for a repo's (its commit) or an image's; two reads at once a node"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get source",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "reveal"
       }
     },
     "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/vulnerabilities": {

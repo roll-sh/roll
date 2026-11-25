@@ -192,7 +192,8 @@ struct Sent(Mutex<Vec<Value>>, Mutex<Option<Value>>, std::sync::atomic::AtomicBo
 /// A self-managed GitLab's access tokens for project `acme/web`, OpenAI's service accounts in one
 /// project, Datadog's keys on its EU site, an account's Cloudflare API tokens, a Databricks
 /// workspace's tokens, Confluent Cloud's API keys, a SonarQube Server's and SonarQube Cloud's
-/// tokens and a Jenkins user's API tokens, as their docs describe them, each taking only its admin
+/// tokens, a Jenkins user's API tokens and a Salesforce app's consumer key and secret, as their
+/// docs describe them, each taking only its admin
 /// credential (all obviously fake): the key ids live, every request body, and whether the admin
 /// credentials still work (`refuse`).
 #[derive(Default)]
@@ -206,6 +207,24 @@ struct FakeKeyVendors {
     /// Jenkins' API tokens by uuid, and whether new ones fail to sign in (`unverified`).
     jenkins_tokens: Mutex<BTreeMap<String, String>>,
     jenkins_unverified: std::sync::atomic::AtomicBool,
+    salesforce: Mutex<FakeSalesforce>,
+}
+
+/// A Salesforce org's external client app `0xIRollFakeApp1` and its OAuth consumer: the consumer's
+/// current key (`FAKESFKEY0` until a set is promoted), and its staged sets as (id, key, active).
+#[derive(Default)]
+struct FakeSalesforce {
+    main: String,
+    staged: Vec<(String, String, bool)>,
+    made: u32,
+}
+
+impl FakeSalesforce {
+    /// The consumer keys that sign in: the current one and any staged beside it.
+    fn working(&self) -> Vec<String> {
+        let main = if self.main.is_empty() { "FAKESFKEY0".to_string() } else { self.main.clone() };
+        std::iter::once(main).chain(self.staged.iter().filter(|s| s.2).map(|s| s.1.clone())).collect()
+    }
 }
 
 const GITLAB_TOKENS: &str = "https://gitlab.example.com/api/v4/projects/acme%2Fweb/access_tokens";
@@ -218,6 +237,7 @@ const SONAR_TOKENS: &str = "https://sonar.example.com/api/user_tokens/";
 const SONARCLOUD_TOKENS: &str = "https://sonarcloud.io/api/user_tokens/";
 const JENKINS: &str = "https://jenkins.example.com/";
 const JENKINS_TOKENS: &str = "user/roll-bot/descriptorByName/jenkins.security.ApiTokenProperty/";
+const SALESFORCE: &str = "https://acme-rollfake.my.salesforce.com/services/";
 
 /// A form body as JSON: `{name: value}`.
 fn form_json(b: &str) -> Value {
@@ -283,9 +303,68 @@ impl FakeKeyVendors {
         }
     }
 
+    /// Salesforce's token endpoint (the admin app's client credentials) and the Connect REST API's
+    /// OAuth credentials: one staged set at a time, promoting one ends the consumer's key before it.
+    fn salesforce(&self, method: &str, rest: &str, auth: &str, body: Value) -> (u16, Value) {
+        use std::sync::atomic::Ordering::Relaxed;
+        if (method, rest) == ("POST", "oauth2/token") {
+            let ok = !self.refuse.load(Relaxed) && body == json!({ "grant_type": "client_credentials", "client_id": "FAKESFADMINKEY", "client_secret": "fake-sf-admin-secret" });
+            return if ok { (200, json!({ "access_token": "fake-sf-access", "instance_url": "https://acme-rollfake.my.salesforce.com", "token_type": "Bearer" })) } else { (400, json!({ "error": "invalid_client" })) };
+        }
+        if auth != "Bearer fake-sf-access" {
+            return (401, json!([{ "errorCode": "INVALID_SESSION_ID" }]));
+        }
+        let mut sf = self.salesforce.lock().unwrap();
+        let main = sf.working()[0].clone();
+        let entry = |(id, key, active): &(String, String, bool), secret: bool| {
+            let n = key.trim_start_matches("FAKESFKEY");
+            let mut e = json!({ "id": id, "state": if *active { "active" } else { "rotated" }, "key": key, "createdBy": "roll-admin@example.com", "expirationDate": "2099-01-01T00:00:00.000+0000" });
+            if secret {
+                e["secret"] = json!(format!("fake-sf-secret-{n}"));
+            }
+            e
+        };
+        let Some(rest) = rest.strip_prefix("data/v65.0/apps/oauth/credentials/") else { return (404, Value::Null) };
+        match (method, rest) {
+            // The admin's own app, and the one that rotates (its consumer id in the 18-character form).
+            ("GET", "0xIRollFakeAdmn") => (200, json!({ "consumers": [{ "id": "888RollFakeAdmn", "key": "FAKESFADMINKEY", "name": "roll" }] })),
+            ("GET", "0xIRollFakeApp1") => (200, json!({ "consumers": [{ "id": "888RollFakeCon1AAA", "key": main, "name": "web" }] })),
+            ("GET", "0xIRollFakeApp1/888RollFakeCon1/staged") => (200, json!({ "stagedCredentials": sf.staged.iter().map(|s| entry(s, true)).collect::<Vec<_>>() })),
+            ("POST", "0xIRollFakeApp1/888RollFakeCon1/staged") => {
+                if sf.staged.iter().any(|s| s.2) {
+                    return (400, json!([{ "errorCode": "INVALID_STATE", "message": "rotate or delete the staged credentials first" }]));
+                }
+                sf.made += 1;
+                let n = sf.made;
+                sf.staged = vec![(format!("0ugRollFake{n:04}"), format!("FAKESFKEY{n}"), true)];
+                (201, json!({ "stagedCredentials": [entry(&sf.staged[0], true)] }))
+            }
+            (m, r) => {
+                let Some(id) = r.strip_prefix("0xIRollFakeApp1/888RollFakeCon1/staged/") else { return (404, Value::Null) };
+                let Some(i) = sf.staged.iter().position(|s| s.0 == id && s.2) else { return (404, Value::Null) };
+                match m {
+                    "PATCH" if body == json!({ "command": "rotate" }) => {
+                        sf.staged[i].2 = false;
+                        sf.main = sf.staged[i].1.clone();
+                        (200, entry(&sf.staged[i], false))
+                    }
+                    "DELETE" => {
+                        sf.staged.remove(i);
+                        (204, Value::Null)
+                    }
+                    _ => (400, Value::Null),
+                }
+            }
+        }
+    }
+
     fn answer(&self, method: &str, url: &str, headers: &[(&str, &Secret)], body: Option<(&str, &Secret)>) -> Option<(u16, Value)> {
         use std::sync::atomic::Ordering::Relaxed;
         let header = |name: &str| headers.iter().find(|(k, _)| *k == name).map(|(_, v)| v.expose().to_string()).unwrap_or_default();
+        if let Some(rest) = url.strip_prefix(SALESFORCE) {
+            let body = body.map(|(t, b)| if t == "application/json" { serde_json::from_str(b.expose()).unwrap() } else { form_json(b.expose()) }).unwrap_or(Value::Null);
+            return Some(self.salesforce(method, rest, &header("authorization"), body));
+        }
         if let Some(rest) = url.strip_prefix(JENKINS) {
             return Some(self.jenkins(method, rest, &header("authorization"), &header("jenkins-crumb"), body.map(|(_, b)| form_json(b.expose())).unwrap_or(Value::Null)));
         }
@@ -3829,6 +3908,40 @@ async fn sonarqube_tokens_rotate_and_the_old_one_is_revoked_after_the_grace_peri
     api.ok(Method::PUT, "/environments/production/secrets/SONAR_CLOUD_TOKEN", Some(json!({ "link": { "kind": "saas", "ref": cloud["id"], "field": "secret", "mode": "managed" } }))).await;
     assert_eq!(api.values("production", "/").await["values"]["SONAR_CLOUD_TOKEN"], "squ_fakesonar3");
     assert_eq!(api.sent.10.bodies.lock().unwrap()[2]["type"], "USER_TOKEN");
+}
+
+#[tokio::test]
+async fn salesforce_consumer_secrets_rotate_and_the_old_one_ends_when_the_new_one_is_promoted() {
+    let api = Api::new().await;
+    let target = |app: &str, consumer: &str| json!({ "domain": "acme-rollfake.my.salesforce.com", "app_id": app, "consumer_id": consumer });
+    let admin = "FAKESFADMINKEY:fake-sf-admin-secret";
+    for (t, why) in [
+        (json!({ "domain": "10.0.0.1", "app_id": "0xIRollFakeApp1", "consumer_id": "888RollFakeCon1" }), "a My Domain host is a hostname"),
+        (target("RollFakeApp1xyz", "888RollFakeCon1"), "an external client app's id starts 0x"),
+    ] {
+        let (s, _) = api.call(Method::POST, "/saas", Some(json!({ "name": "sf", "vendor": "salesforce", "target": t, "credential": admin }))).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{why}");
+    }
+    // Rotating the app roll signs in as would end roll's own credential.
+    let (s, e) = api.call(Method::POST, "/saas", Some(json!({ "name": "sf", "vendor": "salesforce", "target": target("0xIRollFakeAdmn", "888RollFakeAdmn"), "credential": admin }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("the app roll signs in as"), "{e}");
+
+    let r = key_vendor(&api, "salesforce", target("0xIRollFakeApp1", "888RollFakeCon1"), admin, "SALESFORCE_CLIENT_SECRET", json!({ "rotate_days": 14 })).await;
+    api.ok(Method::PUT, "/environments/production/secrets/SALESFORCE_CLIENT_ID", Some(json!({ "link": { "kind": "saas", "ref": r["id"], "field": "id", "mode": "managed", "options": { "rotate_days": 14 } } }))).await;
+    let values = |v: Value| (v["values"]["SALESFORCE_CLIENT_ID"].clone(), v["values"]["SALESFORCE_CLIENT_SECRET"].clone());
+    assert_eq!(values(api.values("production", "/").await), (json!("FAKESFKEY1"), json!("fake-sf-secret-1")));
+    // Staged beside the app's credential from before roll: both sign in.
+    assert_eq!(api.sent.10.salesforce.lock().unwrap().working(), ["FAKESFKEY0", "FAKESFKEY1"]);
+
+    // The next rotation promotes the first key (ending the one from before roll) and stages a new
+    // one; the old key works through the grace period, and promoting the new one ends it.
+    for n in [2, 3] {
+        api.ok(Method::POST, "/environments/production/secrets/SALESFORCE_CLIENT_SECRET/rotate", None).await;
+        assert_eq!(values(api.values("production", "/").await), (json!(format!("FAKESFKEY{n}")), json!(format!("fake-sf-secret-{n}"))));
+        assert_eq!(api.sent.10.salesforce.lock().unwrap().working(), [format!("FAKESFKEY{}", n - 1), format!("FAKESFKEY{n}")]);
+        end_grace(&api).await;
+        assert_eq!(api.sent.10.salesforce.lock().unwrap().working(), [format!("FAKESFKEY{n}")]);
+    }
 }
 
 #[tokio::test]
@@ -8432,6 +8545,8 @@ struct FakeCa {
     root_key: rcgen::KeyPair,
     root_pem: String,
     orders: Mutex<Vec<(Vec<String>, bool)>>,
+    /// (serial, reason) of each certificate revoked.
+    revoked: Mutex<Vec<(String, roll_secrets::public_certs::RevokeReason)>>,
 }
 
 impl FakeCa {
@@ -8441,7 +8556,7 @@ impl FakeCa {
         root.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         root.distinguished_name.push(rcgen::DnType::CommonName, "roll fake public root");
         let root_pem = root.self_signed(&root_key).unwrap().pem();
-        FakeCa { root, root_key, root_pem, orders: Mutex::default() }
+        FakeCa { root, root_key, root_pem, orders: Mutex::default(), revoked: Mutex::default() }
     }
 }
 
@@ -8483,6 +8598,13 @@ impl roll_secrets::public_certs::PublicCa for FakeCa {
         (p.not_before, p.not_after) = (now - time::Duration::hours(1), now + time::Duration::days(90));
         let leaf = p.signed_by(&key, &rcgen::Issuer::from_params(&self.root, &self.root_key)).unwrap();
         Ok(roll_secrets::public_certs::Ordered { chain: Secret::new(format!("{}{}", leaf.pem(), self.root_pem)), private_key: Secret::new(key.serialize_pem()), account })
+    }
+
+    fn revoke(&self, r: roll_secrets::public_certs::Revoke<'_>) -> Result<roll_secrets::public_certs::RevokeReason, String> {
+        assert_eq!(r.account.expose(), r#"{"fake":"account"}"#, "the account that ordered it");
+        let (_, x) = x509_parser::parse_x509_certificate(r.certificate).map_err(|e| e.to_string())?;
+        self.revoked.lock().unwrap().push((x.raw_serial_as_string().replace(':', ""), r.reason));
+        Ok(r.reason)
     }
 }
 
@@ -8560,6 +8682,19 @@ async fn public_certificates_are_ordered_in_the_background_renewed_and_a_failed_
     sweep().await;
     assert_ne!(api.values("production", "/").await["values"]["TLS_KEY"], before);
 
+    // That was a renewal asked for: another within the hour is a 429 saying when, since each one
+    // spends the CA's weekly limit for these names.
+    let (s, e) = api.call(Method::POST, &format!("/public-certs/{id}/renew"), None).await;
+    assert!(s == StatusCode::TOO_MANY_REQUESTS && e.to_string().contains("ask again after"), "{s} {e}");
+
+    // The certificate a renewal replaced is kept until it ends, so it can still be revoked.
+    let listed = api.ok(Method::GET, "/public-certs", None).await;
+    let previous = listed[0]["previous_serial"].as_str().expect("the replaced certificate").to_string();
+    assert_ne!(listed[0]["serial"].as_str(), Some(previous.as_str()));
+    let revoked = api.ok(Method::POST, &format!("/public-certs/{id}/revoke"), Some(json!({ "serial": "previous", "reason": "superseded" }))).await;
+    assert_eq!((&revoked["revocations"][0]["serial"], &revoked["revocations"][0]["state"]), (&json!(previous), &json!("revoked")), "{revoked}");
+    assert_eq!(*ca.revoked.lock().unwrap(), [(previous.clone(), roll_secrets::public_certs::RevokeReason::Superseded)]);
+
     // A name the DNS records don't prove: the renewal fails, as rotation.failed on its keys and in
     // health, and the certificate in use stays.
     let in_use = api.values("production", "/").await["values"]["TLS_CERT"].clone();
@@ -8576,6 +8711,16 @@ async fn public_certificates_are_ordered_in_the_background_renewed_and_a_failed_
     assert_eq!(api.values("production", "/").await["values"]["TLS_CERT"], in_use);
     // Linked keys hold it.
     assert_eq!(api.call(Method::DELETE, &format!("/public-certs/{id}"), None).await.0, StatusCode::CONFLICT);
+
+    // Production's private key linked into staging, which isn't protected, would be readable
+    // there: only when confirmed, and health says so.
+    let (s, e) = api.call(Method::PUT, "/environments/staging/secrets/TLS_KEY", Some(link("private_key"))).await;
+    assert!(s == StatusCode::CONFLICT && e.to_string().contains("confirm_required"), "{s} {e}");
+    let mut confirmed = link("private_key");
+    confirmed["confirm"] = json!(id);
+    api.ok(Method::PUT, "/environments/staging/secrets/TLS_KEY", Some(confirmed)).await;
+    let health = api.ok(Method::GET, "/health", None).await;
+    assert!(health.as_array().unwrap().iter().any(|f| f["issue"] == "exposed" && f["environment"] == "production" && f["key"] == "TLS_KEY" && f["detail"].as_str().unwrap().contains("staging")), "{health}");
 }
 
 /// What rolld's notifier would send, recorded: chat posts and mails. Only `usr_bob` may use a chat

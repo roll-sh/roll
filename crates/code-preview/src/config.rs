@@ -89,7 +89,7 @@ fn screenshot_rules(at: &str, pages: &[String], hide: &[String], states: &[State
     });
     if states.len() > MAX_STATES || bad_state {
         return Err(format!(
-            "{FILE} {at}: states are at most {MAX_STATES}, each a name (a-z, 0-9, -), a page (a path) and 1 to {MAX_STEPS} steps: click or type on a selector, press one of {}, or wait up to 5000 ms",
+            "{FILE} {at}: states are at most {MAX_STATES}, each a name (a-z, 0-9, -), a page (a path) and 1 to {MAX_STEPS} steps: click or type on a selector, choose a list's option (1 to {MAX_OPTION}), press one of {}, or wait up to 5000 ms",
             STEP_KEYS.join(", ")
         ));
     }
@@ -167,12 +167,14 @@ pub struct StateRule {
 }
 
 /// One step towards a state, on the page's own elements: `{"click": selector}`, `{"type":
-/// [selector, text]}`, `{"press": key}`, `{"wait": ms}`.
+/// [selector, text]}`, `{"choose": [selector, n]}` (a list's nth option, from 1), `{"press":
+/// key}`, `{"wait": ms}`.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Step {
     Click(String),
     Type(String, String),
+    Choose(String, u32),
     Press(String),
     Wait(u32),
 }
@@ -180,6 +182,8 @@ pub enum Step {
 /// The most states, and steps in each.
 pub const MAX_STATES: usize = 3;
 pub const MAX_STEPS: usize = 10;
+/// The furthest option a `choose` step names.
+pub const MAX_OPTION: u32 = 500;
 /// The keys a `press` step may name.
 pub const STEP_KEYS: [&str; 9] = ["Enter", "Escape", "Tab", "ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Space", "Backspace"];
 
@@ -200,6 +204,7 @@ pub fn step_ok(s: &Step) -> bool {
     match s {
         Step::Click(sel) => selector(sel),
         Step::Type(sel, t) => selector(sel) && text(t),
+        Step::Choose(sel, n) => selector(sel) && (1..=MAX_OPTION).contains(n),
         Step::Press(k) => STEP_KEYS.contains(&k.as_str()),
         Step::Wait(ms) => *ms <= 5000,
     }
@@ -490,7 +495,7 @@ mod tests {
             [[preview.states]]
             name = "cart"
             page = "/"
-            steps = [{ click = "#open-cart" }, { type = ["#coupon", "SAVE10"] }, { press = "Enter" }, { wait = 300 }]
+            steps = [{ click = "#open-cart" }, { type = ["#coupon", "SAVE10"] }, { choose = ["#size", 2] }, { press = "Enter" }, { wait = 300 }]
             "##,
         )
         .unwrap();
@@ -502,7 +507,8 @@ mod tests {
         let p = t.preview.unwrap();
         assert_eq!((p.port, p.postgres.as_deref(), p.redis.as_deref(), p.auto), (3000, Some("prj_abc123"), Some("rdb_def456"), true));
         assert_eq!((p.pages.as_slice(), p.hide.as_slice(), p.states.len()), (&["/pricing".to_string()][..], &[".clock".to_string()][..], 1));
-        assert_eq!(p.states[0].steps, [Step::Click("#open-cart".into()), Step::Type("#coupon".into(), "SAVE10".into()), Step::Press("Enter".into()), Step::Wait(300)]);
+        assert_eq!(p.states[0].steps, [Step::Click("#open-cart".into()), Step::Type("#coupon".into(), "SAVE10".into()), Step::Choose("#size".into(), 2), Step::Press("Enter".into()), Step::Wait(300)]);
+        assert!(!super::step_ok(&Step::Choose("#size".into(), 0)) && !super::step_ok(&Step::Choose("#size".into(), 501)), "options count from 1, 500 at most");
         assert_eq!(p.watch, ["web/**", "package.json"]);
         assert!(super::watch_pattern_ok("web/**") && !super::watch_pattern_ok("!web/**") && !super::watch_pattern_ok(""));
     }

@@ -169,7 +169,10 @@ Bodies are JSON. Every error is `{"error": string}`, plus a `code` when a produc
 - A deleted project and its canvas, members and homes are kept apart (`deleted_projects`,
   `deleted_resources`, `deleted_members`, `deleted_homes`) for at most 91 days, so a product's
   recovery can bring them back (`Workspace::restore`: not over another project of the same name; a
-  resource since placed elsewhere, or a home set elsewhere since, stays there). Its pending
+  resource since placed elsewhere, or a home set elsewhere since, stays there). Each kept home
+  comes back only if every product's `in_restore` hook says so, inside the restore's transaction
+  once the members are back (`HomeBack`: yes, no, or only if a given person is an admin or owner
+  there then); the rest go with the kept rows. Its pending
   invites end at the delete. A product that purged what it kept drops them
   (`Workspace::forget_deleted`).
 - `PATCH` changes only the fields it has; `"icon": null` goes back to the default.
@@ -201,8 +204,13 @@ docs/members.md is the design; these are its v1 routes.
   invite's; every failure is the same 404.
 - `PUT …/homes/{kind}/{ref}` needs `admin` outright on the resource where it is now, as placing
   one does, and from a person (their session or their token) that `Owners` says it's theirs;
-  moving a home away from another project takes being that project's admin too. A kind outside
-  `HOME_KINDS` is a 400.
+  moving a home away from another project takes being that project's admin too, and, for a
+  resource that's still a person's own (`Owners::has_person_owner`: a home being settled), being
+  that person (403 otherwise; the operator may). A kind outside `HOME_KINDS` is a 400.
+- A product's hook runs after a home is set (`on_homed`), in another database: a crash between
+  the workspace's commit and the product's record of it loses the product's side. roll search
+  fails closed there: its next pass drops a home it holds no hand-over for, logged at warn with
+  the cluster's id (docs/search/architecture.md, "Who sees a cluster").
 - A new invite to an address replaces a pending one only when the caller may give the role it
   names (409 otherwise); a member removed or demoted loses the pending invites their role no longer
   gives, in the same write.

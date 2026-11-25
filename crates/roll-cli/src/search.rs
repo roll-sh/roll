@@ -52,6 +52,48 @@ pub enum Search {
     /// Web crawlers: `roll_web_crawler` connectors that crawl a site into an index.
     #[command(subcommand)]
     Crawler(Crawler),
+    /// Copy indices from Elasticsearch, OpenSearch, Algolia, Typesense or Meilisearch into a
+    /// cluster: without --index, list the source's indices; --dry-run shows what each becomes
+    /// and what didn't map; otherwise start the copies (roll's tasks), --wait to follow them.
+    /// The source's key comes from the environment (ALGOLIA_API_KEY, TYPESENSE_API_KEY,
+    /// MEILISEARCH_API_KEY, ELASTICSEARCH_API_KEY; --api-key-env to name another) or stdin
+    /// (--api-key-stdin), never from the command line.
+    Migrate {
+        cluster: String,
+        /// elasticsearch, opensearch, algolia, typesense or meilisearch.
+        #[arg(long, default_value = "elasticsearch")]
+        from: String,
+        /// The source's URL (not Algolia's).
+        #[arg(long)]
+        host: Option<String>,
+        /// Algolia's application id.
+        #[arg(long)]
+        app_id: Option<String>,
+        /// Elasticsearch or OpenSearch: sign in as this user (the password in ELASTICSEARCH_PASSWORD).
+        #[arg(long)]
+        username: Option<String>,
+        /// The environment variable holding the source's key.
+        #[arg(long)]
+        api_key_env: Option<String>,
+        /// Read the source's key from stdin instead.
+        #[arg(long, conflicts_with = "api_key_env")]
+        api_key_stdin: bool,
+        /// An index to copy, `name` or `name=copy-name`; repeat for several.
+        #[arg(long = "index")]
+        indices: Vec<String>,
+        /// Show what each index becomes (mappings, synonyms, rules, what didn't map); make nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Documents per page read from the source.
+        #[arg(long)]
+        size: Option<u32>,
+        /// Documents per second per copy (unthrottled unless set).
+        #[arg(long)]
+        requests_per_second: Option<f64>,
+        /// Follow the copies until they end.
+        #[arg(long)]
+        wait: bool,
+    },
     /// Keys a web page ships: derive one from a derivable browser key, here, with no call to roll.
     #[command(subcommand)]
     BrowserKeys(BrowserKeys),
@@ -435,6 +477,14 @@ pub enum Clusters {
         /// Default of `action.destructive_requires_name` (Elasticsearch's default: true).
         #[arg(long)]
         destructive_requires_name: Option<bool>,
+        /// Only the project's admins and owners change its data (`--protected false`: its
+        /// developers too, the default).
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+        protected: Option<bool>,
+        /// Make it in this workspace project (id or name), as its home: your role there decides
+        /// (admin or owner), and its members reach it by theirs. Without it, the cluster is yours.
+        #[arg(long)]
+        project: Option<String>,
     },
     /// Show a cluster: state, URL, indices, branches.
     Show { cluster: String },
@@ -453,6 +503,10 @@ pub enum Clusters {
         /// Default of `action.destructive_requires_name`.
         #[arg(long)]
         destructive_requires_name: Option<bool>,
+        /// Only the project's admins and owners change its data; `--protected false` lets its
+        /// developers too (an admin's change).
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+        protected: Option<bool>,
         /// Let only these networks reach the cluster's endpoint (repeat it; replaces the list):
         /// a CIDR or an address, optionally `=description` (`--allow 203.0.113.0/24=office`).
         /// The dashboard and `roll search` aren't filtered.
@@ -746,6 +800,10 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
         Search::Crawler(Crawler::Test { cluster, url, connector }) => return crate::search_crawler::test(api, as_json, &cluster, &url, connector.as_deref()).await,
         Search::Crawler(Crawler::Verify { cluster, domain, check }) => return crate::search_crawler::verify(api, as_json, &cluster, &domain, check).await,
         Search::Crawler(Crawler::Sites { cluster }) => return crate::search_crawler::sites(api, as_json, &cluster).await,
+        Search::Migrate { cluster, from, host, app_id, username, api_key_env, api_key_stdin, indices, dry_run, size, requests_per_second, wait } => {
+            let args = crate::search_migrate::Args { cluster, from, host, app_id, username, api_key_env, api_key_stdin, indices, dry_run, size, rps: requests_per_second, wait };
+            return crate::search_migrate::run(api, as_json, args).await;
+        }
         Search::Inference(cmd) => match cmd {
             Inference::List { cluster } => {
                 let c = find(api, &cluster).await?;
@@ -1036,12 +1094,15 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                 }
                 v
             }
-            Clusters::Create { name, flavor, idle, max_in_flight, max_body_mb, destructive_requires_name } => {
+            Clusters::Create { name, flavor, idle, max_in_flight, max_body_mb, destructive_requires_name, protected, project } => {
                 let body = json!({
                     "name": name, "flavor": flavor, "idle_timeout_s": idle, "max_in_flight": max_in_flight, "max_body_mb": max_body_mb,
-                    "destructive_requires_name": destructive_requires_name,
+                    "destructive_requires_name": destructive_requires_name, "protected": protected,
                 });
-                let v = api.post("/v1/search/clusters", body).await?;
+                let v = match project {
+                    Some(p) => crate::preview::in_project(api, &crate::preview::project_id(api, &p).await?).post("/v1/search/clusters", body).await?,
+                    None => api.post("/v1/search/clusters", body).await?,
+                };
                 if !as_json {
                     print_cluster(&v);
                     print_credentials(&v);
@@ -1057,6 +1118,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                     let idle = v["idle_timeout_s"].as_i64().unwrap_or(0);
                     println!("idle      {}", if idle == 0 { "always loaded".to_string() } else { format!("{idle}s") });
                     println!("limits    {} in flight, {} MiB bodies", s(&v["max_in_flight"]), s(&v["max_body_mb"]));
+                    println!("protected {}", if v["protected"].as_bool() == Some(true) { "yes: only admins change data" } else { "no" });
                     print_allowlist(&v);
                     println!("created   {}", ago(v["created_at"].as_i64().unwrap_or(0)));
                     for b in v["branches"].as_array().into_iter().flatten() {
@@ -1066,11 +1128,11 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                 }
                 v
             }
-            Clusters::Set { cluster, flavor, idle, max_in_flight, max_body_mb, destructive_requires_name, allow, allow_any } => {
+            Clusters::Set { cluster, flavor, idle, max_in_flight, max_body_mb, destructive_requires_name, protected, allow, allow_any } => {
                 let c = find(api, &cluster).await?;
                 let mut body = json!({
                     "flavor": flavor, "idle_timeout_s": idle, "max_in_flight": max_in_flight, "max_body_mb": max_body_mb,
-                    "destructive_requires_name": destructive_requires_name,
+                    "destructive_requires_name": destructive_requires_name, "protected": protected,
                 });
                 if allow_any || !allow.is_empty() {
                     body["ip_allowlist"] = allow_rules(&allow);

@@ -451,3 +451,353 @@ impl Search {
         self.stop.trigger();
     }
 }
+
+/// A new branch takes its parent's workspace home, and goes on that project's canvas: it was made
+/// from the project's own cluster, so the project trusts it as it trusts the parent
+/// (docs/members.md, "The canvas rule"). A parent with no home leaves the branch without one.
+/// A parent that's still a person's own (a home being settled) gives its branch no home: the
+/// branch is that person's too, never something the project is handed.
+pub fn home_branches(workspace: std::sync::Arc<roll_workspace::Workspace>) -> search_control::control::OnBranch {
+    Box::new(move |parent, branch| {
+        let kind = roll_workspace::Kind::Search;
+        if parent.owner.is_some() {
+            return;
+        }
+        let home = || -> roll_workspace::Result<()> {
+            let Some(project) = workspace.home_of(kind, &parent.id)? else { return Ok(()) };
+            workspace.place(roll_workspace::Scope::All, &project, kind, &branch.id, 0.0, 0.0)?;
+            workspace.set_home(&roll_workspace::Actor::operator(), &project, kind, &branch.id, true)
+        };
+        if let Err(e) = blocking(home) {
+            tracing::warn!(branch = branch.name, error = %e, "putting a search branch in its parent's project failed");
+        }
+    })
+}
+
+/// A quick write to the workspace database from an async hook, on a worker that may block.
+fn blocking<T>(f: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()) {
+        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(f),
+        _ => f(),
+    }
+}
+
+/// Whether this node runs the homes and links passes now: on a fleet, the holder of the
+/// singleton lease `search:homes` only; on one node, always.
+pub type Leads = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// Search clusters and workspace projects (docs/members.md): a cluster at home in a project is the
+/// project's, never a person's, and a project still home to clusters isn't deleted from under them.
+/// - Canvases and homes keep a cluster by its id (`Owners::canonical`), never a name a later
+///   cluster could take.
+/// - A cluster homed now (`Homed::Set`: its owner, an admin, the operator, a create's placement,
+///   or the same home said again) loses its owner (`Store::disown`: who owned it becomes
+///   `made_by`, for their caps), so leaving the project ends their access and a home never stands
+///   for a stranger's cluster. A home being settled (the cluster still a person's) moves only with
+///   that person or the operator (`Owners::has_person_owner`).
+/// - A project's restore brings a kept home back only for a cluster that's the project's, one
+///   whose hand-over to it is owed, or one whose owner is an admin or owner there then; decided
+///   inside the restore, then settled as what's kept from before is ([`settle_home`]).
+/// - A cluster that comes back to life (a failed delete, a restore) after the project it was at
+///   home in was deleted keeps no home there (`Workspace::drop_kept_homes`).
+/// - What's kept from before is put right at start, before the API listens ([`fix_homes`], then
+///   [`fix_links`]), and both again every few minutes ([`passes`]: a hand-over that failed is
+///   owed, not forgotten); on a fleet only where `leads` says. Until it's settled, a home whose
+///   cluster is still a person's grants the project nothing (`Workspace::trusts`).
+/// - Deleting a project at home to live clusters is refused (409), and answered 503 when that
+///   can't be read: they'd be no one's.
+pub fn members(control: &std::sync::Arc<search_control::Control>, workspace: &std::sync::Arc<roll_workspace::Workspace>) {
+    let kind = roll_workspace::Kind::Search;
+    // The workspace holds its hooks: they hold it weakly.
+    let (c, weak) = (control.clone(), std::sync::Arc::downgrade(workspace));
+    workspace.on_homed(Box::new(move |k, r#ref, project, how| {
+        if k != kind {
+            return;
+        }
+        // An id only: a ref that's a name (kept from before) is the start-up pass's to settle.
+        if !matches!(c.store.id_of(r#ref), Ok(Some(id)) if id == r#ref) {
+            tracing::warn!(cluster = r#ref, project, "a search home by a name, not an id: left to the start-up pass");
+            return;
+        }
+        match how {
+            // Decided now: recorded as owed first, so a hand-over that fails is done later.
+            roll_workspace::Homed::Set => {
+                if let Err(e) = c.store.owe_handover(r#ref, project).and_then(|()| c.store.disown(r#ref).map(drop)).and_then(|()| c.store.set_project(r#ref, Some(project)).map(drop)) {
+                    tracing::warn!(cluster = r#ref, project, error = %e, "handing a search cluster to its project failed; the homes pass tries again");
+                }
+            }
+            roll_workspace::Homed::Restored => {
+                let Some(ws) = weak.upgrade() else { return };
+                if let Ok(Some(row)) = ws.home_row(kind, r#ref)
+                    && row.project == project
+                {
+                    settle_home(&c, &ws, &row);
+                }
+            }
+        }
+    }));
+    // Which kept homes come back with a project's restore, decided inside it.
+    let c3 = control.clone();
+    workspace.in_restore(Box::new(move |k, r, project| {
+        if k != kind {
+            return Ok(roll_workspace::HomeBack::Yes);
+        }
+        let unreadable = |e: anyhow::Error| roll_workspace::Refusal { status: 503, code: "unavailable".into(), message: format!("can't tell whether search cluster {r} comes back with project {project} ({e}): try again") };
+        match c3.store.owner_and_made(r).map_err(unreadable)? {
+            // The project's own, or no cluster by that id (a name the start-up pass settles).
+            None | Some((None, _, _)) => Ok(roll_workspace::HomeBack::Yes),
+            Some((Some(owner), _, _)) => match c3.store.owed_handover(r).map_err(unreadable)? {
+                Some(p) if p == project => Ok(roll_workspace::HomeBack::Yes),
+                _ => Ok(roll_workspace::HomeBack::IfManagedBy(owner)),
+            },
+        }
+    }));
+    // A cluster live again after its home project was deleted (it lost the race with the delete's
+    // check): that project keeps no home for it.
+    let (weak2, c4) = (std::sync::Arc::downgrade(workspace), control.clone());
+    control.on_revived(Box::new(move |id| {
+        let Some(ws) = weak2.upgrade() else { return };
+        match blocking(|| ws.drop_kept_homes(kind, id)) {
+            Ok(projects) if !projects.is_empty() => {
+                tracing::warn!(cluster = id, ?projects, "a search cluster came back after the project it was at home in was deleted: that project keeps no home for it (it's the operator's now)");
+                if let Err(e) = c4.store.set_project(id, None) {
+                    tracing::warn!(cluster = id, error = %e, "forgetting a revived search cluster's project failed");
+                }
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(cluster = id, error = %e, "dropping a revived search cluster's kept homes failed"),
+        }
+    }));
+    let (c, weak) = (control.clone(), std::sync::Arc::downgrade(workspace));
+    // And again inside the delete's transaction: a cluster at home there that came alive since (a
+    // restore meanwhile) refuses it.
+    let c2 = control.clone();
+    workspace.in_delete(Box::new(move |project, homes| {
+        for (k, r) in homes {
+            if k != kind.as_str() {
+                continue;
+            }
+            match c2.store.id_of(r) {
+                Ok(None) => {}
+                Ok(Some(_)) => return Err(roll_workspace::Refusal { status: 409, code: "search_clusters".into(), message: format!("project {project} is home to search cluster {r}: delete it first") }),
+                Err(e) => return Err(roll_workspace::Refusal { status: 503, code: "unavailable".into(), message: format!("can't tell whether project {project} is home to search clusters ({e}): try again") }),
+            }
+        }
+        Ok(())
+    }));
+    workspace.before_delete(Box::new(move |d| {
+        let Some(ws) = weak.upgrade() else { return Ok(()) };
+        let unreadable = |what: String| roll_workspace::Refusal { status: 503, code: "unavailable".into(), message: format!("can't tell whether project {} is home to search clusters ({what}): try again", d.project.name) };
+        let homed = ws.homes_in(&d.project.id, kind).map_err(|e| unreadable(e.to_string()))?;
+        let mut live = Vec::new();
+        for r in homed {
+            if c.store.id_of(&r).map_err(|e| unreadable(e.to_string()))?.is_some() {
+                live.push(r);
+            }
+        }
+        if live.is_empty() {
+            return Ok(());
+        }
+        Err(roll_workspace::Refusal {
+            status: 409,
+            code: "search_clusters".into(),
+            message: format!("project {} is home to {} search cluster(s) ({}): delete them first", d.project.name, live.len(), live.join(", ")),
+        })
+    }));
+}
+
+/// The homes and links passes again every few minutes, after the ones at start (main.rs), where
+/// `leads` says: [`fix_homes`], then [`fix_links`] (both are safe to repeat).
+pub fn passes(control: &std::sync::Arc<search_control::Control>, workspace: &std::sync::Arc<roll_workspace::Workspace>, secrets: &std::sync::Arc<roll_secrets::Secrets>, leads: Leads) {
+    let (c, weak, sec) = (control.clone(), std::sync::Arc::downgrade(workspace), std::sync::Arc::downgrade(secrets));
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(HOMES_EVERY);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            let (c, Some(ws), Some(sec), leads) = (c.clone(), weak.upgrade(), sec.upgrade(), leads.clone()) else { return };
+            let _ = tokio::task::spawn_blocking(move || {
+                if leads() {
+                    fix_homes(&c, &ws);
+                    fix_links(&c, &ws, &sec);
+                }
+            })
+            .await;
+        }
+    });
+}
+
+/// How often the homes and links passes run while the node does ([`fix_homes`], [`fix_links`]).
+const HOMES_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// A node without roll search: it can't tell a cluster's id from a name (`Owners::canonical`
+/// refuses, so nothing places or homes one here) nor whether a project's clusters are live, so a
+/// project at home to any is deleted only where search runs (503).
+pub fn members_off(workspace: &std::sync::Arc<roll_workspace::Workspace>) {
+    let weak = std::sync::Arc::downgrade(workspace);
+    workspace.before_delete(Box::new(move |d| {
+        let Some(ws) = weak.upgrade() else { return Ok(()) };
+        match ws.homes_in(&d.project.id, roll_workspace::Kind::Search) {
+            Ok(h) if h.is_empty() => Ok(()),
+            _ => Err(roll_workspace::Refusal {
+                status: 503,
+                code: "unavailable".into(),
+                message: format!("project {} may be home to search clusters, which this node can't check: delete it on a node that runs roll search", d.project.name),
+            }),
+        }
+    }));
+}
+
+/// One home of a cluster that has an owner, as nobody decided it now (kept from before, back with
+/// its project's restore, or a hand-over that failed): handed to the project when its hand-over
+/// was decided and is owed (`Store::owe_handover`, recorded when the home was set), or when its
+/// owner is an admin or owner there now; otherwise the home goes (someone homed it who doesn't
+/// manage the project), unless it was handed over meanwhile. Never decided from timestamps.
+pub fn settle_home(c: &search_control::Control, ws: &roll_workspace::Workspace, h: &roll_workspace::HomeRow) {
+    let kind = roll_workspace::Kind::Search;
+    // The project's already: its tenant is that project (recorded once, for clusters handed over
+    // before tenants were).
+    let record = || {
+        if let Err(e) = c.store.set_project(&h.r#ref, Some(&h.project)) {
+            tracing::warn!(cluster = h.r#ref, error = %e, "recording a search cluster's project failed; the homes pass tries again");
+        }
+    };
+    let owner = match c.store.owner_and_made(&h.r#ref) {
+        Ok(Some((Some(owner), _, _))) => owner,
+        Ok(Some((None, _, _))) => return record(),
+        _ => return,
+    };
+    let owed = matches!(c.store.owed_handover(&h.r#ref), Ok(Some(p)) if p == h.project);
+    let manages = matches!(ws.role_in(&h.project, &owner), Ok(Some(roll_auth::roles::Role::Admin | roll_auth::roles::Role::Owner)));
+    if owed || manages {
+        match c.store.disown(&h.r#ref) {
+            Ok(_) => record(),
+            Err(e) => tracing::warn!(cluster = h.r#ref, error = %e, "handing a search cluster to its project failed; the homes pass tries again"),
+        }
+        return;
+    }
+    // Handed over meanwhile (homed again by its owner or the operator): it stays.
+    if !matches!(c.store.owner_and_made(&h.r#ref), Ok(Some((Some(_), _, _)))) {
+        return;
+    }
+    // No hand-over recorded: a home from before members, or one whose record a crash lost between
+    // the workspace's commit and search's (it fails closed: the cluster stays its owner's).
+    tracing::warn!(cluster = h.r#ref, project = h.project, owner, "a search cluster at home in a project its owner doesn't manage, with no hand-over recorded: its home is dropped and it stays its owner's");
+    if let Err(e) = ws.drop_home(kind, &h.r#ref, &h.project).map_err(anyhow::Error::from).and_then(|()| c.store.set_project(&h.r#ref, None).map(drop)) {
+        tracing::warn!(cluster = h.r#ref, error = %e, "dropping a search cluster's home failed");
+    }
+}
+
+/// Puts right what canvases and homes kept of search clusters (live, or with a deleted project for
+/// its restore), on every start and then every few minutes; each step is safe to repeat.
+/// - A ref that isn't a cluster's id (a name) becomes the id of the cluster that name names, when
+///   that cluster existed, and wasn't restored, since before the ref was placed or homed; else (the
+///   name was taken since by another cluster, or names none) its places and homes go, kept ones
+///   too.
+/// - Each home of a cluster with an owner is settled ([`settle_home`]).
+pub fn fix_homes(c: &search_control::Control, ws: &roll_workspace::Workspace) {
+    let kind = roll_workspace::Kind::Search;
+    let mut after = String::new();
+    loop {
+        let refs = match ws.refs_page(kind, &after, PAGE) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "reading the search clusters canvases keep failed");
+                break;
+            }
+        };
+        let last = refs.len() < PAGE as usize;
+        for (r#ref, since) in refs {
+            after.clone_from(&r#ref);
+            // A cluster's id in any state (one being deleted isn't a live name): left as it is.
+            if c.store.is_cluster_id(&r#ref).unwrap_or(true) {
+                continue;
+            }
+            match c.store.id_of(&r#ref) {
+                Ok(Some(id)) if c.store.owner_and_made(&id).ok().flatten().is_some_and(|(_, made, restored)| made * 1000 <= since && restored.is_none_or(|r| r * 1000 <= since)) => {
+                    tracing::warn!(name = r#ref, cluster = id, "a search cluster kept by name on canvases and homes: kept by its id from now on");
+                    if let Err(e) = ws.rekey(kind, &r#ref, &id) {
+                        tracing::warn!(name = r#ref, error = %e, "keeping a search cluster by its id failed");
+                    }
+                }
+                Ok(_) => {
+                    tracing::warn!(name = r#ref, "a search cluster kept by a name that now names another cluster, or none: its places and homes go");
+                    if let Err(e) = ws.forget_resource(kind, &r#ref).and_then(|()| ws.forget_kept(kind, &r#ref)) {
+                        tracing::warn!(name = r#ref, error = %e, "forgetting a search cluster's places failed");
+                    }
+                }
+                Err(e) => tracing::warn!(name = r#ref, error = %e, "reading a search cluster failed"),
+            }
+        }
+        if last {
+            break;
+        }
+    }
+    let mut after = String::new();
+    loop {
+        let homes = match ws.homes_page(kind, &after, PAGE) {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!(error = %e, "reading search clusters' homes failed");
+                break;
+            }
+        };
+        let last = homes.len() < PAGE as usize;
+        for h in &homes {
+            after.clone_from(&h.r#ref);
+            settle_home(c, ws, h);
+        }
+        if last {
+            break;
+        }
+    }
+}
+
+/// How many rows the passes read at once.
+const PAGE: i64 = 500;
+
+/// roll secrets' search links that name a cluster by a name (made when the provider still took
+/// names, which it now refuses on every read) are kept by the id that name stands for, so running
+/// services keep their values: on every start, after [`fix_homes`]. A name is moved to the cluster
+/// it names now only when that cluster is on the link's project's canvas and the project trusts it
+/// (`Workspace::trusts`, the rule roll secrets' links are written by), and it was made, and last
+/// restored, no later than the link was first written as it is now (`Secrets::link_refs`: its
+/// earliest version carrying that link, so editing a comment or tags doesn't move it), so it's the
+/// one the link was made against.
+/// Anything else stays as it is and keeps failing visibly; nothing is dropped.
+pub fn fix_links(c: &search_control::Control, ws: &roll_workspace::Workspace, secrets: &roll_secrets::Secrets) {
+    let kind = roll_workspace::Kind::Search;
+    let links = match secrets.link_refs("search") {
+        Ok(l) => l,
+        Err(e) => return tracing::warn!(error = %e, "reading roll secrets' search links failed"),
+    };
+    for (project, name, since) in links {
+        let id = match c.store.id_of(&name) {
+            Ok(Some(id)) if id != name => id,
+            // Kept by its id already, or a name that names nothing now (it stays, and fails).
+            Ok(_) => continue,
+            Err(e) => {
+                tracing::warn!(project, name, error = %e, "reading a search cluster failed");
+                continue;
+            }
+        };
+        let on_canvas = ws.projects_of("search", &id).is_ok_and(|p| p.contains(&project));
+        let trusted = ws.get(roll_workspace::Scope::All, &project).is_ok_and(|p| ws.trusts(&p, kind, &id));
+        let made_before = c.store.owner_and_made(&id).ok().flatten().is_some_and(|(_, made, restored)| made * 1000 <= since && restored.is_none_or(|r| r * 1000 <= since));
+        if !(on_canvas && trusted && made_before) {
+            // Once per link while the process runs (the pass repeats every few minutes).
+            static WARNED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<(String, String)>>> = std::sync::LazyLock::new(Default::default);
+            if WARNED.lock().unwrap_or_else(|p| p.into_inner()).insert((project.clone(), name.clone())) {
+                tracing::warn!(project, name, cluster = id, "a roll secrets search link by a name that now names a cluster this project doesn't trust, or one made after the link: it stays (and fails) until it's linked by id");
+            } else {
+                tracing::debug!(project, name, cluster = id, "a roll secrets search link by a name still waits to be linked by id");
+            }
+            continue;
+        }
+        match secrets.rekey_links(&project, "search", &name, &id) {
+            Ok(n) => tracing::info!(project, name, cluster = id, links = n, "roll secrets search links kept by the cluster's id from now on"),
+            Err(e) => tracing::warn!(project, name, error = %e, "keeping roll secrets search links by id failed"),
+        }
+    }
+}

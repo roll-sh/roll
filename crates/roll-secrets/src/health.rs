@@ -8,7 +8,7 @@ use crate::insights::EXPIRING_DAYS;
 use crate::{Result, Secrets, from_json};
 use code_sql::params;
 use serde::Serialize;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 /// Reads of values over this many days count as use.
@@ -32,11 +32,13 @@ pub enum Issue {
     Expired,
     /// Its scheduled rotation fails (the database, vendor or rotator refused or didn't answer).
     RotationFailing,
-    /// A retired or expired credential roll can't revoke yet (it keeps trying).
+    /// A retired or expired credential roll can't revoke yet (it keeps trying), or a public
+    /// certificate's revocation the CA hasn't taken (`key` its name, `environment` empty).
     RevokeFailing,
     /// A required key an environment doesn't define.
     Missing,
-    /// A protected environment's value, also set in an unprotected one.
+    /// A protected environment's value, also set in an unprotected one; or a public certificate
+    /// linked into a protected environment whose private key is also linked into one that isn't.
     Exposed,
     /// A server's credential under a name a framework puts in the browser bundle
     /// (`NEXT_PUBLIC_`, `VITE_`…): whoever loads the site can read it.
@@ -272,6 +274,41 @@ impl Secrets {
                 add(Issue::Unread, format!("not read in {UNREAD_DAYS} days"));
             }
         }
+        // A public certificate linked into a protected environment and, with its private key,
+        // into one that isn't: every key and environment gets the same certificate, so the
+        // protected one's key is readable there. Once per protected environment, on its key.
+        let mut held: BTreeMap<String, BTreeMap<&str, (&str, &str, bool)>> = BTreeMap::new();
+        let mut keyed: BTreeMap<String, BTreeSet<(&str, &str)>> = BTreeMap::new();
+        for (env_id, path, key, _, link, ..) in &rows {
+            let (Some(e), Some(l)) = (slug.get(env_id.as_str()), link.as_deref().and_then(|l| serde_json::from_str::<crate::Link>(l).ok())) else { continue };
+            if l.kind != crate::public_certs::KIND {
+                continue;
+            }
+            let private = l.field == "private_key";
+            if e.protected {
+                let at = held.entry(l.r#ref.clone()).or_default().entry(e.slug.as_str()).or_insert((path.as_str(), key.as_str(), private));
+                if private && !at.2 {
+                    *at = (path.as_str(), key.as_str(), true);
+                }
+            } else if private {
+                keyed.entry(l.r#ref).or_default().insert((e.slug.as_str(), path.as_str()));
+            }
+        }
+        if !held.is_empty() && !keyed.is_empty() {
+            let names: HashMap<String, String> = self.public_cert_refs(project)?.into_iter().collect();
+            for (r, protected) in &held {
+                let Some(others) = keyed.get(r) else { continue };
+                let named: Vec<&str> = others.iter().filter(|(o, at)| caller.allows(Action::Read, &Scope::at(project, o, at))).map(|(o, _)| *o).collect::<BTreeSet<_>>().into_iter().collect();
+                for (env, (path, key, _)) in protected {
+                    if named.is_empty() || !caller.allows(Action::Read, &Scope::at(project, env, path)) {
+                        continue;
+                    }
+                    let name = names.get(r).map_or(r.as_str(), String::as_str);
+                    let detail = format!("public certificate {name}'s private key is also linked into {}: {env}'s key is readable there (give it a public certificate of its own)", named.join(", "));
+                    out.push(Finding { issue: Issue::Exposed, environment: env.to_string(), path: path.to_string(), key: key.to_string(), detail, owner: None, decoy: None });
+                }
+            }
+        }
         // Bindings from before a placement was required.
         let unplaced: Vec<(String, String, String, String)> = self.db.read(|c| c.query("SELECT s.env_id, s.path, s.key, h.binding FROM key_hosts h JOIN secrets s ON s.id = h.secret_id WHERE h.project_id = ? ORDER BY s.path, s.key", [project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))))?;
         for (env_id, path, key, binding) in unplaced {
@@ -363,6 +400,20 @@ impl Secrets {
                 if caller.allows(Action::Read, &Scope::at(project, &e.slug, &path)) {
                     out.push(Finding { issue, environment: e.slug.clone(), path, key, detail: why, owner: None, decoy: None });
                 }
+            }
+        }
+        // A public certificate's revocation the CA hasn't taken (a leak's, or asked by hand): the
+        // job keeps asking. On the registration (`key` its name, `environment` empty).
+        if caller.allows(Action::Read, &Scope::whole(project)) {
+            let pending: Vec<(String, String, String)> = self.db.read(|c| {
+                c.query(
+                    "SELECT p.name, r.serial, r.last_error FROM public_cert_revocations r JOIN public_certs p ON p.id = r.cert_id WHERE r.project_id = ? AND r.revoked_at IS NULL AND r.last_error IS NOT NULL AND r.not_after > ? ORDER BY p.name, r.serial",
+                    params![project, now],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+            })?;
+            for (name, serial, why) in pending {
+                out.push(Finding { issue: Issue::RevokeFailing, environment: String::new(), path: String::new(), key: name, detail: format!("certificate {serial} isn't revoked at the CA yet (roll keeps trying): {why}"), owner: None, decoy: None });
             }
         }
         // Syncs and identities made as the operator account: an admin's session before it recorded

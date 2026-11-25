@@ -6,7 +6,7 @@ export const Route = createFileRoute("/dashboard/apps/$id")({
   head: () => pageHead({ title: "Service" }),
   component: function ServiceRoute() {
     const { id } = Route.useParams();
-    const { env, tab } = Route.useSearch();
-    return <ServicePage key={id} id={id} env={env} tab={tab} />;
+    const { env, tab, q, back } = Route.useSearch();
+    return <ServicePage key={id} id={id} env={env} tab={tab} logQuery={q} logBack={back} />;
   },
 });
