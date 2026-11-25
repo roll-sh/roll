@@ -32,11 +32,26 @@ pub struct EsRequest {
     /// Header names in any case.
     pub headers: Vec<(String, String)>,
     pub body: Bytes,
+    /// Who the host verified the request as, in process ([`Verified`]): no header says it, so
+    /// nothing a client sends can.
+    pub verified: Option<Verified>,
+}
+
+/// Who `search-server` verified a request as before handing it to its cluster, set on the
+/// request in process only, never read from a header ([`crate::xpack::security::authenticate`]).
+#[derive(Clone, Debug)]
+pub enum Verified {
+    /// The cluster's own credentials (the owner, `elastic`, or a credential's user): the request
+    /// runs as the owner, narrowed by [`crate::xpack::security::INDEX_SCOPE_HEADER`].
+    ClusterUser(std::sync::Arc<str>),
+    /// A derived browser key ([`crate::xpack::security::derived`]): the request runs as its
+    /// parent's API key, narrowed, without verifying the key a second time.
+    Derived(std::sync::Arc<crate::xpack::security::derived::VerifiedKey>),
 }
 
 impl EsRequest {
     pub fn new(method: &str, uri: &str) -> EsRequest {
-        EsRequest { method: method.to_string(), uri: uri.to_string(), headers: Vec::new(), body: Bytes::new() }
+        EsRequest { method: method.to_string(), uri: uri.to_string(), headers: Vec::new(), body: Bytes::new(), verified: None }
     }
 
     pub fn json(method: &str, uri: &str, body: impl Into<Bytes>) -> EsRequest {
@@ -45,6 +60,7 @@ impl EsRequest {
             uri: uri.to_string(),
             headers: vec![("content-type".into(), "application/json".into())],
             body: body.into(),
+            verified: None,
         }
     }
 
@@ -314,11 +330,15 @@ pub async fn handle_admitted(cluster: &Cluster, mut req: EsRequest, admitted: Op
             *v = a;
         }
     }
-    let mut resp = match cluster.dialect {
-        Dialect::Elasticsearch => handle_inner(cluster, &req, admitted).await,
-        // Parsers whose grammar differs between the dialects read `opensearch::active()`.
-        Dialect::OpenSearch => crate::opensearch::Scoped::new(handle_inner(cluster, &req, admitted)).await,
+    let handled = async {
+        match cluster.dialect {
+            Dialect::Elasticsearch => handle_inner(cluster, &req, admitted).await,
+            // Parsers whose grammar differs between the dialects read `opensearch::active()`.
+            Dialect::OpenSearch => crate::opensearch::Scoped::new(handle_inner(cluster, &req, admitted)).await,
+        }
     };
+    // A branch's write that may leave a field unembedded (roll previews' masking).
+    let mut resp = crate::xpack::inference::semantic::honour_unembedded(cluster, &req, handled).await;
     finish_headers(&mut resp, &req, cluster.dialect);
     resp
 }

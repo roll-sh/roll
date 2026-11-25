@@ -42,7 +42,7 @@ const CAPPED: &str = "rotated within the hour";
 pub(crate) const LEAKS: &str = "roll:leaks";
 
 /// What a project does when one of its managed keys leaks (`leaks.rotate`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LeakRotate {
     /// Rotated at once, with no grace for the leaked credential.
@@ -103,8 +103,50 @@ struct Match {
     credential: Option<String>,
 }
 
-/// The most candidates one scan takes (`POST …/leaks`).
+/// The most candidates one scan takes (`POST …/leaks`, `POST …/scan`).
 pub const SCAN_MAX: usize = 20_000;
+
+/// The shortest candidate a scanner's check (`POST …/scan`) tries.
+pub const SCAN_MIN_LEN: usize = 16;
+/// A scanner's calls a minute, and candidates in them, per caller.
+pub const SCANS_PER_MINUTE: i64 = 60;
+pub const SCAN_CANDIDATES_PER_MINUTE: i64 = 100_000;
+
+/// Whether a scanner's check tries `c`: at least [`SCAN_MIN_LEN`] characters, two kinds of
+/// character, and 3 bits of entropy a character (`aaaaaaaaaaaaaaaa1` and a word repeated aren't).
+pub fn scannable(c: &str) -> bool {
+    let n = c.chars().count();
+    if !(SCAN_MIN_LEN..=4096).contains(&n) {
+        return false;
+    }
+    let kinds = [c.chars().any(|x| x.is_ascii_lowercase()), c.chars().any(|x| x.is_ascii_uppercase()), c.chars().any(|x| x.is_ascii_digit()), c.chars().any(|x| !x.is_ascii_alphanumeric())];
+    if kinds.iter().filter(|k| **k).count() < 2 {
+        return false;
+    }
+    let mut counts: HashMap<char, usize> = HashMap::new();
+    for x in c.chars() {
+        *counts.entry(x).or_default() += 1;
+    }
+    let bits: f64 = counts
+        .values()
+        .map(|&k| {
+            let p = k as f64 / n as f64;
+            -p * p.log2()
+        })
+        .sum();
+    bits >= 3.0
+}
+
+/// A scanner's calls per caller and minute (`POST …/scan`'s limit).
+pub(crate) const SCAN_COUNTS_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS scan_counts (
+    principal TEXT NOT NULL,
+    minute INTEGER NOT NULL,
+    calls INTEGER NOT NULL,
+    candidates INTEGER NOT NULL,
+    PRIMARY KEY (principal, minute)
+) WITHOUT ROWID;
+";
 
 /// A candidate of a scan that is a stored value: its index, and where the value is.
 #[derive(Clone, Debug, Serialize)]
@@ -167,6 +209,69 @@ impl Secrets {
         Ok(found)
     }
 
+    /// A scanner's check (`POST …/scan`, the `scan` right: a pre-receive hook): which whole
+    /// `candidates` are values of this project, in the environments and folders the caller may
+    /// `scan`, without `read` or `reveal`. Only candidates of [`SCAN_MIN_LEN`] characters and
+    /// fair entropy ([`scannable`]) are tried, so it can't confirm a guess at a short or simple
+    /// value; sensitive values and personal ones never match; [`SCANS_PER_MINUTE`] calls and
+    /// [`SCAN_CANDIDATES_PER_MINUTE`] candidates a minute per caller. Every call is audited
+    /// (`secrets.scan`, the keys found), never a candidate. With `breakglass` the push it checks
+    /// goes through anyway: audited as `secrets.scan.breakglass`.
+    pub fn scan_only(&self, project: &str, candidates: &[String], caller: &Caller, breakglass: bool) -> Result<Vec<Found>> {
+        caller.need(Action::Scan, &Scope::project(project))?;
+        if candidates.len() > SCAN_MAX {
+            return Err(Error::BadRequest(format!("at most {SCAN_MAX} candidates a scan")));
+        }
+        self.project(project)?;
+        let action = if breakglass { "secrets.scan.breakglass" } else { "secrets.scan" };
+        if caller.principal != "operator" {
+            let minute = self.db.now_ms()? / 60_000;
+            let n = candidates.len() as i64;
+            let (calls, total): (i64, i64) = self.db.write(|c| {
+                c.query_row(
+                    "INSERT INTO scan_counts (principal, minute, calls, candidates) VALUES (?, ?, 1, ?) ON CONFLICT (principal, minute) DO UPDATE SET calls = scan_counts.calls + 1, candidates = scan_counts.candidates + excluded.candidates RETURNING calls, candidates",
+                    params![caller.principal, minute, n],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+            })?;
+            if calls > SCANS_PER_MINUTE || total > SCAN_CANDIDATES_PER_MINUTE {
+                self.audit_now(project, caller, action, None, None, &[], &format!("refused a scan of {n} candidates: over {SCANS_PER_MINUTE} scans or {SCAN_CANDIDATES_PER_MINUTE} candidates a minute"));
+                return Err(Error::TooMany(format!("at most {SCANS_PER_MINUTE} scans and {SCAN_CANDIDATES_PER_MINUTE} candidates a minute: try again in a minute")));
+            }
+        }
+        // Only what's worth a scanner's question: a short or simple candidate is never tried, so
+        // a scanner can't walk guesses at a PIN or a word through it.
+        let tried: Vec<String> = candidates.iter().map(|c| if scannable(c) { c.clone() } else { String::new() }).collect();
+        let found: Vec<Found> = self
+            .matches(project, &tried, Some(&caller.principal), false)?
+            .into_iter()
+            .filter(|m| !m.leak.environment.contains('/') && caller.allows(Action::Scan, &Scope::at(project, &m.leak.environment, &m.leak.path)))
+            .map(|m| Found { index: m.index, leak: m.leak })
+            .collect();
+        let summary = format!("scanned {} candidates ({} tried): {} matched{}", candidates.len(), tried.iter().filter(|c| !c.is_empty()).count(), found.len(), if breakglass { ", let through with breakglass" } else { "" });
+        if found.is_empty() {
+            self.audit_now(project, caller, action, None, None, &[], &summary);
+            return Ok(found);
+        }
+        let mut at: BTreeMap<(&str, &str), BTreeSet<String>> = BTreeMap::new();
+        for f in &found {
+            at.entry((f.leak.environment.as_str(), f.leak.path.as_str())).or_default().insert(f.leak.key.clone());
+        }
+        for ((env, path), keys) in at {
+            let keys: Vec<String> = keys.into_iter().collect();
+            let event = Event::new(Kind::ScanFinding, json!({ "candidates": candidates.len(), "matched": found.len(), "guard": false, "breakglass": breakglass }));
+            self.audit_now_event(project, caller, action, Some(env), Some(path), &keys, &summary, Some(event));
+        }
+        Ok(found)
+    }
+
+    /// Minutes of scan counts that have passed (the sweeper).
+    pub(crate) fn forget_scan_counts(&self) -> Result<()> {
+        let minute = self.db.now_ms()? / 60_000;
+        self.db.write(|c| c.execute("DELETE FROM scan_counts WHERE minute < ?", [minute - 1]))?;
+        Ok(())
+    }
+
     /// The secrets of `project`, in any environment, whose value equals one of `candidates`.
     /// Only rows that hold a value count (plain values and managed links): live and dynamic links
     /// store none. A project that never had secrets has none to leak (and isn't set up by asking).
@@ -212,6 +317,7 @@ impl Secrets {
         self.project(project)?;
         let now = self.db.now_ms()?;
         self.db.write(|c| {
+            crate::guardrails::read(c)?.leaks(rotate)?;
             c.execute("UPDATE projects SET leak_rotate = ? WHERE project_id = ?", params![rotate.as_str(), project])?;
             let summary = match rotate {
                 LeakRotate::Managed => "leaked managed keys rotate at once, with no grace for the leaked credential",

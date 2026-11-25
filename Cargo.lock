@@ -7408,6 +7408,7 @@ dependencies = [
  "pg-storage",
  "regex",
  "reqwest",
+ "ring",
  "roll-access",
  "roll-auth",
  "roll-cluster",
@@ -7441,6 +7442,7 @@ dependencies = [
  "unicode-width",
  "url",
  "urlencoding",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 
@@ -8606,6 +8608,7 @@ dependencies = [
  "futures-util",
  "hickory-resolver",
  "hkdf",
+ "hmac 0.12.1",
  "html5ever",
  "indexmap",
  "itoa",

@@ -11,6 +11,7 @@
 //! - [`oauth`]: the MCP authorization flow (discovery, registration, PKCE codes, tokens).
 
 pub mod api;
+mod bootstrap;
 pub mod catalog;
 pub mod checkup;
 pub mod evaluate;
@@ -655,7 +656,14 @@ pub struct Access {
     pub(crate) device_guesses: std::sync::Mutex<Window>,
     /// The token policy as last read (`policy_now`).
     policy_cache: std::sync::Mutex<Option<(std::time::Instant, Policy)>>,
+    /// A product's own cap on the lifetime of tokens whose rules reach it (rolld: roll secrets'
+    /// policy, `max_token_days`): for `rules`, the most days and the refusal's words, if capped.
+    /// Read on every check, never cached.
+    pub lifetime_cap: std::sync::OnceLock<LifetimeCap>,
 }
+
+/// [`Access::lifetime_cap`].
+pub type LifetimeCap = Box<dyn Fn(&roll_auth::scope::Scope) -> Option<(u32, String)> + Send + Sync>;
 
 /// What a user who isn't an admin reaches, and so what their tokens can (docs/accounts.md, "What a
 /// session can reach"): roll code and agents through their own owners, and every product whose
@@ -673,7 +681,7 @@ impl Access {
 
     /// On a database already open (tests: `code_sql::Db::open_or_test`, so they run on Postgres too).
     pub fn with_db(db: code_sql::Db, config: Config, resolvers: Resolvers) -> Result<Arc<Access>> {
-        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), nodes: Default::default(), revokers: Default::default(), decoy_hooks: Default::default(), limiter: Default::default(), sinks: Default::default(), event_hooks: Default::default(), people: Default::default(), workspace: Default::default(), mail_gate: Default::default(), github_keys: Default::default(), registrations: Default::default(), oidc_fetch: Default::default(), oidc_keys: Default::default(), sign_ins: Default::default(), device_starts: Default::default(), device_guesses: Default::default(), policy_cache: Default::default() }))
+        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), nodes: Default::default(), revokers: Default::default(), decoy_hooks: Default::default(), limiter: Default::default(), sinks: Default::default(), event_hooks: Default::default(), people: Default::default(), workspace: Default::default(), mail_gate: Default::default(), github_keys: Default::default(), registrations: Default::default(), oidc_fetch: Default::default(), oidc_keys: Default::default(), sign_ins: Default::default(), device_starts: Default::default(), device_guesses: Default::default(), policy_cache: Default::default(), lifetime_cap: Default::default() }))
     }
 
     /// The resource of `kind` named `id`, with its project and environment filled in.
@@ -1138,6 +1146,12 @@ impl Access {
     /// tokens' caps, and pruned a day after it ends; what it does is audited as any token's, and
     /// each mint is a row.
     pub async fn mint_workload(self: &Arc<Self>, new: store::NewGrant, within: &roll_auth::scope::Scope, minutes: u32, user: Option<&str>) -> Result<(store::Grant, String)> {
+        self.mint_workload_via(new, within, minutes, user, None).await
+    }
+
+    /// [`Access::mint_workload`] for a machine credential's login (`via`: its grant, which must be
+    /// live): the token joins the credential's chain, and goes with it (store/bootstrap.rs).
+    pub async fn mint_workload_via(self: &Arc<Self>, new: store::NewGrant, within: &roll_auth::scope::Scope, minutes: u32, user: Option<&str>, via: Option<&str>) -> Result<(store::Grant, String)> {
         if !within.covers(&new.rules) {
             return Err(Error::Forbidden("a workload's rules must be within its identity's".into()));
         }
@@ -1149,9 +1163,9 @@ impl Access {
         }
         let a = self.clone();
         let by = user.unwrap_or("operator").to_string();
-        let user = user.map(str::to_string);
+        let (user, via) = (user.map(str::to_string), via.map(str::to_string));
         let (g, secret) = tokio::task::spawn_blocking(move || {
-            let made = a.store.create_workload(&new, minutes, &by, user.as_deref())?;
+            let made = a.store.create_workload(&new, minutes, &by, user.as_deref(), via.as_deref())?;
             a.store.audit(&store::AuditEvent {
                 id: new_id("aud"),
                 at: code_sql::now_ms(),
@@ -1803,6 +1817,17 @@ impl Access {
             return p.clone();
         }
         self.policy()
+    }
+
+    /// Whether a grant with `rules` expiring at `expires_at` fits a product's own cap
+    /// ([`Access::lifetime_cap`]): 403 naming the product's policy otherwise.
+    pub fn check_lifetime_cap(&self, rules: &roll_auth::scope::Scope, expires_at: Option<i64>) -> Result<()> {
+        let Some((days, why)) = self.lifetime_cap.get().and_then(|cap| cap(rules)) else { return Ok(()) };
+        match expires_at {
+            None => Err(Error::Forbidden(format!("{why} (set expires_at)"))),
+            Some(e) if e > code_sql::now_ms() + i64::from(days) * 86_400_000 => Err(Error::Forbidden(why)),
+            _ => Ok(()),
+        }
     }
 
     /// Whether a grant expiring at `expires_at` fits the policy.

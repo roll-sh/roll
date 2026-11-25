@@ -1549,7 +1549,15 @@ impl Apps {
                 log.line(format!("loading the uploaded image ({} MiB)", bytes.len() >> 20));
                 let archive = dir.join("image.tar");
                 let a = archive.clone();
-                tokio::task::spawn_blocking(move || crate::image_upload::untagged(&bytes, &a)).await??;
+                let platform = tokio::task::spawn_blocking(move || crate::image_upload::untagged(&bytes, &a)).await??;
+                // Another processor's image would only fail as "exec format error" once started.
+                if let (Some(image), Some(here)) = (platform, self.deps.runtime.platform())
+                    && image != here
+                {
+                    anyhow::bail!(
+                        "the image is for {image}, and instances here run on {here}: build it with `docker build --platform {here} …` (or for both: `docker buildx build --platform linux/amd64,linux/arm64 …`), then deploy it again"
+                    );
+                }
                 let tag = format!("roll-apps-{}:{}", svc.id.strip_prefix("svc_").unwrap_or(&svc.id), d.id.strip_prefix("dep_").unwrap_or(&d.id));
                 let image = self.deps.builder.load(&archive, &tag, log).await?;
                 let (id, img, r) = (d.id.clone(), image.clone(), svc.run.clone());
@@ -3382,6 +3390,7 @@ impl Apps {
         if now - self.status_swept.load(std::sync::atomic::Ordering::Relaxed) >= 60_000 {
             self.status_swept.store(now, std::sync::atomic::Ordering::Relaxed);
             self.status_sweep(&services).await;
+            self.maintenance_pass(now).await;
         }
         let unscheduled = self.db(|s| s.unscheduled()).await.unwrap_or_default();
         for svc in services.into_iter().filter(|s| s.run.kind == RunType::Cron && self.owns(&s.id) && !self.capped(&s.id)) {

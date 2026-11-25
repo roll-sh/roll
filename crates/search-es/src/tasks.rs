@@ -278,7 +278,7 @@ fn describer(ctx: &Ctx) -> Describe {
         if let Some(ct) = &content_type {
             headers.push(("content-type".to_string(), ct.clone()));
         }
-        let req = EsRequest { method: method.as_str().to_string(), uri: uri.clone(), headers, body: body.clone() };
+        let req = EsRequest { verified: None, method: method.as_str().to_string(), uri: uri.clone(), headers, body: body.clone() };
         crate::rest::with_ctx(cluster, &req, |ctx| describe(ctx, api)).unwrap_or_default()
     }))
 }

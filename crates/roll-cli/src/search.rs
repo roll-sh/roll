@@ -119,13 +119,24 @@ pub enum Search {
         #[arg(long, requires = "cutover")]
         alias: Option<String>,
     },
-    /// Keys a web page ships: derive one from a derivable browser key, here, with no call to roll.
+    /// Keys a web page ships: their usage and refusals, or derive one from a derivable browser
+    /// key, here, with no call to roll.
     #[command(subcommand)]
     BrowserKeys(BrowserKeys),
 }
 
 #[derive(Subcommand)]
 pub enum BrowserKeys {
+    /// A browser key's requests, 429s by reason and other refusals over time, with a derived
+    /// key's top users and the top refused origins.
+    Usage {
+        cluster: String,
+        /// The browser key's id.
+        key: String,
+        /// 1h, 24h or 14d.
+        #[arg(long, default_value = "24h")]
+        window: String,
+    },
     /// A key derived from a derivable browser key and signed here with its signing secret
     /// (`ROLL_SEARCH_SIGNING_SECRET`, never an argument), printed for `Authorization: ApiKey
     /// <key>`. It only narrows its parent; the cluster refuses one that would widen it.
@@ -165,6 +176,42 @@ fn derive_key(secret: &str, payload: &str) -> String {
     let mut mac = <hmac::Hmac<sha2::Sha256> as Mac>::new_from_slice(secret.as_bytes()).expect("HMAC takes any key");
     mac.update(signed.as_bytes());
     format!("{signed}.{}", b64.encode(mac.finalize().into_bytes()))
+}
+
+/// A browser key's usage answer as text: totals, a sparkline of requests and of 429s, the
+/// reasons, top users and refused origins.
+fn print_browser_usage(v: &Value) {
+    let t = &v["totals"];
+    let n = |v: &Value| v.as_u64().unwrap_or(0);
+    println!("{} over {}: {} requests, {} throttled (429), {} refused", s(&v["key"]), s(&v["window"]), n(&t["requests"]), n(&t["throttled"]), n(&t["refused"]));
+    let (from, step) = (v["from"].as_i64().unwrap_or(0), v["step_s"].as_i64().unwrap_or(60).max(1));
+    let steps = ((v["to"].as_i64().unwrap_or(from) - from) / step).clamp(1, 400) as usize;
+    let series = |f: &str| {
+        let mut out = vec![0u64; steps];
+        for p in v["points"].as_array().into_iter().flatten() {
+            let i = ((p["at"].as_i64().unwrap_or(from) - from) / step) as usize;
+            if let Some(x) = out.get_mut(i) {
+                *x += n(&p[f]);
+            }
+        }
+        out
+    };
+    let spark = |xs: &[u64]| {
+        let max = xs.iter().copied().max().unwrap_or(0).max(1);
+        xs.iter().map(|x| if *x == 0 { ' ' } else { ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'][((x * 7) / max) as usize] }).collect::<String>()
+    };
+    println!("  requests  |{}|", spark(&series("requests")));
+    println!("  429s      |{}|", spark(&series("throttled")));
+    let reasons: Vec<String> = t["reasons"].as_object().into_iter().flatten().filter(|(_, c)| n(c) > 0).map(|(r, c)| format!("{r} {}", n(c))).collect();
+    if !reasons.is_empty() {
+        println!("  by reason: {}", reasons.join(", "));
+    }
+    for u in t["users"].as_array().into_iter().flatten() {
+        println!("  user {:<32} {:>8} requests {:>6} throttled", s(&u["user"]), n(&u["requests"]), n(&u["throttled"]));
+    }
+    for o in t["origins"].as_array().into_iter().flatten() {
+        println!("  refused origin {:<40} {:>6}", s(&o["origin"]), n(&o["refused"]));
+    }
 }
 
 #[derive(Subcommand)]
@@ -928,6 +975,17 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                 json!({ "deleted": id })
             }
         },
+        Search::BrowserKeys(BrowserKeys::Usage { cluster, key, window }) => {
+            let c = find(api, &cluster).await?;
+            let v = api
+                .get(&format!("/v1/search/clusters/{}/browser-keys/{}/usage?window={}", urlencoding::encode(&s(&c["id"])), urlencoding::encode(&key), urlencoding::encode(&window)))
+                .await?;
+            if !as_json {
+                print_browser_usage(&v);
+                return Ok(());
+            }
+            v
+        }
         Search::BrowserKeys(BrowserKeys::Derive { cluster, key, expires_in, indices, filter, user, origins, per_minute }) => {
             let secret = std::env::var("ROLL_SEARCH_SIGNING_SECRET").ok().filter(|s| !s.is_empty()).context("set ROLL_SEARCH_SIGNING_SECRET to the parent key's signing secret")?;
             let ttl = crate::storage::duration(&expires_in)?;

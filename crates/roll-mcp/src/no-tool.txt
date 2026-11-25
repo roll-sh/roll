@@ -97,6 +97,8 @@ POST /v1/search/clusters/{id}/request                                          t
 POST /v1/search/clusters/{id}/unload                                           the operator's (health, migrations, process control)
 GET /v1/secrets/gateways/{id}/connect                                          interactive (a shell, files, a forward): an admin's, live
 GET /v1/secrets/health                                                         the operator's (health, migrations, process control)
+GET /v1/secrets/policy                                                         the operator's (roll secrets' guardrails bind every project: operator-only in the catalogue; the floors show in each project's health as off_policy)
+PUT /v1/secrets/policy                                                         the operator's (roll secrets' guardrails: lowering a floor for every project is the operator's or an admin account's call, never an agent's)
 PATCH /v1/secrets/projects/{project}                                           a person's call: how long old versions are kept (shortening it deletes history), and whether leaked keys rotate on their own
 POST /v1/secrets/projects/{project}/atlas-projects                             an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/atlas-projects/{id}                      an outside integration's setup: an admin's, with its credentials
@@ -153,6 +155,7 @@ DELETE /v1/secrets/projects/{project}/github-apps/{id}                         a
 DELETE /v1/secrets/projects/{project}/identities/{id}                          an outside integration's setup: an admin's, with its credentials
 PATCH /v1/secrets/projects/{project}/identities/{id}                           an outside integration's setup: an admin's, with its credentials
 PUT /v1/secrets/projects/{project}/identities/{id}/jwks                        an outside integration's setup: an admin's, with its credentials
+POST /v1/secrets/projects/{project}/identities/{id}/bootstrap                  answers or sets a credential (a machine's bootstrap token)
 * /v1/secrets/projects/{project}/kms                                           an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/kubernetes                                 an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/kubernetes/{id}                          an outside integration's setup: an admin's, with its credentials
@@ -173,6 +176,7 @@ POST /v1/secrets/projects/{project}/public-certs                               a
 PATCH /v1/secrets/projects/{project}/public-certs/{id} an outside integration's setup: an admin's, with its credentials (a credential, a person's call)
 DELETE /v1/secrets/projects/{project}/public-certs/{id} an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/public-certs/{id}/revoke a person's call: takes a publicly trusted certificate back at the CA for good (a leaked key's is revoked by roll on its own)
+POST /v1/secrets/projects/{project}/scan                                       a scanner's (a git server's pre-receive hook, with a scan-only token); agents check text with secrets_scan
 POST /v1/secrets/projects/{project}/shares                                     answers or sets a credential
 POST /v1/secrets/projects/{project}/snowflake-accounts                         an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/snowflake-accounts/{id}                  an outside integration's setup: an admin's, with its credentials

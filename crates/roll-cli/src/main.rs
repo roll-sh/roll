@@ -31,6 +31,7 @@ mod secrets;
 mod apps;
 mod aws_login;
 mod login;
+mod sys;
 
 /// roll — serverless infrastructure.
 #[derive(Parser)]
@@ -649,7 +650,11 @@ fn subcommand_name() -> Option<String> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     reset_sigpipe();
-    let matches = match Cli::command().try_get_matches() {
+    // The local agent as a Windows service: its login, from the file only it and the
+    // Administrators may open, before the flags read the environment.
+    #[cfg(windows)]
+    secrets::service::load_login()?;
+    let matches = match Cli::command().mut_subcommand("secrets", secrets::grouped_help).try_get_matches() {
         Ok(m) => m,
         // `roll code` promises agents 2 = land conflict and 3 = no work, so its usage errors
         // exit 1 like every other failure instead of clap's 2. Help and --version still exit 0.
@@ -972,5 +977,30 @@ mod tests {
             .filter(|c| !doc.lines().any(|l| l.starts_with(&format!("| `{c}`")) && l.contains("::")))
             .collect();
         assert!(missing.is_empty(), "no row with tests in docs/code/test-coverage.md for: {missing:?}");
+    }
+
+    /// `roll secrets --help` lists every subcommand once, under a heading of its own.
+    #[test]
+    fn every_secrets_command_has_a_help_heading() {
+        let help = std::thread::Builder::new()
+            .stack_size(16 << 20)
+            .spawn(|| {
+                let mut cli = Cli::command().mut_subcommand("secrets", secrets::grouped_help);
+                let secrets = cli.find_subcommand_mut("secrets").expect("roll secrets");
+                let names: Vec<String> = secrets.get_subcommands().map(|s| s.get_name().to_string()).collect();
+                (names, secrets.render_help().to_string())
+            })
+            .expect("a thread")
+            .join()
+            .expect("the help");
+        let (names, help) = help;
+        assert!(names.len() > 60, "{names:?}");
+        assert!(!help.contains("Other:"), "a subcommand with no heading in secrets::HELP_GROUPS:\n{help}");
+        for name in names.iter().filter(|n| *n != "help") {
+            let lines = help.lines().filter(|l| l.split_whitespace().next() == Some(name.as_str())).count();
+            assert_eq!(lines, 1, "{name} is listed {lines} times:\n{help}");
+        }
+        let stale: Vec<&&str> = secrets::HELP_GROUPS.iter().flat_map(|(_, n)| n.iter()).filter(|n| !names.iter().any(|m| m == **n)).collect();
+        assert!(stale.is_empty(), "secrets::HELP_GROUPS names no such subcommand: {stale:?}");
     }
 }

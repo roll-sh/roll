@@ -184,7 +184,7 @@ export interface Preview {
   /** Its secret values its pages serve at its head, by name and where (never the value). */
   served_secrets?: { key: string; path: string }[];
   /** What its latest screenshot run left out: pages past a run's ten, stories it didn't take. */
-  skipped?: { pages?: string[]; stories?: number; first_stories?: string[] };
+  skipped?: { pages?: string[]; stories?: number; first_stories?: string[]; by_files?: boolean };
   /** Production's browser checks on this head (roll apps runs them as its deployment goes live). */
   browser_checks?: { service: string; name: string; state: "pending" | "passed" | "failed"; error: string | null; files?: { service_id: string; environment: string } | null }[];
   /** The earlier pushes' own copies of the data: how many, their bytes and a month of keeping them (in `cost`). */
@@ -461,6 +461,8 @@ export interface PreviewSettings {
   egress_hosts?: string[];
   /** What a fork's preview (an untrusted head a writer approved) may reach when `egress` is `open`: `roll` (default) or `open`. */
   egress_forks?: "open" | "roll";
+  /** A fork's preview's data: `schema` (default) its branches' structure without rows, a kind that can't be left out; `same` what the project's own previews get. */
+  data_forks?: "schema" | "same";
   /** Branch the data as of a point in time where the product keeps history: `-24h`, `-30m`, `-7d`, or an RFC 3339 time (30 days back at most). */
   data_at?: string | null;
   /** A feedback button on its pages for people who came in through roll (link access, or a team session). */

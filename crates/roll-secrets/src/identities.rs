@@ -11,6 +11,13 @@
 //!
 //! An `aws` identity takes a signed `sts:GetCallerIdentity` instead of a token: a role or user of
 //! one AWS account ([`crate::aws_identity`]).
+//!
+//! A `machine` identity is for a machine with no platform identity (bare metal, on premises): an
+//! admin makes a bootstrap token for it (`…/identities/{id}/bootstrap`), the machine exchanges it
+//! once for a machine credential (`POST /v1/secrets/login/bootstrap`), logs in with that, and
+//! replaces it at half its life (`POST /v1/secrets/login/refresh`). The secrets are roll-access's
+//! chains ([`crate::Workloads::bootstrap`]); `machine_chains` only says which identity a chain is
+//! for. A spent one used again revokes its chain.
 
 use crate::access::{Action, Caller, Scope};
 use crate::issuer::Subject;
@@ -55,11 +62,27 @@ CREATE TABLE IF NOT EXISTS aws_logins (
     at INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS aws_logins_at ON aws_logins (at);
+-- Machine identities' chains (roll-access's: a bootstrap token, the machine credentials it led
+-- to): the identity each is for, and how long its credentials live.
+CREATE TABLE IF NOT EXISTS machine_chains (
+    chain TEXT PRIMARY KEY,
+    identity TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    hours INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    created_by TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS machine_chains_identity ON machine_chains (identity);
 ";
 
 pub(crate) const IDENTITIES_MAX: i64 = 50;
 pub const TTL_MIN: i64 = 5;
 pub const TTL_MAX: i64 = 60;
+/// Bootstrap tokens an identity has made and not deleted, at most (one per machine).
+const CHAINS_MAX: i64 = 1000;
+/// A bootstrap token's minutes, and its machine credentials' hours, unless the admin says.
+const BOOTSTRAP_MINUTES: u32 = 10;
+const CREDENTIAL_HOURS: u32 = 24;
 /// Logins a minute per identity and per client address (a CI matrix logs in many times at once).
 const LOGINS_PER_IDENTITY: u32 = 120;
 const LOGINS_PER_IP: u32 = 240;
@@ -73,13 +96,52 @@ pub enum IdentityKind {
     Oidc,
     /// A signed `sts:GetCallerIdentity` (aws_identity.rs).
     Aws,
+    /// A machine credential, from a bootstrap token an admin made.
+    Machine,
 }
 
-/// A login's proof: an OIDC token, or a signed `GetCallerIdentity`.
-#[derive(Debug)]
+impl IdentityKind {
+    fn stored(self) -> Option<&'static str> {
+        match self {
+            IdentityKind::Oidc => None,
+            IdentityKind::Aws => Some("aws"),
+            IdentityKind::Machine => Some("machine"),
+        }
+    }
+}
+
+/// A login's proof: an OIDC token, a signed `GetCallerIdentity`, or a machine credential.
 pub enum Proof {
     Oidc(String),
     Aws(crate::aws_identity::SignedRequest),
+    Machine(String),
+}
+
+/// A machine identity's bootstrap token (`POST …/identities/{id}/bootstrap`).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NewBootstrap {
+    /// How long it may wait to be exchanged: 1–60 minutes (default 10).
+    pub minutes: Option<u32>,
+    /// The addresses (CIDRs) it, and the machine credentials it leads to, work from.
+    #[serde(default)]
+    pub allowed_ips: Option<Vec<String>>,
+    /// How long each machine credential lives: 1–720 hours (default 24); the machine replaces it at
+    /// half that.
+    pub credential_hours: Option<u32>,
+}
+
+/// A bootstrap token (shown once), or a machine credential (only ever to its machine).
+#[derive(Serialize)]
+pub struct MachineSecret {
+    pub identity: String,
+    pub chain: String,
+    /// `rlbt_…` or `rlmc_…`.
+    pub secret: String,
+    pub expires_at: i64,
+    /// A machine credential's half-life: when its machine replaces it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_at: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -178,7 +240,11 @@ const COLUMNS: &str = "id, project_id, name, issuer, audience, subject, claims, 
 /// An identity, its project, and its pinned keys.
 fn identity_row(r: &code_sql::Row<'_>) -> code_sql::Result<(Identity, String, Option<String>)> {
     let jwks: Option<String> = r.get(16)?;
-    let kind = if r.get::<_, Option<String>>(17)?.as_deref() == Some("aws") { IdentityKind::Aws } else { IdentityKind::Oidc };
+    let kind = match r.get::<_, Option<String>>(17)?.as_deref() {
+        Some("aws") => IdentityKind::Aws,
+        Some("machine") => IdentityKind::Machine,
+        _ => IdentityKind::Oidc,
+    };
     let subject: String = r.get(5)?;
     Ok((
         Identity {
@@ -199,7 +265,12 @@ fn identity_row(r: &code_sql::Row<'_>) -> code_sql::Result<(Identity, String, Op
             created_by: r.get(12)?,
             last_used_at: r.get(13)?,
             last_subject: r.get(14)?,
-            allowed_ips: r.get::<_, Option<String>>(15)?.and_then(|s| serde_json::from_str(&s).ok()),
+            // A list that can't be read restricts to nowhere: the identity fails to load, never
+            // loads as one that logs in from anywhere.
+            allowed_ips: match r.get::<_, Option<String>>(15)? {
+                None => None,
+                Some(s) => Some(serde_json::from_str(&s).map_err(|_| code_sql::Error::Conversion(format!("identity {}'s address list (allowed_ips) can't be read", r.get::<_, String>(0).unwrap_or_default())))?),
+            },
             pinned_keys: jwks.as_deref().and_then(|d| crate::oidc::pinned_keys(d).ok()),
             gateway: r.get(18)?,
             disabled_at: r.get(19)?,
@@ -273,6 +344,15 @@ impl Secrets {
                 crate::aws_identity::Pattern::parse(&arn).map_err(bad)?;
                 ("aws".to_string(), String::new(), arn, None, None)
             }
+            IdentityKind::Machine => {
+                if n.issuer.is_some() || n.audience.is_some() || n.subject.is_some() || n.jwks.is_some() || n.arn.is_some() || !n.claims.is_empty() {
+                    return Err(bad("a machine identity logs in with the bootstrap tokens made for it: no issuer, audience, subject, claims, keys or arn"));
+                }
+                if self.workloads.is_none() {
+                    return Err(bad("machine identities aren't on this server"));
+                }
+                ("roll".to_string(), String::new(), "machine".to_string(), None, None)
+            }
             IdentityKind::Oidc => {
                 if n.arn.is_some() {
                     return Err(bad("arn is an AWS identity's (kind: aws)"));
@@ -301,13 +381,17 @@ impl Secrets {
                     crate::envs::by_slug(c, project, e)?;
                 }
             }
-            let kind = (i.kind == IdentityKind::Aws).then_some("aws");
+            let kind = i.kind.stored();
             c.execute(
                 &format!("INSERT INTO identities ({COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, NULL, NULL)"),
                 params![i.id, project, i.name, i.issuer, i.audience, i.subject, json(&i.claims), i.environments.as_ref().map(json), i.paths.as_ref().map(json), json(&i.actions), i.ttl_minutes, now, i.created_by, i.allowed_ips.as_ref().map(json), jwks, kind, i.gateway],
             )?;
             let keys = i.pinned_keys.map(|n| format!(", {n} pinned key{}", if n == 1 { "" } else { "s" })).unwrap_or_default();
-            let what = if i.kind == IdentityKind::Aws { format!("AWS {}", i.subject) } else { format!("{} ({}{keys})", i.issuer, i.subject) };
+            let what = match i.kind {
+                IdentityKind::Aws => format!("AWS {}", i.subject),
+                IdentityKind::Machine => "machines with bootstrap tokens".to_string(),
+                IdentityKind::Oidc => format!("{} ({}{keys})", i.issuer, i.subject),
+            };
             audit::record(c, self.keys()?, project, caller, "identity.create", None, None, &[], &format!("created identity {} for {what}", i.name), now)
         })?;
         Ok(self.dressed(i))
@@ -374,6 +458,9 @@ impl Secrets {
             if kind.as_deref() == Some("aws") {
                 return Err(bad(format!("{name} is an AWS identity: STS checks its logins, it pins no keys")));
             }
+            if kind.as_deref() == Some("machine") {
+                return Err(bad(format!("{name} is a machine identity: its machines log in with bootstrap tokens, it pins no keys")));
+            }
             c.execute("UPDATE identities SET jwks = ?, created_by = ? WHERE id = ?", params![jwks, by, id])?;
             let live: Vec<String> = c.query("SELECT grant_id FROM identity_logins WHERE identity = ? AND expires_at > ?", params![id, now], |r| r.get(0))?;
             let revoked = live.len();
@@ -431,6 +518,9 @@ impl Secrets {
                 }
             }
         }
+        if change.disabled {
+            self.end_chains(&[id], "its identity was disabled");
+        }
         Ok(identity)
     }
 
@@ -439,15 +529,21 @@ impl Secrets {
         caller.need(Action::Admin, &Scope::project(project))?;
         self.project(project)?;
         let now = self.db.now_ms()?;
-        let (live, gateway): (Vec<String>, Option<String>) = self.db.write(|c| {
+        let (live, gateway, chains): (Vec<String>, Option<String>, Vec<String>) = self.db.write(|c| {
             let found: Option<(String, Option<String>)> = c.query_row("SELECT name, gateway FROM identities WHERE id = ? AND project_id = ?", [id, project], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
             let (name, gateway) = found.ok_or_else(|| Error::NotFound(format!("no identity {id}")))?;
             c.execute("DELETE FROM identities WHERE id = ?", [id])?;
             let live: Vec<String> = c.query("SELECT grant_id FROM identity_logins WHERE identity = ? AND expires_at > ?", params![id, now], |r| r.get(0))?;
+            let chains: Vec<String> = c.query("SELECT chain FROM machine_chains WHERE identity = ?", [id], |r| r.get(0))?;
             let n = live.len();
             audit::record(c, self.keys()?, project, caller, "identity.delete", None, None, &[], &format!("deleted identity {name} ({n} live token{} revoked)", if n == 1 { "" } else { "s" }), now)?;
-            Ok::<_, Error>((live, gateway))
+            Ok::<_, Error>((live, gateway, chains))
         })?;
+        // Its machines' credentials end with it; the rows go once they're revoked.
+        if !chains.is_empty() {
+            self.end_chains(&[id], "its identity was deleted");
+            self.db.write(|c| c.execute("DELETE FROM machine_chains WHERE identity = ?", [id]))?;
+        }
         // What it gave out ends with it (outside the transaction: roll-access's own store).
         if let Some(w) = &self.workloads {
             for g in &live {
@@ -489,7 +585,9 @@ impl Secrets {
             return Err(Error::Forbidden(format!("identity {} doesn't log in from this address", i.name)));
         }
         let now = self.db.now_ms()?;
-        // Who logged in: the token's `sub`, or the ARN STS answered.
+        // Who logged in: the token's `sub`, the ARN STS answered, or the machine's chain (and the
+        // credential's grant, whose chain the token joins).
+        let mut via = None;
         let sub = match (i.kind, proof) {
             (IdentityKind::Oidc, Proof::Oidc(token)) => {
                 let jwt = Jwt::parse(&token)?;
@@ -516,8 +614,25 @@ impl Secrets {
                 sub
             }
             (IdentityKind::Aws, Proof::Aws(signed)) => self.aws_caller(&i, &signed, now / 1000)?,
-            (IdentityKind::Oidc, Proof::Aws(_)) => return Err(Error::Unauthorized(format!("identity {} takes an OIDC token, not a signed AWS request", i.name))),
-            (IdentityKind::Aws, Proof::Oidc(_)) => return Err(Error::Unauthorized(format!("identity {} takes a signed AWS request (GetCallerIdentity), not a token", i.name))),
+            (IdentityKind::Machine, Proof::Machine(secret)) => {
+                let workloads = self.workloads.clone().ok_or_else(denied)?;
+                self.chain_for(&*workloads, &i.id, &secret)?;
+                match workloads.machine(&secret, ip.as_deref())? {
+                    crate::Step::Live((grant, chain)) => {
+                        via = Some(grant);
+                        format!("machine {chain}")
+                    }
+                    crate::Step::Reused { chain } => return Err(self.reused(&project, &i, &chain, ip.clone())),
+                }
+            }
+            (want, _) => {
+                let takes = match want {
+                    IdentityKind::Oidc => "an OIDC token",
+                    IdentityKind::Aws => "a signed AWS request (GetCallerIdentity)",
+                    IdentityKind::Machine => "a machine credential",
+                };
+                return Err(Error::Unauthorized(format!("identity {} takes {takes}", i.name)));
+            }
         };
         self.project(&project)?;
         let workloads = self.workloads.clone().ok_or_else(|| Error::NotFound("workload identities aren't on this server".into()))?;
@@ -534,7 +649,10 @@ impl Secrets {
             crate::caller::Origin::Operator => None,
             crate::caller::Origin::Gone => return Err(denied()),
         };
-        let m = workloads.mint(&i.name, rule, i.allowed_ips.clone(), i.ttl_minutes as u32, owner.as_deref())?;
+        let m = match &via {
+            Some(v) => workloads.mint_via(&i.name, rule, i.allowed_ips.clone(), i.ttl_minutes as u32, owner.as_deref(), v)?,
+            None => workloads.mint(&i.name, rule, i.allowed_ips.clone(), i.ttl_minutes as u32, owner.as_deref())?,
+        };
         let mut caller = Caller::acting(format!("identity:{}", i.id), std::sync::Arc::new(crate::access::Everything));
         caller.ip = ip;
         let kept = self.db.write(|c| {
@@ -580,6 +698,141 @@ impl Secrets {
             return Err(Error::Unauthorized("this signed request has already logged in: sign a new one".into()));
         }
         Ok(caller.arn)
+    }
+
+    /// A bootstrap token for a machine identity (`POST …/identities/{id}/bootstrap`, admin): what
+    /// one machine exchanges, once, for its first machine credential. Made by people, as identities
+    /// are; owned, as its logins' tokens are, by whoever made the identity.
+    pub fn create_bootstrap(&self, project: &str, id: &str, n: NewBootstrap, caller: &Caller) -> Result<MachineSecret> {
+        caller.need(Action::Admin, &Scope::project(project))?;
+        if caller.principal.starts_with("identity:") || caller.principal.starts_with("token:") {
+            return Err(Error::Forbidden("bootstrap tokens are made by people, not tokens or logins".into()));
+        }
+        let minutes = n.minutes.unwrap_or(BOOTSTRAP_MINUTES);
+        let hours = n.credential_hours.unwrap_or(CREDENTIAL_HOURS);
+        if !(1..=60).contains(&minutes) || !(1..=720).contains(&hours) {
+            return Err(bad("minutes is 1–60 and credential_hours 1–720"));
+        }
+        let allowed = crate::caller::allowed(n.allowed_ips)?;
+        self.project(project)?;
+        let found = self.db.read(|c| c.query_row(&format!("SELECT {COLUMNS} FROM identities WHERE id = ? AND project_id = ?"), [id, project], identity_row).optional())?;
+        let (i, ..) = found.ok_or_else(|| Error::NotFound(format!("no identity {id}")))?;
+        if i.kind != IdentityKind::Machine {
+            return Err(bad(format!("{} isn't a machine identity: its workloads log in with their own platform's proof", i.name)));
+        }
+        if i.disabled_at.is_some() {
+            return Err(Error::Forbidden(format!("identity {} is disabled: enable it first", i.name)));
+        }
+        let workloads = self.workloads.clone().ok_or_else(|| bad("machine identities aren't on this server"))?;
+        let owner = match self.maker(&i.created_by)? {
+            crate::caller::Origin::Person(user) => Some(user),
+            crate::caller::Origin::Operator => None,
+            crate::caller::Origin::Gone => return Err(Error::Forbidden(format!("whoever made identity {} can't sign in any more: make it again", i.name))),
+        };
+        let count: i64 = self.db.read(|c| c.query_row("SELECT COUNT(*) FROM machine_chains WHERE identity = ?", [id], |r| r.get(0)))?;
+        if count >= CHAINS_MAX {
+            return Err(bad(format!("identity {} has {CHAINS_MAX} bootstrap tokens: delete it and make it again", i.name)));
+        }
+        // Outside the write (roll-access's store), then the row; a failed write ends the chain.
+        let made = workloads.bootstrap(&i.name, allowed, minutes, owner.as_deref())?;
+        let now = self.db.now_ms()?;
+        let by = self.maker_of(caller)?;
+        let kept = self.db.write(|c| {
+            // Deleted or disabled meanwhile: no chain for it.
+            let there: Option<i64> = c.query_row("SELECT 1 FROM identities WHERE id = ? AND project_id = ? AND disabled_at IS NULL", [id, project], |r| r.get(0)).optional()?;
+            if there.is_none() {
+                return Ok(false);
+            }
+            crate::guardrails::read(c)?.machine_hours(hours)?;
+            c.execute("INSERT INTO machine_chains (chain, identity, project_id, hours, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?)", params![made.chain, id, project, hours, now, by])?;
+            audit::record(c, self.keys()?, project, caller, "identity.bootstrap", None, None, &[], &format!("made a bootstrap token for identity {} (chain {}, {minutes} min, credentials of {hours} h)", i.name, made.chain), now)?;
+            Ok::<_, Error>(true)
+        });
+        if !matches!(kept, Ok(true)) {
+            let _ = workloads.revoke_chain(&made.chain, "its identity changed while it was made");
+            kept?;
+            return Err(Error::NotFound(format!("no identity {id}")));
+        }
+        Ok(MachineSecret { identity: i.id, chain: made.chain, secret: made.secret, expires_at: made.expires_at, refresh_at: None })
+    }
+
+    /// `POST /v1/secrets/login/bootstrap` (`from_bootstrap`) and `…/login/refresh` (public): a
+    /// machine identity's bootstrap token, or its current machine credential, for the next machine
+    /// credential. The one presented is spent; a spent one presented again revokes its chain.
+    pub fn machine_credential(&self, identity: &str, secret: &str, from_bootstrap: bool, ip: Option<String>) -> Result<MachineSecret> {
+        let busy = !self.logins.allow(&format!("identity:{identity}"), LOGINS_PER_IDENTITY) || ip.as_ref().is_some_and(|ip| !self.logins.allow(&format!("ip:{ip}"), LOGINS_PER_IP));
+        if busy {
+            return Err(Error::TooMany("too many logins: try again in a minute".into()));
+        }
+        let denied = || Error::Unauthorized(format!("no identity {identity} takes this credential"));
+        let found = self.db.read(|c| c.query_row(&format!("SELECT {COLUMNS} FROM identities WHERE id = ?"), [identity], identity_row).optional())?;
+        let (i, project, _) = found.ok_or_else(denied)?;
+        if i.kind != IdentityKind::Machine {
+            return Err(denied());
+        }
+        if i.disabled_at.is_some() {
+            return Err(Error::Forbidden(format!("identity {} is disabled: an admin of its project enables it again", i.name)));
+        }
+        if !self.maker_reaches(&i.created_by, &identity_needs(&i, &project))? {
+            return Err(denied());
+        }
+        if let Some(list) = &i.allowed_ips
+            && !crate::caller::ip_allowed(list, ip.as_deref())
+        {
+            return Err(Error::Forbidden(format!("identity {} doesn't log in from this address", i.name)));
+        }
+        let workloads = self.workloads.clone().ok_or_else(denied)?;
+        let hours = self.floors()?.cap_hours(self.chain_for(&*workloads, &i.id, secret)?);
+        let next = match workloads.redeem(secret, from_bootstrap, ip.as_deref(), hours)? {
+            crate::Step::Live(next) => next,
+            crate::Step::Reused { chain } => return Err(self.reused(&project, &i, &chain, ip)),
+        };
+        let now = self.db.now_ms()?;
+        let mut caller = Caller::acting(format!("identity:{}", i.id), std::sync::Arc::new(crate::access::Everything));
+        caller.ip = ip;
+        let (what, step) = if from_bootstrap { ("exchanged a bootstrap token", "identity.bootstrap.exchange") } else { ("replaced its machine credential", "identity.machine.refresh") };
+        self.db.write(|c| audit::record(c, self.keys()?, &project, &caller, step, None, None, &[], &format!("machine {} {what} for identity {}", next.chain, i.name), now))?;
+        let refresh_at = next.issued_at + (next.expires_at - next.issued_at) / 2;
+        Ok(MachineSecret { identity: i.id, chain: next.chain, secret: next.secret, expires_at: next.expires_at, refresh_at: Some(refresh_at) })
+    }
+
+    /// The hours a machine credential of `secret`'s chain lives, when that chain is `identity`'s.
+    fn chain_for(&self, workloads: &dyn crate::Workloads, identity: &str, secret: &str) -> Result<u32> {
+        let denied = || Error::Unauthorized(format!("no identity {identity} takes this credential"));
+        let chain = workloads.chain_of(secret)?.ok_or_else(denied)?;
+        let hours: Option<i64> = self.db.read(|c| c.query_row("SELECT hours FROM machine_chains WHERE chain = ? AND identity = ?", [&chain, identity], |r| r.get(0)).optional())?;
+        hours.and_then(|h| u32::try_from(h).ok()).ok_or_else(denied)
+    }
+
+    /// A spent bootstrap token or machine credential came back (roll-access revoked its chain):
+    /// the audit log says so, and the caller gets a 401.
+    fn reused(&self, project: &str, i: &Identity, chain: &str, ip: Option<String>) -> Error {
+        let mut caller = Caller::acting(format!("identity:{}", i.id), std::sync::Arc::new(crate::access::Everything));
+        caller.ip = ip;
+        let summary = format!("a spent bootstrap token or machine credential of machine {chain} was used again: every credential of the machine is revoked");
+        if let Err(e) = self.db.now_ms().map_err(Error::from).and_then(|now| self.db.write(|c| audit::record(c, self.keys()?, project, &caller, "identity.machine.reused", None, None, &[], &summary, now))) {
+            tracing::warn!(identity = %i.id, chain = %chain, "auditing a reused machine credential failed: {e}");
+        }
+        Error::Unauthorized("this was already used, so every credential of this machine is revoked: the machine needs a new bootstrap token".into())
+    }
+
+    /// Revoke every machine chain of these identities (deleted, disabled, cut off).
+    pub(crate) fn end_chains(&self, identities: &[&str], why: &str) {
+        let Some(w) = &self.workloads else { return };
+        for id in identities {
+            let chains: Vec<String> = match self.db.read(|c| c.query("SELECT chain FROM machine_chains WHERE identity = ?", [id], |r| r.get(0))) {
+                Ok(list) => list,
+                Err(e) => {
+                    tracing::warn!(identity = %id, "listing an identity's machines failed: {e}");
+                    continue;
+                }
+            };
+            for chain in chains {
+                if let Err(e) = w.revoke_chain(&chain, why) {
+                    tracing::warn!(identity = %id, chain = %chain, "revoking a machine's credentials failed: {e}");
+                }
+            }
+        }
     }
 
     /// Whether `issuer` is roll's own (`<public URL>/v1/secrets/oidc`).

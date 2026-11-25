@@ -15,6 +15,8 @@ mod device;
 pub use device::{DEVICE_TTL_MS, DeviceRequest, normalize_user_code, show_user_code};
 mod tasks;
 mod machine;
+mod bootstrap;
+pub use bootstrap::{BOOTSTRAP_MINUTES, BOOTSTRAP_PREFIX, ChainSecret, Issued, MACHINE_HOURS, MACHINE_PREFIX, Machine, Presented};
 pub use machine::{CLIENT_SECRET_PREFIX, ClientKey, ListedClient, MachineClient, TrustedIdentity};
 pub use tasks::{McpTask, TASK_STALE_MS, TASK_TTL_MS, TASKS_PER_OWNER, TaskUpdate, iso};
 
@@ -732,7 +734,9 @@ fn after_grant(n: usize) -> usize {
 
 fn grant_row(r: &code_sql::Row<'_>) -> code_sql::Result<Grant> {
     let rules: String = r.get(3)?;
-    let ip: String = r.get(5)?;
+    // An address list that can't be read restricts to nowhere: the grant fails to load, never
+    // loads as one without a list.
+    let ip_allow: Vec<String> = serde_json::from_str(&r.get::<_, String>(5)?).map_err(|_| code_sql::Error::Conversion(format!("grant {}'s address list (ip_allow) can't be read", r.get::<_, String>(0).unwrap_or_default())))?;
     let client = match r.get::<_, Option<String>>(11)? {
         Some(id) => Some(Client {
             id,
@@ -761,7 +765,7 @@ fn grant_row(r: &code_sql::Row<'_>) -> code_sql::Result<Grant> {
         decided_by: r.get(25)?,
         hint: r.get(26)?,
         decoy: r.get::<_, Option<bool>>(27)?.unwrap_or(false),
-        ip_allow: serde_json::from_str(&ip).unwrap_or_default(),
+        ip_allow,
         created_by: r.get(6)?,
         created_at: r.get(7)?,
         last_used_at: r.get(8)?,
@@ -1047,6 +1051,12 @@ impl Store {
         if !db.has_column("grants", "named")? {
             db.add_column("grants", "named", "TEXT")?;
         }
+        // A bootstrap token's id on it, every machine credential from it and every token their
+        // logins got (store/bootstrap.rs): a spent secret used again revokes them all at once.
+        if !db.has_column("grants", "chain")? {
+            db.add_column("grants", "chain", "TEXT")?;
+        }
+        db.ensure_schema("CREATE INDEX IF NOT EXISTS grants_chain ON grants (chain) WHERE chain IS NOT NULL;")?;
         let (audit_tx, rx) = std::sync::mpsc::sync_channel(AUDIT_QUEUE);
         let (writer, audit_pending) = (db.clone(), Arc::new(std::sync::atomic::AtomicUsize::new(0)));
         let pending = audit_pending.clone();
@@ -1246,7 +1256,8 @@ impl Store {
     }
 
     /// A workload grant (`Access::mint_workload`): a token for `minutes`, whose secret dies with it.
-    pub fn create_workload(&self, new: &NewGrant, minutes: u32, created_by: &str, user: Option<&str>) -> Result<(Grant, String)> {
+    /// `via`: the live machine credential whose login it is, whose chain it joins.
+    pub fn create_workload(&self, new: &NewGrant, minutes: u32, created_by: &str, user: Option<&str>, via: Option<&str>) -> Result<(Grant, String)> {
         check_name(&new.name)?;
         check_rules(&new.rules)?;
         parse_ip_allow(&new.ip_allow)?;
@@ -1268,9 +1279,10 @@ impl Store {
             if theirs as usize >= OWNER_MAX_WORKLOADS {
                 return Err(Error::Conflict(format!("at most {OWNER_MAX_WORKLOADS} live workload tokens for one owner's identities")));
             }
+            let chain = via.map(|v| bootstrap::chain_via(c, v, now)).transpose()?;
             c.execute(
-                "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute, user_id, ask_otherwise) VALUES (?, ?, 'workload', ?, ?, ?, ?, ?, NULL, ?, ?, 0)",
-                params![id, new.name.trim(), rules, until, ip, created_by, now, new.rate_per_minute.map(i64::from), user],
+                "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute, user_id, ask_otherwise, chain) VALUES (?, ?, 'workload', ?, ?, ?, ?, ?, NULL, ?, ?, 0, ?)",
+                params![id, new.name.trim(), rules, until, ip, created_by, now, new.rate_per_minute.map(i64::from), user, chain],
             )?;
             c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at) VALUES (?, ?, 'token', ?, ?)", params![hash(&token), id, until, now])?;
             Ok(())
@@ -1532,9 +1544,14 @@ impl Store {
                     .optional()?,
             };
             let Some(id) = id else { return Ok::<_, Error>(None) };
-            let n = c.execute("UPDATE grants SET revoked_at = ?, revoked_why = ? WHERE id = ? AND revoked_at IS NULL", params![now, why, id])?;
+            let mut n = c.execute("UPDATE grants SET revoked_at = ?, revoked_why = ? WHERE id = ? AND revoked_at IS NULL", params![now, why, id])?;
             c.execute("DELETE FROM grant_secrets WHERE grant_id = ?", [&id])?;
-            Ok((n == 1).then_some(id))
+            // A bootstrap token's or machine credential's: its whole chain, spent or not.
+            let chain: Option<Option<String>> = c.query_row("SELECT chain FROM grants WHERE id = ?", [&id], |r| r.get(0)).optional()?;
+            if let Some(chain) = chain.flatten() {
+                n += c.execute("UPDATE grants SET revoked_at = ?, revoked_why = ? WHERE chain = ? AND revoked_at IS NULL", params![now, why, chain])?;
+            }
+            Ok((n > 0).then_some(id))
         })?;
         id.map(|id| self.get(&id)).transpose()
     }
@@ -2097,6 +2114,19 @@ impl Store {
             .collect())
     }
 
+    /// The MCP tools a grant ran since `since` (allowed, or run on an approval), most used first, at
+    /// most `limit`: search mode lists them beside its own (Atlassian's "primary" tools, from what
+    /// this token does rather than a fixed list).
+    pub fn tools_used(&self, grant: &str, since: i64, limit: usize) -> Result<Vec<String>> {
+        Ok(self.db.read(|c| {
+            c.query(
+                "SELECT tool FROM audit WHERE grant_id = ? AND at >= ? AND tool IS NOT NULL AND (decision = 'allow' OR (decision = 'ask' AND approval IS NOT NULL AND status <> 403)) GROUP BY tool ORDER BY COUNT(*) DESC, tool LIMIT ?",
+                params![grant, since, limit as i64],
+                |r| r.get::<_, String>(0),
+            )
+        })?)
+    }
+
     /// Each grant's requests in the last day, by decision: `grant id → (allowed, denied, asked)`.
     pub fn activity(&self) -> Result<std::collections::HashMap<String, (i64, i64, i64)>> {
         let since = code_sql::now_ms() - 24 * 3600 * 1000;
@@ -2150,7 +2180,9 @@ impl Store {
             c.execute("DELETE FROM oauth_codes WHERE expires_at < ?", [now])?;
             c.execute("DELETE FROM mcp_tasks WHERE expires_at < ?", [now])?;
             c.execute("DELETE FROM grant_secrets WHERE expires_at IS NOT NULL AND expires_at < ?", [now])?;
-            let ended = "SELECT id FROM grants WHERE kind = 'workload' AND COALESCE(revoked_at, expires_at) < ?";
+            // A chain's spent secrets are kept until they'd have ended: one used again until then
+            // revokes the chain.
+            let ended = "SELECT id FROM grants WHERE kind = 'workload' AND (CASE WHEN chain IS NULL THEN COALESCE(revoked_at, expires_at) ELSE expires_at END) < ?";
             let day = now - 24 * 3600 * 1000;
             for table in ["grant_secrets", "grant_networks", "approvals", "grant_names"] {
                 c.execute(&format!("DELETE FROM {table} WHERE grant_id IN ({ended})"), [day])?;

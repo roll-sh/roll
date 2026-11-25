@@ -305,7 +305,7 @@ fn head_of<B>(req: &Request<B>) -> EsRequest {
         }
         headers.push((k.as_str().to_string(), value));
     }
-    EsRequest { method: req.method().as_str().to_string(), uri, headers, body: Bytes::new() }
+    EsRequest { verified: None, method: req.method().as_str().to_string(), uri, headers, body: Bytes::new() }
 }
 
 /// Whether the client takes gzip: `Accept-Encoding` lists `gzip` (or `x-gzip`, or `*`) with a
@@ -562,8 +562,9 @@ async fn answer<B: RequestBody>(
     es.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(CLIENT_ADDRESS_HEADER));
     // Who wrote a repository's roll secrets references: only roll's control plane says it (its
     // own requests, forwarded signed from another node), never a client.
+    // Nor roll's revocation of a key from before a switch of flavor.
     if !matches!(origin, Origin::Internal) {
-        es.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(search_es::secret_refs::MAKER_HEADER));
+        es.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(search_es::secret_refs::MAKER_HEADER) && !k.eq_ignore_ascii_case(search_es::xpack::security::DORMANT_KEY_HEADER));
     }
     if let Origin::Client(ip) = origin {
         es.headers.push((CLIENT_ADDRESS_HEADER.to_string(), crate::allow::canonical(ip).to_string()));
@@ -605,12 +606,14 @@ async fn answer<B: RequestBody>(
     {
         x.allow(Some(cors));
         if x.allowed.is_none() {
+            lease.browser_refused(crate::browser::Reason::Origin, Some(&x.origin));
             return Ok(cors_forbidden());
         }
     }
     let max = lease.max_body_bytes(&node);
     let declared = es.header("content-length").and_then(|v| v.trim().parse::<u64>().ok());
     if declared.is_some_and(|len| len > max as u64) {
+        lease.browser_refused(crate::browser::Reason::BodyTooLarge, None);
         return Ok(too_large());
     }
     if let Some(len) = declared
@@ -625,7 +628,10 @@ async fn answer<B: RequestBody>(
     };
     let body = match read {
         Ok(b) => b,
-        Err(BodyError::TooLong) => return Ok(too_large()),
+        Err(BodyError::TooLong) => {
+            lease.browser_refused(crate::browser::Reason::BodyTooLarge, None);
+            return Ok(too_large());
+        }
         Err(BodyError::OverBudget(r)) => return Ok(closing(to_hyper(search_es::rest::error_response(&r.error, &es, r.dialect), gzip_ok).await)),
         Err(BodyError::TimedOut) => {
             let e = EsError::new(408, "timeout_exception", "timed out reading the request body");
@@ -639,7 +645,10 @@ async fn answer<B: RequestBody>(
             let gz = enc != "deflate";
             match inflate_reserved(&mut lease, body, gz, max).await {
                 Ok(b) => b,
-                Err(Inflate::TooLong) => return Ok(too_large()),
+                Err(Inflate::TooLong) => {
+                    lease.browser_refused(crate::browser::Reason::BodyTooLarge, None);
+                    return Ok(too_large());
+                }
                 Err(Inflate::OverBudget { full, bytes }) => {
                     let r = lease.over_budget(&es, full, bytes);
                     return Ok(closing(to_hyper(search_es::rest::error_response(&r.error, &es, r.dialect), gzip_ok).await));

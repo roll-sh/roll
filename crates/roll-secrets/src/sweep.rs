@@ -546,6 +546,9 @@ impl Secrets {
         if let Err(e) = self.forget_read_counts() {
             tracing::warn!("forgetting old read counts failed: {e}");
         }
+        if let Err(e) = self.forget_scan_counts() {
+            tracing::warn!("forgetting old scan counts failed: {e}");
+        }
         let now = self.db.now_ms()?;
         // Expired leases: dynamic credentials and retired managed ones.
         let due = self.db.read(|c| c.query("SELECT id FROM leases WHERE revoked_at IS NULL AND expires_at <= ? LIMIT 200", [now], |r| r.get::<_, String>(0)))?;

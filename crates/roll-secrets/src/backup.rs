@@ -168,11 +168,20 @@ pub struct Verified {
     pub live_keys: usize,
 }
 
+/// A backup and a verify reach every value of the project, protected environments' and the
+/// registrations' keys included: only a caller who may manage and reveal all of it, as a schedule's
+/// maker must (`backup_schedule.rs`). `admin` alone never includes `reveal`.
+fn need_whole(caller: &Caller, project: &str) -> Result<()> {
+    caller.need(Action::Admin, &Scope::whole(project))?;
+    caller.need(Action::Reveal, &Scope::whole(project))
+}
+
 impl Secrets {
     /// The project's archive sealed to `recipient` (an X25519 public key). Every value of the
-    /// project leaves in it, so it's an admin's, and audited.
+    /// project leaves in it, and its registrations' keys, so it's for a caller who may manage and
+    /// reveal all of it ([`need_whole`]), and audited.
     pub fn backup(&self, project: &str, recipient: &str, caller: &Caller) -> Result<crate::crypto::Sealed> {
-        caller.need(Action::Admin, &Scope::project(project))?;
+        need_whole(caller, project)?;
         let archive = self.archive(project)?;
         let plain = zeroize::Zeroizing::new(serde_json::to_vec(&archive).expect("JSON"));
         let sealed = crate::crypto::seal_to(recipient, &context(project), &plain).map_err(Error::BadRequest)?;
@@ -388,8 +397,11 @@ impl Secrets {
                 }
             }
         }
+        // A production below roll secrets' policy comes back at its floor (guardrails.rs).
+        let floor = self.floors()?.production_approvals.unwrap_or(0);
         for e in order.iter().filter(|e| e.protected) {
-            let p = envs::Policy { protected: true, approvals: Some(e.approvals), approvers: Some(e.approvers.clone()), notify_url: None };
+            let approvals = if e.slug == crate::PRODUCTION { e.approvals.max(floor) } else { e.approvals };
+            let p = envs::Policy { protected: true, approvals: Some(approvals), approvers: Some(e.approvers.clone()), notify_url: None };
             if let Err(err) = self.set_policy(project, &e.slug, p, caller) {
                 warnings.push(format!("{} policy: {err}", e.slug));
             }
@@ -454,7 +466,13 @@ impl Secrets {
                 }
             }
             if let Some(s) = &settings {
-                c.execute("UPDATE projects SET history_days = ?, validity_checks = ?, leak_rotate = ? WHERE project_id = ?", params![s.history_days, s.validity_checks as i64, s.leak_rotate, project])?;
+                // Under roll secrets' policy, a restore comes back at its floors (guardrails.rs).
+                let mut leak_rotate = s.leak_rotate.clone();
+                if crate::guardrails::read(c)?.leaks_rotate == Some(crate::leaks::LeakRotate::Managed) && leak_rotate.as_deref() != Some("managed") {
+                    leak_rotate = Some("managed".into());
+                    kept.push("leaks.rotate: roll secrets' policy keeps it managed, so it's restored as managed".into());
+                }
+                c.execute("UPDATE projects SET history_days = ?, validity_checks = ?, leak_rotate = ? WHERE project_id = ?", params![s.history_days, s.validity_checks as i64, leak_rotate, project])?;
             }
             Ok::<_, Error>((moved, kept))
         })?;
@@ -570,11 +588,25 @@ impl Secrets {
                 made.0 += 1;
             }
             let mut count: i64 = c.query_row("SELECT COUNT(*) FROM syncs WHERE project_id = ?", [project], |r| r.get(0))?;
+            let floors = crate::guardrails::read(c)?;
+            // A sync roll secrets' policy wouldn't let the project make isn't restored either (a
+            // product's own kinds aren't covered, as on create).
+            let off_policy = |r: &Row| {
+                let kind = r.text("kind");
+                let target = self.syncs.get(kind).ok();
+                if target.is_some_and(|t| t.internal()) {
+                    return None;
+                }
+                let stored = target.and_then(|t| t.stored_cloud_key(&serde_json::from_str(r.text("target")).unwrap_or_default()));
+                floors.sync(kind, stored).err().map(|e| e.to_string())
+            };
             for r in syncs {
                 let label = format!("{} sync on {}:{}", r.text("kind"), r.text("environment"), r.text("path"));
                 let env = envs::by_slug(c, project, r.text("environment"));
                 let why = if !complete(r, &["path", "kind", "target", "prefix", "state"]) {
                     Some("the backup doesn't hold all of it".to_string())
+                } else if let Some(why) = off_policy(r) {
+                    Some(why)
                 } else if env.is_err() {
                     Some("its environment wasn't restored".into())
                 } else if count >= crate::syncs::PER_PROJECT {
@@ -610,7 +642,7 @@ impl Secrets {
     /// values, keys and certificates are compared here and never answered. A project's admin's,
     /// as a backup is, and audited (it reads every value to compare).
     pub fn verify_backup(&self, project: &str, archive: Archive, caller: &Caller) -> Result<Verified> {
-        caller.need(Action::Admin, &Scope::project(project))?;
+        need_whole(caller, project)?;
         if !(1..=V).contains(&archive.v) {
             return Err(Error::BadRequest(format!("an archive of version {} (this server reads 1 to {V})", archive.v)));
         }

@@ -73,7 +73,63 @@ pub(crate) fn walk(store: &Store, repo: &str, cs: &ChangesetId, limit: usize, mu
     Ok(false)
 }
 
+/// Marks what a read answers as an outsider's (`"outside": true`, MCP's lockdown): the answer
+/// itself and each item of its `lists`.
+pub(crate) fn mark_outside(v: &mut Value, lists: &[&str]) {
+    v["outside"] = json!(true);
+    for k in lists {
+        for item in v[*k].as_array_mut().into_iter().flatten().filter(|i| i.is_object()) {
+            item["outside"] = json!(true);
+        }
+    }
+}
+
 impl Code {
+    /// Whether what revision `cs` holds may be an outsider's (MCP's lockdown withholds it): someone
+    /// who can't push wrote it (`outside_changesets`: what a fork's pull request brought in, an
+    /// untrusted change's writes, a queue tip built on one), and it hasn't landed since (a writer
+    /// let it onto the default branch). One indexed lookup; a team's own branches and changes
+    /// aren't in it. A failed lookup counts as outside.
+    pub(crate) fn outside_at(&self, r: &RepoRow, cs: &ChangesetId) -> bool {
+        match self.db.outside_of(&r.id, &[cs_id(cs)]) {
+            Ok(set) => !set.is_empty() && !self.on_default(r, cs),
+            Err(_) => true,
+        }
+    }
+
+    /// Whether `cs` is on the default branch (landed, so a writer let it in).
+    pub(crate) fn on_default(&self, r: &RepoRow, cs: &ChangesetId) -> bool {
+        self.head(r).ok().flatten().is_some_and(|h| self.store.is_ancestor(&r.id, cs, &h).unwrap_or(false))
+    }
+
+    /// `outside_at` for a revision an answer names (`cs_…`), marking the answer and its `lists`;
+    /// `changesets` lists items named by changeset (`key`), marked only when off the default
+    /// branch (a fork's chain runs into landed history). Whether it marked.
+    pub(crate) fn mark_at(&self, r: &RepoRow, rev: Option<&str>, v: &mut Value, lists: &[&str], changesets: Option<(&str, &str)>) -> bool {
+        let Some(cs) = rev.and_then(|rev| self.store.resolve(&r.id, rev).ok().flatten()) else { return false };
+        if !self.outside_at(r, &cs) {
+            return false;
+        }
+        mark_outside(v, lists);
+        if let Some((list, key)) = changesets {
+            // One lookup for the list; only a fork's own changesets are checked against the default
+            // branch (each once).
+            let ids: Vec<String> = v[list].as_array().into_iter().flatten().filter_map(|i| i[key].as_str().map(str::to_string)).collect();
+            let theirs = self.db.outside_of(&r.id, &ids).unwrap_or_else(|_| ids.iter().cloned().collect());
+            let mut landed: HashMap<String, bool> = HashMap::new();
+            for item in v[list].as_array_mut().into_iter().flatten() {
+                let Some(id) = item[key].as_str().map(str::to_string) else { continue };
+                if !theirs.contains(&id) {
+                    continue;
+                }
+                let on = *landed.entry(id.clone()).or_insert_with(|| self.store.resolve(&r.id, &id).ok().flatten().is_some_and(|c| self.on_default(r, &c)));
+                if !on {
+                    item["outside"] = json!(true);
+                }
+            }
+        }
+        true
+    }
     pub(crate) fn resolve_rev(&self, r: &RepoRow, rev: &str) -> Result<ChangesetId> {
         self.store.resolve(&r.id, rev.trim())?.ok_or_else(|| Error::NotFound(format!("revision {rev}")))
     }

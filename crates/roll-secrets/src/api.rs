@@ -32,6 +32,8 @@ pub fn router(s: Arc<Secrets>) -> Router {
     Router::new()
         .route("/v1/secrets/health", get(health))
         .route("/v1/secrets/whoami", get(whoami))
+        // Guardrails: floors every project may only tighten (guardrails.rs).
+        .route("/v1/secrets/policy", get(guardrails).put(set_guardrails))
         .route("/v1/secrets/search", get(find))
         // Deleted projects in their recovery window (docs/secrets.md, "When a secret, an
         // environment or the project goes").
@@ -96,7 +98,10 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/identities"), get(identities).post(create_identity))
         .route(&format!("{P}/identities/{{id}}"), axum::routing::delete(delete_identity).patch(update_identity))
         .route(&format!("{P}/identities/{{id}}/jwks"), axum::routing::put(set_identity_keys))
+        .route(&format!("{P}/identities/{{id}}/bootstrap"), post(create_bootstrap))
         .route("/v1/secrets/login", post(login))
+        .route("/v1/secrets/login/bootstrap", post(login_bootstrap))
+        .route("/v1/secrets/login/refresh", post(login_refresh))
         .route("/v1/secrets/oidc/.well-known/openid-configuration", get(oidc_discovery))
         .route("/v1/secrets/oidc/jwks", get(oidc_jwks))
         .route("/v1/secrets/issuer/rotate", post(rotate_issuer))
@@ -110,6 +115,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/audit/sinks"), get(sinks).post(create_sink))
         .route(&format!("{P}/audit/sinks/{{id}}"), axum::routing::delete(delete_sink))
         .route(&format!("{P}/leaks"), post(scan_leaks))
+        .route(&format!("{P}/scan"), post(scan_only))
         .route(&format!("{P}/validity"), post(check_validity))
         .route(&format!("{P}/unstored/{{fingerprint}}"), get(unstored))
         .route(&format!("{P}/health"), get(project_health))
@@ -292,6 +298,18 @@ async fn health(State(s): S, Who(c): Who) -> crate::Result<Response> {
         return Err(Error::Forbidden("the deployment key's state is the operator's".into()));
     }
     Ok(ok(blocking(s, |s| s.health()).await?))
+}
+
+/// roll secrets' policy (the operator's, or an admin account's).
+async fn guardrails(State(s): S, Who(c): Who) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.guardrails(&c)).await?))
+}
+
+/// Replace the policy: `{production_approvals?, leaks_rotate?, sync_kinds?, no_stored_cloud_keys?,
+/// max_token_days?}`, a field left out having no floor.
+async fn set_guardrails(State(s): S, Who(c): Who, b: Bytes) -> crate::Result<Response> {
+    let g: crate::guardrails::Guardrails = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.set_guardrails(g, &c)).await?))
 }
 
 /// Where a key is set, across the projects the caller may read.
@@ -1260,6 +1278,38 @@ struct LoginBody {
     token: Option<String>,
     /// An AWS identity's signed `sts:GetCallerIdentity` (aws_identity.rs).
     aws: Option<crate::aws_identity::SignedRequest>,
+    /// A machine identity's machine credential (`rlmc_…`).
+    machine: Option<String>,
+}
+
+/// A machine identity's bootstrap token (`token`) or current machine credential (`credential`).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MachineBody {
+    identity: String,
+    token: Option<String>,
+    credential: Option<String>,
+}
+
+async fn create_bootstrap(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::NewBootstrap = if b.is_empty() { Default::default() } else { body(&b)? };
+    Ok(secret_response(created(blocking(s, move |s| s.create_bootstrap(&project, &id, n, &c)).await?)))
+}
+
+/// A bootstrap token for the machine's first machine credential (public: the token is the credential).
+async fn login_bootstrap(State(s): S, parts: Parts, b: Bytes) -> crate::Result<Response> {
+    let m: MachineBody = body(&b)?;
+    let token = m.token.filter(|_| m.credential.is_none()).ok_or_else(|| Error::BadRequest("an exchange carries the bootstrap token (token)".into()))?;
+    let ip = s.client_ip(&parts);
+    Ok(secret_response(ok(blocking(s, move |s| s.machine_credential(&m.identity, &token, true, ip)).await?)))
+}
+
+/// A machine credential for the next one (public: the credential is the credential).
+async fn login_refresh(State(s): S, parts: Parts, b: Bytes) -> crate::Result<Response> {
+    let m: MachineBody = body(&b)?;
+    let credential = m.credential.filter(|_| m.token.is_none()).ok_or_else(|| Error::BadRequest("a refresh carries the current machine credential (credential)".into()))?;
+    let ip = s.client_ip(&parts);
+    Ok(secret_response(ok(blocking(s, move |s| s.machine_credential(&m.identity, &credential, false, ip)).await?)))
 }
 
 /// A workload's OIDC token for a short-lived scoped token (public: the token is the credential).
@@ -1324,10 +1374,11 @@ async fn delete_cloud_account(State(s): S, Who(c): Who, Path((project, id)): Pat
 
 async fn login(State(s): S, parts: Parts, b: Bytes) -> crate::Result<Response> {
     let l: LoginBody = body(&b)?;
-    let proof = match (l.token, l.aws) {
-        (Some(t), None) => crate::Proof::Oidc(t),
-        (None, Some(a)) => crate::Proof::Aws(a),
-        _ => return Err(Error::BadRequest("a login carries a token (OIDC) or aws (a signed GetCallerIdentity)".into())),
+    let proof = match (l.token, l.aws, l.machine) {
+        (Some(t), None, None) => crate::Proof::Oidc(t),
+        (None, Some(a), None) => crate::Proof::Aws(a),
+        (None, None, Some(m)) => crate::Proof::Machine(m),
+        _ => return Err(Error::BadRequest("a login carries a token (OIDC), aws (a signed GetCallerIdentity) or machine (a machine credential)".into())),
     };
     let ip = s.client_ip(&parts);
     Ok(secret_response(ok(blocking(s, move |s| s.login(&l.identity, proof, ip)).await?)))
@@ -1463,6 +1514,21 @@ async fn scan_leaks(State(s): S, Who(c): Who, Path(project): Path<String>, heade
     // A credential guard's check of what a tool call would write (roll MCP): audited apart.
     let guard = headers.get("x-roll-guard").is_some_and(|v| v.as_bytes() == b"1");
     Ok(ok(blocking(s, move |s| s.scan_as(&project, &candidates, &c, guard, leaked)).await?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScanOnly {
+    candidates: Vec<String>,
+    /// The push it checks goes through anyway (a pre-receive hook's `breakglass` push option).
+    #[serde(default)]
+    breakglass: bool,
+}
+
+/// A scanner's check (the `scan` right): which whole candidates are values, never a value.
+async fn scan_only(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let ScanOnly { candidates, breakglass } = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.scan_only(&project, &candidates, &c, breakglass)).await?))
 }
 
 async fn all_health(State(s): S, Who(c): Who) -> crate::Result<Response> {

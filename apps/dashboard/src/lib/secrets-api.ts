@@ -7,7 +7,7 @@
  * revealed value for as long as it's shown and no longer.
  */
 
-import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, HeldValues, ValuesDelta, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Hosts, PlaceholderRecord, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Totp, Share, NewShare, ValueRequest, NewValueRequest, NewToken, AuditEntry, AuditFilter, AuditVerification, AuditFormat, EventsQuery, EventPage, NewNotification, SecretsNotification, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, SaasRotator, NewSaasRotator, SaasRotatorChange, PublicCert, NewPublicCert, PublicCertChange, RevokePublicCert, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, Directory, NewDirectory, SnowflakeAccount, NewSnowflakeAccount, AtlasProject, NewAtlasProject, AwsUser, CloudAccount, NewCloudAccount, KubernetesCluster, NewKubernetesCluster, SignedCertificate, CaCertificate, Ca, AcmeSettings, NewAcmeKey, SshCa, HostCertificate, UserCertificate, TransitKey, TransitPublicKey, Rotation, FolderPolicy, Reach, GitHubApp, SinkFormat, Gateway, MadeGateway, NewDecoy, CutOff, CutOffRequest, ValidityProbe, CheckedCredential, LeakRotate, DeletedProject, Recovered, EnvironmentDeletion, EnvironmentDeleted, RecoveredEnvironment } from "@roll/secrets/types";
+import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, HeldValues, ValuesDelta, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Hosts, PlaceholderRecord, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Totp, Share, NewShare, ValueRequest, NewValueRequest, NewToken, AuditEntry, AuditFilter, AuditVerification, AuditFormat, EventsQuery, EventPage, NewNotification, SecretsNotification, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, SaasRotator, NewSaasRotator, SaasRotatorChange, PublicCert, NewPublicCert, PublicCertChange, RevokePublicCert, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, Directory, NewDirectory, SnowflakeAccount, NewSnowflakeAccount, AtlasProject, NewAtlasProject, AwsUser, CloudAccount, NewCloudAccount, KubernetesCluster, NewKubernetesCluster, SignedCertificate, CaCertificate, Ca, AcmeSettings, NewAcmeKey, SshCa, HostCertificate, UserCertificate, TransitKey, TransitPublicKey, Rotation, FolderPolicy, Reach, GitHubApp, SinkFormat, Gateway, MadeGateway, NewDecoy, CutOff, CutOffRequest, ValidityProbe, CheckedCredential, LeakRotate, DeletedProject, Recovered, EnvironmentDeletion, EnvironmentDeleted, RecoveredEnvironment, Guardrails } from "@roll/secrets/types";
 import type { Grant } from "./access-api";
 import { withSession } from "./code-token";
 import { grantFor, tokenOf } from "./secrets-tokens";
@@ -16,7 +16,7 @@ import { apiHeaders, onApiStatus, ROLL_API } from "./roll-api";
 /** The API's shapes live in the `@roll/secrets` package, shared with services. */
 export type * from "@roll/secrets/types";
 
-export const ACTIONS: readonly Action[] = ["read", "reveal", "write", "delete", "admin"];
+export const ACTIONS: readonly Action[] = ["read", "reveal", "write", "delete", "admin", "scan"];
 export const KEY_TYPES: readonly KeyType[] = ["url", "int", "port", "bool", "json", "email", "totp"];
 
 /** An answer that isn't 2xx: the API's `error`, its `code` (`approval_required`, `stale`, `conflict`…) and the status. */
@@ -294,6 +294,8 @@ export function secretsApi(project: string) {
     deleteSink: (id: string) => req<null>("DELETE", `${P}/audit/sinks/${enc(id)}`),
     /** Which candidates (tokens of some text) are this project's values the caller may reveal; never the values. */
     scanLeaks: (candidates: string[]) => req<{ index: number; key: string; environment: string; path: string }[]>("POST", `${P}/leaks`, { candidates }),
+    /** A scanner's check (the `scan` right): which whole candidates (16+ characters, fair entropy) are values, never a value. */
+    scanOnly: (candidates: string[], breakglass = false) => req<{ index: number; key: string; environment: string; path: string }[]>("POST", `${P}/scan`, { candidates, breakglass }),
     /** `code`: also the keys no repository on the canvas mentions (a search per key: on request). */
     health: (code = false) => req<Finding[]>("GET", `${P}/health${qs({ code: code ? 1 : undefined })}`),
     /** Every managed credential: schedule, last issue, next due, last failure. */
@@ -373,6 +375,8 @@ export type SecretsApi = ReturnType<typeof secretsApi>;
 
 export const secretsHealth = () => req<Health>("GET", "/v1/secrets/health");
 export const secretsWhoami = () => req<WhoAmI>("GET", "/v1/secrets/whoami");
+/** roll secrets' policy: floors every project may only tighten (403 unless the operator or an admin account). */
+export const secretsGuardrails = () => req<Guardrails>("GET", "/v1/secrets/policy");
 /** roll's OIDC issuer, which a GCP pool or an Azure federated credential trusts (public). */
 export const secretsIssuer = () => req<{ issuer: string; jwks_uri: string }>("GET", "/v1/secrets/oidc/.well-known/openid-configuration");
 /** Every project, environment and folder holding `key` (`PREFIX*` for a prefix) that the caller may read. */

@@ -4,7 +4,7 @@
  * package's both use them; change them with the contract.
  */
 
-export type Action = "read" | "reveal" | "write" | "delete" | "admin";
+export type Action = "read" | "reveal" | "write" | "delete" | "admin" | "scan";
 export type SecretType = "shared" | "personal";
 export type LinkMode = "live" | "managed" | "dynamic";
 
@@ -343,7 +343,7 @@ export type PasswordPolicy = { length: number; classes?: PasswordClass[]; symbol
 export type Required = { key: string; path: string; comment: string; type?: KeyType; pattern?: string; owner?: string; password?: PasswordPolicy };
 /** A workload identity: CI jobs and clusters whose OIDC tokens match log in for a short-lived token. */
 /** What a login proves itself with: an OIDC token, or a signed AWS `GetCallerIdentity`. */
-export type IdentityKind = "oidc" | "aws";
+export type IdentityKind = "oidc" | "aws" | "machine";
 export type Identity = {
   id: string;
   name: string;
@@ -383,9 +383,10 @@ type IdentityScope = { name: string; environments?: string[]; paths?: string[]; 
 /**
  * `jwks`: the issuer's keys (a JWKS document as text); then the issuer is never fetched. An `aws`
  * identity takes one role or user instead (`arn:aws:iam::<account>:role/<name>`, or
- * `arn:aws:sts::<account>:assumed-role/<role>/<session prefix>*`).
+ * `arn:aws:sts::<account>:assumed-role/<role>/<session prefix>*`). A `machine` identity takes
+ * neither: its machines log in with bootstrap tokens made for it (docs/secrets.md, "On a VM").
  */
-export type NewIdentity = IdentityScope & ({ kind?: "oidc"; issuer: string; audience: string; subject: string; claims?: Record<string, string>; jwks?: string } | { kind: "aws"; arn: string });
+export type NewIdentity = IdentityScope & ({ kind?: "oidc"; issuer: string; audience: string; subject: string; claims?: Record<string, string>; jwks?: string } | { kind: "aws"; arn: string } | { kind: "machine" });
 export type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number; allowed_ips?: string[] };
 /** `approval`: the approval that let the request through roll-access's gate (an `ask` approved; `until` when a rule it remembered allowed it). */
 /** `seq` and `hash` place a row in its project's chain (absent on rows from before it); an `audit.digest` row's `digest` is roll's signed JWS of it. */
@@ -506,7 +507,9 @@ export type DeletedProject = { project: string; name: string; environment?: stri
 export type Recovered = { project: string; name: string; recovered_at: number; rotated: number; rotation_failed: string[] };
 export type Place = { project: string; project_name: string; environment: string; path: string; key: string; version: number; updated_at: number; linked: boolean };
 /** One thing to fix (`GET …/health`), worst first: where, never a value. */
-export type Finding = { issue: "decoy_used" | "production_unprotected" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "unplaced" | "operator_made" | "stored_cloud_key" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy };
+export type Finding = { issue: "decoy_used" | "production_unprotected" | "off_policy" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "unplaced" | "operator_made" | "stored_cloud_key" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy };
+/** roll secrets' policy (`GET`/`PUT /v1/secrets/policy`, the operator's or an admin account's): floors every project may only tighten; `null` is no floor. */
+export type Guardrails = { production_approvals: number | null; leaks_rotate: "managed" | null; sync_kinds: string[] | null; no_stored_cloud_keys: boolean; max_token_days: number | null; updated_at: number | null; updated_by: string | null };
 /** One project's findings (`GET /v1/secrets/findings`). */
 export type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
 /** A URL roll calls to issue and revoke a value that lives outside roll (`rotator` links). */

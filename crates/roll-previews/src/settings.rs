@@ -91,6 +91,10 @@ pub struct Settings {
     /// approval is to run its code, not a read of it for what it sends out; `open` lets it reach
     /// what the project's own previews do.
     pub egress_forks: EgressRule,
+    /// What a fork's preview's data is: `schema` (the default) its branches' structure without
+    /// rows, whatever the project's own previews get, so what masks miss never reaches a fork's
+    /// code (a kind that can't be structure-only is left out); `same` what the project's own get.
+    pub data_forks: DataForks,
     /// Branch the data as of a point in time (Neon's time-travel branches), where the product
     /// keeps history: `-24h` (`-30m`, `-7d`) before each branching or reset, or an RFC 3339 time;
     /// at most 30 days back. Products without history branch as of now and say so.
@@ -169,6 +173,14 @@ pub enum MailRule {
     #[default]
     Catch,
     Deliver,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DataForks {
+    #[default]
+    Schema,
+    Same,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -564,6 +576,7 @@ impl Default for Settings {
             egress: EgressRule::Open,
             egress_hosts: Vec::new(),
             egress_forks: EgressRule::Roll,
+            data_forks: DataForks::Schema,
             data_at: None,
             feedback: true,
             note_mail: true,
@@ -877,6 +890,16 @@ impl Settings {
             None if self.data == Mode::Schema && !kind.has_schema_mode() => None,
             None => Some(self.data),
         }
+    }
+
+    /// [`Self::mode_of`] for a preview: a fork's (`trusted` false) is held to the structure by
+    /// `data_forks`, a kind that can't be structure-only left out.
+    pub fn mode_for(&self, kind: Kind, r#ref: &str, trusted: bool) -> Option<Mode> {
+        let mode = self.mode_of(kind, r#ref)?;
+        if trusted || self.data_forks == DataForks::Same || mode == Mode::Schema {
+            return Some(mode);
+        }
+        kind.has_schema_mode().then_some(Mode::Schema)
     }
 }
 

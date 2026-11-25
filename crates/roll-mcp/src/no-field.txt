@@ -51,6 +51,7 @@ PUT /v1/previews/projects/{project}/settings oidc_audiences which clouds a previ
 PUT /v1/previews/projects/{project}/settings egress         what previews' code may reach outside roll: a person's
 PUT /v1/previews/projects/{project}/settings egress_hosts   hosts outside roll previews' code may reach: a person's
 PUT /v1/previews/projects/{project}/settings egress_forks   what a fork's preview may reach: a person's
+PUT /v1/previews/projects/{project}/settings data_forks     what of the data a fork's preview gets: a person's
 PUT /v1/previews/projects/{project}/settings masking        how production's data is masked in previews: a person's (previews_mask_suggestions reads what isn't)
 PUT /v1/previews/projects/{project}/settings visual_review  a gate on landing: a person's
 PUT /v1/previews/projects/{project}/settings regressions    a gate on landing: a person's

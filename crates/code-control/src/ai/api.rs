@@ -84,7 +84,13 @@ struct SearchQuery {
 async fn search(State(code): S, caller: Caller, Path((owner, repo)): Path<(String, String)>, crate::api::Q(q): crate::api::Q<SearchQuery>) -> Result<Json<Value>> {
     let r = code.readable(&caller, &owner, &repo)?;
     let text = q.q.unwrap_or_default();
-    Ok(Json(code.search_code(&r, &text, q.regex.unwrap_or(false), q.case.unwrap_or(false), q.path.as_deref().filter(|p| !p.is_empty()), q.limit.unwrap_or(100), q.rev.as_deref()).await?))
+    let mut v = code.search_code(&r, &text, q.regex.unwrap_or(false), q.case.unwrap_or(false), q.path.as_deref().filter(|p| !p.is_empty()), q.limit.unwrap_or(100), q.rev.as_deref()).await?;
+    // Matches at a fork's revision are its author's lines (MCP's lockdown).
+    if q.rev.is_some() {
+        let rev = v["rev"].as_str().map(str::to_string);
+        code.mark_at(&r, rev.as_deref(), &mut v, &["matches"], None);
+    }
+    Ok(Json(v))
 }
 
 async fn ai_review(State(code): S, caller: Caller, Path(id): Path<String>, B(b): B) -> Result<(StatusCode, Json<Value>)> {

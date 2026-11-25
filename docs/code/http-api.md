@@ -133,6 +133,15 @@ GET /changesets/{id} → Changeset
 GET /compare/{base}...{head} → {base, head, changesets: ChangesetSummary[], files: FileDiff[]}
 GET /compare/{base}...{head}?format=diff → text/plain: each file's unified diff after a `diff --git a/… b/…` line
 
+A read at a revision someone who can't push wrote says so for MCP's lockdown. Such a revision is
+one recorded where it came in (`outside_changesets`): every commit a fork's pull request brought
+from GitHub, an untrusted change's own writes, and the queue's tips built on one. Earlier
+revisions stay recorded; one that has since landed on the default branch doesn't count. The
+answer and its `entries`, `files`, `matches` and `statuses` carry `outside: true` (and a
+`/documents/{id}` file match, and a compare whose base or head is one), and so do the `items`, `ranges`
+and `changesets` that aren't on the default branch; `/blob` and `?format=diff` answer an
+`x-roll-outside: true` header. A team's own branches and changes don't.
+
 ChangesetSummary = {id, git_commit: sha | null, generation, parents: string[],
                     author: {name, email, time}, message, files_changed}
 Changeset = ChangesetSummary & {committer: {name, email, time}, files: FileDiff[]}
@@ -1025,6 +1034,9 @@ POST   /v1/code/agents/{owner}/automations/test TestRequest → TestResult
 GET    /v1/code/agents/{owner}/automations/runs?automation=&status=&before=&limit= → [AutomationRun]
        newest first, 50 by default, at most 200; `before` a run id (the next page)
 GET    /v1/code/agents/{owner}/automations/runs/{run} → RunDetail {run, event}
+       (a run for an issue someone who can't push opened, on a trigger that takes `anyone`'s,
+       `trusted_author: false` in its data: `event.data` and `run.event` carry `outside: true`, and
+       so does each such run's `event` in the runs lists, for MCP's lockdown)
 GET    /v1/code/agents/{owner}/automations/notices?before=&limit= → [Notice]
        the notify steps' notices, newest first (the newest 200 per owner are kept), 50 by default, at most
        200; `before` a notice's `at` (the next page). For a dashboard that wasn't open when they came.

@@ -208,7 +208,10 @@ async fn store_key(ctx: &Ctx<'_>, owner: &Principal, k: NewKey) -> EsResult<Repl
     doc.insert("username".into(), owner.username.clone().into());
     doc.insert("realm".into(), realm.into());
     doc.insert("realm_type".into(), realm_type.into());
-    doc.insert("metadata".into(), k.metadata);
+    // A new key's `derive` is checked as an update from nothing: its first generation only.
+    let mut metadata = k.metadata;
+    super::derived::on_update(&mut metadata, &Value::Null)?;
+    doc.insert("metadata".into(), metadata);
     doc.insert("role_descriptors".into(), k.role_descriptors);
     doc.insert("limited_by".into(), limited);
     if let Some(a) = k.cross_cluster {
@@ -583,11 +586,23 @@ pub async fn invalidate(ctx: &Ctx<'_>) -> EsResult<Reply> {
     }
     let p = super::principal(ctx).clone();
     let all = manages_all(ctx) && !owner;
+    let dormant = ctx.request.header(super::DORMANT_KEY_HEADER).is_some();
     let now = ctx.now_ms;
     let invalidated = ctx
         .cluster
         .update(move |st| {
             let mut out = Vec::new();
+            // roll's revocation of OpenSearch keys from before a switch of flavor: their users.
+            if dormant && all {
+                use super::opensearch::{KEY_USER_PREFIXES, Kind};
+                for id in ids.iter().filter(|id| KEY_USER_PREFIXES.iter().any(|p| id.starts_with(p))) {
+                    if store::remove(st, Kind::Users.family(), id).is_some() {
+                        store::remove(st, Kind::Roles.family(), id);
+                        out.push(id.clone());
+                    }
+                }
+                return Ok(out);
+            }
             let candidates: Vec<(String, Value)> = st.metadata.xpack.iter(KEYS).map(|(i, k)| (i.clone(), k.clone())).collect();
             for (id, mut k) in candidates {
                 if k.get("invalidated").and_then(Value::as_bool) == Some(true) {
@@ -622,6 +637,21 @@ pub async fn invalidate(ctx: &Ctx<'_>) -> EsResult<Reply> {
         "previously_invalidated_api_keys" => Value::Arr(Vec::new()),
         "error_count" => 0,
     })
+}
+
+/// Invalidates key `id` (as `DELETE _security/api_key` does); `Ok(false)` when there's no live
+/// key of that id.
+pub(crate) fn invalidate_id(st: &mut crate::meta::ClusterState, id: &str, now: i64) -> EsResult<bool> {
+    let Some(mut k) = st.metadata.xpack.get(KEYS, id).cloned() else { return Ok(false) };
+    if k.get("invalidated").and_then(Value::as_bool) == Some(true) {
+        return Ok(false);
+    }
+    if let Value::Obj(m) = &mut k {
+        m.insert("invalidated".into(), true.into());
+        m.insert("invalidation".into(), now.into());
+    }
+    store::put(st, KEYS, id, k, now)?;
+    Ok(true)
 }
 
 /// Applies an update to one key; `Ok(true)` when it changed anything.

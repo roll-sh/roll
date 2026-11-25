@@ -25,7 +25,6 @@ sha2.workspace = true
 roll-secrets-chain.workspace = true
 # `roll secrets import --from doppler|infisical`: roll's own key, folder and slug rules.
 roll-secrets-ref.workspace = true
-agent-host.workspace = true
 apps-build.workspace = true
 # `roll apps cp`: files to and from an instance as tar (Docker's `docker cp`).
 tar.workspace = true
@@ -81,6 +80,22 @@ roll-keyshares.workspace = true
 roll-auth.workspace = true
 code-review.workspace = true
 
+# `roll agent up` (the daemon: PTYs, process groups) and `roll code`'s GitHub fallback: Linux and
+# macOS only. On Windows they say so.
+[target.'cfg(unix)'.dependencies]
+agent-host.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_Services",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 # `tests/apps.rs`: roll apps in process on its fake runtime.
 apps-control.workspace = true
@@ -107,6 +122,8 @@ s3-server.workspace = true
 s3-store.workspace = true
 # `tests/secrets.rs`: roll secrets in process.
 roll-secrets.workspace = true
+# `tests/secrets.rs`: a fake Google's identity tokens.
+ring.workspace = true
 # `tests/search.rs` runs the `roll` binary against an in-process search control plane.
 search-control.workspace = true
 search-server.workspace = true

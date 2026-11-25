@@ -1364,6 +1364,13 @@ pub async fn sync_job_delete(ctx: &Ctx<'_>) -> EsResult<Reply> {
 
 // --- secrets -----------------------------------------------------------------------------------
 
+/// What secret `id` is sealed as: bound to the cluster and the entry, so it doesn't open in
+/// another entry's slot or another cluster's state (a branch's copy of its parent's, which
+/// doesn't keep the parent's secrets: [`crate::branch`]).
+pub(crate) fn secret_kind(cluster: &crate::cluster::Cluster, id: &str) -> String {
+    format!("{}:{id}", crate::seal::bind(cluster, SECRET_KIND))
+}
+
 pub async fn secret_post(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let body = ctx.body_map()?.unwrap_or_default();
     let Some(v) = body.get("value").filter(|v| !v.is_null()) else {
@@ -1371,7 +1378,7 @@ pub async fn secret_post(ctx: &Ctx<'_>) -> EsResult<Reply> {
     };
     let id = crate::meta::names::time_based_id();
     let out = id.clone();
-    let entry = crate::seal::seal_value(ctx.cluster, SECRET_KIND, v.clone())?;
+    let entry = crate::seal::seal_value(ctx.cluster, &secret_kind(ctx.cluster, &id), v.clone())?;
     let now = ctx.now_ms;
     ctx.cluster.update(move |st| store::put(st, SECRETS, &id, entry, now).map(|_| ())).await?;
     Reply::ok(obj! { "id" => out })
@@ -1383,7 +1390,7 @@ pub async fn secret_put(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let Some(v) = body.get("value").filter(|v| !v.is_null()).cloned() else {
         return Err(EsError::action_request_validation(&["[value] of the connector secret cannot be [null] or [\"\"]".into()]));
     };
-    let entry = crate::seal::seal_value(ctx.cluster, SECRET_KIND, v)?;
+    let entry = crate::seal::seal_value(ctx.cluster, &secret_kind(ctx.cluster, &id), v)?;
     let now = ctx.now_ms;
     let created = ctx.cluster.update(move |st| store::put(st, SECRETS, &id, entry, now)).await?;
     Ok(Reply::Body(if created { 201 } else { 200 }, obj! { "result" => if created { "created" } else { "updated" } }))
@@ -1392,7 +1399,7 @@ pub async fn secret_put(ctx: &Ctx<'_>) -> EsResult<Reply> {
 pub fn secret_get(ctx: &Ctx) -> EsResult<Reply> {
     let id = ctx.path_param("id").unwrap_or_default();
     match ctx.state().metadata.xpack.get(SECRETS, id) {
-        Some(s) => Reply::ok(obj! { "id" => id, "value" => crate::seal::open_value(ctx.cluster, SECRET_KIND, s)? }),
+        Some(s) => Reply::ok(obj! { "id" => id, "value" => crate::seal::open_value(ctx.cluster, &secret_kind(ctx.cluster, id), s)? }),
         None => Err(EsError::resource_not_found(format!("No secret with id [{id}]"))),
     }
 }

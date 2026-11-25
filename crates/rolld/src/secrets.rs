@@ -484,6 +484,7 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     let canaries = roll_secrets::validity::Canaries::parse(&std::env::var("ROLL_SECRETS_VALIDITY_CANARIES").unwrap_or_default()).map_err(|e| anyhow::anyhow!("ROLL_SECRETS_VALIDITY_CANARIES: {e}"))?;
     secrets.set_validity_settings(roll_secrets::validity::Settings { aws_live, canaries });
     tell_decoys(&access, secrets.clone());
+    cap_token_lifetimes(&access, secrets.clone());
     // ACME's http-01 and dns-01 checks: public addresses only, as webhooks.
     secrets.set_acme_checks(Arc::new(acme::Checks::new(allow_private)));
     // Publicly trusted certificates: the edge's ACME client, over a guarded client, dns-01 through
@@ -551,6 +552,21 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
         }
     });
     Ok(secrets)
+}
+
+/// roll secrets' policy caps the lifetime of roll-access tokens with a secrets rule (or every
+/// product's): roll-access makes and changes every token, so it asks on each (guardrails.rs).
+fn cap_token_lifetimes(access: &roll_access::Access, secrets: Arc<Secrets>) {
+    let cap: roll_access::LifetimeCap = Box::new(move |rules| {
+        if !rules.0.iter().any(|r| r.product == "secrets" || r.product == "*") {
+            return None;
+        }
+        secrets.token_days_cap().unwrap_or_else(|e| {
+            tracing::warn!("reading roll secrets' policy for a token's lifetime: {e}");
+            None
+        })
+    });
+    let _ = access.lifetime_cap.set(cap);
 }
 
 /// A decoy key's token was used: roll-access tells roll secrets, which raises `decoy_used` on its
@@ -2108,6 +2124,9 @@ impl roll_secrets::Workloads for Workloads {
         // On the store's blocking threads, as `mint`.
         match tokio::runtime::Handle::current().block_on(async move { access.create_grant(&ext, new).await }) {
             Ok((g, secret)) => Ok(roll_secrets::Minted { id: g.id, secret, expires_at: g.expires_at.unwrap_or_default() }),
+            Err(roll_access::Error::Forbidden(m)) if m.starts_with("roll secrets' policy") => {
+                Err(Error::Forbidden(format!("{m}: a gateway's token lasts until the gateway is deleted, so add the gateway without a token and log it in through a workload identity")))
+            }
             Err(roll_access::Error::Forbidden(_) | roll_access::Error::Unauthorized(_)) => {
                 Err(Error::Forbidden("roll couldn't tell whose this gateway's token would be: sign in, or add the gateway without a token and log it in through a workload identity".into()))
             }
@@ -2160,6 +2179,51 @@ impl roll_secrets::Workloads for Workloads {
         Ok(self.now(list.into_iter().filter(|g| g.revoked_at.is_none())))
     }
 
+    /// A machine identity's bootstrap token: roll-access's chain, owned as the identity's logins are.
+    fn bootstrap(&self, name: &str, ip_allow: Option<Vec<String>>, minutes: u32, owner: Option<&str>) -> roll_secrets::Result<roll_secrets::Chained> {
+        let (access, name, owner) = (self.0.clone(), name.chars().take(64).collect::<String>(), owner.map(str::to_string));
+        // On the store's blocking threads, as `mint`.
+        match tokio::runtime::Handle::current().block_on(async move { access.mint_bootstrap(&name, minutes, ip_allow.unwrap_or_default(), owner.as_deref()).await }) {
+            Ok(i) => Ok(roll_secrets::Chained { chain: i.chain, secret: i.secret, issued_at: i.issued_at, expires_at: i.expires_at }),
+            Err(e) => Err(access_error(e, "making a bootstrap token")),
+        }
+    }
+
+    fn chain_of(&self, secret: &str) -> roll_secrets::Result<Option<String>> {
+        self.0.store.chain_of(secret).map_err(|e| access_error(e, "reading a machine credential"))
+    }
+
+    fn redeem(&self, secret: &str, from_bootstrap: bool, ip: Option<&str>, hours: u32) -> roll_secrets::Result<roll_secrets::Step<roll_secrets::Chained>> {
+        let from = if from_bootstrap { roll_access::store::ChainSecret::Bootstrap } else { roll_access::store::ChainSecret::Machine };
+        match self.0.redeem(secret, from, ip.and_then(|i| i.parse().ok()), hours) {
+            Ok(roll_access::store::Presented::Live(i)) => Ok(roll_secrets::Step::Live(roll_secrets::Chained { chain: i.chain, secret: i.secret, issued_at: i.issued_at, expires_at: i.expires_at })),
+            Ok(roll_access::store::Presented::Reused { chain }) => Ok(roll_secrets::Step::Reused { chain }),
+            Err(e) => Err(access_error(e, "replacing a machine credential")),
+        }
+    }
+
+    fn machine(&self, secret: &str, ip: Option<&str>) -> roll_secrets::Result<roll_secrets::Step<(String, String)>> {
+        match self.0.present_machine(secret, ip.and_then(|i| i.parse().ok())) {
+            Ok(roll_access::store::Presented::Live(m)) => Ok(roll_secrets::Step::Live((m.grant, m.chain))),
+            Ok(roll_access::store::Presented::Reused { chain }) => Ok(roll_secrets::Step::Reused { chain }),
+            Err(e) => Err(access_error(e, "reading a machine credential")),
+        }
+    }
+
+    fn mint_via(&self, name: &str, rule: roll_auth::scope::Rule, ip_allow: Option<Vec<String>>, minutes: u32, owner: Option<&str>, via: &str) -> roll_secrets::Result<roll_secrets::Minted> {
+        let within = roll_auth::scope::Scope(vec![rule]);
+        let new = roll_access::store::NewGrant { name: name.chars().take(64).collect(), rules: within.clone(), expires_at: None, ip_allow: ip_allow.unwrap_or_default(), rate_per_minute: None, ask_otherwise: false, ..Default::default() };
+        let (access, owner, via) = (self.0.clone(), owner.map(str::to_string), via.to_string());
+        match tokio::runtime::Handle::current().block_on(async move { access.mint_workload_via(new, &within, minutes, owner.as_deref(), Some(&via)).await }) {
+            Ok((g, secret)) => Ok(roll_secrets::Minted { id: g.id, secret, expires_at: g.expires_at.unwrap_or_default() }),
+            Err(e) => Err(access_error(e, "minting a workload token")),
+        }
+    }
+
+    fn revoke_chain(&self, chain: &str, why: &str) -> roll_secrets::Result<()> {
+        self.0.revoke_chain(chain, why).map(|_| ()).map_err(|e| access_error(e, "revoking a machine's credentials"))
+    }
+
     /// Only tokens whose rules (and rules approved for a while) can name `project` are read
     /// (`Store::naming`, one indexed read whatever the number of tokens) and resolved.
     fn grants_naming(&self, project: &str) -> roll_secrets::Result<Vec<roll_auth::Grant>> {
@@ -2167,6 +2231,18 @@ impl roll_secrets::Workloads for Workloads {
         let list = self.0.store.naming("secrets", project).map_err(|e| Error::Internal(format!("listing roll-access's tokens: {e}")))?;
         let naming = list.into_iter().filter(|g| g.rules.0.iter().chain(g.temporary.iter().map(|t| &t.rule)).any(names));
         Ok(self.now(naming).into_iter().filter(|g| g.scope.0.iter().any(names)).collect())
+    }
+}
+
+/// roll-access's refusal as roll secrets'.
+fn access_error(e: roll_access::Error, doing: &str) -> Error {
+    match e {
+        roll_access::Error::Unauthorized(m) => Error::Unauthorized(m),
+        roll_access::Error::Forbidden(m) => Error::Forbidden(m),
+        roll_access::Error::BadRequest(m) => Error::BadRequest(m),
+        roll_access::Error::NotFound(m) => Error::NotFound(m),
+        roll_access::Error::Conflict(m) | roll_access::Error::TooMany(m) => Error::TooMany(m),
+        e => Error::Internal(format!("{doing}: {e}")),
     }
 }
 

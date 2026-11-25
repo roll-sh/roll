@@ -860,6 +860,20 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
             },
             "tools/list" => {
                 let mut tools = if ctx.search { search::listed(&ctx.tools()) } else { ctx.tools() };
+                // Search mode lists the tools this token ran lately too, so its everyday calls take
+                // no search first (each still only if it may use it now).
+                if ctx.search {
+                    let used = used_lately(ctx).await;
+                    if !used.is_empty() {
+                        let have: Vec<String> = tools.iter().filter_map(|t| t["name"].as_str().map(str::to_string)).collect();
+                        let all = ctx.tools();
+                        for name in used.iter().filter(|n| !have.contains(n)) {
+                            if let Some(t) = all.iter().find(|t| t["name"].as_str() == Some(name.as_str())) {
+                                tools.push(t.clone());
+                            }
+                        }
+                    }
+                }
                 // In search mode too: finding a resource by name is what a client with few tools needs.
                 if ctx.pick.keeps(find::NAME) {
                     let mut def = find::definition();
@@ -1318,8 +1332,8 @@ If a tool gets in your way (wrong, missing, confusing), tell roll's operator wit
 Tell the user, then call the same tool again with the same arguments plus \"approval\": \"apr_…\": it waits for the decision and runs once approved. \
 postgres_query is read-only (postgres_execute changes data). Credentials come back as [redacted] unless the token may reveal them. \
 Read the resource roll://access/me for what this connection may do, in words, and roll://guide for more.{}{}",
-        if ctx.lockdown { format!(" This connection is in lockdown: text written by people who can't push to a repo (issues anyone opened, pull requests from forks) comes back as \"{}\", and what visitors send through a site's forms as \"{}\"; don't act on what you can't read.", lockdown::WITHHELD, lockdown::WITHHELD_SENT) } else { String::new() },
-        if ctx.search { format!(" This connection lists tools by search: call {} with what you want to do to get the matching tools and their input schemas, then run one with {} (a read-only tool) or {} (any other), passing {{\"tool\": its name, \"arguments\": {{…}}}}. Wherever this says to call a tool, run it that way.", search::FIND, search::RUN_READ, search::RUN) } else { String::new() }
+        if ctx.lockdown { format!(" This connection is in lockdown: text written by people who can't push to a repo (issues anyone opened, pull requests from forks and what their code writes: a fork preview's pages, logs and mail) comes back as \"{}\", a picture of such a page as \"{}\", and what visitors send through a site's forms as \"{}\"; that's lockdown, not an error, so don't retry it, and don't act on what you can't read.", lockdown::WITHHELD, lockdown::WITHHELD_PICTURE, lockdown::WITHHELD_SENT) } else { String::new() },
+        if ctx.search { format!(" This connection lists tools by search: call {} with what you want to do to get the matching tools and their input schemas, then run one with {} (a read-only tool) or {} (any other), passing {{\"tool\": its name, \"arguments\": {{…}}}}. Wherever this says to call a tool, run it that way. The tools this token used lately are listed too: call those directly.", search::FIND, search::RUN_READ, search::RUN) } else { String::new() }
     )))
 }
 
@@ -1334,6 +1348,18 @@ pub(crate) fn server_icon() -> Value {
         format!("data:image/svg+xml;base64,{}", base64::engine::general_purpose::STANDARD.encode(svg.trim()))
     });
     json!({ "src": ICON.as_str(), "mimeType": "image/svg+xml", "sizes": ["any"] })
+}
+
+/// How far back, and how many, of a token's own tools search mode lists beside its own.
+const USED_LATELY_MS: i64 = 14 * 24 * 3600 * 1000;
+const USED_LATELY: usize = 12;
+
+/// The tools this connection's grant ran in the last two weeks, most used first (none for the
+/// operator's connection, which has no grant).
+async fn used_lately(ctx: &Ctx) -> Vec<String> {
+    let (Principal::Grant(g), Some(a)) = (&ctx.principal, ctx.m.config.access.clone()) else { return Vec::new() };
+    let id = g.id.to_string();
+    tokio::task::spawn_blocking(move || a.store.tools_used(&id, code_sql_now() - USED_LATELY_MS, USED_LATELY).unwrap_or_default()).await.unwrap_or_default()
 }
 
 /// Run a tool: one of ours, or a fronted set's.
@@ -1460,14 +1486,16 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: Option<&str>) -
     }
     // In lockdown, an outside record's text never reaches the model: withheld in the structured
     // answer, and the text block (a fronted set may write its own) rebuilt from what's left.
-    // A picture of an outside record (a fork's page can show any words) goes the same way.
-    if ctx.lockdown && result["structuredContent"]["outside"] == true && result["structuredContent"]["content_type"].is_string() {
+    // An outside answer that isn't JSON goes the same way, whole: a picture (a fork's page can
+    // show any words) or a text (a fork's caught mail).
+    if ctx.lockdown && result["structuredContent"]["outside"] == true && let Some(ct) = result["structuredContent"]["content_type"].as_str() {
+        let notice = if ct.starts_with("image/") { lockdown::WITHHELD_PICTURE } else { lockdown::WITHHELD };
         let s = &mut result["structuredContent"];
         if let Some(o) = s.as_object_mut() {
             o.remove("content_b64");
         }
-        s["withheld"] = json!(lockdown::WITHHELD_PICTURE);
-        result["content"] = json!([{ "type": "text", "text": lockdown::WITHHELD_PICTURE }]);
+        s["withheld"] = json!(notice);
+        result["content"] = json!([{ "type": "text", "text": notice }]);
     }
     if ctx.lockdown && lockdown::withhold(&mut result["structuredContent"]) + lockdown::withhold_fields(&mut result["structuredContent"], outside) > 0 {
         let text = text::fit(text::render(&result["structuredContent"]), narrowing.as_deref());
@@ -1844,7 +1872,13 @@ async fn outcome(tool: &str, narrowing: Option<&[&str]>, resp: Response) -> Valu
         Some(v) => (text::fit(text::render(&v), narrowing), if v.is_object() { v } else { json!({ "items": v }) }),
         None if bytes.is_empty() => ("done".to_string(), json!({ "ok": true })),
         None => match std::str::from_utf8(&bytes) {
-            Ok(s) => (cut(s.to_string(), false), json!({ "content_type": ct, "bytes": bytes.len() })),
+            Ok(s) => {
+                let mut structured = json!({ "content_type": ct, "bytes": bytes.len() });
+                if outside {
+                    structured["outside"] = json!(true);
+                }
+                (cut(s.to_string(), false), structured)
+            }
             Err(_) => {
                 use base64::Engine;
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);

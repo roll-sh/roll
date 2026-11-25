@@ -86,6 +86,8 @@ pub const RULES: &[Rule] = &[
     Rule { route: "/v1/secrets/health", access: Access::Credential("a roll token (rlt_…); the operator's answer") },
     // roll's issuer key signs for every project: rotating it is the operator's.
     Rule { route: "/v1/secrets/issuer", access: Access::Operator },
+    // roll secrets' policy (guardrails) binds every project: the operator's, or an admin account's.
+    Rule { route: "/v1/secrets/policy", access: Access::Operator },
     // So does the audit log's digest key, and its public keys are what exports are checked with.
     Rule { route: "/v1/secrets/audit/key", access: Access::Operator },
     Rule { route: "/v1/secrets/audit/jwks", access: Access::Public("the audit log's digest keys: public, as an export is checked against them offline") },
@@ -109,7 +111,9 @@ pub const RULES: &[Rule] = &[
     // ACME (RFC 8555) on a project's CA: the account key's JWS, made with an External Account
     // Binding an admin of the project issued, and looked up on every request.
     Rule { route: "/v1/secrets/acme", access: Access::Public("ACME on a project's CA: the account key's signature and its External Account Binding are the credential") },
-    Rule { route: "/v1/secrets/login", access: Access::Public("a workload's OIDC token is the credential (workload identities)") },
+    // Machine identities' exchanges (`/login/bootstrap`, `/login/refresh`) too: the bootstrap token
+    // or machine credential in the body is the credential, checked by roll-access on every use.
+    Rule { route: "/v1/secrets/login", access: Access::Public("a workload's OIDC token, or a machine's bootstrap token or machine credential, is the credential (workload identities)") },
     Rule { route: "/v1/secrets/oidc", access: Access::Public("roll's OIDC issuer: its discovery document and public keys, which GCP and Azure fetch anonymously") },
     // Tasks: its own token (ROLL_TASKS_TOKEN) and API keys.
     Rule { route: "/v1/tasks", access: Access::Credential("a tasks token or API key") },

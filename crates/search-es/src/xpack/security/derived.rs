@@ -71,6 +71,11 @@ pub const REDACTED: &str = "::es_redacted::";
 /// What a derived key adds to its parent's API key authentication.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DerivedAuth {
+    /// Which derived key this is: the hash of its signed payload (`rdk1.<payload>`), so what one
+    /// derived key stores for later (a scroll, a point in time, async results: none of them
+    /// reachable through the browser policy today) is never another's of the same parent
+    /// ([`crate::search::contexts::owner_of`], [`super::resource_owner`]).
+    pub id: String,
     /// Role descriptors every permission must also pass: the derived key's indices (or its
     /// parent's) with `read`, and its filter as their document-level `query`.
     pub narrowing: Value,
@@ -80,6 +85,42 @@ pub struct DerivedAuth {
     pub per_minute: Option<u64>,
     /// Pages it may be sent from (as written: the node normalizes and checks them).
     pub origins: Vec<String>,
+    /// When it stops working (unix seconds).
+    pub exp: i64,
+    /// The generation of the parent's secret that signed it: a rotation after its verification
+    /// stops the rest of its request too ([`verified`]).
+    pub generation: i64,
+}
+
+/// A derived key the node verified on this request ([`crate::rest::Verified::Derived`]): its
+/// parent's id and what it may do, never the key or anything secret.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VerifiedKey {
+    pub key: String,
+    pub auth: DerivedAuth,
+}
+
+/// The principal of a derived key the node verified on this request: it isn't verified again,
+/// but its parent must still be a live derivable browser key whose secret is still the one that
+/// signed it, and the key unexpired, so a revoke, a rotation or an expiry between the node's
+/// check and any of the request's internal calls holds.
+pub fn verified(cluster: &Cluster, v: &VerifiedKey) -> EsResult<Principal> {
+    let st = cluster.state();
+    let Some(k) = st.metadata.xpack.get(KEYS, &v.key) else { return Err(unverified()) };
+    let now_ms = crate::time::now_millis();
+    let generation = k.pointer(&["metadata", METADATA, DERIVE]).filter(|d| !d.is_null()).map(|d| d.get("generation").and_then(Value::as_i64).unwrap_or(0));
+    if k.get("invalidated").and_then(Value::as_bool) == Some(true)
+        || k.get("expiration").and_then(Value::as_i64).is_some_and(|e| e <= now_ms)
+        || generation != Some(v.auth.generation)
+        || v.auth.exp.saturating_add(SKEW_S) < now_ms / 1000
+    {
+        return Err(unverified());
+    }
+    let mut p = super::api_keys::principal_of(&v.key, k);
+    if let AuthKind::ApiKey(a) = &mut p.kind {
+        a.derived = Some(Box::new(v.auth.clone()));
+    }
+    Ok(p)
 }
 
 /// The kind a parent's signing secret is sealed as: bound to its cluster's id and its key's id.
@@ -132,6 +173,12 @@ fn refused(why: impl std::fmt::Display) -> EsError {
 /// they have reaches anyone without the secret.
 fn unverified() -> EsError {
     super::unauthorized_credentials("API key: derived key refused")
+}
+
+/// The parent key a derived key names, unverified (anyone may write any id): only to count a
+/// refused key under its parent's usage when that is one of the cluster's browser keys.
+pub fn claimed_parent(token: &str) -> Option<String> {
+    split(token).ok()?.claims.get("key").and_then(Value::as_str).map(str::to_string)
 }
 
 /// Splits and parses a derived key, bounded by its own bytes: one JSON object, no trailing
@@ -221,12 +268,140 @@ pub fn authenticate(cluster: &Cluster, token: &str) -> EsResult<Principal> {
     if c.as_object().is_some_and(|m| m.keys().any(|k| !FIELDS.contains(&k.as_str()))) {
         return Err(refused(format!("a field it doesn't know: only {}", FIELDS.join(", "))));
     }
-    let derived = narrowed(c, browser, k, now_ms / 1000)?;
+    let mut derived = narrowed(&st, c, browser, k, now_ms / 1000)?;
+    derived.generation = browser.pointer(&[DERIVE, "generation"]).and_then(Value::as_i64).unwrap_or(0);
+    derived.id = <sha2::Sha256 as sha2::Digest>::digest(t.signed.as_bytes())[..16].iter().map(|b| format!("{b:02x}")).collect();
     let mut p = super::api_keys::principal_of(key_id, k);
     if let AuthKind::ApiKey(a) = &mut p.kind {
         a.derived = Some(Box::new(derived));
     }
     Ok(p)
+}
+
+/// Whether filter `q` (a [`plain_filter`]) expands terms: `prefix`, `wildcard`,
+/// `match_phrase_prefix`, `match_bool_prefix`, `simple_query_string` (its `*` and `~`), or a
+/// `fuzziness` or `max_expansions` in a match query. A browser key's own queries do so under its
+/// policy (`max_expansions` capped); a filter is built as the owner's, outside it, so only a parent
+/// with `allow_expensive_queries` lets its derived keys' filters expand.
+fn expands(q: &Value) -> bool {
+    fn names(v: &Value, keys: &[&str]) -> bool {
+        v.as_object().is_some_and(|m| m.iter().any(|(k, x)| keys.contains(&k.as_str()) || names(x, keys)))
+    }
+    let Some((kind, body)) = q.as_object().and_then(|m| m.iter().next()) else { return false };
+    let queries = |v: &Value| match v {
+        Value::Arr(a) => a.iter().any(expands),
+        q => expands(q),
+    };
+    match kind.as_str() {
+        "prefix" | "wildcard" | "match_phrase_prefix" | "match_bool_prefix" | "simple_query_string" => true,
+        "match" | "match_phrase" => names(body, &["fuzziness", "max_expansions"]),
+        "multi_match" => names(body, &["fuzziness", "max_expansions"]) || matches!(body.get("type").and_then(Value::as_str), Some("phrase_prefix" | "bool_prefix")),
+        "bool" => ["must", "should", "filter", "must_not"].iter().filter_map(|k| body.get(k)).any(queries),
+        "constant_score" => body.get("filter").is_some_and(queries),
+        "nested" => body.get("query").is_some_and(queries),
+        _ => false,
+    }
+}
+
+/// The fields the `range` queries of filter `q` (a [`plain_filter`]) test.
+fn range_fields<'a>(q: &'a Value, out: &mut Vec<&'a str>) {
+    let Some((kind, body)) = q.as_object().and_then(|m| m.iter().next()) else { return };
+    let children: Vec<&'a Value> = match kind.as_str() {
+        "range" => {
+            out.extend(body.as_object().into_iter().flat_map(|m| m.keys()).filter(|k| !matches!(k.as_str(), "boost" | "_name")).map(String::as_str));
+            return;
+        }
+        "bool" => ["must", "should", "filter", "must_not"].iter().filter_map(|k| body.get(k)).collect(),
+        "constant_score" => body.get("filter").into_iter().collect(),
+        "nested" => body.get("query").into_iter().collect(),
+        _ => return,
+    };
+    for c in children {
+        match c {
+            Value::Arr(a) => a.iter().for_each(|q| range_fields(q, out)),
+            q => range_fields(q, out),
+        }
+    }
+}
+
+/// The indices a derived key reaches (`reach`: the names and patterns its narrowing grants): by
+/// name or alias, and the backing indices of the data streams (and data stream aliases) it names.
+fn reached<'a>(st: &'a crate::meta::ClusterState, reach: &[String]) -> Vec<&'a crate::meta::IndexMeta> {
+    let hit = |n: &str| reach.iter().any(|p| super::privileges::glob(p, n));
+    let mut backing: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut stream = |name: &str| {
+        if let Some(d) = st.metadata.data_streams.get(name) {
+            backing.extend(d.indices.iter().map(String::as_str));
+        }
+    };
+    for d in st.metadata.data_streams.values().filter(|d| hit(&d.name)) {
+        stream(&d.name);
+    }
+    for (alias, a) in &st.metadata.data_stream_aliases {
+        if hit(alias) {
+            a.data_streams.iter().for_each(|d| stream(d));
+        }
+    }
+    st.metadata.indices.values().filter(|i| hit(&i.name) || i.aliases.keys().any(|a| hit(a)) || backing.contains(i.name.as_str())).map(|i| &**i).collect()
+}
+
+/// Whether `path` is a string in mapping `m` (text, keyword and their kin), a keyed subfield of a
+/// `flattened` field (`labels.foo`) included: a range over it walks the terms between its bounds.
+fn string_field(m: &crate::mapping::Mapping, path: &str) -> bool {
+    const STRINGS: &[&str] = &["text", "match_only_text", "keyword", "wildcard", "version", "flattened", "alias"];
+    if let Some(r) = m.lookup(path) {
+        return STRINGS.contains(&r.type_name());
+    }
+    let mut at = path.len();
+    while let Some(i) = path[..at].rfind('.') {
+        at = i;
+        if m.lookup(&path[..at]).is_some_and(|r| r.type_name() == "flattened") {
+            return true;
+        }
+    }
+    false
+}
+
+/// The fields the queries of filter `q` (a [`plain_filter`]) name, as written (a query's own
+/// parameters may come along: only ever a reason to refuse more); `*` where one searches its
+/// index's default fields.
+fn filter_fields<'a>(q: &'a Value, out: &mut Vec<&'a str>) {
+    const PARAMS: &[&str] = &["boost", "_name", "validation_method", "ignore_unmapped", "distance", "distance_type", "type"];
+    let Some((kind, body)) = q.as_object().and_then(|m| m.iter().next()) else { return };
+    let children: Vec<&'a Value> = match kind.as_str() {
+        "bool" => ["must", "should", "filter", "must_not"].iter().filter_map(|k| body.get(k)).collect(),
+        "constant_score" => body.get("filter").into_iter().collect(),
+        "nested" => body.get("query").into_iter().collect(),
+        "ids" | "match_all" | "match_none" => return,
+        "exists" => {
+            out.extend(body.get("field").and_then(Value::as_str));
+            return;
+        }
+        "multi_match" | "simple_query_string" => {
+            match body.get("fields").and_then(Value::as_array) {
+                Some(f) => out.extend(f.iter().filter_map(Value::as_str).map(|f| f.split('^').next().unwrap_or(f))),
+                None => out.push("*"),
+            }
+            return;
+        }
+        _ => {
+            out.extend(body.as_object().into_iter().flat_map(|m| m.keys()).map(String::as_str).filter(|k| !PARAMS.contains(k)));
+            return;
+        }
+    };
+    for c in children {
+        match c {
+            Value::Arr(a) => a.iter().for_each(|q| filter_fields(q, out)),
+            q => filter_fields(q, out),
+        }
+    }
+}
+
+/// Whether one of `fields` (names or patterns) is a runtime field of an index in `indices`: a
+/// query on one runs its script for every document, and a filter is built as the owner's,
+/// outside the browser policy.
+fn names_runtime_field(indices: &[&crate::meta::IndexMeta], fields: &[&str]) -> bool {
+    indices.iter().any(|i| i.mapping.runtime.keys().any(|r| fields.iter().any(|f| super::privileges::glob(f, r))))
 }
 
 /// Whether `q` is a filter a derived key may carry: queries on the document itself, combined
@@ -258,7 +433,7 @@ fn plain_filter(q: &Value) -> bool {
 
 /// Checks a signed payload's fields against its parent (`browser`, its `metadata.roll_browser`;
 /// `k`, the stored key), refusing any that would widen it.
-fn narrowed(c: &Value, browser: &Value, k: &Value, now_s: i64) -> EsResult<DerivedAuth> {
+fn narrowed(st: &crate::meta::ClusterState, c: &Value, browser: &Value, k: &Value, now_s: i64) -> EsResult<DerivedAuth> {
     let exp = c.get("exp").and_then(Value::as_i64).ok_or_else(|| refused("[exp] (unix seconds) is required"))?;
     if exp.saturating_add(SKEW_S) < now_s {
         return Err(refused("expired"));
@@ -301,6 +476,7 @@ fn narrowed(c: &Value, browser: &Value, k: &Value, now_s: i64) -> EsResult<Deriv
             (None, None) => return Err(refused("its parent reaches nothing")),
         },
     };
+    let reach: Vec<String> = names.iter().filter_map(Value::as_str).map(str::to_string).collect();
     let mut group = obj! { "names" => Value::Arr(names), "privileges" => crate::arr!["read"] };
     match c.get("filter") {
         None | Some(Value::Null) => {}
@@ -310,6 +486,24 @@ fn narrowed(c: &Value, browser: &Value, k: &Value, now_s: i64) -> EsResult<Deriv
             }
             if !plain_filter(f) {
                 return Err(refused("[filter]: only queries on the document itself (term, terms of values, range, exists, match… in bool, constant_score or nested): no lookups, joins, scripts, templates or wrapped queries"));
+            }
+            // Read from the mappings as they are on each request, so a field mapped later is
+            // caught then.
+            let indices = reached(st, &reach);
+            let mut named = Vec::new();
+            filter_fields(f, &mut named);
+            if names_runtime_field(&indices, &named) {
+                return Err(refused("[filter]: a query on a runtime field runs a script for every document: a derived key's filter can't"));
+            }
+            if !super::browser::Policy::of(browser).allow_expensive_queries {
+                if expands(f) {
+                    return Err(refused("[filter]: expanding terms (prefix, wildcard, the prefix match queries, simple_query_string, fuzziness, max_expansions) needs its parent's limits.allow_expensive_queries"));
+                }
+                let mut ranged = Vec::new();
+                range_fields(f, &mut ranged);
+                if indices.iter().any(|i| ranged.iter().any(|f| string_field(&i.mapping, f))) {
+                    return Err(refused("[filter]: a range on a text or keyword field (its terms are walked, as a prefix's are) needs its parent's limits.allow_expensive_queries"));
+                }
             }
             // As a role's query is checked when it's put, then as the cluster will build it.
             if super::users::check_role_query(&f.to_json()).is_err() || crate::query::parse_stored(f).is_err() {
@@ -358,7 +552,7 @@ fn narrowed(c: &Value, browser: &Value, k: &Value, now_s: i64) -> EsResult<Deriv
         }
         Some(_) => return Err(refused(format!("[origins]: 1 to {MAX_ORIGINS} origins"))),
     };
-    Ok(DerivedAuth { narrowing: obj! { "roll_derived" => descriptor }, user, per_minute, origins })
+    Ok(DerivedAuth { id: String::new(), narrowing: obj! { "roll_derived" => descriptor }, user, per_minute, origins, exp, generation: 0 })
 }
 
 /// The stored key `k` with its signing secret redacted ([`REDACTED`]), as the API key APIs
@@ -413,7 +607,10 @@ pub fn on_update(new: &mut Value, stored: &Value) -> EsResult<()> {
             }
         },
         Some(d) => {
-            let next = kept.as_ref().map_or(0, generation) + 1;
+            // A key's first is 1, so a stored one past `i64::MAX - 1` was never made here.
+            let Some(next) = kept.as_ref().map_or(0, generation).checked_add(1) else {
+                return Err(EsError::new(409, "version_conflict_engine_exception", format!("[{METADATA}.{DERIVE}]: its generation can't advance: make a new browser key")));
+            };
             if generation(d) != next {
                 return Err(EsError::new(409, "version_conflict_engine_exception", format!("[{METADATA}.{DERIVE}]: a new signing secret must be generation [{next}]; another took its place")));
             }
@@ -429,6 +626,86 @@ mod tests {
     /// The test vector the TypeScript helper's test checks too (apps/dashboard
     /// `search-derive.test.ts`): the same secret and payload sign the same key.
     const VECTOR: &str = include_str!("../../../tests/fixtures/derived-key-vector.json");
+
+    /// An update's `derive`: left out, kept; `null`, removed; a new secret only as the next
+    /// generation, never past `i64::MAX`.
+    #[test]
+    fn updates_keep_derive_and_advance_its_generation_once() {
+        let stored = |generation: i64| obj! { "metadata" => obj! { METADATA => obj! { DERIVE => obj! { "secret" => "s", "generation" => generation } } } };
+        let update = |derive: Option<Value>| {
+            let mut b = obj! { "indices" => crate::arr!["i"] };
+            if let (Some(d), Some(m)) = (derive, b.as_object_mut()) {
+                m.insert(DERIVE.into(), d);
+            }
+            obj! { METADATA => b }
+        };
+        let secret = |generation: i64| obj! { "secret" => "new", "generation" => generation };
+        let mut kept = update(None);
+        on_update(&mut kept, &stored(3)).unwrap();
+        assert_eq!(kept.pointer(&[METADATA, DERIVE, "generation"]).and_then(Value::as_i64), Some(3), "left out: kept");
+        let mut removed = update(Some(Value::Null));
+        on_update(&mut removed, &stored(3)).unwrap();
+        assert!(removed.pointer(&[METADATA, DERIVE]).is_none(), "null: removed");
+        assert!(on_update(&mut update(Some(secret(4))), &stored(3)).is_ok(), "the next generation");
+        for (g, at) in [(3, 3), (5, 3), (2, 3), (1, i64::MAX)] {
+            let e = on_update(&mut update(Some(secret(g))), &stored(at)).unwrap_err();
+            assert_eq!(e.status, 409, "generation {g} over a stored {at}");
+        }
+        // A new key starts at 1.
+        assert!(on_update(&mut update(Some(secret(1))), &Value::Null).is_ok());
+        assert_eq!(on_update(&mut update(Some(secret(i64::MAX))), &Value::Null).unwrap_err().status, 409);
+    }
+
+    async fn call(c: &Cluster, method: &str, uri: &str, body: &str) -> (u16, Value) {
+        let req = if body.is_empty() { crate::rest::EsRequest::new(method, uri) } else { crate::rest::EsRequest::json(method, uri, body.to_string()) };
+        let r = crate::rest::handle(c, req).await;
+        (r.status, crate::json::parse(&r.body).ok().flatten().unwrap_or(Value::Null))
+    }
+
+    /// A derived key is checked against the cluster that verifies it, whatever routed it there:
+    /// named for another cluster it's refused; on a node without a catalog (`search-dev`) it is
+    /// never accepted. A planted generation is refused when the parent is made.
+    #[tokio::test]
+    async fn the_cluster_checking_a_key_must_be_the_one_it_names() {
+        let make = |name: &str, catalog: Option<&str>| {
+            let mut cfg = crate::ClusterConfig::new(name);
+            cfg.catalog_id = catalog.map(str::to_string);
+            cfg.unsealed_secrets = true;
+            cfg
+        };
+        let key = |generation: i64| {
+            format!(
+                r#"{{"name":"saas","role_descriptors":{{"r":{{"indices":[{{"names":["i"],"privileges":["read"]}}]}}}},"metadata":{{"roll_browser":{{"cluster":"srch_1","indices":["i"],"rate_limit":{{"per_minute":100}},"derive":{{"secret":"rdks_t","generation":{generation}}}}}}}}}"#
+            )
+        };
+        let exp = crate::time::now_millis() / 1000 + 600;
+        for (name, catalog) in [("shop", Some("srch_1")), ("dev", None)] {
+            let c = Cluster::open(make(name, catalog), std::sync::Arc::new(crate::MemoryStore::new())).await.unwrap();
+            let (s, v) = call(&c, "POST", "/_security/api_key", &key(i64::MAX)).await;
+            assert_eq!(s, 409, "a planted generation: {v}");
+            let (s, v) = call(&c, "POST", "/_security/api_key", &key(1)).await;
+            assert_eq!(s, 200, "{v}");
+            let id = v.get("id").and_then(Value::as_str).unwrap();
+            let token = |cluster: &str| sign("rdks_t", &format!(r#"{{"key":"{id}","cluster":"{cluster}","exp":{exp}}}"#));
+            let mine = authenticate(&c, &token(name));
+            if catalog.is_some() {
+                let p = mine.expect("named for this cluster");
+                let AuthKind::ApiKey(a) = &p.kind else { panic!("an API key") };
+                let v = VerifiedKey { key: id.to_string(), auth: a.derived.as_deref().expect("narrowed").clone() };
+                assert!(verified(&c, &v).is_ok(), "as the node verified it");
+                let stale = VerifiedKey { auth: DerivedAuth { exp: exp - 3600, ..v.auth.clone() }, ..v.clone() };
+                assert!(verified(&c, &stale).is_err(), "expired since");
+                // A rotation after the node's check stops the rest of the request too.
+                let body = r#"{"metadata":{"roll_browser":{"cluster":"srch_1","indices":["i"],"rate_limit":{"per_minute":100},"derive":{"secret":"rdks_u","generation":2}}}}"#;
+                let (s, r) = call(&c, "PUT", &format!("/_security/api_key/{id}"), body).await;
+                assert_eq!(s, 200, "{r}");
+                assert!(verified(&c, &v).is_err(), "its secret rotated since");
+            } else {
+                assert!(mine.is_err(), "no catalog id to bind the secret to");
+            }
+            assert!(authenticate(&c, &token("other")).is_err(), "named for another cluster");
+        }
+    }
 
     #[test]
     fn the_shared_vector_signs_and_splits() {

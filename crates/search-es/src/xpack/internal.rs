@@ -25,6 +25,8 @@ pub type Call<'a> = Pin<Box<dyn Future<Output = EsResult<Value>> + Send + 'a>>;
 pub struct Caller {
     /// The headers that make an internal call that client.
     headers: Vec<(String, String)>,
+    /// What the node verified it as ([`crate::rest::Verified`]), carried onto the call.
+    verified: Option<crate::rest::Verified>,
     /// Its document and field level security (`None`: it reads documents unrestricted).
     pub security: Option<crate::xpack::security::dls::ReadSecurity>,
 }
@@ -80,6 +82,9 @@ pub fn stored_user(p: &crate::xpack::security::Principal) -> Option<Value> {
         // A derived key's narrowing stays with it (browser keys start no jobs; kept regardless).
         if let (Some(d), Some(k)) = (&a.derived, k.as_object_mut()) {
             k.insert("narrowing".into(), d.narrowing.clone());
+            k.insert("derived_id".into(), d.id.clone().into());
+            k.insert("derived_exp".into(), d.exp.into());
+            k.insert("derived_generation".into(), d.generation.into());
         }
         m.insert("api_key".into(), k);
     }
@@ -98,7 +103,14 @@ pub fn principal_of(u: &Value) -> Option<crate::xpack::security::Principal> {
             limited_by: a.get("limited_by").cloned().unwrap_or(Value::Null),
             cross_cluster: a.get("cross_cluster").and_then(Value::as_bool).unwrap_or(false),
             remote: None,
-            derived: a.get("narrowing").map(|n| Box::new(crate::xpack::security::derived::DerivedAuth { narrowing: n.clone(), user: None, per_minute: None, origins: Vec::new() })),
+            derived: a.get("narrowing").map(|n| {
+                let id = a.get("derived_id").and_then(Value::as_str).unwrap_or_default().to_string();
+                // As it was verified: a job run past its expiry or its secret's rotation is
+                // refused ([`principal_problem`]); one kept without them, never run.
+                let exp = a.get("derived_exp").and_then(Value::as_i64).unwrap_or(0);
+                let generation = a.get("derived_generation").and_then(Value::as_i64).unwrap_or(-1);
+                Box::new(crate::xpack::security::derived::DerivedAuth { id, narrowing: n.clone(), user: None, per_minute: None, origins: Vec::new(), exp, generation })
+            }),
         })),
         None => crate::xpack::security::AuthKind::Realm,
     };
@@ -136,6 +148,18 @@ pub fn principal_problem(cluster: &Cluster, p: &crate::xpack::security::Principa
         if k.get("expiration").and_then(Value::as_i64).is_some_and(|exp| exp <= crate::time::now_millis()) {
             return Some(format!("{key} has expired"));
         }
+        // A key derived from it holds only while it's unexpired and its parent's secret is still
+        // the one that signed it.
+        if let Some(d) = &a.derived {
+            use crate::xpack::security::{browser::METADATA, derived::DERIVE};
+            let generation = k.pointer(&["metadata", METADATA, DERIVE]).filter(|d| !d.is_null()).map(|d| d.get("generation").and_then(Value::as_i64).unwrap_or(0));
+            if generation != Some(d.generation) {
+                return Some(format!("{key} signs no longer with the secret its derived key was signed with"));
+            }
+            if d.exp.saturating_add(crate::xpack::security::derived::SKEW_S) < crate::time::now_millis() / 1000 {
+                return Some(format!("{key} derived a key that has expired"));
+            }
+        }
         return None;
     }
     let gone = match (cluster.dialect, p.realm_type) {
@@ -160,7 +184,7 @@ pub const SYSTEM_HEADER: &str = "x-roll-internal-system";
 
 /// The principal an internal request without credentials runs as ([`as_principal`]).
 pub fn acting_principal(req: &EsRequest) -> Option<crate::xpack::security::Principal> {
-    if req.header("authorization").is_some() || req.header(crate::xpack::security::AUTHENTICATED_HEADER).is_some() || req.header(SYSTEM_HEADER).is_some() {
+    if req.header("authorization").is_some() || req.verified.is_some() || req.header(SYSTEM_HEADER).is_some() {
         return None;
     }
     ACTING.try_with(Clone::clone).ok()
@@ -178,18 +202,20 @@ impl Caller {
     /// The client of `ctx`, a superuser too: for calls whose result belongs to whoever sent
     /// them (a point in time or scroll is bound to its opener).
     pub fn client(ctx: &crate::rest::Ctx<'_>) -> Option<Caller> {
-        use crate::xpack::security::{AUTHENTICATED_HEADER, INDEX_SCOPE_HEADER, RUN_AS_HEADER};
+        use crate::xpack::security::{INDEX_SCOPE_HEADER, RUN_AS_HEADER};
         ctx.principal.get()?;
-        // The headers that made it this principal: the node's authentication (narrowed to some
-        // indices on a per-index route) or the client's credentials, and its run-as user.
-        // A linked remote cluster's request keeps its remote access too (only roll's own calls
-        // reach here with it), or its key alone would be refused.
-        let headers = [AUTHENTICATED_HEADER, INDEX_SCOPE_HEADER, "Authorization", RUN_AS_HEADER, crate::remote::links::REMOTE_ACCESS_HEADER]
+        // What made it this principal: the node's verification (the cluster's own credentials,
+        // narrowed to some indices on a per-index route, or a derived key) or the client's
+        // credentials, and its run-as user. A linked remote cluster's request keeps its remote
+        // access too (only roll's own calls reach here with it), or its key alone would be
+        // refused.
+        let verified = ctx.request.verified.clone();
+        let headers = [INDEX_SCOPE_HEADER, "Authorization", RUN_AS_HEADER, crate::remote::links::REMOTE_ACCESS_HEADER]
             .into_iter()
-            .filter(|h| *h != "Authorization" || ctx.request.header(AUTHENTICATED_HEADER).is_none())
+            .filter(|h| *h != "Authorization" || verified.is_none())
             .filter_map(|h| ctx.request.header(h).map(|v| (h.to_string(), v.to_string())))
             .collect();
-        Some(Caller { headers, security: crate::xpack::security::dls::ReadSecurity::of(ctx) })
+        Some(Caller { headers, verified, security: crate::xpack::security::dls::ReadSecurity::of(ctx) })
     }
 }
 
@@ -226,6 +252,7 @@ pub fn call<'a>(cluster: &'a Cluster, method: &str, uri: &str, body: Option<&Val
     Box::pin(async move {
         if let Some(c) = caller() {
             req.headers.extend(c.headers);
+            req.verified = c.verified;
         }
         send(cluster, req).await
     })
@@ -258,11 +285,12 @@ pub fn call_as<'a>(ctx: &crate::rest::Ctx<'_>, cluster: &'a Cluster, method: &st
         req.body = bytes::Bytes::from(b.to_json());
         req.headers.push(("Content-Type".into(), "application/json".into()));
     }
-    if ctx.request.header(crate::xpack::security::AUTHENTICATED_HEADER).is_none()
+    if ctx.request.verified.is_none()
         && let Some(a) = ctx.request.header("authorization")
     {
         req.headers.push(("Authorization".into(), a.to_string()));
     }
+    req.verified = ctx.request.verified.clone();
     if let Some(user) = ctx.request.header(crate::xpack::security::RUN_AS_HEADER) {
         req.headers.push((crate::xpack::security::RUN_AS_HEADER.into(), user.to_string()));
     }
@@ -285,6 +313,7 @@ pub fn call_ndjson<'a>(cluster: &'a Cluster, method: &str, uri: &str, body: Stri
         // As the caller too ([`call`]): a bulk write is authorized per item as the client.
         if let Some(c) = caller() {
             req.headers.extend(c.headers);
+            req.verified = c.verified;
         }
         let resp = crate::rest::handle(cluster, req).await;
         let v = crate::json::parse(&resp.body).ok().flatten().unwrap_or(Value::Null);
