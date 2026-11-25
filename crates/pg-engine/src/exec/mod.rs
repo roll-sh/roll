@@ -454,14 +454,9 @@ pub struct ExecCtx<'a> {
     /// Initplans reading the enclosing queries' rows: the rows of each with the outer rows
     /// they were made for (`outer`'s, kept alive so they are told apart by address).
     enclosing_cache: RefCell<HashMap<usize, (Vec<Rc<Row>>, Rc<Vec<Row>>)>>,
-    /// Correlated SubPlans' executor trees, by subquery id, kept from one run to the next
-    /// in the statement and rescanned (ExecReScan) for the next outer row: the plan and the
-    /// snapshot each was opened for (another plan at the id's address, or another snapshot,
-    /// opens its own).
-    subplan_trees: RefCell<HashMap<usize, KeptSubplan>>,
-    /// Correlated scalar and EXISTS SubPlans' rows by their parameters' values, for the
-    /// plan and snapshot each was made for (`memo_rows`).
-    subplan_memo: RefCell<HashMap<usize, SubplanMemo>>,
+    /// What correlated SubPlans keep between their runs in the statement (`Subplans`),
+    /// made by the first one: a statement without one sets one pointer, not two maps.
+    subplans: RefCell<Option<Box<Subplans>>>,
     pub ctes: RefCell<HashMap<usize, Rc<RefCell<nodes::CteState>>>>,
     pub work: RefCell<HashMap<usize, Rc<Vec<Row>>>>,
     /// Shared with child contexts: a COMMIT inside a procedure starts a new transaction time.
@@ -834,6 +829,18 @@ pub struct Kept {
     enrs: Vec<Rc<Enr>>,
 }
 
+/// What correlated SubPlans keep between their runs in a statement (`ExecCtx::subplans`).
+#[derive(Default)]
+struct Subplans {
+    /// Executor trees, by subquery id, kept from one run to the next and rescanned
+    /// (ExecReScan) for the next outer row: the plan and the snapshot each was opened for
+    /// (another plan at the id's address, or another snapshot, opens its own).
+    trees: HashMap<usize, KeptSubplan>,
+    /// Scalar and EXISTS SubPlans' rows by their parameters' values, for the plan and
+    /// snapshot each was made for (`memo_rows`).
+    memo: HashMap<usize, SubplanMemo>,
+}
+
 /// A correlated SubPlan's rows by its parameters' values (`ExecCtx::memo_rows`): None when
 /// its plan can't be remembered so.
 struct SubplanMemo {
@@ -915,7 +922,7 @@ fn memo_expr(e: &Expr) -> bool {
     ok
 }
 
-/// A correlated SubPlan's tree between its runs (`ExecCtx::subplan_trees`).
+/// A correlated SubPlan's tree between its runs (`Subplans::trees`).
 struct KeptSubplan {
     plan: Arc<Plan>,
     snap: Rc<crate::txn::Snap>,
@@ -1038,8 +1045,7 @@ impl<'a> ExecCtx<'a> {
             case_vals: RefCell::new(Vec::new()),
             subq_cache: RefCell::new(HashMap::default()),
             enclosing_cache: RefCell::new(HashMap::default()),
-            subplan_trees: RefCell::new(HashMap::default()),
-            subplan_memo: RefCell::new(HashMap::default()),
+            subplans: RefCell::new(None),
             ctes: RefCell::new(HashMap::default()),
             work: RefCell::new(HashMap::default()),
             txn_time: Rc::new(Cell::new(txn_time)),
@@ -1174,8 +1180,7 @@ impl<'a> ExecCtx<'a> {
             case_vals: RefCell::new(Vec::new()),
             subq_cache: RefCell::new(HashMap::default()),
             enclosing_cache: RefCell::new(HashMap::default()),
-            subplan_trees: RefCell::new(HashMap::default()),
-            subplan_memo: RefCell::new(HashMap::default()),
+            subplans: RefCell::new(None),
             ctes: RefCell::new(HashMap::default()),
             work: RefCell::new(HashMap::default()),
             txn_time: self.txn_time.clone(),
@@ -1639,7 +1644,8 @@ impl<'a> ExecCtx<'a> {
             return Ok(None);
         };
         {
-            let mut memo = self.subplan_memo.borrow_mut();
+            let mut sp = self.subplans();
+            let memo = &mut sp.memo;
             let fresh = memo.get(&s.id).is_none_or(|m| !Arc::ptr_eq(&m.plan, &s.plan) || !Rc::ptr_eq(&m.snap, &snap));
             if fresh {
                 let exact = |e: &Expr| {
@@ -1657,8 +1663,8 @@ impl<'a> ExecCtx<'a> {
             params.push(eval(p, row, self)?);
         }
         let keep = {
-            let mut memo = self.subplan_memo.borrow_mut();
-            let Some(m) = memo.get_mut(&s.id) else { return Ok(None) };
+            let mut sp = self.subplans();
+            let Some(m) = sp.memo.get_mut(&s.id) else { return Ok(None) };
             m.asked = m.asked.saturating_add(1);
             if let Some(r) = m.rows.as_ref().and_then(|rows| rows.get(&params)) {
                 m.found = m.found.saturating_add(1);
@@ -1673,10 +1679,15 @@ impl<'a> ExecCtx<'a> {
             return Ok(Some(Rc::new(self.with_outer(Rc::new(params), || self.subplan_rows(s, limit))?)));
         }
         let rows = Rc::new(self.with_outer(Rc::new(params.clone()), || self.subplan_rows(s, limit))?);
-        if let Some(m) = self.subplan_memo.borrow_mut().get_mut(&s.id).and_then(|m| m.rows.as_mut()) {
+        if let Some(m) = self.subplans().memo.get_mut(&s.id).and_then(|m| m.rows.as_mut()) {
             m.insert(params, rows.clone());
         }
         Ok(Some(rows))
+    }
+
+    /// `subplans`, made now if no SubPlan made it yet.
+    fn subplans(&self) -> std::cell::RefMut<'_, Subplans> {
+        std::cell::RefMut::map(self.subplans.borrow_mut(), |s| &mut **s.get_or_insert_with(Default::default))
     }
 
     /// The rows of subquery `s` (its parameters, if any, evaluated over `row`).
@@ -1705,7 +1716,7 @@ impl<'a> ExecCtx<'a> {
         }) else {
             return collect(&s.plan, self, limit);
         };
-        let kept = self.subplan_trees.borrow_mut().remove(&s.id);
+        let kept = self.subplans().trees.remove(&s.id);
         let rescanned = match kept {
             Some(mut k) if Arc::ptr_eq(&k.plan, &s.plan) && Rc::ptr_eq(&k.snap, &snap) => k.node.rescan(self)?.then_some(k.node),
             _ => None,
@@ -1722,7 +1733,7 @@ impl<'a> ExecCtx<'a> {
             }
         }
         if node.can_rescan() {
-            self.subplan_trees.borrow_mut().insert(s.id, KeptSubplan { plan: s.plan.clone(), snap, node });
+            self.subplans().trees.insert(s.id, KeptSubplan { plan: s.plan.clone(), snap, node });
         }
         Ok(out)
     }
