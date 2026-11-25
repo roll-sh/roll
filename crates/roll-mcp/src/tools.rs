@@ -441,6 +441,7 @@ fn apps_area(method: &str, path: &str) -> Area {
         // Finding a service and its environments: every area starts there.
         [] | ["services"] | ["services", "environments"] if read => return Area::Every,
         ["projects", "services"] if read => return Area::Every,
+        ["services", "deploys"] => "deploy",
         ["services"] | ["services", "environments"] | ["projects", "services"] => "configure",
         ["services", "environments", s, ..] => match *s {
             "analytics" | "app-metrics" | "errors" | "logs" | "metrics" | "routes" | "slo" | "traces" | "usage" | "vitals" | "push" | "fetch" | "advice" => "observe",
@@ -1414,7 +1415,8 @@ static TOOLS: &[Tool] = &[
             IDEMPOTENCY,
         ],
     ).open_world(),
-    t("apps_list_deploys", "List deploys", "An environment's deploys, newest first, 100 at a time (before: the next page).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys", &[SERVICE, ENV, q("before", Ty::Int, "The next page: the last one's created_at (unix ms)")]),
+    t("apps_list_deploys", "List deploys", "An environment's deploys, newest first, 100 at a time (before: the next page), narrowed by state, who made them or their message and commit.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys", &[SERVICE, ENV, q("before", Ty::Int, "The next page: the last one's created_at (unix ms)"), q("status", Ty::Str, "Only deploys in this state: queued, building, deploying, ready, active, inactive, failed, canceled or removed"), q("actor", Ty::Str, "Only deploys this person, token or commit author made (as the deploy's actor says)"), q("q", Ty::Str, "Only deploys whose message holds this, or whose commit starts with it")]),
+    t("apps_service_deploys", "List a service's deploys", "Every environment's deploys of a service (previews' too), newest first, 100 at a time, narrowed by state, who made them or their message and commit.", "apps", "GET", "/v1/apps/services/{service}/deploys", &[SERVICE, q("before", Ty::Int, "The next page: the last one's created_at (unix ms)"), q("status", Ty::Str, "Only deploys in this state: queued, building, deploying, ready, active, inactive, failed, canceled or removed"), q("actor", Ty::Str, "Only deploys this person, token or commit author made (as the deploy's actor says)"), q("q", Ty::Str, "Only deploys whose message holds this, or whose commit starts with it")]),
     t("apps_deploy_logs", "Deploy logs", "A deploy's build and release log.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/logs", &[SERVICE, ENV, req("deploy", "Deploy id"), q("tail", Ty::Int, "Last lines")]),
     t(
         "apps_promote",

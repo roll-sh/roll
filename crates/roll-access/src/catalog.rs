@@ -1697,6 +1697,8 @@ static ROWS: &[Row] = &[
     // on their usage), in any environment: write, never production's deploy.
     row("POST", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/explain", "apps", W, one(PG, "service")).env(EnvFrom::Param("env")),
     row("POST", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/approve", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
+    // Every environment's deployments of a service (a preview's among them).
+    row("GET", "/v1/apps/services/{id}/deploys", "apps", R, one(PG, "service")),
     // Keeping a deployment from pruning changes nothing that runs.
     row("POST", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/pin", "apps", W, one(PG, "service")).env(EnvFrom::Param("env")),
     row("DELETE", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/pin", "apps", W, one(PG, "service")).env(EnvFrom::Param("env")),

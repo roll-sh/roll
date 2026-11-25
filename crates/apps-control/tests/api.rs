@@ -1360,6 +1360,12 @@ async fn old_deployments_are_pruned_past_what_an_environment_keeps() {
     let last = page.as_array().unwrap().last().unwrap()["created_at"].as_i64().unwrap();
     let (_, older) = call(&w.api, "GET", &format!("{base}?before={last}"), None).await;
     assert!(older.as_array().unwrap().is_empty() && page.as_array().unwrap().len() == 7, "{page}");
+    // Narrowed in the database: the two that failed, by state or across every environment.
+    let (_, failed) = call(&w.api, "GET", &format!("{base}?status=failed"), None).await;
+    assert!(failed.as_array().unwrap().len() == 2 && failed.as_array().unwrap().iter().all(|d| d["status"] == "failed"), "{failed}");
+    let (_, all) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/deploys?status=failed"), None).await;
+    assert_eq!(all.as_array().unwrap().len(), 2, "{all}");
+    assert_eq!(call(&w.api, "GET", &format!("{base}?status=done"), None).await.0, StatusCode::BAD_REQUEST);
     // Pruned once: a second pass removes nothing again; unpinned, it's pruned as the rest are.
     w.apps.prune().await;
     assert_eq!(w.fake.removed.lock().len(), removed.len());
