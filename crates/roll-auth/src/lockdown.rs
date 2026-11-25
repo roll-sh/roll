@@ -24,8 +24,9 @@ pub const OUTSIDE_HEADER: &str = "x-roll-outside";
 /// route's `name`; a preview note from a share link's guest its `note`, and the page `path` and
 /// element `selector` they sent; a fork's page, fetched or tried, its console `errors` and its
 /// response `headers` (each value); a fork's caught mail its `subject`, `from` and `to`; and its
-/// data branch's `table`, `columns` and `rows` (each value, so a table keeps its shape).
-const TEXT: [&str; 20] = ["title", "body", "description", "message", "text", "line", "lines", "sample", "name", "note", "selector", "path", "errors", "headers", "subject", "from", "to", "table", "columns", "rows"];
+/// data branch's `table`, `columns` and `rows` (each value, so a table keeps its shape); and a
+/// file or a diff at a fork's revision in roll code, its `content` and each file's `patch`.
+const TEXT: [&str; 22] = ["title", "body", "description", "message", "text", "line", "lines", "sample", "name", "note", "selector", "path", "errors", "headers", "subject", "from", "to", "table", "columns", "rows", "content", "patch"];
 /// An author roll names after what they typed (a share link's guest, `guest:<name>`): the name is
 /// their text too, so only the prefix stays.
 const CHOSEN_AUTHOR: &str = "guest:";

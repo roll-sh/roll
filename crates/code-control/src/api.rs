@@ -418,7 +418,11 @@ async fn tree(
     Path((owner, repo, rev, path)): Path<(String, String, String, String)>,
 ) -> Result<Json<Value>> {
     let r = code.readable(&caller, &owner, &repo)?;
-    Ok(Json(code.tree_view(&r, &rev, &path).await?))
+    let mut v = code.tree_view(&r, &rev, &path).await?;
+    // A fork's tree names its own files (MCP's lockdown).
+    let cs = v["changeset"].as_str().map(str::to_string);
+    code.mark_at(&r, cs.as_deref(), &mut v, &["entries"], None);
+    Ok(Json(v))
 }
 
 async fn blob(
@@ -442,6 +446,10 @@ async fn blob(
     if let Ok(v) = HeaderValue::from_str(&cs_id(&cs)) {
         h.insert("x-roll-changeset", v);
     }
+    // A file in a fork's change is its author's text (MCP's lockdown), which bytes can't say.
+    if code.outside_at(&r, &cs) {
+        h.insert(roll_auth::lockdown::OUTSIDE_HEADER, HeaderValue::from_static("true"));
+    }
     if let Ok(v) = HeaderValue::from_str(&file.oid.hex()) {
         h.insert(header::ETAG, v);
     }
@@ -460,7 +468,11 @@ async fn blame(
     Path((owner, repo, rev, path)): Path<(String, String, String, String)>,
 ) -> Result<Json<Value>> {
     let r = code.readable(&caller, &owner, &repo)?;
-    Ok(Json(code.blame_view(&r, &rev, &path).await?))
+    let mut v = code.blame_view(&r, &rev, &path).await?;
+    // A fork's lines and its changesets' messages are its author's (MCP's lockdown).
+    let cs = v["changeset"].as_str().map(str::to_string);
+    code.mark_at(&r, cs.as_deref(), &mut v, &[], Some(("ranges", "changeset")));
+    Ok(Json(v))
 }
 
 // ── webhooks and commit statuses ──
@@ -576,12 +588,19 @@ struct LogQuery {
 
 async fn log(State(code): S, caller: Caller, Path((owner, repo)): Path<(String, String)>, Q(q): Q<LogQuery>) -> Result<Json<Value>> {
     let r = code.readable(&caller, &owner, &repo)?;
-    Ok(Json(code.log_view(&r, q.rev.as_deref(), q.path.as_deref(), q.limit.unwrap_or(0), q.cursor.as_deref())?))
+    let mut v = code.log_view(&r, q.rev.as_deref(), q.path.as_deref(), q.limit.unwrap_or(0), q.cursor.as_deref())?;
+    // A fork's own changesets' messages are its author's (MCP's lockdown); landed ones aren't.
+    code.mark_at(&r, q.rev.as_deref(), &mut v, &[], Some(("items", "id")));
+    Ok(Json(v))
 }
 
 async fn changeset(State(code): S, caller: Caller, Path((owner, repo, id)): Path<(String, String, String)>) -> Result<Json<Value>> {
     let r = code.readable(&caller, &owner, &repo)?;
-    Ok(Json(code.changeset_view(&r, &id).await?))
+    let mut v = code.changeset_view(&r, &id).await?;
+    // A fork's changeset: its message and its patches are its author's (MCP's lockdown).
+    let cs = v["id"].as_str().map(str::to_string);
+    code.mark_at(&r, cs.as_deref(), &mut v, &["files"], None);
+    Ok(Json(v))
 }
 
 #[derive(Deserialize)]
@@ -598,7 +617,10 @@ async fn compare(
 ) -> Result<Response> {
     let r = code.readable(&caller, &owner, &repo)?;
     let (base, head) = spec.split_once("...").ok_or_else(|| Error::Invalid("compare takes base...head".into()))?;
-    let v = code.compare_view(&r, base, head).await?;
+    let mut v = code.compare_view(&r, base, head).await?;
+    // A fork's head: its patches and its own changesets' messages are its author's (MCP's lockdown).
+    let to = v["head"].as_str().map(str::to_string);
+    let outside = code.mark_at(&r, to.as_deref(), &mut v, &["files"], Some(("changesets", "id")));
     match q.format.as_deref() {
         None | Some("json") => Ok(Json(v).into_response()),
         Some("diff" | "patch") => {
@@ -615,7 +637,11 @@ async fn compare(
                     out.push('\n');
                 }
             }
-            Ok(([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], out).into_response())
+            let mut resp = ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], out).into_response();
+            if outside {
+                resp.headers_mut().insert(roll_auth::lockdown::OUTSIDE_HEADER, HeaderValue::from_static("true"));
+            }
+            Ok(resp)
         }
         Some(f) => Err(Error::Invalid(format!("format is json or diff, not {f}"))),
     }
