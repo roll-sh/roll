@@ -314,15 +314,27 @@ struct Check {
 /// a nested or catch-all route is matched by its path, as the gate matches it.
 async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Result<Json<Value>> {
     let who = who(&a, &ext)?;
-    let (scope, ask_otherwise) = match (&who, &c.token) {
-        (Who::Grant(g), None) => (g.scope.as_ref().clone(), g.ask_otherwise),
+    let (scope, ask_otherwise, user) = match (&who, &c.token) {
+        (Who::Grant(g), None) => (g.scope.as_ref().clone(), g.ask_otherwise, g.user.as_deref().map(str::to_string)),
         (Who::Grant(_), Some(_)) => return Err(Error::Forbidden("a token checks only itself".into())),
         (Who::Operator | Who::User(_), Some(id)) => {
             let g = visible_grant(&a, &who, id).await?;
-            (g.effective_rules(code_sql::now_ms(), |r| a.policy_now().asks_again(r)), g.ask_otherwise)
+            (g.effective_rules(code_sql::now_ms(), |r| a.policy_now().asks_again(r)), g.ask_otherwise, g.user.clone())
         }
         (Who::Operator, None) => return Ok(Json(json!({ "decision": "allow", "why": "the operator may do everything" }))),
         (Who::User(_), None) => return Err(Error::BadRequest("name the token to check (token)".into())),
+    };
+    // A person's token is decided as the gate decides it: as a person's grant (a canvas counts
+    // only where it trusts) unless they're an admin, whose token is the operator's, narrowed.
+    // A token whose person can't sign in is dead at the gate: so it is here.
+    let person = match (&user, a.people.get()) {
+        (None, _) => false,
+        (Some(_), None) => return Ok(Json(json!({ "decision": "deny", "why": "the token's person can't sign in: it works for nothing" }))),
+        (Some(u), Some(people)) => match people.person(u).await {
+            Ok(Some(p)) => !p.admin,
+            Ok(None) => return Ok(Json(json!({ "decision": "deny", "why": "the token's person can't sign in: it works for nothing" }))),
+            Err(e) => return Err(Error::Internal(format!("looking up the token's person: {e}"))),
+        },
     };
     let method = c.method.to_ascii_uppercase();
     let uri: axum::http::Uri = c.path.parse().map_err(|_| Error::BadRequest("path isn't a request path".into()))?;
@@ -331,18 +343,20 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
     };
     let row = found.row;
     let params = found.params.unwrap_or_default();
-    let (a2, q) = (a.clone(), uri.query().map(str::to_string));
-    let params2 = params.clone();
-    let target = tokio::task::spawn_blocking(move || crate::evaluate::target(&a2, row, &params2, q.as_deref(), &axum::http::HeaderMap::new()))
-        .await
-        .map_err(|e| Error::Internal(e.to_string()))?;
-    // Decided as the gate decides: the copy a body asks for, and "ask for anything else".
+    // Decided as the gate decides: the request's headers (a create's `X-Roll-Project`), the
+    // project a create's body names, the copy a body asks for, and "ask for anything else".
     let mut headers = axum::http::HeaderMap::new();
     for (k, v) in &c.headers {
         if let (Ok(k), Ok(v)) = (axum::http::HeaderName::try_from(k.as_str()), axum::http::HeaderValue::from_str(v)) {
             headers.insert(k, v);
         }
     }
+    let (a2, q, h) = (a.clone(), uri.query().map(str::to_string), headers.clone());
+    let params2 = params.clone();
+    let mut target = tokio::task::spawn_blocking(move || crate::evaluate::target(&a2, row, &params2, q.as_deref(), &h, person))
+        .await
+        .map_err(|e| Error::Internal(e.to_string()))?;
+    crate::evaluate::project_from_body(row, &mut target, c.body.as_ref()).map_err(Error::BadRequest)?;
     let mut action = row.action_with(&method, &params, c.body.as_ref(), &headers);
     let mut outcome = if matches!(row.target, catalog::Tgt::AnyGrant) { Outcome::Allow } else { scope.outcome(&target, action) };
     if let Some((copied, _, _)) = crate::evaluate::copy_outcome(&a, row, &params, &target, (c.body.as_ref(), uri.query()), &scope).await
@@ -351,7 +365,7 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
         (outcome, action) = (copied, Action::Reveal);
     }
     let mut about: (&str, Option<String>) = (row.product, None);
-    if let Some(l) = crate::evaluate::lend_outcome(&a, row, &params, c.body.as_ref(), &scope).await
+    if let Some(l) = crate::evaluate::lend_outcome(&a, row, &params, c.body.as_ref(), &scope, person).await
         && crate::evaluate::rank(l.outcome) < crate::evaluate::rank(outcome)
     {
         (outcome, action) = (l.outcome, l.action);
@@ -949,6 +963,9 @@ async fn approvals(State(a): S, ext: Extensions, Query(q): Query<ApprovalsQuery>
         _ => None,
     };
     let (state, limit) = (q.state.clone(), q.limit.unwrap_or(100));
+    if let Some(s) = state.as_deref().filter(|s| !crate::store::APPROVAL_STATES.contains(s)) {
+        return Err(Error::BadRequest(format!("state is one of {}, not {s}", crate::store::APPROVAL_STATES.join(", "))));
+    }
     let list = blocking(a, move |a| {
         let mut list: Vec<_> = a.store.approvals(state.as_deref(), grants.as_deref(), limit)?.into_iter().map(|x| a.gated(x)).collect();
         // A person also sees what roll's policy names them to approve.

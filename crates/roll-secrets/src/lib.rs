@@ -61,6 +61,7 @@ pub mod issuer;
 pub mod kubernetes;
 mod oidc;
 mod read;
+mod rekey;
 mod metrics;
 pub mod backup_schedule;
 pub mod reach;
@@ -655,11 +656,11 @@ impl Secrets {
         db.add_column("cas", "acme_preauthorize", "INTEGER")?;
         db.ensure_schema(ssh::SCHEMA)?;
         db.ensure_schema(public_certs::SCHEMA)?;
-        // The sweep's marks (public_certs.rs): the serial every linked key was rolled to, when (or
-        // until when a node holds it), and when a key last took the certificate.
-        db.add_column("public_certs", "rolled_serial", "TEXT")?;
-        db.add_column("public_certs", "rolled_at", "INTEGER")?;
-        db.add_column("public_certs", "linked_at", "INTEGER")?;
+        // The certificate a renewal replaced, the renewals asked for, and the sweep's marks
+        // (public_certs.rs).
+        for (column, decl) in public_certs::ADDED {
+            db.add_column("public_certs", column, decl)?;
+        }
         db.ensure_schema(aws::SCHEMA)?;
         // An audit sink's format and its SIEM's token, sealed (sinks.rs): absent is roll's own.
         db.add_column("audit_sinks", "format", "TEXT")?;

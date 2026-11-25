@@ -2500,21 +2500,40 @@ async fn a_notes_people_are_told_by_mail() {
     assert_eq!(e.engine.store.pending_tells(&p.id).unwrap().len(), 1, "nothing more queued");
 }
 
+/// A preview whose data grows past the project's `max_bytes` goes to sleep, and stays asleep
+/// whichever way it's woken (the API, a visit's start) until the cap is raised or it's reset.
+#[tokio::test]
+async fn a_preview_over_its_size_cap_stays_asleep() {
+    use roll_previews::ports::EnvSource;
+    let e = env(json!({ "enabled": true, "max_bytes": 1 << 20 }));
+    e.code.open(change("chg_cap", 4));
+    for _ in 0..3 {
+        e.engine.pass().await.unwrap();
+    }
+    let p = e.engine.store.row_by_change("chg_cap").unwrap().unwrap();
+    assert!(p.state == State::Sleeping && p.error.as_deref().is_some_and(|m| m.contains("max_bytes")), "two 1 MiB branches over a 1 MiB cap: {:?} {:?}", p.state, p.error);
+    assert!(matches!(e.engine.wake(&p.id).await, Err(roll_previews::Error::Conflict(_))), "not woken by the API");
+    assert!(e.engine.env(&p.id, "web").await.is_err(), "nor started by a visit");
+    let s = e.engine.store.settings(&e.project).unwrap().patched(&json!({ "max_bytes": 1u64 << 30 })).unwrap();
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    e.engine.wake(&p.id).await.unwrap();
+}
+
 /// A guest's note through a share link that takes notes: on the change as `guest:<name>`, its
 /// words inert for a pull request, the link's label said; a link that takes none refuses; ten an
-/// hour per link; a guest sees only their link's notes. No share link where roll apps serves it.
+/// hour per link; a guest sees only their link's notes.
 #[tokio::test]
 async fn a_share_links_guest_leaves_notes_as_a_guest() {
     let e = env(json!({ "enabled": true }));
     e.code.open(change("chg_g", 5));
     e.engine.pass().await.unwrap();
     let p = e.engine.store.row_by_change("chg_g").unwrap().unwrap();
-    let live = async |notes: bool, label: &str| {
-        let (_, url) = e.engine.share(&p.id, 2, "ada", None, label, notes).await.unwrap();
+    let live = |notes: bool, label: &str| {
+        let (_, url) = e.engine.share(&p.id, 2, "ada", None, label, notes).unwrap();
         let token = url.split("roll_share=").nth(1).unwrap().to_string();
         e.engine.store.share_live(&p.id, &token).unwrap().unwrap()
     };
-    let (open, closed) = (live(true, "Acme's review").await, live(false, "").await);
+    let (open, closed) = (live(true, "Acme's review"), live(false, ""));
     let note = roll_previews::notes::GuestNote { name: "Ada <script>".into(), path: "/pricing".into(), selector: "button.buy".into(), note: "Ping @team ![x](https://t.example/p.gif) <b>here</b>".into(), viewport: "390x844".into(), ..Default::default() };
     e.engine.guest_note(&p.id, &open, &note).await.unwrap();
     let (change, body, by, outside) = e.code.comments.lock()[0].clone();
@@ -2535,9 +2554,6 @@ async fn a_share_links_guest_leaves_notes_as_a_guest() {
     let seen: Vec<String> = e.engine.guest_notes_of(&p.id, &open.id, "/pricing").await.unwrap().into_iter().map(|n| n.id).collect();
     assert_eq!(seen, ["rv_c1"]);
     assert!(e.engine.guest_notes_of(&p.id, &closed.id, "/pricing").await.unwrap().is_empty());
-    // None where roll apps serves the preview: its proxy would turn the link's visitors away.
-    *e.apps.catalog.lock() = Some(vec![roll_previews::ports::CatalogService { name: "web".into(), repo: Some("acme/web".into()), root: String::new(), memory_mb: 512 }]);
-    assert!(matches!(e.engine.share(&p.id, 2, "ada", None, "", false).await, Err(roll_previews::Error::Conflict(_))));
 }
 
 /// A start's dynamic credentials (roll secrets' leases) live as long as it runs: renewed near

@@ -279,6 +279,8 @@ pub struct Apps {
     capped_refresh: tokio::sync::Mutex<()>,
     /// roll previews' notes for a preview's feedback button ([`Apps::set_feedback_notes`]).
     notes: std::sync::OnceLock<Arc<dyn integrations::FeedbackNotes>>,
+    /// roll previews' share links for a preview's host ([`Apps::set_preview_shares`]).
+    shares: std::sync::OnceLock<Arc<dyn integrations::PreviewShares>>,
     /// Where a name under a project's preview domain no environment holds goes (roll previews).
     preview_router: std::sync::OnceLock<Arc<dyn integrations::PreviewRouter>>,
     /// roll previews' branch pushes ([`Apps::set_git_pushes`]).
@@ -691,6 +693,7 @@ impl Apps {
             capped: Mutex::new(Default::default()),
             capped_refresh: tokio::sync::Mutex::new(()),
             notes: std::sync::OnceLock::new(),
+            shares: std::sync::OnceLock::new(),
             preview_router: std::sync::OnceLock::new(),
             pushes: std::sync::OnceLock::new(),
             github: std::sync::OnceLock::new(),
@@ -1288,6 +1291,42 @@ impl Apps {
         let link = self.db(move |s| s.git_github(&sid)).await.ok().flatten()?;
         let (owner, repo) = github_repo(url, &app.host()?)?;
         link.repo.eq_ignore_ascii_case(&format!("{owner}/{repo}")).then_some((app, link.installation, owner, repo))
+    }
+
+    /// roll previews' commit status on a Git URL service's GitLab or Bitbucket repository, with
+    /// its Git login, sent only to its source's own host (`ci_hosts`). `false` when it has no
+    /// login or its host is neither (GitHub's goes through roll's GitHub App). On the service's
+    /// owner only (roll previews' fleet hop brings it there).
+    pub async fn commit_status(self: &Arc<Self>, service: &str, sha: &str, status: &integrations::CommitStatus) -> anyhow::Result<bool> {
+        anyhow::ensure!(self.owns(service), "the service's owner reports for it");
+        let sid = service.to_string();
+        let svc = self.db(move |s| s.service(&sid)).await?;
+        let Source::Git { url, .. } = &svc.source else { return Ok(false) };
+        let remote = self.git_remote(&svc.id, url).await;
+        let (Some(host), Some(login)) = (ci_hosts::host_of(url), remote.login()) else { return Ok(false) };
+        ci_hosts::post(self.cfg.allow_private, &host, login, sha, status).await?;
+        Ok(true)
+    }
+
+    /// roll previews' one note on a Git URL service's GitLab merge request or Bitbucket pull
+    /// request `number` of `repo` (its path), `existing` edited in place (made again when it's
+    /// gone there): its id. `None` when it has no login, its host is neither, or its source is
+    /// another repository now (a number is its repository's). On the service's owner only.
+    pub async fn pull_request_note(self: &Arc<Self>, service: &str, repo: &str, number: u64, body: &str, existing: Option<u64>) -> anyhow::Result<Option<u64>> {
+        anyhow::ensure!(self.owns(service), "the service's owner reports for it");
+        let sid = service.to_string();
+        let svc = self.db(move |s| s.service(&sid)).await?;
+        let Source::Git { url, .. } = &svc.source else { return Ok(None) };
+        let remote = self.git_remote(&svc.id, url).await;
+        let (Some(host), Some(login)) = (ci_hosts::host_of(url), remote.login()) else { return Ok(None) };
+        let path = match &host {
+            ci_hosts::Host::GitLab { project, .. } => project.clone(),
+            ci_hosts::Host::Bitbucket { workspace, repo, .. } => format!("{workspace}/{repo}"),
+        };
+        if !path.eq_ignore_ascii_case(repo.trim_end_matches(".git")) {
+            return Ok(None);
+        }
+        Ok(Some(ci_hosts::note(self.cfg.allow_private, &host, login, number, body, existing).await?))
     }
 
     /// The repository a Git URL service fetches from: through roll's GitHub App when it's
@@ -4425,6 +4464,16 @@ impl Apps {
 
     pub(crate) fn feedback_notes(&self) -> Option<Arc<dyn integrations::FeedbackNotes>> {
         self.notes.get().cloned()
+    }
+
+    /// Where a preview environment's host checks a share link (roll previews, once it's on this
+    /// node). Set once.
+    pub fn set_preview_shares(&self, shares: Arc<dyn integrations::PreviewShares>) {
+        let _ = self.shares.set(shares);
+    }
+
+    pub(crate) fn preview_shares(&self) -> Option<Arc<dyn integrations::PreviewShares>> {
+        self.shares.get().cloned()
     }
 
     /// Where names under a project's preview domain that no environment holds go (roll previews'

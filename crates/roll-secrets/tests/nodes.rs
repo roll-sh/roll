@@ -103,7 +103,7 @@ fn two_nodes_racing_on_one_environment_lose_no_change_and_share_no_number() {
                 let caller = Caller::operator();
                 for i in 0..20 {
                     let ops = vec![set("SHARED", &format!("{name}{i}")), set(&format!("ONLY_{}", name.to_uppercase()), &i.to_string())];
-                    s.batch(&project, "production", Batch { path: None, message: None, ops, if_seq: None }, &caller).unwrap();
+                    s.batch(&project, "production", Batch { path: None, message: None, ops, if_seq: None, confirm: None }, &caller).unwrap();
                 }
             })
         })
@@ -164,7 +164,7 @@ fn a_digest_one_node_keeps_moves_at_once_with_what_another_node_changes() {
     links.register(bucket.clone());
     let (a, b) = (node_with(dir.path(), ws.clone(), links.clone(), None), node_with(dir.path(), ws, links, None));
     let op = Caller::operator();
-    let write = |s: &Secrets, env: &str, ops: Vec<Op>| drop(s.batch(&project, env, Batch { path: None, message: None, ops, if_seq: None }, &op).unwrap());
+    let write = |s: &Secrets, env: &str, ops: Vec<Op>| drop(s.batch(&project, env, Batch { path: None, message: None, ops, if_seq: None, confirm: None }, &op).unwrap());
     let live = Op::Set { key: "BUCKET_URL".into(), value: None, comment: None, tags: None, kind: None, link: Some(Some(Link { kind: "bucket".into(), r#ref: "assets".into(), field: "url".into(), mode: Mode::Live, options: Default::default() })), path: None, expires_at: None, if_version: None };
     write(&b, "production", vec![set("API", "1"), live]);
     write(&b, "staging", vec![set("SHARED", "x")]);
@@ -205,7 +205,7 @@ fn two_nodes_rotating_the_issuers_key_publish_one_key_and_never_sign_with_a_pull
     // The test's own handle on the nodes' database: there's no clock to move, so a key's time is
     // moved instead (`signs_from`, on the database's clock).
     let db = secrets_db(dir.path());
-    a.batch(&project, "production", Batch { path: None, message: None, ops: vec![set("A", "1")], if_seq: None }, &Caller::operator()).unwrap();
+    a.batch(&project, "production", Batch { path: None, message: None, ops: vec![set("A", "1")], if_seq: None, confirm: None }, &Caller::operator()).unwrap();
     let sign = |s: &Secrets| s.issue(roll_secrets::Subject::App { project: project.clone(), service: "svc_web".into(), env: "production".into() }, "roll", std::time::Duration::from_secs(600)).unwrap();
     // (kid, signs_from, retired_at), oldest first.
     let keys = || -> Vec<(String, i64, Option<i64>)> { db.read(|c| c.query("SELECT kid, COALESCE(signs_from, created_at), retired_at FROM oidc_keys ORDER BY created_at, kid", (), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))).unwrap() };
@@ -324,7 +324,7 @@ fn two_nodes_sweeping_a_deleted_project_close_its_log_once_and_purge_it_once() {
     let project = ws.create("", "shop", "", None).unwrap().id;
     let (a, b) = (node(dir.path(), ws.clone()), node(dir.path(), ws.clone()));
     let caller = Caller::operator();
-    a.batch(&project, "production", Batch { path: None, message: None, ops: vec![set("K", "v")], if_seq: None }, &caller).unwrap();
+    a.batch(&project, "production", Batch { path: None, message: None, ops: vec![set("K", "v")], if_seq: None, confirm: None }, &caller).unwrap();
     // A sink that never takes anything (nothing delivers here, so it's written as create_sink
     // writes one): the purge waits for it.
     let db = secrets_db(dir.path());
@@ -381,7 +381,7 @@ fn two_nodes_writing_events_never_leave_a_gap_a_follower_has_passed() {
     let (a, b) = (node(dir.path(), ws.clone()), node(dir.path(), ws));
     let value = "sk_live_eventsrace0123456789";
     let caller = Caller::operator();
-    a.batch(&project, "production", Batch { path: None, message: None, ops: vec![set("STRIPE_KEY", value)], if_seq: None }, &caller).unwrap();
+    a.batch(&project, "production", Batch { path: None, message: None, ops: vec![set("STRIPE_KEY", value)], if_seq: None, confirm: None }, &caller).unwrap();
 
     // On each node, scans (group-committed reads: `scan.finding`), policy changes (writes:
     // `production.unprotected` each time it goes) and plain changes (rows with no event) race,
@@ -402,7 +402,7 @@ fn two_nodes_writing_events_never_leave_a_gap_a_follower_has_passed() {
                             s.set_policy(&project, "production", p(true), &caller).unwrap();
                             s.set_policy(&project, "production", p(false), &caller).unwrap();
                         }
-                        _ => drop(s.batch(&project, "staging", Batch { path: None, message: None, ops: vec![set("N", &i.to_string())], if_seq: None }, &caller).unwrap()),
+                        _ => drop(s.batch(&project, "staging", Batch { path: None, message: None, ops: vec![set("N", &i.to_string())], if_seq: None, confirm: None }, &caller).unwrap()),
                     }
                 }
             })

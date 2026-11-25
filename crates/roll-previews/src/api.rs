@@ -301,13 +301,25 @@ struct CreateBody {
     change: Option<String>,
 }
 
-async fn create(AxState(e): S, axum::Extension(visible): axum::Extension<Visible>, who: Option<axum::Extension<roll_auth::SignedIn>>, headers: axum::http::HeaderMap, b: Bytes) -> crate::Result<Response> {
+async fn create(
+    AxState(e): S,
+    axum::Extension(visible): axum::Extension<Visible>,
+    who: Option<axum::Extension<roll_auth::SignedIn>>,
+    decided: Option<axum::Extension<roll_auth::InProject>>,
+    headers: axum::http::HeaderMap,
+    b: Bytes,
+) -> crate::Result<Response> {
     let b: CreateBody = body(&b)?;
     if b.branch.is_some() == b.change.is_some() {
         return Err(Error::BadRequest("give one of branch or change".into()));
     }
-    // roll-access decides a create by the project `X-Roll-Project` names (a member's role there, a
-    // token's rule): the preview is made in that one, never in another the body names.
+    // roll-access decided a create by its project (the body's, or `X-Roll-Project`: a member's
+    // role there, a token's rule): the preview is made in that one, never in another.
+    if let Some(axum::Extension(roll_auth::InProject(p))) = &decided
+        && *p != b.project
+    {
+        return Err(Error::BadRequest(format!("decided for project {p}, the body names {}: they must be the same project", b.project)));
+    }
     if let Some(named) = headers.get("x-roll-project").map(|v| v.to_str().unwrap_or_default().trim())
         && named != b.project
     {
@@ -479,7 +491,7 @@ async fn share(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extensio
     // Whose link it is: the person signed in, or the person behind a token (an operator's: none).
     let maker = who.as_ref().map(|axum::Extension(u)| u.user.clone()).or_else(|| grant.and_then(|axum::Extension(g)| g.user.map(|u| u.to_string())));
     let by = who.map(|axum::Extension(u)| u.handle).unwrap_or_else(|| "operator".into());
-    let (share, url) = e.share(&id, s.hours, &by, maker.as_deref(), &s.label, s.notes).await?;
+    let (share, url) = blocking(e, move |e| e.share(&id, s.hours, &by, maker.as_deref(), &s.label, s.notes)).await?;
     let mut v = serde_json::to_value(&share).unwrap_or_default();
     v["url"] = json!(url);
     Ok((StatusCode::CREATED, Json(v)).into_response())

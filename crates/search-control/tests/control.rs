@@ -686,6 +686,16 @@ async fn people_are_held_to_their_cluster_caps() {
     assert!(e.call_as("admin", Method::GET, "/v1/search", None).await.1["caps"].is_null());
     // Alice's count toward nobody else: bob still makes his.
     assert_eq!(e.call_as("bob", Method::POST, "/v1/search/clusters", Some(create("b1", None))).await.0, 200);
+    // One handed to a workspace project (its home: rolld's `on_homed`) is no one's, and counts
+    // toward who made it.
+    for name in ["b2", "b3"] {
+        let (s, v) = e.call_as("bob", Method::POST, "/v1/search/clusters", Some(create(name, None))).await;
+        assert_eq!(s, 200, "{v}");
+        assert!(e.control.store.disown(v["id"].as_str().unwrap()).unwrap());
+        let (_, v) = e.call_as("admin", Method::GET, &format!("/v1/search/clusters/{name}"), None).await;
+        assert!(v["owner"].is_null() && v["made_by"] == "usr_bob", "{v}");
+    }
+    assert_eq!(e.call_as("bob", Method::POST, "/v1/search/clusters", Some(create("b4", None))).await.0, 409, "what bob made for a project counts toward him");
 
     // A deleted cluster frees its place (alice: a1, a2, a1-dev and the admin's a1-fix; two go),
     // and restoring one past the cap is the same 409 as a create.
@@ -3782,6 +3792,36 @@ async fn cross_cluster_search_between_a_persons_own_clusters() {
     assert!(info.get("logs").is_none(), "{info}");
 }
 
+/// A remote link holds by its maker's rights: once roll-access says they may no longer administer
+/// its target (removed from the project, demoted), searches across it are skipped and it shows as
+/// not connected, though the link is still there.
+#[tokio::test]
+async fn a_link_stops_once_its_maker_may_not_administer_the_target() {
+    use reqwest::Method;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let e = env().await;
+    let still = Arc::new(AtomicBool::new(true));
+    let s2 = still.clone();
+    e.control.set_link_makers(Arc::new(move |maker: &str, _target: &str| maker == "usr_ann" && s2.load(Ordering::SeqCst)));
+    let mut made = Vec::new();
+    for name in ["mk-app", "mk-logs"] {
+        let (s, c) = e.call_as("ann", Method::POST, "/v1/search/clusters", Some(json!({ "name": name }))).await;
+        assert_eq!(s, 200, "{c}");
+        made.push(creds(&c));
+    }
+    let ((app, app_pw), (logs, logs_pw)) = (made[0].clone(), made[1].clone());
+    assert_eq!(e.es(&logs, &logs_pw, Method::PUT, "/logs-1/_doc/1?refresh=true", Some(json!({ "m": "x" }))).await.0, 201);
+    let (s, v) = e.call_as("ann", Method::PUT, "/v1/search/clusters/mk-app/remotes/logs", Some(json!({ "cluster": "mk-logs" }))).await;
+    assert_eq!(s, 200, "{v}");
+    let (_, v) = e.es(&app, &app_pw, Method::GET, "/logs:logs-1/_search", None).await;
+    assert_eq!(v["hits"]["total"]["value"], 1, "{v}");
+    still.store(false, Ordering::SeqCst);
+    let (_, v) = e.es(&app, &app_pw, Method::GET, "/logs:logs-1/_search", None).await;
+    assert_eq!((v["hits"]["total"]["value"].as_i64(), v["_clusters"]["details"]["logs"]["status"].as_str()), (Some(0), Some("skipped")), "{v}");
+    let (_, listed) = e.call_as("ann", Method::GET, "/v1/search/clusters/mk-app/remotes", None).await;
+    assert_eq!((listed["remotes"][0]["alias"].as_str(), listed["remotes"][0]["connected"].as_bool()), (Some("logs"), Some(false)), "{listed}");
+}
+
 /// A linked remote that sleeps wakes for the search; one that's gone is skipped (the default),
 /// or fails the search when it may not be.
 #[tokio::test]
@@ -5080,6 +5120,32 @@ impl Env {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
+}
+
+/// A cluster's site verifications and their tokens belong to its tenant: its home project, else its
+/// person owner. Two clusters of one project share a site's token (a record published once
+/// proves it for both); clusters of two projects never do, so neither reuses the other's proof.
+#[tokio::test]
+async fn crawler_site_tokens_follow_the_clusters_project() {
+    let e = crawler_env(&[]).await;
+    let mut ids = Vec::new();
+    for name in ["a-one", "a-two", "b-one"] {
+        ids.push(e.post("/v1/search/clusters", json!({"name": name})).await["id"].as_str().unwrap().to_string());
+    }
+    // Handed to their projects, as rolld records a home.
+    for (id, project) in [(&ids[0], "prj_a"), (&ids[1], "prj_a"), (&ids[2], "prj_b")] {
+        e.control.store.set_project(id, Some(project)).unwrap();
+    }
+    let token = |id: String| {
+        let e = &e;
+        async move {
+            let v = e.post(&format!("/v1/search/clusters/{id}/site-verifications"), json!({"domain": "docs.example.com"})).await;
+            v["dns"]["value"].as_str().unwrap_or_else(|| panic!("{v}")).to_string()
+        }
+    };
+    let (a1, a2, b1) = (token(ids[0].clone()).await, token(ids[1].clone()).await, token(ids[2].clone()).await);
+    assert_eq!(a1, a2, "one project's clusters share the site's token");
+    assert_ne!(a1, b1, "another project's cluster gets its own");
 }
 
 /// A site of six pages on loopback.

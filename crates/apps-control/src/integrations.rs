@@ -246,6 +246,30 @@ pub trait FeedbackNotes: Send + Sync {
     async fn notes(&self, env: &str, path: &str) -> anyhow::Result<Vec<Note>>;
 }
 
+/// roll previews' share links (someone outside the team, until the link ends) for a preview
+/// environment's own host (rolld fills it from `roll_previews::Engine`). Unset: none taken. Every
+/// call checks the link again, so a revoked or ended one stops at once.
+#[async_trait]
+pub trait PreviewShares: Send + Sync {
+    /// Link `token` to `env` (`pv-<id>`)'s preview, if it's live. `followed`: the link itself was
+    /// followed (previews counts that once a day).
+    async fn live(&self, env: &str, token: &str, followed: bool) -> Option<Share>;
+    /// A guest's note from the page's button (its JSON body) through link `token`: the note's id,
+    /// or why not (an HTTP status and a line).
+    async fn note(&self, env: &str, token: &str, body: &[u8]) -> Result<String, (u16, String)>;
+    /// The notes on `path` left through link `token`: all its guests see.
+    async fn notes(&self, env: &str, token: &str, path: &str) -> Vec<Note>;
+}
+
+/// A live share link.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Share {
+    /// When it ends (ms since the epoch).
+    pub ends_ms: i64,
+    /// Its guests may leave notes.
+    pub notes: bool,
+}
+
 /// A push to a Git URL service's repository, to a branch none of its environments follows: roll
 /// previews makes (or moves, or tears down) that branch's preview. Checked against the
 /// repository before it's handed on: `sha` is where the branch is now, and a deletion is a branch

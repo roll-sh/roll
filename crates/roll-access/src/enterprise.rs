@@ -244,7 +244,8 @@ impl Access {
             let out = app.clone();
             write_enterprise(c, &e)?;
             if let Some(r) = &encoded {
-                c.execute("UPDATE grants SET rules = ? WHERE client_id = ? AND kind = 'oauth' AND revoked_at IS NULL", params![r, client_id])?;
+                let ids: Vec<String> = c.query("SELECT id FROM grants WHERE client_id = ? AND kind = 'oauth' AND revoked_at IS NULL", [client_id], |r| r.get(0))?;
+                ids.iter().try_for_each(|id| crate::store::set_rules(c, id, r))?;
             }
             Ok::<_, Error>(out)
         })
@@ -535,7 +536,9 @@ fn connect(a: &Access, app: &App, idp: &Idp, user: &str, read_only: bool, mcp_on
         let rules = serde_json::to_string(&app.rules).map_err(|e| Error::Internal(e.to_string()))?;
         a.store.db.write(|c| {
             // The app's rules as they are now (the operator may have changed them).
-            c.execute("UPDATE grants SET rules = ? WHERE id = ? AND revoked_at IS NULL", params![rules, id])?;
+            if c.query_row("SELECT 1 FROM grants WHERE id = ? AND revoked_at IS NULL", [&id], |_| Ok(())).optional()?.is_some() {
+                crate::store::set_rules(c, &id, &rules)?;
+            }
             c.execute("DELETE FROM grant_secrets WHERE grant_id = ? AND kind = 'access' AND expires_at < ?", params![id, now])?;
             c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at, read_only, audience) VALUES (?, ?, 'access', ?, ?, ?, ?)", params![hash(&access), id, now + crate::store::ACCESS_TTL_MS, now, read_only, audience])?;
             Ok::<_, Error>(())

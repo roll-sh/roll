@@ -431,6 +431,15 @@ const step = async (sessionId, s, until) => {
     for (const type of [text ? "keyDown" : "rawKeyDown", "keyUp"]) await send("Input.dispatchKeyEvent", { type, key, code: s.press, windowsVirtualKeyCode: KEYS[s.press], text: type === "keyUp" ? undefined : text }, sessionId).catch(() => null);
     return null;
   }
+  if (Array.isArray(s.choose) && s.choose.length === 2 && Number.isInteger(s.choose[1])) {
+    const [target, n] = s.choose;
+    const r = await check({
+      expression: `(() => { const el = document.querySelector(${sel(target)}); if (!(el instanceof HTMLSelectElement) || ${n} < 1 || ${n} > el.options.length) return false; el.focus();
+        const t0 = performance.now(); el.selectedIndex = ${n} - 1; el.dispatchEvent(new Event("input", { bubbles: true })); el.dispatchEvent(new Event("change", { bubbles: true })); ${PAINTED} return true; })()`,
+      returnByValue: true,
+    }, sessionId);
+    return r?.result?.value === true ? null : `choose ${target}: no option ${n} there`;
+  }
   if (typeof s.wait === "number") {
     await sleep(Math.min(Math.max(s.wait, 0), 5000));
     return null;

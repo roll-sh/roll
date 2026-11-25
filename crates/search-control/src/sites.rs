@@ -1,10 +1,11 @@
 //! The web crawler's sites, kept in the catalogue every node shares (docs/search/crawler.md,
-//! "Domain verification"): each cluster's verified domains and origins, and each owner's crawls
-//! of sites they haven't verified (the daily limit, counted across the fleet). Clusters reach
-//! them through [`CatalogSites`] (`ClusterConfig::sites`); people through
-//! `/v1/search/clusters/{id}/site-verifications`, decided on that cluster. A verification is the
-//! cluster's, its token the owner's for the site (the same in each of their clusters), so a
-//! record published once proves the site for another of their clusters in one check, while a
+//! "Domain verification"): each cluster's verified domains and origins, and each tenant's crawls
+//! of sites they haven't verified (the daily limit, counted across the fleet). A tenant is a
+//! cluster's home project, else its person owner ([`SearchCluster::tenant`]): two projects never
+//! share one. Clusters reach them through [`CatalogSites`] (`ClusterConfig::sites`); people
+//! through `/v1/search/clusters/{id}/site-verifications`, decided on that cluster. A verification
+//! is the cluster's, its token the tenant's for the site (the same in each of their clusters), so
+//! a record published once proves the site for another of their clusters in one check, while a
 //! grant on one cluster touches only that cluster's verifications.
 //!
 //! A domain is verified by a DNS TXT record and covers every origin on it; an origin by the file
@@ -28,10 +29,11 @@ const RECHECK_BATCH: i64 = 50;
 /// `crawl-test`s and verification checks one owner may start in a minute, on one node.
 pub const PROBES_PER_MINUTE: usize = 10;
 
-/// Whose verifications a cluster's are: its owner, or the operator's for clusters without one
-/// (as the crawler counts them: `search_es` `crawler::sync`).
+/// Whose verifications a cluster's are: its tenant ([`SearchCluster::tenant`]: its home project,
+/// its person owner, or itself), or the operator's for the operator's own clusters (as the
+/// crawler counts them: `search_es` `crawler::sync`, from `ClusterSpec::owner`).
 pub fn owner_of(c: &SearchCluster) -> String {
-    c.owner.clone().unwrap_or_else(|| "(no owner)".to_string())
+    c.tenant().unwrap_or_else(|| "(no owner)".to_string())
 }
 
 /// The catalogue as clusters see it.
