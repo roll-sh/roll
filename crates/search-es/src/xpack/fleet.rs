@@ -18,8 +18,15 @@ use crate::xpack::{internal, store};
 use std::sync::Arc;
 
 pub const SECRETS: &str = "fleet_secret";
-/// What a Fleet secret's value is sealed as ([`crate::seal`]).
+/// What a Fleet secret's value is sealed as ([`crate::seal`]), bound by [`secret_kind`].
 pub(crate) const SECRET_KIND: &str = "fleet secret";
+
+/// What secret `id` is sealed as: bound to the cluster and the entry, so it doesn't open in
+/// another entry's slot or another cluster's state (a branch's copy of its parent's, which
+/// doesn't keep the parent's secrets: [`crate::branch`]).
+fn secret_kind(cluster: &crate::cluster::Cluster, id: &str) -> String {
+    format!("{}:{id}", crate::seal::bind(cluster, SECRET_KIND))
+}
 
 /// The one index `expr` names (an index, alias or data stream write index).
 fn single_index(ctx: &Ctx, expr: &str) -> EsResult<Option<Arc<IndexMeta>>> {
@@ -211,7 +218,7 @@ pub async fn post_secret(ctx: &Ctx<'_>) -> EsResult<Reply> {
     };
     let id = crate::meta::names::time_based_id();
     let out = id.clone();
-    let entry = crate::seal::seal_value(ctx.cluster, SECRET_KIND, value)?;
+    let entry = crate::seal::seal_value(ctx.cluster, &secret_kind(ctx.cluster, &id), value)?;
     let now = ctx.now_ms;
     ctx.cluster.update(move |st| store::put(st, SECRETS, &id, entry, now).map(|_| ())).await?;
     Reply::ok(obj! { "id" => out })
@@ -225,7 +232,7 @@ fn no_secret(id: &str) -> EsError {
 pub fn get_secret(ctx: &Ctx) -> EsResult<Reply> {
     let id = ctx.path_param("id").unwrap_or_default();
     match ctx.state().metadata.xpack.get(SECRETS, id) {
-        Some(s) => Reply::ok(obj! { "id" => id, "value" => crate::seal::open_value(ctx.cluster, SECRET_KIND, s)? }),
+        Some(s) => Reply::ok(obj! { "id" => id, "value" => crate::seal::open_value(ctx.cluster, &secret_kind(ctx.cluster, id), s)? }),
         None => Err(no_secret(id)),
     }
 }

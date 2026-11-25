@@ -14,8 +14,9 @@
 //!   only a cluster of the same owner, or one a link that holds points at ([`Control::linked`]).
 //! - **Credentials**: the remote issues a `cross_cluster` API key (`search` access patterns);
 //!   the local cluster keeps it as `cluster.remote.<alias>.credentials`, a secure setting, here
-//!   in the catalog (`search_remotes`), sealed under the deployment's key and bound to its row
-//!   (cluster, alias, target), never returned. Revoking the key on the remote cuts the link.
+//!   in the catalog (`search_remotes`), sealed under the catalog's key (the deployment's, or on a
+//!   single node without one the node's own) and bound to its row (cluster, alias, target), never
+//!   returned. Revoking the key on the remote cuts the link.
 //! - **Execution**: a remote's part runs on the remote cluster's owner through [`Control`]'s
 //!   own in-process call or signed fleet forward, never over the public endpoint, so IP
 //!   allowlists don't apply to it. A sleeping remote wakes for it.
@@ -144,6 +145,18 @@ impl Links for ControlLinks {
     }
 }
 
+/// A linked remote's request without the headers only roll says: credentials (the key goes on
+/// after), the host, a repository's maker (only `Control::put_repository`), and roll's revocation
+/// of a key from before a switch of flavor.
+fn link_headers(req: &mut EsRequest) {
+    req.headers.retain(|(k, _)| {
+        !k.eq_ignore_ascii_case("authorization")
+            && !k.eq_ignore_ascii_case("host")
+            && !k.eq_ignore_ascii_case(search_es::secret_refs::MAKER_HEADER)
+            && !k.eq_ignore_ascii_case(search_es::xpack::security::DORMANT_KEY_HEADER)
+    });
+}
+
 impl Control {
     /// Whether the cluster's own endpoint may name `target` as a remote of `local`
     /// (`PUT _cluster/settings`): a cluster of the same owner, or one roll linked it to through
@@ -193,20 +206,14 @@ impl Control {
 
     /// Opens a remote's sealed credentials (`None`: sealed under another key, or tampered with).
     fn open_remote_credentials(&self, row: &RemoteLink) -> Option<String> {
-        match &self.cfg.sealer {
-            Some(s) if search_es::seal::is_sealed(&row.credentials) => s.open_text(&kind(&row.cluster_id, &row.alias, &row.target_id), &row.credentials),
-            Some(_) => None,
-            None if search_es::seal::is_sealed(&row.credentials) => None,
-            None => Some(row.credentials.clone()),
-        }
+        self.store.open_secret(&kind(&row.cluster_id, &row.alias, &row.target_id), &row.credentials)
     }
 
     /// Sends a linked remote's request to cluster `t` as cross-cluster key `key_id`, on `t`'s
     /// owner (here, or forwarded signed): roll's own call, which the target's IP allowlist
     /// doesn't filter and which wakes it.
     async fn send_link(&self, t: &SearchCluster, key_id: &str, secret: &str, mut req: EsRequest) -> EsResponse {
-        // A repository's maker is said only by `Control::put_repository`.
-        req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case("authorization") && !k.eq_ignore_ascii_case("host") && !k.eq_ignore_ascii_case(search_es::secret_refs::MAKER_HEADER));
+        link_headers(&mut req);
         let token = base64::engine::general_purpose::STANDARD.encode(format!("{key_id}@{}:{secret}", t.name));
         req.headers.push(("Authorization".into(), format!("ApiKey {token}")));
         self.on_owner(&t.name, req).await
@@ -257,11 +264,6 @@ impl Control {
         if !valid_alias(alias) {
             return Err(ControlError::Invalid("alias: 1 to 64 letters, digits, - and _".into()));
         }
-        if api_key.is_some() && self.cfg.sealer.is_none() {
-            return Err(ControlError::Invalid(
-                "api_key would be stored in the clear: this node has no sealing key (ROLL_SECRET_KEY). Have the operator set it, or link without api_key and roll makes the cross-cluster key".into(),
-            ));
-        }
         let c = self.get(id).await?;
         let held = self.store.remotes(&c.id).await?;
         if held.len() >= MAX_REMOTES && !held.iter().any(|r| r.alias == alias) {
@@ -299,14 +301,10 @@ impl Control {
             }
         };
         let k = kind(&c.id, alias, &t.id);
-        // Sealed under the deployment's key. A node without one (`ROLL_SECRET_KEY` unset: local
-        // development only) refuses a key someone pasted (above) and keeps the one roll made, a
-        // cross-cluster key between two of its own clusters, as made; it's sealed once the node
-        // has a key (`Store::seal_remote_credentials`, as the node starts).
-        let credentials = match &self.cfg.sealer {
-            Some(s) => s.seal_text(&k, &encoded),
-            None => encoded,
-        };
+        // Sealed under the catalog's key: the deployment's, or on a single node without one
+        // (`ROLL_SECRET_KEY` unset) the node's own, sealed again with the deployment's once it has
+        // one (`Store::seal_remote_credentials`, as the node starts).
+        let credentials = self.store.seal_secret(&k, &encoded);
         let row = RemoteLink { cluster_id: c.id.clone(), alias: alias.to_string(), target_id: t.id.clone(), key_id: key_id.clone(), credentials, minted, created_at: crate::control::now(), made_by: Some(made_by.to_string()) };
         let replaced = self.store.put_remote(&row).await?;
         let mut settings = serde_json::Map::new();
@@ -385,6 +383,18 @@ impl Control {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A linked remote's request carries none of the headers only roll says, whoever sent them.
+    #[test]
+    fn link_requests_drop_rolls_own_headers() {
+        let mut req = EsRequest::new("DELETE", "/_security/api_key");
+        for k in ["Authorization", "Host", search_es::secret_refs::MAKER_HEADER, "X-Roll-Dormant-Key", "Content-Type"] {
+            req.headers.push((k.to_string(), "x".into()));
+        }
+        link_headers(&mut req);
+        let kept: Vec<&str> = req.headers.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(kept, ["Content-Type"]);
+    }
 
     #[test]
     fn targets() {

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generates an Elasticsearch snapshot of known data, and what Elasticsearch answers about it.
 
-usage: generate.py <elasticsearch url> <repository location under path.repo> <docs per index> <expected.json> [global|large|datastream]
+usage: generate.py <elasticsearch url> <repository location under path.repo> <docs per index> <expected.json> [global|large]
 
 Indices: `mixed` (2 shards, routing, nested objects, geo points, a dense vector, deletes and
 updates, several segments), `compressed` (best_compression), `excludes` (`_source.excludes`),
@@ -10,10 +10,6 @@ updates, several segments), `compressed` (best_compression), `excludes` (`_sourc
 state with a template, a pipeline and a lifecycle policy (Elasticsearch's own templates come
 with it, so the committed fixtures leave it out). `large` snapshots instead an index `big` of
 `<docs>` documents of 4 MiB each (one letter pattern, so they compress to almost nothing).
-`datastream` snapshots instead a data stream `events-fixture` from a composable template
-`events-fixture` (not `logs-*-*`, which 9.x makes `logsdb`): `<docs>` documents, a rollover, `<docs>` more (generation 2, two backing
-indices), with global state; its expected answers are the data stream as Elasticsearch shows it
-and every document.
 
 The expected answers: every live document (_id, _routing, _source with its vectors,
 _seq_no, _version, _primary_term, and _source as Elasticsearch keeps it), counts of a few
@@ -159,36 +155,9 @@ def large():
         json.dump({'big': {'count': N}}, f)
 
 
-def datastream():
-    ds = 'events-fixture'
-    req('DELETE', '/_snapshot/' + REPO, ok=(404,))
-    req('PUT', '/_snapshot/' + REPO, {'type': 'fs', 'settings': {'location': LOCATION}})
-    req('PUT', '/_index_template/events-fixture', {
-        'index_patterns': ['events-fixture*'], 'data_stream': {}, 'priority': 500,
-        'template': {'settings': {'number_of_shards': 1, 'number_of_replicas': 0},
-                     'mappings': {'properties': {'@timestamp': {'type': 'date'}, 'message': {'type': 'text'}, 'n': {'type': 'long'}}}},
-    })
-    def add(lo, hi):
-        for i in range(lo, hi):
-            req('POST', f'/{ds}/_doc?refresh=true', {'@timestamp': f'2026-11-01T00:{i // 60:02d}:{i % 60:02d}Z', 'message': f'event {i}', 'n': i})
-    add(0, N)
-    req('POST', f'/{ds}/_rollover')
-    add(N, 2 * N)
-    req('PUT', f'/_snapshot/{REPO}/snap-1?wait_for_completion=true', {'indices': ds, 'include_global_state': True})
-    stream = req('GET', f'/_data_stream/{ds}')['data_streams'][0]
-    hits = req('POST', f'/{ds}/_search', {'size': 2 * N, 'sort': [{'n': 'asc'}], 'seq_no_primary_term': True})['hits']['hits']
-    docs = [{'_index': h['_index'], '_id': h['_id'], '_source': h['_source']} for h in hits]
-    out = {'data_stream': {k: stream[k] for k in ('name', 'generation', 'indices', 'template', 'hidden', 'system', 'timestamp_field')}, 'count': len(docs), 'docs': docs}
-    with open(OUT, 'w') as f:
-        json.dump(out, f, ensure_ascii=False, sort_keys=True, indent=0)
-    print(json.dumps({'count': len(docs), 'generation': stream['generation']}))
-
-
 def main():
     if len(sys.argv) > 5 and sys.argv[5] == 'large':
         return large()
-    if len(sys.argv) > 5 and sys.argv[5] == 'datastream':
-        return datastream()
     nine = int(req('GET', '/')['version']['number'].split('.')[0]) >= 9
     # Synthetic _source needs more than the basic licence: without it Elasticsearch stores it.
     req('POST', '/_license/start_trial?acknowledge=true', ok=(403,))
