@@ -1885,14 +1885,74 @@ mod tests {
             ("workspace_set_group_role", "role", roles.into_iter().filter(|r| r != "owner").collect()),
             ("access_request_access", "action", actions),
         ];
+        // The rest: each from the one place its product decides it (a match, an enum, a list).
+        let between = |src: &'static str, from: &str, to: &str| -> &'static str { src.split(from).nth(1).and_then(|r| r.split(to).next()).unwrap_or_else(|| panic!("{from} moved")) };
+        let after = |body: &str, pattern: &str| -> Vec<String> { body.match_indices(pattern).map(|(i, m)| body[i + m.len()..].split(['"', '\'']).next().unwrap().to_string()).collect() };
+        let list = |body: &str| -> Vec<String> { body.split('"').skip(1).step_by(2).map(str::to_string).collect() };
+        // A match's keys: the string before each `" =>` (the last of `"a" | "b" =>`).
+        let keys = |body: &str| -> Vec<String> {
+            let chunks: Vec<&str> = body.split("\" =>").collect();
+            chunks[..chunks.len() - 1].iter().filter_map(|c| c.rsplit('"').next()).map(str::to_string).collect()
+        };
+        // A serde enum's variants, lowercased (`rename_all = "lowercase"`).
+        let variants = |body: &str| -> Vec<String> { body.lines().map(str::trim).filter_map(|l| l.strip_suffix(',')).filter(|v| v.chars().all(char::is_alphanumeric) && v.starts_with(char::is_uppercase)).map(str::to_lowercase).collect() };
+        let notify = include_str!("../../apps-control/src/notify.rs");
+        let notification_kinds: Vec<String> = between(notify, "\"kind is ", "\"").replace(" or ", ", ").split(", ").map(str::to_string).collect();
+        let mut severity = keys(between(include_str!("../../apps-control/src/model.rs"), "impl Severity {", "\n}\n"));
+        assert!(include_str!("../../apps-control/src/vulns.rs").contains("s != \"unknown\""), "the vulnerabilities route moved: does it still take unknown?");
+        severity.push("unknown".into());
+        let types = after(between(include_str!("../../roll-secrets/src/api.rs"), "fn kind_of(", "\n}\n"), "Some(\"");
+        let envs = after(between(include_str!("../../roll-secrets/src/envs.rs"), "impl Kind {", "\n}\n"), "=> \"");
+        let destinations = after(between(include_str!("../../mq-control/src/api.rs"), "destination_type must be ", ", not"), "'").into_iter().step_by(2).collect::<Vec<_>>();
+        let flavors = keys(between(include_str!("../../search-control/src/control.rs"), "pub fn dialect(flavor: &str)", "\n}\n"));
+        let incidents = list(between(include_str!("../../apps-control/src/status_page.rs"), "Some(s @ (", "))"));
+        let more: Vec<(&str, &str, Vec<String>)> = vec![
+            ("access_request_access", "for", keys(between(include_str!("../../roll-access/src/api.rs"), "fn request_duration(", "\n}\n"))),
+            ("access_list_approvals", "state", roll_access::store::APPROVAL_STATES.iter().map(|s| s.to_string()).collect()),
+            ("nosql_create_database", "dialect", list(between(include_str!("../../nosql-control/src/api.rs"), "\"dialects\": [", "]"))),
+            ("queues_declare_queue", "type", keys(between(include_str!("../../mq-core/src/queue/config.rs"), "impl QueueType {", "\n}\n"))),
+            ("queues_set_policy", "apply_to", list(between(include_str!("../../mq-mgmt/src/api/admin.rs"), "const APPLY_TO", "];"))),
+            ("queues_bind", "destination_type", destinations.clone()),
+            ("queues_unbind", "destination_type", destinations),
+            ("search_create_cluster", "flavor", flavors.clone()),
+            ("search_update_cluster", "flavor", flavors),
+            ("search_cluster_metrics", "range", keys(between(include_str!("../../search-control/src/control.rs"), "impl MetricsRange {", "\n}\n"))),
+            ("search_analytics", "range", keys(between(include_str!("../../search-control/src/analytics.rs"), "impl Range {", "\n}\n"))),
+            ("secrets_create_environment", "kind", envs.clone()),
+            ("secrets_ensure_environment", "kind", envs),
+            ("secrets_get", "type", types.clone()),
+            ("secrets_set", "type", types.clone()),
+            ("secrets_delete", "type", types.clone()),
+            ("secrets_versions", "type", types.clone()),
+            ("secrets_version_value", "type", types),
+            ("secrets_list_requests", "state", list(between(include_str!("../../roll-secrets/src/requests.rs"), "const STATES", "];"))),
+            ("apps_rollout", "action", variants(between(include_str!("../../apps-control/src/model.rs"), "pub enum RolloutAction {", "}"))),
+            ("apps_set_error_state", "state", variants(between(include_str!("../../apps-control/src/errors.rs"), "pub enum Lifecycle {", "}"))),
+            ("apps_logs", "stream", variants(between(include_str!("../../apps-control/src/logs.rs"), "pub enum Stream {", "}"))),
+            ("apps_update_incident", "state", incidents.clone()),
+            ("apps_create_incident", "state", incidents),
+            ("apps_set_private_network", "kind", after(between(include_str!("../../apps-control/src/peering.rs"), "let kind = match o.get(\"kind\")", "};"), "Some(\"")),
+            ("apps_add_notification", "kind", notification_kinds),
+            ("apps_add_notification", "region", after(notify, "(\"pagerduty\", \"")),
+            ("apps_deploy_vulnerabilities", "severity", severity),
+            ("storage_presign", "method", after(between(include_str!("../../s3-control/src/control.rs"), "pub fn presign(", "\n    }\n"), "!= \"")),
+            ("previews_screenshot", "diff", list(between(include_str!("../../roll-previews/src/api.rs"), "Some(d @ (", "))"))),
+        ];
+        let sets: Vec<(&str, &str, Vec<String>)> = sets.into_iter().chain(more).collect();
+        let mut covered = std::collections::BTreeSet::new();
         for (tool, param, mut want) in sets {
             want.sort();
+            want.dedup();
+            covered.insert((tool, param));
             let t = super::all().iter().find(|t| t.name == tool).unwrap_or_else(|| panic!("{tool}"));
             let Some(Ty::Choice(values)) = t.params.iter().find(|p| p.name == param).map(|p| p.ty) else { panic!("{tool}.{param} isn't a choice") };
             let mut got: Vec<String> = values.iter().map(|v| v.to_string()).collect();
             got.sort();
             assert_eq!(got, want, "{tool}.{param}: its choice (left) isn't the product's set (right)");
         }
+        // Every choice is read from its product: a new one joins the list above.
+        let unread: Vec<String> = super::all().iter().flat_map(|t| t.params.iter().filter(|p| matches!(p.ty, Ty::Choice(_)) && !covered.contains(&(t.name, p.name))).map(move |p| format!("{}.{}", t.name, p.name))).collect();
+        assert!(unread.is_empty(), "choices not read from their product here: {unread:?}");
     }
 
     /// `secrets_list_saas` names every vendor roll secrets rotates for: the list is prose, and new

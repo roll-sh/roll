@@ -949,6 +949,9 @@ async fn approvals(State(a): S, ext: Extensions, Query(q): Query<ApprovalsQuery>
         _ => None,
     };
     let (state, limit) = (q.state.clone(), q.limit.unwrap_or(100));
+    if let Some(s) = state.as_deref().filter(|s| !crate::store::APPROVAL_STATES.contains(s)) {
+        return Err(Error::BadRequest(format!("state is one of {}, not {s}", crate::store::APPROVAL_STATES.join(", "))));
+    }
     let list = blocking(a, move |a| {
         let mut list: Vec<_> = a.store.approvals(state.as_deref(), grants.as_deref(), limit)?.into_iter().map(|x| a.gated(x)).collect();
         // A person also sees what roll's policy names them to approve.
