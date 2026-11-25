@@ -579,11 +579,16 @@ const stories = async (sessionId) => {
     const shot = await send("Page.captureScreenshot", clip ? { format: "png", clip, captureBeyondViewport: true } : { format: "png" }, sessionId).catch(() => null);
     if (!shot) continue;
     fs.writeFileSync(`${process.env.OUT}.story.${out.length}.png`, Buffer.from(shot.data, "base64"));
-    out.push({ id: e.id, errors: errors.length + failed.length - before });
+    // Its accessibility too (Chromatic's accessibility tests): axe on the story alone, while more
+    // than 30 s of the run are left, so a big Storybook still gets its pictures. 8 KB at most.
+    const a11y = until - Date.now() > 30000 ? await axeReport(sessionId).catch(() => null) : null;
+    const said = { id: e.id, errors: errors.length + failed.length - before };
+    if (a11y && JSON.stringify(a11y).length <= 8000) said.a11y = a11y;
+    out.push(said);
   }
   // And what it didn't take (past the first 40, or out of its time), so roll can say so.
   const left = listed.filter((e) => !out.some((o) => o.id === e.id)).map((e) => e.id);
-  fs.writeFileSync(process.env.OUT + ".stories.json", JSON.stringify({ stories: out, left: left.length, first_left: left.slice(0, 10) }));
+  fs.writeFileSync(process.env.OUT + ".stories.json", JSON.stringify({ stories: out, left: left.length, first_left: left.slice(0, 10), by_files: CHANGED.length > 0 && !stats }));
 };
 // A run an agent asked for ($TRY: {path, steps}; roll previews' `…/try`): the page loaded, its
 // steps taken as a page state's are (10 at most, 15 s), then its picture to $OUT, and to

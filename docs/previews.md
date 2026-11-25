@@ -795,7 +795,7 @@ previews' code may reach:
   page shows (rows of the repo's data) and send it to another site from their browser, around
   `egress_forks`, which holds only its server. A policy of the page's own still applies (a
   browser keeps both); a navigation away isn't something a policy can stop. Previews' own proxy
-  only so far: roll apps' for its forks is next (Next). `runtime::tests::service_hosts_reach_their_containers`.
+  and roll apps' for a fork's `pv-` environments (a closed one: roll apps' #1032 adds the same policy, its origins the same `pv-` name's hosts across the project's services and their custom domains; live in `scripts/preview-apps.sh`, the fork's pages carry it and the same repo's pull request's don't). `runtime::tests::service_hosts_reach_their_containers`.
 - `data_forks`: what a fork's preview's data is. It's `"schema"` by default: its branches hold the
   structure without the rows (Postgres' schema, NoSQL's tables, streams' topics, queues' and
   tasks' definitions), whatever the project's own previews get, and a kind that can't be
@@ -1128,6 +1128,13 @@ thirty-fourth review found them in the clear.
     `_forcemerge?only_expunge_deletes`), as Postgres masking's `VACUUM FULL` (live: the branch
     reads `[masked]` and its `_terms_enum` finds nothing, the parent reads `parent`; roll
     search's `expunging_a_branch_rewrites_the_segments_it_shares` pins the sequence).
+    A masked `semantic_text` field: a branch doesn't get its parent's inference endpoint's key
+    (roll search's #988), so the masking's writes send `X-Roll-Unembedded: drop`. The masked text
+    stays unembedded, and the real values' chunks and embeddings go, with no provider called. An
+    app's own writes to such a field on a preview's branch need the endpoint's key set on the
+    branch (`_inference/{task}/{id}/_update`, or the Inference tab's "A roll secret"); without it
+    they're a 400 ("this branch doesn't have the parent's provider key; set it on the branch").
+    Endpoints that need no key (E5 on the node, the preconfigured ones) are unaffected.
   - Other products: a `seed` anonymises the rows instead.
   - **Suggestions** (as Tonic's and Neon's anonymisation tools name columns that look personal):
     `GET /v1/previews/projects/{project}/mask-suggestions` reads the columns of every Postgres,
@@ -2057,7 +2064,7 @@ type Preview = {
   slower_routes?: { branch: string; routes: { name: string; count: number; p50_ms: number; main_p50_ms: number; grew?: GrewSpan | null; budget_ms?: number | null }[] } | null;
   new_errors?: { branch: string; total: number; errors: { service: string; title: string }[] } | null;
   served_secrets?: { key: string; path: string }[]; // its secret values its pages serve at its head: names and where, never values
-  skipped?: { pages?: string[]; stories?: number; first_stories?: string[] }; // what its latest screenshot run left out at its head: pages past a run's ten, stories it didn't take (the first 10 by id)
+  skipped?: { pages?: string[]; stories?: number; first_stories?: string[]; by_files?: true }; // what its latest screenshot run left out at its head: pages past a run's ten, stories it didn't take (the first 10 by id); by_files: it chose them by the change's files alone, its Storybook serving no module graph (--stats-json)
   regressions?: "check" | "required" | null;
   regressions_accepted?: { head: string; by: string; at: number } | null;
   regressions_compared?: boolean;     // compared with main's preview at its head (errors; routes too with traces)
@@ -2325,7 +2332,11 @@ type Settings = {
     root holds something (3 s at most), and captured clipped to what it rendered (an 8 px margin,
     at most 1280 by 2000; 256 KiB a PNG), 100 s in all. Each is a page of its own (`story:<id>`,
     "Stories" on the sheet, labelled `button / primary`), with what went wrong while it rendered,
-    compared with main's same story and reviewed like a page. A story gone from Storybook goes
+    compared with main's same story and reviewed like a page. Each is checked with axe as a page
+    is (Chromatic's accessibility tests: its rules, its language and title), while more than 30 s
+    of the run are left so a big Storybook still gets its pictures, 8 KB of it at most; what it
+    adds against main's same story counts like a page's (`a11y_added`). Live: the live
+    Storybook's stories carry it. A story gone from Storybook goes
     from the preview. The index is the preview's code's: an id Storybook wouldn't make
     (`components-button--primary`) is dropped. A Storybook on another service is kept with that
     service's pages while it runs what it ran (TurboSnap), and taken at once when the rule is
@@ -2869,8 +2880,9 @@ comments, Render and Railway, Neon, Chromatic and Percy, Signadot, Jam.
 2. **The stories a change touched, by the module graph, in review**: a story that imports a changed
    file from anywhere comes after those whose own file changed (Storybook's `preview-stats.json`
    when the build has it; files alone without), and a built Storybook's stories run live in a
-   real browser for the first time. Next for it: a `storybook dev` server has no stats file, so
-   say on the sheet when a run ordered by files alone.
+   real browser for the first time (#1014). In review: a run that chose by files alone (no stats
+   file, as from `storybook dev`) and left stories says so on the sheet (`skipped.by_files`),
+   with how to give it the graph.
 3. **A note in one click, in review**: the button's note opens a small window of roll's with its
    form alone, which posts and closes (`/dashboard/previews/note`); a phone keeps the dashboard
    in a tab. Next for it: a reply and a resolve from the page the same way.
