@@ -217,7 +217,7 @@ async fn every_control_plane_route_needs_the_operator_token() {
 
     // A signed-in user who isn't an admin: 403 on every operator route (and on a credential
     // route without its credential), their own projects, and roll code as their own owner.
-    let cookie = sign_in(&http, &api, &home.path().join("outbox")).await;
+    let cookie = sign_in(&http, &api, &home.path().join("outbox"), "ada@example.com").await;
     let mut wrong = Vec::new();
     for (host, route, access) in routes.iter().filter(|(h, ..)| h == "api") {
         if access.starts_with("product:") || access.starts_with("public:") {
@@ -335,6 +335,146 @@ async fn every_control_plane_route_needs_the_operator_token() {
     }
     let users: serde_json::Value = http.get(format!("{api}/v1/accounts/users")).header("authorization", &operator).send().await.unwrap().json().await.unwrap();
     let ada = users.as_array().unwrap().iter().find(|u| u["handle"] == "ada").unwrap()["id"].as_str().unwrap().to_string();
+    // roll search on members (docs/members.md): a cluster made in her project reaches its members
+    // by their role there (a branch of it too), a person's own stays theirs, a stranger's dropped
+    // on the canvas reaches nobody, and someone outside the project gets 404.
+    let bob = sign_in(&http, &api, &home.path().join("outbox"), "bob@example.com").await;
+    let csrf_of = |cookie: String| {
+        let (http, api) = (http.clone(), api.clone());
+        async move { http.get(format!("{api}/v1/accounts/session")).header("cookie", &cookie).send().await.unwrap().json::<serde_json::Value>().await.unwrap()["csrf"].as_str().unwrap().to_string() }
+    };
+    let (ada_csrf, bob_csrf) = (csrf_of(cookie.clone()).await, csrf_of(bob.clone()).await);
+    let as_person = |cookie: String, csrf: String, method: reqwest::Method, path: String, body: Option<serde_json::Value>, project: Option<String>| {
+        let (http, api) = (http.clone(), api.clone());
+        async move {
+            let mut req = http.request(method, format!("{api}{path}")).header("cookie", cookie).header("origin", DASHBOARD).header("x-roll-csrf", csrf);
+            if let Some(p) = project {
+                req = req.header("x-roll-project", p);
+            }
+            if let Some(b) = body {
+                req = req.json(&b);
+            }
+            let r = req.send().await.unwrap();
+            (r.status().as_u16(), r.json::<serde_json::Value>().await.unwrap_or_default())
+        }
+    };
+    let ada_does = |m: reqwest::Method, path: String, body: Option<serde_json::Value>, project: Option<String>| as_person(cookie.clone(), ada_csrf.clone(), m, path, body, project);
+    let bob_does = |m: reqwest::Method, path: String| as_person(bob.clone(), bob_csrf.clone(), m, path, None, None);
+    let names = |v: &serde_json::Value| v.as_array().map(|a| a.iter().filter_map(|c| c["name"].as_str().map(String::from)).collect::<Vec<_>>()).unwrap_or_default();
+    let (s, homed) = ada_does(reqwest::Method::POST, "/v1/search/clusters".into(), Some(serde_json::json!({ "name": "hers-search" })), Some(hers.clone())).await;
+    assert_eq!(s, 200, "{homed}");
+    // Made in the project, it's the project's (its home), never hers: her caps count it.
+    let (_, made) = ada_does(reqwest::Method::GET, format!("/v1/search/clusters/{}", homed["id"].as_str().unwrap()), None, None).await;
+    assert!(made["owner"].is_null() && made["made_by"].as_str() == Some(ada.as_str()), "{made}");
+    let (s, own) = ada_does(reqwest::Method::POST, "/v1/search/clusters".into(), Some(serde_json::json!({ "name": "adas-own" })), None).await;
+    assert_eq!((s, own["owner"].as_str()), (200, Some(ada.as_str())), "{own}");
+    let dropped: serde_json::Value = http.post(format!("{api}/v1/search/clusters")).header("authorization", &operator).json(&serde_json::json!({ "name": "ops-dropped" })).send().await.unwrap().json().await.unwrap();
+    let placed = http.put(format!("{api}/v1/workspace/projects/{hers}/resources/search/{}", dropped["id"].as_str().unwrap())).header("authorization", &operator).json(&serde_json::json!({ "x": 0, "y": 0 })).send().await.unwrap();
+    assert!(placed.status().is_success(), "{}", placed.text().await.unwrap_or_default());
+    let homed_path = format!("/v1/search/clusters/{}", homed["id"].as_str().unwrap());
+    assert_eq!(bob_does(reqwest::Method::GET, homed_path.clone()).await.0, 404, "not a member yet");
+    let (s, inv) = ada_does(reqwest::Method::POST, format!("/v1/workspace/projects/{hers}/invites"), Some(serde_json::json!({ "email": "bob@example.com", "role": "viewer" })), None).await;
+    assert_eq!(s, 201, "{inv}");
+    let token = inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string();
+    assert_eq!(bob_does(reqwest::Method::POST, format!("/v1/workspace/invites/{token}/accept")).await.0, 200);
+    let (s, branch) = ada_does(reqwest::Method::POST, format!("{homed_path}/branches"), Some(serde_json::json!({ "name": "hers-dev" })), None).await;
+    assert_eq!(s, 200, "{branch}");
+    let (_, listed) = bob_does(reqwest::Method::GET, "/v1/search/clusters".into()).await;
+    assert_eq!(names(&listed), ["hers-search", "hers-dev"], "{listed}");
+    let (_, listed) = ada_does(reqwest::Method::GET, "/v1/search/clusters".into(), None, None).await;
+    assert_eq!(names(&listed), ["hers-search", "adas-own", "hers-dev"], "{listed}");
+    assert_eq!(bob_does(reqwest::Method::GET, homed_path.clone()).await.0, 200, "a viewer reads it");
+    assert_eq!(bob_does(reqwest::Method::DELETE, homed_path.clone()).await.0, 403, "a viewer doesn't delete it");
+    for theirs in ["adas-own", "ops-dropped"] {
+        assert_eq!(bob_does(reqwest::Method::GET, format!("/v1/search/clusters/{theirs}")).await.0, 404, "{theirs}");
+    }
+    assert_eq!(ada_does(reqwest::Method::GET, "/v1/search/clusters/ops-dropped".into(), None, None).await.0, 404, "dropped on her canvas, never hers");
+    // Her token, whatever its rules say (`*`), makes nothing in a project she isn't in: a create
+    // named there is held within her session, and the project doesn't exist for her (404, never
+    // a 403 that says it does). In her own project the same token gets past the gate.
+    let (s, wide) = ada_does(
+        reqwest::Method::POST,
+        "/v1/access/tokens".into(),
+        Some(serde_json::json!({ "name": "wide", "rules": [
+            { "product": "search", "resources": "*", "actions": { "read": "allow", "write": "allow" } },
+            { "product": "previews", "resources": "*", "actions": { "read": "allow", "write": "allow" } },
+        ] })),
+        None,
+    )
+    .await;
+    assert_eq!(s, 201, "{wide}");
+    let wide = wide["token"].as_str().unwrap().to_string();
+    let create_in = |path: &'static str, project: String, body: serde_json::Value| {
+        let (http, api, wide) = (http.clone(), api.clone(), wide.clone());
+        async move {
+            let r = http.post(format!("{api}{path}")).bearer_auth(wide).header("x-roll-project", project).json(&body).send().await.unwrap();
+            (r.status().as_u16(), r.json::<serde_json::Value>().await.unwrap_or_default())
+        }
+    };
+    // Each product's create body, for a project.
+    type Body = fn(&str) -> serde_json::Value;
+    let cases: [(&'static str, Body); 2] = [
+        ("/v1/search/clusters", |p| serde_json::json!({ "name": format!("wide-{}", &p[p.len() - 4..]) })),
+        ("/v1/previews", |p| serde_json::json!({ "project": p, "repo": "ada/none", "branch": "main" })),
+    ];
+    for (path, body) in cases {
+        let (s, v) = create_in(path, theirs.clone(), body(&theirs)).await;
+        assert_eq!((s, v["error"].as_str()), (404, Some(&*format!("no project {theirs}"))), "{path} in a project she isn't in");
+        // In hers the gate lets it through (what the product answers next is its own).
+        let (s, v) = create_in(path, hers.clone(), body(&hers)).await;
+        let refused = v["error"].as_str().is_some_and(|e| e == format!("no project {hers}") || e.starts_with("your role"));
+        assert!(!refused, "{path} in her own project: {s} {v}");
+    }
+    // A preview whose project only its body names (roll MCP's previews_create, the API) is
+    // decided by that project just the same: past the gate in hers, 404 in theirs.
+    let preview_in = |project: String| {
+        let (http, api, wide) = (http.clone(), api.clone(), wide.clone());
+        async move {
+            let r = http.post(format!("{api}/v1/previews")).bearer_auth(wide).json(&serde_json::json!({ "project": project, "repo": "ada/none", "branch": "main" })).send().await.unwrap();
+            (r.status().as_u16(), r.json::<serde_json::Value>().await.unwrap_or_default())
+        }
+    };
+    let (s, v) = preview_in(theirs.clone()).await;
+    assert_eq!((s, v["error"].as_str()), (404, Some(&*format!("no project {theirs}"))), "a body-only preview in a project she isn't in");
+    let (s, v) = preview_in(hers.clone()).await;
+    let refused = s == 403 || v["error"].as_str().is_some_and(|e| e == format!("no project {hers}") || e.starts_with("your role"));
+    assert!(!refused, "a body-only preview in her own project: {s} {v}");
+    // A viewer's token does no more through a create than their role does: no preview in the
+    // project (its body names it: write there, which a viewer hasn't), and no branch of the
+    // project's cluster (it takes write there: 404, as for one they can't see).
+    let (s, t) = as_person(
+        bob.clone(),
+        bob_csrf.clone(),
+        reqwest::Method::POST,
+        "/v1/access/tokens".into(),
+        Some(serde_json::json!({ "name": "bob-wide", "rules": [
+            { "product": "search", "resources": "*", "actions": { "read": "allow", "write": "allow", "reveal": "allow" } },
+            { "product": "previews", "resources": "*", "actions": { "read": "allow", "write": "allow" } },
+        ] })),
+        None,
+    )
+    .await;
+    assert_eq!(s, 201, "{t}");
+    let bobs = t["token"].as_str().unwrap().to_string();
+    let as_bobs = |path: &'static str, body: serde_json::Value| {
+        let (http, api, bobs) = (http.clone(), api.clone(), bobs.clone());
+        async move { http.post(format!("{api}{path}")).bearer_auth(bobs).json(&body).send().await.unwrap().status().as_u16() }
+    };
+    assert_eq!(as_bobs("/v1/previews", serde_json::json!({ "project": hers, "repo": "ada/none", "branch": "main" })).await, 403, "a viewer's preview in the project");
+    assert_eq!(as_bobs("/v1/search/clusters", serde_json::json!({ "name": "vb", "parent": "hers-search" })).await, 404, "a viewer's branch of the project's cluster");
+    // Her own cluster put in her project and made at home there, by its name, is kept there by its
+    // id and is the project's from then on: no owner (she's its maker), and its members reach it.
+    let own_id = own["id"].as_str().unwrap().to_string();
+    let (s, v) = ada_does(reqwest::Method::PUT, format!("/v1/workspace/projects/{hers}/resources/search/adas-own"), Some(serde_json::json!({ "x": 0, "y": 0 })), None).await;
+    assert_eq!((s, v["ref"].as_str()), (200, Some(own_id.as_str())), "{v}");
+    let (s, v) = ada_does(reqwest::Method::PUT, format!("/v1/workspace/projects/{hers}/homes/search/adas-own"), None, None).await;
+    assert_eq!(s, 200, "{v}");
+    let (_, homed_own) = ada_does(reqwest::Method::GET, format!("/v1/search/clusters/{own_id}"), None, None).await;
+    assert!(homed_own["owner"].is_null() && homed_own["made_by"].as_str() == Some(ada.as_str()), "{homed_own}");
+    assert_eq!(bob_does(reqwest::Method::GET, format!("/v1/search/clusters/{own_id}")).await.0, 200, "a viewer of its project reads it");
+    // A project home to clusters isn't deleted from under them (they'd be no one's).
+    let (s, v) = ada_does(reqwest::Method::DELETE, format!("/v1/workspace/projects/{hers}"), None, None).await;
+    assert!(s == 409 && v.to_string().contains("search cluster"), "{s} {v}");
     let off = http.patch(format!("{api}/v1/accounts/users/{ada}")).header("authorization", &operator).json(&serde_json::json!({ "disabled": true })).send().await.unwrap();
     assert_eq!(off.status(), 200);
     assert_ne!(as_token(token).await, "owner", "a disabled account's roll code token still works");
@@ -499,13 +639,13 @@ async fn every_control_plane_route_needs_the_operator_token() {
     assert!(foreign.headers().get("access-control-allow-origin").is_none(), "a foreign origin gets no CORS grant");
 }
 
-/// Invite `ada@example.com` with the operator's token and sign in by email code (from the
-/// outbox): the session cookie, as `name=value`.
-async fn sign_in(http: &reqwest::Client, api: &str, outbox: &std::path::Path) -> String {
+/// Invite `email` with the operator's token and sign in by email code (from the outbox): the
+/// session cookie, as `name=value`.
+async fn sign_in(http: &reqwest::Client, api: &str, outbox: &std::path::Path, email: &str) -> String {
     let invite: serde_json::Value = http
         .post(format!("{api}/v1/accounts/invites"))
         .bearer_auth(TOKEN)
-        .json(&serde_json::json!({ "email": "ada@example.com" }))
+        .json(&serde_json::json!({ "email": email }))
         .send()
         .await
         .unwrap()
@@ -514,7 +654,7 @@ async fn sign_in(http: &reqwest::Client, api: &str, outbox: &std::path::Path) ->
         .unwrap();
     let start: serde_json::Value = http
         .post(format!("{api}/v1/accounts/email/start"))
-        .json(&serde_json::json!({ "email": "ada@example.com", "invite": invite["token"] }))
+        .json(&serde_json::json!({ "email": email, "invite": invite["token"] }))
         .send()
         .await
         .unwrap()
@@ -526,6 +666,7 @@ async fn sign_in(http: &reqwest::Client, api: &str, outbox: &std::path::Path) ->
         let mails = std::fs::read_dir(outbox).into_iter().flatten().flatten().filter(|e| !e.file_name().to_string_lossy().starts_with('.'));
         code = mails
             .filter_map(|e| serde_json::from_slice::<serde_json::Value>(&std::fs::read(e.path()).ok()?).ok())
+            .filter(|m| m["to"].as_str() == Some(email))
             .find_map(|m| m["subject"].as_str().filter(|s| s.contains("sign-in code")).map(|s| s[..6].to_string()));
         if code.is_some() {
             break;
@@ -567,7 +708,7 @@ async fn mcp_search_with_a_project_token() {
         assert!(started.elapsed() < Duration::from_secs(60), "rolld didn't answer");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let cookie = sign_in(&http, &api, &home.path().join("outbox")).await;
+    let cookie = sign_in(&http, &api, &home.path().join("outbox"), "ada@example.com").await;
     let session: serde_json::Value = http.get(format!("{api}/v1/accounts/session")).header("cookie", &cookie).send().await.unwrap().json().await.unwrap();
     let csrf = session["csrf"].as_str().unwrap().to_string();
     let as_ada = |method: reqwest::Method, path: String, body: serde_json::Value| {
@@ -636,6 +777,202 @@ async fn mcp_search_with_a_project_token() {
     assert!(names(TOKEN).await.iter().any(|n| n == "secrets_list_environments"), "the operator's list");
     let listed = names(&token).await;
     assert!(listed.iter().any(|n| n.starts_with("search_")) && !listed.iter().any(|n| n.starts_with("postgres_") || n == "secrets_list_environments"), "{listed:?}");
+}
+
+/// A search cluster homed in a project its owner doesn't manage, with no hand-over ever decided for
+/// it (as a person's token could make one before members: a create in someone else's project), is
+/// never handed to that project: at start its home is dropped and the cluster stays its owner's;
+/// while such a home is there, an owner of its project can't move it to another project they
+/// own; and a project's restore doesn't bring such a home back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_strangers_home_from_before_is_dropped_never_handed_over() {
+    let home = tempfile::tempdir().unwrap();
+    let env = vec![
+        ("ROLL_ADMIN_TOKEN", TOKEN.to_string()),
+        ("ROLL_PRODUCTS", "search".to_string()),
+        ("ROLL_SECRET_KEY", "fake-deployment-key-for-the-strangers-home-test".to_string()),
+        ("ROLL_SECRETS_DELETE_WINDOW_DAYS", "3".to_string()),
+        ("ROLL_DASHBOARD_ORIGIN", DASHBOARD.to_string()),
+        ("ROLL_ACCOUNTS_OUTBOX", home.path().join("outbox").display().to_string()),
+    ];
+    let http = reqwest::Client::builder().timeout(Duration::from_secs(30)).build().unwrap();
+    async fn start(home: &std::path::Path, env: &[(&str, String)], http: &reqwest::Client) -> (Rolld, String) {
+        let mut cmd = rolld(home, &[], env);
+        let started = common::on_any_port(&mut cmd, common::LISTENERS, home);
+        let mut child = cmd.stdout(Stdio::null()).spawn().expect("rolld starts");
+        let api = started.addrs(&mut child).await.url("api");
+        let up = std::time::Instant::now();
+        while !http.get(format!("{api}/v1/info")).bearer_auth(TOKEN).send().await.is_ok_and(|r| r.status().is_success()) {
+            assert!(up.elapsed() < Duration::from_secs(60), "rolld didn't answer");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        (Rolld(child), api)
+    }
+    let op = |api: String, m: reqwest::Method, path: String, body: Option<serde_json::Value>| {
+        let http = http.clone();
+        async move {
+            let mut req = http.request(m, format!("{api}{path}")).bearer_auth(TOKEN);
+            if let Some(b) = body {
+                req = req.json(&b);
+            }
+            let r = req.send().await.unwrap();
+            let status = r.status().as_u16();
+            (status, r.json::<serde_json::Value>().await.unwrap_or_default())
+        }
+    };
+    let (d, api) = start(home.path(), &env, &http).await;
+    let id_of = |v: &serde_json::Value| v["id"].as_str().unwrap().to_string();
+    let p = id_of(&op(api.clone(), reqwest::Method::POST, "/v1/workspace/projects".into(), Some(serde_json::json!({ "name": "p" }))).await.1);
+    let q = id_of(&op(api.clone(), reqwest::Method::POST, "/v1/workspace/projects".into(), Some(serde_json::json!({ "name": "q" }))).await.1);
+    let c1 = id_of(&op(api.clone(), reqwest::Method::POST, "/v1/search/clusters".into(), Some(serde_json::json!({ "name": "c1" }))).await.1);
+    let c2 = id_of(&op(api.clone(), reqwest::Method::POST, "/v1/search/clusters".into(), Some(serde_json::json!({ "name": "c2" }))).await.1);
+    for path in [format!("/v1/workspace/projects/{p}/resources/search/{c1}"), format!("/v1/workspace/projects/{p}/homes/search/{c1}")] {
+        let (s, v) = op(api.clone(), reqwest::Method::PUT, path.clone(), Some(serde_json::json!({ "x": 0, "y": 0 }))).await;
+        assert_eq!(s, 200, "{path}: {v}");
+    }
+    // Q holds a secret, so its delete keeps it for its window (and its recover brings it back).
+    let (s, v) = op(api.clone(), reqwest::Method::PUT, format!("/v1/secrets/projects/{q}/environments/production/secrets/K"), Some(serde_json::json!({ "value": "v" }))).await;
+    assert!(s < 300, "{s} {v}");
+    drop(d);
+    // Stopped: c1 belongs to someone who isn't in p, and no hand-over to p was ever decided.
+    let db = |path: std::path::PathBuf| {
+        let c = rusqlite::Connection::open(path).unwrap();
+        c.busy_timeout(Duration::from_secs(5)).unwrap();
+        c
+    };
+    let (search, ws) = (db(home.path().join("search").join("search.db")), db(home.path().join("workspace.db")));
+    search.execute("UPDATE search_clusters SET owner = 'usr_x', made_by = NULL WHERE id = ?1", [&c1]).unwrap();
+    search.execute("DELETE FROM search_handovers", []).unwrap();
+    let home_of = |c: &str, project: &str| ws.query_row("SELECT 1 FROM homes WHERE kind = 'search' AND ref = ?1 AND project_id = ?2", [c, project], |_| Ok(())).is_ok();
+    let owner_of = |c: &str| search.query_row("SELECT owner FROM search_clusters WHERE id = ?1", [c], |r| r.get::<_, Option<String>>(0)).unwrap();
+    assert!(home_of(&c1, &p));
+    let (_d, api) = start(home.path(), &env, &http).await;
+    let waited = std::time::Instant::now();
+    while home_of(&c1, &p) {
+        assert!(waited.elapsed() < Duration::from_secs(30), "the stranger's home was never dropped");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(owner_of(&c1).as_deref(), Some("usr_x"), "dropped, never handed over");
+    // Such a home while rolld runs (made a stranger's in the store): Ada, an owner of its project
+    // and of another, can't move it there to have it handed over.
+    let cookie = sign_in(&http, &api, &home.path().join("outbox"), "ada@example.com").await;
+    let session: serde_json::Value = http.get(format!("{api}/v1/accounts/session")).header("cookie", &cookie).send().await.unwrap().json().await.unwrap();
+    let csrf = session["csrf"].as_str().unwrap().to_string();
+    let as_ada = |method: reqwest::Method, path: String, body: Option<serde_json::Value>| {
+        let mut req = http.request(method, format!("{api}{path}")).header("cookie", &cookie).header("origin", DASHBOARD).header("x-roll-csrf", &csrf);
+        if let Some(b) = body {
+            req = req.json(&b);
+        }
+        async move {
+            let r = req.send().await.unwrap();
+            (r.status().as_u16(), r.text().await.unwrap())
+        }
+    };
+    let mut hers = Vec::new();
+    for name in ["adas-f", "adas-g"] {
+        let (s, v) = as_ada(reqwest::Method::POST, "/v1/workspace/projects".into(), Some(serde_json::json!({ "name": name }))).await;
+        assert_eq!(s, 201, "{v}");
+        hers.push(serde_json::from_str::<serde_json::Value>(&v).unwrap()["id"].as_str().unwrap().to_string());
+    }
+    let (f, g) = (hers[0].clone(), hers[1].clone());
+    let c3 = id_of(&op(api.clone(), reqwest::Method::POST, "/v1/search/clusters".into(), Some(serde_json::json!({ "name": "c3" }))).await.1);
+    for path in [format!("/v1/workspace/projects/{f}/resources/search/{c3}"), format!("/v1/workspace/projects/{f}/homes/search/{c3}")] {
+        let (s, v) = op(api.clone(), reqwest::Method::PUT, path.clone(), Some(serde_json::json!({ "x": 0, "y": 0 }))).await;
+        assert_eq!(s, 200, "{path}: {v}");
+    }
+    search.execute("UPDATE search_clusters SET owner = 'usr_x', made_by = NULL WHERE id = ?1", [&c3]).unwrap();
+    let (status, body) = as_ada(reqwest::Method::PUT, format!("/v1/workspace/projects/{g}/homes/search/{c3}"), None).await;
+    // The gate refuses it (a person homes only what's theirs, or into the project it's at home in),
+    // and the workspace would too (`Owners::has_person_owner`).
+    assert_eq!(status, 403, "{body}");
+    assert!(home_of(&c3, &f), "its home stays");
+    assert_eq!(owner_of(&c3).as_deref(), Some("usr_x"), "and it stays its owner's");
+    // A deleted project whose kept homes hold such a cluster: its restore drops that home too.
+    let (s, v) = op(api.clone(), reqwest::Method::DELETE, format!("/v1/workspace/projects/{q}?confirm=q"), None).await;
+    assert_eq!(s, 204, "{v}");
+    search.execute("UPDATE search_clusters SET owner = 'usr_x', made_by = NULL WHERE id = ?1", [&c2]).unwrap();
+    ws.execute("INSERT INTO deleted_homes (kind, ref, project_id, set_by, set_at) VALUES ('search', ?1, ?2, 'operator', 0)", [&c2, &q]).unwrap();
+    let (s, v) = op(api.clone(), reqwest::Method::POST, format!("/v1/secrets/projects/{q}/recover"), Some(serde_json::json!({}))).await;
+    assert_eq!(s, 200, "{v}");
+    let waited = std::time::Instant::now();
+    while home_of(&c2, &q) {
+        assert!(waited.elapsed() < Duration::from_secs(30), "the restored stranger's home was never dropped");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(owner_of(&c2).as_deref(), Some("usr_x"), "and never handed over");
+}
+
+/// A protected search cluster is changed only by its project's admins and owners: made protected
+/// in a project, a developer there can't write it (403) until an admin opens it (`PATCH
+/// protected: false`); and a branch of a protected cluster is never protected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_developer_writes_a_search_cluster_only_while_it_isnt_protected() {
+    let home = tempfile::tempdir().unwrap();
+    let env = vec![
+        ("ROLL_ADMIN_TOKEN", TOKEN.to_string()),
+        ("ROLL_DASHBOARD_ORIGIN", DASHBOARD.to_string()),
+        ("ROLL_PRODUCTS", "search".to_string()),
+        ("ROLL_ACCOUNTS_OUTBOX", home.path().join("outbox").display().to_string()),
+    ];
+    let mut cmd = rolld(home.path(), &[], &env);
+    let started = common::on_any_port(&mut cmd, common::LISTENERS, home.path());
+    let mut child = cmd.stdout(Stdio::null()).spawn().expect("rolld starts");
+    let api = started.addrs(&mut child).await.url("api");
+    let _d = Rolld(child);
+    let http = reqwest::Client::builder().timeout(Duration::from_secs(30)).build().unwrap();
+    let up = std::time::Instant::now();
+    while !http.get(format!("{api}/v1/info")).bearer_auth(TOKEN).send().await.is_ok_and(|r| r.status().is_success()) {
+        assert!(up.elapsed() < Duration::from_secs(60), "rolld didn't answer");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let mut people = Vec::new();
+    for email in ["ada@example.com", "bob@example.com"] {
+        let cookie = sign_in(&http, &api, &home.path().join("outbox"), email).await;
+        let session: serde_json::Value = http.get(format!("{api}/v1/accounts/session")).header("cookie", &cookie).send().await.unwrap().json().await.unwrap();
+        people.push((cookie, session["csrf"].as_str().unwrap().to_string()));
+    }
+    let does = |who: usize, method: reqwest::Method, path: String, body: Option<serde_json::Value>, project: Option<&str>| {
+        let (cookie, csrf) = &people[who];
+        let mut req = http.request(method, format!("{api}{path}")).header("cookie", cookie).header("origin", DASHBOARD).header("x-roll-csrf", csrf);
+        if let Some(p) = project {
+            req = req.header("x-roll-project", p);
+        }
+        if let Some(b) = body {
+            req = req.json(&b);
+        }
+        async move {
+            let r = req.send().await.unwrap();
+            let status = r.status().as_u16();
+            (status, r.json::<serde_json::Value>().await.unwrap_or_default())
+        }
+    };
+    let (ada, bob) = (0, 1);
+    let (s, p) = does(ada, reqwest::Method::POST, "/v1/workspace/projects".into(), Some(serde_json::json!({ "name": "shop" })), None).await;
+    assert_eq!(s, 201, "{p}");
+    let project = p["id"].as_str().unwrap().to_string();
+    let (s, inv) = does(ada, reqwest::Method::POST, format!("/v1/workspace/projects/{project}/invites"), Some(serde_json::json!({ "email": "bob@example.com", "role": "developer" })), None).await;
+    assert_eq!(s, 201, "{inv}");
+    let token = inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string();
+    assert_eq!(does(bob, reqwest::Method::POST, format!("/v1/workspace/invites/{token}/accept"), None, None).await.0, 200);
+    // Made protected in the project: Bob, a developer there, reads it but doesn't write it.
+    let (s, c) = does(ada, reqwest::Method::POST, "/v1/search/clusters".into(), Some(serde_json::json!({ "name": "orders", "protected": true })), Some(&project)).await;
+    assert_eq!((s, c["protected"].as_bool()), (200, Some(true)), "{c}");
+    let cluster = format!("/v1/search/clusters/{}", c["id"].as_str().unwrap());
+    assert_eq!(does(bob, reqwest::Method::GET, cluster.clone(), None, None).await.0, 200, "a developer reads a protected cluster");
+    let branch = |name: &str| Some(serde_json::json!({ "name": name }));
+    let (s, v) = does(bob, reqwest::Method::POST, format!("{cluster}/branches"), branch("bobs"), None).await;
+    assert_eq!(s, 403, "a developer doesn't write a protected cluster: {v}");
+    // Opened by Ada, an owner there: Bob writes it.
+    let (s, v) = does(ada, reqwest::Method::PATCH, cluster.clone(), Some(serde_json::json!({ "protected": false })), None).await;
+    assert_eq!((s, v["protected"].as_bool()), (200, Some(false)), "{v}");
+    let (s, v) = does(bob, reqwest::Method::POST, format!("{cluster}/branches"), branch("bobs"), None).await;
+    assert_eq!(s, 200, "a developer writes an unprotected cluster: {v}");
+    // Protected again, its branch isn't, and can't be made so.
+    assert_eq!(does(ada, reqwest::Method::PATCH, cluster.clone(), Some(serde_json::json!({ "protected": true })), None).await.0, 200);
+    let (s, b) = does(ada, reqwest::Method::POST, format!("{cluster}/branches"), branch("adas"), None).await;
+    assert_eq!((s, b["protected"].as_bool()), (200, Some(false)), "a branch is never protected: {b}");
+    let (s, v) = does(ada, reqwest::Method::PATCH, format!("/v1/search/clusters/{}", b["id"].as_str().unwrap()), Some(serde_json::json!({ "protected": true })), None).await;
+    assert_eq!(s, 400, "{v}");
 }
 
 #[test]

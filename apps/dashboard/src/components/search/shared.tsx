@@ -77,6 +77,7 @@ export function settingsOf(c: SearchCluster): SearchSettings {
     max_in_flight: c.max_in_flight,
     max_body_mb: c.max_body_mb,
     destructive_requires_name: c.destructive_requires_name,
+    protected: c.protected,
   };
 }
 
@@ -149,6 +150,16 @@ export function SettingsFields({ value, onChange }: { value: SearchSettings; onC
             { label: "allowed", value: "allowed" },
           ]}
           onChange={(v) => set("destructive_requires_name", v === "blocked")}
+        />
+      </Field>
+      <Field label="Protected" hint={value.protected ? "only admins change data" : "a project's developers change data"}>
+        <Segmented
+          value={value.protected ? "yes" : "no"}
+          options={[
+            { label: "yes", value: "yes" },
+            { label: "no", value: "no" },
+          ]}
+          onChange={(v) => set("protected", v === "yes")}
         />
       </Field>
     </div>
