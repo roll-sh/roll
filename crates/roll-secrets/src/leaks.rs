@@ -225,15 +225,8 @@ impl Secrets {
         self.project(project)?;
         let action = if breakglass { "secrets.scan.breakglass" } else { "secrets.scan" };
         if caller.principal != "operator" {
-            let minute = self.db.now_ms()? / 60_000;
             let n = candidates.len() as i64;
-            let (calls, total): (i64, i64) = self.db.write(|c| {
-                c.query_row(
-                    "INSERT INTO scan_counts (principal, minute, calls, candidates) VALUES (?, ?, 1, ?) ON CONFLICT (principal, minute) DO UPDATE SET calls = scan_counts.calls + 1, candidates = scan_counts.candidates + excluded.candidates RETURNING calls, candidates",
-                    params![caller.principal, minute, n],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-            })?;
+            let (calls, total) = self.count_calls(&caller.principal, n)?;
             if calls > SCANS_PER_MINUTE || total > SCAN_CANDIDATES_PER_MINUTE {
                 self.audit_now(project, caller, action, None, None, &[], &format!("refused a scan of {n} candidates: over {SCANS_PER_MINUTE} scans or {SCAN_CANDIDATES_PER_MINUTE} candidates a minute"));
                 return Err(Error::TooMany(format!("at most {SCANS_PER_MINUTE} scans and {SCAN_CANDIDATES_PER_MINUTE} candidates a minute: try again in a minute")));
@@ -263,6 +256,19 @@ impl Secrets {
             self.audit_now_event(project, caller, action, Some(env), Some(path), &keys, &summary, Some(event));
         }
         Ok(found)
+    }
+
+    /// One more call by `who` this minute, of `n` candidates: (calls, candidates) so far this
+    /// minute. `/scan` counts by principal, a backup verify as `backup.verify:<principal>`.
+    pub(crate) fn count_calls(&self, who: &str, n: i64) -> Result<(i64, i64)> {
+        let minute = self.db.now_ms()? / 60_000;
+        Ok(self.db.write(|c| {
+            c.query_row(
+                "INSERT INTO scan_counts (principal, minute, calls, candidates) VALUES (?, ?, 1, ?) ON CONFLICT (principal, minute) DO UPDATE SET calls = scan_counts.calls + 1, candidates = scan_counts.candidates + excluded.candidates RETURNING calls, candidates",
+                params![who, minute, n],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })?)
     }
 
     /// Minutes of scan counts that have passed (the sweeper).

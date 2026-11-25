@@ -101,7 +101,17 @@ pub enum IdentityKind {
 }
 
 impl IdentityKind {
-    fn stored(self) -> Option<&'static str> {
+    /// As `identities.kind` holds it (`None`: OIDC); [`IdentityKind::stored`]'s inverse.
+    pub(crate) fn from_stored(kind: Option<&str>) -> Option<IdentityKind> {
+        match kind {
+            None | Some("") => Some(IdentityKind::Oidc),
+            Some("aws") => Some(IdentityKind::Aws),
+            Some("machine") => Some(IdentityKind::Machine),
+            Some(_) => None,
+        }
+    }
+
+    pub(crate) fn stored(self) -> Option<&'static str> {
         match self {
             IdentityKind::Oidc => None,
             IdentityKind::Aws => Some("aws"),
@@ -282,7 +292,7 @@ fn identity_row(r: &code_sql::Row<'_>) -> code_sql::Result<(Identity, String, Op
 }
 
 /// An identity's issuer, audience, subject, pinned keys (a JWKS) and how many.
-type Checked = (String, String, String, Option<String>, Option<usize>);
+pub(crate) type Checked = (String, String, String, Option<String>, Option<usize>);
 
 fn bad(m: impl Into<String>) -> Error {
     Error::BadRequest(m.into())
@@ -329,37 +339,29 @@ impl Secrets {
             return Err(bad("an identity's name is 1–64 characters"));
         }
         let ttl = n.ttl_minutes.unwrap_or(15);
-        if !(TTL_MIN..=TTL_MAX).contains(&ttl) {
-            return Err(bad(format!("ttl_minutes is {TTL_MIN}–{TTL_MAX}")));
-        }
-        let (issuer, audience, subject, jwks, pinned_keys) = match n.kind {
+        // What it trusts, as its kind takes it (the request's shape), then the checks every
+        // identity passes, restored or enabled again too ([`Secrets::admit_identity`]).
+        let (issuer, audience, subject) = match n.kind {
             IdentityKind::Aws => {
                 if n.issuer.is_some() || n.audience.is_some() || n.subject.is_some() || n.jwks.is_some() || !n.claims.is_empty() {
                     return Err(bad("an AWS identity takes arn, not an issuer, audience, subject, claims or keys"));
                 }
-                if self.deliver.is_none() {
-                    return Err(bad("AWS logins aren't on this server"));
-                }
-                let arn = n.arn.as_deref().unwrap_or_default().trim().to_string();
-                crate::aws_identity::Pattern::parse(&arn).map_err(bad)?;
-                ("aws".to_string(), String::new(), arn, None, None)
+                ("aws".to_string(), String::new(), n.arn.clone().unwrap_or_default())
             }
             IdentityKind::Machine => {
                 if n.issuer.is_some() || n.audience.is_some() || n.subject.is_some() || n.jwks.is_some() || n.arn.is_some() || !n.claims.is_empty() {
                     return Err(bad("a machine identity logs in with the bootstrap tokens made for it: no issuer, audience, subject, claims, keys or arn"));
                 }
-                if self.workloads.is_none() {
-                    return Err(bad("machine identities aren't on this server"));
-                }
-                ("roll".to_string(), String::new(), "machine".to_string(), None, None)
+                ("roll".to_string(), String::new(), "machine".to_string())
             }
             IdentityKind::Oidc => {
                 if n.arn.is_some() {
                     return Err(bad("arn is an AWS identity's (kind: aws)"));
                 }
-                self.oidc_identity(project, n.issuer.unwrap_or_default(), n.audience.unwrap_or_default(), n.subject.unwrap_or_default(), &n.claims, n.jwks)?
+                (n.issuer.clone().unwrap_or_default(), n.audience.clone().unwrap_or_default(), n.subject.clone().unwrap_or_default())
             }
         };
+        let (issuer, audience, subject, jwks, pinned_keys) = self.admit_identity(project, n.kind, issuer, audience, subject, &n.claims, n.jwks, ttl)?;
         let gateway = self.check_gateway(project, n.gateway)?;
         let (environments, paths, actions) = match &gateway {
             // Its rule is the gateway's own (gateways::rule), whatever the identity's scope says.
@@ -395,6 +397,42 @@ impl Secrets {
             audit::record(c, self.keys()?, project, caller, "identity.create", None, None, &[], &format!("created identity {} for {what}", i.name), now)
         })?;
         Ok(self.dressed(i))
+    }
+
+    /// What making an identity checks of what it trusts, whatever made the row: its TTL, an AWS
+    /// one's role pattern, a machine one's empty fields, an OIDC one's issuer URL, audience,
+    /// subject, pinned keys and the shared-issuer rule ([`roll_oidc::check_identity`]). Making one,
+    /// restoring one from a backup (backup.rs) and enabling one again all ask it, so a row from an
+    /// archive or from before a rule existed never logs in past the rule. An AWS identity's
+    /// `subject` is its ARN; a machine one's issuer is `roll` and its subject `machine`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn admit_identity(&self, project: &str, kind: IdentityKind, issuer: String, audience: String, subject: String, claims: &BTreeMap<String, String>, jwks: Option<String>, ttl: i64) -> Result<Checked> {
+        if !(TTL_MIN..=TTL_MAX).contains(&ttl) {
+            return Err(bad(format!("ttl_minutes is {TTL_MIN}–{TTL_MAX}")));
+        }
+        match kind {
+            IdentityKind::Aws => {
+                if issuer != "aws" || !audience.is_empty() || jwks.is_some() || !claims.is_empty() {
+                    return Err(bad("an AWS identity takes arn, not an issuer, audience, subject, claims or keys"));
+                }
+                if self.deliver.is_none() {
+                    return Err(bad("AWS logins aren't on this server"));
+                }
+                let arn = subject.trim().to_string();
+                crate::aws_identity::Pattern::parse(&arn).map_err(bad)?;
+                Ok((issuer, audience, arn, None, None))
+            }
+            IdentityKind::Machine => {
+                if issuer != "roll" || subject != "machine" || !audience.is_empty() || jwks.is_some() || !claims.is_empty() {
+                    return Err(bad("a machine identity logs in with the bootstrap tokens made for it: no issuer, audience, subject, claims, keys or arn"));
+                }
+                if self.workloads.is_none() {
+                    return Err(bad("machine identities aren't on this server"));
+                }
+                Ok((issuer, audience, subject, None, None))
+            }
+            IdentityKind::Oidc => self.oidc_identity(project, issuer, audience, subject, claims, jwks),
+        }
     }
 
     /// An OIDC identity's issuer, audience, subject, pinned keys and how many, checked.
@@ -493,6 +531,17 @@ impl Secrets {
         self.project(project)?;
         // One restored from a backup has no maker: whoever enables it becomes it (backup.rs).
         let maker = self.maker_of(caller)?;
+        if !change.disabled {
+            // Logging in again passes what making it would now: a row from an archive or from
+            // before a rule existed (the shared-issuer rule, the TTL range) stays off. One with no
+            // maker reaches only what its enabler may grant.
+            let found: Option<(Identity, String, Option<String>)> = self.db.read(|c| c.query_row(&format!("SELECT {COLUMNS} FROM identities WHERE id = ? AND project_id = ?"), [id, project], identity_row).optional())?;
+            let (i, _, jwks) = found.ok_or_else(|| Error::NotFound(format!("no identity {id}")))?;
+            self.admit_identity(project, i.kind, i.issuer, i.audience, i.subject, &i.claims, jwks, i.ttl_minutes).map_err(|e| bad(format!("{} can't be enabled: {e}; make it again", i.name)))?;
+            if i.created_by.is_empty() && i.gateway.is_none() {
+                crate::caller::scope(project, i.environments, i.paths, i.actions, caller)?;
+            }
+        }
         let now = self.db.now_ms()?;
         let (identity, live) = self.db.write(|c| {
             let name: Option<String> = c.query_row("SELECT name FROM identities WHERE id = ? AND project_id = ?", [id, project], |r| r.get(0)).optional()?;

@@ -577,8 +577,8 @@ async fn delete_backup_schedule(State(s): S, Who(c): Who, Path(project): Path<St
 async fn backup(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
     let body: BackupBody = body(&b)?;
     let context = crate::backup::context(&project);
-    let sealed = blocking(s, move |s| s.backup(&project, &body.recipient, &c)).await?;
-    Ok(secret_response(ok(json!({ "sealed": sealed, "context": context }))))
+    let b = blocking(s, move |s| s.backup(&project, &body.recipient, &c)).await?;
+    Ok(secret_response(ok(json!({ "sealed": b.sealed, "context": context, "warnings": b.warnings }))))
 }
 
 /// An opened archive against the live project, by names and counts; nothing written (admin).
