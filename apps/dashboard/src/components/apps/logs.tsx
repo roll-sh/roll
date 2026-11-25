@@ -9,13 +9,31 @@ import { usePageVisible } from "./live";
 const MAX_LINES = 5000;
 
 /** The environment's runtime log, live: every instance's stdout and stderr, filterable, pausable. */
-export function RuntimeLogs({ service, env, onGroup }: { service: string; env: string; onGroup?: () => void }) {
+export function RuntimeLogs({
+  service,
+  env,
+  onGroup,
+  retentionDays = 7,
+  initialFilter,
+  initialDays,
+  onSearch,
+}: {
+  service: string;
+  env: string;
+  onGroup?: () => void;
+  retentionDays?: number;
+  /** A search from the URL: run once as the tab opens. */
+  initialFilter?: string;
+  initialDays?: number;
+  /** A search ran (its filter and range): the page keeps them in its URL. */
+  onSearch?: (filter: string, days: number) => void;
+}) {
   const [lines, setLines] = useState<LogLine[]>([]);
   // A request's trace, opened from its line.
   const [trace, setTrace] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const [paused, setPaused] = useState(false);
-  const [filter, setFilter] = useState("");
+  const [filter, setFilter] = useState(initialFilter ?? "");
   const [instance, setInstance] = useState("");
   // Only what the app says is at this level or worse (lines that say none are left out).
   const [level, setLevel] = useState<LogLevel | "">("");
@@ -31,11 +49,14 @@ export function RuntimeLogs({ service, env, onGroup }: { service: string; env: s
   // live tail until left.
   const [found, setFound] = useState<{ q?: string; where?: string; before?: number; by?: string; lines: LogLine[]; truncated: boolean; error?: string } | null>(null);
   const [searching, setSearching] = useState(false);
+  // How far back a search reads: up to what the environment keeps (its log retention).
+  const [days, setDays] = useState(Math.min(initialDays ?? 7, Math.max(7, retentionDays)));
+  const span = days === 1 ? "day" : `${days} days`;
   const read = async (q: { q?: string; where?: string; before?: number; by?: string }) => {
     setSearching(true);
     try {
       const narrow = requests ? { status: status || undefined, min_ms: slow || undefined } : {};
-      const got = await appsApi.readLogs(service, env, { ...q, ...narrow, since: Date.now() - 7 * 86_400_000, instance: instance || undefined, level: (!requests && level) || undefined, deployment: (!requests && deployment) || undefined, stream: (!requests && stream) || undefined, http: requests, tail: q.q || q.where ? 2000 : 500 });
+      const got = await appsApi.readLogs(service, env, { ...q, ...narrow, since: Date.now() - days * 86_400_000, instance: instance || undefined, level: (!requests && level) || undefined, deployment: (!requests && deployment) || undefined, stream: (!requests && stream) || undefined, http: requests, tail: q.q || q.where ? 2000 : 500 });
       setFound({ ...q, ...got });
     } catch (e) {
       setFound({ ...q, lines: [], truncated: false, error: e instanceof Error ? e.message : String(e) });
@@ -46,8 +67,20 @@ export function RuntimeLogs({ service, env, onGroup }: { service: string; env: s
   const search = () => {
     // Field terms (`level:error user_id:42`) are the API's `where`; the other words its text search.
     const { where, words } = splitFilter(filter);
-    if (where || words) void read({ ...(words ? { q: words } : {}), ...(where ? { where } : {}) });
+    if (where || words) {
+      onSearch?.(filter, days);
+      void read({ ...(words ? { q: words } : {}), ...(where ? { where } : {}) });
+    }
   };
+  // A search the URL brought: once, as the tab opens.
+  const opened = useRef(false);
+  useEffect(() => {
+    if (opened.current || !initialFilter?.trim()) return;
+    opened.current = true;
+    search();
+    // Only the first render's filter: later edits search when asked.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const at = (t: number) => new Date(t).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   // Lines keep arriving while paused; the view shows them on resume.
   const buffer = useRef<LogLine[]>([]);
@@ -158,8 +191,8 @@ export function RuntimeLogs({ service, env, onGroup }: { service: string; env: s
                 <option value={5000}>≥ 5 s</option>
               </select>
               {(status || slow > 0) && (
-                <button type="button" className={btn} disabled={searching} onClick={() => void read({})} title="These requests from the stored week, not just what's here">
-                  Search 7 days
+                <button type="button" className={btn} disabled={searching} onClick={() => void read({})} title={`These requests from the stored ${span}, not just what's here`}>
+                  Search {span}
                 </button>
               )}
             </>
@@ -170,14 +203,23 @@ export function RuntimeLogs({ service, env, onGroup }: { service: string; env: s
             </button>
           )}
           {filter.trim() && !requests && (
-            <button type="button" className={btn} disabled={searching} onClick={() => search()} title="Search the stored logs of the last 7 days, not just what's here">
-              {searching ? "Searching…" : "Search 7 days"}
+            <button type="button" className={btn} disabled={searching} onClick={() => search()} title={`Search the stored logs of the last ${span}, not just what's here`}>
+              {searching ? "Searching…" : `Search ${span}`}
             </button>
           )}
+          <select value={days} onChange={(e) => setDays(Number(e.target.value))} aria-label="Search back" title="How far back a search reads (the environment keeps its logs this long at most)" className="h-8 rounded-lg border border-line bg-panel px-2 text-[12px] outline-none">
+            {[1, 7, 30, 90]
+              .filter((d) => d <= Math.max(7, retentionDays))
+              .map((d) => (
+                <option key={d} value={d}>
+                  {d === 1 ? "last day" : `last ${d} days`}
+                </option>
+              ))}
+          </select>
           <input
             type="datetime-local"
             aria-label="Read back to"
-            title="The lines before this time, from the stored logs of the last 7 days"
+            title={`The lines before this time, from the stored logs of the last ${span}`}
             className="h-8 rounded-lg border border-line bg-panel px-2 font-mono text-[12px] text-muted outline-none"
             onChange={(e) => {
               const t = new Date(e.target.value).getTime();
@@ -231,12 +273,12 @@ export function RuntimeLogs({ service, env, onGroup }: { service: string; env: s
           ) : (
             found.by ? (
               <>
-                {found.lines.length} {found.lines.length === 1 ? "request" : "requests"} roll answered itself in the last 7 days
+                {found.lines.length} {found.lines.length === 1 ? "request" : "requests"} roll answered itself in the last {span}
                 {found.truncated && " (the newest)"}
               </>
             ) : found.q || found.where ? (
               <>
-                {found.truncated ? `The newest ${found.lines.length}` : found.lines.length} {found.lines.length === 1 ? "line" : "lines"} with “{[found.where, found.q].filter(Boolean).join(" ")}” in the last 7 days
+                {found.truncated ? `The newest ${found.lines.length}` : found.lines.length} {found.lines.length === 1 ? "line" : "lines"} with “{[found.where, found.q].filter(Boolean).join(" ")}” in the last {span}
                 {found.truncated && " (more matched: narrow the search)"}
               </>
             ) : (
@@ -249,6 +291,11 @@ export function RuntimeLogs({ service, env, onGroup }: { service: string; env: s
                 )}
               </>
             )
+          )}
+          {found.lines.length > 0 && (
+            <button type="button" className="text-accent hover:underline" onClick={() => download(found.lines, `${service}-${env}-logs.ndjson`)} title="These lines, one JSON object each">
+              Download
+            </button>
           )}
           <button type="button" className="text-accent hover:underline" onClick={() => setFound(null)}>
             Back to live
@@ -272,6 +319,7 @@ export function RuntimeLogs({ service, env, onGroup }: { service: string; env: s
         lines={found ? found.lines : shown}
         columns
         onTrace={setTrace}
+        onContext={found && (found.q || found.where || found.by) ? (l) => void read({ before: l.t + 30_000 }) : undefined}
         onGroup={onGroup}
         onBlock={async (ip) => {
           // First in the list (the first match decides), unless a rule denies it already.
@@ -297,4 +345,12 @@ export function RuntimeLogs({ service, env, onGroup }: { service: string; env: s
       />
     </div>
   );
+}
+
+/** Lines as an NDJSON file the browser saves. */
+function download(lines: LogLine[], name: string) {
+  const url = URL.createObjectURL(new Blob([lines.map((l) => JSON.stringify(l)).join("\n") + "\n"], { type: "application/x-ndjson" }));
+  const a = Object.assign(document.createElement("a"), { href: url, download: name });
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }

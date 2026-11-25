@@ -86,7 +86,8 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}` | | `Environment` | read |
 | `DELETE /v1/apps/services/{id}/environments/{env}` | | 204 | delete |
 | `POST /v1/apps/services/{id}/environments/{env}/deploys` | `NewDeploy`, a gzipped tar of a tree (`application/gzip`, `roll up`), or an image built elsewhere (`application/x-docker-image`: `docker save`'s archive, gzipped or not; at most the upload limit; its names are taken out before it's loaded, and it's tagged as a build's would be; on the fleet a CodeBuild run of its own loads and pushes it to the service's ECR repository) | 202 `Deployment` | deploy*; admin with `X-Roll-Override: 1` |
-| `GET /v1/apps/services/{id}/environments/{env}/deploys?before=` | | `Deployment[]`, newest first, 100 at most; `before` (unix ms, the last one's `created_at`): the next page | read |
+| `GET /v1/apps/services/{id}/environments/{env}/deploys?before=&status=&actor=&q=` | | `Deployment[]`, newest first, 100 at most; `before` (unix ms, the last one's `created_at`): the next page; `status` (`queued`, `building`, `deploying`, `ready`, `active`, `inactive`, `failed`, `canceled`, `removed`), `actor` (exactly the deploy's) and `q` (in its message, or the start of its commit; 1–200) narrow it in the database, so a page is 100 matches | read |
+| `GET /v1/apps/services/{id}/deploys?before=&status=&actor=&q=` | | `Deployment[]`: every environment's (previews' too), as above | read |
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}` | | `Deployment` | read |
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/logs?follow=&tail=` | | `LogLine[]` or SSE (ends with the deploy: an `end` event, then the stream closes, so a follower stops instead of reading it again; a job's and a run's log end the same way) | read |
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/sbom` | | its image's SBOM, CycloneDX JSON (`application/vnd.cyclonedx+json`, as a download) from the same scan; 404 when it wasn't scanned, the SBOM was over 8 MiB, or the deployment was pruned | read |
@@ -500,6 +501,7 @@ type EnvironmentPut = {
    *  the app's. */
   vitals?: boolean;
   log_retention_days?: 7 | 30 | 90 | null; // how long its logs are kept (null: 7); a preview's stay 7 (400)
+  keep_days?: number | null; // 1–90: its built deployments stay to roll back to that many days past the newest ten (Vercel's retention); null: only those
   scheduled?: boolean; // false: its schedules don't run (a cron service's, run.schedules' commands and calls), skipped and not made up when turned back on; deploys and POST …/runs still go; default true (roll previews turns pv- environments' off)
   data?: "branch" | null; // admin: data of its own, a branch of each Postgres and Redis database it links (made now and at each deploy for links made since; an environment's services share one), its link variables the branch's, never the database's; null goes back to them, deleting the branches no other environment uses; 400 for production and previews (roll previews branches theirs)
   closed_by?: string | null; // with egress, the operator's only (roll previews in process, or any caller on an open daemon; a token needs admin; 403 for a user's token or a signed-in person): who a closed environment's placeholders are made by (usr_… or token:…); null, no one (its keys bound to hosts withheld); unset, whoever set the egress
@@ -618,6 +620,7 @@ type Environment = EnvironmentSummary & {
   approvals?: number; // approvals a deployment needs before it goes live (absent: none)
   badge_url?: string; // its deploy status badge, when `badge` is on
   log_retention_days: number; // 7 (default), 30 or 90: its logs (output, access log, traces, metrics, events, Vitals) are kept that long, then deleted hourly by the owner; a preview's are 7
+  keep_days?: number;         // days its built deployments stay to roll back to past the newest ten (PUT keep_days)
   report: boolean; // its deploys are reported to the Git host (default true)
   preview_host?: string; // its label under the project's preview domain
   egress: { mode: "roll" | "open"; hosts: string[] }; // what its code may reach (roll: roll and the hosts)

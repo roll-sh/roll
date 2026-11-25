@@ -760,6 +760,8 @@ pub struct EnvRow {
     pub egress_by: Option<String>,
     /// Its own redirects (`crate::site_rules::EnvRedirects`'s text), any kind of service.
     pub redirects: Option<String>,
+    /// Days its deployments are kept to roll back to, beyond the newest ones (1–90).
+    pub keep_days: Option<u32>,
     /// Its deploys are reported to the Git host (commit statuses, GitHub Deployments); false:
     /// someone else reports them (roll previews for its `pv-` environments).
     pub report: bool,
@@ -826,6 +828,15 @@ pub struct MinuteRow {
     pub egress_bytes: i64,
     /// Requests that found every instance busy at `max_instances`.
     pub over_capacity: i64,
+}
+
+/// What a deployments list is narrowed to (`…/deploys?status=&actor=&q=`).
+#[derive(Clone, Debug, Default)]
+pub struct DeployFilter {
+    pub status: Option<String>,
+    pub actor: Option<String>,
+    /// In its message, or the start of its commit.
+    pub q: Option<String>,
 }
 
 /// A visitor's session: `(hash, user, login, created_at, expires_at)`.
@@ -907,7 +918,7 @@ fn name_taken(name: &str, deleted: Option<i64>) -> String {
         Some(_) => format!("a deleted service named {name} holds the name: restore it, or delete it again to delete it for good"),
     }
 }
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split, freeze, mirror, pause_schedule, snippets, log_retention_days, approvals, badge, egress_by, redirects";
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split, freeze, mirror, pause_schedule, snippets, log_retention_days, approvals, badge, egress_by, redirects, keep_days";
 /// A deployment [`Store::prune_deployments`] pruned, with its image when nothing else names it.
 pub struct Pruned {
     pub id: String,
@@ -999,6 +1010,7 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         badge: r.get::<_, i64>(38)? != 0,
         egress_by: r.get(39)?,
         redirects: r.get(40)?,
+        keep_days: r.get::<_, Option<i64>>(41)?.map(|d| d as u32),
     })
 }
 
@@ -1178,6 +1190,7 @@ impl Store {
         db.add_column("environments", "vitals", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("environments", "report", "INTEGER NOT NULL DEFAULT 1")?;
         db.add_column("environments", "log_retention_days", "INTEGER")?;
+        db.add_column("environments", "keep_days", "INTEGER")?;
         db.add_column("environments", "approvals", "INTEGER")?;
         db.add_column("environments", "badge", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("environments", "egress_by", "TEXT")?;
@@ -1490,7 +1503,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }
@@ -1925,11 +1938,36 @@ impl Store {
 
     /// Newest first; `before` (ms): only those made before then (the next page).
     pub fn deployments(&self, service: &str, env: &str, limit: usize, before: Option<i64>) -> Result<Vec<Deployment>> {
-        Ok(self.db.query(
-            &format!("SELECT {DEPLOY_COLS} FROM deployments WHERE service = ? AND env = ? AND created_at < ? ORDER BY created_at DESC, id DESC LIMIT ?"),
-            params![service, env, before.unwrap_or(i64::MAX), limit as i64],
-            deploy_row,
-        )?)
+        self.deployments_where(service, Some(env), limit, before, &DeployFilter::default())
+    }
+
+    /// A service's deployments, newest first: one environment's or all of them, narrowed by
+    /// `f` (in the database, so a page is `limit` matches).
+    pub fn deployments_where(&self, service: &str, env: Option<&str>, limit: usize, before: Option<i64>, f: &DeployFilter) -> Result<Vec<Deployment>> {
+        let mut sql = format!("SELECT {DEPLOY_COLS} FROM deployments WHERE service = ? AND created_at < ?");
+        let mut args: Vec<code_sql::Value> = vec![code_sql::Value::Text(service.into()), code_sql::Value::Int(before.unwrap_or(i64::MAX))];
+        if let Some(e) = env {
+            sql.push_str(" AND env = ?");
+            args.push(code_sql::Value::Text(e.into()));
+        }
+        if let Some(s) = &f.status {
+            sql.push_str(" AND status = ?");
+            args.push(code_sql::Value::Text(s.clone()));
+        }
+        if let Some(a) = &f.actor {
+            sql.push_str(" AND actor = ?");
+            args.push(code_sql::Value::Text(a.clone()));
+        }
+        if let Some(q) = &f.q {
+            // Its message or its commit, as typed (`%` and `_` are themselves).
+            let esc = q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+            sql.push_str(" AND (message LIKE ? ESCAPE '\\' OR revision LIKE ? ESCAPE '\\')");
+            args.push(code_sql::Value::Text(format!("%{esc}%")));
+            args.push(code_sql::Value::Text(format!("{esc}%")));
+        }
+        sql.push_str(" ORDER BY created_at DESC, id DESC LIMIT ?");
+        args.push(code_sql::Value::Int(limit as i64));
+        Ok(self.db.query(&sql, args, deploy_row)?)
     }
 
     /// A service's deployments past what's kept, marked pruned in one transaction: what's kept
@@ -1948,6 +1986,8 @@ impl Store {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )?;
             let live: Vec<String> = c.query("SELECT active FROM environments WHERE service = ? AND active IS NOT NULL", [service], |r| r.get(0))?;
+            // An environment that keeps its deployments some days: none younger is pruned.
+            let kept_days: HashMap<String, i64> = c.query("SELECT name, keep_days FROM environments WHERE service = ? AND keep_days IS NOT NULL", [service], |r| Ok((r.get(0)?, r.get(1)?)))?.into_iter().collect();
             // Deployments with their own values (earlier pushes' views): never counted toward
             // what's kept, pruned a day after their URL was last visited.
             let views: HashMap<String, i64> = c.query("SELECT o.deployment, o.seen_at FROM deploy_overrides o JOIN deployments d ON d.id = o.deployment WHERE d.service = ?", [service], |r| Ok((r.get(0)?, r.get(1)?)))?.into_iter().collect();
@@ -1965,14 +2005,15 @@ impl Store {
                 }
                 let removed = status == "removed";
                 if image.is_some() && matches!(status.as_str(), "active" | "inactive") {
-                    let n = built.entry(env).or_default();
+                    let n = built.entry(env.clone()).or_default();
                     *n += 1;
                     if *n <= keep {
                         continue;
                     }
                 }
                 let running = matches!(status.as_str(), "queued" | "building" | "deploying" | "active" | "ready");
-                if running || live.contains(&id) || (!removed && ended >= recent) {
+                let young = kept_days.get(&env).is_some_and(|d| image.is_some() && !removed && ended >= now - d * 86_400_000);
+                if running || young || live.contains(&id) || (!removed && ended >= recent) {
                     continue;
                 }
                 c.execute("UPDATE deployments SET pruned_at = ? WHERE id = ?", params![now, id])?;
@@ -4280,6 +4321,11 @@ impl Store {
 
     pub fn approvals_of(&self, deployment: &str) -> Result<Vec<String>> {
         Ok(self.db.query("SELECT approver FROM deploy_approvals WHERE deployment = ? ORDER BY at, approver", [deployment], |r| r.get(0))?)
+    }
+
+    pub fn set_keep_days(&self, service: &str, env: &str, days: Option<u32>) -> Result<()> {
+        self.db.execute("UPDATE environments SET keep_days = ? WHERE service = ? AND name = ?", params![days.map(|d| d as i64), service, env])?;
+        Ok(())
     }
 
     pub fn set_log_retention(&self, service: &str, env: &str, days: Option<u32>) -> Result<()> {

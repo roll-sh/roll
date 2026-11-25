@@ -720,13 +720,19 @@ impl Ctx {
         }
     }
 
-    /// Whether a call of this connection's can wait for a person: a rule that asks, or "ask for
-    /// anything else". The operator's never do (the gate doesn't judge them).
-    fn can_ask(&self) -> bool {
-        match &self.principal {
-            Principal::Operator => false,
-            Principal::Grant(g) => g.ask_otherwise || g.scope.0.iter().any(|r| r.actions.values().any(|e| *e == roll_auth::scope::Effect::Ask)),
-        }
+    /// Whether a call of this tool (its product, its candidate actions) can wait for a person, so
+    /// it takes `approval`: a rule of the token's that asks for one of its actions, "ask for
+    /// anything else" short of rules that allow all of them everywhere, or the policy's
+    /// `agents_ask` covering one (it holds MCP calls whatever the token allows). The operator's
+    /// never do (the gate doesn't judge them). `policy` is read once per listing.
+    fn might_ask(&self, product: &str, actions: &[Action], policy: Option<&roll_access::Policy>) -> bool {
+        use roll_auth::scope::{Effect, Resources};
+        let Principal::Grant(g) = &self.principal else { return false };
+        let rules = || g.scope.0.iter().filter(|r| r.product == "*" || r.product == product);
+        let asks = rules().any(|r| actions.iter().any(|a| r.actions.get(a) == Some(&Effect::Ask)));
+        let everywhere = |a: &Action| rules().any(|r| r.actions.get(a) == Some(&Effect::Allow) && r.resources == Resources::All && r.environments.is_none() && r.paths.is_none() && !r.unprotected);
+        let otherwise = g.ask_otherwise && !actions.iter().all(everywhere);
+        asks || otherwise || policy.is_some_and(|p| actions.iter().any(|a| p.agent_asks(product, *a, None)))
     }
 
     /// A person's own token reaches only what their session can (`USER_REACH`).
@@ -800,14 +806,19 @@ impl Ctx {
     /// Every tool this caller can use, as `tools/list` shows it.
     fn tools(&self) -> Vec<Value> {
         let mut out: Vec<Value> = self.usable_tools().into_iter().map(std::borrow::Cow::into_owned).collect();
-        // A connection no person is ever asked about has no use for the approval argument (a
-        // model reads every tool's schema): the operator's, and a token whose rules only allow.
-        // Fronted sets' tools take it too.
-        if !self.can_ask() {
-            for t in &mut out {
-                if let Some(p) = t["inputSchema"]["properties"].as_object_mut() {
-                    p.remove("approval");
-                }
+        // Only a tool whose calls can wait for a person takes the approval argument: a model reads
+        // every schema, and on all 500-odd tools it was ~13k tokens a listing. A fronted set's
+        // tool (roll code's) takes it wherever any of the connection's could.
+        let policy = self.m.config.access.as_ref().map(|a| a.policy_now());
+        let roll: std::collections::HashMap<&str, &tools::Tool> = tools::all().iter().map(|t| (t.name, t)).collect();
+        let any = roll.values().any(|t| self.might_ask(t.product, &t.actions(), policy.as_ref()));
+        for t in &mut out {
+            let asks = match t["name"].as_str().and_then(|n| roll.get(n)) {
+                Some(tool) => self.might_ask(tool.product, &tool.actions(), policy.as_ref()),
+                None => any,
+            };
+            if !asks && let Some(p) = t["inputSchema"]["properties"].as_object_mut() {
+                p.remove("approval");
             }
         }
         out
@@ -920,11 +931,7 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                             if ctx.modern { rpc_result(id, modern::approval_input_required(&r)) } else { approval_elicitation(id, &r) }
                         }
                         Ok(Some(r)) => rpc_result(id, r),
-                        Ok(None) => {
-                            let listed = ctx.usable_tools();
-                            let near = tools::nearest(&name, listed.iter().filter_map(|t| t["name"].as_str())).map(|n| format!(": did you mean {n:?}?")).unwrap_or_default();
-                            rpc_error(id, -32602, format!("unknown tool {name:?}{near}"))
-                        }
+                        Ok(None) => rpc_result(id, unknown_tool(ctx, &name)),
                     }
                 }
             }
@@ -1718,6 +1725,14 @@ fn steps_up(client: Option<&str>) -> bool {
     let Some((name, version)) = client.and_then(|c| c.split_once(' ')) else { return false };
     let v: Vec<u32> = version.trim().split('.').map_while(|p| p.parse().ok()).collect();
     name == "claude-code" && v.len() >= 3 && (v[0], v[1], v[2]) >= (2, 1, 288)
+}
+
+/// A call to a tool this connection doesn't have: a tool error the model reads (and can correct
+/// from the nearest name), not a protocol error, as the official SDKs answer it (SEP-2145).
+fn unknown_tool(ctx: &Ctx, name: &str) -> Value {
+    let listed = ctx.usable_tools();
+    let near = tools::nearest(name, listed.iter().filter_map(|t| t["name"].as_str())).map(|n| format!(": did you mean {n:?}?")).unwrap_or_default();
+    tool_error(format!("unknown tool {name:?}{near}"), json!({ "code": "unknown_tool" }))
 }
 
 fn tool_error(text: String, data: Value) -> Value {

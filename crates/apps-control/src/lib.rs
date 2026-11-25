@@ -279,6 +279,8 @@ pub struct Apps {
     capped_refresh: tokio::sync::Mutex<()>,
     /// roll previews' notes for a preview's feedback button ([`Apps::set_feedback_notes`]).
     notes: std::sync::OnceLock<Arc<dyn integrations::FeedbackNotes>>,
+    /// roll previews' share links for a preview's host ([`Apps::set_preview_shares`]).
+    shares: std::sync::OnceLock<Arc<dyn integrations::PreviewShares>>,
     /// Where a name under a project's preview domain no environment holds goes (roll previews).
     preview_router: std::sync::OnceLock<Arc<dyn integrations::PreviewRouter>>,
     /// roll previews' branch pushes ([`Apps::set_git_pushes`]).
@@ -691,6 +693,7 @@ impl Apps {
             capped: Mutex::new(Default::default()),
             capped_refresh: tokio::sync::Mutex::new(()),
             notes: std::sync::OnceLock::new(),
+            shares: std::sync::OnceLock::new(),
             preview_router: std::sync::OnceLock::new(),
             pushes: std::sync::OnceLock::new(),
             github: std::sync::OnceLock::new(),
@@ -1929,6 +1932,7 @@ impl Apps {
             feedback: r.feedback,
             vitals: r.vitals,
             log_retention_days: r.log_retention_days.unwrap_or(crate::logs::KEEP_DAYS),
+            keep_days: r.keep_days,
             approvals: r.approvals,
             // On the environment's own public name (the apps listener answers `/_roll/badge/` on any).
             badge_url: r.badge.then(|| format!("{}{}{}/{}.svg", self.url(&r.slug), crate::public::BADGE, r.service, r.name)),
@@ -2049,7 +2053,7 @@ impl Apps {
                 settings.push(json!({ "field": format!("run.{k}"), "from": x, "to": y, "put": { "run": { k: x } } }));
             }
         }
-        for k in ["wait_for_ci", "follow_tag", "redeploy_on_secrets", "traces", "vitals", "report", "egress", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "log_retention_days", "approvals"] {
+        for k in ["wait_for_ci", "follow_tag", "redeploy_on_secrets", "traces", "vitals", "report", "egress", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "log_retention_days", "keep_days", "approvals"] {
             let (x, y) = (a.get(k).cloned().unwrap_or(Value::Null), b.get(k).cloned().unwrap_or(Value::Null));
             if x != y {
                 settings.push(json!({ "field": k, "from": x, "to": y, "put": { k: x } }));
@@ -2099,7 +2103,7 @@ impl Apps {
     pub async fn put_environment_by(self: &Arc<Self>, service: &str, env: &str, body: Value, by: Option<String>) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "approvals", "badge", "closed_by", "data", "scheduled", "attack_mode", "challenge_until", "preflight"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "keep_days", "approvals", "badge", "closed_by", "data", "scheduled", "attack_mode", "challenge_until", "preflight"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -2534,6 +2538,15 @@ impl Apps {
         if retention.flatten().is_some_and(|d| d != crate::logs::KEEP_DAYS) && ephemeral.unwrap_or(existing.as_ref().is_some_and(|r| r.ephemeral)) {
             return Err(Error::BadRequest("a preview's logs are kept 7 days".into()));
         }
+        // Days its deployments stay to roll back to past the newest ones (null: only those).
+        let keep_days = match o.get("keep_days") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(v) => match v.as_u64() {
+                Some(d @ 1..=90) => Some(Some(d as u32)),
+                _ => return Err(Error::BadRequest("keep_days is 1–90 (null: only the newest deployments)".into())),
+            },
+        };
         // Approvals from people other than a deployment's author before it goes live: 0–3.
         let approvals = match o.get("approvals") {
             None => None,
@@ -2760,6 +2773,12 @@ impl Apps {
         if let Some(n) = approvals {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_approvals(&sid, &e, n)).await?;
+            self.changed(service);
+        }
+        // Kept from the next pruning pass on.
+        if let Some(days) = keep_days {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_keep_days(&sid, &e, days)).await?;
             self.changed(service);
         }
         // Kept from the next hourly pass on (logs::expire_pass).
@@ -4445,6 +4464,16 @@ impl Apps {
 
     pub(crate) fn feedback_notes(&self) -> Option<Arc<dyn integrations::FeedbackNotes>> {
         self.notes.get().cloned()
+    }
+
+    /// Where a preview environment's host checks a share link (roll previews, once it's on this
+    /// node). Set once.
+    pub fn set_preview_shares(&self, shares: Arc<dyn integrations::PreviewShares>) {
+        let _ = self.shares.set(shares);
+    }
+
+    pub(crate) fn preview_shares(&self) -> Option<Arc<dyn integrations::PreviewShares>> {
+        self.shares.get().cloned()
     }
 
     /// Where names under a project's preview domain that no environment holds go (roll previews'

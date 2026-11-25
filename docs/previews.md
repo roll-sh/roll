@@ -1277,7 +1277,7 @@ thirty-fourth review found them in the clear.
       environment, so roll apps' own sign-in flow and its own check decide (its
       `AccountsVisitors` and `/dashboard/apps/visit`: admins only today), not previews'. roll
       apps refuses `signed_in` on a node without roll's dashboard address (`web_url`), which
-      fails the deploy. Share links don't open services on roll apps, as under `link`. roll
+      fails the deploy. Share links open them as previews' own (see Share links). roll
       apps adds the feedback button only for a visitor with its access cookie (`via_link` in
       `apps-control/src/public.rs`), never for one with its sign-in session, so a team
       preview's services on roll apps have no button yet.
@@ -1366,6 +1366,13 @@ thirty-fourth review found them in the clear.
   change, or in Slack); a link without `notes` gives no button, as before.
   `a_share_links_guest_leaves_notes_as_a_guest` and the runtime's link test (the guest's
   script; a note from another site's page refused).
+  Where roll apps serves the preview, its proxy takes the same links on the `pv-` environment's
+  host through a port of roll apps' (`integrations::PreviewShares`, rolld's
+  `previews::services::Shares`): `?roll_share=` sets the same cookie, and every request asks
+  previews again (`Engine::share_visit`, which previews' own proxy uses too: live, and its maker
+  still reaching the project), so a revoked link stops at once there as well. The cookie never
+  reaches the app, and a guest is no visitor session of roll apps'. Guests' notes and their list
+  go through the same port. `apps-control/tests/api.rs::a_previews_share_link_lets_its_guest_in_until_it_ends`.
 
 ## Cost
 
@@ -1892,7 +1899,7 @@ previews in it), the operator and admins see every project.
 | `DELETE /v1/previews/{id}/restore-points/{point}` | | 204 |
 | `GET /v1/previews/{id}/screenshot` | | `image/png`: the first service's page at the preview's head (404 when it has none); `?previous=1` the one before, `?view=phone` at a phone's width, `?base=1` the default branch's preview's, `?page=/pricing` another of `github.pages`, `?diff=base` or `?diff=previous` where it differs from that one or the one before (the page faded, changed pixels marked red) |
 | `GET /v1/previews/{id}/screenshot.png?exp=&sig=` | | `image/png` behind a signed, expiring link, without credentials (403 otherwise): the pull request comment's image; `&diff=base` under its own signature, the diff against main |
-| `GET`/`POST /v1/previews/{id}/shares` | `{hours, label?, notes?}` (1–720 hours; `label` who it's for, one line of 60 characters at most; `notes` its visitors may leave notes as guests) for a new one | `Share[]` (never a token), or 201 `Share` with `url`, the only time the link is shown; 409 for a public preview, one roll apps serves (its proxy takes the preview's own link, `share_url`), or past 20 live ones. A link works only while its maker (the person, or the person behind the token, that made it; not the operator's) may still open the project's previews: an account that still signs in, with a role that reveals a preview. Asked again at most every few minutes while it's used; one whose maker may not ends at once ("ada's share link ended: …" in the activity). `visit::tests::a_signed_in_person_gets_into_a_team_preview` |
+| `GET`/`POST /v1/previews/{id}/shares` | `{hours, label?, notes?}` (1–720 hours; `label` who it's for, one line of 60 characters at most; `notes` its visitors may leave notes as guests) for a new one | `Share[]` (never a token), or 201 `Share` with `url`, the only time the link is shown; 409 for a public preview or past 20 live ones. A link works only while its maker (the person, or the person behind the token, that made it; not the operator's) may still open the project's previews: an account that still signs in, with a role that reveals a preview. Asked again at most every few minutes while it's used; one whose maker may not ends at once ("ada's share link ended: …" in the activity). `visit::tests::a_signed_in_person_gets_into_a_team_preview` |
 | `DELETE /v1/previews/{id}/shares/{share}` | | 204: the link stops at the visitor's next request |
 | `GET`/`PUT /v1/previews/{id}/env` | `{vars: {NAME: value \| null}}` (`null` removes; at most 100, 32 KiB each; a value may be `roll://ENV[/folder]/KEY`) | `{vars}`: the preview's own variables; its services redeploy with them. 403 for a reference to an environment other than the base without the caller's reveal on its folder; 400 for a malformed one or a look-alike |
 | `POST /v1/previews/{id}/approve` | `{head}` (the head looked at) | `Preview`: that head of a fork's pull request on a Git URL service runs (`pull.approved_head`); the next push waits again. 409 when the preview moved on to another head or isn't a fork's pull request. Admin in the permissions catalogue, and no MCP tool: letting outside code run with the project's data is a person's call |
@@ -2757,9 +2764,9 @@ Ranked by what a person notices first. Done so far:
 2. **roll apps on par, in review**: roll apps' feedback button is previews' own script (a note
    carries the page's errors and the reviewer's steps there too), and a share link on a preview
    roll apps serves is a 409 that says why, not a link that answers 401.
-3. **Share links on roll apps** (with roll apps' thread): a port in roll apps' access check that
-   asks previews whether a `roll_share` token is a live link of the environment's preview (its
-   maker still reaching the project), and guests' notes through roll apps' host.
+3. **Share links on roll apps, in review**: a port in roll apps' access check asks previews about a
+   `roll_share` link at every request (`Engine::share_visit`, shared with previews' own proxy),
+   and guests' notes go through it.
 4. **`note_mail` in the dashboard's rules**: the setting is in the API and roll MCP, not the page.
 5. **`roll preview try`**: an agent's page drive (`…/try`) from the CLI, as `roll preview fetch`.
 6. **A note in its reviewer's engine, typing**: their typing where the button can say what

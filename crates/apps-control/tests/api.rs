@@ -1343,6 +1343,14 @@ async fn old_deployments_are_pruned_past_what_an_environment_keeps() {
         let (_, d) = call(&w.api, "POST", &base, Some(json!({}))).await;
         assert_eq!(settled(&w, &id, "production", d["id"].as_str().unwrap()).await["status"], "failed");
     }
+    // Kept by age: none younger than its environment's keep_days is pruned.
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    let (st, e) = call(&w.api, "PUT", &env, Some(json!({"keep_days": 1}))).await;
+    assert!(st == StatusCode::OK && e["keep_days"] == 1, "{e}");
+    w.apps.prune().await;
+    assert!(w.fake.removed.lock().is_empty(), "a day's deployments kept");
+    assert_eq!(call(&w.api, "PUT", &env, Some(json!({"keep_days": 0}))).await.0, StatusCode::BAD_REQUEST);
+    call(&w.api, "PUT", &env, Some(json!({"keep_days": null}))).await;
     // A pinned one is never pruned, whatever its age.
     let (st, p) = call(&w.api, "POST", &format!("{base}/{}/pin", deps[1]), None).await;
     assert!(st == StatusCode::OK && p["pinned_at"].is_i64(), "{p}");
@@ -1360,6 +1368,12 @@ async fn old_deployments_are_pruned_past_what_an_environment_keeps() {
     let last = page.as_array().unwrap().last().unwrap()["created_at"].as_i64().unwrap();
     let (_, older) = call(&w.api, "GET", &format!("{base}?before={last}"), None).await;
     assert!(older.as_array().unwrap().is_empty() && page.as_array().unwrap().len() == 7, "{page}");
+    // Narrowed in the database: the two that failed, by state or across every environment.
+    let (_, failed) = call(&w.api, "GET", &format!("{base}?status=failed"), None).await;
+    assert!(failed.as_array().unwrap().len() == 2 && failed.as_array().unwrap().iter().all(|d| d["status"] == "failed"), "{failed}");
+    let (_, all) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/deploys?status=failed"), None).await;
+    assert_eq!(all.as_array().unwrap().len(), 2, "{all}");
+    assert_eq!(call(&w.api, "GET", &format!("{base}?status=done"), None).await.0, StatusCode::BAD_REQUEST);
     // Pruned once: a second pass removes nothing again; unpinned, it's pruned as the rest are.
     w.apps.prune().await;
     assert_eq!(w.fake.removed.lock().len(), removed.len());
@@ -5447,6 +5461,88 @@ async fn a_previews_pages_carry_the_feedback_button_for_its_link_visitors() {
     assert_eq!(st, StatusCode::OK);
     assert_eq!(serde_json::from_str::<Value>(&list).unwrap(), json!([{"path": "/pricing", "selector": "h1", "note": "bigger", "by": "ana", "at": 1}]));
     assert_eq!(*said.0.lock(), [("pv-abc".to_string(), "/pricing".to_string())], "the preview and the page's path");
+}
+
+/// A roll previews share link on a preview roll apps serves: followed, its cookie set and on
+/// without the token; asked of previews at every request (a revoked link stops at once); never
+/// seen by the app; its guest gets the button posting from the page (not told where roll is),
+/// and sees their link's notes only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_previews_share_link_lets_its_guest_in_until_it_ends() {
+    use apps_control::integrations::{Note, PreviewShares, Share};
+    let w = world_with(|c| c.web_url = Some("https://roll.test".into())).await;
+    let (svc, _) = image_service(&w, "web", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/pv-abc");
+    let (st, env) = call(&w.api, "PUT", &base, Some(json!({"ephemeral": true, "access": {"token": "t".repeat(32)}, "feedback": true}))).await;
+    assert_eq!(st, StatusCode::OK, "{env}");
+    let (_, d) = call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({}))).await;
+    settled(&w, &id, "pv-abc", d["id"].as_str().unwrap()).await;
+    let (_, env) = call(&w.api, "GET", &base, None).await;
+    let h = host(&env["url"]);
+    #[derive(Default)]
+    struct Links {
+        revoked: std::sync::atomic::AtomicBool,
+        followed: Mutex<Vec<String>>,
+        posted: Mutex<Vec<(String, String, String)>>,
+    }
+    #[async_trait]
+    impl PreviewShares for Links {
+        async fn live(&self, env: &str, token: &str, followed: bool) -> Option<Share> {
+            if env != "pv-abc" || token != "share-1" || self.revoked.load(Ordering::SeqCst) {
+                return None;
+            }
+            if followed {
+                self.followed.lock().push(token.into());
+            }
+            Some(Share { ends_ms: i64::MAX / 2, notes: true })
+        }
+        async fn note(&self, env: &str, token: &str, body: &[u8]) -> Result<String, (u16, String)> {
+            self.posted.lock().push((env.into(), token.into(), String::from_utf8_lossy(body).into()));
+            Ok("rv_g".into())
+        }
+        async fn notes(&self, _env: &str, token: &str, path: &str) -> Vec<Note> {
+            vec![Note { path: path.into(), selector: "h1".into(), note: format!("through {token}"), by: "guest:Ada".into(), at: 1 }]
+        }
+    }
+    let links = Arc::new(Links::default());
+    w.apps.set_preview_shares(links.clone());
+    let send = |method: &'static str, path: &str, cookie: Option<&str>, origin: Option<String>, body: &'static str| {
+        let mut r = Request::builder().method(method).uri(path).header("host", &h).header("accept", if path == "/page" { "text/html" } else { "*/*" });
+        if let Some(c) = cookie {
+            r = r.header("cookie", c);
+        }
+        if let Some(o) = origin {
+            r = r.header("origin", o).header("content-type", "application/json");
+        }
+        w.public.clone().oneshot(r.body(Body::from(body)).unwrap())
+    };
+    let text = |r: axum::response::Response| async move { String::from_utf8(r.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap() };
+    // Followed: its cookie for as long as it lasts, and on without the token.
+    let r = send("GET", "/pricing?roll_share=share-1&plan=pro", None, None, "").await.unwrap();
+    assert_eq!((r.status(), r.headers()["location"].to_str().unwrap()), (StatusCode::FOUND, "/pricing?plan=pro"));
+    let set = r.headers()["set-cookie"].to_str().unwrap();
+    assert!(set.starts_with("roll_share_pv-abc=share-1;") && set.contains("HttpOnly") && set.contains("Max-Age="), "{set}");
+    assert_eq!(*links.followed.lock(), ["share-1"]);
+    assert_eq!(send("GET", "/pricing?roll_share=nope", None, None, "").await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    // In with it, which the app never sees; the button posts from the page.
+    let jar = Some("theme=dark; roll_share_pv-abc=share-1");
+    let r = send("GET", "/pricing", jar, None, "").await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let app: Value = serde_json::from_str(&text(r).await).unwrap();
+    assert_eq!(app["cookie"], "theme=dark", "the link is roll's: {app}");
+    assert!(text(send("GET", "/page", jar, None, "").await.unwrap()).await.ends_with(r#"<script src="/__roll/feedback.js" defer></script></body></html>"#));
+    let js = text(send("GET", "/__roll/feedback.js", jar, None, "").await.unwrap()).await;
+    assert!(js.contains("const GUEST = true") && !js.contains("roll.test"), "a guest's button, not told where roll is");
+    let list: Value = serde_json::from_str(&text(send("GET", "/__roll/feedback.json?path=%2Fpricing", jar, None, "").await.unwrap()).await).unwrap();
+    assert_eq!(list[0]["note"], "through share-1", "their link's notes: {list}");
+    let r = send("POST", "/__roll/notes", jar, Some(format!("http://{h}")), r#"{"name":"Ada","path":"/pricing","note":"Hi"}"#).await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    assert_eq!(*links.posted.lock(), [("pv-abc".to_string(), "share-1".to_string(), r#"{"name":"Ada","path":"/pricing","note":"Hi"}"#.to_string())]);
+    assert_eq!(send("POST", "/__roll/notes", jar, Some("https://evil.example".into()), "{}").await.unwrap().status(), StatusCode::FORBIDDEN, "from the preview's own pages only");
+    // Revoked: out at the next request.
+    links.revoked.store(true, Ordering::SeqCst);
+    assert_eq!(send("GET", "/pricing", jar, None, "").await.unwrap().status(), StatusCode::UNAUTHORIZED);
 }
 
 /// A worker that follows its work: its instances follow a stream group's lag within its bounds,
