@@ -355,6 +355,9 @@ provider "elasticstack" {
   key, so KMS must still answer.
 - `roll_secrets_project` writes only the settings that differ from roll's, and destroying it leaves
   them (and the project) as they are.
+- `roll_secrets_policy` is roll secrets' policy of floors for every project (the operator's token
+  or an admin's; one per server, imported by `policy`). It owns the whole policy: a floor left out
+  has none, and destroying it removes every floor.
 
 - A notification target's URL is never read back, and a new URL is a new target. A webhook's
   signing secret is in `.secret` from when it's made. Filters left out are the defaults.
