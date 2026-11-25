@@ -318,18 +318,84 @@ fn range_fields<'a>(q: &'a Value, out: &mut Vec<&'a str>) {
     }
 }
 
-/// Whether an index the key reaches (`reach`: the names and patterns its narrowing grants,
-/// matched against index names and aliases) maps one of `fields` as a string (text, keyword
-/// and their kin): a range over them walks the terms between its bounds, as Elasticsearch's
-/// `search.allow_expensive_queries: false` refuses. Read from the mappings as they are on each
-/// request, so a field mapped later is caught then.
-fn string_range(st: &crate::meta::ClusterState, fields: &[&str], reach: &[String]) -> bool {
-    const STRINGS: &[&str] = &["text", "match_only_text", "keyword", "wildcard", "version", "flattened", "alias"];
-    if fields.is_empty() {
-        return false;
+/// The indices a derived key reaches (`reach`: the names and patterns its narrowing grants): by
+/// name or alias, and the backing indices of the data streams (and data stream aliases) it names.
+fn reached<'a>(st: &'a crate::meta::ClusterState, reach: &[String]) -> Vec<&'a crate::meta::IndexMeta> {
+    let hit = |n: &str| reach.iter().any(|p| super::privileges::glob(p, n));
+    let mut backing: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut stream = |name: &str| {
+        if let Some(d) = st.metadata.data_streams.get(name) {
+            backing.extend(d.indices.iter().map(String::as_str));
+        }
+    };
+    for d in st.metadata.data_streams.values().filter(|d| hit(&d.name)) {
+        stream(&d.name);
     }
-    let reached = |i: &crate::meta::IndexMeta| reach.iter().any(|n| super::privileges::glob(n, &i.name) || i.aliases.keys().any(|a| super::privileges::glob(n, a)));
-    st.metadata.indices.values().filter(|i| reached(i)).any(|i| fields.iter().any(|f| i.mapping.lookup(f).is_some_and(|m| STRINGS.contains(&m.type_name()))))
+    for (alias, a) in &st.metadata.data_stream_aliases {
+        if hit(alias) {
+            a.data_streams.iter().for_each(|d| stream(d));
+        }
+    }
+    st.metadata.indices.values().filter(|i| hit(&i.name) || i.aliases.keys().any(|a| hit(a)) || backing.contains(i.name.as_str())).map(|i| &**i).collect()
+}
+
+/// Whether `path` is a string in mapping `m` (text, keyword and their kin), a keyed subfield of a
+/// `flattened` field (`labels.foo`) included: a range over it walks the terms between its bounds.
+fn string_field(m: &crate::mapping::Mapping, path: &str) -> bool {
+    const STRINGS: &[&str] = &["text", "match_only_text", "keyword", "wildcard", "version", "flattened", "alias"];
+    if let Some(r) = m.lookup(path) {
+        return STRINGS.contains(&r.type_name());
+    }
+    let mut at = path.len();
+    while let Some(i) = path[..at].rfind('.') {
+        at = i;
+        if m.lookup(&path[..at]).is_some_and(|r| r.type_name() == "flattened") {
+            return true;
+        }
+    }
+    false
+}
+
+/// The fields the queries of filter `q` (a [`plain_filter`]) name, as written (a query's own
+/// parameters may come along: only ever a reason to refuse more); `*` where one searches its
+/// index's default fields.
+fn filter_fields<'a>(q: &'a Value, out: &mut Vec<&'a str>) {
+    const PARAMS: &[&str] = &["boost", "_name", "validation_method", "ignore_unmapped", "distance", "distance_type", "type"];
+    let Some((kind, body)) = q.as_object().and_then(|m| m.iter().next()) else { return };
+    let children: Vec<&'a Value> = match kind.as_str() {
+        "bool" => ["must", "should", "filter", "must_not"].iter().filter_map(|k| body.get(k)).collect(),
+        "constant_score" => body.get("filter").into_iter().collect(),
+        "nested" => body.get("query").into_iter().collect(),
+        "ids" | "match_all" | "match_none" => return,
+        "exists" => {
+            out.extend(body.get("field").and_then(Value::as_str));
+            return;
+        }
+        "multi_match" | "simple_query_string" => {
+            match body.get("fields").and_then(Value::as_array) {
+                Some(f) => out.extend(f.iter().filter_map(Value::as_str).map(|f| f.split('^').next().unwrap_or(f))),
+                None => out.push("*"),
+            }
+            return;
+        }
+        _ => {
+            out.extend(body.as_object().into_iter().flat_map(|m| m.keys()).map(String::as_str).filter(|k| !PARAMS.contains(k)));
+            return;
+        }
+    };
+    for c in children {
+        match c {
+            Value::Arr(a) => a.iter().for_each(|q| filter_fields(q, out)),
+            q => filter_fields(q, out),
+        }
+    }
+}
+
+/// Whether one of `fields` (names or patterns) is a runtime field of an index in `indices`: a
+/// query on one runs its script for every document, and a filter is built as the owner's,
+/// outside the browser policy.
+fn names_runtime_field(indices: &[&crate::meta::IndexMeta], fields: &[&str]) -> bool {
+    indices.iter().any(|i| i.mapping.runtime.keys().any(|r| fields.iter().any(|f| super::privileges::glob(f, r))))
 }
 
 /// Whether `q` is a filter a derived key may carry: queries on the document itself, combined
@@ -415,13 +481,21 @@ fn narrowed(st: &crate::meta::ClusterState, c: &Value, browser: &Value, k: &Valu
             if !plain_filter(f) {
                 return Err(refused("[filter]: only queries on the document itself (term, terms of values, range, exists, match… in bool, constant_score or nested): no lookups, joins, scripts, templates or wrapped queries"));
             }
+            // Read from the mappings as they are on each request, so a field mapped later is
+            // caught then.
+            let indices = reached(st, &reach);
+            let mut named = Vec::new();
+            filter_fields(f, &mut named);
+            if names_runtime_field(&indices, &named) {
+                return Err(refused("[filter]: a query on a runtime field runs a script for every document: a derived key's filter can't"));
+            }
             if !super::browser::Policy::of(browser).allow_expensive_queries {
                 if expands(f) {
                     return Err(refused("[filter]: expanding terms (prefix, wildcard, the prefix match queries, simple_query_string, fuzziness, max_expansions) needs its parent's limits.allow_expensive_queries"));
                 }
-                let mut fields = Vec::new();
-                range_fields(f, &mut fields);
-                if string_range(st, &fields, &reach) {
+                let mut ranged = Vec::new();
+                range_fields(f, &mut ranged);
+                if indices.iter().any(|i| ranged.iter().any(|f| string_field(&i.mapping, f))) {
                     return Err(refused("[filter]: a range on a text or keyword field (its terms are walked, as a prefix's are) needs its parent's limits.allow_expensive_queries"));
                 }
             }
