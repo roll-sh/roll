@@ -1390,6 +1390,17 @@ static ROWS: &[Row] = &[
     row("PUT", "/v1/search/clusters/{id}/query_rules/{ruleset}", "search", W, one(PG, "cluster")),
     row("DELETE", "/v1/search/clusters/{id}/query_rules/{ruleset}", "search", W, one(PG, "cluster")),
     row("POST", "/v1/search/clusters/{id}/query_rules/{ruleset}/test", "search", R, one(PG, "cluster")),
+    // The web crawler's verified domains and origins are each cluster's own (the token is its
+    // owner's, shared by their clusters, but a verification and its limits aren't), so a grant
+    // on one cluster reaches that cluster's alone. Starting, checking or dropping one changes the
+    // limits its crawls get: write. The token it answers is meant to be published (DNS or the
+    // origin), not a credential.
+    row("GET", "/v1/search/clusters/{id}/site-verifications", "search", R, one(PG, "cluster")),
+    row("POST", "/v1/search/clusters/{id}/site-verifications", "search", W, one(PG, "cluster")),
+    row("DELETE", "/v1/search/clusters/{id}/site-verifications/{site}", "search", W, one(PG, "cluster")),
+    row("POST", "/v1/search/clusters/{id}/site-verifications/{site}/check", "search", W, one(PG, "cluster")),
+    // `crawl-test` stores nothing, but it makes roll send requests to a site: write.
+    row("POST", "/v1/search/clusters/{id}/crawl-test", "search", W, one(PG, "cluster")),
     // ── secrets (feature/roll-secrets, docs/secrets.md) ──
     // The caller and its grant's project (`roll run`), and health: any grant.
     row("GET", "/v1/secrets/whoami", "secrets", R, Tgt::AnyGrant),
@@ -1468,6 +1479,11 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/secrets/projects/{project}/saas", "secrets", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/saas/{id}", "secrets", ADMIN, one(&["project"], "project")),
     row("PATCH", "/v1/secrets/projects/{project}/saas/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/public-certs", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/public-certs", "secrets", ADMIN, one(&["project"], "project")),
+    row("PATCH", "/v1/secrets/projects/{project}/public-certs/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/public-certs/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/public-certs/{id}/renew", "secrets", W, one(&["project"], "project")),
     // Lists only the keys the caller's grant reaches (`Grants::reaches_key`, each key's name as
     // its index), so a rule limited to some keys sees those.
     row("GET", "/v1/secrets/projects/{project}/transit", "secrets", R, one(&["project"], "project")).filters_index(),

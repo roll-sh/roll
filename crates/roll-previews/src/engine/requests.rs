@@ -435,8 +435,9 @@ impl Engine {
     /// token: the answer is the only time the link is shown. Only where the preview isn't public
     /// (`access: link` or `team`); a public one needs none.
     /// `maker`: who it is (`usr_…`, a person or the person behind their token; none for the
-    /// operator): the link works only while they may still open the project's previews.
-    pub fn share(&self, id: &str, hours: u32, by: &str, maker: Option<&str>, label: &str, notes: bool) -> Result<(crate::Share, String)> {
+    /// operator): the link works only while they may still open the project's previews. Not
+    /// where roll apps serves the preview: its proxy takes the preview's own link, not these.
+    pub async fn share(&self, id: &str, hours: u32, by: &str, maker: Option<&str>, label: &str, notes: bool) -> Result<(crate::Share, String)> {
         if !(1..=KEEP_MAX_HOURS).contains(&hours) {
             return Err(Error::BadRequest(format!("hours: 1 to {KEEP_MAX_HOURS}")));
         }
@@ -450,6 +451,11 @@ impl Engine {
         }
         if !self.store.access(id)?.is_some_and(|a| a.required()) {
             return Err(Error::Conflict("the preview is public: anyone can open it without a link".into()));
+        }
+        // The rule converge follows: a project with services on roll apps runs its previews there.
+        let catalog = self.apps.catalog(&r.project_id).await.map_err(|e| Error::Internal(format!("reading the project's services: {e:#}")))?;
+        if catalog.is_some_and(|c| !c.is_empty()) {
+            return Err(Error::Conflict("roll apps serves this preview, and its proxy takes the preview's own link (`share_url`), not share links".into()));
         }
         let url = self.store.services(id)?.into_iter().next().map(|s| s.url).ok_or_else(|| Error::Conflict("the preview has no service to share yet".into()))?;
         let (share, token) = self.store.create_share(id, self.store.now_ms()? + hours as i64 * 3_600_000, by, maker, label, notes)?;
