@@ -17,6 +17,7 @@ mod members;
 mod preview;
 mod search;
 mod search_crawler;
+mod search_migrate;
 mod storage;
 mod redis;
 mod seal;
