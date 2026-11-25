@@ -768,6 +768,14 @@ previews' code may reach:
 - `egress: "open"` (the default, as before): anything.
 - `egress: "roll"`: only roll's own products (the preview's branches) and roll's proxy in front
   of it. Nothing on the internet.
+- A fork's preview's pages carry a Content-Security-Policy (`runtime.rs` `fork_policy`): they
+  may load from and send to only the preview's own hosts (`default-src 'self'` and its services'
+  origins; inline scripts, `eval`, `data:` and `blob:` still allowed, so its pages run as they
+  did; `form-action` the same). An approved fork's code could otherwise read what a reviewer's
+  page shows (rows of the repo's data) and send it to another site from their browser, around
+  `egress_forks`, which holds only its server. A policy of the page's own still applies (a
+  browser keeps both); a navigation away isn't something a policy can stop. Previews' own proxy
+  only so far: roll apps' for its forks is next (Next). `runtime::tests::service_hosts_reach_their_containers`.
 - `egress_forks`: what a fork's preview reaches when `egress` is `"open"`. It's `"roll"` by
   default, with `egress_hosts` still allowed through the proxy; `"open"` lets it reach what the
   project's own previews do. A fork's head runs only once a writer approves it, but an approval
@@ -2758,33 +2766,48 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **The fifth review's security fixes, in review** (#943): a share link's cookie kept from the
-   app, outside readers' notes never mailed, replayed or posted raw to Slack, try and fetch of a
-   fork's preview outside, the guest limit taken atomically, guests unable to link.
-2. **roll apps on par, in review**: roll apps' feedback button is previews' own script (a note
-   carries the page's errors and the reviewer's steps there too), and a share link on a preview
-   roll apps serves is a 409 that says why, not a link that answers 401.
-3. **Share links on roll apps, in review**: a port in roll apps' access check asks previews about a
-   `roll_share` link at every request (`Engine::share_visit`, shared with previews' own proxy),
-   and guests' notes go through it.
-4. **`note_mail` in the dashboard's rules**: the setting is in the API and roll MCP, not the page.
-5. **`roll preview try`**: an agent's page drive (`…/try`) from the CLI, as `roll preview fetch`.
-6. **A note in its reviewer's engine, typing and choices, in review**: typing taken again as
-   long as theirs, a choice in a list by its option's place (a `choose` step, also in
-   `roll.toml` states, `…/try` and `roll preview try`).
-7. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
+Ranked again after a sixth product review (2026-11-25), against Vercel's and Netlify's previews and
+comments, Render and Railway, Neon, Chromatic and Percy, Signadot, Jam.
+
+1. **A fork's preview's pages can't send what they show elsewhere, in review**: a
+   Content-Security-Policy on its pages (its own hosts only). Next for it: roll apps' proxy the
+   same for a fork's services there, and a `data_forks` rule (a fork's data `schema` unless the
+   project says otherwise), as `egress_forks` is for its server.
+2. **The `max_bytes` cap holds**: a preview put to sleep over its cap is woken again by `wake`
+   (`requests.rs`) or a visit until the next pass; refuse both until a reset, and test the cap
+   (no test names it).
+3. **Signed in to the app**: pages, states, crops, endpoint timings and `try` all start from a
+   fresh browser, so a page behind the app's own login screenshots its login page (Percy and
+   Chromatic capture with a saved login). A `github.login` step list (its password a `roll://`
+   reference), run once per screenshot run, its cookies used by every page and browser.
+4. **Coverage cut silently**: at most 40 stories and 10 pages, and nothing says what was left
+   out; `skipped` (how many, which) on the run, the sheet and the comment; then stories chosen
+   by what the change touched (Chromatic's TurboSnap).
+5. **Browser runs and jobs in the cost**: `cost_of` counts branches, compute and services'
+   memory-hours, not the screenshot runs (three engines, stories, crops, `try`), builds or seed,
+   release and teardown jobs; meter their container-seconds into `spent_usd`, so `max_usd_month`
+   caps them too.
+6. **GitLab and Bitbucket merge requests**: previews are made from their events, but only
+   GitHub hears back (`GitReport`); a commit status and one note edited in place, with roll apps'
+   GitLab token.
+7. **A note in one click**: a team note opens the whole dashboard in a tab to post; a small popup
+   that posts and closes (Vercel's comments post in place).
+8. **Sleeping previews cost the control plane**: every settled preview goes through a whole
+   converge every 5 minutes (secrets' links and digests, usage of every branch); a usage-only
+   pass for settled ones, counted per sleeping preview in the live run.
+9. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
    is kept only where the product puts a branch back in place, keeping its id (their delete
    guards check it); each needs its control plane's reset `from`, as pg-control's.
-8. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+10. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-9. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+11. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-10. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+12. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-11. **Watch: pg-control's recovery to a time seconds old** (unowned).
+13. **Watch: pg-control's recovery to a time seconds old** (unowned).
 
 
 
