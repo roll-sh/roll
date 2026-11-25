@@ -327,7 +327,8 @@ impl Store {
         Store { api, project: format!("/v1/secrets/projects/{}", enc(project)), ttl, size, slots: Default::default(), refusals: tokio::sync::watch::Sender::new(None), name }
     }
 
-    /// Told each time roll refuses a kept folder while it's followed.
+    /// Told each time roll refuses a kept folder while it's followed (`roll secrets mount`'s).
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(super) fn refusals(&self) -> tokio::sync::watch::Receiver<Option<String>> {
         self.refusals.subscribe()
     }
