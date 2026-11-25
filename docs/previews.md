@@ -787,7 +787,7 @@ previews' code may reach:
   page shows (rows of the repo's data) and send it to another site from their browser, around
   `egress_forks`, which holds only its server. A policy of the page's own still applies (a
   browser keeps both); a navigation away isn't something a policy can stop. Previews' own proxy
-  only so far: roll apps' for its forks is next (Next). `runtime::tests::service_hosts_reach_their_containers`.
+  and roll apps' for a fork's `pv-` environments (a closed one: roll apps' #1032 adds the same policy, its origins the same `pv-` name's hosts across the project's services and their custom domains; live in `scripts/preview-apps.sh`, the fork's pages carry it and the same repo's pull request's don't). `runtime::tests::service_hosts_reach_their_containers`.
 - `egress_forks`: what a fork's preview reaches when `egress` is `"open"`. It's `"roll"` by
   default, with `egress_hosts` still allowed through the proxy; `"open"` lets it reach what the
   project's own previews do. A fork's head runs only once a writer approves it, but an approval
