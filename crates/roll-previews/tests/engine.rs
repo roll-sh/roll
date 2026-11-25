@@ -235,7 +235,7 @@ async fn screenshots_sign_in_first_on_a_trusted_preview() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     let (ours, fork) = (e.engine.store.row_by_change("chg_in").unwrap().unwrap(), e.engine.store.row_by_change("chg_fork").unwrap().unwrap());
-    let asked = |id: &str| e.apps.logins.lock().iter().filter(|(p, _)| p == id).map(|(_, l)| l.clone()).last().expect("a screenshot run");
+    let asked = |id: &str| e.apps.logins.lock().iter().rev().find(|(p, _)| p == id).map(|(_, l)| l.clone()).expect("a screenshot run");
     let l = asked(&ours.id).expect("signed in");
     assert_eq!((l.page.as_str(), &l.steps[1]), ("/login", &roll_previews::settings::Step::Type("#password".into(), "hunter2-from-staging".into())));
     assert!(!format!("{l:?}").contains("hunter2"), "never in a Debug: {l:?}");
