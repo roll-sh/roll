@@ -581,6 +581,10 @@ pub struct AuditQuery {
     pub grants: Option<Vec<String>>,
 }
 
+/// An approval's states: waiting for a person, decided either way, past its time, or spent on the
+/// request it was for (one use).
+pub const APPROVAL_STATES: &[&str] = &["pending", "approved", "denied", "expired", "used"];
+
 pub struct Store {
     pub(crate) db: Db,
     /// When each grant's use from each network was last written by this node ([`use_key`]).
@@ -1695,6 +1699,7 @@ impl Store {
     }
 
     /// The newest approvals, in a state and of some grants when given (`Some(&[])`: none).
+    /// `state` is one of [`APPROVAL_STATES`].
     pub fn approvals(&self, state: Option<&str>, grants: Option<&[String]>, limit: usize) -> Result<Vec<Approval>> {
         let now = code_sql::now_ms();
         let limit = limit.clamp(1, 500) as i64;
