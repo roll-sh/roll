@@ -459,6 +459,12 @@ impl Engine {
                     Err(e) => warn!(preview = %r.id, kind = d.kind.as_str(), error = %e, "previews: reading an earlier push's copy's usage"),
                 }
             }
+            // And what roll apps billed its services there (their builds too).
+            for svc in self.store.services(&r.id)? {
+                if let Some(usd) = self.apps.spent_usd(&r.id, &svc.name).await {
+                    self.store.set_service_spend(&r.id, &svc.name, usd)?;
+                }
+            }
             self.usage_read.lock().insert(r.id.clone(), now);
         }
         if let Some(bytes) = self.over_cap(&r.id, s.max_bytes)? {

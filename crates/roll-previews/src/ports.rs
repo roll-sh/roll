@@ -870,6 +870,12 @@ pub trait Apps: Send + Sync {
     fn requests(&self, _preview: &str) -> Vec<crate::RequestLine> {
         Vec::new()
     }
+    /// What the service's environment cost this month where something else runs and bills it
+    /// (roll apps: its `pv-` environment's builds, compute and egress at roll apps' prices), or
+    /// `None` when roll's runtime runs it and its time is counted here.
+    async fn spent_usd(&self, _preview: &str, _service: &str) -> Option<f64> {
+        None
+    }
     /// What the service uses right now, `(cores, resident bytes)`: `None` when it isn't running
     /// (or the backend can't tell).
     async fn metrics(&self, _preview: &str, _service: &str) -> Option<(f64, u64)> {

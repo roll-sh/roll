@@ -3,6 +3,7 @@
 
 mod local_agent;
 mod mount;
+mod vm_login;
 mod repo;
 #[cfg(windows)]
 pub mod service;
@@ -1854,8 +1855,14 @@ pub enum Identities {
     /// Let workloads whose OIDC tokens match log in. For GitHub Actions:
     /// `add deploy --github acme/web --claim ref=refs/heads/main --for-env production`. For
     /// machines on AWS: `add web --aws arn:aws:iam::123456789012:role/web --for-env production`.
+    /// For machines with no platform identity: `add racks --machine --for-env production`, then a
+    /// bootstrap token per machine (`identities bootstrap`).
     Add {
         name: String,
+        /// Machines with no platform identity (bare metal, on premises): each logs in with a
+        /// bootstrap token made for it once, then a machine credential that replaces itself.
+        #[arg(long, conflicts_with_all = ["github", "aws", "issuer", "subject", "audience", "claims", "jwks"])]
+        machine: bool,
         /// A GitHub repo (`owner/name`): GitHub Actions' issuer, and every workflow of the repo
         /// (narrow with `--claim`).
         #[arg(long, conflicts_with_all = ["issuer", "subject", "aws"])]
@@ -1906,6 +1913,22 @@ pub enum Identities {
         /// The JWKS file (`-` for stdin): `kubectl get --raw /openid/v1/jwks`.
         #[arg(long, value_name = "FILE")]
         jwks: String,
+    },
+    /// A bootstrap token for one machine of a machine identity (printed once): single-use, it lives
+    /// minutes. On the machine, `ROLL_IDENTITY=ID ROLL_BOOTSTRAP_TOKEN=…` and `roll secrets agent`
+    /// or `roll run` exchange it for a machine credential they keep and replace.
+    Bootstrap {
+        id: String,
+        /// How long it may wait to be exchanged, 1–60 minutes (default 10).
+        #[arg(long)]
+        minutes: Option<u32>,
+        /// Only from this address or CIDR (repeatable): it and the machine's credentials.
+        #[arg(long = "allow-ip")]
+        allow_ips: Vec<String>,
+        /// How long each machine credential lives, 1–720 hours (default 24); the machine replaces it
+        /// at half that.
+        #[arg(long)]
+        credential_hours: Option<u32>,
     },
     /// Delete an identity; the tokens it gave out stop working.
     Rm { id: String },
@@ -3939,9 +3962,11 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     println!("{}  {:<16} {}{keys}  {}  envs {}  {}  {} min  used {used}", s(&i["id"]), s(&i["name"]), s(&i["issuer"]), s(&i["subject"]), list(&i["environments"]), list(&i["actions"]), i["ttl_minutes"]);
                 }
             }
-            Identities::Add { name, github, aws, issuer, subject, audience, claims, envs, paths, actions, ttl_minutes, allow_ips, jwks, gateway } => {
+            Identities::Add { name, machine, github, aws, issuer, subject, audience, claims, envs, paths, actions, ttl_minutes, allow_ips, jwks, gateway } => {
                 let actions = if gateway.is_some() { vec![] } else if actions.is_empty() { vec!["read".to_string(), "reveal".to_string()] } else { actions };
-                let mut body = if let Some(arn) = &aws {
+                let mut body = if machine {
+                    json!({ "name": name, "kind": "machine", "actions": actions })
+                } else if let Some(arn) = &aws {
                     json!({ "name": name, "kind": "aws", "arn": arn, "actions": actions })
                 } else {
                     let (issuer, subject) = match (github, issuer, subject) {
@@ -3980,6 +4005,10 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     return print(&v);
                 }
                 println!("{}", s(&v["id"]));
+                if machine {
+                    eprintln!("Created {}. For each machine: roll secrets identities bootstrap {} (a single-use token), then on the machine ROLL_IDENTITY={} ROLL_BOOTSTRAP_TOKEN=… (and ROLL_API_URL).", s(&v["name"]), s(&v["id"]), s(&v["id"]));
+                    return Ok(());
+                }
                 eprintln!("Created {}. In the workload: ROLL_IDENTITY={} (and ROLL_API_URL), then `roll run …` logs in by itself.", s(&v["name"]), s(&v["id"]));
                 // Signed requests name the server: only worth saying when it isn't the API's URL.
                 if let Some(id) = v["server_id"].as_str().filter(|id| *id != c.api.base.trim_end_matches('/')) {
@@ -3993,6 +4022,25 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     return print(&v);
                 }
                 println!("{} now pins {} key(s)", s(&v["name"]), v["pinned_keys"]);
+            }
+            Identities::Bootstrap { id, minutes, allow_ips, credential_hours } => {
+                let mut body = json!({});
+                if let Some(m) = minutes {
+                    body["minutes"] = json!(m);
+                }
+                if !allow_ips.is_empty() {
+                    body["allowed_ips"] = json!(allow_ips);
+                }
+                if let Some(h) = credential_hours {
+                    body["credential_hours"] = json!(h);
+                }
+                let v = c.call(Method::POST, &format!("{}/identities/{}/bootstrap", c.base(), enc(&id)), Some(body)).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("{}", s(&v["secret"]));
+                let left = (v["expires_at"].as_i64().unwrap_or_default() - now_ms()).max(0) / 60_000;
+                eprintln!("Single-use, within {left} min: on the machine, ROLL_IDENTITY={id} and ROLL_BOOTSTRAP_TOKEN (or ROLL_BOOTSTRAP_TOKEN_FILE) set to it. Used a second time, it revokes the machine's credentials.");
             }
             Identities::Rm { id } => {
                 c.call(Method::DELETE, &format!("{}/identities/{}", c.base(), enc(&id)), None).await?;
@@ -5174,19 +5222,29 @@ fn write_private(path: &std::path::Path, text: &str) -> anyhow::Result<()> {
 }
 
 /// A workload identity's login (`ROLL_IDENTITY`): the workload's own OIDC token (`oidc_token`:
-/// `ROLL_OIDC_TOKEN`, `ROLL_OIDC_TOKEN_FILE`, GitHub Actions or Azure Pipelines); without one (or
-/// with `ROLL_IDENTITY_KIND=aws`), a `GetCallerIdentity` signed with the machine's AWS credentials
+/// `ROLL_OIDC_TOKEN`, `ROLL_OIDC_TOKEN_FILE`, GitHub Actions or Azure Pipelines); a VM's from its
+/// metadata server (`ROLL_IDENTITY_KIND=gcp` or `azure`); a machine identity's credential
+/// (`ROLL_IDENTITY_KIND=machine`, or a bootstrap token set: vm_login.rs); without any (or with
+/// `ROLL_IDENTITY_KIND=aws`), a `GetCallerIdentity` signed with the machine's AWS credentials
 /// (aws_login.rs). A short-lived secrets token and when it ends (ms).
 pub async fn identity_login(api: &Api, identity: &str) -> anyhow::Result<(String, i64)> {
     let env = |k: &str| std::env::var(k).ok().filter(|t| !t.trim().is_empty());
+    let kind = env("ROLL_IDENTITY_KIND").map(|k| k.trim().to_string());
+    if vm_login::is_machine(kind.as_deref()) {
+        return vm_login::machine_login(api, identity).await;
+    }
     let oidc_source = ["ROLL_OIDC_TOKEN", "ROLL_OIDC_TOKEN_FILE", "ACTIONS_ID_TOKEN_REQUEST_URL", "SYSTEM_OIDCREQUESTURI"].iter().any(|k| env(k).is_some());
-    let aws = match env("ROLL_IDENTITY_KIND").as_deref().map(str::trim) {
+    let aws = match kind.as_deref() {
         Some("aws") => true,
-        Some("oidc") => false,
-        Some(k) => anyhow::bail!("ROLL_IDENTITY_KIND is aws or oidc, not {k}"),
+        Some("oidc" | "gcp" | "azure") => false,
+        Some(k) => anyhow::bail!("ROLL_IDENTITY_KIND is oidc, aws, gcp, azure or machine, not {k}"),
         None => !oidc_source,
     };
-    let proof = if aws {
+    let proof = if let Some(k @ ("gcp" | "azure")) = kind.as_deref() {
+        // The server's own URL by default, as GitHub Actions' token: one roll's isn't good at another.
+        let audience = env("ROLL_OIDC_AUDIENCE").unwrap_or_else(|| api.base.clone());
+        json!({ "identity": identity, "token": vm_login::platform_token(k, &audience).await? })
+    } else if aws {
         let signed = crate::aws_login::login_request(&api.http, &api.base)
             .await
             .context("ROLL_IDENTITY is set but there's no OIDC token (ROLL_OIDC_TOKEN, ROLL_OIDC_TOKEN_FILE, GitHub Actions with `permissions: id-token: write`, Azure Pipelines with SYSTEM_ACCESSTOKEN) and no AWS credentials to sign with")?;
@@ -5194,6 +5252,11 @@ pub async fn identity_login(api: &Api, identity: &str) -> anyhow::Result<(String
     } else {
         json!({ "identity": identity, "token": oidc_token(api).await?.trim() })
     };
+    post_login(api, proof).await
+}
+
+/// `POST /v1/secrets/login` with `proof`: a short-lived secrets token and when it ends (ms).
+async fn post_login(api: &Api, proof: Value) -> anyhow::Result<(String, i64)> {
     // A request of its own, without a token (never through `Api::call`, which renews logins).
     let mut req = api.http.post(format!("{}/v1/secrets/login", api.base)).json(&proof);
     for (k, v) in &api.headers {

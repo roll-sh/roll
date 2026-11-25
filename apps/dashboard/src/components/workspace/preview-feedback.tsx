@@ -1,7 +1,8 @@
+import { HorizonMark } from "@roll/brand";
 import { MessageSquare } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { codeApi } from "@/lib/code-api";
-import type { Preview } from "@/lib/previews-api";
+import { previewsApi, type Preview } from "@/lib/previews-api";
 import { errorText } from "./previews-common";
 
 /** A note from the preview page's feedback button (docs/previews.md): what it pins and where. */
@@ -200,5 +201,41 @@ export function FeedbackForm({ preview: p, feedback: f, onPosted }: { preview: P
         </button>
       </div>
     </form>
+  );
+}
+
+/** A note from the preview page's button in a small window of its own (Vercel's comments post in
+ * place): the preview read, the note's form alone, and the window closed once it's posted. */
+export function NotePopup({ preview, query, close = () => window.close() }: { preview?: string; query: string; close?: () => void }) {
+  const f = feedbackFrom(query);
+  const [p, setP] = useState<Preview | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!preview) return;
+    let live = true;
+    previewsApi
+      .get(preview)
+      .then((x) => live && setP(x))
+      .catch((e: unknown) => live && setError(errorText(e)));
+    return () => {
+      live = false;
+    };
+  }, [preview]);
+  return (
+    <div className="mx-auto w-full max-w-md space-y-3 px-4 py-5">
+      <div className="flex items-center gap-2 text-[13px] font-semibold tracking-[-0.04em]">
+        <HorizonMark size={16} interactive={false} />
+        <span className="truncate">{p ? `Note on ${p.title || p.slug}` : "Note"}</span>
+      </div>
+      {!preview || !f ? (
+        <p className="text-[12.5px] text-muted">This link doesn't carry a note.</p>
+      ) : error ? (
+        <p className="text-[12.5px] text-danger">{error}</p>
+      ) : !p ? (
+        <p className="shimmer text-[12.5px] text-muted">Opening the preview…</p>
+      ) : (
+        <FeedbackForm preview={p} feedback={f} onPosted={() => setTimeout(close, 900)} />
+      )}
+    </div>
   );
 }

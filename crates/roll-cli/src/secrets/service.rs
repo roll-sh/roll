@@ -5,8 +5,8 @@
 //! files are under `%ProgramData%\roll\agent`, a directory only the Administrators and the
 //! service may open: the request token file (`agent-token`, readable by the service and by the
 //! accounts named with `--token-reader`), the service's login (`<name>.login`: `ROLL_TOKEN`, or a
-//! workload identity's `ROLL_IDENTITY` and `ROLL_OIDC_TOKEN_FILE`, readable by the service alone)
-//! and its log (`<name>.log`, which, like every log of the agent's, holds no value). The service's
+//! workload identity's `ROLL_IDENTITY` and what it logs in with, readable by the service alone), a
+//! machine identity's credential (`<name>.machine.json`) and its log (`<name>.log`, which, like every log of the agent's, holds no value). The service's
 //! command line names the project, environment and flags, never a credential: the login is read
 //! from its file before the flags read the environment ([`load_login`]).
 //!
@@ -32,8 +32,20 @@ use windows_sys::Win32::System::Services::{
 /// The hidden flag `--install-service` puts on the service's command line, before its name.
 pub const FLAG: &str = "--windows-service";
 
-/// What the login file may set: the ways `roll secrets` logs in, nothing else.
-const LOGIN_KEYS: [&str; 4] = ["ROLL_TOKEN", "ROLL_IDENTITY", "ROLL_IDENTITY_KIND", "ROLL_OIDC_TOKEN_FILE"];
+/// What the login file may set: the ways `roll secrets` logs in (a scoped token, or a workload
+/// identity: an OIDC token file, a VM's metadata, a bare-metal machine's bootstrap token), nothing
+/// else.
+const LOGIN_KEYS: [&str; 9] = [
+    "ROLL_TOKEN",
+    "ROLL_IDENTITY",
+    "ROLL_IDENTITY_KIND",
+    "ROLL_OIDC_TOKEN_FILE",
+    "ROLL_OIDC_AUDIENCE",
+    "ROLL_AZURE_CLIENT_ID",
+    "ROLL_BOOTSTRAP_TOKEN",
+    "ROLL_BOOTSTRAP_TOKEN_FILE",
+    "ROLL_MACHINE_CREDENTIAL_FILE",
+];
 
 /// `%ProgramData%\roll\agent`.
 pub fn dir() -> PathBuf {
@@ -73,6 +85,11 @@ pub fn load_login() -> anyhow::Result<()> {
         // SAFETY: first thing in `main`, before any task reads the environment (and Windows'
         // environment is locked by the system anyway).
         unsafe { std::env::set_var(k, v) };
+    }
+    // A machine identity's credential stays with the service's other files.
+    if std::env::var_os("ROLL_MACHINE_CREDENTIAL_FILE").is_none() {
+        // SAFETY: as above.
+        unsafe { std::env::set_var("ROLL_MACHINE_CREDENTIAL_FILE", dir().join(format!("{name}.machine.json"))) };
     }
     Ok(())
 }

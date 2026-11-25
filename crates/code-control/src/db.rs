@@ -1257,6 +1257,12 @@ impl Db {
         Ok(ahead as u64 + 1)
     }
 
+    /// The heads of a repo's changes from outside it (a fork's pull requests, `trusted = 0`), the
+    /// newest `limit`, in any state: what a read at a revision checks (MCP's lockdown).
+    pub fn untrusted_heads(&self, repo_id: &str, limit: usize) -> Result<Vec<String>> {
+        Ok(self.sql.query("SELECT head FROM changes WHERE repo_id = ? AND trusted = 0 ORDER BY number DESC LIMIT ?", params![repo_id, crate::db::limit(limit)], |r| r.get(0))?)
+    }
+
     /// An open (or queued) change whose head is `head`.
     pub fn change_by_head(&self, repo_id: &str, head: &str) -> Result<Option<Change>> {
         let row = self

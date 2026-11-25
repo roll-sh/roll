@@ -59,7 +59,6 @@ GET /v1/previews/{id}/files                                                    i
 PUT /v1/previews/{id}/files                                                    interactive (a shell, files, a forward): an admin's, live
 GET /v1/previews/{id}/forward                                                  interactive (a shell, files, a forward): an admin's, live
 GET /v1/previews/{id}/swap                                                     interactive (a laptop's process standing in for a service): an admin's, live
-GET /v1/previews/{id}/notes/{note}/crop                                        the dashboard's (a note's image)
 GET /v1/previews/{id}/qr.png                                                   the dashboard's (a QR code)
 POST /v1/previews/{id}/regressions/accept                                      a person's call (approving, accepting, cutting off)
 POST /v1/previews/{id}/shell/sessions                                          interactive (a shell, files, a forward): an admin's, live
@@ -154,6 +153,7 @@ DELETE /v1/secrets/projects/{project}/github-apps/{id}                         a
 DELETE /v1/secrets/projects/{project}/identities/{id}                          an outside integration's setup: an admin's, with its credentials
 PATCH /v1/secrets/projects/{project}/identities/{id}                           an outside integration's setup: an admin's, with its credentials
 PUT /v1/secrets/projects/{project}/identities/{id}/jwks                        an outside integration's setup: an admin's, with its credentials
+POST /v1/secrets/projects/{project}/identities/{id}/bootstrap                  answers or sets a credential (a machine's bootstrap token)
 * /v1/secrets/projects/{project}/kms                                           an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/kubernetes                                 an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/kubernetes/{id}                          an outside integration's setup: an admin's, with its credentials
