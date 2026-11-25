@@ -2389,17 +2389,45 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
         (None, None) => {
             // Read here first: a tree nothing builds makes no service (a roll.toml `[app]` can
             // name its builder, so with one it's only said).
-            match local_plan(&dir, &u.target.env) {
-                Ok(p) => eprintln!("detected {}{}", serde_json::to_value(&p)?["provider"].as_str().unwrap_or("?"), p.framework.as_deref().map(|f| format!(" ({f})")).unwrap_or_default()),
-                Err(e) if dir.join("roll.toml").exists() => eprintln!("{e} (its roll.toml may say how)"),
+            let wanted = match local_plan(&dir, &u.target.env) {
+                Ok(p) => {
+                    eprintln!("detected {}{}", serde_json::to_value(&p)?["provider"].as_str().unwrap_or("?"), p.framework.as_deref().map(|f| format!(" ({f})")).unwrap_or_default());
+                    p.variables
+                }
+                Err(e) if dir.join("roll.toml").exists() => {
+                    eprintln!("{e} (its roll.toml may say how)");
+                    Vec::new()
+                }
                 Err(e) => bail!("{e}"),
-            }
+            };
+            // On a terminal the first run asks what New service asks (`fly launch`'s questions);
+            // without one it does what it always did.
+            let tty = std::io::IsTerminal::is_terminal(&std::io::stdin()) && std::io::IsTerminal::is_terminal(&std::io::stderr());
             // First time here: a project and an upload service named after the directory.
             let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("app").to_ascii_lowercase();
             let name: String = name.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect::<String>().trim_matches('-').chars().take(32).collect();
             let name = if name.is_empty() { "app".to_string() } else { name };
-            let project = match &u.target.project {
-                Some(p) => project_id(api, p).await?,
+            let chosen = match (&u.target.project, tty) {
+                (None, true) => {
+                    let names: Vec<String> = api.get("/v1/workspace/projects").await.ok().and_then(|v| v.as_array().map(|a| a.iter().filter_map(|p| p["name"].as_str().map(str::to_string)).collect())).unwrap_or_default();
+                    if !names.is_empty() {
+                        eprintln!("your projects: {}", names.join(", "));
+                    }
+                    let answer = prompt(&format!("its project (enter: {name}, made if it's new): "))?;
+                    (!answer.is_empty()).then_some(answer)
+                }
+                (p, _) => p.clone(),
+            };
+            let project = match &chosen {
+                Some(p) => match project_id(api, p).await {
+                    Ok(id) => id,
+                    Err(_) if tty => {
+                        let id = s(&api.post("/v1/workspace/projects", json!({ "name": p })).await?["id"]);
+                        eprintln!("made the project {p} ({id})");
+                        id
+                    }
+                    Err(e) => return Err(e),
+                },
                 None => match find_project(api, &name).await? {
                     Some(p) => {
                         eprintln!("using the project {name} ({p}), named as this directory is (-p puts it in another)");
@@ -2415,13 +2443,43 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
             eprintln!("made service {} in project {}", s(&svc["name"]), project);
             // What the code talks to, said once: roll apps links the database's variables in.
             let tree = apps_build::DirTree::new(&dir);
-            for (store, why) in apps_build::uses(&tree) {
-                let make = match store {
-                    apps_build::Datastore::Postgres => format!("roll db create {name}-db"),
-                    apps_build::Datastore::Redis => format!("roll redis create {name}-cache"),
-                };
-                let kind = if store == apps_build::Datastore::Postgres { "postgres" } else { "redis" };
+            let mut provided: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            for (i, (store, why)) in apps_build::uses(&tree).into_iter().enumerate() {
+                let postgres = store == apps_build::Datastore::Postgres;
+                let (kind, db) = if postgres { ("postgres", format!("{name}-db")) } else { ("redis", format!("{name}-cache")) };
+                if tty && ask(&format!("the code uses {} ({why}): make {db} and link it? [Y/n] ", store.label()), true)? {
+                    let made = if postgres { api.post("/v1/projects", json!({ "name": db })).await? } else { api.post("/v1/redis/databases", json!({ "name": db })).await? };
+                    let r = s(&made["id"]);
+                    let _ = api.call(reqwest::Method::PUT, &format!("/v1/workspace/projects/{}/resources/{kind}/{}", enc(&project), enc(&r)), Some(json!({ "x": 48 + 320 * i as i64, "y": 340 }))).await;
+                    api.call(reqwest::Method::PUT, &format!("/v1/apps/services/{}/links/{kind}/{}", enc(&s(&svc["id"])), enc(&r)), Some(json!({}))).await?;
+                    eprintln!("made {} {db} and linked it: its URL is in the first deploy", store.label());
+                    provided.extend(if postgres { &["DATABASE_URL", "PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGDATABASE"][..] } else { &["REDIS_URL"][..] });
+                    continue;
+                }
+                let make = if postgres { format!("roll db create {db}") } else { format!("roll redis create {db}") };
                 eprintln!("the code uses {} ({why}): `{make}`, then `roll apps link {kind} <its id>` puts its URL in", store.label());
+            }
+            if tty {
+                // Its variables before the first deploy: the local .env (never uploaded) if
+                // asked, then what .env.example names that's still missing.
+                let mut set = serde_json::Map::new();
+                if let Ok(text) = std::fs::read_to_string(dir.join(".env")) {
+                    let (vars, _) = parse_env(&text);
+                    if !vars.is_empty() && ask(&format!("set .env's {} variables on the service (names that read as secrets sealed)? [y/N] ", vars.len()), false)? {
+                        set.extend(vars.into_iter().map(|(k, v)| (k, Value::String(v))));
+                    }
+                }
+                for k in wanted.iter().filter(|k| !set.contains_key(k.as_str()) && !provided.contains(k.as_str()) && k.as_str() != "PORT") {
+                    let v = prompt(&format!("{k} (its .env.example names it; enter leaves it unset): "))?;
+                    if !v.is_empty() {
+                        set.insert(k.clone(), Value::String(v));
+                    }
+                }
+                if !set.is_empty() {
+                    let seal: Vec<String> = set.keys().filter(|k| looks_secret(k)).cloned().collect();
+                    api.call(reqwest::Method::PATCH, &format!("{}/variables", env_path(&svc, &u.target.env)), Some(json!({ "set": set, "seal": seal }))).await?;
+                    eprintln!("set {} variables{}", set.len(), if seal.is_empty() { String::new() } else { format!(" ({} sealed)", seal.len()) });
+                }
             }
             svc
         }
@@ -2555,6 +2613,22 @@ fn fill_vars(app: &str, vars: &std::collections::BTreeMap<String, apps_build::pr
 }
 
 /// Whether a variable's name reads as a secret, as the dashboard's `looksSecret` does.
+/// A line read from the terminal, trimmed.
+fn prompt(q: &str) -> anyhow::Result<String> {
+    use std::io::{BufRead, Write};
+    eprint!("{q}");
+    std::io::stderr().flush()?;
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    Ok(line.trim().to_string())
+}
+
+/// A yes or no from the terminal (`yes` when it's left empty and that's the default).
+fn ask(q: &str, yes: bool) -> anyhow::Result<bool> {
+    let a = prompt(q)?.to_ascii_lowercase();
+    Ok(if a.is_empty() { yes } else { a.starts_with('y') })
+}
+
 fn looks_secret(name: &str) -> bool {
     let n = name.to_ascii_uppercase();
     let words = ["SECRET", "TOKEN", "PASSWORD", "PASSWD", "PASS", "PRIVATE_KEY", "API_KEY", "ACCESS_KEY", "KEY", "CREDENTIAL", "CREDENTIALS", "DSN"];
