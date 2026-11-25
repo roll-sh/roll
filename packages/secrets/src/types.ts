@@ -60,7 +60,7 @@ export type NewEnvironment = {
 export type Deletion = { window_days: number; holds: string | null };
 /** What a leaked managed key does (docs/secrets.md, "When a value leaks"): `managed` rotates it at once, `off` only reports it. */
 export type LeakRotate = "managed" | "off";
-export type Overview = { project: string; environments: Environment[]; previews: number; history_days: number | null; validity_checks: "on" | "off"; leaks: { rotate: LeakRotate }; deletion: Deletion };
+export type Overview = { project: string; environments: Environment[]; previews: number; history_days: number | null; validity_checks: "on" | "off"; leaks: { rotate: LeakRotate }; breakglass: string[]; deletion: Deletion };
 /** A credential to check: a found value and, for an AWS access key id, the secret access key next to it. */
 export type ValidityProbe = { value: string; pair?: string | null };
 /** What a credential's provider said: never its value. `invalid` is revoked, deleted or never real. */

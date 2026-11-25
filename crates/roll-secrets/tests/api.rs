@@ -2521,6 +2521,19 @@ async fn a_stored_value_is_found_by_fingerprint_and_short_values_never_are() {
 }
 
 #[tokio::test]
+async fn a_scanner_never_confirms_a_weak_password_inside_text_it_knows() {
+    let api = Api::new().await;
+    let url = "postgres://app:hunter2@db.internal.example.com:5432/shop";
+    let random = "Zq7vR2mXk9LpT4wB8nC1sD6fG3hJ5yUe";
+    api.set("production", "DB_URL", url).await;
+    api.set("production", "API_KEY", random).await;
+    let token = api.token(json!({ "actions": ["scan"] }));
+    let (s, found) = api.req(Method::POST, "/scan", Some(json!({ "candidates": [url, random] })), Some(&token)).await;
+    // The URL is long, but its password is a word: never tried. A scan-only token isn't told the key.
+    assert_eq!((s, found.clone()), (StatusCode::OK, json!([{ "index": 1, "environment": "production" }])), "{found}");
+}
+
+#[tokio::test]
 async fn validity_checks_ask_each_provider_once_and_only_when_an_admin_turned_them_on() {
     let api = Api::new().await;
     let c = creds();

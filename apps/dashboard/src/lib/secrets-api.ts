@@ -125,6 +125,7 @@ export function secretsApi(project: string) {
     setValidityChecks: (validity_checks: "on" | "off") => req<{ validity_checks: "on" | "off" }>("PATCH", P, { validity_checks }),
     /** What a leaked managed key does (admin): rotated at once, or only reported. */
     setLeakRotate: (rotate: LeakRotate) => req<{ leaks: { rotate: LeakRotate } }>("PATCH", P, { leaks: { rotate } }),
+    setBreakglass: (who: string[]) => req<{ breakglass: string[] }>("PATCH", P, { breakglass: who }),
     /** Whether found credentials work, asked of their providers; none asked while the project's checks are off. */
     checkValidity: (credentials: ValidityProbe[]) => req<{ validity_checks: "on" | "off"; results: CheckedCredential[] }>("POST", `${P}/validity`, { credentials }),
     /** A credential's last check, by its fingerprint. */
@@ -295,7 +296,7 @@ export function secretsApi(project: string) {
     /** Which candidates (tokens of some text) are this project's values the caller may reveal; never the values. */
     scanLeaks: (candidates: string[]) => req<{ index: number; key: string; environment: string; path: string }[]>("POST", `${P}/leaks`, { candidates }),
     /** A scanner's check (the `scan` right): which whole candidates (16+ characters, fair entropy) are values, never a value. */
-    scanOnly: (candidates: string[], breakglass = false) => req<{ index: number; key: string; environment: string; path: string }[]>("POST", `${P}/scan`, { candidates, breakglass }),
+    scanOnly: (candidates: string[], push: { breakglass?: boolean; pusher?: string; refs?: string[] } = {}) => req<{ index: number; environment: string; key?: string; path?: string }[]>("POST", `${P}/scan`, { candidates, ...push }),
     /** `code`: also the keys no repository on the canvas mentions (a search per key: on request). */
     health: (code = false) => req<Finding[]>("GET", `${P}/health${qs({ code: code ? 1 : undefined })}`),
     /** Every managed credential: schedule, last issue, next due, last failure. */

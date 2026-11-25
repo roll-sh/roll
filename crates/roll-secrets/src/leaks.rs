@@ -362,7 +362,7 @@ impl Secrets {
                     |r| r.get(0),
                 )?;
                 let hour = c.query_row("SELECT COALESCE(SUM(candidates), 0) FROM scan_project_counts WHERE project_id = ? AND minute > ?", params![project, minute - 60], |r| r.get(0))?;
-                Ok((calls, mine, at, hour))
+                Ok::<_, Error>((calls, mine, at, hour))
             })?;
             if calls > SCANS_PER_MINUTE || mine > SCAN_CANDIDATES_PER_MINUTE || project_minute > SCAN_CANDIDATES_PER_MINUTE || project_hour > SCAN_CANDIDATES_PER_HOUR {
                 let limits = format!("{SCANS_PER_MINUTE} scans and {SCAN_CANDIDATES_PER_MINUTE} candidates tried a minute per token, {SCAN_CANDIDATES_PER_MINUTE} a minute and {SCAN_CANDIDATES_PER_HOUR} an hour per project");
