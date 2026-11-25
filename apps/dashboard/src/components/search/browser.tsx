@@ -155,8 +155,12 @@ function Keys({ cluster }: { cluster: SearchCluster }) {
   const [expiry, setExpiry] = useState(0);
   const [perMinute, setPerMinute] = useState("600");
   const [perIp, setPerIp] = useState("60");
+  const [derivable, setDerivable] = useState(false);
   const [made, setMade] = useState<NewBrowserKey | null>(null);
+  // A signing secret just made or rotated, shown once.
+  const [signing, setSigning] = useState<{ name: string; secret: string } | null>(null);
   const [revoking, setRevoking] = useState<string | null>(null);
+  const [rotating, setRotating] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [snippet, setSnippet] = useState<Quickstart>("search-application");
@@ -197,10 +201,12 @@ function Keys({ cluster }: { cluster: SearchCluster }) {
         filter: parsed,
         expires_in_s: expiry || undefined,
         rate_limit: { per_minute: Number(perMinute) || undefined, per_ip_per_minute: Number(perIp) || undefined },
+        derivable: derivable || undefined,
       }),
     );
     if (r) {
       setMade(r.value);
+      setSigning(r.value.signing_secret ? { name: r.value.name ?? "key", secret: r.value.signing_secret } : null);
       setSnippet(r.value.application ? "search-application" : "instantsearch");
       setName("");
       if (keys) await load();
@@ -291,7 +297,14 @@ function Keys({ cluster }: { cluster: SearchCluster }) {
               </select>
             </Field>
           </div>
-          <div className="flex justify-end sm:col-span-2">
+          <div className="flex flex-wrap items-center justify-between gap-3 sm:col-span-2">
+            <label className="flex max-w-[60ch] items-start gap-2 text-[12px] text-muted">
+              <input type="checkbox" checked={derivable} onChange={(e) => setDerivable(e.target.checked)} className="mt-0.5 accent-accent" />
+              <span>
+                Derivable: your backend signs short-lived, narrower keys from it per end customer (a filter, some of its indices, a user&apos;s own rate), with no call
+                to roll. Its signing secret is shown once.
+              </span>
+            </label>
             <button type="submit" disabled={busy !== null || !name.trim() || !target.trim()} className={primary}>
               {busy === "create" ? (
                 <span className="shimmer">Creating…</span>
@@ -314,11 +327,35 @@ function Keys({ cluster }: { cluster: SearchCluster }) {
               <span className="text-[12px] text-subtle">shown once</span>
             </div>
             <SecretField id="browser-key" value={made.api_key} masked="••••••••••••••••••••••••" copied={copied} onCopy={copy} />
+            {signing && <SigningSecret secret={signing.secret} copied={copied} onCopy={copy} />}
             <div className="flex flex-wrap items-center gap-2 text-[12px] text-muted">
               <span>{reachOf(made)}</span>
               <span>· {limitOf(made)}</span>
               {made.expires_at && <span>· expires {day(made.expires_at)}</span>}
-              <button onClick={() => setMade(null)} className={`${primary} ml-auto`}>
+              <button
+                onClick={() => {
+                  setMade(null);
+                  setSigning(null);
+                }}
+                className={`${primary} ml-auto`}
+              >
+                I&apos;ve saved it
+              </button>
+            </div>
+          </div>
+        )}
+
+        {signing && !made && (
+          <div className="rise space-y-3 rounded-lg border border-line bg-bg p-4">
+            <div className="flex items-center justify-between gap-3">
+              <span className="flex items-center gap-2 text-[13px] font-medium">
+                <KeyRound className="size-4 text-accent" /> {signing.name}: new signing secret
+              </span>
+              <span className="text-[12px] text-subtle">shown once</span>
+            </div>
+            <SigningSecret secret={signing.secret} copied={copied} onCopy={copy} />
+            <div className="flex justify-end">
+              <button onClick={() => setSigning(null)} className={primary}>
                 I&apos;ve saved it
               </button>
             </div>
@@ -377,10 +414,38 @@ function Keys({ cluster }: { cluster: SearchCluster }) {
                             Cancel
                           </button>
                         </span>
+                      ) : rotating === k.id ? (
+                        <span className="inline-flex items-center gap-2">
+                          <span className="text-[12px] text-muted">Keys derived under the old secret fail at once.</span>
+                          <button
+                            disabled={busy !== null}
+                            onClick={async () => {
+                              const r = await act("rotate", () => searchApi.rotateBrowserKeySecret(cluster.id, k.id));
+                              setRotating(null);
+                              if (r) {
+                                setMade(null);
+                                setSigning({ name: k.name ?? k.id, secret: r.value.signing_secret });
+                              }
+                            }}
+                            className={btn}
+                          >
+                            {busy === "rotate" ? <span className="shimmer">Rotating…</span> : "Rotate"}
+                          </button>
+                          <button onClick={() => setRotating(null)} className={btn}>
+                            Cancel
+                          </button>
+                        </span>
                       ) : (
-                        <button onClick={() => setRevoking(k.id)} className={btn}>
-                          Revoke
-                        </button>
+                        <span className="inline-flex items-center gap-2">
+                          {k.derivable && (
+                            <button onClick={() => setRotating(k.id)} className={btn} title="A new signing secret for the keys your backend derives from it">
+                              Rotate secret
+                            </button>
+                          )}
+                          <button onClick={() => setRevoking(k.id)} className={btn}>
+                            Revoke
+                          </button>
+                        </span>
                       )}
                     </td>
                   </tr>
@@ -420,5 +485,17 @@ function Keys({ cluster }: { cluster: SearchCluster }) {
         </p>
       </div>
     </>
+  );
+}
+
+/** A derivable key's signing secret, with where it goes: the backend that derives keys, never a page. */
+function SigningSecret({ secret, copied, onCopy }: { secret: string; copied: string | null; onCopy: (id: string, text: string) => void }) {
+  return (
+    <div className="space-y-1.5">
+      <SecretField id="browser-signing-secret" value={secret} masked="••••••••••••••••••••••••" copied={copied} onCopy={onCopy} />
+      <p className="text-[12px] text-subtle">
+        Signing secret: keep it on your backend, which derives keys with it (the site-search guide has Node, Python and Go). It never goes in a page.
+      </p>
+    </div>
   );
 }

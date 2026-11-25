@@ -1067,6 +1067,181 @@ async fn browsers_search_with_browser_keys() {
     assert_eq!(r.text().await.unwrap(), r#"{"ok":false,"message":"Forbidden due to traffic filtering"}"#);
 }
 
+/// A request with a derived browser key (from `origin`, when given).
+async fn as_derived(e: &Env, key: &str, method: reqwest::Method, p: &str, origin: Option<&str>) -> (u16, Value) {
+    let mut r = e.http.request(method.clone(), format!("{}{p}", e.es)).header("authorization", format!("ApiKey {key}"));
+    if let Some(o) = origin {
+        r = r.header("origin", o);
+    }
+    if method == reqwest::Method::POST {
+        r = r.json(&json!({"query": {"match_all": {}}}));
+    } else if method == reqwest::Method::PUT {
+        r = r.json(&json!({"title": "x"}));
+    }
+    let r = r.send().await.unwrap();
+    let s = r.status().as_u16();
+    let t = r.text().await.unwrap();
+    (s, serde_json::from_str(&t).unwrap_or(Value::String(t)))
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
+}
+
+/// Keys derived without a call to roll (docs/search/README.md, "Keys derived without a call to
+/// roll"): a backend signs one with a derivable browser key's signing secret, sealed on the
+/// cluster; it searches only its narrowed indices through both filters, every widening is
+/// refused, it expires, and rotating the secret, a branch or revoking the parent stops it.
+#[tokio::test]
+async fn derived_keys_narrow_their_parent_and_die_with_it() {
+    let e = env_with(|c| c.sealer = search_control::Sealer::from_secret(&"derived-keys-test-deployment-key".repeat(2))).await;
+    let c = e.post("/v1/search/clusters", json!({"name": "shop"})).await;
+    let path = format!("/v1/search/clusters/{}", c["id"].as_str().unwrap());
+    let keys = format!("{path}/browser-keys");
+    let bulk = [
+        ("products", "1", json!({"tenant": "acme", "public": true})),
+        ("products", "2", json!({"tenant": "globex", "public": true})),
+        ("products", "3", json!({"tenant": "acme", "public": false})),
+        ("products-archive", "4", json!({"tenant": "acme", "public": true})),
+        ("other", "5", json!({"tenant": "acme", "public": true})),
+    ]
+    .iter()
+    .map(|(i, id, d)| format!("{}\n{d}\n", json!({"index": {"_index": i, "_id": id}})))
+    .collect::<String>();
+    let r = e.post(&format!("{path}/request"), json!({"method": "POST", "path": "/_bulk?refresh=true", "body": bulk})).await;
+    assert_eq!(r["status"], 200, "{r}");
+    let (s, _) = e.call(reqwest::Method::PATCH, &path, Some(json!({"cors": {"allow_origin": ["https://shop.example.com"]}}))).await;
+    assert_eq!(s, 200);
+    let parent = e.post(&keys, json!({"name": "saas", "indices": ["products*"], "filter": {"term": {"public": true}}, "rate_limit": {"per_minute": 400}, "derivable": true})).await;
+    let (pid, secret) = (parent["id"].as_str().unwrap().to_string(), parent["signing_secret"].as_str().unwrap().to_string());
+    assert!(secret.starts_with("rdks_"), "{parent}");
+    let plain = e.post(&keys, json!({"name": "plain", "indices": ["products"]})).await;
+    assert_eq!((plain["derivable"].as_bool(), plain.get("signing_secret")), (Some(false), None));
+    // The secret is never listed, and the cluster's own API prints it redacted.
+    let listed = e.get(&keys).await;
+    assert!(!listed.to_string().contains(&secret) && !listed.to_string().contains("signing_secret"), "{listed}");
+    assert_eq!(listed["keys"].as_array().unwrap().iter().filter(|k| k["derivable"] == true).count(), 1, "{listed}");
+    let r = e.post(&format!("{path}/request"), json!({"method": "GET", "path": format!("/_security/api_key?id={pid}"), "body": null})).await;
+    let metadata = body(&r)["api_keys"][0]["metadata"].clone();
+    assert_eq!(metadata["roll_browser"]["derive"]["secret"], "::es_redacted::", "{r}");
+
+    let sign = |secret: &str, payload: Value| search_es::xpack::security::derived::sign(secret, &payload.to_string());
+    let exp = unix_now() + 600;
+    let acme = sign(&secret, json!({"key": pid, "cluster": "shop", "exp": exp, "indices": ["products"], "filter": {"term": {"tenant": "acme"}}, "user": "acme"}));
+    // Only `products` (of the parent's `products*`), only acme's (its filter) and public (the parent's).
+    let (s, v) = as_derived(&e, &acme, reqwest::Method::POST, "/products*/_search", None).await;
+    let ids: Vec<&str> = v["hits"]["hits"].as_array().unwrap().iter().filter_map(|h| h["_id"].as_str()).collect();
+    assert_eq!((s, ids), (200, vec!["1"]), "{v}");
+    for p in ["/products-archive/_search", "/other/_search"] {
+        assert_eq!(as_derived(&e, &acme, reqwest::Method::POST, p, None).await.0, 403, "{p}");
+    }
+    assert_eq!(as_derived(&e, &acme, reqwest::Method::PUT, "/products/_doc/9", None).await.0, 403, "it never writes");
+    assert_eq!(as_derived(&e, &acme, reqwest::Method::GET, "/_security/_authenticate", None).await.0, 400, "nor reaches _security");
+    // Origins narrow the cluster's: a browser on another page is refused.
+    let paged = sign(&secret, json!({"key": pid, "cluster": "shop", "exp": exp, "origins": ["https://Shop.Example.com:443"]}));
+    assert_eq!(as_derived(&e, &paged, reqwest::Method::POST, "/products/_search", Some("https://shop.example.com")).await.0, 200);
+
+    // The owner's own update sends the redacted secret back, as the API printed it: the secret is
+    // kept, and the audit line has neither it nor its sealed form.
+    let r = e.post(&format!("{path}/request"), json!({"method": "PUT", "path": format!("/_security/api_key/{pid}"), "body": {"metadata": metadata}})).await;
+    assert_eq!(r["status"], 200, "{r}");
+    assert_eq!(as_derived(&e, &acme, reqwest::Method::POST, "/products/_search", None).await.0, 200, "the secret survives the round trip");
+    let audit = audit_entries(&e, "shop", "").await;
+    let change = audited(&audit, "security_config_change", |x| x["event.action"] == "change_apikey").expect("the update");
+    assert_eq!(change["change"]["apikey"]["metadata"]["roll_browser"]["derive"]["secret"], "::es_redacted::", "{change}");
+    let text = json!(audit).to_string();
+    assert!(!text.contains("::roll_sealed::") && !text.contains(&secret), "no secret in the audit log");
+
+    // Every widening, and every way of not being the parent's, is refused; until the signature
+    // verifies, all alike.
+    let unverified = "\"API key: derived key refused\"";
+    let plain_only = "only queries on the document itself";
+    let base = || json!({"key": pid, "cluster": "shop", "exp": exp});
+    let with = |f: &str, v: Value| {
+        let mut p = base();
+        p[f] = v;
+        p
+    };
+    let cases: Vec<(String, &str)> = vec![
+        (sign(&secret, with("indices", json!(["other"]))), "isn't within its parent's indices"),
+        (sign(&secret, with("indices", json!(["prod*"]))), "isn't within its parent's indices"),
+        (sign(&secret, with("indices", json!(["*"]))), "would reach every index"),
+        (sign(&secret, with("indices", json!([".security"]))), "hidden or system index"),
+        (sign(&secret, with("application", json!("shop-search"))), "[application] isn't its parent's"),
+        (sign(&secret, with("filter", json!([{"match_all": {}}]))), "[filter]"),
+        // A lookup would read an index the parent can't; a script runs Painless as the owner.
+        (sign(&secret, with("filter", json!({"bool": {"filter": [{"terms": {"tenant": {"index": "other", "id": "5", "path": "tenant"}}}]}}))), plain_only),
+        (sign(&secret, with("filter", json!({"script": {"script": "true"}}))), plain_only),
+        (sign(&secret, with("exp", json!(unix_now() + 2 * 86_400))), "ahead"),
+        (sign(&secret, with("exp", json!(unix_now() - 120))), "expired"),
+        (sign(&secret, json!({"key": pid, "cluster": "shop", "exp": exp, "user": "acme", "rate_limit": {"per_minute": 101}})), "share"),
+        (sign(&secret, with("rate_limit", json!({"per_minute": 1}))), "give [user]"),
+        (sign(&secret, with("alg", json!("none"))), "a field it doesn't know"),
+        (sign("rdks_not-the-secret", base()), unverified),
+        (sign(&secret, with("key", json!(plain["id"]))), unverified),
+        (sign(&secret, with("cluster", json!("shop-other"))), unverified),
+        (sign(&secret, with("origins", json!(["https://evil.example"]))), unverified),
+        (paged.clone(), unverified),
+    ];
+    for (i, (key, why)) in cases.iter().enumerate() {
+        let origin = (i == cases.len() - 1).then_some("https://evil.example");
+        let (s, v) = as_derived(&e, key, reqwest::Method::POST, "/products/_search", origin).await;
+        assert!(s == 401 && v.to_string().contains(why), "case {i} ({why}): {s} {v}");
+    }
+
+    // A branch copies the parent with its sealed secret, which works only where it was made.
+    e.post(&format!("{path}/branches"), json!({"name": "shop-staging"})).await;
+    let on_branch = sign(&secret, json!({"key": pid, "cluster": "shop-staging", "exp": exp}));
+    assert_eq!(as_derived(&e, &on_branch, reqwest::Method::POST, "/products/_search", None).await.0, 401);
+    // Rotating refuses what the old secret signed, at once; revoking the parent, everything.
+    let rotated = e.post(&format!("{keys}/{pid}/rotate"), json!({})).await;
+    let fresh = rotated["signing_secret"].as_str().unwrap();
+    assert_ne!(fresh, secret);
+    assert_eq!(as_derived(&e, &acme, reqwest::Method::POST, "/products/_search", None).await.0, 401);
+    let renewed = sign(fresh, base());
+    assert_eq!(as_derived(&e, &renewed, reqwest::Method::POST, "/products/_search", None).await.0, 200);
+    let (s, _) = e.call(reqwest::Method::POST, &format!("{keys}/{}/rotate", plain["id"].as_str().unwrap()), Some(json!({}))).await;
+    assert_eq!(s, 409, "only a derivable key has a secret to rotate");
+    let (s, _) = e.call(reqwest::Method::DELETE, &format!("{keys}/{pid}"), None).await;
+    assert_eq!(s, 204);
+    assert_eq!(as_derived(&e, &renewed, reqwest::Method::POST, "/products/_search", None).await.0, 401);
+}
+
+/// A derived key pays its parent's limits, which stay the ceiling of all its derived keys
+/// together, and each `user` has its own share: a quarter of the parent's, or less if it asks.
+#[tokio::test]
+async fn derived_keys_share_their_parents_rate_by_user() {
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "shop"})).await;
+    let path = format!("/v1/search/clusters/{}", c["id"].as_str().unwrap());
+    let r = e.post(&format!("{path}/request"), json!({"method": "PUT", "path": "/products", "body": null})).await;
+    assert_eq!(r["status"], 200, "{r}");
+    let parent = e.post(&format!("{path}/browser-keys"), json!({"name": "saas", "indices": ["products"], "rate_limit": {"per_minute": 8}, "derivable": true})).await;
+    let (pid, secret) = (parent["id"].as_str().unwrap(), parent["signing_secret"].as_str().unwrap());
+    let exp = unix_now() + 600;
+    let key = |user: &str, per_minute: Option<u64>| {
+        let mut p = json!({"key": pid, "cluster": "shop", "exp": exp, "user": user});
+        if let Some(n) = per_minute {
+            p["rate_limit"] = json!({ "per_minute": n });
+        }
+        search_es::xpack::security::derived::sign(secret, &p.to_string())
+    };
+    let mut statuses = Vec::new();
+    // A share of 2 each (8 / 4), or 1 asked for; the parent's 8 for all of them.
+    for (user, asked, tries) in [("slow", Some(1), 2), ("a", None, 3), ("b", None, 2), ("c", None, 2), ("d", None, 2)] {
+        let k = key(user, asked);
+        for _ in 0..tries {
+            let (s, v) = as_derived(&e, &k, reqwest::Method::POST, "/products/_search", None).await;
+            if s == 429 {
+                assert!(v.to_string().contains(&format!("for user [{user}]")), "{v}");
+            }
+            statuses.push((user, s));
+        }
+    }
+    let codes: Vec<u16> = statuses.iter().map(|(_, s)| *s).collect();
+    assert_eq!(codes, [200, 429, 200, 200, 429, 200, 200, 200, 200, 200, 429], "{statuses:?}: d's second is past the parent's 8");
+}
+
 /// A cluster where a browser key's filter (`public: true`) hides document 2 of `products`, and an
 /// index `other` the key can't read: the key, for [`as_key`].
 async fn filtered_key(e: &Env) -> String {
@@ -3319,6 +3494,26 @@ async fn an_s3_repository_bounds_and_checks_what_a_bucket_holds() {
     expect("taken while a deletion waited", third, 200, "SUCCESS");
     expect("deleted after it", deleted, 200, "acknowledged");
     expect("restores what it reused", e.es(&u, &p, reqwest::Method::POST, "/_snapshot/backup/third/_restore?wait_for_completion=true", Some(json!({"rename_pattern": "docs", "rename_replacement": "third"}))).await, 200, "third");
+    // The other way round: a snapshot starting while a deletion runs waits for it. `fourth`
+    // alone holds a new segment; with its DELETE held as it commits, `fifth` starts, and doesn't
+    // take `fourth` as its base (it would reuse that segment's chunks as they go).
+    assert_eq!(es(reqwest::Method::PUT, "/docs/_doc/fresher?refresh=true", Some(json!({"n": 3}))).await.0, 201);
+    expect("fourth", es(reqwest::Method::PUT, "/_snapshot/backup/fourth?wait_for_completion=true", Some(json!({"indices": "docs"}))).await, 200, "SUCCESS");
+    let (arrived, release) = (Arc::new(tokio::sync::Notify::new()), Arc::new(tokio::sync::Notify::new()));
+    *bucket.hold_index.lock().unwrap() = Some((arrived.clone(), release.clone()));
+    let deleting = es(reqwest::Method::DELETE, "/_snapshot/backup/fourth", None);
+    let starting = async {
+        arrived.notified().await;
+        let released = async {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            release.notify_one();
+        };
+        tokio::join!(es(reqwest::Method::PUT, "/_snapshot/backup/fifth?wait_for_completion=true", Some(json!({"indices": "docs"}))), released).0
+    };
+    let (deleted, fifth) = tokio::join!(deleting, starting);
+    expect("deleted while a snapshot waited", deleted, 200, "acknowledged");
+    expect("taken after it", fifth, 200, "SUCCESS");
+    expect("restores without the deleted base", e.es(&u, &p, reqwest::Method::POST, "/_snapshot/backup/fifth/_restore?wait_for_completion=true", Some(json!({"rename_pattern": "docs", "rename_replacement": "fifth"}))).await, 200, "fifth");
     // Another program's upload in parts under `indices/` makes a location someone else's.
     bucket.uploads.lock().unwrap().insert("es-upload".into(), ("parts/roll/indices/Xq/0/__e".into(), Default::default()));
     let parts = json!({"type": "s3", "settings": {"bucket": "backups", "base_path": "parts", "endpoint": endpoint, "path_style_access": true}});
