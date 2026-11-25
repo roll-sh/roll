@@ -479,6 +479,34 @@ const ROOT_BOX = `JSON.stringify((() => {
   }
   return x2 > x1 && y2 > y1 ? { x: x1, y: y1, w: x2 - x1, h: y2 - y1 } : null;
 })())`;
+// touched-first: start
+// Stories the change touched first (Chromatic's TurboSnap, without a bundler's graph): a story
+// whose own file the change changed, then one beside a file it changed (its component, its
+// styles), then the rest in the index's order. `changed` are paths in the repo; a story's
+// `importPath` is its project's (`./src/Button.stories.tsx`), so a path matches by its end.
+const touchedFirst = (listed, changed) => {
+  const norm = (p) => String(p || "").replace(/^\.\//, "").replace(/^\/+/, "");
+  const ends = (path, tail) => !!tail && (path === tail || path.endsWith("/" + tail));
+  const dir = (p) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
+  const score = (e) => {
+    const own = norm(e.importPath);
+    if (!own) return 0;
+    if (changed.some((c) => ends(c, own))) return 2;
+    const d = dir(own);
+    return d && changed.some((c) => ends(dir(c), d)) ? 1 : 0;
+  };
+  return listed.map((e, i) => [score(e), i, e]).sort((a, b) => b[0] - a[0] || a[1] - b[1]).map((x) => x[2]);
+};
+// touched-first: end
+// The paths the change touched ($STORIES_CHANGED, roll's: the repo's, since the default branch).
+const CHANGED = (() => {
+  try {
+    const c = JSON.parse(process.env.STORIES_CHANGED || "[]");
+    return Array.isArray(c) ? c.filter((p) => typeof p === "string").slice(0, 2000) : [];
+  } catch {
+    return [];
+  }
+})();
 const stories = async (sessionId) => {
   const base = new URL(process.env.STORIES, process.env.URL);
   let entries = [];
@@ -492,7 +520,9 @@ const stories = async (sessionId) => {
       if (entries.length) break;
     } catch {}
   }
-  const picked = entries.filter((e) => e && typeof e.id === "string" && STORY_ID.test(e.id) && (e.type == null || e.type === "story")).slice(0, 40);
+  // The ones the change touched first, so the 40 a run takes are those that matter.
+  const listed = touchedFirst(entries.filter((e) => e && typeof e.id === "string" && STORY_ID.test(e.id) && (e.type == null || e.type === "story")), CHANGED);
+  const picked = listed.slice(0, 40);
   const out = [];
   const until = Date.now() + 100000;
   for (const e of picked) {
@@ -519,13 +549,50 @@ const stories = async (sessionId) => {
     fs.writeFileSync(`${process.env.OUT}.story.${out.length}.png`, Buffer.from(shot.data, "base64"));
     out.push({ id: e.id, errors: errors.length + failed.length - before });
   }
-  fs.writeFileSync(process.env.OUT + ".stories.json", JSON.stringify(out));
+  // And what it didn't take (past the first 40, or out of its time), so roll can say so.
+  const left = listed.filter((e) => !out.some((o) => o.id === e.id)).map((e) => e.id);
+  fs.writeFileSync(process.env.OUT + ".stories.json", JSON.stringify({ stories: out, left: left.length, first_left: left.slice(0, 10) }));
 };
 // A run an agent asked for ($TRY: {path, steps}; roll previews' `…/try`): the page loaded, its
 // steps taken as a page state's are (10 at most, 15 s), then its picture to $OUT, and to
 // $OUT.try.json its status, the step that found nothing, its visible text (its own line breaks
 // kept) and what went wrong on the way.
+// The app's own sign-in ($LOGIN_FILE: {page, steps}, a trusted preview's, its typed values put
+// in by roll): the file goes once read, the steps taken on its page (15 s at most; the first that
+// finds nothing ends them), and what the sign-in page went through counts for no page. Where it
+// went and where it stopped, or null for none.
+const signIn = async (sessionId) => {
+  let login = null;
+  try {
+    login = JSON.parse(fs.readFileSync(process.env.LOGIN_FILE || "", "utf8"));
+  } catch {}
+  try {
+    fs.unlinkSync(process.env.LOGIN_FILE || "");
+  } catch {}
+  if (!login || typeof login.page !== "string" || !/^\/(?!\/)[^\s#"'`\\]{0,199}$/.test(login.page)) return null;
+  const at = once("Page.loadEventFired");
+  await send("Page.navigate", { url: new URL(login.page, process.env.URL).href }, sessionId);
+  await Promise.race([at, sleep(15000)]);
+  await sleep(300);
+  const until = Date.now() + 15000;
+  let stopped = null;
+  for (const s of (Array.isArray(login.steps) ? login.steps : []).slice(0, 10)) {
+    if (Date.now() > until) break;
+    stopped = await step(sessionId, s || {}, until);
+    if (stopped) break;
+    await sleep(150);
+  }
+  const page = login.page;
+  login = null;
+  // Its last step usually submits: what that loads, settled.
+  await sleep(1500);
+  errors.length = 0;
+  failed.length = 0;
+  return { page, stopped };
+};
 const tryIt = async (sessionId) => {
+  // Signed in first, as the screenshots are (`github.login`).
+  const signed = await signIn(sessionId);
   let t = {};
   try {
     t = JSON.parse(process.env.TRY_FILE ? fs.readFileSync(process.env.TRY_FILE, "utf8") : process.env.TRY);
@@ -556,7 +623,8 @@ const tryIt = async (sessionId) => {
   try {
     text = JSON.parse(r?.result?.value || '""');
   } catch {}
-  fs.writeFileSync(process.env.OUT + ".try.json", JSON.stringify({ status, step_failed: stepFailed, text, errors: [...errors, ...failed].slice(0, 20) }));
+  const login = signed && (signed.stopped ? `signing in stopped at ${signed.stopped}: the page is the signed-out one` : `signed in through ${signed.page} first`);
+  fs.writeFileSync(process.env.OUT + ".try.json", JSON.stringify({ status, step_failed: stepFailed, text, errors: [...errors, ...failed].slice(0, 20), login }));
 };
 (async () => {
   const { targetId } = await send("Target.createTarget", { url: "about:blank" });
@@ -611,39 +679,10 @@ const tryIt = async (sessionId) => {
     chrome.kill();
     process.exit(0);
   }
-  // The app's own sign-in first ($LOGIN_FILE: {page, steps}, a trusted preview's, its typed
-  // values put in by roll), so every page, state, crop and timing after it is the signed-in one:
-  // its cookies stay in this browser. The file goes once read; what the sign-in page went
-  // through isn't counted as any page's. What it said is the report's `login`.
-  let login = null;
-  try {
-    login = JSON.parse(fs.readFileSync(process.env.LOGIN_FILE || "", "utf8"));
-  } catch {}
-  try {
-    fs.unlinkSync(process.env.LOGIN_FILE || "");
-  } catch {}
-  let loginSaid = null;
-  if (login && typeof login.page === "string" && /^\/(?!\/)[^\s#"'`\\]{0,199}$/.test(login.page)) {
-    const at = once("Page.loadEventFired");
-    await send("Page.navigate", { url: new URL(login.page, process.env.URL).href }, sessionId);
-    await Promise.race([at, sleep(15000)]);
-    await sleep(300);
-    const until = Date.now() + 15000;
-    let stopped = null;
-    for (const s of (Array.isArray(login.steps) ? login.steps : []).slice(0, 10)) {
-      if (Date.now() > until) break;
-      stopped = await step(sessionId, s || {}, until);
-      if (stopped) break;
-      await sleep(150);
-    }
-    const page = login.page;
-    login = null;
-    // Its last step usually submits: what that loads, settled.
-    await sleep(1500);
-    loginSaid = stopped ? `signing in stopped at ${stopped}: its pages are the signed-out ones` : `signed in through ${page} before its pages`;
-    errors.length = 0;
-    failed.length = 0;
-  }
+  // Signed in first, so every page, state, crop and timing after it is the signed-in one: its
+  // cookies stay in this browser. What it said is the report's `login`.
+  const signed = await signIn(sessionId);
+  const loginSaid = signed && (signed.stopped ? `signing in stopped at ${signed.stopped}: its pages are the signed-out ones` : `signed in through ${signed.page} before its pages`);
   const loaded = once("Page.loadEventFired");
   await send("Page.navigate", { url: process.env.URL }, sessionId);
   await Promise.race([loaded, sleep(45000)]);

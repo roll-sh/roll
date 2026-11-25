@@ -155,7 +155,7 @@ pub struct Plan {
     /// functions service.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edge: Vec<edge::EdgeFn>,
-    /// The OpenTelemetry agent the build added (`node`, `python`; [`otel`]).
+    /// The OpenTelemetry agent the build added (`node`, `python`, `java`, `dotnet`; [`otel`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub otel: Option<String>,
     /// roll's Next.js adapter is in the image ([`next_cache`]): its instances share a cache.

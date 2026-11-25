@@ -201,6 +201,23 @@ impl Tool {
         &PREPARED[self.name].definition
     }
 
+    /// What a call of it could need a person for ([`AskScope`]).
+    pub fn ask_scope(&self) -> &'static AskScope {
+        &PREPARED[self.name].asks
+    }
+
+    /// Built while [`PREPARED`] is (so from `find_actions`, never `actions`, which reads it).
+    fn find_asks(&self) -> AskScope {
+        let Some(found) = catalog::by_path(self.method, &self.sample_path()) else { return AskScope::default() };
+        let row = found.row;
+        // A body decides it (a `build` makes an apps write a deploy, SQL can be admin): any action.
+        let mut actions = if matches!(row.act, catalog::Act::Body(_) | catalog::Act::Raw(_)) && self.fixed.is_none() { Action::ALL.to_vec() } else { self.find_actions() };
+        if row.admin_if_field.is_some() && !actions.contains(&Action::Admin) {
+            actions.push(Action::Admin);
+        }
+        AskScope { actions, others: row.lends.is_some() || row.copies_from.is_some() }
+    }
+
     fn find_actions(&self) -> Vec<Action> {
         let Some(found) = catalog::by_path(self.method, &self.sample_path()) else { return Vec::new() };
         match found.row.act {
@@ -311,10 +328,13 @@ impl Tool {
                 }
                 continue;
             };
-            // An optional one left empty is no choice, as its routes read it (some clients fill every
-            // field they have).
+            // An optional one left empty is left out (some clients fill every field they have; most
+            // routes refuse an empty value rather than reading it as none).
+            if matches!(p.ty, Ty::Choice(_)) && !p.required && v.as_str() == Some("") {
+                continue;
+            }
             if let Ty::Choice(values) = p.ty
-                && !v.as_str().is_some_and(|s| values.contains(&s) || (s.is_empty() && !p.required))
+                && !v.as_str().is_some_and(|s| values.contains(&s))
             {
                 return Err(format!("{}: {} is one of {} (not {v})", self.name, p.name, values.join(", ")));
             }
@@ -449,7 +469,7 @@ fn apps_area(method: &str, path: &str) -> Area {
         ["services", "environments", "deploys", "source" | "output"] => "observe",
         ["services"] | ["services", "environments"] | ["projects", "services"] => "configure",
         ["services", "environments", s, ..] => match *s {
-            "analytics" | "app-metrics" | "errors" | "logs" | "metrics" | "routes" | "slo" | "traces" | "usage" | "vitals" | "push" | "fetch" | "advice" => "observe",
+            "analytics" | "app-metrics" | "errors" | "logs" | "metrics" | "routes" | "slo" | "traces" | "usage" | "vitals" | "push" | "fetch" | "advice" | "checks" => "observe",
             "deploys" | "promote" | "redeploy" | "rollback" | "pending" | "diff" | "jobs" | "runs" | "restart" | "sleep" | "wake" | "instances" | "cache" | "sandboxes" => "deploy",
             "private-network" => "configure",
             "visitors" if read => "observe",
@@ -501,6 +521,15 @@ const IDEMPOTENCY: P = P { name: "idempotency_key", ty: Ty::Str, at: At::Header(
 /// binds the header into its approval), audited by roll apps as `freeze.overridden`.
 const OVERRIDE: P = P { name: "override", ty: Ty::Bool, at: At::Header("x-roll-override"), required: false, desc: "Go past the environment's deploy freeze: an admin's call (a token that may only deploy can't), audited" };
 const IN_PROJECT: P = P { name: "workspace_project", ty: Ty::Str, at: At::Header("x-roll-project"), required: false, desc: "Workspace project (prj_…) to put the new resource in" };
+
+/// What a call of a tool could need a person for: the actions its route can be decided as (every
+/// one where its body decides), and whether it reaches another product's resources too (what it
+/// lends or copies from), whose rules and policy can ask as well.
+#[derive(Clone, Debug, Default)]
+pub struct AskScope {
+    pub actions: Vec<Action>,
+    pub others: bool,
+}
 
 const fn t(name: &'static str, title: &'static str, description: &'static str, product: &'static str, method: &'static str, path: &'static str, params: &'static [P]) -> Tool {
     Tool { name, title, description, product, method, path, params, fixed: None, wrap: None, hint: Hint::Auto, until: None, outside: &[], published: false, open_world: false, bodiless: false, one_of: &[] }
@@ -1565,6 +1594,7 @@ static TOOLS: &[Tool] = &[
     t("apps_route_stats", "Route stats", "An environment's routes from its access log over the last minutes (5-60, default 60): requests, 5xx and 4xx errors, p50/p95/max latency per route (ids folded as :id), the busiest, most failing and slowest 50 of each. Start here when a service is slow or failing.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/routes", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back, 5-60 (default 60)")]),
     t("apps_errors", "Errors: why a service is failing", "An environment's errors over the last minutes (5-10080, default 1440), grouped (the same error once, with its count, first and last seen and a sample), the most frequent first, at most 50. Start here when a service is failing or erroring.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/errors", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back, 5-10080 (default 1440)")]),
     t("apps_push_status", "Stream push status", "An environment's run.push rules as they stand: each one's lag (records not yet delivered), delivered and dead-lettered counts, the last delivery, and failing_since and last_error when it's failing, or why nothing is delivered (off). Why a pushed stream is behind.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/push", &[SERVICE, ENV]),
+    t("apps_check_screenshot", "A browser check's failure, as it looked", "The page as it looked when an environment's browser check last failed (its check_states' failure_at says one is kept), as an image you can look at: for when the check's error doesn't show what broke. 404 when none is kept.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/checks/{check}/screenshot", &[SERVICE, ENV, req("check", "The browser check's name")]),
     t("apps_set_error_state", "Resolve, mute or reopen an error", "Triage an error group (its fingerprint from apps_errors): resolved goes quiet until it's seen again, which reopens it as a regression naming the deploy it came back in; muted stays quiet; open reopens it.", "apps", "PATCH", "/v1/apps/services/{service}/environments/{env}/errors/{fingerprint}", &[SERVICE, ENV, req("fingerprint", "The error group's fingerprint"), breq("state", Ty::Choice(&["open", "resolved", "muted"]), "The error's new state")]),
     t("apps_rotate_config", "Rotate the runtime config's address", "Give an environment's runtime config a new read token (a leaked ROLL_CONFIG_URL): the old address reads until a deploy made after the rotation is live, so redeploy to finish it. 409 while the last rotation's old address still reads.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/config/rotate", &[SERVICE, ENV]).destructive(),
     t("apps_traces", "Traces of slow requests", "An environment's recent traces (traces on), newest first, at most 100: each one's root span, service, duration, span count and whether any span failed; min_ms keeps the slow ones. apps_get_trace has one's spans.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/traces", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back (default 60)"), q("min_ms", Ty::Int, "Only traces at least this slow")]),
@@ -1740,7 +1770,7 @@ static TOOLS: &[Tool] = &[
     t("previews_resolve_note", "Resolve a preview note", "Mark a note left on a preview page's feedback button as dealt with, so the page stops listing it (after fixing what it asked).", "previews", "POST", "/v1/previews/{id}/notes/{note}/resolve", &[req("id", "Preview id"), req("note", "Note id from previews_list_notes")]),
     t("previews_screenshot", "Screenshot a preview", "A preview's page as an image the agent can look at; diff against the base or the previous deploy, another page, or the phone view.", "previews", "GET", "/v1/previews/{id}/screenshot", &[req("id", "Preview id"), q("diff", Ty::Choice(&["base", "previous"]), "Highlight what changed against the base or the previous deploy"), q("page", Ty::Str, "Path of the page (default /)"), q("view", Ty::Str, "phone for a phone-sized view")]),
     t("previews_fetch", "Read a preview's page", "One page of a preview's service read through roll, as a visitor gets it, without making a share link: its status, a few headers (content-type, location, cache-control, content-length) and its text, masked as the preview's logs are (null when it isn't text, cut at 256 KiB with truncated). For checking what a change does to a page or an API answer; head for the status alone. A roll apps service is read through roll apps' own proxy as a visitor with the preview's link (a team-only preview's answers its 401 as the status). A page can show copies of production's people: reveal.", "previews", "GET", "/v1/previews/{id}/fetch", &[req("id", "Preview id"), qreq("path", "The page's path, from / (up to 200 characters; no #, quotes or spaces)"), q("service", Ty::Str, "Which of the preview's services (default: its first)"), q("head", Ty::Bool, "Only the status and headers (HEAD)")]),
-    t("previews_try", "Try a preview's page in a browser", "Load a page of a preview in a browser in its own network and take steps on it, as a person would: [{click: selector} | {type: [selector, text]} | {press: key} | {wait: ms}], 10 at most, 15 s. Stateless: send the whole way to the state you want each time. Answers the run id, the page's status, the step that found nothing (step_failed), its visible text after the steps (masked as its logs are) and the uncaught errors and failed requests on the way; previews_try_screenshot shows its picture when the text isn't enough. Two runs at a time per preview. Clicks can change the preview's own data, and the page shows masked copies of production's: reveal.", "previews", "POST", "/v1/previews/{id}/try", &[req("id", "Preview id"), breq("path", Ty::Str, "The page's path, from /"), breq("steps", Ty::Arr, "[{click: \"#sign-in\"}, {type: [\"#email\", \"a@example.com\"]}, {press: \"Enter\"}, {wait: 500}] (10 at most; typed text is never kept)"), b("service", Ty::Str, "Which of the preview's services (default: its first)")]),
+    t("previews_try", "Try a preview's page in a browser", "Load a page of a preview in a browser in its own network and take steps on it, as a person would: [{click: selector} | {type: [selector, text]} | {choose: [selector, n]} (a list's nth option, from 1) | {press: key} | {wait: ms}], 10 at most, 15 s. Stateless: send the whole way to the state you want each time. Answers the run id, the page's status, the step that found nothing (step_failed), its visible text after the steps (masked as its logs are) and the uncaught errors and failed requests on the way; previews_try_screenshot shows its picture when the text isn't enough. Two runs at a time per preview. Clicks can change the preview's own data, and the page shows masked copies of production's: reveal.", "previews", "POST", "/v1/previews/{id}/try", &[req("id", "Preview id"), breq("path", Ty::Str, "The page's path, from /"), breq("steps", Ty::Arr, "[{click: \"#sign-in\"}, {type: [\"#email\", \"a@example.com\"]}, {press: \"Enter\"}, {wait: 500}] (10 at most; typed text is never kept)"), b("service", Ty::Str, "Which of the preview's services (default: its first)")]),
     t("previews_try_screenshot", "A browser run's picture", "The picture of a previews_try run after its steps (kept 5 minutes), as an image you can look at: for when the run's text doesn't show what you need.", "previews", "GET", "/v1/previews/{id}/try/{run}/screenshot", &[req("id", "Preview id"), req("run", "The run id previews_try answered")]),
     t("previews_list_saved_data", "A preview's restore points (saved data)", "A preview's saved data states, oldest first (at most 3): id, label, who made it and when, and what it holds (its Postgres branches for now). previews_restore puts one back.", "previews", "GET", "/v1/previews/{id}/restore-points", &[req("id", "Preview id")]),
     t("previews_save_data", "Save a preview's data", "Save a preview's data as it is now (its Postgres branches for now), to put back after trying something that changes it: a flow with previews_try, a migration. At most 3 a preview; 409 while it isn't ready, when it's full, or with no Postgres branch.", "previews", "POST", "/v1/previews/{id}/restore-points", &[req("id", "Preview id"), b("label", Ty::Str, "What it's before, one line (at most 60 characters)")]),
@@ -1811,13 +1841,14 @@ pub fn all() -> &'static [Tool] {
 /// every tool, on every `tools/list`, cost ~43 ms a call with every product on.
 struct Prepared {
     actions: Vec<Action>,
+    asks: AskScope,
     open: bool,
     within: bool,
     definition: Value,
 }
 
 static PREPARED: std::sync::LazyLock<std::collections::HashMap<&'static str, Prepared>> = std::sync::LazyLock::new(|| {
-    TOOLS.iter().map(|t| (t.name, Prepared { actions: t.find_actions(), open: t.find_open(), within: t.find_within(), definition: t.build_definition() })).collect()
+    TOOLS.iter().map(|t| (t.name, Prepared { actions: t.find_actions(), asks: t.find_asks(), open: t.find_open(), within: t.find_within(), definition: t.build_definition() })).collect()
 });
 
 #[cfg(test)]
@@ -1845,7 +1876,8 @@ mod tests {
         assert!(call("abort").is_ok());
         assert!(call("").is_err(), "a required choice can't be empty");
         let vulns = super::all().iter().find(|t| t.name == "apps_deploy_vulnerabilities").unwrap();
-        assert!(vulns.request(&serde_json::json!({ "service": "svc_1", "env": "production", "deploy": "dpl_1", "severity": "" })).is_ok(), "an optional one may be");
+        let empty = vulns.request(&serde_json::json!({ "service": "svc_1", "env": "production", "deploy": "dpl_1", "severity": "" })).unwrap();
+        assert!(!empty.uri.contains("severity"), "an optional one left empty is left out: {}", empty.uri);
     }
 
     /// A choice copies its set from the product that takes it: a value the product adds has to
@@ -1960,6 +1992,20 @@ mod tests {
         // Every choice is read from its product: a new one joins the list above.
         let unread: Vec<String> = super::all().iter().flat_map(|t| t.params.iter().filter(|p| matches!(p.ty, Ty::Choice(_)) && !covered.contains(&(t.name, p.name))).map(move |p| format!("{}.{}", t.name, p.name))).collect();
         assert!(unread.is_empty(), "choices not read from their product here: {unread:?}");
+    }
+
+    /// Whether a call can wait for a person is judged on everything it can be decided as: a body
+    /// that decides (a `build` makes an apps update a deploy) counts every action, a field that
+    /// makes it admin counts admin, and what it lends from another product (a link to a Postgres
+    /// database) counts that product's rules too. Its listed actions alone missed both.
+    #[test]
+    fn a_call_that_can_wait_is_judged_on_all_it_can_be() {
+        let scope = |n: &str| super::all().iter().find(|t| t.name == n).unwrap().ask_scope().clone();
+        let update = scope("apps_update_service");
+        assert!(update.actions.contains(&Action::Deploy) && !super::all().iter().find(|t| t.name == "apps_update_service").unwrap().actions().contains(&Action::Deploy), "{update:?}");
+        assert!(scope("apps_link").others, "a link lends another product's resource");
+        let plain = scope("postgres_list_projects");
+        assert_eq!((plain.actions.as_slice(), plain.others), (&[Action::Read][..], false));
     }
 
     /// `secrets_list_saas` names every vendor roll secrets rotates for: the list is prose, and new

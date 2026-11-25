@@ -85,6 +85,7 @@ POST /v1/redis/databases/{id}/password                                         a
 POST /v1/redis/databases/{id}/unload                                           the operator's (health, migrations, process control)
 POST /v1/redis/replicas/{id}/unload                                            the operator's (health, migrations, process control)
 POST /v1/search/clusters/{id}/browser-keys                                     answers or sets a credential (#358)
+POST /v1/search/clusters/{id}/browser-keys/{key}/rotate                        answers or sets a credential (a derivable browser key's signing secret)
 GET /v1/search/clusters/{id}/indices/{index}/docs                              no such handler (only POST exists)
 POST /v1/search/clusters/{id}/inference/secrets                                answers or sets a credential (an inference service's key)
 POST /v1/search/clusters/{id}/keys                                             answers or sets a credential
@@ -220,6 +221,5 @@ GET /v1/workspace/projects/{id}/invites                                        a
 DELETE /v1/workspace/projects/{id}/invites/{invite}                            a person's call: invites are a signed-in person's (#501)
 DELETE /v1/workspace/projects/{id}/members/me                                  a person's call: leaving a project is the person's own (#501)
 GET /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files            raw bytes, not JSON: apps_sandbox_exec reads and writes files (cat, a heredoc)
-GET /v1/apps/services/{id}/environments/{env}/checks/{check}/screenshot        a PNG, not JSON: the check's state says its error and when its failure was kept
 GET /v1/apps/services/{id}/environments/{env}/checks/{check}/trace             a Playwright trace archive, not JSON: for `npx playwright show-trace`
 PUT /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files            raw bytes, not JSON: apps_sandbox_exec reads and writes files (cat, a heredoc)

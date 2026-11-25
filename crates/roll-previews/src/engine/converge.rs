@@ -1065,24 +1065,20 @@ impl Engine {
         // is the preview's first URL and its path): what each note is about, as a picture.
         let crops = self.crops_wanted(r).await;
         let stories = storybook.as_ref().filter(|(svc, _)| *svc == first.name).map(|(_, at)| at.clone());
+        // The paths the change touched, so the stories it touched are taken first (its own
+        // repo's; another repo's service takes them in the index's order).
+        let changed = match (&stories, first.repo == r.repo, r.change_id.is_some()) {
+            (Some(_), true, true) => self.source.paths(&r.repo, r.build()).await.ok().flatten().unwrap_or_default(),
+            _ => Vec::new(),
+        };
         let opts_crops = crops.clone();
         // The app's sign-in first, a trusted preview's only (`github.login`).
-        let login = match self.store.settings(&r.project_id).ok().and_then(|s| s.github.login) {
-            None => None,
-            Some(_) if !r.trusted => {
-                let _ = self.store.log(&r.id, "screenshots taken signed out: a fork's preview signs in with nothing (its code would get what's typed)");
-                None
-            }
-            Some(rule) => match self.login_for(r, &rule).await {
-                Ok(l) => Some(l),
-                Err(e) => {
-                    let _ = self.store.log(&r.id, &format!("screenshots taken signed out: {e:#}"));
-                    None
-                }
-            },
-        };
+        let (login, why_not) = self.run_login(r).await;
+        if let Some(why) = why_not {
+            let _ = self.store.log(&r.id, &format!("screenshots taken signed out: {why}"));
+        }
         let signs_in = login.is_some();
-        let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone(), openapi, endpoints, states, browsers, crops, stories, modes, login };
+        let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone(), openapi, endpoints, states, browsers, crops, stories, modes, login, changed };
         let started = std::time::Instant::now();
         // The page's words are its code's: what it was given is masked before they're kept (and
         // reach the pull request's comment); a run whose masks can't be read fails as a run.
@@ -1090,6 +1086,14 @@ impl Engine {
             Ok(Some(mut shot)) => self.mask_shot(&r.id, &mut shot).await.map(|()| Some(shot)).map_err(|e| anyhow::anyhow!("reading what its page mustn't show: {e}")),
             other => other,
         };
+        // What its browsers' containers ran for (the whole run's time where it didn't finish).
+        let ran_ms = match &taken {
+            Ok(Some(shot)) => shot.container_ms,
+            _ => started.elapsed().as_millis() as u64,
+        };
+        if let Err(e) = self.store.add_run_usage(&r.id, crate::runtime::BROWSER_GIB, ran_ms as i64) {
+            warn!(preview = %r.id, error = %e, "previews: a screenshot run's cost");
+        }
         if signs_in && let Ok(Some(shot)) = &taken {
             let said = shot.login.as_deref().unwrap_or("its sign-in said nothing");
             let _ = self.store.log(&r.id, &format!("screenshots: {said}"));
@@ -1097,6 +1101,8 @@ impl Engine {
         match taken {
             Ok(Some(mut shot)) => {
                 self.check_served(r, &mut shot).await;
+                // What it left out, for this head (none clears what an earlier one said).
+                let _ = self.store.set_runtime_fact(&r.id, "skipped", Some(&crate::SkippedAt { head: r.build().to_string(), skipped: shot.skipped.clone() }));
                 // Kept under the entry that asked for each (`/pricing`, or `web:/pricing`).
                 let mut pages: Vec<crate::ports::PageShot> = shot
                     .pages
@@ -1235,6 +1241,7 @@ impl Engine {
             let opts = crate::ports::ShotOptions { pages: paths.iter().filter(|p| **p != "/").map(|p| p.to_string()).collect(), hide: hide.to_vec(), stories, ..Default::default() };
             match self.apps.screenshot(&r.id, svc, &opts).await {
                 Ok(Some(mut shot)) => {
+                    let _ = self.store.add_run_usage(&r.id, crate::runtime::BROWSER_GIB, shot.container_ms as i64);
                     if let Err(e) = self.mask_shot(&r.id, &mut shot).await {
                         let _ = self.store.log(&r.id, &format!("{svc}'s pages weren't kept: {e}"));
                         continue;
@@ -1351,7 +1358,12 @@ impl Engine {
             egress_hosts: s.egress_hosts.clone(),
         };
         self.store.log(&r.id, &format!("{what}: {}", job.run.lines().next().unwrap_or("")))?;
+        let started = std::time::Instant::now();
         let ran = self.apps.seed(&run).await;
+        // Its container's time, at its memory: the preview's cost (`max_usd_month` caps it).
+        if let Err(e) = self.store.add_run_usage(&r.id, job.memory_mb as f64 / 1024.0, started.elapsed().as_millis() as i64) {
+            warn!(preview = %r.id, error = %e, "previews: a job's cost");
+        }
         for l in &leases {
             if let Err(e) = self.secrets.revoke(&r.project_id, l).await {
                 warn!(preview = %r.id, lease = %l, error = %e, "previews: revoking a job's dynamic credential (it expires by itself)");

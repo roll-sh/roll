@@ -150,6 +150,20 @@ impl EnvSource for Engine {
 }
 
 impl Engine {
+    /// The sign-in a browser run takes first (`github.login`: screenshots, `try`), and why there's
+    /// none when the project has one: a fork's preview signs in with nothing (its code would get
+    /// what's typed), and one whose variables can't be read is taken signed out.
+    pub(super) async fn run_login(&self, r: &Row) -> (Option<crate::ports::Login>, Option<String>) {
+        match self.store.settings(&r.project_id).ok().and_then(|s| s.github.login) {
+            None => (None, None),
+            Some(_) if !r.trusted => (None, Some("a fork's preview signs in with nothing (its code would get what's typed)".into())),
+            Some(rule) => match self.login_for(r, &rule).await {
+                Ok(l) => (Some(l), None),
+                Err(e) => (None, Some(format!("{e:#}"))),
+            },
+        }
+    }
+
     /// `github.login` with its `$NAME`s from the preview's own environment, as a start of its
     /// would get them (its secrets without dynamic credentials, then the project's and its own
     /// variables; a reference never as text), each masked wherever the preview's words are kept.

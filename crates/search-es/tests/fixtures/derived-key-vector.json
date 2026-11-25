@@ -1,0 +1,6 @@
+{
+  "about": "A derived browser key (docs/search/guides/site-search.md): HMAC-SHA256 over `rdk1.<payload>` keyed with the secret as written. Checked by search-es (xpack/security/derived.rs) and the dashboard's helper (src/lib/search-derive.test.ts).",
+  "secret": "rdks_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+  "payload": "{\"key\":\"Jx2kq3Z0RkKp1M7m0nQv\",\"cluster\":\"shop\",\"exp\":1767225600,\"indices\":[\"products\"],\"filter\":{\"term\":{\"tenant\":\"acme\"}},\"user\":\"acme\",\"origins\":[\"https://acme.example.com\"],\"rate_limit\":{\"per_minute\":60}}",
+  "key": "rdk1.eyJrZXkiOiJKeDJrcTNaMFJrS3AxTTdtMG5RdiIsImNsdXN0ZXIiOiJzaG9wIiwiZXhwIjoxNzY3MjI1NjAwLCJpbmRpY2VzIjpbInByb2R1Y3RzIl0sImZpbHRlciI6eyJ0ZXJtIjp7InRlbmFudCI6ImFjbWUifX0sInVzZXIiOiJhY21lIiwib3JpZ2lucyI6WyJodHRwczovL2FjbWUuZXhhbXBsZS5jb20iXSwicmF0ZV9saW1pdCI6eyJwZXJfbWludXRlIjo2MH19.N4ZsU4BgvwT9K97PfZt-mlWNbTDjkelryY4PvZnR4fE"
+}
