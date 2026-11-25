@@ -6117,6 +6117,8 @@ async fn read_pushed(news: &[String], mut each: impl FnMut(&str, usize, &str, &s
     let errs = tokio::spawn(async move {
         let mut b = vec![];
         let _ = (&mut err).take(64 << 10).read_to_end(&mut b).await;
+        // The rest is dropped, so git never waits on a full pipe.
+        let _ = tokio::io::copy(&mut err, &mut tokio::io::sink()).await;
         String::from_utf8_lossy(&b).trim().to_string()
     });
     let mut diff = PatchLines::default();

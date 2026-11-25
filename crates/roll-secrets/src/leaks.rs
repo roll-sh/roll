@@ -127,10 +127,13 @@ pub fn scannable(c: &str) -> bool {
     for x in c.chars() {
         *counts.entry(x).or_default() += 1;
     }
-    let bits: f64 = counts.values().map(|&k| {
-        let p = k as f64 / n as f64;
-        -p * p.log2()
-    }).sum();
+    let bits: f64 = counts
+        .values()
+        .map(|&k| {
+            let p = k as f64 / n as f64;
+            -p * p.log2()
+        })
+        .sum();
     bits >= 3.0
 }
 
@@ -221,7 +224,7 @@ impl Secrets {
         }
         self.project(project)?;
         let action = if breakglass { "secrets.scan.breakglass" } else { "secrets.scan" };
-        if !caller.principal.eq("operator") {
+        if caller.principal != "operator" {
             let minute = self.db.now_ms()? / 60_000;
             let n = candidates.len() as i64;
             let (calls, total): (i64, i64) = self.db.write(|c| {
