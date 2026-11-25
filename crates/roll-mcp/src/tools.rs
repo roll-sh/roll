@@ -2522,4 +2522,48 @@ mod tests {
         dangling.dedup();
         assert!(dangling.is_empty(), "these name tools roll doesn't have: {dangling:?}");
     }
+
+    /// Every previews tool says whether its answer holds what a fork's code wrote, which roll
+    /// previews marks outside for an untrusted preview (`mark_outside`, `outside_if_untrusted`)
+    /// so lockdown withholds it, or why it holds none. Pictures, caught mail, a data branch's
+    /// rows, request paths and activity had each reached a model in lockdown unmarked.
+    #[test]
+    fn every_previews_tool_says_whether_it_holds_a_forks_words() {
+        // Marked in roll previews' api.rs (`a_forks_preview_and_its_errors_are_marked_outside`).
+        const FORK_WORDS: &[&str] = &[
+            "previews_list", "previews_errors", "previews_traces", "previews_get_trace", "previews_routes", "previews_logs", "previews_requests", "previews_activity",
+            "previews_list_mail", "previews_read_mail", "previews_screenshot", "previews_fetch", "previews_try", "previews_try_screenshot", "previews_note_crop", "previews_tables",
+            // A share link's guests' notes (`by` `guest:…`).
+            "previews_list_notes",
+        ];
+        const NONE: &[(&str, &str)] = &[
+            ("previews_refresh", "roll's state of it"),
+            ("previews_keep", "roll's state of it"),
+            ("previews_sleep", "roll's state of it"),
+            ("previews_wake", "roll's state of it"),
+            ("previews_delete", "roll's state of it"),
+            ("previews_metrics", "numbers"),
+            ("previews_usage", "costs"),
+            ("previews_mask_suggestions", "the project's own databases, not a branch"),
+            ("previews_list_shares", "links people made"),
+            ("previews_revoke_share", "a link people made"),
+            ("previews_env", "variables people set"),
+            ("previews_connect", "roll's connections to its branches"),
+            ("previews_resolve_note", "the note's id"),
+            ("previews_list_saved_data", "restore points people named"),
+            ("previews_save_data", "a restore point"),
+            ("previews_restore", "a restore point"),
+            ("previews_delete_saved_data", "a restore point"),
+            ("previews_settings", "the project's, from its default branch"),
+            ("previews_visitors", "who opened it"),
+            ("previews_list_hooks", "the project's"),
+            ("previews_delete_hook", "the project's"),
+        ];
+        let previews: Vec<&str> = all().iter().filter(|t| t.product == "previews").map(|t| t.name).collect();
+        let undecided: Vec<&&str> = previews.iter().filter(|n| !FORK_WORDS.contains(n) && !NONE.iter().any(|(t, _)| t == *n)).collect();
+        assert!(undecided.is_empty(), "say whether these answer what a fork's code wrote (mark it outside in roll previews and list it in FORK_WORDS) or why not (NONE): {undecided:?}");
+        for n in FORK_WORDS.iter().chain(NONE.iter().map(|(n, _)| n)) {
+            assert!(previews.contains(n), "{n} isn't a previews tool any more");
+        }
+    }
 }
