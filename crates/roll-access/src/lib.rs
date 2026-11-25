@@ -11,6 +11,7 @@
 //! - [`oauth`]: the MCP authorization flow (discovery, registration, PKCE codes, tokens).
 
 pub mod api;
+mod bootstrap;
 pub mod catalog;
 pub mod checkup;
 pub mod evaluate;
@@ -1145,6 +1146,12 @@ impl Access {
     /// tokens' caps, and pruned a day after it ends; what it does is audited as any token's, and
     /// each mint is a row.
     pub async fn mint_workload(self: &Arc<Self>, new: store::NewGrant, within: &roll_auth::scope::Scope, minutes: u32, user: Option<&str>) -> Result<(store::Grant, String)> {
+        self.mint_workload_via(new, within, minutes, user, None).await
+    }
+
+    /// [`Access::mint_workload`] for a machine credential's login (`via`: its grant, which must be
+    /// live): the token joins the credential's chain, and goes with it (store/bootstrap.rs).
+    pub async fn mint_workload_via(self: &Arc<Self>, new: store::NewGrant, within: &roll_auth::scope::Scope, minutes: u32, user: Option<&str>, via: Option<&str>) -> Result<(store::Grant, String)> {
         if !within.covers(&new.rules) {
             return Err(Error::Forbidden("a workload's rules must be within its identity's".into()));
         }
@@ -1156,9 +1163,9 @@ impl Access {
         }
         let a = self.clone();
         let by = user.unwrap_or("operator").to_string();
-        let user = user.map(str::to_string);
+        let (user, via) = (user.map(str::to_string), via.map(str::to_string));
         let (g, secret) = tokio::task::spawn_blocking(move || {
-            let made = a.store.create_workload(&new, minutes, &by, user.as_deref())?;
+            let made = a.store.create_workload(&new, minutes, &by, user.as_deref(), via.as_deref())?;
             a.store.audit(&store::AuditEvent {
                 id: new_id("aud"),
                 at: code_sql::now_ms(),
