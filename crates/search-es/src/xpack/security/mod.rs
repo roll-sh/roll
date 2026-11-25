@@ -5,9 +5,10 @@
 //! **Authentication** ([`authenticate`]) runs before a request is parsed, like Elasticsearch's
 //! security REST filter. A request is authenticated by, in order:
 //!
-//! - the node: when `search-server` already verified the cluster's own credentials it says so
-//!   in [`AUTHENTICATED_HEADER`] (it strips any client-sent copy), and the request runs as the
-//!   cluster's owner (`elastic`, a superuser); a request without an `Authorization` header in
+//! - the node: what `search-server` already verified is on the request in process
+//!   ([`crate::rest::Verified`], never a header a client could send): the cluster's own
+//!   credentials run as the cluster's owner (`elastic`, a superuser), a derived browser key as its
+//!   parent's API key, narrowed ([`derived`]); a request without an `Authorization` header in
 //!   dev mode (no node authentication) is the owner too;
 //! - `Basic` credentials of a native user ([`users`]), a file-realm user (node setting
 //!   `roll.security.file_users`, `name:password:role|role,...`: the test clusters' superuser),
@@ -45,10 +46,6 @@ use crate::rest::Ctx;
 use privileges::{Permission, Scope};
 use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
-
-/// The header `search-server` sets on requests it authenticated with the cluster's own
-/// credentials (value: the user name, `elastic` for the owner).
-pub const AUTHENTICATED_HEADER: &str = "x-roll-authenticated-user";
 
 /// Narrows a request the node authenticated as the owner to these index names and patterns
 /// (comma-separated; `-` exclusions are ignored): roll search's per-index control-plane routes
@@ -269,11 +266,15 @@ pub fn stored_browser_key_cluster(state: &[u8], dialect: crate::cluster::Dialect
 
 /// Who owns what a request stores for later (async search results): the API key it
 /// authenticated with, else its user and realm (the run-as user when there is one), as
-/// Elasticsearch's `Authentication.canAccessResourcesOf` tells owners apart.
+/// Elasticsearch's `Authentication.canAccessResourcesOf` tells owners apart; a derived key is
+/// its own owner, never its parent or another key derived from it.
 pub fn resource_owner(ctx: &Ctx) -> String {
     let p = principal(ctx);
     match &p.kind {
-        AuthKind::ApiKey(a) => format!("api_key:{}", a.id),
+        AuthKind::ApiKey(a) => match &a.derived {
+            Some(d) => format!("api_key:{}:derived:{}", a.id, d.id),
+            None => format!("api_key:{}", a.id),
+        },
         _ => format!("user:{}:{}:{}", p.realm_type, p.realm_name, p.username),
     }
 }
@@ -318,13 +319,13 @@ pub fn authenticate(ctx: &Ctx) -> EsResult<()> {
         let _ = ctx.principal.set(api_keys::authenticate_link(ctx.cluster, key, access)?);
         return Ok(());
     }
-    let p = if req.header(AUTHENTICATED_HEADER).is_some() {
-        req.header(INDEX_SCOPE_HEADER).map(Principal::owner_scoped)
-    } else {
-        match req.header("authorization") {
+    let p = match &req.verified {
+        Some(crate::rest::Verified::Derived(k)) => Some(derived::verified(ctx.cluster, k)?),
+        Some(crate::rest::Verified::ClusterUser(_)) => req.header(INDEX_SCOPE_HEADER).map(Principal::owner_scoped),
+        None => match req.header("authorization") {
             Some(h) => Some(authenticate_header(ctx.cluster, h, &req.uri)?),
             None => None,
-        }
+        },
     };
     let p = match req.header(RUN_AS_HEADER) {
         Some(target) if ctx.cluster.dialect == crate::cluster::Dialect::Elasticsearch && run_as_enabled(ctx.cluster) => {
@@ -869,17 +870,24 @@ fn authorize_action(ctx: &Ctx) -> EsResult<Option<String>> {
 }
 
 /// The `indices:admin/refresh` an OpenSearch user's `refresh=true` by-query request runs as the
-/// user once its documents are written (the plugin denies it then, after the writes).
-pub fn check_refresh(ctx: &Ctx) -> EsResult<()> {
+/// user once its documents are written (the plugin denies it then, after the writes): on the
+/// request's indices, or on `written` (a reindex: the indices it wrote to).
+pub fn check_refresh(ctx: &Ctx, written: Option<&[String]>) -> EsResult<()> {
     const REFRESH: &str = "indices:admin/refresh";
     let Some(p) = ctx.principal.get().filter(|p| !p.is_superuser() && p.os().is_some()) else { return Ok(()) };
     let eff = effective(&file_roles(ctx.cluster), &ctx.state(), p);
-    if request_indices(ctx).iter().all(|i| eff.allows_index(REFRESH, i)) { Ok(()) } else { Err(denied(p, REFRESH, None)) }
+    let indices = match written {
+        Some(w) => w.to_vec(),
+        None => request_indices(ctx),
+    };
+    if indices.iter().all(|i| eff.allows_index(REFRESH, i)) { Ok(()) } else { Err(denied(p, REFRESH, None)) }
 }
 
 /// APIs Elasticsearch authorizes by action name only (`RBACEngine.shouldAuthorizeIndexActionNameOnly`):
-/// the request when any role grants its action on some index, its items one by one.
-const COMPOSITE: &[&str] = &["bulk", "mget", "msearch", "msearch_template"];
+/// the request when any role grants its action on some index, its items one by one. A
+/// reindex's items are its source's search and each write to its destination
+/// (`by_query::reindex`), both as the caller.
+const COMPOSITE: &[&str] = &["bulk", "mget", "msearch", "msearch_template", "reindex"];
 
 /// What a bulk item (or a single document request) writes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
