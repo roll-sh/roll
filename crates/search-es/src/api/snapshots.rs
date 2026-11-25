@@ -52,11 +52,14 @@ mod cloud;
 mod elastic;
 mod elastic_restore;
 mod refs;
+mod rename;
 mod s3;
 mod transfer;
 pub use analyze::analyze_repository;
 pub use elastic::decode_id as decode_elasticsearch_id;
-pub use elastic_restore::{ShardView as RestoringShard, TEST_HOOK as ELASTIC_RESTORE_HOOK, TestHook as ElasticRestoreHook, resume as resume_elasticsearch_restores};
+pub use elastic_restore::{ShardView as RestoringShard, resume as resume_elasticsearch_restores};
+#[cfg(feature = "test-hooks")]
+pub use elastic_restore::{TEST_HOOK as ELASTIC_RESTORE_HOOK, TestHook as ElasticRestoreHook};
 pub use s3::ALLOW_PRIVATE as S3_ALLOW_PRIVATE;
 pub(crate) use cloud::{AZURE_CONTAINER, seal_stored_secrets};
 
@@ -1882,10 +1885,7 @@ pub async fn restore(ctx: &Ctx<'_>) -> EsResult<Reply> {
             return Err(EsError::new(500, "snapshot_restore_exception", format!("[{repo}:{snap}] cannot modify setting [{k}] on restore")));
         }
     }
-    let rename = match (&rename_pattern, &rename_replacement) {
-        (Some(p), r) => Some((regex::Regex::new(p).map_err(|e| EsError::illegal_argument(e.to_string()))?, r.clone().unwrap_or_default())),
-        _ => None,
-    };
+    let rename = rename::Rename::of(rename_pattern.as_deref(), rename_replacement.as_deref())?;
     let partial = body.get("partial").map(|v| crate::units::parse_bool(&v.to_es_string())).transpose()?.unwrap_or(false);
     // A snapshot Elasticsearch wrote restores from its own files.
     if let Some(r) = ctx.state().metadata.repositories.get(&repo).cloned()
@@ -1965,7 +1965,7 @@ pub async fn restore(ctx: &Ctx<'_>) -> EsResult<Reply> {
         for name in &selected {
             let Some(stored) = s.index_meta.get(name) else { continue };
             let target = match &rename {
-                Some((re, rep)) => re.replace_all(name, rep.as_str()).into_owned(),
+                Some(r) => r.apply(name)?,
                 None => name.clone(),
             };
             crate::meta::names::validate_index_name(&target)?;

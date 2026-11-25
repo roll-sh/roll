@@ -11,7 +11,7 @@
 //!   data streams claim; a pattern matching only backing indices restores them as indices. Its
 //!   template comes back with the global state. System data streams and indices, failure store
 //!   indices and data stream aliases aren't restored. Writes to an index wait for its restore
-//!   (503 while it runs).
+//!   (503 while it runs, by-query runs' too: `write::check_writable`).
 //! - **Plan.** Each index's metadata (settings, mappings, aliases) becomes a create-index
 //!   request, checked as `PUT <index>` checks one (no templates apply, as on Elasticsearch).
 //!   Settings the cluster that made the index set, shard allocation, blocks, lifecycle and
@@ -28,7 +28,8 @@
 //! - **Takeover.** The restore's state is kept in each index's recovery source, with the shards
 //!   it finished, each recorded only once its documents are durable (`ShardLog::durable`): an
 //!   owner that opens a cluster with a restore still running resumes each index from the first
-//!   shard not recorded (that shard's documents already indexed are indexed again under the
+//!   shard not recorded (a task cancelled because the cluster leaves the node, handed over or
+//!   the node stopping, leaves it running: `TaskInfo::leaving`; that shard's documents already indexed are indexed again under the
 //!   same ids; none is skipped), and one whose repository is gone records the failure. A document deleted on roll while its index was being restored comes
 //!   back on such a restart once its tombstone is gone (deletions aren't recorded apart: an index
 //!   is meant to be used once its restore is done). The previous owner's task isn't stopped from
@@ -80,7 +81,7 @@ pub(super) struct Request {
     pub(super) include_global_state: bool,
     pub(super) include_aliases: bool,
     pub(super) partial: bool,
-    pub(super) rename: Option<(regex::Regex, String)>,
+    pub(super) rename: Option<super::rename::Rename>,
     pub(super) index_settings: Settings,
     pub(super) ignore_settings: Vec<String>,
 }
@@ -290,7 +291,7 @@ fn plan_index(req: &Request, name: &str, meta: &Value, index_id: &str, target: O
     }
     let target = match (target, &req.rename) {
         (Some(t), _) => t.to_string(),
-        (None, Some((re, rep))) => re.replace_all(name, rep.as_str()).into_owned(),
+        (None, Some(r)) => r.apply(name)?,
         (None, None) => name.to_string(),
     };
     let mut settings = Settings::new();
@@ -384,12 +385,12 @@ struct Stream {
 /// What backing index `index` (in the snapshot) is restored as: Elasticsearch's
 /// `RestoreService.renameIndex`, the rename applied to what follows `.ds-` in a `.ds-` name and
 /// to the whole name otherwise (a shrunk, downsampled or added backing index).
-fn backing_target(rename: &Option<(regex::Regex, String)>, index: &str) -> String {
-    let Some((re, rep)) = rename else { return index.to_string() };
-    match index.strip_prefix(".ds-") {
-        Some(rest) => format!(".ds-{}", re.replace_all(rest, rep.as_str())),
-        None => re.replace_all(index, rep.as_str()).into_owned(),
-    }
+fn backing_target(rename: &Option<super::rename::Rename>, index: &str) -> EsResult<String> {
+    let Some(r) = rename else { return Ok(index.to_string()) };
+    Ok(match index.strip_prefix(".ds-") {
+        Some(rest) => format!(".ds-{}", r.apply(rest)?),
+        None => r.apply(index)?,
+    })
 }
 
 impl Stream {
@@ -594,7 +595,7 @@ pub(super) async fn restore(ctx: &Ctx<'_>, req: Request, r: Arc<Repository>) -> 
             notes.push(format!("data stream [{name}]: its failure store isn't restored"));
         }
         let target = match &req.rename {
-            Some((re, rep)) => re.replace_all(name, rep.as_str()).into_owned(),
+            Some(r) => r.apply(name)?,
             None => name.clone(),
         };
         crate::meta::data_streams::validate_name(&target)?;
@@ -613,7 +614,7 @@ pub(super) async fn restore(ctx: &Ctx<'_>, req: Request, r: Arc<Repository>) -> 
     let mut refused: Vec<(String, String)> = Vec::new();
     for name in &selected {
         let (meta, id) = index_metadata(ctx, &src, &data, &s, name).await?;
-        let target = owner_of.contains_key(name.as_str()).then(|| backing_target(&req.rename, name));
+        let target = owner_of.contains_key(name.as_str()).then(|| backing_target(&req.rename, name)).transpose()?;
         match plan_index(&req, name, &meta, &id, target.as_deref())? {
             Ok(p) => {
                 crate::meta::names::validate_index_name(&p.target)?;
@@ -694,10 +695,11 @@ pub(super) async fn restore(ctx: &Ctx<'_>, req: Request, r: Arc<Repository>) -> 
         ignore_settings: Vec::new(),
     };
     // Each data stream with its backing indices, as restored.
-    let stream_copy: Vec<(Stream, Vec<String>)> = streams
-        .iter()
-        .map(|st| (Stream { source: st.source.clone(), target: st.target.clone(), def: st.def.clone(), backing: st.backing.clone() }, st.backing.iter().map(|b| backing_target(&req.rename, b)).collect()))
-        .collect();
+    let mut stream_copy: Vec<(Stream, Vec<String>)> = Vec::new();
+    for st in &streams {
+        let targets = st.backing.iter().map(|b| backing_target(&req.rename, b)).collect::<EsResult<_>>()?;
+        stream_copy.push((Stream { source: st.source.clone(), target: st.target.clone(), def: st.def.clone(), backing: st.backing.clone() }, targets));
+    }
     ctx.cluster
         .update(move |st| {
             for p in &plan_copy {
@@ -740,7 +742,7 @@ pub(super) async fn restore(ctx: &Ctx<'_>, req: Request, r: Arc<Repository>) -> 
         cancellable: true,
         cancelled: None,
     });
-    let cancelled = ctx.cluster.tasks.get(guard.id).map(|t| t.cancelled).unwrap_or_default();
+    let stop = Stop::of(ctx.cluster, guard.id);
     // The restore runs in a task of its own, the request only waiting for it (if asked to): a
     // client that goes away drops the wait, never the restore half way.
     let outcome = match ctx.cluster.handle() {
@@ -751,7 +753,7 @@ pub(super) async fn restore(ctx: &Ctx<'_>, req: Request, r: Arc<Repository>) -> 
                 let guard = cluster.tasks.adopt(id);
                 let busy = Busy(&cluster.snapshot_data.elastic);
                 // A failure is recorded in each index's recovery source (`set_state`).
-                let out = supervise(cluster.clone(), job, cancelled).await;
+                let out = supervise(cluster.clone(), job, stop).await;
                 drop(busy);
                 drop(guard);
                 out
@@ -763,7 +765,7 @@ pub(super) async fn restore(ctx: &Ctx<'_>, req: Request, r: Arc<Repository>) -> 
         }
         // Without background work (an embedded cluster): in the request.
         None => {
-            let out = run(ctx.cluster, &job, &cancelled).await;
+            let out = run(ctx.cluster, &job, &stop).await;
             drop(guard);
             drop(busy);
             out
@@ -844,8 +846,10 @@ async fn record_shard_done(cluster: &crate::Cluster, index: &IndexMeta, shard: u
         .await
 }
 
-/// Test hook (search-control's takeover test): the shards restores start, in order, and a
-/// shard after whose record a restore stops for good, as on a node killed there.
+/// Test hook (search-control's takeover test, through the `test-hooks` feature only its
+/// dev-dependency turns on): the shards restores start, in order, and a shard after whose
+/// record a restore stops for good, as on a node killed there.
+#[cfg(feature = "test-hooks")]
 #[doc(hidden)]
 #[derive(Default)]
 pub struct TestHook {
@@ -854,6 +858,7 @@ pub struct TestHook {
     pub stopped: tokio::sync::Notify,
 }
 
+#[cfg(feature = "test-hooks")]
 impl TestHook {
     fn stops_after(&self, index: &str, shard: u32) -> bool {
         let mut stop = self.stop_after.lock().unwrap();
@@ -865,8 +870,29 @@ impl TestHook {
     }
 }
 
+#[cfg(feature = "test-hooks")]
 #[doc(hidden)]
 pub static TEST_HOOK: std::sync::OnceLock<TestHook> = std::sync::OnceLock::new();
+
+/// [`TestHook`]: shard `shard` of `index` starts.
+fn hook_started(_index: &str, _shard: u32) {
+    #[cfg(feature = "test-hooks")]
+    if let Some(h) = TEST_HOOK.get() {
+        h.started.lock().unwrap().push((_index.to_string(), _shard));
+    }
+}
+
+/// [`TestHook`]: shard `shard` of `index` is recorded finished; the restore never goes on when
+/// the hook stops it here.
+async fn hook_finished(_index: &str, _shard: u32) {
+    #[cfg(feature = "test-hooks")]
+    if let Some(h) = TEST_HOOK.get()
+        && h.stops_after(_index, _shard)
+    {
+        h.stopped.notify_one();
+        std::future::pending::<()>().await;
+    }
+}
 
 /// Records shard `shard` of `index` finished once every document it indexed is durable (its
 /// shards' logs acknowledged them): a takeover resumes after it.
@@ -877,6 +903,24 @@ async fn shard_finished(cluster: &crate::Cluster, index: &Arc<IndexMeta>, shard:
         log.durable().await?;
     }
     record_shard_done(cluster, index, shard).await
+}
+
+/// What stops a restore's task: its cancellation, and why ([`crate::cluster::TaskInfo::leaving`]).
+#[derive(Clone, Default)]
+struct Stop {
+    cancelled: Arc<AtomicBool>,
+    leaving: Arc<AtomicBool>,
+}
+
+impl Stop {
+    fn of(cluster: &crate::Cluster, task: u64) -> Stop {
+        cluster.tasks.get(task).map(|t| Stop { cancelled: t.cancelled, leaving: t.leaving }).unwrap_or_default()
+    }
+
+    /// Whether `e` is the restore stopping because the cluster leaves this node, not a failure.
+    fn left(&self, e: &EsError) -> bool {
+        e.kind == "task_cancelled_exception" && self.cancelled.load(Ordering::SeqCst) && self.leaving.load(Ordering::SeqCst)
+    }
 }
 
 struct Job {
@@ -914,9 +958,9 @@ async fn set_state(cluster: &crate::Cluster, index: &IndexMeta, state: &str, fai
 /// Runs [`run`] in a task of its own: when that task panics, the indices it hadn't finished are
 /// marked failed before this returns (and so before the caller lets another restore start), or
 /// every later owner would start them again.
-async fn supervise(cluster: Arc<crate::Cluster>, job: Arc<Job>, cancelled: Arc<AtomicBool>) -> EsResult<i64> {
+async fn supervise(cluster: Arc<crate::Cluster>, job: Arc<Job>, stop: Stop) -> EsResult<i64> {
     let (c, j) = (cluster.clone(), job.clone());
-    match tokio::spawn(async move { run(&c, &j, &cancelled).await }).await {
+    match tokio::spawn(async move { run(&c, &j, &stop).await }).await {
         Ok(out) => out,
         // Cancelled with the runtime (the node stopping): the indices stay restoring, for the
         // next owner to resume.
@@ -933,7 +977,7 @@ async fn supervise(cluster: Arc<crate::Cluster>, job: Arc<Job>, cancelled: Arc<A
 }
 
 /// Fills every index of `job`: the shards that failed (the first failure ends the restore).
-async fn run(cluster: &crate::Cluster, job: &Job, cancelled: &Arc<AtomicBool>) -> EsResult<i64> {
+async fn run(cluster: &crate::Cluster, job: &Job, stop: &Stop) -> EsResult<i64> {
     let _permit = POOL.acquire().await.map_err(|e| EsError::internal(e.to_string()))?;
     for ix in &job.indices {
         let result = async {
@@ -947,17 +991,10 @@ async fn run(cluster: &crate::Cluster, job: &Job, cancelled: &Arc<AtomicBool>) -
                     p.stage.store(2, Ordering::Relaxed);
                     continue;
                 }
-                if let Some(h) = TEST_HOOK.get() {
-                    h.started.lock().unwrap().push((ix.target.name.clone(), shard));
-                }
-                restore_shard(cluster, job, ix, shard, cancelled).await?;
+                hook_started(&ix.target.name, shard);
+                restore_shard(cluster, job, ix, shard, &stop.cancelled).await?;
                 shard_finished(cluster, &ix.target, shard).await?;
-                if let Some(h) = TEST_HOOK.get()
-                    && h.stops_after(&ix.target.name, shard)
-                {
-                    h.stopped.notify_one();
-                    std::future::pending::<()>().await;
-                }
+                hook_finished(&ix.target.name, shard).await;
             }
             CopyTarget::new(cluster, &ix.target)?.finish()
         }
@@ -968,9 +1005,10 @@ async fn run(cluster: &crate::Cluster, job: &Job, cancelled: &Arc<AtomicBool>) -
                 set_state(cluster, &ix.target, "done", None).await;
                 ix.finished.store(true, Ordering::SeqCst);
             }
-            // Stopped because the cluster leaves this node (a drain, a rebalance): the indices
-            // stay restoring, and the next owner resumes them after their finished shards.
-            Err(e) if cluster.tasks.unloading() => {
+            // Stopped because the cluster leaves this node (a drain, a rebalance, the node
+            // stopping): the indices stay restoring, and the next owner resumes them after their
+            // finished shards. Any other failure, during an unload too, is recorded.
+            Err(e) if stop.left(&e) => {
                 for later in &job.indices {
                     cluster.snapshot_data.elastic.progress.lock().remove(&later.target.uuid);
                 }
@@ -1469,8 +1507,8 @@ pub fn resume(cluster: &Arc<crate::Cluster>) {
                 cancellable: true,
                 cancelled: None,
             });
-            let cancelled = cluster.tasks.get(guard.id).map(|t| t.cancelled).unwrap_or_default();
-            let _ = supervise(cluster.clone(), job, cancelled).await;
+            let stop = Stop::of(&cluster, guard.id);
+            let _ = supervise(cluster.clone(), job, stop).await;
             drop(guard);
         });
     }
@@ -1489,10 +1527,11 @@ mod tests {
         assert!(finished_shards(&obj! { "state" => "running" }, 4).is_empty());
     }
 
-    /// A log whose `durable` waits until the test releases it.
+    /// A log whose `durable` waits until the test releases it (a permit per call).
+    #[derive(Default)]
     struct HeldLog {
         waiting: tokio::sync::Notify,
-        release: tokio::sync::Notify,
+        release: tokio::sync::Semaphore,
     }
 
     impl crate::engine::ShardLog for HeldLog {
@@ -1503,7 +1542,7 @@ mod tests {
         fn durable(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = EsResult<()>> + Send + '_>> {
             Box::pin(async move {
                 self.waiting.notify_one();
-                self.release.notified().await;
+                self.release.acquire().await.unwrap().forget();
                 Ok(())
             })
         }
@@ -1521,46 +1560,101 @@ mod tests {
         }
     }
 
-    /// A shard is recorded finished only once its log says what it indexed is durable: a new
-    /// owner never skips a shard whose documents it doesn't have.
-    #[tokio::test]
-    async fn a_shard_is_recorded_finished_only_once_its_documents_are_durable() {
-        use crate::cluster::{ClusterConfig, MemoryStore};
-        let held = Arc::new(HeldLog { waiting: tokio::sync::Notify::new(), release: tokio::sync::Notify::new() });
-        let mut c = crate::Cluster::open(ClusterConfig::new("c"), Arc::new(MemoryStore::new())).await.unwrap();
+    async fn call(c: &crate::Cluster, method: &str, uri: &str, body: &str) -> (u16, Value) {
+        let req = if body.is_empty() { crate::rest::EsRequest::new(method, uri) } else { crate::rest::EsRequest::json(method, uri, body.to_string()) };
+        let r = crate::rest::handle(c, req).await;
+        (r.status, crate::json::parse(&r.body).ok().flatten().unwrap_or_default())
+    }
+
+    /// A cluster whose shards' logs are `held`'s, with `settings` (node settings).
+    async fn held_cluster(held: &Arc<HeldLog>, settings: &[(&str, String)]) -> Arc<crate::Cluster> {
+        let mut cfg = crate::cluster::ClusterConfig::new("c");
+        cfg.node_settings.extend(settings.iter().map(|(k, v)| (k.to_string(), v.clone())));
+        let mut c = crate::Cluster::open(cfg, Arc::new(crate::cluster::MemoryStore::new())).await.unwrap();
         c.engine = crate::engine::Engine::with_storage(Arc::new(HeldStorage(held.clone())));
-        let c = Arc::new(c);
-        let r = crate::rest::handle(&c, crate::rest::EsRequest::json("PUT", "/i", r#"{"settings":{"number_of_shards":2}}"#.to_string())).await;
-        assert_eq!(r.status, 200);
-        c.update(|st| {
-            let mut idx = (**st.metadata.indices.get("i").unwrap()).clone();
+        Arc::new(c)
+    }
+
+    /// Records index `name` as being restored (no shard finished).
+    async fn mark_restoring(c: &crate::Cluster, name: &str) {
+        let name = name.to_string();
+        c.update(move |st| {
+            let mut idx = (**st.metadata.indices.get(&name).unwrap()).clone();
             let mut rs = Map::new();
-            rs.insert("roll_elastic".into(), obj! { "state" => "running", "shards" => 2i64, "done" => Value::Arr(Vec::new()) });
+            rs.insert("roll_elastic".into(), obj! { "state" => "running", "shards" => idx.number_of_shards() as i64, "done" => Value::Arr(Vec::new()) });
             idx.recovery_source = Some(Arc::new(rs));
-            st.metadata.indices.insert("i".into(), Arc::new(idx));
+            st.metadata.indices.insert(name, Arc::new(idx));
             Ok(())
         })
         .await
         .unwrap();
-        let done = || {
-            let st = c.state();
-            let e = st.metadata.indices.get("i").and_then(|i| i.recovery_source.clone()).and_then(|rs| rs.get("roll_elastic").cloned()).unwrap();
-            finished_shards(&e, 2)
-        };
+    }
+
+    /// Index `name`'s restore record: its state and the shards it finished.
+    fn restore_record(c: &crate::Cluster, name: &str) -> (Option<String>, Vec<u32>) {
+        let st = c.state();
+        let e = st.metadata.indices.get(name).and_then(|i| i.recovery_source.clone()).and_then(|rs| rs.get("roll_elastic").cloned()).unwrap();
+        (e.get("state").and_then(Value::as_str).map(str::to_string), finished_shards(&e, 64))
+    }
+
+    /// A shard is recorded finished only once its log says what it indexed is durable: a new
+    /// owner never skips a shard whose documents it doesn't have.
+    #[tokio::test]
+    async fn a_shard_is_recorded_finished_only_once_its_documents_are_durable() {
+        let held = Arc::new(HeldLog::default());
+        let c = held_cluster(&held, &[]).await;
+        assert_eq!(call(&c, "PUT", "/i", r#"{"settings":{"number_of_shards":2}}"#).await.0, 200);
+        mark_restoring(&c, "i").await;
         let target = c.state().metadata.indices.get("i").cloned().unwrap();
         let task = tokio::spawn({
             let c = c.clone();
             async move { shard_finished(&c, &target, 1).await }
         });
         held.waiting.notified().await;
-        assert!(done().is_empty(), "recorded before its documents were durable");
+        assert!(restore_record(&c, "i").1.is_empty(), "recorded before its documents were durable");
         // Each shard's log is waited on in turn.
-        held.release.notify_one();
+        held.release.add_permits(1);
         held.waiting.notified().await;
-        assert!(done().is_empty(), "recorded before every shard's log was durable");
-        held.release.notify_one();
+        assert!(restore_record(&c, "i").1.is_empty(), "recorded before every shard's log was durable");
+        held.release.add_permits(1);
         task.await.unwrap().unwrap();
-        assert_eq!(done(), vec![1]);
+        assert_eq!(restore_record(&c, "i").1, vec![1]);
+    }
+
+    /// A node stopping cancels its tasks as leaving (`TaskRegistry::cancel_all`, SIGTERM): a
+    /// restore it stops stays running, with the shards it finished, for the next owner.
+    #[tokio::test]
+    async fn a_node_stopping_leaves_its_restore_running() {
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/es-snapshots");
+        let held = Arc::new(HeldLog::default());
+        let c = held_cluster(&held, &[("path.repo", fixtures.display().to_string())]).await;
+        assert_eq!(call(&c, "PUT", "/_snapshot/es", r#"{"type":"fs","settings":{"location":"es-9.5.5"}}"#).await.0, 200);
+        let restore = tokio::spawn({
+            let c = c.clone();
+            async move { call(&c, "POST", "/_snapshot/es/snap-1/_restore?wait_for_completion=true", r#"{"indices":"mixed"}"#).await }
+        });
+        // Shard 0 is indexed; the node stops while it's made durable.
+        held.waiting.notified().await;
+        assert!(c.tasks.cancel_all() >= 1);
+        held.release.add_permits(64);
+        let (s, v) = restore.await.unwrap();
+        assert!(s >= 400, "{v:?}");
+        assert_eq!(restore_record(&c, "mixed"), (Some("running".into()), vec![0]));
+    }
+
+    /// Nothing deletes documents of an index a restore is still filling: a delete-by-query
+    /// reaches each document past the write checks of a request, and fails on every one.
+    #[tokio::test]
+    async fn a_delete_by_query_waits_for_the_restore() {
+        let c = held_cluster(&Arc::new(HeldLog::default()), &[]).await;
+        for i in 0..3 {
+            assert_eq!(call(&c, "PUT", &format!("/i/_doc/{i}?refresh=true"), r#"{"n":1}"#).await.0, 201);
+        }
+        mark_restoring(&c, "i").await;
+        let (_, v) = call(&c, "POST", "/i/_delete_by_query?refresh=true", r#"{"query":{"match_all":{}}}"#).await;
+        let failures = v.get("failures").and_then(Value::as_array).map_or(0, Vec::len);
+        assert!(v.get("deleted").and_then(Value::as_i64) == Some(0) && failures > 0, "{v:?}");
+        assert_eq!(call(&c, "GET", "/i/_count", "").await.1.get("count").and_then(Value::as_i64), Some(3));
     }
 
     #[test]

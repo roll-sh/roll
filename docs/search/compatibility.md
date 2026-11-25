@@ -2322,8 +2322,12 @@ the rest are skipped by the tests' own prerequisites.
     `partial`, a data stream dropped (its global metadata missing, a backing index not in the
     snapshot) takes its backing indices with it unless the request names them; a request for
     data streams only whose global metadata is missing is an error. System data streams and
-    system indices aren't restored (a note says so). An index stays closed to writes (503
-    `unavailable_shards_exception`) while its restore runs. Failure
+    system indices aren't restored (a note says so). An index takes no document writes (503
+    `unavailable_shards_exception`; by-query runs fail on each document) while its restore
+    runs. Renames, on either kind of repository, need both `rename_pattern` and
+    `rename_replacement` and use Java's replacement syntax, as `RestoreService` does (`$12`
+    with two groups is group 1 then `2`, `${name}`, `\x` for `x`; a group the pattern lacks
+    fails the restore). Failure
     store indices and data stream aliases aren't restored, nor are feature states. A restore
     interrupted by a takeover resumes on the next owner from the first shard it hadn't finished
     (each shard recorded finished only once its documents are durable). At most one such restore
@@ -2347,7 +2351,8 @@ the rest are skipped by the tests' own prerequisites.
     and an owner that opens a cluster with one still running restores those indices again from
     the first shard not finished (that shard's documents already there are written again under
     the same ids; one deleted on roll meanwhile comes back once its tombstone is gone), or
-    records why it can't; a drain or rebalance leaves the restore running for the next owner; a task that stops on a panic marks its
+    records why it can't; a drain, a rebalance or the node stopping (SIGTERM) leaves the restore
+    running for the next owner, and any other failure is recorded; a task that stops on a panic marks its
     indices failed. The old owner's task isn't stopped; its writes fail the write-ahead log's
     ownership check like every write of a node that lost the cluster.
 - Searchable snapshots mount through the snapshot restore API, so a mounted index holds its own

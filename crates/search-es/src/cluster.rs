@@ -338,6 +338,10 @@ pub struct TaskInfo {
     /// Request headers tasks carry (`X-Opaque-Id`, `traceparent`).
     pub headers: Vec<(String, String)>,
     pub cancelled: Arc<std::sync::atomic::AtomicBool>,
+    /// Set (before `cancelled`) when the task is cancelled because the cluster leaves this node
+    /// (handed over, unloaded, the node stopping) rather than by a caller: work the next owner
+    /// resumes (a restore from an Elasticsearch snapshot) isn't recorded failed for it.
+    pub leaving: Arc<std::sync::atomic::AtomicBool>,
     /// A running by-query task's rate and progress (`BulkByScrollTask`).
     pub live: Option<Arc<crate::api::by_query::Live>>,
     /// Builds the description when a listing asks for it (Elasticsearch's description
@@ -393,9 +397,6 @@ pub struct TaskRegistry {
     /// Callers in [`TaskRegistry::wait_until`]: ending a task wakes `ended` only when there
     /// are any (a search ends several tasks).
     waiters: std::sync::atomic::AtomicUsize,
-    /// The cluster is leaving this node ([`crate::api::tasks::cancel_all`]): what its tasks stop
-    /// for isn't theirs to record as a failure (a restore resumes on the next owner).
-    unloading: std::sync::atomic::AtomicBool,
 }
 
 /// A finished task's record: the task as it ran and its response or failure.
@@ -432,16 +433,6 @@ impl TaskGuard<'_> {
 }
 
 impl TaskRegistry {
-    /// Marks the cluster as leaving this node: its tasks are being stopped for that.
-    pub fn mark_unloading(&self) {
-        self.unloading.store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// Whether the cluster is leaving this node ([`TaskRegistry::mark_unloading`]).
-    pub fn unloading(&self) -> bool {
-        self.unloading.load(std::sync::atomic::Ordering::SeqCst)
-    }
-
     pub fn register(&self, action: &str, description: &str, parent: Option<u64>, headers: Vec<(String, String)>) -> TaskGuard<'_> {
         self.start(NewTask { action: action.to_string().into(), description: description.to_string(), describe: None, parent, headers, cancellable: true, cancelled: None })
     }
@@ -466,6 +457,7 @@ impl TaskRegistry {
             parent: t.parent,
             headers: t.headers,
             cancelled: t.cancelled.unwrap_or_default(),
+            leaving: Default::default(),
             live: None,
             describe: t.describe,
         };
@@ -505,12 +497,14 @@ impl TaskRegistry {
         self.running.lock().is_empty()
     }
 
-    /// Cancels every cancellable task (a node shutting down); returns how many it cancelled.
+    /// Cancels every cancellable task as leaving this node ([`TaskInfo::leaving`]: the node
+    /// stopping); returns how many it cancelled.
     pub fn cancel_all(&self) -> usize {
         let g = self.running.lock();
         let mut n = 0;
         for t in g.values().filter(|t| t.cancellable) {
-            if !t.cancelled.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            t.leaving.store(true, std::sync::atomic::Ordering::SeqCst);
+            if !t.cancelled.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 n += 1;
             }
         }
