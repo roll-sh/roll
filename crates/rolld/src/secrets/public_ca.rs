@@ -9,10 +9,10 @@
 use axum::http::{Request, Response};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
-use instant_acme::{Account, AccountCredentials, BodyWrapper, BytesResponse, ExternalAccountKey, HttpClient, NewAccount};
+use instant_acme::{Account, AccountCredentials, BodyWrapper, BytesResponse, ExternalAccountKey, HttpClient, NewAccount, RevocationReason};
 use roll_edge::acme::{Cloudflare, Solver, Timing};
 use roll_secrets::Value;
-use roll_secrets::public_certs::{DnsProvider, Order, Ordered, PUBLIC_CAS, PublicCa};
+use roll_secrets::public_certs::{DnsProvider, Order, Ordered, PUBLIC_CAS, PublicCa, Revoke, RevokeReason};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -98,6 +98,32 @@ impl RollPublicCa {
         let cert = roll_edge::acme::order(&account, &solver, o.names, self.timing).await.map_err(|e| format!("{e:#}"))?;
         Ok(Ordered { chain: Value::new(cert.chain), private_key: Value::new(cert.key), account: created })
     }
+
+    async fn revoke_async(&self, r: Revoke<'_>) -> Result<RevokeReason, String> {
+        roll_edge::install_crypto_provider();
+        let creds: AccountCredentials = serde_json::from_str(r.account.expose()).map_err(|_| "the project's ACME account isn't readable".to_string())?;
+        let account = Account::builder_with_http(Box::new(self.client()?)).from_credentials(creds).await.map_err(problem)?;
+        match roll_edge::acme::revoke(&account, r.certificate, reason(r.reason)).await {
+            Ok(()) => Ok(r.reason),
+            // A CA that takes keyCompromise only from the certificate's own key: revoked all the
+            // same, as unspecified (taking it back is what matters).
+            Err(instant_acme::Error::Api(p)) if r.reason == RevokeReason::KeyCompromise && p.r#type.as_deref() == Some("urn:ietf:params:acme:error:badRevocationReason") => {
+                roll_edge::acme::revoke(&account, r.certificate, RevocationReason::Unspecified).await.map_err(problem)?;
+                Ok(RevokeReason::Unspecified)
+            }
+            Err(e) => Err(problem(e)),
+        }
+    }
+}
+
+fn reason(r: RevokeReason) -> RevocationReason {
+    match r {
+        RevokeReason::Unspecified => RevocationReason::Unspecified,
+        RevokeReason::KeyCompromise => RevocationReason::KeyCompromise,
+        RevokeReason::AffiliationChanged => RevocationReason::AffiliationChanged,
+        RevokeReason::Superseded => RevocationReason::Superseded,
+        RevokeReason::CessationOfOperation => RevocationReason::CessationOfOperation,
+    }
 }
 
 /// The CA's problem, by its type and detail (never a request, which would carry a nonce or a key).
@@ -126,6 +152,10 @@ impl PublicCa for RollPublicCa {
 
     fn order(&self, o: Order<'_>) -> Result<Ordered, String> {
         Self::block(self.order_async(o))
+    }
+
+    fn revoke(&self, r: Revoke<'_>) -> Result<RevokeReason, String> {
+        Self::block(self.revoke_async(r))
     }
 }
 

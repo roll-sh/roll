@@ -1241,11 +1241,14 @@ key past its `expires_at`, or a SaaS rotator whose registered credential has end
 database, vendor, product or rotator refused or didn't answer; the detail says why, the old
 credential keeps working, and the sweeper tries again; cleared by the next rotation that works),
 `revoke_failing` (a credential roll retired, or a lease that ended, that it couldn't revoke yet: it
-still works until roll can; cleared once it does; `GET …/rotations`, `roll secrets rotations` and
+still works until roll can; cleared once it does; also a public certificate whose revocation the CA
+hasn't taken yet, `environment` empty, `key` the registration's name; `GET …/rotations`, `roll secrets rotations` and
 the Health view's "Managed credentials" list every managed credential with its schedule and last
 failure; `roll secrets rotations --rotate-due 7` rotates every one due within a week, or failing,
 in one run, for an operator's maintenance window, and fails if one does), `missing` (a required key an environment doesn't define, through its
-imports and base), `exposed` (a protected value also in an unprotected environment), `public`,
+imports and base), `exposed` (a protected value also in an unprotected environment, or a public
+certificate linked into a protected environment whose private key is also linked into one that
+isn't: "public certificate web's private key is also linked into development"), `public`,
 `weak`, `unplaced` (a key bound to hosts without a `header` or `query`, from before a placement
 was required: a trusted reader's placeholder may ride in any header, and an untrusted consumer's
 doesn't swap; see "Using a key without seeing it"), `expiring` (within two weeks: a key's
@@ -1500,6 +1503,13 @@ its sessions and gives what it made (a migration's tables) to `roll` before drop
 a credential never drops data.
 
 | `search` | `url`, `host`, `port`, `username` | a credential of its own with data access only (no keys or users; `"access": "data"`), or narrower with the options `permission` (`read`: searches and reads; `append`: adds to named data streams only, Elasticsearch flavor) and `names` (index names or patterns, a list or a comma-separated string; a data key on names gets none of the cluster's templates, pipelines or lifecycle policies); a key roll search doesn't say is the access and indices asked for, whatever else it says or if it says nothing, is deleted and refused, credential `key`: on an Elasticsearch cluster `api_key` (`Authorization: ApiKey …`), on an OpenSearch one an internal user, `user` (`<user>@<cluster>`, which the node routes) and `password`; a link to the field the cluster's flavor doesn't issue is refused when written, and switching a cluster's flavor carries no credential across (link the other fields again); an OpenSearch cluster's fields are offered and suggested under the names its clients read (`OPENSEARCH_URL`, `_HOST`, `_PORT`, `OPENSEARCH_USERNAME`/`_PASSWORD` for its user, `OPENSEARCH_CLUSTER` for the cluster's name); a dynamic one expires by itself 5 minutes after its lease | no (never the cluster's password) |
+
+A link keeps its resource by the id it goes by for good. Search links written while the provider
+still took a cluster's name are rewritten to the id at rolld's start (`Secrets::link_refs`,
+`Secrets::rekey_links`, docs/search/architecture.md "Who sees a cluster"): only current versions,
+in one write per project and name, audited as the operator's `link.rekey` with the keys it moved
+(never a value), fingerprints kept. Rolling a key back to a version that names the cluster by
+name is refused (400), as any link by a name is.
 
 roll apps' services have a workspace kind (`service`, `svc_…`); they consume secrets (an app's
 variables, `app:<svc>`) rather than issue credentials, so they have no link provider. Products
@@ -3060,8 +3070,13 @@ the names with dns-01, renews them, and keys link to the result.
   - The fields are `certificate` (`TLS_CERT`), `private_key` (`TLS_KEY`, masked), `ca_chain`
     (`TLS_CA_CHAIN`, the CA's certificates above the leaf) and `fullchain` (`TLS_FULLCHAIN`, the leaf
     then the chain, as nginx and HAProxy take it).
-  - Every key and environment linked to one registration gets the same certificate. Each key's
-    `expires_at` is the certificate's end, so health's `expiring` and `expired` see it.
+  - Every key and environment linked to one registration gets the same certificate, private key
+    included. Linked into a protected environment and, with its private key, into one that isn't,
+    the protected environment's key is readable there: health lists it as `exposed`, and a link
+    that would do it (either way round) is a 409 `confirm_required` unless the change sends
+    `confirm: "pcr_…"` (a batch's or a key's `PUT`; the dashboard's "Link anyway"). Give each
+    protected environment a registration of its own instead.
+  - Each key's `expires_at` is the certificate's end, so health's `expiring` and `expired` see it.
 - **Renewal is the registration's.** It renews `rotate_days` after a certificate was issued: by
   default two thirds of the certificate's lifetime (60 days of Let's Encrypt's 90). It's never later
   than the lifetime less 14 days, or half the lifetime below 28 days, which is the rule SaaS keys
@@ -3075,9 +3090,39 @@ the names with dns-01, renews them, and keys link to the result.
   - A renewal that fails is `rotation.failed` on every linked key, and health's `rotation_failing`,
     until one works. The certificate in use keeps working until it ends.
   - `POST …/public-certs/{id}/renew` (`write`; `secrets_renew_public_cert` over MCP) and a linked
-    key's rotation (`POST …/secrets/{KEY}/rotate`, or the rotation after a leak of its private key)
-    ask for a new certificate now. They answer at once (202, or `warnings` on the key's rotation),
-    and the key changes when the job has the certificate.
+    key's rotation (`POST …/secrets/{KEY}/rotate`) ask for a new certificate now. They answer at
+    once (202, or `warnings` on the key's rotation), and the key changes when the job has the
+    certificate.
+  - **Renewals asked for are capped**, per registration: one an hour and three a week, a 429
+    `rate_limited` saying when the next may come. Each renewal spends the CA's limit for the exact
+    set of names (Let's Encrypt issues 5 a week), so a script or an agent retrying in a loop could
+    otherwise use it up and block the renewal a leak needs. A leak's renewal (below) is exempt from
+    the weekly count but not repeatable within the hour; a person's renewal just before it doesn't
+    hold it up. Scheduled renewals and new domains or credentials aren't counted.
+- **A leaked private key is revoked at the CA, then replaced.** A leak of a key linked to a public
+  certificate (roll code's landing check, `POST …/leaks` with `leaked: true` by someone who may
+  write there, under `leaks.rotate = managed`) rotates it as any managed key's leak does, claimed
+  once. For a public certificate that rotation first revokes the certificate the key holds at the
+  CA, through the project's ACME account, with reason `keyCompromise` (Let's Encrypt then also
+  refuses that key for later certificates; a CA that takes `keyCompromise` only when the
+  certificate's own key signs gets `unspecified`), and then asks for a new certificate. A
+  compromised key is worse than a short gap: every environment linked to it serves a revoked
+  certificate until the new one is in, within minutes.
+  - The `secret.leaked` event says `revoking: [serial]`, and the linked keys' `rotation.succeeded`,
+    once they move to the new certificate, says `revoked: <serial>`.
+  - Revocation runs outside any write. One the CA doesn't take is `rotation.failed` (`via: leak`),
+    stays pending, and the job asks again every 5 minutes (health's `revoke_failing` on the
+    registration meanwhile); the new certificate is ordered either way.
+  - The certificate a renewal replaces stays sealed on the registration (`previous_serial` in the
+    list) until it ends, so a leak noticed after a renewal can still be revoked.
+  - `POST …/public-certs/{id}/revoke {serial?: "current" | "previous", reason?}` (admin, audited)
+    revokes by hand: `current` (the default) also orders its replacement at once (as a leak's
+    renewal), `previous` the one the last renewal replaced. `reason` is `unspecified` (the
+    default), `keyCompromise`, `affiliationChanged`, `superseded` or `cessationOfOperation`.
+    Revoking one already revoked is a no-op; a CA that refuses is a 502 and stays pending (retried).
+    Not an MCP tool: taking a certificate back for good is a person's call.
+  - The list shows each revocation of a certificate that hasn't ended (`revocations`: serial,
+    reason, `revoked` or `pending` with `last_error`).
 - `PATCH …/public-certs/{id} {name?, domains?, dns_credential?, rotate_days?}` (admin). New domains or a
   new credential are checked as adding them is, then order a new certificate at once. A new
   `dns_credential` makes the caller the registration's maker, so orders act at the replacer's
@@ -3090,7 +3135,7 @@ the names with dns-01, renews them, and keys link to the result.
   certificate's private key. The list shows the CA, names, status, serial and dates. The private key
   reaches people only through a linked key's own reveal routes, and the audit log names the
   registration, the serial and the end (`public_cert.add`, `.update`, `.renew`, `.issued`,
-  `.failed`, `.delete`).
+  `.failed`, `.revoke`, `.revoked`, `.revoke_failed`, `.delete`).
 - Ordering acts for whoever registered it, as they are now: a registration made by someone who may no
   longer manage the project stops ordering (`last_error` says so) until an admin registers it again.
 - Checked with Pebble, Let's Encrypt's test CA, and its DNS server, through the edge's own Cloudflare
@@ -6234,10 +6279,10 @@ roll-workspace's records, not secrets' audit rows: they're the workspace's own f
 | --- | --- | --- |
 | `secret.changed` | a change added, changed, linked or rotated stored values (a change that only edits comments, tags or expiry isn't one) | `via`, `change` (its number in the history), `version` (one key) or `versions` (`{key: version}`), `keys` when the row names more (the change's other keys only had their metadata edited or were deleted), `deleted` (keys the same change deleted), `folders` (a change across folders) |
 | `secret.deleted` | a change only deleted keys (a folder's delete too) | `via`, `change`, `version` or `versions` (the delete's), `folders` (a change across folders) |
-| `secret.leaked` | a stored value turned up in a roll code repository (a change's added lines or a scan) or in text reported published (`POST …/leaks` with `leaked: true`), in the project holding the value, once a day for the same keys and place and whenever a rotation of them starts ("When a value leaks"); or GitHub's secret scanning found a placeholder (`secrets.placeholders.end`) | `repo` (and `project`, the repo's, when the value came from another's shared folder) or `reported: true`, with `rotatable` (roll can rotate one of the keys), `rotating` (the keys `leaks.rotate = managed` rotates now; `false` with `reason: "rotated within the hour"` when the keys rotated for a leak within the hour) and `requests` (the change requests opened for their rotation where approvals are needed); or `placeholder`, `consumer`, `reason` |
+| `secret.leaked` | a stored value turned up in a roll code repository (a change's added lines or a scan) or in text reported published (`POST …/leaks` with `leaked: true`), in the project holding the value, once a day for the same keys and place and whenever a rotation of them starts ("When a value leaks"); or GitHub's secret scanning found a placeholder (`secrets.placeholders.end`) | `repo` (and `project`, the repo's, when the value came from another's shared folder) or `reported: true`, with `rotatable` (roll can rotate one of the keys), `rotating` (the keys `leaks.rotate = managed` rotates now; `false` with `reason: "rotated within the hour"` when the keys rotated for a leak within the hour) and `requests` (the change requests opened for their rotation where approvals are needed), `revoking` (the serials of public certificates whose leaked key roll revokes at the CA first, `keyCompromise`); or `placeholder`, `consumer`, `reason` |
 | `scan.finding` | `roll secrets scan` or roll MCP's credential guard (`POST …/leaks`) matched values: a row per folder | `candidates`, `matched`, `guard` |
 | `rotation.failed` | a managed key's scheduled rotation failed: once as a failing run starts (health's `rotation_failing` until one works); a leaked key's rotation failed | `reason`, `via: "leak"` (a leak's) |
-| `rotation.succeeded` | a rotation worked, scheduled, `--now` or for a leak: a managed key's new credential (the row right after its `secret.changed` via `rotation`, in the same transaction), or a live link's resource credential reset | `mode` (`managed` or `live`), `scheduled`, `version` and `change` (managed), `sharing` (the keys holding the same credential, when more than one), `via: "leak"` and `grace_minutes: 0` (a leak's: the leaked credential revoked at once) |
+| `rotation.succeeded` | a rotation worked, scheduled, `--now` or for a leak: a managed key's new credential (the row right after its `secret.changed` via `rotation`, in the same transaction), or a live link's resource credential reset | `mode` (`managed` or `live`), `scheduled`, `version` and `change` (managed), `sharing` (the keys holding the same credential, when more than one), `via: "leak"` and `grace_minutes: 0` (a leak's: the leaked credential revoked at once), `revoked: <serial>` (a public certificate's key moving off a certificate roll revoked at the CA) |
 | `request.pending` | a change request or a secret request opened | `request`, `type` (`change` or `value`), `expires_at` (a secret request's) |
 | `request.decided` | a change request approved or rejected (once its state moves) or closed; a secret request answered or cancelled | `request`, `type`, `state` |
 | `sync.failed` | a sync's push failed | `sync`, `target`, `reason` |
@@ -6563,7 +6608,8 @@ isn't in the workspace is 404.
 | `GET /public-certs` | | `PublicCert[]` (`read` on the project; never a credential, the EAB key or the private key) |
 | `POST /public-certs` | `NewPublicCert` | 201 `PublicCert`, `status: "pending"` (`admin`; the DNS credential is checked first, read only: each name's zone; the order is the background job's) |
 | `PATCH /public-certs/{id}` | `PublicCertChange` | `PublicCert` (`admin`; new `domains` or `dns_credential`, checked as adding one checks it, order a new certificate at once; `rotate_days` over the current certificate's lifetime less 14 days is a 400; a new `dns_credential` makes the caller the registration's `created_by`, as for `PATCH /saas/{id}`) |
-| `POST /public-certs/{id}/renew` | | 202 `PublicCert` (`write`; ordered in the background, linked keys rotate once it's issued) |
+| `POST /public-certs/{id}/renew` | | 202 `PublicCert` (`write`; ordered in the background, linked keys rotate once it's issued); 429 `rate_limited` past one an hour or three a week, saying when |
+| `POST /public-certs/{id}/revoke` | `{serial?, reason?}` | `PublicCert` (`admin`; `serial` `current`, the default, also orders a replacement, or `previous`; `reason` RFC 5280's, default `unspecified`); 502 when the CA refused (pending: roll asks again) |
 | `DELETE /public-certs/{id}` | | 204; 409 while a key links to it (`admin`) |
 | `GET /outside-databases` | | `OutsideDatabase[]` (`read` on the project; never the URL) |
 | `POST /outside-databases` | `{name, url, roles?: [a, b], group?, ca?, gateway?}` | 201 `OutsideDatabase` (`admin`; connects and checks the roles first: 400 with the server's reason) |
@@ -6697,11 +6743,11 @@ type Secret = {
 };
 type Decoy = { kind: "rlt" | "postgres"; created_at: number; created_by: string; uses: number; used_at: number | null; used_ip: string | null; used_route: string | null; used_endpoint: string | null }; // the last use: when, its address, and the route pattern it called (rlt; never a path or query) or the endpoint it tried (postgres)
 type NewDecoy = { key: string; kind: "rlt"; path?: string } | { key: string; kind: "postgres"; resource: string; path?: string };
-type SetSecret = { value?: string; comment?: string; tags?: string[]; type?: "shared" | "personal"; link?: Link | null; message?: string; expires_at?: number | null; if_version?: number };
+type SetSecret = { value?: string; comment?: string; tags?: string[]; type?: "shared" | "personal"; link?: Link | null; message?: string; expires_at?: number | null; if_version?: number; confirm?: string /* as Batch's */ };
 type Op =
   | { op: "set"; key: string; value?: string; comment?: string; tags?: string[]; type?: "shared" | "personal"; link?: Link | null; if_version?: number }
   | { op: "delete"; key: string; type?: "shared" | "personal"; if_version?: number };
-type Batch = { path?: string; message?: string; ops: Op[]; if_seq?: number };
+type Batch = { path?: string; message?: string; ops: Op[]; if_seq?: number; confirm?: string /* public certificate ids a 409 confirm_required named, comma separated */ };
 type Written = { change: Change | null; secret: Secret | null; warnings: string[] };
 type Applied = { change: Change | null; items: Item[]; warnings: string[]; request?: Request }; // change: null when nothing changed; request: opened instead (promote into a protected environment)
 type Item = { key: string; path: string; type: "shared" | "personal"; what: string[]; from_fp: string | null; to_fp: string | null };
@@ -6726,7 +6772,8 @@ type SaasRotator = { id: string; name: string; vendor: "sendgrid" | "twilio" | "
 // PATCH …/saas/{id}: the vendor and target stay. `credential_expires_at`: absent keeps it (a new
 // credential drops the old one's), null clears it, ms in the future sets it.
 type SaasRotatorChange = { name?: string; credential?: string; credential_expires_at?: number | null };
-type PublicCert = { id: string; name: string; directory_url: string; domains: string[]; dns_provider: "cloudflare"; eab_kid?: string; rotate_days?: number; status: "pending" | "issued" | "failing"; serial?: string; not_after?: number; issued_at?: number; renews_at?: number; last_error?: string; failed_at?: number; created_at: number; created_by: string };
+type PublicCert = { id: string; name: string; directory_url: string; domains: string[]; dns_provider: "cloudflare"; eab_kid?: string; rotate_days?: number; status: "pending" | "issued" | "failing"; serial?: string; not_after?: number; issued_at?: number; renews_at?: number; last_error?: string; failed_at?: number; previous_serial?: string; revocations?: { serial: string; reason: RevokeReason; state: "revoked" | "pending"; asked_at: number; asked_by: string; revoked_at?: number; last_error?: string }[]; created_at: number; created_by: string };
+type RevokeReason = "unspecified" | "keyCompromise" | "affiliationChanged" | "superseded" | "cessationOfOperation";
 type NewPublicCert = { name: string; directory_url: string; domains: string[]; dns_provider: "cloudflare"; dns_credential: string; eab_kid?: string; eab_hmac_key?: string /* base64url */; rotate_days?: number };
 type PublicCertChange = { name?: string; domains?: string[]; dns_credential?: string; rotate_days?: number | null /* null: the default */ };
 type KubernetesCluster = { id: string; name: string; api_url: string; has_ca: boolean; created_at: number; created_by: string };

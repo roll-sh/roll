@@ -276,8 +276,12 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
     `{budget: {project, project_name, percent, spent_usd_month, max_usd_month}, dashboard_url}`,
     once per level per month and budget (raising the budget alerts afresh). It's recorded after it's queued, so a
     crash repeats one rather than losing it, and every live preview's activity says so.
-  - `max_bytes` (10 GiB by default) is a cap on the bytes a preview's branches own. A preview
-    over the cap goes to sleep with `error`, and resetting it brings it back under.
+  - `max_bytes` (10 GiB by default) is a cap on the bytes a preview's branches and its earlier
+    pushes' copies own. A preview over the cap goes to sleep with `error` and stays asleep until
+    resetting it brings it back under or the cap is raised: a wake (`POST …/wake`, the sheet) is
+    a 409, roll apps' services included, and a visit doesn't start its own services. A visit to a
+    roll apps service still wakes it there (roll apps doesn't ask previews; Next).
+    `a_preview_over_its_size_cap_stays_asleep`.
 
 ### Converging
 
@@ -632,8 +636,13 @@ none of the service's environments follows, after checking the branch really is 
   change's gets, edited in place, saying "deleted" when it goes. Each is posted only when it
   changed, and what was posted (the comment's id too) is kept, so a restart posts nothing new.
   Through the `GitReport` port: rolld posts with roll apps' GitHub App connection (a short-lived
-  token for that one repository; never the service's git login); a service that isn't connected
-  gets nothing. The project's `github.status` and `github.comment` switches hold as for a roll
+  token for that one repository; never the service's git login). A service on GitLab or
+  Bitbucket gets the same through roll apps (`Apps::commit_status`, `Apps::pull_request_note`:
+  `roll/preview` on the commit, and one note on the merge request edited in place, made again
+  when it was deleted there), with the service's Git login, sent only to its source's own host
+  through the client for tenant-chosen URLs. It's posted on the service's holder, which uses
+  that login: a signed fleet hop (`fleet::REPORT`) when that's another node. A service with
+  neither gets nothing. The project's `github.status` and `github.comment` switches hold as for a roll
   code change's. A comment's number and id belong to the repository its pull request's page
   names: once the service is connected to another repository, nothing is posted there (an
   independent review's finding). `a_git_url_preview_reports_its_status_and_pull_request_comment`.
@@ -768,6 +777,14 @@ previews' code may reach:
 - `egress: "open"` (the default, as before): anything.
 - `egress: "roll"`: only roll's own products (the preview's branches) and roll's proxy in front
   of it. Nothing on the internet.
+- A fork's preview's pages carry a Content-Security-Policy (`runtime.rs` `fork_policy`): they
+  may load from and send to only the preview's own hosts (`default-src 'self'` and its services'
+  origins; inline scripts, `eval`, `data:` and `blob:` still allowed, so its pages run as they
+  did; `form-action` the same). An approved fork's code could otherwise read what a reviewer's
+  page shows (rows of the repo's data) and send it to another site from their browser, around
+  `egress_forks`, which holds only its server. A policy of the page's own still applies (a
+  browser keeps both); a navigation away isn't something a policy can stop. Previews' own proxy
+  only so far: roll apps' for its forks is next (Next). `runtime::tests::service_hosts_reach_their_containers`.
 - `egress_forks`: what a fork's preview reaches when `egress` is `"open"`. It's `"roll"` by
   default, with `egress_hosts` still allowed through the proxy; `"open"` lets it reach what the
   project's own previews do. A fork's head runs only once a writer approves it, but an approval
@@ -2032,7 +2049,7 @@ type Settings = {
   max_usd_month: number;              // 0: no cap; once the month's cost reaches it, new previews wait
   secrets: { base: string; allow_production: boolean };      // "development", false
   env: Record<string, string>;        // overrides every service gets
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string; endpoints?: string[]; states?: {name, page, steps}[]; modes?: {name: string; color_scheme?: "dark" | "light"; locale?: string; timezone?: string}[]; storybook?: string /* "web" or "web:/storybook/" */; browsers?: ("firefox" | "webkit" | "webkit-phone")[] };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's; endpoints: up to 5 GET paths timed against main's
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string; endpoints?: string[]; states?: {name, page, steps}[]; login?: {page, steps} /* a type step's text may be "$NAME" */; modes?: {name: string; color_scheme?: "dark" | "light"; locale?: string; timezone?: string}[]; storybook?: string /* "web" or "web:/storybook/" */; browsers?: ("firefox" | "webkit" | "webkit-phone")[] };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's; endpoints: up to 5 GET paths timed against main's
   access: "link" | "team" | "public"; // "link": a preview's URLs need its link; "team": a person signed in to roll who may open the project
   visual_review: "off" | "check" | "required";   // the roll/visual review; required also blocks landing in roll ("off")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
@@ -2278,6 +2295,22 @@ type Settings = {
     and half again main's (Vercel's Speed Insights' INP, without visitors' own numbers yet). A
     number the page reports is kept only when it could be a time (a minute at most). Live: the
     Tab state's click timed on both. `a_screenshot_run_s_pages_are_only_those_asked_for_each_once`.
+    Signed in to the app (Percy's and Chromatic's saved logins; `github.login`: a page of the
+    first service's and its steps, as a state's): a page behind the app's own login would
+    otherwise screenshot its login page. A `type` step's text may be `$NAME`, a variable of the
+    preview's own environment (its secrets, resolved untrusted unless the project allows
+    production and the change is trusted, without dynamic credentials; then the project's and
+    its own variables, a `roll://` reference never as text), put in by the engine at the run,
+    added to the preview's masks, and never kept. The sign-in goes to the browser as the first
+    line of its container's stdin, into a file `shot.js` reads and removes: never a command line,
+    an environment variable, a log or the record (`ports::Login`'s `Debug` says only its page).
+    The run signs in before the first page, and its cookies stay in the browser for every page,
+    state, crop and endpoint timing after it; the sign-in page's own errors count for no page.
+    The activity says how it went ("screenshots: signed in through /login before its pages", or
+    the step it stopped at). A fork's preview signs in with nothing (its code would get what's
+    typed): its screenshots are taken signed out, and its activity says so. Not yet: the other
+    browsers' run, Storybook's stories and `try`, which start signed out (Next).
+    `screenshots_sign_in_first_on_a_trusted_preview`.
     Other browsers too (Percy's and Chromatic's browsers; `github.browsers`: `firefox`, `webkit`,
     and `webkit-phone`, WebKit at 390 × 844 at twice the density as a touch device, mobile
     Safari's engine; a picture past 2 MiB is left out so the others still fit):
@@ -2758,33 +2791,43 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **The fifth review's security fixes, in review** (#943): a share link's cookie kept from the
-   app, outside readers' notes never mailed, replayed or posted raw to Slack, try and fetch of a
-   fork's preview outside, the guest limit taken atomically, guests unable to link.
-2. **roll apps on par, in review**: roll apps' feedback button is previews' own script (a note
-   carries the page's errors and the reviewer's steps there too), and a share link on a preview
-   roll apps serves is a 409 that says why, not a link that answers 401.
-3. **Share links on roll apps, in review**: a port in roll apps' access check asks previews about a
-   `roll_share` link at every request (`Engine::share_visit`, shared with previews' own proxy),
-   and guests' notes go through it.
-4. **`note_mail` in the dashboard's rules**: the setting is in the API and roll MCP, not the page.
-5. **`roll preview try`**: an agent's page drive (`…/try`) from the CLI, as `roll preview fetch`.
-6. **A note in its reviewer's engine, typing and choices, in review**: typing taken again as
-   long as theirs, a choice in a list by its option's place (a `choose` step, also in
-   `roll.toml` states, `…/try` and `roll preview try`).
-7. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
+Ranked again after a sixth product review (2026-11-25), against Vercel's and Netlify's previews and
+comments, Render and Railway, Neon, Chromatic and Percy, Signadot, Jam.
+
+1. **Signed in to the app, in review**: the first service's run signs in first (`github.login`,
+   `$NAME` from the preview's environment, trusted previews only). Next for it: the other
+   browsers' run, `try` and a live check against a page behind a login.
+2. **Coverage cut silently**: at most 40 stories and 10 pages, and nothing says what was left
+   out; `skipped` (how many, which) on the run, the sheet and the comment; then stories chosen
+   by what the change touched (Chromatic's TurboSnap).
+3. **Browser runs and jobs in the cost**: `cost_of` counts branches, compute and services'
+   memory-hours, not the screenshot runs (three engines, stories, crops, `try`), builds or seed,
+   release and teardown jobs; meter their container-seconds into `spent_usd`, so `max_usd_month`
+   caps them too.
+4. **A note in one click**: a team note opens the whole dashboard in a tab to post; a small popup
+   that posts and closes (Vercel's comments post in place).
+5. **Sleeping previews cost the control plane**: every settled preview goes through a whole
+   converge every 5 minutes (secrets' links and digests, usage of every branch); a usage-only
+   pass for settled ones, counted per sleeping preview in the live run.
+6. **A fork's preview on roll apps**: its services' pages the same Content-Security-Policy as on
+   previews' own proxy (roll apps' proxy adds it for a `pv-` environment previews marks
+   untrusted), and a `data_forks` rule (a fork's data `schema` unless the project says
+   otherwise), as `egress_forks` is for its server.
+7. **A capped preview's roll apps service**: a visit to it still wakes it there (roll apps wakes
+   it itself); previews tells roll apps to keep it down while it's over its cap.
+8. **Restore points for the products that only copy** (Redis, search, NoSQL, streams): a point
    is kept only where the product puts a branch back in place, keeping its id (their delete
    guards check it); each needs its control plane's reset `from`, as pg-control's.
-8. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+9. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-9. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+10. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-10. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+11. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-11. **Watch: pg-control's recovery to a time seconds old** (unowned).
+12. **Watch: pg-control's recovery to a time seconds old** (unowned).
 
 
 
@@ -2793,6 +2836,13 @@ Ranked by what a person notices first. Done so far:
 
 
 
+
+Landed 2026-11-25, night: the fifth review's security fixes (#943); roll apps on par (#947: one
+feedback button); `note_mail` in the page and `roll preview try` (#948); share links on the
+previews roll apps serves (#952); a note's typing (#953) and choices (#955: a `choose` step) taken
+again for its crop; a fork's preview's pages kept to its own hosts (#963: a Content-Security-Policy);
+a preview over its `max_bytes` stays asleep (#964); GitLab and Bitbucket merge requests hear back
+(#967).
 
 Landed 2026-11-24, night: a note's element cropped in its reviewer's engine (#938: WebKit for Safari and iOS, Firefox; their viewport, after their clicks).
 

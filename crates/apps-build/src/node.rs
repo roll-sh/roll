@@ -137,7 +137,7 @@ pub(crate) fn detect(tree: &dyn Tree, o: &Overrides) -> Result<Option<Draft>, Er
         // `vitepress build docs` writes docs/.vitepress/dist.
         let root = script("build")
             .and_then(|b| b.split_whitespace().skip_while(|w| *w != "build").nth(1))
-            .filter(|d| !d.starts_with('-') && crate::tree::valid(d))
+            .filter(|d| !d.starts_with('-') && crate::tree::plain(d))
             .map(|d| format!("{}/", d.trim_end_matches('/')))
             .unwrap_or_default();
         let dir = format!("{root}.vitepress/dist");
@@ -175,7 +175,8 @@ pub(crate) fn detect(tree: &dyn Tree, o: &Overrides) -> Result<Option<Draft>, Er
     // Next.js app's netlify.toml publishes `.next`, which isn't a site).
     let publish = match (&o.output, &fw) {
         (Some(d), _) => Some((d.clone(), "build.output")),
-        (None, None | Some(Framework::Static(_))) => crate::site_configs::publish_dir(tree),
+        // Not over a server the package says how to start (a start script, or one set).
+        (None, None | Some(Framework::Static(_))) if start_script.is_none() && o.start.is_none() => crate::site_configs::publish_dir(tree),
         (None, _) => None,
     };
     let fw = match (publish, fw) {
@@ -457,7 +458,7 @@ fn angular_output(tree: &dyn Tree) -> String {
         let o = &p["architect"]["build"]["options"]["outputPath"];
         o.as_str().or_else(|| o["base"].as_str()).map(str::to_string)
     });
-    let base = path.or_else(|| project.map(|(name, _)| format!("dist/{name}"))).filter(|d| crate::tree::valid(d)).unwrap_or_else(|| "dist".into());
+    let base = path.or_else(|| project.map(|(name, _)| format!("dist/{name}"))).filter(|d| crate::tree::plain(d)).unwrap_or_else(|| "dist".into());
     format!("{}/browser", base.trim_end_matches('/'))
 }
 

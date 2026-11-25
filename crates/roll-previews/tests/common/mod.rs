@@ -366,6 +366,8 @@ pub struct FakeApps {
     pub slept: Mutex<Vec<(String, String)>>,
     /// The PNG every screenshot is (unset: the backend can't take one), and the previews taken.
     pub shot: Mutex<Option<Vec<u8>>>,
+    /// The sign-in each screenshot run was asked for (`github.login`), by preview.
+    pub logins: Mutex<Vec<(String, Option<roll_previews::ports::Login>)>>,
     /// What the screenshot's page logs as its first error.
     pub page_says: Mutex<Option<String>>,
     /// The API operations a screenshot reads when it's asked to (`github.openapi`), by a
@@ -534,9 +536,11 @@ impl Apps for FakeApps {
             .map(|path| roll_previews::ports::PageShot { path, png: png.clone(), errors: 0, report: Default::default() })
             .collect();
         self.crops_asked.lock().extend(opts.crops.iter().map(|c| c.note.clone()));
+        self.logins.lock().push((preview.to_string(), opts.login.clone()));
+        let login = opts.login.as_ref().map(|l| format!("signed in through {} before its pages", l.page));
         let crops = opts.crops.iter().filter(|c| c.selector != "#missing").map(|c| (c.note.clone(), png.clone())).collect();
         let health = self.page_says.lock().clone().map(|said| roll_previews::PageHealth { errors: 1, first_error: Some(said), failed: 0, first_failed: None, unstable: false });
-        Ok(Some(roll_previews::ports::Shot { png, speed: None, health, a11y: None, phone: None, pages, text: None, links: None, api, crops, bodies: self.served.lock().clone() }))
+        Ok(Some(roll_previews::ports::Shot { png, speed: None, health, a11y: None, phone: None, pages, text: None, links: None, api, crops, bodies: self.served.lock().clone(), login }))
     }
     async fn try_page(&self, _preview: &str, _service: &str, _path: &str, _steps: &[roll_previews::settings::Step]) -> anyhow::Result<Option<roll_previews::ports::Tried>> {
         Ok(self.tried.lock().clone())

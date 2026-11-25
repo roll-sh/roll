@@ -212,6 +212,39 @@ async fn with_screenshots_a_baseline_of_the_default_branch_is_kept_to_compare_ch
     assert_eq!(e.engine.store.row_by_change("chg_1").unwrap().map(|r| r.desired), Some(Desired::Active), "the change's preview came back with its repo");
 }
 
+/// A trusted preview's screenshots sign in to the app first (`github.login`), a `$NAME` typed as
+/// the preview's own secret's value (which `Debug` never shows), and the activity says how it
+/// went; a fork's are taken signed out, which it says, its code never given what's typed.
+#[tokio::test]
+async fn screenshots_sign_in_first_on_a_trusted_preview() {
+    let login = json!({ "page": "/login", "steps": [{ "type": ["#email", "qa@acme.dev"] }, { "type": ["#password", "$E2E_PASSWORD"] }, { "press": "Enter" }] });
+    let e = env(json!({ "enabled": true, "github": { "screenshot": true, "baseline": false, "login": login } }));
+    e.secrets.values.lock().push(("E2E_PASSWORD".into(), "hunter2-from-staging".into()));
+    let mut png = Vec::new();
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 0, 255])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    *e.apps.shot.lock() = Some(png);
+    e.code.open(change("chg_in", 4));
+    e.code.open(ChangeInfo { trusted: false, approved: true, ..change("chg_fork", 5) });
+    for _ in 0..3 {
+        e.engine.pass().await.unwrap();
+    }
+    for _ in 0..3000 {
+        if !e.engine.shooting() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let (ours, fork) = (e.engine.store.row_by_change("chg_in").unwrap().unwrap(), e.engine.store.row_by_change("chg_fork").unwrap().unwrap());
+    let asked = |id: &str| e.apps.logins.lock().iter().rev().find(|(p, _)| p == id).map(|(_, l)| l.clone()).expect("a screenshot run");
+    let l = asked(&ours.id).expect("signed in");
+    assert_eq!((l.page.as_str(), &l.steps[1]), ("/login", &roll_previews::settings::Step::Type("#password".into(), "hunter2-from-staging".into())));
+    assert!(!format!("{l:?}").contains("hunter2"), "never in a Debug: {l:?}");
+    let said = |id: &str| e.engine.store.activity(id).unwrap().into_iter().map(|a| a.message).collect::<Vec<_>>();
+    assert!(said(&ours.id).iter().any(|m| m == "screenshots: signed in through /login before its pages"), "{:?}", said(&ours.id));
+    assert!(asked(&fork.id).is_none(), "a fork's run signs in with nothing");
+    assert!(said(&fork.id).iter().any(|m| m.starts_with("screenshots taken signed out: a fork's preview")), "{:?}", said(&fork.id));
+}
+
 /// Pages changed the same way against main's (Percy's grouped diffs), the first page included,
 /// share a group, accepted together; a page changed another way is left to review on its own.
 #[tokio::test]
@@ -2498,6 +2531,25 @@ async fn a_notes_people_are_told_by_mail() {
     e.engine.store.put_settings(&e.project, &s).unwrap();
     e.engine.tell_on_review("chg_m", "rv_y", "dan", note, "carol", None, false).unwrap();
     assert_eq!(e.engine.store.pending_tells(&p.id).unwrap().len(), 1, "nothing more queued");
+}
+
+/// A preview whose data grows past the project's `max_bytes` goes to sleep, and stays asleep
+/// whichever way it's woken (the API, a visit's start) until the cap is raised or it's reset.
+#[tokio::test]
+async fn a_preview_over_its_size_cap_stays_asleep() {
+    use roll_previews::ports::EnvSource;
+    let e = env(json!({ "enabled": true, "max_bytes": 1 << 20 }));
+    e.code.open(change("chg_cap", 4));
+    for _ in 0..3 {
+        e.engine.pass().await.unwrap();
+    }
+    let p = e.engine.store.row_by_change("chg_cap").unwrap().unwrap();
+    assert!(p.state == State::Sleeping && p.error.as_deref().is_some_and(|m| m.contains("max_bytes")), "two 1 MiB branches over a 1 MiB cap: {:?} {:?}", p.state, p.error);
+    assert!(matches!(e.engine.wake(&p.id).await, Err(roll_previews::Error::Conflict(_))), "not woken by the API");
+    assert!(e.engine.env(&p.id, "web").await.is_err(), "nor started by a visit");
+    let s = e.engine.store.settings(&e.project).unwrap().patched(&json!({ "max_bytes": 1u64 << 30 })).unwrap();
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    e.engine.wake(&p.id).await.unwrap();
 }
 
 /// A guest's note through a share link that takes notes: on the change as `guest:<name>`, its

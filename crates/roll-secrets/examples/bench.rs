@@ -66,10 +66,10 @@ fn main() {
         .chain((0..n / 10).map(|i| Op::Set { key: format!("R{i:05}"), value: Some(format!("${{K{i:05}}}/x")), comment: None, tags: None, kind: None, link: None, path: None, expires_at: None, if_version: None }))
         .collect();
     time("one change (all keys)", &mut || {
-        s.batch(&project, "production", Batch { path: None, message: None, ops: ops.clone(), if_seq: None }, &c).unwrap();
+        s.batch(&project, "production", Batch { path: None, message: None, ops: ops.clone(), if_seq: None, confirm: None }, &c).unwrap();
     });
     time("one key", &mut || {
-        s.batch(&project, "production", Batch { path: None, message: None, ops: vec![Op::Set { key: "ONE".into(), value: Some("1".into()), comment: None, tags: None, kind: None, link: None, path: None, expires_at: None, if_version: None }], if_seq: None }, &c).unwrap();
+        s.batch(&project, "production", Batch { path: None, message: None, ops: vec![Op::Set { key: "ONE".into(), value: Some("1".into()), comment: None, tags: None, kind: None, link: None, path: None, expires_at: None, if_version: None }], if_seq: None, confirm: None }, &c).unwrap();
     });
     for _ in 0..2 {
         time("grid", &mut || drop(s.grid(&project, "/", &c).unwrap()));
@@ -101,7 +101,7 @@ fn main() {
     // The first digest after a change (one key written, untimed, before each).
     let mut ms: Vec<f64> = (0..20)
         .map(|i| {
-            s.batch(&project, "production", Batch { path: None, message: None, ops: vec![Op::Set { key: "ONE".into(), value: Some(i.to_string()), comment: None, tags: None, kind: None, link: None, path: None, expires_at: None, if_version: None }], if_seq: None }, &c).unwrap();
+            s.batch(&project, "production", Batch { path: None, message: None, ops: vec![Op::Set { key: "ONE".into(), value: Some(i.to_string()), comment: None, tags: None, kind: None, link: None, path: None, expires_at: None, if_version: None }], if_seq: None, confirm: None }, &c).unwrap();
             let t = Instant::now();
             drop(s.digest(&project, "production", "/", &c).unwrap());
             t.elapsed().as_secs_f64() * 1000.0
@@ -160,7 +160,7 @@ fn concurrent(ns: &[usize], secs: u64, nodes: usize) {
     let all: Vec<Arc<Secrets>> = (0..nodes).map(|_| Arc::new(Secrets::new(connect(), ws.clone(), opts()).unwrap())).collect();
     let (s, c) = (&all[0], Caller::operator());
     let ops = (0..20).map(|i| Op::Set { key: format!("APP_{i:02}"), value: Some(format!("value-{i:02}-abcdefghijklmnop")), comment: None, tags: None, kind: None, link: None, path: None, expires_at: None, if_version: None }).collect();
-    s.batch(&project, "production", Batch { path: None, message: None, ops, if_seq: None }, &c).unwrap();
+    s.batch(&project, "production", Batch { path: None, message: None, ops, if_seq: None, confirm: None }, &c).unwrap();
     // Every resolver reads the project's production values until `stop`, and the writer writes:
     // (read latencies in ms, read errors, seconds, write latencies, write errors).
     type Timed = (Vec<f64>, usize);
@@ -176,7 +176,7 @@ fn concurrent(ns: &[usize], secs: u64, nodes: usize) {
                     }
                     let t = Instant::now();
                     let ops = vec![Op::Set { key: "ROLLOUT".into(), value: Some(i.to_string()), comment: None, tags: None, kind: None, link: None, path: None, expires_at: None, if_version: None }];
-                    if s.batch(&project, "production", Batch { path: None, message: None, ops, if_seq: None }, &c).is_err() {
+                    if s.batch(&project, "production", Batch { path: None, message: None, ops, if_seq: None, confirm: None }, &c).is_err() {
                         errors += 1;
                     }
                     ms.push(t.elapsed().as_secs_f64() * 1000.0);
@@ -264,7 +264,7 @@ fn big(ns: &[usize]) {
             }
             let load_start = load();
             let t = Instant::now();
-            let a = s.batch(&project, "production", Batch { path: None, message: None, ops, if_seq: None }, &c).unwrap();
+            let a = s.batch(&project, "production", Batch { path: None, message: None, ops, if_seq: None, confirm: None }, &c).unwrap();
             let ms = t.elapsed().as_secs_f64() * 1000.0;
             assert_eq!(a.items.len(), n);
             let mut line = format!("{backend:>8} {n:>6} keys  one change, {what:<10} {ms:>9.1} ms  load {load_start}");
@@ -309,7 +309,7 @@ fn stampede(ns: &[usize], n: usize, workers: usize, pool: usize) {
     let c = Caller::operator();
     let set = |key: String, value: String| Op::Set { key, value: Some(value), comment: None, tags: None, kind: None, link: None, path: None, expires_at: None, if_version: None };
     let ops = (0..n).map(|i| set(format!("K{i:05}"), format!("value-{i:05}-abcdefghijklmnop"))).chain((0..n / 10).map(|i| set(format!("R{i:05}"), format!("${{K{i:05}}}/x")))).collect();
-    s.batch(&project, "production", Batch { path: None, message: None, ops, if_seq: None }, &c).unwrap();
+    s.batch(&project, "production", Batch { path: None, message: None, ops, if_seq: None, confirm: None }, &c).unwrap();
     // This process's CPU seconds (user and system), and the database container's.
     let cpu = || {
         let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
@@ -353,7 +353,7 @@ fn stampede(ns: &[usize], n: usize, workers: usize, pool: usize) {
         assert!(!full.delta && full.stamps.len() == n + n / 10 && full.basis.is_some(), "the full set with every key's stamp");
         let held = roll_secrets::Held { digest: full.digest.clone(), basis: full.basis.clone().unwrap(), stamps: full.stamps.clone().into_iter().collect() };
         let value = format!("rotated-{round}");
-        s.batch(&project, "production", Batch { path: None, message: None, ops: vec![set("K00000".into(), value.clone())], if_seq: None }, &c).unwrap();
+        s.batch(&project, "production", Batch { path: None, message: None, ops: vec![set("K00000".into(), value.clone())], if_seq: None, confirm: None }, &c).unwrap();
         let r0 = format!("{value}/x");
         let steps: [(&str, Poll<'_>); 3] = [
             ("conditional read (miss)", &|p| matches!(s.unchanged(&project, "production", "/", &before, true, p), Ok(None))),

@@ -13,13 +13,14 @@ use crate::seal::Sealer;
 use crate::tls::CertPem;
 use anyhow::Context as _;
 use futures::future::BoxFuture;
-use instant_acme::{Account, AccountCredentials, AuthorizationStatus, ChallengeType, Identifier, NewAccount, NewOrder, OrderStatus, RetryPolicy};
+use instant_acme::{Account, AccountCredentials, AuthorizationStatus, ChallengeType, Identifier, NewAccount, NewOrder, OrderStatus, RetryPolicy, RevocationReason, RevocationRequest};
 use pg_storage::Objects;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio_rustls::rustls::pki_types::CertificateDer;
 use tracing::{info, warn};
 
 /// Publishes and removes DNS TXT records.
@@ -415,6 +416,17 @@ pub async fn order(account: &Account, solver: &Solver, names: &[String], timing:
         }
     }
     result
+}
+
+/// Revoke `certificate` (DER) through `account`, the account that ordered it (RFC 8555 §7.6),
+/// with an RFC 5280 `reason`. A certificate the CA already revoked counts as revoked. The error is
+/// instant-acme's: its caller says what the CA refused, never the request (it carries a nonce).
+pub async fn revoke(account: &Account, certificate: &[u8], reason: RevocationReason) -> Result<(), instant_acme::Error> {
+    let der = CertificateDer::from(certificate);
+    match account.revoke(&RevocationRequest { certificate: &der, reason: Some(reason) }).await {
+        Err(instant_acme::Error::Api(p)) if p.r#type.as_deref() == Some("urn:ietf:params:acme:error:alreadyRevoked") => Ok(()),
+        r => r,
+    }
 }
 
 impl Issuer for Acme {

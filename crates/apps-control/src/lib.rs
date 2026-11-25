@@ -19,6 +19,7 @@ pub mod attacks;
 pub mod attack_mode;
 pub mod advice;
 pub mod build_steps;
+pub mod source;
 pub mod visitor_token;
 pub mod backups;
 pub mod browser;
@@ -1293,6 +1294,42 @@ impl Apps {
         link.repo.eq_ignore_ascii_case(&format!("{owner}/{repo}")).then_some((app, link.installation, owner, repo))
     }
 
+    /// roll previews' commit status on a Git URL service's GitLab or Bitbucket repository, with
+    /// its Git login, sent only to its source's own host (`ci_hosts`). `false` when it has no
+    /// login or its host is neither (GitHub's goes through roll's GitHub App). On the service's
+    /// owner only (roll previews' fleet hop brings it there).
+    pub async fn commit_status(self: &Arc<Self>, service: &str, sha: &str, status: &integrations::CommitStatus) -> anyhow::Result<bool> {
+        anyhow::ensure!(self.owns(service), "the service's owner reports for it");
+        let sid = service.to_string();
+        let svc = self.db(move |s| s.service(&sid)).await?;
+        let Source::Git { url, .. } = &svc.source else { return Ok(false) };
+        let remote = self.git_remote(&svc.id, url).await;
+        let (Some(host), Some(login)) = (ci_hosts::host_of(url), remote.login()) else { return Ok(false) };
+        ci_hosts::post(self.cfg.allow_private, &host, login, sha, status).await?;
+        Ok(true)
+    }
+
+    /// roll previews' one note on a Git URL service's GitLab merge request or Bitbucket pull
+    /// request `number` of `repo` (its path), `existing` edited in place (made again when it's
+    /// gone there): its id. `None` when it has no login, its host is neither, or its source is
+    /// another repository now (a number is its repository's). On the service's owner only.
+    pub async fn pull_request_note(self: &Arc<Self>, service: &str, repo: &str, number: u64, body: &str, existing: Option<u64>) -> anyhow::Result<Option<u64>> {
+        anyhow::ensure!(self.owns(service), "the service's owner reports for it");
+        let sid = service.to_string();
+        let svc = self.db(move |s| s.service(&sid)).await?;
+        let Source::Git { url, .. } = &svc.source else { return Ok(None) };
+        let remote = self.git_remote(&svc.id, url).await;
+        let (Some(host), Some(login)) = (ci_hosts::host_of(url), remote.login()) else { return Ok(None) };
+        let path = match &host {
+            ci_hosts::Host::GitLab { project, .. } => project.clone(),
+            ci_hosts::Host::Bitbucket { workspace, repo, .. } => format!("{workspace}/{repo}"),
+        };
+        if !path.eq_ignore_ascii_case(repo.trim_end_matches(".git")) {
+            return Ok(None);
+        }
+        Ok(Some(ci_hosts::note(self.cfg.allow_private, &host, login, number, body, existing).await?))
+    }
+
     /// The repository a Git URL service fetches from: through roll's GitHub App when it's
     /// connected (a short-lived installation token), else with its login when the login is for
     /// this URL's host (a login never goes to another host).
@@ -1631,6 +1668,10 @@ impl Apps {
             let id = d.id.clone();
             if let Ok(Some(key)) = self.db(move |s| s.deployment_upload(&id)).await {
                 self.drop_upload(&d.id, &key).await;
+            }
+            let id = d.id.clone();
+            if let Ok(Some(key)) = self.db(move |s| s.deployment_source(&id)).await {
+                self.delete_upload(&key).await;
             }
             self.logs.delete(&format!("build:{}", d.id)).await;
         }
@@ -3148,7 +3189,15 @@ impl Apps {
     async fn resolve_vars_as(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, deployment: &str, read_refs: bool, mint: bool) -> Result<ResolvedVars> {
         let mut vars: BTreeMap<String, (String, &'static str)> = BTreeMap::new();
         let port = svc.run.port.unwrap_or(8080);
-        let run = svc.for_env(env).map_or_else(|_| svc.run.clone(), |s| s.run);
+        // The deployment's own size (a rollback's, roll.toml's), else what the next deploy takes.
+        let run = match deployment.is_empty() {
+            false => {
+                let d = deployment.to_string();
+                self.db(move |s| s.deployment(&d)).await.ok().map(|d| d.run)
+            }
+            true => None,
+        }
+        .unwrap_or_else(|| svc.for_env(env).map_or_else(|_| svc.run.clone(), |s| s.run));
         let roll = [
             ("PORT", port.to_string()),
             // The app server's workers for its instance's size (Heroku's): gunicorn, uvicorn and
@@ -3466,15 +3515,17 @@ impl Apps {
                 Some(v) => format!("{v}{sep}{ours}"),
                 None => ours.to_string(),
             };
+            // Joined to the app's own value, which keeps its source: a secret's stays one, so its
+            // value is still redacted where the runtime prints it (a JVM's "Picked up …").
+            let joined = |var: &str, ours: &str, sep: &str, first: bool, vars: &mut BTreeMap<String, (String, &'static str)>| {
+                let src = vars.get(var).map_or("roll", |(_, s)| *s);
+                let v = join(vars.get(var), ours, sep, first);
+                vars.insert(var.into(), (v, src));
+            };
             match agent.as_deref() {
-                Some("node") => {
-                    let v = join(vars.get("NODE_OPTIONS"), &format!("--require {}", apps_build::otel::NODE_REQUIRE), " ", false);
-                    vars.insert("NODE_OPTIONS".into(), (v, "roll"));
-                }
-                Some("python") => {
-                    let v = join(vars.get("PYTHONPATH"), apps_build::otel::PYTHON_PATH, ":", true);
-                    vars.insert("PYTHONPATH".into(), (v, "roll"));
-                }
+                Some("node") => joined("NODE_OPTIONS", &format!("--require {}", apps_build::otel::NODE_REQUIRE), " ", false, &mut vars),
+                Some("python") => joined("PYTHONPATH", apps_build::otel::PYTHON_PATH, ":", true, &mut vars),
+                Some("java") => joined("JAVA_TOOL_OPTIONS", &format!("-javaagent:{}", apps_build::otel::JAVA_AGENT), " ", false, &mut vars),
                 _ => {}
             }
         }
@@ -4790,8 +4841,10 @@ impl ResolvedVars {
             .iter()
             // `ROLL_AWAKE_URL` is roll's own on every web service: its arrival isn't a change of
             // the service's to deploy (each deployment gets it).
-            // `WEB_CONCURRENCY` follows `cpu` and `memory_mb`, which are settings a deploy already says.
-            .filter(|(k, _)| !matches!(k.as_str(), "ROLL_DEPLOYMENT" | "ROLL_GIT_COMMIT" | "ROLL_GIT_BRANCH" | "ROLL_AWAKE_URL" | "WEB_CONCURRENCY"))
+            .filter(|(k, _)| !matches!(k.as_str(), "ROLL_DEPLOYMENT" | "ROLL_GIT_COMMIT" | "ROLL_GIT_BRANCH" | "ROLL_AWAKE_URL"))
+            // roll's `WEB_CONCURRENCY` follows `cpu` and `memory_mb`, settings a deploy already says;
+            // the service's own value is a change like any.
+            .filter(|(k, _)| !(k == "WEB_CONCURRENCY" && self.sources.get(k.as_str()).copied() == Some("roll")))
             // A placeholder is new random text each time it's made: its binding decides.
             .map(|(k, v)| (k.clone(), self.placeholders.get(k).map(|b| format!("placeholder:{b}")).or_else(|| self.ref_texts.get(k).cloned()).unwrap_or_else(|| v.clone())))
             .collect()

@@ -6,7 +6,7 @@ use crate::{Commands, Draft, Error, Overrides, Provider, Tree, node, text};
 
 const DEFAULT: Ver = Ver(3, 3);
 
-pub(crate) fn detect(tree: &dyn Tree, _: &Overrides) -> Result<Option<Draft>, Error> {
+pub(crate) fn detect(tree: &dyn Tree, o: &Overrides) -> Result<Option<Draft>, Error> {
     let Some(gemfile) = text(tree, "Gemfile") else {
         return Ok(None);
     };
@@ -50,6 +50,9 @@ pub(crate) fn detect(tree: &dyn Tree, _: &Overrides) -> Result<Option<Draft>, Er
             build,
             Some(format!("{rails_cmd} server -b 0.0.0.0 -p $PORT")),
         )
+    } else if gem("jekyll") && !tree.exists("config.ru") && !tree.exists("Procfile") && o.start.is_none() {
+        notes.push("jekyll in the Gemfile: a static Jekyll site, built into _site".into());
+        (Some("jekyll"), Some("bundle exec jekyll build".to_string()), Some(crate::static_site::START.to_string()))
     } else if tree.exists("config.ru") {
         let start = if gem("puma") {
             "bundle exec puma -b tcp://0.0.0.0:$PORT"
@@ -92,6 +95,7 @@ pub(crate) fn detect(tree: &dyn Tree, _: &Overrides) -> Result<Option<Draft>, Er
             .collect()
     });
     let locked = lock.is_some();
+    let site = framework == Some("jekyll");
     let image = format!("ruby:{}-slim", version.minor());
     let render = Box::new(move |c: &Commands<'_>| {
         let mut env = vec![
@@ -120,7 +124,14 @@ pub(crate) fn detect(tree: &dyn Tree, _: &Overrides) -> Result<Option<Draft>, Er
             },
         );
         if let Some(build) = c.build {
-            df.run(&[], build);
+            // Jekyll's own environment: a production build (its `jekyll.environment`).
+            df.run(&[], &if site { format!("JEKYLL_ENV=production {build}") } else { build.to_string() });
+        }
+        if site {
+            df.from(crate::static_site::IMAGE, None);
+            df.line(&format!("COPY --from=build /app/_site {}", crate::static_site::ROOT));
+            df.serve(Some(crate::static_site::USER), c.start);
+            return df.finish();
         }
         df.from(&image, None);
         if !runtime_packages.is_empty() {
@@ -139,7 +150,7 @@ pub(crate) fn detect(tree: &dyn Tree, _: &Overrides) -> Result<Option<Draft>, Er
         df.finish()
     });
     Ok(Some(Draft {
-        provider: Provider::Ruby,
+        provider: if site { Provider::Static } else { Provider::Ruby },
         framework,
         language_version: Some(version.minor()),
         install: Some("bundle install".into()),

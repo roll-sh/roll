@@ -135,6 +135,39 @@ pub struct Person {
     pub admin: bool,
 }
 
+/// Run after a resource gets a home ([`Workspace::on_homed`]): `(kind, ref, project, how)`.
+pub type OnHomed = Box<dyn Fn(Kind, &str, &str, Homed) + Send + Sync>;
+
+/// How a resource got its home ([`OnHomed`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Homed {
+    /// `set_home`: someone who may (its owner, an admin, the operator, a create's placement) made
+    /// the project its home now, or said so again.
+    Set,
+    /// Its project's restore brought the home back: nobody decided anything now, so a product
+    /// checks it as it checks what it kept from before.
+    Restored,
+}
+
+/// A home as [`Workspace::homes`] lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HomeRow {
+    pub r#ref: String,
+    pub project: String,
+    /// `operator`, `usr_…`, or a token's id.
+    pub set_by: String,
+    /// Unix ms.
+    pub set_at: i64,
+}
+
+/// What [`Workspace::trusts`] reads of a project itself: its namespace (empty: the operator's)
+/// and its owners ([`Workspace::trust_basis`]).
+#[derive(Clone, Debug)]
+pub struct TrustBasis {
+    namespace: String,
+    owners: Vec<String>,
+}
+
 /// Who is changing membership, and what they hold: the operator (no grant: everything), or a
 /// grant's rules (a person's session, their token and the session it acts within, an operator's
 /// token).
@@ -461,10 +494,12 @@ impl Workspace {
     /// As [`Workspace::trusted_by_members`], from a deleted project's kept homes and owners.
     pub(crate) fn trusted_when_deleted(&self, project: &str, namespace: &str, kind: Kind, r#ref: &str) -> bool {
         let home = self.db.read(|c| c.query_row("SELECT 1 FROM deleted_homes WHERE project_id = ? AND kind = ? AND ref = ?", [project, kind.as_str(), r#ref], |r| r.get::<_, i64>(0)).optional());
-        if roles::decisions::HOMES && HOME_KINDS.contains(&kind) && home.ok().flatten().is_some() {
+        let owners = self.owners.get();
+        // As a live home counts ([`Workspace::trusted_with`]): not while it's a person's own.
+        if roles::decisions::HOMES && HOME_KINDS.contains(&kind) && home.ok().flatten().is_some() && !owners.is_some_and(|o| o.has_person_owner(kind, r#ref)) {
             return true;
         }
-        let Some(owners) = self.owners.get() else { return false };
+        let Some(owners) = owners else { return false };
         let kept = self.deleted_members(project).unwrap_or_default();
         kept.iter().filter(|(_, r)| *r == Role::Owner).any(|(o, _)| if o == namespace { owners.trusts(o, kind, r#ref) } else { owners.owns(o, kind, r#ref) })
     }
@@ -754,6 +789,9 @@ impl Workspace {
     /// moves a home that's set. Moving one away from a project takes being its admin too.
     pub fn set_home(&self, actor: &Actor, project: &str, kind: Kind, r#ref: &str, only_if_none: bool) -> Result<()> {
         crate::check_ref(r#ref)?;
+        // Kept by its id, never a name a later resource could take.
+        let canonical = self.canonical(kind, r#ref)?;
+        let r#ref = canonical.as_str();
         if !HOME_KINDS.contains(&kind) {
             // A create placed through a project: it just gets no home.
             if only_if_none {
@@ -764,18 +802,25 @@ impl Workspace {
         // A person makes a project the home of only what's their own (`Owners`): their grant's rules
         // can name any resource, so they prove nothing about whose it is.
         let owns = actor.user.as_deref().is_none_or(|u| self.owned_by(u, kind, r#ref));
+        // A person's own resource at home in a project (one being settled) moves only with them.
+        let persons = !owns && self.owners.get().is_some_and(|o| o.has_person_owner(kind, r#ref));
         let now = self.db.now_ms()?;
         let changed = self.db.write(|c| {
             owner_of(c, actor.scope(), project)?;
             let current: Option<String> = c.query_row("SELECT project_id FROM homes WHERE kind = ? AND ref = ?", [kind.as_str(), r#ref], |r| r.get(0)).optional()?;
             match current {
-                Some(p) if p == project => return Ok(false),
+                // Said again by the operator or its owner: a product acts on it again (a hand-over
+                // that failed before); by anyone else, nothing changes. Never an audit row.
+                Some(p) if p == project => return Ok(owns),
                 Some(_) if only_if_none => return Ok(false),
                 Some(from) => {
                     if let Some(user) = &actor.user
                         && !matches!(crate::groups::effective_role(c, &from, user)?, Some(Role::Admin | Role::Owner))
                     {
                         return Err(Error::Forbidden(format!("{} {} is at home in another project: only its admins move it", kind.as_str(), r#ref)));
+                    }
+                    if persons {
+                        return Err(Error::Forbidden(format!("{} {} is still a person's own: only they or the operator move its home", kind.as_str(), r#ref)));
                     }
                     c.execute("UPDATE homes SET project_id = ?, set_by = ?, set_at = ? WHERE kind = ? AND ref = ?", params![project, actor.id, now, kind.as_str(), r#ref])?;
                 }
@@ -790,9 +835,126 @@ impl Workspace {
             Ok(true)
         })?;
         if changed {
+            for f in self.on_homed.read().expect("on_homed").iter() {
+                f(kind, r#ref, project, Homed::Set);
+            }
             self.run_events();
         }
         Ok(())
+    }
+
+    /// Run `f(kind, ref, project)` after each resource gets a home, or a new one, outside the
+    /// write: a product whose resources also have a person owner (search) hands it to the project
+    /// there, so a home never stands for a stranger's resource.
+    pub fn on_homed(&self, f: OnHomed) {
+        self.on_homed.write().expect("on_homed").push(f);
+    }
+
+    /// Every home of `kind`.
+    pub fn homes(&self, kind: Kind) -> Result<Vec<HomeRow>> {
+        Ok(self.db.read(|c| {
+            c.query("SELECT ref, project_id, set_by, set_at FROM homes WHERE kind = ? ORDER BY ref", [kind.as_str()], |r| {
+                Ok(HomeRow { r#ref: r.get(0)?, project: r.get(1)?, set_by: r.get(2)?, set_at: r.get(3)? })
+            })
+        })?)
+    }
+
+    /// [`Workspace::homes`] a page at a time: up to `limit` homes of `kind` after the ref `after`.
+    pub fn homes_page(&self, kind: Kind, after: &str, limit: i64) -> Result<Vec<HomeRow>> {
+        Ok(self.db.read(|c| {
+            c.query("SELECT ref, project_id, set_by, set_at FROM homes WHERE kind = ? AND ref > ? ORDER BY ref LIMIT ?", params![kind.as_str(), after, limit], |r| {
+                Ok(HomeRow { r#ref: r.get(0)?, project: r.get(1)?, set_by: r.get(2)?, set_at: r.get(3)? })
+            })
+        })?)
+    }
+
+    /// `kind ref`'s home, if it has one.
+    pub fn home_row(&self, kind: Kind, r#ref: &str) -> Result<Option<HomeRow>> {
+        Ok(self.db.read(|c| {
+            c.query_row("SELECT ref, project_id, set_by, set_at FROM homes WHERE kind = ? AND ref = ?", [kind.as_str(), r#ref], |r| {
+                Ok(HomeRow { r#ref: r.get(0)?, project: r.get(1)?, set_by: r.get(2)?, set_at: r.get(3)? })
+            })
+            .optional()
+        })?)
+    }
+
+    /// Every home in `project`, as `(kind, ref)`.
+    pub fn homes_of_project(&self, project: &str) -> Result<Vec<(String, String)>> {
+        self.db.read(|c| homes_of(c, project))
+    }
+
+    /// Every ref of `kind` a canvas or a home keeps (live or with a deleted project), with the
+    /// earliest it was placed or made a home (unix ms): what a product checks is still the id it
+    /// stood for.
+    pub fn refs_of(&self, kind: Kind) -> Result<Vec<(String, i64)>> {
+        self.refs_page(kind, "", i64::MAX)
+    }
+
+    /// [`Workspace::refs_of`] a page at a time: up to `limit` refs after `after`.
+    pub fn refs_page(&self, kind: Kind, after: &str, limit: i64) -> Result<Vec<(String, i64)>> {
+        let k = kind.as_str();
+        Ok(self.db.read(|c| {
+            c.query(
+                "SELECT ref, MIN(at) FROM (SELECT ref, added_at AS at FROM resources WHERE kind = ?1 AND ref > ?2 UNION ALL SELECT ref, added_at FROM deleted_resources WHERE kind = ?1 AND ref > ?2 \
+                 UNION ALL SELECT ref, set_at FROM homes WHERE kind = ?1 AND ref > ?2 UNION ALL SELECT ref, set_at FROM deleted_homes WHERE kind = ?1 AND ref > ?2) t GROUP BY ref ORDER BY ref LIMIT ?3",
+                params![k, after, limit],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })?)
+    }
+
+    /// The operator's: every canvas place and home of `kind from` (live or with a deleted project)
+    /// is `kind to`'s from now on; where `to` is there already, `from`'s goes.
+    pub fn rekey(&self, kind: Kind, from: &str, to: &str) -> Result<()> {
+        let k = kind.as_str();
+        self.db.write(|c| {
+            c.execute("DELETE FROM resources WHERE kind = ?1 AND ref = ?2 AND owner IN (SELECT owner FROM resources WHERE kind = ?1 AND ref = ?3)", params![k, from, to])?;
+            c.execute("UPDATE resources SET ref = ?3 WHERE kind = ?1 AND ref = ?2", params![k, from, to])?;
+            c.execute("DELETE FROM deleted_resources WHERE kind = ?1 AND ref = ?2 AND project_id IN (SELECT project_id FROM deleted_resources WHERE kind = ?1 AND ref = ?3)", params![k, from, to])?;
+            c.execute("UPDATE deleted_resources SET ref = ?3 WHERE kind = ?1 AND ref = ?2", params![k, from, to])?;
+            c.execute("DELETE FROM homes WHERE kind = ?1 AND ref = ?2 AND EXISTS (SELECT 1 FROM homes WHERE kind = ?1 AND ref = ?3)", params![k, from, to])?;
+            c.execute("UPDATE homes SET ref = ?3 WHERE kind = ?1 AND ref = ?2", params![k, from, to])?;
+            c.execute("DELETE FROM deleted_homes WHERE kind = ?1 AND ref = ?2 AND project_id IN (SELECT project_id FROM deleted_homes WHERE kind = ?1 AND ref = ?3)", params![k, from, to])?;
+            c.execute("UPDATE deleted_homes SET ref = ?3 WHERE kind = ?1 AND ref = ?2", params![k, from, to])?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// The refs of `kind` at home in `project`.
+    pub fn homes_in(&self, project: &str, kind: Kind) -> Result<Vec<String>> {
+        Ok(self.db.read(|c| c.query("SELECT ref FROM homes WHERE project_id = ? AND kind = ? ORDER BY ref", [project, kind.as_str()], |r| r.get(0)))?)
+    }
+
+    /// The operator's: `kind ref` has no home in `project` any more (if it moved since, its new one
+    /// stays; its places on canvases stay, trusted only as their projects' owners' own).
+    pub fn drop_home(&self, kind: Kind, r#ref: &str, project: &str) -> Result<()> {
+        self.db.write(|c| c.execute("DELETE FROM homes WHERE kind = ? AND ref = ? AND project_id = ?", [kind.as_str(), r#ref, project]).map(|_| ()))?;
+        Ok(())
+    }
+
+    /// The operator's: `kind ref` came back to life (a delete that failed, a restore) after the
+    /// project it was at home in was deleted. If it has no home now, the homes deleted projects
+    /// keep of it go, so it's no one's but the operator's and no restore hands it back. The
+    /// projects those homes were in.
+    pub fn drop_kept_homes(&self, kind: Kind, r#ref: &str) -> Result<Vec<String>> {
+        self.db.write(|c| {
+            if c.query_row("SELECT 1 FROM homes WHERE kind = ? AND ref = ?", [kind.as_str(), r#ref], |r| r.get::<_, i64>(0)).optional()?.is_some() {
+                return Ok(Vec::new());
+            }
+            let projects: Vec<String> = c.query("SELECT project_id FROM deleted_homes WHERE kind = ? AND ref = ? ORDER BY project_id", [kind.as_str(), r#ref], |r| r.get(0))?;
+            c.execute("DELETE FROM deleted_homes WHERE kind = ? AND ref = ?", [kind.as_str(), r#ref])?;
+            Ok::<_, Error>(projects)
+        })
+    }
+
+    /// The operator's: what deleted projects keep of `kind ref` (places and homes, for their
+    /// restore) goes too, as [`Workspace::forget_resource`] does for live ones.
+    pub fn forget_kept(&self, kind: Kind, r#ref: &str) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("DELETE FROM deleted_homes WHERE kind = ? AND ref = ?", [kind.as_str(), r#ref])?;
+            c.execute("DELETE FROM deleted_resources WHERE kind = ? AND ref = ?", [kind.as_str(), r#ref])?;
+            Ok::<_, Error>(())
+        })
     }
 
     /// Act on the events not yet done: each claimed for a minute in a write first, so two nodes
@@ -869,13 +1031,40 @@ impl Workspace {
     /// Whether `project` trusts `kind ref` through its home or its owners' resources
     /// ([`Workspace::trusts`]).
     pub(crate) fn trusted_by_members(&self, project: &str, namespace: &str, kind: Kind, r#ref: &str) -> bool {
-        if roles::decisions::HOMES && HOME_KINDS.contains(&kind) && self.home_of(kind, r#ref).ok().flatten().as_deref() == Some(project) {
+        self.trusted_with(project, namespace, &self.owners_of(project).unwrap_or_default(), kind, r#ref)
+    }
+
+    /// [`Workspace::trusted_by_members`] with the project's owners read already.
+    fn trusted_with(&self, project: &str, namespace: &str, project_owners: &[String], kind: Kind, r#ref: &str) -> bool {
+        let owners = self.owners.get();
+        // Its home, unless what's there is still a person's own (a home from before members, or
+        // a hand-over not done yet): that grants nothing until it's settled. One owner lookup,
+        // only for a resource at home in the project.
+        if roles::decisions::HOMES
+            && HOME_KINDS.contains(&kind)
+            && self.home_of(kind, r#ref).ok().flatten().as_deref() == Some(project)
+            && !owners.is_some_and(|o| o.has_person_owner(kind, r#ref))
+        {
             return true;
         }
-        let Some(owners) = self.owners.get() else { return false };
+        let Some(owners) = owners else { return false };
         // The person who made the project as before members (an admin's project is the operator's,
         // D9); another owner adds only what's their own, never all of an admin account's reach.
-        self.owners_of(project).unwrap_or_default().iter().any(|o| if o == namespace { owners.trusts(o, kind, r#ref) } else { owners.owns(o, kind, r#ref) })
+        project_owners.iter().any(|o| if o == namespace { owners.trusts(o, kind, r#ref) } else { owners.owns(o, kind, r#ref) })
+    }
+
+    /// What [`Workspace::trusts`] reads of `project` itself (its namespace and owners), read once
+    /// to ask about many resources ([`Workspace::trusts_on`]). `None`: no such project.
+    pub fn trust_basis(&self, project: &str) -> Result<Option<TrustBasis>> {
+        let namespace: Option<String> = self.db.read(|c| c.query_row("SELECT owner FROM projects WHERE id = ?", [project], |r| r.get(0)).optional())?;
+        let Some(namespace) = namespace else { return Ok(None) };
+        let owners = if namespace.is_empty() { Vec::new() } else { self.owners_of(project)? };
+        Ok(Some(TrustBasis { namespace, owners }))
+    }
+
+    /// [`Workspace::trusts`] on a project's [`TrustBasis`].
+    pub fn trusts_on(&self, project: &str, basis: &TrustBasis, kind: Kind, r#ref: &str) -> bool {
+        basis.namespace.is_empty() || self.trusted_with(project, &basis.namespace, &basis.owners, kind, r#ref)
     }
 
     /// A product deleted `kind ref`: its home and its places on every canvas go, so nothing made
@@ -1070,8 +1259,21 @@ pub(crate) fn bring_back(c: &Conn<'_>, project: &str) -> Result<()> {
         "INSERT INTO members (project_id, user_id, role, environments, added_by, added_at) SELECT project_id, user_id, role, environments, added_by, added_at FROM deleted_members WHERE project_id = ? ON CONFLICT (project_id, user_id) DO NOTHING",
         [project],
     )?;
-    c.execute("INSERT INTO homes (kind, ref, project_id, set_by, set_at) SELECT kind, ref, project_id, set_by, set_at FROM deleted_homes WHERE project_id = ? ON CONFLICT (kind, ref) DO NOTHING", [project])?;
     Ok(())
+}
+
+/// One kept home of a deleted project back (its restore decided it comes back).
+pub(crate) fn bring_back_home(c: &Conn<'_>, project: &str, kind: &str, r#ref: &str) -> Result<()> {
+    c.execute(
+        "INSERT INTO homes (kind, ref, project_id, set_by, set_at) SELECT kind, ref, project_id, set_by, set_at FROM deleted_homes WHERE project_id = ? AND kind = ? AND ref = ? ON CONFLICT (kind, ref) DO NOTHING",
+        [project, kind, r#ref],
+    )?;
+    Ok(())
+}
+
+/// The homes in `project`, as `(kind, ref)`.
+pub(crate) fn homes_of(c: &Conn<'_>, project: &str) -> Result<Vec<(String, String)>> {
+    Ok(c.query("SELECT kind, ref FROM homes WHERE project_id = ? ORDER BY kind, ref", [project], |r| Ok((r.get(0)?, r.get(1)?)))?)
 }
 
 /// A kept deleted project's members and homes go.

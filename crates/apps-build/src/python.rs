@@ -17,9 +17,11 @@ enum Manager {
     Requirements,
     /// A PEP 621 `[project]`: `pip install .`.
     Project,
+    /// Neither (an MkDocs site with only its mkdocs.yml): what it needs installed by name.
+    Bare,
 }
 
-pub(crate) fn detect(tree: &dyn Tree, _: &Overrides) -> Result<Option<Draft>, Error> {
+pub(crate) fn detect(tree: &dyn Tree, o: &Overrides) -> Result<Option<Draft>, Error> {
     let requirements = text(tree, "requirements.txt");
     let pyproject = match text(tree, "pyproject.toml") {
         Some(t) => {
@@ -27,7 +29,9 @@ pub(crate) fn detect(tree: &dyn Tree, _: &Overrides) -> Result<Option<Draft>, Er
         }
         None => None,
     };
-    if requirements.is_none() && pyproject.is_none() {
+    // An MkDocs site (mkdocs.yml): built with `mkdocs build`, its `site` served as static files.
+    let mkdocs = ["mkdocs.yml", "mkdocs.yaml"].into_iter().any(|f| tree.exists(f));
+    if requirements.is_none() && pyproject.is_none() && !mkdocs {
         return Ok(None);
     }
     let mut notes = Vec::new();
@@ -54,6 +58,8 @@ pub(crate) fn detect(tree: &dyn Tree, _: &Overrides) -> Result<Option<Draft>, Er
     } else if requirements.is_some() {
         notes.push("found requirements.txt: pip".into());
         Manager::Requirements
+    } else if pyproject.is_none() {
+        Manager::Bare
     } else {
         notes.push("found pyproject.toml: pip install .".into());
         Manager::Project
@@ -83,7 +89,20 @@ pub(crate) fn detect(tree: &dyn Tree, _: &Overrides) -> Result<Option<Draft>, Er
     );
 
     let mut extra: Option<&str> = None;
-    let start = if tree.exists("manage.py")
+    // Only when nothing else says how it starts: an app keeping its docs' mkdocs.yml at its root
+    // is the app (a start set, a Procfile, an entry file or a server among its dependencies).
+    let server = ["django", "flask", "fastapi", "starlette", "litestar", "aiohttp", "sanic", "quart", "streamlit", "gunicorn", "uvicorn", "tornado", "bottle", "falcon"].iter().any(|f| has(f));
+    let entry = ["main.py", "app.py", "server.py", "manage.py", "Procfile"].into_iter().any(|f| tree.exists(f));
+    let site = mkdocs && !server && !entry && o.start.is_none();
+    if site {
+        notes.push("mkdocs.yml: a static MkDocs site, built into site".into());
+        if !has("mkdocs") {
+            extra = Some("mkdocs");
+        }
+    }
+    let start = if site {
+        None
+    } else if tree.exists("manage.py")
         && (has("django") || text(tree, "manage.py").is_some_and(|m| m.contains("django")))
     {
         notes.push("found manage.py: Django".into());
@@ -151,6 +170,7 @@ pub(crate) fn detect(tree: &dyn Tree, _: &Overrides) -> Result<Option<Draft>, Er
     }
     match &start {
         Some(s) => notes.push(format!("starts with {s}")),
+        None if site => {}
         None => notes.push("nothing says how to start it: add main.py or set start".into()),
     }
     // Their workers follow the instance's size: roll sets WEB_CONCURRENCY from its CPU and memory.
@@ -201,6 +221,7 @@ pub(crate) fn detect(tree: &dyn Tree, _: &Overrides) -> Result<Option<Draft>, Er
             "/root/.cache/pip",
         ),
         Manager::Project => ("", "pip install .", None, "/root/.cache/pip"),
+        Manager::Bare => ("", "", None, "/root/.cache/pip"),
     };
     let add = extra.map(|e| {
         if manager == Manager::Uv {
@@ -277,6 +298,12 @@ pub(crate) fn detect(tree: &dyn Tree, _: &Overrides) -> Result<Option<Draft>, Er
         if let Some(build) = c.build {
             df.run(&caches, build);
         }
+        if site {
+            df.from(crate::static_site::IMAGE, None);
+            df.line(&format!("COPY --from=build /app/site {}", crate::static_site::ROOT));
+            df.serve(Some(crate::static_site::USER), c.start);
+            return df.finish();
+        }
         df.from(&image, None);
         df.env(&[
             ("PYTHONUNBUFFERED", "1"),
@@ -291,12 +318,12 @@ pub(crate) fn detect(tree: &dyn Tree, _: &Overrides) -> Result<Option<Draft>, Er
         df.finish()
     });
     Ok(Some(Draft {
-        provider: Provider::Python,
-        framework,
+        provider: if site { Provider::Static } else { Provider::Python },
+        framework: if site { Some("mkdocs") } else { framework },
         language_version: Some(version.minor()),
         install,
-        build: None,
-        start,
+        build: site.then(|| "mkdocs build".to_string()),
+        start: if site { Some(crate::static_site::START.to_string()) } else { start },
         notes,
         render,
     }))

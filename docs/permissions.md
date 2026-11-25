@@ -478,6 +478,12 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   so a rule that asks for `reveal` isn't asked here (the 403 says so). A token that should do this
   needs `reveal` allowed, or can use `POST …/keys`, which asks as any route does. The gate reads
   no console body.
+- A search API key (`POST /v1/search/clusters/{id}/keys`) is what the key may do: `reveal` when
+  its `access` is `read` or `append`, `delete` when it's `data` (its role deletes indices and sets
+  lifecycle policies), and `admin` when it's `admin` (the default, everything the cluster's own
+  user may do, as the console is) or anything else. A new admin password (`POST …/password`) is
+  `admin`. Both answer a credential, so search refuses them (403) to a grant that can't also
+  reveal on the cluster (`capable: [reveal]`).
 - Agents' machine commands, by `policy::agent_may`'s tiers: diffs and file reads `read`; working
   threads `write`; publishing with `land` `deploy`; a shell, writing files, rolling back, raising a
   thread's runtime or interaction mode, answering an agent's approval, endpoints, the gateway,
@@ -677,9 +683,10 @@ A signed-in person who isn't an admin (D9: roll's admin accounts stay the operat
 `Access::UserOrCredential`), rolld's gate hands the request to the evaluator
 (`Authorizer::handle_session`), which builds `GrantKind::Session` from their memberships now (one
 indexed read in the workspace, never cached) and, on a **member product's** row (workspace and
-secrets in v1, `roll_auth::roles::MEMBER_PRODUCTS`), decides it as a token's: the row, the
-resource, the rules. Making a project is the person's own (`catalog::PERSON_OWN`). Every other
-route goes on as it did.
+secrets in v1, previews and search in v1.1, `roll_auth::roles::MEMBER_PRODUCTS`), decides it as a
+token's: the row, the resource, the rules. Making a project is the person's own
+(`catalog::PERSON_OWN`), and so is a search cluster made without `X-Roll-Project`
+(`catalog::PERSON_OWN_UNPLACED`). Every other route goes on as it did.
 
 - The roles are fixed rule templates (`crates/roll-auth/src/roles.rs`, one module holding the open
   decisions D1–D9). A rule may carry `unprotected: true`: it matches only a resource whose
@@ -692,6 +699,25 @@ route goes on as it did.
   that a project admin changes roles. A list it can't see whole is filtered; a session never asks,
   and neither does a person's token that wasn't made to: its rules can't reach past their roles,
   so its refusal points at a role, not at the token's rules.
+- A canvas proves nothing for a person's grant (their session, or a token of theirs): on a member
+  product, a resource a project's canvas holds is in that project for their rules only when the
+  project trusts it (`Workspace::trusts`: its home, or one of the project's owners' own;
+  `Access::resource_as`). A resource in none of their projects is a 404 worded as for a missing
+  one, with no role hint (that's only for a project they're in). Products that aren't member
+  products yet keep the canvas as it is.
+- A person's token is held within their session on a create too, whatever its own rules say: it
+  never makes anything in a project its person isn't in (404), nor where their role doesn't let
+  them (403). A create naming no project is refused the same way (previews'), except where it's
+  the person's own (`catalog::PERSON_OWN_UNPLACED`: a search cluster of theirs). What a request
+  hands its resource from others (`lends`: a branch's parent, a remote) the session must reach
+  too, or it answers 404. An allowed create in a project carries the project the gate decided it
+  by (`roll_auth::InProject`); a product makes it there from that, never from the header.
+- What a person owns themselves stays theirs beside their projects: a product registers it
+  (`Resolvers::owned_fn`; search's clusters), and the person's grant gets a rule with every action on
+  each, by id.
+- A person's allowed request carries `roll_auth::Reach`: the same decision, asked about another
+  resource of the product by id, resolved the same way. search narrows lists and checks a remote
+  cluster with it.
 - Session requests aren't access-log rows (they aren't a token's), allowed or refused: a refused
   session request leaves no audit row either, only its answer. Membership changes are
   (`product=workspace`: `member.invite`, `member.accept`, `member.role`, `member.remove`,
@@ -1292,7 +1318,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `GET /v1/access/tokens/{id}/tools` | access read | what an agent connected with it is offered over MCP: `{tools: [{name, title, product, read_only, destructive}], prompts, context_tokens}` (served by roll-mcp, which reads the token as the caller first); the token page shows it |
 | `GET /v1/access/tokens/{id}/tighten` | access read | `?days=` (1-90, 30): `{since, days, used: [{product, action, resource, count, last_at}], rules, narrower}`: its rules narrowed to what it used ("Tighten to what it used") |
 | `POST /v1/access/tokens/{id}/rotate` | access admin | `{keep_old_for_s?}`: a new secret with the same rules; the old one stops at once, or works that long (at most 604800, a week: Stripe's roll key); in its grace the old one calls products but manages no tokens (403 `rotated_secret` on `/v1/access`) → `{grant, token}`; not for OAuth connections |
-| `GET /v1/access/approvals` | access read | newest first; `?state=pending`, `?grant=<id>` (one token's), `?limit=` (at most 500) |
+| `GET /v1/access/approvals` | access read | newest first; `?state=` one of pending, approved, denied, expired, used (another is a 400), `?grant=<id>` (one token's), `?limit=` (at most 500) |
 | `GET /v1/access/approvals/{id}` | the grant that asked, or access read | an approval; `?wait=55` waits for a decision |
 | `GET /v1/access/approvals/decided` | any grant (its own), a person (their tokens'), the operator (all) | `{events, next}`: approvals decided after `?after=` (each decision's `seq`, given in the deciding write, so none is missed), oldest first, `?limit=` (at most 500); `?latest=1` answers only the newest place (not with `after`). Each says its `id`, `state`, `product`, `action`, `resource`, `tool`, `summary`, `decided_by` and `reason`, never the request's arguments. MCP Events' `access.approval` reads it |
 | `POST /v1/access/approvals/{id}/approve` | operator | `{remember?: "1h" \| "8h" \| "1d" \| "7d" \| "30d" \| "always"}`: also allow the same action on the same resource ("Remembered approvals") |
