@@ -21772,6 +21772,44 @@ Measuring notes for whoever repeats it:
 - Two fixed-count TPC-B runs of the same binary read 494 k and 425 k user instructions a
   transaction (304 saw the same: the counts follow the throughput a run reaches).
 
+## Storage format 5: column blocks, step 2, first piece: rows made a column at a time, of the columns read (agent 311)
+
+On step 1 (`cand/a311-2`), format 5 only (switch on); format 4's paths as they were. HANDOFF
+"Storage format 5: column blocks, stage 1" for the format; BENCH "Storage format 5, step 2" for the
+pairs.
+- **Rows made a column at a time** (`ColDir::rows_into`): a run of rows' lengths summed a column
+  at a time, then each column's values written where they go, one loop per layout (fixed widths
+  copied by a constant length, no call per value), the rows into one buffer. `LazyRows::make`,
+  `Block::col_rows` (a block's rows for a row-at-a-time reader or a compaction) and a single row
+  (`ColDir::row`: a point read's) all go this way; before, `ColDir::value` took ~120 instructions
+  a value (a layout's match and a push each): q03's extra instructions were 85% `value` / `row`.
+- **A lookup's rows of the columns it reads** (303's sketch, `wip/a303-s2`): `Lookup::reads` (the
+  columns decoded and those `StoredCmps` compares, `mark_cols`), `PointReader::get_sorted_cols`:
+  a column block's rows found by the multi-get made after every seek, a block's run at a time,
+  into one buffer, the other columns NULL.
+- **A heap fetch's rows of the columns read** (`Scan::read_cols`, `TxnScan::read_cols`, set by
+  `ScanNode::fetch_dense_ref` when its scan has column blocks): `need`, the projection (`pick`
+  offers it as stored) and the filter's columns; none (whole rows) for row marks / DML, a
+  tracked table (`emit`), an index-only or access-method scan, or no `need` / projection. A
+  masked row's batch entry gets its length as made.
+- Test: `column_blocks_read_as_rows` also reads a scan with `read_cols` (the masked columns as
+  whole rows read; the others NULL in column blocks' rows, asserted).
+
+**Format 5 against format 4** (`s4` plain dist, one binary, two data sets; step 1 for comparison):
+q03 +31.6% -> **+8.8%**, q07 +39.6% -> **+19.7%**, q09 +14.4% -> **+11.8%**, range read (100 rows of
+orders, two columns) +23.8% -> **+10.4%**, point select +3.6% -> +4.3%; q01 -29.2%, q06 -39.0%, q10
+-12.1% as before.
+
+**Switch off against `aaa096e02`** (plain dist, two pairs): q01 -0.08%, q03 -0.05 / +0.14%, q07
+-0.25 / -0.28%, q09 -0.22 / -0.21%, q06 +0.21-0.24% and the count(*) / sum steps +0.14-0.60% as
+step 1's (its jump padding), 313's probe ranges -0.05 to +0.20%, select-only point reads -1.5 to
++0.3% (+6% / -1.5% in the phase without updates: noise on lane B's 6.6-6.9 foreign cores).
+
+**Left for step 2**: q07 / q09's lookups still make rows of the columns they read and then decode
+them (decode from the column block itself would skip the bytes), point selects make whole rows
+(`first_to` / `first_in_l1`: no columns known there yet), range reads of seq scans and parscan's
+row path have no mask yet.
+
 ## Storage format 5: column blocks, stage 1 (agents 303, 311)
 
 Agent 282's prototype (HANDOFF "Storage format 5: column blocks, a prototype", branch

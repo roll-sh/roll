@@ -356,6 +356,32 @@ DELETE and VACUUM, 75.2 MB after VACUUM FULL (its bloat for these statements: 91
 | whole script without the three `string_agg(ctid::text ... ORDER BY id)` checks | 255.6 (UPDATE) | 359.5 |
 | the highest step's own peak, with the checks | 301 (n2 382, CHECKPOINT after the last check) | - |
 
+## Storage format 5, step 2: rows made a column at a time, of the columns read (2026-11-25, agent 311)
+
+HANDOFF "Storage format 5: column blocks, step 2, first piece". `h3` = the head `aaa096e02`, `s4` =
+step 2's first piece on step 1, plain dist; TPC-H SF1 per form as in "Storage format 5, stage 1"
+(format 4 loaded by h3, format 5 by step 1's build with `ROLL_COLBLOCKS=1`); 313's probe for range
+and point reads (`~/.cache/a313/bench/probe.sh`, scale 32, 8 clients). User instructions, lanes
+3-7 foreign cores.
+
+| format 5 against format 4 | step 1 | s4 |
+|---|---|---|
+| q01 / q06 / q10 | -29.1 / -39.1 / -11.6% | -29.2 / -39.0 / -12.1% |
+| q03 | +31.6% | +8.8% |
+| q07 | +39.6% | +19.7% |
+| q09 | +14.4% | +11.8% |
+| range read, 100 rows, 2 columns (instructions / read) | +23.8% | +10.4% |
+| point select | +3.6% | +4.3% |
+
+| switch off, h3 -> s4 | pair 1 | pair 2 |
+|---|---|---|
+| q01 / q06 | -0.08 / +0.24% | -0.09 / +0.21% |
+| q03 / q07 / q09 | -0.05 / -0.25 / -0.22% | +0.14 / -0.28 / -0.21% |
+| count(*) / sums (bulk steps) | +0.14 to +0.60% | +0.14 to +0.60% |
+| probe fx100 none / 10 / 100 newer | -0.05 / +0.02 / +0.08% | +0.20 / +0.01 / +0.05% |
+| probe fx1k none / 10 / 100 newer | +0.02 / 0.00 / +0.01% | +0.05 / +0.02 / +0.03% |
+| select-only none / 10 / 100 | -1.52 / +0.15 / +0.12% | +6.06 / +0.30 / +0.19% |
+
 ## Storage format 5, stage 1: column blocks behind a switch (2026-11-25, agents 303, 311)
 
 HANDOFF "Storage format 5: column blocks, stage 1". The head `8f3876dab` (**h**) and step 1 on it
