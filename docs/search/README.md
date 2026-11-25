@@ -343,7 +343,9 @@ applications). A web page calls a cluster directly, with no backend of its own i
     makes a new one (in its answer only): every key derived under the old one is refused from the
     next request. Each secret has a `generation`, and the cluster stores a new secret only as the
     stored one's next, inside the state update: of two rotations racing, one gets a 409 and its
-    secret is never handed out. Revoking the parent refuses all of them at once.
+    secret is never handed out; a key made with a `derive` of its own starts at generation 1, and
+    one that can't advance is refused, never wrapped. Revoking the parent refuses all of them at
+    once.
   - *A derived key* is `rdk1.<payload>.<mac>`: base64url (no padding) of one JSON object, and of
     HMAC-SHA256 over `rdk1.<payload>` keyed with the secret as written. One version, one
     algorithm; nothing in the token picks either. The payload: `key` (the parent's id) and
@@ -356,7 +358,13 @@ applications). A web page calls a cluster directly, with no backend of its own i
     `constant_score` or `nested`; it's built as the owner's filter is, outside the browser
     policy, so nothing that reads another document or index (terms lookups, indexed shapes,
     `more_like_this`, joins, `percolate`), runs Painless, renders a template or wraps an encoded
-    query; then Elasticsearch's role-query check and the cluster's own parse), a `user` (an end
+    query; then Elasticsearch's role-query check and the cluster's own parse; nothing that
+    expands terms (`prefix`, `wildcard`, the prefix match queries, `simple_query_string`,
+    `fuzziness`, `max_expansions`) unless the parent's `limits.allow_expensive_queries`, since
+    its expansions aren't capped as a browser key's own queries' are; nor, without it, a
+    `range` on a field an index the key reaches maps as text or a keyword (its terms are walked,
+    as Elasticsearch's `search.allow_expensive_queries: false` refuses), read from the mappings on
+    each request), a `range` on numbers and dates staying allowed, a `user` (an end
     customer, Algolia's `userToken`),
     `origins` and `rate_limit: {"per_minute": n}` (the user's). Unknown fields, duplicate keys and
     trailing bytes are refused. It goes wherever a browser key goes (`Authorization: ApiKey
@@ -372,14 +380,23 @@ applications). A web page calls a cluster directly, with no backend of its own i
     the parent's, the parent's application only, the filter as above at most 24 levels deep, a
     `rate_limit` at most a user's share, origins the cluster's CORS allows), each refusal a 401
     naming the field, never a value from the key. The key is verified once per request, nothing
-    cached: a revoke or rotation holds from the next request.
+    cached: the owner node verifies it and hands the request to the cluster with what it verified
+    (the parent's id, the narrowing, the key's expiry and the generation of the secret that
+    signed it) on the request in process (`search_es::rest::Verified`, as it says who
+    authenticated with the cluster's own credentials): no header carries either, so nothing a
+    client sends can claim them. The cluster checks only that the parent is still live, its
+    secret still that generation and the key unexpired, on the request and every internal call
+    it makes, so a revoke, rotation or expiry holds even inside a running request.
   - *What it may do* is its parent's, narrowed: the principal is the parent's API key with one
     more set of role descriptors every permission must also pass (the derived indices with
     `read`, the derived filter as their document-level `query`), so the indices intersect and
     the two filters AND, in every place document and field level security reach. It's a browser
     key under its parent's policy, limits and concurrency, and doesn't even get
-    `_security/_authenticate`. With `origins`, a request whose `Origin` isn't one of them is
-    refused (curl and servers send none: origins bind browsers, as CORS does).
+    `_security/_authenticate`, nor scrolls, points in time or async searches (were one
+    reachable, its owner would be the derived key itself, by the hash of its payload, never its
+    parent or a sibling). Its reads are restricted ones (`dls::ReadSecurity`), so it never reads a
+    request-cache entry built for a wider view. With `origins`, a request whose `Origin` isn't
+    one of them is refused (curl and servers send none: origins bind browsers, as CORS does).
   - *Rate limits*: a derived key pays everything its parent would (the cluster's ceiling, the
     parent's own limit, its per-address limits), so the parent's limit is the ceiling of all its
     derived keys together. A `user` gets its own bucket on top: a quarter of the parent's limit,
