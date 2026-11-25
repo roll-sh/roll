@@ -6,8 +6,9 @@ name: release-cli
 # (https://roll.sh/install.ps1) install from, with the winget and Scoop manifests filled in for it
 # (deploy/cli/render.sh).
 #
-# `windows-check` (cargo check for Windows, on both runners) runs on pull requests that touch roll-cli and on a
-# dispatch without a tag, which builds and publishes nothing. It isn't part of the merge gate (ci.yml).
+# `windows-check` (cargo check for Windows, on both runners) runs on pull requests that touch
+# roll-cli and on a dispatch without a tag, which builds and publishes nothing. It isn't part of the
+# merge gate (ci.yml).
 
 on:
   push:
