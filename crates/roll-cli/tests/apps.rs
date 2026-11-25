@@ -273,3 +273,40 @@ async fn exec_reaches_a_linked_service_through_a_tunnel() {
     assert_eq!(code, Some(0), "{err}\n{out}");
     assert!(out.contains("url=http://127.0.0.1:") && out.contains("HTTP/1.1 200") && out.contains(r#""path":"/via""#), "{out}\n{err}");
 }
+
+/// A whole project is promoted (Heroku Pipelines' promote): what each service runs in staging,
+/// listed, then each promoted through its own call with that deployment as its `expect`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_project_is_promoted_whole() {
+    let t = start().await;
+    for name in ["web", "api"] {
+        t.ok(&["create", name, "-p", "acme", "--image", "nginx:1.27", "--port", "80"]).await;
+    }
+    t.ok(&["env", "-s", "web", "-p", "acme", "-e", "staging", "--all-services"]).await;
+    for name in ["web", "api"] {
+        let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll")).args(["--json", "deploy", "-s", name, "-p", "acme", "-e", "staging", "--image", "nginx:1.27"]).current_dir(t.work.path()).env("ROLL_API_URL", &t.api).env_remove("ROLL_API_KEY").stdin(Stdio::null()).output().await.unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+    // Live in staging first: what's promoted is what runs there.
+    let mut live = Vec::new();
+    for _ in 0..200 {
+        live.clear();
+        for name in ["web", "api"] {
+            let d = t.json(&["deploys", "-s", name, "-p", "acme", "-e", "staging"]).await;
+            if d[0]["status"] == "active" {
+                live.push(d[0]["id"].as_str().unwrap_or_default().to_string());
+            }
+        }
+        if live.len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(live.len(), 2, "staging live for both");
+    let out = t.json(&["promote", "-s", "web", "-p", "acme", "--from", "staging", "--all-services"]).await;
+    let promoted: Vec<&str> = out.as_array().unwrap().iter().filter_map(|r| r["deployment"]["id"].as_str()).collect();
+    assert_eq!(promoted.len(), 2, "{out}");
+    for r in out.as_array().unwrap() {
+        assert_eq!(r["deployment"]["trigger"], "promote", "{r}");
+    }
+}
