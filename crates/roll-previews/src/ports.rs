@@ -264,6 +264,10 @@ pub struct Shot {
     /// What it left out (pages past a run's ten, stories it didn't take).
     #[serde(default)]
     pub skipped: crate::Skipped,
+    /// How long its containers ran, together (Chromium's, the other browsers', the stories'),
+    /// each of [`crate::runtime::BROWSER_GIB`]: what it costs.
+    #[serde(default)]
+    pub container_ms: u64,
 }
 
 /// PNG bytes as base64 in JSON (a [`Shot`] from another node).
@@ -865,6 +869,18 @@ pub trait Apps: Send + Sync {
     /// backend serves them itself).
     fn requests(&self, _preview: &str) -> Vec<crate::RequestLine> {
         Vec::new()
+    }
+    /// What the service's environment cost this month where something else runs and bills it
+    /// (roll apps: its `pv-` environment's builds, compute and egress at roll apps' prices), or
+    /// `None` when roll's runtime runs it and its time is counted here.
+    async fn spent_usd(&self, _preview: &str, _service: &str) -> Option<f64> {
+        None
+    }
+    /// Keep a service down where its backend wakes it by itself (roll apps wakes its own on a
+    /// visit: its `pv-` environment paused), `true` while the preview is over its size cap and
+    /// `false` once it isn't. roll's runtime refuses a capped preview's start itself.
+    async fn hold_down(&self, _preview: &str, _service: &str, _down: bool) -> anyhow::Result<()> {
+        Ok(())
     }
     /// What the service uses right now, `(cores, resident bytes)`: `None` when it isn't running
     /// (or the backend can't tell).

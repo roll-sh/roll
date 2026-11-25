@@ -77,6 +77,8 @@ export interface PreviewCost {
   sleeping_usd_month: number;
   active_usd_hour: number;
   month_to_date_usd: number;
+  /** Of `month_to_date_usd`: its browsers' and jobs' containers (screenshot runs, stories, agents' runs, seed/release/teardown). */
+  runs_usd?: number;
   bytes: number;
 }
 
@@ -459,6 +461,8 @@ export interface PreviewSettings {
   egress_hosts?: string[];
   /** What a fork's preview (an untrusted head a writer approved) may reach when `egress` is `open`: `roll` (default) or `open`. */
   egress_forks?: "open" | "roll";
+  /** A fork's preview's data: `schema` (default) its branches' structure without rows, a kind that can't be left out; `same` what the project's own previews get. */
+  data_forks?: "schema" | "same";
   /** Branch the data as of a point in time where the product keeps history: `-24h`, `-30m`, `-7d`, or an RFC 3339 time (30 days back at most). */
   data_at?: string | null;
   /** A feedback button on its pages for people who came in through roll (link access, or a team session). */

@@ -29,11 +29,15 @@
 
 pub(crate) mod algolia;
 mod copy;
+mod filters;
+pub(crate) mod later;
 pub(crate) mod meili;
+mod template;
 pub(crate) mod typesense;
 
 use crate::control::{Control, ControlError, Result};
-use crate::migrate::{remote_error, Inspected, Kind, MigrateRequest, Pick, Progress, Source};
+use crate::migrate::{remote_error, Inspected, Kind, MigrateRequest, Pick, Progress, Source, Stage};
+use later::{now_ms, CopyState, Imported, Position};
 use crate::store::SearchCluster;
 use copy::{response, Copy, Reader};
 use search_es::api::by_query::Live;
@@ -56,6 +60,8 @@ pub(crate) const MAX_RULES: usize = MAX_RULESETS * RULES_PER_SET;
 const MAX_RULE_IDS: usize = 100;
 /// Entries `not_mapped` lists per index (the rest are counted).
 const MAX_NOT_MAPPED: usize = 500;
+/// Algolia rules that become search templates of their own (filters, query rewrites).
+const MAX_RULE_TEMPLATES: usize = 50;
 /// Algolia replicas read for their sorts.
 const MAX_REPLICAS: usize = 20;
 /// Records read to see what types the attributes the settings name hold.
@@ -82,6 +88,10 @@ struct Ready {
     mappings: Value,
     summary: Value,
     restart: bool,
+    /// A stopped copy's record and where it resumes (`None`: from the start).
+    resume: Option<(Imported, Option<Position>)>,
+    /// The search templates to store, checked ([`Plan::build_templates`]).
+    templates: Vec<(String, String)>,
     permit: Option<remote::RemoteSlot>,
     index: String,
     dest: String,
@@ -129,6 +139,11 @@ fn kind_name(k: Kind) -> &'static str {
 
 /// The checked source: which fields each product takes, its URL, its key.
 fn spec_of(s: &Source, algolia_url: Option<&str>) -> Result<Spec> {
+    spec_for(s, algolia_url, true)
+}
+
+/// [`spec_of`]; `keyed: false` takes a source without its key (a cutover calls no source).
+fn spec_for(s: &Source, algolia_url: Option<&str>, keyed: bool) -> Result<Spec> {
     let invalid = |m: &str| Err(ControlError::Invalid(m.to_string()));
     let key = s.api_key.as_deref().map(str::trim).filter(|k| !k.is_empty());
     if s.username.is_some() || s.password.is_some() {
@@ -147,7 +162,11 @@ fn spec_of(s: &Source, algolia_url: Option<&str>) -> Result<Spec> {
             if app.is_empty() || app.len() > 32 || !app.bytes().all(|c| c.is_ascii_alphanumeric()) {
                 return invalid("app_id is Algolia's application id (letters and digits, as the dashboard shows it)");
             }
-            let Some(key) = key else { return invalid("Algolia needs an API key that can browse, read settings, synonyms and rules (the admin key, or one with browse and settings)") };
+            let key = match key {
+                Some(k) => k,
+                None if !keyed => "",
+                None => return invalid("Algolia needs an API key that can browse, read settings, synonyms and rules (the admin key, or one with browse and settings)"),
+            };
             let base = match algolia_url {
                 Some(u) => crate::migrate::normalize_host(u)?,
                 None => format!("https://{}-dsn.algolia.net:443", app.to_ascii_lowercase()),
@@ -167,7 +186,7 @@ fn spec_of(s: &Source, algolia_url: Option<&str>) -> Result<Spec> {
             let base = crate::migrate::normalize_host(&s.host)?;
             let headers = match (s.kind, key) {
                 (Kind::Typesense, Some(k)) => vec![("X-TYPESENSE-API-KEY".into(), k.to_string())],
-                (Kind::Typesense, None) => return invalid("Typesense needs an API key (an admin key, or one with collections:get, documents:export, synonyms:get and overrides:get)"),
+                (Kind::Typesense, None) if keyed => return invalid("Typesense needs an API key (an admin key, or one with collections:get, documents:export, synonyms:get and overrides:get)"),
                 (_, Some(k)) => vec![("Authorization".into(), format!("Bearer {k}"))],
                 // A Meilisearch without a master key takes requests without one.
                 (_, None) => Vec::new(),
@@ -266,6 +285,11 @@ pub(crate) struct Plan {
     pub synonyms: Vec<(String, String)>,
     /// Elasticsearch query rules (`rule_id`, `type`, `criteria`, `actions`).
     pub rules: Vec<Value>,
+    /// Pinned rules of Algolia rules with `filterPromotes`: applied inside the search's
+    /// `filters`, so their pins must match them.
+    pub filtered_rules: Vec<Value>,
+    /// Algolia rules that filter or rewrite the query, each a search template of its own.
+    pub rule_templates: Vec<RuleTemplate>,
     /// `fuzziness` for the template (`AUTO:4,8`), or none when typo tolerance is off.
     pub fuzziness: Option<String>,
     /// The last word matches as a prefix (search as you type): `bool_prefix`.
@@ -392,9 +416,9 @@ impl Plan {
         for f in bad {
             self.skip("setting", format!("attribute: {f}"), "not an attribute name the search template can carry (a metadata field, or characters a field name can't hold): left out of the template");
         }
-        if !self.rules.is_empty() {
-            let ids: Vec<&str> = self.rules.iter().filter_map(|r| r["rule_id"].as_str()).take(20).collect();
-            let more = self.rules.len().saturating_sub(ids.len());
+        if !self.rules.is_empty() || !self.filtered_rules.is_empty() {
+            let ids: Vec<&str> = self.rules.iter().chain(&self.filtered_rules).filter_map(|r| r["rule_id"].as_str()).take(20).collect();
+            let more = (self.rules.len() + self.filtered_rules.len()).saturating_sub(ids.len());
             self.notes.push(format!(
                 "query rules ({}{}) match the search text exactly as sent, case and all, and `contains` is a substring test: send the text lowercased as `rules_query` (the template falls back to `query`)",
                 ids.join(", "),
@@ -415,6 +439,20 @@ impl Plan {
         (0..n).map(|i| if i == 0 { format!("{dest}-rules") } else { format!("{dest}-rules-{}", i + 1) }).collect()
     }
 
+    fn filtered_rulesets(&self, dest: &str) -> Vec<String> {
+        let n = self.filtered_rules.len().div_ceil(RULES_PER_SET);
+        (0..n).map(|i| if i == 0 { format!("{dest}-rules-filtered") } else { format!("{dest}-rules-filtered-{}", i + 1) }).collect()
+    }
+
+    fn rule_template_id(dest: &str, rule: &str) -> String {
+        format!("{dest}-search-rule-{rule}")
+    }
+
+    /// The rule templates as the import record and the answer list them.
+    fn rule_template_list(&self, dest: &str) -> Vec<Value> {
+        self.rule_templates.iter().map(|r| json!({ "rule": r.rule, "anchoring": r.anchoring, "pattern": r.pattern, "template": Plan::rule_template_id(dest, &r.rule) })).collect()
+    }
+
     fn template_id(dest: &str) -> String {
         format!("{dest}-search")
     }
@@ -425,7 +463,7 @@ impl Plan {
 
     /// The index's mappings: the explicit fields as a tree, `dynamic` for the rest, where it
     /// came from (`_meta.roll_import`, which a restarted copy checks), `_source` filtering.
-    pub fn mappings(&mut self, from: &str) -> Value {
+    pub fn mappings(&mut self, imported: &Imported) -> Value {
         let mut props = Map::new();
         // Deepest first: an attribute that holds objects (`a.b`) wins over a leaf at its parent
         // (`a`), which is the one listed.
@@ -446,7 +484,7 @@ impl Plan {
         for p in conflicts {
             self.skip("field", p, "another mapped field is an object at this path: left to dynamic mapping");
         }
-        let mut m = json!({ "dynamic": true, "_meta": { "roll_import": { "from": from } }, "properties": props });
+        let mut m = json!({ "dynamic": true, "_meta": { "roll_import": imported }, "properties": props });
         let mut source = Map::new();
         if !self.source_excludes.is_empty() {
             source.insert("excludes".into(), json!(self.source_excludes));
@@ -520,47 +558,6 @@ impl Plan {
         s
     }
 
-    /// The search template's source: the default fields searched as the source would (typo
-    /// tolerance, prefix on the last word), the rules applied, the sorts, the collapse.
-    fn template(&self, dest: &str, sort_first: &[(String, &'static str)]) -> Value {
-        // Typos on every word, the last also as a prefix: `bool_prefix` alone never makes its
-        // last word fuzzy, so the two are said apart.
-        let words = match &self.fuzziness {
-            Some(f) => json!({ "multi_match": { "query": "{{query}}", "fuzziness": f, "lenient": true } }),
-            None => json!({ "multi_match": { "query": "{{query}}", "lenient": true } }),
-        };
-        let mut query = if self.prefix {
-            let prefix = json!({ "multi_match": { "query": "{{query}}", "type": "bool_prefix", "lenient": true } });
-            json!({ "bool": { "should": [words, prefix] } })
-        } else {
-            words
-        };
-        let sets = self.rulesets(dest);
-        if !sets.is_empty() {
-            // Rules match the text exactly as sent (as Elasticsearch's do): `rules_query`, which
-            // clients send lowercased, else the query itself.
-            query = json!({ "rule": { "organic": query, "ruleset_ids": sets, "match_criteria": { "query_string": "{{rules_query}}{{^rules_query}}{{query}}{{/rules_query}}", "context": "{{context}}" } } });
-        }
-        let mut t = json!({ "query": query });
-        if !sort_first.is_empty() || !self.sort_after.is_empty() {
-            let one = |(f, o): &(String, &str)| json!({ f.clone(): { "order": o } });
-            let mut sort: Vec<Value> = sort_first.iter().map(one).collect();
-            sort.push(json!("_score"));
-            sort.extend(self.sort_after.iter().map(one));
-            t["sort"] = json!(sort);
-        }
-        if let Some((f, n)) = &self.collapse {
-            t["collapse"] = if *n > 1 { json!({ "field": f, "inner_hits": { "name": "distinct", "size": n } }) } else { json!({ "field": f }) };
-        }
-        if !self.retrieve.is_empty() {
-            t["_source"] = json!(self.retrieve);
-        }
-        if let Some(n) = self.size {
-            t["size"] = json!(n);
-        }
-        t
-    }
-
     /// What the answer says about the plan (also before anything is made: `dry_run`).
     fn summary(&self, dest: &str) -> Value {
         let mut v = json!({
@@ -569,7 +566,7 @@ impl Plan {
             "mappings": self.fields.len(),
             "default_fields": self.default_fields,
             "synonyms": self.synonyms.len(),
-            "rules": self.rules.len(),
+            "rules": self.rules.len() + self.filtered_rules.len(),
             "search_template": Plan::template_id(dest),
             "not_mapped": self.not_mapped,
             "not_mapped_more": self.not_mapped_more,
@@ -581,11 +578,29 @@ impl Plan {
         if !self.rules.is_empty() {
             v["rulesets"] = json!(self.rulesets(dest));
         }
+        if !self.filtered_rules.is_empty() {
+            v["filtered_rulesets"] = json!(self.filtered_rulesets(dest));
+        }
+        if !self.rule_templates.is_empty() {
+            v["rule_templates"] = json!(self.rule_template_list(dest));
+        }
         if !self.replicas.is_empty() {
             v["sort_templates"] = Value::Object(self.replicas.iter().map(|(r, _)| (r.clone(), json!(Plan::replica_template(dest, r)))).collect());
         }
         v
     }
+}
+
+/// An Algolia rule's search template: the rule's condition, which a client matches to pick it,
+/// and what it does (a filter, a literal query).
+#[derive(Debug, Clone)]
+pub(crate) struct RuleTemplate {
+    pub rule: String,
+    /// `is`, `startsWith`, `endsWith`, `contains` or `always` (no pattern).
+    pub anchoring: String,
+    pub pattern: String,
+    pub filter: Option<Value>,
+    pub query: Option<String>,
 }
 
 /// Puts `leaf` at the dotted `path` of a properties tree; `false` when the path crosses a leaf
@@ -712,15 +727,15 @@ pub(crate) fn criteria(kind: &str, values: Vec<String>) -> Value {
 
 /// Adds the pinned and excluded rules of one source rule (ids beyond Elasticsearch's 100 a
 /// rule are listed as not mapped).
-pub(crate) fn push_rules(plan: &mut Plan, id: &str, crit: Vec<Value>, mut pins: Vec<String>, mut hides: Vec<String>) {
-    let id = if id.is_empty() { format!("rule-{}", plan.rules.len() + 1) } else { id.to_string() };
+pub(crate) fn push_rules(plan: &mut Plan, id: &str, crit: Vec<Value>, mut pins: Vec<String>, mut hides: Vec<String>, filtered: bool) {
+    let id = if id.is_empty() { format!("rule-{}", plan.rules.len() + plan.filtered_rules.len() + 1) } else { id.to_string() };
     let id = id.as_str();
     for (ty, ids, suffix) in [("pinned", &mut pins, ""), ("exclude", &mut hides, "-exclude")] {
         if ids.is_empty() {
             continue;
         }
         // One search names at most MAX_RULESETS rulesets of RULES_PER_SET rules.
-        if plan.rules.len() >= MAX_RULES {
+        if plan.rules.len() + plan.filtered_rules.len() >= MAX_RULES {
             plan.skip("rule", format!("{id}{suffix}"), format!("past the {MAX_RULES} query rules an index's search can apply (Elasticsearch takes {MAX_RULESETS} rulesets of {RULES_PER_SET})"));
             continue;
         }
@@ -737,7 +752,13 @@ pub(crate) fn push_rules(plan: &mut Plan, id: &str, crit: Vec<Value>, mut pins: 
             n += 1;
             rule_id = format!("{base}-{n}");
         }
-        plan.rules.push(json!({ "rule_id": rule_id, "type": ty, "criteria": crit, "actions": { "ids": ids } }));
+        let rule = json!({ "rule_id": rule_id, "type": ty, "criteria": crit, "actions": { "ids": ids } });
+        // Only pins are filtered by `filterPromotes`: a hide hides whatever the filters say.
+        if filtered && ty == "pinned" {
+            plan.filtered_rules.push(rule);
+        } else {
+            plan.rules.push(rule);
+        }
     }
 }
 
@@ -844,11 +865,21 @@ impl Control {
     /// copied by a task (or only planned, `dry_run`), one row per index in order; one index's
     /// failure doesn't stop the others.
     pub(crate) async fn saas_migrate(&self, c: SearchCluster, req: &MigrateRequest) -> Result<Value> {
-        let spec = spec_of(&req.source, self.algolia_url())?;
+        let stage = req.step.unwrap_or_default();
+        let spec = spec_for(&req.source, self.algolia_url(), stage != Stage::Cutover)?;
         if req.size.is_some_and(|n| n > PAGE_DOCS && spec.kind == Kind::Algolia) {
             return Err(ControlError::Invalid(format!("size is at most {PAGE_DOCS} for Algolia (its browse pages)")));
         }
         let dry = req.dry_run.unwrap_or(false);
+        if stage != Stage::CatchUp && (req.since_attribute.is_some() || req.since_unit.is_some()) {
+            return Err(ControlError::Invalid("since_attribute and since_unit are for step catch_up".into()));
+        }
+        if stage != Stage::Copy {
+            if dry {
+                return Err(ControlError::Invalid("dry_run is for step copy".into()));
+            }
+            return self.saas_later(c, &spec, req, stage).await;
+        }
         // The cluster's migration slot, shared with each index's setup task: it frees once this
         // call and every setup it started have ended, so a dropped request can't let a second
         // migration start beside a setup still running.
@@ -912,6 +943,43 @@ impl Control {
         Ok(json!({ "indices": out }))
     }
 
+    /// `catch_up` and `cutover`: one row per index, in order, within the call's deadline (a
+    /// catch-up starts its task and returns).
+    async fn saas_later(&self, c: SearchCluster, spec: &Spec, req: &MigrateRequest, stage: Stage) -> Result<Value> {
+        let _slot = self.control_slot(&c)?;
+        let deadline = tokio::time::Instant::now() + crate::migrate::DEADLINE;
+        let mut out = Vec::new();
+        let mut aliases: HashSet<String> = HashSet::new();
+        for p in &req.indices {
+            let dest = p.dest.clone().filter(|d| !d.trim().is_empty()).unwrap_or_else(|| p.index.clone());
+            let mut row = json!({ "index": p.index, "dest": dest, "step": if stage == Stage::CatchUp { "catch_up" } else { "cutover" } });
+            // One alias moves to one copy: a second pick naming it in the same call would take it
+            // straight back.
+            if stage == Stage::Cutover {
+                let alias = p.alias.clone().filter(|a| !a.trim().is_empty()).unwrap_or_else(|| p.index.clone());
+                if !aliases.insert(alias.clone()) {
+                    row["error"] = json!(format!("alias [{alias}] is moved by an earlier index of this call: give each index its own alias"));
+                    out.push(row);
+                    continue;
+                }
+            }
+            let one = async {
+                match stage {
+                    Stage::CatchUp => self.saas_catch_up(&c, spec, req, p, &dest).await,
+                    _ => self.saas_cutover(&c, spec, p, &dest).await,
+                }
+            };
+            match tokio::time::timeout_at(deadline, Box::pin(one)).await {
+                Ok(Ok(Value::Object(m))) => row.as_object_mut().expect("an object").extend(m),
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => row["error"] = json!(e),
+                Err(_) => row["error"] = json!(format!("the call ran past {}s before this index", crate::migrate::DEADLINE.as_secs())),
+            }
+            out.push(row);
+        }
+        Ok(json!({ "indices": out }))
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn saas_one(
         &self,
@@ -929,22 +997,29 @@ impl Control {
         }
         // Where the copy came from: the product, which application or server, which index.
         let from = format!("{}:{}:{}", kind_name(spec.kind), spec.key, p.index);
-        let enc_dest = urlencoding::encode(dest).into_owned();
         let mut restart = false;
+        let mut resume = None;
         if names.contains(dest) {
             // A copy roll made from this same index (its earlier copy failed or was cancelled) is
-            // copied into again; anything else is never touched.
-            let (status, v) = self.call_json(c, "GET", &format!("/{enc_dest}/_mapping"), None).await;
-            let made = status == 200 && v.as_object().and_then(|m| m.values().next()).and_then(|m| m.pointer("/mappings/_meta/roll_import/from")).and_then(Value::as_str) == Some(from.as_str());
-            if !made {
+            // copied into again, from where it stopped; anything else is never touched.
+            let Some((imp, _)) = self.read_import(c, dest).await.filter(|(i, _)| i.from == from) else {
                 return Err(format!("index [{dest}] already exists on roll: give the copy another name"));
-            }
+            };
             if let Some(task) = self.running_copy(c, dest).await {
                 progress.created = true;
                 progress.task = Some(task);
                 return Ok(Step::Done(json!({ "note": "already copying into it" })));
             }
             restart = true;
+            // A finished copy, or `full`, copies everything again (keeping nothing of the old
+            // record's place); a stopped one resumes where it stopped.
+            // A record from before copies kept their place (no state, nothing to resume from)
+            // starts a new one.
+            let old = imp.copy.state.is_empty() && imp.copy.position.is_none();
+            if imp.copy.state != "done" && !old && !p.full.unwrap_or(false) {
+                let at = imp.copy.position.clone();
+                resume = Some((imp, at));
+            }
         }
         // The copy's place in the node's task slots, held from here until it ends.
         let permit = if dry {
@@ -968,7 +1043,24 @@ impl Control {
             return Err(format!("[{}] has no primary key roll can use as _id", p.index));
         }
         plan.guard();
-        let mappings = plan.mappings(&from);
+        let templates = plan.build_templates(dest);
+        // A resumed copy's record learns what this plan knows (an older record may lack it).
+        if let Some((imp, _)) = resume.as_mut() {
+            imp.id_field = plan.id_field.clone();
+            imp.geo_points = plan.geo_points.clone();
+            imp.rule_templates = plan.rule_template_list(dest);
+        }
+        let imported = Imported {
+            from: from.clone(),
+            id_field: plan.id_field.clone(),
+            geo_points: plan.geo_points.clone(),
+            copy: CopyState { state: "copying".into(), started_ms: now_ms(), done_ms: None, position: None },
+            caught_up_ms: None,
+            cutover: None,
+            rule_templates: plan.rule_template_list(dest),
+            needs_full: false,
+        };
+        let mappings = plan.mappings(&imported);
         let summary = plan.summary(dest);
         // The analyzers are built as the index would build them (a synonym the chain can't
         // parse fails here, in the review, not at creation).
@@ -980,20 +1072,30 @@ impl Control {
         }
         drop(f);
         if dry {
-            return Ok(Step::Done(json!({ "plan": summary, "mappings": mappings, "settings": plan.settings(dest), "restart": restart })));
+            let mut v = json!({ "plan": summary, "mappings": mappings, "settings": plan.settings(dest), "restart": restart });
+            if let Some((_, at)) = &resume {
+                v["resume"] = json!(at.as_ref().map_or_else(|| "the start".to_string(), Position::describe));
+            }
+            return Ok(Step::Done(v));
         }
-        Ok(Step::Ready(Box::new(Ready { plan, mappings, summary, restart, permit, index: p.index.clone(), dest: dest.to_string() })))
+        // A restart that doesn't resume starts a new record (the copy's start is now).
+        let resume = match (restart, resume) {
+            (_, Some(r)) => Some(r),
+            (true, None) => Some((imported, None)),
+            (false, None) => None,
+        };
+        Ok(Step::Ready(Box::new(Ready { plan, mappings, summary, restart, resume, templates, permit, index: p.index.clone(), dest: dest.to_string() })))
     }
 
     /// The rest of one index's migration, past the read: what it needs made on cluster `c`
     /// (undone if a step fails), then its copy started. Run in a task of its own, so neither
     /// the call's deadline nor a closed connection leaves it half made.
     async fn finish_one(&self, c: &SearchCluster, spec: &Spec, r: Ready, size: Option<u32>, rps: Option<f64>) -> (Value, bool, Option<String>) {
-        let Ready { plan, mappings, summary, restart, permit, index, dest } = r;
+        let Ready { plan, mappings, summary, restart, resume, templates, permit, index, dest } = r;
         let mut made = Vec::new();
         if !restart {
             let mut undo = Vec::new();
-            if let Err(e) = self.make(c, &plan, &dest, &mappings, &mut made, &mut undo).await {
+            if let Err(e) = self.make(c, &plan, &dest, &mappings, &templates, &mut made, &mut undo).await {
                 // Nothing half made stays: a later attempt starts from scratch.
                 for path in undo.iter().rev() {
                     self.call_json(c, "DELETE", path, None).await;
@@ -1001,11 +1103,18 @@ impl Control {
                 return (json!({ "plan": summary, "error": e }), false, None);
             }
         }
-        let reader = match spec.kind {
-            Kind::Algolia => Reader::Algolia { index: index.clone(), cursor: None, first: true, done: false, seen: HashSet::new() },
-            Kind::Typesense => Reader::Typesense { collection: index.clone(), lines: None, geo: plan.geo_points.clone() },
-            _ => Reader::Meili { uid: index.clone(), offset: 0, done: false },
+        // The record the copy keeps: a resumed copy's own, else the one the index was made with.
+        let (mut meta, at) = match resume {
+            Some((imp, at)) => (imp, at),
+            None => (serde_json::from_value(mappings.pointer("/_meta/roll_import").cloned().unwrap_or_default()).unwrap_or_default(), None),
         };
+        let resumed = at.as_ref().map(Position::describe);
+        // Resuming by count (Meilisearch's offset, the export's lines) misses records that moved
+        // below it when the source deleted some meanwhile: only a full compare finds them.
+        if matches!(at, Some(Position::Offset(n) | Position::Lines(n)) if n > 0) {
+            meta.needs_full = true;
+        }
+        let reader = Reader::new(spec.kind, &index, at.clone(), None, plan.geo_points.clone());
         let started = match self.saas_client(spec, None).await {
             Ok(client) => {
                 let copy = Copy {
@@ -1017,6 +1126,9 @@ impl Control {
                     total: plan.total,
                     read: 0,
                     stated: plan.total,
+                    mode: copy::Mode::Copy,
+                    meta,
+                    resume_at: at,
                 };
                 let description = format!("reindex from [{}][{index}] to [{dest}]", spec.label);
                 self.start_copy(c, copy, description, rps, permit)
@@ -1028,7 +1140,10 @@ impl Control {
             Err(e) => return (json!({ "plan": summary, "made": made, "error": format!("[{dest}] is ready, but its copy didn't start: {e}; pick it again to start it") }), !restart, None),
         };
         let mut v = json!({ "plan": summary, "made": made, "dropped": [] });
-        if restart {
+        if let Some(r) = resumed {
+            v["resumed"] = json!(r);
+            v["note"] = json!(format!("resuming the copy that stopped, from {r}"));
+        } else if restart {
             v["restarted"] = json!(true);
             v["note"] = json!("copying again into the index an earlier copy of it made: documents are overwritten by id, and none is deleted");
         }
@@ -1055,18 +1170,23 @@ impl Control {
     /// analyzer reads it), the index, the rulesets, the search templates. Names roll already
     /// has are never overwritten. What was made is listed in `made`, and how to remove it in
     /// `undo` (the caller does, if a later step fails).
-    async fn make(&self, c: &SearchCluster, plan: &Plan, dest: &str, mappings: &Value, made: &mut Vec<String>, undo: &mut Vec<String>) -> std::result::Result<(), String> {
+    #[allow(clippy::too_many_arguments)]
+    async fn make(&self, c: &SearchCluster, plan: &Plan, dest: &str, mappings: &Value, sources: &[(String, String)], made: &mut Vec<String>, undo: &mut Vec<String>) -> std::result::Result<(), String> {
         let enc = |s: &str| urlencoding::encode(s).into_owned();
         let failed = |what: &str, v: &Value| format!("{what} failed: {}", v.pointer("/error/reason").and_then(Value::as_str).unwrap_or("roll refused it"));
         let set = Plan::synonyms_set(dest);
-        let sets = plan.rulesets(dest);
-        let mut templates = vec![Plan::template_id(dest)];
-        templates.extend(plan.replicas.iter().map(|(r, _)| Plan::replica_template(dest, r)));
+        let mut sets: Vec<(String, &[Value])> = Vec::new();
+        for (names, rules) in [(plan.rulesets(dest), &plan.rules), (plan.filtered_rulesets(dest), &plan.filtered_rules)] {
+            for (i, n) in names.into_iter().enumerate() {
+                sets.push((n, &rules[i * RULES_PER_SET..((i + 1) * RULES_PER_SET).min(rules.len())]));
+            }
+        }
+        let templates: Vec<&String> = sources.iter().map(|(id, _)| id).collect();
         // Everything this index needs is free before anything is made.
         if !plan.synonyms.is_empty() && self.call_json(c, "GET", &format!("/_synonyms/{}?size=1", enc(&set)), None).await.0 == 200 {
             return Err(format!("synonyms set [{set}] already exists on roll: give the copy another name"));
         }
-        for s in &sets {
+        for (s, _) in &sets {
             if self.call_json(c, "GET", &format!("/_query_rules/{}", enc(s)), None).await.0 == 200 {
                 return Err(format!("query ruleset [{s}] already exists on roll: give the copy another name"));
             }
@@ -1092,8 +1212,7 @@ impl Control {
         }
         made.push(format!("index [{dest}]"));
         undo.push(format!("/{}", enc(dest)));
-        for (i, s) in sets.iter().enumerate() {
-            let rules = &plan.rules[i * RULES_PER_SET..((i + 1) * RULES_PER_SET).min(plan.rules.len())];
+        for (s, rules) in &sets {
             let (status, v) = self.call_json(c, "PUT", &format!("/_query_rules/{}", enc(s)), Some(&json!({ "rules": rules }))).await;
             if status != 200 && status != 201 {
                 return Err(failed(&format!("creating query ruleset [{s}]"), &v));
@@ -1101,18 +1220,14 @@ impl Control {
             made.push(format!("query ruleset [{s}]"));
             undo.push(format!("/_query_rules/{}", enc(s)));
         }
-        let mut sources = vec![(Plan::template_id(dest), plan.template(dest, &plan.sort_first))];
-        for (r, sort) in &plan.replicas {
-            sources.push((Plan::replica_template(dest, r), plan.template(dest, sort)));
-        }
         for (id, source) in sources {
             let body = json!({ "script": { "lang": "mustache", "source": source } });
-            let (status, v) = self.call_json(c, "PUT", &format!("/_scripts/{}", enc(&id)), Some(&body)).await;
+            let (status, v) = self.call_json(c, "PUT", &format!("/_scripts/{}", enc(id)), Some(&body)).await;
             if status != 200 {
                 return Err(failed(&format!("storing search template [{id}]"), &v));
             }
             made.push(format!("search template [{id}]"));
-            undo.push(format!("/_scripts/{}", enc(&id)));
+            undo.push(format!("/_scripts/{}", enc(id)));
         }
         Ok(())
     }
@@ -1169,7 +1284,7 @@ mod tests {
         p.fields.insert("a.b".into(), Field::Keyword);
         p.fields.insert("a.c".into(), Field::Text { keyword: true });
         p.fields.insert("a".into(), Field::Keyword);
-        let m = p.mappings("algolia:x");
+        let m = p.mappings(&Imported { from: "algolia:x".into(), ..Default::default() });
         assert_eq!(m["properties"]["a"]["properties"]["b"]["type"], "keyword");
         assert_eq!(m["properties"]["a"]["properties"]["c"]["fields"]["keyword"]["type"], "keyword");
         // `a` itself can't be a keyword and an object.

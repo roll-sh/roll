@@ -907,6 +907,53 @@ async fn an_environments_delete_names_only_the_tokens_that_reach_it() {
     assert_eq!(delete("?confirm=staging").await.unwrap().status(), 200);
 }
 
+/// A machine with no platform identity (docs/secrets.md, "On a VM"): a bootstrap token, exchanged
+/// once, becomes a machine credential that logs in and reads a folder; replaced at half its life,
+/// the new one works and the old one stops. A bootstrap token exchanged a second time is a 401 and
+/// revokes the machine's credential and the token its login got (real roll-access).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_bootstrap_token_is_exchanged_once_and_a_spent_credential_ends_its_machine() {
+    let r = Rolld::start("search", false).await;
+    let project = Project::new(&r).await.id;
+    let p = format!("/v1/secrets/projects/{project}");
+    r.call(reqwest::Method::PUT, &format!("{p}/environments/production/secrets/GREETING"), Some(json!({ "value": "fake-hello" }))).await;
+    let id = r.post(&format!("{p}/identities"), json!({ "name": "racks", "kind": "machine", "environments": ["production"], "actions": ["read", "reveal"] })).await["id"].as_str().unwrap().to_string();
+    // Public: the bootstrap token or credential in the body is the credential.
+    let public = |path: &str, body: Value| {
+        let req = r.http.post(format!("{}/v1/secrets/{path}", r.api)).json(&body);
+        async move {
+            let a = req.send().await.unwrap();
+            (a.status().as_u16(), a.json::<Value>().await.unwrap_or_default())
+        }
+    };
+    let exchange = |token: String| public("login/bootstrap", json!({ "identity": id, "token": token }));
+    let login = |credential: String| public("login", json!({ "identity": id, "machine": credential }));
+    let read = |token: String| r.http.get(format!("{}{p}/environments/production/values?path=/", r.api)).bearer_auth(token).send();
+    let secret = |v: &Value| v["secret"].as_str().unwrap().to_string();
+
+    let boot = secret(&r.post(&format!("{p}/identities/{id}/bootstrap"), json!({ "minutes": 5 })).await);
+    let (s, first) = exchange(boot.clone()).await;
+    assert_eq!(s, 200, "{first}");
+    assert!(first["refresh_at"].as_i64() < first["expires_at"].as_i64(), "{first}");
+    let (s, l) = login(secret(&first)).await;
+    assert_eq!(s, 200, "{l}");
+    let token = l["token"].as_str().unwrap().to_string();
+    let values: Value = read(token.clone()).await.unwrap().json().await.unwrap();
+    assert_eq!(values["values"]["GREETING"], "fake-hello", "{values}");
+
+    let (s, e) = exchange(boot).await;
+    assert_eq!(s, 401, "a bootstrap token works once: {e}");
+    assert_eq!(login(secret(&first)).await.0, 401, "and its second use ended the machine's credential");
+    assert_eq!(read(token).await.unwrap().status(), 401, "and its login's token");
+
+    let (_, one) = exchange(secret(&r.post(&format!("{p}/identities/{id}/bootstrap"), json!({})).await)).await;
+    let (s, two) = public("login/refresh", json!({ "identity": id, "credential": secret(&one) })).await;
+    assert_eq!(s, 200, "{two}");
+    assert_eq!(login(secret(&two)).await.0, 200, "the new credential works");
+    assert_eq!(login(secret(&one)).await.0, 401, "the old one stops");
+    assert_eq!(login(secret(&two)).await.0, 401, "and, spent but used again, it ended the machine");
+}
+
 /// Invite `ada@example.com` with the operator's token and sign in by email code (from the
 /// outbox): the session cookie, as `name=value`.
 async fn sign_in(r: &Rolld, outbox: &std::path::Path) -> String {

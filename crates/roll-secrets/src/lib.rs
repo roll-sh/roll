@@ -35,6 +35,7 @@ mod audit;
 pub mod audit_key;
 pub use roll_secrets_chain as chain;
 pub mod backup;
+mod backup_rows;
 pub mod crypto;
 pub mod dotenv;
 mod envs;
@@ -88,7 +89,7 @@ mod write;
 pub mod unseal;
 pub mod validity;
 
-pub use access::{Action, Approval, Caller, Minted, People, Person, Scope, Workloads, PREVIEWS};
+pub use access::{Action, Approval, Caller, Chained, Minted, People, Person, Scope, Step, Workloads, PREVIEWS};
 pub use api::router;
 pub use crypto::{Keyring, Value};
 pub use audit::{AuditEntry, AuditFilter, VerifyQuery};
@@ -104,7 +105,7 @@ pub use read::{Delta, Followed, Grid, Held, Linked, Problem, Secret, Source, Val
 pub use requests::{Request, RequestPage, RequestValue, Review, Verdict};
 pub use exports::Export;
 pub use decoys::{Decoy, NewDecoy};
-pub use identities::{Identity, IdentityKind, Login, NewIdentity, Proof};
+pub use identities::{Identity, IdentityKind, Login, MachineSecret, NewBootstrap, NewIdentity, Proof};
 pub use issuer::Subject;
 pub use required::Required;
 pub use shares::{NewShare, Peek, Share};
@@ -626,6 +627,7 @@ impl Secrets {
         // What a leaked managed key does (leaks.rs): `managed` rotates it, `off` (NULL) reports it.
         db.add_column("projects", "leak_rotate", "TEXT")?;
         db.ensure_schema(leaks::SCHEMA)?;
+        db.ensure_schema(leaks::SCAN_COUNTS_SCHEMA)?;
         // The key a leak rotation was found by (at most one an hour per key), and a rotation
         // request's leaked credential and what applying it did instead of rotating.
         db.add_column("leak_rotations", "path", "TEXT")?;

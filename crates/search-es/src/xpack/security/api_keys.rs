@@ -211,7 +211,10 @@ async fn store_key(ctx: &Ctx<'_>, owner: &Principal, k: NewKey) -> EsResult<Repl
     doc.insert("username".into(), owner.username.clone().into());
     doc.insert("realm".into(), realm.into());
     doc.insert("realm_type".into(), realm_type.into());
-    doc.insert("metadata".into(), k.metadata);
+    // A new key's `derive` is checked as an update from nothing: its first generation only.
+    let mut metadata = k.metadata;
+    super::derived::on_update(&mut metadata, &Value::Null)?;
+    doc.insert("metadata".into(), metadata);
     doc.insert("role_descriptors".into(), k.role_descriptors);
     doc.insert("limited_by".into(), limited);
     if let Some(a) = k.cross_cluster {

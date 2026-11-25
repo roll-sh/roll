@@ -85,7 +85,7 @@ const GITHUB: &str = "https://api.github.com";
 
 const FIELDS: &[Field] = &[Field { field: "token", label: "Installation token", modes: &[Mode::Dynamic], secret: true, suggest: "GITHUB_TOKEN", credential: Some("token") }];
 
-fn key_aad(project: &str, id: &str) -> String {
+pub(crate) fn key_aad(project: &str, id: &str) -> String {
     format!("roll-secrets:github-app:{project}:{id}")
 }
 
@@ -93,14 +93,14 @@ fn token_aad(project: &str, id: &str) -> String {
     format!("roll-secrets:github-app-token:{project}:{id}")
 }
 
-fn check_repositories(repositories: &[String]) -> Result<()> {
+pub(crate) fn check_repositories(repositories: &[String]) -> Result<()> {
     if repositories.len() > 500 || repositories.iter().any(|r| r.is_empty() || r.len() > 100 || !r.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))) {
         return Err(Error::BadRequest("repositories names at most 500 repositories of the installation's owner (letters, digits, -, _ and .)".into()));
     }
     Ok(())
 }
 
-fn check_permissions(permissions: &BTreeMap<String, String>) -> Result<()> {
+pub(crate) fn check_permissions(permissions: &BTreeMap<String, String>) -> Result<()> {
     if permissions.len() > 64 || permissions.iter().any(|(k, v)| k.is_empty() || k.len() > 64 || !k.chars().all(|c| c.is_ascii_lowercase() || c == '_') || level(v).is_none()) {
         return Err(Error::BadRequest("permissions maps a permission (contents, issues, pull_requests…) to read, write or admin".into()));
     }

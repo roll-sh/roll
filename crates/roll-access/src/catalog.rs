@@ -266,6 +266,7 @@ const D: Act = Act::Is(Action::Delete);
 const REVEAL: Act = Act::Is(Action::Reveal);
 const DEPLOY: Act = Act::Is(Action::Deploy);
 const ADMIN: Act = Act::Is(Action::Admin);
+const SCAN: Act = Act::Is(Action::Scan);
 const M: Act = Act::ByMethod;
 
 const fn one(params: &'static [&'static str], kind: &'static str) -> Tgt {
@@ -1359,6 +1360,8 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/search/clusters/{id}/browser-keys", "search", R, one(PG, "cluster")),
     row("POST", "/v1/search/clusters/{id}/browser-keys", "search", REVEAL, one(PG, "cluster")),
     row("DELETE", "/v1/search/clusters/{id}/browser-keys/{key}", "search", ADMIN, one(PG, "cluster")),
+    // A browser key's usage: counts and reasons, top users and origins (never a body or address).
+    row("GET", "/v1/search/clusters/{id}/browser-keys/{key}/usage", "search", R, one(PG, "cluster")),
     // A derivable browser key's new signing secret: a credential, in the answer.
     row("POST", "/v1/search/clusters/{id}/browser-keys/{key}/rotate", "search", REVEAL, one(PG, "cluster")),
     // A snapshot repository, the only way its credentials can be roll secrets references: it
@@ -1480,6 +1483,10 @@ static ROWS: &[Row] = &[
     // Which candidates are this project's stored values (`roll secrets scan`): read on the
     // project. Secrets keeps only matches in folders the caller may reveal, so it's no oracle.
     row("POST", "/v1/secrets/projects/{project}/leaks", "secrets", R, one(&["project"], "project")).filters_itself(),
+    // A scanner's check (a pre-receive hook): which whole candidates are values, never a value
+    // and never which one it would have been. Its own action, `scan`, so a scanner's token needs
+    // no `read` or `reveal`; secrets keeps only matches where the caller may scan.
+    row("POST", "/v1/secrets/projects/{project}/scan", "secrets", SCAN, one(&["project"], "project")).filters_itself(),
     // Validity checks (docs/secrets.md, "Is it live?"): asking a credential's provider whether a
     // credential found in code works is a write (it calls out and is audited, rate-limited per
     // project); a kept answer by fingerprint (never the value) is a read.
@@ -1591,8 +1598,10 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/secrets/projects/{project}/kubernetes", "secrets", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/kubernetes/{id}", "secrets", ADMIN, one(&["project"], "project")),
     // A backup seals every environment's values to a key the caller chooses; a restore loads a
-    // whole project. Both are admin in secrets too.
+    // whole project; a verify compares an opened backup with every value. All admin in secrets too.
     row("POST", "/v1/secrets/projects/{project}/backup", "secrets", ADMIN, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/backup/verify", "secrets", ADMIN, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/backup/latest", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/backup/schedule", "secrets", ADMIN, one(&["project"], "project")),
     row("PUT", "/v1/secrets/projects/{project}/backup/schedule", "secrets", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/backup/schedule", "secrets", ADMIN, one(&["project"], "project")),
@@ -1633,6 +1642,8 @@ static ROWS: &[Row] = &[
     row("*", "/v1/secrets/projects/{project}/identities/", "secrets", ADMIN, one(&["project"], "project")),
     // Pinning an issuer's keys decides which tokens log in as the identity: the identity's admin.
     row("PUT", "/v1/secrets/projects/{project}/identities/{id}/jwks", "secrets", ADMIN, one(&["project"], "project")),
+    // A machine identity's bootstrap token: the identity's admin, and the answer is a credential.
+    row("POST", "/v1/secrets/projects/{project}/identities/{id}/bootstrap", "secrets", ADMIN, one(&["project"], "project")).reveals(&["secret"]),
     // Renewing a lease extends a credential whoever could read it holds.
     row("POST", "/v1/secrets/projects/{project}/leases/{id}/renew", "secrets", REVEAL, one(&["project"], "project")),
     // Ending a credential only takes access away: whoever could reveal it may.

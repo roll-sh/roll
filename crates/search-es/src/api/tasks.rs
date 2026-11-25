@@ -221,7 +221,9 @@ pub fn cancel_all(cluster: &crate::Cluster, reason: &str) -> Vec<u64> {
     }
     let mut ids = Vec::new();
     for t in tasks {
-        t.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+        // The cluster leaves the node (the only caller): work the next owner resumes isn't failed.
+        t.leaving.store(true, std::sync::atomic::Ordering::SeqCst);
+        t.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
         if let Some(l) = &t.live {
             l.wake();
         }

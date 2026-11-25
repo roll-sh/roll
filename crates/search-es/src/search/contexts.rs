@@ -79,17 +79,22 @@ fn hold(ctx: &Ctx, c: &mut SearchContext) -> EsResult<()> {
     Ok(())
 }
 
-/// Who a scroll or point in time belongs to: the request's API key, or its user and realm. A
-/// linked remote cluster's request belongs to the user it was sent for, under the link's key.
-/// The one place an identity is turned into an owner: one a later kind of identity brings
-/// plugs in here.
+/// Who a scroll or point in time belongs to: the request's API key (a derived key's own, not
+/// its parent's), or its user and realm. A linked remote cluster's request belongs to the user
+/// it was sent for, under the link's key. The one place an identity is turned into an owner.
 pub(crate) fn owner_of(ctx: &Ctx) -> String {
     let p = crate::xpack::security::principal(ctx);
     match &p.kind {
-        crate::xpack::security::AuthKind::ApiKey(a) => match &a.remote {
-            Some(r) => format!("api_key:{}:{}", a.id, r.owner),
-            None => format!("api_key:{}", a.id),
-        },
+        crate::xpack::security::AuthKind::ApiKey(a) => {
+            let mut owner = format!("api_key:{}", a.id);
+            if let Some(d) = &a.derived {
+                owner.push_str(&format!(":derived:{}", d.id));
+            }
+            if let Some(r) = &a.remote {
+                owner.push_str(&format!(":{}", r.owner));
+            }
+            owner
+        }
         _ => format!("{}:{}", p.realm_name, p.username),
     }
 }

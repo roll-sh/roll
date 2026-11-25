@@ -527,7 +527,7 @@ async fn every_control_plane_route_needs_the_operator_token() {
         ("/v1/secrets/shares/{id}", "a one-time share: the link's key is the credential"),
         ("/v1/secrets/value-requests/{token}", "a secret request's link: its answer token is the credential"),
         ("/v1/secrets/unseal", "a sealed node's unseal: the deployment key's shares are the credential"),
-        ("/v1/secrets/login", "workload identities: the workload's OIDC token is the credential"),
+        ("/v1/secrets/login", "workload identities: the workload's OIDC token, or a machine's bootstrap token or credential, is the credential"),
         ("/v1/secrets/crl/{id}", "a CA's revocation list: public, as any CRL"),
         ("/v1/secrets/ocsp/{id}", "a CA's OCSP responder: public, as any OCSP"),
         ("/v1/secrets/acme/{ca}", "ACME on a CA: the account key's JWS and its External Account Binding are the credential"),
@@ -922,7 +922,8 @@ async fn a_strangers_home_from_before_is_dropped_never_handed_over() {
 
 /// A protected search cluster is changed only by its project's admins and owners: made protected
 /// in a project, a developer there can't write it (403) until an admin opens it (`PATCH
-/// protected: false`); and a branch of a protected cluster is never protected.
+/// protected: false`); a branch of a protected cluster is never protected; and a branch goes only in
+/// its parent's project (another one named in `X-Roll-Project` is a 400).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_developer_writes_a_search_cluster_only_while_it_isnt_protected() {
     let home = tempfile::tempdir().unwrap();
@@ -991,6 +992,17 @@ async fn a_developer_writes_a_search_cluster_only_while_it_isnt_protected() {
     assert_eq!((s, b["protected"].as_bool()), (200, Some(false)), "a branch is never protected: {b}");
     let (s, v) = does(ada, reqwest::Method::PATCH, format!("/v1/search/clusters/{}", b["id"].as_str().unwrap()), Some(serde_json::json!({ "protected": true })), None).await;
     assert_eq!(s, 400, "{v}");
+    // A branch goes only in its parent's project: naming another one (Ada's too) is refused, and
+    // nothing is made; naming the parent's is fine.
+    let (s, other) = does(ada, reqwest::Method::POST, "/v1/workspace/projects".into(), Some(serde_json::json!({ "name": "other" })), None).await;
+    assert_eq!(s, 201, "{other}");
+    let other = other["id"].as_str().unwrap().to_string();
+    let parent = c["id"].as_str().unwrap();
+    let (s, v) = does(ada, reqwest::Method::POST, "/v1/search/clusters".into(), Some(serde_json::json!({ "name": "stray", "parent": parent })), Some(&other)).await;
+    assert_eq!(s, 400, "a branch named into another project: {v}");
+    assert_eq!(does(ada, reqwest::Method::GET, "/v1/search/clusters/stray".into(), None, None).await.0, 404, "nothing was made");
+    let (s, v) = does(ada, reqwest::Method::POST, "/v1/search/clusters".into(), Some(serde_json::json!({ "name": "kept", "parent": parent })), Some(&project)).await;
+    assert_eq!(s, 200, "a branch named into its parent's project: {v}");
 }
 
 #[test]

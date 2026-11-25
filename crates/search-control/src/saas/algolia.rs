@@ -446,29 +446,98 @@ fn rule_into(p: &mut Plan, r: &Value) {
     }
     let pins: Vec<String> = promoted.into_iter().map(|(_, id)| id).collect();
     let hides: Vec<String> = cons["hide"].as_array().into_iter().flatten().filter_map(|h| h["objectID"].as_str().map(str::to_string)).collect();
-    let mut rest = Vec::new();
-    if cons["params"].as_object().is_some_and(|m| !m.is_empty()) {
-        rest.push("its params (filters, query edits, search parameters)");
-    }
+    let mut rest: Vec<String> = Vec::new();
+    // Filters and query rewrites: a search template of the rule's own, which a client picks
+    // when the query meets the rule's condition (query rules only pin and exclude).
+    let made = rule_template(p, &id, &conds, &cons["params"], &mut rest);
     if !cons["userData"].is_null() {
-        rest.push("its userData");
-    }
-    if cons["filterPromotes"] == json!(true) {
-        rest.push("filterPromotes");
+        rest.push("its userData (no query rule returns data: keep it in your client)".into());
     }
     if r["validity"].as_array().is_some_and(|v| !v.is_empty()) {
-        rest.push("its validity periods");
+        rest.push("its validity periods (query rules have none: remove the rule when it ends)".into());
     }
+    let filter_promotes = cons["filterPromotes"] == json!(true);
     if pins.is_empty() && hides.is_empty() {
-        let why = if rest.is_empty() { "it neither promotes nor hides anything".to_string() } else { format!("query rules pin or exclude documents; this rule only sets {}", rest.join(", ")) };
-        p.skip("rule", id, why);
-        return;
+        if !made {
+            let why = if rest.is_empty() { "it neither promotes nor hides anything".to_string() } else { format!("query rules pin or exclude documents; this rule only sets {}", rest.join(", ")) };
+            p.skip("rule", id, why);
+            return;
+        }
+    } else if filter_promotes && !pins.is_empty() {
+        p.notes.push(format!("rule [{id}] filters its promotions (filterPromotes): its pins show only when they match the template's `filters`"));
     }
     if !rest.is_empty() {
-        p.skip("rule", id.clone(), format!("its promotions and hides are mapped, not {}", rest.join(", ")));
+        p.skip("rule", id.clone(), format!("mapped but for {}", rest.join("; ")));
+    }
+    if pins.is_empty() && hides.is_empty() {
+        return;
     }
     for (i, crit) in crit_sets.into_iter().enumerate() {
         let rid = if i == 0 { id.clone() } else { format!("{id}-{}", i + 1) };
-        push_rules(p, &rid, crit, pins.clone(), hides.clone());
+        push_rules(p, &rid, crit, pins.clone(), hides.clone(), filter_promotes);
     }
+}
+
+/// An Algolia rule's `params` as a search template of its own: `filters`, `facetFilters` and
+/// `numericFilters` as a filter, `query` as the text searched (a string; or edits, applied to
+/// an `is` pattern, the only one whose text is known). What else `params` sets goes in `rest`.
+/// Whether a template was made.
+fn rule_template(p: &mut Plan, id: &str, conds: &[&Value], params: &Value, rest: &mut Vec<String>) -> bool {
+    let Some(m) = params.as_object().filter(|m| !m.is_empty()) else { return false };
+    let cond = conds.first().copied().cloned().unwrap_or(json!({}));
+    let pattern = cond["pattern"].as_str().unwrap_or_default().to_string();
+    let anchoring = if pattern.is_empty() { "always".to_string() } else { cond["anchoring"].as_str().unwrap_or("is").to_string() };
+    let exact = |a: &str| p.exact(a);
+    let mut filters = Vec::new();
+    let mut query = None;
+    for (k, v) in m {
+        match k.as_str() {
+            "filters" => match v.as_str().map(|f| super::filters::filters(f, &exact)) {
+                Some(Ok(q)) => filters.push(q),
+                Some(Err(e)) => rest.push(format!("its filters ({e})")),
+                None => rest.push("its filters (not a string)".into()),
+            },
+            "facetFilters" | "numericFilters" => match super::filters::filter_list(v, &exact) {
+                Ok(q) => filters.push(q),
+                Err(e) => rest.push(format!("its {k} ({e})")),
+            },
+            "query" => match v {
+                Value::String(q) => query = Some(q.clone()),
+                Value::Object(_) if anchoring == "is" => match super::template::apply_edits(&pattern, v) {
+                    Some(q) => query = Some(q),
+                    None => rest.push("its query edits (one roll doesn't apply)".into()),
+                },
+                _ => rest.push(format!("its query edits (only an `is` pattern's text is known; this one is `{anchoring}`)")),
+            },
+            other => rest.push(format!("its {other} parameter")),
+        }
+    }
+    if query.as_deref().is_some_and(|q| q.contains(['{', '}'])) {
+        rest.push("its query (braces a template can't carry)".into());
+        query = None;
+    }
+    if filters.is_empty() && query.is_none() {
+        return false;
+    }
+    if !super::template_safe(id) || p.rule_templates.len() >= super::MAX_RULE_TEMPLATES {
+        rest.push(format!("its filters and query (a rule template needs a plain id, and an index brings at most {})", super::MAX_RULE_TEMPLATES));
+        return false;
+    }
+    if conds.len() > 1 {
+        p.notes.push(format!("rule [{id}]'s template stands for its first condition only"));
+    }
+    let filter = match filters.len() {
+        0 => None,
+        1 => filters.pop(),
+        _ => Some(json!({ "bool": { "filter": filters } })),
+    };
+    p.notes.push(format!("rule [{id}] filters or rewrites the query: search with its template when the query {} [{pattern}]", match anchoring.as_str() {
+        "is" => "is",
+        "startsWith" => "starts with",
+        "endsWith" => "ends with",
+        "always" => "is anything (no pattern)",
+        _ => "contains",
+    }));
+    p.rule_templates.push(super::RuleTemplate { rule: id.to_string(), anchoring, pattern, filter, query });
+    true
 }

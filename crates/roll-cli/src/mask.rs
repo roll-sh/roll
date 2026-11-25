@@ -246,8 +246,14 @@ fn ci() -> bool {
 }
 
 /// Whether `f` is a regular file (output redirected to one is data, not a log).
+#[cfg(unix)]
 fn regular_file(f: &impl std::os::fd::AsFd) -> bool {
     f.as_fd().try_clone_to_owned().ok().map(std::fs::File::from).and_then(|f| f.metadata().ok()).is_some_and(|m| m.is_file())
+}
+
+#[cfg(windows)]
+fn regular_file(f: &impl std::os::windows::io::AsHandle) -> bool {
+    f.as_handle().try_clone_to_owned().ok().map(std::fs::File::from).and_then(|f| f.metadata().ok()).is_some_and(|m| m.is_file())
 }
 
 /// A command started with `env`, its masked streams copied by tasks of their own.
@@ -261,7 +267,7 @@ pub struct Running {
 pub fn spawn(command: &[String], env: &[(String, String)], conceal: &[&str], streams: Streams) -> std::io::Result<Running> {
     let masker = || Masker::new(conceal.iter().copied());
     let streams = if masker().is_some() { streams } else { Streams { stdout: false, stderr: false } };
-    let mut cmd = tokio::process::Command::new(&command[0]);
+    let mut cmd = tokio::process::Command::new(crate::sys::program(&command[0]));
     cmd.args(&command[1..]).envs(env.iter().cloned());
     if streams.stdout {
         cmd.stdout(Stdio::piped());
@@ -324,11 +330,50 @@ impl Signals {
     }
 
     /// Passes `sig` to `child`.
-    pub fn pass(child: &tokio::process::Child, sig: i32) {
+    pub fn pass(child: &mut tokio::process::Child, sig: i32) {
         if let Some(pid) = child.id() {
             // SAFETY: kill(2) on our own child's pid.
             unsafe { libc::kill(pid as libc::pid_t, sig) };
         }
+    }
+}
+
+/// On Windows, the console's control events. Ctrl-C and Ctrl-Break go to every process on the
+/// console, the command included, so roll only stays up for it to exit (as a Ctrl-C from roll's
+/// terminal on Linux). Closing the console, logging off and shutting down end the command
+/// (TerminateProcess: Windows has no SIGTERM to pass on) rather than leave it running without roll.
+#[cfg(windows)]
+pub struct Signals {
+    c: tokio::signal::windows::CtrlC,
+    brk: tokio::signal::windows::CtrlBreak,
+    close: tokio::signal::windows::CtrlClose,
+    shutdown: tokio::signal::windows::CtrlShutdown,
+    logoff: tokio::signal::windows::CtrlLogoff,
+}
+
+#[cfg(windows)]
+impl Signals {
+    pub fn new() -> std::io::Result<Signals> {
+        use tokio::signal::windows;
+        Ok(Signals { c: windows::ctrl_c()?, brk: windows::ctrl_break()?, close: windows::ctrl_close()?, shutdown: windows::ctrl_shutdown()?, logoff: windows::ctrl_logoff()? })
+    }
+
+    /// The next event that ends the command.
+    pub async fn next(&mut self) -> i32 {
+        loop {
+            tokio::select! {
+                _ = self.c.recv() => {}
+                _ = self.brk.recv() => {}
+                _ = self.close.recv() => return 2,
+                _ = self.logoff.recv() => return 5,
+                _ = self.shutdown.recv() => return 6,
+            }
+        }
+    }
+
+    /// Ends `child`.
+    pub fn pass(child: &mut tokio::process::Child, _: i32) {
+        let _ = child.start_kill();
     }
 }
 

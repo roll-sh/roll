@@ -349,6 +349,10 @@ pub struct TaskInfo {
     /// Request headers tasks carry (`X-Opaque-Id`, `traceparent`).
     pub headers: Vec<(String, String)>,
     pub cancelled: Arc<std::sync::atomic::AtomicBool>,
+    /// Set (before `cancelled`) when the task is cancelled because the cluster leaves this node
+    /// (handed over, unloaded, the node stopping) rather than by a caller: work the next owner
+    /// resumes (a restore from an Elasticsearch snapshot) isn't recorded failed for it.
+    pub leaving: Arc<std::sync::atomic::AtomicBool>,
     /// A running by-query task's rate and progress (`BulkByScrollTask`).
     pub live: Option<Arc<crate::api::by_query::Live>>,
     /// Builds the description when a listing asks for it (Elasticsearch's description
@@ -493,6 +497,7 @@ impl TaskRegistry {
             parent: t.parent,
             headers: t.headers,
             cancelled: t.cancelled.unwrap_or_default(),
+            leaving: Default::default(),
             live: None,
             describe: t.describe,
         };
@@ -532,12 +537,14 @@ impl TaskRegistry {
         self.running.lock().is_empty()
     }
 
-    /// Cancels every cancellable task (a node shutting down); returns how many it cancelled.
+    /// Cancels every cancellable task as leaving this node ([`TaskInfo::leaving`]: the node
+    /// stopping); returns how many it cancelled.
     pub fn cancel_all(&self) -> usize {
         let g = self.running.lock();
         let mut n = 0;
         for t in g.values().filter(|t| t.cancellable) {
-            if !t.cancelled.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            t.leaving.store(true, std::sync::atomic::Ordering::SeqCst);
+            if !t.cancelled.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 n += 1;
             }
         }

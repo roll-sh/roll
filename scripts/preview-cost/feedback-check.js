@@ -1,7 +1,7 @@
 // scripts/preview-cost.sh: the preview's feedback button driven in Chromium. It opens $LINK (a
 // preview's link with its access token), picks the page's first link, writes a note and posts it;
 // roll's dashboard isn't opened (window.open is caught), and what it would open is printed as
-// "<fb_path> · <fb_selector> · <fb_note>".
+// "<path> · <fb_path> · <fb_selector> · <fb_note>".
 const { chromium } = require("playwright-core");
 const fs = require("fs");
 (async () => {
@@ -26,7 +26,7 @@ const fs = require("fs");
     await bar.locator("form.card textarea").fill("a live note");
     await bar.locator("form.card button.go").click();
     const u = new URL(await p.evaluate(() => window.__opened || ""));
-    console.log([u.searchParams.get("fb_path"), u.searchParams.get("fb_selector"), u.searchParams.get("fb_note")].join(" · "));
+    console.log([u.pathname, u.searchParams.get("fb_path"), u.searchParams.get("fb_selector"), u.searchParams.get("fb_note")].join(" · "));
   } catch (e) {
     console.log(`failed: ${e.message.split("\n")[0]}`);
   } finally {

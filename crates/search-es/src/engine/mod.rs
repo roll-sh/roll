@@ -150,6 +150,13 @@ pub trait ShardLog: Send + Sync {
     /// durably, and calls [`ShardEngine::committed`], before the request is answered. Only the
     /// shards a request flushed are committed, as in Elasticsearch.
     fn flush_requested(&self) {}
+
+    /// Resolves once every operation appended so far is durable, as a request's
+    /// acknowledgement waits for: background writers that record their progress elsewhere (a
+    /// restore's finished shards) wait for it first, so the record never runs ahead of the data.
+    fn durable(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = EsResult<()>> + Send + '_>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 /// Shards in memory.

@@ -176,7 +176,8 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
   the mappings naming it or its backend roles (wildcards, `and_backend_roles`); action groups
   expand to action patterns and `${user.name}`-style variables fill index patterns and DLS. The
   plugin's authorization: its 403 (`no permissions for [...] and User [...]`), the composite,
-  scroll and reindex actions checked as cluster actions, no narrowing of wildcards to permitted
+  scroll and reindex actions checked as cluster actions (then their items on their indices: a
+  reindex's search of its source and each of its writes), no narrowing of wildcards to permitted
   indices, `indices:admin/create` for writes that create an index, bulk items naming both
   actions, a by-query `refresh=true` refused after its writes, a plain `Unauthorized` 401.
   Document and field level security and masked fields (BLAKE2b with
@@ -1115,6 +1116,11 @@ Checked against Elasticsearch 9.5.5 (captures in
   document) are read as the caller, so one its filter hides is missing and hidden fields are left
   out; term vectors of a hidden document are `found: false`; `suggest` and `profile` are refused
   (400 `action_request_validation_exception`) where the caller's documents are restricted. A
+  `_reindex` is authorized as Elasticsearch authorizes it: its action by name (`write` on some
+  index), then its source searched as the caller (wildcards narrowed to what it may read, its
+  document and field level security applied, so only what it sees is copied) and each write
+  authorized as a bulk item at the index it goes to (a script's `_index` and `ctx.op = 'delete'`
+  too); a remote source is read with its own credentials. A
   stored result (async search, ES|QL, EQL, SQL, and SQL cursors) is its opener's (the API key, or
   the user and realm): anyone else gets 404 for it, its status and its delete (a cursor: unknown),
   except that `cancel_task` may delete it. One stored before owners were recorded is the
@@ -1704,7 +1710,10 @@ taken over by roll's crawler. Where roll's differs ([crawler.md](crawler.md)):
   `auth_origin` over https, never after a redirect to another origin; one per connector.
   `http_auth_allowed`, proxies and `domains[].auth` in the snippet aren't taken (the CLI import
   moves `auth` to the sealed fields).
-- **Not yet**: extraction rules (a snippet with any fails validation), XPath, incremental crawls
+- **Extraction rules** are Open Crawler's rulesets; `html` selectors are CSS Selectors Level 3
+  without `:has()`, states, pseudo-elements or escapes (each refused at validation), and a rule's
+  text is gathered as the body's is, not Jsoup's `text()`.
+- **Not yet**: XPath selectors, incremental crawls
   (an incremental job fails), binary content extraction (only `text/html` and
   `application/xhtml+xml` are indexed), `data-elastic-name` and `meta.elastic` beyond 100 fields a
   page, and `full_html` is the page as served, not Jsoup's re-serialisation. Pages are decoded as
@@ -2332,8 +2341,27 @@ the rest are skipped by the tests' own prerequisites.
     the restoring cluster's, and the settings Elasticsearch set for its cluster (allocation,
     blocks, lifecycle, `index.store.*`, the made-by-the-cluster ones) are dropped with a warning,
     as the migration from a live cluster drops them; `index.mapping.exclude_source_vectors` is set
-    explicitly to what the index had. Data streams restore as their backing indices (the data
-    stream itself isn't recreated), and feature states aren't restored. At most one such restore
+    explicitly to what the index had. Data streams restore as on Elasticsearch 9.5.5 (checked
+    against it): a pattern matching a data stream's name (or `*`, or no `indices`) brings it back
+    with all its backing indices, its generation, flags, `_meta`, lifecycle and settings from the
+    snapshot's global metadata whatever `include_global_state` says (its template only with the
+    global state; it takes writes without one); renamed, every backing index is renamed as
+    Elasticsearch's `RestoreService.renameIndex` renames it (the pattern applied to what follows
+    `.ds-`, so `.ds-<new name>-<date>-<generation>`); a data stream or backing index already here
+    under a target name is refused, and so is a snapshot whose data streams share a backing
+    index; a pattern matching only backing indices restores them as plain indices. With
+    `partial`, a data stream dropped (its global metadata missing, a backing index not in the
+    snapshot) takes its backing indices with it unless the request names them; a request for
+    data streams only whose global metadata is missing is an error. System data streams and
+    system indices aren't restored (a note says so). An index takes no document writes (503
+    `unavailable_shards_exception`; by-query runs fail on each document) while its restore
+    runs. Renames, on either kind of repository, need both `rename_pattern` and
+    `rename_replacement` and use Java's replacement syntax, as `RestoreService` does (`$12`
+    with two groups is group 1 then `2`, `${name}`, `\x` for `x`; a group the pattern lacks
+    fails the restore). Failure
+    store indices and data stream aliases aren't restored, nor are feature states. A restore
+    interrupted by a takeover resumes on the next owner from the first shard it hadn't finished
+    (each shard recorded finished only once its documents are durable). At most one such restore
     runs per cluster (a second answers 503 `concurrent_snapshot_execution_exception`) and two per
     node; a restore is a full reindex, at roll's indexing rate (docs/search/README.md, "Next").
   - **Hostile input**: everything is read as a tenant's bytes. No allocation is sized from a count
@@ -2350,10 +2378,12 @@ the rest are skipped by the tests' own prerequisites.
     names that become keys or paths are checked. Reads pay `max_restore_bytes_per_sec` and
     `indices.recovery.max_bytes_per_sec`; the task obeys cancellation between documents.
   - **On the fleet**, the restore runs on the cluster's owner and its writes are logged and fenced
-    like any write; each index's recovery source records the restore, and an owner that opens a
-    cluster with one still running restores those indices again from the start (the documents
-    already there are written again under the same ids; one deleted on roll meanwhile comes back
-    once its tombstone is gone), or records why it can't; a task that stops on a panic marks its
+    like any write; each index's recovery source records the restore and the shards it finished,
+    and an owner that opens a cluster with one still running restores those indices again from
+    the first shard not finished (that shard's documents already there are written again under
+    the same ids; one deleted on roll meanwhile comes back once its tombstone is gone), or
+    records why it can't; a drain, a rebalance or the node stopping (SIGTERM) leaves the restore
+    running for the next owner, and any other failure is recorded; a task that stops on a panic marks its
     indices failed. The old owner's task isn't stopped; its writes fail the write-ahead log's
     ownership check like every write of a node that lost the cluster.
 - Searchable snapshots mount through the snapshot restore API, so a mounted index holds its own
