@@ -1501,6 +1501,10 @@ async fn lookups_are_authorized_where_they_run() {
         let (s, v) = e.es(&ann, ann_pw, Method::PUT, "/mine/_alias/mine-f", Some(json!({"filter": lookup("secret")}))).await;
         assert_eq!((s, v["error"]["reason"].as_str()), (400, Some("failed to parse filter for alias [mine-f]")), "{name}: {v}");
         if flavor != "elasticsearch" {
+            // OpenSearch's terms lookup by `query` is the reader's search of the index it names.
+            let by_query = json!({"terms": {"n": {"index": "secret", "path": "v", "query": {"match_all": {}}}}});
+            let (s, v) = search(json!({"size": 0, "aggs": {"params": {"filter": by_query}}})).await;
+            refused("a terms lookup by query", s, &v);
             continue;
         }
         let runtime = json!({"runtime_mappings": {"document": {"type": "lookup", "target_index": "secret", "input_field": "k", "target_field": "k", "fetch_fields": ["v"]}}, "fields": ["document"]});
