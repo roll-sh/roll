@@ -931,11 +931,7 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                             if ctx.modern { rpc_result(id, modern::approval_input_required(&r)) } else { approval_elicitation(id, &r) }
                         }
                         Ok(Some(r)) => rpc_result(id, r),
-                        Ok(None) => {
-                            let listed = ctx.usable_tools();
-                            let near = tools::nearest(&name, listed.iter().filter_map(|t| t["name"].as_str())).map(|n| format!(": did you mean {n:?}?")).unwrap_or_default();
-                            rpc_error(id, -32602, format!("unknown tool {name:?}{near}"))
-                        }
+                        Ok(None) => rpc_result(id, unknown_tool(ctx, &name)),
                     }
                 }
             }
@@ -1729,6 +1725,14 @@ fn steps_up(client: Option<&str>) -> bool {
     let Some((name, version)) = client.and_then(|c| c.split_once(' ')) else { return false };
     let v: Vec<u32> = version.trim().split('.').map_while(|p| p.parse().ok()).collect();
     name == "claude-code" && v.len() >= 3 && (v[0], v[1], v[2]) >= (2, 1, 288)
+}
+
+/// A call to a tool this connection doesn't have: a tool error the model reads (and can correct
+/// from the nearest name), not a protocol error, as the official SDKs answer it (SEP-2145).
+fn unknown_tool(ctx: &Ctx, name: &str) -> Value {
+    let listed = ctx.usable_tools();
+    let near = tools::nearest(name, listed.iter().filter_map(|t| t["name"].as_str())).map(|n| format!(": did you mean {n:?}?")).unwrap_or_default();
+    tool_error(format!("unknown tool {name:?}{near}"), json!({ "code": "unknown_tool" }))
 }
 
 fn tool_error(text: String, data: Value) -> Value {
