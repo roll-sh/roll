@@ -203,8 +203,14 @@ impl PointReader {
                 Some(First::None)
             } else if uk < start || key_ts(k) > ts {
                 None
+            } else if block.is_cols() {
+                // (A column block's row made alone: `value_ref` would make all of them.)
+                block.value(pos).map(|v| {
+                    f(&v);
+                    First::Row(Vec::new(), Bytes::new())
+                })
             } else {
-                block.value_ref(pos).map(|v| {
+                block.value_ref_plain(pos).map(|v| {
                     f(v);
                     First::Row(Vec::new(), Bytes::new())
                 })
@@ -396,13 +402,18 @@ impl PointReader {
                 found.push((st.i, plan[pi - 1].0, span));
                 continue;
             }
-            match block.value_ref(bpos) {
+            if block.is_cols() {
+                // (A column block's row (never stored out of line), made alone.)
+                out[st.i] = block.value(bpos);
+                continue;
+            }
+            match block.value_ref_plain(bpos) {
                 None => {}
                 Some(v) if resolve && super::toast::has_external(v) => {
-                    let v = block.value(bpos).expect("a value");
+                    let v = block.value_plain(bpos).expect("a value");
                     out[st.i] = Some(super::toast::resolve(view, key, v, ts)?);
                 }
-                Some(_) => out[st.i] = block.value(bpos),
+                Some(_) => out[st.i] = block.value_plain(bpos),
             }
         }
         for (i, b, span) in found {

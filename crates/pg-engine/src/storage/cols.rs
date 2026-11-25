@@ -5,7 +5,8 @@
 //! The interface is agent 149's (HANDOFF "Executor: batch execution"). This body is the
 //! executor's stub until 149's typed decode lands under the same signatures.
 
-use super::batch::RowBatch;
+use super::batch::{LazyRows, RowBatch};
+use super::colblock::ColDir;
 use super::row::{ROW_HEADER, ROW_HEADER_EXT, ROW_HEADER_TID, ROW_HEADER_TID_EXT, tag};
 use super::sst::get_varint;
 use crate::error::Result;
@@ -561,6 +562,169 @@ fn walk_row(steps: &mut [Step<'_>], r: usize, bytes: &[u8], buf: Option<(u32, us
     pos <= data.len()
 }
 
+/// The value at `data[p]` into `col`'s slot `r` as the general walk takes it: NULL, typed
+/// (`put_typed`), else decoded and kept as odd. Whether it was odd.
+fn general_value(col: &mut Col, r: usize, own: &mut Vec<u8>, data: &[u8], p: usize, buf: Option<(u32, usize)>) -> Result<bool> {
+    if data.get(p) == Some(&tag::NULL) {
+        col.nulls[r] = true;
+        col.data.set_default(r);
+        return Ok(false);
+    }
+    let mut q = p;
+    if put_typed(col, r, own, data, &mut q, buf) {
+        return Ok(false);
+    }
+    let mut q = p;
+    let v = super::row::decode_value(data, &mut q)?;
+    col.nulls[r] = v.is_null();
+    col.data.set_default(r);
+    col.odd.push((r as u32, v));
+    Ok(true)
+}
+
+/// Rows `brow..brow + m` of column `c` of a column block (`dir`, its buffer `d`, the batch's
+/// buffer `bi`) into `col`'s slots `r0..r0 + m` (format 5): what the walk or the general path
+/// writes from the rows' bytes, a value at a time from its place. Whether it kept odd values.
+#[allow(clippy::too_many_arguments)]
+fn gather(col: &mut Col, dir: &ColDir, d: &[u8], c: usize, (r0, m, brow): (usize, usize, usize), bi: u32, own: &mut Vec<u8>, missing: &Value, scratch: &mut Vec<u8>) -> Result<bool> {
+    use super::colblock::{Kind, is_null, sint};
+    if c >= dir.ncols as usize {
+        for r in r0..r0 + m {
+            col.nulls[r] = missing.is_null();
+            col.data.set_default(r);
+            col.odd.push((r as u32, missing.clone()));
+        }
+        return Ok(true);
+    }
+    let k = dir.cols[c];
+    let at = k.at as usize;
+    if k.kind == Kind::Null {
+        for r in r0..r0 + m {
+            col.nulls[r] = true;
+            col.data.set_default(r);
+        }
+        return Ok(false);
+    }
+    let Col { data, nulls, .. } = col;
+    // (Each row's slot and NULL flag written: a NULL's slot its default.)
+    macro_rules! each {
+        ($v:expr, $def:expr, |$b:ident| $x:expr) => {{
+            for j in 0..m {
+                let ($b, r) = (brow + j, r0 + j);
+                let n = is_null(d, k.nulls, $b);
+                $v[r] = if n { $def } else { $x };
+                nulls[r] = n;
+            }
+            return Ok(false);
+        }};
+    }
+    // (No NULL in the column: the slots' flags cleared at once, the values copied in loops the
+    // compiler unrolls, one per width.)
+    if k.nulls == u32::MAX {
+        macro_rules! plain {
+            ($v:expr, $w:expr, |$c:ident| $x:expr) => {{
+                nulls[r0..r0 + m].fill(false);
+                let src = &d[at + brow * $w..at + (brow + m) * $w];
+                for (dst, $c) in $v[r0..r0 + m].iter_mut().zip(src.chunks_exact($w)) {
+                    *dst = $x;
+                }
+                return Ok(false);
+            }};
+        }
+        match (&mut *data, k.kind) {
+            (ColData::I32(v), Kind::Fixed { tag: tag::INT4, .. }) => plain!(v, 4, |c| i32::from_le_bytes(c.try_into().unwrap())),
+            (ColData::Date(v), Kind::Fixed { tag: tag::DATE, .. }) => plain!(v, 4, |c| i32::from_le_bytes(c.try_into().unwrap())),
+            (ColData::I64(v), Kind::Fixed { tag: tag::INT8, .. }) => plain!(v, 8, |c| i64::from_le_bytes(c.try_into().unwrap())),
+            (ColData::F64(v), Kind::Fixed { tag: tag::FLOAT8, .. }) => plain!(v, 8, |c| f64::from_le_bytes(c.try_into().unwrap())),
+            (ColData::Num(v), Kind::Num { scale, w: 1 }) => plain!(v, 1, |c| (c[0] as i8 as i128, scale)),
+            (ColData::Num(v), Kind::Num { scale, w: 2 }) => plain!(v, 2, |c| (i16::from_le_bytes(c.try_into().unwrap()) as i128, scale)),
+            (ColData::Num(v), Kind::Num { scale, w: 4 }) => plain!(v, 4, |c| (i32::from_le_bytes(c.try_into().unwrap()) as i128, scale)),
+            (ColData::Num(v), Kind::Num { scale, w: 8 }) => plain!(v, 8, |c| (i64::from_le_bytes(c.try_into().unwrap()) as i128, scale)),
+            (ColData::Bytes(v), Kind::Dict { tag: tag::TEXT | tag::BYTEA, k: nk }) => {
+                // (The dictionary's spans looked up once a run.)
+                let spans: Vec<(u32, u32, u32)> = (0..nk).map(|x| {
+                    let (s, e) = dir.dict_span(d, c, x as u8);
+                    (bi, s as u32, e as u32)
+                }).collect();
+                nulls[r0..r0 + m].fill(false);
+                for (dst, code) in v[r0..r0 + m].iter_mut().zip(&d[at + brow..at + brow + m]) {
+                    *dst = spans[*code as usize];
+                }
+                return Ok(false);
+            }
+            _ => {}
+        }
+    }
+    match (data, k.kind) {
+        (ColData::I32(v), Kind::Fixed { tag: tag::INT4 | tag::INT2, w }) => each!(v, 0, |b| sint(d, at + b * w as usize, w) as i32),
+        (ColData::Date(v), Kind::Fixed { tag: tag::DATE, .. }) => each!(v, 0, |b| sint(d, at + b * 4, 4) as i32),
+        (ColData::I64(v), Kind::Fixed { tag: tag::INT8, .. }) => each!(v, 0, |b| sint(d, at + b * 8, 8)),
+        (ColData::F64(v), Kind::Fixed { tag: tag::FLOAT8, .. }) => each!(v, 0.0, |b| f64::from_le_bytes(d[at + b * 8..at + b * 8 + 8].try_into().unwrap())),
+        (ColData::F64(v), Kind::Fixed { tag: tag::FLOAT4, .. }) => each!(v, 0.0, |b| f32::from_le_bytes(d[at + b * 4..at + b * 4 + 4].try_into().unwrap()) as f64),
+        (ColData::Bool(v), Kind::Bool) => each!(v, false, |b| d[at + b] == tag::TRUE),
+        (ColData::Num(v), Kind::Num { scale, w }) => each!(v, (0, 0), |b| (sint(d, at + b * w as usize, w) as i128, scale)),
+        (ColData::Bytes(v), Kind::Str { tag: tag::TEXT | tag::BYTEA, .. }) => each!(v, (0, 0, 0), |b| {
+            let (s, e) = dir.str_span(d, c, b);
+            (bi, s as u32, e as u32)
+        }),
+        (ColData::Bytes(v), Kind::Dict { tag: tag::TEXT | tag::BYTEA, .. }) => each!(v, (0, 0, 0), |b| {
+            let (s, e) = dir.dict_span(d, c, d[at + b]);
+            (bi, s as u32, e as u32)
+        }),
+        _ => {}
+    }
+    // (Any other: each value as the general path takes it, from its bytes in the block (a raw
+    // column) or made.)
+    let mut odd = false;
+    for j in 0..m {
+        let (b, r) = (brow + j, r0 + j);
+        odd |= match k.kind {
+            Kind::Raw { .. } => general_value(col, r, own, d, dir.str_span(d, c, b).0, Some((bi, 0)))?,
+            _ => {
+                scratch.clear();
+                dir.value(d, c, b, scratch);
+                general_value(col, r, own, scratch, 0, None)?
+            }
+        };
+    }
+    Ok(odd)
+}
+
+/// `decode_cols`' rows of column blocks (format 5): each run's needed columns copied from its
+/// block (`gather`), the rows it took marked in `covered`. Whether some column kept odd values
+/// out of row order.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn gather_runs(lazy: &LazyRows, rows: &std::ops::Range<usize>, len: usize, cols: &mut [Option<Col>], bufs: &mut Vec<Bytes>, own: &mut Vec<u8>, missing: &[Value], covered: &mut Vec<bool>) -> Result<bool> {
+    let mut sort_odd = false;
+    let mut scratch = Vec::new();
+    covered.clear();
+    covered.resize(len, false);
+    let null = Value::Null;
+    for run in lazy.runs() {
+        let (a, b) = ((run.at as usize).max(rows.start), (run.at as usize + run.n as usize).min(rows.end));
+        if a >= b {
+            continue;
+        }
+        let blk = lazy.block(run.buf);
+        let dir = blk.col_dir().expect("a column block");
+        let d = &blk.data()[..];
+        let last = bufs.last().unwrap();
+        if bufs.len() == 1 || last.as_ptr() != d.as_ptr() || last.len() != d.len() {
+            bufs.push(blk.data().clone());
+        }
+        let bi = (bufs.len() - 1) as u32;
+        let span = (a - rows.start, b - a, run.row as usize + (a - run.at as usize));
+        for (c, slot) in cols.iter_mut().enumerate() {
+            if let Some(col) = slot {
+                sort_odd |= gather(col, dir, d, c, span, bi, own, missing.get(c).unwrap_or(&null), &mut scratch)?;
+            }
+        }
+        covered[a - rows.start..b - rows.start].fill(true);
+    }
+    Ok(sort_odd)
+}
+
 /// Rows `rows` of `batch` as columns into `out`: the columns `need` marks, decoded as
 /// `types` declares them, a column a row was stored without as `missing`'s value. (Inlined
 /// into the scans' decode, as it was before `decode_cols_only` shared its body: called, it
@@ -731,6 +895,55 @@ fn decode_cols_in<P: Iterator<Item = u32> + Clone>(
     } else {
         for r in left {
             row(r as usize, rows.start + r as usize)?;
+        }
+    }
+    bufs[0] = Bytes::from(std::mem::take(own));
+    Ok(())
+}
+
+/// `decode_cols` of rows `rows` of a batch that are all rows of column blocks left unmade
+/// (`lazy`, storage format 5: `FillRows::fill_lazy`): each run's needed columns copied from its
+/// block (`gather_runs`). (Its own function: `decode_cols`' walk compiles as before format 5.)
+/// Err when a row of `rows` isn't one: the reader then goes the row path, the rows made.
+#[inline(never)]
+pub fn decode_cols_lazy(lazy: &LazyRows, rows: std::ops::Range<usize>, need: &[bool], types: &[DataType], missing: &[Value], out: &mut ColBatch) -> Result<()> {
+    let ncols = need.len().min(types.len());
+    let len = rows.len();
+    out.cols.resize_with(ncols.max(out.cols.len()), || None);
+    // (Every needed column's slots made at once, as `decode_cols` makes them.)
+    for (c, slot) in out.cols.iter_mut().enumerate() {
+        if c >= ncols || !need[c] {
+            *slot = None;
+            continue;
+        }
+        let want = data_for(&types[c]);
+        match slot {
+            Some(col) if col.data.kind() == want.kind() => {
+                col.nulls.clear();
+                col.odd.clear();
+            }
+            _ => *slot = Some(Col { data: want, nulls: Vec::new(), odd: Vec::new() }),
+        }
+        let col = slot.as_mut().unwrap();
+        col.data.size(len);
+        col.nulls.resize(len, false);
+    }
+    out.len = len;
+    out.bufs.clear();
+    out.ext.clear();
+    out.own.clear();
+    out.bufs.push(Bytes::new());
+    let upto = need.iter().take(ncols).rposition(|b| *b).map_or(0, |c| c + 1);
+    let ColBatch { cols, bufs, own, .. } = out;
+    let cols = &mut cols[..upto];
+    let mut covered = Vec::new();
+    let sort_odd = gather_runs(lazy, &rows, len, cols, bufs, own, missing, &mut covered)?;
+    if !covered.iter().all(|c| *c) {
+        return Err(crate::error::internal("a row of the batch isn't a column block's"));
+    }
+    if sort_odd {
+        for col in cols.iter_mut().flatten() {
+            col.odd.sort_by_key(|o| o.0);
         }
     }
     bufs[0] = Bytes::from(std::mem::take(own));

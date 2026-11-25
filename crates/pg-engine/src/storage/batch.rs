@@ -4,16 +4,38 @@
 //! row: a block's bytes are referenced once per batch, not once per row, and the buffers are
 //! reused from batch to batch.
 use bytes::Bytes;
+use std::sync::Arc;
 
 /// A source of rows a batch at a time (`TxnScan`, a store `Scan`): up to `max` more rows
 /// appended to `b` per call; none appended means it is done.
 pub trait FillRows: Send {
     fn fill(&mut self, b: &mut RowBatch, max: usize) -> crate::error::Result<()>;
+
+    /// Whether `fill_lazy` may leave rows unmade: a store scan with column blocks (storage
+    /// format 5) among its sources.
+    fn lazy(&self) -> bool {
+        false
+    }
+
+    /// `fill`, the rows of column blocks left unmade (`LazyRows`): for a reader that decodes
+    /// their columns from the blocks and makes only the rows it reads by index.
+    fn fill_lazy(&mut self, b: &mut RowBatch, lazy: &mut LazyRows, max: usize) -> crate::error::Result<()> {
+        let _ = lazy;
+        self.fill(b, max)
+    }
 }
 
 impl FillRows for super::Scan {
     fn fill(&mut self, b: &mut RowBatch, max: usize) -> crate::error::Result<()> {
         self.fill_batch(b, max)
+    }
+
+    fn lazy(&self) -> bool {
+        self.has_cols()
+    }
+
+    fn fill_lazy(&mut self, b: &mut RowBatch, lazy: &mut LazyRows, max: usize) -> crate::error::Result<()> {
+        self.fill_batch_lazy(b, max, None, lazy)
     }
 }
 
@@ -24,6 +46,150 @@ pub struct BulkFill<F>(pub F);
 impl<F: FillRows> FillRows for BulkFill<F> {
     fn fill(&mut self, b: &mut RowBatch, max: usize) -> crate::error::Result<()> {
         super::bulk_read(|| self.0.fill(b, max))
+    }
+
+    fn lazy(&self) -> bool {
+        self.0.lazy()
+    }
+
+    fn fill_lazy(&mut self, b: &mut RowBatch, lazy: &mut LazyRows, max: usize) -> crate::error::Result<()> {
+        super::bulk_read(|| self.0.fill_lazy(b, lazy, max))
+    }
+}
+
+/// A batch's rows of column blocks (storage format 5) a fill left unmade (`FillRows::
+/// fill_lazy`): each such row refers to an empty buffer of the batch (reading it by index
+/// would panic), the column block by that buffer's index here, and the runs of rows they
+/// are, in batch order. It describes the batch it was filled into: cleared with it, and
+/// shrunk as its rows are made (`make`). Apart from the batch, which many readers make and
+/// drop a row at a time: a batch's layout and code are format 4's.
+#[derive(Default)]
+pub struct LazyRows {
+    blocks: Vec<(u32, Arc<super::sst::Block>)>,
+    runs: Vec<ColRun>,
+}
+
+/// Rows `at..at + n` of a batch are rows `row..row + n` of the column block of buffer `buf`.
+#[derive(Clone, Copy, Debug)]
+pub struct ColRun {
+    pub at: u32,
+    pub n: u32,
+    pub buf: u32,
+    pub row: u32,
+}
+
+impl LazyRows {
+    /// No row is left unmade.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.runs.is_empty()
+    }
+
+    /// How many rows are left unmade.
+    pub fn rows(&self) -> usize {
+        self.runs.iter().map(|r| r.n as usize).sum()
+    }
+
+    /// With its batch cleared.
+    pub fn clear(&mut self) {
+        self.blocks.clear();
+        self.runs.clear();
+    }
+
+    /// The runs of rows left unmade, in order.
+    pub fn runs(&self) -> &[ColRun] {
+        &self.runs
+    }
+
+    /// The column block of buffer `buf`.
+    pub fn block(&self, buf: u32) -> &Arc<super::sst::Block> {
+        &self.blocks.iter().rev().find(|(x, _)| *x == buf).expect("a column block's buffer").1
+    }
+
+    /// The buffer of `batch` the rows of column block `blk` pushed next refer to.
+    pub fn buf_of(&mut self, batch: &mut RowBatch, blk: &Arc<super::sst::Block>) -> u32 {
+        let last = batch.bufs.len() as u32;
+        if let Some((b, x)) = self.blocks.last()
+            && *b + 1 == last
+            && Arc::ptr_eq(x, blk)
+        {
+            return *b;
+        }
+        self.blocks.push((last, blk.clone()));
+        batch.bufs.push(Bytes::new());
+        last
+    }
+
+    /// A row of the column block of buffer `buf` (`buf_of`) into `batch`, unmade: `len`
+    /// bytes, its block's row `row`.
+    pub fn push(&mut self, batch: &mut RowBatch, key: &[u8], buf: u32, len: usize, row: u32) {
+        batch.push_ent(key, buf, 0, len);
+        self.note(batch, 1, row);
+    }
+
+    /// The last `n` rows pushed into `batch` are rows `row..row + n` of their column block.
+    pub fn note(&mut self, batch: &RowBatch, n: usize, row: u32) {
+        let at = (batch.ents.len() - n) as u32;
+        let buf = batch.ents[at as usize].buf;
+        if let Some(r) = self.runs.last_mut()
+            && r.buf == buf
+            && r.at + r.n == at
+            && r.row + r.n == row
+        {
+            r.n += n as u32;
+            return;
+        }
+        self.runs.push(ColRun { at, n: n as u32, buf, row });
+    }
+
+    /// The rows of `batch` from `from` on that `keep` takes (by row of the batch) made, each
+    /// run's into one buffer: they read as any row after. The others stay unmade (not to be
+    /// read by index).
+    #[cold]
+    #[inline(never)]
+    pub fn make(&mut self, batch: &mut RowBatch, from: usize, keep: &dyn Fn(usize) -> bool) {
+        let mut left = Vec::with_capacity(self.runs.len());
+        let mut at = Vec::new();
+        for run in std::mem::take(&mut self.runs) {
+            let blk = self.block(run.buf).clone();
+            let (a, n) = (run.at as usize, run.n as usize);
+            let mut buf = Vec::with_capacity(batch.ents[a..a + n].iter().map(|e| e.len as usize).sum());
+            at.clear();
+            for j in 0..n {
+                let i = a + j;
+                if i >= from && keep(i) {
+                    at.push((i, buf.len()));
+                    blk.row_into(run.row as usize + j, &mut buf);
+                    continue;
+                }
+                // (Left unmade: the run of them goes on, or one starts.)
+                match left.last_mut() {
+                    Some(ColRun { at: la, n: ln, buf: lb, row: lr }) if *lb == run.buf && *la + *ln == i as u32 && *lr + *ln == run.row + j as u32 => *ln += 1,
+                    _ => left.push(ColRun { at: i as u32, n: 1, buf: run.buf, row: run.row + j as u32 }),
+                }
+            }
+            if at.is_empty() {
+                continue;
+            }
+            let b = batch.bufs.len() as u32;
+            batch.bufs.push(Bytes::from(buf));
+            for &(i, o) in &at {
+                let e = &mut batch.ents[i];
+                e.buf = b;
+                e.off = o as u32;
+            }
+        }
+        self.runs = left;
+        if self.runs.is_empty() {
+            self.blocks.clear();
+        }
+    }
+
+    /// Every row left unmade made.
+    pub fn make_all(&mut self, batch: &mut RowBatch) {
+        if !self.is_empty() {
+            self.make(batch, 0, &|_| true);
+        }
     }
 }
 
@@ -187,7 +353,7 @@ impl RowBatch {
 
     /// A row (not the first) whose key is the last row's first `shared` bytes and then
     /// `suffix`, its value `bufs[buf][off..off + len]` (`buf_index`).
-    #[inline]
+    #[inline(always)]
     pub fn push_shared(&mut self, shared: usize, suffix: &[u8], buf: u32, off: usize, len: usize) {
         let prev = self.key_start(self.ents.len() - 1);
         self.keys.extend_from_within(prev..prev + shared);
@@ -197,7 +363,7 @@ impl RowBatch {
 
     /// A row whose key is `key`'s first `n` bytes, its value `bufs[buf][off..off + len]`
     /// (`buf_index`): the key's bytes moved as one fixed-size copy, then cut back.
-    #[inline]
+    #[inline(always)]
     pub fn push_key<const K: usize>(&mut self, key: &[u8; K], n: usize, buf: u32, off: usize, len: usize) {
         let start = self.keys.len();
         self.keys.extend_from_slice(key);
