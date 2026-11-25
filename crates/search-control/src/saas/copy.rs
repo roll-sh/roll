@@ -84,7 +84,7 @@ pub(super) enum Mode {
     Copy,
     /// A catch-up started at `started_ms`: writes only documents that differ from roll's
     /// (top-level `excludes` left out of the comparison: roll doesn't keep them).
-    CatchUp { started_ms: i64, excludes: Vec<String> },
+    CatchUp { started_ms: i64, excludes: Vec<String>, filtered: bool },
 }
 
 /// One copy: the source's documents into `dest`, page by page.
@@ -114,6 +114,8 @@ struct Batch {
     _held: search_es::breaker::Reservation,
 }
 
+/// Ids a catch-up's `_mget` asks roll for at once.
+const MGET_CHUNK: usize = 200;
 /// `_bulk` requests sent again after a 429 (Elasticsearch's reindex: 11).
 const BULK_RETRIES: u32 = 11;
 /// An Algolia cursor longer than this is refused (one is a few hundred bytes).
@@ -143,9 +145,15 @@ impl Copy {
                     self.meta.copy.done_ms = Some(now_ms());
                 }
             }
-            Mode::CatchUp { started_ms, .. } => {
-                if finished {
+            Mode::CatchUp { started_ms, filtered, .. } => {
+                // A filtered pass that read nothing moves nothing: the next one reads the same
+                // time again (the source may not have applied the filter).
+                if finished && !(*filtered && self.read == 0) {
                     self.meta.caught_up_ms = Some(*started_ms);
+                }
+                // Every record compared: nothing a resume by count skipped is left behind.
+                if finished && !*filtered {
+                    self.meta.needs_full = false;
                 }
             }
         }
@@ -264,31 +272,33 @@ impl Copy {
     /// many those were; a copy's page as it is.
     async fn changed(&self, me: &Control, c: &SearchCluster, docs: Vec<(String, String)>) -> (Vec<(String, String)>, u64) {
         let Mode::CatchUp { excludes, .. } = &self.mode else { return (docs, 0) };
-        let ids: Vec<&str> = docs.iter().map(|(id, _)| id.as_str()).collect();
-        let (status, v) = me.call_json(c, "POST", &format!("/{}/_mget", urlencoding::encode(&self.dest)), Some(&json!({ "ids": ids }))).await;
-        if status != 200 {
-            return (docs, 0);
-        }
-        let mut held: std::collections::HashMap<&str, &Value> = std::collections::HashMap::new();
-        for d in v["docs"].as_array().into_iter().flatten() {
-            if let (Some(id), Some(src)) = (d["_id"].as_str(), d.get("_source").filter(|_| d["found"] == true)) {
-                held.insert(id, src);
-            }
-        }
         let mut out = Vec::new();
         let mut same = 0;
-        for (id, src) in docs.iter() {
-            let unchanged = held.get(id.as_str()).is_some_and(|roll| {
-                let Ok(Value::Object(mut ours)) = serde_json::from_str::<Value>(src) else { return false };
-                for e in excludes {
-                    ours.remove(e);
+        // A few hundred ids at a time: roll's answer holds their sources.
+        for chunk in docs.chunks(MGET_CHUNK) {
+            let ids: Vec<&str> = chunk.iter().map(|(id, _)| id.as_str()).collect();
+            let (status, v) = me.call_json(c, "POST", &format!("/{}/_mget", urlencoding::encode(&self.dest)), Some(&json!({ "ids": ids }))).await;
+            let mut held: std::collections::HashMap<&str, &Value> = std::collections::HashMap::new();
+            if status == 200 {
+                for d in v["docs"].as_array().into_iter().flatten() {
+                    if let (Some(id), Some(src)) = (d["_id"].as_str(), d.get("_source").filter(|_| d["found"] == true)) {
+                        held.insert(id, src);
+                    }
                 }
-                Value::Object(ours) == **roll
-            });
-            if unchanged {
-                same += 1;
-            } else {
-                out.push((id.clone(), src.clone()));
+            }
+            for (id, src) in chunk {
+                let unchanged = held.get(id.as_str()).is_some_and(|roll| {
+                    let Ok(Value::Object(mut ours)) = serde_json::from_str::<Value>(src) else { return false };
+                    for e in excludes {
+                        ours.remove(e);
+                    }
+                    Value::Object(ours) == **roll
+                });
+                if unchanged {
+                    same += 1;
+                } else {
+                    out.push((id.clone(), src.clone()));
+                }
             }
         }
         (out, same)

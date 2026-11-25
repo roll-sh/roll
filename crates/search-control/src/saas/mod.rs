@@ -90,6 +90,8 @@ struct Ready {
     restart: bool,
     /// A stopped copy's record and where it resumes (`None`: from the start).
     resume: Option<(Imported, Option<Position>)>,
+    /// The search templates to store, checked ([`Plan::build_templates`]).
+    templates: Vec<(String, String)>,
     permit: Option<remote::RemoteSlot>,
     index: String,
     dest: String,
@@ -444,18 +446,6 @@ impl Plan {
 
     fn rule_template_id(dest: &str, rule: &str) -> String {
         format!("{dest}-search-rule-{rule}")
-    }
-
-    /// Every search template the import makes, with its source.
-    fn templates(&self, dest: &str) -> Vec<(String, String)> {
-        let mut out = vec![(Plan::template_id(dest), self.template_source(dest, &self.sort_first, None))];
-        for (r, sort) in &self.replicas {
-            out.push((Plan::replica_template(dest, r), self.template_source(dest, sort, None)));
-        }
-        for r in &self.rule_templates {
-            out.push((Plan::rule_template_id(dest, &r.rule), self.template_source(dest, &self.sort_first, Some(r))));
-        }
-        out
     }
 
     /// The rule templates as the import record and the answer list them.
@@ -959,9 +949,20 @@ impl Control {
         let _slot = self.control_slot(&c)?;
         let deadline = tokio::time::Instant::now() + crate::migrate::DEADLINE;
         let mut out = Vec::new();
+        let mut aliases: HashSet<String> = HashSet::new();
         for p in &req.indices {
             let dest = p.dest.clone().filter(|d| !d.trim().is_empty()).unwrap_or_else(|| p.index.clone());
             let mut row = json!({ "index": p.index, "dest": dest, "step": if stage == Stage::CatchUp { "catch_up" } else { "cutover" } });
+            // One alias moves to one copy: a second pick naming it in the same call would take it
+            // straight back.
+            if stage == Stage::Cutover {
+                let alias = p.alias.clone().filter(|a| !a.trim().is_empty()).unwrap_or_else(|| p.index.clone());
+                if !aliases.insert(alias.clone()) {
+                    row["error"] = json!(format!("alias [{alias}] is moved by an earlier index of this call: give each index its own alias"));
+                    out.push(row);
+                    continue;
+                }
+            }
             let one = async {
                 match stage {
                     Stage::CatchUp => self.saas_catch_up(&c, spec, req, p, &dest).await,
@@ -1012,7 +1013,10 @@ impl Control {
             restart = true;
             // A finished copy, or `full`, copies everything again (keeping nothing of the old
             // record's place); a stopped one resumes where it stopped.
-            if imp.copy.state != "done" && !p.full.unwrap_or(false) {
+            // A record from before copies kept their place (no state, nothing to resume from)
+            // starts a new one.
+            let old = imp.copy.state.is_empty() && imp.copy.position.is_none();
+            if imp.copy.state != "done" && !old && !p.full.unwrap_or(false) {
                 let at = imp.copy.position.clone();
                 resume = Some((imp, at));
             }
@@ -1039,6 +1043,13 @@ impl Control {
             return Err(format!("[{}] has no primary key roll can use as _id", p.index));
         }
         plan.guard();
+        let templates = plan.build_templates(dest);
+        // A resumed copy's record learns what this plan knows (an older record may lack it).
+        if let Some((imp, _)) = resume.as_mut() {
+            imp.id_field = plan.id_field.clone();
+            imp.geo_points = plan.geo_points.clone();
+            imp.rule_templates = plan.rule_template_list(dest);
+        }
         let imported = Imported {
             from: from.clone(),
             id_field: plan.id_field.clone(),
@@ -1047,6 +1058,7 @@ impl Control {
             caught_up_ms: None,
             cutover: None,
             rule_templates: plan.rule_template_list(dest),
+            needs_full: false,
         };
         let mappings = plan.mappings(&imported);
         let summary = plan.summary(dest);
@@ -1072,18 +1084,18 @@ impl Control {
             (true, None) => Some((imported, None)),
             (false, None) => None,
         };
-        Ok(Step::Ready(Box::new(Ready { plan, mappings, summary, restart, resume, permit, index: p.index.clone(), dest: dest.to_string() })))
+        Ok(Step::Ready(Box::new(Ready { plan, mappings, summary, restart, resume, templates, permit, index: p.index.clone(), dest: dest.to_string() })))
     }
 
     /// The rest of one index's migration, past the read: what it needs made on cluster `c`
     /// (undone if a step fails), then its copy started. Run in a task of its own, so neither
     /// the call's deadline nor a closed connection leaves it half made.
     async fn finish_one(&self, c: &SearchCluster, spec: &Spec, r: Ready, size: Option<u32>, rps: Option<f64>) -> (Value, bool, Option<String>) {
-        let Ready { plan, mappings, summary, restart, resume, permit, index, dest } = r;
+        let Ready { plan, mappings, summary, restart, resume, templates, permit, index, dest } = r;
         let mut made = Vec::new();
         if !restart {
             let mut undo = Vec::new();
-            if let Err(e) = self.make(c, &plan, &dest, &mappings, &mut made, &mut undo).await {
+            if let Err(e) = self.make(c, &plan, &dest, &mappings, &templates, &mut made, &mut undo).await {
                 // Nothing half made stays: a later attempt starts from scratch.
                 for path in undo.iter().rev() {
                     self.call_json(c, "DELETE", path, None).await;
@@ -1092,11 +1104,16 @@ impl Control {
             }
         }
         // The record the copy keeps: a resumed copy's own, else the one the index was made with.
-        let (meta, at) = match resume {
+        let (mut meta, at) = match resume {
             Some((imp, at)) => (imp, at),
             None => (serde_json::from_value(mappings.pointer("/_meta/roll_import").cloned().unwrap_or_default()).unwrap_or_default(), None),
         };
         let resumed = at.as_ref().map(Position::describe);
+        // Resuming by count (Meilisearch's offset, the export's lines) misses records that moved
+        // below it when the source deleted some meanwhile: only a full compare finds them.
+        if matches!(at, Some(Position::Offset(n) | Position::Lines(n)) if n > 0) {
+            meta.needs_full = true;
+        }
         let reader = Reader::new(spec.kind, &index, at.clone(), None, plan.geo_points.clone());
         let started = match self.saas_client(spec, None).await {
             Ok(client) => {
@@ -1153,7 +1170,8 @@ impl Control {
     /// analyzer reads it), the index, the rulesets, the search templates. Names roll already
     /// has are never overwritten. What was made is listed in `made`, and how to remove it in
     /// `undo` (the caller does, if a later step fails).
-    async fn make(&self, c: &SearchCluster, plan: &Plan, dest: &str, mappings: &Value, made: &mut Vec<String>, undo: &mut Vec<String>) -> std::result::Result<(), String> {
+    #[allow(clippy::too_many_arguments)]
+    async fn make(&self, c: &SearchCluster, plan: &Plan, dest: &str, mappings: &Value, sources: &[(String, String)], made: &mut Vec<String>, undo: &mut Vec<String>) -> std::result::Result<(), String> {
         let enc = |s: &str| urlencoding::encode(s).into_owned();
         let failed = |what: &str, v: &Value| format!("{what} failed: {}", v.pointer("/error/reason").and_then(Value::as_str).unwrap_or("roll refused it"));
         let set = Plan::synonyms_set(dest);
@@ -1163,7 +1181,6 @@ impl Control {
                 sets.push((n, &rules[i * RULES_PER_SET..((i + 1) * RULES_PER_SET).min(rules.len())]));
             }
         }
-        let sources = plan.templates(dest);
         let templates: Vec<&String> = sources.iter().map(|(id, _)| id).collect();
         // Everything this index needs is free before anything is made.
         if !plan.synonyms.is_empty() && self.call_json(c, "GET", &format!("/_synonyms/{}?size=1", enc(&set)), None).await.0 == 200 {
@@ -1203,7 +1220,7 @@ impl Control {
             made.push(format!("query ruleset [{s}]"));
             undo.push(format!("/_query_rules/{}", enc(s)));
         }
-        for (id, source) in &sources {
+        for (id, source) in sources {
             let body = json!({ "script": { "lang": "mustache", "source": source } });
             let (status, v) = self.call_json(c, "PUT", &format!("/_scripts/{}", enc(id)), Some(&body)).await;
             if status != 200 {

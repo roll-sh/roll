@@ -10,6 +10,8 @@ use serde_json::{json, Value};
 
 const MAX_LEN: usize = 4096;
 const MAX_DEPTH: usize = 32;
+/// The most entries a `facetFilters` / `numericFilters` list (inner lists counted) may hold.
+const MAX_ENTRIES: usize = 100;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Tok {
@@ -102,7 +104,16 @@ fn keyword(t: Option<&Tok>, k: &str) -> bool {
     matches!(t, Some(Tok::Word(w)) if w.eq_ignore_ascii_case(k))
 }
 
-/// A value as JSON: a number when it reads as one, `true`/`false`, else a string.
+/// A facet value (`attr:value`): always a string, as Algolia compares facet values (`zip:02139`,
+/// `sku:1e5` stay as written; a numeric field takes the string as Elasticsearch coerces it).
+fn facet_value(t: &Tok) -> Value {
+    match t {
+        Tok::Quoted(s) | Tok::Word(s) => json!(s),
+        _ => Value::Null,
+    }
+}
+
+/// A comparison's value as JSON: a number when it reads as one, `true`/`false`, else a string.
 fn value(t: &Tok) -> Value {
     match t {
         Tok::Quoted(s) => json!(s),
@@ -195,7 +206,7 @@ impl<F: Fn(&str) -> String> Parser<'_, F> {
                 }
                 return Ok(json!({ "range": { attr: { "gte": val, "lte": hi } } }));
             }
-            return Ok(json!({ "term": { field: val } }));
+            return Ok(json!({ "term": { field: facet_value(&v) } }));
         }
         if !val.is_number() {
             return Err(format!("[{attr}] {op} compares with a number"));
@@ -215,6 +226,10 @@ impl<F: Fn(&str) -> String> Parser<'_, F> {
 pub(crate) fn filters(s: &str, exact: &impl Fn(&str) -> String) -> Result<Value, String> {
     if s.len() > MAX_LEN {
         return Err(format!("the filter is longer than the {MAX_LEN} bytes roll reads"));
+    }
+    // A brace would be a Mustache tag once the filter is in a search template.
+    if s.contains(['{', '}']) {
+        return Err("a filter with `{` or `}` can't go in a search template".into());
     }
     if s.contains("<score=") {
         return Err("filter scores (`<score=…>`) have no Elasticsearch equivalent".into());
@@ -239,6 +254,13 @@ pub(crate) fn filter_list(v: &Value, exact: &impl Fn(&str) -> String) -> Result<
             None => filters(s, exact),
         }
     };
+    let entries = match v {
+        Value::Array(a) => a.iter().map(|x| x.as_array().map_or(1, Vec::len)).sum(),
+        _ => 1,
+    };
+    if entries > MAX_ENTRIES {
+        return Err(format!("{entries} entries, more than the {MAX_ENTRIES} roll maps"));
+    }
     match v {
         Value::String(s) => one(s),
         Value::Array(a) => {
@@ -275,7 +297,9 @@ mod tests {
             ] } })
         );
         assert_eq!(filter_list(&json!([["brand:Acme", "brand:Brewer"], "-color:red"]), &exact).unwrap()["bool"]["filter"][1], json!({ "bool": { "must_not": [{ "term": { "color": "red" } }] } }));
-        for bad in ["brand:", "(brand:a", "price < cheap", "_id:x", "{{x}}:1", "brand:a OR", "a<score=2>:b"] {
+        // Facet values stay as written; braces never reach a template.
+        assert_eq!(filters("zip:02139 AND sku:1e5", &exact).unwrap()["bool"]["filter"], json!([{ "term": { "zip": "02139" } }, { "term": { "sku": "1e5" } }]));
+        for bad in ["brand:", "(brand:a", "price < cheap", "_id:x", "{{x}}:1", "brand:a OR", "a<score=2>:b", "brand:{{{query}}}", r#"brand:"}}""#] {
             assert!(filters(bad, &exact).is_err(), "{bad}");
         }
         let deep = format!("{}a:1{}", "(".repeat(100), ")".repeat(100));

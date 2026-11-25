@@ -113,6 +113,9 @@ ranges, anything a `bool` filter takes):
 {"id": "products-search", "params": {"query": "kettle", "filters": {"term": {"brand.keyword": "Acme"}}}}
 ```
 
+Build `filters` in your backend, as an object. Never pass a string or an object that came from the
+browser: whoever sends `filters` decides what the search may return.
+
 Pins follow Algolia's rule: a rule's promoted records show whatever the filters say, unless the
 rule set `filterPromotes`, whose pins show only when they match the filters too (they're kept in
 their own rulesets, `<index>-rules-filtered`).
@@ -137,8 +140,14 @@ Query edits (`remove`, `replace`) are applied to the pattern when the rule's anc
 where the query's text is known; on other anchorings they're listed. Algolia's filter syntax
 maps to Elasticsearch queries: `attr:value` and `attr:"a value"` (on the exact field), `attr <
 10` and the other comparisons, `attr:10 TO 20`, `AND`, `OR`, `NOT` and parentheses; facet and
-numeric filter lists (inner lists are ORs, a leading `-` negates). Filter scores and optional
-filters are listed.
+numeric filter lists (inner lists are ORs, a leading `-` negates). A facet value stays as written
+(`zip:02139`). Filter scores, optional filters, a filter with `{` or `}`, and lists of more than
+100 entries are listed.
+
+Every template roll builds is checked before it's stored: it must compile as Mustache and hold
+only roll's own tags (`query`, `rules_query`, `context`, `filters`), stay under 65,535 bytes, and
+keep a rule's filter under 1,024 clauses. A template that fails isn't made, and the review says
+why.
 
 Plain searches work too. The index's default fields (`index.query.default_field`) are the
 source's searchable attributes, so a `multi_match` or `query_string` without `fields` searches
@@ -288,6 +297,11 @@ Limits, each listed when it's reached:
   - Meilisearch from its offset;
   - Typesense from the line after the last one written. The export has no cursor, so the lines
     before it are read again and passed over, not written.
+
+  A copy that resumed from an offset or a line can miss records: if the source deleted records
+  below that point meanwhile, the later ones moved down past it. So after such a resume, roll
+  refuses a catch-up with `since_attribute` until one catch-up without it (every record compared)
+  has run, and the refusal says why. A copy from before copies kept their place starts over.
 - A source that sends a cursor it sent before, or more than twice the documents it said it
   holds, is stopped.
 - The search analyzer runs case and accent folding, then the synonyms, then stop words and
@@ -309,7 +323,9 @@ Once the copy is done, keep the source in use while you check roll, then move ov
 3. **Cut over** (`"step": "cutover"`, `--cutover`, **Cut over**): an alias, the source's index
    name unless you name another, moves to the copy in one step, from whatever index held it.
    Clients that search the alias now search the copy. No key is needed: roll doesn't call the
-   source.
+   source. When indices that aren't roll's imports hold the alias (your own, maybe with a filter
+   or routing), the cutover names them and refuses unless you give `alias` yourself. The answer
+   then lists them as `taken_from_other_indices`. One call moves each alias once.
 
 How much a catch-up reads depends on what the source lets roll ask:
 
@@ -320,7 +336,12 @@ How much a catch-up reads depends on what the source lets roll ask:
 | Meilisearch | documents with `filter=<attr> >= <time>` (the attribute must be filterable) | Every record, compared |
 
 `since_unit` says whether the attribute counts seconds (`s`, the default) or milliseconds
-(`ms`) since the epoch.
+(`ms`) since the epoch. Before a filtered catch-up starts, roll checks that its copy's records
+hold the attribute as numbers of that unit (around 1e9 for seconds, 1e12 for milliseconds), then
+asks the source how many records match. When none does, no task starts, the answer says so, and
+the catch-up time doesn't move. A source that can't filter on the attribute also reads as none:
+Algolia without it in `numericAttributesForFiltering` (when that's set), or Meilisearch without
+it in `filterableAttributes`.
 
 What no catch-up can do:
 

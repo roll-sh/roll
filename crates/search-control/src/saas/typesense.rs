@@ -154,7 +154,7 @@ pub(crate) async fn plan(f: &mut Fetch<'_>, name: &str) -> Result<Plan, String> 
     // Synonyms: the collection's own (Typesense 28 and older) and the synonym sets its schema
     // names (29 and later); curations likewise: its overrides and its curation sets (30).
     let mut syns: Vec<Value> = f.get_opt(&format!("/collections/{e}/synonyms")).await?.and_then(|v| v["synonyms"].as_array().cloned()).unwrap_or_default();
-    for set in names(&schema["synonym_sets"]) {
+    for set in capped(&mut p, "synonym", names(&schema["synonym_sets"])) {
         match f.get_opt(&format!("/synonym_sets/{}", urlencoding::encode(&set))).await? {
             Some(v) => syns.extend(items(&v, &["items", "synonyms"])),
             None => p.skip("synonym", set, "the synonym set the schema names doesn't exist on the server"),
@@ -167,7 +167,7 @@ pub(crate) async fn plan(f: &mut Fetch<'_>, name: &str) -> Result<Plan, String> 
         synonym_into(&mut p, s);
     }
     let mut curations: Vec<Value> = f.get_opt(&format!("/collections/{e}/overrides")).await?.and_then(|v| v["overrides"].as_array().cloned()).unwrap_or_default();
-    for set in names(&schema["curation_sets"]) {
+    for set in capped(&mut p, "rule", names(&schema["curation_sets"])) {
         match f.get_opt(&format!("/curation_sets/{}", urlencoding::encode(&set))).await? {
             Some(v) => curations.extend(items(&v, &["items", "curations", "overrides"])),
             None => p.skip("rule", set, "the curation set the schema names doesn't exist on the server"),
@@ -185,6 +185,19 @@ pub(crate) async fn plan(f: &mut Fetch<'_>, name: &str) -> Result<Plan, String> 
 /// The names a schema field lists (`synonym_sets`, `curation_sets`).
 fn names(v: &Value) -> Vec<String> {
     v.as_array().into_iter().flatten().filter_map(|x| x.as_str().map(str::to_string)).collect()
+}
+
+/// The most synonym or curation sets one schema brings.
+const MAX_SETS: usize = 20;
+
+/// The first [`MAX_SETS`] of a schema's sets; the rest are listed.
+fn capped(p: &mut Plan, kind: &str, sets: Vec<String>) -> Vec<String> {
+    if sets.len() > MAX_SETS {
+        for extra in &sets[MAX_SETS..] {
+            p.skip(kind, extra.clone(), format!("a collection brings at most {MAX_SETS} sets of each kind"));
+        }
+    }
+    sets.into_iter().take(MAX_SETS).collect()
 }
 
 /// A set's entries, under whichever of `keys` the server's version uses (or the set itself, a list).

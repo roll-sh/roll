@@ -5405,6 +5405,8 @@ async fn saas_handle(method: axum::http::Method, uri: axum::http::Uri, headers: 
                 { "objectID": "filter-acme", "conditions": [{ "pattern": "acme", "anchoring": "is" }], "consequence": { "params": { "filters": "brand:Acme", "aroundLatLng": "1,2" } } },
                 { "objectID": "rewrite-chai", "conditions": [{ "pattern": "chai", "anchoring": "is" }], "consequence": { "params": { "query": { "edits": [{ "type": "replace", "delete": "chai", "insert": "teapot" }] } } } },
                 { "objectID": "pin-teapot-filtered", "conditions": [{ "pattern": "pot", "anchoring": "is" }], "consequence": { "promote": [{ "objectID": "2", "position": 0 }], "filterPromotes": true } },
+                // A filter value that would be a Mustache tag in its template.
+                { "objectID": "inject", "conditions": [{ "pattern": "x", "anchoring": "is" }], "consequence": { "params": { "filters": "brand:{{{query}}}" } } },
             ] })),
             // 600 rules that each pin and hide: 1,200 query rules, past the 1,000 a search applies.
             ("POST", ["indexes", "big", "rules", "search"]) => {
@@ -5510,6 +5512,12 @@ fn live_collection(rest: &[&str], query: &str) -> axum::response::Response {
     let docs = LIVE.lock().unwrap().clone();
     match rest {
         [] => axum::Json(json!({ "name": "live", "num_documents": docs.len(), "fields": [{ "name": "title", "type": "string" }, { "name": "updated_at", "type": "int64" }] })).into_response(),
+        // A catch-up asks how many records changed before it starts.
+        ["documents", "search"] => {
+            let since = query.split('&').find_map(|p| p.strip_prefix("filter_by=")).map(percent_decode).and_then(|f| f.strip_prefix("updated_at:>=").and_then(|n| n.parse::<i64>().ok()));
+            let found = docs.iter().filter(|d| since.is_none_or(|t| d["updated_at"].as_i64().unwrap_or(0) >= t)).count();
+            axum::Json(json!({ "found": found, "hits": [] })).into_response()
+        }
         ["documents", "export"] => {
             LIVE_EXPORTS.lock().unwrap().push(query.to_string());
             let since = query.strip_prefix("filter_by=").map(percent_decode).and_then(|f| f.strip_prefix("updated_at:>=").and_then(|n| n.parse::<i64>().ok()));
@@ -5582,6 +5590,7 @@ async fn importing_from_algolia() {
     // parameter is listed.
     let not_mapped_reason = |name: &str| row["plan"]["not_mapped"].as_array().unwrap().iter().find(|n| n["name"] == name).map(|n| n["reason"].as_str().unwrap().to_string());
     assert!(not_mapped_reason("filter-acme").is_some_and(|r| r.contains("aroundLatLng")), "{planned}");
+    assert!(not_mapped_reason("inject").is_some_and(|r| r.contains("`{`")), "{planned}");
     let templates: Vec<&str> = row["plan"]["rule_templates"].as_array().unwrap().iter().map(|t| t["template"].as_str().unwrap()).collect();
     assert_eq!(templates, ["products-search-rule-filter-acme", "products-search-rule-rewrite-chai"], "{planned}");
     assert!(skipped.iter().any(|n| n.starts_with("decompoundedAttributes")), "{planned}");
@@ -5870,19 +5879,32 @@ async fn a_stopped_saas_copy_resumes_from_its_last_page() {
 /// the alias to the copy in one step.
 #[tokio::test]
 async fn catching_up_and_cutting_over() {
-    *LIVE.lock().unwrap() = (1..=3).map(|i| json!({ "id": format!("l{i}"), "title": format!("item {i}"), "updated_at": 1000 })).collect();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    *LIVE.lock().unwrap() = (1..=3).map(|i| json!({ "id": format!("l{i}"), "title": format!("item {i}"), "updated_at": now - 10_000 })).collect();
     let (e, fake) = saas_env(&[]).await;
     let source = json!({ "kind": "typesense", "host": fake, "api_key": TYPESENSE_KEY });
+    // An index an older roll made for this copy, whose record holds only where it came from: the
+    // copy starts over with a full record (later catch-ups need its id field).
+    let from = format!("typesense:{fake}:live");
+    let (s, v) = e.shop("PUT", "/live-v1", Some(json!({ "mappings": { "_meta": { "roll_import": { "from": from }, "kept": "yes" } } }))).await;
+    assert_eq!(s, 200, "{v}");
     let started = e.post("/v1/search/clusters/shop/migrate", json!({ "source": source, "indices": [{ "index": "live", "dest": "live-v1" }] })).await;
+    assert_eq!((started["indices"][0]["restarted"].as_bool(), started["indices"][0]["resumed"].as_str()), (Some(true), None), "{started}");
     e.task_done(started["indices"][0]["task"].as_str().unwrap_or_else(|| panic!("{started}"))).await;
 
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let pick = json!([{ "index": "live", "dest": "live-v1" }]);
+    // A unit that doesn't fit the attribute is refused; nothing changed yet reads as nothing,
+    // with no task and the catch-up time unmoved.
+    let (_, wrong) = e.call(reqwest::Method::POST, "/v1/search/clusters/shop/migrate", Some(json!({ "source": source, "indices": pick, "step": "catch_up", "since_attribute": "updated_at", "since_unit": "ms" }))).await;
+    assert!(wrong["indices"][0]["error"].as_str().is_some_and(|m| m.contains("is since_unit s?")), "{wrong}");
+    let quiet = e.post("/v1/search/clusters/shop/migrate", json!({ "source": source, "indices": pick, "step": "catch_up", "since_attribute": "updated_at" })).await;
+    assert_eq!((quiet["indices"][0]["read"].as_u64(), quiet["indices"][0]["task"].as_str()), (Some(0), None), "{quiet}");
+
     {
         let mut docs = LIVE.lock().unwrap();
         docs[1] = json!({ "id": "l2", "title": "changed", "updated_at": now });
         docs.push(json!({ "id": "l4", "title": "new", "updated_at": now }));
     }
-    let pick = json!([{ "index": "live", "dest": "live-v1" }]);
     let caught = e.post("/v1/search/clusters/shop/migrate", json!({ "source": source, "indices": pick, "step": "catch_up", "since_attribute": "updated_at" })).await;
     assert_eq!(caught["indices"][0]["method"], "since_attribute", "{caught}");
     let t = e.task_done(caught["indices"][0]["task"].as_str().unwrap_or_else(|| panic!("{caught}"))).await;
@@ -5895,12 +5917,19 @@ async fn catching_up_and_cutting_over() {
     let t = e.task_done(full["indices"][0]["task"].as_str().unwrap_or_else(|| panic!("{full}"))).await;
     assert_eq!((t["response"]["noops"].as_u64(), t["response"]["created"].as_u64(), t["response"]["updated"].as_u64()), (Some(4), Some(0), Some(0)), "{t}");
     let (_, m) = e.shop("GET", "/live-v1/_mapping", None).await;
-    assert!(m["live-v1"]["mappings"]["_meta"]["roll_import"]["caught_up_ms"].is_i64(), "{m}");
+    let meta = &m["live-v1"]["mappings"]["_meta"];
+    // The record is kept beside what else `_meta` held.
+    assert!(meta["roll_import"]["caught_up_ms"].is_i64() && meta["kept"] == "yes", "{m}");
 
-    // Cutover needs no key: no source is called.
+    // The tenant's own alias of that name, with a filter: the cutover names it, and moves the
+    // alias off it only when the alias is named on purpose. Cutover needs no key.
+    let (s, v) = e.shop("PUT", "/tenant-idx", Some(json!({ "aliases": { "live": { "filter": { "term": { "x": 1 } } } } }))).await;
+    assert_eq!(s, 200, "{v}");
     let keyless = json!({ "kind": "typesense", "host": fake });
+    let (_, refused) = e.call(reqwest::Method::POST, "/v1/search/clusters/shop/migrate", Some(json!({ "source": keyless, "indices": [{ "index": "live", "dest": "live-v1" }], "step": "cutover" }))).await;
+    assert!(refused["indices"][0]["error"].as_str().is_some_and(|m| m.contains("tenant-idx")), "{refused}");
     let cut = e.post("/v1/search/clusters/shop/migrate", json!({ "source": keyless, "indices": [{ "index": "live", "dest": "live-v1", "alias": "live" }], "step": "cutover" })).await;
-    assert_eq!(cut["indices"][0]["alias"], "live", "{cut}");
+    assert_eq!((cut["indices"][0]["alias"].clone(), cut["indices"][0]["taken_from_other_indices"].clone()), (json!("live"), json!(["tenant-idx"])), "{cut}");
     let (_, a) = e.shop("GET", "/_alias/live", None).await;
     assert_eq!(index_names(&a), ["live-v1"], "{a}");
     let (_, n) = e.shop("GET", "/live/_count", None).await;

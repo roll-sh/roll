@@ -17,11 +17,88 @@
 
 use super::{Plan, RuleTemplate};
 use serde_json::{json, Value};
+use std::collections::HashSet;
+
+/// The most a stored search template may be (`script.max_size_in_bytes`' default).
+const MAX_TEMPLATE_BYTES: usize = 65_535;
+/// The most clauses a rule template's filter may hold (`indices.query.bool.max_clause_count`).
+const MAX_CLAUSES: usize = 1024;
+
+/// Whether `src` compiles as Mustache and holds only the tags roll puts in a template: `query`,
+/// `rules_query`, `context` and the `filters` section with its `toJson`. A source value that
+/// slipped a tag in (a filter value with braces) fails here, whatever the converters let by.
+pub(crate) fn check_tags(src: &str) -> Result<(), String> {
+    // roll's templates never change delimiters: a change would hide tags from this check.
+    if src.contains("{{=") {
+        return Err("it changes Mustache's delimiters".into());
+    }
+    let t = search_painless::mustache::Template::compile(src, &[]).map_err(|e| format!("it doesn't compile as Mustache ({})", e.reason))?;
+    for (kind, name) in t.tags() {
+        let ours = matches!((kind, name.as_str()), ("value", "query" | "rules_query" | "context") | ("inverted", "rules_query") | ("section", "filters") | ("toJson", "filters"));
+        if !ours {
+            return Err(format!("it holds a {kind} tag [{name}] roll didn't put there"));
+        }
+    }
+    Ok(())
+}
+
+/// The leaf queries of a filter (what `max_clause_count` counts).
+fn clauses(v: &Value) -> usize {
+    match v {
+        Value::Object(m) => m.iter().map(|(k, x)| if matches!(k.as_str(), "term" | "terms" | "range" | "match") { 1 } else { clauses(x) }).sum(),
+        Value::Array(a) => a.iter().map(clauses).sum(),
+        _ => 0,
+    }
+}
 
 /// The rules' match criteria: the text a client sends for them, and the search's context.
 const MATCH_CRITERIA: &str = r#"{"query_string":"{{rules_query}}{{^rules_query}}{{query}}{{/rules_query}}","context":"{{context}}"}"#;
 
 impl Plan {
+    /// Every search template the import makes, with its source, each checked: an id another
+    /// template has, a source past [`MAX_TEMPLATE_BYTES`], a filter past [`MAX_CLAUSES`], or a
+    /// tag [`check_tags`] refuses leaves that template out, listed with why (a replica's or a
+    /// rule's out of the plan too).
+    pub(super) fn build_templates(&mut self, dest: &str) -> Vec<(String, String)> {
+        enum Of {
+            Main,
+            Replica(String),
+            Rule(String),
+        }
+        let mut wanted = vec![(Plan::template_id(dest), self.template_source(dest, &self.sort_first, None), Of::Main, 0)];
+        for (r, sort) in &self.replicas {
+            wanted.push((Plan::replica_template(dest, r), self.template_source(dest, sort, None), Of::Replica(r.clone()), 0));
+        }
+        for r in &self.rule_templates {
+            wanted.push((Plan::rule_template_id(dest, &r.rule), self.template_source(dest, &self.sort_first, Some(r)), Of::Rule(r.rule.clone()), r.filter.as_ref().map_or(0, clauses)));
+        }
+        let (mut ids, mut out) = (HashSet::new(), Vec::new());
+        for (id, src, of, n) in wanted {
+            let why = if !ids.insert(id.clone()) {
+                Some(format!("another template is named [{id}]"))
+            } else if src.len() > MAX_TEMPLATE_BYTES {
+                Some(format!("its template is {} bytes, past the {MAX_TEMPLATE_BYTES} a stored script may be", src.len()))
+            } else if n > MAX_CLAUSES {
+                Some(format!("its filter holds {n} clauses, past the {MAX_CLAUSES} a query may"))
+            } else {
+                check_tags(&src).err()
+            };
+            match (why, of) {
+                (None, _) => out.push((id, src)),
+                (Some(w), Of::Main) => self.skip("setting", "search template", format!("[{id}] isn't made: {w}")),
+                (Some(w), Of::Replica(r)) => {
+                    self.replicas.retain(|(x, _)| *x != r);
+                    self.skip("replica", r, format!("its template isn't made: {w}"));
+                }
+                (Some(w), Of::Rule(r)) => {
+                    self.rule_templates.retain(|x| x.rule != r);
+                    self.skip("rule", r, format!("its template isn't made: {w}"));
+                }
+            }
+        }
+        out
+    }
+
     /// `x` filtered by `baked` (a rule template's own filter) and the search's `filters`.
     fn filtered(x: &str, baked: Option<&Value>) -> String {
         match baked {
@@ -129,6 +206,14 @@ mod tests {
     fn edits_apply_word_by_word() {
         assert_eq!(apply_edits("cheap red chai", &json!({ "remove": ["cheap"], "edits": [{ "type": "replace", "delete": "chai", "insert": "teapot" }] })).as_deref(), Some("red teapot"));
         assert_eq!(apply_edits("a b", &json!({ "edits": [{ "type": "shuffle", "delete": "a" }] })), None);
+    }
+
+    #[test]
+    fn only_roll_s_own_tags_pass() {
+        assert!(check_tags(r#"{"q":"{{query}}","r":"{{rules_query}}{{^rules_query}}{{query}}{{/rules_query}}"{{#filters}},"f":{{#toJson}}filters{{/toJson}}{{/filters}}}"#).is_ok());
+        for bad in [r#"{"q":"{{{query}}}"}"#, r#"{"q":"{{&query}}"}"#, r#"{"q":"{{other}}"}"#, r#"{{#x}}{{/x}}"#, r#"{{=<% %>=}}<%query%>"#] {
+            assert!(check_tags(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
