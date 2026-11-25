@@ -7,8 +7,9 @@
 //!
 //! Requests go out through rolld ([`Deliver::request`]): HTTPS to a public address, no redirects,
 //! the answer bounded, a timeout. Hosts are the vendors' own, except Okta's and Auth0's tenant
-//! domains, a self-managed GitLab's host, a Databricks workspace's, a SonarQube Server's and a
-//! Jenkins controller's, which are checked as hostnames and then go through the same guard; Datadog's site is one of its documented ones. The credential is
+//! domains, a self-managed GitLab's host, a Databricks workspace's, a SonarQube Server's, a
+//! Jenkins controller's and a Salesforce org's My Domain host, which are checked as hostnames and
+//! then go through the same guard; Datadog's site is one of its documented ones. The credential is
 //! sealed with the project's data key, bound to the registration's vendor and target, so a row
 //! pointed somewhere else no longer opens. Errors name the vendor and the status, never what a
 //! vendor answered.
@@ -147,6 +148,12 @@ pub enum Vendor {
     /// a user make their own). Each key is a new API token of `user`, checked to work before it's
     /// kept; the old one is revoked after the grace period.
     Jenkins { host: String, user: String },
+    /// The credential is another external client app's consumer key and secret as `KEY:SECRET`
+    /// (client credentials flow, its run-as user allowed to manage `app_id`'s OAuth credentials),
+    /// on the org's My Domain host `domain`. Each key is a new staged consumer key and secret of
+    /// `consumer_id`, working beside the current one; revoking the old one after the grace period
+    /// promotes the new one, which is what ends the old (Salesforce's own rotation).
+    Salesforce { domain: String, app_id: String, consumer_id: String },
 }
 
 /// Which of SonarQube's tokens a registration rotates.
@@ -175,6 +182,10 @@ fn databricks_days() -> u16 {
 
 /// An Entra password's lifetime when none is asked for (Microsoft's default: two years).
 const ENTRA_DAYS: u64 = 730;
+/// How long Salesforce keeps a staged consumer key and secret that isn't promoted.
+const SALESFORCE_STAGED_DAYS: u64 = 30;
+/// The Connect REST API version of Salesforce's staged credentials (Winter '26's, the first).
+const SALESFORCE_API: &str = "v65.0";
 /// How long before a vendor ends a key roll rotates it at the latest (health's `expiring` window).
 const EXPIRY_MARGIN_DAYS: u64 = crate::insights::EXPIRING_DAYS as u64;
 
@@ -223,6 +234,7 @@ impl Vendor {
             Vendor::Confluent { .. } => "confluent",
             Vendor::Sonarqube { .. } => "sonarqube",
             Vendor::Jenkins { .. } => "jenkins",
+            Vendor::Salesforce { .. } => "salesforce",
         }
     }
 
@@ -330,6 +342,12 @@ impl Vendor {
                     return bad("a jenkins target is {host: the controller's host (ci.example.com), user: the Jenkins user whose API tokens rotate}");
                 }
             }
+            Vendor::Salesforce { domain, app_id, consumer_id } => {
+                *domain = domain.trim().to_ascii_lowercase();
+                if !hostname(domain) || !(sf_id(app_id) && app_id.starts_with("0x")) || !sf_id(consumer_id) {
+                    return bad("a salesforce target is {domain: the org's My Domain host (acme.my.salesforce.com), app_id: the external client app's id (0xI…), consumer_id: its OAuth consumer's id}");
+                }
+            }
         }
         Ok(self)
     }
@@ -356,24 +374,28 @@ impl Vendor {
             Vendor::Sonarqube { host, kind: SonarToken::GlobalAnalysis, .. } => format!("global analysis tokens on {host}"),
             Vendor::Sonarqube { host, .. } => format!("user tokens on {host}"),
             Vendor::Jenkins { host, user } => format!("{user}'s API tokens on {host}"),
+            Vendor::Salesforce { domain, app_id, .. } => format!("{app_id} on {domain}"),
         }
     }
 
-    /// The vendor keeps one secret per app at a time (Auth0) or two at most (Okta): one
-    /// environment per registration, or one would end or block another's.
+    /// The vendor keeps one secret per app at a time (Auth0), two at most (Okta) or one staged
+    /// beside the current one (Salesforce): one environment per registration, or one would end or
+    /// block another's.
     fn exclusive(&self) -> bool {
-        matches!(self, Vendor::Okta { .. } | Vendor::Auth0 { .. })
+        matches!(self, Vendor::Okta { .. } | Vendor::Auth0 { .. } | Vendor::Salesforce { .. })
     }
 
     /// Days each key lives at the vendor, when the vendor ends it by itself: GitLab's
     /// `expires_days`, Databricks' `lifetime_days`, SonarQube's `expires_days` when set, Entra's two
-    /// years. The rest live until revoked.
+    /// years, Salesforce's 30 days for a staged set (the first key after linking stays staged until
+    /// the next rotation). The rest live until revoked.
     fn lifetime_days(&self) -> Option<u64> {
         match self {
             Vendor::Gitlab { expires_days, .. } => Some(u64::from(*expires_days)),
             Vendor::Databricks { lifetime_days, .. } => Some(u64::from(*lifetime_days)),
             Vendor::Sonarqube { expires_days, .. } => expires_days.map(u64::from),
             Vendor::Entra { .. } => Some(ENTRA_DAYS),
+            Vendor::Salesforce { .. } => Some(SALESFORCE_STAGED_DAYS),
             _ => None,
         }
     }
@@ -401,6 +423,7 @@ impl Vendor {
             Vendor::Confluent { .. } => ("CONFLUENT_API_SECRET", "CONFLUENT_API_KEY"),
             Vendor::Sonarqube { .. } => ("SONAR_TOKEN", "SONAR_TOKEN_NAME"),
             Vendor::Jenkins { .. } => ("JENKINS_API_TOKEN", "JENKINS_API_TOKEN_ID"),
+            Vendor::Salesforce { .. } => ("SALESFORCE_CLIENT_SECRET", "SALESFORCE_CLIENT_ID"),
         };
         FIELDS.iter().cloned().zip([secret, id]).map(|(f, suggest)| Field { suggest, ..f }).collect()
     }
@@ -433,6 +456,21 @@ fn sonar_project(s: &str) -> bool {
 /// A Jenkins user id as it goes in a URL path (`@` encoded where it's used).
 fn jenkins_user(s: &str) -> bool {
     !s.is_empty() && s.len() <= 128 && s != "." && s != ".." && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_.@".contains(c))
+}
+
+/// A Salesforce record id: 15 letters and digits, or 18 (the same with a case-safe suffix).
+fn sf_id(s: &str) -> bool {
+    (s.len() == 15 || s.len() == 18) && s.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// Two Salesforce ids of one record, whichever form each is in.
+fn same_sf_id(a: &str, b: &str) -> bool {
+    sf_id(a) && sf_id(b) && a[..15] == b[..15]
+}
+
+/// A Salesforce consumer key (the OAuth client id): letters, digits, `._-`.
+fn consumer_key(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 256 && s.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
 }
 
 fn guid(s: &str) -> bool {
@@ -659,7 +697,7 @@ fn short(label: &str) -> String {
     label.chars().take(LABEL_MAX).collect()
 }
 
-/// An OAuth client credentials token (Entra's and Auth0's management APIs).
+/// An OAuth client credentials token (Entra's and Auth0's management APIs, Salesforce's REST API).
 fn token(d: &dyn Deliver, vendor: &Vendor, credential: &Value) -> Result<Value> {
     #[derive(Deserialize)]
     struct Token {
@@ -674,7 +712,12 @@ fn token(d: &dyn Deliver, vendor: &Vendor, credential: &Value) -> Result<Value> 
             let body = Value::new(json!({ "grant_type": "client_credentials", "client_id": client_id, "client_secret": credential.expose(), "audience": format!("https://{domain}/api/v2/") }).to_string());
             send(d, vendor, "signing in", "POST", &format!("https://{domain}/oauth/token"), &[], Some((JSON_TYPE, &body)), false)?
         }
-        _ => unreachable!("only Entra and Auth0 sign in"),
+        Vendor::Salesforce { domain, .. } => {
+            let (key, secret) = salesforce_pair(credential)?;
+            let body = form(&[("grant_type", "client_credentials"), ("client_id", key), ("client_secret", secret)]);
+            send(d, vendor, "signing in", "POST", &format!("https://{domain}/services/oauth2/token"), &[], Some((FORM_TYPE, &body)), false)?
+        }
+        _ => unreachable!("only Entra, Auth0 and Salesforce sign in"),
     };
     let t: Token = parse(vendor, "signing in", &answer.unwrap_or_default())?;
     Ok(t.access_token)
@@ -692,6 +735,8 @@ pub(crate) fn issue(d: &dyn Deliver, vendor: &Vendor, credential: &Value, label:
     let days_ms = |days: u64| now_ms() + days as i64 * 86_400_000;
     // When the vendor ends the key by itself.
     let mut expires_at = None;
+    // What revoking it takes, where that's more than its id.
+    let mut handle = None;
     let (secret, id): (Value, String) = match vendor {
         Vendor::Sendgrid { scopes } => {
             #[derive(Deserialize)]
@@ -924,14 +969,35 @@ pub(crate) fn issue(d: &dyn Deliver, vendor: &Vendor, credential: &Value, label:
             }
             (a.data.token_value, uuid)
         }
+        Vendor::Salesforce { .. } => {
+            let auth = bearer(&token(d, vendor, credential)?);
+            // Salesforce keeps one staged set beside the current one. One still staged (the first
+            // key after linking, which no revocation promoted, or one from a rotation inside the
+            // last grace period) is promoted first: that ends the consumer's credential before it.
+            for s in salesforce_staged(d, vendor, &auth, step)?.into_iter().filter(|s| s.state == "active") {
+                salesforce_promote(d, vendor, &auth, &key_id(vendor, s.id)?, step)?;
+            }
+            let s = salesforce_stage(d, vendor, &auth, step)?;
+            let id = key_id(vendor, s.id)?;
+            let (Some(key), Some(secret)) = (s.key.filter(|k| consumer_key(k)), s.secret) else {
+                // Staged, but its secret wasn't answered (the org doesn't allow it over REST): taken back.
+                let _ = send(d, vendor, step, "DELETE", &format!("{}/staged/{id}", salesforce_consumer(vendor)), &[("authorization", &auth)], None, true);
+                return Err(Error::Link(format!("salesforce didn't answer the staged consumer key and secret {step}: allow access to External Client App consumer secrets via REST API in its settings")));
+            };
+            // A staged set ends after 30 days unless it's promoted (as the next revocation does).
+            expires_at = Some(s.expiration_date.as_deref().and_then(utc_ms).unwrap_or_else(|| days_ms(SALESFORCE_STAGED_DAYS)));
+            handle = Some(json!({ "id": id, "key": key }));
+            (secret, key)
+        }
     };
     if secret.expose().is_empty() {
         return Err(Error::Link(format!("{} answered an empty secret", vendor.name())));
     }
     names::value(secret.expose()).map_err(|_| Error::Link(format!("{} answered a secret roll can't keep (over 64 KiB)", vendor.name())))?;
-    let id = key_id(vendor, id)?;
+    // Salesforce's id is the consumer key, checked with its handle.
+    let id = if handle.is_some() { id } else { key_id(vendor, id)? };
     // Auth0 replaced the old secret already: there's nothing to revoke later.
-    let handle = if matches!(vendor, Vendor::Auth0 { .. }) { json!({}) } else { json!({ "id": id }) };
+    let handle = handle.unwrap_or_else(|| if matches!(vendor, Vendor::Auth0 { .. }) { json!({}) } else { json!({ "id": id }) });
     Ok(Issued { parts: BTreeMap::from([("secret".to_string(), secret), ("id".to_string(), Value::new(id))]), handle, expires_at })
 }
 
@@ -998,6 +1064,25 @@ pub(crate) fn revoke(d: &dyn Deliver, vendor: &Vendor, credential: &Value, handl
             let mut headers = vec![("authorization", &auth)];
             headers.extend(crumb.iter().map(|(h, v)| (h.as_str(), v)));
             send(d, vendor, step, "POST", &format!("{}/revoke", jenkins_tokens(host, user)), &headers, Some((FORM_TYPE, &form(&[("tokenUuid", id)]))), true)?;
+        }
+        Vendor::Salesforce { .. } => {
+            let key = handle["key"].as_str().filter(|k| consumer_key(k)).ok_or_else(|| Error::Link("a salesforce key without its consumer key can't be revoked".into()))?;
+            let auth = bearer(&token(d, vendor, credential)?);
+            let staged = salesforce_staged(d, vendor, &auth, step)?;
+            if staged.iter().any(|s| s.state == "active" && same_sf_id(&s.id, id)) {
+                // Never promoted: deleting it ends it, and the consumer's credential stays.
+                send(d, vendor, step, "DELETE", &format!("{}/staged/{id}", salesforce_consumer(vendor)), &[("authorization", &auth)], None, true)?;
+            } else if salesforce_key(d, vendor, &auth, step)? == key {
+                // It's the consumer's credential: promoting the set staged after it ends it. That's
+                // the one the rotation staged; with none (the link went away), a new one roll doesn't
+                // keep, as an app always has a credential.
+                let next = match staged.into_iter().find(|s| s.state == "active") {
+                    Some(s) => s.id,
+                    None => salesforce_stage(d, vendor, &auth, step)?.id,
+                };
+                salesforce_promote(d, vendor, &auth, &key_id(vendor, next)?, step)?;
+            }
+            // Otherwise a later promotion ended it already.
         }
         Vendor::Auth0 { .. } => unreachable!("returned above"),
     }
@@ -1068,8 +1153,102 @@ pub(crate) fn probe(d: &dyn Deliver, vendor: &Vendor, credential: &Value) -> Res
         Vendor::Jenkins { user, .. } => {
             jenkins_whoami(d, vendor, &jenkins_auth(user, credential), step)?;
         }
+        Vendor::Salesforce { app_id, .. } => {
+            let auth = bearer(&token(d, vendor, credential)?);
+            // The consumer's current key, and its staged sets: what rotating reads and changes.
+            if salesforce_key(d, vendor, &auth, step)? == salesforce_pair(credential)?.0 {
+                return Err(Error::Link(format!("salesforce app {app_id} is the app roll signs in as: rotating it would end roll's own credential (register another external client app's)")));
+            }
+            salesforce_staged(d, vendor, &auth, step)?;
+        }
     }
     Ok(())
+}
+
+/// A Salesforce credential's consumer key and secret, from `KEY:SECRET`.
+fn salesforce_pair(credential: &Value) -> Result<(&str, &str)> {
+    match credential.expose().split_once(':') {
+        Some((k, s)) if consumer_key(k) && !s.is_empty() => Ok((k, s)),
+        _ => Err(Error::Link("a salesforce credential is an external client app's consumer key and secret as KEY:SECRET".into())),
+    }
+}
+
+/// The registration's OAuth consumer in Salesforce's Connect REST API.
+fn salesforce_consumer(vendor: &Vendor) -> String {
+    let Vendor::Salesforce { domain, app_id, consumer_id } = vendor else { unreachable!("only Salesforce has consumers") };
+    format!("https://{domain}/services/data/{SALESFORCE_API}/apps/oauth/credentials/{app_id}/{consumer_id}")
+}
+
+/// A staged consumer key and secret, as Salesforce answers one (`state` is `active` until it's
+/// promoted, `rotated` after).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Staged {
+    id: String,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default)]
+    secret: Option<Value>,
+    #[serde(default)]
+    expiration_date: Option<String>,
+}
+
+/// The consumer's staged sets.
+fn salesforce_staged(d: &dyn Deliver, vendor: &Vendor, auth: &Value, step: &str) -> Result<Vec<Staged>> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct A {
+        #[serde(default)]
+        staged_credentials: Vec<Staged>,
+    }
+    let answer = send(d, vendor, step, "GET", &format!("{}/staged", salesforce_consumer(vendor)), &[("authorization", auth)], None, false)?;
+    Ok(parse::<A>(vendor, step, &answer.unwrap_or_default())?.staged_credentials)
+}
+
+/// A new staged set: answered as itself or in a `stagedCredentials` list.
+fn salesforce_stage(d: &dyn Deliver, vendor: &Vendor, auth: &Value, step: &str) -> Result<Staged> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum A {
+        List {
+            #[serde(rename = "stagedCredentials")]
+            staged_credentials: Vec<Staged>,
+        },
+        One(Staged),
+    }
+    let answer = send(d, vendor, step, "POST", &format!("{}/staged", salesforce_consumer(vendor)), &[("authorization", auth)], None, false)?;
+    let staged = match parse(vendor, step, &answer.unwrap_or_default())? {
+        A::List { staged_credentials } => staged_credentials.into_iter().find(|s| s.state != "rotated"),
+        A::One(s) => Some(s),
+    };
+    staged.ok_or_else(|| Error::Link(format!("salesforce answered something roll didn't expect {step}")))
+}
+
+/// Promote a staged set: it becomes the consumer's credential, and the one before it ends.
+fn salesforce_promote(d: &dyn Deliver, vendor: &Vendor, auth: &Value, id: &str, step: &str) -> Result<()> {
+    let body = Value::new(json!({ "command": "rotate" }).to_string());
+    send(d, vendor, step, "PATCH", &format!("{}/staged/{id}", salesforce_consumer(vendor)), &[("authorization", auth)], Some((JSON_TYPE, &body)), false)?;
+    Ok(())
+}
+
+/// The consumer's current key (its client id), from the app's consumers.
+fn salesforce_key(d: &dyn Deliver, vendor: &Vendor, auth: &Value, step: &str) -> Result<String> {
+    let Vendor::Salesforce { domain, app_id, consumer_id } = vendor else { unreachable!("only Salesforce has consumers") };
+    #[derive(Deserialize)]
+    struct Consumer {
+        id: String,
+        key: String,
+    }
+    #[derive(Deserialize)]
+    struct A {
+        #[serde(default)]
+        consumers: Vec<Consumer>,
+    }
+    let answer = send(d, vendor, step, "GET", &format!("https://{domain}/services/data/{SALESFORCE_API}/apps/oauth/credentials/{app_id}"), &[("authorization", auth)], None, false)?;
+    let a: A = parse(vendor, step, &answer.unwrap_or_default())?;
+    a.consumers.into_iter().find(|c| same_sf_id(&c.id, consumer_id)).map(|c| c.key).ok_or_else(|| Error::Link(format!("salesforce has no consumer {consumer_id} on app {app_id} {step}")))
 }
 
 const CONFLUENT_KEYS: &str = "https://api.confluent.cloud/iam/v2/api-keys";

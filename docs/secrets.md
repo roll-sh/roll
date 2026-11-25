@@ -1552,8 +1552,9 @@ gives one Twilio key. Each rotation is `rotation.succeeded` on the events feed, 
 the vendor refuses is `rotation.failed` (and `rotation_failing` in health), as for every managed key.
 
 **Keys a vendor ends by itself rotate before that.** GitLab ends each token after `expires_days`,
-Databricks after `lifetime_days`, SonarQube after `expires_days` when one is set, and Entra a
-password after Microsoft's two years. A link to one
+Databricks after `lifetime_days`, SonarQube after `expires_days` when one is set, Entra a
+password after Microsoft's two years, and Salesforce a staged consumer key and secret after 30
+days (the first one after linking stays staged until the next rotation). A link to one
 of those needs `rotate_days`, at most the lifetime less 14 days (half the lifetime below 28 days),
 refused at link time otherwise (`gitlab ends these keys after 90 days: set rotate_days (at most
 76)…`). The margin is health's `expiring` window: a rotation on schedule (a weekly `rotate_window`'s
@@ -1602,7 +1603,10 @@ instead of at the first rotation:
 - Databricks: the identity's tokens (`GET /api/2.0/token/list`);
 - Confluent: one page of the owner's API keys;
 - SonarQube: the credential's user's tokens (`GET /api/user_tokens/search`);
-- Jenkins: `GET /whoami/api/json`, which must name `user` (Jenkins answers it for anyone).
+- Jenkins: `GET /whoami/api/json`, which must name `user` (Jenkins answers it for anyone);
+- Salesforce: signing in, the app's consumers (`GET …/apps/oauth/credentials/{app_id}`; the
+  credential's own app is refused, as rotating it would end roll's credential) and the consumer's
+  staged sets.
 
 | `vendor` | `target` | `credential` | Issue | Revoke |
 | --- | --- | --- | --- | --- |
@@ -1619,6 +1623,7 @@ instead of at the first rotation:
 | `confluent` | `{owner: "sa-…" \| "u-…", resource?: "lkc-…", environment?: "env-…"}` (no `resource`: a Cloud API key) | a Cloud API key as `KEY:SECRET` that may manage `owner`'s keys (OrganizationAdmin, or AccountAdmin of the owner) | `POST https://api.confluent.cloud/iam/v2/api-keys {spec: {display_name, owner: {id}, resource?: {id, environment?}}}` (basic auth) → `id` (the key), `spec.secret` | `DELETE …/api-keys/{id}` |
 | `sonarqube` | `{host?: "sonarcloud.io" \| a SonarQube Server's host, kind?: "user" (default) \| "global_analysis" \| "project_analysis", project?: the project's key (project_analysis only), expires_days?: 1-730}` (analysis tokens on a Server only) | a user token of the user whose tokens rotate (for analysis tokens, one who may run analysis there) | `POST https://{host}/api/user_tokens/generate`, form `name, type, projectKey?, expirationDate?` (the token as basic auth's login) → `token` (`id` is the name roll gave it) | `POST …/api/user_tokens/revoke`, form `name` |
 | `jenkins` | `{host: "ci.example.com", user}` | an API token of `user` (Jenkins lets only a user make their own) | `GET https://{host}/crumbIssuer/api/json` (none on a 404), then `POST https://{host}/user/{user}/descriptorByName/jenkins.security.ApiTokenProperty/generateNewToken`, form `newTokenName`, with the crumb (basic auth `user:token`) → `data.tokenUuid`, `data.tokenValue`; then `GET /whoami/api/json` with the new token, which must name `user` | the crumb, then `POST …/ApiTokenProperty/revoke`, form `tokenUuid` |
+| `salesforce` | `{domain: "acme.my.salesforce.com", app_id: "0xI…", consumer_id}` (a local external client app and its OAuth consumer) | another external client app's consumer key and secret as `KEY:SECRET`, with the client credentials flow and a run-as user that may manage the app's OAuth credentials | `POST https://{domain}/services/oauth2/token` (client credentials), then any set still staged promoted (below), then `POST https://{domain}/services/data/v65.0/apps/oauth/credentials/{app_id}/{consumer_id}/staged` (Bearer) → `key` (`id`), `secret`, `expirationDate` | a set never promoted: `DELETE …/staged/{staged id}`; the consumer's credential: `PATCH …/staged/{the next set} {command: "rotate"}`, which promotes the next set and ends it |
 
 - **Auth0 has no grace period.** `rotate-secret` replaces the app's secret at once: the old one
   stops working the moment roll rotates, whatever `grace_minutes` says, so services must pick up
@@ -1677,11 +1682,26 @@ instead of at the first rotation:
   credential is an API token, not a password: Jenkins exempts requests signed with an API token
   from its session-bound crumb check. `host` is a hostname (no IP literal, no port; a controller
   under a path prefix isn't supported yet).
+- **Salesforce ends the old key when the new one is promoted.** Salesforce keeps one consumer key
+  and secret per external client app consumer, plus one staged set beside it; both sign in until
+  the staged set is promoted (`{command: "rotate"}`), which ends the old one at once. So a rotation
+  stages a new set, and revoking the old key after `grace_minutes` promotes it: the grace period is
+  real, and the old key ends with it. The key changes too: link `SALESFORCE_CLIENT_ID` to `id` and
+  `SALESFORCE_CLIENT_SECRET` to `secret`. A staged set that isn't promoted ends after 30 days, and
+  the first key after linking stays staged until the next rotation, so a link needs `rotate_days`
+  of 16 at most. That rotation promotes it first, which ends the consumer's credential from before
+  roll; so does a rotation inside the last grace period, cutting that grace short. One environment
+  per registration. Revoking a key that is the consumer's credential with nothing staged (a link
+  removed) stages a set roll doesn't keep and promotes it. The org must allow access to External
+  Client App consumer secrets via REST API (otherwise the staged set is deleted and the rotation
+  fails); only local external client apps (not packaged ones or connected apps) have staged
+  credentials. The credential must be another app's, as rotating the app roll signs in with would
+  end its own credential. `domain` is a hostname (no IP literal, no port).
 
 Requests go out from rolld's guarded client, as a rotator's calls do: HTTPS to a public address, no
 redirects, a 15-second timeout, at most 64 KiB of answer. The hosts are the vendors' own, except
 Okta's and Auth0's tenant domains, a self-managed GitLab's host, a Databricks workspace's host, a
-SonarQube Server's host and a Jenkins controller's host, which must be hostnames (no IP literal, no port) and then pass the same guard; Datadog's site must be one of its documented ones. The credential is sealed with the project's data key, bound to the registration's
+SonarQube Server's host, a Jenkins controller's host and a Salesforce org's My Domain host, which must be hostnames (no IP literal, no port) and then pass the same guard; Datadog's site must be one of its documented ones. The credential is sealed with the project's data key, bound to the registration's
 id, vendor and target, so a row pointed at another host no longer opens; it's never answered,
 logged or audited, and the list shows the vendor and target only. A vendor's answer is never part
 of an error: errors name the vendor, the step and the status (`okta answered 401 issuing a key`).
@@ -6693,7 +6713,7 @@ type ProjectFindings = { project: string; project_name: string; findings: Findin
 type Finding = { issue: "decoy_used" | "production_unprotected" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "unplaced" | "operator_made" | "stored_cloud_key" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy }; // decoy: on decoy_used only (an admin's session's or the operator's), the key's Decoy
 type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; rotate_window: string | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
-type SaasRotator = { id: string; name: string; vendor: "sendgrid" | "twilio" | "okta" | "entra" | "auth0" | "gitlab" | "openai" | "datadog" | "cloudflare" | "databricks" | "confluent" | "sonarqube" | "jenkins"; target: Record<string, unknown>; credential_expires_at?: number; created_at: number; created_by: string };
+type SaasRotator = { id: string; name: string; vendor: "sendgrid" | "twilio" | "okta" | "entra" | "auth0" | "gitlab" | "openai" | "datadog" | "cloudflare" | "databricks" | "confluent" | "sonarqube" | "jenkins" | "salesforce"; target: Record<string, unknown>; credential_expires_at?: number; created_at: number; created_by: string };
 // PATCH …/saas/{id}: the vendor and target stay. `credential_expires_at`: absent keeps it (a new
 // credential drops the old one's), null clears it, ms in the future sets it.
 type SaasRotatorChange = { name?: string; credential?: string; credential_expires_at?: number | null };

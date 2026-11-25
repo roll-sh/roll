@@ -298,6 +298,10 @@ async fn tools_follow_the_tokens_rules() {
     assert!(said.contains("allow it here") && !said.contains("access_request_access"), "{said}");
     let bad = d.tool(&reader, "postgres_list_projects", json!({ "nope": 1 })).await;
     assert_eq!(bad["isError"], true);
+    // A tool it doesn't have is a tool error the model reads, with the nearest name (SEP-2145).
+    let slip = d.tool(&reader, "postgres_lst_projects", json!({})).await;
+    assert_eq!((slip["isError"].as_bool(), slip["structuredContent"]["code"].as_str()), (Some(true), Some("unknown_tool")), "{slip}");
+    assert!(slip["content"][0]["text"].as_str().unwrap().contains("did you mean \"postgres_list_projects\""), "{slip}");
 
     // Ask: the call comes back pending, and runs once approved when called again with it.
     let asker = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "delete": "ask" } }])).await;
