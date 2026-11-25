@@ -2075,7 +2075,7 @@ impl Runtime {
                 None => None,
             }
         };
-        let (run, (more, browsers_ms), stories) = tokio::join!(tokio::time::timeout(within, docker_with_input(&argv, &input, SHOT_OUTPUT_MAX)), browsers_run, stories_run);
+        let (run, (more, browsers_ms), stories) = tokio::join!(tokio::time::timeout(within, docker_with_input(&argv, input, SHOT_OUTPUT_MAX)), browsers_run, stories_run);
         let out = match run {
             Ok(Ok(out)) => out,
             // Its container outlives a docker CLI that gave up on it (too much output).
