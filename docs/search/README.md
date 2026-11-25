@@ -394,6 +394,26 @@ applications). A web page calls a cluster directly, with no backend of its own i
     CLI and the TypeScript helper. `crates/search-control/tests/control.rs`
     `derived_keys_narrow_their_parent_and_die_with_it` and
     `derived_keys_share_their_parents_rate_by_user` cover the rest.
+- *Usage and refusals per key* (Algolia's per-key usage and logs; `search_server::browser::Usage`):
+  the cluster's owner counts every request a browser key makes and why one was refused: 429s by
+  the bucket that held it back (`key_rate`, `address_rate`, `user_rate`, `concurrency`,
+  `cluster_ceiling`) and other refusals (`origin`: a page the cluster's CORS or a derived key's
+  `origins` refuses; `policy`: an API, query or parameter the key's policy refuses, or more than
+  one of its `max_…`; `body_too_large`; `invalid_key`: an expired, revoked or wrongly signed key,
+  counted under the browser key it names). A derived key counts under its parent, with its
+  `user` in a top list. Counting is atomics in memory (a lock only for a derived key's user or a
+  refused request's origin), no write per request; the metering pass hands the minutes on with
+  the cluster's metrics, and the catalog keeps them in the same rings (`search_browser_usage`:
+  a minute ring of 24 hours and an hour ring of 14 days per key, at most 64 keys per cluster;
+  a revoked key's rows go with it). A takeover starts from what was flushed. Nothing of a
+  request is kept but counts: no body, query or address; origins only as the top 10 refused
+  ones, normalized `scheme://host[:port]` of at most 255 bytes, and users only as a derived
+  key's top 10 (each at most 128 bytes, as derived keys allow), from at most 64 counted per key
+  and minute. `GET …/browser-keys/{key}/usage?window=1h|24h|14d` answers the points and
+  totals, the list a `usage_24h` summary per key, the dashboard's Browser search section a
+  sparkline per key, `roll search browser-keys usage <cluster> <key>` a table, and MCP
+  `search_browser_key_usage`. `crates/search-control/tests/control.rs`
+  `browser_key_usage_counts_requests_and_429s_by_reason` covers it.
 - *A point-in-time branch takes its parent's security as it is now*, whatever key: users and their
   passwords, API keys, tokens, service tokens, roles, mappings and profiles (OpenSearch Security's
   configuration on an OpenSearch-flavor cluster) are copied from the parent's latest state into
@@ -883,7 +903,8 @@ origins (browser search), once they're on main.
 | GET | `/v1/search/clusters/{id}/audit?from=&to=&event=&size=` | the cluster's security audit log (below), newest first: `{flavor, retention_days, entries: [{at_ms, event, entry}], more}`. `from` (inclusive) and `to` (exclusive) are Unix milliseconds; `event` takes names or categories, comma-separated (an Elasticsearch `event.action` such as `put_user` too); `size` up to 1,000 (100). Never wakes the cluster. A read in roll's permissions, not a reveal: entries hold no secret |
 | POST | `/v1/search/clusters/{id}/keys` | a new API key of the cluster `{name, expires_in_s?, access?, indices?}`: `reveal` at the gate for a `read` key, `write` for an `append` key (it adds documents), `delete` for a `data` key (its role deletes indices), `admin` for an `admin` one; each refused (403) to a grant that can't also reveal (`access`: `admin`, the default, everything the cluster's own user may do; `data`: a link's role, every index's data plus the cluster's templates, pipelines and lifecycle policies, without security, or with `indices` given those indices' data only (and `monitor`): templates, pipelines and lifecycle policies are the whole cluster's, so a narrowed key gets none; `read`: `read` and `view_index_metadata` on the indices, no cluster privilege; `append`: `create_doc` and `auto_configure` on exactly the named indices, no cluster privilege, so a log drain adds to its data streams and reads nothing. `indices`: the index names or patterns it reaches, default every index (`["*"]`); not with `admin`; no remote (`alias:…`), hidden or system (`.…`) names; `append` takes names only. An OpenSearch-flavor cluster has no `append`, its index action also overwrites, and its `read` role holds `cluster_composite_ops_ro`, which OpenSearch needs for `_msearch`, `_mget` and scrolls. roll secrets' and apps' search links ask for these through their `permission` (`read`, `append`; left out, `data`) and `names` options) → `{id, name, access, indices?, api_key, url, expires_at?}` (`access` and `indices`: what the key was made with): `api_key` is `base64(<key id>@<cluster>:<key>)` for `Authorization: ApiKey …`, in this answer only (roll secrets' managed links use it instead of sharing the password); on an OpenSearch-flavor cluster (whose clients sign in with a user) the key is an internal user of its own: `{id, name, access, username, password, url, expires_at?}` without `api_key`, `username` being `<user>@<cluster>`, refused once `expires_in_s` passes |
 | DELETE | `/v1/search/clusters/{id}/keys/{key}` | revoke it (204; 404 when it's gone). On a deleted cluster (by its id) the revoke is kept and applied by its restore (204) |
-| GET | `/v1/search/clusters/{id}/browser-keys` | `{keys}`: the browser keys that still work, newest first, each `{id, name, indices or application, filter?, rate_limit, created_at, expires_at}` (no secret). Wakes the cluster |
+| GET | `/v1/search/clusters/{id}/browser-keys` | `{keys}`: the browser keys that still work, newest first, each `{id, name, indices or application, filter?, rate_limit, created_at, expires_at, usage_24h: {requests, throttled, refused, reasons}}` (no secret; `usage_24h` covers the hour in progress and the 23 before). Wakes the cluster |
+| GET | `/v1/search/clusters/{id}/browser-keys/{key}/usage?window=1h\|24h\|14d` | one browser key's usage (above; 24h by default): `{key, window, step_s, from, to, points: [{at, requests, throttled, refused, reasons}], totals: {requests, throttled, refused, reasons, users: [{user, requests, throttled}], origins: [{origin, refused}]}}`. `throttled` counts 429s, `refused` the other refusals, `reasons` both by name (`key_rate`, `address_rate`, `user_rate`, `concurrency`, `cluster_ceiling`, `origin`, `policy`, `body_too_large`, `invalid_key`); points only where the key made requests. 404 for a key that isn't one of the cluster's browser keys; 400 for another window |
 | POST | `/v1/search/clusters/{id}/browser-keys` | a key a web page ships (above) `{name, indices or application, filter?, expires_in_s?, rate_limit?: {per_minute?, per_ip_per_minute?}, limits?: {max_concurrent?, max_result_window?, max_buckets?, max_items?, max_inference?, max_rerank_window?, max_body_bytes?, inference_endpoints?, allow_scripts?, allow_expensive_queries?}}` → the same fields plus `api_key` (once) and `url`. 400 on an OpenSearch-flavor cluster; 409 past 20 browser keys |
 | DELETE | `/v1/search/clusters/{id}/browser-keys/{key}` | revoke a browser key (204; 404 for any other key of the cluster; on a deleted cluster, a browser key of it is kept for the restore, which revokes it: 202) |
 | GET | `/v1/search/clusters/{id}/remotes` | the remote clusters it holds credentials for: `{remotes: [{alias, cluster, cluster_id, key_id, minted, created_at, connected}]}` (never the key) |
@@ -1342,8 +1363,9 @@ deterministic (#396).
    when the parent allows them, and each end user's own context owner);
    what remains: RAG's chat limits for browser keys (item 11); browser search on previews (a branch keeps the
    parent's origins but no browser key works there: give it one and the preview's URL, roll
-   previews' side); and usage and 429s per browser key in the Browser search section (Algolia's
-   per-key usage and logs); Algolia's search-only and secured API keys,
+   previews' side); usage and 429s per browser key, by reason, with a derived key's top users and
+   the top refused origins, in the Browser search section, the CLI and MCP (Algolia's per-key
+   usage and logs) in review (`feature/search-browser-key-usage`); Algolia's search-only and secured API keys,
    Typesense's scoped keys, Meilisearch's tenant tokens, Elastic's search applications): a web
    page can't call a roll cluster today. There's no CORS (`http.cors.*` are static settings no
    tenant can set), so every site needs a backend in front of search, which is the first thing
