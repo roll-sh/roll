@@ -10627,6 +10627,111 @@ and confirm on PGO:
 Agent 218's short-transaction stack (ten steps, `wip/a218`) was gated this way and landed: BENCH
 "Profile-guided build", part 2.
 
+## Bulk writes, round 27: COPY out's floats and text, index builds' key columns; what the DELETE costs (agent 315)
+
+BENCH "Bulk writes, round 27" has the measurements (lane C, plain dist, the 1M-row bulk script
+with joined windows: agent 314's standing harness copied to `~/.cache/a315/bench`). Two code
+commits on origin's `541928f40`; no format change, no storage change.
+
+**COPY TO's float8 and text** (`types::text::pg_fixed`, `push_float8`, `push_float8_bytes`;
+`session::copy::plain_ascii`, `CopyLines::row_stored`):
+- `push_float8` took Ryu's text apart into digits and an exponent and wrote it again, and every
+  value whose digits ended in 5 (11% of the bulk table's, any 1/7) went through
+  `format_float_shortest`: a second Ryu call into Strings and `is_midpoint`'s test. About 1,100
+  user instructions a value; float formatting was 36% of COPY out. Ryu's own text is
+  float8out's (extra_float_digits > 0) wherever Ryu writes fixed notation and float8out does too
+  (decimal exponents -4 to 14), but for Ryu's ".0" after an integer (cut off) and a decimal on the
+  midpoint to a neighbouring float (only one ending in 5 can be: `is_midpoint`'s divisibility test
+  on the digits, inline; one that may be goes the old way). So that text is written as it is;
+  scientific notation and the rest go the old way (`push_float8_parsed`, unchanged). An integer
+  below 10^15 printed by Ryu is the float itself, never a midpoint. Every float8 text output
+  (SELECT's too) takes it.
+- A row COPY writes from its stored bytes (`row_stored`) is made as bytes: a text value of ASCII
+  alone with nothing to escape (no control character, backslash, DEL or delimiter: `plain_ascii`,
+  eight bytes at a time) goes in as it is, without `str::from_utf8` and the byte-at-a-time check;
+  others as before. `text_escape_into` tries `plain_ascii` first too.
+- Tests: `types::text::tests::float8_ryu_text_is_the_parsed` (the new path against the old for
+  ~260,000 values: fractions by 7, multiples of 0.05, both ends of the fixed range, integers
+  ending in 5, random bit patterns, both signs), `session::copy::tests::plain_ascii_is_the_byte_check`.
+  Before the commit, a standalone differential run (`~/.cache/a315/ftest`) compared the two for
+  62.3M values at extra_float_digits 1 and 3: no difference.
+
+**A parallel index build decodes the key and INCLUDE columns alone** (`parbuild::Plan::row`,
+`Plan::read` / `at`): each row was decoded into a whole row of Values (`decode_table_row_need`:
+a Vec a row, the unneeded columns as NULLs, dropped again) and its key columns cloned out of it.
+Now `storage::row::decode_cols` reads only the index's columns into a kept list, columns past the
+row's values (added since) get their missing values as `decode_table_row_need` gives them. A row
+whose heap tuple is sized from its decoded values (one the stored bytes don't size) is still
+decoded whole. The keys, entries and measures are the same.
+
+Results (BENCH "Bulk writes, round 27"; plain dist, three alternating pairs, G user instructions;
+every pair had 2.4-3.8 foreign cores, the counts repeat within 0.2% regardless):
+CREATE INDEX 3.304 -> 3.013 (-8.8%), CREATE UNIQUE INDEX 2.960 -> 2.669 (-9.8%), COPY out 3.082
+-> 2.358 (-23.5%), the same in every pair. The whole script once each (b0 / n2, same hold):
+all steps 73.25 -> 71.94 G (-1.8%), every other step within 0.1%, rows, sums and ctid hashes
+equal, bytes written the same but COPY with a primary key (122.3 / 67.6 MB: when its compaction
+fell), data directory 48 MB both. Against the standing's pgrust (PGO-built): COPY out 2.36 (plain)
+against 2.02, CREATE UNIQUE INDEX 2.67 against 1.91; the PGO build not measured.
+
+Verification: `tools/quick-check.sh` with `QC_CHECKED=1` and `big_tables crash_bulk
+storage_linked_gc` on `dfe678eb8` (the tree of the two commits): Clippy 16 warnings, none new in a changed file;
+367 tests in 8 binaries, again built `--profile verify-checked` (367 passed); regress 51,148 /
+51,150, 0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed. No crash step (no
+storage, WAL or commit path changed; crash_bulk ran with the tests). `tools/crash-binary.py` seeds 1-3 (7 rounds each)
+against the plain dist binary of the two commits: ok.
+
+**Bulk DELETE: what it costs, and the brief's three options measured** (no code kept):
+- The DELETE's joined window, 7.75 G (plain), is the statement 3.70 G and the compaction its
+  deletions force at commit (`deletions_due`) 4.05 G: measured by a build with that trigger off
+  (an env switch, `~/.cache/a315/patches/exp-nodue.patch`), same pair. In this script the
+  compaction is mostly the UPDATE's: every block of the table has the UPDATE's new versions (every
+  other row) and a deleted row (every fourth), so the table (1M rows + 500,000 versions) is
+  written again as 750,000 rows; the index files are only marked (their deletions alone).
+  zstd with the dictionary is about 40% of it (settings not ours to loosen), the merge, the
+  writer and the output's bloom filter the rest.
+- (c) No compaction at the DELETE (the trigger off), same pair: DELETE 7.748 -> 3.702 G, but every
+  later read merges the table's L1 rows with the UPDATE's and DELETE's L0 files: count(*), sum(c)
+  0.355 -> 1.306 G (+0.95 G a scan), ANALYZE 0.468 -> 0.978, 20,000 point reads by id 3.58 ->
+  5.10, a 10,000-id range 0.031 -> 0.053, VACUUM and an index-only scan level; nothing compacts
+  them later while no other write fills L0. Four scans pay the saved 4.05 G back. Space: the
+  data directory 47.9 -> 85.5 MB after VACUUM (+37.6 MB); PostgreSQL's own bloat for the same
+  statements is 91.1 MB (table and indexes 166.3 MB after DELETE and VACUUM against 75.2 MB after
+  VACUUM FULL). So space would allow it; the reads don't. Not kept: the trigger isn't too eager
+  here (a quarter of the rows deleted and half the table's versions dead).
+- (a) The deletions already go in as one sorted run a statement (`Txn::put_entry_deletes`, a
+  linkable run, sorted by index and skipping groups already in order); the run isn't what forces
+  the compaction, the 750,000 deletions over 3M entries are (`deletions_due`, an eighth).
+- (b) No block of the table is unchanged in this script (agent 275's note holds), so agent 292's
+  block copies don't apply; every output block is new and compressed once.
+- What is left within format 4: the statement's 3.70 G (the scan and filter of 1.5M entries
+  through the UPDATE's versions, each deleted row's lock, index values and deferred deletions,
+  sorting and writing 750,000 tombstones with their bloom filter), itself 2.4x pgrust's whole
+  step (1.54 G). A delete marker with a snapshot bound would spare the tombstones and the table's
+  rewrite only where the table has no newer versions in L0; here the rewrite is the UPDATE's
+  versions' merge, which any format pays once. Not a format change for agent 311 on this
+  evidence.
+
+**Bulk peak memory** (the standing's 562 MB against PostgreSQL's 386 MB): the peak isn't a step
+of the script. Per-step peaks (sampled every 0.2 s) never pass 382 MB; the run's peak comes from
+the harness's own checks between steps, `md5(string_agg(ctid::text, ',' ORDER BY id))` over 1M
+rows (three of them). Without those three queries the whole script peaks at 255.6 MB on roll
+(during UPDATE) against PostgreSQL's 359.5 MB (same lane, same day); with them roll peaks at
+552 MB (today) and PostgreSQL at 386 MB (the standing's run), so the checks add about 300 MB on
+roll and a few tens on PostgreSQL, whose ordered aggregate sorts its input within work_mem
+(4 MB, spilling). Not profiled further: **left**, an ordered aggregate's input sort that keeps to
+work_mem (exec/agg; not built here).
+
+**Left:**
+1. The DELETE statement (above), and the compaction's merge and writer outside zstd.
+2. count(*) after the DELETE (0.355 G against pgrust's 0.204): it no longer reads tombstones (the
+   compaction dropped them); 42% is the vectorised column decode (`parscan::Pre::decode`,
+   `cols::decode_cols`), agent 311's format 5 area.
+3. CREATE UNIQUE INDEX still 1.40x pgrust (plain): the btree measure model (`relsize`,
+   `BtreeMeasure`, `FusedMeasure`, about 7%), the run writer and its zstd.
+4. An ordered aggregate's memory (above).
+5. Not gated on the PGO build: neither commit changes inlining or function boundaries of a hot
+   path beyond replacing the code inside `push_float8` and `Plan::row`.
+
 ## Bulk writes, round 26: a bulk load's runs one a table or index, none overlapping (agent 309)
 
 BENCH.md "Bulk writes, round 26" has the measurements (lane C, agent 246's `bulkx.sh` with
@@ -15375,6 +15480,148 @@ failed: all passed.
 
 Not this round's: roll's `VACUUM (VERBOSE)` sends none of PostgreSQL's INFO lines (agent 205's
 note, still open).
+
+## Short write transactions, round 18: a compaction's filter bits for keys the adopted file holds; a range read's newer versions taken in its runs' loop; the standing table; the L0 merge again (agent 313)
+
+BENCH.md "Short write transactions, round 18" has the counts. Plain dist builds (`tools/dist.sh`), b0 =
+the head (`8f3876dab`'s tree), its PGO build pgob0 (`tools/dist-pgo.sh`); work-in-progress builds with
+measuring switches read from the environment (not in any commit), so both arms of a pair ran one
+binary. Harness `~/.cache/a313/bench` (306's), the in-process probe `~/.cache/a313/patches/a313_probe.rs`
+(306's, with a three-source case).
+
+**Where the head stands** (brief item 1, one run a cell, lane A at 1-2.2 foreign cores on the
+server CPUs). The five statements alone sum to 430.2k user instructions a transaction on the plain
+build (connection threads 310.7k, flush thread 119.5k) and 399.5k on the PGO build (247.8k / 151.7k);
+round 15's PostgreSQL 18.6 363k, pgrust 402k. TPC-B-like whole: plain 446.6k at 8 clients, 499.6k at
+32; PGO 334.8k and 311.1k (PostgreSQL 320-326k, pgrust 386-391k at 32, round 11). These are 10 s
+windows: a compaction in the window or not moves the flush column by 100k+ (the fixed-count runs
+below are the gates). What is left is mostly the flush thread: ~100k a transaction at 32 clients
+over a 160k-transaction run, 18% of it (zstd ~1/3 of that, `SstWriter::add`, `zip_entries`); the
+connection threads' profile is flat (no item over 2%).
+
+**What changed** (one commit, `storage/mod.rs`, `storage/sst.rs`). A compaction's output that copies
+blocks of an L1 input takes that file's bloom filter (`SstWriter::adopt`) and, at its end, sets the
+bits of every key it wrote itself (`copied_bloom`): for a big table's UPDATEs, every row of each block
+written again, about 45% of the table's rows each compaction (round 14), all of them keys the adopted
+filter has. The compaction now says which L1 input an entry came from (`Compacted::entry`'s `from`: the
+L1 source's current file, in the merge loop and in `zip_entries`, whose callback now gets the side an
+entry came from), and the writer keeps those keys' hashes apart (`SstWriter::add_from`: `known`, of
+one file at a time). When the output adopted that file, their bits are not set again; for a filter
+made anew (no file adopted, a file without a filter, or the adopted one too full: the fallback reads
+the copied blocks' keys) they are added as before. The filter is the same bits as before: the skipped
+ones are set already. Keys of another L1 file than the one adopted, and every L0 key (a newer version
+or a new row), are set as before.
+
+**Measured** (BENCH "round 18"): 160k TPC-B-like transactions at 32 clients, the merge switched off
+(the head's compactions), two alternating pairs: 589.8k -> 575.3k and 583.9k -> 569.1k user
+instructions a transaction (-2.5% both; pair 2's base run made one L1 compaction fewer), the flush
+thread 111.1k -> 100.5k in the pair with equal compactions; `bloom_set` (1.64% of the run) gone from
+the profile. Not gated on PGO (no inlining or function-boundary aim).
+
+Verification: `tools/quick-check.sh` with `QC_CHECKED=1` and `QC_TESTS="crash_ctids big_tables"` on
+`33b97131f` (this commit on `8f3876dab`): 24 test binaries, clippy 16 warnings, none new in a changed
+file, 413 tests in 20 binaries (the lib's unit tests with the compaction and copied-block tests,
+crash_ctids, big_tables, golden, wire among them), the same 413 built `--profile verify-checked`,
+`crash_random` seeds 1-3 x 2 rounds and `power_cut_at_every_point`, regress 51,148 / 51,150 (0 newly
+differing), isolation 1,647 / 1,648, pg_dump_tap 14,609. `tools/crash-binary.py` seeds 1-3 (7 rounds
+each) against n4, a plain dist build with all of this round's code (this commit, the overlay list of
+cand/a313-3 and the L0 merge): all ok (7 kill rounds and a clean shutdown each, every acknowledged
+transaction found, sums equal). Rebased onto `83a21ef3f` (as cand/a313-2; cand/a313 is this on `8f3876dab`), with
+cand/a313-3's commit on top: `tools/quick-check.sh` as above on `9ba0f74a8`, all green with 28 test
+binaries, 436 tests in 24 binaries and the same counts of the reference suites (a first run's regress
+step failed to start: the reference container had been stopped by the machine's idle timer).
+
+**The overlay list (cand/a313-3, on cand/a313-2; brief item 2).** A range read's merging scan
+(`Scan::fill_batch_with`) took a newer version in its range (an UPDATE's, in a memtable or an L0
+file, over the table in L1) by stopping the L1 run there, `overlay` or three rounds of `position`,
+and setting the run up again: in process (306's probe, a verify build) a newer entry cost 2.8-4.9k
+user instructions against ~220 for a row, spread over `Cursor::head` / `fill`, `Merge::min`, the run's
+setup, re-ranking, `zip_rows` tried when runs got short, and the stop-checking run loop itself
+(`run_rows_to::<true>`, ~8-15 instructions a row more than the stop-free one, taken for every block
+while any other source had a head anywhere ahead).
+
+What changed (one commit, `storage/mod.rs`, `storage/sst.rs`, `storage/batch.rs`):
+
+- `Scan::gather`: when the run's source is the merge's oldest (L1, or the oldest L0 file without
+  L1) and the others' next entry is in its current block, the other ranked sources' entries ahead
+  are read into a list without moving them (a memtable's buffer, read on to its full size first;
+  a file's current block through a position of its own), up to 128 entries, merged by key from
+  each source's run (`sst::Overlay`, keys in fixed 56-byte buffers as the run makes its own). Where
+  a source's entries at hand end (a file's block, a memtable's buffer not read to the end), or the
+  scan's end, the list has its limit: entries at or past it are left out and the run stops there.
+  A deletion, an out-of-line value under `resolve`, a derived value or a key over 32 bytes: no list
+  (`position` as before), and none under range deletions or while a dead-range hint is looked for.
+- `Block::run_rows` takes the list (`ov`): its stop is the list's next entry; at the stop
+  (`Overlay::take`, out of line) the entries up to the run's entry are taken: a version at or
+  before the snapshot of a key after the last row pushed is pushed (value referenced in its
+  block or memtable buffer), anything else passed; the run's entry is then passed when it is an
+  older version of that key (`Skip`), taken when below the next stop (`Row`), or the run ends
+  (`Stop`: past the limit, or the batch full). A run entry newer than the list's (a block newer
+  than a source of the list) comes first and the list's version is passed after it.
+- The runs go on into the oldest source's next block with the same list (`Cursor::block_done`,
+  `fill`, the head taken as the entries after it, `run_into`'s `pushed`), and `Scan::ungather`
+  moves each source past what was taken or passed (a file's to the position it was read to when
+  all of it was taken) and ranks them again, once.
+- A block whose last key is below the others' heads (or, with a list, below its next entry) runs
+  the stop-free loop; with a list, the rest of a block past its last entry there runs with no stop.
+  This holds without a list too: any read with a newer version ahead in its range ran every block
+  before it through the stop-checking loop.
+
+Rows, their order, the versions read and the merge's state after are as before; the probe's hashes
+of keys and values are equal in every case. Test `storage::tests::runs_take_newer_versions_in_their_loop`:
+a table in L1, sparse newer versions in two L0 files and the memtable (some of the same rows in two of
+them), the model's reads (`check_at`: whole scans, batches of 1-64, ranges ending inside blocks,
+point reads) at five pinned snapshots, from one that sees none of the newer versions to all, with
+one the memtable's newest are past; and that runs took list entries. (Unpinned, its first form
+failed on the hot range's rows, which are kept trimmed to the gc horizon, not on the list.)
+
+**Measured** (BENCH "Short write transactions, round 18", the overlay rows):
+
+- In process (verify build, the old path by a switch in the same binary), user instructions a
+  read: 100-row with 10 newer versions in an L0 file 68.6k -> 50.4k, in the memtable 72.8k -> 55.4k,
+  in both 82.7k -> 58.7k; 1,000-row with 10 in an L0 file 264.3k -> 242.2k, with 100 531.6k ->
+  426.7k, in the memtable 593.1k -> 414.6k, in both 713.6k -> 473.9k; none 222k both; 100-row with
+  every row newer 209.6k -> 214.1k (+2.1%) and 262.3k -> 265.9k (+1.4%), the one case it loses.
+- Server, controlled (306's `probe.sh`, lane B, two pairs b0 -> n4 with the merge off): 100-row
+  ranges with 10 newer versions each in the memtable -5.8% and -3.6%, 1,000-row with 100 -6.9% and
+  -6.2%; the other cells -1.8% to +1.7% (the base read 327.6k and 319.7k in its two runs of one cell).
+- Across the TPC-B write cycle (`cycle.sh`, lane A, one pair b0 -> n4 with the merge off):
+  select-only +0.8%, 100-row -1.7%, 1,000-row +0.4% (level: its newer versions lie about one to an
+  L1 block). TPC-H SF1 (one pair): q01 +0.05%, q06 +0.3%, hashes equal; the bulk script's COPY,
+  scans, INSERT ... SELECT and UPDATE level, row checks equal. On the PGO build (its
+  run loop and stops are out-of-line calls and instances of their own, so gated there too):
+  `tools/dist-pgo.sh` of the candidate (its own profile, staleness 0) against pgob0, one probe pair
+  (lane B): 100-row with 10 newer -4.0%, 1,000-row with 100 -6.7%, the other cells +0.2% to +0.7%.
+  The candidate built with pgob0's profile instead (its 11 changed hot functions without data, 3% of
+  the hot counts) lost 1.9-3.6% even where no list is made: that build measures the profile, not the
+  change.
+
+What is left of a newer entry: in a 1,000-row read with one to a block, ~2.0k user instructions in
+process (from ~4.9k), mostly the stop-checking loop over the block it is in and the list's set-up
+per range; with every few rows newer, ~1.3k. Going on: a run loop whose stop check costs nothing
+when the next stop is far (a count of rows to it instead of the key compare), and the memtable's
+values pushed without a `Bytes` clone each.
+
+Verification of cand/a313-3: `tools/quick-check.sh` with `QC_CHECKED=1` and `QC_TESTS="crash_ctids big_tables parallel_scan heap_order_scan pk_clustered stored_filters"`
+on `b6906769a` (on cand/a313): 28 test binaries, clippy 16 warnings, none new in a changed file, 435 tests
+in 24 binaries (the lib's unit tests with the new one, the storage binaries, big_tables, crash_ctids,
+parallel_scan, heap_order_scan, pk_clustered, stored_filters, golden, wire among them), the same 435 built
+`--profile verify-checked`, `crash_random` seeds 1-3 x 2 rounds and `power_cut_at_every_point`, regress
+51,148 / 51,150 (0 newly differing), isolation 1,647 / 1,648, pg_dump_tap 14,609; `tools/crash-binary.py`
+as above (n4 holds this code). Rebased onto `83a21ef3f`: the same, all green, on `9ba0f74a8` (436 tests
+in 24 binaries, plain and `verify-checked`).
+
+**The L0 merge, gated a third time: still not landed** (`~/.cache/a305/patches/l0-merge-3f0f6d320.patch`,
+applied unchanged). On top of the overlay list (cand/a313-3, which lowers a newer entry's cost inside
+a range read), across the write cycle, merge against no merge on one binary: select-only -2.2%,
+-1.4%, -3.1%; the 100-row read +1.2%, +0.5%, +0.7%; the 1,000-row +1.5%, +1.2%, +1.2% (three pairs,
+the first on an earlier form of the list; round 17 without the list +2.6% / +3.2%). The gate (every
+read level or better in every pair) fails. The write side measured again (480k transactions, one
+pair): 546.1k -> 492.3k user instructions a transaction (-9.9%), L1 compactions 13 -> 4. Why reads
+still pay: the merge keeps L0's entries about three times as many flushes before they go to L1, so a
+read meets about three times as many newer versions; in a 1,000-row range of the TPC-B cycle they lie
+about one to a block of L1, where a newer entry still costs ~2k user instructions in process against
+~220 for a row (cand/a313-3's part above has where).
 
 ## Short write transactions, round 17: a range read's run goes on between newer versions; the L0 merge gated again (agent 306)
 
@@ -21525,6 +21772,44 @@ Measuring notes for whoever repeats it:
 - Two fixed-count TPC-B runs of the same binary read 494 k and 425 k user instructions a
   transaction (304 saw the same: the counts follow the throughput a run reaches).
 
+## Storage format 5: column blocks, step 2, first piece: rows made a column at a time, of the columns read (agent 311)
+
+On step 1 (`cand/a311-2`), format 5 only (switch on); format 4's paths as they were. HANDOFF
+"Storage format 5: column blocks, stage 1" for the format; BENCH "Storage format 5, step 2" for the
+pairs.
+- **Rows made a column at a time** (`ColDir::rows_into`): a run of rows' lengths summed a column
+  at a time, then each column's values written where they go, one loop per layout (fixed widths
+  copied by a constant length, no call per value), the rows into one buffer. `LazyRows::make`,
+  `Block::col_rows` (a block's rows for a row-at-a-time reader or a compaction) and a single row
+  (`ColDir::row`: a point read's) all go this way; before, `ColDir::value` took ~120 instructions
+  a value (a layout's match and a push each): q03's extra instructions were 85% `value` / `row`.
+- **A lookup's rows of the columns it reads** (303's sketch, `wip/a303-s2`): `Lookup::reads` (the
+  columns decoded and those `StoredCmps` compares, `mark_cols`), `PointReader::get_sorted_cols`:
+  a column block's rows found by the multi-get made after every seek, a block's run at a time,
+  into one buffer, the other columns NULL.
+- **A heap fetch's rows of the columns read** (`Scan::read_cols`, `TxnScan::read_cols`, set by
+  `ScanNode::fetch_dense_ref` when its scan has column blocks): `need`, the projection (`pick`
+  offers it as stored) and the filter's columns; none (whole rows) for row marks / DML, a
+  tracked table (`emit`), an index-only or access-method scan, or no `need` / projection. A
+  masked row's batch entry gets its length as made.
+- Test: `column_blocks_read_as_rows` also reads a scan with `read_cols` (the masked columns as
+  whole rows read; the others NULL in column blocks' rows, asserted).
+
+**Format 5 against format 4** (`s4` plain dist, one binary, two data sets; step 1 for comparison):
+q03 +31.6% -> **+8.8%**, q07 +39.6% -> **+19.7%**, q09 +14.4% -> **+11.8%**, range read (100 rows of
+orders, two columns) +23.8% -> **+10.4%**, point select +3.6% -> +4.3%; q01 -29.2%, q06 -39.0%, q10
+-12.1% as before.
+
+**Switch off against `aaa096e02`** (plain dist, two pairs): q01 -0.08%, q03 -0.05 / +0.14%, q07
+-0.25 / -0.28%, q09 -0.22 / -0.21%, q06 +0.21-0.24% and the count(*) / sum steps +0.14-0.60% as
+step 1's (its jump padding), 313's probe ranges -0.05 to +0.20%, select-only point reads -1.5 to
++0.3% (+6% / -1.5% in the phase without updates: noise on lane B's 6.6-6.9 foreign cores).
+
+**Left for step 2**: q07 / q09's lookups still make rows of the columns they read and then decode
+them (decode from the column block itself would skip the bytes), point selects make whole rows
+(`first_to` / `first_in_l1`: no columns known there yet), range reads of seq scans and parscan's
+row path have no mask yet.
+
 ## Storage format 5: column blocks, stage 1 (agents 303, 311)
 
 Agent 282's prototype (HANDOFF "Storage format 5: column blocks, a prototype", branch
@@ -21583,14 +21868,34 @@ disassembly per function, `~/.cache/a311/asmdiff.py`, and per-symbol `instructio
   as without (+0.46-0.53%, +0.24%), so the simpler code stays (patch
   `~/.cache/a311/patches/0001-WIP-a311-parscan-s-reader-paths-per-instance-run_row.patch`).
 
+**Rebased onto 313's overlay list** (`cand/a311-2` on `aaa096e02`): 313's runs take the other
+sources' entries inside the L1 run loop (`sst::Overlay`, `Scan::gather` / `ungather`). Format 4
+keeps 313's code: `Block::run_rows_to::<STOP, COL>` (313's body, its `COL = false` instances its
+`STOP` ones), the list gathered only in format 4's instance (`!C && self.merge.bounded &&
+self.gather(..)`), `run_into::<C>` with 313's `ov` / `pushed`, `ungather`'s ranks by
+`rank_of::<false>`. A column block's run takes no list (as 306's `overlay`). Measured again
+against `aaa096e02`, plain dist, two pairs (lane B 5.0-5.2, lane C 1.5-3.8 foreign cores): 313's
+probe (64 fixed 100-row and 1,000-row ranges, 0 / 10 / 100 rows of each updated in the memtable,
+8 clients, `~/.cache/a313/bench/probe.sh`) every cell within ±0.16% (fx100 -0.05 to +0.16%, fx1k
+-0.02 to +0.04%), select-only point reads ±0.3% (±4% both ways in the phase without updates:
+noise); q01 -0.07%, q06 +0.27%, count(*) / sum steps +0.04 to +0.60%. Built without the jump
+padding: q01 -0.10%, q06 -0.16%, count(*) -0.10 to -0.16%, sums -0.21 to -0.23%. Quick-check
+(`QC_CHECKED=1`) on these commits: tests 406, checked 406, crash seeds 1-3 x 2 and the power cut,
+regress 51,148 / 51,150 0 newly differing, isolation 1,647 / 1,648, pg_dump 14,609; with
+`ROLL_COLBLOCKS=1 ROLL_MEMTABLE_BYTES=1048576` (the diagnostic commit on top) the same counts,
+regress's engine writing **6,421 column blocks** (of 20,333, 211 compactions), isolation's 2,101
+of 3,536.
+
 **Rows of column blocks made where read** (step 2's first item, in this candidate): parscan's
 reader makes, after `Pre::mark`, only the rows whose fate isn't DROP (`make_marked`);
 `partial_chunk` those of its run the row path reads; all of them when `Pre` turns itself off or
 the reader ends (`Drop for Reader`). 303's build made every row of a batch: q10 on format 5 +163%
 -> -11.6%.
 
-**Where switch off stands** (against `8f3876dab`; BENCH has every cell): plain dist, the shipped
-flags: q01 -0.08%, q10 -0.02%, q03 +0.14 / -0.06%, q06 **+0.23%**, COPY in / out, INSERT ...
+**Where switch off stands** (against `8f3876dab`; BENCH has every cell; rebased onto `83a21ef3f`
+and measured again there, plain dist: q01 -0.08%, q06 +0.24 / +0.27%, q10 and q03 level, count(*)
++0.40-0.47%, sums +0.49-0.51%, the count after UPDATE / DELETE +0.65%, CREATE INDEX +0.09 /
++0.13%, the rest within 0.11%): plain dist, the shipped flags: q01 -0.08%, q10 -0.02%, q03 +0.14 / -0.06%, q06 **+0.23%**, COPY in / out, INSERT ...
 SELECT, UPDATE, DELETE, VACUUM within ±0.1%, CREATE INDEX +0.02-0.15%, range reads and point
 selects level, count(*) / sum scans **+0.42 to +0.54%** and the count after UPDATE / DELETE
 **+0.67%** (0.8 instructions a row, both pairs). The same two sources built without
@@ -21621,8 +21926,8 @@ for format 5 is making rows from columns (q03's extra instructions are `ColDir::
 **Correctness**: unit tests `storage::tests::column_blocks_read_as_rows` (now also through the
 lazy rows: decoded from the blocks, a third made and read, the rest made) and 282's
 `colblock::tests::sections_give_their_rows_back`. `tools/quick-check.sh` with `QC_CHECKED=1`,
-switch off, on the candidate's code (`750a0de9a`): tests 402 passed in 20 binaries, the checked
-build's 402, crash seeds 1-3 x 2 and the power cut, regress 51,148 / 51,150 units (0 newly
+switch off, on the candidate (`cand/a311` on `83a21ef3f`): tests 403 passed in 20 binaries, the
+checked build's 403, crash seeds 1-3 x 2 and the power cut, regress 51,148 / 51,150 units (0 newly
 differing), isolation 1,647 / 1,648, pg_dump 14,609 passed; clippy no new warning. With `ROLL_COLBLOCKS=1 ROLL_MEMTABLE_BYTES=1048576` in
 the environment, on a diagnostic commit (the candidate's code plus `ROLL_MEMTABLE_BYTES` and a column-block counter
 logged at each compaction, not handed in): tests 402, checked 402, crash seeds 1-3 x 2 and the

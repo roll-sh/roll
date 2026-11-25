@@ -148,6 +148,11 @@ impl LazyRows {
     #[cold]
     #[inline(never)]
     pub fn make(&mut self, batch: &mut RowBatch, from: usize, keep: &dyn Fn(usize) -> bool) {
+        self.make_cols(batch, from, keep, None)
+    }
+
+    /// `make`, the columns `mask` doesn't mark NULL (a reader of those alone: `Scan::read_cols`).
+    pub fn make_cols(&mut self, batch: &mut RowBatch, from: usize, keep: &dyn Fn(usize) -> bool, mask: Option<&[bool]>) {
         let mut left = Vec::with_capacity(self.runs.len());
         let (mut at, mut rows, mut ends) = (Vec::new(), Vec::new(), Vec::new());
         for run in std::mem::take(&mut self.runs) {
@@ -174,15 +179,17 @@ impl LazyRows {
             }
             // (The run's rows made a column at a time, into one buffer.)
             let mut buf = Vec::with_capacity(at.iter().map(|&i| batch.ents[i].len as usize).sum());
-            blk.rows_into(&rows, None, &mut buf, &mut ends);
+            blk.rows_into(&rows, mask, &mut buf, &mut ends);
             let b = batch.bufs.len() as u32;
             batch.bufs.push(Bytes::from(buf));
             let mut o = 0;
             for (&i, &end) in at.iter().zip(&ends) {
                 let e = &mut batch.ents[i];
-                debug_assert_eq!(end - o, e.len as usize);
+                // (Its length as made: shorter than the stored row's with `mask`.)
+                debug_assert!(mask.is_some() || end - o == e.len as usize);
                 e.buf = b;
                 e.off = o as u32;
+                e.len = (end - o) as u32;
                 o = end;
             }
         }
@@ -376,6 +383,11 @@ impl RowBatch {
         self.keys.extend_from_slice(key);
         self.keys.truncate(start + n);
         self.ents.push(Ent { key_end: (start + n) as u32, buf, off: off as u32, len: len as u32 });
+    }
+
+    /// A row whose value is `bufs[buf][off..off + len]` (`buf_index`).
+    pub fn push_at(&mut self, key: &[u8], buf: u32, off: usize, len: usize) {
+        self.push_ent(key, buf, off, len);
     }
 
     /// A row whose value is `v`.

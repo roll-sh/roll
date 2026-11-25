@@ -285,6 +285,103 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Bulk writes, round 27: COPY out's floats and text, index builds' key columns; the DELETE's compaction measured (2026-11-25, agent 315)
+
+HANDOFF "Bulk writes, round 27" has what changed. Lane C, agent 314's standing harness (one server
+a container on the lane's server CPUs, 8 GiB, 2 GB cache, the 1M-row `bulk1m.tsv`, joined windows:
+a step's window runs on until the server is quiet, so a compaction it left counts in it), copied to
+`~/.cache/a315/bench` (`bulk.sh` adds per-step peaks, sizes after DELETE / VACUUM, read steps,
+`NOCHK`). Plain dist builds (`tools/dist.sh`): **b0** origin's `8f3876dab`; **n1** b0 with an env
+switch turning off the compaction deletions force (`deletions_due`; an experiment, not kept);
+**n2** the two commits of `cand/a315` (on `8f3876dab`; rebased onto `541928f40`, which adds
+exec SubPlan code only, before the quick-check). G user instructions of the server's cgroup;
+every counter ran 100% of its window. **Foreign load was over 1.0 core in every run** (1.9-3.9
+cores on the server CPUs: other agents' builds); the instruction counts repeat within 0.2%
+regardless.
+
+### b0 against n2 (3 alternating pairs, one `tools/lane.sh` hold each)
+
+| step | b0 | n2 | % per pair |
+|---|---:|---:|---|
+| CREATE INDEX | 3.301-3.307 | 3.012-3.014 | -8.9 / -8.7 / -8.8 |
+| CREATE UNIQUE INDEX | 2.957-2.962 | 2.668-2.670 | -9.8 / -9.9 / -9.9 |
+| COPY out | 3.082 | 2.358 | -23.5 x3 |
+
+### The whole script once each (b0, n2, one hold)
+
+| step | b0 | n2 |
+|---|---:|---:|
+| COPY in | 6.400 | 6.399 |
+| CREATE INDEX | 3.301 | 3.014 |
+| CREATE UNIQUE INDEX | 2.961 | 2.670 |
+| COPY out | 3.082 | 2.358 |
+| INSERT ... SELECT | 4.426 | 4.426 |
+| UPDATE half | 11.557 | 11.557 |
+| DELETE a quarter, with its compaction | 7.750 | 7.748 |
+| VACUUM | 1.719 | 1.719 |
+| ANALYZE | 0.472 | 0.472 |
+| count after | 0.355 | 0.355 |
+| TRUNCATE, DROP | 0.006 | 0.005 |
+| COPY, primary key and index | 18.296 | 18.295 |
+| COPY, index only | 12.926 | 12.920 |
+| **all steps** | 73.25 | 71.94 (-1.8%) |
+
+Rows, sums and ctid hashes equal; MB written equal but COPY with a primary key (122.3 / 67.6:
+when its compaction fell in the window); data directory after 48 MB both.
+
+### The DELETE without its compaction (b0 against n1 with the trigger off, one pair)
+
+| step | b0 | n1, no deletion trigger |
+|---|---:|---:|
+| DELETE a quarter (joined window) | 7.748 | 3.702 |
+| MB written by it | 54.0 | 16.3 |
+| VACUUM | 1.714 | 1.693 |
+| ANALYZE | 0.468 | 0.978 |
+| count(*), sum(c) | 0.355 | 1.306 |
+| the same again | 0.355 | 1.306 |
+| index-only scan of `bulk_a` | 2.083 | 2.039 |
+| 20,000 point reads by id (a join with generate_series) | 3.580 | 5.102 |
+| 10,000-id range | 0.031 | 0.053 |
+| data directory after VACUUM | 47.9 MB | 85.5 MB |
+
+PostgreSQL 18.6, the same steps (same lane, that hour): DELETE 1.669, VACUUM 2.530, ANALYZE 0.698,
+count 0.492, point reads 1.392, range 0.018; `pg_total_relation_size('bulk')` 166.3 MB after the
+DELETE and VACUUM, 75.2 MB after VACUUM FULL (its bloat for these statements: 91.1 MB).
+
+### Peak memory (anon+shmem of the server's cgroup, sampled every 0.2 s)
+
+| run | roll b0 | PostgreSQL 18.6 |
+|---|---:|---:|
+| whole script with the harness's ctid-hash checks | 552.0 MB (n2 551.4) | 386 (the standing's run) |
+| whole script without the three `string_agg(ctid::text ... ORDER BY id)` checks | 255.6 (UPDATE) | 359.5 |
+| the highest step's own peak, with the checks | 301 (n2 382, CHECKPOINT after the last check) | - |
+
+## Storage format 5, step 2: rows made a column at a time, of the columns read (2026-11-25, agent 311)
+
+HANDOFF "Storage format 5: column blocks, step 2, first piece". `h3` = the head `aaa096e02`, `s4` =
+step 2's first piece on step 1, plain dist; TPC-H SF1 per form as in "Storage format 5, stage 1"
+(format 4 loaded by h3, format 5 by step 1's build with `ROLL_COLBLOCKS=1`); 313's probe for range
+and point reads (`~/.cache/a313/bench/probe.sh`, scale 32, 8 clients). User instructions, lanes
+3-7 foreign cores.
+
+| format 5 against format 4 | step 1 | s4 |
+|---|---|---|
+| q01 / q06 / q10 | -29.1 / -39.1 / -11.6% | -29.2 / -39.0 / -12.1% |
+| q03 | +31.6% | +8.8% |
+| q07 | +39.6% | +19.7% |
+| q09 | +14.4% | +11.8% |
+| range read, 100 rows, 2 columns (instructions / read) | +23.8% | +10.4% |
+| point select | +3.6% | +4.3% |
+
+| switch off, h3 -> s4 | pair 1 | pair 2 |
+|---|---|---|
+| q01 / q06 | -0.08 / +0.24% | -0.09 / +0.21% |
+| q03 / q07 / q09 | -0.05 / -0.25 / -0.22% | +0.14 / -0.28 / -0.21% |
+| count(*) / sums (bulk steps) | +0.14 to +0.60% | +0.14 to +0.60% |
+| probe fx100 none / 10 / 100 newer | -0.05 / +0.02 / +0.08% | +0.20 / +0.01 / +0.05% |
+| probe fx1k none / 10 / 100 newer | +0.02 / 0.00 / +0.01% | +0.05 / +0.02 / +0.03% |
+| select-only none / 10 / 100 | -1.52 / +0.15 / +0.12% | +6.06 / +0.30 / +0.19% |
+
 ## Storage format 5, stage 1: column blocks behind a switch (2026-11-25, agents 303, 311)
 
 HANDOFF "Storage format 5: column blocks, stage 1". The head `8f3876dab` (**h**) and step 1 on it
@@ -683,6 +780,163 @@ INDEX +0.45% / +0.35% (4.013-4.015 -> 4.032-4.033, 3.980 -> 3.994).
 Per query peaks in the 22 (MB, `bench --mem-cgroup`): q01 357-360, q02-q09 368-395, q10 463-471,
 q11 467, q12 389-395, q13 448-456, q14 448-456, q15 421-425, q16 415-420, q17-q22 380-420 (q18 410-420).
 `MIMALLOC_PURGE_DELAY=0` on pgbench -i: peak 634.7, end 34.2 MB (default: 674-726, end 174-202).
+
+## Short write transactions, round 18: the standing table, a compaction's filter bits, the overlay list, the L0 merge again (2026-11-24, agent 313)
+
+HANDOFF "Short write transactions, round 18" has what changed. Plain dist builds (`tools/dist.sh`):
+**b0** = `7e6df5f9c` (the tree of `8f3876dab`, cand/a306 landed); **pgob0** = `tools/dist-pgo.sh` of it
+(profile staleness 0.00%); **n1**-**n4** = b0 + this round's work in progress with measuring switches
+read from the environment (`A313_NO_MERGE`: no L0 merge; `A313_OLD`: no overlay list), one binary for
+both arms of a pair: n2 = `d58c55bc9` (the bloom commit on the list's first form and the L0 merge), n4 =
+`5a3c1780c` (the list in its last form, the bloom commit, the L0 merge). Harness `~/.cache/a313/bench`
+(306's, with `epair.sh`: one alternating pair on one binary by switch, and `ppair2.sh` for `probe.sh`).
+One table or pair a `tools/lane.sh` hold; lanes A and B carried 4.9-6.8 foreign cores of their 8 CPUs
+in every hold (over the 1.0 rule in all): the gates are on user instructions, cycles and tps readings.
+
+### Standing table (brief item 1; lane A, one run a cell, `-D scale=32` on every `-f` script)
+
+10 s cells after `pgbench -i -s 32`; conn / flush: the connection threads' user instructions (`perf stat
+--per-thread --no-inherit`) and the rest of the cgroup's (the flush thread). PostgreSQL 18.6's and
+pgrust's rows: round 15's (BENCH "Short write transactions, round 15", agent 299's table) stand.
+
+| statement | clients | build | tps | p99 ms | user instr | conn / flush | user cycles | kernel instr | yields | foreign |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| BEGIN; END | 8 | roll b0 (plain) | 41,131 | 1.569 | 23,368 | 23,366 / 2 | 47,400 | 78,846 | 0.000 | 1.61 |
+| BEGIN; END | 8 | roll pgob0 (PGO) | 47,423 | 0.472 | 17,175 | 17,161 / 14 | 26,239 | 77,310 | 0.000 | 1.39 |
+| INSERT history | 8 | roll b0 (plain) | 17,431 | 3.141 | 51,449 | 48,019 / 3,430 | 140,147 | 70,168 | 0.348 | 2.24 |
+| INSERT history | 8 | roll pgob0 (PGO) | 25,664 | 1.759 | 42,007 | 39,610 / 2,397 | 91,249 | 70,786 | 0.325 | 1.76 |
+| UPDATE tellers | 8 | roll b0 (plain) | 13,686 | 3.365 | 101,343 | 73,476 / 27,867 | 255,484 | 77,639 | 0.943 | 1.94 |
+| UPDATE tellers | 8 | roll pgob0 (PGO) | 19,298 | 2.065 | 58,881 | 58,739 / 142 | 146,100 | 74,615 | 0.999 | 1.78 |
+| UPDATE branches | 8 | roll b0 (plain) | 13,266 | 3.489 | 75,904 | 75,462 / 442 | 232,794 | 79,219 | 0.981 | 2.15 |
+| UPDATE branches | 8 | roll pgob0 (PGO) | 17,873 | 3.085 | 73,104 | 59,222 / 13,882 | 154,996 | 78,318 | 0.970 | 1.83 |
+| UPDATE accounts | 8 | roll b0 (plain) | 10,236 | 4.325 | 178,178 | 90,346 / 87,832 | 378,938 | 92,601 | 0.973 | 2.03 |
+| UPDATE accounts | 8 | roll pgob0 (PGO) | 12,583 | 5.117 | 208,341 | 73,082 / 135,259 | 311,274 | 92,933 | 0.803 | 1.81 |
+| SELECT accounts | 8 | roll b0 (plain) | 47,380 | 0.401 | 39,762 | 39,732 / 30 | 108,344 | 38,966 | 0.000 | 1.17 |
+| SELECT accounts | 8 | roll pgob0 (PGO) | 48,856 | 0.534 | 35,111 | 35,131 / -20 | 77,420 | 41,397 | 0.000 | 1.73 |
+| TPC-B-like | 8 | roll b0 (plain) | 4,387 | 7.135 | 446,637 | 300,957 / 145,680 | 1,161,947 | 348,390 | 2.327 | 1.29 |
+| TPC-B-like | 8 | roll pgob0 (PGO) | 3,948 | 9.619 | 334,811 | 242,431 / 92,380 | 824,728 | 353,882 | 1.670 | 1.97 |
+| TPC-B-like | 32 | roll b0 (plain) | 4,686 | 26.791 | 499,646 | 321,875 / 177,771 | 1,350,110 | 352,414 | 3.153 | 0.95 |
+| TPC-B-like | 32 | roll pgob0 (PGO) | 4,232 | 33.114 | 311,120 | 277,558 / 33,562 | 975,667 | 373,630 | 2.973 | 1.62 |
+
+Sums of the five one-statement rows (BEGIN/END, INSERT history, the three UPDATEs; SELECT apart):
+plain 430.2k (conn 310.7k, flush 119.5k), PGO 399.5k (conn 247.8k, flush 151.7k); round 15: roll
+524k (its base), PostgreSQL 363k, pgrust 402k. TPC-B-like whole: plain 446.6k / 499.6k (8 / 32
+clients), PGO 334.8k / 311.1k; PostgreSQL 320-326k and pgrust 386-391k at 32 clients (round 11).
+The flush column moves with whether a compaction falls in a 10 s window (UPDATE tellers' flush 27.9k
+plain against 0.1k PGO; TPC-B at 32 clients 177.8k against 33.6k): the fixed-count runs below are the
+write gates. The PGO build's TPC-B rows are under pgrust's and about PostgreSQL's here, its
+statements' sum about pgrust's; the gap left is the flush thread's (the plain fixed-count runs
+below: ~100 k a transaction at 32 clients, 18% of the run).
+
+A flat profile of the TPC-B 8-client cell (plain b0, period 2,000,003, `instructions:u`): roll-conn
+72.7%, roll-flush 27.3%; the flush thread's zstd 8.6% of all, `SstWriter::add` 3.5%, `zip_entries`
+2.7%, `bloom_set` 2.6%; the connection threads' largest items each under 2% (`Block::seek` 1.8%,
+`Lps::settle` 1.7%, mimalloc ~4% together, the server loop 1.4%, zstd decompression 1.3%).
+
+### A compaction's keys from the file whose filter it adopted (n1 -> n2, lane A, `fixed.sh`)
+
+160k TPC-B-like transactions at 32 clients, both builds with `A313_NO_MERGE=1` (every L0 compaction
+into L1, as on the head); the cgroup's counts over the run a transaction, the flush thread's share from
+a flat profile of the run:
+
+| pair | build | L1 compactions | user instr | flush thread | conn | user cycles | foreign |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 1 | n1 | 6 | 589,825 | 111.1k (18.8%) | 475.8k | 1,776,235 | 6.77 |
+| 1 | n2 | 6 | 575,302 (-2.5%) | 100.5k (17.5%) | 471.9k | 1,724,638 | 6.77 |
+| 2 | n2 | 6 | 569,131 | 102.0k (17.9%) | 464.1k | 1,772,205 | 6.23 |
+| 2 | n1 | 5 | 583,855 | 83.8k (14.4%) | 497.0k | 1,831,714 | 6.23 |
+
+Pair 2's n1 run made one compaction fewer and still read 2.5% more. `bloom_set` was 1.64% of n1's
+run (9.7k a transaction) and is out of n2's top symbols. Not gated on PGO (no inlining or function
+boundary aim: the compaction's per-entry path takes one more argument).
+
+### The L0 merge on the overlay list (n3, n4; `cycle.sh` and `fixed.sh`, lane A)
+
+`cycle.sh` (34 rounds of 7,040 TPC-B transactions at 32 clients, after each 2 s of each read at 8
+clients; user instructions a read), one binary, `A313_NO_MERGE=1` against the merge:
+
+| pair | build | events | select-only | 100-row BETWEEN | 1,000-row BETWEEN | foreign |
+|---|---|---|---:|---:|---:|---:|
+| 1 | n1, no merge | 26 flushes, 7 compactions | 48,428 | 334,344 | 2,170,578 | 6.04 |
+| 1 | n1, merge | 26 flushes, 9 merges, 3 compactions | 47,365 (-2.2%) | 338,444 (+1.2%) | 2,203,345 (+1.5%) | 6.04 |
+| 1 | n3, no merge | 26 flushes, 7 compactions | 48,016 | 336,178 | 2,171,585 | 5.53 |
+| 1 | n3, merge | 27 flushes, 9 merges, 3 compactions | 47,349 (-1.4%) | 337,892 (+0.5%) | 2,197,927 (+1.2%) | 5.53 |
+| 2 | n4, merge | 26 flushes, 9 merges, 3 compactions | 46,831 | 339,626 | 2,203,947 | 5.65 |
+| 2 | n4, no merge | 27 flushes, 8 compactions | 48,330 (merge -3.1%) | 337,385 (merge +0.7%) | 2,176,934 (merge +1.2%) | 5.65 |
+
+Round 17's pair (without the list): +2.6% / +3.2%. The write side on n3, 480k transactions at 32
+clients, one pair (4.89 foreign cores): no merge 546,148 user instructions a transaction (13 L1
+compactions, flush thread 97.1k, md2 write bytes 4,196), merge 492,281 (-9.9%; 4 compactions and 18
+L0 merges, flush thread 62.7k, 3,650 bytes), user cycles 1.42 M -> 1.38 M, tps 4,281 / 4,257.
+
+### The overlay list (cand/a313-3)
+
+In process (verify build of the lib's tests, 306's probe `~/.cache/a313/patches/a313_probe.rs` with a
+case of three sources: n rows of each of 64 ranges updated, every other one into an L0 file and the
+rest left in the memtable). User instructions a read; "old" is the same binary with the list switched
+off (it has the stop-free blocks below the others' heads, which both paths share; the head before
+them read 270.4k for the 1,000-row L0 case with 10); the final form (o11; 2,000 reads a case, same
+hashes of keys and values in every case):
+
+| where | rows | newer a range | old | list |
+|---|---:|---:|---:|---:|
+| L0 file | 100 | 0 | 33,959 | 34,076 |
+| L0 file | 100 | 10 | 68,555 | 50,359 (-26.5%) |
+| L0 file | 100 | 100 | 209,631 | 214,076 (+2.1%) |
+| L0 file | 1,000 | 0 | 221,182 | 222,149 |
+| L0 file | 1,000 | 10 | 264,298 | 242,196 (-8.4%) |
+| L0 file | 1,000 | 100 | 531,578 | 426,709 (-19.7%) |
+| memtable | 100 | 10 | 72,788 | 55,423 (-23.9%) |
+| memtable | 100 | 100 | 262,330 | 265,920 (+1.4%) |
+| memtable | 1,000 | 10 | 265,908 | 247,154 (-7.1%) |
+| memtable | 1,000 | 100 | 593,108 | 414,579 (-30.1%) |
+| both | 100 | 10 | 82,710 | 58,674 (-29.1%) |
+| both | 1,000 | 10 | 269,675 | 248,822 (-7.7%) |
+| both | 1,000 | 100 | 713,583 | 473,865 (-33.6%) |
+
+Forms measured on the way, dropped: taking the others' heads in place and going on without a list
+(level: the cost was not in `position`); a list per L1 block (sparse entries -4%, but a newer L0 file's
+block leading the merge gathered L1's rows: -31% to +16%); sorting the list (14k a 100-row read
+with two sources: merged from the sources' runs instead); the rest of a block past the list handed to
+the stop-free loop (+0.3% to +2.4% everywhere: dropped).
+
+Server, controlled (`probe.sh`: `pgbench -i -s 32`, CHECKPOINT, 64 fixed 100-row and 64 fixed 1,000-row
+ranges; none, then 10 and then 100 rows of each updated and left in the memtable; 3 s of each read at 8
+clients), lane B, b0 against n4 with `A313_NO_MERGE=1`, user instructions a read:
+
+| pair | read | none | 10 newer | 100 newer | foreign |
+|---|---|---:|---:|---:|---:|
+| 1 | 100-row, b0 -> n4 | 327,644 -> 321,759 | 358,074 -> 337,291 (-5.8%) | 507,442 -> 507,905 | 6.50 |
+| 1 | 1,000-row | 2,115,544 -> 2,114,427 | 2,155,801 -> 2,152,040 | 2,421,509 -> 2,254,946 (-6.9%) | 6.50 |
+| 2 | 100-row, n4 first | 319,724 -> 321,387 | 349,168 -> 336,764 (-3.6%) | 498,671 -> 507,340 (+1.7%) | 6.65 |
+| 2 | 1,000-row | 2,095,766 -> 2,114,171 (+0.9%) | 2,136,867 -> 2,152,120 (+0.7%) | 2,402,292 -> 2,254,421 (-6.2%) | 6.65 |
+
+Across the TPC-B write cycle (`cycle.sh`, lane A, 6.04 foreign cores, b0 -> n4 with the merge off, 26
+flushes and 7 compactions each): select-only 47,962 -> 48,351, 100-row 337,465 -> 331,866 (-1.7%),
+1,000-row 2,161,418 -> 2,169,624 (+0.4%); one pair before on n1 (the list's first form, old path by
+switch): 335,640 -> 336,497 and 2,178,169 -> 2,168,855.
+
+On the PGO build (lane B, 5.60 foreign cores, `probe.sh`, one pair): pgob0 against the candidate's
+`tools/dist-pgo.sh` (commit `b6906769a`, its own profile, staleness 0.00%), user instructions a read:
+
+| read | none | 10 newer | 100 newer |
+|---|---:|---:|---:|
+| 100-row | 255,647 -> 256,186 (+0.2%) | 281,907 -> 270,762 (-4.0%) | 400,661 -> 403,296 (+0.7%) |
+| 1,000-row | 1,634,255 -> 1,641,025 (+0.4%) | 1,676,815 -> 1,682,409 (+0.3%) | 1,907,252 -> 1,778,767 (-6.7%) |
+
+The candidate built with pgob0's profile (`--profdata`; its 11 changed hot functions without data,
+3.03% of the hot counts) against pgob0, one pair (5.99 foreign cores): +3.6% / +1.9% with no newer
+versions, -1.2% / +1.3% with 10, +5.3% / -6.0% with 100: the profile's loss, not the change's.
+
+TPC-H SF1 (lane C, 6.68 foreign cores, one pair, b0 -> n4 with the merge off, 2 GB cache, 3 runs a
+query in one window; loaded by b0): q01 7,375,482,799 -> 7,378,966,828 user instructions a run
+(+0.05%), q06 5,008,883,426 -> 5,023,406,068 (+0.3%), hashes equal. The bulk script (lane C, 2.0-4.0
+foreign cores, 1M rows, user instructions a step, G): copy_in 6.400 / 6.405, copy_out 3.083 / 3.084,
+insert_select 4.426 / 4.432, update_half 11.613 / 11.605, count_after 0.363 / 0.364, row checks equal;
+delete_quarter 4.169 / 4.047 and vacuum 4.616 / 4.804 move with the background compactions in their
+windows (the list switched off in n4 in a second run: delete_quarter 4.411 against 4.112 on, b0 again
+3.934); ANALYZE read 0.468 on b0's first run and 1.002-1.004 on every run after it, b0's second
+included.
 
 ## Short write transactions, round 17: a range read's run between newer versions; the L0 merge again (2026-11-24, agent 306)
 

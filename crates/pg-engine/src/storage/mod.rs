@@ -137,8 +137,9 @@ impl Compacted<'_> {
     /// Entry `k` (a storage key) of an input, in key order: written, or dropped when no one
     /// reads it any more. (Called through a reference from the merge and its zipped blocks:
     /// one body.)
+    /// `from`: the id of the L1 input it was read from (`SstWriter::add_from`).
     #[inline(never)]
-    fn entry(&mut self, k: &[u8], v: Option<&[u8]>) -> Result<()> {
+    fn entry(&mut self, k: &[u8], v: Option<&[u8]>, from: Option<u64>) -> Result<()> {
         let uk = user_key(k);
         let ts = key_ts(k);
         let first_version = !self.started || !sst::short_eq(&self.cur_user, uk);
@@ -174,7 +175,7 @@ impl Compacted<'_> {
         if self.writer.is_none() {
             self.writer = Some(self.store.sst_writer(self.store.next_id.fetch_add(1, Ordering::Relaxed), true)?);
         }
-        self.writer.as_mut().unwrap().add(k, v)?;
+        self.writer.as_mut().unwrap().add_from(k, v, from)?;
         if first_version || self.part.1 == 0 {
             self.set_part(uk);
         }
@@ -2713,13 +2714,23 @@ impl Store {
                 out.copy_blocks(&mut merge, li, &mut copies)?;
             }
             let Some(i) = merge.min()? else { break };
+            // (The L1 input file the L1 source is in: its keys are in its filter.)
+            let l1_file = merge.sources[li].file_id();
             // (Interleaved files, an UPDATE's versions over the table, a block at a time.)
-            if merge.rank.len() > 1 && merge.with_zip(|srcs, bound| sst::zip_entries(srcs, bound, &mut |k, v| out.entry(k, v))).transpose()? == Some(true) {
+            if merge.rank.len() > 1
+                && merge
+                    .with_zip(|srcs, bound, picked| {
+                        let l1 = (picked.last() == Some(&li)).then_some(srcs.len() - 1);
+                        sst::zip_entries(srcs, bound, &mut |k, v, s| out.entry(k, v, if l1 == Some(s) { l1_file } else { None }))
+                    })
+                    .transpose()?
+                    == Some(true)
+            {
                 merge.cur = None;
                 continue;
             }
             let (k, v) = merge.sources[i].head().expect("a head entry");
-            out.entry(k, v)?;
+            out.entry(k, v, if i == li { l1_file } else { None })?;
             merge.sources[i].advance();
         }
         if let Some(w) = out.writer.take() {
@@ -3388,6 +3399,46 @@ impl Cursor {
         }
     }
 
+    /// A memtable's buffer of entries read on (after those it holds) up to its full size
+    /// (`BATCH`), unless its range is read to the end.
+    fn top_up(&mut self) {
+        let Cursor::Mem { mem, buf, from, end, done, batch } = self else { return };
+        if *done || buf.len() >= BATCH || buf.is_empty() {
+            return;
+        }
+        let upper = if end.is_empty() { Bound::Unbounded } else { Bound::Excluded(end.as_slice()) };
+        let lower = match from {
+            Bound::Included(k) => Bound::Included(k.as_slice()),
+            Bound::Excluded(k) => Bound::Excluded(k.as_slice()),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        let want = BATCH - buf.len();
+        let had = buf.len();
+        for e in mem.map.range::<[u8], _>((lower, upper)).take(want) {
+            buf.push_back((e.key().to_vec(), e.value().clone()));
+        }
+        if buf.len() - had < want {
+            *done = true;
+        }
+        *batch = BATCH;
+        if let Some((k, _)) = buf.back() {
+            *from = Bound::Excluded(k.clone());
+        }
+    }
+
+    /// Whether a level's cursor is past the last entry of the block it holds.
+    fn block_done(&self) -> bool {
+        matches!(self, Cursor::Level { block: Some(b), pos, .. } if pos.index() >= b.len())
+    }
+
+    /// The id of the file a level's cursor is in (None: a memtable's, or past its files).
+    fn file_id(&self) -> Option<u64> {
+        match self {
+            Cursor::Level { ssts, file, .. } => ssts.get(*file).map(|s| s.meta.id),
+            Cursor::Mem { .. } => None,
+        }
+    }
+
     /// The entry `fill` positioned on (None: none left), without reading further.
     fn head(&self) -> Option<(&[u8], Option<&[u8]>)> {
         match self {
@@ -3502,9 +3553,23 @@ impl Cursor {
     /// first entry of a key after the last row pushed, a version at or before `ts`, not a
     /// deletion, and (`resolve`) without out-of-line values. Up to `max`; how many, and the
     /// last version. `long`: the runs before were long (a run from the head is worth its
-    /// setting up; sources taking turns at every row step on first).
+    /// setting up; sources taking turns at every row step on first). With `ov`, the other
+    /// sources' entries up to its limit are taken where they come (`sst::Overlay`): `bound`
+    /// is `ov`'s. `pushed` false: the head isn't pushed yet (the first entry of the block after
+    /// a run's), and is taken as the entries after it are.
     #[allow(clippy::too_many_arguments)]
-    fn run_into<const C: bool>(&mut self, ts: u64, bound: Option<&[u8]>, resolve: bool, batch: &mut batch::RowBatch, max: usize, long: bool, lazy: Option<&mut batch::LazyRows>) -> (usize, u64) {
+    fn run_into<const C: bool>(
+        &mut self,
+        ts: u64,
+        bound: Option<&[u8]>,
+        resolve: bool,
+        batch: &mut batch::RowBatch,
+        max: usize,
+        long: bool,
+        mut ov: Option<&mut sst::Overlay>,
+        pushed: bool,
+        lazy: Option<&mut batch::LazyRows>,
+    ) -> (usize, u64) {
         // (A column block's out of line at once, nothing live but the arguments.)
         if C && let Cursor::Level { block: Some(b), .. } = self
             && b.is_cols()
@@ -3512,29 +3577,39 @@ impl Cursor {
             return self.run_into_cols(ts, bound, batch, max, lazy.expect("a column block's rows"));
         }
         let Cursor::Level { block: Some(b), pos, end, whole, .. } = self else {
-            self.advance();
+            if pushed {
+                self.advance();
+            }
             return (0, 0);
         };
         // (The rows after the head go a run at a time, `Block::run_rows`, up to another
         // source's head (`bound`, below the end) or, in a block the end falls in, the end;
         // a row at a time where a run stops.)
+        // (No stop where every key of the block is below the other sources' heads: the run
+        // ends with the block, without comparing each key.)
+        let below = bound.is_some_and(|x| b.last_key().is_some_and(|l| sst::short_cmp(l, x).is_lt()));
         let stop = match bound {
-            Some(x) => Some(x),
-            None if !*whole && !end.is_empty() => Some(end.as_slice()),
-            None => None,
+            Some(x) if !below => Some(x),
+            _ if !*whole && !end.is_empty() => Some(end.as_slice()),
+            _ => None,
         };
         // (A block of derived values, an index's, goes a row at a time: a run takes none.)
         let runs = !b.derived();
-        let (mut n, mut last) = match runs && (bound.is_none() || long) {
+        let (mut n, mut last) = match (pushed, runs && (bound.is_none() || below || long || ov.is_some())) {
+            (false, _) => (0, 0),
             // (From the head as it stands: not decoded again.)
-            true => b.run_rows(pos, ts, max, resolve, batch, stop),
-            false => {
+            (true, true) => b.run_rows(pos, ts, max, resolve, batch, stop, ov.as_deref_mut()),
+            (true, false) => {
                 b.step(pos);
                 (0, 0)
             }
         };
         while n < max && pos.index() < b.len() {
             let k = pos.key();
+            let bound = match &ov {
+                Some(o) => o.stop(),
+                None => bound,
+            };
             if (!*whole && !end.is_empty() && k >= end.as_slice()) || bound.is_some_and(|x| k >= x) || k.len() < 8 {
                 break;
             }
@@ -3557,7 +3632,7 @@ impl Cursor {
             n += 1;
             last = kts;
             if runs && n < max {
-                let (m, ver) = b.run_rows(pos, ts, max - n, resolve, batch, stop);
+                let (m, ver) = b.run_rows(pos, ts, max - n, resolve, batch, stop, ov.as_deref_mut());
                 if m > 0 {
                     n += m;
                     last = ver;
@@ -3876,7 +3951,8 @@ impl Merge {
     /// next source's head as their bound (`sst::zip_rows`, `sst::zip_entries`). Only the source
     /// `min` chose last may have moved since; a `g` that moves any makes the ranks stale: the
     /// caller then sets `cur` to None.
-    fn with_zip<R>(&mut self, g: impl FnOnce(&mut [(&sst::Block, &mut sst::BlockPos)], Option<&[u8]>) -> R) -> Option<R> {
+    /// `g` also gets the sources' indexes, in the order of their blocks.
+    fn with_zip<R>(&mut self, g: impl FnOnce(&mut [(&sst::Block, &mut sst::BlockPos)], Option<&[u8]>, &[usize]) -> R) -> Option<R> {
         // (Not a column block's: the zips read values in the block's bytes.)
         let cols = self.cols;
         let zippable = |c: &Cursor| matches!(c, Cursor::Level { block: Some(b), end, whole, .. } if (*whole || end.is_empty()) && !(cols && b.is_cols()));
@@ -3894,6 +3970,8 @@ impl Merge {
             None => None,
         };
         let picked = &self.rank[..n];
+        let mut order: smallvec::SmallVec<[usize; sst::ZIP_MAX]> = picked.iter().copied().collect();
+        order.sort_unstable();
         let mut srcs: smallvec::SmallVec<[(&sst::Block, &mut sst::BlockPos); sst::ZIP_MAX]> = self
             .sources
             .iter_mut()
@@ -3904,7 +3982,7 @@ impl Merge {
                 Cursor::Mem { .. } | Cursor::Level { .. } => None,
             })
             .collect();
-        Some(g(&mut srcs, bound))
+        Some(g(&mut srcs, bound, &order))
     }
 
     /// Every source on to its first entry >= `target`.
@@ -3943,10 +4021,25 @@ pub struct Scan {
     /// Whether the merge's sources take turns often enough for `zip` (`ZIP_RUN`): a newer
     /// version every few dozen rows goes faster as runs of the table's block between them.
     zip_ok: bool,
+    /// The other sources' entries a run takes in its loop (`gather`), and a position their
+    /// blocks are read at.
+    ov: Option<Box<(sst::Overlay, Vec<(usize, sst::BlockPos, usize)>)>>,
     /// Its store's data directory has column blocks switched on (`StoreOptions::colblocks`):
     /// its files may have them (`Merge::scan`).
     colstore: bool,
+    /// The columns its reader reads (`read_cols`): a column block's rows are made of those
+    /// alone, the others NULL (None: whole).
+    read_mask: Option<Arc<[bool]>>,
 }
+
+/// A run's overlay list (`Scan::gather`) holds at most this many entries, of at most this many
+/// sources.
+const OV_MAX: usize = 128;
+const OV_SOURCES: usize = 64;
+
+/// Overlay entries runs took or passed (tests: that a read went that way).
+#[cfg(test)]
+static OV_TAKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// `Scan::zip` is tried while the rows go fewer than this many at a time from one source.
 const ZIP_RUN: usize = 8;
@@ -4066,7 +4159,9 @@ impl Scan {
             dead: None,
             dead_run: 0,
             zip_ok: true,
+            ov: None,
             colstore: false,
+            read_mask: None,
         }
     }
 
@@ -4088,8 +4183,16 @@ impl Scan {
             dead: None,
             dead_run: 0,
             zip_ok: true,
+            ov: None,
             colstore,
+            read_mask: None,
         }
+    }
+
+    /// A column block's rows made from here on with only the columns `mask` marks, the others
+    /// NULL (None: whole): for a reader that reads those alone (a range read's projection).
+    pub fn read_cols(&mut self, mask: Option<Arc<[bool]>>) {
+        self.read_mask = mask;
     }
 
     /// Whether a source is a file with column blocks (format 5): `FillRows::lazy`.
@@ -4345,7 +4448,9 @@ impl Scan {
             None => {
                 let mut l = batch::LazyRows::default();
                 let r = self.fill_batch_in::<true>(batch, max, put_back, Some(&mut l));
-                l.make_all(batch);
+                if !l.is_empty() {
+                    l.make_cols(batch, 0, &|_| true, self.read_mask.as_deref());
+                }
                 r
             }
         }
@@ -4428,14 +4533,42 @@ impl Scan {
                 c.advance();
                 continue;
             }
-            let bound = self.merge.bounded.then_some(self.merge.bound.as_slice());
-            let (n, last) = c.run_into::<C>(self.ts, bound, resolve, batch, target - batch.len(), !self.zip_ok, lazy.as_deref_mut());
-            self.zip_ok = n < ZIP_RUN;
-            if n > 0 {
-                let d = self.decided.get_or_insert_with(Vec::new);
-                d.clear();
-                d.extend_from_slice(batch.last_key().expect("a row"));
-                self.decided_ts = last;
+            // (The other sources' entries ahead in the range, taken in the run's loop.)
+            // (Format 4's only: a column block's run takes no list.)
+            let gathered = !C && self.merge.bounded && self.gather(i, resolve, batch)?;
+            let mut pushed = true;
+            loop {
+                let bound = self.merge.bounded.then_some(self.merge.bound.as_slice());
+                let ov = match gathered {
+                    true => self.ov.as_deref_mut().map(|o| &mut o.0),
+                    false => None,
+                };
+                let (n, last) = self.merge.sources[i].run_into::<C>(self.ts, bound, resolve, batch, target - batch.len(), !self.zip_ok, ov, pushed, lazy.as_deref_mut());
+                if pushed || n > 0 {
+                    self.zip_ok = n < ZIP_RUN;
+                }
+                if n > 0 {
+                    let d = self.decided.get_or_insert_with(Vec::new);
+                    d.clear();
+                    d.extend_from_slice(batch.last_key().expect("a row"));
+                    self.decided_ts = last;
+                }
+                // (With the list, the run goes on into the source's next block: the list is
+                // gathered once for the blocks its entries are in, the others not moved till
+                // the run ends.)
+                let c = &mut self.merge.sources[i];
+                if !gathered || batch.len() >= target || !c.block_done() {
+                    break;
+                }
+                c.fill()?;
+                if c.head().is_none() {
+                    break;
+                }
+                pushed = false;
+            }
+            if gathered {
+                self.ungather(i)?;
+                continue;
             }
             // (The other source's head the run stopped at: a newer version or a new key, taken
             // here.)
@@ -4444,6 +4577,183 @@ impl Scan {
                 self.overlay(i, resolve, batch)?;
             }
         }
+        Ok(())
+    }
+
+    /// The entries of the sources ranked after `i` from their heads on, read without moving the
+    /// sources, into the overlay list the runs of `i`'s blocks take in their loop (`sst::Overlay`),
+    /// their values referenced from `batch`. Each source's are read up to the end of what it has
+    /// at hand (a file's block, a memtable's buffer read on to its full size), at most `OV_MAX`
+    /// in all: past that the run stops (the list's limit), as it does at the scan's end. Only
+    /// once the others' next entry is in `i`'s block. False (no list): `i` isn't the oldest
+    /// source's block of rows, or an entry is what a run can't take (a deletion, an out-of-line
+    /// value under `resolve`, a derived value, a long key), or range deletions or a dead-range
+    /// hint want `position`.
+    fn gather(&mut self, i: usize, resolve: bool, batch: &mut batch::RowBatch) -> Result<bool> {
+        let m = &self.merge;
+        // (Only the oldest source's blocks: the others' entries over them are the newer versions
+        // of a few of their rows. A newer file's block, whose range spans many of the oldest
+        // source's rows, takes the next of those as its run's stop instead.)
+        if !self.rdels.is_empty()
+            || self.dead.is_some()
+            || m.cur != Some(i)
+            || m.rank.first() != Some(&i)
+            || i + 1 != m.sources.len()
+            || m.sources.len() > OV_SOURCES
+        {
+            return Ok(false);
+        }
+        let Cursor::Level { block: Some(b), .. } = &m.sources[i] else { return Ok(false) };
+        let Some(last) = b.last_key() else { return Ok(false) };
+        // (Not before the block the others' next entry is in: up to there the run needs no
+        // stop.)
+        if b.derived() || sst::short_cmp(&m.bound, last).is_gt() {
+            return Ok(false);
+        }
+        // (A memtable's buffer read on to its full size first: the list ends where it does.)
+        for r in 1..self.merge.rank.len() {
+            let j = self.merge.rank[r];
+            self.merge.sources[j].top_up();
+        }
+        let m = &self.merge;
+        let Cursor::Level { end, .. } = &m.sources[i] else { return Ok(false) };
+        let ov = self.ov.get_or_insert_with(Default::default);
+        let (list, peeked) = (&mut ov.0, &mut ov.1);
+        list.clear();
+        let mut np = 0;
+        if !end.is_empty() && !list.limit_at(end) {
+            return Ok(false);
+        }
+        for &j in &m.rank[1..] {
+            list.next_source();
+            match &m.sources[j] {
+                Cursor::Mem { buf, done, .. } => {
+                    let mut all = true;
+                    // (Its entries are those of the scan's range.)
+                    for (k, v) in buf.iter() {
+                        if list.len() >= OV_MAX {
+                            if !list.limit_at(k) {
+                                return Ok(false);
+                            }
+                            all = false;
+                            break;
+                        }
+                        let Some(v) = v else { return Ok(false) };
+                        if !sst::Overlay::fits(k) || (resolve && toast::has_external(v)) {
+                            return Ok(false);
+                        }
+                        let bi = batch.buf_index(v);
+                        list.push(k, j, bi, 0, v.len(), key_ts(k) <= self.ts);
+                    }
+                    // (Past its buffered entries, the memtable's next ones aren't read yet.)
+                    if all && !*done && let Some((k, _)) = buf.back() && !list.limit_at(k) {
+                        return Ok(false);
+                    }
+                }
+                Cursor::Level { block: Some(lb), pos, .. } => {
+                    if lb.derived() {
+                        return Ok(false);
+                    }
+                    if peeked.len() <= np {
+                        peeked.push((0, sst::BlockPos::default(), 0));
+                    }
+                    let (src, at, count) = &mut peeked[np];
+                    np += 1;
+                    at.clone_from(pos);
+                    (*src, *count) = (j, 0);
+                    let bi = batch.buf_index(lb.bytes());
+                    let mut all = true;
+                    while at.index() < lb.len() {
+                        let k = at.key();
+                        if list.past_limit(k) {
+                            all = false;
+                            break;
+                        }
+                        if list.len() >= OV_MAX {
+                            if !list.limit_at(k) {
+                                return Ok(false);
+                            }
+                            all = false;
+                            break;
+                        }
+                        let Some((off, len)) = lb.value_span(at).map(|(o, n)| (o as usize, n as usize)) else { return Ok(false) };
+                        if !sst::Overlay::fits(k) || (resolve && toast::has_external(&lb.bytes()[off..off + len])) {
+                            return Ok(false);
+                        }
+                        list.push(k, j, bi, off, len, key_ts(k) <= self.ts);
+                        *count += 1;
+                        lb.step(at);
+                    }
+                    // (Past its block, the file's next one isn't read yet.)
+                    if all && at.index() >= lb.len() && let Some(l) = lb.last_key() && !list.limit_at(l) {
+                        return Ok(false);
+                    }
+                }
+                Cursor::Level { .. } => return Ok(false),
+            }
+        }
+        peeked.truncate(np);
+        list.finish();
+        Ok(!list.is_empty())
+    }
+
+    /// After a run with the overlay list (`gather`): each source past its entries the run took
+    /// or passed (a file's at the position its block was read to, when it took all it read),
+    /// and the sources ranked again.
+    fn ungather(&mut self, i: usize) -> Result<()> {
+        let m = &mut self.merge;
+        let (list, peeked) = {
+            let o = self.ov.as_ref().expect("a list");
+            (&o.0, &o.1)
+        };
+        #[cfg(test)]
+        OV_TAKEN.fetch_add(list.at as u64, Ordering::Relaxed);
+        let mut moved: u64 = 1 << i;
+        let mut taken = [0u32; OV_SOURCES];
+        for j in 0..list.at {
+            let src = list.src(j);
+            taken[src] += 1;
+            moved |= 1 << src;
+        }
+        for (src, at, count) in peeked {
+            if taken[*src] > 0 && taken[*src] == *count as u32 {
+                if let Cursor::Level { pos, .. } = &mut m.sources[*src] {
+                    pos.clone_from(at);
+                }
+                taken[*src] = 0;
+            }
+        }
+        let mut bits = moved & !(1 << i);
+        while bits != 0 {
+            let src = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            for _ in 0..taken[src] {
+                m.sources[src].advance();
+            }
+        }
+        // (The moved sources ranked again among the others, by their heads.)
+        let mut out: smallvec::SmallVec<[usize; 8]> = smallvec::SmallVec::new();
+        m.rank.retain(|&j| {
+            let keep = moved >> j & 1 == 0;
+            if !keep {
+                out.push(j);
+            }
+            keep
+        });
+        for j in out {
+            m.sources[j].fill()?;
+            if let Some((k, _)) = m.sources[j].head() {
+                let at = rank_of::<false>(&m.sources, &m.rank, k);
+                m.rank.insert(at, j);
+            }
+        }
+        m.bound.clear();
+        m.bounded = m.rank.len() > 1;
+        if m.bounded {
+            let (b, _) = m.sources[m.rank[1]].head().expect("a ranked head");
+            m.bound.extend_from_slice(b);
+        }
+        m.cur = m.rank.first().copied();
         Ok(())
     }
 
@@ -4522,7 +4832,7 @@ impl Scan {
     #[inline(never)]
     fn zip(&mut self, resolve: bool, batch: &mut batch::RowBatch, max: usize) -> bool {
         let (ts, decided) = (self.ts, self.decided.get_or_insert_with(Vec::new));
-        let Some(z) = self.merge.with_zip(|srcs, bound| sst::zip_rows(srcs, bound, ts, max, resolve, batch, decided)) else {
+        let Some(z) = self.merge.with_zip(|srcs, bound, _| sst::zip_rows(srcs, bound, ts, max, resolve, batch, decided)) else {
             return false;
         };
         if !z.moved {
@@ -6082,6 +6392,52 @@ mod tests {
         drop(pins);
     }
 
+    #[test]
+    fn runs_take_newer_versions_in_their_loop() {
+        // A table in L1, sparse newer versions over it in two L0 files and the memtable (some of
+        // the same rows in two of them), read at snapshots that see none, some and all of them:
+        // runs of L1's blocks take them from the overlay list (`Scan::gather`), versions newer
+        // than the snapshot passed, and read as the model does.
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(dir.path(), StoreOptions { background: false, memtable_bytes: 1 << 20, ..opts() }).unwrap();
+        let mut model = Model::new();
+        let write = |s: &Arc<Store>, model: &mut Model, rows: &mut dyn Iterator<Item = u32>, g: u32| {
+            let w: Vec<_> = rows.map(|i| (format!("acct{i:06}").into_bytes(), Some(Bytes::from(format!("v{g}-{i}"))))).collect();
+            let ts = s.commit(w.clone(), |_| Ok(())).unwrap();
+            for (k, v) in w {
+                model.entry(k).or_default().push((ts, v));
+            }
+            ts
+        };
+        let n = 4000;
+        for c in 0..4 {
+            write(&s, &mut model, &mut (c * n / 4..(c + 1) * n / 4), 0);
+        }
+        s.rotate().unwrap();
+        s.flush_all().unwrap();
+        s.compact().unwrap();
+        let t0 = s.visible_ts();
+        write(&s, &mut model, &mut (0..n).step_by(13), 1);
+        s.rotate().unwrap();
+        s.flush_all().unwrap();
+        let t1 = s.visible_ts();
+        write(&s, &mut model, &mut (0..n).step_by(29), 2);
+        s.rotate().unwrap();
+        s.flush_all().unwrap();
+        let t2 = s.visible_ts();
+        write(&s, &mut model, &mut (5..n).step_by(17), 3);
+        let t3 = write(&s, &mut model, &mut (6..n).step_by(91), 4);
+        assert_eq!(s.view().l0.len(), 2);
+        // (Pinned: a hot range's rows are kept trimmed to the gc horizon.)
+        let pins: Vec<_> = [t0, t1, t2, t3 - 1].map(|t| s.pin(t)).into();
+        let before = OV_TAKEN.load(Ordering::Relaxed);
+        for (ts, what) in [(t0, "none seen"), (t1, "one file seen"), (t2, "files seen"), (t3 - 1, "memtable partly"), (t3, "all seen")] {
+            check_at(&s, &model, ts, what);
+        }
+        drop(pins);
+        assert!(OV_TAKEN.load(Ordering::Relaxed) > before, "no run took an overlay entry");
+    }
+
     /// Every version written: key -> [(ts, value)].
     type Model = BTreeMap<Vec<u8>, Vec<(u64, Option<Bytes>)>>;
 
@@ -6673,6 +7029,7 @@ mod tests {
         let mut seen: Vec<Vec<String>> = Vec::new();
         for on in [false, true] {
             let mut lazy_seen = false;
+            let mut masked_nulls = false;
             let dir = tempfile::tempdir().unwrap();
             let o = |on| StoreOptions { memtable_bytes: 256 << 10, sync: false, background: false, target_file_bytes: 1 << 20, colblocks: on, ..Default::default() };
             let mut s = Store::open(dir.path(), o(on)).unwrap();
@@ -6731,6 +7088,24 @@ mod tests {
                         out.push(format!("b {k:?} {v:?} {:?}", b.value_bytes(i)));
                     }
                 }
+                // (Rows made of some columns alone, `Scan::read_cols`: those read as whole rows'
+                // do; the others NULL in a column block's rows.)
+                let mask: Arc<[bool]> = Arc::from(vec![true, false, true, false, false, true, false, true]);
+                let mut sc = s.scan(&lo, &hi, ts);
+                sc.read_cols(Some(mask.clone()));
+                loop {
+                    b.clear();
+                    sc.fill_batch(&mut b, 300).unwrap();
+                    if b.is_empty() {
+                        break;
+                    }
+                    cols::decode_cols(&b, 0..b.len(), &[true; 8], &types, &missing, &mut cb).unwrap();
+                    for i in 0..b.len() {
+                        let vs: Vec<String> = (0..8).filter(|&c| mask[c]).map(|c| format!("{:?}", cb.cols[c].as_ref().unwrap().value(&cb, i, &types[c]).unwrap())).collect();
+                        out.push(format!("k {}", vs.join(",")));
+                        masked_nulls |= cb.cols[3].as_ref().unwrap().value(&cb, i, &types[3]).unwrap().is_null();
+                    }
+                }
                 for r in s.scan(&lo, &hi, ts) {
                     out.push(format!("s {:?}", r.unwrap()));
                 }
@@ -6757,6 +7132,7 @@ mod tests {
             assert_eq!(m["format"], if on { sst::FORMAT_COLS } else { sst::FORMAT_DICT }, "colblocks {on}");
             assert_eq!(s.view().l1.iter().any(|f| f.meta.cols), on);
             assert_eq!(lazy_seen, on, "rows left unmade");
+            assert_eq!(masked_nulls, on, "columns left out of rows made");
             seen.push(out);
         }
         assert_eq!(seen[0].len(), seen[1].len());

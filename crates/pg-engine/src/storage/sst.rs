@@ -544,6 +544,10 @@ pub struct SstWriter {
     /// holds the entries it held in format 1, and the cache holds it as it did).
     raw1: usize,
     hashes: Vec<u64>,
+    /// Hashes of keys that came from the file `known_in` (a compaction's L1 input: `add_from`),
+    /// kept apart: when the writer adopts that file's filter they are in it already.
+    known: Vec<u64>,
+    known_in: Option<u64>,
     last_user_hash: Option<u64>,
     /// A key not an index entry was added: the file gets a bloom filter (one of index
     /// entries alone gets none, `index_entry`).
@@ -756,6 +760,8 @@ impl SstWriter {
             block_target: None,
             raw1: 0,
             hashes: Vec::new(),
+            known: Vec::new(),
+            known_in: None,
             last_user_hash: None,
             rows: false,
             offset: 0,
@@ -912,6 +918,13 @@ impl SstWriter {
 
     /// Keys must arrive in strictly increasing order.
     pub fn add(&mut self, key: &[u8], value: Option<&[u8]>) -> Result<()> {
+        self.add_from(key, value, None)
+    }
+
+    /// `add` of an entry read from the file with id `from` (a compaction's L1 input), whose
+    /// bloom filter holds its user key: when the writer adopts that file's filter (`adopt`),
+    /// the key's bits aren't set again (`copied_bloom`).
+    pub fn add_from(&mut self, key: &[u8], value: Option<&[u8]>, from: Option<u64>) -> Result<()> {
         if self.first_key.is_none() {
             self.first_key = Some(key.to_vec());
         }
@@ -939,9 +952,17 @@ impl SstWriter {
         if !self.index_run {
             let h = if self.v2 { hash64_2(user_key(key)) } else { hash64(user_key(key)) };
             if self.last_user_hash != Some(h) {
-                match &mut self.bloom {
-                    Some((b, m)) => bloom_set(b, *m, h),
-                    None => self.hashes.push(h),
+                match (&mut self.bloom, from) {
+                    (Some((b, m)), _) => bloom_set(b, *m, h),
+                    (None, Some(f)) => {
+                        // (Keys of one file at a time: another file's before them are not.)
+                        if self.known_in != Some(f) {
+                            self.hashes.append(&mut self.known);
+                            self.known_in = Some(f);
+                        }
+                        self.known.push(h);
+                    }
+                    (None, None) => self.hashes.push(h),
                 }
                 self.last_user_hash = Some(h);
             } else {
@@ -1194,6 +1215,7 @@ impl SstWriter {
             Some((b, _)) => b,
             None if !self.copied.is_empty() => self.copied_bloom()?,
             None => {
+                self.hashes.append(&mut self.known);
                 let nbits = (self.hashes.len() * BLOOM_BITS_PER_KEY).max(64);
                 let mut bloom = vec![0u8; nbits.div_ceil(8)];
                 let m = FastMod::new(bloom.len() as u64 * 8);
@@ -1261,7 +1283,11 @@ impl SstWriter {
     /// at most 60% of them set: 10 bits a key with 7 set each sets about half); else made
     /// for its keys, the copied blocks' read again for theirs.
     fn copied_bloom(&mut self) -> Result<Vec<u8>> {
-        let keys = self.copied_keys as usize + self.hashes.len();
+        // (Keys of the adopted file are in its filter already; another file's are not.)
+        if self.known_in != self.adopted.as_ref().map(|f| f.meta.id) {
+            self.hashes.append(&mut self.known);
+        }
+        let keys = self.copied_keys as usize + self.hashes.len() + self.known.len();
         let mut b = std::mem::take(&mut self.carried);
         if !b.is_empty() {
             let m = FastMod::new(b.len() as u64 * 8);
@@ -1274,6 +1300,7 @@ impl SstWriter {
                 return Ok(b);
             }
         }
+        self.hashes.append(&mut self.known);
         let f = self.adopted.clone().ok_or_else(|| internal("copied blocks without their file"))?;
         let mut pos = BlockPos::default();
         for &i in &self.copied {
@@ -2076,13 +2103,20 @@ impl Block {
     /// row's first `shared` bytes and the entry's own (less its version, when stored), made in
     /// the batch: no `BlockPos` key per entry. `pos` ends on the first entry not taken (or past
     /// the end). How many it took, and the last one's version.
+    ///
+    /// With `ov`, the other sources' entries ahead (`Overlay`) are taken in the loop where they
+    /// come, and the stop is `ov`'s (its next entry; past them its limit, if
+    /// any): rows pushed, versions older than a row taken passed, on both sides.
     #[inline]
-    pub fn run_rows(&self, pos: &mut BlockPos, ts: u64, max: usize, resolve: bool, batch: &mut super::batch::RowBatch, stop: Option<&[u8]>) -> (usize, u64) {
+    pub fn run_rows(&self, pos: &mut BlockPos, ts: u64, max: usize, resolve: bool, batch: &mut super::batch::RowBatch, stop: Option<&[u8]>, ov: Option<&mut Overlay>) -> (usize, u64) {
         debug_assert!(!self.is_cols());
         // (Two loops: without a stop the one runs before it had, which inlines as that one did.)
-        match stop {
-            None => self.run_rows_to::<false, false>(pos, ts, max, resolve, batch, &[], 0, None),
-            Some(s) => self.run_rows_to::<true, false>(pos, ts, max, resolve, batch, s, 0, None),
+        match (stop, ov) {
+            // (No entry of the list in the block: none stops the run.)
+            (_, Some(o)) if o.stop().is_none_or(|s| self.last_key().is_some_and(|l| short_cmp(l, s).is_lt())) => self.run_rows_to::<false, false>(pos, ts, max, resolve, batch, &[], None, 0, None),
+            (_, Some(o)) => self.run_rows_to::<true, false>(pos, ts, max, resolve, batch, &[], Some(o), 0, None),
+            (None, None) => self.run_rows_to::<false, false>(pos, ts, max, resolve, batch, &[], None, 0, None),
+            (Some(s), None) => self.run_rows_to::<true, false>(pos, ts, max, resolve, batch, s, None, 0, None),
         }
     }
 
@@ -2090,7 +2124,7 @@ impl Block {
     /// of its buffer `cbuf` (`LazyRows::buf_of`). (Never out of line: none of its rows are.)
     pub fn run_rows_col(&self, pos: &mut BlockPos, ts: u64, max: usize, batch: &mut super::batch::RowBatch, cbuf: u32, lazy: &mut super::batch::LazyRows) -> (usize, u64) {
         debug_assert!(self.is_cols());
-        self.run_rows_to::<false, true>(pos, ts, max, false, batch, &[], cbuf, Some(lazy))
+        self.run_rows_to::<false, true>(pos, ts, max, false, batch, &[], None, cbuf, Some(lazy))
     }
 
     /// Rows `rows` of a column block (in that order) onto `out`, each one's end pushed onto
@@ -2100,9 +2134,20 @@ impl Block {
         c.dir.rows_into(&self.data, rows, mask, out, ends);
     }
 
-    /// `run_rows`, with (`STOP`) or without `stop`, of a column block's rows (`COL`) or not.
+    /// `run_rows`, with (`STOP`) or without a stop, of a column block's rows (`COL`) or not.
     #[allow(clippy::too_many_arguments)]
-    fn run_rows_to<const STOP: bool, const COL: bool>(&self, pos: &mut BlockPos, ts: u64, max: usize, resolve: bool, batch: &mut super::batch::RowBatch, stop: &[u8], cbuf: u32, lazy: Option<&mut super::batch::LazyRows>) -> (usize, u64) {
+    fn run_rows_to<const STOP: bool, const COL: bool>(
+        &self,
+        pos: &mut BlockPos,
+        ts: u64,
+        max: usize,
+        resolve: bool,
+        batch: &mut super::batch::RowBatch,
+        stop: &[u8],
+        mut ov: Option<&mut Overlay>,
+        cbuf: u32,
+        lazy: Option<&mut super::batch::LazyRows>,
+    ) -> (usize, u64) {
         let b = &self.data[..];
         let row0 = pos.i as u32 + 1;
         let (mut p, mut v) = (pos.next as usize, pos.vnext as usize);
@@ -2124,16 +2169,16 @@ impl Block {
         // differs from it, below it there: a key sharing more than that with the one before is
         // below `stop` too, so only a key that changes a byte up to there is compared. Not
         // known, as when the last row's user key begins `stop`: every key is compared.)
-        let mut stop = STOP.then(|| {
-            let s = stop;
-            let mut w = [0u8; ZK];
-            let n = s.len().min(ZK);
-            w[..n].copy_from_slice(&s[..n]);
-            let d = if short { below_at(&kb, &w, klen.min(s.len())) } else { None };
-            (w, s.len(), d.unwrap_or(usize::MAX))
-        });
+        let mut stop = match (STOP, &ov) {
+            (false, _) => None,
+            (true, Some(o)) => o.stop_w().map(|(w, sl)| stop_in(w, sl, &kb, short.then_some(klen))),
+            (true, None) => Some(stop_at(stop, &kb, short.then_some(klen))),
+        };
         let own = self.version() <= ts;
+        // (The version of the block's last entry taken or passed, and of the last row pushed:
+        // the same but for rows taken from `ov`.)
         let mut ver = self.ts;
+        let mut rver = self.ts;
         let buf = if COL { cbuf } else { batch.buf_index(&self.data) };
         let mut n = 0;
         while n < max && i < self.len {
@@ -2178,6 +2223,7 @@ impl Block {
                     _ => kb[shared..nk].copy_from_slice(suffix),
                 }
                 // (Sharing up to `d` exactly, the key's byte there decides, unless equal.)
+                let mut hit = false;
                 if STOP
                     && let Some((w, sl, d)) = &mut stop
                     && shared <= *d
@@ -2185,10 +2231,44 @@ impl Block {
                 {
                     match below_at(&kb, w, nk.min(*sl)) {
                         Some(i) => *d = i,
-                        None => {
+                        None => hit = true,
+                    }
+                }
+                if hit {
+                    // (At or past the stop: `ov`'s entries up to the one the run is on.)
+                    let took = match ov.as_deref_mut() {
+                        Some(o) => {
+                            let ever = if ukn == unshared { self.ts } else { b[p + ukn..p + unshared].try_into().unwrap() };
+                            let t = o.take(&kb, nk, ever, batch, &mut n, max, &mut rver, &mut stop);
+                            // (The list's next entry past the block: no stop for the rest of it.)
+                            if let Some((w, sl, _)) = &stop
+                                && self.last_key().is_some_and(|l| short_cmp(l, &w[..*sl]).is_lt())
+                            {
+                                stop = None;
+                            }
+                            t
+                        }
+                        None => Took::Stop,
+                    };
+                    match took {
+                        Took::Stop => {
                             p = at;
                             break;
                         }
+                        // (An older version of a row taken from `ov`: passed.)
+                        Took::Skip => {
+                            ver = if ukn == unshared { self.ts } else { b[p + ukn..p + unshared].try_into().unwrap() };
+                            p += unshared;
+                            v += len;
+                            klen = nk;
+                            i += 1;
+                            continue;
+                        }
+                        Took::Row if n >= max => {
+                            p = at;
+                            break;
+                        }
+                        Took::Row => {}
                     }
                 }
                 batch.push_key::<KEY>(kb[..KEY].try_into().unwrap(), nk, buf, v, len);
@@ -2205,6 +2285,7 @@ impl Block {
                 }
             }
             ver = if ukn == unshared { self.ts } else { b[p + ukn..p + unshared].try_into().unwrap() };
+            rver = ver;
             p += unshared;
             v += len;
             klen = nk;
@@ -2214,15 +2295,269 @@ impl Block {
         if COL && n > 0 {
             lazy.expect("a column block's rows").note(batch, n, row0);
         }
-        if n > 0 {
-            // (On the entry stopped at: its key from the last row's and its version.)
+        if i > pos.i + 1 {
+            // (On the entry stopped at: its key from the last one taken or passed, and its
+            // version.)
             pos.key.clear();
-            pos.key.extend_from_slice(batch.last_key().expect("a row"));
+            match short {
+                true => pos.key.extend_from_slice(&kb[..klen]),
+                false => pos.key.extend_from_slice(batch.last_key().expect("a row")),
+            }
             pos.key.extend_from_slice(&ver);
             (pos.i, pos.next, pos.vnext) = (i - 1, p as u32, v as u32);
         }
         self.step(pos);
-        (n, !u64::from_be_bytes(ver))
+        (n, !u64::from_be_bytes(rver))
+    }
+
+    /// The buffer its entries and values are in.
+    pub fn bytes(&self) -> &Bytes {
+        &self.data
+    }
+}
+
+/// A run's stop (`Block::run_rows_to`) at `s`: `s` in a buffer as the keys are, its length, and
+/// where the key made last (`kb`'s first `klen` bytes, when known) first differs from it, below
+/// it there (`usize::MAX`: not known, every key compared).
+#[inline]
+fn stop_at(s: &[u8], kb: &[u8; ZK], klen: Option<usize>) -> ([u8; ZK], usize, usize) {
+    let mut w = [0u8; ZK];
+    let n = s.len().min(ZK);
+    w[..n].copy_from_slice(&s[..n]);
+    stop_in(&w, s.len(), kb, klen)
+}
+
+/// `stop_at` of a stop already in a buffer (`w`, its first `sl` bytes).
+#[inline(always)]
+fn stop_in(w: &[u8; ZK], sl: usize, kb: &[u8; ZK], klen: Option<usize>) -> ([u8; ZK], usize, usize) {
+    let d = klen.and_then(|k| below_at(kb, w, k.min(sl)));
+    (*w, sl, d.unwrap_or(usize::MAX))
+}
+
+/// What `Overlay::take` did at a run's stop.
+enum Took {
+    /// The run ends before the entry it is on.
+    Stop,
+    /// The entry is an older version of a row taken or passed: passed.
+    Skip,
+    /// The entry comes before the next stop: taken as a row.
+    Row,
+}
+
+/// The other sources' entries the runs of the oldest source's blocks take in their loop
+/// (`Block::run_rows`): those of a merge's other sources from their heads on, as far as each has
+/// them at hand, in key order (`Scan::gather` reads them without moving the sources;
+/// `Scan::ungather` moves each past those taken or passed once the runs end). Each is a row version (no deletion) of a short key, in a
+/// buffer as a run's keys are; one newer than the snapshot is passed. Past them the run stops
+/// at `limit` (where a source's entries not read begin, or the scan's end), if any.
+pub struct Overlay {
+    ents: Vec<OvEnt>,
+    /// Where each source's entries (in key order) begin in `ents`, and a buffer they're merged
+    /// in.
+    runs: Vec<u32>,
+    merged: Vec<OvEnt>,
+    limit: [u8; ZK],
+    limit_len: usize,
+    limited: bool,
+    /// The next entry not taken or passed.
+    pub at: usize,
+}
+
+impl Default for Overlay {
+    fn default() -> Overlay {
+        Overlay { ents: Vec::with_capacity(32), runs: Vec::new(), merged: Vec::new(), limit: [0; ZK], limit_len: 0, limited: false, at: 0 }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct OvEnt {
+    key: [u8; ZK],
+    klen: u8,
+    /// A version at or before the snapshot.
+    vis: bool,
+    /// The source it is the head of or after (the caller's).
+    src: u16,
+    buf: u32,
+    off: u32,
+    len: u32,
+}
+
+/// A key against a limit in a buffer (its first `n` bytes).
+#[inline(always)]
+fn sst_cmp_limit(k: &[u8], w: &[u8; ZK], n: usize) -> std::cmp::Ordering {
+    short_cmp(k, &w[..n])
+}
+
+/// Two keys in buffers, as `cmp` of their first `an` and `bn` bytes.
+#[inline(always)]
+fn cmp_keys(a: &[u8; ZK], an: usize, b: &[u8; ZK], bn: usize) -> std::cmp::Ordering {
+    cmp_words(a, b, an.min(bn)).then(an.cmp(&bn))
+}
+
+impl Overlay {
+    pub fn clear(&mut self) {
+        self.ents.clear();
+        self.runs.clear();
+        self.limited = false;
+        self.at = 0;
+    }
+
+    pub fn len(&self) -> usize {
+        self.ents.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ents.is_empty()
+    }
+
+    /// Whether a storage key can go in (at most `KEY` bytes of user key).
+    pub fn fits(key: &[u8]) -> bool {
+        key.len() >= 8 && key.len() - 8 <= KEY
+    }
+
+    /// The entries pushed next are another source's (in key order).
+    pub fn next_source(&mut self) {
+        self.runs.push(self.ents.len() as u32);
+    }
+
+    /// Entry `key` of source `src` (`fits`), its value `batch`'s buffer `buf` at `off`, `len`
+    /// bytes, visible to the snapshot or not.
+    pub fn push(&mut self, key: &[u8], src: usize, buf: u32, off: usize, len: usize, vis: bool) {
+        let mut k = [0u8; ZK];
+        k[..key.len()].copy_from_slice(key);
+        self.ents.push(OvEnt { key: k, klen: key.len() as u8, vis, src: src as u16, buf, off: off as u32, len: len as u32 });
+    }
+
+    /// The source of entry `j`.
+    pub fn src(&self, j: usize) -> usize {
+        self.ents[j].src as usize
+    }
+
+    /// A run stops at `k` (a source's first entry not read, or the scan's end) once past the
+    /// entries below it, when below the limit set: those at or past it are left out. False: a
+    /// key too long to be a stop (no list then).
+    pub fn limit_at(&mut self, k: &[u8]) -> bool {
+        if k.len() > ZK {
+            return false;
+        }
+        let mut w = [0u8; ZK];
+        w[..k.len()].copy_from_slice(k);
+        if !self.limited || cmp_keys(&w, k.len(), &self.limit, self.limit_len).is_lt() {
+            (self.limit, self.limit_len, self.limited) = (w, k.len(), true);
+        }
+        true
+    }
+
+    /// Whether `k` is at or past the limit set (its entries would be left out).
+    pub fn past_limit(&self, k: &[u8]) -> bool {
+        self.limited && sst_cmp_limit(k, &self.limit, self.limit_len).is_ge()
+    }
+
+    /// The entries in key order (each source's, `next_source`, merged), those at or past the
+    /// limit left out.
+    pub fn finish(&mut self) {
+        let ord = |a: &OvEnt, b: &OvEnt| cmp_keys(&a.key, a.klen as usize, &b.key, b.klen as usize);
+        // (The sources with entries, each from where it's at to where the next begins.)
+        let n = self.ents.len() as u32;
+        let mut at: smallvec::SmallVec<[(u32, u32); 8]> = smallvec::SmallVec::new();
+        for (r, &st) in self.runs.iter().enumerate() {
+            let en = self.runs.get(r + 1).copied().unwrap_or(n);
+            if st < en {
+                at.push((st, en));
+            }
+        }
+        if at.len() > 1 {
+            self.merged.clear();
+            loop {
+                let mut m = usize::MAX;
+                for (r, &(st, en)) in at.iter().enumerate() {
+                    if st < en && (m == usize::MAX || ord(&self.ents[st as usize], &self.ents[at[m].0 as usize]).is_lt()) {
+                        m = r;
+                    }
+                }
+                if m == usize::MAX {
+                    break;
+                }
+                self.merged.push(self.ents[at[m].0 as usize]);
+                at[m].0 += 1;
+            }
+            std::mem::swap(&mut self.ents, &mut self.merged);
+        }
+        debug_assert!(self.ents.is_sorted_by(|a, b| ord(a, b).is_lt()));
+        if self.limited {
+            let (lim, ll) = (&self.limit, self.limit_len);
+            let n = self.ents.partition_point(|e| cmp_keys(&e.key, e.klen as usize, lim, ll).is_lt());
+            self.ents.truncate(n);
+        }
+    }
+
+    /// Where a run stops next: the next entry, past them the limit (in a buffer, its length).
+    #[inline]
+    fn stop_w(&self) -> Option<(&[u8; ZK], usize)> {
+        match self.ents.get(self.at) {
+            Some(e) => Some((&e.key, e.klen as usize)),
+            None => self.limited.then_some((&self.limit, self.limit_len)),
+        }
+    }
+
+    /// `stop_w` as a key.
+    pub fn stop(&self) -> Option<&[u8]> {
+        self.stop_w().map(|(w, n)| &w[..n])
+    }
+
+    /// At a run's stop, the run on an entry (its user key `kb[..nk]`, its version `ever` as
+    /// stored) at or past it: the entries before that one taken (a version at or before the
+    /// snapshot of a key after the last row pushed: pushed, else passed), `n` counting rows up
+    /// to `max`, `stop` set to the next stop. `Skip`: the run's entry is an older version of the
+    /// row last taken or passed; `Row`: it comes first; `Stop`: neither (past the limit, or
+    /// `max` rows).
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn take(
+        &mut self,
+        kb: &[u8; ZK],
+        nk: usize,
+        ever: [u8; 8],
+        batch: &mut super::batch::RowBatch,
+        n: &mut usize,
+        max: usize,
+        rver: &mut [u8; 8],
+        stop: &mut Option<([u8; ZK], usize, usize)>,
+    ) -> Took {
+        loop {
+            let Some(e) = self.ents.get(self.at) else { return Took::Stop };
+            let kl = e.klen as usize;
+            let ul = kl - 8;
+            let ver: [u8; 8] = e.key[ul..kl].try_into().unwrap();
+            let same = nk == ul && cmp_words(kb, &e.key, nk).is_eq();
+            // (A newer version of the key than the entry's, as when the run's block is newer
+            // than a source of the list: the run's entry first, the entry passed after it.)
+            if same && ever < ver {
+                if let Some((_, _, d)) = stop {
+                    *d = usize::MAX;
+                }
+                return Took::Row;
+            }
+            if e.vis && batch.last_key().is_none_or(|l| !short_eq(l, &e.key[..ul])) {
+                if *n >= max {
+                    return Took::Stop;
+                }
+                batch.push_key::<KEY>(e.key[..KEY].try_into().unwrap(), ul, e.buf, e.off as usize, e.len as usize);
+                *n += 1;
+                *rver = ver;
+            }
+            let skip = e.vis && same;
+            self.at += 1;
+            *stop = self.stop_w().map(|(w, sl)| stop_in(w, sl, kb, None));
+            if skip {
+                return Took::Skip;
+            }
+            let Some((w, sl, d)) = stop else { return Took::Row };
+            if let Some(i) = below_at(kb, w, nk.min(*sl)) {
+                *d = i;
+                return Took::Row;
+            }
+        }
     }
 }
 
@@ -2569,13 +2904,14 @@ fn zip_n<const N: usize>(
 }
 
 /// Blocks' entries in key order, every version and deletion (a compaction's merge; up to
-/// `ZIP_MAX` blocks), each passed to `f` (storage key, value: None for a deletion), from the
+/// `ZIP_MAX` blocks), each passed to `f` (storage key, value: None for a deletion, its block's
+/// place in `srcs`), from the
 /// entries their positions are on (each the head of its source; together the smallest heads,
 /// below `bound`, the next source's head, if any), while every block has one, below `bound`,
 /// whose key fits a buffer. The positions are left on each side's first entry not passed, as
 /// `Block::step` leaves them. Whether it passed any.
 #[inline(never)]
-pub fn zip_entries(srcs: &mut [(&Block, &mut BlockPos)], bound: Option<&[u8]>, f: &mut dyn FnMut(&[u8], Option<&[u8]>) -> Result<()>) -> Result<bool> {
+pub fn zip_entries(srcs: &mut [(&Block, &mut BlockPos)], bound: Option<&[u8]>, f: &mut dyn FnMut(&[u8], Option<&[u8]>, usize) -> Result<()>) -> Result<bool> {
     let mut s: smallvec::SmallVec<[ZipSide; ZIP_MAX]> = smallvec::SmallVec::new();
     for (b, p) in srcs.iter() {
         match ZipSide::new(b, p, 0) {
@@ -2597,7 +2933,7 @@ pub fn zip_entries(srcs: &mut [(&Block, &mut BlockPos)], bound: Option<&[u8]>, f
 
 /// `zip_entries`' merge of `N` sides.
 #[inline(always)]
-fn entries_n<const N: usize>(s: &mut [ZipSide; N], bound: Option<&[u8]>, f: &mut dyn FnMut(&[u8], Option<&[u8]>) -> Result<()>) -> Result<bool> {
+fn entries_n<const N: usize>(s: &mut [ZipSide; N], bound: Option<&[u8]>, f: &mut dyn FnMut(&[u8], Option<&[u8]>, usize) -> Result<()>) -> Result<bool> {
     let mut moved = false;
     let mut dval = [0u8; ZK];
     let bound = bound.map(ZipBound::new);
@@ -2625,7 +2961,7 @@ fn entries_n<const N: usize>(s: &mut [ZipSide; N], bound: Option<&[u8]>, f: &mut
             }
             n => Some(&x.blk.data[x.vat..x.vat + n as usize]),
         };
-        f(k, v)?;
+        f(k, v, m)?;
         moved = true;
         if !x.step() {
             break;

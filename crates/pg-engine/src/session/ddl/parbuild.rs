@@ -127,6 +127,8 @@ struct Gathered {
     model: Vec<(Key, Vec<u8>)>,
     /// A row's key values and sort key (`row`'s, kept for the next row: no allocation each).
     vals: Vec<Value>,
+    /// The values of `Plan::read` a row holds (`row`'s, kept for the next row).
+    read: Vec<Value>,
     sort: Vec<u8>,
     /// The bytes of the measure keys' longer parts (`MeasureKey`'s boxes).
     long: usize,
@@ -600,6 +602,11 @@ struct Plan<'a> {
     /// entry's index tuple size follows its key (`Entries::sized`): 2 bytes a row in place
     /// of a measure key's 40 and its boxed rest.
     fused: bool,
+    /// The key and INCLUDE columns, ascending, each once, and where in them each of `cols`
+    /// and then of the INCLUDE columns is: a row whose heap tuple isn't sized from its decoded
+    /// values has only these decoded (`storage::row::decode_cols`), not the whole row.
+    read: Vec<u32>,
+    at: Vec<usize>,
 }
 
 impl Plan<'_> {
@@ -633,25 +640,41 @@ impl Plan<'_> {
             true => Some(crate::storage::row::stored_tuple_len(crate::exec::scan::row_data(bytes)?, &self.types, &self.virt_mask)),
             false => None,
         };
-        let mut row = match stored {
-            Some(None) => crate::exec::scan::decode_table_row(self.t, bytes)?,
-            _ => crate::exec::scan::decode_table_row_need(self.t, bytes, &self.need)?,
+        // (The whole row decoded only where its heap tuple is sized from its values; else the
+        // key and INCLUDE columns alone, `read`, those past the row's own values added since
+        // with their missing values, as `decode_table_row_need` gives them.)
+        let mut read = std::mem::take(&mut g.read);
+        read.clear();
+        let row = match stored {
+            Some(None) => Some(crate::exec::scan::decode_table_row(self.t, bytes)?),
+            _ => {
+                crate::storage::row::decode_cols(crate::exec::scan::row_data(bytes)?, &self.read, &mut read)?;
+                for &c in &self.read[read.len()..] {
+                    read.push(self.t.columns[c as usize].missing.clone().unwrap_or(Value::Null));
+                }
+                None
+            }
         };
         if let Some(len) = stored {
             part.may_toast |= len.is_none_or(|len| len > crate::exec::sizing::TOAST_THRESHOLD);
         }
+        let value = |n: usize, i: usize| match &row {
+            Some(r) => r[i].clone(),
+            None => read[self.at[n]].clone(),
+        };
         let mut vals = std::mem::take(&mut g.vals);
         vals.clear();
-        vals.extend(self.cols.iter().map(|&i| row[i].clone()));
+        vals.extend(self.cols.iter().enumerate().map(|(n, &i)| value(n, i)));
         let at = g.entries.data.len();
         crate::exec::scan::index_entry_key_into(&mut g.entries.data, self.t, self.ix, &vals, dkey, self.colls);
         let checked = !self.check_nulls || !vals.iter().any(Value::is_null);
         g.entries.push_at(at, dkey.len().saturating_sub(8), checked);
-        let k = &g.entries.data[at..];
         if !self.fused {
             super::table::key_bytes_into(&mut g.sort, &vals);
         }
-        vals.extend(self.ix.include.iter().map(|&i| row[i].clone()));
+        let k = &g.entries.data[at..];
+        let nk = self.cols.len();
+        vals.extend(self.ix.include.iter().enumerate().map(|(n, &i)| value(nk + n, i)));
         let size = relsize::index_tuple(&self.ix_types, &vals, &text);
         if size > crate::exec::rowsize::INDEX_SIZE_MASK {
             return Err(crate::exec::rowsize::form_error(size));
@@ -669,10 +692,12 @@ impl Plan<'_> {
             }
         }
         g.vals = vals;
-        match stored {
-            None => {}
-            Some(Some(len)) => part.sizes.push(relsize::heap_tuple_of_len(len) as u32),
-            Some(None) => {
+        g.read = read;
+        match (stored, row) {
+            (None, _) => {}
+            (Some(Some(len)), _) => part.sizes.push(relsize::heap_tuple_of_len(len) as u32),
+            (Some(None), None) => unreachable!("a row sized from its values is decoded whole"),
+            (Some(None), Some(mut row)) => {
                 for &i in &self.virt {
                     if i < row.len() {
                         row[i] = Value::Null;
@@ -900,6 +925,10 @@ impl Ddl<'_, '_> {
             return Ok(None);
         };
         let virt: Vec<usize> = t.columns.iter().enumerate().filter(|(_, c)| c.virtual_gen).map(|(i, _)| i).collect();
+        let mut read: Vec<u32> = cols.iter().chain(&ix.include).map(|&i| i as u32).collect();
+        read.sort_unstable();
+        read.dedup();
+        let at: Vec<usize> = cols.iter().chain(&ix.include).map(|&i| read.partition_point(|&c| c < i as u32)).collect();
         let mut needed = std::collections::HashSet::new();
         crate::exec::sizing::index_columns(bix, &mut needed);
         let mut ix_types: Vec<DataType> = bix.keys.iter().map(|k| k.ty()).collect();
@@ -937,6 +966,8 @@ impl Ddl<'_, '_> {
                 && ix.include.is_empty()
                 && bix.keys.iter().all(|k| relsize::equal_image(&k.ty()))
                 && ix.columns.iter().enumerate().all(|(i, c)| !c.desc && !c.nulls_first && bix.colls.get(i).is_none_or(Option::is_none)),
+            read,
+            at,
         };
         let chunks = Mutex::new(chunks);
         let stop = AtomicBool::new(false);
