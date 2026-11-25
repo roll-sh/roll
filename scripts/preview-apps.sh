@@ -514,7 +514,7 @@ case "$GH_SAID" in *success\;*" 1 comment(s) on #7"*) ;; *) echo "the approved f
 # Its pages held to its own hosts in a reviewer's browser (roll apps' #1032, as previews' own proxy
 # does since #963): a Content-Security-Policy on its HTML, beside any of the app's own. The
 # same-repo pull request's preview (trusted) gets none.
-csp_of() { curl -sS -D - -o /dev/null -H "Host: $(api GET "/v1/previews/$1" | jq_ "d['services'][0]['url']" | sed -E 's#^https?://##; s#/.*##; s#:.*##')" "http://127.0.0.1:${PORTS}080/" --max-time 60 | tr -d '\r' | grep -i "^content-security-policy:" | grep -c "default-src 'self'"; }
+csp_of() { curl -sS -D - -o /dev/null -H "Host: $(api GET "/v1/previews/$1" | jq_ "d['services'][0]['url']" | sed -E 's#^https?://##; s#/.*##; s#:.*##')" "http://127.0.0.1:${PORTS}080/" --max-time 60 | python3 -c "import sys; print(sum(1 for l in sys.stdin if l.lower().startswith('content-security-policy:') and \"default-src 'self'\" in l))"; }
 FORK_CSP=$(csp_of "$FORK_ID")
 SAME_CSP=$(csp_of "$(pull_preview cart | python3 -c "import sys,ast; print(ast.literal_eval(sys.stdin.read())['id'])")")
 [ "$FORK_CSP $SAME_CSP" = "1 0" ] || { echo "a fork's pv- pages should carry roll's Content-Security-Policy and a trusted one's none (fork, same repo): $FORK_CSP $SAME_CSP"; exit 1; }
