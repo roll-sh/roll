@@ -266,6 +266,7 @@ const D: Act = Act::Is(Action::Delete);
 const REVEAL: Act = Act::Is(Action::Reveal);
 const DEPLOY: Act = Act::Is(Action::Deploy);
 const ADMIN: Act = Act::Is(Action::Admin);
+const SCAN: Act = Act::Is(Action::Scan);
 const M: Act = Act::ByMethod;
 
 const fn one(params: &'static [&'static str], kind: &'static str) -> Tgt {
@@ -1482,6 +1483,10 @@ static ROWS: &[Row] = &[
     // Which candidates are this project's stored values (`roll secrets scan`): read on the
     // project. Secrets keeps only matches in folders the caller may reveal, so it's no oracle.
     row("POST", "/v1/secrets/projects/{project}/leaks", "secrets", R, one(&["project"], "project")).filters_itself(),
+    // A scanner's check (a pre-receive hook): which whole candidates are values, never a value
+    // and never which one it would have been. Its own action, `scan`, so a scanner's token needs
+    // no `read` or `reveal`; secrets keeps only matches where the caller may scan.
+    row("POST", "/v1/secrets/projects/{project}/scan", "secrets", SCAN, one(&["project"], "project")).filters_itself(),
     // Validity checks (docs/secrets.md, "Is it live?"): asking a credential's provider whether a
     // credential found in code works is a write (it calls out and is audited, rate-limited per
     // project); a kept answer by fingerprint (never the value) is a read.

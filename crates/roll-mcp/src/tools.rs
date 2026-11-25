@@ -786,7 +786,7 @@ static TOOLS: &[Tool] = &[
         "/v1/access/requests",
         &[
             breq("product", Ty::Str, "The product, e.g. postgres, apps, secrets"),
-            breq("action", Ty::Choice(&["read", "write", "delete", "reveal", "deploy", "admin"]), "The action asked for"),
+            breq("action", Ty::Choice(&["read", "write", "delete", "reveal", "deploy", "admin", "scan"]), "The action asked for"),
             b("resource", Ty::Str, "One resource's id (every resource of the product when left out)"),
             b("environment", Ty::Str, "Only in this environment"),
             b("path", Ty::Str, "Only under this folder"),
