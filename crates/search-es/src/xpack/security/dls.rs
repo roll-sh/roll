@@ -54,6 +54,9 @@ struct Inner {
     inference_left: std::sync::atomic::AtomicI64,
     /// The searches collapse's `inner_hits` may still expand under the policy.
     sub_searches_left: std::sync::atomic::AtomicI64,
+    /// The lookups ([`ReadSecurity::authorize`]) the request's reader passed, by action and
+    /// name: one check each per request (a `lookup` runtime field asks for every hit).
+    authorized: parking_lot::Mutex<std::collections::HashSet<(String, String)>>,
 }
 
 impl std::fmt::Debug for ReadSecurity {
@@ -253,6 +256,7 @@ impl ReadSecurity {
             fetch_left,
             inference_left,
             sub_searches_left,
+            authorized: Default::default(),
         })))
     }
 
@@ -273,11 +277,16 @@ impl ReadSecurity {
     /// Elasticsearch sends those requests as the user. `index` is the name it was asked by,
     /// checked as resolved against `st` at `now_ms` (the request's: [`super::denied_lookup`]).
     pub fn authorize(&self, st: &crate::meta::ClusterState, now_ms: i64, action: &str, index: &str) -> EsResult<()> {
-        let denied = super::denied_lookup(&self.0.eff, st, now_ms, action, index)?;
-        match denied.is_empty() {
-            true => Ok(()),
-            false => Err(super::denied(&self.0.principal, action, Some(&denied))),
+        let key = (action.to_string(), index.to_string());
+        if self.0.authorized.lock().contains(&key) {
+            return Ok(());
         }
+        let denied = super::denied_lookup(&self.0.eff, st, now_ms, action, index)?;
+        if !denied.is_empty() {
+            return Err(super::denied(&self.0.principal, action, Some(&denied)));
+        }
+        self.0.authorized.lock().insert(key);
+        Ok(())
     }
 
     /// Takes one document from the request's fetch budget (a browser key's `max_result_window`,
