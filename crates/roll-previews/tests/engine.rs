@@ -212,6 +212,32 @@ async fn with_screenshots_a_baseline_of_the_default_branch_is_kept_to_compare_ch
     assert_eq!(e.engine.store.row_by_change("chg_1").unwrap().map(|r| r.desired), Some(Desired::Active), "the change's preview came back with its repo");
 }
 
+/// What a screenshot run left out (pages past a run's ten, stories past forty) is on the record
+/// for its head and goes to roll code with the report, never dropped quietly.
+#[tokio::test]
+async fn a_screenshot_run_says_what_it_left_out() {
+    let e = env(json!({ "enabled": true, "github": { "screenshot": true, "baseline": false } }));
+    let mut png = Vec::new();
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 0, 255])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    *e.apps.shot.lock() = Some(png);
+    let left = roll_previews::Skipped { pages: vec!["/old".into()], stories: 12, first_stories: vec!["button--danger".into()] };
+    *e.apps.skipped.lock() = left.clone();
+    e.code.open(change("chg_cut", 4));
+    for _ in 0..3 {
+        e.engine.pass().await.unwrap();
+    }
+    for _ in 0..3000 {
+        if !e.engine.shooting() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let p = e.engine.store.row_by_change("chg_cut").unwrap().unwrap();
+    assert_eq!(e.engine.store.preview(&p.id).unwrap().skipped, Some(left.clone()));
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.code.last_report("chg_cut").skipped, Some(left), "and in the report to roll code");
+}
+
 /// A trusted preview's screenshots and agents' runs (`try`) sign in to the app first
 /// (`github.login`), a `$NAME` typed as the preview's own secret's value (which `Debug` never
 /// shows), and the activity or the run's answer says how it went; a fork's are taken signed out,
