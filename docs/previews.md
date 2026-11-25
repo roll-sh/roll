@@ -1404,6 +1404,13 @@ own rates (the same ones its usage page shows).
   and seed, release and teardown jobs at their `memory_mb` (`run_usage`, this month's). They're
   in `month_to_date_usd`, so `max_usd_month` caps them too, and said apart as `runs_usd`.
   `a_previews_browser_runs_are_in_its_cost`.
+- **roll apps services**: what roll apps billed their `pv-` environments this month (their
+  builds, compute and egress at roll apps' prices, from its `…/usage` since the 1st, UTC), read
+  with the branches' usage (`service_spend`). roll's runtime never runs them, so they have no
+  running time here; until 2026-11-25 their whole bill was missing from `month_to_date_usd`, and
+  `max_usd_month` couldn't hold a project whose previews run on roll apps.
+  `a_previews_roll_apps_bill_is_in_its_cost`. A `roll.toml` service builds inside its own
+  container (`run`), so its build is in its running time.
 - Every preview shows `cost: {sleeping_usd_month, active_usd_hour, month_to_date_usd, runs_usd}`,
   and the project shows the total.
 
@@ -2815,10 +2822,10 @@ Ranked by what a person notices first. Done so far:
 Ranked again after a sixth product review (2026-11-25), against Vercel's and Netlify's previews and
 comments, Render and Railway, Neon, Chromatic and Percy, Signadot, Jam.
 
-1. **Browser runs and jobs in the cost, in review**: screenshot runs (every engine, stories, another
-   service's), agents' runs and seed, release and teardown jobs count by their containers'
-   GiB-hours in `month_to_date_usd` (`runs_usd` apart), so `max_usd_month` caps them. Next for
-   it: builds (a `roll.toml` image built for a preview), which still cost nothing on the record.
+1. **Everything a preview runs in its cost, in review**: screenshot runs (every engine, stories,
+   another service's), agents' runs and seed, release and teardown jobs count by their
+   containers' GiB-hours (`runs_usd` apart; #1010), and roll apps services by roll apps' own bill
+   for their `pv-` environments, builds included, so `max_usd_month` caps them all.
 2. **Signed in to a page that really sits behind a login, live**: screenshots, every engine and
    `try` sign in (`github.login`, landed); the live check proves the stdin path and the stop at
    a missing field, not a page that only answers once signed in.
