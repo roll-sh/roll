@@ -185,7 +185,7 @@ export function HealthView() {
 }
 
 /** roll secrets' policy as plain lines, `[]` when it sets no floor. */
-export function guardrailLines(g: Guardrails): string[] {
+function guardrailLines(g: Guardrails): string[] {
   const lines: string[] = [];
   const n = g.production_approvals;
   if (n !== null) lines.push(`Production stays protected with at least ${n} ${n === 1 ? "approval" : "approvals"}`);
