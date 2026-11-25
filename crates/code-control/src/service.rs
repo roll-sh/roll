@@ -786,6 +786,10 @@ impl Code {
             Some(Value::Bool(b)) => *b,
             Some(_) => return Err(Error::Invalid("draft must be true or false".into())),
         };
+        // An untrusted change's head is its author's (MCP's lockdown).
+        if !trusted {
+            self.db.mark_outside(&r.id, &[cs_id(&cs)])?;
+        }
         let mut promised = self.db.insert_change(
             &id,
             &r.id,
@@ -824,6 +828,9 @@ impl Code {
         }
         let w: WriteFiles = serde_json::from_value(input.clone()).map_err(|e| Error::Invalid(e.to_string()))?;
         let cs = self.write(r, caller, &w).await?;
+        if !c.trusted {
+            self.db.mark_outside(&r.id, &[cs_id(&cs)])?;
+        }
         self.db.revise_change(&c.id, &self.base_of(r, &cs)?, &cs_id(&cs))?;
         // A queued change stays queued, but whatever batch it was in tested the old head.
         self.queued_change_moved(r, c, true)?;
