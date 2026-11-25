@@ -88,6 +88,10 @@ pub struct Row {
     /// SQL as the database's superuser only for a grant that may `admin` the endpoint): the gate
     /// asks it quietly, never refusing for it, and says yes with `roll_auth::Capable`.
     pub capable: &'static [Action],
+    /// A create whose project its JSON body names (this top-level field), beside or instead of
+    /// `X-Roll-Project`: the gate decides it by that project, and refuses a body and a header
+    /// that name two (previews' `project`).
+    pub project_in_body: Option<&'static str>,
     /// A JSON body field whose presence makes it `admin` (apps' `freeze`: setting or lifting a
     /// freeze is the same call as going past one).
     pub admin_if_field: Option<&'static [&'static str]>,
@@ -174,6 +178,18 @@ fn search_parent(b: &Value) -> Vec<Lent> {
     b.get("parent").and_then(Value::as_str).map(|p| Lent { kind: "search".into(), r#ref: p.into(), action: Action::Write }).into_iter().collect()
 }
 
+/// A search API key's action, by what the key may do: `reveal` for a `read` or `append` key; `delete`
+/// for a `data` key, whose role manages indices and lifecycle policies (it deletes indices, runs
+/// delete-by-query, sets ILM); `admin` for an `admin` one, the default, or anything else (it fails
+/// closed). Each answers the key, so search asks `reveal` too (the row's `capable`).
+fn search_key_action(b: &Value) -> Action {
+    match b.get("access").and_then(Value::as_str) {
+        Some("read" | "append") => Action::Reveal,
+        Some("data") => Action::Delete,
+        _ => Action::Admin,
+    }
+}
+
 /// A search cluster linked as another's remote (`cluster`): roll issues a cross-cluster API key
 /// of it, so the link needs `admin` on it too, as making its keys does.
 fn search_remote(b: &Value) -> Vec<Lent> {
@@ -216,7 +232,7 @@ pub type Sources = Vec<(String, Option<String>)>;
 
 impl Row {
     pub fn needs_body(&self) -> bool {
-        self.admin_if_field.is_some() || matches!(self.act, Act::Body(_) | Act::Raw(_)) || matches!(self.copies_from, Some(CopyFrom::Body(_) | CopyFrom::Each(_))) || matches!(self.lends, Some(Lend::Each(_)))
+        self.admin_if_field.is_some() || self.project_in_body.is_some() || matches!(self.act, Act::Body(_) | Act::Raw(_)) || matches!(self.copies_from, Some(CopyFrom::Body(_) | CopyFrom::Each(_))) || matches!(self.lends, Some(Lend::Each(_)))
     }
 
     pub fn action(&self, method: &str, params: &[(String, String)], body: Option<&Value>) -> Action {
@@ -240,7 +256,7 @@ impl Row {
 }
 
 const fn row(method: &'static str, route: &'static str, product: &'static str, act: Act, target: Tgt) -> Row {
-    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false, filters_index: false, admin_if: None, admin_if_field: None, capable: &[] }
+    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false, filters_index: false, admin_if: None, admin_if_field: None, capable: &[], project_in_body: None }
 }
 
 const R: Act = Act::Is(Action::Read);
@@ -276,6 +292,10 @@ impl Row {
     }
     const fn path_query(mut self, q: &'static str) -> Row {
         self.path_query = Some(q);
+        self
+    }
+    const fn project_in_body(mut self, field: &'static str) -> Row {
+        self.project_in_body = Some(field);
         self
     }
     const fn capable(mut self, a: &'static [Action]) -> Row {
@@ -374,6 +394,11 @@ pub const OPERATOR_ONLY: &[(&str, &str)] = &[
 /// What a person's session does for itself, past the member rules (docs/members.md): making a
 /// project, which they then own. Tokens are decided by its row as ever.
 pub const PERSON_OWN: &[(&str, &str)] = &[("POST", "/v1/workspace/projects")];
+
+/// Creates on a member product that are a person's own when they name no project
+/// (`X-Roll-Project`): a person's search cluster is theirs, held to their caps by the product, as
+/// before members. Named in a project, the person's role there decides, by the row.
+pub const PERSON_OWN_UNPLACED: &[(&str, &str)] = &[("POST", "/v1/search/clusters")];
 
 pub fn rows() -> &'static [Row] {
     ROWS
@@ -1312,15 +1337,20 @@ static ROWS: &[Row] = &[
     row("PATCH", "/v1/search/clusters/{id}", "search", ADMIN, one(PG, "cluster")).reveals(SEARCH_SECRETS),
     row("DELETE", "/v1/search/clusters/{id}", "search", D, one(PG, "cluster")),
     row("POST", "/v1/search/clusters/{id}/branches", "search", W, one(PG, "cluster")).reveals(SEARCH_SECRETS),
-    row("POST", "/v1/search/clusters/{id}/password", "search", REVEAL, one(PG, "cluster")),
+    // A new admin password: managing the cluster (every client using the old one stops), and the
+    // new one is in the answer, so search refuses it to a grant that can't reveal too (`capable`).
+    row("POST", "/v1/search/clusters/{id}/password", "search", ADMIN, one(PG, "cluster")).capable(&[Action::Reveal]),
     // A deleted cluster back (its id still resolves while it is kept): a write, like a create.
     row("POST", "/v1/search/clusters/{id}/restore", "search", W, one(PG, "cluster")),
     // Any request as the cluster's owner. One that answers or sets a credential (decided by
     // search on the API the cluster routes it to) needs reveal too: the gate says whether the
     // grant has it (`capable`), without reading the body.
     row("POST", "/v1/search/clusters/{id}/request", "search", ADMIN, one(PG, "cluster")).capable(&[Action::Reveal]),
-    // An API key: its secret is in the answer.
-    row("POST", "/v1/search/clusters/{id}/keys", "search", REVEAL, one(PG, "cluster")),
+    // An API key: its secret is in the answer, so search refuses it to a grant that can't reveal
+    // too (`capable`). The action is what the key may do (`search_key_action`): `admin` access
+    // (the default) is everything the cluster's own user may do, as the console is; a `data` key
+    // deletes indices and sets lifecycle policies (`delete`); `read` and `append` keys are reveal.
+    row("POST", "/v1/search/clusters/{id}/keys", "search", Act::Body(search_key_action), one(PG, "cluster")).capable(&[Action::Reveal]),
     row("DELETE", "/v1/search/clusters/{id}/keys/{key}", "search", ADMIN, one(PG, "cluster")),
     // Keys a web page ships (read-only, rate limited): the new key's secret is in the answer;
     // the list has none.
@@ -1802,7 +1832,8 @@ static ROWS: &[Row] = &[
     // A preview's link carries its access token (`share_url`, also each service's and earlier
     // ones'): the link is a credential, as its QR code is.
     row("GET", "/v1/previews", "previews", R, list("id")).reveals(&["share_url"]),
-    row("POST", "/v1/previews", "previews", W, Tgt::Create { project: None, place: None, id_field: "id" }).env(EnvFrom::Fixed("preview")),
+    // Its project is the body's `project` (or `X-Roll-Project`, which must name the same one).
+    row("POST", "/v1/previews", "previews", W, Tgt::Create { project: None, place: None, id_field: "id" }).env(EnvFrom::Fixed("preview")).project_in_body("project"),
     // Each event is its project's: a member, or a token held to some projects, follows theirs
     // (a deleted preview's event too: its project still resolves).
     row("GET", "/v1/previews/events", "previews", R, Tgt::List { items: Some("events"), id_field: "project", kind: Some("project") }),
