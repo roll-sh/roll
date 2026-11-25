@@ -50,6 +50,11 @@ use std::sync::OnceLock;
 /// credentials (value: the user name, `elastic` for the owner).
 pub const AUTHENTICATED_HEADER: &str = "x-roll-authenticated-user";
 
+/// A derived browser key the node verified ([`derived::verified_header`]): the request runs as
+/// its parent's API key, narrowed, without verifying the key a second time. Only the node sets
+/// it (it strips any client-sent copy), as [`AUTHENTICATED_HEADER`].
+pub const DERIVED_HEADER: &str = "x-roll-derived-key";
+
 /// Narrows a request the node authenticated as the owner to these index names and patterns
 /// (comma-separated; `-` exclusions are ignored): roll search's per-index control-plane routes
 /// (`/v1/search/clusters/{id}/indices/{index}/…`) send it, so a caller scoped to an index by
@@ -269,11 +274,15 @@ pub fn stored_browser_key_cluster(state: &[u8], dialect: crate::cluster::Dialect
 
 /// Who owns what a request stores for later (async search results): the API key it
 /// authenticated with, else its user and realm (the run-as user when there is one), as
-/// Elasticsearch's `Authentication.canAccessResourcesOf` tells owners apart.
+/// Elasticsearch's `Authentication.canAccessResourcesOf` tells owners apart; a derived key is
+/// its own owner, never its parent or another key derived from it.
 pub fn resource_owner(ctx: &Ctx) -> String {
     let p = principal(ctx);
     match &p.kind {
-        AuthKind::ApiKey(a) => format!("api_key:{}", a.id),
+        AuthKind::ApiKey(a) => match &a.derived {
+            Some(d) => format!("api_key:{}:derived:{}", a.id, d.id),
+            None => format!("api_key:{}", a.id),
+        },
         _ => format!("user:{}:{}:{}", p.realm_type, p.realm_name, p.username),
     }
 }
@@ -318,7 +327,9 @@ pub fn authenticate(ctx: &Ctx) -> EsResult<()> {
         let _ = ctx.principal.set(api_keys::authenticate_link(ctx.cluster, key, access)?);
         return Ok(());
     }
-    let p = if req.header(AUTHENTICATED_HEADER).is_some() {
+    let p = if let Some(d) = req.header(DERIVED_HEADER) {
+        Some(derived::verified(ctx.cluster, d)?)
+    } else if req.header(AUTHENTICATED_HEADER).is_some() {
         req.header(INDEX_SCOPE_HEADER).map(Principal::owner_scoped)
     } else {
         match req.header("authorization") {

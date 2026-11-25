@@ -80,6 +80,7 @@ pub fn stored_user(p: &crate::xpack::security::Principal) -> Option<Value> {
         // A derived key's narrowing stays with it (browser keys start no jobs; kept regardless).
         if let (Some(d), Some(k)) = (&a.derived, k.as_object_mut()) {
             k.insert("narrowing".into(), d.narrowing.clone());
+            k.insert("derived_id".into(), d.id.clone().into());
         }
         m.insert("api_key".into(), k);
     }
@@ -98,7 +99,10 @@ pub fn principal_of(u: &Value) -> Option<crate::xpack::security::Principal> {
             limited_by: a.get("limited_by").cloned().unwrap_or(Value::Null),
             cross_cluster: a.get("cross_cluster").and_then(Value::as_bool).unwrap_or(false),
             remote: None,
-            derived: a.get("narrowing").map(|n| Box::new(crate::xpack::security::derived::DerivedAuth { narrowing: n.clone(), user: None, per_minute: None, origins: Vec::new() })),
+            derived: a.get("narrowing").map(|n| {
+                let id = a.get("derived_id").and_then(Value::as_str).unwrap_or_default().to_string();
+                Box::new(crate::xpack::security::derived::DerivedAuth { id, narrowing: n.clone(), user: None, per_minute: None, origins: Vec::new() })
+            }),
         })),
         None => crate::xpack::security::AuthKind::Realm,
     };
@@ -160,7 +164,11 @@ pub const SYSTEM_HEADER: &str = "x-roll-internal-system";
 
 /// The principal an internal request without credentials runs as ([`as_principal`]).
 pub fn acting_principal(req: &EsRequest) -> Option<crate::xpack::security::Principal> {
-    if req.header("authorization").is_some() || req.header(crate::xpack::security::AUTHENTICATED_HEADER).is_some() || req.header(SYSTEM_HEADER).is_some() {
+    if req.header("authorization").is_some()
+        || req.header(crate::xpack::security::AUTHENTICATED_HEADER).is_some()
+        || req.header(crate::xpack::security::DERIVED_HEADER).is_some()
+        || req.header(SYSTEM_HEADER).is_some()
+    {
         return None;
     }
     ACTING.try_with(Clone::clone).ok()
@@ -178,13 +186,13 @@ impl Caller {
     /// The client of `ctx`, a superuser too: for calls whose result belongs to whoever sent
     /// them (a point in time or scroll is bound to its opener).
     pub fn client(ctx: &crate::rest::Ctx<'_>) -> Option<Caller> {
-        use crate::xpack::security::{AUTHENTICATED_HEADER, INDEX_SCOPE_HEADER, RUN_AS_HEADER};
+        use crate::xpack::security::{AUTHENTICATED_HEADER, DERIVED_HEADER, INDEX_SCOPE_HEADER, RUN_AS_HEADER};
         ctx.principal.get()?;
         // The headers that made it this principal: the node's authentication (narrowed to some
         // indices on a per-index route) or the client's credentials, and its run-as user.
         // A linked remote cluster's request keeps its remote access too (only roll's own calls
         // reach here with it), or its key alone would be refused.
-        let headers = [AUTHENTICATED_HEADER, INDEX_SCOPE_HEADER, "Authorization", RUN_AS_HEADER, crate::remote::links::REMOTE_ACCESS_HEADER]
+        let headers = [AUTHENTICATED_HEADER, DERIVED_HEADER, INDEX_SCOPE_HEADER, "Authorization", RUN_AS_HEADER, crate::remote::links::REMOTE_ACCESS_HEADER]
             .into_iter()
             .filter(|h| *h != "Authorization" || ctx.request.header(AUTHENTICATED_HEADER).is_none())
             .filter_map(|h| ctx.request.header(h).map(|v| (h.to_string(), v.to_string())))
@@ -265,6 +273,9 @@ pub fn call_as<'a>(ctx: &crate::rest::Ctx<'_>, cluster: &'a Cluster, method: &st
     }
     if let Some(user) = ctx.request.header(crate::xpack::security::RUN_AS_HEADER) {
         req.headers.push((crate::xpack::security::RUN_AS_HEADER.into(), user.to_string()));
+    }
+    if let Some(d) = ctx.request.header(crate::xpack::security::DERIVED_HEADER) {
+        req.headers.push((crate::xpack::security::DERIVED_HEADER.into(), d.to_string()));
     }
     if let Some(access) = ctx.request.header(crate::remote::links::REMOTE_ACCESS_HEADER) {
         req.headers.push((crate::remote::links::REMOTE_ACCESS_HEADER.into(), access.to_string()));

@@ -223,9 +223,12 @@ impl ReadSecurity {
         let p = ctx.principal.get().filter(|p| !p.is_superuser())?;
         let eff = super::effective(&super::file_roles(ctx.cluster), &ctx.state(), p);
         let restricts = eff.own.iter().chain(eff.limited_by.iter().flatten()).chain(eff.also.iter().flatten()).flat_map(|r| r.indices.iter()).any(|g| g.query.is_some() || g.field_security.is_some() || !g.masked.is_empty());
-        // A browser key is restricted whatever its roles: its policy rides with its reads.
+        // A browser key is restricted whatever its roles: its policy rides with its reads. So is a
+        // key derived from one, by its narrowing too (it's in `eff.also`): a reader that isn't
+        // everyone never shares a cached result built for a wider view.
         let browser = super::browser::policy(ctx);
-        if !restricts && browser.is_none() {
+        let derived = matches!(&p.kind, super::AuthKind::ApiKey(a) if a.derived.is_some());
+        if !restricts && browser.is_none() && !derived {
             return None;
         }
         let st = ctx.state();

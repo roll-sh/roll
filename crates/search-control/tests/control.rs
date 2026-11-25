@@ -1084,6 +1084,12 @@ async fn as_derived(e: &Env, key: &str, method: reqwest::Method, p: &str, origin
     (s, serde_json::from_str(&t).unwrap_or(Value::String(t)))
 }
 
+/// `products`' request cache stats, read as the owner.
+async fn request_cache(e: &Env, path: &str) -> Value {
+    let r = e.post(&format!("{path}/request"), json!({"method": "GET", "path": "/products/_stats/request_cache", "body": null})).await;
+    body(&r)["_all"]["total"]["request_cache"].clone()
+}
+
 fn unix_now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
 }
@@ -1132,11 +1138,29 @@ async fn derived_keys_narrow_their_parent_and_die_with_it() {
     let (s, v) = as_derived(&e, &acme, reqwest::Method::POST, "/products*/_search", None).await;
     let ids: Vec<&str> = v["hits"]["hits"].as_array().unwrap().iter().filter_map(|h| h["_id"].as_str()).collect();
     assert_eq!((s, ids), (200, vec!["1"]), "{v}");
+    // A cached answer is the parent's wider view: a derived key never reads one (nor fills one).
+    let agg = json!({"size": 0, "aggs": {"t": {"terms": {"field": "tenant.keyword"}}}});
+    for _ in 0..2 {
+        let r = e.post(&format!("{path}/request"), json!({"method": "POST", "path": "/products/_search?request_cache=true", "body": agg})).await;
+        assert_eq!(r["status"], 200, "{r}");
+    }
+    let before = request_cache(&e, &path).await;
+    assert!(before["hit_count"].as_i64() > Some(0), "the owner's second search was a hit: {before}");
+    let r = e.http.post(format!("{}/products/_search?request_cache=true", e.es)).header("authorization", format!("ApiKey {acme}")).json(&agg).send().await.unwrap();
+    let v: Value = r.json().await.unwrap();
+    let buckets: Vec<&str> = v["aggregations"]["t"]["buckets"].as_array().unwrap().iter().filter_map(|b| b["key"].as_str()).collect();
+    assert_eq!(buckets, ["acme"], "its own view, not the cached one: {v}");
+    assert_eq!(request_cache(&e, &path).await, before, "the cache wasn't read or filled");
     for p in ["/products-archive/_search", "/other/_search"] {
         assert_eq!(as_derived(&e, &acme, reqwest::Method::POST, p, None).await.0, 403, "{p}");
     }
     assert_eq!(as_derived(&e, &acme, reqwest::Method::PUT, "/products/_doc/9", None).await.0, 403, "it never writes");
     assert_eq!(as_derived(&e, &acme, reqwest::Method::GET, "/_security/_authenticate", None).await.0, 400, "nor reaches _security");
+    // Nothing that keeps state for later (whose owner would be the parent's key).
+    for p in ["/products/_search?scroll=1m", "/products/_pit?keep_alive=1m", "/products/_async_search"] {
+        let (s, v) = as_derived(&e, &acme, reqwest::Method::POST, p, None).await;
+        assert!(s == 400 && v.to_string().contains("isn't available to a browser key"), "{p}: {s} {v}");
+    }
     // Origins narrow the cluster's: a browser on another page is refused.
     let paged = sign(&secret, json!({"key": pid, "cluster": "shop", "exp": exp, "origins": ["https://Shop.Example.com:443"]}));
     assert_eq!(as_derived(&e, &paged, reqwest::Method::POST, "/products/_search", Some("https://shop.example.com")).await.0, 200);
@@ -1172,6 +1196,8 @@ async fn derived_keys_narrow_their_parent_and_die_with_it() {
         // A lookup would read an index the parent can't; a script runs Painless as the owner.
         (sign(&secret, with("filter", json!({"bool": {"filter": [{"terms": {"tenant": {"index": "other", "id": "5", "path": "tenant"}}}]}}))), plain_only),
         (sign(&secret, with("filter", json!({"script": {"script": "true"}}))), plain_only),
+        // Expanding terms, built as the owner's filter, needs the parent's allow_expensive_queries.
+        (sign(&secret, with("filter", json!({"bool": {"filter": [{"prefix": {"tenant": "ac"}}]}}))), "allow_expensive_queries"),
         (sign(&secret, with("exp", json!(unix_now() + 2 * 86_400))), "ahead"),
         (sign(&secret, with("exp", json!(unix_now() - 120))), "expired"),
         (sign(&secret, json!({"key": pid, "cluster": "shop", "exp": exp, "user": "acme", "rate_limit": {"per_minute": 101}})), "share"),
