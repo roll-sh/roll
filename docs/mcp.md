@@ -621,11 +621,14 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
 **A person's own connection.** A token or OAuth client of a person who isn't an admin reaches
 what their account does (`roll_access::USER_REACH`, held to rolld's gate by its `auth::tests`):
 roll code and agents through their own owners, and the projects they're members of, with those
-projects' secrets and previews as their role allows (docs/members.md). `tools/list` shows only
+projects' secrets, previews and search clusters as their role allows (docs/members.md; search
+since #808, its own clusters a person's whatever their roles). `tools/list` shows only
 those products' tools, and on one resource of a member product only what their role allows too,
 as the gate decides each call (`within` their session): a viewer's client lists secrets' reads,
-not its reveals or writes, whatever the token names. A list or a create goes on the token's rules
-alone, as at the gate.
+not its reveals or writes, whatever the token names. A list goes on the token's rules alone, as at
+the gate. A create is listed on them too, though the gate holds one that names a project within
+the session (which project isn't known until the call, and a person's own search cluster, in no
+project, is theirs to make).
 
 ## Protocol
 
