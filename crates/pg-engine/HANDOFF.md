@@ -21686,6 +21686,98 @@ Not done, found:
 - Subquery Scan widths (remove_unused_subquery_outputs' NULLs at their types' widths), memoize:8,
   subselect:19 rows, the catalog plans (bloat), as agent 288 left them.
 
+## Analytic CPU, round 15: dense bitmaps read by key, probes before the walk (agent 316)
+
+The standing (BENCH "Standing, 2026-11-24") had roll PGO 0.5% under pgrust on the TPC-H total and
+behind it on 17 of the 22 queries. Base **b0** is origin's `541928f40` (cand/a314-2 landed: q17's
+SubPlan memo); BENCH "Analytic CPU, round 15" has the tables. Profiles (`instructions:upp`,
+period 2,000,003, LBR) of b0's q10, q15, q21, q02, q20, q11, q05 found two causes worth most of
+the gap, both in the parallel lineitem / orders scans:
+
+- **A dense bitmap heap scan decoded every row of the table.** `scan::dense_bitmap_scan` runs a
+  bitmap heap scan whose index entries are 1/32 of the table or more as a sequential scan with the
+  bitmap's condition added to the filter (the same rows in heap order, in parallel). It counted
+  the entries and dropped them, so each row was walked to the condition's column and decoded:
+  q15's lineitem (241k of 6M rows by `l_shipdate`: the walk 55% of q15), q06's (15%), q04's and
+  q10's orders (4% by `o_orderdate`), and q05's orders (15%: its EXPLAIN shows a nested loop into
+  `orders_o_custkey_idx`, the plan the executor runs reads them by the date bitmap, `KeyedFill`
+  5-6% of its profile now). PostgreSQL's plan is the same (Parallel Bitmap Heap Scan); its heap
+  scan reads only the bitmap's tuples.
+- **A probe that drops most rows ran after the filter's columns were decoded.** q10's lineitem
+  rows (filter `l_returnflag = 'R'`, column 8) are probed into the orders hash by `l_orderkey`
+  (column 0), which ~4% of rows hit; q21's (`l_receiptdate > l_commitdate`, columns 11-12) into
+  the Saudi suppliers by `l_suppkey` (column 2, 4%). Every row was walked to column 8 or 12
+  before the probe looked at its key.
+
+**What changed** (`exec/scan.rs`, `exec/parscan.rs`, `exec/vector.rs`, `storage/cols.rs`):
+- `dense_bitmap_scan` keeps the data keys of the entries that pass (`parscan::KeySet`: keys of one
+  length up to 24 bytes, the table's 8-byte prefix and the rest as a big-endian `u128`, sorted, at
+  most 2M keys; a bitmap of an AND or OR, other key forms or more keys keep the old path), and
+  the parallel scan's chunks read through `KeyedFill`, which passes over a row whose key isn't in
+  the set before it is decoded (one compare of words a row; the chunk's place in the set kept
+  from row to row). The bitmap's condition stays in the filter and is checked on the rows left,
+  so the rows are those of the scan before whatever the index held. The serial dense path and
+  EXPLAIN ANALYZE (never dense) are as before. `KEYED_PASSED` counts the rows passed over.
+- `Pre::decode_split`: where a scan's first stage probes a hash join on an integer column, the
+  batch filter raises no error for any row (`VB::total`: comparisons, IN lists, LIKE, IS NULL,
+  date and timestamp comparisons, their AND / OR / NOT; no arithmetic or other calls) and the
+  scan reads a column past the probe's, a run of rows is decoded up to the probe's column
+  first, the probe's bit filter and map tell which keys may have candidates, and only those rows
+  (and rows the batch can't tell) are decoded whole (`cols::decode_cols_only`) and filtered;
+  the rest are dropped as the probe would drop them. A row the probe drops is one PostgreSQL
+  drops too, and a filter that can't raise an error makes not checking it unobservable (a
+  filter with arithmetic keeps the old path: the parallel join test's division by zero). The
+  scan stops splitting once over half of its first 1,024 rows may have candidates
+  (`VPlan::splits`, shared by the chunks: q12's orders probe, which every row hits).
+  `SPLIT_PASSED` counts the rows dropped by key alone.
+- `cols::decode_cols` and the typed walk (`walk_row`) are `#[inline(always)]`: with
+  `decode_cols_only` sharing their body (`decode_cols_in`), LLVM made `decode_cols` a call per run
+  and `walk_row` a call per row (q01 +2.0%, q12 +2.3%, q17 +5.7% in the first build).
+
+**Measured** (BENCH "Analytic CPU, round 15", plain dist, user instructions a run, the pairs in
+both orders, b0 against n6): **the 22 91.62 -> 83.25 G (-9.13 / -9.12%)**, q15 4.65 -> 2.30 G
+(-50.6%), q06 -32.8%, q10 7.44 -> 5.54 G (-25.6%), q21 6.76 -> 5.26 G (-22.3%), q04 -21.1%, q05
+-9.2%, q03 / q12 -1.5%, q01 -0.9%; q14 +0.7% (9 M), q11 +0.2%, the rest within +-0.6%. Every
+result hash equal to b0's and PostgreSQL's; the 22 plans' EXPLAIN identical to b0's; peak memory
+over the pass level (1,587-1,605 MB). The pairs repeated within 0.1 point a query. Earlier builds
+and the inlining's cost before it was fixed: BENCH. PGO: one `tools/dist-pgo.sh` build of this
+code (the inlining changed, so the shipped build is gated too) was running at hand-in; its pass of
+the 22 beside the standing's PGO figures comes in a later candidate's docs.
+
+**Verification** (`tools/quick-check.sh` with `QC_CHECKED=1` and `parallel_scan`, on `8a183986a`
+rebased on origin's `7a11af253`): clippy 16 warnings, none new in a changed file; 454 tests in 28
+binaries, and again `--profile verify-checked`; crash_random seeds 1-3 x 2, power_cut_at_every_point;
+regress 51,148 / 51,150, 0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed.
+
+**Dropped**: the split's probe loop written without a branch (each row's place stored, the count
+moved by the outcome: `~/.cache/a316/patches/dropped-split-branchless-loop.patch`, its last hunk):
+q10 +0.94 / +0.94%, q21 +1.28 / +1.30% against the `extend` of a filter (n4 against n5, two
+pairs; the same patch's `KeySet::word` change, kept, gave q15 -2.54%, q06 -2.22%, q04 -1.09%,
+q05 -0.6%).
+
+**Tests** (`tests/parallel_scan.rs`): `bitmap_quals_on_entries` gains two dense bitmaps (10% and
+6% of the rows) checked against sequential scans, before and after the transaction's own DELETE
+and an UPDATE moving rows into one's range, and that rows were passed over by key;
+`parallel_joins_match_serial` gains three joins probing 7 of 97 key values, two under total
+filters on later columns (checked against the serial plan and the row path) and one whose filter
+divides by zero at a late row (the error stays).
+
+**Left** (largest gaps to pgrust's PGO figures, plain n6 here, so about 8% less PGO-built): q10
+5.54 G against 4.33 (the lineitem scan's block iteration `Block::run_rows_to` is now its largest
+part, 18%; then the probe of every row by key, the joined rows' copies and hashing for the
+customer join, the per-worker external sort); q02 2.62 against 1.03 (serial: the 158,720-row build
+side's index fetches of partsupp by `ps_suppkey`, 1.6k instructions a fetch in
+`get_sorted_snap`, each made a full row and spilled in 8 batches, as PostgreSQL's plan does);
+q05 2.81 against 1.69 (orders lookups of lineitem); q21 5.26 against 4.71 (the semi and anti
+lookups: `Block::seek`, `StoredCmps::passes_with`, `Cursor::head`); q20 1.37 against PostgreSQL's
+0.44 (the outer `Seq Scan on part` is serial, heap-ordered, ~1.7k instructions a row; the SubPlan's
+8,332 runs half the query); q11 0.83 against 0.38 (row fetches by key and the serial row path);
+q14 1.39 against 0.68 (75k keyed fetches at ~2.3k each, the part hash build). The serial dense
+bitmap path (no workers) still decodes every row: `KeyedFill` wraps only the parallel chunks.
+EXPLAIN ANALYZE of q11 shows its HashAggregate as `Batches: 1  Memory Usage: 69kB` where
+PostgreSQL 18.6 shows `Batches: 5  Memory Usage: 8241kB  Disk Usage: 664kB` (the same rows; not
+this round's).
+
 ## Analytic CPU, round 14: correlated SubPlans run once a parameter value (agent 314)
 
 The standing (above, BENCH "Standing, 2026-11-24") put TPC-H q17 at 1.96x pgrust's instructions.

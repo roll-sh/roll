@@ -389,6 +389,60 @@ DELETE and VACUUM, 75.2 MB after VACUUM FULL (its bloat for these statements: 91
 | whole script without the three `string_agg(ctid::text ... ORDER BY id)` checks | 255.6 (UPDATE) | 359.5 |
 | the highest step's own peak, with the checks | 301 (n2 382, CHECKPOINT after the last check) | - |
 
+## Analytic CPU, round 15: dense bitmaps read by key, probes before the walk (2026-11-25, agent 316)
+
+HANDOFF "Analytic CPU, round 15" has what changed. Lane C, TPC-H SF1 (loaded by b0), agent 314's
+harness copied to `~/.cache/a316/bench/` (`tpair.sh`: per build a fresh server on a copy of the
+data, a warm-up run of each query, then each query once in its own perf window of the server's
+cgroup), plain dist builds (`tools/dist.sh`): **b0** origin's `541928f40` (cand/a314-2 landed),
+**n6** the candidate. One pair a hold, b0 n6 then n6 b0; lane.sh read 4.0-5.4 foreign cores, the
+pairs' own 1.5-2.3 (no pair met the 1.0 rule): instructions decide. Every result hash equal to
+b0's and to PostgreSQL's (the standing's), and the 22 plans' EXPLAIN (COSTS OFF) identical to
+b0's.
+
+| query | b0 / n6 pair 1 (G) | n6 / b0 pair 2 (G) | % per pair |
+|---|---|---|---|
+| q01 | 7.375 / 7.307 | 7.307 / 7.374 | -0.92, -0.92 |
+| q02 | 2.624 / 2.624 | 2.624 / 2.624 | -0.02, -0.01 |
+| q03 | 4.182 / 4.120 | 4.119 / 4.183 | -1.49, -1.53 |
+| q04 | 1.709 / 1.349 | 1.349 / 1.709 | -21.10, -21.09 |
+| q05 | 3.097 / 2.811 | 2.810 / 3.097 | -9.24, -9.26 |
+| q06 | 5.007 / 3.364 | 3.364 / 5.005 | -32.82, -32.79 |
+| q07 | 3.532 / 3.532 | 3.532 / 3.532 | -0.00, +0.01 |
+| q08 | 1.410 / 1.409 | 1.408 / 1.409 | -0.10, -0.09 |
+| q09 | 7.808 / 7.810 | 7.808 / 7.810 | +0.02, -0.03 |
+| q10 | 7.444 / 5.539 | 5.541 / 7.444 | -25.59, -25.56 |
+| q11 | 0.832 / 0.834 | 0.834 / 0.832 | +0.23, +0.22 |
+| q12 | 5.964 / 5.873 | 5.872 / 5.964 | -1.53, -1.54 |
+| q13 | 4.120 / 4.103 | 4.103 / 4.121 | -0.41, -0.43 |
+| q14 | 1.377 / 1.386 | 1.387 / 1.378 | +0.70, +0.65 |
+| q15 | 4.654 / 2.300 | 2.300 / 4.654 | -50.58, -50.57 |
+| q16 | 2.878 / 2.865 | 2.863 / 2.879 | -0.47, -0.57 |
+| q17 | 2.875 / 2.853 | 2.853 / 2.876 | -0.77, -0.79 |
+| q18 | 15.494 / 15.458 | 15.458 / 15.480 | -0.23, -0.14 |
+| q19 | 0.476 / 0.474 | 0.474 / 0.476 | -0.53, -0.54 |
+| q20 | 1.367 / 1.367 | 1.367 / 1.367 | -0.00, +0.02 |
+| q21 | 6.763 / 5.256 | 5.255 / 6.763 | -22.29, -22.30 |
+| q22 | 0.626 / 0.623 | 0.623 / 0.626 | -0.46, -0.49 |
+| all | 91.62 / 83.25 | 83.25 / 91.60 | -9.13, -9.12 |
+
+- q15 -50.6% (4.65 -> 2.30 G; pgrust PGO 2.95 in the standing), q06 -32.8%, q04 -21.1%, q05 -9.2%:
+  the dense bitmaps' rows passed over by key (q10 too, its orders side; q05's EXPLAIN shows a
+  nested loop into `orders_o_custkey_idx`, but the plan it runs reads orders through a dense
+  bitmap: `KeyedFill` is 5-6% of its profile, the rest of its gain the probes). q21 -22.3% (6.76 ->
+  5.26 G), q10 -25.6% (7.44 -> 5.54 G, both parts): the probes before the walk. q03 -1.5%, q12
+  -1.5%, q01 -0.9%: the walk inlined. q14 +0.7% (9 M: its keyed lineitem fetches and the part
+  hash; nothing it runs changed but the inlined decode), q11 +0.2%; the rest within +-0.6%.
+- Earlier builds, same pairs: **n2** (both changes, `decode_cols` and `walk_row` left to LLVM)
+  -7.27 / -7.29% on the 22 but q17 +5.7%, q12 +2.3%, q01 +2.0%, q18 +1.4% (both called, not
+  inlined: q01's decode 2,744 -> 2,978 samples); **n3** (`walk_row` inlined, the split decided
+  for the whole scan) -8.36 / -8.35%, q17 +1.1%; **n4** (`decode_cols` inlined) -8.93%.
+  **n5** against n4 (two pairs, eight queries): `KeySet::word` from two word loads, q15 -2.54 /
+  -2.54%, q06 -2.22 / -2.22%, q04 -1.09 / -1.08%, q05 -0.61 / -0.57% (kept); the split's probe
+  loop without a branch, q10 +0.94 / +0.94%, q21 +1.28 / +1.30% (dropped: n6 is n5 without it).
+- Peak anon+shmem over the pass 1,587-1,605 MB on both builds (the key set: 241k keys of 16 bytes
+  for q15, about 910k for q06, freed with the scan).
+
 ## Analytic CPU, round 14: correlated SubPlans run once a parameter value (2026-11-24, agent 314)
 
 HANDOFF "Analytic CPU, round 14" has what changed. Lane C, the TPC-H SF1 data and harness of
