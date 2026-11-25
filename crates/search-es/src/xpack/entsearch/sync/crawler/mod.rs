@@ -162,6 +162,9 @@ struct Stats {
     dropped_links: u64,
     skipped_origin_urls: u64,
     sitemap_errors: u64,
+    /// Pages some of whose extraction rules were dropped (past a page's cap on extracted bytes or
+    /// text visits).
+    extraction_dropped: u64,
     /// URLs checked against the crawl rules and robots.txt.
     checked_urls: u64,
     errors: Map,
@@ -568,6 +571,9 @@ impl Crawl<'_, '_> {
         m.insert("dropped_link_count".into(), n(s.dropped_links));
         m.insert("skipped_origin_url_count".into(), n(s.skipped_origin_urls));
         m.insert("sitemap_error_count".into(), n(s.sitemap_errors));
+        if s.extraction_dropped > 0 {
+            m.insert("extraction_rules_dropped_page_count".into(), n(s.extraction_dropped));
+        }
         m.insert("checked_url_count".into(), n(s.checked_urls));
         m.insert("error_count".into(), Value::Obj(s.errors.clone()));
         if !s.elastic_crawler_groups.is_empty() {
@@ -991,6 +997,9 @@ impl Crawl<'_, '_> {
             Ok(p) => p,
             Err(why) => return self.failed(src, &at, &why),
         };
+        if page.extraction_dropped > 0 {
+            self.stats.extraction_dropped += 1;
+        }
         // A canonical URL is honoured only once the crawl has fetched it and indexed it as
         // itself: then this page is one of its `additional_urls`, not a document of its own.
         // Until then the page is stored under its own URL, and the canonical one is queued,

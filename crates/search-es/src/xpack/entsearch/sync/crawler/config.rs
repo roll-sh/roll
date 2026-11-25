@@ -214,8 +214,9 @@ const DOMAIN_KEYS: &[&str] = &["url", "seed_urls", "sitemap_urls", "exclude_tags
 const MAX_RULESETS: usize = 100;
 const MAX_EXTRACTIONS: usize = 100;
 const MAX_URL_FILTERS: usize = 20;
-/// What a ruleset's regex (a URL filter's or a `url` rule's) may compile to.
-const REGEX_BYTES: usize = 256 << 10;
+/// Regexes the extraction rules of one crawl may hold (`regex` URL filters and `url` rules): they
+/// share [`RULES_BYTES`] with the crawl rules, each an equal share.
+const MAX_EXTRACTION_REGEXES: usize = 200;
 const MAX_DOMAINS: usize = 100;
 const MAX_LISTED: usize = 10_000;
 /// Crawl rules in one crawl, across its domains, and what their DFAs may hold: each rule gets an
@@ -297,20 +298,39 @@ fn compile_rule(origin: &str, r: &Value, at: &str, size_limit: usize) -> Result<
     Ok(CrawlRule { allow, dfa, describe: format!("{} {} {pattern}", if allow { "allow" } else { "deny" }, text("type")?) })
 }
 
-fn regex_of(pattern: &str, at: &str) -> Result<regex::Regex, String> {
+/// An extraction regex within its `share` of the rules' memory (half for its program, half for
+/// its lazy DFA's cache).
+fn regex_of(pattern: &str, at: &str, share: usize) -> Result<regex::Regex, String> {
     if pattern.len() > MAX_PATTERN {
         return Err(format!("{at}'s pattern is longer than {MAX_PATTERN} bytes"));
     }
     if needs_backtracking(pattern) {
         return Err(format!("{at}'s regex [{pattern}] uses look-around or a backreference, which roll's linear-time regex engine doesn't run"));
     }
-    regex::RegexBuilder::new(pattern).size_limit(REGEX_BYTES).dfa_size_limit(REGEX_BYTES).build().map_err(|e| format!("{at}'s regex [{pattern}] doesn't compile: {e}"))
+    regex::RegexBuilder::new(pattern).size_limit(share / 2).dfa_size_limit(share / 2).build().map_err(|e| match e {
+        regex::Error::CompiledTooBig(_) => format!("{at}'s regex [{pattern}] needs more than its share of the rules' memory ({} KiB): simplify it", share >> 10),
+        e => format!("{at}'s regex [{pattern}] doesn't compile: {e}"),
+    })
+}
+
+/// The regexes `snippet`'s extraction rulesets hold (`regex` URL filters and `url` rules).
+fn extraction_regexes(snippet: Option<&Value>) -> usize {
+    let list = |v: Option<&Value>| v.and_then(Value::as_array).cloned().unwrap_or_default();
+    let mut n = 0;
+    for d in list(snippet.and_then(|s| s.get("domains"))) {
+        for rs in list(d.get("extraction_rulesets")) {
+            n += list(rs.get("url_filters")).iter().filter(|f| f.get("type").and_then(Value::as_str) == Some("regex")).count();
+            n += list(rs.get("rules")).iter().filter(|r| r.get("source").and_then(Value::as_str) == Some("url")).count();
+        }
+    }
+    n
 }
 
 /// A domain's `extraction_rulesets` (Open Crawler's shape: `url_filters` of `type` and
 /// `pattern`, then `rules` of `action`, `field_name`, `selector`, `join_as`, `source` and, for
-/// `set`, `value`), validated; `counts` are the crawl's rulesets and rules so far.
-fn rulesets(v: &Value, at: &str, counts: &mut (usize, usize)) -> Result<Vec<Ruleset>, String> {
+/// `set`, `value`), validated; `counts` are the crawl's rulesets and rules so far, `share` what
+/// each regex may take of the rules' memory.
+fn rulesets(v: &Value, at: &str, counts: &mut (usize, usize), share: usize) -> Result<Vec<Ruleset>, String> {
     let Value::Arr(list) = v else { return Err(format!("[{at}] is an array")) };
     let mut out = Vec::with_capacity(list.len());
     for (i, rs) in list.iter().enumerate() {
@@ -344,7 +364,7 @@ fn rulesets(v: &Value, at: &str, counts: &mut (usize, usize)) -> Result<Vec<Rule
                     Some("begins") => return Err(format!("{at}: a [begins] pattern is a path, starting with /")),
                     Some("ends") => UrlFilter::Ends(pattern.to_string()),
                     Some("contains") => UrlFilter::Contains(pattern.to_string()),
-                    Some("regex") => UrlFilter::Regex(regex_of(pattern, &at)?),
+                    Some("regex") => UrlFilter::Regex(regex_of(pattern, &at, share)?),
                     Some(t) => return Err(format!("{at} has type [{t}]: begins, ends, contains or regex")),
                     None => return Err(format!("{at} needs a [type]")),
                 });
@@ -385,7 +405,7 @@ fn rulesets(v: &Value, at: &str, counts: &mut (usize, usize)) -> Result<Vec<Rule
             let selector = text("selector")?;
             let from = match text("source")? {
                 "html" => Source::Html(super::select::Selectors::parse(selector).map_err(|e| format!("{at}'s selector: {e}"))?),
-                "url" => Source::Url(regex_of(selector, &at)?),
+                "url" => Source::Url(regex_of(selector, &at, share)?),
                 s => return Err(format!("{at} has source [{s}]: html or url")),
             };
             rules.push(Extraction { field: field.to_string(), set, array, from });
@@ -447,7 +467,13 @@ pub fn plan(fields: &Fields, snippet: Option<&Value>, ceilings: &Ceilings) -> Re
     if total_rules > MAX_RULES {
         return Err(format!("the crawl has {total_rules} crawl rules: at most {MAX_RULES} across its domains"));
     }
-    let size_limit = (RULES_BYTES / total_rules.max(1)).min(1 << 20);
+    // Extraction regexes share the same memory: each regex, a crawl rule's DFA or an extraction
+    // regex, gets an equal share.
+    let regexes = extraction_regexes(snippet);
+    if regexes > MAX_EXTRACTION_REGEXES {
+        return Err(format!("the crawl's extraction rules have {regexes} regexes (regex URL filters and url rules): at most {MAX_EXTRACTION_REGEXES}"));
+    }
+    let size_limit = (RULES_BYTES / (total_rules + regexes).max(1)).min(1 << 20);
     let mut extraction_counts = (0usize, 0usize);
     let add_domain = |domains: &mut Vec<Domain>, origin: String| -> usize {
         match domains.iter().position(|d| d.origin == origin) {
@@ -516,7 +542,7 @@ pub fn plan(fields: &Fields, snippet: Option<&Value>, ceilings: &Ceilings) -> Re
                             domains[di].rules = out;
                         }
                         if let Some(r) = d.get("extraction_rulesets") {
-                            domains[di].extraction = std::sync::Arc::new(rulesets(r, &format!("{at}.extraction_rulesets"), &mut extraction_counts)?);
+                            domains[di].extraction = std::sync::Arc::new(rulesets(r, &format!("{at}.extraction_rulesets"), &mut extraction_counts, size_limit)?);
                         }
                     }
                 }
@@ -648,5 +674,22 @@ mod tests {
         let (_, cpu) = search_test_support::cpu_time(|| plan(&fields(&[]), Some(&rules(&[worst; 10])), &ceilings()));
         assert!(cpu < std::time::Duration::from_secs(5), "{cpu:?} of CPU to build the plan");
         assert!(snippet_problem(&obj(r#"{"domains":[{"url":"https://e.com","seed_urls":["https://other.com/"]}]}"#), &ceilings()).unwrap().contains("isn't on the domain"));
+    }
+
+    /// Extraction regexes share the crawl rules' memory: past their count a snippet is refused,
+    /// and with many of them each gets a share too small for a big pattern.
+    #[test]
+    fn extraction_regexes_share_the_rules_budget() {
+        let snippet = |rulesets: usize, filters: usize, pattern: &str| {
+            let fs = vec![format!(r#"{{"type":"regex","pattern":"{pattern}"}}"#); filters].join(",");
+            let rs = vec![format!(r#"{{"url_filters":[{fs}],"rules":[]}}"#); rulesets].join(",");
+            obj(&format!(r#"{{"domains":[{{"url":"https://example.com","extraction_rulesets":[{rs}]}}]}}"#))
+        };
+        let plan_of = |s: &Value| plan(&fields(&["https://example.com/"]), Some(s), &ceilings());
+        assert!(plan_of(&snippet(10, 20, "^/blog/[0-9]+$")).is_ok(), "200 small regexes fit");
+        let e = plan_of(&snippet(11, 19, "^/blog/[0-9]+$")).err().unwrap();
+        assert!(e.contains("209 regexes"), "{e}");
+        let e = plan_of(&snippet(10, 20, "\\\\w{100}")).err().unwrap();
+        assert!(e.contains("share of the rules' memory"), "{e}");
     }
 }

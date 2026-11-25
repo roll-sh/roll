@@ -14,8 +14,12 @@
 //! Matching walks the elements once, in document order. Each element carries, per compound of
 //! the list, whether the selector up to that compound matched it, whether it matched an ancestor
 //! (inherited from the parent) and whether it matched an earlier sibling (carried from the
-//! previous one), so a combinator is one bit test: the work is the elements times the compounds,
-//! whatever the page's shape.
+//! previous one), so a combinator is one bit test and nothing backtracks. What a condition costs
+//! depends on the element (its attributes, their lengths), so the walk counts the bytes it
+//! touches and asks its caller whether to stop at every element and after every [`STEP`] of
+//! them ([`Selectors::select`]): a page's attributes can't hold a match past its deadline.
+//! Attribute values are compared in place, and ` i` folds ASCII only, as Selectors Level 4
+//! defines it.
 
 /// The longest selector text taken.
 pub const MAX_TEXT: usize = 1024;
@@ -25,6 +29,8 @@ pub const MAX_SELECTORS: usize = 16;
 pub const MAX_COMPOUNDS: usize = 32;
 /// Simple selectors in one compound.
 pub const MAX_SIMPLE: usize = 16;
+/// Bytes of attributes a match touches between two asks of its caller's `stop`.
+pub const STEP: u64 = 64 << 10;
 
 /// A parsed selector list.
 #[derive(Debug, Clone)]
@@ -95,9 +101,43 @@ pub struct Element<'a> {
 }
 
 impl Element<'_> {
-    fn attr(&self, name: &str) -> Option<&str> {
-        self.attrs.iter().find(|(n, _)| *n == name).map(|(_, v)| *v)
+    /// Attribute `name`'s value; the scan is spent from `work`.
+    fn attr(&self, name: &str, work: &mut Work<'_>) -> Result<Option<&str>, TimedOut> {
+        let at = self.attrs.iter().position(|(n, _)| *n == name);
+        work.spend(at.map_or(self.attrs.len(), |i| i + 1) as u64)?;
+        Ok(at.map(|i| self.attrs[i].1))
     }
+}
+
+/// What a match has touched, and the caller's `stop`, asked every [`STEP`].
+struct Work<'a> {
+    used: u64,
+    next: u64,
+    stop: &'a mut dyn FnMut() -> bool,
+}
+
+impl Work<'_> {
+    fn spend(&mut self, n: u64) -> Result<(), TimedOut> {
+        self.used = self.used.saturating_add(n);
+        if self.used >= self.next {
+            self.next = self.used.saturating_add(STEP);
+            if (self.stop)() {
+                return Err(TimedOut);
+            }
+        }
+        Ok(())
+    }
+
+    fn ask(&mut self) -> Result<(), TimedOut> {
+        match (self.stop)() {
+            true => Err(TimedOut),
+            false => Ok(()),
+        }
+    }
+}
+
+fn eq(a: &[u8], b: &[u8], fold: bool) -> bool {
+    if fold { a.eq_ignore_ascii_case(b) } else { a == b }
 }
 
 impl Selectors {
@@ -142,9 +182,11 @@ impl Selectors {
     }
 
     /// The elements of `elements` (in document order, each with its parent's and previous
-    /// sibling's position in the slice) the list matches, in document order. `stop` is asked
-    /// every so often and ends the walk ([`TimedOut`]) when it says so.
+    /// sibling's position in the slice) the list matches, in document order. `stop` is asked at
+    /// every element and after every [`STEP`] bytes of attributes touched, and ends the walk
+    /// ([`TimedOut`]) when it says so.
     pub fn select(&self, elements: &[(Element<'_>, Option<usize>, Option<usize>)], mut stop: impl FnMut() -> bool) -> Result<Vec<usize>, TimedOut> {
+        let mut work = Work { used: 0, next: STEP, stop: &mut stop };
         // Bit offsets of each selector's compounds in one word.
         let mut offsets = Vec::with_capacity(self.list.len());
         let mut n = 0u32;
@@ -155,9 +197,7 @@ impl Selectors {
         let (mut matched, mut above, mut before) = (vec![0u32; elements.len()], vec![0u32; elements.len()], vec![0u32; elements.len()]);
         let mut out = Vec::new();
         for (k, (el, parent, prev)) in elements.iter().enumerate() {
-            if k % 1024 == 1023 && stop() {
-                return Err(TimedOut);
-            }
+            work.ask()?;
             let at_parent = parent.map_or(0, |p| matched[p]);
             let inherited = parent.map_or(0, |p| matched[p] | above[p]);
             let at_prev = prev.map_or(0, |q| matched[q]);
@@ -181,7 +221,7 @@ impl Selectors {
                             }
                         }
                     };
-                    if ok && compound.matches(el) {
+                    if ok && compound.matches(el, &mut work)? {
                         m |= bit;
                         if i + 1 == sel.len() {
                             subject = true;
@@ -199,30 +239,74 @@ impl Selectors {
 }
 
 impl Compound {
-    fn matches(&self, el: &Element<'_>) -> bool {
-        self.tag.as_deref().is_none_or(|t| t == el.tag) && self.simple.iter().all(|s| s.matches(el))
+    fn matches(&self, el: &Element<'_>, work: &mut Work<'_>) -> Result<bool, TimedOut> {
+        if self.tag.as_deref().is_some_and(|t| t != el.tag) {
+            return Ok(false);
+        }
+        for s in &self.simple {
+            if !s.matches(el, work)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 }
 
 impl Simple {
-    fn matches(&self, el: &Element<'_>) -> bool {
-        match self {
-            Simple::Id(id) => el.attr("id") == Some(id.as_str()),
-            Simple::Class(c) => el.attr("class").is_some_and(|v| v.split_ascii_whitespace().any(|w| w == c)),
+    fn matches(&self, el: &Element<'_>, work: &mut Work<'_>) -> Result<bool, TimedOut> {
+        Ok(match self {
+            Simple::Id(id) => el.attr("id", work)? == Some(id.as_str()),
+            Simple::Class(c) => match el.attr("class", work)? {
+                Some(v) => {
+                    work.spend(v.len() as u64)?;
+                    v.split_ascii_whitespace().any(|w| w == c)
+                }
+                None => false,
+            },
             Simple::Attr { name, op } => {
-                let Some(v) = el.attr(name) else { return false };
-                let Some((op, want, fold)) = op else { return true };
-                let (v, want) = match fold {
-                    true => (v.to_lowercase(), want.to_lowercase()),
-                    false => (v.to_string(), want.clone()),
-                };
+                let Some(v) = el.attr(name, work)? else { return Ok(false) };
+                let Some((op, want, fold)) = op else { return Ok(true) };
+                let (v, want, fold) = (v.as_bytes(), want.as_bytes(), *fold);
                 match op {
-                    AttrOp::Equals => v == want,
-                    AttrOp::Word => !want.is_empty() && v.split_ascii_whitespace().any(|w| w == want),
-                    AttrOp::Dash => v == want || v.starts_with(&format!("{want}-")),
-                    AttrOp::Prefix => !want.is_empty() && v.starts_with(&want),
-                    AttrOp::Suffix => !want.is_empty() && v.ends_with(&want),
-                    AttrOp::Substring => !want.is_empty() && v.contains(&want),
+                    AttrOp::Equals => {
+                        work.spend(want.len() as u64)?;
+                        eq(v, want, fold)
+                    }
+                    AttrOp::Word => {
+                        work.spend(v.len() as u64)?;
+                        !want.is_empty() && v.split(|b| b.is_ascii_whitespace()).any(|w| eq(w, want, fold))
+                    }
+                    AttrOp::Dash => {
+                        work.spend(want.len() as u64 + 1)?;
+                        eq(v, want, fold) || (v.len() > want.len() && v[want.len()] == b'-' && eq(&v[..want.len()], want, fold))
+                    }
+                    AttrOp::Prefix => {
+                        work.spend(want.len() as u64)?;
+                        !want.is_empty() && v.len() >= want.len() && eq(&v[..want.len()], want, fold)
+                    }
+                    AttrOp::Suffix => {
+                        work.spend(want.len() as u64)?;
+                        !want.is_empty() && v.len() >= want.len() && eq(&v[v.len() - want.len()..], want, fold)
+                    }
+                    AttrOp::Substring if want.is_empty() || want.len() > v.len() => false,
+                    AttrOp::Substring if !fold => {
+                        // Two-way search: linear in the value and the needle.
+                        work.spend((v.len() + want.len()) as u64)?;
+                        std::str::from_utf8(v).ok().zip(std::str::from_utf8(want).ok()).is_some_and(|(v, w)| v.contains(w))
+                    }
+                    AttrOp::Substring => {
+                        // Folded: each place the needle could start costs its length, spent as
+                        // it goes, so a long value can't run past the caller's stop.
+                        let mut found = false;
+                        for start in 0..=v.len() - want.len() {
+                            work.spend(want.len() as u64)?;
+                            if v[start].eq_ignore_ascii_case(&want[0]) && v[start..start + want.len()].eq_ignore_ascii_case(want) {
+                                found = true;
+                                break;
+                            }
+                        }
+                        found
+                    }
                 }
             }
             Simple::Root => el.is_root,
@@ -237,9 +321,9 @@ impl Simple {
                 }
             }
             Simple::Only(of_type) => if *of_type { el.type_count == 1 } else { el.count == 1 },
-            Simple::Not(s) => !s.matches(el),
+            Simple::Not(s) => !s.matches(el, work)?,
             Simple::NotTag(t) => el.tag != t,
-        }
+        })
     }
 }
 
@@ -523,6 +607,30 @@ mod tests {
         assert_eq!(sel("div :only-of-type"), [5]);
         assert_eq!(sel("[class|=x], [class*=d]"), [4]);
         assert_eq!(sel("html body div p"), [3, 4]);
-        assert!(Selectors::parse("p").unwrap().select(&els, || true).is_ok(), "fewer elements than a check");
+        // A stop that fires ends the match however few the elements are.
+        assert_eq!(Selectors::parse("p").unwrap().select(&els, || true), Err(TimedOut));
+    }
+
+    /// A page of a few elements can't hold a match past its caller's stop: a huge attribute's
+    /// folded substring search asks it as it goes, and ` i` folds ASCII only.
+    #[test]
+    fn a_huge_attribute_meets_the_stop() {
+        let huge = "b".repeat(9 << 20);
+        let attrs = [("data-x", huge.as_str())];
+        let els = vec![(Element { tag: "div", attrs: &attrs, is_root: true, is_empty: true, index: 1, count: 1, type_index: 1, type_count: 1 }, None, None)];
+        let sel = Selectors::parse("[data-x*=a i]").unwrap();
+        let mut asked = 0;
+        let r = sel.select(&els, || {
+            asked += 1;
+            asked > 3
+        });
+        assert_eq!(r, Err(TimedOut), "stopped inside the one element");
+        assert!(asked < 10, "asked {asked} times: at the element, then every {STEP} bytes");
+        let fold = [("lang", "EN-us")];
+        let el = vec![(Element { tag: "p", attrs: &fold, is_root: true, is_empty: true, index: 1, count: 1, type_index: 1, type_count: 1 }, None, None)];
+        assert_eq!(Selectors::parse("[lang|=en i]").unwrap().select(&el, || false), Ok(vec![0]));
+        let dotted = [("title", "İSTANBUL")];
+        let el = vec![(Element { tag: "p", attrs: &dotted, is_root: true, is_empty: true, index: 1, count: 1, type_index: 1, type_count: 1 }, None, None)];
+        assert_eq!(Selectors::parse("[title^='i' i]").unwrap().select(&el, || false), Ok(vec![]), "ASCII folding: İ isn't i");
     }
 }

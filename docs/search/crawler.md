@@ -224,8 +224,8 @@ crawls is the owner's, per site, so neither another cluster nor another host of 
 buys more. Deleting a cluster deletes its verifications (when it is tombstoned, purged or deleted
 outright); a restored cluster starts without them and checks again.
 
-The token isn't kept anywhere but the rows: it is derived, HMAC-SHA256 of `<identity>\n<site>`,
-the identity being the cluster's tenant (`sites::owner_of`: its home project, else its person
+The token isn't kept anywhere but the rows: it is derived, HMAC-SHA256 of the identity's length
+(8 bytes), the identity and the site, the identity being the cluster's tenant (`sites::owner_of`: its home project, else its person
 owner, else the cluster itself, or the operator's for the operator's own clusters), under a key
 used for nothing else, derived (HKDF, its own label) from the deployment key, or on a
 single node without one from the node's own key (`<home>/key`), and cut to 22 base64url characters
@@ -239,6 +239,10 @@ token from its row:
 - Rotating the deployment key changes every derived token. New starts get the new one; a verified
   row keeps the token it was proven with, re-checked against it, until it lapses or is deleted,
   and then the tenant publishes the new one.
+- A cluster whose tenant changes (handed to a project, its home recorded, or moved between
+  projects) keeps its rows under the tenant that made them, so its verifications hold, but the new
+  tenant's other clusters get the new tenant's token: a proof never moves from one tenant to
+  another.
 
 A verification is re-checked every 30 days (claimed in the catalogue first, so one node of a fleet
 checks it; the claim is kept apart from the result, so a node that dies mid-check only delays it).
@@ -348,8 +352,16 @@ advanced snippet (and carried over by `roll search crawler import`):
 - A field name is lowercase letters, digits and `_`, and never one of the fields every page has,
   so a rule can't overwrite them; a rule's field wins over the page's own `meta.elastic` and
   `data-elastic-name` fields, and a later rule's over an earlier one's.
-- Per page, a rule takes at most 100 values of 32 KiB each, and all its rules together 1 MiB. A
-  crawl has at most 100 rulesets and 100 rules, a ruleset at most 20 URL filters.
+- Per page, a rule takes at most 100 values of 32 KiB each, and all its rules together 1 MiB,
+  charged to the request breaker as they're taken. The text of the elements rules pick shares one
+  budget of node visits per page (four per node of the page), so rules picking nested elements
+  can't walk a subtree again and again. Past the 1 MiB or the visits, the page's remaining rules
+  are dropped: the page is indexed with what was extracted, and the job's metadata counts the
+  pages (`extraction_rules_dropped_page_count`; `crawl-test` answers `extraction_rules_dropped`).
+- A crawl has at most 100 rulesets and 100 rules, a ruleset at most 20 URL filters, and the crawl
+  at most 200 regexes in its rules (`regex` filters and `url` rules). They share the crawl rules'
+  10 MiB: every regex, a crawl rule's or an extraction rule's, gets an equal share, and one that
+  needs more fails validation.
 
 `html` selectors are CSS Selectors Level 3 without what needs more than an element's ancestors and
 earlier siblings (`crawler/select.rs`, roll's own): types, `#id`, `.class`, attribute selectors
@@ -358,11 +370,15 @@ earlier siblings (`crawler/select.rs`, roll's own): types, `#id`, `.class`, attr
 the four combinators. A selector is at most 1 KiB, 16 selectors in a list, 32 compound parts across
 it and 16 conditions on one element; `:has()`, states (`:hover`), pseudo-elements, escapes and
 XPath (which Open Crawler also accepts) fail validation, each with its reason. A page's elements are
-indexed once (charged to the request breaker, like its nodes), and a selector list is matched in
-one pass: each element inherits from its parent which parts matched an ancestor and from its
-previous sibling which matched an earlier sibling, so every combinator is a bit test and the work
-is the elements times the parts, never backtracking. A page whose rules can't finish by its parse
-deadline fails. `url` selectors and `regex` filters are regexes with the same linear-time engine
+indexed once (charged to the request breaker, like its nodes, with their attributes), and a
+selector list is matched in one pass: each element inherits from its parent which parts matched an
+ancestor and from its previous sibling which matched an earlier sibling, so every combinator is a
+bit test and nothing backtracks. What a condition costs depends on the attribute it reads, so the
+match counts the bytes it touches; attribute values are compared in place, and ` i` folds ASCII
+only (Selectors Level 4's definition), allocating nothing. The deadline is checked between rules,
+at every element a selector looks at, after every 64 KiB of attributes touched (so one huge
+attribute can't hold a match), and as an element's text is gathered: a page whose rules can't
+finish by its parse deadline fails, `crawl-test`'s too. `url` selectors and `regex` filters are regexes with the same linear-time engine
 as crawl rules (no look-around or backreferences).
 
 ## Purge
@@ -502,7 +518,9 @@ to see why pages are missing.
 | Every rolld argument naming a host roll serves reaches `roll.crawler.fleet_names` | unit test in `rolld/src/served_names.rs` |
 | The derived token is the same after a delete and a new start | `search-control/tests/control.rs` (`crawler_verifications_are_each_clusters`) |
 | Extraction rules end to end: a URL filter, `extract` as a string and an array, `set`, a URL group | `crates/search-es/tests/crawler.rs` (`extraction_rules_fill_fields`) |
-| Selector parsing bounds and one-pass matching | unit tests in `crawler/select.rs` |
+| Selector parsing bounds and one-pass matching; a huge attribute on a page of a few elements meets the deadline | unit tests in `crawler/select.rs` |
+| Extraction regexes share the crawl rules' budget (too many, or too big for their share, are refused) | unit test in `crawler/config.rs` |
+| A tenant change carries no proof across owners | `search-control/tests/control.rs` (`crawler_site_tokens_follow_the_clusters_project`) |
 | The routes' catalogue rows; the MCP tools | `rolld/tests/auth.rs`; docs/mcp.md and `pnpm test:mcp-sweep` |
 | The dashboard's crawl box | `apps/dashboard/src/components/search/connectors.test.tsx` |
 | `roll search crawler import` | `roll-cli/tests/search.rs` |

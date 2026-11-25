@@ -365,8 +365,10 @@ pub struct Page {
     pub nofollow: bool,
     /// `<meta class="elastic">` and `data-elastic-name` fields.
     pub fields: Vec<(String, String)>,
-    /// What the domain's extraction rules found ([`Dom::extract`]).
+    /// What the domain's extraction rules found ([`Dom::extract`]), and how many of them were
+    /// dropped (past a page's cap on extracted bytes or text visits).
     pub extracted: Vec<(String, Extracted)>,
+    pub extraction_dropped: usize,
 }
 
 /// What an extraction rule puts in its field: a string (`join_as: string`) or an array.
@@ -380,8 +382,44 @@ pub enum Extracted {
 const MAX_MATCHES: usize = 100;
 const MAX_VALUE: usize = 32 << 10;
 const MAX_EXTRACTED: usize = 1 << 20;
-/// What indexing an element for selectors costs the breaker.
+/// What indexing an element for selectors costs the breaker, and each of its attributes.
 const SELECT_COST: u64 = 160;
+const ATTR_COST: u64 = 40;
+/// Nodes the text of a page's extracted elements may visit, per node of the page: hits that
+/// nest (a `div` in a `div`) share them, so rules can't walk a big subtree again and again.
+const VISITS_PER_NODE: u64 = 4;
+const MIN_VISITS: u64 = 100_000;
+
+/// Why [`Dom::text_in`] stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextStop {
+    Visits,
+    Deadline,
+}
+
+/// The nodes a page's extraction rules may still visit, and their deadline.
+struct Visits {
+    left: u64,
+    since: u32,
+    deadline: std::time::Instant,
+}
+
+impl Visits {
+    fn visit(&mut self) -> Result<(), TextStop> {
+        if self.left == 0 {
+            return Err(TextStop::Visits);
+        }
+        self.left -= 1;
+        self.since += 1;
+        if self.since >= 1024 {
+            self.since = 0;
+            if std::time::Instant::now() >= self.deadline {
+                return Err(TextStop::Deadline);
+            }
+        }
+        Ok(())
+    }
+}
 
 /// Fields Open Crawler's documents always have (`Constants::RESERVED_FIELD_NAMES`): a page's
 /// own meta tags can't set them.
@@ -464,6 +502,12 @@ impl Dom {
     /// ancestor includes it when `transform` (`ContentEngine::Transformer`). Stops gathering
     /// past `max` bytes.
     fn text(&self, from: usize, skip: &[String], transform: bool, max: usize) -> String {
+        self.text_in(from, skip, transform, max, None).unwrap_or_default()
+    }
+
+    /// [`Dom::text`] within `visits` (a page's extraction rules share them): `Err` when they're
+    /// spent or their deadline passes before the text is gathered.
+    fn text_in(&self, from: usize, skip: &[String], transform: bool, max: usize, mut visits: Option<&mut Visits>) -> Result<String, TextStop> {
         enum Step {
             Node(usize, usize, bool),
             Space,
@@ -479,6 +523,9 @@ impl Dom {
         while let Some(step) = stack.pop() {
             if out.len() > max + 1024 {
                 break;
+            }
+            if let Some(v) = visits.as_deref_mut() {
+                v.visit()?;
             }
             let (i, depth, include) = match step {
                 Step::Space => {
@@ -534,7 +581,7 @@ impl Dom {
             }
             stack.push(Step::Space);
         }
-        squish(&out)
+        Ok(squish(&out))
     }
 
     /// The page at `url`, read within `limits`; `exclude_tags` are the domain's.
@@ -687,21 +734,29 @@ impl Dom {
     }
 
     /// The fields `rulesets` (those whose URL filters take `url`) extract from this page, later
-    /// rules replacing earlier ones' values of a field. Selectors are matched in one pass each
-    /// ([`super::select`]), and indexing the elements for them is charged to `held` first; a
-    /// page whose rules can't finish by `deadline` fails.
-    pub fn extract(&self, url: &Link, rulesets: &[super::config::Ruleset], held: &mut Reservation, deadline: std::time::Instant) -> Result<Vec<(String, Extracted)>, String> {
+    /// rules replacing earlier ones' values of a field, and how many rules were dropped. Selectors
+    /// are matched in one pass each ([`super::select`]); indexing the elements for them, and each
+    /// value as it's taken, are charged to `held`. The deadline is checked between rules, at every
+    /// element a selector looks at and as an element's text is gathered: a page whose rules can't
+    /// finish by `deadline` fails. The text of hits shares one budget of node visits (a few per
+    /// node of the page), and the values one [`MAX_EXTRACTED`]: past either, the remaining rules
+    /// are dropped (counted, so the job says so).
+    pub fn extract(&self, url: &Link, rulesets: &[super::config::Ruleset], held: &mut Reservation, deadline: std::time::Instant) -> Result<(Vec<(String, Extracted)>, usize), String> {
         use super::config::Source;
+        let late = || "the page's extraction rules ran out of time".to_string();
         let rules: Vec<&super::config::Extraction> = rulesets.iter().filter(|r| r.applies(url)).flat_map(|r| &r.rules).collect();
         let mut out: Vec<(String, Extracted)> = Vec::new();
         if rules.is_empty() {
-            return Ok(out);
+            return Ok((out, 0));
         }
         // The elements, indexed once for every selector, when a rule has one.
         let (order, info) = match rules.iter().any(|r| matches!(r.from, Source::Html(_))) {
             true => {
                 held.add(self.nodes.len() as u64 * SELECT_COST, "extraction rules").map_err(|e| e.reason().to_string())?;
-                self.selectable()
+                let (order, info) = self.selectable();
+                let attrs: u64 = order.iter().map(|n| self.element(*n).map_or(0, |(_, a)| a.len() as u64)).sum();
+                held.add(attrs * ATTR_COST, "extraction rules").map_err(|e| e.reason().to_string())?;
+                (order, info)
             }
             false => (Vec::new(), Vec::new()),
         };
@@ -715,15 +770,28 @@ impl Dom {
                 (super::select::Element { tag, attrs: a, is_root: i.is_root, is_empty: i.empty, index: i.index, count: i.count, type_index: i.type_index, type_count: i.type_count }, i.parent, i.prev)
             })
             .collect();
+        let mut visits = Visits { left: (self.nodes.len() as u64 * VISITS_PER_NODE).max(MIN_VISITS), since: 0, deadline };
         let mut total = 0usize;
-        for rule in rules {
+        let count = rules.len();
+        for (r, rule) in rules.into_iter().enumerate() {
+            if std::time::Instant::now() >= deadline {
+                return Err(late());
+            }
+            let dropped = count - r;
             let (found, mut values) = match &rule.from {
                 Source::Html(sel) => {
-                    let hits = sel.select(&els, || std::time::Instant::now() >= deadline).map_err(|_| "the page's extraction rules ran out of time".to_string())?;
-                    let values = match rule.set {
-                        Some(_) => Vec::new(),
-                        None => hits.iter().take(MAX_MATCHES).map(|k| limit_bytes(self.text(order[*k], &[], false, MAX_VALUE), MAX_VALUE)).filter(|t| !t.is_empty()).collect(),
-                    };
+                    let hits = sel.select(&els, || std::time::Instant::now() >= deadline).map_err(|_| late())?;
+                    let mut values = Vec::new();
+                    if rule.set.is_none() {
+                        for k in hits.iter().take(MAX_MATCHES) {
+                            match self.text_in(order[*k], &[], false, MAX_VALUE, Some(&mut visits)) {
+                                Ok(t) if t.is_empty() => {}
+                                Ok(t) => values.push(limit_bytes(t, MAX_VALUE)),
+                                Err(TextStop::Deadline) => return Err(late()),
+                                Err(TextStop::Visits) => return Ok((out, dropped)),
+                            }
+                        }
+                    }
                     (!hits.is_empty(), values)
                 }
                 Source::Url(re) => {
@@ -738,17 +806,19 @@ impl Dom {
             if values.is_empty() {
                 continue;
             }
-            total += values.iter().map(String::len).sum::<usize>();
-            if total > MAX_EXTRACTED {
-                break;
+            let bytes: usize = values.iter().map(String::len).sum();
+            if total + bytes > MAX_EXTRACTED {
+                return Ok((out, dropped));
             }
+            total += bytes;
+            held.add(bytes as u64, "extracted fields").map_err(|e| e.reason().to_string())?;
             let value = if rule.array { Extracted::Many(values) } else { Extracted::One(values.join(" ")) };
             match out.iter().position(|(f, _)| *f == rule.field) {
                 Some(i) => out[i].1 = value,
                 None => out.push((rule.field.clone(), value)),
             }
         }
-        Ok(out)
+        Ok((out, 0))
     }
 }
 
@@ -778,7 +848,7 @@ fn set_field(fields: &mut Vec<(String, String)>, name: &str, v: String) {
 pub fn read_page(html: &str, held: Reservation, url: &Link, exclude_tags: &[String], extraction: &[super::config::Ruleset], limits: &Limits, deadline: std::time::Instant) -> Result<(Page, Reservation), String> {
     let (dom, mut held) = parse(html, held, deadline)?;
     let mut page = dom.read(url, exclude_tags, limits);
-    page.extracted = dom.extract(url, extraction, &mut held, deadline)?;
+    (page.extracted, page.extraction_dropped) = dom.extract(url, extraction, &mut held, deadline)?;
     Ok((page, held))
 }
 

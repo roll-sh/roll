@@ -165,6 +165,9 @@ pub async fn test(cluster: &Cluster, connector: Option<&str>, url: &str) -> Resu
         }
     };
     answer.insert("noindex".into(), page.noindex.into());
+    if page.extraction_dropped > 0 {
+        answer.insert("extraction_rules_dropped".into(), (page.extraction_dropped as i64).into());
+    }
     answer.insert("nofollow".into(), page.nofollow.into());
     if let Some(c) = &page.canonical {
         answer.insert("canonical".into(), c.as_str().into());

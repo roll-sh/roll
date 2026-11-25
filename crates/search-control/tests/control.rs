@@ -5146,6 +5146,28 @@ async fn crawler_site_tokens_follow_the_clusters_project() {
     let (a1, a2, b1) = (token(ids[0].clone()).await, token(ids[1].clone()).await, token(ids[2].clone()).await);
     assert_eq!(a1, a2, "one project's clusters share the site's token");
     assert_ne!(a1, b1, "another project's cluster gets its own");
+
+    // A tenant change carries no proof across owners: alice's cluster verified an origin as hers
+    // (its row keeps that owner); handed to prj_a, the project's clusters get prj_a's own token,
+    // never reusing hers, and hers keeps the row it proved.
+    use reqwest::Method;
+    let site = FakeSite::start().await;
+    let x = e.ok_as(Some("alice"), Method::POST, "/v1/search/clusters", Some(json!({"name": "alice-x"}))).await["id"].as_str().unwrap().to_string();
+    let start = |who: Option<&'static str>, id: String| {
+        let (e, origin) = (&e, site.url("/"));
+        async move { e.ok_as(who, Method::POST, &format!("/v1/search/clusters/{id}/site-verifications"), Some(json!({"origin": origin}))).await }
+    };
+    let hers = start(Some("alice"), x.clone()).await;
+    let her_token = hers["file"]["content"].as_str().unwrap().to_string();
+    site.set(verify_file(), 200, &[], &her_token);
+    let check = format!("/v1/search/clusters/{x}/site-verifications/{}/check", urlencoding::encode(hers["site"].as_str().unwrap()));
+    assert_eq!(e.ok_as(Some("alice"), Method::POST, &check, Some(json!({}))).await["status"], "verified");
+    e.control.store.set_project(&x, Some("prj_a")).unwrap();
+    let (p0, p1) = (start(None, ids[0].clone()).await, start(None, ids[1].clone()).await);
+    let project_token = p0["file"]["content"].as_str().unwrap().to_string();
+    assert_eq!(p1["file"]["content"].as_str(), Some(project_token.as_str()), "the project's own token in both");
+    assert_ne!(project_token, her_token, "never alice's, though her verified cluster is in the project now");
+    assert_eq!(start(None, x).await["status"], "verified", "her cluster keeps the row it proved");
 }
 
 /// A site of six pages on loopback.
