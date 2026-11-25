@@ -411,7 +411,7 @@ async fn shell(api: &Api, preview: &str, service: Option<&str>) -> anyhow::Resul
         }
     });
     let raw = crate::apps::term::Raw::enter();
-    let mut winch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
+    let mut winch = crate::apps::term::Resizes::new()?;
     let mut screen = screen;
     // The shell ends when its screen does (its `exit`); the end of stdin (keys from a pipe) only
     // stops the keys.
@@ -427,7 +427,7 @@ async fn shell(api: &Api, preview: &str, service: Option<&str>) -> anyhow::Resul
                 }
                 None => typing = false,
             },
-            _ = winch.recv() => {
+            _ = winch.next() => {
                 if let Some((c, r)) = crate::apps::term::size() {
                     let _ = api.post(&format!("{base}/resize"), json!({ "cols": c, "rows": r })).await;
                 }

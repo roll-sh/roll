@@ -841,6 +841,13 @@ impl Engine {
             row.last_active_at = row.last_active_at.max(0);
         })?;
         self.store.touch(id)?;
+        // Under its cap again: what was kept down may wake (as its next converge would let it).
+        if self.store.runtime_fact::<bool>(id, "held_down")?.is_some() {
+            for svc in self.store.services(id)? {
+                self.apps.hold_down(id, &svc.name, false).await.map_err(|e| Error::Conflict(format!("{} is still kept down: {e:#}", svc.name)))?;
+            }
+            self.store.set_runtime_fact::<bool>(id, "held_down", None)?;
+        }
         for svc in self.store.services(id)? {
             if let Err(e) = self.apps.wake(id, &svc.name).await {
                 return Err(Error::Conflict(format!("{} didn't start: {e:#}", svc.name)));

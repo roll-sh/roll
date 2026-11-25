@@ -77,6 +77,10 @@ pub struct Config {
     pub interval: Duration,
     /// How often branches' sizes and costs are read again.
     pub usage_every: Duration,
+    /// How often a settled sleeping preview goes through a whole converge (its secrets
+    /// environment's 24 h lease renewed, its base's links followed, its data checked); in between,
+    /// only its usage is read, every `usage_every`.
+    pub settled_every: Duration,
     /// Where services reach roll's mail catcher (`host:port` as a client on this node writes it;
     /// containers get it rewritten). `None`: no catcher, and previews' mail fails.
     pub mail: Option<String>,
@@ -97,6 +101,7 @@ impl Default for Config {
             port: None,
             interval: Duration::from_secs(15),
             usage_every: Duration::from_secs(300),
+            settled_every: Duration::from_secs(3600),
             mail: None,
             otlp: None,
             routes_every: Duration::from_secs(60),
@@ -216,6 +221,8 @@ pub struct Engine {
     /// When this process started, as Docker's `--since` takes it: a follower's first start.
     started_stamp: String,
     usage_read: Mutex<HashMap<String, i64>>,
+    /// When each preview last went through a whole converge to its end (ms).
+    converged_at: Mutex<HashMap<String, i64>>,
     /// What each preview's services used, read at (ms): `GET …/metrics` reads them again only after
     /// [`METRICS_FOR`], however many sheets poll.
     metrics_read: Mutex<HashMap<String, (i64, Vec<crate::ServiceMetrics>)>>,
@@ -315,6 +322,7 @@ impl Engine {
 
             git_report: std::sync::OnceLock::new(),
             usage_read: Mutex::new(HashMap::new()),
+            converged_at: Mutex::new(HashMap::new()),
             metrics_read: Mutex::new(HashMap::new()),
             errors_read: Mutex::new(HashMap::new()),
             error_counts_read: Mutex::new(HashMap::new()),

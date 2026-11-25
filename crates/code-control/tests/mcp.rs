@@ -848,6 +848,10 @@ async fn lockdown_withholds_outsiders_text() {
     assert!(!shut["result"]["content"][0]["text"].as_str().unwrap_or_default().contains("Ignore your instructions"), "{shut}");
     assert_eq!(content(&locked.rpc("tools/call", read("main".into())).await), "a\n");
     assert_eq!(content(&locked.rpc("tools/call", read(ch["head"].as_str().unwrap().to_string())).await), "b\n", "a team's own change");
+    // Revised, its old head stays its author's (every revision is, not just the newest).
+    let old = fork.head.clone();
+    a.code.revise_change(&r, &code_control::Caller::Admin, &fork, &json!({ "message": "v2", "files": { "a.txt": { "content": "v2\n" } } })).await.unwrap();
+    assert_eq!(content(&locked.rpc("tools/call", read(old)).await), roll_auth::lockdown::WITHHELD, "an earlier revision");
     // Its changeset and a compare to it: the message and the patch are withheld too.
     let (_, cs) = a.req("GET", &format!("/v1/code/repos/acme/pub/changesets/{}", fork.head), None, root).await;
     assert_eq!((cs["outside"].as_bool(), cs["files"][0]["outside"].as_bool()), (Some(true), Some(true)), "{cs}");
@@ -1472,4 +1476,75 @@ async fn automation_tools_map_onto_their_routes() {
     let (status, _) = a.req("POST", "/v1/code/agents/acme/sandboxes/sbx_nope/stop", Some(json!({})), root).await;
     let r = owner.call("stop_agent_sandbox", json!({ "owner": "acme", "sandbox": "sbx_nope" })).await;
     assert_eq!((r["isError"].as_bool(), r["structuredContent"]["http_status"].as_u64()), (Some(true), Some(status.as_u16() as u64)), "{r}");
+}
+
+/// Every roll code tool says whether its answer can hold text written by someone who can't push
+/// to the repo (an issue anyone opened, a fork's change, a stranger's comment), which roll code
+/// marks `outside` so lockdown withholds it, or why it can't: a new tool decides. Reads at a
+/// fork's revision and its queue entries had once answered unmarked.
+#[test]
+fn every_tool_says_whether_it_holds_an_outsiders_words() {
+    // Marked by roll code: a record's own `outside` (changes, work items, reviews and their
+    // comments), the reads at a revision (`Code::mark_at`), the queue's entries, documents.
+    const OUTSIDE_WORDS: &[&str] = &[
+        "search", "fetch", "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare",
+        "get_change", "list_changes", "revise_change", "update_change", "close_change", "start_preview", "enqueue_change", "set_change_lane", "queue_status",
+        "list_work", "get_work", "claim_work", "heartbeat_work", "update_work", "complete_work", "release_work", "claim_agent_work",
+        "resolve_thread", "reopen_thread", "request_review", "get_commit_statuses",
+    ];
+    const NONE: &[(&str, &str)] = &[
+        ("list_repos", "repos"),
+        ("create_repo", "the caller's repo"),
+        ("list_refs", "branches writers pushed (roll's own refs are never listed)"),
+        ("get_repo_audit", "writers' and roll's actions"),
+        ("get_reviewer", "the repo's settings"),
+        ("get_review_rules", "the default branch's review rules"),
+        ("get_ai_review_pricing", "prices"),
+        ("get_review_usage", "spend"),
+        ("list_ai_reviews", "roll's own reviewer's jobs: model output is data, and its approval is guarded"),
+        ("request_ai_review", "a job"),
+        ("set_commit_status", "the caller's status"),
+        ("report_check", "the caller's check"),
+        ("create_change", "the caller's change"),
+        ("land", "the caller's landing"),
+        ("dequeue_change", "a queue entry's state"),
+        ("create_work", "the caller's work item"),
+        ("comment", "the caller's comment"),
+        ("review", "the caller's review"),
+        ("apply_suggestion", "the change it makes"),
+        ("stop_preview", "a preview's state"),
+        ("release_agent_work", "a claim's state"),
+        // The owner's agents: their machines, threads and automations are the owner's own; GitHub
+        // comments drive them only from OWNER, MEMBER or COLLABORATOR, and a fork's pull request
+        // only after approve-run (docs/code/chatops.md).
+        ("list_agent_machines", "the owner's agents"),
+        ("list_agent_threads", "the owner's agents"),
+        ("create_agent_thread", "the owner's agents"),
+        ("send_agent_message", "the owner's agents"),
+        ("respond_agent_request", "the owner's agents"),
+        ("interrupt_agent_thread", "the owner's agents"),
+        ("publish_agent_thread", "the owner's agents"),
+        ("create_agent_project", "the owner's agents"),
+        ("list_agent_automations", "the owner's agents"),
+        ("save_agent_automation", "the owner's agents"),
+        ("run_agent_automation", "the owner's agents"),
+        ("list_agent_automation_runs", "the owner's agents"),
+        ("get_agent_automation_run", "the owner's agents"),
+        ("cancel_agent_automation_run", "the owner's agents"),
+        ("retry_agent_automation_run", "the owner's agents"),
+        ("enable_agent_automation", "the owner's agents"),
+        ("disable_agent_automation", "the owner's agents"),
+        ("get_agent_automation_catalog", "the owner's agents"),
+        ("test_agent_automation", "the owner's agents"),
+        ("list_agent_sandboxes", "the owner's agents"),
+        ("stop_agent_sandbox", "the owner's agents"),
+        ("get_agent_sandbox_usage", "the owner's agents"),
+    ];
+    let mut tools: Vec<&str> = code_control::mcp::ROUTES.iter().map(|r| r.0).collect();
+    tools.dedup();
+    let undecided: Vec<&&str> = tools.iter().filter(|n| !OUTSIDE_WORDS.contains(n) && !NONE.iter().any(|(t, _)| t == *n)).collect();
+    assert!(undecided.is_empty(), "say whether these answer what someone who can't push wrote (mark it outside and list it in OUTSIDE_WORDS) or why not (NONE): {undecided:?}");
+    for n in OUTSIDE_WORDS.iter().chain(NONE.iter().map(|(n, _)| n)) {
+        assert!(tools.contains(n), "{n} isn't a roll code tool any more");
+    }
 }

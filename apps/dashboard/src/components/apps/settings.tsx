@@ -1082,7 +1082,7 @@ export function SettingsTab({
                   <option value="on">On</option>
                 </select>
               </Field>
-              <Field label="Request timeout (s)" hint="a request unanswered by then is a 504; empty: no limit">
+              <Field label="Request timeout (s)" hint="a request unanswered by then is a 504; empty: 300">
                 {t("timeout", "300")}
               </Field>
             </Grid>

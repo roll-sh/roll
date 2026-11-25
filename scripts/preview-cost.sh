@@ -617,6 +617,9 @@ case "$SHOT" in *PNG) ;; *) echo "the screenshot should be a PNG: $SHOT"; exit 1
 # the module graph) taken, the 40th listed left and said.
 LEFT=$(api GET "/v1/previews/$PV" | jq_ "(lambda k: '%s %s' % (k.get('stories'), k.get('first_stories')))(d.get('skipped') or {})")
 [ "$LEFT" = "1 ['s40--one']" ] || { echo "the stories run should take Deep's through the module graph and leave the 40th: $LEFT"; exit 1; }
+# Each story checked with axe as a page is (Chromatic's accessibility tests): its record says so.
+STORY_A11Y=$(api GET "/v1/previews/$PV" | jq_ "[(x.get('a11y') or {}).get('lang') for x in d['pages'] if x['path'] == 'story:deep--one']")
+[ "$STORY_A11Y" = "[True]" ] || { echo "a story's page should carry its accessibility, as a page's does: $STORY_A11Y"; exit 1; }
 # Signed in first (github.login): its $GREETING put in by roll and handed to the browser through
 # its container's stdin. The page has no #nope, so the run says where it stopped, never what it
 # would have typed.
@@ -658,12 +661,15 @@ curl -sS -o /dev/null -L -c "$JAR" -b "$JAR" -H "Host: $HOST" "http://$API/?$QUE
 
 say "a restore point (roll preview points): saved, a table made after it, put back"
 # A restore point (roll preview points): a table made after it is gone once it's put back, on
-# the same DATABASE_URL (pg-control's reset from the point: same endpoint and role).
+# the same DATABASE_URL (pg-control's reset from the point: same endpoint and role), and in the
+# NoSQL branch (NoSQL's point-in-time restore in place, to the second the point was cut at).
 psql_app() { docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB" -Atc "$1" 2>&1 | head -1; }
 POINT=$(api POST "/v1/previews/$PV/restore-points" '{"label":"before the live check"}' | jq_ "d['id']")
 case "$POINT" in rp_*) ;; *) echo "a restore point should be saved: $POINT"; exit 1;; esac
 ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview points "$PV" | has "$POINT" || { echo "roll preview points should list $POINT"; exit 1; }
 psql_app "CREATE TABLE after_the_point (id int)" >/dev/null
+CQL "$BRANCH_NOSQL" "CREATE TABLE app.after_the_point (id int PRIMARY KEY)" >/dev/null
+[ "$(CQL "$BRANCH_NOSQL" "SELECT id FROM app.after_the_point" | jq_ "'rows' in d")" = True ] || { echo "the NoSQL branch should have the table made after the point"; exit 1; }
 TR0=$(now_ms)
 api POST "/v1/previews/$PV/restore-points/$POINT/restore" >/dev/null
 # Put back: the line is looked for in the whole activity (the services' lines come after it),
@@ -677,6 +683,8 @@ RESTORE_MS=$(( $(now_ms) - TR0 ))
 [ -n "$PUT_BACK" ] || { echo "the restore point should be put back and the preview settled (ready or asleep)"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:12]]"; exit 1; }
 RESTORED=$(psql_app "SELECT coalesce(to_regclass('public.after_the_point')::text, 'gone') || ' ' || (SELECT email FROM users WHERE id = 1)")
 [ "$RESTORED" = "gone $APP_MASKED" ] || { echo "putting the point back should drop what came after it, still masked, on the same DATABASE_URL: $RESTORED"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:8]]"; exit 1; }
+NOSQL_AFTER=$(CQL "$BRANCH_NOSQL" "SELECT id FROM app.after_the_point" | jq_ "'rows' in d")
+[ "$NOSQL_AFTER" = False ] || { echo "putting the point back should drop the NoSQL table made after it"; exit 1; }
 api DELETE "/v1/previews/$PV/restore-points/$POINT" >/dev/null
 # Its services slept while the data went back: a visit wakes them, on the same DATABASE_URL.
 for _ in $(seq 1 120); do
@@ -870,8 +878,9 @@ NOSQL_COPY_MASK=$(api GET /v1/nosql/databases | jq_ "[x.get('masking', {}).get('
 OWN_DATA="$OWN_DATA, NoSQL its own and masked"
 
 # Screenshots stayed on through the pushes: the page's change since the head before is known.
+# (A run at a new head took 79 s under load 58 on 2026-11-25, its stories with it: up to 5 min.)
 VISUAL=""
-for _ in $(seq 1 120); do
+for _ in $(seq 1 600); do
   VISUAL=$(api GET "/v1/previews/$PV" | jq_ "('%s%% since %s' % (d['visual_change']['percent'], d['visual_change']['since'][:10])) if d.get('visual_change') else ''")
   [ -n "$VISUAL" ] && break
   sleep 0.5
@@ -1321,7 +1330,7 @@ cat <<EOF
 | The migration's risks the preview names | ${RISKS:-} |
 | The teardown as the preview went (its exit code, with the branch's URL) / runs | 3 / $TEARDOWN |
 | The service's Postgres role / its WAL read / users.email as it reads it | $(echo "$APP_DB" | sed -E 's#^postgres://([^:]+):.*#\1#') / refused / $APP_MASKED |
-| A restore point put back (a table made after it gone, same DATABASE_URL, still masked) | $RESTORE_MS ms |
+| A restore point put back (a table made after it gone in Postgres and NoSQL, same DATABASE_URL, still masked) | $RESTORE_MS ms |
 | Postgres: the parent's data directory / the branch's (a full copy on this disk) | ${PG_PARENT_KB} KiB / ${PG_BRANCH_KB} KiB |
 | First visit (cold start of the service container, image cached) | $((T3 - T2)) ms |
 | Next visit (warm) | $((T5 - T4)) ms |

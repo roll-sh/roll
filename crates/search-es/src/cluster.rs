@@ -137,6 +137,14 @@ pub struct ClusterConfig {
     /// ([`crate::branch`]). Later loads, and branches made before marking existed, have none:
     /// their jobs are their own.
     pub branch_of: Option<String>,
+    /// The parent's catalog id on every load of a branch (`None`: not a branch). The parent's
+    /// secrets in the branch's copy of its state never open there ([`crate::seal`]), branches
+    /// made before marking ([`Self::branch_of`]) included.
+    pub parent: Option<String>,
+    /// Where a branch's state was copied from, for telling the secrets it made from those it
+    /// copied as it first opens under binding ([`crate::seal::Lineage`]); `None`: everything not
+    /// sealed as the branch's own counts as copied.
+    pub lineage: Option<std::sync::Arc<dyn crate::seal::Lineage>>,
     /// Read service account tokens from `<path.conf>/service_tokens` too, as Elasticsearch
     /// does. The file is the node's, so a token in it would sign in to every cluster the node
     /// serves: the host sets this only for a node serving one cluster, or for the clusters its
@@ -186,6 +194,8 @@ impl ClusterConfig {
             sites: None,
             connector_slots: None,
             branch_of: None,
+            parent: None,
+            lineage: None,
             file_service_tokens: false,
             audit: None,
             embedder: None,
@@ -251,6 +261,10 @@ pub struct Cluster {
     /// The cluster's own `reindex.remote.whitelist` (roll's API sets it, as Elastic Cloud's user
     /// settings set it); `None`: the node setting's.
     pub reindex_whitelist: RwLock<Option<Vec<String>>>,
+    /// Set when [`crate::seal::seal_leftovers`] failed on a cluster that isn't a branch: until
+    /// the next load, [`crate::seal::open`] also opens values sealed under the bare kind, as they
+    /// were before secrets were bound to their cluster (never on a branch: those are its parent's).
+    pub(crate) unbound_secrets: std::sync::atomic::AtomicBool,
     /// The request thread pools (`search`, `write`, `get`, `analyze`): admission and stats.
     pub thread_pools: crate::thread_pool::ThreadPools,
     /// Shard contents of the snapshots this process took.
@@ -667,6 +681,7 @@ impl Cluster {
             breakers,
             remote: remote_node,
             reindex_whitelist: RwLock::new(None),
+            unbound_secrets: Default::default(),
             thread_pools,
             snapshot_data: Default::default(),
             ccs: Default::default(),

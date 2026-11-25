@@ -922,7 +922,7 @@ export interface NewDeploy {
 export type DeployTrigger = "push" | "manual" | "rollback" | "upload" | "api" | "settings" | "promote";
 
 export interface Plan {
-  provider: "dockerfile" | "deno" | "node" | "python" | "go" | "rust" | "ruby" | "php" | "java" | "dotnet" | "elixir" | "scala" | "clojure" | "gleam" | "shell" | "static" | "functions";
+  provider: "dockerfile" | "deno" | "node" | "python" | "go" | "rust" | "ruby" | "php" | "java" | "dotnet" | "elixir" | "scala" | "clojure" | "gleam" | "swift" | "dart" | "shell" | "static" | "functions";
   framework: string | null;
   language_version: string | null;
   install: string | null;
@@ -1310,6 +1310,18 @@ export interface Freeze {
 }
 
 /** A project's public status page: its checks and heartbeats (all, or `items`), at `url`. */
+export type IncidentState = "investigating" | "identified" | "monitoring" | "resolved";
+/** A status page's incident: a person's, or one a check going down or a heartbeat missed opened (`automatic`). */
+export interface Incident {
+  id: string;
+  title: string;
+  state: IncidentState;
+  started_at: number;
+  resolved_at: number | null;
+  automatic: boolean;
+  updates: { at: number; state: IncidentState; text: string }[];
+}
+
 export interface StatusPage {
   title: string;
   url: string;
@@ -1657,6 +1669,8 @@ export const appsApi = {
   statusPage: (project: string) => call<StatusPage>("GET", `/v1/apps/projects/${enc(project)}/status-page`),
   putStatusPage: (project: string, body: { title?: string; items?: StatusPage["items"] }) => call<StatusPage>("PUT", `/v1/apps/projects/${enc(project)}/status-page`, body),
   postIncident: (project: string, body: { title: string; state?: string; text: string }) => call<{ id: string }>("POST", `/v1/apps/projects/${enc(project)}/status-page/incidents`, body),
+  incidents: (project: string) => call<{ incidents: Incident[] }>("GET", `/v1/apps/projects/${enc(project)}/status-page/incidents`).then((r) => r.incidents),
+  updateIncident: (project: string, incident: string, body: { state: IncidentState; text: string }) => call<null>("POST", `/v1/apps/projects/${enc(project)}/status-page/incidents/${enc(incident)}/updates`, body),
   deleteStatusPage: (project: string) => call<void>("DELETE", `/v1/apps/projects/${enc(project)}/status-page`),
   previewDomain: (project: string) => call<Domain>("GET", `/v1/apps/projects/${enc(project)}/preview-domain`),
   setPreviewDomain: (project: string, hostname: string) => call<Domain>("POST", `/v1/apps/projects/${enc(project)}/preview-domain`, { hostname }),

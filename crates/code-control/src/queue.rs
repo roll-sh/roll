@@ -379,6 +379,9 @@ impl Code {
                 "number": c.as_ref().map(|c| c.number),
                 "title": c.as_ref().map(|c| c.title.clone()),
                 "author": c.as_ref().map(|c| c.author.clone()),
+                // A fork's change (approved to run): its title and what its checks printed are its
+                // author's (MCP's lockdown).
+                "outside": c.as_ref().is_some_and(|c| c.outside),
                 "position": position,
                 "lane": e.lane,
                 "state": e.state,
@@ -400,6 +403,13 @@ impl Code {
             (None, true) => "paused",
             (None, false) => "idle",
         };
+        // A batch with a fork's change in it ran its code: what its checks said is its author's too
+        // (MCP's lockdown).
+        let mut batch = serde_json::to_value(&batch).unwrap_or(Value::Null);
+        let fork_in = batch["changes"].as_array().into_iter().flatten().filter_map(Value::as_str).any(|id| self.db.change(id).ok().flatten().is_some_and(|c| c.outside));
+        if fork_in {
+            batch["outside"] = json!(true);
+        }
         Ok(json!({
             "repo": r.full_name(),
             "policy": r.land_policy,
@@ -667,6 +677,11 @@ impl Code {
             *w.view.lock() = None;
             self.emit_queue(&r);
             return Ok(true);
+        }
+        // A tip built on a fork's change (approved to run) holds its words, and so does every tip
+        // after it (MCP's lockdown).
+        if let Some(first) = members.iter().position(|m| m.change.outside) {
+            self.db.mark_outside(repo_id, &members[first..].iter().map(|m| cs_id(&m.tip)).collect::<Vec<_>>())?;
         }
         let tip = members.last().map(|m| m.tip).expect("non-empty");
         if let Some(v) = w.view.lock().as_mut() {

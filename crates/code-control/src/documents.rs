@@ -391,9 +391,10 @@ impl Code {
         let to = (from + FILE_LINES - 1).min(lines.len());
         let body = lines.get(from - 1..to).unwrap_or_default().join("\n");
         let rev = crate::cs_id(&cs);
-        // Text at a revision off the default branch (a fork's change) may be an outsider's: marked
-        // so, lockdown withholds it.
-        let on_default = self.head(&r)?.is_some_and(|h| self.store.is_ancestor(&r.id, &cs, &h).unwrap_or(false));
+        // Text at a fork's change's revision is an outsider's: marked so, lockdown withholds it,
+        // as every read at a revision does (`Code::outside_at`); a team's own branches read as
+        // they are.
+        let outside = self.outside_at(&r, &cs);
         Ok(json!({
             "id": id,
             "title": format!("{}: {path}", r.full_name()),
@@ -401,7 +402,7 @@ impl Code {
             "url": format!("{}/blob/{rev}/{path}#L{line}", self.web_url(&r)),
             "metadata": { "kind": "file", "repo": r.full_name(), "path": path, "rev": rev, "line": line, "from": from, "to": to, "lines": lines.len() },
             "repo": r.full_name(),
-            "outside": !on_default,
+            "outside": outside,
         }))
     }
 }

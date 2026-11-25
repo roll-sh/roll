@@ -1,7 +1,7 @@
-import { Globe, KeyRound, Plus } from "lucide-react";
-import { useEffect, useState } from "react";
-import { limitOf, parseOrigins, quickstart, reachOf, type Quickstart } from "@/lib/search-browser";
-import { searchApi, type BrowserKey, type NewBrowserKey, type SearchCluster } from "@/lib/search-api";
+import { Activity, Globe, KeyRound, Plus } from "lucide-react";
+import { Fragment, useEffect, useState } from "react";
+import { limitOf, parseOrigins, quickstart, reachOf, shortCount, usageSeries, type Quickstart } from "@/lib/search-browser";
+import { searchApi, type BrowserKey, type BrowserKeyUsage, type BrowserUsageWindow, type NewBrowserKey, type SearchCluster } from "@/lib/search-api";
 import { Field, Segmented, type Run } from "../redis/shared";
 import { btn, CopyButton, ErrorNote, input, Panel, primary, SecretField, useCopy } from "../ui";
 
@@ -161,6 +161,8 @@ function Keys({ cluster }: { cluster: SearchCluster }) {
   const [signing, setSigning] = useState<{ name: string; secret: string } | null>(null);
   const [revoking, setRevoking] = useState<string | null>(null);
   const [rotating, setRotating] = useState<string | null>(null);
+  // The key whose usage is open below its row.
+  const [usageOf, setUsageOf] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [snippet, setSnippet] = useState<Quickstart>("search-application");
@@ -372,83 +374,105 @@ function Keys({ cluster }: { cluster: SearchCluster }) {
                   <th className="px-3 py-2 font-normal">Filter</th>
                   <th className="px-3 py-2 font-normal">Limit</th>
                   <th className="px-3 py-2 font-normal">Expires</th>
+                  <th className="px-3 py-2 font-normal" title="The last 24 hours">24h</th>
                   <th className="px-3 py-2" />
                 </tr>
               </thead>
               <tbody>
                 {keys.length === 0 && (
                   <tr>
-                    <td colSpan={6} className="px-3 py-3 text-muted">
+                    <td colSpan={7} className="px-3 py-3 text-muted">
                       No browser keys yet.
                     </td>
                   </tr>
                 )}
                 {keys.map((k) => (
-                  <tr key={k.id} className="border-b border-line last:border-0">
-                    <td className="max-w-56 px-3 py-2">
-                      <div className="truncate">{k.name ?? <span className="text-subtle">unnamed</span>}</div>
-                      <div className="truncate font-mono text-[11px] text-subtle">{k.id}</div>
-                    </td>
-                    <td className="px-3 py-2 text-muted">{reachOf(k)}</td>
-                    <td className="max-w-56 truncate px-3 py-2 font-mono text-[11px] text-muted" title={k.filter ? JSON.stringify(k.filter) : undefined}>
-                      {k.filter ? JSON.stringify(k.filter) : "—"}
-                    </td>
-                    <td className="whitespace-nowrap px-3 py-2 font-mono text-[12px] text-muted">{limitOf(k)}</td>
-                    <td className="whitespace-nowrap px-3 py-2 font-mono text-[12px] text-muted">{k.expires_at ? day(k.expires_at) : "never"}</td>
-                    <td className="whitespace-nowrap px-3 py-2 text-right">
-                      {revoking === k.id ? (
-                        <span className="inline-flex items-center gap-2">
-                          <span className="text-[12px] text-muted">Pages using it fail at once.</span>
-                          <button
-                            disabled={busy !== null}
-                            onClick={async () => {
-                              const r = await act("revoke", () => searchApi.revokeBrowserKey(cluster.id, k.id));
-                              setRevoking(null);
-                              if (r) await load();
-                            }}
-                            className={`${btn} hover:border-danger/50 hover:text-danger`}
-                          >
-                            {busy === "revoke" ? <span className="shimmer">Revoking…</span> : "Revoke"}
-                          </button>
-                          <button onClick={() => setRevoking(null)} className={btn}>
-                            Cancel
-                          </button>
-                        </span>
-                      ) : rotating === k.id ? (
-                        <span className="inline-flex items-center gap-2">
-                          <span className="text-[12px] text-muted">Keys derived under the old secret fail at once.</span>
-                          <button
-                            disabled={busy !== null}
-                            onClick={async () => {
-                              const r = await act("rotate", () => searchApi.rotateBrowserKeySecret(cluster.id, k.id));
-                              setRotating(null);
-                              if (r) {
-                                setMade(null);
-                                setSigning({ name: k.name ?? k.id, secret: r.value.signing_secret });
-                              }
-                            }}
-                            className={btn}
-                          >
-                            {busy === "rotate" ? <span className="shimmer">Rotating…</span> : "Rotate"}
-                          </button>
-                          <button onClick={() => setRotating(null)} className={btn}>
-                            Cancel
-                          </button>
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-2">
-                          {k.derivable && (
-                            <button onClick={() => setRotating(k.id)} className={btn} title="A new signing secret for the keys your backend derives from it">
-                              Rotate secret
+                  <Fragment key={k.id}>
+                    <tr className="border-b border-line last:border-0">
+                      <td className="max-w-56 px-3 py-2">
+                        <div className="truncate">{k.name ?? <span className="text-subtle">unnamed</span>}</div>
+                        <div className="truncate font-mono text-[11px] text-subtle">{k.id}</div>
+                      </td>
+                      <td className="px-3 py-2 text-muted">{reachOf(k)}</td>
+                      <td className="max-w-56 truncate px-3 py-2 font-mono text-[11px] text-muted" title={k.filter ? JSON.stringify(k.filter) : undefined}>
+                        {k.filter ? JSON.stringify(k.filter) : "—"}
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-2 font-mono text-[12px] text-muted">{limitOf(k)}</td>
+                      <td className="whitespace-nowrap px-3 py-2 font-mono text-[12px] text-muted">{k.expires_at ? day(k.expires_at) : "never"}</td>
+                      <td className="whitespace-nowrap px-3 py-2 font-mono text-[12px] text-muted">
+                        <button
+                          onClick={() => setUsageOf(usageOf === k.id ? null : k.id)}
+                          className="inline-flex items-center gap-1.5 rounded-md px-1 hover:text-fg"
+                          title="Requests and refusals over time"
+                          aria-expanded={usageOf === k.id}
+                        >
+                          <Activity className="size-3.5" strokeWidth={1.5} />
+                          {shortCount(k.usage_24h?.requests ?? 0)}
+                          {(k.usage_24h?.throttled ?? 0) > 0 && <span className="text-danger">· {shortCount(k.usage_24h?.throttled ?? 0)} 429</span>}
+                        </button>
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-2 text-right">
+                        {revoking === k.id ? (
+                          <span className="inline-flex items-center gap-2">
+                            <span className="text-[12px] text-muted">Pages using it fail at once.</span>
+                            <button
+                              disabled={busy !== null}
+                              onClick={async () => {
+                                const r = await act("revoke", () => searchApi.revokeBrowserKey(cluster.id, k.id));
+                                setRevoking(null);
+                                if (r) await load();
+                              }}
+                              className={`${btn} hover:border-danger/50 hover:text-danger`}
+                            >
+                              {busy === "revoke" ? <span className="shimmer">Revoking…</span> : "Revoke"}
                             </button>
-                          )}
-                          <button onClick={() => setRevoking(k.id)} className={btn}>
-                            Revoke
-                          </button>
-                        </span>
-                      )}
-                    </td>
-                  </tr>
+                            <button onClick={() => setRevoking(null)} className={btn}>
+                              Cancel
+                            </button>
+                          </span>
+                        ) : rotating === k.id ? (
+                          <span className="inline-flex items-center gap-2">
+                            <span className="text-[12px] text-muted">Keys derived under the old secret fail at once.</span>
+                            <button
+                              disabled={busy !== null}
+                              onClick={async () => {
+                                const r = await act("rotate", () => searchApi.rotateBrowserKeySecret(cluster.id, k.id));
+                                setRotating(null);
+                                if (r) {
+                                  setMade(null);
+                                  setSigning({ name: k.name ?? k.id, secret: r.value.signing_secret });
+                                }
+                              }}
+                              className={btn}
+                            >
+                              {busy === "rotate" ? <span className="shimmer">Rotating…</span> : "Rotate"}
+                            </button>
+                            <button onClick={() => setRotating(null)} className={btn}>
+                              Cancel
+                            </button>
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-2">
+                            {k.derivable && (
+                              <button onClick={() => setRotating(k.id)} className={btn} title="A new signing secret for the keys your backend derives from it">
+                                Rotate secret
+                              </button>
+                            )}
+                            <button onClick={() => setRevoking(k.id)} className={btn}>
+                              Revoke
+                            </button>
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                    {usageOf === k.id && (
+                      <tr className="border-b border-line last:border-0">
+                        <td colSpan={7} className="bg-bg px-3 py-3">
+                          <KeyUsage clusterId={cluster.id} keyId={k.id} />
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 ))}
               </tbody>
             </table>
@@ -497,5 +521,122 @@ function SigningSecret({ secret, copied, onCopy }: { secret: string; copied: str
         Signing secret: keep it on your backend, which derives keys with it (the site-search guide has Node, Python and Go). It never goes in a page.
       </p>
     </div>
+  );
+}
+
+/** One browser key's use: requests and 429s over time, why it was refused, its top users (a derived key's) and the pages refused. */
+function KeyUsage({ clusterId, keyId }: { clusterId: string; keyId: string }) {
+  const [range, setRange] = useState<BrowserUsageWindow>("24h");
+  const [usage, setUsage] = useState<BrowserKeyUsage | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    setError(null);
+    searchApi.browserKeyUsage(clusterId, keyId, range).then(
+      (u) => live && setUsage(u),
+      (e) => live && setError(e instanceof Error ? e.message : String(e)),
+    );
+    return () => {
+      live = false;
+    };
+  }, [clusterId, keyId, range]);
+  const series = usage && usageSeries(usage);
+  const t = usage?.totals;
+  return (
+    <div className="rise space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <span className="text-[12px] text-muted">
+          {t ? (
+            <>
+              <span className="font-mono text-fg">{shortCount(t.requests)}</span> requests · <span className="font-mono text-fg">{shortCount(t.throttled)}</span> throttled (429) ·{" "}
+              <span className="font-mono text-fg">{shortCount(t.refused)}</span> refused
+            </>
+          ) : error ? null : (
+            <span className="shimmer">Loading…</span>
+          )}
+        </span>
+        <Segmented
+          value={range}
+          options={[
+            { label: "24h", value: "24h" },
+            { label: "14d", value: "14d" },
+          ]}
+          onChange={setRange}
+        />
+      </div>
+      <ErrorNote error={error} />
+      {series && (
+        <div className="grid gap-4 sm:grid-cols-[1fr_minmax(0,16rem)]">
+          <div className="space-y-1">
+            <UsageLines requests={series.requests} throttled={series.throttled} />
+            <div className="flex gap-4 text-[11px] text-subtle">
+              <span className="flex items-center gap-1.5">
+                <span className="h-px w-3 bg-muted" /> requests
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="h-px w-3 bg-danger" /> 429s
+              </span>
+            </div>
+          </div>
+          <ul className="space-y-1 text-[12px]">
+            {series.reasons.length === 0 && <li className="text-subtle">Nothing refused.</li>}
+            {series.reasons.map((r) => (
+              <li key={r.reason} className="flex justify-between gap-3">
+                <span className={r.throttles ? "text-danger" : "text-muted"}>{r.label}</span>
+                <span className="font-mono text-muted">{shortCount(r.count)}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {t && (t.users.length > 0 || t.origins.length > 0) && (
+        <div className="grid gap-4 text-[12px] sm:grid-cols-2">
+          {t.users.length > 0 && (
+            <div>
+              <h4 className="mb-1 text-[11px] text-subtle">Top users (derived keys)</h4>
+              <ul className="space-y-0.5">
+                {t.users.map((u) => (
+                  <li key={u.user} className="flex justify-between gap-3">
+                    <span className="truncate font-mono text-muted">{u.user}</span>
+                    <span className="whitespace-nowrap font-mono text-muted">
+                      {shortCount(u.requests)}
+                      {u.throttled > 0 && <span className="text-danger"> · {shortCount(u.throttled)} 429</span>}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {t.origins.length > 0 && (
+            <div>
+              <h4 className="mb-1 text-[11px] text-subtle">Top refused origins</h4>
+              <ul className="space-y-0.5">
+                {t.origins.map((o) => (
+                  <li key={o.origin} className="flex justify-between gap-3">
+                    <span className="truncate font-mono text-muted">{o.origin}</span>
+                    <span className="font-mono text-muted">{shortCount(o.refused)}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Requests (muted) and 429s (red) a step a point, on one scale, stretched to the row's width. */
+function UsageLines({ requests, throttled, height = 40 }: { requests: number[]; throttled: number[]; height?: number }) {
+  const width = 320;
+  const n = Math.max(2, requests.length);
+  const max = Math.max(1, ...requests, ...throttled);
+  const line = (vs: number[]) =>
+    vs.map((v, i) => `${i ? "L" : "M"}${((i * width) / (n - 1)).toFixed(1)},${(height - 2 - (v / max) * (height - 4)).toFixed(1)}`).join("");
+  return (
+    <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" className="h-10 w-full overflow-visible" role="img" aria-label="Requests and 429s over time">
+      <path d={line(requests)} fill="none" className="stroke-muted" strokeWidth={1.25} strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+      {throttled.some((v) => v > 0) && <path d={line(throttled)} fill="none" className="stroke-danger" strokeWidth={1.25} strokeLinejoin="round" vectorEffect="non-scaling-stroke" />}
+    </svg>
   );
 }

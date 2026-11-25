@@ -88,17 +88,20 @@ fn bootstrap_token() -> anyhow::Result<Option<String>> {
 }
 
 /// Where the machine credential is kept: `ROLL_MACHINE_CREDENTIAL_FILE`, else
-/// `machine-<identity>.json` under systemd's `$STATE_DIRECTORY`, `$XDG_STATE_HOME/roll` or
-/// `~/.local/state/roll`.
+/// `machine-<identity>.json` under systemd's `$STATE_DIRECTORY`, `$XDG_STATE_HOME/roll`
+/// (Windows: `%LOCALAPPDATA%\roll`) or `~/.local/state/roll`.
 fn credential_file(identity: &str) -> anyhow::Result<PathBuf> {
     if let Some(f) = std::env::var_os("ROLL_MACHINE_CREDENTIAL_FILE").filter(|f| !f.is_empty()) {
         return Ok(PathBuf::from(f));
     }
-    let dir = std::env::var_os("STATE_DIRECTORY")
+    let state = std::env::var_os("STATE_DIRECTORY")
         .filter(|d| !d.is_empty())
         // systemd may list several, `:`-separated: the first is this unit's.
         .map(|d| PathBuf::from(d.to_string_lossy().split(':').next().unwrap_or_default()))
-        .or_else(|| std::env::var_os("XDG_STATE_HOME").filter(|d| !d.is_empty()).map(|d| PathBuf::from(d).join("roll")))
+        .or_else(|| std::env::var_os("XDG_STATE_HOME").filter(|d| !d.is_empty()).map(|d| PathBuf::from(d).join("roll")));
+    #[cfg(windows)]
+    let state = state.or_else(|| std::env::var_os("LOCALAPPDATA").filter(|d| !d.is_empty()).map(|d| PathBuf::from(d).join("roll")));
+    let dir = state
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state/roll")))
         .context("no state directory for the machine credential: set ROLL_MACHINE_CREDENTIAL_FILE")?;
     let safe: String = identity.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').collect();
@@ -125,7 +128,11 @@ fn keep(path: &Path, k: &Kept) -> anyhow::Result<()> {
     o.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    #[cfg(windows)]
+    crate::sys::acl::exclusive(&mut o);
     let mut f = o.open(&tmp).with_context(|| format!("writing {}", tmp.display()))?;
+    #[cfg(windows)]
+    crate::sys::acl::private(&f).with_context(|| format!("making {} private", tmp.display()))?;
     f.write_all(serde_json::to_string(k)?.as_bytes())?;
     f.sync_all()?;
     std::fs::rename(&tmp, path).with_context(|| format!("keeping the machine credential in {}", path.display()))?;

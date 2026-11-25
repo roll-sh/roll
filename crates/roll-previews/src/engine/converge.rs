@@ -258,6 +258,39 @@ impl Engine {
     }
 
     /// Bring one active preview to its desired state.
+    /// What a preview's branches, its earlier pushes' copies and its roll apps services used, read
+    /// again (step 2 of a converge, and a sleeping preview's pass between its converges).
+    pub(super) async fn read_usage(&self, r: &Row, now: i64) -> anyhow::Result<()> {
+        for res in self.store.resources(&r.id)? {
+            let (Some(branch), Ok(b)) = (&res.r#ref, self.brancher(res.kind)) else { continue };
+            match b.usage(&res.parent, branch).await {
+                Ok(u) => self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
+                    x.bytes = u.bytes;
+                    x.usd_month = u.storage_usd_month;
+                    x.usd_hour = u.active_usd_hour;
+                    x.spent_usd = u.month_to_date_usd;
+                })?,
+                Err(e) => warn!(preview = %r.id, kind = res.kind.as_str(), error = %e, "previews: reading usage"),
+            }
+        }
+        // And the earlier pushes' copies, which count in its cost and size cap too.
+        for d in self.store.pinned_data(&r.id)? {
+            let Ok(b) = self.brancher(d.kind) else { continue };
+            match b.usage(&d.parent, &d.r#ref).await {
+                Ok(u) => self.store.set_pinned_usage(&r.id, &d, &u)?,
+                Err(e) => warn!(preview = %r.id, kind = d.kind.as_str(), error = %e, "previews: reading an earlier push's copy's usage"),
+            }
+        }
+        // And what roll apps billed its services there (their builds too).
+        for svc in self.store.services(&r.id)? {
+            if let Some(usd) = self.apps.spent_usd(&r.id, &svc.name).await {
+                self.store.set_service_spend(&r.id, &svc.name, usd)?;
+            }
+        }
+        self.usage_read.lock().insert(r.id.clone(), now);
+        Ok(())
+    }
+
     pub(super) async fn converge(&self, r: &Row) -> anyhow::Result<()> {
         let s = self.store.settings(&r.project_id)?;
         // A fork's head waits for a writer's approval; nothing of it runs meanwhile.
@@ -300,7 +333,7 @@ impl Engine {
             .resources
             .iter()
             .filter_map(|res| Kind::of_workspace(res.kind).map(|k| (k, res.r#ref.clone())))
-            .filter_map(|(k, parent)| s.mode_of(k, &parent).map(|m| (k, parent, m)))
+            .filter_map(|(k, parent)| s.mode_for(k, &parent, r.trusted).map(|m| (k, parent, m)))
             .collect();
         // A resource whose rule changed (branch ↔ schema) is branched again in its new mode: a
         // project that moves to structure-only stops keeping full copies at once.
@@ -439,37 +472,17 @@ impl Engine {
         // 2. What the branches use (every `usage_every`), and the size cap.
         let usage_due = self.usage_read.lock().get(&r.id).is_none_or(|t| *t + self.cfg.usage_every.as_millis() as i64 <= now);
         if usage_due {
-            for res in self.store.resources(&r.id)? {
-                let (Some(branch), Ok(b)) = (&res.r#ref, self.brancher(res.kind)) else { continue };
-                match b.usage(&res.parent, branch).await {
-                    Ok(u) => self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
-                        x.bytes = u.bytes;
-                        x.usd_month = u.storage_usd_month;
-                        x.usd_hour = u.active_usd_hour;
-                        x.spent_usd = u.month_to_date_usd;
-                    })?,
-                    Err(e) => warn!(preview = %r.id, kind = res.kind.as_str(), error = %e, "previews: reading usage"),
-                }
-            }
-            // And the earlier pushes' copies, which count in its cost and size cap too.
-            for d in self.store.pinned_data(&r.id)? {
-                let Ok(b) = self.brancher(d.kind) else { continue };
-                match b.usage(&d.parent, &d.r#ref).await {
-                    Ok(u) => self.store.set_pinned_usage(&r.id, &d, &u)?,
-                    Err(e) => warn!(preview = %r.id, kind = d.kind.as_str(), error = %e, "previews: reading an earlier push's copy's usage"),
-                }
-            }
-            // And what roll apps billed its services there (their builds too).
-            for svc in self.store.services(&r.id)? {
-                if let Some(usd) = self.apps.spent_usd(&r.id, &svc.name).await {
-                    self.store.set_service_spend(&r.id, &svc.name, usd)?;
-                }
-            }
-            self.usage_read.lock().insert(r.id.clone(), now);
+            self.read_usage(r, now).await?;
         }
         if let Some(bytes) = self.over_cap(&r.id, s.max_bytes)? {
+            // Down, and kept down where a visit would wake it by itself (roll apps).
+            self.store.set_runtime_fact(&r.id, "held_down", Some(&true))?;
             for svc in self.store.services(&r.id)? {
                 self.apps.sleep(&r.id, &svc.name).await;
+                if let Err(e) = self.apps.hold_down(&r.id, &svc.name, true).await {
+                    warn!(preview = %r.id, service = %svc.name, error = %e, "previews: keeping a capped preview's service down (tried again next pass)");
+                    self.store.update(&r.id, |row| row.next_at = 0)?;
+                }
             }
             let msg = format!("its branches hold {bytes} bytes, over the project's max_bytes ({}): reset it to start again", s.max_bytes);
             let row = self.store.update(&r.id, |row| {
@@ -479,6 +492,13 @@ impl Engine {
             })?;
             self.report(row).await;
             return Ok(());
+        }
+        // Under its cap again (a reset, a raised cap): what was kept down may wake.
+        if self.store.runtime_fact::<bool>(&r.id, "held_down")?.is_some() {
+            for svc in self.store.services(&r.id)? {
+                self.apps.hold_down(&r.id, &svc.name, false).await.map_err(|e| anyhow::anyhow!("letting {} wake again: {e:#}", svc.name))?;
+            }
+            self.store.set_runtime_fact::<bool>(&r.id, "held_down", None)?;
         }
 
         // 3. The secrets environment: its base, the project's overrides, the branches' URLs.
@@ -887,6 +907,7 @@ impl Engine {
             self.store.log(&r.id, row.state.as_str())?;
         }
         let ready = row.state == State::Ready;
+        self.converged_at.lock().insert(r.id.clone(), self.store.now_ms()?);
         self.store.mark_step(&r.id, &r.head, "ready")?;
         self.report(row).await;
         // 5b. Warm: the change's own services just deployed are woken after the pass, so the first
@@ -1679,6 +1700,7 @@ impl Engine {
             c.retire(&preview_key(&r.id));
         }
         self.usage_read.lock().remove(&r.id);
+        self.converged_at.lock().remove(&r.id);
         self.secrets_told.lock().remove(&r.id);
         self.egress_told.lock().remove(&r.id);
         self.git_reporting.lock().remove(&r.id);
