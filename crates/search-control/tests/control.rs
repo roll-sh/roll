@@ -1487,7 +1487,7 @@ async fn term_vectors_and_rank_eval_read_only_what_the_caller_may() {
         }
         let user = format!("{reader}@{name}");
         let user_pw = user_body["password"].as_str().unwrap();
-        let es = |method: Method, path: &str, body: Option<Value>| e.es(&user, user_pw, method, path, body);
+        let es = |method: Method, path: &'static str, body: Option<Value>| e.es(&user, user_pw, method, path, body);
 
         let docs = json!({"docs": [{"_index": "tenant-a-1", "_id": "1", "fields": ["t"]}, {"_index": "tenant-b", "_id": "1", "fields": ["t"]}]});
         for path in ["/_mtermvectors", "/tenant-a-1/_mtermvectors"] {
