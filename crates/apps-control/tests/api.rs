@@ -10213,4 +10213,7 @@ async fn a_forks_preview_pages_load_only_from_the_preview() {
     assert!(errors.get("outside").is_none(), "{errors}");
     let r = w.api.clone().oneshot(Request::get(format!("{env}/logs?tail=5")).body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(r.headers().get("x-roll-outside").and_then(|v| v.to_str().ok()), Some("true"));
+    let (_, ev) = call(&w.api, "GET", "/v1/apps/events?after=0", None).await;
+    let of = |env: &str| ev["events"].as_array().unwrap().iter().filter(|e| e["service"] == id.as_str() && e["environment"] == env).map(|e| e["outside"] == true).collect::<Vec<_>>();
+    assert!(!of("pv-7").is_empty() && of("pv-7").iter().all(|o| *o) && of("production").iter().all(|o| !o), "{ev}");
 }

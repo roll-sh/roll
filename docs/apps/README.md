@@ -3965,8 +3965,9 @@ roll and nothing else, so a fork's preview can't send its branched data anywhere
   every other environment get nothing (`a_forks_preview_pages_load_only_from_the_preview`).
   What a preview's app writes is marked from outside for roll MCP's lockdown, as roll previews
   marks an untrusted preview's: its logs (`x-roll-outside: true`, and each line of a read
-  `outside: true`), errors, traces, routes and vitals (`outside: true` on the answer), and its
-  browser checks' failure screenshots and traces (the header). Every ephemeral environment counts,
+  `outside: true`), errors, traces, routes and vitals (`outside: true` on the answer), its
+  events in `/v1/apps/events` (a failed build's error can quote it), and its browser checks'
+  failure screenshots and traces (the header). Every ephemeral environment counts,
   and one that can't be read counts too (it fails closed); a team's own long-lived environments
   don't.
 - **A network with no route out.** From its next deploy its instances run on
