@@ -1568,6 +1568,11 @@ through the client for tenant-chosen URLs (public addresses, no redirects, bound
 token needs the API (a GitLab personal or project access token with `api`, a Bitbucket app
 password with repository and pipeline access), not only Git. `ci_hosts.rs`' tests read and post
 against fake GitLab and Bitbucket APIs, each with its token as that host takes it.
+roll previews reports a preview of such a service there too, through `Apps::commit_status`
+(`roll/preview`, never apps' own contexts) and `Apps::pull_request_note` (one note on the merge
+request or pull request, edited in place, made again when it was deleted there; nothing when the
+service's source is another repository now), on the service's owner only (previews' fleet hop
+brings it there). `ci_hosts::tests::a_previews_note_is_made_then_edited_in_place`.
 
 ## Audit trail
 

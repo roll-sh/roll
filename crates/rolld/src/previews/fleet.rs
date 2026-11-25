@@ -15,6 +15,30 @@ pub const SHOT: &str = "/internal/previews/apps-shot";
 /// The internal route an agent's run on a roll apps instance's page comes in on.
 pub const TRY: &str = "/internal/previews/apps-try";
 
+/// The internal route a preview's report on a roll apps service's GitLab or Bitbucket repository
+/// comes in on (a commit status, or the merge request's note): its holder uses its Git login.
+pub const REPORT: &str = "/internal/previews/apps-report";
+
+/// A preview's report on a roll apps service's repository, posted on this node
+/// (`apps_control::Apps::commit_status`, `pull_request_note`): `{status: {sha, state,
+/// description, target_url?}}` answers whether it posted, `{note: {repo, number, body,
+/// existing?}}` the note's id (or null).
+#[async_trait::async_trait]
+pub trait Report: Send + Sync {
+    async fn report(&self, service: &str, ask: &serde_json::Value) -> anyhow::Result<serde_json::Value>;
+}
+
+/// A report on `service`'s repository, on its holder: here, or a signed hop to [`REPORT`].
+pub async fn report(cluster: Option<&Arc<Cluster>>, local: &dyn Report, service: &str, mut ask: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    if let Some(c) = cluster
+        && let Some(holder) = elsewhere(c, service).await
+    {
+        ask["service"] = serde_json::json!(service);
+        return Ok(on::<serde_json::Value>(c, &holder, REPORT, ask).await?.unwrap_or_default());
+    }
+    local.report(service, &ask).await
+}
+
 /// The most of a holder's answer that's read: the pages' PNGs, as base64.
 const ANSWER_BYTES: usize = 256 << 20;
 
@@ -32,18 +56,30 @@ const SLOTS: usize = 2;
 
 struct Holder {
     local: Arc<dyn Shoot>,
+    report: Arc<dyn Report>,
     slots: tokio::sync::Semaphore,
 }
 
 /// [`SHOT`] and [`TRY`], for the other nodes' hops: only a request a node of the cluster signed
 /// gets in (`require_signed`; rolld's gate lets `/internal` through without a token), only for a
 /// preview's environment (`pv-…`), at most [`SLOTS`] at once.
-pub fn internal_router(local: Arc<dyn Shoot>, cluster: Arc<Cluster>) -> axum::Router {
+pub fn internal_router(local: Arc<dyn Shoot>, report: Arc<dyn Report>, cluster: Arc<Cluster>) -> axum::Router {
     axum::Router::new()
         .route(SHOT, axum::routing::post(shot))
         .route(TRY, axum::routing::post(tried))
+        .route(REPORT, axum::routing::post(reported))
         .route_layer(axum::middleware::from_fn_with_state(cluster, roll_cluster::require_signed))
-        .with_state(Arc::new(Holder { local, slots: tokio::sync::Semaphore::new(SLOTS) }))
+        .with_state(Arc::new(Holder { local, report, slots: tokio::sync::Semaphore::new(SLOTS) }))
+}
+
+/// A preview's report on a service's repository, asked of this node: `{service, status | note}`.
+async fn reported(axum::extract::State(h): axum::extract::State<Arc<Holder>>, axum::Json(ask): axum::Json<serde_json::Value>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let Some(service) = ask["service"].as_str() else { return refused("expected {service, status | note}") };
+    match h.report.report(service, &ask).await {
+        Ok(answer) => axum::Json(answer).into_response(),
+        Err(e) => (axum::http::StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
+    }
 }
 
 /// What a holder is asked for a screenshot: `{service, env, opts}`.
@@ -141,12 +177,19 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
+    impl Report for Here {
+        async fn report(&self, service: &str, ask: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+            Ok(serde_json::json!(format!("{} reported {service} {}", self.0, ask["note"]["number"])))
+        }
+    }
+
     async fn node(store: &MemoryStore, id: &'static str) -> Arc<Cluster> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (store, url) = (store.clone(), format!("http://{addr}"));
         let cluster = tokio::task::spawn_blocking(move || Cluster::join(Box::new(Memory::new(store)), ClusterConfig::for_tests(id, url, "0123456789abcdef0123")).unwrap()).await.unwrap();
-        let app = internal_router(Arc::new(Here(id)), cluster.clone()).merge(cluster.router());
+        let app = internal_router(Arc::new(Here(id)), Arc::new(Here(id)), cluster.clone()).merge(cluster.router());
         tokio::spawn(async move { axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap() });
         cluster
     }
@@ -174,6 +217,9 @@ mod tests {
         // An agent's run on its page (`…/try`) goes the same way, its answer whole.
         let tried = try_page(Some(&a), &Here("a"), &theirs, "pv-1", "/cart", &[Step::Press("Tab".into())]).await.unwrap().unwrap();
         assert_eq!((tried.text, tried.png, tried.errors), (format!("b tried {theirs} pv-1 /cart 1"), Some(vec![137, 80]), vec!["boom".to_string()]), "tried on the holder");
+        // A report on its GitLab or Bitbucket repository: on the holder too (its Git login's use).
+        let note = report(Some(&a), &Here("a"), &theirs, serde_json::json!({ "note": { "repo": "acme/site", "number": 4, "body": "x" } })).await.unwrap();
+        assert_eq!(note, serde_json::json!(format!("b reported {theirs} 4")), "reported on the holder");
         // Not a node's signed hop: refused, whatever it asks; a node's, only for a preview's environment.
         let b_url = b.nodes().into_iter().find(|n| n.id == "b").unwrap().url;
         let unsigned = reqwest::Client::builder().no_proxy().build().unwrap().post(format!("{b_url}{SHOT}")).json(&serde_json::json!({ "service": theirs, "env": "pv-1", "opts": {} })).send().await.unwrap();

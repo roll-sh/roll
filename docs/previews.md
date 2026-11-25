@@ -636,8 +636,13 @@ none of the service's environments follows, after checking the branch really is 
   change's gets, edited in place, saying "deleted" when it goes. Each is posted only when it
   changed, and what was posted (the comment's id too) is kept, so a restart posts nothing new.
   Through the `GitReport` port: rolld posts with roll apps' GitHub App connection (a short-lived
-  token for that one repository; never the service's git login); a service that isn't connected
-  gets nothing. The project's `github.status` and `github.comment` switches hold as for a roll
+  token for that one repository; never the service's git login). A service on GitLab or
+  Bitbucket gets the same through roll apps (`Apps::commit_status`, `Apps::pull_request_note`:
+  `roll/preview` on the commit, and one note on the merge request edited in place, made again
+  when it was deleted there), with the service's Git login, sent only to its source's own host
+  through the client for tenant-chosen URLs. It's posted on the service's holder, which uses
+  that login: a signed fleet hop (`fleet::REPORT`) when that's another node. A service with
+  neither gets nothing. The project's `github.status` and `github.comment` switches hold as for a roll
   code change's. A comment's number and id belong to the repository its pull request's page
   names: once the service is connected to another repository, nothing is posted there (an
   independent review's finding). `a_git_url_preview_reports_its_status_and_pull_request_comment`.

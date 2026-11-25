@@ -199,6 +199,8 @@ pub fn start(
     roll_apps.feedback = apps.is_some();
     let apps_for_notes = apps.clone();
     let shots: Option<Arc<dyn fleet::Shoot>> = apps.clone().map(|a| Arc::new(services::AppsShots { reach: Arc::new(services::AppsReach(a)), runtime: runtime.clone() }) as Arc<dyn fleet::Shoot>);
+    // And the holder's side of a report on a service's GitLab or Bitbucket repository.
+    let apps_report: Option<Arc<dyn fleet::Report>> = apps.clone().map(|a| Arc::new(services::AppsReport(a)) as Arc<dyn fleet::Report>);
     let engine = roll_previews::Engine::new(
         {
             let mut c = roll_previews::engine::Config { domain, port: Some(args.api.port()), mail: Some(format!("127.0.0.1:{}", args.previews_smtp.port())), otlp: Some(format!("127.0.0.1:{}", args.api.port())), ..Default::default() };
@@ -230,7 +232,7 @@ pub fn start(
         // Its pushes to branches of a Git URL service: those branches' previews.
         a.set_git_pushes(Arc::new(services::GitPushes(Arc::downgrade(&engine))));
         // And their status and pull request comment, where the code lives (roll's GitHub App).
-        let _ = engine.git_report.set(Arc::new(services::GitReport { api: api.clone(), code: code.code.clone() }));
+        let _ = engine.git_report.set(Arc::new(services::GitReport { api: api.clone(), code: code.code.clone(), elsewhere: Some(services::ThroughApps { local: Arc::new(services::AppsReport(a.clone())), cluster: clustered.then(|| cluster.clone()) }) }));
         // roll.toml services' output to the project's log drains that take previews'.
         let _ = engine.drains.set(Arc::new(services::AppsDrains { apps: a.clone(), wanted: Default::default() }));
     }
@@ -251,7 +253,7 @@ pub fn start(
     drop(engine.start());
     crate::logs::PreviewMetrics::start(&engine);
     tracing::info!("roll previews: on");
-    let internal = shots.filter(|_| clustered).map(|s| fleet::internal_router(s, cluster.clone()));
+    let internal = shots.filter(|_| clustered).zip(apps_report).map(|(s, r)| fleet::internal_router(s, r, cluster.clone()));
     Ok(Running { engine, runtime, internal })
 }
 
