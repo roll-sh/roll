@@ -19,8 +19,8 @@ use crate::obj;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-/// A registered repository.
-#[derive(Clone, Debug, PartialEq)]
+/// A registered repository (`Debug` prints its credentials' names, never their values).
+#[derive(Clone, PartialEq)]
 pub struct Repository {
     pub ty: String,
     pub settings: Settings,
@@ -38,6 +38,17 @@ pub struct Repository {
 /// The `client` of roll's default repository: an `s3` repository on the cluster's own object
 /// storage ([`Repository::roll_default`]). Tenants can't name it.
 pub const ROLL_CLIENT: &str = "roll";
+
+impl std::fmt::Debug for Repository {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Repository")
+            .field("ty", &self.ty)
+            .field("settings", &self.settings)
+            .field("secrets", &self.secrets.keys().map(|k| (k, "<redacted>")).collect::<BTreeMap<_, _>>())
+            .field("refs_by", &self.refs_by)
+            .finish()
+    }
+}
 
 impl Repository {
     pub fn new(ty: impl Into<String>, settings: Settings) -> Repository {

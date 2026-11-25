@@ -1362,15 +1362,39 @@ impl Store {
         })?)
     }
 
-    /// Seals every remote's credentials still in the clear (linked on a node without a sealing
-    /// key), each with `seal`, only where the row still holds what was read: a node that gains a
-    /// key seals them as it starts, rather than failing to open them.
-    pub async fn seal_remote_credentials(&self, seal: impl Fn(&RemoteLink) -> String) -> anyhow::Result<usize> {
+    /// `plain` sealed for `kind` with the store's key: the deployment's, or on a single node
+    /// without one the node's own ([`Store::open`]), so nothing is kept in the clear.
+    pub fn seal_secret(&self, kind: &str, plain: &str) -> String {
+        self.sealer.seal_text(kind, plain)
+    }
+
+    /// What [`Store::seal_secret`] sealed for `kind` (with the former key too, until it's sealed
+    /// again); a value an older node kept in the clear as it is. `None`: sealed under another key,
+    /// for another row, or tampered with.
+    pub fn open_secret(&self, kind: &str, stored: &str) -> Option<String> {
+        if !is_sealed(stored) {
+            return Some(stored.to_string());
+        }
+        self.sealer.open_text(kind, stored).or_else(|| self.former.as_ref()?.open_text(kind, stored))
+    }
+
+    /// Seals with the store's key every remote's credentials kept otherwise (in the clear by an
+    /// older node without a key, or under the node's own key before it had the deployment's), only
+    /// where the row still holds what was read. Run as the store's owner starts.
+    pub async fn seal_remote_credentials(&self) -> anyhow::Result<usize> {
         let rows: Vec<RemoteLink> = self.db.read(|x| x.query(&format!("SELECT {REMOTE_COLS} FROM search_remotes"), params![], remote_row))?;
-        let legacy: Vec<(RemoteLink, String)> = rows.into_iter().filter(|r| !is_sealed(&r.credentials)).map(|r| {
-            let sealed = seal(&r);
-            (r, sealed)
-        }).collect();
+        let legacy: Vec<(RemoteLink, String)> = rows
+            .into_iter()
+            .filter_map(|r| {
+                let kind = crate::remotes::kind(&r.cluster_id, &r.alias, &r.target_id);
+                if is_sealed(&r.credentials) && self.sealer.open_text(&kind, &r.credentials).is_some() {
+                    return None;
+                }
+                let plain = self.open_secret(&kind, &r.credentials)?;
+                let sealed = self.sealer.seal_text(&kind, &plain);
+                Some((r, sealed))
+            })
+            .collect();
         if legacy.is_empty() {
             return Ok(0);
         }
