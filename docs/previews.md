@@ -2281,7 +2281,9 @@ type Settings = {
     module's `name`, those it concatenates, and the `reasons` that import it), walked up from the
     changed files; the graph is the preview's code's, so it only orders the stories, and its read
     (64 MiB, 15 s) and walk (200,000 edges, 50,000 modules) are bounded. Without it, by files
-    alone. `stories_the_change_touched_go_first`. (docs left out; the rest, and any not
+    alone. `stories_the_change_touched_go_first`. Live: a built Storybook's 41 stories in a real
+    browser, the last in its index reached through `preview-stats.json` taken and the 40th
+    listed said as left. (docs left out; the rest, and any not
     reached in its 100 s, are said: `skipped.stories` with the first ten ids, on the sheet and in
     the comment's **Not taken**, as are pages past a run's ten) in a run of its own
     beside the screenshot's, in the service's network and locked down the same way. Each story is
