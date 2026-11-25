@@ -994,15 +994,86 @@ pub fn checks_items(ctx: &Ctx) -> bool {
     ctx.principal.get().is_some_and(|p| !p.is_superuser())
 }
 
+/// Whether the caller's document or field level security (or OpenSearch's field masking)
+/// restricts `index` for `action`, where an update would read and rewrite what it can't see:
+/// the action itself on Elasticsearch (`IndicesAccessControl` of the update or shard request),
+/// the reads on OpenSearch (the plugin's DLS and FLS are read restrictions).
+fn update_restricted(ctx: &Ctx, p: &Principal, action: &str, index: &str) -> bool {
+    let action = if p.os().is_some() { dls::READ } else { action };
+    dls::ReadSecurity::of(ctx).is_some_and(|s| s.restricts(action, index))
+}
+
+/// An update an index's document or field level security restricts for the caller isn't run:
+/// it would read the whole document and write it back (Elasticsearch's
+/// `UpdateRequestInterceptor`, 400; OpenSearch's DLS/FLS valve, 500). `index` is the index the
+/// update writes to.
+pub fn check_update(ctx: &Ctx, index: &str) -> EsResult<()> {
+    let Some(p) = ctx.principal.get().filter(|p| !p.is_superuser()) else { return Ok(()) };
+    if !update_restricted(ctx, p, "indices:data/write/update", index) {
+        return Ok(());
+    }
+    Err(update_refusal(p, "Can't execute an update request if field or document level security is enabled"))
+}
+
+fn update_refusal(p: &Principal, es_reason: &str) -> EsError {
+    if p.os().is_some() {
+        return EsError::security(500, "Update is not supported when FLS or DLS or Fieldmasking is activated");
+    }
+    EsError::security(400, es_reason)
+}
+
+/// [`check_update`] for a bulk request's update items, added to `out` (the items' errors so far):
+/// Elasticsearch fails each such update item (`BulkShardRequestInterceptor`, its error repeated
+/// as suppressed); OpenSearch fails every item of the shard request holding one.
+fn refuse_updates(ctx: &Ctx, p: &Principal, items: &[WriteItem], out: &mut [Option<EsError>]) {
+    const SHARD: &str = "indices:data/write/bulk[s]";
+    const REASON: &str = "Can't execute a bulk item request with update requests embedded if field or document level security is enabled";
+    let refused: Vec<usize> = (0..items.len()).filter(|&i| out[i].is_none() && items[i].op == WriteOp::Update && update_restricted(ctx, p, SHARD, &items[i].shard.0)).collect();
+    if refused.is_empty() {
+        return;
+    }
+    let e = update_refusal(p, REASON);
+    if p.os().is_some() {
+        for i in 0..items.len() {
+            if out[i].is_none() && refused.iter().any(|&r| items[r].shard == items[i].shard) {
+                out[i] = Some(e.clone());
+            }
+        }
+        return;
+    }
+    for i in refused {
+        out[i] = Some(e.clone().with_suppressed(vec![e.clone()]));
+    }
+}
+
 /// Elasticsearch's checks of the writes of a request whose own action was authorized by name
 /// (`TransportBulkAction`, `AuthorizationService.authorizeBulkItems`), in its order:
 /// `indices:admin/auto_create` on an index a write creates; `indices:data/write/bulk[s]` on
 /// every name written to a shard, where one denied name fails all of the shard's writes; then
 /// each write's own action on its name. The error of each denied item, `None` for the others.
 pub fn authorize_writes(ctx: &Ctx, items: &[WriteItem]) -> Vec<Option<EsError>> {
-    match ctx.principal.get().filter(|p| !p.is_superuser()) {
-        Some(p) => check_writes(p, &effective(&file_roles(ctx.cluster), &ctx.state(), p), items),
-        None => vec![None; items.len()],
+    BatchWrites::of(ctx).check(ctx, items)
+}
+
+/// The caller's permissions for [`authorize_writes`], computed once for writes sent together
+/// (a reindex batch: one bulk request in Elasticsearch) instead of once per write.
+pub struct BatchWrites<'a>(Option<(&'a Principal, Effective)>);
+
+impl<'a> BatchWrites<'a> {
+    pub fn of(ctx: &'a Ctx) -> BatchWrites<'a> {
+        BatchWrites(ctx.principal.get().filter(|p| !p.is_superuser()).map(|p| (p, effective(&file_roles(ctx.cluster), &ctx.state(), p))))
+    }
+
+    /// [`authorize_writes`] of `items`.
+    pub fn check(&self, ctx: &Ctx, items: &[WriteItem]) -> Vec<Option<EsError>> {
+        match &self.0 {
+            Some((p, eff)) => {
+                let mut out = check_writes(p, eff, items);
+                refuse_updates(ctx, p, items, &mut out);
+                out
+            }
+            None => vec![None; items.len()],
+        }
     }
 }
 

@@ -182,7 +182,11 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
   actions, a by-query `refresh=true` refused after its writes, a plain `Unauthorized` 401.
   Document and field level security and masked fields (BLAKE2b with
   `plugins.security.compliance.salt`, `::/regex/::replacement` and `::SHA-256`/`::SHA-512`
-  rules; the union over roles) by `os_security_dls.json` (16 steps). Differences: a DLS query
+  rules; the union over roles) by `os_security_dls.json` (16 steps). Where they restrict an
+  index, an update is refused (500 `security_exception` "Update is not supported when FLS or
+  DLS or Fieldmasking is activated"; in `_bulk`, every item of the shard request holding the
+  update), and an update by query writes back only what the user reads, as Elasticsearch's
+  does. Differences: a DLS query
   filters without adding OpenSearch's +1.0 to scores; masked fields are unmapped for queries
   and aggregations (OpenSearch aggregates and matches their hashes); mappings by `hosts` never
   match (roll doesn't see the client's address); `hash`es given by clients are bcrypt (as the
@@ -1120,7 +1124,17 @@ Checked against Elasticsearch 9.5.5 (captures in
   index), then its source searched as the caller (wildcards narrowed to what it may read, its
   document and field level security applied, so only what it sees is copied) and each write
   authorized as a bulk item at the index it goes to (a script's `_index` and `ctx.op = 'delete'`
-  too); a remote source is read with its own credentials. A
+  too); a remote source is read with its own credentials. An update reads the whole document
+  and writes it back, so where the caller's document or field level security restricts the
+  index, `_update` (an upsert too) answers 400 `security_exception` "Can't execute an update
+  request if field or document level security is enabled" and a bulk update item fails the
+  same way ("… a bulk item request with update requests embedded …", the error repeated as
+  `suppressed`, as Elasticsearch prints it), the request's other items unaffected. An update by
+  query reads as the caller, as Elasticsearch's scroll does: only the documents it sees, their
+  `_source` without the fields it can't see, and it writes them back so: those fields are
+  dropped from the documents (a script reading one gets `null`). Difference: Elasticsearch
+  refreshes a by-query `refresh=true` as the caller (403 without `maintenance`); roll refreshes
+  it as the cluster. A
   stored result (async search, ES|QL, EQL, SQL, and SQL cursors) is its opener's (the API key, or
   the user and realm): anyone else gets 404 for it, its status and its delete (a cursor: unknown),
   except that `cancel_task` may delete it. One stored before owners were recorded is the

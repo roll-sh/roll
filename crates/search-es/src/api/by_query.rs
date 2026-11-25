@@ -90,8 +90,8 @@ struct ShardScan {
     /// source gets the vectors it keeps out back, as Elasticsearch shows them (reindex writes
     /// them to the destination, update by query's scripts see them).
     vectors: Option<Arc<crate::engine::fields::FieldTable>>,
-    /// The reader's field level security on the index (reindex): `_source` without the fields
-    /// it may not see.
+    /// The reader's field level security on the index (reindex, update by query): `_source`
+    /// without the fields it may not see.
     fields: Option<crate::xpack::security::dls::FieldFilter>,
 }
 
@@ -158,8 +158,9 @@ fn merge_key(by_shard: bool, doc: u32, shard: usize) -> u64 {
 /// (`search_phase_execution_exception`, "all shards failed" / "Partial shards failure");
 /// `need_source` (reindex, update by query) rejects documents without a stored `_source`;
 /// `by_shard` (reindex) reads the shards one after the other (see [`Scanner`]); `read_fields`
-/// (reindex) leaves out of `_source` the fields the reader's field level security hides, as
-/// the scroll a reindex opens as its caller returns them. The search runs
+/// (reindex, update by query) leaves out of `_source` the fields the reader's field level
+/// security hides, as the scroll they open as their caller returns them: an update by query
+/// writes the documents back without them, as Elasticsearch's does. The search runs
 /// as an `indices:data/read/search` child of task `parent` (with its per-shard children), as
 /// the scroll an Elasticsearch by-query run opens does.
 #[allow(clippy::too_many_arguments)]
@@ -1114,6 +1115,7 @@ async fn reindex_remote(ctx: &Ctx<'_>, plan: &ReindexPlan, req: &super::by_query
             let sds: Vec<SourceDoc> = docs.into_iter().map(|d| SourceDoc { index: d.index, id: d.id, routing: d.routing, version: d.version, source: d.source }).collect();
             reject_versioned_deletes(ctx, plan, sds.iter())?;
             let mut stop = false;
+            let writes = crate::xpack::security::BatchWrites::of(ctx);
             for sd in &sds {
                 // A cancel (also the node unloading the cluster) stops between documents: nothing
                 // is written into a cluster being unloaded.
@@ -1122,7 +1124,7 @@ async fn reindex_remote(ctx: &Ctx<'_>, plan: &ReindexPlan, req: &super::by_query
                     publish(live, &s, &throttle);
                     return Ok(());
                 }
-                if let Flow::Stop = reindex_doc(ctx, plan, sd, &mut s, &mut touched).await? {
+                if let Flow::Stop = reindex_doc(ctx, plan, &writes, sd, &mut s, &mut touched).await? {
                     stop = true;
                 }
             }
@@ -1295,7 +1297,7 @@ pub async fn update_by_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
         let one = |slice: Option<(u32, u32)>, max_docs: Option<u64>, live: Arc<Live>| {
             let (indices, query, routing, bound, pipeline) = (&indices, &query, &routing, &bound, &pipeline);
             async move {
-                let mut scanner = match scan(ctx, indices, query.as_ref(), routing.as_deref(), max_docs, slice, true, false, false, live.task) {
+                let mut scanner = match scan(ctx, indices, query.as_ref(), routing.as_deref(), max_docs, slice, true, false, true, live.task) {
                     Ok(sc) => sc,
                     Err(_) if live.is_cancelled() => return Ok((cancelled_before_start(&live), Vec::new())),
                     Err(e) => return Err(e),
@@ -1453,17 +1455,19 @@ fn reject_versioned_deletes<'a>(ctx: &Ctx<'_>, p: &ReindexPlan, docs: impl Itera
 
 /// A reindex's write of document `id` to `index`, authorized as the caller's bulk item would be
 /// (`authorize_writes`: creating the index, the shard action, the item's own action), wherever
-/// the document goes: the destination, or the index a script moved it to.
-fn check_dest_write(ctx: &Ctx<'_>, index: &str, op: crate::xpack::security::WriteOp, id: &str, routing: Option<&str>) -> EsResult<()> {
-    let item = crate::xpack::security::WriteItem::new(&ctx.state(), index.to_string(), op, id, routing);
-    match crate::xpack::security::authorize_writes(ctx, std::slice::from_ref(&item)).pop().flatten() {
+/// the document goes: the destination, or the index a script moved it to; at the name its date
+/// math resolves to, as `_bulk` authorizes it. `writes`: the caller's permissions for the batch.
+fn check_dest_write(ctx: &Ctx<'_>, writes: &crate::xpack::security::BatchWrites, index: &str, op: crate::xpack::security::WriteOp, id: &str, routing: Option<&str>) -> EsResult<()> {
+    let name = crate::meta::resolve::resolve_date_math(index, ctx.now_ms)?;
+    let item = crate::xpack::security::WriteItem::new(&ctx.state(), name, op, id, routing);
+    match writes.check(ctx, std::slice::from_ref(&item)).pop().flatten() {
         Some(e) => Err(e),
         None => Ok(()),
     }
 }
 
 /// Writes one document read by a reindex.
-async fn reindex_doc(ctx: &Ctx<'_>, p: &ReindexPlan, d: &SourceDoc, s: &mut Status, touched: &mut Vec<String>) -> EsResult<Flow> {
+async fn reindex_doc(ctx: &Ctx<'_>, p: &ReindexPlan, writes: &crate::xpack::security::BatchWrites<'_>, d: &SourceDoc, s: &mut Status, touched: &mut Vec<String>) -> EsResult<Flow> {
     let mut src = reindex_source(p, d)?;
     let mut index = p.dest_index.clone();
     let mut id = d.id.clone();
@@ -1491,7 +1495,7 @@ async fn reindex_doc(ctx: &Ctx<'_>, p: &ReindexPlan, d: &SourceDoc, s: &mut Stat
                 };
                 let did = nid.unwrap_or_else(|| d.id.clone());
                 let r = if nr != d.routing { nr } else { routing.clone() };
-                if let Err(e) = check_dest_write(ctx, &di, crate::xpack::security::WriteOp::Delete, &did, r.as_deref()) {
+                if let Err(e) = check_dest_write(ctx, writes, &di, crate::xpack::security::WriteOp::Delete, &did, r.as_deref()) {
                     s.failure_status = s.failure_status.max(e.status);
                     s.failures.push(failure(&di, &did, &e));
                     return Ok(Flow::Stop);
@@ -1545,7 +1549,7 @@ async fn reindex_doc(ctx: &Ctx<'_>, p: &ReindexPlan, d: &SourceDoc, s: &mut Stat
         args.version = Some(version);
     }
     let op = if p.op_create { crate::xpack::security::WriteOp::Create } else { crate::xpack::security::WriteOp::Index };
-    let checked = match (check_dest_write(ctx, &index, op, &id, args.routing.as_deref()), write::resolve_existing(&ctx.state(), &index)) {
+    let checked = match (check_dest_write(ctx, writes, &index, op, &id, args.routing.as_deref()), write::resolve_existing(&ctx.state(), &index)) {
         (Err(e), _) => Err(e),
         (Ok(()), Some(meta)) => check_copies(ctx, &meta, &id, args.routing.as_deref(), Some(&src[..])).await,
         (Ok(()), None) => Ok(()),
@@ -1696,8 +1700,9 @@ pub async fn reindex(ctx: &Ctx<'_>) -> EsResult<Reply> {
                             s.batches += 1;
                             let sds: Vec<SourceDoc> = docs.into_iter().map(|d| SourceDoc { index: d.index.name.clone(), id: d.id, routing: d.routing, version: d.version, source: d.source }).collect();
                             reject_versioned_deletes(ctx, plan, sds.iter())?;
+                            let writes = crate::xpack::security::BatchWrites::of(ctx);
                             for sd in &sds {
-                                if let Flow::Stop = reindex_doc(ctx, plan, sd, &mut s, &mut touched).await? {
+                                if let Flow::Stop = reindex_doc(ctx, plan, &writes, sd, &mut s, &mut touched).await? {
                                     stop = true;
                                 }
                             }
