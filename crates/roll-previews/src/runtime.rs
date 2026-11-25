@@ -2083,7 +2083,7 @@ impl Runtime {
         // Its Storybook's stories, in a run of their own alongside (`github.storybook`).
         let stories_run = async {
             match opts.stories.as_deref().filter(|p| crate::settings::page_path_ok(p) && p.ends_with('/')) {
-                Some(at) => Some(self.stories_in(name, port, at).await),
+                Some(at) => Some(self.stories_in(name, port, at, &opts.changed).await),
                 None => None,
             }
         };
@@ -2160,10 +2160,23 @@ impl Runtime {
     /// A service's Storybook stories (`github.storybook`; Chromatic's stories), served at `at`: a
     /// run of their own in its network, locked down as the screenshot's is, each story a page
     /// (`story:<id>`).
-    async fn stories_in(&self, name: &str, port: u16, at: &str) -> anyhow::Result<(Vec<crate::ports::PageShot>, crate::Skipped)> {
+    async fn stories_in(&self, name: &str, port: u16, at: &str, changed: &[String]) -> anyhow::Result<(Vec<crate::ports::PageShot>, crate::Skipped)> {
         let shot = format!("roll-previews-story-{}", name.trim_start_matches("roll-previews-"));
         let mut args = shot_args(&shot, name, port);
         args.extend(["--env".into(), format!("STORIES={at}")]);
+        // What the change touched, so its stories go first: as many paths as fit in 64 KiB.
+        let mut fit = Vec::new();
+        let mut size = 0;
+        for p in changed.iter().filter(|p| p.len() <= 400 && !p.chars().any(char::is_control)) {
+            size += p.len() + 4;
+            if size > 64 << 10 {
+                break;
+            }
+            fit.push(p);
+        }
+        if !fit.is_empty() {
+            args.extend(["--env".into(), format!("STORIES_CHANGED={}", serde_json::to_string(&fit)?)]);
+        }
         args.extend([
             self.cfg.screenshot_image.clone(),
             "sh".into(),
@@ -3290,6 +3303,19 @@ mod tests {
         assert_eq!(step_ms(r#"[{"path":"/pricing","step_ms":120.4}]"#), [Some(120)]);
         assert_eq!(step_ms(r#"[{"path":"/pricing","step_ms":1e12}]"#), [None]);
         assert_eq!(step_ms(r#"[{"path":"/pricing","step_ms":-3}]"#), [None]);
+    }
+
+    /// A run's stories put the ones the change touched first: a story whose own file changed,
+    /// then one beside a changed file, then the rest in the index's order (Chromatic's
+    /// TurboSnap); a repo's path matches a project's by its end, and the repo's root by nothing.
+    /// `shot.js`'s own function, run by `node`.
+    #[test]
+    fn stories_the_change_touched_go_first() {
+        let src = SHOT_JS.split("// touched-first: start").nth(1).and_then(|s| s.split("// touched-first: end").next()).expect("the function");
+        let entries = r#"[{"id":"a--1","importPath":"./src/A.stories.tsx"},{"id":"b--1","importPath":"./src/b/B.stories.tsx"},{"id":"c--1","importPath":"./src/c/C.stories.tsx"},{"id":"d--1"}]"#;
+        let changed = r#"["web/src/c/C.stories.tsx","web/src/b/B.tsx","README.md"]"#;
+        let out = std::process::Command::new("node").arg("-e").arg(format!("{src}\nconsole.log(touchedFirst({entries}, {changed}).map((e) => e.id).join(','))")).output().expect("node");
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "c--1,b--1,a--1,d--1", "{}", String::from_utf8_lossy(&out.stderr));
     }
 
     /// A stories run's report is the preview's code's: each story once, by an id Storybook would

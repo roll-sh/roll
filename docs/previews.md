@@ -2265,7 +2265,11 @@ type Settings = {
     Its Storybook's stories too (Chromatic's stories): with `github.storybook` (`web`, or
     `web:/storybook/` when the service serves it under a path: a static build or `storybook
     dev`), that service's run reads Storybook's index (`index.json`, Storybook 7 and later;
-    `stories.json` before), and takes the first 40 stories (docs left out; the rest, and any not
+    `stories.json` before), and takes 40 stories, those the change touched first (Chromatic's
+    TurboSnap, without a bundler's graph: a story whose own file the change changed since the
+    default branch, then one beside a file it changed, its component or its styles, then the rest
+    in the index's order; a repo's path matches a story's `importPath` by its end; the change's own
+    repo's paths, `$STORIES_CHANGED`, at most 64 KiB of them) (docs left out; the rest, and any not
     reached in its 100 s, are said: `skipped.stories` with the first ten ids, on the sheet and in
     the comment's **Not taken**, as are pages past a run's ten) in a run of its own
     beside the screenshot's, in the service's network and locked down the same way. Each story is
@@ -2805,11 +2809,10 @@ Ranked by what a person notices first. Done so far:
 Ranked again after a sixth product review (2026-11-25), against Vercel's and Netlify's previews and
 comments, Render and Railway, Neon, Chromatic and Percy, Signadot, Jam.
 
-1. **Coverage that's cut says so, in review**: a screenshot run's pages past its ten (the
-   project's, the repo's `roll.toml`, widths, modes and states together) and Storybook's stories
-   it didn't take (past forty, or out of its 100 s) are `skipped` on the record for its head, a
-   line on the sheet and **Not taken** in the pull request's comment. Next for it: stories chosen
-   by what the change touched (Chromatic's TurboSnap) rather than the first forty.
+1. **The stories a change touched first, in review**: a run's 40 stories are those whose file
+   the change changed, then those beside a file it changed, then the rest (`touchedFirst` in
+   `shot.js`). Next for it: a bundler's module graph (Storybook's `--stats-json`) for stories that
+   import a changed file from elsewhere.
 2. **Signed in to a page that really sits behind a login, live**: screenshots, every engine and
    `try` sign in (`github.login`, landed); the live check proves the stdin path and the stop at
    a missing field, not a page that only answers once signed in.
@@ -2849,6 +2852,8 @@ comments, Render and Railway, Neon, Chromatic and Percy, Signadot, Jam.
 
 
 
+
+Landed 2026-11-25, late morning: what a screenshot run left out, said (#997: `skipped` on the record, the sheet and the comment); a branch's `PGOPTIONS` and `PGSSLMODE` (#999, found by roll apps' review).
 
 Landed 2026-11-25, morning: screenshots signed in to the app (#980: `github.login`, `$NAME` from
 the preview's environment, trusted previews only), in every engine (#986), and agents' runs
