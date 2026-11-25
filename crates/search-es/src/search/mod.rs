@@ -4836,12 +4836,13 @@ pub(crate) const LOOKUP_TERM_VECTORS: &str = "indices:data/read/mtv[shard]";
 /// `_source` (`None`: not stored) without the fields the reader's field level security hides,
 /// as a get by the reader answers.
 pub(crate) fn lookup_source(ctx: &QueryCtx, action: &str, requested: &str, idx: &Arc<IndexMeta>, id: &str, routing: Option<&str>) -> EsResult<Option<(i64, Option<Value>)>> {
-    use crate::xpack::security::dls::READ;
     let sec = ctx.security.read_lookup(ctx.cluster, action, requested)?;
+    // The read's own document and field level security: the role entries granting `action`
+    // (a role may grant gets alone, with a query of their own).
     let engine = ctx.cluster.engine.index(ctx.cluster, ctx.st, idx)?;
     let shard = engine.shard(crate::meta::routing::shard_for(idx, id, routing));
     let Some(doc) = shard.shard.get(id.as_bytes(), true).map_err(crate::engine::convert::index_error)? else { return Ok(None) };
-    let fields = match sec.map(|s| s.documents(ctx.cluster, READ, &idx.name)).transpose()?.flatten() {
+    let fields = match sec.map(|s| s.documents(ctx.cluster, action, &idx.name)).transpose()?.flatten() {
         None => doc.fields,
         // Under document level security the document is read from the searcher the filter is
         // checked on (a document not searchable yet isn't visible).
@@ -4855,7 +4856,7 @@ pub(crate) fn lookup_source(ctx: &QueryCtx, action: &str, requested: &str, idx: 
     };
     let Some(src) = crate::fetch::source_bytes(&fields) else { return Ok(Some((doc.version, None))) };
     let src = crate::fetch::parse_source(src)?;
-    Ok(Some((doc.version, Some(match sec.and_then(|s| s.fields(READ, &idx.name)) {
+    Ok(Some((doc.version, Some(match sec.and_then(|s| s.fields(action, &idx.name)) {
         Some(f) => f.filter_source(src),
         None => src,
     }))))
