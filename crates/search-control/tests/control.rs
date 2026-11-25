@@ -1307,6 +1307,23 @@ async fn browser_search_works_on_a_preview_branch() {
     let again = e.post(&format!("{branch}/browser-keys/from-parent"), json!({})).await;
     assert_eq!(again["keys"].as_array().unwrap().len(), 2, "{again}");
     assert_eq!(search(key, "https://web-pv-shop.preview.test").await.unwrap().status().as_u16(), 401, "the earlier key");
+    // The parent's later changes reach the branch with roll previews' next pass (`…/prune`): the
+    // copy of a revoked key, and of a key whose secret rotated, are revoked; nothing else is.
+    let copies: Vec<Value> = again["keys"].as_array().unwrap().clone();
+    let copy_of = |parent: &Value| copies.iter().find(|k| k["parent_key"] == parent["id"]).unwrap().clone();
+    let (site_copy, saas_copy) = (copy_of(&site), copy_of(&saas));
+    let pruned = e.post(&format!("{branch}/browser-keys/from-parent/prune"), json!({})).await;
+    assert_eq!(pruned["revoked"], json!([]), "nothing changed yet");
+    let (s, _) = e.call(reqwest::Method::DELETE, &format!("{path}/browser-keys/{}", site["id"].as_str().unwrap()), None).await;
+    assert_eq!(s, 204);
+    e.post(&format!("{path}/browser-keys/{}/rotate", saas["id"].as_str().unwrap()), json!({})).await;
+    let pruned = e.post(&format!("{branch}/browser-keys/from-parent/prune"), json!({})).await;
+    let mut revoked: Vec<&str> = pruned["revoked"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    revoked.sort();
+    let mut want = vec![site_copy["id"].as_str().unwrap(), saas_copy["id"].as_str().unwrap()];
+    want.sort();
+    assert_eq!(revoked, want, "{pruned}");
+    assert_eq!(search(site_copy["api_key"].as_str().unwrap(), "https://web-pv-shop.preview.test").await.unwrap().status().as_u16(), 401);
     // Only a branch has a parent to copy.
     let (s, _) = e.call(reqwest::Method::POST, &format!("{path}/browser-keys/from-parent"), Some(json!({}))).await;
     assert_eq!(s, 409);

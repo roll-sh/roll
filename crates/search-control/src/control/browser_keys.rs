@@ -229,7 +229,7 @@ fn listed(k: &Value, cluster_id: &str) -> Option<Value> {
         "expires_at": k.get("expiration").and_then(Value::as_i64).map(|ms| ms / 1000),
         "rate_limit": meta.get("rate_limit").cloned().unwrap_or(Value::Null),
     });
-    for f in ["indices", "application", "filter", "limits", "from_parent"] {
+    for f in ["indices", "application", "filter", "limits", "from_parent", "from_parent_generation"] {
         if let Some(v) = meta.get(f) {
             out[f] = v.clone();
         }
@@ -239,6 +239,10 @@ fn listed(k: &Value, cluster_id: &str) -> Option<Value> {
     out["derivable"] = json!(derive.is_some());
     if let Some(at) = derive.and_then(|d| d.get("rotated_at")) {
         out["secret_rotated_at"] = at.clone();
+    }
+    // Which of its secrets signs now (never the secret): a branch's copy of it is stale once it moves.
+    if let Some(g) = derive.and_then(|d| d.get("generation")) {
+        out["secret_generation"] = g.clone();
     }
     Some(out)
 }
@@ -251,8 +255,9 @@ impl Control {
     }
 
     /// [`Control::create_browser_key`]; `from_parent`: the key of the cluster's parent it stands
-    /// in for on this branch ([`Control::copy_parent_browser_keys`]), kept in its metadata.
-    async fn make_browser_key(&self, id: &str, k: NewBrowserKey, from_parent: Option<&str>) -> Result<Value> {
+    /// in for on this branch, and the generation of that key's signing secret when it was copied
+    /// ([`Control::copy_parent_browser_keys`]), kept in its metadata.
+    async fn make_browser_key(&self, id: &str, k: NewBrowserKey, from_parent: Option<(&str, Option<i64>)>) -> Result<Value> {
         let c = self.get(id).await?;
         if c.flavor == "opensearch" {
             return Err(ControlError::Invalid("browser keys are API keys: make them on an Elasticsearch-flavor cluster (OpenSearch clients don't send API keys)".into()));
@@ -271,8 +276,11 @@ impl Control {
         // cluster's keys, and the node refuses a browser key anywhere but where it was made.
         let mut meta = reach.clone();
         meta["cluster"] = json!(c.id);
-        if let Some(p) = from_parent {
+        if let Some((p, generation)) = from_parent {
             meta["from_parent"] = json!(p);
+            if let Some(g) = generation {
+                meta["from_parent_generation"] = json!(g);
+            }
         }
         let mut body = json!({
             "name": k.name.trim(),
@@ -398,34 +406,85 @@ impl Control {
             }
         }
         let now = super::now();
-        let mut out = Vec::new();
+        let mut out: Vec<Value> = Vec::new();
         for p in parents {
-            let Some(pid) = p["id"].as_str() else { continue };
-            let expires_in_s = match p["expires_at"].as_i64() {
-                Some(at) if at <= now => continue,
-                Some(at) => Some(at - now),
-                None => None,
-            };
-            let strings = |v: &Value| v.as_array().map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>());
-            let n = |f: &str| p["rate_limit"][f].as_u64();
-            let k = NewBrowserKey {
-                name: p["name"].as_str().unwrap_or(pid).to_string(),
-                indices: strings(&p["indices"]),
-                application: p["application"].as_str().map(str::to_string),
-                filter: p.get("filter").cloned(),
-                expires_in_s,
-                rate_limit: Some(RateLimit { per_minute: n("per_minute"), per_ip_per_minute: n("per_ip_per_minute") }),
-                limits: p.get("limits").map(|l| serde_json::from_value(l.clone())).transpose().map_err(|e| ControlError::Internal(anyhow::anyhow!("browser key {pid}'s limits: {e}")))?,
-                derivable: Some(p["derivable"] == true),
-            };
-            let made = self.make_browser_key(id, k, Some(pid)).await?;
-            let mut one = json!({ "parent_key": pid, "id": made["id"], "name": made["name"], "api_key": made["api_key"], "derivable": made["derivable"] });
-            if let Some(secret) = made.get("signing_secret") {
-                one["signing_secret"] = secret.clone();
+            match self.copy_one(id, &p, now).await {
+                Ok(Some(one)) => out.push(one),
+                Ok(None) => {}
+                // Never half a set: what this call made goes too (its values were never handed out).
+                Err(e) => {
+                    for made in &out {
+                        if let Some(key) = made["id"].as_str() {
+                            let _ = self.delete_key_on(&c, key).await;
+                        }
+                    }
+                    return Err(e);
+                }
             }
-            out.push(one);
         }
         Ok(json!({ "keys": out }))
+    }
+
+    /// Branch `id`'s copy of its parent's browser key `p` (as listed), `None` for one that has
+    /// expired.
+    async fn copy_one(&self, id: &str, p: &Value, now: i64) -> Result<Option<Value>> {
+        let Some(pid) = p["id"].as_str() else { return Ok(None) };
+        let expires_in_s = match p["expires_at"].as_i64() {
+            Some(at) if at <= now => return Ok(None),
+            Some(at) => Some(at - now),
+            None => None,
+        };
+        let strings = |v: &Value| v.as_array().map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>());
+        let n = |f: &str| p["rate_limit"][f].as_u64();
+        let k = NewBrowserKey {
+            name: p["name"].as_str().unwrap_or(pid).to_string(),
+            indices: strings(&p["indices"]),
+            application: p["application"].as_str().map(str::to_string),
+            filter: p.get("filter").cloned(),
+            expires_in_s,
+            rate_limit: Some(RateLimit { per_minute: n("per_minute"), per_ip_per_minute: n("per_ip_per_minute") }),
+            limits: p.get("limits").map(|l| serde_json::from_value(l.clone())).transpose().map_err(|e| ControlError::Internal(anyhow::anyhow!("browser key {pid}'s limits: {e}")))?,
+            derivable: Some(p["derivable"] == true),
+        };
+        let made = self.make_browser_key(id, k, Some((pid, p["secret_generation"].as_i64()))).await?;
+        let mut one = json!({ "parent_key": pid, "id": made["id"], "name": made["name"], "api_key": made["api_key"], "derivable": made["derivable"] });
+        if let Some(secret) = made.get("signing_secret") {
+            one["signing_secret"] = secret.clone();
+        }
+        Ok(Some(one))
+    }
+
+    /// Revokes branch `id`'s copies of its parent's browser keys ([`Control::copy_parent_browser_keys`])
+    /// that no longer stand for one: its parent key revoked or expired, its signing secret
+    /// rotated since the copy (or the parent gone). Nothing is made again here: the next copy
+    /// (a reset of the preview's branch) hands out new ones. The ids it revoked.
+    pub async fn prune_parent_browser_keys(&self, id: &str) -> Result<Value> {
+        let c = self.get(id).await?;
+        let Some(parent_id) = c.parent_id.clone() else {
+            return Err(ControlError::Conflict(format!("cluster {} isn't a branch", c.name)));
+        };
+        let copies: Vec<Value> = self.browser_keys(id).await?.into_iter().filter(|k| k.get("from_parent").is_some()).collect();
+        if copies.is_empty() {
+            return Ok(json!({ "revoked": [] }));
+        }
+        let parents = match self.browser_keys(&parent_id).await {
+            Ok(k) => k,
+            Err(ControlError::NotFound(_)) => Vec::new(),
+            Err(e) => return Err(e),
+        };
+        let mut revoked = Vec::new();
+        for copy in copies {
+            let live = parents.iter().find(|p| p["id"] == copy["from_parent"]);
+            let stale = match live {
+                None => true,
+                Some(p) => p["secret_generation"].as_i64() != copy["from_parent_generation"].as_i64(),
+            };
+            if stale && let Some(key) = copy["id"].as_str() {
+                self.delete_key_on(&c, key).await?;
+                revoked.push(key.to_string());
+            }
+        }
+        Ok(json!({ "revoked": revoked }))
     }
 
     /// Cluster `id`'s browser keys that still work (not revoked, not expired), newest first.

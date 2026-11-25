@@ -109,12 +109,14 @@ pub trait Brancher: Send + Sync {
         Ok(())
     }
 
-    /// The preview's pages are served from `origins` now (`scheme://host[:port]`: its services'
-    /// URLs and its earlier pushes' pinned ones): a product whose branch answers browsers itself
-    /// lets those pages call it, and no others but its parent's (roll search's browser keys:
-    /// the branch's allowed origins). Called once the services are deployed, every pass, so it
-    /// must change nothing when nothing moved. Nothing by default.
-    async fn serve(&self, _parent: &str, _branch: &str, _kept: Option<&str>, _origins: &[String]) -> anyhow::Result<()> {
+    /// The pages using `branch` are served from `urls` now (the preview's services' URLs and its
+    /// earlier pushes' pinned ones; an earlier push with a copy of its own, its own URLs): a
+    /// product whose branch answers browsers itself lets those pages call it, and no others but
+    /// its parent's (roll search's browser keys: the branch's allowed origins; it reads each URL's
+    /// origin, and skips what isn't one), and follows what its parent changed since. Called once
+    /// the services are deployed, every pass, so it must change nothing when nothing moved; a
+    /// failure is a problem on the preview, never a failed pass. Nothing by default.
+    async fn serve(&self, _parent: &str, _branch: &str, _kept: Option<&str>, _urls: &[String]) -> anyhow::Result<()> {
         Ok(())
     }
 

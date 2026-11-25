@@ -846,13 +846,23 @@ impl Engine {
             }
         }
         // 4a. Where its pages are served from, for the branches that answer browsers themselves
-        // (roll search: a page that searches from the browser).
-        let mut origins: Vec<String> = self.store.services(&r.id)?.into_iter().map(|s| s.url).chain(self.store.pinned(&r.id)?.into_iter().map(|p| p.url)).filter_map(|u| origin_of(&u)).collect();
-        origins.sort();
-        origins.dedup();
+        // (roll search: a page that searches from the browser). Best effort: a branch that
+        // couldn't be told is a problem on the preview, the pass goes on.
+        let pinned = self.store.pinned(&r.id)?;
+        let urls: Vec<String> = self.store.services(&r.id)?.into_iter().map(|s| s.url).chain(pinned.iter().map(|p| p.url.clone())).collect();
         for res in self.store.resources(&r.id)? {
             let (Some(branch), Ok(b)) = (&res.r#ref, self.brancher(res.kind)) else { continue };
-            b.serve(&res.parent, branch, res.kept.as_deref(), &origins).await.map_err(|e| anyhow::anyhow!("letting the preview's pages reach the {} branch: {e:#}", res.kind.as_str()))?;
+            if let Err(e) = b.serve(&res.parent, branch, res.kept.as_deref(), &urls).await {
+                problems.push(format!("the preview's pages can't reach the {} branch from the browser: {e:#}", res.kind.as_str()));
+            }
+        }
+        // An earlier push with its own copy of the data: its pages, at its own URLs.
+        for d in self.store.pinned_data(&r.id)? {
+            let Ok(b) = self.brancher(d.kind) else { continue };
+            let own: Vec<String> = pinned.iter().filter(|p| p.revision == d.revision).map(|p| p.url.clone()).collect();
+            if let Err(e) = b.serve(&d.parent, &d.r#ref, d.kept.as_deref(), &own).await {
+                problems.push(format!("an earlier push's pages can't reach its {} copy from the browser: {e:#}", d.kind.as_str()));
+            }
         }
         // 4b. Health: a service with a `health` path counts once it answers 2xx/3xx there, asked
         // once per revision (Render's and Railway's checks). Anything else fails the preview, and
@@ -1864,11 +1874,4 @@ fn pull_repo(url: &str) -> Option<String> {
     let mut parts = path.split('/');
     let (owner, name, kind) = (parts.next()?, parts.next()?, parts.next()?);
     (kind == "pull" && !owner.is_empty() && !name.is_empty()).then(|| format!("{owner}/{name}"))
-}
-
-/// A URL's origin as browsers send it (`scheme://host[:port]`, lower case, no path).
-fn origin_of(url: &str) -> Option<String> {
-    let (scheme, rest) = url.split_once("://")?;
-    let authority = rest.split(['/', '?', '#']).next()?.rsplit('@').next()?;
-    (!authority.is_empty()).then(|| format!("{}://{}", scheme.to_ascii_lowercase(), authority.to_ascii_lowercase()))
 }
