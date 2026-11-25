@@ -3850,6 +3850,97 @@ async fn a_wildcard_key_reaches_no_watch_history() {
     assert!(v["hits"]["hits"][0]["_source"].get("leaked").is_none(), "{v}");
 }
 
+/// Runs `POST {path}?wait_for_completion=false` as the cluster's owner and waits for its result
+/// to be stored in `.tasks`.
+async fn stored_task(e: &Env, u: &str, p: &str, path: &str, body: Value) -> String {
+    let (s, v) = e.es(u, p, reqwest::Method::POST, &format!("{path}?wait_for_completion=false"), Some(body)).await;
+    let task = v["task"].as_str().unwrap_or_else(|| panic!("{s} {v}")).to_string();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    // Completed in memory first, then `.tasks` made for its result: wait for both.
+    loop {
+        let (_, t) = e.es(u, p, reqwest::Method::GET, &format!("/_tasks/{task}"), None).await;
+        let (s, _) = e.es(u, p, reqwest::Method::GET, "/.tasks/_count", None).await;
+        if t["completed"] == true && s == 200 {
+            return task;
+        }
+        assert!(std::time::Instant::now() < deadline, "{t}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Task results (`.tasks`) are every principal's: on Elasticsearch a hidden, restricted system
+/// index, so a `*` data key's searches answer as before once one is stored, its by-query over
+/// everything leaves them alone, and naming `.tasks` is refused; the result still reads back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn task_results_are_out_of_a_wildcard_keys_reach() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "tk"})).await;
+    let (u, p) = creds(&c);
+    assert_eq!(e.es(&u, &p, Method::PUT, "/docs/_doc/1?refresh=true", Some(json!({"a": 1}))).await.0, 201);
+    let task = stored_task(&e, &u, &p, "/docs/_update_by_query", json!({"script": {"source": "ctx._source.b = 2"}})).await;
+    // The update is visible before the key's by-query scans it (no version conflict).
+    assert_eq!(e.es(&u, &p, Method::POST, "/docs/_refresh", None).await.0, 200);
+    let (_, v) = e.es(&u, &p, Method::GET, "/.tasks/_settings", None).await;
+    assert_eq!(v[".tasks"]["settings"]["index"]["hidden"], "true", "{v}");
+    let key = e.post("/v1/search/clusters/tk/keys", json!({"name": "app", "access": "data"})).await;
+    let auth = format!("ApiKey {}", key["api_key"].as_str().unwrap());
+    let as_key = |m: Method, path: &str, body: Option<Value>| {
+        let mut r = e.http.request(m, format!("{}{path}", e.es)).header("authorization", auth.clone());
+        if let Some(b) = body {
+            r = r.json(&b);
+        }
+        async move {
+            let r = r.send().await.unwrap();
+            (r.status().as_u16(), r.json::<Value>().await.unwrap_or(Value::Null))
+        }
+    };
+    let (s, v) = as_key(Method::GET, "/_search", None).await;
+    assert_eq!((s, &v["hits"]["total"]["value"]), (200, &json!(1)), "{v}");
+    let (s, v) = as_key(Method::POST, "/*/_delete_by_query?expand_wildcards=all&refresh=true", Some(json!({"query": {"match_all": {}}}))).await;
+    assert_eq!((s, &v["total"]), (200, &json!(1)), "only the key's own document: {v}");
+    let (s, v) = as_key(Method::GET, "/.tasks/_search", None).await;
+    assert_eq!(s, 403, "{v}");
+    let (_, t) = e.es(&u, &p, Method::GET, &format!("/_tasks/{task}"), None).await;
+    assert_eq!((&t["completed"], &t["response"]["updated"]), (&json!(true), &json!(1)), "{t}");
+}
+
+/// On OpenSearch, whose plugin refuses a request over `*` when one index it reaches isn't
+/// permitted: a data user's `GET /_search` answers once a task result is stored, `_cat/aliases`
+/// answers for the indices it may see (an alias over watch records left out), and a by-query
+/// expanding hidden indices onto watch records is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_opensearch_data_user_answers_over_task_results() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "tko", "flavor": "opensearch"})).await;
+    let (u, p) = creds(&c);
+    for (m, path, body) in [
+        (Method::PUT, "/docs/_doc/1?refresh=true", json!({"a": 1})),
+        (Method::PUT, "/.watcher-history-7-x", json!({"settings": {"index.hidden": true}})),
+        (Method::POST, "/_aliases", json!({"actions": [{"add": {"index": ".watcher-history-7-x", "alias": "wh-alias"}}]})),
+    ] {
+        let (s, v) = e.es(&u, &p, m, path, Some(body)).await;
+        assert!(s < 300, "{path}: {v}");
+    }
+    stored_task(&e, &u, &p, "/docs/_update_by_query", json!({"script": {"source": "ctx._source.b = 2"}})).await;
+    let key = e.post("/v1/search/clusters/tko/keys", json!({"name": "app", "access": "data"})).await;
+    let (ku, kp) = (key["username"].as_str().unwrap().to_string(), key["password"].as_str().unwrap().to_string());
+    let as_user = |m: Method, path: &str| {
+        let r = e.http.request(m, format!("{}{path}", e.es)).basic_auth(&ku, Some(&kp)).send();
+        async move {
+            let r = r.await.unwrap();
+            (r.status().as_u16(), r.text().await.unwrap_or_default())
+        }
+    };
+    let (s, v) = as_user(Method::GET, "/_search").await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = as_user(Method::GET, "/_cat/aliases?format=json").await;
+    assert!(s == 200 && !v.contains("wh-alias"), "{s} {v}");
+    let (s, v) = as_user(Method::POST, "/*/_update_by_query?expand_wildcards=all").await;
+    assert_eq!(s, 403, "{v}");
+}
+
 #[path = "control/cloud_repositories.rs"]
 mod cloud_repositories;
 
