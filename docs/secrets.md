@@ -4583,14 +4583,28 @@ vercel env pull .env.production --environment=production  &&  roll secrets impor
 ### Backup and restore
 
 `roll secrets keygen` makes an X25519 key pair (the secret key in a 0600 file, the public key
-printed); `roll secrets backup --to <public key> --out shop.backup` writes the whole project:
-every environment (with its base, labels, expiry, trust, protection, approvals and age limit), its
-folders, its own keys with their values, comments, tags and links, its imports and the project's
-required keys. The archive is sealed to that key (`roll-seal-v1`, associated data
+printed); `roll secrets backup --to <public key> --out shop.backup` writes the whole project
+(archive version 2):
+
+- every environment (with its base, labels, expiry, trust, protection, approvals and age limit),
+  its folders, its own keys with their values, comments, tags and links, its imports, folder
+  policies, the project's required keys and its encryption keys;
+- the registrations its links name, with what they hold sealed: CAs and SSH CAs with their
+  **private keys** (and a CA's certificates that haven't ended, revoked ones too, so its CRL stays
+  whole), SaaS rotators, public certificates with their DNS credential, certificate and the
+  project's ACME accounts, rotators, databases outside roll and GitHub Apps;
+- its identities and syncs, and its settings (`history_days`, `validity_checks`, `leaks.rotate`).
+
+The archive is sealed to that key (`roll-seal-v1`, associated data
 `roll-secrets-backup:<project>`), so the file is safe at rest anywhere and only the key's holder
-opens it; `POST …/backup {recipient}` (admin, audited `project.backup`) is the call. Linked keys
-carry their link and no value: a restore issues its own credentials. Personal values, history,
-leases, tokens and identities aren't in it.
+opens it: nothing in it is in the clear, and only it carries registrations' keys out of roll.
+`POST …/backup {recipient}` (admin, audited `project.backup`) is the call. Linked keys carry their
+link and no value: a restore issues its own credentials, from the restored registrations.
+Personal values, history, leases and tokens aren't in it, and neither are registrations whose
+trust names the project they were made in or that hold a token of the server's own: AWS roles and
+IAM users (their ExternalId or subject is `roll-secrets:<project>`), GCP and Azure accounts (the
+same subject), Kubernetes clusters, Snowflake accounts, Atlas projects, directories, gateways,
+audit sinks and the backup schedule. The archive names the ones it left out (`left_out`).
 So that a backup restores without the one person who holds its secret key, split that key into
 shares (`roll secrets key split --file roll-secrets-backup.key`; see "Splitting the deployment
 key").
@@ -4600,10 +4614,43 @@ there: the browser never holds the secret key.
 
 `roll secrets restore shop.backup --key roll-secrets-backup.key` opens it on the CLI's machine and
 loads it into the selected project, which must have no secrets yet (`POST …/restore` with the
-opened archive; admin, audited `project.restore`), on this server or another. Values are written
-before any environment is protected, so a restore isn't a change request; what can't be restored
-(a link to a resource that project doesn't have, an import of another project's folder) comes back
-as a warning, by name. Disaster recovery, and moving a project between roll servers.
+opened archive; admin, audited `project.restore`), on this server or another. Archives of version
+1 still restore. In order:
+
+1. **Registrations**, in one write, each made by the restorer (recorded as anything else they make
+   is: their person, or their token), with a new id; links move to it. Each is checked first as
+   registering it would be, without asking its service (that happens at its first use): a name
+   roll takes, a CA's policy, a rotator's URL, a database's URL and CA, a GitHub App's API and
+   ceiling, a public certificate's CA (one this server orders from). One this project already has
+   by that name is kept as it is; a database reached through a gateway isn't restored (a backup
+   carries no gateway). A restored CA signs with the same key, so every client that trusts it keeps
+   trusting what it issues.
+2. **Environments and keys.** Values are written before any environment is protected, so a restore
+   isn't a change request; managed links issue fresh credentials from the restored registrations.
+3. **Identities and syncs**, in one write, with no maker: identities come back disabled and syncs
+   paused, with the reason `restored from a backup`. An admin enables or resumes each
+   (`PATCH …/identities/{id}`, `PATCH …/syncs/{id}`) and becomes its maker then, so a restored
+   workload acts only at the rights of a person who chose to turn it on.
+
+What can't be restored (a link to a resource that project doesn't have, an import of another
+project's folder, a registration that fails its check) comes back as a warning, by name, never a
+value. A restore moves a project between roll servers, or brings one back after it was lost; for a
+whole server see "Disaster recovery" below.
+
+**The restore drill.** A backup nobody has opened isn't a backup. Both of these run where the
+secret key is, open the archive there, and write nothing:
+
+- `roll secrets backup verify shop.backup --key roll-secrets-backup.key` (or
+  `--latest-from-bucket`, the schedule's newest, read through `GET …/backup/latest` still sealed)
+  compares it with the live project (`POST …/backup/verify`, admin, audited `backup.verify`):
+  counts of environments, keys, registrations, identities and syncs; key names missing, changed
+  (value or link compared by fingerprint, here and never answered) or added since;
+  registrations missing or changed (key, certificate, credential); settings that differ; and the
+  registrations a backup doesn't carry. A sensitive key's value isn't in a backup, so it's never
+  compared.
+- `roll secrets restore shop.backup --key … --dry-run` asks the same of the project it would load
+  into: what it would bring back, whether that project has registrations already (one by the same
+  name is kept as it is), and whether it still has keys (then it fails, as the restore would).
 
 **Scheduled backups** (Vault's automated snapshots, Akeyless' DR): `PUT …/backup/schedule
 {bucket, recipient, every_hours?, keep?}` (admin; default every 24 h, keeping 30, at most 500) writes the same
@@ -4615,7 +4662,32 @@ that opens them: the recipient's secret key restores one as above. One node runs
 is claimed by moving its next time on); what a person set up runs only while they can still reach
 the project, and only into a bucket the project still has. `GET …/backup/schedule` says when the
 last one landed, its key, and why the last attempt failed; `DELETE` stops it (what's in the bucket
-stays).
+stays). Drill one now and then: `roll secrets backup verify --latest-from-bucket --key …`.
+
+### Disaster recovery
+
+A project backup brings one project back. A whole server comes back from two things, kept apart:
+
+1. **The control database**: `<home>/secrets.db` on one node (SQLite: copy it with
+   `sqlite3 secrets.db ".backup secrets-copy.db"` or a filesystem snapshot, never a plain copy of
+   a live file), or the system database's `secrets` schema with the rest of `ROLL_SYSTEM_DATABASE`
+   (Postgres: your provider's snapshots and point-in-time recovery). The workspace's projects
+   live beside it and come back with it. Every value, data key, registration key and audit row in
+   it is sealed: the copy is useless without the next item.
+2. **The deployment key**, `ROLL_SECRET_KEY` (or the KMS ciphertext and access to its KMS key, or
+   enough holders of its shares: see "Splitting the deployment key"). Keep it out of the database's
+   backups. Projects with a customer-managed key also need that KMS key to answer.
+
+To recover: restore the database, start rolld with the same key (or start it sealed and have the
+holders unseal it), and check `GET /v1/secrets/health` (`"key"`, `"resealed"`). Everything comes
+back as it was, including what a project backup leaves out (identities with their makers, syncs,
+sinks, AWS roles, gateways' registrations), because nothing moved: the project ids, the issuer's
+signing keys and every trust that names them are the same. A leaked deployment key with the
+database is a leak of everything; rotate it as "Encryption" says.
+
+When only some projects are lost (deleted past their recovery window, or broken by hand), restore
+each from its project backup into a new project as above. Test both paths before you need them:
+restore the database copy on a spare node, and `backup verify` the newest project backup.
 
 ### Checking against a template
 
@@ -6572,11 +6644,13 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/imports?path=` | | `Import[]` |
 | `PUT /environments/{env}/imports?path=` | `Import[]` | `Import[]` |
 | `GET /environments/{env}/exports?path=` | | `Export[]` |
-| `POST /backup` | `{recipient}` | `{sealed, context}`: the whole project, sealed to `recipient` (admin) |
+| `POST /backup` | `{recipient}` | `{sealed, context}`: the whole project, sealed to `recipient` (admin; archive version 2) |
+| `POST /backup/verify` | `Archive` (an opened backup) | `{project, at, v, environments, keys, registrations, identities, syncs, settings, left_out, live_keys}` (admin; nothing written): each part `{archive, live, missing, extra, changed}`, by name |
+| `GET /backup/latest` | | `{sealed, context, key}`: the schedule's newest backup, still sealed (admin; 404 with no schedule or none landed yet) |
 | `GET /backup/schedule` | | `BackupSchedule` or null (admin): bucket, recipient, `every_hours`, `keep`, `next_at`, `last_at`, `last_key`, `last_error` |
 | `PUT /backup/schedule` | `{bucket, recipient, every_hours?, keep?}` | `BackupSchedule` (admin; one of the project's roll buckets; the first backup at once) |
 | `DELETE /backup/schedule` | | 204 (admin; the backups made stay) |
-| `POST /restore` | `Archive` (an opened backup) | `{environments, secrets, warnings}` (admin; an empty project) |
+| `POST /restore` | `Archive` (an opened backup, version 1 or 2) | `{environments, secrets, registrations, identities, syncs, warnings}` (admin; an empty project; identities disabled and syncs paused until an admin resumes them) |
 | `GET /suggestions` | | `Suggestion[]`: canvas resources linked nowhere yet, with their usual keys and where they'd go |
 | `GET /shared` | | `Import[]`: the folders other projects share with this one |
 | `PUT /environments/{env}/exports?path=` | `{project}[]` | `Export[]` (admin) |

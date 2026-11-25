@@ -1,7 +1,7 @@
 // Tests of the dashboard's migration from Elasticsearch or OpenSearch (vitest).
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { aliasOffer, defaultDest, destProblem, displayHost, droppedByReason, mergeStarted, migrateRefusal, notMappedCount, notMappedGroups, partial, plainHttpWarning, queuedPicks, queueRetryDelay, retryableStart, shouldStartQueued, sourceFrom, sourceProblem, taskPoll, taskProgress, type MigrateStarted, type SaasPlan, type SourceForm } from "./search-migrate";
+import { aliasOffer, defaultDest, destProblem, displayHost, droppedByReason, mergeStarted, migrateRefusal, nextSteps, notMappedCount, replaceRow, sinceProblem, notMappedGroups, partial, plainHttpWarning, queuedPicks, queueRetryDelay, retryableStart, shouldStartQueued, sourceFrom, sourceProblem, taskPoll, taskProgress, type MigrateStarted, type SaasPlan, type SourceForm } from "./search-migrate";
 
 const form = (f: Partial<SourceForm>): SourceForm => ({ host: "https://es.example:9243", auth: "api_key", apiKey: "", username: "", password: "", ...f });
 
@@ -120,4 +120,19 @@ test("Algolia, Typesense and Meilisearch send their own fields, and only those",
   assert.equal(plainHttpWarning(form({ kind: "elasticsearch", host: "http://es.example" })), null);
   assert.match(migrateRefusal(403, "forbidden"), /admin/);
   assert.equal(migrateRefusal(400, "bad"), "bad");
+});
+
+test("a copy's row offers resume when it stopped, and catch up and cutover once done", () => {
+  const plan = { not_mapped: [], not_mapped_more: 0 } as unknown as SaasPlan;
+  const row: MigrateStarted = { index: "products", dest: "products", task: "n:1", plan };
+  assert.equal(nextSteps(row, "running"), null);
+  assert.equal(nextSteps(row, "failed"), "resume");
+  assert.equal(nextSteps(row, "done"), "after");
+  assert.equal(nextSteps({ ...row, step: "catch_up" }, "failed"), "after");
+  assert.equal(nextSteps({ index: "logs", dest: "logs", task: "n:2" }, "done"), null, "an Elasticsearch copy has none");
+  const caught = replaceRow([row, { index: "x", dest: "x" }], { index: "products", dest: "products", task: "n:3", step: "catch_up" });
+  assert.deepEqual([caught[0].task, caught[0].plan, caught[1].index], ["n:3", plan, "x"]);
+  assert.equal(sinceProblem(""), null);
+  assert.equal(sinceProblem("updated_at"), null);
+  assert.match(sinceProblem("a b") ?? "", /attribute/);
 });

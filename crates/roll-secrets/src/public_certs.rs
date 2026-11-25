@@ -199,7 +199,7 @@ impl DnsProvider {
         }
     }
 
-    fn parse(s: &str) -> Option<DnsProvider> {
+    pub(crate) fn parse(s: &str) -> Option<DnsProvider> {
         match s {
             "cloudflare" => Some(DnsProvider::Cloudflare),
             _ => None,
@@ -416,11 +416,11 @@ fn renew_days(rotate_days: Option<u64>, lifetime_days: u64) -> u64 {
     rotate_days.unwrap_or(lifetime_days * 2 / 3).clamp(1, most)
 }
 
-fn aad(project: &str, id: &str, what: &str) -> String {
+pub(crate) fn aad(project: &str, id: &str, what: &str) -> String {
     format!("roll-secrets:public-cert:{project}:{id}:{what}")
 }
 
-fn account_aad(project: &str, directory: &str) -> String {
+pub(crate) fn account_aad(project: &str, directory: &str) -> String {
     format!("roll-secrets:public-cert-account:{project}:{directory}")
 }
 
@@ -700,7 +700,7 @@ impl Secrets {
         let _ = self.public_ca.set(ca);
     }
 
-    fn public_ca(&self) -> Result<&std::sync::Arc<dyn PublicCa>> {
+    pub(crate) fn public_ca(&self) -> Result<&std::sync::Arc<dyn PublicCa>> {
         self.public_ca.get().ok_or_else(|| Error::BadRequest("publicly trusted certificates aren't on this server".into()))
     }
 

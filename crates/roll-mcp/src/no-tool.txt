@@ -112,6 +112,8 @@ PATCH /v1/secrets/projects/{project}/aws-users/{id}                            a
 POST /v1/secrets/projects/{project}/backup                                     a person's call: it seals every value to a recipient key the caller picks
 DELETE /v1/secrets/projects/{project}/backup/schedule                          a person's call: stopping a project's backups
 PUT /v1/secrets/projects/{project}/backup/schedule                             a person's call: it seals every value to a recipient key the caller picks
+GET /v1/secrets/projects/{project}/backup/latest                               a person's call: a sealed backup only its recipient's secret key opens (roll secrets backup verify)
+POST /v1/secrets/projects/{project}/backup/verify                              a person's call: it takes an opened backup, every value of the project in the clear
 POST /v1/secrets/projects/{project}/cas                                        an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/cas/{id}                                 an outside integration's setup: an admin's, with its credentials
 PATCH /v1/secrets/projects/{project}/cas/{id}/acme                             an outside integration's setup: an admin's, with its credentials
@@ -222,6 +224,5 @@ GET /v1/workspace/projects/{id}/invites                                        a
 DELETE /v1/workspace/projects/{id}/invites/{invite}                            a person's call: invites are a signed-in person's (#501)
 DELETE /v1/workspace/projects/{id}/members/me                                  a person's call: leaving a project is the person's own (#501)
 GET /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files            raw bytes, not JSON: apps_sandbox_exec reads and writes files (cat, a heredoc)
-GET /v1/apps/services/{id}/environments/{env}/checks/{check}/screenshot        a PNG, not JSON: the check's state says its error and when its failure was kept
 GET /v1/apps/services/{id}/environments/{env}/checks/{check}/trace             a Playwright trace archive, not JSON: for `npx playwright show-trace`
 PUT /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files            raw bytes, not JSON: apps_sandbox_exec reads and writes files (cat, a heredoc)

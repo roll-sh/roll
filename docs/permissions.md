@@ -480,7 +480,7 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   needs `reveal` allowed, or can use `POST …/keys`, which asks as any route does. The gate reads
   no console body.
 - A search API key (`POST /v1/search/clusters/{id}/keys`) is what the key may do: `reveal` when
-  its `access` is `read` or `append`, `delete` when it's `data` (its role deletes indices and sets
+  its `access` is `read`, `write` when it's `append` (it adds documents), `delete` when it's `data` (its role deletes indices and sets
   lifecycle policies), and `admin` when it's `admin` (the default, everything the cluster's own
   user may do, as the console is) or anything else. A new admin password (`POST …/password`) is
   `admin`. Both answer a credential, so search refuses them (403) to a grant that can't also
@@ -717,8 +717,12 @@ token's: the row, the resource, the rules. Making a project is the person's own
   (`Resolvers::owned_fn`; search's clusters), and the person's grant gets a rule with every action on
   each, by id.
 - A person's allowed request carries `roll_auth::Reach`: the same decision, asked about another
-  resource of the product by id, resolved the same way. search narrows lists and checks a remote
-  cluster with it.
+  resource of the product by id, resolved the same way. Asked about the route's own resource, it
+  answers the gate's decision there, its indices included: the request's actions and `read` are
+  allowed, anything else is decided on the same indices (a token limited to some indices of a
+  cluster reaches the cluster in them). search narrows lists and checks a remote cluster with it.
+- `POST /v1/access/check` decides a person's token as the gate does: held within their session,
+  and on what the request lends.
 - Session requests aren't access-log rows (they aren't a token's), allowed or refused: a refused
   session request leaves no audit row either, only its answer. Membership changes are
   (`product=workspace`: `member.invite`, `member.accept`, `member.role`, `member.remove`,

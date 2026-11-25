@@ -1,0 +1,25 @@
+# Listmonk: newsletters and mailing lists (listmonk.app), on a roll Postgres database, which it
+# reaches by the link's PGHOST, PGUSER… parts. It installs its schema on the first start and signs
+# in as admin with the password made here. In Settings, set its root URL to the service's URL
+# (links in mail use it) and its SMTP server before sending.
+[apps.listmonk]
+image = "listmonk/listmonk:v6.2.0"
+port = 9000
+links = ["db"]
+start = "./listmonk --install --idempotent --yes --config '' && ./listmonk --upgrade --yes --config '' && exec ./listmonk --config ''"
+[apps.listmonk.run]
+health_path = "/admin/login"
+health_timeout_s = 120
+[apps.listmonk.variables]
+LISTMONK_app__address = "0.0.0.0:9000"
+LISTMONK_db__host = "${{ PGHOST }}"
+LISTMONK_db__port = "${{ PGPORT }}"
+LISTMONK_db__user = "${{ PGUSER }}"
+LISTMONK_db__password = "${{ PGPASSWORD }}"
+LISTMONK_db__database = "${{ PGDATABASE }}"
+LISTMONK_db__ssl_mode = "${{ PGSSLMODE }}"
+LISTMONK_db__params = "options=${{ PGOPTIONS }}"
+LISTMONK_ADMIN_USER = "admin"
+LISTMONK_ADMIN_PASSWORD = { generate = "secret" }
+[databases.db]
+kind = "postgres"

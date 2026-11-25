@@ -5,6 +5,8 @@
  * apps-build's `every_starter_template_parses` reads these files as `roll up --all` would.
  */
 import directus from "./templates/directus.toml?raw";
+import listmonk from "./templates/listmonk.toml?raw";
+import mattermost from "./templates/mattermost.toml?raw";
 import metabase from "./templates/metabase.toml?raw";
 import n8n from "./templates/n8n.toml?raw";
 import umami from "./templates/umami.toml?raw";
@@ -26,6 +28,8 @@ export const TEMPLATES: Template[] = [
   { id: "uptime-kuma", name: "Uptime Kuma", blurb: "Uptime monitoring", with: "a volume", rollToml: uptimeKuma },
   { id: "directus", name: "Directus", blurb: "Headless CMS and API", with: "Postgres", rollToml: directus },
   { id: "metabase", name: "Metabase", blurb: "Dashboards over your data", with: "Postgres", rollToml: metabase },
+  { id: "mattermost", name: "Mattermost", blurb: "Team chat", with: "Postgres and a volume", rollToml: mattermost },
+  { id: "listmonk", name: "Listmonk", blurb: "Newsletters and mailing lists", with: "Postgres", rollToml: listmonk },
 ];
 
 export const template = (id: string | undefined): Template | undefined => TEMPLATES.find((t) => t.id === id);

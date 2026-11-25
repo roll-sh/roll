@@ -35,6 +35,7 @@ mod audit;
 pub mod audit_key;
 pub use roll_secrets_chain as chain;
 pub mod backup;
+mod backup_rows;
 pub mod crypto;
 pub mod dotenv;
 mod envs;

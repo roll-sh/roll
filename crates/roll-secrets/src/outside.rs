@@ -162,7 +162,7 @@ fn authority_host(url: &str) -> Result<String> {
     Ok(after.split(['/', '?', '#']).next().unwrap_or_default().to_string())
 }
 
-fn aad(project: &str, id: &str) -> String {
+pub(crate) fn aad(project: &str, id: &str) -> String {
     format!("roll-secrets:outside_database:{project}:{id}:url")
 }
 
@@ -170,7 +170,7 @@ fn aad(project: &str, id: &str) -> String {
 /// How long a rotation's claim on url_next keeps others off it: past its server call's timeouts.
 const ROTATING_MS: i64 = 5 * 60_000;
 
-fn next_aad(project: &str, id: &str) -> String {
+pub(crate) fn next_aad(project: &str, id: &str) -> String {
     format!("roll-secrets:outside_database:{project}:{id}:url_next")
 }
 
@@ -186,7 +186,7 @@ fn with_password(url: &str, password: &str) -> Result<String> {
 }
 
 /// A URL a registration may use: one of the engines', with a host.
-fn check_url(url: &str) -> Result<String> {
+pub(crate) fn check_url(url: &str) -> Result<String> {
     let host = authority_host(url)?;
     if !["postgres://", "postgresql://", "mysql://", "sqlserver://", "clickhouse://", "rabbitmq://", "redis://", "rediss://", "mongodb://", "mongodb+srv://", "elasticsearch://", "opensearch://", "cassandra://"].iter().any(|p| url.starts_with(p)) || host.is_empty() || url.len() > 2048 {
         return Err(Error::BadRequest("the URL is postgres://user:password@host:5432/db, mysql://…@host:3306/db, sqlserver://…@host:1433/db, clickhouse://…@host:8443/db, rabbitmq://…@host:15671/vhost, rediss://…@host:6379, mongodb+srv://…@cluster, elasticsearch://…@host:9200, opensearch://…@host:9200 or cassandra://…@host:9142/keyspace".into()));
@@ -194,7 +194,7 @@ fn check_url(url: &str) -> Result<String> {
     Ok(host)
 }
 
-fn check_ca(ca: Option<String>) -> Result<Option<String>> {
+pub(crate) fn check_ca(ca: Option<String>) -> Result<Option<String>> {
     let ca = ca.map(|c| c.trim().to_string()).filter(|c| !c.is_empty());
     if ca.as_ref().is_some_and(|c| c.len() > 64 * 1024 || !c.contains("-----BEGIN CERTIFICATE-----")) {
         return Err(Error::BadRequest("ca is the server's CA certificates, PEM (64 KiB at most)".into()));
