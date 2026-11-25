@@ -4027,6 +4027,9 @@ pub struct Scan {
     /// Its store's data directory has column blocks switched on (`StoreOptions::colblocks`):
     /// its files may have them (`Merge::scan`).
     colstore: bool,
+    /// The columns its reader reads (`read_cols`): a column block's rows are made of those
+    /// alone, the others NULL (None: whole).
+    read_mask: Option<Arc<[bool]>>,
 }
 
 /// A run's overlay list (`Scan::gather`) holds at most this many entries, of at most this many
@@ -4158,6 +4161,7 @@ impl Scan {
             zip_ok: true,
             ov: None,
             colstore: false,
+            read_mask: None,
         }
     }
 
@@ -4181,7 +4185,14 @@ impl Scan {
             zip_ok: true,
             ov: None,
             colstore,
+            read_mask: None,
         }
+    }
+
+    /// A column block's rows made from here on with only the columns `mask` marks, the others
+    /// NULL (None: whole): for a reader that reads those alone (a range read's projection).
+    pub fn read_cols(&mut self, mask: Option<Arc<[bool]>>) {
+        self.read_mask = mask;
     }
 
     /// Whether a source is a file with column blocks (format 5): `FillRows::lazy`.
@@ -4437,7 +4448,9 @@ impl Scan {
             None => {
                 let mut l = batch::LazyRows::default();
                 let r = self.fill_batch_in::<true>(batch, max, put_back, Some(&mut l));
-                l.make_all(batch);
+                if !l.is_empty() {
+                    l.make_cols(batch, 0, &|_| true, self.read_mask.as_deref());
+                }
                 r
             }
         }
@@ -7016,6 +7029,7 @@ mod tests {
         let mut seen: Vec<Vec<String>> = Vec::new();
         for on in [false, true] {
             let mut lazy_seen = false;
+            let mut masked_nulls = false;
             let dir = tempfile::tempdir().unwrap();
             let o = |on| StoreOptions { memtable_bytes: 256 << 10, sync: false, background: false, target_file_bytes: 1 << 20, colblocks: on, ..Default::default() };
             let mut s = Store::open(dir.path(), o(on)).unwrap();
@@ -7074,6 +7088,24 @@ mod tests {
                         out.push(format!("b {k:?} {v:?} {:?}", b.value_bytes(i)));
                     }
                 }
+                // (Rows made of some columns alone, `Scan::read_cols`: those read as whole rows'
+                // do; the others NULL in a column block's rows.)
+                let mask: Arc<[bool]> = Arc::from(vec![true, false, true, false, false, true, false, true]);
+                let mut sc = s.scan(&lo, &hi, ts);
+                sc.read_cols(Some(mask.clone()));
+                loop {
+                    b.clear();
+                    sc.fill_batch(&mut b, 300).unwrap();
+                    if b.is_empty() {
+                        break;
+                    }
+                    cols::decode_cols(&b, 0..b.len(), &[true; 8], &types, &missing, &mut cb).unwrap();
+                    for i in 0..b.len() {
+                        let vs: Vec<String> = (0..8).filter(|&c| mask[c]).map(|c| format!("{:?}", cb.cols[c].as_ref().unwrap().value(&cb, i, &types[c]).unwrap())).collect();
+                        out.push(format!("k {}", vs.join(",")));
+                        masked_nulls |= cb.cols[3].as_ref().unwrap().value(&cb, i, &types[3]).unwrap().is_null();
+                    }
+                }
                 for r in s.scan(&lo, &hi, ts) {
                     out.push(format!("s {:?}", r.unwrap()));
                 }
@@ -7100,6 +7132,7 @@ mod tests {
             assert_eq!(m["format"], if on { sst::FORMAT_COLS } else { sst::FORMAT_DICT }, "colblocks {on}");
             assert_eq!(s.view().l1.iter().any(|f| f.meta.cols), on);
             assert_eq!(lazy_seen, on, "rows left unmade");
+            assert_eq!(masked_nulls, on, "columns left out of rows made");
             seen.push(out);
         }
         assert_eq!(seen[0].len(), seen[1].len());

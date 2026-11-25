@@ -1264,6 +1264,9 @@ struct Reader<'c> {
     /// has them, `FillRows::lazy`): `Pre` decodes their columns from the blocks; a row is
     /// made before it is read by index (`LazyRows::make`). None: every row is made.
     lazy: Option<Box<LazyRows>>,
+    /// The columns its rows are read for (`Decode::need`, set where `lazy` is): rows of column
+    /// blocks are made of these alone, the others NULL (None: whole).
+    mask: Option<Arc<[bool]>>,
 }
 
 impl Drop for Reader<'_> {
@@ -1273,7 +1276,7 @@ impl Drop for Reader<'_> {
             && !l.is_empty()
         {
             let from = self.batch.pos();
-            l.make(self.batch, from, &|_| true);
+            l.make_cols(self.batch, from, &|_| true, self.mask.as_deref());
         }
     }
 }
@@ -1284,11 +1287,11 @@ impl Drop for Reader<'_> {
 /// `cols::decode_cols_lazy`).
 #[cold]
 #[inline(never)]
-fn fill_lazy(f: &mut Box<dyn FillRows>, batch: &mut RowBatch, lazy: &mut LazyRows) -> Result<()> {
+fn fill_lazy(f: &mut Box<dyn FillRows>, batch: &mut RowBatch, lazy: &mut LazyRows, mask: Option<&[bool]>) -> Result<()> {
     lazy.clear();
     let r = f.fill_lazy(batch, lazy, FILL);
     if !lazy.is_empty() && lazy.rows() != batch.len() {
-        lazy.make_all(batch);
+        lazy.make_cols(batch, 0, &|_| true, mask);
     }
     r
 }
@@ -1297,8 +1300,8 @@ fn fill_lazy(f: &mut Box<dyn FillRows>, batch: &mut RowBatch, lazy: &mut LazyRow
 /// when it turned itself off, `off`: the row path reads every row after).
 #[cold]
 #[inline(never)]
-fn make_marked(lazy: &mut LazyRows, batch: &mut RowBatch, from: usize, skip: &[u8], off: bool) {
-    lazy.make(batch, from, &|i| off || skip.get(i - from).is_none_or(|f| *f != DROP));
+fn make_marked(lazy: &mut LazyRows, batch: &mut RowBatch, from: usize, skip: &[u8], off: bool, mask: Option<&[bool]>) {
+    lazy.make_cols(batch, from, &|i| off || skip.get(i - from).is_none_or(|f| *f != DROP), mask);
 }
 
 impl<'c> Reader<'c> {
@@ -1307,7 +1310,16 @@ impl<'c> Reader<'c> {
             Source::Fill(f) if f.lazy() => Some(Box::default()),
             _ => None,
         };
-        Reader { src, batch, cur: None, left, done: false, skip: Vec::new(), skip_from: 0, lazy }
+        Reader { src, batch, cur: None, left, done: false, skip: Vec::new(), skip_from: 0, lazy, mask: None }
+    }
+
+    /// The reader of `d`'s rows: rows of column blocks it leaves unmade are made of the columns
+    /// `d` reads alone (`Decode::need`: its row path reads no other from the bytes).
+    fn for_decode(mut self, d: &Decode) -> Self {
+        if self.lazy.is_some() {
+            self.mask = d.need.clone();
+        }
+        self
     }
 
     /// Whether the rows come a batch at a time (`next_run`).
@@ -1326,7 +1338,7 @@ impl<'c> Reader<'c> {
             self.batch.clear();
             let r = match &mut self.lazy {
                 None => f.fill(self.batch, FILL),
-                Some(l) => fill_lazy(f, self.batch, l),
+                Some(l) => fill_lazy(f, self.batch, l, self.mask.as_deref()),
             };
             if let Err(e) = r {
                 return Some(Err(e));
@@ -1365,10 +1377,12 @@ impl<'c> Reader<'c> {
                     let r = match &mut self.lazy {
                         None => f.fill(self.batch, FILL),
                         Some(l) => {
-                            let r = fill_lazy(f, self.batch, l);
+                            let r = fill_lazy(f, self.batch, l, self.mask.as_deref());
                             // (Without `Pre` every row is read by index.)
                             if pre.is_none() {
-                                l.make_all(self.batch);
+                                if !l.is_empty() {
+                                    l.make_cols(self.batch, 0, &|_| true, self.mask.as_deref());
+                                }
                             }
                             r
                         }
@@ -1390,7 +1404,7 @@ impl<'c> Reader<'c> {
                         if let Some(l) = &mut self.lazy
                             && !l.is_empty()
                         {
-                            make_marked(l, self.batch, i, &self.skip, pre.off);
+                            make_marked(l, self.batch, i, &self.skip, pre.off, self.mask.as_deref());
                         }
                     }
                     let fate = self.skip[i - self.skip_from];
@@ -2054,7 +2068,7 @@ fn run_job<'d>(
     held: Option<&mut Option<super::partial::Partials<'d>>>,
 ) -> bool {
     batch.clear();
-    run_rows(&mut Reader::new(&mut scan, batch, usize::MAX), out, d, stopped, scratch, lazy, held)
+    run_rows(&mut Reader::new(&mut scan, batch, usize::MAX).for_decode(d), out, d, stopped, scratch, lazy, held)
 }
 
 /// `run_job` over any run of rows (an inline scan's slice of a chunk).
@@ -2405,7 +2419,7 @@ fn partial_chunk<'d>(
                 && !l.is_empty()
             {
                 let r = run.clone();
-                l.make(scan.batch, r.start, &|i| i < r.end && fates[i - r.start] != DROP);
+                l.make_cols(scan.batch, r.start, &|i| i < r.end && fates[i - r.start] != DROP, scan.mask.as_deref());
             }
             let mut taken = 0;
             for (r, i) in run.enumerate() {
@@ -2761,7 +2775,7 @@ impl ParScan {
                 if let Some(c) = cur {
                     let (out, rx) = channel();
                     self.results.push_back(rx);
-                    let mut rd = Reader::new(c, batch, INLINE_SLICE);
+                    let mut rd = Reader::new(c, batch, INLINE_SLICE).for_decode(d);
                     run_rows(&mut rd, out, d, &|| false, scratch, lazy, None);
                     // (The reader dropped first: it makes the rows it left unmade.)
                     let done = rd.done;

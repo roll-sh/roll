@@ -2127,10 +2127,11 @@ impl Block {
         self.run_rows_to::<false, true>(pos, ts, max, false, batch, &[], None, cbuf, Some(lazy))
     }
 
-    /// Row `r` of a column block onto `out`, made from its columns.
-    pub fn row_into(&self, r: usize, out: &mut Vec<u8>) {
+    /// Rows `rows` of a column block (in that order) onto `out`, each one's end pushed onto
+    /// `ends` (`ColDir::rows_into`: a column at a time; the columns `mask` doesn't mark NULL).
+    pub fn rows_into(&self, rows: &[u32], mask: Option<&[bool]>, out: &mut Vec<u8>, ends: &mut Vec<usize>) {
         let c = self.cols.as_ref().expect("a column block");
-        c.dir.row(&self.data, r, out);
+        c.dir.rows_into(&self.data, rows, mask, out, ends);
     }
 
     /// `run_rows`, with (`STOP`) or without a stop, of a column block's rows (`COL`) or not.
