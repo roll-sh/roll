@@ -2272,10 +2272,16 @@ type Settings = {
     `web:/storybook/` when the service serves it under a path: a static build or `storybook
     dev`), that service's run reads Storybook's index (`index.json`, Storybook 7 and later;
     `stories.json` before), and takes 40 stories, those the change touched first (Chromatic's
-    TurboSnap, without a bundler's graph: a story whose own file the change changed since the
-    default branch, then one beside a file it changed, its component or its styles, then the rest
-    in the index's order; a repo's path matches a story's `importPath` by its end; the change's own
-    repo's paths, `$STORIES_CHANGED`, at most 64 KiB of them) (docs left out; the rest, and any not
+    TurboSnap: a story whose own file the change changed since the default branch, then one that
+    imports a changed file from anywhere, then one beside a file it changed, its component or its
+    styles, then the rest in the index's order; a repo's path matches a story's `importPath` and a
+    module's name by its end; the change's own repo's paths, `$STORIES_CHANGED`, at most 64 KiB of
+    them). Who imports what comes from the bundler's module graph when the build was made with
+    `--stats-json` (Storybook's `preview-stats.json`, beside its index, as TurboSnap reads it: each
+    module's `name`, those it concatenates, and the `reasons` that import it), walked up from the
+    changed files; the graph is the preview's code's, so it only orders the stories, and its read
+    (64 MiB, 15 s) and walk (200,000 edges, 50,000 modules) are bounded. Without it, by files
+    alone. `stories_the_change_touched_go_first`. (docs left out; the rest, and any not
     reached in its 100 s, are said: `skipped.stories` with the first ten ids, on the sheet and in
     the comment's **Not taken**, as are pages past a run's ten) in a run of its own
     beside the screenshot's, in the service's network and locked down the same way. Each story is
@@ -2822,7 +2828,10 @@ comments, Render and Railway, Neon, Chromatic and Percy, Signadot, Jam.
 2. **Signed in to a page that really sits behind a login, live**: screenshots, every engine and
    `try` sign in (`github.login`, landed); the live check proves the stdin path and the stop at
    a missing field, not a page that only answers once signed in.
-3. **The stories a change touched, by the module graph**: #1005 takes stories by their own file and the files beside them first; one that imports a changed file from elsewhere waits for Storybook's `--stats-json`.
+3. **The stories a change touched, by the module graph, in review**: a story that imports a changed
+   file from anywhere comes after those whose own file changed (Storybook's `preview-stats.json`
+   when the build has it; files alone without). Next for it: a `storybook dev` server has no
+   stats file, so say on the sheet when a run ordered by files alone.
 4. **A note in one click**: a team note opens the whole dashboard in a tab to post; a small popup
    that posts and closes (Vercel's comments post in place).
 5. **Sleeping previews cost the control plane**: every settled preview goes through a whole
