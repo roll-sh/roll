@@ -693,7 +693,7 @@ async fn ilm_rolls_an_index_over_on_its_own() {
 /// shard finished: the next owner resumes it from the second shard, and every document is there.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_killed_owners_restore_resumes_after_its_finished_shards() {
-    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../search-es/tests/fixtures/es-snapshots");
+    let fixtures = std::fs::canonicalize(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../search-es/tests/fixtures/es-snapshots")).unwrap();
     let (a, b) = two_nodes("fleet-es-restore", |c| c.node_settings.push(("path.repo".into(), fixtures.display().to_string()))).await;
     let hook = search_es::api::snapshots::ELASTIC_RESTORE_HOOK.get_or_init(Default::default);
     *hook.stop_after.lock().unwrap() = Some(("mixed".into(), 0));
