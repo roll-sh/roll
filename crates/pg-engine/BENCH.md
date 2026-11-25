@@ -356,6 +356,73 @@ DELETE and VACUUM, 75.2 MB after VACUUM FULL (its bloat for these statements: 91
 | whole script without the three `string_agg(ctid::text ... ORDER BY id)` checks | 255.6 (UPDATE) | 359.5 |
 | the highest step's own peak, with the checks | 301 (n2 382, CHECKPOINT after the last check) | - |
 
+## Storage format 5, stage 1: column blocks behind a switch (2026-11-25, agents 303, 311)
+
+HANDOFF "Storage format 5: column blocks, stage 1". The head `8f3876dab` (**h**) and step 1 on it
+(**s**, the switch off by default; the candidate's code `750a0de9a`), built as: plain dist
+(`tools/dist.sh`, the shipped flags); unpadded (`cargo build --profile dist` without
+`dist-flags.sh`'s `-x86-branches-within-32B-boundaries`); aligned (every function at 64 bytes,
+`-Cllvm-args=-align-all-functions=6` before the shipped flags); PGO (`tools/dist-pgo.sh`, each its
+own training; the head's built twice). The unpadded and aligned s were built from `44d8d25d0`, the
+candidate before `decode_cols` / `Pre::decode` went back to the head's text. TPC-H SF1 loaded once
+per form (format 4 by `ad12b41b5`, format 5 by 303's build with `ROLL_COLBLOCKS=1`: the file
+format didn't change since), closed cleanly, copied per run; 2 GB cache; 3 runs a query in one perf
+window after a warm-up of the 22. Lane C (TPC-H, bulk), A (point selects), B (range reads), all
+loaded (lane.sh 1.6-4.1 foreign cores, every pair): user instructions of the engine's cgroup, two
+alternating pairs (pair 1 / pair 2).
+
+**Switch off against the head** (stage 1's gate: within 0.1%, no cell worse on PGO):
+
+| | h -> s plain dist | h -> s unpadded | h -> s aligned | h -> h aligned (same code) | h -> s PGO | h -> h PGO (same commit) |
+|---|---|---|---|---|---|---|
+| q01 | -0.08 / -0.08% | -0.08 / -0.09% | +0.25 / +0.25% | 0.00 / 0.00% | -0.23 / -0.23% | +0.01 / 0.00% |
+| q06 | +0.24 / +0.21% | -0.12 / -0.14% | +0.76 / +0.73% | 0.00 / -0.02% | +0.14 / +0.14% | -0.03 / -0.01% |
+| q10 | -0.02 / -0.02% | -0.05 / -0.06% | +0.36 / +0.35% | +0.05 / -0.01% | +0.52 / +0.52% | +0.78 / +0.80% |
+| q03 | +0.14 / -0.06% | +0.18 / -0.07% | +0.40 / +0.33% | -0.33 / -0.07% | +0.41 / +0.48% | -0.08 / 0.00% |
+| bulk COPY in | +0.01 / +0.01% | -0.03 / -0.03% | +0.02 / +0.02% | 0.00 / 0.00% | -0.28 / -0.28% | -0.28 / -0.28% |
+| CREATE INDEX | +0.02 / +0.04% | +0.05 / -0.03% | -0.12 / +0.07% | -0.10 / 0.00% | +0.08 / +0.09% | +7.96 / +7.99% |
+| CREATE UNIQUE INDEX | +0.10 / +0.03% | +0.14 / +0.03% | +0.27 / +0.07% | -0.27 / -0.41% | +0.37 / +0.33% | +9.77 / +9.64% |
+| COPY TO | 0.00 / 0.00% | 0.00 / 0.00% | 0.00 / 0.00% | 0.00 / 0.00% | +0.33 / +0.34% | -0.72 / -0.72% |
+| INSERT ... SELECT | +0.01 / +0.01% | -0.05 / -0.05% | +0.02 / +0.02% | 0.00 / 0.00% | -0.23 / -0.22% | -0.23 / -0.23% |
+| UPDATE | -0.04 / +0.01% | -0.04 / -0.03% | -0.20 / -0.02% | 0.00 / -0.06% | -0.66 / -0.63% | -0.55 / -0.50% |
+| DELETE | -0.08 / -0.05% | -0.08 / -0.12% | -0.08 / -0.05% | -0.01 / +0.03% | +0.32 / +0.30% | +0.13 / +0.15% |
+| VACUUM / ANALYZE | +0.02, -0.01% / +0.30, +0.89% | 0.00 / -0.24%, 0.00 / -1.10% | 0.00, 0.00% / +0.29, +0.85% | 0.00, 0.00% / +0.29, +0.85% | -1.20 / -0.84%, +0.67 / +1.67% | -1.19, +0.94% |
+| count after UPDATE / DELETE | +0.67 / +0.67% | -0.29 / -0.29% | +1.10 / +1.10% | 0.00 / 0.00% | +1.40 / +1.41% | +0.56 / +0.56% |
+| count(*) scans | +0.42 to +0.48% | 0.00 / 0.00% | +0.58 / +0.58% | 0.00 / 0.00% | +2.37 to +2.42% | +1.74 to +2.34% |
+| sum scans | +0.48 to +0.54% | -0.32 / -0.32% | +0.92 / +0.92% | 0.00 / 0.00% | +1.53 / +1.54% | +0.94 / +0.94% |
+| range read (instructions / read) | +0.06 / +0.01% | +0.12 / -4.3% | -0.03 / 0.00% | -0.23 / -0.24% | | |
+| point select (instructions / select) | -0.35 / +0.24% | -1.33 / -0.79% | +3.8 / +0.7% | -0.22% | | |
+
+(Plain-dist bulk cells at 4 digits, the others at the script's earlier 3: the 0.17 G count(*)
+steps then move in 0.6% steps. The second VACUUM / ANALYZE pair of each column read 1.714 / 0.468
+G for its first arm, the head included: a step that sometimes does less. Point and range reads
+move ±1-4% between runs of one binary on these loaded lanes: the server spins between requests.)
+
+**Format 5 against format 4** (s plain dist, one binary, the two data sets; 303's build n9 for
+comparison):
+
+| | format 4 | format 5 | s | 303's n9 |
+|---|---|---|---|---|
+| q01 (G) | 7.370 | 5.224 | **-29.1%** | -28.0% |
+| q06 | 5.021 | 3.059 | **-39.1%** | -36.1% |
+| q10 | 7.444 | 6.578 | **-11.6%** | +163% |
+| q03 | 4.192 | 5.517 | +31.6% | +78% |
+| q07 | 3.575 | 4.989 | +39.6% | +45% |
+| q09 | 7.908 | 9.043 | +14.4% | +26% |
+| VmHWM (MB) | 1,680.9 | 1,430.6 | -14.9% | -19% |
+| range read (instructions / read) | 561.0 k | 694.3 k | +23.8% | |
+| point select (instructions / select) | 61.8 k | 64.0 k | +3.6% | |
+| TPC-H load (user G) | 731.3 (`ad12b41b5`) | 777.8 (n9) | +6.3% | +5.8% |
+| store on disk (MB) | 612.3 | 569.8 | -6.9% | -7.0% |
+
+Step 2's start (branch `a311-s2b`: rows made a column at a time, a lookup's columns only), format 5
+against 4: q03 +8.7%, q07 +19.6%, q09 +11.7%, range read +20.8%, point select +2.1%.
+
+**PGO head, 309's two indexed COPY steps** (asked by the coordinator: 309's bulk sink was not
+PGO-gated; `~/.cache/a309/bench/bulkx.sh`'s steps, run once on the head's PGO build, lane C 2.9 /
+3.1 foreign cores): COPY into `bulkp` (a primary key and an index) **15.061 G** user instructions,
+into `bulks` (an index) **10.866 G** (309's plain dist: 18.21 / 12.92 G).
+
 ## Analytic CPU, round 14: correlated SubPlans run once a parameter value (2026-11-24, agent 314)
 
 HANDOFF "Analytic CPU, round 14" has what changed. Lane C, the TPC-H SF1 data and harness of
