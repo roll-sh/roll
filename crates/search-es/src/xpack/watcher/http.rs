@@ -5,6 +5,15 @@
 //! host, port, path and params; methods in lower case), printed with its secrets redacted,
 //! rendered with the execution's mustache model, and sent.
 //!
+//! Its secrets ([`Slot`]) are the basic auth password, every header whose name says it carries a
+//! credential ([`credential_header`]), and the URL's path and params: webhook URLs (Slack, Teams,
+//! Discord, PagerDuty) carry their token in the path, and API keys ride in query strings. They
+//! are sealed bound to the cluster ([`crate::seal`]), so a branch's copy of its parent's watches
+//! doesn't open them, and printed as `::es_redacted::`, Elasticsearch's mark for a secret. A
+//! redacted value given back on an update keeps the stored one only while the request still goes
+//! to the same scheme, host and port. A node without a key refuses a password or credential
+//! header, as before, and keeps the URL as given, as Elasticsearch does.
+//!
 //! The URL is chosen by the tenant, so roll's rule for such URLs applies (AGENTS.md), through the
 //! node's egress check ([`crate::egress`]): a client that resolves names to public addresses
 //! only, never to one the node denies, refuses private and denied IP literals and `localhost`,
@@ -82,30 +91,11 @@ pub fn normalize(v: &Value, previous: Option<&Value>) -> EsResult<Map> {
         }
     }
     out.insert("params".into(), Value::Obj(params));
-    // Only the cluster seals values: one given sealed would be opened when the watch runs.
-    if let Some(Value::Obj(h)) = r.get("headers")
-        && h.iter().any(|(k, v)| k.eq_ignore_ascii_case("authorization") && crate::seal::is_sealed(&v.to_es_string()))
-    {
-        return Err(parse_err("found a sealed value in header [Authorization]"));
-    }
     out.insert("headers".into(), r.get("headers").cloned().unwrap_or_else(Value::object));
     if let Some(a) = r.get("auth") {
         let user = a.pointer(&["basic", "username"]).map(Value::to_es_string);
         let pass = a.pointer(&["basic", "password"]).map(Value::to_es_string);
-        let (Some(user), Some(mut pass)) = (user, pass) else { return Err(parse_err("could not parse http request template. unknown auth type")) };
-        if crate::seal::is_sealed(&pass) {
-            return Err(parse_err("found a sealed value in field [password]"));
-        }
-        if pass == REDACTED {
-            // The stored password goes only where it went: a template sent elsewhere needs it
-            // given again, and so does one whose host is a template (it renders anywhere).
-            let templated = out.get("host").is_some_and(|h| h.to_es_string().contains("{{"));
-            let same_place = |p: &&Value| !templated && ["scheme", "host", "port"].iter().all(|k| p.get(k) == out.get(*k));
-            match previous.filter(same_place).and_then(|p| p.pointer(&["auth", "basic", "password"])).map(Value::to_es_string) {
-                Some(old) => pass = old,
-                None => return Err(parse_err("found redacted password in field [password]")),
-            }
-        }
+        let (Some(user), Some(pass)) = (user, pass) else { return Err(parse_err("could not parse http request template. unknown auth type")) };
         out.insert("auth".into(), obj! { "basic" => obj! { "username" => user, "password" => pass } });
     }
     for k in ["body", "proxy"] {
@@ -124,92 +114,197 @@ pub fn normalize(v: &Value, previous: Option<&Value>) -> EsResult<Map> {
             _ => {}
         }
     }
+    // The stored secrets go only where they went: a template sent elsewhere needs them given
+    // again, and so does one whose host is a template (it renders anywhere).
+    let templated = out.get("host").is_some_and(|h| h.to_es_string().contains("{{"));
+    let same_place = |p: &&Value| !templated && ["scheme", "host", "port"].iter().all(|k| p.get(k) == out.get(*k));
+    let kept = previous.filter(same_place);
+    let mut v = Value::Obj(out);
+    each_secret(&mut v, &mut |slot, t| {
+        // Only the cluster seals values: one given sealed would be opened when the watch runs.
+        if crate::seal::is_sealed(t) {
+            return Err(parse_err(format!("found a sealed value in {}", slot.field())));
+        }
+        if t == REDACTED {
+            match kept.and_then(|p| secret_of(p, slot)) {
+                Some(old) => *t = old.to_string(),
+                None if slot == Slot::Password => return Err(parse_err("found redacted password in field [password]")),
+                None => return Err(parse_err(format!("found a redacted value in {}", slot.field()))),
+            }
+        }
+        Ok(())
+    })?;
+    let Value::Obj(out) = v else { unreachable!("an object stays one") };
     Ok(out)
 }
 
-/// Kinds of sealed values ([`crate::seal`]).
+/// A secret of a request template.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Slot<'a> {
+    /// `auth.basic.password`.
+    Password,
+    /// A header carrying a credential ([`credential_header`]), by its name as given.
+    Header(&'a str),
+    /// The URL's path (`path`; none for an empty one or `/`).
+    Path,
+    /// A param's value (`params.<name>`).
+    Param(&'a str),
+}
+
+impl Slot<'_> {
+    /// Where the slot is, for messages.
+    fn field(self) -> String {
+        match self {
+            Slot::Password => "field [password]".into(),
+            Slot::Header(h) => format!("header [{h}]"),
+            Slot::Path => "field [path]".into(),
+            Slot::Param(p) => format!("field [params.{p}]"),
+        }
+    }
+
+    /// What its value is sealed as (bound to the cluster by [`crate::seal::bind`]).
+    fn kind(self) -> &'static str {
+        match self {
+            Slot::Password => PASSWORD,
+            Slot::Header(_) => AUTH_HEADER,
+            Slot::Path | Slot::Param(_) => URL,
+        }
+    }
+
+    /// Whether the slot is a declared credential: refused on a node without a key, as
+    /// Elasticsearch's `encrypt_sensitive_data` would need one. A URL is kept as given there.
+    fn credential(self) -> bool {
+        matches!(self, Slot::Password | Slot::Header(_))
+    }
+}
+
+/// Whether a header carries a credential: `Authorization`, `Proxy-Authorization`, a cookie, or a
+/// name that says auth, token, key, secret or session (`X-Api-Key`, `X-Auth-Token`, …), in any
+/// case.
+pub fn credential_header(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    ["auth", "token", "key", "secret", "cookie", "session"].iter().any(|w| n.contains(w))
+}
+
+/// The text of a value that is a text template: a string, or the `source` of a template object.
+fn text_mut(v: &mut Value) -> Option<&mut String> {
+    match v {
+        Value::Str(s) => Some(s),
+        Value::Obj(m) => match m.get_mut("source") {
+            Some(Value::Str(s)) => Some(s),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// [`text_mut`] to read.
+fn text(v: &Value) -> Option<&str> {
+    match v {
+        Value::Obj(m) => m.get("source").and_then(Value::as_str),
+        other => other.as_str(),
+    }
+}
+
+/// Calls `f` on each secret of a stored template ([`Slot`]) in place.
+pub fn each_secret(v: &mut Value, f: &mut dyn FnMut(Slot<'_>, &mut String) -> EsResult<()>) -> EsResult<()> {
+    let Value::Obj(m) = v else { return Ok(()) };
+    if let Some(Value::Str(p)) = m.get_mut("auth").and_then(|a| a.as_object_mut()).and_then(|a| a.get_mut("basic")).and_then(|b| b.as_object_mut()).and_then(|b| b.get_mut("password")) {
+        f(Slot::Password, p)?;
+    }
+    if let Some(Value::Obj(h)) = m.get_mut("headers") {
+        for (k, val) in h.iter_mut() {
+            if credential_header(k)
+                && let Some(t) = text_mut(val)
+            {
+                f(Slot::Header(k), t)?;
+            }
+        }
+    }
+    if let Some(t) = m.get_mut("path").and_then(text_mut).filter(|t| !t.is_empty() && t.as_str() != "/") {
+        f(Slot::Path, t)?;
+    }
+    if let Some(Value::Obj(p)) = m.get_mut("params") {
+        for (k, val) in p.iter_mut() {
+            if let Some(t) = text_mut(val) {
+                f(Slot::Param(k), t)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The value of `slot` in a stored template.
+fn secret_of<'a>(v: &'a Value, slot: Slot<'_>) -> Option<&'a str> {
+    match slot {
+        Slot::Password => v.pointer(&["auth", "basic", "password"]).and_then(Value::as_str),
+        Slot::Header(name) => v.get("headers").and_then(Value::as_object)?.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).and_then(|(_, x)| text(x)),
+        Slot::Path => v.get("path").and_then(text),
+        Slot::Param(name) => v.get("params").and_then(|p| p.get(name)).and_then(text),
+    }
+}
+
+/// Kinds of sealed values ([`crate::seal`]), bound to the cluster ([`crate::seal::bind`]).
 const PASSWORD: &str = "watch password";
 #[cfg(test)]
 pub(crate) const PASSWORD_KIND: &str = PASSWORD;
+/// Every credential header's (the name is `Authorization`'s, sealed first).
 const AUTH_HEADER: &str = "watch authorization header";
+const URL: &str = "watch url";
 
-/// A kind of sealed value bound to this cluster (`<kind>:<cluster id>`, as connectors' are): a
-/// sealed value carried to another cluster's state doesn't open there.
-fn bound(cluster: &Cluster, kind: &str) -> String {
-    format!("{kind}:{}", crate::branch::cluster_id(cluster))
-}
-
-/// A stored template with its secrets sealed under this node's key and bound to this cluster
-/// ([`bound`]): a value in the clear (kept by a node without a key) is sealed, and one sealed
-/// before the binding, under the bare kind, is opened and sealed again ([`crate::seal::seal_leftovers`]).
-pub fn rebind(cluster: &Cluster, stored: &Value, sealer: &crate::seal::Sealer) -> Value {
-    let one = |kind: &str, s: &str| -> String {
-        let to = bound(cluster, kind);
-        if !crate::seal::is_sealed(s) {
-            return sealer.seal_text(&to, s);
-        }
-        if sealer.open_text(&to, s).is_some() {
-            return s.to_string();
-        }
-        match sealer.open_text(kind, s) {
-            Some(plain) => sealer.seal_text(&to, &plain),
-            None => s.to_string(),
-        }
-    };
+/// A stored template with its secrets settled ([`crate::seal::settle`]): sealed under this
+/// node's key and bound to this cluster, those sealed before the binding sealed again; or, in a
+/// watch the branch `inherited` from its parent, every one that isn't the branch's own replaced
+/// with [`crate::seal::INHERITED`] ([`crate::seal::seal_leftovers`]).
+pub fn rebind(cluster: &Cluster, stored: &Value, sealer: &crate::seal::Sealer, inherited: bool) -> Value {
     let mut v = stored.clone();
-    if let Some(Value::Obj(a)) = v.as_object_mut().and_then(|m| m.get_mut("auth")).and_then(|a| a.as_object_mut()).and_then(|a| a.get_mut("basic"))
-        && let Some(p) = a.get("password").map(Value::to_es_string)
-    {
-        a.insert("password".into(), one(PASSWORD, &p).into());
-    }
-    if let Some(Value::Obj(h)) = v.as_object_mut().and_then(|m| m.get_mut("headers")) {
-        for (k, val) in h.iter_mut() {
-            if k.eq_ignore_ascii_case("authorization") && let Value::Str(s) = val {
-                *val = Value::from(one(AUTH_HEADER, s));
-            }
-        }
-    }
+    let _ = each_secret(&mut v, &mut |slot, t| {
+        *t = crate::seal::settle(sealer, inherited, slot.kind(), &crate::seal::bind(cluster, slot.kind()), t);
+        Ok(())
+    });
     v
 }
 
-/// A normalized template as the cluster stores it: its password and `Authorization` headers
-/// sealed ([`crate::seal`]; refused in the clear on a node without a key). A value that looks
-/// sealed is kept only when `trusted` says it's the cluster's own (the stored watch's, kept by
-/// an update); any other is sealed as given, so a client can't plant a sealed value copied from
-/// elsewhere for the node to open and send to its URL.
-pub fn seal(cluster: &Cluster, stored: &Value, trusted: &dyn Fn(&str) -> bool) -> EsResult<Value> {
-    let seal_one = |kind: &str, s: &str| -> EsResult<String> {
-        if crate::seal::is_sealed(s) && trusted(s) { Ok(s.to_string()) } else { crate::seal::seal_given(cluster, &bound(cluster, kind), s) }
-    };
+/// A stored template with none of its secrets ([`crate::seal::INHERITED`] in their place): a
+/// branch's copy of its parent's ([`crate::branch::mark_inherited`]).
+pub fn inherited(stored: &Value) -> Value {
     let mut v = stored.clone();
-    if let Some(Value::Obj(a)) = v.as_object_mut().and_then(|m| m.get_mut("auth")).and_then(|a| a.as_object_mut()).and_then(|a| a.get_mut("basic"))
-        && let Some(p) = a.get("password").map(Value::to_es_string)
-    {
-        a.insert("password".into(), seal_one(PASSWORD, &p)?.into());
-    }
-    if let Some(Value::Obj(h)) = v.as_object_mut().and_then(|m| m.get_mut("headers")) {
-        for (k, val) in h.iter_mut() {
-            if k.eq_ignore_ascii_case("authorization") && let Value::Str(s) = val {
-                *val = Value::from(seal_one(AUTH_HEADER, s)?);
-            }
+    let _ = each_secret(&mut v, &mut |_, t| {
+        *t = crate::seal::INHERITED.to_string();
+        Ok(())
+    });
+    v
+}
+
+/// A normalized template as the cluster stores it: its secrets sealed ([`crate::seal`]; a
+/// password or credential header refused in the clear on a node without a key, a URL kept as
+/// given there). A value that looks sealed is kept only when `trusted` says it's the cluster's own
+/// (the stored watch's, kept by an update); any other is sealed as given, so a client can't plant a
+/// sealed value copied from elsewhere for the node to open and send to its URL.
+pub fn seal(cluster: &Cluster, stored: &Value, trusted: &dyn Fn(&str) -> bool) -> EsResult<Value> {
+    let mut v = stored.clone();
+    each_secret(&mut v, &mut |slot, t| {
+        if crate::seal::is_sealed(t) && trusted(t) {
+            return Ok(());
         }
-    }
+        if slot.credential() || cluster.config.sealer.is_some() {
+            *t = crate::seal::seal_given(cluster, &crate::seal::bind(cluster, slot.kind()), t)?;
+        }
+        Ok(())
+    })?;
     Ok(v)
 }
 
-/// A stored template as it is printed: the password and any `Authorization` header redacted.
+/// A stored template as it is printed: every secret ([`Slot`]) redacted.
 pub fn redact(stored: &Value) -> Value {
     let mut v = stored.clone();
     if let Some(Value::Obj(a)) = v.as_object_mut().and_then(|m| m.get_mut("auth")).and_then(|a| a.as_object_mut()).and_then(|a| a.get_mut("basic")) {
         a.insert("password".into(), REDACTED.into());
     }
-    if let Some(Value::Obj(h)) = v.as_object_mut().and_then(|m| m.get_mut("headers")) {
-        for (k, val) in h.iter_mut() {
-            if k.eq_ignore_ascii_case("authorization") {
-                *val = Value::from(REDACTED);
-            }
-        }
-    }
+    let _ = each_secret(&mut v, &mut |_, t| {
+        *t = REDACTED.to_string();
+        Ok(())
+    });
     v
 }
 
@@ -231,22 +326,33 @@ pub struct Request {
 
 impl std::fmt::Debug for Request {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.to_record().to_json())
+        let mut r = self.to_record();
+        if let Value::Obj(m) = &mut r {
+            for k in ["path", "params"] {
+                if m.contains_key(k) {
+                    m.insert(k.into(), REDACTED.into());
+                }
+            }
+        }
+        f.write_str(&r.to_json())
     }
 }
 
 /// Renders a stored template with the execution model (`render`: one text template). Its
-/// sealed `Authorization` headers and password are opened first: a value that only renders to
-/// sealed text (from the payload) is sent as it is, never opened.
+/// sealed secrets ([`Slot`]) are opened first: a value that only renders to sealed text (from the
+/// payload) is sent as it is, never opened. A secret a branch didn't get from its parent is an
+/// error ([`crate::seal::inherited`]), before anything is sent.
 pub fn render(cluster: &Cluster, stored: &Map, render: &dyn Fn(&Value) -> EsResult<(String, bool)>) -> EsResult<Request> {
+    let mut opened = Value::Obj(stored.clone());
+    each_secret(&mut opened, &mut |slot, t| {
+        *t = crate::seal::open(cluster, &crate::seal::bind(cluster, slot.kind()), t)?;
+        Ok(())
+    })?;
+    let Value::Obj(stored) = &opened else { unreachable!("an object stays one") };
     let text = |k: &str| -> EsResult<Option<String>> { stored.get(k).map(|v| render(v).map(|r| r.0)).transpose() };
     let mut headers = Vec::new();
     for (k, v) in stored.get("headers").and_then(Value::as_object).into_iter().flatten() {
-        let v = match v {
-            Value::Str(t) if k.eq_ignore_ascii_case("authorization") => Value::from(crate::seal::open(cluster, &bound(cluster, AUTH_HEADER), t)?),
-            other => other.clone(),
-        };
-        headers.push((k.clone(), render(&v)?.0));
+        headers.push((k.clone(), render(v)?.0));
     }
     let mut params = Vec::new();
     for (k, v) in stored.get("params").and_then(Value::as_object).into_iter().flatten() {
@@ -263,10 +369,7 @@ pub fn render(cluster: &Cluster, stored: &Map, render: &dyn Fn(&Value) -> EsResu
             Some(s)
         }
     };
-    let auth = match stored.get("auth").and_then(|a| a.get("basic")) {
-        Some(b) => Some((b.get("username").map(Value::to_es_string).unwrap_or_default(), crate::seal::open(cluster, &bound(cluster, PASSWORD), &b.get("password").map(Value::to_es_string).unwrap_or_default())?)),
-        None => None,
-    };
+    let auth = stored.get("auth").and_then(|a| a.get("basic")).map(|b| (b.get("username").map(Value::to_es_string).unwrap_or_default(), b.get("password").map(Value::to_es_string).unwrap_or_default()));
     Ok(Request {
         scheme: stored.get("scheme").map(Value::to_es_string).unwrap_or_else(|| "http".into()),
         host: text("host")?.unwrap_or_default(),
@@ -299,7 +402,7 @@ impl Request {
         if !self.headers.is_empty() {
             m.insert(
                 "headers".into(),
-                Value::Obj(self.headers.iter().map(|(k, v)| (k.clone(), Value::from(if k.eq_ignore_ascii_case("authorization") { REDACTED.to_string() } else { v.clone() }))).collect()),
+                Value::Obj(self.headers.iter().map(|(k, v)| (k.clone(), Value::from(if credential_header(k) { REDACTED.to_string() } else { v.clone() }))).collect()),
             );
         }
         if let Some((u, _)) = &self.auth {

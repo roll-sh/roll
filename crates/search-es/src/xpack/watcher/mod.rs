@@ -221,6 +221,8 @@ pub async fn put_watch(ctx: &Ctx<'_>) -> EsResult<Reply> {
             }
             let doc = obj! { "watch" => w, "status" => Value::Obj(initial_status(&body, active, now)), "_version" => version, "_seq_no" => seq, "_roll" => Value::Obj(roll) };
             store::put(st, WATCHES, &id, doc, now)?;
+            // Put on a branch, it is the branch's own: its secrets are the ones given here.
+            crate::branch::adopt_watch(st, &id, now)?;
             Ok((version, seq, old.is_none()))
         })
         .await?;

@@ -44,6 +44,10 @@ use std::sync::OnceLock;
 pub const INDEX: &str = ".opendistro_security";
 /// The cluster's owner (the plugin's `admin`).
 pub const OWNER: &str = "admin";
+/// The names of the internal users (and their roles) roll's control plane makes for keys and
+/// links: an OpenSearch-flavor cluster's API keys, taken out when it becomes Elasticsearch-flavor
+/// ([`super::forget_other_flavor`]).
+pub const KEY_USER_PREFIXES: [&str; 2] = ["roll-key-", "roll-link-"];
 /// The key of a stored entry that hides a default of its name.
 const DELETED: &str = "_deleted";
 /// `plugins.security.compliance.salt`'s default (masked fields' BLAKE2b salt).

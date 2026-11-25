@@ -1373,6 +1373,7 @@ impl Node {
         cfg.owner = spec.owner.clone();
         cfg.secret_refs = self.cfg.secret_refs.clone();
         cfg.branch_of = spec.branch_of.clone();
+        cfg.parent = spec.parent.clone();
         // Snapshot contents are durable only with object storage behind the cluster.
         cfg.default_repository = self.cfg.default_repository.clone().filter(|_| data_store.is_some());
         cfg.file_service_tokens = self.reads_file_service_tokens(&spec.name);
@@ -1394,6 +1395,12 @@ impl Node {
             Ok(0) => {}
             Ok(n) => tracing::info!(cluster = spec.name, records = n, "sealed secrets stored in the clear"),
             Err(e) => tracing::warn!(cluster = spec.name, error = %e.reason(), "sealing secrets stored in the clear failed"),
+        }
+        // A switch of flavor: the keys of the flavor it left don't come back with a switch back.
+        match Box::pin(search_es::xpack::security::forget_other_flavor(&cluster)).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(cluster = spec.name, keys = n, "took out the keys of the flavor the cluster left"),
+            Err(e) => tracing::warn!(cluster = spec.name, error = %e.reason(), "taking out the keys of the flavor the cluster left failed"),
         }
         Box::pin(search_es::xpack::entsearch::sync::adopt_existing(&cluster)).await.map_err(|e| anyhow::anyhow!("pausing the connectors from before roll ran syncs: {}", e.reason()))?;
         let mut stats = persist::RecoveryStats::default();

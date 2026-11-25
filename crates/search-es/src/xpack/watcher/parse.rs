@@ -409,12 +409,18 @@ pub fn sealed_watch(cluster: &Cluster, w: &Map, trusted: &dyn Fn(&str) -> bool) 
     })
 }
 
-/// A stored watch with its secrets sealed and bound to this cluster ([`http::rebind`]).
-pub fn rebound_watch(cluster: &Cluster, w: &Map, sealer: &crate::seal::Sealer) -> Map {
-    match map_requests(&Value::Obj(w.clone()), &|r| http::rebind(cluster, r, sealer)) {
+/// A stored watch with its secrets settled ([`http::rebind`]): sealed and bound to this cluster,
+/// or in a watch a branch `inherited`, taken out where they aren't the branch's own.
+pub fn rebound_watch(cluster: &Cluster, w: &Map, sealer: &crate::seal::Sealer, inherited: bool) -> Map {
+    match map_requests(&Value::Obj(w.clone()), &|r| http::rebind(cluster, r, sealer, inherited)) {
         Value::Obj(m) => m,
         _ => w.clone(),
     }
+}
+
+/// A stored watch without its secrets ([`http::inherited`]): a branch's copy of its parent's.
+pub fn inherited_watch(w: &Value) -> Value {
+    map_requests(w, &http::inherited)
 }
 
 /// The sealed values a stored watch holds: what an update may keep as they are.

@@ -534,9 +534,9 @@ async fn a_reused_name_inherits_nothing_of_the_deleted_cluster() {
 }
 
 /// Credentials pasted into a snapshot repository or a remote link are never kept in the clear: a
-/// node without a sealing key refuses them (pointing at a `roll://` reference or the key) and
-/// keeps nothing, and a node with one keeps them only sealed, in the cluster state as saved and in
-/// the catalog.
+/// node without a sealing key refuses a repository's (pointing at a `roll://` reference or the
+/// key) and keeps nothing, and seals a remote's with its own key; a node with one keeps them only
+/// sealed, in the cluster state as saved and in the catalog.
 #[tokio::test]
 async fn pasted_credentials_are_sealed_or_refused() {
     use reqwest::Method;
@@ -561,19 +561,17 @@ async fn pasted_credentials_are_sealed_or_refused() {
         let (_, k) = e.es(&ul, &pl, Method::POST, "/_security/cross_cluster/api_key", Some(json!({ "name": "mine", "access": { "search": [{ "names": ["*"] }] } }))).await;
         let key = k["encoded"].as_str().unwrap_or_else(|| panic!("{k}")).to_string();
         let (sr, vr) = e.call(Method::PUT, "/v1/search/clusters/app/remotes/logs", Some(json!({ "cluster": "logs", "api_key": key }))).await;
+        assert_eq!(sr, 200, "{vr}");
         if sealed {
-            assert_eq!((s, sr), (200, 200), "{v} {vr}");
+            assert_eq!(s, 200, "{v}");
         } else {
             assert!(s == 400 && v.to_string().contains("roll://"), "{v}");
-            assert!(sr == 400 && vr.to_string().contains("ROLL_SECRET_KEY"), "{vr}");
         }
         let state = e.control.node.get_loaded("app").unwrap().cluster.state().to_json().to_json();
         assert!(!state.contains("pasted-secret-key") && !state.contains("AKIDPASTED"), "sealed={sealed}: a credential in the saved state");
         assert_eq!(state.contains("::roll_sealed::"), sealed);
-        match e.control.store.remote(app["id"].as_str().unwrap(), "logs").await.unwrap() {
-            Some(r) => assert!(sealed && search_es::seal::is_sealed(&r.credentials) && !r.credentials.contains(&key)),
-            None => assert!(!sealed, "the link is kept"),
-        }
+        let r = e.control.store.remote(app["id"].as_str().unwrap(), "logs").await.unwrap().expect("the link is kept");
+        assert!(search_es::seal::is_sealed(&r.credentials) && !r.credentials.contains(&key), "sealed={sealed}");
     }
 }
 
@@ -3121,6 +3119,72 @@ async fn a_branch_runs_none_of_its_parents_jobs() {
     assert_eq!(v["backup"]["settings"]["readonly"], Value::Null, "{v}");
     let (_, v) = e.es(&ou, &op, Method::GET, "/_slm/policy/nightly", None).await;
     assert!(v["nightly"]["next_execution_millis"].is_i64() && v["nightly"].get("last_failure").is_none(), "{v}");
+}
+
+/// A branch's people may not be the parent's (a branch-scoped token, the branch's own password,
+/// a preview's data key), so it opens none of the parent's secrets: its connector and Fleet
+/// secret stores don't have the parent's entries, a watch's credential header and the token in
+/// its webhook URL are shown redacted on the parent and aren't sent from the branch, and an
+/// inference endpoint refuses on the branch without calling the provider with the parent's key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_branch_opens_none_of_its_parents_secrets() {
+    use reqwest::Method;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let calls = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let counter = calls.clone();
+    let router = axum::Router::new().fallback(move || {
+        counter.fetch_add(1, Ordering::SeqCst);
+        async { "ok" }
+    });
+    tokio::spawn(async move { axum::serve(listener, router).await });
+    let e = env_with(|c| {
+        c.sealer = search_control::Sealer::from_secret("0123456789abcdef0123456789abcdef-branches");
+        c.unsealed_secrets = false;
+        c.node_settings.push((search_es::xpack::watcher::http::ALLOW_PRIVATE.into(), "true".into()));
+        c.node_settings.push((search_control::INFERENCE_ALLOW_PRIVATE.into(), "true".into()));
+        c.node_settings.push(("xpack.inference.skip_validate_and_start".into(), "true".into()));
+    })
+    .await;
+    let c = e.post("/v1/search/clusters", json!({"name": "prod"})).await;
+    let (u, p) = creds(&c);
+    let id_of = |v: &Value| v["id"].as_str().unwrap_or_else(|| panic!("{v}")).to_string();
+    let (_, v) = e.es(&u, &p, Method::POST, "/_connector/_secret", Some(json!({"value": "conn-key-1"}))).await;
+    let conn = id_of(&v);
+    let (_, v) = e.es(&u, &p, Method::POST, "/_fleet/secret", Some(json!({"value": "fleet-pw-2"}))).await;
+    let fleet = id_of(&v);
+    let watch = json!({
+        "trigger": {"schedule": {"interval": "1h"}},
+        "input": {"simple": {}},
+        "actions": {"hook": {"webhook": {"method": "post", "url": format!("http://127.0.0.1:{port}/services/T0/B0/slack-token-3?key=q-4"), "headers": {"X-Api-Key": "api-key-5"}, "body": "fired"}}},
+    });
+    let (s, v) = e.es(&u, &p, Method::PUT, "/_watcher/watch/ping?active=false", Some(watch)).await;
+    assert_eq!(s, 201, "{v}");
+    let endpoint = json!({"service": "openai", "service_settings": {"api_key": "sk-parent-6", "model_id": "emb", "url": format!("http://127.0.0.1:{port}/v1/embeddings")}});
+    let (s, v) = e.es(&u, &p, Method::PUT, "/_inference/text_embedding/emb", Some(endpoint)).await;
+    assert_eq!(s, 200, "{v}");
+    // The parent shows its watch's secrets redacted, and opens its own stores.
+    let (_, v) = e.es(&u, &p, Method::GET, "/_watcher/watch/ping", None).await;
+    let shown = v.to_string();
+    assert!(!["slack-token-3", "q-4", "api-key-5"].iter().any(|t| shown.contains(t)) && shown.contains("::es_redacted::"), "{v}");
+    assert_eq!(e.es(&u, &p, Method::GET, &format!("/_connector/_secret/{conn}"), None).await.1["value"], "conn-key-1");
+    assert_eq!(e.es(&u, &p, Method::GET, &format!("/_fleet/secret/{fleet}"), None).await.1["value"], "fleet-pw-2");
+
+    let b = e.post(&format!("/v1/search/clusters/{}/branches", id_of(&c)), json!({"name": "prod-dev"})).await;
+    let (bu, bp) = creds(&b);
+    for uri in [format!("/_connector/_secret/{conn}"), format!("/_fleet/secret/{fleet}")] {
+        let (s, v) = e.es(&bu, &bp, Method::GET, &uri, None).await;
+        assert_eq!(s, 404, "{uri}: {v}");
+    }
+    let (s, v) = e.es(&bu, &bp, Method::POST, "/_watcher/watch/ping/_execute", Some(json!({"action_modes": {"_all": "force_execute"}}))).await;
+    assert_eq!(s, 200, "{v}");
+    let action = &v["watch_record"]["result"]["actions"][0];
+    assert_eq!(action["status"], "failure", "{v}");
+    assert!(action["error"]["reason"].as_str().unwrap_or_default().contains("this branch doesn't have the parent's"), "{v}");
+    let (s, v) = e.es(&bu, &bp, Method::POST, "/_inference/text_embedding/emb", Some(json!({"input": "words"}))).await;
+    assert!(s == 400 && v.to_string().contains("this branch doesn't have the parent's provider key; set it on the branch"), "{s} {v}");
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "the branch called out with the parent's secrets");
 }
 
 #[path = "control/cloud_repositories.rs"]

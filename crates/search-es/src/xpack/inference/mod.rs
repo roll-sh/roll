@@ -175,16 +175,26 @@ impl Endpoint {
         self.service_settings.get("rate_limit").and_then(|r| r.get("requests_per_minute")).and_then(Value::as_i64)
     }
 
+    /// On a branch, the parent's keys aren't there ([`crate::seal::INHERITED`]): an endpoint it
+    /// inherited refuses before calling out, until the branch gives it a key of its own.
     pub fn secret(&self, cluster: &Cluster, key: &str) -> EsResult<Option<String>> {
         match self.secrets.get(key).and_then(Value::as_str) {
-            Some(s) => crate::seal::open(cluster, SECRET_KIND, s).map(Some),
+            Some(crate::seal::INHERITED) => Err(EsError::status(400, "this branch doesn't have the parent's provider key; set it on the branch")),
+            Some(s) => crate::seal::open(cluster, &secret_kind(cluster), s).map(Some),
             None => Ok(None),
         }
     }
 }
 
-/// What an endpoint's secret values are sealed as ([`crate::seal`]).
+/// What an endpoint's secret values are sealed as ([`crate::seal`]), bound to the cluster by
+/// [`secret_kind`].
 pub const SECRET_KIND: &str = "inference api key";
+
+/// [`SECRET_KIND`] bound to `cluster` ([`crate::seal::bind`]): a key doesn't open in another
+/// cluster's state, so a branch (a copy of its parent's) never calls a provider with the parent's.
+pub fn secret_kind(cluster: &Cluster) -> String {
+    crate::seal::bind(cluster, SECRET_KIND)
+}
 
 /// Whether `id` is a valid inference id (`MlStrings.isValidId`).
 fn valid_id(id: &str) -> bool {

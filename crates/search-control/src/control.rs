@@ -508,6 +508,8 @@ pub fn spec_for(c: &SearchCluster) -> ClusterSpec {
     // Only until its first load has marked what it inherited: a branch made before marking
     // existed, or one already marked, runs its jobs as its own.
     spec.branch_of = c.parent_id.clone().filter(|_| c.inherit_pending);
+    // On every load: the parent's secrets in the branch's copy never open there.
+    spec.parent = c.parent_id.clone();
     spec
 }
 
@@ -690,7 +692,9 @@ fn key_indices(indices: Option<Vec<String>>, concrete: bool) -> Result<Vec<Strin
 }
 
 /// The name prefix of the internal users the keys route makes on OpenSearch-flavor clusters.
-const OS_KEY_PREFIX: &str = "roll-key-";
+const OS_KEY_PREFIX: &str = search_es::xpack::security::opensearch::KEY_USER_PREFIXES[0];
+/// The name prefix of the internal users links make on OpenSearch-flavor clusters.
+const OS_LINK_PREFIX: &str = search_es::xpack::security::opensearch::KEY_USER_PREFIXES[1];
 
 /// A link's credential ([`Control::mint_link`]): its variables (unprefixed) and what revoking
 /// it takes.
@@ -834,12 +838,11 @@ impl Control {
                 Arc::new(Store::open(&cfg.home.join("search.db"), sealer, former)?)
             }
         };
-        if let Some(s) = &cfg.sealer {
-            // Remotes linked before the node had a key: sealed now, or they couldn't be opened.
-            let n = store.seal_remote_credentials(|r| s.seal_text(&crate::remotes::kind(&r.cluster_id, &r.alias, &r.target_id), &r.credentials)).await?;
-            if n > 0 {
-                tracing::info!(remotes = n, "sealed remote credentials stored in the clear");
-            }
+        // Remotes kept in the clear by an older node, or under the node's own key before it had the
+        // deployment's: sealed with the store's key now.
+        let n = store.seal_remote_credentials().await?;
+        if n > 0 {
+            tracing::info!(remotes = n, "sealed remote credentials with the store's key");
         }
         let scfg = StoreConfig {
             node: cfg.node_name.clone(),
@@ -2018,7 +2021,7 @@ impl Control {
     /// An OpenSearch-flavor cluster's link: a role and an internal user named
     /// `roll-link-<random>`, the user holding only that role.
     async fn mint_os_link(&self, c: &SearchCluster, url: &str) -> Result<LinkCredential> {
-        let (name, password) = self.os_user(c, "roll-link-", Some(os_link_role(None)), "roll: an app's link", None).await?;
+        let (name, password) = self.os_user(c, OS_LINK_PREFIX, Some(os_link_role(None)), "roll: an app's link", None).await?;
         let mut u = reqwest::Url::parse(url).map_err(|e| ControlError::Internal(anyhow::anyhow!("cluster {} has no URL: {e}", c.name)))?;
         let userinfo = (u.set_username(&format!("{name}@{}", c.name)), u.set_password(Some(&password)));
         if userinfo != (Ok(()), Ok(())) {

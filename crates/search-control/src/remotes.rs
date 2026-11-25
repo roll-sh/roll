@@ -9,8 +9,9 @@
 //!   deleted cluster's name can be taken by someone else.
 //! - **Credentials**: the remote issues a `cross_cluster` API key (`search` access patterns);
 //!   the local cluster keeps it as `cluster.remote.<alias>.credentials`, a secure setting, here
-//!   in the catalog (`search_remotes`), sealed under the deployment's key and bound to its row
-//!   (cluster, alias, target), never returned. Revoking the key on the remote cuts the link.
+//!   in the catalog (`search_remotes`), sealed under the catalog's key (the deployment's, or on a
+//!   single node without one the node's own) and bound to its row (cluster, alias, target), never
+//!   returned. Revoking the key on the remote cuts the link.
 //! - **Execution**: a remote's part runs on the remote cluster's owner through [`Control`]'s
 //!   own in-process call or signed fleet forward, never over the public endpoint, so IP
 //!   allowlists don't apply to it. A sleeping remote wakes for it.
@@ -138,12 +139,7 @@ impl Links for ControlLinks {
 impl Control {
     /// Opens a remote's sealed credentials (`None`: sealed under another key, or tampered with).
     fn open_remote_credentials(&self, row: &RemoteLink) -> Option<String> {
-        match &self.cfg.sealer {
-            Some(s) if search_es::seal::is_sealed(&row.credentials) => s.open_text(&kind(&row.cluster_id, &row.alias, &row.target_id), &row.credentials),
-            Some(_) => None,
-            None if search_es::seal::is_sealed(&row.credentials) => None,
-            None => Some(row.credentials.clone()),
-        }
+        self.store.open_secret(&kind(&row.cluster_id, &row.alias, &row.target_id), &row.credentials)
     }
 
     /// Sends a linked remote's request to cluster `t` as cross-cluster key `key_id`, on `t`'s
@@ -196,11 +192,6 @@ impl Control {
         if !valid_alias(alias) {
             return Err(ControlError::Invalid("alias: 1 to 64 letters, digits, - and _".into()));
         }
-        if api_key.is_some() && self.cfg.sealer.is_none() {
-            return Err(ControlError::Invalid(
-                "api_key would be stored in the clear: this node has no sealing key (ROLL_SECRET_KEY). Have the operator set it, or link without api_key and roll makes the cross-cluster key".into(),
-            ));
-        }
         let c = self.get(id).await?;
         let held = self.store.remotes(&c.id).await?;
         if held.len() >= MAX_REMOTES && !held.iter().any(|r| r.alias == alias) {
@@ -238,14 +229,10 @@ impl Control {
             }
         };
         let k = kind(&c.id, alias, &t.id);
-        // Sealed under the deployment's key. A node without one (`ROLL_SECRET_KEY` unset: local
-        // development only) refuses a key someone pasted (above) and keeps the one roll made, a
-        // cross-cluster key between two of its own clusters, as made; it's sealed once the node
-        // has a key (`Store::seal_remote_credentials`, as the node starts).
-        let credentials = match &self.cfg.sealer {
-            Some(s) => s.seal_text(&k, &encoded),
-            None => encoded,
-        };
+        // Sealed under the catalog's key: the deployment's, or on a single node without one
+        // (`ROLL_SECRET_KEY` unset) the node's own, sealed again with the deployment's once it has
+        // one (`Store::seal_remote_credentials`, as the node starts).
+        let credentials = self.store.seal_secret(&k, &encoded);
         let row = RemoteLink { cluster_id: c.id.clone(), alias: alias.to_string(), target_id: t.id.clone(), key_id: key_id.clone(), credentials, minted, created_at: crate::control::now() };
         let replaced = self.store.put_remote(&row).await?;
         let mut settings = serde_json::Map::new();

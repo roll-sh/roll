@@ -425,7 +425,9 @@ pub fn authenticate_native(cluster: &Cluster, header: &str) -> Option<Principal>
         }
         return users::authenticate_password(cluster, user, password);
     }
-    if scheme.eq_ignore_ascii_case("apikey") {
+    // OpenSearch has no API keys: an Elasticsearch-flavor cluster's, kept in its state across a
+    // switch of flavor, don't sign in there.
+    if scheme.eq_ignore_ascii_case("apikey") && cluster.dialect == crate::cluster::Dialect::Elasticsearch {
         return api_keys::authenticate(cluster, value).ok();
     }
     if scheme.eq_ignore_ascii_case("bearer") {
@@ -434,11 +436,59 @@ pub fn authenticate_native(cluster: &Cluster, header: &str) -> Option<Principal>
     None
 }
 
+/// Takes out, as the cluster opens, the keys a switch of flavor left from the other flavor, so a
+/// key leaked before a switch doesn't sign in again after a switch back: on an
+/// OpenSearch-dialect cluster every Elasticsearch API key is invalidated (as `DELETE
+/// _security/api_key` does; links' too), and on an Elasticsearch one the internal users and
+/// roles roll made for keys and links ([`opensearch::KEY_USER_PREFIXES`]) are removed. Neither
+/// is made under the other dialect, so whatever is there came from before the switch. Returns
+/// how many it took out.
+pub async fn forget_other_flavor(cluster: &Cluster) -> EsResult<usize> {
+    use crate::xpack::store;
+    let st = cluster.state();
+    let n = match cluster.dialect {
+        crate::cluster::Dialect::OpenSearch => st.metadata.xpack.iter(api_keys::KEYS).filter(|(_, k)| k.get("invalidated").and_then(Value::as_bool) != Some(true)).count(),
+        _ => [opensearch::Kind::Users, opensearch::Kind::Roles]
+            .iter()
+            .map(|k| st.metadata.xpack.iter(k.family()).filter(|(name, _)| opensearch::KEY_USER_PREFIXES.iter().any(|p| name.starts_with(p))).count())
+            .sum(),
+    };
+    drop(st);
+    if n == 0 {
+        return Ok(0);
+    }
+    let dialect = cluster.dialect;
+    let now = crate::time::now_millis();
+    cluster
+        .update(move |st| {
+            if dialect == crate::cluster::Dialect::OpenSearch {
+                let live: Vec<(String, Value)> = st.metadata.xpack.iter(api_keys::KEYS).filter(|(_, k)| k.get("invalidated").and_then(Value::as_bool) != Some(true)).map(|(i, k)| (i.clone(), k.clone())).collect();
+                for (id, mut k) in live {
+                    if let Value::Obj(m) = &mut k {
+                        m.insert("invalidated".into(), true.into());
+                        m.insert("invalidation".into(), now.into());
+                    }
+                    store::put(st, api_keys::KEYS, &id, k, now)?;
+                }
+                return Ok(());
+            }
+            for kind in [opensearch::Kind::Users, opensearch::Kind::Roles] {
+                let made: Vec<String> = st.metadata.xpack.iter(kind.family()).map(|(name, _)| name.clone()).filter(|name| opensearch::KEY_USER_PREFIXES.iter().any(|p| name.starts_with(p))).collect();
+                for name in made {
+                    store::remove(st, kind.family(), &name);
+                }
+            }
+            Ok(())
+        })
+        .await?;
+    Ok(n)
+}
+
 /// [`authenticate_native`] for a linked remote cluster's request (`access`: its remote access
 /// header): a `cross_cluster` key of this cluster only.
 pub fn authenticate_native_link(cluster: &Cluster, header: &str, access: &str) -> Option<Principal> {
     let (scheme, value) = header.trim().split_once(' ')?;
-    if !scheme.eq_ignore_ascii_case("apikey") {
+    if !scheme.eq_ignore_ascii_case("apikey") || cluster.dialect != crate::cluster::Dialect::Elasticsearch {
         return None;
     }
     api_keys::authenticate_link(cluster, value.trim(), access).ok()

@@ -137,6 +137,10 @@ pub struct ClusterConfig {
     /// ([`crate::branch`]). Later loads, and branches made before marking existed, have none:
     /// their jobs are their own.
     pub branch_of: Option<String>,
+    /// The parent's catalog id on every load of a branch (`None`: not a branch). The parent's
+    /// secrets in the branch's copy of its state never open there ([`crate::seal`]), branches
+    /// made before marking ([`Self::branch_of`]) included.
+    pub parent: Option<String>,
     /// Read service account tokens from `<path.conf>/service_tokens` too, as Elasticsearch
     /// does. The file is the node's, so a token in it would sign in to every cluster the node
     /// serves: the host sets this only for a node serving one cluster, or for the clusters its
@@ -186,6 +190,7 @@ impl ClusterConfig {
             sites: None,
             connector_slots: None,
             branch_of: None,
+            parent: None,
             file_service_tokens: false,
             audit: None,
             embedder: None,

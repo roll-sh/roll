@@ -328,14 +328,38 @@ creator, a transform as the user who put or last updated it. A superuser's reque
 run with the cluster's authority, as before.
 
 Secrets a cluster stores for later use are sealed in its state (`search-es` `seal.rs`): a
-watch's HTTP passwords and `Authorization` headers, connector secrets and Fleet secrets.
-AES-256-GCM under a key derived from the deployment's `ROLL_SECRET_KEY` (rolld; search-dev
-reads the same variable), a fresh nonce per value and the value's kind as associated data. They
-travel sealed through cluster states, snapshots and branches, and are opened only to send a
-request or to answer that secret's own read API; a node with another key refuses to open them
-without naming either. With no key they are refused, unless the node opts in for local
-development (`--search-allow-unsealed-secrets`): then they are stored as given, as Elasticsearch
-does without `xpack.watcher.encrypt_sensitive_data`. ES|QL data sources still refuse S3 secrets, as
+watch's HTTP passwords, credential headers (`Authorization`, `Proxy-Authorization`, cookies, and
+any header whose name says auth, token, key, secret or session) and URLs (path and params:
+webhook URLs carry their token in the path), connector secrets, Fleet secrets and inference
+endpoints' keys. AES-256-GCM under a key derived from the deployment's `ROLL_SECRET_KEY` (rolld;
+search-dev reads the same variable), a fresh nonce per value, and as associated data the
+value's kind bound to the cluster's id in the catalog (`<kind>:<cluster id>`, plus the entry's id
+for connector and Fleet secrets). They travel sealed through cluster states and snapshots, and
+are opened only to send a request or to answer that secret's own read API; a node with another
+key, or another cluster, can't open them, and the error names neither the value nor the key.
+`GET _watcher/watch` shows each of a watch's secrets as `::es_redacted::`; a redacted value given
+back on an update keeps the stored one only while the request goes to the same scheme, host and
+port. With no key, passwords, credential headers and secret stores' values are refused, unless
+the node opts in for local development (`--search-allow-unsealed-secrets`): then they are stored
+as given, as Elasticsearch does without `xpack.watcher.encrypt_sensitive_data`; a watch's URL is
+kept as given there.
+
+**Branches don't get their parent's secrets.** A branch's people aren't necessarily the
+parent's (a branch-scoped token, the branch's own password, a preview's data key), and its
+state is a copy of the parent's, so nothing sealed for the parent opens there. On a new branch's
+first load (`branch::mark_inherited`) the connector and Fleet secret stores' entries are removed,
+and inference endpoints' keys and inherited watches' secrets are replaced with a value that
+never opens: using one answers 400 "this branch doesn't have the parent's …; set it on the
+branch", before anything is sent. An inference endpoint the branch inherited answers "this
+branch doesn't have the parent's provider key; set it on the branch" until the branch updates it
+with a key of its own; a roll secret's `search-inference` sync names the parent and doesn't
+reach the branch (a branch is no trusted copy to give a provider key to). A watch the branch
+puts again is its own. The node is told on every load that a cluster is a branch
+(`ClusterConfig::parent`), so branches made before marking, or marked before this rule, get the
+same as they open (`seal::seal_leftovers`: on a branch, a secret that doesn't open as the
+branch's own is taken out; on any other cluster, one sealed before secrets were bound to their
+cluster is sealed again, bound to it). A point-in-time branch so never keeps a key the parent
+has since rotated or deleted. ES|QL data sources still refuse S3 secrets, as
 Elasticsearch does without cluster state encryption. Users' passwords are hashes and API keys
 are kept as hashes, never sealed.
 

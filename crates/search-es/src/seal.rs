@@ -1,5 +1,5 @@
-//! Secrets a cluster keeps in its stored state, sealed at rest: a watch's HTTP passwords and
-//! `Authorization` headers, connector and Fleet secrets.
+//! Secrets a cluster keeps in its stored state, sealed at rest: a watch's HTTP passwords,
+//! credential headers and URLs, connector and Fleet secrets, inference endpoints' keys.
 //!
 //! Elasticsearch stores them as given unless `xpack.watcher.encrypt_sensitive_data` and a
 //! system key are set; roll seals them whenever the node has a key (rolld's `ROLL_SECRET_KEY`,
@@ -7,6 +7,13 @@
 //! value and the value's kind as associated data, so a sealed password can't be moved into
 //! another kind's slot. A sealed value is a string, `::roll_sealed::v1:` and the base64 of the
 //! nonce and ciphertext, so it travels through cluster state, snapshots and branches unchanged.
+//!
+//! Every kind is bound to the cluster ([`bind`]: its id in roll's catalog), so a value doesn't
+//! open in another cluster's state: a branch starts from a copy of its parent's, and the
+//! parent's secrets (its provider keys, its connectors' API keys, its webhooks' tokens) are the
+//! parent's, which the branch's people may not be allowed to read. A branch's copy holds
+//! [`INHERITED`] in their place ([`crate::branch::mark_inherited`]): using one is an error that
+//! says to give the secret again on the branch.
 //!
 //! A node without a key refuses to store a secret a client gives (a 400 naming
 //! `ROLL_SECRET_KEY`) rather than keep it in the clear, unless it opts in for local development
@@ -26,6 +33,26 @@ use crate::cluster::Cluster;
 use crate::error::{EsError, EsResult};
 
 const PREFIX: &str = "::roll_sealed::v1:";
+
+/// What a branch's copy holds in place of a secret of its parent's ([`crate::branch`]): it never
+/// opens, and using it is an error that says to give the secret again on the branch.
+pub const INHERITED: &str = "::roll_inherited::";
+
+/// `kind` bound to this cluster (`<kind>:<cluster id>`, [`crate::branch::cluster_id`]): a value
+/// sealed for it opens only in this cluster's state, never in a branch's copy of it.
+pub fn bind(cluster: &Cluster, kind: &str) -> String {
+    format!("{kind}:{}", crate::branch::cluster_id(cluster))
+}
+
+/// The error of using a secret a branch didn't get from its parent ([`INHERITED`]).
+pub fn inherited(what: &str) -> EsError {
+    EsError::illegal_argument(format!("this branch doesn't have the parent's {what}; set it on the branch"))
+}
+
+/// What `kind` names (bound or not), for messages: its part before the cluster.
+fn label(kind: &str) -> &str {
+    kind.split(':').next().unwrap_or(kind)
+}
 
 /// Seals and opens a cluster's stored secrets.
 pub struct Sealer {
@@ -82,7 +109,8 @@ impl Sealer {
 /// The refusal of a node without a key to store a `kind` in the clear.
 pub fn keyless(kind: &str) -> EsError {
     EsError::illegal_argument(format!(
-        "this node has no sealing key (ROLL_SECRET_KEY), so a {kind} would be stored in the clear: it isn't stored. Have the operator set ROLL_SECRET_KEY"
+        "this node has no sealing key (ROLL_SECRET_KEY), so a {} would be stored in the clear: it isn't stored. Have the operator set ROLL_SECRET_KEY",
+        label(kind)
     ))
 }
 
@@ -104,6 +132,10 @@ pub fn seal_given(cluster: &Cluster, kind: &str, plain: &str) -> EsResult<String
 /// place a secret a client gives is sealed, kept as given on a node that opted in
 /// ([`crate::ClusterConfig::unsealed_secrets`]), or refused ([`keyless`]).
 pub fn seal_given_with(sealer: Option<&Sealer>, unsealed: bool, kind: &str, plain: &str) -> EsResult<String> {
+    // Kept as it is: it never opens ([`open`]), so it can't carry anything.
+    if plain == INHERITED {
+        return Ok(INHERITED.to_string());
+    }
     match sealer {
         Some(s) => Ok(s.seal(kind, plain)),
         None if unsealed => Ok(plain.to_string()),
@@ -127,21 +159,25 @@ pub fn seal(cluster: &Cluster, kind: &str, plain: &str) -> EsResult<String> {
 }
 
 /// A stored value in the clear (`stored` as it is when it isn't sealed). A sealed value this
-/// node can't open (no key, another deployment's key, tampered with) is an error that names
-/// neither the value nor the key.
+/// node can't open (no key, another deployment's key, another cluster's, tampered with) is an
+/// error that names neither the value nor the key; [`INHERITED`] is [`inherited`].
 pub fn open(cluster: &Cluster, kind: &str, stored: &str) -> EsResult<String> {
+    if stored == INHERITED {
+        return Err(inherited(label(kind)));
+    }
     let Some(body) = stored.strip_prefix(PREFIX) else { return Ok(stored.to_string()) };
-    cluster
-        .config
-        .sealer
-        .as_ref()
-        .and_then(|s| s.open(kind, body))
-        .ok_or_else(|| EsError::new(500, "illegal_state_exception", format!("a sealed {kind} can't be opened on this node (its sealing key differs)")))
+    let plain = cluster.config.sealer.as_ref().and_then(|s| s.open(kind, body)).ok_or_else(|| {
+        EsError::new(500, "illegal_state_exception", format!("a sealed {} can't be opened here (sealed for another cluster, or under another key)", label(kind)))
+    })?;
+    if plain == INHERITED {
+        return Err(inherited(label(kind)));
+    }
+    Ok(plain)
 }
 
-/// A secret store's entry for `value` (connector and Fleet secrets): `{"sealed": …}` holding its
-/// JSON sealed when the node has a key, `{"value": …}` as given on a node that opted in, refused
-/// otherwise ([`keyless`]).
+/// A secret store's entry for `value` (connector and Fleet secrets, `kind` bound to the cluster
+/// and the entry): `{"sealed": …}` holding its JSON sealed when the node has a key, `{"value": …}`
+/// as given on a node that opted in, refused otherwise ([`keyless`]).
 pub fn seal_value(cluster: &Cluster, kind: &str, value: crate::json::Value) -> EsResult<crate::json::Value> {
     match &cluster.config.sealer {
         Some(s) => Ok(crate::obj! { "sealed" => s.seal(kind, &value.to_json()) }),
@@ -150,50 +186,84 @@ pub fn seal_value(cluster: &Cluster, kind: &str, value: crate::json::Value) -> E
     }
 }
 
-/// Seals every secret a cluster keeps in the clear (stored on a node without a key), with this
-/// node's key, and persists it at once: inference endpoints' keys, watches' passwords and
-/// `Authorization` headers (and binds those sealed before watches' were bound to the cluster),
-/// the connector and Fleet secret stores (`_connector/_secret`, `_fleet/secret`), snapshot
-/// repositories' credentials. A connector's own configuration values are the connectors' to seal
-/// (`xpack::entsearch::sync::adopt_existing`, bound to the cluster and the connector): this never
-/// touches them.
+/// A stored secret as the cluster keeps it from now on, sealed under `to` (`kind` bound to the
+/// cluster, [`bind`]): a value in the clear (kept by a node without a key) is sealed, and one
+/// sealed under the bare `kind` (before secrets were bound to their cluster) is opened and sealed
+/// again. Unless it's `inherited`, a branch's copy of its parent's: then whatever isn't the
+/// branch's own (in the clear, under the bare kind, bound to another cluster) becomes
+/// [`INHERITED`]. A value under another key is left as it is (the node may get that key back).
+pub fn settle(sealer: &Sealer, inherited: bool, kind: &str, to: &str, stored: &str) -> String {
+    if stored == INHERITED || sealer.open_text(to, stored).is_some() {
+        return stored.to_string();
+    }
+    if inherited {
+        return INHERITED.to_string();
+    }
+    if !is_sealed(stored) {
+        return sealer.seal_text(to, stored);
+    }
+    match sealer.open_text(kind, stored) {
+        Some(plain) => sealer.seal_text(to, &plain),
+        None => stored.to_string(),
+    }
+}
+
+/// Settles every secret a cluster keeps ([`settle`]) and persists it at once: seals what's kept in
+/// the clear (stored on a node without a key) with this node's key, binds to the cluster what was
+/// sealed before secrets were bound, and on a branch ([`crate::branch::is_branch`]) takes out
+/// what it holds of its parent's: inference endpoints' keys and inherited watches' secrets become
+/// [`INHERITED`], connector and Fleet secrets (`_connector/_secret`, `_fleet/secret`) are removed.
+/// Snapshot repositories' credentials are sealed too. A connector's own configuration values are
+/// the connectors' to seal (`xpack::entsearch::sync::adopt_existing`, bound to the cluster and the
+/// connector): this never touches them.
 /// Run as the cluster opens; a record changed meanwhile is left for the next open. Returns how
-/// many records it sealed.
+/// many records it changed.
 pub async fn seal_leftovers(cluster: &Cluster) -> EsResult<usize> {
     use crate::json::Value;
     use crate::xpack::store;
+    use crate::xpack::{entsearch::connectors, fleet, inference, watcher};
     let Some(sealer) = cluster.config.sealer.clone() else { return Ok(0) };
     let st = cluster.state();
-    // (family, id, as read, sealed)
-    let mut changes: Vec<(&'static str, String, Value, Value)> = Vec::new();
-    for (id, rec) in st.metadata.xpack.iter(crate::xpack::inference::SECRETS) {
+    let branch = crate::branch::is_branch(cluster, &st);
+    // (family, id, as read, what it becomes: `None` removes it)
+    let mut changes: Vec<(&'static str, String, Value, Option<Value>)> = Vec::new();
+    let to = bind(cluster, inference::SECRET_KIND);
+    for (id, rec) in st.metadata.xpack.iter(inference::SECRETS) {
         let Value::Obj(m) = rec else { continue };
-        if m.values().all(|v| v.as_str().is_none_or(is_sealed)) {
-            continue;
+        let settled: crate::json::Map = m
+            .iter()
+            .map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.clone(), |s| Value::from(settle(&sealer, branch, inference::SECRET_KIND, &to, s)))))
+            .collect();
+        if &settled != m {
+            changes.push((inference::SECRETS, id.clone(), rec.clone(), Some(Value::Obj(settled))));
         }
-        let sealed = m.iter().map(|(k, v)| (k.clone(), match v.as_str() {
-            Some(s) if !is_sealed(s) => Value::from(sealer.seal(crate::xpack::inference::SECRET_KIND, s)),
-            _ => v.clone(),
-        }));
-        changes.push((crate::xpack::inference::SECRETS, id.clone(), rec.clone(), Value::Obj(sealed.collect())));
     }
-    for (family, kind) in [(crate::xpack::entsearch::connectors::SECRETS, crate::xpack::entsearch::connectors::SECRET_KIND), (crate::xpack::fleet::SECRETS, crate::xpack::fleet::SECRET_KIND)] {
+    for (family, kind) in [(connectors::SECRETS, connectors::SECRET_KIND), (fleet::SECRETS, fleet::SECRET_KIND)] {
         for (id, rec) in st.metadata.xpack.iter(family) {
-            if let Some(v) = rec.get("value") {
-                changes.push((family, id.clone(), rec.clone(), crate::obj! { "sealed" => sealer.seal(kind, &v.to_json()) }));
-            }
+            let to = format!("{}:{id}", bind(cluster, kind));
+            let next = match (rec.get("sealed").and_then(Value::as_str), rec.get("value")) {
+                (Some(s), _) if sealer.open_text(&to, s).is_some() => continue,
+                _ if branch => None,
+                (Some(s), _) => match sealer.open_text(kind, s) {
+                    Some(plain) => Some(crate::obj! { "sealed" => sealer.seal_text(&to, &plain) }),
+                    None => continue,
+                },
+                (None, Some(v)) => Some(crate::obj! { "sealed" => sealer.seal_text(&to, &v.to_json()) }),
+                (None, None) => continue,
+            };
+            changes.push((family, id.clone(), rec.clone(), next));
         }
     }
-    for (id, rec) in st.metadata.xpack.iter(crate::xpack::watcher::WATCHES) {
+    for (id, rec) in st.metadata.xpack.iter(watcher::WATCHES) {
         let Some(Value::Obj(w)) = rec.get("watch") else { continue };
-        // Sealed, and bound to this cluster (values sealed before the binding sealed again).
-        let sealed = crate::xpack::watcher::parse::rebound_watch(cluster, w, &sealer);
+        let inherited = crate::branch::inherited_watch(cluster, &st, id);
+        let sealed = watcher::parse::rebound_watch(cluster, w, &sealer, inherited);
         if &sealed != w {
             let mut r = rec.clone();
             if let Value::Obj(m) = &mut r {
                 m.insert("watch".into(), Value::Obj(sealed));
             }
-            changes.push((crate::xpack::watcher::WATCHES, id.clone(), rec.clone(), r));
+            changes.push((watcher::WATCHES, id.clone(), rec.clone(), Some(r)));
         }
     }
     let repos = st.metadata.repositories.values().any(|r| r.secrets.values().any(|v| !is_sealed(v)));
@@ -205,9 +275,17 @@ pub async fn seal_leftovers(cluster: &Cluster) -> EsResult<usize> {
     let now = crate::time::now_millis();
     cluster
         .update(move |st| {
-            for (family, id, read, sealed) in changes {
-                if st.metadata.xpack.get(family, &id) == Some(&read) {
-                    store::put(st, family, &id, sealed, now)?;
+            for (family, id, read, next) in changes {
+                if st.metadata.xpack.get(family, &id) != Some(&read) {
+                    continue;
+                }
+                match next {
+                    Some(v) => {
+                        store::put(st, family, &id, v, now)?;
+                    }
+                    None => {
+                        store::remove(st, family, &id);
+                    }
                 }
             }
             crate::api::snapshots::seal_stored_secrets(&mut st.metadata, Some(&sealer));
@@ -312,5 +390,11 @@ mod tests {
         let got = call(&c, "GET", &format!("/_connector/_secret/{id}"), "").await;
         assert!(String::from_utf8_lossy(&got.body).contains("conn-3"), "still opens");
         assert_eq!(seal_leftovers(&c).await.unwrap(), 0);
+        // One sealed before secrets were bound to their cluster is bound to it as it opens.
+        let bare = Sealer::from_secret("0123456789abcdef0123456789abcdef-k").unwrap().seal("connector secret", "\"bare-5\"");
+        c.update(move |st| crate::xpack::store::put(st, crate::xpack::entsearch::connectors::SECRETS, "old", crate::obj! { "sealed" => bare }, 0).map(drop)).await.unwrap();
+        assert_eq!(seal_leftovers(&c).await.unwrap(), 1);
+        let got = call(&c, "GET", "/_connector/_secret/old", "").await;
+        assert!(String::from_utf8_lossy(&got.body).contains("bare-5"), "{}", String::from_utf8_lossy(&got.body));
     }
 }
