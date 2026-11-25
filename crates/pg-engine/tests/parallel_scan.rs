@@ -1258,6 +1258,7 @@ fn inserts_into_free_space_through_chunks_inner() {
         "SELECT g, count(*), sum(x) FROM f WHERE t LIKE 'f1%' GROUP BY g ORDER BY g",
         "SELECT f.id, q.w FROM f JOIN q ON f.g = q.k WHERE f.x = 12.25",
         "SELECT q.w, count(*), sum(f.x) FROM f JOIN q ON f.g = q.k WHERE f.id % 7 <> 0 GROUP BY q.w ORDER BY 1",
+        "SELECT id, t FROM f WHERE t LIKE '%17' AND id % 3 = 1",
     ];
     let run = |s: &mut Session| -> Vec<Vec<String>> { queries.iter().map(|q| out(s, q)).collect() };
     s.query("SET max_parallel_workers_per_gather = 0").unwrap();
@@ -1271,6 +1272,12 @@ fn inserts_into_free_space_through_chunks_inner() {
         assert_eq!(a, b, "{q}");
     }
     assert!(serial[0].len() > 10, "{:?}", serial[0]);
+    // (A filter alone above the scan, one stored-value comparisons don't decide: the chunks
+    // too, not the serial path's two reads of every row.)
+    let displaced = DISPLACED_ROWS.load(Relaxed);
+    assert_eq!(out(&mut s, queries[4]), serial[4]);
+    assert!(DISPLACED_ROWS.load(Relaxed) > displaced, "a filter-only scan read through the chunks");
+    assert!(serial[4].len() > 10, "{:?}", serial[4]);
 }
 
 #[test]

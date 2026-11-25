@@ -450,6 +450,15 @@ impl StoredCmps {
         Some(c)
     }
 
+    /// Whether `of` makes one of `k` (without counting it).
+    pub fn covers(k: &K) -> bool {
+        let ks: Vec<&K> = match k {
+            K::And(ks) => ks.iter().collect(),
+            k => vec![k],
+        };
+        Self::make(&ks, None).is_some_and(|(_, n)| n == ks.len())
+    }
+
     /// Over a nested loop's joined row (outer row `0..nleft`, the inner scan's row after it),
     /// the first of conjuncts `ks` that run over the inner row's stored values, and how many:
     /// an outer column's value is taken from the outer row `passes_with` is given.

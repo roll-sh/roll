@@ -696,6 +696,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             lazy: None,
             kfilter: None,
             implied: false,
+            rest: None,
             point: false,
             proj: None,
             erb: Default::default(),
@@ -801,6 +802,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             lazy: None,
             kfilter: None,
             implied: false,
+            rest: None,
             point: false,
             proj: None,
             erb: Default::default(),
@@ -896,6 +898,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             lazy: None,
             kfilter: None,
             implied: false,
+            rest: None,
             point: false,
             proj: None,
             erb: Default::default(),
@@ -1018,6 +1021,7 @@ fn open_scan_as(
     let Bound { ranges, kills, ios_entries, skip, stat } = bind_scan(s, ranges, only.is_some(), rev, None, ctx)?;
     let ios = matches!(s.access, Access::Index { only: true, .. }) && ctx.instrumented();
     let implied = secondary && only.is_none() && filter_implied(s, ctx);
+    let rest = if secondary && only.is_none() && !implied && ctx.snapshot().is_some() { filter_rest_plan(s) } else { None };
     let point = secondary && only.is_none() && ios_cols.is_none() && !ios && unique_point(s, ctx);
     Ok(Box::new(ScanNode {
         stat,
@@ -1061,6 +1065,7 @@ fn open_scan_as(
         lazy: None,
         kfilter: None,
         implied,
+        rest,
         point,
         proj: None,
         erb: Default::default(),
@@ -1155,10 +1160,37 @@ fn filter_implied(s: &ScanPlan, ctx: &ExecCtx) -> bool {
 
 /// `filter_implied`'s conditions on the plan alone.
 fn filter_implied_plan(s: &ScanPlan) -> bool {
+    implied_conjuncts(s).is_some_and(|c| c.iter().all(|i| *i))
+}
+
+/// The conjuncts of an index scan's filter its key range doesn't apply exactly (by
+/// `implied_conjuncts`), when it applies some of them but not all (None otherwise): the
+/// filter its rows are checked against at the statement's snapshot (`ScanNode::rest`). A
+/// correlated SubPlan's scan (TPC-H q20's, `l_partkey = <outer> AND l_suppkey = <outer> AND
+/// l_shipdate >= ..`) so has a filter of constants its kernel decides over the stored values.
+fn filter_rest_plan(s: &ScanPlan) -> Option<Rc<Expr>> {
+    let implied = implied_conjuncts(s)?;
+    if implied.iter().all(|i| *i) || !implied.iter().any(|i| *i) {
+        return None;
+    }
+    let mut rest: Vec<Expr> = conjuncts(s.filter.as_ref()?).into_iter().zip(implied).filter(|&(_, i)| !i).map(|(c, _)| c.clone()).collect();
+    Some(Rc::new(if rest.len() == 1 { rest.pop().expect("a conjunct") } else { Expr::And(rest) }))
+}
+
+fn conjuncts(f: &Expr) -> Vec<&Expr> {
+    match f {
+        Expr::And(a) => a.iter().collect(),
+        e => vec![e],
+    }
+}
+
+/// For each conjunct of an index scan's filter, whether its key range applies it exactly
+/// (`filter_implied`'s test); None: no such scan or filter.
+fn implied_conjuncts(s: &ScanPlan) -> Option<Vec<bool>> {
     use crate::catalog::IndexKey;
     use crate::types::DataType as T;
     let (Some(f), Some((ix, b)), Access::Index { quals, only: false, .. }) = (&s.filter, &s.index, &s.access) else {
-        return false;
+        return None;
     };
     if ix.method != "btree"
         || s.mark.is_some()
@@ -1168,7 +1200,7 @@ fn filter_implied_plan(s: &ScanPlan) -> bool {
         || b.skip.is_some()
         || !b.order.is_empty()
     {
-        return false;
+        return None;
     }
     let exact = |q: &crate::sql::plan::IndexQual| {
         let Expr::Call(def, args, _) = &q.expr else { return false };
@@ -1196,11 +1228,7 @@ fn filter_implied_plan(s: &ScanPlan) -> bool {
             _ => false,
         }
     };
-    let conj: Vec<&Expr> = match f {
-        Expr::And(a) => a.iter().collect(),
-        e => vec![e],
-    };
-    conj.iter().all(|c| quals.iter().any(|q| q.orig.same_as(c) && exact(q)))
+    Some(conjuncts(f).iter().map(|c| quals.iter().any(|q| q.orig.same_as(c) && exact(q))).collect())
 }
 
 /// What a scan over its ranges starts with, at open and again at each rescan.
@@ -2144,6 +2172,7 @@ fn dense_bitmap_scan(
         lazy: None,
         kfilter: None,
         implied: false,
+        rest: None,
         point: false,
         proj: None,
         erb: Default::default(),
@@ -2631,6 +2660,10 @@ struct ScanNode {
     /// The filter is exactly the index conditions the scan's key range applies
     /// (`filter_implied`): not checked again on the rows it returns.
     implied: bool,
+    /// Else, where the key range applies some of its conjuncts exactly, the others: what
+    /// the rows are checked against (`filter_rest_plan`; at the statement's snapshot, as
+    /// `implied`).
+    rest: Option<Rc<Expr>>,
     /// The table columns its rows are made of, in order, for a projection above
     /// (`Node::project_columns`; None: the table's row).
     proj: Option<Box<[u32]>>,
@@ -2641,9 +2674,9 @@ struct ScanNode {
     spare: Option<StoreIter>,
     /// This execution's point probe (`probe_point`).
     probe: Probe,
-    /// What the plan alone decides of `implied` and `point` (`filter_implied_plan`,
-    /// `unique_point_plan`), asked once for the node's restarts.
-    plan_decided: Option<(bool, bool)>,
+    /// What the plan alone decides of `implied`, `point` and `rest` (`filter_implied_plan`,
+    /// `unique_point_plan`, `filter_rest_plan`), asked once for the node's restarts.
+    plan_decided: Option<(bool, bool, Option<Rc<Expr>>)>,
     /// The table's rows read for a few keys at a time (`fetch_kept`): one scan kept and
     /// sought from key to key, its sources staying in their blocks.
     fscan: Option<Box<TxnScan>>,
@@ -4505,7 +4538,7 @@ impl ScanNode {
             let p = &self.plan;
             // (No mask: every column read.)
             let need = |i: usize| self.need.as_ref().is_none_or(|n| n.get(i).copied().unwrap_or(false));
-            let mask = match &p.filter {
+            let mask = match self.rest.as_deref().or(p.filter.as_ref()) {
                 Some(f) if p.mark.is_none() && !matches!(p.access, Access::Tid { .. } | Access::TidRange(_)) => {
                     super::need::of([f]).filter(|fm| {
                         p.table.columns.iter().enumerate().any(|(i, c)| {
@@ -4562,11 +4595,11 @@ impl ScanNode {
     /// a few of its columns): over the stored values first (`StoredCmps`), else over `row`.
     fn filter_kernel(&mut self, bytes: &[u8], row: Option<&Row>, ctx: &ExecCtx) -> Option<bool> {
         let stored = self.ios_cols.is_none() && !crate::storage::toast::has_external(bytes);
-        let plan = &self.plan;
+        let filter = self.rest.as_deref().or(self.plan.filter.as_ref());
         let (k, cmps) = self
             .kfilter
             .get_or_insert_with(|| {
-                plan.filter.as_ref().and_then(|f| super::kernel::compile_bound(f, ctx)).map(|k| {
+                filter.and_then(|f| super::kernel::compile_bound(f, ctx)).map(|k| {
                     let c = super::kernel::StoredCmps::of(&k);
                     (k, c)
                 })
@@ -4650,7 +4683,7 @@ impl ScanNode {
             return None;
         }
         if self.filter_cols.is_none() {
-            let f = self.plan.filter.as_ref();
+            let f = self.rest.as_deref().or(self.plan.filter.as_ref());
             self.filter_cols = Some(f.and_then(|f| super::need::of([f])).map(Rc::from));
         }
         self.filter_cols.clone().flatten()
@@ -5164,10 +5197,6 @@ impl ScanNode {
             // (Rows nothing reads in order come as stored: no page is pruned as the scan
             // reaches it.)
             reordered = !computed.any_order && !super::sizing::heap_scan_splits(&p.table, p.sys, ctx);
-            // (Reordered only for the work above it: joins' probes and lookups, aggregation.)
-            if reordered && stages.is_empty() && spec.is_none() {
-                return Ok(None);
-            }
             self.in_order = Some(!reordered);
         } else {
             // A table too big to model whose rows went in out of key order, every one placed
@@ -5186,22 +5215,34 @@ impl ScanNode {
         // A modelled heap stored in heap order under 8 MB of pages (min_parallel_table_
         // scan_size's default, as for PostgreSQL's parallel scans) runs the workers' way of
         // reading rows on this thread (`ParScan::start_inline`): cheaper per row than the
-        // serial path's, and threads wouldn't pay. A reordered one that small stays serial.
-        // So does any aggregating scan with workers off (`serial`), modelled or not.
+        // serial path's, and threads wouldn't pay; a reordered one too when its displaced rows
+        // are known (else it stays serial). So does any aggregating scan with workers off
+        // (`serial`), modelled or not.
         let inline = serial || self.nblocks.is_some_and(|n| n < INLINE_MAX_PAGES);
-        if inline && reordered {
-            return Ok(None);
-        }
         let (start, end) = self.ranges[0].clone();
         if self.reads_little(&start, &end, Some(&index_prefix(p.table.oid, 0)), ctx) {
             return Ok(None);
         }
         // (A heap whose rows only inserts put out of key order, as a COPY puts some in an
-        // earlier page's free space: the model names them, and the workers read chunks of
-        // keys with those rows moved to their places in heap order (`DisplacedFill`). Else
-        // the rows are read here and sorted by TID.)
+        // earlier page's free space: the model names them, and the chunks read keys with those
+        // rows moved to their places in heap order (`DisplacedFill`). Else the rows are read
+        // here and sorted by TID: only for the work above it (joins' probes and lookups,
+        // aggregation), and not inline.)
+        // With only a filter above, the chunks cost less than the serial path, which reads the
+        // rows twice (their TIDs, then in heap order) and makes each the filter can't decide
+        // over its stored values: not where it decides every row so (`StoredCmps`), its
+        // compares on the first read costing less than working out the displaced rows (TPC-H
+        // q17's part, `p_brand = .. AND p_container = ..`: +2.2% through the chunks, against
+        // q20's `p_name LIKE 'forest%'` -35% and q02's -13%).
+        let filtering = stages.is_empty() && spec.is_none();
+        if reordered && filtering && filter.as_ref().is_some_and(super::kernel::StoredCmps::covers) {
+            return Ok(None);
+        }
         let displaced = if reordered { super::sizing::displaced_inserts(&p.table, ctx) } else { None };
         let listed = reordered && displaced.is_none();
+        if listed && (inline || filtering) {
+            return Ok(None);
+        }
         let txn = ctx.txn.borrow();
         // (Chunks read rows as stored: the workers read the out-of-line values of the columns
         // they decode, for the rows they keep. Reordered rows come with their values.)
@@ -5974,6 +6015,7 @@ impl Node for ScanNode {
             lazy,
             kfilter,
             implied,
+            rest,
             point,
             proj,
             erb,
@@ -6035,6 +6077,7 @@ impl Node for ScanNode {
         *lazy = None;
         *kfilter = None;
         *implied = false;
+        *rest = None;
         *point = false;
         *probe = Probe::Not;
         // (Asked again by the projection above as it starts over.)
@@ -6119,9 +6162,13 @@ impl Node for ScanNode {
         self.ios_cols = if self.secondary { index_only_columns(&self.plan, ctx) } else { None };
         // (As `open_scan_as` decides them, at this execution's snapshot and isolation; what
         // the plan alone decides, once.)
-        let (implied, point) = *self.plan_decided.get_or_insert_with(|| (filter_implied_plan(&self.plan), unique_point_plan(&self.plan)));
+        let (implied, point, rest) = self
+            .plan_decided
+            .get_or_insert_with(|| (filter_implied_plan(&self.plan), unique_point_plan(&self.plan), filter_rest_plan(&self.plan)))
+            .clone();
         let snap = ctx.snapshot().is_some();
         self.implied = self.secondary && self.only.is_none() && snap && implied;
+        self.rest = rest.filter(|_| self.secondary && self.only.is_none() && snap);
         self.point = self.secondary
             && self.only.is_none()
             && self.ios_cols.is_none()
@@ -6452,7 +6499,7 @@ impl ScanNode {
             };
             let pass = match self.filter_kernel(bytes, Some(&probe), ctx) {
                 Some(p) => p,
-                None => eval_bool(self.plan.filter.as_ref().expect("a filter"), &probe, ctx)?,
+                None => eval_bool(self.rest.as_deref().or(self.plan.filter.as_ref()).expect("a filter"), &probe, ctx)?,
             };
             if !pass {
                 ctx.filtered(self.key);
@@ -6523,11 +6570,23 @@ impl ScanNode {
             && self.plan.filter.is_some()
             && !match self.filter_kernel(bytes, Some(&row), ctx) {
                 Some(pass) => pass,
-                None => eval_bool(self.plan.filter.as_ref().expect("a filter"), &row, ctx)?,
+                None => eval_bool(self.rest.as_deref().or(self.plan.filter.as_ref()).expect("a filter"), &row, ctx)?,
             }
         {
             ctx.filtered(self.key);
             return Ok(None);
+        }
+        // (The conjuncts the key range applies hold: checked in debug builds, those alone, the
+        // others possibly having effects: a function's NOTICE.)
+        #[cfg(debug_assertions)]
+        if self.rest.is_some()
+            && let Some(f) = &self.plan.filter
+            && let Some(implied) = implied_conjuncts(&self.plan)
+        {
+            let whole = self.full_row(key, bytes, ctx)?;
+            for (c, _) in conjuncts(f).into_iter().zip(implied).filter(|&(_, i)| i) {
+                assert!(eval_bool(c, &whole, ctx).unwrap_or(true), "a row outside its index range");
+            }
         }
         if let Some((mark, wait)) = self.plan.mark {
             let locked = lock_row(&self.plan.table, key, mark, wait, Xltw::Lock, ctx)?;
@@ -7251,6 +7310,7 @@ fn keyed_scan(s: &ScanPlan, plan: ScanPlan, ix: &Index, keys: Keys, ctx: &ExecCt
         lazy: None,
         kfilter: None,
         implied: false,
+        rest: None,
         point: false,
         proj: None,
         erb: Default::default(),

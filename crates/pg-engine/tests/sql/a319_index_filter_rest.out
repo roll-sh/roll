@@ -1,0 +1,155 @@
+> CREATE TABLE a319_l (pk int, sk int, q numeric, d date, note text)
+-- CREATE TABLE
+
+> INSERT INTO a319_l SELECT g % 40 + 1, g % 7, g % 50, date '1994-01-01' + (g * 37) % 700, CASE WHEN g % 11 = 0 THEN NULL ELSE 'n' || g % 5 END FROM generate_series(1, 4000) g
+-- INSERT 0 4000
+
+> INSERT INTO a319_l VALUES (3, 2, NULL, NULL, NULL), (3, 2, 5, NULL, 'x'), (NULL, 2, 7, date '1994-03-01', 'y')
+-- INSERT 0 3
+
+> CREATE INDEX a319_l_ps ON a319_l (pk, sk)
+-- CREATE INDEX
+
+> CREATE TABLE a319_ps (pk int, sk int, avail int)
+-- CREATE TABLE
+
+> INSERT INTO a319_ps SELECT p, s, (p * 13 + s * 7) % 60 FROM generate_series(1, 42) p, generate_series(0, 7) s
+-- INSERT 0 336
+
+> ANALYZE a319_l, a319_ps
+-- ANALYZE
+
+> SET enable_seqscan = off
+-- SET
+
+> SET enable_bitmapscan = off
+-- SET
+
+> SELECT ps.pk, ps.sk, ps.avail FROM a319_ps ps
+> WHERE ps.pk <= 6 AND ps.avail > (SELECT 0.08 * sum(l.q) FROM a319_l l WHERE l.pk = ps.pk AND l.sk = ps.sk
+>   AND l.d >= date '1994-01-01' AND l.d < date '1994-01-01' + interval '1' year)
+> ORDER BY 1, 2
+pk:int4 | sk:int4 | avail:int4
+1 | 1 | 20
+1 | 2 | 27
+1 | 3 | 34
+1 | 4 | 41
+1 | 5 | 48
+1 | 6 | 55
+2 | 0 | 26
+2 | 1 | 33
+2 | 2 | 40
+2 | 3 | 47
+2 | 4 | 54
+3 | 0 | 39
+3 | 1 | 46
+3 | 2 | 53
+3 | 5 | 14
+3 | 6 | 21
+4 | 0 | 52
+4 | 1 | 59
+4 | 3 | 13
+4 | 4 | 20
+4 | 5 | 27
+4 | 6 | 34
+5 | 2 | 19
+5 | 3 | 26
+5 | 4 | 33
+5 | 5 | 40
+5 | 6 | 47
+6 | 0 | 18
+6 | 1 | 25
+6 | 2 | 32
+6 | 3 | 39
+6 | 4 | 46
+6 | 5 | 53
+-- SELECT 33
+
+> SELECT ps.pk, ps.sk, (SELECT count(*) FROM a319_l l WHERE l.pk = ps.pk AND l.sk = ps.sk AND (l.note = 'n2' OR l.q IS NULL OR l.q < 3))
+> FROM a319_ps ps WHERE ps.pk IN (3, 41) ORDER BY 1, 2
+pk:int4 | sk:int4 | count:int8
+3 | 0 | 15
+3 | 1 | 13
+3 | 2 | 15
+3 | 3 | 12
+3 | 4 | 12
+3 | 5 | 13
+3 | 6 | 13
+3 | 7 | 0
+41 | 0 | 0
+41 | 1 | 0
+41 | 2 | 0
+41 | 3 | 0
+41 | 4 | 0
+41 | 5 | 0
+41 | 6 | 0
+41 | 7 | 0
+-- SELECT 16
+
+> SELECT count(*), sum(q) FROM a319_l WHERE pk = 3 AND sk::numeric = 2 AND d IS NULL
+count:int8 | sum:numeric
+2 | 5
+-- SELECT 1
+
+> SELECT pk, sk, q, d, note FROM a319_l WHERE pk = 3 AND sk = 2 AND (q IS NULL OR d IS NULL) ORDER BY q NULLS FIRST, d
+pk:int4 | sk:int4 | q:numeric | d:date | note:text
+3 | 2 | NULL | NULL | NULL
+3 | 2 | 5 | NULL | x
+-- SELECT 2
+
+> SELECT count(*), min(d), max(d) FROM a319_l WHERE pk >= 38 AND sk = 4 AND note LIKE 'n%'
+count:int8 | min:date | max:date
+39 | 1994-01-30 | 1995-10-29
+-- SELECT 1
+
+> RESET enable_seqscan
+-- RESET
+
+> SET enable_indexscan = off
+-- SET
+
+> SELECT ps.pk, ps.sk, ps.avail FROM a319_ps ps
+> WHERE ps.pk <= 6 AND ps.avail > (SELECT 0.08 * sum(l.q) FROM a319_l l WHERE l.pk = ps.pk AND l.sk = ps.sk
+>   AND l.d >= date '1994-01-01' AND l.d < date '1994-01-01' + interval '1' year)
+> ORDER BY 1, 2
+pk:int4 | sk:int4 | avail:int4
+1 | 1 | 20
+1 | 2 | 27
+1 | 3 | 34
+1 | 4 | 41
+1 | 5 | 48
+1 | 6 | 55
+2 | 0 | 26
+2 | 1 | 33
+2 | 2 | 40
+2 | 3 | 47
+2 | 4 | 54
+3 | 0 | 39
+3 | 1 | 46
+3 | 2 | 53
+3 | 5 | 14
+3 | 6 | 21
+4 | 0 | 52
+4 | 1 | 59
+4 | 3 | 13
+4 | 4 | 20
+4 | 5 | 27
+4 | 6 | 34
+5 | 2 | 19
+5 | 3 | 26
+5 | 4 | 33
+5 | 5 | 40
+5 | 6 | 47
+6 | 0 | 18
+6 | 1 | 25
+6 | 2 | 32
+6 | 3 | 39
+6 | 4 | 46
+6 | 5 | 53
+-- SELECT 33
+
+> SELECT count(*), min(d), max(d) FROM a319_l WHERE pk >= 38 AND sk = 4 AND note LIKE 'n%'
+count:int8 | min:date | max:date
+39 | 1994-01-30 | 1995-10-29
+-- SELECT 1
+
