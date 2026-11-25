@@ -448,8 +448,15 @@ impl search_es::seal::Lineage for ParentStates {
                 _ => return Vec::new(),
             },
         };
-        let (now, oldest) = futures::future::join(self.data.read_cluster(&name), self.data.read_cluster_oldest(&name)).await;
-        [now, oldest].into_iter().filter_map(|s| s.ok().flatten().map(|s| s.json)).collect()
+        // Either read failing gives nothing to compare with: everything not sealed as the
+        // branch's own is then taken out, never kept as its own on half the evidence.
+        match futures::future::join(self.data.read_cluster(&name), self.data.read_cluster_oldest(&name)).await {
+            (Ok(now), Ok(oldest)) => [now, oldest].into_iter().flatten().map(|s| s.json).collect(),
+            (now, oldest) => {
+                tracing::warn!(parent = self.parent, error = ?now.err().or(oldest.err()), "reading a branch's parent's states failed: its secrets not sealed as its own are taken out");
+                Vec::new()
+            }
+        }
     }
 }
 

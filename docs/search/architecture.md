@@ -348,7 +348,11 @@ back on an update keeps the stored one only while the request goes to the same s
 (lower case, punycode, no trailing dot) and port. Records written before that are index data a
 branch copies, so a role's grant of `*` (an app's link, a preview's data key) doesn't reach
 `.watcher-history-*`: only a grant that names a dot index (`.watch*`, `.watcher-history-*`, as
-Elasticsearch's watcher roles do) or allows restricted indices does. With no key, passwords, credential headers and secret stores' values are refused, unless
+Elasticsearch's watcher roles do) or allows restricted indices does, through an alias over those
+indices too, and `_has_privileges` answers the same. The by-query APIs narrow their wildcards to
+the indices the caller may act on (as Elasticsearch's replaceable requests do), so
+`expand_wildcards=all` doesn't take them past this, and the other APIs check their wildcards as
+the request expands them. With no key, passwords, credential headers and secret stores' values are refused, unless
 the node opts in for local development (`--search-allow-unsealed-secrets`): then they are stored
 as given, as Elasticsearch does without `xpack.watcher.encrypt_sensitive_data`; a watch's URL is
 kept as given there.
@@ -374,8 +378,10 @@ puts again is its own. The node is told on every load that a cluster is a branch
 same as they open (`seal::seal_leftovers`: on a branch, a secret that doesn't open as the
 branch's own is taken out if it's byte for byte one of the parent's, in its current state or its
 oldest kept one (sealing draws a fresh nonce, so an equal sealed value was copied), and sealed to
-the branch otherwise, as one it made itself; with neither state readable, every one is taken
-out. The ids taken out are logged. On any other cluster, one sealed before secrets were bound
+the branch otherwise, as one it made itself; if either state can't be read, every one is taken
+out. The gap: a value the parent had when the branch was made, but replaced (rotated or deleted)
+before its oldest kept state, is in neither state, so such a branch keeps it as its own. Branches
+marked since binding never have that gap: their first load replaces everything they inherited. The ids taken out are logged. On any other cluster, one sealed before secrets were bound
 to their cluster is sealed again, bound to it; should that fail, values under the bare kind
 still open until the next load). A point-in-time branch so never keeps a key the parent
 has since rotated or deleted. ES|QL data sources still refuse S3 secrets, as

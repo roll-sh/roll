@@ -3348,11 +3348,69 @@ async fn an_opensearch_flavor_takes_no_elasticsearch_credentials() {
     for auth in [&user_key, &token, &roll_key] {
         assert_eq!(status(auth.clone()).await, 401, "{auth} on OpenSearch");
     }
+    // A client's say-so isn't roll's: the header is dropped on the public port, so this looks
+    // for a user of the key's id and finds none, and the key is left as it is.
+    let r = e.http.delete(format!("{}/_plugins/_security/api/internalusers/{}", e.es, k["id"].as_str().unwrap())).basic_auth(&u, Some(&p)).header(search_es::xpack::security::DORMANT_KEY_HEADER, "true").send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 404, "{}", r.text().await.unwrap_or_default());
     let (s, v) = e.call(Method::DELETE, &format!("/v1/search/clusters/flip/keys/{}", roll["id"].as_str().unwrap()), None).await;
     assert!(s < 300, "revoking an Elasticsearch key on OpenSearch: {s} {v}");
     switch("elasticsearch").await;
     assert_eq!(status(roll_key).await, 401, "revoked on OpenSearch, still revoked");
     assert_eq!(status(user_key).await, 200, "a key nobody revoked works again");
+}
+
+/// Watch records stay out of a `*` grant's reach whatever the request expands: a data key's
+/// `_update_by_query` and `_delete_by_query` over `*` with `expand_wildcards=all` touch only the
+/// indices it may act on, other APIs that expand hidden indices refuse, an alias over the
+/// records doesn't open them, and `_has_privileges` says so.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_wildcard_key_reaches_no_watch_history() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "hist"})).await;
+    let (u, p) = creds(&c);
+    let watch = json!({"trigger": {"schedule": {"interval": "1h"}}, "input": {"simple": {"token": "hist-secret-1"}}, "actions": {"log": {"logging": {"text": "ran"}}}});
+    for (m, uri, body) in [
+        (Method::PUT, "/docs/_doc/1?refresh=true", json!({"a": 1})),
+        (Method::PUT, "/_watcher/watch/w?active=false", watch),
+        (Method::POST, "/_watcher/watch/w/_execute", json!({"record_execution": true})),
+        (Method::POST, "/.watcher-history-*/_refresh?expand_wildcards=all", Value::Null),
+    ] {
+        let (s, v) = e.es(&u, &p, m, uri, Some(body).filter(|b| !b.is_null())).await;
+        assert!(s < 300, "{uri}: {v}");
+    }
+    let (_, v) = e.es(&u, &p, Method::GET, "/_cat/indices/.watcher-history-*?expand_wildcards=all&format=json", None).await;
+    let history = v[0]["index"].as_str().unwrap_or_else(|| panic!("the premise: a history index {v}")).to_string();
+    assert_eq!(e.es(&u, &p, Method::POST, "/_aliases", Some(json!({"actions": [{"add": {"index": history, "alias": "hist-alias"}}]}))).await.0, 200);
+    let key = e.post("/v1/search/clusters/hist/keys", json!({"name": "app", "access": "data"})).await;
+    let auth = format!("ApiKey {}", key["api_key"].as_str().unwrap());
+    let as_key = |m: Method, path: &str, body: Option<Value>| {
+        let mut r = e.http.request(m, format!("{}{path}", e.es)).header("authorization", auth.clone());
+        if let Some(b) = body {
+            r = r.json(&b);
+        }
+        async move {
+            let r = r.send().await.unwrap();
+            (r.status().as_u16(), r.json::<Value>().await.unwrap_or(Value::Null))
+        }
+    };
+    let script = json!({"script": {"source": "ctx._source.leaked = true"}});
+    let (s, v) = as_key(Method::POST, "/*/_update_by_query?expand_wildcards=all&refresh=true&conflicts=proceed", Some(script)).await;
+    assert_eq!((s, &v["total"]), (200, &json!(1)), "only the key's own index: {v}");
+    let (s, v) = as_key(Method::POST, "/*/_delete_by_query?expand_wildcards=all&refresh=true", Some(json!({"query": {"term": {"leaked": true}}}))).await;
+    assert_eq!((s, &v["total"]), (200, &json!(1)), "{v}");
+    let (s, v) = as_key(Method::GET, "/*/_settings?expand_wildcards=all", None).await;
+    assert_eq!(s, 403, "hidden indices the key may not read: {v}");
+    let (s, v) = as_key(Method::GET, "/_cat/shards?format=json", None).await;
+    assert!(s == 200 && !v.to_string().contains(".watcher-history"), "{s} {v}");
+    let (s, v) = as_key(Method::POST, "/hist-alias/_search", Some(json!({}))).await;
+    assert_eq!(s, 403, "through an alias: {v}");
+    let (s, v) = as_key(Method::POST, "/_security/user/_has_privileges", Some(json!({"index": [{"names": [history.clone(), "docs"], "privileges": ["read"]}]}))).await;
+    assert_eq!((s, &v["index"][&history]["read"], &v["index"]["docs"]["read"]), (200, &json!(false), &json!(true)), "{v}");
+    // The records are as they were.
+    let (_, v) = e.es(&u, &p, Method::POST, "/.watcher-history-*/_search?expand_wildcards=all", Some(json!({"query": {"match_all": {}}}))).await;
+    assert_eq!(v["hits"]["total"]["value"], 1, "{v}");
+    assert!(v["hits"]["hits"][0]["_source"].get("leaked").is_none(), "{v}");
 }
 
 #[path = "control/cloud_repositories.rs"]

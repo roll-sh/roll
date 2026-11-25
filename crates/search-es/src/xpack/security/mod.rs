@@ -476,6 +476,9 @@ pub struct Effective {
     /// what its data stream is (`IndicesPermission`'s `IndexResource`). Failure store indices
     /// are not: they need the failure store's own privileges.
     pub parents: std::collections::HashMap<String, String>,
+    /// Aliases over watch records (`.watcher-history-*`), with those indices: a grant of the
+    /// alias reaches them only when one reaches the indices too ([`privileges::grant_names`]).
+    pub history_aliases: std::collections::HashMap<String, Vec<String>>,
 }
 
 impl Effective {
@@ -495,6 +498,12 @@ impl Effective {
     pub fn allows_index(&self, action: &str, index: &str) -> bool {
         let restricted = privileges::is_restricted(index);
         let parent = self.parents.get(index);
+        // Through an alias over watch records: the records themselves too.
+        if let Some(behind) = self.history_aliases.get(index)
+            && !behind.iter().all(|i| self.allows(|p| p.allows_index(action, i, privileges::is_restricted(i))))
+        {
+            return false;
+        }
         self.allows(|p| p.allows_index(action, index, restricted) || parent.is_some_and(|ds| p.allows_index(action, ds, privileges::is_restricted(ds))))
     }
 
@@ -515,6 +524,11 @@ impl Effective {
     }
 
     pub fn has_index_privilege(&self, privilege: &str, index: &str) -> bool {
+        if let Some(behind) = self.history_aliases.get(index)
+            && !behind.iter().all(|i| self.allows(|p| p.has_index_privilege(privilege, i)))
+        {
+            return false;
+        }
         self.allows(|p| p.has_index_privilege(privilege, index))
     }
 
@@ -626,12 +640,35 @@ pub fn effective(file: &FileRoles, st: &crate::meta::ClusterState, p: &Principal
         _ => (permissions_of_roles(file, st, &p.roles), None),
     };
     let parents = st.metadata.data_streams.values().flat_map(|d| d.indices.iter().map(|i| (i.clone(), d.name.clone()))).collect();
-    Effective { own, limited_by, also, parents }
+    let mut history_aliases: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for (name, idx) in st.metadata.indices.iter().filter(|(n, _)| privileges::is_watch_history(n)) {
+        for alias in idx.aliases.keys() {
+            history_aliases.entry(alias.clone()).or_default().push(name.clone());
+        }
+    }
+    Effective { own, limited_by, also, parents, history_aliases }
 }
 
 /// Read APIs whose wildcard index expressions Elasticsearch expands to the indices the user
 /// may read (`IndicesAndAliasesResolver`) instead of failing on the others.
-const NARROWED: &[&str] = &["search", "count", "field_caps", "async_search.submit", "eql.search", "search_template", "open_point_in_time", "knn_search", "indices.get", "cat.indices"];
+/// The by-query APIs too (`IndicesRequest.Replaceable`): their scan resolves the request's own
+/// `expand_wildcards`, hidden indices included, so only the indices authorized may be in it.
+/// `_cat/shards` lists hidden indices by default.
+const NARROWED: &[&str] = &[
+    "search",
+    "count",
+    "field_caps",
+    "async_search.submit",
+    "eql.search",
+    "search_template",
+    "open_point_in_time",
+    "knn_search",
+    "indices.get",
+    "cat.indices",
+    "update_by_query",
+    "delete_by_query",
+    "cat.shards",
+];
 
 /// The indices options [`narrow`] expands an API's wildcards with (before its parameters).
 fn narrow_defaults(api: &str) -> crate::meta::resolve::IndicesOptions {
@@ -639,6 +676,7 @@ fn narrow_defaults(api: &str) -> crate::meta::resolve::IndicesOptions {
     match api {
         "indices.get" => IndicesOptions::STRICT_EXPAND_OPEN,
         "cat.indices" => IndicesOptions::STRICT_EXPAND,
+        "cat.shards" => IndicesOptions::STRICT_EXPAND_HIDDEN,
         _ => IndicesOptions::LENIENT_EXPAND_OPEN,
     }
 }
@@ -1364,11 +1402,16 @@ fn request_indices(ctx: &Ctx) -> Vec<String> {
     if api == "search_application.search" {
         exprs.extend(ctx.path_param("name").map(str::to_string));
     }
+    // Wildcards as the request expands them (`expand_wildcards=all` reaches hidden indices).
+    let default = crate::meta::resolve::IndicesOptions::LENIENT_EXPAND_OPEN;
+    let opts = ctx.indices_options(default).unwrap_or(default);
     if exprs.is_empty() {
+        if opts.expand_hidden {
+            return crate::meta::resolve::resolve(&st, &["_all".to_string()], &opts, ctx.now_ms).unwrap_or_default();
+        }
         return st.metadata.indices.keys().filter(|k| !k.starts_with('.')).cloned().collect();
     }
     let mut out = Vec::new();
-    let opts = crate::meta::resolve::IndicesOptions::LENIENT_EXPAND_OPEN;
     for e in exprs {
         if e.contains('*') || e == "_all" {
             if let Ok(names) = crate::meta::resolve::resolve(&st, std::slice::from_ref(&e), &opts, ctx.now_ms) {

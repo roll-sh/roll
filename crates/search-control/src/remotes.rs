@@ -147,7 +147,12 @@ impl Control {
     /// doesn't filter and which wakes it.
     async fn send_link(&self, t: &SearchCluster, key_id: &str, secret: &str, mut req: EsRequest) -> EsResponse {
         // A repository's maker is said only by `Control::put_repository`.
-        req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case("authorization") && !k.eq_ignore_ascii_case("host") && !k.eq_ignore_ascii_case(search_es::secret_refs::MAKER_HEADER));
+        req.headers.retain(|(k, _)| {
+            !k.eq_ignore_ascii_case("authorization")
+                && !k.eq_ignore_ascii_case("host")
+                && !k.eq_ignore_ascii_case(search_es::secret_refs::MAKER_HEADER)
+                && !k.eq_ignore_ascii_case(search_es::xpack::security::DORMANT_KEY_HEADER)
+        });
         let token = base64::engine::general_purpose::STANDARD.encode(format!("{key_id}@{}:{secret}", t.name));
         req.headers.push(("Authorization".into(), format!("ApiKey {token}")));
         self.on_owner(&t.name, req).await

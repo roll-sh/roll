@@ -485,9 +485,7 @@ impl Permission {
     /// Whether the role holds a named index privilege on `index` (directly, through `all`, or
     /// through a privilege granting every action of it).
     pub fn has_index_privilege(&self, privilege: &str, index: &str) -> bool {
-        self.indices.iter().any(|g| {
-            g.names.iter().any(|n| index_pattern_matches(n, index)) && g.privileges.iter().any(|p| p == privilege || p == "all" || implies_index(p, privilege))
-        })
+        self.indices.iter().any(|g| grant_names(g, index) && g.privileges.iter().any(|p| p == privilege || p == "all" || implies_index(p, privilege)))
     }
 
     /// Whether the role holds a cluster privilege (by name or action pattern).
@@ -534,8 +532,13 @@ pub fn index_pattern_matches(pattern: &str, index: &str) -> bool {
 /// link, a preview's data key on a branch) doesn't read them. Not a restricted index: roles that
 /// name them keep working as on Elasticsearch.
 pub fn grant_names(g: &IndexGrant, index: &str) -> bool {
-    let history = index.starts_with(".watcher-history-");
+    let history = is_watch_history(index);
     g.names.iter().any(|n| index_pattern_matches(n, index) && (!history || g.allow_restricted || n.starts_with('.') || n.starts_with("/\\.")))
+}
+
+/// Whether `index` holds watch records ([`grant_names`]).
+pub fn is_watch_history(index: &str) -> bool {
+    index.starts_with(".watcher-history-")
 }
 
 /// Restricted indices: the security indices and other internal indices roles must opt into.
@@ -557,6 +560,21 @@ mod tests {
         assert!(cluster_grants("manage_security", "cluster:admin/xpack/security/user/put"));
         assert!(cluster_grants("cluster:monitor/*", "cluster:monitor/health"));
         assert_eq!(granted_by("cluster:monitor/health", true), vec!["monitor", "manage", "all"]);
+    }
+
+    /// Watch records are reached by a grant that names them (a role of the user's, Elasticsearch's
+    /// `watcher_user`) or allows restricted indices, never by `*`; `_has_privileges` agrees.
+    #[test]
+    fn watch_history_needs_a_grant_naming_it() {
+        let role = |names: &str, restricted: bool| Permission::of_descriptor(&obj! { "indices" => crate::arr![obj! { "names" => names, "privileges" => crate::arr!["read"], "allow_restricted_indices" => restricted }] });
+        let history = ".watcher-history-18-2026.11.25";
+        let read = "indices:data/read/search";
+        assert!(!role("*", false).allows_index(read, history, false) && !role("*", false).has_index_privilege("read", history));
+        assert!(role("*", false).allows_index(read, "logs-1", false));
+        assert!(role("*", true).allows_index(read, history, false));
+        assert!(role(".watcher-history-*", false).allows_index(read, history, false) && role(".watcher-history-*", false).has_index_privilege("read", history));
+        let watcher_user = Permission::of_descriptor(&crate::xpack::security::users::reserved_roles()["watcher_user"]);
+        assert!(watcher_user.allows_index(read, history, false));
     }
 
     #[test]

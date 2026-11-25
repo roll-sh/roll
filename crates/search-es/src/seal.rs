@@ -195,8 +195,11 @@ pub fn seal_value(cluster: &Cluster, kind: &str, value: crate::json::Value) -> E
 #[async_trait::async_trait]
 pub trait Lineage: Send + Sync + std::fmt::Debug {
     /// Saved states (as [`crate::MetaStore`] saves them) the branch's state may have been copied
-    /// from: the parent's current one, and the branch's oldest kept one (its copy, while its
-    /// history keeps it). Empty when none can be read.
+    /// from: the parent's current one and the parent's oldest kept one (the nearest to when the
+    /// branch was made; the branch's own history isn't read, since once pruned it can hold
+    /// secrets the branch made). Empty when either can't be read: then nothing counts as the
+    /// branch's own. A value the parent had when the branch was made but replaced before its
+    /// oldest kept state isn't in either, so it's kept as the branch's own (architecture.md).
     async fn sources(&self) -> Vec<bytes::Bytes>;
 }
 
