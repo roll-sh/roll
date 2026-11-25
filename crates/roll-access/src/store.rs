@@ -399,6 +399,7 @@ fn insert_oauth_grant(c: &code_sql::Conn<'_>, grant_id: &str, client: &Client, n
         "INSERT INTO grants (id, name, kind, rules, expires_at, not_before, ip_allow, created_by, created_at, client_id, rate_per_minute, user_id, ask_otherwise, pending) VALUES (?, ?, 'oauth', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         params![grant_id, new.name.trim(), rules, new.expires_at, new.not_before, ip, created_by, now, client.id, new.rate_per_minute.map(i64::from), user, new.ask_otherwise, new.pending],
     )?;
+    name_rules(c, grant_id)?;
     Ok(())
 }
 
@@ -804,7 +805,60 @@ fn push_temp(c: &code_sql::Conn<'_>, grant: &str, temp: Option<String>, add: Tem
     let mut list: Vec<TempRule> = temp.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
     list.retain(|t| t.until > now && t.rule != add.rule);
     list.push(add);
-    c.execute("UPDATE grants SET temp_rules = ? WHERE id = ?", params![serde_json::to_string(&list).unwrap_or_default(), grant])?;
+    set_temp_rules(c, grant, &serde_json::to_string(&list).unwrap_or_default())
+}
+
+/// A grant's rules replaced, inside a write: the only way `rules` changes, so `grant_names` follows.
+pub(crate) fn set_rules(c: &code_sql::Conn<'_>, id: &str, rules: &str) -> code_sql::Result<()> {
+    c.execute("UPDATE grants SET rules = ? WHERE id = ?", params![rules, id])?;
+    name_rules(c, id)
+}
+
+/// A grant's temporary rules replaced, inside a write, as [`set_rules`].
+fn set_temp_rules(c: &code_sql::Conn<'_>, id: &str, temp: &str) -> code_sql::Result<()> {
+    c.execute("UPDATE grants SET temp_rules = ? WHERE id = ?", params![temp, id])?;
+    name_rules(c, id)
+}
+
+/// What `named` holds: which `rules` and `temp_rules` a grant's `grant_names` came from.
+fn names_stamp(rules: &str, temp: Option<&str>) -> String {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    h.update(rules.as_bytes());
+    h.update([0]);
+    h.update(temp.unwrap_or("").as_bytes());
+    hex::encode(&h.finalize()[..12])
+}
+
+/// Grant `id`'s `grant_names` derived again from its row, inside the write that changed its rules
+/// (or made it): each rule's and temporary rule's product, and each project it names (`*`: every
+/// project). Workloads have none: [`Store::naming`] never returns them.
+pub(crate) fn name_rules(c: &code_sql::Conn<'_>, id: &str) -> code_sql::Result<()> {
+    use roll_auth::scope::{Resources, Selector};
+    c.execute("DELETE FROM grant_names WHERE grant_id = ?", [id])?;
+    let row: Option<(String, String, Option<String>)> = c.query_row("SELECT kind, rules, temp_rules FROM grants WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+    let Some((kind, rules, temp)) = row else { return Ok(()) };
+    if kind == "workload" {
+        return Ok(());
+    }
+    let scope: Scope = serde_json::from_str(&rules).unwrap_or_default();
+    let temporary: Vec<TempRule> = temp.as_deref().and_then(|t| serde_json::from_str(t).ok()).unwrap_or_default();
+    let mut names = std::collections::BTreeSet::new();
+    for rule in scope.0.iter().chain(temporary.iter().map(|t| &t.rule)) {
+        match &rule.resources {
+            Resources::All => {
+                names.insert((rule.product.as_str(), "*"));
+            }
+            Resources::Some(sel) => names.extend(sel.iter().map(|s| match s {
+                Selector::Project { project } => (rule.product.as_str(), project.as_str()),
+                Selector::Id { id, .. } => (rule.product.as_str(), id.as_str()),
+            })),
+        }
+    }
+    for (product, name) in names {
+        c.execute("INSERT INTO grant_names (product, name, grant_id) VALUES (?, ?, ?)", params![product, name, id])?;
+    }
+    c.execute("UPDATE grants SET named = ? WHERE id = ?", params![names_stamp(&rules, temp.as_deref()), id])?;
     Ok(())
 }
 
@@ -978,11 +1032,56 @@ impl Store {
         if !db.has_column("grants", "hint")? {
             db.add_column("grants", "hint", "TEXT")?;
         }
+        // What each token's rules can name, by product (`*`: any) and project (a slug or an id;
+        // `*`: every project), so a product asks for the few that can reach one project
+        // ([`Store::naming`]) instead of reading every token. Kept by [`name_rules`] in every write
+        // of `rules` or `temp_rules`; `named` is the rules it was derived from ([`names_stamp`]).
+        db.ensure_schema(
+            "CREATE TABLE IF NOT EXISTS grant_names (product TEXT NOT NULL, name TEXT NOT NULL, grant_id TEXT NOT NULL, PRIMARY KEY (product, name, grant_id)) WITHOUT ROWID;
+             CREATE INDEX IF NOT EXISTS grant_names_grant ON grant_names (grant_id);",
+        )?;
+        if !db.has_column("grants", "named")? {
+            db.add_column("grants", "named", "TEXT")?;
+        }
         let (audit_tx, rx) = std::sync::mpsc::sync_channel(AUDIT_QUEUE);
         let (writer, audit_pending) = (db.clone(), Arc::new(std::sync::atomic::AtomicUsize::new(0)));
         let pending = audit_pending.clone();
         std::thread::Builder::new().name("roll-access-audit".into()).spawn(move || audit_writer(writer, rx, pending)).map_err(|e| Error::Internal(e.to_string()))?;
-        Ok(Store { db, touched: Default::default(), audit_tx, audit_pending })
+        let store = Store { db, touched: Default::default(), audit_tx, audit_pending };
+        store.backfill_names()?;
+        Ok(store)
+    }
+
+    /// Tokens whose `grant_names` don't match their rules (made before the table, or written by a
+    /// node that didn't keep it during an upgrade) get theirs, one write for all of them; every
+    /// start checks, so it runs once and again only if something was missed.
+    fn backfill_names(&self) -> Result<()> {
+        let rows: Vec<(String, String, Option<String>, Option<String>)> =
+            self.db.read(|c| c.query("SELECT id, rules, temp_rules, named FROM grants WHERE kind <> 'workload'", (), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))))?;
+        let stale: Vec<String> = rows.into_iter().filter(|(_, rules, temp, named)| named.as_deref() != Some(names_stamp(rules, temp.as_deref()).as_str())).map(|(id, ..)| id).collect();
+        if !stale.is_empty() {
+            // `name_rules` reads each row again inside the write: a change since the read wins.
+            self.db.write(|c| stale.iter().try_for_each(|id| name_rules(c, id)))?;
+        }
+        Ok(())
+    }
+
+    /// Live tokens and connections (not workloads), newest first, with a rule (or a rule allowed
+    /// for a while) that can name `project` for `product`: a rule for `product` or `*`, naming it
+    /// by slug or id or naming every project. One indexed read of `grant_names`, whatever the
+    /// number of tokens; a superset (environments, paths, lapsed temporary rules aren't
+    /// considered), so the caller still judges each grant.
+    pub fn naming(&self, product: &str, project: &str) -> Result<Vec<Grant>> {
+        Ok(self.db.read(|c| {
+            c.query(
+                &format!(
+                    "SELECT {GRANT_COLUMNS} FROM {GRANT_FROM} WHERE g.id IN (SELECT grant_id FROM grant_names WHERE product IN (?, '*') AND name IN (?, '*')) \
+                     AND g.kind <> 'workload' AND g.revoked_at IS NULL ORDER BY g.created_at DESC, g.id"
+                ),
+                params![product, project],
+                grant_row,
+            )
+        })?)
     }
 
     /// A setting (JSON), by key: `notify` (where approvals are posted).
@@ -1076,6 +1175,7 @@ impl Store {
                 "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute, user_id, ask_otherwise, not_before, pending, hint, decoy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![id, new.name.trim(), kind_s, rules, new.expires_at, ip, created_by, now, client_id, new.rate_per_minute.map(i64::from), user, new.ask_otherwise, new.not_before, new.pending, shown, new.decoy],
             )?;
+            name_rules(c, &id)?;
             c.execute(
                 "INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
                 params![hash(&token), id, secret_kind, secret_expiry, now],
@@ -1283,7 +1383,7 @@ impl Store {
                 c.execute("UPDATE grants SET name = ? WHERE id = ?", params![n.trim(), id])?;
             }
             if let Some(r) = &change.rules {
-                c.execute("UPDATE grants SET rules = ? WHERE id = ?", params![serde_json::to_string(r).unwrap_or_default(), id])?;
+                set_rules(c, id, &serde_json::to_string(r).unwrap_or_default())?;
             }
             if let Some(e) = &change.expires_at {
                 c.execute("UPDATE grants SET expires_at = ? WHERE id = ?", params![*e, id])?;
@@ -1364,7 +1464,7 @@ impl Store {
                     if !rules.0.contains(rule) {
                         rules.0.push(rule.clone());
                     }
-                    c.execute("UPDATE grants SET rules = ? WHERE id = ?", params![serde_json::to_string(&rules).unwrap_or_default(), id])?;
+                    set_rules(c, id, &serde_json::to_string(&rules).unwrap_or_default())?;
                 }
                 Some(until) => push_temp(c, id, temp, TempRule { rule: rule.clone(), until, approval: Some(approval.to_string()), gated: false }, now)?,
             }
@@ -1382,7 +1482,7 @@ impl Store {
             if serde_json::from_str::<Scope>(&rules).ok().as_ref() != Some(from) {
                 return Err(Error::Conflict("its rules changed since this was proposed: look again".into()));
             }
-            c.execute("UPDATE grants SET rules = ? WHERE id = ?", params![serde_json::to_string(to).unwrap_or_default(), id])?;
+            set_rules(c, id, &serde_json::to_string(to).unwrap_or_default())?;
             Ok(())
         })?;
         self.get(id)
@@ -1401,7 +1501,7 @@ impl Store {
                 return Err(Error::NotFound(format!("{approval} allows this token nothing now")));
             }
             temp.retain(|t| t.until > now && t.approval.as_deref() != Some(approval));
-            c.execute("UPDATE grants SET temp_rules = ? WHERE id = ?", params![serde_json::to_string(&temp).unwrap_or_default(), id])?;
+            set_temp_rules(c, id, &serde_json::to_string(&temp).unwrap_or_default())?;
             c.execute("UPDATE approvals SET state = 'expired' WHERE id = ? AND grant_id = ? AND state = 'approved'", params![approval, id])?;
             Ok(())
         })?;
@@ -2047,13 +2147,13 @@ impl Store {
             c.execute("DELETE FROM grant_secrets WHERE expires_at IS NOT NULL AND expires_at < ?", [now])?;
             let ended = "SELECT id FROM grants WHERE kind = 'workload' AND COALESCE(revoked_at, expires_at) < ?";
             let day = now - 24 * 3600 * 1000;
-            for table in ["grant_secrets", "grant_networks", "approvals"] {
+            for table in ["grant_secrets", "grant_networks", "approvals", "grant_names"] {
                 c.execute(&format!("DELETE FROM {table} WHERE grant_id IN ({ended})"), [day])?;
             }
             c.execute(&format!("DELETE FROM grants WHERE id IN ({ended})"), [day])?;
             // A connection that ended as long ago as the log keeps: nothing still points at it.
             let gone = "SELECT id FROM grants WHERE kind = 'oauth' AND COALESCE(revoked_at, expires_at) < ?";
-            for table in ["grant_secrets", "grant_networks", "approvals"] {
+            for table in ["grant_secrets", "grant_networks", "approvals", "grant_names"] {
                 c.execute(&format!("DELETE FROM {table} WHERE grant_id IN ({gone})"), [before])?;
             }
             c.execute(&format!("DELETE FROM grants WHERE id IN ({gone})"), [before])?;
@@ -2257,7 +2357,8 @@ impl Store {
             scope.0.push(rule);
             check_rules(&scope)?;
             let waits = needs_approval(&scope, ask);
-            c.execute("UPDATE grants SET rules = ?, pending = ? WHERE id = ?", params![serde_json::to_string(&scope).unwrap_or_default(), waits, grant_id])?;
+            c.execute("UPDATE grants SET pending = ? WHERE id = ?", params![waits, grant_id])?;
+            set_rules(c, grant_id, &serde_json::to_string(&scope).unwrap_or_default())?;
             Ok::<_, Error>(true)
         })?;
         Ok((self.get(grant_id)?, added))
