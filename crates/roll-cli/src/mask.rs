@@ -246,8 +246,14 @@ fn ci() -> bool {
 }
 
 /// Whether `f` is a regular file (output redirected to one is data, not a log).
+#[cfg(unix)]
 fn regular_file(f: &impl std::os::fd::AsFd) -> bool {
     f.as_fd().try_clone_to_owned().ok().map(std::fs::File::from).and_then(|f| f.metadata().ok()).is_some_and(|m| m.is_file())
+}
+
+#[cfg(windows)]
+fn regular_file(f: &impl std::os::windows::io::AsHandle) -> bool {
+    f.as_handle().try_clone_to_owned().ok().map(std::fs::File::from).and_then(|f| f.metadata().ok()).is_some_and(|m| m.is_file())
 }
 
 /// A command started with `env`, its masked streams copied by tasks of their own.
