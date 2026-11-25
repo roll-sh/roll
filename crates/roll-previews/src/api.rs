@@ -535,7 +535,7 @@ async fn note_crop(AxState(e): S, Path((id, note)): Path<(String, String)>) -> c
     check_id(&id)?;
     e.store.row(&id)?;
     let (png, seen) = e.store.note_crop(&id, &note)?.ok_or_else(|| Error::NotFound("no picture of that note's element yet".into()))?;
-    let mut resp = ([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "private, max-age=3600")], png).into_response();
+    let mut resp = picture(&e, &id, png, "private, max-age=3600");
     // Taken as its reviewer saw it: how (`390x844, after 2 steps`).
     if let Some(v) = seen.and_then(|s| axum::http::HeaderValue::from_str(&s).ok()) {
         resp.headers_mut().insert(axum::http::HeaderName::from_static("x-roll-crop-as"), v);
@@ -643,6 +643,7 @@ async fn screenshot(AxState(e): S, Path(id): Path<String>, Query(q): Query<std::
         Some(d @ ("base" | "previous")) => Some(d == "base"),
         Some(v) => return Err(Error::BadRequest(format!("diff: base or previous, not {v:?}"))),
     };
+    let (e2, id2) = (e.clone(), id.clone());
     let png = blocking(e, move |e| {
         let shot = |base: bool, previous: bool| -> crate::Result<Option<Vec<u8>>> {
             // `base=1`: the default branch's preview's, the one this was compared with (at the
@@ -669,7 +670,7 @@ async fn screenshot(AxState(e): S, Path(id): Path<String>, Query(q): Query<std::
     })
     .await?;
     match png.filter(|png| !png.is_empty()) {
-        Some(png) => Ok(([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "private, no-store")], png).into_response()),
+        Some(png) => Ok(picture(&e2, &id2, png, "private, no-store")),
         None => Err(Error::NotFound(if previous { "the preview has no earlier screenshot" } else { "the preview has no screenshot" }.into())),
     }
 }
@@ -1070,7 +1071,18 @@ async fn try_page(AxState(e): S, Path(id): Path<String>, Json(b): Json<TryBody>)
 async fn try_screenshot(AxState(e): S, Path((id, run)): Path<(String, String)>) -> crate::Result<Response> {
     check_id(&id)?;
     let png = e.try_screenshot(&id, &run)?;
-    Ok(([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "private, no-store")], png).into_response())
+    Ok(picture(&e, &id, png, "private, no-store"))
+}
+
+/// A picture of a preview's page: an untrusted preview's (a fork's) is its code's words too, so
+/// it says it's from outside (`x-roll-outside`), which MCP's lockdown keeps from a model, as
+/// `mark_outside` does for JSON.
+fn picture(e: &crate::Engine, id: &str, png: Vec<u8>, cache: &'static str) -> Response {
+    let mut resp = ([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, cache)], png).into_response();
+    if e.store.row(id).is_ok_and(|r| !r.trusted) {
+        resp.headers_mut().insert(roll_auth::lockdown::OUTSIDE_HEADER, axum::http::HeaderValue::from_static("true"));
+    }
+    resp
 }
 
 #[derive(serde::Deserialize)]
