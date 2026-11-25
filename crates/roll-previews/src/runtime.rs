@@ -2183,7 +2183,8 @@ impl Runtime {
     async fn stories_in(&self, name: &str, port: u16, at: &str, changed: &[String]) -> anyhow::Result<(Vec<crate::ports::PageShot>, crate::Skipped)> {
         let shot = format!("roll-previews-story-{}", name.trim_start_matches("roll-previews-"));
         let mut args = shot_args(&shot, name, port);
-        args.extend(["--env".into(), format!("STORIES={at}")]);
+        // axe-core for each story's accessibility, on stdin as the page run's is.
+        args.extend(["--env".into(), format!("STORIES={at}"), "--env".into(), "AXE=/tmp/axe.js".into()]);
         // What the change touched, so its stories go first: as many paths as fit in 64 KiB.
         let mut fit = Vec::new();
         let mut size = 0;
@@ -2202,13 +2203,13 @@ impl Runtime {
             "sh".into(),
             "-c".into(),
             format!(
-                "{} >/dev/null 2>&1; (cat /tmp/s.png.stories.json 2>/dev/null || true) && for n in $(seq 0 {}); do echo; base64 -w0 /tmp/s.png.story.$n.png 2>/dev/null || true; done",
+                "cat > /tmp/axe.js; {} >/dev/null 2>&1; (cat /tmp/s.png.stories.json 2>/dev/null || true) && for n in $(seq 0 {}); do echo; base64 -w0 /tmp/s.png.story.$n.png 2>/dev/null || true; done",
                 self.cfg.screenshot_command,
                 crate::settings::MAX_STORIES - 1
             ),
         ]);
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-        let out = match tokio::time::timeout(STORIES_FOR, docker_with_input(&argv, Vec::new(), STORIES_OUTPUT_MAX)).await {
+        let out = match tokio::time::timeout(STORIES_FOR, docker_with_input(&argv, AXE_JS.as_bytes().to_vec(), STORIES_OUTPUT_MAX)).await {
             Ok(Ok(out)) => out,
             Ok(Err(e)) => {
                 code_preview::docker::remove(&shot).await;
