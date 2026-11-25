@@ -119,6 +119,26 @@ pub struct InspectRequest {
 pub struct Pick {
     pub index: String,
     pub dest: Option<String>,
+    /// Algolia, Typesense, Meilisearch: a copy that stopped part way starts again from the
+    /// start instead of from its last page.
+    pub full: Option<bool>,
+    /// `cutover`: the alias moved to the copy (the source's index name unless set).
+    pub alias: Option<String>,
+}
+
+/// What a `migrate` call does to each picked index (Algolia, Typesense and Meilisearch; an
+/// Elasticsearch migration only copies).
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Stage {
+    /// Plan, make and copy (resuming a copy that stopped).
+    #[default]
+    Copy,
+    /// Read again what changed since the copy (or the last catch-up) started, writing only
+    /// documents that differ.
+    CatchUp,
+    /// Move an alias to the copy, in one step.
+    Cutover,
 }
 
 #[derive(Deserialize, Debug)]
@@ -133,6 +153,13 @@ pub struct MigrateRequest {
     /// Algolia, Typesense and Meilisearch: answer what each index would become (mappings,
     /// synonyms, rules, what doesn't map) without making anything.
     pub dry_run: Option<bool>,
+    /// `copy` (the default), `catch_up` or `cutover`.
+    pub step: Option<Stage>,
+    /// `catch_up`: a numeric attribute of the source's records that says when each changed;
+    /// only records changed since the last pass are read. Without it, every record is read.
+    pub since_attribute: Option<String>,
+    /// `since_attribute`'s unit: `s` (the default) or `ms` since the epoch.
+    pub since_unit: Option<String>,
 }
 
 /// `host` as reindex's `source.remote.host` takes it: a scheme, a DNS name or an IP literal, a
@@ -519,8 +546,8 @@ impl Control {
             return self.saas_migrate(c, req).await;
         }
         check_es_source(&req.source)?;
-        if req.dry_run.is_some() {
-            return Err(ControlError::Invalid("dry_run is for algolia, typesense and meilisearch sources".into()));
+        if req.dry_run.is_some() || req.step.is_some() || req.since_attribute.is_some() || req.since_unit.is_some() || req.indices.iter().any(|p| p.full.is_some() || p.alias.is_some()) {
+            return Err(ControlError::Invalid("dry_run, step, since_attribute, since_unit, full and alias are for algolia, typesense and meilisearch sources".into()));
         }
         let remote = remote_json(&req.source)?;
         let host = remote["host"].as_str().unwrap_or_default().to_string();
