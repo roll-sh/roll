@@ -343,7 +343,9 @@ applications). A web page calls a cluster directly, with no backend of its own i
     makes a new one (in its answer only): every key derived under the old one is refused from the
     next request. Each secret has a `generation`, and the cluster stores a new secret only as the
     stored one's next, inside the state update: of two rotations racing, one gets a 409 and its
-    secret is never handed out. Revoking the parent refuses all of them at once.
+    secret is never handed out; a key made with a `derive` of its own starts at generation 1, and
+    one that can't advance is refused, never wrapped. Revoking the parent refuses all of them at
+    once.
   - *A derived key* is `rdk1.<payload>.<mac>`: base64url (no padding) of one JSON object, and of
     HMAC-SHA256 over `rdk1.<payload>` keyed with the secret as written. One version, one
     algorithm; nothing in the token picks either. The payload: `key` (the parent's id) and
@@ -356,7 +358,13 @@ applications). A web page calls a cluster directly, with no backend of its own i
     `constant_score` or `nested`; it's built as the owner's filter is, outside the browser
     policy, so nothing that reads another document or index (terms lookups, indexed shapes,
     `more_like_this`, joins, `percolate`), runs Painless, renders a template or wraps an encoded
-    query; then Elasticsearch's role-query check and the cluster's own parse), a `user` (an end
+    query; then Elasticsearch's role-query check and the cluster's own parse; nothing that
+    expands terms (`prefix`, `wildcard`, the prefix match queries, `simple_query_string`,
+    `fuzziness`, `max_expansions`) unless the parent's `limits.allow_expensive_queries`, since
+    its expansions aren't capped as a browser key's own queries' are; nor, without it, a
+    `range` on a field an index the key reaches maps as text or a keyword (its terms are walked,
+    as Elasticsearch's `search.allow_expensive_queries: false` refuses), read from the mappings on
+    each request), a `range` on numbers and dates staying allowed, a `user` (an end
     customer, Algolia's `userToken`),
     `origins` and `rate_limit: {"per_minute": n}` (the user's). Unknown fields, duplicate keys and
     trailing bytes are refused. It goes wherever a browser key goes (`Authorization: ApiKey
@@ -372,14 +380,23 @@ applications). A web page calls a cluster directly, with no backend of its own i
     the parent's, the parent's application only, the filter as above at most 24 levels deep, a
     `rate_limit` at most a user's share, origins the cluster's CORS allows), each refusal a 401
     naming the field, never a value from the key. The key is verified once per request, nothing
-    cached: a revoke or rotation holds from the next request.
+    cached: the owner node verifies it and hands the request to the cluster with what it verified
+    (the parent's id, the narrowing, the key's expiry and the generation of the secret that
+    signed it) on the request in process (`search_es::rest::Verified`, as it says who
+    authenticated with the cluster's own credentials): no header carries either, so nothing a
+    client sends can claim them. The cluster checks only that the parent is still live, its
+    secret still that generation and the key unexpired, on the request and every internal call
+    it makes, so a revoke, rotation or expiry holds even inside a running request.
   - *What it may do* is its parent's, narrowed: the principal is the parent's API key with one
     more set of role descriptors every permission must also pass (the derived indices with
     `read`, the derived filter as their document-level `query`), so the indices intersect and
     the two filters AND, in every place document and field level security reach. It's a browser
     key under its parent's policy, limits and concurrency, and doesn't even get
-    `_security/_authenticate`. With `origins`, a request whose `Origin` isn't one of them is
-    refused (curl and servers send none: origins bind browsers, as CORS does).
+    `_security/_authenticate`, nor scrolls, points in time or async searches (were one
+    reachable, its owner would be the derived key itself, by the hash of its payload, never its
+    parent or a sibling). Its reads are restricted ones (`dls::ReadSecurity`), so it never reads a
+    request-cache entry built for a wider view. With `origins`, a request whose `Origin` isn't
+    one of them is refused (curl and servers send none: origins bind browsers, as CORS does).
   - *Rate limits*: a derived key pays everything its parent would (the cluster's ceiling, the
     parent's own limit, its per-address limits), so the parent's limit is the ceiling of all its
     derived keys together. A `user` gets its own bucket on top: a quarter of the parent's limit,
@@ -1338,8 +1355,9 @@ deterministic (#396).
    #954 (Algolia's `generateSecuredApiKey`, Typesense's `generateScopedSearchKey`, Meilisearch's
    tenant tokens: a derivable browser key's backend signs a short-lived, narrower key per end
    customer, checked on the owner every request, with a per-user share of the parent's rate;
-   in progress, `fix/search-derived-keys-2`: verified once per request, expensive filters only
-   when the parent allows them, and each end user's own context owner);
+   then #1002: verified once per request through a typed field only the node sets, expensive
+   filters only when the parent allows them, and each end user's own context owner; in review
+   (#1025): usage and 429s per browser key by reason, with a derived key's top users);
    what remains: RAG's chat limits for browser keys (item 11); browser search on previews (a branch keeps the
    parent's origins but no browser key works there: give it one and the preview's URL, roll
    previews' side); and usage and 429s per browser key in the Browser search section (Algolia's
@@ -1364,10 +1382,7 @@ deterministic (#396).
    on the same routes, records, settings, synonyms and rules mapped onto indices, synonyms sets,
    query rules and a search template, everything that doesn't map listed with why before the copy
    starts (`dry_run`), copies as reindex tasks, `roll search migrate`, and
-   [guides/migrate-from-algolia.md](guides/migrate-from-algolia.md) (#957). In review (#993):
-   a copy that resumes from its last page, Typesense 29's synonym sets and 30's curation sets,
-   Algolia's filter and query-edit rules as search templates, and catch-up and cutover (changed
-   records read again, then an alias moved in one step). Elastic Cloud restores from
+   [guides/migrate-from-algolia.md](guides/migrate-from-algolia.md) (#957). Elastic Cloud restores from
    other deployments, AWS OpenSearch Service has migration assistants, Typesense and Meilisearch
    publish Algolia importers). A follow-up added: a stopped copy resumes from its last page
    (its place in `_meta.roll_import`), Typesense 29's synonym sets and 30's curation sets are
@@ -1428,7 +1443,14 @@ deterministic (#396).
    cluster loaded past the always-on caps. Fix in progress (`fix/search-contexts-caches`).
    Checked and sound: async results, scroll and point-in-time ids, cross-cluster contexts, the
    credential and analysis caches, and the metering buffers. The second pass's fix is in review
-   (#988, with previews' `X-Roll-Unembedded: drop` for masking a `semantic_text` field on a branch).
+   (#988, with previews' `X-Roll-Unembedded: drop` for masking a `semantic_text` field on a branch;
+   its reviews also found `_update_by_query`/`_delete_by_query` reaching hidden indices with
+   `expand_wildcards=all`, now narrowed as Elasticsearch narrows them), and the third's in review
+   (#1021). Found on the way: on OpenSearch-flavor clusters `_reindex` checked neither its source
+   nor its destination, so a key limited to some indices could copy any index into its own (in
+   review, #1029: read on the source and write on each destination, as Elasticsearch requires);
+   and `_update`, bulk updates and `_update_by_query` don't honour DLS and FLS, where Elasticsearch
+   refuses them (in progress, `fix/search-update-dls-fls`).
 5. **Cross-cluster search: what's left** (ES|QL across clusters landed in #504 after five reviews: each
    cluster's part on its owner, `_remote`/`_coordinator`/`_any` enrich modes, LOOKUP JOIN across clusters
    with union types refused as Elasticsearch refuses them; still different: a command inside a part after
@@ -1562,9 +1584,9 @@ deterministic (#396).
    reached rather than from the start of each index. Landed since: a snapshot DELETE waits for
    running snapshots that build on it, as Elasticsearch does, and a cap on repository generations
    (#941); deletions and `_cleanup` show as running, so a snapshot starting meanwhile waits for
-   them rather than take a removed snapshot as its base (#995). In progress
-   (`feature/search-es-restore-2`): data streams restored whole, and a restore resumed after a
-   takeover from the shard it reached.
+   them rather than take a removed snapshot as its base (#995). In review
+   (#1008): data streams restored whole, and a restore resumed after a takeover from the shard
+   it reached.
    Chunks of failed snapshots stay until `_cleanup` (compatibility.md says why).
 10. **Relevance tuning by MCP and Terraform**: `/v1/search` serves synonyms sets, query rulesets
    (and `_test`), writing an index's settings and `_explain` (the routes table), and `roll search`
@@ -1577,7 +1599,7 @@ deterministic (#396).
    `conversation=true`, Meilisearch `/chats`, OpenSearch's `retrieval_augmented_generation`
    processor). Design: [rag.md](rag.md). Phase 1 is built: streamed inference (`…/_stream` sent as
    it comes, through the node and the console route) and the Playground's Chat view with "view
-   code". Left: phase 2 (the `/_roll/chat` engine, the OpenAI-compatible route, browser key limits
+   code". In progress (`feature/search-rag-2`): phase 2 (the `/_roll/chat` engine, the OpenAI-compatible route, browser key limits
    on `_answer` (#358's keys can't call `_inference` at all), CLI and MCP) and phase 3 (memory,
    OpenSearch's processor).
 12. **The first query in a minute** (the guides landed in #604; sample data and a guided first
@@ -1603,11 +1625,11 @@ deterministic (#396).
    count of unverified crawls in the fleet's catalogue), `crawl-test` (one URL through the crawler's path, storing nothing,
    rate-limited per owner) with its MCP tools and `roll search crawler test`/`verify`/`sites`, the
    dashboard's "crawl a site" box in the Connectors tab, and every product's names blocked
-   (`roll.crawler.fleet_names`). In review (#990): a verification token derived from the
-   tenant and the site (HMAC), so a published record keeps working after the last row for it
-   goes, and extraction rules (Open Crawler's `extraction_rulesets`: CSS selectors on the arena
-   DOM, matched in one pass under the page's deadline). Left (phase 3): incremental crawls with
-   `If-Modified-Since`, and the docs preset; charset detection beyond UTF-8, fetching several
+   (`roll.crawler.fleet_names`); then (phase 3) extraction rules (Open Crawler's rulesets, CSS
+   selectors matched in one pass on the arena DOM, carried over by the import) and a verification
+   token derived from the owner and the site (HMAC), so a published record outlives its rows.
+   Left: incremental crawls with `If-Modified-Since`, and the docs preset; charset detection
+   beyond UTF-8, fetching several
    origins at once, and per-site politeness by address rather than name are open too.
 14. **Semantic search on OpenSearch-flavor clusters** (design in
    [opensearch-neural.md](opensearch-neural.md); AWS OpenSearch neural search):

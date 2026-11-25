@@ -41,6 +41,7 @@ import { Route as DashboardAppsVisitRouteImport } from './routes/dashboard/apps/
 import { Route as DashboardCodeIndexRouteImport } from './routes/dashboard/code/index'
 import { Route as DashboardNosqlIndexRouteImport } from './routes/dashboard/nosql/index'
 import { Route as DashboardNosqlIdRouteImport } from './routes/dashboard/nosql/$id'
+import { Route as DashboardPreviewsNoteRouteImport } from './routes/dashboard/previews/note'
 import { Route as DashboardPreviewsVisitRouteImport } from './routes/dashboard/previews/visit'
 import { Route as DashboardProjectsIdRouteImport } from './routes/dashboard/projects/$id'
 import { Route as DashboardQueuesIndexRouteImport } from './routes/dashboard/queues/index'
@@ -242,6 +243,11 @@ const DashboardNosqlIndexRoute = DashboardNosqlIndexRouteImport.update({
 const DashboardNosqlIdRoute = DashboardNosqlIdRouteImport.update({
   id: '/dashboard/nosql/$id',
   path: '/dashboard/nosql/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DashboardPreviewsNoteRoute = DashboardPreviewsNoteRouteImport.update({
+  id: '/dashboard/previews/note',
+  path: '/dashboard/previews/note',
   getParentRoute: () => rootRouteImport,
 } as any)
 const DashboardPreviewsVisitRoute = DashboardPreviewsVisitRouteImport.update({
@@ -493,6 +499,7 @@ export interface FileRoutesByFullPath {
   '/dashboard/apps/$id': typeof DashboardAppsIdRoute
   '/dashboard/apps/visit': typeof DashboardAppsVisitRoute
   '/dashboard/nosql/$id': typeof DashboardNosqlIdRoute
+  '/dashboard/previews/note': typeof DashboardPreviewsNoteRoute
   '/dashboard/previews/visit': typeof DashboardPreviewsVisitRoute
   '/dashboard/projects/$id': typeof DashboardProjectsIdRouteWithChildren
   '/dashboard/queues/connections': typeof DashboardQueuesConnectionsRoute
@@ -567,6 +574,7 @@ export interface FileRoutesByTo {
   '/dashboard/apps/$id': typeof DashboardAppsIdRoute
   '/dashboard/apps/visit': typeof DashboardAppsVisitRoute
   '/dashboard/nosql/$id': typeof DashboardNosqlIdRoute
+  '/dashboard/previews/note': typeof DashboardPreviewsNoteRoute
   '/dashboard/previews/visit': typeof DashboardPreviewsVisitRoute
   '/dashboard/projects/$id': typeof DashboardProjectsIdRouteWithChildren
   '/dashboard/queues/connections': typeof DashboardQueuesConnectionsRoute
@@ -643,6 +651,7 @@ export interface FileRoutesById {
   '/dashboard/apps/$id': typeof DashboardAppsIdRoute
   '/dashboard/apps/visit': typeof DashboardAppsVisitRoute
   '/dashboard/nosql/$id': typeof DashboardNosqlIdRoute
+  '/dashboard/previews/note': typeof DashboardPreviewsNoteRoute
   '/dashboard/previews/visit': typeof DashboardPreviewsVisitRoute
   '/dashboard/projects/$id': typeof DashboardProjectsIdRouteWithChildren
   '/dashboard/queues/connections': typeof DashboardQueuesConnectionsRoute
@@ -720,6 +729,7 @@ export interface FileRouteTypes {
     | '/dashboard/apps/$id'
     | '/dashboard/apps/visit'
     | '/dashboard/nosql/$id'
+    | '/dashboard/previews/note'
     | '/dashboard/previews/visit'
     | '/dashboard/projects/$id'
     | '/dashboard/queues/connections'
@@ -794,6 +804,7 @@ export interface FileRouteTypes {
     | '/dashboard/apps/$id'
     | '/dashboard/apps/visit'
     | '/dashboard/nosql/$id'
+    | '/dashboard/previews/note'
     | '/dashboard/previews/visit'
     | '/dashboard/projects/$id'
     | '/dashboard/queues/connections'
@@ -869,6 +880,7 @@ export interface FileRouteTypes {
     | '/dashboard/apps/$id'
     | '/dashboard/apps/visit'
     | '/dashboard/nosql/$id'
+    | '/dashboard/previews/note'
     | '/dashboard/previews/visit'
     | '/dashboard/projects/$id'
     | '/dashboard/queues/connections'
@@ -941,6 +953,7 @@ export interface RootRouteChildren {
   DashboardAppsIdRoute: typeof DashboardAppsIdRoute
   DashboardAppsVisitRoute: typeof DashboardAppsVisitRoute
   DashboardNosqlIdRoute: typeof DashboardNosqlIdRoute
+  DashboardPreviewsNoteRoute: typeof DashboardPreviewsNoteRoute
   DashboardPreviewsVisitRoute: typeof DashboardPreviewsVisitRoute
   DashboardProjectsIdRoute: typeof DashboardProjectsIdRouteWithChildren
   DashboardQueuesConnectionsRoute: typeof DashboardQueuesConnectionsRoute
@@ -1201,6 +1214,13 @@ declare module '@tanstack/react-router' {
       path: '/dashboard/nosql/$id'
       fullPath: '/dashboard/nosql/$id'
       preLoaderRoute: typeof DashboardNosqlIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/dashboard/previews/note': {
+      id: '/dashboard/previews/note'
+      path: '/dashboard/previews/note'
+      fullPath: '/dashboard/previews/note'
+      preLoaderRoute: typeof DashboardPreviewsNoteRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/dashboard/previews/visit': {
@@ -1568,6 +1588,7 @@ const rootRouteChildren: RootRouteChildren = {
   DashboardAppsIdRoute: DashboardAppsIdRoute,
   DashboardAppsVisitRoute: DashboardAppsVisitRoute,
   DashboardNosqlIdRoute: DashboardNosqlIdRoute,
+  DashboardPreviewsNoteRoute: DashboardPreviewsNoteRoute,
   DashboardPreviewsVisitRoute: DashboardPreviewsVisitRoute,
   DashboardProjectsIdRoute: DashboardProjectsIdRouteWithChildren,
   DashboardQueuesConnectionsRoute: DashboardQueuesConnectionsRoute,

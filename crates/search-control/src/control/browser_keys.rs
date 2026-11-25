@@ -349,7 +349,8 @@ impl Control {
             return Err(ControlError::Conflict(format!("browser key {key_id} isn't derivable: make a derivable one (\"derivable\": true)")));
         }
         let generation = k["metadata"][METADATA][DERIVE]["generation"].as_i64().unwrap_or(0);
-        let (secret, at) = self.set_signing_secret(&c, key_id, k["metadata"].clone(), generation + 1).await?;
+        let next = generation.checked_add(1).ok_or_else(|| ControlError::Conflict(format!("browser key {key_id}'s signing secret can't be rotated again: make a new browser key")))?;
+        let (secret, at) = self.set_signing_secret(&c, key_id, k["metadata"].clone(), next).await?;
         Ok(json!({ "id": key_id, "signing_secret": secret, "secret_rotated_at": at }))
     }
 

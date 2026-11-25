@@ -4489,7 +4489,12 @@ impl Apps {
             }
             false => None,
         };
+        let fork_csp = match row.ephemeral && row.egress.closed() && self.deps.runtime.closes_egress() {
+            true => self.fork_policy(&live.service, &row.name).await,
+            false => None,
+        };
         let g = Arc::new(live::Gate {
+            fork_csp,
             maintenance: row.maintenance,
             allow,
             rate: crate::model::RateLimit::stricter(row.rate_limit, file.rate_limit),
@@ -4503,6 +4508,37 @@ impl Apps {
             redirects: row.redirects.as_deref().map(crate::site_rules::EnvRedirects::parse).filter(|r| !r.is_empty()).map(Arc::new) });
         live.set_gate(g.clone(), seen);
         Ok(g)
+    }
+
+    /// A fork's preview's Content-Security-Policy (roll previews' own proxy's, `fork_policy` in
+    /// roll-previews): its own origins are the same preview environment's across the project's
+    /// services (generated hosts and custom domains); inline scripts, eval, `data:` and `blob:`
+    /// stay allowed, so pages run as before, but nothing loads from or is sent to another site.
+    async fn fork_policy(self: &Arc<Self>, service: &str, env: &str) -> Option<axum::http::HeaderValue> {
+        let sid = service.to_string();
+        let project = self.db(move |s| s.service(&sid)).await.ok()?.project;
+        let e = env.to_string();
+        let (slugs, domains) = self
+            .db(move |s| {
+                let (mut slugs, mut domains) = (Vec::new(), Vec::new());
+                for svc in s.services(Some(&project))? {
+                    if let Ok(row) = s.environment(&svc.id, &e) {
+                        slugs.push(row.slug.clone());
+                        domains.extend(s.domains(&svc.id, &e)?.into_iter().map(|d| d.hostname));
+                    }
+                }
+                Ok((slugs, domains))
+            })
+            .await
+            .ok()?;
+        // Each as a host source (the generated ones with the apps domain and its port), never a
+        // scheme: the page's own applies.
+        let generated = slugs.iter().map(|slug| self.url(slug)).map(|u| u.split_once("://").map_or(u.clone(), |(_, rest)| rest.to_string()));
+        let mut own: Vec<String> = generated.chain(domains).collect();
+        own.sort();
+        own.dedup();
+        let own = own.join(" ");
+        axum::http::HeaderValue::from_str(&format!("default-src 'self' {own} 'unsafe-inline' 'unsafe-eval' data: blob:; form-action 'self' {own}; base-uri 'self'")).ok()
     }
 
     /// Where a preview's feedback button reads what's been said (roll previews, once it's on this

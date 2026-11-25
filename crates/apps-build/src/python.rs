@@ -8,7 +8,8 @@ use crate::version::{self, Ver};
 use crate::{Commands, Draft, Error, Overrides, Provider, Tree, invalid, join, node, text};
 
 const DEFAULT: Ver = Ver(3, 12);
-const UV_IMAGE: &str = "ghcr.io/astral-sh/uv:latest";
+/// uv, pinned like every other builder image (a release can change how a project resolves).
+const UV_IMAGE: &str = "ghcr.io/astral-sh/uv:0.13.7";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Manager {
