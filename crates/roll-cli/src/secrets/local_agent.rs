@@ -179,13 +179,14 @@ async fn serve(api: &Api, args: &super::AtArgs, a: LocalAgent, scm: Manager<'_>)
     if let Some(scm) = scm {
         scm.running();
     }
+    let managed = scm.is_some();
     axum::serve(listener, router)
         .with_graceful_shutdown(async move {
             #[cfg(windows)]
-            if scm.is_some() {
+            if managed {
                 return super::service::Scm::stopping().await;
             }
-            let _ = scm;
+            let _ = managed;
             let _ = tokio::signal::ctrl_c().await;
         })
         .await?;
