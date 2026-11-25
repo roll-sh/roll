@@ -342,13 +342,13 @@ type Selector =
 type Product = "workspace" | "postgres" | "redis" | "storage" | "streams" | "nosql" | "queues"
   | "tasks" | "code" | "agents" | "secrets" | "apps" | "previews" | "search" | "observability"
   | "access";
-type Action = "read" | "write" | "delete" | "reveal" | "deploy" | "admin";
+type Action = "read" | "write" | "delete" | "reveal" | "deploy" | "admin" | "scan";
 ```
 
 ### Actions
 
 Every route is exactly one action on one product. Actions don't imply each other: `write` doesn't
-include `read`, and nothing includes `delete`, `reveal`, `deploy` or `admin`. The builder fills in
+include `read`, and nothing includes `delete`, `reveal`, `deploy`, `admin` or `scan`. The builder fills in
 the usual combinations, so this stays explicit without being tedious.
 
 | action | means | examples |
@@ -359,6 +359,7 @@ the usual combinations, so this stays explicit without being tedious.
 | `reveal` | see a credential or a secret value | connection strings with passwords, reset a password, API keys, storage access keys, secret values |
 | `deploy` | change production | land a change on a default branch, deploy, roll back or promote to production, bypass a merge queue |
 | `admin` | manage access and settings | IAM users and policies, API keys, stream ACLs, owner settings, webhooks, tokens (product `access`) |
+| `scan` | ask whether text holds a stored value, never see one | roll secrets' `POST …/scan` (a git server's pre-receive hook, docs/secrets.md): whole candidates of 16 characters or more only |
 
 A route whose effect depends on its body is classified from the body. Comments are stripped
 first, so they can't hide what runs, and anything that makes or changes credentials or privileges
