@@ -90,6 +90,21 @@ api POST /v1/code/repos/acme/web/land "{\"message\":\"init\",\"files\":{\"roll.t
 # A second service, from a second repo (its default branch in every preview): its pages too.
 api POST /v1/code/repos '{"owner":"acme","name":"wiki","source":"native"}' >/dev/null
 api POST /v1/code/repos/acme/wiki/land "{\"message\":\"init\",\"files\":{\"roll.toml\":{\"content\":\"$TOML\"},\"index.html\":{\"content\":\"the wiki\"}}}" >/dev/null
+# A built Storybook under /storybook/ (github.storybook): 41 stories, one run takes 40. The last,
+# Deep's, imports lib/deep.js, which the change adds: its module graph (preview-stats.json, as
+# `storybook build --stats-json` writes it) puts it first, so the one left is the 40th listed.
+STORYBOOK=$(python3 - <<'PY2'
+import json
+ids = ["s%02d--one" % i for i in range(1, 41)] + ["deep--one"]
+path = lambda i: "./stories/%s.stories.js" % i.split("--")[0]
+index = {"v": 5, "entries": {i: {"id": i, "type": "story", "title": i, "name": "One", "importPath": path(i)} for i in ids}}
+stats = {"modules": [{"name": "./lib/deep.js", "reasons": [{"moduleName": "./stories/Deep.js"}]}, {"name": "./stories/Deep.js", "reasons": [{"moduleName": "./stories/deep.stories.js"}]}]}
+frame = '<!doctype html><html lang="en"><title>story</title><div id="storybook-root"><button>a story</button></div>'
+files = {"storybook/index.json": json.dumps(index), "storybook/preview-stats.json": json.dumps(stats), "storybook/iframe.html": frame}
+print(json.dumps({"message": "storybook", "files": {k: {"content": v} for k, v in files.items()}}))
+PY2
+)
+api POST /v1/code/repos/acme/web/land "$STORYBOOK" >/dev/null
 REDIS=$(api POST /v1/redis/databases '{"name":"cache"}' | jq_ "d['id']")
 api POST /v1/storage/buckets '{"name":"assets"}' >/dev/null
 NOSQL=$(api POST /v1/nosql/databases '{"name":"events"}' | jq_ "d['id']")
@@ -171,7 +186,7 @@ case "$LINKED" in 200|201) ;; *) echo "linking development's STAGING_PGPASS to $
 EV0=$(api GET "/v1/previews/events?latest=1" | jq_ "d['next']")
 say "open a change"
 T0=$(now_ms)
-CHG=$(api POST /v1/code/repos/acme/web/changes '{"title":"New page","message":"New page","base":"main","files":{"index.html":{"content":"preview of change 1"},'"$OPENAPI_CHG"'}}' | jq_ "d['id']")
+CHG=$(api POST /v1/code/repos/acme/web/changes '{"title":"New page","message":"New page","base":"main","files":{"index.html":{"content":"preview of change 1"},"lib/deep.js":{"content":"export const deep = 1;"},'"$OPENAPI_CHG"'}}' | jq_ "d['id']")
 PV=""
 for _ in $(seq 1 240); do
   L=$(api GET "/v1/previews?project=$PRJ")
@@ -574,7 +589,7 @@ done
 
 say "a screenshot of the service (github.screenshot), once per head"
 # And /pricing, which the test service doesn't have (a 404 page, one failed request).
-api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true,"pages":["/pricing","web:/","wiki:/"],"widths":[768],"hide":[".clock"],"budget":{"load_ms":60000},"openapi":"/openapi.json","endpoints":["/openapi.json","/env.txt"],"states":[{"name":"tab","page":"/","steps":[{"press":"Tab"},{"click":"body"}]}],"browsers":["firefox","webkit-phone"],"login":{"page":"/","steps":[{"type":["#nope","$GREETING"]}]}}}' >/dev/null
+api PUT "/v1/previews/projects/$PRJ/settings" '{"github":{"screenshot":true,"storybook":"web:/storybook/","pages":["/pricing","web:/","wiki:/"],"widths":[768],"hide":[".clock"],"budget":{"load_ms":60000},"openapi":"/openapi.json","endpoints":["/openapi.json","/env.txt"],"states":[{"name":"tab","page":"/","steps":[{"press":"Tab"},{"click":"body"}]}],"browsers":["firefox","webkit-phone"],"login":{"page":"/","steps":[{"type":["#nope","$GREETING"]}]}}}' >/dev/null
 # roll keeps a preview of the default branch (github.baseline): the change's screenshots are
 # compared with its.
 MAINPV=""
@@ -585,14 +600,18 @@ for _ in $(seq 1 120); do
 done
 [ -n "$MAINPV" ] || { echo "roll should keep a preview of main once screenshots are on (github.baseline)"; exit 1; }
 # (Screenshots take one slot a node: main's, then this one, each with its pages, states and
-# other browsers.)
-for _ in $(seq 1 360); do
+# other browsers, and its 40 stories.)
+for _ in $(seq 1 720); do
   [ "$(api GET "/v1/previews/$PV" | jq_ "d.get('screenshot_at') is not None")" = True ] && break
   sleep 0.5
 done
 curl -sS -o "$HOME_DIR/screenshot.png" "http://$API/v1/previews/$PV/screenshot"
 SHOT=$(python3 -c "import sys; b=open(sys.argv[1],'rb').read(); print(f'{len(b)} bytes, PNG' if b[:4]==b'\x89PNG' else 'not a PNG')" "$HOME_DIR/screenshot.png")
 case "$SHOT" in *PNG) ;; *) echo "the screenshot should be a PNG: $SHOT"; exit 1;; esac
+# Its stories in a real browser, the change's first: Deep's (last in the index, reached through
+# the module graph) taken, the 40th listed left and said.
+LEFT=$(api GET "/v1/previews/$PV" | jq_ "(lambda k: '%s %s' % (k.get('stories'), k.get('first_stories')))(d.get('skipped') or {})")
+[ "$LEFT" = "1 ['s40--one']" ] || { echo "the stories run should take Deep's through the module graph and leave the 40th: $LEFT"; exit 1; }
 # Signed in first (github.login): its $GREETING put in by roll and handed to the browser through
 # its container's stdin. The page has no #nope, so the run says where it stopped, never what it
 # would have typed.
