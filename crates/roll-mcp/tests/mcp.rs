@@ -73,7 +73,14 @@ fn products() -> Router {
         }))
         // A deploy still building (MCP Apps views read it again until it settles).
         .route("/v1/apps/services/{id}/environments/{env}/deploys/{deploy}", get(|| async { axum::Json(json!({ "id": "dep_1", "status": "building" })) }))
-        .route("/v1/previews/{id}/screenshot", get(|| async { ([(axum::http::header::CONTENT_TYPE, "image/png")], vec![0x89u8, b'P', b'N', b'G', 0, 1, 2]) }))
+        // A fork's preview's picture says it's from outside, as roll previews' do.
+        .route("/v1/previews/{id}/screenshot", get(|axum::extract::Path(id): axum::extract::Path<String>| async move {
+            let mut r = axum::response::IntoResponse::into_response(([(axum::http::header::CONTENT_TYPE, "image/png")], vec![0x89u8, b'P', b'N', b'G', 0, 1, 2]));
+            if id == "pv_fork" {
+                r.headers_mut().insert(roll_mcp::lockdown::OUTSIDE_HEADER, axum::http::HeaderValue::from_static("true"));
+            }
+            r
+        }))
         // A run still going the first two times it's waited on (each wait answers at its limit).
         .route("/v1/tasks/runs/{id}/wait", get(|| async {
             static WAITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -909,12 +916,22 @@ async fn prompt_arguments_complete_from_what_it_may_read() {
     assert_eq!(pending.as_array().map_or(0, Vec::len) + pending["approvals"].as_array().map_or(0, Vec::len), 0, "no approval opened: {pending}");
 }
 
-/// A screenshot comes back as MCP image content, so an agent can look at a preview.
+/// A screenshot comes back as MCP image content, so an agent can look at a preview; in lockdown
+/// a fork's page (any words its code shows) comes back as a notice instead.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_screenshot_is_an_image_the_agent_sees() {
     let d = Daemon::with_products(vec!["previews".into()]);
     let shot = d.tool(OPERATOR, "previews_screenshot", json!({ "id": "pv_1" })).await;
     assert_eq!((shot["isError"].as_bool(), shot["content"][1]["type"].as_str(), shot["content"][1]["mimeType"].as_str()), (Some(false), Some("image"), Some("image/png")), "{shot}");
+    let call = |path: &'static str, id: &'static str| {
+        let d = &d;
+        async move { d.http(OPERATOR, Method::POST, path, Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "previews_screenshot", "arguments": { "id": id } } }))).await.2["result"].clone() }
+    };
+    let images = |r: &Value| r["content"].as_array().map_or(0, |c| c.iter().filter(|c| c["type"] == "image").count());
+    assert_eq!(images(&call("/v1/mcp", "pv_fork").await), 1, "outside lockdown a fork's picture is shown");
+    assert_eq!(images(&call("/v1/mcp?lockdown=1", "pv_1").await), 1, "a trusted preview's picture is shown in lockdown");
+    let locked = call("/v1/mcp?lockdown=1", "pv_fork").await;
+    assert_eq!((images(&locked), locked["content"][0]["text"].as_str()), (0, Some(roll_mcp::lockdown::WITHHELD_PICTURE)), "{locked}");
 }
 
 /// `roll_find`: a resource by part of its name, from each list the connection has, naming the read

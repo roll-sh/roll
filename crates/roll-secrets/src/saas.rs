@@ -243,13 +243,13 @@ impl Vendor {
         serde_json::to_value(self).expect("JSON")["target"].take()
     }
 
-    fn parse(vendor: &str, target: Json) -> Result<Vendor> {
+    pub(crate) fn parse(vendor: &str, target: Json) -> Result<Vendor> {
         let target = if target.is_null() { json!({}) } else { target };
         serde_json::from_value(json!({ "vendor": vendor, "target": target })).map_err(|e| Error::BadRequest(format!("a {vendor} target: {e}")))
     }
 
     /// The registration as roll keeps it: domains lowercased, every part checked.
-    fn checked(mut self) -> Result<Vendor> {
+    pub(crate) fn checked(mut self) -> Result<Vendor> {
         let bad = |what: &str| Err(Error::BadRequest(what.to_string()));
         match &mut self {
             Vendor::Sendgrid { scopes } => {
@@ -554,7 +554,7 @@ fn check_expiry(at: Option<i64>, now: i64) -> Result<()> {
 }
 
 /// Bound to the vendor and target too: a row pointed at another host doesn't open.
-fn aad(project: &str, id: &str, vendor: &str, target: &str) -> String {
+pub(crate) fn aad(project: &str, id: &str, vendor: &str, target: &str) -> String {
     format!("roll-secrets:saas:{project}:{id}:{vendor}:{target}")
 }
 

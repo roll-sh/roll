@@ -673,11 +673,16 @@ pub enum Secrets {
         out: std::path::PathBuf,
     },
     /// Back the project up, sealed to a public key (`keygen`): every environment, folder, value,
-    /// link, import, policy and required key. Written to stdout or --out.
+    /// link, import, policy and required key, the registrations links name (CAs' keys among
+    /// them), identities, syncs and settings. Written to stdout or --out. `backup verify` opens one
+    /// with its secret key and compares it with the project, writing nothing.
+    #[command(args_conflicts_with_subcommands = true)]
     Backup {
+        #[command(subcommand)]
+        cmd: Option<BackupCmd>,
         /// The recipient's public key (base64url X25519). It may start with `-`.
         #[arg(long, allow_hyphen_values = true)]
-        to: String,
+        to: Option<String>,
         #[arg(long)]
         out: Option<std::path::PathBuf>,
     },
@@ -705,6 +710,9 @@ pub enum Secrets {
         /// The secret key file (`keygen`).
         #[arg(long)]
         key: std::path::PathBuf,
+        /// Say what the restore would bring back and what stops it, writing nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Split the deployment key (`ROLL_SECRET_KEY`) or a backup's secret key into shares, any
     /// threshold of which give it back, and combine them again. On this machine only: nothing
@@ -1099,6 +1107,24 @@ pub enum Requests {
         bypass: bool,
     },
     Close { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum BackupCmd {
+    /// Open a backup with its secret key, here, and compare it with the project: counts, key
+    /// names, values and certificates by fingerprint, registrations it doesn't hold. Writes
+    /// nothing (the restore drill).
+    Verify {
+        /// A backup file (`backup --out`, or one from the schedule's bucket).
+        #[arg(required_unless_present = "latest_from_bucket")]
+        file: Option<std::path::PathBuf>,
+        /// The newest scheduled backup, read from the project's bucket.
+        #[arg(long, conflicts_with = "file")]
+        latest_from_bucket: bool,
+        /// The secret key file (`keygen`).
+        #[arg(long)]
+        key: std::path::PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3753,7 +3779,23 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
         },
         Secrets::Keygen { .. } | Secrets::Key(_) | Secrets::Unseal { .. } | Secrets::Find { .. } | Secrets::Recover { .. } | Secrets::Doctor | Secrets::Health { all: true, .. } | Secrets::Issuer { .. } | Secrets::Policy { .. } | Secrets::Agent(_) | Secrets::Mount(_) => unreachable!("handled before a project is picked"),
-        Secrets::Backup { to, out } => {
+        Secrets::Backup { cmd: Some(BackupCmd::Verify { file, latest_from_bucket, key }), .. } => {
+            let sealed = match (file, latest_from_bucket) {
+                (Some(file), _) => serde_json::from_str(&std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?)?,
+                (None, _) => c.call(Method::GET, &format!("{}/backup/latest", c.base()), None).await?,
+            };
+            let archive = open_backup(&key, &sealed)?;
+            let r = c.call(Method::POST, &format!("{}/backup/verify", c.base()), Some(archive)).await?;
+            if json_out {
+                return print(&r);
+            }
+            if let Some(k) = sealed["key"].as_str() {
+                println!("{k}: opened with the key.");
+            }
+            print_verified(&r, &c.project);
+        }
+        Secrets::Backup { to, out, .. } => {
+            let to = to.ok_or_else(|| anyhow::anyhow!("backup --to <public key> (`roll secrets keygen` makes one), or `backup verify`"))?;
             let v = c.call(Method::POST, &format!("{}/backup", c.base()), Some(json!({ "recipient": to }))).await?;
             let text = serde_json::to_string_pretty(&v)?;
             match out {
@@ -3789,16 +3831,48 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 _ => println!("The first one is due now."),
             }
         }
-        Secrets::Restore { file, key } => {
-            let secret = std::fs::read_to_string(&key).with_context(|| format!("reading {}", key.display()))?;
+        Secrets::Restore { file, key, dry_run } => {
             let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?)?;
-            let plain = crate::seal::open(&secret, v["context"].as_str().unwrap_or_default(), &v["sealed"])?;
-            let archive: Value = serde_json::from_slice(&plain)?;
+            let archive = open_backup(&key, &v)?;
+            if dry_run {
+                let r = c.call(Method::POST, &format!("{}/backup/verify", c.base()), Some(archive)).await?;
+                if json_out {
+                    return print(&r);
+                }
+                let n = |part: &str| r[part]["archive"].as_u64().unwrap_or(0);
+                println!(
+                    "A restore into {} would bring back {} environments, {} keys, {} registrations, {} identities (disabled) and {} syncs (paused). Nothing was written.",
+                    c.project,
+                    n("environments"),
+                    n("keys"),
+                    n("registrations"),
+                    n("identities"),
+                    n("syncs")
+                );
+                if r["registrations"]["live"].as_u64().unwrap_or(0) > 0 {
+                    println!("{} has {} registrations already: one of the same name is kept as it is, not restored.", c.project, r["registrations"]["live"]);
+                }
+                let left_out: Vec<String> = r["left_out"].as_array().into_iter().flatten().map(s).collect();
+                if !left_out.is_empty() {
+                    println!("Not in the backup, registered again by hand: {}", left_out.join(", "));
+                }
+                if r["live_keys"].as_u64().unwrap_or(0) > 0 {
+                    bail!("{} has {} keys: a restore goes only into a project with none", c.project, r["live_keys"]);
+                }
+                return Ok(());
+            }
             let r = c.call(Method::POST, &format!("{}/restore", c.base()), Some(archive)).await?;
             if json_out {
                 return print(&r);
             }
-            println!("Restored {} environments and {} keys into {}", r["environments"], r["secrets"], c.project);
+            println!(
+                "Restored {} environments, {} keys and {} registrations into {}",
+                r["environments"], r["secrets"], r["registrations"], c.project
+            );
+            let waiting = r["identities"].as_u64().unwrap_or(0) + r["syncs"].as_u64().unwrap_or(0);
+            if waiting > 0 {
+                println!("{} identities and {} syncs wait, disabled and paused: an admin resumes each, and acts as its maker from then on.", r["identities"], r["syncs"]);
+            }
             for w in r["warnings"].as_array().into_iter().flatten() {
                 eprintln!("warning: {}", s(w));
             }
@@ -5613,6 +5687,35 @@ async fn approve_table(api: &Api, all: &mut setup::File, f: &repo::Found) -> any
 }
 
 /// `2026-11-30 05:00 UTC`.
+/// A backup (`{sealed, context}`) opened with the secret key in `key`, on this machine.
+fn open_backup(key: &std::path::Path, v: &Value) -> anyhow::Result<Value> {
+    let secret = std::fs::read_to_string(key).with_context(|| format!("reading {}", key.display()))?;
+    let plain = crate::seal::open(&secret, v["context"].as_str().unwrap_or_default(), &v["sealed"])?;
+    Ok(serde_json::from_slice(&plain)?)
+}
+
+/// `backup verify`'s answer: each part's counts, then what's missing, changed or new, by name.
+fn print_verified(r: &Value, project: &str) {
+    println!("A backup of {} from {} (archive v{}), against {project}:", s(&r["project"]), utc_ms(r["at"].as_i64().unwrap_or(0)), r["v"]);
+    let names = |v: &Value| v.as_array().into_iter().flatten().map(s).collect::<Vec<_>>().join(", ");
+    for part in ["environments", "keys", "registrations", "identities", "syncs"] {
+        let d = &r[part];
+        println!("  {part}: {} in the backup, {} here", d["archive"], d["live"]);
+        for (what, field) in [("missing here", "missing"), ("changed since", "changed"), ("not in the backup", "extra")] {
+            let list = names(&d[field]);
+            if !list.is_empty() {
+                println!("    {what}: {list}");
+            }
+        }
+    }
+    if !names(&r["settings"]).is_empty() {
+        println!("  settings that differ: {}", names(&r["settings"]));
+    }
+    if !names(&r["left_out"]).is_empty() {
+        println!("  registrations a backup doesn't carry: {}", names(&r["left_out"]));
+    }
+}
+
 fn utc_ms(at: i64) -> String {
     chrono::DateTime::from_timestamp_millis(at).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default()
 }

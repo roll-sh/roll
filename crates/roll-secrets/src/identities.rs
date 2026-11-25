@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS aws_logins (
 CREATE INDEX IF NOT EXISTS aws_logins_at ON aws_logins (at);
 ";
 
-const IDENTITIES_MAX: i64 = 50;
+pub(crate) const IDENTITIES_MAX: i64 = 50;
 pub const TTL_MIN: i64 = 5;
 pub const TTL_MAX: i64 = 60;
 /// Logins a minute per identity and per client address (a CI matrix logs in many times at once).
@@ -404,6 +404,8 @@ impl Secrets {
             return Err(Error::Forbidden("identities are enabled by people, not tokens or logins".into()));
         }
         self.project(project)?;
+        // One restored from a backup has no maker: whoever enables it becomes it (backup.rs).
+        let maker = self.maker_of(caller)?;
         let now = self.db.now_ms()?;
         let (identity, live) = self.db.write(|c| {
             let name: Option<String> = c.query_row("SELECT name FROM identities WHERE id = ? AND project_id = ?", [id, project], |r| r.get(0)).optional()?;
@@ -414,7 +416,7 @@ impl Secrets {
                     c.query("SELECT grant_id FROM identity_logins WHERE identity = ? AND expires_at > ?", params![id, now], |r| r.get(0))?
                 }
                 false => {
-                    c.execute("UPDATE identities SET disabled_at = NULL, disabled_why = NULL WHERE id = ?", [id])?;
+                    c.execute("UPDATE identities SET disabled_at = NULL, disabled_why = NULL, created_by = CASE WHEN created_by = '' THEN ? ELSE created_by END WHERE id = ?", params![maker, id])?;
                     vec![]
                 }
             };

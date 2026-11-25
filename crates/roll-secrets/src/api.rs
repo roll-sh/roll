@@ -57,6 +57,8 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/suggestions"), get(suggestions))
         .route(&format!("{P}/backup"), post(backup))
         .route(&format!("{P}/backup/schedule"), get(backup_schedule).put(set_backup_schedule).delete(delete_backup_schedule))
+        .route(&format!("{P}/backup/verify"), post(verify_backup))
+        .route(&format!("{P}/backup/latest"), get(latest_backup))
         .route(&format!("{P}/restore"), post(restore))
         .route(&format!("{E}/secrets"), get(secrets))
         .route(&format!("{E}/decoys"), post(add_decoy))
@@ -573,6 +575,17 @@ async fn backup(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes)
     let context = crate::backup::context(&project);
     let sealed = blocking(s, move |s| s.backup(&project, &body.recipient, &c)).await?;
     Ok(secret_response(ok(json!({ "sealed": sealed, "context": context }))))
+}
+
+/// An opened archive against the live project, by names and counts; nothing written (admin).
+async fn verify_backup(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let archive: crate::backup::Archive = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.verify_backup(&project, archive, &c)).await?))
+}
+
+/// The newest scheduled backup, still sealed to its recipient (admin).
+async fn latest_backup(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(secret_response(ok(blocking(s, move |s| s.latest_backup(&project, &c)).await?)))
 }
 
 /// An opened archive into a project with no secrets yet (admin).
