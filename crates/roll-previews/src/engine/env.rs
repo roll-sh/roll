@@ -54,8 +54,7 @@ impl EnvSource for Engine {
         if resources.iter().any(|x| matches!(x.state, crate::ResourceState::Pending | crate::ResourceState::Resetting)) || (s.seed.is_some() && self.store.seed_needed(preview)?) {
             anyhow::bail!("its data is being prepared (branched, reset, seeded or masked)");
         }
-        let bytes: i64 = resources.iter().map(|x| x.bytes).sum();
-        if bytes as u64 > s.max_bytes {
+        if let Some(bytes) = self.over_cap(preview, s.max_bytes)? {
             anyhow::bail!("its branches hold {bytes} bytes, over the project's max_bytes: reset it to start again");
         }
         let spec = self

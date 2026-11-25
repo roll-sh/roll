@@ -2599,11 +2599,39 @@ fn named(rt: &Runtime, req: &Request) -> Option<(String, String)> {
 }
 
 async fn serve_named(rt: Arc<Runtime>, preview: String, service: String, req: Request) -> Response {
-    let mut resp = serve(rt, preview, service, req).await;
+    let mut resp = serve(rt.clone(), preview.clone(), service, req).await;
     // Kept out of search engines, whatever the service says (as Vercel's previews are): a public
     // preview, a share link or an earlier push's URL is never what a search should land on.
     resp.headers_mut().insert(header::HeaderName::from_static("x-robots-tag"), header::HeaderValue::from_static("noindex"));
+    if let Some(csp) = fork_policy(&rt, &preview) {
+        resp.headers_mut().append(header::CONTENT_SECURITY_POLICY, csp);
+    }
     resp
+}
+
+/// A fork's preview (code from someone who can't push, that a writer approved to run on the
+/// repo's data): its pages may load from and send to only the preview's own hosts, so its code
+/// can't carry what a reviewer's page shows to another site from their browser (its server's
+/// reach is `egress_forks`'). Inline scripts, `eval`, `data:` and `blob:` stay allowed, so its
+/// pages run as they did; a policy of the page's own still applies too (a browser keeps both).
+/// A navigation away isn't something a policy can stop.
+fn fork_policy(rt: &Runtime, preview: &str) -> Option<HeaderValue> {
+    if rt.store.row(preview).ok()?.trusted {
+        return None;
+    }
+    let mut own: Vec<String> = rt.store.services(preview).ok()?.into_iter().filter_map(|s| origin_of(&s.url)).collect();
+    own.sort();
+    own.dedup();
+    let own = own.join(" ");
+    HeaderValue::from_str(&format!("default-src 'self' {own} 'unsafe-inline' 'unsafe-eval' data: blob:; form-action 'self' {own}; base-uri 'self'")).ok()
+}
+
+/// A URL's scheme and host (and port), when it's a plain one.
+fn origin_of(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    let host = rest.split(['/', '?', '#']).next()?;
+    let plain = matches!(scheme, "http" | "https") && !host.is_empty() && host.bytes().all(|b| b.is_ascii_alphanumeric() || b"-.:".contains(&b));
+    plain.then(|| format!("{scheme}://{host}"))
 }
 
 /// A request for a preview's service: through its gate, then to the service.
@@ -2673,6 +2701,9 @@ fn crops_env(asks: &[crate::ports::CropAsk]) -> Vec<serde_json::Value> {
     let steps_ok = |c: &crate::ports::CropAsk| {
         c.steps.iter().all(|s| match s {
             crate::settings::Step::Click(sel) => crate::settings::selector_ok(sel),
+            // Typing only as roll writes it for a note: `x`s as many as theirs, never words.
+            crate::settings::Step::Type(sel, text) => crate::settings::selector_ok(sel) && (1..=200).contains(&text.len()) && text.bytes().all(|b| b == b'x'),
+            crate::settings::Step::Choose(sel, n) => crate::settings::selector_ok(sel) && (1..=crate::settings::MAX_OPTION).contains(n),
             crate::settings::Step::Press(k) => matches!(k.as_str(), "Enter" | "Escape"),
             _ => false,
         })
@@ -2824,6 +2855,15 @@ mod tests {
         s.read_to_string(&mut out).await.unwrap();
         assert!(out.ends_with("service saw /hello"), "{out}");
         assert!(out.contains("x-robots-tag: noindex"), "never indexed, whatever the service says: {out}");
+        assert!(!out.contains("content-security-policy"), "a trusted preview's pages keep only their own policy: {out}");
+        // A fork's: its pages may load from and send to only the preview's own hosts.
+        rt.store.update(&row.id, |r| r.trusted = false).unwrap();
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        s.write_all(format!("GET /hello HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nCookie: roll_access_{}={token}\r\nConnection: close\r\n\r\n", row.id).as_bytes()).await.unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).await.unwrap();
+        assert!(out.ends_with("service saw /hello") && out.contains("content-security-policy: default-src 'self' http://web-pr1-shop.preview.test 'unsafe-inline'"), "{out}");
+        rt.store.update(&row.id, |r| r.trusted = true).unwrap();
         // Automation: the project's bypass secret in a header, which the service never sees.
         let raw = |head: String| async move {
             let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -3158,10 +3198,16 @@ mod tests {
     fn crops_carry_how_their_reviewers_saw_the_page() {
         use crate::settings::Step;
         let ask = |note: &str, browser: Option<&str>, steps: Vec<Step>| crate::ports::CropAsk { note: note.into(), path: "/cart".into(), selector: "button.pay".into(), width: Some(390), height: Some(844), steps, browser: browser.map(String::from) };
-        let env = crops_env(&[ask("rv_1", None, vec![Step::Click("li > button".into()), Step::Press("Escape".into())]), ask("rv_2", Some("webkit-phone"), vec![]), ask("rv_3", None, vec![Step::Click("a[href='//x']{".into())])]);
-        assert_eq!(env[0], serde_json::json!({ "note": "rv_1", "path": "/cart", "selector": "button.pay", "width": 390, "height": 844, "steps": [{ "click": "li > button" }, { "press": "Escape" }] }));
-        assert_eq!(env.len(), 2, "WebKit's is the other browsers' run's");
+        let env = crops_env(&[
+            ask("rv_1", None, vec![Step::Click("li > button".into()), Step::Type("#coupon".into(), "xxxx".into()), Step::Choose("#size".into(), 2), Step::Press("Escape".into())]),
+            ask("rv_2", Some("webkit-phone"), vec![]),
+            ask("rv_3", None, vec![Step::Click("a[href='//x']{".into())]),
+            ask("rv_5", None, vec![Step::Type("#coupon".into(), "SAVE10".into())]),
+        ]);
+        assert_eq!(env[0], serde_json::json!({ "note": "rv_1", "path": "/cart", "selector": "button.pay", "width": 390, "height": 844, "steps": [{ "click": "li > button" }, { "type": ["#coupon", "xxxx"] }, { "choose": ["#size", 2] }, { "press": "Escape" }] }));
+        assert_eq!(env.len(), 3, "WebKit's is the other browsers' run's");
         assert_eq!(env[1]["steps"], serde_json::json!([]), "a step its checks refuse: none of them");
+        assert_eq!(env[2]["steps"], serde_json::json!([]), "typing only as roll writes it (x's), never words");
         assert!(crops_env(&[ask("rv_4", Some("firefox"), vec![])]).is_empty());
     }
 

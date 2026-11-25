@@ -461,8 +461,7 @@ impl Engine {
             }
             self.usage_read.lock().insert(r.id.clone(), now);
         }
-        let bytes: i64 = self.store.resources(&r.id)?.iter().map(|x| x.bytes).sum::<i64>() + self.store.pinned_usage(&r.id)?.iter().map(|x| x.0).sum::<i64>();
-        if bytes as u64 > s.max_bytes {
+        if let Some(bytes) = self.over_cap(&r.id, s.max_bytes)? {
             for svc in self.store.services(&r.id)? {
                 self.apps.sleep(&r.id, &svc.name).await;
             }
