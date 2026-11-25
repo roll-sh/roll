@@ -609,7 +609,7 @@ async fn an_agents_run_on_a_page_answers_what_it_showed_masked() {
     e.code.open(change("chg_try", 4));
     e.engine.pass().await.unwrap();
     let p = e.engine.store.row_by_change("chg_try").unwrap().unwrap();
-    *e.apps.tried.lock() = Some(roll_previews::ports::Tried { png: Some(b"\x89PNG...".to_vec()), status: 200, step_failed: None, text: "Cart\nkey sk_test_51Hx9abc".into(), errors: vec!["TypeError".into()] });
+    *e.apps.tried.lock() = Some(roll_previews::ports::Tried { png: Some(b"\x89PNG...".to_vec()), status: 200, step_failed: None, text: "Cart\nkey sk_test_51Hx9abc".into(), errors: vec!["TypeError".into()], login: None });
     let call = |req: axum::http::Request<axum::body::Body>| {
         let router = roll_previews::api::router(e.engine.clone());
         async move {
