@@ -300,6 +300,51 @@ async fn a_forward_carries_the_clients_address_to_the_owner() {
     assert_eq!(r.status(), 401, "a client's own x-roll-code-client");
 }
 
+/// The deployment's key on every node of the fleet: a derivable browser key's secret, sealed
+/// where it was made, opens on whichever node owns the cluster.
+fn sealed(c: &mut SearchConfig) {
+    c.sealer = search_control::Sealer::from_secret(SECRET);
+}
+
+/// A derived browser key's request through a node that doesn't own its cluster: forwarded to the
+/// owner, which verifies it there and answers with its narrowed view.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_derived_key_is_verified_and_narrowed_on_the_owner() {
+    let leases = MemoryStore::new();
+    let objects = search_store::test_objects("fleet-derived");
+    let catalog = Arc::new(search_control::store::Store::memory().unwrap());
+    let a = node_with("a", &leases, &objects, &catalog, sealed).await;
+    let b = node_with("b", &leases, &objects, &catalog, sealed).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while a.cluster.nodes().len() != 2 || b.cluster.nodes().len() != 2 {
+        assert!(tokio::time::Instant::now() < deadline, "the nodes never saw each other");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let http = reqwest::Client::new();
+    let (s, c) = call(&http, reqwest::Method::POST, format!("{}/v1/search/clusters", a.api), None, Some(json!({"name": "shop"}))).await;
+    assert_eq!(s, 200, "{c}");
+    let path = format!("{}/v1/search/clusters/{}", a.api, c["id"].as_str().unwrap());
+    let bulk = [("products", "1", "acme", true), ("products", "2", "globex", true), ("products", "3", "acme", false), ("products-archive", "4", "acme", true)]
+        .iter()
+        .map(|(i, id, t, public)| format!("{}\n{}\n", json!({"index": {"_index": i, "_id": id}}), json!({"tenant": t, "public": public})))
+        .collect::<String>();
+    let (s, r) = call(&http, reqwest::Method::POST, format!("{path}/request"), None, Some(json!({"method": "POST", "path": "/_bulk?refresh=true", "body": bulk}))).await;
+    assert!(s == 200 && r["status"] == 200, "{r}");
+    let (s, parent) = call(&http, reqwest::Method::POST, format!("{path}/browser-keys"), None, Some(json!({"name": "saas", "indices": ["products*"], "filter": {"term": {"public": true}}, "derivable": true}))).await;
+    assert_eq!(s, 200, "{parent}");
+    let exp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 600;
+    let payload = json!({"key": parent["id"], "cluster": "shop", "exp": exp, "indices": ["products"], "filter": {"term": {"tenant": "acme"}}, "user": "acme"});
+    let derived = search_es::xpack::security::derived::sign(parent["signing_secret"].as_str().unwrap(), &payload.to_string());
+    let key = search_control::cluster::key("shop");
+    let (_, other) = if a.cluster.owns(&key) { (&a, &b) } else { (&b, &a) };
+    let r = http.post(format!("{}/products*/_search", other.rest)).header("authorization", format!("ApiKey {derived}")).json(&json!({"query": {"match_all": {}}})).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    let ids: Vec<&str> = v["hits"]["hits"].as_array().unwrap().iter().filter_map(|h| h["_id"].as_str()).collect();
+    assert_eq!(ids, ["1"], "products only, acme's only, public only: {v}");
+    assert!(other.control.node.loaded().is_empty(), "verified on the owner");
+}
+
 /// A linked remote owned by another node is searched on that node through the signed forward:
 /// roll's own request, which the remote's IP allowlist doesn't filter, and which loads the
 /// remote only on its owner.

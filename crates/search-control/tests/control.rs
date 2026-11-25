@@ -1192,6 +1192,17 @@ async fn derived_keys_narrow_their_parent_and_die_with_it() {
     let text = json!(audit).to_string();
     assert!(!text.contains("::roll_sealed::") && !text.contains(&secret), "no secret in the audit log");
 
+    // A runtime field and a flattened one on `products`, and a data stream the parent's
+    // `products*` reaches, whose backing index (`.ds-…`) no pattern names.
+    for (m, p, b) in [
+        ("PUT", "/products/_mapping", json!({"runtime": {"r": {"type": "keyword", "script": "emit('x')"}}, "properties": {"labels": {"type": "flattened"}}})),
+        ("PUT", "/_index_template/plogs", json!({"index_patterns": ["products-logs*"], "data_stream": {}, "template": {"mappings": {"properties": {"host": {"type": "keyword"}}}}})),
+        ("POST", "/products-logs/_doc?refresh=true", json!({"@timestamp": "2026-11-25T00:00:00Z", "host": "a"})),
+    ] {
+        let r = e.post(&format!("{path}/request"), json!({"method": m, "path": p, "body": b})).await;
+        assert!(r["status"].as_u64() < Some(300), "{p}: {r}");
+    }
+
     // Every widening, and every way of not being the parent's, is refused; until the signature
     // verifies, all alike.
     let unverified = "\"API key: derived key refused\"";
@@ -1215,6 +1226,9 @@ async fn derived_keys_narrow_their_parent_and_die_with_it() {
         // Expanding terms, built as the owner's filter, needs the parent's allow_expensive_queries.
         (sign(&secret, with("filter", json!({"bool": {"filter": [{"prefix": {"tenant": "ac"}}]}}))), "allow_expensive_queries"),
         (sign(&secret, with("filter", json!({"range": {"tenant.keyword": {"gte": "a"}}}))), "a range on a text or keyword field"),
+        (sign(&secret, with("filter", json!({"range": {"labels.size": {"gte": "a"}}}))), "a range on a text or keyword field"),
+        (sign(&secret, json!({"key": pid, "cluster": "shop", "exp": exp, "indices": ["products-logs"], "filter": {"range": {"host": {"gte": "a"}}}})), "a range on a text or keyword field"),
+        (sign(&secret, with("filter", json!({"term": {"r": "x"}}))), "a query on a runtime field"),
         (sign(&secret, with("exp", json!(unix_now() + 2 * 86_400))), "ahead"),
         (sign(&secret, with("exp", json!(unix_now() - 120))), "expired"),
         (sign(&secret, json!({"key": pid, "cluster": "shop", "exp": exp, "user": "acme", "rate_limit": {"per_minute": 101}})), "share"),

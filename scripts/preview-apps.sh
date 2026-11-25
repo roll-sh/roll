@@ -546,10 +546,18 @@ for _ in $(seq 1 120); do
 done
 GH_SAID=$(gh_log | jq_ "'%s; %d comment(s) on #7, %d edit(s)' % ('/'.join(s['state'] for s in d if s['kind'] == 'status' and s['context'] == 'roll/preview' and s['sha'] == '$CART'), sum(1 for c in d if c['kind'] == 'comment' and c['number'] == 7), sum(1 for c in d if c['kind'] == 'edit'))")
 case "$GH_SAID" in *success\;*" 1 comment(s) on #7"*) ;; *) echo "the approved fork's preview should be roll/preview success with one comment on #7: $GH_SAID"; gh_log; exit 1;; esac
+# Its pages held to its own hosts in a reviewer's browser (roll apps' #1032, as previews' own proxy
+# does since #963): a Content-Security-Policy on its HTML, beside any of the app's own. The
+# same-repo pull request's preview (trusted) gets none.
+csp_of() { curl -sS -D - -o /dev/null -H "Host: $(api GET "/v1/previews/$1" | jq_ "d['services'][0]['url']" | sed -E 's#^https?://##; s#/.*##; s#:.*##')" "http://127.0.0.1:${PORTS}080/" --max-time 60 | python3 -c "import sys; print(sum(1 for l in sys.stdin if l.lower().startswith('content-security-policy:') and \"default-src 'self'\" in l))"; }
+FORK_CSP=$(csp_of "$FORK_ID")
+SAME_CSP=$(csp_of "$(pull_preview cart | python3 -c "import sys,ast; print(ast.literal_eval(sys.stdin.read())['id'])")")
+[ "$FORK_CSP $SAME_CSP" = "1 0" ] || { echo "a fork's pv- pages should carry roll's Content-Security-Policy and a trusted one's none (fork, same repo): $FORK_CSP $SAME_CSP"; exit 1; }
+PR_CSP="a fork's pages held to its own hosts (Content-Security-Policy), the same repo's not"
 pr_event closed 7 cart "$CART" 2 "$HOOK3" >/dev/null
 for _ in $(seq 1 120); do [ -z "$(api GET "/v1/previews?project=$PRJ" | jq_ "''.join(p['id'] for p in d if p['branch'] == 'pull/7')")" ] && break; sleep 0.5; done
 [ -z "$(api GET "/v1/previews?project=$PRJ" | jq_ "''.join(p['id'] for p in d if p['branch'] == 'pull/7')")" ] || { echo "closing the fork's pull request should delete its preview"; exit 1; }
-PR_FORK="waited for an approval with nothing deployed (another head refused, 409), ran once approved, deleted when closed"
+PR_FORK="waited for an approval with nothing deployed (another head refused, 409), ran once approved ($PR_CSP), deleted when closed"
 pr_event closed 5 cart "$CART" 1 >/dev/null
 for _ in $(seq 1 120); do [ "$(pull_preview cart)" = None ] && break; sleep 0.5; done
 [ "$(pull_preview cart)" = None ] || { echo "closing the pull request should delete its preview"; exit 1; }
