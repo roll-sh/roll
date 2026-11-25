@@ -5381,7 +5381,10 @@ async fn edit(c: &Client<'_>, env: &str, request: bool, json_out: bool) -> anyho
     let dir = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).filter(|d| d.is_dir()).unwrap_or_else(std::env::temp_dir);
     let file = tempfile::Builder::new().prefix("roll-secrets-").suffix(".env").tempfile_in(dir)?;
     std::fs::write(file.path(), &text)?;
-    let editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).unwrap_or_else(|_| "vi".into());
+    let editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).unwrap_or_else(|_| if cfg!(windows) { "notepad" } else { "vi" }.into());
+    #[cfg(windows)]
+    let status = crate::sys::shell(&format!("{editor} \"{}\"", file.path().display())).status().with_context(|| format!("running {editor}"))?;
+    #[cfg(not(windows))]
     let status = std::process::Command::new("sh").arg("-c").arg(format!("{editor} \"$1\"")).arg("sh").arg(file.path()).status().with_context(|| format!("running {editor}"))?;
     anyhow::ensure!(status.success(), "{editor} exited with {status}: nothing applied");
     let edited = std::fs::read_to_string(file.path())?;
@@ -5867,7 +5870,11 @@ async fn render_watch(c: &Client<'_>, env: &str, file: &str, tpl: &str, out: &st
                 text = next;
                 eprintln!("roll secrets render: {which} changed, wrote {out}");
                 if let Some(cmd) = exec {
-                    match tokio::process::Command::new("sh").arg("-c").arg(cmd).status().await {
+                    #[cfg(windows)]
+                    let ran = tokio::process::Command::from(crate::sys::shell(cmd)).status().await;
+                    #[cfg(not(windows))]
+                    let ran = tokio::process::Command::new("sh").arg("-c").arg(cmd).status().await;
+                    match ran {
                         Ok(st) if st.success() => {}
                         Ok(st) => eprintln!("roll secrets render: {cmd} exited with {st}"),
                         Err(e) => eprintln!("roll secrets render: running {cmd}: {e}"),
@@ -6529,7 +6536,7 @@ pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
     if streams.any() {
         return run_masked(&r, &env, streams).await;
     }
-    let mut cmd = std::process::Command::new(&r.command[0]);
+    let mut cmd = std::process::Command::new(crate::sys::program(&r.command[0]));
     cmd.args(&r.command[1..]).envs(env.into_iter().map(|v| (v.name, v.value)));
     #[cfg(unix)]
     {

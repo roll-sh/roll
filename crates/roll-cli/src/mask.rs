@@ -261,7 +261,7 @@ pub struct Running {
 pub fn spawn(command: &[String], env: &[(String, String)], conceal: &[&str], streams: Streams) -> std::io::Result<Running> {
     let masker = || Masker::new(conceal.iter().copied());
     let streams = if masker().is_some() { streams } else { Streams { stdout: false, stderr: false } };
-    let mut cmd = tokio::process::Command::new(&command[0]);
+    let mut cmd = tokio::process::Command::new(crate::sys::program(&command[0]));
     cmd.args(&command[1..]).envs(env.iter().cloned());
     if streams.stdout {
         cmd.stdout(Stdio::piped());

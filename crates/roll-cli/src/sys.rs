@@ -34,6 +34,36 @@ pub fn config_base() -> anyhow::Result<PathBuf> {
     Ok(home().context("HOME isn't set")?.join(".config"))
 }
 
+/// What to start for a command's name: as given, except that on Windows a bare name (`npm`) is
+/// looked up with `%PATHEXT%` (`npm.cmd`), as a shell does; std's `Command` finds only `.exe`.
+pub fn program(name: &str) -> PathBuf {
+    #[cfg(windows)]
+    if let Some(found) = on_path(name) {
+        return found;
+    }
+    PathBuf::from(name)
+}
+
+#[cfg(windows)]
+fn on_path(name: &str) -> Option<PathBuf> {
+    let p = std::path::Path::new(name);
+    if p.extension().is_some() || p.components().count() != 1 {
+        return None;
+    }
+    let exts = std::env::var("PATHEXT").ok().filter(|e| !e.is_empty()).unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
+    std::env::split_paths(&std::env::var_os("PATH")?).find_map(|dir| exts.split(';').filter(|e| !e.is_empty()).map(|e| dir.join(format!("{name}{e}"))).find(|c| c.is_file()))
+}
+
+/// A command line for the shell: `sh -c` on Linux and macOS, `cmd /C` on Windows (the line as
+/// written, unquoted).
+#[cfg(windows)]
+pub fn shell(line: &str) -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+    let mut c = std::process::Command::new("cmd");
+    c.arg("/C").raw_arg(line);
+    c
+}
+
 /// This machine's name, if it has one.
 pub fn hostname() -> Option<String> {
     #[cfg(unix)]
