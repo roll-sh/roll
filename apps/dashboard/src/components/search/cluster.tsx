@@ -576,7 +576,7 @@ function IndicesTab({ cluster, samples, onSamples, onOpenConsole, onManageKeys }
             <button onClick={() => setImporting(true)} disabled={importing} className={btn} title="Index a JSON, NDJSON or CSV file" aria-label="Import">
               <FileUp className="size-3.5" /> <span className="hidden sm:inline">Import</span>
             </button>
-            <button onClick={() => setMigrating(true)} disabled={migrating} className={btn} title="Migrate from Elasticsearch / OpenSearch" aria-label="Migrate from Elasticsearch / OpenSearch">
+            <button onClick={() => setMigrating(true)} disabled={migrating} className={btn} title="Migrate from Elasticsearch, OpenSearch, Algolia, Typesense or Meilisearch" aria-label="Migrate into roll">
               <CloudDownload className="size-3.5" /> <span className="hidden sm:inline">Migrate</span>
             </button>
             <button onClick={() => setSampling(true)} disabled={sampling} className={btn} title="Load a generated dataset and try queries on it" aria-label="Sample data">

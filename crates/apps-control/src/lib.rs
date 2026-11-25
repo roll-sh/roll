@@ -19,6 +19,7 @@ pub mod attacks;
 pub mod attack_mode;
 pub mod advice;
 pub mod build_steps;
+pub mod source;
 pub mod visitor_token;
 pub mod backups;
 pub mod browser;
@@ -1668,6 +1669,10 @@ impl Apps {
             if let Ok(Some(key)) = self.db(move |s| s.deployment_upload(&id)).await {
                 self.drop_upload(&d.id, &key).await;
             }
+            let id = d.id.clone();
+            if let Ok(Some(key)) = self.db(move |s| s.deployment_source(&id)).await {
+                self.delete_upload(&key).await;
+            }
             self.logs.delete(&format!("build:{}", d.id)).await;
         }
         let sid = id.to_string();
@@ -3184,7 +3189,15 @@ impl Apps {
     async fn resolve_vars_as(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, deployment: &str, read_refs: bool, mint: bool) -> Result<ResolvedVars> {
         let mut vars: BTreeMap<String, (String, &'static str)> = BTreeMap::new();
         let port = svc.run.port.unwrap_or(8080);
-        let run = svc.for_env(env).map_or_else(|_| svc.run.clone(), |s| s.run);
+        // The deployment's own size (a rollback's, roll.toml's), else what the next deploy takes.
+        let run = match deployment.is_empty() {
+            false => {
+                let d = deployment.to_string();
+                self.db(move |s| s.deployment(&d)).await.ok().map(|d| d.run)
+            }
+            true => None,
+        }
+        .unwrap_or_else(|| svc.for_env(env).map_or_else(|_| svc.run.clone(), |s| s.run));
         let roll = [
             ("PORT", port.to_string()),
             // The app server's workers for its instance's size (Heroku's): gunicorn, uvicorn and
@@ -3502,15 +3515,17 @@ impl Apps {
                 Some(v) => format!("{v}{sep}{ours}"),
                 None => ours.to_string(),
             };
+            // Joined to the app's own value, which keeps its source: a secret's stays one, so its
+            // value is still redacted where the runtime prints it (a JVM's "Picked up …").
+            let joined = |var: &str, ours: &str, sep: &str, first: bool, vars: &mut BTreeMap<String, (String, &'static str)>| {
+                let src = vars.get(var).map_or("roll", |(_, s)| *s);
+                let v = join(vars.get(var), ours, sep, first);
+                vars.insert(var.into(), (v, src));
+            };
             match agent.as_deref() {
-                Some("node") => {
-                    let v = join(vars.get("NODE_OPTIONS"), &format!("--require {}", apps_build::otel::NODE_REQUIRE), " ", false);
-                    vars.insert("NODE_OPTIONS".into(), (v, "roll"));
-                }
-                Some("python") => {
-                    let v = join(vars.get("PYTHONPATH"), apps_build::otel::PYTHON_PATH, ":", true);
-                    vars.insert("PYTHONPATH".into(), (v, "roll"));
-                }
+                Some("node") => joined("NODE_OPTIONS", &format!("--require {}", apps_build::otel::NODE_REQUIRE), " ", false, &mut vars),
+                Some("python") => joined("PYTHONPATH", apps_build::otel::PYTHON_PATH, ":", true, &mut vars),
+                Some("java") => joined("JAVA_TOOL_OPTIONS", &format!("-javaagent:{}", apps_build::otel::JAVA_AGENT), " ", false, &mut vars),
                 _ => {}
             }
         }
@@ -4826,8 +4841,10 @@ impl ResolvedVars {
             .iter()
             // `ROLL_AWAKE_URL` is roll's own on every web service: its arrival isn't a change of
             // the service's to deploy (each deployment gets it).
-            // `WEB_CONCURRENCY` follows `cpu` and `memory_mb`, which are settings a deploy already says.
-            .filter(|(k, _)| !matches!(k.as_str(), "ROLL_DEPLOYMENT" | "ROLL_GIT_COMMIT" | "ROLL_GIT_BRANCH" | "ROLL_AWAKE_URL" | "WEB_CONCURRENCY"))
+            .filter(|(k, _)| !matches!(k.as_str(), "ROLL_DEPLOYMENT" | "ROLL_GIT_COMMIT" | "ROLL_GIT_BRANCH" | "ROLL_AWAKE_URL"))
+            // roll's `WEB_CONCURRENCY` follows `cpu` and `memory_mb`, settings a deploy already says;
+            // the service's own value is a change like any.
+            .filter(|(k, _)| !(k == "WEB_CONCURRENCY" && self.sources.get(k.as_str()).copied() == Some("roll")))
             // A placeholder is new random text each time it's made: its binding decides.
             .map(|(k, v)| (k.clone(), self.placeholders.get(k).map(|b| format!("placeholder:{b}")).or_else(|| self.ref_texts.get(k).cloned()).unwrap_or_else(|| v.clone())))
             .collect()

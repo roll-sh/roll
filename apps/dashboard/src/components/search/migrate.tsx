@@ -9,15 +9,21 @@ import {
   destProblem,
   displayHost,
   droppedByReason,
+  isSaas,
   LOST,
   mergeStarted,
   migrateApi,
+  migrateRefusal,
+  notMappedCount,
+  notMappedGroups,
   partial,
+  plainHttpWarning,
   queuedPicks,
   QUEUED_RETRY_MS,
   queueRetryDelay,
   retryableStart,
   shouldStartQueued,
+  SOURCES,
   sourceFrom,
   sourceProblem,
   taskPoll,
@@ -26,7 +32,9 @@ import {
   type MigrateInspect,
   type MigrateRequest,
   type MigrateStarted,
+  type SaasPlan,
   type SourceForm,
+  type SourceKind,
   type TaskProgress,
 } from "@/lib/search-migrate";
 import { Field, Segmented } from "../redis/shared";
@@ -48,20 +56,75 @@ interface Pick {
 
 type AliasState = { alias: string; busy?: boolean; done?: boolean; error?: string };
 
+const KIND_WORDS: Record<string, string> = { setting: "Settings", field: "Fields", replica: "Replicas", synonym: "Synonyms", rule: "Rules" };
+
+/** What an Algolia, Typesense or Meilisearch index becomes, and what didn't map. */
+function PlanSummary({ plan, open }: { plan: SaasPlan; open?: boolean }) {
+  const groups = notMappedGroups(plan);
+  const n = notMappedCount(plan);
+  return (
+    <div className="space-y-1.5 text-[12px]">
+      <p className="text-muted">
+        <span className="font-mono">{plan.id_field}</span> as <span className="font-mono">_id</span> · {plan.mappings} mapped fields · {plan.synonyms} synonyms · {plan.rules} rules · search template{" "}
+        <span className="font-mono text-fg">{plan.search_template}</span>
+        {plan.sort_templates && Object.keys(plan.sort_templates).length > 0 && ` · ${Object.keys(plan.sort_templates).length} replica sorts`}
+      </p>
+      {(n > 0 || plan.notes.length > 0) && (
+        <details className="group" open={open}>
+          <summary className="cursor-pointer text-subtle transition hover:text-fg">
+            {n === 0 ? "Everything mapped" : `${n} ${n === 1 ? "thing" : "things"} didn't map`}
+            {plan.notes.length > 0 && ` · ${plan.notes.length} ${plan.notes.length === 1 ? "note" : "notes"}`}
+          </summary>
+          <div className="mt-2 space-y-2">
+            {groups.map((g) => (
+              <div key={g.kind}>
+                <p className="text-[11px] text-subtle">{KIND_WORDS[g.kind]}</p>
+                <ul className="space-y-1">
+                  {g.items.map((m, i) => (
+                    <li key={`${m.name}-${i}`}>
+                      <span className="break-all font-mono text-[11px] text-fg">{m.name}</span> <span className="text-muted">— {m.reason}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+            {plan.not_mapped_more > 0 && <p className="text-subtle">and {formatCount(plan.not_mapped_more)} more.</p>}
+            {plan.notes.length > 0 && (
+              <ul className="list-disc space-y-1 pl-4 text-muted">
+                {plan.notes.map((note) => (
+                  <li key={note}>{note}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </details>
+      )}
+    </div>
+  );
+}
+
 /**
- * Migrate indices from Elastic Cloud, a self-hosted Elasticsearch or OpenSearch: the remote's
- * URL and credentials go to roll (which reads the remote, never the browser), its indices are
- * listed with their size, the picked ones are created on roll with their mappings, settings and
- * aliases and copied by reindex tasks this panel follows, with cancel; once a copy is done an
- * alias can carry the remote's index name.
+ * Migrate indices from Elastic Cloud, a self-hosted Elasticsearch or OpenSearch, Algolia,
+ * Typesense or Meilisearch: the source's URL (or Algolia's application id) and credentials go to
+ * roll (which reads the source, never the browser), its indices are listed with their size, the
+ * picked ones are created on roll and copied by reindex tasks this panel follows, with cancel;
+ * once a copy is done an alias can carry the source's index name. Algolia, Typesense and
+ * Meilisearch indices are mapped onto roll's (mappings, synonyms, query rules, a search
+ * template), and what didn't map is shown before the copy starts.
  */
 export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluster: SearchCluster; existing: string[]; onClose: () => void; onChanged: () => void }) {
-  const [form, setForm] = useState<SourceForm>({ host: "", auth: "api_key", apiKey: "", username: "", password: "" });
+  const [form, setForm] = useState<SourceForm>({ kind: "elasticsearch", host: "", appId: "", auth: "api_key", apiKey: "", username: "", password: "" });
+  /** Algolia, Typesense, Meilisearch: what the picked indices become (a `dry_run`), shown
+   * before the copy starts. */
+  const [plans, setPlans] = useState<MigrateStarted[] | null>(null);
+  const kind: SourceKind = form.kind ?? "elasticsearch";
+  const saas = isSaas(kind);
+  const meta = SOURCES.find((x) => x.value === kind) ?? SOURCES[0];
   const [remote, setRemote] = useState<MigrateInspect | null>(null);
   const [picks, setPicks] = useState<Record<string, Pick>>({});
   const [rps, setRps] = useState("");
   const [size, setSize] = useState("");
-  const [busy, setBusy] = useState<"inspect" | "start" | null>(null);
+  const [busy, setBusy] = useState<"inspect" | "start" | "review" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [started, setStarted] = useState<MigrateStarted[] | null>(null);
   const [progress, setProgress] = useState<Record<string, TaskProgress>>({});
@@ -103,6 +166,7 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
     try {
       const r = await migrateApi.inspect(cluster.id, sourceFrom(form));
       setRemote(r);
+      setPlans(null);
       setPicks(Object.fromEntries(r.indices.map((i) => [i.index, { on: false, dest: defaultDest(i.index, taken) }])));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -122,12 +186,27 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
   const optionsProblem =
     rpsNum !== undefined && !(rpsNum > 0) ? "Documents per second is a positive number." : sizeNum !== undefined && !(Number.isInteger(sizeNum) && sizeNum >= 1 && sizeNum <= 10000) ? "The batch size is 1 to 10,000 documents." : null;
 
+  const picked = () => chosen.map((i) => ({ index: i.index, dest: picks[i.index].dest.trim() }));
+
+  const review = async () => {
+    setBusy("review");
+    setError(null);
+    try {
+      const r = await migrateApi.start(cluster.id, { source: sourceFrom(form), indices: picked(), size: sizeNum, dry_run: true });
+      setPlans(r.indices);
+    } catch (e) {
+      setError(migrateRefusal(e instanceof ApiError ? e.status : undefined, e instanceof Error ? e.message : String(e)));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const start = async () => {
     setBusy("start");
     setError(null);
     try {
       const options = { source: sourceFrom(form), requests_per_second: rpsNum, size: sizeNum };
-      const r = await migrateApi.start(cluster.id, { ...options, indices: chosen.map((i) => ({ index: i.index, dest: picks[i.index].dest.trim() })) });
+      const r = await migrateApi.start(cluster.id, { ...options, indices: picked() });
       setStarted(r.indices);
       // The remote's key leaves the page; it's kept in memory only while copies wait.
       waiting.current = r.indices.some((x) => x.queued) ? options : null;
@@ -140,7 +219,7 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
       setAliases(offers);
       onChanged();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(migrateRefusal(e instanceof ApiError ? e.status : undefined, e instanceof Error ? e.message : String(e)));
     } finally {
       setBusy(null);
     }
@@ -262,12 +341,13 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
     setAliases({});
     setRemoved({});
     setRemote(null);
+    setPlans(null);
     reported.current = false;
   };
 
   return (
     <Panel
-      title="Migrate from Elasticsearch / OpenSearch"
+      title="Migrate into roll"
       className="rise"
       aside={
         <button onClick={onClose} className={btn} aria-label="Close migration">
@@ -279,36 +359,40 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
         {!remote && (
           <>
             <p className="text-[13px] text-muted">
-              Copy indices from Elastic Cloud, a self-hosted Elasticsearch or OpenSearch into <span className="font-mono text-fg">{cluster.name}</span>. roll&apos;s servers read
-              the other cluster page by page, as a reindex from remote; your browser never connects to it.
+              Copy indices into <span className="font-mono text-fg">{cluster.name}</span>. roll&apos;s servers read the source page by page; your browser never connects to it.
+              {saas && " Its settings, synonyms and rules are mapped onto roll's, and you see what didn't map before the copy starts."}
             </p>
-            <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
-              <Field label="Cluster URL" hint={form.host.trim() ? `roll calls ${displayHost(form.host)}` : undefined}>
-                <input
-                  value={form.host}
-                  onChange={(e) => set({ host: e.target.value })}
-                  placeholder="https://my-deployment.es.us-east-1.aws.elastic.cloud"
-                  className={`${input} w-full font-mono`}
-                  spellCheck={false}
-                  autoComplete="off"
-                />
+            <Field label="Source">
+              <div className="overflow-x-auto">
+                <Segmented value={kind} options={SOURCES.map((x) => ({ label: x.label, value: x.value }))} onChange={(k) => set({ kind: k, auth: isSaas(k) ? "api_key" : form.auth })} />
+              </div>
+            </Field>
+            {kind === "algolia" ? (
+              <Field label="Application ID">
+                <input value={form.appId ?? ""} onChange={(e) => set({ appId: e.target.value })} placeholder="YourAppID" className={`${input} w-full font-mono`} spellCheck={false} autoComplete="off" />
               </Field>
-              <Field label="Sign in with">
-                <Segmented value={form.auth} options={AUTH} onChange={(auth) => set({ auth })} />
-              </Field>
-            </div>
+            ) : (
+              <div className={`grid gap-3 ${saas ? "" : "sm:grid-cols-[minmax(0,1fr)_auto]"}`}>
+                <Field label={saas ? `${meta.label} URL` : "Cluster URL"} hint={form.host.trim() ? `roll calls ${displayHost(form.host)}` : undefined}>
+                  <input value={form.host} onChange={(e) => set({ host: e.target.value })} placeholder={meta.placeholder} className={`${input} w-full font-mono`} spellCheck={false} autoComplete="off" />
+                </Field>
+                {!saas && (
+                  <Field label="Sign in with">
+                    <Segmented value={form.auth} options={AUTH} onChange={(auth) => set({ auth })} />
+                  </Field>
+                )}
+              </div>
+            )}
+            {plainHttpWarning(form) && <p className="text-[12px] text-danger">{plainHttpWarning(form)}</p>}
             {form.auth === "api_key" && (
               <div className="space-y-1">
                 <Field label="API key">
                   <input type="password" value={form.apiKey} onChange={(e) => set({ apiKey: e.target.value })} className={`${input} w-full font-mono`} autoComplete="off" spellCheck={false} />
                 </Field>
-                <p className="text-[11px] text-subtle">
-                  Its encoded value. It needs the <span className="font-mono">monitor</span> cluster privilege, and <span className="font-mono">read</span> and{" "}
-                  <span className="font-mono">view_index_metadata</span> on the indices to copy.
-                </p>
+                <p className="text-[11px] text-subtle">{meta.keyHint}</p>
               </div>
             )}
-            {form.auth === "basic" && (
+            {!saas && form.auth === "basic" && (
               <div className="grid gap-3 sm:grid-cols-2">
                 <Field label="Username">
                   <input value={form.username} onChange={(e) => set({ username: e.target.value })} className={`${input} w-full font-mono`} autoComplete="off" spellCheck={false} />
@@ -323,13 +407,45 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
                 <CloudDownload className="size-3.5" strokeWidth={1.5} /> List indices
               </button>
               <span className={`text-[12px] ${problem && form.host.trim() ? "text-danger" : "text-subtle"}`}>
-                {busy === "inspect" ? <span className="shimmer">Reading the remote cluster…</span> : problem && form.host.trim() ? problem : "Sent to roll for this migration only: never stored, never shown again."}
+                {busy === "inspect" ? (
+                  <span className="shimmer">Reading {saas ? meta.label : "the remote cluster"}…</span>
+                ) : problem && (form.host.trim() || form.appId?.trim()) ? (
+                  problem
+                ) : (
+                  "Sent to roll for this migration only: never stored, never shown again."
+                )}
               </span>
             </div>
           </>
         )}
 
-        {remote && !started && (
+        {remote && !started && plans && (
+          <div className="space-y-3">
+            <p className="text-[13px] text-muted">What the picked indices become on roll. Nothing is made until you start.</p>
+            {plans.map((p) => (
+              <div key={p.index} className="space-y-2 rounded-lg border border-line px-4 py-3">
+                <p className="flex min-w-0 items-center gap-2 font-mono text-[12px]">
+                  <span className="truncate text-muted">{p.index}</span>
+                  <ArrowRight className="size-3.5 shrink-0 text-subtle" strokeWidth={1.5} />
+                  <span className="truncate">{p.dest}</span>
+                </p>
+                {p.error && <p className="break-words font-mono text-[11px] text-danger">{p.error}</p>}
+                {p.restart && <p className="text-[12px] text-muted">An earlier copy of it is on roll: starting copies into it again (documents overwritten by id).</p>}
+                {p.plan && <PlanSummary plan={p.plan} open />}
+              </div>
+            ))}
+            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line pt-3">
+              <button onClick={() => setPlans(null)} className={btn}>
+                Back
+              </button>
+              <button onClick={start} disabled={busy !== null || plans.every((p) => p.error)} className={primary}>
+                {busy === "start" ? <span className="shimmer">Starting…</span> : `Migrate ${chosen.length} ${chosen.length === 1 ? "index" : "indices"}`}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {remote && !started && !plans && (
           <>
             <div className="flex flex-wrap items-center justify-between gap-2">
               <p className="min-w-0 truncate font-mono text-[12px] text-muted">
@@ -341,7 +457,7 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
               </button>
             </div>
             {remote.indices.length === 0 ? (
-              <p className="text-[13px] text-muted">The remote cluster has no open indices to copy.</p>
+              <p className="text-[13px] text-muted">{saas ? "The source has no indices to copy." : "The remote cluster has no open indices to copy."}</p>
             ) : (
               <div className="overflow-x-auto rounded-lg border border-line">
                 <table className="w-full text-[12px]">
@@ -385,7 +501,9 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
                           <td className="px-3 py-1.5 text-right font-mono tabular-nums">{formatBytes(i.size_bytes)}</td>
                           <td className="hidden max-w-48 truncate px-3 py-1.5 font-mono text-subtle sm:table-cell" title={i.aliases_on_roll.length ? "Aliases roll has already aren't copied" : undefined}>
                             {i.aliases.length === 0
-                              ? "—"
+                              ? i.replica_of
+                                ? `replica of ${i.replica_of}`
+                                : "—"
                               : i.aliases.map((a, n) => (
                                   <span key={a}>
                                     {n > 0 && ", "}
@@ -447,9 +565,15 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
               </span>
               <span className="flex items-center gap-3">
                 {optionsProblem && <span className="text-[12px] text-danger">{optionsProblem}</span>}
-                <button onClick={start} disabled={blocked || !!optionsProblem || busy !== null} className={primary}>
-                  {busy === "start" ? <span className="shimmer">Starting…</span> : chosen.length === 0 ? "Migrate" : `Migrate ${chosen.length} ${chosen.length === 1 ? "index" : "indices"}`}
-                </button>
+                {saas ? (
+                  <button onClick={review} disabled={blocked || !!optionsProblem || busy !== null} className={primary}>
+                    {busy === "review" ? <span className="shimmer">Reading definitions…</span> : "Review mapping"}
+                  </button>
+                ) : (
+                  <button onClick={start} disabled={blocked || !!optionsProblem || busy !== null} className={primary}>
+                    {busy === "start" ? <span className="shimmer">Starting…</span> : chosen.length === 0 ? "Migrate" : `Migrate ${chosen.length} ${chosen.length === 1 ? "index" : "indices"}`}
+                  </button>
+                )}
               </span>
             </div>
           </>
@@ -496,6 +620,8 @@ export function MigratePanel({ cluster, existing, onClose, onChanged }: { cluste
                     </>
                   )}
                   {(s.error || pr?.error) && <p className="break-words font-mono text-[11px] text-danger">{s.error ?? pr?.error}</p>}
+                  {s.note && <p className="text-[12px] text-muted">{s.note}</p>}
+                  {s.plan && <PlanSummary plan={s.plan} />}
                   {s.task && state !== "queued" && partial(state) && (
                     <div className="flex flex-wrap items-center gap-2 text-[12px]">
                       {removed[s.dest] === "done" ? (

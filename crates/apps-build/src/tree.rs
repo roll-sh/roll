@@ -32,6 +32,12 @@ pub(crate) fn valid(path: &str) -> bool {
             .all(|c| !c.is_empty() && c != "." && c != ".." && !c.contains(['\\', '\0']))
 }
 
+/// A relative path in a generated Dockerfile's terms: [`valid`], and only characters that need
+/// no quoting there (no space, no newline).
+pub(crate) fn plain(path: &str) -> bool {
+    valid(path) && path.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_./@+".contains(&b))
+}
+
 /// A directory on disk.
 pub struct DirTree {
     root: PathBuf,

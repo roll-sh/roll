@@ -48,12 +48,36 @@ impl Generator {
     }
 }
 
-pub(crate) fn detect(tree: &dyn Tree, _: &Overrides) -> Result<Option<Draft>, Error> {
-    // Hugo's own config names, or a config.toml in Hugo's spelling (`baseURL`); Zola's
-    // config.toml says `base_url`.
+/// Another language's app: a config.toml beside one is that app's, never a site's.
+const MANIFESTS: [&str; 9] = ["go.mod", "requirements.txt", "pyproject.toml", "Cargo.toml", "Gemfile", "composer.json", "pom.xml", "build.gradle", "mix.exs"];
+
+/// Whether `text` sets `key` at its top level (a line `key = …` before any `[table]`).
+fn top_level(text: &str, key: &str) -> bool {
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('[') {
+            return false;
+        }
+        if let Some(rest) = line.strip_prefix(key)
+            && rest.trim_start().starts_with('=')
+        {
+            return true;
+        }
+    }
+    false
+}
+
+pub(crate) fn detect(tree: &dyn Tree, o: &Overrides) -> Result<Option<Draft>, Error> {
+    // A start command set, or another language's app here: not a site.
+    if o.start.is_some() || MANIFESTS.iter().any(|f| tree.exists(f)) {
+        return Ok(None);
+    }
+    let node_app = text(tree, "package.json").and_then(|p| serde_json::from_str::<serde_json::Value>(&p).ok()).is_some_and(|p| p["scripts"]["start"].is_string());
+    // Hugo's own config names; or a config.toml setting `baseURL` at its top level beside Hugo's
+    // own directories. Zola's sets `base_url` beside `templates` and `content`.
     let config = text(tree, "config.toml");
-    let hugo = ["hugo.toml", "hugo.yaml", "hugo.yml", "hugo.json"].into_iter().any(|f| tree.exists(f)) || config.as_deref().is_some_and(|c| c.contains("baseURL") || c.contains("baseurl"));
-    let zola = !hugo && config.as_deref().is_some_and(|c| c.lines().any(|l| l.trim_start().starts_with("base_url"))) && (tree.exists("templates") || tree.exists("content"));
+    let hugo = ["hugo.toml", "hugo.yaml", "hugo.yml", "hugo.json"].into_iter().any(|f| tree.exists(f))
+        || (!node_app && config.as_deref().is_some_and(|c| top_level(c, "baseURL") || top_level(c, "baseurl")) && ["layouts", "themes", "archetypes"].into_iter().any(|d| tree.exists(d)));
+    let zola = !hugo && !node_app && config.as_deref().is_some_and(|c| top_level(c, "base_url")) && tree.exists("templates") && tree.exists("content");
     let g = match (hugo, zola) {
         (true, _) => HUGO,
         (_, true) => ZOLA,

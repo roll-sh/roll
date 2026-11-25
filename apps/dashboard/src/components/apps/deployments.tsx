@@ -309,6 +309,51 @@ function useFull(service: string, env: string, d: Deployment) {
   return full;
 }
 
+/** A folder upload's files as deployed, or a static build's as served (Vercel's Source and Output
+ *  tabs): listed on opening, one shown on asking. */
+function Source({ which, service, env, d }: { which: "source" | "output"; service: string; env: string; d: Deployment }) {
+  const [files, setFiles] = useState<{ path: string; bytes: number; link?: string }[] | null>(null);
+  const [shown, setShown] = useState<{ path: string; text?: string; bytes: number } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const load = () => {
+    if (files) return;
+    (which === "source" ? appsApi.source(service, env, d.id) : appsApi.output(service, env, d.id)).then(
+      (s) => setFiles(s.files ?? []),
+      (e: unknown) => setError(e instanceof Error ? e.message : String(e)),
+    );
+  };
+  const open = (path: string) =>
+    (which === "source" ? appsApi.sourceFile(service, env, d.id, path) : appsApi.output(service, env, d.id, path)).then(
+      (f) => setShown({ path, bytes: f.bytes ?? 0, text: f.text }),
+      (e: unknown) => setError(e instanceof Error ? e.message : String(e)),
+    );
+  return (
+    <details className="mb-2 rounded-lg border border-line bg-panel text-[11.5px]" onToggle={(e) => (e.currentTarget as HTMLDetailsElement).open && load()}>
+      <summary className="cursor-pointer px-3 py-2 text-fg">{which === "source" ? "Source" : "Output"}</summary>
+      <div className="border-t border-line px-3 py-2">
+        {error && <p className="text-danger">{error}</p>}
+        {!files && !error && <p className="shimmer text-muted">Reading…</p>}
+        {files && (
+          <div className="grid gap-2 md:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
+            <ul className="max-h-64 overflow-auto font-mono">
+              {files.map((f) => (
+                <li key={f.path}>
+                  <button type="button" className={`w-full truncate text-left hover:text-fg ${shown?.path === f.path ? "text-fg" : "text-muted"}`} onClick={() => void open(f.path)} title={f.link ? `→ ${f.link}` : `${f.bytes} bytes`}>
+                    {f.path}
+                  </button>
+                </li>
+              ))}
+            </ul>
+            {shown && (
+              <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded-md bg-bg p-2 font-mono text-[11px] text-muted">{shown.text ?? `${shown.bytes} bytes, not shown (binary, or over 1 MiB)`}</pre>
+            )}
+          </div>
+        )}
+      </div>
+    </details>
+  );
+}
+
 /** A build's time by step (Vercel's, Netlify's): each step's share of the slowest, which its cache answered. */
 function BuildSteps({ steps }: { steps: BuildStep[] }) {
   const ran = steps.filter((s) => !s.cached);
@@ -548,6 +593,8 @@ function BuildLog({ service, env, d, explains = false }: { service: string; env:
         </ol>
       )}
       {(full?.build_steps?.length ?? 0) > 0 && <BuildSteps steps={full?.build_steps ?? []} />}
+      {d.trigger === "upload" && !d.pruned_at && <Source key={`s${d.id}`} which="source" service={service} env={env} d={d} />}
+      {d.plan?.provider === "static" && d.image && !d.pruned_at && <Source key={`o${d.id}`} which="output" service={service} env={env} d={d} />}
       <LogView
         lines={lines}
         className="h-[460px]"
