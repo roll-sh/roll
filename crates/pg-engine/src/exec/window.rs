@@ -30,6 +30,141 @@ pub struct WindowNode {
     sort: Option<std::sync::Arc<crate::sql::plan::Plan>>,
     /// EXPLAIN ANALYZE: each WindowAgg's tuplestore as PostgreSQL's would hold it (`Store`).
     store: Option<Stores>,
+    /// The input's plan, its column types (found once a partition is sized) and the columns
+    /// PostgreSQL's input target list keeps.
+    shape: Shape,
+    /// The size of the partition being read, while one past work_mem may be streamed
+    /// (`winstream`); the partition being streamed.
+    big: Option<Big>,
+    streamed: Option<Streamed>,
+}
+
+#[derive(Default)]
+struct Shape {
+    input: Option<std::sync::Arc<crate::sql::plan::Plan>>,
+    types: Option<Vec<DataType>>,
+    keep: Option<Vec<bool>>,
+}
+
+/// The size so far of the partition being read (one row's tuple in every `SAMPLE`, times
+/// `SAMPLE`), against work_mem; once one is past it, the calls as `winstream` runs them
+/// and the window's tuplestore's count. (Nothing else is found before: a window that fits
+/// pays a row count's test.)
+struct Big {
+    allowed: Option<i64>,
+    est: i64,
+    on: Option<(super::winstream::Spec, super::workmem::StoreMem)>,
+}
+
+/// (One tuple's size a sample: a size every 16th row cost a window that fits 0.5% of its
+/// instructions.)
+const SAMPLE: usize = 256;
+
+impl Big {
+    /// The partition's `n`th row, `row`, is read: whether it is past work_mem by now.
+    #[inline]
+    fn past(big: &mut Option<Big>, n: usize, row: &Row, shape: &mut Shape, ctx: &ExecCtx) -> bool {
+        if !n.is_multiple_of(SAMPLE) {
+            return false;
+        }
+        let Some(b) = big else { return false };
+        b.sample(row, shape, ctx)
+    }
+
+    #[inline(never)]
+    fn sample(&mut self, row: &Row, shape: &mut Shape, ctx: &ExecCtx) -> bool {
+        let allowed = *self.allowed.get_or_insert_with(|| super::workmem::work_mem(ctx));
+        let types = shape
+            .types
+            .get_or_insert_with(|| shape.input.as_ref().map(|p| crate::sql::paths::analyzejoins::col_types(p)).unwrap_or_default());
+        let t = super::workmem::minimal_tuple_len_cols(row, types, shape.keep.as_deref(), ctx);
+        // (A generation chunk and a pointer in the array, as `StoreMem::put` counts.)
+        self.est += SAMPLE as i64 * (super::workmem::maxalign(t) + 16);
+        self.est > allowed
+    }
+
+    /// A partition is past work_mem: whether the window streams it (`streamable`); if not,
+    /// nothing is sized again.
+    fn resolve(
+        big: &mut Option<Big>,
+        calls: &[WindowCall],
+        presorted: &[String],
+        stream: &Option<Vec<NeedKey>>,
+        ctx: &ExecCtx,
+    ) -> bool {
+        let Some(b) = big else { return false };
+        if b.on.is_none() {
+            match streamable(calls, presorted, stream, ctx) {
+                Some(spec) => {
+                    let mem = super::workmem::StoreMem::new(b.allowed.unwrap_or_else(|| super::workmem::work_mem(ctx)), spec.backward);
+                    b.on = Some((spec, mem));
+                }
+                None => {
+                    *big = None;
+                    return false;
+                }
+            }
+        }
+        true
+    }
+}
+
+/// The calls' one window, when its partitions can be streamed past work_mem: the input comes
+/// a partition at a time in its order (sorted on its partition and order keys) and
+/// `winstream` runs its calls.
+fn streamable(calls: &[WindowCall], presorted: &[String], stream: &Option<Vec<NeedKey>>, ctx: &ExecCtx) -> Option<super::winstream::Spec> {
+    let (keys, need) = window_keys(calls, true, ctx)?;
+    if presorted.len() < need.len() || presorted[..need.len()] != need[..] {
+        return None;
+    }
+    if !keys.is_empty() && stream.is_none() {
+        return None;
+    }
+    super::winstream::Spec::of(calls)
+}
+
+/// A partition being streamed: the rows read before it went to `winstream`, its partition
+/// keys' values, and its state.
+struct Streamed {
+    pre: std::collections::VecDeque<Row>,
+    pvals: Vec<Value>,
+    part: super::winstream::Part,
+}
+
+/// The rest of a streamed partition: `pre`, then the input's rows until one of another
+/// partition (kept in `pending`).
+struct Src<'a> {
+    pre: &'a mut std::collections::VecDeque<Row>,
+    input: &'a mut Option<BoxNode>,
+    pending: &'a mut Option<Row>,
+    keys: Option<&'a [NeedKey]>,
+    pvals: &'a [Value],
+}
+
+impl super::winstream::Source for Src<'_> {
+    fn pull(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+        if let Some(r) = self.pre.pop_front() {
+            return Ok(Some(r));
+        }
+        if self.pending.is_some() {
+            return Ok(None);
+        }
+        let Some(input) = self.input.as_mut() else { return Ok(None) };
+        let Some(r) = input.next(ctx)? else {
+            *self.input = None;
+            return Ok(None);
+        };
+        ctx.check()?;
+        if let Some(keys) = self.keys {
+            for (k, v) in keys.iter().zip(self.pvals) {
+                if cmp_need(&eval(&k.key.expr, &r, ctx)?, v, k, ctx)? != Ordering::Equal {
+                    *self.pending = Some(r);
+                    return Ok(None);
+                }
+            }
+        }
+        Ok(Some(r))
+    }
 }
 
 /// What EXPLAIN ANALYZE counts of the windows' tuplestores: the input's column types, the
@@ -54,6 +189,9 @@ impl WindowNode {
             started: false,
             sort: None,
             store: None,
+            shape: Shape::default(),
+            big: None,
+            streamed: None,
         }
     }
 
@@ -73,6 +211,8 @@ impl WindowNode {
                 keep,
                 wins: Vec::new(),
             });
+        } else {
+            self.shape = Shape { input: Some(input.clone()), types: None, keep };
         }
         self
     }
@@ -98,20 +238,43 @@ impl Node for WindowNode {
         if !self.started {
             self.started = true;
             self.stream = streamed_partitions(&self.calls, &self.presorted, ctx);
+            // (EXPLAIN ANALYZE counts the store over a whole partition: `count_store`.)
+            if self.store.is_none() {
+                self.big = Some(Big { allowed: None, est: 0, on: None });
+            }
         }
         loop {
             if let Some(r) = self.out.next() {
                 return Ok(Some(r));
             }
+            if self.streamed.is_some() {
+                match self.stream_next(ctx)? {
+                    Some(r) => return Ok(Some(r)),
+                    None => continue,
+                }
+            }
             let Some(input) = self.input.as_mut() else { return Ok(None) };
+            if let Some(b) = self.big.as_mut() {
+                b.est = 0;
+            }
             // The whole input, or (streamed) the next partition: its rows until one whose
             // partition keys differ, kept for the next.
             let mut rows = Vec::new();
             match &self.stream {
                 None => {
+                    let mut past = false;
                     while let Some(r) = input.next(ctx)? {
                         ctx.check()?;
+                        past = Big::past(&mut self.big, rows.len() + 1, &r, &mut self.shape, ctx)
+                            && Big::resolve(&mut self.big, &self.calls, &self.presorted, &self.stream, ctx);
                         rows.push(r);
+                        if past {
+                            break;
+                        }
+                    }
+                    if past {
+                        self.stream_rest(rows, Vec::new(), ctx);
+                        continue;
                     }
                     self.input = None;
                 }
@@ -127,8 +290,9 @@ impl Node for WindowNode {
                         },
                     };
                     let part: Vec<Value> = keys.iter().map(|k| eval(&k.key.expr, &first, ctx)).collect::<Result<_>>()?;
+                    let mut past = false;
                     rows.push(first);
-                    loop {
+                    while !past {
                         let Some(r) = input.next(ctx)? else {
                             self.input = None;
                             break;
@@ -145,7 +309,13 @@ impl Node for WindowNode {
                             self.pending = Some(r);
                             break;
                         }
+                        past = Big::past(&mut self.big, rows.len() + 1, &r, &mut self.shape, ctx)
+                            && Big::resolve(&mut self.big, &self.calls, &self.presorted, &self.stream, ctx);
                         rows.push(r);
+                    }
+                    if past && self.pending.is_none() && self.input.is_some() {
+                        self.stream_rest(rows, part, ctx);
+                        continue;
                     }
                 }
             }
@@ -155,6 +325,34 @@ impl Node for WindowNode {
 }
 
 impl WindowNode {
+    /// The streamed partition's next row; None once it is out (it is released).
+    #[inline(never)]
+    fn stream_next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+        let (Some(st), Some(Big { on: Some((spec, mem)), .. })) = (self.streamed.as_mut(), self.big.as_mut()) else {
+            unreachable!("a streamed window")
+        };
+        let mut src = Src {
+            pre: &mut st.pre,
+            input: &mut self.input,
+            pending: &mut self.pending,
+            keys: self.stream.as_deref(),
+            pvals: &st.pvals,
+        };
+        let shape = super::winstream::Shape { types: self.shape.types.as_deref().unwrap_or_default(), keep: self.shape.keep.as_deref() };
+        let r = st.part.next(spec, &self.calls, &mut src, mem, &shape, ctx)?;
+        if r.is_none() {
+            self.streamed.take().unwrap().part.release(mem);
+        }
+        Ok(r)
+    }
+
+    /// The partition `rows` began, past work_mem: the rest of it is streamed.
+    #[inline(never)]
+    fn stream_rest(&mut self, rows: Vec<Row>, pvals: Vec<Value>, ctx: &ExecCtx) {
+        let Some(Big { on: Some((spec, _)), .. }) = &self.big else { unreachable!("a streamed window") };
+        self.streamed = Some(Streamed { pre: rows.into(), pvals, part: super::winstream::Part::new(spec, ctx) });
+    }
+
     /// The calls' results for `rows`, appended to them, in the order they come out.
     fn compute(&mut self, rows: Vec<Row>, ctx: &ExecCtx) -> Result<Vec<Row>> {
         let n = rows.len();

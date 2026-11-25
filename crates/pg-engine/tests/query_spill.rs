@@ -346,3 +346,72 @@ fn hash_join_limit_temp_accounting_matches_postgres() {
     drop(s);
     eng.shutdown();
 }
+
+/// Window partitions past work_mem streamed (`exec::winstream`): every function and frame
+/// it runs gives what the partition computed whole in memory does, a store past work_mem
+/// spills and its files go. (Rows tied on ORDER BY b come in another order once the Sort
+/// below spills, as PostgreSQL's do: what is read of them is equal within a peer group. The
+/// in-memory path reads every row of a frame for first_value / last_value / nth_value:
+/// partitions of 1,000 rows keep it short.)
+const WINDOWS: &[&str] = &[
+    "row_number() OVER (ORDER BY a DESC)",
+    "rank() OVER w, dense_rank() OVER w, percent_rank() OVER w, cume_dist() OVER w FROM ws WINDOW w AS (ORDER BY b)",
+    "sum(a) OVER w, count(*) FILTER (WHERE a % 3 = 0) OVER w, last_value(b % 7) OVER w, nth_value(b, 3) OVER w, first_value(b) OVER w \
+       FROM ws WINDOW w AS (PARTITION BY a % 40 ORDER BY b)",
+    "sum(a) OVER w, lag(t, 2) OVER w, lead(a, 3, -1) OVER w, max(t) OVER w FROM ws \
+       WINDOW w AS (PARTITION BY b % 3 ORDER BY a ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)",
+    "sum(n) OVER w, avg(a) OVER w, rank() OVER w, cume_dist() OVER w FROM ws WINDOW w AS (PARTITION BY b % 7)",
+    "ntile(7) OVER w, lead(t, 3, 'x') OVER w, lag(a, 5000) OVER w FROM ws WINDOW w AS (ORDER BY a)",
+    "last_value(a) OVER w, count(*) OVER w, nth_value(t, 999) OVER w FROM ws \
+       WINDOW w AS (PARTITION BY a % 40 ORDER BY a ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)",
+    "first_value(b) OVER w, nth_value(b, 2) OVER w FROM ws WINDOW w AS (PARTITION BY a % 40 ORDER BY b RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)",
+    "sum(a) OVER w, last_value(b) OVER w FROM ws WINDOW w AS (PARTITION BY a % 40 ORDER BY b GROUPS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)",
+];
+
+#[test]
+fn windows_stream_past_work_mem() {
+    std::thread::Builder::new().stack_size(64 << 20).spawn(windows_stream).unwrap().join().unwrap();
+}
+
+fn windows_stream() {
+    let dir = tempfile::tempdir().unwrap();
+    let eng = open(dir.path());
+    let mut s = eng.connect(1, "postgres", "postgres", "postgres").unwrap();
+    for sql in [
+        "CREATE TABLE ws (a int, b int, t text, n numeric)",
+        "INSERT INTO ws SELECT g, g % 3000, md5(g::text), g % 1000 FROM generate_series(1, 40000) g",
+        "ANALYZE ws",
+        "SET work_mem = '256MB'",
+    ] {
+        q(&mut s, sql).unwrap();
+    }
+    let sql = |w: &str| {
+        let sel = if w.contains(" FROM ws") { w.to_string() } else { format!("{w} FROM ws") };
+        format!("SELECT md5(string_agg(x::text, ',' ORDER BY x::text)) FROM (SELECT a, b, {sel}) x")
+    };
+    let in_memory: Vec<Value> = WINDOWS.iter().map(|w| one(&mut s, &sql(w))).collect();
+    q(&mut s, "SET work_mem = '64kB'").unwrap();
+    for (w, want) in WINDOWS.iter().zip(&in_memory) {
+        assert_eq!(&one(&mut s, &sql(w)), want, "{w}");
+        assert_eq!(temp_files(dir.path()), 0, "{w}: files left");
+    }
+    // The window's own store spills (the Sort below spills too): lag's 5,000 rows back.
+    q(&mut s, "SELECT pg_stat_force_next_flush()").unwrap();
+    let f0 = int(&mut s, "SELECT temp_files FROM pg_stat_database WHERE datname = current_database()");
+    q(&mut s, "SELECT count(x) FROM (SELECT lag(t, 5000) OVER (ORDER BY a) x FROM ws) s").unwrap();
+    q(&mut s, "SELECT pg_stat_force_next_flush()").unwrap();
+    let f1 = int(&mut s, "SELECT temp_files FROM pg_stat_database WHERE datname = current_database()");
+    assert_eq!(f1 - f0, 2, "the Sort's file and the window's");
+    // lag / lead a row away keep a few rows (the RANGE frame's tail at the peer group's end):
+    // only the Sort's file.
+    q(&mut s, "SELECT count(x) FROM (SELECT lag(t) OVER (ORDER BY a) x, lead(t, 2) OVER (ORDER BY a) FROM ws) s").unwrap();
+    q(&mut s, "SELECT pg_stat_force_next_flush()").unwrap();
+    let f2 = int(&mut s, "SELECT temp_files FROM pg_stat_database WHERE datname = current_database()");
+    assert_eq!(f2 - f1, 1, "the Sort's file alone");
+    // An error in a streamed partition: no files left.
+    let e = q(&mut s, "SELECT count(x) FROM (SELECT sum(1 / (a - 39000)) OVER (ORDER BY a ROWS UNBOUNDED PRECEDING) x FROM ws) s").unwrap_err();
+    assert!(e.starts_with("22012"), "{e}");
+    assert_no_spill_files(dir.path());
+    drop(s);
+    eng.shutdown();
+}

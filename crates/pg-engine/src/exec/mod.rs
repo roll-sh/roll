@@ -34,6 +34,7 @@ pub mod trigger;
 pub mod tuplestore;
 pub mod vector;
 pub mod window;
+mod winstream;
 pub mod workmem;
 
 use crate::catalog::Catalog;
