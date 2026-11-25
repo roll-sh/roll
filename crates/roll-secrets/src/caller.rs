@@ -270,6 +270,16 @@ impl Secrets {
         Ok(by.to_string())
     }
 
+    /// Who may replace a registration's credential (a SaaS rotator's, a public certificate's DNS
+    /// token, a rotator's endpoint): as [`Secrets::maker_of`], since the new credential makes them
+    /// its maker. Asked before the credential is checked with its vendor; a workload identity's
+    /// login is refused (400).
+    pub(crate) fn replacer(&self, caller: &Caller) -> Result<Replacer> {
+        self.maker_of(caller).map(Replacer).map_err(|_| {
+            Error::BadRequest(format!("a registration's credential is replaced by a person, a token or the operator: {} is a workload identity's login, and the registration would act as it once its token ends", caller.made_by()))
+        })
+    }
+
     /// What `by` (a maker as [`Secrets::maker_of`] recorded it: `operator`, a person's `usr_…`,
     /// `token:…`) may do now, named `name` in the audit log, not a runtime: the operator
     /// everything; a person while their account can sign in (an admin only while they still are
@@ -344,4 +354,36 @@ mod tests {
         assert!(!ip_allowed(&list, Some("203.0.113.8")) && !ip_allowed(&list, None), "no address known: not allowed");
         assert!(allowed(Some(vec!["not-an-ip".into()])).is_err() && allowed(Some(vec![])).is_err());
     }
+}
+
+/// Whoever replaces a registration's credential, as [`Secrets::replacer`] allowed them: the only
+/// way to [`replace_registration_credential`].
+pub(crate) struct Replacer(String);
+
+/// A registration whose credential acts later for whoever registered it, as they are now
+/// (`registration_reaches` on its `created_by`).
+#[derive(Clone, Copy)]
+pub(crate) enum Registration {
+    /// `saas_rotators.credential`.
+    Saas,
+    /// `public_certs.dns_credential`.
+    PublicCertDns,
+    /// `rotators.url`: the endpoint roll calls is what it trusts.
+    RotatorUrl,
+}
+
+/// Write a registration's new (sealed) credential and make `by` its maker in the same statement: a
+/// new credential is the registration made anew, so it acts at its replacer's rights from then on,
+/// never at the old maker's (docs/secrets.md, "a registration stores the person, never their
+/// token"). A name or expiry change doesn't come through here and keeps the maker. Answers the
+/// audit note ("; its maker moved from … to …"), empty when the maker stays.
+pub(crate) fn replace_registration_credential(c: &code_sql::Conn<'_>, what: Registration, id: &str, sealed: &[u8], by: &Replacer) -> Result<String> {
+    let (table, column) = match what {
+        Registration::Saas => ("saas_rotators", "credential"),
+        Registration::PublicCertDns => ("public_certs", "dns_credential"),
+        Registration::RotatorUrl => ("rotators", "url"),
+    };
+    let old: String = c.query_row(&format!("SELECT created_by FROM {table} WHERE id = ?"), [id], |r| r.get(0))?;
+    c.execute(&format!("UPDATE {table} SET {column} = ?, created_by = ? WHERE id = ?"), code_sql::params![sealed, by.0, id])?;
+    Ok(if old == by.0 { String::new() } else { format!("; its maker moved from {old} to {}", by.0) })
 }
