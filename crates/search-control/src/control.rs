@@ -65,6 +65,9 @@ pub enum ControlError {
     /// Too much of something runs at once (HTTP 429): try again later.
     #[error("{0}")]
     Busy(String),
+    /// Something it depends on can't answer now (HTTP 503): try again.
+    #[error("{0}")]
+    Unavailable(String),
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -238,6 +241,9 @@ pub struct ClusterOptions {
     /// The cluster's `reindex.remote.whitelist`: `host:port` patterns (`*` matches any run of
     /// characters) reindex from remote may read, at most [`MAX_WHITELIST`]; `[]`: none.
     pub reindex_whitelist: Option<Vec<String>>,
+    /// Whether only a project's admins and owners change its data (a developer's default doesn't
+    /// reach it). A branch is never protected.
+    pub protected: Option<bool>,
 }
 
 /// The most patterns a cluster's reindex whitelist holds.
@@ -559,7 +565,8 @@ pub fn spec_for(c: &SearchCluster) -> ClusterSpec {
         }
     });
     spec.catalog_id = Some(c.id.clone());
-    spec.owner = c.owner.clone();
+    // What node-wide fairness and the crawler's site limits count by: its tenant.
+    spec.owner = c.tenant();
     // Only until its first load has marked what it inherited: a branch made before marking
     // existed, or one already marked, runs its jobs as its own.
     spec.branch_of = c.parent_id.clone().filter(|_| c.inherit_pending);
@@ -856,7 +863,27 @@ pub struct Control {
     leases: OnceLock<Arc<crate::cluster::ClusterLeases>>,
     /// Resolves snapshot repositories' credential references ([`Control::set_secrets`]).
     secret_refs: Arc<crate::secret_refs::CatalogRefs>,
+    /// Told of the branches people make ([`Control::on_branch`]).
+    on_branch: OnceLock<OnBranch>,
+    /// The workspace project a cluster is at home in ([`Control::set_home_of`]).
+    home_of: OnceLock<HomeOf>,
+    /// Told of each cluster purged for good ([`Control::on_purged`]).
+    on_purged: OnceLock<OnPurged>,
+    /// Told of each cluster that came back to life ([`Control::on_revived`]).
+    on_revived: OnceLock<OnPurged>,
+    /// Whether a remote link's maker may still administer its target ([`Control::set_link_makers`]).
+    pub(crate) link_makers: OnceLock<crate::remotes::LinkMakers>,
 }
+
+/// Called with a purged cluster's id, once it's gone for good.
+pub type OnPurged = Box<dyn Fn(&str) + Send + Sync>;
+
+/// Called with a new branch's parent and the branch, once it's in the catalog; an error (why)
+/// undoes the branch ([`Control::branched`]).
+pub type OnBranch = Box<dyn Fn(&SearchCluster, &SearchCluster) -> std::result::Result<(), String> + Send + Sync>;
+
+/// The workspace project cluster `id` is at home in, if any; an error (why) when that can't be read.
+pub type HomeOf = Box<dyn Fn(&str) -> std::result::Result<Option<String>, String> + Send + Sync>;
 
 impl Control {
     pub async fn new(cfg: SearchConfig, objects: Objects) -> anyhow::Result<Arc<Self>> {
@@ -957,6 +984,11 @@ impl Control {
             refreshed: Mutex::new(HashMap::new()),
             leases: OnceLock::new(),
             secret_refs,
+            on_branch: OnceLock::new(),
+            home_of: OnceLock::new(),
+            on_purged: OnceLock::new(),
+            on_revived: OnceLock::new(),
+            link_makers: OnceLock::new(),
         });
         // Nothing can load before the node is handed out, so the hook always finds the control.
         let _ = hooks.control.set(Arc::downgrade(&control));
@@ -1068,6 +1100,60 @@ impl Control {
         let _ = self.secret_refs.secrets.set(secrets);
     }
 
+    /// Tell `f` of the branches people make, with their parents ([`Control::branched`]; rolld: a
+    /// branch stays in the workspace project its parent is at home in, so the members who could
+    /// branch it reach the copy). Once.
+    pub fn on_branch(&self, f: OnBranch) {
+        let _ = self.on_branch.set(f);
+    }
+
+    /// Where clusters are at home in the workspace (rolld), for a branch's project
+    /// ([`Control::home_of`]). Once.
+    pub fn set_home_of(&self, f: HomeOf) {
+        let _ = self.home_of.set(f);
+    }
+
+    /// The workspace project cluster `id` is at home in (none without a workspace); 503 when
+    /// that can't be read.
+    pub fn home_of(&self, id: &str) -> Result<Option<String>> {
+        match self.home_of.get() {
+            Some(f) => f(id).map_err(|e| ControlError::Unavailable(format!("can't tell which project search cluster {id} is in ({e}): try again"))),
+            None => Ok(None),
+        }
+    }
+
+    /// Tell `f` of each cluster purged for good (rolld: its home and canvas places go, so nothing
+    /// keeps a project's trust in it). A delete kept for restoring isn't a purge. Once.
+    pub fn on_purged(&self, f: OnPurged) {
+        let _ = self.on_purged.set(f);
+    }
+
+    /// Tell `f` of each cluster that's live again after something else could see it gone: a
+    /// delete that failed (un-hidden) or a restore, once it's committed (rolld: a project deleted
+    /// meanwhile keeps no home for it). Once.
+    pub fn on_revived(&self, f: OnPurged) {
+        let _ = self.on_revived.set(f);
+    }
+
+    fn revived(&self, id: &str) {
+        if let Some(f) = self.on_revived.get() {
+            f(id);
+        }
+    }
+
+    /// A person made `branch` of `parent` through the API ([`Control::on_branch`]). The
+    /// operator's own branches (previews' data copies) aren't told: they belong to no project.
+    /// A branch the hook can't put in its parent's project is deleted again (503): a copy of a
+    /// project's data is never left anywhere else, nor its maker's.
+    pub async fn branched(&self, parent: &SearchCluster, branch: &SearchCluster) -> Result<()> {
+        let Some(f) = self.on_branch.get() else { return Ok(()) };
+        let Err(why) = f(parent, branch) else { return Ok(()) };
+        if let Err(e) = self.delete(&branch.id).await {
+            tracing::warn!(branch = branch.name, error = %e, "deleting a search branch that couldn't be put in its parent's project failed");
+        }
+        Err(ControlError::Unavailable(format!("branch {} of {} couldn't be put in its parent's project, so it wasn't made ({why}): try again", branch.name, parent.name)))
+    }
+
     pub fn cluster_leases(&self) -> Option<&Arc<crate::cluster::ClusterLeases>> {
         self.leases.get()
     }
@@ -1161,6 +1247,9 @@ impl Control {
         if let Some(v) = o.destructive_requires_name {
             c.destructive_requires_name = v;
         }
+        if let Some(v) = o.protected {
+            c.protected = v;
+        }
         Ok(c)
     }
 
@@ -1211,18 +1300,22 @@ impl Control {
             loaded_on: None,
             wake_at: None,
             owner: None,
+            made_by: None,
             restored_at: None,
             ip_allowlist: Vec::new(),
             cors: None,
             browser_per_minute: None,
             inherit_pending: false,
             reindex_whitelist: Vec::new(),
+            protected: false,
+            project_id: None,
         }
     }
 
     /// A new, empty cluster, `owner`'s (a signed-in person's `usr_…`; `None`: the operator's).
     /// Past one of `caps` for the owner it is refused (409). Nothing is written to object storage
-    /// until it is first used.
+    /// until it is first used. A home in a workspace project hands it to the project later
+    /// ([`crate::store::Store::disown`]).
     pub async fn create(&self, name: &str, o: ClusterOptions, owner: Option<&str>, caps: Caps) -> Result<SearchCluster> {
         let c = Self::apply(SearchCluster { owner: owner.map(str::to_string), ..self.fresh(name) }, o)?;
         self.check(&c)?;
@@ -1280,12 +1373,14 @@ impl Control {
     /// parent's segments, nothing is copied. Settings and the owner come from the parent (settings
     /// unless given), but not its `reindex_whitelist`: the remotes the parent reads from are the
     /// parent's (a branch whitelists its own). The parent's CORS origins, IP allowlist and
-    /// browser rate stay; its browser keys don't. The branch counts toward the owner's `caps`. In a
+    /// browser rate stay; its browser keys don't. The branch counts toward the owner's `caps`; a
+    /// branch of a cluster with no owner counts toward `made_by`, the person making it (none for
+    /// the operator's). In a
     /// fleet, call it on the node holding the parent (the API forwards there): a loaded parent
     /// is committed first, so the branch sees every acknowledged write. `parent` is the cluster
     /// the caller was checked against: it is read again by its id, never its name, so a cluster
     /// that took the name meanwhile is never branched in its place.
-    pub async fn branch(&self, parent: &SearchCluster, name: &str, at: Option<i64>, o: ClusterOptions, caps: Caps) -> Result<SearchCluster> {
+    pub async fn branch(&self, parent: &SearchCluster, name: &str, at: Option<i64>, o: ClusterOptions, made_by: Option<&str>, caps: Caps) -> Result<SearchCluster> {
         let p = self.store.get(&parent.id).await?.ok_or_else(|| ControlError::NotFound(format!("no search cluster {}", parent.id)))?;
         let now = now();
         if let Some(t) = at {
@@ -1305,17 +1400,21 @@ impl Control {
                 parent_at: Some(at.unwrap_or(now).min(now)),
                 // Its first load marks what it inherits (`search_es::branch`).
                 inherit_pending: true,
+                made_by: made_by.filter(|_| p.owner.is_none()).map(str::to_string),
                 // The remotes the parent may read from aren't the branch's.
                 reindex_whitelist: Vec::new(),
                 ..p.clone()
             },
             o,
         )?;
+        // Never protected, whatever the parent is or the options say (a preview's copy); in a
+        // project only once its home there is recorded (rolld's homes).
+        let c = SearchCluster { protected: false, project_id: None, ..c };
         self.check(&c)?;
         self.check_free(name).await?;
         // Refused by a cap before anything is copied (the insert's count, in its transaction,
         // still decides).
-        if let Some(owner) = &c.owner
+        if let Some(owner) = c.counted_toward()
             && let Some(o) = self.store.check_caps(owner, c.idle_timeout_s, caps).await?
         {
             return Err(over(o));
@@ -1406,6 +1505,10 @@ impl Control {
     /// cluster always-on past the owner's `caps.always_on` is refused (409).
     pub async fn update(&self, id: &str, o: ClusterOptions, caps: Caps) -> Result<SearchCluster> {
         self.update_with(id, caps, move |c| {
+            // A branch is never protected (one from before the mark may be: it can be opened).
+            if c.parent_id.is_some() && o.protected == Some(true) {
+                return Err(ControlError::Invalid(format!("protected: {} is a branch, and a branch is never protected", c.name)));
+            }
             *c = Self::apply(c.clone(), o)?;
             Ok(())
         })
@@ -1640,6 +1743,7 @@ impl Control {
                     tracing::warn!(cluster = c.name, error = %e, "un-hiding a search cluster after a failed delete failed");
                 }
                 self.apply_spec(&c.name).await;
+                self.revived(&c.id);
             }
         }
         r
@@ -1665,6 +1769,9 @@ impl Control {
                 tracing::warn!(cluster = c.id, error = %e, "revoking a deleted search cluster's remote keys failed");
             }
             self.store.delete(&c.id).await?;
+            if let Some(f) = self.on_purged.get() {
+                f(&c.id);
+            }
         } else {
             self.keep_deleted(c).await?;
         }
@@ -1791,6 +1898,7 @@ impl Control {
                 return Err(over(o));
             }
         }
+        self.revived(&d.cluster.id);
         // Credentials revoked while it was deleted, before anything else (the sweep retries a
         // failure).
         self.apply_revokes(&d.cluster.id).await;
@@ -1843,6 +1951,9 @@ impl Control {
             }
             if ok && self.store.finish_purge(&d.cluster.id, &claim).await? {
                 purged += 1;
+                if let Some(f) = self.on_purged.get() {
+                    f(&d.cluster.id);
+                }
             } else if let Err(e) = self.store.release_claim(&d.cluster.id, &claim).await {
                 tracing::warn!(cluster = d.cluster.id, error = %e, "releasing a purge claim failed; it lapses");
             }
@@ -1956,6 +2067,11 @@ impl Control {
     /// Sends a request to the cluster as its owner (through authentication and admission, so
     /// limits apply and it wakes the cluster like any client). On a fleet it runs on the node that
     /// owns the cluster: here, or sent there (an in-process caller on any node, as apps' links).
+    /// This control plane as an `Arc`, for work that outlives a request (a migration's copies).
+    pub(crate) fn arc(&self) -> Option<Arc<Control>> {
+        self.me.get()?.upgrade()
+    }
+
     pub(crate) async fn call(&self, c: &SearchCluster, mut req: EsRequest) -> EsResponse {
         // Who wrote a repository's references is said only by `put_repository`, never by a
         // request relayed here (the console's headers are the caller's).
@@ -2732,12 +2848,15 @@ mod tests {
             loaded_on: None,
             wake_at: None,
             owner: None,
+            made_by: None,
             restored_at: None,
             ip_allowlist: vec![IpRule { cidr: "203.0.113.0/24".into(), description: None }],
             cors: None,
             browser_per_minute: None,
             inherit_pending: false,
             reindex_whitelist: vec!["es.example.com:443".into()],
+            protected: false,
+            project_id: None,
         };
         let s = spec_for(&c);
         assert!(s.ip_allowlist.contains("::ffff:203.0.113.9".parse().unwrap()) && !s.ip_allowlist.is_open());

@@ -415,6 +415,12 @@ impl Apps {
         let (sid, e) = (service.to_string(), env.to_string());
         let (svc, row) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await?;
         run.volume = svc.for_env(&row).map(|s| s.run.volume).unwrap_or(svc.run.volume);
+        // Checked again with today's volume: one that's one writer's now holds the old settings
+        // to one instance (a deployment from when it was shared, or had none, ran more).
+        if run.one_writer() {
+            run.rollout.steps.clear();
+        }
+        let run = run.normalized()?;
         let d = NewDeployment {
             trigger: Trigger::Rollback,
             revision: old.revision.clone(),
@@ -636,6 +642,13 @@ impl Apps {
             let sid = svc.id.clone();
             let Ok(pruned) = self.db(move |s| s.prune_deployments(&sid, keep, day_ago)).await else { continue };
             for p in pruned {
+                // Its row keeps the key until the object is gone (a failed delete is tried again).
+                if let Some(k) = &p.source
+                    && self.delete_upload(k).await
+                {
+                    let id = p.id.clone();
+                    let _ = self.db(move |s| s.clear_source(&id)).await;
+                }
                 if let Some(img) = &p.image {
                     self.deps.builder.remove_image(img).await;
                     let i = img.clone();
@@ -1124,7 +1137,7 @@ impl Apps {
         let did = d.id.clone();
         let no_traffic = self.db(move |s| s.no_traffic(&did)).await?;
         // What was built decides: a roll.toml can make it a worker, or give it a volume.
-        anyhow::ensure!(!no_traffic || (tpl.run.kind == RunType::Web && tpl.run.volume.is_none()), "no_traffic is for a web service without a volume, and this build isn't one");
+        anyhow::ensure!(!no_traffic || (tpl.run.kind == RunType::Web && !tpl.run.one_writer()), "no_traffic is for a web service whose volume (if any) is shared, and this build isn't one");
         // A try-out never migrates the shared database: its pre-deploy command runs when it's put
         // live.
         if let Some(cmd) = tpl.run.pre_deploy.clone().filter(|_| !no_traffic) {
@@ -1506,10 +1519,17 @@ impl Apps {
         tokio::fs::create_dir_all(&dir).await?;
         let result = self.build_in(svc, d, log, cancel, &dir).await;
         let _ = tokio::fs::remove_dir_all(&dir).await;
-        // The image is the deployment's from here (a rollback never rebuilds): the upload goes.
+        // The image is the deployment's from here (a rollback never rebuilds). A folder upload's
+        // bundle that built is kept as its source (Vercel's Source tab) until it's pruned; any
+        // other upload goes.
         let id = d.id.clone();
         if let Ok(Some(key)) = self.db(move |s| s.deployment_upload(&id)).await {
-            self.drop_upload(&d.id, &key).await;
+            if result.is_ok() && key.ends_with(".tgz") {
+                let (id, k) = (d.id.clone(), key.clone());
+                let _ = self.db(move |s| s.keep_source(&id, &k)).await;
+            } else {
+                self.drop_upload(&d.id, &key).await;
+            }
         }
         // Metered by its builder's size where the builder gives it one.
         let factor = if self.deps.builder.sizes_builds() { svc.build.size.unwrap_or_default().factor() } else { 1.0 };
@@ -1529,7 +1549,15 @@ impl Apps {
                 log.line(format!("loading the uploaded image ({} MiB)", bytes.len() >> 20));
                 let archive = dir.join("image.tar");
                 let a = archive.clone();
-                tokio::task::spawn_blocking(move || crate::image_upload::untagged(&bytes, &a)).await??;
+                let platform = tokio::task::spawn_blocking(move || crate::image_upload::untagged(&bytes, &a)).await??;
+                // Another processor's image would only fail as "exec format error" once started.
+                if let (Some(image), Some(here)) = (platform, self.deps.runtime.platform())
+                    && image != here
+                {
+                    anyhow::bail!(
+                        "the image is for {image}, and instances here run on {here}: build it with `docker build --platform {here} …` (or for both: `docker buildx build --platform linux/amd64,linux/arm64 …`), then deploy it again"
+                    );
+                }
                 let tag = format!("roll-apps-{}:{}", svc.id.strip_prefix("svc_").unwrap_or(&svc.id), d.id.strip_prefix("dep_").unwrap_or(&d.id));
                 let image = self.deps.builder.load(&archive, &tag, log).await?;
                 let (id, img, r) = (d.id.clone(), image.clone(), svc.run.clone());
@@ -2353,7 +2381,7 @@ impl Apps {
     }
 
     /// Delete an upload's bytes: whether they're gone.
-    async fn delete_upload(&self, key: &str) -> bool {
+    pub(crate) async fn delete_upload(&self, key: &str) -> bool {
         match &self.deps.objects {
             Some(o) => o.delete(key).await.is_ok(),
             None => match tokio::fs::remove_file(self.cfg.home.join(key)).await {
@@ -2369,6 +2397,13 @@ impl Apps {
         let Ok(spent) = self.db(|s| s.spent_uploads(100)).await else { return };
         for (_, id, key) in spent.into_iter().filter(|(service, _, _)| self.owns(service)) {
             self.drop_upload(&id, &key).await;
+        }
+        // Pruned deployments' sources whose delete failed: again.
+        let Ok(left) = self.db(|s| s.pruned_sources(100)).await else { return };
+        for (id, key) in left {
+            if self.delete_upload(&key).await {
+                let _ = self.db(move |s| s.clear_source(&id)).await;
+            }
         }
     }
 
@@ -3342,6 +3377,7 @@ impl Apps {
             self.logs_expired.store(now, std::sync::atomic::Ordering::Relaxed);
             self.expire_logs_pass(&services, now).await;
             self.build_cache_pass(&services, now).await;
+            self.source_pass(now).await;
             self.next_cache_pass(now).await;
         }
         if now - self.intercepts_checked.load(std::sync::atomic::Ordering::Relaxed) >= 60_000 {

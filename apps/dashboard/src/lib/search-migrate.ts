@@ -1,17 +1,42 @@
 /**
- * roll search: migrating from Elasticsearch or OpenSearch (`POST /v1/search/clusters/{id}/migrate/
- * inspect` and `…/migrate`, crates/search-control/src/migrate.rs). roll's server talks to the
- * remote, never the browser; the remote's key or password goes to roll with those two calls,
- * isn't kept and is never sent back. The copies run as reindex tasks the dashboard follows
- * through `_tasks`.
+ * roll search: migrating from Elasticsearch, OpenSearch, Algolia, Typesense or Meilisearch
+ * (`POST /v1/search/clusters/{id}/migrate/inspect` and `…/migrate`,
+ * crates/search-control/src/migrate.rs and src/saas/). roll's server talks to the source, never
+ * the browser; the source's key or password goes to roll with those two calls, isn't kept and is
+ * never sent back. The copies run as reindex tasks the dashboard follows through `_tasks`.
  */
 
 import { call } from "./roll-api";
 import { indexNameProblem } from "./search-import";
 
+/** The product a migration reads from (`elasticsearch` when absent). */
+export type SourceKind = "elasticsearch" | "opensearch" | "algolia" | "typesense" | "meilisearch";
+
+/** Algolia, Typesense and Meilisearch: their definitions are mapped, not copied as they are. */
+export function isSaas(kind: SourceKind | undefined): boolean {
+  return kind === "algolia" || kind === "typesense" || kind === "meilisearch";
+}
+
+/** What the source picker offers, and what each source's form asks for. */
+export const SOURCES: { value: SourceKind; label: string; placeholder: string; keyHint: string }[] = [
+  {
+    value: "elasticsearch",
+    label: "Elasticsearch",
+    placeholder: "https://my-deployment.es.us-east-1.aws.elastic.cloud",
+    keyHint: "Its encoded value. It needs the monitor cluster privilege, and read and view_index_metadata on the indices to copy.",
+  },
+  { value: "opensearch", label: "OpenSearch", placeholder: "https://search-my-domain.us-east-1.es.amazonaws.com", keyHint: "Its encoded value, if the cluster takes API keys." },
+  { value: "algolia", label: "Algolia", placeholder: "", keyHint: "The Admin API key, or a key with the listIndexes, browse and settings ACLs (Settings → API Keys)." },
+  { value: "typesense", label: "Typesense", placeholder: "https://xyz.a1.typesense.net", keyHint: "An admin key, or one allowed collections:get, documents:export, synonyms:get and overrides:get." },
+  { value: "meilisearch", label: "Meilisearch", placeholder: "https://ms-1234.meilisearch.io", keyHint: "The master key, or a key with indexes.get, documents.get, settings.get and stats.get. Leave it empty for a server without one." },
+];
+
 /** The remote and how to log in to it. */
 export interface MigrateSource {
-  host: string;
+  kind?: SourceKind;
+  host?: string;
+  /** Algolia's application id (its host comes from it). */
+  app_id?: string;
   api_key?: string;
   username?: string;
   password?: string;
@@ -34,6 +59,8 @@ export interface RemoteIndex {
   aliases_on_roll: string[];
   /** An index of this name exists on the roll cluster already. */
   exists: boolean;
+  /** An Algolia replica: the index it's a replica of (copying the primary brings its sort). */
+  replica_of?: string;
 }
 
 export interface MigrateInspect {
@@ -54,6 +81,37 @@ export interface DroppedSetting {
   reason: string;
 }
 
+/** Something of an Algolia, Typesense or Meilisearch index that didn't map, and why. */
+export interface NotMapped {
+  kind: "setting" | "synonym" | "rule" | "field" | "replica";
+  name: string;
+  reason: string;
+}
+
+/** What an Algolia, Typesense or Meilisearch index becomes on roll. */
+export interface SaasPlan {
+  id_field: string;
+  docs: number | null;
+  mappings: number;
+  default_fields: string[];
+  synonyms: number;
+  rules: number;
+  synonyms_set?: string;
+  rulesets?: string[];
+  search_template: string;
+  /** Algolia replicas, each a search template with its sort. */
+  sort_templates?: Record<string, string>;
+  /** Rulesets of Algolia rules with `filterPromotes` (their pins match the search's `filters`). */
+  filtered_rulesets?: string[];
+  /** Algolia rules that filter or rewrite the query: search with `template` when the query
+   * meets the rule's condition. */
+  rule_templates?: { rule: string; anchoring: string; pattern: string; template: string }[];
+  not_mapped: NotMapped[];
+  not_mapped_more: number;
+  /** What mapped with a difference worth knowing. */
+  notes: string[];
+}
+
 /** One picked index after `migrate`: its task, why it didn't start, or that it waits for a
  * free task slot (`queued`: nothing was created for it yet). */
 export interface MigrateStarted {
@@ -67,13 +125,37 @@ export interface MigrateStarted {
   reason?: string;
   /** The copy was created (also when the call's deadline cut the rest short). */
   created?: boolean;
+  /** Algolia, Typesense, Meilisearch: what the index became (or would become, `dry_run`). */
+  plan?: SaasPlan;
+  /** Copied again into the index an earlier copy of it made. */
+  restarted?: boolean;
+  /** `dry_run`: the index exists from an earlier copy, which a start copies into again. */
+  restart?: boolean;
+  note?: string;
+  /** A stopped copy resumed: from where (`dry_run`: `resume`). */
+  resumed?: string;
+  resume?: string;
+  /** `catch_up` or `cutover` (a copy when absent). */
+  step?: "catch_up" | "cutover";
+  /** A catch-up: how it reads (`since_attribute`, or `compare`: every record). */
+  method?: "since_attribute" | "compare";
+  /** A cutover: the alias moved, and the indices it left. */
+  alias?: string;
+  previous?: string[];
 }
 
 export interface MigrateRequest {
   source: MigrateSource;
-  indices: { index: string; dest?: string }[];
+  indices: { index: string; dest?: string; alias?: string; full?: boolean }[];
+  /** `copy` (the default: resumes a stopped copy), `catch_up` or `cutover`. */
+  step?: "copy" | "catch_up" | "cutover";
+  /** `catch_up`: a numeric attribute the records set when they change. */
+  since_attribute?: string;
+  since_unit?: "s" | "ms";
   requests_per_second?: number;
   size?: number;
+  /** Algolia, Typesense, Meilisearch: answer each index's plan, making nothing. */
+  dry_run?: boolean;
 }
 
 const cl = (id: string) => `/v1/search/clusters/${encodeURIComponent(id)}`;
@@ -86,7 +168,11 @@ export const migrateApi = {
 export type AuthKind = "api_key" | "basic" | "none";
 
 export interface SourceForm {
+  /** Elasticsearch unless set. */
+  kind?: SourceKind;
   host: string;
+  /** Algolia's application id. */
+  appId?: string;
   auth: AuthKind;
   apiKey: string;
   username: string;
@@ -95,7 +181,14 @@ export interface SourceForm {
 
 /** What the form sends: only the credentials of the chosen kind. */
 export function sourceFrom(f: SourceForm): MigrateSource {
+  const kind = f.kind ?? "elasticsearch";
+  if (isSaas(kind)) {
+    const s: MigrateSource = kind === "algolia" ? { kind, app_id: (f.appId ?? "").trim() } : { kind, host: f.host.trim() };
+    if (f.apiKey.trim()) s.api_key = f.apiKey.trim();
+    return s;
+  }
   const s: MigrateSource = { host: f.host.trim() };
+  if (kind === "opensearch") s.kind = kind;
   if (f.auth === "api_key" && f.apiKey.trim()) s.api_key = f.apiKey.trim();
   if (f.auth === "basic" && f.username.trim()) {
     s.username = f.username.trim();
@@ -106,6 +199,14 @@ export function sourceFrom(f: SourceForm): MigrateSource {
 
 /** Why the form can't be sent yet, or `null`. */
 export function sourceProblem(f: SourceForm): string | null {
+  const kind = f.kind ?? "elasticsearch";
+  if (kind === "algolia") {
+    const app = (f.appId ?? "").trim();
+    if (!app) return "Enter the application id.";
+    if (!/^[A-Za-z0-9]{1,32}$/.test(app)) return "The application id is letters and digits, as Algolia's dashboard shows it.";
+    if (!f.apiKey.trim()) return "Paste an API key.";
+    return null;
+  }
   const host = f.host.trim();
   if (!host) return "Enter the cluster's URL.";
   const scheme = /^([a-z][a-z0-9+.-]*):\/\//i.exec(host)?.[1]?.toLowerCase();
@@ -113,9 +214,26 @@ export function sourceProblem(f: SourceForm): string | null {
   // Credentials typed into the URL would end up in places a password shouldn't.
   if (/^([a-z][a-z0-9+.-]*:\/\/)?[^/]*@/i.test(host)) return "Put the username and password in their own fields, not in the URL.";
   if (/\s/.test(host)) return "The URL can't hold spaces.";
+  if (kind === "typesense" && !f.apiKey.trim()) return "Paste an API key.";
+  if (kind === "meilisearch") return null;
   if (f.auth === "api_key" && !f.apiKey.trim()) return "Paste an API key, or pick another way to sign in.";
   if (f.auth === "basic" && !f.username.trim()) return "Enter a username.";
   return null;
+}
+
+/** Why a key would cross the network readable, or `null`: a Typesense or Meilisearch URL over
+ * plain `http://`. */
+export function plainHttpWarning(f: SourceForm): string | null {
+  const kind = f.kind ?? "elasticsearch";
+  if (kind !== "typesense" && kind !== "meilisearch") return null;
+  return /^http:\/\//i.test(f.host.trim()) ? "This URL is plain http: the API key crosses the network unencrypted. Use https:// if the server has it." : null;
+}
+
+/** What the panel says when roll refuses a review or a start: both need `admin` on the
+ * cluster (they add the source to the cluster and start copies as its own user). */
+export function migrateRefusal(status: number | undefined, message: string): string {
+  if (status === 403) return "Reviewing and starting a migration need admin on this cluster: they create indices and start copies as the cluster's own user. Ask someone with admin, or sign in with a token that has it.";
+  return message;
 }
 
 /** The URL roll will call, as the server normalizes it (a scheme and a port), for display. */
@@ -286,6 +404,41 @@ export function queueRetryDelay(failures: number): number {
  * index and copy name); the others as they were. */
 export function mergeStarted(rows: MigrateStarted[], results: MigrateStarted[]): MigrateStarted[] {
   return rows.map((r) => (r.queued ? (results.find((x) => x.index === r.index && x.dest === r.dest) ?? r) : r));
+}
+
+/** What didn't map, grouped by kind in a fixed order (settings, fields, replicas, synonyms,
+ * rules), for the summary shown before a copy starts and on its row. */
+export function notMappedGroups(plan: SaasPlan): { kind: NotMapped["kind"]; items: NotMapped[] }[] {
+  const order: NotMapped["kind"][] = ["setting", "field", "replica", "synonym", "rule"];
+  return order.map((kind) => ({ kind, items: plan.not_mapped.filter((n) => n.kind === kind) })).filter((g) => g.items.length > 0);
+}
+
+/** How many things didn't map, the ones past the listed ones included. */
+export function notMappedCount(plan: SaasPlan): number {
+  return plan.not_mapped.length + plan.not_mapped_more;
+}
+
+/** What an Algolia, Typesense or Meilisearch copy's row offers next: resume a copy that
+ * stopped, or, once it's done, catch up and cut over; nothing while it runs. */
+export function nextSteps(row: MigrateStarted, state: TaskState | undefined): "resume" | "after" | null {
+  if (!row.plan && !row.step) return null;
+  if (row.step === "cutover") return null;
+  if (state === "done") return "after";
+  if (state === "failed" || state === "cancelled" || state === "lost") return row.step === "catch_up" ? "after" : "resume";
+  return null;
+}
+
+/** `rows` with the one for `result`'s index and copy replaced by it (a resume, a catch-up, a
+ * cutover), the plan kept when the new answer has none. */
+export function replaceRow(rows: MigrateStarted[], result: MigrateStarted): MigrateStarted[] {
+  return rows.map((r) => (r.index === result.index && r.dest === result.dest ? { ...result, plan: result.plan ?? r.plan } : r));
+}
+
+/** Why a catch-up's timestamp attribute can't be sent, or `null` (empty: every record is read). */
+export function sinceProblem(attr: string): string | null {
+  const a = attr.trim();
+  if (!a) return null;
+  return /^[\p{L}\p{N}_.@-]+$/u.test(a) ? null : "An attribute name: letters, digits, _ . - @.";
 }
 
 /** Dropped settings grouped by reason, in the order they first appear. */

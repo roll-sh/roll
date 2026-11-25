@@ -15,10 +15,17 @@
 //!
 //! The encoded key is in the create answer only. Listing reads the cluster's keys back; revoking
 //! invalidates one, refusing any key that isn't a browser key.
+//!
+//! A derivable key (`derivable: true`) also has a signing secret, in the create answer and a
+//! rotate's only, from which a backend derives narrower short-lived keys with no call to roll
+//! ([`search_es::xpack::security::derived`]). It is kept in the key's `metadata.roll_browser.derive`,
+//! sealed for the cluster and the key ([`search_es::xpack::security::derived::seal_kind`]), and
+//! a rotate replaces it, which refuses every key derived under the old one.
 
 use super::{Control, ControlError, Result, connection_of};
 use base64::Engine;
 use search_es::EsRequest;
+use search_es::xpack::security::derived::{self, DERIVE};
 use search_server::browser::{MAX_PER_MINUTE, METADATA};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -56,6 +63,10 @@ pub struct NewBrowserKey {
     /// `max_concurrent`): the safe defaults when left out, widened by the owner.
     #[serde(default)]
     pub limits: Option<Limits>,
+    /// Whether a backend may derive keys from it without a call to roll: the answer then has its
+    /// signing secret too.
+    #[serde(default)]
+    pub derivable: Option<bool>,
 }
 
 /// A browser key's request limits; every field optional.
@@ -116,19 +127,7 @@ fn reach(k: &NewBrowserKey) -> Result<Value> {
                 return Err(ControlError::Invalid(format!("indices: at most {MAX_INDICES}")));
             }
             for n in i {
-                if n.is_empty() || n.len() > 255 || n.contains([',', ' ', '"', '\\', '/', '?', '#']) || n.starts_with(['-', '+', '_']) {
-                    return Err(ControlError::Invalid(format!("indices: {n:?} isn't an index name or pattern")));
-                }
-                if n.chars().all(|c| c == '*') {
-                    return Err(ControlError::Invalid(format!("indices: {n:?} would reach every index, hidden ones included: name the indices or a pattern of them")));
-                }
-                if n.starts_with('.') {
-                    return Err(ControlError::Invalid(format!("indices: {n:?} is a hidden or system index: a browser key can't reach those")));
-                }
-                // `alias:index` names an index of a remote cluster (cross-cluster search).
-                if n.contains(':') {
-                    return Err(ControlError::Invalid(format!("indices: {n:?}: browser keys can't search across clusters")));
-                }
+                search_es::xpack::security::browser::check_index_name(n).map_err(|why| ControlError::Invalid(format!("indices: {n:?} {why}")))?;
             }
             (Some(i.clone()), None)
         }
@@ -230,6 +229,12 @@ fn listed(k: &Value, cluster_id: &str) -> Option<Value> {
             out[f] = v.clone();
         }
     }
+    // Whether keys may be derived from it, and since when its secret signs them (never the secret).
+    let derive = meta.get(DERIVE);
+    out["derivable"] = json!(derive.is_some());
+    if let Some(at) = derive.and_then(|d| d.get("rotated_at")) {
+        out["secret_rotated_at"] = at.clone();
+    }
     Some(out)
 }
 
@@ -242,6 +247,10 @@ impl Control {
             return Err(ControlError::Invalid("browser keys are API keys: make them on an Elasticsearch-flavor cluster (OpenSearch clients don't send API keys)".into()));
         }
         let reach = reach(&k)?;
+        let derivable = k.derivable == Some(true);
+        if derivable && self.cfg.sealer.is_none() && !self.cfg.unsealed_secrets {
+            return Err(ControlError::Invalid(search_es::seal::keyless("browser key's signing secret").reason().to_string()));
+        }
         // Counted before the create, so two racing creates may pass one over: a bound on keys
         // left lying around, not a quota.
         if self.browser_keys(id).await?.len() >= MAX_KEYS {
@@ -270,6 +279,19 @@ impl Control {
         let (Some(key_id), Some(key)) = (v["id"].as_str(), v["api_key"].as_str()) else {
             return Err(ControlError::Internal(anyhow::anyhow!("the cluster answered without a key")));
         };
+        // The secret is sealed for the key's id, which the create gave: set it now, and take the
+        // key back when that fails.
+        let signing = if derivable {
+            match self.set_signing_secret(&c, key_id, body["metadata"].clone(), 1).await {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    let _ = self.delete_key_on(&c, key_id).await;
+                    return Err(e);
+                }
+            }
+        } else {
+            None
+        };
         let mut out = json!({
             "id": key_id,
             "name": k.name.trim(),
@@ -281,7 +303,55 @@ impl Control {
         if let (Some(o), Some(r)) = (out.as_object_mut(), reach.as_object()) {
             o.extend(r.clone());
         }
+        out["derivable"] = json!(derivable);
+        if let Some((secret, at)) = signing {
+            out["signing_secret"] = json!(secret);
+            out["secret_rotated_at"] = json!(at);
+        }
         Ok(out)
+    }
+
+    /// Gives browser key `key_id` of cluster `c` (whose `metadata` is `metadata`) a new signing
+    /// secret, sealed for the cluster and the key, as its `generation` (the stored one's next:
+    /// the cluster stores it only then, so of two racing rotations one is a 409): the secret in
+    /// the clear and when it was made.
+    async fn set_signing_secret(&self, c: &crate::store::SearchCluster, key_id: &str, mut metadata: Value, generation: i64) -> Result<(String, i64)> {
+        let secret = derived::new_secret();
+        let sealed = search_es::seal::seal_given_with(self.cfg.sealer.as_deref(), self.cfg.unsealed_secrets, &derived::seal_kind(&c.id, key_id), &secret)
+            .map_err(|e| ControlError::Invalid(e.reason().to_string()))?;
+        let at = super::now();
+        metadata[METADATA][DERIVE] = json!({ "secret": sealed, "rotated_at": at, "generation": generation });
+        let body = serde_json::to_vec(&json!({ "metadata": metadata })).unwrap_or_default();
+        let resp = self.call(c, EsRequest::json("PUT", &format!("/_security/api_key/{}", urlencoding::encode(key_id)), body)).await;
+        if resp.status == 409 {
+            return Err(ControlError::Conflict(format!("browser key {key_id}'s signing secret changed while this one was made: rotate again")));
+        }
+        if resp.status != 200 {
+            // The cluster's error, never the request: it held the sealed secret.
+            return Err(ControlError::Internal(anyhow::anyhow!("setting the signing secret of browser key {key_id} of cluster {} failed ({})", c.name, resp.status)));
+        }
+        Ok((secret, at))
+    }
+
+    /// A new signing secret for derivable browser key `key_id` of cluster `id`, in this answer
+    /// only: every key derived under the old one is refused from the next request.
+    pub async fn rotate_browser_key_secret(&self, id: &str, key_id: &str) -> Result<Value> {
+        let c = self.get(id).await?;
+        let none = || ControlError::NotFound(format!("no browser key {key_id} on cluster {}", c.name));
+        if c.flavor == "opensearch" {
+            return Err(none());
+        }
+        let resp = self.call(&c, EsRequest::new("GET", &format!("/_security/api_key?id={}&active_only=true", urlencoding::encode(key_id)))).await;
+        let v: Value = serde_json::from_slice(&resp.body).unwrap_or(Value::Null);
+        let Some(k) = v["api_keys"].as_array().into_iter().flatten().find(|k| k["id"].as_str() == Some(key_id)) else { return Err(none()) };
+        let Some(listed) = listed(k, &c.id) else { return Err(none()) };
+        if listed["derivable"] != json!(true) {
+            return Err(ControlError::Conflict(format!("browser key {key_id} isn't derivable: make a derivable one (\"derivable\": true)")));
+        }
+        let generation = k["metadata"][METADATA][DERIVE]["generation"].as_i64().unwrap_or(0);
+        let next = generation.checked_add(1).ok_or_else(|| ControlError::Conflict(format!("browser key {key_id}'s signing secret can't be rotated again: make a new browser key")))?;
+        let (secret, at) = self.set_signing_secret(&c, key_id, k["metadata"].clone(), next).await?;
+        Ok(json!({ "id": key_id, "signing_secret": secret, "secret_rotated_at": at }))
     }
 
     /// Cluster `id`'s browser keys that still work (not revoked, not expired), newest first.

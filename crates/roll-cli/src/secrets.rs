@@ -3,6 +3,7 @@
 
 mod local_agent;
 mod mount;
+mod vm_login;
 mod repo;
 
 use crate::Api;
@@ -673,11 +674,16 @@ pub enum Secrets {
         out: std::path::PathBuf,
     },
     /// Back the project up, sealed to a public key (`keygen`): every environment, folder, value,
-    /// link, import, policy and required key. Written to stdout or --out.
+    /// link, import, policy and required key, the registrations links name (CAs' keys among
+    /// them), identities, syncs and settings. Written to stdout or --out. `backup verify` opens one
+    /// with its secret key and compares it with the project, writing nothing.
+    #[command(args_conflicts_with_subcommands = true)]
     Backup {
+        #[command(subcommand)]
+        cmd: Option<BackupCmd>,
         /// The recipient's public key (base64url X25519). It may start with `-`.
         #[arg(long, allow_hyphen_values = true)]
-        to: String,
+        to: Option<String>,
         #[arg(long)]
         out: Option<std::path::PathBuf>,
     },
@@ -705,6 +711,9 @@ pub enum Secrets {
         /// The secret key file (`keygen`).
         #[arg(long)]
         key: std::path::PathBuf,
+        /// Say what the restore would bring back and what stops it, writing nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Split the deployment key (`ROLL_SECRET_KEY`) or a backup's secret key into shares, any
     /// threshold of which give it back, and combine them again. On this machine only: nothing
@@ -1068,6 +1077,24 @@ pub enum Requests {
         bypass: bool,
     },
     Close { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum BackupCmd {
+    /// Open a backup with its secret key, here, and compare it with the project: counts, key
+    /// names, values and certificates by fingerprint, registrations it doesn't hold. Writes
+    /// nothing (the restore drill).
+    Verify {
+        /// A backup file (`backup --out`, or one from the schedule's bucket).
+        #[arg(required_unless_present = "latest_from_bucket")]
+        file: Option<std::path::PathBuf>,
+        /// The newest scheduled backup, read from the project's bucket.
+        #[arg(long, conflicts_with = "file")]
+        latest_from_bucket: bool,
+        /// The secret key file (`keygen`).
+        #[arg(long)]
+        key: std::path::PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1827,8 +1854,14 @@ pub enum Identities {
     /// Let workloads whose OIDC tokens match log in. For GitHub Actions:
     /// `add deploy --github acme/web --claim ref=refs/heads/main --for-env production`. For
     /// machines on AWS: `add web --aws arn:aws:iam::123456789012:role/web --for-env production`.
+    /// For machines with no platform identity: `add racks --machine --for-env production`, then a
+    /// bootstrap token per machine (`identities bootstrap`).
     Add {
         name: String,
+        /// Machines with no platform identity (bare metal, on premises): each logs in with a
+        /// bootstrap token made for it once, then a machine credential that replaces itself.
+        #[arg(long, conflicts_with_all = ["github", "aws", "issuer", "subject", "audience", "claims", "jwks"])]
+        machine: bool,
         /// A GitHub repo (`owner/name`): GitHub Actions' issuer, and every workflow of the repo
         /// (narrow with `--claim`).
         #[arg(long, conflicts_with_all = ["issuer", "subject", "aws"])]
@@ -1879,6 +1912,22 @@ pub enum Identities {
         /// The JWKS file (`-` for stdin): `kubectl get --raw /openid/v1/jwks`.
         #[arg(long, value_name = "FILE")]
         jwks: String,
+    },
+    /// A bootstrap token for one machine of a machine identity (printed once): single-use, it lives
+    /// minutes. On the machine, `ROLL_IDENTITY=ID ROLL_BOOTSTRAP_TOKEN=…` and `roll secrets agent`
+    /// or `roll run` exchange it for a machine credential they keep and replace.
+    Bootstrap {
+        id: String,
+        /// How long it may wait to be exchanged, 1–60 minutes (default 10).
+        #[arg(long)]
+        minutes: Option<u32>,
+        /// Only from this address or CIDR (repeatable): it and the machine's credentials.
+        #[arg(long = "allow-ip")]
+        allow_ips: Vec<String>,
+        /// How long each machine credential lives, 1–720 hours (default 24); the machine replaces it
+        /// at half that.
+        #[arg(long)]
+        credential_hours: Option<u32>,
     },
     /// Delete an identity; the tokens it gave out stop working.
     Rm { id: String },
@@ -3673,7 +3722,23 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
         },
         Secrets::Keygen { .. } | Secrets::Key(_) | Secrets::Unseal { .. } | Secrets::Find { .. } | Secrets::Recover { .. } | Secrets::Doctor | Secrets::Health { all: true, .. } | Secrets::Issuer { .. } | Secrets::Agent(_) | Secrets::Mount(_) => unreachable!("handled before a project is picked"),
-        Secrets::Backup { to, out } => {
+        Secrets::Backup { cmd: Some(BackupCmd::Verify { file, latest_from_bucket, key }), .. } => {
+            let sealed = match (file, latest_from_bucket) {
+                (Some(file), _) => serde_json::from_str(&std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?)?,
+                (None, _) => c.call(Method::GET, &format!("{}/backup/latest", c.base()), None).await?,
+            };
+            let archive = open_backup(&key, &sealed)?;
+            let r = c.call(Method::POST, &format!("{}/backup/verify", c.base()), Some(archive)).await?;
+            if json_out {
+                return print(&r);
+            }
+            if let Some(k) = sealed["key"].as_str() {
+                println!("{k}: opened with the key.");
+            }
+            print_verified(&r, &c.project);
+        }
+        Secrets::Backup { to, out, .. } => {
+            let to = to.ok_or_else(|| anyhow::anyhow!("backup --to <public key> (`roll secrets keygen` makes one), or `backup verify`"))?;
             let v = c.call(Method::POST, &format!("{}/backup", c.base()), Some(json!({ "recipient": to }))).await?;
             let text = serde_json::to_string_pretty(&v)?;
             match out {
@@ -3709,16 +3774,48 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 _ => println!("The first one is due now."),
             }
         }
-        Secrets::Restore { file, key } => {
-            let secret = std::fs::read_to_string(&key).with_context(|| format!("reading {}", key.display()))?;
+        Secrets::Restore { file, key, dry_run } => {
             let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?)?;
-            let plain = crate::seal::open(&secret, v["context"].as_str().unwrap_or_default(), &v["sealed"])?;
-            let archive: Value = serde_json::from_slice(&plain)?;
+            let archive = open_backup(&key, &v)?;
+            if dry_run {
+                let r = c.call(Method::POST, &format!("{}/backup/verify", c.base()), Some(archive)).await?;
+                if json_out {
+                    return print(&r);
+                }
+                let n = |part: &str| r[part]["archive"].as_u64().unwrap_or(0);
+                println!(
+                    "A restore into {} would bring back {} environments, {} keys, {} registrations, {} identities (disabled) and {} syncs (paused). Nothing was written.",
+                    c.project,
+                    n("environments"),
+                    n("keys"),
+                    n("registrations"),
+                    n("identities"),
+                    n("syncs")
+                );
+                if r["registrations"]["live"].as_u64().unwrap_or(0) > 0 {
+                    println!("{} has {} registrations already: one of the same name is kept as it is, not restored.", c.project, r["registrations"]["live"]);
+                }
+                let left_out: Vec<String> = r["left_out"].as_array().into_iter().flatten().map(s).collect();
+                if !left_out.is_empty() {
+                    println!("Not in the backup, registered again by hand: {}", left_out.join(", "));
+                }
+                if r["live_keys"].as_u64().unwrap_or(0) > 0 {
+                    bail!("{} has {} keys: a restore goes only into a project with none", c.project, r["live_keys"]);
+                }
+                return Ok(());
+            }
             let r = c.call(Method::POST, &format!("{}/restore", c.base()), Some(archive)).await?;
             if json_out {
                 return print(&r);
             }
-            println!("Restored {} environments and {} keys into {}", r["environments"], r["secrets"], c.project);
+            println!(
+                "Restored {} environments, {} keys and {} registrations into {}",
+                r["environments"], r["secrets"], r["registrations"], c.project
+            );
+            let waiting = r["identities"].as_u64().unwrap_or(0) + r["syncs"].as_u64().unwrap_or(0);
+            if waiting > 0 {
+                println!("{} identities and {} syncs wait, disabled and paused: an admin resumes each, and acts as its maker from then on.", r["identities"], r["syncs"]);
+            }
             for w in r["warnings"].as_array().into_iter().flatten() {
                 eprintln!("warning: {}", s(w));
             }
@@ -3861,9 +3958,11 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     println!("{}  {:<16} {}{keys}  {}  envs {}  {}  {} min  used {used}", s(&i["id"]), s(&i["name"]), s(&i["issuer"]), s(&i["subject"]), list(&i["environments"]), list(&i["actions"]), i["ttl_minutes"]);
                 }
             }
-            Identities::Add { name, github, aws, issuer, subject, audience, claims, envs, paths, actions, ttl_minutes, allow_ips, jwks, gateway } => {
+            Identities::Add { name, machine, github, aws, issuer, subject, audience, claims, envs, paths, actions, ttl_minutes, allow_ips, jwks, gateway } => {
                 let actions = if gateway.is_some() { vec![] } else if actions.is_empty() { vec!["read".to_string(), "reveal".to_string()] } else { actions };
-                let mut body = if let Some(arn) = &aws {
+                let mut body = if machine {
+                    json!({ "name": name, "kind": "machine", "actions": actions })
+                } else if let Some(arn) = &aws {
                     json!({ "name": name, "kind": "aws", "arn": arn, "actions": actions })
                 } else {
                     let (issuer, subject) = match (github, issuer, subject) {
@@ -3902,6 +4001,10 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     return print(&v);
                 }
                 println!("{}", s(&v["id"]));
+                if machine {
+                    eprintln!("Created {}. For each machine: roll secrets identities bootstrap {} (a single-use token), then on the machine ROLL_IDENTITY={} ROLL_BOOTSTRAP_TOKEN=… (and ROLL_API_URL).", s(&v["name"]), s(&v["id"]), s(&v["id"]));
+                    return Ok(());
+                }
                 eprintln!("Created {}. In the workload: ROLL_IDENTITY={} (and ROLL_API_URL), then `roll run …` logs in by itself.", s(&v["name"]), s(&v["id"]));
                 // Signed requests name the server: only worth saying when it isn't the API's URL.
                 if let Some(id) = v["server_id"].as_str().filter(|id| *id != c.api.base.trim_end_matches('/')) {
@@ -3915,6 +4018,25 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     return print(&v);
                 }
                 println!("{} now pins {} key(s)", s(&v["name"]), v["pinned_keys"]);
+            }
+            Identities::Bootstrap { id, minutes, allow_ips, credential_hours } => {
+                let mut body = json!({});
+                if let Some(m) = minutes {
+                    body["minutes"] = json!(m);
+                }
+                if !allow_ips.is_empty() {
+                    body["allowed_ips"] = json!(allow_ips);
+                }
+                if let Some(h) = credential_hours {
+                    body["credential_hours"] = json!(h);
+                }
+                let v = c.call(Method::POST, &format!("{}/identities/{}/bootstrap", c.base(), enc(&id)), Some(body)).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("{}", s(&v["secret"]));
+                let left = (v["expires_at"].as_i64().unwrap_or_default() - now_ms()).max(0) / 60_000;
+                eprintln!("Single-use, within {left} min: on the machine, ROLL_IDENTITY={id} and ROLL_BOOTSTRAP_TOKEN (or ROLL_BOOTSTRAP_TOKEN_FILE) set to it. Used a second time, it revokes the machine's credentials.");
             }
             Identities::Rm { id } => {
                 c.call(Method::DELETE, &format!("{}/identities/{}", c.base(), enc(&id)), None).await?;
@@ -5086,19 +5208,29 @@ fn write_private(path: &std::path::Path, text: &str) -> anyhow::Result<()> {
 }
 
 /// A workload identity's login (`ROLL_IDENTITY`): the workload's own OIDC token (`oidc_token`:
-/// `ROLL_OIDC_TOKEN`, `ROLL_OIDC_TOKEN_FILE`, GitHub Actions or Azure Pipelines); without one (or
-/// with `ROLL_IDENTITY_KIND=aws`), a `GetCallerIdentity` signed with the machine's AWS credentials
+/// `ROLL_OIDC_TOKEN`, `ROLL_OIDC_TOKEN_FILE`, GitHub Actions or Azure Pipelines); a VM's from its
+/// metadata server (`ROLL_IDENTITY_KIND=gcp` or `azure`); a machine identity's credential
+/// (`ROLL_IDENTITY_KIND=machine`, or a bootstrap token set: vm_login.rs); without any (or with
+/// `ROLL_IDENTITY_KIND=aws`), a `GetCallerIdentity` signed with the machine's AWS credentials
 /// (aws_login.rs). A short-lived secrets token and when it ends (ms).
 pub async fn identity_login(api: &Api, identity: &str) -> anyhow::Result<(String, i64)> {
     let env = |k: &str| std::env::var(k).ok().filter(|t| !t.trim().is_empty());
+    let kind = env("ROLL_IDENTITY_KIND").map(|k| k.trim().to_string());
+    if vm_login::is_machine(kind.as_deref()) {
+        return vm_login::machine_login(api, identity).await;
+    }
     let oidc_source = ["ROLL_OIDC_TOKEN", "ROLL_OIDC_TOKEN_FILE", "ACTIONS_ID_TOKEN_REQUEST_URL", "SYSTEM_OIDCREQUESTURI"].iter().any(|k| env(k).is_some());
-    let aws = match env("ROLL_IDENTITY_KIND").as_deref().map(str::trim) {
+    let aws = match kind.as_deref() {
         Some("aws") => true,
-        Some("oidc") => false,
-        Some(k) => anyhow::bail!("ROLL_IDENTITY_KIND is aws or oidc, not {k}"),
+        Some("oidc" | "gcp" | "azure") => false,
+        Some(k) => anyhow::bail!("ROLL_IDENTITY_KIND is oidc, aws, gcp, azure or machine, not {k}"),
         None => !oidc_source,
     };
-    let proof = if aws {
+    let proof = if let Some(k @ ("gcp" | "azure")) = kind.as_deref() {
+        // The server's own URL by default, as GitHub Actions' token: one roll's isn't good at another.
+        let audience = env("ROLL_OIDC_AUDIENCE").unwrap_or_else(|| api.base.clone());
+        json!({ "identity": identity, "token": vm_login::platform_token(k, &audience).await? })
+    } else if aws {
         let signed = crate::aws_login::login_request(&api.http, &api.base)
             .await
             .context("ROLL_IDENTITY is set but there's no OIDC token (ROLL_OIDC_TOKEN, ROLL_OIDC_TOKEN_FILE, GitHub Actions with `permissions: id-token: write`, Azure Pipelines with SYSTEM_ACCESSTOKEN) and no AWS credentials to sign with")?;
@@ -5106,6 +5238,11 @@ pub async fn identity_login(api: &Api, identity: &str) -> anyhow::Result<(String
     } else {
         json!({ "identity": identity, "token": oidc_token(api).await?.trim() })
     };
+    post_login(api, proof).await
+}
+
+/// `POST /v1/secrets/login` with `proof`: a short-lived secrets token and when it ends (ms).
+async fn post_login(api: &Api, proof: Value) -> anyhow::Result<(String, i64)> {
     // A request of its own, without a token (never through `Api::call`, which renews logins).
     let mut req = api.http.post(format!("{}/v1/secrets/login", api.base)).json(&proof);
     for (k, v) in &api.headers {
@@ -5533,6 +5670,35 @@ async fn approve_table(api: &Api, all: &mut setup::File, f: &repo::Found) -> any
 }
 
 /// `2026-11-30 05:00 UTC`.
+/// A backup (`{sealed, context}`) opened with the secret key in `key`, on this machine.
+fn open_backup(key: &std::path::Path, v: &Value) -> anyhow::Result<Value> {
+    let secret = std::fs::read_to_string(key).with_context(|| format!("reading {}", key.display()))?;
+    let plain = crate::seal::open(&secret, v["context"].as_str().unwrap_or_default(), &v["sealed"])?;
+    Ok(serde_json::from_slice(&plain)?)
+}
+
+/// `backup verify`'s answer: each part's counts, then what's missing, changed or new, by name.
+fn print_verified(r: &Value, project: &str) {
+    println!("A backup of {} from {} (archive v{}), against {project}:", s(&r["project"]), utc_ms(r["at"].as_i64().unwrap_or(0)), r["v"]);
+    let names = |v: &Value| v.as_array().into_iter().flatten().map(s).collect::<Vec<_>>().join(", ");
+    for part in ["environments", "keys", "registrations", "identities", "syncs"] {
+        let d = &r[part];
+        println!("  {part}: {} in the backup, {} here", d["archive"], d["live"]);
+        for (what, field) in [("missing here", "missing"), ("changed since", "changed"), ("not in the backup", "extra")] {
+            let list = names(&d[field]);
+            if !list.is_empty() {
+                println!("    {what}: {list}");
+            }
+        }
+    }
+    if !names(&r["settings"]).is_empty() {
+        println!("  settings that differ: {}", names(&r["settings"]));
+    }
+    if !names(&r["left_out"]).is_empty() {
+        println!("  registrations a backup doesn't carry: {}", names(&r["left_out"]));
+    }
+}
+
 fn utc_ms(at: i64) -> String {
     chrono::DateTime::from_timestamp_millis(at).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default()
 }

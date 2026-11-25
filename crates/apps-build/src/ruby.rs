@@ -6,7 +6,7 @@ use crate::{Commands, Draft, Error, Overrides, Provider, Tree, node, text};
 
 const DEFAULT: Ver = Ver(3, 3);
 
-pub(crate) fn detect(tree: &dyn Tree, _: &Overrides) -> Result<Option<Draft>, Error> {
+pub(crate) fn detect(tree: &dyn Tree, o: &Overrides) -> Result<Option<Draft>, Error> {
     let Some(gemfile) = text(tree, "Gemfile") else {
         return Ok(None);
     };
@@ -50,7 +50,7 @@ pub(crate) fn detect(tree: &dyn Tree, _: &Overrides) -> Result<Option<Draft>, Er
             build,
             Some(format!("{rails_cmd} server -b 0.0.0.0 -p $PORT")),
         )
-    } else if gem("jekyll") {
+    } else if gem("jekyll") && !tree.exists("config.ru") && !tree.exists("Procfile") && o.start.is_none() {
         notes.push("jekyll in the Gemfile: a static Jekyll site, built into _site".into());
         (Some("jekyll"), Some("bundle exec jekyll build".to_string()), Some(crate::static_site::START.to_string()))
     } else if tree.exists("config.ru") {

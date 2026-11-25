@@ -390,6 +390,7 @@ fn innermost(e: &(dyn std::error::Error + 'static)) -> String {
 }
 
 /// A connection to one remote cluster: the guarded client, its credentials and its limits.
+#[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
     /// `scheme://host:port[pathPrefix]`.
@@ -510,6 +511,14 @@ impl Client {
     pub fn for_control(mut self, limit: u64) -> Client {
         self.limit = self.limit.min(limit);
         self.exchange = CONTROL_EXCHANGE;
+        self.quiet = true;
+        self
+    }
+
+    /// Errors that never quote the remote's answer (its status and `error.type` at most), the
+    /// client's limits otherwise kept: roll's imports from other search products, whose pages
+    /// are larger than a control call's.
+    pub fn quiet(mut self) -> Client {
         self.quiet = true;
         self
     }
@@ -679,6 +688,29 @@ impl Client {
         self.json(reqwest::Method::GET, path_query, None, &mut retries).await
     }
 
+    /// One `POST` of a JSON body whose answer is JSON (an Algolia page, its synonyms or its
+    /// rules), its tree charged while it's held; a rejected one (429) is sent again with
+    /// Elasticsearch's backoff.
+    pub async fn post(&self, path_query: &str, body: &str) -> EsResult<Charged> {
+        let mut retries = 0;
+        self.json(reqwest::Method::POST, path_query, Some(body), &mut retries).await
+    }
+
+    /// One `GET` whose answer is lines (a Typesense collection's JSONL export), read as it comes:
+    /// the whole exchange may take `exchange`, each read the client's socket timeout, and no line
+    /// may be longer than the client's answer limit (refused, never buffered past it). What's
+    /// buffered is charged while it is.
+    pub async fn lines(&self, path_query: &str, exchange: Duration) -> EsResult<Lines> {
+        let url = format!("{}{path_query}", self.base);
+        let resp = self.http.get(&url).timeout(exchange).send().await.map_err(|e| self.transport_error(&e))?;
+        let status = resp.status().as_u16();
+        if !(200..300).contains(&status) {
+            let b = Body { status, bytes: Bytes::new(), held: None };
+            return Err(self.status_error(&reqwest::Method::GET, path_query, &b));
+        }
+        Ok(Lines { resp, client: self.clone(), buf: bytes::BytesMut::new(), held: self.budget.clone().map(Reservation::new), ended: false })
+    }
+
     /// One `GET` of a `_cat` API in `format=json`, read row by row without a tree
     /// ([`super::remote_page::scan_rows`]): the answer's bytes and each row charged while held.
     pub async fn get_rows(&self, path_query: &str, columns: &[&str], max_rows: usize) -> EsResult<(super::remote_page::CatRows, Option<Reservation>)> {
@@ -694,6 +726,67 @@ impl Client {
     /// `scheme://host:port`, as errors name the remote.
     pub fn host(&self) -> &str {
         &self.host
+    }
+}
+
+/// An answer read line by line ([`Client::lines`]).
+pub struct Lines {
+    resp: reqwest::Response,
+    client: Client,
+    buf: bytes::BytesMut,
+    /// What `buf` holds, on the breaker.
+    held: Option<Reservation>,
+    ended: bool,
+}
+
+impl Lines {
+    /// The next line (without its newline; blank lines skipped), or `None` at the end. A line
+    /// longer than the client's limit is refused as an answer that size would be.
+    pub async fn next(&mut self) -> EsResult<Option<Bytes>> {
+        loop {
+            if let Some(at) = self.buf.iter().position(|b| *b == b'\n') {
+                let line = self.buf.split_to(at + 1).freeze();
+                if let Some(h) = self.held.as_mut() {
+                    h.release(line.len() as u64);
+                }
+                let line = line.slice(..at);
+                let trimmed = line.iter().rposition(|b| !b.is_ascii_whitespace()).map_or(0, |e| e + 1);
+                if trimmed == 0 {
+                    continue;
+                }
+                return Ok(Some(line.slice(..trimmed)));
+            }
+            if self.ended {
+                if self.buf.iter().all(u8::is_ascii_whitespace) {
+                    return Ok(None);
+                }
+                let line = self.buf.split().freeze();
+                if let Some(h) = self.held.as_mut() {
+                    h.release(line.len() as u64);
+                }
+                return Ok(Some(line));
+            }
+            match self.resp.chunk().await.map_err(|e| self.client.transport_error(&e))? {
+                None => self.ended = true,
+                Some(chunk) => {
+                    let n = (self.buf.len() + chunk.len()) as u64;
+                    // Past the limit with no line end in sight: refused, never buffered.
+                    if n > self.client.limit && !chunk.contains(&b'\n') {
+                        return Err(too_large(n, self.client.limit));
+                    }
+                    if let Some(h) = self.held.as_mut() {
+                        h.add(chunk.len() as u64, BREAKER_LABEL)?;
+                    }
+                    self.buf.extend_from_slice(&chunk);
+                    // A line that ended in this chunk may still be over the limit.
+                    if let Some(at) = self.buf.iter().position(|b| *b == b'\n')
+                        && at as u64 > self.client.limit
+                    {
+                        return Err(too_large(at as u64, self.client.limit));
+                    }
+                }
+            }
+        }
     }
 }
 

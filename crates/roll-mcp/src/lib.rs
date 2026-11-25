@@ -725,14 +725,17 @@ impl Ctx {
     /// anything else" short of rules that allow all of them everywhere, or the policy's
     /// `agents_ask` covering one (it holds MCP calls whatever the token allows). The operator's
     /// never do (the gate doesn't judge them). `policy` is read once per listing.
-    fn might_ask(&self, product: &str, actions: &[Action], policy: Option<&roll_access::Policy>) -> bool {
+    fn might_ask(&self, product: &str, scope: &tools::AskScope, policy: Option<&roll_access::Policy>) -> bool {
         use roll_auth::scope::{Effect, Resources};
         let Principal::Grant(g) = &self.principal else { return false };
-        let rules = || g.scope.0.iter().filter(|r| r.product == "*" || r.product == product);
-        let asks = rules().any(|r| actions.iter().any(|a| r.actions.get(a) == Some(&Effect::Ask)));
-        let everywhere = |a: &Action| rules().any(|r| r.actions.get(a) == Some(&Effect::Allow) && r.resources == Resources::All && r.environments.is_none() && r.paths.is_none() && !r.unprotected);
-        let otherwise = g.ask_otherwise && !actions.iter().all(everywhere);
-        asks || otherwise || policy.is_some_and(|p| actions.iter().any(|a| p.agent_asks(product, *a, None)))
+        let actions = &scope.actions;
+        // What it lends or copies from another product is decided on that product too: any rule.
+        let rules = || g.scope.0.iter().filter(|r| scope.others || r.product == "*" || r.product == product);
+        let asks = rules().any(|r| actions.iter().any(|a| r.actions.get(a) == Some(&Effect::Ask)) || (scope.others && r.actions.values().any(|e| *e == Effect::Ask)));
+        let everywhere = |a: &Action| g.scope.0.iter().filter(|r| r.product == "*" || r.product == product).any(|r| r.actions.get(a) == Some(&Effect::Allow) && r.resources == Resources::All && r.environments.is_none() && r.paths.is_none() && !r.unprotected);
+        let otherwise = g.ask_otherwise && (scope.others || !actions.iter().all(everywhere));
+        let held = policy.is_some_and(|p| if scope.others { !p.agents_ask.is_empty() } else { actions.iter().any(|a| p.agent_asks(product, *a, None)) });
+        asks || otherwise || held
     }
 
     /// A person's own token reaches only what their session can (`USER_REACH`).
@@ -811,10 +814,10 @@ impl Ctx {
         // tool (roll code's) takes it wherever any of the connection's could.
         let policy = self.m.config.access.as_ref().map(|a| a.policy_now());
         let roll: std::collections::HashMap<&str, &tools::Tool> = tools::all().iter().map(|t| (t.name, t)).collect();
-        let any = roll.values().any(|t| self.might_ask(t.product, &t.actions(), policy.as_ref()));
+        let any = roll.values().any(|t| self.might_ask(t.product, t.ask_scope(), policy.as_ref()));
         for t in &mut out {
             let asks = match t["name"].as_str().and_then(|n| roll.get(n)) {
-                Some(tool) => self.might_ask(tool.product, &tool.actions(), policy.as_ref()),
+                Some(tool) => self.might_ask(tool.product, tool.ask_scope(), policy.as_ref()),
                 None => any,
             };
             if !asks && let Some(p) = t["inputSchema"]["properties"].as_object_mut() {
@@ -1457,6 +1460,17 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: Option<&str>) -
     }
     // In lockdown, an outside record's text never reaches the model: withheld in the structured
     // answer, and the text block (a fronted set may write its own) rebuilt from what's left.
+    // An outside answer that isn't JSON goes the same way, whole: a picture (a fork's page can
+    // show any words) or a text (a fork's caught mail).
+    if ctx.lockdown && result["structuredContent"]["outside"] == true && let Some(ct) = result["structuredContent"]["content_type"].as_str() {
+        let notice = if ct.starts_with("image/") { lockdown::WITHHELD_PICTURE } else { lockdown::WITHHELD };
+        let s = &mut result["structuredContent"];
+        if let Some(o) = s.as_object_mut() {
+            o.remove("content_b64");
+        }
+        s["withheld"] = json!(notice);
+        result["content"] = json!([{ "type": "text", "text": notice }]);
+    }
     if ctx.lockdown && lockdown::withhold(&mut result["structuredContent"]) + lockdown::withhold_fields(&mut result["structuredContent"], outside) > 0 {
         let text = text::fit(text::render(&result["structuredContent"]), narrowing.as_deref());
         if let Some(content) = result["content"].as_array_mut() {
@@ -1784,6 +1798,8 @@ pub(crate) fn waiting_approval(s: &Value) -> Option<&str> {
 async fn outcome(tool: &str, narrowing: Option<&[&str]>, resp: Response) -> Value {
     let status = resp.status();
     let ct = resp.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    // A picture of an outside record (a fork's page): lockdown withholds it as it does text.
+    let outside = resp.headers().contains_key(lockdown::OUTSIDE_HEADER);
     let bytes = axum::body::to_bytes(resp.into_body(), MAX_ANSWER).await.unwrap_or_default();
     let json: Option<Value> = if ct.starts_with("application/json") || ct.is_empty() { serde_json::from_slice(&bytes).ok() } else { None };
     if !status.is_success() {
@@ -1830,16 +1846,30 @@ async fn outcome(tool: &str, narrowing: Option<&[&str]>, resp: Response) -> Valu
         Some(v) => (text::fit(text::render(&v), narrowing), if v.is_object() { v } else { json!({ "items": v }) }),
         None if bytes.is_empty() => ("done".to_string(), json!({ "ok": true })),
         None => match std::str::from_utf8(&bytes) {
-            Ok(s) => (cut(s.to_string(), false), json!({ "content_type": ct, "bytes": bytes.len() })),
+            Ok(s) => {
+                let mut structured = json!({ "content_type": ct, "bytes": bytes.len() });
+                if outside {
+                    structured["outside"] = json!(true);
+                }
+                (cut(s.to_string(), false), structured)
+            }
             Err(_) => {
                 use base64::Engine;
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
                 // An image the agent can look at (a preview's screenshot): MCP's image content.
                 if IMAGES.contains(&ct.as_str()) && bytes.len() <= MAX_IMAGE {
                     let text = format!("a {ct} image, {} bytes", bytes.len());
-                    return json!({ "content": [{ "type": "text", "text": text }, { "type": "image", "data": b64, "mimeType": ct }], "structuredContent": { "content_type": ct, "bytes": bytes.len() }, "isError": false });
+                    let mut structured = json!({ "content_type": ct, "bytes": bytes.len() });
+                    if outside {
+                        structured["outside"] = json!(true);
+                    }
+                    return json!({ "content": [{ "type": "text", "text": text }, { "type": "image", "data": b64, "mimeType": ct }], "structuredContent": structured, "isError": false });
                 }
-                (format!("{} bytes of {ct} (base64 in structuredContent.content_b64)", bytes.len()), json!({ "content_type": ct, "bytes": bytes.len(), "content_b64": b64 }))
+                let mut structured = json!({ "content_type": ct, "bytes": bytes.len(), "content_b64": b64 });
+                if outside {
+                    structured["outside"] = json!(true);
+                }
+                (format!("{} bytes of {ct} (base64 in structuredContent.content_b64)", bytes.len()), structured)
             }
         },
     };

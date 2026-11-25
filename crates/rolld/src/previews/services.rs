@@ -415,6 +415,15 @@ impl roll_previews::ports::Apps for RollApps {
         anyhow::bail!("its build on the copy wasn't ready within a minute")
     }
 
+    /// What roll apps billed the `pv-` environment this month (its usage's days since the 1st,
+    /// UTC: builds, compute and egress at its prices). None when it can't say.
+    async fn spent_usd(&self, preview: &str, service: &str) -> Option<f64> {
+        let (id, env) = self.find(preview, service).await.ok()??;
+        let u = self.api.get(&format!("{}/usage?days=31", Self::env_path(&id, &env))).await.ok()?;
+        let first = roll_previews::store::month_start(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as i64) / 86_400_000;
+        Some(u["days"].as_array()?.iter().filter(|d| d["day"].as_i64().is_some_and(|d| d >= first)).filter_map(|d| d["usd"].as_f64()).sum())
+    }
+
     /// The `pv-` environment's latest minute (roll apps' metrics): cores, and resident bytes.
     /// None while nothing ran that minute (asleep).
     async fn metrics(&self, preview: &str, service: &str) -> Option<(f64, u64)> {
@@ -600,9 +609,9 @@ impl super::fleet::Shoot for AppsShots {
         shot.map(Some)
     }
 
-    async fn try_page(&self, service: &str, env: &str, path: &str, steps: &[roll_previews::settings::Step]) -> anyhow::Result<Option<roll_previews::ports::Tried>> {
+    async fn try_page(&self, service: &str, env: &str, path: &str, steps: &[roll_previews::settings::Step], login: Option<&roll_previews::ports::Login>) -> anyhow::Result<Option<roll_previews::ports::Tried>> {
         let Some(at) = self.reach.reach(service, env).await? else { return Ok(None) };
-        let tried = self.runtime.try_in(&at.container, at.port, path, steps).await;
+        let tried = self.runtime.try_in(&at.container, at.port, path, steps, login).await;
         drop(at.hold);
         tried.map(Some)
     }
@@ -931,6 +940,10 @@ impl roll_previews::ports::Apps for Services {
         if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { self.apps.metrics(preview, service).await } else { self.runtime.metrics(preview, service).await }
     }
 
+    async fn spent_usd(&self, preview: &str, service: &str) -> Option<f64> {
+        if self.local(preview, service) { None } else { self.apps.spent_usd(preview, service).await }
+    }
+
     async fn live_build(&self, preview: &str, service: &str) -> Option<roll_previews::ports::LiveBuild> {
         if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { self.apps.live_build(preview, service).await } else { None }
     }
@@ -1004,11 +1017,11 @@ impl roll_previews::ports::Apps for Services {
     }
 
     /// A `roll.toml` service's page in a browser, its steps taken (roll apps' services: next).
-    async fn try_page(&self, preview: &str, service: &str, path: &str, steps: &[roll_previews::settings::Step]) -> anyhow::Result<Option<roll_previews::ports::Tried>> {
-        let Some((id, env)) = self.apps.find(preview, service).await? else { return self.runtime.try_page(preview, service, path, steps).await };
+    async fn try_page(&self, preview: &str, service: &str, path: &str, steps: &[roll_previews::settings::Step], login: Option<&roll_previews::ports::Login>) -> anyhow::Result<Option<roll_previews::ports::Tried>> {
+        let Some((id, env)) = self.apps.find(preview, service).await? else { return self.runtime.try_page(preview, service, path, steps, login).await };
         // A roll apps instance: run where it runs, as its screenshot is.
         let Some(shots) = &self.shots else { return Ok(None) };
-        super::fleet::try_page(self.fleet.as_ref(), shots.as_ref(), &id, &env, path, steps).await
+        super::fleet::try_page(self.fleet.as_ref(), shots.as_ref(), &id, &env, path, steps, login).await
     }
 
     /// A `roll.toml` service's page, read through the runtime (roll apps' services answer at their

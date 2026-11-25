@@ -1616,7 +1616,7 @@ async fn builds_and_answers_in(w: &World, name: &str, files: &[(&str, &str)], wa
     assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
 }
 
-/// The pinned OpenTelemetry agents (`build.otel`) install and start: a Node and a Python app built
+/// The pinned OpenTelemetry agents (`build.otel`) install and start: a Node, a Python and a .NET app built
 /// with them, their traces on (to an intake that isn't there: an exporter's failure never stops
 /// the app), still answer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1636,7 +1636,13 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_response(200); self.end_headers(); self.wfile.write(b'python otel ' + str(ok).encode())
 http.server.HTTPServer(('0.0.0.0', int(os.environ['PORT'])), H).serve_forever()
 "),
-    ], "python otel True", json!({"otel": true}), traces).await;
+    ], "python otel True", json!({"otel": true}), traces.clone()).await;
+    // .NET's: its zip checked for the build's architecture, its startup hook and native profiler
+    // both loaded (a wrong profiler path only logs).
+    builds_and_answers_in(&w, "dotnet-otel", &[
+        ("app.csproj", "<Project Sdk=\"Microsoft.NET.Sdk.Web\"><PropertyGroup><TargetFramework>net9.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings></PropertyGroup></Project>\n"),
+        ("Program.cs", "var app = WebApplication.CreateBuilder(args).Build();\napp.MapGet(\"/\", () => \"dotnet otel \" + (AppDomain.CurrentDomain.GetAssemblies().Any(a => a.GetName().Name!.StartsWith(\"OpenTelemetry.AutoInstrumentation\")) && File.ReadAllText(\"/proc/self/maps\").Contains(\"OpenTelemetry.AutoInstrumentation.Native.so\")));\napp.Run();\n"),
+    ], "dotnet otel True", json!({"otel": true}), traces).await;
     w.apps.shutdown().await;
 }
 

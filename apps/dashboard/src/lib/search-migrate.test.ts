@@ -1,7 +1,7 @@
 // Tests of the dashboard's migration from Elasticsearch or OpenSearch (vitest).
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { aliasOffer, defaultDest, destProblem, displayHost, droppedByReason, mergeStarted, partial, queuedPicks, queueRetryDelay, retryableStart, shouldStartQueued, sourceFrom, sourceProblem, taskPoll, taskProgress, type MigrateStarted, type SourceForm } from "./search-migrate";
+import { aliasOffer, defaultDest, destProblem, displayHost, droppedByReason, mergeStarted, migrateRefusal, nextSteps, notMappedCount, replaceRow, sinceProblem, notMappedGroups, partial, plainHttpWarning, queuedPicks, queueRetryDelay, retryableStart, shouldStartQueued, sourceFrom, sourceProblem, taskPoll, taskProgress, type MigrateStarted, type SaasPlan, type SourceForm } from "./search-migrate";
 
 const form = (f: Partial<SourceForm>): SourceForm => ({ host: "https://es.example:9243", auth: "api_key", apiKey: "", username: "", password: "", ...f });
 
@@ -95,4 +95,44 @@ test("a start of waiting copies that fails is retried, with growing pauses, unle
   assert.ok(retryableStart(429) && retryableStart(503));
   assert.ok(!retryableStart(400) && !retryableStart(403) && !retryableStart(404) && !retryableStart(undefined));
   assert.deepEqual([0, 1, 2, 3, 4, 20].map(queueRetryDelay), [5_000, 10_000, 20_000, 40_000, 60_000, 60_000]);
+});
+
+test("Algolia, Typesense and Meilisearch send their own fields, and only those", () => {
+  const algolia = form({ kind: "algolia", host: "https://ignored.example", appId: " APP1 ", apiKey: " k ", username: "u", password: "p" });
+  assert.deepEqual(sourceFrom(algolia), { kind: "algolia", app_id: "APP1", api_key: "k" });
+  assert.equal(sourceProblem(algolia), null);
+  assert.match(sourceProblem(form({ kind: "algolia", appId: "app.1", apiKey: "k" })) ?? "", /letters and digits/);
+  assert.match(sourceProblem(form({ kind: "algolia", appId: "APP1" })) ?? "", /API key/);
+  assert.deepEqual(sourceFrom(form({ kind: "typesense", host: "https://x.a1.typesense.net", apiKey: "t", username: "u" })), { kind: "typesense", host: "https://x.a1.typesense.net", api_key: "t" });
+  assert.match(sourceProblem(form({ kind: "typesense", host: "https://x.a1.typesense.net" })) ?? "", /API key/);
+  // A Meilisearch without a master key takes no key.
+  assert.deepEqual(sourceFrom(form({ kind: "meilisearch", host: "http://ms.example:7700" })), { kind: "meilisearch", host: "http://ms.example:7700" });
+  assert.equal(sourceProblem(form({ kind: "meilisearch", host: "http://ms.example:7700" })), null);
+  assert.deepEqual(sourceFrom(form({ kind: "opensearch", apiKey: "k" })), { kind: "opensearch", host: "https://es.example:9243", api_key: "k" });
+
+  const plan = { not_mapped: [{ kind: "rule", name: "r1", reason: "x" }, { kind: "setting", name: "ranking", reason: "y" }], not_mapped_more: 3 } as SaasPlan;
+  assert.deepEqual(notMappedGroups(plan).map((g) => g.kind), ["setting", "rule"]);
+  assert.equal(notMappedCount(plan), 5);
+
+  // A key sent over plain http is said to be readable; https and Algolia say nothing.
+  assert.match(plainHttpWarning(form({ kind: "meilisearch", host: "http://ms.example:7700" })) ?? "", /unencrypted/);
+  assert.equal(plainHttpWarning(form({ kind: "typesense", host: "https://x.a1.typesense.net" })), null);
+  assert.equal(plainHttpWarning(form({ kind: "elasticsearch", host: "http://es.example" })), null);
+  assert.match(migrateRefusal(403, "forbidden"), /admin/);
+  assert.equal(migrateRefusal(400, "bad"), "bad");
+});
+
+test("a copy's row offers resume when it stopped, and catch up and cutover once done", () => {
+  const plan = { not_mapped: [], not_mapped_more: 0 } as unknown as SaasPlan;
+  const row: MigrateStarted = { index: "products", dest: "products", task: "n:1", plan };
+  assert.equal(nextSteps(row, "running"), null);
+  assert.equal(nextSteps(row, "failed"), "resume");
+  assert.equal(nextSteps(row, "done"), "after");
+  assert.equal(nextSteps({ ...row, step: "catch_up" }, "failed"), "after");
+  assert.equal(nextSteps({ index: "logs", dest: "logs", task: "n:2" }, "done"), null, "an Elasticsearch copy has none");
+  const caught = replaceRow([row, { index: "x", dest: "x" }], { index: "products", dest: "products", task: "n:3", step: "catch_up" });
+  assert.deepEqual([caught[0].task, caught[0].plan, caught[1].index], ["n:3", plan, "x"]);
+  assert.equal(sinceProblem(""), null);
+  assert.equal(sinceProblem("updated_at"), null);
+  assert.match(sinceProblem("a b") ?? "", /attribute/);
 });

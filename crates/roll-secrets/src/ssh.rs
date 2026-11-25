@@ -106,7 +106,7 @@ const FIELDS: &[Field] = &[
     Field { field: "private_key", label: "Private key", modes: &[Mode::Dynamic], secret: true, suggest: "SSH_KEY", credential: Some("login") },
 ];
 
-fn aad(project: &str, id: &str) -> String {
+pub(crate) fn aad(project: &str, id: &str) -> String {
     format!("roll-secrets:ssh:{project}:{id}:key")
 }
 

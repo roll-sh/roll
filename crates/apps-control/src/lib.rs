@@ -19,6 +19,7 @@ pub mod attacks;
 pub mod attack_mode;
 pub mod advice;
 pub mod build_steps;
+pub mod source;
 pub mod visitor_token;
 pub mod backups;
 pub mod browser;
@@ -603,6 +604,9 @@ pub struct ResolvedVars {
     pub notices: Vec<String>,
     /// A closed environment's placeholders: each variable's binding (the hosts it's for).
     pub placeholders: BTreeMap<String, String>,
+    /// A Postgres link's parts ([`integrations::pg_parts`]): its `DATABASE_URL` says them, so
+    /// their arrival isn't a change to deploy.
+    pub derived: BTreeSet<String>,
 }
 
 impl ResolvedVars {
@@ -1667,6 +1671,10 @@ impl Apps {
             let id = d.id.clone();
             if let Ok(Some(key)) = self.db(move |s| s.deployment_upload(&id)).await {
                 self.drop_upload(&d.id, &key).await;
+            }
+            let id = d.id.clone();
+            if let Ok(Some(key)) = self.db(move |s| s.deployment_source(&id)).await {
+                self.delete_upload(&key).await;
             }
             self.logs.delete(&format!("build:{}", d.id)).await;
         }
@@ -3184,7 +3192,15 @@ impl Apps {
     async fn resolve_vars_as(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, deployment: &str, read_refs: bool, mint: bool) -> Result<ResolvedVars> {
         let mut vars: BTreeMap<String, (String, &'static str)> = BTreeMap::new();
         let port = svc.run.port.unwrap_or(8080);
-        let run = svc.for_env(env).map_or_else(|_| svc.run.clone(), |s| s.run);
+        // The deployment's own size (a rollback's, roll.toml's), else what the next deploy takes.
+        let run = match deployment.is_empty() {
+            false => {
+                let d = deployment.to_string();
+                self.db(move |s| s.deployment(&d)).await.ok().map(|d| d.run)
+            }
+            true => None,
+        }
+        .unwrap_or_else(|| svc.for_env(env).map_or_else(|_| svc.run.clone(), |s| s.run));
         let roll = [
             ("PORT", port.to_string()),
             // The app server's workers for its instance's size (Heroku's): gunicorn, uvicorn and
@@ -3299,6 +3315,8 @@ impl Apps {
         let (sid, e) = (svc.id.clone(), env.name.clone());
         let (links, own_data, branches) = self.db(move |s| Ok((s.links_minted(&sid)?, s.env_data(&sid, &e)?, s.env_branches(&sid, &e)?))).await?;
         let mut branch_notices = Vec::new();
+        // A Postgres link's parts, each with the URL it was read from.
+        let mut derived: BTreeMap<String, String> = BTreeMap::new();
         // The resources it links itself: in an environment with data of its own, each is its
         // branch or left out, so roll secrets' links to them are left out too.
         let own_links: BTreeSet<(&'static str, String)> = links.iter().filter(|l| l.0 != LinkKind::Service).map(|l| (l.0.as_str(), l.1.clone())).collect();
@@ -3327,9 +3345,11 @@ impl Apps {
             };
             match read {
                 Ok(vs) => {
+                    // Another service's names are the project network's: nothing to rewrite.
+                    let mut vs: Vec<(String, String)> = vs.into_iter().map(|(k, v)| if kind == LinkKind::Service { (k, v) } else { let v = self.deps.runtime.reach(&v); (k, v) }).collect();
+                    // From the URL the instance reaches.
+                    derived.extend(integrations::pg_parts(kind, &mut vs).into_iter().map(|k| (format!("{prefix}{k}"), format!("{prefix}DATABASE_URL"))));
                     for (k, v) in vs {
-                        // Another service's names are the project network's: nothing to rewrite.
-                        let v = if kind == LinkKind::Service { v } else { self.deps.runtime.reach(&v) };
                         vars.insert(format!("{prefix}{k}"), (v, "link"));
                     }
                 }
@@ -3502,14 +3522,24 @@ impl Apps {
                 Some(v) => format!("{v}{sep}{ours}"),
                 None => ours.to_string(),
             };
+            // Joined to the app's own value, which keeps its source: a secret's stays one, so its
+            // value is still redacted where the runtime prints it (a JVM's "Picked up …").
+            let joined = |var: &str, ours: &str, sep: &str, first: bool, vars: &mut BTreeMap<String, (String, &'static str)>| {
+                let src = vars.get(var).map_or("roll", |(_, s)| *s);
+                let v = join(vars.get(var), ours, sep, first);
+                vars.insert(var.into(), (v, src));
+            };
             match agent.as_deref() {
-                Some("node") => {
-                    let v = join(vars.get("NODE_OPTIONS"), &format!("--require {}", apps_build::otel::NODE_REQUIRE), " ", false);
-                    vars.insert("NODE_OPTIONS".into(), (v, "roll"));
-                }
-                Some("python") => {
-                    let v = join(vars.get("PYTHONPATH"), apps_build::otel::PYTHON_PATH, ":", true);
-                    vars.insert("PYTHONPATH".into(), (v, "roll"));
+                Some("node") => joined("NODE_OPTIONS", &format!("--require {}", apps_build::otel::NODE_REQUIRE), " ", false, &mut vars),
+                Some("python") => joined("PYTHONPATH", apps_build::otel::PYTHON_PATH, ":", true, &mut vars),
+                Some("java") => joined("JAVA_TOOL_OPTIONS", &format!("-javaagent:{}", apps_build::otel::JAVA_AGENT), " ", false, &mut vars),
+                // The runtime loads one profiler: an app that names its own (another vendor's
+                // agent), or says whether profiling is on, keeps its choice, and roll's isn't started.
+                Some("dotnet") if !["CORECLR_PROFILER", "CORECLR_ENABLE_PROFILING"].iter().any(|k| vars.get(*k).is_some_and(|(v, _)| !v.trim().is_empty())) => {
+                    for (k, v) in apps_build::otel::DOTNET_VARS {
+                        vars.insert(k.into(), (v.into(), "roll"));
+                    }
+                    joined("DOTNET_STARTUP_HOOKS", apps_build::otel::DOTNET_HOOK, ":", true, &mut vars);
                 }
                 _ => {}
             }
@@ -3518,7 +3548,19 @@ impl Apps {
         let sources = vars.iter().map(|(k, (_, s))| (k.clone(), *s)).collect();
         // A placeholder the service's own variable of the same name replaced isn't one.
         placeholders.retain(|k, _| vars.get(k).is_some_and(|(_, s)| *s == "secret"));
-        Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources, unresolved, refused, ref_texts, sealed, from_secrets, plain_secrets, notices, placeholders })
+        // A part the service's own variable of the same name replaced isn't one; and when its URL
+        // was replaced (the service's own, roll secrets'), its parts would name another database
+        // than the URL the instance gets: left out.
+        let link_set = |vars: &BTreeMap<String, (String, &'static str)>, k: &str| vars.get(k).is_some_and(|(_, s)| *s == "link");
+        let gone: Vec<String> = derived.iter().filter(|(_, url)| !link_set(&vars, url)).map(|(k, _)| k.clone()).collect();
+        for k in &gone {
+            if link_set(&vars, k) {
+                vars.remove(k);
+            }
+            derived.remove(k);
+        }
+        let derived: BTreeSet<String> = derived.into_keys().filter(|k| link_set(&vars, k)).collect();
+        Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources, unresolved, refused, ref_texts, sealed, from_secrets, plain_secrets, notices, placeholders, derived })
     }
 
     /// Fill the `${{ … }}` in the service's own variables ([`refs`]); what named nothing. A
@@ -3812,7 +3854,12 @@ impl Apps {
         let mut out = Vec::new();
         for (kind, r, prefix, minted) in rows {
             let names = self.link_values(&svc, kind, &r, "production", minted).await;
-            let vars = names.map(|v| v.into_iter().map(|(k, _)| format!("{prefix}{k}")).collect()).unwrap_or_default();
+            let vars = names
+                .map(|mut v| {
+                    integrations::pg_parts(kind, &mut v);
+                    v.into_iter().map(|(k, _)| format!("{prefix}{k}")).collect()
+                })
+                .unwrap_or_default();
             let opts: integrations::LinkOptions = options.get(&(kind.as_str().to_string(), r.clone())).and_then(|o| serde_json::from_str(o).ok()).unwrap_or_default();
             out.push(Link { kind, r#ref: r, prefix, vars, indices: None, access: None }.narrowed(&opts));
         }
@@ -3899,6 +3946,8 @@ impl Apps {
                 return Err(e);
             }
         };
+        let mut vars = vars;
+        integrations::pg_parts(kind, &mut vars);
         Ok(Link { kind, r#ref: r#ref.to_string(), vars: vars.into_iter().map(|(k, _)| format!("{prefix}{k}")).collect(), prefix, indices: None, access: None }.narrowed(&options))
     }
 
@@ -4440,7 +4489,12 @@ impl Apps {
             }
             false => None,
         };
+        let fork_csp = match row.ephemeral && row.egress.closed() && self.deps.runtime.closes_egress() {
+            true => self.fork_policy(&live.service, &row.name).await,
+            false => None,
+        };
         let g = Arc::new(live::Gate {
+            fork_csp,
             maintenance: row.maintenance,
             allow,
             rate: crate::model::RateLimit::stricter(row.rate_limit, file.rate_limit),
@@ -4454,6 +4508,37 @@ impl Apps {
             redirects: row.redirects.as_deref().map(crate::site_rules::EnvRedirects::parse).filter(|r| !r.is_empty()).map(Arc::new) });
         live.set_gate(g.clone(), seen);
         Ok(g)
+    }
+
+    /// A fork's preview's Content-Security-Policy (roll previews' own proxy's, `fork_policy` in
+    /// roll-previews): its own origins are the same preview environment's across the project's
+    /// services (generated hosts and custom domains); inline scripts, eval, `data:` and `blob:`
+    /// stay allowed, so pages run as before, but nothing loads from or is sent to another site.
+    async fn fork_policy(self: &Arc<Self>, service: &str, env: &str) -> Option<axum::http::HeaderValue> {
+        let sid = service.to_string();
+        let project = self.db(move |s| s.service(&sid)).await.ok()?.project;
+        let e = env.to_string();
+        let (slugs, domains) = self
+            .db(move |s| {
+                let (mut slugs, mut domains) = (Vec::new(), Vec::new());
+                for svc in s.services(Some(&project))? {
+                    if let Ok(row) = s.environment(&svc.id, &e) {
+                        slugs.push(row.slug.clone());
+                        domains.extend(s.domains(&svc.id, &e)?.into_iter().map(|d| d.hostname));
+                    }
+                }
+                Ok((slugs, domains))
+            })
+            .await
+            .ok()?;
+        // Each as a host source (the generated ones with the apps domain and its port), never a
+        // scheme: the page's own applies.
+        let generated = slugs.iter().map(|slug| self.url(slug)).map(|u| u.split_once("://").map_or(u.clone(), |(_, rest)| rest.to_string()));
+        let mut own: Vec<String> = generated.chain(domains).collect();
+        own.sort();
+        own.dedup();
+        let own = own.join(" ");
+        axum::http::HeaderValue::from_str(&format!("default-src 'self' {own} 'unsafe-inline' 'unsafe-eval' data: blob:; form-action 'self' {own}; base-uri 'self'")).ok()
     }
 
     /// Where a preview's feedback button reads what's been said (roll previews, once it's on this
@@ -4826,8 +4911,12 @@ impl ResolvedVars {
             .iter()
             // `ROLL_AWAKE_URL` is roll's own on every web service: its arrival isn't a change of
             // the service's to deploy (each deployment gets it).
-            // `WEB_CONCURRENCY` follows `cpu` and `memory_mb`, which are settings a deploy already says.
-            .filter(|(k, _)| !matches!(k.as_str(), "ROLL_DEPLOYMENT" | "ROLL_GIT_COMMIT" | "ROLL_GIT_BRANCH" | "ROLL_AWAKE_URL" | "WEB_CONCURRENCY"))
+            .filter(|(k, _)| !matches!(k.as_str(), "ROLL_DEPLOYMENT" | "ROLL_GIT_COMMIT" | "ROLL_GIT_BRANCH" | "ROLL_AWAKE_URL"))
+            // roll's `WEB_CONCURRENCY` follows `cpu` and `memory_mb`, settings a deploy already says;
+            // the service's own value is a change like any.
+            .filter(|(k, _)| !(k == "WEB_CONCURRENCY" && self.sources.get(k.as_str()).copied() == Some("roll")))
+            // A Postgres link's parts follow its URL, which is hashed.
+            .filter(|(k, _)| !self.derived.contains(k))
             // A placeholder is new random text each time it's made: its binding decides.
             .map(|(k, v)| (k.clone(), self.placeholders.get(k).map(|b| format!("placeholder:{b}")).or_else(|| self.ref_texts.get(k).cloned()).unwrap_or_else(|| v.clone())))
             .collect()

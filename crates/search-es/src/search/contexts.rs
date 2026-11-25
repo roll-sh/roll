@@ -42,11 +42,15 @@ pub struct SearchContext {
     pub owner: String,
 }
 
-/// Who a scroll or point in time belongs to: the request's API key, or its user and realm.
+/// Who a scroll or point in time belongs to: the request's API key (a derived key's own, not
+/// its parent's), or its user and realm.
 pub(crate) fn owner_of(ctx: &Ctx) -> String {
     let p = crate::xpack::security::principal(ctx);
     match &p.kind {
-        crate::xpack::security::AuthKind::ApiKey(a) => format!("api_key:{}", a.id),
+        crate::xpack::security::AuthKind::ApiKey(a) => match &a.derived {
+            Some(d) => format!("api_key:{}:derived:{}", a.id, d.id),
+            None => format!("api_key:{}", a.id),
+        },
         _ => format!("{}:{}", p.realm_name, p.username),
     }
 }

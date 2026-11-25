@@ -98,6 +98,8 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/vulnerabilities?severity=` | | `{ scan: ScanSummary \| null, vulnerabilities: Vulnerability[] }`: its image's known vulnerabilities, most severe first (then those with a fix), at most 2,000 (the counts are of all); `severity` keeps those at it or worse; a pruned deployment's list is empty, its counts kept | read |
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/commits` | | `DeployCommits`: what a repo deployment brings over the live one (for the live one: the one live before it), along its first parents, newest first, at most 50 | read |
 | `POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/approve` | | 200 `{deployment, approved_by, needed, live, waiting?}`: a person's approval (signed in or the operator; a token's is 403) of a deployment waiting at `ready` where the environment asks for `approvals`, never its own author's (403); the one that makes the count puts it live (`live`: the new deployment), unless a freeze still stops it (`waiting` says why); 409 when the environment asks for none or it isn't waiting | deploy* |
+| `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/source?path=` | | `{files: {path, bytes, link?}[], truncated}` (at most 10,000), or with `path` one file `{path, bytes, text?}` (`text` when UTF-8 and at most 1 MiB): a folder upload's files as deployed, kept until the deployment is pruned (never the environment a bundle carries, nor a file named as a secret's: `.env*`, keys, `.npmrc`…, counted in `hidden`); 404 for a repo's (its commit) or an image's; two reads at once a node | reveal |
+| `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/output?path=` | | as `…/source`, for a static build's files as it serves them (read from its site's index); 404 for anything but a static build, or once it's pruned | read |
 | `POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/pin` | | `Deployment` with `pinned_at`: never pruned (its image and build log stay, so its rollback stays instant), nor counted toward the kept ones; 409 once pruned; audited | write |
 | `DELETE /v1/apps/services/{id}/environments/{env}/deploys/{dep}/pin` | | `Deployment`: pruned again as the kept ones are; audited | write |
 | `POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollback` | `{ keep_variables? }` (default false: the variables come back as they were when it was live); `X-Roll-Override: 1` puts a never-live `ready` build live during a freeze, audited; or `{ no_traffic: true, variables: {NAME: value} }`: a view of `dep` at its own URL with some of the environment's variables given values of its own (1–50 of its names, each ≤ 64 KiB; `variables` without `no_traffic`, or `no_traffic` without `variables`, is a 400): sealed, never listed, never put live (no `deploy.ready`), not counted toward what's kept, pruned a day after its URL was last visited | 202 `Deployment` (a view's `url` is its own) | deploy*; admin with `X-Roll-Override: 1` |
@@ -270,7 +272,10 @@ type Build = {
   submodule_repos?: string[];
   /** The language's OpenTelemetry agent in a generated Dockerfile (default false): Node's
    *  (`@opentelemetry/auto-instrumentations-node`, by NODE_OPTIONS' --require) and Python's
-   *  (`opentelemetry-distro`, bootstrapped, by PYTHONPATH's sitecustomize), pinned; started only
+   *  (`opentelemetry-distro`, bootstrapped, by PYTHONPATH's sitecustomize), the JVM's (Java,
+   *  Scala, Clojure: OpenTelemetry's Java agent, by JAVA_TOOL_OPTIONS' -javaagent) and .NET 8 and
+   *  later's (its automatic instrumentation: the CORECLR_* profiler variables, unless the app
+   *  names a profiler of its own or sets CORECLR_ENABLE_PROFILING, and DOTNET_STARTUP_HOOKS), pinned and checksummed; started only
    *  while the environment's traces are on, joined to the app's own value; the plan's `otel`
    *  says which. None in the tree's own Dockerfile or another language (a note says so). */
   otel?: boolean;
@@ -288,7 +293,7 @@ type Run = {
                             // non-zero exit fails the deploy; the old one keeps serving
   schedule?: string;        // cron: five fields, in `timezone` (UTC when unset)
   timezone?: string;        // cron: an IANA zone (Europe/Budapest), its daylight saving kept; 400 for an unknown one
-  timeout_s?: number;       // cron: a run's limit (default 3600); web: a request's time to its answer's head, 1–3600, then a 504 (unset: no limit; upgrades and streams that began are the app's)
+  timeout_s?: number;       // cron: a run's limit (default 3600); web: a request's time to its answer's head, 1–3600, then a 504 (unset: 300, Cloud Run's default; upgrades and streams that began are the app's)
   retries?: number;         // cron: a failed or timed-out run is tried again this many times (0–5), after 30 s, then twice as long each time (10 min at most); each try its own run, `cron.failed` only for the last (a canceled run isn't tried again)
   min_instances: number;    // web: 0 scales to zero (default 0); worker: at least 1
   max_instances: number;    // default 3
@@ -759,7 +764,7 @@ type Plan = {
   source_maps?: boolean;
 };
 
-/** Wired on a node today: postgres (DATABASE_URL), redis (REDIS_URL, REDIS_REST_URL/TOKEN) and search. */
+/** Wired on a node today: postgres (DATABASE_URL and its parts: PGHOST, PGPORT, PGUSER, PGPASSWORD, PGDATABASE, PGOPTIONS, PGSSLMODE), redis (REDIS_URL, REDIS_REST_URL/TOKEN) and search. */
 type LinkKind = "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql" | "search" | "service" | "tasks";
 type Link = { kind: LinkKind; ref: string; prefix: string; vars: string[]; indices?: string[] /* a search link's key's indices */; access?: "read" | "append" };
 // `search`: `ref` is a roll search cluster (id or name). The link makes a data-only credential of

@@ -641,6 +641,22 @@ async fn bodies_in_flight_are_held_to_the_node_budget() {
 
 /// A person's clusters and always-on clusters are capped (`--search-max-*-per-person`); branches
 /// count toward the parent's owner, and the operator and admins aren't held to it.
+/// A person's branch that the workspace can't put in its parent's project isn't made: the create
+/// answers 503 and the branch is gone, never left its maker's.
+#[tokio::test]
+async fn a_branch_that_cant_be_homed_with_its_parent_isnt_made() {
+    use reqwest::Method;
+    let e = env().await;
+    e.control.on_branch(Box::new(|_, _| Err("the workspace can't be written".into())));
+    let (s, v) = e.call_as("alice", Method::POST, "/v1/search/clusters", Some(json!({ "name": "orders" }))).await;
+    assert_eq!(s, 200, "{v}");
+    for (path, body) in [("/v1/search/clusters/orders/branches", json!({ "name": "copy" })), ("/v1/search/clusters", json!({ "name": "copy", "parent": "orders" }))] {
+        let (s, v) = e.call_as("alice", Method::POST, path, Some(body)).await;
+        assert_eq!(s, 503, "{path}: {v}");
+        assert_eq!(e.call_as("alice", Method::GET, "/v1/search/clusters/copy", None).await.0, 404, "{path}: the branch is gone");
+    }
+}
+
 #[tokio::test]
 async fn people_are_held_to_their_cluster_caps() {
     use reqwest::Method;
@@ -684,6 +700,16 @@ async fn people_are_held_to_their_cluster_caps() {
     assert!(e.call_as("admin", Method::GET, "/v1/search", None).await.1["caps"].is_null());
     // Alice's count toward nobody else: bob still makes his.
     assert_eq!(e.call_as("bob", Method::POST, "/v1/search/clusters", Some(create("b1", None))).await.0, 200);
+    // One handed to a workspace project (its home: rolld's `on_homed`) is no one's, and counts
+    // toward who made it.
+    for name in ["b2", "b3"] {
+        let (s, v) = e.call_as("bob", Method::POST, "/v1/search/clusters", Some(create(name, None))).await;
+        assert_eq!(s, 200, "{v}");
+        assert!(e.control.store.disown(v["id"].as_str().unwrap()).unwrap());
+        let (_, v) = e.call_as("admin", Method::GET, &format!("/v1/search/clusters/{name}"), None).await;
+        assert!(v["owner"].is_null() && v["made_by"] == "usr_bob", "{v}");
+    }
+    assert_eq!(e.call_as("bob", Method::POST, "/v1/search/clusters", Some(create("b4", None))).await.0, 409, "what bob made for a project counts toward him");
 
     // A deleted cluster frees its place (alice: a1, a2, a1-dev and the admin's a1-fix; two go),
     // and restoring one past the cap is the same 409 as a create.
@@ -1053,6 +1079,210 @@ async fn browsers_search_with_browser_keys() {
         .unwrap();
     assert_eq!(r.status().as_u16(), 403);
     assert_eq!(r.text().await.unwrap(), r#"{"ok":false,"message":"Forbidden due to traffic filtering"}"#);
+}
+
+/// A request with a derived browser key (from `origin`, when given).
+async fn as_derived(e: &Env, key: &str, method: reqwest::Method, p: &str, origin: Option<&str>) -> (u16, Value) {
+    let mut r = e.http.request(method.clone(), format!("{}{p}", e.es)).header("authorization", format!("ApiKey {key}"));
+    if let Some(o) = origin {
+        r = r.header("origin", o);
+    }
+    if method == reqwest::Method::POST {
+        r = r.json(&json!({"query": {"match_all": {}}}));
+    } else if method == reqwest::Method::PUT {
+        r = r.json(&json!({"title": "x"}));
+    }
+    let r = r.send().await.unwrap();
+    let s = r.status().as_u16();
+    let t = r.text().await.unwrap();
+    (s, serde_json::from_str(&t).unwrap_or(Value::String(t)))
+}
+
+/// `products`' request cache stats, read as the owner.
+async fn request_cache(e: &Env, path: &str) -> Value {
+    let r = e.post(&format!("{path}/request"), json!({"method": "GET", "path": "/products/_stats/request_cache", "body": null})).await;
+    body(&r)["_all"]["total"]["request_cache"].clone()
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
+}
+
+/// Keys derived without a call to roll (docs/search/README.md, "Keys derived without a call to
+/// roll"): a backend signs one with a derivable browser key's signing secret, sealed on the
+/// cluster; it searches only its narrowed indices through both filters, every widening is
+/// refused, it expires, and rotating the secret, a branch or revoking the parent stops it.
+#[tokio::test]
+async fn derived_keys_narrow_their_parent_and_die_with_it() {
+    let e = env_with(|c| c.sealer = search_control::Sealer::from_secret(&"derived-keys-test-deployment-key".repeat(2))).await;
+    let c = e.post("/v1/search/clusters", json!({"name": "shop"})).await;
+    let path = format!("/v1/search/clusters/{}", c["id"].as_str().unwrap());
+    let keys = format!("{path}/browser-keys");
+    let bulk = [
+        ("products", "1", json!({"tenant": "acme", "public": true})),
+        ("products", "2", json!({"tenant": "globex", "public": true})),
+        ("products", "3", json!({"tenant": "acme", "public": false})),
+        ("products-archive", "4", json!({"tenant": "acme", "public": true})),
+        ("other", "5", json!({"tenant": "acme", "public": true})),
+    ]
+    .iter()
+    .map(|(i, id, d)| format!("{}\n{d}\n", json!({"index": {"_index": i, "_id": id}})))
+    .collect::<String>();
+    let r = e.post(&format!("{path}/request"), json!({"method": "POST", "path": "/_bulk?refresh=true", "body": bulk})).await;
+    assert_eq!(r["status"], 200, "{r}");
+    let (s, _) = e.call(reqwest::Method::PATCH, &path, Some(json!({"cors": {"allow_origin": ["https://shop.example.com"]}}))).await;
+    assert_eq!(s, 200);
+    let parent = e.post(&keys, json!({"name": "saas", "indices": ["products*"], "filter": {"term": {"public": true}}, "rate_limit": {"per_minute": 400}, "derivable": true})).await;
+    let (pid, secret) = (parent["id"].as_str().unwrap().to_string(), parent["signing_secret"].as_str().unwrap().to_string());
+    assert!(secret.starts_with("rdks_"), "{parent}");
+    let plain = e.post(&keys, json!({"name": "plain", "indices": ["products"]})).await;
+    assert_eq!((plain["derivable"].as_bool(), plain.get("signing_secret")), (Some(false), None));
+    // The secret is never listed, and the cluster's own API prints it redacted.
+    let listed = e.get(&keys).await;
+    assert!(!listed.to_string().contains(&secret) && !listed.to_string().contains("signing_secret"), "{listed}");
+    assert_eq!(listed["keys"].as_array().unwrap().iter().filter(|k| k["derivable"] == true).count(), 1, "{listed}");
+    let r = e.post(&format!("{path}/request"), json!({"method": "GET", "path": format!("/_security/api_key?id={pid}"), "body": null})).await;
+    let metadata = body(&r)["api_keys"][0]["metadata"].clone();
+    assert_eq!(metadata["roll_browser"]["derive"]["secret"], "::es_redacted::", "{r}");
+
+    let sign = |secret: &str, payload: Value| search_es::xpack::security::derived::sign(secret, &payload.to_string());
+    let exp = unix_now() + 600;
+    let acme = sign(&secret, json!({"key": pid, "cluster": "shop", "exp": exp, "indices": ["products"], "filter": {"term": {"tenant": "acme"}}, "user": "acme"}));
+    // Only `products` (of the parent's `products*`), only acme's (its filter) and public (the parent's).
+    let (s, v) = as_derived(&e, &acme, reqwest::Method::POST, "/products*/_search", None).await;
+    let ids: Vec<&str> = v["hits"]["hits"].as_array().unwrap().iter().filter_map(|h| h["_id"].as_str()).collect();
+    assert_eq!((s, ids), (200, vec!["1"]), "{v}");
+    // A cached answer is the parent's wider view: a derived key never reads one (nor fills one).
+    // Browser keys' reads already skip the cache (`dls::ReadSecurity` is theirs); this keeps it
+    // so for the keys derived from them.
+    let agg = json!({"size": 0, "aggs": {"t": {"terms": {"field": "tenant.keyword"}}}});
+    for _ in 0..2 {
+        let r = e.post(&format!("{path}/request"), json!({"method": "POST", "path": "/products/_search?request_cache=true", "body": agg})).await;
+        assert_eq!(r["status"], 200, "{r}");
+    }
+    let before = request_cache(&e, &path).await;
+    assert!(before["hit_count"].as_i64() > Some(0), "the owner's second search was a hit: {before}");
+    let r = e.http.post(format!("{}/products/_search?request_cache=true", e.es)).header("authorization", format!("ApiKey {acme}")).json(&agg).send().await.unwrap();
+    let v: Value = r.json().await.unwrap();
+    let buckets: Vec<&str> = v["aggregations"]["t"]["buckets"].as_array().unwrap().iter().filter_map(|b| b["key"].as_str()).collect();
+    assert_eq!(buckets, ["acme"], "its own view, not the cached one: {v}");
+    assert_eq!(request_cache(&e, &path).await, before, "the cache wasn't read or filled");
+    for p in ["/products-archive/_search", "/other/_search"] {
+        assert_eq!(as_derived(&e, &acme, reqwest::Method::POST, p, None).await.0, 403, "{p}");
+    }
+    assert_eq!(as_derived(&e, &acme, reqwest::Method::PUT, "/products/_doc/9", None).await.0, 403, "it never writes");
+    assert_eq!(as_derived(&e, &acme, reqwest::Method::GET, "/_security/_authenticate", None).await.0, 400, "nor reaches _security");
+    // Nothing that keeps state for later (whose owner would be the parent's key).
+    for p in ["/products/_search?scroll=1m", "/products/_pit?keep_alive=1m", "/products/_async_search"] {
+        let (s, v) = as_derived(&e, &acme, reqwest::Method::POST, p, None).await;
+        assert!(s == 400 && v.to_string().contains("isn't available to a browser key"), "{p}: {s} {v}");
+    }
+    // Origins narrow the cluster's: a browser on another page is refused.
+    let paged = sign(&secret, json!({"key": pid, "cluster": "shop", "exp": exp, "origins": ["https://Shop.Example.com:443"]}));
+    assert_eq!(as_derived(&e, &paged, reqwest::Method::POST, "/products/_search", Some("https://shop.example.com")).await.0, 200);
+
+    // The owner's own update sends the redacted secret back, as the API printed it: the secret is
+    // kept, and the audit line has neither it nor its sealed form.
+    let r = e.post(&format!("{path}/request"), json!({"method": "PUT", "path": format!("/_security/api_key/{pid}"), "body": {"metadata": metadata}})).await;
+    assert_eq!(r["status"], 200, "{r}");
+    assert_eq!(as_derived(&e, &acme, reqwest::Method::POST, "/products/_search", None).await.0, 200, "the secret survives the round trip");
+    let audit = audit_entries(&e, "shop", "").await;
+    let change = audited(&audit, "security_config_change", |x| x["event.action"] == "change_apikey").expect("the update");
+    assert_eq!(change["change"]["apikey"]["metadata"]["roll_browser"]["derive"]["secret"], "::es_redacted::", "{change}");
+    let text = json!(audit).to_string();
+    assert!(!text.contains("::roll_sealed::") && !text.contains(&secret), "no secret in the audit log");
+
+    // Every widening, and every way of not being the parent's, is refused; until the signature
+    // verifies, all alike.
+    let unverified = "\"API key: derived key refused\"";
+    let plain_only = "only queries on the document itself";
+    let base = || json!({"key": pid, "cluster": "shop", "exp": exp});
+    let with = |f: &str, v: Value| {
+        let mut p = base();
+        p[f] = v;
+        p
+    };
+    let cases: Vec<(String, &str)> = vec![
+        (sign(&secret, with("indices", json!(["other"]))), "isn't within its parent's indices"),
+        (sign(&secret, with("indices", json!(["prod*"]))), "isn't within its parent's indices"),
+        (sign(&secret, with("indices", json!(["*"]))), "would reach every index"),
+        (sign(&secret, with("indices", json!([".security"]))), "hidden or system index"),
+        (sign(&secret, with("application", json!("shop-search"))), "[application] isn't its parent's"),
+        (sign(&secret, with("filter", json!([{"match_all": {}}]))), "[filter]"),
+        // A lookup would read an index the parent can't; a script runs Painless as the owner.
+        (sign(&secret, with("filter", json!({"bool": {"filter": [{"terms": {"tenant": {"index": "other", "id": "5", "path": "tenant"}}}]}}))), plain_only),
+        (sign(&secret, with("filter", json!({"script": {"script": "true"}}))), plain_only),
+        // Expanding terms, built as the owner's filter, needs the parent's allow_expensive_queries.
+        (sign(&secret, with("filter", json!({"bool": {"filter": [{"prefix": {"tenant": "ac"}}]}}))), "allow_expensive_queries"),
+        (sign(&secret, with("filter", json!({"range": {"tenant.keyword": {"gte": "a"}}}))), "a range on a text or keyword field"),
+        (sign(&secret, with("exp", json!(unix_now() + 2 * 86_400))), "ahead"),
+        (sign(&secret, with("exp", json!(unix_now() - 120))), "expired"),
+        (sign(&secret, json!({"key": pid, "cluster": "shop", "exp": exp, "user": "acme", "rate_limit": {"per_minute": 101}})), "share"),
+        (sign(&secret, with("rate_limit", json!({"per_minute": 1}))), "give [user]"),
+        (sign(&secret, with("alg", json!("none"))), "a field it doesn't know"),
+        (sign("rdks_not-the-secret", base()), unverified),
+        (sign(&secret, with("key", json!(plain["id"]))), unverified),
+        (sign(&secret, with("cluster", json!("shop-other"))), unverified),
+        (sign(&secret, with("origins", json!(["https://evil.example"]))), unverified),
+        (paged.clone(), unverified),
+    ];
+    for (i, (key, why)) in cases.iter().enumerate() {
+        let origin = (i == cases.len() - 1).then_some("https://evil.example");
+        let (s, v) = as_derived(&e, key, reqwest::Method::POST, "/products/_search", origin).await;
+        assert!(s == 401 && v.to_string().contains(why), "case {i} ({why}): {s} {v}");
+    }
+
+    // A branch copies the parent with its sealed secret, which works only where it was made.
+    e.post(&format!("{path}/branches"), json!({"name": "shop-staging"})).await;
+    let on_branch = sign(&secret, json!({"key": pid, "cluster": "shop-staging", "exp": exp}));
+    assert_eq!(as_derived(&e, &on_branch, reqwest::Method::POST, "/products/_search", None).await.0, 401);
+    // Rotating refuses what the old secret signed, at once; revoking the parent, everything.
+    let rotated = e.post(&format!("{keys}/{pid}/rotate"), json!({})).await;
+    let fresh = rotated["signing_secret"].as_str().unwrap();
+    assert_ne!(fresh, secret);
+    assert_eq!(as_derived(&e, &acme, reqwest::Method::POST, "/products/_search", None).await.0, 401);
+    let renewed = sign(fresh, base());
+    assert_eq!(as_derived(&e, &renewed, reqwest::Method::POST, "/products/_search", None).await.0, 200);
+    let (s, _) = e.call(reqwest::Method::POST, &format!("{keys}/{}/rotate", plain["id"].as_str().unwrap()), Some(json!({}))).await;
+    assert_eq!(s, 409, "only a derivable key has a secret to rotate");
+    let (s, _) = e.call(reqwest::Method::DELETE, &format!("{keys}/{pid}"), None).await;
+    assert_eq!(s, 204);
+    assert_eq!(as_derived(&e, &renewed, reqwest::Method::POST, "/products/_search", None).await.0, 401);
+}
+
+/// A derived key pays its parent's limits, which stay the ceiling of all its derived keys
+/// together, and each `user` has its own share: a quarter of the parent's, or less if it asks.
+#[tokio::test]
+async fn derived_keys_share_their_parents_rate_by_user() {
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "shop"})).await;
+    let path = format!("/v1/search/clusters/{}", c["id"].as_str().unwrap());
+    let r = e.post(&format!("{path}/request"), json!({"method": "PUT", "path": "/products", "body": null})).await;
+    assert_eq!(r["status"], 200, "{r}");
+    let parent = e.post(&format!("{path}/browser-keys"), json!({"name": "saas", "indices": ["products"], "rate_limit": {"per_minute": 8}, "derivable": true})).await;
+    let (pid, secret) = (parent["id"].as_str().unwrap(), parent["signing_secret"].as_str().unwrap());
+    let exp = unix_now() + 600;
+    let key = |user: &str, per_minute: Option<u64>| {
+        let mut p = json!({"key": pid, "cluster": "shop", "exp": exp, "user": user});
+        if let Some(n) = per_minute {
+            p["rate_limit"] = json!({ "per_minute": n });
+        }
+        search_es::xpack::security::derived::sign(secret, &p.to_string())
+    };
+    let mut statuses = Vec::new();
+    // A share of 2 each (8 / 4), or 1 asked for; the parent's 8 for all of them.
+    for (user, asked, tries) in [("slow", Some(1), 2), ("a", None, 3), ("b", None, 2), ("c", None, 2), ("d", None, 2)] {
+        let k = key(user, asked);
+        for _ in 0..tries {
+            let (s, v) = as_derived(&e, &k, reqwest::Method::POST, "/products/_search", None).await;
+            if s == 429 {
+                assert!(v.to_string().contains(&format!("for user [{user}]")), "{v}");
+            }
+            statuses.push((user, s));
+        }
+    }
+    let codes: Vec<u16> = statuses.iter().map(|(_, s)| *s).collect();
+    assert_eq!(codes, [200, 429, 200, 200, 429, 200, 200, 200, 200, 200, 429], "{statuses:?}: d's second is past the parent's 8");
 }
 
 /// A cluster where a browser key's filter (`public: true`) hides document 2 of `products`, and an
@@ -3612,6 +3842,26 @@ async fn an_s3_repository_bounds_and_checks_what_a_bucket_holds() {
     expect("taken while a deletion waited", third, 200, "SUCCESS");
     expect("deleted after it", deleted, 200, "acknowledged");
     expect("restores what it reused", e.es(&u, &p, reqwest::Method::POST, "/_snapshot/backup/third/_restore?wait_for_completion=true", Some(json!({"rename_pattern": "docs", "rename_replacement": "third"}))).await, 200, "third");
+    // The other way round: a snapshot starting while a deletion runs waits for it. `fourth`
+    // alone holds a new segment; with its DELETE held as it commits, `fifth` starts, and doesn't
+    // take `fourth` as its base (it would reuse that segment's chunks as they go).
+    assert_eq!(es(reqwest::Method::PUT, "/docs/_doc/fresher?refresh=true", Some(json!({"n": 3}))).await.0, 201);
+    expect("fourth", es(reqwest::Method::PUT, "/_snapshot/backup/fourth?wait_for_completion=true", Some(json!({"indices": "docs"}))).await, 200, "SUCCESS");
+    let (arrived, release) = (Arc::new(tokio::sync::Notify::new()), Arc::new(tokio::sync::Notify::new()));
+    *bucket.hold_index.lock().unwrap() = Some((arrived.clone(), release.clone()));
+    let deleting = es(reqwest::Method::DELETE, "/_snapshot/backup/fourth", None);
+    let starting = async {
+        arrived.notified().await;
+        let released = async {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            release.notify_one();
+        };
+        tokio::join!(es(reqwest::Method::PUT, "/_snapshot/backup/fifth?wait_for_completion=true", Some(json!({"indices": "docs"}))), released).0
+    };
+    let (deleted, fifth) = tokio::join!(deleting, starting);
+    expect("deleted while a snapshot waited", deleted, 200, "acknowledged");
+    expect("taken after it", fifth, 200, "SUCCESS");
+    expect("restores without the deleted base", e.es(&u, &p, reqwest::Method::POST, "/_snapshot/backup/fifth/_restore?wait_for_completion=true", Some(json!({"rename_pattern": "docs", "rename_replacement": "fifth"}))).await, 200, "fifth");
     // Another program's upload in parts under `indices/` makes a location someone else's.
     bucket.uploads.lock().unwrap().insert("es-upload".into(), ("parts/roll/indices/Xq/0/__e".into(), Default::default()));
     let parts = json!({"type": "s3", "settings": {"bucket": "backups", "base_path": "parts", "endpoint": endpoint, "path_style_access": true}});
@@ -4083,6 +4333,112 @@ async fn cross_cluster_search_between_a_persons_own_clusters() {
     assert_eq!(e.call_as("ann", Method::DELETE, "/v1/search/clusters/ann-app/remotes/logs", None).await.0, 204);
     let (_, info) = e.es(&app, &app_pw, Method::GET, "/_remote/info", None).await;
     assert!(info.get("logs").is_none(), "{info}");
+}
+
+/// Only the node says who a request authenticated as, on the request in process: no header
+/// does (the old `x-roll-derived-key` and `x-roll-authenticated-user`, any case), whatever the
+/// credentials beside it. And what it verified reaches the request's internal calls: a derived
+/// key's search application search, rendered and run as the caller, is narrowed.
+#[tokio::test]
+async fn no_header_says_who_authenticated_and_a_derived_key_holds_through_internal_calls() {
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "spoof"})).await;
+    let (user, pw) = creds(&c);
+    let path = format!("/v1/search/clusters/{}", c["id"].as_str().unwrap());
+    let keys = format!("{path}/browser-keys");
+    let bulk = [
+        ("products", "1", json!({"tenant": "acme", "public": true})),
+        ("products", "2", json!({"tenant": "globex", "public": true})),
+        ("products", "3", json!({"tenant": "acme", "public": false})),
+        ("other", "5", json!({"tenant": "acme", "public": true})),
+    ]
+    .iter()
+    .map(|(i, id, d)| format!("{}\n{d}\n", json!({"index": {"_index": i, "_id": id}})))
+    .collect::<String>();
+    let r = e.post(&format!("{path}/request"), json!({"method": "POST", "path": "/_bulk?refresh=true", "body": bulk})).await;
+    assert_eq!(r["status"], 200, "{r}");
+    let app = json!({"indices": ["products"], "template": {
+        "script": {"source": {"query": {"term": {"tenant.keyword": "{{t}}"}}}, "params": {"t": ""}},
+        "dictionary": {"properties": {"t": {"type": "string"}}, "additionalProperties": false}}});
+    let r = e.post(&format!("{path}/request"), json!({"method": "PUT", "path": "/_application/search_application/shop-search", "body": app})).await;
+    assert!(r["status"].as_u64() < Some(300), "{r}");
+    let parent = e.post(&keys, json!({"name": "saas", "application": "shop-search", "filter": {"term": {"public": true}}, "derivable": true})).await;
+    let other = e.post(&keys, json!({"name": "other", "indices": ["other"]})).await;
+    let pid = parent["id"].as_str().unwrap();
+    let exp = unix_now() + 600;
+    let acme = search_es::xpack::security::derived::sign(parent["signing_secret"].as_str().unwrap(), &json!({"key": pid, "cluster": "spoof", "exp": exp, "filter": {"term": {"tenant.keyword": "acme"}}}).to_string());
+
+    // What a forger would claim: the parent, narrowed to nothing.
+    let claim = json!({"key": pid, "auth": {"narrowing": {}}}).to_string();
+    let forged = [("x-roll-derived-key", claim.as_str()), ("X-Roll-Derived-Key", claim.as_str()), ("x-roll-authenticated-user", "elastic"), ("X-Roll-Authenticated-User", "elastic")];
+    let send = |auth: Option<(&str, String)>, header: (&str, &str), p: &str| {
+        let mut r = e.http.post(format!("{}{p}", e.es)).header(header.0, header.1).json(&json!({}));
+        r = match auth {
+            Some(("basic", _)) => r.basic_auth(&user, Some(&pw)),
+            Some((_, key)) => r.header("authorization", format!("ApiKey {key}")),
+            None => r,
+        };
+        r.send()
+    };
+    let hits = |v: &Value| v["hits"]["hits"].as_array().map(|h| h.iter().filter_map(|x| x["_id"].as_str().map(str::to_string)).collect::<Vec<_>>());
+    for header in forged {
+        let r = send(None, header, "/products/_search").await.unwrap();
+        assert_eq!(r.status().as_u16(), 401, "{header:?} alone");
+        // Beside a browser key of another index: that key's own view.
+        let key = other["api_key"].as_str().unwrap().to_string();
+        assert_eq!(send(Some(("key", key.clone())), header, "/products/_search").await.unwrap().status().as_u16(), 403, "{header:?} with another index's key");
+        let v: Value = send(Some(("key", key)), header, "/other/_search").await.unwrap().json().await.unwrap();
+        assert_eq!(hits(&v), Some(vec!["5".to_string()]), "{header:?}: {v}");
+        // Beside the cluster's own credentials: ignored, the owner reads everything.
+        let v: Value = send(Some(("basic", String::new())), header, "/products/_search").await.unwrap().json().await.unwrap();
+        assert_eq!(v["hits"]["total"]["value"], 3, "{header:?} with the owner's credentials: {v}");
+    }
+
+    // The application's search runs its template as the caller: the derived key's filter and the
+    // parent's both hold there (as the owner it would find globex's document, and acme's hidden one).
+    let run = |t: &str| {
+        e.http
+            .post(format!("{}/_application/search_application/shop-search/_search", e.es))
+            .header("authorization", format!("ApiKey {acme}"))
+            .json(&json!({ "params": { "t": t } }))
+            .send()
+    };
+    for (t, want) in [("globex", vec![]), ("acme", vec!["1".to_string()])] {
+        let r = run(t).await.unwrap();
+        assert_eq!(r.status().as_u16(), 200, "t={t}");
+        let v: Value = r.json().await.unwrap();
+        assert_eq!(hits(&v), Some(want), "t={t}: {v}");
+    }
+}
+
+/// A remote link holds by its maker's rights: once roll-access says they may no longer administer
+/// its target (removed from the project, demoted), searches across it are skipped and it shows as
+/// not connected, though the link is still there.
+#[tokio::test]
+async fn a_link_stops_once_its_maker_may_not_administer_the_target() {
+    use reqwest::Method;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let e = env().await;
+    let still = Arc::new(AtomicBool::new(true));
+    let s2 = still.clone();
+    e.control.set_link_makers(Arc::new(move |maker: &str, _target: &str| maker == "usr_ann" && s2.load(Ordering::SeqCst)));
+    let mut made = Vec::new();
+    for name in ["mk-app", "mk-logs"] {
+        let (s, c) = e.call_as("ann", Method::POST, "/v1/search/clusters", Some(json!({ "name": name }))).await;
+        assert_eq!(s, 200, "{c}");
+        made.push(creds(&c));
+    }
+    let ((app, app_pw), (logs, logs_pw)) = (made[0].clone(), made[1].clone());
+    assert_eq!(e.es(&logs, &logs_pw, Method::PUT, "/logs-1/_doc/1?refresh=true", Some(json!({ "m": "x" }))).await.0, 201);
+    let (s, v) = e.call_as("ann", Method::PUT, "/v1/search/clusters/mk-app/remotes/logs", Some(json!({ "cluster": "mk-logs" }))).await;
+    assert_eq!(s, 200, "{v}");
+    let (_, v) = e.es(&app, &app_pw, Method::GET, "/logs:logs-1/_search", None).await;
+    assert_eq!(v["hits"]["total"]["value"], 1, "{v}");
+    still.store(false, Ordering::SeqCst);
+    let (_, v) = e.es(&app, &app_pw, Method::GET, "/logs:logs-1/_search", None).await;
+    assert_eq!((v["hits"]["total"]["value"].as_i64(), v["_clusters"]["details"]["logs"]["status"].as_str()), (Some(0), Some("skipped")), "{v}");
+    let (_, listed) = e.call_as("ann", Method::GET, "/v1/search/clusters/mk-app/remotes", None).await;
+    assert_eq!((listed["remotes"][0]["alias"].as_str(), listed["remotes"][0]["connected"].as_bool()), (Some("logs"), Some(false)), "{listed}");
 }
 
 /// A linked remote that sleeps wakes for the search; one that's gone is skipped (the default),
@@ -5385,6 +5741,54 @@ impl Env {
     }
 }
 
+/// A cluster's site verifications and their tokens belong to its tenant: its home project, else its
+/// person owner. Two clusters of one project share a site's token (a record published once
+/// proves it for both); clusters of two projects never do, so neither reuses the other's proof.
+#[tokio::test]
+async fn crawler_site_tokens_follow_the_clusters_project() {
+    let e = crawler_env(&[]).await;
+    let mut ids = Vec::new();
+    for name in ["a-one", "a-two", "b-one"] {
+        ids.push(e.post("/v1/search/clusters", json!({"name": name})).await["id"].as_str().unwrap().to_string());
+    }
+    // Handed to their projects, as rolld records a home.
+    for (id, project) in [(&ids[0], "prj_a"), (&ids[1], "prj_a"), (&ids[2], "prj_b")] {
+        e.control.store.set_project(id, Some(project)).unwrap();
+    }
+    let token = |id: String| {
+        let e = &e;
+        async move {
+            let v = e.post(&format!("/v1/search/clusters/{id}/site-verifications"), json!({"domain": "docs.example.com"})).await;
+            v["dns"]["value"].as_str().unwrap_or_else(|| panic!("{v}")).to_string()
+        }
+    };
+    let (a1, a2, b1) = (token(ids[0].clone()).await, token(ids[1].clone()).await, token(ids[2].clone()).await);
+    assert_eq!(a1, a2, "one project's clusters share the site's token");
+    assert_ne!(a1, b1, "another project's cluster gets its own");
+
+    // A tenant change carries no proof across owners: alice's cluster verified an origin as hers
+    // (its row keeps that owner); handed to prj_a, the project's clusters get prj_a's own token,
+    // never reusing hers, and hers keeps the row it proved.
+    use reqwest::Method;
+    let site = FakeSite::start().await;
+    let x = e.ok_as(Some("alice"), Method::POST, "/v1/search/clusters", Some(json!({"name": "alice-x"}))).await["id"].as_str().unwrap().to_string();
+    let start = |who: Option<&'static str>, id: String| {
+        let (e, origin) = (&e, site.url("/"));
+        async move { e.ok_as(who, Method::POST, &format!("/v1/search/clusters/{id}/site-verifications"), Some(json!({"origin": origin}))).await }
+    };
+    let hers = start(Some("alice"), x.clone()).await;
+    let her_token = hers["file"]["content"].as_str().unwrap().to_string();
+    site.set(verify_file(), 200, &[], &her_token);
+    let check = format!("/v1/search/clusters/{x}/site-verifications/{}/check", urlencoding::encode(hers["site"].as_str().unwrap()));
+    assert_eq!(e.ok_as(Some("alice"), Method::POST, &check, Some(json!({}))).await["status"], "verified");
+    e.control.store.set_project(&x, Some("prj_a")).unwrap();
+    let (p0, p1) = (start(None, ids[0].clone()).await, start(None, ids[1].clone()).await);
+    let project_token = p0["file"]["content"].as_str().unwrap().to_string();
+    assert_eq!(p1["file"]["content"].as_str(), Some(project_token.as_str()), "the project's own token in both");
+    assert_ne!(project_token, her_token, "never alice's, though her verified cluster is in the project now");
+    assert_eq!(start(None, x).await["status"], "verified", "her cluster keeps the row it proved");
+}
+
 /// A site of six pages on loopback.
 async fn six_page_site() -> FakeSite {
     let site = FakeSite::start().await;
@@ -5506,7 +5910,15 @@ async fn crawler_verifications_are_each_clusters() {
     let theirs = e.ok_as(Some("bob"), Method::GET, &format!("/v1/search/clusters/{bob}/site-verifications"), None).await;
     assert_eq!(theirs["verifications"], json!([]));
     assert_eq!(crawled("bob", bob.clone()).await.as_deref(), Some("unverified_domain_max_unique_url_count"));
-    assert_ne!(start("bob", bob).await["file"]["content"].as_str(), Some(token.as_str()));
+    let bobs = start("bob", bob.clone()).await;
+    let bob_token = bobs["file"]["content"].as_str().unwrap().to_string();
+    assert_ne!(bob_token, token);
+
+    // The token is derived from the owner and the site, not kept in a row: after bob's only row
+    // for the site goes, starting again gives the same token, so what he published still holds.
+    let gone = e.ok_as(Some("bob"), Method::DELETE, &format!("/v1/search/clusters/{bob}/site-verifications/{}", urlencoding::encode(bobs["site"].as_str().unwrap())), None).await;
+    assert!(gone["deleted"].is_string(), "{gone}");
+    assert_eq!(start("bob", bob).await["file"]["content"].as_str(), Some(bob_token.as_str()), "the same token after a delete");
 }
 
 /// The daily limit of unverified crawls is the owner's, kept in the catalogue: a second connector
@@ -5528,4 +5940,647 @@ async fn crawler_daily_limit_is_the_owners_across_connectors() {
     e.crawler(None, &id, "two", &fresh.url("/")).await;
     let j = e.crawl(None, &id, "two").await;
     assert_eq!(j["status"], "completed", "the refused crawl spent none of the owner's or the connector's count: {j}");
+}
+
+/// Keys the fake SaaS sources take (and echo in their refusals, as a hostile source might).
+const ALGOLIA_KEY: &str = "alg-admin-KEY-1234567";
+const TYPESENSE_KEY: &str = "ts-admin-KEY-4567890";
+const MEILI_KEY: &str = "meili-master-KEY-7890123";
+
+/// One fake that speaks Algolia's, Typesense's and Meilisearch's APIs over a small index each:
+/// records, settings, synonyms and rules. `big` (Algolia) holds 400 records of about 300 bytes.
+async fn fake_saas() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let router = axum::Router::new().fallback(saas_handle);
+    tokio::spawn(async move { axum::serve(listener, router).await });
+    url
+}
+
+fn algolia_records(index: &str) -> Vec<Value> {
+    match index {
+        "products" => vec![
+            json!({ "objectID": "1", "name": "Kettle", "brand": "Acme", "popularity": 50, "price": 30.0, "internal_cost": 11, "_highlightResult": { "name": {} } }),
+            json!({ "objectID": "2", "name": "Teapot", "brand": "Brewer", "popularity": 80, "price": 25.0, "internal_cost": 9 }),
+            json!({ "objectID": "3", "name": "Mug", "brand": "Acme", "popularity": 10, "price": 8.0, "internal_cost": 2 }),
+        ],
+        "big" => (0..400).map(|i| json!({ "objectID": format!("b{i}"), "text": "x".repeat(280) })).collect(),
+        "flaky" => (0..300).map(|i| json!({ "objectID": format!("f{i}"), "n": i })).collect(),
+        "hostile" => vec![json!({ "objectID": "h1", "name": "plain", "_id": "evil", "_routing": "r" })],
+        _ => Vec::new(),
+    }
+}
+
+async fn saas_handle(method: axum::http::Method, uri: axum::http::Uri, headers: axum::http::HeaderMap, body: axum::body::Bytes) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    let path = uri.path().to_string();
+    let q: std::collections::HashMap<String, String> = uri.query().unwrap_or_default().split('&').filter_map(|p| p.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    let header = |h: &str| headers.get(h).and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
+    let ok = |v: Value| axum::Json(v).into_response();
+    let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let seg: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    // A refusal that quotes the key it was given, as a hostile source could.
+    let refuse = |given: String| (StatusCode::FORBIDDEN, axum::Json(json!({ "message": format!("Invalid API key {given}"), "status": 403 }))).into_response();
+    if seg[0] == "1" {
+        if header("x-algolia-application-id") != "TESTAPP" || header("x-algolia-api-key") != ALGOLIA_KEY {
+            return refuse(header("x-algolia-api-key"));
+        }
+        return match (method.as_str(), &seg[1..]) {
+            ("GET", ["indexes"]) => ok(json!({ "items": [
+                { "name": "products", "entries": 3, "dataSize": 512, "replicas": ["products_price_asc", "virtual(products_popular)"] },
+                { "name": "products_price_asc", "entries": 3, "dataSize": 512, "primary": "products" },
+                { "name": "products_popular", "entries": 0, "dataSize": 0, "primary": "products", "virtual": true },
+                { "name": "big", "entries": 400, "dataSize": 120000 },
+            ], "nbPages": 1 })),
+            ("GET", ["indexes", "products", "settings"]) => ok(json!({
+                "searchableAttributes": ["name", "unordered(brand)"],
+                "attributesForFaceting": ["brand", "filterOnly(price)"],
+                "customRanking": ["desc(popularity)"],
+                "ranking": ["typo", "geo", "words", "filters", "proximity", "attribute", "exact", "custom"],
+                "typoTolerance": true,
+                "ignorePlurals": true,
+                "removeStopWords": ["en"],
+                "unretrievableAttributes": ["internal_cost"],
+                "replicas": ["products_price_asc", "virtual(products_popular)"],
+                "decompoundedAttributes": { "de": ["name"] },
+                "highlightPreTag": "<em>",
+            })),
+            ("GET", ["indexes", "products_price_asc", "settings"]) => ok(json!({ "ranking": ["asc(price)", "typo", "words", "custom"], "primary": "products" })),
+            ("GET", ["indexes", "products_popular", "settings"]) => ok(json!({ "customRanking": ["desc(popularity)"], "primary": "products" })),
+            ("GET", ["indexes", "big" | "flaky", "settings"]) => ok(json!({})),
+            ("GET", ["indexes", "hostile", "settings"]) => ok(json!({
+                "searchableAttributes": ["_source", "name", "{{x}}"],
+                "customRanking": ["desc(_id)", "asc({{x}})", "asc()"],
+                "attributesToRetrieve": ["{{evil}}", "name"],
+                "distinct": true,
+                "attributeForDistinct": "_routing",
+            })),
+            ("POST", ["indexes", index, "browse"]) => {
+                if *index == "flaky" {
+                    let seen = body["cursor"].as_str().map_or_else(|| format!("first-{}", body["hitsPerPage"]), str::to_string);
+                    FLAKY_BROWSES.lock().unwrap().push(seen.clone());
+                    // The third page fails once, as a source's blip would.
+                    if seen == "c200-100" && !FLAKY_FAILED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(json!({ "message": "try again" }))).into_response();
+                    }
+                }
+                let all = algolia_records(index);
+                let size = body["hitsPerPage"].as_u64().map(|n| n as usize);
+                let (from, size) = match body["cursor"].as_str() {
+                    Some(c) => {
+                        let (f, s) = c.trim_start_matches('c').split_once('-').unwrap();
+                        (f.parse::<usize>().unwrap(), s.parse::<usize>().unwrap())
+                    }
+                    None => (0, size.unwrap_or(1000)),
+                };
+                let page: Vec<Value> = all.iter().skip(from).take(size).cloned().collect();
+                let mut v = json!({ "hits": page, "nbHits": all.len(), "page": 0 });
+                if from + size < all.len() {
+                    v["cursor"] = json!(format!("c{}-{size}", from + size));
+                }
+                ok(v)
+            }
+            ("POST", ["indexes", "products", "synonyms", "search"]) => ok(json!({ "nbHits": 4, "hits": [
+                { "objectID": "s1", "type": "synonym", "synonyms": ["kettle", "boiler"] },
+                { "objectID": "s2", "type": "onewaysynonym", "input": "cup", "synonyms": ["mug"] },
+                { "objectID": "s3", "type": "altcorrection1", "word": "tea", "corrections": ["teapot"] },
+                { "objectID": "s4", "type": "placeholder", "placeholder": "<size>", "replacements": ["small", "large"] },
+                { "objectID": "s5", "type": "synonym", "synonyms": ["it", "information technology"] },
+            ] })),
+            ("POST", ["indexes", "products", "rules", "search"]) => ok(json!({ "nbHits": 3, "hits": [
+                { "objectID": "pin-mug", "conditions": [{ "pattern": "kettle", "anchoring": "is" }], "consequence": { "promote": [{ "objectID": "3", "position": 0 }] } },
+                { "objectID": "hide-teapot", "conditions": [{ "pattern": "brew", "anchoring": "contains" }], "consequence": { "hide": [{ "objectID": "2" }] } },
+                { "objectID": "filter-acme", "conditions": [{ "pattern": "acme", "anchoring": "is" }], "consequence": { "params": { "filters": "brand:Acme", "aroundLatLng": "1,2" } } },
+                { "objectID": "rewrite-chai", "conditions": [{ "pattern": "chai", "anchoring": "is" }], "consequence": { "params": { "query": { "edits": [{ "type": "replace", "delete": "chai", "insert": "teapot" }] } } } },
+                { "objectID": "pin-teapot-filtered", "conditions": [{ "pattern": "pot", "anchoring": "is" }], "consequence": { "promote": [{ "objectID": "2", "position": 0 }], "filterPromotes": true } },
+                // A filter value that would be a Mustache tag in its template.
+                { "objectID": "inject", "conditions": [{ "pattern": "x", "anchoring": "is" }], "consequence": { "params": { "filters": "brand:{{{query}}}" } } },
+            ] })),
+            // 600 rules that each pin and hide: 1,200 query rules, past the 1,000 a search applies.
+            ("POST", ["indexes", "big", "rules", "search"]) => {
+                let (page, per) = (body["page"].as_u64().unwrap_or(0) as usize, body["hitsPerPage"].as_u64().unwrap_or(20) as usize);
+                let hits: Vec<Value> = (0..600)
+                    .skip(page * per)
+                    .take(per)
+                    .map(|i| json!({ "objectID": format!("r{i}"), "conditions": [{ "pattern": format!("q{i}"), "anchoring": "is" }], "consequence": { "promote": [{ "objectID": "b1", "position": 0 }], "hide": [{ "objectID": "b2" }] } }))
+                    .collect();
+                ok(json!({ "nbHits": 600, "hits": hits }))
+            }
+            ("POST", [_, _, "synonyms" | "rules", "search"]) => ok(json!({ "nbHits": 0, "hits": [] })),
+            _ => (StatusCode::NOT_FOUND, axum::Json(json!({ "message": "not found" }))).into_response(),
+        };
+    }
+    if matches!(seg[0], "collections" | "debug" | "synonym_sets" | "curation_sets") {
+        if header("x-typesense-api-key") != TYPESENSE_KEY {
+            return refuse(header("x-typesense-api-key"));
+        }
+        if seg.get(1) == Some(&"live") {
+            return live_collection(&seg[2..], uri.query().unwrap_or_default());
+        }
+        let schema = json!({ "name": "books", "num_documents": 3, "default_sorting_field": "year", "synonym_sets": ["common"], "curation_sets": ["promos"], "fields": [
+            { "name": "title", "type": "string" },
+            { "name": "author", "type": "string", "facet": true },
+            { "name": "year", "type": "int32", "sort": true },
+            { "name": "loc", "type": "geopoint" },
+            { "name": "store.loc", "type": "geopoint" },
+            { "name": "cover", "type": "image" },
+        ] });
+        return match &seg[..] {
+            ["debug"] => ok(json!({ "state": 1, "version": "28.0" })),
+            // Typesense 29's synonym sets and 30's curation sets, which the schema names.
+            ["synonym_sets", "common"] => ok(json!({ "name": "common", "items": [{ "id": "lit", "synonyms": ["literature", "letters"] }] })),
+            ["curation_sets", "promos"] => ok(json!({ "name": "promos", "items": [{ "id": "pin-ulysses", "rule": { "query": "modern", "match": "exact" }, "includes": [{ "id": "b3", "position": 1 }] }] })),
+            ["collections"] => ok(json!([schema])),
+            ["collections", "books"] => ok(schema),
+            ["collections", "books", "documents", "export"] => {
+                let lines = [
+                    json!({ "id": "b1", "title": "Dune", "author": "Herbert", "year": 1965, "loc": [48.85, 2.35] }),
+                    json!({ "id": "b2", "title": "Emma", "author": "Austen", "year": 1815, "loc": [51.5, -0.12], "store": { "loc": [48.2, 16.37] } }),
+                    json!({ "id": "b3", "title": "Ulysses", "author": "Joyce", "year": 1922, "loc": [53.35, -6.26] }),
+                ];
+                // In pieces, a line split across them, as a stream comes.
+                let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+                let (a, b) = text.split_at(text.len() / 2);
+                let chunks = vec![Ok::<_, std::io::Error>(axum::body::Bytes::from(a.to_string())), Ok(axum::body::Bytes::from(b.to_string()))];
+                axum::response::Response::new(axum::body::Body::from_stream(futures_util::stream::iter(chunks)))
+            }
+            ["collections", "books", "synonyms"] => ok(json!({ "synonyms": [
+                { "id": "novel", "synonyms": ["novel", "book"] },
+                { "id": "sf", "root": "scifi", "synonyms": ["science fiction"] },
+            ] })),
+            ["collections", "books", "overrides"] => ok(json!({ "overrides": [
+                { "id": "pin-emma", "rule": { "query": "classic", "match": "exact" }, "includes": [{ "id": "b2", "position": 1 }], "excludes": [{ "id": "b3" }] },
+                { "id": "only-filter", "rule": { "query": "old", "match": "contains" }, "filter_by": "year:<1900" },
+            ] })),
+            _ => (StatusCode::NOT_FOUND, axum::Json(json!({ "message": "Not Found" }))).into_response(),
+        };
+    }
+    if header("authorization") != format!("Bearer {MEILI_KEY}") {
+        return refuse(header("authorization"));
+    }
+    let movies = [
+        json!({ "movie_id": 7, "title": "Alien", "overview": "a science fiction film", "genres": ["sf", "horror"], "year": 1979 }),
+        json!({ "movie_id": 8, "title": "Arrival", "overview": "a science fiction story", "genres": ["sf"], "year": 2016 }),
+        json!({ "movie_id": 9, "title": "Heat", "overview": "A heist in Los Angeles", "genres": ["crime"], "year": 1995 }),
+    ];
+    match &seg[..] {
+        ["version"] => ok(json!({ "pkgVersion": "1.12.0" })),
+        ["indexes"] => ok(json!({ "results": [{ "uid": "movies", "primaryKey": "movie_id" }], "offset": 0, "limit": 1000, "total": 1 })),
+        ["stats"] => ok(json!({ "indexes": { "movies": { "numberOfDocuments": 3, "rawDocumentDbSize": 900 } } })),
+        ["indexes", "movies"] => ok(json!({ "uid": "movies", "primaryKey": "movie_id" })),
+        ["indexes", "movies", "settings"] => ok(json!({
+            "displayedAttributes": ["*"], "searchableAttributes": ["title", "overview"],
+            "filterableAttributes": ["genres"], "sortableAttributes": ["year"],
+            "rankingRules": ["words", "typo", "proximity", "attribute", "sort", "exactness", "year:desc"],
+            "stopWords": ["the"], "synonyms": { "sf": ["science fiction"], "the matrix": ["matrix"] }, "distinctAttribute": null,
+            "typoTolerance": { "enabled": true, "minWordSizeForTypos": { "oneTypo": 5, "twoTypos": 9 }, "disableOnWords": [], "disableOnAttributes": [] },
+            "separatorTokens": [], "nonSeparatorTokens": [], "dictionary": ["J. R. R."], "proximityPrecision": "byWord", "embedders": {},
+        })),
+        ["indexes", "movies", "documents"] => {
+            let offset: usize = q.get("offset").and_then(|v| v.parse().ok()).unwrap_or(0);
+            let limit: usize = q.get("limit").and_then(|v| v.parse().ok()).unwrap_or(20);
+            ok(json!({ "results": movies.iter().skip(offset).take(limit).collect::<Vec<_>>(), "offset": offset, "limit": limit, "total": movies.len() }))
+        }
+        _ => (StatusCode::NOT_FOUND, axum::Json(json!({ "message": "Index not found" }))).into_response(),
+    }
+}
+
+/// The fake Algolia `flaky` index's browse requests (`first-<size>` or the cursor), and whether
+/// its third page has failed yet.
+static FLAKY_BROWSES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+static FLAKY_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The fake Typesense `live` collection, which a test changes, and its exports' queries.
+static LIVE: std::sync::Mutex<Vec<Value>> = std::sync::Mutex::new(Vec::new());
+static LIVE_EXPORTS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Typesense's `live` collection: its schema and its export, which takes `filter_by` on
+/// `updated_at` (`updated_at:>=<n>`).
+fn live_collection(rest: &[&str], query: &str) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let docs = LIVE.lock().unwrap().clone();
+    match rest {
+        [] => axum::Json(json!({ "name": "live", "num_documents": docs.len(), "fields": [{ "name": "title", "type": "string" }, { "name": "updated_at", "type": "int64" }] })).into_response(),
+        // A catch-up asks how many records changed before it starts.
+        ["documents", "search"] => {
+            let since = query.split('&').find_map(|p| p.strip_prefix("filter_by=")).map(percent_decode).and_then(|f| f.strip_prefix("updated_at:>=").and_then(|n| n.parse::<i64>().ok()));
+            let found = docs.iter().filter(|d| since.is_none_or(|t| d["updated_at"].as_i64().unwrap_or(0) >= t)).count();
+            axum::Json(json!({ "found": found, "hits": [] })).into_response()
+        }
+        ["documents", "export"] => {
+            LIVE_EXPORTS.lock().unwrap().push(query.to_string());
+            let since = query.strip_prefix("filter_by=").map(percent_decode).and_then(|f| f.strip_prefix("updated_at:>=").and_then(|n| n.parse::<i64>().ok()));
+            let text: String = docs.iter().filter(|d| since.is_none_or(|t| d["updated_at"].as_i64().unwrap_or(0) >= t)).map(|d| format!("{d}\n")).collect();
+            text.into_response()
+        }
+        ["synonyms"] => axum::Json(json!({ "synonyms": [] })).into_response(),
+        ["overrides"] => axum::Json(json!({ "overrides": [] })).into_response(),
+        _ => axum::http::StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// An env whose Algolia calls go to the fake ([`fake_saas`]), with `more` node settings.
+async fn saas_env(more: &[(&str, &str)]) -> (Env, String) {
+    let fake = fake_saas().await;
+    let f = fake.clone();
+    let more: Vec<(String, String)> = more.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    let e = env_with(move |c| {
+        c.node_settings.push((search_control::REINDEX_ALLOW_PRIVATE.into(), "true".into()));
+        c.node_settings.push((search_control::MIGRATE_ALGOLIA_URL.into(), f));
+        c.node_settings.extend(more);
+    })
+    .await;
+    e.post("/v1/search/clusters", json!({ "name": "shop" })).await;
+    (e, fake)
+}
+
+impl Env {
+    /// A console request on cluster `shop`: the status and the parsed body.
+    async fn shop(&self, method: &str, path: &str, body: Option<Value>) -> (u64, Value) {
+        let (_, r) = self.call(reqwest::Method::POST, "/v1/search/clusters/shop/request", Some(json!({ "method": method, "path": path, "body": body }))).await;
+        (r["status"].as_u64().unwrap_or(0), serde_json::from_str(r["body"].as_str().unwrap_or("null")).unwrap_or(Value::Null))
+    }
+
+    /// Waits for a copy's task to end: its `GET _tasks/<id>` answer.
+    async fn task_done(&self, task: &str) -> Value {
+        let (_, t) = self.shop("GET", &format!("/_tasks/{task}?wait_for_completion=true&timeout=30s"), None).await;
+        assert_eq!(t["completed"], true, "{t}");
+        t
+    }
+}
+
+/// The names of a `not_mapped` list's entries.
+fn not_mapped(row: &Value) -> Vec<String> {
+    row["plan"]["not_mapped"].as_array().unwrap().iter().map(|n| n["name"].as_str().unwrap().to_string()).collect()
+}
+
+/// Algolia into roll: the listing (a replica names its primary), a dry run that makes nothing,
+/// then the copy: records with `objectID` as `_id`, searchable attributes as default fields,
+/// facets as keyword sub-fields, `unretrievableAttributes` out of `_source`, synonyms in a set
+/// the search analyzer reads, promote and hide rules as query rules, replicas as sort templates,
+/// and everything that didn't map listed with why. The search template searches as Algolia did.
+#[tokio::test]
+async fn importing_from_algolia() {
+    let (e, _) = saas_env(&[]).await;
+    let source = json!({ "kind": "algolia", "app_id": "TESTAPP", "api_key": ALGOLIA_KEY });
+    let listed = e.post("/v1/search/clusters/shop/migrate/inspect", json!({ "source": source })).await;
+    let rows = listed["indices"].as_array().unwrap();
+    let replica = rows.iter().find(|r| r["index"] == "products_price_asc").unwrap();
+    assert_eq!((replica["replica_of"].as_str(), listed["remote"]["distribution"].as_str()), (Some("products"), Some("algolia")), "{listed}");
+    assert_eq!(rows.iter().find(|r| r["index"] == "products").unwrap()["docs"], 3, "{listed}");
+
+    let planned = e.post("/v1/search/clusters/shop/migrate", json!({ "source": source, "indices": [{ "index": "products" }], "dry_run": true })).await;
+    let row = &planned["indices"][0];
+    let skipped = not_mapped(row);
+    for s in ["s4", "ranking: typo, geo, words, filters, proximity, attribute, exact"] {
+        assert!(skipped.iter().any(|n| n == s), "{s} not mapped: {planned}");
+    }
+    // A rule that filters (and sets a parameter roll doesn't take) is a template of its own; the
+    // parameter is listed.
+    let not_mapped_reason = |name: &str| row["plan"]["not_mapped"].as_array().unwrap().iter().find(|n| n["name"] == name).map(|n| n["reason"].as_str().unwrap().to_string());
+    assert!(not_mapped_reason("filter-acme").is_some_and(|r| r.contains("aroundLatLng")), "{planned}");
+    assert!(not_mapped_reason("inject").is_some_and(|r| r.contains("`{`")), "{planned}");
+    let templates: Vec<&str> = row["plan"]["rule_templates"].as_array().unwrap().iter().map(|t| t["template"].as_str().unwrap()).collect();
+    assert_eq!(templates, ["products-search-rule-filter-acme", "products-search-rule-rewrite-chai"], "{planned}");
+    assert!(skipped.iter().any(|n| n.starts_with("decompoundedAttributes")), "{planned}");
+    assert!(!skipped.iter().any(|n| n.starts_with("highlightPreTag")), "display settings aren't listed: {planned}");
+    assert_eq!((row["plan"]["synonyms"].as_u64(), row["plan"]["rules"].as_u64(), row["task"].as_str()), (Some(4), Some(3), None), "{planned}");
+    assert!(row["plan"]["notes"].as_array().unwrap().iter().any(|n| n.as_str().is_some_and(|n| n.contains("rules_query"))), "{planned}");
+    assert_eq!(e.shop("HEAD", "/products", None).await.0, 404, "a dry run makes nothing");
+
+    let started = e.post("/v1/search/clusters/shop/migrate", json!({ "source": source, "indices": [{ "index": "products" }], "size": 2 })).await;
+    let row = &started["indices"][0];
+    let t = e.task_done(row["task"].as_str().unwrap_or_else(|| panic!("{started}"))).await;
+    assert_eq!((t["response"]["created"].as_u64(), t["response"]["batches"].as_u64(), t["error"].is_null()), (Some(3), Some(2), true), "{t}");
+    assert_eq!(t["task"]["description"], "reindex from [algolia app [TESTAPP]][products] to [products]", "{t}");
+
+    let (_, m) = e.shop("GET", "/products/_mapping", None).await;
+    let m = &m["products"]["mappings"];
+    assert_eq!((m["properties"]["objectID"]["type"].as_str(), m["properties"]["brand"]["fields"]["keyword"]["type"].as_str()), (Some("keyword"), Some("keyword")), "{m}");
+    assert_eq!(m["_source"]["excludes"], json!(["internal_cost"]), "{m}");
+    let (_, s) = e.shop("GET", "/products/_settings?flat_settings=true", None).await;
+    let s = &s["products"]["settings"];
+    assert_eq!((s["index.query.default_field"].clone(), s["index.analysis.filter.roll_plurals.language"].as_str()), (json!(["name^2", "brand"]), Some("minimal_english")), "{s}");
+    let (_, doc) = e.shop("GET", "/products/_doc/1", None).await;
+    assert!(doc["_source"]["internal_cost"].is_null() && doc["_source"]["_highlightResult"].is_null() && doc["_source"]["name"] == "Kettle", "{doc}");
+    let (_, syn) = e.shop("GET", "/_synonyms/products-synonyms", None).await;
+    let mut rules: Vec<&str> = syn["synonyms_set"].as_array().unwrap().iter().map(|r| r["synonyms"].as_str().unwrap()).collect();
+    rules.sort();
+    // `it` is an English stop word: the synonyms are parsed before stop words go.
+    assert_eq!(rules, ["cup => cup, mug", "it, information technology", "kettle, boiler", "tea => tea, teapot"], "{syn}");
+    let (_, qr) = e.shop("GET", "/_query_rules/products-rules", None).await;
+    let kinds: Vec<(&str, &str)> = qr["rules"].as_array().unwrap().iter().map(|r| (r["rule_id"].as_str().unwrap(), r["type"].as_str().unwrap())).collect();
+    assert_eq!(kinds, [("pin-mug", "pinned"), ("hide-teapot-exclude", "exclude")], "{qr}");
+    assert_eq!(e.shop("GET", "/_scripts/products-search-products_price_asc", None).await.0, 200);
+
+    // The template: a typo still finds the kettle, the rule pins the mug first, `boiler` is a
+    // synonym, and `brew` hides the teapot.
+    let search_with = async |params: Value| {
+        let (s, v) = e.shop("POST", "/products/_search/template", Some(json!({ "id": "products-search", "params": params }))).await;
+        assert_eq!(s, 200, "{v}");
+        v["hits"]["hits"].as_array().unwrap().iter().map(|h| h["_id"].as_str().unwrap().to_string()).collect::<Vec<_>>()
+    };
+    let search = async |q: &str| search_with(json!({ "query": q })).await;
+    assert_eq!(search("kettle").await, ["3", "1"]);
+    assert_eq!(search("ketle").await, ["1"]);
+    assert_eq!(search("boiler").await, ["1"]);
+    assert!(!search("brew teapot").await.contains(&"2".to_string()));
+    // Rules match the text as sent: "Kettle" pins nothing, unless its lowercased form comes as
+    // `rules_query`.
+    assert_eq!(search("Kettle").await, ["1"]);
+    assert_eq!(search_with(json!({ "query": "Kettle", "rules_query": "kettle" })).await, ["3", "1"]);
+    // `filters` filters the results; an ordinary pin shows anyway (Algolia's default), a
+    // `filterPromotes` rule's pin only when it matches.
+    let brewer = json!({ "term": { "brand.keyword": "Brewer" } });
+    let acme = json!({ "term": { "brand.keyword": "Acme" } });
+    assert_eq!(search_with(json!({ "query": "kettle", "filters": brewer })).await, ["3"]);
+    assert_eq!(search("pot").await, ["2"]);
+    assert!(search_with(json!({ "query": "pot", "filters": acme })).await.is_empty());
+    // The rules' templates: Algolia's filter, and its query edit applied to the pattern.
+    let rule_search = async |template: &str, q: &str| {
+        let (s, v) = e.shop("POST", "/products/_search/template", Some(json!({ "id": template, "params": { "query": q } }))).await;
+        assert_eq!(s, 200, "{v}");
+        v["hits"]["hits"].as_array().unwrap().iter().map(|h| h["_id"].as_str().unwrap().to_string()).collect::<Vec<_>>()
+    };
+    assert_eq!(rule_search("products-search-rule-filter-acme", "teapot kettle").await, ["1"]);
+    assert_eq!(rule_search("products-search-rule-rewrite-chai", "chai").await, ["2"]);
+
+    // Names that can't reach a mapping or the template are left out and listed, never failing
+    // the index: metadata fields (also in the records), `{{`, an empty `asc()`.
+    let started = e.post("/v1/search/clusters/shop/migrate", json!({ "source": source, "indices": [{ "index": "hostile" }] })).await;
+    let row = &started["indices"][0];
+    let t = e.task_done(row["task"].as_str().unwrap_or_else(|| panic!("{started}"))).await;
+    assert_eq!(t["response"]["created"].as_u64(), Some(1), "{t}");
+    let skipped = not_mapped(row);
+    for s in ["attribute: _id", "attribute: _routing", "attribute: {{evil}}", "customRanking: asc()", "searchable attribute: _source", "searchable attribute: {{x}}"] {
+        assert!(skipped.iter().any(|n| n == s), "{s} not mapped: {started}");
+    }
+    let (_, doc) = e.shop("GET", "/hostile/_doc/h1", None).await;
+    assert_eq!(doc["_source"], json!({ "objectID": "h1", "name": "plain" }), "{doc}");
+    let (s, v) = e.shop("POST", "/hostile/_search/template", Some(json!({ "id": "hostile-search", "params": { "query": "plain" } }))).await;
+    assert_eq!((s, v["hits"]["total"]["value"].as_u64()), (200, Some(1)), "{v}");
+}
+
+/// Typesense into roll: the schema's types mapped (a facet as a keyword sub-field, a geopoint's
+/// `[lat, lng]` written as `{lat, lon}`), the JSONL export copied as it streams, synonyms (one
+/// way from a root), an override's includes and excludes as query rules, and an override that
+/// only filters listed as not mapped, with the image field.
+#[tokio::test]
+async fn importing_from_typesense() {
+    let (e, fake) = saas_env(&[]).await;
+    let source = json!({ "kind": "typesense", "host": fake, "api_key": TYPESENSE_KEY });
+    let listed = e.post("/v1/search/clusters/shop/migrate/inspect", json!({ "source": source })).await;
+    assert_eq!((listed["indices"][0]["index"].as_str(), listed["indices"][0]["docs"].as_u64(), listed["remote"]["version"].as_str()), (Some("books"), Some(3), Some("28.0")), "{listed}");
+    let started = e.post("/v1/search/clusters/shop/migrate", json!({ "source": source, "indices": [{ "index": "books" }] })).await;
+    let row = &started["indices"][0];
+    let t = e.task_done(row["task"].as_str().unwrap_or_else(|| panic!("{started}"))).await;
+    assert_eq!(t["response"]["created"].as_u64(), Some(3), "{t}");
+    let skipped = not_mapped(row);
+    assert!(skipped.contains(&"only-filter".to_string()) && skipped.contains(&"cover".to_string()), "{started}");
+
+    let (_, m) = e.shop("GET", "/books/_mapping", None).await;
+    let p = &m["books"]["mappings"]["properties"];
+    assert_eq!(
+        (p["author"]["fields"]["keyword"]["type"].as_str(), p["year"]["type"].as_str(), p["loc"]["type"].as_str(), p["id"]["type"].as_str()),
+        (Some("keyword"), Some("integer"), Some("geo_point"), Some("keyword")),
+        "{m}"
+    );
+    let (_, doc) = e.shop("GET", "/books/_doc/b2", None).await;
+    assert_eq!(doc["_source"]["loc"], json!({ "lat": 51.5, "lon": -0.12 }), "{doc}");
+    assert_eq!(doc["_source"]["store"]["loc"], json!({ "lat": 48.2, "lon": 16.37 }), "{doc}");
+    assert_eq!(p["store"]["properties"]["loc"]["type"], "geo_point", "{m}");
+    let (_, near) = e.shop("POST", "/books/_search", Some(json!({ "query": { "geo_distance": { "distance": "50km", "loc": { "lat": 51.5, "lon": -0.1 } } } }))).await;
+    assert_eq!(near["hits"]["hits"][0]["_id"], "b2", "{near}");
+    let (_, syn) = e.shop("GET", "/_synonyms/books-synonyms", None).await;
+    let mut rules: Vec<&str> = syn["synonyms_set"].as_array().unwrap().iter().map(|r| r["synonyms"].as_str().unwrap()).collect();
+    rules.sort();
+    // The collection's own synonyms and its synonym set's; its overrides and its curation set's.
+    assert_eq!(rules, ["literature, letters", "novel, book", "scifi => scifi, science fiction"], "{syn}");
+    let (_, qr) = e.shop("GET", "/_query_rules/books-rules", None).await;
+    let ids: Vec<&str> = qr["rules"].as_array().unwrap().iter().map(|r| r["rule_id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["pin-emma", "pin-emma-exclude", "pin-ulysses"], "{qr}");
+    let (_, found) = e.shop("POST", "/books/_search/template", Some(json!({ "id": "books-search", "params": { "query": "classic" } }))).await;
+    let ids: Vec<&str> = found["hits"]["hits"].as_array().unwrap().iter().map(|h| h["_id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["b2"], "{found}");
+}
+
+/// Meilisearch into roll: the primary key as `_id`, documents read in offset pages, searchable
+/// attributes as default fields, filterable and sortable ones as keyword sub-fields, a custom
+/// ranking rule as a sort, stop words and synonyms at search time; the default ranking rules
+/// and the dictionary listed as not mapped.
+#[tokio::test]
+async fn importing_from_meilisearch() {
+    let (e, fake) = saas_env(&[]).await;
+    let source = json!({ "kind": "meilisearch", "host": fake, "api_key": MEILI_KEY });
+    let listed = e.post("/v1/search/clusters/shop/migrate/inspect", json!({ "source": source })).await;
+    assert_eq!((listed["indices"][0]["docs"].as_u64(), listed["indices"][0]["size_bytes"].as_u64()), (Some(3), Some(900)), "{listed}");
+    let started = e.post("/v1/search/clusters/shop/migrate", json!({ "source": source, "indices": [{ "index": "movies", "dest": "films" }], "size": 2 })).await;
+    let row = &started["indices"][0];
+    let t = e.task_done(row["task"].as_str().unwrap_or_else(|| panic!("{started}"))).await;
+    assert_eq!((t["response"]["created"].as_u64(), t["response"]["batches"].as_u64()), (Some(3), Some(2)), "{t}");
+    let skipped = not_mapped(row);
+    assert!(skipped.iter().any(|n| n.starts_with("rankingRules")) && skipped.iter().any(|n| n.starts_with("dictionary")), "{started}");
+    let (_, doc) = e.shop("GET", "/films/_doc/8", None).await;
+    assert_eq!(doc["_source"]["title"], "Arrival", "{doc}");
+    let (_, m) = e.shop("GET", "/films/_mapping", None).await;
+    let p = &m["films"]["mappings"]["properties"];
+    assert_eq!((p["genres"]["type"].as_str(), p["title"]["type"].as_str()), (Some("keyword"), Some("text")), "{m}");
+    let (_, s) = e.shop("GET", "/films/_settings?flat_settings=true", None).await;
+    assert_eq!(s["films"]["settings"]["index.query.default_field"], json!(["title^2", "overview"]), "{s}");
+    let (_, syn) = e.shop("GET", "/_synonyms/films-synonyms", None).await;
+    assert_eq!(syn["synonyms_set"][0]["synonyms"], "sf => sf, science fiction", "{syn}");
+    // `the` is a stop word: the rule still builds (synonyms are parsed before stop words go).
+    assert_eq!(syn["synonyms_set"][1]["synonyms"], "the matrix => the matrix, matrix", "{syn}");
+    // `year:desc` sorts after relevance: two equal matches come newest first.
+    let (_, found) = e.shop("POST", "/films/_search/template", Some(json!({ "id": "films-search", "params": { "query": "the sf" } }))).await;
+    let ids: Vec<&str> = found["hits"]["hits"].as_array().unwrap().iter().map(|h| h["_id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["8", "7"], "{found}");
+}
+
+/// A SaaS source's key is in no answer, no error (a refusal that echoes it included), no task
+/// description and no log line, from inspect through the copy's end.
+#[tokio::test]
+async fn saas_keys_are_never_shown() {
+    use std::io::Write;
+    #[derive(Clone, Default)]
+    struct Logs(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl Write for Logs {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let logs = Logs::default();
+    let sink = logs.clone();
+    let subscriber = tracing_subscriber::fmt().with_max_level(tracing::Level::TRACE).with_writer(move || sink.clone()).with_ansi(false).finish();
+    // The test runs on one thread: everything it starts logs here.
+    let _logging = tracing::subscriber::set_default(subscriber);
+    let (e, fake) = saas_env(&[]).await;
+    let mut seen = Vec::new();
+    for (source, key) in [
+        (json!({ "kind": "algolia", "app_id": "TESTAPP", "api_key": ALGOLIA_KEY }), ALGOLIA_KEY),
+        (json!({ "kind": "typesense", "host": fake, "api_key": TYPESENSE_KEY }), TYPESENSE_KEY),
+        (json!({ "kind": "meilisearch", "host": fake, "api_key": MEILI_KEY }), MEILI_KEY),
+    ] {
+        let mut wrong = source.clone();
+        wrong["api_key"] = json!(format!("{key}-wrong"));
+        let (s, v) = e.call(reqwest::Method::POST, "/v1/search/clusters/shop/migrate/inspect", Some(json!({ "source": wrong }))).await;
+        assert!(s == 400 && v["error"].as_str().is_some_and(|m| m.contains("answered 403")), "{v}");
+        seen.push(v.to_string());
+        seen.push(e.post("/v1/search/clusters/shop/migrate/inspect", json!({ "source": source })).await.to_string());
+        let index = match source["kind"].as_str() {
+            Some("algolia") => "products",
+            Some("typesense") => "books",
+            _ => "movies",
+        };
+        let (_, v) = e.call(reqwest::Method::POST, "/v1/search/clusters/shop/migrate", Some(json!({ "source": wrong, "indices": [{ "index": index, "dest": format!("{index}-x") }] }))).await;
+        seen.push(v.to_string());
+        let started = e.post("/v1/search/clusters/shop/migrate", json!({ "source": source, "indices": [{ "index": index }] })).await;
+        seen.push(started.to_string());
+        let task = started["indices"][0]["task"].as_str().unwrap_or_else(|| panic!("{started}")).to_string();
+        seen.push(e.shop("GET", "/_tasks?detailed=true&actions=*reindex", None).await.1.to_string());
+        seen.push(e.task_done(&task).await.to_string());
+        for text in &seen {
+            assert!(!text.contains(key), "{key} in {text}");
+        }
+    }
+    // Whatever this thread logged, at every level (often nothing: the import logs no events).
+    let logged = String::from_utf8_lossy(&logs.0.lock().unwrap()).into_owned();
+    for key in [ALGOLIA_KEY, TYPESENSE_KEY, MEILI_KEY] {
+        assert!(!logged.contains(key), "{key} logged");
+    }
+}
+
+/// A source page past the node's answer bound is refused, never buffered: the copy fails with
+/// roll's limit (its memory given back), and picking the index again with smaller pages copies
+/// into the index the first attempt made.
+#[tokio::test]
+async fn a_saas_page_past_the_bound_is_refused() {
+    let (e, _) = saas_env(&[(search_es::api::remote::BUFFER_LIMIT, "64kb")]).await;
+    let source = json!({ "kind": "algolia", "app_id": "TESTAPP", "api_key": ALGOLIA_KEY });
+    let started = e.post("/v1/search/clusters/shop/migrate", json!({ "source": source, "indices": [{ "index": "big" }] })).await;
+    // 1,200 query rules from 600: the first 1,000 in 10 rulesets, the rest listed; the template
+    // still searches.
+    let plan = &started["indices"][0]["plan"];
+    assert_eq!((plan["rules"].as_u64(), plan["rulesets"].as_array().map(Vec::len)), (Some(1000), Some(10)), "{started}");
+    assert!(plan["not_mapped"].as_array().unwrap().iter().any(|n| n["reason"].as_str().is_some_and(|r| r.starts_with("past the 1000 query rules"))), "{started}");
+    let (s, v) = e.shop("POST", "/big/_search/template", Some(json!({ "id": "big-search", "params": { "query": "q1" } }))).await;
+    assert_eq!(s, 200, "{v}");
+    let t = e.task_done(started["indices"][0]["task"].as_str().unwrap_or_else(|| panic!("{started}"))).await;
+    assert!(t["error"]["reason"].as_str().is_some_and(|r| r.contains("too large")), "{t}");
+    assert!(t["error"]["caused_by"]["reason"].as_str().is_some_and(|r| r.ends_with("for the configured buffer limit [65536]")), "{t}");
+    assert_eq!(e.control.node.reindex().budget.used(), 0);
+    let again = e.post("/v1/search/clusters/shop/migrate", json!({ "source": source, "indices": [{ "index": "big" }], "size": 100 })).await;
+    assert_eq!(again["indices"][0]["restarted"], true, "{again}");
+    let t = e.task_done(again["indices"][0]["task"].as_str().unwrap()).await;
+    assert_eq!(t["response"]["created"].as_u64(), Some(400), "{t}");
+}
+
+/// The SaaS sources go through the guard: a Typesense or Meilisearch URL at a private or
+/// link-local address, and an operator's Algolia URL there, are refused unless the node allows
+/// private addresses, and the answer doesn't say which.
+#[tokio::test]
+async fn saas_sources_are_guarded() {
+    let e = env_with(|c| c.node_settings.push((search_control::MIGRATE_ALGOLIA_URL.into(), "http://127.0.0.1:9".into()))).await;
+    e.post("/v1/search/clusters", json!({ "name": "shop" })).await;
+    for source in [
+        json!({ "kind": "typesense", "host": "http://127.0.0.1:8108", "api_key": "k" }),
+        json!({ "kind": "meilisearch", "host": "http://169.254.169.254" }),
+        json!({ "kind": "algolia", "app_id": "APP", "api_key": "k" }),
+    ] {
+        let (s, v) = e.call(reqwest::Method::POST, "/v1/search/clusters/shop/migrate/inspect", Some(json!({ "source": source }))).await;
+        assert!(s == 400 && v["error"].as_str().is_some_and(|m| m.starts_with("couldn't reach")), "{source}: {v}");
+    }
+}
+
+/// A copy that stopped part way (the source failed a page) resumes from its last page when the
+/// index is picked again: its place is in the index's `_meta.roll_import`, the pages before it
+/// aren't read again, and every record ends up copied once.
+#[tokio::test]
+async fn a_stopped_saas_copy_resumes_from_its_last_page() {
+    let (e, _) = saas_env(&[]).await;
+    let source = json!({ "kind": "algolia", "app_id": "TESTAPP", "api_key": ALGOLIA_KEY });
+    let started = e.post("/v1/search/clusters/shop/migrate", json!({ "source": source, "indices": [{ "index": "flaky" }], "size": 100 })).await;
+    let t = e.task_done(started["indices"][0]["task"].as_str().unwrap_or_else(|| panic!("{started}"))).await;
+    assert!(t["error"].is_object() && t["response"].is_null(), "{t}");
+    let (_, m) = e.shop("GET", "/flaky/_mapping", None).await;
+    let copy = &m["flaky"]["mappings"]["_meta"]["roll_import"]["copy"];
+    assert_eq!((copy["state"].as_str(), copy["position"].clone()), (Some("stopped"), json!({ "cursor": "c200-100" })), "{m}");
+
+    let again = e.post("/v1/search/clusters/shop/migrate", json!({ "source": source, "indices": [{ "index": "flaky" }], "size": 100 })).await;
+    assert!(again["indices"][0]["resumed"].is_string(), "{again}");
+    let t = e.task_done(again["indices"][0]["task"].as_str().unwrap()).await;
+    assert_eq!(t["response"]["created"].as_u64(), Some(100), "{t}");
+    let (_, n) = e.shop("GET", "/flaky/_count", None).await;
+    assert_eq!(n["count"], 300, "{n}");
+    let browses = FLAKY_BROWSES.lock().unwrap().clone();
+    assert_eq!(browses.iter().filter(|b| *b == "first-100").count(), 1, "the first page was read again: {browses:?}");
+    let (_, m) = e.shop("GET", "/flaky/_mapping", None).await;
+    assert_eq!(m["flaky"]["mappings"]["_meta"]["roll_import"]["copy"]["state"], "done", "{m}");
+}
+
+/// After the copy, a catch-up reads what changed at the source: with `since_attribute`, only
+/// the records changed since the copy started (Typesense's `filter_by`), the changed and the new
+/// one written; without it, every record, none written because none differs. Cutover then moves
+/// the alias to the copy in one step.
+#[tokio::test]
+async fn catching_up_and_cutting_over() {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    *LIVE.lock().unwrap() = (1..=3).map(|i| json!({ "id": format!("l{i}"), "title": format!("item {i}"), "updated_at": now - 10_000 })).collect();
+    let (e, fake) = saas_env(&[]).await;
+    let source = json!({ "kind": "typesense", "host": fake, "api_key": TYPESENSE_KEY });
+    // An index an older roll made for this copy, whose record holds only where it came from: the
+    // copy starts over with a full record (later catch-ups need its id field).
+    let from = format!("typesense:{fake}:live");
+    let (s, v) = e.shop("PUT", "/live-v1", Some(json!({ "mappings": { "_meta": { "roll_import": { "from": from }, "kept": "yes" } } }))).await;
+    assert_eq!(s, 200, "{v}");
+    let started = e.post("/v1/search/clusters/shop/migrate", json!({ "source": source, "indices": [{ "index": "live", "dest": "live-v1" }] })).await;
+    assert_eq!((started["indices"][0]["restarted"].as_bool(), started["indices"][0]["resumed"].as_str()), (Some(true), None), "{started}");
+    e.task_done(started["indices"][0]["task"].as_str().unwrap_or_else(|| panic!("{started}"))).await;
+
+    let pick = json!([{ "index": "live", "dest": "live-v1" }]);
+    // A unit that doesn't fit the attribute is refused; nothing changed yet reads as nothing,
+    // with no task and the catch-up time unmoved.
+    let (_, wrong) = e.call(reqwest::Method::POST, "/v1/search/clusters/shop/migrate", Some(json!({ "source": source, "indices": pick, "step": "catch_up", "since_attribute": "updated_at", "since_unit": "ms" }))).await;
+    assert!(wrong["indices"][0]["error"].as_str().is_some_and(|m| m.contains("is since_unit s?")), "{wrong}");
+    let quiet = e.post("/v1/search/clusters/shop/migrate", json!({ "source": source, "indices": pick, "step": "catch_up", "since_attribute": "updated_at" })).await;
+    assert_eq!((quiet["indices"][0]["read"].as_u64(), quiet["indices"][0]["task"].as_str()), (Some(0), None), "{quiet}");
+
+    {
+        let mut docs = LIVE.lock().unwrap();
+        docs[1] = json!({ "id": "l2", "title": "changed", "updated_at": now });
+        docs.push(json!({ "id": "l4", "title": "new", "updated_at": now }));
+    }
+    let caught = e.post("/v1/search/clusters/shop/migrate", json!({ "source": source, "indices": pick, "step": "catch_up", "since_attribute": "updated_at" })).await;
+    assert_eq!(caught["indices"][0]["method"], "since_attribute", "{caught}");
+    let t = e.task_done(caught["indices"][0]["task"].as_str().unwrap_or_else(|| panic!("{caught}"))).await;
+    assert_eq!((t["response"]["created"].as_u64(), t["response"]["updated"].as_u64()), (Some(1), Some(1)), "{t}");
+    assert!(LIVE_EXPORTS.lock().unwrap().last().is_some_and(|q| q.starts_with("filter_by=updated_at%3A%3E%3D")), "{:?}", LIVE_EXPORTS.lock().unwrap());
+    let (_, doc) = e.shop("GET", "/live-v1/_doc/l2", None).await;
+    assert_eq!(doc["_source"]["title"], "changed", "{doc}");
+
+    let full = e.post("/v1/search/clusters/shop/migrate", json!({ "source": source, "indices": pick, "step": "catch_up" })).await;
+    let t = e.task_done(full["indices"][0]["task"].as_str().unwrap_or_else(|| panic!("{full}"))).await;
+    assert_eq!((t["response"]["noops"].as_u64(), t["response"]["created"].as_u64(), t["response"]["updated"].as_u64()), (Some(4), Some(0), Some(0)), "{t}");
+    let (_, m) = e.shop("GET", "/live-v1/_mapping", None).await;
+    let meta = &m["live-v1"]["mappings"]["_meta"];
+    // The record is kept beside what else `_meta` held.
+    assert!(meta["roll_import"]["caught_up_ms"].is_i64() && meta["kept"] == "yes", "{m}");
+
+    // The tenant's own alias of that name, with a filter: the cutover names it, and moves the
+    // alias off it only when the alias is named on purpose. Cutover needs no key.
+    let (s, v) = e.shop("PUT", "/tenant-idx", Some(json!({ "aliases": { "live": { "filter": { "term": { "x": 1 } } } } }))).await;
+    assert_eq!(s, 200, "{v}");
+    let keyless = json!({ "kind": "typesense", "host": fake });
+    let (_, refused) = e.call(reqwest::Method::POST, "/v1/search/clusters/shop/migrate", Some(json!({ "source": keyless, "indices": [{ "index": "live", "dest": "live-v1" }], "step": "cutover" }))).await;
+    assert!(refused["indices"][0]["error"].as_str().is_some_and(|m| m.contains("tenant-idx")), "{refused}");
+    let cut = e.post("/v1/search/clusters/shop/migrate", json!({ "source": keyless, "indices": [{ "index": "live", "dest": "live-v1", "alias": "live" }], "step": "cutover" })).await;
+    assert_eq!((cut["indices"][0]["alias"].clone(), cut["indices"][0]["taken_from_other_indices"].clone()), (json!("live"), json!(["tenant-idx"])), "{cut}");
+    let (_, a) = e.shop("GET", "/_alias/live", None).await;
+    assert_eq!(index_names(&a), ["live-v1"], "{a}");
+    let (_, n) = e.shop("GET", "/live/_count", None).await;
+    assert_eq!(n["count"], 4, "{n}");
 }

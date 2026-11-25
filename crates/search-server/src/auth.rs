@@ -20,6 +20,9 @@ pub enum Presented {
     None,
     Basic { user: String, password: String },
     ApiKey { id: String, secret: String },
+    /// `ApiKey rdk1.…`: a browser key derived from a parent
+    /// ([`search_es::xpack::security::derived`]), checked by its cluster.
+    Derived(String),
     Bearer(String),
 }
 
@@ -30,6 +33,7 @@ impl std::fmt::Debug for Presented {
             Presented::Basic { user, .. } => f.debug_struct("Basic").field("user", user).field("password", &"<redacted>").finish(),
             Presented::ApiKey { id, .. } => f.debug_struct("ApiKey").field("id", id).field("secret", &"<redacted>").finish(),
             Presented::Bearer(_) => f.write_str("Bearer(<redacted>)"),
+            Presented::Derived(_) => f.write_str("Derived(<redacted>)"),
         }
     }
 }
@@ -150,6 +154,9 @@ pub fn parse_authorization(header: Option<&str>) -> Result<Presented, Malformed>
         if rest.is_empty() {
             return Ok(Presented::None);
         }
+        if search_es::xpack::security::derived::is_derived(rest) {
+            return Ok(Presented::Derived(rest.to_string()));
+        }
         let bytes = java_base64(rest.as_bytes()).map_err(Malformed::ApiKey)?;
         let text = String::from_utf8_lossy(&bytes);
         let (id, secret) = text.split_once(':').filter(|(id, _)| !id.is_empty()).ok_or_else(|| Malformed::ApiKey("invalid ApiKey value".into()))?;
@@ -235,6 +242,11 @@ pub fn claim(p: &Presented, host_cluster: Option<&str>) -> Option<Claim> {
             let (c, s) = token.rsplit_once('_')?;
             Some(Claim { cluster: c.to_string(), user: None, api_key_id: None, secret: Some(s.to_string()) })
         }
+        // Its cluster is the one it names (as `<key id>@<cluster>`); no secret of the cluster's own.
+        Presented::Derived(token) => {
+            let (key, cluster) = search_es::xpack::security::derived::names(token)?;
+            Some(Claim { cluster, user: None, api_key_id: Some(key), secret: None })
+        }
         Presented::None => host_cluster.map(|c| Claim { cluster: c.to_string(), user: None, api_key_id: None, secret: None }),
     }
 }
@@ -252,6 +264,7 @@ pub fn native_authorization(p: &Presented, claim: &Claim, host_cluster: Option<&
         Presented::Basic { password, .. } => claim.user.as_ref().map(|u| format!("Basic {}", b64(format!("{u}:{password}")))),
         Presented::ApiKey { secret, .. } => claim.api_key_id.as_ref().map(|k| format!("ApiKey {}", b64(format!("{k}:{secret}")))),
         Presented::Bearer(token) => (host_cluster == Some(claim.cluster.as_str()) && claim.secret.as_ref() == Some(token)).then(|| format!("Bearer {token}")),
+        Presented::Derived(token) => Some(format!("ApiKey {token}")),
         Presented::None => None,
     }
 }

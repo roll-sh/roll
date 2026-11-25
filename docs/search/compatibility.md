@@ -1698,7 +1698,10 @@ taken over by roll's crawler. Where roll's differs ([crawler.md](crawler.md)):
   `auth_origin` over https, never after a redirect to another origin; one per connector.
   `http_auth_allowed`, proxies and `domains[].auth` in the snippet aren't taken (the CLI import
   moves `auth` to the sealed fields).
-- **Not yet**: extraction rules (a snippet with any fails validation), XPath, incremental crawls
+- **Extraction rules** are Open Crawler's rulesets; `html` selectors are CSS Selectors Level 3
+  without `:has()`, states, pseudo-elements or escapes (each refused at validation), and a rule's
+  text is gathered as the body's is, not Jsoup's `text()`.
+- **Not yet**: XPath selectors, incremental crawls
   (an incremental job fails), binary content extraction (only `text/html` and
   `application/xhtml+xml` are indexed), `data-elastic-name` and `meta.elastic` beyond 100 fields a
   page, and `full_html` is the page as served, not Jsoup's re-serialisation. Pages are decoded as
@@ -2262,7 +2265,9 @@ the rest are skipped by the tests' own prerequisites.
   of that shard; roll doesn't, because a snapshot running elsewhere (on another node, or a
   cluster writing the same bucket) records the chunks it uses only when it commits, so a commit
   can't tell another snapshot's chunks from leftovers. As on Elasticsearch, deleting snapshots
-  waits for the snapshots running in the repository, which may reuse what it would delete;
+  waits for the snapshots running in the repository, which may reuse what it would delete, and
+  a snapshot starting while a deletion or `_cleanup` runs there waits for it to end (a running
+  snapshot makes `_cleanup` refuse), so it never takes a removed snapshot as its base;
   `_cleanup` deletes what no snapshot references, and only objects of the names roll writes
   (`index-N` from 1, `tests-<uuid>`, its shard files and chunks under `indices/`; nothing when
   the bucket holds no repository data), and aborts only its own dangling uploads,

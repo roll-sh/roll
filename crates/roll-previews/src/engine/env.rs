@@ -150,6 +150,46 @@ impl EnvSource for Engine {
 }
 
 impl Engine {
+    /// The sign-in a browser run takes first (`github.login`: screenshots, `try`), and why there's
+    /// none when the project has one: a fork's preview signs in with nothing (its code would get
+    /// what's typed), and one whose variables can't be read is taken signed out.
+    pub(super) async fn run_login(&self, r: &Row) -> (Option<crate::ports::Login>, Option<String>) {
+        match self.store.settings(&r.project_id).ok().and_then(|s| s.github.login) {
+            None => (None, None),
+            Some(_) if !r.trusted => (None, Some("a fork's preview signs in with nothing (its code would get what's typed)".into())),
+            Some(rule) => match self.login_for(r, &rule).await {
+                Ok(l) => (Some(l), None),
+                Err(e) => (None, Some(format!("{e:#}"))),
+            },
+        }
+    }
+
+    /// `github.login` with its `$NAME`s from the preview's own environment, as a start of its
+    /// would get them (its secrets without dynamic credentials, then the project's and its own
+    /// variables; a reference never as text), each masked wherever the preview's words are kept.
+    pub(super) async fn login_for(&self, r: &Row, rule: &crate::settings::LoginRule) -> anyhow::Result<crate::ports::Login> {
+        let mut steps = rule.steps.clone();
+        if !rule.names().is_empty() {
+            let s = self.store.settings(&r.project_id)?;
+            let untrusted = !(s.secrets.allow_production && r.trusted);
+            let (secrets, _, _) = self.resolve_secrets(r, untrusted, false, "login").await?;
+            let own = project_env(&s, r.branch.as_deref()).into_iter().chain(self.store.vars(&r.id)?).filter(|(_, v)| !crate::settings::is_reference(v));
+            let vars: std::collections::HashMap<String, String> = secrets.into_iter().chain(own).collect();
+            let mut used = Vec::new();
+            for st in &mut steps {
+                if let crate::settings::Step::Type(_, text) = st
+                    && let Some(name) = crate::settings::var_ref(text)
+                {
+                    let v = vars.get(name).ok_or_else(|| anyhow::anyhow!("github.login's ${name} isn't a variable of the preview's"))?.clone();
+                    used.push(v.clone());
+                    *text = v;
+                }
+            }
+            self.add_masks(&r.id, used);
+        }
+        Ok(crate::ports::Login { page: rule.page.clone(), steps })
+    }
+
     /// The runtime saw a service start, stop or fail: keep the preview's state truthful.
     pub async fn observed(&self, preview: &str, service: &str, state: ServiceState, error: Option<String>, active_ms: i64) {
         let _ = self.store.set_service(preview, service, state, None, error.as_deref());

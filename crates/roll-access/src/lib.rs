@@ -11,6 +11,7 @@
 //! - [`oauth`]: the MCP authorization flow (discovery, registration, PKCE codes, tokens).
 
 pub mod api;
+mod bootstrap;
 pub mod catalog;
 pub mod checkup;
 pub mod evaluate;
@@ -373,10 +374,28 @@ pub struct Resolvers {
     /// Per product: the workspace project a resource is in, for a product that keeps it itself
     /// rather than on the canvas (previews: a preview's project).
     pub projects: HashMap<&'static str, ProjectFn>,
+    /// Per product: the ids of the resources a person owns themselves (search: their clusters),
+    /// for a product whose owner stays a source of trust beside projects (docs/members.md).
+    pub owned: HashMap<&'static str, OwnedFn>,
+    /// Per product whose resources have no environments (search's clusters): whether resource
+    /// `id` is protected as a whole. An `unprotected` rule, a developer's default (docs/members.md,
+    /// D3), reaches one only when this says `Some(false)`.
+    pub protected_whole: HashMap<&'static str, WholeProtectedFn>,
 }
+
+/// Whether resource `id` is protected as a whole (`None`: not known, so no `unprotected` rule
+/// reaches it).
+pub type WholeProtectedFn = Arc<dyn Fn(&str) -> Option<bool> + Send + Sync>;
 
 /// The workspace project `product`'s resource `id` is in (`None`: not known, or gone).
 pub type ProjectFn = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
+/// Workspace projects' trust bases read for one request ([`Access::resource_with`]).
+#[derive(Default)]
+pub struct TrustMemo(HashMap<String, Option<roll_workspace::TrustBasis>>);
+
+/// The ids of `product`'s resources the person `user` (`usr_…`) owns.
+pub type OwnedFn = Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>;
 
 /// Whether environment `env` of resource `id` is protected (`None`: not known).
 pub type ProtectedFn = Arc<dyn Fn(&str, &str) -> Option<bool> + Send + Sync>;
@@ -412,6 +431,19 @@ impl Resolvers {
     /// the project).
     pub fn project_fn(&mut self, product: &'static str, f: impl Fn(&str) -> Option<String> + Send + Sync + 'static) {
         self.projects.insert(product, Arc::new(f));
+    }
+
+    /// Register the resources of `product` a person owns themselves: `f(user)`. A person's grant
+    /// (their session, and within it their tokens) reaches each of them with every action, as their
+    /// own did before members (docs/members.md, "search").
+    pub fn owned_fn(&mut self, product: &'static str, f: impl Fn(&str) -> Vec<String> + Send + Sync + 'static) {
+        self.owned.insert(product, Arc::new(f));
+    }
+
+    /// Register whether `product`'s resources, which have no environments, are protected:
+    /// `f(id)` ([`Resolvers::protected_whole`]).
+    pub fn protected_whole(&mut self, product: &'static str, f: impl Fn(&str) -> Option<bool> + Send + Sync + 'static) {
+        self.protected_whole.insert(product, Arc::new(f));
     }
 
     /// Whether `env` of `product`'s resource `id` is protected, as the product says now.
@@ -647,6 +679,22 @@ impl Access {
 
     /// The resource of `kind` named `id`, with its project and environment filled in.
     pub fn resource(&self, product: &str, kind: &str, id: &str) -> Resource {
+        self.resource_as(false, product, kind, id)
+    }
+
+    /// [`Access::resource`] as a person's grant sees it (`person`: their session, or a token of
+    /// theirs): on a member product, a project whose canvas holds it counts only when the project
+    /// trusts it (its home, or one of its owners' own: `Workspace::trusts`), so an admin of a
+    /// project gains nothing on a stranger's resource dropped on its canvas (docs/members.md, "A
+    /// canvas proves nothing"). Other products keep the canvas as it is until they become member
+    /// products.
+    pub fn resource_as(&self, person: bool, product: &str, kind: &str, id: &str) -> Resource {
+        self.resource_with(person, product, kind, id, &mut TrustMemo::default())
+    }
+
+    /// [`Access::resource_as`] reading each project's trust basis once in `memo` (one request's
+    /// resources: a list's items, a product's second checks).
+    pub fn resource_with(&self, person: bool, product: &str, kind: &str, id: &str, memo: &mut TrustMemo) -> Resource {
         // A git URL names its repo with or without `.git`.
         let (product, kind, id) = if kind == "git-repo" { (product, "repo", id.trim_end_matches(".git")) } else { (product, kind, id) };
         // tasks' queues, topics, schedules and functions share one product: their ids say which
@@ -663,10 +711,53 @@ impl Access {
         } else if let Some(f) = self.resolvers.projects.get(product) {
             f(&id).into_iter().collect()
         } else {
-            catalog::workspace_kind(product).map(|wk| self.resolvers.projects_of(wk, &id)).unwrap_or_default()
+            let wk = catalog::workspace_kind(product);
+            let mut on = wk.map(|wk| self.resolvers.projects_of(wk, &id)).unwrap_or_default();
+            if let (true, Some(wk)) = (person && roll_auth::roles::MEMBER_PRODUCTS.contains(&product), wk) {
+                on.retain(|p| self.trusts(p, wk, &id, memo));
+            }
+            on
         };
         let project = (!projects.is_empty()).then(|| projects.remove(0));
-        Resource { product: product.into(), id: Some(id), project, also_in: projects, environment: resolved.and_then(|r| r.environment), ..Default::default() }
+        let protected = self.resolvers.protected_whole.get(product).and_then(|f| f(&id));
+        Resource { product: product.into(), id: Some(id), project, also_in: projects, environment: resolved.and_then(|r| r.environment), protected, ..Default::default() }
+    }
+
+    /// Whether workspace project `project` stands for `kind ref` (`Workspace::trusts`), its basis
+    /// read once per `memo`. No workspace, or a failed lookup, is a no.
+    fn trusts(&self, project: &str, workspace_kind: &str, r#ref: &str, memo: &mut TrustMemo) -> bool {
+        let (Some(ws), Ok(kind)) = (self.workspace.get(), roll_workspace::Kind::parse(workspace_kind)) else { return false };
+        let basis = memo.0.entry(project.to_string()).or_insert_with(|| ws.trust_basis(project).ok().flatten());
+        basis.as_ref().is_some_and(|b| ws.trusts_on(project, b, kind, r#ref))
+    }
+
+    /// Whether person `user`, as they are now, may `action` `product`'s resource `id`: they can still
+    /// sign in, and their grant (their memberships' rules and what they own of the product, or
+    /// everything for an admin account) allows it, resolved as a person's request is. What a
+    /// person set up that acts later (a search cluster's remote link) acts only while this holds.
+    /// Blocking; never cached.
+    pub fn person_reaches(&self, user: &str, product: &str, kind: &str, id: &str, action: Action) -> bool {
+        let Some(people) = self.people.get() else { return false };
+        let Ok(Some(p)) = people.person_now(user) else { return false };
+        if p.admin {
+            return true;
+        }
+        let Ok(g) = self.session_grant(user, None) else { return false };
+        let mut scope = (*g.scope).clone();
+        scope.0.extend(self.own_rule(product, user));
+        scope.outcome(&roll_auth::scope::Target::One(self.resource_as(true, product, kind, id)), action) == roll_auth::scope::Outcome::Allow
+    }
+
+    /// The rule a person's grant gets for what they own of `product` (`Resolvers::owned_fn`):
+    /// every action on each, by id. `None`: the product registers none, or they own nothing.
+    pub fn own_rule(&self, product: &str, user: &str) -> Option<roll_auth::scope::Rule> {
+        use roll_auth::scope::{Action, Effect, Resources, Rule, Selector};
+        let ids = self.resolvers.owned.get(product).map(|f| f(user)).unwrap_or_default();
+        if ids.is_empty() {
+            return None;
+        }
+        let resources = Resources::Some(ids.into_iter().map(|id| Selector::Id { id, index: None }).collect());
+        Some(Rule { product: product.into(), resources, environments: None, paths: None, unprotected: false, actions: Action::ALL.iter().map(|a| (*a, Effect::Allow)).collect() })
     }
 }
 
@@ -1048,6 +1139,12 @@ impl Access {
     /// tokens' caps, and pruned a day after it ends; what it does is audited as any token's, and
     /// each mint is a row.
     pub async fn mint_workload(self: &Arc<Self>, new: store::NewGrant, within: &roll_auth::scope::Scope, minutes: u32, user: Option<&str>) -> Result<(store::Grant, String)> {
+        self.mint_workload_via(new, within, minutes, user, None).await
+    }
+
+    /// [`Access::mint_workload`] for a machine credential's login (`via`: its grant, which must be
+    /// live): the token joins the credential's chain, and goes with it (store/bootstrap.rs).
+    pub async fn mint_workload_via(self: &Arc<Self>, new: store::NewGrant, within: &roll_auth::scope::Scope, minutes: u32, user: Option<&str>, via: Option<&str>) -> Result<(store::Grant, String)> {
         if !within.covers(&new.rules) {
             return Err(Error::Forbidden("a workload's rules must be within its identity's".into()));
         }
@@ -1059,9 +1156,9 @@ impl Access {
         }
         let a = self.clone();
         let by = user.unwrap_or("operator").to_string();
-        let user = user.map(str::to_string);
+        let (user, via) = (user.map(str::to_string), via.map(str::to_string));
         let (g, secret) = tokio::task::spawn_blocking(move || {
-            let made = a.store.create_workload(&new, minutes, &by, user.as_deref())?;
+            let made = a.store.create_workload(&new, minutes, &by, user.as_deref(), via.as_deref())?;
             a.store.audit(&store::AuditEvent {
                 id: new_id("aud"),
                 at: code_sql::now_ms(),

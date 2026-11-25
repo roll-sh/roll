@@ -77,6 +77,8 @@ export interface PreviewCost {
   sleeping_usd_month: number;
   active_usd_hour: number;
   month_to_date_usd: number;
+  /** Of `month_to_date_usd`: its browsers' and jobs' containers (screenshot runs, stories, agents' runs, seed/release/teardown). */
+  runs_usd?: number;
   bytes: number;
 }
 
@@ -181,6 +183,8 @@ export interface Preview {
   earlier?: { service: string; revision: string; url: string; share_url: string | null; at: number; own_data?: string[] }[];
   /** Its secret values its pages serve at its head, by name and where (never the value). */
   served_secrets?: { key: string; path: string }[];
+  /** What its latest screenshot run left out: pages past a run's ten, stories it didn't take. */
+  skipped?: { pages?: string[]; stories?: number; first_stories?: string[] };
   /** Production's browser checks on this head (roll apps runs them as its deployment goes live). */
   browser_checks?: { service: string; name: string; state: "pending" | "passed" | "failed"; error: string | null; files?: { service_id: string; environment: string } | null }[];
   /** The earlier pushes' own copies of the data: how many, their bytes and a month of keeping them (in `cost`). */

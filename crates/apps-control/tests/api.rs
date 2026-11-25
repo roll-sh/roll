@@ -1802,7 +1802,7 @@ async fn a_custom_domain_routes_once_its_dns_points_at_roll() {
 }
 
 /// A link puts its resource's variables (or credentials it made for itself, once, revoked when it
-/// goes) in the service's environment (prefixed when asked),
+/// goes) in the service's environment (prefixed when asked; a Postgres URL's parts too),
 /// and a running instance has them; a resource that doesn't exist can't be linked.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_link_puts_its_variables_in_the_instances() {
@@ -1811,9 +1811,10 @@ async fn a_link_puts_its_variables_in_the_instances() {
     let id = svc["id"].as_str().unwrap().to_string();
     let links = format!("/v1/apps/services/{id}/links");
     let (st, l) = call(&w.api, "PUT", &format!("{links}/postgres/main"), Some(json!({}))).await;
-    assert_eq!((st, &l["vars"]), (StatusCode::OK, &json!(["DATABASE_URL"])), "{l}");
+    assert_eq!((st, &l["vars"]), (StatusCode::OK, &json!(["DATABASE_URL", "PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGDATABASE"])), "{l}");
     let (_, l) = call(&w.api, "PUT", &format!("{links}/postgres/orders"), Some(json!({"prefix": "ORDERS"}))).await;
-    assert_eq!(l["vars"], json!(["ORDERS_DATABASE_URL"]), "{l}");
+    assert_eq!(l["vars"][0], "ORDERS_DATABASE_URL", "{l}");
+    assert_eq!(l["vars"].as_array().map(Vec::len), Some(6), "{l}");
     assert_eq!(call(&w.api, "PUT", &format!("{links}/postgres/nope"), Some(json!({}))).await.0, StatusCode::BAD_REQUEST);
     // A preview (an ephemeral environment) gets no resource's production variables: roll
     // previews sets the branched ones itself.
@@ -1834,12 +1835,17 @@ async fn a_link_puts_its_variables_in_the_instances() {
     let raw = [std::fs::read(w.apps.cfg.home.join("apps.db")).unwrap(), std::fs::read(w.apps.cfg.home.join("apps.db-wal")).unwrap_or_default()].concat();
     assert!(!raw.windows(11).any(|x| x == b"key0-secret"));
     let base = format!("/v1/apps/services/{id}/environments/production");
-    call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"FAKE_ECHO": "DATABASE_URL,ORDERS_DATABASE_URL,LOGS_ELASTICSEARCH_API_KEY"}}))).await;
+    call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"FAKE_ECHO": "DATABASE_URL,ORDERS_DATABASE_URL,ORDERS_PGHOST,ORDERS_PGPASSWORD,ORDERS_PGDATABASE,LOGS_ELASTICSEARCH_API_KEY"}}))).await;
     let (_, r) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
     settled(&w, &id, "production", r["id"].as_str().unwrap()).await;
     let (st, body) = visit_deployment(&w, &host(&svc["environments"][0]["url"]), r["id"].as_str().unwrap()).await;
     assert_eq!(st, StatusCode::OK, "{body}");
-    assert_eq!(body["vars"], json!({"DATABASE_URL": "postgres://app:pw@db.roll.test:5432/main", "ORDERS_DATABASE_URL": "postgres://app:pw@db.roll.test:5432/orders", "LOGS_ELASTICSEARCH_API_KEY": "key0-secret"}));
+    assert_eq!(body["vars"], json!({"DATABASE_URL": "postgres://app:pw@db.roll.test:5432/main", "ORDERS_DATABASE_URL": "postgres://app:pw@db.roll.test:5432/orders", "ORDERS_PGHOST": "db.roll.test", "ORDERS_PGPASSWORD": "pw", "ORDERS_PGDATABASE": "orders", "LOGS_ELASTICSEARCH_API_KEY": "key0-secret"}));
+    // The service's own URL in place of the link's: the link's parts go with it (they'd name
+    // another database); the other link's stay.
+    call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"DATABASE_URL": "postgres://u:p@elsewhere:5432/x"}}))).await;
+    let (_, v) = call(&w.api, "GET", &format!("{base}/variables/values"), None).await;
+    assert!(v.get("PGHOST").is_none() && v.get("PGPASSWORD").is_none() && v["ORDERS_PGHOST"] == "db.roll.test", "{v}");
     // Unlinking revokes them, and so does deleting the service.
     assert_eq!(call(&w.api, "DELETE", &format!("{links}/search/logs"), None).await.0, StatusCode::NO_CONTENT);
     call(&w.api, "PUT", &format!("{links}/search/logs"), Some(json!({}))).await;
@@ -2098,6 +2104,14 @@ async fn a_static_sites_form_keeps_its_submissions() {
         }
     };
     let form = "application/x-www-form-urlencoded";
+    // The site goes live a moment after its deployment settles on a loaded host: its page first.
+    for _ in 0..100 {
+        let resp = w.public.clone().oneshot(Request::get("/contact.html").header("host", &host).body(Body::empty()).unwrap()).await.unwrap();
+        if resp.status() == StatusCode::OK {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     // Sent from its page: kept, and the sender goes to its action's page.
     assert_eq!(post("/contact.html", form, "email=ana%40example.com&message=hello+there".into()).await, (StatusCode::SEE_OTHER, Some("/thanks.html".into())));
     // A bot filled the honeypot: answered the same, never kept.
@@ -2949,6 +2963,18 @@ async fn an_edge_function_runs_before_a_site_or_a_service() {
     let d: Value = serde_json::from_slice(&w.api.clone().oneshot(req).await.unwrap().into_body().collect().await.unwrap().to_bytes()).unwrap();
     let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
     assert_eq!(d["plan"]["edge"][0]["paths"], json!(["/admin/*"]), "{d}");
+    // Its source, as deployed: the files listed and one read back (a bundle's environment never).
+    let src = format!("/v1/apps/services/{id}/environments/production/deploys/{}/source", d["id"].as_str().unwrap());
+    let (_, list) = call(&w.api, "GET", &src, None).await;
+    let paths: Vec<&str> = list["files"].as_array().unwrap_or_else(|| panic!("{list}")).iter().map(|f| f["path"].as_str().unwrap()).collect();
+    assert_eq!(paths, ["index.html", "netlify/edge-functions/auth.ts"], "{list}");
+    assert_eq!(call(&w.api, "GET", &format!("{src}?path=index.html"), None).await.1["text"], "<h1>hi</h1>");
+    assert_eq!(call(&w.api, "GET", &format!("{src}?path=../env"), None).await.0, StatusCode::BAD_REQUEST);
+    // And what the static build serves, from its site's own index.
+    let out = src.replace("/source", "/output");
+    let (_, files) = call(&w.api, "GET", &out, None).await;
+    assert!(files["files"].as_array().unwrap_or_else(|| panic!("{files}")).iter().any(|f| f["path"] == "index.html"), "{files}");
+    assert!(call(&w.api, "GET", &format!("{out}?path=index.html"), None).await.1["text"].as_str().is_some_and(|t| !t.is_empty()), "the served page's text");
     let h = host(&call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await.1["url"]);
     let get = |path: String, host: String| {
         let public = w.public.clone();
@@ -3589,9 +3615,10 @@ async fn roll_up_deploys_an_uploaded_tree_and_cron_runs_on_demand() {
     let d: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
     let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
     assert_eq!((d["status"].as_str(), d["trigger"].as_str(), d["plan"]["provider"].as_str()), (Some("active"), Some("upload"), Some("static")), "{d}");
-    // The image is the deployment's now; the uploaded tree isn't kept.
+    // The image is the deployment's now; the uploaded tree is kept only as its source (until the
+    // deployment is pruned), never read by a build again.
     let uploads = w.apps.cfg.home.join("apps/uploads");
-    assert!(std::fs::read_dir(&uploads).map(|mut d| d.next().is_none()).unwrap_or(true), "the upload is deleted after its build");
+    assert_eq!(std::fs::read_dir(&uploads).map(|d| d.count()).unwrap_or(0), 1, "the upload kept as the deployment's source");
     // A variable changes: a redeploy runs the same image with it, no upload and no build.
     let base = format!("/v1/apps/services/{id}/environments/production");
     call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"GREETING": "hej", "FAKE_ECHO": "GREETING"}}))).await;
@@ -6264,6 +6291,14 @@ async fn a_deploy_waits_for_another_persons_approval() {
     let (st, again) = as_person("POST", format!("{env}/deploys/{dep}/approve"), Some("usr_bob"), json!({})).await;
     assert_eq!((st, &again["live"]), (StatusCode::OK, &Value::Null), "{again}");
     assert_eq!(call(&w.api, "GET", &env, None).await.1["active"]["id"], json!(live));
+    // A service whose volume every instance shares waits the same way (its deploy runs beside
+    // the live one); one written by one instance can't wait, and says so.
+    let (cms, _) = image_service(&w, "cms", json!({"port": 80, "volume": {"mount": "/data", "size_gb": 1, "shared": true}})).await;
+    let (cid, cenv) = (cms["id"].as_str().unwrap().to_string(), format!("/v1/apps/services/{}/environments/production", cms["id"].as_str().unwrap()));
+    assert_eq!(call(&w.api, "PUT", &cenv, Some(json!({"approvals": 1}))).await.0, StatusCode::OK);
+    let (st, d) = as_person("POST", format!("{cenv}/deploys"), Some("usr_ada"), json!({})).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{d}");
+    assert_eq!(settled(&w, &cid, "production", d["id"].as_str().unwrap()).await["status"], "ready");
 }
 
 /// A status badge (Netlify's): off, a 404; on, an SVG saying the environment is live, cached a
@@ -8351,7 +8386,17 @@ async fn a_builds_otel_agent_starts_while_traces_are_on() {
     call(&w.api, "PUT", &env, Some(json!({"traces": true}))).await;
     let (_, r) = call(&w.api, "POST", &format!("{env}/redeploy"), Some(json!({}))).await;
     assert_eq!(settled(&w, &id, "production", r["id"].as_str().unwrap()).await["status"], "active");
-    assert_eq!(node_options().await, Some(format!("--max-old-space-size=256 --require {}", apps_build::otel::NODE_REQUIRE)));
+    // The live template moves to the new deployment a moment after it settles on a loaded host.
+    let want = Some(format!("--max-old-space-size=256 --require {}", apps_build::otel::NODE_REQUIRE));
+    let mut got = None;
+    for _ in 0..100 {
+        got = node_options().await;
+        if got == want {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(got, want);
 }
 
 /// A Git URL service's Git LFS objects (`build.lfs`): asked of its LFS server, checked against the
@@ -9904,7 +9949,15 @@ async fn a_closed_environment_uses_its_keys_without_seeing_them() {
     // again), nothing deployed or started. (Asleep once the move above settled: until then its
     // deploy can still start an instance.)
     settled(&w, &id, "staging", e["active"]["id"].as_str().unwrap()).await;
-    w.apps.live(&id, "staging").sleep().await;
+    // Asleep and staying so: on a loaded host the move's deploy can still start one after it
+    // settled, which the renewal would rightly move.
+    for _ in 0..20 {
+        w.apps.live(&id, "staging").sleep().await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        if w.apps.live(&id, "staging").awake() == 0 {
+            break;
+        }
+    }
     assert_eq!(w.apps.live(&id, "staging").awake(), 0);
     let (was, minted_before) = (e["active"]["id"].clone(), minted());
     *vault.1.lock() = "FAKECA3".into();
@@ -9958,6 +10011,16 @@ async fn closed_services_on_one_network_move_to_a_new_ca_together() {
     let bundle = |id: &str| w.apps.live(id, "staging").template().unwrap().spec.files.iter().find(|(p, _)| p == apps_control::deploy::INTERCEPT_CA).map(|(_, c)| c.clone()).unwrap_or_default();
     // api sleeps, web runs; the CA is renewed.
     w.apps.live(&api, "staging").sleep().await;
+    // web up: on a loaded host its instance can be counted a moment after its deploy settled,
+    // and a visit wakes it if it went to sleep meanwhile.
+    let web_host = host(&call(&w.api, "GET", &format!("/v1/apps/services/{web}/environments/staging"), None).await.1["url"]);
+    for _ in 0..100 {
+        if w.apps.live(&web, "staging").awake() > 0 {
+            break;
+        }
+        visit(&w, &web_host, "/").await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     assert!(w.apps.live(&web, "staging").awake() > 0);
     let was = call(&w.api, "GET", &format!("/v1/apps/services/{web}/environments/staging"), None).await.1["active"]["id"].clone();
     *vault.1.lock() = "FAKECA2".into();
@@ -10078,4 +10141,53 @@ async fn a_projects_month_reads_by_service() {
     assert_eq!((rows[0]["name"].as_str(), rows[1]["name"].as_str()), (Some("api"), Some("web")), "the most costly first: {u}");
     assert!(rows[0]["usd"].as_f64().unwrap() > rows[1]["usd"].as_f64().unwrap() && u["projected_usd"].as_f64().unwrap() >= u["total_usd"].as_f64().unwrap(), "{u}");
     assert_eq!(call(&w.api, "GET", &format!("/v1/apps/projects/{}/usage?month=2099-01", w.project), None).await.0, StatusCode::BAD_REQUEST);
+}
+
+/// A fork's preview (an ephemeral environment built closed) gets roll previews' fork policy on
+/// its pages beside their own: its own origins are the preview's environments across the
+/// project's services, so a page can't send what it shows a reviewer elsewhere. Production, and
+/// a preview that isn't closed, get none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_forks_preview_pages_load_only_from_the_preview() {
+    let w = world().await;
+    w.code.push("f0f0f0f0f0f0", "site", &[("package.json", r#"{"name":"site","scripts":{"build":"vite build"},"devDependencies":{"vite":"5.0.0"}}"#)]);
+    let (_, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "site", "source": {"kind": "repo", "repo": "acme/site"} }))).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    let (api, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let api = api["id"].as_str().unwrap().to_string();
+    let page = |host: String| {
+        let public = w.public.clone();
+        async move {
+            let mut last = None;
+            for _ in 0..100 {
+                let r = public.clone().oneshot(Request::get("/index.html").header("host", &host).body(Body::empty()).unwrap()).await.unwrap();
+                if r.status() == StatusCode::OK {
+                    last = Some(r.headers().get_all("content-security-policy").iter().map(|v| v.to_str().unwrap_or("").to_string()).collect::<Vec<_>>());
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            last.expect("the page answers")
+        }
+    };
+    assert!(page(host(&svc["environments"][0]["url"])).await.is_empty(), "production: none");
+    // The preview: both services have it, built closed.
+    for sid in [&id, &api] {
+        let env = format!("/v1/apps/services/{sid}/environments/pv-7");
+        let (st, e) = call(&w.api, "PUT", &env, Some(json!({"ephemeral": true, "egress": {"mode": "roll"}}))).await;
+        assert!(st.is_success(), "{e}");
+    }
+    let env = format!("/v1/apps/services/{id}/environments/pv-7");
+    let (_, d) = call(&w.api, "POST", &format!("{env}/deploys"), Some(json!({"closed": true}))).await;
+    settled(&w, &id, "pv-7", d["id"].as_str().unwrap()).await;
+    let url = |sid: &str| {
+        let api = w.api.clone();
+        let path = format!("/v1/apps/services/{sid}/environments/pv-7");
+        async move { call(&api, "GET", &path, None).await.1["url"].as_str().unwrap_or_default().split_once("://").map(|(_, r)| r.to_string()).unwrap_or_default() }
+    };
+    let (mine, theirs) = (url(&id).await, url(&api).await);
+    let csp = page(mine.split(':').next().unwrap_or_default().to_string()).await;
+    assert_eq!(csp.len(), 1, "{csp:?}");
+    assert!(csp[0].starts_with("default-src 'self' ") && csp[0].contains(&mine) && csp[0].contains(&theirs) && csp[0].contains("form-action 'self'") && csp[0].ends_with("base-uri 'self'"), "{csp:?}");
 }

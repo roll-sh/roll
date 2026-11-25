@@ -68,10 +68,10 @@ pub const RULES: &[Rule] = &[
     // Workspace projects: the operator and every signed-in user, each seeing their own.
     Rule { route: "/v1/workspace", access: Access::User("workspace projects: a user's own") },
     Rule { route: "/v1/previews", access: Access::User("previews: the projects a person is a member of, each route as their role there allows (docs/members.md)") },
-    // roll search's control plane: the operator and every signed-in person, each seeing their own
-    // clusters (search scopes by SignedIn; another's answers 404). Clusters' data plane is the
-    // REST port, with the cluster's own credentials.
-    Rule { route: "/v1/search", access: Access::User("search clusters: a user's own") },
+    // roll search's control plane: the operator and every signed-in person, each reaching their own
+    // clusters and their projects' as their role there allows (docs/members.md); anything else
+    // answers 404. Clusters' data plane is the REST port, with the cluster's own credentials.
+    Rule { route: "/v1/search", access: Access::User("search clusters: a person's own, and their projects' as their role there allows (docs/members.md)") },
     // Node-to-node hops are signed with the cluster secret; computes fetch WAL with their token.
     Rule { route: "/internal", access: Access::Product("internal: signed hops and the WAL token") },
     // Storage: IAM users signed in to the dashboard (console sessions) act as themselves.
@@ -109,7 +109,9 @@ pub const RULES: &[Rule] = &[
     // ACME (RFC 8555) on a project's CA: the account key's JWS, made with an External Account
     // Binding an admin of the project issued, and looked up on every request.
     Rule { route: "/v1/secrets/acme", access: Access::Public("ACME on a project's CA: the account key's signature and its External Account Binding are the credential") },
-    Rule { route: "/v1/secrets/login", access: Access::Public("a workload's OIDC token is the credential (workload identities)") },
+    // Machine identities' exchanges (`/login/bootstrap`, `/login/refresh`) too: the bootstrap token
+    // or machine credential in the body is the credential, checked by roll-access on every use.
+    Rule { route: "/v1/secrets/login", access: Access::Public("a workload's OIDC token, or a machine's bootstrap token or machine credential, is the credential (workload identities)") },
     Rule { route: "/v1/secrets/oidc", access: Access::Public("roll's OIDC issuer: its discovery document and public keys, which GCP and Azure fetch anonymously") },
     // Tasks: its own token (ROLL_TASKS_TOKEN) and API keys.
     Rule { route: "/v1/tasks", access: Access::Credential("a tasks token or API key") },

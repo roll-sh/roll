@@ -253,17 +253,24 @@ fn bump_policy(stats: &mut Map, id: &str, k: &str, by: i64) {
 
 /// `SnapshotLifecycleTask.maybeTakeSnapshot`: takes the policy's snapshot now and records the
 /// outcome; a scheduled run also moves the policy's schedule on. Returns the snapshot's name
-/// (`None`: the policy is gone).
+/// (`None`: the policy is gone, paused, or for a scheduled run no longer due).
 async fn execute(cluster: &Cluster, id: &str, now: i64, scheduled: bool) -> Option<String> {
-    let rec = cluster.state().metadata.xpack.get(POLICIES, id).cloned()?;
-    if crate::branch::paused_policy(&rec) {
+    // Counted before the policy is read: a scheduled run decided under a schedule the policy no
+    // longer has is either seen running or doesn't start (Elasticsearch drops a policy's
+    // trigger when the policy is updated), so whoever changes it can wait for runs to end.
+    cluster.xpack.slm_running.fetch_add(1, Ordering::SeqCst);
+    let rec = {
+        let st = cluster.state();
+        st.metadata.xpack.get(POLICIES, id).cloned().filter(|rec| !crate::branch::paused_policy(rec) && (!scheduled || policy_next(&st, rec).is_some_and(|t| t <= now)))
+    };
+    let Some(rec) = rec else {
+        finish_run(cluster, now).await;
         return None;
-    }
+    };
     let p = policy_body(&rec).clone();
     let owner = rec.pointer(&["_roll", "user"]).and_then(internal::principal_of);
     let repo = str_of(&p, "repository").to_string();
     let config = p.get("config").and_then(Value::as_object).cloned().unwrap_or_default();
-    cluster.xpack.slm_running.fetch_add(1, Ordering::SeqCst);
     let name = snapshot_name(str_of(&p, "name"), now);
     let outcome: Result<(String, i64), (String, EsError)> = match name {
         Err(e) => Err((str_of(&p, "name").to_string(), e)),
@@ -1012,8 +1019,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("roll-slm-unit-{}", std::process::id()));
         let mut cfg = ClusterConfig::new("c");
         cfg.node_settings.push(("path.repo".into(), dir.to_string_lossy().into_owned()));
+        // No background scheduler: its turns are taken by hand below, at the times it would take
+        // them, so nothing depends on how fast a loaded machine takes snapshots.
         let c = Arc::new(Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap());
-        c.enable_background_tasks();
         for (m, uri, body) in [
             ("PUT", "/_cluster/settings", r#"{"persistent":{"slm.minimum_interval":"0s"}}"#),
             ("PUT", "/_snapshot/repo", r#"{"type":"fs","settings":{"location":"repo"}}"#),
@@ -1025,10 +1033,15 @@ mod tests {
         }
         let modified = c.state().metadata.xpack.get(super::POLICIES, "p").and_then(|r| r.get("modified_date")).and_then(Value::as_i64).unwrap();
         assert_eq!(super::next_due(&c.state()), Some(modified + 300));
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        while policy_snapshots(&c) < 3 {
-            assert!(std::time::Instant::now() < deadline, "the scheduler took {} snapshots", policy_snapshots(&c));
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Each turn at the time the schedule names takes one snapshot and moves the schedule on;
+        // a turn before it takes none.
+        for taken in 1..=3 {
+            let due = super::next_due(&c.state()).unwrap();
+            super::run_due(&c, due - 1).await;
+            assert_eq!(policy_snapshots(&c), taken - 1, "a turn before the schedule's time took a snapshot");
+            super::run_due(&c, due).await;
+            assert_eq!(policy_snapshots(&c), taken);
+            assert_eq!(super::next_due(&c.state()), Some(due + 300), "the schedule moves on from the run");
         }
         // A schedule far ahead ends the runs; retention keeps the newest two.
         let (s, v) = call(&c, "PUT", "/_slm/policy/p", r#"{"schedule":"0 0 0 1 1 ? 2099","name":"<s-{now/d}>","repository":"repo","retention":{"max_count":2}}"#).await;

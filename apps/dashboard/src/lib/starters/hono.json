@@ -1,0 +1,11 @@
+{
+  "id": "hono",
+  "name": "Hono",
+  "blurb": "A small web API on Node",
+  "files": {
+    "package.json": "{\n  \"name\": \"{{name}}\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"scripts\": {\n    \"dev\": \"node --watch index.js\",\n    \"start\": \"node index.js\"\n  },\n  \"dependencies\": {\n    \"@hono/node-server\": \"^2.1.5\",\n    \"hono\": \"^4.13.17\"\n  }\n}\n",
+    "index.js": "import { serve } from \"@hono/node-server\";\nimport { Hono } from \"hono\";\n\nconst app = new Hono();\n\napp.get(\"/\", (c) => c.json({ name: \"{{name}}\", ok: true }));\napp.get(\"/hello/:who\", (c) => c.text(`Hello, ${c.req.param(\"who\")}!`));\n\n// roll gives the port to listen on.\nserve({ fetch: app.fetch, port: Number(process.env.PORT) || 3000 });\n",
+    ".gitignore": "node_modules/\n.env*\n",
+    "README.md": "# {{name}}\n\nA Hono API, started from roll's Hono starter. Every landing on its default branch deploys it.\n\nRun it on your computer:\n\n```sh\nnpm install\nnpm run dev\n```\n"
+  }
+}

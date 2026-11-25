@@ -51,7 +51,12 @@ pub fn authenticate(cluster: &Cluster, value: &str) -> EsResult<Principal> {
     if let Some(ty) = k.get("type").and_then(Value::as_str).filter(|t| *t != "rest") {
         return Err(super::unauthorized(format!("authentication expected API key type of [rest], but API key [{id}] has type [{ty}]")));
     }
-    Ok(Principal {
+    Ok(principal_of(id, k))
+}
+
+/// The principal stored API key `id` (`k`) authenticates as.
+pub(super) fn principal_of(id: &str, k: &Value) -> Principal {
+    Principal {
         username: k.get("username").map(Value::to_es_string).unwrap_or_default(),
         roles: Vec::new(),
         full_name: k.get("owner_full_name").cloned().unwrap_or(Value::Null),
@@ -67,8 +72,9 @@ pub fn authenticate(cluster: &Cluster, value: &str) -> EsResult<Principal> {
             limited_by: k.get("limited_by").cloned().unwrap_or_else(Value::object),
             cross_cluster: k.get("type").and_then(Value::as_str) == Some("cross_cluster"),
             remote: None,
+            derived: None,
         })),
-    })
+    }
 }
 
 /// Authenticates a linked remote cluster's request ([`crate::remote::links`]): a
@@ -117,6 +123,7 @@ pub fn authenticate_link(cluster: &Cluster, value: &str, access: &str) -> EsResu
             limited_by: Value::object(),
             cross_cluster: true,
             remote: Some(Box::new(super::RemoteUser { roles, who })),
+            derived: None,
         })),
     })
 }
@@ -201,7 +208,10 @@ async fn store_key(ctx: &Ctx<'_>, owner: &Principal, k: NewKey) -> EsResult<Repl
     doc.insert("username".into(), owner.username.clone().into());
     doc.insert("realm".into(), realm.into());
     doc.insert("realm_type".into(), realm_type.into());
-    doc.insert("metadata".into(), k.metadata);
+    // A new key's `derive` is checked as an update from nothing: its first generation only.
+    let mut metadata = k.metadata;
+    super::derived::on_update(&mut metadata, &Value::Null)?;
+    doc.insert("metadata".into(), metadata);
     doc.insert("role_descriptors".into(), k.role_descriptors);
     doc.insert("limited_by".into(), limited);
     if let Some(a) = k.cross_cluster {
@@ -459,6 +469,8 @@ fn owned_by(k: &Value, p: &Principal) -> bool {
 
 /// A key as the get and query APIs print it.
 fn key_view(k: &Value, with_limited_by: bool, profile_uid: Option<Value>) -> Value {
+    let redacted = super::derived::redacted(k);
+    let k = redacted.as_ref().unwrap_or(k);
     let mut out = Map::new();
     for f in ["id", "name", "type", "creation", "expiration", "invalidated", "invalidation", "username", "realm", "realm_type", "metadata", "role_descriptors"] {
         if let Some(v) = k.get(f) {
@@ -524,6 +536,9 @@ pub fn get(ctx: &Ctx) -> EsResult<Reply> {
 }
 
 fn key_fields(k: &Value, f: &str) -> Vec<Value> {
+    // Never a signing secret, even sealed: a query can't probe it.
+    let redacted = super::derived::redacted(k);
+    let k = redacted.as_ref().unwrap_or(k);
     match f {
         "id" | "_id" => query::path_values(k, "id"),
         "name" | "type" | "creation" | "expiration" | "invalidated" | "invalidation" | "username" => query::path_values(k, f),
@@ -664,7 +679,9 @@ fn apply_update(st: &mut crate::meta::ClusterState, file: &super::FileRoles, id:
             m.insert("access".into(), a.clone());
         }
         if let Some(md) = &upd.metadata {
-            m.insert("metadata".into(), md.clone());
+            let mut md = md.clone();
+            super::derived::on_update(&mut md, &before)?;
+            m.insert("metadata".into(), md);
         }
         if let Some(e) = upd.expiration {
             m.insert("expiration".into(), e.into());

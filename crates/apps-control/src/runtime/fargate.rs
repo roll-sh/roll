@@ -544,6 +544,15 @@ impl Runtime for Fargate {
         "fargate"
     }
 
+    /// The stack's task architecture (`X86_64`, `ARM64`).
+    fn platform(&self) -> Option<String> {
+        match self.cfg.arch.to_ascii_uppercase().as_str() {
+            "X86_64" => Some("linux/amd64".into()),
+            "ARM64" => Some("linux/arm64".into()),
+            _ => None,
+        }
+    }
+
     fn can_suspend(&self) -> bool {
         false
     }

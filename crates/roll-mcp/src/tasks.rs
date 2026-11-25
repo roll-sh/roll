@@ -78,6 +78,12 @@ pub(crate) fn on(ctx: &Ctx) -> bool {
     ctx.tasks && ctx.m.config.access.as_ref().is_some_and(|a| a.sinks.get().is_some())
 }
 
+/// A spawned call's answer: `None` only for a tool this connection doesn't have; a call that
+/// stopped (it panicked) is a tool error saying so, not an unknown tool.
+fn answered(job: Result<Option<Value>, tokio::task::JoinError>) -> Option<Value> {
+    job.unwrap_or_else(|_| Some(crate::tool_error("the call stopped before it answered".into(), json!({ "code": "stopped" }))))
+}
+
 /// Run a tool call, as a task if it outlasts [`AFTER`]: `Ok(result)` for a call that finished in
 /// time (or for which no task can be made), `Err(task)` for the `CreateTaskResult` to answer.
 pub(crate) async fn call_or_task(ctx: &Arc<Ctx>, name: &str, args: Value) -> Result<Option<Value>, Value> {
@@ -85,7 +91,7 @@ pub(crate) async fn call_or_task(ctx: &Arc<Ctx>, name: &str, args: Value) -> Res
     let mut job = tokio::spawn(async move { call(&c, &n, a).await });
     tokio::select! {
         done = &mut job => {
-            let done = done.ok().flatten();
+            let done = answered(done);
             // A call that waits for a person is a task however soon it said so: the task shows
             // the approval page and runs the call once a person decides.
             // So is one that waits for something by design, answering before it's over.
@@ -101,7 +107,7 @@ pub(crate) async fn call_or_task(ctx: &Arc<Ctx>, name: &str, args: Value) -> Res
         }
         _ = tokio::time::sleep(AFTER) => {}
     }
-    let Some(access) = ctx.m.config.access.clone() else { return Ok(job.await.ok().flatten()) };
+    let Some(access) = ctx.m.config.access.clone() else { return Ok(answered(job.await)) };
     let id = roll_access::new_secret("rtk_");
     let hash = roll_access::hash(&id);
     let made = {
@@ -111,7 +117,7 @@ pub(crate) async fn call_or_task(ctx: &Arc<Ctx>, name: &str, args: Value) -> Res
     let task = match made {
         Ok(Ok(t)) => t,
         // Over the cap, or the store failing: the call answers in place, as without tasks.
-        _ => return Ok(job.await.ok().flatten()),
+        _ => return Ok(answered(job.await)),
     };
     tokio::spawn(run(ctx.clone(), access, hash, job, name.to_string(), args));
     let mut v = view(&id, &task, None);

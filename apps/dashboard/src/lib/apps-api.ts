@@ -103,7 +103,7 @@ export interface Build {
   submodules?: boolean;
   /** The private roll code repos (owner/name) a roll code repo's submodules may come from. */
   submodule_repos?: string[];
-  /** The language's OpenTelemetry agent (Node, Python), started while traces are on. */
+  /** The language's OpenTelemetry agent (Node, Python, the JVM, .NET 8+), started while traces are on. */
   otel?: boolean;
   /** A Git URL service's Git LFS objects in place of their pointers (default: pointers as text). */
   lfs?: boolean;
@@ -1747,6 +1747,12 @@ export const appsApi = {
   buildLog: (id: string, e: string, d: string, q: LogQuery = {}) => call<LogLine[]>("GET", `${dep(id, e, d)}/logs${qs({ tail: q.tail })}`),
   /** `keepVariables`: its image with the variables as they are now (after a rotated secret), not as they were then. */
   /** Keep a deployment from pruning (`on`), or let it go again. */
+  /** A folder upload's files as deployed (kept until it's pruned). */
+  source: (id: string, e: string, d: string) => call<{ files: { path: string; bytes: number; link?: string }[]; truncated: boolean }>("GET", `${dep(id, e, d)}/source`),
+  /** One of them: its text when it's UTF-8 and at most 1 MiB. */
+  sourceFile: (id: string, e: string, d: string, path: string) => call<{ path: string; bytes: number; text?: string }>("GET", `${dep(id, e, d)}/source${qs({ path })}`),
+  /** A static build's files as served, or one of them (`path`). */
+  output: (id: string, e: string, d: string, path?: string) => call<{ files?: { path: string; bytes: number }[]; truncated?: boolean; path?: string; bytes?: number; text?: string }>("GET", `${dep(id, e, d)}/output${qs({ path })}`),
   pin: (id: string, e: string, d: string, on: boolean) => call<Deployment>(on ? "POST" : "DELETE", `${dep(id, e, d)}/pin`),
   rollback: (id: string, e: string, d: string, keepVariables = false) => call<Deployment>("POST", `${dep(id, e, d)}/rollback`, keepVariables ? { keep_variables: true } : undefined),
   /** Back to the one live before what runs (the server walks back through rollbacks). */

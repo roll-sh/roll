@@ -20,6 +20,45 @@ const STILL =
   "*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important;scroll-behavior:auto!important}" +
   HIDE.map((x) => x + "{visibility:hidden!important}").join("");
 const sleep = (ms) => new Promise((ok) => setTimeout(ok, ms));
+// The app's sign-in ($LOGIN_FILE: {page, steps}, a trusted preview's, its typed values put in by
+// roll): read once and removed. Each browser signs in on its own page before its capture.
+const LOGIN = (() => {
+  const fs = require("fs");
+  let l = null;
+  try {
+    l = JSON.parse(fs.readFileSync(process.env.LOGIN_FILE || "", "utf8"));
+  } catch {}
+  try {
+    fs.unlinkSync(process.env.LOGIN_FILE || "");
+  } catch {}
+  return l && typeof l.page === "string" && /^\/(?!\/)[^\s#"'`\\]{0,199}$/.test(l.page) && Array.isArray(l.steps) ? l : null;
+})();
+const KEYS = ["Enter", "Escape", "Tab", "ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Space", "Backspace"];
+// The sign-in's steps on `page`, 15 s at most; the first that fails ends them (the page is then
+// the signed-out one, as Chromium's run says).
+const signIn = async (page) => {
+  if (!LOGIN) return;
+  await page.goto(new URL(LOGIN.page, process.env.URL).href, { waitUntil: "load", timeout: 20000 });
+  const until = Date.now() + 15000;
+  for (const s of LOGIN.steps.slice(0, 10)) {
+    const left = Math.max(until - Date.now(), 0);
+    if (!left || !s) break;
+    const timeout = Math.min(left, 3000);
+    try {
+      if (typeof s.click === "string") await page.click(s.click, { timeout });
+      else if (Array.isArray(s.type) && s.type.length === 2) await page.fill(String(s.type[0]), String(s.type[1]).slice(0, 200), { timeout });
+      else if (Array.isArray(s.choose) && s.choose.length === 2 && Number.isInteger(s.choose[1]) && s.choose[1] >= 1) await page.selectOption(String(s.choose[0]), { index: s.choose[1] - 1 }, { timeout });
+      else if (KEYS.includes(s.press)) await page.keyboard.press(s.press === "Space" ? " " : s.press);
+      else if (typeof s.wait === "number") await sleep(Math.min(Math.max(s.wait, 0), 5000));
+      else break;
+    } catch {
+      break;
+    }
+    await sleep(150);
+  }
+  // Its last step usually submits: what that loads, settled.
+  await sleep(1500);
+};
 const CROPS = (() => {
   try {
     return JSON.parse(process.env.CROPS || "[]").filter((c) => c && typeof c.note === "string" && typeof c.path === "string" && typeof c.selector === "string" && ["firefox", "webkit", "webkit-phone"].includes(c.browser)).slice(0, 10);
@@ -38,6 +77,7 @@ const crop = async (c) => {
     const h = Number.isInteger(c.height) && c.height >= 320 && c.height <= 2000 ? c.height : phone ? 844 : 800;
     const page = await browser.newPage(phone ? { viewport: { width: w, height: h }, deviceScaleFactor: 2, isMobile: true, hasTouch: true } : { viewport: { width: w, height: h } });
     if (!/^\/(?!\/)[^\s#"'`\\]{0,199}$/.test(c.path)) return;
+    await signIn(page);
     await page.goto(new URL(c.path, process.env.URL).href, { waitUntil: "load", timeout: 30000 });
     await sleep(300);
     const until = Date.now() + 10000;
@@ -89,6 +129,8 @@ const crop = async (c) => {
       browser = await pw[phone ? "webkit" : name].launch();
       // Twice the density, as Chromium's phone screenshot: three times would pass roll's 2 MiB a picture on a page of photos.
       const page = await browser.newPage(phone ? { viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true } : { viewport: { width: 1280, height: 800 } });
+      // Signed in first; what the sign-in page went through counts for no page.
+      await signIn(page);
       let errors = 0;
       page.on("pageerror", () => errors++);
       page.on("console", (m) => m.type() === "error" && errors++);

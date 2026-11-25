@@ -258,6 +258,16 @@ pub struct Shot {
     /// values in ([`crate::served_secrets`]); never kept.
     #[serde(default, with = "png_b64::pairs")]
     pub bodies: Vec<(String, Vec<u8>)>,
+    /// What its sign-in said (`github.login`): "signed in", or the step it stopped at.
+    #[serde(default)]
+    pub login: Option<String>,
+    /// What it left out (pages past a run's ten, stories it didn't take).
+    #[serde(default)]
+    pub skipped: crate::Skipped,
+    /// How long its containers ran, together (Chromium's, the other browsers', the stories'),
+    /// each of [`crate::runtime::BROWSER_GIB`]: what it costs.
+    #[serde(default)]
+    pub container_ms: u64,
 }
 
 /// PNG bytes as base64 in JSON (a [`Shot`] from another node).
@@ -407,6 +417,29 @@ pub struct ShotOptions {
     pub stories: Option<String>,
     /// The first page's modes (`github.modes`): `mode:<name>` in `pages`.
     pub modes: Vec<crate::settings::ModeRule>,
+    /// The paths the change touched since the default branch, for its stories (`stories`): the
+    /// ones it touched are taken first.
+    #[serde(default)]
+    pub changed: Vec<String>,
+    /// The app's sign-in before the pages (`github.login`, a trusted preview's), its typed
+    /// variables resolved.
+    #[serde(default)]
+    pub login: Option<Login>,
+}
+
+/// A screenshot run's sign-in (`github.login`) with its `$NAME`s in place: it may hold a
+/// password, so it goes to the browser only through its own container's stdin, and `Debug`
+/// says only its page.
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct Login {
+    pub page: String,
+    pub steps: Vec<crate::settings::Step>,
+}
+
+impl std::fmt::Debug for Login {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Login").field("page", &self.page).field("steps", &self.steps.len()).finish_non_exhaustive()
+    }
 }
 
 /// One more page of a [`Shot`]: its path, its PNG, and what went wrong while it loaded.
@@ -718,6 +751,9 @@ pub struct Tried {
     pub step_failed: Option<String>,
     pub text: String,
     pub errors: Vec<String>,
+    /// What its sign-in said (`github.login`), when it signed in first.
+    #[serde(default)]
+    pub login: Option<String>,
 }
 
 pub trait ShellIo: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
@@ -833,6 +869,12 @@ pub trait Apps: Send + Sync {
     /// backend serves them itself).
     fn requests(&self, _preview: &str) -> Vec<crate::RequestLine> {
         Vec::new()
+    }
+    /// What the service's environment cost this month where something else runs and bills it
+    /// (roll apps: its `pv-` environment's builds, compute and egress at roll apps' prices), or
+    /// `None` when roll's runtime runs it and its time is counted here.
+    async fn spent_usd(&self, _preview: &str, _service: &str) -> Option<f64> {
+        None
     }
     /// What the service uses right now, `(cores, resident bytes)`: `None` when it isn't running
     /// (or the backend can't tell).
@@ -950,8 +992,9 @@ pub trait Apps: Send + Sync {
         Ok(None)
     }
     /// `path` of the service in a browser, `steps` taken on it (a page state's steps), in the
-    /// service's network (`…/try`). `None` where this backend can't.
-    async fn try_page(&self, _preview: &str, _service: &str, _path: &str, _steps: &[crate::settings::Step]) -> anyhow::Result<Option<Tried>> {
+    /// service's network (`…/try`), signed in first with `login` when it's given (a trusted
+    /// preview's `github.login`). `None` where this backend can't.
+    async fn try_page(&self, _preview: &str, _service: &str, _path: &str, _steps: &[crate::settings::Step], _login: Option<&crate::ports::Login>) -> anyhow::Result<Option<Tried>> {
         Ok(None)
     }
     /// `path` of the service, read through roll's own way in, `GET` or `HEAD`: the runtime's own

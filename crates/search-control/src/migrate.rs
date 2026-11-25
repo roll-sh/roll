@@ -1,6 +1,7 @@
 //! Migrating into roll from Elasticsearch or OpenSearch (`POST /v1/search/clusters/{id}/migrate/
-//! inspect` and `POST /v1/search/clusters/{id}/migrate`), the dashboard's "Migrate from
-//! Elasticsearch / OpenSearch".
+//! inspect` and `POST /v1/search/clusters/{id}/migrate`), the dashboard's "Migrate into roll".
+//! A `source.kind` of `algolia`, `typesense` or `meilisearch` takes the same routes to
+//! [`crate::saas`], which shares this module's slots, deadline and budgets.
 //!
 //! Everything the remote is asked goes through roll's server, never from the browser: search-es'
 //! guarded client ([`search_es::api::remote`]: public addresses only unless the node allows
@@ -60,14 +61,41 @@ pub const DEFINITION_LIMIT: u64 = 4 * 1024 * 1024;
 /// Index creations tried per index while dropping the settings roll refuses.
 const MAX_ATTEMPTS: usize = 32;
 
+/// The product a migration reads from.
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    #[default]
+    Elasticsearch,
+    Opensearch,
+    Algolia,
+    Typesense,
+    Meilisearch,
+}
+
+impl Kind {
+    /// Algolia, Typesense or Meilisearch ([`crate::saas`]).
+    pub fn saas(self) -> bool {
+        matches!(self, Kind::Algolia | Kind::Typesense | Kind::Meilisearch)
+    }
+}
+
 /// The remote cluster and how to log in to it. Its `Debug` leaves the credentials out.
 #[derive(Deserialize, Default, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct Source {
+    /// `elasticsearch` (the default), `opensearch`, `algolia`, `typesense` or `meilisearch`.
+    #[serde(default)]
+    pub kind: Kind,
     /// `https://host[:port][/prefix]`: Elastic Cloud's or OpenSearch's endpoint, or a
-    /// self-hosted node's. Without a scheme, `https`; without a port, the scheme's.
+    /// self-hosted node's (a Typesense or Meilisearch URL). Without a scheme, `https`; without a
+    /// port, the scheme's. Algolia takes none: its host comes from `app_id`.
+    #[serde(default)]
     pub host: String,
-    /// An Elasticsearch API key (its `encoded` value), sent as `Authorization: ApiKey …`.
+    /// Algolia's application id.
+    pub app_id: Option<String>,
+    /// An Elasticsearch API key (its `encoded` value), sent as `Authorization: ApiKey …`; or the
+    /// Algolia, Typesense or Meilisearch key.
     pub api_key: Option<String>,
     pub username: Option<String>,
     pub password: Option<String>,
@@ -75,7 +103,7 @@ pub struct Source {
 
 impl std::fmt::Debug for Source {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Source").field("host", &self.host).field("api_key", &self.api_key.as_ref().map(|_| "<<>>")).field("username", &self.username).finish_non_exhaustive()
+        f.debug_struct("Source").field("kind", &self.kind).field("host", &self.host).field("app_id", &self.app_id).field("api_key", &self.api_key.as_ref().map(|_| "<<>>")).field("username", &self.username).finish_non_exhaustive()
     }
 }
 
@@ -91,6 +119,26 @@ pub struct InspectRequest {
 pub struct Pick {
     pub index: String,
     pub dest: Option<String>,
+    /// Algolia, Typesense, Meilisearch: a copy that stopped part way starts again from the
+    /// start instead of from its last page.
+    pub full: Option<bool>,
+    /// `cutover`: the alias moved to the copy (the source's index name unless set).
+    pub alias: Option<String>,
+}
+
+/// What a `migrate` call does to each picked index (Algolia, Typesense and Meilisearch; an
+/// Elasticsearch migration only copies).
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Stage {
+    /// Plan, make and copy (resuming a copy that stopped).
+    #[default]
+    Copy,
+    /// Read again what changed since the copy (or the last catch-up) started, writing only
+    /// documents that differ.
+    CatchUp,
+    /// Move an alias to the copy, in one step.
+    Cutover,
 }
 
 #[derive(Deserialize, Debug)]
@@ -102,6 +150,16 @@ pub struct MigrateRequest {
     pub requests_per_second: Option<f64>,
     /// Documents per page read from the remote (1000 unless set; lower it for large documents).
     pub size: Option<u32>,
+    /// Algolia, Typesense and Meilisearch: answer what each index would become (mappings,
+    /// synonyms, rules, what doesn't map) without making anything.
+    pub dry_run: Option<bool>,
+    /// `copy` (the default), `catch_up` or `cutover`.
+    pub step: Option<Stage>,
+    /// `catch_up`: a numeric attribute of the source's records that says when each changed;
+    /// only records changed since the last pass are read. Without it, every record is read.
+    pub since_attribute: Option<String>,
+    /// `since_attribute`'s unit: `s` (the default) or `ms` since the epoch.
+    pub since_unit: Option<String>,
 }
 
 /// `host` as reindex's `source.remote.host` takes it: a scheme, a DNS name or an IP literal, a
@@ -191,7 +249,7 @@ fn remote_of(s: &Source) -> Result<Remote> {
 /// What the remote answered, as the caller sees it: a transport failure of any kind is one
 /// message (no port scan reads which), a refusal its status and `error.type` (the client quotes
 /// nothing more); a 429 of roll's own limits stays a 429.
-fn remote_error(host: &str, e: search_es::EsError) -> ControlError {
+pub(crate) fn remote_error(host: &str, e: search_es::EsError) -> ControlError {
     if e.status == 429 && e.kind == "es_rejected_execution_exception" {
         return ControlError::Busy(e.reason().to_string());
     }
@@ -224,8 +282,8 @@ fn small(v: &EsValue) -> Value {
 
 /// `inspect`'s answer, serialized, and the charge for it, sent with [`Inspected::into_stream`].
 pub struct Inspected {
-    body: bytes::Bytes,
-    held: search_es::breaker::Reservation,
+    pub(crate) body: bytes::Bytes,
+    pub(crate) held: search_es::breaker::Reservation,
 }
 
 /// How much of `inspect`'s answer one poll hands the connection.
@@ -325,16 +383,16 @@ fn listing(rows: &[search_es::api::remote_page::CatRow], aliases: Option<&EsValu
 /// What happened to one index of a `migrate` call so far (reported even when the call's
 /// deadline cuts it short).
 #[derive(Default)]
-struct Progress {
-    created: bool,
-    task: Option<String>,
+pub(crate) struct Progress {
+    pub(crate) created: bool,
+    pub(crate) task: Option<String>,
     /// The empty copy was being removed (its task slot was taken meanwhile).
     removing: bool,
 }
 
 impl Control {
     /// The node's reindex-from-remote rules ([`Rules`]) from its node settings.
-    fn remote_rules(&self) -> Result<Rules> {
+    pub(crate) fn remote_rules(&self) -> Result<Rules> {
         let settings = &self.cfg.node_settings;
         Rules::of(|k| settings.iter().rev().find(|(n, _)| n == k).map(|(_, v)| v.as_str())).map_err(|e| ControlError::Internal(anyhow::anyhow!("reindex from remote settings: {}", e.reason())))
     }
@@ -367,14 +425,14 @@ impl Control {
     }
 
     /// A place in the node's pool of control calls for cluster `c` (429 when it's taken).
-    fn control_slot(&self, c: &SearchCluster) -> Result<remote::ControlSlot> {
+    pub(crate) fn control_slot(&self, c: &SearchCluster) -> Result<remote::ControlSlot> {
         let owner = search_es::slots::owner_of(c.owner.as_deref(), &c.name);
         self.node.reindex().control_slot(&c.name, &owner).map_err(|e| ControlError::Busy(e.reason().to_string()))
     }
 
     /// Every index and alias name cluster `c` has (an alias of the remote's by one of these
     /// names isn't copied: the copy would join what's there).
-    async fn roll_names(&self, c: &SearchCluster) -> Result<std::collections::HashSet<String>> {
+    pub(crate) async fn roll_names(&self, c: &SearchCluster) -> Result<std::collections::HashSet<String>> {
         let (status, v) = self.call_json(c, "GET", "/_alias?expand_wildcards=all", None).await;
         if status != 200 {
             return Err(ControlError::Internal(anyhow::anyhow!("listing cluster {}'s aliases failed ({status})", c.name)));
@@ -388,7 +446,7 @@ impl Control {
     }
 
     /// One request on cluster `c` as its owner: status and parsed body.
-    async fn call_json(&self, c: &SearchCluster, method: &str, path: &str, body: Option<&Value>) -> (u16, Value) {
+    pub(crate) async fn call_json(&self, c: &SearchCluster, method: &str, path: &str, body: Option<&Value>) -> (u16, Value) {
         self.call_text(c, method, path, body.map(|b| b.to_string())).await
     }
 
@@ -409,6 +467,12 @@ impl Control {
     pub async fn migrate_inspect(&self, id: &str, s: &Source) -> Result<Inspected> {
         let c = self.get(id).await?;
         let _slot = self.control_slot(&c)?;
+        if s.kind.saas() {
+            return tokio::time::timeout(DEADLINE, Box::pin(self.saas_inspect(&c, s)))
+                .await
+                .map_err(|_| ControlError::Invalid(format!("{} didn't answer within {}s", crate::saas::product(s.kind), DEADLINE.as_secs())))?;
+        }
+        check_es_source(s)?;
         tokio::time::timeout(DEADLINE, Box::pin(self.inspect_within(&c, s)))
             .await
             .map_err(|_| ControlError::Invalid(format!("the remote cluster didn't answer within {}s", DEADLINE.as_secs())))?
@@ -477,6 +541,13 @@ impl Control {
         }
         if req.size.is_some_and(|n| n == 0 || n > 10_000) {
             return Err(ControlError::Invalid("size must be between 1 and 10000".into()));
+        }
+        if req.source.kind.saas() {
+            return self.saas_migrate(c, req).await;
+        }
+        check_es_source(&req.source)?;
+        if req.dry_run.is_some() || req.step.is_some() || req.since_attribute.is_some() || req.since_unit.is_some() || req.indices.iter().any(|p| p.full.is_some() || p.alias.is_some()) {
+            return Err(ControlError::Invalid("dry_run, step, since_attribute, since_unit, full and alias are for algolia, typesense and meilisearch sources".into()));
         }
         let remote = remote_json(&req.source)?;
         let host = remote["host"].as_str().unwrap_or_default().to_string();
@@ -569,7 +640,7 @@ impl Control {
 
     /// A running reindex task into `dest` on cluster `c`, if there is one (a copy an earlier
     /// call started).
-    async fn running_copy(&self, c: &SearchCluster, dest: &str) -> Option<String> {
+    pub(crate) async fn running_copy(&self, c: &SearchCluster, dest: &str) -> Option<String> {
         let (status, v) = self.call_json(c, "GET", "/_tasks?actions=*reindex&detailed=true", None).await;
         if status != 200 {
             return None;
@@ -736,6 +807,14 @@ impl Control {
         progress.task = Some(task.to_string());
         Ok(json!({ "dropped": dropped, "aliases": aliases }))
     }
+}
+
+/// An Elasticsearch or OpenSearch source names no Algolia application.
+fn check_es_source(s: &Source) -> Result<()> {
+    if s.app_id.is_some() {
+        return Err(ControlError::Invalid("app_id is for an algolia source".into()));
+    }
+    Ok(())
 }
 
 /// The setting an index-creation error names (`unknown setting [index.x] …`, `Failed to parse

@@ -25,7 +25,8 @@
 //!   signed. That certificate must carry the CA's key, be a CA's (`keyCertSign`, `cRLSign`), be
 //!   valid now and chain to a self-signed root; the CA's policy narrows to the name constraints the
 //!   chain actually has. A certificate without a critical `nameConstraints` within the CA's domains
-//!   (in its own certificate or one between it and the root) is refused, since a signer that dropped
+//!   that also excludes every IP address (unless the policy allows them), in its own certificate or
+//!   one between it and the root, is refused, since a signer that dropped
 //!   the CSR's would make roll's key a CA for every name under the root; `unconstrained: true` takes
 //!   it for a root that constrains elsewhere, and the CA says so. Every certificate it issues comes
 //!   with the chain (`ca_chain`), and lives no longer than the intermediate does. CRLs and OCSP stay
@@ -149,7 +150,7 @@ const FIELDS: &[Field] = &[
     Field { field: "ca_chain", label: "CA chain", modes: &[Mode::Dynamic, Mode::Managed], secret: false, suggest: "TLS_CA_CHAIN", credential: Some("cert") },
 ];
 
-fn aad(project: &str, id: &str) -> String {
+pub(crate) fn aad(project: &str, id: &str) -> String {
     format!("roll-secrets:pki:{project}:{id}:key")
 }
 
@@ -160,7 +161,7 @@ pub(crate) fn is_domain(d: &str) -> bool {
 }
 
 impl Policy {
-    fn check(&mut self) -> Result<()> {
+    pub(crate) fn check(&mut self) -> Result<()> {
         for d in &mut self.domains {
             *d = d.trim().trim_end_matches('.').to_ascii_lowercase();
         }
@@ -513,17 +514,18 @@ fn check_chain(req: &Chain, key: &[u8], policy: &mut Policy) -> Result<Checked> 
         current = p;
     }
     // Name constraints apply from every CA below the root (a trust anchor's are its own business).
-    let constrained = std::iter::once(&cert).chain(path[..path.len() - 1].iter().map(|&i| &pool[i])).any(|c| constraint(c, &policy.domains).is_ok());
+    let constrained = std::iter::once(&cert).chain(path[..path.len() - 1].iter().map(|&i| &pool[i])).any(|c| constraint(c, policy).is_ok());
     if !constrained && !req.unconstrained {
-        let why = constraint(&cert, &policy.domains).err().unwrap_or_default();
+        let why = constraint(&cert, policy).err().unwrap_or_default();
         return Err(Error::BadRequest(format!(
-            "the certificate {why}, so roll's key would be a CA for any name under your root. Have it signed with the CSR's name constraints \
-             (critical, permitting {}): AWS Private CA copies them with the SubordinateCACertificate_PathLen0_CSRPassthrough/V1 template \
+            "the certificate {why}, so roll's key would be a CA for any name or address under your root. Have it signed with the CSR's name constraints \
+             (critical, permitting {}{}): AWS Private CA copies them with the SubordinateCACertificate_PathLen0_CSRPassthrough/V1 template \
              (or …_APIPassthrough/V1 with them in the API passthrough), and the plain subordinate templates drop them; openssl ca drops them \
              unless its config has copy_extensions = copy, or nameConstraints = critical,{} in the extension section. For a root that \
              constrains this CA elsewhere, install it with unconstrained: true",
             policy.domains.join(", "),
-            policy.domains.iter().map(|d| format!("permitted;DNS:{d}")).collect::<Vec<_>>().join(",")
+            if policy.allow_ip { " and every IP address" } else { ", excluding every IPv4 and IPv6 address" },
+            openssl_constraints(policy)
         )));
     }
     narrow(policy, &cert, "the certificate")?;
@@ -549,10 +551,24 @@ fn under(name: &str, d: &str) -> bool {
     d.is_empty() || name == d || name.ends_with(&format!(".{d}"))
 }
 
-/// Whether a certificate limits what it signs to `domains`: a critical `nameConstraints` whose
-/// permitted DNS subtrees are each within one of them. Otherwise why not, for the refusal.
-fn constraint(c: &x509_parser::certificate::X509Certificate<'_>, domains: &[String]) -> std::result::Result<(), String> {
+/// The `nameConstraints` value an `openssl ca` extension section gives an intermediate for
+/// `policy`: its DNS names, and every IP address excluded unless the policy allows them.
+fn openssl_constraints(policy: &Policy) -> String {
+    let mut parts: Vec<String> = policy.domains.iter().map(|d| format!("permitted;DNS:{d}")).collect();
+    if !policy.allow_ip {
+        parts.extend(["excluded;IP:0.0.0.0/0.0.0.0".to_string(), "excluded;IP:0:0:0:0:0:0:0:0/0:0:0:0:0:0:0:0".to_string()]);
+    }
+    parts.join(",")
+}
+
+/// Whether a certificate limits what it signs to `policy`: a critical `nameConstraints` whose
+/// permitted DNS subtrees are each within one of its domains and, unless the policy allows IP
+/// addresses, that excludes all of IPv4 and IPv6 or permits IP ranges short of either whole family
+/// (CA/B Forum BR 7.1.2.5: otherwise an IP address in a certificate it signs is unconstrained).
+/// Otherwise why not, for the refusal.
+fn constraint(c: &x509_parser::certificate::X509Certificate<'_>, policy: &Policy) -> std::result::Result<(), String> {
     use x509_parser::extensions::GeneralName;
+    let domains = &policy.domains;
     let nc = match c.name_constraints() {
         Ok(Some(nc)) => nc,
         Ok(None) => return Err("has no name constraints: its signer dropped the ones the CSR asked for".into()),
@@ -565,10 +581,27 @@ fn constraint(c: &x509_parser::certificate::X509Certificate<'_>, domains: &[Stri
     if dns.is_empty() {
         return Err("permits no DNS names in particular (its name constraints have no permitted DNS subtrees)".into());
     }
-    match dns.iter().find(|p| p.is_empty() || !domains.iter().any(|d| under(p, d))) {
-        Some(p) => Err(format!("permits {}, outside the CA's domains ({})", if p.is_empty() { "every DNS name" } else { p }, domains.join(", "))),
-        None => Ok(()),
+    if let Some(p) = dns.iter().find(|p| p.is_empty() || !domains.iter().any(|d| under(p, d))) {
+        return Err(format!("permits {}, outside the CA's domains ({})", if p.is_empty() { "every DNS name" } else { p }, domains.join(", ")));
     }
+    if policy.allow_ip {
+        return Ok(());
+    }
+    // An iPAddress subtree is address then mask: 8 bytes for IPv4, 32 for IPv6; a zero mask is the
+    // whole family.
+    let ips = |subtrees: &Option<Vec<x509_parser::extensions::GeneralSubtree<'_>>>| -> Vec<Vec<u8>> {
+        subtrees.iter().flatten().filter_map(|s| if let GeneralName::IPAddress(ip) = &s.base { Some(ip.to_vec()) } else { None }).collect()
+    };
+    let whole = |ip: &[u8], len: usize| ip.len() == len * 2 && ip[len..].iter().all(|x| *x == 0);
+    let permitted = ips(&nc.value.permitted_subtrees);
+    let excluded = ips(&nc.value.excluded_subtrees);
+    if let Some(family) = [(4, "IPv4"), (16, "IPv6")].into_iter().find(|(len, _)| permitted.iter().any(|ip| whole(ip, *len))) {
+        return Err(format!("permits every {} address (its name constraints permit {})", family.1, if family.0 == 4 { "0.0.0.0/0" } else { "::/0" }));
+    }
+    if permitted.is_empty() && !(excluded.iter().any(|ip| whole(ip, 4)) && excluded.iter().any(|ip| whole(ip, 16))) {
+        return Err("permits every IP address (its name constraints neither exclude 0.0.0.0/0 and ::/0 nor permit IP ranges)".into());
+    }
+    Ok(())
 }
 
 /// `policy` narrowed to a certificate's name constraints: DNS names within both, IP addresses

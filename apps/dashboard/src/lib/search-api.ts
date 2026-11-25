@@ -86,6 +86,9 @@ export interface SearchSettings {
   max_in_flight: number;
   max_body_mb: number;
   destructive_requires_name: boolean;
+  /** Only a project's admins and owners change its data (a developer only reads it). Changing it
+   * is an admin's; a branch never is. */
+  protected: boolean;
 }
 
 /** One entry of a cluster's IP allowlist (roll apps' `allow_ips` have the same shape). */
@@ -129,12 +132,24 @@ export interface BrowserKey {
   /** Unix seconds. */
   created_at: number | null;
   expires_at: number | null;
+  /** Whether a backend may derive narrower keys from it with its signing secret (`lib/search-derive`). */
+  derivable?: boolean;
+  /** When its signing secret was made (unix seconds). */
+  secret_rotated_at?: number;
 }
 
-/** A new browser key: `api_key` (sent as `Authorization: ApiKey …`) is shown once. */
+/** A new browser key: `api_key` (sent as `Authorization: ApiKey …`) and a derivable key's `signing_secret` are shown once. */
 export interface NewBrowserKey extends BrowserKey {
   api_key: string;
   url: string;
+  signing_secret?: string;
+}
+
+/** A derivable browser key's new signing secret, shown once: keys derived under the old one stop working. */
+export interface RotatedSigningSecret {
+  id: string;
+  signing_secret: string;
+  secret_rotated_at: number;
 }
 
 export interface BrowserKeyRequest {
@@ -144,6 +159,8 @@ export interface BrowserKeyRequest {
   filter?: Record<string, unknown>;
   expires_in_s?: number;
   rate_limit?: { per_minute?: number; per_ip_per_minute?: number };
+  /** Whether a backend may derive keys from it: the answer has its signing secret. */
+  derivable?: boolean;
 }
 
 export interface BranchRef {
@@ -323,8 +340,10 @@ export const searchApi = {
   info: () => call<SearchInfo>("GET", "/v1/search"),
   list: () => call<SearchCluster[]>("GET", "/v1/search/clusters"),
   get: (id: string) => call<SearchCluster>("GET", cl(id)),
-  create: (name: string, settings: Partial<SearchSettings>) =>
-    call<SearchCluster>("POST", "/v1/search/clusters", { name, ...settings }),
+  /** A cluster of your own, or with `projectId` one made in that project (`X-Roll-Project`): your
+   * role there decides it (admin and owner), and the project is its home, so its members reach it. */
+  create: (name: string, settings: Partial<SearchSettings>, projectId?: string) =>
+    call<SearchCluster>("POST", "/v1/search/clusters", { name, ...settings }, projectId ? { "x-roll-project": projectId } : undefined),
   update: (id: string, settings: SearchClusterPatch) => call<SearchCluster>("PATCH", cl(id), settings),
   remove: (id: string) => call<{ deleted: string; name: string }>("DELETE", cl(id)),
   deleted: () => call<DeletedSearchCluster[]>("GET", "/v1/search/clusters?deleted=true"),
@@ -350,6 +369,7 @@ export const searchApi = {
   browserKeys: (id: string) => call<{ keys: BrowserKey[] }>("GET", `${cl(id)}/browser-keys`),
   createBrowserKey: (id: string, k: BrowserKeyRequest) => call<NewBrowserKey>("POST", `${cl(id)}/browser-keys`, k),
   revokeBrowserKey: (id: string, key: string) => call<null>("DELETE", `${cl(id)}/browser-keys/${encodeURIComponent(key)}`),
+  rotateBrowserKeySecret: (id: string, key: string) => call<RotatedSigningSecret>("POST", `${cl(id)}/browser-keys/${encodeURIComponent(key)}/rotate`),
   /** One URL through the web crawler's path, writing nothing (with a connector's configuration, or none). */
   crawlTest: (id: string, url: string, connector?: string) => call<CrawlTest>("POST", `${cl(id)}/crawl-test`, { url, connector }),
   siteVerifications: (id: string) => call<{ verifications: SiteVerification[] }>("GET", `${cl(id)}/site-verifications`),

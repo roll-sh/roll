@@ -12,6 +12,7 @@ pub mod hosts;
 pub mod html;
 pub mod probe;
 pub mod robots;
+pub mod select;
 pub mod sitemap;
 pub mod url;
 pub mod verify;
@@ -161,6 +162,9 @@ struct Stats {
     dropped_links: u64,
     skipped_origin_urls: u64,
     sitemap_errors: u64,
+    /// Pages some of whose extraction rules were dropped (past a page's cap on extracted bytes or
+    /// text visits).
+    extraction_dropped: u64,
     /// URLs checked against the crawl rules and robots.txt.
     checked_urls: u64,
     errors: Map,
@@ -567,6 +571,9 @@ impl Crawl<'_, '_> {
         m.insert("dropped_link_count".into(), n(s.dropped_links));
         m.insert("skipped_origin_url_count".into(), n(s.skipped_origin_urls));
         m.insert("sitemap_error_count".into(), n(s.sitemap_errors));
+        if s.extraction_dropped > 0 {
+            m.insert("extraction_rules_dropped_page_count".into(), n(s.extraction_dropped));
+        }
         m.insert("checked_url_count".into(), n(s.checked_urls));
         m.insert("error_count".into(), Value::Obj(s.errors.clone()));
         if !s.elastic_crawler_groups.is_empty() {
@@ -968,11 +975,12 @@ impl Crawl<'_, '_> {
         let text = String::from_utf8_lossy(&body).into_owned();
         drop(body);
         let tags = self.plan.domain(&at).map(|d| d.exclude_tags.clone()).unwrap_or_default();
+        let extraction = self.plan.domain(&at).map(|d| d.extraction.clone()).unwrap_or_default();
         // Off the async worker, against a deadline: a page can't hold a core past it.
         let (url, limits) = (at.clone(), self.plan.limits.clone());
         let deadline = (Instant::now() + PAGE_PARSE_TIME).min(self.deadline.max(Instant::now() + Duration::from_secs(1)));
         let parse = tokio::task::spawn_blocking(move || {
-            let r = html::read_page(&text, held, &url, &tags, &limits, deadline);
+            let r = html::read_page(&text, held, &url, &tags, &extraction, &limits, deadline);
             (r, text)
         });
         // A cancel doesn't wait for the parse (it ends at its own deadline, and its result is
@@ -989,6 +997,9 @@ impl Crawl<'_, '_> {
             Ok(p) => p,
             Err(why) => return self.failed(src, &at, &why),
         };
+        if page.extraction_dropped > 0 {
+            self.stats.extraction_dropped += 1;
+        }
         // A canonical URL is honoured only once the crawl has fetched it and indexed it as
         // itself: then this page is one of its `additional_urls`, not a document of its own.
         // Until then the page is stored under its own URL, and the canonical one is queued,
@@ -1346,6 +1357,16 @@ fn document(url: &Link, additional: Option<String>, page: html::Page, full_html:
     let dirs: Vec<&str> = u.path().split('/').collect();
     for (i, key) in ["url_path_dir1", "url_path_dir2", "url_path_dir3"].into_iter().enumerate() {
         put(key, dirs.get(i + 1).map_or(Value::Null, |s| Value::from(*s)));
+    }
+    // Extraction rules' fields, then the page's own (`<meta class="elastic">`,
+    // `data-elastic-name`): neither replaces a field above, and a rule's wins over the page's.
+    for (k, v) in page.extracted {
+        if !d.contains_key(&k) {
+            d.insert(k, match v {
+                html::Extracted::One(s) => Value::from(s),
+                html::Extracted::Many(a) => strs(a),
+            });
+        }
     }
     for (k, v) in page.fields {
         if !d.contains_key(&k) {

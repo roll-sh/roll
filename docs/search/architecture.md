@@ -411,6 +411,110 @@ node can't open fails that read: the error names the cluster, but neither the va
 `Debug` output of a cluster, a node's credentials and a presented `Authorization` header prints
 `<redacted>` in place of the secret.
 
+## Who sees a cluster
+
+roll's control plane (`/v1/search`, `search-control` `api.rs`) answers the operator, roll's admin
+accounts and signed-in people. search is a member product (docs/members.md): roll-access decides a
+person's request, whether it comes from their session or a token of theirs, with the one
+evaluator and search's catalogue rows. search adds no role checks of its own.
+
+- **The operator and admins** see and manage every cluster. What they make has no owner.
+- **A person** owns what they make without naming a project (`SearchCluster::owner`). Their grant
+  reaches each of their own clusters with every action, whatever their projects say
+  (`Resolvers::owned_fn`). A token of theirs reaches them only as far as its own rules do.
+- **A project's members** reach a cluster that the project trusts, as their role there allows. A
+  project trusts a cluster when the project is its home, or when the cluster belongs to one of the
+  project's owners (`Workspace::trusts`). A cluster made with `X-Roll-Project` gets that project as
+  its home and has no owner: it's the project's, so whoever made it loses it when they leave
+  the project. Any cluster homed now is handed to the project this way (rolld's `on_homed`): a
+  person's own one homed by hand (`PUT …/homes`), a branch a person makes, which takes its
+  parent's home, or a home said again. A branch goes only in its parent's project: a create that
+  names another one in `X-Roll-Project` is refused (400), and a branch that can't be homed there
+  isn't made (it's deleted again, 503), so a copy of a project's data never lands in another
+  project or stays its maker's. A home being settled (the cluster still a person's own)
+  moves only with that person or the operator (403 for anyone else, its project's admins too),
+  and a branch of such a cluster takes no home: it's that person's as well. A project's restore
+  brings a kept home back only for a cluster that's the project's, one whose hand-over to that
+  project is owed, or one whose owner is an admin or owner there once its members are back. That's
+  decided inside the restore's transaction; the rest go with its kept rows, and those that come
+  back are settled as what's kept from before is (below). A create is
+  its maker's until its home hands it over, so a placement that fails leaves it theirs, never no
+  one's. Canvases and homes keep a cluster by its id, never a name another cluster could take
+  once it's gone (a name is resolved as it's placed or homed, and an owner answers for ids only; a
+  node without roll search places none). rolld puts what's kept from before right at every start,
+  before its API listens, and the homes again every five minutes. On a fleet only the node
+  holding the singleton lease `search:homes` runs these passes, reading a page of rows at a time:
+  - a ref kept by a name becomes the id of the cluster that name names, if that cluster existed,
+    and wasn't restored, since before the ref was placed or homed; otherwise its places and homes
+    go, deleted projects' too;
+  - a homed cluster with an owner who's an admin or owner of the project is handed over, as is
+    one whose hand-over was decided when its home was set and failed (recorded as owed in
+    `search_handovers` before it's done, never inferred from times). That record is search's,
+    written after the workspace's commit: a crash in between loses it, and then the home is
+    dropped at the next pass and the cluster stays its owner's (it fails closed);
+  - any other home of an owned cluster goes (that home only, in that project), logged at warn with
+    the cluster's id;
+  - a roll secrets search link by a name (the provider once took names, and now refuses them) is
+    rewritten to the id that name names, when that cluster is on the link's project's canvas, the
+    project trusts it (`Workspace::trusts`, as links are written), and it was made and last
+    restored no later than the link was first written as it is now: its earliest version carrying
+    that link, so editing a comment or tags doesn't move it (`Secrets::link_refs`). The rewrite is
+    `Secrets::rekey_links`, audited as `link.rekey`. Any other link stays as it is and keeps
+    failing visibly. Only the current versions are rewritten; older versions keep the name in
+    their link, and rolling back to one is refused (400), as writing any link by a name is: link
+    the key by id again instead.
+
+  Until it's settled, a home whose cluster is still a person's own grants the project nothing
+  (`Workspace::trusts` skips a home `Owners::has_person_owner` reports), on every node, whenever
+  the pass runs; and only that person or the operator moves it. A stranger's cluster dropped on
+  the project's canvas reaches nobody through it, and a purged
+  cluster leaves every canvas. A project still home to live clusters can't be deleted (409); when
+  that can't be read, or on a node without roll search, the delete is answered 503. Inside the
+delete's transaction, a home made in the project meanwhile, or one whose cluster came alive
+meanwhile (a restore), refuses it too (409, try again). That check reads search's catalog on its
+own, so the other half is search's: a cluster that comes back to life (a failed delete, a
+restore) after its home project was deleted anyway keeps no home there, and is the operator's
+(`Workspace::drop_kept_homes`).
+
+  | role | what they may do to the project's clusters |
+  | --- | --- |
+  | viewer | read: settings, indices, documents, searches, metrics, logs, analytics |
+  | developer | as viewer, plus write (documents, indices, mappings, synonyms, branches, restores) and reveal (`read` API keys, `append` ones (which need write too), browser keys) |
+  | admin, owner | everything: settings, the console, `data` and `admin` API keys, the admin password, remotes, migrations, deletes, creates in the project |
+
+  A cluster has no environments, but it can be protected as a whole (`protected`, as other
+  products protect production): then only admins and owners change its data, and a developer
+  only reads it (`Resolvers::protected_whole`, read per cluster; unreadable counts as protected).
+  A new cluster isn't protected unless its creator says (`protected` on create); an admin changes
+  it with `PATCH`; clusters made before members are protected (nobody's role reached them then),
+  branches too, until an admin opens them; a new branch never is, whatever its parent, and
+  `protected: true` on a branch is refused (400). A developer's default reaches an unprotected one. A
+  bulk that deletes, `delete_by_query`, a lifecycle setting and a `data` key (its role deletes
+  indices and sets lifecycle policies) are `delete`, which only admins and owners have.
+- **Anyone else** gets 404 for the cluster, worded as for one that doesn't exist (the name they
+  asked for, never the id or project it resolved to). Lists hold only what the caller reaches:
+  search narrows them by the gate's decision (`roll_auth::Reach`), and the gate filters the answer
+  again. A cluster's `branches`, `parent_name` and remotes show only clusters the caller sees.
+
+Per-person caps (`SearchConfig::person_caps`) count toward a cluster's owner, or for one made in a
+project toward who made it (`made_by`, which grants nothing). A branch counts toward its parent's
+owner, or when the parent has none, toward the person branching it. `made_by` keeps counting after
+its maker leaves the project, until the cluster is deleted: caps bound what a person may cause to
+be made, not what they reach.
+
+Linking two clusters (`PUT …/remotes/{alias}`) takes administering both: the gate asks `admin` on
+each, and search asks the same decision about the target. The link keeps who made it (an admin
+account by its own `usr_…`, so it stops once they're no longer one; `operator` only for the
+operator's token), and works
+only while they still may administer the target, which roll-access decides again on every use
+(`Access::person_reaches`): a removed or demoted member's links stop at once, though they stay
+listed (not connected) for the cluster's admins to remove. It's also bound to the target's id. A
+cluster's own endpoint (`PUT _cluster/settings`) may name only a cluster of the same owner, or one
+a link that still holds points at.
+
+On a fleet, a call about one cluster still runs on the cluster's owner node. The forward carries
+the person's own credentials, and the owner node's gate decides again.
+
 ## Client addresses and IP allowlists
 
 A cluster can have an IP allowlist (`ip_allowlist`: at most 64 CIDRs, IPv4 or IPv6, each with an
@@ -438,7 +542,8 @@ signed, never through the public endpoint, so the remote's allowlist doesn't app
 the local cluster's has already admitted the client): a client the local cluster admits reads the
 remote's data within the key's access, whatever the remote's own allowlist says. Only these calls may carry the link's
 `x-roll-remote-access` header, which lets a `cross_cluster` key authenticate: the node drops it
-from every request with another origin (`Lease::handle`), as it drops `x-roll-authenticated-user`.
+from every request with another origin (`Lease::handle`); who authenticated is never a header at
+all (`search_es::rest::Verified`, set on the request in process).
 A link's search may ask for its aggregations partially reduced (`x-roll-partial-aggs`, honored
 only for a cross-cluster key's request): the remote answers `search-aggs`' `wire` encoding of its
 `Aggs` tree in an internal field, and the local cluster does the final reduce. The encoding names

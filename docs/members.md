@@ -111,7 +111,11 @@ The product's resolver sets `Resource.protected` beside `Resource.environment`:
 - secrets: an environment with a protection policy (a new project's `production` starts with one,
   `approvals: 0`);
 - apps: `production`;
-- previews: never protected.
+- previews: never protected;
+- search: a cluster has no environments, and is protected as a whole when it says so
+  (`protected`: set on create or by an admin's `PATCH`; clusters made before members are, until an
+  admin opens them; a new branch never is, and can't be made so), through
+  `Resolvers::protected_whole`.
 
 A resource whose protection isn't known never matches an `unprotected` rule, and neither does an
 environment named `production`, whatever its product says (`roll_auth::scope::PRODUCTION`): a
@@ -195,7 +199,7 @@ Each product does only what's listed. None of them reads a role.
 | **code** | None in v1. Membership doesn't give access to a repo: roll code keeps its owners, orgs and tokens (`Product` routes, its own checks). Only trust changes: a project stands for a repo when `Owners` says the repo is one of the project's **owners'** (their roll code owner, or an org they manage), instead of the project creator's. |
 | **previews** | Member routes (v1.1, built): `/v1/previews` is a person's route, roll-access knows a preview's project (`Resolvers::project_fn`) and that its environment, `preview`, is never protected (`protected_fn`, asked for a row's fixed environment too), so the catalogue's actions decide by role (viewer reads, developer reveals and writes, admin opens shells and manages rules). Previews drops a session's grant before its handlers, which see the person. Previews get project secrets through `counts_for_repo` → `trusts`, which changes only as code's does. |
 | **apps** | Apps' routes become member routes (v1.1). Apps already puts a new service on its project's canvas (`Tgt::Create` with `place: service`); that placement now also sets the service's home. Its resolver says `production` is protected. Production deploys are `deploy` (admin and owner only). Apps still adds no token or scope checks of its own. |
-| **search** | `/v1/search` stops scoping by `SignedIn` owner and goes through the evaluator (v1.1). A cluster's existing `owner` stays a source of trust (`Owners`). A cluster made in a project gets that project as its home. |
+| **search** | Member routes (v1.1, built): `/v1/search` goes through the evaluator for a person's session and their tokens, so the catalogue's actions decide by role in the cluster's project (viewer reads; developer also writes and makes `read` and `append` keys on a cluster that isn't protected, and only reads one that is (`Resolvers::protected_whole`); admin and owner manage: settings, the console, `data` and `admin` keys, the admin password, remotes, deletes, creates in the project). A cluster counts for a project only through `Workspace::trusts` (`Access::resource_as` drops canvas projects that don't trust it, for every person's grant on a member product), so a stranger's cluster dropped on the canvas is a 404 to every member. A cluster's `owner` stays a source of trust: a person's grant reaches their own clusters with every action (`Resolvers::owned_fn`), and a create naming no project is still their own (`catalog::PERSON_OWN_UNPLACED`). A create with `X-Roll-Project` gets that project as its home and no owner (it's the project's; `made_by` only counts it toward its maker's caps), and a branch takes its parent's home (only that: a create naming another project is a 400, and a branch that can't be homed there isn't made, 503). A developer's keys are `read` and `append` (a `data` key deletes indices: `delete`). search narrows lists with the gate's decision (`roll_auth::Reach`). Linking two clusters takes administering both, and a link works only while its maker still may administer the target (`Access::person_reaches`). A person's token is held within their session on every create but their own (previews' creates as well), and on what a request lends (a branch's parent). A home hands a person's cluster to the project (`Workspace::on_homed`, a restored home too), canvases and homes keep a cluster by its id (`Owners::canonical`), and a project home to live clusters can't be deleted. A search link names a cluster by its id. |
 | **storage** | None in v1. Storage's people are IAM users with console sessions (its own evaluator). A bucket on a project's canvas counts for the project's secrets only through its home. Mapping project roles onto IAM is later. |
 | **Postgres, Redis, streams, NoSQL, queues, tasks** | Later, one product at a time. Each needs its creates placed in a project (a `Create` row with `place`) and its resolver to find the project, and then it joins the member products. This replaces accounts' "Phase 2: per-user separation": a resource belongs to the project it was made in, not to a person. |
 
@@ -438,7 +442,7 @@ Accepting an invite isn't a tool, because it's a person's.
 - the dashboard's Members tab and Invites page, the CLI, the MCP tools.
 
 **v1.1: the products that already know their project.** Apps, previews and search become member
-products. Previews is built (#524).
+products. Previews is built (#524), and so is search (#808).
 
 **v1.1: groups, SCIM groups and time-boxed elevation** (design: [members-v1-1.md](members-v1-1.md)).
 Groups hold roles on projects, and roles add up. A company's provider keeps a group's members over

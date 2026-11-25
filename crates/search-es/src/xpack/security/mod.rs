@@ -5,9 +5,10 @@
 //! **Authentication** ([`authenticate`]) runs before a request is parsed, like Elasticsearch's
 //! security REST filter. A request is authenticated by, in order:
 //!
-//! - the node: when `search-server` already verified the cluster's own credentials it says so
-//!   in [`AUTHENTICATED_HEADER`] (it strips any client-sent copy), and the request runs as the
-//!   cluster's owner (`elastic`, a superuser); a request without an `Authorization` header in
+//! - the node: what `search-server` already verified is on the request in process
+//!   ([`crate::rest::Verified`], never a header a client could send): the cluster's own
+//!   credentials run as the cluster's owner (`elastic`, a superuser), a derived browser key as its
+//!   parent's API key, narrowed ([`derived`]); a request without an `Authorization` header in
 //!   dev mode (no node authentication) is the owner too;
 //! - `Basic` credentials of a native user ([`users`]), a file-realm user (node setting
 //!   `roll.security.file_users`, `name:password:role|role,...`: the test clusters' superuser),
@@ -28,6 +29,7 @@
 pub mod actions;
 pub mod api_keys;
 pub mod browser;
+pub mod derived;
 pub mod audit;
 pub mod dls;
 pub mod opensearch;
@@ -44,10 +46,6 @@ use crate::rest::Ctx;
 use privileges::{Permission, Scope};
 use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
-
-/// The header `search-server` sets on requests it authenticated with the cluster's own
-/// credentials (value: the user name, `elastic` for the owner).
-pub const AUTHENTICATED_HEADER: &str = "x-roll-authenticated-user";
 
 /// Narrows a request the node authenticated as the owner to these index names and patterns
 /// (comma-separated; `-` exclusions are ignored): roll search's per-index control-plane routes
@@ -86,6 +84,8 @@ pub struct ApiKeyAuth {
     /// A linked remote cluster's request (`cross_cluster` key, [`api_keys::authenticate_link`]):
     /// who it was sent for.
     pub remote: Option<Box<RemoteUser>>,
+    /// A key derived from this one ([`derived`]): what narrows it.
+    pub derived: Option<Box<derived::DerivedAuth>>,
 }
 
 /// The user a linked remote cluster's request was sent for.
@@ -144,6 +144,7 @@ impl Principal {
                 limited_by,
                 cross_cluster: false,
                 remote: None,
+                derived: None,
             })),
             ..Principal::owner()
         }
@@ -265,11 +266,15 @@ pub fn stored_browser_key_cluster(state: &[u8], dialect: crate::cluster::Dialect
 
 /// Who owns what a request stores for later (async search results): the API key it
 /// authenticated with, else its user and realm (the run-as user when there is one), as
-/// Elasticsearch's `Authentication.canAccessResourcesOf` tells owners apart.
+/// Elasticsearch's `Authentication.canAccessResourcesOf` tells owners apart; a derived key is
+/// its own owner, never its parent or another key derived from it.
 pub fn resource_owner(ctx: &Ctx) -> String {
     let p = principal(ctx);
     match &p.kind {
-        AuthKind::ApiKey(a) => format!("api_key:{}", a.id),
+        AuthKind::ApiKey(a) => match &a.derived {
+            Some(d) => format!("api_key:{}:derived:{}", a.id, d.id),
+            None => format!("api_key:{}", a.id),
+        },
         _ => format!("user:{}:{}:{}", p.realm_type, p.realm_name, p.username),
     }
 }
@@ -318,13 +323,13 @@ pub fn authenticate(ctx: &Ctx) -> EsResult<()> {
         let _ = ctx.principal.set(api_keys::authenticate_link(ctx.cluster, key, access)?);
         return Ok(());
     }
-    let p = if req.header(AUTHENTICATED_HEADER).is_some() {
-        req.header(INDEX_SCOPE_HEADER).map(Principal::owner_scoped)
-    } else {
-        match req.header("authorization") {
+    let p = match &req.verified {
+        Some(crate::rest::Verified::Derived(k)) => Some(derived::verified(ctx.cluster, k)?),
+        Some(crate::rest::Verified::ClusterUser(_)) => req.header(INDEX_SCOPE_HEADER).map(Principal::owner_scoped),
+        None => match req.header("authorization") {
             Some(h) => Some(authenticate_header(ctx.cluster, h, &req.uri)?),
             None => None,
-        }
+        },
     };
     let p = match req.header(RUN_AS_HEADER) {
         Some(target) if ctx.cluster.dialect == crate::cluster::Dialect::Elasticsearch && run_as_enabled(ctx.cluster) => {
@@ -398,7 +403,13 @@ pub fn authenticate_header(cluster: &Cluster, header: &str, uri: &str) -> EsResu
         if !es_credentials(cluster) {
             return Err(opensearch::unauthorized());
         }
-        return if scheme.eq_ignore_ascii_case("apikey") { api_keys::authenticate(cluster, value) } else { tokens::authenticate_bearer(cluster, value) };
+        if scheme.eq_ignore_ascii_case("bearer") {
+            return tokens::authenticate_bearer(cluster, value);
+        }
+        if derived::is_derived(value) {
+            return derived::authenticate(cluster, value);
+        }
+        return api_keys::authenticate(cluster, value);
     }
     // Other schemes present no credentials Elasticsearch's realms understand.
     Ok(Principal::owner())
@@ -446,6 +457,9 @@ pub fn authenticate_native(cluster: &Cluster, header: &str) -> Option<Principal>
         return users::authenticate_password(cluster, user, password);
     }
     if scheme.eq_ignore_ascii_case("apikey") && es_credentials(cluster) {
+        if derived::is_derived(value) {
+            return derived::authenticate(cluster, value).ok();
+        }
         return api_keys::authenticate(cluster, value).ok();
     }
     if scheme.eq_ignore_ascii_case("bearer") && es_credentials(cluster) {
@@ -626,6 +640,10 @@ pub fn effective(file: &FileRoles, st: &crate::meta::ClusterState, p: &Principal
         AuthKind::ApiKey(a) => {
             let (role_descriptors, limited_by) = (&a.role_descriptors, &a.limited_by);
             let limited = permissions_of_descriptors(limited_by);
+            // A derived key: one more set every permission must pass.
+            if let Some(d) = &a.derived {
+                also.push(permissions_of_descriptors(&d.narrowing));
+            }
             if role_descriptors.as_object().is_none_or(|m| m.is_empty()) {
                 (limited, None)
             } else {

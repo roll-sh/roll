@@ -4775,7 +4775,8 @@ async fn an_intermediate_ca_issues_under_the_customers_own_root() {
         p.distinguished_name.push(rcgen::DnType::CommonName, "roll intermediate");
         p.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Constrained(0));
         p.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign, rcgen::KeyUsagePurpose::CrlSign];
-        p.name_constraints = Some(rcgen::NameConstraints { permitted_subtrees: vec![rcgen::GeneralSubtree::DnsName(permitted.into())], excluded_subtrees: vec![] });
+        let any_ip = vec![rcgen::GeneralSubtree::IpAddress(rcgen::CidrSubnet::V4([0; 4], [0; 4])), rcgen::GeneralSubtree::IpAddress(rcgen::CidrSubnet::V6([0; 16], [0; 16]))];
+        p.name_constraints = Some(rcgen::NameConstraints { permitted_subtrees: vec![rcgen::GeneralSubtree::DnsName(permitted.into())], excluded_subtrees: any_ip });
         p.not_after = ::time::OffsetDateTime::now_utc() + ::time::Duration::days(days);
         p.use_authority_key_identifier_extension = true;
         p
@@ -4809,6 +4810,14 @@ async fn an_intermediate_ca_issues_under_the_customers_own_root() {
     assert!(audit.contains("no name constraints within those domains (unconstrained: true)"), "{audit}");
     let (s, _) = api.call(Method::PUT, &chain_at, Some(json!({ "certificate": bare.pem(), "chain": root_cert.pem() }))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "a renewal without name constraints asks again");
+    // DNS constraints alone leave every IP address unconstrained (BR 7.1.2.5): refused, with the
+    // whole openssl line.
+    let mut dns_only = intermediate(30, "svc.internal");
+    dns_only.name_constraints.as_mut().unwrap().excluded_subtrees.clear();
+    let dns_only = dns_only.signed_by(&spki, &root_issuer).unwrap();
+    let (s, e) = api.call(Method::PUT, &chain_at, Some(json!({ "certificate": dns_only.pem(), "chain": root_cert.pem() }))).await;
+    let why = e["error"].as_str().unwrap_or_default();
+    assert!(s == StatusCode::BAD_REQUEST && why.contains("permits every IP address") && why.contains("permitted;DNS:svc.internal,excluded;IP:0.0.0.0/0.0.0.0,excluded;IP:0:0:0:0:0:0:0:0/0:0:0:0:0:0:0:0"), "{e}");
     let ca = api.ok(Method::PUT, &chain_at, Some(json!({ "certificate": inter.pem(), "chain": root_cert.pem() }))).await;
     assert_eq!((ca["status"].as_str(), ca["domains"].clone(), &ca["unconstrained"]), (Some("active"), json!(["prod.svc.internal"]), &json!(false)));
     assert!(ca.get("csr").is_none() && ca["ca_chain"].as_str().unwrap().ends_with(&root_cert.pem()));
@@ -6142,6 +6151,10 @@ async fn a_project_backs_up_sealed_to_a_key_and_restores_into_another() {
     api.ok(Method::PUT, "/environments/development/imports?path=/", Some(json!([{ "environment": "staging", "path": "/" }]))).await;
     api.ok(Method::PUT, "/required", Some(json!([{ "key": "API", "type": "url" }]))).await;
     api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "approvals": 1 }))).await;
+    // A CA and a certificate from it: the backup carries the CA's key.
+    let ca = api.ok(Method::POST, "/cas", Some(json!({ "name": "internal", "domains": ["svc.internal"] }))).await;
+    let link = json!({ "kind": "pki", "ref": ca["id"], "field": "certificate", "mode": "managed", "options": { "names": "api.svc.internal", "rotate_days": 7 } });
+    api.ok(Method::PUT, "/environments/staging/secrets/TLS_CERT", Some(json!({ "link": link }))).await;
 
     let secret = [7u8; 32];
     let b = api.ok(Method::POST, "/backup", Some(json!({ "recipient": roll_secrets::crypto::public_key(&secret) }))).await;
@@ -6149,11 +6162,25 @@ async fn a_project_backs_up_sealed_to_a_key_and_restores_into_another() {
     let sealed: roll_secrets::crypto::Sealed = serde_json::from_value(b["sealed"].clone()).unwrap();
     let plain = roll_secrets::crypto::open_sealed(&secret, b["context"].as_str().unwrap(), &sealed).unwrap();
     let archive: Value = serde_json::from_slice(&plain).unwrap();
+    // The drill: compared with the project by name, never a value, and nothing written.
+    api.set("staging", "API", "https://staging.example").await;
+    let v = api.ok(Method::POST, "/backup/verify", Some(archive.clone())).await;
+    assert_eq!((v["keys"]["missing"].clone(), v["keys"]["changed"].clone(), v["registrations"]["missing"].clone()), (json!([]), json!(["staging:/API"]), json!([])), "{v}");
+    assert!(!v.to_string().contains("sk_live_backup") && !v.to_string().contains("PRIVATE KEY"));
 
     let (_, other) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "restored" }))).await;
     let to = |p: &str| format!("/v1/secrets/projects/{}{p}", other["id"].as_str().unwrap());
     let r = api.ok(Method::POST, &to("/restore"), Some(archive.clone())).await;
-    assert_eq!((r["secrets"].as_u64(), r["warnings"].clone()), (Some(2), json!([])));
+    assert_eq!((r["secrets"].as_u64(), r["registrations"].as_u64(), r["warnings"].clone()), (Some(3), Some(1), json!([])));
+    // The CA came back with its key, under the restorer: a certificate issued after the restore
+    // chains to the same CA certificate.
+    let restored = api.ok(Method::GET, &to("/cas"), None).await[0].clone();
+    assert!(restored["certificate"] == ca["certificate"] && restored["id"] != ca["id"], "{restored}");
+    let leaf = api.ok(Method::GET, &to("/environments/staging/values"), None).await["values"]["TLS_CERT"].as_str().unwrap().to_string();
+    let (_, leaf) = x509_parser::pem::parse_x509_pem(leaf.as_bytes()).unwrap();
+    let (_, root) = x509_parser::pem::parse_x509_pem(ca["certificate"].as_str().unwrap().as_bytes()).unwrap();
+    let (leaf, root) = (leaf.parse_x509().unwrap(), root.parse_x509().unwrap());
+    assert!(leaf.issuer() == root.subject() && leaf.verify_signature(Some(root.public_key())).is_ok());
     assert_eq!(api.ok(Method::GET, &to("/environments/production/values?path=/pay"), None).await["values"]["STRIPE"], "sk_live_backup");
     assert_eq!(api.ok(Method::GET, &to("/environments/development/values"), None).await["values"]["API"], "https://staging", "imports restored");
     assert_eq!(api.ok(Method::GET, &to("/environments/production"), None).await["protected"], true, "protection last");
@@ -8675,6 +8702,24 @@ async fn public_certificates_are_ordered_in_the_background_renewed_and_a_failed_
     let pushed = api.certs.pushes.lock().unwrap().clone();
     assert_eq!((pushed.len(), pushed[1].0.as_str(), pushed[1].3.as_deref()), (2, v["TLS_CERT"].as_str().unwrap(), Some("arn:fake:1")), "the renewed certificate, to the same target");
 
+    // A key linked as a renewal came in may have taken the certificate before it: the next pass
+    // rolls it (as a key a node stopped short of).
+    api.ok(Method::PUT, "/environments/staging/secrets/TLS_CERT", Some(link("certificate"))).await;
+    let staging = || {
+        let p = api.project.clone();
+        api.db.read(move |c| c.query_row("SELECT s.link_state, p.serial FROM secrets s JOIN environments e ON e.id = s.env_id JOIN public_certs p ON p.project_id = s.project_id WHERE s.project_id = ? AND e.slug = 'staging' AND s.key = 'TLS_CERT'", [&p], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))).unwrap()
+    };
+    let (state, serial) = staging();
+    let mut state: Value = serde_json::from_str(&state).unwrap();
+    assert_eq!(state["handle"]["serial"].as_str(), Some(serial.as_str()));
+    state["handle"]["serial"] = json!("fake-serial-before");
+    let p = api.project.clone();
+    api.db.write(move |c| c.execute("UPDATE secrets SET link_state = ? WHERE project_id = ? AND key = 'TLS_CERT' AND env_id IN (SELECT id FROM environments WHERE project_id = ? AND slug = 'staging')", code_sql::params![state.to_string(), p, p])).unwrap();
+    sweep().await;
+    let (state, serial) = staging();
+    assert_eq!(serde_json::from_str::<Value>(&state).unwrap()["handle"]["serial"].as_str(), Some(serial.as_str()), "rolled to the current certificate");
+    api.ok(Method::DELETE, "/environments/staging/secrets/TLS_CERT", None).await;
+
     // A key's rotation asks for a new certificate; the job brings it.
     let r = api.ok(Method::POST, "/environments/production/secrets/TLS_KEY/rotate", None).await;
     assert!(r["warnings"][0].as_str().unwrap().contains("ordering a new certificate"), "{r}");
@@ -8721,6 +8766,45 @@ async fn public_certificates_are_ordered_in_the_background_renewed_and_a_failed_
     api.ok(Method::PUT, "/environments/staging/secrets/TLS_KEY", Some(confirmed)).await;
     let health = api.ok(Method::GET, "/health", None).await;
     assert!(health.as_array().unwrap().iter().any(|f| f["issue"] == "exposed" && f["environment"] == "production" && f["key"] == "TLS_KEY" && f["detail"].as_str().unwrap().contains("staging")), "{health}");
+}
+
+/// docs/secrets.md, "Public certificates": a new DNS credential is the registration made anew, so
+/// orders act at its replacer's rights from then on, never at the old maker's; a rename keeps the
+/// maker.
+#[tokio::test]
+async fn replacing_a_public_certificates_dns_credential_makes_the_replacer_its_maker() {
+    let api = Api::new().await;
+    api.secrets.set_public_ca(Arc::new(FakeCa::new()));
+    let (_, p) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "team" }))).await;
+    let team = p["id"].as_str().unwrap().to_string();
+    let at = |rest: &str| format!("/v1/secrets/projects/{team}{rest}");
+    api.join(&team, "cat", "admin", None).await;
+    api.join(&team, "bob", "admin", None).await;
+    let le = roll_secrets::public_certs::PUBLIC_CAS[0];
+    let new = json!({ "name": "web", "directory_url": le, "domains": ["www.roll-fake.test"], "dns_provider": "cloudflare", "dns_credential": "fake-cf-dns-token", "eab_kid": "kid-roll-fake", "eab_hmac_key": "cm9sbC1mYWtlLWhtYWM" });
+    let (s, cert) = api.signed_in("cat", false, Method::POST, &at("/public-certs"), Some(new)).await;
+    assert!(s.is_success(), "{s} {cert}");
+    let id = cert["id"].as_str().unwrap().to_string();
+    let (s, cert) = api.signed_in("bob", false, Method::PATCH, &at(&format!("/public-certs/{id}")), Some(json!({ "dns_credential": "fake-cf-dns-token" }))).await;
+    assert!(s.is_success() && cert["created_by"] == "usr_bob", "{s} {cert}");
+    let (_, cert) = api.as_ada(Method::PATCH, &at(&format!("/public-certs/{id}")), Some(json!({ "name": "web-2" }))).await;
+    assert_eq!(cert["created_by"], "usr_bob", "a rename keeps the maker: {cert}");
+    let (_, audit) = api.as_ada(Method::GET, &at("/audit?action=public_cert.update"), None).await;
+    assert!(audit.to_string().contains("its maker moved from usr_cat to usr_bob"), "{audit}");
+    let sweep = || {
+        let s = api.secrets.clone();
+        async move { tokio::task::spawn_blocking(move || s.sweep_public_certs().unwrap()).await.unwrap() }
+    };
+    // The first maker leaving no longer stops it; the replacer leaving does.
+    assert_eq!(api.as_ada(Method::DELETE, &format!("/v1/workspace/projects/{team}/members/usr_cat"), None).await.0, StatusCode::NO_CONTENT);
+    sweep().await;
+    assert_eq!(api.as_ada(Method::GET, &at("/public-certs"), None).await.1[0]["status"], "issued");
+    assert_eq!(api.as_ada(Method::DELETE, &format!("/v1/workspace/projects/{team}/members/usr_bob"), None).await.0, StatusCode::NO_CONTENT);
+    assert!(api.as_ada(Method::POST, &at(&format!("/public-certs/{id}/renew")), None).await.0.is_success());
+    sweep().await;
+    let (_, listed) = api.as_ada(Method::GET, &at("/public-certs"), None).await;
+    let why = listed[0]["last_error"].as_str().unwrap_or_default();
+    assert!(why.contains("usr_bob") && why.contains("may no longer manage"), "{listed}");
 }
 
 /// What rolld's notifier would send, recorded: chat posts and mails. Only `usr_bob` may use a chat
@@ -8808,4 +8892,40 @@ async fn a_subscriber_is_told_of_production_changes_once_and_never_a_value() {
         assert!(values.iter().all(|v| !t.contains(v)), "{t}");
         assert!(t.split(|c: char| !c.is_ascii_hexdigit()).all(|w| w.len() < 32), "{t}");
     }
+}
+
+/// A pass takes the subscriptions that have waited longest first: on a busy server, the ones past
+/// a pass's limit are served on the next pass, not starved by the same first ones every time.
+#[tokio::test]
+async fn every_due_subscription_is_served_within_two_passes() {
+    let api = Api::new().await;
+    let fake = Arc::new(FakeNotifier::default());
+    api.secrets.set_notifier(fake.clone());
+    let (_, p) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "busy" }))).await;
+    let team = p["id"].as_str().unwrap().to_string();
+    let at = |rest: &str| format!("/v1/secrets/projects/{team}{rest}");
+    let (s, n) = api.as_ada(Method::POST, &at("/notifications"), Some(json!({ "kinds": ["secret.changed"], "channel": { "email": "own" } }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{n}");
+    // 250 in all, as many people's would be (one person has at most 20).
+    let id = n["id"].as_str().unwrap().to_string();
+    api.db
+        .write(move |c| {
+            for i in 0..249 {
+                c.execute(
+                    "INSERT INTO notifications (id, project_id, user_id, kinds, environment, channel, install, target, cursor, state, error, error_at, tries, running_until, retry_at, delivered, delivered_at, created_at)
+                     SELECT ?, project_id, user_id, kinds, environment, channel, install, target, cursor, state, error, error_at, tries, running_until, retry_at, delivered, delivered_at, created_at FROM notifications WHERE id = ?",
+                    code_sql::params![format!("ntf_busy{i:03}"), id],
+                )?;
+            }
+            Ok::<_, code_sql::Error>(())
+        })
+        .unwrap();
+    // Every one has something new before each pass.
+    for value in ["fake-busy-value-1", "fake-busy-value-2"] {
+        api.as_ada(Method::PUT, &at("/environments/production/secrets/DB_PASSWORD"), Some(json!({ "value": value }))).await;
+        api.secrets.sweep_notifications().unwrap();
+    }
+    let p = team.clone();
+    let starved: i64 = api.db.read(move |c| c.query_row("SELECT COUNT(*) FROM notifications WHERE project_id = ? AND delivered = 0", [&p], |r| r.get(0))).unwrap();
+    assert_eq!(starved, 0, "every subscription told within two passes ({} mails)", fake.mails.lock().unwrap().len());
 }

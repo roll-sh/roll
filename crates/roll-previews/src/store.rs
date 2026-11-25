@@ -72,6 +72,21 @@ CREATE TABLE IF NOT EXISTS services (
     updated_at INTEGER NOT NULL,
     PRIMARY KEY (preview_id, name)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS run_usage (
+    preview_id TEXT NOT NULL,
+    month INTEGER NOT NULL,
+    gib_ms INTEGER NOT NULL,
+    PRIMARY KEY (preview_id, month)
+) WITHOUT ROWID;
+-- What roll apps billed a preview's service's `pv-` environment, a month's (its builds, compute
+-- and egress at roll apps' prices), as last read.
+CREATE TABLE IF NOT EXISTS service_spend (
+    preview_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    month INTEGER NOT NULL,
+    usd REAL NOT NULL,
+    PRIMARY KEY (preview_id, name, month)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS spend (
     project_id TEXT NOT NULL,
     month INTEGER NOT NULL,
@@ -1415,7 +1430,7 @@ impl Store {
             if let Some((project, change, head)) = gone {
                 emit(c, now, "deleted", &project, id, change.as_deref(), &serde_json::json!({ "head": head }))?;
             }
-            for t in ["resources", "services", "pinned", "pinned_data", "restore_points", "shares", "guest_notes", "note_tells", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "previews"] {
+            for t in ["resources", "services", "pinned", "pinned_data", "restore_points", "shares", "guest_notes", "note_tells", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "run_usage", "service_spend", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -1621,7 +1636,47 @@ impl Store {
         })
     }
 
-    /// Add `ms` of running time to a service (its share of the month's cost).
+    /// A browser's or a job's container ran `ms` with `gib` of memory for the preview (a
+    /// screenshot run, an agent's run, a seed): this month's, at the containers' rate.
+    pub fn add_run_usage(&self, id: &str, gib: f64, ms: i64) -> Result<()> {
+        let month = month_start(self.now_ms()?);
+        let gib_ms = (gib.max(0.0) * ms.max(0) as f64).round() as i64;
+        if gib_ms == 0 {
+            return Ok(());
+        }
+        self.db.write(|c| {
+            c.execute(
+                "INSERT INTO run_usage (preview_id, month, gib_ms) VALUES (?, ?, ?) ON CONFLICT (preview_id, month) DO UPDATE SET gib_ms = run_usage.gib_ms + excluded.gib_ms",
+                params![id, month, gib_ms],
+            )?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// The GiB-milliseconds its runs used this month.
+    fn run_usage_month(&self, id: &str) -> Result<i64> {
+        let month = month_start(self.now_ms()?);
+        Ok(self.db.read(|c| c.query_row("SELECT gib_ms FROM run_usage WHERE preview_id = ? AND month = ?", params![id, month], |r| r.get::<_, i64>(0)).optional())?.unwrap_or(0))
+    }
+
+    /// What roll apps says a service's environment cost this month, as read now.
+    pub fn set_service_spend(&self, id: &str, name: &str, usd: f64) -> Result<()> {
+        let month = month_start(self.now_ms()?);
+        self.db.write(|c| {
+            c.execute(
+                "INSERT INTO service_spend (preview_id, name, month, usd) VALUES (?, ?, ?, ?) ON CONFLICT (preview_id, name, month) DO UPDATE SET usd = excluded.usd",
+                params![id, name, month, usd.max(0.0)],
+            )?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// Its roll apps services' bill this month.
+    fn service_spend_month(&self, id: &str) -> Result<f64> {
+        let month = month_start(self.now_ms()?);
+        Ok(self.db.read(|c| c.query_row("SELECT COALESCE(SUM(usd), 0) FROM service_spend WHERE preview_id = ? AND month = ?", params![id, month], |r| r.get::<_, f64>(0)))?)
+    }
+
     /// Add `ms` of running time to a service, this month's (a new month starts from zero).
     pub fn add_active(&self, id: &str, name: &str, ms: i64) -> Result<()> {
         let month = month_start(self.now_ms()?);
@@ -3470,6 +3525,12 @@ impl Store {
             cost.active_usd_hour += gib * self.rates.usd_per_container_gib_hour;
             cost.month_to_date_usd += gib * self.rates.usd_per_container_gib_hour * (*active_ms as f64 / HOUR_MS);
         }
+        // Its browsers' and jobs' containers, at the same rate (`max_usd_month` caps them too).
+        cost.runs_usd = self.run_usage_month(&r.id)? as f64 / HOUR_MS * self.rates.usd_per_container_gib_hour;
+        cost.month_to_date_usd += cost.runs_usd;
+        // Its roll apps services, as roll apps billed their `pv-` environments (builds included):
+        // roll's runtime never ran them, so they have no running time here.
+        cost.month_to_date_usd += self.service_spend_month(&r.id)?;
         Ok(cost)
     }
 
@@ -3544,6 +3605,7 @@ impl Store {
         // whether it compared at this head at all (errors; routes too with traces).
         let new_errors = self.runtime_fact::<crate::NewErrors>(&r.id, "new_errors")?.filter(|f| f.head == r.head);
         let served_secrets = self.runtime_fact::<crate::ServedSecrets>(&r.id, "served_secrets")?.filter(|f| f.head == r.build()).map(|f| f.secrets).unwrap_or_default();
+        let skipped = self.runtime_fact::<crate::SkippedAt>(&r.id, "skipped")?.filter(|f| f.head == r.build() && !f.skipped.is_empty()).map(|f| f.skipped);
         let slower_routes = if settings.traces { self.runtime_fact::<crate::SlowerRoutes>(&r.id, "slower_routes")?.filter(|f| f.head == r.head) } else { None };
         let compared_at = |kind: &str| -> Result<bool> { Ok(self.runtime_fact::<String>(&r.id, kind)?.as_deref() == Some(r.head.as_str())) };
         let regressions_compared = compared_at("compared_errors")? && (!settings.traces || compared_at("compared_routes")?);
@@ -3646,6 +3708,7 @@ impl Store {
             slower_routes,
             new_errors,
             served_secrets,
+            skipped,
             regressions,
             regressions_accepted,
             regressions_compared,
