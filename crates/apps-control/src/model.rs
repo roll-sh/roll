@@ -852,6 +852,17 @@ impl ScaleWindow {
     }
 }
 
+/// How long a web request has to its answer's head when `timeout_s` isn't set (Cloud Run's
+/// default): a hung upstream call answers 504 rather than holding the instance up for good.
+pub const DEFAULT_REQUEST_TIMEOUT_S: u32 = 300;
+
+impl Run {
+    /// A web request's time to its answer's head ([`DEFAULT_REQUEST_TIMEOUT_S`] unless set).
+    pub fn request_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.timeout_s.unwrap_or(DEFAULT_REQUEST_TIMEOUT_S) as u64)
+    }
+}
+
 impl Run {
     /// These settings with the floor its schedule asks for at `now` (the reaper's view).
     pub fn at(&self, now: i64) -> Run {

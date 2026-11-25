@@ -1709,6 +1709,12 @@ pub(crate) async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment:
     if deployment.is_some() || gate.as_ref().is_some_and(|g| g.preview) {
         r.headers_mut().insert("x-robots-tag", HeaderValue::from_static("noindex"));
     }
+    // A fork's preview's pages: its policy beside the page's own (a browser enforces both).
+    if let Some(csp) = gate.as_ref().and_then(|g| g.fork_csp.clone())
+        && r.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|t| t.starts_with("text/html"))
+    {
+        r.headers_mut().append(header::CONTENT_SECURITY_POLICY, csp);
+    }
     r
 }
 
