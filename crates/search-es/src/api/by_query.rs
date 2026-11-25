@@ -474,6 +474,40 @@ impl Live {
         self.cancelled.iter().any(|c| c.load(std::sync::atomic::Ordering::Relaxed))
     }
 
+    /// A run that isn't a by-query request (roll's imports from Algolia, Typesense and
+    /// Meilisearch, `search-control`'s `saas`) reporting as reindex task `task`: its counters for
+    /// `GET _tasks`, `rps` documents per second (not positive: unthrottled), stopped by
+    /// `cancelled` (the task's own flag).
+    pub fn for_task(task: u64, rps: f64, cancelled: Arc<std::sync::atomic::AtomicBool>) -> Arc<Live> {
+        Live::new(task, None, rps, vec![cancelled])
+    }
+
+    /// Changes the counters `GET _tasks` shows.
+    pub fn update(&self, f: impl FnOnce(&mut Status)) {
+        f(&mut self.status.lock());
+    }
+
+    /// Whether the task was cancelled (`_tasks/_cancel`, or its cluster unloading).
+    pub fn cancelled(&self) -> bool {
+        self.is_cancelled()
+    }
+
+    /// Why a cancelled run stopped, as its `canceled` field says it.
+    pub fn cancel_reason(&self) -> String {
+        self.canceled_reason()
+    }
+
+    /// Waits until the task is woken (cancelled or rethrottled) or `d` passes.
+    pub async fn pause(&self, d: std::time::Duration) {
+        let woken = self.changed.notified();
+        tokio::pin!(woken);
+        woken.as_mut().enable();
+        if self.is_cancelled() {
+            return;
+        }
+        let _ = tokio::time::timeout(d, woken).await;
+    }
+
     /// Gives back the run's [`super::remote::RemoteSlot`], if it holds one.
     fn release_slot(&self) {
         self.slot.lock().take();

@@ -18,6 +18,7 @@ These guides are for people building on roll search. The operator's and internal
 | Log search | [logs.md](logs.md) | data streams, retention, ingest pipelines, ES\|QL, snapshots |
 | Retrieval for an LLM app | [rag.md](rag.md) | `semantic_text`, semantic and hybrid search, inference endpoints, a retrieve-then-generate script |
 | A multi-tenant SaaS | [saas-tenants.md](saas-tenants.md) | an index per tenant or filtered keys, staging branches, roll apps, caps |
+| A move from Algolia, Typesense or Meilisearch | [migrate-from-algolia.md](migrate-from-algolia.md) | one-step imports: records, settings, synonyms and rules mapped, and what doesn't map |
 
 Start with the first query below if you have no cluster yet.
 
