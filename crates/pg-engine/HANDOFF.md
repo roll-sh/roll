@@ -10627,6 +10627,111 @@ and confirm on PGO:
 Agent 218's short-transaction stack (ten steps, `wip/a218`) was gated this way and landed: BENCH
 "Profile-guided build", part 2.
 
+## Bulk writes, round 27: COPY out's floats and text, index builds' key columns; what the DELETE costs (agent 315)
+
+BENCH "Bulk writes, round 27" has the measurements (lane C, plain dist, the 1M-row bulk script
+with joined windows: agent 314's standing harness copied to `~/.cache/a315/bench`). Two code
+commits on origin's `541928f40`; no format change, no storage change.
+
+**COPY TO's float8 and text** (`types::text::pg_fixed`, `push_float8`, `push_float8_bytes`;
+`session::copy::plain_ascii`, `CopyLines::row_stored`):
+- `push_float8` took Ryu's text apart into digits and an exponent and wrote it again, and every
+  value whose digits ended in 5 (11% of the bulk table's, any 1/7) went through
+  `format_float_shortest`: a second Ryu call into Strings and `is_midpoint`'s test. About 1,100
+  user instructions a value; float formatting was 36% of COPY out. Ryu's own text is
+  float8out's (extra_float_digits > 0) wherever Ryu writes fixed notation and float8out does too
+  (decimal exponents -4 to 14), but for Ryu's ".0" after an integer (cut off) and a decimal on the
+  midpoint to a neighbouring float (only one ending in 5 can be: `is_midpoint`'s divisibility test
+  on the digits, inline; one that may be goes the old way). So that text is written as it is;
+  scientific notation and the rest go the old way (`push_float8_parsed`, unchanged). An integer
+  below 10^15 printed by Ryu is the float itself, never a midpoint. Every float8 text output
+  (SELECT's too) takes it.
+- A row COPY writes from its stored bytes (`row_stored`) is made as bytes: a text value of ASCII
+  alone with nothing to escape (no control character, backslash, DEL or delimiter: `plain_ascii`,
+  eight bytes at a time) goes in as it is, without `str::from_utf8` and the byte-at-a-time check;
+  others as before. `text_escape_into` tries `plain_ascii` first too.
+- Tests: `types::text::tests::float8_ryu_text_is_the_parsed` (the new path against the old for
+  ~260,000 values: fractions by 7, multiples of 0.05, both ends of the fixed range, integers
+  ending in 5, random bit patterns, both signs), `session::copy::tests::plain_ascii_is_the_byte_check`.
+  Before the commit, a standalone differential run (`~/.cache/a315/ftest`) compared the two for
+  62.3M values at extra_float_digits 1 and 3: no difference.
+
+**A parallel index build decodes the key and INCLUDE columns alone** (`parbuild::Plan::row`,
+`Plan::read` / `at`): each row was decoded into a whole row of Values (`decode_table_row_need`:
+a Vec a row, the unneeded columns as NULLs, dropped again) and its key columns cloned out of it.
+Now `storage::row::decode_cols` reads only the index's columns into a kept list, columns past the
+row's values (added since) get their missing values as `decode_table_row_need` gives them. A row
+whose heap tuple is sized from its decoded values (one the stored bytes don't size) is still
+decoded whole. The keys, entries and measures are the same.
+
+Results (BENCH "Bulk writes, round 27"; plain dist, three alternating pairs, G user instructions;
+every pair had 2.4-3.8 foreign cores, the counts repeat within 0.2% regardless):
+CREATE INDEX 3.304 -> 3.013 (-8.8%), CREATE UNIQUE INDEX 2.960 -> 2.669 (-9.8%), COPY out 3.082
+-> 2.358 (-23.5%), the same in every pair. The whole script once each (b0 / n2, same hold):
+all steps 73.25 -> 71.94 G (-1.8%), every other step within 0.1%, rows, sums and ctid hashes
+equal, bytes written the same but COPY with a primary key (122.3 / 67.6 MB: when its compaction
+fell), data directory 48 MB both. Against the standing's pgrust (PGO-built): COPY out 2.36 (plain)
+against 2.02, CREATE UNIQUE INDEX 2.67 against 1.91; the PGO build not measured.
+
+Verification: `tools/quick-check.sh` with `QC_CHECKED=1` and `big_tables crash_bulk
+storage_linked_gc` on `dfe678eb8` (the tree of the two commits): Clippy 16 warnings, none new in a changed file;
+367 tests in 8 binaries, again built `--profile verify-checked` (367 passed); regress 51,148 /
+51,150, 0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed. No crash step (no
+storage, WAL or commit path changed; crash_bulk ran with the tests). `tools/crash-binary.py` seeds 1-3 (7 rounds each)
+against the plain dist binary of the two commits: ok.
+
+**Bulk DELETE: what it costs, and the brief's three options measured** (no code kept):
+- The DELETE's joined window, 7.75 G (plain), is the statement 3.70 G and the compaction its
+  deletions force at commit (`deletions_due`) 4.05 G: measured by a build with that trigger off
+  (an env switch, `~/.cache/a315/patches/exp-nodue.patch`), same pair. In this script the
+  compaction is mostly the UPDATE's: every block of the table has the UPDATE's new versions (every
+  other row) and a deleted row (every fourth), so the table (1M rows + 500,000 versions) is
+  written again as 750,000 rows; the index files are only marked (their deletions alone).
+  zstd with the dictionary is about 40% of it (settings not ours to loosen), the merge, the
+  writer and the output's bloom filter the rest.
+- (c) No compaction at the DELETE (the trigger off), same pair: DELETE 7.748 -> 3.702 G, but every
+  later read merges the table's L1 rows with the UPDATE's and DELETE's L0 files: count(*), sum(c)
+  0.355 -> 1.306 G (+0.95 G a scan), ANALYZE 0.468 -> 0.978, 20,000 point reads by id 3.58 ->
+  5.10, a 10,000-id range 0.031 -> 0.053, VACUUM and an index-only scan level; nothing compacts
+  them later while no other write fills L0. Four scans pay the saved 4.05 G back. Space: the
+  data directory 47.9 -> 85.5 MB after VACUUM (+37.6 MB); PostgreSQL's own bloat for the same
+  statements is 91.1 MB (table and indexes 166.3 MB after DELETE and VACUUM against 75.2 MB after
+  VACUUM FULL). So space would allow it; the reads don't. Not kept: the trigger isn't too eager
+  here (a quarter of the rows deleted and half the table's versions dead).
+- (a) The deletions already go in as one sorted run a statement (`Txn::put_entry_deletes`, a
+  linkable run, sorted by index and skipping groups already in order); the run isn't what forces
+  the compaction, the 750,000 deletions over 3M entries are (`deletions_due`, an eighth).
+- (b) No block of the table is unchanged in this script (agent 275's note holds), so agent 292's
+  block copies don't apply; every output block is new and compressed once.
+- What is left within format 4: the statement's 3.70 G (the scan and filter of 1.5M entries
+  through the UPDATE's versions, each deleted row's lock, index values and deferred deletions,
+  sorting and writing 750,000 tombstones with their bloom filter), itself 2.4x pgrust's whole
+  step (1.54 G). A delete marker with a snapshot bound would spare the tombstones and the table's
+  rewrite only where the table has no newer versions in L0; here the rewrite is the UPDATE's
+  versions' merge, which any format pays once. Not a format change for agent 311 on this
+  evidence.
+
+**Bulk peak memory** (the standing's 562 MB against PostgreSQL's 386 MB): the peak isn't a step
+of the script. Per-step peaks (sampled every 0.2 s) never pass 382 MB; the run's peak comes from
+the harness's own checks between steps, `md5(string_agg(ctid::text, ',' ORDER BY id))` over 1M
+rows (three of them). Without those three queries the whole script peaks at 255.6 MB on roll
+(during UPDATE) against PostgreSQL's 359.5 MB (same lane, same day); with them roll peaks at
+552 MB (today) and PostgreSQL at 386 MB (the standing's run), so the checks add about 300 MB on
+roll and a few tens on PostgreSQL, whose ordered aggregate sorts its input within work_mem
+(4 MB, spilling). Not profiled further: **left**, an ordered aggregate's input sort that keeps to
+work_mem (exec/agg; not built here).
+
+**Left:**
+1. The DELETE statement (above), and the compaction's merge and writer outside zstd.
+2. count(*) after the DELETE (0.355 G against pgrust's 0.204): it no longer reads tombstones (the
+   compaction dropped them); 42% is the vectorised column decode (`parscan::Pre::decode`,
+   `cols::decode_cols`), agent 311's format 5 area.
+3. CREATE UNIQUE INDEX still 1.40x pgrust (plain): the btree measure model (`relsize`,
+   `BtreeMeasure`, `FusedMeasure`, about 7%), the run writer and its zstd.
+4. An ordered aggregate's memory (above).
+5. Not gated on the PGO build: neither commit changes inlining or function boundaries of a hot
+   path beyond replacing the code inside `push_float8` and `Plan::row`.
+
 ## Bulk writes, round 26: a bulk load's runs one a table or index, none overlapping (agent 309)
 
 BENCH.md "Bulk writes, round 26" has the measurements (lane C, agent 246's `bulkx.sh` with

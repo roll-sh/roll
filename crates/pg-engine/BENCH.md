@@ -285,6 +285,77 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Bulk writes, round 27: COPY out's floats and text, index builds' key columns; the DELETE's compaction measured (2026-11-25, agent 315)
+
+HANDOFF "Bulk writes, round 27" has what changed. Lane C, agent 314's standing harness (one server
+a container on the lane's server CPUs, 8 GiB, 2 GB cache, the 1M-row `bulk1m.tsv`, joined windows:
+a step's window runs on until the server is quiet, so a compaction it left counts in it), copied to
+`~/.cache/a315/bench` (`bulk.sh` adds per-step peaks, sizes after DELETE / VACUUM, read steps,
+`NOCHK`). Plain dist builds (`tools/dist.sh`): **b0** origin's `8f3876dab`; **n1** b0 with an env
+switch turning off the compaction deletions force (`deletions_due`; an experiment, not kept);
+**n2** the two commits of `cand/a315` (on `8f3876dab`; rebased onto `541928f40`, which adds
+exec SubPlan code only, before the quick-check). G user instructions of the server's cgroup;
+every counter ran 100% of its window. **Foreign load was over 1.0 core in every run** (1.9-3.9
+cores on the server CPUs: other agents' builds); the instruction counts repeat within 0.2%
+regardless.
+
+### b0 against n2 (3 alternating pairs, one `tools/lane.sh` hold each)
+
+| step | b0 | n2 | % per pair |
+|---|---:|---:|---|
+| CREATE INDEX | 3.301-3.307 | 3.012-3.014 | -8.9 / -8.7 / -8.8 |
+| CREATE UNIQUE INDEX | 2.957-2.962 | 2.668-2.670 | -9.8 / -9.9 / -9.9 |
+| COPY out | 3.082 | 2.358 | -23.5 x3 |
+
+### The whole script once each (b0, n2, one hold)
+
+| step | b0 | n2 |
+|---|---:|---:|
+| COPY in | 6.400 | 6.399 |
+| CREATE INDEX | 3.301 | 3.014 |
+| CREATE UNIQUE INDEX | 2.961 | 2.670 |
+| COPY out | 3.082 | 2.358 |
+| INSERT ... SELECT | 4.426 | 4.426 |
+| UPDATE half | 11.557 | 11.557 |
+| DELETE a quarter, with its compaction | 7.750 | 7.748 |
+| VACUUM | 1.719 | 1.719 |
+| ANALYZE | 0.472 | 0.472 |
+| count after | 0.355 | 0.355 |
+| TRUNCATE, DROP | 0.006 | 0.005 |
+| COPY, primary key and index | 18.296 | 18.295 |
+| COPY, index only | 12.926 | 12.920 |
+| **all steps** | 73.25 | 71.94 (-1.8%) |
+
+Rows, sums and ctid hashes equal; MB written equal but COPY with a primary key (122.3 / 67.6:
+when its compaction fell in the window); data directory after 48 MB both.
+
+### The DELETE without its compaction (b0 against n1 with the trigger off, one pair)
+
+| step | b0 | n1, no deletion trigger |
+|---|---:|---:|
+| DELETE a quarter (joined window) | 7.748 | 3.702 |
+| MB written by it | 54.0 | 16.3 |
+| VACUUM | 1.714 | 1.693 |
+| ANALYZE | 0.468 | 0.978 |
+| count(*), sum(c) | 0.355 | 1.306 |
+| the same again | 0.355 | 1.306 |
+| index-only scan of `bulk_a` | 2.083 | 2.039 |
+| 20,000 point reads by id (a join with generate_series) | 3.580 | 5.102 |
+| 10,000-id range | 0.031 | 0.053 |
+| data directory after VACUUM | 47.9 MB | 85.5 MB |
+
+PostgreSQL 18.6, the same steps (same lane, that hour): DELETE 1.669, VACUUM 2.530, ANALYZE 0.698,
+count 0.492, point reads 1.392, range 0.018; `pg_total_relation_size('bulk')` 166.3 MB after the
+DELETE and VACUUM, 75.2 MB after VACUUM FULL (its bloat for these statements: 91.1 MB).
+
+### Peak memory (anon+shmem of the server's cgroup, sampled every 0.2 s)
+
+| run | roll b0 | PostgreSQL 18.6 |
+|---|---:|---:|
+| whole script with the harness's ctid-hash checks | 552.0 MB (n2 551.4) | 386 (the standing's run) |
+| whole script without the three `string_agg(ctid::text ... ORDER BY id)` checks | 255.6 (UPDATE) | 359.5 |
+| the highest step's own peak, with the checks | 301 (n2 382, CHECKPOINT after the last check) | - |
+
 ## Analytic CPU, round 14: correlated SubPlans run once a parameter value (2026-11-24, agent 314)
 
 HANDOFF "Analytic CPU, round 14" has what changed. Lane C, the TPC-H SF1 data and harness of
