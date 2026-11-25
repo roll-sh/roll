@@ -415,7 +415,7 @@ struct Revocable(std::sync::Mutex<bool>);
 
 impl roll_auth::Grants for Revocable {
     fn grant(&self, id: &str) -> Option<roll_auth::Grant> {
-        let all: roll_auth::scope::Scope = serde_json::from_value(json!([{ "product": "*", "resources": "*", "actions": { "read": "allow", "write": "allow", "admin": "allow", "delete": "allow", "reveal": "allow", "deploy": "allow" } }])).unwrap();
+        let all: roll_auth::scope::Scope = serde_json::from_value(json!([{ "product": "*", "resources": "*", "actions": { "read": "allow", "write": "allow", "admin": "allow", "delete": "allow", "reveal": "allow", "deploy": "allow", "scan": "allow" } }])).unwrap();
         (id == "tok_ci" && !*self.0.lock().unwrap()).then(|| roll_auth::Grant { id: id.into(), name: "ci".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(all), user: None, ask_otherwise: false })
     }
 }
