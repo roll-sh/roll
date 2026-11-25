@@ -175,6 +175,12 @@ impl Endpoint {
         self.service_settings.get("rate_limit").and_then(|r| r.get("requests_per_minute")).and_then(Value::as_i64)
     }
 
+    /// Whether the endpoint came from the parent without its provider key ([`crate::seal::INHERITED`]):
+    /// it can't embed on the branch.
+    pub fn lacks_inherited_key(&self) -> bool {
+        self.secrets.values().any(|v| v.as_str() == Some(crate::seal::INHERITED))
+    }
+
     /// On a branch, the parent's keys aren't there ([`crate::seal::INHERITED`]): an endpoint it
     /// inherited refuses before calling out, until the branch gives it a key of its own.
     pub fn secret(&self, cluster: &Cluster, key: &str) -> EsResult<Option<String>> {

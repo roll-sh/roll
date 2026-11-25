@@ -546,6 +546,13 @@ async fn put(ctx: &Ctx<'_>, kind: Kind, name: &str) -> EsResult<Reply> {
 }
 
 async fn delete(ctx: &Ctx<'_>, kind: Kind, name: &str) -> EsResult<Reply> {
+    if kind == Kind::Users && ctx.request.header(super::super::DORMANT_KEY_HEADER).is_some() {
+        // roll's revocation of an Elasticsearch API key from before a switch of flavor: the key,
+        // never a user of this name.
+        let (id, now) = (name.to_string(), ctx.now_ms);
+        let revoked = ctx.cluster.update(move |st| super::super::api_keys::invalidate_id(st, &id, now)).await?;
+        return Ok(if revoked { message(200, "OK", format!("'{name}' deleted.")) } else { not_found(kind, name) });
+    }
     let st = ctx.state();
     let Some(existing) = entry(&st, kind, name).filter(|v| !flag(v, "hidden")) else { return Ok(not_found(kind, name)) };
     if let Some(r) = protected(&existing, name) {

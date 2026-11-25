@@ -405,6 +405,54 @@ fn kept_name(id: &str) -> String {
     format!("deleted_{id}_{}", random_string(8))
 }
 
+/// Branches' parents' states, from the catalog (the parent's name, live or kept after a delete)
+/// and object storage: its current state and its oldest kept one, the closest to when a branch
+/// was made ([`search_es::seal::Lineage`]). A branch's own history isn't read: once it's pruned,
+/// its oldest state can hold secrets the branch made.
+struct CatalogLineages {
+    store: Arc<Store>,
+    data: search_store::Store,
+}
+
+impl std::fmt::Debug for CatalogLineages {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CatalogLineages")
+    }
+}
+
+impl search_server::Lineages for CatalogLineages {
+    fn of(&self, parent: &str) -> Arc<dyn search_es::seal::Lineage> {
+        Arc::new(ParentStates { store: self.store.clone(), data: self.data.clone(), parent: parent.to_string() })
+    }
+}
+
+struct ParentStates {
+    store: Arc<Store>,
+    data: search_store::Store,
+    parent: String,
+}
+
+impl std::fmt::Debug for ParentStates {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParentStates").field("parent", &self.parent).finish()
+    }
+}
+
+#[async_trait::async_trait]
+impl search_es::seal::Lineage for ParentStates {
+    async fn sources(&self) -> Vec<Bytes> {
+        let name = match self.store.get(&self.parent).await {
+            Ok(Some(c)) => c.name,
+            _ => match self.store.get_deleted(&self.parent).await {
+                Ok(Some(d)) => d.stored_as,
+                _ => return Vec::new(),
+            },
+        };
+        let (now, oldest) = futures::future::join(self.data.read_cluster(&name), self.data.read_cluster_oldest(&name)).await;
+        [now, oldest].into_iter().filter_map(|s| s.ok().flatten().map(|s| s.json)).collect()
+    }
+}
+
 /// The key of a node without the deployment's (`<home>/key`), which seals clusters' passwords in
 /// its own `search.db`: made once (48 random characters, mode 0600), then read back.
 pub fn node_key(home: &std::path::Path) -> anyhow::Result<Arc<search_es::seal::Sealer>> {
@@ -882,6 +930,7 @@ impl Control {
                 audit: cfg.audit.clone(),
                 embedder: cfg.embed.clone().map(search_server::embed::EmbedPool::new),
                 secret_refs: Some(search_es::secret_refs::Resolver(secret_refs.clone())),
+                lineages: Some(Arc::new(CatalogLineages { store: store.clone(), data: data.clone() })),
                 ..NodeConfig::default()
             },
             hooks.clone(),
@@ -1903,7 +1952,7 @@ impl Control {
     pub(crate) async fn call(&self, c: &SearchCluster, mut req: EsRequest) -> EsResponse {
         // Who wrote a repository's references is said only by `put_repository`, never by a
         // request relayed here (the console's headers are the caller's).
-        req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(search_es::secret_refs::MAKER_HEADER));
+        req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(search_es::secret_refs::MAKER_HEADER) && !k.eq_ignore_ascii_case(search_es::xpack::security::DORMANT_KEY_HEADER));
         self.call_as_roll(c, req).await
     }
 
@@ -2137,6 +2186,11 @@ impl Control {
                 Ok(()) | Err(ControlError::NotFound(_)) => Ok(()),
                 Err(e) => Err(e),
             },
+            // A link's OpenSearch user on a cluster switched to Elasticsearch since.
+            Some(("osuser", name)) if c.flavor != "opensearch" => match self.delete_key_on(c, name).await {
+                Ok(()) | Err(ControlError::NotFound(_)) => Ok(()),
+                Err(e) => Err(e),
+            },
             Some(("osuser", name)) => {
                 let api = "/_plugins/_security/api";
                 for path in [format!("{api}/internalusers/{name}"), format!("{api}/roles/{name}")] {
@@ -2227,9 +2281,9 @@ impl Control {
             Ok(c) => c,
             Err(ControlError::NotFound(m)) => {
                 let kept = match self.store.get_deleted(id).await? {
-                    // Only what the route could revoke on the live cluster.
-                    Some(d) if d.cluster.flavor != "opensearch" || key_id.starts_with(OS_KEY_PREFIX) => self.keep_revoke(id, &format!("key:{key_id}")).await?,
-                    _ => false,
+                    // Either flavor's key: the restore revokes it whatever the flavor is then.
+                    Some(_) => self.keep_revoke(id, &format!("key:{key_id}")).await?,
+                    None => false,
                 };
                 return if kept { Ok(()) } else { Err(ControlError::NotFound(m)) };
             }
@@ -2238,10 +2292,28 @@ impl Control {
         self.delete_key_on(&c, key_id).await
     }
 
+    /// Revokes key `key_id` of either flavor, whatever cluster `c`'s flavor is now: a key made
+    /// before a switch of flavor doesn't sign in after it, but would after a switch back, so it's
+    /// revoked in the cluster's security state too ([`search_es::xpack::security::DORMANT_KEY_HEADER`]).
     async fn delete_key_on(&self, c: &SearchCluster, key_id: &str) -> Result<()> {
+        let api = "/_plugins/_security/api";
+        let dormant = |mut req: EsRequest| {
+            req.headers.push((search_es::xpack::security::DORMANT_KEY_HEADER.into(), "true".into()));
+            req
+        };
+        // A user roll made for an OpenSearch key or link.
+        let os_key = search_es::xpack::security::opensearch::KEY_USER_PREFIXES.iter().any(|p| key_id.starts_with(p));
+        if c.flavor == "opensearch" && !os_key {
+            // An Elasticsearch key from before the switch: invalidated, no user touched.
+            let r = self.call_as_roll(c, dormant(EsRequest::new("DELETE", &format!("{api}/internalusers/{}", urlencoding::encode(key_id))))).await;
+            return match r.status {
+                s if s < 300 => Ok(()),
+                404 => Err(ControlError::NotFound(format!("no API key {key_id} on cluster {}", c.name))),
+                s => Err(ControlError::Internal(anyhow::anyhow!("revoking API key {key_id} of cluster {} failed ({s})", c.name))),
+            };
+        }
         if c.flavor == "opensearch" {
             // Only users the keys route made: never another internal user.
-            let api = "/_plugins/_security/api";
             if !key_id.starts_with(OS_KEY_PREFIX) {
                 return Err(ControlError::NotFound(format!("no API key {key_id} on cluster {}", c.name)));
             }
@@ -2254,7 +2326,9 @@ impl Control {
             };
         }
         let body = serde_json::to_vec(&json!({ "ids": [key_id] })).unwrap_or_default();
-        let resp = self.call(c, EsRequest::json("DELETE", "/_security/api_key", body)).await;
+        let req = EsRequest::json("DELETE", "/_security/api_key", body);
+        // An OpenSearch key from before the switch: its user and role go.
+        let resp = if os_key { self.call_as_roll(c, dormant(req)).await } else { self.call(c, req).await };
         let v: Value = serde_json::from_slice(&resp.body).unwrap_or(Value::Null);
         let revoked = v["invalidated_api_keys"].as_array().is_some_and(|a| a.iter().any(|k| k.as_str() == Some(key_id)));
         match (resp.status, revoked) {

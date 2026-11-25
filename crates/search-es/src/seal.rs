@@ -166,7 +166,9 @@ pub fn open(cluster: &Cluster, kind: &str, stored: &str) -> EsResult<String> {
         return Err(inherited(label(kind)));
     }
     let Some(body) = stored.strip_prefix(PREFIX) else { return Ok(stored.to_string()) };
-    let plain = cluster.config.sealer.as_ref().and_then(|s| s.open(kind, body)).ok_or_else(|| {
+    // Bound values first; the bare kind only for this load after binding them failed.
+    let unbound = || cluster.unbound_secrets.load(std::sync::atomic::Ordering::Relaxed) && label(kind) != kind;
+    let plain = cluster.config.sealer.as_ref().and_then(|s| s.open(kind, body).or_else(|| unbound().then(|| s.open(label(kind), body)).flatten())).ok_or_else(|| {
         EsError::new(500, "illegal_state_exception", format!("a sealed {} can't be opened here (sealed for another cluster, or under another key)", label(kind)))
     })?;
     if plain == INHERITED {
@@ -186,17 +188,38 @@ pub fn seal_value(cluster: &Cluster, kind: &str, value: crate::json::Value) -> E
     }
 }
 
+/// Where a branch's state was copied from: what the host can read of it, so a branch made
+/// before secrets were bound to their cluster keeps the secrets it made itself
+/// ([`seal_leftovers`]). Sealing draws a fresh nonce, so a sealed value equal byte for byte to one
+/// in these states was copied, never made again.
+#[async_trait::async_trait]
+pub trait Lineage: Send + Sync + std::fmt::Debug {
+    /// Saved states (as [`crate::MetaStore`] saves them) the branch's state may have been copied
+    /// from: the parent's current one, and the branch's oldest kept one (its copy, while its
+    /// history keeps it). Empty when none can be read.
+    async fn sources(&self) -> Vec<bytes::Bytes>;
+}
+
+/// What [`seal_leftovers`] did.
+#[derive(Debug, Default, PartialEq)]
+pub struct Leftovers {
+    /// Records it changed.
+    pub changed: usize,
+    /// `<family>/<id>` of every record whose secrets it took out as the parent's (on a branch).
+    pub taken: Vec<String>,
+}
+
 /// A stored secret as the cluster keeps it from now on, sealed under `to` (`kind` bound to the
 /// cluster, [`bind`]): a value in the clear (kept by a node without a key) is sealed, and one
 /// sealed under the bare `kind` (before secrets were bound to their cluster) is opened and sealed
-/// again. Unless it's `inherited`, a branch's copy of its parent's: then whatever isn't the
-/// branch's own (in the clear, under the bare kind, bound to another cluster) becomes
-/// [`INHERITED`]. A value under another key is left as it is (the node may get that key back).
-pub fn settle(sealer: &Sealer, inherited: bool, kind: &str, to: &str, stored: &str) -> String {
+/// again. Unless it's `inherited` (in a branch's copy of its parent's state) and `copied` says
+/// it came from the parent: then it becomes [`INHERITED`]. A value under another key is left as
+/// it is (the node may get that key back).
+pub fn settle(sealer: &Sealer, inherited: bool, copied: &dyn Fn(&str) -> bool, kind: &str, to: &str, stored: &str) -> String {
     if stored == INHERITED || sealer.open_text(to, stored).is_some() {
         return stored.to_string();
     }
-    if inherited {
+    if inherited && copied(stored) {
         return INHERITED.to_string();
     }
     if !is_sealed(stored) {
@@ -208,34 +231,49 @@ pub fn settle(sealer: &Sealer, inherited: bool, kind: &str, to: &str, stored: &s
     }
 }
 
-/// Settles every secret a cluster keeps ([`settle`]) and persists it at once: seals what's kept in
-/// the clear (stored on a node without a key) with this node's key, binds to the cluster what was
-/// sealed before secrets were bound, and on a branch ([`crate::branch::is_branch`]) takes out
-/// what it holds of its parent's: inference endpoints' keys and inherited watches' secrets become
-/// [`INHERITED`], connector and Fleet secrets (`_connector/_secret`, `_fleet/secret`) are removed.
-/// Snapshot repositories' credentials are sealed too. A connector's own configuration values are
-/// the connectors' to seal (`xpack::entsearch::sync::adopt_existing`, bound to the cluster and the
-/// connector): this never touches them.
-/// Run as the cluster opens; a record changed meanwhile is left for the next open. Returns how
-/// many records it changed.
-pub async fn seal_leftovers(cluster: &Cluster) -> EsResult<usize> {
+/// Every string, and every record's JSON, of the families [`seal_leftovers`] settles in saved
+/// state `raw`: what a copied value equals.
+fn secret_values(raw: &[u8], out: &mut std::collections::HashSet<String>) {
     use crate::json::Value;
-    use crate::xpack::store;
     use crate::xpack::{entsearch::connectors, fleet, inference, watcher};
-    let Some(sealer) = cluster.config.sealer.clone() else { return Ok(0) };
-    let st = cluster.state();
-    let branch = crate::branch::is_branch(cluster, &st);
-    // (family, id, as read, what it becomes: `None` removes it)
-    let mut changes: Vec<(&'static str, String, Value, Option<Value>)> = Vec::new();
+    fn strings(v: &Value, out: &mut std::collections::HashSet<String>) {
+        match v {
+            Value::Str(s) => {
+                out.insert(s.clone());
+            }
+            Value::Obj(m) => m.values().for_each(|x| strings(x, out)),
+            Value::Arr(a) => a.iter().for_each(|x| strings(x, out)),
+            _ => {}
+        }
+    }
+    let Ok(Some(v)) = crate::json::parse(raw) else { return };
+    let xpack = crate::xpack::store::XpackState::from_stored(v.get("xpack").or_else(|| v.get("metadata").and_then(|m| m.get("xpack"))));
+    for family in [inference::SECRETS, connectors::SECRETS, fleet::SECRETS, watcher::WATCHES] {
+        for (_, rec) in xpack.iter(family) {
+            out.insert(rec.to_json());
+            strings(rec, out);
+        }
+    }
+}
+
+/// (family, id, as read, what it becomes: `None` removes it, whether that takes the parent's out)
+type Change = (&'static str, String, crate::json::Value, Option<crate::json::Value>, bool);
+
+/// The changes [`seal_leftovers`] makes to `st`, with `copied` telling a branch's copied values.
+fn plan(cluster: &Cluster, st: &crate::meta::ClusterState, sealer: &Sealer, branch: bool, copied: &dyn Fn(&str) -> bool) -> Vec<Change> {
+    use crate::json::Value;
+    use crate::xpack::{entsearch::connectors, fleet, inference, watcher};
+    let mut changes: Vec<Change> = Vec::new();
     let to = bind(cluster, inference::SECRET_KIND);
     for (id, rec) in st.metadata.xpack.iter(inference::SECRETS) {
         let Value::Obj(m) = rec else { continue };
         let settled: crate::json::Map = m
             .iter()
-            .map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.clone(), |s| Value::from(settle(&sealer, branch, inference::SECRET_KIND, &to, s)))))
+            .map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.clone(), |s| Value::from(settle(sealer, branch, copied, inference::SECRET_KIND, &to, s)))))
             .collect();
         if &settled != m {
-            changes.push((inference::SECRETS, id.clone(), rec.clone(), Some(Value::Obj(settled))));
+            let taken = settled.values().zip(m.values()).any(|(a, b)| a.as_str() == Some(INHERITED) && b.as_str() != Some(INHERITED));
+            changes.push((inference::SECRETS, id.clone(), rec.clone(), Some(Value::Obj(settled)), taken));
         }
     }
     for (family, kind) in [(connectors::SECRETS, connectors::SECRET_KIND), (fleet::SECRETS, fleet::SECRET_KIND)] {
@@ -243,7 +281,7 @@ pub async fn seal_leftovers(cluster: &Cluster) -> EsResult<usize> {
             let to = format!("{}:{id}", bind(cluster, kind));
             let next = match (rec.get("sealed").and_then(Value::as_str), rec.get("value")) {
                 (Some(s), _) if sealer.open_text(&to, s).is_some() => continue,
-                _ if branch => None,
+                _ if branch && copied(&rec.to_json()) => None,
                 (Some(s), _) => match sealer.open_text(kind, s) {
                     Some(plain) => Some(crate::obj! { "sealed" => sealer.seal_text(&to, &plain) }),
                     None => continue,
@@ -251,31 +289,81 @@ pub async fn seal_leftovers(cluster: &Cluster) -> EsResult<usize> {
                 (None, Some(v)) => Some(crate::obj! { "sealed" => sealer.seal_text(&to, &v.to_json()) }),
                 (None, None) => continue,
             };
-            changes.push((family, id.clone(), rec.clone(), next));
+            let taken = next.is_none();
+            changes.push((family, id.clone(), rec.clone(), next, taken));
         }
     }
     for (id, rec) in st.metadata.xpack.iter(watcher::WATCHES) {
         let Some(Value::Obj(w)) = rec.get("watch") else { continue };
-        let inherited = crate::branch::inherited_watch(cluster, &st, id);
-        let sealed = watcher::parse::rebound_watch(cluster, w, &sealer, inherited);
+        let inherited = branch && crate::branch::inherited_watch(cluster, st, id);
+        let sealed = watcher::parse::rebound_watch(cluster, w, sealer, inherited, copied);
         if &sealed != w {
+            let taken = Value::Obj(sealed.clone()).to_json().matches(INHERITED).count() > Value::Obj(w.clone()).to_json().matches(INHERITED).count();
             let mut r = rec.clone();
             if let Value::Obj(m) = &mut r {
                 m.insert("watch".into(), Value::Obj(sealed));
             }
-            changes.push((watcher::WATCHES, id.clone(), rec.clone(), Some(r)));
+            changes.push((watcher::WATCHES, id.clone(), rec.clone(), Some(r), taken));
+        }
+    }
+    changes
+}
+
+/// Settles every secret a cluster keeps ([`settle`]) and persists it at once: seals what's kept in
+/// the clear (stored on a node without a key) with this node's key, binds to the cluster what was
+/// sealed before secrets were bound, and on a branch ([`crate::branch::is_branch`]) takes out
+/// what it holds of its parent's: inference endpoints' keys and inherited watches' secrets become
+/// [`INHERITED`], connector and Fleet secrets (`_connector/_secret`, `_fleet/secret`) are removed.
+/// A branch made before binding can't tell its own secrets from its parent's by how they're
+/// sealed: those equal byte for byte to a value in the states it was copied from
+/// ([`crate::ClusterConfig::lineage`]) are the parent's, the rest its own, sealed to it. With
+/// nothing to compare with, every one that isn't sealed as its own counts as the parent's.
+/// Snapshot repositories' credentials are sealed too. A connector's own configuration values are
+/// the connectors' to seal (`xpack::entsearch::sync::adopt_existing`, bound to the cluster and the
+/// connector): this never touches them.
+/// Run as the cluster opens; a record changed meanwhile is left for the next open. Should it
+/// fail on a cluster that isn't a branch, values sealed under the bare kind still open until the
+/// next load ([`open`]).
+pub async fn seal_leftovers(cluster: &Cluster) -> EsResult<Leftovers> {
+    let r = settle_leftovers(cluster).await;
+    if r.is_err() && !crate::branch::is_branch(cluster, &cluster.state()) {
+        cluster.unbound_secrets.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    r
+}
+
+async fn settle_leftovers(cluster: &Cluster) -> EsResult<Leftovers> {
+    use crate::xpack::store;
+    let Some(sealer) = cluster.config.sealer.clone() else { return Ok(Leftovers::default()) };
+    let st = cluster.state();
+    let branch = crate::branch::is_branch(cluster, &st);
+    // On a branch, first as if everything not its own were copied, noting what that takes.
+    let candidates = std::cell::Cell::new(false);
+    let mut changes = plan(cluster, &st, &sealer, branch, &|_| {
+        candidates.set(true);
+        true
+    });
+    if candidates.get()
+        && let Some(lineage) = cluster.config.lineage.clone()
+    {
+        let mut values = std::collections::HashSet::new();
+        for raw in lineage.sources().await {
+            secret_values(&raw, &mut values);
+        }
+        if !values.is_empty() {
+            changes = plan(cluster, &st, &sealer, branch, &|v| values.contains(v));
         }
     }
     let repos = st.metadata.repositories.values().any(|r| r.secrets.values().any(|v| !is_sealed(v)));
     drop(st);
     if changes.is_empty() && !repos {
-        return Ok(0);
+        return Ok(Leftovers::default());
     }
-    let n = changes.len() + usize::from(repos);
+    let out = Leftovers { changed: changes.len() + usize::from(repos), taken: changes.iter().filter(|c| c.4).map(|c| format!("{}/{}", c.0, c.1)).collect() };
     let now = crate::time::now_millis();
     cluster
         .update(move |st| {
-            for (family, id, read, next) in changes {
+            for (family, id, read, next, _) in changes {
                 if st.metadata.xpack.get(family, &id) != Some(&read) {
                     continue;
                 }
@@ -292,7 +380,7 @@ pub async fn seal_leftovers(cluster: &Cluster) -> EsResult<usize> {
             Ok(())
         })
         .await?;
-    Ok(n)
+    Ok(out)
 }
 
 /// The value of an entry [`seal_value`] made.
@@ -382,18 +470,18 @@ mod tests {
         let mut cfg = ClusterConfig::new("c");
         cfg.sealer = Sealer::from_secret("0123456789abcdef0123456789abcdef-k");
         let c = Cluster::open(cfg, store.clone()).await.unwrap();
-        assert_eq!(seal_leftovers(&c).await.unwrap(), 3);
+        assert_eq!(seal_leftovers(&c).await.unwrap().changed, 3);
         let saved = String::from_utf8_lossy(&store.load().await.unwrap().unwrap()).into_owned();
         for secret in ["pw-1", "conn-3", "fleet-4"] {
             assert!(!saved.contains(secret), "{secret} still in the clear in the saved state");
         }
         let got = call(&c, "GET", &format!("/_connector/_secret/{id}"), "").await;
         assert!(String::from_utf8_lossy(&got.body).contains("conn-3"), "still opens");
-        assert_eq!(seal_leftovers(&c).await.unwrap(), 0);
+        assert_eq!(seal_leftovers(&c).await.unwrap().changed, 0);
         // One sealed before secrets were bound to their cluster is bound to it as it opens.
         let bare = Sealer::from_secret("0123456789abcdef0123456789abcdef-k").unwrap().seal("connector secret", "\"bare-5\"");
         c.update(move |st| crate::xpack::store::put(st, crate::xpack::entsearch::connectors::SECRETS, "old", crate::obj! { "sealed" => bare }, 0).map(drop)).await.unwrap();
-        assert_eq!(seal_leftovers(&c).await.unwrap(), 1);
+        assert_eq!(seal_leftovers(&c).await.unwrap().changed, 1);
         let got = call(&c, "GET", "/_connector/_secret/old", "").await;
         assert!(String::from_utf8_lossy(&got.body).contains("bare-5"), "{}", String::from_utf8_lossy(&got.body));
     }

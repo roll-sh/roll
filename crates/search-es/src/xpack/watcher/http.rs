@@ -5,14 +5,17 @@
 //! host, port, path and params; methods in lower case), printed with its secrets redacted,
 //! rendered with the execution's mustache model, and sent.
 //!
-//! Its secrets ([`Slot`]) are the basic auth password, every header whose name says it carries a
-//! credential ([`credential_header`]), and the URL's path and params: webhook URLs (Slack, Teams,
-//! Discord, PagerDuty) carry their token in the path, and API keys ride in query strings. They
-//! are sealed bound to the cluster ([`crate::seal`]), so a branch's copy of its parent's watches
-//! doesn't open them, and printed as `::es_redacted::`, Elasticsearch's mark for a secret. A
-//! redacted value given back on an update keeps the stored one only while the request still goes
-//! to the same scheme, host and port. A node without a key refuses a password or credential
-//! header, as before, and keeps the URL as given, as Elasticsearch does.
+//! Its secrets ([`Slot`]) are the basic auth password, every header but a few that never carry
+//! one ([`plain_header`]), the URL's path and params (webhook URLs of Slack, Teams, Discord and
+//! PagerDuty carry their token in the path, and API keys ride in query strings), and a body whose
+//! JSON names a credential at its top level ([`credential_body`]: PagerDuty's `routing_key`, a
+//! `token`, a `password`). They are sealed bound to the cluster ([`crate::seal`]), so a branch's
+//! copy of its parent's watches doesn't open them, and printed as `::es_redacted::`,
+//! Elasticsearch's mark for a secret, by `GET _watcher/watch`, `_execute` and the watch records
+//! kept in `.watcher-history-*`. A redacted value given back on an update keeps the stored one
+//! only while the request still goes to the same scheme, host and port. A node without a key
+//! refuses a password or a header named like a credential ([`credential_header`]), as before, and
+//! keeps the rest as given, as Elasticsearch does.
 //!
 //! The URL is chosen by the tenant, so roll's rule for such URLs applies (AGENTS.md), through the
 //! node's egress check ([`crate::egress`]): a client that resolves names to public addresses
@@ -117,8 +120,7 @@ pub fn normalize(v: &Value, previous: Option<&Value>) -> EsResult<Map> {
     // The stored secrets go only where they went: a template sent elsewhere needs them given
     // again, and so does one whose host is a template (it renders anywhere).
     let templated = out.get("host").is_some_and(|h| h.to_es_string().contains("{{"));
-    let same_place = |p: &&Value| !templated && ["scheme", "host", "port"].iter().all(|k| p.get(k) == out.get(*k));
-    let kept = previous.filter(same_place);
+    let kept = previous.filter(|p| !templated && same_place(p, &out));
     let mut v = Value::Obj(out);
     each_secret(&mut v, &mut |slot, t| {
         // Only the cluster seals values: one given sealed would be opened when the watch runs.
@@ -138,17 +140,36 @@ pub fn normalize(v: &Value, previous: Option<&Value>) -> EsResult<Map> {
     Ok(out)
 }
 
+/// Whether stored template `p` goes where `out` does: the same scheme, port and host, the host
+/// compared as a URL would have it (lower case, punycode, no trailing dot), so the same place
+/// spelled another way (`url` or `host`) is the same.
+fn same_place(p: &Value, out: &Map) -> bool {
+    let host = |h: Option<&Value>| h.map(|h| canonical_host(&h.to_es_string()));
+    p.get("scheme") == out.get("scheme") && p.get("port") == out.get("port") && host(p.get("host")) == host(out.get("host"))
+}
+
+/// A host as a URL has it: lower case, international names in punycode, no trailing dot.
+fn canonical_host(h: &str) -> String {
+    let h = h.trim().trim_end_matches('.');
+    match reqwest::Url::parse(&format!("http://{h}/")) {
+        Ok(u) => u.host_str().unwrap_or(h).trim_end_matches('.').to_string(),
+        Err(_) => h.to_ascii_lowercase(),
+    }
+}
+
 /// A secret of a request template.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Slot<'a> {
     /// `auth.basic.password`.
     Password,
-    /// A header carrying a credential ([`credential_header`]), by its name as given.
+    /// A header but a plain one ([`plain_header`]), by its name as given.
     Header(&'a str),
     /// The URL's path (`path`; none for an empty one or `/`).
     Path,
     /// A param's value (`params.<name>`).
     Param(&'a str),
+    /// A body that names a credential ([`credential_body`]).
+    Body,
 }
 
 impl Slot<'_> {
@@ -159,6 +180,7 @@ impl Slot<'_> {
             Slot::Header(h) => format!("header [{h}]"),
             Slot::Path => "field [path]".into(),
             Slot::Param(p) => format!("field [params.{p}]"),
+            Slot::Body => "field [body]".into(),
         }
     }
 
@@ -168,14 +190,41 @@ impl Slot<'_> {
             Slot::Password => PASSWORD,
             Slot::Header(_) => AUTH_HEADER,
             Slot::Path | Slot::Param(_) => URL,
+            Slot::Body => BODY,
         }
     }
 
     /// Whether the slot is a declared credential: refused on a node without a key, as
-    /// Elasticsearch's `encrypt_sensitive_data` would need one. A URL is kept as given there.
+    /// Elasticsearch's `encrypt_sensitive_data` would need one. The rest is kept as given there.
     fn credential(self) -> bool {
-        matches!(self, Slot::Password | Slot::Header(_))
+        match self {
+            Slot::Password => true,
+            Slot::Header(h) => credential_header(h),
+            _ => false,
+        }
     }
+}
+
+/// Whether a header never carries a secret, so it's stored and printed as given: `Content-Type`,
+/// `Content-Length`, `Content-Encoding`, `Accept` and `Accept-*`, `User-Agent`, `Cache-Control`
+/// and `If-*`. Every other header is sealed and redacted.
+pub fn plain_header(name: &str) -> bool {
+    let n = name.trim().to_ascii_lowercase();
+    matches!(n.as_str(), "content-type" | "content-length" | "content-encoding" | "accept" | "user-agent" | "cache-control") || n.starts_with("accept-") || n.starts_with("if-")
+}
+
+/// Whether a body names a credential: JSON whose top level has a key saying token, secret,
+/// password, routing key (PagerDuty's integration key) or API key, in any case. Its text, sealed
+/// or a branch's [`crate::seal::INHERITED`], counts too (its slot was decided when it was stored).
+pub fn credential_body(text: &str) -> bool {
+    if crate::seal::is_sealed(text) || text == crate::seal::INHERITED {
+        return true;
+    }
+    let Ok(Some(Value::Obj(m))) = crate::json::parse(text.as_bytes()) else { return false };
+    m.keys().any(|k| {
+        let k = k.to_ascii_lowercase().replace('-', "_");
+        ["token", "secret", "password", "routing_key", "api_key", "apikey"].iter().any(|w| k.contains(w))
+    })
 }
 
 /// Whether a header carries a credential: `Authorization`, `Proxy-Authorization`, a cookie, or a
@@ -214,12 +263,15 @@ pub fn each_secret(v: &mut Value, f: &mut dyn FnMut(Slot<'_>, &mut String) -> Es
     }
     if let Some(Value::Obj(h)) = m.get_mut("headers") {
         for (k, val) in h.iter_mut() {
-            if credential_header(k)
+            if !plain_header(k)
                 && let Some(t) = text_mut(val)
             {
                 f(Slot::Header(k), t)?;
             }
         }
+    }
+    if let Some(t) = m.get_mut("body").and_then(text_mut).filter(|t| credential_body(t)) {
+        f(Slot::Body, t)?;
     }
     if let Some(t) = m.get_mut("path").and_then(text_mut).filter(|t| !t.is_empty() && t.as_str() != "/") {
         f(Slot::Path, t)?;
@@ -241,6 +293,7 @@ fn secret_of<'a>(v: &'a Value, slot: Slot<'_>) -> Option<&'a str> {
         Slot::Header(name) => v.get("headers").and_then(Value::as_object)?.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).and_then(|(_, x)| text(x)),
         Slot::Path => v.get("path").and_then(text),
         Slot::Param(name) => v.get("params").and_then(|p| p.get(name)).and_then(text),
+        Slot::Body => v.get("body").and_then(text),
     }
 }
 
@@ -248,18 +301,19 @@ fn secret_of<'a>(v: &'a Value, slot: Slot<'_>) -> Option<&'a str> {
 const PASSWORD: &str = "watch password";
 #[cfg(test)]
 pub(crate) const PASSWORD_KIND: &str = PASSWORD;
-/// Every credential header's (the name is `Authorization`'s, sealed first).
+/// Every sealed header's (the name is `Authorization`'s, sealed first).
 const AUTH_HEADER: &str = "watch authorization header";
 const URL: &str = "watch url";
+const BODY: &str = "watch body";
 
 /// A stored template with its secrets settled ([`crate::seal::settle`]): sealed under this
 /// node's key and bound to this cluster, those sealed before the binding sealed again; or, in a
-/// watch the branch `inherited` from its parent, every one that isn't the branch's own replaced
-/// with [`crate::seal::INHERITED`] ([`crate::seal::seal_leftovers`]).
-pub fn rebind(cluster: &Cluster, stored: &Value, sealer: &crate::seal::Sealer, inherited: bool) -> Value {
+/// watch the branch `inherited` from its parent, every one `copied` from it replaced with
+/// [`crate::seal::INHERITED`] ([`crate::seal::seal_leftovers`]).
+pub fn rebind(cluster: &Cluster, stored: &Value, sealer: &crate::seal::Sealer, inherited: bool, copied: &dyn Fn(&str) -> bool) -> Value {
     let mut v = stored.clone();
     let _ = each_secret(&mut v, &mut |slot, t| {
-        *t = crate::seal::settle(sealer, inherited, slot.kind(), &crate::seal::bind(cluster, slot.kind()), t);
+        *t = crate::seal::settle(sealer, inherited, copied, slot.kind(), &crate::seal::bind(cluster, slot.kind()), t);
         Ok(())
     });
     v
@@ -326,15 +380,7 @@ pub struct Request {
 
 impl std::fmt::Debug for Request {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut r = self.to_record();
-        if let Value::Obj(m) = &mut r {
-            for k in ["path", "params"] {
-                if m.contains_key(k) {
-                    m.insert(k.into(), REDACTED.into());
-                }
-            }
-        }
-        f.write_str(&r.to_json())
+        f.write_str(&self.to_record().to_json())
     }
 }
 
@@ -386,7 +432,9 @@ pub fn render(cluster: &Cluster, stored: &Map, render: &dyn Fn(&Value) -> EsResu
 }
 
 impl Request {
-    /// The request as a watch record prints it (`HttpRequest.toXContent`, secrets hidden).
+    /// The request as a watch record prints it (`HttpRequest.toXContent`): `_execute` answers and
+    /// the records kept in `.watcher-history-*`, which a branch's copy holds as index data, so
+    /// every secret ([`Slot`]) is redacted, the path and params too (a webhook's token).
     pub fn to_record(&self) -> Value {
         let mut m = Map::new();
         m.insert("host".into(), self.host.clone().into());
@@ -394,24 +442,29 @@ impl Request {
         m.insert("scheme".into(), self.scheme.clone().into());
         m.insert("method".into(), self.method.clone().into());
         if !self.path.is_empty() {
-            m.insert("path".into(), self.path.clone().into());
+            m.insert("path".into(), if self.path == "/" { "/".into() } else { REDACTED.into() });
         }
         if !self.params.is_empty() {
-            m.insert("params".into(), Value::Obj(self.params.iter().map(|(k, v)| (k.clone(), Value::from(v.clone()))).collect()));
+            m.insert("params".into(), Value::Obj(self.params.iter().map(|(k, _)| (k.clone(), Value::from(REDACTED))).collect()));
         }
         if !self.headers.is_empty() {
             m.insert(
                 "headers".into(),
-                Value::Obj(self.headers.iter().map(|(k, v)| (k.clone(), Value::from(if credential_header(k) { REDACTED.to_string() } else { v.clone() }))).collect()),
+                Value::Obj(self.headers.iter().map(|(k, v)| (k.clone(), Value::from(if plain_header(k) { v.clone() } else { REDACTED.to_string() }))).collect()),
             );
         }
         if let Some((u, _)) = &self.auth {
             m.insert("auth".into(), obj! { "basic" => obj! { "username" => u.clone(), "password" => REDACTED } });
         }
         if let Some(b) = &self.body {
-            m.insert("body".into(), b.clone().into());
+            m.insert("body".into(), if credential_body(b) { REDACTED.to_string() } else { b.clone() }.into());
         }
         Value::Obj(m)
+    }
+
+    /// The URL without its secrets, for messages: scheme, host and port.
+    fn shown_url(&self) -> String {
+        format!("{}://{}:{}/{REDACTED}", self.scheme, self.host, self.port)
     }
 
     /// The URL: the path with characters a URL can't hold escaped (an already escaped `%xx`
@@ -507,7 +560,7 @@ fn connect_error(e: &reqwest::Error, host: &str, port: i64) -> EsError {
 pub async fn send(cluster: &Cluster, req: &Request) -> EsResult<Response> {
     let egress = crate::egress::Egress::of_cluster(cluster, ALLOW_PRIVATE);
     let url = req.url();
-    let parsed = reqwest::Url::parse(&url).map_err(|_| EsError::illegal_argument(format!("Malformed URL [{url}]")))?;
+    let parsed = reqwest::Url::parse(&url).map_err(|_| EsError::illegal_argument(format!("Malformed URL [{}]", req.shown_url())))?;
     match egress.check_url_now(&parsed).await {
         Err(crate::egress::Refused::Private(_)) => return Err(EsError::illegal_argument(format!("host [{}] is a private address, which watches may not connect to unless [{ALLOW_PRIVATE}] is set", req.host))),
         Err(e) => return Err(EsError::illegal_argument(format!("host [{}]: {e}", req.host))),

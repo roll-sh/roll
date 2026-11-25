@@ -752,9 +752,10 @@ browser keys. Progress, cancel and the alias switch as above.
 details) has `roll_search_cluster` (name, flavor, `always_on` or `idle_timeout_s`, limits,
 `ip_allowlist`; computed endpoint, status, version and the password from create; a new name
 makes a new cluster, a new flavor switches it in place keeping its data (links made before are
-reissued, and keys don't carry over: an API key isn't an OpenSearch user, and the cluster takes
-out the flavor it left's keys as it opens, Elasticsearch API keys or the OpenSearch users roll's keys
-and links made, so a switch back brings none back); import by id or name; destroy deletes it, restorable for
+reissued, and keys don't carry over: an API key isn't an OpenSearch user, so an OpenSearch-flavor
+cluster takes no API key, access token or service account token; a key made before a switch is
+revoked by `DELETE …/keys/{key}` whatever the flavor is now, and stays revoked across a switch
+back); import by id or name; destroy deletes it, restorable for
 `deleted_retention_s`, 7 days by default), `roll_search_api_key` (`access`, or Elasticsearch
 `role_descriptors` through the cluster's `_security/api_key`, and an `expiration`; its secret is
 sensitive, replaced on any change and after a flavor switch, revoked on destroy; also an ephemeral resource, revoked when

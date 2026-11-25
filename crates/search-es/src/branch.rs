@@ -38,7 +38,10 @@
 //! (`_inference/{task}/{id}/_update`, or the Inference tab's "A roll secret"). roll secrets'
 //! `search-inference` sync names the parent's id and doesn't reach the branch; no key is given
 //! to a branch on its own, since it may not be one roll secrets would give it. Endpoints that
-//! need no key (E5 on the node, the preconfigured ones) keep working.
+//! need no key (E5 on the node, the preconfigured ones) keep working. A write that would embed
+//! with such an endpoint fails the same way, unless it opts to keep the text unembedded and drop
+//! the field's old embeddings (`X-Roll-Unembedded: drop`, roll previews' masking:
+//! [`crate::xpack::inference::semantic::UNEMBEDDED_HEADER`]).
 //!
 //! Branches marked before this rule, and branches made before marking existed
 //! ([`crate::ClusterConfig::parent`]), get the same as they open: [`crate::seal::seal_leftovers`]

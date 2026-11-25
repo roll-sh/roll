@@ -3185,6 +3185,174 @@ async fn a_branch_opens_none_of_its_parents_secrets() {
     let (s, v) = e.es(&bu, &bp, Method::POST, "/_inference/text_embedding/emb", Some(json!({"input": "words"}))).await;
     assert!(s == 400 && v.to_string().contains("this branch doesn't have the parent's provider key; set it on the branch"), "{s} {v}");
     assert_eq!(calls.load(Ordering::SeqCst), 0, "the branch called out with the parent's secrets");
+
+    // A branch from before secrets were bound to their cluster: the parent's connector secret
+    // sealed under its bare kind and its watch's URL in the clear, copied into the branch, and a
+    // secret the branch made itself then. As it opens again, what it copied goes and its own stays.
+    use search_es::{json::Value as V, xpack::store};
+    let sealer = search_control::Sealer::from_secret("0123456789abcdef0123456789abcdef-branches").unwrap();
+    let copied = V::from(sealer.seal_text("connector secret", "\"old-parent-7\""));
+    let own = V::from(sealer.seal_text("connector secret", "\"branch-own-8\""));
+    let path = ["watch", "actions", "hook", "webhook", "path"];
+    let plant = |name: &str, entries: Vec<(&'static str, V)>| {
+        let cluster = e.control.node.get_loaded(name).expect("loaded").cluster.clone();
+        async move {
+            cluster
+                .update(move |st| {
+                    for (id, sealed) in entries {
+                        store::put(st, search_es::xpack::entsearch::connectors::SECRETS, id, search_es::obj! { "sealed" => sealed }, 0)?;
+                    }
+                    let mut w = st.metadata.xpack.get(search_es::xpack::watcher::WATCHES, "ping").cloned().unwrap();
+                    let mut at = &mut w;
+                    for k in &path[..4] {
+                        at = at.as_object_mut().and_then(|m| m.get_mut(*k)).expect("the webhook");
+                    }
+                    if let V::Obj(hook) = at {
+                        hook.insert("path".into(), V::from("/services/T0/B0/legacy-token-9"));
+                    }
+                    store::put(st, search_es::xpack::watcher::WATCHES, "ping", w, 0).map(drop)
+                })
+                .await
+                .unwrap()
+        }
+    };
+    plant("prod", vec![("legacy", copied.clone())]).await;
+    plant("prod-dev", vec![("legacy", copied), ("mine", own)]).await;
+    assert!(e.control.node.unload("prod-dev").await);
+    let (s, v) = e.es(&bu, &bp, Method::GET, "/_connector/_secret/legacy", None).await;
+    assert_eq!(s, 404, "the parent's copied secret: {v}");
+    let (s, v) = e.es(&bu, &bp, Method::GET, "/_connector/_secret/mine", None).await;
+    assert_eq!((s, &v["value"]), (200, &json!("branch-own-8")), "the branch's own secret: {v}");
+    let at = |name: &str| e.control.node.get_loaded(name).unwrap().cluster.state().metadata.xpack.get(search_es::xpack::watcher::WATCHES, "ping").and_then(|w| w.pointer(&path).cloned());
+    assert_eq!(at("prod-dev"), Some(V::from(search_es::seal::INHERITED)), "the parent's webhook URL in the clear");
+    assert_eq!(e.es(&u, &p, Method::GET, &format!("/_connector/_secret/{conn}"), None).await.1["value"], "conn-key-1", "the parent keeps its own");
+}
+
+/// roll previews' masking on a branch whose `semantic_text` field's endpoint came without the
+/// parent's key: `_update_by_query` with Painless refuses (400, the provider-key message) unless it
+/// says `X-Roll-Unembedded: drop`, which keeps the masked text and drops the field's chunks and
+/// embeddings of the real value, without calling the provider. The header does nothing on the
+/// parent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_branch_write_may_drop_embeddings_it_cant_make() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let calls = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let counter = calls.clone();
+    let router = axum::Router::new().fallback(move |body: axum::Json<Value>| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        let n = body.0["input"].as_array().map_or(1, Vec::len);
+        let data: Vec<Value> = (0..n).map(|i| json!({"object": "embedding", "index": i, "embedding": [0.6, 0.8, 0.0]})).collect();
+        async move { axum::Json(json!({"object": "list", "data": data, "model": "emb", "usage": {"prompt_tokens": 1, "total_tokens": 1}})) }
+    });
+    tokio::spawn(async move { axum::serve(listener, router).await });
+    let e = env_with(|c| {
+        c.sealer = search_control::Sealer::from_secret("0123456789abcdef0123456789abcdef-unembedded");
+        c.unsealed_secrets = false;
+        c.node_settings.push((search_control::INFERENCE_ALLOW_PRIVATE.into(), "true".into()));
+    })
+    .await;
+    let c = e.post("/v1/search/clusters", json!({"name": "shop"})).await;
+    // A REST request through the console, as masking sends it: (status, body).
+    let console = |cluster: &str, method: &str, path: &str, body: Option<Value>, drop: bool| {
+        let mut req = json!({"method": method, "path": path});
+        if let Some(b) = body {
+            req["body"] = b;
+        }
+        if drop {
+            req["headers"] = json!([[search_control::UNEMBEDDED_HEADER, "drop"]]);
+        }
+        let uri = format!("/v1/search/clusters/{cluster}/request");
+        let e = &e;
+        async move {
+            let (s, v) = e.call(reqwest::Method::POST, &uri, Some(req)).await;
+            assert_eq!(s, 200, "{v}");
+            (v["status"].as_u64().unwrap_or(0), serde_json::from_str::<Value>(v["body"].as_str().unwrap_or("null")).unwrap_or(Value::Null))
+        }
+    };
+    let endpoint = json!({"service": "openai", "service_settings": {"api_key": "sk-parent-1", "model_id": "emb", "url": format!("http://127.0.0.1:{port}/v1/embeddings")}});
+    for (method, path, body) in [
+        ("PUT", "/_inference/text_embedding/emb", endpoint),
+        ("PUT", "/docs", json!({"mappings": {"properties": {"f": {"type": "semantic_text", "inference_id": "emb"}}}})),
+        ("PUT", "/docs/_doc/1?refresh=true", json!({"f": "the real value"})),
+    ] {
+        let (s, v) = console("shop", method, path, Some(body), false).await;
+        assert!(s < 300, "{path}: {v}");
+    }
+    let chunks = json!({"query": {"nested": {"path": "f.inference.chunks", "query": {"exists": {"field": "f.inference.chunks.embeddings"}}}}});
+    let knn = json!({"query": {"nested": {"path": "f.inference.chunks", "query": {"knn": {"field": "f.inference.chunks.embeddings", "query_vector": [0.6, 0.8, 0.0], "k": 10}}}}});
+    let hits = |v: &Value| v["hits"]["total"]["value"].as_u64().unwrap_or_else(|| panic!("{v}"));
+    assert_eq!(hits(&console("shop", "POST", "/docs/_search", Some(chunks.clone()), false).await.1), 1, "the premise: the parent's document is embedded");
+    assert_eq!(hits(&console("shop", "POST", "/docs/_search", Some(knn.clone()), false).await.1), 1, "the premise: its embeddings match");
+    let b = e.post(&format!("/v1/search/clusters/{}/branches", c["id"].as_str().unwrap()), json!({"name": "shop-preview"})).await;
+    let branch = b["name"].as_str().unwrap().to_string();
+    let before = calls.load(Ordering::SeqCst);
+    let mask = json!({"query": {"match_all": {}}, "script": {"lang": "painless", "source": "ctx._source.f = 'masked'"}});
+    let ubq = "/docs/_update_by_query?conflicts=proceed&refresh=true";
+
+    let (s, v) = console(&branch, "POST", ubq, Some(mask.clone()), false).await;
+    assert!(s == 400 && v.to_string().contains("this branch doesn't have the parent's provider key; set it on the branch"), "{s} {v}");
+    let (s, v) = console(&branch, "POST", ubq, Some(mask.clone()), true).await;
+    assert_eq!((s, &v["updated"]), (200, &json!(1)), "{v}");
+    let (_, v) = console(&branch, "GET", "/docs/_doc/1?_source_includes=f,_inference_fields", None, false).await;
+    assert_eq!(v["_source"], json!({"f": "masked"}), "the masked text, and no chunks or embeddings: {v}");
+    assert_eq!(hits(&console(&branch, "POST", "/docs/_search", Some(chunks.clone()), false).await.1), 0);
+    assert_eq!(hits(&console(&branch, "POST", "/docs/_search", Some(knn), false).await.1), 0, "the real value's embeddings still match");
+    assert_eq!(calls.load(Ordering::SeqCst), before, "the provider was called from the branch");
+
+    // On the parent the header changes nothing: its endpoint embeds the new text.
+    let (s, v) = console("shop", "POST", ubq, Some(mask), true).await;
+    assert_eq!((s, &v["updated"]), (200, &json!(1)), "{v}");
+    assert!(calls.load(Ordering::SeqCst) > before);
+    assert_eq!(hits(&console("shop", "POST", "/docs/_search", Some(chunks), false).await.1), 1);
+}
+
+/// A switch to OpenSearch doesn't let Elasticsearch's credentials in: an API key, an access token
+/// and a key of roll's get 401. Revoking roll's key meanwhile holds across the switch back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_opensearch_flavor_takes_no_elasticsearch_credentials() {
+    use reqwest::Method;
+    let e = env_with(|c| c.domain = Some("search.test".into())).await;
+    let c = e.post("/v1/search/clusters", json!({"name": "flip", "idle_timeout_s": 0})).await;
+    let (u, p) = creds(&c);
+    let b64 = |s: String| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, s);
+    assert_eq!(e.es(&u, &p, Method::PUT, "/_security/user/alice", Some(json!({"password": "alicepw1", "roles": ["superuser"]}))).await.0, 200);
+    let (_, k) = e.es(&u, &p, Method::POST, "/_security/api_key", Some(json!({"name": "mine"}))).await;
+    let user_key = format!("ApiKey {}", b64(format!("{}@flip:{}", k["id"].as_str().unwrap(), k["api_key"].as_str().unwrap())));
+    let (_, t) = e.es(&u, &p, Method::POST, "/_security/oauth2/token", Some(json!({"grant_type": "password", "username": "alice", "password": "alicepw1"}))).await;
+    let token = format!("Bearer {}", t["access_token"].as_str().unwrap_or_else(|| panic!("{t}")));
+    let roll = e.post("/v1/search/clusters/flip/keys", json!({"name": "leaked"})).await;
+    let roll_key = format!("ApiKey {}", roll["api_key"].as_str().unwrap());
+    let status = |auth: String| {
+        let r = e.http.get(format!("{}/_security/_authenticate", e.es)).header("host", "flip.search.test").header("authorization", auth).send();
+        async move { r.await.unwrap().status().as_u16() }
+    };
+    let switch = |flavor: &'static str| {
+        let e = &e;
+        let (u, p) = (u.clone(), p.clone());
+        async move {
+            let (s, v) = e.call(Method::PATCH, "/v1/search/clusters/flip", Some(json!({"flavor": flavor}))).await;
+            assert_eq!(s, 200, "{v}");
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while (e.es(&u, &p, Method::GET, "/", None).await.1["version"]["distribution"] == "opensearch") != (flavor == "opensearch") {
+                assert!(std::time::Instant::now() < deadline, "not {flavor} yet");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    };
+    for auth in [&user_key, &token, &roll_key] {
+        assert_eq!(status(auth.clone()).await, 200, "the premise: {auth}");
+    }
+    switch("opensearch").await;
+    for auth in [&user_key, &token, &roll_key] {
+        assert_eq!(status(auth.clone()).await, 401, "{auth} on OpenSearch");
+    }
+    let (s, v) = e.call(Method::DELETE, &format!("/v1/search/clusters/flip/keys/{}", roll["id"].as_str().unwrap()), None).await;
+    assert!(s < 300, "revoking an Elasticsearch key on OpenSearch: {s} {v}");
+    switch("elasticsearch").await;
+    assert_eq!(status(roll_key).await, 401, "revoked on OpenSearch, still revoked");
+    assert_eq!(status(user_key).await, 200, "a key nobody revoked works again");
 }
 
 #[path = "control/cloud_repositories.rs"]

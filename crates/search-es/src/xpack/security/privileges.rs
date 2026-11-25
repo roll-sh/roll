@@ -479,11 +479,7 @@ impl Permission {
     /// Whether the role grants `action` on `index` (restricted indices need
     /// `allow_restricted_indices`).
     pub fn allows_index(&self, action: &str, index: &str, restricted: bool) -> bool {
-        self.indices.iter().any(|g| {
-            (!restricted || g.allow_restricted)
-                && g.names.iter().any(|n| index_pattern_matches(n, index))
-                && g.privileges.iter().any(|p| index_grants(p, action))
-        })
+        self.indices.iter().any(|g| (!restricted || g.allow_restricted) && grant_names(g, index) && g.privileges.iter().any(|p| index_grants(p, action)))
     }
 
     /// Whether the role holds a named index privilege on `index` (directly, through `all`, or
@@ -529,6 +525,17 @@ pub fn index_pattern_matches(pattern: &str, index: &str) -> bool {
         return regex::Regex::new(&format!("^(?:{inner})$")).map(|r| r.is_match(index)).unwrap_or(false);
     }
     glob(pattern, index)
+}
+
+/// Whether grant `g` names `index`: one of its patterns matches it, and for watch records
+/// (`.watcher-history-*`) the pattern names a dot index (`.watch*`, `.watcher-history-*`, as
+/// Elasticsearch's watcher roles do) or the grant allows restricted indices. Watch records print
+/// the requests watches sent and a branch's copy holds its parent's, so a grant of `*` (an app's
+/// link, a preview's data key on a branch) doesn't read them. Not a restricted index: roles that
+/// name them keep working as on Elasticsearch.
+pub fn grant_names(g: &IndexGrant, index: &str) -> bool {
+    let history = index.starts_with(".watcher-history-");
+    g.names.iter().any(|n| index_pattern_matches(n, index) && (!history || g.allow_restricted || n.starts_with('.') || n.starts_with("/\\.")))
 }
 
 /// Restricted indices: the security indices and other internal indices roles must opt into.

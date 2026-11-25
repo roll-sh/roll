@@ -1224,7 +1224,10 @@ impl Brancher for Search {
         let run = |method: &'static str, path: String, body: Option<Value>| {
             let console = console.clone();
             async move {
-                let mut req = json!({ "method": method, "path": path });
+                // A masked `semantic_text` field whose endpoint came without the parent's key keeps
+                // its masked text unembedded, the real values' embeddings dropped (roll search's
+                // `X-Roll-Unembedded`; nothing for a field that can embed).
+                let mut req = json!({ "method": method, "path": path, "headers": [[search_control::UNEMBEDDED_HEADER, "drop"]] });
                 if let Some(b) = body {
                     req["body"] = b;
                 }

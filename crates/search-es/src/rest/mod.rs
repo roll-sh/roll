@@ -303,11 +303,15 @@ pub async fn handle(cluster: &Cluster, req: EsRequest) -> EsResponse {
 /// [`crate::thread_pool::pool_for`]): the server queues for the pool before it takes a
 /// node-wide running slot, so a queued request holds none. `None`: the slot is taken here.
 pub async fn handle_admitted(cluster: &Cluster, req: EsRequest, admitted: Option<Admitted>) -> EsResponse {
-    let mut resp = match cluster.dialect {
-        Dialect::Elasticsearch => handle_inner(cluster, &req, admitted).await,
-        // Parsers whose grammar differs between the dialects read `opensearch::active()`.
-        Dialect::OpenSearch => crate::opensearch::Scoped::new(handle_inner(cluster, &req, admitted)).await,
+    let handled = async {
+        match cluster.dialect {
+            Dialect::Elasticsearch => handle_inner(cluster, &req, admitted).await,
+            // Parsers whose grammar differs between the dialects read `opensearch::active()`.
+            Dialect::OpenSearch => crate::opensearch::Scoped::new(handle_inner(cluster, &req, admitted)).await,
+        }
     };
+    // A branch's write that may leave a field unembedded (roll previews' masking).
+    let mut resp = crate::xpack::inference::semantic::honour_unembedded(cluster, &req, handled).await;
     finish_headers(&mut resp, &req, cluster.dialect);
     resp
 }

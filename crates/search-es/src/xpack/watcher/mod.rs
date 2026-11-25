@@ -910,6 +910,17 @@ mod tests {
         assert!(!format!("{:?}", c.state().metadata.xpack).contains("att-pw-5"), "stored in the clear");
         let shown = call("GET", "/_watcher/watch/m", String::new()).await;
         assert!(!String::from_utf8_lossy(&shown.body).contains("att-pw-5"), "printed in the clear");
+        // A webhook's token in its URL stays out of `_execute`'s answer and the watch's history.
+        let hook = format!(r#"{{"trigger":{{"schedule":{{"interval":"1h"}}}},"input":{{"simple":{{}}}},"actions":{{"hook":{{"webhook":{{"method":"post","url":"http://127.0.0.1:{port}/services/T0/B0/hist-token-6?k=q-7","body":"b"}}}}}}}}"#);
+        assert_eq!(call("PUT", "/_watcher/watch/h?active=false", hook).await.status, 201);
+        let ran = call("POST", "/_watcher/watch/h/_execute", r#"{"record_execution":true}"#.into()).await;
+        let _ = rx.try_recv();
+        assert_eq!(call("POST", "/.watcher-history-*/_refresh?expand_wildcards=all", String::new()).await.status, 200);
+        let history = call("GET", "/.watcher-history-*/_search?expand_wildcards=all", String::new()).await;
+        for (what, body) in [("_execute", &ran.body), ("history", &history.body)] {
+            let text = String::from_utf8_lossy(body);
+            assert!(text.contains("::es_redacted::") && !text.contains("hist-token-6") && !text.contains("q-7"), "{what}: {text}");
+        }
     }
 
     #[test]
