@@ -1539,7 +1539,8 @@ From a 2026-11-24 gap review (every tool run as an agent would against a fresh r
    secrets' event feed landed (#751). #485's migration landed with both
    routes kept tool-less on purpose (the remote's credentials go in their bodies). #524 (previews on members) adds no routes
    beyond #501's; #627, #629, #596 and #504 add none. Not a tool: making a search browser key
-   (#358's create answers the key; `limits.max_body_bytes` has no schema to join).
+   (#358's create answers the key; `limits.max_body_bytes` has no schema to join), nor rotating a
+   derivable one's signing secret (its answer is the secret).
 12. **Suggested to other threads** (from the 2026-11-21 comparison of 11 MCP servers): fetching an
    app environment's URL through its access gate (Vercel's `web_fetch_vercel_url`; apps, now that
    apps has an SSO gate coming; previews' is `previews_fetch`, #859), Postgres logs, live metrics and migrations as records (Supabase, Neon, PlanetScale), a

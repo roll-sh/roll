@@ -1357,6 +1357,8 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/search/clusters/{id}/browser-keys", "search", R, one(PG, "cluster")),
     row("POST", "/v1/search/clusters/{id}/browser-keys", "search", REVEAL, one(PG, "cluster")),
     row("DELETE", "/v1/search/clusters/{id}/browser-keys/{key}", "search", ADMIN, one(PG, "cluster")),
+    // A derivable browser key's new signing secret: a credential, in the answer.
+    row("POST", "/v1/search/clusters/{id}/browser-keys/{key}/rotate", "search", REVEAL, one(PG, "cluster")),
     // A snapshot repository, the only way its credentials can be roll secrets references: it
     // changes the cluster as the console does; roll secrets checks `reveal` on each reference
     // itself (search_control::secret_refs).

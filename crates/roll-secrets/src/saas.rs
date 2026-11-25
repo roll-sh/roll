@@ -15,6 +15,7 @@
 //! vendor answered.
 
 use crate::access::{Action, Caller, Scope};
+use crate::caller::{Registration, replace_registration_credential};
 use crate::crypto::Keyring;
 use crate::links::{Field, Issued, Link, LinkProvider, Mode};
 use crate::sinks::Deliver;
@@ -1489,6 +1490,7 @@ impl Secrets {
             check_expiry(at, now)?;
         }
         let target = r.vendor.target().to_string();
+        let replacer = ch.credential.as_ref().map(|_| self.replacer(caller)).transpose()?;
         let sealed = match &ch.credential {
             Some(credential) => {
                 let credential = check_credential(&r.vendor, credential)?;
@@ -1515,14 +1517,10 @@ impl Secrets {
                 c.execute("UPDATE saas_rotators SET name = ? WHERE id = ?", [n.as_str(), id])?;
                 changed.push("name");
             }
-            // A new credential is the registration made anew: it acts at its replacer's rights
-            // from now on, never at the old maker's.
-            let mut maker = None;
-            if let Some(sealed) = &sealed {
-                let old: String = c.query_row("SELECT created_by FROM saas_rotators WHERE id = ?", [id], |x| x.get(0))?;
-                c.execute("UPDATE saas_rotators SET credential = ?, created_by = ? WHERE id = ?", params![sealed, caller.made_by(), id])?;
+            let mut moved = String::new();
+            if let (Some(sealed), Some(by)) = (&sealed, &replacer) {
+                moved = replace_registration_credential(c, Registration::Saas, id, sealed, by)?;
                 changed.push("credential");
-                maker = Some(old);
             }
             if let Some(at) = expires_at
                 && at != r.credential_expires_at
@@ -1531,7 +1529,6 @@ impl Secrets {
                 changed.push("credential expiry");
             }
             if !changed.is_empty() {
-                let moved = maker.map(|old| format!("; its maker moved from {old} to {}", caller.made_by())).unwrap_or_default();
                 audit::record(c, self.keys()?, project, caller, "saas.update", None, None, &[], &format!("changed SaaS rotator {name}'s {} ({}, {}){moved}", changed.join(", "), r.vendor.name(), r.vendor.label()), now)?;
             }
             Ok(())

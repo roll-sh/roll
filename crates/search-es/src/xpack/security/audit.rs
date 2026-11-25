@@ -922,6 +922,10 @@ fn config_changes(ctx: &Ctx, reply: &Reply) -> Vec<(&'static str, Value)> {
                 m.insert("role_descriptors".into(), descriptors(key.get("role_descriptors")));
             }
             m.extend(pick(&key, &["metadata"]));
+            // A browser key's signing secret never goes in the log, even sealed.
+            if let Some(md) = m.get_mut("metadata") {
+                super::derived::redact_metadata(md);
+            }
             let mut create = Map::new();
             create.insert("apikey".into(), Value::Obj(m));
             if ctx.api == Api::SecurityGrantApiKey {
@@ -960,6 +964,9 @@ fn config_changes(ctx: &Ctx, reply: &Reply) -> Vec<(&'static str, Value)> {
                 m.insert("role_descriptors".into(), descriptors(body.get("role_descriptors")));
             }
             m.extend(pick(&body, &["metadata", "expiration"]));
+            if let Some(md) = m.get_mut("metadata") {
+                super::derived::redact_metadata(md);
+            }
             one("change_apikey", "change", "apikey", Value::Obj(m))
         }
         Api::SecurityBulkUpdateApiKeys => {
@@ -968,6 +975,9 @@ fn config_changes(ctx: &Ctx, reply: &Reply) -> Vec<(&'static str, Value)> {
                 m.insert("role_descriptors".into(), descriptors(body.get("role_descriptors")));
             }
             m.extend(pick(&body, &["metadata", "expiration"]));
+            if let Some(md) = m.get_mut("metadata") {
+                super::derived::redact_metadata(md);
+            }
             one("change_apikeys", "change", "apikeys", Value::Obj(m))
         }
         Api::SecurityPutPrivileges => {

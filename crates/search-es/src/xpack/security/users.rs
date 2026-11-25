@@ -580,7 +580,7 @@ pub fn parse_role(name: &str, v: &Value, api_key: bool) -> EsResult<Value> {
 /// checked once rendered), and holds none of the queries that would read other documents than
 /// the one being filtered: terms lookups, indexed shapes, `has_child`, `has_parent` and
 /// `percolate` (in compound queries too).
-fn check_role_query(text: &str) -> EsResult<()> {
+pub(super) fn check_role_query(text: &str) -> EsResult<()> {
     let Some(v) = crate::json::parse(text.as_bytes())? else { return Ok(()) };
     if v.get("template").is_some() {
         return Ok(());
