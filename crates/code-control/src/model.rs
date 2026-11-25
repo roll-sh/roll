@@ -380,6 +380,9 @@ pub struct PreviewEnvironment {
     /// Its secret values its pages serve, by name and path (never the value).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub served_secrets: Vec<PreviewServedSecret>,
+    /// What its latest screenshot run left out (pages past a run's ten, stories past forty).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<PreviewSkipped>,
     /// How much its page differs from the project's preview of the default branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_change: Option<PreviewBaseChange>,
@@ -545,6 +548,18 @@ pub struct PreviewBaseChange {
     /// the branch's.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub endpoints: Vec<PreviewEndpoint>,
+}
+
+/// What a preview's screenshot run left out: pages by path, how many stories and the first few
+/// by id (the ids are the preview's code's: untrusted).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PreviewSkipped {
+    #[serde(default)]
+    pub pages: Vec<String>,
+    #[serde(default)]
+    pub stories: u32,
+    #[serde(default)]
+    pub first_stories: Vec<String>,
 }
 
 /// One of a preview's secret values its pages serve: its name and where.

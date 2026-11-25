@@ -1424,7 +1424,7 @@ fn shot_args(shot: &str, name: &str, port: u16) -> Vec<String> {
 /// What a stories run said (`[{id, errors}]`), and its PNGs a line each, in that order: each
 /// story once, by an id roll accepts, with a PNG of at most [`STORY_MAX`] bytes, at most
 /// [`crate::settings::MAX_STORIES`]. The run is the preview's code: nothing else is taken.
-fn story_shots<'a>(said: &str, pngs: impl Iterator<Item = &'a str>) -> Vec<crate::ports::PageShot> {
+fn story_shots<'a>(said: &str, pngs: impl Iterator<Item = &'a str>) -> (Vec<crate::ports::PageShot>, crate::Skipped) {
     use base64::Engine as _;
     #[derive(serde::Deserialize)]
     struct Said {
@@ -1432,7 +1432,19 @@ fn story_shots<'a>(said: &str, pngs: impl Iterator<Item = &'a str>) -> Vec<crate
         #[serde(default)]
         errors: u32,
     }
-    let said: Vec<Said> = serde_json::from_str(said.trim()).unwrap_or_default();
+    #[derive(Default, serde::Deserialize)]
+    struct Run {
+        #[serde(default)]
+        stories: Vec<Said>,
+        #[serde(default)]
+        left: u32,
+        #[serde(default)]
+        first_left: Vec<String>,
+    }
+    let run: Run = serde_json::from_str(said.trim()).unwrap_or_default();
+    // What it didn't take, as it said (its ids checked: the index is the preview's code's).
+    let skipped = crate::Skipped { pages: Vec::new(), stories: run.left.min(100_000), first_stories: run.first_left.into_iter().filter(|id| crate::settings::story_id_ok(id)).take(10).collect() };
+    let said = run.stories;
     let mut out: Vec<crate::ports::PageShot> = Vec::new();
     for (s, b64) in said.into_iter().zip(pngs).take(crate::settings::MAX_STORIES) {
         let path = format!("story:{}", s.id);
@@ -1442,7 +1454,7 @@ fn story_shots<'a>(said: &str, pngs: impl Iterator<Item = &'a str>) -> Vec<crate
         }
         out.push(crate::ports::PageShot { path, png, errors: s.errors.min(10_000), report: Default::default() });
     }
-    out
+    (out, skipped)
 }
 const SHOT_OUTPUT_MAX: usize = BODIES_LINE_MAX + (crate::settings::MAX_PAGES + 2) * SCREENSHOT_MAX * 4 / 3 + 3 * SHOT_REPORT_MAX + crate::store::CROPS_PER_RUN * crate::store::CROP_MAX * 4 / 3 + (64 << 10);
 
@@ -1997,12 +2009,14 @@ impl Runtime {
         let shot = format!("roll-previews-shot-{}", name.trim_start_matches("roll-previews-"));
         let mut args = shot_args(&shot, name, port);
         args.extend(["--env".into(), "AXE=/tmp/axe.js".into()]);
-        let pages: Vec<&String> = opts
+        let wanted: Vec<&String> = opts
             .pages
             .iter()
             .filter(|p| crate::settings::page_path_ok(p) || crate::settings::width_entry(p).is_some() || crate::settings::state_entry(p).is_some() || crate::settings::mode_entry(p).is_some())
-            .take(crate::settings::MAX_PAGES)
             .collect();
+        // A run takes ten; the rest are said, never dropped quietly.
+        let cut: Vec<String> = wanted.iter().skip(crate::settings::MAX_PAGES).map(|p| p.to_string()).collect();
+        let pages: Vec<&String> = wanted.into_iter().take(crate::settings::MAX_PAGES).collect();
         args.extend(["--env".into(), format!("PAGES={}", serde_json::to_string(&pages)?)]);
         let hide: Vec<&String> = opts.hide.iter().filter(|s| crate::settings::selector_ok(s)).take(crate::settings::MAX_HIDE).collect();
         args.extend(["--env".into(), format!("HIDE={}", serde_json::to_string(&hide)?)]);
@@ -2117,6 +2131,7 @@ impl Runtime {
             bodies,
             // What `shot.js` said of the sign-in (its own words, never the page's), one line.
             login: serde_json::from_str::<serde_json::Value>(speed).ok().and_then(|v| v["login"].as_str().map(|s| s.chars().take(200).collect())),
+            skipped: crate::Skipped { pages: cut, ..Default::default() },
         };
         // The other browsers', best effort: Chromium's screenshot stands.
         match more {
@@ -2129,7 +2144,11 @@ impl Runtime {
         }
         // The stories, best effort too.
         match stories {
-            Some(Ok(s)) => shot.pages.extend(s),
+            Some(Ok((s, left))) => {
+                shot.pages.extend(s);
+                shot.skipped.stories = left.stories;
+                shot.skipped.first_stories = left.first_stories;
+            }
             Some(Err(e)) => tracing::warn!(container = name, error = %e, "previews: Storybook's stories"),
             None => {}
         }
@@ -2141,7 +2160,7 @@ impl Runtime {
     /// A service's Storybook stories (`github.storybook`; Chromatic's stories), served at `at`: a
     /// run of their own in its network, locked down as the screenshot's is, each story a page
     /// (`story:<id>`).
-    async fn stories_in(&self, name: &str, port: u16, at: &str) -> anyhow::Result<Vec<crate::ports::PageShot>> {
+    async fn stories_in(&self, name: &str, port: u16, at: &str) -> anyhow::Result<(Vec<crate::ports::PageShot>, crate::Skipped)> {
         let shot = format!("roll-previews-story-{}", name.trim_start_matches("roll-previews-"));
         let mut args = shot_args(&shot, name, port);
         args.extend(["--env".into(), format!("STORIES={at}")]);
@@ -3274,17 +3293,20 @@ mod tests {
     }
 
     /// A stories run's report is the preview's code's: each story once, by an id Storybook would
-    /// make, with a PNG within the cap; anything else is dropped.
+    /// make, with a PNG within the cap; anything else is dropped. What it didn't take is said
+    /// (how many, the first by ids Storybook would make).
     #[test]
     fn a_stories_runs_pages_are_stories_it_can_name_each_once() {
         use base64::Engine as _;
         let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
         let (png, junk, big) = (b64(b"\x89PNG\r\n\x1a\n..."), b64(b"not a png"), b64(&[b"\x89PNG".as_slice(), &vec![0u8; STORY_MAX]].concat()));
-        let said = r#"[{"id":"button--primary","errors":2},{"id":"../x--y"},{"id":"button--primary"},{"id":"card--empty"},{"id":"card--big"},{"id":"card--full"}]"#;
+        let said = r#"{"stories":[{"id":"button--primary","errors":2},{"id":"../x--y"},{"id":"button--primary"},{"id":"card--empty"},{"id":"card--big"},{"id":"card--full"}],"left":12,"first_left":["button--danger","../evil"]}"#;
         let pngs = [&png, &png, &png, &junk, &big, &png];
-        let got: Vec<(String, u32)> = story_shots(said, pngs.iter().map(|s| s.as_str())).into_iter().map(|p| (p.path, p.errors)).collect();
+        let (shots, left) = story_shots(said, pngs.iter().map(|s| s.as_str()));
+        let got: Vec<(String, u32)> = shots.into_iter().map(|p| (p.path, p.errors)).collect();
         assert_eq!(got, [("story:button--primary".to_string(), 2), ("story:card--full".to_string(), 0)]);
-        assert!(story_shots("not json", [png.as_str()].into_iter()).is_empty());
+        assert_eq!((left.stories, left.first_stories), (12, vec!["button--danger".to_string()]), "what it didn't take, by ids it could name");
+        assert!(story_shots("not json", [png.as_str()].into_iter()).0.is_empty());
     }
 
     /// A run's answer is the preview's code's: a PNG only within the cap, one printable line for

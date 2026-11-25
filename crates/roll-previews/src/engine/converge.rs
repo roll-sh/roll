@@ -1087,6 +1087,8 @@ impl Engine {
         match taken {
             Ok(Some(mut shot)) => {
                 self.check_served(r, &mut shot).await;
+                // What it left out, for this head (none clears what an earlier one said).
+                let _ = self.store.set_runtime_fact(&r.id, "skipped", Some(&crate::SkippedAt { head: r.build().to_string(), skipped: shot.skipped.clone() }));
                 // Kept under the entry that asked for each (`/pricing`, or `web:/pricing`).
                 let mut pages: Vec<crate::ports::PageShot> = shot
                     .pages

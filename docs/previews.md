@@ -665,7 +665,10 @@ default) with the project's `env` overrides and the branched resources' URLs on 
   stream (`KAFKA_USERNAME`…), a bucket, Redis or a search cluster that the preview branched would
   still give the parent's (a fork's code included). The branch's values go by those names too,
   set after the secrets layer so they win (`names::with_standard`: `PG*` parsed from the branch's
-  app URI, the stream's SASL login, the search branch's key and login), and a credential the
+  app URI, `PGOPTIONS` and `PGSSLMODE` from its query too, as roll apps' Postgres link sets them
+  (roll Postgres picks the endpoint by `options=endpoint=…` on one node, so an app connecting
+  with libpq's `PG*` names needs it; no `sslmode` there is libpq's own `prefer`, never a
+  parent's and never empty, which libpq refuses), the stream's SASL login, the search branch's key and login), and a credential the
   branch has none for is blank (a NoSQL HTTP token, Kafka client properties). The roll secrets
   thread follows with the exact fix: a link to a branched parent isn't resolved at all and comes
   back as `followed`, its name filled from the branch even under a custom prefix.
@@ -2015,6 +2018,7 @@ type Preview = {
   slower_routes?: { branch: string; routes: { name: string; count: number; p50_ms: number; main_p50_ms: number; grew?: GrewSpan | null; budget_ms?: number | null }[] } | null;
   new_errors?: { branch: string; total: number; errors: { service: string; title: string }[] } | null;
   served_secrets?: { key: string; path: string }[]; // its secret values its pages serve at its head: names and where, never values
+  skipped?: { pages?: string[]; stories?: number; first_stories?: string[] }; // what its latest screenshot run left out at its head: pages past a run's ten, stories it didn't take (the first 10 by id)
   regressions?: "check" | "required" | null;
   regressions_accepted?: { head: string; by: string; at: number } | null;
   regressions_compared?: boolean;     // compared with main's preview at its head (errors; routes too with traces)
@@ -2261,7 +2265,9 @@ type Settings = {
     Its Storybook's stories too (Chromatic's stories): with `github.storybook` (`web`, or
     `web:/storybook/` when the service serves it under a path: a static build or `storybook
     dev`), that service's run reads Storybook's index (`index.json`, Storybook 7 and later;
-    `stories.json` before), and takes the first 40 stories (docs left out) in a run of its own
+    `stories.json` before), and takes the first 40 stories (docs left out; the rest, and any not
+    reached in its 100 s, are said: `skipped.stories` with the first ten ids, on the sheet and in
+    the comment's **Not taken**, as are pages past a run's ten) in a run of its own
     beside the screenshot's, in the service's network and locked down the same way. Each story is
     loaded alone (`iframe.html?id=…&viewMode=story`) at the desktop width, waited for until its
     root holds something (3 s at most), and captured clipped to what it rendered (an 8 px margin,
@@ -2799,13 +2805,14 @@ Ranked by what a person notices first. Done so far:
 Ranked again after a sixth product review (2026-11-25), against Vercel's and Netlify's previews and
 comments, Render and Railway, Neon, Chromatic and Percy, Signadot, Jam.
 
-1. **Signed in to the app, in review**: screenshots (every engine) and agents' runs (`try`) sign
-   in first (`github.login`, `$NAME` from the preview's environment, trusted previews only).
-   Next for it: a live check against a page that really sits behind a login (the live service
-   serves one only after a form post sets its cookie).
-2. **Coverage cut silently**: at most 40 stories and 10 pages, and nothing says what was left
-   out; `skipped` (how many, which) on the run, the sheet and the comment; then stories chosen
-   by what the change touched (Chromatic's TurboSnap).
+1. **Coverage that's cut says so, in review**: a screenshot run's pages past its ten (the
+   project's, the repo's `roll.toml`, widths, modes and states together) and Storybook's stories
+   it didn't take (past forty, or out of its 100 s) are `skipped` on the record for its head, a
+   line on the sheet and **Not taken** in the pull request's comment. Next for it: stories chosen
+   by what the change touched (Chromatic's TurboSnap) rather than the first forty.
+2. **Signed in to a page that really sits behind a login, live**: screenshots, every engine and
+   `try` sign in (`github.login`, landed); the live check proves the stdin path and the stop at
+   a missing field, not a page that only answers once signed in.
 3. **Browser runs and jobs in the cost**: `cost_of` counts branches, compute and services'
    memory-hours, not the screenshot runs (three engines, stories, crops, `try`), builds or seed,
    release and teardown jobs; meter their container-seconds into `spent_usd`, so `max_usd_month`
@@ -2842,6 +2849,10 @@ comments, Render and Railway, Neon, Chromatic and Percy, Signadot, Jam.
 
 
 
+
+Landed 2026-11-25, morning: screenshots signed in to the app (#980: `github.login`, `$NAME` from
+the preview's environment, trusted previews only), in every engine (#986), and agents' runs
+(#991).
 
 Landed 2026-11-25, night: the fifth review's security fixes (#943); roll apps on par (#947: one
 feedback button); `note_mail` in the page and `roll preview try` (#948); share links on the

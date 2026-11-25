@@ -3544,6 +3544,7 @@ impl Store {
         // whether it compared at this head at all (errors; routes too with traces).
         let new_errors = self.runtime_fact::<crate::NewErrors>(&r.id, "new_errors")?.filter(|f| f.head == r.head);
         let served_secrets = self.runtime_fact::<crate::ServedSecrets>(&r.id, "served_secrets")?.filter(|f| f.head == r.build()).map(|f| f.secrets).unwrap_or_default();
+        let skipped = self.runtime_fact::<crate::SkippedAt>(&r.id, "skipped")?.filter(|f| f.head == r.build() && !f.skipped.is_empty()).map(|f| f.skipped);
         let slower_routes = if settings.traces { self.runtime_fact::<crate::SlowerRoutes>(&r.id, "slower_routes")?.filter(|f| f.head == r.head) } else { None };
         let compared_at = |kind: &str| -> Result<bool> { Ok(self.runtime_fact::<String>(&r.id, kind)?.as_deref() == Some(r.head.as_str())) };
         let regressions_compared = compared_at("compared_errors")? && (!settings.traces || compared_at("compared_routes")?);
@@ -3646,6 +3647,7 @@ impl Store {
             slower_routes,
             new_errors,
             served_secrets,
+            skipped,
             regressions,
             regressions_accepted,
             regressions_compared,

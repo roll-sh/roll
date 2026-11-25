@@ -16,6 +16,11 @@ pub fn with_standard(kind: Kind, vars: Vec<(String, String)>) -> Vec<(String, St
         Kind::Postgres => {
             if let Some(u) = get("DATABASE_URL").as_deref().and_then(Url::parse) {
                 extra.extend([("PGHOST", u.host.clone()), ("PGPORT", u.port.clone().unwrap_or_else(|| "5432".into())), ("PGUSER", u.user.clone()), ("PGPASSWORD", u.password.clone()), ("PGDATABASE", u.path.clone())]);
+                // Its `options` (roll Postgres picks the endpoint by `endpoint=…` on one node) and
+                // `sslmode`, as roll apps' link sets them: never a parent's. libpq refuses an empty
+                // sslmode, so none is its own default.
+                extra.push(("PGOPTIONS", u.query("options").unwrap_or_default()));
+                extra.push(("PGSSLMODE", u.query("sslmode").filter(|m| !m.is_empty()).unwrap_or_else(|| "prefer".into())));
             }
         }
         Kind::Redis => {
@@ -132,11 +137,19 @@ struct Url {
     host: String,
     port: Option<String>,
     path: String,
+    /// Its query's pairs, decoded.
+    query: Vec<(String, String)>,
 }
 
 impl Url {
     fn parse(s: &str) -> Option<Url> {
         let (scheme, rest) = s.split_once("://")?;
+        let query: Vec<(String, String)> = rest
+            .split('#')
+            .next()
+            .and_then(|r| r.split_once('?'))
+            .map(|(_, q)| q.split('&').filter(|p| !p.is_empty()).map(|p| p.split_once('=').unwrap_or((p, ""))).map(|(k, v)| (decode(k), decode(v))).collect())
+            .unwrap_or_default();
         let rest = rest.split(['?', '#']).next().unwrap_or("");
         let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
         let (userinfo, hostport) = authority.rsplit_once('@').unwrap_or(("", authority));
@@ -151,7 +164,12 @@ impl Url {
                 _ => (hostport.to_string(), None),
             },
         };
-        Some(Url { scheme: scheme.to_ascii_lowercase(), user: decode(user), password: decode(password), host, port, path: decode(path) })
+        Some(Url { scheme: scheme.to_ascii_lowercase(), user: decode(user), password: decode(password), host, port, path: decode(path), query })
+    }
+
+    /// The query's value of `key` (the last, as libpq takes it).
+    fn query(&self, key: &str) -> Option<String> {
+        self.query.iter().rev().find(|(k, _)| k == key).map(|(_, v)| v.clone())
     }
 }
 
@@ -189,8 +207,11 @@ mod tests {
     /// The names roll secrets' links to the parent would hand out are the branch's, or blank.
     #[test]
     fn a_branchs_values_go_by_the_names_a_link_to_its_parent_would_use() {
-        let pg = with_standard(Kind::Postgres, v(&[("DATABASE_URL", "postgres://app_pv:s%40cret@db.test:6543/main?sslmode=require")]));
-        assert_eq!(["PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGDATABASE"].map(|k| get(&pg, k).unwrap()), ["db.test", "6543", "app_pv", "s@cret", "main"]);
+        let pg = with_standard(Kind::Postgres, v(&[("DATABASE_URL", "postgres://app_pv:s%40cret@db.test:6543/main?options=endpoint%3Dep-1&sslmode=require")]));
+        assert_eq!(["PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGDATABASE", "PGOPTIONS", "PGSSLMODE"].map(|k| get(&pg, k).unwrap()), ["db.test", "6543", "app_pv", "s@cret", "main", "endpoint=ep-1", "require"]);
+        // Without them in its URL: no option (never a parent's), and libpq's own sslmode.
+        let pg = with_standard(Kind::Postgres, v(&[("DATABASE_URL", "postgres://app_pv:p@db.test/main")]));
+        assert_eq!(["PGOPTIONS", "PGSSLMODE"].map(|k| get(&pg, k).unwrap()), ["", "prefer"]);
         let stream = with_standard(Kind::Stream, v(&[("KAFKA_BOOTSTRAP_SERVERS", "b:9092"), ("KAFKA_SASL_USERNAME", "pv"), ("KAFKA_SASL_PASSWORD", "p")]));
         assert_eq!(["KAFKA_BROKERS", "KAFKA_USERNAME", "KAFKA_PASSWORD", "KAFKA_PROPERTIES"].map(|k| get(&stream, k).unwrap()), ["b:9092", "pv", "p", ""], "the parent's properties never");
         let search = with_standard(Kind::Search, v(&[("ELASTICSEARCH_URL", "https://br-1:p@search.test")]));
