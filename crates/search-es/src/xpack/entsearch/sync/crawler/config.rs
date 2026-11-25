@@ -200,6 +200,8 @@ pub struct Plan {
     pub sitemap_discovery: bool,
     pub limits: Limits,
     pub full_html: bool,
+    /// The docs preset, when the connector's `preset` is `docs`.
+    pub docs: Option<std::sync::Arc<Docs>>,
 }
 
 impl Plan {
@@ -452,6 +454,74 @@ pub struct Fields {
     pub sitemap_discovery: bool,
     pub max_crawl_depth: Option<i64>,
     pub max_unique_url_count: Option<i64>,
+    /// `preset`: `docs` makes section records of documentation pages ([`Docs`]).
+    pub preset: Option<String>,
+}
+
+/// The docs preset (DocSearch's and Meilisearch's docs-scraper's records): which elements are
+/// the hierarchy's levels (`lvl0` to `lvl6`), which hold a section's content, and which are left
+/// out (navigation, headers, footers), as CSS selectors on the page ([`super::select`]). Each
+/// heading a level picks starts a section; the page becomes one record per section, under its
+/// URL plus the heading's `#anchor`.
+pub struct Docs {
+    /// `lvl0` to `lvl6`. `lvl0` names the page's area (DocSearch's top level): its first match
+    /// anywhere on the page, else `lvl0_default`.
+    pub levels: Vec<Option<super::select::Selectors>>,
+    pub lvl0_default: String,
+    pub content: super::select::Selectors,
+    pub exclude: Option<super::select::Selectors>,
+}
+
+/// The docs preset's selectors when the snippet's `docs` doesn't give them.
+pub const DOCS_DEFAULTS: &[(&str, &str)] = &[
+    ("lvl0", "[data-docs-lvl0]"),
+    ("lvl1", "h1"),
+    ("lvl2", "h2"),
+    ("lvl3", "h3"),
+    ("lvl4", "h4"),
+    ("lvl5", "h5"),
+    ("lvl6", "h6"),
+    ("content", "p, li, td, dd, pre, blockquote"),
+    ("exclude", "nav, header, footer, aside, [role=navigation]"),
+];
+const DOCS_KEYS: &[&str] = &["lvl0", "lvl1", "lvl2", "lvl3", "lvl4", "lvl5", "lvl6", "content", "exclude", "lvl0_default"];
+
+/// The docs preset of a crawl: its defaults with the snippet's `docs` (if any) over them. An
+/// empty selector turns a level (or `exclude`) off.
+fn docs_of(given: Option<&Value>) -> Result<Docs, String> {
+    let given = match given {
+        None => None,
+        Some(Value::Obj(m)) => Some(m),
+        Some(_) => return Err("[docs] is an object of selectors: lvl0 to lvl6, content, exclude and lvl0_default".into()),
+    };
+    if let Some(k) = given.and_then(|m| m.keys().find(|k| !DOCS_KEYS.contains(&k.as_str()))) {
+        return Err(format!("[docs] has a key roll's crawler doesn't know: [{k}]"));
+    }
+    let text = |k: &str| -> Result<String, String> {
+        match given.and_then(|m| m.get(k)) {
+            None => Ok(DOCS_DEFAULTS.iter().find(|(d, _)| *d == k).map_or("", |(_, v)| *v).to_string()),
+            Some(Value::Str(s)) => Ok(s.trim().to_string()),
+            Some(_) => Err(format!("[docs.{k}] is a string")),
+        }
+    };
+    let selectors = |k: &str| -> Result<Option<super::select::Selectors>, String> {
+        let t = text(k)?;
+        if t.is_empty() {
+            return Ok(None);
+        }
+        super::select::Selectors::parse(&t).map(Some).map_err(|e| format!("[docs.{k}]: {e}"))
+    };
+    let mut levels = Vec::with_capacity(7);
+    for n in 0..7 {
+        levels.push(selectors(&format!("lvl{n}"))?);
+    }
+    let content = selectors("content")?.ok_or("[docs.content] can't be empty: it picks what a section's record holds")?;
+    let lvl0_default = match given.and_then(|m| m.get("lvl0_default")) {
+        None => "Documentation".to_string(),
+        Some(Value::Str(s)) if s.len() <= 256 => s.trim().to_string(),
+        Some(_) => return Err("[docs.lvl0_default] is a string of at most 256 bytes".into()),
+    };
+    Ok(Docs { levels, lvl0_default, content, exclude: selectors("exclude")? })
 }
 
 /// The crawl `fields` and the advanced `snippet` (if any) describe, within `ceilings`.
@@ -476,6 +546,7 @@ pub fn plan(fields: &Fields, snippet: Option<&Value>, ceilings: &Ceilings) -> Re
     let mut seeds = Vec::new();
     let mut sitemaps = Vec::new();
     let mut full_html = false;
+    let mut docs_given: Option<&Value> = None;
     // Every domain's rules share one budget.
     let total_rules: usize = snippet.and_then(|s| s.get("domains")).and_then(Value::as_array).map_or(0, |ds| ds.iter().filter_map(|d| d.get("crawl_rules").and_then(Value::as_array)).map(Vec::len).sum());
     if total_rules > MAX_RULES {
@@ -561,6 +632,8 @@ pub fn plan(fields: &Fields, snippet: Option<&Value>, ceilings: &Ceilings) -> Re
                     }
                 }
                 "full_html_extraction_enabled" => full_html = v.as_bool().ok_or("[full_html_extraction_enabled] is true or false")?,
+                // The docs preset's selectors (roll's: Open Crawler has no preset).
+                "docs" => docs_given = Some(v),
                 k if LIMITS.iter().any(|l| l.key == k) => {
                     let n = v.as_i64().ok_or_else(|| format!("[{k}] is a whole number"))?;
                     check(k, n, &mut limits)?;
@@ -580,12 +653,19 @@ pub fn plan(fields: &Fields, snippet: Option<&Value>, ceilings: &Ceilings) -> Re
     if domains.is_empty() {
         return Err("the crawler has nothing to crawl: set [urls], or domains in the advanced snippet".into());
     }
-    Ok(Plan { domains, seeds, sitemaps, sitemap_discovery: fields.sitemap_discovery, limits, full_html })
+    // Checked whether or not the preset is on, so a draft's mistake shows before it's used.
+    let docs = docs_of(docs_given)?;
+    let docs = match fields.preset.as_deref() {
+        None => None,
+        Some("docs") => Some(std::sync::Arc::new(docs)),
+        Some(p) => return Err(format!("[preset] is [{p}]: roll's crawler has one preset, [docs] (or none)")),
+    };
+    Ok(Plan { domains, seeds, sitemaps, sitemap_discovery: fields.sitemap_discovery, limits, full_html, docs })
 }
 
 /// The `validation` problem of a draft's advanced snippet, if any.
 pub fn snippet_problem(snippet: &Value, ceilings: &Ceilings) -> Option<String> {
-    let fields = Fields { urls: Vec::new(), sitemap_urls: Vec::new(), sitemap_discovery: true, max_crawl_depth: None, max_unique_url_count: None };
+    let fields = Fields { urls: Vec::new(), sitemap_urls: Vec::new(), sitemap_discovery: true, max_crawl_depth: None, max_unique_url_count: None, preset: None };
     match plan(&fields, Some(snippet), ceilings) {
         Ok(_) => None,
         // A snippet alone may have no domains (the configuration's `urls` give them).
@@ -607,7 +687,7 @@ mod tests {
     }
 
     fn fields(urls: &[&str]) -> Fields {
-        Fields { urls: urls.iter().map(|s| s.to_string()).collect(), sitemap_urls: Vec::new(), sitemap_discovery: true, max_crawl_depth: None, max_unique_url_count: None }
+        Fields { urls: urls.iter().map(|s| s.to_string()).collect(), sitemap_urls: Vec::new(), sitemap_discovery: true, max_crawl_depth: None, max_unique_url_count: None, preset: None }
     }
 
     fn decide(p: &Plan, url: &str) -> bool {

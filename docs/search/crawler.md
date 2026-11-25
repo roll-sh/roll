@@ -1,12 +1,12 @@
 # A web crawler for site search: design
 
-`## Next` item 13 in [README.md](README.md). Status: phases 1 and 2 landed. Phase 1: the crawl,
+`## Next` item 13 in [README.md](README.md). Status: phases 1, 2 and 3 landed. Phase 1: the crawl,
 robots.txt, sitemaps, crawl rules, default fields, the purge, limits and politeness, and
 `roll search crawler import` (`search-es` `xpack/entsearch/sync/crawler/`). Phase 2: domain
 verification with the verified limits and fleet-wide daily counts (`search-control` `sites.rs`),
-`crawl-test` with its MCP tool and CLI, and the dashboard's "crawl a site" box. Phase 3 has begun:
-extraction rules landed (`crawler/select.rs`), and verification tokens are derived from the owner
-and the site; incremental crawls and the docs preset are to come. It runs on the connector runner of #318, which it reuses for jobs, schedules, slots,
+`crawl-test` with its MCP tool and CLI, and the dashboard's "crawl a site" box. Phase 3:
+extraction rules (`crawler/select.rs`), verification tokens derived from the owner and the site,
+conditional requests with incremental crawls, and the docs preset. It runs on the connector runner of #318, which it reuses for jobs, schedules, slots,
 cancelling, counters and sealed credentials (architecture.md, "Connectors" and "Web crawler").
 Where phase 1 differs from Open Crawler is listed in compatibility.md ("The web crawler").
 
@@ -21,7 +21,7 @@ Postgres tables and S3 buckets. A website has no way in.
 |---|---|---|
 | Elastic Open Crawler | A self-hosted CLI with a YAML config. Elastic's hosted crawler was discontinued in Elasticsearch 9.0, so 9.x has no crawler API. | The config's shape (domains, seed and sitemap URLs, crawl rules, extraction rulesets, limits), the document fields and the id, so an Open Crawler config and index move to roll unchanged |
 | Algolia Crawler | Hosted, with a UI, a URL tester, a schedule, and domain verification before a site is crawled | Running it for the user, the URL tester, and verification as the gate to higher rates |
-| DocSearch, Meilisearch's scrapers | Hosted or self-hosted crawlers that build records for a docs site's heading hierarchy (`lvl0`…`lvl6`) | A docs preset, in a later slice |
+| DocSearch, Meilisearch's scrapers | Hosted or self-hosted crawlers that build records for a docs site's heading hierarchy (`lvl0`…`lvl6`) | The docs preset (see "The docs preset") |
 
 Open Crawler's behaviour is the reference wherever roll does the same thing (crawl rules, robots
 directives, canonical URLs, the document schema). roll departs from it only where noted, and each
@@ -70,6 +70,7 @@ Simple fields go in `configuration`. Open Crawler's structured config goes in
 | `auth_origin` | The one origin (`https://host[:port]`) the credential is sent to | empty |
 | `auth_header` | `sensitive`. A whole `Authorization` value, such as `Bearer …` | empty |
 | `auth_username`, `auth_password` | `sensitive` (the password). Basic auth, as an alternative to `auth_header` | empty |
+| `preset` | `docs`: the docs preset (one record per section); empty: one document per page | empty |
 
 **`filtering.advanced_snippet`** takes a JSON subset of Open Crawler's config:
 
@@ -77,6 +78,8 @@ Simple fields go in `configuration`. Open Crawler's structured config goes in
   `extraction_rulesets`.
 - The limit keys from "Limits" below. A value above roll's ceiling is refused when the draft is
   validated, never silently lowered.
+- `docs`: the docs preset's selectors (see "The docs preset"); roll's, as Open Crawler has no
+  preset.
 
 A domain named only in the snippet is crawled like a seed domain. A credential in the snippet
 (`auth`, or a key roll doesn't know) fails validation, so a secret can't sit in a field that isn't
@@ -420,12 +423,82 @@ Unseen documents are found with a `last_crawled_at` range query over the crawler
 re-fetched with the same politeness. The re-check counts against `max_unique_url_count` and
 `max_duration`.
 
-## Incremental crawls
+## Conditional requests and incremental crawls
 
-An incremental crawl fetches three sets of URLs: the seeds, sitemap entries whose `<lastmod>` is
-newer than the last crawl's start, and links found on the pages it fetches. Each request carries
-`If-Modified-Since: <last_crawled_at>` when the document exists. A 304 counts as seen and leaves
-the document alone. Incremental crawls never purge. Open Crawler has no incremental mode.
+Open Crawler fetches every page in full on every crawl and has no incremental mode. roll keeps
+each page's validators in its document, as fields of its own:
+
+- `http_etag` and `http_last_modified`: the `ETag` and `Last-Modified` of the response the
+  document was read from, kept only when they can be sent back as they came (visible ASCII, at most
+  256 bytes);
+- `crawl_depth`: the link depth the crawl found the page at.
+
+Every crawl asks for a page whose document holds validators with `If-None-Match` and
+`If-Modified-Since`, on the request for that URL only: never on a redirect's next hop, so a
+validator goes back only to the URL that gave it, with the credential still under "Fetching"'s
+rules. A 304 leaves the document exactly as it was: nothing is extracted, nothing is written, and
+its `last_crawled_at` stays the time it was last read. It counts as seen, so the purge keeps it
+and the per-origin guard counts it refreshed. The job's `metadata.not_modified_count` counts them.
+
+A 304 has no body, so an unchanged page's links aren't followed. The pages they lead to are in the
+index already, and the purge's re-check reaches them: it asks for each document the crawl didn't
+reach, conditionally as every request is, and a page that answers 200 (it changed) has its links
+followed from its `crawl_depth`, before the next document, so a page gained behind unchanged ones
+is found. A document without `crawl_depth` (written by Open Crawler, or before roll kept it) is
+re-checked at the maximum depth, its links not followed.
+
+An `incremental` job (`scheduling.incremental`, or `job_type: incremental`) runs the same crawl
+and re-check and deletes nothing but what replaced records leave (see "The docs preset"); its
+cursor stays the full crawls'. Sitemap `<lastmod>` isn't read: an unchanged page costs one 304.
+
+## The docs preset
+
+`preset: docs` crawls a documentation site as Algolia DocSearch and Meilisearch's docs-scraper do:
+one record per section rather than one document per page. It is built on the extraction rules'
+machinery (`Dom::sections` in `crawler/html.rs`): CSS selectors matched in one pass each on the
+arena DOM, the elements indexed once and charged to the request breaker, text gathered within the
+page's visits and parse deadline.
+
+The selectors, each overridable in the snippet's `docs` object (an empty string turns a level or
+`exclude` off):
+
+| Key | Default |
+|---|---|
+| `lvl0` | `[data-docs-lvl0]`: the page's area (DocSearch's top level), its first match anywhere, else `lvl0_default` (`Documentation`) |
+| `lvl1` … `lvl6` | `h1` … `h6` |
+| `content` | `p, li, td, dd, pre, blockquote` |
+| `exclude` | `nav, header, footer, aside, [role=navigation]` (and the domain's `exclude_tags`) |
+
+Walking the page in order, each element a level picks starts a section at that level and clears
+the levels below it; the text of each `content` element (not inside one already taken, nor inside
+what `exclude` picks) goes in the section it falls in. A section's anchor is its heading's `id`,
+else the first `id` (or an `a`'s `name`) inside the heading. Content before the first heading is a
+`lvl0` section when there is any; a page with no section gets one record of its title and text. A
+page makes at most 1,000 records, 32 KiB of content each and 5 MiB in all; past that the rest are
+left out (`metadata.docs_sections_dropped_page_count`).
+
+A record has `id` (the page's id, `-`, its position), `url` (the page's URL plus `#anchor`),
+`url_without_anchor`, `anchor`, `hierarchy.lvl0` to `lvl6` (`null` where there's none), `content`,
+`type` (`lvl<N>`, its heading's level), `weight.level` (100 for `lvl0`, 10 less a level down) and
+`weight.position`, the page's `title`, the URL fields, `last_crawled_at`, the validators, and the
+page's extracted fields (which never replace a record's own). A new index gets the records'
+mappings, and the cluster gets a stored search template `<index>-docs-search` when it has none of
+that name: a `bool_prefix` `multi_match` over the hierarchy (higher levels weigh more) and the
+content, sorted by score then weight, highlighted, with `query` and `size` (10) as its parameters:
+
+```
+POST /content-docs/_search/template
+{"id": "content-docs-docs-search", "params": {"query": "instal"}}
+```
+
+The purge works per page: a record is its page's (`url_without_anchor`). When a page is written
+again, records past its new section count, a page's records when it's now one document, or its
+document when it's now records, are deleted by every crawl, whatever the guards say: a rewrite
+isn't proof of an outage. A page naming an indexed canonical URL gets no records. `crawl-test`
+answers the records the page would make (`records`, the first 20, their content cut to 1 KiB, and
+`record_count`). The preset is chosen in the connector's configuration, with
+`roll search crawler create <cluster> <url> --preset docs` (or `import … --preset docs`), and in
+the dashboard's "crawl a site" box.
 
 ## Limits
 
@@ -504,15 +577,13 @@ to see why pages are missing.
 - **XPath selectors.**
 - **PDF and Office text,** which waits for an attachment processor.
 - **Duplicate content handling** (Elastic's hosted crawler had it; Open Crawler doesn't).
-- **A docs preset** in the DocSearch style: `lvl0`…`lvl6` records per heading, with a mapping and
-  a search-as-you-type template.
 
 ## Tests
 
 | What | Where |
 |---|---|
 | Crawl rules, robots.txt (RFC 9309's examples), URL normalisation and ids (Open Crawler's vectors), and directive parsing | unit tests in `xpack/entsearch/sync/crawler/` |
-| A crawl end to end against a fixture site served by the test on loopback (`allow_private_hosts`): sitemaps, canonical URLs, nofollow, redirects off-domain, a credential not sent after a cross-origin redirect, purge with a 503 window, and incremental with 304 | `crates/search-es/tests/` beside #318's sync tests |
+| A crawl end to end against a fixture site served by the test on loopback (`allow_private_hosts`): sitemaps, canonical URLs, nofollow, redirects off-domain, a credential not sent after a cross-origin redirect, and purge with a 503 window | `crates/search-es/tests/` beside #318's sync tests |
 | Hostile pages: a compression bomb, a million-node page under a small breaker, an endless calendar, and a sitemap with entities | the same file, one test each |
 | `crawl-test` answering; an origin verified by its file (a redirect to another port refused), the higher limits for that origin only | `search-control/tests/control.rs` (`crawler_sites_verified_for_higher_limits`), against a fixture site on loopback |
 | Verifications are each cluster's: the owner's other cluster checks once with the same token; another owner gets nothing and a token of their own; past 10 probes a minute, 429 | the same file (`crawler_verifications_are_each_clusters`; the 429 in `crawler_sites_verified_for_higher_limits`) |
@@ -523,6 +594,8 @@ to see why pages are missing.
 | Every rolld argument naming a host roll serves reaches `roll.crawler.fleet_names` | unit test in `rolld/src/served_names.rs` |
 | The derived token is the same after a delete and a new start | `search-control/tests/control.rs` (`crawler_verifications_are_each_clusters`) |
 | Extraction rules end to end: a URL filter, `extract` as a string and an array, `set`, a URL group | `crates/search-es/tests/crawler.rs` (`extraction_rules_fill_fields`) |
+| Conditional requests: 304s kept as they are and seen by the purge, a changed page behind unchanged ones re-read and its new link followed, an incremental crawl deleting nothing | `crates/search-es/tests/crawler.rs` (`unchanged_pages_answer_304_and_stay`) |
+| The docs preset: section records from a fixture page (hierarchy, content, anchors, nav and footer left out) and its search template | `crates/search-es/tests/crawler.rs` (`the_docs_preset_makes_section_records`) |
 | Selector parsing bounds and one-pass matching; a huge attribute on a page of a few elements meets the deadline | unit tests in `crawler/select.rs` |
 | Extraction regexes share the crawl rules' budget (too many, or too big for their share, are refused; a capture group's one-pass table stays within it; ASCII `\w`) | unit test in `crawler/config.rs` |
 | A rule whose hits nest spends a page's text visits: later rules are dropped and counted, earlier fields stay | unit test in `crawler/html.rs` |
@@ -538,5 +611,5 @@ to see why pages are missing.
 2. **Domain verification, `crawl-test` and the dashboard:** the URL box, and a "crawl a site"
    path in the empty state for `## Next` item 12. The site-search guide's "Index your pages"
    becomes three commands.
-3. **Extraction rules, incremental crawls and the docs preset.** Extraction rules landed, with the
-   derived verification token; incremental crawls and the docs preset are left.
+3. **Extraction rules, incremental crawls and the docs preset**, with the derived verification
+   token.

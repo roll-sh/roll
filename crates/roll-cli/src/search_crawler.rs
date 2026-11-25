@@ -171,9 +171,12 @@ pub fn convert(yaml: &str, connector: Option<&str>) -> anyhow::Result<Import> {
 
 /// Makes (or updates) the connector, writes its configuration and snippet, and activates the
 /// snippet once roll has validated it.
-pub async fn import(api: &Api, as_json: bool, cluster: &str, file: &str, connector: Option<&str>) -> anyhow::Result<()> {
+pub async fn import(api: &Api, as_json: bool, cluster: &str, file: &str, connector: Option<&str>, preset: Option<&str>) -> anyhow::Result<()> {
     let yaml = std::fs::read_to_string(file).with_context(|| format!("can't read {file}"))?;
-    let plan = convert(&yaml, connector)?;
+    let mut plan = convert(&yaml, connector)?;
+    if let Some(p) = preset {
+        plan.values.insert("preset".into(), json!(preset_of(p)?));
+    }
     let c = find(api, cluster).await?;
     let id = urlencoding::encode(&plan.connector).into_owned();
     es_request(api, &c, "PUT", &format!("/_connector/{id}"), Some(json!({ "index_name": plan.index, "is_native": true, "service_type": "roll_web_crawler", "name": plan.connector }))).await?;
@@ -209,6 +212,60 @@ pub async fn import(api: &Api, as_json: bool, cluster: &str, file: &str, connect
         println!("dropped    {}", plan.dropped.join(", "));
     }
     println!("crawl it   roll search request {cluster} POST /_connector/_sync_job '{{\"id\":\"{}\",\"job_type\":\"full\"}}'", plan.connector);
+    Ok(())
+}
+
+/// A `--preset` as the connector takes it.
+fn preset_of(p: &str) -> anyhow::Result<&str> {
+    match p {
+        "docs" => Ok(p),
+        _ => bail!("--preset is docs (a documentation site, one record per section), or leave it out"),
+    }
+}
+
+/// A connector id from a URL's host, as the dashboard's crawl box makes it (`crawlerName`:
+/// `docs-example-com`, runs of other characters one `-`, at most 60, else `site`).
+fn crawler_id(url: &str) -> String {
+    let host = url.split("://").nth(1).unwrap_or(url).split(['/', ':', '?', '#']).next().unwrap_or_default();
+    let mut id = String::new();
+    for c in host.to_ascii_lowercase().chars() {
+        if c.is_ascii_alphanumeric() {
+            id.push(c);
+        } else if !id.ends_with('-') {
+            id.push('-');
+        }
+    }
+    let id: String = id.trim_matches('-').chars().take(60).collect();
+    if id.is_empty() { "site".into() } else { id }
+}
+
+/// Makes a crawler of `url` (as the dashboard's "crawl a site" box does) and starts its first
+/// full crawl.
+pub async fn create(api: &Api, as_json: bool, cluster: &str, url: &str, connector: Option<&str>, preset: Option<&str>) -> anyhow::Result<()> {
+    let id = connector.map(str::to_string).unwrap_or_else(|| crawler_id(url));
+    let index = format!("content-{id}");
+    let c = find(api, cluster).await?;
+    let path = urlencoding::encode(&id).into_owned();
+    // A PUT would replace a connector of that id.
+    if es_request(api, &c, "GET", &format!("/_connector/{path}"), None).await.is_ok() {
+        bail!("a connector [{id}] exists already: pass --connector with another id");
+    }
+    es_request(api, &c, "PUT", &format!("/_connector/{path}"), Some(json!({ "index_name": index, "is_native": true, "service_type": "roll_web_crawler", "name": id }))).await?;
+    let mut values = serde_json::Map::new();
+    values.insert("urls".into(), json!(url));
+    if let Some(p) = preset {
+        values.insert("preset".into(), json!(preset_of(p)?));
+    }
+    es_request(api, &c, "PUT", &format!("/_connector/{path}/_configuration"), Some(json!({ "values": values }))).await?;
+    let job = es_request(api, &c, "POST", "/_connector/_sync_job", Some(json!({ "id": id, "job_type": "full", "trigger_method": "on_demand" }))).await?;
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&json!({ "connector": id, "index": index, "job": job["id"] }))?);
+        return Ok(());
+    }
+    println!("connector  {id}\nindex      {index}\ncrawling   job {}", s(&job["id"]));
+    if preset == Some("docs") {
+        println!("search it  roll search request {cluster} POST /{index}/_search/template '{{\"id\":\"{index}-docs-search\",\"params\":{{\"query\":\"install\"}}}}'");
+    }
     Ok(())
 }
 

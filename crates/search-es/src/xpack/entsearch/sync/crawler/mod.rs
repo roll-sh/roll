@@ -68,17 +68,66 @@ pub const STRIKE_MIN_AGE: &str = "roll.crawler.strike_min_age";
 /// One-off: the next full crawl deletes what it proves gone even past the purge guards, then
 /// turns itself off. For a site that really removed more than half its pages.
 pub const FORCE_PURGE: &str = "force_purge";
+/// The connector field choosing a preset (`docs`).
+pub const PRESET: &str = "preset";
 
-/// The mappings of an index a crawl creates (crawler.md, "Documents").
-pub fn mappings() -> Value {
+/// A page's validators and the link depth it was found at, kept in its documents (roll's: Open
+/// Crawler keeps none): the next crawl asks for the page conditionally, and the purge's re-check
+/// follows its links from where the crawl found it.
+pub const FIELD_ETAG: &str = "http_etag";
+pub const FIELD_LAST_MODIFIED: &str = "http_last_modified";
+pub const FIELD_DEPTH: &str = "crawl_depth";
+
+/// The mappings of an index a crawl creates (crawler.md, "Documents"); with the docs preset, its
+/// records' (crawler.md, "The docs preset").
+pub fn mappings(docs: bool) -> Value {
     let t = |ty: &str| obj! { "type" => ty };
-    obj! { "mappings" => obj! { "properties" => obj! {
-        "title" => t("text"), "body" => t("text"), "headings" => t("text"), "meta_description" => t("text"),
-        "url" => t("keyword"), "url_host" => t("keyword"), "url_path" => t("keyword"), "url_scheme" => t("keyword"), "additional_urls" => t("keyword"),
-        "url_path_dir1" => t("keyword"), "url_path_dir2" => t("keyword"), "url_path_dir3" => t("keyword"),
-        "last_crawled_at" => t("date"), "url_port" => t("long"),
-        "links" => obj! { "type" => "keyword", "index" => false },
-    } } }
+    let stored = |ty: &str| obj! { "type" => ty, "index" => false };
+    let mut props = match docs {
+        false => obj! {
+            "title" => t("text"), "body" => t("text"), "headings" => t("text"), "meta_description" => t("text"),
+            "additional_urls" => t("keyword"),
+            "links" => stored("keyword"),
+        },
+        true => {
+            let level = |boost: bool| match boost {
+                true => obj! { "type" => "text", "fields" => obj! { "keyword" => obj! { "type" => "keyword", "ignore_above" => 256 } } },
+                false => t("text"),
+            };
+            obj! {
+                "hierarchy" => obj! { "properties" => obj! {
+                    "lvl0" => level(true), "lvl1" => level(true), "lvl2" => level(false), "lvl3" => level(false), "lvl4" => level(false), "lvl5" => level(false), "lvl6" => level(false),
+                } },
+                "content" => t("text"), "title" => t("text"),
+                "url_without_anchor" => t("keyword"), "anchor" => stored("keyword"), "type" => t("keyword"),
+                "weight" => obj! { "properties" => obj! { "level" => t("integer"), "position" => t("integer") } },
+            }
+        }
+    };
+    if let Value::Obj(m) = &mut props {
+        for (k, v) in [
+            ("url", t("keyword")), ("url_host", t("keyword")), ("url_path", t("keyword")), ("url_scheme", t("keyword")),
+            ("url_path_dir1", t("keyword")), ("url_path_dir2", t("keyword")), ("url_path_dir3", t("keyword")),
+            ("last_crawled_at", t("date")), ("url_port", t("long")),
+            (FIELD_ETAG, stored("keyword")), (FIELD_LAST_MODIFIED, stored("keyword")), (FIELD_DEPTH, stored("integer")),
+        ] {
+            m.insert(k.into(), v);
+        }
+    }
+    obj! { "mappings" => obj! { "properties" => props } }
+}
+
+/// The search template a docs crawl's index gets (`<index>-docs-search`): a search-as-you-type
+/// query over the hierarchy (higher levels weigh more) and the content, highlighted, with the
+/// records' fields a docs search box shows. Its parameters: `query`, and `size` (10).
+pub fn docs_template() -> Value {
+    let source = r#"{"size": {{size}}{{^size}}10{{/size}}, "query": {"multi_match": {"query": "{{query}}", "type": "bool_prefix", "fields": ["hierarchy.lvl0^2", "hierarchy.lvl1^7", "hierarchy.lvl2^6", "hierarchy.lvl3^5", "hierarchy.lvl4^4", "hierarchy.lvl5^3", "hierarchy.lvl6^3", "content"]}}, "sort": ["_score", {"weight.level": "desc"}, {"weight.position": "asc"}], "_source": ["url", "url_without_anchor", "anchor", "type", "hierarchy", "content", "title"], "highlight": {"fields": {"content": {}, "hierarchy.lvl1": {}, "hierarchy.lvl2": {}, "hierarchy.lvl3": {}}}}"#;
+    obj! { "script" => obj! { "lang" => "mustache", "source" => source } }
+}
+
+/// The id of a page's `n`th section record (the docs preset).
+fn record_id(link: &Link, n: usize) -> String {
+    format!("{}-{n}", link.id())
 }
 
 /// The node's ceilings for crawl limits.
@@ -167,12 +216,18 @@ struct Stats {
     extraction_dropped: u64,
     /// URLs checked against the crawl rules and robots.txt.
     checked_urls: u64,
+    /// Pages that answered 304 to their validators: kept as they are, nothing extracted or written.
+    not_modified: u64,
+    /// Pages some of whose docs-preset sections were dropped (past a page's caps).
+    sections_dropped: u64,
     errors: Map,
     elastic_crawler_groups: Vec<String>,
 }
 
 struct Crawl<'s, 'a> {
     sink: &'s mut Sink<'a>,
+    /// A full crawl (it purges); else incremental (it never deletes anything).
+    full: bool,
     plan: Plan,
     fetcher: Fetcher,
     auth_origin: Option<String>,
@@ -193,8 +248,13 @@ struct Crawl<'s, 'a> {
     /// Of `gone`: URLs the crawl's own configuration now leaves out (its domains, crawl rules,
     /// URL limits). No outage causes that, so they don't count against the purge guards.
     excluded: HashSet<u64>,
-    /// URLs indexed under themselves this crawl, and the pages naming each as canonical.
+    /// URLs indexed under themselves this crawl (304s too), and the pages naming each as
+    /// canonical.
     indexed: HashSet<u64>,
+    /// Of `indexed`: pages that answered 304, whose documents stand as they are.
+    not_modified: HashSet<u64>,
+    /// Pages written as the docs preset's records this crawl, and how many each got.
+    records: HashMap<u64, usize>,
     aliases: HashMap<u64, (Link, Vec<Link>)>,
     /// Redirects of documents re-checked by the purge, and how many led to each target.
     redirects: u64,
@@ -224,9 +284,6 @@ pub async fn sync(cid: &str, v: &Values, sink: &mut Sink<'_>, full: bool, cursor
     let cluster = sink.cluster;
     if !enabled(|k| cluster.config.node_setting(k)) {
         return Err(Stop::Failed(format!("web crawlers are turned off on this node ({ENABLED})")));
-    }
-    if !full {
-        return Err(Stop::Failed("roll's web crawler runs full crawls only; incremental crawls come later".into()));
     }
     let fields = fields_of(v)?;
     // Building the rules' DFAs is CPU work: off the async workers.
@@ -307,6 +364,7 @@ pub async fn sync(cid: &str, v: &Values, sink: &mut Sink<'_>, full: bool, cursor
     let sink_deadline = sink.deadline.checked_sub(Duration::from_secs(60)).unwrap_or(sink.deadline);
     let mut c = Crawl {
         sink,
+        full,
         plan,
         fetcher,
         auth_origin,
@@ -321,6 +379,8 @@ pub async fn sync(cid: &str, v: &Values, sink: &mut Sink<'_>, full: bool, cursor
         kept: HashSet::new(),
         excluded: HashSet::new(),
         indexed: HashSet::new(),
+        not_modified: HashSet::new(),
+        records: HashMap::new(),
         aliases: HashMap::new(),
         redirects: 0,
         redirect_targets: HashMap::new(),
@@ -353,7 +413,7 @@ pub async fn sync(cid: &str, v: &Values, sink: &mut Sink<'_>, full: bool, cursor
 /// The simple fields of a crawler's configuration.
 fn fields_of(v: &Values) -> Result<Fields, String> {
     let int = |k: &str| -> Result<Option<i64>, String> { v.text(k).map(|s| s.parse::<i64>().map_err(|_| format!("the connector's [{k}] isn't a number"))).transpose() };
-    Ok(Fields { urls: v.list("urls"), sitemap_urls: v.list("sitemap_urls"), sitemap_discovery: v.bool("sitemap_discovery", true), max_crawl_depth: int("max_crawl_depth")?, max_unique_url_count: int("max_unique_url_count")? })
+    Ok(Fields { urls: v.list("urls"), sitemap_urls: v.list("sitemap_urls"), sitemap_discovery: v.bool("sitemap_discovery", true), max_crawl_depth: int("max_crawl_depth")?, max_unique_url_count: int("max_unique_url_count")?, preset: v.text("preset").filter(|p| !p.is_empty()) })
 }
 
 /// The credential and its origin, from the sealed fields.
@@ -536,6 +596,14 @@ impl Crawl<'_, '_> {
             self.enqueue(s, 1);
         }
         self.read_sitemaps(sitemaps).await?;
+        self.drain().await?;
+        self.flush().await?;
+        self.purge(cursor, before, force_purge).await
+    }
+
+    /// Visits the frontier breadth first until it's empty, the budget is spent or the deadline
+    /// comes.
+    async fn drain(&mut self) -> Result<(), Stop> {
         while let Some((link, depth)) = self.queue.pop_front() {
             if Instant::now() >= self.deadline {
                 self.limit_reached.get_or_insert("max_duration");
@@ -552,8 +620,7 @@ impl Crawl<'_, '_> {
             self.visit(link, depth).await?;
             self.tick().await?;
         }
-        self.flush().await?;
-        self.purge(cursor, before, force_purge).await
+        Ok(())
     }
 
     /// Writes the crawl's counts into the job's metadata (the heartbeat sends them).
@@ -575,6 +642,10 @@ impl Crawl<'_, '_> {
             m.insert("extraction_rules_dropped_page_count".into(), n(s.extraction_dropped));
         }
         m.insert("checked_url_count".into(), n(s.checked_urls));
+        m.insert("not_modified_count".into(), n(s.not_modified));
+        if s.sections_dropped > 0 {
+            m.insert("docs_sections_dropped_page_count".into(), n(s.sections_dropped));
+        }
         m.insert("error_count".into(), Value::Obj(s.errors.clone()));
         if !s.elastic_crawler_groups.is_empty() {
             m.insert("robots_elastic_crawler_group_ignored".into(), Value::Arr(s.elastic_crawler_groups.iter().cloned().map(Value::from).collect()));
@@ -743,12 +814,12 @@ impl Crawl<'_, '_> {
 
     /// One polite request; `clean`: every hop before it was at the credential's origin. `None`
     /// when its turn would come after the crawl's deadline: nothing was sent.
-    async fn get(&mut self, link: &Link, clean: bool, max: usize) -> Result<Option<Result<fetch::Response, fetch::Failure>>, Stop> {
+    async fn get(&mut self, link: &Link, clean: bool, max: usize, cond: Option<&fetch::Validators>) -> Result<Option<Result<fetch::Response, fetch::Failure>>, Stop> {
         if !self.wait_turn(link).await? {
             return Ok(None);
         }
         let r = tokio::select! {
-            r = self.fetcher.get(link, clean, max) => r,
+            r = self.fetcher.get(link, clean, max, cond) => r,
             s = self.sink.stopped() => return Err(s),
         };
         if let Ok(resp) = &r {
@@ -777,7 +848,7 @@ impl Crawl<'_, '_> {
             if self.fetcher.refused(&at) || self.blocked.iter().any(|b| host == *b || host.ends_with(&format!(".{b}"))) || hosts::site_of(&at) != site {
                 return Ok(Robots::unreachable());
             }
-            let resp = match self.get(&at, clean, robots::MAX_BYTES).await? {
+            let resp = match self.get(&at, clean, robots::MAX_BYTES, None).await? {
                 None => return Ok(Robots::unreachable()),
                 Some(Ok(r)) => r,
                 // Too large: what was read can't be trusted to be whole, so nothing is allowed.
@@ -830,7 +901,7 @@ impl Crawl<'_, '_> {
             read += 1;
             let max = self.plan.limits.usize(L::ResponseSize);
             let clean = self.on_auth_origin(&link);
-            let body = match self.get(&link, clean, max).await? {
+            let body = match self.get(&link, clean, max, None).await? {
                 None => break,
                 Some(Ok(r)) if (200..300).contains(&r.status) => r.body,
                 _ => {
@@ -877,13 +948,16 @@ impl Crawl<'_, '_> {
     async fn visit(&mut self, link: Link, depth: u64) -> Result<(), Stop> {
         self.visited += 1;
         let src = link.hash64();
+        // The validators of the URL's own document go only on the request for that URL: never
+        // on a redirect's next hop.
+        let cond = self.stored_validators(&link).await;
         let mut at = link;
         let mut clean = true;
         let mut hops = 0u64;
         let mut retries = 0usize;
         let max = self.plan.limits.usize(L::ResponseSize);
         let resp = loop {
-            let r = match self.get(&at, clean, max).await? {
+            let r = match self.get(&at, clean, max, cond.as_ref().filter(|_| hops == 0)).await? {
                 // Its turn came after the deadline: not checked, so it proves nothing.
                 None => return Ok(()),
                 Some(Ok(r)) => r,
@@ -895,6 +969,14 @@ impl Crawl<'_, '_> {
             };
             self.stats.fetched_pages += 1;
             match r.status {
+                // Unchanged since its document was written: seen, and left as it is.
+                304 if hops == 0 && cond.is_some() => {
+                    self.stats.not_modified += 1;
+                    self.not_modified.insert(src);
+                    self.indexed.insert(src);
+                    *self.indexed_by_origin.entry(at.origin()).or_default() += 1;
+                    return Ok(());
+                }
                 300..=399 if r.location.is_some() => {
                     hops += 1;
                     let next = r.location.as_deref().and_then(|l| Link::parse(l, Some(at.url())));
@@ -963,11 +1045,24 @@ impl Crawl<'_, '_> {
             self.kept.insert(src);
             return Ok(());
         }
-        self.index_page(src, at, depth, resp.body).await
+        self.index_page(src, at, depth, resp.body, resp.validators).await
+    }
+
+    /// The validators the document of `link` holds (its records' first, with the docs preset),
+    /// if it has one: the crawl asks for the page conditionally then.
+    async fn stored_validators(&self, link: &Link) -> Option<fetch::Validators> {
+        let id = match self.plan.docs {
+            Some(_) => record_id(link, 0),
+            None => link.id(),
+        };
+        let path = format!("/{}/_doc/{}?_source_includes={FIELD_ETAG},{FIELD_LAST_MODIFIED}", enc(&self.sink.index), enc(&id));
+        let doc = internal::call(self.sink.cluster, "GET", &path, None).await.ok()?;
+        let v = fetch::Validators::of_document(doc.get("_source")?);
+        (!v.is_empty()).then_some(v)
     }
 
     /// Parses and indexes a page: the document under its canonical URL, its links queued.
-    async fn index_page(&mut self, src: u64, at: Link, depth: u64, body: Vec<u8>) -> Result<(), Stop> {
+    async fn index_page(&mut self, src: u64, at: Link, depth: u64, body: Vec<u8>, validators: fetch::Validators) -> Result<(), Stop> {
         let mut held = self.sink.reserve();
         if let Err(e) = held.add(body.len() as u64 * 2, "crawled page") {
             return self.failed(src, &at, e.reason());
@@ -977,10 +1072,10 @@ impl Crawl<'_, '_> {
         let tags = self.plan.domain(&at).map(|d| d.exclude_tags.clone()).unwrap_or_default();
         let extraction = self.plan.domain(&at).map(|d| d.extraction.clone()).unwrap_or_default();
         // Off the async worker, against a deadline: a page can't hold a core past it.
-        let (url, limits) = (at.clone(), self.plan.limits.clone());
+        let (url, limits, docs) = (at.clone(), self.plan.limits.clone(), self.plan.docs.clone());
         let deadline = (Instant::now() + PAGE_PARSE_TIME).min(self.deadline.max(Instant::now() + Duration::from_secs(1)));
         let parse = tokio::task::spawn_blocking(move || {
-            let r = html::read_page(&text, held, &url, &tags, &extraction, &limits, deadline);
+            let r = html::read_page(&text, held, &url, &tags, &extraction, docs.as_deref(), &limits, deadline);
             (r, text)
         });
         // A cancel doesn't wait for the parse (it ends at its own deadline, and its result is
@@ -999,6 +1094,9 @@ impl Crawl<'_, '_> {
         };
         if page.extraction_dropped > 0 {
             self.stats.extraction_dropped += 1;
+        }
+        if page.sections_dropped > 0 {
+            self.stats.sections_dropped += 1;
         }
         // A canonical URL is honoured only once the crawl has fetched it and indexed it as
         // itself: then this page is one of its `additional_urls`, not a document of its own.
@@ -1043,16 +1141,38 @@ impl Crawl<'_, '_> {
         self.indexed.insert(at.hash64());
         *self.indexed_by_origin.entry(at.origin()).or_default() += 1;
         let primary = at;
-        let doc = document(&primary, None, page, self.plan.full_html.then_some(text), &self.started_at);
-        let id = primary.id();
-        let mut page_buf = std::mem::replace(&mut self.page, self.sink.new_page());
-        let pushed = self.sink.push_doc(&mut page_buf, &id, doc);
-        self.page = page_buf;
-        drop(held);
-        pushed?;
-        if self.page.sizes.len() >= PAGE_DOCS || self.page.bytes() >= PAGE_BYTES {
-            self.flush().await?;
+        let crawl = |d: &mut Map| {
+            if let Some(e) = &validators.etag {
+                d.insert(FIELD_ETAG.into(), e.clone().into());
+            }
+            if let Some(m) = &validators.last_modified {
+                d.insert(FIELD_LAST_MODIFIED.into(), m.clone().into());
+            }
+            d.insert(FIELD_DEPTH.into(), (depth as i64).into());
+        };
+        let docs: Vec<(String, Map)> = match self.plan.docs.is_some() {
+            false => {
+                let mut doc = document(&primary, None, page, self.plan.full_html.then_some(text), &self.started_at);
+                crawl(&mut doc);
+                vec![(primary.id(), doc)]
+            }
+            true => {
+                let mut records = records(&primary, &page, &self.started_at);
+                records.iter_mut().for_each(|(_, d)| crawl(d));
+                self.records.insert(primary.hash64(), records.len());
+                records
+            }
+        };
+        for (id, doc) in docs {
+            let mut page_buf = std::mem::replace(&mut self.page, self.sink.new_page());
+            let pushed = self.sink.push_doc(&mut page_buf, &id, doc);
+            self.page = page_buf;
+            pushed?;
+            if self.page.sizes.len() >= PAGE_DOCS || self.page.bytes() >= PAGE_BYTES {
+                self.flush().await?;
+            }
         }
+        drop(held);
         Ok(())
     }
 
@@ -1088,12 +1208,16 @@ impl Crawl<'_, '_> {
         // Ids to delete, with their origins.
         let mut delete: Vec<(String, String)> = Vec::new();
         let (mut gone, mut kept, mut struck, mut unchecked, mut excluded) = (0u64, 0u64, 0u64, 0u64, 0u64);
+        // Documents of pages rewritten this crawl in another shape: deleted by every crawl (an
+        // incremental one too), whatever the purge's guards say.
+        let mut replaced_ids: Vec<String> = Vec::new();
         // Per origin: stale documents seen, and how many of them weren't refreshed.
         let mut origins: HashMap<String, (u64, u64)> = HashMap::new();
-        let mut recheck: Vec<(String, Link, Option<i64>)> = Vec::new();
+        let mut recheck: Vec<(String, Link, Option<i64>, Option<u64>)> = Vec::new();
         let max_recheck = self.plan.limits.usize(L::QueueSize);
         let listing = |e: crate::error::EsError| Stop::Failed(format!("listing [{index}] for the purge failed: {}", e.reason()));
-        let first = obj! { "size" => 1000, "_source" => crate::arr!["url", "last_crawled_at"], "sort" => crate::arr!["_doc"], "query" => obj! { "range" => obj! { "last_crawled_at" => obj! { "lt" => self.started_at.clone() } } } };
+        let fields = crate::arr!["url", "url_without_anchor", "last_crawled_at", FIELD_DEPTH, "weight.position"];
+        let first = obj! { "size" => 1000, "_source" => fields, "sort" => crate::arr!["_doc"], "query" => obj! { "range" => obj! { "last_crawled_at" => obj! { "lt" => self.started_at.clone() } } } };
         let mut page = internal::call(cluster, "POST", &format!("/{}/_search?scroll=2m", enc(&index)), Some(&first)).await.map_err(listing)?;
         let mut scroll = page.get("_scroll_id").and_then(Value::as_str).map(str::to_string);
         // What this crawl learnt of one stale document.
@@ -1127,9 +1251,28 @@ impl Crawl<'_, '_> {
             }
             for h in hits {
                 let Some(id) = h.get("_id").and_then(Value::as_str) else { continue };
-                let Some(link) = h.pointer(&["_source", "url"]).and_then(Value::as_str).and_then(|u| Link::parse(u, None)) else { continue };
+                // A docs record is its page's.
+                let record = h.pointer(&["_source", "url_without_anchor"]).and_then(Value::as_str);
+                let Some(link) = record.or_else(|| h.pointer(&["_source", "url"]).and_then(Value::as_str)).and_then(|u| Link::parse(u, None)) else { continue };
                 let last = h.pointer(&["_source", "last_crawled_at"]).and_then(Value::as_str).and_then(ms_of);
+                let depth = h.pointer(&["_source", FIELD_DEPTH]).and_then(Value::as_i64).and_then(|d| u64::try_from(d).ok());
                 let k = link.hash64();
+                // Unchanged (a 304): seen, and left as it is.
+                if self.not_modified.contains(&k) {
+                    continue;
+                }
+                // Rewritten this crawl in another shape: a record past the page's sections now,
+                // a record of a page now indexed as one document, or the document of a page now
+                // in records. No outage causes that.
+                let position = h.pointer(&["_source", "weight", "position"]).and_then(Value::as_i64).and_then(|p| usize::try_from(p).ok());
+                let replaced = match record {
+                    Some(_) => self.indexed.contains(&k) && self.records.get(&k).is_none_or(|n| position.is_none_or(|p| p >= *n)),
+                    None => self.records.contains_key(&k),
+                };
+                if replaced {
+                    replaced_ids.push(id.to_string());
+                    continue;
+                }
                 origins.entry(link.origin()).or_default().0 += 1;
                 // Left out by the crawl's own configuration (its domains, crawl rules, URL
                 // limits): decided here, fetching nothing, whatever budget the crawl has left.
@@ -1140,7 +1283,7 @@ impl Crawl<'_, '_> {
                 if self.gone.contains(&k) || self.kept.contains(&k) {
                     settle(self, id.to_string(), &link, last, &mut delete, &mut origins);
                 } else if recheck.len() < max_recheck {
-                    recheck.push((id.to_string(), link, last));
+                    recheck.push((id.to_string(), link, last, depth));
                 } else {
                     unchecked += 1;
                     origins.entry(link.origin()).or_default().1 += 1;
@@ -1156,9 +1299,11 @@ impl Crawl<'_, '_> {
         if let Some(sid) = scroll {
             let _ = internal::call(cluster, "DELETE", "/_search/scroll", Some(&obj! { "scroll_id" => crate::arr![sid] })).await;
         }
-        // The rest is fetched again, within the crawl's limits.
+        // The rest is fetched again, within the crawl's limits, asked conditionally as every page
+        // is. A page that changed has its links followed from the depth it was found at (they may
+        // lead to pages no unchanged page shows the crawl), before the next one.
         self.rechecking = true;
-        for (n, (id, link, last)) in recheck.into_iter().enumerate() {
+        for (n, (id, link, last, depth)) in recheck.into_iter().enumerate() {
             // Verdicts that fetch nothing still take time: yield, and notice a cancel.
             if n % YIELD_EVERY == YIELD_EVERY - 1 {
                 tokio::task::yield_now().await;
@@ -1175,12 +1320,21 @@ impl Crawl<'_, '_> {
             match self.judge(&link) {
                 Verdict::Allowed => {
                     if !self.known.insert(k) {
-                        unchecked += 1;
-                        origins.entry(link.origin()).or_default().1 += 1;
+                        // Already visited (a re-checked page's link): what it proved stands.
+                        if self.gone.contains(&k) || self.kept.contains(&k) {
+                            settle(self, id, &link, last, &mut delete, &mut origins);
+                        } else if !self.indexed.contains(&k) {
+                            unchecked += 1;
+                            origins.entry(link.origin()).or_default().1 += 1;
+                        }
                         continue;
                     }
-                    self.visit(link.clone(), self.plan.limits.get(L::Depth)).await?;
+                    self.visit(link.clone(), depth.unwrap_or(self.plan.limits.get(L::Depth))).await?;
                     self.tick().await?;
+                    self.rechecking = false;
+                    let drained = self.drain().await;
+                    self.rechecking = true;
+                    drained?;
                 }
                 Verdict::RobotsDisallowed if self.robots.get(&link.origin()).is_some_and(Robots::disallows_root) => {
                     self.kept.insert(k);
@@ -1205,6 +1359,12 @@ impl Crawl<'_, '_> {
         }
         self.rechecking = false;
         self.flush().await?;
+        self.sink.counters.metadata.insert("replaced_document_count".into(), (replaced_ids.len() as i64).into());
+        self.delete_ids(&replaced_ids).await?;
+        // An incremental crawl deletes nothing else, and its cursor stays the full crawls'.
+        if !self.full {
+            return Ok(cursor.clone());
+        }
         let not_refreshed = gone + kept + unchecked;
         let funnel = self.redirect_targets.values().max().copied().unwrap_or(0);
         let skip = if force {
@@ -1246,14 +1406,7 @@ impl Crawl<'_, '_> {
             None => {
                 m.insert("deleted_after_three_kept_crawls_count".into(), (struck as i64).into());
                 let ids: Vec<String> = delete.into_iter().filter(|(_, o)| may_delete(o.as_str())).map(|(id, _)| id).collect();
-                for chunk in ids.chunks(500) {
-                    let mut body = String::new();
-                    for id in chunk {
-                        body.push_str(&obj! { "delete" => obj! { "_id" => id.clone() } }.to_json());
-                        body.push('\n');
-                    }
-                    self.bulk(body).await?;
-                }
+                self.delete_ids(&ids).await?;
             }
         }
         crawls.push(self.started_at.clone());
@@ -1273,13 +1426,22 @@ impl Crawl<'_, '_> {
             }
             let mut urls: Vec<String> = pages.iter().map(|p| p.as_str().to_string()).collect();
             urls.sort();
-            body.push_str(&obj! { "update" => obj! { "_id" => canonical.id() } }.to_json());
-            body.push('\n');
-            body.push_str(&obj! { "doc" => obj! { "additional_urls" => Value::Arr(urls.into_iter().map(Value::from).collect()) } }.to_json());
-            body.push('\n');
-            for p in pages.iter().filter(|p| self.indexed.contains(&p.hash64()) && may_delete(p.origin().as_str())) {
-                body.push_str(&obj! { "delete" => obj! { "_id" => p.id() } }.to_json());
+            // Docs records have no `additional_urls`: the canonical page's records stand alone.
+            if self.plan.docs.is_none() {
+                body.push_str(&obj! { "update" => obj! { "_id" => canonical.id() } }.to_json());
                 body.push('\n');
+                body.push_str(&obj! { "doc" => obj! { "additional_urls" => Value::Arr(urls.into_iter().map(Value::from).collect()) } }.to_json());
+                body.push('\n');
+            }
+            for p in pages.iter().filter(|p| self.indexed.contains(&p.hash64()) && may_delete(p.origin().as_str())) {
+                let ids = match self.records.get(&p.hash64()) {
+                    Some(n) => (0..*n).map(|i| record_id(p, i)).collect(),
+                    None => vec![p.id()],
+                };
+                for id in ids {
+                    body.push_str(&obj! { "delete" => obj! { "_id" => id } }.to_json());
+                    body.push('\n');
+                }
             }
         }
         if body.is_empty() {
@@ -1288,6 +1450,19 @@ impl Crawl<'_, '_> {
         let before = self.sink.counters.deleted;
         self.bulk(body).await?;
         Ok(self.sink.counters.deleted - before)
+    }
+
+    /// Deletes the crawler's own documents `ids`, 500 to a `_bulk`.
+    async fn delete_ids(&mut self, ids: &[String]) -> Result<(), Stop> {
+        for chunk in ids.chunks(500) {
+            let mut body = String::new();
+            for id in chunk {
+                body.push_str(&obj! { "delete" => obj! { "_id" => id.clone() } }.to_json());
+                body.push('\n');
+            }
+            self.bulk(body).await?;
+        }
+        Ok(())
     }
 
     /// A `_bulk` of updates and deletes of the crawler's own documents, into its index (as
@@ -1320,6 +1495,75 @@ async fn clear_force_purge(cluster: &Cluster, cid: &str) -> Result<(), String> {
 
 fn ms_of(t: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(t).ok().map(|d| d.timestamp_millis())
+}
+
+/// A page's records under the docs preset (DocSearch's shape), with their ids: one per section,
+/// at the page's URL plus the section's `#anchor`, with the hierarchy above it (`hierarchy.lvl0`
+/// to `lvl6`, `null` where the page has none), its content, its `type` (the level of its
+/// heading), `weight` (`level`: 100 for `lvl0`, 10 less a level down; `position`: its place in
+/// the page), the page's title and URL fields, and the page's extracted fields. A page with no
+/// section gets one record of its title and text.
+pub(crate) fn records(url: &Link, page: &html::Page, started_at: &str) -> Vec<(String, Map)> {
+    let mut sections = page.sections.clone();
+    if sections.is_empty() {
+        let mut levels: [String; 7] = Default::default();
+        levels[1] = page.title.clone();
+        sections.push(html::Section { levels, level: 1, anchor: None, content: html::limit_bytes(page.body.clone(), 32 << 10) });
+    }
+    let u = url.url();
+    let dirs: Vec<&str> = u.path().split('/').collect();
+    let mut out = Vec::with_capacity(sections.len());
+    for (n, s) in sections.into_iter().enumerate() {
+        let mut d = Map::new();
+        let mut full = u.clone();
+        full.set_fragment(s.anchor.as_deref());
+        d.insert("id".into(), record_id(url, n).into());
+        d.insert("url".into(), full.as_str().into());
+        d.insert("url_without_anchor".into(), url.as_str().into());
+        if let Some(a) = &s.anchor {
+            d.insert("anchor".into(), a.clone().into());
+        }
+        let mut h = Map::new();
+        for (l, v) in s.levels.iter().enumerate() {
+            h.insert(format!("lvl{l}"), if v.is_empty() { Value::Null } else { v.clone().into() });
+        }
+        d.insert("hierarchy".into(), Value::Obj(h));
+        if !s.content.is_empty() {
+            d.insert("content".into(), s.content.into());
+        }
+        d.insert("type".into(), format!("lvl{}", s.level).into());
+        d.insert("weight".into(), obj! { "level" => 100 - 10 * s.level as i64, "position" => n as i64 });
+        if !page.title.is_empty() {
+            d.insert("title".into(), page.title.clone().into());
+        }
+        d.insert("last_crawled_at".into(), started_at.into());
+        d.insert("url_scheme".into(), u.scheme().into());
+        d.insert("url_host".into(), u.host_str().unwrap_or_default().into());
+        if let Some(p) = u.port_or_known_default() {
+            d.insert("url_port".into(), (p as i64).into());
+        }
+        d.insert("url_path".into(), u.path().into());
+        for (i, key) in ["url_path_dir1", "url_path_dir2", "url_path_dir3"].into_iter().enumerate() {
+            if let Some(s) = dirs.get(i + 1).filter(|s| !s.is_empty()) {
+                d.insert(key.into(), (*s).into());
+            }
+        }
+        for (k, v) in &page.extracted {
+            if !d.contains_key(k) {
+                d.insert(k.clone(), match v {
+                    html::Extracted::One(s) => Value::from(s.clone()),
+                    html::Extracted::Many(a) => Value::Arr(a.iter().cloned().map(Value::from).collect()),
+                });
+            }
+        }
+        for (k, v) in &page.fields {
+            if !d.contains_key(k) {
+                d.insert(k.clone(), v.clone().into());
+            }
+        }
+        out.push((record_id(url, n), d));
+    }
+    out
 }
 
 /// A page's document, with Open Crawler's fields (`DocumentMapper#create_html_doc`); empty

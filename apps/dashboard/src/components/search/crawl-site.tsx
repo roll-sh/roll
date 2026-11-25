@@ -55,6 +55,7 @@ async function freeConnectorId(clusterId: string, name: string): Promise<string>
  */
 export function CrawlSite({ cluster, onCreated }: { cluster: SearchCluster; onCreated: () => void }) {
   const [url, setUrl] = useState("");
+  const [docs, setDocs] = useState(false);
   const [busy, setBusy] = useState<null | "test" | "create" | "verify" | "check">(null);
   const [result, setResult] = useState<CrawlTest | null>(null);
   const [verification, setVerification] = useState<SiteVerification | null>(null);
@@ -82,7 +83,7 @@ export function CrawlSite({ cluster, onCreated }: { cluster: SearchCluster; onCr
     const done = await run("create", async () => {
       const name = await freeConnectorId(cluster.id, crawlerName(url));
       await esJson(cluster.id, "PUT", `/_connector/${encodeURIComponent(name)}`, { index_name: `content-${name}`, is_native: true, service_type: "roll_web_crawler", name });
-      await esJson(cluster.id, "PUT", `/_connector/${encodeURIComponent(name)}/_configuration`, { values: { urls: url.trim() } });
+      await esJson(cluster.id, "PUT", `/_connector/${encodeURIComponent(name)}/_configuration`, { values: docs ? { urls: url.trim(), preset: "docs" } : { urls: url.trim() } });
       await esJson(cluster.id, "POST", "/_connector/_sync_job", { id: name, job_type: "full", trigger_method: "on_demand" });
       return true;
     });
@@ -166,6 +167,13 @@ export function CrawlSite({ cluster, onCreated }: { cluster: SearchCluster; onCr
               {result.links_not_shown ? <> ({result.links_not_shown} more not shown)</> : null}
             </p>
           )}
+          <label className="flex items-start gap-2 text-[12px] text-muted">
+            <input type="checkbox" checked={docs} onChange={(e) => setDocs(e.target.checked)} className="mt-0.5 accent-accent" />
+            <span>
+              A documentation site: one record per section (its headings as lvl0 to lvl6, its text, the URL with the section's #anchor), with a
+              search-as-you-type template, as DocSearch builds them.
+            </span>
+          </label>
           <div className="mt-1 flex flex-wrap items-center gap-2">
             <button onClick={create} disabled={busy !== null || result.verdict !== "allowed" || result.indexed === false} className={btn}>
               <Play className="size-3.5" /> {busy === "create" ? <span className="shimmer">Creating…</span> : `Crawl into content-${crawlerName(url)}`}

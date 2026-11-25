@@ -369,7 +369,27 @@ pub struct Page {
     /// dropped (past a page's cap on extracted bytes or text visits).
     pub extracted: Vec<(String, Extracted)>,
     pub extraction_dropped: usize,
+    /// The docs preset's sections, in page order ([`Dom::sections`]); empty without the preset.
+    pub sections: Vec<Section>,
+    /// Sections past a page's caps (records or bytes), left out.
+    pub sections_dropped: usize,
 }
+
+/// One section of a documentation page (the docs preset): the hierarchy above and at its heading
+/// (`lvl0` to `lvl6`, empty where the page has none), the level of the heading that starts it (0
+/// for what comes before the first heading), its anchor, and its content's text.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Section {
+    pub levels: [String; 7],
+    pub level: usize,
+    pub anchor: Option<String>,
+    pub content: String,
+}
+
+/// Records one page makes at most, and the bytes of one record's content and of all of them.
+const MAX_SECTIONS: usize = 1000;
+const MAX_SECTION_CONTENT: usize = 32 << 10;
+const MAX_SECTIONS_BYTES: usize = 5 << 20;
 
 /// What an extraction rule puts in its field: a string (`join_as: string`) or an array.
 #[derive(Debug, Clone, PartialEq)]
@@ -429,6 +449,9 @@ impl Visits {
 const RESERVED: &[&str] = &[
     "id", "any", "all", "none", "or", "and", "not", "additional_urls", "body_content", "body", "domains", "headings", "last_crawled_at", "links", "meta_description", "meta_keywords", "title",
     "url", "url_host", "url_path", "url_path_dir1", "url_path_dir2", "url_path_dir3", "url_port", "url_scheme", "full_html", "_id",
+    // roll's: the crawl's own fields (a docs record's own fields come before a page's, so they
+    // need no entry here).
+    "http_etag", "http_last_modified", "crawl_depth",
 ];
 const MAX_FIELDS: usize = 100;
 /// Tags whose content isn't text (Open Crawler's `NON_CONTENT_TAGS`).
@@ -777,25 +800,11 @@ impl Dom {
         }
         // The elements, indexed once for every selector, when a rule has one.
         let (order, info) = match rules.iter().any(|r| matches!(r.from, Source::Html(_))) {
-            true => {
-                held.add(self.nodes.len() as u64 * SELECT_COST, "extraction rules").map_err(|e| e.reason().to_string())?;
-                let (order, info) = self.selectable();
-                let attrs: u64 = order.iter().map(|n| self.element(*n).map_or(0, |(_, a)| a.len() as u64)).sum();
-                held.add(attrs * ATTR_COST, "extraction rules").map_err(|e| e.reason().to_string())?;
-                (order, info)
-            }
+            true => self.charged_selectable(held, "extraction rules")?,
             false => (Vec::new(), Vec::new()),
         };
-        let attrs: Vec<Vec<(&str, &str)>> = order.iter().map(|n| self.element(*n).map(|(_, a)| a.iter().map(|a| (&*a.name.local, &*a.value)).collect()).unwrap_or_default()).collect();
-        let els: Vec<(super::select::Element<'_>, Option<usize>, Option<usize>)> = order
-            .iter()
-            .zip(&info)
-            .zip(&attrs)
-            .map(|((n, i), a)| {
-                let tag = self.element(*n).map_or("", |(t, _)| t);
-                (super::select::Element { tag, attrs: a, is_root: i.is_root, is_empty: i.empty, index: i.index, count: i.count, type_index: i.type_index, type_count: i.type_count }, i.parent, i.prev)
-            })
-            .collect();
+        let attrs = self.attrs_of(&order);
+        let els = self.elements(&order, &info, &attrs);
         let mut visits = Visits { left: (self.nodes.len() as u64 * VISITS_PER_NODE).max(MIN_VISITS), since: 0, deadline };
         let mut total = 0usize;
         let count = rules.len();
@@ -849,6 +858,180 @@ impl Dom {
     }
 }
 
+impl Dom {
+    /// [`Dom::selectable`], its elements and their attributes charged to `held` for `what`.
+    fn charged_selectable(&self, held: &mut Reservation, what: &str) -> Result<(Vec<usize>, Vec<SelectInfo>), String> {
+        held.add(self.nodes.len() as u64 * SELECT_COST, what).map_err(|e| e.reason().to_string())?;
+        let (order, info) = self.selectable();
+        let attrs: u64 = order.iter().map(|n| self.element(*n).map_or(0, |(_, a)| a.len() as u64)).sum();
+        held.add(attrs * ATTR_COST, what).map_err(|e| e.reason().to_string())?;
+        Ok((order, info))
+    }
+
+    fn attrs_of(&self, order: &[usize]) -> Vec<Vec<(&str, &str)>> {
+        order.iter().map(|n| self.element(*n).map(|(_, a)| a.iter().map(|a| (&*a.name.local, &*a.value)).collect()).unwrap_or_default()).collect()
+    }
+
+    /// The elements as [`super::select::Selectors::select`] takes them.
+    fn elements<'a>(&'a self, order: &[usize], info: &[SelectInfo], attrs: &'a [Vec<(&'a str, &'a str)>]) -> Vec<(super::select::Element<'a>, Option<usize>, Option<usize>)> {
+        order
+            .iter()
+            .zip(info)
+            .zip(attrs)
+            .map(|((n, i), a)| {
+                let tag = self.element(*n).map_or("", |(t, _)| t);
+                (super::select::Element { tag, attrs: a, is_root: i.is_root, is_empty: i.empty, index: i.index, count: i.count, type_index: i.type_index, type_count: i.type_count }, i.parent, i.prev)
+            })
+            .collect()
+    }
+
+    /// The docs preset's sections of this page (DocSearch's records): each element a level's
+    /// selector picks starts a section at that level (the hierarchy below it cleared), and the
+    /// text of each element the content selector picks goes in the section it falls in; nothing
+    /// inside what `exclude` (or the domain's `exclude_tags`) picks counts, nor content nested in
+    /// content already taken. `lvl0` is the first element its selector picks anywhere, else the
+    /// preset's default. The selectors are matched in one pass each and the elements indexed once
+    /// (charged to `held`), the text shares the page's visits, and the deadline holds: as
+    /// [`Dom::extract`]. Past [`MAX_SECTIONS`] records or [`MAX_SECTIONS_BYTES`] the rest are
+    /// dropped and counted.
+    pub fn sections(&self, docs: &super::config::Docs, exclude_tags: &[String], held: &mut Reservation, deadline: std::time::Instant) -> Result<(Vec<Section>, usize), String> {
+        let late = || "the page's docs sections ran out of time".to_string();
+        let (order, info) = self.charged_selectable(held, "docs sections")?;
+        let attrs = self.attrs_of(&order);
+        let els = self.elements(&order, &info, &attrs);
+        let n = order.len();
+        let stop = || std::time::Instant::now() >= deadline;
+        let hits = |s: &super::select::Selectors| s.select(&els, stop).map_err(|_| late());
+        // Where each element's subtree ends in document order (it is `k..end[k]`).
+        let mut end: Vec<usize> = (1..=n).collect();
+        for k in (0..n).rev() {
+            if let Some(p) = info[k].parent {
+                end[p] = end[p].max(end[k]);
+            }
+        }
+        let mut out_of: Vec<bool> = vec![false; n];
+        let mut skip_to = 0usize;
+        let mut excluded: Vec<usize> = match &docs.exclude {
+            Some(s) => hits(s)?,
+            None => Vec::new(),
+        };
+        excluded.extend((0..n).filter(|k| exclude_tags.iter().any(|t| t.as_str() == els[*k].0.tag)));
+        excluded.sort_unstable();
+        for k in excluded {
+            if k < skip_to {
+                continue;
+            }
+            out_of[k..end[k]].iter_mut().for_each(|o| *o = true);
+            skip_to = end[k];
+        }
+        let mut visits = Visits { left: (self.nodes.len() as u64 * VISITS_PER_NODE).max(MIN_VISITS), since: 0, deadline };
+        let mut text = |k: usize, max: usize| match self.text_in(order[k], &[], false, max, Some(&mut visits)) {
+            Ok(t) => Ok(Some(limit_bytes(t, max))),
+            Err(TextStop::Visits) => Ok(None),
+            Err(TextStop::Deadline) => Err(late()),
+        };
+        let mut levels: [String; 7] = Default::default();
+        levels[0] = docs.lvl0_default.clone();
+        if let Some(s) = &docs.levels[0]
+            && let Some(&k) = hits(s)?.first()
+            && let Some(t) = text(k, 4096)?
+            && !t.is_empty()
+        {
+            levels[0] = t;
+        }
+        // Each element's level (the lowest a selector gives it), and the content elements.
+        let mut level_of: Vec<u8> = vec![0; n];
+        for l in (1..7).rev() {
+            if let Some(s) = &docs.levels[l] {
+                for k in hits(s)? {
+                    level_of[k] = l as u8;
+                }
+            }
+        }
+        let mut is_content = vec![false; n];
+        for k in hits(&docs.content)? {
+            is_content[k] = true;
+        }
+        let mut sections: Vec<Section> = Vec::new();
+        let mut current = Section { levels: levels.clone(), level: 0, anchor: None, content: String::new() };
+        let (mut bytes, mut dropped, mut taken_to) = (0usize, 0usize, 0usize);
+        // Past the bytes, or the page's visits spent: the rest of the page is left out.
+        let mut out_of_room = false;
+        for k in 0..n {
+            if out_of[k] || k < taken_to {
+                continue;
+            }
+            if stop() {
+                return Err(late());
+            }
+            let l = level_of[k] as usize;
+            if l > 0 {
+                let Some(title) = text(k, 4096)? else {
+                    out_of_room = true;
+                    break;
+                };
+                if title.is_empty() {
+                    continue;
+                }
+                let done = std::mem::take(&mut current);
+                if done.level > 0 || !done.content.is_empty() {
+                    sections.push(done);
+                }
+                levels[l] = title;
+                levels.iter_mut().skip(l + 1).for_each(String::clear);
+                current = Section { levels: levels.clone(), level: l, anchor: Self::anchor_in(&els, k, end[k]), content: String::new() };
+                // Content inside a heading is the heading's.
+                taken_to = end[k];
+                continue;
+            }
+            if !is_content[k] || out_of_room {
+                continue;
+            }
+            taken_to = end[k];
+            let Some(t) = text(k, MAX_SECTION_CONTENT)? else {
+                out_of_room = true;
+                break;
+            };
+            if t.is_empty() || current.content.len() >= MAX_SECTION_CONTENT {
+                continue;
+            }
+            if bytes + t.len() > MAX_SECTIONS_BYTES {
+                out_of_room = true;
+                continue;
+            }
+            bytes += t.len();
+            held.add(t.len() as u64, "docs sections").map_err(|e| e.reason().to_string())?;
+            if !current.content.is_empty() {
+                current.content.push(' ');
+            }
+            current.content.push_str(&t);
+            current.content = limit_bytes(std::mem::take(&mut current.content), MAX_SECTION_CONTENT);
+        }
+        if current.level > 0 || !current.content.is_empty() {
+            sections.push(current);
+        }
+        if sections.len() > MAX_SECTIONS {
+            dropped += sections.len() - MAX_SECTIONS;
+            sections.truncate(MAX_SECTIONS);
+        }
+        if out_of_room {
+            dropped += 1;
+        }
+        Ok((sections, dropped))
+    }
+
+    /// A heading's anchor: its own `id`, else the first `id` (or an `a`'s `name`) inside it.
+    fn anchor_in(els: &[(super::select::Element<'_>, Option<usize>, Option<usize>)], k: usize, end: usize) -> Option<String> {
+        let id = |j: usize| {
+            let e = &els[j].0;
+            let own = e.attrs.iter().find(|(n, _)| *n == "id").map(|(_, v)| *v);
+            let name = (e.tag == "a").then(|| e.attrs.iter().find(|(n, _)| *n == "name").map(|(_, v)| *v)).flatten();
+            own.or(name).map(str::trim).filter(|v| !v.is_empty() && v.len() <= 256)
+        };
+        (k..end).find_map(id).map(str::to_string)
+    }
+}
+
 /// An element's place for selectors ([`Dom::selectable`]).
 struct SelectInfo {
     parent: Option<usize>,
@@ -872,10 +1055,15 @@ fn set_field(fields: &mut Vec<(String, String)>, name: &str, v: String) {
 /// Parses `html` (charged to `held`) and reads it as the page at `url`, with the domain's
 /// `extraction` rulesets. The DOM never outlives this call: its strings aren't `Send`, so it can't
 /// be held across a crawl's awaits.
-pub fn read_page(html: &str, held: Reservation, url: &Link, exclude_tags: &[String], extraction: &[super::config::Ruleset], limits: &Limits, deadline: std::time::Instant) -> Result<(Page, Reservation), String> {
+/// With the docs preset (`docs`), the page's sections too ([`Dom::sections`]).
+#[allow(clippy::too_many_arguments)]
+pub fn read_page(html: &str, held: Reservation, url: &Link, exclude_tags: &[String], extraction: &[super::config::Ruleset], docs: Option<&super::config::Docs>, limits: &Limits, deadline: std::time::Instant) -> Result<(Page, Reservation), String> {
     let (dom, mut held) = parse(html, held, deadline)?;
     let mut page = dom.read(url, exclude_tags, limits);
     (page.extracted, page.extraction_dropped) = dom.extract(url, extraction, &mut held, deadline)?;
+    if let Some(d) = docs {
+        (page.sections, page.sections_dropped) = dom.sections(d, exclude_tags, &mut held, deadline)?;
+    }
     Ok((page, held))
 }
 
@@ -887,7 +1075,7 @@ mod tests {
         let budget = search_aggs::memory::MemoryBudget::new(u64::MAX);
         let (dom, _held) = parse(html, Reservation::new(budget), std::time::Instant::now() + std::time::Duration::from_secs(30)).unwrap();
         let limits = super::super::config::plan(
-            &super::super::config::Fields { urls: vec!["https://e.com/".into()], sitemap_urls: vec![], sitemap_discovery: true, max_crawl_depth: None, max_unique_url_count: None },
+            &super::super::config::Fields { urls: vec!["https://e.com/".into()], sitemap_urls: vec![], sitemap_discovery: true, max_crawl_depth: None, max_unique_url_count: None, preset: None },
             None,
             &super::super::config::Ceilings::new(|_| None, 3_600_000),
         )
@@ -962,7 +1150,7 @@ mod tests {
         .unwrap()
         .unwrap();
         let plan = super::super::config::plan(
-            &super::super::config::Fields { urls: vec!["https://e.com/".into()], sitemap_urls: vec![], sitemap_discovery: true, max_crawl_depth: None, max_unique_url_count: None },
+            &super::super::config::Fields { urls: vec!["https://e.com/".into()], sitemap_urls: vec![], sitemap_discovery: true, max_crawl_depth: None, max_unique_url_count: None, preset: None },
             Some(&snippet),
             &super::super::config::Ceilings::new(|_| None, 3_600_000),
         )

@@ -751,7 +751,11 @@ async fn sync(cluster: &Arc<Cluster>, job_id: &str, cid: &str, principal: Option
     let filtering = job.pointer(&["connector", "filtering"]).cloned().unwrap_or(Value::Null);
     let rules = rules::Rules::compile(&filtering).map_err(|p| Stop::Failed(format!("the active sync rules don't parse: {}", p.into_iter().map(|p| p.message).collect::<Vec<_>>().join("; "))))?;
     let crawler = service == crawler::SERVICE;
-    ensure_index(cluster, &index, crawler.then(crawler::mappings)).await?;
+    let docs = crawler && values.text(crawler::PRESET).as_deref() == Some("docs");
+    ensure_index(cluster, &index, crawler.then(|| crawler::mappings(docs))).await?;
+    if docs {
+        ensure_docs_template(cluster, &index).await?;
+    }
     let pipeline = match connector.pointer(&["pipeline", "name"]).and_then(Value::as_str) {
         Some(p) if internal::call(cluster, "GET", &format!("/_ingest/pipeline/{}", enc(p)), None).await.is_ok() => Some(p.to_string()),
         _ => None,
@@ -806,6 +810,16 @@ fn enc(name: &str) -> String {
 
 /// Creates the connector's index when it doesn't exist (with `create`'s body), never changing an
 /// existing one's mappings.
+/// A docs crawl's search template (`<index>-docs-search`, [`crawler::docs_template`]), made when
+/// the cluster has none of that name: one the user changed is left as it is.
+async fn ensure_docs_template(cluster: &Cluster, index: &str) -> Result<(), Stop> {
+    let path = format!("/_scripts/{}", enc(&format!("{index}-docs-search")));
+    if internal::call(cluster, "GET", &path, None).await.is_ok() {
+        return Ok(());
+    }
+    internal::call(cluster, "PUT", &path, Some(&crawler::docs_template())).await.map(|_| ()).map_err(|e| Stop::Failed(format!("creating the docs search template for [{index}] failed: {}", e.reason())))
+}
+
 async fn ensure_index(cluster: &Cluster, index: &str, create: Option<Value>) -> Result<(), Stop> {
     let path = format!("/{}", enc(index));
     match internal::call(cluster, "GET", &path, None).await {

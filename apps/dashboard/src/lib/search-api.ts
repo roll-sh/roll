@@ -356,6 +356,9 @@ export interface CrawlTest {
   document?: { id?: string; url?: string; title?: string; body?: string; meta_description?: string; headings?: string[] };
   links?: { url: string; verdict: string }[];
   links_not_shown?: number;
+  /** With a connector on the docs preset: the page's first section records, and how many it makes. */
+  records?: { url: string; anchor?: string; type: string; hierarchy: Record<string, string | null>; content?: string }[];
+  record_count?: number;
 }
 
 /**
