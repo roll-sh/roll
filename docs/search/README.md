@@ -1470,12 +1470,11 @@ deterministic (#396).
    the restore: segments Lucene 8 wrote (Elasticsearch 7.x indices never merged since), data streams themselves (their backing indices restore), `sparse_vector`
    and `rank_vectors` values and nested dense vectors that Elasticsearch 9 left out of `_source`,
    `_status` file counts from the shard snapshots, and resuming after a takeover from the shard
-   reached rather than from the start of each index. Also left: a snapshot that starts after a DELETE is written to
-   the bucket but before the cluster's copy of the repository data updates may still take the
-   deleted snapshot as its base (`_cleanup` has the same window). In progress (`fix/search-snapshot-followups`):
-   a snapshot DELETE waits for running snapshots that build on it, as Elasticsearch does, a cap on
-   repository generations, and unreferenced chunks of failed snapshots removed by the next
-   snapshot of their shard.
+   reached rather than from the start of each index. Landed since: a snapshot DELETE waits for
+   running snapshots that build on it, as Elasticsearch does, and a cap on repository generations
+   (#941); deletions and `_cleanup` show as running, so a snapshot starting meanwhile waits for
+   them rather than take a removed snapshot as its base (`fix/search-snapshot-delete-window`).
+   Chunks of failed snapshots stay until `_cleanup` (compatibility.md says why).
 10. **Relevance tuning by MCP and Terraform**: `/v1/search` serves synonyms sets, query rulesets
    (and `_test`), writing an index's settings and `_explain` (the routes table), and `roll search`
    has `synonyms`, `rules`, `indices settings` and `explain` and makes `read` and `append` keys on
