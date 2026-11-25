@@ -49,6 +49,7 @@ cleanup() {
     # And the previews' own networks (egress roll) a delete just before the stop didn't reach.
     for n in $(docker network ls -q --filter "label=sh.roll.code.home=$HOME_DIR"); do docker network rm "$n" >/dev/null 2>&1 || true; done
   fi
+  [ -n "${EMB_PID:-}" ] && kill "$EMB_PID" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -56,11 +57,36 @@ trap cleanup EXIT
 # Other daemons share this host: never talk to one of theirs.
 if curl -s -o /dev/null --max-time 1 "http://$API/v1/info"; then echo "something already answers on $API: stop it first" >&2; exit 1; fi
 rm -rf "$HOME_DIR" && mkdir -p "$HOME_DIR"
+# A provider of embeddings in OpenAI's shape on this machine, counting its calls: the parent's
+# semantic_text field embeds with it, and a preview's branch must never call it (roll search's
+# #988: a branch doesn't get the parent's key; previews' masking drops what it can't embed).
+python3 - "$HOME_DIR/emb" <<'PY2' &
+import http.server, json, sys
+base = sys.argv[1]
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)) or b"{}")
+        inputs = body.get("input") or [""]
+        inputs = inputs if isinstance(inputs, list) else [inputs]
+        n = int(open(base + ".calls").read() or 0) if __import__("os").path.exists(base + ".calls") else 0
+        open(base + ".calls", "w").write(str(n + 1))
+        out = json.dumps({"object": "list", "data": [{"object": "embedding", "index": i, "embedding": [0.6, 0.8, 0.0]} for i in range(len(inputs))], "model": "emb", "usage": {"prompt_tokens": 1, "total_tokens": 1}}).encode()
+        self.send_response(200); self.send_header("content-type", "application/json"); self.send_header("content-length", str(len(out))); self.end_headers(); self.wfile.write(out)
+    def log_message(self, *a):
+        pass
+s = http.server.HTTPServer(("127.0.0.1", 0), H)
+open(base + ".port", "w").write(str(s.server_port))
+s.serve_forever()
+PY2
+EMB_PID=$!
+for _ in $(seq 1 40); do [ -s "$HOME_DIR/emb.port" ] && break; sleep 0.1; done
+EMB_PORT=$(cat "$HOME_DIR/emb.port")
+emb_calls() { cat "$HOME_DIR/emb.calls" 2>/dev/null || echo 0; }
 export ROLL_HOME=$HOME_DIR ROLL_API=$API ROLL_PROXY=127.0.0.1:${P}432 ROLL_REDIS=127.0.0.1:${P}380 ROLL_REDIS_HTTP=127.0.0.1:${P}081 \
   ROLL_KAFKA=127.0.0.1:${P}092 ROLL_S3=127.0.0.1:${P}900 ROLL_STORAGE_API=127.0.0.1:${P}901 \
   ROLL_QUEUES_AMQP=127.0.0.1:${P}672 ROLL_QUEUES_MANAGEMENT=127.0.0.1:${P}673 ROLL_QUEUES_STOMP=127.0.0.1:${P}613 ROLL_QUEUES_WEB_STOMP=127.0.0.1:${P}674 \
   ROLL_QUEUES_MQTT=127.0.0.1:${P}883 ROLL_QUEUES_WEB_MQTT=127.0.0.1:${P}675 ROLL_QUEUES_STREAM=127.0.0.1:${P}552 ROLL_QUEUES_HTTP=127.0.0.1:${P}680 \
-  ROLL_SEARCH_HTTP=127.0.0.1:${P}200 ROLL_PREVIEWS_SMTP=127.0.0.1:${P}525 \
+  ROLL_SEARCH_HTTP=127.0.0.1:${P}200 ROLL_PREVIEWS_SMTP=127.0.0.1:${P}525 ROLL_SEARCH_INFERENCE_ALLOW_PRIVATE=true \
   ROLL_NOSQL_CQL=127.0.0.1:${P}042 ROLL_NOSQL_CQL_SHARD_AWARE=127.0.0.1:${P}043 ROLL_NOSQL_ALTERNATOR=127.0.0.1:${P}000 ROLL_NOSQL_REST=127.0.0.1:${P}100 \
   ROLL_CODE_PREVIEW_DOMAIN=$DOMAIN ROLL_PRODUCTS=${PREVIEW_PRODUCTS:-code,postgres,redis,storage,nosql,queues,streams,tasks,search} RUST_LOG=${RUST_LOG:-info}
 unset ROLL_ADMIN_TOKEN ROLL_CODE_TOKEN
@@ -130,6 +156,15 @@ curl -sf -XPUT "$SEARCH_URL_PARENT/products/_doc/3?refresh=true" -H 'content-typ
 # An index whose name has dots (logs.2024): its mask is split off at the whole name.
 curl -sf -XPUT "$SEARCH_URL_PARENT/logs.2024/_doc/1?refresh=true" -H 'content-type: application/json' -d '{"user":{"email":"eve@corp.example"}}' >/dev/null
 curl -sf -XPUT "$SEARCH_URL_PARENT/products/_doc/4?refresh=true" -H 'content-type: application/json' -d '{"name":"dotted","owner.email":"bob@corp.example","stock":3}' >/dev/null
+# A semantic_text field on the parent, its endpoint keyed (an openai one, at the provider above):
+# embedded there, its chunks and the knn on them find the document (the premise).
+curl -sf -XPUT "$SEARCH_URL_PARENT/_inference/text_embedding/emb" -H 'content-type: application/json' -d "{\"service\":\"openai\",\"service_settings\":{\"api_key\":\"sk-parent-key\",\"model_id\":\"emb\",\"url\":\"http://127.0.0.1:$EMB_PORT/v1/embeddings\"}}" >/dev/null || { echo "an inference endpoint on the parent"; exit 1; }
+curl -sf -XPUT "$SEARCH_URL_PARENT/notes" -H 'content-type: application/json' -d '{"mappings":{"properties":{"f":{"type":"semantic_text","inference_id":"emb"}}}}' >/dev/null
+curl -sf -XPUT "$SEARCH_URL_PARENT/notes/_doc/1?refresh=true" -H 'content-type: application/json' -d '{"f":"ada'"'"'s own words"}' >/dev/null || { echo "an embedded document on the parent"; exit 1; }
+CHUNKS_Q='{"size":0,"query":{"nested":{"path":"f.inference.chunks","query":{"exists":{"field":"f.inference.chunks.embeddings"}}}}}'
+KNN_Q='{"size":0,"query":{"nested":{"path":"f.inference.chunks","query":{"knn":{"field":"f.inference.chunks.embeddings","query_vector":[0.6,0.8,0.0],"k":10}}}}}'
+hits_of() { curl -sf "$1/notes/_search" -H 'content-type: application/json' -d "$2" | jq_ "d['hits']['total']['value']"; }
+[ "$(hits_of "$SEARCH_URL_PARENT" "$CHUNKS_Q") $(hits_of "$SEARCH_URL_PARENT" "$KNN_Q")" = "1 1" ] || { echo "the parent's document should be embedded, its knn matching"; exit 1; }
 # A connector on the parent (roll search's native syncs, #318): its branches inherit it, waiting.
 curl -sf -XPUT "$SEARCH_URL_PARENT/_connector/catalog-sync" -H 'content-type: application/json' -d '{"index_name":"content-synced","is_native":true,"service_type":"s3"}' >/dev/null || { echo "a connector on the parent search cluster"; exit 1; }
 PG=$(api POST /v1/projects '{"name":"shop-db"}' | jq_ "d['id']")
@@ -171,7 +206,7 @@ done
 # preview's environment reads it there (untrusted), and a plain value's `${` stays as it is.
 REFD=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://$API/v1/secrets/projects/$PRJ/environments/staging/secrets/PAYMENTS_TEST_KEY" -H 'content-type: application/json' -d '{"value":"sk_test_from_staging_42"}')
 case "$REFD" in 200|201) ;; *) echo "setting staging's PAYMENTS_TEST_KEY: HTTP $REFD"; exit 1;; esac
-api PUT "/v1/previews/projects/$PRJ/settings" "{\"env\":{\"SENDGRID_API_KEY\":\"SG.from-production\",\"SMTP_HOST\":\"smtp.sendgrid.net\",\"PAYMENTS_KEY\":\"roll://staging/PAYMENTS_TEST_KEY\",\"GREETING\":\"hello \${USER}\"},\"enabled\":true,\"sleep_after_s\":60,\"release\":{\"image\":\"$IMAGE\",\"run\":\"true\"},\"masking\":{\"nosql:$NOSQL\":{\"app.users.email\":\"mask_default()\"},\"postgres:$PG\":{\"public.users.email\":\"email\"},\"search:$SEARCH\":{\"products.name\":\"redact\",\"products.owner.email\":\"redact\",\"logs.2024.user.email\":\"redact\"}}}" >/dev/null
+api PUT "/v1/previews/projects/$PRJ/settings" "{\"env\":{\"SENDGRID_API_KEY\":\"SG.from-production\",\"SMTP_HOST\":\"smtp.sendgrid.net\",\"PAYMENTS_KEY\":\"roll://staging/PAYMENTS_TEST_KEY\",\"GREETING\":\"hello \${USER}\"},\"enabled\":true,\"sleep_after_s\":60,\"release\":{\"image\":\"$IMAGE\",\"run\":\"true\"},\"masking\":{\"nosql:$NOSQL\":{\"app.users.email\":\"mask_default()\"},\"postgres:$PG\":{\"public.users.email\":\"email\"},\"search:$SEARCH\":{\"products.name\":\"redact\",\"products.owner.email\":\"redact\",\"logs.2024.user.email\":\"redact\",\"notes.f\":\"redact\"}}}" >/dev/null
 # A mask on a key column can't hide it (the engine refuses to read such a table): the settings
 # name it instead of letting a preview's pages fail.
 KEY_MASK=$(curl -s -o /tmp/roll-previews-keymask.json -w '%{http_code}' -X PUT "http://$API/v1/previews/projects/$PRJ/settings" -H 'content-type: application/json' \
@@ -189,6 +224,7 @@ LINKED=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://$API/v1/secrets/p
 case "$LINKED" in 200|201) ;; *) echo "linking development's STAGING_PGPASS to $PG's password: HTTP $LINKED"; exit 1;; esac
 # Where a follower of previews' events (roll MCP's Events) starts: what comes from now on.
 EV0=$(api GET "/v1/previews/events?latest=1" | jq_ "d['next']")
+EMB0=$(emb_calls)
 say "open a change"
 T0=$(now_ms)
 CHG=$(api POST /v1/code/repos/acme/web/changes '{"title":"New page","message":"New page","base":"main","files":{"index.html":{"content":"preview of change 1"},"lib/deep.js":{"content":"export const deep = 1;"},'"$OPENAPI_CHG"'}}' | jq_ "d['id']")
@@ -407,6 +443,13 @@ done
 BSTATE=$(console "$BRANCH_SEARCH" GET "/_connector/_sync_job/$BJOB" | answer status)
 case "$PSTATE" in in_progress|error|completed) [ "$BSTATE" = pending ] ;; *) false ;; esac || { echo "the parent's sync should run (it did: $PSTATE) and the branch's wait for adoption (pending, not $BSTATE)"; exit 1; }
 [ "$(es "$APP_ES/products/_doc/1" | jq_ "d['_source']['name']")" = "[masked]" ] || { echo "the search branch should stay masked beside its inherited connector"; exit 1; }
+# Its semantic_text field masked too, though the branch has no key for the parent's endpoint
+# (roll search's #988): the masked text kept unembedded (X-Roll-Unembedded: drop), the real
+# words' chunks and embeddings gone, and the provider never called from the branch.
+body_of() { jq_ "__import__('json').loads(d.get('body') or '{}')$1"; }
+SEM_DOC=$(console "$BRANCH_SEARCH" GET "/notes/_doc/1?_source_includes=f,_inference_fields" | body_of "['_source']")
+SEM_HITS="$(console "$BRANCH_SEARCH" POST /notes/_search "$CHUNKS_Q" | body_of "['hits']['total']['value']") $(console "$BRANCH_SEARCH" POST /notes/_search "$KNN_Q" | body_of "['hits']['total']['value']")"
+[ "$SEM_DOC | $SEM_HITS | $(( $(emb_calls) - EMB0 ))" = "{'f': '[masked]'} | 0 0 | 0" ] || { echo "a semantic_text field should be masked on the branch with no embeddings left and no provider call (source | chunks knn | calls): $SEM_DOC | $SEM_HITS | $(( $(emb_calls) - EMB0 ))"; exit 1; }
 # A field only the branch's documents have (price): its mapping gains it, and the next head's
 # schema changes say so.
 es -XPUT "$APP_ES/products/_doc/2?refresh=true" -H 'content-type: application/json' -d '{"name":"branch","price":9.5}' >/dev/null
@@ -1300,6 +1343,7 @@ cat <<EOF
 | A push whose earlier head keeps copies of every branch: its timeline | $STEPS3 |
 | What a follower of the events hears (\`GET /v1/previews/events\`, roll MCP's Events) | $EVENTS |
 | Search: a sync of the parent's connector on the parent / asked of the branch (inherited, waits for adoption) | $PSTATE / $BSTATE |
+| Search: a semantic_text field masked on the branch without the parent's key (its source / chunks and knn hits / provider calls) | $SEM_DOC / $SEM_HITS / 0 |
 | Parent bucket bytes / the branch's own bytes after writing 1 MiB / objects the branch sees | $PARENT_OBJECTS / $BRANCH_OBJECTS / $BRANCH_SEES |
 | NoSQL branch's mask on app.users.email / masks on the parent | $MASKED / $PARENT_MASKED |
 | NoSQL: app.users.email in the branch / a filter on the real address there | $NOSQL_READ / $NOSQL_FILTER |

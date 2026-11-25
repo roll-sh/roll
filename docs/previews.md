@@ -795,7 +795,7 @@ previews' code may reach:
   page shows (rows of the repo's data) and send it to another site from their browser, around
   `egress_forks`, which holds only its server. A policy of the page's own still applies (a
   browser keeps both); a navigation away isn't something a policy can stop. Previews' own proxy
-  only so far: roll apps' for its forks is next (Next). `runtime::tests::service_hosts_reach_their_containers`.
+  and roll apps' for a fork's `pv-` environments (a closed one: roll apps' #1032 adds the same policy, its origins the same `pv-` name's hosts across the project's services and their custom domains; live in `scripts/preview-apps.sh`, the fork's pages carry it and the same repo's pull request's don't). `runtime::tests::service_hosts_reach_their_containers`.
 - `data_forks`: what a fork's preview's data is. It's `"schema"` by default: its branches hold the
   structure without the rows (Postgres' schema, NoSQL's tables, streams' topics, queues' and
   tasks' definitions), whatever the project's own previews get, and a kind that can't be
@@ -1128,6 +1128,13 @@ thirty-fourth review found them in the clear.
     `_forcemerge?only_expunge_deletes`), as Postgres masking's `VACUUM FULL` (live: the branch
     reads `[masked]` and its `_terms_enum` finds nothing, the parent reads `parent`; roll
     search's `expunging_a_branch_rewrites_the_segments_it_shares` pins the sequence).
+    A masked `semantic_text` field: a branch doesn't get its parent's inference endpoint's key
+    (roll search's #988), so the masking's writes send `X-Roll-Unembedded: drop`. The masked text
+    stays unembedded, and the real values' chunks and embeddings go, with no provider called. An
+    app's own writes to such a field on a preview's branch need the endpoint's key set on the
+    branch (`_inference/{task}/{id}/_update`, or the Inference tab's "A roll secret"); without it
+    they're a 400 ("this branch doesn't have the parent's provider key; set it on the branch").
+    Endpoints that need no key (E5 on the node, the preconfigured ones) are unaffected.
   - Other products: a `seed` anonymises the rows instead.
   - **Suggestions** (as Tonic's and Neon's anonymisation tools name columns that look personal):
     `GET /v1/previews/projects/{project}/mask-suggestions` reads the columns of every Postgres,
@@ -2860,55 +2867,49 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-Ranked again after a sixth product review (2026-11-25), against Vercel's and Netlify's previews and
-comments, Render and Railway, Neon, Chromatic and Percy, Signadot, Jam.
+Ranked again after a seventh product review (2026-11-25, evening), against Vercel's comments,
+Chromatic's cross-browser and accessibility tests, Render's suspended services, Neon's snapshots.
 
-1. **Everything a preview runs in its cost, in review**: screenshot runs (every engine, stories,
-   another service's), agents' runs and seed, release and teardown jobs count by their
-   containers' GiB-hours (`runs_usd` apart; #1010), and roll apps services by roll apps' own bill
-   for their `pv-` environments, builds included, so `max_usd_month` caps them all.
-   With it, the sign-in proven live on a page that answers only once signed in (`try` on
-   `/account.html` behind `/login.html`; until now the live check proved only the stdin path and
-   the stop at a missing field).
-2. **The stories a change touched, by the module graph, in review**: a story that imports a changed
-   file from anywhere comes after those whose own file changed (Storybook's `preview-stats.json`
-   when the build has it; files alone without), and a built Storybook's stories run live in a
-   real browser for the first time (#1014). In review: a run that chose by files alone (no stats
-   file, as from `storybook dev`) and left stories says so on the sheet (`skipped.by_files`),
-   with how to give it the graph.
-3. **A note in one click, in review**: the button's note opens a small window of roll's with its
-   form alone, which posts and closes (`/dashboard/previews/note`); a phone keeps the dashboard
-   in a tab. Next for it: a reply and a resolve from the page the same way.
-4. **Sleeping previews cost the control plane, in review**: a settled sleeping preview converges
-   whole hourly (`settled_every`), its usage read alone every 5 minutes in between. Next for it:
-   a running preview that's settled could do the same between its health and route reads.
-5. **A fork's preview on roll apps, in review**: a `data_forks` rule, a fork's data its structure
-   only unless the project says `same`. Its services' pages get the same Content-Security-Policy
-   as on previews' own proxy from roll apps' proxy (its #1032; previews' live check in review).
-6. **A capped preview's roll apps service, in review**: its `pv-` environment paused while the
-   preview's over its cap, resumed under it.
-7. **Restore points for the products that only copy**: NoSQL's in review (its point-in-time
-   restore in place, to the second its point was cut at). Redis, search and streams: a point is
-   kept only where the product puts a branch back in place, keeping its id (their delete guards
-   check it); each needs its control plane's reset `from`, as pg-control's.
-8. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+1. **A reply and a resolve from the page in one click**: the button's own notes open the whole
+   dashboard to reply to or resolve one; the small window #1016 opens for a new note, for those
+   too (Vercel's comment threads answer in place).
+2. **Stories in the other browsers** (Chromatic's cross-browser stories): `github.browsers` takes
+   pages in Firefox and WebKit, stories only in Chromium; take the change's first stories in each
+   browser asked for, compared with main's same story in that browser.
+3. **Restore points for Redis, search and streams**: NoSQL's landed (#1028, its point-in-time
+   restore). A point is kept only where the product puts a branch back in place, keeping its id
+   (their delete guards check it); each needs its control plane's reset `from`, as pg-control's:
+   ask the Redis, search and streams owners.
+4. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+   become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
+   follow the same roles, checked live against a member's session.
+5. **A running settled preview's usage read alone too**: #1017 does it for sleeping ones; a running
+   one still converges whole every 5 minutes between its health and route reads.
+6. **roll apps lookups that miss cost a list each**: `RollApps::find` lists every roll apps
+   service when a preview's service isn't one (a `roll.toml` service not started on this node),
+   every usage round; remember the miss for a while, never across a deploy that makes the
+   environment.
+7. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-9. **Previews for the members thread's next products**: once roll apps' and roll search's routes
-   become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
-   follow the same roles, checked live against a member's session.
-10. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+8. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-11. **Watch: pg-control's recovery to a time seconds old** (unowned).
+9. **Watch: pg-control's recovery to a time seconds old** (unowned).
 
-
-
-
-
-
-
-
+Landed 2026-11-25, afternoon and evening:
+- browser runs and jobs in the cost (#1010), and roll apps services' own bill, builds included, with
+  the sign-in proven live behind a login (#1011);
+- stories by the module graph, and the first live Storybook run (#1014);
+- a note in one click (#1016);
+- sleeping previews' usage read alone between hourly converges (#1017);
+- a fork's data its structure only (#1020: `data_forks`);
+- a capped preview's roll apps services paused there (#1027);
+- NoSQL restore points (#1028);
+- every story checked with axe, and a run chosen by files alone said (#1031; the stories run had
+  never had axe-core);
+- a fork's pages on roll apps held to its own hosts, checked live (#1034, roll apps' #1032), with
+  `semantic_text` masking on a search branch (roll search's #988, checked live in #1047).
 
 Landed 2026-11-25, noon: the stories a change touched taken first (#1005).
 
