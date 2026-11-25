@@ -4,7 +4,7 @@
  * package's both use them; change them with the contract.
  */
 
-export type Action = "read" | "reveal" | "write" | "delete" | "admin";
+export type Action = "read" | "reveal" | "write" | "delete" | "admin" | "scan";
 export type SecretType = "shared" | "personal";
 export type LinkMode = "live" | "managed" | "dynamic";
 

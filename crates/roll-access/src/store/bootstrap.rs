@@ -197,7 +197,10 @@ fn present(c: &code_sql::Conn<'_>, secret: &str, want: ChainSecret, ip: Option<s
     if expires_at.is_none_or(|e| e <= now) {
         return Err(Error::Unauthorized(format!("this {} has ended: the machine needs a new bootstrap token", ChainSecret::named(&kind))));
     }
-    let nets = parse_ip_allow(&serde_json::from_str::<Vec<String>>(&ip_allow).unwrap_or_default())?;
+    // An address list that can't be read works from nowhere, never from anywhere.
+    let unreadable = || Error::Forbidden(format!("this {}'s address list can't be read, so it doesn't work from any address: make a new one", ChainSecret::named(&kind)));
+    let list: Vec<String> = serde_json::from_str(&ip_allow).map_err(|_| unreadable())?;
+    let nets = parse_ip_allow(&list).map_err(|_| unreadable())?;
     if !nets.is_empty() && !ip.is_some_and(|ip| nets.iter().any(|n| n.contains(&ip))) {
         return Err(Error::Forbidden(format!("this {} doesn't work from this address", ChainSecret::named(&kind))));
     }

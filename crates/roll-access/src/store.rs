@@ -734,7 +734,9 @@ fn after_grant(n: usize) -> usize {
 
 fn grant_row(r: &code_sql::Row<'_>) -> code_sql::Result<Grant> {
     let rules: String = r.get(3)?;
-    let ip: String = r.get(5)?;
+    // An address list that can't be read restricts to nowhere: the grant fails to load, never
+    // loads as one without a list.
+    let ip_allow: Vec<String> = serde_json::from_str(&r.get::<_, String>(5)?).map_err(|_| code_sql::Error::Conversion(format!("grant {}'s address list (ip_allow) can't be read", r.get::<_, String>(0).unwrap_or_default())))?;
     let client = match r.get::<_, Option<String>>(11)? {
         Some(id) => Some(Client {
             id,
@@ -763,7 +765,7 @@ fn grant_row(r: &code_sql::Row<'_>) -> code_sql::Result<Grant> {
         decided_by: r.get(25)?,
         hint: r.get(26)?,
         decoy: r.get::<_, Option<bool>>(27)?.unwrap_or(false),
-        ip_allow: serde_json::from_str(&ip).unwrap_or_default(),
+        ip_allow,
         created_by: r.get(6)?,
         created_at: r.get(7)?,
         last_used_at: r.get(8)?,
