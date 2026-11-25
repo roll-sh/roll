@@ -51,7 +51,7 @@ const HOLD_MS: i64 = 5 * 60_000;
 /// How long a failed push waits before the sweeper tries it again.
 const RETRY_MS: i64 = 5 * 60_000;
 /// Syncs a project may have.
-const PER_PROJECT: i64 = 50;
+pub(crate) const PER_PROJECT: i64 = 50;
 /// Pushes one sweep makes (the rest wait for the next one).
 const PER_SWEEP: usize = 20;
 /// How many syncs a sweep claims for checking at a time.
@@ -351,7 +351,7 @@ fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
 }
 
 /// The associated data of a sync's signing secret.
-fn secret_aad(project: &str, id: &str) -> String {
+pub(crate) fn secret_aad(project: &str, id: &str) -> String {
     format!("roll-secrets:sync:{project}:{id}")
 }
 

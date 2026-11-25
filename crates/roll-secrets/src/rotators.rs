@@ -71,7 +71,7 @@ fn check_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn aad(project: &str, id: &str, what: &str) -> String {
+pub(crate) fn aad(project: &str, id: &str, what: &str) -> String {
     format!("roll-secrets:rotator:{project}:{id}:{what}")
 }
 

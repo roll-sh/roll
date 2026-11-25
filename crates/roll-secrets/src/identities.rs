@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS aws_logins (
 CREATE INDEX IF NOT EXISTS aws_logins_at ON aws_logins (at);
 ";
 
-const IDENTITIES_MAX: i64 = 50;
+pub(crate) const IDENTITIES_MAX: i64 = 50;
 pub const TTL_MIN: i64 = 5;
 pub const TTL_MAX: i64 = 60;
 /// Logins a minute per identity and per client address (a CI matrix logs in many times at once).
