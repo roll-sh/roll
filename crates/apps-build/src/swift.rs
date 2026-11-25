@@ -52,7 +52,7 @@ pub(crate) fn detect(tree: &dyn Tree, _o: &Overrides) -> Result<Option<Draft>, E
             df.run(&[], build);
         }
         // The executable and its resource bundles out of the build directory.
-        df.run(&[], &format!("mkdir -p /out && cp \"$(swift build -c release --show-bin-path)/{bin}\" /out/ && find \"$(swift build -c release --show-bin-path)\" -maxdepth 1 -name '*.resources' -exec cp -R {{}} /out/ \;"));
+        df.run(&[], &format!("mkdir -p /out && cp \"$(swift build -c release --show-bin-path)/{bin}\" /out/ && find \"$(swift build -c release --show-bin-path)\" -maxdepth 1 -name '*.resources' -exec cp -R {{}} /out/ \\;"));
         df.from(RUN, None);
         df.run(&[], "apt-get update && apt-get install -y --no-install-recommends ca-certificates tzdata && rm -rf /var/lib/apt/lists/* && useradd --system --uid 10001 app");
         df.line("WORKDIR /app");

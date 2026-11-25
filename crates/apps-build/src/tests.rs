@@ -844,8 +844,8 @@ fn scala_clojure_gleam_and_a_start_script_build_and_run() {
 
 #[test]
 fn nothing_detected_says_what_it_did_find() {
-    let err = plan(&tree(&[("pubspec.yaml", "name: shop")]), &Overrides::default()).unwrap_err();
-    assert!(err.to_string().contains("found pubspec.yaml: Dart"), "{err}");
+    let err = plan(&tree(&[("stack.yaml", "resolver: lts-22.0")]), &Overrides::default()).unwrap_err();
+    assert!(err.to_string().contains("found stack.yaml: Haskell"), "{err}");
     let err = plan(&tree(&[("Shop.sln", "")]), &Overrides::default()).unwrap_err();
     assert!(err.to_string().contains("Shop.sln: a .NET solution"), "{err}");
 }
