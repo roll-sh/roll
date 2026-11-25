@@ -987,7 +987,8 @@ fn skipped_line(s: &crate::model::PreviewSkipped) -> String {
     if s.stories > 0 {
         let first: Vec<String> = s.first_stories.iter().take(10).map(|p| span(p)).collect();
         let more = if (s.stories as usize) > first.len() { ", …" } else { "" };
-        parts.push(format!("{} ({}{more})", plural(s.stories as u64, "story", "stories"), first.join(", ")));
+        let n = if s.stories == 1 { "1 story".to_string() } else { format!("{} stories", s.stories) };
+        parts.push(format!("{n} ({}{more})", first.join(", ")));
     }
     format!("**Not taken:** {}.\n\n", parts.join("; "))
 }
