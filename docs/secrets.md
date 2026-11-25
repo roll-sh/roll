@@ -4792,7 +4792,7 @@ printed); `roll secrets backup --to <public key> --out shop.backup` writes the w
 The archive is sealed to that key (`roll-seal-v1`, associated data
 `roll-secrets-backup:<project>`), so the file is safe at rest anywhere and only the key's holder
 opens it: nothing in it is in the clear, and only it carries registrations' keys out of roll.
-`POST …/backup {recipient}` (admin, audited `project.backup`) is the call. Linked keys carry their
+`POST …/backup {recipient}` (admin and reveal over the whole project, audited `project.backup`) is the call. Linked keys carry their
 link and no value: a restore issues its own credentials, from the restored registrations.
 Personal values, history, leases and tokens aren't in it, and neither are registrations whose
 trust names the project they were made in or that hold a token of the server's own: AWS roles and
@@ -4836,7 +4836,7 @@ secret key is, open the archive there, and write nothing:
 
 - `roll secrets backup verify shop.backup --key roll-secrets-backup.key` (or
   `--latest-from-bucket`, the schedule's newest, read through `GET …/backup/latest` still sealed)
-  compares it with the live project (`POST …/backup/verify`, admin, audited `backup.verify`):
+  compares it with the live project (`POST …/backup/verify`, admin and reveal over the whole project, audited `backup.verify`):
   counts of environments, keys, registrations, identities and syncs; key names missing, changed
   (value or link compared by fingerprint, here and never answered) or added since;
   registrations missing or changed (key, certificate, credential); settings that differ; and the
@@ -6840,8 +6840,8 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/imports?path=` | | `Import[]` |
 | `PUT /environments/{env}/imports?path=` | `Import[]` | `Import[]` |
 | `GET /environments/{env}/exports?path=` | | `Export[]` |
-| `POST /backup` | `{recipient}` | `{sealed, context}`: the whole project, sealed to `recipient` (admin; archive version 2) |
-| `POST /backup/verify` | `Archive` (an opened backup) | `{project, at, v, environments, keys, registrations, identities, syncs, settings, left_out, live_keys}` (admin; nothing written): each part `{archive, live, missing, extra, changed}`, by name |
+| `POST /backup` | `{recipient}` | `{sealed, context}`: the whole project, sealed to `recipient` (admin and reveal over the whole project: `admin` alone is a 403; archive version 2) |
+| `POST /backup/verify` | `Archive` (an opened backup) | `{project, at, v, environments, keys, registrations, identities, syncs, settings, left_out, live_keys}` (admin and reveal over the whole project; nothing written): each part `{archive, live, missing, extra, changed}`, by name |
 | `GET /backup/latest` | | `{sealed, context, key}`: the schedule's newest backup, still sealed (admin; 404 with no schedule or none landed yet) |
 | `GET /backup/schedule` | | `BackupSchedule` or null (admin): bucket, recipient, `every_hours`, `keep`, `next_at`, `last_at`, `last_key`, `last_error` |
 | `PUT /backup/schedule` | `{bucket, recipient, every_hours?, keep?}` | `BackupSchedule` (admin; one of the project's roll buckets; the first backup at once) |

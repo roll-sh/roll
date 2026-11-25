@@ -171,11 +171,20 @@ pub struct Verified {
     pub live_keys: usize,
 }
 
+/// A backup and a verify reach every value of the project, protected environments' and the
+/// registrations' keys included: only a caller who may manage and reveal all of it, as a schedule's
+/// maker must (`backup_schedule.rs`). `admin` alone never includes `reveal`.
+fn need_whole(caller: &Caller, project: &str) -> Result<()> {
+    caller.need(Action::Admin, &Scope::whole(project))?;
+    caller.need(Action::Reveal, &Scope::whole(project))
+}
+
 impl Secrets {
     /// The project's archive sealed to `recipient` (an X25519 public key). Every value of the
-    /// project leaves in it, so it's an admin's, and audited.
+    /// project leaves in it, and its registrations' keys, so it's for a caller who may manage and
+    /// reveal all of it ([`need_whole`]), and audited.
     pub fn backup(&self, project: &str, recipient: &str, caller: &Caller) -> Result<crate::crypto::Sealed> {
-        caller.need(Action::Admin, &Scope::project(project))?;
+        need_whole(caller, project)?;
         let archive = self.archive(project)?;
         let plain = zeroize::Zeroizing::new(serde_json::to_vec(&archive).expect("JSON"));
         let sealed = crate::crypto::seal_to(recipient, &context(project), &plain).map_err(Error::BadRequest)?;
@@ -615,7 +624,7 @@ impl Secrets {
     /// values, keys and certificates are compared here and never answered. A project's admin's,
     /// as a backup is, and audited (it reads every value to compare).
     pub fn verify_backup(&self, project: &str, archive: Archive, caller: &Caller) -> Result<Verified> {
-        caller.need(Action::Admin, &Scope::project(project))?;
+        need_whole(caller, project)?;
         if !(1..=V).contains(&archive.v) {
             return Err(Error::BadRequest(format!("an archive of version {} (this server reads 1 to {V})", archive.v)));
         }

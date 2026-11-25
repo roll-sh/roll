@@ -406,6 +406,9 @@ pub async fn update(ctx: &Ctx<'_>) -> EsResult<Reply> {
     if let Some(e) = crate::opensearch::append_only_violation(&ctx.state(), &expr, "UPDATE", Some(&id)) {
         return Err(e);
     }
+    let name = crate::meta::resolve::resolve_date_math(&expr, ctx.now_ms)?;
+    let target = write::resolve_existing(&ctx.state(), &name).map_or(name, |idx| idx.name.clone());
+    crate::xpack::security::check_update(ctx, &target)?;
     let mut out = update_one(ctx, &expr, &id, &args, &body, retries).await?;
     match RefreshPolicy::parse(ctx.query("refresh"))? {
         RefreshPolicy::None => {}

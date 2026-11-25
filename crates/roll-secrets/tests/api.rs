@@ -6170,7 +6170,13 @@ async fn a_project_backs_up_sealed_to_a_key_and_restores_into_another() {
     api.ok(Method::PUT, "/environments/staging/secrets/TLS_CERT", Some(json!({ "link": link }))).await;
 
     let secret = [7u8; 32];
-    let b = api.ok(Method::POST, "/backup", Some(json!({ "recipient": roll_secrets::crypto::public_key(&secret) }))).await;
+    // Only a caller who may manage and reveal the whole project takes it out or compares it: an
+    // admin token that can't reveal gets neither.
+    let recipient = json!({ "recipient": roll_secrets::crypto::public_key(&secret) });
+    let admin_only = api.gate.issue("admin only", roll_secrets::access::rule(&api.project, None, None, &[roll_secrets::Action::Read, roll_secrets::Action::Admin]), None);
+    let (s, e) = api.req(Method::POST, "/backup", Some(recipient.clone()), Some(&admin_only)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{e}");
+    let b = api.ok(Method::POST, "/backup", Some(recipient)).await;
     assert!(!b.to_string().contains("sk_live_backup"), "sealed, never in the clear");
     let sealed: roll_secrets::crypto::Sealed = serde_json::from_value(b["sealed"].clone()).unwrap();
     let plain = roll_secrets::crypto::open_sealed(&secret, b["context"].as_str().unwrap(), &sealed).unwrap();
@@ -6180,6 +6186,8 @@ async fn a_project_backs_up_sealed_to_a_key_and_restores_into_another() {
     let v = api.ok(Method::POST, "/backup/verify", Some(archive.clone())).await;
     assert_eq!((v["keys"]["missing"].clone(), v["keys"]["changed"].clone(), v["registrations"]["missing"].clone()), (json!([]), json!(["staging:/API"]), json!([])), "{v}");
     assert!(!v.to_string().contains("sk_live_backup") && !v.to_string().contains("PRIVATE KEY"));
+    let (s, e) = api.req(Method::POST, "/backup/verify", Some(archive.clone()), Some(&admin_only)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{e}");
 
     let (_, other) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "restored" }))).await;
     let to = |p: &str| format!("/v1/secrets/projects/{}{p}", other["id"].as_str().unwrap());
