@@ -1078,7 +1078,7 @@ pub fn terms_lookup(ctx: &QueryCtx, l: &crate::query::term_level::TermsLookup) -
             // Read as the request's reader may read it (`TermsQueryBuilder.fetch` runs as the
             // user): a document its document level security hides is missing, fields its field
             // level security hides are left out.
-            let doc = super::lookup_source(ctx, super::LOOKUP_GET, &l.index, &idx, &l.id, l.routing.as_deref())?;
+            let doc = super::lookup_source(ctx, super::LOOKUP_GET, Some(&l.index), &idx, &l.id, l.routing.as_deref())?;
             // The lookup is a real get (`TermsQueryBuilder.fetch`): the shard's get stats count it.
             let c = &shard.counters;
             c.get_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

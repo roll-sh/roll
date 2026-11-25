@@ -4847,8 +4847,15 @@ pub(crate) const LOOKUP_TERM_VECTORS: &str = "indices:data/read/mtv[shard]";
 /// when it's missing or the reader's document level security hides it, else its version and
 /// `_source` (`None`: not stored) without the fields the reader's field level security hides,
 /// as a get by the reader answers.
-pub(crate) fn lookup_source(ctx: &QueryCtx, action: &str, requested: &str, idx: &Arc<IndexMeta>, id: &str, routing: Option<&str>) -> EsResult<Option<(i64, Option<Value>)>> {
-    let sec = ctx.security.read_lookup(ctx.st, ctx.now_ms, action, requested)?;
+///
+/// `requested: None` reads the index the search itself was authorized on (a `more_like_this`
+/// item without `_index`): not checked again, as OpenSearch's `search` action group, which
+/// doesn't hold term vectors, reads its own documents that way.
+pub(crate) fn lookup_source(ctx: &QueryCtx, action: &str, requested: Option<&str>, idx: &Arc<IndexMeta>, id: &str, routing: Option<&str>) -> EsResult<Option<(i64, Option<Value>)>> {
+    let sec = match requested {
+        Some(r) => ctx.security.read_lookup(ctx.st, ctx.now_ms, action, r)?,
+        None => ctx.security.read_as()?,
+    };
     // The read's own document and field level security: the role entries granting `action`
     // (a role may grant gets alone, with a query of their own).
     let engine = ctx.cluster.engine.index(ctx.cluster, ctx.st, idx)?;
