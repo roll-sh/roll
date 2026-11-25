@@ -420,7 +420,7 @@ if isinstance(viewer, dict):
     called = 0
     for t in vtools:
         prod = t.get("_meta", {}).get("roll/product", "")
-        if prod not in ("secrets", "previews", "workspace") or not t.get("annotations", {}).get("readOnlyHint"):
+        if prod not in ("secrets", "previews", "workspace", "search") or not t.get("annotations", {}).get("readOnlyHint"):
             continue
         req = t["inputSchema"].get("required", []) or t.get("_meta", {}).get("roll/one_of", [])[:1]  # one of some arguments: the first
         args = {a: seen[(prod, a)] if (prod, a) in seen else stand_in(t, prod, a) for a in req}

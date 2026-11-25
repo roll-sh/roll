@@ -1978,6 +1978,11 @@ impl Control {
     /// Sends a request to the cluster as its owner (through authentication and admission, so
     /// limits apply and it wakes the cluster like any client). On a fleet it runs on the node that
     /// owns the cluster: here, or sent there (an in-process caller on any node, as apps' links).
+    /// This control plane as an `Arc`, for work that outlives a request (a migration's copies).
+    pub(crate) fn arc(&self) -> Option<Arc<Control>> {
+        self.me.get()?.upgrade()
+    }
+
     pub(crate) async fn call(&self, c: &SearchCluster, mut req: EsRequest) -> EsResponse {
         // Who wrote a repository's references is said only by `put_repository`, never by a
         // request relayed here (the console's headers are the caller's).

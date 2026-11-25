@@ -2049,7 +2049,7 @@ type Settings = {
   max_usd_month: number;              // 0: no cap; once the month's cost reaches it, new previews wait
   secrets: { base: string; allow_production: boolean };      // "development", false
   env: Record<string, string>;        // overrides every service gets
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string; endpoints?: string[]; states?: {name, page, steps}[]; modes?: {name: string; color_scheme?: "dark" | "light"; locale?: string; timezone?: string}[]; storybook?: string /* "web" or "web:/storybook/" */; browsers?: ("firefox" | "webkit" | "webkit-phone")[] };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's; endpoints: up to 5 GET paths timed against main's
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string; endpoints?: string[]; states?: {name, page, steps}[]; login?: {page, steps} /* a type step's text may be "$NAME" */; modes?: {name: string; color_scheme?: "dark" | "light"; locale?: string; timezone?: string}[]; storybook?: string /* "web" or "web:/storybook/" */; browsers?: ("firefox" | "webkit" | "webkit-phone")[] };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's; endpoints: up to 5 GET paths timed against main's
   access: "link" | "team" | "public"; // "link": a preview's URLs need its link; "team": a person signed in to roll who may open the project
   visual_review: "off" | "check" | "required";   // the roll/visual review; required also blocks landing in roll ("off")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
@@ -2295,6 +2295,24 @@ type Settings = {
     and half again main's (Vercel's Speed Insights' INP, without visitors' own numbers yet). A
     number the page reports is kept only when it could be a time (a minute at most). Live: the
     Tab state's click timed on both. `a_screenshot_run_s_pages_are_only_those_asked_for_each_once`.
+    Signed in to the app (Percy's and Chromatic's saved logins; `github.login`: a page of the
+    first service's and its steps, as a state's): a page behind the app's own login would
+    otherwise screenshot its login page. A `type` step's text may be `$NAME`, a variable of the
+    preview's own environment (its secrets, resolved untrusted unless the project allows
+    production and the change is trusted, without dynamic credentials; then the project's and
+    its own variables, a `roll://` reference never as text), put in by the engine at the run,
+    added to the preview's masks, and never kept. The sign-in goes to the browser as the first
+    line of its container's stdin, into a file `shot.js` reads and removes: never a command line,
+    an environment variable, a log or the record (`ports::Login`'s `Debug` says only its page).
+    The run signs in before the first page, and its cookies stay in the browser for every page,
+    state, crop and endpoint timing after it; the sign-in page's own errors count for no page.
+    The activity says how it went ("screenshots: signed in through /login before its pages", or
+    the step it stopped at). A fork's preview signs in with nothing (its code would get what's
+    typed): its screenshots are taken signed out, and its activity says so. The other browsers'
+    run signs in the same way (the same stdin line; `browsers.js` takes the steps with Playwright
+    on each browser's page before its capture or crop). Not yet: Storybook's stories (they rarely
+    sit behind the app's login) and `try` (Next).
+    `screenshots_sign_in_first_on_a_trusted_preview`.
     Other browsers too (Percy's and Chromatic's browsers; `github.browsers`: `firefox`, `webkit`,
     and `webkit-phone`, WebKit at 390 × 844 at twice the density as a touch device, mobile
     Safari's engine; a picture past 2 MiB is left out so the others still fit):
@@ -2778,15 +2796,9 @@ Ranked by what a person notices first. Done so far:
 Ranked again after a sixth product review (2026-11-25), against Vercel's and Netlify's previews and
 comments, Render and Railway, Neon, Chromatic and Percy, Signadot, Jam.
 
-1. **Signed in to the app**: pages, states, crops, endpoint timings and `try` all start from a
-   fresh browser, so a page behind the app's own login screenshots its login page (Percy and
-   Chromatic capture with a saved login). The plan: `github.login` ({page, steps}, as a state's),
-   whose `type` text may be `$NAME`, a variable of the preview's own environment (its resolved
-   secrets), substituted by the engine at the run and handed to the browser as a file, never argv
-   or the record. It runs once per screenshot run in each engine before the pages, its cookies kept
-   for every page, state, crop and timing (and `try`'s). Only on a trusted preview: a fork's code
-   would receive what's typed, so its run says it skipped the login. Its text masked wherever the
-   page's words are shown.
+1. **Signed in to the app, in review**: the first service's run and the other browsers' sign in
+   first (`github.login`, `$NAME` from the preview's environment, trusted previews only). Next
+   for it: `try` (an agent's run signed in), and a live check against a page behind a login.
 2. **Coverage cut silently**: at most 40 stories and 10 pages, and nothing says what was left
    out; `skipped` (how many, which) on the run, the sheet and the comment; then stories chosen
    by what the change touched (Chromatic's TurboSnap).
