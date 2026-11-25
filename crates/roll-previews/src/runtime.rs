@@ -971,9 +971,8 @@ impl Runtime {
             && let Some(crate::store::LiveShare { ends, .. }) = self.share_live(preview, &t).await
         {
             let t = t.as_str();
+            crate::visit::share_followed(&self.store, preview, t);
             let now = self.store.now_ms().unwrap_or(ends);
-            // Who followed it isn't known (nobody signed in): that it was, once a day.
-            let _ = self.store.share_opened(preview, t, now.div_euclid(86_400_000), now);
             let left = ((ends - now) / 1000).max(1);
             return Some(self.enter(req, "roll_share", &share_cookie, t, left));
         }
@@ -1048,31 +1047,9 @@ impl Runtime {
         r
     }
 
-    /// When share link `token` of `preview` ends, if it's live: not revoked or past, and its maker
-    /// may still open the project's previews, asked again (off the async workers: it reads roll's
-    /// accounts) once last asked `visitor_recheck` ago. One whose maker may not ends now, said in
-    /// the preview's activity.
+    /// Share link `token` of `preview`, if it's live ([`Engine::share_visit`]).
     async fn share_live(&self, preview: &str, token: &str) -> Option<crate::store::LiveShare> {
-        let live = self.store.share_live(preview, token).ok().flatten()?;
-        let (share, maker_checked) = (live.id.clone(), live.maker_checked);
-        let Some(maker) = live.maker.clone() else { return Some(live) };
-        let now = self.store.now_ms().ok()?;
-        if maker_checked > now - self.cfg.visitor_recheck.as_millis() as i64 {
-            return Some(live);
-        }
-        let engine = self.engine().ok()?;
-        let project = self.store.row(preview).ok()?.project_id;
-        let e = engine.clone();
-        let reaches = tokio::task::spawn_blocking(move || e.maker_reaches(&maker, &project)).await.unwrap_or(false);
-        if reaches {
-            let _ = self.store.share_maker_checked(&share, now);
-            return Some(live);
-        }
-        let by = self.store.shares(preview).ok().and_then(|all| all.into_iter().find(|s| s.id == share)).map(|s| s.created_by).unwrap_or_default();
-        if self.store.revoke_share(preview, &share).is_ok() {
-            let _ = self.store.log(preview, &format!("{by}'s share link ended: they may no longer open the project's previews"));
-        }
-        None
+        crate::visit::share_visit(&self.store, self.engine().ok().as_ref(), preview, token, self.cfg.visitor_recheck).await
     }
 
     /// Whether `token` is a live session in `preview` whose person may still open the project

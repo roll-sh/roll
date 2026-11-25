@@ -1169,8 +1169,19 @@ host and for the same visitors, answered from roll previews through a port
 `no-store`, the latest 200, a 404 where previews isn't on the node and a 502 when it fails (the
 button then shows no list). The script is roll previews' own (`roll-previews/src/feedback.js`),
 so a note carries what went wrong on the page and what the reviewer did before it, as on roll
-previews' proxy; share links' guests and a reviewer's flags are previews' proxy's only. The tagger
-is a copy of previews' (`feedback.rs`).
+previews' proxy; a reviewer's flags are previews' proxy's only. The tagger is a copy of
+previews' (`feedback.rs`).
+
+roll previews' share links (someone outside the team, until the link ends) open a preview
+environment too, through a port roll previews fills (`integrations::PreviewShares`,
+`Apps::set_preview_shares`): on a `pv-` environment, after the bypass and callers and before
+sign-in, `?roll_share=<token>` is asked of previews, and a live link sets a host-only
+`roll_share_<env>` cookie that lasts as long as the link, then sends the visitor on without the
+token. Every later request asks previews again, so a revoked link stops at once; the cookie is
+taken out before the app sees it, and the guest is no visitor session (`…/visitors` and its
+sign-out stay about people). A link that takes notes gets its guest the button, posting from the
+page (`POST /__roll/notes`: JSON from the environment's own origin, 64 KiB at most) and listing
+only that link's notes; the guest's script isn't told where roll is.
 
 ### Permissions and MCP
 
