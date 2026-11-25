@@ -6,7 +6,7 @@ name: release-cli
 # (https://roll.sh/install.ps1) install from, with the winget and Scoop manifests filled in for it
 # (deploy/cli/render.sh).
 #
-# `windows-check` (cargo check for Windows) runs on pull requests that touch roll-cli and on a
+# `windows-check` (cargo check for Windows, on both runners) runs on pull requests that touch roll-cli and on a
 # dispatch without a tag, which builds and publishes nothing. It isn't part of the merge gate (ci.yml).
 
 on:
@@ -38,7 +38,16 @@ env:
 jobs:
   windows-check:
     if: github.event_name != 'push'
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+          # The release's ARM64 runner: ring's C needs its clang there.
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
     timeout-minutes: 60
@@ -46,13 +55,13 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
-          key: windows-check
+          key: windows-check-${{ matrix.target }}
       - name: cargo check
         shell: bash
-        run: cargo check --locked -p roll-cli --target x86_64-pc-windows-msvc
+        run: cargo check --locked -p roll-cli --target ${{ matrix.target }}
 
   build:
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
