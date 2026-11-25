@@ -26,6 +26,7 @@
 //!   audited: the private key reaches people only through the linked keys' own reveal routes.
 
 use crate::access::{Action, Caller, Scope};
+use crate::caller::{Registration, replace_registration_credential};
 use crate::crypto::{Dek, Keyring};
 use crate::links::{Field, Issued, Link, LinkProvider, Mode};
 use crate::{Error, Result, Secrets, Value, audit, names};
@@ -762,7 +763,9 @@ impl Secrets {
 
     /// Change a registration in place. New domains or a new DNS credential (checked first, as
     /// adding one checks it) order a new certificate at once; a new `rotate_days` within what the
-    /// current certificate allows moves the next renewal.
+    /// current certificate allows moves the next renewal. A new DNS credential also makes the
+    /// caller the registration's maker (orders act at their rights now); a name, domains or
+    /// `rotate_days` change keeps the maker.
     pub fn update_public_cert(&self, project: &str, id: &str, ch: PublicCertChange, caller: &Caller) -> Result<PublicCert> {
         caller.need(Action::Admin, &Scope::project(project))?;
         let ca = self.public_ca()?.clone();
@@ -782,6 +785,7 @@ impl Secrets {
                 }
             }
         }
+        let replacer = ch.dns_credential.as_ref().map(|_| self.replacer(caller)).transpose()?;
         let credential = match &ch.dns_credential {
             Some(cred) => {
                 let names = domains.as_deref().unwrap_or(r.domains.as_slice());
@@ -813,8 +817,10 @@ impl Secrets {
                 c.execute("UPDATE public_certs SET domains = ?, renew_requested = 1, failed_at = NULL WHERE id = ?", params![crate::json(d), id])?;
                 changed.push("domains");
             }
-            if let Some(sealed) = &credential {
-                c.execute("UPDATE public_certs SET dns_credential = ?, renew_requested = 1, failed_at = NULL WHERE id = ?", params![sealed, id])?;
+            let mut moved = String::new();
+            if let (Some(sealed), Some(by)) = (&credential, &replacer) {
+                moved = replace_registration_credential(c, Registration::PublicCertDns, id, sealed, by)?;
+                c.execute("UPDATE public_certs SET renew_requested = 1, failed_at = NULL WHERE id = ?", [id])?;
                 changed.push("DNS credential");
             }
             if let Some(d) = ch.rotate_days.filter(|d| *d != r.rotate_days) {
@@ -822,7 +828,7 @@ impl Secrets {
                 changed.push("rotate_days");
             }
             if !changed.is_empty() {
-                audit::record(c, self.keys()?, project, caller, "public_cert.update", None, None, &[], &format!("changed public certificate {name}'s {}", changed.join(", ")), now)?;
+                audit::record(c, self.keys()?, project, caller, "public_cert.update", None, None, &[], &format!("changed public certificate {name}'s {}{moved}", changed.join(", ")), now)?;
             }
             Ok(())
         })?;

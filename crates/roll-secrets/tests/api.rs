@@ -4775,7 +4775,8 @@ async fn an_intermediate_ca_issues_under_the_customers_own_root() {
         p.distinguished_name.push(rcgen::DnType::CommonName, "roll intermediate");
         p.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Constrained(0));
         p.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign, rcgen::KeyUsagePurpose::CrlSign];
-        p.name_constraints = Some(rcgen::NameConstraints { permitted_subtrees: vec![rcgen::GeneralSubtree::DnsName(permitted.into())], excluded_subtrees: vec![] });
+        let any_ip = vec![rcgen::GeneralSubtree::IpAddress(rcgen::CidrSubnet::V4([0; 4], [0; 4])), rcgen::GeneralSubtree::IpAddress(rcgen::CidrSubnet::V6([0; 16], [0; 16]))];
+        p.name_constraints = Some(rcgen::NameConstraints { permitted_subtrees: vec![rcgen::GeneralSubtree::DnsName(permitted.into())], excluded_subtrees: any_ip });
         p.not_after = ::time::OffsetDateTime::now_utc() + ::time::Duration::days(days);
         p.use_authority_key_identifier_extension = true;
         p
@@ -4809,6 +4810,14 @@ async fn an_intermediate_ca_issues_under_the_customers_own_root() {
     assert!(audit.contains("no name constraints within those domains (unconstrained: true)"), "{audit}");
     let (s, _) = api.call(Method::PUT, &chain_at, Some(json!({ "certificate": bare.pem(), "chain": root_cert.pem() }))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "a renewal without name constraints asks again");
+    // DNS constraints alone leave every IP address unconstrained (BR 7.1.2.5): refused, with the
+    // whole openssl line.
+    let mut dns_only = intermediate(30, "svc.internal");
+    dns_only.name_constraints.as_mut().unwrap().excluded_subtrees.clear();
+    let dns_only = dns_only.signed_by(&spki, &root_issuer).unwrap();
+    let (s, e) = api.call(Method::PUT, &chain_at, Some(json!({ "certificate": dns_only.pem(), "chain": root_cert.pem() }))).await;
+    let why = e["error"].as_str().unwrap_or_default();
+    assert!(s == StatusCode::BAD_REQUEST && why.contains("permits every IP address") && why.contains("permitted;DNS:svc.internal,excluded;IP:0.0.0.0/0.0.0.0,excluded;IP:0:0:0:0:0:0:0:0/0:0:0:0:0:0:0:0"), "{e}");
     let ca = api.ok(Method::PUT, &chain_at, Some(json!({ "certificate": inter.pem(), "chain": root_cert.pem() }))).await;
     assert_eq!((ca["status"].as_str(), ca["domains"].clone(), &ca["unconstrained"]), (Some("active"), json!(["prod.svc.internal"]), &json!(false)));
     assert!(ca.get("csr").is_none() && ca["ca_chain"].as_str().unwrap().ends_with(&root_cert.pem()));
@@ -8739,6 +8748,45 @@ async fn public_certificates_are_ordered_in_the_background_renewed_and_a_failed_
     api.ok(Method::PUT, "/environments/staging/secrets/TLS_KEY", Some(confirmed)).await;
     let health = api.ok(Method::GET, "/health", None).await;
     assert!(health.as_array().unwrap().iter().any(|f| f["issue"] == "exposed" && f["environment"] == "production" && f["key"] == "TLS_KEY" && f["detail"].as_str().unwrap().contains("staging")), "{health}");
+}
+
+/// docs/secrets.md, "Public certificates": a new DNS credential is the registration made anew, so
+/// orders act at its replacer's rights from then on, never at the old maker's; a rename keeps the
+/// maker.
+#[tokio::test]
+async fn replacing_a_public_certificates_dns_credential_makes_the_replacer_its_maker() {
+    let api = Api::new().await;
+    api.secrets.set_public_ca(Arc::new(FakeCa::new()));
+    let (_, p) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "team" }))).await;
+    let team = p["id"].as_str().unwrap().to_string();
+    let at = |rest: &str| format!("/v1/secrets/projects/{team}{rest}");
+    api.join(&team, "cat", "admin", None).await;
+    api.join(&team, "bob", "admin", None).await;
+    let le = roll_secrets::public_certs::PUBLIC_CAS[0];
+    let new = json!({ "name": "web", "directory_url": le, "domains": ["www.roll-fake.test"], "dns_provider": "cloudflare", "dns_credential": "fake-cf-dns-token", "eab_kid": "kid-roll-fake", "eab_hmac_key": "cm9sbC1mYWtlLWhtYWM" });
+    let (s, cert) = api.signed_in("cat", false, Method::POST, &at("/public-certs"), Some(new)).await;
+    assert!(s.is_success(), "{s} {cert}");
+    let id = cert["id"].as_str().unwrap().to_string();
+    let (s, cert) = api.signed_in("bob", false, Method::PATCH, &at(&format!("/public-certs/{id}")), Some(json!({ "dns_credential": "fake-cf-dns-token" }))).await;
+    assert!(s.is_success() && cert["created_by"] == "usr_bob", "{s} {cert}");
+    let (_, cert) = api.as_ada(Method::PATCH, &at(&format!("/public-certs/{id}")), Some(json!({ "name": "web-2" }))).await;
+    assert_eq!(cert["created_by"], "usr_bob", "a rename keeps the maker: {cert}");
+    let (_, audit) = api.as_ada(Method::GET, &at("/audit?action=public_cert.update"), None).await;
+    assert!(audit.to_string().contains("its maker moved from usr_cat to usr_bob"), "{audit}");
+    let sweep = || {
+        let s = api.secrets.clone();
+        async move { tokio::task::spawn_blocking(move || s.sweep_public_certs().unwrap()).await.unwrap() }
+    };
+    // The first maker leaving no longer stops it; the replacer leaving does.
+    assert_eq!(api.as_ada(Method::DELETE, &format!("/v1/workspace/projects/{team}/members/usr_cat"), None).await.0, StatusCode::NO_CONTENT);
+    sweep().await;
+    assert_eq!(api.as_ada(Method::GET, &at("/public-certs"), None).await.1[0]["status"], "issued");
+    assert_eq!(api.as_ada(Method::DELETE, &format!("/v1/workspace/projects/{team}/members/usr_bob"), None).await.0, StatusCode::NO_CONTENT);
+    assert!(api.as_ada(Method::POST, &at(&format!("/public-certs/{id}/renew")), None).await.0.is_success());
+    sweep().await;
+    let (_, listed) = api.as_ada(Method::GET, &at("/public-certs"), None).await;
+    let why = listed[0]["last_error"].as_str().unwrap_or_default();
+    assert!(why.contains("usr_bob") && why.contains("may no longer manage"), "{listed}");
 }
 
 /// What rolld's notifier would send, recorded: chat posts and mails. Only `usr_bob` may use a chat

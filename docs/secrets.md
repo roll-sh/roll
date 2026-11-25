@@ -1542,7 +1542,8 @@ a key still links to can't be deleted, nor one with a retired credential still w
 grace period (its revocation goes through the rotator).
 
 A rotator is edited in place (`PATCH …/rotators/{id} {name?, url?}`, the pencil; a new URL is
-checked as adding one is) and its signing secret rotated (`POST …/rotators/{id}/rotate-secret`,
+checked as adding one is, and makes the caller the rotator's maker, as a new credential does for
+every registration: see below) and its signing secret rotated (`POST …/rotators/{id}/rotate-secret`,
 the key button): the new `whsec_…` is shown once and signs every call from then on. Put it in the
 endpoint right away; a call the endpoint refuses in between fails, changes nothing (the value in
 use stays) and is retried, as any failed rotation or revocation is.
@@ -2824,14 +2825,18 @@ TLS certificates for services (mTLS between them), with no CA to run.
   valid now, and verifies through certificates that are CAs, valid now and allow the path's length,
   up to a self-signed root.
   **It must be constrained.** The certificate, or one between it and the root, must carry a
-  critical `nameConstraints` whose permitted DNS names are all within the CA's domains. Otherwise
-  roll's key would be a CA for every name under a root that every laptop and service trusts, so
+  critical `nameConstraints` whose permitted DNS names are all within the CA's domains and, unless
+  the policy has `allow_ip`, that excludes `0.0.0.0/0` and `::/0` (or permits IP ranges short of a
+  whole family; CA/B Forum BR 7.1.2.5), in the same certificate. Otherwise roll's key would be a CA
+  for every name or address under a root that every laptop and service trusts, so
   it's refused with a 400 that says what the signer dropped and how to keep it:
   - AWS Private CA's plain subordinate templates (`SubordinateCACertificate_PathLen0/V1`) drop a
     CSR's extensions. Issue it with `SubordinateCACertificate_PathLen0_CSRPassthrough/V1` (or
     `…_APIPassthrough/V1` with the constraints in the API passthrough).
   - `openssl ca` copies none by default (`copy_extensions = none`). Set `copy_extensions = copy`,
-    or put `nameConstraints = critical,permitted;DNS:svc.internal` in the extension section.
+    or put
+    `nameConstraints = critical,permitted;DNS:svc.internal,excluded;IP:0.0.0.0/0.0.0.0,excluded;IP:0:0:0:0:0:0:0:0/0:0:0:0:0:0:0:0`
+    in the extension section (without the two `excluded;IP` parts for a CA with `allow_ip`).
 
   A root that constrains this CA some other way (a policy outside the certificate) can install it
   with `unconstrained: true`: the CA then answers `unconstrained: true` (the dashboard marks it),
@@ -3119,7 +3124,11 @@ the names with dns-01, renews them, and keys link to the result.
   - The list shows each revocation of a certificate that hasn't ended (`revocations`: serial,
     reason, `revoked` or `pending` with `last_error`).
 - `PATCH …/public-certs/{id} {name?, domains?, dns_credential?, rotate_days?}` (admin). New domains or a
-  new credential are checked as adding them is, then order a new certificate at once. The CA and the
+  new credential are checked as adding them is, then order a new certificate at once. A new
+  `dns_credential` makes the caller the registration's maker, so orders act at the replacer's
+  rights from then on (the audit row names both); a name, domains or `rotate_days` change keeps the
+  maker. A workload identity's login can't replace it (400: a registration's credential is replaced
+  by a person, a token or the operator), as for SaaS and outside rotators. The CA and the
   DNS provider never change in place: a new one is another registration. `DELETE` is refused while a
   key links to it. Its certificates stay valid until they end.
 - **Never answered or logged:** the DNS credential, the EAB key, the account's key and the
@@ -6664,15 +6673,15 @@ isn't in the workspace is 404.
 | `GET /rotators` | | `Rotator[]` (`read` on the project) |
 | `POST /rotators` | `{name, url}` | 201 `Rotator & {secret}` (`admin`; the signing secret shown once) |
 | `DELETE /rotators/{id}` | | 204; 409 while a key links to it (`admin`) |
-| `PATCH /rotators/{id}` | `{name?, url?}` | `Rotator` (`admin`; a new URL is checked first) |
+| `PATCH /rotators/{id}` | `{name?, url?}` | `Rotator` (`admin`; a new URL is checked first, and makes the caller the rotator's `created_by` (the audit row names both; a workload identity's login is a 400); a name change keeps the maker) |
 | `POST /rotators/{id}/rotate-secret` | | `Rotator & {secret}` (`admin`; the new signing secret, shown once) |
 | `GET /saas` | | `SaasRotator[]` (`read` on the project; never the credential) |
 | `POST /saas` | `{name, vendor, target, credential, credential_expires_at?}` (`credential_expires_at`: when the credential ends at the vendor, ms, in the future) | 201 `SaasRotator` (`admin`; never the credential; `credential_expires_at` when given) |
 | `DELETE /saas/{id}` | | 204; 409 while a key links to it or a retired key waits (`admin`) |
-| `PATCH /saas/{id}` | `SaasRotatorChange` | `SaasRotator` (`admin`; a new `credential` is checked with the vendor first, read only, and a refused one is a 400 that changes nothing; a new `credential` makes the caller the registration's `created_by`, so its links act at the replacer's rights from then on, and the audit row names both; a name or date change keeps the maker; never the credential) |
+| `PATCH /saas/{id}` | `SaasRotatorChange` | `SaasRotator` (`admin`; a new `credential` is checked with the vendor first, read only, and a refused one is a 400 that changes nothing; a new `credential` makes the caller the registration's `created_by`, so its links act at the replacer's rights from then on, and the audit row names both (a workload identity's login is a 400); a name or date change keeps the maker; never the credential) |
 | `GET /public-certs` | | `PublicCert[]` (`read` on the project; never a credential, the EAB key or the private key) |
 | `POST /public-certs` | `NewPublicCert` | 201 `PublicCert`, `status: "pending"` (`admin`; the DNS credential is checked first, read only: each name's zone; the order is the background job's) |
-| `PATCH /public-certs/{id}` | `PublicCertChange` | `PublicCert` (`admin`; new `domains` or `dns_credential`, checked as adding one checks it, order a new certificate at once; `rotate_days` over the current certificate's lifetime less 14 days is a 400) |
+| `PATCH /public-certs/{id}` | `PublicCertChange` | `PublicCert` (`admin`; new `domains` or `dns_credential`, checked as adding one checks it, order a new certificate at once; `rotate_days` over the current certificate's lifetime less 14 days is a 400; a new `dns_credential` makes the caller the registration's `created_by`, as for `PATCH /saas/{id}`) |
 | `POST /public-certs/{id}/renew` | | 202 `PublicCert` (`write`; ordered in the background, linked keys rotate once it's issued); 429 `rate_limited` past one an hour or three a week, saying when |
 | `POST /public-certs/{id}/revoke` | `{serial?, reason?}` | `PublicCert` (`admin`; `serial` `current`, the default, also orders a replacement, or `previous`; `reason` RFC 5280's, default `unspecified`); 502 when the CA refused (pending: roll asks again) |
 | `DELETE /public-certs/{id}` | | 204; 409 while a key links to it (`admin`) |

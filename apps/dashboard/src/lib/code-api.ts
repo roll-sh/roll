@@ -245,7 +245,8 @@ export interface Page<T> {
 export type FileWrite = { content: string; mode?: string } | { content_b64: string; mode?: string } | { delete: true };
 
 export interface WriteChangeset {
-  base: string;
+  /** null: an empty repo's first commit. */
+  base: string | null;
   message: string;
   author?: { name: string; email: string };
   files: Record<string, FileWrite>;

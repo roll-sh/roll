@@ -1,0 +1,11 @@
+{
+  "id": "fastapi",
+  "name": "FastAPI",
+  "blurb": "A Python API",
+  "files": {
+    "requirements.txt": "fastapi>=0.160,<1\nuvicorn[standard]>=0.54,<1\n",
+    "main.py": "from fastapi import FastAPI\n\napp = FastAPI(title=\"{{name}}\")\n\n\n@app.get(\"/\")\ndef index():\n    return {\"name\": \"{{name}}\", \"ok\": True}\n\n\n@app.get(\"/hello/{who}\")\ndef hello(who: str):\n    return {\"hello\": who}\n",
+    ".gitignore": ".venv/\n__pycache__/\n.env*\n",
+    "README.md": "# {{name}}\n\nA FastAPI app, started from roll's FastAPI starter. Every landing on its default branch deploys it.\n\nRun it on your computer:\n\n```sh\npython -m venv .venv && . .venv/bin/activate\npip install -r requirements.txt\nuvicorn main:app --reload\n```\n"
+  }
+}
