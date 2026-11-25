@@ -535,6 +535,7 @@ function Form({
         <Toggle label="A commit status (roll/preview)" checked={s.github.status} onChange={(v) => set("github", { ...s.github, status: v })} />
         <Toggle label="A deployment" checked={s.github.deployment} onChange={(v) => set("github", { ...s.github, deployment: v })} />
         <Toggle label="A feedback button on its pages" note="For people who open it through roll: a note pinned to the page posts on the change." checked={s.feedback} onChange={(v) => set("feedback", v)} />
+        <Toggle label="Mail about notes" note="A new note to the change's author; a reply or a resolve to the note's. Never to whoever wrote it, nor to a share link's guests." checked={s.note_mail !== false} onChange={(v) => set("note_mail", v)} />
       </Section>
 
       <Section title="Screenshots and checks">

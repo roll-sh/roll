@@ -287,6 +287,10 @@ pub enum AppsCmd {
         /// The build command, over the detected one.
         #[arg(long)]
         build_command: Option<String>,
+        /// Where a static build's files are (`dist`, `out`, `public`): served as a static site;
+        /// `none` goes back to detecting it.
+        #[arg(long, value_name = "DIR")]
+        output: Option<String>,
         /// The start command baked into the image at the build (`--start` runs over it, no
         /// rebuild).
         #[arg(long)]
@@ -606,6 +610,24 @@ pub enum AppsCmd {
         sbom: Option<String>,
         #[arg(long, short = 'o', requires = "sbom")]
         output: Option<PathBuf>,
+        /// Keep a deployment from pruning, so rolling back to it stays instant.
+        #[arg(long, value_name = "DEPLOYMENT", conflicts_with_all = ["commits", "vulnerabilities", "explain", "sbom", "unpin"])]
+        pin: Option<String>,
+        /// Let a pinned deployment be pruned again.
+        #[arg(long, value_name = "DEPLOYMENT", conflicts_with_all = ["commits", "vulnerabilities", "explain", "sbom"])]
+        unpin: Option<String>,
+        /// Only deploys in this state (`failed`, `active`, `ready`…).
+        #[arg(long)]
+        status: Option<String>,
+        /// Only deploys this person, token or commit author made.
+        #[arg(long)]
+        actor: Option<String>,
+        /// Only deploys whose message holds this, or whose commit starts with it.
+        #[arg(long, value_name = "TEXT")]
+        search: Option<String>,
+        /// Every environment's deploys of the service, not one environment's.
+        #[arg(long)]
+        every_env: bool,
     },
     /// Its objective (`run.slo`) against its window: what met it, the error budget left, and
     /// whether it's burning fast.
@@ -3236,7 +3258,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, alert_cpu, alert_metric, alert_anomaly, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, build_size, submodules, submodule_repos, lfs, otel, rollout, rollout_step, rollout_errors, rollout_manual, rollout_checks, overlap, h2c, health_grpc, scale, public, drain, cpu_target, busy_cpu, memory_target, latency_target, oidc_audience, push, restart, restart_tries, affinity, tcp, udp, rollback_on_crash, rebuild_on_base, block_on, queue, alert_capacity, alert_route, skew_protection, rollout_slo_burn, rollout_p95, floor, floor_timezone, set } => {
+        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, output, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, alert_cpu, alert_metric, alert_anomaly, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, build_size, submodules, submodule_repos, lfs, otel, rollout, rollout_step, rollout_errors, rollout_manual, rollout_checks, overlap, h2c, health_grpc, scale, public, drain, cpu_target, busy_cpu, memory_target, latency_target, oidc_audience, push, restart, restart_tries, affinity, tcp, udp, rollback_on_crash, rebuild_on_base, block_on, queue, alert_capacity, alert_route, skew_protection, rollout_slo_burn, rollout_p95, floor, floor_timezone, set } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
             let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() || rollout_manual.is_some() || rollout_checks.is_some() || overlap.is_some() || rollout_slo_burn.is_some() || rollout_p95.is_some() {
@@ -3353,7 +3375,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     build.insert("packages".into(), json!(names));
                 }
             }
-            for (k, v) in [("builder", builder.map(Value::from)), ("dockerfile", text(dockerfile)), ("target", text(stage)), ("install", text(install)), ("build", text(build_command)), ("start", text(build_start))] {
+            for (k, v) in [("builder", builder.map(Value::from)), ("dockerfile", text(dockerfile)), ("target", text(stage)), ("install", text(install)), ("build", text(build_command)), ("output", text(output)), ("start", text(build_start))] {
                 if let Some(v) = v {
                     build.insert(k.into(), v);
                 }
@@ -3720,6 +3742,20 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             };
             api.post(&format!("/v1/apps/services/{}/restore", enc(&s(&d["id"]))), json!({})).await?
         }
+        AppsCmd::Deploys { target, pin, unpin, .. } if pin.is_some() || unpin.is_some() => {
+            let svc = service(api, &target).await?;
+            let (dep, on) = match (pin, unpin) {
+                (Some(d), _) => (d, true),
+                (None, d) => (d.unwrap_or_default(), false),
+            };
+            let path = format!("{}/deploys/{}/pin", env_path(&svc, &target.env), enc(&dep));
+            let d = if on { api.post(&path, json!({})).await? } else { api.call(reqwest::Method::DELETE, &path, None).await? };
+            if !json_out {
+                println!("{dep} {}", if on { "pinned: never pruned, always one rollback away" } else { "unpinned: pruned as the kept deployments are" });
+                return Ok(());
+            }
+            d
+        }
         AppsCmd::Deploys { target, sbom: Some(dep), output, .. } => {
             let svc = service(api, &target).await?;
             let b = api.get(&format!("{}/deploys/{}/sbom", env_path(&svc, &target.env), enc(&dep))).await?;
@@ -3987,9 +4023,12 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             json!({ "url": url })
         }
-        AppsCmd::Deploys { target, commits: None, .. } => {
+        AppsCmd::Deploys { target, commits: None, status, actor, search, every_env, .. } => {
             let svc = service(api, &target).await?;
-            let v = api.get(&format!("{}/deploys", env_path(&svc, &target.env))).await?;
+            let q: Vec<String> = [("status", status), ("actor", actor), ("q", search)].into_iter().filter_map(|(k, v)| v.map(|v| format!("{k}={}", enc(&v)))).collect();
+            let qs = if q.is_empty() { String::new() } else { format!("?{}", q.join("&")) };
+            let path = if every_env { format!("/v1/apps/services/{}/deploys{qs}", enc(&s(&svc["id"]))) } else { format!("{}/deploys{qs}", env_path(&svc, &target.env)) };
+            let v = api.get(&path).await?;
             if !json_out {
                 for d in v.as_array().into_iter().flatten() {
                     let rev = d["revision"].as_str().map(|r| &r[..r.len().min(8)]).unwrap_or("-").to_string();

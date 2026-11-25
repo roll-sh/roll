@@ -306,6 +306,10 @@ async fn tools_follow_the_tokens_rules() {
     let schema = |list: &Value, tool: &str| list["tools"].as_array().unwrap().iter().find(|t| t["name"] == tool).map(|t| t["inputSchema"]["properties"].clone()).unwrap();
     assert!(schema(&d.rpc(&asker, "tools/list", json!({})).await, "postgres_delete_project").get("approval").is_some());
     assert!(schema(&d.rpc(&reader, "tools/list", json!({})).await, "postgres_query").get("approval").is_none());
+    // Per tool: a token that reads freely and asks to delete is offered it on the delete only.
+    let mixed = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow", "delete": "ask" } }])).await;
+    let listed = d.rpc(&mixed, "tools/list", json!({})).await;
+    assert!(schema(&listed, "postgres_delete_project").get("approval").is_some() && schema(&listed, "postgres_list_projects").get("approval").is_none());
     // A token made to ask people is also told it can ask for what it was refused, for a while.
     let refused = d.tool(&asker, "postgres_list_projects", json!({})).await;
     let said = refused["content"][0]["text"].as_str().unwrap_or_default();
@@ -935,6 +939,11 @@ async fn a_resource_is_found_by_name_or_link() {
     // about is skipped, never put to a person, and the rest is found.
     let token = d.token(json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }, { "product": "postgres", "resources": "*", "actions": { "read": "allow" } }])).await;
     assert_eq!(d.http(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "agents_ask": [{ "product": "postgres" }] }))).await.0, StatusCode::OK);
+    // What the policy has agents ask about takes the approval argument, though the token's rules
+    // only allow; the rest doesn't.
+    let listed = d.rpc(&token, "tools/list", json!({})).await;
+    let takes = |tool: &str| listed["tools"].as_array().unwrap().iter().find(|t| t["name"] == tool).unwrap()["inputSchema"]["properties"].get("approval").is_some();
+    assert!(takes("postgres_list_projects") && !takes("workspace_list_projects"), "{listed}");
     let held = d.tool(&token, "roll_find", json!({ "query": "pa" })).await;
     let skipped = held["structuredContent"]["skipped"].as_array().unwrap();
     assert!(skipped.iter().any(|s| s["tool"] == "postgres_list_projects"), "{held}");

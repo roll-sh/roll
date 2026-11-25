@@ -1,8 +1,8 @@
 //! What every crawl on this node shares per site, outside any cluster's state (so neither more
 //! connectors nor more clusters, nor deleting a connector, buys more): an owner's crawls of a
-//! site in the last 24 hours, and the site's next request turn, which spaces requests to one
-//! site across every crawl on the node. Domain verification (phase 2) moves the daily count into
-//! roll's catalogue, fleet-wide.
+//! site in the last 24 hours (when the host keeps no count fleet-wide: `verify::Sites`), and the
+//! site's next request turn, which spaces requests to one site across every crawl, `crawl-test`
+//! and verification check on the node.
 
 use super::url::Link;
 use std::collections::HashMap;
@@ -45,11 +45,6 @@ fn full(st: &mut State, owner: &str, sites: &[String], per_day: u64, now_ms: i64
         let v = st.crawls.get(&(owner.to_string(), site.clone()))?;
         (v.len() as u64 >= per_day).then(|| (site.clone(), v.iter().min().copied().unwrap_or(now_ms) + DAY_MS))
     })
-}
-
-/// Whether a crawl of `sites` by `owner` may start, recording nothing.
-pub fn check_crawl(owner: &str, sites: &[String], per_day: u64, now_ms: i64) -> Result<(), (String, i64)> {
-    full(&mut state().lock(), owner, sites, per_day, now_ms).map_or(Ok(()), Err)
 }
 
 /// Records a crawl of `sites` by `owner` at `now_ms`; or, when one of them has had `per_day`

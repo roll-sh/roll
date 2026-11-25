@@ -2242,7 +2242,11 @@ the rest are skipped by the tests' own prerequisites.
   instead of being overwritten. A snapshot that fails deletes its own shard files once the
   repository data shows it isn't there; its chunks, named by segment and so possibly uploaded
   by a snapshot taken at the same time, are left to `_cleanup`, which keeps every generation
-  readers may start from;
+  readers may start from. Elasticsearch drops a shard's unreferenced blobs on its next snapshot
+  of that shard; roll doesn't, because a snapshot running elsewhere (on another node, or a
+  cluster writing the same bucket) records the chunks it uses only when it commits, so a commit
+  can't tell another snapshot's chunks from leftovers. As on Elasticsearch, deleting snapshots
+  waits for the snapshots running in the repository, which may reuse what it would delete;
   `_cleanup` deletes what no snapshot references, and only objects of the names roll writes
   (`index-N` from 1, `tests-<uuid>`, its shard files and chunks under `indices/`; nothing when
   the bucket holds no repository data), and aborts only its own dangling uploads,

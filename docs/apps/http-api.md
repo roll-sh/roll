@@ -86,7 +86,8 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}` | | `Environment` | read |
 | `DELETE /v1/apps/services/{id}/environments/{env}` | | 204 | delete |
 | `POST /v1/apps/services/{id}/environments/{env}/deploys` | `NewDeploy`, a gzipped tar of a tree (`application/gzip`, `roll up`), or an image built elsewhere (`application/x-docker-image`: `docker save`'s archive, gzipped or not; at most the upload limit; its names are taken out before it's loaded, and it's tagged as a build's would be; on the fleet a CodeBuild run of its own loads and pushes it to the service's ECR repository) | 202 `Deployment` | deploy*; admin with `X-Roll-Override: 1` |
-| `GET /v1/apps/services/{id}/environments/{env}/deploys?before=` | | `Deployment[]`, newest first, 100 at most; `before` (unix ms, the last one's `created_at`): the next page | read |
+| `GET /v1/apps/services/{id}/environments/{env}/deploys?before=&status=&actor=&q=` | | `Deployment[]`, newest first, 100 at most; `before` (unix ms, the last one's `created_at`): the next page; `status` (`queued`, `building`, `deploying`, `ready`, `active`, `inactive`, `failed`, `canceled`, `removed`), `actor` (exactly the deploy's) and `q` (in its message, or the start of its commit; 1–200) narrow it in the database, so a page is 100 matches | read |
+| `GET /v1/apps/services/{id}/deploys?before=&status=&actor=&q=` | | `Deployment[]`: every environment's (previews' too), as above | read |
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}` | | `Deployment` | read |
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/logs?follow=&tail=` | | `LogLine[]` or SSE (ends with the deploy: an `end` event, then the stream closes, so a follower stops instead of reading it again; a job's and a run's log end the same way) | read |
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/sbom` | | its image's SBOM, CycloneDX JSON (`application/vnd.cyclonedx+json`, as a download) from the same scan; 404 when it wasn't scanned, the SBOM was over 8 MiB, or the deployment was pruned | read |
@@ -97,6 +98,8 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/vulnerabilities?severity=` | | `{ scan: ScanSummary \| null, vulnerabilities: Vulnerability[] }`: its image's known vulnerabilities, most severe first (then those with a fix), at most 2,000 (the counts are of all); `severity` keeps those at it or worse; a pruned deployment's list is empty, its counts kept | read |
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/commits` | | `DeployCommits`: what a repo deployment brings over the live one (for the live one: the one live before it), along its first parents, newest first, at most 50 | read |
 | `POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/approve` | | 200 `{deployment, approved_by, needed, live, waiting?}`: a person's approval (signed in or the operator; a token's is 403) of a deployment waiting at `ready` where the environment asks for `approvals`, never its own author's (403); the one that makes the count puts it live (`live`: the new deployment), unless a freeze still stops it (`waiting` says why); 409 when the environment asks for none or it isn't waiting | deploy* |
+| `POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/pin` | | `Deployment` with `pinned_at`: never pruned (its image and build log stay, so its rollback stays instant), nor counted toward the kept ones; 409 once pruned; audited | write |
+| `DELETE /v1/apps/services/{id}/environments/{env}/deploys/{dep}/pin` | | `Deployment`: pruned again as the kept ones are; audited | write |
 | `POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollback` | `{ keep_variables? }` (default false: the variables come back as they were when it was live); `X-Roll-Override: 1` puts a never-live `ready` build live during a freeze, audited; or `{ no_traffic: true, variables: {NAME: value} }`: a view of `dep` at its own URL with some of the environment's variables given values of its own (1–50 of its names, each ≤ 64 KiB; `variables` without `no_traffic`, or `no_traffic` without `variables`, is a 400): sealed, never listed, never put live (no `deploy.ready`), not counted toward what's kept, pruned a day after its URL was last visited | 202 `Deployment` (a view's `url` is its own) | deploy*; admin with `X-Roll-Override: 1` |
 | `POST /v1/apps/services/{id}/environments/{env}/rollback` | `{ keep_variables? }` | 202 `Deployment`: back to the deployment live before what runs, walking back through rollbacks (after B → A the next goes before A, never forward to B); 409 when there's none | deploy* |
 | `GET /v1/apps/services/{id}/environments/{env}/push` | | `PushState[]`: the environment's `run.push` rules as they stand, read on the service's owner: each group's `lag` (records past its committed offset, on the partitions it has committed on: Kafka's rule, so 0 before its first delivery), `delivered`, `dead_lettered`, `last_delivered_at`, `failing_since` and `last_error` since that node began delivering, and `off` (why nothing is delivered) | read |
@@ -239,6 +242,7 @@ type Build = {
    *  wins over it. */
   watch?: string[];
   spa?: boolean;            // a single-page app (a page path with no file answers index.html); unset: detected
+  output?: string;          // where a static build's files are, relative to the build's root (Netlify's publish directory): a Node app with one is built and that directory served as a static site; unset: detected (a generator's own, netlify.toml's publish, vercel.json's outputDirectory)
   target?: string;          // the tree's own Dockerfile's stage to build (--target): letters, digits, _ - . (64 at most)
   /** System packages the generated Dockerfile installs, apt (or apk on Alpine) in every stage built on an image:
    *  at most 50 names of lowercase letters, digits and + - . : = ~ _; refused for a static site and a
@@ -692,6 +696,7 @@ type Deployment = {
   finished_at: number | null;
   /** Milliseconds from the deploy's start to its first healthy answer. */
   ready_ms: number | null;
+  pinned_at?: number;         // pinned (…/pin): never pruned
   image_bytes?: number;       // its image's size, where the runtime says (a deploy's log adds a hint past 1 GB)
 };
 type SloIndicator = { total: number /* requests, or minutes with requests */; bad: number; sli: number | null /* percent that met it */; budget_left: number | null };

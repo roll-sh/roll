@@ -828,6 +828,15 @@ pub struct MinuteRow {
     pub over_capacity: i64,
 }
 
+/// What a deployments list is narrowed to (`…/deploys?status=&actor=&q=`).
+#[derive(Clone, Debug, Default)]
+pub struct DeployFilter {
+    pub status: Option<String>,
+    pub actor: Option<String>,
+    /// In its message, or the start of its commit.
+    pub q: Option<String>,
+}
+
 /// A visitor's session: `(hash, user, login, created_at, expires_at)`.
 pub type VisitSession = (String, String, Option<String>, Option<i64>, i64);
 
@@ -914,7 +923,7 @@ pub struct Pruned {
     pub image: Option<String>,
 }
 
-const DEPLOY_COLS: &str = "id, service, env, status, cause, revision, message, image, plan, rollback_of, error, created_at, started_at, finished_at, ready_ms, run, vars_hash, actor, pruned_at, error_detail, image_bytes";
+const DEPLOY_COLS: &str = "id, service, env, status, cause, revision, message, image, plan, rollback_of, error, created_at, started_at, finished_at, ready_ms, run, vars_hash, actor, pruned_at, error_detail, image_bytes, pinned_at";
 
 fn json<T: serde::de::DeserializeOwned>(s: &str) -> code_sql::Result<T> {
     serde_json::from_str(s).map_err(|e| code_sql::Error::Conversion(e.to_string()))
@@ -1052,6 +1061,7 @@ fn deploy_row(r: &code_sql::Row<'_>) -> code_sql::Result<Deployment> {
         actor: r.get(17)?,
         pruned_at: r.get(18)?,
         image_bytes: r.get(20)?,
+        pinned_at: r.get(21)?,
         vulnerabilities: None,
         error_detail,
         fix,
@@ -1106,6 +1116,7 @@ impl Store {
         // A deployment's image's size, where the runtime says (Fly's release sizes).
         db.add_column("deployments", "image_bytes", "INTEGER")?;
         db.add_column("deployments", "build_steps", "TEXT")?;
+        db.add_column("deployments", "pinned_at", "INTEGER")?;
         // Paths whose CORS preflights pass the gate (`access.preflight`), as JSON.
         db.add_column("env_access", "preflight", "TEXT")?;
         // Services let in with roll's token for them (`access.callers`), as JSON.
@@ -1828,7 +1839,7 @@ impl Store {
                 )?;
             }
             c.execute(
-                &format!("INSERT INTO deployments ({DEPLOY_COLS}, upload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, ?, ?, ?, NULL, NULL, NULL, ?)"),
+                &format!("INSERT INTO deployments ({DEPLOY_COLS}, upload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, ?, ?, ?, NULL, NULL, NULL, NULL, ?)"),
                 params![
                     id,
                     service,
@@ -1923,11 +1934,36 @@ impl Store {
 
     /// Newest first; `before` (ms): only those made before then (the next page).
     pub fn deployments(&self, service: &str, env: &str, limit: usize, before: Option<i64>) -> Result<Vec<Deployment>> {
-        Ok(self.db.query(
-            &format!("SELECT {DEPLOY_COLS} FROM deployments WHERE service = ? AND env = ? AND created_at < ? ORDER BY created_at DESC, id DESC LIMIT ?"),
-            params![service, env, before.unwrap_or(i64::MAX), limit as i64],
-            deploy_row,
-        )?)
+        self.deployments_where(service, Some(env), limit, before, &DeployFilter::default())
+    }
+
+    /// A service's deployments, newest first: one environment's or all of them, narrowed by
+    /// `f` (in the database, so a page is `limit` matches).
+    pub fn deployments_where(&self, service: &str, env: Option<&str>, limit: usize, before: Option<i64>, f: &DeployFilter) -> Result<Vec<Deployment>> {
+        let mut sql = format!("SELECT {DEPLOY_COLS} FROM deployments WHERE service = ? AND created_at < ?");
+        let mut args: Vec<code_sql::Value> = vec![code_sql::Value::Text(service.into()), code_sql::Value::Int(before.unwrap_or(i64::MAX))];
+        if let Some(e) = env {
+            sql.push_str(" AND env = ?");
+            args.push(code_sql::Value::Text(e.into()));
+        }
+        if let Some(s) = &f.status {
+            sql.push_str(" AND status = ?");
+            args.push(code_sql::Value::Text(s.clone()));
+        }
+        if let Some(a) = &f.actor {
+            sql.push_str(" AND actor = ?");
+            args.push(code_sql::Value::Text(a.clone()));
+        }
+        if let Some(q) = &f.q {
+            // Its message or its commit, as typed (`%` and `_` are themselves).
+            let esc = q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+            sql.push_str(" AND (message LIKE ? ESCAPE '\\' OR revision LIKE ? ESCAPE '\\')");
+            args.push(code_sql::Value::Text(format!("%{esc}%")));
+            args.push(code_sql::Value::Text(format!("{esc}%")));
+        }
+        sql.push_str(" ORDER BY created_at DESC, id DESC LIMIT ?");
+        args.push(code_sql::Value::Int(limit as i64));
+        Ok(self.db.query(&sql, args, deploy_row)?)
     }
 
     /// A service's deployments past what's kept, marked pruned in one transaction: what's kept
@@ -1939,8 +1975,9 @@ impl Store {
     pub fn prune_deployments(&self, service: &str, keep: usize, recent: i64) -> Result<Vec<Pruned>> {
         let now = self.now()?;
         Ok(self.db.write(|c| {
+            // A pinned deployment is never pruned, nor counted toward what's kept.
             let rows: Vec<(String, String, String, Option<String>, i64)> = c.query(
-                "SELECT id, env, status, image, COALESCE(retired_at, finished_at, created_at) FROM deployments WHERE service = ? AND pruned_at IS NULL ORDER BY created_at DESC, id DESC",
+                "SELECT id, env, status, image, COALESCE(retired_at, finished_at, created_at) FROM deployments WHERE service = ? AND pruned_at IS NULL AND pinned_at IS NULL ORDER BY created_at DESC, id DESC",
                 [service],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )?;
@@ -1986,6 +2023,16 @@ impl Store {
             }
             Ok::<_, code_sql::Error>(out)
         })?)
+    }
+
+    /// Pin (or unpin) a deployment that's still kept: pruning leaves it, and its image, alone.
+    pub fn pin_deployment(&self, id: &str, on: bool) -> Result<()> {
+        let now = self.now()?;
+        let n = self.db.execute("UPDATE deployments SET pinned_at = ? WHERE id = ? AND pruned_at IS NULL", params![on.then_some(now), id])?;
+        if n == 0 {
+            return Err(Error::Conflict(format!("{id} was pruned (its image is gone): there's nothing to pin")));
+        }
+        Ok(())
     }
 
     /// Every deployment of a service, any environment.

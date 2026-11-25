@@ -561,11 +561,35 @@ impl Apps {
     }
 
     pub async fn deployments(self: &Arc<Self>, service: &str, env: &str, before: Option<i64>) -> Result<Vec<Deployment>> {
-        let (sid, e) = (service.to_string(), env.to_string());
-        let (svc, row, deps) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?, s.deployments(&sid, &e, 100, before)?))).await?;
+        self.deployments_where(service, Some(env), before, crate::store::DeployFilter::default()).await
+    }
+
+    /// `GET …/deploys?status=&actor=&q=` (one environment's) or `GET /v1/apps/services/{id}/deploys`
+    /// (every environment's, Vercel's Deployments): newest first, 100 matches a page.
+    pub async fn deployments_where(self: &Arc<Self>, service: &str, env: Option<&str>, before: Option<i64>, f: crate::store::DeployFilter) -> Result<Vec<Deployment>> {
+        const STATUSES: [&str; 10] = ["queued", "building", "deploying", "ready", "active", "inactive", "failed", "canceled", "superseded", "removed"];
+        if f.status.as_deref().is_some_and(|s| !STATUSES.contains(&s)) {
+            return Err(Error::BadRequest(format!("status is one of {}", STATUSES.join(", "))));
+        }
+        if f.actor.as_deref().is_some_and(|a| a.is_empty() || a.len() > 200) || f.q.as_deref().is_some_and(|q| q.is_empty() || q.len() > 200) {
+            return Err(Error::BadRequest("actor and q are 1–200 characters".into()));
+        }
+        let (sid, e) = (service.to_string(), env.map(str::to_string));
+        let (svc, rows, deps) = self
+            .db(move |s| {
+                let svc = s.service(&sid)?;
+                let rows = match &e {
+                    Some(e) => vec![s.environment(&sid, e)?],
+                    None => s.environments(&sid)?,
+                };
+                Ok((svc, rows, s.deployments_where(&sid, e.as_deref(), 100, before, &f)?))
+            })
+            .await?;
         let mut deps = self.with_scans(service, deps).await?;
         for d in &mut deps {
-            d.url = self.deployment_url(&svc, &row, d);
+            if let Some(row) = rows.iter().find(|r| r.name == d.environment) {
+                d.url = self.deployment_url(&svc, row, d);
+            }
         }
         Ok(deps)
     }
@@ -628,6 +652,16 @@ impl Apps {
                 self.logs.delete(&format!("build:{}", p.id)).await;
             }
         }
+    }
+
+    /// `POST`/`DELETE …/deploys/{dep}/pin`: a kept deployment pinned (Heroku's releases kept,
+    /// Vercel's retention exceptions) is never pruned, so its rollback stays instant.
+    pub async fn pin_deployment(self: &Arc<Self>, service: &str, env: &str, dep: &str, on: bool) -> Result<Deployment> {
+        self.deployment(service, env, dep).await?;
+        let id = dep.to_string();
+        self.db(move |s| s.pin_deployment(&id, on)).await?;
+        self.changed(service);
+        self.deployment(service, env, dep).await
     }
 
     pub async fn deployment(self: &Arc<Self>, service: &str, env: &str, dep: &str) -> Result<Deployment> {
@@ -1658,8 +1692,9 @@ impl Apps {
             log.line(format!("{} variable(s) only for its instances, left out of the build", runtime_only.len()));
         }
         build_env.extend(cache_vars);
-        // Per deployment (the cache would never hit) or only for the running app.
-        build_env.retain(|(k, _)| k != "ROLL_DEPLOYMENT" && k != "PORT");
+        // Per deployment (the cache would never hit) or only for the running app (its port, its
+        // workers for its instance's size).
+        build_env.retain(|(k, _)| k != "ROLL_DEPLOYMENT" && k != "PORT" && k != "WEB_CONCURRENCY");
         // The commit changes every push: out of the hash and the secrets, or no build would hit
         // the cache. A tree's own Dockerfile still gets it as an `ARG` it declares, which Docker
         // keys its own cache on.

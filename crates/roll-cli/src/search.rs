@@ -109,6 +109,28 @@ pub enum Crawler {
         #[arg(long)]
         connector: Option<String>,
     },
+    /// Test one URL through the crawler's path, writing nothing: robots.txt and the rule that
+    /// decides it, the redirects, what would be indexed and which links would be queued.
+    Test {
+        cluster: String,
+        url: String,
+        /// Use this `roll_web_crawler` connector's configuration (default: a crawl of the URL's site).
+        #[arg(long)]
+        connector: Option<String>,
+    },
+    /// Verify a site for the crawler's higher limits: a domain by a DNS TXT record (every origin
+    /// on it), or a URL's origin by the file that origin serves (that origin alone). Prints what
+    /// to publish; `--check` then checks it.
+    Verify {
+        cluster: String,
+        /// A domain (`example.com`), or a URL (`https://docs.example.com`) for one origin.
+        domain: String,
+        /// Check for the token now, instead of starting.
+        #[arg(long)]
+        check: bool,
+    },
+    /// The domains and origins the cluster verified, or started verifying.
+    Sites { cluster: String },
 }
 
 #[derive(Subcommand)]
@@ -717,6 +739,9 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
             };
         }
         Search::Crawler(Crawler::Import { cluster, file, connector }) => return crate::search_crawler::import(api, as_json, &cluster, &file, connector.as_deref()).await,
+        Search::Crawler(Crawler::Test { cluster, url, connector }) => return crate::search_crawler::test(api, as_json, &cluster, &url, connector.as_deref()).await,
+        Search::Crawler(Crawler::Verify { cluster, domain, check }) => return crate::search_crawler::verify(api, as_json, &cluster, &domain, check).await,
+        Search::Crawler(Crawler::Sites { cluster }) => return crate::search_crawler::sites(api, as_json, &cluster).await,
         Search::Migrate { cluster, from, host, app_id, username, api_key_env, api_key_stdin, indices, dry_run, size, requests_per_second, wait } => {
             let args = crate::search_migrate::Args { cluster, from, host, app_id, username, api_key_env, api_key_stdin, indices, dry_run, size, rps: requests_per_second, wait };
             return crate::search_migrate::run(api, as_json, args).await;

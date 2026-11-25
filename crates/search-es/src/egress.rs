@@ -33,7 +33,7 @@ pub const DENY_NAMES: &str = "roll.egress.deny_names";
 /// What [`DENY_ADDRESSES`] and [`DENY_NAMES`] were called when they covered reindex alone; read
 /// too, so a node configured by name keeps its rules.
 const OLD_DENY_ADDRESSES: &str = "roll.reindex.remote.deny_addresses";
-const OLD_DENY_NAMES: &str = "roll.reindex.remote.deny_names";
+pub(crate) const OLD_DENY_NAMES: &str = "roll.reindex.remote.deny_names";
 /// How long the addresses of [`DENY_NAMES`] are reused before they're resolved again.
 pub const DENY_NAMES_TTL: Duration = Duration::from_secs(30);
 /// After a name of [`DENY_NAMES`] failed to resolve, how soon it's asked again.
@@ -286,7 +286,7 @@ impl Egress {
     }
 
     /// Rules that let nothing out (node settings that don't parse).
-    fn deny_all() -> Egress {
+    pub fn deny_all() -> Egress {
         let all = [Net { addr: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), prefix: 0 }, Net { addr: IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), prefix: 0 }];
         Egress { allow_private: false, deny: Arc::new(all.to_vec()), deny_names: Arc::default() }
     }

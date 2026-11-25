@@ -97,6 +97,10 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/indices/{index}/delete_by_query", post(index_delete_by_query))
         .route("/v1/search/clusters/{id}/indices/{index}/suggestions", get(suggestions))
         .route("/v1/search/clusters/{id}/indices/{index}/suggestions/rebuild", post(rebuild_suggestions))
+        .route("/v1/search/clusters/{id}/site-verifications", get(site_verifications).post(start_site_verification))
+        .route("/v1/search/clusters/{id}/site-verifications/{site}", axum::routing::delete(delete_site_verification))
+        .route("/v1/search/clusters/{id}/site-verifications/{site}/check", post(check_site_verification))
+        .route("/v1/search/clusters/{id}/crawl-test", post(crawl_test))
         // Calls about one cluster: the caller's own, then on its owner.
         .layer(axum::middleware::from_fn_with_state(control.clone(), per_cluster))
         // The dashboard calls it from the browser, like the other control planes.
@@ -804,6 +808,58 @@ async fn browser_keys(State(c): State<AppState>, Path(id): Path<String>) -> ApiR
 /// application or named indices, an optional filter, expiry and rate limit); shown once.
 async fn create_browser_key(State(c): State<AppState>, Path(id): Path<String>, Json(k): Json<crate::control::NewBrowserKey>) -> ApiResult<Value> {
     Ok(Json(c.create_browser_key(&id, k).await?))
+}
+
+/// `GET /v1/search/clusters/{id}/site-verifications`: the domains and origins the cluster's owner
+/// verified, or started verifying, for the web crawler (every cluster of one owner shares them).
+async fn site_verifications(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    let d = c.get(&id).await?;
+    Ok(Json(c.site_verifications(&d).await?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewVerification {
+    domain: Option<String>,
+    origin: Option<String>,
+}
+
+/// `POST /v1/search/clusters/{id}/site-verifications` `{domain}` or `{origin}`: a domain (proven
+/// by a DNS TXT record, covering every origin on it) or one origin (proven by the file it serves,
+/// covering it alone), and the token to publish.
+async fn start_site_verification(State(c): State<AppState>, Path(id): Path<String>, Json(b): Json<NewVerification>) -> ApiResult<Value> {
+    let d = c.get(&id).await?;
+    let (text, origin) = match (b.domain, b.origin) {
+        (Some(t), None) => (t, false),
+        (None, Some(t)) => (t, true),
+        _ => return Err(ControlError::Invalid("give domain (verified by DNS) or origin (verified by its file), not both".into())),
+    };
+    Ok(Json(c.start_site_verification(&d, &text, origin).await?))
+}
+
+/// `POST /v1/search/clusters/{id}/site-verifications/{site}/check`: checks for the token now.
+async fn check_site_verification(State(c): State<AppState>, Path((id, site)): Path<(String, String)>) -> ApiResult<Value> {
+    let d = c.get(&id).await?;
+    Ok(Json(c.check_site_verification(&d, &site).await?))
+}
+
+async fn delete_site_verification(State(c): State<AppState>, Path((id, site)): Path<(String, String)>) -> ApiResult<Value> {
+    let d = c.get(&id).await?;
+    Ok(Json(c.delete_site_verification(&d, &site).await?))
+}
+
+#[derive(Deserialize)]
+struct CrawlTest {
+    url: String,
+    connector: Option<String>,
+}
+
+/// `POST /v1/search/clusters/{id}/crawl-test` `{url, connector?}`: one URL through the crawler's
+/// path (robots.txt, rules, fetch, extraction), what would be indexed and why anything would be
+/// skipped; writes nothing.
+async fn crawl_test(State(c): State<AppState>, Path(id): Path<String>, Json(b): Json<CrawlTest>) -> ApiResult<Value> {
+    let d = c.get(&id).await?;
+    Ok(Json(c.crawl_test(&d, &b.url, b.connector.as_deref()).await?))
 }
 
 /// `DELETE /v1/search/clusters/{id}/browser-keys/{key}`: 204, or 202 on a deleted cluster (the

@@ -328,6 +328,21 @@ pub enum Preview {
         #[arg(long)]
         head: bool,
     },
+    /// Drive a service's page in a browser through roll, as an agent does (roll MCP's
+    /// `previews_try`): the steps follow the path, each a verb and its words (`click <selector>`,
+    /// `type <selector> <text>`, `press <key>`, `wait <ms>`; 10 at most), and it prints the page's
+    /// status, what went wrong and its text after them; --out saves its picture. Options go before
+    /// the path: `roll preview try pv_… /login type '#email' ada@example.com press Enter`.
+    Try {
+        preview: String,
+        #[arg(long, short)]
+        service: Option<String>,
+        #[arg(long, short)]
+        out: Option<std::path::PathBuf>,
+        path: String,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        steps: Vec<String>,
+    },
     /// Swap a service for a process on this machine (Signadot's local sandboxes, Telepresence):
     /// the preview's requests for it, its visitors' and its other services', come here to
     /// 127.0.0.1:<port> until Ctrl-C: `roll preview swap pv_… 3000 --service web`.
@@ -898,6 +913,26 @@ async fn look(api: &Api, preview: Option<&str>, change: Option<&str>) -> anyhow:
 }
 
 /// `a.b=v` into `{"a": {"b": v}}`; `v` as JSON when it parses, else a string.
+/// `try`'s words as steps: each verb takes its own number of words (`type` two, the others one).
+fn try_steps(words: &[String]) -> anyhow::Result<Vec<Value>> {
+    let mut steps = Vec::new();
+    let mut w = words.iter();
+    while let Some(verb) = w.next() {
+        let mut next = |what: &str| w.next().cloned().ok_or_else(|| anyhow::anyhow!("{verb} needs {what}"));
+        steps.push(match verb.as_str() {
+            "click" => json!({ "click": next("a selector")? }),
+            "type" => json!({ "type": [next("a selector")?, next("the text")?] }),
+            "press" => json!({ "press": next("a key")? }),
+            "wait" => {
+                let ms = next("milliseconds")?;
+                json!({ "wait": ms.parse::<u32>().map_err(|_| anyhow::anyhow!("wait takes milliseconds, not {ms:?}"))? })
+            }
+            other => bail!("{other:?} isn't a step: click, type, press or wait"),
+        });
+    }
+    Ok(steps)
+}
+
 fn patch(sets: &[String]) -> anyhow::Result<Value> {
     let mut root = Map::new();
     for kv in sets {
@@ -1465,6 +1500,28 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
             }
             v
         }
+        Preview::Try { preview, service, out, path, steps } => {
+            let steps = try_steps(&steps)?;
+            let v = api.post(&format!("/v1/previews/{preview}/try"), json!({ "service": service, "path": path, "steps": steps })).await?;
+            if let Some(out) = &out {
+                let png = api.open_stream(&format!("/v1/previews/{preview}/try/{}/screenshot", s(&v["run"]))).await?.bytes().await?;
+                std::fs::write(out, &png).map_err(|e| anyhow::anyhow!("writing {}: {e}", out.display()))?;
+            }
+            if !as_json {
+                eprintln!("{}{}", v["status"], v["step_failed"].as_str().map(|f| format!(" · {f}")).unwrap_or_default());
+                for e in v["errors"].as_array().into_iter().flatten() {
+                    eprintln!("! {}", e.as_str().unwrap_or(""));
+                }
+                if let Some(t) = v["text"].as_str() {
+                    println!("{t}");
+                }
+                if let Some(out) = &out {
+                    eprintln!("its picture: {}", out.display());
+                }
+                return Ok(());
+            }
+            v
+        }
         Preview::Swap { preview, port, service } => {
             let base = api.base.strip_prefix("http").map(|rest| format!("ws{rest}")).unwrap_or_else(|| api.base.clone());
             let svc = service.as_deref().map(|s| format!("?service={}", crate::apps::enc(s))).unwrap_or_default();
@@ -1629,8 +1686,16 @@ async fn swap_to(url: String, headers: Vec<(String, String)>, port: u16) -> anyh
 
 #[cfg(test)]
 mod tests {
-    use super::patch;
+    use super::{patch, try_steps};
     use serde_json::json;
+
+    #[test]
+    fn try_words_are_steps_in_order() {
+        let w = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let steps = try_steps(&w(&["type", "#email", "ada@example.com", "click", "form button", "press", "Enter", "wait", "500"])).unwrap();
+        assert_eq!(steps, vec![json!({ "type": ["#email", "ada@example.com"] }), json!({ "click": "form button" }), json!({ "press": "Enter" }), json!({ "wait": 500 })]);
+        assert!(try_steps(&w(&["type", "#email"])).is_err() && try_steps(&w(&["hover", "a"])).is_err() && try_steps(&w(&["wait", "soon"])).is_err());
+    }
 
     #[test]
     fn set_flags_build_a_nested_patch() {
