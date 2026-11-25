@@ -18,7 +18,8 @@
 //!   highlight and rescore queries, inner hits, collapse, a search application's rendered
 //!   template) runs with `search.allow_expensive_queries: false` unless the key allows them
 //!   (`regexp`, `wildcard`, `prefix`, `fuzzy`, joining queries, `percolate`, ranges on text and
-//!   keyword, runtime-field queries), and refuses `query_string` (`?q=` builds one), `span_multi`
+//!   keyword, runtime-field queries; a `semantic_text` field's own chunks, which its `semantic`
+//!   queries search, aren't a join), and refuses `query_string` (`?q=` builds one), `span_multi`
 //!   and intervals' `wildcard`, `prefix`, `regexp` and `fuzzy` rules. The owner's own filters (an
 //!   alias filter, the key's `filter`) are built without the policy
 //!   ([`crate::search::query::QueryCtx::owner_filter`]).
