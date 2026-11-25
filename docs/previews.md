@@ -665,7 +665,10 @@ default) with the project's `env` overrides and the branched resources' URLs on 
   stream (`KAFKA_USERNAME`…), a bucket, Redis or a search cluster that the preview branched would
   still give the parent's (a fork's code included). The branch's values go by those names too,
   set after the secrets layer so they win (`names::with_standard`: `PG*` parsed from the branch's
-  app URI, the stream's SASL login, the search branch's key and login), and a credential the
+  app URI, `PGOPTIONS` and `PGSSLMODE` from its query too, as roll apps' Postgres link sets them
+  (roll Postgres picks the endpoint by `options=endpoint=…` on one node, so an app connecting
+  with libpq's `PG*` names needs it; no `sslmode` there is libpq's own `prefer`, never a
+  parent's and never empty, which libpq refuses), the stream's SASL login, the search branch's key and login), and a credential the
   branch has none for is blank (a NoSQL HTTP token, Kafka client properties). The roll secrets
   thread follows with the exact fix: a link to a branched parent isn't resolved at all and comes
   back as `followed`, its name filled from the branch even under a custom prefix.
