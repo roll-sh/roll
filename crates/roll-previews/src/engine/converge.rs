@@ -845,6 +845,15 @@ impl Engine {
                 self.store.log(&r.id, &format!("removed service {}", svc.name))?;
             }
         }
+        // 4a. Where its pages are served from, for the branches that answer browsers themselves
+        // (roll search: a page that searches from the browser).
+        let mut origins: Vec<String> = self.store.services(&r.id)?.into_iter().map(|s| s.url).chain(self.store.pinned(&r.id)?.into_iter().map(|p| p.url)).filter_map(|u| origin_of(&u)).collect();
+        origins.sort();
+        origins.dedup();
+        for res in self.store.resources(&r.id)? {
+            let (Some(branch), Ok(b)) = (&res.r#ref, self.brancher(res.kind)) else { continue };
+            b.serve(&res.parent, branch, res.kept.as_deref(), &origins).await.map_err(|e| anyhow::anyhow!("letting the preview's pages reach the {} branch: {e:#}", res.kind.as_str()))?;
+        }
         // 4b. Health: a service with a `health` path counts once it answers 2xx/3xx there, asked
         // once per revision (Render's and Railway's checks). Anything else fails the preview, and
         // the retry asks again.
@@ -1855,4 +1864,11 @@ fn pull_repo(url: &str) -> Option<String> {
     let mut parts = path.split('/');
     let (owner, name, kind) = (parts.next()?, parts.next()?, parts.next()?);
     (kind == "pull" && !owner.is_empty() && !name.is_empty()).then(|| format!("{owner}/{name}"))
+}
+
+/// A URL's origin as browsers send it (`scheme://host[:port]`, lower case, no path).
+fn origin_of(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next()?.rsplit('@').next()?;
+    (!authority.is_empty()).then(|| format!("{}://{}", scheme.to_ascii_lowercase(), authority.to_ascii_lowercase()))
 }

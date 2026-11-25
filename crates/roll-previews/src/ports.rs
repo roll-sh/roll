@@ -109,6 +109,15 @@ pub trait Brancher: Send + Sync {
         Ok(())
     }
 
+    /// The preview's pages are served from `origins` now (`scheme://host[:port]`: its services'
+    /// URLs and its earlier pushes' pinned ones): a product whose branch answers browsers itself
+    /// lets those pages call it, and no others but its parent's (roll search's browser keys:
+    /// the branch's allowed origins). Called once the services are deployed, every pass, so it
+    /// must change nothing when nothing moved. Nothing by default.
+    async fn serve(&self, _parent: &str, _branch: &str, _kept: Option<&str>, _origins: &[String]) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     /// How a service reaches the branch, as environment variables (`DATABASE_URL`, …). Read
     /// fresh for every deploy: nothing here is stored.
     async fn connect(&self, parent: &str, branch: &str, kept: Option<&str>) -> anyhow::Result<Vec<(String, String)>>;
