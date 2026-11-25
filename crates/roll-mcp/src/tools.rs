@@ -1263,7 +1263,7 @@ static TOOLS: &[Tool] = &[
     t("secrets_list_cas", "List certificate authorities", "A project's own certificate authorities: their public certificates, domains and limits (never a CA's key; adding one is the project admin's, in the dashboard).", "secrets", "GET", "/v1/secrets/projects/{project}/cas", &[req("project", "Workspace project")]),
     t("secrets_list_ssh_cas", "List SSH certificate authorities", "A project's SSH CAs: their public keys, principals and limits (never a private key; adding one is the project admin's, in the dashboard).", "secrets", "GET", "/v1/secrets/projects/{project}/ssh-cas", &[req("project", "Workspace project")]),
     t("secrets_totp", "Get a one-time code", "The current one-time code (TOTP) from a secret that holds an authenticator seed, and how long it lasts: a reveal, asked for like reading a value. The seed itself is never returned.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/totp", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder")]),
-    t("secrets_list_saas", "List SaaS rotators", "A project's rotators for third-party API keys: each one's vendor (SendGrid, Twilio, Okta, Entra, Auth0, GitLab, OpenAI, Datadog, Cloudflare, Databricks, Confluent, SonarQube, Jenkins) and the account or app it rotates for (never a credential; adding one is the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/saas", &[SECRET_PROJECT]),
+    t("secrets_list_saas", "List SaaS rotators", "A project's rotators for third-party API keys: each one's vendor (SendGrid, Twilio, Okta, Entra, Auth0, GitLab, OpenAI, Datadog, Cloudflare, Databricks, Confluent, SonarQube, Jenkins, Salesforce) and the account or app it rotates for (never a credential; adding one is the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/saas", &[SECRET_PROJECT]),
     t("secrets_list_public_certs", "List publicly trusted certificates", "A project's certificates from public ACME CAs (Let's Encrypt, ZeroSSL, Google Trust Services): names, CA, DNS provider, status (pending, issued, failing), serial, end and next renewal, and why the last order failed (never a credential or a private key; adding one is the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/public-certs", &[SECRET_PROJECT]),
     t("secrets_renew_public_cert", "Renew a public certificate", "Order a new certificate for a project's public certificate now: roll orders it in the background (minutes) and rotates every key linked to it once the CA issues it (rotation.succeeded, or rotation.failed and the reason in secrets_list_public_certs).", "secrets", "POST", "/v1/secrets/projects/{project}/public-certs/{id}/renew", &[SECRET_PROJECT, req("id", "Public certificate id (pcr_…)")]).open_world(),
     t("secrets_list_kubernetes", "List Kubernetes clusters", "The Kubernetes clusters a project issues service-account tokens for: names, API servers, and whether calls trust the cluster's own CA (never a token or the CA; adding one is the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/kubernetes", &[SECRET_PROJECT]),
@@ -1839,6 +1839,20 @@ mod tests {
         assert!(call("").is_err(), "a required choice can't be empty");
         let vulns = super::all().iter().find(|t| t.name == "apps_deploy_vulnerabilities").unwrap();
         assert!(vulns.request(&serde_json::json!({ "service": "svc_1", "env": "production", "deploy": "dpl_1", "severity": "" })).is_ok(), "an optional one may be");
+    }
+
+    /// `secrets_list_saas` names every vendor roll secrets rotates for: the list is prose, and new
+    /// vendors kept landing without it (SonarQube and Jenkins, then Salesforce).
+    #[test]
+    fn the_saas_tool_names_every_vendor() {
+        let saas = include_str!("../../roll-secrets/src/saas.rs");
+        // `Vendor::name`'s arms: each vendor's own name.
+        let names = saas.split("pub fn name(&self) -> &'static str {").nth(1).and_then(|r| r.split("\n    }\n").next()).expect("Vendor::name moved");
+        let said = super::all().iter().find(|t| t.name == "secrets_list_saas").unwrap().description.to_lowercase();
+        let vendors: Vec<&str> = names.match_indices(" { .. } => \"").map(|(i, m)| names[i + m.len()..].split('"').next().unwrap()).collect();
+        assert!(vendors.len() >= 14, "the vendor list moved: {vendors:?}");
+        let missing: Vec<&&str> = vendors.iter().filter(|v| !said.contains(**v)).collect();
+        assert!(missing.is_empty(), "secrets_list_saas doesn't name {missing:?}");
     }
 
     /// An argument described only as its values ("a, b or c") is a [`Ty::Choice`] with the route's
