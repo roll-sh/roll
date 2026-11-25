@@ -2533,20 +2533,16 @@ mod tests {
     fn every_previews_tool_says_whether_it_holds_a_forks_words() {
         // Marked in roll previews' api.rs (`a_forks_preview_and_its_errors_are_marked_outside`).
         const FORK_WORDS: &[&str] = &[
-            // The preview itself (`outside: !trusted`: its title is the fork's pull request's).
-            "previews_list", "previews_get", "previews_wait", "previews_create",
+            // The preview itself (`outside: !trusted`: its title is the fork's pull request's),
+            // and every write that answers it.
+            "previews_list", "previews_get", "previews_wait", "previews_create", "previews_refresh", "previews_keep", "previews_sleep", "previews_wake", "previews_reset",
             "previews_errors", "previews_traces", "previews_get_trace", "previews_routes", "previews_logs", "previews_requests", "previews_activity",
             "previews_list_mail", "previews_read_mail", "previews_screenshot", "previews_fetch", "previews_try", "previews_try_screenshot", "previews_note_crop", "previews_tables",
             // A share link's guests' notes (`by` `guest:…`).
             "previews_list_notes",
         ];
         const NONE: &[(&str, &str)] = &[
-            ("previews_refresh", "roll's state of it"),
-            ("previews_keep", "roll's state of it"),
-            ("previews_sleep", "roll's state of it"),
-            ("previews_wake", "roll's state of it"),
             ("previews_delete", "roll's state of it"),
-            ("previews_reset", "roll's state of it"),
             ("previews_share", "a link people made"),
             ("previews_set_rules", "the project's settings"),
             ("previews_metrics", "numbers"),
