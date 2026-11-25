@@ -1491,6 +1491,8 @@ fn every_tool_says_whether_it_holds_an_outsiders_words() {
         "get_change", "list_changes", "revise_change", "update_change", "close_change", "start_preview", "enqueue_change", "set_change_lane", "queue_status",
         "list_work", "get_work", "claim_work", "heartbeat_work", "update_work", "complete_work", "release_work", "claim_agent_work",
         "resolve_thread", "reopen_thread", "request_review", "get_commit_statuses",
+        // An automation run for an issue anyone opened (a trigger that takes `anyone`'s).
+        "list_agent_automation_runs", "get_agent_automation_run",
     ];
     const NONE: &[(&str, &str)] = &[
         ("list_repos", "repos"),
@@ -1528,8 +1530,6 @@ fn every_tool_says_whether_it_holds_an_outsiders_words() {
         ("list_agent_automations", "the owner's agents"),
         ("save_agent_automation", "the owner's agents"),
         ("run_agent_automation", "the owner's agents"),
-        ("list_agent_automation_runs", "the owner's agents"),
-        ("get_agent_automation_run", "the owner's agents"),
         ("cancel_agent_automation_run", "the owner's agents"),
         ("retry_agent_automation_run", "the owner's agents"),
         ("enable_agent_automation", "the owner's agents"),
