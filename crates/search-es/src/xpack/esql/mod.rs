@@ -296,6 +296,16 @@ fn body_time_zone(ctx: &Ctx, m: &Map) -> EsResult<Option<String>> {
     }
 }
 
+/// Whether `cmds` run an `ENRICH`, in a `FORK` branch or a `FROM` subquery (or view) too.
+fn uses_enrich(cmds: &[parser::Cmd]) -> bool {
+    cmds.iter().any(|c| match c {
+        parser::Cmd::Enrich { .. } => true,
+        parser::Cmd::Fork { branches, .. } => branches.iter().any(|b| uses_enrich(b)),
+        parser::Cmd::Union { branches, .. } => branches.iter().any(|b| uses_enrich(&b.cmds)),
+        _ => false,
+    })
+}
+
 /// Runs a request: the JSON response and the table (for text formats), both charged to `mem`
 /// until it drops (after the response is rendered). A linked remote's part
 /// ([`ccs::requested`]) runs as one and answers its result for the coordinating cluster.
@@ -368,6 +378,12 @@ async fn run_query(ctx: &Ctx<'_>, req: &Request, mem: &memory::Memory) -> EsResu
             return Err(e);
         }
     };
+    // Every `ENRICH` resolves its policy as the caller (`EnrichPolicyResolver`): `monitor_enrich`
+    // here, for a local query as for a remote's part ([`ccs::admit_part`]), before the policy's
+    // table, which the system reads, is loaded.
+    if uses_enrich(&q.cmds) {
+        crate::xpack::security::check_cluster_action(ctx, ccs::RESOLVE_POLICY)?;
+    }
     q.locale = req.locale.clone();
     // `settings.column_metadata` in the body, like `SET column_metadata`.
     if req.column_metadata {
