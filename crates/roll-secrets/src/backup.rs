@@ -867,6 +867,57 @@ impl Secrets {
     }
 }
 
+/// A backup someone took (or, asked for, a verify they ran), as its audit row says: who, when,
+/// and the registrations it carried with their keys (by name: `CA internal`).
+pub(crate) struct Taken {
+    /// Who took it: a person, `operator`, `token:…`; a scheduled one is its schedule's maker's.
+    pub actor: String,
+    pub at: i64,
+    pub registrations: Vec<String>,
+}
+
+/// How far back health and offboarding look for backups someone took: the project's history
+/// (`history_days`), or 90 days where it keeps everything.
+pub(crate) fn taken_days(history_days: Option<i64>) -> i64 {
+    history_days.unwrap_or(90)
+}
+
+/// The most backup rows read for reach, health and offboarding.
+const TAKEN_MAX: i64 = 10_000;
+
+impl Secrets {
+    /// The project's backups since `since` (ms), newest first; with `verifies`, its verifies too
+    /// (they read every value to compare). For reach, health and offboarding: what left, with whom.
+    pub(crate) fn backups_taken(&self, project: &str, since: i64, verifies: bool) -> Result<Vec<Taken>> {
+        let actions = if verifies { "'project.backup', 'backup.verify'" } else { "'project.backup'" };
+        let (rows, schedule): (Vec<(String, i64, String)>, Option<String>) = self.db.read(|c| {
+            let rows = c.query(&format!("SELECT actor, at, keys FROM audit WHERE project_id = ? AND at >= ? AND action IN ({actions}) ORDER BY id DESC LIMIT ?"), params![project, since, TAKEN_MAX], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            let schedule = c.query_row("SELECT created_by FROM backup_schedules WHERE project_id = ?", [project], |r| r.get(0)).optional()?;
+            Ok::<_, Error>((rows, schedule))
+        })?;
+        let scheduled = format!("backup:{project}");
+        Ok(rows
+            .into_iter()
+            .map(|(actor, at, keys)| {
+                let actor = if actor == scheduled { schedule.clone().unwrap_or(actor) } else { actor };
+                Taken { actor, at, registrations: crate::from_json(&keys) }
+            })
+            .collect())
+    }
+}
+
+/// What to do about a registration a backup carried out, now its taker has left: a CA is
+/// re-issued (a new CA, its certificates moved to it), a credential is rotated at its service.
+pub(crate) fn advice(registration: &str) -> String {
+    if registration.starts_with("CA ") || registration.starts_with("SSH CA ") {
+        format!("{registration}: re-issue it (its key left in the backup)")
+    } else if registration.starts_with("ACME account") {
+        format!("{registration}: deactivate it at the CA")
+    } else {
+        format!("{registration}: rotate its credential at its service")
+    }
+}
+
 /// The most of a scheduled backup `latest_backup` reads.
 const LATEST_MAX: usize = 64 << 20;
 

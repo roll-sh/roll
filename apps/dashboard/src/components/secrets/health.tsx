@@ -10,6 +10,7 @@ import { ago, card, errorText, ErrorNote, ghost, Section, sized, useLoad } from 
 const ISSUES: { issue: Finding["issue"]; title: string; what: string; serious: boolean }[] = [
   { issue: "decoy_used", title: "Decoy used", what: "Someone used a decoy key's credential (its token or database login): they found it where it was planted. Cut off whatever could reach that place, rotate the real credentials beside it, then delete the decoy and plant a new one.", serious: true },
   { issue: "production_unprotected", title: "Production isn't protected", what: "Checks, sandboxes and untrusted previews may read production, and no change there needs approval. New projects start with it protected; this one was made before. Protecting it keeps writes direct for whoever may write (no approvals until you ask for them) and keeps everything else out.", serious: true },
+  { issue: "backup_left", title: "Backups that left", what: "Someone who may no longer back this project up took a backup that carried registrations' keys: they can restore those anywhere. Re-issue each CA it held and rotate each credential.", serious: true },
   { issue: "off_policy", title: "Below roll's policy", what: "Floors roll secrets' policy sets for every project (Guardrails), which this project was made or set below. Nothing changes them for you; a write that stays below a floor is refused, so raise each to the floor or above.", serious: true },
   { issue: "expired", title: "Expired", what: "Their values stopped working outside roll, or a SaaS rotator's own credential did: roll can't issue or revoke its keys.", serious: true },
   { issue: "rotation_failing", title: "Rotation failing", what: "Their scheduled rotation fails: the database, vendor or rotator refused or didn't answer. The old credential keeps working; roll tries again.", serious: true },
@@ -139,7 +140,7 @@ export function HealthView() {
                 <div key={`${f.environment}/${f.path}/${f.key}`} className="flex flex-wrap items-center gap-x-3 gap-y-0.5 px-3 py-1.5 text-[12.5px]">
                   {f.issue === "production_unprotected" || (f.issue === "off_policy" && !f.key) ? (
                     <span className="text-fg">{f.environment ? name(f.environment) : "Leaked keys"}</span>
-                  ) : f.issue === "certificate_expiring" || f.issue === "operator_made" || f.issue === "stored_cloud_key" || f.issue === "off_policy" || registration(f) ? (
+                  ) : f.issue === "certificate_expiring" || f.issue === "operator_made" || f.issue === "stored_cloud_key" || f.issue === "off_policy" || f.issue === "backup_left" || registration(f) ? (
                     <span className="flex min-w-0 items-center gap-3">
                       <span className="font-mono text-fg">{f.key}</span>
                       <span className="text-subtle">{f.issue === "certificate_expiring" ? `CA ${f.path}` : registration(f) ? (f.issue === "revoke_failing" ? "public certificate" : "SaaS rotator") : f.environment ? `${name(f.environment)}${f.path === "/" ? "" : ` ${f.path}`}` : ""}</span>
