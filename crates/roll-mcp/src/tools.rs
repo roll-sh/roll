@@ -786,7 +786,7 @@ static TOOLS: &[Tool] = &[
         "/v1/access/requests",
         &[
             breq("product", Ty::Str, "The product, e.g. postgres, apps, secrets"),
-            breq("action", Ty::Choice(&["read", "write", "delete", "reveal", "deploy", "admin"]), "The action asked for"),
+            breq("action", Ty::Choice(&["read", "write", "delete", "reveal", "deploy", "admin", "scan"]), "The action asked for"),
             b("resource", Ty::Str, "One resource's id (every resource of the product when left out)"),
             b("environment", Ty::Str, "Only in this environment"),
             b("path", Ty::Str, "Only under this folder"),
@@ -1191,7 +1191,8 @@ static TOOLS: &[Tool] = &[
     t("search_overview", "roll search here", "What roll search offers here: versions, the endpoint, defaults, the history window and pricing.", "search", "GET", "/v1/search", &[]),
     t("search_unlink_remote", "Unlink a remote cluster", "Stop a cluster searching another (alias:index): the remote's settings and credentials go, and a cross-cluster key roll made for it is revoked. Linking one stays the cluster admin's (no tool).", "search", "DELETE", "/v1/search/clusters/{cluster}/remotes/{alias}", &[req("cluster", "Cluster id or name"), req("alias", "The remote's alias")]).destructive(),
     t("search_revoke_key", "Revoke a cluster API key", "Revoke one of a cluster's API keys at once (404 once it's gone; on a deleted cluster the revoke is applied by its restore). Making one answers a credential, so it has no tool.", "search", "DELETE", "/v1/search/clusters/{cluster}/keys/{key}", &[req("cluster", "Cluster id or name"), req("key", "The API key's id")]).destructive(),
-    t("search_list_browser_keys", "List a cluster's browser keys", "The keys a cluster gave web pages for search from the browser that still work, newest first: name, the indices or search application each may read, its filter, rate limit and when it expires (never the key). Making one answers a credential, so it has no tool.", "search", "GET", "/v1/search/clusters/{cluster}/browser-keys", &[req("cluster", "Cluster id or name")]),
+    t("search_list_browser_keys", "List a cluster's browser keys", "The keys a cluster gave web pages for search from the browser (a site's search box) that still work, newest first: name, the indices or search application each may read, its filter, rate limit and when it expires (never the key). Making one answers a credential, so it has no tool.", "search", "GET", "/v1/search/clusters/{cluster}/browser-keys", &[req("cluster", "Cluster id or name")]),
+    t("search_browser_key_usage", "Browser key usage", "One browser key's requests, 429s by reason (key_rate, address_rate, user_rate, concurrency, cluster_ceiling) and other refusals (origin, policy, body_too_large, invalid_key) over window 1h, 24h (default) or 14d, with a derived key's top users and the top refused origins: tells a broken page, a scraper or a limit set too low apart.", "search", "GET", "/v1/search/clusters/{cluster}/browser-keys/{key}/usage", &[req("cluster", "Cluster id or name"), req("key", "Browser key id (from search_list_browser_keys)"), q("window", Ty::Choice(&["1h", "24h", "14d"]), "How far back")]),
     t("search_revoke_browser_key", "Revoke a browser key", "Revoke one of a cluster's browser keys at once: pages shipping it stop getting answers (on a deleted cluster the revoke is applied by its restore).", "search", "DELETE", "/v1/search/clusters/{cluster}/browser-keys/{key}", &[req("cluster", "Cluster id or name"), req("key", "Browser key id (from search_list_browser_keys)")]),
     t("search_list_inference_secrets", "Inference endpoints keyed by a roll secret", "A cluster's inference endpoints whose API key comes from a roll secret, with the project and key each follows (a rotated value reaches the endpoint within seconds; never the value), and the projects whose secrets it could use.", "search", "GET", "/v1/search/clusters/{cluster}/inference/secrets", &[req("cluster", "Cluster id or name")]),
     t("search_branch_cluster", "Branch a search cluster", "A copy-on-write branch of a cluster, now or at a time within its history.", "search", "POST", "/v1/search/clusters/{cluster}/branches", &[req("cluster", "Cluster id or name"), breq("name", Ty::Str, "Branch name"), b("at", Ty::Int, "Unix seconds")]),
@@ -1957,6 +1958,7 @@ mod tests {
             ("search_create_cluster", "flavor", flavors.clone()),
             ("search_update_cluster", "flavor", flavors),
             ("search_cluster_metrics", "range", keys(between(include_str!("../../search-control/src/control.rs"), "impl MetricsRange {", "\n}\n"))),
+            ("search_browser_key_usage", "window", keys(between(include_str!("../../search-control/src/control.rs"), "impl MetricsRange {", "\n}\n"))),
             ("search_analytics", "range", keys(between(include_str!("../../search-control/src/analytics.rs"), "impl Range {", "\n}\n"))),
             ("secrets_create_environment", "kind", envs.clone()),
             ("secrets_ensure_environment", "kind", envs),
@@ -2521,5 +2523,54 @@ mod tests {
         }
         dangling.dedup();
         assert!(dangling.is_empty(), "these name tools roll doesn't have: {dangling:?}");
+    }
+
+    /// Every previews tool says whether its answer holds what a fork's code wrote, which roll
+    /// previews marks outside for an untrusted preview (`mark_outside`, `outside_if_untrusted`)
+    /// so lockdown withholds it, or why it holds none. Pictures, caught mail, a data branch's
+    /// rows, request paths and activity had each reached a model in lockdown unmarked.
+    #[test]
+    fn every_previews_tool_says_whether_it_holds_a_forks_words() {
+        // Marked in roll previews' api.rs (`a_forks_preview_and_its_errors_are_marked_outside`).
+        const FORK_WORDS: &[&str] = &[
+            // The preview itself (`outside: !trusted`: its title is the fork's pull request's).
+            "previews_list", "previews_get", "previews_wait", "previews_create",
+            "previews_errors", "previews_traces", "previews_get_trace", "previews_routes", "previews_logs", "previews_requests", "previews_activity",
+            "previews_list_mail", "previews_read_mail", "previews_screenshot", "previews_fetch", "previews_try", "previews_try_screenshot", "previews_note_crop", "previews_tables",
+            // A share link's guests' notes (`by` `guest:…`).
+            "previews_list_notes",
+        ];
+        const NONE: &[(&str, &str)] = &[
+            ("previews_refresh", "roll's state of it"),
+            ("previews_keep", "roll's state of it"),
+            ("previews_sleep", "roll's state of it"),
+            ("previews_wake", "roll's state of it"),
+            ("previews_delete", "roll's state of it"),
+            ("previews_reset", "roll's state of it"),
+            ("previews_share", "a link people made"),
+            ("previews_set_rules", "the project's settings"),
+            ("previews_metrics", "numbers"),
+            ("previews_usage", "costs"),
+            ("previews_mask_suggestions", "the project's own databases, not a branch"),
+            ("previews_list_shares", "links people made"),
+            ("previews_revoke_share", "a link people made"),
+            ("previews_env", "variables people set"),
+            ("previews_connect", "roll's connections to its branches"),
+            ("previews_resolve_note", "the note's id"),
+            ("previews_list_saved_data", "restore points people named"),
+            ("previews_save_data", "a restore point"),
+            ("previews_restore", "a restore point"),
+            ("previews_delete_saved_data", "a restore point"),
+            ("previews_settings", "the project's, from its default branch"),
+            ("previews_visitors", "who opened it"),
+            ("previews_list_hooks", "the project's"),
+            ("previews_delete_hook", "the project's"),
+        ];
+        let previews: Vec<&str> = all().iter().filter(|t| t.product == "previews").map(|t| t.name).collect();
+        let undecided: Vec<&&str> = previews.iter().filter(|n| !FORK_WORDS.contains(n) && !NONE.iter().any(|(t, _)| t == *n)).collect();
+        assert!(undecided.is_empty(), "say whether these answer what a fork's code wrote (mark it outside in roll previews and list it in FORK_WORDS) or why not (NONE): {undecided:?}");
+        for n in FORK_WORDS.iter().chain(NONE.iter().map(|(n, _)| n)) {
+            assert!(previews.contains(n), "{n} isn't a previews tool any more");
+        }
     }
 }

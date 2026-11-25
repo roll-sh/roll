@@ -419,6 +419,10 @@ pub struct Gate {
     pub mirror: Option<crate::model::Split>,
     /// Its snippets, joined: before `</head>`, before `</body>`.
     pub snippets: Option<(bytes::Bytes, bytes::Bytes)>,
+    /// A fork's preview (an ephemeral environment built closed): the Content-Security-Policy its
+    /// HTML answers get beside their own, so a page can't send what it shows a reviewer to
+    /// another site ([`crate::Apps::fork_policy`]).
+    pub fork_csp: Option<axum::http::HeaderValue>,
 }
 
 /// What a gRPC health check is called in the log (`run.health_grpc`).
@@ -1190,7 +1194,7 @@ impl EnvLive {
         if let Some(k) = prefer.filter(|_| tpl.run.affinity)
             && let Some(mut l) = self.pick_affine(&tpl.deployment, tpl.run.concurrency, k)
         {
-            (l.h2c, l.timeout, l.affinity) = (tpl.run.h2c, tpl.run.timeout_s.map(|s| Duration::from_secs(s as u64)), true);
+            (l.h2c, l.timeout, l.affinity) = (tpl.run.h2c, Some(tpl.run.request_timeout()), true);
             return Ok(l);
         }
         self.acquire_pinned(tpl, false).await
@@ -1198,7 +1202,7 @@ impl EnvLive {
 
     /// `pinned`: the request asked for this deployment (its own URL), and gets it or nothing.
     async fn acquire_pinned(self: &Arc<Self>, tpl: Arc<Template>, pinned: bool) -> Result<Lease, WakeError> {
-        let (h2c, timeout, affinity) = (tpl.run.h2c, tpl.run.timeout_s.map(|s| Duration::from_secs(s as u64)), tpl.run.affinity);
+        let (h2c, timeout, affinity) = (tpl.run.h2c, Some(tpl.run.request_timeout()), tpl.run.affinity);
         self.acquire_inner(tpl, pinned).await.map(|mut l| {
             (l.h2c, l.timeout, l.affinity) = (h2c, timeout, affinity);
             l

@@ -712,9 +712,9 @@ default) with the project's `env` overrides and the branched resources' URLs on 
   ensure: made if missing, `replace: true` so its own keys are exactly the overrides and branch
   URLs, a removed override doesn't linger; an unchanged repeat records nothing). A different base
   or trust answers 409, and the environment is made again.
-- **It expires by itself.** `ttl_minutes` is a day, renewed by each converge (a preview converges
-  every few minutes while it exists), so a teardown that never happened leaves it for a day at
-  most; roll secrets then deletes it and revokes its leases.
+- **It expires by itself.** `ttl_minutes` is a day, renewed by each whole converge (a running
+  preview's every few minutes, a sleeping one's every hour), so a teardown that never happened
+  leaves it for a day at most; roll secrets then deletes it and revokes its leases.
 - **Keys that don't resolve are said.** A reference to nothing, or to a protected value an
   untrusted preview may not read, leaves the key out (a check would fail on it); the preview's
   activity names those keys once, again whenever the set changes.
@@ -1395,7 +1395,13 @@ A preview's cost is the sum of what its branches and services use, priced with e
 own rates (the same ones its usage page shows).
 
 - **Sleeping**, per month: the bytes each branch owns, at its product's storage rate. Compute
-  costs nothing.
+  costs nothing. Nor does it cost roll's control plane much: usage is read every 5 minutes
+  (`usage_every`), but a settled sleeping preview goes through a whole converge (roll secrets'
+  ensure, its base's links followed, every branch checked) only every hour (`settled_every`;
+  well inside its environment's 24 h lease), its usage read alone in between, as Render and
+  Vercel meter idle previews without waking them. Over its size cap on such a read, it converges
+  to sleep there. A link added to the base reaches a sleeping preview at that hourly converge
+  (rules' changes reach every preview at once). `a_sleeping_previews_usage_is_read_without_a_whole_converge`.
 - **Active**, per hour: the services' containers (memory GiB-hours), Postgres compute units
   while connected, and Redis memory while loaded.
 - **Runs**: its browsers' and jobs' containers by their GiB-hours at the same rate: screenshot
@@ -1711,11 +1717,15 @@ land on the change.
   not a 200 passes through untouched. The script is served from the preview's own host, so a
   `script-src 'self'` policy allows it.
 - The script (no dependencies, in a shadow root) shows a small button; it picks an element,
-  takes a note, and opens the preview in roll's dashboard with the page's path (never its query,
-  which can hold a token)
-  (`/dashboard/projects/{project}/previews?preview={id}&fb_path=…&fb_selector=…&fb_note=…`). The
-  preview's origin never holds a roll credential: the person, signed in to roll there, reads
-  the note in the preview's sheet and posts it (nothing is posted from the link alone).
+  takes a note, and opens a small window of roll's (480 × 640, Vercel's comments posting in
+  place) with the page's path (never its query, which can hold a token):
+  `/dashboard/previews/note?preview={id}&fb_path=…&fb_selector=…&fb_note=…`, the note's form
+  alone. Posted, it closes, and the page reads its list of notes again when it has the focus
+  back. On a phone's width it opens the preview's sheet in roll's dashboard in a tab instead
+  (`/dashboard/projects/{project}/previews?preview={id}&fb_…`). Either opens with `noopener`, so
+  the page gets no handle on roll's window, and the preview's origin never holds a roll
+  credential: the person, signed in to roll there (a sign-in comes back to the form), reads the
+  note and posts it (nothing is posted from the link alone).
 - roll posts it as a `comment` review on the change ("**Feedback on the preview** · `/checkout`
   linked to the preview · `button.pay`", then the note), which reaches the pull request like any
   review. The page's own names are kept to one inert line each.
@@ -2844,11 +2854,12 @@ comments, Render and Railway, Neon, Chromatic and Percy, Signadot, Jam.
    when the build has it; files alone without), and a built Storybook's stories run live in a
    real browser for the first time. Next for it: a `storybook dev` server has no stats file, so
    say on the sheet when a run ordered by files alone.
-3. **A note in one click**: a team note opens the whole dashboard in a tab to post; a small popup
-   that posts and closes (Vercel's comments post in place).
-4. **Sleeping previews cost the control plane**: every settled preview goes through a whole
-   converge every 5 minutes (secrets' links and digests, usage of every branch); a usage-only
-   pass for settled ones, counted per sleeping preview in the live run.
+3. **A note in one click, in review**: the button's note opens a small window of roll's with its
+   form alone, which posts and closes (`/dashboard/previews/note`); a phone keeps the dashboard
+   in a tab. Next for it: a reply and a resolve from the page the same way.
+4. **Sleeping previews cost the control plane, in review**: a settled sleeping preview converges
+   whole hourly (`settled_every`), its usage read alone every 5 minutes in between. Next for it:
+   a running preview that's settled could do the same between its health and route reads.
 5. **A fork's preview on roll apps**: its services' pages the same Content-Security-Policy as on
    previews' own proxy (roll apps' proxy adds it for a `pv-` environment previews marks
    untrusted), and a `data_forks` rule (a fork's data `schema` unless the project says

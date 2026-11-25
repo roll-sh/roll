@@ -1406,9 +1406,9 @@ Health tab and the sidebar's Secrets entry carry
 the count of findings to fix now (expired, missing, exposed), and Home lists them across every
 project (`GET /v1/secrets/findings`, `roll secrets health --all`).
 
-Health, `POST …/leaks`, `GET /v1/secrets/search` and `GET /v1/secrets/findings` filter each
+Health, `POST …/leaks`, `POST …/scan`, `GET /v1/secrets/search` and `GET /v1/secrets/findings` filter each
 finding by the caller's own access: roll secrets asks the caller's roll-access Grant, so
-roll-access lets a token limited to some environments or folders call them (health and leaks are
+roll-access lets a token limited to some environments or folders call them (health, leaks and scan are
 `filters_itself` in its catalogue, search and findings take any grant) and its answer just leaves
 the rest out. Keep the filter in each: without it, the mark would let such a token see the whole
 project.
@@ -3402,6 +3402,7 @@ roll secrets doctor                                            # this machine's 
 roll secrets check   [.env.example] [--strict]                # keys a template names that the environment lacks
 roll secrets scan    [PATH…] | --staged [--allow-unstored]    # this project's values and credentials it doesn't hold: where, never what
 roll secrets scan    --store [KEY=]FILE:LINE                   # move one such credential in; prints what to write instead
+roll secrets scan    --pre-receive [--budget 4s] [--fail-open]  # a git server's hook: refuse a push that adds a value (a scan-only token is enough)
 roll secrets render  config.tpl [--out config.yml [--watch --exec CMD]]   # ${KEY} filled in
 roll secrets export  [--format dotenv|json|shell|yaml|docker|kubernetes] [--name N --namespace NS]
 roll secrets mount   .env [--format dotenv|json]               # a named pipe each read of which gets the current values ("A local .env")
@@ -3869,7 +3870,7 @@ webhook design do.
 - **What counts as found.** A roll code change's added lines and a repo scan ("Leaked secrets don't
   land"), and `POST …/leaks` with `leaked: true` (the caller's text was published: a paste, a
   public repo, an outside scanner's report; it matches only values the caller may reveal). A plain
-  scan (`roll secrets scan`, a pre-commit hook, roll MCP's guard) is text that hasn't left yet, so
+  scan (`roll secrets scan`, a pre-commit or pre-receive hook, roll MCP's guard) is text that hasn't left yet, so
   it reports values and never rotates. GitHub's secret scanning reports only roll's own token
   formats, which roll-access revokes. A live link stores no value, so its value can't be matched in
   text. Its resource's credential is rotated through the same route (`…/rotate`), by hand.
@@ -4158,6 +4159,74 @@ Replace it with process.env.AWS_KEY (roll run puts AWS_KEY in the environment), 
 
 The value is read from the file, never typed or pasted, and goes in one change to the folder of
 `-e`/`roll secrets setup`; a key that's already there is refused, never overwritten.
+
+#### On the git server: a pre-receive hook
+
+A pre-commit hook is each developer's to skip. On the server that takes the push (GitHub
+Enterprise Server, self-managed GitLab, plain git over SSH), `roll secrets scan --pre-receive`
+refuses any push whose new commits add a value of the project, whoever pushes it:
+
+- **What it reads.** git's `old new ref` lines on stdin. The pushed objects are still in git's
+  quarantine (`GIT_QUARANTINE_PATH`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`),
+  and the git the hook runs reads them from there. Only commits no existing ref reaches are read
+  (`git log -p --cc -U0 <new…> --not --all`): a new branch's own commits, an update's new ones,
+  nothing for a deletion. A merge's lines count only when they're new against every parent; a
+  side's lines were checked in that side's commits.
+- **What it asks.** Each added line's candidates, cut as `roll secrets scan` cuts them, of 16
+  characters or more, go to `POST …/scan` (below), 20,000 at a time. Lines over 4 KiB are skipped;
+  it reads at most 256 MiB of patches and keeps at most 32 MiB of candidates.
+- **What it says.** Each value found as `file:line  KEY (environment) in <commit>`, never the
+  value, and it exits 1, so the push is refused.
+- **A time budget.** `--budget` (default `4s`, inside GitHub Enterprise Server's 5 s). A scan that
+  can't finish (the budget runs out, the push is bigger than it reads, roll doesn't answer) fails
+  closed: the push is refused and the hook says why. `--fail-open` lets such a push through with
+  a warning instead. A value it found is refused either way.
+- **Break glass.** `git push -o breakglass` (the repo needs `receive.advertisePushOptions true`)
+  lets the push through. It's still scanned, and roll records it as `secrets.scan.breakglass`,
+  with the keys it found, in the project's audit log. When roll can't be reached, the push still
+  goes through and the hook says roll couldn't record it.
+- **Its token.** `roll secrets -p <project> tokens create pre-receive --scan-only` makes a token
+  that has only `scan`, in every environment unless `--for-env` names some. It can't read a name
+  or reveal a value. Give the hook `ROLL_API_URL`, `ROLL_TOKEN` and `ROLL_PROJECT` (the project's
+  `prj_…` id: a scan-only token can't look a name up).
+
+Setting it up:
+
+```
+# Plain git: hooks/pre-receive in the bare repository (chmod +x)
+#!/bin/sh
+export ROLL_API_URL=https://roll.example ROLL_TOKEN=rlt_… ROLL_PROJECT=prj_…
+exec roll secrets scan --pre-receive
+```
+
+- **GitHub Enterprise Server.** A site admin adds the script above to a repository holding
+  pre-receive hooks, with `roll` in the hook's environment (an environment tarball with the
+  binary), and enables it for an organization or repository (Site admin, Hooks). The hook has
+  5 seconds, so keep `--budget` at 4s or below.
+- **Self-managed GitLab.** Put the script in Gitaly's global server hooks directory
+  (`custom_hooks_dir`'s `pre-receive.d/`) for every repository, or set it on one repository with
+  `gitaly hooks set` (GitLab's "Server hooks").
+- **Plain git.** `hooks/pre-receive` in the bare repository, as above.
+
+GitHub.com and GitLab.com don't run custom pre-receive hooks: there, the GitHub Action's
+`scan: true` checks each pull request ("GitHub Actions" above), and roll code's own repos block a
+value at landing. A check run through roll code's GitHub App for mirrored repos isn't built.
+
+**The `scan` right.** `POST …/scan` answers whether whole candidates are values of the project,
+and where (`{index, key, environment, path}`), never a value and never a near miss. It's its own
+action in roll's permission model (docs/permissions.md), apart from `read` and `reveal`, so the
+server's token can't read production even if it leaks. What stops it from being an oracle:
+
+- only candidates of at least 16 characters, with two kinds of character and 3 bits of entropy a
+  character, are tried; anything shorter or plainer never matches, so a guess at a PIN, a word or
+  a short password isn't confirmed;
+- sensitive keys and personal values never match (as with `POST …/leaks`);
+- at most 60 calls and 100,000 candidates a minute per token (429 after that), counted in the
+  database every node shares;
+- every call is audited (`secrets.scan`, the number of candidates and the keys found, never a
+  candidate), and a finding is the feed's `scan.finding`.
+
+`POST …/leaks` is unchanged: it still needs `read`, and only names values the caller may reveal.
 
 ### Using a key without seeing it
 
@@ -6340,12 +6409,14 @@ replaces it, and a floor left out has none:
   roll where it could sign in without one (the project's AWS role, workload identity federation, a
   federated credential: "Syncing without a cloud key").
 - `max_token_days: d` (1–3650): a roll-access token whose rules reach roll secrets (a `secrets`
-  rule, or `*`) lives at most `d` days. roll-access makes and changes every token, so it asks roll
+  rule, or `*`; a project's tokens, scan-only ones for a pre-receive hook included) lives at most
+  `d` days. roll-access makes and changes every token, so it asks roll
   secrets on each make, each change of rules or lifetime, and each rotation
   (`Access::lifetime_cap`), on top of its own `max_days` (docs/permissions.md). A token that never
   expires is refused under it, and so is a gateway's long-lived token (log the gateway in through
-  a workload identity instead). Workload identities' logins last 60 minutes at most anyway. A
-  machine identity's bootstrap token whose credentials would live longer is refused, and each
+  a workload identity instead). Workload identities' logins and bootstrap tokens last 60
+  minutes at most anyway. A machine identity's bootstrap token whose credentials would live longer
+  is refused, and each
   machine credential issued after the policy (an exchange or a refresh) lives at most `d` days,
   whatever its chain was made with.
 
@@ -6515,7 +6586,7 @@ roll-workspace's records, not secrets' audit rows: they're the workspace's own f
 | `secret.changed` | a change added, changed, linked or rotated stored values (a change that only edits comments, tags or expiry isn't one) | `via`, `change` (its number in the history), `version` (one key) or `versions` (`{key: version}`), `keys` when the row names more (the change's other keys only had their metadata edited or were deleted), `deleted` (keys the same change deleted), `folders` (a change across folders) |
 | `secret.deleted` | a change only deleted keys (a folder's delete too) | `via`, `change`, `version` or `versions` (the delete's), `folders` (a change across folders) |
 | `secret.leaked` | a stored value turned up in a roll code repository (a change's added lines or a scan) or in text reported published (`POST …/leaks` with `leaked: true`), in the project holding the value, once a day for the same keys and place and whenever a rotation of them starts ("When a value leaks"); or GitHub's secret scanning found a placeholder (`secrets.placeholders.end`) | `repo` (and `project`, the repo's, when the value came from another's shared folder) or `reported: true`, with `rotatable` (roll can rotate one of the keys), `rotating` (the keys `leaks.rotate = managed` rotates now; `false` with `reason: "rotated within the hour"` when the keys rotated for a leak within the hour) and `requests` (the change requests opened for their rotation where approvals are needed), `revoking` (the serials of public certificates whose leaked key roll revokes at the CA first, `keyCompromise`); or `placeholder`, `consumer`, `reason` |
-| `scan.finding` | `roll secrets scan` or roll MCP's credential guard (`POST …/leaks`) matched values: a row per folder | `candidates`, `matched`, `guard` |
+| `scan.finding` | `roll secrets scan` or roll MCP's credential guard (`POST …/leaks`), or a pre-receive hook (`POST …/scan`), matched values: a row per folder | `candidates`, `matched`, `guard`, and `breakglass` from a hook |
 | `rotation.failed` | a managed key's scheduled rotation failed: once as a failing run starts (health's `rotation_failing` until one works); a leaked key's rotation failed | `reason`, `via: "leak"` (a leak's) |
 | `rotation.succeeded` | a rotation worked, scheduled, `--now` or for a leak: a managed key's new credential (the row right after its `secret.changed` via `rotation`, in the same transaction), or a live link's resource credential reset | `mode` (`managed` or `live`), `scheduled`, `version` and `change` (managed), `sharing` (the keys holding the same credential, when more than one), `via: "leak"` and `grace_minutes: 0` (a leak's: the leaked credential revoked at once), `revoked: <serial>` (a public certificate's key moving off a certificate roll revoked at the CA) |
 | `request.pending` | a change request or a secret request opened | `request`, `type` (`change` or `value`), `expires_at` (a secret request's) |
@@ -6822,6 +6893,7 @@ isn't in the workspace is 404.
 | `GET /v1/secrets/findings` | | `{project, project_name, findings: Finding[]}[]`: every project's findings the caller may read, projects with none left out |
 | `GET /health?code=` | | `Finding[]`, worst first: every standard environment's findings the caller may read (`read` on the project) |
 | `POST /leaks` | `{candidates: string[], leaked?: boolean}` (at most 20,000; `leaked`: the text was published, so what it matches is a leak, answered as in "When a value leaks": it rotates a managed key only where the caller may `write`; 400 with the guard header); header `X-Roll-Guard: 1` from a credential guard (roll MCP's check of what a tool call would write), audited as `secrets.guard` instead of `secrets.scan`; rolld keeps the header only on a request roll MCP's guard tool makes in process, and removes anyone else's | `{index, key, environment, path}[]`: candidates that are values the caller may reveal (`read` on the project) |
+| `POST /scan` | `{candidates: string[], breakglass?: boolean}` (at most 20,000; `breakglass`: the push it checks goes through anyway, audited as `secrets.scan.breakglass`) | `{index, key, environment, path}[]`: candidates that are values, in the environments and folders the caller may `scan` ("On the git server: a pre-receive hook"); only candidates of 16 characters or more with fair entropy are tried, never sensitive or personal values; 429 past 60 calls or 100,000 candidates a minute per caller |
 | `POST /validity` | `{credentials: {value, pair?}[]}` (at most 200; `pair`: an AWS access key id's secret access key) | `{validity_checks: "on" \| "off", results: Checked[]}`, one per credential in order (`write` on the project); while checks are off, `results` is empty and nothing is asked. `Checked` is `{fingerprint, kind, result: "live" \| "invalid" \| "unknown", account?, checked_at?, why?, rotator?: "aws-iam" \| "github-app"}` ("Is it live?") |
 | `GET /unstored/{fingerprint}` | | `Checked`: a credential's last check (`read`; 404 when it hasn't been checked) |
 | `GET /kms` | | `{key: string \| null}`: the customer-managed key wrapping the project's data key (admin) |

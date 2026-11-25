@@ -20,10 +20,13 @@ pub enum Action {
     Delete,
     /// Environment settings, protection, reviewing requests.
     Admin,
+    /// Whether whole candidates are values (`POST …/scan`, a scanner's), never which value: no
+    /// `read`, no `reveal`.
+    Scan,
 }
 
 impl Action {
-    pub const ALL: [Action; 5] = [Action::Read, Action::Reveal, Action::Write, Action::Delete, Action::Admin];
+    pub const ALL: [Action; 6] = [Action::Read, Action::Reveal, Action::Write, Action::Delete, Action::Admin, Action::Scan];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -32,6 +35,7 @@ impl Action {
             Action::Write => "write",
             Action::Delete => "delete",
             Action::Admin => "admin",
+            Action::Scan => "scan",
         }
     }
 }
@@ -254,6 +258,7 @@ pub fn rule(project: &str, environments: Option<Vec<String>>, paths: Option<Vec<
         Action::Write => scope::Action::Write,
         Action::Delete => scope::Action::Delete,
         Action::Admin => scope::Action::Admin,
+        Action::Scan => scope::Action::Scan,
     };
     scope::Rule {
         product: "secrets".into(),
@@ -273,6 +278,7 @@ fn scope_action(action: Action) -> roll_auth::scope::Action {
         Action::Write => scope::Action::Write,
         Action::Delete => scope::Action::Delete,
         Action::Admin => scope::Action::Admin,
+        Action::Scan => scope::Action::Scan,
     }
 }
 
@@ -427,7 +433,8 @@ impl Grants for GrantGrants {
         // health, findings, the audit log) answers only what the grant reaches in each: a rule
         // limited to some of them takes part in it, as roll-access's `filters_itself` routes do.
         // One about the project as a whole (`Scope::whole`) needs a rule over all of it.
-        let filtered = at.env.is_none() && action == scope::Action::Read && !at.whole;
+        // A scanner's check (`scan`) matches per environment and folder the same way.
+        let filtered = at.env.is_none() && matches!(action, scope::Action::Read | scope::Action::Scan) && !at.whole;
         // The resource as rolld's gate saw it: the project is also its id, so a rule naming it by
         // id (`{id: "prj_…"}`, as the builder and Tighten write it) reaches it as one naming the
         // project does.

@@ -176,6 +176,7 @@ POST /v1/secrets/projects/{project}/public-certs                               a
 PATCH /v1/secrets/projects/{project}/public-certs/{id} an outside integration's setup: an admin's, with its credentials (a credential, a person's call)
 DELETE /v1/secrets/projects/{project}/public-certs/{id} an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/public-certs/{id}/revoke a person's call: takes a publicly trusted certificate back at the CA for good (a leaked key's is revoked by roll on its own)
+POST /v1/secrets/projects/{project}/scan                                       a scanner's (a git server's pre-receive hook, with a scan-only token); agents check text with secrets_scan
 POST /v1/secrets/projects/{project}/shares                                     answers or sets a credential
 POST /v1/secrets/projects/{project}/snowflake-accounts                         an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/snowflake-accounts/{id}                  an outside integration's setup: an admin's, with its credentials

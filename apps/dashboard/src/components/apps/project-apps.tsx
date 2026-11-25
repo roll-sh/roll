@@ -4,13 +4,14 @@ import { useWorkspace } from "@/lib/workspace-store";
 import { btn, Panel } from "../ui";
 import { DeletedPanel } from "./deleted";
 import { PreviewDomainPanel } from "./preview-domain";
+import { PromotePanel } from "./promote-project";
 import { DrainsPanel } from "./drains";
 import { NotificationsPanel } from "./notifications";
 import { RunnerError, useRunner } from "./shared";
 import { SpendPanel } from "./spend";
 import { StatusPagePanel } from "./status-page";
 
-/** A project's roll apps settings, which cover all of its services: where its notifications
+/** A project's roll apps settings, which cover all of its services: promoting them together, where its notifications
  *  go, its log drains, its spending limits, and its recently deleted services. The same panels as a service's Settings → The
  *  project. */
 export function ProjectApps({ project, projectName }: { project: string; projectName: string }) {
@@ -43,6 +44,7 @@ export function ProjectApps({ project, projectName }: { project: string; project
           {projectName}'s services, their settings and the databases they link, as the roll.toml `roll up --all` reads: keep it with the code. Variables go by name only, never a value.
         </p>
       </Panel>
+      <PromotePanel project={project} projectName={projectName} runner={runner} />
       <NotificationsPanel project={project} projectName={projectName} runner={runner} />
       <DrainsPanel project={project} projectName={projectName} runner={runner} />
       <StatusPagePanel project={project} projectName={projectName} runner={runner} />

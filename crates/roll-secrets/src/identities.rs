@@ -265,7 +265,12 @@ fn identity_row(r: &code_sql::Row<'_>) -> code_sql::Result<(Identity, String, Op
             created_by: r.get(12)?,
             last_used_at: r.get(13)?,
             last_subject: r.get(14)?,
-            allowed_ips: r.get::<_, Option<String>>(15)?.and_then(|s| serde_json::from_str(&s).ok()),
+            // A list that can't be read restricts to nowhere: the identity fails to load, never
+            // loads as one that logs in from anywhere.
+            allowed_ips: match r.get::<_, Option<String>>(15)? {
+                None => None,
+                Some(s) => Some(serde_json::from_str(&s).map_err(|_| code_sql::Error::Conversion(format!("identity {}'s address list (allowed_ips) can't be read", r.get::<_, String>(0).unwrap_or_default())))?),
+            },
             pinned_keys: jwks.as_deref().and_then(|d| crate::oidc::pinned_keys(d).ok()),
             gateway: r.get(18)?,
             disabled_at: r.get(19)?,
