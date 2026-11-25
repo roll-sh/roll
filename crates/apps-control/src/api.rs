@@ -99,6 +99,8 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/deploys/{{dep}}/explain"), post(explain_deploy))
         .route(&format!("{env}/deploys/{{dep}}/approve"), post(approve_deploy))
         .route(&format!("{env}/deploys/{{dep}}/pin"), post(pin_deploy).delete(unpin_deploy))
+        .route(&format!("{env}/deploys/{{dep}}/source"), get(deploy_source))
+        .route(&format!("{env}/deploys/{{dep}}/output"), get(deploy_output))
         .route(&format!("{env}/deploys/{{dep}}/rollback"), post(rollback))
         .route(&format!("{env}/deploys/{{dep}}/rollout"), post(rollout_action))
         .route(&format!("{env}/rollback"), post(rollback_previous))
@@ -898,6 +900,19 @@ struct VulnQuery {
 #[derive(Deserialize)]
 struct ExplainQuery {
     again: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SourceQuery {
+    path: Option<String>,
+}
+
+async fn deploy_source(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, Query(q): Query<SourceQuery>) -> R {
+    ok(apps.deployment_source(&id, &env, &dep, q.path.as_deref()).await?)
+}
+
+async fn deploy_output(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, Query(q): Query<SourceQuery>) -> R {
+    ok(apps.deployment_output(&id, &env, &dep, q.path.as_deref()).await?)
 }
 
 async fn pin_deploy(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, ext: Extensions) -> R {

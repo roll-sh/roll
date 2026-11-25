@@ -1404,6 +1404,8 @@ previews are listed once those products are on.
 | `apps_form_submissions` | What people sent through a form, newest first (reveal; every read audited). | `GET /v1/apps/services/{id}/environments/{env}/forms/{form}/submissions` |
 | `apps_delete_form_submission` | Delete one submission for good. | `DELETE /v1/apps/services/{id}/environments/{env}/forms/{form}/submissions/{sub}` |
 | `apps_rollback` | Roll an environment back to an earlier deploy, with the variables it went live with. | `POST /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/rollback` |
+| `apps_deploy_source` | The files a folder upload deployed (kept until it's pruned), or one file's text. | `GET /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/source` |
+| `apps_deploy_output` | The files a static build serves, or one file's text. | `GET /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/output` |
 | `apps_pin_deploy` | Keep a deployment from pruning, so rolling back to it stays instant. | `POST /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/pin` |
 | `apps_unpin_deploy` | Let a pinned deployment be pruned again. | `DELETE /v1/apps/services/{service}/environments/{env}/deploys/{deploy}/pin` |
 | `apps_rollback_previous` | Put back the deploy that was live before this one. | `POST /v1/apps/services/{service}/environments/{env}/rollback` |

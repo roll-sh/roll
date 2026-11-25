@@ -923,6 +923,8 @@ const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, cr
 pub struct Pruned {
     pub id: String,
     pub image: Option<String>,
+    /// Its kept source (a folder upload's bundle), to delete with it.
+    pub source: Option<String>,
 }
 
 const DEPLOY_COLS: &str = "id, service, env, status, cause, revision, message, image, plan, rollback_of, error, created_at, started_at, finished_at, ready_ms, run, vars_hash, actor, pruned_at, error_detail, image_bytes, pinned_at";
@@ -1120,6 +1122,7 @@ impl Store {
         db.add_column("deployments", "image_bytes", "INTEGER")?;
         db.add_column("deployments", "build_steps", "TEXT")?;
         db.add_column("deployments", "pinned_at", "INTEGER")?;
+        db.add_column("deployments", "source_key", "TEXT")?;
         // Paths whose CORS preflights pass the gate (`access.preflight`), as JSON.
         db.add_column("env_access", "preflight", "TEXT")?;
         // Services let in with roll's token for them (`access.callers`), as JSON.
@@ -1925,6 +1928,31 @@ impl Store {
         )?)
     }
 
+    /// A built deployment's upload kept as its source (no longer an upload a build reads).
+    pub fn keep_source(&self, id: &str, key: &str) -> Result<()> {
+        self.db.execute("UPDATE deployments SET source_key = ?, upload = NULL WHERE id = ?", params![key, id])?;
+        Ok(())
+    }
+
+    /// Every kept source: `(service, env, key)`.
+    pub fn kept_sources(&self) -> Result<Vec<(String, String, String)>> {
+        Ok(self.db.query("SELECT service, env, source_key FROM deployments WHERE source_key IS NOT NULL AND pruned_at IS NULL", (), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?)
+    }
+
+    /// Pruned deployments' sources not yet deleted (a delete that failed, tried again).
+    pub fn pruned_sources(&self, limit: usize) -> Result<Vec<(String, String)>> {
+        Ok(self.db.query("SELECT id, source_key FROM deployments WHERE pruned_at IS NOT NULL AND source_key IS NOT NULL LIMIT ?", [limit as i64], |r| Ok((r.get(0)?, r.get(1)?)))?)
+    }
+
+    pub fn clear_source(&self, id: &str) -> Result<()> {
+        self.db.execute("UPDATE deployments SET source_key = NULL WHERE id = ?", [id])?;
+        Ok(())
+    }
+
+    pub fn deployment_source(&self, id: &str) -> Result<Option<String>> {
+        Ok(self.db.query_row("SELECT source_key FROM deployments WHERE id = ?", [id], |r| r.get(0)).optional()?.flatten())
+    }
+
     pub fn clear_upload(&self, id: &str) -> Result<()> {
         self.db.execute("UPDATE deployments SET upload = NULL WHERE id = ?", [id])?;
         Ok(())
@@ -1961,7 +1989,9 @@ impl Store {
         if let Some(q) = &f.q {
             // Its message or its commit, as typed (`%` and `_` are themselves).
             let esc = q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
-            sql.push_str(" AND (message LIKE ? ESCAPE '\\' OR revision LIKE ? ESCAPE '\\')");
+            // Lower case on both sides: SQLite's LIKE ignores case and Postgres' doesn't.
+            let esc = esc.to_lowercase();
+            sql.push_str(" AND (lower(message) LIKE ? ESCAPE '\\' OR lower(revision) LIKE ? ESCAPE '\\')");
             args.push(code_sql::Value::Text(format!("%{esc}%")));
             args.push(code_sql::Value::Text(format!("{esc}%")));
         }
@@ -2000,7 +2030,8 @@ impl Store {
                     }
                     c.execute("UPDATE deployments SET pruned_at = ?, status = 'removed' WHERE id = ?", params![now, id])?;
                     c.execute("DELETE FROM deploy_overrides WHERE deployment = ?", [&id])?;
-                    out.push(Pruned { id, image });
+                    let source = c.query_row("SELECT source_key FROM deployments WHERE id = ?", [&id], |r| r.get::<_, Option<String>>(0))?;
+                    out.push(Pruned { id, image, source });
                     continue;
                 }
                 let removed = status == "removed";
@@ -2019,7 +2050,8 @@ impl Store {
                 c.execute("UPDATE deployments SET pruned_at = ? WHERE id = ?", params![now, id])?;
                 // History keeps its counts; its findings went with its image.
                 c.execute("UPDATE deploy_scans SET items = '[]', sbom = NULL WHERE deployment = ?", [&id])?;
-                out.push(Pruned { id, image });
+                let source = c.query_row("SELECT source_key FROM deployments WHERE id = ?", [&id], |r| r.get::<_, Option<String>>(0))?;
+                out.push(Pruned { id, image, source });
             }
             for p in &mut out {
                 if let Some(img) = &p.image
