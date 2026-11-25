@@ -23,10 +23,13 @@ pub enum Action {
     Deploy,
     /// Manage access and settings.
     Admin,
+    /// Ask whether some text holds a stored value (a scanner's: a pre-receive hook), never see
+    /// one. Not part of `read` or `reveal`.
+    Scan,
 }
 
 impl Action {
-    pub const ALL: [Action; 6] = [Action::Read, Action::Write, Action::Delete, Action::Reveal, Action::Deploy, Action::Admin];
+    pub const ALL: [Action; 7] = [Action::Read, Action::Write, Action::Delete, Action::Reveal, Action::Deploy, Action::Admin, Action::Scan];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -36,6 +39,7 @@ impl Action {
             Action::Reveal => "reveal",
             Action::Deploy => "deploy",
             Action::Admin => "admin",
+            Action::Scan => "scan",
         }
     }
 

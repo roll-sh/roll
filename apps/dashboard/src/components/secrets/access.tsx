@@ -14,6 +14,7 @@ const ACTION_HELP: Record<Action, string> = {
   write: "set, import, rollback, promote, open requests",
   delete: "delete secrets, environments, leases",
   admin: "rename, reorder, protection, review requests",
+  scan: "whether text holds a value, never the value: a pre-receive hook",
 };
 
 /** Tokens for this project (roll-access's `rlt_…`, for CI and services: `ROLL_TOKEN=… roll run …`), workload identities (OIDC logins), the leases of dynamic credentials, and one-time shares. */

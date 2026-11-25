@@ -16,7 +16,7 @@ import { apiHeaders, onApiStatus, ROLL_API } from "./roll-api";
 /** The API's shapes live in the `@roll/secrets` package, shared with services. */
 export type * from "@roll/secrets/types";
 
-export const ACTIONS: readonly Action[] = ["read", "reveal", "write", "delete", "admin"];
+export const ACTIONS: readonly Action[] = ["read", "reveal", "write", "delete", "admin", "scan"];
 export const KEY_TYPES: readonly KeyType[] = ["url", "int", "port", "bool", "json", "email", "totp"];
 
 /** An answer that isn't 2xx: the API's `error`, its `code` (`approval_required`, `stale`, `conflict`…) and the status. */
@@ -294,6 +294,8 @@ export function secretsApi(project: string) {
     deleteSink: (id: string) => req<null>("DELETE", `${P}/audit/sinks/${enc(id)}`),
     /** Which candidates (tokens of some text) are this project's values the caller may reveal; never the values. */
     scanLeaks: (candidates: string[]) => req<{ index: number; key: string; environment: string; path: string }[]>("POST", `${P}/leaks`, { candidates }),
+    /** A scanner's check (the `scan` right): which whole candidates (16+ characters, fair entropy) are values, never a value. */
+    scanOnly: (candidates: string[], breakglass = false) => req<{ index: number; key: string; environment: string; path: string }[]>("POST", `${P}/scan`, { candidates, breakglass }),
     /** `code`: also the keys no repository on the canvas mentions (a search per key: on request). */
     health: (code = false) => req<Finding[]>("GET", `${P}/health${qs({ code: code ? 1 : undefined })}`),
     /** Every managed credential: schedule, last issue, next due, last failure. */

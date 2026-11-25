@@ -895,6 +895,66 @@ async fn roll_secrets_leaks_sets_and_shows_leak_rotation() {
     assert!(roll(&api, &[], &["secrets", "-p", "shop", "leaks", "always"], None).await.code != Some(0));
 }
 
+/// A git server's pre-receive hook (`scan --pre-receive`) in a real bare repository: a new branch
+/// without values goes through, a push adding a production value is refused naming the key, never
+/// the value, with a scan-only token that can't reveal production, and `-o breakglass` lets it
+/// through, audited.
+// The hook calls the server in this process while the test waits on git: two threads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pre_receive_hook_refuses_a_push_adding_a_production_value_with_a_scan_only_token() {
+    let Server { api, projects, .. } = start().await;
+    let value = "fake-Pg9xQ2vLm7RtZk4WbN8s";
+    ok(&api, &[], &["secrets", "-p", "shop", "-e", "production", "set", &format!("DATABASE_URL={value}")], None).await;
+    let made: serde_json::Value = serde_json::from_str(&ok(&api, &[], &["--json", "secrets", "-p", "shop", "tokens", "create", "pre-receive", "--scan-only"], None).await).unwrap();
+    let rule = &made["grant"]["rules"][0];
+    assert_eq!((rule["actions"].clone(), rule.get("environments")), (serde_json::json!({ "scan": "allow" }), None), "{made}");
+    let token = made["token"].as_str().unwrap().to_string();
+    let prj = projects.list(roll_workspace::Scope::All).unwrap().into_iter().find(|p| p.name == "shop").unwrap().id;
+    let hook_env = [("ROLL_TOKEN", token.as_str()), ("ROLL_PROJECT", prj.as_str())];
+    let read = roll(&api, &hook_env, &["secrets", "-e", "production", "get", "DATABASE_URL"], None).await;
+    assert!(read.code != Some(0) && !read.stdout.contains(value), "a scan-only token reveals nothing: {}", read.stderr);
+
+    let dir = tempfile::tempdir().unwrap();
+    let (server, work) = (dir.path().join("server.git"), dir.path().join("work"));
+    let git = |at: &std::path::Path, args: &[&str]| {
+        let mut cmd = std::process::Command::new("git");
+        cmd.current_dir(at).args(["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "init.defaultBranch=main"]).args(args).env("ROLL_API_URL", &api);
+        for (k, v) in hook_env {
+            cmd.env(k, v);
+        }
+        cmd.output().unwrap()
+    };
+    assert!(git(dir.path(), &["init", "-q", "--bare", "server.git"]).status.success());
+    assert!(git(&server, &["config", "receive.advertisePushOptions", "true"]).status.success());
+    let hook = server.join("hooks/pre-receive");
+    std::fs::write(&hook, format!("#!/bin/sh\nexec '{}' secrets scan --pre-receive\n", env!("CARGO_BIN_EXE_roll"))).unwrap();
+    std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    assert!(git(dir.path(), &["init", "-q", "work"]).status.success());
+    let commit = |file: &str, text: &str| {
+        std::fs::write(work.join(file), text).unwrap();
+        assert!(git(&work, &["add", file]).status.success());
+        assert!(git(&work, &["commit", "-qm", file]).status.success());
+    };
+    let push = |extra: &[&str]| {
+        let o = git(&work, &[&["push"][..], extra, &[server.to_str().unwrap(), "main"]].concat());
+        (o.status.success(), String::from_utf8_lossy(&o.stderr).into_owned())
+    };
+
+    commit("README.md", "# shop\nHOST=db.internal\n");
+    let (passed, said) = push(&[]);
+    assert!(passed, "a new branch without values goes through: {said}");
+
+    commit("config.env", "PORT=3000\nDATABASE_URL=fake-Pg9xQ2vLm7RtZk4WbN8s\n");
+    let (passed, said) = push(&[]);
+    assert!(!passed && said.contains("config.env:2  DATABASE_URL (production)") && said.contains("refused"), "{said}");
+    assert!(!said.contains(value), "the value never shows: {said}");
+
+    let (passed, said) = push(&["-o", "breakglass"]);
+    assert!(passed && said.contains("breakglass"), "{said}");
+    let audit: serde_json::Value = reqwest::get(format!("{api}/v1/secrets/projects/{prj}/audit?action=secrets.scan.breakglass")).await.unwrap().json().await.unwrap();
+    assert_eq!(audit[0]["keys"], serde_json::json!(["DATABASE_URL"]), "{audit}");
+}
+
 /// `roll secrets agent` on port 0 for `shop`'s production, with `env` set (its login): its address
 /// once it listens, and what it has logged so far.
 struct LocalAgent {

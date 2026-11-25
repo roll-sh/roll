@@ -1285,6 +1285,69 @@ async fn derived_keys_share_their_parents_rate_by_user() {
     }
     let codes: Vec<u16> = statuses.iter().map(|(_, s)| *s).collect();
     assert_eq!(codes, [200, 429, 200, 200, 429, 200, 200, 200, 200, 200, 429], "{statuses:?}: d's second is past the parent's 8");
+    // Counted under the parent, each user in its top list.
+    e.control.sample().await.unwrap();
+    let u = e.get(&format!("{path}/browser-keys/{pid}/usage")).await;
+    let t = &u["totals"];
+    assert_eq!((t["requests"].as_u64(), t["reasons"]["user_rate"].as_u64(), t["reasons"]["key_rate"].as_u64()), (Some(11), Some(2), Some(1)), "{u}");
+    assert!(t["users"].as_array().unwrap().contains(&json!({"user": "a", "requests": 3, "throttled": 1})), "{u}");
+}
+
+/// A browser key's usage (Algolia's per-key usage and logs): every request it makes and why the
+/// owner refused one, by reason, the same before the metering pass (what the node counted) and
+/// after it (the catalog's rings), with the top refused origins and a summary in the list.
+#[tokio::test]
+async fn browser_key_usage_counts_requests_and_429s_by_reason() {
+    let e = env_with(|c| c.domain = Some("search.example.test".into())).await;
+    let c = e.post("/v1/search/clusters", json!({"name": "shop"})).await;
+    let path = format!("/v1/search/clusters/{}", c["id"].as_str().unwrap());
+    let r = e.post(&format!("{path}/request"), json!({"method": "PUT", "path": "/products", "body": null})).await;
+    assert_eq!(r["status"], 200, "{r}");
+    let (s, v) = e.call(reqwest::Method::PATCH, &path, Some(json!({"cors": {"allow_origin": ["https://shop.example.com"]}}))).await;
+    assert_eq!(s, 200, "{v}");
+    let k = e.post(&format!("{path}/browser-keys"), json!({"name": "page", "indices": ["products"], "rate_limit": {"per_minute": 5, "per_ip_per_minute": 100}})).await;
+    let (id, key) = (k["id"].as_str().unwrap(), k["api_key"].as_str().unwrap().to_string());
+    let send = |key: String, p: &'static str, origin: &'static str| {
+        e.http
+            .post(format!("{}{p}", e.es))
+            .header("host", "shop.search.example.test")
+            .header("origin", origin)
+            .header("authorization", format!("ApiKey {key}"))
+            .json(&json!({}))
+            .send()
+    };
+    let shop = "https://shop.example.com";
+    // Five tokens: a query the policy refuses, a page CORS refuses, three searches; then 429s.
+    let mut codes = vec![send(key.clone(), "/products/_search?q=title:x", shop).await.unwrap().status().as_u16()];
+    codes.push(send(key.clone(), "/products/_search", "https://scraper.example.net").await.unwrap().status().as_u16());
+    for _ in 0..5 {
+        codes.push(send(key.clone(), "/products/_search", shop).await.unwrap().status().as_u16());
+    }
+    // The key's id with a wrong secret: counted as an invalid key.
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let wrong = b64.encode(format!("{id}@shop:not-the-secret"));
+    codes.push(send(wrong, "/products/_search", shop).await.unwrap().status().as_u16());
+    assert_eq!(codes, [400, 403, 200, 200, 200, 429, 429, 401]);
+    let check = |u: &Value| {
+        let t = &u["totals"];
+        assert_eq!((t["requests"].as_u64(), t["throttled"].as_u64(), t["refused"].as_u64()), (Some(8), Some(2), Some(3)), "{u}");
+        let mut reasons: Vec<(&str, u64)> = t["reasons"].as_object().unwrap().iter().filter_map(|(r, n)| n.as_u64().filter(|n| *n > 0).map(|n| (r.as_str(), n))).collect();
+        reasons.sort();
+        assert_eq!(reasons, [("invalid_key", 1), ("key_rate", 2), ("origin", 1), ("policy", 1)], "{u}");
+        assert!(t["origins"].as_array().unwrap().contains(&json!({"origin": "https://scraper.example.net", "refused": 1})), "{u}");
+        assert!(!u.to_string().contains("title:x"), "no query is kept: {u}");
+    };
+    let usage = format!("{path}/browser-keys/{id}/usage");
+    check(&e.get(&usage).await);
+    e.control.sample().await.unwrap();
+    for window in ["24h", "14d"] {
+        check(&e.get(&format!("{usage}?window={window}")).await);
+    }
+    let listed = e.get(&format!("{path}/browser-keys")).await;
+    assert_eq!(listed["keys"][0]["usage_24h"]["throttled"], 2, "{listed}");
+    assert_eq!(e.call(reqwest::Method::GET, &format!("{usage}?window=1y"), None).await.0, 400);
+    assert_eq!(e.call(reqwest::Method::GET, &format!("{path}/browser-keys/nope/usage"), None).await.0, 404);
 }
 
 /// A cluster where a browser key's filter (`public: true`) hides document 2 of `products`, and an
@@ -1825,6 +1888,86 @@ async fn narrowed_keys() {
     assert_eq!(e.es(ku, kp, reqwest::Method::POST, "/products/_search", Some(json!({}))).await.0, 200);
     assert_eq!(e.es(ku, kp, reqwest::Method::PUT, "/products/_doc/2", Some(json!({"t": "y"}))).await.0, 403);
     assert_eq!(e.es(ku, kp, reqwest::Method::POST, "/private/_search", Some(json!({}))).await.0, 403);
+}
+
+/// A reindex reads its source as its caller searches it and writes each document as its caller
+/// would: a data key on `tenant-a-*` copies within its indices only, on either flavor, whether
+/// the other index is the source, the destination, or where a script moves a document. On
+/// Elasticsearch, a role with `read` on the source and `write` on the destination reindexes
+/// (no cluster privilege), and copies only what its document and field level security shows.
+#[tokio::test]
+async fn reindex_reads_and_writes_as_its_caller() {
+    let e = env().await;
+    let e = &e;
+    let call = |k: &Value, m: reqwest::Method, path: &str, b: Option<Value>| {
+        let path = path.to_string();
+        let k = k.clone();
+        async move {
+            match k["api_key"].as_str() {
+                Some(key) => as_key(e, key, m, &path, b).await,
+                None => e.es(k["username"].as_str().unwrap(), k["password"].as_str().unwrap(), m, &path, b).await,
+            }
+        }
+    };
+    let reindex = |src: &str, dest: &str| json!({"source": {"index": src}, "dest": {"index": dest}});
+    for flavor in ["elasticsearch", "opensearch"] {
+        let name = format!("rx-{flavor}");
+        let c = e.post("/v1/search/clusters", json!({"name": name, "flavor": flavor})).await;
+        let owner = json!({"username": c["username"], "password": c["password"]});
+        for (path, doc) in [("/tenant-a-1/_doc/1", json!({"t": "a"})), ("/tenant-b/_doc/1", json!({"t": "b"})), ("/.watcher-history-18-2026.11.25/_doc/1", json!({"w": 1}))] {
+            let (s, v) = call(&owner, reqwest::Method::PUT, &format!("{path}?refresh=true"), Some(doc)).await;
+            assert!(s < 300, "{flavor} {path}: {s} {v}");
+        }
+        let count = |index: &str| {
+            let owner = owner.clone();
+            let index = index.to_string();
+            async move { call(&owner, reqwest::Method::GET, &format!("/{index}/_count"), None).await.1["count"].as_i64().unwrap_or(0) }
+        };
+        let key = e.post(&format!("/v1/search/clusters/{name}/keys"), json!({"name": "a", "access": "data", "indices": ["tenant-a-*"]})).await;
+        let post = |p: &str, b: Value| call(&key, reqwest::Method::POST, p, Some(b));
+        let (s, v) = post("/_reindex?refresh=true", reindex("tenant-b", "tenant-a-copy")).await;
+        assert_eq!(s, 403, "{flavor}: reading tenant-b: {v}");
+        let (s, v) = post("/_reindex?refresh=true", reindex("tenant-a-1", "tenant-b")).await;
+        assert_eq!(s, 403, "{flavor}: writing tenant-b: {v}");
+        let moved = json!({"source": {"index": "tenant-a-1"}, "dest": {"index": "tenant-a-moved"}, "script": {"source": "ctx._index = 'tenant-b'; ctx._id = 'x'"}});
+        let (s, v) = post("/_reindex?refresh=true", moved).await;
+        assert_eq!(s, 403, "{flavor}: a script's move into tenant-b: {v}");
+        let deletes = json!({"source": {"index": "tenant-a-1"}, "dest": {"index": "tenant-b"}, "script": {"source": "ctx.op = 'delete'"}});
+        let (s, v) = post("/_reindex?refresh=true", deletes).await;
+        assert_eq!(s, 403, "{flavor}: a script's delete in tenant-b: {v}");
+        assert_eq!(count("tenant-b").await, 1, "{flavor}: tenant-b untouched");
+        // A restricted index: never read (Elasticsearch narrows the wildcard away, OpenSearch
+        // refuses it), never written.
+        let (s, v) = post("/_reindex?refresh=true", reindex(".watcher-history-*", "tenant-a-w")).await;
+        assert!(s == 403 || (s == 200 && v["created"] == 0), "{flavor}: reading .watcher-history-*: {s} {v}");
+        let (s, v) = post("/_reindex?refresh=true", reindex("tenant-a-1", ".watcher-history-18-2026.11.25")).await;
+        assert_eq!(s, 403, "{flavor}: writing .watcher-history: {v}");
+        assert_eq!(count("tenant-a-w").await, 0, "{flavor}");
+        // Within its indices it reindexes.
+        let (s, v) = post("/_reindex?refresh=true", reindex("tenant-a-1", "tenant-a-copy")).await;
+        assert_eq!((s, &v["created"]), (200, &json!(1)), "{flavor}: {v}");
+    }
+    // Elasticsearch: `read` on the source with a document and a field restriction, `write` on
+    // the destination.
+    let name = "rx-elasticsearch";
+    let request = format!("/v1/search/clusters/{name}/request");
+    let console = |m: &str, p: &str, b: Value| e.post(&request, json!({"method": m, "path": p, "body": b}));
+    let bulk = "{\"index\":{\"_index\":\"src\",\"_id\":\"1\"}}\n{\"title\":\"open\",\"public\":true,\"secret\":\"s1\"}\n\
+                {\"index\":{\"_index\":\"src\",\"_id\":\"2\"}}\n{\"title\":\"closed\",\"public\":false,\"secret\":\"s2\"}\n";
+    assert_eq!(console("POST", "/_bulk?refresh=true", Value::String(bulk.into())).await["status"], 200);
+    assert_eq!(console("PUT", "/dst", json!({})).await["status"], 200);
+    let role = json!({"indices": [
+        {"names": ["src"], "privileges": ["read"], "query": {"term": {"public": true}}, "field_security": {"grant": ["title", "public"]}},
+        {"names": ["dst"], "privileges": ["write"]}
+    ]});
+    let r = console("POST", "/_security/api_key", json!({"name": "mover", "role_descriptors": {"r": role}})).await;
+    let v = body(&r);
+    use base64::Engine;
+    let mover = json!({"api_key": base64::engine::general_purpose::STANDARD.encode(format!("{}@{name}:{}", v["id"].as_str().unwrap(), v["api_key"].as_str().unwrap()))});
+    let (s, v) = call(&mover, reqwest::Method::POST, "/_reindex?refresh=true", Some(reindex("src", "dst"))).await;
+    assert_eq!((s, &v["created"]), (200, &json!(1)), "only the visible document: {v}");
+    let doc = body(&console("GET", "/dst/_doc/1", Value::Null).await);
+    assert_eq!(doc["_source"], json!({"title": "open", "public": true}), "without the hidden field: {doc}");
 }
 
 /// Relevance tuning through `/v1/search`: a synonyms set a search then uses, a query ruleset that

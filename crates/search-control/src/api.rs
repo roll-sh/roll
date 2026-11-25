@@ -82,6 +82,7 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/browser-keys", get(browser_keys).post(create_browser_key))
         .route("/v1/search/clusters/{id}/browser-keys/{key}", axum::routing::delete(revoke_browser_key))
         .route("/v1/search/clusters/{id}/browser-keys/{key}/rotate", post(rotate_browser_key_secret))
+        .route("/v1/search/clusters/{id}/browser-keys/{key}/usage", get(browser_key_usage))
         .route("/v1/search/clusters/{id}/remotes", get(remotes))
         .route("/v1/search/clusters/{id}/remotes/{alias}", axum::routing::put(link_remote).delete(unlink_remote))
         .route("/v1/search/clusters/{id}/indices/{index}", get(index_get).put(index_create).delete(index_delete))
@@ -910,7 +911,18 @@ async fn migrate(State(c): State<AppState>, Path(id): Path<String>, Json(b): Jso
 
 /// `GET /v1/search/clusters/{id}/browser-keys`: the keys web pages ship, without their secrets.
 async fn browser_keys(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
-    Ok(Json(json!({ "keys": c.browser_keys(&id).await? })))
+    Ok(Json(json!({ "keys": c.browser_keys_with_usage(&id).await? })))
+}
+
+#[derive(Deserialize)]
+struct BrowserUsageQuery {
+    window: Option<String>,
+}
+
+/// `GET /v1/search/clusters/{id}/browser-keys/{key}/usage?window=1h|24h|14d`: the key's requests,
+/// 429s and other refusals by reason over time, its top users and refused origins.
+async fn browser_key_usage(State(c): State<AppState>, Path((id, key)): Path<(String, String)>, Query(q): Query<BrowserUsageQuery>) -> ApiResult<Value> {
+    Ok(Json(c.browser_key_usage(&id, &key, q.window.as_deref().unwrap_or("24h")).await?))
 }
 
 /// `POST /v1/search/clusters/{id}/browser-keys`: a key a web page can ship (read-only, one
