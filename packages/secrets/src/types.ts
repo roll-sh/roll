@@ -387,6 +387,12 @@ type IdentityScope = { name: string; environments?: string[]; paths?: string[]; 
  * neither: its machines log in with bootstrap tokens made for it (docs/secrets.md, "On a VM").
  */
 export type NewIdentity = IdentityScope & ({ kind?: "oidc"; issuer: string; audience: string; subject: string; claims?: Record<string, string>; jwks?: string } | { kind: "aws"; arn: string } | { kind: "machine" });
+/** A machine identity's bootstrap token (`POST …/identities/{id}/bootstrap`): `minutes` 1–60 (default 10) to be exchanged, from `allowed_ips` only if given; each machine credential it leads to lives `credential_hours` (1–720, default 24). */
+export type NewBootstrap = { minutes?: number; allowed_ips?: string[]; credential_hours?: number };
+/** A bootstrap token (`rlbt_…`, in the answer this once) and the machine's chain. */
+export type MadeBootstrap = { identity: string; chain: string; secret: string; expires_at: number };
+/** One of a machine identity's machines (`GET …/identities/{id}/machines`): `waiting` until its bootstrap token is exchanged, `live`, `ended` (not replaced before it ended) or `revoked`. Never a secret. */
+export type MachineChain = { chain: string; state: "waiting" | "live" | "ended" | "revoked"; credential_hours: number; created_at: number; created_by: string; refreshed_at: number | null; expires_at: number | null; revoked_at: number | null; revoked_why: string | null };
 export type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number; allowed_ips?: string[] };
 /** `approval`: the approval that let the request through roll-access's gate (an `ask` approved; `until` when a rule it remembered allowed it). */
 /** `seq` and `hash` place a row in its project's chain (absent on rows from before it); an `audit.digest` row's `digest` is roll's signed JWS of it. */
