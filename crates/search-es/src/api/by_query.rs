@@ -90,6 +90,9 @@ struct ShardScan {
     /// source gets the vectors it keeps out back, as Elasticsearch shows them (reindex writes
     /// them to the destination, update by query's scripts see them).
     vectors: Option<Arc<crate::engine::fields::FieldTable>>,
+    /// The reader's field level security on the index (reindex): `_source` without the fields
+    /// it may not see.
+    fields: Option<crate::xpack::security::dls::FieldFilter>,
 }
 
 impl Scanner {
@@ -110,12 +113,19 @@ impl Scanner {
             let id = crate::search::hits::stored_id(&stored).unwrap_or_default();
             let mut source = crate::fetch::source_bytes(&stored).map(Bytes::copy_from_slice);
             if self.need_source
-                && let (Some(table), Some(b)) = (&sh.vectors, &source)
+                && (sh.vectors.is_some() || sh.fields.is_some())
+                && let Some(b) = &source
                 && let Value::Obj(mut m) = crate::fetch::parse_source(b)?
             {
-                crate::engine::synthetic::vectors(table, "", &mut m, false);
-                crate::engine::source_vectors::patch(&table.stripped_vectors, &mut m, &mut crate::engine::source_vectors::InSegment(seg, local));
-                source = Some(Bytes::from(Value::Obj(m).to_json()));
+                if let Some(table) = &sh.vectors {
+                    crate::engine::synthetic::vectors(table, "", &mut m, false);
+                    crate::engine::source_vectors::patch(&table.stripped_vectors, &mut m, &mut crate::engine::source_vectors::InSegment(seg, local));
+                }
+                let v = match &sh.fields {
+                    Some(f) => f.filter_source(Value::Obj(m)),
+                    None => Value::Obj(m),
+                };
+                source = Some(Bytes::from(v.to_json()));
             }
             if self.need_source && source.is_none() {
                 return Err(EsError::illegal_argument(format!("[{}][{id}] didn't store _source", sh.idx.name)));
@@ -147,7 +157,9 @@ fn merge_key(by_shard: bool, doc: u32, shard: usize) -> u64 {
 /// Shard failures fail the whole operation as Elasticsearch's scroll does
 /// (`search_phase_execution_exception`, "all shards failed" / "Partial shards failure");
 /// `need_source` (reindex, update by query) rejects documents without a stored `_source`;
-/// `by_shard` (reindex) reads the shards one after the other (see [`Scanner`]). The search runs
+/// `by_shard` (reindex) reads the shards one after the other (see [`Scanner`]); `read_fields`
+/// (reindex) leaves out of `_source` the fields the reader's field level security hides, as
+/// the scroll a reindex opens as its caller returns them. The search runs
 /// as an `indices:data/read/search` child of task `parent` (with its per-shard children), as
 /// the scroll an Elasticsearch by-query run opens does.
 #[allow(clippy::too_many_arguments)]
@@ -160,6 +172,7 @@ pub fn scan(
     slice: Option<(u32, u32)>,
     need_source: bool,
     by_shard: bool,
+    read_fields: bool,
     parent: u64,
 ) -> EsResult<Scanner> {
     let cluster = ctx.cluster;
@@ -200,7 +213,10 @@ pub fn scan(
     // known after the merge. No shard contributes more than `max_docs`.
     for (ti, t) in targets.iter().enumerate() {
         match ready[ti].clone().and_then(|()| scan_shard(ctx, &st, t, query, slice, max_docs)) {
-            Ok(sh) => {
+            Ok(mut sh) => {
+                if read_fields {
+                    sh.fields = t.security.as_ref().and_then(|s| s.fields(crate::xpack::security::dls::READ, &t.idx.name));
+                }
                 succeeded += 1;
                 matched += sh.docs.len() as u64;
                 shards.push(sh);
@@ -251,7 +267,7 @@ fn scan_shard(
     {
         match crate::search::id_slice_query(&qctx, sid, max)? {
             Some(f) => b = b.add(Occur::Filter, f),
-            None => return Ok(ShardScan { idx: t.idx.clone(), searcher, docs: Vec::new(), vectors: None }),
+            None => return Ok(ShardScan { idx: t.idx.clone(), searcher, docs: Vec::new(), vectors: None, fields: None }),
         }
     }
     q = arc(b);
@@ -264,7 +280,7 @@ fn scan_shard(
         docs.truncate(l.min(usize::MAX as u64) as usize);
     }
     let vectors = (table.has_vectors && t.idx.settings.get("index.mapping.exclude_source_vectors") != Some("false")).then_some(table);
-    Ok(ShardScan { idx: t.idx.clone(), searcher, docs, vectors })
+    Ok(ShardScan { idx: t.idx.clone(), searcher, docs, vectors, fields: None })
 }
 
 /// What a by-query run counted (`BulkByScrollTask.Status`).
@@ -858,7 +874,7 @@ where
         // refreshed as asked, and the run fails with the first failed slice's error, the
         // others' suppressed (bounded).
         if refresh {
-            let _ = refresh_touched(ctx, true, &touched);
+            let _ = refresh_touched(ctx, true, &touched, action == "indices:data/write/reindex");
         }
         let first = errors.remove(0);
         errors.truncate(MAX_SUPPRESSED_SLICES);
@@ -972,10 +988,16 @@ fn run_doc_script(ctx: &Ctx, bound: &crate::scripting::Bound, kind: CtxKind, d: 
 }
 
 /// `refresh`: the written indices, by uuid.
-fn refresh_touched(ctx: &Ctx<'_>, refresh: bool, touched: &[String]) -> EsResult<()> {
+/// `written_only` (a reindex): the refresh OpenSearch runs as the user is of the indices written
+/// to, not of the request's.
+fn refresh_touched(ctx: &Ctx<'_>, refresh: bool, touched: &[String], written_only: bool) -> EsResult<()> {
     if refresh {
         // OpenSearch runs the refresh as the user, once the documents are written.
-        crate::xpack::security::check_refresh(ctx)?;
+        let written: Option<Vec<String>> = written_only.then(|| {
+            let st = ctx.state();
+            st.metadata.indices.values().filter(|i| touched.contains(&i.uuid)).map(|i| i.name.clone()).collect()
+        });
+        crate::xpack::security::check_refresh(ctx, written.as_deref())?;
         for u in touched {
             if let Some(e) = ctx.cluster.engine.loaded(u) {
                 e.refresh_all()?;
@@ -1181,7 +1203,7 @@ pub async fn delete_by_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
         let one = |slice: Option<(u32, u32)>, max_docs: Option<u64>, live: Arc<Live>| {
             let (indices, query, routing) = (&indices, &query, &routing);
             async move {
-                let mut scanner = match scan(ctx, indices, query.as_ref(), routing.as_deref(), max_docs, slice, false, false, live.task) {
+                let mut scanner = match scan(ctx, indices, query.as_ref(), routing.as_deref(), max_docs, slice, false, false, false, live.task) {
                     Ok(sc) => sc,
                     Err(_) if live.is_cancelled() => return Ok((cancelled_before_start(&live), Vec::new())),
                     Err(e) => return Err(e),
@@ -1243,7 +1265,7 @@ pub async fn delete_by_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
         };
         let refresh = ctx.bool_param("refresh", false)?;
         let (s, touched) = run_slices(ctx, opts, &indices, slice, task, live, action, &d2, refresh, one).await?;
-        refresh_touched(ctx, refresh, &touched)?;
+        refresh_touched(ctx, refresh, &touched, false)?;
         Ok((s, touched))
     })
     .await
@@ -1273,7 +1295,7 @@ pub async fn update_by_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
         let one = |slice: Option<(u32, u32)>, max_docs: Option<u64>, live: Arc<Live>| {
             let (indices, query, routing, bound, pipeline) = (&indices, &query, &routing, &bound, &pipeline);
             async move {
-                let mut scanner = match scan(ctx, indices, query.as_ref(), routing.as_deref(), max_docs, slice, true, false, live.task) {
+                let mut scanner = match scan(ctx, indices, query.as_ref(), routing.as_deref(), max_docs, slice, true, false, false, live.task) {
                     Ok(sc) => sc,
                     Err(_) if live.is_cancelled() => return Ok((cancelled_before_start(&live), Vec::new())),
                     Err(e) => return Err(e),
@@ -1375,7 +1397,7 @@ pub async fn update_by_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
         };
         let refresh = ctx.bool_param("refresh", false)?;
         let (s, touched) = run_slices(ctx, opts, &indices, slice, task, live, action, &d2, refresh, one).await?;
-        refresh_touched(ctx, refresh, &touched)?;
+        refresh_touched(ctx, refresh, &touched, false)?;
         Ok((s, touched))
     })
     .await
@@ -1438,6 +1460,17 @@ fn reject_versioned_deletes<'a>(ctx: &Ctx<'_>, p: &ReindexPlan, docs: impl Itera
     Ok(())
 }
 
+/// A reindex's write of document `id` to `index`, authorized as the caller's bulk item would be
+/// (`authorize_writes`: creating the index, the shard action, the item's own action), wherever
+/// the document goes: the destination, or the index a script moved it to.
+fn check_dest_write(ctx: &Ctx<'_>, index: &str, op: crate::xpack::security::WriteOp, id: &str, routing: Option<&str>) -> EsResult<()> {
+    let item = crate::xpack::security::WriteItem::new(&ctx.state(), index.to_string(), op, id, routing);
+    match crate::xpack::security::authorize_writes(ctx, std::slice::from_ref(&item)).pop().flatten() {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
 /// Writes one document read by a reindex.
 async fn reindex_doc(ctx: &Ctx<'_>, p: &ReindexPlan, d: &SourceDoc, s: &mut Status, touched: &mut Vec<String>) -> EsResult<Flow> {
     let mut src = reindex_source(p, d)?;
@@ -1467,6 +1500,11 @@ async fn reindex_doc(ctx: &Ctx<'_>, p: &ReindexPlan, d: &SourceDoc, s: &mut Stat
                 };
                 let did = nid.unwrap_or_else(|| d.id.clone());
                 let r = if nr != d.routing { nr } else { routing.clone() };
+                if let Err(e) = check_dest_write(ctx, &di, crate::xpack::security::WriteOp::Delete, &did, r.as_deref()) {
+                    s.failure_status = s.failure_status.max(e.status);
+                    s.failures.push(failure(&di, &did, &e));
+                    return Ok(Flow::Stop);
+                }
                 let st = ctx.state();
                 match write::resolve_existing(&st, &di) {
                     Some(meta) => {
@@ -1515,9 +1553,11 @@ async fn reindex_doc(ctx: &Ctx<'_>, p: &ReindexPlan, d: &SourceDoc, s: &mut Stat
         args.version_type = Some(vt);
         args.version = Some(version);
     }
-    let checked = match write::resolve_existing(&ctx.state(), &index) {
-        Some(meta) => check_copies(ctx, &meta, &id, args.routing.as_deref(), Some(&src[..])).await,
-        None => Ok(()),
+    let op = if p.op_create { crate::xpack::security::WriteOp::Create } else { crate::xpack::security::WriteOp::Index };
+    let checked = match (check_dest_write(ctx, &index, op, &id, args.routing.as_deref()), write::resolve_existing(&ctx.state(), &index)) {
+        (Err(e), _) => Err(e),
+        (Ok(()), Some(meta)) => check_copies(ctx, &meta, &id, args.routing.as_deref(), Some(&src[..])).await,
+        (Ok(()), None) => Ok(()),
     };
     let r = match checked {
         Ok(()) => document::index_one(ctx, &index, args, src, false).await,
@@ -1586,6 +1626,13 @@ pub async fn reindex(ctx: &Ctx<'_>) -> EsResult<Reply> {
             return Err(EsError::action_request_validation(&[format!("reindex cannot write into an index its reading from [{}]", target.name)]));
         }
     }
+    // The local source is read as the caller searches it (`indices:data/read/search`, wildcards
+    // narrowed to what it may read; OpenSearch: every index it names), its document and field
+    // level security applied by the scan. A remote source is read with its own credentials.
+    let read_indices = match &remote {
+        None => crate::xpack::security::authorize_search(ctx, &req.search.indices, &req.search.opts)?.unwrap_or_else(|| req.search.indices.clone()),
+        Some(_) => req.search.indices.clone(),
+    };
     let opts = Opts::of(&req);
     let src_indices = req.search.indices.clone();
     let dest_index = req.dest.index.clone().unwrap_or_default();
@@ -1624,9 +1671,9 @@ pub async fn reindex(ctx: &Ctx<'_>) -> EsResult<Reply> {
             (Some(r), Some(rq)) => Box::pin(reindex_remote(ctx, &plan, rq, r, opts.max_docs, &live)).await?,
             _ => {
                 let one = |slice: Option<(u32, u32)>, max_docs: Option<u64>, live: Arc<Live>| {
-                    let (src_indices, query, plan) = (&src_indices, &query, &plan);
+                    let (src_indices, query, plan) = (&read_indices, &query, &plan);
                     async move {
-                        let mut scanner = match scan(ctx, src_indices, query.as_ref(), None, max_docs, slice, true, true, live.task) {
+                        let mut scanner = match scan(ctx, src_indices, query.as_ref(), None, max_docs, slice, true, true, true, live.task) {
                     Ok(sc) => sc,
                     Err(_) if live.is_cancelled() => return Ok((cancelled_before_start(&live), Vec::new())),
                     Err(e) => return Err(e),
@@ -1672,10 +1719,10 @@ pub async fn reindex(ctx: &Ctx<'_>) -> EsResult<Reply> {
                         Ok((s, touched))
                     }
                 };
-                run_slices(ctx, opts, &src_indices, slice, task, live, action, &d2, opts.refresh, one).await?
+                run_slices(ctx, opts, &read_indices, slice, task, live, action, &d2, opts.refresh, one).await?
             }
         };
-        refresh_touched(ctx, opts.refresh, &touched)?;
+        refresh_touched(ctx, opts.refresh, &touched, true)?;
         Ok((s, touched))
     })
     .await

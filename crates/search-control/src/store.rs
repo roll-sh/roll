@@ -26,6 +26,10 @@
 //!   one-hour buckets (14 days). A slot is rewritten when its time comes round again, so a
 //!   cluster never has more than `MINUTE_SLOTS + HOUR_SLOTS` rows, and a cluster that served no
 //!   request in a minute writes nothing for it.
+//! - `browser_usage`: each browser key's requests and refusals
+//!   ([`search_server::browser::KeyStats`]) in the same two fixed rings as `metrics`, per key: at
+//!   most [`search_server::browser::MAX_KEYS_COUNTED`] keys per cluster (those with the newest
+//!   buckets), and rows older than their ring go as new ones come; a revoked key's go with it.
 //! - `slowlog`: the newest [`search_es::slowlog::MAX_ENTRIES`] slow log entries per cluster, as
 //!   Elasticsearch's JSON lines.
 //! - `analytics`: search analytics ([`search_es::analytics::Bucket`]) of the indices that turned
@@ -63,6 +67,7 @@
 
 use code_sql::{Db, OptionalExtension, Row, params};
 use search_es::seal::{Sealer, is_sealed};
+use search_server::browser::KeyStats;
 use search_server::metrics::Stats;
 use serde::{Deserialize, Serialize};
 
@@ -650,6 +655,10 @@ impl Store {
         db.ensure_schema("CREATE INDEX IF NOT EXISTS search_site_crawls_by ON search_site_crawls (owner, site, at)")?;
         db.ensure_schema("CREATE INDEX IF NOT EXISTS search_crawler_sites_due ON search_crawler_sites (due_at)")?;
         db.ensure_schema("CREATE INDEX IF NOT EXISTS search_crawler_sites_owner ON search_crawler_sites (owner, site)")?;
+        // Browser keys' usage, in the metrics' rings (`record_browser_usage`).
+        db.ensure_schema(
+            "CREATE TABLE IF NOT EXISTS search_browser_usage (cluster_id TEXT NOT NULL, key_id TEXT NOT NULL, res INTEGER NOT NULL, slot INTEGER NOT NULL, at INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (cluster_id, key_id, res, slot))",
+        )?;
         // Before tenants, every cluster without an owner (all of every project's) shared the key
         // `(no owner)`, and so one token per site: those verifications and counts go once, and
         // their clusters verify again under their own key ([`SearchCluster::tenant`]).
@@ -1129,6 +1138,7 @@ impl Store {
             x.execute("DELETE FROM search_revokes WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_remotes WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_metrics WHERE cluster_id = ?1", params![id])?;
+            x.execute("DELETE FROM search_browser_usage WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_slowlog WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_analytics WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_suggestions WHERE cluster_id = ?1", params![id])?;
@@ -1326,6 +1336,7 @@ impl Store {
             x.execute("DELETE FROM search_clusters WHERE id = ?1", params![id])?;
             x.execute("DELETE FROM search_usage WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_metrics WHERE cluster_id = ?1", params![id])?;
+            x.execute("DELETE FROM search_browser_usage WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_slowlog WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_analytics WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_suggestions WHERE cluster_id = ?1", params![id])?;
@@ -1623,6 +1634,81 @@ impl Store {
             x.query("SELECT at, data FROM search_metrics WHERE cluster_id = ?1 AND res = ?2 AND at >= ?3 ORDER BY at", params![id, res, since], |r| Ok((r.get(0)?, r.get(1)?)))
         })?;
         Ok(rows.into_iter().map(|(at, d)| (at, Stats::decode(&d))).collect())
+    }
+
+    /// Adds minutes of browser keys' usage (key id, unix minute, what it saw) to each key's minute
+    /// and hour rings, as [`Store::record_metrics`] adds metrics, in one transaction; then drops
+    /// rows past their ring (`now`, unix seconds) and the rows of all but the
+    /// [`search_server::browser::MAX_KEYS_COUNTED`] keys with the newest buckets.
+    pub async fn record_browser_usage(&self, id: &str, minutes: &[(String, u64, KeyStats)], now: i64) -> anyhow::Result<()> {
+        if minutes.is_empty() {
+            return Ok(());
+        }
+        self.db.write(|x| {
+            for (key, minute, stats) in minutes {
+                let t = (*minute).min(i64::MAX as u64 / 60) as i64 * 60;
+                for (res, slots) in [(60, MINUTE_SLOTS), (3600, HOUR_SLOTS)] {
+                    let at = t - t.rem_euclid(res);
+                    let slot = (at / res).rem_euclid(slots);
+                    let kept: Option<(i64, String)> = x
+                        .query_row(
+                            "SELECT at, data FROM search_browser_usage WHERE cluster_id = ?1 AND key_id = ?2 AND res = ?3 AND slot = ?4",
+                            params![id, key, res, slot],
+                            |r| Ok((r.get(0)?, r.get(1)?)),
+                        )
+                        .optional()?;
+                    let mut merged = match kept {
+                        Some((a, data)) if a == at => KeyStats::decode(&data),
+                        Some((a, _)) if a > at => continue,
+                        _ => KeyStats::default(),
+                    };
+                    merged.merge(stats);
+                    x.execute(
+                        "INSERT INTO search_browser_usage (cluster_id, key_id, res, slot, at, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                         ON CONFLICT (cluster_id, key_id, res, slot) DO UPDATE SET at = excluded.at, data = excluded.data",
+                        params![id, key, res, slot, at, merged.encode()],
+                    )?;
+                }
+            }
+            x.execute(
+                "DELETE FROM search_browser_usage WHERE cluster_id = ?1 AND ((res = 60 AND at <= ?2) OR (res = 3600 AND at <= ?3))",
+                params![id, now - MINUTE_SLOTS * 60, now - HOUR_SLOTS * 3600],
+            )?;
+            let keys: Vec<(String, i64)> = x.query("SELECT key_id, MAX(at) FROM search_browser_usage WHERE cluster_id = ?1 GROUP BY key_id", params![id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            if keys.len() > search_server::browser::MAX_KEYS_COUNTED {
+                let mut keys = keys;
+                keys.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                for (k, _) in &keys[search_server::browser::MAX_KEYS_COUNTED..] {
+                    x.execute("DELETE FROM search_browser_usage WHERE cluster_id = ?1 AND key_id = ?2", params![id, k])?;
+                }
+            }
+            Ok::<_, code_sql::Error>(())
+        })?;
+        Ok(())
+    }
+
+    /// Browser keys' usage buckets of `res` seconds (60 or 3600) from `since` (unix seconds):
+    /// one key's, or every key's; key id, bucket start, oldest first.
+    pub async fn browser_usage_since(&self, id: &str, key: Option<&str>, res: i64, since: i64) -> anyhow::Result<Vec<(String, i64, KeyStats)>> {
+        let rows: Vec<(String, i64, String)> = self.db.read(|x| match key {
+            Some(k) => x.query(
+                "SELECT key_id, at, data FROM search_browser_usage WHERE cluster_id = ?1 AND key_id = ?2 AND res = ?3 AND at >= ?4 ORDER BY at",
+                params![id, k, res, since],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            ),
+            None => x.query(
+                "SELECT key_id, at, data FROM search_browser_usage WHERE cluster_id = ?1 AND res = ?2 AND at >= ?3 ORDER BY at",
+                params![id, res, since],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            ),
+        })?;
+        Ok(rows.into_iter().map(|(k, at, d)| (k, at, KeyStats::decode(&d))).collect())
+    }
+
+    /// Drops a revoked browser key's usage.
+    pub async fn delete_browser_usage(&self, id: &str, key: &str) -> anyhow::Result<()> {
+        self.db.write(|x| x.execute("DELETE FROM search_browser_usage WHERE cluster_id = ?1 AND key_id = ?2", params![id, key]))?;
+        Ok(())
     }
 
     /// Appends slow log entries (unix ms, the entry as JSON), oldest first, and keeps the

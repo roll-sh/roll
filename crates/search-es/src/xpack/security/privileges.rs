@@ -269,7 +269,7 @@ pub fn action_of(api: &str) -> (Scope, String) {
         "bulk" => Some((Index, "indices:data/write/bulk")),
         "delete_by_query" => Some((Index, "indices:data/write/delete/byquery")),
         "update_by_query" => Some((Index, "indices:data/write/update/byquery")),
-        "reindex" => Some((Cluster, "indices:data/write/reindex")),
+        "reindex" => Some((Index, "indices:data/write/reindex")),
         "indices.create" => Some((Index, "indices:admin/create")),
         "indices.delete" => Some((Index, "indices:admin/delete")),
         "indices.get" | "indices.exists" => Some((Index, "indices:admin/get")),

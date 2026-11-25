@@ -135,7 +135,8 @@ GET /compare/{base}...{head}?format=diff → text/plain: each file's unified dif
 
 A read at a revision of a change from outside the repo (a fork's pull request, `trusted: false`:
 its head or a changeset before it, off the default branch) says so for MCP's lockdown: the answer
-and its `entries`, `files` and `matches` carry `outside: true`, and so do the `items`, `ranges`
+and its `entries`, `files` and `matches` carry `outside: true` (and a `/documents/{id}` file
+match, by the same rule), and so do the `items`, `ranges`
 and `changesets` that aren't on the default branch; `/blob` and `?format=diff` answer an
 `x-roll-outside: true` header. A team's own branches and changes don't.
 
