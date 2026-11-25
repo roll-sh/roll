@@ -564,7 +564,8 @@ async fn unchanged_pages_answer_304_and_stay() {
     let site = Site::start().await;
     site.set("/", 200, &[("Content-Type", "text/html"), ("ETag", "\"home-1\"")], r#"<title>Home</title><a href="/a">a</a>"#);
     site.set("/a", 200, &[("Content-Type", "text/html"), ("Last-Modified", "Wed, 25 Nov 2026 10:00:00 GMT")], "<title>A one</title><p>first</p>");
-    let c = cluster(&[]).await;
+    // Five crawls of one unverified site.
+    let c = cluster(&[("roll.crawler.unverified.max_crawls_per_day", "10")]).await;
     crawler(&c, &format!(r#"{{"urls":"{}"}}"#, site.url("/")), None).await;
     let job = crawl(&c).await;
     assert_eq!((at(&job, "status").as_str(), num(&job, "indexed_document_count")), (Some("completed"), 2), "{job:?}");
