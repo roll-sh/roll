@@ -1314,4 +1314,15 @@ impl<'c> CopyTarget<'c> {
     pub fn finish(self) -> EsResult<()> {
         self.de.refresh_all()
     }
+
+    /// Resolves once every copy indexed so far is durable in each shard's log, as a request's
+    /// acknowledgement waits for (in memory: at once).
+    pub async fn durable(&self) -> EsResult<()> {
+        for n in 0..self.dst.number_of_shards() {
+            if let Some(log) = self.de.shard(n).log.clone() {
+                log.durable().await?;
+            }
+        }
+        Ok(())
+    }
 }

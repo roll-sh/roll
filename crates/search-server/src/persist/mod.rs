@@ -1694,6 +1694,25 @@ impl ShardLog for OpLog {
             d.flush_wanted.store(true, Ordering::SeqCst);
         }
     }
+
+    /// The shard's records appended (those kept while it wasn't attached first) and
+    /// acknowledged as a request's are: the WAL's ack, a valid lease, and ownership when checked.
+    fn durable(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = EsResult<()>> + Send + '_>> {
+        Box::pin(async move {
+            let d = self.data()?;
+            if d.closed.load(Ordering::SeqCst) {
+                return Err(EsError::new(503, "cluster_block_exception", format!("cluster [{}] was unloaded before the writes were made durable", d.cluster)));
+            }
+            if self.st.has_pending() {
+                d.drain(&self.st).await.map_err(|e| e.to_es(&d.cluster))?;
+            }
+            let lsn = self.st.lsn.load(Ordering::SeqCst);
+            if lsn > d.acked_lsn.load(Ordering::SeqCst) {
+                d.acknowledge(lsn).await.map_err(|e| e.to_es(&d.cluster))?;
+            }
+            Ok(())
+        })
+    }
 }
 
 impl ShardStorage for ClusterData {

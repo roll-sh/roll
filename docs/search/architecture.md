@@ -659,8 +659,11 @@ allowlist (a preview's branch included); change it like any setting.
   through `search-lucene` on a blocking thread (ranged reads in 8 MiB windows across a file's
   `.partN` blobs, throttled like any restore; checksums checked as files stream; what is kept
   charged to the `request` breaker) and hands live documents over a bounded channel to be
-  indexed like writes. The restore's state is in each index's recovery source, so a new owner
-  restores an unfinished index again when it opens the cluster.
+  indexed like writes. The restore's state is in each index's recovery source, with the shards it
+  finished (each recorded once its writes are durable: `ShardLog::durable`, the WAL's ack a
+  request waits for), so a new owner resumes an unfinished index from the first shard not
+  finished when it opens the cluster. Data streams matched by the request come back with their
+  backing indices from the snapshot's global metadata, created in the same state update.
 - **Credentials.** Elasticsearch takes a client's secure settings from its keystore; a roll
   tenant has none, so they come with the repository's settings (`s3`: `access_key`,
   `secret_key`, `session_token`; `gcs`: `credentials_file`, the service account key file's

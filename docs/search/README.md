@@ -1535,10 +1535,13 @@ deterministic (#396).
    hostile input, and indexes every live document again from `_source` as a task `_recovery`
    follows. Indices without a stored `_source` are refused by name and reason (`partial`
    restores the rest). Measured: 1M documents (~200 bytes, 2 shards, from an `fs` repository) restored in 22.8 s, 43,900 docs/s (a release build into an in-memory cluster on lane b's 12 build CPUs at nice 19, one run). Left of
-   the restore: segments Lucene 8 wrote (Elasticsearch 7.x indices never merged since), data streams themselves (their backing indices restore), `sparse_vector`
+   the restore: segments Lucene 8 wrote (Elasticsearch 7.x indices never merged since), `sparse_vector`
    and `rank_vectors` values and nested dense vectors that Elasticsearch 9 left out of `_source`,
-   `_status` file counts from the shard snapshots, and resuming after a takeover from the shard
-   reached rather than from the start of each index. Landed since: a snapshot DELETE waits for
+   `_status` file counts from the shard snapshots, and data stream aliases and failure stores.
+   In progress (`feature/search-es-restore-2`): data streams themselves (with their generation,
+   and their template with the global state, as Elasticsearch 9.5.5 restores them), and a restore
+   resumed after a takeover from the shard reached rather than from the start of each index.
+   Landed since: a snapshot DELETE waits for
    running snapshots that build on it, as Elasticsearch does, and a cap on repository generations
    (#941); deletions and `_cleanup` show as running, so a snapshot starting meanwhile waits for
    them rather than take a removed snapshot as its base (`fix/search-snapshot-delete-window`).

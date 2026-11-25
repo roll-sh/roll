@@ -2310,8 +2310,16 @@ the rest are skipped by the tests' own prerequisites.
     the restoring cluster's, and the settings Elasticsearch set for its cluster (allocation,
     blocks, lifecycle, `index.store.*`, the made-by-the-cluster ones) are dropped with a warning,
     as the migration from a live cluster drops them; `index.mapping.exclude_source_vectors` is set
-    explicitly to what the index had. Data streams restore as their backing indices (the data
-    stream itself isn't recreated), and feature states aren't restored. At most one such restore
+    explicitly to what the index had. Data streams restore as on Elasticsearch 9.5.5 (checked
+    against it): a pattern matching a data stream's name (or `*`, or no `indices`) brings it back
+    with all its backing indices, its generation, flags, `_meta`, lifecycle and settings from the
+    snapshot's global metadata whatever `include_global_state` says (its template only with the
+    global state; it takes writes without one); renamed, its backing indices take its new name
+    (`.ds-<new name>-<date>-<generation>`); a data stream already here under the target name is
+    refused; a pattern matching only backing indices restores them as plain indices. Failure
+    store indices and data stream aliases aren't restored, nor are feature states. A restore
+    interrupted by a takeover resumes on the next owner from the first shard it hadn't finished
+    (each shard recorded finished only once its documents are durable). At most one such restore
     runs per cluster (a second answers 503 `concurrent_snapshot_execution_exception`) and two per
     node; a restore is a full reindex, at roll's indexing rate (docs/search/README.md, "Next").
   - **Hostile input**: everything is read as a tenant's bytes. No allocation is sized from a count
