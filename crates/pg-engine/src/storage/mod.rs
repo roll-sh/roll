@@ -24,6 +24,8 @@ pub mod row;
 pub mod sst;
 pub mod toast;
 pub mod wal;
+#[cfg(test)]
+mod a322_probe;
 
 use crate::error::{Result, internal};
 use bytes::Bytes;
@@ -84,6 +86,12 @@ const PART_MIN: u64 = 256 << 10;
 /// How long a compaction at the L0 trigger waits for the newest commit it merges to be seen
 /// by every snapshot (`Store::wait_unpinned`).
 const PIN_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// (Measuring switch of agent 322, not for landing.)
+fn a322_no_merge() -> bool {
+    static O: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *O.get_or_init(|| std::env::var_os("A322_NO_MERGE").is_some())
+}
 
 /// L0 is merged into one L0 file rather than into L1 while the L1 files it would be merged
 /// with hold more than this many times its bytes (`Store::merge_l0`).
@@ -2619,7 +2627,7 @@ impl Store {
     /// deletions pending (they are applied by compaction). Returns whether it merged.
     fn merge_l0(&self) -> Result<bool> {
         let _g = self.bg.lock();
-        if self.closed.load(Ordering::Acquire) || !self.opts.l0_merge {
+        if self.closed.load(Ordering::Acquire) || !self.opts.l0_merge || a322_no_merge() {
             return Ok(false);
         }
         let view = self.view();
