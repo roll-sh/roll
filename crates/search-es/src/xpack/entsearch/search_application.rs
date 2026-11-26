@@ -637,7 +637,11 @@ pub async fn post_event(ctx: &Ctx<'_>) -> EsResult<Reply> {
         let reach = crate::xpack::security::may_read(ctx);
         let doc_index = body.get("document").and_then(|d| d.get("index")).and_then(Value::as_str);
         let app = body.get("search").and_then(|s| s.get("search_application")).and_then(Value::as_str);
-        if doc_index.is_some_and(|i| !reach(i)) || app.is_some_and(|a| !reach(a)) || (doc_index.is_none() && app.is_none()) {
+        // A document of an index the key reads, or one the application it reaches searches (its
+        // alias): a page on an application only ever sees the application's hits.
+        let st = ctx.state();
+        let through_app = |i: &str| app.is_some_and(|a| reach(a) && st.metadata.indices.get(i).is_some_and(|idx| idx.aliases.contains_key(a)));
+        if doc_index.is_some_and(|i| !reach(i) && !through_app(i)) || app.is_some_and(|a| !reach(a)) || (doc_index.is_none() && app.is_none()) {
             return Err(crate::xpack::security::browser::refused("an event about an index or search application it doesn't reach"));
         }
         let outcome = if ty == "roll_conversion" { crate::analytics::Outcome::Conversion(value) } else { crate::analytics::Outcome::Click };

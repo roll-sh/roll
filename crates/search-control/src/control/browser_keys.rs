@@ -102,6 +102,10 @@ pub struct Limits {
     pub allow_scripts: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_expensive_queries: Option<bool>,
+    /// The page may post `search_click` and `roll_conversion` events about what the key reaches
+    /// (counted for the key's own visitor, never stored: relevance-experiments.md).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events: Option<bool>,
 }
 
 /// What a revoke did.
