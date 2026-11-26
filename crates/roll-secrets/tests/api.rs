@@ -2521,6 +2521,39 @@ async fn a_stored_value_is_found_by_fingerprint_and_short_values_never_are() {
 }
 
 #[tokio::test]
+async fn a_scanner_never_confirms_a_weak_password_inside_text_it_knows() {
+    let api = Api::new().await;
+    let url = "postgres://app:hunter2@db.internal.example.com:5432/shop";
+    let random = "Zq7vR2mXk9LpT4wB8nC1sD6fG3hJ5yUe";
+    api.set("production", "DB_URL", url).await;
+    api.set("production", "API_KEY", random).await;
+    let token = api.token(json!({ "actions": ["scan"] }));
+    let (s, found) = api.req(Method::POST, "/scan", Some(json!({ "candidates": [url, random] })), Some(&token)).await;
+    // The URL is long, but its password is a word: never tried. A scan-only token isn't told the key.
+    assert_eq!((s, found.clone()), (StatusCode::OK, json!([{ "index": 1, "environment": "production" }])), "{found}");
+}
+
+/// roll code's GitHub App checking a push to a repo on the project's canvas: a scanner of the
+/// project and nothing more (a weak password inside a URL it knows is never tried), audited as the
+/// installation with the pusher and ref, and a value it finds is a leak (`secrets.leaked`).
+#[tokio::test]
+async fn a_github_push_is_checked_by_a_scanner_and_a_value_found_is_a_leak() {
+    let api = Api::new().await;
+    let url = "postgres://app:hunter2@db.internal.example.com:5432/shop";
+    let random = "Zq7vR2mXk9LpT4wB8nC1sD6fG3hJ5yUe";
+    api.set("production", "DB_URL", url).await;
+    api.set("production", "API_KEY", random).await;
+    let push = roll_secrets::leaks::Push { breakglass: false, pusher: Some("octo".into()), refs: vec!["refs/heads/pay".into()] };
+    let found = api.secrets.scan_pushed(&api.project, "acme/app", "github:7:acme/app", &[url.to_string(), random.to_string()], &push).unwrap();
+    assert_eq!(found, [(1, roll_secrets::Leak { key: "API_KEY".into(), environment: "production".into(), path: "/".into() }, false)]);
+    let scans = api.ok(Method::GET, "/audit?action=secrets.scan", None).await;
+    assert_eq!(scans[0]["actor"], "github:7:acme/app");
+    assert!(scans[0]["summary"].as_str().unwrap().contains("by octo to refs/heads/pay"), "{scans}");
+    let leaked = api.ok(Method::GET, "/audit?action=secrets.leaked", None).await;
+    assert_eq!(leaked[0]["keys"], json!(["API_KEY"]), "{leaked}");
+}
+
+#[tokio::test]
 async fn validity_checks_ask_each_provider_once_and_only_when_an_admin_turned_them_on() {
     let api = Api::new().await;
     let c = creds();
@@ -3778,6 +3811,32 @@ async fn a_saas_credential_replacement_moves_the_maker_to_whoever_replaced_it() 
     let (s, e) = rotate().await;
     assert!(!s.is_success() && e.to_string().contains("usr_bob"), "{s} {e}");
     assert_eq!(api.values("production", "/").await["values"]["GITLAB_TOKEN"], issued, "the old value stands");
+}
+
+/// The 40th review's item 10: a new admin URL for a database outside roll (it carries the admin
+/// password) moves the registration to whoever set it, as a SaaS credential does.
+#[tokio::test]
+async fn an_outside_databases_new_admin_url_moves_the_maker_to_whoever_set_it() {
+    let api = Api::new().await;
+    let p = api.project.clone();
+    for (handle, email) in [("cat", "cat@example.com"), ("bob", "bob@example.com")] {
+        let (_, inv) = api.call(Method::POST, &format!("/v1/workspace/projects/{p}/invites"), Some(json!({ "email": email, "role": "admin" }))).await;
+        let token = inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string();
+        assert_eq!(api.signed_in(handle, false, Method::POST, &format!("/v1/workspace/invites/{token}/accept"), None).await.0, StatusCode::OK);
+    }
+    let new = json!({ "name": "billing", "url": "postgres://admin:hunter2@db.example:5432/app", "roles": ["app_blue", "app_green"] });
+    let (s, d) = api.signed_in("cat", false, Method::POST, &format!("/v1/secrets/projects/{p}/outside-databases"), Some(new)).await;
+    assert!(s == StatusCode::CREATED && d["created_by"] == "usr_cat", "{s} {d}");
+    api.ok(Method::PUT, "/environments/production/secrets/DB_PASSWORD", Some(json!({ "link": { "kind": "outside_database", "ref": d["id"], "field": "password", "mode": "managed" } }))).await;
+    let at = format!("/v1/secrets/projects/{p}/outside-databases/{}", d["id"].as_str().unwrap());
+    let (s, b) = api.signed_in("bob", false, Method::PATCH, &at, Some(json!({ "url": "postgres://admin:hunter2@db.example:5432/app?sslmode=require" }))).await;
+    assert!(s.is_success() && b["created_by"] == "usr_bob", "{s} {b}");
+    let audit = api.ok(Method::GET, "/audit", None).await.to_string();
+    assert!(audit.contains("maker moved from usr_cat to usr_bob") && !audit.contains("hunter2"), "{audit}");
+    // Bob leaves: the URL he set stops acting through roll at once, though Cat is still an admin.
+    assert_eq!(api.call(Method::DELETE, &format!("/v1/workspace/projects/{p}/members/usr_bob"), None).await.0, StatusCode::NO_CONTENT);
+    let (s, e) = api.call(Method::POST, "/environments/production/secrets/DB_PASSWORD/rotate", None).await;
+    assert!(!s.is_success() && e.to_string().contains("usr_bob"), "{s} {e}");
 }
 
 #[tokio::test]
@@ -6137,6 +6196,10 @@ async fn scheduled_backups_land_sealed_in_the_projects_bucket_and_keep_the_newes
     let sealed: roll_secrets::crypto::Sealed = serde_json::from_value(backup["sealed"].clone()).unwrap();
     let plain = roll_secrets::crypto::open_sealed(&secret, backup["context"].as_str().unwrap(), &sealed).unwrap();
     assert!(String::from_utf8_lossy(&plain).contains("sk_live_nightly"));
+    // An incident's cut-off pauses it: every value leaves in each backup.
+    let cut = api.ok(Method::POST, "/environments/production/reach/cut-off?path=/", Some(json!({ "why": "INC-1" }))).await;
+    assert_eq!(cut["backups"][0]["name"], "backups to bucket assets", "{cut}");
+    assert!(api.ok(Method::GET, "/backup/schedule", None).await["paused_at"].is_i64());
     // Not due again for a day.
     let s = api.secrets.clone();
     tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
@@ -6155,6 +6218,10 @@ async fn a_project_backs_up_sealed_to_a_key_and_restores_into_another() {
     let ca = api.ok(Method::POST, "/cas", Some(json!({ "name": "internal", "domains": ["svc.internal"] }))).await;
     let link = json!({ "kind": "pki", "ref": ca["id"], "field": "certificate", "mode": "managed", "options": { "names": "api.svc.internal", "rotate_days": 7 } });
     api.ok(Method::PUT, "/environments/staging/secrets/TLS_CERT", Some(json!({ "link": link }))).await;
+    // An encryption key and a signed sync: their bytes and signing secret leave in a person's backup only.
+    api.ok(Method::POST, "/transit", Some(json!({ "name": "cards" }))).await;
+    let sync = api.ok(Method::POST, "/syncs", Some(json!({ "environment": "staging", "kind": "fake", "target": { "name": "x", "token_key": "PLATFORM_TOKEN" } }))).await;
+    let whsec = sync["signing_secret"].as_str().unwrap().to_string();
 
     let secret = [7u8; 32];
     // Only a caller who may manage and reveal the whole project takes it out or compares it: an
@@ -6163,11 +6230,25 @@ async fn a_project_backs_up_sealed_to_a_key_and_restores_into_another() {
     let admin_only = api.gate.issue("admin only", roll_secrets::access::rule(&api.project, None, None, &[roll_secrets::Action::Read, roll_secrets::Action::Admin]), None);
     let (s, e) = api.req(Method::POST, "/backup", Some(recipient.clone()), Some(&admin_only)).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "{e}");
-    let b = api.ok(Method::POST, "/backup", Some(recipient)).await;
+    let b = api.ok(Method::POST, "/backup", Some(recipient.clone())).await;
     assert!(!b.to_string().contains("sk_live_backup"), "sealed, never in the clear");
-    let sealed: roll_secrets::crypto::Sealed = serde_json::from_value(b["sealed"].clone()).unwrap();
-    let plain = roll_secrets::crypto::open_sealed(&secret, b["context"].as_str().unwrap(), &sealed).unwrap();
-    let archive: Value = serde_json::from_slice(&plain).unwrap();
+    let open = |b: &Value| -> Value {
+        let sealed: roll_secrets::crypto::Sealed = serde_json::from_value(b["sealed"].clone()).unwrap();
+        serde_json::from_slice(&roll_secrets::crypto::open_sealed(&secret, b["context"].as_str().unwrap(), &sealed).unwrap()).unwrap()
+    };
+    let archive = open(&b);
+    assert!(archive.to_string().contains(&whsec) && !archive["encryption_keys"][0]["versions"].as_array().unwrap().is_empty());
+    // A token that may back it up takes the registrations by name only: no route answers their keys
+    // to a token either.
+    let whole = api.gate.issue("whole", roll_secrets::access::rule(&api.project, None, None, &[roll_secrets::Action::Read, roll_secrets::Action::Reveal, roll_secrets::Action::Admin]), None);
+    let (s, tb) = api.req(Method::POST, "/backup", Some(recipient), Some(&whole)).await;
+    assert!(s == StatusCode::OK && tb["warnings"][0].as_str().unwrap().contains("CA internal"), "{tb}");
+    let theirs = open(&tb);
+    assert!(theirs.get("registrations").is_none() && !theirs.to_string().contains("PRIVATE KEY") && theirs.to_string().contains("sk_live_backup"), "{theirs}");
+    // Nor a sync's signing secret or an encryption key's bytes: both by name, and said so.
+    let (said, left_out) = (tb["warnings"].to_string(), theirs["left_out"].to_string());
+    assert!(!theirs.to_string().contains(&whsec) && theirs["encryption_keys"][0]["versions"] == json!([]) && theirs["syncs"][0]["without_credential"] == true, "{theirs}");
+    assert!(said.contains("fake sync on staging:/") && said.contains("encryption key cards") && left_out.contains("encryption key cards") && left_out.contains("can't be decrypted"), "{tb}");
     // The drill: compared with the project by name, never a value, and nothing written.
     api.set("staging", "API", "https://staging.example").await;
     let v = api.ok(Method::POST, "/backup/verify", Some(archive.clone())).await;
@@ -6175,11 +6256,22 @@ async fn a_project_backs_up_sealed_to_a_key_and_restores_into_another() {
     assert!(!v.to_string().contains("sk_live_backup") && !v.to_string().contains("PRIVATE KEY"));
     let (s, e) = api.req(Method::POST, "/backup/verify", Some(archive.clone()), Some(&admin_only)).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "{e}");
+    // A token's verify counts, and names nothing.
+    let (s, tv) = api.req(Method::POST, "/backup/verify", Some(archive.clone()), Some(&whole)).await;
+    assert_eq!((s, tv["names"].clone(), tv["keys"]["changed"].clone(), tv["keys"]["counts"]["changed"].clone()), (StatusCode::OK, json!(false), json!([]), json!(1)), "{tv}");
+
+    // An identity in an archive passes what making it checks: one any repository on GitHub could
+    // log in as is left out, never written to be enabled later.
+    let mut archive = archive;
+    let shared = json!({ "name": "any-repo", "issuer": "https://token.actions.githubusercontent.com", "audience": "roll", "subject": "repo:*", "claims": "{}", "actions": "[\"read\"]", "ttl_minutes": 15 });
+    archive["identities"] = json!([{ "kind": "identity", "id": "idn_shared", "columns": shared }]);
 
     let (_, other) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "restored" }))).await;
     let to = |p: &str| format!("/v1/secrets/projects/{}{p}", other["id"].as_str().unwrap());
     let r = api.ok(Method::POST, &to("/restore"), Some(archive.clone())).await;
-    assert_eq!((r["secrets"].as_u64(), r["registrations"].as_u64(), r["warnings"].clone()), (Some(3), Some(1), json!([])));
+    assert_eq!((r["secrets"].as_u64(), r["registrations"].as_u64(), r["identities"].as_u64(), r["syncs"].as_u64()), (Some(3), Some(1), Some(0), Some(1)), "{r}");
+    let warnings = r["warnings"].as_array().unwrap();
+    assert!(warnings.len() == 1 && warnings[0].as_str().unwrap().contains("any-repo") && warnings[0].as_str().unwrap().contains("signs for everyone"), "{r}");
     // The CA came back with its key, under the restorer: a certificate issued after the restore
     // chains to the same CA certificate.
     let restored = api.ok(Method::GET, &to("/cas"), None).await[0].clone();
@@ -6195,6 +6287,14 @@ async fn a_project_backs_up_sealed_to_a_key_and_restores_into_another() {
     assert_eq!(api.ok(Method::GET, &to("/required"), None).await[0]["type"], "url");
     let (s, _) = api.call(Method::POST, &to("/restore"), Some(archive)).await;
     assert_eq!(s, StatusCode::CONFLICT, "only into a project with no secrets");
+    // A token's archive brings the sync back paused until it's made again with its credential.
+    let (_, third) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "from-a-token" }))).await;
+    let at = |p: &str| format!("/v1/secrets/projects/{}{p}", third["id"].as_str().unwrap());
+    api.ok(Method::POST, &at("/restore"), Some(theirs)).await;
+    let restored = api.ok(Method::GET, &at("/syncs"), None).await["syncs"][0].clone();
+    assert!(restored["paused_why"].as_str().unwrap().contains("without its credential"), "{restored}");
+    let (s, _) = api.call(Method::PATCH, &at(&format!("/syncs/{}", restored["id"].as_str().unwrap())), Some(json!({ "paused": false }))).await;
+    assert_eq!(s, StatusCode::CONFLICT);
 }
 
 #[tokio::test]
@@ -7595,6 +7695,67 @@ async fn members_reach_secrets_by_their_role() {
     assert_eq!(get("bob", format!("/v1/secrets/projects/{}/environments/development/secrets", api.project)).await.0, StatusCode::NOT_FOUND);
 }
 
+/// Guardrails (docs/secrets.md): with a policy of one production approval, a project's admin
+/// can't take production back to none, Health shows a project still below it, and a new project's
+/// production is born at it.
+#[tokio::test]
+async fn a_policy_floor_holds_against_a_project_admin_and_new_projects_are_born_at_it() {
+    let api = Api::new().await;
+    let (_, p) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "before" }))).await;
+    let before = p["id"].as_str().unwrap().to_string();
+    let at = |rest: &str| format!("/v1/secrets/projects/{before}{rest}");
+    api.join(&before, "cat", "admin", None).await;
+    // Its secrets are made on first use: before the policy here.
+    let (s, e) = api.as_ada(Method::GET, &at("/environments/production"), None).await;
+    assert_eq!((s, e["approvals"].as_i64()), (StatusCode::OK, Some(0)), "{e}");
+    let policy = json!({ "production_approvals": 1 });
+    assert_eq!(api.signed_in("cat", false, Method::PUT, "/v1/secrets/policy", Some(policy.clone())).await.0, StatusCode::FORBIDDEN);
+    let set = api.ok(Method::PUT, "/v1/secrets/policy", Some(policy)).await;
+    assert_eq!((set["production_approvals"].as_i64(), set["max_token_days"].is_null()), (Some(1), true), "{set}");
+
+    // Made before the policy, it isn't rewritten: Health says how far it is.
+    let (s, h) = api.signed_in("cat", false, Method::GET, &at("/health"), None).await;
+    assert_eq!(s, StatusCode::OK, "{h}");
+    assert!(h.as_array().unwrap().iter().any(|f| f["issue"] == "off_policy" && f["environment"] == "production"), "{h}");
+    let (s, e) = api.signed_in("cat", false, Method::PUT, &at("/environments/production/policy"), Some(json!({ "protected": true, "approvals": 1 }))).await;
+    assert!(s.is_success(), "{e}");
+    let (s, e) = api.signed_in("cat", false, Method::PUT, &at("/environments/production/policy"), Some(json!({ "protected": true, "approvals": 0 }))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{e}");
+    assert!(e["error"].as_str().unwrap().contains("roll secrets' policy") && e["error"].as_str().unwrap().contains("at least 1 approval"), "{e}");
+
+    let (_, p) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "after" }))).await;
+    let after = p["id"].as_str().unwrap();
+    let (s, e) = api.as_ada(Method::GET, &format!("/v1/secrets/projects/{after}/environments/production"), None).await;
+    assert_eq!((s, e["protected"].as_bool(), e["approvals"].as_i64()), (StatusCode::OK, Some(true), Some(1)), "{e}");
+}
+
+/// A restore comes back within roll secrets' policy: a sync of a kind it rules out isn't restored,
+/// and `leaks.rotate` and `breakglass` come back at their floors.
+#[tokio::test]
+async fn a_restore_brings_back_nothing_below_the_policy() {
+    let api = Api::new().await;
+    api.set("staging", "PLATFORM_TOKEN", "fake-platform-token").await;
+    api.ok(Method::POST, "/syncs", Some(json!({ "environment": "staging", "kind": "fake", "target": { "name": "x", "token_key": "PLATFORM_TOKEN" } }))).await;
+    api.ok(Method::PATCH, "", Some(json!({ "breakglass": ["alice"] }))).await;
+    let secret = [9u8; 32];
+    let b = api.ok(Method::POST, "/backup", Some(json!({ "recipient": roll_secrets::crypto::public_key(&secret) }))).await;
+    let sealed: roll_secrets::crypto::Sealed = serde_json::from_value(b["sealed"].clone()).unwrap();
+    let archive: Value = serde_json::from_slice(&roll_secrets::crypto::open_sealed(&secret, b["context"].as_str().unwrap(), &sealed).unwrap()).unwrap();
+
+    api.ok(Method::PUT, "/v1/secrets/policy", Some(json!({ "sync_kinds": [], "leaks_rotate": "managed", "no_breakglass": true }))).await;
+    let (s, e) = api.call(Method::PATCH, "", Some(json!({ "breakglass": ["bob"] }))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{e}");
+    let (s, e) = api.call(Method::POST, "/syncs", Some(json!({ "environment": "staging", "kind": "fake", "target": { "name": "y", "token_key": "PLATFORM_TOKEN" } }))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{e}");
+    let (_, other) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "restored" }))).await;
+    let to = |p: &str| format!("/v1/secrets/projects/{}{p}", other["id"].as_str().unwrap());
+    let r = api.ok(Method::POST, &to("/restore"), Some(archive)).await;
+    assert_eq!(r["syncs"].as_u64(), Some(0), "{r}");
+    assert!(r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("fake sync") && w.as_str().unwrap().contains("roll secrets' policy")), "{r}");
+    let restored = api.ok(Method::GET, &to(""), None).await;
+    assert_eq!((&restored["leaks"]["rotate"], &restored["breakglass"]), (&json!("managed"), &json!([])), "{restored}");
+}
+
 /// A project as it's made, nothing protected by hand (#688): a developer on the default role works
 /// in development and staging but never reveals production, and a check (an untrusted resolve)
 /// reads staging but is refused production, even through the operator.
@@ -8329,17 +8490,28 @@ async fn reach_names_the_people_clients_and_holders_of_a_folder() {
     api.join(&team, "vic", "developer", None).await;
     let (s, v) = api.signed_in("vic", false, Method::GET, &at("/environments/development/secrets/KEY/value"), None).await;
     assert_eq!((s, v["value"].as_str()), (StatusCode::OK, Some("fake-dev")));
-    assert_eq!(api.as_ada(Method::DELETE, &format!("/v1/workspace/projects/{team}/members/usr_vic"), None).await.0, StatusCode::NO_CONTENT);
+    // An admin's backup reads every folder, and carries the project CA's key out with them.
+    api.as_ada(Method::POST, &at("/cas"), Some(json!({ "name": "internal", "domains": ["svc.internal"] }))).await;
+    let (s, b) = api.signed_in("cat", false, Method::POST, &at("/backup"), Some(json!({ "recipient": roll_secrets::crypto::public_key(&[5u8; 32]) }))).await;
+    assert!(s == StatusCode::OK && b["warnings"] == json!([]), "{b}");
+    for gone in ["usr_vic", "usr_cat"] {
+        assert_eq!(api.as_ada(Method::DELETE, &format!("/v1/workspace/projects/{team}/members/{gone}"), None).await.0, StatusCode::NO_CONTENT);
+    }
     let client = api.gate.oauth("claude", roll_secrets::access::rule(&team, None, None, &[roll_secrets::Action::Read, roll_secrets::Action::Reveal]), "usr_bob");
 
     let (s, r) = api.as_ada(Method::GET, &at("/environments/development/reach?path=/&key=KEY"), None).await;
     assert_eq!(s, StatusCode::OK, "{r}");
     let mut people: Vec<(&str, &str)> = r["people"].as_array().unwrap().iter().map(|p| (p["handle"].as_str().unwrap(), p["role"].as_str().unwrap())).collect();
     people.sort();
-    assert_eq!(people, [("ada", "owner"), ("bob", "developer"), ("cat", "admin")], "{r}");
+    assert_eq!(people, [("ada", "owner"), ("bob", "developer")], "{r}");
     assert_eq!(r["admins"], 1);
     assert_eq!((r["clients"][0]["id"].as_str(), r["clients"][0]["created_by"].as_str(), r["tokens"].as_array().unwrap().len()), (Some(client.as_str()), Some("usr_bob"), 0), "{r}");
-    assert_eq!((r["knew"][0]["user"].as_str(), r["knew"][0]["why"].as_str(), r["knew"].as_array().unwrap().len()), (Some("usr_vic"), Some("left"), 1), "{r}");
+    let knew: Vec<(&str, &str, &str)> = r["knew"].as_array().unwrap().iter().map(|k| (k["user"].as_str().unwrap(), k["why"].as_str().unwrap(), k["via"].as_str().unwrap())).collect();
+    assert_eq!(knew, [("usr_cat", "left", "backup"), ("usr_vic", "left", "read")], "{r}");
+    assert!(r["knew"][0]["registrations"][0].as_str().unwrap().starts_with("CA internal: re-issue"), "{r}");
+    // Health says so too, until the backup is older than the project's history.
+    let (_, health) = api.as_ada(Method::GET, &at("/health"), None).await;
+    assert!(health.as_array().unwrap().iter().any(|f| f["issue"] == "backup_left" && f["key"] == "usr_cat"), "{health}");
     let services: Vec<(&str, &str)> = r["services"].as_array().unwrap().iter().map(|s| (s["name"].as_str().unwrap(), s["through"].as_str().unwrap())).collect();
     assert_eq!((services, r["sandboxes"][0]["keys"].clone()), (vec![("web", "staging:/")], json!(["KEY"])), "{r}");
     assert!(!r.to_string().contains("fake-dev"), "names, never a value");
@@ -8776,7 +8948,64 @@ async fn public_certificates_are_ordered_in_the_background_renewed_and_a_failed_
     assert!(health.as_array().unwrap().iter().any(|f| f["issue"] == "exposed" && f["environment"] == "production" && f["key"] == "TLS_KEY" && f["detail"].as_str().unwrap().contains("staging")), "{health}");
 }
 
-/// docs/secrets.md, "Public certificates": a new DNS credential is the registration made anew, so
+/// docs/secrets.md, "Publicly trusted certificates": a leak of a linked key revokes its certificate
+/// and renews at once, but leaks' renewals count toward the registration's caps, so a writer who
+/// keeps reporting each new key can't spend the CA's limit for the names: a held leak revokes and
+/// orders nothing, and its event says `already rotated`.
+#[tokio::test]
+async fn a_leaks_renewals_count_toward_the_public_certificates_caps() {
+    let api = Api::new().await;
+    let ca = Arc::new(FakeCa::new());
+    api.secrets.set_public_ca(ca.clone());
+    let le = roll_secrets::public_certs::PUBLIC_CAS[0];
+    let cert = api.ok(Method::POST, "/public-certs", Some(json!({ "name": "web", "directory_url": le, "domains": ["www.roll-fake.test"], "dns_provider": "cloudflare", "dns_credential": "fake-cf-dns-token", "eab_kid": "kid-roll-fake", "eab_hmac_key": "cm9sbC1mYWtlLWhtYWM" }))).await;
+    let id = cert["id"].as_str().unwrap().to_string();
+    let sweep = || {
+        let s = api.secrets.clone();
+        async move { tokio::task::spawn_blocking(move || s.sweep_public_certs().unwrap()).await.unwrap() }
+    };
+    sweep().await;
+    api.ok(Method::PUT, "/environments/production/secrets/TLS_KEY", Some(json!({ "link": { "kind": "public_cert", "ref": id, "field": "private_key", "mode": "managed" } }))).await;
+    api.ok(Method::PATCH, "", Some(json!({ "leaks": { "rotate": "managed" } }))).await;
+    let writer = api.token(json!({ "name": "deploy", "actions": ["read", "reveal", "write"] }));
+    let report = |key: Value| json!({ "candidates": [key], "leaked": true });
+    let start = api.ok(Method::GET, "/events?latest=1", None).await["next"].as_i64().unwrap();
+
+    // The week's first leak: revoked at once and replaced.
+    let first = api.values("production", "/").await["values"]["TLS_KEY"].clone();
+    api.req(Method::POST, "/leaks", Some(report(first.clone())), Some(writer.as_str())).await;
+    assert_eq!(ca.revoked.lock().unwrap().len(), 1);
+    sweep().await;
+    let second = api.values("production", "/").await["values"]["TLS_KEY"].clone();
+    assert_ne!(second, first, "replaced");
+    let orders = ca.orders.lock().unwrap().len();
+
+    // Later the same week, two renewals asked for since: the cap is spent, and the next report of
+    // the new key revokes and orders nothing.
+    let p = api.project.clone();
+    api.db
+        .write(move |c| {
+            let asked: String = c.query_row("SELECT asked_renewals FROM public_certs WHERE project_id = ?", [&p], |r| r.get(0))?;
+            let at = serde_json::from_str::<Vec<(i64, bool)>>(&asked).unwrap()[0].0 - 2 * 3_600_000;
+            let asked = json!([[at - 2 * 86_400_000i64, false], [at - 86_400_000i64, false], [at, true]]).to_string();
+            c.execute("UPDATE public_certs SET asked_renewals = ? WHERE project_id = ?", [&asked, &p])?;
+            c.execute("UPDATE leak_rotations SET at = at - ? WHERE project_id = ?", code_sql::params![2 * 3_600_000i64, p])
+        })
+        .unwrap();
+    api.req(Method::POST, "/leaks", Some(report(second.clone())), Some(writer.as_str())).await;
+    sweep().await;
+    assert_eq!((ca.revoked.lock().unwrap().len(), ca.orders.lock().unwrap().len()), (1, orders), "nothing revoked or ordered");
+    assert_eq!(api.values("production", "/").await["values"]["TLS_KEY"], second);
+    let leaked = api.ok(Method::GET, &format!("/events?after={start}&kinds=secret.leaked"), None).await;
+    let last = leaked["events"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!((&last["data"]["rotating"], &last["data"]["reason"]), (&json!(false), &json!("already rotated")), "{leaked}");
+    let audit = api.ok(Method::GET, "/audit?action=secrets.leaked", None).await;
+    assert!(audit[0]["summary"].as_str().unwrap().contains("already renewed for a leak this week"), "audited, saying when: {audit}");
+    let (s, e) = api.call(Method::POST, &format!("/public-certs/{id}/renew"), None).await;
+    assert!(s == StatusCode::TOO_MANY_REQUESTS && e.to_string().contains("3 renewals"), "leaks count toward people's cap: {s} {e}");
+}
+
+/// docs/secrets.md, "Publicly trusted certificates": a new DNS credential is the registration made anew, so
 /// orders act at its replacer's rights from then on, never at the old maker's; a rename keeps the
 /// maker.
 #[tokio::test]

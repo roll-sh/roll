@@ -25,6 +25,15 @@ struct Resp {
 
 /// Requests a site got: (target, Authorization).
 type Log = Arc<Mutex<Vec<(String, Option<String>)>>>;
+/// Each request's target, `If-None-Match` and `If-Modified-Since`.
+type Conditional = Arc<Mutex<Vec<(String, Option<String>, Option<String>)>>>;
+
+/// Requests in flight on the sites sharing one: now, and the most at once.
+#[derive(Clone, Default)]
+struct Flight {
+    now: Arc<std::sync::atomic::AtomicUsize>,
+    max: Arc<std::sync::atomic::AtomicUsize>,
+}
 
 /// A site on loopback: routes by request target, and the requests it got.
 #[derive(Clone)]
@@ -34,13 +43,22 @@ struct Site {
     log: Log,
     /// Every request but robots.txt and the target itself redirects here (a login, maintenance).
     redirect_all: Arc<Mutex<Option<String>>>,
+    conditional: Conditional,
+    /// How long each answer takes, and the requests in flight.
+    delay: Arc<Mutex<Duration>>,
+    flight: Flight,
 }
 
 impl Site {
     async fn start() -> Site {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        Site::start_on("127.0.0.1", Flight::default()).await
+    }
+
+    /// A site on loopback address `ip`, counting its requests in flight in `flight`.
+    async fn start_on(ip: &str, flight: Flight) -> Site {
+        let listener = tokio::net::TcpListener::bind(format!("{ip}:0")).await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
-        let site = Site { base, routes: Arc::default(), log: Arc::default(), redirect_all: Arc::default() };
+        let site = Site { base, routes: Arc::default(), log: Arc::default(), redirect_all: Arc::default(), conditional: Arc::default(), delay: Arc::default(), flight };
         let s = site.clone();
         tokio::spawn(async move {
             loop {
@@ -57,13 +75,28 @@ impl Site {
                     }
                     let head = String::from_utf8_lossy(&buf).into_owned();
                     let target = head.split_whitespace().nth(1).unwrap_or("/").to_string();
-                    let auth = head.lines().find_map(|l| l.split_once(':').filter(|(k, _)| k.eq_ignore_ascii_case("authorization")).map(|(_, v)| v.trim().to_string()));
+                    let header = |name: &str| head.lines().find_map(|l| l.split_once(':').filter(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.trim().to_string()));
+                    let auth = header("authorization");
                     s.log.lock().unwrap().push((target.clone(), auth));
                     let away = s.redirect_all.lock().unwrap().clone().filter(|to| target != "/robots.txt" && !to.ends_with(&target));
-                    let r = match away {
+                    let mut r = match away {
                         Some(to) => Resp { status: 302, headers: vec![("Location".into(), to)], body: vec![] },
                         None => s.routes.lock().unwrap().get(&target).cloned().unwrap_or(Resp { status: 404, headers: vec![], body: b"no".to_vec() }),
                     };
+                    // Conditional requests, as a server with validators answers them.
+                    let has = |k: &str, v: &Option<String>| v.is_some() && r.headers.iter().any(|(h, hv)| h.eq_ignore_ascii_case(k) && Some(hv) == v.as_ref());
+                    let (inm, ims) = (header("if-none-match"), header("if-modified-since"));
+                    s.conditional.lock().unwrap().push((target.clone(), inm.clone(), ims.clone()));
+                    if r.status == 200 && (has("etag", &inm) || (inm.is_none() && has("last-modified", &ims))) {
+                        r = Resp { status: 304, headers: vec![], body: vec![] };
+                    }
+                    use std::sync::atomic::Ordering::SeqCst;
+                    let now = s.flight.now.fetch_add(1, SeqCst) + 1;
+                    s.flight.max.fetch_max(now, SeqCst);
+                    let delay = *s.delay.lock().unwrap();
+                    if !delay.is_zero() {
+                        tokio::time::sleep(delay).await;
+                    }
                     let mut out = format!("HTTP/1.1 {} X\r\nContent-Length: {}\r\nConnection: close\r\n", r.status, r.body.len());
                     for (k, v) in &r.headers {
                         out.push_str(&format!("{k}: {v}\r\n"));
@@ -71,6 +104,7 @@ impl Site {
                     out.push_str("\r\n");
                     let _ = sock.write_all(out.as_bytes()).await;
                     let _ = sock.write_all(&r.body).await;
+                    s.flight.now.fetch_sub(1, SeqCst);
                 });
             }
         });
@@ -179,7 +213,12 @@ async fn set_snippet(c: &Cluster, snippet: &str) {
 
 /// Runs a full crawl to its end; the job.
 async fn crawl(c: &Cluster) -> Value {
-    let (s, v, t) = call(c, "POST", "/_connector/_sync_job", Some(r#"{"id":"site","job_type":"full"}"#)).await;
+    crawl_as(c, "full").await
+}
+
+/// Runs a crawl of `job_type` (`full`, `incremental`) to its end; the job.
+async fn crawl_as(c: &Cluster, job_type: &str) -> Value {
+    let (s, v, t) = call(c, "POST", "/_connector/_sync_job", Some(&format!(r#"{{"id":"site","job_type":"{job_type}"}}"#))).await;
     assert_eq!(s, 201, "{t}");
     let id = at(&v, "id").as_str().unwrap().to_string();
     let deadline = std::time::Instant::now() + Duration::from_secs(120);
@@ -537,4 +576,154 @@ async fn extraction_rules_fill_fields() {
     assert_eq!((at(&p, "section").as_str(), at(&p, "slug").as_str(), at(&p, "title").as_str()), (Some("blog"), Some("first-post"), Some("First post")), "{p:?}");
     let about = doc(&c, &site.url("/about")).await.expect("about is indexed");
     assert!(about.get("author").is_none() && about.get("section").is_none(), "the filter takes /blog only: {about:?}");
+}
+
+/// A page asked for with its validators answers 304: its document stays as it was (nothing
+/// extracted or written) and counts as seen, so the purge keeps it. A page that changed behind an
+/// unchanged one is still re-read by the purge's re-check, and the links it gained are followed.
+/// An incremental crawl asks the same way and deletes nothing.
+#[tokio::test]
+async fn unchanged_pages_answer_304_and_stay() {
+    let site = Site::start().await;
+    site.set("/", 200, &[("Content-Type", "text/html"), ("ETag", "\"home-1\"")], r#"<title>Home</title><a href="/a">a</a>"#);
+    site.set("/a", 200, &[("Content-Type", "text/html"), ("Last-Modified", "Wed, 25 Nov 2026 10:00:00 GMT")], "<title>A one</title><p>first</p>");
+    // Five crawls of one unverified site.
+    let c = cluster(&[("roll.crawler.unverified.max_crawls_per_day", "10")]).await;
+    crawler(&c, &format!(r#"{{"urls":"{}"}}"#, site.url("/")), None).await;
+    let job = crawl(&c).await;
+    assert_eq!((at(&job, "status").as_str(), num(&job, "indexed_document_count")), (Some("completed"), 2), "{job:?}");
+    let first = doc(&c, &site.url("/a")).await.unwrap();
+    assert_eq!(at(&first, "http_last_modified").as_str(), Some("Wed, 25 Nov 2026 10:00:00 GMT"), "{first:?}");
+
+    // Nothing changed: two 304s, no writes, both documents kept as they were.
+    let job = crawl(&c).await;
+    assert_eq!((num(&job, "metadata.not_modified_count"), num(&job, "indexed_document_count"), num(&job, "deleted_document_count")), (2, 0, 0), "{job:?}");
+    assert_eq!(doc(&c, &site.url("/a")).await.unwrap(), first, "untouched");
+    let sent: Vec<_> = site.conditional.lock().unwrap().iter().filter(|(t, ..)| t == "/" || t == "/a").cloned().collect();
+    assert_eq!(sent.last().map(|(_, inm, ims)| (inm.clone(), ims.clone())), Some((None, Some("Wed, 25 Nov 2026 10:00:00 GMT".into()))), "{sent:?}");
+    assert!(sent.iter().any(|(t, inm, _)| t == "/" && inm.as_deref() == Some("\"home-1\"")), "{sent:?}");
+
+    // /a changed behind the unchanged home page, and links a new page.
+    site.set("/a", 200, &[("Content-Type", "text/html"), ("Last-Modified", "Thu, 26 Nov 2026 10:00:00 GMT")], r#"<title>A two</title><a href="/b">b</a>"#);
+    site.page("/b", "<title>B</title><p>new</p>");
+    let job = crawl(&c).await;
+    assert_eq!((num(&job, "metadata.not_modified_count"), num(&job, "indexed_document_count")), (1, 2), "{job:?}");
+    assert_eq!(at(&doc(&c, &site.url("/a")).await.unwrap(), "title").as_str(), Some("A two"));
+    assert!(doc(&c, &site.url("/b")).await.is_some(), "the link the changed page gained was followed");
+
+    // An incremental crawl asks conditionally too, and deletes nothing: /b's 404 waits for a full
+    // crawl.
+    site.set("/b", 404, &[], "gone");
+    let job = crawl_as(&c, "incremental").await;
+    assert_eq!((at(&job, "status").as_str(), num(&job, "deleted_document_count")), (Some("completed"), 0), "{job:?}");
+    assert!(doc(&c, &site.url("/b")).await.is_some());
+    assert!(num(&job, "metadata.not_modified_count") >= 2, "{job:?}");
+
+    // A configuration change reaches unchanged pages: they're read in full and made anew.
+    let rules = format!(
+        r#"{{"domains":[{{"url":"{}","extraction_rulesets":[{{"rules":[{{"action":"set","field_name":"kind","selector":"title","value":"page","join_as":"string","source":"html"}}]}}]}}]}}"#,
+        site.url("").trim_end_matches('/')
+    );
+    set_snippet(&c, &rules).await;
+    let job = crawl(&c).await;
+    assert_eq!(num(&job, "metadata.not_modified_count"), 0, "{job:?}");
+    assert_eq!(at(&doc(&c, &site.url("/")).await.unwrap(), "kind").as_str(), Some("page"), "re-extracted with the new rules");
+}
+
+/// The docs preset: a documentation page becomes one record per section, its hierarchy from the
+/// headings, its content from the text under each, at the page's URL plus the heading's anchor;
+/// navigation and footers left out. The crawl makes the index's search template, and the records
+/// answer it.
+#[tokio::test]
+async fn the_docs_preset_makes_section_records() {
+    let site = Site::start().await;
+    let page = r#"<html><head><title>Guide - Example docs</title></head><body>
+        <nav><a href="/other">Other</a><p>Navigation text</p></nav>
+        <main><div data-docs-lvl0="">Getting started</div>
+        <h1>Guide</h1><p>An introduction.</p>
+        <h2 id="install">Install</h2><p>Run the installer.</p><ul><li>Step one</li><li><p>Step two</p></li></ul>
+        <h3><a id="linux"></a>On Linux</h3><pre>apt install example</pre>
+        <h2 id="configure">Configure</h2><p>Edit the file.</p></main>
+        <footer><p>Footer text</p></footer></body></html>"#;
+    site.page("/guide", page);
+    let c = cluster(&[]).await;
+    crawler(&c, &format!(r#"{{"urls":"{}","preset":"docs"}}"#, site.url("/guide")), None).await;
+    let job = crawl(&c).await;
+    assert_eq!((at(&job, "status").as_str(), num(&job, "indexed_document_count")), (Some("completed"), 4), "{job:?}");
+    let (_, v, t) = call(&c, "POST", "/content-site/_search", Some(r#"{"size":20,"sort":[{"weight.position":"asc"}]}"#)).await;
+    let records: Vec<Value> = at(&v, "hits.hits").as_array().unwrap().iter().map(|h| at(h, "_source").clone()).collect();
+    let row = |r: &Value| {
+        let s = |p: &str| at(r, p).as_str().unwrap_or("").to_string();
+        (s("type"), s("hierarchy.lvl0"), s("hierarchy.lvl1"), s("hierarchy.lvl2"), s("hierarchy.lvl3"), s("content"), s("url").trim_start_matches(&site.base).to_string())
+    };
+    let rows: Vec<_> = records.iter().map(row).collect();
+    let r = |ty: &str, l2: &str, l3: &str, content: &str, url: &str| (ty.to_string(), "Getting started".to_string(), "Guide".to_string(), l2.to_string(), l3.to_string(), content.to_string(), url.to_string());
+    assert_eq!(
+        rows,
+        vec![
+            r("lvl1", "", "", "An introduction.", "/guide"),
+            r("lvl2", "Install", "", "Run the installer. Step one Step two", "/guide#install"),
+            r("lvl3", "Install", "On Linux", "apt install example", "/guide#linux"),
+            r("lvl2", "Configure", "", "Edit the file.", "/guide#configure"),
+        ],
+        "{t}"
+    );
+    assert!(records.iter().all(|r| at(r, "url_without_anchor").as_str() == Some(site.url("/guide").as_str()) && at(r, "title").as_str() == Some("Guide - Example docs")), "{t}");
+    assert!(!t.contains("Navigation text") && !t.contains("Footer text"), "{t}");
+    let (s, v, t) = call(&c, "POST", "/content-site/_search/template", Some(r#"{"id":"content-site-docs-search","params":{"query":"configu"}}"#)).await;
+    assert_eq!((s, at(&v, "hits.hits.0._source.anchor").as_str()), (200, Some("configure")), "{t}");
+    // The query is JSON-escaped into the template, as Elasticsearch's mustache does.
+    let (s, v, t) = call(&c, "POST", "/_render/template", Some(r#"{"id":"content-site-docs-search","params":{"query":"a \"b\" \\c"}}"#)).await;
+    assert_eq!((s, at(&v, "template_output.query.multi_match.query").as_str()), (200, Some(r#"a "b" \c"#)), "{t}");
+}
+
+/// Pages in other charsets read as a browser reads them: a Shift_JIS page by its
+/// `<meta charset>`, an unlabeled windows-1252 page by the fallback.
+#[tokio::test]
+async fn pages_are_decoded_in_their_charset() {
+    let site = Site::start().await;
+    site.page("/", r#"<title>Home</title><a href="/ja">ja</a> <a href="/fr">fr</a>"#);
+    let ja = [b"<html><head><meta charset=\"Shift_JIS\"><title>".as_slice(), &[0x93, 0xFA, 0x96, 0x7B, 0x8C, 0xEA], b"</title></head><body><p>", &[0x93, 0xFA, 0x96, 0x7B], b"</p></body></html>"].concat();
+    site.set("/ja", 200, &[("Content-Type", "text/html")], ja);
+    let fr = [b"<title>Caf".as_slice(), &[0xE9], b"</title><p>", &[0x93], b"Bonjour", &[0x94], b"</p>"].concat();
+    site.set("/fr", 200, &[("Content-Type", "text/html")], fr);
+    let c = cluster(&[]).await;
+    crawler(&c, &format!(r#"{{"urls":"{}"}}"#, site.url("/")), None).await;
+    let job = crawl(&c).await;
+    assert_eq!((at(&job, "status").as_str(), num(&job, "indexed_document_count")), (Some("completed"), 3), "{job:?}");
+    let ja = doc(&c, &site.url("/ja")).await.unwrap();
+    assert_eq!((at(&ja, "title").as_str(), at(&ja, "body").as_str()), (Some("日本語"), Some("日本")), "{ja:?}");
+    let fr = doc(&c, &site.url("/fr")).await.unwrap();
+    assert_eq!((at(&fr, "title").as_str(), at(&fr, "body").as_str()), (Some("Café"), Some("“Bonjour”")), "{fr:?}");
+}
+
+/// Politeness is per server, not per name: two names on one address get one request at a time
+/// between them, however many URLs a crawl may fetch at once; two servers are fetched at once.
+#[tokio::test]
+async fn one_request_at_a_time_per_server() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let flight = Flight::default();
+    let pages = |s: &Site| {
+        for p in ["/", "/1", "/2", "/3"] {
+            s.page(p, &format!(r#"<title>{p}</title><p>x</p><a href="/1">1</a><a href="/2">2</a><a href="/3">3</a>"#));
+        }
+        *s.delay.lock().unwrap() = Duration::from_millis(100);
+    };
+    let a = Site::start_on("127.0.0.1", flight.clone()).await;
+    pages(&a);
+    let by_name = a.base.replace("127.0.0.1", "localhost");
+    let c = cluster(&[("roll.crawler.max_parallel_fetches", "4")]).await;
+    crawler(&c, &format!(r#"{{"urls":"{},{by_name}/"}}"#, a.url("/")), None).await;
+    let job = crawl(&c).await;
+    assert_eq!((at(&job, "status").as_str(), num(&job, "indexed_document_count")), (Some("completed"), 8), "{job:?}");
+    assert_eq!(flight.max.load(SeqCst), 1, "two names on one server: one request at a time");
+
+    let b = Site::start_on("127.0.0.2", flight.clone()).await;
+    pages(&b);
+    flight.max.store(0, SeqCst);
+    let (s, _, t) = call(&c, "PUT", "/_connector/site/_configuration", Some(&format!(r#"{{"values":{{"urls":"{},{}"}}}}"#, a.url("/"), b.url("/")))).await;
+    assert_eq!(s, 200, "{t}");
+    let job = crawl(&c).await;
+    assert_eq!(at(&job, "status").as_str(), Some("completed"), "{job:?}");
+    assert!(flight.max.load(SeqCst) >= 2, "two servers at once: {}", flight.max.load(SeqCst));
 }

@@ -1192,6 +1192,17 @@ async fn derived_keys_narrow_their_parent_and_die_with_it() {
     let text = json!(audit).to_string();
     assert!(!text.contains("::roll_sealed::") && !text.contains(&secret), "no secret in the audit log");
 
+    // A runtime field and a flattened one on `products`, and a data stream the parent's
+    // `products*` reaches, whose backing index (`.ds-…`) no pattern names.
+    for (m, p, b) in [
+        ("PUT", "/products/_mapping", json!({"runtime": {"r": {"type": "keyword", "script": "emit('x')"}}, "properties": {"labels": {"type": "flattened"}}})),
+        ("PUT", "/_index_template/plogs", json!({"index_patterns": ["products-logs*"], "data_stream": {}, "template": {"mappings": {"properties": {"host": {"type": "keyword"}}}}})),
+        ("POST", "/products-logs/_doc?refresh=true", json!({"@timestamp": "2026-11-25T00:00:00Z", "host": "a"})),
+    ] {
+        let r = e.post(&format!("{path}/request"), json!({"method": m, "path": p, "body": b})).await;
+        assert!(r["status"].as_u64() < Some(300), "{p}: {r}");
+    }
+
     // Every widening, and every way of not being the parent's, is refused; until the signature
     // verifies, all alike.
     let unverified = "\"API key: derived key refused\"";
@@ -1215,6 +1226,9 @@ async fn derived_keys_narrow_their_parent_and_die_with_it() {
         // Expanding terms, built as the owner's filter, needs the parent's allow_expensive_queries.
         (sign(&secret, with("filter", json!({"bool": {"filter": [{"prefix": {"tenant": "ac"}}]}}))), "allow_expensive_queries"),
         (sign(&secret, with("filter", json!({"range": {"tenant.keyword": {"gte": "a"}}}))), "a range on a text or keyword field"),
+        (sign(&secret, with("filter", json!({"range": {"labels.size": {"gte": "a"}}}))), "a range on a text or keyword field"),
+        (sign(&secret, json!({"key": pid, "cluster": "shop", "exp": exp, "indices": ["products-logs"], "filter": {"range": {"host": {"gte": "a"}}}})), "a range on a text or keyword field"),
+        (sign(&secret, with("filter", json!({"term": {"r": "x"}}))), "a query on a runtime field"),
         (sign(&secret, with("exp", json!(unix_now() + 2 * 86_400))), "ahead"),
         (sign(&secret, with("exp", json!(unix_now() - 120))), "expired"),
         (sign(&secret, json!({"key": pid, "cluster": "shop", "exp": exp, "user": "acme", "rate_limit": {"per_minute": 101}})), "share"),
@@ -1248,6 +1262,85 @@ async fn derived_keys_narrow_their_parent_and_die_with_it() {
     let (s, _) = e.call(reqwest::Method::DELETE, &format!("{keys}/{pid}"), None).await;
     assert_eq!(s, 204);
     assert_eq!(as_derived(&e, &renewed, reqwest::Method::POST, "/products/_search", None).await.0, 401);
+}
+
+/// Browser search on a preview: a branch's copy of its parent's browser key works only on the
+/// parent, so roll previews asks for keys of the branch's own (`…/browser-keys/from-parent`), and
+/// adds the preview's pages to the branch's allowed origins. Such a key searches the branch from
+/// the preview's origin and no other one, a derivable one signs with the branch's own secret, and
+/// asking again revokes the earlier ones.
+#[tokio::test]
+async fn browser_search_works_on_a_preview_branch() {
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "shop"})).await;
+    let path = format!("/v1/search/clusters/{}", c["id"].as_str().unwrap());
+    let r = e.post(&format!("{path}/request"), json!({"method": "PUT", "path": "/products/_doc/1?refresh=true", "body": {"title": "trail shoes"}})).await;
+    assert!(r["status"].as_u64() < Some(300), "{r}");
+    let (s, _) = e.call(reqwest::Method::PATCH, &path, Some(json!({"cors": {"allow_origin": ["https://shop.example.com"]}}))).await;
+    assert_eq!(s, 200);
+    let site = e.post(&format!("{path}/browser-keys"), json!({"name": "site", "indices": ["products"]})).await;
+    let saas = e.post(&format!("{path}/browser-keys"), json!({"name": "saas", "indices": ["products"], "derivable": true})).await;
+    let b = e.post(&format!("{path}/branches"), json!({"name": "pv-shop"})).await;
+    let branch = format!("/v1/search/clusters/{}", b["id"].as_str().unwrap());
+    let search = |key: &str, origin: &str| e.http.post(format!("{}/products/_search", e.es)).header("origin", origin).header("authorization", format!("ApiKey {key}")).json(&json!({})).send();
+    // The parent's key, named for the branch: refused there.
+    let on_branch = {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let shipped = String::from_utf8(b64.decode(site["api_key"].as_str().unwrap()).unwrap()).unwrap();
+        b64.encode(shipped.replace("@shop:", "@pv-shop:"))
+    };
+    assert_eq!(search(&on_branch, "https://shop.example.com").await.unwrap().status().as_u16(), 401);
+
+    let made = e.post(&format!("{branch}/browser-keys/from-parent"), json!({})).await;
+    let keys = made["keys"].as_array().unwrap();
+    assert_eq!(keys.len(), 2, "{made}");
+    let own = keys.iter().find(|k| k["parent_key"] == site["id"]).unwrap();
+    let derivable = keys.iter().find(|k| k["parent_key"] == saas["id"]).unwrap();
+    assert!(derivable["signing_secret"].as_str().is_some_and(|s| s != saas["signing_secret"].as_str().unwrap()), "a secret of the branch's own: {derivable}");
+    // The preview's page (as roll previews sets it: the parent's origins and the preview's).
+    let (s, v) = e.call(reqwest::Method::PATCH, &branch, Some(json!({"cors": {"allow_origin": ["https://shop.example.com", "https://web-pv-shop.preview.test"]}}))).await;
+    assert_eq!(s, 200, "{v}");
+    let key = own["api_key"].as_str().unwrap();
+    let r = search(key, "https://web-pv-shop.preview.test").await.unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert_eq!(r.headers()["access-control-allow-origin"], "https://web-pv-shop.preview.test");
+    assert_eq!(search(key, "https://elsewhere.test").await.unwrap().status().as_u16(), 403, "another origin");
+    // Made for the branch: refused on the parent.
+    let on_parent = {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let shipped = String::from_utf8(b64.decode(key).unwrap()).unwrap();
+        b64.encode(shipped.replace("@pv-shop:", "@shop:"))
+    };
+    assert_eq!(search(&on_parent, "https://shop.example.com").await.unwrap().status().as_u16(), 401);
+    let exp = unix_now() + 600;
+    let derived = search_es::xpack::security::derived::sign(derivable["signing_secret"].as_str().unwrap(), &json!({"key": derivable["id"], "cluster": "pv-shop", "exp": exp}).to_string());
+    assert_eq!(search(&derived, "https://web-pv-shop.preview.test").await.unwrap().status().as_u16(), 200);
+    // Asked again (a retried branch): one set, the earlier one revoked.
+    let again = e.post(&format!("{branch}/browser-keys/from-parent"), json!({})).await;
+    assert_eq!(again["keys"].as_array().unwrap().len(), 2, "{again}");
+    assert_eq!(search(key, "https://web-pv-shop.preview.test").await.unwrap().status().as_u16(), 401, "the earlier key");
+    // The parent's later changes reach the branch with roll previews' next pass (`…/prune`): the
+    // copy of a revoked key, and of a key whose secret rotated, are revoked; nothing else is.
+    let copies: Vec<Value> = again["keys"].as_array().unwrap().clone();
+    let copy_of = |parent: &Value| copies.iter().find(|k| k["parent_key"] == parent["id"]).unwrap().clone();
+    let (site_copy, saas_copy) = (copy_of(&site), copy_of(&saas));
+    let pruned = e.post(&format!("{branch}/browser-keys/from-parent/prune"), json!({})).await;
+    assert_eq!(pruned["revoked"], json!([]), "nothing changed yet");
+    let (s, _) = e.call(reqwest::Method::DELETE, &format!("{path}/browser-keys/{}", site["id"].as_str().unwrap()), None).await;
+    assert_eq!(s, 204);
+    e.post(&format!("{path}/browser-keys/{}/rotate", saas["id"].as_str().unwrap()), json!({})).await;
+    let pruned = e.post(&format!("{branch}/browser-keys/from-parent/prune"), json!({})).await;
+    let mut revoked: Vec<&str> = pruned["revoked"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    revoked.sort();
+    let mut want = vec![site_copy["id"].as_str().unwrap(), saas_copy["id"].as_str().unwrap()];
+    want.sort();
+    assert_eq!(revoked, want, "{pruned}");
+    assert_eq!(search(site_copy["api_key"].as_str().unwrap(), "https://web-pv-shop.preview.test").await.unwrap().status().as_u16(), 401);
+    // Only a branch has a parent to copy.
+    let (s, _) = e.call(reqwest::Method::POST, &format!("{path}/browser-keys/from-parent"), Some(json!({}))).await;
+    assert_eq!(s, 409);
 }
 
 /// A derived key pays its parent's limits, which stay the ceiling of all its derived keys
@@ -1496,6 +1589,71 @@ async fn term_vectors_of_a_hidden_document_are_not_found() {
     assert_eq!((s, &v["found"]), (200, &json!(false)), "{v}");
     let (s, v) = as_key(&e, &key, reqwest::Method::GET, "/products/_termvectors/1", None).await;
     assert_eq!((s, &v["found"]), (200, &json!(true)), "{v}");
+    let (s, v) = as_key(&e, &key, reqwest::Method::POST, "/_mtermvectors", Some(json!({"docs": [{"_index": "products", "_id": "2"}, {"_index": "products", "_id": "1"}]}))).await;
+    assert_eq!((s, &v["docs"][0]["found"], &v["docs"][1]["found"]), (200, &json!(false), &json!(true)), "{v}");
+}
+
+/// A reader of `tenant-a-*` reads no other index through term vectors or `_rank_eval`, on both
+/// dialects: each `_mtermvectors` item is authorized on its own index (Elasticsearch's
+/// `indices:data/read/mtv[shard]`), and the lookups of a rated request, verbatim or rendered
+/// from a template, fail that request; `_rank_eval` searches only the indices its wildcards may
+/// read, as a search does.
+#[tokio::test]
+async fn term_vectors_and_rank_eval_read_only_what_the_caller_may() {
+    use reqwest::Method;
+    let e = env().await;
+    let lookup = |index: &str| json!({"query": {"terms": {"n": {"index": index, "id": "1", "path": "ids"}}}});
+    let template = json!({"templates": [{"id": "t", "template": {"source": lookup("{{i}}")}}], "requests": [{"id": "q", "template_id": "t", "params": {"i": "tenant-b"}, "ratings": []}], "metric": {"precision": {}}});
+    for (name, flavor, role_path, role, user_path, user_body, reader) in [
+        ("tv", "elasticsearch", "/_security/role/ta", json!({"indices": [{"names": ["tenant-a-*"], "privileges": ["read"]}]}), "/_security/user/ann", json!({"password": "ann-password-1", "roles": ["ta"]}), "ann"),
+        (
+            "tv-os",
+            "opensearch",
+            "/_plugins/_security/api/roles/ta",
+            json!({"cluster_permissions": ["cluster_composite_ops_ro"], "index_permissions": [{"index_patterns": ["tenant-a-*"], "allowed_actions": ["read"]}]}),
+            "/_plugins/_security/api/internalusers/ann",
+            json!({"password": "Zq9#vLx2!pRt7mWk", "opendistro_security_roles": ["ta"]}),
+            "ann",
+        ),
+    ] {
+        let c = e.post("/v1/search/clusters", json!({"name": name, "flavor": flavor})).await;
+        let (admin, pw) = creds(&c);
+        for (path, body) in [
+            ("/tenant-a-1/_doc/1?refresh=true", json!({"t": "alpha words", "n": 1})),
+            ("/tenant-b/_doc/1?refresh=true", json!({"t": "secret words", "ids": ["1"]})),
+            (role_path, role.clone()),
+            (user_path, user_body.clone()),
+        ] {
+            let (s, v) = e.es(&admin, &pw, Method::PUT, path, Some(body)).await;
+            assert!(s == 200 || s == 201, "{name} {path}: {v}");
+        }
+        let user = format!("{reader}@{name}");
+        let user_pw = user_body["password"].as_str().unwrap();
+        let es = |method: Method, path: &'static str, body: Option<Value>| e.es(&user, user_pw, method, path, body);
+
+        let docs = json!({"docs": [{"_index": "tenant-a-1", "_id": "1", "fields": ["t"]}, {"_index": "tenant-b", "_id": "1", "fields": ["t"]}]});
+        for path in ["/_mtermvectors", "/tenant-a-1/_mtermvectors"] {
+            let (s, v) = es(Method::POST, path, Some(docs.clone())).await;
+            assert_eq!((s, &v["docs"][0]["found"]), (200, &json!(true)), "{name} {path}: {v}");
+            let refused = &v["docs"][1];
+            assert!(refused["error"]["type"] == "security_exception" && refused.get("term_vectors").is_none(), "{name} {path}: {v}");
+            assert!(refused["error"]["reason"].as_str().unwrap_or_default().contains("indices:data/read/mtv[shard]"), "{name} {path}: {v}");
+        }
+        assert_eq!(es(Method::GET, "/tenant-b/_termvectors/1", None).await.0, 403, "{name}");
+
+        let verbatim = json!({"requests": [{"id": "q", "request": lookup("tenant-b"), "ratings": []}], "metric": {"precision": {}}});
+        for body in [template.clone(), verbatim] {
+            let (s, v) = es(Method::POST, "/tenant-a-1/_rank_eval", Some(body)).await;
+            let error = &v["failures"]["q"]["error"];
+            assert!(s == 200 && error["type"] == "security_exception" && v["details"] == json!({}), "{name}: {v}");
+        }
+        if flavor == "elasticsearch" {
+            let all = json!({"requests": [{"id": "q", "request": {"query": {"match_all": {}}}, "ratings": []}], "metric": {"precision": {}}});
+            let (s, v) = es(Method::POST, "/tenant-*/_rank_eval", Some(all)).await;
+            let hits: Vec<&str> = v["details"]["q"]["hits"].as_array().map(|h| h.iter().filter_map(|h| h["hit"]["_index"].as_str()).collect()).unwrap_or_default();
+            assert_eq!((s, hits), (200, vec!["tenant-a-1"]), "{v}");
+        }
+    }
 }
 
 /// A stored result (async search, ES|QL, SQL) is its opener's: anyone else (here another API
@@ -3287,7 +3445,7 @@ impl FakeSecrets {
 
 fn refused(r: search_control::secret_refs::Refused) -> String {
     match r {
-        search_control::secret_refs::Refused::Forbidden(m) | search_control::secret_refs::Refused::Invalid(m) => m,
+        search_control::secret_refs::Refused::Forbidden(m) | search_control::secret_refs::Refused::Invalid(m) | search_control::secret_refs::Refused::Conflict(m) => m,
     }
 }
 
@@ -4246,6 +4404,7 @@ async fn field_security_hides_a_field_on_every_read_path() {
         ("term suggester", reqwest::Method::POST, "/docs/_search", Some(json!({"suggest": {"s": {"text": "topsecretvalu", "term": {"field": "secret"}}}}))),
         ("termvectors", reqwest::Method::GET, "/docs/_termvectors/1?fields=secret", None),
         ("termvectors all", reqwest::Method::GET, "/docs/_termvectors/1", None),
+        ("mtermvectors", reqwest::Method::POST, "/_mtermvectors", Some(json!({"docs": [{"_index": "docs", "_id": "1", "fields": ["secret"]}]}))),
         ("explain", reqwest::Method::POST, "/docs/_explain/1", Some(json!({"query": {"match": {"name": "zebra"}}}))),
         ("mget", reqwest::Method::POST, "/_mget", Some(json!({"docs": [{"_index": "docs", "_id": "1"}]}))),
         ("esql", reqwest::Method::POST, "/_query", Some(json!({"query": "FROM docs"}))),
@@ -5358,7 +5517,10 @@ async fn search_analytics() {
         })
     };
     es(Method::POST, "/_application/analytics/web/event/search_click", Some(click("shoes", "2"))).await;
-    es(Method::POST, "/_application/analytics/web/event/search_click", Some(click("shoes", "1"))).await;
+    // The app's own `data` key records its clicks too: no second key for them.
+    let app = e.post("/v1/search/clusters/shop/keys", json!({"name": "app", "access": "data"})).await["api_key"].as_str().unwrap().to_string();
+    let r = e.http.post(format!("{}/_application/analytics/web/event/search_click", e.es)).header("authorization", format!("ApiKey {app}")).json(&click("shoes", "1")).send().await.unwrap();
+    assert!(r.status().is_success(), "a data key's click: {}", r.text().await.unwrap());
 
     let check = |a: &Value| {
         assert_eq!(a["totals"]["searches"].as_u64(), Some(8), "{a}");
@@ -6868,4 +7030,117 @@ async fn catching_up_and_cutting_over() {
     assert_eq!(index_names(&a), ["live-v1"], "{a}");
     let (_, n) = e.shop("GET", "/live/_count", None).await;
     assert_eq!(n["count"], 4, "{n}");
+}
+
+/// A/B tests on a search application (relevance-experiments.md): each visitor stays in one
+/// variant and the weights hold over many visitors; the answer names the variant in its headers;
+/// clicks and `roll_conversion` events count once per search, per variant, for the visitor who
+/// searched; and a browser key posts events only with `limits.events`, about what it reaches,
+/// counted for its own visitor and never stored.
+#[tokio::test]
+async fn search_application_experiments() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "ab"})).await;
+    let (user, pw) = creds(&c);
+    // A `null` body sends none.
+    let es = async |m: Method, p: &str, b: Value| {
+        let (s, v) = e.es(&user, &pw, m, p, (!b.is_null()).then_some(b)).await;
+        assert!(s < 300, "{p}: {s} {v}");
+        v
+    };
+    es(Method::PUT, "/products", json!({"mappings": {"properties": {"title": {"type": "text"}}}})).await;
+    es(Method::PUT, "/products/_doc/1?refresh=true", json!({"title": "red shoes"})).await;
+    let app = json!({
+        "indices": ["products"],
+        "template": {"script": {"source": {"query": {"match": {"title": "{{query}}"}}}, "params": {"query": ""}}},
+        "experiments": [{"id": "ranking", "allow_user_header": true, "variants": [
+            {"name": "control", "weight": 70},
+            {"name": "phrase", "weight": 30, "template": {"script": {"source": {"query": {"match_phrase": {"title": "{{query}}"}}}}}},
+        ]}],
+    });
+    es(Method::PUT, "/_application/search_application/shop", app).await;
+    // A running experiment's arms can't change.
+    let mut changed = json!({"indices": ["products"], "experiments": [{"id": "ranking", "allow_user_header": true, "variants": [{"name": "control", "weight": 50}, {"name": "phrase", "weight": 50}]}]});
+    let (s, v) = e.es(&user, &pw, Method::PUT, "/_application/search_application/shop", Some(changed.take())).await;
+    assert!(s == 400 && v.to_string().contains("is running"), "{s} {v}");
+    es(Method::PUT, "/_application/analytics/web", Value::Null).await;
+
+    let search = async |auth: &str, visitor: &str| {
+        let r = e.http.post(format!("{}/_application/search_application/shop/_search", e.es)).header("authorization", auth).header("x-roll-user", visitor).json(&json!({"params": {"query": "shoes"}})).send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 200);
+        assert_eq!(r.headers().get("x-roll-experiment").and_then(|h| h.to_str().ok()), Some("ranking"));
+        r.headers().get("x-roll-variant").and_then(|h| h.to_str().ok()).unwrap().to_string()
+    };
+    let event = async |auth: &str, visitor: &str, kind: &str, extra: Value| {
+        let mut body = json!({"session": {"id": "s"}, "user": {"id": "u"}, "search": {"query": "Shoes", "search_application": "shop"}, "document": {"index": "products", "id": "1"}});
+        if let (Some(b), Some(x)) = (body.as_object_mut(), extra.as_object()) {
+            b.extend(x.clone());
+        }
+        let r = e.http.post(format!("{}/_application/analytics/web/event/{kind}", e.es)).header("authorization", auth).header("x-roll-user", visitor).json(&body).send().await.unwrap();
+        r.status().as_u16()
+    };
+    use base64::Engine;
+    let owner = format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pw}")));
+    // Stable per visitor; the weights hold over 300 visitors.
+    let mut arms: std::collections::HashMap<String, String> = Default::default();
+    for i in 0..300 {
+        arms.insert(format!("v{i}"), search(&owner, &format!("v{i}")).await);
+    }
+    assert_eq!(search(&owner, "v7").await, arms["v7"], "the same visitor, the same variant");
+    let control = arms.values().filter(|v| *v == "control").count();
+    assert!((180..=240).contains(&control), "{control} of 300 in a 70% arm");
+    // Clicks and conversions: once per search, for its visitor.
+    let clicked: Vec<String> = (0..40).map(|i| format!("v{i}")).collect();
+    for v in &clicked {
+        assert_eq!(event(&owner, v, "search_click", json!({})).await, 202);
+        assert_eq!(event(&owner, v, "search_click", json!({})).await, 202, "a second click on the same search");
+    }
+    for v in &clicked[..10] {
+        assert_eq!(event(&owner, v, "roll_conversion", json!({"value": 12.5, "currency": "EUR"})).await, 202);
+    }
+    assert_eq!(event(&owner, "never-searched", "roll_conversion", json!({"value": 99})).await, 202);
+
+    // A browser key of the application: events only with limits.events, about what it reaches.
+    let page = e.post("/v1/search/clusters/ab/browser-keys", json!({"name": "page", "application": "shop"})).await;
+    let without = format!("ApiKey {}", page["api_key"].as_str().unwrap());
+    // Without it the event API needs a cluster privilege the key hasn't got.
+    assert_eq!(event(&without, "v40", "search_click", json!({})).await, 403);
+    let page = e.post("/v1/search/clusters/ab/browser-keys", json!({"name": "events", "application": "shop", "limits": {"events": true}})).await;
+    let key = format!("ApiKey {}", page["api_key"].as_str().unwrap());
+    assert_eq!(event(&key, "v40", "search_click", json!({"document": {"index": "secrets", "id": "1"}})).await, 400, "a document it doesn't reach");
+    assert_eq!(event(&key, "nobody", "search_click", json!({})).await, 202, "accepted, but no search of that visitor to count");
+    assert_eq!(event(&key, "v40", "search_click", json!({})).await, 202);
+    let count = async || {
+        es(Method::POST, "/behavioral_analytics-events-web/_refresh", Value::Null).await;
+        es(Method::POST, "/behavioral_analytics-events-web/_count", json!({})).await["count"].clone()
+    };
+    let stored = count().await;
+
+    let mut expect: std::collections::BTreeMap<&str, [u64; 3]> = Default::default();
+    for (v, arm) in &arms {
+        let x = expect.entry(arm.as_str()).or_default();
+        x[0] += 1;
+        let n: u32 = v[1..].parse().unwrap();
+        x[1] += u64::from(n < 41);
+        x[2] += u64::from(n < 10);
+    }
+    let check = |a: &Value| {
+        let ex = &a["experiments"][0];
+        assert_eq!((ex["application"].as_str(), ex["experiment"].as_str(), ex["baseline"].as_str()), (Some("shop"), Some("ranking"), Some("control")), "{a}");
+        for v in ex["variants"].as_array().unwrap() {
+            let want = expect[v["name"].as_str().unwrap()];
+            assert_eq!([v["searches"].as_u64().unwrap(), v["clicks"].as_u64().unwrap(), v["conversions"].as_u64().unwrap()], want, "{v}");
+            if v["name"] == "phrase" {
+                assert!(["significant", "not_yet_significant", "not_enough_data"].contains(&v["vs_baseline"]["ctr"]["state"].as_str().unwrap()), "{v}");
+            }
+        }
+        let value: f64 = ex["variants"].as_array().unwrap().iter().map(|v| v["value"].as_f64().unwrap()).sum();
+        assert_eq!(value, 125.0, "{a}");
+    };
+    check(&e.get("/v1/search/clusters/ab/analytics").await);
+    e.control.sample().await.unwrap();
+    check(&e.get("/v1/search/clusters/ab/analytics").await);
+    // The browser key's events weren't stored with the owner's.
+    assert_eq!(count().await, stored);
 }

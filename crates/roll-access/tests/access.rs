@@ -166,6 +166,20 @@ fn postgres() -> Router {
             post(|ext: axum::http::Extensions| async move { axum::Json(json!({ "reveal": ext.get::<roll_auth::Capable>().is_some_and(|c| c.has(roll_auth::scope::Action::Reveal)) })) }),
         )
         .route("/v1/search/clusters/{id}/keys", post(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }))
+        // What roll secrets would answer the caller inside: the grant handed over, on the folder
+        // the body names and on two it doesn't.
+        .route(
+            "/v1/search/clusters/{id}/inference/secrets",
+            post(|ext: axum::http::Extensions, body: axum::Json<Value>| async move {
+                let g = roll_auth::Grant::on(&ext).unwrap();
+                let project = body["secret"]["project"].as_str().unwrap_or("").to_string();
+                let at = |env: &str, path: &str| {
+                    let r = roll_auth::scope::Resource { product: "secrets".into(), id: Some(project.clone()), project: Some(project.clone()), environment: Some(env.into()), path: Some(path.into()), ..Default::default() };
+                    g.allows(&r, roll_auth::scope::Action::Reveal) == roll_auth::scope::Outcome::Allow
+                };
+                axum::Json(json!({ "here": at("production", "/ai"), "below": at("production", "/ai/x"), "elsewhere": at("production", "/"), "staging": at("staging", "/ai") }))
+            }),
+        )
         .route("/v1/search/clusters/{id}/indices", get(|| async { axum::Json(json!([])) }))
         .route("/v1/search/clusters/{id}/request", post(|ext: axum::http::Extensions| async move { axum::Json(json!({ "reveal": ext.get::<roll_auth::Capable>().is_some_and(|c| c.has(roll_auth::scope::Action::Reveal)) })) }))
         .route("/v1/search/clusters/{id}/indices/{index}/bulk", post(|body: String| async move { axum::Json(json!({ "lines": body.lines().count() })) }))
@@ -2614,6 +2628,22 @@ async fn a_spent_bootstrap_token_or_machine_credential_ends_its_chain() {
     d.access.store.prune(30).unwrap();
 }
 
+/// The 40th review's item 4: bootstrap tokens and machine credentials open nothing and live as
+/// long as their machine, so they don't take the workload token room every login shares (roll
+/// secrets caps them per identity): with an owner's cap of them live, that owner still logs in.
+#[tokio::test(flavor = "multi_thread")]
+async fn machine_credentials_leave_the_workload_token_caps_to_logins() {
+    use roll_access::store::{ChainSecret, OWNER_MAX_WORKLOADS, Presented};
+    let d = Daemon::new(50);
+    for n in 0..OWNER_MAX_WORKLOADS {
+        let boot = d.access.store.create_bootstrap(&format!("rack-{n}"), 10, &[], "operator", None).unwrap();
+        assert!(matches!(d.access.store.redeem(&boot.secret, ChainSecret::Bootstrap, None, 24).unwrap(), Presented::Live(_)));
+    }
+    let within = serde_json::from_value::<roll_auth::scope::Scope>(json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }])).unwrap();
+    let new = serde_json::from_value::<roll_access::store::NewGrant>(json!({ "name": "ci", "rules": [{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }] })).unwrap();
+    d.access.mint_workload(new, &within, 15, None).await.expect("a CI login still gets its token");
+}
+
 /// Open registration (RFC 7591) can't be flooded: a network registers at most 20 clients a minute
 /// on a node, then 429 with Retry-After.
 #[tokio::test]
@@ -3289,4 +3319,34 @@ async fn naming_lists_only_tokens_whose_rules_can_name_a_project() {
     assert_eq!(ids(store.naming("secrets", "web").unwrap()), Vec::<String>::new());
     drop(store);
     assert_eq!(named(&Store::new(db).unwrap()), want);
+}
+
+/// A secret a route reads as the caller (search's inference endpoint keyed by a roll secret) is
+/// asked for at the gate: roll secrets treats `ask` as no inside, so before this an `ask` grant
+/// was refused with nothing to approve. Approved, the grant handed over allows exactly that folder
+/// in that environment, nothing beside it; a grant that allows it needs no approval, and one with
+/// no rule for it is refused.
+#[tokio::test]
+async fn a_secret_read_as_the_caller_is_asked_for_and_only_it_is_allowed() {
+    let d = Daemon::new(50);
+    let project = d.workspace.create("", "shop", "", None).unwrap().id;
+    let body = json!({ "inference_id": "emb", "task_type": "text_embedding", "config": { "service": "openai" }, "secret": { "project": project, "environment": "production", "path": "ai/", "key": "OPENAI_API_KEY" } });
+    let path = "/v1/search/clusters/cl_home/inference/secrets";
+    let search = json!({ "product": "search", "resources": "*", "actions": { "admin": "allow" } });
+    let (asks, _) = d.token(json!([search, { "product": "secrets", "resources": [{ "project": project }], "actions": { "reveal": "ask" } }]), json!({})).await;
+    let (s, out) = d.call(&asks, Method::POST, path, Some(body.clone())).await;
+    assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
+    let id = out["approval"].as_str().unwrap().to_string();
+    let (_, asked) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{id}"), None).await;
+    assert_eq!((asked["product"].as_str(), asked["action"].as_str(), asked["environment"].as_str()), (Some("secrets"), Some("reveal"), Some("production")), "{asked}");
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{id}/approve"), None).await.0, StatusCode::OK);
+    let (s, seen) = d.send(&asks, Method::POST, path, Some(body.clone()), &[("x-roll-approval", &id)]).await;
+    assert_eq!(s, StatusCode::OK, "{seen}");
+    assert_eq!(seen, json!({ "here": true, "below": true, "elsewhere": false, "staging": false }));
+    let (allows, _) = d.token(json!([search, { "product": "secrets", "resources": [{ "project": project }], "actions": { "reveal": "allow" } }]), json!({})).await;
+    let (s, seen) = d.call(&allows, Method::POST, path, Some(body.clone())).await;
+    assert_eq!((s, seen["here"].as_bool()), (StatusCode::OK, Some(true)), "{seen}");
+    let (none, _) = d.token(json!([search]), json!({})).await;
+    let (s, out) = d.call(&none, Method::POST, path, Some(body)).await;
+    assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("forbidden")), "{out}");
 }

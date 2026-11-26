@@ -423,11 +423,19 @@ impl Secrets {
                 // A leaked private key: its certificate is revoked at the CA first (a compromised
                 // key is worse than a short gap), then renewed. The leak's claim runs this once.
                 let leaked = state.as_ref().and_then(|s| s.get("handle")).and_then(|h| h.get("serial")).and_then(Json::as_str).filter(|_| leak);
+                // A leak the renewal cap holds revokes nothing: a revoked certificate with no
+                // replacement is the outage the cap is for (a report checks this first too).
+                if leak {
+                    let now = self.db.now_ms()?;
+                    if let Some((name, next)) = self.db.read(|c| crate::public_certs::leak_renewal_held(c, &env.id, &path, key, now))? {
+                        return Err(Error::TooMany(crate::public_certs::leak_held_why(&name, next)));
+                    }
+                }
                 let revoked = leaked.map(|serial| self.revoke_serial(project, &link.r#ref, serial, crate::public_certs::RevokeReason::KeyCompromise, caller).map(|()| serial));
                 if let Some(Ok(serial)) = &revoked {
                     warnings.push(format!("revoked {name}'s certificate {serial} at the CA"));
                 }
-                self.request_renewal(project, &link.r#ref, caller, leak)?;
+                self.request_renewal(project, &link.r#ref, caller, if leak { crate::public_certs::Renewal::Leak } else { crate::public_certs::Renewal::Asked })?;
                 if let Some(Err(e)) = revoked {
                     return Err(e);
                 }

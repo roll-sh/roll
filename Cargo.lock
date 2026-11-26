@@ -8602,6 +8602,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "crc32fast",
+ "encoding_rs",
  "flate2",
  "foldhash 0.2.0",
  "futures",
@@ -8646,6 +8647,7 @@ dependencies = [
  "tokio-postgres-rustls",
  "tokio-rustls 0.26.6",
  "unicode-segmentation",
+ "xxhash-rust",
  "zeroize",
  "zxcvbn",
 ]

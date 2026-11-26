@@ -49,6 +49,7 @@ cleanup() {
     # And the previews' own networks (egress roll) a delete just before the stop didn't reach.
     for n in $(docker network ls -q --filter "label=sh.roll.code.home=$HOME_DIR"); do docker network rm "$n" >/dev/null 2>&1 || true; done
   fi
+  [ -n "${EMB_PID:-}" ] && kill "$EMB_PID" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -56,11 +57,36 @@ trap cleanup EXIT
 # Other daemons share this host: never talk to one of theirs.
 if curl -s -o /dev/null --max-time 1 "http://$API/v1/info"; then echo "something already answers on $API: stop it first" >&2; exit 1; fi
 rm -rf "$HOME_DIR" && mkdir -p "$HOME_DIR"
+# A provider of embeddings in OpenAI's shape on this machine, counting its calls: the parent's
+# semantic_text field embeds with it, and a preview's branch must never call it (roll search's
+# #988: a branch doesn't get the parent's key; previews' masking drops what it can't embed).
+python3 - "$HOME_DIR/emb" <<'PY2' &
+import http.server, json, sys
+base = sys.argv[1]
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)) or b"{}")
+        inputs = body.get("input") or [""]
+        inputs = inputs if isinstance(inputs, list) else [inputs]
+        n = int(open(base + ".calls").read() or 0) if __import__("os").path.exists(base + ".calls") else 0
+        open(base + ".calls", "w").write(str(n + 1))
+        out = json.dumps({"object": "list", "data": [{"object": "embedding", "index": i, "embedding": [0.6, 0.8, 0.0]} for i in range(len(inputs))], "model": "emb", "usage": {"prompt_tokens": 1, "total_tokens": 1}}).encode()
+        self.send_response(200); self.send_header("content-type", "application/json"); self.send_header("content-length", str(len(out))); self.end_headers(); self.wfile.write(out)
+    def log_message(self, *a):
+        pass
+s = http.server.HTTPServer(("127.0.0.1", 0), H)
+open(base + ".port", "w").write(str(s.server_port))
+s.serve_forever()
+PY2
+EMB_PID=$!
+for _ in $(seq 1 40); do [ -s "$HOME_DIR/emb.port" ] && break; sleep 0.1; done
+EMB_PORT=$(cat "$HOME_DIR/emb.port")
+emb_calls() { cat "$HOME_DIR/emb.calls" 2>/dev/null || echo 0; }
 export ROLL_HOME=$HOME_DIR ROLL_API=$API ROLL_PROXY=127.0.0.1:${P}432 ROLL_REDIS=127.0.0.1:${P}380 ROLL_REDIS_HTTP=127.0.0.1:${P}081 \
   ROLL_KAFKA=127.0.0.1:${P}092 ROLL_S3=127.0.0.1:${P}900 ROLL_STORAGE_API=127.0.0.1:${P}901 \
   ROLL_QUEUES_AMQP=127.0.0.1:${P}672 ROLL_QUEUES_MANAGEMENT=127.0.0.1:${P}673 ROLL_QUEUES_STOMP=127.0.0.1:${P}613 ROLL_QUEUES_WEB_STOMP=127.0.0.1:${P}674 \
   ROLL_QUEUES_MQTT=127.0.0.1:${P}883 ROLL_QUEUES_WEB_MQTT=127.0.0.1:${P}675 ROLL_QUEUES_STREAM=127.0.0.1:${P}552 ROLL_QUEUES_HTTP=127.0.0.1:${P}680 \
-  ROLL_SEARCH_HTTP=127.0.0.1:${P}200 ROLL_PREVIEWS_SMTP=127.0.0.1:${P}525 \
+  ROLL_SEARCH_HTTP=127.0.0.1:${P}200 ROLL_PREVIEWS_SMTP=127.0.0.1:${P}525 ROLL_SEARCH_INFERENCE_ALLOW_PRIVATE=true \
   ROLL_NOSQL_CQL=127.0.0.1:${P}042 ROLL_NOSQL_CQL_SHARD_AWARE=127.0.0.1:${P}043 ROLL_NOSQL_ALTERNATOR=127.0.0.1:${P}000 ROLL_NOSQL_REST=127.0.0.1:${P}100 \
   ROLL_CODE_PREVIEW_DOMAIN=$DOMAIN ROLL_PRODUCTS=${PREVIEW_PRODUCTS:-code,postgres,redis,storage,nosql,queues,streams,tasks,search} RUST_LOG=${RUST_LOG:-info}
 unset ROLL_ADMIN_TOKEN ROLL_CODE_TOKEN
@@ -104,7 +130,11 @@ ids = ["s%02d--one" % i for i in range(1, 41)] + ["deep--one"]
 path = lambda i: "./stories/%s.stories.js" % i.split("--")[0]
 index = {"v": 5, "entries": {i: {"id": i, "type": "story", "title": i, "name": "One", "importPath": path(i)} for i in ids}}
 stats = {"modules": [{"name": "./lib/deep.js", "reasons": [{"moduleName": "./stories/Deep.js"}]}, {"name": "./stories/Deep.js", "reasons": [{"moduleName": "./stories/deep.stories.js"}]}]}
-frame = '<!doctype html><html lang="en"><title>story</title><div id="storybook-root"><button>a story</button></div>'
+# Storybook's own preview as its frame exposes it (`__STORYBOOK_PREVIEW__.storyRenders`): Deep's
+# play function threw (phase `errored`), the first one's ran to its end, the rest have none.
+# Its error display says what Deep's threw, as Storybook's frame does (`#error-message`).
+play = '<div id="error-message"></div><script>const id = new URLSearchParams(location.search).get("id"); globalThis.__STORYBOOK_PREVIEW__ = { storyRenders: [{ id, phase: id === "deep--one" ? "errored" : "finished", story: id === "deep--one" || id === "s01--one" ? { playFunction() {} } : {} }] }; if (id === "deep--one") { document.getElementById("error-message").textContent = "expected Pay to be visible"; globalThis.__STORYBOOK_ADDON_INTERACTIONS_INSTRUMENTER_STATE__ = { "deep--one": { calls: [{ id: "c1", path: ["userEvent"], method: "click", status: "done" }, { id: "c2", path: [], method: "expect", status: "done" }, { id: "c3", path: [{ __callId__: "c2" }], method: "toBeVisible", status: "error" }] } }; }</script>'
+frame = '<!doctype html><html lang="en"><title>story</title><div id="storybook-root"><button>a story</button></div>' + play
 files = {"storybook/index.json": json.dumps(index), "storybook/preview-stats.json": json.dumps(stats), "storybook/iframe.html": frame}
 print(json.dumps({"message": "storybook", "files": {k: {"content": v} for k, v in files.items()}}))
 PY2
@@ -130,6 +160,15 @@ curl -sf -XPUT "$SEARCH_URL_PARENT/products/_doc/3?refresh=true" -H 'content-typ
 # An index whose name has dots (logs.2024): its mask is split off at the whole name.
 curl -sf -XPUT "$SEARCH_URL_PARENT/logs.2024/_doc/1?refresh=true" -H 'content-type: application/json' -d '{"user":{"email":"eve@corp.example"}}' >/dev/null
 curl -sf -XPUT "$SEARCH_URL_PARENT/products/_doc/4?refresh=true" -H 'content-type: application/json' -d '{"name":"dotted","owner.email":"bob@corp.example","stock":3}' >/dev/null
+# A semantic_text field on the parent, its endpoint keyed (an openai one, at the provider above):
+# embedded there, its chunks and the knn on them find the document (the premise).
+curl -sf -XPUT "$SEARCH_URL_PARENT/_inference/text_embedding/emb" -H 'content-type: application/json' -d "{\"service\":\"openai\",\"service_settings\":{\"api_key\":\"sk-parent-key\",\"model_id\":\"emb\",\"url\":\"http://127.0.0.1:$EMB_PORT/v1/embeddings\"}}" >/dev/null || { echo "an inference endpoint on the parent"; exit 1; }
+curl -sf -XPUT "$SEARCH_URL_PARENT/notes" -H 'content-type: application/json' -d '{"mappings":{"properties":{"f":{"type":"semantic_text","inference_id":"emb"}}}}' >/dev/null
+curl -sf -XPUT "$SEARCH_URL_PARENT/notes/_doc/1?refresh=true" -H 'content-type: application/json' -d '{"f":"ada'"'"'s own words"}' >/dev/null || { echo "an embedded document on the parent"; exit 1; }
+CHUNKS_Q='{"size":0,"query":{"nested":{"path":"f.inference.chunks","query":{"exists":{"field":"f.inference.chunks.embeddings"}}}}}'
+KNN_Q='{"size":0,"query":{"nested":{"path":"f.inference.chunks","query":{"knn":{"field":"f.inference.chunks.embeddings","query_vector":[0.6,0.8,0.0],"k":10}}}}}'
+hits_of() { curl -sf "$1/notes/_search" -H 'content-type: application/json' -d "$2" | jq_ "d['hits']['total']['value']"; }
+[ "$(hits_of "$SEARCH_URL_PARENT" "$CHUNKS_Q") $(hits_of "$SEARCH_URL_PARENT" "$KNN_Q")" = "1 1" ] || { echo "the parent's document should be embedded, its knn matching"; exit 1; }
 # A connector on the parent (roll search's native syncs, #318): its branches inherit it, waiting.
 curl -sf -XPUT "$SEARCH_URL_PARENT/_connector/catalog-sync" -H 'content-type: application/json' -d '{"index_name":"content-synced","is_native":true,"service_type":"s3"}' >/dev/null || { echo "a connector on the parent search cluster"; exit 1; }
 PG=$(api POST /v1/projects '{"name":"shop-db"}' | jq_ "d['id']")
@@ -162,6 +201,20 @@ assert b"-" not in got[:1], got[:200]
 PY
 }
 resp "$REDIS_URL" 20000 parent
+rcmd() { # rcmd <redis url> <word>…: one command over RESP, its reply's first line
+  python3 - "$@" <<'PY'
+import socket, sys, urllib.parse
+u = urllib.parse.urlparse(sys.argv[1])
+s = socket.create_connection((u.hostname, u.port))
+def cmd(*a):
+    return b"*%d\r\n" % len(a) + b"".join(b"$%d\r\n%s\r\n" % (len(x), x) for x in a)
+s.sendall(cmd(b"AUTH", u.username.encode(), urllib.parse.unquote(u.password).encode()) + cmd(*[w.encode() for w in sys.argv[2:]]))
+got = b""
+while got.count(b"\r\n") < 2:
+    got += s.recv(65536)
+print(got.split(b"\r\n")[1].decode())
+PY
+}
 
 PRJ=$(api POST /v1/workspace/projects '{"name":"shop"}' | jq_ "d['id']")
 for r in "repo/acme%2Fweb" "repo/acme%2Fwiki" "postgres/$PG" "redis/$REDIS" "bucket/assets" "nosql/$NOSQL" "queue/jobs" "stream/$STREAM" "tasks/work" "search/$SEARCH"; do
@@ -171,7 +224,7 @@ done
 # preview's environment reads it there (untrusted), and a plain value's `${` stays as it is.
 REFD=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://$API/v1/secrets/projects/$PRJ/environments/staging/secrets/PAYMENTS_TEST_KEY" -H 'content-type: application/json' -d '{"value":"sk_test_from_staging_42"}')
 case "$REFD" in 200|201) ;; *) echo "setting staging's PAYMENTS_TEST_KEY: HTTP $REFD"; exit 1;; esac
-api PUT "/v1/previews/projects/$PRJ/settings" "{\"env\":{\"SENDGRID_API_KEY\":\"SG.from-production\",\"SMTP_HOST\":\"smtp.sendgrid.net\",\"PAYMENTS_KEY\":\"roll://staging/PAYMENTS_TEST_KEY\",\"GREETING\":\"hello \${USER}\"},\"enabled\":true,\"sleep_after_s\":60,\"release\":{\"image\":\"$IMAGE\",\"run\":\"true\"},\"masking\":{\"nosql:$NOSQL\":{\"app.users.email\":\"mask_default()\"},\"postgres:$PG\":{\"public.users.email\":\"email\"},\"search:$SEARCH\":{\"products.name\":\"redact\",\"products.owner.email\":\"redact\",\"logs.2024.user.email\":\"redact\"}}}" >/dev/null
+api PUT "/v1/previews/projects/$PRJ/settings" "{\"env\":{\"SENDGRID_API_KEY\":\"SG.from-production\",\"SMTP_HOST\":\"smtp.sendgrid.net\",\"PAYMENTS_KEY\":\"roll://staging/PAYMENTS_TEST_KEY\",\"GREETING\":\"hello \${USER}\"},\"enabled\":true,\"sleep_after_s\":60,\"release\":{\"image\":\"$IMAGE\",\"run\":\"true\"},\"masking\":{\"nosql:$NOSQL\":{\"app.users.email\":\"mask_default()\"},\"postgres:$PG\":{\"public.users.email\":\"email\"},\"search:$SEARCH\":{\"products.name\":\"redact\",\"products.owner.email\":\"redact\",\"logs.2024.user.email\":\"redact\",\"notes.f\":\"redact\"}}}" >/dev/null
 # A mask on a key column can't hide it (the engine refuses to read such a table): the settings
 # name it instead of letting a preview's pages fail.
 KEY_MASK=$(curl -s -o /tmp/roll-previews-keymask.json -w '%{http_code}' -X PUT "http://$API/v1/previews/projects/$PRJ/settings" -H 'content-type: application/json' \
@@ -189,6 +242,7 @@ LINKED=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://$API/v1/secrets/p
 case "$LINKED" in 200|201) ;; *) echo "linking development's STAGING_PGPASS to $PG's password: HTTP $LINKED"; exit 1;; esac
 # Where a follower of previews' events (roll MCP's Events) starts: what comes from now on.
 EV0=$(api GET "/v1/previews/events?latest=1" | jq_ "d['next']")
+EMB0=$(emb_calls)
 say "open a change"
 T0=$(now_ms)
 CHG=$(api POST /v1/code/repos/acme/web/changes '{"title":"New page","message":"New page","base":"main","files":{"index.html":{"content":"preview of change 1"},"lib/deep.js":{"content":"export const deep = 1;"},'"$OPENAPI_CHG"'}}' | jq_ "d['id']")
@@ -407,6 +461,13 @@ done
 BSTATE=$(console "$BRANCH_SEARCH" GET "/_connector/_sync_job/$BJOB" | answer status)
 case "$PSTATE" in in_progress|error|completed) [ "$BSTATE" = pending ] ;; *) false ;; esac || { echo "the parent's sync should run (it did: $PSTATE) and the branch's wait for adoption (pending, not $BSTATE)"; exit 1; }
 [ "$(es "$APP_ES/products/_doc/1" | jq_ "d['_source']['name']")" = "[masked]" ] || { echo "the search branch should stay masked beside its inherited connector"; exit 1; }
+# Its semantic_text field masked too, though the branch has no key for the parent's endpoint
+# (roll search's #988): the masked text kept unembedded (X-Roll-Unembedded: drop), the real
+# words' chunks and embeddings gone, and the provider never called from the branch.
+body_of() { jq_ "__import__('json').loads(d.get('body') or '{}')$1"; }
+SEM_DOC=$(console "$BRANCH_SEARCH" GET "/notes/_doc/1?_source_includes=f,_inference_fields" | body_of "['_source']")
+SEM_HITS="$(console "$BRANCH_SEARCH" POST /notes/_search "$CHUNKS_Q" | body_of "['hits']['total']['value']") $(console "$BRANCH_SEARCH" POST /notes/_search "$KNN_Q" | body_of "['hits']['total']['value']")"
+[ "$SEM_DOC | $SEM_HITS | $(( $(emb_calls) - EMB0 ))" = "{'f': '[masked]'} | 0 0 | 0" ] || { echo "a semantic_text field should be masked on the branch with no embeddings left and no provider call (source | chunks knn | calls): $SEM_DOC | $SEM_HITS | $(( $(emb_calls) - EMB0 ))"; exit 1; }
 # A field only the branch's documents have (price): its mapping gains it, and the next head's
 # schema changes say so.
 es -XPUT "$APP_ES/products/_doc/2?refresh=true" -H 'content-type: application/json' -d '{"name":"branch","price":9.5}' >/dev/null
@@ -620,6 +681,18 @@ LEFT=$(api GET "/v1/previews/$PV" | jq_ "(lambda k: '%s %s' % (k.get('stories'),
 # Each story checked with axe as a page is (Chromatic's accessibility tests): its record says so.
 STORY_A11Y=$(api GET "/v1/previews/$PV" | jq_ "[(x.get('a11y') or {}).get('lang') for x in d['pages'] if x['path'] == 'story:deep--one']")
 [ "$STORY_A11Y" = "[True]" ] || { echo "a story's page should carry its accessibility, as a page's does: $STORY_A11Y"; exit 1; }
+# Their interaction tests as Storybook ran them (Chromatic's): Deep's failed, the first's passed.
+PLAYS=$(api GET "/v1/previews/$PV" | jq_ "sorted('%s %s' % (x['path'], x.get('play')) for x in d['pages'] if x['path'] in ('story:deep--one', 'story:s01--one', 'story:s02--one'))")
+[ "$PLAYS" = "['story:deep--one failed', 'story:s01--one passed', 'story:s02--one None']" ] || { echo "a story's interaction test should be read as Storybook ran it: $PLAYS"; exit 1; }
+PLAY_ERROR=$(api GET "/v1/previews/$PV" | jq_ "[(x.get('play_step'), x.get('play_error')) for x in d['pages'] if x['path'] == 'story:deep--one']")
+[ "$PLAY_ERROR" = "[('expect.toBeVisible', 'expected Pay to be visible')]" ] || { echo "a failed interaction test should say where it stopped and what it threw: $PLAY_ERROR"; exit 1; }
+# The change's first stories in the other browsers asked for too (Chromatic's cross-browser
+# stories): Deep's, taken first, in Firefox and WebKit at a phone's size.
+STORY_BROWSERS=$(api GET "/v1/previews/$PV" | jq_ "sorted(x['path'] for x in d['pages'] if x['path'].startswith('story:deep--one@'))")
+[ "$STORY_BROWSERS" = "['story:deep--one@firefox', 'story:deep--one@webkit-phone']" ] || { echo "the change's first story should be taken in the other browsers asked for: $STORY_BROWSERS"; exit 1; }
+# And its interaction test in each of them, as Storybook ran it there.
+PLAY_BROWSERS=$(api GET "/v1/previews/$PV" | jq_ "sorted('%s %s %s' % (x['path'], x.get('play'), x.get('play_error')) for x in d['pages'] if x['path'].startswith('story:deep--one@'))")
+[ "$PLAY_BROWSERS" = "['story:deep--one@firefox failed expected Pay to be visible', 'story:deep--one@webkit-phone failed expected Pay to be visible']" ] || { echo "a story's interaction test should be read in the other browsers too: $PLAY_BROWSERS"; exit 1; }
 # Signed in first (github.login): its $GREETING put in by roll and handed to the browser through
 # its container's stdin. The page has no #nope, so the run says where it stopped, never what it
 # would have typed.
@@ -662,21 +735,33 @@ curl -sS -o /dev/null -L -c "$JAR" -b "$JAR" -H "Host: $HOST" "http://$API/?$QUE
 say "a restore point (roll preview points): saved, a table made after it, put back"
 # A restore point (roll preview points): a table made after it is gone once it's put back, on
 # the same DATABASE_URL (pg-control's reset from the point: same endpoint and role), and in the
-# NoSQL branch (NoSQL's point-in-time restore in place, to the second the point was cut at).
+# NoSQL and Redis branches (their point-in-time restores in place, to the second the point was
+# cut at: the same database, URL and password), and in the stream (branched again from the
+# point: a new stream and key, its records as the point holds them).
 psql_app() { docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB" -Atc "$1" 2>&1 | head -1; }
+stream_ref() { api GET "/v1/previews/$PV" | jq_ "[r['ref'] for r in d['resources'] if r['kind']=='stream'][0]"; }
+srec() { api POST "/v1/streams/$1/topics/clicks/records" "{\"value\":\"$2\"}" | jq_ "'offsets' in d"; }
+sread() { api GET "/v1/streams/$1/topics/clicks/records?from=earliest&limit=1000" | jq_ "' '.join(w for w in ('before-the-point', 'after-the-point') if w in str(d))"; }
+POINT_STREAM=$(stream_ref)
+[ "$(srec "$POINT_STREAM" before-the-point)" = True ] || { echo "the preview's stream should take a record before the point"; exit 1; }
 POINT=$(api POST "/v1/previews/$PV/restore-points" '{"label":"before the live check"}' | jq_ "d['id']")
 case "$POINT" in rp_*) ;; *) echo "a restore point should be saved: $POINT"; exit 1;; esac
 ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview points "$PV" | has "$POINT" || { echo "roll preview points should list $POINT"; exit 1; }
 psql_app "CREATE TABLE after_the_point (id int)" >/dev/null
 CQL "$BRANCH_NOSQL" "CREATE TABLE app.after_the_point (id int PRIMARY KEY)" >/dev/null
+POINT_REDIS_URL=$(api GET "/v1/redis/databases/$BRANCH_REDIS" | jq_ "d['redis_url']")
+[ "$(rcmd "$POINT_REDIS_URL" SET after:the:point 1)" = "+OK" ] || { echo "the Redis branch should take a key after the point"; exit 1; }
+srec "$POINT_STREAM" after-the-point >/dev/null
+[ "$(sread "$POINT_STREAM")" = "before-the-point after-the-point" ] || { echo "the preview's stream should hold both records before the point goes back: $(sread "$POINT_STREAM")"; exit 1; }
 [ "$(CQL "$BRANCH_NOSQL" "SELECT id FROM app.after_the_point" | jq_ "'rows' in d")" = True ] || { echo "the NoSQL branch should have the table made after the point"; exit 1; }
 TR0=$(now_ms)
 api POST "/v1/previews/$PV/restore-points/$POINT/restore" >/dev/null
-# Put back: the line is looked for in the whole activity (the services' lines come after it),
-# and the preview settled, ready or asleep (its services slept for it; a visit wakes them).
+# Put back: each product's line is looked for in the whole activity (the services' lines come
+# after them; NoSQL's may come before Postgres'), and the preview settled, ready or asleep (its
+# services slept for it; a visit wakes them).
 PUT_BACK=""
 for _ in $(seq 1 240); do
-  api GET "/v1/previews/$PV/activity" | jq_ "any('back as restore point' in a['message'] for a in d)" | has True && case "$(api GET "/v1/previews/$PV" | jq_ "d['state']")" in ready|sleeping) true;; *) false;; esac && PUT_BACK=yes && break
+  api GET "/v1/previews/$PV/activity" | jq_ "all(any(a['message'].startswith('put ' + k + ':') and 'back as restore point' in a['message'] for a in d) for k in ('postgres', 'nosql', 'redis', 'stream'))" | has True && case "$(api GET "/v1/previews/$PV" | jq_ "d['state']")" in ready|sleeping) true;; *) false;; esac && PUT_BACK=yes && break
   sleep 0.5
 done
 RESTORE_MS=$(( $(now_ms) - TR0 ))
@@ -685,6 +770,11 @@ RESTORED=$(psql_app "SELECT coalesce(to_regclass('public.after_the_point')::text
 [ "$RESTORED" = "gone $APP_MASKED" ] || { echo "putting the point back should drop what came after it, still masked, on the same DATABASE_URL: $RESTORED"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:8]]"; exit 1; }
 NOSQL_AFTER=$(CQL "$BRANCH_NOSQL" "SELECT id FROM app.after_the_point" | jq_ "'rows' in d")
 [ "$NOSQL_AFTER" = False ] || { echo "putting the point back should drop the NoSQL table made after it"; exit 1; }
+REDIS_AFTER="$(rcmd "$POINT_REDIS_URL" EXISTS after:the:point) $(rcmd "$POINT_REDIS_URL" EXISTS preview:999)"
+[ "$REDIS_AFTER" = ":0 :1" ] || { echo "putting the point back should drop the Redis key set after it, on the same URL, and keep the preview's own: $REDIS_AFTER"; exit 1; }
+BACK_STREAM=$(stream_ref)
+STREAM_AFTER="$([ "$BACK_STREAM" != "$POINT_STREAM" ] && echo new) $(sread "$BACK_STREAM")"
+[ "$STREAM_AFTER" = "new before-the-point" ] || { echo "putting the point back should give the preview a stream with the point's records and not the one after it: $STREAM_AFTER"; exit 1; }
 api DELETE "/v1/previews/$PV/restore-points/$POINT" >/dev/null
 # Its services slept while the data went back: a visit wakes them, on the same DATABASE_URL.
 for _ in $(seq 1 120); do
@@ -1300,6 +1390,7 @@ cat <<EOF
 | A push whose earlier head keeps copies of every branch: its timeline | $STEPS3 |
 | What a follower of the events hears (\`GET /v1/previews/events\`, roll MCP's Events) | $EVENTS |
 | Search: a sync of the parent's connector on the parent / asked of the branch (inherited, waits for adoption) | $PSTATE / $BSTATE |
+| Search: a semantic_text field masked on the branch without the parent's key (its source / chunks and knn hits / provider calls) | $SEM_DOC / $SEM_HITS / 0 |
 | Parent bucket bytes / the branch's own bytes after writing 1 MiB / objects the branch sees | $PARENT_OBJECTS / $BRANCH_OBJECTS / $BRANCH_SEES |
 | NoSQL branch's mask on app.users.email / masks on the parent | $MASKED / $PARENT_MASKED |
 | NoSQL: app.users.email in the branch / a filter on the real address there | $NOSQL_READ / $NOSQL_FILTER |

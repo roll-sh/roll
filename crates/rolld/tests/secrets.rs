@@ -807,6 +807,54 @@ async fn a_repository_key_follows_rotation_and_a_branch_gets_no_protected_key() 
     assert!(!t.contains(&secret), "{t}");
 }
 
+/// A search cluster's admin password kept in roll secrets (`POST …/password` with `secret`):
+/// rotated, written as the caller in the project whose canvas holds the cluster, and answered
+/// without it. A store roll secrets can't make (no project stands for the cluster) rotates
+/// nothing; `"rotate": false` stores the current password again without rotating.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_search_clusters_password_is_kept_in_roll_secrets_and_shown_to_nobody() {
+    let env = [("ROLL_SECRET_KEY", "fake-deployment-key-for-the-password-test-0000000")];
+    let r = Rolld::start_in(Arc::new(tempfile::tempdir().unwrap()), "search", false, &env, "/v1/info").await;
+    let p = Project::new(&r).await;
+    let sc = r.post("/v1/search/clusters", json!({ "name": "kept" })).await;
+    let (id, url) = (sc["id"].as_str().unwrap().to_string(), sc["url"].as_str().unwrap().to_string());
+    let (user, first) = (sc["username"].as_str().unwrap().to_string(), sc["password"].as_str().unwrap().to_string());
+    let logs_in = |password: String| {
+        let req = r.http.get(format!("{url}/")).basic_auth(&user, Some(password));
+        async move { req.send().await.unwrap().status().as_u16() == 200 }
+    };
+    let keep = |rotate: bool| json!({ "secret": { "environment": "production", "key": "SEARCH_PASSWORD" }, "rotate": rotate });
+    // On no canvas, no project stands for the cluster: refused, and its password is as it was.
+    let a = r.http.post(format!("{}/v1/search/clusters/{id}/password", r.api)).bearer_auth(TOKEN).json(&keep(true)).send().await.unwrap();
+    assert_eq!(a.status().as_u16(), 400, "{}", a.text().await.unwrap());
+    assert!(logs_in(first.clone()).await);
+    r.call(reqwest::Method::PUT, &format!("/v1/workspace/projects/{}/resources/search/{id}", p.id), Some(json!({ "x": 0, "y": 0 }))).await;
+    let v = r.post(&format!("/v1/search/clusters/{id}/password"), keep(true)).await;
+    assert!(v.get("password").is_none() && v["cluster"].get("password").is_none() && v["stored"]["key"] == "SEARCH_PASSWORD", "{v}");
+    let kept = p.value("SEARCH_PASSWORD").await;
+    assert!(kept != first && logs_in(kept.clone()).await && !logs_in(first).await, "the kept password is the cluster's new one");
+    assert!(!v.to_string().contains(&kept), "{v}");
+    // The retry of a store that failed after its rotation: the same password, nothing rotated.
+    let again = r.post(&format!("/v1/search/clusters/{id}/password"), keep(false)).await;
+    assert!(again["stored"]["version"].as_i64() >= v["stored"]["version"].as_i64(), "{again}");
+    assert_eq!(p.value("SEARCH_PASSWORD").await, kept);
+    // A store roll secrets would refuse (a key name it doesn't take) is refused before the
+    // password rotates.
+    let a = r.http.post(format!("{}/v1/search/clusters/{id}/password", r.api)).bearer_auth(TOKEN).json(&json!({ "secret": { "environment": "production", "key": "bad key" } })).send().await.unwrap();
+    assert_eq!(a.status().as_u16(), 400, "{}", a.text().await.unwrap());
+    assert!(logs_in(kept.clone()).await, "a refused store rotated the password");
+    // Administering the cluster without revealing its password doesn't copy it into a secret the
+    // caller may reveal.
+    let rules = json!([
+        { "product": "search", "resources": "*", "actions": { "admin": "allow" } },
+        { "product": "secrets", "resources": "*", "actions": { "read": "allow", "write": "allow", "reveal": "allow" } },
+    ]);
+    let made = r.post("/v1/access/tokens", json!({ "name": "no-reveal", "rules": rules })).await;
+    let a = r.http.post(format!("{}/v1/search/clusters/{id}/password", r.api)).bearer_auth(made["token"].as_str().unwrap()).json(&keep(false)).send().await.unwrap();
+    let (status, text) = (a.status().as_u16(), a.text().await.unwrap());
+    assert!(status == 403 && text.contains("needs reveal"), "{status} {text}");
+}
+
 /// Reach names the roll apps services that read a folder (rolld's `ReachHolders`): one deploying
 /// the environment reads its root, and one whose `roll://` variable names a key of a subfolder
 /// reads that folder too. It opens no variable: a write-only one whose sealed value no key opens
@@ -946,12 +994,27 @@ async fn a_bootstrap_token_is_exchanged_once_and_a_spent_credential_ends_its_mac
     assert_eq!(login(secret(&first)).await.0, 401, "and its second use ended the machine's credential");
     assert_eq!(read(token).await.unwrap().status(), 401, "and its login's token");
 
+    // Replaced, its answer lost (the 40th review's item 6): the machine asks again with the same
+    // credential and gets a new one; the unanswered one is spent with it.
     let (_, one) = exchange(secret(&r.post(&format!("{p}/identities/{id}/bootstrap"), json!({})).await)).await;
-    let (s, two) = public("login/refresh", json!({ "identity": id, "credential": secret(&one) })).await;
-    assert_eq!(s, 200, "{two}");
+    let refresh = |credential: String| public("login/refresh", json!({ "identity": id, "credential": credential }));
+    let (s, lost) = refresh(secret(&one)).await;
+    assert_eq!(s, 200, "{lost}");
+    let (s, two) = refresh(secret(&one)).await;
+    assert_eq!(s, 200, "a retry of a refresh whose answer was lost: {two}");
     assert_eq!(login(secret(&two)).await.0, 200, "the new credential works");
-    assert_eq!(login(secret(&one)).await.0, 401, "the old one stops");
+    assert_eq!(refresh(secret(&one)).await.0, 401, "the old one stops, a retry at most once");
     assert_eq!(login(secret(&two)).await.0, 401, "and, spent but used again, it ended the machine");
+
+    // The identity's machines, newest first and never a secret; an admin revokes one.
+    let (_, three) = exchange(secret(&r.post(&format!("{p}/identities/{id}/bootstrap"), json!({})).await)).await;
+    let machines = r.get(&format!("{p}/identities/{id}/machines")).await;
+    let states: Vec<(&str, &str)> = machines.as_array().unwrap().iter().map(|m| (m["chain"].as_str().unwrap(), m["state"].as_str().unwrap())).collect();
+    assert_eq!(states, [(three["chain"].as_str().unwrap(), "live"), (two["chain"].as_str().unwrap(), "revoked"), (first["chain"].as_str().unwrap(), "revoked")], "{machines}");
+    assert!(machines[0]["refreshed_at"].is_i64() && !machines.to_string().contains("rlmc_") && !machines.to_string().contains("rlbt_"), "{machines}");
+    r.call(reqwest::Method::DELETE, &format!("{p}/identities/{id}/machines/{}", three["chain"].as_str().unwrap()), None).await;
+    assert_eq!(login(secret(&three)).await.0, 401, "a revoked machine's credential stops at once");
+    assert_eq!(r.get(&format!("{p}/identities/{id}/machines")).await[0]["state"], "revoked");
 }
 
 /// Invite `ada@example.com` with the operator's token and sign in by email code (from the

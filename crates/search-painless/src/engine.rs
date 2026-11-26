@@ -34,6 +34,9 @@ pub struct Settings {
     pub max_size_in_bytes: usize,
     /// `script.cache.max_size` (3000).
     pub cache_max_size: usize,
+    /// Most bytes the cached scripts may hold together ([`compiled_bytes`] each): roll's, which
+    /// no tenant setting reaches (32 MiB). Past it the least recently used go first.
+    pub cache_max_bytes: u64,
     /// `script.cache.expire` (none).
     pub cache_expire: Option<Duration>,
     /// `script.max_compilations_rate` (150 per 5 minutes); `None` is `unlimited`.
@@ -81,6 +84,7 @@ impl Default for Settings {
         Settings {
             max_size_in_bytes: 65535,
             cache_max_size: 3000,
+            cache_max_bytes: 32 << 20,
             cache_expire: None,
             max_compilations_rate: Some((150, Duration::from_secs(300))),
             regex_enabled: RegexEnabled::Limited,
@@ -148,6 +152,8 @@ struct CacheKey {
 
 struct CacheEntry {
     value: Compiled,
+    /// What it holds ([`compiled_bytes`]).
+    bytes: u64,
     last_used: u64,
     /// Last hit or insertion: `script.cache.expire` counts from here (`setExpireAfterAccess`).
     accessed: StdInstant,
@@ -166,14 +172,73 @@ struct Bucket {
     last: StdInstant,
 }
 
+/// Where the cache's bytes are charged (a host's memory budget): reservations may be refused.
+pub trait MemoryCharge: Send + Sync {
+    /// Reserves `bytes`, or does nothing and answers `false`.
+    fn try_reserve(&self, bytes: u64) -> bool;
+    fn release(&self, bytes: u64);
+}
+
+/// What a compiled script holds, estimated from its source: its bytecode, constants, types and
+/// source positions grow with the source. Measured by the allocator on scripts of 8 B to 10 KiB
+/// (the `compiled_sizes` test): Painless holds about 17 bytes per source byte above some 650,
+/// Mustache about 12, an expression less; the estimate (24 per byte, plus the key and
+/// [`COMPILED_FIXED_BYTES`]) is above each of them.
+pub fn compiled_bytes(source_len: usize, options: &[(String, String)]) -> u64 {
+    let key = source_len + options.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>();
+    COMPILED_FIXED_BYTES + (key as u64) + (source_len as u64) * COMPILED_BYTES_PER_SOURCE_BYTE
+}
+
+/// The fixed part of [`compiled_bytes`]: the script, its program and context, the cache entry.
+pub const COMPILED_FIXED_BYTES: u64 = 1024;
+
+/// The per-source-byte part of [`compiled_bytes`].
+pub const COMPILED_BYTES_PER_SOURCE_BYTE: u64 = 24;
+
 struct Cache {
     map: HashMap<CacheKey, CacheEntry>,
+    /// What `map`'s entries hold.
+    bytes: u64,
+    charge: Option<Arc<dyn MemoryCharge>>,
     inflight: HashMap<CacheKey, Arc<Flight>>,
     tick: u64,
     bucket: Bucket,
     compilations: u64,
     evictions: u64,
     limit_triggered: u64,
+}
+
+impl Cache {
+    fn remove(&mut self, k: &CacheKey) -> bool {
+        let Some(e) = self.map.remove(k) else { return false };
+        self.bytes -= e.bytes;
+        if let Some(c) = &self.charge {
+            c.release(e.bytes);
+        }
+        true
+    }
+
+    fn clear(&mut self) {
+        if let Some(c) = &self.charge {
+            c.release(self.bytes);
+        }
+        self.bytes = 0;
+        self.map.clear();
+    }
+
+    /// Evicts the least recently used entry: `false` when none is left.
+    fn evict_lru(&mut self) -> bool {
+        let Some(k) = self.map.iter().min_by_key(|(_, e)| e.last_used).map(|(k, _)| k.clone()) else { return false };
+        self.remove(&k);
+        self.evictions += 1;
+        true
+    }
+}
+
+impl Drop for Cache {
+    fn drop(&mut self) {
+        self.clear();
+    }
 }
 
 /// Compilation statistics (`GET _nodes/stats/script`).
@@ -203,6 +268,8 @@ impl Engine {
             settings: Mutex::new(settings),
             cache: Mutex::new(Cache {
                 map: HashMap::new(),
+                bytes: 0,
+                charge: None,
                 inflight: HashMap::new(),
                 tick: 0,
                 bucket: Bucket { tokens, last: StdInstant::now() },
@@ -215,6 +282,24 @@ impl Engine {
 
     pub fn settings(&self) -> Settings {
         self.settings.lock().unwrap().clone()
+    }
+
+    /// Charges the cached scripts to `charge` from now on (what is cached already moves there).
+    pub fn charge_to(&self, charge: Arc<dyn MemoryCharge>) {
+        let mut c = self.cache.lock().unwrap();
+        while c.bytes > 0 && !charge.try_reserve(c.bytes) {
+            if !c.evict_lru() {
+                break;
+            }
+        }
+        if let Some(old) = c.charge.replace(charge) {
+            old.release(c.bytes);
+        }
+    }
+
+    /// What the cached scripts hold.
+    pub fn cache_bytes(&self) -> u64 {
+        self.cache.lock().unwrap().bytes
     }
 
     /// Replaces the settings (dynamic cluster settings). Compiled scripts stay cached unless a
@@ -232,8 +317,8 @@ impl Engine {
         *cur = s.clone();
         drop(cur);
         let mut c = self.cache.lock().unwrap();
-        if recompile || s.cache_max_size < c.map.len() {
-            c.map.clear();
+        if recompile || s.cache_max_size < c.map.len() || s.cache_max_bytes < c.bytes {
+            c.clear();
         }
         if rate_changed {
             c.bucket = Bucket { tokens: s.max_compilations_rate.map(|(n, _)| n as f64).unwrap_or(0.0), last: StdInstant::now() };
@@ -301,7 +386,7 @@ impl Engine {
                 _ => false,
             };
             if expired {
-                c.map.remove(&key);
+                c.remove(&key);
             } else if let Some(e) = c.map.get_mut(&key) {
                 e.last_used = tick;
                 e.accessed = now;
@@ -373,17 +458,29 @@ impl Engine {
         let value = value?;
         let mut c = self.cache.lock().unwrap();
         c.compilations += 1;
-        if settings.cache_max_size == 0 {
+        let bytes = compiled_bytes(src.len(), options);
+        if settings.cache_max_size == 0 || bytes > settings.cache_max_bytes {
             return Ok(value);
         }
-        while c.map.len() >= settings.cache_max_size {
-            // evict the least recently used entry
-            let Some(k) = c.map.iter().min_by_key(|(_, e)| e.last_used).map(|(k, _)| k.clone()) else { break };
-            c.map.remove(&k);
-            c.evictions += 1;
+        // Another thread's compilation of the same key landed first (after an expiry).
+        c.remove(&key);
+        // The least recently used go until the entry fits the count, the bytes and the charge.
+        while c.map.len() >= settings.cache_max_size || c.bytes + bytes > settings.cache_max_bytes {
+            if !c.evict_lru() {
+                break;
+            }
+        }
+        if let Some(charge) = c.charge.clone() {
+            while !charge.try_reserve(bytes) {
+                if !c.evict_lru() {
+                    // No room even alone: used uncached.
+                    return Ok(value);
+                }
+            }
         }
         let tick = c.tick;
-        c.map.insert(key.clone(), CacheEntry { value: value.clone(), last_used: tick, accessed: StdInstant::now() });
+        c.bytes += bytes;
+        c.map.insert(key.clone(), CacheEntry { value: value.clone(), bytes, last_used: tick, accessed: StdInstant::now() });
         Ok(value)
     }
 }
@@ -1030,6 +1127,42 @@ mod tests {
         send_sync::<Engine>();
         send_sync::<Script>();
         send_sync::<Compiled>();
+    }
+
+    /// What compiled scripts hold, measured by the allocator, stays within [`compiled_bytes`].
+    #[test]
+    fn compiled_sizes() {
+        fn held<T>(f: impl FnOnce() -> T) -> (i64, T) {
+            let before = crate::guard::room();
+            let v = f();
+            (before - crate::guard::room(), v)
+        }
+        let settings = Settings::default();
+        // Registries and other lazily built tables, once.
+        compile_on_this_thread("return doc['a'].value * 2 + params.x", Context::Score, &settings).unwrap();
+        Template::compile("{{a}}", &[]).unwrap();
+        crate::expression::Expression::compile("doc['a'].value * 2", Context::Score).unwrap();
+        let body: String = (0..120).map(|i| format!("long v{i} = params.a + {i}; if (v{i} > 10) {{ total += v{i} * 2; }} else {{ total -= v{i}; }}\n")).collect();
+        let large = format!("long total = 0; {body} return total;");
+        let mut rows = Vec::new();
+        for src in ["return 1", "double s = 0; for (int i = 0; i < params.n; i++) { s += doc['v'].value * i; } return s;", large.as_str()] {
+            let (bytes, s) = held(|| compile_on_this_thread(src, Context::Score, &settings).unwrap());
+            rows.push(("painless", src.len(), bytes));
+            drop(s);
+        }
+        let template: String = (0..40).map(|i| format!("{{{{#items}}}}<li>{{{{name{i}}}}} {{{{value{i}}}}}</li>{{{{/items}}}}")).collect();
+        for src in ["{{a}}", template.as_str()] {
+            let (bytes, t) = held(|| Template::compile(src, &[]).unwrap());
+            rows.push(("mustache", src.len(), bytes));
+            drop(t);
+        }
+        let (bytes, e) = held(|| crate::expression::Expression::compile("doc['a'].value * 2 + ln(doc['b'].value) / 3", Context::Score).unwrap());
+        rows.push(("expression", 41, bytes));
+        drop(e);
+        for (lang, len, bytes) in rows {
+            println!("{lang} {len} B of source: {bytes} B held ({} B estimated)", compiled_bytes(len, &[]));
+            assert!(bytes as u64 <= compiled_bytes(len, &[]), "{lang} {len}: {bytes}");
+        }
     }
 
     #[test]

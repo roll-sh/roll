@@ -4837,6 +4837,17 @@ impl Apps {
         let live = self.lives.lock().get(&env_key(service, env)).cloned();
         let by_instance = live.map(|l| l.by_instance()).unwrap_or_default();
         out.insert("by_instance", serde_json::to_value(by_instance).expect("JSON"));
+        // Its volume over time (Railway's and Render's disk charts), hourly, with when it'd be
+        // full at its last week's pace.
+        let svc = { let sid = service.to_string(); self.db(move |s| s.service(&sid)).await? };
+        if let Some(vol) = svc.run.volume.as_ref() {
+            let (sid, e, from) = (service.to_string(), env.to_string(), (now_min - minutes.max(7 * 24 * 60)) / 60);
+            let points = self.db(move |s| s.volume_hours(&sid, &e, from)).await?;
+            let size = vol.size_gb as u64 * (1 << 30);
+            let full_in_days = volume_full_in_days(&points, size, now_min / 60);
+            let shown: Vec<Value> = points.iter().filter(|(h, _)| *h * 60 >= since).map(|(h, b)| json!({ "hour": h, "bytes": b })).collect();
+            out.insert("volume", json!({ "size_gb": vol.size_gb, "points": shown, "full_in_days": full_in_days }));
+        }
         Ok(serde_json::to_value(out).expect("JSON"))
     }
 
@@ -5053,5 +5064,39 @@ mod fingerprint_tests {
         run.alerts.error_pct = 10;
         // A nested setting counts alone: a sibling roll adds later doesn't change this.
         assert_eq!(set_only(&run, &Run::default()), json!({"memory_mb": 1024, "alerts": {"error_pct": 10}}));
+    }
+}
+
+/// When a volume growing at its last week's pace (a least-squares line through its hourly sizes)
+/// would be full: in days, None while it isn't growing or with under a day of points.
+fn volume_full_in_days(points: &[(i64, u64)], size: u64, now_hour: i64) -> Option<f64> {
+    let week: Vec<(f64, f64)> = points.iter().filter(|(h, _)| *h > now_hour - 7 * 24).map(|(h, b)| (*h as f64, *b as f64)).collect();
+    if week.len() < 24 {
+        return None;
+    }
+    let n = week.len() as f64;
+    let (mx, my) = (week.iter().map(|p| p.0).sum::<f64>() / n, week.iter().map(|p| p.1).sum::<f64>() / n);
+    let slope = week.iter().map(|p| (p.0 - mx) * (p.1 - my)).sum::<f64>() / week.iter().map(|p| (p.0 - mx).powi(2)).sum::<f64>();
+    let last = week.last()?.1;
+    // Already full: now.
+    if last >= size as f64 {
+        return Some(0.0);
+    }
+    (slope.is_finite() && slope > 0.0).then(|| ((size as f64 - last) / slope / 24.0 * 10.0).round() / 10.0)
+}
+
+#[cfg(test)]
+mod volume_tests {
+    #[test]
+    fn a_growing_volume_says_when_its_full() {
+        // 1 GiB a day on a 10 GiB volume, at about 4 GiB after two days: six days to go.
+        let gib = 1u64 << 30;
+        let points: Vec<(i64, u64)> = (0..48).map(|h| (1000 + h, 2 * gib + gib * h as u64 / 24)).collect();
+        let d = super::volume_full_in_days(&points, 10 * gib, 1047).unwrap();
+        assert!((d - 6.0).abs() < 0.2, "{d}");
+        let flat: Vec<(i64, u64)> = (0..48).map(|h| (1000 + h, gib)).collect();
+        assert_eq!(super::volume_full_in_days(&flat, 10 * gib, 1047), None);
+        assert_eq!(super::volume_full_in_days(&points[..10], 10 * gib, 1047), None, "under a day of points");
+        assert_eq!(super::volume_full_in_days(&points, 2 * gib, 1047), Some(0.0), "already full");
     }
 }

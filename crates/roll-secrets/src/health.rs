@@ -27,6 +27,18 @@ pub enum Issue {
     /// checks and sandboxes that read it in the last 90 days. `key` is empty. Never changed for
     /// the project: protecting it is the admin's call (the dashboard's "Protect production").
     ProductionUnprotected,
+    /// Someone who may no longer back the project up took a backup of it in its history
+    /// (`history_days`, else 90 days) that carried registrations' keys (a CA's, a vendor's
+    /// credential, a DNS token): they can restore those anywhere. `key` is the person, `detail`
+    /// what each backup carried and what to do (re-issue a CA, rotate a credential); `environment`
+    /// is empty. Only for the project's admins. Gone once those backups are older than its history.
+    BackupLeft,
+    /// The project is below roll secrets' policy (guardrails.rs), as it was before the policy or
+    /// a floor was raised: nothing is rewritten. `detail` says the floor and how far it is:
+    /// `production` (`key` empty), `leaks.rotate` (`environment` and `key` empty), or a sync of
+    /// a kind the policy leaves out, or storing a cloud key under `no_stored_cloud_keys` (`key`
+    /// the sync's id, which then isn't `stored_cloud_key` too).
+    OffPolicy,
     /// Its value stopped working outside roll. A SaaS rotator's registered credential too (`key`
     /// its name, `environment` empty): roll can't issue or revoke its keys any more.
     Expired,
@@ -220,6 +232,28 @@ impl Secrets {
         {
             let detail = self.production_reach(project, now)?;
             out.push(Finding { issue: Issue::ProductionUnprotected, environment: e.slug.clone(), path: "/".into(), key: String::new(), detail, owner: None, decoy: None });
+        }
+        if caller.allows(Action::Admin, &Scope::whole(project)) {
+            out.extend(self.backups_left(project, now)?);
+        }
+        // How far the project is from roll secrets' policy.
+        let floors = self.floors()?;
+        if let Some(n) = floors.production_approvals
+            && let Some(e) = envs.iter().find(|e| e.slug == crate::PRODUCTION && e.kind == Kind::Standard)
+            && (!e.protected || e.approvals < n)
+            && caller.allows(Action::Read, &Scope::env(project, &e.slug))
+        {
+            let has = if e.protected { format!("{} approval{}", e.approvals, if e.approvals == 1 { "" } else { "s" }) } else { "no protection".into() };
+            let detail = format!("roll secrets' policy keeps production protected with at least {n} approval{}; it has {has}", if n == 1 { "" } else { "s" });
+            out.push(Finding { issue: Issue::OffPolicy, environment: e.slug.clone(), path: "/".into(), key: String::new(), detail, owner: None, decoy: None });
+        }
+        if floors.leaks_rotate == Some(crate::leaks::LeakRotate::Managed) && self.leak_rotate(project)? != crate::leaks::LeakRotate::Managed && caller.allows(Action::Read, &Scope::whole(project)) {
+            let detail = "roll secrets' policy keeps leaks.rotate managed; it's off, so a leaked managed key isn't rotated".to_string();
+            out.push(Finding { issue: Issue::OffPolicy, environment: String::new(), path: "/".into(), key: String::new(), detail, owner: None, decoy: None });
+        }
+        if floors.no_breakglass && caller.allows(Action::Read, &Scope::whole(project)) && !self.breakglass(project)?.is_empty() {
+            let detail = "roll secrets' policy allows no break glass; this project's breakglass list names someone (it's refused at the hook either way)".to_string();
+            out.push(Finding { issue: Issue::OffPolicy, environment: String::new(), path: "/".into(), key: String::new(), detail, owner: None, decoy: None });
         }
         let mut have: HashSet<(String, String, String)> = HashSet::new();
         for (env_id, path, key, fp, link, refs, updated_at, expires_at, weak, public) in &rows {
@@ -437,12 +471,24 @@ impl Secrets {
             })
         })?;
         for (env, path, id, kind, target) in all {
-            let target: serde_json::Value = serde_json::from_str(&target).unwrap_or_default();
-            let Some((instead, keys)) = self.syncs.get(&kind).ok().and_then(|t| Some((t.stored_cloud_key(&target)?, t.credentials(&target)))) else { continue };
-            if caller.allows(Action::Read, &Scope::at(project, &env, &path)) {
-                let detail = format!("{kind} sync signs in with a cloud key stored in roll ({}): {instead}, and delete the key (\"Syncing without a cloud key\")", keys.join(", "));
-                out.push(Finding { issue: Issue::StoredCloudKey, environment: env, path, key: id, detail, owner: None, decoy: None });
+            if !caller.allows(Action::Read, &Scope::at(project, &env, &path)) {
+                continue;
             }
+            let Ok(t) = self.syncs.get(&kind) else { continue };
+            if let Some(kinds) = floors.sync_kinds.as_ref().filter(|ks| !t.internal() && !ks.contains(&kind)) {
+                let allowed = if kinds.is_empty() { "none".to_string() } else { kinds.join(", ") };
+                let detail = format!("{kind} sync: roll secrets' policy allows only these sync kinds ({allowed})");
+                out.push(Finding { issue: Issue::OffPolicy, environment: env.clone(), path: path.clone(), key: id.clone(), detail, owner: None, decoy: None });
+            }
+            let target: serde_json::Value = serde_json::from_str(&target).unwrap_or_default();
+            let Some(instead) = t.stored_cloud_key(&target) else { continue };
+            let keys = t.credentials(&target).join(", ");
+            let (issue, detail) = if floors.no_stored_cloud_keys {
+                (Issue::OffPolicy, format!("{kind} sync signs in with a cloud key stored in roll ({keys}), which roll secrets' policy rules out: {instead}, and delete the key (\"Syncing without a cloud key\")"))
+            } else {
+                (Issue::StoredCloudKey, format!("{kind} sync signs in with a cloud key stored in roll ({keys}): {instead}, and delete the key (\"Syncing without a cloud key\")"))
+            };
+            out.push(Finding { issue, environment: env, path, key: id, detail, owner: None, decoy: None });
         }
         if caller.allows(Action::Read, &Scope::whole(project)) {
             for (env, path, id, name) in identities {
@@ -516,7 +562,33 @@ impl Secrets {
 }
 
 /// 2027-03-31 (UTC).
-fn chrono_day(ms: i64) -> String {
+impl Secrets {
+    /// [`Issue::BackupLeft`]: one finding per person who took backups carrying registrations' keys
+    /// in the project's history and may no longer back it up, as they are now.
+    fn backups_left(&self, project: &str, now: i64) -> Result<Vec<Finding>> {
+        let since = now - crate::backup::taken_days(self.history_days(project)?) * 86_400_000;
+        let mut by: BTreeMap<String, (i64, BTreeSet<String>)> = BTreeMap::new();
+        for t in self.backups_taken(project, since, false)?.into_iter().filter(|t| !t.registrations.is_empty()) {
+            if let Some(user) = self.reader_person(&t.actor) {
+                let e = by.entry(user).or_default();
+                e.0 = e.0.max(t.at);
+                e.1.extend(t.registrations);
+            }
+        }
+        let mut out = vec![];
+        for (user, (last, carried)) in by {
+            if self.maker_reaches(&user, &[(Action::Admin, Scope::whole(project)), (Action::Reveal, Scope::whole(project))])? {
+                continue;
+            }
+            let advice: Vec<String> = carried.iter().map(|r| crate::backup::advice(r)).collect();
+            let detail = format!("took a backup on {} and may no longer back the project up: {}", chrono_day(last), advice.join("; "));
+            out.push(Finding { issue: Issue::BackupLeft, environment: String::new(), path: "/".into(), key: user, detail, owner: None, decoy: None });
+        }
+        Ok(out)
+    }
+}
+
+pub(crate) fn chrono_day(ms: i64) -> String {
     let days = ms.div_euclid(86_400_000);
     // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
     let z = days + 719_468;

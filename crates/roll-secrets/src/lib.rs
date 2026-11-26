@@ -43,6 +43,7 @@ pub mod deleted_envs;
 pub mod events;
 pub mod exports;
 pub mod find;
+pub mod guardrails;
 mod found;
 pub mod identities;
 pub mod insights;
@@ -89,7 +90,7 @@ mod write;
 pub mod unseal;
 pub mod validity;
 
-pub use access::{Action, Approval, Caller, Chained, Minted, People, Person, Scope, Step, Workloads, PREVIEWS};
+pub use access::{Action, Approval, Caller, ChainState, Chained, Minted, People, Person, Scope, Step, Workloads, PREVIEWS};
 pub use api::router;
 pub use crypto::{Keyring, Value};
 pub use audit::{AuditEntry, AuditFilter, VerifyQuery};
@@ -114,7 +115,7 @@ pub use sweep::{Lease, Swept};
 pub use sinks::{Deliver, NewSink, Sink};
 pub use notifications::{Channel, NewNotification, Notification, Notifier};
 pub use syncs::{NewSync, Push, SecretSync, SyncField, SyncKind, SyncTarget, Syncs};
-pub use write::{Applied, Batch, Change, ItemDiff, Op, Promote, Rollback, SecretType, Written};
+pub use write::{Applied, Batch, Change, ItemDiff, Op, Promote, Rollback, SecretType, SlotNow, Written};
 
 use code_sql::{Db, OptionalExtension, Target};
 use std::sync::Arc;
@@ -628,6 +629,9 @@ impl Secrets {
         db.add_column("projects", "leak_rotate", "TEXT")?;
         db.ensure_schema(leaks::SCHEMA)?;
         db.ensure_schema(leaks::SCAN_COUNTS_SCHEMA)?;
+        db.ensure_schema(guardrails::SCHEMA)?;
+        // Who may push past a pre-receive hook (`breakglass`, leaks.rs): a JSON list; NULL is no one.
+        db.add_column("projects", "breakglass", "TEXT")?;
         // The key a leak rotation was found by (at most one an hour per key), and a rotation
         // request's leaked credential and what applying it did instead of rotating.
         db.add_column("leak_rotations", "path", "TEXT")?;
@@ -775,6 +779,11 @@ impl Secrets {
         }
         db.ensure_schema(outside::SCHEMA)?;
         db.ensure_schema(backup_schedule::SCHEMA)?;
+        // Whether a schedule's backups carry registrations' keys (its maker isn't a token), and an
+        // incident's pause (backup_schedule.rs).
+        db.add_column("backup_schedules", "registrations", "INTEGER NOT NULL DEFAULT 1")?;
+        db.add_column("backup_schedules", "paused_at", "INTEGER")?;
+        db.add_column("backup_schedules", "paused_why", "TEXT")?;
         // A rotation's new admin URL, kept until the server took it (outside.rs).
         db.add_column("outside_dbs", "url_next", "BLOB")?;
         db.add_column("outside_dbs", "url_next_at", "INTEGER")?;
@@ -838,14 +847,21 @@ impl Secrets {
                         code_sql::params![project, sealed, now],
                     )?;
                     if n == 1 {
+                        // Born at roll secrets' policy (guardrails.rs).
+                        let floors = guardrails::read(c)?;
                         for (i, (slug, name)) in DEFAULT_ENVIRONMENTS.iter().enumerate() {
                             let e = envs::insert(c, project, slug, name, i as i64, envs::Kind::Standard, None, &Default::default(), None, now)?;
                             // Protected from the start, so developers' default, checks, sandboxes
-                            // and untrusted previews never reach it; no approvals, so writes stay
-                            // direct for whoever may write until someone asks for them.
+                            // and untrusted previews never reach it; no approvals unless the
+                            // policy asks, so writes stay direct for whoever may write until
+                            // someone asks for them.
                             if *slug == PRODUCTION {
-                                c.execute("UPDATE environments SET protected = 1, approvals = 0 WHERE id = ?", [&e.id])?;
+                                let approvals = floors.born_approvals().unwrap_or(0);
+                                c.execute("UPDATE environments SET protected = 1, approvals = ? WHERE id = ?", code_sql::params![approvals, e.id])?;
                             }
+                        }
+                        if floors.leaks_rotate == Some(leaks::LeakRotate::Managed) {
+                            c.execute("UPDATE projects SET leak_rotate = 'managed' WHERE project_id = ?", [project])?;
                         }
                     }
                     Ok::<_, Error>(c.query_row("SELECT dek FROM projects WHERE project_id = ?", [project], |r| r.get::<_, String>(0))?)

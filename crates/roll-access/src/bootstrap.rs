@@ -31,7 +31,11 @@ impl Access {
     pub fn redeem(&self, secret: &str, from: ChainSecret, ip: Option<std::net::IpAddr>, hours: u32) -> Result<Presented<Issued>> {
         let out = self.store.redeem(secret, from, ip, hours)?;
         match &out {
-            Presented::Live(i) => self.chain_audit(&i.grant, &i.chain, if from == ChainSecret::Bootstrap { "exchanged" } else { "refreshed" }, "allow", 201, None),
+            Presented::Live(i) => {
+                let step = if from == ChainSecret::Bootstrap { "exchanged" } else { "refreshed" };
+                let retried = i.retried.then(|| "a retry within its grace (the first answer was lost): the unanswered credential is spent".to_string());
+                self.chain_audit(&i.grant, &i.chain, step, "allow", 201, retried)
+            }
             Presented::Reused { chain } => self.reused(chain),
         }
         Ok(out)

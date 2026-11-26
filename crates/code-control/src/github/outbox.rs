@@ -53,6 +53,14 @@ pub(crate) enum Job {
     Thread { thread: String },
     /// A pull request's preview: its comment, commit status and deployment.
     Preview { change: String },
+    /// A push to GitHub checked for roll secrets' values: its `roll secrets` check run
+    /// (`push_scan`).
+    PushScan {
+        r#ref: String,
+        before: Option<String>,
+        after: String,
+        pusher: Option<String>,
+    },
 }
 
 impl Job {
@@ -64,6 +72,7 @@ impl Job {
             Job::Review { .. } => "review",
             Job::Thread { .. } => "thread",
             Job::Preview { .. } => "preview",
+            Job::PushScan { .. } => "push_scan",
         }
     }
 }
@@ -136,8 +145,13 @@ pub(crate) fn queue(c: &Conn<'_>, r: &RepoRow, kind: &str, data: &Value) -> code
         return Ok(0);
     }
     let Some(job) = job_for(c, kind, data)? else { return Ok(0) };
-    let payload = serde_json::to_string(&job).unwrap_or_default();
-    let target = target(&r.id);
+    queue_job(c, &r.id, &job)
+}
+
+/// Inside a write: `job` for repo `repo_id`'s GitHub, unless the same one is waiting untaken.
+pub(crate) fn queue_job(c: &Conn<'_>, repo_id: &str, job: &Job) -> code_sql::Result<usize> {
+    let payload = serde_json::to_string(job).unwrap_or_default();
+    let target = target(repo_id);
     let now = crate::db::now_ms();
     let waiting = c.query_row(
         "SELECT EXISTS (SELECT 1 FROM review_deliveries WHERE app_id = ? AND payload = ? AND state = 'pending' AND attempts = 0 AND next_at <= ?)",
@@ -206,10 +220,10 @@ pub(crate) async fn send(code: &Code, d: &DeliveryRow) -> Result<(), Failure> {
     }
     let lock = hub.outbox_locks.lock().entry(repo_id.to_string()).or_default().clone();
     let _one = lock.lock().await;
-    code_github::impatiently(run(code, &hub, job)).await.map_err(Failure::from)
+    code_github::impatiently(run(code, &hub, repo_id, job)).await.map_err(Failure::from)
 }
 
-async fn run(code: &Code, hub: &Hub, job: Job) -> crate::Result<()> {
+async fn run(code: &Code, hub: &Hub, repo_id: &str, job: Job) -> crate::Result<()> {
     match job {
         Job::PrLanded { change } => match code.db.change(&change)? {
             Some(_) => super::notify::change_landed(code, hub, &code.change_or_404(&change)?).await,
@@ -235,6 +249,7 @@ async fn run(code: &Code, hub: &Hub, job: Job) -> crate::Result<()> {
             Some(_) => super::notify::preview(code, hub, &code.change_or_404(&change)?).await,
             None => Ok(()),
         },
+        Job::PushScan { r#ref, before, after, pusher } => super::push_scan::run(code, hub, repo_id, &r#ref, before.as_deref(), &after, pusher.as_deref()).await,
     }
 }
 

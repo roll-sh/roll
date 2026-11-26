@@ -48,6 +48,7 @@ function Body({ env, path, keyName, link, step, setStep, setBusy, onClose }: { e
     ...r.shares.map((s) => `one-time share ${s.note || s.id}, ends ${until(s.expires_at)}`),
     ...r.services.map((s) => `service ${s.name} (${s.environment}) through ${s.through}, ${s.last_deployed_at ? `deployed ${ago(s.last_deployed_at)}` : "not running"}`),
     ...r.sandboxes.map((s) => `sandbox ${s.name} of ${s.owner}, copied by ${s.by} from ${s.from}`),
+    ...r.backups.map((b) => `backups to bucket ${b.bucket}, opened only by ${b.recipient}'s key holder${b.paused_at ? " (paused)" : b.stopped ? " (stopped: its maker may no longer back the project up)" : ""}`),
     ...(r.truncated ? ["and more folders than were followed (256)"] : []),
   ];
   return (
@@ -103,7 +104,7 @@ function Body({ env, path, keyName, link, step, setStep, setBusy, onClose }: { e
             <li key={k.user} className="flex items-center justify-between gap-3 px-3 py-2">
               <ActorMark who={k.user} />
               <span className="shrink-0 text-[11.5px] text-subtle">
-                {k.why === "left" ? "left the project" : k.why === "role" ? "role no longer reveals it" : "account gone"} · read {ago(k.last_at)}
+                {k.why === "left" ? "left the project" : k.why === "role" ? "role no longer reveals it" : "account gone"} · {k.via === "backup" ? "took a backup" : "read"} {ago(k.last_at)}
               </span>
             </li>
           ))}
@@ -128,6 +129,7 @@ export function plan(r: Reach): { what: string; names: string[] }[] {
     ["one-time share expired", "one-time shares expired", r.shares.map((s) => s.note || s.id)],
     ["project no longer sharing the folder", "projects no longer sharing the folder", r.projects],
     ["sync paused", "syncs paused", r.syncs.filter((s) => !s.paused_at).map((s) => `${s.kind} ${summary(s.target)}`.trim())],
+    ["backup schedule paused", "backup schedules paused", r.backups.filter((b) => !b.paused_at).map((b) => `to bucket ${b.bucket}`)],
   ];
   return lines.filter(([, , names]) => names.length > 0).map(([one, many, names]) => ({ what: names.length === 1 ? one : many, names }));
 }
@@ -214,6 +216,8 @@ function Done({ env, path, keyName, link, result: c, onClose }: { env: Environme
       ["Shares expired", c.shares.map((x) => x.name || x.id)],
       ["Projects no longer sharing it", c.projects],
       ["Syncs paused", c.syncs.map((x) => x.name)],
+      ["Backups paused", c.backups.map((x) => x.name)],
+      ["Left in backups: rotate", c.rotate],
     ] as [string, string[]][]
   ).filter(([, n]) => n.length > 0);
   const rotate = async () => {

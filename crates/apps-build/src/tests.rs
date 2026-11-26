@@ -693,6 +693,23 @@ fn an_app_in_a_js_workspace_builds_from_the_repo_root() {
 }
 
 #[test]
+fn a_workspace_package_watches_the_packages_it_depends_on() {
+    let files = [
+        ("package.json", r#"{"private":true,"workspaces":{"packages":["apps/*","packages/**"]}}"#),
+        ("yarn.lock", ""),
+        ("turbo.json", "{}"),
+        ("apps/web/package.json", r#"{"name":"web","dependencies":{"@acme/ui":"workspace:*","react":"19.0.0"}}"#),
+        ("apps/docs/package.json", r#"{"name":"docs","dependencies":{"@acme/ui":"*"}}"#),
+        ("packages/ui/package.json", r#"{"name":"@acme/ui","devDependencies":{"@acme/tokens":"workspace:^"}}"#),
+        ("packages/config/tokens/package.json", r#"{"name":"@acme/tokens"}"#),
+        ("packages/unused/package.json", r#"{"name":"@acme/unused"}"#),
+    ];
+    // Transitively, by name, and nothing it doesn't use (another app, an unused package).
+    assert_eq!(crate::workspace_deps(&tree(&files), "apps/web"), ["packages/config/tokens/**", "packages/ui/**", "package.json", "yarn.lock", "turbo.json"]);
+    assert!(crate::workspace_deps(&tree(&files), "elsewhere").is_empty(), "not a package of the workspace");
+}
+
+#[test]
 fn a_static_build_with_a_client_router_is_a_single_page_app() {
     let vite = |deps: &str| {
         detect(&[(
@@ -936,4 +953,19 @@ fn every_code_starter_has_a_plan() {
         n += 1;
     }
     assert_eq!(n, want.len());
+}
+
+/// A framework's migrations and health route are suggested for a new service, never set: Rails'
+/// db:prepare and /up, Django's migrate, Laravel's migrate --force, Prisma's migrate deploy; a
+/// Procfile's own release wins.
+#[test]
+fn frameworks_suggest_their_migrations_and_health_route() {
+    let rails = detect(&[("Gemfile", "source 'https://rubygems.org'\ngem 'rails', '~> 8.0'\n"), ("Gemfile.lock", ""), ("config.ru", "run Rails.application"), ("bin/rails", ""), ("db/migrate/001_init.rb", ""), ("config/routes.rb", "get \"up\" => \"rails/health#show\"")]);
+    assert_eq!((rails.suggest.pre_deploy.as_deref(), rails.suggest.health_path.as_deref(), rails.release.as_deref()), (Some("bin/rails db:prepare"), Some("/up"), None));
+    let django = detect(&[("requirements.txt", "django==5.1\ngunicorn\n"), ("manage.py", ""), ("shop/settings.py", ""), ("shop/wsgi.py", "")]);
+    assert_eq!(django.suggest.pre_deploy.as_deref(), Some("python manage.py migrate --noinput"));
+    let prisma = detect(&[("package.json", r#"{"name":"api","scripts":{"start":"node index.js"},"dependencies":{"prisma":"6.0.0"}}"#), ("prisma/schema.prisma", ""), ("prisma/migrations/0001/migration.sql", "")]);
+    assert_eq!(prisma.suggest.pre_deploy.as_deref(), Some("npx prisma migrate deploy"));
+    let own = plan(&tree(&[("Gemfile", "gem 'rails'\n"), ("Gemfile.lock", ""), ("config.ru", ""), ("db/migrate/1.rb", ""), ("Procfile", "web: bin/rails server\nrelease: bin/rails db:migrate\n")]), &Overrides { process: Some("web".into()), ..Overrides::default() }).unwrap();
+    assert_eq!((own.release.as_deref(), own.suggest.pre_deploy.as_deref()), (Some("bin/rails db:migrate"), None), "a Procfile's release is its own");
 }

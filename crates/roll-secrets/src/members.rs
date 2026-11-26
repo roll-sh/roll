@@ -5,13 +5,17 @@
 //!
 //! Everything else a person made checks them on every use instead (`maker_reaches`,
 //! `registration_reaches`, `dead_exports`, `Within`, `person_caller`): their tokens, syncs,
-//! identities, gateways, backups, sinks, notify URLs, registered providers, and the folders they
-//! shared.
+//! identities, gateways, backup schedules, sinks, notify URLs, registered providers, and the
+//! folders they shared.
+//!
+//! What can't be called back is said: the backups they took (each holds every value, and the
+//! registrations' keys it carried), in one `backup.left` audit row with what to rotate, and in
+//! health (`backup_left`) until those backups are older than the project's history.
 
 use crate::access::{Action, Caller, Grants, Scope, is_person};
 use crate::caller::Origin;
 use crate::{Result, Secrets, audit};
-use code_sql::params;
+use code_sql::{OptionalExtension, params};
 
 impl Secrets {
     /// `user` lost rights in roll (docs/accounts.md, "Offboarding"): disabled, no longer an admin,
@@ -65,6 +69,57 @@ impl Secrets {
         failed.map_or(Ok(()), Err)
     }
 
+    /// `user` may no longer back `project` up: one `backup.left` audit row (once per backup they
+    /// took) naming the backups they took in the project's history ([`crate::backup::taken_days`])
+    /// and what each carried out, with what to rotate, and that a schedule they set up stops at
+    /// its next run (`maker_reaches`).
+    fn say_backups_left(&self, project: &str, user: &str) -> Result<()> {
+        let since = self.db.now_ms()? - crate::backup::taken_days(self.history_days(project)?) * 86_400_000;
+        let mut taken = vec![];
+        for t in self.backups_taken(project, since, false)? {
+            if self.made_by(&t.actor, user)? {
+                taken.push(t);
+            }
+        }
+        let schedule: Option<String> = self.db.read(|c| c.query_row("SELECT created_by FROM backup_schedules WHERE project_id = ?", [project], |r| r.get(0)).optional())?;
+        let schedule = match schedule {
+            Some(by) => self.made_by(&by, user)?,
+            None => false,
+        };
+        let Some(newest) = taken.iter().map(|t| t.at).max() else {
+            if !schedule {
+                return Ok(());
+            }
+            return self.record_backups_left(project, user, 0, format!("{user} may no longer back the project up: the backup schedule they set up stops at its next run (an admin sets it up again)"));
+        };
+        let mut carried: Vec<String> = taken.iter().flat_map(|t| t.registrations.iter().cloned()).collect();
+        carried.sort();
+        carried.dedup();
+        let n = taken.len();
+        let mut summary = format!("{user} may no longer back the project up and took {n} backup{} since {} (each holds every value of the project)", if n == 1 { "" } else { "s" }, crate::health::chrono_day(since));
+        if !carried.is_empty() {
+            summary.push_str(&format!(": {}", carried.iter().map(|r| crate::backup::advice(r)).collect::<Vec<_>>().join("; ")));
+        }
+        if schedule {
+            summary.push_str("; the backup schedule they set up stops at its next run");
+        }
+        self.record_backups_left(project, user, newest, summary)
+    }
+
+    /// One `backup.left` row about `user`, unless one since `newest` already says it.
+    fn record_backups_left(&self, project: &str, user: &str, newest: i64, summary: String) -> Result<()> {
+        let now = self.db.now_ms()?;
+        let roll = Caller::consumer("roll:members");
+        let keys = vec![user.to_string()];
+        self.db.write(|c| {
+            let said: i64 = c.query_row("SELECT COUNT(*) FROM audit WHERE project_id = ? AND action = 'backup.left' AND at >= ? AND keys = ?", params![project, newest, crate::json(&keys)], |r| r.get(0))?;
+            if said == 0 {
+                audit::record(c, self.keys()?, project, &roll, "backup.left", None, None, &keys, &summary.chars().take(1000).collect::<String>(), now)?;
+            }
+            Ok::<_, crate::Error>(())
+        })
+    }
+
     /// Whether `by` (a person, or a chain of tokens and identities, as roll secrets records who
     /// made or copied something) ends with `user`. A token already gone stands for whoever it
     /// was: its owner, as roll-access still knows it.
@@ -97,6 +152,7 @@ impl Secrets {
             return Ok(());
         }
         crate::metrics::Counters::add(&self.counters.member_rechecks, 1);
+        self.say_backups_left(project, user)?;
         // A key they bound stops counting for its hosts (`binder_reaches`): the project's consumers'
         // interception CAs are checked at their next ask, and one naming such a host ends.
         self.db.write(|c| c.execute(&format!("{}project_id = ?)", crate::intercept::RECHECK_HOLDERS), [project]))?;

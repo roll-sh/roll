@@ -791,3 +791,76 @@ mod level_tests {
         assert!(Level::Warn < Level::Error && Level::Info < Level::Warn);
     }
 }
+
+/// A log search's words (Railway's, Cloud Logging's): every word present (any case), `"a
+/// phrase"` as it's written, `-word` absent, `OR` between alternatives (`timeout OR refused`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Search {
+    /// Alternatives, each its terms: (lowercased text, absent).
+    any: Vec<Vec<(String, bool)>>,
+}
+
+impl Search {
+    /// None for a search with no words.
+    pub fn parse(q: &str) -> Option<Search> {
+        let (mut any, mut terms, mut chars) = (Vec::new(), Vec::new(), q.chars().peekable());
+        while let Some(&c) = chars.peek() {
+            if c.is_whitespace() {
+                chars.next();
+                continue;
+            }
+            // `-word` or `-"phrase"` excludes; `-1`, `--verbose` or `-` alone are what they say.
+            let negate = c == '-' && {
+                let mut ahead = chars.clone();
+                ahead.next();
+                ahead.peek().is_some_and(|n| n.is_alphabetic() || *n == '"')
+            };
+            if negate {
+                chars.next();
+            }
+            let quoted = chars.peek() == Some(&'"');
+            let word: String = if quoted {
+                chars.next();
+                chars.by_ref().take_while(|c| *c != '"').collect()
+            } else {
+                let mut w = String::new();
+                while let Some(&c) = chars.peek().filter(|c| !c.is_whitespace()) {
+                    w.push(c);
+                    chars.next();
+                }
+                w
+            };
+            match word.as_str() {
+                "" => {}
+                // `"OR"` in quotes is the word.
+                "OR" if !negate && !quoted => any.push(std::mem::take(&mut terms)),
+                w => terms.push((w.to_lowercase(), negate)),
+            }
+        }
+        any.push(terms);
+        any.retain(|t: &Vec<(String, bool)>| !t.is_empty());
+        (!any.is_empty()).then_some(Search { any })
+    }
+
+    pub fn matches(&self, text: &str) -> bool {
+        let t = text.to_lowercase();
+        self.any.iter().any(|terms| terms.iter().all(|(w, absent)| t.contains(w.as_str()) != *absent))
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::Search;
+
+    #[test]
+    fn a_search_takes_words_phrases_exclusions_and_or() {
+        let s = |q: &str, t: &str| Search::parse(q).unwrap().matches(t);
+        assert!(s("checkout error", "ERROR in Checkout for order 7") && !s("checkout error", "checkout ok"));
+        assert!(s("\"order 7\"", "for order 7") && !s("\"order 7\"", "order 17 of 7"));
+        assert!(s("error -health", "error saving") && !s("error -health", "error in /health"));
+        assert!(s("--verbose", "ran with --verbose") && s("-1", "exit -1"), "a flag or a number is a word");
+        assert!(s("timeout OR refused", "connection refused") && s("timeout OR refused", "read timeout") && !s("timeout OR refused", "ok"));
+        assert!(s("\"OR\"", "a OR b") && !s("\"OR\"", "a b"), "quoted, OR is a word");
+        assert_eq!(Search::parse("   "), None);
+    }
+}
