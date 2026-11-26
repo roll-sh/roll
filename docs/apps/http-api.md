@@ -756,6 +756,12 @@ type Plan = {
    *  the service sets none. Absent without one, and for a tree's own Dockerfile. A Procfile's `web:`
    *  (`worker:` for a worker) is `start` when the service names none. */
   release?: string;
+  /** What its framework suggests a new service sets, offered by New service, never applied on
+   *  its own: `pre_deploy` its migrations (Rails' db:prepare with db/migrate, Django's migrate,
+   *  Laravel's migrate --force with database/migrations, Prisma's migrate deploy with
+   *  prisma/migrations; none beside a Procfile's release), `health_path` the health route its
+   *  routes declare (Rails' and Laravel's /up). */
+  suggest?: { pre_deploy?: string; health_path?: string };
   /** roll's Next.js adapter is in the image (a Next 16 server, not its own Dockerfile): its
    *  instances share ISR, fetch and "use cache" entries (README, "Next.js across instances"). */
   next_cache?: boolean;
