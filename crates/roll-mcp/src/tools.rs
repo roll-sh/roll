@@ -541,6 +541,11 @@ fn value_request_defaults() -> Value {
     json!({ "ttl_minutes": 1440, "answers": 1 })
 }
 
+/// A search task that completed (its `response` or `error` in the answer).
+fn task_done(v: &Value) -> bool {
+    v["completed"].as_bool() == Some(true)
+}
+
 /// A tasks run that's over (`completed`, `failed` or `canceled`).
 fn run_over(v: &Value) -> bool {
     matches!(v["status"].as_str(), Some("completed" | "failed" | "canceled"))
@@ -1265,6 +1270,26 @@ static TOOLS: &[Tool] = &[
         &[req("cluster", "Cluster"), req("index", "Index"), P { name: "ndjson", ty: Ty::Str, at: At::RawNdjson, required: true, desc: "Action and document lines" }],
     ),
     t("search_delete_by_query", "Delete by query", "Delete every document of an index that matches a query (at most max_docs of them).", "search", "POST", "/v1/search/clusters/{cluster}/indices/{index}/delete_by_query", &[req("cluster", "Cluster"), req("index", "Index"), breq("query", Ty::Obj, "Query DSL"), b("max_docs", Ty::Int, "Delete at most this many"), b("conflicts", Ty::Choice(&["abort", "proceed"]), "On a document changed meanwhile: stop (the default) or go on")]),
+    t(
+        "search_update_by_query",
+        "Update by query",
+        "Index every document of one index that matches a query again, in place, through the index's pipelines and inference: with no script it embeds a semantic_text field added since, or a field a changed mapping now copies to. A script changes each document instead, and can delete (so it needs delete). With wait_for_completion false it answers a task at once; follow it with search_wait_task.",
+        "search",
+        "POST",
+        "/v1/search/clusters/{cluster}/indices/{index}/update_by_query",
+        &[
+            req("cluster", "Cluster id or name"),
+            req("index", "One index, by its name (no pattern or list)"),
+            b("query", Ty::Obj, "Query DSL: the documents to index again (default: every one)"),
+            b("script", Ty::Any, "A Painless script changing each document (it can delete: needs delete)"),
+            b("max_docs", Ty::Int, "At most this many"),
+            b("conflicts", Ty::Choice(&["abort", "proceed"]), "On a document changed meanwhile: stop (the default) or go on"),
+            b("slices", Ty::Any, "Parallel slices: a number, or \"auto\""),
+            q("wait_for_completion", Ty::Bool, "false: answer a task at once (an index past a few thousand documents)"),
+        ],
+    )
+    .open_world(),
+    t("search_wait_task", "Wait for a search task", "A search task (search_update_by_query's) once it completes, or as it is when the timeout passes: completed, and its response (updated, failures) or error. Pass wait_for_completion: true to wait.", "search", "GET", "/v1/search/clusters/{cluster}/tasks/{task}", &[req("cluster", "Cluster id or name"), req("task", "Task id, as search_update_by_query answered it (node:number)"), q("wait_for_completion", Ty::Bool, "true: wait until it completes or the timeout passes"), q("timeout", Ty::Str, "e.g. 30s (at most a minute)")]).until(task_done),
     t("search_query", "Search", "Run an Elasticsearch _search body on an index: a query or a retriever (hybrid search is an rrf or linear retriever over a standard and a knn one), knn, aggregations, highlighting, paging with search_after.", "search", "POST", "/v1/search/clusters/{cluster}/indices/{index}/search", &[
         req("cluster", "Cluster id or name"),
         req("index", "Index"),
@@ -2048,6 +2073,7 @@ mod tests {
             ("search_browser_key_usage", "window", keys(between(include_str!("../../search-control/src/control.rs"), "impl MetricsRange {", "\n}\n"))),
             ("search_analytics", "range", keys(between(include_str!("../../search-control/src/analytics.rs"), "impl Range {", "\n}\n"))),
             ("search_delete_by_query", "conflicts", keys(between(include_str!("../../search-es/src/api/by_query_request.rs"), "fn set_conflicts(", "\n    }\n"))),
+            ("search_update_by_query", "conflicts", keys(between(include_str!("../../search-es/src/api/by_query_request.rs"), "fn set_conflicts(", "\n    }\n"))),
             ("secrets_create_environment", "kind", envs.clone()),
             ("secrets_ensure_environment", "kind", envs),
             ("secrets_get", "type", types.clone()),
