@@ -11,6 +11,18 @@ use std::sync::Arc;
 
 /// How long one converge waits for a roll apps build and rollout before coming back later.
 const DEPLOY_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+/// How long a lookup that found no `pv-` environment for a service (a `roll.toml` service, or
+/// roll apps not on this node) answers that again without listing every roll apps service: its
+/// logs, metrics and usage reads ask often. A deploy here is seen at once (its id is kept first);
+/// one made on another node, within this long.
+const MISS_FOR: std::time::Duration = std::time::Duration::from_secs(30);
+
+type Key = (String, String);
+
+/// Whether `key` was looked up and not found within [`MISS_FOR`] of `now`.
+fn missed_lately(misses: &std::collections::HashMap<Key, std::time::Instant>, key: &Key, now: std::time::Instant) -> bool {
+    misses.get(key).is_some_and(|at| now.saturating_duration_since(*at) < MISS_FOR)
+}
 
 /// roll apps (docs/apps/) over this node's API: a preview is an ephemeral environment
 /// `pv-<id>` of each of the project's services, deployed at the change's commit. roll apps
@@ -25,12 +37,14 @@ pub struct RollApps {
     /// The deployment last started per (preview, service), with what it deploys (`key`): a poll
     /// while it's under way waits on it, and once it's live nothing is started again.
     started: std::sync::Mutex<std::collections::HashMap<(String, String), (String, String)>>,
+    /// (preview, service) → when a lookup last found no `pv-` environment for it ([`MISS_FOR`]).
+    misses: std::sync::Mutex<std::collections::HashMap<Key, std::time::Instant>>,
     pub feedback: bool,
 }
 
 impl RollApps {
     pub fn new(api: Api) -> RollApps {
-        RollApps { api, ids: Default::default(), started: Default::default(), feedback: false }
+        RollApps { api, ids: Default::default(), started: Default::default(), misses: Default::default(), feedback: false }
     }
 
 
@@ -44,12 +58,20 @@ impl RollApps {
     /// when roll apps answered and has none (or roll apps isn't on this node): an error isn't "gone".
     async fn find(&self, preview: &str, name: &str) -> anyhow::Result<Option<(String, String)>> {
         let env = roll_previews::engine::env_name(preview);
-        if let Some(id) = self.ids.lock().unwrap_or_else(|p| p.into_inner()).get(&(preview.to_string(), name.to_string())) {
+        let key = (preview.to_string(), name.to_string());
+        if let Some(id) = self.ids.lock().unwrap_or_else(|p| p.into_inner()).get(&key) {
             return Ok(Some((id.clone(), env)));
         }
+        if missed_lately(&self.misses.lock().unwrap_or_else(|p| p.into_inner()), &key, std::time::Instant::now()) {
+            return Ok(None);
+        }
+        let missed = || {
+            self.misses.lock().unwrap_or_else(|p| p.into_inner()).insert(key.clone(), std::time::Instant::now());
+            Ok(None)
+        };
         let all = match self.api.get("/v1/apps/services").await {
             Ok(a) => a,
-            Err(e) if is_404(&e) => return Ok(None),
+            Err(e) if is_404(&e) => return missed(),
             Err(e) => return Err(e),
         };
         let found = all
@@ -58,8 +80,8 @@ impl RollApps {
             .flatten()
             .find(|x| x["name"] == name && x["environments"].as_array().is_some_and(|e| e.iter().any(|e| e["name"] == env.as_str())))
             .and_then(|svc| s(&svc["id"]));
-        let Some(id) = found else { return Ok(None) };
-        self.ids.lock().unwrap_or_else(|p| p.into_inner()).insert((preview.to_string(), name.to_string()), id.clone());
+        let Some(id) = found else { return missed() };
+        self.ids.lock().unwrap_or_else(|p| p.into_inner()).insert(key, id.clone());
         Ok(Some((id, env)))
     }
 
@@ -145,6 +167,7 @@ impl roll_previews::ports::Apps for RollApps {
     async fn deploy(&self, t: &roll_previews::ports::Target) -> anyhow::Result<Option<String>> {
         let id = self.service_in(&t.project, &t.service).await?.ok_or_else(|| anyhow::anyhow!("roll apps has no service {} in the project", t.service))?;
         self.ids.lock().unwrap_or_else(|p| p.into_inner()).insert((t.preview.clone(), t.service.clone()), id.clone());
+        self.misses.lock().unwrap_or_else(|p| p.into_inner()).remove(&(t.preview.clone(), t.service.clone()));
         let path = Self::env_path(&id, &t.environment);
         // Private like the preview: roll apps' proxy checks the same token (link access), or
         // signs people in through roll's dashboard (team access); the bypass opens either.
@@ -355,6 +378,7 @@ impl roll_previews::ports::Apps for RollApps {
             self.api.delete(&Self::env_path(&id, &env)).await?;
         }
         self.ids.lock().unwrap_or_else(|p| p.into_inner()).remove(&(preview.to_string(), service.to_string()));
+        self.misses.lock().unwrap_or_else(|p| p.into_inner()).remove(&(preview.to_string(), service.to_string()));
         self.started.lock().unwrap_or_else(|p| p.into_inner()).remove(&(preview.to_string(), service.to_string()));
         Ok(())
     }
@@ -1283,6 +1307,17 @@ mod tests {
         assert_ne!(redeploy_key(v1, "dep_1"), redeploy_key(v1, "dep_2"));
         assert_ne!(redeploy_key(v1, "dep_2"), redeploy_key(v2, "dep_2"));
         assert!(redeploy_key(v1, "dep_123456789abc").len() <= 200, "roll apps' limit");
+    }
+
+    /// A lookup that found no `pv-` environment answers that again for a while without listing
+    /// every roll apps service, then asks again.
+    #[test]
+    fn a_missed_lookup_is_remembered_for_a_while() {
+        let (key, t0) = (("pv_1".to_string(), "web".to_string()), std::time::Instant::now());
+        let misses = std::collections::HashMap::from([(key.clone(), t0)]);
+        assert!(missed_lately(&misses, &key, t0 + std::time::Duration::from_secs(5)));
+        assert!(!missed_lately(&misses, &key, t0 + MISS_FOR), "asked again after it");
+        assert!(!missed_lately(&misses, &("pv_1".to_string(), "api".to_string()), t0), "another service's own");
     }
 
     /// What roll set and no longer wants goes; what a person set stays; the list follows; what

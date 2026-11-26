@@ -266,9 +266,11 @@ fn mark_outsiders(code: &Code, runs: &mut Value) {
     }
 }
 
-/// Whether an event's data came from someone who can't push.
+/// Whether an event's data came from someone who can't push: an issue anyone opened
+/// (`trusted_author: false`), or an issue's or a fork's pull request's words carried by a writer's
+/// event (`from_outside`).
 fn outsiders(data: &Value) -> bool {
-    data.get("trusted_author") == Some(&Value::Bool(false))
+    data.get("trusted_author") == Some(&Value::Bool(false)) || data.get("from_outside") == Some(&Value::Bool(true))
 }
 
 #[derive(Deserialize)]

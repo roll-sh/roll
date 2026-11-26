@@ -17,9 +17,10 @@
 //!   it ends, so it can still be revoked. Asking happens in a write; the CA is asked outside it,
 //!   claimed by one node; a revocation the CA didn't take yet is retried by the job, and is
 //!   health's `revoke_failing` meanwhile.
-//! - Renewals people (and tools) ask for are capped per registration: one an hour, three a week
-//!   (a leak's is exempt from the weekly count), so a loop can't spend the CA's limit for the
-//!   names (Let's Encrypt: 5 per exact set a week) and block the renewal a leak needs.
+//! - Renewals people (and tools) ask for, and leaks', are capped per registration: one an hour,
+//!   three a week, so a loop (or a writer reporting each new key) can't spend the CA's limit for
+//!   the names (Let's Encrypt: 5 per exact set a week). The week's first leak renewal comes at
+//!   once whatever the count; a leak held by the cap revokes nothing ([`leak_renewal_held`]).
 //! - The ACME account is one per project and directory, made on the first order (with the
 //!   registration's External Account Binding where the CA asks for one), and kept sealed. Neither it,
 //!   the DNS credential, the EAB key nor the certificate's private key is ever answered, logged or
@@ -137,7 +138,7 @@ const JOB: &str = "roll:rotation";
 const MARGIN_DAYS: u64 = crate::insights::EXPIRING_DAYS as u64;
 const HOUR_MS: i64 = 3_600_000;
 const WEEK_MS: i64 = 7 * 86_400_000;
-/// Asked-for renewals a registration may have in a week (a leak's aside).
+/// Renewals asked for (leaks' too) a registration may have in a week.
 const WEEKLY_RENEWALS: usize = 3;
 /// How long a revocation the CA didn't take waits before the job asks again.
 const REVOKE_RETRY_MS: i64 = 5 * 60_000;
@@ -654,18 +655,52 @@ impl Row {
     }
 }
 
-/// When a renewal asked for now may come instead, if it can't now: one an hour, and three a week
-/// of those not asked for a leak. A leak's is exempt from the weekly count, and held back within
-/// the hour only by another leak's (a person's renewal just before a leak doesn't hold up the
-/// certificate that replaces the leaked key). `asked`: (when, for a leak), the last week's.
+/// When a renewal asked for now may come instead, if it can't now: one an hour and three a week,
+/// leaks' counted with people's. The week's first leak renewal comes at once whatever was asked
+/// (a leaked key must be replaced); a later one is held like any other, so a writer who keeps
+/// reporting the new key can't spend the CA's limit for the names. `asked`: (when, for a leak).
 fn renewal_cap(asked: &[(i64, bool)], now: i64, leak: bool) -> Option<i64> {
-    let hourly = asked.iter().filter(|(at, l)| *at > now - HOUR_MS && (*l || !leak)).map(|(at, _)| at + HOUR_MS).max();
-    if hourly.is_some() || leak {
+    let mut week: Vec<(i64, bool)> = asked.iter().copied().filter(|(at, _)| *at > now - WEEK_MS).collect();
+    if leak && !week.iter().any(|(_, l)| *l) {
+        return None;
+    }
+    let hourly = week.iter().filter(|(at, _)| *at > now - HOUR_MS).map(|(at, _)| at + HOUR_MS).max();
+    if hourly.is_some() {
         return hourly;
     }
-    let mut week: Vec<i64> = asked.iter().filter(|(at, l)| !l && *at > now - WEEK_MS).map(|(at, _)| *at).collect();
     week.sort();
-    (week.len() >= WEEKLY_RENEWALS).then(|| week[week.len() - WEEKLY_RENEWALS] + WEEK_MS)
+    (week.len() >= WEEKLY_RENEWALS).then(|| week[week.len() - WEEKLY_RENEWALS].0 + WEEK_MS)
+}
+
+/// Why a renewal is asked for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Renewal {
+    /// A person's or a tool's (`…/renew`, a linked key's rotation): under [`renewal_cap`].
+    Asked,
+    /// A leaked key's: under [`renewal_cap`] as a leak, and nothing to do while one is on its way.
+    Leak,
+    /// An admin's revocation of the certificate in use (`…/revoke`): their call, never held, but
+    /// counted.
+    Revocation,
+}
+
+/// Whether a leak of key `path`/`key` in environment `env_id`, linked to a public certificate,
+/// can't renew it now ([`renewal_cap`]): its registration's name and when the next may come.
+/// Read in the leak's write before anything is claimed, so a held leak revokes nothing (a revoked
+/// certificate with no replacement is the outage the cap prevents) and answers `already rotated`.
+pub(crate) fn leak_renewal_held(c: &code_sql::Conn<'_>, env_id: &str, path: &str, key: &str, now: i64) -> Result<Option<(String, i64)>> {
+    let link: Option<Option<String>> = c.query_row("SELECT link FROM secrets WHERE env_id = ? AND path = ? AND key = ? AND owner = ''", [env_id, path, key], |r| r.get(0)).optional()?;
+    let Some(link) = link.flatten().and_then(|l| serde_json::from_str::<Link>(&l).ok()).filter(|l| l.kind == KIND) else { return Ok(None) };
+    let row: Option<(String, Option<String>, i64)> = c.query_row("SELECT name, asked_renewals, renew_requested FROM public_certs WHERE id = ?", [&link.r#ref], |x| Ok((x.get(0)?, x.get(1)?, x.get(2)?))).optional()?;
+    // A renewal on its way already brings a new key: revoking the current one spends nothing.
+    let Some((name, asked, 0)) = row else { return Ok(None) };
+    let asked: Vec<(i64, bool)> = asked.and_then(|a| serde_json::from_str(&a).ok()).unwrap_or_default();
+    Ok(renewal_cap(&asked, now, true).map(|next| (name, next)))
+}
+
+/// Why a leak's renewal was held, for its event and its error.
+pub(crate) fn leak_held_why(name: &str, next: i64) -> String {
+    format!("public certificate {name} was already renewed for a leak this week, and each renewal spends the CA's limit for its names (Let's Encrypt issues 5 a week): roll doesn't revoke or renew it again before {} (an admin may still revoke it by hand)", day_time(next))
 }
 
 fn day_time(ms: i64) -> String {
@@ -864,14 +899,15 @@ impl Secrets {
     pub fn renew_public_cert(&self, project: &str, id: &str, caller: &Caller) -> Result<PublicCert> {
         caller.need(Action::Write, &Scope::project(project))?;
         self.project(project)?;
-        self.request_renewal(project, id, caller, false)?;
+        self.request_renewal(project, id, caller, Renewal::Asked)?;
         self.public_cert(project, id)
     }
 
-    /// Ask the job for a new certificate, under [`renewal_cap`]. `urgent`: a leak's (or a
-    /// revocation's) renewal, exempt from the weekly count, and nothing to do while one is
-    /// already on its way (its certificate has a new key too).
-    pub(crate) fn request_renewal(&self, project: &str, id: &str, caller: &Caller, urgent: bool) -> Result<()> {
+    /// Ask the job for a new certificate, under [`renewal_cap`] (an admin's revocation is never
+    /// held). A leak's or a revocation's has nothing to do while one is already on its way (its
+    /// certificate has a new key too).
+    pub(crate) fn request_renewal(&self, project: &str, id: &str, caller: &Caller, why: Renewal) -> Result<()> {
+        let urgent = why != Renewal::Asked;
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             let row: Option<(String, Option<String>, i64)> = c.query_row("SELECT name, asked_renewals, renew_requested FROM public_certs WHERE id = ? AND project_id = ?", [id, project], |x| Ok((x.get(0)?, x.get(1)?, x.get(2)?))).optional()?;
@@ -881,7 +917,10 @@ impl Secrets {
             }
             let mut asked: Vec<(i64, bool)> = asked.and_then(|a| serde_json::from_str(&a).ok()).unwrap_or_default();
             asked.retain(|(at, _)| *at > now - WEEK_MS);
-            if let Some(next) = renewal_cap(&asked, now, urgent) {
+            if let Some(next) = renewal_cap(&asked, now, urgent).filter(|_| why != Renewal::Revocation) {
+                if why == Renewal::Leak {
+                    return Err(Error::TooMany(leak_held_why(&name, next)));
+                }
                 let why = if next - now > HOUR_MS { format!("{WEEKLY_RENEWALS} renewals were asked for this week") } else { "a renewal was asked for within the hour".to_string() };
                 return Err(Error::TooMany(format!("public certificate {name}: {why}, and each spends the CA's limit for these names (Let's Encrypt issues 5 a week): ask again after {}", day_time(next))));
             }
@@ -908,7 +947,7 @@ impl Secrets {
         let revoked = self.revoke_serial(project, id, &serial, reason, caller);
         // A revoked certificate in use is a broken one: its replacement comes at once.
         if which == "current" {
-            self.request_renewal(project, id, caller, true)?;
+            self.request_renewal(project, id, caller, Renewal::Revocation)?;
         }
         revoked?;
         self.public_cert(project, id)
@@ -1246,13 +1285,18 @@ mod tests {
         // One an hour, whoever asked.
         assert_eq!(renewal_cap(&[(now - h / 2, false)], now, false), Some(now + h / 2));
         assert_eq!(renewal_cap(&[(now - h / 2, true)], now, false), Some(now + h / 2));
-        // Three a week, a leak's aside.
+        // Three a week.
         let week = [(now - 5 * 86_400_000, false), (now - 3 * 86_400_000, false), (now - 2 * h, false)];
         assert_eq!(renewal_cap(&week, now, false), Some(now - 5 * 86_400_000 + WEEK_MS));
-        assert_eq!(renewal_cap(&week, now, true), None, "a leak's renewal isn't held by the weekly count");
-        // A leak's isn't held by a person's renewal just before it, but isn't repeatable within the hour.
+        // The week's first leak renewal comes at once, even after a person's just before it.
+        assert_eq!(renewal_cap(&week, now, true), None, "the week's first leak renewal isn't held by the count");
         assert_eq!(renewal_cap(&[(now - h / 2, false)], now, true), None);
+        // Leaks count with the rest: a later one is held by the hour and by the week.
         assert_eq!(renewal_cap(&[(now - h / 2, true)], now, true), Some(now + h / 2));
+        let leaky = [(now - 5 * 86_400_000, true), (now - 3 * 86_400_000, true), (now - 2 * h, false)];
+        assert_eq!(renewal_cap(&leaky, now, true), Some(now - 5 * 86_400_000 + WEEK_MS));
+        assert_eq!(renewal_cap(&leaky, now, false), Some(now - 5 * 86_400_000 + WEEK_MS), "leaks count toward people's cap");
+        assert_eq!(renewal_cap(&leaky[..2], now, true), None, "two of three: one more may come");
     }
 
     #[test]

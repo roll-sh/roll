@@ -115,7 +115,7 @@ impl Engine {
                 slowlog: self.slowlog.clone(),
                 dirty_since: AtomicI64::new(0),
                 last_search: AtomicI64::new(epoch_ms()),
-                request_cache: Default::default(),
+                request_cache: crate::engine::request_cache::ShardCache::new(cluster.request_cache.clone()),
                 log: self.storage.log(&idx.uuid, i),
             }));
         }
@@ -418,14 +418,14 @@ const MAX_PERSISTED_CACHE_KEYS: usize = 256 << 10;
 
 /// A request cache entry an earlier instance of the shard had (its key, kept across an unload):
 /// the next lookup computes it again and counts the hit Elasticsearch, which never restarted,
-/// would count.
+/// would count. It holds the bytes the entry held, which the entry computed again holds.
 pub struct WarmCacheEntry;
 
 impl ShardEngine {
-    /// Keys of the shard's request cache entries (warm ones too), up to
+    /// The shard's request cache entries (warm ones too) as `<key>:<bytes>`, up to
     /// [`MAX_PERSISTED_CACHE_KEYS`] bytes, sorted.
     pub fn request_cache_keys(&self) -> Vec<String> {
-        let mut keys: Vec<String> = self.request_cache.lock().keys().cloned().collect();
+        let mut keys: Vec<String> = self.request_cache.sizes().into_iter().map(|(k, b)| format!("{k}:{b}")).collect();
         keys.sort_unstable();
         let mut total = 0;
         keys.retain(|k| {
@@ -435,13 +435,13 @@ impl ShardEngine {
         keys
     }
 
-    /// Adds [`WarmCacheEntry`]s for `keys` (a fresh shard of a woken index).
+    /// Adds [`WarmCacheEntry`]s for `keys` (a fresh shard of a woken index), each charged what
+    /// its entry held; keys of another form (an older instance's) are left out.
     pub fn warm_request_cache<'a>(&self, keys: impl IntoIterator<Item = &'a str>) {
-        let mut cache = self.request_cache.lock();
         for k in keys {
-            if !cache.contains_key(k) {
-                self.counters.request_cache_bytes.fetch_add(k.len() as u64 + 256, std::sync::atomic::Ordering::Relaxed);
-                cache.insert(k.to_string(), Arc::new(WarmCacheEntry));
+            let Some((key, bytes)) = k.split_once(':').and_then(|(key, b)| Some((key, b.parse::<u64>().ok()?))) else { continue };
+            if crate::search::is_request_cache_key(key) && !self.request_cache.contains(key) {
+                self.request_cache.insert(key.to_string(), Arc::new(WarmCacheEntry), bytes);
             }
         }
     }
@@ -460,6 +460,10 @@ impl IndexEngine {
         use crate::json::Value;
         use std::sync::atomic::Ordering::Relaxed;
         let mut m = self.shard(n).counters.persisted();
+        let evictions = self.shard(n).request_cache_evictions();
+        if evictions > 0 {
+            m.insert("request_cache_evictions".into(), Value::from(evictions as i64));
+        }
         let c = &self.shard(n).counters;
         let translog = c.translog_ops.load(Relaxed);
         // Unless the shard has been inactive for `indices.memory.shard_inactive_time`, when

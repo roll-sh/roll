@@ -922,6 +922,7 @@ Parsing (`code-github/tests`) and the effect in roll against a mock GitHub
 | `push` branch deleted → change closed (unless a PR owns it) | parse + effect | `code-github/tests/events.rs::deleted_refs_and_malformed_payloads`, `github.rs::push_webhooks_for_branches_tags_and_echoes` |
 | `push` tag created / deleted (annotated and lightweight) | parse + effect | `code-github/tests/events.rs::deleted_refs_and_malformed_payloads`, `github.rs::push_webhooks_for_branches_tags_and_echoes` |
 | `push` to a repo that isn't connected → ignored | effect | `github.rs::push_webhooks_for_branches_tags_and_echoes` |
+| `push` branch → roll secrets' check (a value added: a failing `roll secrets` check run naming `file:line KEY (environment)`, the leak reported; taken out: passes) | effect | `github.rs::a_push_to_github_that_adds_a_value_fails_its_check_and_reports_the_leak` |
 | `pull_request.opened` | parse + effect | `code-github/tests/events.rs::every_pull_request_action`, `github.rs::connect_import_webhooks_and_mirror` |
 | `pull_request.opened` from a fork → untrusted | parse + effect | `code-github/tests/github.rs::webhook_events`, `github.rs::automations_hear_github_with_comment_authority_and_forks` |
 | `pull_request.opened` as a draft → draft change | parse + effect | `code-github/tests/events.rs::states_and_accessors`, `github.rs::pull_request_issue_and_installation_actions` |
@@ -1276,7 +1277,8 @@ otherwise. The module docs give the client retry policy and exactly what is asse
 | roll previews: a new preview waits once the project's monthly budget (`max_usd_month`) is spent, and the project's repos are told once, at the highest share passed | `roll-previews/tests/engine.rs::previews_wait_once_the_month_s_budget_is_spent` |
 | roll previews: a preview over its size cap (`max_bytes`) sleeps and stays asleep however it's woken, its roll apps services paused there, until it's under the cap again (live: `scripts/preview-apps.sh`) | `roll-previews/tests/engine.rs::a_preview_over_its_size_cap_stays_asleep` |
 | roll previews: a fork's preview gets its data's structure without rows by default (`data_forks`), a kind that can't be structure-only left out; `same` gives it the project's | `roll-previews/tests/engine.rs::a_forks_preview_gets_the_datas_structure_only` |
-| roll previews: a settled sleeping preview only has its usage read between its hourly whole converges (roll secrets not asked), and converges to sleep over its size cap | `roll-previews/tests/engine.rs::a_sleeping_previews_usage_is_read_without_a_whole_converge` |
+| roll previews: a settled preview, running or asleep, only has its usage read between its hourly whole converges (roll secrets not asked), and converges to sleep over its size cap | `roll-previews/tests/engine.rs::a_settled_previews_usage_is_read_without_a_whole_converge` |
+| roll previews: main's preview takes the stories the open changes keep and it hasn't (a baseline on demand), a story only the change has asked for once per head | `roll-previews/tests/engine.rs::main_takes_the_stories_a_change_has_and_it_hasnt` |
 | roll previews: a preview's browser runs and jobs (screenshots in every engine, stories, `try`, seed/release/teardown) are in its cost by their containers' GiB-hours (`runs_usd`) | `roll-previews/tests/engine.rs::a_previews_browser_runs_are_in_its_cost` |
 | roll previews: a preview's roll apps services' bill (their `pv-` environments' builds, compute and egress) is in its cost, so the budget holds the next preview | `roll-previews/tests/engine.rs::a_previews_roll_apps_bill_is_in_its_cost` |
 | roll previews: a followed log (`…/logs?follow=1`, server-sent events) passes each line on once when polled, and the dashboard reads the events split across chunks; live in `scripts/preview-cost.sh` | `roll-previews/src/engine/requests.rs::a_polled_log_passes_on_only_new_lines`, `apps/dashboard/src/lib/previews-api.test.ts` |
@@ -1998,6 +2000,10 @@ holding a tiny ACP agent that answers `initialize`.
   daemon). It's type-checked and its decisions are the tested modules above, but a window can't
   start on the dev server (no GTK; Xvfb alone isn't enough). Packaging is checked by building the
   Linux AppImage and deb (`pnpm --filter @roll/desktop dist --linux`).
+- **Windows access lists** (`roll-cli/src/sys.rs`'s `acl`: the service's directories under
+  `%ProgramData%` refused when someone else made them or may change them, a token someone else made
+  replaced). Linux CI can't cover them: `roll-cli/src/sys.rs::a_directory_someone_else_owns_or_may_change_isnt_trusted_for_the_machine`
+  runs only in `release-cli.yml`'s `windows-check`, on pull requests that touch roll-cli.
 - **The CLI release workflow** (`.github/workflows/release-cli.yml`) runs only on a `cli-v*` tag;
   its builds are smoke-tested in the workflow itself (`roll --version`, `roll agent --help`), and
   the install script is tested against a local release by `pnpm test:agents`.

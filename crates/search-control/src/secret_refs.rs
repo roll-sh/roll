@@ -57,6 +57,48 @@ pub enum Refused {
     /// It can't be used here at all: not a reference, no project standing for the cluster, no
     /// such key (HTTP 400).
     Invalid(String),
+    /// Not now: a key changed since it was read, or the write would wait for an approval (HTTP
+    /// 409).
+    Conflict(String),
+}
+
+impl Refused {
+    /// Why, whatever the kind.
+    pub fn message(&self) -> &str {
+        match self {
+            Refused::Forbidden(m) | Refused::Invalid(m) | Refused::Conflict(m) => m,
+        }
+    }
+}
+
+/// Where a cluster's admin password goes in roll secrets (`POST …/password` with `secret`): a
+/// key of an environment of the project whose canvas holds the cluster.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreTo {
+    pub environment: String,
+    pub key: String,
+    /// The folder (`/` when absent).
+    #[serde(default = "root")]
+    pub path: String,
+    /// The secret's tags, as the caller chooses (`sensitive` stops reveals and keeps `roll run`).
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    /// The project (`prj_…` or its name), when more than one stands for the cluster.
+    #[serde(default)]
+    pub project: Option<String>,
+}
+
+fn root() -> String {
+    "/".into()
+}
+
+/// What [`ResourceSecrets::store_target`] found: the project, and the key's version then (0: it
+/// doesn't exist yet), which the write is checked against.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoreTarget {
+    pub project: String,
+    pub version: i64,
 }
 
 /// roll secrets for a [`Holder`] (rolld's: `Secrets::bind_ref`, `resolve_as`,
@@ -70,6 +112,16 @@ pub trait ResourceSecrets: Send + Sync {
     async fn resolve(&self, holder: &Holder, reference: &str) -> Result<Revealed, String>;
     /// The digest, under the same check.
     async fn digest(&self, holder: &Holder, reference: &str) -> Result<String, String>;
+    /// Whether `who` may write `value` (the password about to be set) at `to` directly (no change
+    /// request), in the project whose canvas holds the cluster: checked before a rotation, so a
+    /// refused store changes no password.
+    async fn store_target(&self, _who: &Who, _holder: &Holder, _to: &StoreTo, _value: &Revealed) -> Result<StoreTarget, Refused> {
+        Err(Refused::Invalid("roll secrets can't store a cluster's password on this node".into()))
+    }
+    /// Writes `value` at `to` as `who`, if the key is still at `target`'s version.
+    async fn store(&self, _who: &Who, _holder: &Holder, _to: &StoreTo, _target: &StoreTarget, _value: Revealed) -> Result<i64, Refused> {
+        Err(Refused::Invalid("roll secrets can't store a cluster's password on this node".into()))
+    }
 }
 
 /// How many parents a branch's line is followed up (branches of branches).

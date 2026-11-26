@@ -21,6 +21,9 @@ use std::collections::BTreeMap;
 /// reads 1 too.
 const V: u8 = 2;
 
+/// The columns a restore writes as checked, over the archive's ([`Secrets::admit`]).
+type Checked = Vec<(&'static str, Cell)>;
+
 /// Why a restored identity or sync waits: it acts as its maker, and a backup carries none.
 const RESTORED: &str = "restored from a backup: an admin resumes it, and acts as its maker from then on";
 
@@ -70,6 +73,9 @@ pub struct Settings {
     pub validity_checks: bool,
     /// `leaks.rotate`: `managed` or `off`.
     pub leak_rotate: Option<String>,
+    /// Who may push past a pre-receive hook (`breakglass`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub breakglass: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -135,7 +141,8 @@ pub struct Restored {
     pub warnings: Vec<String>,
 }
 
-/// One part of an archive against the live project, by name: never a value.
+/// One part of an archive against the live project, by name: never a value. A token's answer
+/// has counts only: its lists are empty ([`Verified::names`]).
 #[derive(Debug, Default, Serialize)]
 pub struct Diff {
     pub archive: usize,
@@ -146,6 +153,22 @@ pub struct Diff {
     pub extra: Vec<String>,
     /// In both, different: another value, link, key or certificate.
     pub changed: Vec<String>,
+    /// How many are missing, extra and changed: the lists' lengths, or a token's whole answer.
+    pub counts: Counts,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct Counts {
+    pub missing: usize,
+    pub extra: usize,
+    pub changed: usize,
+}
+
+/// A sealed backup, and what it left out for this caller (a token's carries no registration's key).
+#[derive(Debug)]
+pub struct Backup {
+    pub sealed: crate::crypto::Sealed,
+    pub warnings: Vec<String>,
 }
 
 /// What `verify` found (`POST …/backup/verify`).
@@ -160,6 +183,11 @@ pub struct Verified {
     pub registrations: Diff,
     pub identities: Diff,
     pub syncs: Diff,
+    /// What a restore would leave out, and why: a registration or an identity that fails the
+    /// checks making it runs (names, never values). Empty for a token's answer.
+    pub refused: Vec<String>,
+    /// Whether the parts name what differs: only for a person or the operator. A token gets counts.
+    pub names: bool,
     /// The settings that differ (`history_days`, `validity_checks`, `leaks.rotate`).
     pub settings: Vec<String>,
     /// The registrations the archive says it doesn't carry.
@@ -171,31 +199,61 @@ pub struct Verified {
 /// A backup and a verify reach every value of the project, protected environments' and the
 /// registrations' keys included: only a caller who may manage and reveal all of it, as a schedule's
 /// maker must (`backup_schedule.rs`). `admin` alone never includes `reveal`.
-fn need_whole(caller: &Caller, project: &str) -> Result<()> {
+pub(crate) fn need_whole(caller: &Caller, project: &str) -> Result<()> {
     caller.need(Action::Admin, &Scope::whole(project))?;
     caller.need(Action::Reveal, &Scope::whole(project))
 }
+
+/// Whether registrations' keys and credentials (CAs', SSH CAs' and GitHub Apps' private keys, SaaS
+/// and DNS credentials, ACME accounts, rotators' and outside databases' URLs) may leave in this
+/// caller's backup, and per-key answers come back from its verify: a person (their session) or the
+/// operator, never a token, which no route answers them to either.
+pub(crate) fn carries_keys(caller: &Caller) -> bool {
+    caller.principal == "operator" || crate::access::is_person(&caller.principal)
+}
+
+/// The most verifies a caller makes a minute: each reads every value of the project.
+pub const VERIFIES_PER_MINUTE: i64 = 10;
+
+/// Why a token's backup holds a registration by name only.
+const NO_KEYS: &str = "a token's backup carries no registration's key: back it up signed in, or as the operator, to keep it";
 
 impl Secrets {
     /// The project's archive sealed to `recipient` (an X25519 public key). Every value of the
     /// project leaves in it, and its registrations' keys, so it's for a caller who may manage and
     /// reveal all of it ([`need_whole`]), and audited.
-    pub fn backup(&self, project: &str, recipient: &str, caller: &Caller) -> Result<crate::crypto::Sealed> {
+    /// A token's carries the project's registrations by name only ([`carries_keys`]).
+    pub fn backup(&self, project: &str, recipient: &str, caller: &Caller) -> Result<Backup> {
         need_whole(caller, project)?;
-        let archive = self.archive(project)?;
+        self.backup_as(project, recipient, caller, carries_keys(caller))
+    }
+
+    /// [`Secrets::backup`], checked: `keys` says whether registrations leave with their keys. The
+    /// audit row names the registrations that did (its `keys`), for reach and offboarding.
+    pub(crate) fn backup_as(&self, project: &str, recipient: &str, caller: &Caller, keys: bool) -> Result<Backup> {
+        let mut archive = self.archive(project)?;
+        let mut warnings = vec![];
+        if !keys && !(archive.registrations.is_empty() && archive.acme_accounts.is_empty()) {
+            let mut held: Vec<String> = archive.registrations.drain(..).map(|r| registration_label(&r)).collect();
+            held.extend(archive.acme_accounts.drain(..).map(|a| format!("ACME account at {}", a.directory)));
+            warnings.push(format!("left out {}: {NO_KEYS}", held.join(", ")));
+            archive.left_out.extend(held.into_iter().map(|h| format!("{h} ({NO_KEYS})")));
+        }
         let plain = zeroize::Zeroizing::new(serde_json::to_vec(&archive).expect("JSON"));
         let sealed = crate::crypto::seal_to(recipient, &context(project), &plain).map_err(Error::BadRequest)?;
         let n: usize = archive.environments.iter().map(|e| e.secrets.len()).sum();
+        let carried: Vec<String> = archive.registrations.iter().map(registration_label).chain(archive.acme_accounts.iter().map(|a| format!("ACME account at {}", a.directory))).collect();
         let summary = format!(
-            "backed up {} environments, {} keys, {} registrations, {} identities and {} syncs, sealed to a key of the caller's",
+            "backed up {} environments, {} keys, {} registrations{}, {} identities and {} syncs, sealed to a key of the caller's",
             archive.environments.len(),
             n,
             archive.registrations.len(),
+            if keys { " with their keys" } else { " (by name only: a token's)" },
             archive.identities.len(),
             archive.syncs.len()
         );
-        self.audit_now(project, caller, "project.backup", None, None, &[], &summary);
-        Ok(sealed)
+        self.audit_now(project, caller, "project.backup", None, None, &carried, &summary);
+        Ok(Backup { sealed, warnings })
     }
 
     /// The project as an archive, every value and registration key opened (it's sealed or
@@ -268,8 +326,9 @@ impl Secrets {
                 let env = s.columns.remove("env_id").and_then(|id| id.as_str().and_then(|id| slugs.get(id)).cloned()).unwrap_or_default();
                 s.columns.insert("environment".into(), Json::String(env));
             }
-            let settings = c.query_row("SELECT history_days, validity_checks, leak_rotate FROM projects WHERE project_id = ?", [project], |r| {
-                Ok(Settings { history_days: r.get(0)?, validity_checks: r.get::<_, Option<i64>>(1)? == Some(1), leak_rotate: r.get(2)? })
+            let settings = c.query_row("SELECT history_days, validity_checks, leak_rotate, breakglass FROM projects WHERE project_id = ?", [project], |r| {
+                let breakglass = r.get::<_, Option<String>>(3)?.map(|b| crate::from_json(&b)).unwrap_or_default();
+                Ok(Settings { history_days: r.get(0)?, validity_checks: r.get::<_, Option<i64>>(1)? == Some(1), leak_rotate: r.get(2)?, breakglass })
             })?;
             Ok::<_, Error>(Archive {
                 v: V,
@@ -407,7 +466,7 @@ impl Secrets {
             }
         }
         warnings.extend(self.transit_import(project, archive.encryption_keys, caller)?);
-        let (identities, syncs) = self.restore_workloads(project, &archive.identities, &archive.syncs, &dek, &mut warnings)?;
+        let (identities, syncs) = self.restore_workloads(project, &archive.identities, &archive.syncs, &dek, caller, &mut warnings)?;
         let now = self.db.now_ms()?;
         let summary = format!(
             "restored {environments} environments, {secrets} keys, {registrations} registrations, {identities} identities (disabled) and {syncs} syncs (paused) from {}'s backup",
@@ -426,19 +485,19 @@ impl Secrets {
             warnings.push(format!("not in the backup, registered again by hand: {}", archive.left_out.join(", ")));
         }
         let by = if archive.registrations.is_empty() { String::new() } else { self.maker_of(caller)? };
-        let mut admitted: Vec<(&Table, &Row, String)> = vec![];
+        let mut admitted: Vec<(&Table, &Row, String, Checked)> = vec![];
         for r in &archive.registrations {
             let Some(t) = backup_rows::table(&r.kind) else {
                 warnings.push(format!("a {} registration isn't one a backup carries: left out", r.kind.chars().take(40).collect::<String>()));
                 continue;
             };
             match self.admit(t, r) {
-                Ok(()) => admitted.push((t, r, names::new_id(t.prefix, t.len))),
+                Ok(checked) => admitted.push((t, r, names::new_id(t.prefix, t.len), checked)),
                 Err(e) => warnings.push(format!("{} {}: {e}; not restored", t.what, r.text("name"))),
             }
         }
         let settings = archive.settings.clone().filter(|s| {
-            let ok = s.history_days.is_none_or(|d| (1..=3650).contains(&d)) && s.leak_rotate.as_deref().is_none_or(|r| crate::leaks::LeakRotate::parse(r).is_some());
+            let ok = s.history_days.is_none_or(|d| (1..=3650).contains(&d)) && s.leak_rotate.as_deref().is_none_or(|r| crate::leaks::LeakRotate::parse(r).is_some()) && crate::leaks::breakglass_ok(&s.breakglass);
             if !ok {
                 warnings.push("the project's settings aren't ones roll takes: not restored".into());
             }
@@ -450,13 +509,13 @@ impl Secrets {
         let now = self.db.now_ms()?;
         let (moved, kept) = self.db.write(|c| {
             let (mut moved, mut kept) = (BTreeMap::new(), vec![]);
-            for (t, r, id) in &admitted {
+            for (t, r, id, checked) in &admitted {
                 let name = r.text("name");
                 if c.query_row(&format!("SELECT 1 FROM {} WHERE project_id = ? AND name = ?", t.table), [project, name], |_| Ok(())).optional()?.is_some() {
                     kept.push(format!("{} {name}: this project has one by that name, kept as it is", t.what));
                     continue;
                 }
-                backup_rows::import(c, t, project, id, &by, now, r, dek, &[])?;
+                backup_rows::import(c, t, project, id, &by, now, r, dek, checked)?;
                 moved.insert(r.id.clone(), id.clone());
             }
             for a in &archive.acme_accounts {
@@ -472,7 +531,15 @@ impl Secrets {
                     leak_rotate = Some("managed".into());
                     kept.push("leaks.rotate: roll secrets' policy keeps it managed, so it's restored as managed".into());
                 }
-                c.execute("UPDATE projects SET history_days = ?, validity_checks = ?, leak_rotate = ? WHERE project_id = ?", params![s.history_days, s.validity_checks as i64, leak_rotate, project])?;
+                let breakglass = if s.breakglass.is_empty() {
+                    None
+                } else if crate::guardrails::read(c)?.no_breakglass {
+                    kept.push("breakglass: roll secrets' policy allows no break glass, so it's restored as no one".into());
+                    None
+                } else {
+                    Some(serde_json::json!(s.breakglass).to_string())
+                };
+                c.execute("UPDATE projects SET history_days = ?, validity_checks = ?, leak_rotate = ?, breakglass = ? WHERE project_id = ?", params![s.history_days, s.validity_checks as i64, leak_rotate, breakglass, project])?;
             }
             Ok::<_, Error>((moved, kept))
         })?;
@@ -483,37 +550,42 @@ impl Secrets {
 
     /// A registration from an archive checked as registering it would be, without its service:
     /// a name roll takes, the columns its kind needs, its URLs and settings within what roll
-    /// allows. The archive is the caller's own JSON, so nothing in it is taken on trust.
-    fn admit(&self, t: &Table, r: &Row) -> Result<()> {
+    /// allows; a CA's or SSH CA's certificate, chain, name constraints and key as installing or
+    /// making it checks them. The archive is the caller's own JSON, so nothing in it is taken on
+    /// trust. Answers the columns to write as checked (over the archive's). `verify` asks it too.
+    fn admit(&self, t: &Table, r: &Row) -> Result<Checked> {
         let bad = |why: &str| Err(Error::BadRequest(why.to_string()));
         let name = r.text("name");
         if name.is_empty() || name.len() > 64 || !name.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c)) {
             return bad("its name isn't one roll takes");
         }
         let needs = |columns: &[&str]| match columns.iter().find(|c| !r.sealed.contains_key(**c)) {
-            Some(c) => bad(&format!("the backup holds no {c} for it")),
+            Some(c) => Err(Error::BadRequest(format!("the backup holds no {c} for it"))),
             None => Ok(()),
         };
         let json = |column: &str| serde_json::from_str::<Json>(r.text(column)).map_err(|_| Error::BadRequest(format!("its {column} isn't JSON")));
         match t.table {
             "cas" => {
-                let mut policy: crate::pki::Policy = serde_json::from_value(json("policy")?).map_err(|_| Error::BadRequest("its policy isn't one roll reads".into()))?;
-                policy.check()?;
-                if r.text("certificate").is_empty() && r.text("csr").is_empty() {
-                    return bad("it has neither a certificate nor a CSR");
-                }
-                needs(&["private_key"])
+                let policy: crate::pki::Policy = serde_json::from_value(json("policy")?).map_err(|_| Error::BadRequest("its policy isn't one roll reads".into()))?;
+                needs(&["private_key"])?;
+                let unconstrained = r.columns.get("unconstrained").and_then(Json::as_i64).is_some_and(|n| n != 0);
+                let text = |c: &str| Some(r.text(c)).filter(|t| !t.is_empty());
+                let a = crate::pki::admit_archived(text("certificate"), text("csr"), text("chain"), unconstrained, policy, r.sealed["private_key"].expose())?;
+                Ok(vec![
+                    ("certificate", Cell::Text(a.certificate)),
+                    ("chain", a.chain.map_or(Cell::Null, Cell::Text)),
+                    ("policy", Cell::Text(serde_json::to_string(&a.policy).expect("JSON"))),
+                    ("unconstrained", Cell::Int(i64::from(a.unconstrained))),
+                ])
             }
             "ssh_cas" => {
-                json("policy")?;
-                if r.text("public_key").is_empty() {
-                    return bad("it has no public key");
-                }
-                needs(&["private_key"])
+                needs(&["private_key"])?;
+                let policy = crate::ssh::admit_archived(r.text("public_key"), r.text("policy"), r.sealed["private_key"].expose())?;
+                Ok(vec![("policy", Cell::Text(serde_json::to_string(&policy).expect("JSON")))])
             }
             "saas_rotators" => {
                 crate::saas::Vendor::parse(r.text("vendor"), json("target")?)?.checked()?;
-                needs(&["credential"])
+                needs(&["credential"]).map(|_| vec![])
             }
             "public_certs" => {
                 if !self.public_ca()?.allows(r.text("directory")) {
@@ -522,13 +594,14 @@ impl Secrets {
                 if crate::public_certs::DnsProvider::parse(r.text("dns_provider")).is_none() {
                     return bad("its DNS provider isn't one roll takes");
                 }
-                needs(&["dns_credential"])
+                needs(&["dns_credential"]).map(|_| vec![])
             }
             "rotators" => {
                 needs(&["url", "secret"])?;
                 let deliver = self.deliver.as_ref().ok_or_else(|| Error::BadRequest("rotators aren't on this server".into()))?;
                 // Its URL may hold a token: refused without saying what it is.
-                deliver.check(r.sealed["url"].expose()).map_err(|_| Error::BadRequest("its URL isn't one roll calls".into()))
+                deliver.check(r.sealed["url"].expose()).map_err(|_| Error::BadRequest("its URL isn't one roll calls".into()))?;
+                Ok(vec![])
             }
             "outside_dbs" => {
                 if self.outside.is_none() {
@@ -539,39 +612,44 @@ impl Secrets {
                 }
                 needs(&["url"])?;
                 crate::outside::check_url(r.sealed["url"].expose()).map_err(|_| Error::BadRequest("its URL isn't one roll connects to".into()))?;
-                crate::outside::check_ca(r.columns.get("ca").and_then(Json::as_str).map(str::to_string)).map(|_| ())
+                crate::outside::check_ca(r.columns.get("ca").and_then(Json::as_str).map(str::to_string)).map(|_| vec![])
             }
             "github_apps" => {
                 let github = self.github.as_ref().ok_or_else(|| Error::BadRequest("GitHub App tokens aren't on this server".into()))?;
                 github.check(r.text("api_base")).map_err(Error::BadRequest)?;
                 crate::github_app::check_repositories(&serde_json::from_value::<Vec<String>>(json("repositories")?).map_err(|_| Error::BadRequest("its repositories aren't a list".into()))?)?;
                 crate::github_app::check_permissions(&serde_json::from_value(json("permissions")?).map_err(|_| Error::BadRequest("its permissions aren't a map".into()))?)?;
-                needs(&["private_key"])
+                needs(&["private_key"]).map(|_| vec![])
             }
             _ => bad("it isn't one a backup carries"),
         }
     }
 
     /// The archive's identities and syncs, in one write, with no maker: each waits (disabled,
-    /// paused) until an admin resumes it, who becomes its maker then. One that needs what isn't
-    /// here (an environment, a gateway) is a warning.
-    fn restore_workloads(&self, project: &str, identities: &[Row], syncs: &[Row], dek: &crate::crypto::Dek, warnings: &mut Vec<String>) -> Result<(usize, usize)> {
+    /// paused) until an admin resumes it, who becomes its maker then. Each identity is checked
+    /// first as making it is ([`Secrets::admit_archived_identity`]); one that fails, or needs what
+    /// isn't here (an environment, a gateway), is a warning.
+    fn restore_workloads(&self, project: &str, identities: &[Row], syncs: &[Row], dek: &crate::crypto::Dek, caller: &Caller, warnings: &mut Vec<String>) -> Result<(usize, usize)> {
         if identities.is_empty() && syncs.is_empty() {
             return Ok((0, 0));
         }
         let complete = |r: &Row, columns: &[&str]| columns.iter().all(|c| r.columns.get(*c).is_some_and(|v| v.is_string() || v.is_number()));
+        // Outside the write: an issuer's URL is checked through the guarded client.
+        let mut admitted: Vec<(&Row, Checked)> = vec![];
+        for r in identities {
+            match self.admit_archived_identity(project, r, Some(caller)) {
+                Ok(checked) => admitted.push((r, checked)),
+                Err(e) => warnings.push(format!("identity {}: {e}; not restored", r.text("name"))),
+            }
+        }
         let now = self.db.now_ms()?;
         let (made, skipped) = self.db.write(|c| {
             let (mut made, mut skipped) = ((0, 0), vec![]);
             let mut count: i64 = c.query_row("SELECT COUNT(*) FROM identities WHERE project_id = ?", [project], |r| r.get(0))?;
-            for r in identities {
+            for (r, checked) in &admitted {
                 let name = r.text("name");
                 let envs: Vec<String> = serde_json::from_str(r.text("environments")).unwrap_or_default();
-                let why = if !complete(r, &["name", "issuer", "audience", "subject", "claims", "actions", "ttl_minutes"]) {
-                    Some("the backup doesn't hold all of it".to_string())
-                } else if r.columns.get("gateway").is_some_and(|g| !g.is_null()) {
-                    Some("it logs a gateway in, which a backup doesn't carry".into())
-                } else if let Some(e) = envs.iter().find(|e| envs::by_slug(c, project, e).is_err()) {
+                let why = if let Some(e) = envs.iter().find(|e| envs::by_slug(c, project, e).is_err()) {
                     Some(format!("its environment {e} wasn't restored"))
                 } else if count >= crate::identities::IDENTITIES_MAX {
                     Some(format!("a project has at most {} identities", crate::identities::IDENTITIES_MAX))
@@ -583,7 +661,9 @@ impl Secrets {
                     continue;
                 }
                 let id = names::new_id(IDENTITIES.prefix, IDENTITIES.len);
-                backup_rows::import(c, &IDENTITIES, project, &id, "", now, r, dek, &[("disabled_at", Cell::Int(now)), ("disabled_why", Cell::Text(RESTORED.into()))])?;
+                let mut extra = vec![("disabled_at", Cell::Int(now)), ("disabled_why", Cell::Text(RESTORED.into()))];
+                extra.extend(checked.iter().cloned());
+                backup_rows::import(c, &IDENTITIES, project, &id, "", now, r, dek, &extra)?;
                 count += 1;
                 made.0 += 1;
             }
@@ -637,14 +717,90 @@ impl Secrets {
         Ok(made)
     }
 
+    /// An archived identity checked as making it is ([`Secrets::admit_identity`]: the shared-issuer
+    /// rule, the issuer URL, the TTL range, an AWS one's ARN, a machine one's empty fields), its
+    /// address list and scope as they're read (the scope only what `caller` may grant, when it's a
+    /// restore's), and none that logs a gateway in. Answers the columns to write as checked.
+    fn admit_archived_identity(&self, project: &str, r: &Row, caller: Option<&Caller>) -> Result<Checked> {
+        let complete = ["name", "issuer", "audience", "subject", "claims", "actions", "ttl_minutes"].iter().all(|c| r.columns.get(*c).is_some_and(|v| v.is_string() || v.is_number()));
+        if !complete {
+            return Err(Error::BadRequest("the backup doesn't hold all of it".into()));
+        }
+        if r.columns.get("gateway").is_some_and(|g| !g.is_null()) {
+            return Err(Error::BadRequest("it logs a gateway in, which a backup doesn't carry".into()));
+        }
+        let name = r.text("name");
+        if name.trim().is_empty() || name.chars().count() > 64 {
+            return Err(Error::BadRequest("its name isn't one roll takes".into()));
+        }
+        let read = |column: &str| Error::BadRequest(format!("its {column} isn't one roll reads"));
+        let kind = crate::identities::IdentityKind::from_stored(r.columns.get("kind").and_then(Json::as_str)).ok_or_else(|| read("kind"))?;
+        let claims: BTreeMap<String, String> = serde_json::from_str(r.text("claims")).map_err(|_| read("claims"))?;
+        let ttl = r.columns.get("ttl_minutes").and_then(Json::as_i64).ok_or_else(|| read("ttl_minutes"))?;
+        let jwks = Some(r.text("jwks").to_string()).filter(|j| !j.is_empty());
+        let (issuer, audience, subject, jwks, _) = self.admit_identity(project, kind, r.text("issuer").into(), r.text("audience").into(), r.text("subject").into(), &claims, jwks, ttl)?;
+        let list = |column: &str| -> Result<Option<Vec<String>>> {
+            match r.columns.get(column).and_then(Json::as_str) {
+                None => Ok(None),
+                Some(s) => serde_json::from_str(s).map(Some).map_err(|_| read(column)),
+            }
+        };
+        let allowed_ips = crate::caller::allowed(list("allowed_ips")?)?;
+        let actions: Vec<Action> = serde_json::from_str(r.text("actions")).map_err(|_| read("actions"))?;
+        let (environments, paths, actions) = match caller {
+            Some(caller) => crate::caller::scope(project, list("environments")?, list("paths")?, actions, caller)?,
+            None => (list("environments")?, list("paths")?, actions),
+        };
+        let text = |v: Option<String>| v.map_or(Cell::Null, Cell::Text);
+        let json_of = |v: &Option<Vec<String>>| text(v.as_ref().map(|l| serde_json::to_string(l).expect("JSON")));
+        Ok(vec![
+            ("issuer", Cell::Text(issuer)),
+            ("audience", Cell::Text(audience)),
+            ("subject", Cell::Text(subject)),
+            ("jwks", text(jwks)),
+            ("allowed_ips", json_of(&allowed_ips)),
+            ("environments", json_of(&environments)),
+            ("paths", json_of(&paths)),
+            ("actions", Cell::Text(serde_json::to_string(&actions).expect("JSON"))),
+            ("kind", text(kind.stored().map(str::to_string))),
+        ])
+    }
+
     /// Compare an opened archive with the live project, writing nothing: what a restore would
-    /// bring back, what changed since, what the backup doesn't hold. By names and counts only:
-    /// values, keys and certificates are compared here and never answered. A project's admin's,
-    /// as a backup is, and audited (it reads every value to compare).
+    /// bring back, what changed since, what the backup doesn't hold, what a restore would refuse.
+    /// By names and counts only: values, keys and certificates are compared here and never
+    /// answered. For a caller who may back the project up, and audited (it reads every value to
+    /// compare). A token gets counts only, its registrations compared without their keys (it can't
+    /// take those out either: [`carries_keys`]), and [`VERIFIES_PER_MINUTE`] calls a minute, as
+    /// `/scan` limits a scanner: so it can't confirm guesses at what it can't read.
     pub fn verify_backup(&self, project: &str, archive: Archive, caller: &Caller) -> Result<Verified> {
         need_whole(caller, project)?;
         if !(1..=V).contains(&archive.v) {
             return Err(Error::BadRequest(format!("an archive of version {} (this server reads 1 to {V})", archive.v)));
+        }
+        if caller.principal != "operator" {
+            let (calls, _) = self.count_calls(&format!("backup.verify:{}", caller.principal), 1)?;
+            if calls > VERIFIES_PER_MINUTE {
+                self.audit_now(project, caller, "backup.verify", None, None, &[], &format!("refused a verify: over {VERIFIES_PER_MINUTE} a minute"));
+                return Err(Error::TooMany(format!("at most {VERIFIES_PER_MINUTE} verifies a minute: try again in a minute")));
+            }
+        }
+        let names = carries_keys(caller);
+        // What a restore would refuse, as it would: never the identities' scope (that's the restorer's).
+        let mut refused = vec![];
+        if names {
+            for r in &archive.registrations {
+                if let Some(t) = backup_rows::table(&r.kind)
+                    && let Err(e) = self.admit(t, r)
+                {
+                    refused.push(format!("{}: {e}", registration_label(r)));
+                }
+            }
+            for r in &archive.identities {
+                if let Err(e) = self.admit_archived_identity(project, r, None) {
+                    refused.push(format!("identity {}: {e}", r.text("name")));
+                }
+            }
         }
         let live = self.archive(project)?;
         let live_keys: usize = self.db.read(|c| Ok::<_, Error>(c.query_row("SELECT COUNT(*) FROM secrets WHERE project_id = ?", [project], |r| r.get::<_, i64>(0))? as usize))?;
@@ -656,7 +812,7 @@ impl Secrets {
                 .collect()
         };
         let registrations = |a: &Archive| -> BTreeMap<String, [u8; 32]> {
-            let mut out: BTreeMap<String, [u8; 32]> = a.registrations.iter().map(|r| (registration_label(r), fingerprint(&(&r.columns, &r.sealed, &r.certificates)))).collect();
+            let mut out: BTreeMap<String, [u8; 32]> = a.registrations.iter().map(|r| (registration_label(r), fingerprint(&(&r.columns, names.then_some(&r.sealed), &r.certificates)))).collect();
             out.extend(a.encryption_keys.iter().map(|k| (format!("encryption key {}", k.name), fingerprint(&k.versions))));
             out
         };
@@ -682,13 +838,18 @@ impl Secrets {
             if a.leak_rotate.as_deref().unwrap_or("off") != l.leak_rotate.as_deref().unwrap_or("off") {
                 settings.push("leaks.rotate".into());
             }
+            if a.breakglass != l.breakglass {
+                settings.push("breakglass".into());
+            }
         }
         let v = Verified {
-            environments: diff(envs(&archive), envs(&live)),
-            keys: diff(keys(&archive), keys(&live)),
-            registrations: diff(registrations(&archive), registrations(&live)),
-            identities: diff(identities(&archive), identities(&live)),
-            syncs: diff(syncs(&archive), syncs(&live)),
+            environments: diff(envs(&archive), envs(&live), names),
+            keys: diff(keys(&archive), keys(&live), names),
+            registrations: diff(registrations(&archive), registrations(&live), names),
+            identities: diff(identities(&archive), identities(&live), names),
+            syncs: diff(syncs(&archive), syncs(&live), names),
+            refused,
+            names,
             settings,
             left_out: archive.left_out,
             live_keys,
@@ -698,11 +859,7 @@ impl Secrets {
         };
         let summary = format!(
             "checked a backup of {} against the project: {} keys missing, {} changed, {} registrations missing, {} changed (nothing written)",
-            v.project,
-            v.keys.missing.len(),
-            v.keys.changed.len(),
-            v.registrations.missing.len(),
-            v.registrations.changed.len()
+            v.project, v.keys.counts.missing, v.keys.counts.changed, v.registrations.counts.missing, v.registrations.counts.changed
         );
         self.audit_now(project, caller, "backup.verify", None, None, &[], &summary);
         Ok(v)
@@ -728,6 +885,57 @@ impl Secrets {
     }
 }
 
+/// A backup someone took (or, asked for, a verify they ran), as its audit row says: who, when,
+/// and the registrations it carried with their keys (by name: `CA internal`).
+pub(crate) struct Taken {
+    /// Who took it: a person, `operator`, `token:…`; a scheduled one is its schedule's maker's.
+    pub actor: String,
+    pub at: i64,
+    pub registrations: Vec<String>,
+}
+
+/// How far back health and offboarding look for backups someone took: the project's history
+/// (`history_days`), or 90 days where it keeps everything.
+pub(crate) fn taken_days(history_days: Option<i64>) -> i64 {
+    history_days.unwrap_or(90)
+}
+
+/// The most backup rows read for reach, health and offboarding.
+const TAKEN_MAX: i64 = 10_000;
+
+impl Secrets {
+    /// The project's backups since `since` (ms), newest first; with `verifies`, its verifies too
+    /// (they read every value to compare). For reach, health and offboarding: what left, with whom.
+    pub(crate) fn backups_taken(&self, project: &str, since: i64, verifies: bool) -> Result<Vec<Taken>> {
+        let actions = if verifies { "'project.backup', 'backup.verify'" } else { "'project.backup'" };
+        let (rows, schedule): (Vec<(String, i64, String)>, Option<String>) = self.db.read(|c| {
+            let rows = c.query(&format!("SELECT actor, at, keys FROM audit WHERE project_id = ? AND at >= ? AND action IN ({actions}) ORDER BY id DESC LIMIT ?"), params![project, since, TAKEN_MAX], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            let schedule = c.query_row("SELECT created_by FROM backup_schedules WHERE project_id = ?", [project], |r| r.get(0)).optional()?;
+            Ok::<_, Error>((rows, schedule))
+        })?;
+        let scheduled = format!("backup:{project}");
+        Ok(rows
+            .into_iter()
+            .map(|(actor, at, keys)| {
+                let actor = if actor == scheduled { schedule.clone().unwrap_or(actor) } else { actor };
+                Taken { actor, at, registrations: crate::from_json(&keys) }
+            })
+            .collect())
+    }
+}
+
+/// What to do about a registration a backup carried out, now its taker has left: a CA is
+/// re-issued (a new CA, its certificates moved to it), a credential is rotated at its service.
+pub(crate) fn advice(registration: &str) -> String {
+    if registration.starts_with("CA ") || registration.starts_with("SSH CA ") {
+        format!("{registration}: re-issue it (its key left in the backup)")
+    } else if registration.starts_with("ACME account") {
+        format!("{registration}: deactivate it at the CA")
+    } else {
+        format!("{registration}: rotate its credential at its service")
+    }
+}
+
 /// The most of a scheduled backup `latest_backup` reads.
 const LATEST_MAX: usize = 64 << 20;
 
@@ -738,14 +946,14 @@ fn fingerprint(v: &impl Serialize) -> [u8; 32] {
     sha2::Sha256::digest(&*bytes).into()
 }
 
-fn diff(archive: BTreeMap<String, [u8; 32]>, live: BTreeMap<String, [u8; 32]>) -> Diff {
-    Diff {
-        archive: archive.len(),
-        live: live.len(),
-        missing: archive.keys().filter(|k| !live.contains_key(*k)).cloned().collect(),
-        extra: live.keys().filter(|k| !archive.contains_key(*k)).cloned().collect(),
-        changed: archive.iter().filter(|(k, v)| live.get(*k).is_some_and(|l| l != *v)).map(|(k, _)| k.clone()).collect(),
-    }
+/// `archive` against `live`, by name; with `names` false, counts only.
+fn diff(archive: BTreeMap<String, [u8; 32]>, live: BTreeMap<String, [u8; 32]>, names: bool) -> Diff {
+    let missing: Vec<String> = archive.keys().filter(|k| !live.contains_key(*k)).cloned().collect();
+    let extra: Vec<String> = live.keys().filter(|k| !archive.contains_key(*k)).cloned().collect();
+    let changed: Vec<String> = archive.iter().filter(|(k, v)| live.get(*k).is_some_and(|l| l != *v)).map(|(k, _)| k.clone()).collect();
+    let counts = Counts { missing: missing.len(), extra: extra.len(), changed: changed.len() };
+    let named = |l: Vec<String>| if names { l } else { vec![] };
+    Diff { archive: archive.len(), live: live.len(), missing: named(missing), extra: named(extra), changed: named(changed), counts }
 }
 
 fn key_label(env: &str, path: &str, key: &str) -> String {

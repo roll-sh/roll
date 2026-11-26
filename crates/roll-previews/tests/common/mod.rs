@@ -158,6 +158,8 @@ pub struct FakeData {
     pub columns: Mutex<std::collections::HashMap<String, Result<Vec<roll_previews::mask::Column>, roll_previews::ports::Asleep>>>,
     /// Branches put back to a restore point: (the branch, the point's copy).
     pub restored: Mutex<Vec<(String, String)>>,
+    /// A reset makes a new branch with a new id (Redis's), the nth `<parent>~<name>~r<n>`.
+    pub renames_on_reset: AtomicUsize,
 }
 
 impl FakeData {
@@ -177,6 +179,7 @@ impl FakeData {
             columns: Mutex::new(Default::default()),
             branch_now: Mutex::new(None),
             restored: Mutex::new(Vec::new()),
+            renames_on_reset: AtomicUsize::new(0),
         })
     }
 }
@@ -219,7 +222,10 @@ impl Brancher for FakeData {
         Ok(Some(Branched::plain(id)))
     }
     fn restores(&self) -> bool {
-        self.kind == Kind::Postgres
+        matches!(self.kind, Kind::Postgres | Kind::Redis)
+    }
+    fn points_need_their_branch(&self) -> bool {
+        self.kind == Kind::Redis
     }
     async fn restore(&self, _parent: &str, branch: &str, _kept: Option<&str>, point: &str, _name: &str, _mode: Mode) -> anyhow::Result<Option<Branched>> {
         anyhow::ensure!(self.branches.lock().contains(point), "no restore point {point}");
@@ -266,10 +272,16 @@ impl Brancher for FakeData {
     }
     async fn reset(&self, parent: &str, branch: &str, _kept: Option<&str>, name: &str, mode: Mode) -> anyhow::Result<Branched> {
         self.delete(parent, branch, name).await?;
+        if self.renames_on_reset.load(Ordering::SeqCst) > 0 {
+            let id = format!("{parent}~{name}~r{}", self.renames_on_reset.fetch_add(1, Ordering::SeqCst));
+            self.branches.lock().insert(id.clone());
+            return Ok(Branched::plain(id));
+        }
         self.branch(parent, name, mode).await
     }
     async fn delete(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<()> {
-        anyhow::ensure!(branch == format!("{parent}~{name}"), "refusing to delete {branch}: not {parent}'s branch {name}");
+        let own = format!("{parent}~{name}");
+        anyhow::ensure!(branch == own || branch.strip_prefix(&own).is_some_and(|r| r.starts_with("~r")), "refusing to delete {branch}: not {parent}'s branch {name}");
         self.branches.lock().remove(branch);
         Ok(())
     }
@@ -324,6 +336,12 @@ pub struct FakeApps {
     pub metrics: Mutex<HashMap<String, (f64, u64)>>,
     /// What roll apps billed each service's environment this month (None: roll runs it).
     pub spent: Mutex<Option<f64>>,
+    /// Stories a change's run takes besides the Storybook's two (a run with changed paths).
+    pub change_stories: Mutex<Vec<String>>,
+    /// Stories only a change's Storybook has (one it added): a run without changed paths can't take them.
+    pub new_stories: Mutex<Vec<String>>,
+    /// Each run's `stories_first`: (preview, ids).
+    pub stories_first: Mutex<Vec<(String, Vec<String>)>>,
     /// Each hold_down asked: (preview, service, down).
     pub held: Mutex<Vec<(String, String, bool)>>,
     /// Each service's errors, by name.
@@ -546,14 +564,19 @@ impl Apps for FakeApps {
         let revs: Vec<String> = self.deployed.lock().iter().filter(|((p, _), _)| p == preview).map(|(_, r)| r.clone()).collect();
         let api = opts.openapi.as_ref().and_then(|_| revs.iter().find_map(|r| self.api.lock().get(r).cloned()));
         self.shots.lock().push(preview.to_string());
+        if !opts.stories_first.is_empty() {
+            self.stories_first.lock().push((preview.to_string(), opts.stories_first.clone()));
+        }
         self.states.lock().extend(opts.states.iter().map(|s| s.name.clone()));
         let pages = opts
             .pages
             .iter()
             .cloned()
             .chain(opts.browsers.iter().filter(|_| !self.no_browsers.load(Ordering::SeqCst)).map(|b| format!("browser:{b}")))
-            // A Storybook with two stories.
+            // A Storybook with two stories, those asked for first, and a change's own.
             .chain(opts.stories.iter().flat_map(|_| ["story:button--primary".to_string(), "story:button--secondary".to_string()]))
+            .chain(opts.stories.iter().flat_map(|_| opts.stories_first.iter().filter(|i| !self.new_stories.lock().contains(i)).map(|i| format!("story:{i}")).collect::<Vec<_>>()))
+            .chain(opts.stories.iter().filter(|_| !opts.changed.is_empty()).flat_map(|_| self.change_stories.lock().iter().map(|i| format!("story:{i}")).collect::<Vec<_>>()))
             .map(|path| roll_previews::ports::PageShot { path, png: png.clone(), errors: 0, report: Default::default() })
             .collect();
         self.crops_asked.lock().extend(opts.crops.iter().map(|c| c.note.clone()));

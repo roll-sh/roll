@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { matchesTerms, splitFilter } from "./log-where";
+import { matchesTerms, splitFilter, wordsMatch } from "./log-where";
 
 describe("log filters by a line's fields", () => {
   it("splits field terms from words and matches JSON and logfmt as the API does", () => {
@@ -13,5 +13,16 @@ describe("log filters by a line's fields", () => {
     expect(matchesTerms(splitFilter("level:warn user_id:42").terms, "level=warn user_id=42 done")).toBe(true);
     // An address or a time is a word, not a field.
     expect(splitFilter("localhost 127.0.0.1:5432 12:30").where).toBe("");
+  });
+});
+
+describe("wordsMatch", () => {
+  it("reads words as the server's search does", () => {
+    expect(wordsMatch("checkout error", "ERROR in Checkout")).toBe(true);
+    expect(wordsMatch('"order 7"', "order 17 of 7")).toBe(false);
+    expect(wordsMatch("error -health", "error in /health")).toBe(false);
+    expect(wordsMatch("timeout OR refused", "connection refused")).toBe(true);
+    expect(wordsMatch("--verbose", "ran with --verbose")).toBe(true);
+    expect(wordsMatch("", "anything")).toBe(true);
   });
 });

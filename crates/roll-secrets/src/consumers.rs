@@ -275,7 +275,12 @@ impl Secrets {
         let by = self.maker_of(caller)?;
         let r = required(reference)?;
         let project = self.project_for(resource, r.project.as_deref())?;
-        self.may_reveal_for(&project, &r, caller)?;
+        // A bound reference is read as its maker at every use, so an approval for this one request
+        // can't stand in for `reveal`: say so, for a grant whose reveal there is `ask`.
+        self.may_reveal_for(&project, &r, caller).map_err(|e| match e {
+            Refusal::NotAllowed(why) => Refusal::NotAllowed(format!("{why}: binding a roll:// reference needs reveal allowed there, since it's read as you at every use (an approval can't stand in for it)")),
+            e => e,
+        })?;
         let maker = match runtime_env {
             Some(env) if env == r.env => Maker(format!("{by}{RUNTIME}{env}")),
             _ => Maker(by),
@@ -368,8 +373,10 @@ impl Secrets {
         }
     }
 
-    /// The one project whose canvas holds `resource` and stands for it (and is `named`, if given).
-    pub(crate) fn project_for(&self, resource: &ResourceRef, named: Option<&str>) -> Result<String, Refusal> {
+    /// The one project whose canvas holds `resource` and stands for it (and is `named`, if given),
+    /// by `Workspace::trusts`: never just any project whose canvas holds it. A refusal when none (or
+    /// more than one) does.
+    pub fn project_for(&self, resource: &ResourceRef, named: Option<&str>) -> Result<String, Refusal> {
         let who = resource.consumer();
         let ws = |e: roll_workspace::Error| Error::Internal(e.to_string());
         let mut trusting = vec![];

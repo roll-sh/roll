@@ -121,20 +121,28 @@ impl Apps {
         }
     }
 
-    /// The open incidents a check or heartbeat opened that nothing will close any more: its
-    /// check or heartbeat gone, off the page, its environment paused or in maintenance, its
-    /// service deleted. Resolved by the service's owner (anyone's, for a deleted one).
     /// Scheduled maintenances whose window began (now `maintenance`) or ended (`resolved`),
-    /// each said on its page as an update. Run with [`Self::status_sweep`], every minute.
+    /// each said on its page as an update. Run with [`Self::status_sweep`], every minute, on one
+    /// node (`singleton:apps:maintenance`), and each step written only from the state it
+    /// expects, so a node that raced it or a person's update in between makes no second step.
     pub(crate) async fn maintenance_pass(self: &Arc<Self>, now: i64) {
+        if !self.deps.cluster.singleton("apps:maintenance") {
+            return;
+        }
         let Ok(due) = self.db(move |s| s.due_maintenance(now)).await else { return };
         for (project, id, next) in due {
-            let text = if next == "maintenance" { "The scheduled maintenance has begun." } else { "The scheduled maintenance is over." };
-            let _ = self.db(move |s| s.update_incident(&project, Some(&id), None, next, text, now)).await;
-            self.status_cache.forget();
+            let (from, text) = if next == "maintenance" { ("scheduled", "The scheduled maintenance has begun.") } else { ("maintenance", "The scheduled maintenance is over.") };
+            // One that hasn't begun yet and is already over goes straight to resolved.
+            let from = if next == "resolved" { None } else { Some(from) };
+            if self.db(move |s| s.advance_maintenance(&project, &id, from, next, text, now)).await.unwrap_or(false) {
+                self.status_cache.forget();
+            }
         }
     }
 
+    /// The open incidents a check or heartbeat opened that nothing will close any more: its
+    /// check or heartbeat gone, off the page, its environment paused or in maintenance, its
+    /// service deleted. Resolved by the service's owner (anyone's, for a deleted one).
     pub(crate) async fn status_sweep(self: &Arc<Self>, services: &[crate::store::ServiceRow]) {
         let Ok(open) = self.db(|s| s.open_auto_incidents()).await else { return };
         let mut by_project: std::collections::HashMap<String, Vec<String>> = Default::default();
@@ -234,6 +242,14 @@ impl Apps {
     /// `resolved` closes it.
     pub async fn update_incident(self: &Arc<Self>, project: &str, id: &str, body: Value) -> Result<()> {
         let (_, state, text) = incident_fields(&body, false)?;
+        // Under way is a scheduled maintenance's: an incident without a window would say
+        // "Under scheduled maintenance" with nothing to end it.
+        if state == "maintenance" {
+            let (p, i) = (project.to_string(), id.to_string());
+            if !self.db(move |s| s.incident_has_window(&p, &i)).await? {
+                return Err(Error::BadRequest("maintenance is a scheduled maintenance's state: post one with state scheduled, starts_at and ends_at".into()));
+            }
+        }
         let (p, i, at) = (project.to_string(), id.to_string(), code_sql::now_ms());
         match self.db(move |s| s.update_incident(&p, Some(&i), None, &state, &text, at)).await? {
             true => {
@@ -278,6 +294,7 @@ impl Apps {
         let p = project.to_string();
         self.db(move |s| s.delete_status_page(&p)).await?;
         self.status_cache.forget();
+        self.hosts_changed();
         Ok(())
     }
 
@@ -293,6 +310,118 @@ impl Apps {
             return None;
         }
         self.db(move |s| s.status_page_by_slug(&slug)).await.ok().flatten()
+    }
+
+    /// The page whose own domain (`…/status-page/domain`) is `host`, once it checked out.
+    pub(crate) async fn status_page_for_own_host(self: &Arc<Self>, host: &str) -> Option<Page> {
+        let name = host.rsplit_once(':').filter(|(_, p)| p.bytes().all(|b| b.is_ascii_digit())).map_or(host, |(h, _)| h).trim_end_matches('.').to_ascii_lowercase();
+        if name.is_empty() || name.len() > 253 {
+            return None;
+        }
+        self.db(move |s| match s.status_domain_project(&name)? {
+            Some(p) => s.status_page(&p),
+            None => Ok(None),
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    // ── a status page's own domain ──
+
+    /// Where a status page's own domain's CNAME points: its `status-<slug>` name.
+    async fn status_target(self: &Arc<Self>, project: &str) -> Result<String> {
+        let p = project.to_string();
+        let page = self.db(move |s| s.status_page(&p)).await?.ok_or_else(|| Error::NotFound(format!("{project} has no status page")))?;
+        Ok(self.target(&format!("status-{}", page.slug)))
+    }
+
+    /// `GET /v1/apps/projects/{project}/status-page/domain`.
+    pub async fn status_domain(self: &Arc<Self>, project: &str) -> Result<crate::model::Domain> {
+        let p = project.to_string();
+        let (hostname, status, token, error, tls, tls_error, created_at) = self.db(move |s| s.status_domain(&p)).await?.ok_or_else(|| Error::NotFound(format!("{project}'s status page has no domain of its own")))?;
+        Ok(crate::model::Domain {
+            record: self.record(&hostname),
+            target: self.status_target(project).await?,
+            hostname,
+            kind: crate::model::DomainKind::Custom,
+            status,
+            token,
+            error,
+            tls,
+            tls_error,
+            created_at,
+            redirect_to: None,
+            port: None,
+        })
+    }
+
+    /// `POST …/status-page/domain {hostname}` (status.acme.dev): the page answers there too once
+    /// its DNS is verified, as a custom domain's is, with a certificate of its own. One a page (a
+    /// new one replaces it, pending again).
+    pub async fn set_status_domain(self: &Arc<Self>, project: &str, body: Value) -> Result<crate::model::Domain> {
+        self.status_target(project).await?;
+        let host = body.get("hostname").and_then(Value::as_str).ok_or_else(|| Error::BadRequest("hostname is a name like status.acme.dev".into()))?;
+        let mut reserved: Vec<&str> = self.cfg.reserved.iter().map(String::as_str).collect();
+        reserved.push(&self.cfg.domain);
+        let host = crate::model::check_hostname(host, &reserved)?;
+        if host.starts_with("*.") {
+            return Err(Error::BadRequest("a status page's domain is one name, not a wildcard".into()));
+        }
+        let tls = if self.deps.tls.issues() { crate::model::TlsStatus::Pending } else { crate::model::TlsStatus::None };
+        let (p, h) = (project.to_string(), host.clone());
+        self.db(move |s| s.set_status_domain(&p, &h, tls)).await?;
+        self.hosts_changed();
+        self.status_domain(project).await
+    }
+
+    /// `POST …/status-page/domain/verify`: its DNS checked now (the TXT challenge, or the CNAME
+    /// to the page's own name where that name is the project's alone), and its certificate.
+    /// Pending ones are checked every minute too.
+    pub async fn verify_status_domain(self: &Arc<Self>, project: &str) -> Result<crate::model::Domain> {
+        let p = project.to_string();
+        let (host, _, token, ..) = self.db(move |s| s.status_domain(&p)).await?.ok_or_else(|| Error::NotFound(format!("{project}'s status page has no domain of its own")))?;
+        let target = self.status_target(project).await?;
+        let cnames = self.deps.resolver.cname(&host).await;
+        let cname_ok = cnames.contains(&target);
+        let challenge = crate::model::challenge_name(&host);
+        let txts = self.deps.resolver.txt(&challenge).await;
+        let shared = self.cfg.cname_target.is_some();
+        let (status, error) = if txts.contains(&token) || (cname_ok && !shared) {
+            (crate::model::DomainStatus::Active, None)
+        } else {
+            let seen = crate::model::DnsSeen { cnames, txts, host_txts: self.deps.resolver.txt(&host).await, addresses: if cname_ok { Vec::new() } else { self.deps.resolver.addresses(&host).await } };
+            (crate::model::DomainStatus::Pending, Some(crate::model::domain_diagnosis(&host, &target, &challenge, &token, &seen, shared)))
+        };
+        let (p, err) = (project.to_string(), error.clone());
+        self.db(move |s| s.set_status_domain_status(&p, status, err.as_deref())).await?;
+        self.hosts_changed();
+        if status == crate::model::DomainStatus::Active {
+            self.refresh_tls(&host).await;
+        }
+        self.status_domain(project).await
+    }
+
+    /// `DELETE …/status-page/domain`.
+    pub async fn delete_status_domain(self: &Arc<Self>, project: &str) -> Result<()> {
+        let p = project.to_string();
+        if self.db(move |s| s.delete_status_domain(&p)).await?.is_none() {
+            return Err(Error::NotFound(format!("{project}'s status page has no domain of its own")));
+        }
+        self.hosts_changed();
+        Ok(())
+    }
+
+    /// The minute pass's share (`apps:domains`): pending domains checked, active ones' certificates.
+    pub(crate) async fn check_status_domains(self: &Arc<Self>) {
+        let Ok(all) = self.db(|s| s.status_domains()).await else { return };
+        for (project, host, status) in all {
+            if status == crate::model::DomainStatus::Active {
+                self.refresh_tls(&host).await;
+            } else {
+                let _ = self.verify_status_domain(&project).await;
+            }
+        }
     }
 
     /// What a page shows now (each up or down and its days) and its incidents: read again

@@ -1021,7 +1021,25 @@ impl Apps {
                 {
                     log.line(n);
                 }
-                let run = if env.ephemeral { run } else { svc.run.clone() };
+                let mut run = if env.ephemeral { run } else { svc.run.clone() };
+                // No port set: a web service's first deploy takes the one the image exposes
+                // (Fly's), not 8080 for an nginx on 80; later deploys keep what the live one was
+                // served on, so a service that worked on 8080 isn't moved by a new image.
+                if run.port.is_none() && run.kind == RunType::Web {
+                    let live = match env.active.clone() {
+                        Some(a) => self.db(move |s| s.deployment(&a)).await.ok().map(|d| d.run.port),
+                        None => None,
+                    };
+                    match live {
+                        Some(kept) => run.port = kept,
+                        None => {
+                            if let Some(p) = exposed_port(&self.deps.runtime.image_ports(&pinned).await) {
+                                log.line(format!("the image exposes port {p}: it's served there (set a port to choose another)"));
+                                run.port = Some(p);
+                            }
+                        }
+                    }
+                }
                 let bytes = self.deps.runtime.image_bytes(&pinned).await;
                 if let Some(b) = bytes.filter(|b| *b >= 1 << 30) {
                     log.line(format!("the image is {:.1} GB: a slimmer one starts faster each time it's pulled", b as f64 / (1u64 << 30) as f64));
@@ -3673,6 +3691,7 @@ impl Apps {
                     let _ = self.verify_domain(&svc, &env, &d.hostname).await;
                 }
             }
+            self.check_status_domains().await;
         }
     }
 
@@ -4046,4 +4065,25 @@ async fn build_key(job: &BuildJob, dockerfile: &str, builder: &str) -> anyhow::R
         h.update([0]);
     }
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Of an image's exposed TCP ports, the one it's served on: the only one, else a web server's
+/// usual (80, 8080, 3000, 8000), else the lowest.
+fn exposed_port(ports: &[u16]) -> Option<u16> {
+    match ports {
+        [] => None,
+        [one] => Some(*one),
+        many => [80, 8080, 3000, 8000].into_iter().find(|p| many.contains(p)).or_else(|| many.iter().min().copied()),
+    }
+}
+
+#[cfg(test)]
+mod exposed_tests {
+    #[test]
+    fn an_images_port_is_the_one_it_exposes() {
+        assert_eq!(super::exposed_port(&[]), None);
+        assert_eq!(super::exposed_port(&[5678]), Some(5678));
+        assert_eq!(super::exposed_port(&[443, 80]), Some(80), "a web server's usual");
+        assert_eq!(super::exposed_port(&[9090, 9100]), Some(9090));
+    }
 }

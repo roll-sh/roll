@@ -226,7 +226,7 @@ impl Syncs {
 }
 
 /// A sync, as the API shows it.
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct SecretSync {
     pub id: String,
     pub environment: String,
@@ -260,6 +260,34 @@ pub struct SecretSync {
     /// Only in the answer that made it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signing_secret: Option<String>,
+}
+
+/// Never the signing secret.
+impl std::fmt::Debug for SecretSync {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretSync")
+            .field("id", &self.id)
+            .field("environment", &self.environment)
+            .field("path", &self.path)
+            .field("kind", &self.kind)
+            .field("target", &self.target)
+            .field("keys", &self.keys)
+            .field("prefix", &self.prefix)
+            .field("status", &self.status)
+            .field("error", &self.error)
+            .field("last_digest", &self.last_digest)
+            .field("last_synced_at", &self.last_synced_at)
+            .field("synced", &self.synced)
+            .field("signed", &self.signed)
+            .field("created_at", &self.created_at)
+            .field("created_by", &self.created_by)
+            .field("paused_at", &self.paused_at)
+            .field("paused_why", &self.paused_why)
+            .field("remote_id", &self.remote_id)
+            .field("subject", &self.subject)
+            .field("signing_secret", &crate::crypto::redacted(&self.signing_secret))
+            .finish()
+    }
 }
 
 /// What a sync would do, before it exists (`POST …/syncs/preview`): names only.
