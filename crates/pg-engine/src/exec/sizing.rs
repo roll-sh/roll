@@ -313,6 +313,9 @@ struct EstHeap {
     /// Changed since the last commit took it (`estkeep`), and what changed.
     dirty: bool,
     log: estkeep::Log,
+    /// Its fields as last made durable (None: never, or not since a temporary or unlogged
+    /// table's changes were dropped: the next record is a full one).
+    sent: Option<estkeep::Sent>,
     /// The model's limit the table was too big for (`max_versions` then): a build with a
     /// higher one models it instead of using its kept estimate.
     limit: u32,
@@ -439,6 +442,7 @@ impl EstHeap {
             moved: HashedMap::default(),
             dirty: false,
             log: estkeep::Log::default(),
+            sent: None,
             limit: 0,
             locks: Default::default(),
         }
