@@ -630,9 +630,11 @@ impl Ddl<'_, '_> {
                             None => self.count_rows(&r)?,
                         } as i64;
                         // acquire_sample_rows' deadrows: the dead and recently dead versions
-                        // in the heap model (the whole table, as a full sample reads it).
-                        let dead = crate::exec::sizing::heap_tuple_stats(r.oid, self.ctx)?
-                            .map_or(0, |s| s.2 as i64);
+                        // and dead line pointers in the heap model (the whole table, as a full
+                        // sample reads it).
+                        // (A table too big to model: what pg_stat counts dead.)
+                        let dead = crate::exec::sizing::analyze_dead_rows(r.oid, self.ctx)?
+                            .map_or_else(|| crate::exec::pgstat::dead_now(self.ctx, r.oid), |d| d as i64);
                         if let Some(began) = began {
                             let targrows = self.targrows;
                             self.sample_info(&r, targrows, Some(live as u64))?;
@@ -1544,13 +1546,22 @@ impl Ddl<'_, '_> {
             .iter()
             .find(|b| b.index.oid == ix.oid)
             .ok_or_else(|| crate::error::internal("index not found"))?;
-        // (data key, (index entry key, the index key alone, row)).
-        let mut items: Vec<(Vec<u8>, (Vec<u8>, Vec<u8>, crate::exec::Row))> = Vec::new();
-        for (k, r) in self.table_rows(t)? {
+        // A snapshot transaction whose snapshot misses changes to the rows copies what
+        // PostgreSQL's copy keeps (`Txn::RewriteView`): the rows its snapshot sees and the
+        // newer ones, each with its xmin; else the newest rows (with the xmins `latest_xmins`
+        // reads).
+        let both = if t.has_rowid() && self.adopt_latest(t)? { Some(self.snapshot_and_latest(t)?) } else { None };
+        let rows: Vec<(Vec<u8>, crate::exec::Row, Copied)> = match both {
+            Some(rows) => rows,
+            None => self.table_rows(t)?.into_iter().map(|(k, r)| (k, r, Copied::Both(None))).collect(),
+        };
+        // (data key, (index entry key, the index key alone, row, which of the two it is)).
+        let mut items: Vec<(Vec<u8>, (Vec<u8>, Vec<u8>, crate::exec::Row, Copied))> = Vec::new();
+        for (k, r, c) in rows {
             let vals = super::table::index_values(bix, &r, self)?.unwrap_or_default();
             let ik = crate::exec::scan::index_entry_key(t, &bix.index, &vals, &k, &bix.colls);
             let key = crate::exec::scan::index_value_prefix(t, &bix.index, &vals, &bix.colls);
-            items.push((k, (ik, key, r)));
+            items.push((k, (ik, key, r, c)));
         }
         // plan_cluster_use_sort: with index scans disabled, a sequential scan feeds a sort
         // on the index key (tuplesort_begin_cluster), whose quicksort leaves equal keys in
@@ -1568,29 +1579,62 @@ impl Ddl<'_, '_> {
         } else {
             items.sort_by(|a, b| a.1.0.cmp(&b.1.0));
         }
+        // rewrite_heap_tuple writes a version an update replaced only once the newer one it
+        // points to is written: one whose newer version sorts after it goes right after that.
+        if items.iter().any(|i| matches!(i.1.3, Copied::Older(_, true))) {
+            let mut waiting = std::collections::HashMap::new();
+            let mut written = std::collections::HashSet::new();
+            let mut out = Vec::with_capacity(items.len());
+            for it in items {
+                match it.1.3 {
+                    Copied::Older(_, true) if !written.contains(&it.0) => {
+                        waiting.insert(it.0.clone(), it);
+                    }
+                    Copied::Newer(_) => {
+                        let k = it.0.clone();
+                        out.push(it);
+                        if let Some(w) = waiting.remove(&k) {
+                            out.push(w);
+                        }
+                        written.insert(k);
+                    }
+                    _ => out.push(it),
+                }
+            }
+            out.extend(waiting.into_values());
+            items = out;
+        }
         let order: Vec<Vec<u8>> = items.iter().map(|(k, _)| k.clone()).collect();
         if t.has_rowid() {
             // Rows are stored by rowid: new rowids in index order put them in that order.
             // (reform_and_rewrite_tuple copies each row's header: its xmin stays; what the
             // copy froze is the new relfrozenxid's, `measure_rewritten`.)
-            let xmins: std::collections::HashMap<Vec<u8>, u64> = {
-                let start = crate::storage::keys::index_prefix(t.oid, 0);
-                let end = crate::storage::keys::prefix_end(&start);
-                let txn = self.ctx.txn.borrow();
-                txn.scan(&start, &end)
-                    .map(|r| r.and_then(|(k, v)| Ok((k, crate::exec::scan::row_xmin(&v)?))))
-                    .collect::<Result<_>>()?
-            };
+            let xmins = if items.iter().any(|i| matches!(i.1.3, Copied::Both(None))) { self.latest_xmins(t)? } else { Default::default() };
             // (Its range deletion hides every row the transaction's snapshot saw.)
-            self.adopt_latest(t)?;
             crate::exec::dml::truncate(t, self.ctx)?;
             let xid = self.ctx.txn.borrow_mut().cur_xid();
-            let (rows, kept): (Vec<crate::exec::Row>, Vec<u64>) =
-                items.into_iter().map(|(k, (_, _, r))| (r, xmins.get(&k).copied().unwrap_or(xid))).unzip();
-            self.write_rows_as(t, rows, false, Some(&kept))?;
+            let mut copied = Vec::with_capacity(items.len());
+            let (rows, kept): (Vec<crate::exec::Row>, Vec<u64>) = items
+                .into_iter()
+                .map(|(k, (_, _, r, c))| {
+                    let x = match c {
+                        Copied::Both(Some(x)) | Copied::Newer(x) | Copied::Older(x, _) => x,
+                        Copied::Both(None) => xmins.get(&k).copied().unwrap_or(xid),
+                    };
+                    copied.push(c);
+                    (r, x)
+                })
+                .unzip();
+            let newer: Vec<crate::exec::Row> =
+                rows.iter().zip(&copied).filter(|(_, c)| matches!(c, Copied::Newer(_))).map(|(r, _)| r.clone()).collect();
+            let keys = self.write_rows_as(t, rows, false, Some(&kept))?;
+            let held = self.hold_for_commit(&keys, &copied, newer)?;
             let built: Vec<Index> = bixs.iter().map(|b| (*b.index).clone()).collect();
             for i in &built {
                 self.build_index(t, i)?;
+            }
+            if let Some((gone, puts)) = held {
+                self.ctx.txn.borrow_mut().add_rewrite_view(t.oid, gone, puts);
             }
         }
         // Rows re-stored under new keys are in index order already.
@@ -1600,6 +1644,116 @@ impl Ddl<'_, '_> {
             self.send_rewrite_end(t, pages, dead, n, &began);
         }
         Ok(())
+    }
+
+    /// The xmins of `t`'s rows as the statement reads them (the newest ones).
+    fn latest_xmins(&self, t: &Table) -> Result<std::collections::HashMap<Vec<u8>, u64>> {
+        let start = crate::storage::keys::index_prefix(t.oid, 0);
+        let end = crate::storage::keys::prefix_end(&start);
+        let txn = self.ctx.txn.borrow();
+        txn.scan(&start, &end)
+            .map(|r| r.and_then(|(k, v)| Ok((k, crate::exec::scan::row_xmin(&v)?))))
+            .collect()
+    }
+
+    /// The rows CLUSTER copies in a snapshot transaction whose snapshot misses changes to
+    /// `t` (`Txn::RewriteView`): those its snapshot sees (with its own writes), and the
+    /// newest, as one list: a row in both alike once, else each version. A table it
+    /// clustered before has its own writes as its snapshot's rows, and those the commit
+    /// puts in besides (written now: the newest rows are its own from here on).
+    fn snapshot_and_latest(&self, t: &Table) -> Result<Vec<(Vec<u8>, crate::exec::Row, Copied)>> {
+        let start = crate::storage::keys::index_prefix(t.oid, 0);
+        let end = crate::storage::keys::prefix_end(&start);
+        let read = |ts: Option<u64>| -> Result<std::collections::BTreeMap<Vec<u8>, bytes::Bytes>> {
+            let txn = self.ctx.txn.borrow();
+            match ts {
+                Some(ts) => txn.scan_at(&start, &end, ts).collect(),
+                None => txn.scan(&start, &end).collect(),
+            }
+        };
+        let (old, new) = if self.ctx.txn.borrow().rewrite_view(t.oid).is_some() {
+            let old = read(None)?;
+            apply_rewrite_views(self.ctx, Some(t.oid))?;
+            (old, read(None)?)
+        } else {
+            let ts = self.ctx.txn.borrow().statement_snapshot_ts();
+            (read(Some(ts))?, read(None)?)
+        };
+        let decode = |v: &bytes::Bytes| -> Result<(crate::exec::Row, u64)> {
+            Ok((crate::exec::scan::decode_table_row(t, v)?, crate::exec::scan::row_xmin(v)?))
+        };
+        let mut out = Vec::with_capacity(new.len().max(old.len()));
+        let mut newer = new.iter().peekable();
+        for (k, v) in &old {
+            while let Some((nk, nv)) = newer.next_if(|(nk, _)| *nk < k) {
+                let (r, x) = decode(nv)?;
+                out.push((nk.clone(), r, Copied::Newer(x)));
+            }
+            match newer.next_if(|(nk, _)| *nk == k) {
+                Some((_, nv)) if nv == v => {
+                    let (r, x) = decode(v)?;
+                    out.push((k.clone(), r, Copied::Both(Some(x))));
+                }
+                Some((_, nv)) => {
+                    let (r, x) = decode(v)?;
+                    out.push((k.clone(), r, Copied::Older(x, true)));
+                    let (r, x) = decode(nv)?;
+                    out.push((k.clone(), r, Copied::Newer(x)));
+                }
+                None => {
+                    let (r, x) = decode(v)?;
+                    out.push((k.clone(), r, Copied::Older(x, false)));
+                }
+            }
+        }
+        for (nk, nv) in newer {
+            let (r, x) = decode(nv)?;
+            out.push((nk.clone(), r, Copied::Newer(x)));
+        }
+        Ok(out)
+    }
+
+    /// After CLUSTER wrote its copy under `keys` (`snapshot_and_latest`'s rows, in the new
+    /// order): the newer rows' writes taken out of the transaction's (they go in at the
+    /// commit), and the new keys of the rows only its snapshot sees, for
+    /// `Txn::add_rewrite_view`. None: the snapshot misses nothing here.
+    #[allow(clippy::type_complexity)]
+    fn hold_for_commit(
+        &self,
+        keys: &[Vec<u8>],
+        copied: &[Copied],
+        mut newer: Vec<crate::exec::Row>,
+    ) -> Result<Option<(std::collections::HashMap<Vec<u8>, bool>, Vec<crate::txn::RewritePut>)>> {
+        if copied.iter().all(|c| matches!(c, Copied::Both(_))) {
+            return Ok(None);
+        }
+        let mut gone = std::collections::HashMap::new();
+        let mut puts = Vec::new();
+        newer.reverse();
+        let mut txn = self.ctx.txn.borrow_mut();
+        for (k, c) in keys.iter().zip(copied) {
+            match c {
+                Copied::Both(_) => {}
+                Copied::Older(_, updated) => {
+                    gone.insert(k.clone(), *updated);
+                }
+                Copied::Newer(_) => {
+                    let mut one = k.clone();
+                    one.push(0);
+                    let mut kvs: Vec<(Vec<u8>, bytes::Bytes)> =
+                        txn.writes_in(k, &one)?.into_iter().filter_map(|(k, v)| Some((k, v?))).collect();
+                    if let Some((lo, hi)) = crate::storage::toast::value_range(k, k) {
+                        kvs.extend(txn.writes_in(&lo, &hi)?.into_iter().filter_map(|(k, v)| Some((k, v?))));
+                    }
+                    for (w, _) in &kvs {
+                        txn.delete(w.clone())?;
+                    }
+                    let row = newer.pop().expect("a newer row");
+                    puts.push(crate::txn::RewritePut { key: k.clone(), row, kvs });
+                }
+            }
+        }
+        Ok(Some((gone, puts)))
     }
 
     /// CREATE INDEX measures the new index and its table (an empty table that was never
@@ -2353,4 +2507,53 @@ fn builtin_toast_index(rv: &pb::RangeVar, index: &str) -> bool {
     };
     named(&rv.relname, b't')
         && (index.is_empty() || (index == format!("{}_index", rv.relname) && named(index, b'i')))
+}
+
+/// Which rows a CLUSTER copy holds a row as (`Ddl::snapshot_and_latest`), with its xmin.
+#[derive(Clone, Copy)]
+enum Copied {
+    /// The newest version, the one the transaction sees too (its xmin; None: as the newest
+    /// rows are read, `latest_xmins`).
+    Both(Option<u64>),
+    /// Committed after the transaction's snapshot: it doesn't see it, the commit keeps it.
+    Newer(u64),
+    /// Only the transaction's snapshot sees it: true, changed since; false, deleted since.
+    Older(u64, bool),
+}
+
+/// The rows a CLUSTER held out of the transaction's writes for its commit
+/// (`Txn::RewriteView`) go in, with their index entries, and those only its snapshot saw go
+/// out: at the commit (or PREPARE), and before a statement that reads or changes the table
+/// otherwise (`ddl::execute`; the transaction sees the newest rows from then on).
+pub fn apply_rewrite_views(ctx: &crate::exec::ExecCtx, table: Option<u32>) -> Result<()> {
+    if !ctx.txn.borrow().has_rewrite_views() {
+        return Ok(());
+    }
+    let views = ctx.txn.borrow_mut().take_rewrite_views(table);
+    for (oid, gone, puts) in views {
+        let Some(t) = ctx.catalog().tables.get(&oid).cloned() else { continue };
+        let bixs = crate::sql::binder::bound_indexes(&t, ctx)?;
+        for key in &gone {
+            let Some(bytes) = ctx.txn.borrow().get(key)? else { continue };
+            let row = crate::exec::scan::decode_table_row(&t, &bytes)?;
+            crate::exec::dml::delete_index_entries(&t, &bixs, &row, key, false, ctx)?;
+            crate::exec::sizing::deleted(&t, &bixs, key, &row, ctx)?;
+            let mut txn = ctx.txn.borrow_mut();
+            if let Some((lo, hi)) = crate::storage::toast::value_range(key, key) {
+                for (k, v) in txn.writes_in(&lo, &hi)? {
+                    if v.is_some() {
+                        txn.delete(k)?;
+                    }
+                }
+            }
+            txn.delete(key.clone())?;
+        }
+        for p in puts.iter() {
+            for (k, v) in &p.kvs {
+                ctx.txn.borrow_mut().put(k.clone(), v.to_vec())?;
+            }
+            crate::exec::dml::put_index_entries(&t, &bixs, &p.row, &p.key, ctx)?;
+        }
+    }
+    Ok(())
 }

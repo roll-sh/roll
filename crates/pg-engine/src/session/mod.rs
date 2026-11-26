@@ -873,6 +873,14 @@ impl Session {
 
     /// End the current transaction.
     fn finish_txn(&mut self, commit: bool) -> Result<()> {
+        // (The rows a CLUSTER held for the commit, `Txn::RewriteView`.)
+        if commit
+            && self.txn.as_ref().is_some_and(|t| t.borrow().has_rewrite_views())
+            && let Err(e) = self.with_ctx(&[], |ctx| crate::session::ddl::apply_rewrite_views(ctx, None))
+        {
+            let _ = self.finish_txn(false);
+            return Err(e);
+        }
         if commit
             && self.txn.as_ref().is_some_and(|t| {
                 !t.borrow().deferred.is_empty() || !t.borrow().deferred_triggers.is_empty()
@@ -4316,6 +4324,9 @@ pub(crate) fn end_txn_midway(ctx: &ExecCtx, commit: bool, chain: bool) -> Result
             code::INVALID_TRANSACTION_TERMINATION,
             format!("cannot {what} while a subtransaction is active"),
         ));
+    }
+    if commit {
+        crate::session::ddl::apply_rewrite_views(ctx, None)?;
     }
     if commit
         && (!ctx.txn.borrow().deferred.is_empty() || !ctx.txn.borrow().deferred_triggers.is_empty())

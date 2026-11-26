@@ -1325,13 +1325,49 @@ struct DdlReads {
     /// A DDL statement reading the newest committed rows (`begin_latest_reads`): the
     /// snapshot it set aside, given back at its end.
     latest: Option<(u64, Option<SnapshotPin>)>,
+    /// Tables CLUSTER rewrote while the snapshot missed changes to them (`RewriteView`).
+    views: Vec<RewriteView>,
 }
 
 impl DdlReads {
     /// Nothing left for the rest of the transaction, and no statement reading the newest rows.
     fn is_empty(&self) -> bool {
-        self.adopted.is_empty() && self.stale.is_empty() && self.fresh.is_empty() && self.pins.is_empty() && self.latest.is_none()
+        self.adopted.is_empty()
+            && self.stale.is_empty()
+            && self.fresh.is_empty()
+            && self.pins.is_empty()
+            && self.latest.is_none()
+            && self.views.is_empty()
     }
+}
+
+/// CLUSTER in a REPEATABLE READ or SERIALIZABLE transaction whose snapshot misses changes to
+/// the table: PostgreSQL's copy (`heapam_relation_copy_for_cluster`) keeps every tuple not dead
+/// to all with its xmin and xmax, so afterwards the transaction still sees its snapshot's rows
+/// (in the new order), and its UPDATE, DELETE or row lock of one changed since fails with
+/// 40001, while the commit leaves the newest rows. roll's copy is the transaction's own writes:
+/// it writes its snapshot's rows, and the rows committed after its snapshot under the new
+/// keys they take in that order go in at the commit (`session::rewrite_view`), with their
+/// index entries; the rows its snapshot sees that are gone or changed since go out then.
+pub struct RewriteView {
+    pub table: u32,
+    /// The new keys of the rows only the snapshot sees: true, changed since (an update);
+    /// false, deleted since.
+    pub gone: HashMap<Vec<u8>, bool>,
+    /// The rows committed after the snapshot, held out of the write buffer until the commit.
+    pub puts: Arc<[RewritePut]>,
+    /// The savepoint depth it was made at, and the one it was put in at (it stays here
+    /// while a savepoint rollback could undo that).
+    depth: usize,
+    applied: Option<usize>,
+}
+
+/// A row of `RewriteView::puts`: its new key, its values, and what is stored for it (the row
+/// and its out-of-line values).
+pub struct RewritePut {
+    pub key: Vec<u8>,
+    pub row: Vec<crate::types::Value>,
+    pub kvs: Vec<(Vec<u8>, Bytes)>,
 }
 
 /// Indexes whose entries were all made by a commit (a new index, or an index with new
@@ -1810,6 +1846,48 @@ impl TxnState {
                 _ => {}
             }
         }
+    }
+
+    /// CLUSTER of `table` left the rows its snapshot sees as its own (`RewriteView`): `gone`,
+    /// the new keys of those changed or deleted since; `puts`, the newer rows' writes, which
+    /// go in at the commit.
+    pub fn add_rewrite_view(&mut self, table: u32, gone: HashMap<Vec<u8>, bool>, puts: Vec<RewritePut>) {
+        let depth = self.savepoints.len();
+        let d = self.ddl_reads.get_or_insert_with(Default::default);
+        d.views.retain(|v| v.table != table || v.applied.is_some());
+        d.views.push(RewriteView { table, gone, puts: puts.into(), depth, applied: None });
+    }
+
+    /// Whether a `RewriteView` waits for the commit.
+    pub fn has_rewrite_views(&self) -> bool {
+        self.ddl_reads.as_ref().is_some_and(|d| d.views.iter().any(|v| v.applied.is_none()))
+    }
+
+    /// `table`'s waiting `RewriteView`.
+    pub fn rewrite_view(&self, table: u32) -> Option<&RewriteView> {
+        self.ddl_reads.as_ref()?.views.iter().find(|v| v.table == table && v.applied.is_none())
+    }
+
+    /// Whether row `key` is one only a waiting `RewriteView`'s snapshot sees: Some(true)
+    /// changed since, Some(false) deleted since.
+    pub fn rewrite_gone(&self, key: &[u8]) -> Option<bool> {
+        let d = self.ddl_reads.as_ref()?;
+        d.views.iter().filter(|v| v.applied.is_none()).find_map(|v| v.gone.get(key).copied())
+    }
+
+    /// The waiting `RewriteView`s (of `table`; None: every one), now put in (the caller
+    /// writes them): a savepoint rollback past here makes them wait again.
+    pub fn take_rewrite_views(&mut self, table: Option<u32>) -> Vec<(u32, Vec<Vec<u8>>, Arc<[RewritePut]>)> {
+        let depth = self.savepoints.len();
+        let Some(d) = &mut self.ddl_reads else { return Vec::new() };
+        d.views
+            .iter_mut()
+            .filter(|v| v.applied.is_none() && table.is_none_or(|t| t == v.table))
+            .map(|v| {
+                v.applied = Some(depth);
+                (v.table, v.gone.keys().cloned().collect(), v.puts.clone())
+            })
+            .collect()
     }
 
     /// An index was built (its entries written) in `begin_latest_reads`: `fresh`, all its
@@ -4226,8 +4304,13 @@ impl TxnState {
     /// Whether `key` changed after our snapshot (a concurrent committed write).
     pub fn changed_since_snapshot(&self, key: &[u8]) -> Result<bool> {
         // (Nothing committed since the snapshot: no row can have changed.)
-        if self.db.store.last_assigned_ts() <= self.snapshot_ts || self.buf_get(key)?.is_some() {
+        if self.db.store.last_assigned_ts() <= self.snapshot_ts {
             return Ok(false);
+        }
+        // (Our own row: changed since only when a CLUSTER's copy kept it for our snapshot,
+        // `RewriteView`.)
+        if self.buf_get(key)?.is_some() {
+            return Ok(self.ddl_reads.is_some() && self.rewrite_gone(key).is_some());
         }
         self.db.store.changed_after(key, self.snapshot_ts)
     }
@@ -4346,6 +4429,12 @@ impl TxnState {
             d.adopted.retain(|a| a.3 <= i);
             d.stale.retain(|a| a.2 <= i);
             d.fresh.retain(|a| a.1 <= i);
+            d.views.retain(|v| v.depth <= i);
+            for v in &mut d.views {
+                if v.applied.is_some_and(|a| a > i) {
+                    v.applied = None;
+                }
+            }
         }
         // The aborted subtransactions' statistics counts (levels i+2 and deeper).
         for nest in (i + 2..=self.savepoints.len() + 1).rev() {
@@ -4429,6 +4518,10 @@ impl TxnState {
             d.adopted.iter_mut().for_each(|a| a.3 = a.3.min(i));
             d.stale.iter_mut().for_each(|a| a.2 = a.2.min(i));
             d.fresh.iter_mut().for_each(|a| a.1 = a.1.min(i));
+            for v in &mut d.views {
+                v.depth = v.depth.min(i);
+                v.applied = v.applied.map(|a| a.min(i));
+            }
         }
         Ok(())
     }

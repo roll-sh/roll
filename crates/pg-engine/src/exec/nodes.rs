@@ -466,7 +466,7 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
                     return Ok(node);
                 }
                 let need = nd::add(need.map(<[bool]>::to_vec), nd::keys(keys));
-                return Ok(Box::new(SortNode {
+                return Ok(SortNode::boxed(SortNode {
                     presorted: super::pghash::presorted_keys(plan, ctx).min(keys.len()),
                     key: Arc::as_ptr(plan) as usize,
                     input: Some(node),
@@ -497,7 +497,7 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
                 }));
             }
             let need = nd::add(need.map(<[bool]>::to_vec), nd::keys(keys));
-            Box::new(SortNode {
+            SortNode::boxed(SortNode {
                 presorted: super::pghash::presorted_keys(plan, ctx).min(keys.len()),
                 key: Arc::as_ptr(plan) as usize,
                 input: Some(open_need(input, need.clone(), ctx)?),
@@ -545,15 +545,18 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             last: None,
             drain: input.writes(),
         }),
-        Plan::Distinct { input, on, hashed, .. } => Box::new(DistinctNode {
-            input: open(input, ctx)?,
-            on: on.clone(),
-            seen: HashMap::default(),
-            prev: None,
-            hashed: (on.is_none() || *hashed).then(|| plan.clone()),
-            out: None,
-            presort: None,
-        }),
+        Plan::Distinct { input, on, hashed, .. } => match UniqueNode::of(plan, input, on.is_none(), ctx)? {
+            Some(u) => u,
+            None => Box::new(DistinctNode {
+                input: open(input, ctx)?,
+                on: on.clone(),
+                seen: HashMap::default(),
+                prev: None,
+                hashed: (on.is_none() || *hashed).then(|| plan.clone()),
+                out: None,
+                presort: None,
+            }),
+        },
         Plan::SetOp {
             kind,
             all,
@@ -3497,75 +3500,108 @@ fn sort_input_bounded(input: &mut BoxNode, keys: &[SortKey], bound: usize, ctx: 
     Ok((sorted.into_iter().map(|(_, r)| r).collect(), n + skipped))
 }
 
-/// An Incremental Sort's rows: the input sorted on the first `presorted` keys already, read
-/// only as far as the sort needs (a LIMIT above may stop it early). `key`: the node's, for
-/// EXPLAIN ANALYZE's counts of its sorts.
-fn incremental_sort_rows(
-    input: &mut BoxNode,
-    keys: &[SortKey],
+/// An Incremental Sort: a Sort whose input is sorted on its first `presorted` keys
+/// already (`SortNode::boxed`). Its rows go up a sorted batch at a time as
+/// ExecIncrementalSort gives them (`pgsort::IncrSort`: at least 32 rows to the end of a prefix
+/// group, or one prefix group), the input read only as far as the next batch needs, so it
+/// holds one batch, not its whole output. `key`: the node's, for EXPLAIN ANALYZE's counts of
+/// its sorts.
+struct IncrSortNode {
+    input: BoxNode,
+    keys: Vec<SortKey>,
     presorted: usize,
-    bound: Option<usize>,
     key: usize,
-    ctx: &ExecCtx,
-) -> Result<Vec<Row>> {
-    let mut read_err: Option<crate::error::Error> = None;
-    let keyed = std::iter::from_fn(|| {
-        if read_err.is_some() {
-            return None;
+    started: bool,
+    sorter: super::pgsort::IncrSort<(Vec<Value>, Row)>,
+    batch: std::vec::IntoIter<(Vec<Value>, Row)>,
+}
+
+impl IncrSortNode {
+    /// The next batch, sorted (empty at the end).
+    #[inline(never)]
+    fn fill(&mut self, ctx: &ExecCtx) -> Result<()> {
+        if !self.started {
+            self.started = true;
+            // (tuplesort_begin_heap's checks of its keys, as SortNode makes them.)
+            if self.keys.iter().any(|k| k.using.as_ref().is_some_and(|u| crate::sql::binder::is_indeterminate(u))) {
+                return Err(Error::new(
+                    code::INDETERMINATE_COLLATION,
+                    "could not determine which collation to use for string comparison",
+                )
+                .hint("Use the COLLATE clause to set the collation explicitly."));
+            }
+            if let Some(e) = self.keys.iter().find_map(|k| missing_sort_support(&k.expr.ty(), ctx)) {
+                return Err(e);
+            }
         }
-        let r = (|| -> Result<Option<(Vec<Value>, Row)>> {
-            let Some(r) = input.next(ctx)? else { return Ok(None) };
-            ctx.check()?;
-            let k = keys
-                .iter()
-                .map(|k| eval(&k.expr, &r, ctx))
-                .collect::<Result<Vec<_>>>()?;
-            Ok(Some((k, r)))
-        })();
-        match r {
-            Ok(x) => x,
+        let (keys, input, presorted) = (&self.keys, &mut self.input, self.presorted);
+        let mut read_err: Option<crate::error::Error> = None;
+        let mut keyed = std::iter::from_fn(|| {
+            if read_err.is_some() {
+                return None;
+            }
+            let r = (|| -> Result<Option<(Vec<Value>, Row)>> {
+                let Some(r) = input.next(ctx)? else { return Ok(None) };
+                ctx.check()?;
+                let k = keys.iter().map(|k| eval(&k.expr, &r, ctx)).collect::<Result<Vec<_>>>()?;
+                Ok(Some((k, r)))
+            })();
+            match r {
+                Ok(x) => x,
+                Err(e) => {
+                    read_err = Some(e);
+                    None
+                }
+            }
+        });
+        let cmp_range = |a: &(Vec<Value>, Row), b: &(Vec<Value>, Row), from: usize, to: usize| {
+            for (i, k) in keys.iter().enumerate().take(to).skip(from) {
+                match compare_values(&a.0[i], &b.0[i], k, ctx)? {
+                    Ordering::Equal => {}
+                    o => return Ok(o),
+                }
+            }
+            Ok(Ordering::Equal)
+        };
+        let n = keys.len();
+        let mut full = |a: &(Vec<Value>, Row), b: &(Vec<Value>, Row)| cmp_range(a, b, 0, n);
+        let mut suffix = |a: &(Vec<Value>, Row), b: &(Vec<Value>, Row)| cmp_range(a, b, presorted, n);
+        let mut err = None;
+        let mut same = |a: &(Vec<Value>, Row), b: &(Vec<Value>, Row)| match cmp_range(a, b, 0, presorted) {
+            Ok(o) => o == Ordering::Equal,
             Err(e) => {
-                read_err = Some(e);
-                None
+                err.get_or_insert(e);
+                true
             }
+        };
+        let mut cf = super::pgsort::Cmp::new(&mut full);
+        let mut cs = super::pgsort::Cmp::new(&mut suffix);
+        let mut stats = super::pgsort::IncrStats::default();
+        let batch = self.sorter.next_batch(&mut keyed, &mut cf, &mut cs, &mut same, &mut stats);
+        if let Some(e) = read_err.or(err).or(cf.err).or(cs.err) {
+            return Err(e);
         }
-    });
-    let cmp_range = |a: &(Vec<Value>, Row), b: &(Vec<Value>, Row), from: usize, to: usize| {
-        for (i, k) in keys.iter().enumerate().take(to).skip(from) {
-            match compare_values(&a.0[i], &b.0[i], k, ctx)? {
-                Ordering::Equal => {}
-                o => return Ok(o),
+        ctx.count(self.key, |st| {
+            for g in 0..2 {
+                st.incr.groups[g] += stats.groups[g];
+                st.incr.methods[g] |= stats.methods[g];
+                st.incr.kept_total[g] += stats.kept_total[g];
+                st.incr.kept_max[g] = st.incr.kept_max[g].max(stats.kept_max[g]);
             }
-        }
-        Ok(Ordering::Equal)
-    };
-    let n = keys.len();
-    let mut full = |a: &(Vec<Value>, Row), b: &(Vec<Value>, Row)| cmp_range(a, b, 0, n);
-    let mut suffix = |a: &(Vec<Value>, Row), b: &(Vec<Value>, Row)| cmp_range(a, b, presorted, n);
-    let mut err = None;
-    let mut same = |a: &(Vec<Value>, Row), b: &(Vec<Value>, Row)| match cmp_range(a, b, 0, presorted) {
-        Ok(o) => o == Ordering::Equal,
-        Err(e) => {
-            err.get_or_insert(e);
-            true
-        }
-    };
-    let mut cf = super::pgsort::Cmp::new(&mut full);
-    let mut cs = super::pgsort::Cmp::new(&mut suffix);
-    let mut stats = super::pgsort::IncrStats::default();
-    let out = super::pgsort::incremental_sort(keyed, bound, &mut cf, &mut cs, &mut same, &mut stats);
-    if let Some(e) = read_err.or(err).or(cf.err).or(cs.err) {
-        return Err(e);
+        });
+        self.batch = batch.unwrap_or_default().into_iter();
+        Ok(())
     }
-    ctx.count(key, |st| {
-        for g in 0..2 {
-            st.incr.groups[g] += stats.groups[g];
-            st.incr.methods[g] |= stats.methods[g];
-            st.incr.kept_total[g] += stats.kept_total[g];
-            st.incr.kept_max[g] = st.incr.kept_max[g].max(stats.kept_max[g]);
+}
+
+impl Node for IncrSortNode {
+    fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+        if let Some((_, r)) = self.batch.next() {
+            return Ok(Some(r));
         }
-    });
-    Ok(out.into_iter().map(|(_, r)| r).collect())
+        self.fill(ctx)?;
+        Ok(self.batch.next().map(|(_, r)| r))
+    }
 }
 
 /// FinishSortSupportFunction's error for a sort key of made type `ty` whose ordering
@@ -3758,6 +3794,23 @@ pub(super) fn sort_all(
 }
 
 impl SortNode {
+    /// The node: an Incremental Sort's own when its input is sorted on its leading keys
+    /// already (`IncrSortNode`).
+    fn boxed(self) -> BoxNode {
+        if self.presorted == 0 {
+            return Box::new(self);
+        }
+        Box::new(IncrSortNode {
+            input: self.input.expect("a sort not yet run"),
+            keys: self.keys,
+            presorted: self.presorted,
+            key: self.key,
+            started: false,
+            sorter: super::pgsort::IncrSort::new(self.bound),
+            batch: Vec::new().into_iter(),
+        })
+    }
+
     /// The next sorted row, widened back when held narrowed.
     fn next_out(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
         Ok(match (self.out.next(ctx)?, &self.narrow) {
@@ -3788,9 +3841,7 @@ impl Node for SortNode {
             if let Some(e) = self.keys.iter().find_map(|k| missing_sort_support(&k.expr.ty(), ctx)) {
                 return Err(e);
             }
-            self.out = super::extsort::Sorted::Mem(if self.presorted > 0 {
-                incremental_sort_rows(&mut input, &self.keys, self.presorted, self.bound, self.key, ctx)?
-            } else {
+            self.out = super::extsort::Sorted::Mem({
                 match self.bound.filter(|&b| b > 0) {
                     Some(b) => {
                         // A numeric multikey sort can prune by its first key only when
@@ -4310,6 +4361,73 @@ impl Node for DistinctNode {
                     return Ok(Some(r));
                 }
             }
+        }
+        Ok(None)
+    }
+}
+
+/// A plain DISTINCT that EXPLAIN shows as a Unique over its input sorted on every column
+/// (`distinct_order`), of values that compare equal only when identical: its input sorted
+/// through extsort as that Sort is (within work_mem in memory, else runs on disk), the first
+/// row of each run of equal rows given out as it comes. (`DistinctNode` held every row, a
+/// hash set of them and the rows kept.)
+struct UniqueNode {
+    input: Option<BoxNode>,
+    keys: Vec<SortKey>,
+    types: Vec<crate::types::DataType>,
+    norms: Vec<Option<super::agg::KeyNorm>>,
+    sorted: Option<BoxNode>,
+    prev: Option<Row>,
+}
+
+impl UniqueNode {
+    /// The node for `plan`, a DISTINCT over `input` (`plain`: not DISTINCT ON), when it is
+    /// one.
+    #[inline(never)]
+    fn of(plan: &Arc<Plan>, input: &Arc<Plan>, plain: bool, ctx: &ExecCtx) -> Result<Option<BoxNode>> {
+        if !plain {
+            return Ok(None);
+        }
+        let types = row_types(input);
+        if types.is_empty() || types.iter().any(|t| *t == crate::types::DataType::Unknown || !equal_is_identical(t)) {
+            return Ok(None);
+        }
+        let Some(cols) = crate::sql::explain::distinct_order(plan, ctx) else { return Ok(None) };
+        let mut covered = vec![false; types.len()];
+        for &c in &cols {
+            if let Some(x) = covered.get_mut(c) {
+                *x = true;
+            }
+        }
+        if covered.contains(&false) {
+            return Ok(None);
+        }
+        // (The comparisons `sort_rows_by` makes.)
+        let keys = cols
+            .iter()
+            .map(|&c| SortKey { expr: Expr::Col(c, types[c].clone()), desc: false, nulls_first: false, using: None })
+            .collect();
+        let norms = types
+            .iter()
+            .map(|t| matches!(t, crate::types::DataType::Bpchar(_)).then_some(super::agg::KeyNorm::Bpchar(None)))
+            .collect();
+        Ok(Some(Box::new(UniqueNode { input: Some(open(input, ctx)?), keys, types, norms, sorted: None, prev: None })))
+    }
+}
+
+impl Node for UniqueNode {
+    fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+        if let Some(input) = self.input.take() {
+            self.sorted = Some(sort_all(input, &self.keys, std::mem::take(&mut self.types), None, ctx)?);
+        }
+        let Some(sorted) = self.sorted.as_mut() else { return Ok(None) };
+        while let Some(r) = sorted.next(ctx)? {
+            let k = super::agg::group_key(&r, &self.norms);
+            if self.prev.as_ref() == Some(&k) {
+                continue;
+            }
+            self.prev = Some(k);
+            return Ok(Some(r));
         }
         Ok(None)
     }
@@ -4852,7 +4970,8 @@ struct NestLoopNode {
     /// The outer row, its inner rows (with the next one's place) and whether one matched.
     cur: Option<(Row, InnerRows, bool)>,
     /// A parameterized inner side kept open across outer rows and rescanned for each
-    /// (`streams`), once opened.
+    /// (`streams`), once opened; an unparameterized one's Material node past work_mem
+    /// (`held_right`).
     inner: Option<BoxNode>,
     unmatched_right: Option<usize>,
     memo: Option<Memoize>,
@@ -4885,6 +5004,55 @@ struct NestLoopNode {
 enum InnerRows {
     Rows(Rc<Vec<Row>>, usize),
     Stream(Rc<Row>),
+}
+
+/// An unparameterized inner side's rows: in memory, or in a Material node past work_mem.
+enum Held {
+    Mem(Vec<Row>),
+    Material(BoxNode),
+}
+
+/// A nested loop's unparameterized inner side past work_mem, as PostgreSQL's Materialize
+/// over it holds it: a tuplestore (on disk when its count of the tuples passes work_mem),
+/// read from its first row again on each rescan (ExecReScanMaterial).
+struct MaterialNode {
+    store: super::tuplestore::Tuplestore,
+    slot: usize,
+}
+
+impl MaterialNode {
+    /// The side's rows read so far (`rows`, then `r`) and the rest of `node`'s, stored.
+    fn fill(rows: Vec<Row>, r: Row, mut node: BoxNode, types: Vec<crate::types::DataType>, cols: Option<Vec<bool>>, ctx: &ExecCtx) -> Result<Held> {
+        let mut store = super::tuplestore::Tuplestore::new(types, false, ctx).with_cols(cols);
+        for r in rows {
+            store.put(r, None, ctx)?;
+        }
+        store.put(r, None, ctx)?;
+        while let Some(r) = node.next(ctx)? {
+            store.put(r, None, ctx)?;
+        }
+        if let Some(rows) = store.take_rows() {
+            return Ok(Held::Mem(rows));
+        }
+        let slot = store.reader();
+        Ok(Held::Material(Box::new(MaterialNode { store, slot })))
+    }
+}
+
+impl Node for MaterialNode {
+    fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+        self.store.read(self.slot, ctx)
+    }
+
+    fn rescan(&mut self, _ctx: &ExecCtx) -> Result<bool> {
+        self.store.close_reader(self.slot);
+        self.slot = self.store.reader();
+        Ok(true)
+    }
+
+    fn can_rescan(&self) -> bool {
+        true
+    }
 }
 
 /// Snapshot only work owned by this inner input. Lazy InitPlans and enclosing CTE
@@ -5148,7 +5316,7 @@ impl NestLoopNode {
         Ok(rows)
     }
 
-    fn right_rows(&mut self, left: &[Value], ctx: &ExecCtx) -> Result<Rc<Vec<Row>>> {
+    fn right_rows(&mut self, left: &[Value], ctx: &ExecCtx) -> Result<InnerRows> {
         if self.fixed {
             if self.right.is_none() {
                 let p = eval_all(&self.params, &[], ctx)?;
@@ -5156,7 +5324,7 @@ impl NestLoopNode {
                 self.right_matched = vec![false; rows.len()];
                 self.right = Some(Rc::new(rows));
             }
-            return Ok(self.right.clone().unwrap());
+            return Ok(InnerRows::Rows(self.right.clone().unwrap(), 0));
         }
         if !self.params.is_empty() {
             let memo_key = match &self.memo {
@@ -5191,7 +5359,7 @@ impl NestLoopNode {
                     st.rows += n;
                     st.cache_hits += 1;
                 });
-                return Ok(rows.clone());
+                return Ok(InnerRows::Rows(rows.clone(), 0));
             }
             let p = eval_all(&self.params, left, ctx)?;
             let rows = ctx.with_outer(Rc::new(p), || self.collect_right(ctx))?;
@@ -5226,22 +5394,82 @@ impl NestLoopNode {
                 m.lru.insert(m.stamp, k.clone());
                 m.cache.insert(k, (rows.clone(), m.stamp, bytes));
             }
-            return Ok(rows);
+            return Ok(InnerRows::Rows(rows, 0));
         }
         if self.right.is_none() {
-            let instr = ctx.instr.borrow().clone().filter(|_| self.report_rescans);
-            let before = instr.as_ref().map(|i| rescan_snapshot(&self.right_plan, i, !ctx.outer.borrow().is_empty()));
-            let rows = self.collect_right(ctx)?;
-            if let (Some(instr), Some(before)) = (instr, before) {
-                self.right_stats = instr.rescan_delta(&before);
+            if let Some(material) = self.held_right(ctx)? {
+                return Ok(material);
             }
-            self.material_stats(&rows, ctx);
-            self.right_matched = vec![false; rows.len()];
-            self.right = Some(Rc::new(rows));
         } else if let Some(instr) = ctx.instr.borrow().as_ref() {
             instr.repeat_rescan(&self.right_stats);
         }
-        Ok(self.right.clone().unwrap())
+        Ok(InnerRows::Rows(self.right.clone().unwrap(), 0))
+    }
+
+    /// An unparameterized inner side's rows: collected for the first outer row (`right`),
+    /// or, past work_mem, held in a Material node (`inner`, `collect_held`) that each outer
+    /// row reads from its start, as the join reads a parameterized side (`InnerRows::Stream`).
+    #[inline(never)]
+    fn held_right(&mut self, ctx: &ExecCtx) -> Result<Option<InnerRows>> {
+        if let Some(n) = self.inner.as_mut() {
+            n.rescan(ctx)?;
+            return Ok(Some(InnerRows::Stream(Rc::default())));
+        }
+        let instr = ctx.instr.borrow().clone().filter(|_| self.report_rescans);
+        let before = instr.as_ref().map(|i| rescan_snapshot(&self.right_plan, i, !ctx.outer.borrow().is_empty()));
+        let rows = match self.collect_held(ctx)? {
+            Held::Mem(rows) => rows,
+            Held::Material(n) => {
+                self.inner = Some(n);
+                return Ok(Some(InnerRows::Stream(Rc::default())));
+            }
+        };
+        if let (Some(instr), Some(before)) = (instr, before) {
+            self.right_stats = instr.rescan_delta(&before);
+        }
+        self.material_stats(&rows, ctx);
+        self.right_matched = vec![false; rows.len()];
+        self.right = Some(Rc::new(rows));
+        Ok(None)
+    }
+
+    /// `collect_right` for an unparameterized side, its rows sized as PostgreSQL's
+    /// Materialize counts its tuplestore's tuples (the columns the join reads): past work_mem
+    /// they go to a tuplestore that writes its file where PostgreSQL's does, read by a
+    /// `MaterialNode`. A RIGHT / FULL join (its unmatched inner rows are kept by number), a
+    /// side kept for rescans and EXPLAIN ANALYZE (`material_stats` counts the store) keep
+    /// them in memory.
+    fn collect_held(&mut self, ctx: &ExecCtx) -> Result<Held> {
+        if matches!(self.kind, JoinKind::Right | JoinKind::Full) || self.rescans > 0 || ctx.instrumented() {
+            return self.collect_right(ctx).map(Held::Mem);
+        }
+        self.right_node = None;
+        let need: Option<Vec<bool>> =
+            self.keep.as_ref().map(|k| (self.nleft..self.nleft + self.nright).map(|i| k.get(i).copied().unwrap_or(false)).collect());
+        let plan = self.right_plan.clone();
+        ctx.temp_cleanup.run(|| {
+            ctx.statement(|| {
+                let mut node = open_need(&plan, need.clone(), ctx)?;
+                let types = crate::sql::paths::analyzejoins::col_types(&plan);
+                let allowed = super::workmem::work_mem(ctx);
+                // (One row's tuple in every `SAMPLE`, times `SAMPLE`; near work_mem the store
+                // counts each.)
+                const SAMPLE: usize = 256;
+                let mut est = 0i64;
+                let mut rows = Vec::new();
+                while let Some(r) = node.next(ctx)? {
+                    if (rows.len() + 1).is_multiple_of(SAMPLE) {
+                        let t = super::workmem::minimal_tuple_len_cols(&r, &types, need.as_deref(), ctx);
+                        est += SAMPLE as i64 * (super::workmem::maxalign(t) + 16);
+                        if est > allowed {
+                            return MaterialNode::fill(rows, r, node, types, need, ctx);
+                        }
+                    }
+                    rows.push(r);
+                }
+                Ok(Held::Mem(rows))
+            })
+        })
     }
 
     /// EXPLAIN ANALYZE: what a Materialize over the inner side would have held, its
@@ -5322,7 +5550,7 @@ impl NestLoopNode {
                     }
                     Some(l) => {
                         let rows = self.right_rows(&l, ctx)?;
-                        self.cur = Some((l, InnerRows::Rows(rows, 0), false));
+                        self.cur = Some((l, rows, false));
                     }
                     None => {
                         self.flush(ctx);
@@ -5442,6 +5670,7 @@ impl Node for NestLoopNode {
         self.cur = None;
         if self.params.is_empty() {
             self.right = None;
+            self.inner = None;
         }
         self.right_matched.clear();
         self.rescans += 1;

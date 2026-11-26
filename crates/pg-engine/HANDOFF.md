@@ -15046,6 +15046,98 @@ the loop. (2) The ring's per-block cost: three hash lookups a recycled block (`e
 looks the key up twice and then removes it). One `entry` would do. It is worth about 0.4% on
 scan-bound queries at small caches.
 
+## Query memory, round 3: nested loop inner sides, Incremental Sort, sorted DISTINCT, in-memory first / last / nth_value (agent 326)
+
+BENCH.md "Query memory, round 3" has the tables. Plain dist builds (`tools/dist.sh`): **b0**
+`0037841bd` (before agent 320's windows), **n1** the first three changes on it, **n2** all four on
+origin's `eccf1d824` (`cbfcb7229`; the candidates are the same code rebased on `98bc2e3b6`). Four commits, one a change, each its own candidate
+(`cand/a326` .. `cand/a326-4`, stacked in this order). Rule kept throughout (agent 320's lesson):
+the spilling or streaming path is a node or function of its own, chosen once, and the in-memory
+functions' text is left alone.
+
+**What changed:**
+- **first_value / last_value / nth_value in memory** (`exec/window.rs`): `compute_partition`
+  evaluated the argument at every row of each row's frame and took the first, last or nth:
+  quadratic in a partition (a 1M-row partition that fits didn't finish in 20 minutes). A call
+  whose frame has no exclusion and that counts NULLs (`frame_value_at_place`, decided per call in
+  `run_windows`) now runs `frame_values`: the frame's bounds as before (`frame_of`), then the
+  argument at that one row (WinGetFuncArgInFrame), the nth argument checked as before.
+  `compute_partition` is unchanged; IGNORE NULLS and EXCLUDE still go through it. Agent 320's
+  `window-n5.diff` with the dispatch moved out of `compute_partition`.
+- **A nested loop's inner side past work_mem** (`exec/nodes.rs`, `exec/tuplestore.rs`): an
+  unparameterized inner side was collected into an `Rc<Vec<Row>>` whatever its size. Its
+  collection (`collect_held`, out of line in `held_right`, run once) now sizes the rows as
+  PostgreSQL's Materialize tuplestore counts them (the columns the join reads, one tuple every 256
+  rows); past work_mem they go to a `Tuplestore` (`with_cols`, agent 320's), which writes its file
+  where PostgreSQL's does, and a `MaterialNode` reads it from its start for each outer row
+  (ExecReScanMaterial). The join reads that node as it reads a parameterized side
+  (`InnerRows::Stream`; `right_rows` now returns the `InnerRows`), so the join's loop has no new
+  code. RIGHT / FULL joins (unmatched inner rows kept by number), a side kept for rescans and
+  EXPLAIN ANALYZE (whose `material_stats` already reports PostgreSQL's Storage line) keep the rows
+  in memory. Agent 320's version chunked the in-memory loop (+0.11% on a join that fits).
+- **Incremental Sort** (`exec/pgsort.rs`, `exec/nodes.rs`): `incremental_sort_rows` sorted every
+  batch and collected the whole output before the first row went up. `pgsort::incremental_sort`'s
+  state machine is now a struct (`IncrSort`) that gives out one sorted batch at a time, with the
+  same batches, sorts, bound handling and statistics (`incremental_sort` is a loop over it, for
+  windows); a Sort with presorted keys is opened as `IncrSortNode` (`SortNode::boxed`), which
+  holds one batch (at least 32 rows to the end of a prefix group, or one prefix group) and counts
+  each batch's sorts for EXPLAIN ANALYZE as it makes them. `SortNode::next` lost its dead
+  incremental branch.
+- **A sorted DISTINCT** (`exec/nodes.rs`): a plain DISTINCT that EXPLAIN shows as a Unique over a
+  Sort (enable_hashagg off, or the cheaper path) held every row, a hash set of them and the kept
+  rows. When its Sort keys cover every column and the types' equal values are identical
+  (`equal_is_identical`, no unknown types), it is opened as `UniqueNode`: the input sorted
+  through extsort (`sort_all`: in memory within work_mem, runs on disk past it, temp files counted
+  as PostgreSQL's Sort's) with `sort_rows_by`'s comparisons, the first row of each run of equal
+  rows given out as it comes. Other DISTINCTs go to `DistinctNode` as before.
+
+**Measured** (lane C, 1M rows, work_mem 4 MB, peak anon+shmem over the level before, MB, b0 -> n2
+(PostgreSQL 18.6)): the nested loop's inner side 116.0 -> 16.9 (8.3), its temp file 14,000,000
+bytes as PostgreSQL's; Incremental Sort 293.1 -> 17.3 (13.2); sorted DISTINCT 288.9 -> 40.6
+(16.8), its temp file 37.1 MB as PostgreSQL's; first / last / nth_value over 30,000 rows in 10
+partitions in memory 8.78 -> 0.39 s (n1; PostgreSQL 0.30). Every result's hash, in order and
+sorted, equals PostgreSQL's. When the input fits nothing is slower (user instructions, two
+alternating pairs each, 1.1-3.8 foreign cores): window -0.15% (n1) / -0.10% (n2), nested loop
+-0.19%, Incremental Sort -0.50%, DISTINCT -26.2%; TPC-H q01 q02 q03 q11 q15 q18 (the queries with
+a nested loop, a Materialize, the Incremental Sort or a Sort) within -0.13 .. +0.03%, q18's b0
+runs 0.14% apart, hashes equal. Not gated on a PGO build: no hot function's inlining was changed
+on purpose (the new paths are out of line and the old ones' text is the same but for
+`right_rows`' return type and the Sort's dead branch); the point select pair wasn't run (no
+changed node runs in a point select).
+
+**Verification:** `tools/quick-check.sh` with `QC_CHECKED=1` on `79302a0ca` (the four code
+commits and this section on `98bc2e3b6`): Clippy 16 warnings, none new in a changed file; 398
+tests in 12 binaries passed, again built `--profile verify-checked` (398 passed); regress
+51,148 / 51,150, 0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed. Each
+lower candidate is a prefix of that stack; only the stack's head was checked. New query_spill cases: `nested_loop_inner_spills` (agent
+320's) and `sorted_distinct_spills`, their temp file counts (2 and 1) PostgreSQL 18.6's for the
+same statements.
+
+**Dropped:** a sorted INTERSECT / EXCEPT [ALL] as a node of its own (`SortedSetOpNode`,
+chosen when the plan is opened for a SetOp EXPLAIN shows over sorted inputs: both inputs sorted
+through extsort, then merged a group at a time, setop_retrieve_sorted's counts). Past work_mem it
+holds what PostgreSQL's does: `SELECT s FROM t EXCEPT SELECT s FROM t WHERE id % 2 = 0` over 1M
+rows, enable_hashagg off, 298.3 -> 55.8 MB (PostgreSQL 53.2), 2 temp files of 55.6 MB (PostgreSQL
+3, 50.1), hash equal. But when the inputs fit, sorting both whole costs more than the in-memory
+path's hash count of the second input and sort of the kept rows: 20,000-row EXCEPT +6.7%,
+INTERSECT ALL +9.8% user instructions (n2 against n3, two pairs; DISTINCT and window controls
+within 0.01%). Patch: `~/.cache/a326/patches/sorted-setop-n3.diff` (with its query_spill case,
+PostgreSQL's 2 temp files). To keep: decide when the first input passes work_mem (collect it
+sized as the Sort counts it, as the nested loop's inner side does) and only then sort and merge.
+Not done this round: count / sum / avg(DISTINCT x)'s
+hash set (`hash_distinct`; its size check would sit in `feed`, the aggregates' hot function: it
+needs a dispatch chosen per aggregate, e.g. a `Buffered::Sort` once the set passes work_mem).
+
+**Left** (largest first, BENCH's table, MB over PostgreSQL's): several windows of different
+orders (429.0 / 14.5: sorted inside one WindowAgg, whole input), sliding frames (352.5 / 10.2:
+frames that start after the partition's start aren't streamed by `winstream`), sorted EXCEPT /
+INTERSECT (298.3 / 53.2: both sides collected and sorted in memory), grouping sets (267.8 / 34.7:
+input buffered whole), count(DISTINCT) (242.2 / 14.2), a GroupAggregate over a Sort (36.4 / 10.3:
+groups held until the input ends), hashed DISTINCT / UNION (no spill), Recursive Union (7.9 /
+3.7), an Incremental Sort's single group larger than work_mem (sorted in memory; PostgreSQL's
+tuplesort spills), EXPLAIN ANALYZE of a nested loop past work_mem (rows kept in memory, its
+Storage line PostgreSQL's), and agent 318's two cells above PostgreSQL.
+
 ## Query memory: windows past work_mem, partitions streamed (agent 320)
 
 BENCH.md "Query memory: windows past work_mem" has the tables. Plain dist builds (`tools/dist.sh`): **b0**
@@ -23355,6 +23447,160 @@ That is more than a small change in the shared txn/scan code, so it is left.
 4. Agent 310's difference 2 stays: snapshots older than an index's commit plan without it,
    where PostgreSQL uses it (results equal).
 
+## Table rewrites under REPEATABLE READ, pg_stat counters (agent 324, 2026-11-26)
+
+Probes in `~/.cache/a324/scripts/`, run against PostgreSQL 18.6 (own `a324-pg`), the base binary
+(`0037841bd2`) and the new one, all verify builds: `probe-rw.py` (rewrites), `probe-stats.py` /
+`probe-vac.py` / `rec-bt.py` (pg_stat counts; `ROLL_MODEL_MAX_VERSIONS=5000` takes their
+20,000-row tables past the model), `probe-dml.py` (DML statement classes), `cmpstats.py`.
+Outputs are beside them (`pg-*.txt`, `base-*.txt`, `new*-*.txt`).
+
+### 1. CLUSTER and the other rewrites inside REPEATABLE READ / SERIALIZABLE
+
+What PostgreSQL 18.6 does: `probe-rw.py`, 1,000 rows, another session's insert, delete, update,
+or key update committed after the transaction's first SELECT, then the statement, then what the
+transaction sees, what it can still do, and the committed result (167 cases, both levels):
+
+| statement | the transaction afterwards | base roll | now |
+|---|---|---|---|
+| CLUSTER (USING, or ALTER TABLE ... CLUSTER ON then CLUSTER) | **its snapshot's rows**, in the index's order, by scans and through the rebuilt indexes; UPDATE or DELETE of a row changed since: 40001 ("concurrent update" / "concurrent delete"), its row lock: 40001 "concurrent update"; a unique key committed since: 23505; CREATE INDEX or CLUSTER again: still the snapshot's rows; ROLLBACK TO a savepoint before it: the old order | the newest rows (1,001 for 1,000; a deleted row gone; an UPDATE of a changed row went through on the new value) | as PostgreSQL |
+| ALTER COLUMN TYPE, ADD COLUMN with a volatile default, SET UNLOGGED / LOGGED | the newest rows (the copy's tuples are the transaction's own) | as PostgreSQL | as PostgreSQL |
+| ALTER TABLE SET ACCESS METHOD heap (same method), REINDEX | the snapshot's rows (no rewrite) | as PostgreSQL | as PostgreSQL |
+| TRUNCATE | no rows | as PostgreSQL | as PostgreSQL |
+| VACUUM FULL | 25001 inside a block; alone, nothing to see after | as PostgreSQL | as PostgreSQL |
+| CREATE TABLE AS, REFRESH MATERIALIZED VIEW | the transaction's snapshot (agent 310) | as PostgreSQL | as PostgreSQL |
+
+So only CLUSTER needed a change. PostgreSQL's copy (`heapam_relation_copy_for_cluster`) keeps every
+tuple not dead to all, with its xmin and xmax; `rewrite_heap_tuple` writes a version an update
+replaced only after the newer version it points to (an updated key's old row comes after the new
+one in the new order).
+
+**The fix.**
+- `cluster_rel_inner`: when the snapshot misses changes to the table (`adopt_latest`),
+  `snapshot_and_latest` reads both the snapshot's rows (with the transaction's own writes) and the
+  newest, and the copy writes the union in the index's order: a row alike in both once, a changed
+  one as both versions (the replaced one right after the newer one when that sorts later), with
+  the xmin each had. `hold_for_commit` then takes the newer rows' writes (the row and its
+  out-of-line values) back out of the transaction's writes, before the indexes are built.
+- `Txn::RewriteView` (in `DdlReads`, kept per savepoint depth): those held rows, and the new keys
+  of the rows only the snapshot sees (and whether each was updated or deleted).
+  `ddl::apply_rewrite_views` puts the held rows in with their index entries (`put_index_entries`,
+  every index the table has then) and takes the snapshot-only rows out (`delete_index_entries`,
+  `sizing::deleted`). It runs at the commit (`finish_txn`, a procedure's COMMIT), at PREPARE, and
+  before any DDL statement but CREATE INDEX / REINDEX / CLUSTER (an ALTER TABLE rewrite then reads
+  the newest rows, as PostgreSQL's does). A savepoint rollback past where it ran makes the view
+  wait again.
+- A later CLUSTER of the same table takes its own writes as the snapshot's rows and the view put
+  in as the newest.
+- `Txn::changed_since_snapshot`: a row the view kept is changed since, so UPDATE, DELETE, the
+  batched DELETE and row locks fail with 40001 (`after_lock`, which now takes the `Xltw` and says
+  "concurrent update" for a row lock as ExecLockRows does). `committed_conflict`: a kept row
+  doesn't conflict, a held one does.
+
+Found on the way (item 3): **a row lock (FOR UPDATE / NO KEY UPDATE / SHARE / KEY SHARE, SKIP
+LOCKED, a cursor's) of a row deleted after the snapshot said "could not serialize access due to
+concurrent delete"**; PostgreSQL's ExecLockRows says "concurrent update". `probe-dml.py`: 12 of
+128 cases differed on the base, none now.
+
+**Checks.**
+- `probe-rw.py`: 167 / 167 lines as PostgreSQL (base: 45 differ, every CLUSTER case).
+- Isolation spec `roll-cluster-snapshot` (14 permutations: the snapshot's rows by scan and index,
+  UPDATE / DELETE / row lock of rows updated or deleted since, a key updated since, a unique key
+  inserted or deleted since, CREATE INDEX and CLUSTER after it, a savepoint, ALTER TABLE after it,
+  SERIALIZABLE, PREPARE / COMMIT PREPARED, a row lock without CLUSTER): 14 / 14 against PostgreSQL
+  18.6 live; the base 4 / 13 (before the 14th was added). All 28 roll specs: 28 / 28 (three timing
+  specs, `roll-index-progress`, `roll-exclusion-on-conflict`, `roll-migration-lock-timeout`,
+  each differed once in one of four runs on base and new binaries alike).
+- `tools/quick-check.sh` with `QC_CHECKED=1 QC_TESTS=big_tables` on `cand/a324-2`'s code
+  (`91ef0e7e0`, on `98bc2e3b6`): 488 tests in 31 binaries and again built `--profile
+  verify-checked`, clippy nothing new, crash seeds 1-3, regress 51,148 / 51,150 (0 newly
+  differing), isolation 1,647 / 1,648, pg_dump_tap 14,609 passed. `tools/crash-binary.py --seed 1`
+  on its verify binary: ok. The roll specs on it: 28 / 28.
+- `probe-dml.py` (UPDATE, DELETE, the four row locks, SKIP LOCKED, ON CONFLICT DO UPDATE /
+  NOTHING, MERGE update / delete / insert, foreign key child inserts, a FOR UPDATE cursor; after
+  an update, key update, delete or insert committed since; both levels): 128 / 128.
+
+### 2. pg_stat counters
+
+`probe-stats.py` (fillfactor 100, a primary key and an index, 2,000 and 20,000 rows: random
+updates, updates of an indexed column, one row updated 10 times, sequential updates, delete /
+insert / update / ANALYZE / VACUUM in turn, every tenth row updated twice around a VACUUM),
+counting n_tup_ins / upd / del / hot_upd / newpage_upd, n_live_tup, n_dead_tup,
+n_mod_since_analyze, n_ins_since_vacuum:
+
+| | base | `cand/a324-2` |
+|---|---|---|
+| n_tup_newpage_upd, modelled | **always 0** (`count_update` was given false) | PostgreSQL's in every case (`sizing::Updated`: the new version on another page than the old) |
+| n_dead_tup after ANALYZE, modelled | 99 for 168, 245 for 288: the dead line pointers a prune left weren't counted | PostgreSQL's (acquire_sample_rows counts LP_DEAD items: `Heap::dead_items`) |
+| n_dead_tup after ANALYZE past the model | 0 | what pg_stat counts dead (`pgstat::dead_now`; PostgreSQL's sample counts the same in the probes) |
+| n_tup_hot_upd, n_tup_newpage_upd, n_dead_tup past the model | 0, 0, no prune (385 / 14 / 21 PostgreSQL for 399 sequential updates) | **as the base** (below) |
+| n_tup_ins / upd / del, n_live_tup, n_mod_since_analyze, n_ins_since_vacuum | as PostgreSQL | as PostgreSQL |
+
+Test `big_tables::update_counts_modelled` (sequential updates, one row updated ten times,
+updates around a VACUUM: PostgreSQL 18.6's counts).
+
+**Past the model: tried, measured, kept as a patch** (`~/.cache/a324/patches/past-model-page-record.patch`,
+on `eccf1d824`; it was `cand/a324`). `EstHeap::seen` kept an `EstPage` for each page an update
+changed (free space, line pointers, PD_PAGE_FULL, the dead versions not pruned yet, the rows
+whose newest version there is heap-only; at most 65,536 pages a table), with `update_on` as
+heap_update's choice after heap_page_prune_opt, `seen_rows` (each updated row's page, at most
+262,144 a table), and a VACUUM's freed pages as the free space map. It made every probe count
+PostgreSQL's but a few (HOT 165 for 168 and 21 for 27 after a VACUUM, n_dead_tup 34 for 54).
+It is not kept because:
+- a row's page as loaded is only in its stored version's TID, so every past-model UPDATE of a row
+  not updated before did one more point lookup (`Txn::get_raw`), and each new page and row an
+  allocation in the record;
+- the record is bounded per table only (about 82 bytes a page in the map, plus about 130 bytes
+  of vectors, and 18 bytes a row in `seen_rows`: up to about 20 MB a table), not across tables.
+
+Measured (below): pgbench scale 32 accounts UPDATE alone -7.4% / -5.9% user instructions a
+transaction (its HOT updates skip the btree estimate's entries), but TPC-B-like +3.0% / -0.6% and
+peak anon+shmem +20 to +64 MiB for the one table. A cheap form needs the old version's page
+without a lookup (the scan that found the row has its stored TID; nothing carries it to
+`sizing::updated` now) and a record of fixed size a page with one budget for all tables. The
+split candidate's past-model update path is the base's: `untracked_write` returns no HOT or
+new-page flag. (A first split that set them from the estimate's own fill / tail placement was
++0.33% / +0.50% on TPC-B-like: a second pg_stat entry lookup on nearly every update; dropped.)
+
+### Measured
+
+**In process** (`bench --target inproc oltp --clients 1 --only <case>`, a fresh 100,000-row
+database each run, perf stat user instructions of the bench process, (I30 s - I10 s) / (ops30 -
+ops10); harness `~/.cache/a324/inproc/`, agent 317's; plain dist, base `0037841bd2` against
+`20e5dd1cbf`, the first candidate's code, whose modelled path `cand/a324-2` keeps): point_select
+36,391 -> 36,398 (+0.02%) and 36,434 -> 36,424 (-0.03%); short_txn 256,662 -> 260,782 (+1.6%),
+263,106 -> 263,400 (+0.1%), 264,072 -> 262,161 (-0.7%): median +0.1%.
+
+**pgbench scale 32** (`~/.cache/a324/pgb/run1.sh`, `pair.sh`: roll-engine in a container on lane
+A's server CPUs, 8 GiB, `-c autovacuum=off`; `pgbench -i -I dtGvp -s 32` (3.2 M accounts, past the
+400,000-version model), 200 transactions a client to warm, the server idle, then a FIXED 400,000
+transactions (8 clients x 50,000, `-M prepared`; the UPDATE alone `-f ua.sql -D scale=32`); perf
+stat user instructions of the server's cgroup over the run, divided by the transactions; anon+shmem
+of the cgroup every 0.25 s, its peak). Plain dist builds; base `eccf1d824e`; alternating pairs,
+one a hold through `tools/lane.sh a`; every hold had 6.2-7.6 foreign cores on the lane, so
+instruction counts only. 40,000-transaction runs were bimodal (117k or 288k a transaction for
+the UPDATE alone, both arms of a pair alike: a compaction in the run or not); 400,000 settle it.
+The second run of a pair reads about +0.2-0.5% higher (A/A: 202,391 -> 202,752, +0.18%; nine base
+runs of the UPDATE alone span 202.1-205.1k).
+
+| arm | UPDATE accounts alone, instr/txn base -> arm | TPC-B-like | peak anon+shmem |
+|---|---|---|---|
+| `cand/a324` (the page record) | 203,039 -> 188,060 (-7.4%), 204,673 -> 192,601 (-5.9%) | 480,935 -> 495,388 (+3.0%), 480,718 -> 478,033 (-0.6%) | 516, 546, 557, 493 MiB against 492-496 |
+| first split (flags from the estimate's placement) | +0.59%, -0.32%, +0.53% | +0.33%, +0.50% | as the base |
+| **`cand/a324-2`** | 202,064 -> 203,918 (+0.92%, base first), 203,202 -> 202,687 (-0.25%, base second); median of its runs 203.3k against the base's 203.2k | 483,252 -> 481,822 (-0.30%), 482,026 -> 480,558 (-0.30%) | 493-495 MiB against 491-493 |
+
+`cand/a324-2`'s past-model update path is the base's but for the returned struct; what its
+changes add on these paths is an empty `ddl_reads` test, a borrow in a unique check and one at the
+commit.
+
+### Left
+1. Past the model: n_tup_hot_upd / n_tup_newpage_upd / prunes (above): the old version's page
+   from the scan that found the row, a fixed-size record a page under one budget for all tables;
+   the patch has the decisions (`update_on`, `fsm_page`) and the probes.
+2. The modelled heap's n_dead_tup by 1-3 after random updates (451 for 448, 170 for 169).
+3. CLUSTER's held rows go in at the commit through `put_index_entries`: an extension access
+   method's index gets them as inserts then (its own build saw only the snapshot's rows).
+
 ## Point selects: what the snapshot / DDL fixes cost, and the code a read runs through (agent 317, 2026-11-25)
 
 Base `9efd42d19` (the head before agent 310), "head" `83a21ef3f` (agents 310 and 312 landed, and
@@ -23606,6 +23852,107 @@ entry / contains_key / len / clear). Nothing else in the plan cache changed.
   `run_query` 1,225.
 - Merging the ~60 per-statement session functions into fewer was not tried: the trace showed
   repeated work, not call overhead, and function boundaries need a PGO gate (two more builds).
+
+## Point selects, outside the session: lock keys, portals and pgstat (agent 329, 2026-11-26)
+
+Base `214433872` (agent 323's round and agent 324's CLUSTER snapshot landed). Harness
+`~/.cache/a329/inproc/`: agent 323's Intel PT scripts, plus `unk.py`, which splits the code
+without symbols (`[unknown]`: libc and the vDSO) by the address it is entered at and the function
+that enters it. Builds plain dist (`tools/dist.sh --example bench`). Lane A read 5-8 foreign cores
+the whole round: the gate is exact instructions.
+
+### What the libc share was
+
+323 left about 4,000 instructions a select in `[unknown]`. Over 400 extended selects (base): 3,977 in
+libc, 54 in the vDSO. By entry point and caller, most of it was `memcpy`, and most of that was
+moves of the `Portal` struct: Execute takes the portal out of `Session::portals` and puts it back,
+Bind inserts it, Sync's close removes it. `Portal` held a `cursor::Lazy` (a suspended SELECT's
+executor, with its `Kept` maps) inline, about 1 kB: 13 copies a select of ~110 instructions each,
+1,500 in all. Next: `run_query` 7 copies (389), `end_xact_counts` 3 (225: the per-table count
+list a read-only transaction builds empty), `bind_scan` 5 (175), `begin_in` 1 (159: the new
+`TxnState` written into its box), `PointReader`'s drop 4 (112). `memcmp` and `free` the rest.
+
+Allocations: 29 a select. The lock path's: `FastHold` kept each fast-path hold's key in a `Vec`
+(one allocation and one free per relation lock and per transaction lock), and `TxnState::lock`
+cloned its `SmallVec` key for the journal (smallvec's `Clone` goes through `iter().cloned()`: 174
+instructions a key, 522 a select).
+
+Clock reads: in process, 4 a select in the engine (`ensure_txn`'s and `run_query`'s statement
+time and `finish_txn`'s `Database::touch` read the clock only because the bench calls the session
+API without `message_starts`; `pgstat::report`'s flush-interval check). Over the wire the
+server reads at Bind and at Execute (`message_starts`, statement_timestamp as PostgreSQL sets it
+at both), at the Sync's change to idle (pg_stat_activity's state_change, only when the state
+changes) and in `pgstat::report`: 4. PostgreSQL 18 reads about 6 for the same cycle
+(SetCurrentStatementStartTimestamp and pgstat_report_activity at Bind and at Execute, the idle
+report, GetCurrentTransactionStopTimestamp for pgstat_report_stat). Nothing to remove there.
+
+### What changed (no behaviour change)
+
+- `FastHold::key` is a `LockKey` (inline up to 24 bytes): a fast-path hold allocates nothing.
+  `move_slot` copies it into the main table's `Vec` key (the rare path).
+- `TxnState::lock` makes the journal's and the held map's keys with `LockKey::from_slice` each,
+  not one `clone` of the other.
+- `release_fast_owner` doesn't hash the owner into `FastHolds::moved` when nothing was moved.
+- `Portal::lazy` and `Session::suspended` box the executor: a portal is about 300 bytes.
+- Execute lends the portal's parameters to the run (`mem::take` and back) instead of cloning them.
+- pgstat: `Unflushed::tabs` / `funcs` use the executor's hasher, not SipHash (only summed into the
+  shared entries, in no order anything shows); `end_xact_counts` skips `XactStats::end_xact` when
+  the transaction has no table counts (no levels, nothing done): nothing would be added.
+
+### Measured
+
+Exact instructions per op, in process, 1 client (Intel PT, client thread; 400 selects, 100 range
+reads, short_txn per `Session::query_copy`, two a transaction), plain dist, base `214433872`:
+
+| case | base | candidate | |
+|---|---|---|---|
+| point select, extended | 35,251 | 32,375 | -8.2% |
+| point select, simple protocol | 37,055 | 35,418 | -4.4% |
+| range_scan_100 | 392,053 | 390,416 | -0.4% |
+| short_txn (per query_copy) | 100,886 | 96,285 | -4.6% (see below) |
+
+Extended, by function: libc -1,658 (4,033 -> 2,375), SmallVec clones -522, `end_xact_counts` -132,
+the allocator -330 (mallocs 29 -> 24 a select), SipHash -182 (`release_locks` and
+`pgstat::report`), `execute_portal_here` -44, `release_locks` -32; `TxnState::lock` +49 (the two
+inlined key copies). (The bench client's own SipHash moved -85 too.) short_txn moves with the
+data's state both ways (`Block::seek` -2,967, the btree model's splits +2,000 in this pair); its
+own part is the clones (-1,004 a query) and libc; on the old base the same change read -0.3% in
+total. TPC-H SF 0.1 in process (lane C, the 22 once, process `instructions:u`): 17.1315 G base,
+17.1296 G candidate (level); every query's rows and hash equal.
+
+Checks: on the code commit (on `214433872`), `tools/quick-check.sh` with `QC_CHECKED=1` and
+`QC_TESTS=kept_plans`: clippy 16 warnings, none new in a changed file; 461 tests in 26 binaries
+(`wire`, `wire_waits`, `golden`, `kept_plans`, `twophase`, `compact_locks` among them), and again
+built `verify-checked`; crash seeds 1-3 x 2 and power_cut_at_every_point; regress 51,148 / 51,150,
+0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed.
+`tools/crash-binary.py` against the candidate's roll-engine (plain dist): `--seed 1` 7 rounds ok,
+`--seed 1 --power drop` 10 rounds ok.
+
+### Left
+
+- The lock path is still about 2,500 instructions a select, in pieces: `TxnState::lock` 732 (four
+  calls: Bind's binding locks the table and its index, Execute's `lock_some` finds them held), the
+  held map's insert 330 and lookup 224 (a new lock's key is hashed twice: hashbrown's `entry_ref`
+  needs `From<&HeldKey>` for the key, a tuple, so a `HeldLock` newtype through the journal's users),
+  `release_locks` 239, `catalog_version` 224 (seven calls: `lock_some` compares it before and after
+  every lock past the named ones, the index's too), `accept_catalog` 201, `hold_own_xact_lock` 190.
+- Portals boxed in `Session::portals` (`~/.cache/a329/patches/portals-boxed.patch`, on this
+  candidate): -152 a select (-0.47%, exact): the copies go (-198 in libc), but hashbrown's insert
+  and remove cost the same with a pointer for a value, and the box's allocation takes some back.
+  Not handed in on its own (a quick-check for 0.5%); worth carrying with the next change there.
+- Execute's second binding lookup (`bound_as` from `planned_as`, after Describe's at Bind: about
+  400 with `current_role` and the search path) runs inside the custom-plan choice, agent 328's.
+- `ExecCtx::with_search_path` 513 and its drop 158 (about 50 fields set and dropped a statement;
+  `live_notices` allocates an `Rc` each), `txn_settings` 484 and `Settings::end_transaction` 428
+  (session/settings), `pgstat::report` 408 (each transaction's counts move into the backend's
+  slot so readers can flush an idle backend; PostgreSQL keeps them local until a flush).
+- libc 2,375 a select: `memcmp` in storage's point reads, `bind_scan`'s 5 copies (175), the new
+  `TxnState` written into its box (`begin_in`, 159: built on the stack first), `PointReader`'s drop
+  (112).
+- In process the session reads the clock for the statement and transaction times and
+  `Database::touch` (`stmt_start` is 0 without `message_starts`): 3 reads a select a server does not
+  make. An embedding caller sees statement_timestamp() and transaction_timestamp() of its first
+  statement from two reads, where PostgreSQL has one.
 
 ## Power cuts of the shipped binary, and a release script (agent 325, 2026-11-26)
 

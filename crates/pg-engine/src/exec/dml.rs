@@ -1042,11 +1042,14 @@ pub(crate) fn committed_conflict(
         .collect();
     let prefix = index_value_prefix(t, &bix.index, vals, &bix.colls);
     let end = prefix_end(&prefix);
+    // (A table a CLUSTER kept as our snapshot sees it: its rows gone since don't conflict,
+    // the newer ones the commit puts in do, `RewriteView`.)
+    let view = ctx.txn.borrow().rewrite_view(t.oid).is_some();
     let scanned = || -> Result<Option<Vec<u8>>> {
         let mut scan = ctx.txn.borrow().scan_latest(&prefix, &end);
         for e in scan.by_ref() {
             let (_, dkey) = e?;
-            if own == Some(dkey.as_ref()) {
+            if own == Some(dkey.as_ref()) || (view && ctx.txn.borrow().rewrite_gone(&dkey).is_some()) {
                 continue;
             }
             if image.contains(&true) {
@@ -1068,6 +1071,20 @@ pub(crate) fn committed_conflict(
         }
         Ok(None)
     };
+    if view {
+        if let Some(k) = scanned()? {
+            return Ok(Some(k));
+        }
+        let puts: Arc<[crate::txn::RewritePut]> = ctx.txn.borrow().rewrite_view(t.oid).map_or_else(|| Arc::from(Vec::new()), |v| v.puts.clone());
+        for p in puts.iter() {
+            if let Some(other) = index_values(bix, &p.row, ctx)?
+                && index_value_prefix(t, &bix.index, &other, &bix.colls) == prefix
+            {
+                return Ok(Some(p.key.clone()));
+            }
+        }
+        return Ok(None);
+    }
     // The first entry, read without a merging scan, when it answers: it isn't `own`'s, and
     // no image comparison could pass over it.
     if !image.contains(&true) {
@@ -1631,7 +1648,7 @@ fn am_insert(t: &Table, bix: &BoundIndex, vals: Option<&[Value]>, dkey: &[u8], u
     Ok(true)
 }
 
-fn delete_index_entries(
+pub(crate) fn delete_index_entries(
     t: &Table,
     indexes: &[BoundIndex],
     row: &[Value],
@@ -3184,7 +3201,7 @@ pub fn update_row_rls(
     // The new version went into the heap before its index entries found a clash or an
     // entry too big (`rowsize`): it stays, dead, where it was put (its TID the error's).
     let dead = || match new_key == dkey {
-        true => super::sizing::updated(t, &rules.indexes, dkey, old, &new_key, &new, ctx).ok().flatten().map(|u| u.0),
+        true => super::sizing::updated(t, &rules.indexes, dkey, old, &new_key, &new, ctx).ok().and_then(|u| u.tid),
         false => None,
     };
     // Indexes whose key changed: an entry's size as it is formed, a unique or exclusion
@@ -3231,8 +3248,8 @@ pub fn update_row_rls(
         super::rowsize::on_insert(t, bix, nv.as_deref(), &new, tid, ctx)?;
     }
     let upd = super::sizing::updated(t, &rules.indexes, dkey, old, &new_key, &new, ctx)?;
-    let tid = upd.map(|u| u.0);
-    super::pgstat::count_update(ctx, t.oid, upd.is_some_and(|u| u.1), false);
+    let tid = upd.tid;
+    super::pgstat::count_update(ctx, t.oid, upd.hot, upd.newpage);
     if new_key != dkey {
         super::toast::delete_row(dkey.to_vec(), Some(old), &mut ctx.txn.borrow_mut(), false)?;
     }
@@ -6587,7 +6604,7 @@ impl DeleteNode {
             let upto = i + fast;
             while i < n {
                 let locked = if i < upto {
-                    super::scan::after_lock(&t, keys[i], mode, false, ctx)?
+                    super::scan::after_lock(&t, keys[i], mode, Xltw::Delete, false, ctx)?
                 } else if i == upto {
                     super::scan::lock_row_with(&t, keys[i], mode, Wait::Block, Xltw::Delete, false, ctx)?
                 } else {
