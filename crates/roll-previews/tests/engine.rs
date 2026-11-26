@@ -2281,8 +2281,15 @@ async fn a_service_that_didnt_change_keeps_its_pages() {
     e.code.open(c);
     e.engine.pass().await.unwrap();
     let p = e.engine.store.row_by_change("chg_ts").unwrap().unwrap();
-    // The change's run takes api's page, then web's.
+    // The change's run takes api's page, then web's, and records them (web's kept page and what
+    // it ran) before the next push: a push while it's still storing them takes web again.
     taken(&e.apps, "web", 1).await;
+    for _ in 0..3000 {
+        if e.engine.store.kept_page(&p.id, "web:/").unwrap().is_some() && e.engine.store.service_shot_key(&p.id, "web").unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     let web_before = runs("web");
     assert!(web_before >= 1, "web's page taken at first");
     let api_before = runs("api");
