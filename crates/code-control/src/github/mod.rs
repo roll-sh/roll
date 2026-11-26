@@ -19,6 +19,7 @@ pub(crate) mod inbox;
 pub(crate) mod mirror;
 mod notify;
 pub(crate) mod outbox;
+mod push_scan;
 mod reconcile;
 mod reviews;
 pub(crate) mod sync;
