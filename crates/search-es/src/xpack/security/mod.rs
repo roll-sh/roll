@@ -314,6 +314,12 @@ pub fn authenticate(ctx: &Ctx) -> EsResult<()> {
     let req = ctx.request;
     // A linked remote cluster's request: the node keeps the header only on roll's own calls.
     if let Some(access) = req.header(crate::remote::links::REMOTE_ACCESS_HEADER) {
+        // OpenSearch: the link's own internal user ([`opensearch::authenticate_link`]).
+        if ctx.cluster.dialect == crate::cluster::Dialect::OpenSearch {
+            let p = req.header("authorization").and_then(|h| authenticate_native_link(ctx.cluster, h, access)).ok_or_else(opensearch::unauthorized)?;
+            let _ = ctx.principal.set(p);
+            return Ok(());
+        }
         // Cross-cluster keys are Elasticsearch's ([`es_credentials`]).
         if !es_credentials(ctx.cluster) {
             return Err(opensearch::unauthorized());
