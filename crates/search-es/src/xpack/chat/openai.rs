@@ -29,7 +29,13 @@ use bytes::Bytes;
 pub const PREFIX: &str = "/_roll/openai/";
 
 /// Whether `Bearer <value>` on `path` is an API key: on the OpenAI-compatible routes, a derived
-/// key, or base64 of `<id>:<key>` (never the cluster's `<name>_<password>`: base64 has no `_`).
+/// key, or base64 of `<id>[@<cluster>]:<key>` read strictly, so no other Bearer credential is
+/// taken for one:
+/// - the cluster's `<name>_<password>` has a `_`, which base64 never does, and its bare password
+///   (routed by host) is lowercase letters and digits that don't decode to this shape;
+/// - a service account token decodes to `00 01 00 01 …` (base64 `AAEAA…`);
+/// - an access token decodes to random bytes: not UTF-8, or no id of the API key alphabet
+///   (16 to 64 of `A-Za-z0-9_-`) before its `:`.
 pub fn bearer_is_api_key(path: &str, value: &str) -> bool {
     if !path.starts_with(PREFIX) {
         return false;
@@ -37,7 +43,17 @@ pub fn bearer_is_api_key(path: &str, value: &str) -> bool {
     if crate::xpack::security::derived::is_derived(value) {
         return true;
     }
-    !value.contains('_') && crate::xpack::security::b64_decode(value).is_ok_and(|b| b.iter().position(|&c| c == b':').is_some_and(|i| i > 0))
+    if value.contains('_') || value.starts_with("AAEAA") {
+        return false;
+    }
+    let Ok(bytes) = crate::xpack::security::b64_decode(value) else { return false };
+    let Ok(text) = std::str::from_utf8(&bytes) else { return false };
+    let Some((who, secret)) = text.split_once(':') else { return false };
+    let (id, cluster) = who.split_once('@').map_or((who, None), |(i, c)| (i, Some(c)));
+    let id_ok = (16..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+    let cluster_ok = cluster.is_none_or(|c| (1..=63).contains(&c.len()) && c.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'));
+    let secret_ok = !secret.is_empty() && secret.len() <= 256 && secret.bytes().all(|b| b.is_ascii_graphic());
+    id_ok && cluster_ok && secret_ok
 }
 
 /// An `Authorization` header as these routes read it: `Bearer <API key>` as `ApiKey <API key>`
@@ -220,12 +236,23 @@ mod tests {
 
     #[test]
     fn bearer_api_keys_on_the_openai_routes_only() {
-        let key = base64::engine::general_purpose::STANDARD.encode("kid@shop:secret");
+        let key = base64::engine::general_purpose::STANDARD.encode("Jx2kq3Z0RkKp1M7m0nQv@shop:k3yS3cretValue22chr");
         assert_eq!(authorization_for("/_roll/openai/v1/chat/completions", &format!("Bearer {key}")), Some(format!("ApiKey {key}")));
         assert_eq!(authorization_for("/_search", &format!("Bearer {key}")), None);
         // The cluster's own `<name>_<password>`, and access tokens, stay Bearer.
         assert_eq!(authorization_for("/_roll/openai/v1/models", "Bearer shop_s3cret"), None);
         assert_eq!(authorization_for("/_roll/openai/v1/models", "Bearer dGtu"), None);
         assert_eq!(authorization_for("/_roll/openai/v1/models", "Bearer rdk1.e30.AAAA"), Some("ApiKey rdk1.e30.AAAA".into()));
+        // A service token (`00 01 00 01` + `elastic/fleet-server/token1:secret`) and an access
+        // token of random bytes that happen to hold a `:` are left as Bearer.
+        let mut svc = vec![0u8, 1, 0, 1];
+        svc.extend_from_slice(b"elastic/fleet-server/token1:s3cr3tValue");
+        let svc = base64::engine::general_purpose::STANDARD.encode(svc);
+        assert!(svc.starts_with("AAEAA"));
+        assert_eq!(authorization_for("/_roll/openai/v1/models", &format!("Bearer {svc}")), None);
+        let random = base64::engine::general_purpose::STANDARD.encode([0x9fu8, 0x3a, 0xc3, 0x28, 0x3a, 0x41, 0x42]);
+        assert_eq!(authorization_for("/_roll/openai/v1/models", &format!("Bearer {random}")), None);
+        // A host-routed cluster password (lowercase letters and digits).
+        assert_eq!(authorization_for("/_roll/openai/v1/models", "Bearer k3mz8q2rjvx9a4tnc7wd5ype"), None);
     }
 }

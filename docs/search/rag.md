@@ -48,9 +48,12 @@ what the best of the four products does:
   `GET /_roll/openai/v1/models` lists the profiles the caller may run. Errors before the stream
   are the cluster's with their status and `Retry-After` (OpenAI SDKs retry by them); a failure
   mid-stream is OpenAI's error object as the last event.
-- **Bearer API keys.** On `/_roll/openai/` paths a Bearer value that base64-decodes to
-  `<id>:<key>` (base64 has no `_`, so never the cluster's `<name>_<password>`) or is a derived
-  key authenticates as `ApiKey`. The node rewrites the header before admission
+- **Bearer API keys.** On `/_roll/openai/` paths a Bearer value that is a derived key, or that
+  base64-decodes to UTF-8 `<id>[@<cluster>]:<key>` with an id of the API key alphabet (16 to 64 of
+  `A-Za-z0-9_-`) and a printable key, authenticates as `ApiKey`. Nothing else matches: the
+  cluster's `<name>_<password>` has a `_` (base64 never does), its bare password is lowercase
+  letters and digits, a service token decodes to `00 01 00 01 …` (base64 `AAEAA…`, refused by
+  its prefix), and an access token's random bytes aren't that shape. The node rewrites the header before admission
   (`search-server/src/http.rs`), so a browser key sent as Bearer pays its rate limits like any.
 - **Browser keys** chat through their own policy entry, `limits.chat` (in place of the
   `chat_profiles`, `chat_cost` and `max_history_tokens` limits sketched below):
