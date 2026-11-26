@@ -5007,7 +5007,7 @@ struct CopyCheck {
 }
 
 impl CopyCheck {
-    fn done(self) -> anyhow::Result<()> {
+    fn done(&self) -> anyhow::Result<()> {
         let plural = |n: usize| if n == 1 { "" } else { "s" };
         match self.missing + self.changed {
             0 => {
