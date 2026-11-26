@@ -380,6 +380,70 @@ All 22 queries' user instructions -0.00% / -0.04%; per query within +-0.26% (q03
 / -0.15, q16 -0.10 / -0.13, the rest within 0.1%); hashes equal; peak anon+shmem 1,620.9 / 1,620.3 MB
 against 1,616.0 / 1,615.6. Foreign load 0.8-2.5 cores (wall times not compared).
 
+## Short write transactions, round 20: the TPC-B-like spread by thread class; a small table's filtered scan of a kept hot range (2026-11-26, agent 333)
+
+HANDOFF "Short write transactions, round 20" has what it means. Builds: plain dist (`tools/dist.sh`). **b0** = `e60eabee2`
+(agent 328's candidate), **n1** = b0 + this change (`9c98d0d72`). Lane A, one run a `tools/lane.sh` hold; every hold read
+5-7.6 foreign cores (over the 1.0 rule: instruction counts only). Harness `~/.cache/a333/bench` (`split.sh`).
+
+### The split: scale 32, 160,000 TPC-B-like transactions a run, user instructions a transaction
+
+Counted from every client connected through 8 s after the last transaction and a CHECKPOINT. Connection threads exactly
+(`perf stat --per-thread --no-inherit`); the flush thread (a new `roll-flush` thread a background run) and autovacuum
+workers as the cgroup total minus the threads alive at the start, split by a `-c 5000011` sample. "Start": the L0 files
+left when the window opens (the load's last three, or not). "Warmed": 160,000 transactions first, uncounted. Seq scans:
+the window's `pg_stat_user_tables.seq_scan` of tellers / branches (of 160,000 UPDATEs each).
+
+| run | start | mode | tps | total | connection threads | flush thread | autovacuum | compactions | tellers seq / branches seq |
+|---|---|---|---|---|---|---|---|---|---|
+| b0 8 cl r7 | cold, 0 L0 | auto | 598 | 509.8k | 374.1k | 122.0k | 13.6k | 4 | 10,916 / 160,001 |
+| b0 8 cl r8 | cold, 0 L0 | auto | 1204 | 538.2k | 410.7k | 121.6k | 5.8k | 4 | 42,181 / 42,182 |
+| b0 32 cl q2 | cold, 0 L0 | auto | 3806 | 463.7k | 356.4k | 102.7k | 4.6k | 3 | 55 / 160,001 |
+| b0 8 cl w1 | warmed, 3 L0 | auto | 1524 | 489.4k | 345.6k | 133.6k | 10.1k | 4 | 0 / 132,911 |
+| b0 8 cl w2 | warmed, 1 L0 | auto | 1969 | 464.1k | 317.8k | 135.7k | 10.6k | 4 | 0 / 1 |
+| b0 8 cl g1 | warmed, 1 L0 | auto | 612 | 474.6k | 316.5k | 134.1k | 24.0k | 4 | 0 / 1 |
+| b0 8 cl g2 | warmed, 1 L0 | force_generic_plan | 733 | 484.3k | 331.6k | 133.9k | 18.7k | 4 | 0 / 59,926 |
+| n1 8 cl s1 | cold, 3 L0 | auto | 758 | 528.1k | 351.6k | 164.1k | 12.3k | 5 | 24,695 / 66,530 |
+| n1 8 cl s2 | cold, 3 L0 | auto | 1065 | 547.0k | 375.8k | 165.2k | 5.9k | 5 | 51,474 / 93,298 |
+| n1 8 cl s3 | cold, 3 L0 | auto | 1754 | 549.1k | 376.4k | 165.4k | 7.1k | 5 | 55,968 / 55,968 |
+| n1 32 cl sq1 | cold, 3 L0 | auto | 1142 | 506.8k | 337.7k | 162.6k | 6.4k | 5 | 1,417 / 45,315 |
+| n1 8 cl w1 | warmed, 1 L0 | auto | 1352 | 462.1k | 317.6k | 134.0k | 10.4k | 4 | 0 / 1 |
+| n1 8 cl w2 | warmed, 3 L0 | auto | 1112 | 474.4k | 331.7k | 129.5k | 13.1k | 4 | 0 / 160,001 |
+
+(g1 ran under force_generic_plan too; its line was written before the mode was. b0's first six runs, before the
+seq-scan counts were recorded: connection threads 424k, 502k, 468k, 439k, 519k, 417k at 1,574 / 2,158 / 1,486 / 1,233 /
+2,200 / 1,095 tps, the flush thread 123-136k with four compactions each.)
+
+b0's connection threads against its runs' plan mix: `317.4k + 319k x T + 34.7k x B` (T, B: tellers / branches seq scans
+a transaction), residuals −949 .. +1,136 over r7, r8, w1, w2, g1, g2. n1's: a tellers seq scan ~131k, a branches one
+13-14k; with no seq scan 317.6k (b0's fit 317.4k).
+
+PostgreSQL 18.6 (`postgres@sha256:77f58...`, 2 GB shared_buffers, as 328's harness), 8 clients, cold: client backends
+406.5k, checkpointer 4.4k, autovacuum workers 7.5k (branches 157,527 seq scans, tellers 3,762); warmed: backends 312.0k
+(no branches seq scan in the window) and 347.6k (all 160,000), checkpointer 4.0k. 32 clients, cold: backends 344.2k,
+checkpointer 4.4k, autovacuum 6.5k.
+
+### One statement, one client (`stmt.sh`): user instructions an execution (whole cgroup, 10,000 executions)
+
+| statement, plan | b0 | n1 |
+|---|---|---|
+| UPDATE pgbench_tellers, seq scan (index and bitmap scans off) | 408.3k, 388.9k | 244.8k, 248.1k |
+| UPDATE pgbench_tellers, index scan | 115.1k | 116.4k |
+| UPDATE pgbench_branches (one page: a seq scan in every cell) | 123.0k, 121.9k, 122.1k | 104.6k, 105.2k, 104.6k |
+
+(A cell that planned a seq scan by itself and one with a compaction in it are left out: 379.7k / 217.4k, 690.7k / 672.1k.)
+
+### Reads that must stay level: connection threads exactly over a fixed count (`reads.sh`)
+
+| case | b0 | n1 |
+|---|---|---|
+| prepared point select (1 client, 100,000) | 60.9k, 58.8k | 58.3k, 62.8k |
+| 1,000-row primary-key range read (8 clients x 2,000), the same start (no L0 file) | 2,128.0k, 2,109.2k | 2,103.9k |
+
+(Runs before the start state was recorded: b0 2,113.5k, 2,102.9k, n1 2,145.5k, 2,138.1k; an n1 run that started with
+the load's three L0 files: 2,155.8k. A one-client LBR profile of the range read, b0 against n1: −1.0%, no symbol past
+sampling noise.)
+
 ## Cheap custom plans, round 1: a named statement's custom plan stays its binding after a size change (2026-11-26, agent 328)
 
 HANDOFF "Cheap custom plans" has what changed. Builds: plain dist (`tools/dist.sh`). **b0** = `eccf1d824`,

@@ -16163,6 +16163,96 @@ Harness: `~/.cache/a328/bench` (`stmt.sh`: per-statement cells, custom against g
 `prof.sh`: an LBR profile of one cell; `oltp.sh` from 322 with `PCM=<plan_cache_mode>`), the probe test and
 its trace prints in `~/.cache/a328/patches/` (`a328_probe.rs`, `probe-trace2.patch`; not for landing).
 
+## Short write transactions, round 20: where TPC-B-like's run-to-run spread comes from; a small table's filtered scan of a kept hot range (agent 333)
+
+BENCH "Short write transactions, round 20" has the tables. Harness `~/.cache/a333/bench` (below).
+
+**The split** (brief item 1). One server cgroup, scale 32, 160,000 TPC-B-like transactions a run (`-M prepared`, fixed
+count), counted from the moment every client is connected through 8 s after the last transaction and a CHECKPOINT.
+roll's threads are counted exactly: `perf stat --per-thread --no-inherit -p` of every thread alive at the start (the
+connection threads, models, autovacuum launcher...), and the threads born in the window (each background
+flush/compaction run is a new `roll-flush` thread; autovacuum workers; the CHECKPOINT's connection) are the cgroup total
+minus those, named by a sample split at `-c 5000011` (it agrees with the exact remainder to 0.3 points of the total).
+Same binary (plain dist of `e60eabee2`, 328's candidate), eight runs at 8 clients:
+
+- **Connection threads 374-519k, the flush thread 122-136k, autovacuum 3-24k.** The flush thread is steady: four
+  compactions in every run started from the same state (30-33k a transaction each), the memtable flushes ~9k. The spread
+  is in the connection threads.
+- **It is the plan mix, and nothing else.** `pg_stat_user_tables` after each run shows how many of the tellers and
+  branches UPDATEs scanned their table: tellers 56-108,987 seq scans of 160,000, branches 0-160,002. Over six runs of
+  both cold and warmed starts and both plan modes the connection threads fit `317.4k + 319k x (tellers seq scans per
+  transaction) + 34.7k x (branches seq scans per transaction)` with residuals within ±1.1k (0.35%). No spinning, no
+  repeated planning, no cold-read term was left to find. Which plan a run gets follows how the heap model grows: a custom
+  plan of an UPDATE planned while its table was one or two pages is a seq scan, the generic plan once it grew is an index
+  scan, and whether branches grows (1 page or 9-10) depends on the snapshots open when its pages fill. PostgreSQL makes
+  the same choice the same way (its backends: 312.0k with no branches seq scan in the window, 347.6k with all of them).
+- **A seq scan of a small hot table cost ~780 instructions a row**: 319k for tellers' 320 rows, 34.7k for branches' 32,
+  against ~130k for the whole UPDATE by index. Every row of the kept hot range (`storage/hot.rs`) was cloned out of its
+  chain (key and value `Bytes`), pushed into the batch, peeked, its TID parsed, its stored values compared, and the batch
+  dropped, to keep one row of 320.
+- **The start state is a second, smaller term.** Whether the load's last three L0 files were merged before the window
+  (`l0=0` or `l0=3` after `pgbench -i` and the quiet wait) adds one compaction to the window (~33k a transaction), and
+  makes a 1,000-row range read right after the load ~2% dearer. Warmed windows (below) start from either and still see
+  four compactions.
+- Autovacuum is time-driven: 5-24k a transaction, following the run's wall time (10k at 104 s, 24k at 261 s).
+
+**A measure stable to ~1%** (brief item 2). A warm-up of 160,000 transactions first (uncounted; the tables reach their
+grown sizes, tellers stops seq-scanning), CHECKPOINT and quiet, then 160,000 counted with `-c enable_seqscan=off` for
+the measured run only (index plans on every server: what both choose once the tables grew, so the branches flip is out
+of it), autovacuum's share reported apart. Warmed runs with no seq scan in the window (b0 twice, n1, n1 with the
+round's probe at its defaults twice): connection threads 317.8k, 316.5k, 317.6k, 317.9k, 315.6k (−0.7 .. +0.1%), the
+flush thread 133.6-136.8k. PostgreSQL by the same measure: 311.5k / 316.3k at 8 clients, 344.0k / 338.4k at 32. 324's 40,000-transaction cells
+were bimodal for the second reason above; 322's and 328's 505-792k spread was the first.
+
+**What changed** (brief item 3: the spread's cost was repeated work, the rows copied to be rejected):
+
+- `Hot::scan_kept` / `Store::scan_raw_kept` / `Txn::scan_snap_kept`: a kept hot range read with a filter over the stored
+  value, called on every visible row in key order, under the range's lock; only the rows it takes are copied out. None
+  (not called) when no kept range holds the range, or when our writes may be in it (buffered or spilled writes, a range
+  deletion of ours, a snapshot with writes since its mark).
+- `ScanNode::open_kept`: `next_heap_ordered`'s held pass (a small table's rows held whole, the filter's stored-value
+  comparisons first: agent 305's path) opens its one range that way; the rows the comparisons reject are counted
+  (`count_rows`, `removed` in one call each) as before, never batched. A row without its TID is taken (the pass then
+  reads everything its other way, as before); a pass that would hold more than `HELD_ROWS` reads the range again whole
+  (the other way needs every row's TID). `HEAP_ORDER_KEPT` counts the passes.
+- The held pass counts its rejected rows at once (`count_rows`) instead of one call a row.
+
+Measured (plain dist, **b0** = `e60eabee2`, **n1** = b0 + the change but `count_rows`, lane A at 6-7.6 foreign cores in every hold: user
+instructions only):
+
+- One client, one statement (`stmt.sh`, 10,000 executions, whole cgroup): the tellers UPDATE seq-scanning
+  (`enable_indexscan`/`enable_bitmapscan` off) 389-408k -> 245-248k an execution (−37%), the branches UPDATE (one page:
+  a seq scan in every cell) 122-123k -> 104.6k (−15%); the tellers UPDATE by index 115k -> 116k.
+- TPC-B-like at 8 clients, connection threads against b0's fit for the run's own plan mix: 351.6k (b0's 380.9k), 375.8k
+  (440.4k), 376.4k (440.6k); warmed, no seq scan: 317.6k (b0 317.4k); every branches UPDATE seq-scanning: 331.7k (b0
+  352.2k). Per seq scan under TPC-B: tellers 319k -> 131k, branches 34.7k -> 13-14k. b0's eight runs spread 374-519k
+  in the connection threads; a seq scan now costs n1 about 40% of what it cost b0, so the same mixes spread about 40% as far.
+- Level: the connection threads exactly over fixed counts (`reads.sh`): prepared point select b0 60.9k / 58.8k, n1
+  58.3k / 62.8k (start states alike in each pair); the 1,000-row range read (8 clients) b0 2,128.0k / 2,109.2k, n1
+  2,103.9k with the same start state (`l0=0`; one n1 run that started at `l0=3` read 2,155.8k, as the start-state term
+  above). A one-client profile of the range read: −1.0%, no symbol over sampling noise.
+
+Not done: the PGO gate (no inlining boundary of the read paths changed; the new code is a separate function).
+
+Checks: `hot_ranges_match_the_store` reads the kept range through `scan_raw_kept` at every check (rows taken, every
+visible row asked once); `heap_order_scan` asserts the prepared UPDATE / SELECT loop read the kept range
+(`HEAP_ORDER_KEPT`) and EXPLAIN ANALYZE's `Rows Removed by Filter: 299` there. quick-check with QC_CHECKED=1 on `9a90ff345` (rebased on `4c322b3d8`): tests 453 passed in 25 binaries (`crash_bulk` and
+`storage_linked_gc` among them), crash seeds 1-3 x 2 and power_cut_at_every_point, checked 453 passed, regress 0 newly
+differing, isolation 1,647 / 1,648, pg_dump 14,609 passed; `tools/crash-binary.py` seeds 1-3 and `--power drop` seed 1
+against the plain dist build of the change (`41ba91baa`, the same code on `9ca2d3685`): ok.
+
+Left:
+
+- What a seq scan of tellers still costs over the index plan (+130k at one client, ~300 a row): `StoredCmps::passes_with`
+  91 a row with `peek_num` 49 (out of line: `storage/row.rs`), the chain walk 67, the row header's three varints 46, and
+  the heap model's page pruning on every scan (`Heap::prune_with`, 17.7k a scan: `catalog/heapsim.rs`).
+- The flush thread (134k a transaction) is now the largest item against PostgreSQL (its checkpointer + background
+  writer + WAL writer: ~4.3k); the next part of this round (a second candidate).
+- Harness: `split.sh <arm> <clients> <tag>` (WARM, PCM, MOPTS, ENGINE_ENV; one copy of it per run through `run.sh`:
+  bash reads a running script), `splitagg.py` / `pgsplit.py` (the split), `fit.py` (connection threads against the
+  plan mix), `stmt.sh` (the statement cells), `reads.sh` (exact read gates), `prof.sh`, `bulk.sh`, `lsm.py` (L0/L1 of a
+  data directory from its MANIFESTs).
+
 ## Short write transactions, round 19: the TPC-B-like standing at fixed counts; the L0 merge left out, its read cost itemized (agent 322)
 
 BENCH "Short write transactions, round 19" has the tables. No engine code changed: what was tried is in
