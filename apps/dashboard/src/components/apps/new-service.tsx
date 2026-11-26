@@ -67,6 +67,8 @@ export function NewServiceSheet({
   // Any public Git URL instead (GitHub, GitLab…): no app to install, no mirror.
   const [gitUrl, setGitUrl] = useState("");
   const [gitBranch, setGitBranch] = useState("");
+  // A roll code repo's branch to follow (Vercel's, Render's import): its default when empty.
+  const [repoBranch, setRepoBranch] = useState("");
   const [root, setRoot] = useState("");
   const [image, setImage] = useState("");
   const [regUser, setRegUser] = useState("");
@@ -140,7 +142,7 @@ export function NewServiceSheet({
   const loginKey = "git_login" in gitLogin ? `${regUser.trim()}:${loginRev}` : "";
   const planKey = `${git || repo}\n${gitBranch.trim()}\n${root.trim()}\n${loginKey}`;
   useEffect(() => {
-    if (from !== "repo" || (!git && !repo) || (git && !/^https?:\/\/[^/@\s]+\/\S+$/.test(git))) return;
+    if (from !== "repo" || (!git && !repo) || (git && !/^https:\/\/[^/@\s]+\/\S+$/.test(git))) return;
     let live = true;
     const at = root.trim() ? { root: root.trim() } : {};
     const t = setTimeout(() => {
@@ -158,7 +160,7 @@ export function NewServiceSheet({
   }, [from, repo, git, gitBranch, root, planKey]);
   const rootsKey = `${git || repo}\n${gitBranch.trim()}\n${loginKey}`;
   useEffect(() => {
-    if (from !== "repo" || (!git && !repo) || (git && !/^https?:\/\/[^/@\s]+\/\S+$/.test(git)) || roots?.key === rootsKey) return;
+    if (from !== "repo" || (!git && !repo) || (git && !/^https:\/\/[^/@\s]+\/\S+$/.test(git)) || roots?.key === rootsKey) return;
     let live = true;
     const t = setTimeout(() => {
       appsApi.roots(git ? { git, ...(gitBranch.trim() ? { branch: gitBranch.trim() } : {}), ...gitLogin } : { repo }).then(
@@ -217,9 +219,12 @@ export function NewServiceSheet({
   const parsed = useMemo(() => parseEnv(env), [env]);
   // What its `.env.example` names that isn't set yet (a database it links sets its own URL).
   const expects = from === "repo" && plan?.key === planKey ? (plan.plan?.variables ?? []) : [];
-  const linkedUrls = new Set([...(links.size || make.size ? ["DATABASE_URL", "PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGDATABASE", "REDIS_URL"] : [])]);
+  // By what's linked or made: a Redis link sets no DATABASE_URL.
+  const linkedKinds = new Set<string>([...make, ...[...links].map((k) => k.split(":")[0]!)]);
+  const linkedUrls = new Set([...(linkedKinds.has("postgres") ? ["DATABASE_URL", "PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGDATABASE"] : []), ...(linkedKinds.has("redis") ? ["REDIS_URL"] : [])]);
   const unset = expects.filter((n) => !(n in parsed.vars) && !linkedUrls.has(n));
-  const scheduleOk = kind !== "cron" || schedule.trim().split(/\s+/).length === 5;
+  // Five fields, or a macro the server reads (`@daily`, `@hourly`…).
+  const scheduleOk = kind !== "cron" || schedule.trim().split(/\s+/).length === 5 || /^@(yearly|annually|monthly|weekly|daily|midnight|hourly)$/.test(schedule.trim());
   const healthOk = !health.trim() || health.trim().startsWith("/");
   const ready = !!source && gitOk && SERVICE_NAME.test(name) && portOk && healthOk && scheduleOk && parsed.errors.length === 0 && !busy;
 
@@ -263,7 +268,8 @@ export function NewServiceSheet({
         ...fresh.map((r) => ({ kind: LINKABLE[r.kind]!, ref: r.ref })),
         ...linkable.filter((v) => links.has(resourceKey(v)) && !freshKeys.has(resourceKey(v))).map((v) => ({ kind: LINKABLE[v.kind]!, ref: v.ref })),
       ];
-      const branch = source.kind === "git" && gitBranch.trim() ? { branch: gitBranch.trim() } : {};
+      const picked = source.kind === "git" ? gitBranch.trim() : source.kind === "repo" ? repoBranch.trim() : "";
+      const branch = picked ? { branch: picked } : {};
       const s = await appsApi.create({ project: project.id, name, source, ...branch, ...(run ? { run } : {}), ...variables, ...registry, ...(chosen.length ? { links: chosen } : {}), ...spot });
       onCreated(s);
     } catch (e) {
@@ -314,6 +320,14 @@ export function NewServiceSheet({
                   </option>
                 ))}
               </select>
+            )}
+            {repo && !gitUrl.trim() && (
+              <>
+                <Label>
+                  Branch <span className="font-normal">optional; production follows it</span>
+                </Label>
+                <input value={repoBranch} onChange={(e) => setRepoBranch(e.target.value)} placeholder="its default branch" aria-label="Repository branch" className={field} spellCheck={false} />
+              </>
             )}
             <FromGithub
               onPicked={(full) => {
@@ -450,9 +464,9 @@ export function NewServiceSheet({
             {kind === "web" && (
               <>
                 <Label>
-                  Port <span className="font-normal">{from === "repo" && plan?.plan ? `detected ${plan.plan.port}` : "default 8080"}</span>
+                  Port <span className="font-normal">{from === "repo" && plan?.plan ? `detected ${plan.plan.port}` : from === "image" ? "default: the one the image exposes" : "default 8080"}</span>
                 </Label>
-                <input value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))} placeholder={String(plan?.plan?.port ?? 8080)} inputMode="numeric" className={field} />
+                <input value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))} placeholder={from === "image" ? "its EXPOSE" : String(plan?.plan?.port ?? 8080)} inputMode="numeric" className={field} />
                 <Label>
                   Health check path <span className="font-normal">optional; none: the port accepting</span>
                 </Label>

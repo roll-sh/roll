@@ -663,6 +663,10 @@ LEFT=$(api GET "/v1/previews/$PV" | jq_ "(lambda k: '%s %s' % (k.get('stories'),
 # Each story checked with axe as a page is (Chromatic's accessibility tests): its record says so.
 STORY_A11Y=$(api GET "/v1/previews/$PV" | jq_ "[(x.get('a11y') or {}).get('lang') for x in d['pages'] if x['path'] == 'story:deep--one']")
 [ "$STORY_A11Y" = "[True]" ] || { echo "a story's page should carry its accessibility, as a page's does: $STORY_A11Y"; exit 1; }
+# The change's first stories in the other browsers asked for too (Chromatic's cross-browser
+# stories): Deep's, taken first, in Firefox and WebKit at a phone's size.
+STORY_BROWSERS=$(api GET "/v1/previews/$PV" | jq_ "sorted(x['path'] for x in d['pages'] if x['path'].startswith('story:deep--one@'))")
+[ "$STORY_BROWSERS" = "['story:deep--one@firefox', 'story:deep--one@webkit-phone']" ] || { echo "the change's first story should be taken in the other browsers asked for: $STORY_BROWSERS"; exit 1; }
 # Signed in first (github.login): its $GREETING put in by roll and handed to the browser through
 # its container's stdin. The page has no #nope, so the run says where it stopped, never what it
 # would have typed.

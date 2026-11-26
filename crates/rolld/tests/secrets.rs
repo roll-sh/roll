@@ -946,11 +946,16 @@ async fn a_bootstrap_token_is_exchanged_once_and_a_spent_credential_ends_its_mac
     assert_eq!(login(secret(&first)).await.0, 401, "and its second use ended the machine's credential");
     assert_eq!(read(token).await.unwrap().status(), 401, "and its login's token");
 
+    // Replaced, its answer lost (the 40th review's item 6): the machine asks again with the same
+    // credential and gets a new one; the unanswered one is spent with it.
     let (_, one) = exchange(secret(&r.post(&format!("{p}/identities/{id}/bootstrap"), json!({})).await)).await;
-    let (s, two) = public("login/refresh", json!({ "identity": id, "credential": secret(&one) })).await;
-    assert_eq!(s, 200, "{two}");
+    let refresh = |credential: String| public("login/refresh", json!({ "identity": id, "credential": credential }));
+    let (s, lost) = refresh(secret(&one)).await;
+    assert_eq!(s, 200, "{lost}");
+    let (s, two) = refresh(secret(&one)).await;
+    assert_eq!(s, 200, "a retry of a refresh whose answer was lost: {two}");
     assert_eq!(login(secret(&two)).await.0, 200, "the new credential works");
-    assert_eq!(login(secret(&one)).await.0, 401, "the old one stops");
+    assert_eq!(refresh(secret(&one)).await.0, 401, "the old one stops, a retry at most once");
     assert_eq!(login(secret(&two)).await.0, 401, "and, spent but used again, it ended the machine");
 
     // The identity's machines, newest first and never a secret; an admin revokes one.
