@@ -149,19 +149,31 @@ pub fn create_dir_all_synced(path: &Path) -> io::Result<()> {
 /// Replace `path` with `data` durably: written to `<path>.tmp`, fsynced, renamed over it,
 /// and the directory fsynced. (Without `sync`, the same steps less the fsyncs.)
 pub fn replace(path: &Path, data: &[u8], sync: bool) -> io::Result<()> {
+    replace_with(path, data, sync, sync)
+}
+
+/// Replace `path` with `data` atomically but not yet durably: `<path>.tmp` is fsynced before it
+/// is renamed over `path`, the directory isn't. A power cut leaves the old file or the new
+/// one, whole. (A rename over a file whose bytes no fsync covered can reach the disk before
+/// them once anything else fsyncs the directory, and leave an empty file: the case this is for.)
+pub fn replace_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
+    replace_with(path, data, true, false)
+}
+
+fn replace_with(path: &Path, data: &[u8], sync_file: bool, sync_parent: bool) -> io::Result<()> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = Path::new(&tmp);
     {
         let mut f = DFile::create(tmp)?;
         f.write_all(data)?;
-        if sync {
+        if sync_file {
             f.sync_all()?;
         }
     }
     rename(tmp, path)?;
     match path.parent() {
-        Some(dir) if sync => sync_dir(dir),
+        Some(dir) if sync_parent => sync_dir(dir),
         _ => Ok(()),
     }
 }
