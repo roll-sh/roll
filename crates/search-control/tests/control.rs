@@ -6870,8 +6870,9 @@ async fn search_application_experiments() {
     let e = env().await;
     let c = e.post("/v1/search/clusters", json!({"name": "ab"})).await;
     let (user, pw) = creds(&c);
+    // A `null` body sends none.
     let es = async |m: Method, p: &str, b: Value| {
-        let (s, v) = e.es(&user, &pw, m, p, Some(b)).await;
+        let (s, v) = e.es(&user, &pw, m, p, (!b.is_null()).then_some(b)).await;
         assert!(s < 300, "{p}: {s} {v}");
         v
     };
@@ -6890,7 +6891,7 @@ async fn search_application_experiments() {
     let mut changed = json!({"indices": ["products"], "experiments": [{"id": "ranking", "allow_user_header": true, "variants": [{"name": "control", "weight": 50}, {"name": "phrase", "weight": 50}]}]});
     let (s, v) = e.es(&user, &pw, Method::PUT, "/_application/search_application/shop", Some(changed.take())).await;
     assert!(s == 400 && v.to_string().contains("is running"), "{s} {v}");
-    es(Method::PUT, "/_application/analytics/web", json!({})).await;
+    es(Method::PUT, "/_application/analytics/web", Value::Null).await;
 
     let search = async |auth: &str, visitor: &str| {
         let r = e.http.post(format!("{}/_application/search_application/shop/_search", e.es)).header("authorization", auth).header("x-roll-user", visitor).json(&json!({"params": {"query": "shoes"}})).send().await.unwrap();
@@ -6937,7 +6938,7 @@ async fn search_application_experiments() {
     assert_eq!(event(&key, "nobody", "search_click", json!({})).await, 202, "accepted, but no search of that visitor to count");
     assert_eq!(event(&key, "v40", "search_click", json!({})).await, 202);
     let count = async || {
-        es(Method::POST, "/behavioral_analytics-events-web/_refresh", json!({})).await;
+        es(Method::POST, "/behavioral_analytics-events-web/_refresh", Value::Null).await;
         es(Method::POST, "/behavioral_analytics-events-web/_count", json!({})).await["count"].clone()
     };
     let stored = count().await;
