@@ -724,6 +724,7 @@ type ProjectImport = {
     source: { kind: "repo"; repo: string; root: string | null } | { kind: "git"; url: string; root: string | null } | { kind: "image"; image: string } | { kind: "upload"; root: string };
     branch: string | null;    // a repo's production branch
     run: Patch<Run>;          // the run settings the entry names
+    build: Partial<Build>;    // its [apps.<name>.build]: dockerfile, target (a stage), install, build, start (a Compose build's dockerfile and target too)
     links: { kind: "postgres" | "redis" | "bucket" | "stream" | "nosql" | "service"; name: string }[]; // databases below by name, or another app of the file (`service`)
     environments: { [env: string]: { branch: string | null; run: object /* an environment's own run settings */; variables: { [name: string]: string } /* set when it's made */ } }; // besides production
     variables: { [name: string]: string }; // set when the service is made, never over what it has

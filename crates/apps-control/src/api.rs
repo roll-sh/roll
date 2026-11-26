@@ -367,7 +367,8 @@ async fn import(State(apps): S, b: Bytes) -> R {
                 .iter()
                 .map(|(e, env)| (e.clone(), json!({ "branch": env.branch, "run": env.run.as_ref().map(|t| serde_json::to_value(t).unwrap_or_default()).unwrap_or_else(|| json!({})), "variables": env.variables })))
                 .collect();
-            (n.clone(), json!({ "environments": environments, "source": source, "branch": branch, "run": entry_run(a), "links": links, "variables": fixed, "generate": generate, "ask": ask }))
+            let build = a.build.as_ref().map(|t| serde_json::to_value(t).unwrap_or_default()).unwrap_or_else(|| json!({}));
+            (n.clone(), json!({ "environments": environments, "source": source, "branch": branch, "run": entry_run(a), "build": build, "links": links, "variables": fixed, "generate": generate, "ask": ask }))
         })
         .collect();
     ok(json!({ "roll_toml": toml_text, "notes": notes, "apps": apps, "databases": f.databases }))

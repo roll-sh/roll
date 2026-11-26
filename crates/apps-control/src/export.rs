@@ -38,7 +38,16 @@ impl Apps {
         let mut file = ProjectFile::default();
         let mut notes = Vec::new();
         for svc in &services {
-            let mut a = AppEntry { root: None, image: None, repo: None, git: None, branch: None, kind: None, start: svc.run.start.clone(), schedule: svc.run.schedule.clone(), run: None, links: Vec::new(), port: svc.run.port, variables: BTreeMap::new(), environments: BTreeMap::new() };
+            let mut a = AppEntry { root: None, image: None, repo: None, git: None, branch: None, kind: None, start: svc.run.start.clone(), schedule: svc.run.schedule.clone(), run: None, build: None, links: Vec::new(), port: svc.run.port, variables: BTreeMap::new(), environments: BTreeMap::new() };
+            // Its build settings a file can say, as `[apps.<name>.build]`.
+            let b = &svc.build;
+            let mut build = toml::Table::new();
+            for (k, v) in [("dockerfile", &b.dockerfile), ("target", &b.target), ("install", &b.install), ("build", &b.build), ("start", &b.start)] {
+                if let Some(v) = v {
+                    build.insert(k.into(), toml::Value::String(v.clone()));
+                }
+            }
+            a.build = (!build.is_empty() && !matches!(svc.source, Source::Image { .. })).then_some(build);
             match &svc.source {
                 Source::Repo { repo, root } => {
                     a.repo = Some(repo.clone());
