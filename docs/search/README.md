@@ -1376,8 +1376,8 @@ in review (item 11's RAG phase 2, #1068 in its third round; item 30's read-only 
 its second; item 1's derived-key follow-ups, #1127 in its second; item 31's re-embed route,
 #1132, landing), then item 32 (resetting a branch from a copy for previews' restore points; in
 progress), item 33's second slice (saved searches, surrounding documents, a field's chart; in
-progress), item 15's next slice (conversions per index, zero results and latency per variant,
-promoting a winner: the top open item), item 14 (semantic search on OpenSearch-flavor
+progress), item 15's confidence intervals and promoting from the Relevance tab (in progress),
+then its judgment lists and offline evaluation (the top open item), item 14 (semantic search on OpenSearch-flavor
 clusters; resumes after #1111), item 16 (cold start at size; resumes after #1127), OpenSearch's
 `_plugins/_sm` (item 9; in progress), item 5's OpenSearch links (designed), and chat token
 metering (item 11's follow-up; in progress).
@@ -1387,7 +1387,7 @@ secrets and the MCP sweep's person flow (#1097), Terraform for synonyms sets and
 (#1076, #1104), the `semantic_text` default (#1093), click events with a `data` key (#1078), the
 help-articles sample (#1081), browser search on previews (#1054), the crawler's charsets,
 per-server politeness and parallel fetches (#1075), A/B tests on search applications
-(#1090, item 15's first slice), names authorized as they resolve in lookups (#1059), an API
+(#1090 and #1126, item 15's first two slices), names authorized as they resolve in lookups (#1059), an API
 key's `encoded` that works at the shared address (#1115), and a Discover screen (#1133, item
 33's first slice).
 
@@ -1746,10 +1746,12 @@ deterministic (#396).
    the address) and answered with `X-Roll-Experiment` and `X-Roll-Variant`; `roll_conversion`
    events beside clicks, counted once per search per variant; browser keys' `limits.events`; and
    per-variant click-through and conversion with a two-proportion z-test in `GET …/analytics` and
-   the Relevance tab. The second slice adds conversions to the indices' analytics, zero-result
-   rate and p95 latency per variant, and promoting a variant into the application
-   (`…/_roll/experiments/{id}/_promote`). Left: judgment lists and offline evaluation (phase 1),
-   confidence intervals, the `roll_` rule types and dynamic re-ranking.
+   the Relevance tab. The second slice landed in #1126: conversions in the indices' analytics,
+   zero-result rate and p95 latency per variant, and promoting a variant into the application
+   (`…/_roll/experiments/{id}/_promote`). Next: confidence intervals beside the p-values and
+   promoting from the Relevance tab (in progress), then judgment lists and offline evaluation
+   (phase 1: OpenSearch's Search Relevance Workbench and `_rank_eval` with lists, for CI). Left:
+   the `roll_` rule types and dynamic re-ranking.
 16. **Cold start at size**: the 19.8 ms cold start is a 50k-document index from local cache;
    nothing measures the first query and p99 on a node with an empty cache for 1, 10 and 50 GB
    indices loaded from object storage, or on Graviton. Buyers comparing always-on Typesense or Algolia
