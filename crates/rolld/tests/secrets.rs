@@ -807,6 +807,39 @@ async fn a_repository_key_follows_rotation_and_a_branch_gets_no_protected_key() 
     assert!(!t.contains(&secret), "{t}");
 }
 
+/// A search cluster's admin password kept in roll secrets (`POST …/password` with `secret`):
+/// rotated, written as the caller in the project whose canvas holds the cluster, and answered
+/// without it. A store roll secrets can't make (no project stands for the cluster) rotates
+/// nothing; `"rotate": false` stores the current password again without rotating.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_search_clusters_password_is_kept_in_roll_secrets_and_shown_to_nobody() {
+    let env = [("ROLL_SECRET_KEY", "fake-deployment-key-for-the-password-test-0000000")];
+    let r = Rolld::start_in(Arc::new(tempfile::tempdir().unwrap()), "search", false, &env, "/v1/info").await;
+    let p = Project::new(&r).await;
+    let sc = r.post("/v1/search/clusters", json!({ "name": "kept" })).await;
+    let (id, url) = (sc["id"].as_str().unwrap().to_string(), sc["url"].as_str().unwrap().to_string());
+    let (user, first) = (sc["username"].as_str().unwrap().to_string(), sc["password"].as_str().unwrap().to_string());
+    let logs_in = |password: String| {
+        let req = r.http.get(format!("{url}/")).basic_auth(&user, Some(password));
+        async move { req.send().await.unwrap().status().as_u16() == 200 }
+    };
+    let keep = |rotate: bool| json!({ "secret": { "environment": "production", "key": "SEARCH_PASSWORD" }, "rotate": rotate });
+    // On no canvas, no project stands for the cluster: refused, and its password is as it was.
+    let a = r.http.post(format!("{}/v1/search/clusters/{id}/password", r.api)).bearer_auth(TOKEN).json(&keep(true)).send().await.unwrap();
+    assert_eq!(a.status().as_u16(), 400, "{}", a.text().await.unwrap());
+    assert!(logs_in(first.clone()).await);
+    r.call(reqwest::Method::PUT, &format!("/v1/workspace/projects/{}/resources/search/{id}", p.id), Some(json!({ "x": 0, "y": 0 }))).await;
+    let v = r.post(&format!("/v1/search/clusters/{id}/password"), keep(true)).await;
+    assert!(v.get("password").is_none() && v["cluster"].get("password").is_none() && v["stored"]["key"] == "SEARCH_PASSWORD", "{v}");
+    let kept = p.value("SEARCH_PASSWORD").await;
+    assert!(kept != first && logs_in(kept.clone()).await && !logs_in(first).await, "the kept password is the cluster's new one");
+    assert!(!v.to_string().contains(&kept), "{v}");
+    // The retry of a store that failed after its rotation: the same password, nothing rotated.
+    let again = r.post(&format!("/v1/search/clusters/{id}/password"), keep(false)).await;
+    assert!(again["stored"]["version"].as_i64() >= v["stored"]["version"].as_i64(), "{again}");
+    assert_eq!(p.value("SEARCH_PASSWORD").await, kept);
+}
+
 /// Reach names the roll apps services that read a folder (rolld's `ReachHolders`): one deploying
 /// the environment reads its root, and one whose `roll://` variable names a key of a subfolder
 /// reads that folder too. It opens no variable: a write-only one whose sealed value no key opens

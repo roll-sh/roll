@@ -59,6 +59,33 @@ pub enum Refused {
     Invalid(String),
 }
 
+/// Where a cluster's admin password goes in roll secrets (`POST …/password` with `secret`): a
+/// key of an environment of the project whose canvas holds the cluster.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreTo {
+    pub environment: String,
+    pub key: String,
+    /// The folder (`/` when absent).
+    #[serde(default = "root")]
+    pub path: String,
+    /// The secret's tags, as the caller chooses (`sensitive` stops reveals and keeps `roll run`).
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+}
+
+fn root() -> String {
+    "/".into()
+}
+
+/// What [`ResourceSecrets::store_target`] found: the project, and the key's version then (0: it
+/// doesn't exist yet), which the write is checked against.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoreTarget {
+    pub project: String,
+    pub version: i64,
+}
+
 /// roll secrets for a [`Holder`] (rolld's: `Secrets::bind_ref`, `resolve_as`,
 /// `digest_as`, as the stored maker). Errors say why, never with a value.
 #[async_trait]
@@ -70,6 +97,15 @@ pub trait ResourceSecrets: Send + Sync {
     async fn resolve(&self, holder: &Holder, reference: &str) -> Result<Revealed, String>;
     /// The digest, under the same check.
     async fn digest(&self, holder: &Holder, reference: &str) -> Result<String, String>;
+    /// Whether `who` may write `to` directly (no change request), in the project whose canvas
+    /// holds the cluster: checked before a rotation, so a refused store changes no password.
+    async fn store_target(&self, _who: &Who, _holder: &Holder, _to: &StoreTo) -> Result<StoreTarget, Refused> {
+        Err(Refused::Invalid("roll secrets can't store a cluster's password on this node".into()))
+    }
+    /// Writes `value` at `to` as `who`, if the key is still at `target`'s version.
+    async fn store(&self, _who: &Who, _holder: &Holder, _to: &StoreTo, _target: &StoreTarget, _value: Revealed) -> Result<i64, Refused> {
+        Err(Refused::Invalid("roll secrets can't store a cluster's password on this node".into()))
+    }
 }
 
 /// How many parents a branch's line is followed up (branches of branches).

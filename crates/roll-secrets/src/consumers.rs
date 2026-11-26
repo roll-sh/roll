@@ -369,7 +369,7 @@ impl Secrets {
     }
 
     /// The one project whose canvas holds `resource` and stands for it (and is `named`, if given).
-    pub(crate) fn project_for(&self, resource: &ResourceRef, named: Option<&str>) -> Result<String, Refusal> {
+    pub fn project_for(&self, resource: &ResourceRef, named: Option<&str>) -> Result<String, Refusal> {
         let who = resource.consumer();
         let ws = |e: roll_workspace::Error| Error::Internal(e.to_string());
         let mut trusting = vec![];

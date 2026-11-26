@@ -534,10 +534,35 @@ async fn branches(State(c): State<AppState>, caller: Caller, Path(id): Path<Stri
     Ok(Json(views(&c, &caller, list).await?))
 }
 
-async fn rotate(State(c): State<AppState>, caller: Caller, Path(id): Path<String>, ext: Extensions) -> ApiResult<ClusterView> {
-    answers_credential(&ext, || format!("a new admin password of cluster {id}"))?;
-    let d = c.rotate_password(&id).await?;
-    Ok(Json(view(&c, &caller, d, true).await?))
+/// `POST …/password`'s body (none: rotate and answer the new password).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PasswordBody {
+    /// Keep the password in roll secrets, as the caller writes it there, and answer without it.
+    secret: Option<crate::secret_refs::StoreTo>,
+    /// With `secret`: `false` stores the current password without rotating (the retry of a store
+    /// that failed after its rotation). Default `true`.
+    rotate: Option<bool>,
+}
+
+async fn rotate(State(c): State<AppState>, caller: Caller, Path(id): Path<String>, ext: Extensions, body: bytes::Bytes) -> Result<Response, ControlError> {
+    let body: PasswordBody = if body.iter().all(u8::is_ascii_whitespace) {
+        PasswordBody { secret: None, rotate: None }
+    } else {
+        serde_json::from_slice(&body).map_err(|e| ControlError::Invalid(format!("invalid body: {e}")))?
+    };
+    let Some(to) = body.secret else {
+        if body.rotate.is_some() {
+            return Err(ControlError::Invalid("rotate is only for a password kept in roll secrets (with secret)".into()));
+        }
+        answers_credential(&ext, || format!("a new admin password of cluster {id}"))?;
+        let d = c.rotate_password(&id).await?;
+        return Ok(Json(view(&c, &caller, d, true).await?).into_response());
+    };
+    let who = crate::secret_refs::Who::of(&ext);
+    let (d, version) = c.store_password(&id, &who, &to, body.rotate.unwrap_or(true)).await?;
+    let cluster = view(&c, &caller, d, false).await?;
+    Ok(Json(json!({ "cluster": cluster, "stored": { "environment": to.environment, "path": to.path, "key": to.key, "version": version } })).into_response())
 }
 
 async fn unload(State(c): State<AppState>, Path(id): Path<String>, method: Method, headers: HeaderMap) -> Result<Response, ControlError> {

@@ -1552,6 +1552,40 @@ impl Control {
         Ok(c)
     }
 
+    /// `POST …/password` with `secret`: the cluster's admin password kept in roll secrets, as
+    /// `who` writes it there, and shown to nobody. Checked first, so a store roll secrets would
+    /// refuse (or turn into a change request) rotates nothing; then rotated (unless `rotate` is
+    /// false: the retry of a store that failed after its rotation), then written at the version
+    /// the check read. A write that fails after the rotation keeps the new password (search
+    /// holds it sealed) and says how to store it again without rotating.
+    pub async fn store_password(&self, id: &str, who: &crate::secret_refs::Who, to: &crate::secret_refs::StoreTo, rotate: bool) -> Result<(SearchCluster, i64)> {
+        let refused = |e: crate::secret_refs::Refused| match e {
+            crate::secret_refs::Refused::Forbidden(m) => ControlError::Forbidden(m),
+            crate::secret_refs::Refused::Invalid(m) => ControlError::Invalid(m),
+        };
+        let c = self.get(id).await?;
+        if c.parent_id.is_some() {
+            return Err(ControlError::Invalid(format!("{} is a branch: its password isn't kept in roll secrets (keep its parent's)", c.name)));
+        }
+        let (holder, secrets) = self.secret_refs.holder(&c.id, "").await.map_err(ControlError::Invalid)?;
+        let target = secrets.store_target(who, &holder, to).await.map_err(refused)?;
+        let c = if rotate { self.rotate_password(&c.id).await? } else { c };
+        let value = crate::secret_refs::Revealed::new(c.password.clone());
+        match secrets.store(who, &holder, to, &target, value).await {
+            Ok(version) => Ok((c, version)),
+            Err(e) if rotate => {
+                let why = match e {
+                    crate::secret_refs::Refused::Forbidden(m) | crate::secret_refs::Refused::Invalid(m) => m,
+                };
+                Err(ControlError::Conflict(format!(
+                    "{}'s password was rotated, but storing it in roll secrets failed: {why}. Store it again without rotating: the same request with \"rotate\": false",
+                    c.name
+                )))
+            }
+            Err(e) => Err(refused(e)),
+        }
+    }
+
     /// Applies the catalog's description of `name` to its loaded instance, if any. Call with
     /// `specs` held (or through [`Self::apply_spec_now`]).
     ///

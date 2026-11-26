@@ -917,7 +917,7 @@ origins (browser search), once they're on main.
 | DELETE | `/v1/search/clusters/{id}` | waits for running requests and for a wake in progress (which is locked out and unloaded, never left serving); the cluster leaves the list, its REST endpoint answers as for a missing cluster and its name is free at once, but its storage is kept for `--search-deleted-retention-days` (7) and billed as storage, for `restore` (0 days: removed at once); branches keep working |
 | POST | `/v1/search/clusters/{id}/restore` | a deleted cluster (by its id) back as it was within its window: data, snapshots, settings, owner, password and API keys; under its own name, else 409 and `{"name": "…"}` restores it under another (the new name is its Basic auth user, API key id suffix and host label; the password stays). Scoped like every per-cluster route (owner, admins, the operator); 404 once purged |
 | GET, POST | `/v1/search/clusters/{id}/branches` | list; branch `{name, at?}` (`at`: Unix seconds within `--search-history`) |
-| POST | `/v1/search/clusters/{id}/password` | rotate; the new password is in the answer, once. From the answer on, the old one fails, also on a cluster that was waking up. `admin` at the gate, and refused (403) to a grant that can't also reveal |
+| POST | `/v1/search/clusters/{id}/password` | rotate; the new password is in the answer, once. From the answer on, the old one fails, also on a cluster that was waking up. `admin` at the gate, and refused (403) to a grant that can't also reveal With a body `{"secret": {"environment", "key", "path"?, "tags"?}, "rotate"?}` the password is kept in roll secrets instead, written as the caller in the project whose canvas holds the cluster (their rights, the environment's protection, guardrails and the audit apply), and the answer is `{cluster, stored: {environment, path, key, version}}` with no password: a store roll secrets would refuse, or an environment that takes approvals, is refused before anything rotates; a write that fails after the rotation is a 409 saying so, and `"rotate": false` stores the current password without rotating again. Not for a branch (its parent's password is the one to keep). |
 | POST | `/v1/search/clusters/{id}/unload` | sleep now (`{"unloaded": false}` while requests run) |
 | GET | `/v1/search/clusters/{id}/indices` | `_cat/indices` as JSON numbers: health, status, shards, docs, sizes; docs and sizes of open indices come from the engine (as `_stats` reports them: Lucene documents, nested ones included, unflushed writes included). Wakes the cluster |
 | POST | `/v1/search/clusters/{id}/request` | console: `{method, path, body?}` (a JSON body, sent byte for byte so `_source` keeps its key order, or a string such as NDJSON, sent as is) → `{status, headers, body, took_ms, truncated}`; an answer the cluster streams (`_inference/…/_stream`) is passed through as it comes instead, with its status and `Content-Type: text/event-stream`. Accepts bodies up to the cluster's `max_body_mb` (the request may be up to twice that plus 1 MiB, for JSON escapes) |
@@ -1908,13 +1908,18 @@ deterministic (#396).
    an OpenSearch user): links made before one are reissued. The fleet test with every product on
    passed (2026-11-13: search 8,077 writes acknowledged and verified, no errors, longest stall
    1.2 s in the rolling restart).
+   A cluster's admin password is kept as a project secret from roll's API and CLI (`POST …/password`
+   with `secret`, `roll search clusters password --secret ENV/KEY`): rotated, written as the caller, shown
+   to nobody.
    Joins the 2026-11-21 category review found: landed since, an apps link narrowed to indices and
    `read` or `append` (#721, through secrets' `names` and `permission` link options), apps' log
    drains into a roll search data stream (#735: ECS documents through `_bulk` with an `append` key
    on `logs-roll.apps-*`), and previews giving a branch only its data credential (#607). Not yet
-   built: a cluster's admin password can't be kept as a project secret from roll's API or CLI; and only a
-   unit test covers previews' search branch, and one MCP test search (no create → bulk → query
-   flow with a person's scoped token). Project members landed in #808
+   built: only a
+   unit test covers previews' search branch. The MCP sweep (`pnpm test:mcp-sweep`) runs a
+   developer's own flow: a person signed in, with a token scoped to search, makes a cluster in the
+   project, bulk-indexes and finds the document through `/v1/mcp`, and their read-only token is
+   refused the bulk. Project members landed in #808
    (`feature/search-members`): search is a member product, so a member's role in a cluster's project
    decides what they do to it through roll-access, a person's own clusters stay theirs, and linking
    two clusters takes administering both ([Who sees a cluster](architecture.md#who-sees-a-cluster)).
