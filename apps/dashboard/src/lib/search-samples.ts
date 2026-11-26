@@ -9,7 +9,7 @@ import type { Flavor } from "./search-api";
 import { BulkBatcher } from "./search-import";
 import { KEY_ENV, secretIn, shellQuote } from "./search-playground";
 
-export type SampleId = "sample-products" | "sample-logs";
+export type SampleId = "sample-products" | "sample-logs" | "sample-articles";
 
 /** One REST request as the console sends it. */
 export interface SampleRequest {
@@ -40,6 +40,8 @@ export interface SampleDataset {
   /** The documents, generated for a load at `now` (ms since the epoch). */
   documents: (now: number) => { id: string; source: Record<string, unknown> }[];
   queries: (flavor: Flavor) => SampleQuery[];
+  /** The flavors it loads on (absent: both). */
+  flavors?: Flavor[];
 }
 
 /** mulberry32: small, fast and the same on every engine. */
@@ -374,7 +376,110 @@ const LOGS_SET: SampleDataset = {
   ],
 };
 
-export const SAMPLES: readonly SampleDataset[] = [PRODUCTS_SET, LOGS_SET];
+// --- Articles (semantic search, and the passages a chat answers from) ------------------------------
+
+const ARTICLES = 240;
+const TOPICS: { topic: string; lines: string[] }[] = [
+  { topic: "Refunds", lines: ["You can return an order within 30 days of delivery for a full refund.", "Refunds go back to the card you paid with, usually within five business days.", "Items marked final sale can't be returned, but they can be exchanged for store credit."] },
+  { topic: "Shipping", lines: ["Standard shipping takes three to five business days; express arrives the next business day.", "Orders over $50 ship free within the country.", "A tracking link is emailed as soon as the parcel leaves the warehouse."] },
+  { topic: "Accounts", lines: ["Reset a forgotten password from the sign-in page with the link we email you.", "Two-step sign-in can use an authenticator app or a security key.", "Closing an account deletes its order history after 90 days."] },
+  { topic: "Billing", lines: ["Invoices are under Account, then Billing, and can be downloaded as PDF.", "A card that fails is retried three times over a week before the plan pauses.", "Prices include sales tax where the law asks for it."] },
+  { topic: "Warranty", lines: ["Every device has a two-year warranty against manufacturing faults.", "A warranty claim needs the order number and a photo of the fault.", "Water damage and drops aren't covered, but a repair can be quoted."] },
+  { topic: "Subscriptions", lines: ["A subscription renews on the same day each month until it's cancelled.", "Cancelling keeps the plan until the end of the period already paid.", "Switching plans takes effect at once, and the difference is prorated."] },
+  { topic: "Privacy", lines: ["We never sell personal data, and it's kept only as long as an order needs it.", "You can download everything we hold about you from Account, then Privacy.", "Marketing emails stop as soon as you unsubscribe from any of them."] },
+  { topic: "Stores", lines: ["Click and collect orders wait at the store for seven days.", "Most stores open from 9 to 8 on weekdays and 10 to 6 at weekends.", "Online orders can be returned in any store with the receipt email."] },
+];
+const ASKED = ["How do I", "What happens when I", "Can I", "Why can't I", "When will I"];
+const VERBS: Record<string, string[]> = {
+  Refunds: ["get my money back", "return a gift", "return a sale item"],
+  Shipping: ["track my parcel", "get free delivery", "ship abroad"],
+  Accounts: ["reset my password", "turn on two-step sign-in", "close my account"],
+  Billing: ["find an invoice", "update my card", "see the tax on my bill"],
+  Warranty: ["claim a repair", "check what's covered", "send a faulty device back"],
+  Subscriptions: ["cancel my plan", "change plans", "pause a renewal"],
+  Privacy: ["download my data", "stop marketing emails", "delete my data"],
+  Stores: ["collect an order", "find opening hours", "return in a store"],
+};
+
+function articles(): { id: string; source: Record<string, unknown> }[] {
+  const r = prng(424242);
+  const out: { id: string; source: Record<string, unknown> }[] = [];
+  for (let i = 0; i < ARTICLES; i++) {
+    const t = TOPICS[i % TOPICS.length];
+    const title = `${pick(r, ASKED)} ${pick(r, VERBS[t.topic])}?`;
+    const first = pick(r, t.lines);
+    const second = pick(r, t.lines);
+    const body = second === first ? first : `${first} ${second}`;
+    out.push({ id: `a${pad(i + 1, 4)}`, source: { title, topic: t.topic, body, url: `https://help.example.com/${t.topic.toLowerCase()}/${pad(i + 1, 4)}` } });
+  }
+  return out;
+}
+
+const ARTICLES_SET: SampleDataset = {
+  id: "sample-articles",
+  title: "Help articles",
+  about: "240 help-center articles whose text is semantic_text on the E5 model roll runs: searched by meaning, and the passages a chat answers from.",
+  docs: ARTICLES,
+  kind: "index",
+  // `semantic_text` is Elasticsearch's (OpenSearch's semantic fields are another mapping).
+  flavors: ["elasticsearch"],
+  setup: [
+    {
+      method: "PUT",
+      path: "/sample-articles",
+      body: {
+        settings: { number_of_shards: 1 },
+        mappings: {
+          properties: {
+            title: { type: "text" },
+            topic: { type: "keyword" },
+            body: { type: "semantic_text", inference_id: ".multilingual-e5-small-elasticsearch" },
+            url: { type: "keyword", index: false },
+          },
+        },
+      },
+    },
+  ],
+  remove: [{ method: "DELETE", path: "/sample-articles" }],
+  documents: () => articles(),
+  queries: () => [
+    {
+      id: "semantic",
+      title: "Search by meaning",
+      about: "No article says 'money back guarantee', but the refund ones answer it.",
+      request: { method: "POST", path: "/sample-articles/_search", body: { size: 3, query: { semantic: { field: "body", query: "is there a money back guarantee" } }, _source: ["title", "topic", "url"] } },
+    },
+    {
+      id: "hybrid",
+      title: "Words and meaning together",
+      about: "A keyword match and a semantic match ranked together with reciprocal rank fusion.",
+      request: {
+        method: "POST",
+        path: "/sample-articles/_search",
+        body: {
+          size: 3,
+          retriever: { rrf: { retrievers: [{ standard: { query: { match: { title: "password" } } } }, { standard: { query: { semantic: { field: "body", query: "I can't get into my account" } } } }] } },
+          _source: ["title", "topic", "url"],
+        },
+      },
+    },
+    {
+      id: "passages",
+      title: "The passages a chat would cite",
+      about: "The best-matching chunk of each article, as retrieval for an answer sees it.",
+      request: {
+        method: "POST",
+        path: "/sample-articles/_search",
+        body: { size: 3, query: { semantic: { field: "body", query: "how long does delivery take" } }, highlight: { fields: { body: { type: "semantic", number_of_fragments: 1 } } }, _source: ["title", "url"] },
+      },
+    },
+  ],
+};
+
+export const SAMPLES: readonly SampleDataset[] = [PRODUCTS_SET, LOGS_SET, ARTICLES_SET];
+
+/** The datasets a cluster of `flavor` offers. */
+export const samplesFor = (flavor: Flavor) => SAMPLES.filter((s) => !s.flavors || s.flavors.includes(flavor));
 
 export const sample = (id: SampleId) => SAMPLES.find((s) => s.id === id) as SampleDataset;
 
@@ -404,6 +509,7 @@ export function presentSamples(indices: string[]): Set<SampleId> {
   const out = new Set<SampleId>();
   for (const i of indices) {
     if (i === "sample-products") out.add("sample-products");
+    if (i === "sample-articles") out.add("sample-articles");
     if (i.startsWith(".ds-sample-logs-")) out.add("sample-logs");
   }
   return out;
