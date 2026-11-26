@@ -1801,7 +1801,11 @@ impl Block {
             let at = (p, v);
             let (shared, us, vf) = head(b, &mut p);
             let unshared = us >> 2;
-            if shared <= m {
+            // (Most entries of a block of rows: keys alike but for their row id's last byte. An
+            // entry sharing `m` bytes whose next byte is below `key`'s is below `key`, sharing
+            // `m` with it: that one byte compared, not its tail and version.)
+            let below = shared == m && unshared > 0 && key.get(m).is_some_and(|&k| b[p] < k);
+            if shared <= m && !below {
                 // (Its first `shared` bytes are `key`'s: its tail, then the block's version,
                 // against the rest.)
                 let tail = &b[p..p + unshared];
