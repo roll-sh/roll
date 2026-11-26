@@ -2624,7 +2624,9 @@ mod tests {
         for (whose, text) in &texts {
             for w in text.split(|c: char| !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')) {
                 let looks = w.split_once('_').is_some_and(|(p, rest)| products.contains(&p) && !rest.is_empty() && !rest.starts_with('_'));
-                if looks && !names.iter().any(|n| n == w) && !not_tools.contains(&w) {
+                // A tool's argument as its product spells it (`search_after`) isn't a tool.
+                let argument = all().iter().any(|t| t.params.iter().any(|p| p.name == w));
+                if looks && !argument && !names.iter().any(|n| n == w) && !not_tools.contains(&w) {
                     dangling.push(format!("{whose}: {w}"));
                 }
             }
