@@ -383,8 +383,12 @@ impl Control {
             let v: Value = serde_json::from_slice(&r.body).unwrap_or(Value::Null);
             return Err(ControlError::Internal(anyhow::anyhow!("setting remote {alias} of cluster {} failed ({}): {}", c.name, r.status, v["error"]["reason"])));
         }
-        if let Some(old) = replaced.filter(|o| o.minted && o.key_id != key_id) {
-            let _ = self.revoke_remote_key(&old.target_id, &old.key_id).await;
+        // The credentials it replaced go now; a failure is the caller's to know (the new link
+        // works, the old user or key is still on the target), never swallowed.
+        if let Some(old) = replaced.filter(|o| o.minted && o.key_id != key_id)
+            && let Err(e) = self.revoke_remote_key(&old.target_id, &old.key_id).await
+        {
+            return Err(ControlError::Internal(anyhow::anyhow!("remote {alias} of cluster {} is linked with new credentials, but its old ones ({}) couldn't be revoked on the target: {e}", c.name, old.key_id)));
         }
         let mut out = json!({ "alias": alias, "cluster": t.name, "cluster_id": t.id, "mode": "proxy", "proxy_address": address, "key_id": key_id, "minted": minted });
         if let Some(s) = skip_unavailable {
@@ -398,6 +402,11 @@ impl Control {
     pub async fn unlink_remote(&self, id: &str, alias: &str) -> Result<()> {
         let c = self.get(id).await?;
         let Some(row) = self.store.remote(&c.id, alias).await? else { return Err(ControlError::NotFound(format!("cluster {} has no remote {alias}", c.name))) };
+        // The target's key or user first: a failure leaves the link as it was, for a retry
+        // (gone already counts as revoked).
+        if row.minted {
+            self.revoke_remote_key(&row.target_id, &row.key_id).await?;
+        }
         let mut settings = serde_json::Map::new();
         for k in ["mode", "proxy_address", "seeds", "skip_unavailable", "server_name", "proxy_socket_connections", "node_connections", "transport.ping_schedule", "transport.compress"] {
             settings.insert(format!("cluster.remote.{alias}.{k}"), Value::Null);
@@ -407,9 +416,6 @@ impl Control {
             return Err(ControlError::Internal(anyhow::anyhow!("removing remote {alias} of cluster {} failed ({})", c.name, r.status)));
         }
         self.store.delete_remote(&c.id, alias).await?;
-        if row.minted {
-            self.revoke_remote_key(&row.target_id, &row.key_id).await?;
-        }
         Ok(())
     }
 
