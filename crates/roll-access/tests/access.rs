@@ -3333,12 +3333,23 @@ async fn a_secret_written_as_the_caller_is_asked_for_and_only_it_is_allowed() {
     let body = |env: &str| json!({ "secret": { "project": project, "environment": env, "path": "/ai", "key": "ADMIN_PASSWORD" } });
     let path = "/v1/search/clusters/cl_home/password";
     let search = |effect: &str| json!({ "product": "search", "resources": "*", "actions": { "admin": effect, "reveal": "allow" } });
-    let (asks, _) = d.token(json!([search("ask"), { "product": "secrets", "resources": [{ "project": project }], "actions": { "write": "ask" } }]), json!({})).await;
-    let (s, out) = d.call(&asks, Method::POST, path, Some(body("production"))).await;
-    assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
-    let id = out["approval"].as_str().unwrap().to_string();
-    let (_, asked) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{id}"), None).await;
-    assert_eq!((asked["product"].as_str(), asked["action"].as_str(), asked["environment"].as_str()), (Some("secrets"), Some("write"), Some("production")), "{asked}");
+    let write_asks = json!({ "product": "secrets", "resources": [{ "project": project }], "actions": { "write": "ask" } });
+    let asked = |token: String| {
+        let (d, body) = (&d, body("production"));
+        async move {
+            let (s, out) = d.call(&token, Method::POST, path, Some(body)).await;
+            assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
+            let id = out["approval"].as_str().unwrap().to_string();
+            let (_, asked) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{id}"), None).await;
+            assert_eq!((asked["product"].as_str(), asked["action"].as_str(), asked["environment"].as_str()), (Some("secrets"), Some("write"), Some("production")), "{asked}");
+            id
+        }
+    };
+    // The route's own action asks too: the approval still names the secret.
+    let (tie, _) = d.token(json!([search("ask"), write_asks]), json!({})).await;
+    asked(tie).await;
+    let (asks, _) = d.token(json!([search("allow"), write_asks]), json!({})).await;
+    let id = asked(asks.clone()).await;
     assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{id}/approve"), Some(json!({ "remember": "1h" }))).await.0, StatusCode::OK);
     let (s, seen) = d.send(&asks, Method::POST, path, Some(body("production")), &[("x-roll-approval", &id)]).await;
     assert_eq!(s, StatusCode::OK, "{seen}");
