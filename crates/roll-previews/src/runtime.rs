@@ -1501,6 +1501,10 @@ fn browser_story_shots(out: &str, ids: &[&String], browsers: &[&String]) -> Vec<
         #[serde(default)]
         errors: u32,
         png: String,
+        #[serde(default)]
+        play: Option<crate::Play>,
+        #[serde(default)]
+        play_error: Option<String>,
     }
     let mut shots: Vec<crate::ports::PageShot> = Vec::new();
     for l in out.lines().filter_map(|l| serde_json::from_str::<Line>(l).ok()) {
@@ -1510,7 +1514,10 @@ fn browser_story_shots(out: &str, ids: &[&String], browsers: &[&String]) -> Vec<
         }
         let Ok(png) = base64::engine::general_purpose::STANDARD.decode(l.png.trim()) else { continue };
         if png.starts_with(b"\x89PNG") && png.len() <= STORY_MAX {
-            shots.push(crate::ports::PageShot { path, png, errors: l.errors.min(10_000), report: Default::default() });
+            // Its interaction test in that browser, as Chromium's run reads its own (one line).
+            let play_error = l.play_error.filter(|_| l.play == Some(crate::Play::Failed)).map(|t| t.chars().filter(|c| !c.is_control()).take(300).collect::<String>()).filter(|t| !t.trim().is_empty());
+            let report = crate::PageReport { play: l.play, play_error, ..Default::default() };
+            shots.push(crate::ports::PageShot { path, png, errors: l.errors.min(10_000), report });
         }
     }
     shots
@@ -3475,10 +3482,10 @@ mod tests {
         // The first of them in the other browsers: only a story and a browser asked for, once
         // each, a PNG within a story's cap.
         let (ids, browsers) = (["button--primary".to_string()], ["firefox".to_string()]);
-        let line = |story: &str, browser: &str, png: &str| serde_json::json!({ "story": story, "browser": browser, "errors": 1, "png": png }).to_string();
+        let line = |story: &str, browser: &str, png: &str| serde_json::json!({ "story": story, "browser": browser, "errors": 1, "png": png, "play": "failed", "play_error": "threw\u{7}" }).to_string();
         let out = [line("button--primary", "firefox", &png), line("button--primary", "firefox", &png), line("card--full", "firefox", &png), line("button--primary", "webkit", &png), line("button--primary", "firefox", &junk)].join("\n");
-        let got: Vec<(String, u32)> = browser_story_shots(&out, &ids.iter().collect::<Vec<_>>(), &browsers.iter().collect::<Vec<_>>()).into_iter().map(|p| (p.path, p.errors)).collect();
-        assert_eq!(got, [("story:button--primary@firefox".to_string(), 1)]);
+        let got: Vec<(String, u32, Option<crate::Play>, Option<String>)> = browser_story_shots(&out, &ids.iter().collect::<Vec<_>>(), &browsers.iter().collect::<Vec<_>>()).into_iter().map(|p| (p.path, p.errors, p.report.play, p.report.play_error)).collect();
+        assert_eq!(got, [("story:button--primary@firefox".to_string(), 1, Some(crate::Play::Failed), Some("threw".to_string()))], "with its interaction test in that browser");
         assert!(crate::settings::page_key_ok("story:button--primary@webkit-phone") && !crate::settings::page_key_ok("story:button--primary@lynx"));
     }
 

@@ -116,6 +116,24 @@ const crop = async (c) => {
     if (browser) await browser.close().catch(() => null);
   }
 };
+// A story's interaction test as Storybook ran it (its render in Storybook's own preview, in the
+// page's world: a forged "passed" only hides its own failure), as shot.js reads it in Chromium:
+// "failed", "passed", "pending" while it runs, "none" without one; bounded to 2 s a read.
+const playOf = (page, id) =>
+  Promise.race([
+    page
+      .evaluate((id) => {
+        const p = globalThis.__STORYBOOK_PREVIEW__;
+        const r = p && Array.isArray(p.storyRenders) ? p.storyRenders.find((x) => x && x.id === id) : null;
+        if (!r) return "none";
+        if (r.phase === "errored") return "failed";
+        if (!(r.story && r.story.playFunction)) return "none";
+        if (["played", "completing", "completed", "afterEach", "finished"].includes(r.phase)) return "passed";
+        return r.phase === "aborted" ? "none" : "pending";
+      }, id)
+      .catch(() => null),
+    sleep(2000).then(() => null),
+  ]);
 // The change's first stories in each browser ($STORIES: where the service serves Storybook,
 // $STORY_IDS: the ids Chromium's run took first, at most 5; Chromatic's cross-browser stories):
 // each loaded alone and captured clipped to its root, a `{story, browser, errors, png}` line each.
@@ -142,11 +160,30 @@ const stories = async (names) => {
           const root = page.locator("#storybook-root, #root").first();
           // A story renders after the load: until its root holds something, 3 s at most.
           await root.locator(":scope > *").first().waitFor({ timeout: 3000 }).catch(() => null);
+          // Its interaction test, until it ends (5 s at most), so the picture is after it.
+          let play = null;
+          for (let i = 0; i < 50; i++) {
+            const v = await playOf(page, id);
+            if (v === "passed" || v === "failed") {
+              play = v;
+              break;
+            }
+            if (v !== "pending") break;
+            await sleep(100);
+          }
           await page.addStyleTag({ content: STILL }).catch(() => null);
           await sleep(150);
           const png = await root.screenshot({ timeout: 5000 });
           if (png.length > 256 * 1024) continue;
-          process.stdout.write(JSON.stringify({ story: id, browser: name, errors: Math.min(errors - before, 10000), png: png.toString("base64") }) + "\n");
+          const line = { story: id, browser: name, errors: Math.min(errors - before, 10000), png: png.toString("base64") };
+          if (play) line.play = play;
+          // What a failed one threw, as Storybook's frame shows it (its error display).
+          if (play === "failed") {
+            const m = await page.locator("#error-message").first().textContent({ timeout: 1000 }).catch(() => null);
+            const said = (m || "").replace(/\s+/g, " ").trim().slice(0, 300);
+            if (said) line.play_error = said;
+          }
+          process.stdout.write(JSON.stringify(line) + "\n");
         } catch (e) {
           console.error(`${name} ${id}: ${e.message}`);
         }
