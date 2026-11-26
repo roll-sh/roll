@@ -511,11 +511,13 @@ impl Effective {
         if action.starts_with("indices:data/read") { self.reads_failure_store(name) } else { self.allows(|p| p.manages_failure_store(name)) }
     }
 
-    /// Whether every index privilege `wider` holds is held on `narrower` too: an alias or a
+    /// Whether every index action allowed on `wider` is allowed on `narrower` too: an alias or a
     /// resize target can't give more than the index it's made from (Elasticsearch's
-    /// `validateIndexPermissionsAreSubset`).
+    /// `validateIndexPermissionsAreSubset`, which compares the actions' automata). Compared by
+    /// action, never by privilege name, so a role granting raw actions (`indices:data/read/search`)
+    /// or OpenSearch action groups is held to it too ([`privileges::PROBE_ACTIONS`]).
     pub fn no_wider(&self, wider: &str, narrower: &str) -> bool {
-        privileges::INDEX_PRIVILEGES.iter().all(|p| !self.has_index_privilege(p, wider) || self.has_index_privilege(p, narrower))
+        privileges::PROBE_ACTIONS.iter().all(|a| !self.allows_index(a, wider) || self.allows_index(a, narrower))
     }
 
     fn allows(&self, f: impl Fn(&Permission) -> bool) -> bool {

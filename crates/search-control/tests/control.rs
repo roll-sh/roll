@@ -4132,6 +4132,8 @@ async fn names_are_authorized_as_resolved() {
         (Method::PUT, "/_security/user/lim", json!({"password": "lim-pass-1", "roles": ["limited"]})),
         (Method::PUT, "/_security/role/reader", json!({"indices": [{"names": ["*"], "privileges": ["read"]}]})),
         (Method::PUT, "/_security/user/rd", json!({"password": "rd-pass-1", "roles": ["reader"]})),
+        (Method::PUT, "/_security/role/raw", json!({"indices": [{"names": ["mine*", "secret"], "privileges": ["manage"]}, {"names": ["mine*"], "privileges": ["indices:data/read/search"]}]})),
+        (Method::PUT, "/_security/user/raw", json!({"password": "raw-pass-1", "roles": ["raw"]})),
         (Method::PUT, "/mine/_settings", json!({"index.blocks.write": true})),
     ] {
         let (s, v) = e.es(&u, &p, m, path, Some(body).filter(|b| !b.is_null())).await;
@@ -4155,6 +4157,9 @@ async fn names_are_authorized_as_resolved() {
     assert_eq!(lim(Method::GET, "/mine-x/_search", None).await.0, 404, "no alias was made");
     let (s, v) = lim(Method::PUT, "/mine/_alias/mine-ok", None).await;
     assert_eq!(s, 200, "an alias that gives no more than its index: {v}");
+    // Compared by action: a raw action granted on the alias's name counts as much as `read`.
+    let (s, v) = e.es("raw@rn", "raw-pass-1", Method::PUT, "/secret/_alias/mine-r", None).await;
+    assert!(s == 403 && v.to_string().contains("more permissions than any of the indices"), "{s} {v}");
     // `_aliases` is authorized per action, never on every index: a user limited to `mine*` may.
     let (s, v) = lim(Method::POST, "/_aliases", Some(json!({"actions": [{"add": {"index": "mine", "alias": "mine-x"}}]}))).await;
     assert_eq!(s, 200, "{v}");
@@ -4187,6 +4192,8 @@ async fn an_opensearch_alias_reaches_no_more_than_its_index() {
         (Method::PUT, "/secret/_doc/1?refresh=true".to_string(), json!({"t": "top secret"})),
         (Method::PUT, format!("{api}/roles/limited"), json!({"index_permissions": [{"index_patterns": ["mine*", "secret"], "allowed_actions": ["manage_aliases"]}, {"index_patterns": ["mine*"], "allowed_actions": ["read"]}]})),
         (Method::PUT, format!("{api}/internalusers/lim"), json!({"password": "Zq7-unrelated-Pw!93", "opendistro_security_roles": ["limited"]})),
+        (Method::PUT, format!("{api}/roles/searcher"), json!({"index_permissions": [{"index_patterns": ["mine*", "secret"], "allowed_actions": ["manage_aliases"]}, {"index_patterns": ["mine*"], "allowed_actions": ["search"]}]})),
+        (Method::PUT, format!("{api}/internalusers/srch"), json!({"password": "Zq7-unrelated-Pw!93", "opendistro_security_roles": ["searcher"]})),
     ] {
         let (s, v) = e.es(&u, &p, m, &path, Some(body)).await;
         assert!(s < 300, "{path}: {v}");
@@ -4194,6 +4201,10 @@ async fn an_opensearch_alias_reaches_no_more_than_its_index() {
     let (s, v) = e.es("lim@rno", "Zq7-unrelated-Pw!93", Method::PUT, "/mine/_alias/mine-x", Some(json!({"index": "secret"}))).await;
     assert_eq!(s, 403, "{v}");
     assert_eq!(e.es("lim@rno", "Zq7-unrelated-Pw!93", Method::GET, "/mine-x/_search", None).await.0, 404, "no alias was made");
+    // Compared by action, so the `search` action group counts as much as `read`.
+    let (s, v) = e.es("srch@rno", "Zq7-unrelated-Pw!93", Method::PUT, "/secret/_alias/mine-s", None).await;
+    assert_eq!(s, 403, "{v}");
+    assert_eq!(e.es("srch@rno", "Zq7-unrelated-Pw!93", Method::POST, "/mine-s/_search", None).await.0, 404, "no alias was made");
 }
 
 #[path = "control/cloud_repositories.rs"]
