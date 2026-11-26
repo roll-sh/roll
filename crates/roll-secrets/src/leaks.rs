@@ -207,6 +207,17 @@ fn strong(c: &str) -> bool {
     bits >= 3.0
 }
 
+/// One more call by `who` in `minute`, of `n` candidates: (calls, candidates) in that minute so far.
+/// The one counter `/scan` (by principal) and a backup verify (`backup.verify:<principal>`) share;
+/// inside a write, as each caller's read-then-write is one.
+fn bump(c: &code_sql::Conn<'_>, who: &str, minute: i64, n: i64) -> Result<(i64, i64)> {
+    Ok(c.query_row(
+        "INSERT INTO scan_counts (principal, minute, calls, candidates) VALUES (?, ?, 1, ?) ON CONFLICT (principal, minute) DO UPDATE SET calls = scan_counts.calls + 1, candidates = scan_counts.candidates + excluded.candidates RETURNING calls, candidates",
+        params![who, minute, n],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?)
+}
+
 /// A scanner's calls per caller and minute (`POST …/scan`'s limit).
 pub(crate) const SCAN_COUNTS_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS scan_counts (
@@ -355,11 +366,7 @@ impl Secrets {
         if caller.principal != "operator" {
             let minute = self.db.now_ms()? / 60_000;
             let (calls, mine, project_minute, project_hour): (i64, i64, i64, i64) = self.db.write(|c| {
-                let (calls, mine) = c.query_row(
-                    "INSERT INTO scan_counts (principal, minute, calls, candidates) VALUES (?, ?, 1, ?) ON CONFLICT (principal, minute) DO UPDATE SET calls = scan_counts.calls + 1, candidates = scan_counts.candidates + excluded.candidates RETURNING calls, candidates",
-                    params![caller.principal, minute, n],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )?;
+                let (calls, mine) = bump(c, &caller.principal, minute, n)?;
                 let at = c.query_row(
                     "INSERT INTO scan_project_counts (project_id, minute, candidates) VALUES (?, ?, ?) ON CONFLICT (project_id, minute) DO UPDATE SET candidates = scan_project_counts.candidates + excluded.candidates RETURNING candidates",
                     params![project, minute, n],
@@ -440,6 +447,14 @@ impl Secrets {
             crate::audit::record(c, self.keys()?, project, caller, "scan.breakglass", None, None, &[], &summary, now)
         })?;
         Ok(who)
+    }
+
+    /// One more call by `who` this minute, outside a scan (a backup verify counts as
+    /// `backup.verify:<principal>`): (calls, candidates) so far this minute, in `scan_counts` as
+    /// [`bump`] keeps it for `/scan`.
+    pub(crate) fn count_calls(&self, who: &str, n: i64) -> Result<(i64, i64)> {
+        let minute = self.db.now_ms()? / 60_000;
+        self.db.write(|c| bump(c, who, minute, n))
     }
 
     /// Minutes of scan counts that have passed (the sweeper): a caller's last minute, a project's

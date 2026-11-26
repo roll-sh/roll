@@ -1194,6 +1194,7 @@ static TOOLS: &[Tool] = &[
     t("search_list_browser_keys", "List a cluster's browser keys", "The keys a cluster gave web pages for search from the browser (a site's search box) that still work, newest first: name, the indices or search application each may read, its filter, rate limit and when it expires (never the key). Making one answers a credential, so it has no tool.", "search", "GET", "/v1/search/clusters/{cluster}/browser-keys", &[req("cluster", "Cluster id or name")]),
     t("search_browser_key_usage", "Browser key usage", "One browser key's requests, 429s by reason (key_rate, address_rate, user_rate, concurrency, cluster_ceiling) and other refusals (origin, policy, body_too_large, invalid_key) over window 1h, 24h (default) or 14d, with a derived key's top users and the top refused origins: tells a broken page, a scraper or a limit set too low apart.", "search", "GET", "/v1/search/clusters/{cluster}/browser-keys/{key}/usage", &[req("cluster", "Cluster id or name"), req("key", "Browser key id (from search_list_browser_keys)"), q("window", Ty::Choice(&["1h", "24h", "14d"]), "How far back")]),
     t("search_revoke_browser_key", "Revoke a browser key", "Revoke one of a cluster's browser keys at once: pages shipping it stop getting answers (on a deleted cluster the revoke is applied by its restore).", "search", "DELETE", "/v1/search/clusters/{cluster}/browser-keys/{key}", &[req("cluster", "Cluster id or name"), req("key", "Browser key id (from search_list_browser_keys)")]),
+    t("search_create_inference_endpoint", "Create an inference endpoint keyed by a roll secret", "An inference endpoint (embeddings for semantic_text, sparse embeddings, reranking, completion) whose provider's API key comes from a roll secret of the project the cluster is in: roll reads the key as you (reveal on that secret), creates the endpoint with it and keeps it following the secret (a rotated value reaches the endpoint within seconds). The key is never in the call or the answer: config is {service (openai, cohere, elastic, …), service_settings (model_id and the like; no api_key), task_settings?, chunking_settings?}, secret is {environment, key, path?, project?}. The cluster then calls the provider.", "search", "POST", "/v1/search/clusters/{cluster}/inference/secrets", &[req("cluster", "Cluster id or name"), breq("inference_id", Ty::Str, "The endpoint's id, e.g. my-embeddings"), b("task_type", Ty::Choice(&["text_embedding", "sparse_embedding", "embedding", "rerank", "completion", "chat_completion"]), "What the endpoint does (default: the service's own)"), breq("config", Ty::Obj, "{service, service_settings (no api_key), task_settings?, chunking_settings?}"), breq("secret", Ty::Obj, "The roll secret holding the key: {environment, key, path?, project?}")]).open_world(),
     t("search_list_inference_secrets", "Inference endpoints keyed by a roll secret", "A cluster's inference endpoints whose API key comes from a roll secret, with the project and key each follows (a rotated value reaches the endpoint within seconds; never the value), and the projects whose secrets it could use.", "search", "GET", "/v1/search/clusters/{cluster}/inference/secrets", &[req("cluster", "Cluster id or name")]),
     t("search_branch_cluster", "Branch a search cluster", "A copy-on-write branch of a cluster, now or at a time within its history.", "search", "POST", "/v1/search/clusters/{cluster}/branches", &[req("cluster", "Cluster id or name"), breq("name", Ty::Str, "Branch name"), b("at", Ty::Int, "Unix seconds")]),
     t("search_update_cluster", "Update a search cluster", "Change a cluster's settings: idle_timeout_s (0: always loaded), max_in_flight, max_body_mb at once; flavor or destructive_requires_name put it to sleep to reload once no request runs; ip_allowlist replaces the networks its endpoint answers (up to 64 CIDRs, each a string or {cidr, description}; [] answers everyone; this API isn't filtered by it).", "search", "PATCH", "/v1/search/clusters/{cluster}", &[req("cluster", "Cluster id or name"), b("idle_timeout_s", Ty::Int, "Seconds idle before it sleeps (0: never)"), b("max_in_flight", Ty::Int, "Requests at once"), b("max_body_mb", Ty::Int, "Largest request body"), b("destructive_requires_name", Ty::Bool, "Refuse wildcard deletes"), b("flavor", Ty::Choice(&["elasticsearch", "opensearch"]), "Which API it speaks"), b("ip_allowlist", Ty::Arr, "CIDRs its endpoint answers (strings or {cidr, description})"), b("protected", Ty::Bool, "Only the project's admins change its data")]),
@@ -1253,7 +1254,35 @@ static TOOLS: &[Tool] = &[
         &[req("cluster", "Cluster"), req("index", "Index"), P { name: "ndjson", ty: Ty::Str, at: At::RawNdjson, required: true, desc: "Action and document lines" }],
     ),
     t("search_delete_by_query", "Delete by query", "Delete every document of an index that matches a query.", "search", "POST", "/v1/search/clusters/{cluster}/indices/{index}/delete_by_query", &[req("cluster", "Cluster"), req("index", "Index"), breq("query", Ty::Obj, "Query DSL")]),
-    t("search_query", "Search", "Run an Elasticsearch _search body on an index.", "search", "POST", "/v1/search/clusters/{cluster}/indices/{index}/search", &[req("cluster", "Cluster id or name"), req("index", "Index"), b("query", Ty::Obj, "Query DSL"), b("size", Ty::Int, "Hits"), b("from", Ty::Int, "Offset"), b("sort", Ty::Arr, "Sort"), b("aggs", Ty::Obj, "Aggregations")]),
+    t("search_query", "Search", "Run an Elasticsearch _search body on an index: a query or a retriever (hybrid search is an rrf or linear retriever over a standard and a knn one), knn, aggregations, highlighting, paging with search_after.", "search", "POST", "/v1/search/clusters/{cluster}/indices/{index}/search", &[
+        req("cluster", "Cluster id or name"),
+        req("index", "Index"),
+        b("query", Ty::Obj, "Query DSL (a semantic_text field: {semantic: {field, query}})"),
+        b("retriever", Ty::Obj, "A retriever tree in place of query: standard, knn, rrf, linear, text_similarity_reranker, rule"),
+        b("knn", Ty::Any, "Approximate nearest neighbours on a dense_vector field: {field, query_vector or query_vector_builder, k, num_candidates, filter?}, or a list of them"),
+        b("size", Ty::Int, "Hits"),
+        b("from", Ty::Int, "Offset (past 10,000 hits, page with search_after)"),
+        b("sort", Ty::Arr, "Sort"),
+        b("search_after", Ty::Arr, "The sort values of the previous page's last hit"),
+        b("aggs", Ty::Obj, "Aggregations"),
+        b("post_filter", Ty::Obj, "A filter applied to hits after aggregations"),
+        b("highlight", Ty::Obj, "{fields: {name: {}}, …}: a semantic_text field highlights its best chunks"),
+        b("_source", Ty::Any, "Which source fields come back: false, a field or pattern, a list, or {includes, excludes}"),
+        b("fields", Ty::Arr, "Fields to return as the mapping reads them (patterns too)"),
+        b("collapse", Ty::Obj, "One hit per value of a field: {field, inner_hits?}"),
+        b("rescore", Ty::Any, "Rescore the top hits again: {window_size, query: {rescore_query}}, or a list"),
+        b("track_total_hits", Ty::Any, "true for an exact count, false for none, or a number to count up to"),
+        b("min_score", Ty::Num, "Leave out hits scoring below this"),
+        b("track_scores", Ty::Bool, "Score hits when sorting by a field"),
+        b("profile", Ty::Bool, "Where the time goes, per shard and per part of the query"),
+        b("explain", Ty::Bool, "How each hit's score was computed"),
+        b("timeout", Ty::Str, "e.g. 2s: answer with what's found by then"),
+        b("terminate_after", Ty::Int, "Stop each shard after this many hits"),
+        b("runtime_mappings", Ty::Obj, "Fields computed at search time, by name"),
+        b("script_fields", Ty::Obj, "Fields a script computes per hit, by name"),
+        b("suggest", Ty::Obj, "Suggesters (term, phrase, completion)"),
+        b("indices_boost", Ty::Arr, "Weights for hits from each index of the expression: [{index: weight}]"),
+    ]),
     t("search_get_document", "Get a document", "A document by id.", "search", "GET", "/v1/search/clusters/{cluster}/indices/{index}/docs/{doc}", &[req("cluster", "Cluster"), req("index", "Index"), req("doc", "Document id")]),
     t("search_index_document", "Index a document", "Create or replace a document.", "search", "PUT", "/v1/search/clusters/{cluster}/indices/{index}/docs/{doc}", &[req("cluster", "Cluster"), req("index", "Index"), req("doc", "Document id"), P { name: "document", ty: Ty::Str, at: At::RawJson, required: true, desc: "The document, as JSON text" }]),
     t("search_delete_document", "Delete a document", "Delete a document.", "search", "DELETE", "/v1/search/clusters/{cluster}/indices/{index}/docs/{doc}", &[req("cluster", "Cluster"), req("index", "Index"), req("doc", "Document id")]),
@@ -1937,6 +1966,8 @@ mod tests {
         let runs = arms(include_str!("../../tasks/src/model.rs"), "impl RunStatus {");
         let previews = arms(include_str!("../../roll-previews/src/lib.rs"), "impl State {");
         let exchanges = quoted(include_str!("../../mq-core/src/exchange.rs"), "fn name(", "\n    }\n", "=> \"");
+        // `any` matches every task in a lookup; an endpoint is made for one.
+        let tasks = quoted(include_str!("../../search-es/src/xpack/inference/mod.rs"), "pub fn name(self)", "\n    }\n", "=> \"").into_iter().filter(|t| t != "any").collect();
         let roles: Vec<String> = roll_auth::roles::Role::ALL.iter().map(|r| r.as_str().to_string()).collect();
         let actions: Vec<String> = roll_auth::scope::Action::ALL.iter().map(|a| a.as_str().to_string()).collect();
         let sets: Vec<(&str, &str, Vec<String>)> = vec![
@@ -1951,6 +1982,7 @@ mod tests {
             ("tasks_list_runs", "status", runs),
             ("previews_list", "state", previews),
             ("queues_declare_exchange", "type", exchanges),
+            ("search_create_inference_endpoint", "task_type", tasks),
             ("workspace_invite_member", "role", roles.clone()),
             ("workspace_set_member_role", "role", roles.clone()),
             ("workspace_set_group_role", "role", roles.into_iter().filter(|r| r != "owner").collect()),
@@ -2057,6 +2089,49 @@ mod tests {
     }
 
     /// An argument described only as its values ("a, b or c") is a [`Ty::Choice`] with the route's
+    /// `search_query` sends what Elasticsearch's _search body takes: every key roll search parses
+    /// there (`SearchSource`) is an argument or left out here with why. With five arguments a
+    /// workflow asked for `profile` the tool refused, and hybrid search had no way in.
+    #[test]
+    fn a_search_takes_what_a_search_body_takes() {
+        const LEFT_OUT: &[(&str, &str)] = &[
+            ("aggregations", "aggs under its other name"),
+            ("stored_fields", "fields reads stored and doc-value fields too"),
+            ("docvalue_fields", "fields reads stored and doc-value fields too"),
+            ("version", "only for a conditional write, and no write tool takes one"),
+            ("seq_no_primary_term", "only for a conditional write, and no write tool takes one"),
+            ("pit", "a point in time is opened by a route with no tool; paging is search_after"),
+            ("slice", "splits a point in time's pages between workers"),
+            ("rank", "retriever's rrf replaces it in Elasticsearch"),
+            ("sub_searches", "retriever's rrf replaces it in Elasticsearch"),
+            ("stats", "groups for the indices stats API, which no tool reads"),
+            ("ext", "plugins' and search pipelines' sections; no tool names a pipeline"),
+            ("derived", "OpenSearch's own; runtime_mappings on Elasticsearch clusters"),
+            ("verbose_pipeline", "OpenSearch's trace of a search pipeline; no tool names a pipeline"),
+        ];
+        let src = include_str!("../../search-es/src/search_source.rs");
+        let start = src.find("fn value_key(").expect("SearchSource::value_key moved");
+        let arrays = start + src[start..].find("fn array_key(").expect("SearchSource::array_key moved");
+        let end = arrays + src[arrays..].find("\n    }\n").unwrap();
+        let mut keys = Vec::new();
+        for line in src[start..end].lines().filter(|l| l.starts_with("            \"") && l.contains("=>")) {
+            for k in line.split("=>").next().unwrap().split('|') {
+                if let Some(k) = k.trim().strip_prefix('"').and_then(|r| r.split('"').next()) {
+                    keys.push(k.to_string());
+                }
+            }
+        }
+        keys.sort();
+        keys.dedup();
+        assert!(keys.len() > 30, "read {} keys from SearchSource: the match moved", keys.len());
+        let tool = super::all().iter().find(|t| t.name == "search_query").unwrap();
+        let takes = |k: &str| tool.params.iter().any(|p| p.name == k);
+        let missing: Vec<&String> = keys.iter().filter(|k| !takes(k) && !LEFT_OUT.iter().any(|(n, _)| n == k)).collect();
+        assert!(missing.is_empty(), "search_query doesn't take {missing:?}: add each as an argument or to LEFT_OUT with why");
+        let stale: Vec<&str> = LEFT_OUT.iter().map(|(n, _)| *n).filter(|n| takes(n) || !keys.iter().any(|k| k == n)).collect();
+        assert!(stale.is_empty(), "LEFT_OUT names {stale:?}, which search_query takes or SearchSource no longer parses");
+    }
+
     /// own set: prose lists drifted from their routes (queues' exchange types named 5 of 9, apps'
     /// notification kinds 6 of 8). The ones left are sets a route widens or is changing.
     #[test]
@@ -2362,7 +2437,9 @@ mod tests {
             let text = format!("{} {} {}", t.title, t.description, params.join(" "));
             for word in text.split(|c: char| !(c.is_ascii_lowercase() || c == '_')) {
                 let Some((product, _)) = word.split_once('_') else { continue };
-                if roll_auth::scope::PRODUCTS.contains(&product) && !matches!(product, "code" | "agents") && word != "access_denied" {
+                // An argument of its own, as the product spells it (`search_after`), isn't a tool.
+                let own = t.params.iter().any(|p| p.name == word);
+                if roll_auth::scope::PRODUCTS.contains(&product) && !matches!(product, "code" | "agents") && word != "access_denied" && !own {
                     assert!(names.contains(word), "{} names {word}, which isn't a tool", t.name);
                 }
             }
@@ -2547,7 +2624,9 @@ mod tests {
         for (whose, text) in &texts {
             for w in text.split(|c: char| !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')) {
                 let looks = w.split_once('_').is_some_and(|(p, rest)| products.contains(&p) && !rest.is_empty() && !rest.starts_with('_'));
-                if looks && !names.iter().any(|n| n == w) && !not_tools.contains(&w) {
+                // A tool's argument as its product spells it (`search_after`) isn't a tool.
+                let argument = all().iter().any(|t| t.params.iter().any(|p| p.name == w));
+                if looks && !argument && !names.iter().any(|n| n == w) && !not_tools.contains(&w) {
                     dangling.push(format!("{whose}: {w}"));
                 }
             }
