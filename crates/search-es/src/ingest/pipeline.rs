@@ -802,7 +802,6 @@ fn meta_of(target: &Target, args: &WriteArgs, id: &str) -> Map {
 /// pipeline ends. Failures record the target their pipeline started from (whose failure store
 /// takes the document).
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub async fn run_write(cluster: &Cluster, target: Target, args: &WriteArgs, id: &str, value: Value, first: Option<String>, fin: Option<String>, now_ms: i64, source_len: usize, moved: Option<&super::MoveCheck<'_>>) -> EsResult<Outcome> {
     let started = std::time::Instant::now();
     let mut first_metrics = None;
