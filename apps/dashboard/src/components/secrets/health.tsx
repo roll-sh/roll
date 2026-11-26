@@ -193,6 +193,7 @@ function guardrailLines(g: Guardrails): string[] {
   if (g.sync_kinds) lines.push(`Syncs only of these kinds: ${g.sync_kinds.length ? g.sync_kinds.join(", ") : "none"}`);
   if (g.no_stored_cloud_keys) lines.push("No sync stores a cloud key for AWS, Google or Azure");
   if (g.max_token_days !== null) lines.push(`Tokens with a secrets rule live at most ${g.max_token_days} ${g.max_token_days === 1 ? "day" : "days"}`);
+  if (g.no_breakglass) lines.push("No push goes past a pre-receive hook (no break glass)");
   return lines;
 }
 
