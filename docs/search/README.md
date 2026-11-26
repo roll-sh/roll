@@ -1663,10 +1663,10 @@ deterministic (#396).
    a sample dataset for RAG (passages with `semantic_text` on E5); and
    what writing the guides found: an API key's `encoded` value works only at the cluster's own
    host, so clients behind a shared address re-encode it as `<id>@<cluster>:<key>`; a `data` key
-   can't post click events, so an app tracking clicks needs a second key; a `semantic_text` field
-   with no `inference_id` fails, because its default (`.elser-2-elasticsearch`) answers as a
-   cluster without ML nodes, the first error anyone copying Elasticsearch's docs hits; and no
-   screen is named Discover.
+   can't post click events, so an app tracking clicks needs a second key; and no screen is named
+   Discover. (A `semantic_text` field with no `inference_id`, whose Elasticsearch default answers
+   as a cluster without ML nodes, the first error anyone copying Elasticsearch's docs hit, now
+   defaults to the E5 the node runs: `feature/search-semantic-default`.)
 13. **A web crawler for site search** (design in [crawler.md](crawler.md); Elastic Open Crawler,
    Algolia Crawler, DocSearch, Meilisearch's docs-scraper). Phases 1 and 2 landed: a native
    connector roll runs (`roll_web_crawler`, on #318's runner) taking Open Crawler's config, fields
