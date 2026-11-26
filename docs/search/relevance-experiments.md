@@ -66,9 +66,14 @@ Where this design or the request left a choice open, the stricter one:
     stays); the experiment ends now if it still runs and records `promoted: {variant, at}`. Once
     per experiment (409 again). An ended experiment can't be started again by a `PUT` (400): its
     counts would mix two tests.
-- **Left:** confidence intervals beside the p-values, promoting from the Relevance tab, judgment
-  lists and evaluation (section 1), the `roll_` rule types (section 4) and dynamic re-ranking
-  (section 5).
+- **Intervals and promoting from the tab** (also built): each rate carries its 95% Wilson
+  interval, and each comparison the difference from the baseline with its 95% interval
+  (Newcombe's hybrid score interval, from the two Wilson intervals, so it agrees with them at
+  small counts and rates near 0 where the plain normal interval doesn't). The Relevance tab shows
+  them under each rate, reads each experiment's state from its application (running, ended,
+  promoted) and promotes a variant through the `_promote` route after saying what it does.
+- **Left:** judgment lists and evaluation (section 1), the `roll_` rule types (section 4) and
+  dynamic re-ranking (section 5).
 
 ## Why
 

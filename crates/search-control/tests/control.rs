@@ -7412,3 +7412,71 @@ async fn search_application_experiments() {
     assert_eq!(r.status().as_u16(), 200);
     assert!(r.headers().get("x-roll-variant").is_none());
 }
+
+/// `…/indices/{index}/update_by_query` re-embeds an index's own documents: a `semantic_text`
+/// field (fed by `copy_to`) added after the documents is filled by indexing each again in place,
+/// in the background (202 and a task the tasks route follows), and a semantic query then finds
+/// them. The body takes only `_update_by_query`'s fields.
+#[tokio::test]
+async fn update_by_query_re_embeds_an_indexs_documents() {
+    use reqwest::Method;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    // An OpenAI-style embeddings endpoint on loopback: one 3-dimensional vector per input.
+    let inputs = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen = inputs.clone();
+    let router = axum::Router::new().route(
+        "/v1/embeddings",
+        axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+            let n = match &body["input"] {
+                Value::Array(a) => a.len(),
+                _ => 1,
+            };
+            seen.fetch_add(n, Ordering::SeqCst);
+            let data: Vec<Value> = (0..n).map(|i| json!({"object": "embedding", "index": i, "embedding": [1.0, 0.5, 0.25]})).collect();
+            async move { axum::Json(json!({"object": "list", "data": data, "model": "emb", "usage": {"prompt_tokens": n, "total_tokens": n}})) }
+        }),
+    );
+    tokio::spawn(async move { axum::serve(listener, router).await });
+    let e = env_with(|c| {
+        c.node_settings.push((search_control::INFERENCE_ALLOW_PRIVATE.into(), "true".into()));
+        c.node_settings.push(("xpack.inference.skip_validate_and_start".into(), "true".into()));
+    })
+    .await;
+    let c = e.post("/v1/search/clusters", json!({"name": "embeds"})).await;
+    let (u, p) = creds(&c);
+    let id = c["id"].as_str().unwrap().to_string();
+    let endpoint = json!({"service": "openai", "service_settings": {"api_key": "sk-1", "model_id": "emb", "dimensions": 3, "url": format!("http://127.0.0.1:{port}/v1/embeddings")}});
+    assert_eq!(e.es(&u, &p, Method::PUT, "/_inference/text_embedding/emb", Some(endpoint)).await.0, 200);
+    assert_eq!(e.es(&u, &p, Method::PUT, "/docs", Some(json!({"mappings": {"properties": {"title": {"type": "text"}}}}))).await.0, 200);
+    for (i, t) in ["red sofa", "blue chair", "green lamp"].iter().enumerate() {
+        assert_eq!(e.es(&u, &p, Method::PUT, &format!("/docs/_doc/{i}?refresh=true"), Some(json!({"title": t}))).await.0, 201);
+    }
+    let mapping = json!({"properties": {"title": {"type": "text", "copy_to": ["body"]}, "body": {"type": "semantic_text", "inference_id": "emb"}}});
+    let (s, v) = e.es(&u, &p, Method::PUT, "/docs/_mapping", Some(mapping)).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(inputs.load(Ordering::SeqCst), 0, "nothing embedded yet");
+
+    let base = format!("/v1/search/clusters/{id}/indices/docs/update_by_query");
+    let (s, v) = e.call(Method::POST, &base, Some(json!({"size": 1}))).await;
+    assert!(s == 400 && v.to_string().contains("no field [size]"), "{s} {v}");
+    assert_eq!(e.call(Method::POST, &format!("/v1/search/clusters/{id}/indices/doc*/update_by_query"), None).await.0, 400, "one index by its name");
+    let (s, v) = e.call(Method::POST, &format!("{base}?wait_for_completion=false&refresh=true"), Some(json!({"slices": 1}))).await;
+    assert_eq!(s, 202, "{v}");
+    let task = v["task"].as_str().unwrap_or_else(|| panic!("{v}")).to_string();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let done = loop {
+        let (s, v) = e.call(Method::GET, &format!("/v1/search/clusters/{id}/tasks/{task}"), None).await;
+        assert_eq!(s, 200, "{v}");
+        if v["completed"] == true {
+            break v;
+        }
+        assert!(std::time::Instant::now() < deadline, "the task didn't finish: {v}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!((&done["response"]["updated"], &done["response"]["failures"]), (&json!(3), &json!([])), "{done}");
+    assert_eq!(inputs.load(Ordering::SeqCst), 3, "each document embedded once");
+    let (s, v) = e.es(&u, &p, Method::POST, "/docs/_search", Some(json!({"query": {"semantic": {"field": "body", "query": "a seat"}}}))).await;
+    assert_eq!((s, &v["hits"]["total"]["value"]), (200, &json!(3)), "{v}");
+}

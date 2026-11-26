@@ -20,20 +20,26 @@ import {
   ANALYTICS_RANGES,
   ANALYTICS_SETTING,
   comparisonText,
+  differenceText,
   emptyText,
   enabledIndices,
+  experimentStatus,
   fillPoints,
+  intervalText,
   percent,
+  promotePath,
   type AnalyticsList,
   type AnalyticsRange,
+  type Comparison,
   type ExperimentResult,
   type Prefill,
   type QueryRow,
   type SearchAnalytics,
+  type StoredExperiment,
 } from "@/lib/search-analytics";
 import { esJson, searchApi, type SearchCluster } from "@/lib/search-api";
 import { Segmented } from "../redis/shared";
-import { btn, Confirm, input, Panel } from "../ui";
+import { btn, Confirm, input, Panel, primary } from "../ui";
 import { errText } from "./relevance-shared";
 
 const enc = encodeURIComponent;
@@ -163,60 +169,150 @@ function Rows({ list, rows, a, onAct }: { list: AnalyticsList; rows: QueryRow[];
   );
 }
 
-/** Which indices have analytics on, and turning it on or off for one. */
-/** A/B tests on search applications: each variant's trials, click-through and conversion rate,
- * against the baseline's, with the z-test's p-value or why it can't call one yet. */
-function Experiments({ list }: { list: ExperimentResult[] }) {
+/** A/B tests on search applications: each variant's trials, click-through and conversion rate
+ * with their 95% intervals, against the baseline's (the difference with its interval, and the
+ * z-test's p-value or why it can't call one yet), and promoting a variant into its application. */
+function Experiments({ cluster, list }: { cluster: SearchCluster; list: ExperimentResult[] }) {
+  const [stored, setStored] = useState<Record<string, StoredExperiment[]>>({});
+  const [asking, setAsking] = useState<{ application: string; experiment: string; variant: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [tick, setTick] = useState(0);
+  const apps = [...new Set(list.map((x) => x.application))].sort().join("\n");
+  useEffect(() => {
+    if (!apps) return;
+    let alive = true;
+    void Promise.all(
+      apps.split("\n").map((a) =>
+        esJson<{ experiments?: StoredExperiment[] }>(cluster.id, "GET", `/_application/search_application/${enc(a)}`).then(
+          (r) => [a, r.experiments ?? []] as const,
+          () => [a, []] as const,
+        ),
+      ),
+    ).then((rows) => alive && setStored(Object.fromEntries(rows)));
+    return () => {
+      alive = false;
+    };
+  }, [cluster.id, apps, tick]);
   if (list.length === 0) return null;
+  const promote = async () => {
+    if (!asking) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await esJson(cluster.id, "POST", promotePath(asking.application, asking.experiment), { variant: asking.variant });
+      setAsking(null);
+      setTick((t) => t + 1);
+    } catch (e) {
+      setError(errText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const now = Date.now();
   return (
     <div className="border-t border-line px-5 pt-4 pb-2">
       <div className="pb-2 text-[13px] font-medium">Experiments</div>
-      {list.map((x) => (
-        <div key={`${x.application}/${x.experiment}`} className="relative mb-4 overflow-x-auto">
-          <div className="pb-1 font-mono text-[12px] text-muted">
-            {x.application} · {x.experiment}
-          </div>
-          <table className="w-full min-w-[52rem] table-fixed text-[13px]">
-            <thead>
-              <tr className="border-b border-line text-left text-[11px] text-subtle">
-                <th className="py-2 font-normal">Variant</th>
-                <th className="px-2 py-2 text-right font-normal">Searches</th>
-                <th className="px-2 py-2 text-right font-normal">Click-through</th>
-                <th className="px-2 py-2 text-right font-normal">Conversion</th>
-                <th className="px-2 py-2 text-right font-normal">Value</th>
-                <th className="px-2 py-2 text-right font-normal">No results</th>
-                <th className="px-2 py-2 text-right font-normal">p95</th>
-              </tr>
-            </thead>
-            <tbody>
-              {x.variants.map((v) => (
-                <tr key={v.name} className="border-b border-line last:border-0 align-top">
-                  <td className="py-2 font-mono text-[12px]">
-                    {v.name}
-                    {v.name === x.baseline && <span className="ml-2 text-[11px] text-subtle">baseline</span>}
-                  </td>
-                  <td className="px-2 py-2 text-right font-mono text-[12px] tabular-nums">{v.searches.toLocaleString("en-US")}</td>
-                  <td className="px-2 py-2 text-right font-mono text-[12px] tabular-nums">
-                    {percent(v.ctr)}
-                    {v.vs_baseline && <div className="text-[11px] text-subtle">{comparisonText(v.vs_baseline.ctr)}</div>}
-                  </td>
-                  <td className="px-2 py-2 text-right font-mono text-[12px] tabular-nums">
-                    {percent(v.conversion_rate)}
-                    {v.vs_baseline && <div className="text-[11px] text-subtle">{comparisonText(v.vs_baseline.conversion_rate)}</div>}
-                  </td>
-                  <td className="px-2 py-2 text-right font-mono text-[12px] tabular-nums text-muted">{v.value.toLocaleString("en-US")}</td>
-                  <td className="px-2 py-2 text-right font-mono text-[12px] tabular-nums text-muted">{percent(v.no_hit_rate)}</td>
-                  <td className="px-2 py-2 text-right font-mono text-[12px] tabular-nums text-muted">{v.p95_latency_ms == null ? "—" : `<${v.p95_latency_ms} ms`}</td>
+      {list.map((x) => {
+        const status = experimentStatus(
+          stored[x.application]?.find((e) => e.id === x.experiment),
+          now,
+        );
+        const canPromote = status.kind === "running" || status.kind === "ended";
+        const open = asking?.application === x.application && asking.experiment === x.experiment ? asking : null;
+        return (
+          <div key={`${x.application}/${x.experiment}`} className="relative mb-4 overflow-x-auto">
+            <div className="flex items-center gap-2 pb-1 font-mono text-[12px] text-muted">
+              {x.application} · {x.experiment}
+              {status.kind !== "unknown" && (
+                <span className={`rounded border px-1.5 text-[11px] ${status.kind === "running" ? "border-accent/40 text-accent" : "border-line text-subtle"}`}>
+                  {status.kind === "promoted" ? `promoted ${status.variant}` : status.kind}
+                </span>
+              )}
+            </div>
+            <table className="w-full min-w-[58rem] table-fixed text-[13px]">
+              <thead>
+                <tr className="border-b border-line text-left text-[11px] text-subtle">
+                  <th className="py-2 font-normal">Variant</th>
+                  <th className="px-2 py-2 text-right font-normal">Searches</th>
+                  <th className="w-[13rem] px-2 py-2 text-right font-normal">Click-through</th>
+                  <th className="w-[13rem] px-2 py-2 text-right font-normal">Conversion</th>
+                  <th className="px-2 py-2 text-right font-normal">Value</th>
+                  <th className="px-2 py-2 text-right font-normal">No results</th>
+                  <th className="px-2 py-2 text-right font-normal">p95</th>
+                  <th className="w-[6rem] py-2" />
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ))}
+              </thead>
+              <tbody>
+                {x.variants.map((v) => (
+                  <tr key={v.name} className="border-b border-line last:border-0 align-top">
+                    <td className="py-2 font-mono text-[12px]">
+                      {v.name}
+                      {v.name === x.baseline && <span className="ml-2 text-[11px] text-subtle">baseline</span>}
+                    </td>
+                    <td className="px-2 py-2 text-right font-mono text-[12px] tabular-nums">{v.searches.toLocaleString("en-US")}</td>
+                    <td className="px-2 py-2 text-right font-mono text-[12px] tabular-nums">
+                      <Rate value={v.ctr} interval={v.ctr_interval} vs={v.vs_baseline?.ctr} baseline={!v.vs_baseline} />
+                    </td>
+                    <td className="px-2 py-2 text-right font-mono text-[12px] tabular-nums">
+                      <Rate value={v.conversion_rate} interval={v.conversion_rate_interval} vs={v.vs_baseline?.conversion_rate} baseline={!v.vs_baseline} />
+                    </td>
+                    <td className="px-2 py-2 text-right font-mono text-[12px] tabular-nums text-muted">{v.value.toLocaleString("en-US")}</td>
+                    <td className="px-2 py-2 text-right font-mono text-[12px] tabular-nums text-muted">{percent(v.no_hit_rate)}</td>
+                    <td className="px-2 py-2 text-right font-mono text-[12px] tabular-nums text-muted">{v.p95_latency_ms == null ? "—" : `<${v.p95_latency_ms} ms`}</td>
+                    <td className="py-1.5 text-right">
+                      {canPromote && (
+                        <button className={btn} disabled={busy} onClick={() => setAsking({ application: x.application, experiment: x.experiment, variant: v.name })}>
+                          Promote
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {open && (
+              <div className="rise mt-2 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-line bg-bg px-4 py-3">
+                <p className="max-w-2xl text-[13px] text-muted">
+                  Make <span className="font-mono text-fg">{open.variant}</span> what{" "}
+                  <span className="font-mono text-fg">{open.application}</span> runs for everyone: its params or template become the
+                  application&apos;s, and {status.kind === "running" ? "the experiment ends now" : "the experiment stays ended"}. An experiment
+                  promotes once.
+                </p>
+                <div className="flex gap-2">
+                  <button className={btn} disabled={busy} onClick={() => setAsking(null)}>
+                    Cancel
+                  </button>
+                  <button className={primary} disabled={busy} onClick={() => void promote()}>
+                    {busy ? "Promoting…" : `Promote ${open.variant}`}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+      {error && <p className="pb-2 text-[13px] text-danger">{error}</p>}
     </div>
   );
 }
 
+/** A rate, its 95% interval, and (but for the baseline) its difference from the baseline with
+ * that difference's interval and the test's call. */
+function Rate({ value, interval, vs, baseline }: { value: number | null; interval?: [number, number] | null; vs?: Comparison; baseline: boolean }) {
+  const range = intervalText(interval);
+  const diff = differenceText(vs);
+  return (
+    <>
+      {percent(value)}
+      {range && <div className="text-[11px] text-subtle">{range}</div>}
+      {!baseline && diff && <div className="text-[11px] text-muted">{diff}</div>}
+      {!baseline && <div className="text-[11px] text-subtle">{comparisonText(vs)}</div>}
+    </>
+  );
+}
+
+/** Which indices have analytics on, and turning it on or off for one. */
 function Switches({ cluster, indices, enabled, onChanged }: { cluster: SearchCluster; indices: string[]; enabled: string[]; onChanged: () => void }) {
   const [pick, setPick] = useState("");
   const [off, setOff] = useState<string | null>(null);
@@ -356,7 +452,7 @@ export function SearchAnalyticsPanel({ cluster, onAct }: { cluster: SearchCluste
             them with a synonym or a query rule. It&apos;s off until you turn it on, because query text is your users&apos; data.
           </p>
         </div>
-        <Experiments list={data.experiments ?? []} />
+        <Experiments cluster={cluster} list={data.experiments ?? []} />
         {indices.length === 0 ? <p className="px-5 pb-6 text-[13px] text-subtle">Create an index first.</p> : <Switches cluster={cluster} indices={indices} enabled={enabled} onChanged={reload} />}
       </Panel>
     );
@@ -383,7 +479,7 @@ export function SearchAnalyticsPanel({ cluster, onAct }: { cluster: SearchCluste
         />
       </div>
       <Rows list={list} rows={rows} a={data} onAct={onAct} />
-      <Experiments list={data.experiments ?? []} />
+      <Experiments cluster={cluster} list={data.experiments ?? []} />
       <Switches cluster={cluster} indices={indices} enabled={enabled} onChanged={reload} />
     </Panel>
   );
