@@ -452,14 +452,17 @@ impl Scope {
     /// indices and answers only what the grant reaches ([`Resource::filters_index`]): `None` the
     /// whole resource, else the index patterns of the rules that reach it in some indices only
     /// (each rule matching `r` named with that pattern, so its other limits hold). Only allowed
-    /// actions count: an `ask` is the gate's, never a product's to widen into.
-    pub fn indices_reaching(&self, r: &Resource, action: Action) -> Option<Vec<String>> {
+    /// actions count, unless a person approved this very request (`approved`: its outcome was
+    /// `ask`, and the gate let it through on the approval): then its `ask` rules reach too, for
+    /// it alone (a remembered approval is a temporary `allow` rule already).
+    pub fn indices_reaching(&self, r: &Resource, action: Action, approved: bool) -> Option<Vec<String>> {
+        let reaches = |o: Outcome| o == Outcome::Allow || (approved && o == Outcome::Ask);
         let whole = Resource { index: None, filters_index: false, ..r.clone() };
-        if self.outcome(&Target::One(whole), action) == Outcome::Allow {
+        if reaches(self.outcome(&Target::One(whole), action)) {
             return None;
         }
         let mut out = Vec::new();
-        for rule in self.0.iter().filter(|rule| rule.actions.get(&action) == Some(&Effect::Allow)) {
+        for rule in self.0.iter().filter(|rule| rule.actions.get(&action).is_some_and(|e| reaches(Outcome::from(*e)))) {
             let Resources::Some(selectors) = &rule.resources else { continue };
             for s in selectors {
                 if let Selector::Id { id, index: Some(ix) } = s
@@ -473,6 +476,27 @@ impl Scope {
         out.sort();
         out.dedup();
         Some(out)
+    }
+
+    /// [`Scope::indices_reaching`] for a token held `within` a person's session (their own token):
+    /// the patterns of each that the other reaches too, so a narrower session pattern
+    /// (`tenant-a-*` within the token's `tenant-*`) is kept, never dropped.
+    pub fn indices_reaching_within(&self, within: Option<&Scope>, r: &Resource, action: Action, approved: bool) -> Option<Vec<String>> {
+        let Some(w) = within else { return self.indices_reaching(r, action, approved) };
+        match (self.indices_reaching(r, action, approved), w.indices_reaching(r, action, approved)) {
+            (mine, None) => mine,
+            (None, theirs) => theirs,
+            (Some(mine), Some(theirs)) => {
+                let reaches = |s: &Scope, p: &String| {
+                    let o = s.outcome(&Target::One(Resource { index: Some(p.clone()), filters_index: false, ..r.clone() }), action);
+                    o == Outcome::Allow || (approved && o == Outcome::Ask)
+                };
+                let mut both: Vec<String> = mine.iter().filter(|p| reaches(w, p)).chain(theirs.iter().filter(|p| reaches(self, p))).cloned().collect();
+                both.sort();
+                both.dedup();
+                Some(both)
+            }
+        }
     }
 
     /// Whether any rule names this product with this action (what `tools/list` shows).
@@ -576,10 +600,17 @@ mod tests {
             { "product": "search", "resources": [{ "id": "srch_1", "index": "tenant-a-*" }, { "id": "srch_2" }], "actions": { "read": "allow" } },
             { "product": "search", "resources": [{ "id": "srch_1", "index": "logs" }], "actions": { "read": "ask" } }
         ]));
-        assert_eq!(limited.indices_reaching(&r, Action::Read), Some(vec!["tenant-a-*".to_string()]));
-        assert_eq!(limited.indices_reaching(&r, Action::Write), Some(Vec::new()));
+        assert_eq!(limited.indices_reaching(&r, Action::Read, false), Some(vec!["tenant-a-*".to_string()]));
+        assert_eq!(limited.indices_reaching(&r, Action::Write, false), Some(Vec::new()));
+        // A request a person approved reaches what its `ask` rules name too.
+        assert_eq!(limited.indices_reaching(&r, Action::Read, true), Some(vec!["logs".to_string(), "tenant-a-*".to_string()]));
         let whole = scope(serde_json::json!([{ "product": "search", "resources": [{ "id": "srch_1" }], "actions": { "read": "allow" } }]));
-        assert_eq!(whole.indices_reaching(&r, Action::Read), None);
+        assert_eq!(whole.indices_reaching(&r, Action::Read, false), None);
+        // A token held within a session: what both reach, a narrower pattern of either kept.
+        let token = scope(serde_json::json!([{ "product": "search", "resources": [{ "id": "srch_1", "index": "tenant-*" }, { "id": "srch_1", "index": "other" }], "actions": { "read": "allow" } }]));
+        let session = scope(serde_json::json!([{ "product": "search", "resources": [{ "id": "srch_1", "index": "tenant-a-*" }], "actions": { "read": "allow" } }]));
+        assert_eq!(token.indices_reaching_within(Some(&session), &r, Action::Read, false), Some(vec!["tenant-a-*".to_string()]));
+        assert_eq!(token.indices_reaching_within(Some(&whole), &r, Action::Read, false), Some(vec!["other".to_string(), "tenant-*".to_string()]));
     }
 
     #[test]

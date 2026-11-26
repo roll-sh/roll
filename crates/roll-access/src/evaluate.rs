@@ -1008,19 +1008,13 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
     }
     // A route that answers only the indices the grant reaches of its resource: which they are, as
     // the gate decided it (the resource's project and all), the token's held within the person's
-    // session (a pattern counts when the session reaches it too).
+    // session: the patterns of each the other reaches too. A request that went through on an
+    // approval of its `ask` (here, or on the node that forwarded it) reaches its `ask` rules too.
     if row.filters_index
         && let Target::One(r) = &target
     {
-        let mine = scope.indices_reaching(r, action);
-        let reach = match (mine, within_scope.as_ref().map(|w| w.indices_reaching(r, action))) {
-            (mine, None | Some(None)) => mine,
-            (None, Some(theirs)) => theirs,
-            (Some(mine), Some(Some(_))) => {
-                let w = within_scope.as_ref().expect("a session");
-                Some(mine.into_iter().filter(|p| w.outcome(&Target::One(roll_auth::scope::Resource { index: Some(p.clone()), filters_index: false, ..r.clone() }), action) == Outcome::Allow).collect())
-            }
-        };
+        let approved_ask = outcome == Outcome::Ask;
+        let reach = scope.indices_reaching_within(within_scope.as_deref(), r, action, approved_ask);
         parts.extensions.insert(roll_auth::IndexScope(reach));
     }
     parts.extensions.insert(roll_auth::Grant {

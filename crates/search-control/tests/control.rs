@@ -6993,10 +6993,27 @@ async fn esql_reads_only_the_indices_the_grant_reaches() {
     };
     let (s, v) = esql(json!({"query": "FROM tenant-a-* | KEEP n"})).await;
     assert_eq!((s, &v["values"]), (200, &json!([[1]])), "{v}");
-    for query in ["FROM tenant-b", "FROM tenant-a-1, tenant-b", "FROM tenant-a-1 | LOOKUP JOIN tenant-b-lookup ON t", "FROM tenant-a-1 | ENRICH p ON t"] {
+    // A pattern resolved as the query runs reaches only the grant's indices (`METADATA _index`
+    // says which).
+    let (s, v) = esql(json!({"query": "FROM tenant-* METADATA _index | KEEP _index"})).await;
+    assert_eq!((s, &v["values"]), (200, &json!([["tenant-a-1"]])), "{v}");
+    for query in ["FROM tenant-b", "FROM tenant-a-1, tenant-b", "FROM tenant-a-1 | LOOKUP JOIN tenant-b-lookup ON t", "FROM tenant-a-1 | ENRICH p ON t", "FROM far:tenant-a-1", "FROM *:*"] {
         let (s, v) = esql(json!({"query": query})).await;
         assert!((s == 400 || s == 403) && !v.to_string().contains("s-of-b"), "{query}: {s} {v}");
     }
     let (s, v) = esql(json!({"query": "FROM tenant-a-*", "keep_on_completion": true})).await;
     assert_eq!(s, 400, "{v}");
+    // The index form reads as the path's index only, whatever the query names.
+    let on_index = |query: &str| {
+        let (e, rules, body) = (&e, rules.clone(), json!({"query": query}));
+        async move {
+            let r = e.http.post(format!("{}/v1/search/clusters/esql/indices/tenant-a-1/esql", e.api)).header("x-test-grant", rules).json(&body).send().await.unwrap();
+            let s = r.status().as_u16();
+            (s, r.text().await.unwrap())
+        }
+    };
+    let (s, v) = on_index("FROM tenant-a-1 | KEEP n").await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = on_index("FROM tenant-b").await;
+    assert!((s == 400 || s == 403) && !v.contains("s-of-b"), "{s} {v}");
 }
