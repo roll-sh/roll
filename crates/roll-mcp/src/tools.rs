@@ -541,6 +541,11 @@ fn value_request_defaults() -> Value {
     json!({ "ttl_minutes": 1440, "answers": 1 })
 }
 
+/// A search task that completed (its `response` or `error` in the answer).
+fn task_done(v: &Value) -> bool {
+    v["completed"].as_bool() == Some(true)
+}
+
 /// A tasks run that's over (`completed`, `failed` or `canceled`).
 fn run_over(v: &Value) -> bool {
     matches!(v["status"].as_str(), Some("completed" | "failed" | "canceled"))
@@ -1265,6 +1270,26 @@ static TOOLS: &[Tool] = &[
         &[req("cluster", "Cluster"), req("index", "Index"), P { name: "ndjson", ty: Ty::Str, at: At::RawNdjson, required: true, desc: "Action and document lines" }],
     ),
     t("search_delete_by_query", "Delete by query", "Delete every document of an index that matches a query (at most max_docs of them).", "search", "POST", "/v1/search/clusters/{cluster}/indices/{index}/delete_by_query", &[req("cluster", "Cluster"), req("index", "Index"), breq("query", Ty::Obj, "Query DSL"), b("max_docs", Ty::Int, "Delete at most this many"), b("conflicts", Ty::Choice(&["abort", "proceed"]), "On a document changed meanwhile: stop (the default) or go on")]),
+    t(
+        "search_update_by_query",
+        "Update by query",
+        "Index every document of one index that matches a query again, in place, through the index's pipelines and inference: with no script it embeds a semantic_text field added since, or a field a changed mapping now copies to. A script changes each document instead, and can delete (so it needs delete). With wait_for_completion false it answers a task at once; follow it with search_wait_task.",
+        "search",
+        "POST",
+        "/v1/search/clusters/{cluster}/indices/{index}/update_by_query",
+        &[
+            req("cluster", "Cluster id or name"),
+            req("index", "One index, by its name (no pattern or list)"),
+            b("query", Ty::Obj, "Query DSL: the documents to index again (default: every one)"),
+            b("script", Ty::Any, "A Painless script changing each document (it can delete: needs delete)"),
+            b("max_docs", Ty::Int, "At most this many"),
+            b("conflicts", Ty::Choice(&["abort", "proceed"]), "On a document changed meanwhile: stop (the default) or go on"),
+            b("slices", Ty::Any, "Parallel slices: a number, or \"auto\""),
+            q("wait_for_completion", Ty::Bool, "false: answer a task at once (an index past a few thousand documents)"),
+        ],
+    )
+    .open_world(),
+    t("search_wait_task", "Wait for a search task", "A search task (search_update_by_query's) once it completes, or as it is when the timeout passes: completed, and its response (updated, failures) or error. Pass wait_for_completion: true to wait.", "search", "GET", "/v1/search/clusters/{cluster}/tasks/{task}", &[req("cluster", "Cluster id or name"), req("task", "Task id, as search_update_by_query answered it (node:number)"), q("wait_for_completion", Ty::Bool, "true: wait until it completes or the timeout passes"), q("timeout", Ty::Str, "e.g. 30s (at most a minute)")]).until(task_done),
     t("search_query", "Search", "Run an Elasticsearch _search body on an index: a query or a retriever (hybrid search is an rrf or linear retriever over a standard and a knn one), knn, aggregations, highlighting, paging with search_after.", "search", "POST", "/v1/search/clusters/{cluster}/indices/{index}/search", &[
         req("cluster", "Cluster id or name"),
         req("index", "Index"),
@@ -1620,6 +1645,7 @@ static TOOLS: &[Tool] = &[
     t("apps_delete_environment", "Delete an environment", "Delete an environment with its deploys, instances and domains. Irreversible.", "apps", "DELETE", "/v1/apps/services/{service}/environments/{env}", &[SERVICE, ENV]),
     t("apps_link", "Link a resource", "Give a service a roll resource's connection variables (DATABASE_URL and the like, with prefix if given): kind is postgres, redis, bucket, stream, queue, nosql, service (another service of the project: its private and public URLs), tasks (a roll tasks tenant: an API key of the link's own and the tenant's signing keys) or search (a search cluster: a data-only key of the link's own, narrowed with indices and access: a SaaS's tenants' indices, a frontend's read-only key, a log shipper's append-only one; changing them makes a new key and revokes the old). Needs reveal on the resource; the next deploy picks it up.", "apps", "PUT", "/v1/apps/services/{service}/links/{kind}/{ref}", &[SERVICE, req_choice("kind", &["postgres", "redis", "bucket", "stream", "queue", "nosql", "search", "service", "tasks"], "Resource kind (service: another service of the project)"), req("ref", "The resource's id or name"), b("prefix", Ty::Str, "Variable name prefix"), b("indices", Ty::Arr, "Search only: the key's index names or patterns (tenant-*)"), b("access", Ty::Str, "Search only: read, or append (create documents on exact names); none: read and write documents")]),
     t("apps_unlink", "Unlink a resource", "Stop giving a service a linked resource's variables (from the next deploy).", "apps", "DELETE", "/v1/apps/services/{service}/links/{kind}/{ref}", &[SERVICE, req_choice("kind", &["postgres", "redis", "bucket", "stream", "queue", "nosql", "search", "service", "tasks"], "Link kind"), req("ref", "The resource's id or name")]),
+    t("apps_claim_domain", "Claim a domain held elsewhere", "Take a hostname another environment holds by proving it's yours: the first call answers the TXT record to add (claimed false, txt {name, value}); once DNS has it, the next call moves the domain here, verified (claimed true, domain), and the holder is told.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/domains/{host}/claim", &[SERVICE, ENV, req("host", "The domain")]).open_world(),
     t("apps_configure_domain", "Write a domain's DNS records", "Write a custom domain's records (its CNAME, and the TXT challenge where it needs one) at the customer's Cloudflare with their API token, then check it: cloudflare_token is a roll:// reference to a token scoped to Zone:DNS:Edit on that zone, read as the caller (who must be able to reveal it, not marked sensitive) for this call only: a grant that would ask for it is refused, not asked. The name's A or AAAA records (its old host) answer a 409 naming them unless replace is true.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/domains/{host}/configure", &[SERVICE, ENV, req("host", "The domain"), breq("cloudflare_token", Ty::Str, "A roll:// reference to the Cloudflare API token"), b("replace", Ty::Bool, "Delete the name's A and AAAA records for roll's CNAME")]).open_world(),
     t("apps_verify_domain", "Check a domain", "Check a custom domain's DNS now and answer its state (pending, verified) and the record to add.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/domains/{host}/verify", &[SERVICE, ENV, req("host", "The domain")]).open_world(),
     t("apps_list_backups", "Volume backups", "An environment's volume backups, newest first (7 kept).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/volume/backups", &[SERVICE, ENV]),
@@ -1809,6 +1835,15 @@ static TOOLS: &[Tool] = &[
         "POST",
         "/v1/previews/{id}/reset",
         &[req("id", "Preview id"), b("resources", Ty::Arr, "Only these, as \"<kind>:<parent>\"")],
+    ),
+    t(
+        "previews_rehearse",
+        "Rehearse a release on today's data",
+        "Run a change's release (its migrations) once more on fresh, masked branches of its Postgres parents as they are now, instead of the preview's branches from when it was made: how long it takes and whether it fails on today's data, before it lands. Answers at once; previews_wait, then the preview's rehearsal {head, ok, ms, error}. Refused for a default branch's preview, or one without a release or a Postgres branch.",
+        "previews",
+        "POST",
+        "/v1/previews/{id}/rehearse",
+        &[req("id", "Preview id")],
     ),
     t("previews_keep", "Keep a preview", "Keep a preview past its time to live, for some hours (0 lets it go; a landed or closed change still ends it).", "previews", "POST", "/v1/previews/{id}/keep", &[req("id", "Preview id"), breq("hours", Ty::Int, "0 to 720")]),
     t("previews_activity", "Preview activity", "What happened to a preview, newest first.", "previews", "GET", "/v1/previews/{id}/activity", &[req("id", "Preview id")]),
@@ -2048,6 +2083,7 @@ mod tests {
             ("search_browser_key_usage", "window", keys(between(include_str!("../../search-control/src/control.rs"), "impl MetricsRange {", "\n}\n"))),
             ("search_analytics", "range", keys(between(include_str!("../../search-control/src/analytics.rs"), "impl Range {", "\n}\n"))),
             ("search_delete_by_query", "conflicts", keys(between(include_str!("../../search-es/src/api/by_query_request.rs"), "fn set_conflicts(", "\n    }\n"))),
+            ("search_update_by_query", "conflicts", keys(between(include_str!("../../search-es/src/api/by_query_request.rs"), "fn set_conflicts(", "\n    }\n"))),
             ("secrets_create_environment", "kind", envs.clone()),
             ("secrets_ensure_environment", "kind", envs),
             ("secrets_get", "type", types.clone()),
@@ -2666,7 +2702,7 @@ mod tests {
         const FORK_WORDS: &[&str] = &[
             // The preview itself (`outside: !trusted`: its title is the fork's pull request's),
             // and every write that answers it.
-            "previews_list", "previews_get", "previews_wait", "previews_create", "previews_refresh", "previews_keep", "previews_sleep", "previews_wake", "previews_reset",
+            "previews_list", "previews_get", "previews_wait", "previews_create", "previews_refresh", "previews_keep", "previews_sleep", "previews_wake", "previews_reset", "previews_rehearse",
             "previews_errors", "previews_traces", "previews_get_trace", "previews_routes", "previews_logs", "previews_requests", "previews_activity",
             "previews_list_mail", "previews_read_mail", "previews_screenshot", "previews_fetch", "previews_try", "previews_try_screenshot", "previews_note_crop", "previews_tables",
             // A share link's guests' notes (`by` `guest:…`).

@@ -440,6 +440,10 @@ pub struct Preview {
     /// a dropped table or column, a type change, a column made NOT NULL).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub schema_risks: Vec<String>,
+    /// Its release rehearsed on the parents' data as it is now (PlanetScale's deploy requests
+    /// check against today's production): asked for at a head, then how it went.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rehearsal: Option<Rehearsal>,
     /// The project's `release` (migrations) at its last head: how long it took on this
     /// preview's data, which is the parent's (PlanetScale's deploy requests show this before a
     /// merge: what's slow here locks production as long).
@@ -1324,6 +1328,25 @@ pub enum VisualState {
     /// Someone refused a page at this head (Chromatic's Deny): it fails until a new head, or
     /// until someone accepts that page.
     Refused,
+}
+
+/// A change's release run again on fresh branches of its Postgres parents, as they are now
+/// (`POST …/rehearse`): its preview's data may be days old, production's isn't.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct Rehearsal {
+    /// The head it's for.
+    pub head: String,
+    pub by: String,
+    /// When it was asked for.
+    pub at: i64,
+    /// `None` while it waits for the next converge; then whether the release passed.
+    #[serde(default)]
+    pub ok: Option<bool>,
+    #[serde(default)]
+    pub ms: Option<i64>,
+    /// What it failed with (one line, masked).
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 /// Another open change's preview whose schema changes touch the same tables as this one's.

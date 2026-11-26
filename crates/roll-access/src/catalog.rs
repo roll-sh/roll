@@ -420,6 +420,7 @@ pub const OPERATOR_ONLY: &[(&str, &str)] = &[
     ("/v1/secrets/issuer/rotate", "roll's OIDC issuer key signs for every project: rotating it is the operator's"),
     ("/v1/secrets/audit/key/rotate", "the audit log's digest key signs every project's digests: rotating or pulling it is the operator's"),
     ("/v1/secrets/policy", "roll secrets' guardrails are floors for every project: reading and setting them is the operator's (or an admin account's)"),
+    ("/v1/secrets/policy/report", "every project's distance from roll secrets' guardrails, and every grant past them: the operator's (or an admin account's)"),
     ("/v1/previews/{id}/visit", "a browser session in a team-access preview is a signed-in person's (rolld's gate sees their session), never a token's"),
     ("/v1/apps/services/{id}/environments/{env}/visit", "a browser session in a sign-in-gated environment is a signed-in person's (rolld's gate sees their session), never a token's"),
     ("/v1/apps/services/{id}/github", "roll's GitHub App installations span tenants: connecting a service to one (its tokens fetch any repository the installation sees) is the operator's, as connecting a repo is roll code's admin token's"),
@@ -1882,6 +1883,9 @@ static ROWS: &[Row] = &[
     // Writing a domain's records at the customer's Cloudflare with their token (a `roll://`
     // reference roll secrets checks they may reveal): what pointing the domain here is.
     row("POST", "/v1/apps/services/{id}/environments/{env}/domains/{host}/configure", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
+    // Taking a hostname another environment holds, once DNS proves it's the caller's: what
+    // adding the domain is.
+    row("POST", "/v1/apps/services/{id}/environments/{env}/domains/{host}/claim", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
     row("GET", "/v1/apps", "apps", R, Tgt::Product),
     // A plan or an import of a roll code repo reads it: read there too.
     row("POST", "/v1/apps/plan", "apps", R, Tgt::AnyGrant).lends(Lend::Each(apps_repo)),
@@ -1944,6 +1948,7 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/previews/{id}/reset", "previews", D, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // Putting a restore point back replaces the data the preview has now, as a reset does.
     row("POST", "/v1/previews/{id}/restore-points/{point}/restore", "previews", D, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("POST", "/v1/previews/{id}/rehearse", "previews", D, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // A share link lets someone outside the team in, its token only in the answer: reveal, as the
     // bypass secret is. Listing (no tokens) is read and revoking one is delete, by the prefix.
     row("POST", "/v1/previews/{id}/shares", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
