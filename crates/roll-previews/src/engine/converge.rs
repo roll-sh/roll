@@ -1520,9 +1520,11 @@ impl Engine {
                 }
                 // Its variables in place of the preview's branch's: the same names, wherever their
                 // values went (a suffixed name too), by value (a branch's URL holds its own role's
-                // password, so it's that branch's alone).
-                let old = b.connect(&res.parent, branch, res.kept.as_deref()).await?;
-                let new = b.connect(&res.parent, &fresh.r#ref, fresh.kept.as_deref()).await?;
+                // password, so it's that branch's alone), and the ones roll makes from them
+                // (`PGHOST`, `PGUSER`, `PGPASSWORD`, `PGOPTIONS`…), so a release that reads those
+                // never runs on the preview's own branch.
+                let old = crate::names::with_standard(res.kind, b.connect(&res.parent, branch, res.kept.as_deref()).await?);
+                let new = crate::names::with_standard(res.kind, b.connect(&res.parent, &fresh.r#ref, fresh.kept.as_deref()).await?);
                 for (k, v) in &old {
                     if let Some((_, nv)) = new.iter().find(|(nk, _)| nk == k) {
                         for kv in vars.iter_mut().filter(|(_, vv)| vv == v) {
