@@ -514,6 +514,28 @@ pub struct Effective {
     pub history_aliases: std::collections::HashMap<String, Vec<String>>,
     /// The cluster's dialect ([`Effective::restricted`]).
     pub dialect: crate::cluster::Dialect,
+    /// A linked OpenSearch cluster's user: the names it never reaches, whatever a role's or the
+    /// ceiling's patterns say ([`off_limits_to_links`]). `None` for everyone else.
+    pub off_limits: Option<std::collections::HashSet<String>>,
+}
+
+/// What a linked cluster's user never reaches here: dot-prefixed, hidden and restricted indices,
+/// hidden or system data streams, and every alias over any of them. A data stream's backing
+/// index (`.ds-…`) is reached through its data stream, so only a reachable one's are.
+fn off_limits_to_links(st: &crate::meta::ClusterState) -> std::collections::HashSet<String> {
+    let mut off = std::collections::HashSet::new();
+    for (name, idx) in st.metadata.indices.iter() {
+        if name.starts_with('.') || idx.is_hidden() || privileges::is_restricted(name) {
+            off.insert(name.clone());
+            off.extend(idx.aliases.keys().cloned());
+        }
+    }
+    for ds in st.metadata.data_streams.values() {
+        if ds.hidden || ds.system || ds.name.starts_with('.') {
+            off.insert(ds.name.clone());
+        }
+    }
+    off
 }
 
 impl Effective {
@@ -539,7 +561,17 @@ impl Effective {
         self.allows(|p| p.allows_cluster(action))
     }
 
+    /// Whether `index` is off limits to the principal ([`Effective::off_limits`]): a name in the
+    /// set, or a dot-prefixed name that isn't a reachable data stream's backing index.
+    fn off_limits(&self, index: &str) -> bool {
+        let Some(off) = &self.off_limits else { return false };
+        off.contains(index) || (index.starts_with('.') && self.parents.get(index).is_none_or(|ds| off.contains(ds)))
+    }
+
     pub fn allows_index(&self, action: &str, index: &str) -> bool {
+        if self.off_limits(index) {
+            return false;
+        }
         let restricted = self.restricted(index);
         let parent = self.parents.get(index);
         // Through an alias over watch records: the records themselves too.
@@ -573,6 +605,9 @@ impl Effective {
     }
 
     pub fn has_index_privilege(&self, privilege: &str, index: &str) -> bool {
+        if self.off_limits(index) {
+            return false;
+        }
         if let Some(behind) = self.history_aliases.get(index)
             && !behind.iter().all(|i| self.allows(|p| p.has_index_privilege(privilege, i)))
         {
@@ -700,7 +735,8 @@ pub fn effective(file: &FileRoles, st: &crate::meta::ClusterState, p: &Principal
             history_aliases.entry(alias.clone()).or_default().push(name.clone());
         }
     }
-    Effective { own, limited_by, also, parents, history_aliases, dialect: st.metadata.dialect }
+    let off_limits = matches!(&p.kind, AuthKind::OpenSearch(id) if id.link.is_some()).then(|| off_limits_to_links(st));
+    Effective { own, limited_by, also, parents, history_aliases, dialect: st.metadata.dialect, off_limits }
 }
 
 /// Read APIs whose wildcard index expressions Elasticsearch expands to the indices the user

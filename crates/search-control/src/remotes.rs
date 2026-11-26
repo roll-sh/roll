@@ -91,7 +91,9 @@ fn os_ceiling(access: Option<&Value>, local: &str) -> Result<Value> {
             for e in a.get("search").and_then(Value::as_array).filter(|s| !s.is_empty()).ok_or_else(bad)? {
                 let e = e.as_object().filter(|e| e.len() == 1).ok_or_else(bad)?;
                 for n in e.get("names").and_then(Value::as_array).filter(|n| !n.is_empty()).ok_or_else(bad)? {
-                    let n = n.as_str().filter(|n| !n.is_empty() && n.len() <= 255 && !n.starts_with(['.', '-', '_']) && !n.contains([':', ',', ' '])).ok_or_else(bad)?;
+                    // No templates (`${user.name}`, `${attr.…}`: filled from the identity the
+                    // linking cluster sends) and no `/regex/`: names and `*` patterns only.
+                    let n = n.as_str().filter(|n| !n.is_empty() && n.len() <= 255 && !n.starts_with(['.', '-', '_']) && !n.contains([':', ',', ' ', '$', '{', '}', '/'])).ok_or_else(bad)?;
                     names.push(n.to_string());
                 }
             }
