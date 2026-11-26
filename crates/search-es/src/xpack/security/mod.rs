@@ -1514,56 +1514,79 @@ pub fn authz_name(expr: &str, now_ms: i64) -> String {
     }
 }
 
-/// An alias action on what it resolved to (`indices` concrete or data streams, `aliases` with
-/// their date math resolved), as Elasticsearch authorizes `_aliases` and `PUT _alias`:
-/// `indices:admin/aliases` on the indices and on the alias names, so a body's `index` can't
-/// point an alias at an index the request's path never named. Adding one is refused, as
-/// `IndicesAliasesRequestInterceptor` refuses it, when document or field level security
-/// applies to one of the indices for the caller, or when the alias would give more than the
-/// index it points at (`manage` on an index without `read` mustn't read it through an alias
-/// that `read` reaches).
-pub fn check_alias_action(ctx: &Ctx, adding: bool, indices: &[String], aliases: &[String]) -> EsResult<()> {
-    let Some(p) = ctx.principal.get().filter(|p| !p.is_superuser()) else { return Ok(()) };
+/// What an alias change is authorized with: the caller's permissions, captured before the
+/// cluster update, so the checks run inside it on the state the change applies to (wildcards and
+/// existing aliases resolved there, never on an earlier state).
+///
+/// An alias action is authorized on what it resolved to (indices concrete or data streams, alias
+/// names with their date math resolved), as Elasticsearch authorizes `_aliases`, `PUT _alias`
+/// and the aliases of a create, resize or rollover: `indices:admin/aliases` on the indices and on
+/// the alias names, so a body's `index` can't point an alias at an index the request's path never
+/// named. Adding one is refused, as `IndicesAliasesRequestInterceptor` refuses it, when document
+/// or field level security applies to one of the indices for the caller, or when the alias would
+/// give more than the index it points at (`manage` on an index without `read` mustn't read it
+/// through an alias that `read` reaches).
+pub struct AliasAuth {
+    who: Option<(Principal, Effective)>,
+    dls: Option<dls::ReadSecurity>,
+}
+
+impl AliasAuth {
     const ACTION: &str = "indices:admin/aliases";
-    let eff = effective(&file_roles(ctx.cluster), &ctx.state(), p);
-    let denied_on: Vec<String> = indices.iter().chain(aliases).filter(|n| !eff.allows_index(ACTION, n)).cloned().collect();
-    if !denied_on.is_empty() {
-        return Err(denied(p, ACTION, Some(&denied_on)));
+
+    pub fn of(ctx: &Ctx) -> AliasAuth {
+        let who = ctx.principal.get().filter(|p| !p.is_superuser()).map(|p| (p.clone(), effective(&file_roles(ctx.cluster), &ctx.state(), p)));
+        let dls = who.as_ref().and_then(|_| dls::ReadSecurity::of(ctx));
+        AliasAuth { who, dls }
     }
-    if !adding {
-        return Ok(());
+
+    pub fn check(&self, adding: bool, indices: &[String], aliases: &[String]) -> EsResult<()> {
+        let Some((p, eff)) = &self.who else { return Ok(()) };
+        let denied_on: Vec<String> = indices.iter().filter(|n| !eff.allows_index(Self::ACTION, n)).cloned().collect();
+        if !denied_on.is_empty() {
+            return Err(denied(p, Self::ACTION, Some(&denied_on)));
+        }
+        // An alias name is refused without naming it, as Elasticsearch refuses a create's.
+        if aliases.iter().any(|a| !eff.allows_index(Self::ACTION, a)) {
+            let by = privileges::granted_by(Self::ACTION, false).join(",");
+            return Err(EsError::security(403, format!("action [{}] is unauthorized for {}, this action is granted by the index privileges [{by}]", Self::ACTION, who(p))));
+        }
+        if !adding || aliases.is_empty() {
+            return Ok(());
+        }
+        if let Some(r) = &self.dls
+            && indices.iter().any(|i| r.restricts("indices:data/read/search", i))
+        {
+            return Err(EsError::security(403, "Alias requests are not allowed for users who have field or document level security enabled on one of the indices"));
+        }
+        if indices.iter().any(|i| aliases.iter().any(|a| !eff.no_wider(a, i))) {
+            return Err(EsError::security(403, "Adding an alias is not allowed when the alias has more permissions than any of the indices"));
+        }
+        Ok(())
     }
-    if let Some(r) = dls::ReadSecurity::of(ctx)
-        && indices.iter().any(|i| r.restricts("indices:data/read/search", i))
-    {
-        return Err(EsError::security(403, "Alias requests are not allowed for users who have field or document level security enabled on one of the indices"));
+
+    /// The aliases a request makes `index` with (a create, a resize, a rollover), as adding them.
+    pub fn check_new(&self, index: &str, aliases: &[String]) -> EsResult<()> {
+        if aliases.is_empty() { Ok(()) } else { self.check(true, &[index.to_string()], aliases) }
     }
-    if indices.iter().any(|i| aliases.iter().any(|a| !eff.no_wider(a, i))) {
-        return Err(EsError::security(403, "Adding an alias is not allowed when the alias has more permissions than any of the indices"));
+
+    /// Removing indices through `_aliases` (`remove_index`): `indices:admin/delete` on each.
+    pub fn check_index_removal(&self, indices: &[String]) -> EsResult<()> {
+        let Some((p, eff)) = &self.who else { return Ok(()) };
+        const ACTION: &str = "indices:admin/delete";
+        let denied_on: Vec<String> = indices.iter().filter(|n| !eff.allows_index(ACTION, n)).cloned().collect();
+        if denied_on.is_empty() { Ok(()) } else { Err(denied(p, ACTION, Some(&denied_on))) }
     }
-    Ok(())
 }
 
-/// Removing indices through `_aliases` (`remove_index`): `indices:admin/delete` on each.
-pub fn check_alias_index_removal(ctx: &Ctx, indices: &[String]) -> EsResult<()> {
-    let Some(p) = ctx.principal.get().filter(|p| !p.is_superuser()) else { return Ok(()) };
-    const ACTION: &str = "indices:admin/delete";
-    let eff = effective(&file_roles(ctx.cluster), &ctx.state(), p);
-    let denied_on: Vec<String> = indices.iter().filter(|n| !eff.allows_index(ACTION, n)).cloned().collect();
-    if denied_on.is_empty() { Ok(()) } else { Err(denied(p, ACTION, Some(&denied_on))) }
-}
-
-/// A resize (`_shrink`, `_split`, `_clone`) from `source` into `target`: `indices:admin/resize`
-/// on the target too, and, as `ResizeRequestInterceptor` does, no resize from a source under
-/// document or field level security for the caller, nor into a target the caller holds more on
-/// than the source (the copy would read what the source hides).
+/// A resize (`_shrink`, `_split`, `_clone`) from `source` into `target`, as
+/// `ResizeRequestInterceptor` checks it: no resize from a source under document or field level
+/// security for the caller, nor into a target the caller holds more on than the source (the copy
+/// would read what the source hides). The target itself needs no privilege, as on Elasticsearch
+/// (an index no role names reads nothing); aliases the body gives it are [`AliasAuth`]'s.
 pub fn check_resize(ctx: &Ctx, source: &str, target: &str) -> EsResult<()> {
     let Some(p) = ctx.principal.get().filter(|p| !p.is_superuser()) else { return Ok(()) };
-    const ACTION: &str = "indices:admin/resize";
     let eff = effective(&file_roles(ctx.cluster), &ctx.state(), p);
-    if !eff.allows_index(ACTION, target) {
-        return Err(denied(p, ACTION, Some(&[target.to_string()])));
-    }
     if dls::ReadSecurity::of(ctx).is_some_and(|r| r.restricts("indices:data/read/search", source)) {
         return Err(EsError::security(403, "Resize requests are not allowed for users when field or document level security is enabled on the source index"));
     }

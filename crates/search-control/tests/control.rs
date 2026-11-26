@@ -4137,6 +4137,8 @@ async fn names_are_authorized_as_resolved() {
         (Method::PUT, "/mine/_settings", json!({"index.blocks.write": true})),
         (Method::PUT, "/_security/role/fsm", json!({"indices": [{"names": ["logs-*"], "privileges": ["manage_failure_store"]}]})),
         (Method::PUT, "/_security/user/fsm", json!({"password": "fsm-pass-1", "roles": ["fsm"]})),
+        (Method::PUT, "/secret/_alias/secret-w", Value::Null),
+        (Method::PUT, "/mine-000001", json!({"aliases": {"mine-roll": {"is_write_index": true}}})),
     ] {
         let (s, v) = e.es(&u, &p, m, path, Some(body).filter(|b| !b.is_null())).await;
         assert!(s < 300, "{path}: {v}");
@@ -4188,11 +4190,24 @@ async fn names_are_authorized_as_resolved() {
         let (s, v) = e.es("rd@rn", "rd-pass-1", Method::POST, path, Some(json!({"docs": [{"_index": "<.async-search>", "_id": "x"}]}))).await;
         assert_eq!((s, &v["docs"][0]["error"]["type"]), (200, &json!("security_exception")), "{path}: {v}");
     }
-    // A clone's target is authorized too.
-    let (s, v) = lim(Method::POST, "/mine/_clone/other-copy", None).await;
-    assert!(s == 403 && v.to_string().contains("indices:admin/resize"), "{s} {v}");
+    // A resize's target needs nothing of its own, as on Elasticsearch, but can't hold more than
+    // its source, and the aliases it's made with are authorized as an alias request's.
+    let (s, v) = lim(Method::POST, "/secret/_clone/mine-sc", None).await;
+    assert!(s == 403 && v.to_string().contains("target index has more permissions than the source"), "{s} {v}");
+    let (s, v) = lim(Method::POST, "/secret/_clone/zz-copy", Some(json!({"aliases": {"mine-leak": {}}}))).await;
+    assert!(s == 403 && v.to_string().contains("indices:admin/aliases"), "secret read through mine-leak: {s} {v}");
+    assert_eq!(e.es(&u, &p, Method::GET, "/zz-copy", None).await.0, 404, "nothing was made");
     let (s, v) = lim(Method::POST, "/mine/_clone/mine-copy", None).await;
     assert_eq!(s, 200, "{v}");
+    // So are a create's and a rollover's: neither takes over another index's write alias.
+    let hijack = json!({"aliases": {"secret-w": {"is_write_index": true}}});
+    let (s, v) = lim(Method::PUT, "/mine-new", Some(hijack.clone())).await;
+    assert!(s == 403 && v.to_string().contains("indices:admin/aliases"), "{s} {v}");
+    let (s, v) = lim(Method::POST, "/mine-roll/_rollover", Some(hijack)).await;
+    assert!(s == 403 && v.to_string().contains("indices:admin/aliases"), "{s} {v}");
+    let (_, v) = e.es(&u, &p, Method::GET, "/_alias/secret-w", None).await;
+    assert_eq!(v, json!({"secret": {"aliases": {"secret-w": {}}}}), "the write alias is where it was");
+    assert_eq!(lim(Method::POST, "/mine-roll/_rollover", None).await.0, 200, "a rollover of the user's own");
 }
 
 /// The same alias attack on OpenSearch: the body's index is authorized, and an alias can't

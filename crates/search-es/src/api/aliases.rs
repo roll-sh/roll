@@ -13,6 +13,7 @@ use crate::meta::{AliasMeta, ClusterState, IndexMeta};
 use crate::obj;
 use crate::rest::{Ctx, Reply};
 use crate::xcontent::filter::glob_match;
+use crate::xpack::security::AliasAuth;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -707,10 +708,10 @@ fn action_value(a: &Action, targeted: Option<&Vec<String>>) -> Value {
 
 /// Authorizes each action on what it resolves to, as [`apply`] resolves it: the indices (or
 /// data streams) it reaches, whatever named them (the path, the body's `index`), and the alias
-/// names ([`crate::xpack::security::check_alias_action`]). What doesn't resolve fails in
+/// names ([`AliasAuth`]). What doesn't resolve fails in
 /// `apply` as before.
 fn authorize(ctx: &Ctx, actions: &[Action]) -> EsResult<()> {
-    use crate::xpack::security::{check_alias_action, check_alias_index_removal};
+    let auth = AliasAuth::of(ctx);
     let st = ctx.state();
     let now = ctx.now_ms;
     let lenient = IndicesOptions { expand_closed: true, allow_aliases: false, include_data_streams: false, ignore_unavailable: true, allow_no_indices: true, ..IndicesOptions::STRICT_EXPAND_OPEN };
@@ -723,7 +724,7 @@ fn authorize(ctx: &Ctx, actions: &[Action]) -> EsResult<()> {
         match a {
             Action::Add { indices, aliases, .. } => {
                 let names: Vec<String> = aliases.iter().map(|a| resolve::resolve_date_math(a, now).unwrap_or_else(|_| a.clone())).collect();
-                check_alias_action(ctx, true, &targets(indices), &names)?;
+                auth.check(true, &targets(indices), &names)?;
             }
             Action::Remove { indices, aliases, .. } => {
                 let on = targets(indices);
@@ -735,9 +736,9 @@ fn authorize(ctx: &Ctx, actions: &[Action]) -> EsResult<()> {
                     }
                 }
                 names.extend(st.metadata.data_stream_aliases.iter().filter(|(a, d)| alias_selected(aliases, a) && d.data_streams.iter().any(|s| on.contains(s))).map(|(a, _)| a.clone()));
-                check_alias_action(ctx, false, &on, &names.into_iter().collect::<Vec<_>>())?;
+                auth.check(false, &on, &names.into_iter().collect::<Vec<_>>())?;
             }
-            Action::RemoveIndex { indices } => check_alias_index_removal(ctx, &targets(indices))?,
+            Action::RemoveIndex { indices } => auth.check_index_removal(&targets(indices))?,
         }
     }
     Ok(())
