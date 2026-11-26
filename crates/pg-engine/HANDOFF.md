@@ -22436,6 +22436,116 @@ Not done, found:
 - Subquery Scan widths (remove_unused_subquery_outputs' NULLs at their types' widths), memoize:8,
   subselect:19 rows, the catalog plans (bloat), as agent 288 left them.
 
+## Analytic CPU, round 17: keyed row fetches on format 4, the block seek's walk and a bitmap's checked rows (agent 332)
+
+Round 16 (319) left roll PGO behind the better of pgrust and PostgreSQL on 15 of the 22, the
+largest q02 1.91x, q11 1.91x, q20 1.77x, q14 1.74x. Base **b1** is `73efad1e8` (cand/a327 landed;
+the candidate is rebased since on `4c322b3d8`, whose later commits touch none of its files' code
+paths); BENCH "Analytic CPU, round 17" has the tables. Profiles (`instructions:upp`, period
+2,000,003, LBR) of b0 (`214433872`, the base before a327; the same fetch code) for q02, q11, q14,
+q20 and the next four (q05, q16, q08, q17), each sample put where its leaf-most frame says
+(`~/.cache/a332/bench/split.py`), % of the query:
+
+| query | keyed fetch: get / seek / decode | index scan | join build / probe | aggregate | scans | nested loop rows | other |
+|---|---|---|---|---|---|---|---|
+| q02 | 17.0 / 3.9 / 6.9 | 5.2 | 23.8 / 2.1 | 1.1 | 11.2 | 23.1 | 5.6 |
+| q11 | 14.9 / 3.5 / 8.5 | 3.6 | 1.1 / - | 35.5 | 0.8 | 21.6 | 10.5 |
+| q14 | 4.5 / 7.3 / 21.4 | 4.7 | 8.9 / 0.2 | 0.2 | 27.9 | - | 24.9 |
+| q20 | 17.4 / 5.1 / 2.6 | 15.7 | 0.2 / 1.8 | 22.3 | 18.9 | 6.2 | 9.9 |
+| q05 | 3.0 / 8.1 / 10.0 | 8.8 | 1.6 / - | 0.3 | 50.0 | 3.6 | 14.6 |
+| q16 | - / - / 21.7 | 7.5 | 1.0 / 1.8 | 13.3 | 46.1 | - | 8.6 |
+| q08 | 6.2 / 13.5 / 8.9 | 3.4 | 2.0 / - | 0.5 | 34.3 | 11.5 | 19.7 |
+| q17 | 0.8 / 0.6 / 0.5 | 3.5 | - / 0.7 | 1.5 | 90.9 | - | 1.5 |
+
+("get": the multi-get's own body, `get_sorted_snap` with everything inlined, and the single-key
+path; "seek": what shows as functions of their own, `find_block`, `Block::seek` / `seek_on`,
+`block_with`; "decode": the fetched rows' `decode_row*` / `Decode::row_with`. q14's decode is
+mostly its parallel `part` scan for the hash build, q16's its scans: not keyed fetches.)
+
+What the fetches are: q02's and q11's build sides are serial nested loops, a supplier row then an
+index scan of `partsupp_ps_suppkey_idx` (80 rows a supplier, each in its own 8 KB block); q20's
+SubPlan 8,332 index scans of lineitem by (partkey, suppkey); q14's 75k lineitem rows of the date
+bitmap, one `get_with` a key through `IndexChunk` (about one key a block). q02 paid about 2.5k
+instructions a key (`get_sorted_snap` 17.9% of 2.28 G over 158,720 keys; agent 311 measured the
+same form at 2,685-2,697, the entry walk ~980 and `Block::read` ~260 of it). The largest single
+part was the seek's walk from its restart: `seek_from`'s loop over up to 16 entries, 5.9 of
+`get_sorted_snap`'s 10.7% self in q02. A table's data keys are its prefix, an int tag and an 8-byte
+row id: neighbouring entries share 16 bytes and differ in the row id's last byte, so every entry
+of a restart took the walk's general compare (its tail against the key's rest by `common_prefix`,
+then the version), about 85 instructions an entry.
+
+q08 and q05 had another keyed cost: 6.7% / 3.6% of the query in one `get_snap` a row, from
+`bitmap_keys` (a run-time plan the EXPLAIN doesn't show: a nested loop whose inner side is a bitmap
+heap scan of customer by `c_nationkey`, under a hash build). A secondary index's entries whose
+quals the entries can't decide had each row fetched by a point read of its own to check them,
+unless the bitmap was dense.
+
+**What changed**:
+- `storage/sst.rs`, `Block::seek_from`: an entry that shares exactly as many bytes with the entry
+  before as that one shares with the sought key (`m`), and whose next byte is below the key's, is
+  below the key and shares `m` with it: that one byte is compared and the walk goes on; the
+  general compare is left to the other entries. Every seek in a block goes through it (the
+  multi-get's, `Block::seek` of single-key reads, `seek_on`'s fallback). The loop is now about 40
+  instructions an entry; in q02 it is 3.6% (from 5.9%). Covered by sst's block test (probes below,
+  at and above every key of row-id-like keys, every restart interval).
+- `exec/scan.rs`, `bitmap_keys`: those rows of a range's entries (a secondary index, at the
+  statement's snapshot) are read together by the sorted multi-get (`get_sorted`: `Store::get_sorted`
+  when no key is one of the transaction's own writes, `get_many_snap` otherwise, as `get_snap`
+  reads them), as stored when the quals' out-of-line values are read by `qual_row`; then each is
+  checked as before, in the entries' order. Without a snapshot, one at a time as before.
+
+**Measured** (BENCH "Analytic CPU, round 17", user instructions a run, pairs in both orders):
+- plain dist, b1 against n2 (the seek): **the 22 82.55 -> 82.19 / 82.57 -> 82.20 G (-0.44 /
+  -0.45%)**: q09 -2.1%, q08 -2.1%, q02 -1.3 / -1.2%, q11 -1.3%, q07 -1.2%, q20 -1.2%, q03 -0.7 /
+  -0.5%, q05 -0.6%, q14 -0.6%, q19 -0.6%, q04 -0.5 / -0.6%, q21 -0.4%, the rest within +-0.15%.
+  The same change on the base before a327 (b0 against n1): -0.45 / -0.47%, the same queries.
+- plain dist, n2 against n3 (the bitmap's rows): the 22 -0.08 / -0.08%: q08 -1.95 / -1.91%, q05
+  -0.99 / -0.92%, the rest within +-0.16%.
+- PGO (`tools/dist-pgo.sh --profdata` of agent 322's profile for both arms, so the pair differs
+  by the change alone; that profile is 3.87% stale on b1, 4.81% on n3, the functions this changes
+  losing their counts): pb1 against pn3 **the 22 75.94 -> 75.53 / 75.92 -> 75.55 G (-0.53 /
+  -0.49%)**, q08 -3.4%, q09 -2.5%, q11 -1.7%, q07 -1.5%, q02 -1.5 / -1.2%, q20 -1.4 / -1.3%, q05
+  -1.1%, q19 -0.8%, q14 -0.7%, the rest within +-0.15%. Both arms' totals are ~1% over a freshly
+  trained build (319's p1 75.15 G).
+- Every result hash equal in every pair; peak anon+shmem over the pass level (1,590-1,606 MB).
+- In process (`bench --target inproc`, 1 client, a fresh 100,000-row database a run, (I30 s - I10
+  s) / (ops30 - ops10), lane A, b1 against n2): point select 35,265.7 -> 34,889.1 and 35,315.2 ->
+  34,937.8 user instructions an op (-1.07 / -1.07%), the 100-row range read 392,380 -> 392,016
+  and 392,434 -> 391,983 (-0.09 / -0.11%; the in-process client has no 1,000-row case).
+- Every lane hold read 4.9-7.7 foreign cores (no pair met the 1.0 rule): instructions decide.
+
+**Verification** (`tools/quick-check.sh` with `QC_CHECKED=1` on `6c3aed4e7`, rebased on
+`4c322b3d8`): clippy 16 warnings, none new in a changed file; 453 tests in 25 binaries, and again
+`--profile verify-checked`; crash_random seeds 1-3 x 2, power_cut_at_every_point; regress 51,148 /
+51,150, 0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed. `tools/crash-binary.py`
+seed 1 against pn3's binary: 7 rounds and the clean shutdown ok (325 s).
+
+**Not done, and why**:
+- A batched lookup of many outer rows' inner rows for q02's / q11's serial nested loops (the
+  `Lookup` stage runs only in a parallel scan's workers): `Lookup::new` takes no modelled table's
+  non-unique index (equal keys' rows in the model's heap order), which partsupp's is; and a batch
+  of 64 suppliers is ~5,000 keys over ~16,000 partsupp blocks, about one key a block still: it would
+  save per-row scan work, not the seeks.
+- A restart every 8 entries in row blocks (a block records its interval, so every reader takes it):
+  would halve the walk again, but every block written grows (~1.5-2% of TPC-H's bytes) and every
+  workload's reads change. Not tried.
+- `DisplacedFill` / `IndexChunk` on format 4 fill their batches with rows as stored
+  (`fill_batch_rows`, `push_in`) and the scans decode the columns they need later: format 4 doesn't
+  pay the every-column build agent 311 is fixing for format 5 (cand/a311-7), so nothing here.
+
+**Left** (pn3 PGO against the standing's pgrust / PostgreSQL; BENCH's table):
+- q02 1.99 G (1.93x pgrust): the build side's 158,720 fetches are now ~2.3k instructions a key:
+  the rest of the walk (~40 an entry, 8 on average), `Block::read` making the found key, the
+  multi-get's per-key steps; then the per-row scan work (`next_raw_ref`, `emit` ~1.5k a row:
+  the entries' owned copies in `fetch_entries`, the run's heap order), the hash table's size
+  accounting (`workmem::data_len`) and spill encoding.
+- q11 0.72 G (1.90x PostgreSQL): the same fetches; the nested loop's joined rows' drops in
+  `project_moving` and the numeric multiply (`eval`), ~1.4k instructions a joined row each.
+- q14 1.21 G (1.79x pgrust): the part hash build's decode (`p_type` text and its UTF-8 check)
+  and the lineitem fetches through `IndexChunk` (~2.2k a key, one key a block).
+- q20 0.77 G (1.76x PostgreSQL): the SubPlan's index seeks (`reseek_snap`) and row fetches, and
+  the outer partsupp rows read through `fetch_dense`'s range scan.
+
 ## Analytic CPU, round 16: reordered heaps' filter-only scans through chunks, index filters less what the key range applies (agent 319)
 
 Round 15 (316) left roll PGO behind the better of pgrust and PostgreSQL on 16 of the 22, the

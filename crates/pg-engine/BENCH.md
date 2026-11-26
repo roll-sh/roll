@@ -910,6 +910,95 @@ DELETE and VACUUM, 75.2 MB after VACUUM FULL (its bloat for these statements: 91
 | whole script without the three `string_agg(ctid::text ... ORDER BY id)` checks | 255.6 (UPDATE) | 359.5 |
 | the highest step's own peak, with the checks | 301 (n2 382, CHECKPOINT after the last check) | - |
 
+## Analytic CPU, round 17: keyed row fetches on format 4, the block seek's walk and a bitmap's checked rows (2026-11-26, agent 332)
+
+HANDOFF "Analytic CPU, round 17" has what changed. Lane C, TPC-H SF1 (loaded by b0, origin's
+`214433872`), agent 319's harness copied to `~/.cache/a332/bench/` (`tpair.sh`: per build a fresh
+server on a copy of the data, a warm-up run of each query, then each query once in its own perf
+window of the server's cgroup). Builds: **b1** origin's `73efad1e8` (cand/a327 landed), **n2** the
+seek change on it, **n3** n2 and the bitmap's rows (plain `tools/dist.sh`); **pb1** / **pn3** the
+same commits by `tools/dist-pgo.sh --profdata` of agent 322's profile (profile staleness 3.87% /
+4.81% of the hot functions' counts: the same profile for both, so the pair differs by the change
+alone, and both are ~1% over a freshly trained build). One pair a hold; lane.sh read 4.9-7.7
+foreign cores (no pair met the 1.0 rule): instructions decide. Every result hash equal across
+each pair; peak anon+shmem over the pass 1,590-1,606 MB on every arm.
+
+### Plain dist, G user instructions a run
+
+| query | b1 / n2 pair 1 (G) | n2 / b1 pair 2 (G) | % per pair | n2 / n3 pair 3 (G) | n3 / n2 pair 4 (G) | % per pair |
+|---|---|---|---|---|---|---|
+| q01 | 7.316 / 7.316 | 7.316 / 7.316 | -0.00, -0.00 | 7.317 / 7.317 | 7.317 / 7.316 | +0.00, +0.01 |
+| q02 | 2.277 / 2.247 | 2.251 / 2.279 | -1.33, -1.22 | 2.252 / 2.251 | 2.253 / 2.252 | -0.01, +0.04 |
+| q03 | 4.119 / 4.091 | 4.092 / 4.113 | -0.68, -0.52 | 4.089 / 4.092 | 4.091 / 4.090 | +0.08, +0.04 |
+| q04 | 1.350 / 1.343 | 1.342 / 1.350 | -0.47, -0.58 | 1.342 / 1.342 | 1.342 / 1.342 | -0.00, +0.01 |
+| q05 | 2.811 / 2.794 | 2.794 / 2.811 | -0.62, -0.58 | 2.794 / 2.767 | 2.768 / 2.793 | -0.99, -0.92 |
+| q06 | 3.376 / 3.376 | 3.376 / 3.376 | -0.01, -0.00 | 3.376 / 3.376 | 3.376 / 3.376 | -0.00, +0.00 |
+| q07 | 3.499 / 3.458 | 3.459 / 3.500 | -1.16, -1.18 | 3.457 / 3.458 | 3.457 / 3.457 | +0.02, -0.01 |
+| q08 | 1.405 / 1.376 | 1.376 / 1.405 | -2.07, -2.05 | 1.376 / 1.349 | 1.350 / 1.376 | -1.95, -1.91 |
+| q09 | 7.790 / 7.626 | 7.628 / 7.788 | -2.11, -2.05 | 7.627 / 7.628 | 7.626 / 7.628 | +0.02, -0.03 |
+| q10 | 5.545 / 5.546 | 5.547 / 5.547 | +0.02, -0.00 | 5.545 / 5.546 | 5.545 / 5.545 | +0.01, +0.01 |
+| q11 | 0.832 / 0.821 | 0.821 / 0.832 | -1.26, -1.29 | 0.821 / 0.820 | 0.822 / 0.821 | -0.10, +0.16 |
+| q12 | 5.878 / 5.879 | 5.879 / 5.879 | +0.02, -0.01 | 5.879 / 5.878 | 5.879 / 5.879 | -0.01, +0.00 |
+| q13 | 4.103 / 4.103 | 4.103 / 4.105 | -0.00, -0.05 | 4.103 / 4.102 | 4.103 / 4.103 | -0.02, +0.00 |
+| q14 | 1.390 / 1.382 | 1.381 / 1.390 | -0.59, -0.64 | 1.382 / 1.381 | 1.381 / 1.380 | -0.06, +0.07 |
+| q15 | 2.306 / 2.306 | 2.306 / 2.306 | -0.00, -0.00 | 2.306 / 2.306 | 2.306 / 2.306 | +0.00, +0.00 |
+| q16 | 2.881 / 2.882 | 2.882 / 2.881 | +0.04, +0.03 | 2.881 / 2.879 | 2.882 / 2.881 | -0.07, +0.04 |
+| q17 | 2.863 / 2.863 | 2.863 / 2.865 | -0.01, -0.08 | 2.864 / 2.863 | 2.862 / 2.862 | -0.03, -0.01 |
+| q18 | 15.561 / 15.561 | 15.567 / 15.571 | -0.00, -0.02 | 15.559 / 15.551 | 15.545 / 15.565 | -0.06, -0.13 |
+| q19 | 0.474 / 0.471 | 0.471 / 0.474 | -0.62, -0.55 | 0.471 / 0.471 | 0.471 / 0.471 | +0.03, -0.02 |
+| q20 | 0.891 / 0.881 | 0.881 / 0.892 | -1.15, -1.16 | 0.881 / 0.881 | 0.881 / 0.881 | -0.05, +0.00 |
+| q21 | 5.262 / 5.242 | 5.239 / 5.263 | -0.37, -0.45 | 5.241 / 5.241 | 5.240 / 5.240 | -0.01, -0.00 |
+| q22 | 0.623 / 0.623 | 0.623 / 0.624 | -0.12, -0.15 | 0.623 / 0.623 | 0.623 / 0.623 | -0.02, -0.01 |
+| the 22 | 82.55 / 82.19 | 82.20 / 82.57 | -0.44, -0.45 | 82.19 / 82.12 | 82.12 / 82.19 | -0.08, -0.08 |
+
+- n2 against b1 (the seek): the 22 -0.44 / -0.45%, every query the walk reaches by a seek (q09,
+  q08 -2.1%; q02, q11, q07, q20 -1.2..-1.3%); scan-only queries (q01, q06, q15, q12, q13) level.
+  b0 / n1 (the change on the base before a327): -0.45 / -0.47%, the same queries.
+- n3 against n2 (the bitmap's rows read by one multi-get): q08 -1.95 / -1.91%, q05 -0.99 /
+  -0.92%, the rest within +-0.16%.
+- In process (`bench --target inproc oltp`, 1 client, a fresh 100,000-row database a run, (I30 s -
+  I10 s) / (ops30 - ops10), lane A at 7.6-7.7 foreign cores), b1 / n2: point select 35,265.7 /
+  34,889.1 then (n2 first) 34,937.8 / 35,315.2 user instructions an op (-1.07 / -1.07%);
+  `range_scan_100` 392,380.5 / 392,016.0 then 391,982.7 / 392,433.5 (-0.09 / -0.11%).
+
+### PGO (pb1 against pn3, both orders), with the standing's pgrust and PostgreSQL 18.6
+
+pgrust (its published PGO build) and PostgreSQL are BENCH "Standing, 2026-11-24"'s, not run again;
+the PGO columns are each arm's mean of its two runs. The plain columns are b1's mean of pairs 1-2
+and n3's of pairs 3-4.
+
+| query | pb1 PGO (G) | pn3 PGO (G) | % | b1 plain | n3 plain | pgrust | PostgreSQL | pn3 / best other |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| q01 | 7.407 | **7.408** | +0.00 | 7.316 | 7.317 | 6.76 | 45.22 | 1.10x |
+| q02 | 2.019 | **1.991** | -1.37 | 2.278 | 2.252 | 1.03 | 1.16 | 1.93x |
+| q03 | 3.671 | **3.657** | -0.37 | 4.116 | 4.092 | 3.52 | 4.07 | 1.04x |
+| q04 | 1.209 | **1.203** | -0.51 | 1.350 | 1.342 | 1.54 | 1.01 | 1.19x |
+| q05 | 2.440 | **2.415** | -1.05 | 2.811 | 2.767 | 1.69 | 1.98 | 1.43x |
+| q06 | 3.240 | **3.240** | +0.00 | 3.376 | 3.376 | 5.76 | 4.84 | 0.67x |
+| q07 | 3.059 | **3.014** | -1.46 | 3.499 | 3.457 | 3.31 | 2.57 | 1.17x |
+| q08 | 1.228 | **1.186** | -3.42 | 1.405 | 1.349 | 1.14 | 0.93 | 1.28x |
+| q09 | 6.913 | **6.742** | -2.47 | 7.789 | 7.627 | 14.35 | 13.12 | 0.51x |
+| q10 | 5.162 | **5.163** | +0.03 | 5.546 | 5.546 | 4.33 | 6.58 | 1.19x |
+| q11 | 0.735 | **0.722** | -1.72 | 0.832 | 0.821 | 0.39 | 0.38 | 1.90x |
+| q12 | 5.800 | **5.800** | -0.00 | 5.879 | 5.879 | 8.93 | 8.73 | 0.66x |
+| q13 | 3.689 | **3.689** | +0.00 | 4.104 | 4.103 | 3.63 | 6.83 | 1.02x |
+| q14 | 1.223 | **1.214** | -0.70 | 1.390 | 1.381 | 0.68 | 1.12 | 1.79x |
+| q15 | 2.245 | **2.245** | +0.00 | 2.306 | 2.306 | 2.95 | 3.16 | 0.76x |
+| q16 | 2.517 | **2.519** | +0.07 | 2.881 | 2.880 | 1.79 | 3.60 | 1.41x |
+| q17 | 2.695 | **2.697** | +0.04 | 2.864 | 2.863 | 2.22 | 4.60 | 1.21x |
+| q18 | 14.143 | **14.137** | -0.04 | 15.566 | 15.548 | 16.22 | 41.14 | 0.87x |
+| q19 | 0.430 | **0.426** | -0.83 | 0.474 | 0.471 | 0.41 | 0.40 | 1.07x |
+| q20 | 0.784 | **0.774** | -1.34 | 0.892 | 0.881 | 0.62 | 0.44 | 1.76x |
+| q21 | 4.776 | **4.757** | -0.40 | 5.262 | 5.240 | 4.71 | 7.38 | 1.01x |
+| q22 | 0.543 | **0.543** | -0.05 | 0.624 | 0.623 | 0.59 | 1.13 | 0.92x |
+| the 22 | 75.93 | **75.54** | -0.51 | 82.56 | 82.12 | 86.57 | 160.39 | 0.87x pgrust |
+
+- pn3 against pb1: -0.53 / -0.49% (75.94 -> 75.53, 75.92 -> 75.55 G), q08 -3.4%, q09 -2.5%, q11
+  -1.7%, q07 -1.5%, q02 -1.4%, q20 -1.3%, q05 -1.1%.
+- Behind the better of pgrust and PostgreSQL on 16 of the 22 here; with the stale profile's ~1%
+  (q13 3.69 against pgrust's 3.63, q16 2.52 where round 16's p1 had 2.34) not comparable with
+  round 16's count of 15.
+
 ## Analytic CPU, round 16: reordered heaps' filter-only scans through chunks, index filters less what the key range applies (2026-11-25, agent 319)
 
 HANDOFF "Analytic CPU, round 16" has what changed. Lane C, TPC-H SF1 (loaded by b0, agent 316's
