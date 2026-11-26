@@ -80,6 +80,8 @@ pub struct Runtime {
     pub connector_syncs: entsearch::sync::Syncs,
     /// What the audit log records, as of a state version ([`security::audit::snapshot`]).
     pub audit: parking_lot::Mutex<Option<(u64, std::sync::Arc<security::audit::Snapshot>)>>,
+    /// Provider tokens of completions not metered yet ([`inference::tokens`]).
+    pub tokens: std::sync::Arc<inference::tokens::Tokens>,
 }
 
 /// The `_nodes` header plus the node, as the cache-clearing APIs answer.
