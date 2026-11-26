@@ -1032,7 +1032,7 @@ fn authorize_action(ctx: &Ctx) -> EsResult<Option<String>> {
         }
         Scope::Index if DATA_STREAM_LISTS.contains(&ctx.api.name()) || ctx.api.name() == "indices.resolve_index" => {
             let explicit = target_expressions(ctx).into_iter().filter(|e| !e.contains('*') && e != "_all" && !e.starts_with('-'));
-            let denied_on: Vec<String> = explicit.filter(|n| !eff.allows_index(&action, n)).collect();
+            let denied_on: Vec<String> = explicit.map(|e| authz_name(&e, ctx.now_ms)).filter(|n| !eff.allows_index(&action, n)).collect();
             if denied_on.is_empty() { Ok(None) } else { Err(denied(p, &action, Some(&denied_on))) }
         }
         Scope::Index => {
