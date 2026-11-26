@@ -4309,9 +4309,48 @@ exec roll secrets scan --pre-receive
   nothing for roll.
 - **Plain git.** `hooks/pre-receive` in the bare repository, as above.
 
-GitHub.com and GitLab.com don't run custom pre-receive hooks: there, the GitHub Action's
-`scan: true` checks each pull request ("GitHub Actions" above), and roll code's own repos block a
-value at landing. A check run through roll code's GitHub App for mirrored repos isn't built.
+GitHub.com and GitLab.com don't run custom pre-receive hooks, so nothing there refuses a push.
+On GitHub.com roll code's GitHub App checks each push after it lands on GitHub (below), the
+GitHub Action's `scan: true` checks each pull request ("GitHub Actions" above), and roll code's
+own repos block a value at landing. GitLab.com has only the Action's equivalent in a pipeline.
+
+#### On GitHub.com: roll code's GitHub App
+
+A repository connected to roll code through its GitHub App ("GitHub-connected repositories" in
+docs/code/architecture.md), and on the canvas of a project roll secrets trusts for it, gets each
+push checked: **after the push, reported, rotated and a failing check**. It's not a block: GitHub
+has the commit before roll hears of it, so a value found is a leak.
+
+- **What it reads.** GitHub's `push` webhook, verified and recorded before it's acknowledged, as
+  every GitHub delivery is (docs/code/cluster.md, "GitHub webhooks"). Once the push's commits are
+  in roll, its check goes into roll code's one delivery queue and runs on the repo's owner, never
+  inside the webhook's request. It reads the commits the push brought (those `after` reaches and
+  neither `before` nor, for any branch but the default, the default branch reaches), each one's
+  lines new against every parent, and, for a branch other than the default, everything the branch
+  adds since its merge base: the check stays failing while the branch still adds a value, so a
+  clean commit on top doesn't hide it. Lines are cut into candidates as `roll secrets scan` cuts
+  them.
+- **Bounds.** At most 1,000 commits, 256 MiB read, files up to 64 MiB, lines up to 8 MiB and
+  20,000 candidates a push (one scan). What isn't read is named in the check run and the check
+  fails ("Couldn't read all of this push"): never passed unread. Binary files aren't text and
+  aren't read, as in the pre-receive hook.
+- **Who asks.** The App's installation is a scanner of each project: `scan` only, decided in
+  process by roll secrets (no token is made), so it's `POST …/scan`'s check: whole candidates of 16
+  characters or more with fair entropy, never a sensitive or personal value, and its limits (its
+  principal, `github:<installation>:<owner>/<repo>`, is one per installation and repo, since an
+  installation spans tenants). Each call is audited as `secrets.scan` with the pusher's GitHub
+  login and the ref.
+- **On a match.** A `secret.leaked` row in the project holding the value, as a change's
+  `secret_leak` is ("When a value leaks"): with `leaks.rotate = managed` its managed keys rotate at
+  once. The commit gets a check run, `roll secrets`, that fails and lists each place as
+  `` `file:line` KEY (environment) in <commit> ``, never the value (the pusher holds it). Make it a
+  required status check in the branch's protection rules and a pull request carrying the value
+  can't merge until a push takes it out of the branch; the value stays in GitHub's history, so
+  rotate what wasn't rotated.
+- **Only the repository's own pushes.** Branches of the installed repository itself: a fork's
+  pull request comes as GitHub's `pull_request`, never a push, and is the Action's to check. Tags
+  and roll's own mirror pushes (landings, which roll's blockers checked) aren't read; a push
+  missed while roll was down is read when roll compares GitHub's branches with its own.
 
 **The `scan` right.** `POST …/scan` answers whether whole candidates are values of the project,
 and in which environment (`{index, environment}`; the key and folder too, `{index, key,

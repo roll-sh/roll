@@ -922,6 +922,7 @@ Parsing (`code-github/tests`) and the effect in roll against a mock GitHub
 | `push` branch deleted → change closed (unless a PR owns it) | parse + effect | `code-github/tests/events.rs::deleted_refs_and_malformed_payloads`, `github.rs::push_webhooks_for_branches_tags_and_echoes` |
 | `push` tag created / deleted (annotated and lightweight) | parse + effect | `code-github/tests/events.rs::deleted_refs_and_malformed_payloads`, `github.rs::push_webhooks_for_branches_tags_and_echoes` |
 | `push` to a repo that isn't connected → ignored | effect | `github.rs::push_webhooks_for_branches_tags_and_echoes` |
+| `push` branch → roll secrets' check (a value added: a failing `roll secrets` check run naming `file:line KEY (environment)`, the leak reported; taken out: passes) | effect | `github.rs::a_push_to_github_that_adds_a_value_fails_its_check_and_reports_the_leak` |
 | `pull_request.opened` | parse + effect | `code-github/tests/events.rs::every_pull_request_action`, `github.rs::connect_import_webhooks_and_mirror` |
 | `pull_request.opened` from a fork → untrusted | parse + effect | `code-github/tests/github.rs::webhook_events`, `github.rs::automations_hear_github_with_comment_authority_and_forks` |
 | `pull_request.opened` as a draft → draft change | parse + effect | `code-github/tests/events.rs::states_and_accessors`, `github.rs::pull_request_issue_and_installation_actions` |
