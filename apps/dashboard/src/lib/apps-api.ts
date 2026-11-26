@@ -340,6 +340,8 @@ export interface ProjectImport {
       source: { kind: "repo"; repo: string; root: string | null } | { kind: "git"; url: string; root: string | null } | { kind: "image"; image: string } | { kind: "upload"; root: string };
       branch: string | null;
       run: Partial<Run>;
+      /** Its `[apps.<name>.build]`: dockerfile, target (a stage), install, build, start. */
+      build?: Partial<Pick<Build, "dockerfile" | "target" | "install" | "build" | "start">>;
       /** A database's kind, or `service`: another app of the file, by its name. */
       links: { kind: "postgres" | "redis" | "bucket" | "stream" | "nosql" | "search" | "service"; name: string }[];
       /** What it's set to as it is. */
@@ -937,6 +939,8 @@ export interface Plan {
   uses?: ("postgres" | "redis")[];
   /** The variables its `.env.example` (or `.env.sample`, `.env.template`, `.env.dist`, `example.env`) names: asked for before the first deploy. */
   variables?: string[];
+  /** What its framework suggests a new service sets (its migrations, its health route): offered, never applied on its own. */
+  suggest?: { pre_deploy?: string; health_path?: string };
   /** A static site's function directories (`netlify/functions`, `api`) the `functions` builder runs. */
   functions?: string[];
   /** A static site's edge functions: run before its files on their paths by its `-fn` service. */
@@ -1310,7 +1314,7 @@ export interface Freeze {
 }
 
 /** A project's public status page: its checks and heartbeats (all, or `items`), at `url`. */
-export type IncidentState = "investigating" | "identified" | "monitoring" | "resolved";
+export type IncidentState = "investigating" | "identified" | "monitoring" | "resolved" | "scheduled" | "maintenance";
 /** A status page's incident: a person's, or one a check going down or a heartbeat missed opened (`automatic`). */
 export interface Incident {
   id: string;
@@ -1320,6 +1324,8 @@ export interface Incident {
   resolved_at: number | null;
   automatic: boolean;
   updates: { at: number; state: IncidentState; text: string }[];
+  /** A scheduled maintenance's window (ms): `scheduled` until it begins, `maintenance` until it ends. */
+  scheduled: { from: number; until: number } | null;
 }
 
 export interface StatusPage {
@@ -1394,6 +1400,8 @@ export interface Metrics {
   over_capacity: number[];
   /** Each instance's own last hour by minute (those it has now), whatever the range. */
   by_instance?: InstanceSeries[];
+  /** Its volume's size by the hour (measured hourly), and when it'd be full at its last week's pace. */
+  volume?: { size_gb: number; points: { hour: number; bytes: number }[]; full_in_days: number | null };
 }
 
 /** One instance's last hour (Railway's per replica): cores in use on average each minute, and
@@ -1668,7 +1676,7 @@ export const appsApi = {
   /** The project's own preview domain (a wildcard its preview environments answer under). */
   statusPage: (project: string) => call<StatusPage>("GET", `/v1/apps/projects/${enc(project)}/status-page`),
   putStatusPage: (project: string, body: { title?: string; items?: StatusPage["items"] }) => call<StatusPage>("PUT", `/v1/apps/projects/${enc(project)}/status-page`, body),
-  postIncident: (project: string, body: { title: string; state?: string; text: string }) => call<{ id: string }>("POST", `/v1/apps/projects/${enc(project)}/status-page/incidents`, body),
+  postIncident: (project: string, body: { title: string; state?: string; text: string; starts_at?: number; ends_at?: number }) => call<{ id: string }>("POST", `/v1/apps/projects/${enc(project)}/status-page/incidents`, body),
   incidents: (project: string) => call<{ incidents: Incident[] }>("GET", `/v1/apps/projects/${enc(project)}/status-page/incidents`).then((r) => r.incidents),
   updateIncident: (project: string, incident: string, body: { state: IncidentState; text: string }) => call<null>("POST", `/v1/apps/projects/${enc(project)}/status-page/incidents/${enc(incident)}/updates`, body),
   deleteStatusPage: (project: string) => call<void>("DELETE", `/v1/apps/projects/${enc(project)}/status-page`),

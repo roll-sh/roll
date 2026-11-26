@@ -165,6 +165,11 @@ pub struct ClusterConfig {
     /// limit is held to [`crate::breaker::REQUEST_MAX_LIMIT`] of it ([`crate::breaker::Breakers::node`]).
     /// `None`: the `request` breaker alone.
     pub request_memory: Option<std::sync::Arc<search_aggs::memory::MemoryBudget>>,
+    /// The node's budget for caches (the shard request cache, compiled scripts), shared by every
+    /// cluster on the node and set by its operator: the parent of the cluster's
+    /// [`Cluster::cache_memory`]. Outside request admission, so caches never crowd out requests,
+    /// and bounded, so together they never take more than it. `None`: the cluster's own caps.
+    pub cache_memory: Option<std::sync::Arc<search_aggs::memory::MemoryBudget>>,
     /// Without a [`ClusterConfig::sealer`], store the secrets clients give in the clear rather
     /// than refuse them ([`crate::seal`]): local development and tests only.
     pub unsealed_secrets: bool,
@@ -201,6 +206,7 @@ impl ClusterConfig {
             embedder: None,
             secret_refs: None,
             request_memory: None,
+            cache_memory: None,
             unsealed_secrets: false,
             reindex_node: None,
         }
@@ -246,6 +252,11 @@ pub struct Cluster {
     pub engine: crate::engine::Engine,
     /// Compiled scripts (Painless, Mustache).
     pub scripts: Arc<crate::scripting::ScriptService>,
+    /// The shard request cache's cap and charge ([`crate::engine::request_cache`]).
+    pub request_cache: Arc<crate::engine::request_cache::Budget>,
+    /// What the cluster's caches (request cache, compiled scripts) hold, charged to the node's
+    /// cache budget ([`ClusterConfig::cache_memory`]).
+    pub cache_memory: Arc<search_aggs::memory::MemoryBudget>,
     /// Open scrolls and points in time.
     pub contexts: crate::search::contexts::Contexts,
     /// Scrolls and points in time over linked remote clusters ([`crate::remote::contexts`]).
@@ -401,7 +412,9 @@ pub struct NewTask {
 pub struct TaskRegistry {
     next: std::sync::atomic::AtomicU64,
     running: parking_lot::Mutex<std::collections::BTreeMap<u64, TaskInfo>>,
-    results: parking_lot::Mutex<std::collections::BTreeMap<u64, StoredTask>>,
+    results: parking_lot::Mutex<StoredResults>,
+    /// What stored results hold is charged here (the cluster's `request` breaker).
+    budget: std::sync::OnceLock<Arc<search_aggs::memory::MemoryBudget>>,
     /// Woken whenever a task ends (`wait_for_completion` on the task APIs).
     ended: tokio::sync::Notify,
     /// Callers in [`TaskRegistry::wait_until`]: ending a task wakes `ended` only when there
@@ -419,6 +432,33 @@ pub struct StoredTask {
 
 /// Stored results kept per cluster (oldest dropped first), bounding memory.
 const MAX_STORED_TASKS: usize = 1000;
+
+/// Most bytes a cluster's stored results hold together (oldest dropped first).
+const MAX_STORED_TASK_BYTES: u64 = 64 << 20;
+
+/// Most `failures` a stored by-query result keeps. Elasticsearch stores the whole response (a
+/// failed batch's items, its search's shard failures), with no cap of its own; roll keeps the
+/// first ones and says how many it left out (`failures_truncated`).
+pub const MAX_STORED_FAILURES: usize = 100;
+
+#[derive(Debug, Default)]
+struct StoredResults {
+    /// Each result with what it holds.
+    tasks: std::collections::BTreeMap<u64, (StoredTask, u64)>,
+    bytes: u64,
+}
+
+impl StoredTask {
+    /// What the record holds in memory.
+    fn bytes(&self) -> u64 {
+        let i = &self.info;
+        let outcome = match &self.outcome {
+            Ok(v) => crate::breaker::json_bytes(v),
+            Err(e) => crate::breaker::json_bytes(&e.to_value(false)),
+        };
+        (size_of::<StoredTask>() + i.action.len() + i.description.len() + i.headers.iter().map(|(k, v)| k.len() + v.len() + 48).sum::<usize>() + outcome) as u64
+    }
+}
 
 /// Unregisters its task when dropped.
 pub struct TaskGuard<'a> {
@@ -595,16 +635,82 @@ impl TaskRegistry {
         self.store_result(StoredTask { running_nanos: info.started.elapsed().as_nanos() as i64, info, outcome });
     }
 
-    pub fn store_result(&self, t: StoredTask) {
-        let mut r = self.results.lock();
-        r.insert(t.info.id, t);
-        while r.len() > MAX_STORED_TASKS {
-            r.pop_first();
+    /// Charges stored results to `budget` from now on (the cluster's `request` breaker).
+    pub fn charge_to(&self, budget: Arc<search_aggs::memory::MemoryBudget>) {
+        let _ = self.budget.set(budget);
+    }
+
+    /// Keeps `t`'s outcome (its by-query `failures` cut to [`MAX_STORED_FAILURES`]), dropping
+    /// the oldest results to stay within [`MAX_STORED_TASKS`], [`MAX_STORED_TASK_BYTES`] and the
+    /// breaker. One that fits in none of them is kept as an error saying so.
+    pub fn store_result(&self, mut t: StoredTask) {
+        if let Ok(Value::Obj(m)) = &mut t.outcome
+            && let Some(Value::Arr(f)) = m.get_mut("failures")
+            && f.len() > MAX_STORED_FAILURES
+        {
+            let dropped = f.len() - MAX_STORED_FAILURES;
+            f.truncate(MAX_STORED_FAILURES);
+            m.insert("failures_truncated".into(), Value::from(dropped as i64));
         }
+        let mut bytes = t.bytes();
+        let budget = self.budget.get();
+        let mut r = self.results.lock();
+        let release = |b: u64| {
+            if let Some(budget) = budget {
+                budget.release(b);
+            }
+        };
+        if let Some((_, b)) = r.tasks.remove(&t.info.id) {
+            r.bytes -= b;
+            release(b);
+        }
+        let drop_oldest = |r: &mut StoredResults| match r.tasks.pop_first() {
+            Some((_, (_, b))) => {
+                r.bytes -= b;
+                release(b);
+                true
+            }
+            None => false,
+        };
+        if bytes > MAX_STORED_TASK_BYTES {
+            t.outcome = Err(not_kept(bytes, "it is larger than the store"));
+            bytes = t.bytes();
+        }
+        while r.tasks.len() >= MAX_STORED_TASKS || r.bytes + bytes > MAX_STORED_TASK_BYTES {
+            if !drop_oldest(&mut r) {
+                break;
+            }
+        }
+        if let Some(b) = budget {
+            while !b.try_reserve(bytes) {
+                if !drop_oldest(&mut r) {
+                    // The breaker has no room even for this alone: kept small, and charged anyway.
+                    t.outcome = Err(not_kept(bytes, "the request breaker has no room for it"));
+                    bytes = t.bytes();
+                    b.force(bytes);
+                    break;
+                }
+            }
+        }
+        r.bytes += bytes;
+        r.tasks.insert(t.info.id, (t, bytes));
     }
 
     pub fn stored(&self, id: u64) -> Option<StoredTask> {
-        self.results.lock().get(&id).cloned()
+        self.results.lock().tasks.get(&id).map(|(t, _)| t.clone())
+    }
+}
+
+/// The error a stored task keeps in place of an outcome too large to keep.
+fn not_kept(bytes: u64, why: &str) -> crate::error::EsError {
+    crate::error::EsError::new(500, "exception", format!("the task's result of [{bytes}] bytes was not kept: {why}"))
+}
+
+impl Drop for TaskRegistry {
+    fn drop(&mut self) {
+        if let Some(b) = self.budget.get() {
+            b.release(self.results.get_mut().bytes);
+        }
     }
 }
 
@@ -649,6 +755,22 @@ impl Cluster {
         // Kept async results count against what this cluster's requests may hold.
         let xpack = crate::xpack::Runtime::default();
         xpack.results.charge_to(breakers.request_budget().clone());
+        // And stored task results.
+        let tasks = TaskRegistry::default();
+        tasks.charge_to(breakers.request_budget().clone());
+        // Caches aren't requests (Elasticsearch charges them to no breaker): they are charged to
+        // the cluster's cache budget, a child of the node's ([`ClusterConfig::cache_memory`]).
+        let cache_memory = search_aggs::memory::MemoryBudget::with_parent(u64::MAX, config.cache_memory.clone());
+        let scripts = Arc::new(crate::scripting::ScriptService::default());
+        scripts.charge_to(cache_memory.clone());
+        // The request cache's entries hold at most `indices.requests.cache.size` (a static node
+        // setting: 1% of the node's budget for requests by default, as Elasticsearch's is 1% of
+        // its heap), and what the node's cache budget has room for.
+        let request_cache = {
+            let heap = config.request_memory.as_ref().map_or_else(|| crate::breaker::Breakers::node_budget(None).limit(), |b| b.limit()).min(i64::MAX as u64) as i64;
+            let size = config.node_setting("indices.requests.cache.size").and_then(|v| crate::breaker::memory_size(v, heap)).unwrap_or_else(|| (heap.max(0) / 100) as u64);
+            Arc::new(crate::engine::request_cache::Budget::new(size, Some(cache_memory.clone())))
+        };
         Ok(Cluster {
             analytics,
             changes,
@@ -671,9 +793,11 @@ impl Cluster {
             started: std::time::Instant::now(),
             analysis: Default::default(),
             ops: Default::default(),
-            tasks: Default::default(),
+            tasks,
             engine: Default::default(),
-            scripts: Default::default(),
+            scripts,
+            request_cache,
+            cache_memory,
             contexts: Default::default(),
             ccs_contexts: Default::default(),
             ingest: Default::default(),

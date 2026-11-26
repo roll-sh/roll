@@ -115,12 +115,19 @@ fn vault_note(v: Option<u32>) -> String {
 }
 
 /// One item to encrypt: base64 plaintext, and the context bound to it.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Plain {
     pub plaintext: String,
     #[serde(default)]
     pub context: Option<String>,
+}
+
+/// Never the plaintext.
+impl std::fmt::Debug for Plain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Plain").field("plaintext", &"<redacted>").field("context", &self.context).finish()
+    }
 }
 
 #[derive(Debug, Deserialize)]

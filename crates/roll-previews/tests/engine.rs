@@ -1351,23 +1351,28 @@ async fn a_delete_during_a_converge_and_an_unrecorded_branch_leave_nothing_behin
     assert!(e.pg.branches.lock().is_empty(), "{:?}", e.pg.branches.lock());
 }
 
-/// A sleeping preview between its whole converges only has its usage read (Render and Vercel
-/// meter idle previews without waking them): roll secrets isn't asked again; past its size cap it
-/// converges and stays asleep over it.
+/// A settled preview, running or asleep, between its whole converges only has its usage read
+/// (Render and Vercel meter previews without touching them): roll secrets isn't asked again; past
+/// its size cap it converges and stays asleep over it.
 #[tokio::test]
-async fn a_sleeping_previews_usage_is_read_without_a_whole_converge() {
+async fn a_settled_previews_usage_is_read_without_a_whole_converge() {
     let e = env_with_config(json!({ "enabled": true }), |c| c.usage_every = std::time::Duration::ZERO);
     e.code.open(change("chg_zz", 1));
     e.engine.pass().await.unwrap();
     let p = e.engine.store.row_by_change("chg_zz").unwrap().unwrap();
-    e.engine.sleep(&p.id).await.unwrap();
-    e.engine.pass().await.unwrap();
-    let (asked, read) = (e.secrets.ensured.lock().len(), e.pg.usage_reads.load(Ordering::SeqCst));
-    for _ in 0..3 {
+    // Running, then asleep: neither converges whole between its hourly ones.
+    for asleep in [false, true] {
+        if asleep {
+            e.engine.sleep(&p.id).await.unwrap();
+        }
         e.engine.pass().await.unwrap();
+        let (asked, read) = (e.secrets.ensured.lock().len(), e.pg.usage_reads.load(Ordering::SeqCst));
+        for _ in 0..3 {
+            e.engine.pass().await.unwrap();
+        }
+        assert_eq!(e.secrets.ensured.lock().len(), asked, "no whole converge between its hourly ones (asleep: {asleep})");
+        assert!(e.pg.usage_reads.load(Ordering::SeqCst) >= read + 3, "its usage read every pass (asleep: {asleep})");
     }
-    assert_eq!(e.secrets.ensured.lock().len(), asked, "no whole converge between its hourly ones");
-    assert!(e.pg.usage_reads.load(Ordering::SeqCst) >= read + 3, "its usage read every pass");
     // Over its size cap (two 1 MiB branches), it converges to say so and sleeps there.
     e.engine.store.put_settings(&e.project, &roll_previews::Settings { enabled: true, max_bytes: 1 << 20, ..Default::default() }).unwrap();
     e.engine.pass().await.unwrap();
@@ -2702,6 +2707,60 @@ async fn a_preview_over_its_size_cap_stays_asleep() {
     cap(1 << 30);
     e.engine.wake(&p.id).await.unwrap();
     assert_eq!(held(false), held(true), "let wake again: {:?}", e.apps.held.lock());
+}
+
+/// A story a change took that main's preview hasn't (past its first 40, or in another browser) is
+/// taken by main's preview at its head, so the change's has main's to be compared with (a baseline
+/// on demand); one main's Storybook doesn't have (the change added it) is asked for once per set.
+#[tokio::test]
+async fn main_takes_the_stories_a_change_has_and_it_hasnt() {
+    let e = env(json!({ "enabled": true, "github": { "screenshot": true, "storybook": "web:/sb/" } }));
+    let mut png = Vec::new();
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 0, 255])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    *e.apps.shot.lock() = Some(png);
+    *e.apps.new_stories.lock() = vec!["card--added".into()];
+    e.code.open(change("chg_bl", 5));
+    let p = || e.engine.store.row_by_change("chg_bl").unwrap().unwrap();
+    // Screenshots done, within 30 s: a preview asked for again and again never settles.
+    async fn settle(e: &Env) {
+        for _ in 0..3000 {
+            if !e.engine.shooting() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("screenshots never settled: {:?}", e.apps.stories_first.lock());
+    }
+    let compared = |e: &Env| e.engine.store.preview(&p().id).unwrap().pages.iter().find(|x| x.path == "story:card--new").and_then(|x| x.base_percent);
+    // Both took their pictures (main's in the index's order), then a push brings the change's
+    // own stories: only asking main again can give them a main to be compared with.
+    for _ in 0..10 {
+        e.engine.pass().await.unwrap();
+        settle(&e).await;
+    }
+    *e.apps.change_stories.lock() = vec!["card--new".into(), "card--added".into()];
+    e.code.paths.lock().insert("cs_5b".into(), vec!["src/Card.tsx".into()]);
+    e.code.edit("chg_bl", |c| c.head = "cs_5b".into());
+    for _ in 0..40 {
+        e.engine.pass().await.unwrap();
+        settle(&e).await;
+        if compared(&e).is_some() {
+            break;
+        }
+    }
+    let asked = e.apps.stories_first.lock().clone();
+    assert!(asked.iter().any(|(pv, ids)| *pv != p().id && ids.contains(&"card--new".to_string())), "main's preview asked for the change's story first: {asked:?}");
+    assert!(compared(&e).is_some(), "and the change's story compared with main's");
+    // The one main hasn't got stays wanted, but isn't asked for again at the same head, even as
+    // main converges again.
+    let runs = e.apps.stories_first.lock().len();
+    let main = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|x| x.change_id.is_none()).expect("main's preview");
+    e.engine.refresh(&main.id).unwrap();
+    for _ in 0..3 {
+        e.engine.pass().await.unwrap();
+        settle(&e).await;
+    }
+    assert_eq!(e.apps.stories_first.lock().len(), runs, "once per set at main's head: {:?}", e.apps.stories_first.lock());
 }
 
 /// A guest's note through a share link that takes notes: on the change as `guest:<name>`, its

@@ -70,6 +70,9 @@ pub struct Settings {
     pub validity_checks: bool,
     /// `leaks.rotate`: `managed` or `off`.
     pub leak_rotate: Option<String>,
+    /// Who may push past a pre-receive hook (`breakglass`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub breakglass: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -268,8 +271,9 @@ impl Secrets {
                 let env = s.columns.remove("env_id").and_then(|id| id.as_str().and_then(|id| slugs.get(id)).cloned()).unwrap_or_default();
                 s.columns.insert("environment".into(), Json::String(env));
             }
-            let settings = c.query_row("SELECT history_days, validity_checks, leak_rotate FROM projects WHERE project_id = ?", [project], |r| {
-                Ok(Settings { history_days: r.get(0)?, validity_checks: r.get::<_, Option<i64>>(1)? == Some(1), leak_rotate: r.get(2)? })
+            let settings = c.query_row("SELECT history_days, validity_checks, leak_rotate, breakglass FROM projects WHERE project_id = ?", [project], |r| {
+                let breakglass = r.get::<_, Option<String>>(3)?.map(|b| crate::from_json(&b)).unwrap_or_default();
+                Ok(Settings { history_days: r.get(0)?, validity_checks: r.get::<_, Option<i64>>(1)? == Some(1), leak_rotate: r.get(2)?, breakglass })
             })?;
             Ok::<_, Error>(Archive {
                 v: V,
@@ -397,8 +401,11 @@ impl Secrets {
                 }
             }
         }
+        // A production below roll secrets' policy comes back at its floor (guardrails.rs).
+        let floor = self.floors()?.production_approvals.unwrap_or(0);
         for e in order.iter().filter(|e| e.protected) {
-            let p = envs::Policy { protected: true, approvals: Some(e.approvals), approvers: Some(e.approvers.clone()), notify_url: None };
+            let approvals = if e.slug == crate::PRODUCTION { e.approvals.max(floor) } else { e.approvals };
+            let p = envs::Policy { protected: true, approvals: Some(approvals), approvers: Some(e.approvers.clone()), notify_url: None };
             if let Err(err) = self.set_policy(project, &e.slug, p, caller) {
                 warnings.push(format!("{} policy: {err}", e.slug));
             }
@@ -435,7 +442,7 @@ impl Secrets {
             }
         }
         let settings = archive.settings.clone().filter(|s| {
-            let ok = s.history_days.is_none_or(|d| (1..=3650).contains(&d)) && s.leak_rotate.as_deref().is_none_or(|r| crate::leaks::LeakRotate::parse(r).is_some());
+            let ok = s.history_days.is_none_or(|d| (1..=3650).contains(&d)) && s.leak_rotate.as_deref().is_none_or(|r| crate::leaks::LeakRotate::parse(r).is_some()) && crate::leaks::breakglass_ok(&s.breakglass);
             if !ok {
                 warnings.push("the project's settings aren't ones roll takes: not restored".into());
             }
@@ -463,7 +470,21 @@ impl Secrets {
                 }
             }
             if let Some(s) = &settings {
-                c.execute("UPDATE projects SET history_days = ?, validity_checks = ?, leak_rotate = ? WHERE project_id = ?", params![s.history_days, s.validity_checks as i64, s.leak_rotate, project])?;
+                // Under roll secrets' policy, a restore comes back at its floors (guardrails.rs).
+                let mut leak_rotate = s.leak_rotate.clone();
+                if crate::guardrails::read(c)?.leaks_rotate == Some(crate::leaks::LeakRotate::Managed) && leak_rotate.as_deref() != Some("managed") {
+                    leak_rotate = Some("managed".into());
+                    kept.push("leaks.rotate: roll secrets' policy keeps it managed, so it's restored as managed".into());
+                }
+                let breakglass = if s.breakglass.is_empty() {
+                    None
+                } else if crate::guardrails::read(c)?.no_breakglass {
+                    kept.push("breakglass: roll secrets' policy allows no break glass, so it's restored as no one".into());
+                    None
+                } else {
+                    Some(serde_json::json!(s.breakglass).to_string())
+                };
+                c.execute("UPDATE projects SET history_days = ?, validity_checks = ?, leak_rotate = ?, breakglass = ? WHERE project_id = ?", params![s.history_days, s.validity_checks as i64, leak_rotate, breakglass, project])?;
             }
             Ok::<_, Error>((moved, kept))
         })?;
@@ -579,11 +600,25 @@ impl Secrets {
                 made.0 += 1;
             }
             let mut count: i64 = c.query_row("SELECT COUNT(*) FROM syncs WHERE project_id = ?", [project], |r| r.get(0))?;
+            let floors = crate::guardrails::read(c)?;
+            // A sync roll secrets' policy wouldn't let the project make isn't restored either (a
+            // product's own kinds aren't covered, as on create).
+            let off_policy = |r: &Row| {
+                let kind = r.text("kind");
+                let target = self.syncs.get(kind).ok();
+                if target.is_some_and(|t| t.internal()) {
+                    return None;
+                }
+                let stored = target.and_then(|t| t.stored_cloud_key(&serde_json::from_str(r.text("target")).unwrap_or_default()));
+                floors.sync(kind, stored).err().map(|e| e.to_string())
+            };
             for r in syncs {
                 let label = format!("{} sync on {}:{}", r.text("kind"), r.text("environment"), r.text("path"));
                 let env = envs::by_slug(c, project, r.text("environment"));
                 let why = if !complete(r, &["path", "kind", "target", "prefix", "state"]) {
                     Some("the backup doesn't hold all of it".to_string())
+                } else if let Some(why) = off_policy(r) {
+                    Some(why)
                 } else if env.is_err() {
                     Some("its environment wasn't restored".into())
                 } else if count >= crate::syncs::PER_PROJECT {
@@ -658,6 +693,9 @@ impl Secrets {
             }
             if a.leak_rotate.as_deref().unwrap_or("off") != l.leak_rotate.as_deref().unwrap_or("off") {
                 settings.push("leaks.rotate".into());
+            }
+            if a.breakglass != l.breakglass {
+                settings.push("breakglass".into());
             }
         }
         let v = Verified {

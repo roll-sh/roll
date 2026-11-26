@@ -720,8 +720,8 @@ default) with the project's `env` overrides and the branched resources' URLs on 
   ensure: made if missing, `replace: true` so its own keys are exactly the overrides and branch
   URLs, a removed override doesn't linger; an unchanged repeat records nothing). A different base
   or trust answers 409, and the environment is made again.
-- **It expires by itself.** `ttl_minutes` is a day, renewed by each whole converge (a running
-  preview's every few minutes, a sleeping one's every hour), so a teardown that never happened
+- **It expires by itself.** `ttl_minutes` is a day, renewed by each whole converge (every
+  hour for a settled preview, at once for a deploy, a reset or a refresh), so a teardown that never happened
   leaves it for a day at most; roll secrets then deletes it and revokes its leases.
 - **Keys that don't resolve are said.** A reference to nothing, or to a protected value an
   untrusted preview may not read, leaves the key out (a check would fail on it); the preview's
@@ -1010,16 +1010,21 @@ fails the start with the reason rather than falling back.
 What previews keeps that's a credential is sealed with the deployment key (`ROLL_SECRET_KEY`,
 AES-256-GCM, as roll's reviewer keys are), each bound to its row: a preview's own variables (to
 the preview), the rules' pasted `env`/`env_for` values (to the project, scope and name; a
-`roll://` reference isn't a secret and stays as it is) and the screenshot links' signing key. They
+`roll://` reference isn't a secret and stays as it is), the screenshot links' signing key, and
+what a branch's product handed out once (`kept`: a stream's SASL secret, a queue user's password,
+a bucket key's secret, a search branch's keys; to the preview, the resource and the earlier push
+or restore point it's a copy for; roll search's review of #1054 found it in the clear). They
 open inside the store as they're read. With no key, a pasted value is refused (400, naming
 `ROLL_SECRET_KEY`), never written in the clear; the signing key is then this process's own, kept
-in memory only (its links stop at a restart: local development). A database from before is sealed
+in memory only (its links stop at a restart: local development); a branch's `kept` is written as
+it is, since its services need it (local development too). A database from before is sealed
 the moment the key comes (`Store::set_sealer`), in one write with SQLite's `secure_delete` on and
 the WAL checkpointed and truncated after it, so nothing of the old values stays readable in the
 file, its free pages or its `-wal` (`credentials_are_sealed_at_rest_and_nothing_stays_in_the_file`,
 on an upgraded database). On Postgres (a fleet's control database) the rewrite is an ordinary
 write: the old row versions stay as dead tuples until autovacuum reuses their pages (`VACUUM FULL`
-on `settings`, `previews` and `keys` removes them at once). Either way, backups and WAL archives
+on `settings`, `previews`, `keys`, `resources`, `pinned_data` and `restore_points` removes them at
+once). Either way, backups and WAL archives
 taken before the key came still hold the clear values: rotate or expire them. Roll secrets'
 thirty-fourth review found them in the clear.
 
@@ -1419,12 +1424,12 @@ own rates (the same ones its usage page shows).
 
 - **Sleeping**, per month: the bytes each branch owns, at its product's storage rate. Compute
   costs nothing. Nor does it cost roll's control plane much: usage is read every 5 minutes
-  (`usage_every`), but a settled sleeping preview goes through a whole converge (roll secrets'
+  (`usage_every`), but a settled preview, asleep or running, goes through a whole converge (roll secrets'
   ensure, its base's links followed, every branch checked) only every hour (`settled_every`;
   well inside its environment's 24 h lease), its usage read alone in between, as Render and
   Vercel meter idle previews without waking them. Over its size cap on such a read, it converges
   to sleep there. A link added to the base reaches a sleeping preview at that hourly converge
-  (rules' changes reach every preview at once). `a_sleeping_previews_usage_is_read_without_a_whole_converge`.
+  (rules' changes reach every preview at once). `a_settled_previews_usage_is_read_without_a_whole_converge`.
 - **Active**, per hour: the services' containers (memory GiB-hours), Postgres compute units
   while connected, and Redis memory while loaded.
 - **Runs**: its browsers' and jobs' containers by their GiB-hours at the same rate: screenshot
@@ -1744,7 +1749,9 @@ land on the change.
   place) with the page's path (never its query, which can hold a token):
   `/dashboard/previews/note?preview={id}&fb_path=…&fb_selector=…&fb_note=…`, the note's form
   alone. Posted, it closes, and the page reads its list of notes again when it has the focus
-  back. On a phone's width it opens the preview's sheet in roll's dashboard in a tab instead
+  back. The Reply and Resolve of a note it lists open the same window with that note's thread
+  alone (`fb_reply`/`fb_resolve`; Vercel's threads answer in place), which closes once the note
+  is resolved. On a phone's width it opens the preview's sheet in roll's dashboard in a tab instead
   (`/dashboard/projects/{project}/previews?preview={id}&fb_…`). Either opens with `noopener`, so
   the page gets no handle on roll's window, and the preview's origin never holds a roll
   credential: the person, signed in to roll there (a sign-in comes back to the form), reads the
@@ -2336,7 +2343,19 @@ type Settings = {
     is (Chromatic's accessibility tests: its rules, its language and title), while more than 30 s
     of the run are left so a big Storybook still gets its pictures, 8 KB of it at most; what it
     adds against main's same story counts like a page's (`a11y_added`). Live: the live
-    Storybook's stories carry it. A story gone from Storybook goes
+    Storybook's stories carry it. With `github.browsers`, the change's first 5 stories (as the run
+    ordered them: those it touched first) are taken in each of those browsers too, once
+    Chromium's run knows which (Chromatic's cross-browser stories): `story:<id>@<browser>`
+    ("button / primary · Firefox" on the sheet), each loaded alone and clipped to its root, in
+    the service's network and locked down as the other browsers' run is, and compared with
+    main's same story in that browser. Main's preview takes, first, the stories the project's
+    open changes keep and it hasn't (in Chromium past its 40, or in another browser): a change's
+    run that has one queues main's again at its head (`stories_first`), and each change is then
+    compared again (a baseline on demand). A story main's Storybook doesn't have (the change added
+    it) is asked for once per head, never again until main moves.
+    `main_takes_the_stories_a_change_has_and_it_hasnt`.
+    Best effort: Chromium's stories stand without them. Live: the live Storybook's first story
+    in Firefox and in WebKit at a phone's size. A story gone from Storybook goes
     from the preview. The index is the preview's code's: an id Storybook wouldn't make
     (`components-button--primary`) is dropped. A Storybook on another service is kept with that
     service's pages while it runs what it ran (TurboSnap), and taken at once when the rule is
@@ -2870,32 +2889,27 @@ Ranked by what a person notices first. Done so far:
 Ranked again after a seventh product review (2026-11-25, evening), against Vercel's comments,
 Chromatic's cross-browser and accessibility tests, Render's suspended services, Neon's snapshots.
 
-1. **A reply and a resolve from the page in one click**: the button's own notes open the whole
-   dashboard to reply to or resolve one; the small window #1016 opens for a new note, for those
-   too (Vercel's comment threads answer in place).
-2. **Stories in the other browsers** (Chromatic's cross-browser stories): `github.browsers` takes
-   pages in Firefox and WebKit, stories only in Chromium; take the change's first stories in each
-   browser asked for, compared with main's same story in that browser.
-3. **Restore points for Redis, search and streams**: NoSQL's landed (#1028, its point-in-time
+1. **A baseline on demand for stories, in review**: main's preview takes the stories the open
+   changes keep and it hasn't, in Chromium and the other browsers, so each change's is compared
+   with main's (#1064 took a change's first 5 in the other browsers).
+2. **Restore points for Redis, search and streams**: NoSQL's landed (#1028, its point-in-time
    restore). A point is kept only where the product puts a branch back in place, keeping its id
    (their delete guards check it); each needs its control plane's reset `from`, as pg-control's:
    ask the Redis, search and streams owners.
-4. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+3. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-5. **A running settled preview's usage read alone too**: #1017 does it for sleeping ones; a running
-   one still converges whole every 5 minutes between its health and route reads.
-6. **roll apps lookups that miss cost a list each**: `RollApps::find` lists every roll apps
-   service when a preview's service isn't one (a `roll.toml` service not started on this node),
-   every usage round; remember the miss for a while, never across a deploy that makes the
-   environment.
-7. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+4. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-8. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-9. **Watch: pg-control's recovery to a time seconds old** (unowned).
+6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-26, early: a change's first stories in the other browsers (#1064); roll apps lookups that miss remembered (#1066); a settled running preview's usage read alone too (#1069).
+
+Landed 2026-11-25, night: a note's reply and resolve in roll's small window (#1052); branches' handed-out credentials sealed at rest (#1058).
 
 Landed 2026-11-25, afternoon and evening:
 - browser runs and jobs in the cost (#1010), and roll apps services' own bill, builds included, with

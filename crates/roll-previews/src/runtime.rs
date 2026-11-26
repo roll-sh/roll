@@ -1466,6 +1466,50 @@ fn story_shots<'a>(said: &str, pngs: impl Iterator<Item = &'a str>) -> (Vec<crat
     }
     (out, skipped)
 }
+/// How many of a change's first stories the other browsers take (`story:<id>@<browser>`).
+pub const STORIES_IN_BROWSERS: usize = 5;
+
+/// A container of the other browsers' image in service `name`'s network, locked down (no
+/// capabilities, read-only but its /tmp, 1 GiB and one CPU), its URL the service's.
+fn browsers_args(run: &str, name: &str, port: u16) -> Vec<String> {
+    let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "-i".into(), "--name".into(), run.to_string(), "--network".into(), format!("container:{name}")];
+    args.extend(["--label".into(), format!("{}=preview", code_preview::docker::LABEL)]);
+    if let Some(l) = code_preview::docker::home_label() {
+        args.extend(["--label".into(), l]);
+    }
+    args.extend(["--cap-drop".into(), "ALL".into(), "--security-opt".into(), "no-new-privileges".into(), "--read-only".into(), "--tmpfs".into(), "/tmp:rw,size=512m".into()]);
+    args.extend(code_preview::docker::limits(1024, 1.0));
+    args.extend(["--env".into(), format!("URL=http://127.0.0.1:{port}/"), "--env".into(), "HOME=/tmp".into()]);
+    args
+}
+
+/// What the stories in the other browsers said (a line each: `{story, browser, errors, png}`):
+/// only a story and a browser asked for, once each, with a PNG within a story's cap. The lines
+/// are the preview's code's.
+fn browser_story_shots(out: &str, ids: &[&String], browsers: &[&String]) -> Vec<crate::ports::PageShot> {
+    use base64::Engine as _;
+    #[derive(serde::Deserialize)]
+    struct Line {
+        story: String,
+        browser: String,
+        #[serde(default)]
+        errors: u32,
+        png: String,
+    }
+    let mut shots: Vec<crate::ports::PageShot> = Vec::new();
+    for l in out.lines().filter_map(|l| serde_json::from_str::<Line>(l).ok()) {
+        let path = format!("story:{}@{}", l.story, l.browser);
+        if !ids.iter().any(|i| **i == l.story) || !browsers.iter().any(|b| **b == l.browser) || shots.iter().any(|p| p.path == path) {
+            continue;
+        }
+        let Ok(png) = base64::engine::general_purpose::STANDARD.decode(l.png.trim()) else { continue };
+        if png.starts_with(b"\x89PNG") && png.len() <= STORY_MAX {
+            shots.push(crate::ports::PageShot { path, png, errors: l.errors.min(10_000), report: Default::default() });
+        }
+    }
+    shots
+}
+
 const SHOT_OUTPUT_MAX: usize = BODIES_LINE_MAX + (crate::settings::MAX_PAGES + 2) * SCREENSHOT_MAX * 4 / 3 + 3 * SHOT_REPORT_MAX + crate::store::CROPS_PER_RUN * crate::store::CROP_MAX * 4 / 3 + (64 << 10);
 
 /// The header automation sends a project's bypass secret in (docs/previews.md, "Safety").
@@ -2094,7 +2138,21 @@ impl Runtime {
         let stories_run = async {
             let started = std::time::Instant::now();
             let r = match opts.stories.as_deref().filter(|p| crate::settings::page_path_ok(p) && p.ends_with('/')) {
-                Some(at) => Some(self.stories_in(name, port, at, &opts.changed).await),
+                Some(at) => {
+                    let mut r = self.stories_in(name, port, at, &opts.changed, &opts.stories_first).await;
+                    // Then the first of them in the other browsers asked for, once Chromium's run
+                    // knows which the change touched first. Best effort: Chromium's stand alone.
+                    if let Ok((shots, _)) = &mut r
+                        && !opts.browsers.is_empty()
+                    {
+                        let ids: Vec<String> = shots.iter().filter_map(|p| p.path.strip_prefix("story:").map(str::to_string)).take(STORIES_IN_BROWSERS).collect();
+                        match self.browser_stories(name, port, at, &ids, &opts.browsers).await {
+                            Ok(more) => shots.extend(more),
+                            Err(e) => warn!(service = %name, error = %e, "previews: the stories in the other browsers"),
+                        }
+                    }
+                    Some(r)
+                }
                 None => None,
             };
             (r, started.elapsed().as_millis() as u64)
@@ -2180,7 +2238,7 @@ impl Runtime {
     /// A service's Storybook stories (`github.storybook`; Chromatic's stories), served at `at`: a
     /// run of their own in its network, locked down as the screenshot's is, each story a page
     /// (`story:<id>`).
-    async fn stories_in(&self, name: &str, port: u16, at: &str, changed: &[String]) -> anyhow::Result<(Vec<crate::ports::PageShot>, crate::Skipped)> {
+    async fn stories_in(&self, name: &str, port: u16, at: &str, changed: &[String], first: &[String]) -> anyhow::Result<(Vec<crate::ports::PageShot>, crate::Skipped)> {
         let shot = format!("roll-previews-story-{}", name.trim_start_matches("roll-previews-"));
         let mut args = shot_args(&shot, name, port);
         // axe-core for each story's accessibility, on stdin as the page run's is.
@@ -2197,6 +2255,10 @@ impl Runtime {
         }
         if !fit.is_empty() {
             args.extend(["--env".into(), format!("STORIES_CHANGED={}", serde_json::to_string(&fit)?)]);
+        }
+        let first: Vec<&String> = first.iter().filter(|i| crate::settings::story_id_ok(i)).take(crate::settings::MAX_STORIES).collect();
+        if !first.is_empty() {
+            args.extend(["--env".into(), format!("STORIES_FIRST={}", serde_json::to_string(&first)?)]);
         }
         args.extend([
             self.cfg.screenshot_image.clone(),
@@ -2225,11 +2287,42 @@ impl Runtime {
         Ok(story_shots(said, lines))
     }
 
-    /// The first page in the other browsers `opts.browsers` names (`browser:<name>` pages), in the
-    /// service's network as Chromium's run is, locked down the same way.
-    async fn other_browsers(&self, name: &str, port: u16, opts: &crate::ports::ShotOptions) -> anyhow::Result<(Vec<crate::ports::PageShot>, Vec<(String, Vec<u8>)>)> {
-        use base64::Engine as _;
-        let building = self.browsers_building.lock().await;
+    /// The change's first stories (`ids`, as the Chromium run took them, at most
+    /// [`STORIES_IN_BROWSERS`]) in the other browsers `browsers` names (Chromatic's cross-browser
+    /// stories): `story:<id>@<browser>` pages, each loaded alone and clipped to its root, in the
+    /// service's network and locked down as the other browsers' run is. No sign-in: stories don't.
+    async fn browser_stories(&self, name: &str, port: u16, at: &str, ids: &[String], browsers: &[String]) -> anyhow::Result<Vec<crate::ports::PageShot>> {
+        let browsers: Vec<&String> = browsers.iter().filter(|b| crate::settings::BROWSERS.contains(&b.as_str())).collect();
+        let ids: Vec<&String> = ids.iter().filter(|i| crate::settings::story_id_ok(i)).take(STORIES_IN_BROWSERS).collect();
+        if browsers.is_empty() || ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.browsers_image().await?;
+        let run = format!("roll-previews-bstories-{}", name.trim_start_matches("roll-previews-"));
+        let mut args = browsers_args(&run, name, port);
+        args.extend(["--env".into(), format!("BROWSERS={}", serde_json::to_string(&browsers)?), "--env".into(), format!("STORIES={at}"), "--env".into(), format!("STORY_IDS={}", serde_json::to_string(&ids)?)]);
+        args.extend(["--env".into(), format!("ROLL_BROWSERS_JS={BROWSERS_JS}"), BROWSERS_IMAGE.into(), "sh".into(), "-c".into(), r#"node -e "$ROLL_BROWSERS_JS""#.into()]);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        let within = Duration::from_secs(30 + browsers.len() as u64 * (20 + 8 * ids.len() as u64));
+        let max = browsers.len() * ids.len() * (STORY_MAX * 4 / 3 + 4096);
+        let out = match tokio::time::timeout(within, docker_with_input(&argv, Vec::new(), max)).await {
+            Ok(Ok(out)) => out,
+            Ok(Err(e)) => {
+                code_preview::docker::remove(&run).await;
+                return Err(e);
+            }
+            Err(_) => {
+                code_preview::docker::remove(&run).await;
+                anyhow::bail!("the stories in the other browsers took over {} s", within.as_secs());
+            }
+        };
+        Ok(browser_story_shots(&out, &ids, &browsers))
+    }
+
+    /// The other browsers' image (`BROWSERS_IMAGE`), built once from the screenshot image; a failed
+    /// build is tried again within the hour. Only the build is one at a time: runs go side by side.
+    async fn browsers_image(&self) -> anyhow::Result<()> {
+        let _building = self.browsers_building.lock().await;
         if code_preview::docker::docker(&["image", "inspect", "--format", "{{.Id}}", BROWSERS_IMAGE]).await.is_err() {
             if let Some(at) = *self.browsers_failed.lock() {
                 anyhow::ensure!(at.elapsed() >= BROWSERS_RETRY, "building {BROWSERS_IMAGE} failed {} min ago; tried again within the hour", at.elapsed().as_secs() / 60);
@@ -2246,19 +2339,18 @@ impl Runtime {
             }
             *self.browsers_failed.lock() = None;
         }
-        // Only the build is one at a time: the runs go side by side.
-        drop(building);
+        Ok(())
+    }
+
+    /// The first page in the other browsers `opts.browsers` names (`browser:<name>` pages), in the
+    /// service's network as Chromium's run is, locked down the same way.
+    async fn other_browsers(&self, name: &str, port: u16, opts: &crate::ports::ShotOptions) -> anyhow::Result<(Vec<crate::ports::PageShot>, Vec<(String, Vec<u8>)>)> {
+        use base64::Engine as _;
+        self.browsers_image().await?;
         let browsers: Vec<&String> = opts.browsers.iter().filter(|b| crate::settings::BROWSERS.contains(&b.as_str())).collect();
         let hide: Vec<&String> = opts.hide.iter().filter(|s| crate::settings::selector_ok(s)).take(crate::settings::MAX_HIDE).collect();
         let run = format!("roll-previews-browsers-{}", name.trim_start_matches("roll-previews-"));
-        let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "-i".into(), "--name".into(), run.clone(), "--network".into(), format!("container:{name}")];
-        args.extend(["--label".into(), format!("{}=preview", code_preview::docker::LABEL)]);
-        if let Some(l) = code_preview::docker::home_label() {
-            args.extend(["--label".into(), l]);
-        }
-        args.extend(["--cap-drop".into(), "ALL".into(), "--security-opt".into(), "no-new-privileges".into(), "--read-only".into(), "--tmpfs".into(), "/tmp:rw,size=512m".into()]);
-        args.extend(code_preview::docker::limits(1024, 1.0));
-        args.extend(["--env".into(), format!("URL=http://127.0.0.1:{port}/"), "--env".into(), "HOME=/tmp".into()]);
+        let mut args = browsers_args(&run, name, port);
         args.extend(["--env".into(), format!("BROWSERS={}", serde_json::to_string(&browsers)?), "--env".into(), format!("HIDE={}", serde_json::to_string(&hide)?)]);
         // The notes in another engine, as roll checked them (their pages and selectors).
         let crops: Vec<&crate::ports::CropAsk> = opts
@@ -3345,6 +3437,9 @@ mod tests {
         };
         assert_eq!(order(stats), "c--1,e--1,b--1,a--1,d--1");
         assert_eq!(order("null"), "c--1,b--1,a--1,d--1,e--1", "without a graph, by files alone");
+        // A default branch's preview: the stories asked for first, before the rest.
+        let out = std::process::Command::new("node").arg("-e").arg(format!("{src}\nconsole.log(touchedFirst({entries}, [], null, [\"d--1\"]).map((e) => e.id).join(','))")).output().expect("node");
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "d--1,a--1,b--1,c--1,e--1");
     }
 
     /// A stories run's report is the preview's code's: each story once, by an id Storybook would
@@ -3364,6 +3459,14 @@ mod tests {
         assert_eq!(got, [("story:button--primary".to_string(), 2), ("story:card--full".to_string(), 0)]);
         assert_eq!((left.stories, left.first_stories, left.by_files), (12, vec!["button--danger".to_string()], true), "what it didn't take, by ids it could name, and that it chose by files alone");
         assert!(story_shots("not json", [png.as_str()].into_iter()).0.is_empty());
+        // The first of them in the other browsers: only a story and a browser asked for, once
+        // each, a PNG within a story's cap.
+        let (ids, browsers) = (["button--primary".to_string()], ["firefox".to_string()]);
+        let line = |story: &str, browser: &str, png: &str| serde_json::json!({ "story": story, "browser": browser, "errors": 1, "png": png }).to_string();
+        let out = [line("button--primary", "firefox", &png), line("button--primary", "firefox", &png), line("card--full", "firefox", &png), line("button--primary", "webkit", &png), line("button--primary", "firefox", &junk)].join("\n");
+        let got: Vec<(String, u32)> = browser_story_shots(&out, &ids.iter().collect::<Vec<_>>(), &browsers.iter().collect::<Vec<_>>()).into_iter().map(|p| (p.path, p.errors)).collect();
+        assert_eq!(got, [("story:button--primary@firefox".to_string(), 1)]);
+        assert!(crate::settings::page_key_ok("story:button--primary@webkit-phone") && !crate::settings::page_key_ok("story:button--primary@lynx"));
     }
 
     /// A run's answer is the preview's code's: a PNG only within the cap, one printable line for

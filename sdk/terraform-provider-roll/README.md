@@ -257,6 +257,28 @@ resource "roll_search_snapshot_repository" "backups" {
   credentials = { access_key = var.aws_key_id, secret_key = var.aws_secret }
 }
 
+# Relevance as code: an index's synonym filter names the set (`synonyms_set = "products"`), and a
+# `rule` query or retriever names the ruleset.
+resource "roll_search_synonyms_set" "products" {
+  cluster = roll_search_cluster.shop.id
+  name    = "products"
+  rules = [
+    { id = "tv", synonyms = "tv, television" },
+    { id = "ipod", synonyms = "ipod => ipod, i-pod" },
+  ]
+}
+
+resource "roll_search_query_ruleset" "promos" {
+  cluster = roll_search_cluster.shop.id
+  name    = "promos"
+  rules = jsonencode([{
+    rule_id  = "sale"
+    type     = "pinned"
+    criteria = [{ type = "exact", metadata = "query", values = ["sale"] }]
+    actions  = { ids = ["sku-1", "sku-2"] }
+  }])
+}
+
 data "roll_search_cluster" "logs" {
   name = "logs"                  # or id = "srch_…": .endpoint, .flavor, .version
 }
@@ -355,6 +377,9 @@ provider "elasticstack" {
   key, so KMS must still answer.
 - `roll_secrets_project` writes only the settings that differ from roll's, and destroying it leaves
   them (and the project) as they are.
+- `roll_secrets_policy` is roll secrets' policy of floors for every project (the operator's token
+  or an admin's; one per server, imported by `policy`). It owns the whole policy: a floor left out
+  has none, and destroying it removes every floor.
 
 - A notification target's URL is never read back, and a new URL is a new target. A webhook's
   signing secret is in `.secret` from when it's made. Filters left out are the defaults.

@@ -1320,8 +1320,9 @@ pub enum AppsCmd {
     },
     /// The project's status page: shown (its address and incidents); made or changed (`--title`,
     /// `--item SERVICE/ENV/check:NAME` or `…/heartbeat:NAME`: every check and heartbeat without
-    /// one); taken down (`--delete`). An incident posted (`--incident TITLE --text …`) or updated
-    /// (`--update ID --state resolved --text …`).
+    /// one); taken down (`--delete`). An incident posted (`--incident TITLE --text …`; a
+    /// maintenance with `--starts` and `--ends`, RFC 3339) or updated (`--update ID --state
+    /// resolved --text …`).
     StatusPage {
         #[command(flatten)]
         target: Target,
@@ -1335,11 +1336,17 @@ pub enum AppsCmd {
         incident: Option<String>,
         #[arg(long, value_name = "ID", conflicts_with_all = ["title", "item"])]
         update: Option<String>,
-        #[arg(long, value_parser = ["investigating", "identified", "monitoring", "resolved"])]
+        #[arg(long, value_parser = ["investigating", "identified", "monitoring", "maintenance", "resolved"])]
         state: Option<String>,
         /// What it says (public: the page and its feed show it).
         #[arg(long)]
         text: Option<String>,
+        /// A scheduled maintenance's start (RFC 3339, `2026-12-01T02:00:00Z`): shown ahead, and
+        /// roll begins and ends it.
+        #[arg(long, requires_all = ["incident", "ends"])]
+        starts: Option<String>,
+        #[arg(long, requires = "starts")]
+        ends: Option<String>,
     },
     /// The project's spend limits this month: show them, or set `--alert` and `--hard` (dollars;
     /// `0` removes one). At the hard limit its services stop until it's raised.
@@ -2418,21 +2425,52 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
     let git = git_head(&dir);
     let svc = match (&u.target.service, &link) {
         (Some(_), _) => service(api, &u.target).await?,
-        (None, Some(l)) => api.get(&format!("/v1/apps/services/{}", enc(&s(&l["service"])))).await?,
+        (None, Some(l)) => api.get(&format!("/v1/apps/services/{}", enc(&s(&l["service"])))).await.map_err(|e| {
+            // Linked to a service that's gone: say what brings it back or links another.
+            anyhow::anyhow!("{e:#}\nthis directory is linked (.roll/app.json) to {}, which isn't there: `roll apps restore -s {}` if it was deleted in the last 48 hours, or `roll apps use <name>` to link another", s(&l["service"]), s(&l["service"]))
+        })?,
         (None, None) => {
             // Read here first: a tree nothing builds makes no service (a roll.toml `[app]` can
             // name its builder, so with one it's only said).
-            match local_plan(&dir, &u.target.env) {
-                Ok(p) => eprintln!("detected {}{}", serde_json::to_value(&p)?["provider"].as_str().unwrap_or("?"), p.framework.as_deref().map(|f| format!(" ({f})")).unwrap_or_default()),
-                Err(e) if dir.join("roll.toml").exists() => eprintln!("{e} (its roll.toml may say how)"),
+            let wanted = match local_plan(&dir, &u.target.env) {
+                Ok(p) => {
+                    eprintln!("detected {}{}", serde_json::to_value(&p)?["provider"].as_str().unwrap_or("?"), p.framework.as_deref().map(|f| format!(" ({f})")).unwrap_or_default());
+                    p.variables
+                }
+                Err(e) if dir.join("roll.toml").exists() => {
+                    eprintln!("{e} (its roll.toml may say how)");
+                    Vec::new()
+                }
                 Err(e) => bail!("{e}"),
-            }
+            };
+            // On a terminal the first run asks what New service asks (`fly launch`'s questions);
+            // without one it does what it always did.
+            let tty = std::io::IsTerminal::is_terminal(&std::io::stdin()) && std::io::IsTerminal::is_terminal(&std::io::stderr());
             // First time here: a project and an upload service named after the directory.
             let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("app").to_ascii_lowercase();
             let name: String = name.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect::<String>().trim_matches('-').chars().take(32).collect();
             let name = if name.is_empty() { "app".to_string() } else { name };
-            let project = match &u.target.project {
-                Some(p) => project_id(api, p).await?,
+            let chosen = match (&u.target.project, tty) {
+                (None, true) => {
+                    let names: Vec<String> = api.get("/v1/workspace/projects").await.ok().and_then(|v| v.as_array().map(|a| a.iter().filter_map(|p| p["name"].as_str().map(str::to_string)).collect())).unwrap_or_default();
+                    if !names.is_empty() {
+                        eprintln!("your projects: {}", names.join(", "));
+                    }
+                    let answer = prompt(&format!("its project (enter: {name}, made if it's new): "))?;
+                    (!answer.is_empty()).then_some(answer)
+                }
+                (p, _) => p.clone(),
+            };
+            let project = match &chosen {
+                Some(p) => match project_id(api, p).await {
+                    Ok(id) => id,
+                    Err(_) if tty => {
+                        let id = s(&api.post("/v1/workspace/projects", json!({ "name": p })).await?["id"]);
+                        eprintln!("made the project {p} ({id})");
+                        id
+                    }
+                    Err(e) => return Err(e),
+                },
                 None => match find_project(api, &name).await? {
                     Some(p) => {
                         eprintln!("using the project {name} ({p}), named as this directory is (-p puts it in another)");
@@ -2441,17 +2479,51 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
                     None => s(&api.post("/v1/workspace/projects", json!({ "name": name })).await?["id"]),
                 },
             };
-            let svc = api.post("/v1/apps/services", json!({ "project": project, "name": name, "source": { "kind": "upload" } })).await?;
+            let svc = api.post("/v1/apps/services", json!({ "project": project, "name": name, "source": { "kind": "upload" } })).await.map_err(|e| {
+                // Another machine already made it: link to it rather than make a second.
+                anyhow::anyhow!("{e:#}\nif that's this directory's service made from another machine, `roll apps use {name} -p {project}` links it here")
+            })?;
             eprintln!("made service {} in project {}", s(&svc["name"]), project);
             // What the code talks to, said once: roll apps links the database's variables in.
             let tree = apps_build::DirTree::new(&dir);
-            for (store, why) in apps_build::uses(&tree) {
-                let make = match store {
-                    apps_build::Datastore::Postgres => format!("roll db create {name}-db"),
-                    apps_build::Datastore::Redis => format!("roll redis create {name}-cache"),
-                };
-                let kind = if store == apps_build::Datastore::Postgres { "postgres" } else { "redis" };
+            let mut provided: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            for (i, (store, why)) in apps_build::uses(&tree).into_iter().enumerate() {
+                let postgres = store == apps_build::Datastore::Postgres;
+                let (kind, db) = if postgres { ("postgres", format!("{name}-db")) } else { ("redis", format!("{name}-cache")) };
+                if tty && ask(&format!("the code uses {} ({why}): make {db} and link it? [Y/n] ", store.label()), true)? {
+                    let made = if postgres { api.post("/v1/projects", json!({ "name": db })).await? } else { api.post("/v1/redis/databases", json!({ "name": db })).await? };
+                    let r = s(&made["id"]);
+                    let _ = api.call(reqwest::Method::PUT, &format!("/v1/workspace/projects/{}/resources/{kind}/{}", enc(&project), enc(&r)), Some(json!({ "x": 48 + 320 * i as i64, "y": 340 }))).await;
+                    api.call(reqwest::Method::PUT, &format!("/v1/apps/services/{}/links/{kind}/{}", enc(&s(&svc["id"])), enc(&r)), Some(json!({}))).await?;
+                    eprintln!("made {} {db} and linked it: its URL is in the first deploy", store.label());
+                    provided.extend(if postgres { &["DATABASE_URL", "PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGDATABASE"][..] } else { &["REDIS_URL"][..] });
+                    continue;
+                }
+                let make = if postgres { format!("roll db create {db}") } else { format!("roll redis create {db}") };
                 eprintln!("the code uses {} ({why}): `{make}`, then `roll apps link {kind} <its id>` puts its URL in", store.label());
+            }
+            if tty {
+                // Its variables before the first deploy: the local .env (never uploaded) if
+                // asked, then what .env.example names that's still missing.
+                let mut set = serde_json::Map::new();
+                if let Ok(text) = std::fs::read_to_string(dir.join(".env")) {
+                    let (vars, _) = parse_env(&text);
+                    if !vars.is_empty() && ask(&format!("set .env's {} variables on the service (names that read as secrets sealed)? [y/N] ", vars.len()), false)? {
+                        set.extend(vars.into_iter().map(|(k, v)| (k, Value::String(v))));
+                    }
+                }
+                let missing: Vec<String> = wanted.iter().filter(|k| !set.contains_key(k.as_str()) && !provided.contains(k.as_str()) && k.as_str() != "PORT").cloned().collect();
+                for k in &missing {
+                    let v = prompt(&format!("{k} (its .env.example names it; enter leaves it unset): "))?;
+                    if !v.is_empty() {
+                        set.insert(k.clone(), Value::String(v));
+                    }
+                }
+                if !set.is_empty() {
+                    let seal: Vec<String> = set.keys().filter(|k| looks_secret(k)).cloned().collect();
+                    api.call(reqwest::Method::PATCH, &format!("{}/variables", env_path(&svc, &u.target.env)), Some(json!({ "set": set, "seal": seal }))).await?;
+                    eprintln!("set {} variables{}", set.len(), if seal.is_empty() { String::new() } else { format!(" ({} sealed)", seal.len()) });
+                }
             }
             svc
         }
@@ -2585,6 +2657,22 @@ fn fill_vars(app: &str, vars: &std::collections::BTreeMap<String, apps_build::pr
 }
 
 /// Whether a variable's name reads as a secret, as the dashboard's `looksSecret` does.
+/// A line read from the terminal, trimmed.
+fn prompt(q: &str) -> anyhow::Result<String> {
+    use std::io::{BufRead, Write};
+    eprint!("{q}");
+    std::io::stderr().flush()?;
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    Ok(line.trim().to_string())
+}
+
+/// A yes or no from the terminal (`yes` when it's left empty and that's the default).
+fn ask(q: &str, yes: bool) -> anyhow::Result<bool> {
+    let a = prompt(q)?.to_ascii_lowercase();
+    Ok(if a.is_empty() { yes } else { a.starts_with('y') })
+}
+
 fn looks_secret(name: &str) -> bool {
     let n = name.to_ascii_uppercase();
     let words = ["SECRET", "TOKEN", "PASSWORD", "PASSWD", "PASS", "PRIVATE_KEY", "API_KEY", "ACCESS_KEY", "KEY", "CREDENTIAL", "CREDENTIALS", "DSN"];
@@ -2733,6 +2821,9 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
                 let run = entry_run(a);
                 if !run.is_empty() {
                     body["run"] = Value::Object(run);
+                }
+                if let Some(b) = a.build.as_ref().filter(|b| !b.is_empty()) {
+                    body["build"] = serde_json::to_value(b)?;
                 }
                 if !a.variables.is_empty() {
                     let vars = fill_vars(n, &a.variables)?;
@@ -5172,7 +5263,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 v
             }
         }
-        AppsCmd::StatusPage { target, title, item, delete, incident, update, state, text } => {
+        AppsCmd::StatusPage { target, title, item, delete, incident, update, state, text, starts, ends } => {
             let svc = service(api, &target).await?;
             let path = format!("/v1/apps/projects/{}/status-page", enc(&s(&svc["project"])));
             if delete {
@@ -5183,6 +5274,12 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 let mut b = json!({ "title": t, "text": text });
                 if let Some(st) = state {
                     b["state"] = json!(st);
+                }
+                if let (Some(f), Some(u)) = (&starts, &ends) {
+                    let ms = |t: &str| chrono::DateTime::parse_from_rfc3339(t).map(|d| d.timestamp_millis()).map_err(|e| anyhow::anyhow!("{t}: {e} (RFC 3339, like 2026-12-01T02:00:00Z)"));
+                    b["state"] = json!("scheduled");
+                    b["starts_at"] = json!(ms(f)?);
+                    b["ends_at"] = json!(ms(u)?);
                 }
                 api.post(&format!("{path}/incidents"), b).await?
             } else if let Some(id) = update {

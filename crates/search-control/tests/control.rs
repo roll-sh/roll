@@ -5358,7 +5358,10 @@ async fn search_analytics() {
         })
     };
     es(Method::POST, "/_application/analytics/web/event/search_click", Some(click("shoes", "2"))).await;
-    es(Method::POST, "/_application/analytics/web/event/search_click", Some(click("shoes", "1"))).await;
+    // The app's own `data` key records its clicks too: no second key for them.
+    let app = e.post("/v1/search/clusters/shop/keys", json!({"name": "app", "access": "data"})).await["api_key"].as_str().unwrap().to_string();
+    let r = e.http.post(format!("{}/_application/analytics/web/event/search_click", e.es)).header("authorization", format!("ApiKey {app}")).json(&click("shoes", "1")).send().await.unwrap();
+    assert!(r.status().is_success(), "a data key's click: {}", r.text().await.unwrap());
 
     let check = |a: &Value| {
         assert_eq!(a["totals"]["searches"].as_u64(), Some(8), "{a}");

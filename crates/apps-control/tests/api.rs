@@ -3386,14 +3386,30 @@ async fn status_page_incidents_open_and_close() {
     let (st, inc) = call(&w.api, "POST", &format!("{page}/incidents"), Some(json!({"title": "Slow checkouts", "text": "We're looking into slow checkouts."}))).await;
     assert_eq!(st, StatusCode::CREATED, "{inc}");
     let iid = inc["id"].as_str().unwrap();
+    assert_eq!(call(&w.api, "POST", &format!("{page}/incidents/{iid}/updates"), Some(json!({"state": "maintenance", "text": "x"}))).await.0, StatusCode::BAD_REQUEST, "only a scheduled one is under way");
     assert_eq!(call(&w.api, "POST", &format!("{page}/incidents/{iid}/updates"), Some(json!({"state": "resolved", "text": "Fixed: a slow query."}))).await.0, StatusCode::NO_CONTENT);
     let j: Value = serde_json::from_str(&get("/status.json".into(), h.clone()).await).unwrap();
     let mine = j["incidents"].as_array().unwrap().iter().find(|i| i["id"] == iid).unwrap();
     assert_eq!((mine["state"].as_str(), mine["updates"].as_array().map(Vec::len)), (Some("resolved"), Some(2)), "{j}");
     let html = get("/".into(), h.clone()).await;
     assert!(html.contains("Slow checkouts") && html.contains("Fixed: a slow query."), "{html}");
-    let feed = get("/feed.xml".into(), h).await;
+    let feed = get("/feed.xml".into(), h.clone()).await;
     assert!(feed.starts_with("<?xml") && feed.contains("Slow checkouts: resolved"), "{feed}");
+    // A scheduled maintenance: listed ahead with its window, begun and over by the sweep.
+    let at = code_sql::now_ms() + 5 * 3_600_000;
+    assert_eq!(call(&w.api, "POST", &format!("{page}/incidents"), Some(json!({"title": "x", "text": "y", "state": "scheduled", "starts_at": at, "ends_at": at - 1}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, m) = call(&w.api, "POST", &format!("{page}/incidents"), Some(json!({"title": "Database upgrade", "text": "Checkout may be slow.", "state": "scheduled", "starts_at": at, "ends_at": at + 3_600_000}))).await;
+    assert_eq!(st, StatusCode::CREATED, "{m}");
+    let html = get("/".into(), h.clone()).await;
+    assert!(html.contains("Scheduled maintenance") && html.contains("Database upgrade"), "{html}");
+    let state = |w: &World, page: String| {
+        let api = w.api.clone();
+        async move { call(&api, "GET", &format!("{page}/incidents"), None).await.1["incidents"].as_array().unwrap().iter().find(|i| i["title"] == "Database upgrade").map(|i| (i["state"].clone(), i["resolved_at"].is_i64())).unwrap() }
+    };
+    w.apps.cron_pass(at + 60_000).await;
+    assert_eq!(state(&w, page.clone()).await, (json!("maintenance"), false));
+    w.apps.cron_pass(at + 3_600_000 + 120_000).await;
+    assert_eq!(state(&w, page).await, (json!("resolved"), true));
 }
 
 /// An instance the kernel killed for its memory says so: in the log and in why it crashed.
@@ -8106,6 +8122,9 @@ async fn a_volume_filling_up_is_said_once() {
     assert_eq!(events().await, 1, "once while it stays full");
     let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await;
     assert_eq!(env["volume_used"]["bytes"], 1_000_000_000u64, "{env}");
+    // Kept by the hour too: Metrics charts it against its size.
+    let (_, m) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/metrics?minutes=60"), None).await;
+    assert_eq!((m["volume"]["size_gb"].as_u64(), m["volume"]["points"].as_array().and_then(|p| p.last()).map(|p| p["bytes"].clone())), (Some(1), Some(json!(1_000_000_000u64))), "{}", m["volume"]);
     w.fake.set_volume_used(&volume, 1_000);
     w.apps.measure_volumes().await;
     w.fake.set_volume_used(&volume, 1_050_000_000);
@@ -10198,4 +10217,7 @@ async fn a_forks_preview_pages_load_only_from_the_preview() {
     assert!(errors.get("outside").is_none(), "{errors}");
     let r = w.api.clone().oneshot(Request::get(format!("{env}/logs?tail=5")).body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(r.headers().get("x-roll-outside").and_then(|v| v.to_str().ok()), Some("true"));
+    let (_, ev) = call(&w.api, "GET", "/v1/apps/events?after=0", None).await;
+    let of = |env: &str| ev["events"].as_array().unwrap().iter().filter(|e| e["service"] == id.as_str() && e["environment"] == env).map(|e| e["outside"] == true).collect::<Vec<_>>();
+    assert!(!of("pv-7").is_empty() && of("pv-7").iter().all(|o| *o) && of("production").iter().all(|o| !o), "{ev}");
 }

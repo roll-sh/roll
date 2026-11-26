@@ -32,6 +32,8 @@ pub fn router(s: Arc<Secrets>) -> Router {
     Router::new()
         .route("/v1/secrets/health", get(health))
         .route("/v1/secrets/whoami", get(whoami))
+        // Guardrails: floors every project may only tighten (guardrails.rs).
+        .route("/v1/secrets/policy", get(guardrails).put(set_guardrails))
         .route("/v1/secrets/search", get(find))
         // Deleted projects in their recovery window (docs/secrets.md, "When a secret, an
         // environment or the project goes").
@@ -97,6 +99,8 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/identities/{{id}}"), axum::routing::delete(delete_identity).patch(update_identity))
         .route(&format!("{P}/identities/{{id}}/jwks"), axum::routing::put(set_identity_keys))
         .route(&format!("{P}/identities/{{id}}/bootstrap"), post(create_bootstrap))
+        .route(&format!("{P}/identities/{{id}}/machines"), get(identity_machines))
+        .route(&format!("{P}/identities/{{id}}/machines/{{chain}}"), axum::routing::delete(revoke_machine))
         .route("/v1/secrets/login", post(login))
         .route("/v1/secrets/login/bootstrap", post(login_bootstrap))
         .route("/v1/secrets/login/refresh", post(login_refresh))
@@ -298,6 +302,18 @@ async fn health(State(s): S, Who(c): Who) -> crate::Result<Response> {
     Ok(ok(blocking(s, |s| s.health()).await?))
 }
 
+/// roll secrets' policy (the operator's, or an admin account's).
+async fn guardrails(State(s): S, Who(c): Who) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.guardrails(&c)).await?))
+}
+
+/// Replace the policy: `{production_approvals?, leaks_rotate?, sync_kinds?, no_stored_cloud_keys?,
+/// max_token_days?, no_breakglass?}`, a field left out having no floor.
+async fn set_guardrails(State(s): S, Who(c): Who, b: Bytes) -> crate::Result<Response> {
+    let g: crate::guardrails::Guardrails = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.set_guardrails(g, &c)).await?))
+}
+
 /// Where a key is set, across the projects the caller may read.
 async fn find(State(s): S, Who(c): Who, Query(q): Q) -> crate::Result<Response> {
     let key = q.get("key").cloned().unwrap_or_default();
@@ -323,17 +339,19 @@ async fn overview(State(s): S, Who(c): Who, Path(project): Path<String>) -> crat
         let history_days = s.history_days(&project)?;
         let validity_checks = if s.validity_checks(&project)? { "on" } else { "off" };
         let leaks = json!({ "rotate": s.leak_rotate(&project)? });
+        let breakglass = s.breakglass(&project)?;
         // What deleting the workspace project would take with it, and for how long it's recoverable.
         let deletion = s.deletion(&project)?;
-        Ok(json!({ "project": project, "environments": envs, "previews": previews, "history_days": history_days, "validity_checks": validity_checks, "leaks": leaks, "deletion": deletion }))
+        Ok(json!({ "project": project, "environments": envs, "previews": previews, "history_days": history_days, "validity_checks": validity_checks, "leaks": leaks, "breakglass": breakglass, "deletion": deletion }))
     })
     .await?;
     Ok(ok(v))
 }
 
-/// `{history_days?, validity_checks?, leaks?}`: how long old values are kept (`null`: for good),
-/// whether credentials found in code are checked with their providers (`"on"` or `"off"`), and
-/// what a leaked managed key does (`{rotate: "managed" | "off"}`).
+/// `{history_days?, validity_checks?, leaks?, breakglass?}`: how long old values are kept
+/// (`null`: for good), whether credentials found in code are checked with their providers (`"on"`
+/// or `"off"`), what a leaked managed key does (`{rotate: "managed" | "off"}`), and who may push
+/// past a pre-receive hook (pushers' logins, `token:<id>`, `*`; `[]`: no one).
 async fn project_settings(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
     let mut o: serde_json::Map<String, serde_json::Value> = body(&b)?;
     let days = match o.remove("history_days") {
@@ -363,11 +381,15 @@ async fn project_settings(State(s): S, Who(c): Who, Path(project): Path<String>,
         }
         None => None,
     };
+    let breakglass: Option<Vec<String>> = match o.remove("breakglass") {
+        Some(v) => Some(serde_json::from_value(v).map_err(|_| Error::BadRequest("breakglass is a list: pushers' logins, token:<id>, *".into()))?),
+        None => None,
+    };
     if let Some(k) = o.keys().next() {
         return Err(Error::BadRequest(format!("unknown field {k}")));
     }
-    if days.is_none() && checks.is_none() && leaks.is_none() {
-        return Err(Error::BadRequest("nothing to change: history_days, validity_checks, leaks".into()));
+    if days.is_none() && checks.is_none() && leaks.is_none() && breakglass.is_none() {
+        return Err(Error::BadRequest("nothing to change: history_days, validity_checks, leaks, breakglass".into()));
     }
     let v = blocking(s, move |s| {
         let mut out = serde_json::Map::new();
@@ -379,6 +401,9 @@ async fn project_settings(State(s): S, Who(c): Who, Path(project): Path<String>,
         }
         if let Some(rotate) = leaks {
             out.insert("leaks".into(), json!({ "rotate": s.set_leak_rotate(&project, rotate, &c)? }));
+        }
+        if let Some(who) = breakglass {
+            out.insert("breakglass".into(), json!(s.set_breakglass(&project, who, &c)?));
         }
         Ok(out)
     })
@@ -1282,6 +1307,15 @@ async fn create_bootstrap(State(s): S, Who(c): Who, Path((project, id)): Path<(S
     Ok(secret_response(created(blocking(s, move |s| s.create_bootstrap(&project, &id, n, &c)).await?)))
 }
 
+async fn identity_machines(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.identity_machines(&project, &id, &c)).await?))
+}
+
+async fn revoke_machine(State(s): S, Who(c): Who, Path((project, id, chain)): Path<(String, String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.revoke_machine(&project, &id, &chain, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// A bootstrap token for the machine's first machine credential (public: the token is the credential).
 async fn login_bootstrap(State(s): S, parts: Parts, b: Bytes) -> crate::Result<Response> {
     let m: MachineBody = body(&b)?;
@@ -1506,15 +1540,21 @@ async fn scan_leaks(State(s): S, Who(c): Who, Path(project): Path<String>, heade
 #[serde(deny_unknown_fields)]
 struct ScanOnly {
     candidates: Vec<String>,
-    /// The push it checks goes through anyway (a pre-receive hook's `breakglass` push option).
+    /// The push it checks goes through anyway (a pre-receive hook's `breakglass` push option),
+    /// if the project's `breakglass` list allows it.
     #[serde(default)]
     breakglass: bool,
+    /// Who pushed, as the git server tells the hook, and to which refs: for the audit log.
+    pusher: Option<String>,
+    #[serde(default)]
+    refs: Vec<String>,
 }
 
 /// A scanner's check (the `scan` right): which whole candidates are values, never a value.
 async fn scan_only(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
-    let ScanOnly { candidates, breakglass } = body(&b)?;
-    Ok(ok(blocking(s, move |s| s.scan_only(&project, &candidates, &c, breakglass)).await?))
+    let ScanOnly { candidates, breakglass, pusher, refs } = body(&b)?;
+    let push = crate::leaks::Push { breakglass, pusher, refs };
+    Ok(ok(blocking(s, move |s| s.scan_only(&project, &candidates, &c, &push)).await?))
 }
 
 async fn all_health(State(s): S, Who(c): Who) -> crate::Result<Response> {

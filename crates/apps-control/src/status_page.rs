@@ -121,6 +121,25 @@ impl Apps {
         }
     }
 
+    /// Scheduled maintenances whose window began (now `maintenance`) or ended (`resolved`),
+    /// each said on its page as an update. Run with [`Self::status_sweep`], every minute, on one
+    /// node (`singleton:apps:maintenance`), and each step written only from the state it
+    /// expects, so a node that raced it or a person's update in between makes no second step.
+    pub(crate) async fn maintenance_pass(self: &Arc<Self>, now: i64) {
+        if !self.deps.cluster.singleton("apps:maintenance") {
+            return;
+        }
+        let Ok(due) = self.db(move |s| s.due_maintenance(now)).await else { return };
+        for (project, id, next) in due {
+            let (from, text) = if next == "maintenance" { ("scheduled", "The scheduled maintenance has begun.") } else { ("maintenance", "The scheduled maintenance is over.") };
+            // One that hasn't begun yet and is already over goes straight to resolved.
+            let from = if next == "resolved" { None } else { Some(from) };
+            if self.db(move |s| s.advance_maintenance(&project, &id, from, next, text, now)).await.unwrap_or(false) {
+                self.status_cache.forget();
+            }
+        }
+    }
+
     /// The open incidents a check or heartbeat opened that nothing will close any more: its
     /// check or heartbeat gone, off the page, its environment paused or in maintenance, its
     /// service deleted. Resolved by the service's owner (anyone's, for a deleted one).
@@ -213,7 +232,8 @@ impl Apps {
         }
         let (title, state, text) = incident_fields(&body, true)?;
         let (p, at) = (project.to_string(), code_sql::now_ms());
-        let id = self.db(move |s| s.open_incident(&p, &title, &state, &text, None, at)).await?.expect("a person's always opens");
+        let window = maintenance_window(&body, &state, at)?;
+        let id = self.db(move |s| s.open_incident_in(&p, &title, &state, &text, None, at, window)).await?.expect("a person's always opens");
         self.status_cache.forget();
         Ok(json!({ "id": id }))
     }
@@ -222,6 +242,14 @@ impl Apps {
     /// `resolved` closes it.
     pub async fn update_incident(self: &Arc<Self>, project: &str, id: &str, body: Value) -> Result<()> {
         let (_, state, text) = incident_fields(&body, false)?;
+        // Under way is a scheduled maintenance's: an incident without a window would say
+        // "Under scheduled maintenance" with nothing to end it.
+        if state == "maintenance" {
+            let (p, i) = (project.to_string(), id.to_string());
+            if !self.db(move |s| s.incident_has_window(&p, &i)).await? {
+                return Err(Error::BadRequest("maintenance is a scheduled maintenance's state: post one with state scheduled, starts_at and ends_at".into()));
+            }
+        }
         let (p, i, at) = (project.to_string(), id.to_string(), code_sql::now_ms());
         match self.db(move |s| s.update_incident(&p, Some(&i), None, &state, &text, at)).await? {
             true => {
@@ -321,11 +349,32 @@ impl Apps {
     }
 }
 
-/// An incident's or update's fields: `title` (a new one's), `state` (investigating, identified,
-/// monitoring, resolved) and `text`, each bounded, as text.
+/// A scheduled maintenance's window from `starts_at` and `ends_at` (unix ms): in the future, at
+/// most 90 days ahead and a week long. Only a new `scheduled` incident has one.
+fn maintenance_window(body: &Value, state: &str, now: i64) -> Result<Option<(i64, i64)>> {
+    let (from, until) = (body.get("starts_at").and_then(Value::as_i64), body.get("ends_at").and_then(Value::as_i64));
+    if state != "scheduled" {
+        return match (from, until) {
+            (None, None) => Ok(None),
+            _ => Err(Error::BadRequest("starts_at and ends_at are a scheduled maintenance's (state scheduled)".into())),
+        };
+    }
+    match (from, until) {
+        (Some(f), Some(u)) if f > now && f <= now + 90 * 86_400_000 && u > f && u - f <= 7 * 86_400_000 => Ok(Some((f, u))),
+        _ => Err(Error::BadRequest("a scheduled maintenance takes starts_at (in the next 90 days) and ends_at (after it, at most a week later), unix ms".into())),
+    }
+}
+
+/// The states a new incident may be posted in (`scheduled`: a maintenance with its window).
+pub(crate) const NEW_STATES: [&str; 5] = ["investigating", "identified", "monitoring", "resolved", "scheduled"];
+/// The states an update may move one to (`maintenance`: a scheduled one under way).
+pub(crate) const UPDATE_STATES: [&str; 5] = ["investigating", "identified", "monitoring", "maintenance", "resolved"];
+
+/// An incident's or update's fields: `title` (a new one's), `state` ([`NEW_STATES`],
+/// [`UPDATE_STATES`]) and `text`, each bounded, as text.
 fn incident_fields(body: &Value, new: bool) -> Result<(String, String, String)> {
     let o = body.as_object().cloned().unwrap_or_default();
-    let allowed: &[&str] = if new { &["title", "state", "text"] } else { &["state", "text"] };
+    let allowed: &[&str] = if new { &["title", "state", "text", "starts_at", "ends_at"] } else { &["state", "text"] };
     if let Some(k) = o.keys().find(|k| !allowed.contains(&k.as_str())) {
         return Err(Error::BadRequest(format!("unknown field {k}")));
     }
@@ -337,10 +386,11 @@ fn incident_fields(body: &Value, new: bool) -> Result<(String, String, String)> 
         }
     };
     let title = if new { text_of("title", 120, true)? } else { String::new() };
+    let states: &[&str] = if new { &NEW_STATES } else { &UPDATE_STATES };
     let state = match o.get("state").and_then(Value::as_str) {
         None if new => "investigating".to_string(),
-        Some(s @ ("investigating" | "identified" | "monitoring" | "resolved")) => s.to_string(),
-        _ => return Err(Error::BadRequest("state is investigating, identified, monitoring or resolved".into())),
+        Some(s) if states.contains(&s) => s.to_string(),
+        _ => return Err(Error::BadRequest(format!("state is {}", states.join(", ")))),
     };
     Ok((title, state, text_of("text", 2000, true)?))
 }
@@ -366,11 +416,26 @@ pub(crate) async fn serve(apps: Arc<Apps>, page: Page, path: &str) -> Response {
     }
     let all_up = rows.iter().all(|r| r.up != Some(false));
     let clock = |ms: i64| chrono::DateTime::from_timestamp_millis(ms).map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default();
-    let mut history = String::new();
+    let (mut history, mut planned) = (String::new(), String::new());
     for i in incidents {
         let open = i["resolved_at"].is_null();
         let ups: String = i["updates"].as_array().into_iter().flatten().rev().map(|u| format!("<p><b>{}</b> · {}<br>{}</p>", crate::public::escape(u["state"].as_str().unwrap_or("")), clock(u["at"].as_i64().unwrap_or(0)), crate::public::escape(u["text"].as_str().unwrap_or("")))).collect();
-        history.push_str(&format!("<article class=\"{}\"><h2>{}</h2>{ups}</article>", if open { "inc open" } else { "inc" }, crate::public::escape(i["title"].as_str().unwrap_or(""))));
+        // A maintenance says its window; one still ahead is listed apart, before the incidents.
+        let window = match (i["scheduled"]["from"].as_i64(), i["scheduled"]["until"].as_i64()) {
+            (Some(f), Some(u)) => format!("<p class=when>{} – {}</p>", clock(f), clock(u)),
+            _ => String::new(),
+        };
+        let class = match (i["state"].as_str(), open) {
+            (Some("scheduled" | "maintenance"), true) => "inc maint",
+            (_, true) => "inc open",
+            _ => "inc",
+        };
+        let article = format!("<article class=\"{class}\"><h2>{}</h2>{window}{ups}</article>", crate::public::escape(i["title"].as_str().unwrap_or("")));
+        if i["state"] == "scheduled" {
+            planned.push_str(&article);
+        } else {
+            history.push_str(&article);
+        }
     }
     let esc = crate::public::escape;
     let mut list = String::new();
@@ -399,11 +464,20 @@ pub(crate) async fn serve(apps: Arc<Apps>, page: Page, path: &str) -> Response {
          li{{border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:0 0 12px}}.row{{display:flex;justify-content:space-between;gap:12px;margin:0 0 10px}}\
          .up{{color:var(--accent)}}.down{{color:var(--danger)}}.none{{color:var(--muted)}}.bars{{display:flex;gap:2px}}.bars i{{flex:1;height:28px;border-radius:2px;background:var(--none)}}\
          .bars i.g{{background:var(--accent)}}.bars i.b{{background:var(--danger)}}.foot{{display:flex;justify-content:space-between;color:var(--muted);font-size:12px;margin-top:6px}}\
-         .inc{{border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:0 0 12px}}.inc.open{{border-color:var(--danger)}}.inc h2{{font-size:14px;margin:0 0 6px}}.inc p{{color:var(--muted);margin:6px 0 0}}\
-         h3{{font-size:13px;font-weight:600;margin:28px 0 10px}}footer{{color:var(--muted);font-size:12px;margin-top:24px}}</style><link rel=alternate type=application/atom+xml href=/feed.xml><main><h1>{t}</h1><p class=all>{all}</p><ul>{list}</ul>{hist}<footer>Kept by roll · <a href=/feed.xml style=color:inherit>feed</a></footer></main>",
+         .inc{{border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:0 0 12px}}.inc.open{{border-color:var(--danger)}}.inc.maint{{border-color:var(--accent)}}.inc .when{{color:var(--fg);margin:0 0 6px}}.inc h2{{font-size:14px;margin:0 0 6px}}.inc p{{color:var(--muted);margin:6px 0 0}}\
+         h3{{font-size:13px;font-weight:600;margin:28px 0 10px}}footer{{color:var(--muted);font-size:12px;margin-top:24px}}</style><link rel=alternate type=application/atom+xml href=/feed.xml><main><h1>{t}</h1><p class=all>{all}</p>{plan}<ul>{list}</ul>{hist}<footer>Kept by roll · <a href=/feed.xml style=color:inherit>feed</a></footer></main>",
         hist = if history.is_empty() { String::new() } else { format!("<h3>Incidents</h3>{history}") },
+        plan = if planned.is_empty() { String::new() } else { format!("<h3>Scheduled maintenance</h3>{planned}") },
         t = esc(&page.title),
-        all = if rows.is_empty() { "Nothing to show yet." } else if all_up { "Everything is up." } else { "Something is down." },
+        all = if rows.is_empty() {
+            "Nothing to show yet."
+        } else if !all_up {
+            "Something is down."
+        } else if incidents.iter().any(|i| i["state"] == "maintenance" && i["resolved_at"].is_null()) {
+            "Under scheduled maintenance."
+        } else {
+            "Everything is up."
+        },
     );
     (StatusCode::OK, [(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "public, max-age=30")], html).into_response()
 }

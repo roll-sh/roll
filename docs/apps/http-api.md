@@ -35,9 +35,9 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/projects/{project}/status-page` | | `{ title, url, items }`: the project's public status page; 404 without one | read |
 | `PUT /v1/apps/projects/{project}/status-page` | `{ title?: string /* 1–80, default "Status" */, items?: { service, environment?, check? \| heartbeat? }[] /* at most 50; none: every check and heartbeat of its environments */ }` | `{ title, url, items }`: made (a new public name, `status-<slug>.<domain>`) or changed (its name kept) | admin (it makes the project's service names public: a person's call, not a token's write) |
 | `DELETE /v1/apps/projects/{project}/status-page` | | 204: taken down | write |
-| `GET /v1/apps/projects/{project}/status-page/incidents` | | `{ incidents: { id, title, state, started_at, resolved_at, automatic, updates: { at, state, text }[] }[] }`: the last 90 days' and the open ones, newest first (at most 200) | read |
-| `POST /v1/apps/projects/{project}/status-page/incidents` | `{ title: string /* 1–120 */, state?: "investigating" \| "identified" \| "monitoring" \| "resolved", text: string /* 1–2000 */ }` | 201 `{ id }`: a person's incident on the page; 404 without a page | write |
-| `POST /v1/apps/projects/{project}/status-page/incidents/{iid}/updates` | `{ state, text }` | 204: an update (at most 100 an incident); `resolved` closes it | write |
+| `GET /v1/apps/projects/{project}/status-page/incidents` | | `{ incidents: { id, title, state, started_at, resolved_at, automatic, updates: { at, state, text }[], scheduled: { from, until } \| null /* a maintenance's window, ms */ }[] }`: the last 90 days' and the open ones, newest first (at most 200) | read |
+| `POST /v1/apps/projects/{project}/status-page/incidents` | `{ title: string /* 1–120 */, state?: "investigating" \| "identified" \| "monitoring" \| "resolved" \| "scheduled", text: string /* 1–2000 */, starts_at?: number, ends_at?: number /* a scheduled maintenance's window (unix ms, only with state scheduled): starts in the next 90 days, lasts at most a week; roll moves it to maintenance at its start and resolves it at its end */ }` | 201 `{ id }`: a person's incident on the page; 404 without a page | write |
+| `POST /v1/apps/projects/{project}/status-page/incidents/{iid}/updates` | `{ state, text }` (`state` as a new one's, or `maintenance`; never `scheduled`) | 204: an update (at most 100 an incident); `resolved` closes it | write |
 | `GET /v1/apps/projects/{project}/preview-domain` | | `Domain` (404: none): the project's own preview domain, a wildcard its preview environments answer under by their `preview_host`; `tls` is `none` (plain HTTP until wildcard certificates, DNS-01, are issued here) | read |
 | `POST /v1/apps/projects/{project}/preview-domain` | `{ hostname: "*.preview.acme.dev" }` (a wildcard; one a project, a new one replaces it; 409 when another project's previews or any service's domain has it) | 201 `Domain` (pending: the same CNAME, `target` its own, or `_roll-challenge` TXT a custom domain takes) | write |
 | `POST /v1/apps/projects/{project}/preview-domain/verify` | | `Domain` (active once its DNS checks out, else pending with what DNS answered) | write |
@@ -286,7 +286,7 @@ type Build = {
 
 type Run = {
   type: "web" | "worker" | "cron";
-  port?: number;            // web: the port the app listens on (default from the plan, else 8080; PORT is set to it)
+  port?: number;            // web: the port the app listens on (default from the plan, an image's own EXPOSE, else 8080; PORT is set to it)
   start?: string;           // overrides the image's command
   pre_deploy?: string;      // once per deploy, in a container of the new image with its variables and
                             // the project network (no volume), before the switch: a migration. A
@@ -724,6 +724,7 @@ type ProjectImport = {
     source: { kind: "repo"; repo: string; root: string | null } | { kind: "git"; url: string; root: string | null } | { kind: "image"; image: string } | { kind: "upload"; root: string };
     branch: string | null;    // a repo's production branch
     run: Patch<Run>;          // the run settings the entry names
+    build: Partial<Build>;    // its [apps.<name>.build]: dockerfile, target (a stage), install, build, start (a Compose build's dockerfile and target too)
     links: { kind: "postgres" | "redis" | "bucket" | "stream" | "nosql" | "service"; name: string }[]; // databases below by name, or another app of the file (`service`)
     environments: { [env: string]: { branch: string | null; run: object /* an environment's own run settings */; variables: { [name: string]: string } /* set when it's made */ } }; // besides production
     variables: { [name: string]: string }; // set when the service is made, never over what it has
@@ -756,6 +757,12 @@ type Plan = {
    *  the service sets none. Absent without one, and for a tree's own Dockerfile. A Procfile's `web:`
    *  (`worker:` for a worker) is `start` when the service names none. */
   release?: string;
+  /** What its framework suggests a new service sets, offered by New service, never applied on
+   *  its own: `pre_deploy` its migrations (Rails' db:prepare with db/migrate, Django's migrate,
+   *  Laravel's migrate --force with database/migrations, Prisma's migrate deploy with
+   *  prisma/migrations; none beside a Procfile's release), `health_path` the health route its
+   *  routes declare (Rails' and Laravel's /up). */
+  suggest?: { pre_deploy?: string; health_path?: string };
   /** roll's Next.js adapter is in the image (a Next 16 server, not its own Dockerfile): its
    *  instances share ISR, fetch and "use cache" entries (README, "Next.js across instances"). */
   next_cache?: boolean;
@@ -820,6 +827,10 @@ type Metrics = {
     instance: string; deployment: string;
     minutes: number[]; cpu: number[] /* cores, average over the minute */; memory_bytes: number[] /* the minute's peak */;
   }[];
+  volume?: {                 // a service with a volume: its size by the hour (measured hourly on its owner, 90 days kept)
+    size_gb: number; points: { hour: number /* hours since 1970 */; bytes: number }[];
+    full_in_days: number | null /* at its last week's pace (a least-squares line; a day of points at least), null while it isn't growing */;
+  };
 };
 
 type Usage = {

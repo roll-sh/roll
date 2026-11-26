@@ -44,6 +44,8 @@ type fakeCluster struct {
 	loaded                     bool
 	keys                       map[string]bool // id → invalidated
 	repos                      map[string]map[string]any
+	synonyms                   map[string][]any // set → its rules, as put
+	rulesets                   map[string]any   // ruleset → its rules, as put
 }
 
 func newFakeSearch() *fakeSearch {
@@ -180,7 +182,8 @@ func (f *fakeSearch) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/v1/search/clusters" && r.Method == http.MethodPost {
 		name, _ := b["name"].(string)
 		c := &fakeCluster{id: fmt.Sprintf("srch_%d", len(f.clusters)+len(f.deleted)+1), name: name, flavor: "elasticsearch", password: "pw-" + name,
-			idle: 900, maxInFlight: 64, maxBody: 100, drn: true, allow: []map[string]any{}, keys: map[string]bool{}, repos: map[string]map[string]any{}}
+			idle: 900, maxInFlight: 64, maxBody: 100, drn: true, allow: []map[string]any{}, keys: map[string]bool{}, repos: map[string]map[string]any{},
+			synonyms: map[string][]any{}, rulesets: map[string]any{}}
 		if msg := f.apply(c, b); msg != "" {
 			fail(400, msg)
 			return
@@ -259,6 +262,44 @@ func (f *fakeSearch) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		c.keys[id] = true
 		f.revoked = append(f.revoked, id)
 		write(204, nil)
+	// Synonyms sets and query rulesets, as Elasticsearch answers them through /v1/search: a GET
+	// of a set gives `size` rules (10 unless asked), and every answer has its keys sorted.
+	case strings.HasPrefix(sub, "synonyms/"):
+		name := strings.TrimPrefix(sub, "synonyms/")
+		set, ok := c.synonyms[name]
+		switch {
+		case r.Method == http.MethodPut:
+			rules, _ := b["synonyms_set"].([]any)
+			c.synonyms[name] = rules
+			write(200, map[string]any{"result": "created"})
+		case !ok:
+			write(404, map[string]any{"error": map[string]any{"type": "resource_not_found_exception", "reason": "synonyms set [" + name + "] not found"}, "status": 404})
+		case r.Method == http.MethodGet:
+			size := 10
+			fmt.Sscan(r.URL.Query().Get("size"), &size)
+			if len(set) < size {
+				size = len(set)
+			}
+			write(200, map[string]any{"count": len(set), "synonyms_set": set[:size]})
+		case r.Method == http.MethodDelete:
+			delete(c.synonyms, name)
+			write(200, map[string]any{"acknowledged": true})
+		}
+	case strings.HasPrefix(sub, "query_rules/"):
+		name := strings.TrimPrefix(sub, "query_rules/")
+		rules, ok := c.rulesets[name]
+		switch {
+		case r.Method == http.MethodPut:
+			c.rulesets[name] = b["rules"]
+			write(200, map[string]any{"result": "created"})
+		case !ok:
+			write(404, map[string]any{"error": map[string]any{"type": "resource_not_found_exception", "reason": "query ruleset [" + name + "] not found"}, "status": 404})
+		case r.Method == http.MethodGet:
+			write(200, map[string]any{"ruleset_id": name, "rules": rules})
+		case r.Method == http.MethodDelete:
+			delete(c.rulesets, name)
+			write(200, map[string]any{"acknowledged": true})
+		}
 	case sub == "request" && r.Method == http.MethodPost:
 		status, body := f.console(c, b)
 		out, _ := json.Marshal(body)
@@ -617,4 +658,101 @@ resource "terraform_data" "seed" {
 func mustDecode(s string) string {
 	b, _ := base64.StdEncoding.DecodeString(s)
 	return string(b)
+}
+
+// Relevance as code: a synonyms set with more rules than Elasticsearch's default page (so a read
+// that forgot `size` would drop some), and a ruleset written by hand with its own key order and
+// spacing, which roll answers sorted and compact: the plan after each apply is empty. A rule
+// change elsewhere is seen, and both import by `<cluster id>/<name>`.
+func TestSearchRelevanceAsCode(t *testing.T) {
+	f := newFakeSearch()
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	rules := func(n int) string {
+		var b strings.Builder
+		for i := 0; i < n; i++ {
+			fmt.Fprintf(&b, "    { id = \"r%d\", synonyms = \"word%d, term%d\" },\n", i, i, i)
+		}
+		return b.String()
+	}
+	config := func(n int, pinned string) string {
+		return fmt.Sprintf(`
+provider "roll" {
+  api_url = %q
+  token   = "rlt_terraform"
+}
+resource "roll_search_cluster" "shop" {
+  name      = "shop"
+  always_on = true
+}
+resource "roll_search_synonyms_set" "products" {
+  cluster = roll_search_cluster.shop.id
+  name    = "products"
+  rules = [
+%s  ]
+}
+resource "roll_search_query_ruleset" "promos" {
+  cluster = roll_search_cluster.shop.id
+  name    = "promos"
+  rules   = <<-EOT
+    [ { "type": "pinned", "rule_id": "sale",
+        "criteria": [ { "values": ["sale"], "type": "exact", "metadata": "query" } ],
+        "actions": { "ids": [%q] } } ]
+  EOT
+}
+`, srv.URL, rules(n), pinned)
+	}
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: searchFactories(),
+		Steps: []resource.TestStep{
+			{
+				Config: config(12, "doc-1"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("roll_search_synonyms_set.products", "rules.#", "12"),
+					resource.TestCheckResourceAttr("roll_search_synonyms_set.products", "rules.11.synonyms", "word11, term11"),
+					held(f, "shop", func(c *fakeCluster) error {
+						if len(c.synonyms["products"]) != 12 || c.rulesets["promos"] == nil {
+							return fmt.Errorf("what the cluster holds: %d rules, ruleset %v", len(c.synonyms["products"]), c.rulesets["promos"])
+						}
+						return nil
+					}),
+				),
+			},
+			{
+				// A changed rule: written again, and the set shrinks.
+				Config: config(3, "doc-2"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("roll_search_synonyms_set.products", "rules.#", "3"),
+					held(f, "shop", func(c *fakeCluster) error {
+						if got, _ := json.Marshal(c.rulesets["promos"]); !strings.Contains(string(got), "doc-2") {
+							return fmt.Errorf("the ruleset: %s", got)
+						}
+						return nil
+					}),
+				),
+			},
+			{
+				// Changed outside Terraform: the next plan puts it back.
+				PreConfig: func() {
+					f.mu.Lock()
+					defer f.mu.Unlock()
+					for _, c := range f.clusters {
+						c.synonyms["products"] = c.synonyms["products"][:1]
+					}
+				},
+				Config:             config(3, "doc-2"),
+				PlanOnly:           true,
+				ExpectNonEmptyPlan: true,
+			},
+			{Config: config(3, "doc-2")},
+			{ResourceName: "roll_search_synonyms_set.products", ImportState: true, ImportStateVerify: true,
+				ImportStateIdFunc: func(s *terraform.State) (string, error) {
+					return s.RootModule().Resources["roll_search_synonyms_set.products"].Primary.ID, nil
+				}},
+			{ResourceName: "roll_search_query_ruleset.promos", ImportState: true, ImportStateVerify: true, ImportStateVerifyIgnore: []string{"rules"},
+				ImportStateIdFunc: func(s *terraform.State) (string, error) {
+					return s.RootModule().Resources["roll_search_query_ruleset.promos"].Primary.ID, nil
+				}},
+		},
+	})
 }

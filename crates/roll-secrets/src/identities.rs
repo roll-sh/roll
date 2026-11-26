@@ -78,8 +78,12 @@ CREATE INDEX IF NOT EXISTS machine_chains_identity ON machine_chains (identity);
 pub(crate) const IDENTITIES_MAX: i64 = 50;
 pub const TTL_MIN: i64 = 5;
 pub const TTL_MAX: i64 = 60;
-/// Bootstrap tokens an identity has made and not deleted, at most (one per machine).
+/// Bootstrap tokens an identity has made and not deleted, at most (one per machine). With
+/// [`IDENTITIES_MAX`], a project's cap on machine chains: roll-access doesn't count them toward the
+/// workload token caps every project's logins share, so this is all that bounds them.
 const CHAINS_MAX: i64 = 1000;
+/// Bootstrap tokens a project makes a minute, at most.
+const BOOTSTRAPS_PER_PROJECT: u32 = 60;
 /// A bootstrap token's minutes, and its machine credentials' hours, unless the admin says.
 const BOOTSTRAP_MINUTES: u32 = 10;
 const CREDENTIAL_HOURS: u32 = 24;
@@ -129,6 +133,23 @@ pub struct NewBootstrap {
     /// How long each machine credential lives: 1–720 hours (default 24); the machine replaces it at
     /// half that.
     pub credential_hours: Option<u32>,
+}
+
+/// One of a machine identity's machines (`GET …/identities/{id}/machines`): never a secret.
+#[derive(Serialize)]
+pub struct MachineChain {
+    /// The bootstrap token's id, which every credential and login of the machine carries.
+    pub chain: String,
+    /// `waiting` (its bootstrap token not exchanged yet), `live`, `ended` or `revoked`.
+    pub state: &'static str,
+    pub credential_hours: i64,
+    pub created_at: i64,
+    pub created_by: String,
+    /// When its machine credential was last made (the exchange, or the last replacement).
+    pub refreshed_at: Option<i64>,
+    pub expires_at: Option<i64>,
+    pub revoked_at: Option<i64>,
+    pub revoked_why: Option<String>,
 }
 
 /// A bootstrap token (shown once), or a machine credential (only ever to its machine).
@@ -227,12 +248,19 @@ pub struct NewIdentity {
 }
 
 /// What a login gets: the token (shown once) and when it ends.
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct Login {
     pub token: String,
     pub expires_at: i64,
     pub project: String,
     pub identity: String,
+}
+
+/// Never the login's token.
+impl std::fmt::Debug for Login {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Login").field("token", &"<redacted>").field("expires_at", &self.expires_at).field("project", &self.project).field("identity", &self.identity).finish()
+    }
 }
 
 const COLUMNS: &str = "id, project_id, name, issuer, audience, subject, claims, environments, paths, actions, ttl_minutes, created_at, created_by, last_used_at, last_subject, allowed_ips, jwks, kind, gateway, disabled_at, disabled_why";
@@ -715,6 +743,9 @@ impl Secrets {
         }
         let allowed = crate::caller::allowed(n.allowed_ips)?;
         self.project(project)?;
+        if !self.logins.allow(&format!("bootstrap:{project}"), BOOTSTRAPS_PER_PROJECT) {
+            return Err(Error::TooMany(format!("at most {BOOTSTRAPS_PER_PROJECT} bootstrap tokens a minute for one project: try again in a minute")));
+        }
         let found = self.db.read(|c| c.query_row(&format!("SELECT {COLUMNS} FROM identities WHERE id = ? AND project_id = ?"), [id, project], identity_row).optional())?;
         let (i, ..) = found.ok_or_else(|| Error::NotFound(format!("no identity {id}")))?;
         if i.kind != IdentityKind::Machine {
@@ -729,11 +760,13 @@ impl Secrets {
             crate::caller::Origin::Operator => None,
             crate::caller::Origin::Gone => return Err(Error::Forbidden(format!("whoever made identity {} can't sign in any more: make it again", i.name))),
         };
-        let count: i64 = self.db.read(|c| c.query_row("SELECT COUNT(*) FROM machine_chains WHERE identity = ?", [id], |r| r.get(0)))?;
-        if count >= CHAINS_MAX {
-            return Err(bad(format!("identity {} has {CHAINS_MAX} bootstrap tokens: delete it and make it again", i.name)));
+        let full = || bad(format!("identity {} has {CHAINS_MAX} bootstrap tokens: delete it and make it again", i.name));
+        let count = |c: &code_sql::Conn<'_>| c.query_row("SELECT COUNT(*) FROM machine_chains WHERE identity = ?", [id], |r| r.get::<_, i64>(0));
+        if self.db.read(count)? >= CHAINS_MAX {
+            return Err(full());
         }
-        // Outside the write (roll-access's store), then the row; a failed write ends the chain.
+        // Outside the write (roll-access's store), then the row, counted again in its write (it
+        // decides); a refused or failed write ends the chain.
         let made = workloads.bootstrap(&i.name, allowed, minutes, owner.as_deref())?;
         let now = self.db.now_ms()?;
         let by = self.maker_of(caller)?;
@@ -743,16 +776,70 @@ impl Secrets {
             if there.is_none() {
                 return Ok(false);
             }
+            if count(c)? >= CHAINS_MAX {
+                return Err(full());
+            }
+            crate::guardrails::read(c)?.machine_hours(hours)?;
             c.execute("INSERT INTO machine_chains (chain, identity, project_id, hours, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?)", params![made.chain, id, project, hours, now, by])?;
             audit::record(c, self.keys()?, project, caller, "identity.bootstrap", None, None, &[], &format!("made a bootstrap token for identity {} (chain {}, {minutes} min, credentials of {hours} h)", i.name, made.chain), now)?;
             Ok::<_, Error>(true)
         });
         if !matches!(kept, Ok(true)) {
-            let _ = workloads.revoke_chain(&made.chain, "its identity changed while it was made");
+            let _ = workloads.revoke_chain(&made.chain, "it wasn't kept for its identity (changed meanwhile, full, or past the policy's floor)");
             kept?;
             return Err(Error::NotFound(format!("no identity {id}")));
         }
         Ok(MachineSecret { identity: i.id, chain: made.chain, secret: made.secret, expires_at: made.expires_at, refresh_at: None })
+    }
+
+    /// `GET …/identities/{id}/machines` (admin): a machine identity's machines, newest first, each
+    /// its chain (the bootstrap token's id) and where it stands now (roll-access's: never a secret).
+    pub fn identity_machines(&self, project: &str, id: &str, caller: &Caller) -> Result<Vec<MachineChain>> {
+        caller.need(Action::Admin, &Scope::project(project))?;
+        self.project(project)?;
+        type Row = (String, i64, i64, String);
+        let rows: Vec<Row> = self.db.read(|c| {
+            if c.query_row("SELECT 1 FROM identities WHERE id = ? AND project_id = ?", [id, project], |r| r.get::<_, i64>(0)).optional()?.is_none() {
+                return Err(Error::NotFound(format!("no identity {id}")));
+            }
+            Ok::<_, Error>(c.query("SELECT chain, hours, created_at, created_by FROM machine_chains WHERE identity = ? AND project_id = ? ORDER BY created_at DESC, chain", [id, project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?)
+        })?;
+        let chains: Vec<String> = rows.iter().map(|r| r.0.clone()).collect();
+        let mut states: BTreeMap<String, crate::ChainState> = match &self.workloads {
+            Some(w) if !chains.is_empty() => w.chains(&chains)?.into_iter().map(|s| (s.chain.clone(), s)).collect(),
+            _ => BTreeMap::new(),
+        };
+        Ok(rows
+            .into_iter()
+            .map(|(chain, hours, created_at, created_by)| {
+                let s = states.remove(&chain);
+                MachineChain {
+                    state: s.as_ref().map_or("ended", |s| s.state),
+                    refreshed_at: s.as_ref().and_then(|s| s.refreshed_at),
+                    expires_at: s.as_ref().and_then(|s| s.expires_at),
+                    revoked_at: s.as_ref().and_then(|s| s.revoked_at),
+                    revoked_why: s.and_then(|s| s.revoked_why),
+                    chain,
+                    credential_hours: hours,
+                    created_at,
+                    created_by,
+                }
+            })
+            .collect())
+    }
+
+    /// `DELETE …/identities/{id}/machines/{chain}` (admin): end one machine, its credential and
+    /// every token its logins got, at once (audited). The machine needs a new bootstrap token.
+    pub fn revoke_machine(&self, project: &str, id: &str, chain: &str, caller: &Caller) -> Result<()> {
+        caller.need(Action::Admin, &Scope::project(project))?;
+        self.project(project)?;
+        let name: Option<String> = self.db.read(|c| c.query_row("SELECT i.name FROM machine_chains m JOIN identities i ON i.id = m.identity WHERE m.chain = ? AND m.identity = ? AND m.project_id = ?", [chain, id, project], |r| r.get(0)).optional())?;
+        let name = name.ok_or_else(|| Error::NotFound(format!("identity {id} has no machine {chain}")))?;
+        let workloads = self.workloads.clone().ok_or_else(|| bad("machine identities aren't on this server"))?;
+        workloads.revoke_chain(chain, "an admin revoked the machine")?;
+        let now = self.db.now_ms()?;
+        self.db.write(|c| audit::record(c, self.keys()?, project, caller, "identity.machine.revoke", None, None, &[], &format!("revoked machine {chain} of identity {name}: its credential and its logins' tokens"), now))?;
+        Ok(())
     }
 
     /// `POST /v1/secrets/login/bootstrap` (`from_bootstrap`) and `…/login/refresh` (public): a
@@ -781,7 +868,7 @@ impl Secrets {
             return Err(Error::Forbidden(format!("identity {} doesn't log in from this address", i.name)));
         }
         let workloads = self.workloads.clone().ok_or_else(denied)?;
-        let hours = self.chain_for(&*workloads, &i.id, secret)?;
+        let hours = self.floors()?.cap_hours(self.chain_for(&*workloads, &i.id, secret)?);
         let next = match workloads.redeem(secret, from_bootstrap, ip.as_deref(), hours)? {
             crate::Step::Live(next) => next,
             crate::Step::Reused { chain } => return Err(self.reused(&project, &i, &chain, ip)),
