@@ -1,7 +1,7 @@
 // Tests of search analytics' dashboard logic: enabled indices, the series and the prefills (vitest).
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { comparisonText, analyticsQuery, enabledIndices, fillPoints, percent, rulePrefill, ruleIdFor, synonymPrefill } from "./search-analytics";
+import { comparisonText, differenceText, experimentStatus, analyticsQuery, enabledIndices, fillPoints, percent, rulePrefill, ruleIdFor, synonymPrefill } from "./search-analytics";
 import { draftToRule } from "./search-relevance";
 
 test("the indices with analytics on come from their flat settings", () => {
@@ -47,4 +47,11 @@ test("an experiment's comparison says whether it's called yet", () => {
   assert.equal(comparisonText({ p_value: 0.0004, state: "significant" }), "p <0.001, significant");
   assert.equal(comparisonText({ p_value: 0.153, state: "not_yet_significant" }), "p 0.153, not yet significant");
   assert.equal(comparisonText({ p_value: 0.01, state: "not_enough_data" }), "not enough data");
+  assert.equal(differenceText({ p_value: 0.02, state: "significant", difference: 0.0244, interval: [-0.0031, 0.051] }), "+2.4 pts (\u22120.3 to +5.1)");
+  assert.equal(differenceText({ p_value: null, state: "not_enough_data", difference: null, interval: null }), "");
+  // Promoted wins over ended; an end still ahead is running; one the application lacks is unknown.
+  assert.deepEqual(experimentStatus({ id: "a", ends_at: 1, promoted: { variant: "b", at: 1 } }, 5), { kind: "promoted", variant: "b" });
+  assert.deepEqual(experimentStatus({ id: "a", ends_at: 9 }, 5), { kind: "running" });
+  assert.deepEqual(experimentStatus({ id: "a", ends_at: 5 }, 5), { kind: "ended" });
+  assert.deepEqual(experimentStatus(undefined, 5), { kind: "unknown" });
 });
