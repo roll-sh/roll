@@ -36,7 +36,8 @@ pub struct Archive {
     pub environments: Vec<ArchivedEnvironment>,
     #[serde(default)]
     pub required: Vec<Required>,
-    /// Encryption keys (transit.rs): their bytes, so a restore still opens what they encrypted.
+    /// Encryption keys (transit.rs): their bytes, so a restore still opens what they encrypted. A
+    /// token's archive holds them by name only (no versions), and names them in `left_out`.
     #[serde(default)]
     pub encryption_keys: Vec<crate::transit::ArchivedKey>,
     /// The registrations links name, with their keys and credentials (v2): CAs, SSH CAs, SaaS
@@ -205,9 +206,10 @@ pub(crate) fn need_whole(caller: &Caller, project: &str) -> Result<()> {
 }
 
 /// Whether registrations' keys and credentials (CAs', SSH CAs' and GitHub Apps' private keys, SaaS
-/// and DNS credentials, ACME accounts, rotators' and outside databases' URLs) may leave in this
-/// caller's backup, and per-key answers come back from its verify: a person (their session) or the
-/// operator, never a token, which no route answers them to either.
+/// and DNS credentials, ACME accounts, rotators' and outside databases' URLs), syncs' signing
+/// secrets and URLs, and encryption keys' bytes may leave in this caller's backup, and per-key
+/// answers come back from its verify: a person (their session) or the operator, never a token,
+/// which no route answers them to either.
 pub(crate) fn carries_keys(caller: &Caller) -> bool {
     caller.principal == "operator" || crate::access::is_person(&caller.principal)
 }
@@ -217,6 +219,9 @@ pub const VERIFIES_PER_MINUTE: i64 = 10;
 
 /// Why a token's backup holds a registration by name only.
 const NO_KEYS: &str = "a token's backup carries no registration's key: back it up signed in, or as the operator, to keep it";
+
+/// Why a token's backup holds an encryption key by name only.
+const NO_BYTES: &str = "a token's backup carries no encryption key's bytes: what it encrypted can't be decrypted after a restore from this backup; back it up signed in, or as the operator, to keep it";
 
 impl Secrets {
     /// The project's archive sealed to `recipient` (an X25519 public key). Every value of the
@@ -238,6 +243,17 @@ impl Secrets {
             held.extend(archive.acme_accounts.drain(..).map(|a| format!("ACME account at {}", a.directory)));
             warnings.push(format!("left out {}: {NO_KEYS}", held.join(", ")));
             archive.left_out.extend(held.into_iter().map(|h| format!("{h} ({NO_KEYS})")));
+        }
+        if !keys {
+            let bare = strip_credentials(&mut archive);
+            if !bare.is_empty() {
+                warnings.push(format!("left out the credentials of {}: {}", bare.join(", "), crate::syncs::NO_CREDENTIAL));
+            }
+            let held: Vec<String> = archive.encryption_keys.iter().map(|k| format!("encryption key {}", k.name)).collect();
+            if !held.is_empty() {
+                warnings.push(format!("left out the bytes of {}: {NO_BYTES}", held.join(", ")));
+                archive.left_out.extend(held.into_iter().map(|h| format!("{h} ({NO_BYTES})")));
+            }
         }
         let plain = zeroize::Zeroizing::new(serde_json::to_vec(&archive).expect("JSON"));
         let sealed = crate::crypto::seal_to(recipient, &context(project), &plain).map_err(Error::BadRequest)?;
@@ -681,7 +697,7 @@ impl Secrets {
                 floors.sync(kind, stored).err().map(|e| e.to_string())
             };
             for r in syncs {
-                let label = format!("{} sync on {}:{}", r.text("kind"), r.text("environment"), r.text("path"));
+                let label = sync_label(r);
                 let env = envs::by_slug(c, project, r.text("environment"));
                 let why = if !complete(r, &["path", "kind", "target", "prefix", "state"]) {
                     Some("the backup doesn't hold all of it".to_string())
@@ -698,6 +714,10 @@ impl Secrets {
                     skipped.push(format!("{label}: {}; not restored", why.unwrap_or_default()));
                     continue;
                 };
+                if r.without_credential {
+                    skipped.push(format!("{label}: {}", crate::syncs::NO_CREDENTIAL));
+                }
+                let why = if r.without_credential { crate::syncs::NO_CREDENTIAL } else { RESTORED };
                 let id = names::new_id(SYNCS.prefix, SYNCS.len);
                 let extra = [
                     ("env_id", Cell::Text(env.id)),
@@ -705,7 +725,7 @@ impl Secrets {
                     ("running_until", Cell::Int(0)),
                     ("retry_at", Cell::Int(0)),
                     ("paused_at", Cell::Int(now)),
-                    ("paused_why", Cell::Text(RESTORED.into())),
+                    ("paused_why", Cell::Text(why.into())),
                 ];
                 backup_rows::import(c, &SYNCS, project, &id, "", now, r, dek, &extra)?;
                 count += 1;
@@ -770,8 +790,8 @@ impl Secrets {
     /// bring back, what changed since, what the backup doesn't hold, what a restore would refuse.
     /// By names and counts only: values, keys and certificates are compared here and never
     /// answered. For a caller who may back the project up, and audited (it reads every value to
-    /// compare). A token gets counts only, its registrations compared without their keys (it can't
-    /// take those out either: [`carries_keys`]), and [`VERIFIES_PER_MINUTE`] calls a minute, as
+    /// compare). A token gets counts only, its registrations, encryption keys and syncs compared
+    /// without their keys, bytes and credentials (it can't take those out either: [`carries_keys`]), and [`VERIFIES_PER_MINUTE`] calls a minute, as
     /// `/scan` limits a scanner: so it can't confirm guesses at what it can't read.
     pub fn verify_backup(&self, project: &str, archive: Archive, caller: &Caller) -> Result<Verified> {
         need_whole(caller, project)?;
@@ -802,6 +822,10 @@ impl Secrets {
                 }
             }
         }
+        // What the archive holds by name only (a token's) is compared by name on both sides, as is
+        // everything for a token: never by material it can't take out.
+        let bare_keys: std::collections::BTreeSet<String> = archive.encryption_keys.iter().filter(|k| k.versions.is_empty()).map(|k| k.name.clone()).collect();
+        let bare_syncs: std::collections::BTreeSet<String> = archive.syncs.iter().filter(|r| r.without_credential).map(sync_label).collect();
         let live = self.archive(project)?;
         let live_keys: usize = self.db.read(|c| Ok::<_, Error>(c.query_row("SELECT COUNT(*) FROM secrets WHERE project_id = ?", [project], |r| r.get::<_, i64>(0))? as usize))?;
         let envs = |a: &Archive| -> BTreeMap<String, [u8; 32]> { a.environments.iter().map(|e| (e.slug.clone(), fingerprint(&(&e.base, &e.labels, e.protected, e.approvals, &e.approvers, &e.folders)))).collect() };
@@ -813,7 +837,7 @@ impl Secrets {
         };
         let registrations = |a: &Archive| -> BTreeMap<String, [u8; 32]> {
             let mut out: BTreeMap<String, [u8; 32]> = a.registrations.iter().map(|r| (registration_label(r), fingerprint(&(&r.columns, names.then_some(&r.sealed), &r.certificates)))).collect();
-            out.extend(a.encryption_keys.iter().map(|k| (format!("encryption key {}", k.name), fingerprint(&k.versions))));
+            out.extend(a.encryption_keys.iter().map(|k| (format!("encryption key {}", k.name), fingerprint(&(names && !bare_keys.contains(&k.name)).then_some(&k.versions)))));
             out
         };
         let identities = |a: &Archive| -> BTreeMap<String, [u8; 32]> { a.identities.iter().map(|r| (format!("identity {}", r.text("name")), fingerprint(&r.columns))).collect() };
@@ -821,8 +845,15 @@ impl Secrets {
             a.syncs
                 .iter()
                 .map(|r| {
-                    let label = format!("{} sync on {}:{}", r.text("kind"), r.text("environment"), r.text("path"));
-                    (label, fingerprint(&(r.columns.get("target"), r.columns.get("keys"), r.columns.get("prefix"))))
+                    let label = sync_label(r);
+                    if !names {
+                        return (label, fingerprint(&()));
+                    }
+                    let mut target = r.columns.get("target").and_then(Json::as_str).and_then(|t| serde_json::from_str::<Json>(t).ok()).unwrap_or_default();
+                    if bare_syncs.contains(&label) {
+                        crate::syncs::mask_target(&mut target);
+                    }
+                    (label, fingerprint(&(target, r.columns.get("keys"), r.columns.get("prefix"))))
                 })
                 .collect()
         };
@@ -958,6 +989,34 @@ fn diff(archive: BTreeMap<String, [u8; 32]>, live: BTreeMap<String, [u8; 32]>, n
 
 fn key_label(env: &str, path: &str, key: &str) -> String {
     format!("{env}:{}{key}", if path == "/" { "/".to_string() } else { format!("{path}/") })
+}
+
+fn sync_label(r: &Row) -> String {
+    format!("{} sync on {}:{}", r.text("kind"), r.text("environment"), r.text("path"))
+}
+
+/// A token's archive ([`carries_keys`]): syncs without their signing secret and with their
+/// targets' URLs by host only, encryption keys by name only. Answers the syncs that lost something.
+fn strip_credentials(archive: &mut Archive) -> Vec<String> {
+    let mut bare = vec![];
+    for r in &mut archive.syncs {
+        let mut target = serde_json::from_str::<Json>(r.text("target")).unwrap_or_default();
+        let urls = crate::syncs::mask_target(&mut target);
+        if urls {
+            r.columns.insert("target".into(), Json::String(target.to_string()));
+        }
+        if urls || !r.sealed.is_empty() {
+            r.sealed.clear();
+            r.without_credential = true;
+            bare.push(sync_label(r));
+        }
+    }
+    for k in &mut archive.encryption_keys {
+        k.versions.clear();
+        k.vault.clear();
+        k.imported.clear();
+    }
+    bare
 }
 
 fn registration_label(r: &Row) -> String {

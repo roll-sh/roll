@@ -196,11 +196,13 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
   use as zeros.
 
 A `roll up` upload (`application/gzip`) may carry `X-Roll-Message` (percent-encoded UTF-8: the
-checkout's last commit, by default) and `X-Roll-Revision` (its sha), shown on the deployment.
+checkout's last commit, by default) and `X-Roll-Revision` (its sha), shown on the deployment,
+and `X-Roll-No-Traffic: 1` (`roll up --no-traffic`): built and health-checked to `ready` at its
+own URL, as `no_traffic` is, not put live.
 
 A log's `q` (1–200 characters) returns the lines with every word in it, any case (`"a phrase"` as
 it's written (any case), `-word` absent (`-1` and `--flag` are words), `OR` between alternatives: `checkout "order 7" -health`,
-`timeout OR refused`), from memory and then
+`timeout OR refused`; `"OR"` quoted is the word), from memory and then
 the stored chunks newest first (back to `since`), at most `tail` (2000); it reads at most 64 MiB
 of stored logs and says so with `X-Roll-Search-Truncated: 1`.
 
