@@ -898,11 +898,13 @@ back); import by id or name; destroy deletes it, restorable for
 `role_descriptors` through the cluster's `_security/api_key`, and an `expiration`; its secret is
 sensitive, replaced on any change and after a flavor switch, revoked on destroy; also an ephemeral resource, revoked when
 the run ends), `roll_search_snapshot_repository` (`s3`, `gcs` or `azure` through
-`PUT _snapshot/<name>`, credentials in a sensitive map roll seals apart and never returns) and
-the data source `roll_search_cluster` (by id or name). Reading keys and repositories never
-wakes a sleeping cluster. There's no `deletion_protection` (roll has no setting to enforce it;
+`PUT _snapshot/<name>`, credentials in a sensitive map roll seals apart and never returns),
+`roll_search_synonyms_set` (its rules as `{id, synonyms}`, through `…/synonyms/{set}`) and
+`roll_search_query_ruleset` (its rules as JSON, compared by meaning, through
+`…/query_rules/{ruleset}`), and the data source `roll_search_cluster` (by id or name). Reading
+keys, repositories, synonyms sets and rulesets never wakes a sleeping cluster. There's no `deletion_protection` (roll has no setting to enforce it;
 `prevent_destroy` covers the plan). `TestSearchAsCode`, `TestSearchClusterCap` and
-`TestSearchKeyEphemeral` (`internal/provider/search_test.go`) drive Terraform against a fake
+`TestSearchKeyEphemeral` and `TestSearchRelevanceAsCode` (`internal/provider/search_test.go`) drive Terraform against a fake
 `/v1/search`: create, change in place, a flavor switch in place (the id kept), import, destroy, the cap's 409, and keys'
 secrets kept out of the plan and the state. Left: remote-cluster links (#347) and allowed
 origins (browser search), once they're on main.
@@ -925,7 +927,7 @@ origins (browser search), once they're on main.
 | GET | `/v1/search/clusters/{id}/metrics?range=1h\|24h\|14d` | request metrics (architecture.md, "Observability"): `{range, step_s, from, to, points, totals}`; each point (`at`, the start of its step: a minute for `1h`, 15 minutes for `24h`, 2 hours for `14d`; only steps with requests) and `totals` hold `all`, `search`, `index` and `other`, each `{requests, rate, 2xx, 4xx, 5xx, rejected, p50_ms, p95_ms, p99_ms}` (`rate` per second; `rejected`: 429s; percentiles `null` when nothing ran). Includes what the cluster's node recorded since the last metering pass |
 | GET | `/v1/search/clusters/{id}/slowlog` | the search and indexing slow logs, newest first, at most 500: `{entries, max_entries}`, each entry Elasticsearch's JSON slow log line (`@timestamp`, `log.level`, `log.logger`, `elasticsearch.index.name`, `elasticsearch.shard.id`, `elasticsearch.slowlog.{message,took,took_millis,source,total_hits,stats,search_type,total_shards,id,routing}`) |
 | GET | `/v1/search/clusters/{id}/audit?from=&to=&event=&size=` | the cluster's security audit log (below), newest first: `{flavor, retention_days, entries: [{at_ms, event, entry}], more}`. `from` (inclusive) and `to` (exclusive) are Unix milliseconds; `event` takes names or categories, comma-separated (an Elasticsearch `event.action` such as `put_user` too); `size` up to 1,000 (100). Never wakes the cluster. A read in roll's permissions, not a reveal: entries hold no secret |
-| POST | `/v1/search/clusters/{id}/keys` | a new API key of the cluster `{name, expires_in_s?, access?, indices?}`: `reveal` at the gate for a `read` key, `write` for an `append` key (it adds documents), `delete` for a `data` key (its role deletes indices), `admin` for an `admin` one; each refused (403) to a grant that can't also reveal (`access`: `admin`, the default, everything the cluster's own user may do; `data`: a link's role, every index's data plus the cluster's templates, pipelines and lifecycle policies, without security, or with `indices` given those indices' data only (and `monitor`): templates, pipelines and lifecycle policies are the whole cluster's, so a narrowed key gets none; `read`: `read` and `view_index_metadata` on the indices, no cluster privilege; `append`: `create_doc` and `auto_configure` on exactly the named indices, no cluster privilege, so a log drain adds to its data streams and reads nothing. `indices`: the index names or patterns it reaches, default every index (`["*"]`); not with `admin`; no remote (`alias:…`), hidden or system (`.…`) names; `append` takes names only. An OpenSearch-flavor cluster has no `append`, its index action also overwrites, and its `read` role holds `cluster_composite_ops_ro`, which OpenSearch needs for `_msearch`, `_mget` and scrolls. roll secrets' and apps' search links ask for these through their `permission` (`read`, `append`; left out, `data`) and `names` options) → `{id, name, access, indices?, api_key, url, expires_at?}` (`access` and `indices`: what the key was made with): `api_key` is `base64(<key id>@<cluster>:<key>)` for `Authorization: ApiKey …`, in this answer only (roll secrets' managed links use it instead of sharing the password); on an OpenSearch-flavor cluster (whose clients sign in with a user) the key is an internal user of its own: `{id, name, access, username, password, url, expires_at?}` without `api_key`, `username` being `<user>@<cluster>`, refused once `expires_in_s` passes |
+| POST | `/v1/search/clusters/{id}/keys` | a new API key of the cluster `{name, expires_in_s?, access?, indices?}`: `reveal` at the gate for a `read` key, `write` for an `append` key (it adds documents), `delete` for a `data` key (its role deletes indices), `admin` for an `admin` one; each refused (403) to a grant that can't also reveal (`access`: `admin`, the default, everything the cluster's own user may do; `data`: a link's role, every index's data plus the cluster's templates, pipelines and lifecycle policies, without security, or with `indices` given those indices' data only (and `monitor`): templates, pipelines and lifecycle policies are the whole cluster's, so a narrowed key gets none; either way `post_behavioral_analytics_event`, so an app records its clicks (`_application/analytics/{collection}/event/search_click`) with the key it searches with (a cluster privilege in Elasticsearch too: a narrowed key may post to any collection); `read`: `read` and `view_index_metadata` on the indices, no cluster privilege; `append`: `create_doc` and `auto_configure` on exactly the named indices, no cluster privilege, so a log drain adds to its data streams and reads nothing. `indices`: the index names or patterns it reaches, default every index (`["*"]`); not with `admin`; no remote (`alias:…`), hidden or system (`.…`) names; `append` takes names only. An OpenSearch-flavor cluster has no `append`, its index action also overwrites, and its `read` role holds `cluster_composite_ops_ro`, which OpenSearch needs for `_msearch`, `_mget` and scrolls. roll secrets' and apps' search links ask for these through their `permission` (`read`, `append`; left out, `data`) and `names` options) → `{id, name, access, indices?, api_key, url, expires_at?}` (`access` and `indices`: what the key was made with): `api_key` is `base64(<key id>@<cluster>:<key>)` for `Authorization: ApiKey …`, in this answer only (roll secrets' managed links use it instead of sharing the password); on an OpenSearch-flavor cluster (whose clients sign in with a user) the key is an internal user of its own: `{id, name, access, username, password, url, expires_at?}` without `api_key`, `username` being `<user>@<cluster>`, refused once `expires_in_s` passes |
 | DELETE | `/v1/search/clusters/{id}/keys/{key}` | revoke it (204; 404 when it's gone). On a deleted cluster (by its id) the revoke is kept and applied by its restore (204) |
 | GET | `/v1/search/clusters/{id}/browser-keys` | `{keys}`: the browser keys that still work, newest first, each `{id, name, indices or application, filter?, rate_limit, created_at, expires_at, usage_24h: {requests, throttled, refused, reasons}}` (no secret; `usage_24h` covers the hour in progress and the 23 before). Wakes the cluster |
 | GET | `/v1/search/clusters/{id}/browser-keys/{key}/usage?window=1h\|24h\|14d` | one browser key's usage (above; 24h by default): `{key, window, step_s, from, to, points: [{at, requests, throttled, refused, reasons}], totals: {requests, throttled, refused, reasons, users: [{user, requests, throttled}], origins: [{origin, refused}]}}`. `throttled` counts 429s, `refused` the other refusals, `reasons` both by name (`key_rate`, `address_rate`, `user_rate`, `concurrency`, `cluster_ceiling`, `origin`, `policy`, `body_too_large`, `invalid_key`); points only where the key made requests. 404 for a key that isn't one of the cluster's browser keys; 400 for another window |
@@ -1643,8 +1645,7 @@ deterministic (#396).
 10. **Relevance tuning by MCP and Terraform**: `/v1/search` serves synonyms sets, query rulesets
    (and `_test`), writing an index's settings and `_explain` (the routes table), and `roll search`
    has `synonyms`, `rules`, `indices settings` and `explain` and makes `read` and `append` keys on
-   named indices; roll's MCP maps them next (`no-tool.txt`). Left: `roll_search_synonyms_set` and
-   `roll_search_query_ruleset` in the Terraform provider, and a redacted answer for
+   named indices; roll's MCP maps them next (`no-tool.txt`). Terraform has `roll_search_synonyms_set` and `roll_search_query_ruleset`. Left: a redacted answer for
    `POST …/inference/secrets`, so it can become a tool and an agent can set up semantic search end
    to end.
 11. **Conversational search and RAG** (Elastic Playground's chat with citations, Typesense
@@ -1662,10 +1663,10 @@ deterministic (#396).
    a sample dataset for RAG (passages with `semantic_text` on E5); and
    what writing the guides found: an API key's `encoded` value works only at the cluster's own
    host, so clients behind a shared address re-encode it as `<id>@<cluster>:<key>`; a `data` key
-   can't post click events, so an app tracking clicks needs a second key; a `semantic_text` field
-   with no `inference_id` fails, because its default (`.elser-2-elasticsearch`) answers as a
-   cluster without ML nodes, the first error anyone copying Elasticsearch's docs hits; and no
-   screen is named Discover.
+   can't post click events, so an app tracking clicks needs a second key; and no screen is named
+   Discover. (A `semantic_text` field with no `inference_id`, whose Elasticsearch default answers
+   as a cluster without ML nodes, the first error anyone copying Elasticsearch's docs hit, now
+   defaults to the E5 the node runs: `feature/search-semantic-default`.)
 13. **A web crawler for site search** (design in [crawler.md](crawler.md); Elastic Open Crawler,
    Algolia Crawler, DocSearch, Meilisearch's docs-scraper). Phases 1 and 2 landed: a native
    connector roll runs (`roll_web_crawler`, on #318's runner) taking Open Crawler's config, fields
@@ -1679,10 +1680,13 @@ deterministic (#396).
    dashboard's "crawl a site" box in the Connectors tab, and every product's names blocked
    (`roll.crawler.fleet_names`); then (phase 3) extraction rules (Open Crawler's rulesets, CSS
    selectors matched in one pass on the arena DOM, carried over by the import) and a verification
-   token derived from the owner and the site (HMAC), so a published record outlives its rows.
-   Left: incremental crawls with `If-Modified-Since`, and the docs preset; charset detection
-   beyond UTF-8, fetching several
-   origins at once, and per-site politeness by address rather than name are open too.
+   token derived from the owner and the site (HMAC), so a published record outlives its rows;
+   then conditional requests (each page's `ETag` and `Last-Modified` kept in its document and sent
+   back, a 304 kept as it is and counted as seen) with `incremental` jobs that delete nothing, and
+   the docs preset (one record per section, `lvl0` to `lvl6` from the headings, the URL with its
+   `#anchor`, a mapping and a search-as-you-type template; `roll search crawler create --preset
+   docs` and the crawl box). Open: charset detection beyond UTF-8, fetching several origins at
+   once, and per-site politeness by address rather than name.
 14. **Semantic search on OpenSearch-flavor clusters** (design in
    [opensearch-neural.md](opensearch-neural.md); AWS OpenSearch neural search):
    `neural`, `neural_sparse` and `agentic` are names only (`meta/aliases.rs`); ML Commons

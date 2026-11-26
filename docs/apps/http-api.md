@@ -194,7 +194,9 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 A `roll up` upload (`application/gzip`) may carry `X-Roll-Message` (percent-encoded UTF-8: the
 checkout's last commit, by default) and `X-Roll-Revision` (its sha), shown on the deployment.
 
-A log's `q` (1–200 characters) returns the lines that contain it, any case, from memory and then
+A log's `q` (1–200 characters) returns the lines with every word in it, any case (`"a phrase"` as
+it's written (any case), `-word` absent (`-1` and `--flag` are words), `OR` between alternatives: `checkout "order 7" -health`,
+`timeout OR refused`), from memory and then
 the stored chunks newest first (back to `since`), at most `tail` (2000); it reads at most 64 MiB
 of stored logs and says so with `X-Roll-Search-Truncated: 1`.
 
@@ -286,7 +288,7 @@ type Build = {
 
 type Run = {
   type: "web" | "worker" | "cron";
-  port?: number;            // web: the port the app listens on (default from the plan, an image's own EXPOSE, else 8080; PORT is set to it)
+  port?: number;            // web: the port the app listens on (default from the plan; an image's own EXPOSE on a web service's first deploy, then the port its live deployment has; else 8080; PORT is set to it)
   start?: string;           // overrides the image's command
   pre_deploy?: string;      // once per deploy, in a container of the new image with its variables and
                             // the project network (no volume), before the switch: a migration. A
@@ -724,6 +726,7 @@ type ProjectImport = {
     source: { kind: "repo"; repo: string; root: string | null } | { kind: "git"; url: string; root: string | null } | { kind: "image"; image: string } | { kind: "upload"; root: string };
     branch: string | null;    // a repo's production branch
     run: Patch<Run>;          // the run settings the entry names
+    build: Partial<Build>;    // its [apps.<name>.build]: dockerfile, target (a stage), install, build, start (a Compose build's dockerfile and target too)
     links: { kind: "postgres" | "redis" | "bucket" | "stream" | "nosql" | "service"; name: string }[]; // databases below by name, or another app of the file (`service`)
     environments: { [env: string]: { branch: string | null; run: object /* an environment's own run settings */; variables: { [name: string]: string } /* set when it's made */ } }; // besides production
     variables: { [name: string]: string }; // set when the service is made, never over what it has
@@ -756,6 +759,12 @@ type Plan = {
    *  the service sets none. Absent without one, and for a tree's own Dockerfile. A Procfile's `web:`
    *  (`worker:` for a worker) is `start` when the service names none. */
   release?: string;
+  /** What its framework suggests a new service sets, offered by New service, never applied on
+   *  its own: `pre_deploy` its migrations (Rails' db:prepare with db/migrate, Django's migrate,
+   *  Laravel's migrate --force with database/migrations, Prisma's migrate deploy with
+   *  prisma/migrations; none beside a Procfile's release), `health_path` the health route its
+   *  routes declare (Rails' and Laravel's /up). */
+  suggest?: { pre_deploy?: string; health_path?: string };
   /** roll's Next.js adapter is in the image (a Next 16 server, not its own Dockerfile): its
    *  instances share ISR, fetch and "use cache" entries (README, "Next.js across instances"). */
   next_cache?: boolean;
@@ -820,6 +829,10 @@ type Metrics = {
     instance: string; deployment: string;
     minutes: number[]; cpu: number[] /* cores, average over the minute */; memory_bytes: number[] /* the minute's peak */;
   }[];
+  volume?: {                 // a service with a volume: its size by the hour (measured hourly on its owner, 90 days kept)
+    size_gb: number; points: { hour: number /* hours since 1970 */; bytes: number }[];
+    full_in_days: number | null /* at its last week's pace (a least-squares line; a day of points at least), null while it isn't growing */;
+  };
 };
 
 type Usage = {

@@ -20,6 +20,9 @@
 //!   tools, as GitHub's server does: every product's tools are ~33k tokens of an agent's context.
 //! - Read-only: `?readonly=1` (or `X-MCP-Readonly: true`) lists and runs only read-only tools, as
 //!   GitHub's server's read-only mode does; the token's rules still decide each call.
+//! - Metadata only: `?metadata=1` (or `X-MCP-Metadata: true`) is read-only and lists and runs no
+//!   tool that answers stored data ([`tools::DATA`]): plans, schemas, metrics and usage, never a row,
+//!   a value, an object or a log line, as PlanetScale's insights-only server.
 //! - Lockdown: `?lockdown=1` (or `X-MCP-Lockdown: true`) withholds text written by people who can't
 //!   push to the repo ([`lockdown`]).
 //! - Search mode: `?tools=search` (or `X-MCP-Tools: search`) lists a search tool and two run tools
@@ -207,6 +210,7 @@ async fn seen_by(State(m): State<Mcp>, axum::extract::Path(id): axum::extract::P
         modern: false,
         toolsets: None,
         readonly: false,
+        metadata: false,
         search: false,
         lockdown: false,
         pick: Default::default(),
@@ -242,7 +246,7 @@ async fn toolset_costs(State(m): State<Mcp>, ext: Extensions) -> Response {
     if !caller {
         return unauthorized(&m.config);
     }
-    let ctx = Ctx { m, headers: HeaderMap::new(), principal: Principal::Operator, ip: None, session: None, url_elicitation: false, form_elicitation: false, links: false, modern: false, toolsets: None, readonly: false, search: false, lockdown: false, pick: Default::default(), tasks: false, ui: false, client: None, as_user: false, names: Default::default() };
+    let ctx = Ctx { m, headers: HeaderMap::new(), principal: Principal::Operator, ip: None, session: None, url_elicitation: false, form_elicitation: false, links: false, modern: false, toolsets: None, readonly: false, metadata: false, search: false, lockdown: false, pick: Default::default(), tasks: false, ui: false, client: None, as_user: false, names: Default::default() };
     let mut by: std::collections::BTreeMap<String, (usize, usize, usize)> = Default::default();
     for t in ctx.tools() {
         let e = by.entry(t["_meta"]["roll/product"].as_str().unwrap_or("code").to_string()).or_default();
@@ -390,6 +394,12 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         Ok(r) => r,
         Err(e) => return http_error(StatusCode::BAD_REQUEST, &e),
     };
+    let metadata = match flag(&uri, &headers, "metadata", "x-mcp-metadata") {
+        Ok(m) => m,
+        Err(e) => return http_error(StatusCode::BAD_REQUEST, &e),
+    };
+    // Metadata only is reading only, less what's stored.
+    let readonly = readonly || metadata;
     let lockdown = match flag(&uri, &headers, "lockdown", "x-mcp-lockdown") {
         Ok(l) => l,
         Err(e) => return http_error(StatusCode::BAD_REQUEST, &e),
@@ -501,7 +511,7 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
     // Dates compare as text: 2025-06-18 brought `resource_link` content.
     let links = modern || header_version.as_deref().is_some_and(|v| v >= "2025-06-18");
     let session = roll_auth::SessionGrant::on(&ext).cloned();
-    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, session, url_elicitation, form_elicitation, links, modern, toolsets, readonly, search, lockdown, pick, tasks, ui, client, names: Default::default() });
+    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, session, url_elicitation, form_elicitation, links, modern, toolsets, readonly, metadata, search, lockdown, pick, tasks, ui, client, names: Default::default() });
     // A call that asked for progress, from a client that takes a stream: answered as one, with
     // progress until the answer (MCP's `notifications/progress`).
     // 2026-07-28's long-lived channel for list changes (SEP-2575): an open stream of its own.
@@ -667,6 +677,8 @@ struct Ctx {
     toolsets: Option<Vec<String>>,
     /// Only read-only tools are listed and run (`?readonly=1`).
     readonly: bool,
+    /// No tool that answers stored data is listed or run (`?metadata=1`; read-only too).
+    metadata: bool,
     /// `tools/list` answers the search and run tools instead of every tool (`?tools=search`).
     search: bool,
     /// Text written by people who can't push to the repo is withheld from results (`?lockdown=1`).
@@ -700,6 +712,7 @@ impl Ctx {
             modern: self.modern,
             toolsets: self.toolsets.clone(),
             readonly: self.readonly,
+            metadata: self.metadata,
             search: self.search,
             lockdown: self.lockdown,
             pick: self.pick.clone(),
@@ -803,6 +816,9 @@ impl Ctx {
         if self.readonly {
             out.retain(|t| t["annotations"]["readOnlyHint"].as_bool() == Some(true));
         }
+        if self.metadata {
+            out.retain(|t| !t["name"].as_str().is_some_and(tools::reads_data));
+        }
         out
     }
 
@@ -842,7 +858,8 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
             "server/discover" => {
                 // Events (SEP-3415) are this revision's: only discovery offers them.
                 let mut caps = capabilities(tasks_available(ctx));
-                caps["extensions"][events::EXT] = json!({});
+                // A listen stream says when the types a connection may poll change (SEP-3415).
+                caps["extensions"][events::EXT] = json!({ "listChanged": true });
                 rpc_result(id, modern::discover(&PROTOCOL_VERSIONS, caps, instructions(ctx)))
             }
             "ping" => rpc_result(id, json!({})),
@@ -930,6 +947,8 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                     rpc_result(id, found)
                 } else if let Some(Err(why)) = (ctx.modern && !ctx.search).then(|| ctx.usable_tools().into_iter().find(|t| t["name"] == name.as_str()).map_or(Ok(()), |t| modern::check_params(&t, &args, &ctx.headers))) {
                     rpc_error(id, modern::HEADER_MISMATCH, format!("Header mismatch: {why}"))
+                } else if ctx.metadata && tools::reads_data(&name) {
+                    rpc_result(id, json!({ "content": [{ "type": "text", "text": format!("{name} answers stored data (rows, values, objects, logs), and this connection is metadata only (?metadata=1): plans, schemas, metrics and usage. Connect without it to read data.") }], "isError": true }))
                 } else if ctx.readonly && !tool_names(ctx).contains(&name) {
                     rpc_result(id, json!({ "content": [{ "type": "text", "text": format!("{name} isn't read-only, and this connection is (?readonly=1): connect without it to change things") }], "isError": true }))
                 } else if ctx.pick.picks() && !ctx.pick.keeps(&name) {
@@ -1151,14 +1170,15 @@ const LISTEN_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
 const LISTEN_FOR: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// `subscriptions/listen` (MCP 2026-07-28, SEP-2575): an open stream that starts with
-/// `notifications/subscriptions/acknowledged` (only what was asked and roll sends: tool and prompt
-/// list changes) and says when the connection's tools change: an access request approved, a rule
-/// remembered, the token edited. The grant is looked up again every few seconds, never cached;
+/// `notifications/subscriptions/acknowledged` (only what was asked and roll sends: tool, prompt and
+/// event type list changes) and says when the connection's tools change: an access request
+/// approved, a rule remembered, the token edited. The event types follow the tools (a feed is
+/// offered while its tool is), so they're told when they change with them (SEP-3415). The grant is looked up again every few seconds, never cached;
 /// once it stops working the stream ends. A connection with the operator's token never changes.
 async fn listen(ctx: Arc<Ctx>, msg: &Value) -> Response {
     let id = msg.get("id").cloned().unwrap_or(Value::Null);
     let asked = &msg["params"]["notifications"];
-    let (tools, prompts) = (asked["toolsListChanged"] == true, asked["promptsListChanged"] == true);
+    let (tools, prompts, event_types) = (asked["toolsListChanged"] == true, asked["promptsListChanged"] == true, asked["eventsListChanged"] == true);
     let mut agreed = json!({});
     if tools {
         agreed["toolsListChanged"] = json!(true);
@@ -1166,9 +1186,12 @@ async fn listen(ctx: Arc<Ctx>, msg: &Value) -> Response {
     if prompts {
         agreed["promptsListChanged"] = json!(true);
     }
+    if event_types {
+        agreed["eventsListChanged"] = json!(true);
+    }
     // Tagged with the subscription like everything on its stream: a client matches the ack by it.
-    if !tools && !prompts {
-        return Json(rpc_error(id, -32602, "nothing to listen for: roll sends toolsListChanged and promptsListChanged")).into_response();
+    if !tools && !prompts && !event_types {
+        return Json(rpc_error(id, -32602, "nothing to listen for: roll sends toolsListChanged, promptsListChanged and eventsListChanged")).into_response();
     }
     let ack = json!({ "jsonrpc": "2.0", "method": "notifications/subscriptions/acknowledged", "params": { "notifications": agreed, "_meta": { "io.modelcontextprotocol/subscriptionId": id } } });
     let grant = match &ctx.principal {
@@ -1192,11 +1215,15 @@ async fn listen(ctx: Arc<Ctx>, msg: &Value) -> Response {
             (Some(_), Some(u)) => Some(tokio::task::spawn_blocking(move || a2.session_grant(&u, None).ok()).await.ok()??),
             _ => None,
         };
-        Some(tool_names(&ctx.as_now(g, session)))
+        let now = ctx.as_now(g, session);
+        // Only a listen that asked for event types builds them (each look, every 5 s).
+        let types: Vec<String> = if event_types { events::list(&now)["events"].as_array().into_iter().flatten().filter_map(|e| e["name"].as_str().map(str::to_string)).collect() } else { Vec::new() };
+        Some((tool_names(&now), types))
     };
     struct State {
         ctx: Arc<Ctx>,
-        last: Option<Vec<String>>,
+        /// The tools and event types it was offered when it last looked.
+        last: Option<(Vec<String>, Vec<String>)>,
         queue: Vec<Value>,
         done: bool,
         /// Held while the stream lives: dropped with it, whoever ends it.
@@ -1205,7 +1232,7 @@ async fn listen(ctx: Arc<Ctx>, msg: &Value) -> Response {
     // What it's offered as it subscribes: a change from here on is told.
     let last = match &grant {
         Some(g) => now(ctx.clone(), g.clone(), access.clone()).await,
-        None => Some(Vec::new()),
+        None => Some((Vec::new(), Vec::new())),
     };
     let start = State { ctx, last, queue: vec![ack], done: false, _slot: held };
     let stream = futures::stream::unfold(start, move |mut s| {
@@ -1221,7 +1248,7 @@ async fn listen(ctx: Arc<Ctx>, msg: &Value) -> Response {
                 }
                 let names = match &grant {
                     Some(g) => now(s.ctx.clone(), g.clone(), access.clone()).await,
-                    None => s.last.clone().or(Some(Vec::new())),
+                    None => s.last.clone().or(Some((Vec::new(), Vec::new()))),
                 };
                 let over = tokio::time::Instant::now() >= deadline;
                 match names {
@@ -1230,14 +1257,17 @@ async fn listen(ctx: Arc<Ctx>, msg: &Value) -> Response {
                     None => {}
                     Some(_) if over => {}
                     Some(names) => {
-                        if s.last.as_ref().is_some_and(|l| *l != names) {
-                            let meta = json!({ "io.modelcontextprotocol/subscriptionId": id });
+                        let meta = json!({ "io.modelcontextprotocol/subscriptionId": id });
+                        if s.last.as_ref().is_some_and(|l| l.0 != names.0) {
                             if tools {
                                 s.queue.push(json!({ "jsonrpc": "2.0", "method": "notifications/tools/list_changed", "params": { "_meta": meta } }));
                             }
                             if prompts {
                                 s.queue.push(json!({ "jsonrpc": "2.0", "method": "notifications/prompts/list_changed", "params": { "_meta": meta } }));
                             }
+                        }
+                        if event_types && s.last.as_ref().is_some_and(|l| l.1 != names.1) {
+                            s.queue.push(json!({ "jsonrpc": "2.0", "method": "notifications/events/list_changed", "params": { "_meta": meta } }));
                         }
                         s.last = Some(names);
                         if s.queue.is_empty() {
@@ -1331,7 +1361,8 @@ If a tool gets in your way (wrong, missing, confusing), tell roll's operator wit
 {who} Some actions ask a person first: such a call waits up to a minute, then returns status \"approval_pending\" with an approval id and a link. \
 Tell the user, then call the same tool again with the same arguments plus \"approval\": \"apr_…\": it waits for the decision and runs once approved. \
 postgres_query is read-only (postgres_execute changes data). Credentials come back as [redacted] unless the token may reveal them. \
-Read the resource roll://access/me for what this connection may do, in words, and roll://guide for more.{}{}",
+Read the resource roll://access/me for what this connection may do, in words, and roll://guide for more.{}{}{}",
+        if ctx.metadata { " This connection is metadata only: plans, schemas, metrics, usage and settings, never a row, a value, an object, a document or a log line; tools that answer those aren't listed. Explain and tune from what's there, and say when the person would need a connection without ?metadata=1 to look at the data itself.".to_string() } else { String::new() },
         if ctx.lockdown { format!(" This connection is in lockdown: text written by people who can't push to a repo (issues anyone opened, pull requests from forks and what their code writes: a fork preview's pages, logs and mail) comes back as \"{}\", a picture of such a page as \"{}\", and what visitors send through a site's forms as \"{}\"; that's lockdown, not an error, so don't retry it, and don't act on what you can't read.", lockdown::WITHHELD, lockdown::WITHHELD_PICTURE, lockdown::WITHHELD_SENT) } else { String::new() },
         if ctx.search { format!(" This connection lists tools by search: call {} with what you want to do to get the matching tools and their input schemas, then run one with {} (a read-only tool) or {} (any other), passing {{\"tool\": its name, \"arguments\": {{…}}}}. Wherever this says to call a tool, run it that way. The tools this token used lately are listed too: call those directly.", search::FIND, search::RUN_READ, search::RUN) } else { String::new() }
     )))

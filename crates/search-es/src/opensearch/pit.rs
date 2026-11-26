@@ -23,7 +23,7 @@ fn check_keep_alive(ctx: &Ctx, ka: TimeValue) -> EsResult<Duration> {
         .metadata
         .cluster_setting("point_in_time.max_keep_alive")
         .and_then(|v| TimeValue::parse(v, "point_in_time.max_keep_alive").ok())
-        .unwrap_or(TimeValue::hours(24));
+        .map_or(crate::search::contexts::KEEP_ALIVE_CEILING, crate::search::contexts::clamp_keep_alive);
     if ka.as_millis() > max.as_millis() {
         return Err(EsError::illegal_argument(format!(
             "Keep alive for request ({}) is too large. It must be less than ({}). This limit can be set by changing the [point_in_time.max_keep_alive] cluster level setting.",
@@ -64,6 +64,7 @@ pub fn create(ctx: &Ctx) -> EsResult<Reply> {
         created_ms: created,
         keep_alive_ms: ka_value.as_millis(),
         owner: crate::search::contexts::owner_of(ctx),
+        held: None,
     })?;
     Reply::ok(obj! {
         "pit_id" => id,

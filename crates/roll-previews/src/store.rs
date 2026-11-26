@@ -1140,6 +1140,11 @@ impl Store {
 
     /// A page as it was last kept (its picture, what went wrong while it loaded, its checks), to
     /// keep again at a new head.
+    /// The story pages a preview keeps (`story:<id>` and `story:<id>@<browser>`), by key.
+    pub fn story_keys(&self, id: &str) -> Result<Vec<String>> {
+        Ok(self.db.read(|c| c.query("SELECT path FROM page_shots WHERE preview_id = ? AND path LIKE 'story:%' ORDER BY path", [id], |r| r.get(0)))?)
+    }
+
     /// The stories kept from the last run that took them (`story:<id>` pages).
     pub fn kept_story_pages(&self, id: &str) -> Result<Vec<crate::ports::PageShot>> {
         let paths: Vec<String> = self.db.read(|c| c.query("SELECT path FROM page_shots WHERE preview_id = ? AND path LIKE 'story:%' ORDER BY path", [id], |r| r.get(0)))?;
@@ -2304,6 +2309,8 @@ impl Store {
                 unstable: report.unstable,
                 step: report.step,
                 step_ms: report.step_ms,
+                play: report.play,
+                play_error: report.play_error,
                 base_group: sig.filter(|_| base.is_some()),
             })
             .collect())

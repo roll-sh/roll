@@ -466,3 +466,20 @@ async fn a_failing_sort_script_stops_at_its_first_failure() {
         assert!(parked < 50, "{body}: {parked} errors parked");
     }
 }
+
+/// A tenant can't keep scrolls or points in time alive past roll's ceiling (24h): its
+/// `search.max_keep_alive` reads as written, but the limit applied is the ceiling.
+#[tokio::test]
+async fn keep_alive_is_held_to_the_ceiling() {
+    let c = Cluster::in_memory("keep-alive").await;
+    call(&c, "PUT", "/k/_doc/1?refresh=true", r#"{"a":1}"#).await;
+    assert_eq!(call(&c, "PUT", "/_cluster/settings", r#"{"persistent":{"search.max_keep_alive":"3650d"}}"#).await.0, 200);
+    let (_, v) = call(&c, "GET", "/_cluster/settings", "").await;
+    assert_eq!(at(&v, &["persistent", "search", "max_keep_alive"]).as_str(), Some("3650d"), "{}", v.to_json());
+    for uri in ["/k/_search?scroll=48h", "/k/_pit?keep_alive=48h"] {
+        let (s, v) = call(&c, "POST", uri, "").await;
+        assert_eq!(s, 400, "{uri}: {}", v.to_json());
+        assert!(v.to_json().contains("is too large"), "{uri}: {}", v.to_json());
+    }
+    assert_eq!(call(&c, "POST", "/k/_search?scroll=24h", "").await.0, 200);
+}

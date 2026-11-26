@@ -110,7 +110,7 @@ pub struct NewValueRequest {
     pub answers: Option<i64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct ValueRequest {
     pub id: String,
     /// The environment's slug (empty once it's deleted).
@@ -136,6 +136,29 @@ pub struct ValueRequest {
     /// (`ROLL_WEB_URL`); only in `create`'s answer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub link: Option<String>,
+}
+
+/// Never the request's token, nor its link (which carries the token).
+impl std::fmt::Debug for ValueRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ValueRequest")
+            .field("id", &self.id)
+            .field("environment", &self.environment)
+            .field("path", &self.path)
+            .field("keys", &self.keys)
+            .field("note", &self.note)
+            .field("answers_left", &self.answers_left)
+            .field("created_by", &self.created_by)
+            .field("created_at", &self.created_at)
+            .field("expires_at", &self.expires_at)
+            .field("answered_at", &self.answered_at)
+            .field("cancelled_at", &self.cancelled_at)
+            .field("open", &self.open)
+            .field("outcome", &self.outcome)
+            .field("token", &crate::crypto::redacted(&self.token))
+            .field("link", &crate::crypto::redacted(&self.link))
+            .finish()
+    }
 }
 
 /// What a request's public page shows: the note, the key names, and the key to seal to.

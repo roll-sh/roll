@@ -118,6 +118,15 @@ pub struct FoundLeak {
     pub rotatable: bool,
 }
 
+/// A push to a GitHub repo that roll code's GitHub App checks ([`SecretEnv::scan_push`]): the
+/// App's installation, who pushed (their GitHub login) and the ref, for roll secrets' audit log.
+#[derive(Clone, Debug)]
+pub struct PushScan {
+    pub installation: u64,
+    pub pusher: Option<String>,
+    pub r#ref: String,
+}
+
 /// An environment's secrets from roll secrets (docs/secrets.md, "Consumption"). Values come back
 /// resolved; the caller puts them in a process's environment and nowhere else (no records, no
 /// logs). Every read is in the project's audit log as `consumer`.
@@ -155,6 +164,22 @@ pub trait SecretEnv: Send + Sync {
     /// back). Empty for a repo on no project's canvas. roll secrets answers it as a leak (its
     /// event, and the project's `leaks.rotate`).
     async fn leaks(&self, repo: &str, candidates: Vec<String>) -> anyhow::Result<Vec<FoundLeak>>;
+    /// Whether pushes to repo `owner/name` on GitHub are checked for values ([`SecretEnv::scan_push`]):
+    /// a project roll secrets trusts the repo for has it on its canvas. Names nothing.
+    async fn scans_pushes(&self, repo: &str) -> anyhow::Result<bool> {
+        let _ = repo;
+        Ok(false)
+    }
+    /// Which of `candidates` (the lines a push to GitHub adds, in repo `owner/name`) are values of
+    /// the projects roll secrets trusts the repo for, asked as `push`'s GitHub App installation, a
+    /// scanner of each project (the `scan` right only: whole candidates, its floor and its limits,
+    /// never a sensitive or personal value). A value found already left: roll secrets answers it
+    /// as a leak (`secret.leaked`, rotated under the project's `leaks.rotate`). Over the scan's
+    /// limits it's an error: try again later.
+    async fn scan_push(&self, repo: &str, push: &PushScan, candidates: Vec<String>) -> anyhow::Result<Vec<FoundLeak>> {
+        let _ = (repo, push, candidates);
+        Ok(Vec::new())
+    }
     /// Of `keys`, the ones a standard environment of the project that has repo `owner/name` on its
     /// canvas doesn't define, with those environments: (key, [environment]). Names only.
     async fn missing(&self, repo: &str, keys: Vec<String>) -> anyhow::Result<Vec<(String, Vec<String>)>> {

@@ -1170,6 +1170,12 @@ pub struct PageCheck {
     /// Paint in the lab.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step_ms: Option<u32>,
+    /// A story's interaction test (its `play` function), as Storybook ran it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub play: Option<Play>,
+    /// What a failed one threw (one line, masked).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub play_error: Option<String>,
     /// What its change against the baseline is ([`crate::visual::compare`]'s signature): pages
     /// with the same one changed the same way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1192,6 +1198,21 @@ pub struct PageReport {
     /// Its slowest step's time to the next paint (ms).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step_ms: Option<u32>,
+    /// A story's interaction test (its `play` function), as Storybook ran it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub play: Option<Play>,
+    /// What a failed one threw, as Storybook's frame showed it (one line, the preview's code's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub play_error: Option<String>,
+}
+
+/// How a story's interaction test went (Chromatic's interaction tests): its `play` function ran
+/// to its end, or it (or the story's render) threw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Play {
+    Passed,
+    Failed,
 }
 
 /// A page's checks against main's page at the same path.
@@ -1204,6 +1225,9 @@ pub struct PageAgainst {
     /// Main's same state's slowest step to the next paint (ms), when both timed one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step_ms: Option<u32>,
+    /// Its interaction test fails where main's same story's passes: the change broke it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub play_broke: bool,
 }
 
 impl PageReport {
@@ -1215,6 +1239,7 @@ impl PageReport {
             seo_added: self.a11y.as_ref().and_then(|a| a.seo.as_ref()).zip(main.a11y.as_ref().and_then(|a| a.seo.as_ref())).map(|(a, b)| a.added_since(b)),
             text: self.text.as_deref().zip(main.text.as_deref()).map(|(now, then)| crate::visual::text_diff(then, now)),
             step_ms: main.step_ms.filter(|_| self.step_ms.is_some()),
+            play_broke: self.play == Some(Play::Failed) && main.play == Some(Play::Passed),
         }
     }
 }

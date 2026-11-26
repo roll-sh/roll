@@ -26,6 +26,28 @@ impl Default for ScriptService {
     }
 }
 
+/// The cluster's cache budget ([`crate::Cluster::cache_memory`]) as what its compiled scripts
+/// are charged to.
+struct CacheMemory(Arc<search_aggs::memory::MemoryBudget>);
+
+impl search_painless::MemoryCharge for CacheMemory {
+    fn try_reserve(&self, bytes: u64) -> bool {
+        self.0.try_reserve(bytes)
+    }
+
+    fn release(&self, bytes: u64) {
+        self.0.release(bytes);
+    }
+}
+
+impl ScriptService {
+    /// Charges the compiled-script cache to `budget` (the cluster's cache budget) from now on;
+    /// the cache holds at most its [`search_painless::Settings::cache_max_bytes`].
+    pub fn charge_to(&self, budget: Arc<search_aggs::memory::MemoryBudget>) {
+        self.engine.charge_to(Arc::new(CacheMemory(budget)));
+    }
+}
+
 impl std::fmt::Debug for ScriptService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("ScriptService")

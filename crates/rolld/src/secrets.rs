@@ -2310,6 +2310,11 @@ impl roll_secrets::Workloads for Workloads {
         self.0.revoke_chain(chain, why).map(|_| ()).map_err(|e| access_error(e, "revoking a machine's credentials"))
     }
 
+    fn chains(&self, chains: &[String]) -> roll_secrets::Result<Vec<roll_secrets::ChainState>> {
+        let states = self.0.store.chain_states(chains).map_err(|e| access_error(e, "reading a machine's credentials"))?;
+        Ok(states.into_iter().map(|s| roll_secrets::ChainState { chain: s.chain, state: s.state, refreshed_at: s.refreshed_at, expires_at: s.expires_at, revoked_at: s.revoked_at, revoked_why: s.revoked_why }).collect())
+    }
+
     /// Only tokens whose rules (and rules approved for a while) can name `project` are read
     /// (`Store::naming`, one indexed read whatever the number of tokens) and resolved.
     fn grants_naming(&self, project: &str) -> roll_secrets::Result<Vec<roll_auth::Grant>> {
@@ -2556,6 +2561,31 @@ impl code_control::SecretEnv for ForCode {
             let mut out = Vec::new();
             for p in ws.projects_of(roll_workspace::Kind::Repo.as_str(), &r)?.into_iter().filter(|p| secrets.counts_for_repo(p, &r)) {
                 out.extend(secrets.leaks_in_code(&p, &candidates, &r)?.into_iter().map(|(index, l, rotatable)| code_control::FoundLeak { index, key: l.key, environment: l.environment, folder: l.path, rotatable }));
+            }
+            Ok(out)
+        })
+        .await?
+    }
+
+    async fn scans_pushes(&self, repo: &str) -> anyhow::Result<bool> {
+        let (secrets, ws) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting"))?;
+        let r = repo.to_string();
+        tokio::task::spawn_blocking(move || Ok(ws.projects_of(roll_workspace::Kind::Repo.as_str(), &r)?.iter().any(|p| secrets.counts_for_repo(p, &r)))).await?
+    }
+
+    /// Each project roll secrets trusts the repo for, asked by the App's installation as a scanner
+    /// of that project only (`Secrets::scan_pushed`), decided here in process: no token is made.
+    async fn scan_push(&self, repo: &str, push: &code_control::PushScan, candidates: Vec<String>) -> anyhow::Result<Vec<code_control::FoundLeak>> {
+        let (secrets, ws) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting"))?;
+        let (r, push) = (repo.to_string(), push.clone());
+        tokio::task::spawn_blocking(move || {
+            // One principal per installation and repo: an installation spans tenants, so one
+            // repo's pushes never spend another's scan limits.
+            let principal = format!("github:{}:{r}", push.installation);
+            let said = roll_secrets::leaks::Push { breakglass: false, pusher: push.pusher.clone(), refs: vec![push.r#ref.clone()] };
+            let mut out = Vec::new();
+            for p in ws.projects_of(roll_workspace::Kind::Repo.as_str(), &r)?.into_iter().filter(|p| secrets.counts_for_repo(p, &r)) {
+                out.extend(secrets.scan_pushed(&p, &r, &principal, &candidates, &said)?.into_iter().map(|(index, l, rotatable)| code_control::FoundLeak { index, key: l.key, environment: l.environment, folder: l.path, rotatable }));
             }
             Ok(out)
         })

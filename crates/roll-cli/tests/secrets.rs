@@ -916,14 +916,15 @@ async fn a_pre_receive_hook_refuses_a_push_adding_a_production_value_with_a_scan
 
     let dir = tempfile::tempdir().unwrap();
     let (server, work) = (dir.path().join("server.git"), dir.path().join("work"));
-    let git = |at: &std::path::Path, args: &[&str]| {
+    let git_with = |at: &std::path::Path, args: &[&str], env: &[(&str, &str)]| {
         let mut cmd = std::process::Command::new("git");
         cmd.current_dir(at).args(["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "init.defaultBranch=main"]).args(args).env("ROLL_API_URL", &api);
-        for (k, v) in hook_env {
+        for (k, v) in hook_env.iter().chain(env) {
             cmd.env(k, v);
         }
         cmd.output().unwrap()
     };
+    let git = |at: &std::path::Path, args: &[&str]| git_with(at, args, &[]);
     assert!(git(dir.path(), &["init", "-q", "--bare", "server.git"]).status.success());
     assert!(git(&server, &["config", "receive.advertisePushOptions", "true"]).status.success());
     let hook = server.join("hooks/pre-receive");
@@ -935,24 +936,51 @@ async fn a_pre_receive_hook_refuses_a_push_adding_a_production_value_with_a_scan
         assert!(git(&work, &["add", file]).status.success());
         assert!(git(&work, &["commit", "-qm", file]).status.success());
     };
-    let push = |extra: &[&str]| {
-        let o = git(&work, &[&["push"][..], extra, &[server.to_str().unwrap(), "main"]].concat());
+    let push_as = |extra: &[&str], env: &[(&str, &str)]| {
+        let o = git_with(&work, &[&["push"][..], extra, &[server.to_str().unwrap(), "main"]].concat(), env);
         (o.status.success(), String::from_utf8_lossy(&o.stderr).into_owned())
     };
+    let push = |extra: &[&str]| push_as(extra, &[]);
 
     commit("README.md", "# shop\nHOST=db.internal\n");
     let (passed, said) = push(&[]);
     assert!(passed, "a new branch without values goes through: {said}");
 
+    // A scan-only token is told the environment, never the key's name.
     commit("config.env", "PORT=3000\nDATABASE_URL=fake-Pg9xQ2vLm7RtZk4WbN8s\n");
     let (passed, said) = push(&[]);
-    assert!(!passed && said.contains("config.env:2  DATABASE_URL (production)") && said.contains("refused"), "{said}");
-    assert!(!said.contains(value), "the value never shows: {said}");
+    assert!(!passed && said.contains("config.env:2  a value of production") && said.contains("refused"), "{said}");
+    assert!(!said.contains(value) && !said.contains("DATABASE_URL"), "the value never shows: {said}");
+    assert!(git(&work, &["reset", "-q", "--hard", "HEAD~1"]).status.success());
 
-    let (passed, said) = push(&["-o", "breakglass"]);
+    // A minified bundle's one long line is read.
+    commit("bundle.js", &format!("var a=\"{}\";var k=\"{value}\";\n", "x-".repeat(2500)));
+    let (passed, said) = push(&[]);
+    assert!(!passed && said.contains("bundle.js:1"), "{said}");
+    assert!(git(&work, &["reset", "-q", "--hard", "HEAD~1"]).status.success());
+
+    // A commit a pull request's ref already holds (no push made it) is read when it's merged.
+    assert!(git(&work, &["switch", "-q", "-c", "pr"]).status.success());
+    commit("config.env", "PORT=3000\nDATABASE_URL=fake-Pg9xQ2vLm7RtZk4WbN8s\n");
+    assert!(git(&work, &["switch", "-q", "main"]).status.success());
+    assert!(git(&server, &["fetch", "-q", work.to_str().unwrap(), "pr:refs/pull/1/head"]).status.success());
+    assert!(git(&work, &["merge", "-q", "pr"]).status.success());
+    let (passed, said) = push(&[]);
+    assert!(!passed && said.contains("config.env:2"), "{said}");
+
+    // Break glass is the project's to allow, names the pusher, and never passes unrecorded.
+    let alice = [("GITHUB_USER_LOGIN", "alice")];
+    let (passed, said) = push_as(&["-o", "breakglass"], &alice);
+    assert!(!passed && said.contains("break glass refused"), "no one may until an admin says: {said}");
+    assert!(ok(&api, &[], &["secrets", "-p", "shop", "breakglass", "alice"], None).await.contains("alice"));
+    let (passed, said) = push_as(&["-o", "breakglass"], &[("GITHUB_USER_LOGIN", "alice"), ("ROLL_API_URL", "http://127.0.0.1:9")]);
+    assert!(!passed && said.contains("couldn't"), "{said}");
+    let (passed, said) = push_as(&["-o", "breakglass"], &alice);
     assert!(passed && said.contains("breakglass"), "{said}");
     let audit: serde_json::Value = reqwest::get(format!("{api}/v1/secrets/projects/{prj}/audit?action=secrets.scan.breakglass")).await.unwrap().json().await.unwrap();
     assert_eq!(audit[0]["keys"], serde_json::json!(["DATABASE_URL"]), "{audit}");
+    let summary = audit[0]["summary"].as_str().unwrap_or_default();
+    assert!(summary.contains("by alice to refs/heads/main"), "{audit}");
 }
 
 /// `roll secrets agent` on port 0 for `shop`'s production, with `env` set (its login): its address

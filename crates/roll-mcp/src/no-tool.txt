@@ -86,7 +86,6 @@ POST /v1/redis/replicas/{id}/unload                                            t
 POST /v1/search/clusters/{id}/browser-keys                                     answers or sets a credential (#358)
 POST /v1/search/clusters/{id}/browser-keys/{key}/rotate                        answers or sets a credential (a derivable browser key's signing secret)
 GET /v1/search/clusters/{id}/indices/{index}/docs                              no such handler (only POST exists)
-POST /v1/search/clusters/{id}/inference/secrets                                answers or sets a credential (an inference service's key)
 POST /v1/search/clusters/{id}/keys                                             answers or sets a credential
 POST /v1/search/clusters/{id}/migrate                                          an outside integration's setup: an admin's, with the remote's credentials (#485)
 POST /v1/search/clusters/{id}/migrate/inspect                                  answers or sets a credential: the remote's credentials go in its body (#485)
@@ -156,6 +155,8 @@ DELETE /v1/secrets/projects/{project}/identities/{id}                          a
 PATCH /v1/secrets/projects/{project}/identities/{id}                           an outside integration's setup: an admin's, with its credentials
 PUT /v1/secrets/projects/{project}/identities/{id}/jwks                        an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/identities/{id}/bootstrap                  answers or sets a credential (a machine's bootstrap token)
+GET /v1/secrets/projects/{project}/identities/{id}/machines                    an outside integration's setup: an admin's, with its credentials
+DELETE /v1/secrets/projects/{project}/identities/{id}/machines/{chain}         a person's call (approving, accepting, cutting off)
 * /v1/secrets/projects/{project}/kms                                           an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/kubernetes                                 an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/kubernetes/{id}                          an outside integration's setup: an admin's, with its credentials

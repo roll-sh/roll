@@ -720,8 +720,8 @@ default) with the project's `env` overrides and the branched resources' URLs on 
   ensure: made if missing, `replace: true` so its own keys are exactly the overrides and branch
   URLs, a removed override doesn't linger; an unchanged repeat records nothing). A different base
   or trust answers 409, and the environment is made again.
-- **It expires by itself.** `ttl_minutes` is a day, renewed by each whole converge (a running
-  preview's every few minutes, a sleeping one's every hour), so a teardown that never happened
+- **It expires by itself.** `ttl_minutes` is a day, renewed by each whole converge (every
+  hour for a settled preview, at once for a deploy, a reset or a refresh), so a teardown that never happened
   leaves it for a day at most; roll secrets then deletes it and revokes its leases.
 - **Keys that don't resolve are said.** A reference to nothing, or to a protected value an
   untrusted preview may not read, leaves the key out (a check would fail on it); the preview's
@@ -1424,12 +1424,12 @@ own rates (the same ones its usage page shows).
 
 - **Sleeping**, per month: the bytes each branch owns, at its product's storage rate. Compute
   costs nothing. Nor does it cost roll's control plane much: usage is read every 5 minutes
-  (`usage_every`), but a settled sleeping preview goes through a whole converge (roll secrets'
+  (`usage_every`), but a settled preview, asleep or running, goes through a whole converge (roll secrets'
   ensure, its base's links followed, every branch checked) only every hour (`settled_every`;
   well inside its environment's 24 h lease), its usage read alone in between, as Render and
   Vercel meter idle previews without waking them. Over its size cap on such a read, it converges
   to sleep there. A link added to the base reaches a sleeping preview at that hourly converge
-  (rules' changes reach every preview at once). `a_sleeping_previews_usage_is_read_without_a_whole_converge`.
+  (rules' changes reach every preview at once). `a_settled_previews_usage_is_read_without_a_whole_converge`.
 - **Active**, per hour: the services' containers (memory GiB-hours), Postgres compute units
   while connected, and Redis memory while loaded.
 - **Runs**: its browsers' and jobs' containers by their GiB-hours at the same rate: screenshot
@@ -2343,7 +2343,33 @@ type Settings = {
     is (Chromatic's accessibility tests: its rules, its language and title), while more than 30 s
     of the run are left so a big Storybook still gets its pictures, 8 KB of it at most; what it
     adds against main's same story counts like a page's (`a11y_added`). Live: the live
-    Storybook's stories carry it. A story gone from Storybook goes
+    Storybook's stories carry it. Each story's interaction test too (Chromatic's interaction
+    tests): its `play` function runs as Storybook renders the story, and the run reads how it
+    went from Storybook's own preview (`__STORYBOOK_PREVIEW__.storyRenders`, Storybook 7 and
+    later: the story's render by id, its `phase` and whether it has a `playFunction`), waiting up
+    to 5 s for it to end before the picture. It's the one read from the page's own JavaScript
+    (every other check runs in an isolated world the page's code can't reach): what it answers is
+    the story's word about its own test, so a forged "passed" only hides its own failure; each
+    read is bounded to 2 s and taken as one of two words. `play` on the story's page is `failed`
+    when it threw (or the story's render did: phase `errored`), with `play_error` what it threw as
+    Storybook's frame shows it (its error display, `#error-message`, read in the isolated world: one
+    line of 300 characters at most, masked like the page's other words), and `passed` when a play
+    function ran to its end;
+    against main's same story, one that fails where main's passes is `against.play_broke`. The
+    sheet says which. Live: the fixture's preview object has Deep's play throw and the first
+    story's pass. With `github.browsers`, the change's first 5 stories (as the run
+    ordered them: those it touched first) are taken in each of those browsers too, once
+    Chromium's run knows which (Chromatic's cross-browser stories): `story:<id>@<browser>`
+    ("button / primary · Firefox" on the sheet), each loaded alone and clipped to its root, in
+    the service's network and locked down as the other browsers' run is, and compared with
+    main's same story in that browser. Main's preview takes, first, the stories the project's
+    open changes keep and it hasn't (in Chromium past its 40, or in another browser): a change's
+    run that has one queues main's again at its head (`stories_first`), and each change is then
+    compared again (a baseline on demand). A story main's Storybook doesn't have (the change added
+    it) is asked for once per head, never again until main moves.
+    `main_takes_the_stories_a_change_has_and_it_hasnt`.
+    Best effort: Chromium's stories stand without them. Live: the live Storybook's first story
+    in Firefox and in WebKit at a phone's size. A story gone from Storybook goes
     from the preview. The index is the preview's code's: an id Storybook wouldn't make
     (`components-button--primary`) is dropped. A Storybook on another service is kept with that
     service's pages while it runs what it ran (TurboSnap), and taken at once when the rule is
@@ -2874,35 +2900,29 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-Ranked again after a seventh product review (2026-11-25, evening), against Vercel's comments,
-Chromatic's cross-browser and accessibility tests, Render's suspended services, Neon's snapshots.
+Ranked again after an eighth product review (2026-11-26, morning), against Chromatic's
+interaction and accessibility tests and baselines, Vercel's and Netlify's comments, Render's and
+Railway's previews, Neon's branches.
 
-1. **A reply and a resolve from the page in one click**: the button's own notes open the whole
-   dashboard to reply to or resolve one; the small window #1016 opens for a new note, for those
-   too (Vercel's comment threads answer in place).
-2. **Stories in the other browsers** (Chromatic's cross-browser stories): `github.browsers` takes
-   pages in Firefox and WebKit, stories only in Chromium; take the change's first stories in each
-   browser asked for, compared with main's same story in that browser.
-3. **Restore points for Redis, search and streams**: NoSQL's landed (#1028, its point-in-time
-   restore). A point is kept only where the product puts a branch back in place, keeping its id
-   (their delete guards check it); each needs its control plane's reset `from`, as pg-control's:
-   ask the Redis, search and streams owners.
-4. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+1. **Stories' interaction tests, in review** (Chromatic's): each story's `play` function, read as
+   Storybook ran it, `failed` or `passed` on its page and against main's. Next for it: the failing
+   step and its message (Storybook's interactions log), and the interaction tests in the other
+   browsers.
+2. **Restore points for Redis, search and streams**: NoSQL's landed (#1028). A point is kept only
+   where the product puts a branch back in place, keeping its id; each needs its control plane's
+   reset `from` (roll search: feasible, about a day, with its user to schedule).
+3. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-5. **A running settled preview's usage read alone too**: #1017 does it for sleeping ones; a running
-   one still converges whole every 5 minutes between its health and route reads.
-6. **roll apps lookups that miss cost a list each**: `RollApps::find` lists every roll apps
-   service when a preview's service isn't one (a `roll.toml` service not started on this node),
-   every usage round; remember the miss for a while, never across a deploy that makes the
-   environment.
-7. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
-   longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
-   0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
-   (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-8. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+4. **The data step's Postgres compute start** (pg-control's; watch): most of the data step is the
+   Postgres branch's compute start and its masking, which needs that compute up.
+5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-9. **Watch: pg-control's recovery to a time seconds old** (unowned).
+6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-26, early: a baseline on demand for stories (#1082); a change's first stories in the other browsers (#1064); roll apps lookups that miss remembered (#1066); a settled running preview's usage read alone too (#1069).
+
+Landed 2026-11-25, night: a note's reply and resolve in roll's small window (#1052); branches' handed-out credentials sealed at rest (#1058).
 
 Landed 2026-11-25, afternoon and evening:
 - browser runs and jobs in the cost (#1010), and roll apps services' own bill, builds included, with

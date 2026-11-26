@@ -625,11 +625,13 @@ fn connection_of(cfg: &SearchConfig, name: &str) -> Value {
 /// the whole cluster's (a template for `tenant-a-*` could match `tenant-b-*`), so they go.
 fn link_role(indices: Option<&[String]>) -> Value {
     match indices {
+        // `post_behavioral_analytics_event`: an app that searches records its clicks
+        // (`_application/analytics/{collection}/event/search_click`) with the same key.
         None => json!({
-            "cluster": ["monitor", "manage_index_templates", "manage_ingest_pipelines", "manage_ilm"],
+            "cluster": ["monitor", "manage_index_templates", "manage_ingest_pipelines", "manage_ilm", "post_behavioral_analytics_event"],
             "indices": [{ "names": ["*"], "privileges": ["all"] }]
         }),
-        Some(names) => json!({ "cluster": ["monitor"], "indices": [{ "names": names, "privileges": ["all"] }] }),
+        Some(names) => json!({ "cluster": ["monitor", "post_behavioral_analytics_event"], "indices": [{ "names": names, "privileges": ["all"] }] }),
     }
 }
 
