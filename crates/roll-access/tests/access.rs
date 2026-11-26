@@ -3443,7 +3443,7 @@ async fn a_dns_token_read_once_is_asked_for_by_its_folder() {
     let (s, out) = d.call(&token, Method::POST, path, Some(json!({ "cloudflare_token": "roll://production/dns/CF_TOKEN" }))).await;
     assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
     let (_, asked) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{}", out["approval"].as_str().unwrap()), None).await;
-    assert_eq!((asked["product"].as_str(), asked["action"].as_str(), asked["environment"].as_str(), asked["path"].as_str()), (Some("secrets"), Some("reveal"), Some("production"), Some("/dns")), "{asked}");
+    assert_eq!((asked["product"].as_str(), asked["action"].as_str(), asked["environment"].as_str(), asked["scope_path"].as_str()), (Some("secrets"), Some("reveal"), Some("production"), Some("/dns")), "{asked}");
 }
 
 /// Claude's auto-connect (its connector docs, "Enterprise Managed Auth"): Claude signs the
