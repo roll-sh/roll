@@ -406,15 +406,19 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             groups,
             sets,
             aggs,
-        } => Box::new(
-            super::agg::AggNode::new(
-                open_agg_input(input, groups, aggs, ctx)?,
-                groups.clone(),
-                sets.clone(),
-                aggs.clone(),
+        } => {
+            let sorted = super::agg::sorted_distinct(input, groups, sets.is_none(), aggs, ctx);
+            let aggs = sorted.as_ref().unwrap_or(aggs);
+            Box::new(
+                super::agg::AggNode::new(
+                    open_agg_input(input, groups, aggs, ctx)?,
+                    groups.clone(),
+                    sets.clone(),
+                    aggs.clone(),
+                )
+                    .planned(plan.clone()),
             )
-                .planned(plan.clone()),
-        ),
+        }
         Plan::Window { input, calls } => {
             // (Its rows are the input's, then the calls' results.)
             let need = (|| {

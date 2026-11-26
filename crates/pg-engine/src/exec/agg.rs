@@ -2392,6 +2392,49 @@ pub fn hash_distinct(a: &AggCall) -> bool {
     }
 }
 
+/// A plain aggregation's `hash_distinct` aggregates when the table its input scans has more
+/// rows than their values' sort fits in work_mem (pg_class.reltuples, each value a SortTuple
+/// and its tuple): each given its arguments as its ORDER BY (the same aggregate), so its values
+/// are sorted as PostgreSQL's per-aggregate tuplesort sorts them (`Buffered::Sort`, runs on
+/// disk past work_mem) and fed once a run of equal ones, not kept in a hash set. Decided when
+/// the plan is opened; None: the aggregates as they are.
+#[inline(never)]
+pub fn sorted_distinct(
+    input: &crate::sql::plan::Plan,
+    groups: &[crate::sql::expr::Expr],
+    plain: bool,
+    aggs: &[AggCall],
+    ctx: &ExecCtx,
+) -> Option<Vec<AggCall>> {
+    use crate::sql::plan::Plan;
+    if !groups.is_empty() || !plain || !aggs.iter().any(hash_distinct) {
+        return None;
+    }
+    let mut p = input;
+    let table = loop {
+        match p {
+            Plan::Project { input, .. } | Plan::Filter { input, .. } => p = input,
+            Plan::Scan(s) if s.index.is_none() && !matches!(s.access, crate::sql::plan::Access::Index { .. }) => break &s.table,
+            _ => return None,
+        }
+    };
+    let tuples = ctx.catalog().relstats.get(&table.oid)?.tuples;
+    if tuples * 56.0 <= super::workmem::work_mem(ctx) as f64 {
+        return None;
+    }
+    Some(
+        aggs.iter()
+            .map(|a| {
+                let mut a = a.clone();
+                if hash_distinct(&a) {
+                    a.order_by = a.args.iter().map(|e| SortKey { expr: e.clone(), desc: false, nulls_first: false, using: None }).collect();
+                }
+                a
+            })
+            .collect(),
+    )
+}
+
 /// Aggregates that share another's transition state (`find_compatible_trans`): the same
 /// user-defined transition function, initial value and inputs. `share[i] = Some(j)`: i
 /// takes j's state.

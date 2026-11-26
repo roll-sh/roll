@@ -581,3 +581,42 @@ fn several_windows() {
     drop(s);
     eng.shutdown();
 }
+
+/// count / sum / avg (DISTINCT x) of a plain aggregation over a table larger than work_mem:
+/// each aggregate's values sorted as PostgreSQL's per-aggregate sort sorts them (a temporary
+/// file each past work_mem, PostgreSQL 18.6's count here), not kept in a hash set; the
+/// results are those of the hash set's.
+#[test]
+fn distinct_aggregates_spill() {
+    std::thread::Builder::new().stack_size(64 << 20).spawn(distinct_aggregates).unwrap().join().unwrap();
+}
+
+fn distinct_aggregates() {
+    let dir = tempfile::tempdir().unwrap();
+    let eng = open(dir.path());
+    let mut s = eng.connect(1, "postgres", "postgres", "postgres").unwrap();
+    for sql in [
+        "CREATE TABLE cd (a int, t text)",
+        "INSERT INTO cd SELECT g % 7000, md5((g % 9000)::text) FROM generate_series(1, 20000) g",
+        "ANALYZE cd",
+    ] {
+        q(&mut s, sql).unwrap();
+    }
+    for (sql, files) in [
+        ("SELECT count(DISTINCT t), count(DISTINCT a) FROM cd", 2),
+        ("SELECT count(DISTINCT t) FROM cd WHERE a > 10", 1),
+    ] {
+        q(&mut s, "SET work_mem = '256MB'").unwrap();
+        let want = q(&mut s, sql).unwrap();
+        q(&mut s, "SET work_mem = '64kB'").unwrap();
+        q(&mut s, "SELECT pg_stat_force_next_flush()").unwrap();
+        let f0 = int(&mut s, "SELECT temp_files FROM pg_stat_database WHERE datname = current_database()");
+        assert_eq!(q(&mut s, sql).unwrap(), want, "{sql}");
+        assert_eq!(temp_files(dir.path()), 0);
+        q(&mut s, "SELECT pg_stat_force_next_flush()").unwrap();
+        let f1 = int(&mut s, "SELECT temp_files FROM pg_stat_database WHERE datname = current_database()");
+        assert_eq!(f1 - f0, files, "{sql}: the aggregates' sorts' files");
+    }
+    drop(s);
+    eng.shutdown();
+}
