@@ -1330,12 +1330,14 @@ pub fn authorize_term_vectors(ctx: &Ctx, docs: &[(String, (String, u32))]) -> Ve
 }
 
 /// The `action` checks of the per-shard requests a composite read sends: one denied name
-/// fails every document of its shard.
+/// fails every document of its shard. A name is authorized as it resolves ([`authz_name`]: date
+/// math and `::failures` resolved, an alias as itself).
 fn authorize_shard_reads(ctx: &Ctx, action: &str, docs: &[(String, (String, u32))]) -> Vec<Option<EsError>> {
     let Some(p) = ctx.principal.get().filter(|p| !p.is_superuser()) else { return vec![None; docs.len()] };
     let eff = effective(&file_roles(ctx.cluster), &ctx.state(), p);
     let mut out = vec![None; docs.len()];
-    for (shard, denied_on) in denied_shards(&eff, action, docs.iter().enumerate().map(|(i, (n, s))| (i, s, n))) {
+    let named: Vec<String> = docs.iter().map(|(n, _)| authz_name(n, ctx.now_ms)).collect();
+    for (shard, denied_on) in denied_shards(&eff, action, docs.iter().zip(&named).enumerate().map(|(i, ((_, s), n))| (i, s, n))) {
         for (i, (_, s)) in docs.iter().enumerate() {
             if s == shard {
                 out[i] = Some(denied(p, action, Some(&denied_on)));

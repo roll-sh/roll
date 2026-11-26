@@ -4171,6 +4171,11 @@ async fn names_are_authorized_as_resolved() {
         let (s, v) = rd(path).await;
         assert_eq!(s, 403, "{path}: {v}");
     }
+    // A multi get's and multi term vectors' items too.
+    for path in ["/_mget", "/_mtermvectors"] {
+        let (s, v) = e.es("rd@rn", "rd-pass-1", Method::POST, path, Some(json!({"docs": [{"_index": "<.async-search>", "_id": "x"}]}))).await;
+        assert_eq!((s, &v["docs"][0]["error"]["type"]), (200, &json!("security_exception")), "{path}: {v}");
+    }
     // A clone's target is authorized too.
     let (s, v) = lim(Method::POST, "/mine/_clone/other-copy", None).await;
     assert!(s == 403 && v.to_string().contains("indices:admin/resize"), "{s} {v}");
