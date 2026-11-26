@@ -527,6 +527,13 @@ CREATE TABLE IF NOT EXISTS domains (
 CREATE INDEX IF NOT EXISTS domains_env ON domains (service, env);
 -- A project's own preview domain (`*.preview.acme.dev`, roll previews' preview deployment
 -- suffix), and the label each preview environment answers to under it.
+CREATE TABLE IF NOT EXISTS env_deploy_tags (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    pattern TEXT NOT NULL,
+    seen TEXT NOT NULL,
+    PRIMARY KEY (service, env)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS domain_claims (
     hostname TEXT NOT NULL,
     service TEXT NOT NULL,
@@ -1473,7 +1480,7 @@ impl Store {
             c.execute("DELETE FROM deploy_overrides WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
             c.execute("DELETE FROM status_days WHERE key LIKE ?", [format!("%:{id}/%")])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans", "env_data", "env_branches", "udp_ports", "env_unscheduled", "sandboxes", "env_peering", "volume_hours"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans", "env_data", "env_branches", "udp_ports", "env_unscheduled", "sandboxes", "env_peering", "volume_hours", "env_deploy_tags"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -1613,7 +1620,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "form_submissions", "env_data", "udp_ports", "env_unscheduled", "sandboxes", "env_peering"] {
+            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "form_submissions", "env_data", "udp_ports", "env_unscheduled", "sandboxes", "env_peering", "env_deploy_tags"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             // Its schedules', challenge's and base images' state goes with it.
@@ -2960,6 +2967,44 @@ impl Store {
             Ok(())
         })?;
         Ok(Domain { hostname: host.into(), record: "none", kind: DomainKind::Custom, status: DomainStatus::Pending, target: String::new(), token, error: None, tls, tls_error: None, created_at: now, redirect_to: None, port: None })
+    }
+
+    /// The tag pattern an environment deploys (`deploy_tags`) and the tags it has acted on.
+    pub fn deploy_tags(&self, service: &str, env: &str) -> Result<Option<(String, Vec<String>)>> {
+        Ok(self
+            .db
+            .query_row("SELECT pattern, seen FROM env_deploy_tags WHERE service = ? AND env = ?", [service, env], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .optional()?
+            .map(|(p, s)| (p, serde_json::from_str(&s).unwrap_or_default())))
+    }
+
+    /// An environment's tag pattern set, its tags already there marked as acted on (never
+    /// deployed: only a tag made from now on is), or (None) removed.
+    pub fn set_deploy_tags(&self, service: &str, env: &str, set: Option<(&str, &[String])>) -> Result<()> {
+        match set {
+            Some((pattern, seen)) => self.db.execute(
+                "INSERT INTO env_deploy_tags (service, env, pattern, seen) VALUES (?, ?, ?, ?) ON CONFLICT (service, env) DO UPDATE SET pattern = excluded.pattern, seen = excluded.seen",
+                params![service, env, pattern, serde_json::to_string(seen).expect("tags serialize")],
+            )?,
+            None => self.db.execute("DELETE FROM env_deploy_tags WHERE service = ? AND env = ?", [service, env])?,
+        };
+        Ok(())
+    }
+
+    /// `tag` marked as acted on: false when it already was (each tag deploys once). The newest
+    /// [`crate::tags::MAX_SEEN`] are kept.
+    pub fn mark_tag_seen(&self, service: &str, env: &str, tag: &str) -> Result<bool> {
+        self.db.write(|c| {
+            let Some(seen): Option<String> = c.query_row("SELECT seen FROM env_deploy_tags WHERE service = ? AND env = ?", [service, env], |r| r.get(0)).optional()? else { return Ok(false) };
+            let mut seen: Vec<String> = serde_json::from_str(&seen).unwrap_or_default();
+            if seen.iter().any(|t| t == tag) {
+                return Ok(false);
+            }
+            seen.push(tag.to_string());
+            let skip = seen.len().saturating_sub(crate::tags::MAX_SEEN);
+            c.execute("UPDATE env_deploy_tags SET seen = ? WHERE service = ? AND env = ?", params![serde_json::to_string(&seen[skip..]).expect("tags serialize"), service, env])?;
+            Ok(true)
+        })
     }
 
     /// The token `service`'s `env` proves it holds `host` with (Vercel's "linked to another team"),

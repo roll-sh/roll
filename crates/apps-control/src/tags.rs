@@ -14,6 +14,44 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// The most tags an environment remembers acting on (its `deploy_tags`), newest kept.
+pub const MAX_SEEN: usize = 1000;
+
+/// Whether `pattern` (`v*`, `release-*`, `v1.*.*`: `*` any run of characters, `/` too) matches
+/// the tag `name` whole.
+pub fn tag_matches(pattern: &str, name: &str) -> bool {
+    let (p, n) = (pattern.as_bytes(), name.as_bytes());
+    // Greedy with one backtrack point: linear, whatever the pattern.
+    let (mut i, mut j, mut star, mut mark) = (0, 0, None, 0);
+    while j < n.len() {
+        if i < p.len() && p[i] == b'*' {
+            star = Some(i);
+            mark = j;
+            i += 1;
+        } else if i < p.len() && p[i] == n[j] {
+            i += 1;
+            j += 1;
+        } else if let Some(s) = star {
+            i = s + 1;
+            mark += 1;
+            j = mark;
+        } else {
+            return false;
+        }
+    }
+    p[i..].iter().all(|b| *b == b'*')
+}
+
+/// A tag pattern as `deploy_tags` takes it: 1–100 of `A–Z a–z 0–9 . _ / - + *`, with a
+/// character that isn't `*`.
+pub fn check_tag_pattern(p: &str) -> std::result::Result<(), String> {
+    if (1..=100).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_alphanumeric() || b"._/-+*".contains(&b)) && p.bytes().any(|b| b != b'*') {
+        Ok(())
+    } else {
+        Err("deploy_tags is a tag pattern like v* (1–100 of letters, digits, . _ / - + and *, more than *)".into())
+    }
+}
+
 /// What one look at an environment's secrets did ([`Apps::check_secrets`]).
 enum SecretsCheck {
     /// A redeploy, by its id.
@@ -290,6 +328,18 @@ impl Apps {
             .deploy(service, env, json!({ "message": format!("{image} moved to {short}"), "no_traffic": ready }), By { trigger: Trigger::Api, actor: Some("tag watch".into()) }, None, None)
             .await?;
         Ok(Some(d.id))
+    }
+}
+
+#[cfg(test)]
+mod tags_tests {
+    use super::tag_matches;
+
+    #[test]
+    fn a_pattern_matches_whole_tags() {
+        assert!(tag_matches("v*", "v1.2.3") && tag_matches("v*", "v") && !tag_matches("v*", "release-v1"));
+        assert!(tag_matches("v1.*.*", "v1.20.3") && !tag_matches("v1.*.*", "v1.2"));
+        assert!(tag_matches("release/*", "release/2026-11") && tag_matches("*-prod", "eu-prod") && !tag_matches("*-prod", "eu-prod-2"));
     }
 }
 

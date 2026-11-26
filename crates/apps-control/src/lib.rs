@@ -1936,6 +1936,10 @@ impl Apps {
             run: r.run.clone(),
             hook: r.hook_hash.is_some(),
             follow_tag: r.follow_tag,
+            deploy_tags: {
+                let (sid, e) = (r.service.clone(), r.name.clone());
+                self.db(move |s| s.deploy_tags(&sid, &e)).await.ok().flatten().map(|(p, _)| p)
+            },
             redeploy_on_secrets: r.redeploy_on_secrets,
             traces: {
                 let (sid, e) = (r.service.clone(), r.name.clone());
@@ -2115,7 +2119,7 @@ impl Apps {
     pub async fn put_environment_by(self: &Arc<Self>, service: &str, env: &str, body: Value, by: Option<String>) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "keep_days", "approvals", "badge", "closed_by", "data", "scheduled", "attack_mode", "challenge_until", "preflight"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "keep_days", "approvals", "badge", "closed_by", "data", "scheduled", "attack_mode", "challenge_until", "preflight", "deploy_tags"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -2830,6 +2834,27 @@ impl Apps {
                 self.changed(service);
             }
             _ => {}
+        }
+        // The Git tags it deploys (Cloud Build's tag triggers): a Git URL service's, from its hook;
+        // the tags already there are marked as seen, so only one made from now on deploys.
+        match o.get("deploy_tags") {
+            None => {}
+            Some(Value::Null) => {
+                let (sid, e) = (service.to_string(), env.to_string());
+                self.db(move |s| s.set_deploy_tags(&sid, &e, None)).await?;
+            }
+            Some(Value::String(p)) => {
+                crate::tags::check_tag_pattern(p).map_err(Error::BadRequest)?;
+                let Source::Git { url, .. } = &svc.source else {
+                    return Err(Error::BadRequest("deploy_tags is for a Git URL service (its repository's hook sends the tags)".into()));
+                };
+                let refs = self.git_remote(service, url).await.ls_refs().await.map_err(|e| Error::BadRequest(format!("its repository's tags couldn't be read: {e:#}")))?;
+                let seen: Vec<String> = refs.refs.iter().filter_map(|r| r.name.strip_prefix("refs/tags/")).filter(|t| crate::tags::tag_matches(p, t)).map(str::to_string).collect();
+                let skip = seen.len().saturating_sub(crate::tags::MAX_SEEN);
+                let (sid, e, p) = (service.to_string(), env.to_string(), p.clone());
+                self.db(move |s| s.set_deploy_tags(&sid, &e, Some((&p, &seen[skip..])))).await?;
+            }
+            Some(_) => return Err(Error::BadRequest("deploy_tags is a tag pattern like v*, or null".into())),
         }
         match o.get("follow_tag") {
             None | Some(Value::Null) => {}
