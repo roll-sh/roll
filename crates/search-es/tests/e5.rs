@@ -169,9 +169,8 @@ async fn semantic_text_defaults_to_the_model_the_node_runs() {
     assert_eq!(m.pointer(&["docs", "mappings", "properties", "body", "inference_id"]).and_then(Value::as_str), Some(".multilingual-e5-small-elasticsearch"), "{m}");
     let s = get(&c, "/docs/_settings").await;
     assert_eq!(s.pointer(&["docs", "settings", "index", "semantic_text", "default_inference_id"]).and_then(Value::as_str), Some(".multilingual-e5-small-elasticsearch"), "{s}");
-    let mut req = EsRequest::json("PUT", "/docs/_doc/1?refresh=true", r#"{"body":"a mapping copied from the docs"}"#.to_string());
-    req.headers.push(("content-type".into(), "application/json".into()));
-    assert_eq!(search_es::handle(&c, req).await.status, 201);
+    let r = search_es::handle(&c, EsRequest::json("PUT", "/docs/_doc/1?refresh=true", r#"{"body":"a mapping copied from the docs"}"#.to_string())).await;
+    assert_eq!(r.status, 201, "{}", String::from_utf8_lossy(&r.body));
     assert!(!fake.calls.lock().unwrap().is_empty(), "the node's model embedded it");
     // The index's own choice, and a field's, stand.
     let own = r#"{"settings":{"index.semantic_text.default_inference_id":".elser-2-elasticsearch"},"mappings":{"properties":{"a":{"type":"semantic_text"},"b":{"type":"semantic_text","inference_id":".elser-2-elasticsearch"}}}}"#;
