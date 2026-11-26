@@ -720,8 +720,8 @@ default) with the project's `env` overrides and the branched resources' URLs on 
   ensure: made if missing, `replace: true` so its own keys are exactly the overrides and branch
   URLs, a removed override doesn't linger; an unchanged repeat records nothing). A different base
   or trust answers 409, and the environment is made again.
-- **It expires by itself.** `ttl_minutes` is a day, renewed by each whole converge (a running
-  preview's every few minutes, a sleeping one's every hour), so a teardown that never happened
+- **It expires by itself.** `ttl_minutes` is a day, renewed by each whole converge (every
+  hour for a settled preview, at once for a deploy, a reset or a refresh), so a teardown that never happened
   leaves it for a day at most; roll secrets then deletes it and revokes its leases.
 - **Keys that don't resolve are said.** A reference to nothing, or to a protected value an
   untrusted preview may not read, leaves the key out (a check would fail on it); the preview's
@@ -1424,12 +1424,12 @@ own rates (the same ones its usage page shows).
 
 - **Sleeping**, per month: the bytes each branch owns, at its product's storage rate. Compute
   costs nothing. Nor does it cost roll's control plane much: usage is read every 5 minutes
-  (`usage_every`), but a settled sleeping preview goes through a whole converge (roll secrets'
+  (`usage_every`), but a settled preview, asleep or running, goes through a whole converge (roll secrets'
   ensure, its base's links followed, every branch checked) only every hour (`settled_every`;
   well inside its environment's 24 h lease), its usage read alone in between, as Render and
   Vercel meter idle previews without waking them. Over its size cap on such a read, it converges
   to sleep there. A link added to the base reaches a sleeping preview at that hourly converge
-  (rules' changes reach every preview at once). `a_sleeping_previews_usage_is_read_without_a_whole_converge`.
+  (rules' changes reach every preview at once). `a_settled_previews_usage_is_read_without_a_whole_converge`.
 - **Active**, per hour: the services' containers (memory GiB-hours), Postgres compute units
   while connected, and Redis memory while loaded.
 - **Runs**: its browsers' and jobs' containers by their GiB-hours at the same rate: screenshot
@@ -2896,8 +2896,8 @@ Chromatic's cross-browser and accessibility tests, Render's suspended services, 
 3. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-4. **A running settled preview's usage read alone too**: #1017 does it for sleeping ones; a running
-   one still converges whole every 5 minutes between its health and route reads.
+4. **A running settled preview's usage read alone too, in review**: as #1017 did for sleeping
+   ones; a deploy, a reset, a refresh or a failing service still converges at once.
 5. **roll apps lookups that miss cost a list each**: `RollApps::find` lists every roll apps
    service when a preview's service isn't one (a `roll.toml` service not started on this node),
    every usage round; remember the miss for a while, never across a deploy that makes the
