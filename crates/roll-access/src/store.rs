@@ -183,6 +183,11 @@ pub const MAX_WORKLOADS: usize = 10_000;
 /// Live workload grants one owner's identities hold at most, so one busy pipeline doesn't take
 /// everyone's room.
 pub const OWNER_MAX_WORKLOADS: usize = 1_000;
+/// The workload grants those two caps count: live ones, apart from bootstrap tokens and machine
+/// credentials (a chain's grants with no rules, which open nothing). Those live until their
+/// machine is gone, so they'd fill the room every CI login shares; their caller caps them per
+/// identity instead (roll secrets' `machine_chains`, store/bootstrap.rs).
+const COUNTED_WORKLOADS: &str = "kind = 'workload' AND revoked_at IS NULL AND expires_at > ? AND (chain IS NULL OR rules <> '[]')";
 /// How long a workload grant lives, in minutes.
 pub const WORKLOAD_MINUTES: std::ops::RangeInclusive<u32> = 5..=60;
 pub const ACCESS_PREFIX: &str = "rlo_";
@@ -1271,11 +1276,11 @@ impl Store {
         let rules = serde_json::to_string(&new.rules).map_err(|e| Error::Internal(e.to_string()))?;
         let ip = serde_json::to_string(&new.ip_allow).map_err(|e| Error::Internal(e.to_string()))?;
         self.db.write(|c| {
-            let live: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE kind = 'workload' AND revoked_at IS NULL AND expires_at > ?", [now], |r| r.get(0))?;
+            let live: i64 = c.query_row(&format!("SELECT COUNT(*) FROM grants WHERE {COUNTED_WORKLOADS}"), [now], |r| r.get(0))?;
             if live as usize >= MAX_WORKLOADS {
                 return Err(Error::Conflict(format!("at most {MAX_WORKLOADS} live workload tokens")));
             }
-            let theirs: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE kind = 'workload' AND revoked_at IS NULL AND expires_at > ? AND created_by = ?", params![now, created_by], |r| r.get(0))?;
+            let theirs: i64 = c.query_row(&format!("SELECT COUNT(*) FROM grants WHERE {COUNTED_WORKLOADS} AND created_by = ?"), params![now, created_by], |r| r.get(0))?;
             if theirs as usize >= OWNER_MAX_WORKLOADS {
                 return Err(Error::Conflict(format!("at most {OWNER_MAX_WORKLOADS} live workload tokens for one owner's identities")));
             }
@@ -2112,6 +2117,19 @@ impl Store {
                 Some(crate::tighten::Used { product, action, resource, count, last_at })
             })
             .collect())
+    }
+
+    /// The MCP tools a grant ran since `since` (allowed, or run on an approval), most used first, at
+    /// most `limit`: search mode lists them beside its own (Atlassian's "primary" tools, from what
+    /// this token does rather than a fixed list).
+    pub fn tools_used(&self, grant: &str, since: i64, limit: usize) -> Result<Vec<String>> {
+        Ok(self.db.read(|c| {
+            c.query(
+                "SELECT tool FROM audit WHERE grant_id = ? AND at >= ? AND tool IS NOT NULL AND (decision = 'allow' OR (decision = 'ask' AND approval IS NOT NULL AND status <> 403)) GROUP BY tool ORDER BY COUNT(*) DESC, tool LIMIT ?",
+                params![grant, since, limit as i64],
+                |r| r.get::<_, String>(0),
+            )
+        })?)
     }
 
     /// Each grant's requests in the last day, by decision: `grant id → (allowed, denied, asked)`.
