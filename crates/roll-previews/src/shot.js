@@ -101,6 +101,10 @@ listeners.add((m) => {
 });
 const check = (params, sessionId) => (world == null ? Promise.resolve(null) : send("Runtime.evaluate", { ...params, contextId: world }, sessionId).catch(() => null));
 const checkIn = check;
+// The one read from the page's own JavaScript (its main world): a story's interaction test, which
+// only Storybook's own preview there knows. What it answers is the page's word about its own test
+// (a forged "passed" only hides its own failure): bounded to 2 s, and read as one of two words.
+const pageSays = (params, sessionId) => Promise.race([send("Runtime.evaluate", params, sessionId).catch(() => null), sleep(2000).then(() => null)]);
 // What a screen reader can't name, and what a document misses (WCAG's most common failures).
 const A11Y = `JSON.stringify((() => {
   const named = (el) => (el.getAttribute("aria-label") || "").trim() || el.getAttribute("aria-labelledby") || (el.getAttribute("title") || "").trim();
@@ -480,7 +484,8 @@ const ROOT_BOX = `JSON.stringify((() => {
   return x2 > x1 && y2 > y1 ? { x: x1, y: y1, w: x2 - x1, h: y2 - y1 } : null;
 })())`;
 // A story's interaction test as Storybook ran it (Chromatic's interaction tests): its render in
-// Storybook's own preview (`__STORYBOOK_PREVIEW__.storyRenders`, 7 and later), "failed" when it
+// Storybook's own preview (`__STORYBOOK_PREVIEW__.storyRenders`, 7 and later; read in the page's
+// own world, `pageSays`), "failed" when it
 // threw (its `play` function or its render: phase `errored`), "passed" when a `play` function ran
 // to its end, "pending" while it runs, "none" without one.
 const PLAY = (id) => `(() => {
@@ -600,7 +605,7 @@ const stories = async (sessionId) => {
     // Its play function runs on render: until it ends (5 s at most), so the picture is after it.
     let play = null;
     for (let i = 0; i < 50 && Date.now() < until; i++) {
-      const r = await check({ expression: PLAY(e.id), returnByValue: true }, sessionId);
+      const r = await pageSays({ expression: PLAY(e.id), returnByValue: true }, sessionId);
       const v = r?.result?.value;
       if (v === "passed" || v === "failed") {
         play = v;
