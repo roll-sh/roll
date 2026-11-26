@@ -285,6 +285,24 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Point selects, outside the session: lock keys, portals and pgstat (2026-11-26, agent 329)
+
+HANDOFF "Point selects, outside the session: lock keys, portals and pgstat" has what changed. Plain
+dist `bench` (`tools/dist.sh --example bench`), base `214433872`, the candidate's code on it; in
+process, 1 client, 100,000 rows. Exact instructions per op (Intel PT, the client thread,
+`~/.cache/a329/inproc/`):
+
+| case | base | candidate | |
+|---|---|---|---|
+| point select, extended | 35,251 | 32,375 | -8.2% |
+| point select, simple protocol | 37,055 | 35,418 | -4.4% |
+| range_scan_100 | 392,053 | 390,416 | -0.4% |
+| short_txn (per query_copy) | 100,886 | 96,285 | -4.6%, mostly the data's state (HANDOFF) |
+
+libc and the vDSO a select: 4,033 -> 2,375; allocations 29 -> 24. TPC-H SF 0.1 in process (lane C,
+the 22 once): 17.1315 G user instructions base, 17.1296 G candidate, every query's rows and hash
+equal. Lane A read 5-8 foreign cores throughout: no cycle numbers.
+
 ## Point selects: the per-statement work (2026-11-26, agent 323)
 
 HANDOFF "Point selects: the per-statement work a read runs through" has what changed. Plain dist
