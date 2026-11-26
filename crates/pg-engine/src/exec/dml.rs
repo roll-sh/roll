@@ -6042,11 +6042,13 @@ impl Node for UpdateNode {
                         continue;
                     }
                     // (A TID scan's condition, on the new version's TID.)
-                    if let Some(tid) = super::scan::stored_tid(&bytes)
+                    let tid = super::scan::stored_tid(&bytes);
+                    if let Some(tid) = tid
                         && super::scan::tid_recheck(&self.plan.source, t.oid, tid, ctx)? == Some(false)
                     {
                         continue;
                     }
+                    super::sizing::scanned_for_change(t.oid, &dkey, tid, &ctx.sess.db);
                     src.splice(0..n, named);
                     fresh
                 }

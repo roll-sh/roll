@@ -28,6 +28,7 @@ use std::sync::Arc;
 pub mod btest;
 pub mod estkeep;
 pub mod estlocks;
+mod estpages;
 pub mod gistlog;
 pub mod kept;
 
@@ -117,6 +118,9 @@ pub struct Models {
     /// A bit per group of table oids, set (for good) once one of them, too big to model, may
     /// keep a row's lock (`estlocks`): writes past the model look no further for the others.
     locks_maybe: [std::sync::atomic::AtomicU64; 16],
+    /// The pages updates past the model changed, for all tables (`estpages`). Taken under a
+    /// shard's lock, never the other way round.
+    pages: parking_lot::Mutex<estpages::Record>,
 }
 
 /// (A power of two: hot tables' oids are usually close together, and land in shards of
@@ -132,6 +136,7 @@ impl Default for Models {
             untracked_maybe: Default::default(),
             est_dirty: Default::default(),
             locks_maybe: Default::default(),
+            pages: Default::default(),
         }
     }
 }
@@ -2348,6 +2353,7 @@ fn set_estimated(db: &Database, t: &Table, est: Option<EstHeap>) -> u32 {
         }
     }
     forget(&mut rf, t);
+    db.relfiles.pages.lock().forget(t.oid);
     let pages = est.pages;
     rf.estimated.insert(t.oid, EstHeap { limit: max_limit(), ..est });
     full_next(db, &mut rf, t.oid);
@@ -2780,21 +2786,67 @@ fn untracked_write(
     // version's page, or in space a VACUUM freed, with no indexed column changed).
     let entries = est_entries(t, indexes, row, old, vals, ctx)?;
     let txn = ctx.txn.borrow().id;
-    let mut rf = ctx.sess.db.relfiles.of(t.oid).write();
+    // (An update: its old version's row, the TID that version is stored with as the scan
+    // that found it read it (`scanned_for_change`), the updater, the horizon a prune removes versions
+    // below, and whether it keeps every index's columns: `estpages`.)
+    let upd = match (old_key, old) {
+        (Some(k), Some(o)) => {
+            let xid = ctx.txn.borrow_mut().cur_xid();
+            let hot_ok = k == key && indexes.iter().filter(|b| b.index.method != "brin").all(|bix| columns_unchanged(bix, o, row));
+            Some((k, key_hash(k), scanned_tid(t.oid, k), xid, ctx.sess.db.xids().horizon(), hot_ok))
+        }
+        _ => None,
+    };
+    let db = &ctx.sess.db;
+    let mut rf = db.relfiles.of(t.oid).write();
     let RelFiles { estimated, bulk, est_btrees, .. } = &mut *rf;
     let mut tid = None;
     let mut reused = false;
+    let mut stats = Updated::default();
+    let mut reclaimed = 0;
     if let Some(e) = estimated.get_mut(&t.oid) {
+        let ff = heap_fillfactor(t);
         // (A bulk load's, COPY's, extends the file as its model did: `add_in`.)
         let put = match old_key {
             Some(k) => Put::Update(k),
             None => Put::Row(Some(key)),
         };
-        tid = e.add_in(len, heap_fillfactor(t), Some((bulk, (t.oid, txn))), put);
+        match upd {
+            Some((k, h, stored, xid, horizon, hot_ok)) => {
+                let mut rec = db.relfiles.pages.lock();
+                // (The page of the old version: the record's for a row updated before, else
+                // where the estimate put it, else its stored TID's.)
+                let page = rec.row(h).map(|r| r.0).or_else(|| e.moved.get(&h).map(|t| t.0)).or_else(|| stored.flatten().or_else(|| e.rowid_tid(k)).map(|t| t.0));
+                match page {
+                    Some(page) => {
+                        let (at, n) = rec.update_on(e, t.oid, page, h, len, ff, xid, horizon, hot_ok);
+                        reclaimed = n;
+                        match at {
+                            Some(at) => {
+                                tid = Some(at);
+                                e.in_place = true;
+                                stats.hot = hot_ok;
+                            }
+                            None => {
+                                tid = match rec.fsm_page(e, t.oid, len, ff, page) {
+                                    Some(at) => Some(at),
+                                    None => e.add_in(len, ff, Some((bulk, (t.oid, txn))), Put::Row(None)),
+                                };
+                                e.in_place = false;
+                                stats.newpage = true;
+                            }
+                        }
+                    }
+                    None => tid = e.add_in(len, ff, Some((bulk, (t.oid, txn))), put),
+                }
+                rec.row_moved(if k == key { h } else { key_hash(key) }, tid, stats.hot);
+            }
+            None => tid = e.add_in(len, ff, Some((bulk, (t.oid, txn))), put),
+        }
         reused = tid.is_none() || e.in_place;
         // (A new row of a table keyed by row ids has a key past every other's.)
         e.placed(Some(key), tid, old.is_none() && t.has_rowid());
-        estkeep::touched(&ctx.sess.db, e);
+        estkeep::touched(db, e);
     }
     let hot = reused && old.is_some() && entries.iter().all(|e| e.3);
     if !hot {
@@ -2804,13 +2856,43 @@ fn untracked_write(
             }
         }
     }
+    drop(rf);
     // (The TID isn't stored with the row: a scan in heap order asks the estimate for it,
     // `estimated_rank`, and the rows' bytes stay as they were.)
     let _ = tid;
-    // (No HOT or new-page flag: the estimate doesn't follow the pages of the rows as loaded,
-    // and following them costs a past-model UPDATE more than the counters are worth here:
-    // HANDOFF, agent 324.)
-    Ok(Updated::default())
+    // (pgstat_update_heap_dead_tuples: what the update's prune reclaimed.)
+    super::pgstat::count_reclaimed(ctx, t.oid, reclaimed);
+    Ok(stats)
+}
+
+thread_local! {
+    /// The last row a scan handed to an UPDATE or DELETE of a table that may be past the
+    /// model (`scanned_for_change`): (its table, key, the TID its stored version has), for `untracked_write` (the
+    /// old version's page without reading it again).
+    static SCANNED: std::cell::RefCell<(u32, Vec<u8>, Option<Tid>)> = const { std::cell::RefCell::new((0, Vec::new(), None)) };
+}
+
+/// A scan hands row `key` of table `t` (stored with `tid`) to an UPDATE or DELETE.
+#[inline]
+pub fn scanned_for_change(t: u32, key: &[u8], tid: Option<Tid>, db: &Database) {
+    if db.relfiles.maybe_untracked(t) {
+        let _ = SCANNED.try_with(|s| {
+            let s = &mut *s.borrow_mut();
+            s.0 = t;
+            s.1.clear();
+            s.1.extend_from_slice(key);
+            s.2 = tid;
+        });
+    }
+}
+
+/// The TID row `key` of table `t` is stored with, when the last row scanned for a change
+/// was it (`scanned_for_change`): Some(None) when it has none.
+fn scanned_tid(t: u32, key: &[u8]) -> Option<Option<Tid>> {
+    SCANNED.try_with(|s| {
+        let s = s.borrow();
+        (s.0 == t && s.1 == key).then_some(s.2)
+    }).ok().flatten()
 }
 
 /// The btree entries a version of `row` of a table too big to model gets in those of
@@ -4432,6 +4514,7 @@ pub fn truncated(t: &Table, db: &Database) {
     rf.untracked.remove(&t.oid);
     if rf.estimated.remove(&t.oid).is_some() {
         estkeep::gone(db, &mut rf, t.oid);
+        db.relfiles.pages.lock().forget(t.oid);
     }
     for i in t.indexes.iter().chain(&t.pkey_index) {
         rf.est_btrees.remove(i);
@@ -5259,6 +5342,9 @@ pub fn dropped(oids: &[u32], db: &Database) {
     for shard in db.relfiles.all() {
         let mut rf = shard.write();
         for o in oids {
+            if rf.estimated.contains_key(o) {
+                db.relfiles.pages.lock().forget(*o);
+            }
             forget_dropped(&mut rf, o);
         }
         if !rf.est_gone.is_empty() {
@@ -5349,6 +5435,7 @@ pub fn loaded(
     rf.untracked.remove(&t.oid);
     if rf.estimated.remove(&t.oid).is_some() {
         estkeep::gone(&ctx.sess.db, &mut rf, t.oid);
+        ctx.sess.db.relfiles.pages.lock().forget(t.oid);
     }
     forget(&mut rf, t);
     let RelFiles {
@@ -5508,6 +5595,7 @@ pub fn rewritten(t: &Table, order: Option<&[Vec<u8>]>, ctx: &ExecCtx) -> Result<
         estlocks::loaded(&ctx.sess.db, t.oid, &mut est);
         let mut rf = ctx.sess.db.relfiles.of(t.oid).write();
         rf.estimated.insert(t.oid, est);
+        ctx.sess.db.relfiles.pages.lock().forget(t.oid);
         full_next(&ctx.sess.db, &mut rf, t.oid);
         return Ok(());
     }
@@ -6074,6 +6162,9 @@ pub fn vacuum(t: &Table, ctx: &ExecCtx) -> Result<Option<Vacuumed>> {
     if !ensure(t, &indexes, ctx)? {
         let (skip, freeze) = VACUUM_SKIP.with(|c| c.get());
         estlocks::vacuumed(t, freeze, skip != heapsim::Skip::AllVisible, ctx)?;
+        // (The dead versions it removes from the pages updates changed.)
+        let horizon = ctx.sess.db.xids().horizon();
+        ctx.sess.db.relfiles.pages.lock().vacuumed(t.oid, horizon);
         return Ok(None);
     }
     let db = &ctx.sess.db;

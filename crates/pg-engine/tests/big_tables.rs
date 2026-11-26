@@ -1228,15 +1228,15 @@ fn bulk_delete_batches() {
     }
 }
 
-/// pg_stat_user_tables' update counts of a modelled table (agent 324): an update whose new
-/// version fits on its old one's page after the on-access prune is HOT, one that doesn't goes
-/// to another page (n_tup_newpage_upd), the prune reclaims dead HOT versions (n_dead_tup), and
-/// after a VACUUM a new version that doesn't fit goes to a page the VACUUM freed. The counts
-/// are PostgreSQL 18.6's for the same statements. (Past the model the estimate doesn't follow
-/// the loaded pages: HANDOFF, agent 324.)
+/// pg_stat_user_tables' update counts of a table, modelled (agent 324) and too big to model
+/// (the pages its estimate keeps of the updates, `sizing::estpages`, agent 331): an update
+/// whose new version fits on its old one's page after the on-access prune is HOT, one that
+/// doesn't goes to another page (n_tup_newpage_upd), the prune reclaims dead HOT versions
+/// (n_dead_tup), and after a VACUUM a new version that doesn't fit goes to a page the VACUUM
+/// freed. The counts are PostgreSQL 18.6's for the same statements.
 #[test]
-fn update_counts_modelled() {
-    {
+fn update_counts() {
+    for big in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let eng = open(dir.path());
         let go = || {
@@ -1249,11 +1249,11 @@ fn update_counts_modelled() {
             for i in 1..400 {
                 run(&mut s, &format!("UPDATE u SET v = v + 1 WHERE id = {i}"));
             }
-            assert_eq!(counts(&mut s), "[Int8(385), Int8(14), Int8(21)]", "modelled");
+            assert_eq!(counts(&mut s), "[Int8(385), Int8(14), Int8(21)]", "big {big}");
             for _ in 0..10 {
                 run(&mut s, "UPDATE u SET v = v + 1 WHERE id = 5000");
             }
-            assert_eq!(counts(&mut s), "[Int8(394), Int8(15), Int8(31)]", "modelled");
+            assert_eq!(counts(&mut s), "[Int8(394), Int8(15), Int8(31)]", "big {big}");
             run(&mut s, "DROP TABLE u;\nCREATE TABLE u (id int PRIMARY KEY, v int, k int, filler char(84)) WITH (autovacuum_enabled = off);\nINSERT INTO u SELECT g, 0, g, '' FROM generate_series(1, 20000) g");
             let each = |s: &mut Session, at: i32| {
                 for p in 0..20 {
@@ -1262,12 +1262,12 @@ fn update_counts_modelled() {
             };
             each(&mut s, 1);
             each(&mut s, 2);
-            assert_eq!(counts(&mut s), "[Int8(20), Int8(20), Int8(40)]", "modelled");
+            assert_eq!(counts(&mut s), "[Int8(20), Int8(20), Int8(40)]", "big {big}");
             run(&mut s, "VACUUM u");
             each(&mut s, 1);
             each(&mut s, 2);
-            assert_eq!(counts(&mut s), "[Int8(39), Int8(41), Int8(34)]", "modelled");
+            assert_eq!(counts(&mut s), "[Int8(39), Int8(41), Int8(34)]", "big {big}");
         };
-        go()
+        if big { with_max_versions(5000, go) } else { go() }
     }
 }

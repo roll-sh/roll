@@ -6537,7 +6537,13 @@ impl ScanNode {
 
     fn emit(&mut self, key: &[u8], bytes: &[u8], ctx: &ExecCtx) -> Result<Option<Row>> {
         self.count_row(ctx);
-        self.note_fetch(key, stored_tid(bytes), ctx);
+        let tid = stored_tid(bytes);
+        self.note_fetch(key, tid, ctx);
+        // (An UPDATE's or DELETE's row: the TID its old version is stored with, for a table
+        // past the model's page record, `sizing::scanned_for_change`.)
+        if self.plan.with_key {
+            super::sizing::scanned_for_change(self.plan.table.oid, key, tid, &ctx.sess.db);
+        }
         if self.ios {
             let counted = match &mut self.ios_entries {
                 Some(e) => e.upto_row(&self.plan.table, key, ctx),
