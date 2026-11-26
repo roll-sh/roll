@@ -365,17 +365,29 @@ fn stamp(e: &crate::read::Entry) -> String {
 /// A sync as it's shown: a URL in its target (a deploy hook's or a chat's, which are often
 /// credentials themselves) only by its host.
 fn masked(mut s: SecretSync) -> SecretSync {
-    if let Some(o) = s.target.as_object_mut() {
+    mask_target(&mut s.target);
+    s
+}
+
+/// A target's URLs by host only (`masked`, and a token's backup). Answers whether it had any.
+pub(crate) fn mask_target(target: &mut Json) -> bool {
+    let mut any = false;
+    if let Some(o) = target.as_object_mut() {
         for (k, v) in o.iter_mut() {
             if (k == "url" || k.ends_with("_url"))
                 && let Some(u) = v.as_str()
             {
                 *v = Json::String(format!("https://{}/…", names::url_host(u)));
+                any = true;
             }
         }
     }
-    s
+    any
 }
+
+/// Why a sync from a token's backup waits: it came without its signing secret and with its
+/// target's URLs by host only, so it can't push until it's made again (resuming it is refused).
+pub(crate) const NO_CREDENTIAL: &str = "restored without its credential: set it again (a token's backup carries no sync's signing secret or URLs; make the sync again)";
 
 fn clip(s: String) -> String {
     if s.len() <= ERROR_MAX {
@@ -668,6 +680,9 @@ impl Secrets {
         // Resuming what a cut-off paused is the incident's admin's call (the sync's maker may be
         // who it was cut off from). Otherwise pausing or resuming needs what running the kind
         // does (`reveal` for a product's kind, as making, running or deleting one does), or admin.
+        if !change.paused && r.info.paused_why.as_deref() == Some(NO_CREDENTIAL) {
+            return Err(Error::Conflict("conflict", format!("sync {id} was {NO_CREDENTIAL}")));
+        }
         if !change.paused && r.info.paused_why.is_some() {
             caller.need(Action::Admin, &scope)?;
         } else if !caller.allows(Action::Admin, &scope) {
