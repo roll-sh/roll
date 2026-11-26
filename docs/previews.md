@@ -242,10 +242,14 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   so the branch keeps its endpoint, `DATABASE_URL` and role; NoSQL, a zero-copy branch cut at a
   whole second, put back by NoSQL's point-in-time restore of the preview's own branch to that
   second, in place with the same id, endpoint and credentials, within its 7 days of history:
-  what was written in the fraction of a second before saving isn't in the point), at most 3 per
-  preview. `POST
+  what was written in the fraction of a second before saving isn't in the point; Redis, the same
+  way, through redis-control's branch `at` and its restore in place, within the database's
+  `history_retention_s`: the same id, `REDIS_URL` and password, its clients disconnected), at
+  most 3 per preview. `POST
   …/restore-points/{point}/restore` puts the data back on the next converge, as a reset does:
   the services sleep meanwhile, and the seed doesn't run again (the point holds what it made).
+  A reset that makes a new branch (Redis's, a new database) deletes the points' part of it: they
+  go back only into the branch they were saved from (`Brancher::points_need_their_branch`).
   A point is masked as the branch was. New masking rules delete the points masked by the old
   ones, and a point is never put back under rules other than its own. A resource moving to
   structure-only, or no longer wanted, takes its points with it, and the preview's deletion
@@ -574,7 +578,7 @@ behind the `Apps` trait:
      | Stream | `KAFKA_BOOTSTRAP_SERVERS`, `KAFKA_SASL_USERNAME`, `KAFKA_SASL_PASSWORD` |
      | Queue | `AMQP_URL` |
      | Tasks | `ROLL_TASKS_URL`, `ROLL_TASKS_TOKEN` |
-     | Search | Only a data-only credential of the branch, as production's link gets (roll search's keys route, `access: data`): `ELASTICSEARCH_URL` with no login and `ELASTICSEARCH_API_KEY`, or on OpenSearch the data user in the URL and `OPENSEARCH_USERNAME`/`OPENSEARCH_PASSWORD`. Never the branch's own login: no data credential, no link (the branch fails and is made again). A branch whose link held that login (made before 2026-11-21) is branched again at the next converge. roll search keeps a deleted cluster restorable with its keys and password, so before a search branch is deleted or reset its data key is revoked (`Brancher::retire`) and its password changed (no change, no delete). `a_search_branch_gives_only_a_data_credential` |
+     | Search | Only a data-only credential of the branch, as production's link gets (roll search's keys route, `access: data`): `ELASTICSEARCH_URL` with no login and `ELASTICSEARCH_API_KEY`, or on OpenSearch the data user in the URL and `OPENSEARCH_USERNAME`/`OPENSEARCH_PASSWORD`. When the parent has browser keys (a site that searches from the browser), the branch gets keys of its own after them (roll search's `…/browser-keys/from-parent`) as `ROLL_SEARCH_BROWSER_KEYS` (JSON; the one to read: `ROLL_SEARCH_BROWSER_KEY`, `ROLL_SEARCH_BROWSER_KEY_ID` and `ROLL_SEARCH_SIGNING_SECRET` are only set while the parent has exactly one), hidden in logs, errors and pages as the data key is (each JSON field on its own). Previews' environment rules don't interpolate (`${…}` stays as written), so a site's build reads `ROLL_SEARCH_*` itself rather than through a rule. After every deploy (`Brancher::serve`, best effort: a problem on the preview, never a failed pass) the branch's allowed origins become its parent's plus the preview's pages' origins, off when the parent's are, and its copies of parent keys revoked or rotated since are revoked; they're all revoked with the data key, ones never recorded too. An earlier push's pinned head reaches the preview's branch at its own URL, which is among those origins; one with its own copy of the data has that copy's origins set to its own URLs. Never the branch's own login: no data credential, no link (the branch fails and is made again). A branch whose link held that login (made before 2026-11-21) is branched again at the next converge. roll search keeps a deleted cluster restorable with its keys and password, so before a search branch is deleted or reset its data key is revoked (`Brancher::retire`) and its password changed (no change, no delete). `a_search_branch_gives_only_a_data_credential`, `a_search_branch_gets_browser_keys_of_its_own_for_the_previews_pages` |
 
      A search branch starts with its parent's IP allowlist (`ip_allowlist`, search's #243). Masking
      a branch goes through roll search's own console route, so it works whatever the list says.
@@ -1202,8 +1206,8 @@ thirty-fourth review found them in the clear.
 - **Data as of a point in time** (Neon's time-travel branches): `data_at` (`-24h`, `-30m`, `-7d`
   or an RFC 3339 time, 30 days back at most) makes each branching and reset start from the
   parent as it was then, where the product keeps history: Postgres (pg-control's point in time;
-  a reset branches again from there, since an in-place reset can't go back) and NoSQL (`at`, in
-  place). Structure-only branches need no history and ignore it; other products branch as of
+  a reset branches again from there, since an in-place reset can't go back), NoSQL (`at`, in
+  place) and Redis (`at`; a reset is a new branch from then, as Redis's resets are). Structure-only branches need no history and ignore it; other products branch as of
   now and the preview's activity says so (`Brancher::branch_at`/`reset_at`;
   `engine.rs::data_at_branches_from_history_where_there_is_some`). Not checked live: a
   Postgres branch as of a time seconds old stayed in recovery past two minutes even once the
@@ -1966,7 +1970,7 @@ previews in it), the operator and admins see every project.
 | `POST /v1/previews/{id}/wake` | | `Preview`: start its services now |
 | `POST /v1/previews/{id}/reset` | `{resources?: ["postgres:prj_…"]}` | `Preview`: re-branch from the parents |
 | `GET /v1/previews/{id}/restore-points` | | `{points: [{id, label, by, at, data}], max}`: oldest first, `data` the resources it holds (`postgres:prj_…`) |
-| `POST /v1/previews/{id}/restore-points` | `{label?}` (one line, 60 characters at most) | 201 `{id, label, by, at, data}`: its Postgres and NoSQL data saved now; 409 while it isn't ready, past `max`, or with nothing to save |
+| `POST /v1/previews/{id}/restore-points` | `{label?}` (one line, 60 characters at most) | 201 `{id, label, by, at, data}`: its Postgres, NoSQL and Redis data saved now; 409 while it isn't ready, past `max`, or with nothing to save |
 | `POST /v1/previews/{id}/restore-points/{point}/restore` | | `Preview`: the data put back as the point left it, on its next converge (no seed); `delete`, as a reset is |
 | `DELETE /v1/previews/{id}/restore-points/{point}` | | 204 |
 | `GET /v1/previews/{id}/screenshot` | | `image/png`: the first service's page at the preview's head (404 when it has none); `?previous=1` the one before, `?view=phone` at a phone's width, `?base=1` the default branch's preview's, `?page=/pricing` another of `github.pages`, `?diff=base` or `?diff=previous` where it differs from that one or the one before (the page faded, changed pixels marked red) |
@@ -2353,8 +2357,10 @@ type Settings = {
     read is bounded to 2 s and taken as one of two words. `play` on the story's page is `failed`
     when it threw (or the story's render did: phase `errored`), with `play_error` what it threw as
     Storybook's frame shows it (its error display, `#error-message`, read in the isolated world: one
-    line of 300 characters at most, masked like the page's other words), and `passed` when a play
-    function ran to its end;
+    line of 300 characters at most, masked like the page's other words) and `play_step` the
+    interaction or assertion it stopped at (`expect.toBeVisible`, `userEvent.click`: the call
+    Storybook's instrumenter marks `error`, read in the page's world like `play` and kept to a
+    dotted name of 120 characters), and `passed` when a play function ran to its end;
     against main's same story, one that fails where main's passes is `against.play_broke`. The
     sheet says which. Live: the fixture's preview object has Deep's play throw and the first
     story's pass. With `github.browsers`, the change's first 5 stories (as the run
@@ -2368,7 +2374,8 @@ type Settings = {
     compared again (a baseline on demand). A story main's Storybook doesn't have (the change added
     it) is asked for once per head, never again until main moves.
     `main_takes_the_stories_a_change_has_and_it_hasnt`.
-    Best effort: Chromium's stories stand without them. Live: the live Storybook's first story
+    Each with its interaction test in that browser too (`play`, `play_error` and `play_step`, read the same
+    way, through Playwright in the page's world). Best effort: Chromium's stories stand without them. Live: the live Storybook's first story
     in Firefox and in WebKit at a phone's size. A story gone from Storybook goes
     from the preview. The index is the preview's code's: an id Storybook wouldn't make
     (`components-button--primary`) is dropped. A Storybook on another service is kept with that
@@ -2707,7 +2714,7 @@ Ranked by what a person notices first. Done so far:
 - feedback resolved from the page (its Resolve opens roll, where it's resolved for the page);
 - the first page's words against main's (`base_change.text`, lines gained and lost);
 - broken links on the first page (its own origin's, `HEAD` only, against main's);
-- data as of a point in time (`data_at`, where the product keeps history: Postgres, NoSQL);
+- data as of a point in time (`data_at`, where the product keeps history: Postgres, NoSQL, Redis);
 - SEO basics on the first page (a description, a viewport, one `h1`, no `noindex` of its own);
 - previews on roll apps never email real people either (the deploy's variables get roll's SMTP,
   providers' keys replaced over roll secrets');
@@ -2900,25 +2907,25 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-Ranked again after an eighth product review (2026-11-26, morning), against Chromatic's
-interaction and accessibility tests and baselines, Vercel's and Netlify's comments, Render's and
-Railway's previews, Neon's branches.
+Ranked again after a ninth product review (2026-11-26, morning), against Chromatic's
+cross-browser and interaction tests, Percy's snapshots, Vercel's comments and toolbar, Render's
+previews.
 
-1. **Stories' interaction tests, in review** (Chromatic's): each story's `play` function, read as
-   Storybook ran it, `failed` or `passed` on its page and against main's. Next for it: the failing
-   step and its message (Storybook's interactions log), and the interaction tests in the other
-   browsers.
-2. **Restore points for Redis, search and streams**: NoSQL's landed (#1028). A point is kept only
-   where the product puts a branch back in place, keeping its id; each needs its control plane's
-   reset `from` (roll search: feasible, about a day, with its user to schedule).
-3. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+1. **Restore points for Redis, in review**, through redis-control's own point-in-time restore,
+   in place (and `data_at` for Redis from its history). Search and streams next: a point is kept
+   only where the product puts a branch back in place, keeping its id; each needs its control
+   plane's reset `from` (roll search: feasible, about a day, with its user to schedule; streams:
+   the broker has no reset of a stream to an earlier state yet).
+2. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-4. **The data step's Postgres compute start** (pg-control's; watch): most of the data step is the
+3. **The data step's Postgres compute start** (pg-control's; watch): most of the data step is the
    Postgres branch's compute start and its masking, which needs that compute up.
-5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+4. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+5. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-26, morning: stories' interaction tests (#1087), what a failed one threw (#1091), both in the other browsers (#1100), and the step a failed one stopped at (#1105).
 
 Landed 2026-11-26, early: a baseline on demand for stories (#1082); a change's first stories in the other browsers (#1064); roll apps lookups that miss remembered (#1066); a settled running preview's usage read alone too (#1069).
 

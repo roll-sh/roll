@@ -96,7 +96,9 @@ windows-sys = { workspace = true, features = [
     "Win32_System_Threading",
 ] }
 
-[dev-dependencies]
+# The integration tests' products in process: Linux and macOS only (pg-storage and others are
+# Unix-only), so Windows builds the binary's own unit tests (`release-cli.yml`'s `windows-check`).
+[target.'cfg(not(windows))'.dev-dependencies]
 # `tests/apps.rs`: roll apps in process on its fake runtime.
 apps-control.workspace = true
 roll-cluster.workspace = true

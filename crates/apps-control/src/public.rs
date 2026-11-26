@@ -84,6 +84,8 @@ pub fn router(apps: Arc<Apps>) -> axum::Router {
                 // (a preview on roll's own runtime), with the request as it came.
                 None => match apps.preview_router_for(&host).await {
                     Some(router) => router.serve(req).await,
+                    // A status page on a domain of its own.
+                    None if let Some(p) = apps.status_page_for_own_host(&host).await => crate::status_page::serve(apps, p, req.uri().path()).await,
                     None => page(StatusCode::NOT_FOUND, "Nothing here", "No roll apps service answers on this address."),
                 },
             }

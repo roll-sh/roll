@@ -442,6 +442,12 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   resource, so remembering it allows revealing that one (all of reveal on it, not only the link);
   when several linked resources aren't allowed outright, the approval names them all and is
   approved once. Each linked resource's reveal is its own audit row.
+- A roll secret another product reads or writes as the caller is lent the same way:
+  - **The routes:** search's inference endpoint keyed by a secret (`POST …/inference/secrets`, `reveal`) and its admin password rotated into one (`POST …/password` with `secret`, `write`).
+  - **What's checked:** the action on that folder (`secret: {environment, path?, project?}`; the project left out is the one the cluster is on) as roll secrets decides it, protected environments included. Before this, an `ask` there was refused inside roll secrets with nothing to approve.
+  - **An approval** is about that folder, so remembering it allows exactly that folder and environment.
+  - **The grant the product gets** carries an exact rule allowing that one action on that folder, for this request only. roll secrets checks the caller again inside, and nothing else in the project opens.
+  - **Binding a `roll://` reference is the exception.** It is checked again as its maker at every use, so it keeps needing `reveal` allowed: an approval can't stand in for it.
 - Comparing a local copy with a secrets folder (`POST …/environments/{env}/diff`, by fingerprint,
   names only) tests a guess at a value: `reveal` there, as reading the values is.
 - A secrets project's backup (every value, sealed to a key the caller chooses) and restore are

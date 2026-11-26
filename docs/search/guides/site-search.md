@@ -380,6 +380,33 @@ Revoking the parent stops every key derived from it at once. If the secret leaks
 (**Rotate secret** in the list): keys signed with the old one stop working with their next
 request, and your backend signs with the new one from then on.
 
+### On a preview
+
+A pull request's preview (roll previews) searches a branch of the cluster, not the cluster
+itself, and the browser key the site ships is the production cluster's: it doesn't work on the
+branch. roll previews makes the branch browser keys of its own, one for each of production's
+(the same indices, filter and limits; a derivable one gets a signing secret of the branch's own),
+and lets the preview's pages call the branch: its allowed origins are production's plus the
+preview's own URLs. The preview's services get them as `ROLL_SEARCH_BROWSER_KEYS` (JSON, one
+entry per key: `name`, `id`, `api_key` and, for a derivable one, `signing_secret`), and when
+production has exactly one browser key, as `ROLL_SEARCH_BROWSER_KEY`,
+`ROLL_SEARCH_BROWSER_KEY_ID` and `ROLL_SEARCH_SIGNING_SECRET`, beside `ELASTICSEARCH_URL`.
+Read `ROLL_SEARCH_BROWSER_KEYS`: the one-key variables go as soon as production has a second
+browser key. Previews' environment rules don't interpolate, so the build reads it itself, and
+takes the production key when it isn't set:
+
+```js
+// The key the page ships: the preview's own (by the production key's name) when roll previews
+// set them.
+const own = JSON.parse(process.env.ROLL_SEARCH_BROWSER_KEYS ?? '[]').find((k) => k.name === 'site')
+const KEY = own?.api_key ?? process.env.NEXT_PUBLIC_SEARCH_KEY
+const CLUSTER = process.env.ELASTICSEARCH_URL ?? 'https://docs.search.…'
+```
+
+A backend that derives keys takes its entry's `id` and `signing_secret` the same way, and names
+the branch's cluster in what it signs. The keys are revoked when the preview's branch goes, and
+a copy of a production key that's revoked or rotated stops working on the preview's next deploy.
+
 ### Or keep a backend
 
 If you'd rather not ship a key, put a small endpoint in front of search. Give it a key that can

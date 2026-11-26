@@ -425,6 +425,9 @@ state directory and replaces on its own. A token or credential used twice revoke
 
    `--token-reader` names the account that may read the request token: the app's.
 
+   If someone else made `%ProgramData%\roll` or `%ProgramData%\roll\agent`, the command refuses
+   to write there. Remove the directory as an administrator, then run the command again.
+
 3. The app reads values from `http://127.0.0.1:2773`, with the contents of
    `%ProgramData%\roll\agent\agent-token` as its `X-Roll-Token` header.
 

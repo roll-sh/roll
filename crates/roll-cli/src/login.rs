@@ -164,12 +164,17 @@ impl Drop for Lock {
 }
 
 /// `dir` and its parents, 0700 where they're made (on Windows, as the parent's ACL says).
-fn private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+/// The logins' directory, made when it doesn't exist. On Windows it's refused when someone else
+/// owns it (`%APPDATA%\roll` is in the user's profile, so only an administrator could have).
+fn private_dir(dir: &std::path::Path) -> anyhow::Result<()> {
     let mut b = std::fs::DirBuilder::new();
     b.recursive(true);
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
-    b.create(dir)
+    b.create(dir)?;
+    #[cfg(windows)]
+    crate::sys::acl::trusted_dir(dir, crate::sys::acl::Owners::User)?;
+    Ok(())
 }
 
 fn now_ms() -> i64 {

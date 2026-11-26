@@ -6,7 +6,11 @@
 //! service may open: the request token file (`agent-token`, readable by the service and by the
 //! accounts named with `--token-reader`), the service's login (`<name>.login`: `ROLL_TOKEN`, or a
 //! workload identity's `ROLL_IDENTITY` and what it logs in with, readable by the service alone), a
-//! machine identity's credential (`<name>.machine.json`) and its log (`<name>.log`, which, like every log of the agent's, holds no value). The service's
+//! machine identity's credential (`<name>.machine.json`) and its log (`<name>.log`, which, like every log of the agent's, holds no value). Before anything is
+//! written, `%ProgramData%\roll`, `…\agent` and the directories of a `--token-file` and a
+//! `ROLL_MACHINE_CREDENTIAL_FILE` are made or checked ([`acl::trusted_dir`]): any of them that
+//! someone else made, or may change, is refused, since a local user could otherwise plant the
+//! request token. The service's
 //! command line names the project, environment and flags, never a credential: the login is read
 //! from its file before the flags read the environment ([`load_login`]).
 //!
@@ -14,7 +18,8 @@
 //! the manager's stop or the machine's shutdown, and reports a failure (which the service's
 //! recovery restarts) when it ends with an error.
 
-use crate::sys::{acl, quote};
+use crate::sys::acl::{self, Owners};
+use crate::sys::quote;
 use anyhow::{Context, bail};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -162,8 +167,26 @@ pub fn install(i: Install<'_>) -> anyhow::Result<()> {
         );
     }
     let dir = dir();
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    let token_file = i.token_file.map(Path::to_path_buf).unwrap_or_else(|| dir.join("agent-token"));
+    acl::trusted_dir(dir.parent().context("the service's directory has no parent")?, Owners::Machine)?;
+    acl::trusted_dir(&dir, Owners::Machine)?;
+    let token_file = match i.token_file {
+        Some(f) => {
+            let parent = f.parent().filter(|p| f.is_absolute() && !p.as_os_str().is_empty()).context("the service's --token-file is a full path (C:\\…)")?;
+            acl::trusted_dir(parent, Owners::Machine)?;
+            f.to_path_buf()
+        }
+        None => dir.join("agent-token"),
+    };
+    // A machine identity's credential the service keeps somewhere else: its directory too, which
+    // the service then writes in when this made it.
+    let credential_dir = match login.iter().find(|(k, _)| *k == "ROLL_MACHINE_CREDENTIAL_FILE") {
+        Some((_, f)) => {
+            let f = Path::new(f);
+            let parent = f.parent().filter(|p| f.is_absolute() && !p.as_os_str().is_empty()).context("the service's ROLL_MACHINE_CREDENTIAL_FILE is a full path (C:\\…)")?;
+            acl::trusted_dir(parent, Owners::Machine)?.then(|| parent.to_path_buf())
+        }
+        None => None,
+    };
 
     let mut cmd = vec![quote(&exe.to_string_lossy()), "--api".into(), quote(i.api), "secrets".into(), "-p".into(), quote(i.project)];
     if let Some(e) = i.env {
@@ -226,14 +249,23 @@ pub fn install(i: Install<'_>) -> anyhow::Result<()> {
         for r in i.readers {
             readers.push(acl::sid(r).with_context(|| format!("--token-reader {r}"))?);
         }
-        // The directory: the Administrators, and the service reading and writing (its log)
-        // without changing who may open what.
-        acl::set_path(&dir, &format!("D:P(A;OICI;FA;;;BA)(A;OICI;GRGW;;;{me})")).with_context(|| format!("setting who may open {}", dir.display()))?;
+        // The directory: the Administrators and SYSTEM, and the service reading and writing (its
+        // log) without changing who may open what; its owner has no rights of its own.
+        let dir_sddl = format!("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGW;;;{me})(A;;0x0;;;OW)");
+        for d in std::iter::once(&dir).chain(&credential_dir) {
+            acl::set_path(d, &dir_sddl).with_context(|| format!("setting who may open {}", d.display()))?;
+        }
         let token_sddl = format!("D:P(A;;FA;;;BA)(A;;FR;;;{me}){}", readers.iter().map(|r| format!("(A;;FR;;;{r})")).collect::<String>());
-        if token_file.exists() {
-            // Kept (apps may hold it already); who may read it is set again.
+        if acl::machine_file(&token_file).with_context(|| format!("reading who owns {}", token_file.display()))? {
+            // Kept (apps may hold it already): an administrator made it. Who may read it is set
+            // again.
             acl::set_path(&token_file, &token_sddl).with_context(|| format!("setting who may open {}", token_file.display()))?;
         } else {
+            if token_file.symlink_metadata().is_ok() {
+                // Never a token someone else made (they'd know it): a new one in its place.
+                std::fs::remove_file(&token_file).with_context(|| format!("removing {}, which someone else made", token_file.display()))?;
+                eprintln!("roll secrets agent: someone else made {}: it has a new request token (apps read it again)", token_file.display());
+            }
             let mut b = [0u8; 32];
             getrandom::fill(&mut b).map_err(|e| anyhow::anyhow!("system randomness: {e}"))?;
             write_new(&token_file, &token_sddl, &format!("{}\n", b.iter().map(|x| format!("{x:02x}")).collect::<String>()))?;

@@ -6218,6 +6218,10 @@ async fn a_project_backs_up_sealed_to_a_key_and_restores_into_another() {
     let ca = api.ok(Method::POST, "/cas", Some(json!({ "name": "internal", "domains": ["svc.internal"] }))).await;
     let link = json!({ "kind": "pki", "ref": ca["id"], "field": "certificate", "mode": "managed", "options": { "names": "api.svc.internal", "rotate_days": 7 } });
     api.ok(Method::PUT, "/environments/staging/secrets/TLS_CERT", Some(json!({ "link": link }))).await;
+    // An encryption key and a signed sync: their bytes and signing secret leave in a person's backup only.
+    api.ok(Method::POST, "/transit", Some(json!({ "name": "cards" }))).await;
+    let sync = api.ok(Method::POST, "/syncs", Some(json!({ "environment": "staging", "kind": "fake", "target": { "name": "x", "token_key": "PLATFORM_TOKEN" } }))).await;
+    let whsec = sync["signing_secret"].as_str().unwrap().to_string();
 
     let secret = [7u8; 32];
     // Only a caller who may manage and reveal the whole project takes it out or compares it: an
@@ -6233,6 +6237,7 @@ async fn a_project_backs_up_sealed_to_a_key_and_restores_into_another() {
         serde_json::from_slice(&roll_secrets::crypto::open_sealed(&secret, b["context"].as_str().unwrap(), &sealed).unwrap()).unwrap()
     };
     let archive = open(&b);
+    assert!(archive.to_string().contains(&whsec) && !archive["encryption_keys"][0]["versions"].as_array().unwrap().is_empty());
     // A token that may back it up takes the registrations by name only: no route answers their keys
     // to a token either.
     let whole = api.gate.issue("whole", roll_secrets::access::rule(&api.project, None, None, &[roll_secrets::Action::Read, roll_secrets::Action::Reveal, roll_secrets::Action::Admin]), None);
@@ -6240,6 +6245,10 @@ async fn a_project_backs_up_sealed_to_a_key_and_restores_into_another() {
     assert!(s == StatusCode::OK && tb["warnings"][0].as_str().unwrap().contains("CA internal"), "{tb}");
     let theirs = open(&tb);
     assert!(theirs.get("registrations").is_none() && !theirs.to_string().contains("PRIVATE KEY") && theirs.to_string().contains("sk_live_backup"), "{theirs}");
+    // Nor a sync's signing secret or an encryption key's bytes: both by name, and said so.
+    let (said, left_out) = (tb["warnings"].to_string(), theirs["left_out"].to_string());
+    assert!(!theirs.to_string().contains(&whsec) && theirs["encryption_keys"][0]["versions"] == json!([]) && theirs["syncs"][0]["without_credential"] == true, "{theirs}");
+    assert!(said.contains("fake sync on staging:/") && said.contains("encryption key cards") && left_out.contains("encryption key cards") && left_out.contains("can't be decrypted"), "{tb}");
     // The drill: compared with the project by name, never a value, and nothing written.
     api.set("staging", "API", "https://staging.example").await;
     let v = api.ok(Method::POST, "/backup/verify", Some(archive.clone())).await;
@@ -6260,7 +6269,7 @@ async fn a_project_backs_up_sealed_to_a_key_and_restores_into_another() {
     let (_, other) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "restored" }))).await;
     let to = |p: &str| format!("/v1/secrets/projects/{}{p}", other["id"].as_str().unwrap());
     let r = api.ok(Method::POST, &to("/restore"), Some(archive.clone())).await;
-    assert_eq!((r["secrets"].as_u64(), r["registrations"].as_u64(), r["identities"].as_u64()), (Some(3), Some(1), Some(0)), "{r}");
+    assert_eq!((r["secrets"].as_u64(), r["registrations"].as_u64(), r["identities"].as_u64(), r["syncs"].as_u64()), (Some(3), Some(1), Some(0), Some(1)), "{r}");
     let warnings = r["warnings"].as_array().unwrap();
     assert!(warnings.len() == 1 && warnings[0].as_str().unwrap().contains("any-repo") && warnings[0].as_str().unwrap().contains("signs for everyone"), "{r}");
     // The CA came back with its key, under the restorer: a certificate issued after the restore
@@ -6278,6 +6287,14 @@ async fn a_project_backs_up_sealed_to_a_key_and_restores_into_another() {
     assert_eq!(api.ok(Method::GET, &to("/required"), None).await[0]["type"], "url");
     let (s, _) = api.call(Method::POST, &to("/restore"), Some(archive)).await;
     assert_eq!(s, StatusCode::CONFLICT, "only into a project with no secrets");
+    // A token's archive brings the sync back paused until it's made again with its credential.
+    let (_, third) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "from-a-token" }))).await;
+    let at = |p: &str| format!("/v1/secrets/projects/{}{p}", third["id"].as_str().unwrap());
+    api.ok(Method::POST, &at("/restore"), Some(theirs)).await;
+    let restored = api.ok(Method::GET, &at("/syncs"), None).await["syncs"][0].clone();
+    assert!(restored["paused_why"].as_str().unwrap().contains("without its credential"), "{restored}");
+    let (s, _) = api.call(Method::PATCH, &at(&format!("/syncs/{}", restored["id"].as_str().unwrap())), Some(json!({ "paused": false }))).await;
+    assert_eq!(s, StatusCode::CONFLICT);
 }
 
 #[tokio::test]
