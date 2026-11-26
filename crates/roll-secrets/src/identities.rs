@@ -918,13 +918,13 @@ impl Secrets {
         let (name, chains) = found.ok_or_else(|| Error::NotFound(format!("no identity {id}")))?;
         self.settle_chains(&chains)?;
         let now = self.db.now_ms()?;
-        Ok(self.db.write(|c| {
+        self.db.write(|c| {
             let n = c.execute("DELETE FROM machine_chains WHERE identity = ? AND project_id = ? AND live_until <= ?", params![id, project, now])?;
             if n > 0 {
                 audit::record(c, self.keys()?, project, caller, "identity.machine.prune", None, None, &[], &format!("forgot {n} ended machine{} of identity {name}", if n == 1 { "" } else { "s" }), now)?;
             }
             Ok::<_, Error>(n)
-        })?)
+        })
     }
 
     /// Write each chain's `live_until` as roll-access has it now: its newest credential's end,
