@@ -484,7 +484,8 @@ pub enum Secrets {
         store: Option<String>,
         /// A git server's pre-receive hook: read `old new ref` lines on stdin and refuse a push
         /// whose new commits add a value of the project. A scan-only token (`tokens create
-        /// --scan-only`) is enough. `git push -o breakglass` lets one through, audited.
+        /// --scan-only`) is enough. `git push -o breakglass` lets one through, audited with the
+        /// pusher, when the project's `roll secrets breakglass` list allows it.
         #[arg(long, conflicts_with_all = ["paths", "staged", "store", "allow_unstored"])]
         pre_receive: bool,
         /// With --pre-receive: how long it may take (`4s`, `1500ms`; default 4s, inside GitHub
@@ -496,6 +497,10 @@ pub enum Secrets {
         /// refused.
         #[arg(long, requires = "pre_receive")]
         fail_open: bool,
+        /// With --pre-receive: let a breakglass push through when roll can't be reached to record
+        /// it (it then goes through unrecorded). Default: refuse it.
+        #[arg(long, requires = "pre_receive")]
+        breakglass_unrecorded: bool,
     },
     /// Pull the environment's folder into Kubernetes with External Secrets Operator: makes a token
     /// for it and prints the token's Secret, a SecretStore and an ExternalSecret (`| kubectl apply -f -`).
@@ -830,6 +835,10 @@ pub enum Secrets {
         #[arg(value_parser = ["managed", "off"])]
         rotate: Option<String>,
     },
+    /// Who may push past the project's pre-receive hooks (`git push -o breakglass`): pushers'
+    /// logins as the git server names them, `token:<id>` for every push through one hook's
+    /// token, `*` for anyone; `off` for no one (the default). Without any: who may now.
+    Breakglass { who: Vec<String> },
     /// When each key was last read and changed, and which are stale or unused.
     Insights {
         /// Only keys not read in the last 90 days.
@@ -925,7 +934,7 @@ pub(crate) const HELP_GROUPS: &[(&str, &[&str])] = &[
     (
         "Operations",
         &[
-            "health", "insights", "events", "audit", "sinks", "backup", "backup-schedule", "restore", "keygen", "recover", "purge", "retention", "leaks", "validity-checks", "decoy", "kms", "key", "unseal",
+            "health", "insights", "events", "audit", "sinks", "backup", "backup-schedule", "restore", "keygen", "recover", "purge", "retention", "leaks", "breakglass", "validity-checks", "decoy", "kms", "key", "unseal",
             "issuer", "policy",
         ],
     ),
@@ -980,6 +989,9 @@ pub enum PolicyCmd {
         /// The longest a token with a secrets rule may live, in days.
         #[arg(long)]
         max_token_days: Option<u32>,
+        /// No project lets a push past its pre-receive hooks (`git push -o breakglass`).
+        #[arg(long)]
+        no_breakglass: bool,
     },
 }
 
@@ -2257,7 +2269,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
     if let Secrets::Policy { cmd } = &cmd {
         let v = match cmd {
             PolicyCmd::Get => api.get("/v1/secrets/policy").await?,
-            PolicyCmd::Set { production_approvals, leaks_managed, sync_kinds, no_stored_cloud_keys, max_token_days } => {
+            PolicyCmd::Set { production_approvals, leaks_managed, sync_kinds, no_stored_cloud_keys, max_token_days, no_breakglass } => {
                 let kinds = sync_kinds.as_ref().map(|ks| ks.iter().map(|k| k.trim()).filter(|k| !k.is_empty()).collect::<Vec<_>>());
                 let body = json!({
                     "production_approvals": production_approvals,
@@ -2265,6 +2277,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     "sync_kinds": kinds,
                     "no_stored_cloud_keys": no_stored_cloud_keys,
                     "max_token_days": max_token_days,
+                    "no_breakglass": no_breakglass,
                 });
                 api.call(Method::PUT, "/v1/secrets/policy", Some(body)).await?
             }
@@ -2289,6 +2302,9 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
         }
         if let Some(d) = v["max_token_days"].as_i64() {
             floors.push(format!("tokens with a secrets rule live at most {d} days"));
+        }
+        if v["no_breakglass"] == true {
+            floors.push("no break glass: no push goes past a pre-receive hook".into());
         }
         if floors.is_empty() {
             println!("No floors: each project sets its own");
@@ -2423,13 +2439,13 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
         return unseal(api, status, nodes).await;
     }
     // A pre-receive hook runs on the git server, with a scan-only token: the project is all it needs.
-    if let Secrets::Scan { pre_receive: true, budget, fail_open, .. } = &cmd {
+    if let Secrets::Scan { pre_receive: true, budget, fail_open, breakglass_unrecorded, .. } = &cmd {
         let project = project(api, args.project.as_deref()).await?;
         let budget = match budget {
             Some(b) => duration_ms(b)?,
             None => std::time::Duration::from_secs(4),
         };
-        return pre_receive(api, &project, budget, *fail_open).await;
+        return pre_receive(api, &project, budget, *fail_open, *breakglass_unrecorded).await;
     }
     let (at, project) = locate(api, &args).await?;
     let c = Client { project, api, at };
@@ -4328,6 +4344,20 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             match v["validity_checks"].as_str() {
                 Some("on") => println!("Credentials found in code are checked with their providers"),
                 _ => println!("Credentials found in code aren't checked"),
+            }
+        }
+        Secrets::Breakglass { who } => {
+            let v = match who.as_slice() {
+                [] => c.call(Method::GET, &c.base(), None).await?,
+                [off] if off == "off" => c.call(Method::PATCH, &c.base(), Some(json!({ "breakglass": [] }))).await?,
+                _ => c.call(Method::PATCH, &c.base(), Some(json!({ "breakglass": who }))).await?,
+            };
+            if json_out {
+                return print(&json!({ "breakglass": v["breakglass"] }));
+            }
+            match v["breakglass"].as_array().filter(|a| !a.is_empty()) {
+                None => println!("No one may push past a pre-receive hook: `git push -o breakglass` is refused"),
+                Some(a) => println!("May push past a pre-receive hook (audited): {}", a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")),
             }
         }
         Secrets::Leaks { rotate } => {
@@ -6299,8 +6329,8 @@ const PUSH_INPUT_MAX: u64 = 1 << 20;
 /// The most of `git log -p` a pre-receive scan reads, and the most candidate bytes it keeps.
 const PUSH_PATCH_MAX: u64 = 256 << 20;
 const PUSH_CANDIDATES_MAX: usize = 32 << 20;
-/// Lines longer than this are skipped, as roll code's scans skip them.
-const PUSH_LINE_MAX: usize = 4096;
+/// The longest added line read (a minified bundle's): one longer makes the scan incomplete.
+const PUSH_LINE_MAX: usize = 8 << 20;
 /// The places one candidate is reported at.
 const PUSH_PLACES_MAX: usize = 20;
 
@@ -6310,7 +6340,8 @@ struct PushHit {
     file: String,
     line: usize,
     commit: String,
-    key: String,
+    /// Only for a token that may also `read` there.
+    key: Option<String>,
     environment: String,
     path: String,
 }
@@ -6318,22 +6349,30 @@ struct PushHit {
 /// `roll secrets scan --pre-receive` (docs/secrets.md, "On the git server: a pre-receive hook").
 /// git runs the hook with the pushed objects in quarantine (`GIT_QUARANTINE_PATH`,
 /// `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`); the git it runs inherits them,
-/// so it reads the new commits before any ref points at them. Commits reachable from an existing
-/// ref were checked when they came, so only the rest are read (`--not --all`): a new branch's own
-/// commits, an update's new ones, nothing for a deletion. Each commit's added lines (a merge's:
-/// those new against every parent) are cut into candidates as `roll secrets scan` cuts them and
-/// checked with `POST …/scan`, which a scan-only token may call: it answers which are values,
-/// never a value.
-async fn pre_receive(api: &Api, project: &str, budget: std::time::Duration, fail_open: bool) -> anyhow::Result<()> {
+/// so it reads the new commits before any ref points at them. Commits reachable from a branch or
+/// a tag were checked when they came through a push, so only the rest are read (`--not --branches
+/// --tags`): a new branch's own commits, an update's new ones, nothing for a deletion. Refs a push
+/// doesn't make (a fork's `refs/pull/<n>/head`, GitLab's `refs/merge-requests/<n>/head`) count
+/// for nothing: a merge of them is read. Each commit's added lines (a merge's: those new against
+/// every parent) are cut into candidates as `roll secrets scan` cuts them and checked with
+/// `POST …/scan`, which a scan-only token may call: it answers which are values, never a value.
+/// Each call names the pusher (as the git server tells the hook) and the refs. A breakglass push
+/// is recorded (and allowed by the project) before anything else, and refused when roll can't
+/// record it, unless `breakglass_unrecorded`.
+async fn pre_receive(api: &Api, project: &str, budget: std::time::Duration, fail_open: bool, breakglass_unrecorded: bool) -> anyhow::Result<()> {
     let mut input = String::new();
     std::io::stdin().take(PUSH_INPUT_MAX + 1).read_to_string(&mut input).context("reading the push's `old new ref` lines")?;
     anyhow::ensure!(input.len() as u64 <= PUSH_INPUT_MAX, "more than {PUSH_INPUT_MAX} bytes of ref updates");
     let hex = |s: &str| matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit());
     let mut news: Vec<String> = vec![];
+    let mut refs: Vec<String> = vec![];
     for line in input.lines().filter(|l| !l.trim().is_empty()) {
         let mut f = line.split_whitespace();
-        let (Some(old), Some(new), Some(_)) = (f.next(), f.next(), f.next()) else { bail!("not an `old new ref` line: {line}") };
+        let (Some(old), Some(new), Some(name)) = (f.next(), f.next(), f.next()) else { bail!("not an `old new ref` line: {line}") };
         anyhow::ensure!(hex(old) && hex(new), "not an `old new ref` line: {line}");
+        if refs.len() < 100 && !refs.iter().any(|r| r == name) {
+            refs.push(name.chars().filter(|c| !c.is_control()).take(256).collect());
+        }
         // A deletion adds nothing.
         if new.bytes().any(|b| b != b'0') && !news.iter().any(|n| n == new) {
             news.push(new.to_string());
@@ -6341,8 +6380,29 @@ async fn pre_receive(api: &Api, project: &str, budget: std::time::Duration, fail
     }
     let breakglass = push_option("breakglass");
     let base = format!("/v1/secrets/projects/{}", enc(project));
+    let push = json!({ "breakglass": breakglass, "pusher": pusher(), "refs": refs });
+    let started = std::time::Instant::now();
+    if breakglass {
+        // Recorded, and allowed by the project, before anything is read: a scan that can't finish
+        // still has its row, and roll's "no" refuses the push whatever the hook's settings.
+        let body = json!({ "candidates": [], "breakglass": true, "pusher": push["pusher"], "refs": push["refs"] });
+        let why = match tokio::time::timeout(budget, api.answer(Method::POST, &format!("{base}/scan"), Some(body))).await {
+            Ok(Ok(Ok(_))) => None,
+            Ok(Ok(Err((status, message)))) if status.is_client_error() => bail!("break glass refused: {message}"),
+            Ok(Ok(Err((status, message)))) => Some(format!("{status}: {message}")),
+            Ok(Err(e)) => Some(format!("{e:#}")),
+            Err(_) => Some(format!("no answer in its {} ms budget", budget.as_millis())),
+        };
+        if let Some(why) = why {
+            if breakglass_unrecorded {
+                eprintln!("roll secrets: let through with breakglass, unrecorded: roll couldn't record it ({why}; --breakglass-unrecorded)");
+                return Ok(());
+            }
+            bail!("break glass needs roll to record it, and roll couldn't ({why}): refused (--breakglass-unrecorded on the hook lets such a push through)");
+        }
+    }
     let hits = std::sync::Mutex::new(Vec::<PushHit>::new());
-    let ran = tokio::time::timeout(budget, scan_push(api, &base, &news, breakglass, &hits)).await;
+    let ran = tokio::time::timeout(budget.saturating_sub(started.elapsed()), scan_push(api, &base, &news, &push, &hits)).await;
     let mut hits = hits.into_inner().unwrap_or_else(|p| p.into_inner());
     hits.sort();
     hits.dedup();
@@ -6353,12 +6413,17 @@ async fn pre_receive(api: &Api, project: &str, budget: std::time::Duration, fail
         Err(_) => Some(format!("it ran out of its {} ms budget", budget.as_millis())),
     };
     for h in &hits {
-        let folder = if h.path == "/" { String::new() } else { format!(" {}", h.path) };
-        eprintln!("{}:{}  {} ({}{folder}) in {}", h.file, h.line, h.key, h.environment, &h.commit[..h.commit.len().min(12)]);
+        // A scan-only token isn't told the key's name: the environment says enough.
+        let what = match (&h.key, h.path.as_str()) {
+            (None, _) => format!("a value of {}", h.environment),
+            (Some(key), "/" | "") => format!("{key} ({})", h.environment),
+            (Some(key), folder) => format!("{key} ({} {folder})", h.environment),
+        };
+        eprintln!("{}:{}  {what} in {}", h.file, h.line, &h.commit[..h.commit.len().min(12)]);
     }
     if breakglass {
-        let recorded = if unfinished.is_none() { "roll recorded it" } else { "roll couldn't record it" };
-        eprintln!("roll secrets: let through with breakglass ({recorded}){}", if hits.is_empty() { String::new() } else { format!(": rotate {}", if hits.len() == 1 { "it" } else { "them" }) });
+        let scanned = unfinished.as_deref().map(|why| format!("; not fully scanned: {why}")).unwrap_or_default();
+        eprintln!("roll secrets: let through with breakglass (roll recorded it{scanned}){}", if hits.is_empty() { String::new() } else { format!(": rotate {}", if hits.len() == 1 { "it" } else { "them" }) });
         return Ok(());
     }
     if !hits.is_empty() {
@@ -6375,6 +6440,17 @@ async fn pre_receive(api: &Api, project: &str, budget: std::time::Duration, fail
     Ok(())
 }
 
+/// Who pushed, as the git server tells its hooks: GitHub Enterprise Server's `GITHUB_USER_LOGIN`,
+/// GitLab's `GL_USERNAME`, Gitea's and Forgejo's `GITEA_PUSHER_NAME`, the web server's
+/// `REMOTE_USER` (git over HTTP), or the account git runs as (`USER`, git over SSH).
+fn pusher() -> Option<String> {
+    ["GITHUB_USER_LOGIN", "GL_USERNAME", "GITEA_PUSHER_NAME", "REMOTE_USER", "USER"]
+        .iter()
+        .filter_map(|k| std::env::var(k).ok())
+        .map(|v| v.chars().filter(|c| !c.is_control()).take(100).collect::<String>())
+        .find(|v| !v.trim().is_empty())
+}
+
 /// Whether the pusher gave push option `name` (`git push -o <name>`; the server repo needs
 /// `receive.advertisePushOptions`).
 fn push_option(name: &str) -> bool {
@@ -6384,7 +6460,7 @@ fn push_option(name: &str) -> bool {
 
 /// Read what `news` adds and check it, pushing each value found into `hits` as it's found (so a
 /// budget that runs out still reports them). `Ok(false)`: a bound stopped the read first.
-async fn scan_push(api: &Api, base: &str, news: &[String], breakglass: bool, hits: &std::sync::Mutex<Vec<PushHit>>) -> anyhow::Result<bool> {
+async fn scan_push(api: &Api, base: &str, news: &[String], push: &Value, hits: &std::sync::Mutex<Vec<PushHit>>) -> anyhow::Result<bool> {
     let mut by: std::collections::HashMap<String, Vec<(String, usize, String)>> = Default::default();
     let mut kept = 0usize;
     let mut complete = true;
@@ -6407,31 +6483,31 @@ async fn scan_push(api: &Api, base: &str, news: &[String], breakglass: bool, hit
         .await?;
     }
     let all: Vec<String> = by.keys().cloned().collect();
-    // A breakglass push is recorded even when it adds nothing to check.
-    let chunks: Vec<&[String]> = if all.is_empty() && breakglass { vec![&[][..]] } else { all.chunks(20_000).collect() };
-    for chunk in chunks {
-        let v = api.call(Method::POST, &format!("{base}/scan"), Some(json!({ "candidates": chunk, "breakglass": breakglass }))).await?;
+    for chunk in all.chunks(20_000) {
+        let mut body = push.clone();
+        body["candidates"] = json!(chunk);
+        let v = api.call(Method::POST, &format!("{base}/scan"), Some(body)).await?;
         for f in v.as_array().into_iter().flatten() {
             let Some(cand) = f["index"].as_u64().and_then(|i| chunk.get(i as usize)) else { continue };
             let mut h = hits.lock().unwrap_or_else(|p| p.into_inner());
             for (file, line, commit) in &by[cand] {
-                h.push(PushHit { file: file.clone(), line: *line, commit: commit.clone(), key: s(&f["key"]), environment: s(&f["environment"]), path: s(&f["path"]) });
+                h.push(PushHit { file: file.clone(), line: *line, commit: commit.clone(), key: f["key"].as_str().map(str::to_string), environment: s(&f["environment"]), path: s(&f["path"]) });
             }
         }
     }
     Ok(complete)
 }
 
-/// Each line the commits reachable from `news` and from no ref add, as `(file, line, commit,
-/// text)`: `git log -p --cc -U0`, read in bounded pieces (a line over [`PUSH_LINE_MAX`] is
-/// skipped, at most [`PUSH_PATCH_MAX`] read). `each` answers false to stop. `Ok(false)`: stopped
-/// by a bound before the end.
+/// Each line the commits reachable from `news` and from no branch or tag add, as `(file, line,
+/// commit, text)`: `git log -p --cc -U0`, read in bounded pieces (at most [`PUSH_PATCH_MAX`], and
+/// lines of at most [`PUSH_LINE_MAX`]). `each` answers false to stop. `Ok(false)`: stopped by a
+/// bound before the end, a line too long to read among them.
 async fn read_pushed(news: &[String], mut each: impl FnMut(&str, usize, &str, &str) -> bool) -> anyhow::Result<bool> {
     use tokio::io::AsyncReadExt;
     let mut cmd = tokio::process::Command::new("git");
     cmd.args(["-c", "core.quotePath=false", "log", "-p", "--cc", "-U0", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--format=%x00%H"])
         .args(news)
-        .args(["--not", "--all", "--"])
+        .args(["--not", "--branches", "--tags", "--"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -6447,7 +6523,7 @@ async fn read_pushed(news: &[String], mut each: impl FnMut(&str, usize, &str, &s
         String::from_utf8_lossy(&b).trim().to_string()
     });
     let mut diff = PatchLines::default();
-    let (mut buf, mut line, mut long, mut read) = (vec![0u8; 64 << 10], Vec::with_capacity(PUSH_LINE_MAX), false, 0u64);
+    let (mut buf, mut line, mut read) = (vec![0u8; 64 << 10], Vec::new(), 0u64);
     let mut stopped = false;
     'read: loop {
         let n = out.read(&mut buf).await.context("reading git's output")?;
@@ -6461,16 +6537,17 @@ async fn read_pushed(news: &[String], mut each: impl FnMut(&str, usize, &str, &s
         }
         for &b in &buf[..n] {
             if b == b'\n' {
-                if !long && !diff.line(&line, &mut each) {
+                if !diff.line(&line, &mut each) {
                     stopped = true;
                     break 'read;
                 }
                 line.clear();
-                long = false;
             } else if line.len() < PUSH_LINE_MAX {
                 line.push(b);
             } else {
-                long = true;
+                // A line it can't read whole: the scan isn't complete.
+                stopped = true;
+                break 'read;
             }
         }
     }
@@ -6478,7 +6555,7 @@ async fn read_pushed(news: &[String], mut each: impl FnMut(&str, usize, &str, &s
         let _ = child.kill().await;
         return Ok(false);
     }
-    if !line.is_empty() && !long {
+    if !line.is_empty() {
         diff.line(&line, &mut each);
     }
     let status = child.wait().await.context("waiting for git")?;
