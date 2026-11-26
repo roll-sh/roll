@@ -45,6 +45,10 @@ pub struct Up {
     /// Deploy during the environment's deploy freeze (said in the deployment and the audit log).
     #[arg(long = "override")]
     pub override_freeze: bool,
+    /// Build and health-check it without putting it live (Vercel's preview, Netlify's draft):
+    /// it answers on its own URL, and `roll apps rollback <id>` puts it live.
+    #[arg(long)]
+    pub no_traffic: bool,
     /// Every service and database the directory's roll.toml declares (`[apps.<name>]`,
     /// `[databases.<name>]`): made where missing, linked, and deployed. The plan is printed
     /// first.
@@ -2406,6 +2410,12 @@ async fn watch(api: &Api, svc: &Value, env: &str, dep: &Value) -> anyhow::Result
             }
             Ok(())
         }
+        // Built and checked, not live (`--no-traffic`): its own URL, and how it goes live.
+        Some("ready") => {
+            println!("\n✓ {} is ready, not live: {}", s(&svc["name"]), s(&d["url"]));
+            println!("  `roll apps rollback {} -s {}{}` puts it live", s(&d["id"]), s(&svc["name"]), if env == "production" { String::new() } else { format!(" -e {env}") });
+            Ok(())
+        }
         Some(st) => match d["fix"].as_str() {
             Some(f) => bail!("the deploy is {st}: {}\n  fix: {f}", d["error"].as_str().unwrap_or("see the log above")),
             None => bail!("the deploy is {st}: {}", d["error"].as_str().unwrap_or("see the log above")),
@@ -2557,6 +2567,9 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
     }
     if u.no_cache {
         req = req.header("x-roll-no-cache", "1");
+    }
+    if u.no_traffic {
+        req = req.header("x-roll-no-traffic", "1");
     }
     if u.override_freeze {
         req = req.header("x-roll-override", "1");
@@ -2893,6 +2906,9 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
                 }
                 if u.no_cache {
                     req = req.header("x-roll-no-cache", "1");
+                }
+                if u.no_traffic {
+                    req = req.header("x-roll-no-traffic", "1");
                 }
                 if u.override_freeze {
                     req = req.header("x-roll-override", "1");

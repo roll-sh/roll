@@ -52,6 +52,15 @@ impl Engine {
         }
     }
 
+    /// A product's error as a preview may show it: masked as its logs are (its branches'
+    /// credentials, its secrets); when what to mask can't be read, without its details.
+    async fn masked_error(&self, id: &str, e: &anyhow::Error) -> String {
+        match self.masks(id).await {
+            Ok(hide) => code_preview::runner::mask(&format!("{e:#}"), &hide),
+            Err(_) => "(its details are hidden: what to mask in them couldn't be read)".into(),
+        }
+    }
+
     pub(super) fn brancher(&self, kind: Kind) -> anyhow::Result<&Arc<dyn Brancher>> {
         self.branchers.get(&kind).ok_or_else(|| anyhow::anyhow!("roll {} isn't on this node, so it can't be branched", kind.as_str()))
     }
@@ -848,6 +857,25 @@ impl Engine {
                 self.apps.remove(&r.id, &svc.name).await.map_err(|e| anyhow::anyhow!("removing {}: {e:#}", svc.name))?;
                 self.store.drop_service(&r.id, &svc.name)?;
                 self.store.log(&r.id, &format!("removed service {}", svc.name))?;
+            }
+        }
+        // 4a. Where its pages are served from, for the branches that answer browsers themselves
+        // (roll search: a page that searches from the browser). Best effort: a branch that
+        // couldn't be told is a problem on the preview, the pass goes on.
+        let pinned = self.store.pinned(&r.id)?;
+        let urls: Vec<String> = self.store.services(&r.id)?.into_iter().map(|s| s.url).chain(pinned.iter().map(|p| p.url.clone())).collect();
+        for res in self.store.resources(&r.id)? {
+            let (Some(branch), Ok(b)) = (&res.r#ref, self.brancher(res.kind)) else { continue };
+            if let Err(e) = b.serve(&res.parent, branch, res.kept.as_deref(), &urls).await {
+                problems.push(format!("the preview's pages can't reach the {} branch from the browser: {}", res.kind.as_str(), self.masked_error(&r.id, &e).await));
+            }
+        }
+        // An earlier push with its own copy of the data: its pages, at its own URLs.
+        for d in self.store.pinned_data(&r.id)? {
+            let Ok(b) = self.brancher(d.kind) else { continue };
+            let own: Vec<String> = pinned.iter().filter(|p| p.revision == d.revision).map(|p| p.url.clone()).collect();
+            if let Err(e) = b.serve(&d.parent, &d.r#ref, d.kept.as_deref(), &own).await {
+                problems.push(format!("an earlier push's pages can't reach its {} copy from the browser: {}", d.kind.as_str(), self.masked_error(&r.id, &e).await));
             }
         }
         // 4b. Health: a service with a `health` path counts once it answers 2xx/3xx there, asked
