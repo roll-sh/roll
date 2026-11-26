@@ -60,6 +60,15 @@ struct CfId {
     id: String,
 }
 
+#[derive(serde::Deserialize)]
+struct CfRecord {
+    id: String,
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    content: String,
+}
+
 impl Cloudflare {
     pub const API: &'static str = "https://api.cloudflare.com/client/v4";
 
@@ -123,8 +132,10 @@ impl Cloudflare {
 
     /// Make `name`'s `kind` record (`CNAME`, `TXT`) say `content`, unproxied (roll apps writing a
     /// customer's domain records with their own token): the one there changed, else one made. A
-    /// CNAME's name may be its zone's apex (Cloudflare flattens it).
-    pub async fn put_record(&self, kind: &str, name: &str, content: &str, comment: &str) -> anyhow::Result<()> {
+    /// CNAME's name may be its zone's apex (Cloudflare flattens it). A CNAME can't sit beside its
+    /// name's A and AAAA records (the old host's): with `replace` they're deleted first, else
+    /// nothing is written and they're answered (`type content` each).
+    pub async fn put_record(&self, kind: &str, name: &str, content: &str, comment: &str, replace: bool) -> anyhow::Result<Vec<String>> {
         anyhow::ensure!(matches!(kind, "CNAME" | "TXT"), "only CNAME and TXT records");
         let zone = match self.zone_id(name).await? {
             Some(z) => z,
@@ -132,16 +143,28 @@ impl Cloudflare {
         };
         let base = format!("{}/zones/{zone}/dns_records", self.api);
         // Names are DNS names (checked by the caller): nothing in them needs escaping.
-        let there: Vec<CfId> = self.call(self.http.get(format!("{base}?type={kind}&name={name}")), &format!("find {kind} {name}")).await?;
+        let all: Vec<CfRecord> = self.call(self.http.get(format!("{base}?name={name}&per_page=100")), &format!("find {name}'s records")).await?;
+        let same: Vec<&CfRecord> = all.iter().filter(|r| r.kind == kind).collect();
+        if kind == "CNAME" {
+            // What a CNAME can't stand beside: the name's addresses (Cloudflare refuses it there:
+            // 81053), the old host's usually. Anything else Cloudflare refuses comes back as its error.
+            let others: Vec<&CfRecord> = all.iter().filter(|r| matches!(r.kind.as_str(), "A" | "AAAA")).collect();
+            if !others.is_empty() && !replace {
+                return Ok(others.iter().map(|r| format!("{} {}", r.kind, short(&r.content, 100))).collect());
+            }
+            for r in &others {
+                let _: CfId = self.call(self.http.delete(format!("{base}/{}", r.id)), &format!("delete {} {name}", r.kind)).await?;
+            }
+        }
         let mut body = serde_json::json!({ "type": kind, "name": name, "content": content, "ttl": 1, "comment": comment });
         if kind == "CNAME" {
             body["proxied"] = serde_json::json!(false);
         }
-        let _: CfId = match there.first() {
+        let _: CfId = match same.first() {
             Some(r) => self.call(self.http.put(format!("{base}/{}", r.id)).json(&body), &format!("update {kind} {name}")).await?,
             None => self.call(self.http.post(base).json(&body), &format!("create {kind} {name}")).await?,
         };
-        Ok(())
+        Ok(Vec::new())
     }
 }
 

@@ -3255,6 +3255,8 @@ async fn a_status_page_shows_the_projects_checks() {
     assert_eq!(at("/status.json").await, StatusCode::NOT_FOUND, "not before it's verified");
     w.dns.add("_roll-challenge.status.acme.dev", "TXT", d["token"].as_str().unwrap());
     assert_eq!(call(&w.api, "POST", &format!("{own}/verify"), None).await.1["status"], "active");
+    let (_, again) = call(&w.api, "POST", &own, Some(json!({"hostname": "status.acme.dev"}))).await;
+    assert_eq!((again["status"].as_str(), again["token"].clone()), (Some("active"), d["token"].clone()), "the same name again changes nothing");
     assert_eq!(at("/status.json").await, StatusCode::OK);
     assert_eq!(call(&w.api, "POST", &format!("{env}/domains"), Some(json!({"hostname": "status.acme.dev"}))).await.0, StatusCode::CONFLICT);
     // Kept by its address when changed; gone when deleted.
@@ -3495,11 +3497,15 @@ async fn a_domains_records_are_written_with_the_customers_token() {
     struct Writer(Arc<apps_control::integrations::StaticDns>, Mutex<Vec<(String, String)>>);
     #[async_trait]
     impl apps_control::integrations::DnsWriter for Writer {
-        async fn put_record(&self, token: &str, kind: &str, name: &str, content: &str) -> anyhow::Result<()> {
+        async fn put_record(&self, token: &str, kind: &str, name: &str, content: &str, replace: bool) -> anyhow::Result<Vec<String>> {
             assert_eq!(token, "cf-secret");
+            // The name still has the old host's address: a CNAME waits for `replace`.
+            if kind == "CNAME" && !replace {
+                return Ok(vec!["A 192.0.2.7".into()]);
+            }
             self.1.lock().push((kind.to_string(), name.to_string()));
             self.0.add(name, if kind == "TXT" { "TXT" } else { "CNAME" }, content);
-            Ok(())
+            Ok(Vec::new())
         }
     }
     let w = world_full(|_| {}, false, |d| d.secrets = Arc::new(Cf)).await;
@@ -3513,9 +3519,12 @@ async fn a_domains_records_are_written_with_the_customers_token() {
     assert_eq!(call(&w.api, "POST", &configure, Some(json!({"cloudflare_token": "cf-secret"}))).await.0, StatusCode::BAD_REQUEST, "a reference, never the token");
     assert_eq!(call(&w.api, "POST", &configure, Some(json!({"cloudflare_token": "roll://production/OTHER"}))).await.0, StatusCode::FORBIDDEN);
     let (st, v) = call(&w.api, "POST", &configure, Some(json!({"cloudflare_token": "roll://production/CF_TOKEN"}))).await;
+    assert!(st == StatusCode::CONFLICT && v.to_string().contains("A 192.0.2.7"), "the old host's address is named, not deleted: {v}");
+    let (st, v) = call(&w.api, "POST", &configure, Some(json!({"cloudflare_token": "roll://production/CF_TOKEN", "replace": true}))).await;
     assert_eq!((st, v["status"].as_str()), (StatusCode::OK, Some("active")), "{v}");
-    // An apex: its CNAME (Cloudflare flattens it) and the challenge.
-    assert_eq!(*writer.1.lock(), [("CNAME".to_string(), "acme.dev".to_string()), ("TXT".to_string(), "_roll-challenge.acme.dev".to_string())]);
+    // An apex: the challenge first (each time), then its CNAME (Cloudflare flattens it).
+    assert_eq!(writer.1.lock().last().cloned(), Some(("CNAME".to_string(), "acme.dev".to_string())));
+    assert!(writer.1.lock().iter().any(|r| *r == ("TXT".to_string(), "_roll-challenge.acme.dev".to_string())));
     assert!(!v.to_string().contains("cf-secret"));
 }
 
