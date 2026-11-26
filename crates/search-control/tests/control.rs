@@ -5055,9 +5055,14 @@ async fn opensearch_flavor_clusters_link_with_the_remotes_own_mappings() {
         let (s, v) = e.es("nobody@os-near", "Zq7-Mountain-River-88", Method::GET, p, None).await;
         assert_eq!(s, 403, "{p}: {v}");
     }
-    let r = e.http.post(format!("{}/_msearch", e.es)).basic_auth("nobody@os-near", Some("Zq7-Mountain-River-88")).header("content-type", "application/x-ndjson").body("{\"index\":\"loop:*\"}\n{}\n").send().await.unwrap();
+    // An `_msearch` item: a user who may run `_msearch` and read `secret-near` only.
+    let partial = json!({"cluster_permissions": ["cluster_composite_ops_ro"], "index_permissions": [{"index_patterns": ["secret-near"], "allowed_actions": ["read"]}]});
+    for (p, body) in [("roles/partial", partial), ("internalusers/partial", json!({"password": "Zq7-Mountain-River-87"})), ("rolesmapping/partial", json!({"users": ["partial"]}))] {
+        assert!(es_as(&e, &near, Method::PUT, &format!("{api}/{p}"), Some(body)).await.0 < 300, "{p}");
+    }
+    let r = e.http.post(format!("{}/_msearch", e.es)).basic_auth("partial@os-near", Some("Zq7-Mountain-River-87")).header("content-type", "application/x-ndjson").body("{\"index\":\"loop:*\"}\n{}\n{\"index\":\"loop:secret-near\"}\n{}\n").send().await.unwrap();
     let m: Value = r.json().await.unwrap();
-    assert_eq!(m["responses"][0]["error"]["type"], "security_exception", "{m}");
+    assert_eq!((m["responses"][0]["error"]["type"].as_str(), m["responses"][1]["hits"]["total"]["value"].as_i64()), (Some("security_exception"), Some(1)), "{m}");
     let (s, v) = es_as(&e, &near, Method::GET, "/loop:secret-near/_search", None).await;
     assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(1)), "{v}");
     // A link's request names no further remote, the remote's loopback included.
