@@ -22,12 +22,25 @@ pub fn metadata(cluster: &Cluster, id: &str) -> Option<Value> {
     cluster.state().metadata.xpack.get(KEYS, id).and_then(|k| k.get("metadata").cloned())
 }
 
+/// The id of an API key presented to `cluster`: as is, or `<id>@<cluster>` (the `encoded` a new
+/// key is answered with, which roll's nodes route at any address) naming this cluster. `None`:
+/// it names another cluster, whose key this never is (a branch holds copies of its parent's).
+fn presented_id<'a>(cluster: &Cluster, id: &'a str) -> Option<&'a str> {
+    match id.rsplit_once('@') {
+        None => Some(id),
+        Some((id, named)) => (named == cluster.name && !id.is_empty()).then_some(id),
+    }
+}
+
 /// Authenticates the value of an `ApiKey` header.
 pub fn authenticate(cluster: &Cluster, value: &str) -> EsResult<Principal> {
     let decoded = super::b64_decode(value).map_err(|e| super::unauthorized_credentials(format!("API key: {e}")))?;
     let text = String::from_utf8_lossy(&decoded).into_owned();
     let Some((id, secret)) = text.split_once(':').filter(|(i, s)| !i.is_empty() && !s.is_empty()) else {
         return Err(super::unauthorized_credentials("API key: invalid ApiKey value"));
+    };
+    let Some(id) = presented_id(cluster, id) else {
+        return Err(super::unauthorized_credentials(format!("API key: unable to find apikey with id {id}")));
     };
     let st = cluster.state();
     let Some(k) = st.metadata.xpack.get(KEYS, id) else {
@@ -87,10 +100,10 @@ pub fn authenticate_link(cluster: &Cluster, value: &str, access: &str) -> EsResu
     let Some((id, secret)) = text.split_once(':').filter(|(i, s)| !i.is_empty() && !s.is_empty()) else {
         return Err(super::unauthorized_credentials("API key: invalid ApiKey value"));
     };
-    // `<id>@<cluster>` names the cluster for the node.
-    let id = id.split_once('@').map_or(id, |(i, _)| i);
-    let st = cluster.state();
     let refused = || super::unauthorized_credentials(format!("API key: unable to authenticate cross-cluster API key [{id}]"));
+    // `<id>@<cluster>` names the cluster for the node: this one, or it's no key of this cluster's.
+    let Some(id) = presented_id(cluster, id) else { return Err(refused()) };
+    let st = cluster.state();
     let Some(k) = st.metadata.xpack.get(KEYS, id) else { return Err(refused()) };
     if k.get("invalidated").and_then(Value::as_bool) == Some(true)
         || k.get("expiration").and_then(Value::as_i64).is_some_and(|exp| exp <= crate::time::now_millis())
@@ -228,7 +241,10 @@ async fn store_key(ctx: &Ctx<'_>, owner: &Principal, k: NewKey) -> EsResult<Repl
     let key_id = id.clone();
     ctx.cluster.update(move |st| store::put(st, KEYS, &key_id, Value::Obj(doc), now)).await?;
     use base64::Engine;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{id}:{secret}"));
+    // `<id>@<cluster>:<secret>`, not Elasticsearch's `<id>:<secret>`: roll's nodes route it to
+    // this cluster at any address (the shared host too), and only this cluster accepts it
+    // ([`presented_id`]). `id` and `api_key` stay as Elasticsearch answers them.
+    let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{id}@{}:{secret}", ctx.cluster.name));
     let mut out = Map::new();
     out.insert("id".into(), id.into());
     out.insert("name".into(), k.name);
@@ -787,6 +803,22 @@ mod tests {
         let (_, d) = cross_cluster_descriptor(&obj! { "search" => crate::arr![obj! { "names" => crate::arr!["logs*"] }] }).unwrap();
         assert_eq!(d.pointer(&["cross_cluster", "cluster"]), Some(&crate::arr!["cross_cluster_search", "monitor_enrich"]));
         assert!(cross_cluster_descriptor(&obj! {}).is_err());
+    }
+
+    /// A node serving one cluster hands the header to it as sent: the `encoded` it answers
+    /// (`<id>@<its name>`) and the bare id work, another cluster's qualifier doesn't.
+    #[tokio::test]
+    async fn encoded_names_its_cluster_and_only_it_accepts_it() {
+        use base64::Engine;
+        let c = Cluster::open(crate::cluster::ClusterConfig::new("c"), std::sync::Arc::new(crate::cluster::MemoryStore::new())).await.unwrap();
+        let r = crate::rest::handle(&c, crate::EsRequest::json("POST", "/_security/api_key", r#"{"name":"k"}"#.to_string())).await;
+        let k = crate::json::parse(&r.body).ok().flatten().unwrap_or_default();
+        let (id, secret, encoded) = (k.get("id").unwrap().to_es_string(), k.get("api_key").unwrap().to_es_string(), k.get("encoded").unwrap().to_es_string());
+        let b64 = |s: String| base64::engine::general_purpose::STANDARD.encode(s);
+        assert_eq!(encoded, b64(format!("{id}@c:{secret}")));
+        assert!(authenticate(&c, &encoded).is_ok());
+        assert!(authenticate(&c, &b64(format!("{id}:{secret}"))).is_ok());
+        assert!(authenticate(&c, &b64(format!("{id}@d:{secret}"))).is_err());
     }
 
     #[test]

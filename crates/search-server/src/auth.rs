@@ -214,10 +214,17 @@ impl std::fmt::Debug for Claim {
     }
 }
 
+/// `None` when it names no cluster, or when its qualifier (`<user>@<cluster>`, `<key id>@<cluster>`)
+/// names another cluster than the host it came to: a cluster's own host never takes another's
+/// credentials.
 pub fn claim(p: &Presented, host_cluster: Option<&str>) -> Option<Claim> {
+    let elsewhere = |c: &str| host_cluster.is_some_and(|h| h != c);
     match p {
         Presented::Basic { user, password } => {
             if let Some((u, c)) = user.rsplit_once('@') {
+                if elsewhere(c) {
+                    return None;
+                }
                 return Some(Claim { cluster: c.to_string(), user: Some(u.to_string()), api_key_id: None, secret: Some(password.clone()) });
             }
             match host_cluster {
@@ -227,6 +234,7 @@ pub fn claim(p: &Presented, host_cluster: Option<&str>) -> Option<Claim> {
         }
         Presented::ApiKey { id, secret } => {
             let (key, cluster) = match id.rsplit_once('@') {
+                Some((_, c)) if elsewhere(c) => return None,
                 Some((k, c)) => (Some(k.to_string()), c.to_string()),
                 None => (None, host_cluster.map(str::to_string).unwrap_or_else(|| id.clone())),
             };
@@ -380,6 +388,11 @@ mod tests {
         assert_eq!(claim(&Presented::None, None), None);
         let c = claim(&Presented::ApiKey { id: "k1@c5".into(), secret: "s".into() }, None).unwrap();
         assert_eq!((c.cluster.as_str(), c.api_key_id.as_deref()), ("c5", Some("k1")));
+        // At a cluster's own host, only its own qualifier.
+        let c = claim(&Presented::ApiKey { id: "k1@c5".into(), secret: "s".into() }, Some("c5")).unwrap();
+        assert_eq!((c.cluster.as_str(), c.api_key_id.as_deref()), ("c5", Some("k1")));
+        assert_eq!(claim(&Presented::ApiKey { id: "k1@c6".into(), secret: "s".into() }, Some("c5")), None);
+        assert_eq!(claim(&basic("bob@c6"), Some("c5")), None);
     }
 
     #[test]

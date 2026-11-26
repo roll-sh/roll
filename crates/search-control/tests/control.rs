@@ -1763,6 +1763,39 @@ async fn browser_keys_pay_per_item_and_leave_the_owner_permits() {
     assert_eq!(s, 409, "{v}");
 }
 
+/// An API key a cluster makes answers an `encoded` that names its cluster
+/// (`<id>@<cluster>:<secret>`), so a copied value works at the node's shared address as at the
+/// cluster's own host; no other cluster, and no other cluster's host, accepts it.
+#[tokio::test]
+async fn an_api_keys_encoded_works_at_the_shared_address_and_only_on_its_cluster() {
+    use base64::Engine;
+    let e = env_with(|c| c.domain = Some("search.example.test".into())).await;
+    e.post("/v1/search/clusters", json!({"name": "shop"})).await;
+    e.post("/v1/search/clusters", json!({"name": "other"})).await;
+    let r = e.post("/v1/search/clusters/shop/request", json!({"method": "POST", "path": "/_security/api_key", "body": {"name": "app"}})).await;
+    let k = body(&r);
+    let (id, secret, encoded) = (k["id"].as_str().unwrap(), k["api_key"].as_str().unwrap(), k["encoded"].as_str().unwrap());
+    let b64 = |s: String| base64::engine::general_purpose::STANDARD.encode(s);
+    assert_eq!(encoded, b64(format!("{id}@shop:{secret}")));
+    let auth = |key: String, host: Option<&'static str>| {
+        let mut r = e.http.get(format!("{}/_security/_authenticate", e.es)).header("authorization", format!("ApiKey {key}"));
+        if let Some(h) = host {
+            r = r.header("host", h);
+        }
+        async move { r.send().await.unwrap().status().as_u16() }
+    };
+    let (shop, other) = (Some("shop.search.example.test"), Some("other.search.example.test"));
+    // The shared address: the qualified key only (a bare id names no cluster there).
+    assert_eq!(auth(encoded.to_string(), None).await, 200);
+    assert_eq!(auth(b64(format!("{id}:{secret}")), None).await, 401);
+    assert_eq!(auth(b64(format!("{id}@other:{secret}")), None).await, 401);
+    // The cluster's own host: bare or its own qualifier; another cluster's host: neither.
+    assert_eq!(auth(encoded.to_string(), shop).await, 200);
+    assert_eq!(auth(b64(format!("{id}:{secret}")), shop).await, 200);
+    assert_eq!(auth(encoded.to_string(), other).await, 401);
+    assert_eq!(auth(b64(format!("{id}:{secret}")), other).await, 401);
+}
+
 #[tokio::test]
 async fn documents() {
     let e = env().await;

@@ -262,8 +262,8 @@ es POST /_security/api_key '{
 }'
 ```
 
-Use its `encoded` value against the cluster's own host. On a shared address such as
-`http://127.0.0.1:59200`, encode `<id>@shop:<api_key>` in base64 instead.
+Its `encoded` value names the cluster, so it works at the cluster's own host and at a shared
+address such as `http://127.0.0.1:59200` alike.
 
 ## Next steps
 
