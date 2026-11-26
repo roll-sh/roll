@@ -1942,24 +1942,25 @@ fn cacheable(req: &SearchRequest, t: &Target) -> bool {
         return false;
     }
     let text = format!("{src:?}");
-    if text.contains("now") || text.contains("Script") || text.contains("random") {
-        return false;
-    }
-    // A query reading other documents is authorized as its reader where the lookup runs, which
-    // a hit skips, and the key doesn't hold who asked (Elasticsearch rewrites lookups as the user
-    // before it keys): terms lookups, `percolate`, indexed shapes and `more_like_this` documents
-    // (any percolate and any document item, from the parsed request's text), in the request or
-    // its alias filter, never use the cache.
-    let filter = format!("{:?}", t.filter);
-    if READS_OTHER_DOCUMENTS.iter().any(|p| text.contains(p) || filter.contains(p)) {
-        return false;
-    }
-    // The sections kept as JSON, parsed per shard (aggregations: a `filter` with a lookup).
-    let json = src.aggs.iter().chain(src.retriever.iter()).chain(src.highlight.iter()).chain(src.knn.iter());
-    !json.into_iter().any(crate::query::reads::reads_elsewhere)
+    !(text.contains("now") || text.contains("Script") || text.contains("random"))
 }
 
-/// How the parsed queries that read other documents print ([`cacheable`]).
+/// Whether the request (or its alias filter) reads documents of other indices: terms lookups,
+/// `percolate`, indexed shapes, `more_like_this` documents (any percolate and any document item
+/// of the parsed parts, from their text; the sections kept as JSON and parsed per shard, such
+/// as aggregations, by [`crate::query::reads::reads_elsewhere`]).
+fn reads_other_documents(req: &SearchRequest, t: &Target) -> bool {
+    let src = &req.source;
+    let text = format!("{src:?}");
+    let filter = format!("{:?}", t.filter);
+    if READS_OTHER_DOCUMENTS.iter().any(|p| text.contains(p) || filter.contains(p)) {
+        return true;
+    }
+    let json = src.aggs.iter().chain(src.retriever.iter()).chain(src.highlight.iter()).chain(src.knn.iter());
+    json.into_iter().any(crate::query::reads::reads_elsewhere)
+}
+
+/// How the parsed queries that read other documents print ([`reads_other_documents`]).
 const READS_OTHER_DOCUMENTS: &[&str] = &["Some(TermsLookup", "Indexed {", "Percolate {", "MltItem {"];
 
 fn request_cache_key(req: &SearchRequest, t: &Target) -> String {
@@ -1970,6 +1971,15 @@ fn request_cache_key(req: &SearchRequest, t: &Target) -> String {
     // Terms lookups read other indices: key on every refresh anywhere.
     if k.contains("Some(TermsLookup") {
         k.push_str(&format!("|{}", crate::engine::refresh_epoch()));
+    }
+    // A lookup is authorized as its reader where it runs, which a hit skips: an answer that read
+    // other documents is the reader's own (by who it is and what its roles grant now), as
+    // Elasticsearch keys the query its lookups were rewritten into as that user. Superusers
+    // (no reader restrictions at all) share theirs.
+    if let Some(s) = &t.security
+        && reads_other_documents(req, t)
+    {
+        k.push_str(&format!("|reader:{:x}", s.cache_identity()));
     }
     k
 }

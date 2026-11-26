@@ -265,6 +265,17 @@ impl ReadSecurity {
         self.0.browser.as_ref()
     }
 
+    /// Who the reader is and what its roles grant, as a request cache key part: an answer whose
+    /// lookups were authorized for one reader is never another's, nor this one's once its roles
+    /// change.
+    pub fn cache_identity(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let e = &self.0.eff;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        format!("{:?}|{:?}|{:?}|{:?}", self.0.principal, e.own, e.limited_by, e.also).hash(&mut h);
+        h.finish()
+    }
+
     /// Whether document or field level security, or a browser key's policy, restricts any of
     /// the reader's reads (what an answer that may be shared, the request cache's, depends on).
     pub fn restricts_anything(&self) -> bool {
