@@ -2996,18 +2996,16 @@ services' stop, which products' restore points save, the CLI's commands).
    asked by itself when the change is queued to land.
 2. **The feedback button for team-access visitors on roll apps previews** (S, with roll apps:
    `apps-control/src/public.rs` adds it for link and share visitors only).
-3. **This page on main, from the toolbar, in review** (Vercel's deployment switcher): the
-   toolbar's Main.
-4. **Older pushes past the last three, started on demand** (Vercel keeps every deployment's URL;
+3. **Older pushes past the last three, started on demand** (Vercel keeps every deployment's URL;
    S–M): kept as code only, on the preview's own data, started at the first visit.
-5. **What a note's reviewer saw, from their own browser** (Jam, Marker.io; M): an opt-in
+4. **What a note's reviewer saw, from their own browser** (Jam, Marker.io; M): an opt-in
    capture, labelled as theirs, and mentions of the team's members.
-6. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
+5. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
     (its Next 32); buckets need a put-back on roll storage's side.
-7. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+6. **Previews for the members thread's next products**: once roll apps' and roll search's routes
     become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
     follow the same roles, checked live against a member's session.
-8. **Watches on pg-control**: the data step's Postgres compute start (most of the data step is
+7. **Watches on pg-control**: the data step's Postgres compute start (most of the data step is
     it and its masking); cheap branches on ext4 through overlay volumes over a frozen base
     (measured 2026-11-17: 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole
     table file); recovery to a time seconds old (unowned).
@@ -3017,8 +3015,8 @@ pull request for less than the items above).
 
 Landed 2026-11-26, midday: restore points for streams (#1112), the TurboSnap test's race under
 load (#1114), the tenth review's fixes (#1119), the visual review holding on stories a change
-touched that its run didn't take (#1120), a visual change refused (#1125), masked bases (#1130), more stories per run (#1135), and open
-changes that change the same tables named on each other (#1136).
+touched that its run didn't take (#1120), a visual change refused (#1125), masked bases (#1130), more stories per run (#1135), open
+changes that change the same tables named on each other (#1136), and the toolbar's Main (#1138).
 
 Landed 2026-11-26, morning: stories' interaction tests (#1087), what a failed one threw (#1091), both in the other browsers (#1100), the step a failed one stopped at (#1105), and restore points for Redis (#1109).
 
