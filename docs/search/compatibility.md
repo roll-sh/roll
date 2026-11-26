@@ -534,6 +534,11 @@ refused (400 `found a redacted value in field [path]`) unless the update says `i
 goes to the same scheme, host and port, when each redacted value keeps the stored one, as the
 password does on Elasticsearch. The watcher suites pass as before (89 and 9).
 
+Task results: on the Elasticsearch dialect `.tasks` is a hidden, restricted system index (as
+`TaskResultsService` creates it); the OpenSearch dialect keeps it an ordinary index, which its
+roles name. Known gap: on the OpenSearch dialect a `wait_for_completion=false` by-query creates
+`.tasks` but stores no result document in it, where OpenSearch stores one.
+
 Watch records (`.watcher-history-*`) are reached only by a grant that names them (`.watch*`,
 `.watcher-history-*`, Elasticsearch's watcher roles) or that allows restricted indices, through an
 alias too: on Elasticsearch a grant of `*` reaches them. `_update_by_query` drops a

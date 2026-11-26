@@ -527,6 +527,11 @@ CREATE TABLE IF NOT EXISTS domains (
 CREATE INDEX IF NOT EXISTS domains_env ON domains (service, env);
 -- A project's own preview domain (`*.preview.acme.dev`, roll previews' preview deployment
 -- suffix), and the label each preview environment answers to under it.
+CREATE TABLE IF NOT EXISTS project_boards (
+    project TEXT PRIMARY KEY,
+    panels TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS status_domains (
     project TEXT PRIMARY KEY,
     hostname TEXT NOT NULL UNIQUE,
@@ -2158,6 +2163,21 @@ impl Store {
 
     /// The project's secrets' digest ([`crate::integrations::SecretSource::digest`]) a deployment
     /// went live with.
+    /// A project's board's panels (JSON), if it has one.
+    pub fn board(&self, project: &str) -> Result<Option<String>> {
+        Ok(self.db.query_row("SELECT panels FROM project_boards WHERE project = ?", [project], |r| r.get(0)).optional()?)
+    }
+
+    /// A project's board replaced, or (None) removed.
+    pub fn put_board(&self, project: &str, panels: Option<&str>) -> Result<()> {
+        let now = self.now()?;
+        match panels {
+            Some(j) => self.db.execute("INSERT INTO project_boards (project, panels, updated_at) VALUES (?, ?, ?) ON CONFLICT (project) DO UPDATE SET panels = excluded.panels, updated_at = excluded.updated_at", params![project, j, now])?,
+            None => self.db.execute("DELETE FROM project_boards WHERE project = ?", [project])?,
+        };
+        Ok(())
+    }
+
     /// A project's status page made or changed: a new one gets `slug`, a changed one keeps its own.
     pub fn put_status_page(&self, project: &str, slug: &str, title: &str, items: &str) -> Result<crate::status_page::Page> {
         self.db.execute(

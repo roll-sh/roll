@@ -593,8 +593,7 @@ pub fn is_watch_history(index: &str) -> bool {
 /// Restricted indices: the security indices and other internal indices roles must opt into.
 pub fn is_restricted(index: &str) -> bool {
     // `.synonyms-2` (`.synonyms`) holds the synonym sets: a system index, restricted in
-    // Elasticsearch. (`.tasks` too, once it's made hidden: until then a restricted `.tasks`
-    // would fail whole-request checks over `*`.)
+    // Elasticsearch. `.tasks` is restricted on Elasticsearch only (`Effective::restricted`).
     index.starts_with(".security")
         || index == super::opensearch::INDEX
         || index.starts_with(".async-search")
