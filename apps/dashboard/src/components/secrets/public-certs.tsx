@@ -273,7 +273,7 @@ export function PublicCerts() {
                         autoFocus
                       />
                       <p className="text-[11px] text-subtle sm:col-span-2">
-                        <DnsHint dns={c.dns_provider} role={replacing.role} /> roll orders a new certificate at once with it.
+                        <DnsHint dns={c.dns_provider} role={replacing.role} replacing />
                       </p>
                       <span className="flex gap-2 sm:col-span-2">
                         <button type="submit" className={primary} disabled={!credentialOk(c.dns_provider, replacing.role, replacing.credential) || busy !== null}>
@@ -352,8 +352,8 @@ function DnsFields(p: { dns: PublicCertDns; roles: AwsRole[]; rolesHref: string;
               No AWS role yet:{" "}
               <Link href={p.rolesHref} className="text-accent hover:underline">
                 add one
-              </Link>{" "}
-              and no key is kept.
+              </Link>
+              , and roll keeps no key.
             </span>
           )}
         </label>
@@ -376,10 +376,13 @@ function DnsFields(p: { dns: PublicCertDns; roles: AwsRole[]; rolesHref: string;
   );
 }
 
-function DnsHint({ dns, role }: { dns: PublicCertDns; role: string }) {
+function DnsHint({ dns, role, replacing = false }: { dns: PublicCertDns; role: string; replacing?: boolean }) {
+  const then = replacing ? " roll orders a new certificate with it at once." : "";
   return dns === "route53" && role !== ""
-    ? "roll writes the records as the role, a short session each time, named roll-public-cert-… and limited to _acme-challenge TXT records: give it route53:ChangeResourceRecordSets and ListResourceRecordSets on the zone, ListHostedZonesByName and GetChange."
-    : "Checked with the provider first, then kept sealed: roll never shows it again, and the certificate's key button replaces it.";
+    ? `roll writes the records as the role, a short session each time, named roll-public-cert-… and limited to _acme-challenge TXT records: give it route53:ChangeResourceRecordSets and ListResourceRecordSets on the zone, ListHostedZonesByName and GetChange.${then}`
+    : replacing
+      ? `Checked with the provider first, then kept sealed in place of the old one: roll never shows it again.${then}`
+      : "Checked with the provider first, then kept sealed: roll never shows it again (the certificate's key button replaces it).";
 }
 
 function Status({ status }: { status: PublicCert["status"] }) {
