@@ -370,22 +370,23 @@ def http(method, path, body=None, headers=None):
             return e.code, raw.decode(errors="replace"), e.headers
 member_fails = []
 outbox = os.environ.get("MCP_SWEEP_OUTBOX")
-def member_token():
+def member_token(email="viewer@example.com", role="viewer", rules=None, name="sweep-viewer"):
     op = {"authorization": f"Bearer {tok}"}
-    s, inv, _ = http("POST", "/v1/accounts/invites", {"email": "viewer@example.com"}, op)
+    s, inv, _ = http("POST", "/v1/accounts/invites", {"email": email}, op)
     if s >= 300:
         return f"inviting a person: {s} {inv}"
-    s, start, _ = http("POST", "/v1/accounts/email/start", {"email": "viewer@example.com", "invite": inv["token"]})
+    s, start, _ = http("POST", "/v1/accounts/email/start", {"email": email, "invite": inv["token"]})
     if s >= 300:
         return f"starting a sign-in: {s} {start}"
     code = None
     for _ in range(100):
         for f in glob.glob(os.path.join(outbox, "*")):
             try:
-                subject = json.load(open(f)).get("subject", "")
+                mail = json.load(open(f))
             except (ValueError, OSError):
                 continue
-            if "sign-in code" in subject:
+            subject = mail.get("subject", "")
+            if "sign-in code" in subject and email in (mail.get("to") if isinstance(mail.get("to"), list) else [mail.get("to")]):
                 code = subject[:6]
         if code:
             break
@@ -398,17 +399,18 @@ def member_token():
     cookie = h.get("set-cookie", "").split(";")[0]
     s, session, _ = http("GET", "/v1/accounts/session", headers={"cookie": cookie})
     me = {"cookie": cookie, "origin": api, "x-roll-csrf": (session or {}).get("csrf", "")}
-    s, pinv, _ = http("POST", f"/v1/workspace/projects/{ws}/invites", {"email": "viewer@example.com", "role": "viewer"}, op)
+    s, pinv, _ = http("POST", f"/v1/workspace/projects/{ws}/invites", {"email": email, "role": role}, op)
     if s >= 300:
         return f"inviting them to the project: {s} {pinv}"
     s, acc, _ = http("POST", f"/v1/workspace/invites/{pinv['url'].split('token=')[1]}/accept", None, me)
     if s >= 300:
         return f"accepting: {s} {acc}"
     every = [{"product": "*", "resources": "*", "actions": {a: "allow" for a in ("read", "write", "delete", "reveal", "deploy", "admin")}}]
-    s, made, _ = http("POST", "/v1/access/tokens", {"name": "sweep-viewer", "rules": every}, me)
+    s, made, _ = http("POST", "/v1/access/tokens", {"name": name, "rules": rules or every}, me)
     if s >= 300:
         return f"minting their token: {s} {made}"
     secrets.discard(made["token"])
+    made["session"] = me
     return made
 viewer = member_token() if outbox and ws else "no outbox or project"
 if isinstance(viewer, dict):
@@ -432,6 +434,47 @@ if isinstance(viewer, dict):
     print(f"member: a viewer's client lists {len(vtools)} tools; {called} read tools of member products called, {len(member_fails)} refused by the role that listed them")
 else:
     member_fails.append(f"the member pass couldn't start: {viewer}")
+
+# A person's own search flow (docs/search/README.md, Next item 26): a person signed in, an
+# admin of the sweep's project (a developer writes search only in the environments their role
+# reaches, and a new cluster names none), with a token scoped to search alone (read and write), makes a
+# cluster in the project, an index, bulk-indexes, refreshes and finds the document, all through
+# /v1/mcp as their agent would; a read-only token of theirs is refused the bulk.
+def search_flow():
+    rw = [{"product": "search", "resources": "*", "actions": {"read": "allow", "write": "allow"}}]
+    dev = member_token("searcher@example.com", "admin", rw, "sweep-search-dev")
+    if not isinstance(dev, dict):
+        return [f"the person couldn't start: {dev}"]
+    dt, out = dev["token"], []
+    def dcall(name, args, token=dt):
+        res = rpc("tools/call", {"name": name, "arguments": args}, token=token).get("result", {})
+        return res, json.dumps(res.get("structuredContent")) + " ".join(c.get("text", "") for c in res.get("content", []))
+    steps = [("search_create_cluster", {"name": "sweep-dev", "workspace_project": ws}), ("search_create_index", {"cluster": "sweep-dev", "index": "notes"}),
+             ("search_bulk", {"cluster": "sweep-dev", "index": "notes", "ndjson": '{"index":{"_id":"n1"}}\n{"title":"rolling search from an agent"}\n'}),
+             ("search_refresh", {"cluster": "sweep-dev", "index": "notes"})]
+    for name, args in steps:
+        res, text = dcall(name, args)
+        if res.get("isError"):
+            return out + [f"{name} as the person's search token: {text[:200]}"]
+    res, text = dcall("search_query", {"cluster": "sweep-dev", "index": "notes", "query": {"match": {"title": "agent"}}})
+    if res.get("isError") or '"n1"' not in text:
+        out.append(f"search_query didn't find what the person indexed: {text[:200]}")
+    s, ro, _ = http("POST", "/v1/access/tokens", {"name": "sweep-search-ro", "rules": [{"product": "search", "resources": "*", "actions": {"read": "allow"}}]}, dev["session"])
+    if s >= 300:
+        return out + [f"minting the person's read-only token: {s} {ro}"]
+    secrets.discard(ro["token"])
+    res, text = dcall("search_bulk", {"cluster": "sweep-dev", "index": "notes", "ndjson": '{"index":{"_id":"n2"}}\n{"title":"not allowed"}\n'}, token=ro["token"])
+    if not res.get("isError"):
+        out.append("a read-only search token's bulk went through")
+    res, text = dcall("search_query", {"cluster": "sweep-dev", "index": "notes", "query": {"match_all": {}}}, token=ro["token"])
+    if res.get("isError") or '"n2"' in text:
+        out.append(f"the read-only token should read the index, without n2: {text[:200]}")
+    # Kept: the sweep reads back every link a tool answered (search_create_cluster's too), and its
+    # rolld is thrown away at the end.
+    print("member: a person's search flow ok" if not out else f"member: a person's search flow: {len(out)} problems")
+    return out
+if outbox and ws:
+    member_fails += [f"search flow: {f}" for f in search_flow()]
 for f in member_fails:
     print("MFAIL", f)
 fails += [f"leak {l}" for l in leaks]

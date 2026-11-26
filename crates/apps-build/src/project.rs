@@ -404,6 +404,15 @@ pub fn compose_to_toml(text: &str) -> Result<(String, Vec<String>), ProjectError
                 out.push_str(&format!("root = {}\n", q(if ctx.is_empty() { "." } else { ctx })));
                 // Its Dockerfile and stage: a multi-stage Dockerfile.prod built whole is the wrong image.
                 let (file, target) = (b.get("dockerfile").and_then(str_of), b.get("target").and_then(str_of));
+                // A path inside the context (`./docker/Dockerfile.prod` as `docker/…`); one that
+                // leaves it can't be a service's, so it's said instead.
+                let file = match file.map(|f| f.trim_start_matches("./").to_string()) {
+                    Some(f) if f.is_empty() || f.starts_with('/') || f.split('/').any(|c| c == ".." || c == ".") => {
+                        notes.push(format!("{k}: its build's dockerfile {f} is outside its context: set one inside it on the service (Settings → Build)"));
+                        None
+                    }
+                    f => f,
+                };
                 if file.is_some() || target.is_some() {
                     let parts: Vec<String> = [file.map(|f| format!("dockerfile = {}", q(&f))), target.map(|t| format!("target = {}", q(&t)))].into_iter().flatten().collect();
                     out.push_str(&format!("build = {{ {} }}\n", parts.join(", ")));
@@ -508,6 +517,10 @@ mod tests {
         let b = parse_project(&text).unwrap_or_else(|e| panic!("{e}\n{text}")).apps["api"].build.clone().unwrap_or_default();
         assert_eq!((b["dockerfile"].as_str(), b["target"].as_str()), (Some("Dockerfile.prod"), Some("runtime")), "{text}");
         assert!(parse_project("[apps.web]\nroot = \".\"\nbuild = { cache = true }\n").is_err(), "a key a file can't set");
+        let (text, notes) = compose_to_toml("services:\n  api:\n    build:\n      context: .\n      dockerfile: ./docker/Dockerfile.prod\n  web:\n    build:\n      context: ./web\n      dockerfile: ../Dockerfile\n").unwrap();
+        let f = parse_project(&text).unwrap();
+        assert_eq!(f.apps["api"].build.as_ref().and_then(|b| b["dockerfile"].as_str()), Some("docker/Dockerfile.prod"), "./ dropped");
+        assert!(f.apps["web"].build.is_none() && notes.iter().any(|n| n.contains("outside its context")), "{notes:?}");
         // A few KB that aliases make gigabytes stops at the budget, before anything is built.
         let bomb = format!("x: &a [{}]\ny: [{}]\nservices: {{}}\n", vec!["1"; 2000].join(","), vec!["*a"; 2000].join(","));
         let e = compose_to_toml(&bomb).unwrap_err().to_string();

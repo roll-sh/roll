@@ -32,13 +32,20 @@ const FORWARDED: &[&str] = &["authorization", "content-type", "x-amz-date", "x-a
 const SIGNABLE: &[&str] = &["host", "content-length", "content-type", "x-amz-date", "x-amz-security-token", "x-amz-content-sha256", SERVER_ID_HEADER];
 
 /// A signed `GetCallerIdentity` as the client would have sent it.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignedRequest {
     pub method: String,
     pub url: String,
     pub headers: BTreeMap<String, String>,
     pub body: String,
+}
+
+/// Never the signature or the session token: the headers by name only, the body by length.
+impl std::fmt::Debug for SignedRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SignedRequest").field("method", &self.method).field("url", &self.url).field("headers", &self.headers.keys().collect::<Vec<_>>()).field("body", &self.body.len()).finish()
+    }
 }
 
 /// A request checked to be `GetCallerIdentity` to STS: the endpoint's host and the headers that

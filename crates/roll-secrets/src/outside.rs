@@ -97,7 +97,7 @@ pub struct OutsideDatabase {
 }
 
 /// A registration's changes (`PATCH …/outside-databases/{id}`): what's absent stays.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutsideDatabaseChange {
     #[serde(default)]
@@ -110,7 +110,14 @@ pub struct OutsideDatabaseChange {
     pub ca: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+/// Never the admin URL (it carries the password).
+impl std::fmt::Debug for OutsideDatabaseChange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OutsideDatabaseChange").field("name", &self.name).field("url", &crate::crypto::redacted(&self.url)).field("ca", &self.ca).finish()
+    }
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NewOutsideDatabase {
     pub name: String,
@@ -131,6 +138,20 @@ pub struct NewOutsideDatabase {
     /// private address (docs/secrets.md, "Gateways").
     #[serde(default)]
     pub gateway: Option<String>,
+}
+
+/// Never the admin URL (it carries the password).
+impl std::fmt::Debug for NewOutsideDatabase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NewOutsideDatabase")
+            .field("name", &self.name)
+            .field("url", &"<redacted>")
+            .field("roles", &self.roles)
+            .field("group", &self.group)
+            .field("ca", &self.ca)
+            .field("gateway", &self.gateway)
+            .finish()
+    }
 }
 
 /// What a database's provider needs to reach it.

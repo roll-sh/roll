@@ -42,8 +42,11 @@ pub struct Reach {
     /// Live agents sandboxes whose environment holds a copy of its values.
     pub sandboxes: Vec<SandboxReach>,
     /// People who read its values in the last [`READ_DAYS`] days and may no longer reveal them:
-    /// they still know what they read (rotate it).
+    /// they still know what they read (rotate it). A backup or a backup verify reads every folder.
     pub knew: Vec<Knew>,
+    /// The project's backup schedule: every value leaves in each backup, which only the holder of
+    /// `recipient`'s secret key opens. A cut-off pauses it.
+    pub backups: Vec<BackupReach>,
     pub syncs: Vec<SyncReach>,
     /// Live dynamic credentials issued for its keys (or the key): their holders keep them until
     /// they end.
@@ -124,6 +127,28 @@ pub struct Knew {
     /// `left`: no longer a member; `role`: their role no longer reveals it; `gone`: their account
     /// can't sign in.
     pub why: &'static str,
+    /// `backup`: they took a backup of the project (or compared one with it), which holds every
+    /// folder; `read`: they read this folder.
+    pub via: &'static str,
+    /// The registrations their backups carried with their keys, and what to do now about each
+    /// (`crate::backup::advice`): rotate a credential, re-issue a CA.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub registrations: Vec<String>,
+}
+
+/// The project's backup schedule, as reach lists it.
+#[derive(Debug, Serialize)]
+pub struct BackupReach {
+    pub bucket: String,
+    /// The X25519 public key each backup is sealed to: whoever holds its secret key opens them.
+    pub recipient: String,
+    pub created_by: String,
+    /// Whether its backups carry registrations' keys too.
+    pub registrations: bool,
+    pub last_at: Option<i64>,
+    pub paused_at: Option<i64>,
+    /// Its maker may no longer manage and reveal the whole project: it backs nothing up.
+    pub stopped: bool,
 }
 
 /// What other products hold of a project's secrets, for reach: rolld asks roll apps and roll code
@@ -240,9 +265,10 @@ pub struct Reader {
     pub reads: usize,
 }
 
-/// The people who read a folder lately, by user: when last, how often, and which reading folders
-/// (`env`, `path`) they read it through.
-type ReadBy = BTreeMap<String, (i64, usize, Vec<(String, String)>)>;
+/// The people who read a folder lately, by user: when last, how often, which reading folders
+/// (`env`, `path`) they read it through, and the registrations of their backups (`Some`: they
+/// took or compared one).
+type ReadBy = BTreeMap<String, (i64, usize, Vec<(String, String)>, Option<std::collections::BTreeSet<String>>)>;
 
 const ACTIONS: [Action; 4] = [Action::Read, Action::Reveal, Action::Write, Action::Admin];
 
@@ -452,7 +478,7 @@ impl Secrets {
             if sp == project
                 && let Some(user) = self.reader_person(&actor)
             {
-                let k = read_by.entry(user).or_insert((at, 0, vec![]));
+                let k = read_by.entry(user).or_insert((at, 0, vec![], None));
                 k.0 = k.0.max(at);
                 k.1 += 1;
                 if !k.2.contains(&(se.clone(), spath.clone())) {
@@ -471,9 +497,29 @@ impl Secrets {
             r.last_at = r.last_at.max(at);
             r.reads += 1;
         }
+        // A backup (or a verify, which compares every value) reads every folder and key.
+        for t in self.backups_taken(project, now - READ_DAYS * 86_400_000, true)? {
+            if let Some(user) = self.reader_person(&t.actor) {
+                let k = read_by.entry(user).or_insert((t.at, 0, vec![], None));
+                k.0 = k.0.max(t.at);
+                k.1 += 1;
+                k.3.get_or_insert_default().extend(t.registrations);
+            }
+            let who = format!("{} (a backup)", t.actor);
+            let r = readers.entry(who.clone()).or_insert(Reader { actor: who, last_at: t.at, reads: 0 });
+            r.last_at = r.last_at.max(t.at);
+            r.reads += 1;
+        }
         let mut readers: Vec<Reader> = readers.into_values().collect();
         readers.sort_by_key(|r| std::cmp::Reverse(r.last_at));
         let knew = self.knew(project, slug, &path, read_by)?;
+        let backups = match self.backup_schedule(project, caller)? {
+            Some(b) => {
+                let stopped = !self.maker_reaches(&b.created_by, &[(Action::Admin, Scope::whole(project)), (Action::Reveal, Scope::whole(project))])?;
+                vec![BackupReach { bucket: b.bucket, recipient: b.recipient, created_by: b.created_by, registrations: b.registrations, last_at: b.last_at, paused_at: b.paused_at, stopped }]
+            }
+            None => vec![],
+        };
         // Folders of this project whose readers read it: here, and those importing it or based on it.
         let reading: Vec<(&str, &str)> = std::iter::once((slug, path.as_str())).chain(sources.iter().filter(|s| s.0 == project).map(|s| (s.1.as_str(), s.2.as_str()))).collect();
         let (services, sandboxes) = self.held_by(project, key, &reading)?;
@@ -491,6 +537,7 @@ impl Secrets {
             services,
             sandboxes,
             knew,
+            backups,
             syncs,
             leases,
             placeholders,
@@ -545,7 +592,7 @@ impl Secrets {
 
     /// The person behind an audit row's actor: a person, or a person's own token (`token:…`, as
     /// roll-access still knows it after it ends).
-    fn reader_person(&self, actor: &str) -> Option<String> {
+    pub(crate) fn reader_person(&self, actor: &str) -> Option<String> {
         if crate::access::is_person(actor) {
             return Some(actor.to_string());
         }
@@ -557,7 +604,7 @@ impl Secrets {
     /// folders), those who may reveal neither it nor where they read it now.
     fn knew(&self, project: &str, slug: &str, path: &str, read_by: ReadBy) -> Result<Vec<Knew>> {
         let mut knew = vec![];
-        for (user, (last_at, reads, at)) in read_by {
+        for (user, (last_at, reads, at, backup)) in read_by {
             let why = match self.person(&user)? {
                 None => "gone",
                 Some(p) if p.admin => continue,
@@ -570,7 +617,9 @@ impl Secrets {
                     if session.sees(project) { "role" } else { "left" }
                 }
             };
-            knew.push(Knew { user, last_at, reads, why });
+            let via = if backup.is_some() { "backup" } else { "read" };
+            let registrations = backup.unwrap_or_default().into_iter().map(|r| crate::backup::advice(&r)).collect();
+            knew.push(Knew { user, last_at, reads, why, via, registrations });
         }
         knew.sort_by_key(|k| std::cmp::Reverse(k.last_at));
         Ok(knew)

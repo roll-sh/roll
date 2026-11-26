@@ -1150,7 +1150,7 @@ impl Engine {
                 // `<first>:/` is the screenshot itself (which service is first isn't the person's to know).
                 if let Some(e) = entries.iter().find(|e| crate::settings::page_entry(e) == Some((Some(first.name.as_str()), "/"))) {
                     let errors = shot.health.as_ref().map_or(0, |h| h.errors + h.failed);
-                    let report = crate::PageReport { a11y: shot.a11y.clone(), links: shot.links.clone(), text: shot.text.clone(), unstable: shot.health.as_ref().is_some_and(|h| h.unstable), step: None, step_ms: None };
+                    let report = crate::PageReport { a11y: shot.a11y.clone(), links: shot.links.clone(), text: shot.text.clone(), unstable: shot.health.as_ref().is_some_and(|h| h.unstable), step: None, step_ms: None, play: None, play_error: None };
                     pages.push(crate::ports::PageShot { path: e.clone(), png: shot.png.clone(), errors, report });
                 }
                 pages.extend(self.other_services_pages(r, &first.name, &entries, &hide, storybook.as_ref()).await);
@@ -1302,7 +1302,7 @@ impl Engine {
                     }
                     if paths.contains(&"/") {
                         let errors = shot.health.as_ref().map_or(0, |h| h.errors + h.failed);
-                        let report = crate::PageReport { a11y: shot.a11y.clone(), links: shot.links.clone(), text: shot.text.clone(), unstable: shot.health.as_ref().is_some_and(|h| h.unstable), step: None, step_ms: None };
+                        let report = crate::PageReport { a11y: shot.a11y.clone(), links: shot.links.clone(), text: shot.text.clone(), unstable: shot.health.as_ref().is_some_and(|h| h.unstable), step: None, step_ms: None, play: None, play_error: None };
                         out.push(crate::ports::PageShot { path: format!("{svc}:/"), png: shot.png.clone(), errors, report });
                     }
                     // A story is a story whichever service serves it (`story:<id>`).

@@ -1599,6 +1599,101 @@ async fn push_webhooks_for_branches_tags_and_echoes() {
     assert_eq!(a.ok("GET", "/v1/code/repos/acme/app", None).await["head_git"], roll_head, "nothing was landed");
 }
 
+/// roll secrets for acme/app: STRIPE_KEY in production holds [`PUSHED`]. Records each push it
+/// was asked about and what it found (as roll secrets reports a leak).
+#[derive(Default)]
+struct PushSecrets(Mutex<Vec<Asked>>);
+
+/// (repo, installation, pusher, ref, keys found).
+type Asked = (String, u64, Option<String>, String, Vec<String>);
+
+const PUSHED: &str = "sk_live_51Hx9Q2pushedROLL";
+
+#[async_trait::async_trait]
+impl code_control::SecretEnv for PushSecrets {
+    async fn for_repo(&self, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<(String, String)>> {
+        anyhow::bail!("not in this test")
+    }
+    async fn for_owner(&self, _: &str, _: &str, _: &str, _: &str, _: code_control::Asker<'_>) -> anyhow::Result<code_control::Revealed> {
+        anyhow::bail!("not in this test")
+    }
+    async fn leaks(&self, _: &str, _: Vec<String>) -> anyhow::Result<Vec<code_control::FoundLeak>> {
+        Ok(Vec::new())
+    }
+    async fn scans_pushes(&self, repo: &str) -> anyhow::Result<bool> {
+        Ok(repo == "acme/app")
+    }
+    async fn scan_push(&self, repo: &str, push: &code_control::PushScan, candidates: Vec<String>) -> anyhow::Result<Vec<code_control::FoundLeak>> {
+        let found: Vec<code_control::FoundLeak> = candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| *c == PUSHED)
+            .map(|(index, _)| code_control::FoundLeak { index, key: "STRIPE_KEY".into(), environment: "production".into(), folder: "/".into(), rotatable: false })
+            .collect();
+        self.0.lock().push((repo.to_string(), push.installation, push.pusher.clone(), push.r#ref.clone(), found.iter().map(|l| l.key.clone()).collect()));
+        Ok(found)
+    }
+}
+
+/// GitHub.com runs no pre-receive hook: a push that adds a production value is scanned after it
+/// by the App's installation (a scanner of the repo's project), reported to roll secrets as a
+/// leak, and its commit gets a failing `roll secrets` check run naming the file, line, key and
+/// environment, never the value; a push that takes it out of the branch passes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_push_to_github_that_adds_a_value_fails_its_check_and_reports_the_leak() {
+    let g = github_mock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let w = seed(home, &format!("{}/git/acme/app.git", g.base));
+    let a = app(None);
+    let secrets = Arc::new(PushSecrets::default());
+    a.code.set_secret_env(secrets.clone());
+    enable(&a, &g, quiet_mirror());
+    connect(&a).await;
+    let push = |before: &str, after: &str| {
+        json!({
+            "ref": "refs/heads/pay", "before": before, "after": after, "created": before == ZERO,
+            "repository": repo_json(&g.mock), "sender": { "login": "human", "id": 5 }, "installation": { "id": INSTALLATION },
+        })
+    };
+    let check = |sha: String| {
+        let m = g.mock.clone();
+        async move {
+            let runs: Vec<(String, Value)> = m.calls.lock().iter().filter(|(_, p, _)| p.contains("/check-runs")).map(|(_, p, b)| (p.clone(), b.clone())).collect();
+            let id = runs.iter().find(|(_, b)| b["name"] == "roll secrets" && b["head_sha"] == sha.as_str()).map(|(_, b)| b.clone());
+            id.filter(|b| b["status"] == "completed")
+        }
+    };
+
+    git(home, &w, &["checkout", "-qb", "pay"]);
+    write(&w, "config.js", &format!("export const port = 8080;\nconst stripe = \"{PUSHED}\";\n"));
+    git(home, &w, &["add", "-A"]);
+    git(home, &w, &["commit", "-qm", "pay"]);
+    git(home, &w, &["push", "-q", "origin", "pay"]);
+    let leaked = rev(home, &w, "pay");
+    assert_eq!(hook(&a, "push", "s-1", &push(ZERO, &leaked), SECRET).await, StatusCode::OK);
+    until("the leak's check run", || async { check(leaked.clone()).await.is_some() }).await;
+    let run = check(leaked.clone()).await.unwrap();
+    assert_eq!(run["conclusion"], "failure", "{run}");
+    assert_eq!(run["output"]["title"], "Adds the value of STRIPE_KEY");
+    let summary = run["output"]["summary"].as_str().unwrap();
+    assert!(summary.contains(&format!("- `config.js:2` STRIPE_KEY (production) in {}", &leaked[..7])), "{summary}");
+    assert!(!run.to_string().contains(PUSHED), "never the value: {run}");
+    assert_eq!(secrets.0.lock()[0], ("acme/app".to_string(), INSTALLATION, Some("human".to_string()), "refs/heads/pay".to_string(), vec!["STRIPE_KEY".to_string()]));
+
+    // Taken out of the branch: the next push's check passes (the branch since its merge base adds
+    // nothing any more, and neither does the new commit).
+    write(&w, "config.js", "export const port = 8080;\nconst stripe = process.env.STRIPE_KEY;\n");
+    git(home, &w, &["commit", "-qam", "read it from the environment"]);
+    git(home, &w, &["push", "-q", "origin", "pay"]);
+    let fixed = rev(home, &w, "pay");
+    assert_eq!(hook(&a, "push", "s-2", &push(&leaked, &fixed), SECRET).await, StatusCode::OK);
+    until("the fix's check run", || async { check(fixed.clone()).await.is_some() }).await;
+    let run = check(fixed.clone()).await.unwrap();
+    assert_eq!((run["conclusion"].as_str(), run["output"]["title"].as_str()), (Some("success"), Some("Adds no value of roll secrets")), "{run}");
+    assert_eq!(secrets.0.lock().last().unwrap().4, Vec::<String>::new());
+}
+
 /// Pull request and issue actions end to end, the queue included: edits, draft and ready, a
 /// close or a draft dequeues a queued change, reopen, merged on GitHub (landed, dequeued, not
 /// echoed), PRs into other branches ignored, draft PRs; issues unlabeled, issue events about

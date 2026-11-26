@@ -1719,7 +1719,7 @@ contexts of x-pack's version allowlist), `EsObj::Version`, `contexts::version_al
 | PATCH  | `/v1/search/clusters/{id}`                       | settings: idle timeout, flavor, limits, `protected` |
 | DELETE | `/v1/search/clusters/{id}`                       | |
 | POST   | `/v1/search/clusters/{id}/branches`              | branch `{name, at?}` |
-| POST   | `/v1/search/clusters/{id}/password`              | rotate |
+| POST   | `/v1/search/clusters/{id}/password`              | rotate (with `secret`: kept in roll secrets, answered without it) |
 | POST   | `/v1/search/clusters/{id}/unload`                | put it to sleep now |
 | GET    | `/v1/search/clusters/{id}/indices`               | indices with docs, size, health |
 | POST   | `/v1/search/clusters/{id}/request`               | run one REST request (dashboard console) |
