@@ -218,6 +218,11 @@ fn up_previews_the_working_tree_and_down_removes_it() {
     let (ok, _, err) = s.roll_in(&work, &["up", "--no-wait"]);
     assert!(!ok && err.contains("dump.sql") && err.contains("--force"), "{err}");
     std::fs::remove_file(work.join("dump.sql")).unwrap();
+    // Nor one named like a secret (`.env.local`), whatever its size.
+    std::fs::write(work.join(".env.local"), "STRIPE_KEY=sk_live_1").unwrap();
+    let (ok, _, err) = s.roll_in(&work, &["up", "--no-wait"]);
+    assert!(!ok && err.contains(".env.local") && err.contains("named like a secret") && err.contains("--force"), "{err}");
+    std::fs::remove_file(work.join(".env.local")).unwrap();
     // A config that rewrites roll's URL to another host: refused, and that host gets nothing.
     let other = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let other_url = format!("http://{}/", other.local_addr().unwrap());
