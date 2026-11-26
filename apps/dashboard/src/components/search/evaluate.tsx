@@ -257,6 +257,14 @@ function Changes({ title, rows }: { title: string; rows: EvalChange[] }) {
         <p className="text-[12px] text-subtle">None.</p>
       ) : (
         <table className="w-full table-fixed text-[12px]">
+          <thead>
+            <tr className="text-[11px] text-subtle">
+              <th className="pb-1 text-left font-normal">Query</th>
+              <th className="w-16 pb-1 text-right font-normal">Baseline</th>
+              <th className="w-16 pb-1 text-right font-normal">Candidate</th>
+              <th className="w-20 pb-1 text-right font-normal">Change</th>
+            </tr>
+          </thead>
           <tbody>
             {rows.slice(0, 10).map((r) => (
               <tr key={r.query} className="border-b border-line last:border-0">
