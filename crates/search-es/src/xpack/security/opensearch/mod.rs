@@ -165,9 +165,18 @@ pub struct Identity {
     pub owner: bool,
     /// A reserved internal user (`is_reserved` of the account API).
     pub reserved: bool,
-    /// A linked cluster's user (a link's request, [`authenticate_link`]): the roles of the
-    /// link's own user, which limit everything this user's roles allow.
-    pub link_ceiling: Option<Vec<String>>,
+    /// A linked cluster's user (a link's request, [`authenticate_link`]).
+    pub link: Option<Box<Linked>>,
+}
+
+/// What a linked cluster's user is besides the user sent ([`Identity::link`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Linked {
+    /// The roles of the link's own user, which limit everything the user's roles allow.
+    pub ceiling: Vec<String>,
+    /// Who the user's scrolls and points in time belong to here: the link's user, the linking
+    /// cluster and the owner it named, never a user of this cluster of the same name.
+    pub owner: String,
 }
 
 /// The principal of an internal user.
@@ -188,7 +197,7 @@ fn principal_of(st: &ClusterState, name: &str, user: &Value, owner: bool) -> Pri
             attributes: user.get("attributes").and_then(Value::as_object).cloned().unwrap_or_default(),
             owner,
             reserved: flag(user, "reserved"),
-            link_ceiling: None,
+            link: None,
         })),
     }
 }
@@ -268,6 +277,8 @@ pub fn authenticate_link(cluster: &Cluster, user: &str, password: &str, access: 
     };
     // Its own roles only: a mapping of this cluster (`users: ["*"]`) never widens a link.
     let ceiling = strs(u.get("opendistro_security_roles"));
+    let from = access.get("cluster").and_then(Value::as_str).unwrap_or_default();
+    let owner = format!("{user}:{from}/{}", access.get("owner").and_then(Value::as_str).unwrap_or(&name));
     Some(Principal {
         username: name.clone(),
         roles: mapped_roles(&st, &name, &backend_roles, &security_roles),
@@ -277,7 +288,7 @@ pub fn authenticate_link(cluster: &Cluster, user: &str, password: &str, access: 
         realm_name: "internal",
         realm_type: "internal",
         authenticating: None,
-        kind: AuthKind::OpenSearch(Box::new(Identity { backend_roles, attributes, owner: false, reserved: false, link_ceiling: Some(ceiling) })),
+        kind: AuthKind::OpenSearch(Box::new(Identity { backend_roles, attributes, owner: false, reserved: false, link: Some(Box::new(Linked { ceiling, owner })) })),
     })
 }
 

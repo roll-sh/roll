@@ -126,7 +126,7 @@ fn access(ctx: &Ctx, endpoint: Option<&str>) -> Option<Reply> {
     let p = principal(ctx);
     // A linked cluster's user never configures this one, whatever it's mapped to here: the
     // link's ceiling has no security permission.
-    let linked = p.os().is_some_and(|id| id.link_ceiling.is_some());
+    let linked = p.os().is_some_and(|id| id.link.is_some());
     if !linked && (p.os().is_some_and(|id| id.owner) || p.roles.iter().any(|r| r == "all_access" || r == "security_rest_api_access")) {
         return None;
     }

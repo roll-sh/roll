@@ -668,7 +668,7 @@ pub fn effective(file: &FileRoles, st: &crate::meta::ClusterState, p: &Principal
             (vec![Permission::of_descriptor(&d)], None)
         }
         // A link's user: what this cluster gives the user sent, within the link's ceiling.
-        AuthKind::OpenSearch(id) => (opensearch::permissions(st, p, id), id.link_ceiling.as_ref().map(|roles| opensearch::role_permissions(st, roles, p, id))),
+        AuthKind::OpenSearch(id) => (opensearch::permissions(st, p, id), id.link.as_ref().map(|l| opensearch::role_permissions(st, &l.ceiling, p, id))),
         _ => (permissions_of_roles(file, st, &p.roles), None),
     };
     let parents = st.metadata.data_streams.values().flat_map(|d| d.indices.iter().map(|i| (i.clone(), d.name.clone()))).collect();

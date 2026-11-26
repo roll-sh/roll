@@ -95,6 +95,7 @@ pub(crate) fn owner_of(ctx: &Ctx) -> String {
             }
             owner
         }
+        crate::xpack::security::AuthKind::OpenSearch(id) if id.link.is_some() => format!("link:{}", id.link.as_ref().map(|l| l.owner.as_str()).unwrap_or_default()),
         _ => format!("{}:{}", p.realm_name, p.username),
     }
 }
