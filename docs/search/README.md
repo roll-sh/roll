@@ -1194,9 +1194,10 @@ query-rule editors prefilled with it (`query, ` as a rule; an `exact` `query_str
   without `index`). A read for roll-access; a person sees only their own clusters' (404 otherwise).
   The answer adds what the cluster's owner recorded since the last pass. Its `experiments` list
   the A/B tests of the cluster's search applications ([relevance-experiments.md](relevance-experiments.md)):
-  `[{application, experiment, baseline, variants: [{name, searches, clicks, conversions, value, ctr, conversion_rate, vs_baseline?: {ctr, conversion_rate}}]}]`,
+  `[{application, experiment, baseline, variants: [{name, searches, clicks, conversions, value, ctr, conversion_rate, no_hits, no_hit_rate, p95_latency_ms, vs_baseline?: {ctr, conversion_rate}}]}]`,
   each comparison `{p_value, state}` with `state` one of `significant`, `not_yet_significant` or
-  `not_enough_data`; counted since each started, whatever `range` says.
+  `not_enough_data`; counted since each started, whatever `range` says. The totals, points and
+  query rows also count `roll_conversion` events (`conversions`, `conversion_rate`, `value`).
 
 **Privacy.** No `Authorization` header, credential, API key or document body is ever recorded:
 the only header read is `X-Roll-Search-Query`, and only a query's text, counted, is kept. Query
@@ -1744,8 +1745,10 @@ deterministic (#396).
    the address) and answered with `X-Roll-Experiment` and `X-Roll-Variant`; `roll_conversion`
    events beside clicks, counted once per search per variant; browser keys' `limits.events`; and
    per-variant click-through and conversion with a two-proportion z-test in `GET …/analytics` and
-   the Relevance tab. Left: judgment lists and offline evaluation (phase 1), promoting a winner,
-   zero-result rate and latency per variant, the `roll_` rule types and dynamic re-ranking.
+   the Relevance tab. The second slice adds conversions to the indices' analytics, zero-result
+   rate and p95 latency per variant, and promoting a variant into the application
+   (`…/_roll/experiments/{id}/_promote`). Left: judgment lists and offline evaluation (phase 1),
+   confidence intervals, the `roll_` rule types and dynamic re-ranking.
 16. **Cold start at size**: the 19.8 ms cold start is a 50k-document index from local cache;
    nothing measures the first query and p99 on a node with an empty cache for 1, 10 and 50 GB
    indices loaded from object storage, or on Graviton. Buyers comparing always-on Typesense or Algolia

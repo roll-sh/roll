@@ -239,6 +239,20 @@ CREATE TABLE IF NOT EXISTS visual_page_accepts (
     at INTEGER NOT NULL,
     PRIMARY KEY (preview_id, path)
 );
+-- A masked base (Neon's anonymized branches): a branch of a data parent masked once by a set
+-- of rules (`digest`), which previews masked by those rules branch from instead of masking a copy
+-- each. `making` while one converge makes it (until `claim_until`), then `ready`.
+CREATE TABLE IF NOT EXISTS mask_bases (
+    kind TEXT NOT NULL,
+    parent TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    name TEXT NOT NULL,
+    ref TEXT,
+    state TEXT NOT NULL,
+    made_at INTEGER NOT NULL,
+    claim_until INTEGER NOT NULL,
+    PRIMARY KEY (kind, parent, name)
+);
 -- A page someone refused at a head (Chromatic's Deny), with why: the review fails until a new
 -- head or an accept; an accept of the page clears it, as a refusal clears the page's accept.
 CREATE TABLE IF NOT EXISTS visual_page_refusals (
@@ -706,6 +720,17 @@ impl std::fmt::Debug for PinnedData {
             .field("source", &self.source)
             .finish()
     }
+}
+
+/// What [`Store::claim_mask_base`] found.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BaseClaim {
+    /// Branch from this one.
+    Ready { name: String, r#ref: String },
+    /// Make one named so (and say [`Store::mask_base_ready`]).
+    Make { name: String },
+    /// Another converge is making one: mask this branch itself meanwhile.
+    Busy,
 }
 
 /// A restore point (`…/restore-points`): the preview's data saved as it was, to put back later.
@@ -1805,6 +1830,91 @@ impl Store {
             c.execute("DELETE FROM services WHERE preview_id = ? AND name = ?", [id, name])?;
             Ok::<_, Error>(())
         })
+    }
+
+    /// The masked base of `kind:parent` for the rules `digest`: the newest one ready and made since
+    /// `fresh_since` to branch from; else, if no converge is making one, a claim on making one now
+    /// (its name), held until `now + hold_ms`; else nothing (another is making it).
+    pub fn claim_mask_base(&self, kind: Kind, parent: &str, digest: &str, fresh_since: i64, hold_ms: i64) -> Result<BaseClaim> {
+        let now = self.now_ms()?;
+        self.db.write(|c| {
+            let ready: Option<(String, String)> = c
+                .query_row(
+                    "SELECT name, ref FROM mask_bases WHERE kind = ? AND parent = ? AND digest = ? AND state = 'ready' AND made_at >= ? AND ref IS NOT NULL ORDER BY made_at DESC LIMIT 1",
+                    params![kind.as_str(), parent, digest, fresh_since],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            if let Some((name, r#ref)) = ready {
+                return Ok(BaseClaim::Ready { name, r#ref });
+            }
+            let making: Option<String> = c.query_row("SELECT name FROM mask_bases WHERE kind = ? AND parent = ? AND digest = ? AND state = 'making' AND claim_until > ?", params![kind.as_str(), parent, digest, now], |r| r.get(0)).optional()?;
+            if making.is_some() {
+                return Ok(BaseClaim::Busy);
+            }
+            // A claim that lapsed (its converge died) is taken over under its own name: its
+            // branch, if one was made, is found again by name.
+            let lapsed: Option<String> = c.query_row("SELECT name FROM mask_bases WHERE kind = ? AND parent = ? AND digest = ? AND state = 'making' ORDER BY made_at DESC LIMIT 1", params![kind.as_str(), parent, digest], |r| r.get(0)).optional()?;
+            let name = lapsed.unwrap_or_else(|| format!("{}{}-{}", crate::MASK_BASE_PREFIX, &digest[..digest.len().min(8)], now / 1000));
+            c.execute(
+                "INSERT INTO mask_bases (kind, parent, digest, name, ref, state, made_at, claim_until) VALUES (?, ?, ?, ?, NULL, 'making', ?, ?) ON CONFLICT (kind, parent, name) DO UPDATE SET claim_until = excluded.claim_until, made_at = excluded.made_at",
+                params![kind.as_str(), parent, digest, name, now, now + hold_ms],
+            )?;
+            Ok(BaseClaim::Make { name })
+        })
+    }
+
+    /// The masked base `name` is made and masked: previews branch from it from now on.
+    pub fn mask_base_ready(&self, kind: Kind, parent: &str, name: &str, r#ref: &str) -> Result<()> {
+        let now = self.now_ms()?;
+        self.db.write(|c| c.execute("UPDATE mask_bases SET ref = ?, state = 'ready', made_at = ? WHERE kind = ? AND parent = ? AND name = ?", params![r#ref, now, kind.as_str(), parent, name]).map(|_| ()))?;
+        Ok(())
+    }
+
+    /// Forget the masked base `name` (making it failed, or it was deleted).
+    pub fn drop_mask_base(&self, kind: Kind, parent: &str, name: &str) -> Result<()> {
+        self.db.write(|c| c.execute("DELETE FROM mask_bases WHERE kind = ? AND parent = ? AND name = ?", params![kind.as_str(), parent, name]).map(|_| ()))?;
+        Ok(())
+    }
+
+    /// The masked bases of `kind:parent` that are no longer the one to branch from (an older one of
+    /// the same rules, one past `fresh_since`, or one of rules no project has any more): (name,
+    /// ref), each to delete once no branch comes from it.
+    pub fn old_mask_bases(&self, kind: Kind, parent: &str, fresh_since: i64) -> Result<Vec<(String, String)>> {
+        let rows: Vec<(String, String, Option<String>, String, i64)> = self.db.read(|c| {
+            c.query("SELECT digest, name, ref, state, made_at FROM mask_bases WHERE kind = ? AND parent = ? ORDER BY made_at DESC", params![kind.as_str(), parent], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+        })?;
+        let current: std::collections::BTreeSet<String> = self
+            .projects_masking(kind, parent)?
+            .into_iter()
+            .collect();
+        let mut newest: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        Ok(rows
+            .into_iter()
+            .filter(|(digest, _, _, state, made_at)| {
+                state == "ready" && !(current.contains(digest) && *made_at >= fresh_since && newest.insert(digest.clone()))
+            })
+            .filter_map(|(_, name, r#ref, _, _)| Some((name, r#ref?)))
+            .collect())
+    }
+
+    /// Every data parent that has a masked base.
+    pub fn mask_base_parents(&self) -> Result<Vec<(Kind, String)>> {
+        let rows: Vec<(String, String)> = self.db.read(|c| c.query("SELECT DISTINCT kind, parent FROM mask_bases", params![], |r| Ok((r.get(0)?, r.get(1)?))))?;
+        Ok(rows.into_iter().filter_map(|(k, p)| Some((Kind::parse(&k).ok()?, p))).collect())
+    }
+
+    /// The masking rules' digests the projects keep for `kind:parent` now.
+    fn projects_masking(&self, kind: Kind, parent: &str) -> Result<Vec<String>> {
+        let key = format!("{}:{parent}", kind.as_str());
+        let projects: Vec<String> = self.db.read(|c| c.query("SELECT DISTINCT project_id FROM previews", params![], |r| r.get(0)))?;
+        let mut out = Vec::new();
+        for p in projects {
+            if let Some(cols) = self.settings(&p)?.masking.get(&key).filter(|c| !c.is_empty()) {
+                out.push(crate::engine::mask_digest_of(Some(cols)));
+            }
+        }
+        Ok(out)
     }
 
     /// The masking rules a branch was last masked with (`crate::engine::mask_digest`).

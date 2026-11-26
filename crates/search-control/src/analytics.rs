@@ -59,7 +59,9 @@ fn compare(x: u64, n: u64, bx: u64, bn: u64) -> Value {
 }
 
 /// Experiments' results, by application and experiment: each variant's trials (a user's query in
-/// an hour), clicks, conversions, value, click-through and conversion rate, against the baseline
+/// an hour), clicks, conversions, value, click-through and conversion rate, the share of trials
+/// that found nothing and its searches' 95th percentile latency (a bucket's bound: under 1, 2, 4
+/// … ms), against the baseline
 /// (the variant named `control`, else the first by name).
 pub fn experiments_json(counts: &[(search_es::analytics::VariantKey, search_es::analytics::VariantStats)]) -> Value {
     let mut by: std::collections::BTreeMap<(String, String), std::collections::BTreeMap<String, search_es::analytics::VariantStats>> = std::collections::BTreeMap::new();
@@ -82,6 +84,9 @@ pub fn experiments_json(counts: &[(search_es::analytics::VariantKey, search_es::
                         "value": (s.value * 100.0).round() / 100.0,
                         "ctr": ratio(s.clicks, s.searches),
                         "conversion_rate": ratio(s.conversions, s.searches),
+                        "no_hits": s.no_hits,
+                        "no_hit_rate": ratio(s.no_hits, s.searches),
+                        "p95_latency_ms": s.p95_ms(),
                     });
                     if *name != baseline {
                         v["vs_baseline"] = json!({
@@ -129,6 +134,9 @@ fn query_json(q: &str, s: &QueryStats) -> Value {
         "clicks": s.clicks,
         "ctr": ratio(s.clicks, s.searches),
         "avg_position": ratio(s.position_sum, s.positioned).map(|v| (v * 10.0).round() / 10.0),
+        "conversions": s.conversions,
+        "conversion_rate": ratio(s.conversions, s.searches),
+        "value": s.value_milli as f64 / 1000.0,
     })
 }
 
@@ -155,13 +163,15 @@ impl Control {
         let gone = |i: &str| pending.cleared.iter().any(|c| c == i) || pending.enabled.as_ref().is_some_and(|on| !on.iter().any(|o| o == i));
         let mut total = Bucket::new(4 * LIST_ROWS, 2 * LIST_ROWS);
         let mut indices: Vec<String> = Vec::new();
-        // Per bucket of the range's resolution: searches, searches with no results, clicks.
-        let mut points: std::collections::BTreeMap<i64, [u64; 3]> = std::collections::BTreeMap::new();
+        // Per bucket of the range's resolution: searches, searches with no results, clicks,
+        // conversions.
+        let mut points: std::collections::BTreeMap<i64, [u64; 4]> = std::collections::BTreeMap::new();
         let mut point = |at: i64, b: &Bucket| {
             let p = points.entry(at - at.rem_euclid(r.res)).or_default();
             p[0] += b.searches;
             p[1] += b.no_hits;
             p[2] += b.clicks;
+            p[3] += b.conversions;
         };
         for (i, at, b) in self.store.analytics_since(&c.id, index, r.res, from).await? {
             if gone(&i) {
@@ -210,13 +220,16 @@ impl Control {
             "from": from,
             "step_s": r.res,
             "indices": indices,
-            "points": points.iter().map(|(at, p)| json!({ "at": at, "searches": p[0], "no_hits": p[1], "clicks": p[2] })).collect::<Vec<_>>(),
+            "points": points.iter().map(|(at, p)| json!({ "at": at, "searches": p[0], "no_hits": p[1], "clicks": p[2], "conversions": p[3] })).collect::<Vec<_>>(),
             "totals": {
                 "searches": total.searches,
                 "no_hits": total.no_hits,
                 "no_hit_rate": ratio(total.no_hits, total.searches),
                 "clicks": total.clicks,
                 "ctr": ratio(total.clicks, total.searches),
+                "conversions": total.conversions,
+                "conversion_rate": ratio(total.conversions, total.searches),
+                "value": total.value_milli as f64 / 1000.0,
             },
             "top": top,
             "no_results": no_results,
