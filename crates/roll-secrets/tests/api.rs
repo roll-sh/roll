@@ -8408,14 +8408,13 @@ async fn reach_names_the_people_clients_and_holders_of_a_folder() {
     api.join(&team, "bob", "developer", None).await;
     api.join(&team, "cat", "admin", None).await;
     api.join(&team, "vic", "developer", None).await;
-    api.join(&team, "dan", "admin", None).await;
     let (s, v) = api.signed_in("vic", false, Method::GET, &at("/environments/development/secrets/KEY/value"), None).await;
     assert_eq!((s, v["value"].as_str()), (StatusCode::OK, Some("fake-dev")));
     // An admin's backup reads every folder, and carries the project CA's key out with them.
     api.as_ada(Method::POST, &at("/cas"), Some(json!({ "name": "internal", "domains": ["svc.internal"] }))).await;
-    let (s, b) = api.signed_in("dan", false, Method::POST, &at("/backup"), Some(json!({ "recipient": roll_secrets::crypto::public_key(&[5u8; 32]) }))).await;
+    let (s, b) = api.signed_in("cat", false, Method::POST, &at("/backup"), Some(json!({ "recipient": roll_secrets::crypto::public_key(&[5u8; 32]) }))).await;
     assert!(s == StatusCode::OK && b["warnings"] == json!([]), "{b}");
-    for gone in ["usr_vic", "usr_dan"] {
+    for gone in ["usr_vic", "usr_cat"] {
         assert_eq!(api.as_ada(Method::DELETE, &format!("/v1/workspace/projects/{team}/members/{gone}"), None).await.0, StatusCode::NO_CONTENT);
     }
     let client = api.gate.oauth("claude", roll_secrets::access::rule(&team, None, None, &[roll_secrets::Action::Read, roll_secrets::Action::Reveal]), "usr_bob");
@@ -8424,15 +8423,15 @@ async fn reach_names_the_people_clients_and_holders_of_a_folder() {
     assert_eq!(s, StatusCode::OK, "{r}");
     let mut people: Vec<(&str, &str)> = r["people"].as_array().unwrap().iter().map(|p| (p["handle"].as_str().unwrap(), p["role"].as_str().unwrap())).collect();
     people.sort();
-    assert_eq!(people, [("ada", "owner"), ("bob", "developer"), ("cat", "admin")], "{r}");
+    assert_eq!(people, [("ada", "owner"), ("bob", "developer")], "{r}");
     assert_eq!(r["admins"], 1);
     assert_eq!((r["clients"][0]["id"].as_str(), r["clients"][0]["created_by"].as_str(), r["tokens"].as_array().unwrap().len()), (Some(client.as_str()), Some("usr_bob"), 0), "{r}");
     let knew: Vec<(&str, &str, &str)> = r["knew"].as_array().unwrap().iter().map(|k| (k["user"].as_str().unwrap(), k["why"].as_str().unwrap(), k["via"].as_str().unwrap())).collect();
-    assert_eq!(knew, [("usr_dan", "left", "backup"), ("usr_vic", "left", "read")], "{r}");
+    assert_eq!(knew, [("usr_cat", "left", "backup"), ("usr_vic", "left", "read")], "{r}");
     assert!(r["knew"][0]["registrations"][0].as_str().unwrap().starts_with("CA internal: re-issue"), "{r}");
     // Health says so too, until the backup is older than the project's history.
     let (_, health) = api.as_ada(Method::GET, &at("/health"), None).await;
-    assert!(health.as_array().unwrap().iter().any(|f| f["issue"] == "backup_left" && f["key"] == "usr_dan"), "{health}");
+    assert!(health.as_array().unwrap().iter().any(|f| f["issue"] == "backup_left" && f["key"] == "usr_cat"), "{health}");
     let services: Vec<(&str, &str)> = r["services"].as_array().unwrap().iter().map(|s| (s["name"].as_str().unwrap(), s["through"].as_str().unwrap())).collect();
     assert_eq!((services, r["sandboxes"][0]["keys"].clone()), (vec![("web", "staging:/")], json!(["KEY"])), "{r}");
     assert!(!r.to_string().contains("fake-dev"), "names, never a value");

@@ -21,6 +21,9 @@ use std::collections::BTreeMap;
 /// reads 1 too.
 const V: u8 = 2;
 
+/// The columns a restore writes as checked, over the archive's ([`Secrets::admit`]).
+type Checked = Vec<(&'static str, Cell)>;
+
 /// Why a restored identity or sync waits: it acts as its maker, and a backup carries none.
 const RESTORED: &str = "restored from a backup: an admin resumes it, and acts as its maker from then on";
 
@@ -478,7 +481,7 @@ impl Secrets {
             warnings.push(format!("not in the backup, registered again by hand: {}", archive.left_out.join(", ")));
         }
         let by = if archive.registrations.is_empty() { String::new() } else { self.maker_of(caller)? };
-        let mut admitted: Vec<(&Table, &Row, String, Vec<(&str, Cell)>)> = vec![];
+        let mut admitted: Vec<(&Table, &Row, String, Checked)> = vec![];
         for r in &archive.registrations {
             let Some(t) = backup_rows::table(&r.kind) else {
                 warnings.push(format!("a {} registration isn't one a backup carries: left out", r.kind.chars().take(40).collect::<String>()));
@@ -538,7 +541,7 @@ impl Secrets {
     /// allows; a CA's or SSH CA's certificate, chain, name constraints and key as installing or
     /// making it checks them. The archive is the caller's own JSON, so nothing in it is taken on
     /// trust. Answers the columns to write as checked (over the archive's). `verify` asks it too.
-    fn admit(&self, t: &Table, r: &Row) -> Result<Vec<(&'static str, Cell)>> {
+    fn admit(&self, t: &Table, r: &Row) -> Result<Checked> {
         let bad = |why: &str| Err(Error::BadRequest(why.to_string()));
         let name = r.text("name");
         if name.is_empty() || name.len() > 64 || !name.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c)) {
@@ -620,7 +623,7 @@ impl Secrets {
         }
         let complete = |r: &Row, columns: &[&str]| columns.iter().all(|c| r.columns.get(*c).is_some_and(|v| v.is_string() || v.is_number()));
         // Outside the write: an issuer's URL is checked through the guarded client.
-        let mut admitted: Vec<(&Row, Vec<(&str, Cell)>)> = vec![];
+        let mut admitted: Vec<(&Row, Checked)> = vec![];
         for r in identities {
             match self.admit_archived_identity(project, r, Some(caller)) {
                 Ok(checked) => admitted.push((r, checked)),
@@ -706,7 +709,7 @@ impl Secrets {
     /// rule, the issuer URL, the TTL range, an AWS one's ARN, a machine one's empty fields), its
     /// address list and scope as they're read (the scope only what `caller` may grant, when it's a
     /// restore's), and none that logs a gateway in. Answers the columns to write as checked.
-    fn admit_archived_identity(&self, project: &str, r: &Row, caller: Option<&Caller>) -> Result<Vec<(&'static str, Cell)>> {
+    fn admit_archived_identity(&self, project: &str, r: &Row, caller: Option<&Caller>) -> Result<Checked> {
         let complete = ["name", "issuer", "audience", "subject", "claims", "actions", "ttl_minutes"].iter().all(|c| r.columns.get(*c).is_some_and(|v| v.is_string() || v.is_number()));
         if !complete {
             return Err(Error::BadRequest("the backup doesn't hold all of it".into()));
