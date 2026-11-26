@@ -409,13 +409,26 @@ pub fn expand(st: &ClusterState, names: &[String]) -> Vec<String> {
 /// The user variables of index patterns and DLS queries (`${user.name}`, `${user_name}`,
 /// `${user.roles}`: backend roles, `${user.securityRoles}`, `${attr.internal.<name>}`).
 fn substitute(s: &str, p: &Principal, id: &Identity) -> String {
+    substitute_with(s, p, id, |v| v.to_string())
+}
+
+/// [`substitute`] into a DLS query's JSON text: each value escaped as JSON string content, so a
+/// value (an attribute a linked cluster sent, a user name) stays a string and never adds query.
+fn substitute_json(s: &str, p: &Principal, id: &Identity) -> String {
+    substitute_with(s, p, id, |v| {
+        let quoted = Value::from(v).to_json();
+        quoted.strip_prefix('"').and_then(|q| q.strip_suffix('"')).unwrap_or(&quoted).to_string()
+    })
+}
+
+fn substitute_with(s: &str, p: &Principal, id: &Identity, value: impl Fn(&str) -> String) -> String {
     if !s.contains("${") {
         return s.to_string();
     }
-    let mut out = s.replace("${user.name}", &p.username).replace("${user_name}", &p.username);
-    out = out.replace("${user.roles}", &id.backend_roles.join(",")).replace("${user.securityRoles}", &p.roles.join(","));
+    let mut out = s.replace("${user.name}", &value(&p.username)).replace("${user_name}", &value(&p.username));
+    out = out.replace("${user.roles}", &value(&id.backend_roles.join(","))).replace("${user.securityRoles}", &value(&p.roles.join(",")));
     for (k, v) in &id.attributes {
-        out = out.replace(&format!("${{attr.internal.{k}}}"), &v.to_es_string());
+        out = out.replace(&format!("${{attr.internal.{k}}}"), &value(&v.to_es_string()));
     }
     out
 }
@@ -436,7 +449,7 @@ pub fn descriptor(st: &ClusterState, role: &Value, p: &Principal, id: &Identity)
         g.insert("privileges".into(), arr(privileges));
         g.insert("allow_restricted_indices".into(), false.into());
         if let Some(q) = e.get("dls").and_then(Value::as_str).filter(|q| !q.trim().is_empty()) {
-            g.insert("query".into(), Value::from(substitute(q, p, id)));
+            g.insert("query".into(), Value::from(substitute_json(q, p, id)));
         }
         let fls = strs(e.get("fls"));
         if !fls.is_empty() {
