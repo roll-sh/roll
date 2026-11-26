@@ -15046,6 +15046,84 @@ the loop. (2) The ring's per-block cost: three hash lookups a recycled block (`e
 looks the key up twice and then removes it). One `entry` would do. It is worth about 0.4% on
 scan-bound queries at small caches.
 
+## Query memory, round 5: sliding window frames, EXPLAIN ANALYZE of a streamed window; grouping sets dropped (agent 334)
+
+BENCH.md "Query memory, round 5" has the tables. Plain dist builds: **b0** agent 330's stack
+(`2ad810e0a`, landed as `9ca2d3685`); **n1** the windows and grouping sets on it; **b1** origin's
+`9ca2d3685`; **n2** the windows, EXPLAIN ANALYZE and grouping sets on b1 with the gate's fixes
+(`58baf4872`: its window.rs / winstream.rs are the candidates'); **n3** n2 with the in-memory
+grouping sets forced inline. Two commits, each its own candidate, stacked in this order:
+`cand/a334` (sliding frames), `cand/a334-2` (EXPLAIN ANALYZE of a streamed window, with this
+section). The rule kept (agents 320 / 326 / 330): each spilling path a function of its own, chosen
+when the input first passes work_mem; the in-memory functions' text left alone.
+
+**What changed:**
+- **Sliding frames past work_mem** (`exec/winstream.rs`, `exec/window.rs`): `winstream` streamed
+  only frames from the partition's start; any other frame (ROWS / RANGE / GROUPS offsets, a head at
+  the current row), an EXCLUDE clause or a moving aggregate held the partition whole (351.9 MB for
+  a ROWS frame of 11 rows over 1M). `Spec::of` now takes any frame (an exclusion of peers only with
+  an ORDER BY). The frame is found as nodeWindowAgg.c finds it: a head and a tail pointer moving
+  forward (ROWS by count; GROUPS counting peer groups as they pass; RANGE by `window::range_stop`,
+  `frame_of`'s in_range test as a function of its own). Rows are spooled and trimmed by
+  `count_store`'s pointer model with the frame's head / tail pointers and the aggregates' mark at
+  the head, so the store spills where PostgreSQL's does; on disk every kept row's offset is known,
+  so a cursor seeks back (an aggregate that starts again, a moving aggregate's rows, first / last /
+  nth_value under an exclusion). Each function computes over the frame what `compute_partition`
+  does: an aggregate from the partition's start grows (as before), one with a moving implementation
+  runs `moving_aggregate`'s step over the same code (`window::Moving`: its closures moved into
+  methods, `#[inline(always)]`, see Dropped), any other starts again each row; first / last /
+  nth_value take the frame's k-th row left after the exclusion (the excluded rows as at most two
+  runs: O(1) a row).
+- **EXPLAIN ANALYZE of a streamed window** (`exec/window.rs`): under EXPLAIN ANALYZE a window held
+  every partition and counted its store by `count_store` (406.4 MB for the sliding query). It now
+  streams as the plain run does; when a streamed partition ends its store's figures
+  (`StoreMem::stats`) join the WindowAgg's Storage line as `compute` records a partition counted
+  whole (`record_streamed`), with the executor's Sort below. Several windows stay in memory under
+  it (`Chain`'s Sorts and WindowAggs aren't the plan's nodes).
+
+**Measured** (lane C, 1M rows, work_mem 4 MB, peak anon+shmem over the level before, MB, base ->
+new (PostgreSQL 18.6)): `sum(id) OVER (ORDER BY a ROWS BETWEEN 5 PRECEDING AND 5 FOLLOWING)` 351.9
+-> 12.4 (10.2), its temp file PostgreSQL's (18.1 MB); a RANGE frame of +-50 with EXCLUDE CURRENT
+ROW and last_value 12.0 (10.3), the Sort's file PostgreSQL's (46 MB; the base doesn't finish it in
+30 minutes: the in-memory `frame_of` scans each RANGE bound from the partition's start, quadratic);
+EXPLAIN ANALYZE of the ROWS query 406.4 -> 67.4. Every result hash, in order and sorted,
+PostgreSQL's. When the input fits (user instructions, 40 runs, two alternating pairs b1 / n2):
+agent 320's window +0.07 / +0.07%, a sliding sum and last_value -0.28 / -0.28%, a moving msum -1.20
+/ -1.22%. No TPC-H query has a window (the TPC-H pairs ran for the grouping sets: within 0.07%).
+Not gated on a PGO build: the new paths are out of line; `Moving`'s methods are forced inline into
+`moving_aggregate`, restoring its closures' code (n1's plain methods cost +0.9%).
+
+**Dropped:**
+- **Grouping sets past work_mem read as they come** (patch `~/.cache/a334/patches/grouping-sets-n3.diff`,
+  its n3 attribute `grouping-sets-n2-to-n3-inline.diff`): the buffering loop asked a function of its
+  own (`sets_past`) as the buffer filled; past work_mem sorted sets ran as PostgreSQL's
+  GroupAggregate (a phase per rollup over extsort, each row fed to the next phase's sort: sort_out)
+  and hashed ones fed every set's table a row at a time (lookup_hash_entries, same groups and order
+  as `hashed_sets`). Memory: two sorted sets 290.6 -> 19.1 MB (PostgreSQL 35.1), a set and ()
+  191.0 -> 32.0 (10.2), rows in order and temp files PostgreSQL 18.6's (the patch's query_spill
+  case). But fitting grouping sets: +0.30-0.33% (n1: a size every 256th row), +0.22-0.27% (n2: a
+  test only when the Vec is full; LLVM no longer inlined `hashed_sets` into `run`: 83 kB -> 67 kB
+  plus an 11 kB `hashed_sets`), +2.9-3.0% (n3: `hashed_sets` / `sorted_sets` forced inline). To
+  keep it: take the buffering and both dispatches out of `run` into a function of their own (the
+  in-memory `hashed_sets` then inlined into that, not into `run`) and gate again.
+- n1's `Moving` as plain methods (above): fitting msum +0.89 / +0.94% (`n1-to-n2.diff`).
+
+**Verification:** the quick-check on the stack's head follows below this section's commit (agent 334).
+
+**Left** (largest first): grouping sets (290.6 / 35.1: the dropped patch above); DISTINCT
+aggregates sharing an argument, under GROUP BY, over a join or with reltuples unknown (44.1 / 14.2,
+agent 330's); sorted DISTINCT and the partitioned window chain's lower Sort carrying every input
+column (41 / 17; a user aggregate's window Sort too: msum's EXPLAIN ANALYZE shows Disk 2216kB to
+PostgreSQL's 512kB and Storage 2344kB to 704kB, so that case isn't in the test); EXPLAIN ANALYZE of
+the sliding query 67.4 MB to the plain run's 12.4 (not found); a window Sort of (a, t) counts
+1848kB to PostgreSQL's 1872kB; the in-memory RANGE `frame_of` is quadratic in the partition (and
+roll's restart-per-row aggregates without a moving implementation, PostgreSQL's builtins have
+inverse transitions: sum(int) is O(frame) a row here); hashed grouping sets come in another order
+than PostgreSQL's hash order (seen in memory: `GROUPING SETS ((a % 100), ())` at 1 MB);
+GroupAggregate over a Sort (36 / 10), hashed DISTINCT / UNION (no spill), Recursive Union (7.9 /
+3.7: one row an iteration in the bench, so not its tables), an Incremental Sort's single group past
+work_mem, EXPLAIN ANALYZE of the other spilling nodes.
+
 ## Query memory, round 4: several windows, sorted set operations, count(DISTINCT) (agent 330)
 
 BENCH.md "Query memory, round 4" has the tables. Plain dist builds: **b0** agent 326's stack
