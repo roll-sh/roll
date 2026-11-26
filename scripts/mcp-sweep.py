@@ -435,15 +435,16 @@ if isinstance(viewer, dict):
 else:
     member_fails.append(f"the member pass couldn't start: {viewer}")
 
-# A developer's own search flow (docs/search/README.md, Next item 26): a person signed in, a
-# developer in the sweep's project, with a token scoped to search alone (read and write), makes a
+# A person's own search flow (docs/search/README.md, Next item 26): a person signed in, an
+# admin of the sweep's project (a developer writes search only in the environments their role
+# reaches, and a new cluster names none), with a token scoped to search alone (read and write), makes a
 # cluster in the project, an index, bulk-indexes, refreshes and finds the document, all through
 # /v1/mcp as their agent would; a read-only token of theirs is refused the bulk.
 def search_flow():
     rw = [{"product": "search", "resources": "*", "actions": {"read": "allow", "write": "allow"}}]
-    dev = member_token("developer@example.com", "developer", rw, "sweep-search-dev")
+    dev = member_token("searcher@example.com", "admin", rw, "sweep-search-dev")
     if not isinstance(dev, dict):
-        return [f"the developer couldn't start: {dev}"]
+        return [f"the person couldn't start: {dev}"]
     dt, out = dev["token"], []
     def dcall(name, args, token=dt):
         res = rpc("tools/call", {"name": name, "arguments": args}, token=token).get("result", {})
@@ -454,13 +455,13 @@ def search_flow():
     for name, args in steps:
         res, text = dcall(name, args)
         if res.get("isError"):
-            return out + [f"{name} as the developer's search token: {text[:200]}"]
+            return out + [f"{name} as the person's search token: {text[:200]}"]
     res, text = dcall("search_query", {"cluster": "sweep-dev", "index": "notes", "query": {"match": {"title": "agent"}}})
     if res.get("isError") or '"n1"' not in text:
-        out.append(f"search_query didn't find what the developer indexed: {text[:200]}")
+        out.append(f"search_query didn't find what the person indexed: {text[:200]}")
     s, ro, _ = http("POST", "/v1/access/tokens", {"name": "sweep-search-ro", "rules": [{"product": "search", "resources": "*", "actions": {"read": "allow"}}]}, dev["session"])
     if s >= 300:
-        return out + [f"minting the developer's read-only token: {s} {ro}"]
+        return out + [f"minting the person's read-only token: {s} {ro}"]
     secrets.discard(ro["token"])
     res, text = dcall("search_bulk", {"cluster": "sweep-dev", "index": "notes", "ndjson": '{"index":{"_id":"n2"}}\n{"title":"not allowed"}\n'}, token=ro["token"])
     if not res.get("isError"):
@@ -468,9 +469,9 @@ def search_flow():
     res, text = dcall("search_query", {"cluster": "sweep-dev", "index": "notes", "query": {"match_all": {}}}, token=ro["token"])
     if res.get("isError") or '"n2"' in text:
         out.append(f"the read-only token should read the index, without n2: {text[:200]}")
-    # Short-lived: gone again with the operator's token (the developer's can't delete).
+    # Short-lived: gone again with the operator's token (the person's can't delete).
     rpc("tools/call", {"name": "search_delete_cluster", "arguments": {"cluster": "sweep-dev"}})
-    print("member: a developer's search flow ok" if not out else f"member: a developer's search flow: {len(out)} problems")
+    print("member: a person's search flow ok" if not out else f"member: a person's search flow: {len(out)} problems")
     return out
 if outbox and ws:
     member_fails += [f"search flow: {f}" for f in search_flow()]
