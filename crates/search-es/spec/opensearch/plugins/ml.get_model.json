@@ -1,0 +1,26 @@
+{
+  "ml.get_model": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/ml-commons-plugin/api/",
+      "description": "Returns a model."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_ml/models/{model_id}",
+          "methods": [
+            "GET"
+          ],
+          "parts": {
+            "model_id": {
+              "type": "string",
+              "description": "model_id"
+            }
+          }
+        }
+      ]
+    },
+    "params": {}
+  }
+}

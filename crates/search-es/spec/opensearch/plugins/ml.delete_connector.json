@@ -1,0 +1,26 @@
+{
+  "ml.delete_connector": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/ml-commons-plugin/api/",
+      "description": "Deletes a connector."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_ml/connectors/{connector_id}",
+          "methods": [
+            "DELETE"
+          ],
+          "parts": {
+            "connector_id": {
+              "type": "string",
+              "description": "connector_id"
+            }
+          }
+        }
+      ]
+    },
+    "params": {}
+  }
+}

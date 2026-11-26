@@ -1,0 +1,29 @@
+{
+  "ml.update_connector": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/ml-commons-plugin/api/",
+      "description": "Updates a connector."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_ml/connectors/{connector_id}",
+          "methods": [
+            "PUT"
+          ],
+          "parts": {
+            "connector_id": {
+              "type": "string",
+              "description": "connector_id"
+            }
+          }
+        }
+      ]
+    },
+    "params": {},
+    "body": {
+      "description": "The request definition."
+    }
+  }
+}

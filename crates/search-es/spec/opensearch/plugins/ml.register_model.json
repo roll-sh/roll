@@ -1,0 +1,28 @@
+{
+  "ml.register_model": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/ml-commons-plugin/api/",
+      "description": "Registers a model."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_ml/models/_register",
+          "methods": [
+            "POST"
+          ]
+        }
+      ]
+    },
+    "params": {
+      "deploy": {
+        "type": "boolean",
+        "description": "Deploy the model once registered."
+      }
+    },
+    "body": {
+      "description": "The request definition."
+    }
+  }
+}
