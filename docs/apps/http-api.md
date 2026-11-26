@@ -286,7 +286,7 @@ type Build = {
 
 type Run = {
   type: "web" | "worker" | "cron";
-  port?: number;            // web: the port the app listens on (default from the plan, else 8080; PORT is set to it)
+  port?: number;            // web: the port the app listens on (default from the plan, an image's own EXPOSE, else 8080; PORT is set to it)
   start?: string;           // overrides the image's command
   pre_deploy?: string;      // once per deploy, in a container of the new image with its variables and
                             // the project network (no volume), before the switch: a migration. A
