@@ -31,6 +31,7 @@
 //! (`timeout`, at most `roll.inference.max_timeout`), and what the answer holds charged to the
 //! `request` breaker while it runs. Costs: [`limits`].
 
+pub mod answer;
 pub mod limits;
 pub mod openai;
 pub mod prompt;
@@ -549,6 +550,10 @@ pub struct Answering {
     _slot: Option<limits::Slot>,
     started: bool,
     ended: bool,
+    /// What the model writes goes out only through this ([`answer`]).
+    sanitizer: answer::Sanitizer,
+    /// The sanitizer's held text went out.
+    flushed: bool,
 }
 
 impl Drop for Answering {
@@ -638,10 +643,13 @@ impl Answering {
             return Some(Event::Sources);
         }
         loop {
-            let Some(values) = self.values.as_mut() else { return Some(self.end()) };
+            let Some(values) = self.values.as_mut() else { return Some(self.flush_or_end()) };
             let read = match tokio::time::timeout_at(self.deadline, values.next()).await {
                 Err(_) => return Some(self.fail(EsError::status(504, format!("the answer took longer than its [{}ms]", self.timeout.as_millis())))),
-                Ok(None) => return Some(self.end()),
+                Ok(None) => {
+                    self.values = None;
+                    return Some(self.flush_or_end());
+                }
                 Ok(Some(Err(e))) => return Some(self.fail(e)),
                 Ok(Some(Ok(chunks))) => chunks,
             };
@@ -667,21 +675,44 @@ impl Answering {
             if text.is_empty() {
                 continue;
             }
-            let room = MAX_ANSWER_BYTES.saturating_sub(self.answer.len());
-            let cut = prompt::cut(&text, room).to_string();
-            if let Err(e) = self.held.add(cut.len() as u64, "<chat answer>") {
-                return Some(self.fail(e));
-            }
-            self.answer.push_str(&cut);
-            if cut.len() < text.len() {
-                // Past the answer's cap: it ends here, and the upstream is closed.
-                self.finish = Some("length".into());
-                self.values = None;
-            }
-            if !cut.is_empty() {
-                return Some(Event::Delta(cut));
+            let safe = self.sanitizer.feed(&text);
+            if let Some(e) = self.push(safe) {
+                return Some(e);
             }
         }
+    }
+
+    /// Adds sanitized text to the answer, within its cap and charged to the breaker: the delta to
+    /// send, if any.
+    fn push(&mut self, text: String) -> Option<Event> {
+        if text.is_empty() {
+            return None;
+        }
+        let room = MAX_ANSWER_BYTES.saturating_sub(self.answer.len());
+        let cut = prompt::cut(&text, room).to_string();
+        if let Err(e) = self.held.add(cut.len() as u64, "<chat answer>") {
+            return Some(self.fail(e));
+        }
+        self.answer.push_str(&cut);
+        if cut.len() < text.len() {
+            // Past the answer's cap: it ends here, and the upstream is closed.
+            self.finish = Some("length".into());
+            self.values = None;
+            self.flushed = true;
+        }
+        (!cut.is_empty()).then_some(Event::Delta(cut))
+    }
+
+    /// The text the sanitizer held, once, then the end.
+    fn flush_or_end(&mut self) -> Event {
+        if !self.flushed {
+            self.flushed = true;
+            let rest = self.sanitizer.finish();
+            if let Some(e) = self.push(rest) {
+                return e;
+            }
+        }
+        self.end()
     }
 
     /// The whole answer as JSON (`_answer` without `stream`).
@@ -768,7 +799,21 @@ pub async fn run(ctx: &Ctx<'_>, profile: &Profile, ask: Ask) -> EsResult<Answeri
         _slot: slot,
         started: false,
         ended: false,
+        sanitizer: answer::Sanitizer::new(None),
+        flushed: false,
     };
+    // Links only to the sources' own URLs, and only when the profile allows links.
+    if profile.allow_links {
+        let urls: Vec<String> = answering
+            .given
+            .iter()
+            .flat_map(|s| s.fields.values())
+            .filter_map(Value::as_str)
+            .filter(|u| u.starts_with("https://") || u.starts_with("http://"))
+            .map(str::to_owned)
+            .collect();
+        answering.sanitizer = answer::Sanitizer::new(Some(urls));
+    }
     if answering.given.is_empty() {
         return Ok(answering);
     }

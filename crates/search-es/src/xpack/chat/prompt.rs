@@ -10,8 +10,11 @@
 //!   `&`, `<`, `>` and `"` of document text, ids and the question is escaped, and so is any copy
 //!   of the request's random boundary, so a document can't close its block or open another.
 //!
-//! The model has no tools: an injected instruction can at worst change the answer's text, and
-//! nothing in a document chooses what is retrieved (the profile and the question do).
+//! The model has no tools, and nothing in a document chooses what is retrieved (the profile and
+//! the question do). An injected instruction can still steer the answer's text, including markup
+//! that a chat UI would load or link to send other sources' text away (an image, a link): the
+//! frame asks for plain text, but that's no defence, so the answer is sanitized on its way out
+//! ([`super::answer`]).
 //!
 //! Tokens are estimated, as roll has no tokenizer per model: an ASCII character is a third of a
 //! token, any other character one ([`tokens`]), which overestimates for common tokenizers.

