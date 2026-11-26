@@ -1543,6 +1543,10 @@ impl Node {
         }
         // Before any job can run: a branch's inherited jobs must not act as its parent's.
         Box::pin(search_es::branch::mark_inherited(&cluster)).await.map_err(|e| anyhow::anyhow!("marking what the branch inherited: {}", e.reason()))?;
+        // Task results an earlier version kept in a `.tasks` that isn't hidden: hidden now.
+        if let Err(e) = Box::pin(search_es::api::tasks::hide_results_index(&cluster)).await {
+            tracing::warn!(cluster = spec.name, error = %e.reason(), "hiding the task results index failed");
+        }
         // Secrets a node without a key kept in the clear are sealed now that this one has one.
         match Box::pin(search_es::seal::seal_leftovers(&cluster)).await {
             Ok(l) if l.changed == 0 => {}

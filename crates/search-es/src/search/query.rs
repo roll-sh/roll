@@ -115,6 +115,18 @@ impl Reader {
         }
     }
 
+    /// A lookup in `index` (the name it was asked by) as the reader ([`ReadSecurity::authorize`]),
+    /// then the restrictions to read it under; an error for [`Reader::Unset`].
+    ///
+    /// [`ReadSecurity::authorize`]: crate::xpack::security::dls::ReadSecurity::authorize
+    pub fn read_lookup(&self, st: &crate::meta::ClusterState, now_ms: i64, action: &str, index: &str) -> EsResult<Option<&crate::xpack::security::dls::ReadSecurity>> {
+        let sec = self.read_as()?;
+        if let Some(s) = sec {
+            s.authorize(st, now_ms, action, index)?;
+        }
+        Ok(sec)
+    }
+
     /// The restrictions to read under; an error for [`Reader::Unset`].
     pub fn read_as(&self) -> EsResult<Option<&crate::xpack::security::dls::ReadSecurity>> {
         match self {
@@ -264,7 +276,8 @@ impl<'a> QueryCtx<'a> {
     /// the shard's reader, before the request); the mapping's own runtime fields still do.
     pub fn for_security(&self) -> EsResult<QueryCtx<'a>> {
         let scope = super::runtime::RuntimeScope::of_mapping(&self.cluster.scripts, self.cluster.state(), self.idx, self.table, self.shard as i32)?;
-        let mut c = QueryCtx::new(self.cluster, self.st, self.idx, self.table, self.searcher, self.now_ms, self.security.clone());
+        // A role query reads no other document (`Reader::Unset`): Elasticsearch's can't fetch.
+        let mut c = QueryCtx::new(self.cluster, self.st, self.idx, self.table, self.searcher, self.now_ms, Reader::Unset);
         c.shard = self.shard;
         // The owner's filter: a browser key's policy doesn't hold it (its `filter` is in it).
         c.owner.set(true);

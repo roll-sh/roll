@@ -1370,19 +1370,23 @@ filtered listing; and the auth matrix's probe of storage's nested route (also br
 
 Ranked; the top item is in progress. Updated as work lands (the watchdog reads this list).
 
-Working order (2026-11-26, refreshed after the day's landings): the fourth sweep's fixes first
-(item 4: #1059 in its second round, `fix/search-resolved-names`, `fix/search-indirect-meds`,
-each a HIGH or MED on main), then the work in review (item 1's previews, #1054; item 11's RAG
-phase 2, #1068 in its second round; item 13's politeness, #1075), then item 12's last friction
-(an API key's `encoded` working at a shared address), item 31 (re-embedding an index's own
-documents, for agents setting up semantic search), item 30 (read-only ES|QL for agents, after
-item 4's ENRICH fix), and item 15 (Algolia's strongest ground: A/B tests, conversion analytics,
-merchandising rules; its first slice is in progress on `feature/search-experiments`).
+Working order (2026-11-26, afternoon): the fourth sweep's fixes first (item 4: #1059 in its
+third round, #1096 in its second, #1084 in its second; each a HIGH or MED on main), then the
+work in review (item 11's RAG phase 2, #1068 in its third round; item 30's read-only ES|QL,
+#1111 in its second; item 12's shared-address `encoded`, #1115, in review), then item 33 (a
+Discover screen, the dashboard's largest gap against Kibana and OpenSearch Dashboards, and
+nobody is on it: the top open item), items 31 and 32 (re-embedding an index's documents, and
+resetting a branch from a copy for previews' restore points; both in progress), item 14
+(semantic search on OpenSearch-flavor clusters; in progress), item 15's next slice
+(conversions per index, zero results and latency per variant, promoting a winner), item 5's
+OpenSearch links (designed), and chat token metering (item 11's follow-up).
 Landed 2026-11-26: the PIT and caches fix (#1021), a cluster's admin password kept in roll
 secrets and the MCP sweep's person flow (#1097), Terraform for synonyms sets and rulesets
 (#1071), inference endpoints from a secret answered redacted and limited to `api_key` services
-(#1076, #1104), the `semantic_text` default (#1093), click events with a `data` key (#1078) and
-the help-articles sample (#1081).
+(#1076, #1104), the `semantic_text` default (#1093), click events with a `data` key (#1078), the
+help-articles sample (#1081), browser search on previews (#1054), the crawler's charsets,
+per-server politeness and parallel fetches (#1075), and A/B tests on search applications
+(#1090, item 15's first slice).
 
 Landed 2026-11-17: per-person cluster caps (#162: 50 clusters and 2 always-on per person,
 rolld flags, 409 past a cap, counted in the write's own transaction); the search playground (#159); the Relevance tab for
@@ -2135,3 +2139,20 @@ deterministic (#396).
    `wait_for_completion=false` answers 202 `{task}`, with the tasks route catalogued as a read
    (roll MCP's wait tool follows it). Each document's E5 time is charged and rate-limited as bulk
    indexing is. roll MCP maps it as `search_update_by_query`.
+32. **Resetting a branch from a copy** (asked by roll previews, 2026-11-26, for search restore
+   points): `POST /v1/search/clusters/{branch}/reset {"from": <copy>}` puts the branch's indices
+   back to a copy's (previews' masked `Search::snapshot`, or another branch of the same parent
+   line) in place, as a manifest swap over shared segments, keeping the branch's id, parent,
+   data key, browser keys and origins (pg-control's `reset` with `from` is the model); `write` on
+   the branch, on its owner. Re-branching from the copy instead would tangle #1054's key chain
+   (the copy as parent, copies of copies). In progress (`feature/search-branch-reset`).
+33. **A Discover screen** (Kibana's and OpenSearch Dashboards' first screen for logs): today a
+   time-based index is browsed as Discover does (range presets, documents over time, a click on a
+   bar narrows), but one index at a time, from the index browser. Discover adds, at the cluster
+   level: an index pattern or data stream as the view (with its time field), a query bar in KQL
+   or ES|QL (both run here) with the time range, a field sidebar (each field's type and its top
+   values over a sample, filter in or out on a click), chosen columns with a document's JSON a
+   click away, and the view as a URL (index, query, range, columns) to share or bookmark; on
+   OpenSearch-flavor clusters PPL as well as DQL. Built from the existing pieces (the index
+   browser's histogram, the console's request preview, `_field_caps`, `auto_date_histogram`), as
+   requests the panel shows and opens in the console.

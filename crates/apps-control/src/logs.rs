@@ -385,13 +385,14 @@ impl LogHub {
         lines.split_off(skip)
     }
 
-    /// How many of the lines still in memory since `since` contain `q` (any case) and came from
-    /// the app (stdout, stderr): cheap, for an alert judged every minute (nothing stored is read).
+    /// How many of the lines still in memory since `since` match `q` (the Logs tab's search:
+    /// [`Search`]) and came from the app (stdout, stderr): cheap, for an alert judged every minute
+    /// (nothing stored is read).
     pub fn count_recent(&self, key: &str, q: &str, since: i64) -> usize {
-        let q = q.to_lowercase();
+        let Some(q) = Search::parse(q) else { return 0 };
         let logs = self.logs.lock();
         let Some(l) = logs.get(key) else { return 0 };
-        l.ring.iter().rev().take_while(|ln| ln.t >= since).filter(|ln| matches!(ln.stream, Stream::Stdout | Stream::Stderr) && ln.text.to_lowercase().contains(&q)).count()
+        l.ring.iter().rev().take_while(|ln| ln.t >= since).filter(|ln| matches!(ln.stream, Stream::Stdout | Stream::Stderr) && q.matches(&ln.text)).count()
     }
 
     /// Lines that contain `q` (any case), newest last, at most `limit` ([`Self::read`]).
