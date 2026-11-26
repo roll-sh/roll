@@ -90,7 +90,7 @@ pub struct NewGateway {
     pub token: Option<bool>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct MadeGateway {
     pub gateway: Gateway,
     /// The token's secret, shown once.
@@ -353,5 +353,12 @@ impl Secrets {
 
     pub fn open_hop(&self, gateway: &str, raw: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>> {
         self.keys()?.open_hop(&format!("gateway:{gateway}"), raw).map_err(|_| Error::BadRequest("a forwarded call that doesn't open".into()))
+    }
+}
+
+/// Never the gateway's token.
+impl std::fmt::Debug for MadeGateway {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MadeGateway").field("gateway", &self.gateway).field("token", &crate::crypto::redacted(&self.token)).finish()
     }
 }

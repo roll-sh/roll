@@ -231,7 +231,7 @@ pub struct NewIdentity {
 }
 
 /// What a login gets: the token (shown once) and when it ends.
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct Login {
     pub token: String,
     pub expires_at: i64,
@@ -890,4 +890,11 @@ fn identity_needs<'a>(i: &'a Identity, project: &'a str) -> Vec<(Action, Scope<'
         }
     }
     out
+}
+
+/// Never the login's token.
+impl std::fmt::Debug for Login {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Login").field("token", &"<redacted>").field("expires_at", &self.expires_at).field("project", &self.project).field("identity", &self.identity).finish()
+    }
 }

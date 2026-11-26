@@ -64,7 +64,7 @@ pub struct GitHubApp {
     pub created_by: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NewGitHubApp {
     pub name: String,
@@ -347,5 +347,20 @@ mod tests {
         assert!(narrowing(&link(json!({ "permissions": { "contents": "admin" } })), ceiling).is_err(), "past the App's level");
         assert!(narrowing(&link(json!({ "permissions": { "administration": "read" } })), ceiling).is_err(), "a permission the App doesn't allow");
         assert!(narrowing(&link(json!({ "permissions": { "contents": "everything" } })), ceiling).is_err());
+    }
+}
+
+/// Never the App's private key.
+impl std::fmt::Debug for NewGitHubApp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NewGitHubApp")
+            .field("name", &self.name)
+            .field("app_id", &self.app_id)
+            .field("installation_id", &self.installation_id)
+            .field("private_key", &"<redacted>")
+            .field("api_base", &self.api_base)
+            .field("repositories", &self.repositories)
+            .field("permissions", &self.permissions)
+            .finish()
     }
 }

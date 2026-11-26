@@ -115,7 +115,7 @@ fn vault_note(v: Option<u32>) -> String {
 }
 
 /// One item to encrypt: base64 plaintext, and the context bound to it.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Plain {
     pub plaintext: String,
@@ -624,4 +624,11 @@ fn batch_limits(sizes: impl Iterator<Item = usize>) -> Result<()> {
         return Err(Error::BadRequest(format!("1–{BATCH_MAX} items, {} MiB at most in all", BATCH_BYTES >> 20)));
     }
     Ok(())
+}
+
+/// Never the plaintext.
+impl std::fmt::Debug for Plain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Plain").field("plaintext", &"<redacted>").field("context", &self.context).finish()
+    }
 }

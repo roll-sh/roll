@@ -15,7 +15,7 @@ use serde_json::Value as Json;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// One operation of a batch, as the API takes it.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(tag = "op", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Op {
     Set {
@@ -1523,5 +1523,26 @@ mod tests {
         let chain = format!("leaf and CA\n{}{}", cert(2031), cert(2029));
         assert_eq!(super::certificate_expiry(&chain), Some(1_869_609_600_000));
         assert_eq!(super::certificate_expiry("not a certificate"), None);
+    }
+}
+
+/// Never the value a set carries.
+impl std::fmt::Debug for Op {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Op::Set { key, value, comment, tags, kind, link, path, expires_at, if_version } => f
+                .debug_struct("Set")
+                .field("key", key)
+                .field("value", &crate::crypto::redacted(value))
+                .field("comment", comment)
+                .field("tags", tags)
+                .field("kind", kind)
+                .field("link", link)
+                .field("path", path)
+                .field("expires_at", expires_at)
+                .field("if_version", if_version)
+                .finish(),
+            Op::Delete { key, kind, path, if_version } => f.debug_struct("Delete").field("key", key).field("kind", kind).field("path", path).field("if_version", if_version).finish(),
+        }
     }
 }
