@@ -2639,7 +2639,7 @@ async fn a_github_push_is_checked_by_a_scanner_and_a_value_found_is_a_leak() {
     assert_eq!(found, [(1, roll_secrets::Leak { key: "API_KEY".into(), environment: "production".into(), path: "/".into() }, false)]);
     let scans = api.ok(Method::GET, "/audit?action=secrets.scan", None).await;
     assert_eq!(scans[0]["actor"], "github:7:acme/app");
-    assert!(scans[0]["summary"].as_str().unwrap().contains("by octo to refs/heads/pay"), "{scans}");
+    assert!(scans[0]["summary"].as_str().unwrap().contains("by octo (as github:7:acme/app says) to refs/heads/pay"), "{scans}");
     let leaked = api.ok(Method::GET, "/audit?action=secrets.leaked", None).await;
     assert_eq!(leaked[0]["keys"], json!(["API_KEY"]), "{leaked}");
 }
