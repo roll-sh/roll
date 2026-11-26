@@ -1347,6 +1347,14 @@ pub enum AppsCmd {
         starts: Option<String>,
         #[arg(long, requires = "starts")]
         ends: Option<String>,
+        /// Put the page on a domain of its own (status.acme.dev): prints the DNS record to add.
+        #[arg(long, value_name = "HOST", conflicts_with_all = ["delete", "incident", "update", "title", "item", "verify_domain", "remove_domain"])]
+        domain: Option<String>,
+        /// Check its own domain's DNS now.
+        #[arg(long, conflicts_with_all = ["delete", "incident", "update", "title", "item", "remove_domain"])]
+        verify_domain: bool,
+        #[arg(long, conflicts_with_all = ["delete", "incident", "update", "title", "item"])]
+        remove_domain: bool,
     },
     /// The project's spend limits this month: show them, or set `--alert` and `--hard` (dollars;
     /// `0` removes one). At the hard limit its services stop until it's raised.
@@ -5233,10 +5241,37 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 v
             }
         }
-        AppsCmd::StatusPage { target, title, item, delete, incident, update, state, text, starts, ends } => {
+        AppsCmd::StatusPage { target, title, item, delete, incident, update, state, text, starts, ends, domain, verify_domain, remove_domain } => {
             let svc = service(api, &target).await?;
             let path = format!("/v1/apps/projects/{}/status-page", enc(&s(&svc["project"])));
-            if delete {
+            if domain.is_some() || verify_domain || remove_domain {
+                let path = format!("{path}/domain");
+                if remove_domain {
+                    api.call(reqwest::Method::DELETE, &path, None).await?;
+                    json!({ "removed": true })
+                } else {
+                    let d = match domain {
+                        Some(h) => api.post(&path, json!({ "hostname": h })).await?,
+                        None => api.post(&format!("{path}/verify"), json!({})).await?,
+                    };
+                    if !json_out {
+                        println!("{} {}", s(&d["hostname"]), s(&d["status"]));
+                        if d["status"] != "active" {
+                            if d["record"] != "txt" {
+                                println!("  CNAME {} → {}", s(&d["hostname"]), s(&d["target"]));
+                            }
+                            if d["record"] != "cname" {
+                                println!("  TXT   _roll-challenge.{} = {}", s(&d["hostname"]), s(&d["token"]));
+                            }
+                            if let Some(e) = d["error"].as_str() {
+                                println!("  {e}");
+                            }
+                        }
+                        return Ok(());
+                    }
+                    d
+                }
+            } else if delete {
                 api.call(reqwest::Method::DELETE, &path, None).await?;
                 json!({ "deleted": true })
             } else if let Some(t) = incident {
