@@ -50,7 +50,7 @@ pub fn validate_filter(alias: &str, filter: &Value) -> Result<(), EsError> {
 /// document, a `geo_shape` or `shape` query's `indexed_shape`, at any depth.
 fn fetches_to_rewrite(v: &Value) -> bool {
     use crate::query::reads::DocumentRead;
-    crate::query::reads::document_reads(v).into_iter().any(|r| matches!(r, DocumentRead::TermsLookup | DocumentRead::IndexedShape | DocumentRead::Percolate { indexed: true }))
+    crate::query::reads::document_reads(v).into_iter().any(|r| matches!(r, DocumentRead::TermsLookup | DocumentRead::IndexedShape | DocumentRead::Percolate { indexed: true } | DocumentRead::Opaque))
 }
 
 /// Whether any object key in `v` is one of `names`.

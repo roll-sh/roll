@@ -566,11 +566,6 @@ impl Effective {
         self.allows(|p| p.allows_index(action, index, restricted) || parent.is_some_and(|ds| p.allows_index(action, ds, self.restricted(ds))))
     }
 
-    /// Whether the principal may read the failure store of `index` ([`Permission::reads_failure_store`]).
-    pub fn reads_failure_store(&self, index: &str) -> bool {
-        self.allows(|p| p.reads_failure_store(index))
-    }
-
     /// Whether some role grants `action` on some index (`IndicesPermission.check(action)`):
     /// how Elasticsearch authorizes the request of a composite action, whose items are then
     /// authorized one by one.
@@ -894,24 +889,23 @@ pub fn check_lookups(ctx: &Ctx, rendered: Option<&Value>) -> EsResult<()> {
 }
 
 /// The names a lookup of `expr` by `action` may not read, as the principal of `eff`: the name
-/// [`crate::meta::resolve::authorization_name`] gives (date math resolved, the selector split
-/// off; a failure store needs its own privilege), a wildcard resolved against `st` as a lookup
-/// resolves it. An expression that doesn't resolve fails the check, never passes it.
+/// the request's own indices are authorized as ([`try_authz_name`]: date math resolved, a
+/// failure store kept as `<stream>::failures`, which needs the failure store's own privileges),
+/// a wildcard (or `_all`) resolved against `st` as a lookup resolves it, never as a name a
+/// grant's pattern could match. An expression that doesn't resolve fails the check, never
+/// passes it.
 pub(crate) fn denied_lookup(eff: &Effective, st: &crate::meta::ClusterState, now_ms: i64, action: &str, expr: &str) -> EsResult<Vec<String>> {
-    use crate::meta::resolve::{IndicesOptions, Selector, authorization_name, is_wildcard, resolve};
-    let (name, selector) = authorization_name(expr, now_ms)?;
-    let names = match is_wildcard(&name) {
-        true => resolve(st, std::slice::from_ref(&name), &IndicesOptions::STRICT_EXPAND_OPEN, now_ms)?,
-        false => vec![name],
+    use crate::meta::resolve::{IndicesOptions, is_wildcard, resolve};
+    let name = try_authz_name(expr, now_ms)?;
+    let (base, selector) = match name.strip_suffix("::failures") {
+        Some(stream) => (stream.to_string(), "::failures"),
+        None => (name, ""),
     };
-    Ok(names
-        .into_iter()
-        .filter(|n| match selector {
-            Selector::Data => !eff.allows_index(action, n),
-            Selector::Failures => !eff.reads_failure_store(n),
-        })
-        .map(|n| if selector == Selector::Failures { format!("{n}::failures") } else { n })
-        .collect())
+    let names = match is_wildcard(&base) || base == "_all" {
+        true => resolve(st, std::slice::from_ref(&base), &IndicesOptions::STRICT_EXPAND_OPEN, now_ms)?,
+        false => vec![base],
+    };
+    Ok(names.into_iter().map(|n| format!("{n}{selector}")).filter(|n| !eff.allows_index(action, n)).collect())
 }
 
 /// A write an ingest pipeline moved to `index` (`_index`, `reroute`): authorized there as an
@@ -1509,20 +1503,25 @@ fn narrow_exprs(
     Ok(Some(with_linked(if out.is_empty() { vec!["-*".to_string()] } else { out })))
 }
 
-/// An index expression (no wildcard) as the checks that compare names see it, through the one
-/// resolution every index check shares ([`crate::meta::resolve::authorization_name`]: date math
-/// resolved, `<…>::failures` included, the selector split off): its `-` dropped, and a
-/// `::failures` selector kept as a suffix, which [`Effective::allows_index`] authorizes with the
-/// failure store's own privileges. Text that doesn't parse is checked as written: the request
-/// fails on it later, the same way, before it reads anything.
-pub fn authz_name(expr: &str, now_ms: i64) -> String {
+/// The name an index expression is authorized as, by every index check (the request's own
+/// indices, its items, its lookups), through the one resolution they share
+/// ([`crate::meta::resolve::authorization_name`]: date math resolved, `<…>::failures` included):
+/// its `-` dropped, and a `::failures` selector kept as a suffix, which
+/// [`Effective::allows_index`] authorizes with the failure store's own privileges. `Err`: text
+/// that doesn't parse (a lookup fails on it).
+pub fn try_authz_name(expr: &str, now_ms: i64) -> EsResult<String> {
     use crate::meta::resolve::{Selector, authorization_name};
     let expr = expr.strip_prefix('-').unwrap_or(expr);
-    match authorization_name(expr, now_ms) {
-        Ok((name, Selector::Failures)) => format!("{name}::failures"),
-        Ok((name, Selector::Data)) => name,
-        Err(_) => expr.to_string(),
-    }
+    Ok(match authorization_name(expr, now_ms)? {
+        (name, Selector::Failures) => format!("{name}::failures"),
+        (name, Selector::Data) => name,
+    })
+}
+
+/// [`try_authz_name`] for the request's own names: text that doesn't parse is checked as written,
+/// and the request fails on it later, the same way, before it reads anything.
+pub fn authz_name(expr: &str, now_ms: i64) -> String {
+    try_authz_name(expr, now_ms).unwrap_or_else(|_| expr.strip_prefix('-').unwrap_or(expr).to_string())
 }
 
 /// What an alias change is authorized with: the caller's permissions, captured before the

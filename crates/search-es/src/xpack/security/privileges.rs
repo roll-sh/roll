@@ -509,11 +509,6 @@ impl Permission {
         self.indices.iter().any(|g| (!restricted || g.allow_restricted) && grant_names(g, index) && g.privileges.iter().any(|p| index_grants(p, action)))
     }
 
-    /// Whether the role may read the failure store of `index` (a data stream).
-    pub fn reads_failure_store(&self, index: &str) -> bool {
-        self.grants_failure_store("indices:data/read/search", index)
-    }
-
     /// Whether the role may perform `action` on the failure store of `index` (a data stream),
     /// as Elasticsearch's failure store selector privileges grant it: `read_failure_store` the
     /// actions `read` covers, `manage_failure_store` those `manage` covers (settings, mappings,

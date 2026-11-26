@@ -267,15 +267,14 @@ impl ReadSecurity {
         self.0.browser.as_ref()
     }
 
-    /// Who the reader is and what its roles grant, as a request cache key part: an answer whose
-    /// lookups were authorized for one reader is never another's, nor this one's once its roles
-    /// change.
-    pub fn cache_identity(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
+    /// Who the reader is and what its roles grant, as a request cache key part (the SHA-256 of
+    /// them, hex): an answer whose lookups were authorized for one reader is never another's,
+    /// nor this one's once its roles change.
+    pub fn cache_identity(&self) -> String {
+        use sha2::Digest as _;
         let e = &self.0.eff;
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        format!("{:?}|{:?}|{:?}|{:?}", self.0.principal, e.own, e.limited_by, e.also).hash(&mut h);
-        h.finish()
+        let digest = sha2::Sha256::digest(format!("{:?}|{:?}|{:?}|{:?}", self.0.principal, e.own, e.limited_by, e.also).as_bytes());
+        digest.iter().map(|b| format!("{b:02x}")).collect()
     }
 
     /// Whether document or field level security, or a browser key's policy, restricts any of
