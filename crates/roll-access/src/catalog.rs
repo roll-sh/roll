@@ -148,7 +148,8 @@ fn secret_path(p: &str) -> Option<String> {
     if rest.is_empty() {
         return Some("/".into());
     }
-    rest.split('/').all(roll_secrets_ref::is_segment).then(|| format!("/{rest}"))
+    let segments: Vec<&str> = rest.split('/').collect();
+    (segments.len() <= roll_secrets_ref::DEPTH_MAX && segments.iter().all(|s| roll_secrets_ref::is_segment(s))).then(|| format!("/{rest}"))
 }
 
 /// A worker's `run.scale.stream`: apps reads that stream group's lag for it (read on the stream).

@@ -170,11 +170,12 @@ fn postgres() -> Router {
                 let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
                 let Some(project) = body["secret"]["project"].as_str().map(String::from) else { return axum::Json(json!({ "reveal": reveal })) };
                 let g = roll_auth::Grant::on(&ext).unwrap();
-                let at = |env: &str, path: &str| {
+                let at = |env: &str, path: &str, action: roll_auth::scope::Action| {
                     let r = roll_auth::scope::Resource { product: "secrets".into(), id: Some(project.clone()), project: Some(project.clone()), environment: Some(env.into()), path: Some(path.into()), ..Default::default() };
-                    g.allows(&r, roll_auth::scope::Action::Write) == roll_auth::scope::Outcome::Allow
+                    g.allows(&r, action) == roll_auth::scope::Outcome::Allow
                 };
-                axum::Json(json!({ "here": at("production", "/ai"), "below": at("production", "/ai/x"), "elsewhere": at("production", "/"), "staging": at("staging", "/ai") }))
+                use roll_auth::scope::Action::{Read, Write};
+                axum::Json(json!({ "here": at("production", "/ai", Write), "read": at("production", "/ai", Read), "below": at("production", "/ai/x", Write), "elsewhere": at("production", "/", Write), "staging": at("staging", "/ai", Write) }))
             }),
         )
         .route("/v1/search/clusters/{id}/keys", post(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }))
@@ -3332,16 +3333,35 @@ async fn a_secret_written_as_the_caller_is_asked_for_and_only_it_is_allowed() {
     let body = |env: &str| json!({ "secret": { "project": project, "environment": env, "path": "/ai", "key": "ADMIN_PASSWORD" } });
     let path = "/v1/search/clusters/cl_home/password";
     let search = |effect: &str| json!({ "product": "search", "resources": "*", "actions": { "admin": effect, "reveal": "allow" } });
-    let (asks, _) = d.token(json!([search("ask"), { "product": "secrets", "resources": [{ "project": project }], "actions": { "write": "ask" } }]), json!({})).await;
-    let (s, out) = d.call(&asks, Method::POST, path, Some(body("production"))).await;
-    assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
-    let id = out["approval"].as_str().unwrap().to_string();
-    let (_, asked) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{id}"), None).await;
-    assert_eq!((asked["product"].as_str(), asked["action"].as_str(), asked["environment"].as_str()), (Some("secrets"), Some("write"), Some("production")), "{asked}");
-    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{id}/approve"), None).await.0, StatusCode::OK);
+    let write_asks = json!({ "product": "secrets", "resources": [{ "project": project }], "actions": { "write": "ask" } });
+    let asked = |token: String| {
+        let (d, body) = (&d, body("production"));
+        async move {
+            let (s, out) = d.call(&token, Method::POST, path, Some(body)).await;
+            assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
+            let id = out["approval"].as_str().unwrap().to_string();
+            let (_, asked) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{id}"), None).await;
+            assert_eq!((asked["product"].as_str(), asked["action"].as_str(), asked["environment"].as_str()), (Some("secrets"), Some("write"), Some("production")), "{asked}");
+            id
+        }
+    };
+    // The route's own action asks too: the approval still names the secret.
+    let (tie, _) = d.token(json!([search("ask"), write_asks]), json!({})).await;
+    asked(tie).await;
+    let (asks, _) = d.token(json!([search("allow"), write_asks]), json!({})).await;
+    let id = asked(asks.clone()).await;
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{id}/approve"), Some(json!({ "remember": "1h" }))).await.0, StatusCode::OK);
     let (s, seen) = d.send(&asks, Method::POST, path, Some(body("production")), &[("x-roll-approval", &id)]).await;
     assert_eq!(s, StatusCode::OK, "{seen}");
-    assert_eq!(seen, json!({ "here": true, "below": true, "elsewhere": false, "staging": false }));
+    assert_eq!(seen, json!({ "here": true, "read": true, "below": true, "elsewhere": false, "staging": false }));
+    // Remembered, it allows that folder again with no approval (and reading it, which the product
+    // does), and nothing beside it: another folder asks again.
+    let (s, seen) = d.call(&asks, Method::POST, path, Some(body("production"))).await;
+    assert_eq!((s, seen["read"].as_bool(), seen["elsewhere"].as_bool()), (StatusCode::OK, Some(true), Some(false)), "{seen}");
+    let mut root = body("production");
+    root["secret"]["path"] = json!("/");
+    let (s, out) = d.call(&asks, Method::POST, path, Some(root)).await;
+    assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
     let (allows, _) = d.token(json!([search("allow"), { "product": "secrets", "resources": [{ "project": project }], "actions": { "write": "allow" } }]), json!({})).await;
     let (s, seen) = d.call(&allows, Method::POST, path, Some(body("production"))).await;
     assert_eq!((s, seen["here"].as_bool()), (StatusCode::OK, Some(true)), "{seen}");
