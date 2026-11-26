@@ -2743,6 +2743,15 @@ async fn an_enterprise_idp_signs_a_person_in_to_an_app() {
     let (_, me) = d.call(&token, Method::GET, "/v1/access", None).await;
     assert_eq!((me["grant"]["user"].as_str(), me["grant"]["created_by"].as_str()), (Some("usr_alice"), Some(format!("enterprise:{okta}").as_str())), "it acts as alice: {me}");
     assert_eq!(d.call(&token, Method::POST, "/v1/workspace/projects", Some(json!({ "name": "from-claude" }))).await.0, StatusCode::CREATED);
+    // A policy that requires an end and names no length doesn't stop sign-ins: the connection is
+    // made again, ending in a day.
+    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "require_expiry": true }))).await.0, StatusCode::OK);
+    let (s, again) = sign_in(idjag(claims("j60", "alice@acme.test", &api, &client_id)), secret.clone()).await;
+    assert_eq!(s, StatusCode::OK, "{again}");
+    let (_, me) = d.call(again["access_token"].as_str().unwrap(), Method::GET, "/v1/access", None).await;
+    let ends = me["grant"]["expires_at"].as_i64().unwrap_or(0) - std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    assert!(ends > 23 * 3_600_000 && ends <= 24 * 3_600_000, "{me}");
+    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({}))).await.0, StatusCode::OK);
     // An assertion for roll's MCP server alone: its token works through that server, never on the
     // API directly (draft -06: the token is held to the assertion's resources).
     let mut for_mcp = claims("j40", "alice@acme.test", &api, &client_id);

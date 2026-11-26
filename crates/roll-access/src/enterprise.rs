@@ -746,8 +746,9 @@ fn connect(a: &Access, app: &App, idp: &Idp, user: &str, read_only: bool, mcp_on
         return Ok((a.store.get(&id)?, access));
     }
     let host = url::Url::parse(&idp.issuer).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
-    // Nobody asks for a lifetime here: the policy's longest for these rules (none: none).
-    let expires_at = a.lifetime_days(&app.rules).map(|d| now + i64::from(d) * 86_400_000);
+    // Nobody asks for a lifetime here: the policy's longest for these rules, or a day when it
+    // requires an end and names no length (the next sign-in after makes it again). None: none.
+    let expires_at = a.lifetime_days(&app.rules).map(|d| i64::from(d) * 86_400_000).or_else(|| a.policy().require_expiry.then_some(86_400_000)).map(|ms| now + ms);
     a.meets_policy(&app.rules, expires_at).map_err(|e| Error::OAuth("access_denied", e.to_string()))?;
     let new = NewGrant { name: format!("{} (via {})", app.name, idp.name.clone().unwrap_or(host)).chars().take(100).collect(), rules: app.rules.clone(), expires_at, pending: a.policy_now().needs_approval(&app.rules, false), ..Default::default() };
     let (grant, access) = a.store.create(&new, GrantKind::Oauth, &format!("enterprise:{}", idp.issuer), Some(&app.client_id), Some(user))?;

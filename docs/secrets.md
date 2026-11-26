@@ -6497,7 +6497,8 @@ replaces it, and a floor left out has none:
   MCP client's consent (and a device's) gets an end `d` days away when it asked for none or a
   later one, and a step-up brings the connection's end forward (both consent screens say so). An
   approval remembered for good, or for longer, on a secrets rule is remembered for `d` days. An
-  enterprise app's connection lives `d` days and is made again at the next sign-in after (one made
+  enterprise app's connection lives `d` days (a day when roll's policy requires an end and names no
+  length) and is made again at the next sign-in after (one made
   before the policy is replaced then). A gateway's long-lived token is refused under it (log the
   gateway in through a workload identity instead). roll-access's `tests/policy_callers.rs` fails
   on a new writer that doesn't ask. Workload identities' logins and bootstrap tokens last 60
