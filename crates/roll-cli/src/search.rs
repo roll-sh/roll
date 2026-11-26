@@ -222,6 +222,22 @@ pub enum Crawler {
         /// The connector's id (default: from `output_index`).
         #[arg(long)]
         connector: Option<String>,
+        /// `docs`: one record per section of a documentation site (lvl0 to lvl6, content, the
+        /// URL with its #anchor), as DocSearch makes them.
+        #[arg(long)]
+        preset: Option<String>,
+    },
+    /// Crawl a site from one URL: makes a crawler for it (`content-<connector>`) and starts its
+    /// first full crawl. Test the URL first with `roll search crawler test`.
+    Create {
+        cluster: String,
+        url: String,
+        /// The connector's id (default: from the URL's host).
+        #[arg(long)]
+        connector: Option<String>,
+        /// `docs`: one record per section of a documentation site, as DocSearch makes them.
+        #[arg(long)]
+        preset: Option<String>,
     },
     /// Test one URL through the crawler's path, writing nothing: robots.txt and the rule that
     /// decides it, the redirects, what would be indexed and which links would be queued.
@@ -864,7 +880,8 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                 Docs::Delete { cluster, index, id, refresh: r } => index_call(api, as_json, Method::DELETE, &cluster, &index, &doc(&id), (refresh(r), None)).await,
             };
         }
-        Search::Crawler(Crawler::Import { cluster, file, connector }) => return crate::search_crawler::import(api, as_json, &cluster, &file, connector.as_deref()).await,
+        Search::Crawler(Crawler::Import { cluster, file, connector, preset }) => return crate::search_crawler::import(api, as_json, &cluster, &file, connector.as_deref(), preset.as_deref()).await,
+        Search::Crawler(Crawler::Create { cluster, url, connector, preset }) => return crate::search_crawler::create(api, as_json, &cluster, &url, connector.as_deref(), preset.as_deref()).await,
         Search::Crawler(Crawler::Test { cluster, url, connector }) => return crate::search_crawler::test(api, as_json, &cluster, &url, connector.as_deref()).await,
         Search::Crawler(Crawler::Verify { cluster, domain, check }) => return crate::search_crawler::verify(api, as_json, &cluster, &domain, check).await,
         Search::Crawler(Crawler::Sites { cluster }) => return crate::search_crawler::sites(api, as_json, &cluster).await,

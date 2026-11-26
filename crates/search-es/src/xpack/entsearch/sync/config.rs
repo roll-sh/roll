@@ -93,6 +93,10 @@ const CRAWLER: &[FieldDef] = &[
     f("auth_username", "Basic auth username", Ty::Str, empty, false, true),
     f("auth_password", "Basic auth password", Ty::Str, empty, false, true),
     FieldDef {
+        tooltip: Some("docs: a documentation site, one record per section (lvl0 to lvl6 from its headings, the content, the URL with its #anchor), as DocSearch makes them. Empty: one document per page, as Open Crawler makes them."),
+        ..f("preset", "Preset", Ty::Str, empty, false, false)
+    },
+    FieldDef {
         tooltip: Some("Once: the next full crawl deletes what it proves gone even when most of the site changed (the purge guards are lifted), then this turns itself off."),
         ..f("force_purge", "Purge past the guards once", Ty::Bool, || Value::Bool(false), false, false)
     },
