@@ -1633,7 +1633,7 @@ fn handler_expansion(ctx: &Ctx) -> crate::meta::resolve::IndicesOptions {
         // `/{index}/_settings/index.uuid?expand_wildcards=open,closed,hidden` (`ilm::resolve`).
         "ilm.remove_policy" | "ilm.retry" | "ilm.explain_lifecycle" => return IndicesOptions { expand_closed: true, expand_hidden: true, ..lenient },
         "indices.open" => IndicesOptions { expand_open: false, expand_closed: true, ..lenient },
-        "indices.put_settings" | "indices.put_mapping" | "indices.delete" | "indices.shard_stores" => IndicesOptions { expand_closed: true, ..lenient },
+        "indices.put_settings" | "indices.put_mapping" | "indices.delete" | "indices.shard_stores" | "indices.delete_alias" => IndicesOptions { expand_closed: true, ..lenient },
         _ => lenient,
     };
     ctx.indices_options(defaults).unwrap_or(defaults)
