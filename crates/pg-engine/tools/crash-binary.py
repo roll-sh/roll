@@ -66,12 +66,12 @@ one maybe torn, and a seeded prefix of the unsynced name changes). The schema is
 the first watched start (a clean shutdown: that state counts as durable). The rounds then cycle
 through three more kinds:
   ack           0-300 us after a writer's COMMIT was acknowledged (it must be there);
-  ddl           0-3 ms after the nth of a DDL sequence was sent: CREATE TABLE, INSERT, ADD
+  ddl           0-3 ms after the nth of a DDL sequence was sent or acknowledged: CREATE TABLE, INSERT, ADD
                 COLUMN, CREATE INDEX, ALTER SYSTEM, a physical replication slot, a replication
                 origin, DROP TABLE of the last round's table; each acknowledged step must be
                 there (ALTER SYSTEM, the slot and the origin under synchronous_commit=off too:
                 roll writes them as files, not in a transaction);
-  prepare       0-2 ms after the nth two-phase message was sent (PREPARE TRANSACTION, COMMIT /
+  prepare       0-2 ms after the nth two-phase message was sent or acknowledged (PREPARE TRANSACTION, COMMIT /
                 ROLLBACK PREPARED of TPC-B transactions on a connection of their own): an
                 acknowledged PREPARE is in pg_prepared_xacts after the restart (then committed
                 by the check), an acknowledged COMMIT PREPARED is in history, under
@@ -317,7 +317,8 @@ class Model:
         (self.sent if sent else self.ackt)[key] = time.monotonic()
 
     def step(self):
-        """A ddl / prepare worker sent its next statement."""
+        """A ddl / prepare worker sent its next statement, or had one acknowledged (two events
+        a statement: odd ones sent, even ones acknowledged)."""
         self.steps += 1
         if self.steps >= self.step_want:
             self.step_evt.set()
@@ -456,6 +457,7 @@ def twopc(port, model, rng, r, stop):
             continue
         with model.lock:
             model.prep[gid][1] = 'prepared'
+        model.step()
         commit = rng.randrange(8) != 0
         with model.lock:
             model.prep[gid][1] = 'committing' if commit else 'rolling'
@@ -473,6 +475,7 @@ def twopc(port, model, rng, r, stop):
         with model.lock:
             model.prep[gid][1] = 'committed' if commit else 'rolledback'
             (model.acked if commit else model.never).add(txid)
+        model.step()
     c.close()
 
 
@@ -523,6 +526,7 @@ def ddl_worker(port, model, rng, r):
             else:
                 (model.slots if key[0] == 'slot' else model.origins)[key[1]] = 'there'
             model.mark(key)
+        model.step()
         time.sleep(rng.random() * 0.02)
     model.step_evt.set()  # all of it acknowledged: a kill after the whole sequence
     c.close()
@@ -898,7 +902,7 @@ def run_round(srv, model, rng, r, kind, batch0):
         time.sleep(us / 1e6)
         what = f'{us} us after a COMMIT was acknowledged' if hit else '10 s (no COMMIT acknowledged)'
     elif kind in ('ddl', 'prepare'):
-        n = rng.randrange(1, 10 if kind == 'ddl' else 25)
+        n = rng.randrange(1, 19 if kind == 'ddl' else 41)
         us = rng.randrange(0, 3000 if kind == 'ddl' else 2000)
         model.steps, model.step_want = 0, n
         model.step_evt.clear()
@@ -909,9 +913,9 @@ def run_round(srv, model, rng, r, kind, batch0):
         act.start()
         hit = model.step_evt.wait(15)
         time.sleep(us / 1e6)
-        what = (f'{us} us after {kind} step {n} was sent' if hit and model.steps >= n else
-                f'{us} us after all {model.steps} {kind} steps were acknowledged' if hit else
-                f'15 s ({model.steps} of {n} {kind} steps sent)')
+        what = (f'{us} us after {kind} statement {(n + 1) // 2} was {"sent" if n % 2 else "acknowledged"}' if hit and model.steps >= n else
+                f'{us} us after all {model.steps // 2} {kind} statements were acknowledged' if hit else
+                f'15 s ({model.steps} of {n} {kind} events)')
     alive = srv.proc.poll() is None
     if alive:
         srv.kill()
@@ -934,6 +938,7 @@ def main():
     ap.add_argument('--keep', default=None, help='keep the data directory here (default: only on a failure)')
     ap.add_argument('--power', choices=('drop', 'keep'), default=None,
                     help='cut the power at each kill (tools/powercut): drop every unsynced change, or keep a seeded part')
+    ap.add_argument('--kinds', default=None, help='comma-separated: only these kinds of rounds (default all)')
     ap.add_argument('--set', action='append', default=[], metavar='NAME=VALUE',
                     help="the server's -c (synchronous_commit=off: a power cut may lose acknowledged commits, "
                          'as a suffix; a SIGKILL may not)')
@@ -942,6 +947,10 @@ def main():
     seed = a.seed if a.seed is not None else int.from_bytes(os.urandom(4), 'little')
     rng = random.Random(seed)
     kinds = POWER_KINDS if a.power else KINDS
+    if a.kinds:
+        kinds = a.kinds.split(',')
+        if set(kinds) - set(POWER_KINDS if a.power else KINDS):
+            ap.error(f'--kinds: one of {",".join(POWER_KINDS if a.power else KINDS)}')
     rounds = a.rounds if a.rounds is not None else len(kinds)
     port, release = a.port, None
     if port is None:
@@ -971,6 +980,7 @@ def main():
         rng.shuffle(k)
         order += k
     replay = f'--seed {seed}' + (f' --rounds {rounds}' if a.rounds is not None else '') + \
+        (f' --kinds {a.kinds}' if a.kinds else '') + \
         (f' --power {a.power}' if a.power else '') + ''.join(f" --set '{kv}'" for kv in a.set)
     print(f'crash-binary: {binary} ({hashlib.sha256(open(binary, "rb").read()).hexdigest()[:16]}), seed {seed}, '
           f'{rounds} rounds, {"power cuts (" + a.power + ")" if a.power else "kills"}, port {port}, data {data}', flush=True)
