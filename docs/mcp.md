@@ -1558,7 +1558,7 @@ From a 2026-11-24 gap review (every tool run as an agent would against a fresh r
    - `search_put_mapping` warns that `copy_to` and `_meta` are replaced whole. `_meta` holds an imported index's `roll_import` record.
    - `search_query` takes `seq_no_primary_term`, `version`, `stored_fields`, `docvalue_fields` and OpenSearch's `derived`.
    - Suggested to roll search:
-     - refuse other services' credentials in the body (Bedrock's `access_key`/`secret_key`, Vertex's `service_account_json`, custom's `secret_parameters`);
+     - refuse other services' credentials in the body (Bedrock's `access_key`/`secret_key`, Vertex's `service_account_json`), in flight on `fix/search-inference-secrets-credentials`: unknown services and services without `api_key` are refused, and so is every sensitive setting in the body;
      - `update_by_query` (their Next 24), to be mapped as `search_update_by_query` with a wait.
    Next from that review, roll MCP's own: SEP-2792 (a request's language) watched with SEP-2643 and SEP-2848. For product
    threads: failed queries grouped by fingerprint and cost per query tag (PlanetScale; Postgres),
