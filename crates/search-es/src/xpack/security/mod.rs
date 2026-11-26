@@ -1540,6 +1540,16 @@ impl AliasAuth {
         AliasAuth { who, dls }
     }
 
+    /// Whether the caller's alias changes are limited at all (not a superuser, not unsecured).
+    pub fn limited(&self) -> bool {
+        self.who.is_some()
+    }
+
+    /// Whether the caller may change aliases on `name` (an index, a data stream or an alias).
+    pub fn allows(&self, name: &str) -> bool {
+        self.who.as_ref().is_none_or(|(_, eff)| eff.allows_index(Self::ACTION, name))
+    }
+
     pub fn check(&self, adding: bool, indices: &[String], aliases: &[String]) -> EsResult<()> {
         let Some((p, eff)) = &self.who else { return Ok(()) };
         let denied_on: Vec<String> = indices.iter().filter(|n| !eff.allows_index(Self::ACTION, n)).cloned().collect();

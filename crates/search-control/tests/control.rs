@@ -4138,6 +4138,7 @@ async fn names_are_authorized_as_resolved() {
         (Method::PUT, "/_security/role/fsm", json!({"indices": [{"names": ["logs-*"], "privileges": ["manage_failure_store"]}]})),
         (Method::PUT, "/_security/user/fsm", json!({"password": "fsm-pass-1", "roles": ["fsm"]})),
         (Method::PUT, "/secret/_alias/secret-w", Value::Null),
+        (Method::PUT, "/mine/_alias/sec-a", Value::Null),
         (Method::PUT, "/mine-000001", json!({"aliases": {"mine-roll": {"is_write_index": true}}})),
     ] {
         let (s, v) = e.es(&u, &p, m, path, Some(body).filter(|b| !b.is_null())).await;
@@ -4208,6 +4209,17 @@ async fn names_are_authorized_as_resolved() {
     let (_, v) = e.es(&u, &p, Method::GET, "/_alias/secret-w", None).await;
     assert_eq!(v, json!({"secret": {"aliases": {"secret-w": {}}}}), "the write alias is where it was");
     assert_eq!(lim(Method::POST, "/mine-roll/_rollover", None).await.0, 200, "a rollover of the user's own");
+    // Removing aliases: a name spelled out must be the user's; a pattern reaches only theirs.
+    let (s, v) = lim(Method::DELETE, "/mine/_alias/sec-a", None).await;
+    assert!(s == 403 && v.to_string().contains("indices:admin/aliases"), "{s} {v}");
+    let (s, v) = lim(Method::POST, "/_aliases", Some(json!({"actions": [{"remove": {"index": "mine", "alias": "sec-a"}}]}))).await;
+    assert_eq!(s, 403, "{v}");
+    let (s, v) = lim(Method::DELETE, "/mine/_alias/*", None).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = lim(Method::POST, "/_aliases", Some(json!({"actions": [{"remove": {"index": "mine", "alias": "sec*"}}]}))).await;
+    assert_eq!((s, &v["error"]["type"]), (404, &json!("aliases_not_found_exception")), "as on Elasticsearch: {v}");
+    let (_, v) = e.es(&u, &p, Method::GET, "/mine/_alias", None).await;
+    assert_eq!(v, json!({"mine": {"aliases": {"sec-a": {}}}}), "{v}");
 }
 
 /// The same alias attack on OpenSearch: the body's index is authorized, and an alias can't
