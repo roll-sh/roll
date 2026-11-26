@@ -674,11 +674,18 @@ one flavor (Elasticsearch and OpenSearch clusters don't link to each other, as o
   attributes) and authorizes it with its own role mappings and roles, within the ceiling, so a
   user mapped only locally is refused there (one 403 for the request, or the cluster skipped
   with `skip_unavailable: true`). Anyone who can manage the local cluster's security can assert
-  any user, as between OpenSearch clusters: the ceiling is what the link reaches. `_search`,
-  `_count`, `_msearch`, `_field_caps`, `_resolve/index`, scrolls and asynchronous search cross
-  the link; `_clusters` has OpenSearch's `total`, `successful` and `skipped`; a point in time on
-  a remote index is OpenSearch's 400 (`invalid id: [null]`); SQL and PPL stay local, as in
-  OpenSearch. Loopback remotes are searched as OpenSearch searches them.
+  any user, as between OpenSearch clusters: the ceiling is what the link reaches. Whatever the
+  ceiling's patterns, a link never reaches the remote's dot-prefixed, hidden or system indices,
+  hidden or system data streams, or aliases over them; the ceiling takes names and `*` patterns
+  only (no `${…}` templates, no `/regex/`); a link runs no inference on the remote (`semantic`,
+  `sparse_vector`, a reranker: 400); a link's request names no further remote, loopbacks
+  included (the remote's 403). `_search`, `_count`, `_msearch`, `_field_caps`, `_resolve/index`
+  and scrolls cross the link (roll has no `_plugins/_asynchronous_search`); `_clusters` has
+  OpenSearch's `total`, `successful` and `skipped`; a point in time on a remote index is
+  OpenSearch's 400 (`invalid id: [null]`); SQL and PPL stay local, as in OpenSearch. Loopback
+  remotes are searched as OpenSearch searches them, their indices authorized as this cluster's
+  own: a user needs the index permission a local search would. Only OpenSearch users reach a
+  remote: the owner's per-index scope or a key gets the plugin's 403.
 - **ES|QL** (`search-es` `xpack/esql/ccs.rs`): `FROM <alias>:<index>` (`*:logs-*`,
   `local,remote:idx`) answers as one cluster holding all the data would, as Elasticsearch 9.5.5
   answers it. Each cluster runs its **part**: the source, the commands that work row by row

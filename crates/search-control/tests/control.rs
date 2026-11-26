@@ -5037,6 +5037,49 @@ async fn opensearch_flavor_clusters_link_with_the_remotes_own_mappings() {
     assert!(s < 300, "{v}");
     assert_eq!(e.es(&format!("{user}@os-far"), "Zq7-Mountain-River-90", Method::GET, "/docs/_search", None).await.0, 401);
 
+    // A loopback reads this cluster's own indices: authorized as them, in every API that plans
+    // remotes. A user with no index permission is refused; the owner reads.
+    let transport = |c: &'static str| {
+        let e = &e;
+        async move {
+            let (_, n) = e.call(Method::POST, &format!("/v1/search/clusters/{c}/request"), Some(json!({"method": "GET", "path": "/_nodes/_local"}))).await;
+            let n = body(&n);
+            n["nodes"].as_object().unwrap().values().next().unwrap()["transport_address"].as_str().unwrap().to_string()
+        }
+    };
+    let loopback = |alias: &str, address: String| json!({"persistent": {format!("cluster.remote.{alias}.mode"): "proxy", format!("cluster.remote.{alias}.proxy_address"): address}});
+    assert_eq!(es_as(&e, &near, Method::PUT, "/_cluster/settings", Some(loopback("loop", transport("os-near").await))).await.0, 200);
+    assert_eq!(es_as(&e, &near, Method::PUT, "/secret-near/_doc/1?refresh=true", Some(json!({"x": 1}))).await.0, 201);
+    assert!(es_as(&e, &near, Method::PUT, &format!("{api}/internalusers/nobody"), Some(json!({"password": "Zq7-Mountain-River-88"}))).await.0 < 300);
+    for p in ["/loop:*/_search", "/loop:secret*/_count", "/loop:*/_field_caps?fields=x", "/_cat/indices/loop:*"] {
+        let (s, v) = e.es("nobody@os-near", "Zq7-Mountain-River-88", Method::GET, p, None).await;
+        assert_eq!(s, 403, "{p}: {v}");
+    }
+    let r = e.http.post(format!("{}/_msearch", e.es)).basic_auth("nobody@os-near", Some("Zq7-Mountain-River-88")).header("content-type", "application/x-ndjson").body("{\"index\":\"loop:*\"}\n{}\n").send().await.unwrap();
+    let m: Value = r.json().await.unwrap();
+    assert_eq!(m["responses"][0]["error"]["type"], "security_exception", "{m}");
+    let (s, v) = es_as(&e, &near, Method::GET, "/loop:secret-near/_search", None).await;
+    assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(1)), "{v}");
+    // A link's request names no further remote, the remote's loopback included.
+    assert_eq!(es_as(&e, &far, Method::PUT, "/_cluster/settings", Some(loopback("back", transport("os-far").await))).await.0, 200);
+    let (s, v) = es_as(&e, &near, Method::GET, "/r:back:docs/_search", None).await;
+    assert_eq!(s, 403, "{v}");
+    // Hidden and dot-prefixed indices of the remote are out of any ceiling; so is inference.
+    assert_eq!(es_as(&e, &far, Method::PUT, "/docs-hidden", Some(json!({"settings": {"index.hidden": true}}))).await.0, 200);
+    assert_eq!(es_as(&e, &far, Method::PUT, "/.docs-dot", Some(json!({"aliases": {"docs-alias-of-dot": {}}}))).await.0, 200);
+    for p in ["/r:docs-hidden/_search", "/r:docs*/_search?expand_wildcards=all", "/r:docs-alias-of-dot/_search"] {
+        let (s, v) = es_as(&e, &near, Method::GET, p, None).await;
+        assert_eq!(s, 403, "{p}: {v}");
+    }
+    let sparse = json!({"query": {"sparse_vector": {"field": "tenant", "inference_id": ".elser-2-elasticsearch", "query": "a"}}});
+    let (s, v) = es_as(&e, &near, Method::POST, "/r:docs/_search", Some(sparse)).await;
+    assert!(s == 400 && v.to_string().contains("inference isn't available"), "{s} {v}");
+    // The ceiling takes names and `*` patterns only.
+    for names in [json!(["${user.name}"]), json!(["/docs.*/"])] {
+        let (s, v) = e.call(Method::PUT, "/v1/search/clusters/os-near/remotes/bad", Some(json!({"cluster": "os-far", "access": {"search": [{"names": names}]}}))).await;
+        assert_eq!(s, 400, "{v}");
+    }
+
     // Unlinked: the user is gone on the remote.
     assert_eq!(e.call(Method::DELETE, "/v1/search/clusters/os-near/remotes/r", None).await.0, 204);
     assert_eq!(es_as(&e, &far, Method::GET, &format!("{api}/internalusers/{user}"), None).await.0, 404);

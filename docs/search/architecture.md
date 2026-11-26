@@ -594,7 +594,22 @@ tenants don't hold, with a credential per link:
   - Remote forms: `_search`, `_count`, `_msearch`, `_field_caps`, `_resolve/index`, scroll and
     asynchronous search work across clusters. A point in time over a remote index fails (400,
     `invalid id: [null]`). SQL and PPL find no `r:docs` ("no such index"). There's no ES|QL. So
-    the OpenSearch flavor answers the first group across a link and the rest as OpenSearch does.
+    the OpenSearch flavor answers the first group across a link (roll has no
+    `_plugins/_asynchronous_search` at all) and the rest as OpenSearch does.
+- *What a link never reaches (round 2 of the review)*: whatever the ceiling's patterns, the
+  remote keeps a link's user out of its dot-prefixed, hidden and restricted indices, hidden or
+  system data streams and every alias over them (`Effective::off_limits`). The ceiling takes
+  index names and `*` patterns only: no `${…}` templates (they'd be filled from the identity the
+  linking cluster sends) and no `/regex/`. A link's user runs no inference on the remote
+  (`inference::refuse_over_link`): a link reads data, it never spends the remote's models or its
+  providers' keys (OpenSearch-flavor neural search isn't built yet; when it is, it refuses there
+  too). A loopback remote's indices are authorized as the cluster's own (`check_all`), and a
+  link's user can't name a loopback at all: it would read past the ceiling. A principal that
+  isn't an OpenSearch user (the owner's per-index scope, a key) reaches no remote. DLS values
+  substituted from a user's attributes are JSON-escaped.
+- *Fan-out*: any local user can make the local cluster ask every linked remote (at most 20) in
+  one request, as an OpenSearch cluster asks all its remotes. Each remote part runs on its
+  owner and is charged there.
 - *Tests*: one flow in search-control's tests. It covers: the owner's search across two
   OpenSearch-flavor clusters, a user mapped only locally refused on the remote part, a mapped user
   limited to the ceiling, the link user refused as Basic, and unlinking cutting it at once. The

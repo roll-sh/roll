@@ -2226,7 +2226,9 @@ the rest are skipped by the tests' own prerequisites.
   time on a remote index is a 400 (`invalid id: [null]`), and SQL and PPL don't reach remotes,
   as there. What differs: the link authenticates with an internal user roll makes on the remote
   (OpenSearch's clusters trust each other's node certificates instead), and that user's role
-  bounds what the link reaches. Loopback remotes are searched as OpenSearch 3.9 searches them.
+  bounds what the link reaches, which never includes the remote's dot-prefixed, hidden or system
+  indices or data streams (or aliases over them), and runs no inference there. Loopback remotes
+  are searched as OpenSearch 3.9 searches them, their index part authorized as local indices.
 - Aggregations and sorting on keyed flattened sub-fields, `_index_mode` aggregations,
   nested sorts inside `top_hits`, and shard-level aggregation failures as partial results.
 - Compound retrievers (`rrf`, `linear`, `pinned`, `rule` and `rescorer` over them) follow
