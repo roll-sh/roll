@@ -3308,11 +3308,12 @@ async fn a_mirror_copies_requests_to_another_environment() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn matching_log_lines_are_a_metric() {
     let w = world().await;
-    let (svc, _) = image_service(&w, "api", json!({"port": 80, "min_instances": 1, "log_metrics": [{"name": "payments_failed", "pattern": "Payment failed"}]})).await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80, "min_instances": 1, "log_metrics": [{"name": "payments_failed", "pattern": "\"Payment failed\" -fraud OR declined"}]})).await;
     let id = svc["id"].as_str().unwrap().to_string();
     assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"log_metrics": [{"name": "9bad", "pattern": "x"}]}}))).await.0, StatusCode::BAD_REQUEST);
     let out = w.apps.logs.sink(format!("env:{id}/production"), apps_control::logs::Stream::Stdout);
-    for line in ["payment failed: card declined", "PAYMENT FAILED: timeout", "payment ok", "payment failed: fraud"] {
+    // The Logs tab's search: a phrase without a word, or another word.
+    for line in ["payment failed: card declined", "PAYMENT FAILED: timeout", "payment ok", "payment failed: fraud", "refund declined"] {
         out.line(line);
     }
     let live = w.apps.live(&id, "production");

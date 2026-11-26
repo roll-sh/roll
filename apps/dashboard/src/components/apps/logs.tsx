@@ -301,6 +301,7 @@ export function RuntimeLogs({
               Download
             </button>
           )}
+          {!found.error && !found.by && !found.where && found.q && !requests && <AlertOnSearch service={service} q={found.q} />}
           <button type="button" className="text-accent hover:underline" onClick={() => setFound(null)}>
             Back to live
           </button>
@@ -358,6 +359,35 @@ function download(lines: LogLine[], name: string) {
   const a = Object.assign(document.createElement("a"), { href: url, download: name });
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+/** "Alert on this" (Cloud Logging's, Datadog's log alerts): the search as the service's log
+ *  alert (`alerts.log_match`, the same syntax; its count and the others kept), so it fires when
+ *  that many lines in five minutes match. One log alert a service: a new one replaces it. */
+export function AlertOnSearch({ service, q }: { service: string; q: string }) {
+  const [state, setState] = useState<"idle" | "busy" | { count: number } | { error: string }>("idle");
+  const set = async () => {
+    setState("busy");
+    try {
+      const svc = await appsApi.service(service);
+      const alerts = { memory_pct: 90, error_pct: 5, p95_ms: 0, ...svc.run.alerts, log_match: q.trim() };
+      const saved = await appsApi.update(service, { run: { alerts } });
+      setState({ count: saved.run.alerts?.log_count ?? 10 });
+    } catch (e) {
+      setState({ error: e instanceof Error ? e.message : String(e) });
+    }
+  };
+  if (typeof state === "object")
+    return "count" in state ? (
+      <span className="text-fg">Alerts when {state.count} lines in 5 minutes match (Settings → Alerts)</span>
+    ) : (
+      <span className="text-danger">{state.error}</span>
+    );
+  return (
+    <button type="button" className="text-accent hover:underline" disabled={state === "busy"} onClick={() => void set()} title="The service's log alert: this search, its count kept">
+      Alert on this
+    </button>
+  );
 }
 
 /** Matches over the searched window (Railway's Log Explorer, Cloud Logging's histogram): the
