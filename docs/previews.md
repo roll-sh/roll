@@ -2343,7 +2343,15 @@ type Settings = {
     is (Chromatic's accessibility tests: its rules, its language and title), while more than 30 s
     of the run are left so a big Storybook still gets its pictures, 8 KB of it at most; what it
     adds against main's same story counts like a page's (`a11y_added`). Live: the live
-    Storybook's stories carry it. A story gone from Storybook goes
+    Storybook's stories carry it. With `github.browsers`, the change's first 5 stories (as the run
+    ordered them: those it touched first) are taken in each of those browsers too, once
+    Chromium's run knows which (Chromatic's cross-browser stories): `story:<id>@<browser>`
+    ("button / primary · Firefox" on the sheet), each loaded alone and clipped to its root, in
+    the service's network and locked down as the other browsers' run is, and compared with
+    main's same story in that browser when main's run took it (main takes its first 5 in the
+    index's order, so a story the change touched further down is shown without a comparison).
+    Best effort: Chromium's stories stand without them. Live: the live Storybook's first story
+    in Firefox and in WebKit at a phone's size. A story gone from Storybook goes
     from the preview. The index is the preview's code's: an id Storybook wouldn't make
     (`components-button--primary`) is dropped. A Storybook on another service is kept with that
     service's pages while it runs what it ran (TurboSnap), and taken at once when the rule is
@@ -2877,32 +2885,32 @@ Ranked by what a person notices first. Done so far:
 Ranked again after a seventh product review (2026-11-25, evening), against Vercel's comments,
 Chromatic's cross-browser and accessibility tests, Render's suspended services, Neon's snapshots.
 
-1. **A reply and a resolve from the page in one click**: the button's own notes open the whole
-   dashboard to reply to or resolve one; the small window #1016 opens for a new note, for those
-   too (Vercel's comment threads answer in place).
-2. **Stories in the other browsers** (Chromatic's cross-browser stories): `github.browsers` takes
-   pages in Firefox and WebKit, stories only in Chromium; take the change's first stories in each
-   browser asked for, compared with main's same story in that browser.
-3. **Restore points for Redis, search and streams**: NoSQL's landed (#1028, its point-in-time
+1. **Stories in the other browsers, in review** (Chromatic's cross-browser stories): the change's
+   first 5 stories in each browser `github.browsers` asks for. Next for it: a baseline on demand,
+   main's preview taking the same stories (in Chromium past its 40, and in each browser) when a
+   change has them and main's run didn't.
+2. **Restore points for Redis, search and streams**: NoSQL's landed (#1028, its point-in-time
    restore). A point is kept only where the product puts a branch back in place, keeping its id
    (their delete guards check it); each needs its control plane's reset `from`, as pg-control's:
    ask the Redis, search and streams owners.
-4. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+3. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-5. **A running settled preview's usage read alone too**: #1017 does it for sleeping ones; a running
+4. **A running settled preview's usage read alone too**: #1017 does it for sleeping ones; a running
    one still converges whole every 5 minutes between its health and route reads.
-6. **roll apps lookups that miss cost a list each**: `RollApps::find` lists every roll apps
+5. **roll apps lookups that miss cost a list each**: `RollApps::find` lists every roll apps
    service when a preview's service isn't one (a `roll.toml` service not started on this node),
    every usage round; remember the miss for a while, never across a deploy that makes the
    environment.
-7. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
+6. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
    (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
-8. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+7. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-9. **Watch: pg-control's recovery to a time seconds old** (unowned).
+8. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-25, night: a note's reply and resolve in roll's small window (#1052); branches' handed-out credentials sealed at rest (#1058).
 
 Landed 2026-11-25, afternoon and evening:
 - browser runs and jobs in the cost (#1010), and roll apps services' own bill, builds included, with
