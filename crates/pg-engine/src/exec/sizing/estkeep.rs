@@ -19,9 +19,13 @@
 use super::*;
 use std::sync::atomic::Ordering;
 
-/// A full record's and a change record's first byte.
+/// A full record's and a change record's first byte: a change record holds what changed
+/// whole (`CHANGES`, a build before the compact form's: still read), or only the fields
+/// that differ from the record before (`COMPACT`). A build before `COMPACT` takes a table
+/// with such a record as one without (estimated afresh).
 const FULL: u8 = 0xe1;
 const CHANGES: u8 = 0xe2;
+const COMPACT: u8 = 0xe3;
 
 /// A record's bytes, written in order (little-endian).
 pub(crate) struct Enc(pub Vec<u8>);
@@ -52,6 +56,30 @@ impl Enc {
     fn tid(&mut self, t: Tid) {
         self.u32(t.0);
         self.u16(t.1);
+    }
+    pub fn varint(&mut self, v: u64) {
+        crate::storage::sst::put_varint(&mut self.0, v);
+    }
+    /// A signed difference (zigzag).
+    pub fn diff(&mut self, old: u64, new: u64) {
+        let d = new.wrapping_sub(old) as i64;
+        self.varint(((d << 1) ^ (d >> 63)) as u64);
+    }
+    /// `new` as the decoder makes it from `old`: `old` plus a whole number when that sum is
+    /// exactly `new` (a count's step, an entry's bytes added), else its bits.
+    pub fn fdiff(&mut self, old: f64, new: f64) {
+        let d = (new - old).round();
+        if d.abs() < (1u64 << 52) as f64 && (old + d).to_bits() == new.to_bits() {
+            let d = d as i64;
+            self.varint((((d << 1) ^ (d >> 63)) as u64) << 1);
+        } else {
+            self.varint(1);
+            self.f64(new);
+        }
+    }
+    pub fn vbytes(&mut self, b: &[u8]) {
+        self.varint(b.len() as u64);
+        self.0.extend_from_slice(b);
     }
 }
 
@@ -91,6 +119,34 @@ impl Dec<'_> {
     fn tid(&mut self) -> Option<Tid> {
         Some((self.u32()?, self.u16()?))
     }
+    pub fn varint(&mut self) -> Option<u64> {
+        let mut p = 0;
+        let v = crate::storage::sst::get_varint(self.0, &mut p).ok()?;
+        self.0 = &self.0[p..];
+        Some(v)
+    }
+    /// `Enc::diff`'s value applied to `old`.
+    pub fn diff(&mut self, old: u64) -> Option<u64> {
+        let z = self.varint()?;
+        let d = ((z >> 1) as i64) ^ -((z & 1) as i64);
+        Some(old.wrapping_add(d as u64))
+    }
+    /// `Enc::fdiff`'s value applied to `old`.
+    pub fn fdiff(&mut self, old: f64) -> Option<f64> {
+        let z = self.varint()?;
+        if z & 1 != 0 {
+            return self.f64();
+        }
+        let z = z >> 1;
+        let d = ((z >> 1) as i64) ^ -((z & 1) as i64);
+        Some(old + d as f64)
+    }
+    pub fn vbytes(&mut self) -> Option<Vec<u8>> {
+        let n = self.varint()? as usize;
+        let (b, rest) = (self.0.get(..n)?, &self.0[n..]);
+        self.0 = rest;
+        Some(b.to_vec())
+    }
 }
 
 /// What changed in an `EstHeap` since it was last made durable: the places set since, in
@@ -101,6 +157,62 @@ pub(super) struct Log {
     pub moved: Vec<(u64, Tid)>,
     pub runs_saved: usize,
     pub reset: bool,
+}
+
+/// An `EstHeap`'s fields as last made durable (`take`, `restore`): a change record holds
+/// those that differ. `nums`: `Sent::nums`'s order.
+#[derive(Clone, Default)]
+pub(super) struct Sent {
+    nums: [u64; 9],
+    fill_key: Option<Vec<u8>>,
+    tail: Option<(u32, usize, u16, Vec<u8>)>,
+    last_run: Option<(Vec<u8>, u32, u16)>,
+}
+
+impl Sent {
+    fn of(h: &EstHeap) -> Sent {
+        Sent {
+            nums: Self::nums(h),
+            fill_key: h.fill_key.clone(),
+            tail: h.tail.as_ref().map(|t| (t.page, t.room, t.items, t.key.clone())),
+            last_run: h.runs.last().cloned(),
+        }
+    }
+
+    /// pages, fill, room, items, reusable, fresh, order, writes, flags.
+    fn nums(h: &EstHeap) -> [u64; 9] {
+        [
+            h.pages as u64,
+            h.fill as u64,
+            h.room as u64,
+            h.items as u64,
+            h.reusable as u64,
+            h.fresh as u64,
+            order_byte(h.order) as u64,
+            h.writes,
+            (h.fill_bulk as u8 | (h.in_place as u8) << 1 | (h.skip_fsm as u8) << 2) as u64,
+        ]
+    }
+}
+
+/// `Sent::nums` by how often an UPDATE changes them (a bit each in a change record).
+const NUM_ORDER: [usize; 9] = [7, 2, 3, 1, 0, 4, 5, 6, 8];
+
+fn order_byte(o: EstOrder) -> u8 {
+    match o {
+        EstOrder::InOrder => 0,
+        EstOrder::Placed => 1,
+        EstOrder::Unplaced => 2,
+    }
+}
+
+fn order_of(b: u8) -> Option<EstOrder> {
+    Some(match b {
+        0 => EstOrder::InOrder,
+        1 => EstOrder::Placed,
+        2 => EstOrder::Unplaced,
+        _ => return None,
+    })
 }
 
 /// What the store holds of a table's estimate: its change records after the full one
@@ -167,11 +279,7 @@ fn scalars(e: &mut Enc, h: &EstHeap) {
     e.u16(h.items);
     e.u64(h.reusable as u64);
     e.u32(h.fresh);
-    e.u8(match h.order {
-        EstOrder::InOrder => 0,
-        EstOrder::Placed => 1,
-        EstOrder::Unplaced => 2,
-    });
+    e.u8(order_byte(h.order));
     e.u64(h.writes);
     e.u8(h.fill_bulk as u8 | (h.in_place as u8) << 1 | (h.skip_fsm as u8) << 2);
     match &h.fill_key {
@@ -200,12 +308,7 @@ fn decode_scalars(d: &mut Dec, h: &mut EstHeap) -> Option<()> {
     h.items = d.u16()?;
     h.reusable = d.u64()? as usize;
     h.fresh = d.u32()?;
-    h.order = match d.u8()? {
-        0 => EstOrder::InOrder,
-        1 => EstOrder::Placed,
-        2 => EstOrder::Unplaced,
-        _ => return None,
-    };
+    h.order = order_of(d.u8()?)?;
     h.writes = d.u64()?;
     let f = d.u8()?;
     (h.fill_bulk, h.in_place, h.skip_fsm) = (f & 1 != 0, f & 2 != 0, f & 4 != 0);
@@ -220,23 +323,138 @@ fn decode_scalars(d: &mut Dec, h: &mut EstHeap) -> Option<()> {
     Some(())
 }
 
-/// The heap's changes since it was last made durable.
-fn encode_heap_changes(e: &mut Enc, h: &EstHeap) {
-    scalars(e, h);
-    e.u8(h.log.reset as u8);
-    // (The last run kept is written again: its key may have come after it, `stored_run_key`.)
-    let from = if h.log.reset { 0 } else { h.log.runs_saved.saturating_sub(1).min(h.runs.len()) };
-    e.u32(from as u32);
-    e.u32((h.runs.len() - from) as u32);
-    for r in &h.runs[from..] {
-        e.bytes(&r.0);
-        e.tid((r.1, r.2));
+/// The heap's changes since it was last made durable (`sent`): a bit each for the fields
+/// that differ, the places dropped, the runs and the places set, then those (numbers as
+/// differences, the rest as they are). An UPDATE past the model changes a few numbers and
+/// places its new version: ~15 bytes where its whole fields took ~140.
+fn encode_heap_changes(e: &mut Enc, h: &EstHeap, sent: &mut Sent) {
+    let now = Sent::nums(h);
+    let mut mask = 0u64;
+    for (bit, &i) in NUM_ORDER.iter().enumerate() {
+        mask |= ((now[i] != sent.nums[i]) as u64) << bit;
     }
-    e.u32(h.log.moved.len() as u32);
-    for (k, t) in &h.log.moved {
-        e.u64(*k);
-        e.tid(*t);
+    let tail_now = h.tail.as_ref().map(|t| (t.page, t.room, t.items, &t.key[..]));
+    let tail_was = sent.tail.as_ref().map(|t| (t.0, t.1, t.2, &t.3[..]));
+    // (The last run kept may have changed: its key may have come after it, `stored_run_key`.)
+    let runs = h.log.reset || h.runs.len() != h.log.runs_saved || h.runs.last() != sent.last_run.as_ref();
+    mask |= ((h.fill_key != sent.fill_key) as u64) << 9
+        | ((tail_now != tail_was) as u64) << 10
+        | (h.log.reset as u64) << 11
+        | (runs as u64) << 12
+        | (!h.log.moved.is_empty() as u64) << 13;
+    e.varint(mask);
+    for (bit, &i) in NUM_ORDER.iter().enumerate() {
+        if mask & 1 << bit != 0 {
+            e.diff(sent.nums[i], now[i]);
+        }
     }
+    if mask & 1 << 9 != 0 {
+        match &h.fill_key {
+            Some(k) => {
+                e.varint(k.len() as u64 + 1);
+                e.0.extend_from_slice(k);
+            }
+            None => e.varint(0),
+        }
+        sent.fill_key = h.fill_key.clone();
+    }
+    if mask & 1 << 10 != 0 {
+        match &h.tail {
+            Some(t) => {
+                e.u8(1);
+                e.varint(t.page as u64);
+                e.varint(t.room as u64);
+                e.varint(t.items as u64);
+                e.vbytes(&t.key);
+            }
+            None => e.u8(0),
+        }
+        sent.tail = h.tail.as_ref().map(|t| (t.page, t.room, t.items, t.key.clone()));
+    }
+    if runs {
+        let from = if h.log.reset { 0 } else { h.log.runs_saved.saturating_sub(1).min(h.runs.len()) };
+        e.varint(from as u64);
+        e.varint((h.runs.len() - from) as u64);
+        for r in &h.runs[from..] {
+            e.vbytes(&r.0);
+            e.varint(r.1 as u64);
+            e.varint(r.2 as u64);
+        }
+        sent.last_run = h.runs.last().cloned();
+    }
+    if !h.log.moved.is_empty() {
+        e.varint(h.log.moved.len() as u64);
+        for (k, t) in &h.log.moved {
+            e.u64(*k);
+            e.varint(t.0 as u64);
+            e.varint(t.1 as u64);
+        }
+    }
+    sent.nums = now;
+}
+
+/// `encode_heap_changes`' record applied to `h`.
+fn decode_heap_changes(d: &mut Dec, h: &mut EstHeap) -> Option<()> {
+    let mut n = Sent::nums(h);
+    let mask = d.varint()?;
+    for (bit, &i) in NUM_ORDER.iter().enumerate() {
+        if mask & 1 << bit != 0 {
+            n[i] = d.diff(n[i])?;
+        }
+    }
+    h.pages = u32::try_from(n[0]).ok()?;
+    h.fill = u32::try_from(n[1]).ok()?;
+    h.room = n[2] as usize;
+    h.items = u16::try_from(n[3]).ok()?;
+    h.reusable = n[4] as usize;
+    h.fresh = u32::try_from(n[5]).ok()?;
+    h.order = order_of(u8::try_from(n[6]).ok()?)?;
+    h.writes = n[7];
+    (h.fill_bulk, h.in_place, h.skip_fsm) = (n[8] & 1 != 0, n[8] & 2 != 0, n[8] & 4 != 0);
+    if mask & 1 << 9 != 0 {
+        h.fill_key = match d.varint()? {
+            0 => None,
+            k => {
+                let k = k as usize - 1;
+                let (b, rest) = (d.0.get(..k)?, &d.0[k..]);
+                d.0 = rest;
+                Some(b.to_vec())
+            }
+        };
+    }
+    if mask & 1 << 10 != 0 {
+        h.tail = match d.u8()? {
+            0 => None,
+            _ => Some(Tail {
+                page: u32::try_from(d.varint()?).ok()?,
+                room: d.varint()? as usize,
+                items: u16::try_from(d.varint()?).ok()?,
+                key: d.vbytes()?,
+            }),
+        };
+    }
+    if mask & 1 << 11 != 0 {
+        h.runs.clear();
+        h.moved.clear();
+    }
+    if mask & 1 << 12 != 0 {
+        let from = d.varint()? as usize;
+        if from > h.runs.len() {
+            return None;
+        }
+        h.runs.truncate(from);
+        for _ in 0..d.varint()? {
+            let k = d.vbytes()?;
+            h.runs.push((k, u32::try_from(d.varint()?).ok()?, u16::try_from(d.varint()?).ok()?));
+        }
+    }
+    if mask & 1 << 13 != 0 {
+        for _ in 0..d.varint()? {
+            let k = d.u64()?;
+            h.moved.insert(k, (u32::try_from(d.varint()?).ok()?, u16::try_from(d.varint()?).ok()?));
+        }
+    }
+    Some(())
 }
 
 fn decode_heap(d: &mut Dec, full: bool, h: &mut EstHeap) -> Option<()> {
@@ -326,9 +544,10 @@ fn take_shard(db: &Database, cat: &Catalog, rf: &mut RelFiles, writes: &mut Vec<
         if t.temporary || t.unlogged {
             e.dirty = false;
             e.log = Log::default();
+            e.sent = None;
             for i in &ixs {
                 if let Some(b) = est_btrees.get_mut(i) {
-                    b.encode(&mut Enc(Vec::new()), false);
+                    b.forget_changes();
                 }
             }
             continue;
@@ -341,29 +560,41 @@ fn take_shard(db: &Database, cat: &Catalog, rf: &mut RelFiles, writes: &mut Vec<
         // again. A fold after a fixed count of them wrote a big table's whole estimate, a
         // megabyte and more with its places, every 256 small commits: to the log, the
         // memtable and every compaction after it.)
-        let full = all || saved.full_next || saved.seq.is_none() || saved.changes_bytes > saved.full_bytes.max(1 << 16);
-        let mut enc = Enc(Vec::with_capacity(256));
-        enc.u8(if full { FULL } else { CHANGES });
-        enc.u32(node);
-        enc.u32(e.limit);
+        let full = all
+            || saved.full_next
+            || saved.seq.is_none()
+            || e.sent.is_none()
+            || saved.changes_bytes > saved.full_bytes.max(1 << 16);
+        let parts: Vec<u32> = ixs.iter().copied().filter(|i| est_btrees.get(i).is_some_and(|b| full || b.changed())).collect();
+        let mut enc = Enc(Vec::with_capacity(if full { 256 } else { 64 }));
         if full {
+            enc.u8(FULL);
+            enc.u32(node);
+            enc.u32(e.limit);
             encode_heap_full(&mut enc, e);
+            enc.u32(parts.len() as u32);
+            e.sent = Some(Sent::of(e));
         } else {
-            encode_heap_changes(&mut enc, e);
+            enc.u8(COMPACT);
+            enc.varint(node as u64);
+            enc.varint(e.limit as u64);
+            let mut sent = e.sent.take().expect("checked");
+            encode_heap_changes(&mut enc, e, &mut sent);
+            e.sent = Some(sent);
+            enc.varint(parts.len() as u64);
         }
-        let mut n = 0u32;
-        let at = enc.0.len();
-        enc.u32(0);
-        for i in &ixs {
-            if let Some(b) = est_btrees.get_mut(i)
-                && (full || b.changed())
-            {
-                enc.u32(*i);
-                b.encode(&mut enc, full);
-                n += 1;
+        for i in parts {
+            let b = est_btrees.get_mut(&i).expect("listed");
+            if full {
+                enc.u32(i);
+            } else {
+                enc.varint(i as u64);
             }
+            b.encode(&mut enc, full);
         }
-        enc.0[at..at + 4].copy_from_slice(&n.to_le_bytes());
+        // (Its bytes alone: `Bytes::from` keeps a vector's spare capacity, up to half of a
+        // full record's megabytes, for as long as the memtable holds it.)
+        enc.0.shrink_to_fit();
         let len = enc.0.len();
         if full {
             drop_records(db, oid, saved.seq, writes);
@@ -436,15 +667,21 @@ pub(super) fn restore(t: &Table, ctx: &ExecCtx) -> Option<(EstHeap, Vec<(u32, bt
     let mut btrees: HashMap<u32, btest::BtEst> = HashMap::new();
     let mut saved = Saved { seq: Some(0), full_bytes: v.len(), changes_bytes: 0, full_next: false };
     let mut apply = |v: &[u8], full: bool, btrees: &mut HashMap<u32, btest::BtEst>| -> Option<()> {
+        let compact = v[0] == COMPACT;
         let mut d = Dec(&v[1..]);
-        let (n, l) = (d.u32()?, d.u32()?);
+        let (n, l) = if compact { (u32::try_from(d.varint()?).ok()?, u32::try_from(d.varint()?).ok()?) } else { (d.u32()?, d.u32()?) };
         if n != node || max_versions() > l as usize {
             return None;
         }
         h.limit = l;
-        decode_heap(&mut d, full, &mut h)?;
-        for _ in 0..d.u32()? {
-            let i = d.u32()?;
+        if compact {
+            decode_heap_changes(&mut d, &mut h)?;
+        } else {
+            decode_heap(&mut d, full, &mut h)?;
+        }
+        let parts = if compact { d.varint()? } else { d.u32()? as u64 };
+        for _ in 0..parts {
+            let i = if compact { u32::try_from(d.varint()?).ok()? } else { d.u32()? };
             let b = btest::BtEst::decode(&mut d, btrees.remove(&i))?;
             btrees.insert(i, b);
         }
@@ -454,7 +691,7 @@ pub(super) fn restore(t: &Table, ctx: &ExecCtx) -> Option<(EstHeap, Vec<(u32, bt
     for r in it {
         let (k, v) = r.ok()?;
         let seq = u64::from_be_bytes(k.get(start.len()..)?.try_into().ok()?);
-        if v.first() != Some(&CHANGES) || seq != saved.seq? + 1 {
+        if !matches!(v.first(), Some(&CHANGES | &COMPACT)) || seq != saved.seq? + 1 {
             return None;
         }
         apply(&v, false, &mut btrees)?;
@@ -462,6 +699,100 @@ pub(super) fn restore(t: &Table, ctx: &ExecCtx) -> Option<(EstHeap, Vec<(u32, bt
         saved.changes_bytes += v.len();
     }
     h.log = Log { moved: Vec::new(), runs_saved: h.runs.len(), reset: false };
+    h.sent = Some(Sent::of(&h));
     let btrees = btrees.into_iter().filter(|(i, _)| ixs.contains(i)).collect();
     Some((h, btrees, saved))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What a record keeps of an estimate, the places in key order.
+    fn kept(h: &EstHeap) -> (Vec<u8>, Vec<(u64, Tid)>) {
+        let mut e = Enc(Vec::new());
+        scalars(&mut e, h);
+        for r in &h.runs {
+            e.bytes(&r.0);
+            e.tid((r.1, r.2));
+        }
+        let mut moved: Vec<(u64, Tid)> = h.moved.iter().map(|(k, t)| (*k, *t)).collect();
+        moved.sort_unstable();
+        (e.0, moved)
+    }
+
+    /// Change records of an estimate's random changes (pages filled and added, versions
+    /// placed, runs begun and their last key moved, the fill key and tail page set and
+    /// dropped, the places dropped), each applied in turn to the full record, give it back.
+    #[test]
+    fn change_records_rebuild_the_estimate() {
+        let mut h = EstHeap {
+            pages: 100,
+            fill: 99,
+            room: 4000,
+            items: 20,
+            order: EstOrder::Placed,
+            writes: 7,
+            runs: vec![(b"key 0".to_vec(), 0, 1)],
+            tail: Some(Tail { page: 40, room: 112, items: 62, key: b"tail".to_vec() }),
+            ..Default::default()
+        };
+        let mut full = Enc(Vec::new());
+        encode_heap_full(&mut full, &h);
+        let mut copy = EstHeap::default();
+        decode_heap(&mut Dec(&full.0), true, &mut copy).expect("a full record");
+        h.sent = Some(Sent::of(&h));
+        h.log = Log { moved: Vec::new(), runs_saved: h.runs.len(), reset: false };
+        let (mut x, mut bytes) = (0x2545_F491_4F6C_DD1Du64, 0);
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for round in 0..300 {
+            for _ in 0..next() % 4 {
+                h.writes += 1;
+                if h.room < 200 {
+                    (h.pages, h.fill, h.room, h.items) = (h.pages + 1, h.pages, 8000, 0);
+                } else {
+                    (h.room, h.items) = (h.room - 132, h.items + 1);
+                }
+                let k = next();
+                h.moved.insert(k, (h.fill, h.items));
+                h.log.moved.push((k, (h.fill, h.items)));
+            }
+            match next() % 16 {
+                0 => h.runs.push((format!("key {round}").into_bytes(), h.fill, 1)),
+                1 => h.runs.last_mut().expect("a run").0.push(b'x'),
+                2 => h.fill_key = Some(format!("fill {round}").into_bytes()),
+                3 => h.fill_key = None,
+                4 => h.tail = None,
+                5 => h.tail = Some(Tail { page: h.fill, room: h.room, items: h.items, key: b"t".to_vec() }),
+                6 => h.reusable += 300,
+                7 => {
+                    h.runs.clear();
+                    h.moved.clear();
+                    h.log.moved.clear();
+                    h.log.reset = true;
+                    h.runs.push((b"key".to_vec(), 0, 1));
+                    h.order = EstOrder::Unplaced;
+                }
+                8 => h.in_place = !h.in_place,
+                _ => {}
+            }
+            let mut e = Enc(Vec::new());
+            let mut sent = h.sent.take().expect("sent");
+            encode_heap_changes(&mut e, &h, &mut sent);
+            h.sent = Some(sent);
+            bytes += e.0.len();
+            let mut d = Dec(&e.0);
+            decode_heap_changes(&mut d, &mut copy).expect("a change record");
+            assert!(d.0.is_empty(), "round {round}: {} bytes left", d.0.len());
+            h.log = Log { moved: Vec::new(), runs_saved: h.runs.len(), reset: false };
+            assert!(kept(&h) == kept(&copy), "round {round}");
+        }
+        // (~1.5 places a record, ~12 bytes each: the rest is a few bytes.)
+        assert!(bytes < 300 * 40, "{bytes}");
+    }
 }

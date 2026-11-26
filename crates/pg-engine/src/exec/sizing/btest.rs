@@ -62,14 +62,30 @@ pub struct BtEst {
     hint: usize,
     /// The file's blocks (it never shrinks).
     blocks: u32,
-    /// What changed since the summary was last made durable (`estkeep`): the leaves by slot
-    /// (`dirty_bits` marks those listed), or all of it (`all_dirty`).
-    dirty: Vec<u32>,
+    /// What changed since the summary was last made durable (`estkeep`): the leaves by slot,
+    /// each with what it held then (None: a leaf made since; `dirty_bits` marks those
+    /// listed), or all of it (`all_dirty`).
+    dirty: Vec<(u32, Option<Leaf>)>,
     dirty_bits: Vec<u64>,
     all_dirty: bool,
+    /// The header as last made durable, and the leaves there were then (None: never made
+    /// durable, the next record is a full one): a change record holds what differs.
+    sent: Option<Head>,
+    sent_len: usize,
     /// Each leaf slot's place in `lows` (u32::MAX: no longer a leaf), for the changed leaves'
     /// record; empty when the leaves' order changed since it was made (`reordered`).
     places: Vec<u32>,
+}
+
+/// A summary's fields besides its leaves (`BtEst::head`).
+#[derive(Clone, Copy, Debug)]
+struct Head {
+    dedup: bool,
+    base: f64,
+    pivot: f64,
+    /// inner_built, inner_base, free, stuck, hint.
+    n: [usize; 5],
+    blocks: u32,
 }
 
 /// What a build hands the summary for each leaf it lays out.
@@ -143,6 +159,8 @@ impl EstBuilder {
             dirty: Vec::new(),
             dirty_bits: Vec::new(),
             all_dirty: true,
+            sent: None,
+            sent_len: 0,
             places: Vec::new(),
         };
         e.inner_base = e.inner_for(n);
@@ -188,6 +206,8 @@ impl BtEst {
             dirty: Vec::new(),
             dirty_bits: Vec::new(),
             all_dirty: true,
+            sent: None,
+            sent_len: 0,
             places: Vec::new(),
         };
         e.inner_base = e.inner_for(n);
@@ -444,10 +464,11 @@ impl BtEst {
     }
 }
 
-/// The summary as `estkeep` keeps it: in full, or the leaves changed since it was last
-/// made durable.
+/// The summary as `estkeep` keeps it: in full; its changed leaves as they are (a build
+/// before the compact form's); or what changed since it was last made durable (`COMPACT`).
 const FULL: u8 = 1;
 const CHANGED: u8 = 2;
+const COMPACT: u8 = 3;
 
 impl BtEst {
     /// Leaf slot `slot` changed (`estkeep`).
@@ -461,8 +482,18 @@ impl BtEst {
         }
         if self.dirty_bits[w] & b == 0 {
             self.dirty_bits[w] |= b;
-            self.dirty.push(slot as u32);
+            let old = (slot < self.sent_len).then(|| self.store[slot].clone());
+            self.dirty.push((slot as u32, old));
         }
+    }
+
+    /// Nothing changed made durable (a temporary or unlogged table's): its next record is a
+    /// full one.
+    pub(super) fn forget_changes(&mut self) {
+        self.dirty.clear();
+        self.dirty_bits.clear();
+        self.all_dirty = false;
+        self.sent = None;
     }
 
     /// The leaves' order changed (`places` is made again when next needed).
@@ -475,67 +506,203 @@ impl BtEst {
         self.all_dirty || !self.dirty.is_empty()
     }
 
-    /// The summary, in full (`full`, or when all of it changed) or its changed leaves, for
-    /// `estkeep`; nothing is marked changed after it.
-    pub(super) fn encode(&mut self, e: &mut Enc, full: bool) {
-        let full = full || self.all_dirty;
-        e.u8(if full { FULL } else { CHANGED });
-        e.u8(self.dedup as u8);
-        e.f64(self.base);
-        e.f64(self.pivot);
-        for n in [self.inner_built, self.inner_base, self.free, self.stuck, self.hint] {
-            e.u64(n as u64);
+    fn head(&self) -> Head {
+        Head {
+            dedup: self.dedup,
+            base: self.base,
+            pivot: self.pivot,
+            n: [self.inner_built, self.inner_base, self.free, self.stuck, self.hint],
+            blocks: self.blocks,
         }
-        e.u32(self.blocks);
-        let leaf = |e: &mut Enc, l: &Leaf| {
-            e.u128(l.max);
-            for x in [l.used, l.tuples, l.tids, l.keys] {
-                e.f64(x);
-            }
-        };
-        if full {
-            e.u32(self.lows.len() as u32);
-            for (lo, slot) in self.lows.iter().zip(&self.slots) {
-                e.u128(lo.0);
-                e.u64(lo.1);
-                e.u32(*slot);
-            }
-            e.u32(self.store.len() as u32);
-            for l in &self.store {
-                leaf(e, l);
-            }
-        } else {
-            // (Each changed leaf with its low key: a new one, split off, goes in its place.)
-            // (The slots' places are made once for the commits between two splits, not at
-            // each: a commit changes a leaf or two of thousands.)
-            if self.places.len() != self.store.len() {
-                self.places.clear();
-                self.places.resize(self.store.len(), u32::MAX);
-                for (i, s) in self.slots.iter().enumerate() {
-                    self.places[*s as usize] = i as u32;
+    }
+
+    fn set_head(&mut self, h: Head) {
+        (self.dedup, self.base, self.pivot, self.blocks) = (h.dedup, h.base, h.pivot, h.blocks);
+        [self.inner_built, self.inner_base, self.free, self.stuck, self.hint] = h.n;
+    }
+
+    /// The summary, in full (`full`, when all of it changed, or when it was never made
+    /// durable) or what changed since it last was, for `estkeep`; nothing is marked changed
+    /// after it.
+    pub(super) fn encode(&mut self, e: &mut Enc, full: bool) {
+        let head = self.head();
+        match self.sent {
+            Some(sent) if !full && !self.all_dirty => self.encode_changes(e, &sent, &head),
+            _ => {
+                e.u8(FULL);
+                e.u8(self.dedup as u8);
+                e.f64(self.base);
+                e.f64(self.pivot);
+                for n in head.n {
+                    e.u64(n as u64);
                 }
-            }
-            let at = &self.places;
-            self.dirty.sort_unstable();
-            let live: Vec<(u32, u32)> = self.dirty.iter().filter_map(|&s| Some((s, *at.get(s as usize)?)).filter(|x| x.1 != u32::MAX)).collect();
-            e.u32(live.len() as u32);
-            for (slot, i) in live {
-                let lo = self.lows[i as usize];
-                e.u32(slot);
-                e.u128(lo.0);
-                e.u64(lo.1);
-                leaf(e, &self.store[slot as usize]);
+                e.u32(self.blocks);
+                e.u32(self.lows.len() as u32);
+                for (lo, slot) in self.lows.iter().zip(&self.slots) {
+                    e.u128(lo.0);
+                    e.u64(lo.1);
+                    e.u32(*slot);
+                }
+                e.u32(self.store.len() as u32);
+                for l in &self.store {
+                    e.u128(l.max);
+                    for x in [l.used, l.tuples, l.tids, l.keys] {
+                        e.f64(x);
+                    }
+                }
             }
         }
         self.dirty.clear();
         self.dirty_bits.clear();
         self.all_dirty = false;
+        self.sent = Some(head);
+        self.sent_len = self.store.len();
     }
 
-    /// A summary `encode` wrote: in full, or the leaves that changed applied to `base` (None:
-    /// a malformed record, or changes without a summary to apply them to).
+    /// The fields of the header that differ from `sent` (a bit each, the hint first: an
+    /// insert moves it), then each changed leaf: its slot, and of a leaf there was then the
+    /// values that differ from what it held (`Enc::fdiff`: an entry's bytes and counts added
+    /// are a few whole numbers), of a new one (split off) its low key and values.
+    fn encode_changes(&mut self, e: &mut Enc, sent: &Head, head: &Head) {
+        e.u8(COMPACT);
+        let order = [4, 3, 2, 1, 0];
+        let mut mask = 0u64;
+        for (bit, &i) in order.iter().enumerate() {
+            mask |= ((sent.n[i] != head.n[i]) as u64) << bit;
+        }
+        mask |= ((sent.blocks != head.blocks) as u64) << 5;
+        mask |= ((sent.dedup != head.dedup) as u64) << 6;
+        mask |= ((sent.base.to_bits() != head.base.to_bits()) as u64) << 7;
+        mask |= ((sent.pivot.to_bits() != head.pivot.to_bits()) as u64) << 8;
+        e.varint(mask);
+        for (bit, &i) in order.iter().enumerate() {
+            if mask & 1 << bit != 0 {
+                e.diff(sent.n[i] as u64, head.n[i] as u64);
+            }
+        }
+        if mask & 1 << 5 != 0 {
+            e.diff(sent.blocks as u64, head.blocks as u64);
+        }
+        if mask & 1 << 6 != 0 {
+            e.u8(head.dedup as u8);
+        }
+        if mask & 1 << 7 != 0 {
+            e.f64(head.base);
+        }
+        if mask & 1 << 8 != 0 {
+            e.f64(head.pivot);
+        }
+        self.dirty.sort_unstable_by_key(|d| d.0);
+        // (A new leaf's low key from its place: the places are made once for the commits
+        // between two splits, not at each.)
+        if self.dirty.iter().any(|d| d.1.is_none()) && self.places.len() != self.store.len() {
+            self.places.clear();
+            self.places.resize(self.store.len(), u32::MAX);
+            for (i, s) in self.slots.iter().enumerate() {
+                self.places[*s as usize] = i as u32;
+            }
+        }
+        let live = |p: &[u32], d: &(u32, Option<Leaf>)| d.1.is_some() || p.get(d.0 as usize).is_some_and(|&i| i != u32::MAX);
+        e.varint(self.dirty.iter().filter(|d| live(&self.places, d)).count() as u64);
+        for d in self.dirty.iter().filter(|d| live(&self.places, d)) {
+            let l = &self.store[d.0 as usize];
+            e.varint(d.0 as u64);
+            match &d.1 {
+                None => {
+                    let lo = self.lows[self.places[d.0 as usize] as usize];
+                    e.u128(lo.0);
+                    e.varint(lo.1);
+                    e.u128(l.max);
+                    for x in [l.used, l.tuples, l.tids, l.keys] {
+                        e.fdiff(0.0, x);
+                    }
+                }
+                Some(o) => {
+                    let (was, now) = ([o.used, o.tuples, o.tids, o.keys], [l.used, l.tuples, l.tids, l.keys]);
+                    let mut m = ((o.max != l.max) as u8) << 4;
+                    for i in 0..4 {
+                        m |= ((was[i].to_bits() != now[i].to_bits()) as u8) << i;
+                    }
+                    e.u8(m);
+                    if m & 1 << 4 != 0 {
+                        e.u128(l.max);
+                    }
+                    for i in 0..4 {
+                        if m & 1 << i != 0 {
+                            e.fdiff(was[i], now[i]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A summary `encode` wrote: in full, or its changes applied to `base` (None: a
+    /// malformed record, or changes without a summary to apply them to).
     pub(super) fn decode(d: &mut Dec, base: Option<BtEst>) -> Option<BtEst> {
         let tag = d.u8()?;
+        let mut e = if tag == COMPACT { Self::decode_changes(d, base?)? } else { Self::decode_whole(d, tag, base)? };
+        e.sent = Some(e.head());
+        e.sent_len = e.store.len();
+        Some(e)
+    }
+
+    /// A new leaf in slot `slot` (the next one) under low key `lo`.
+    fn add_leaf(&mut self, slot: usize, lo: (u128, u64), l: Leaf) {
+        let i = self.lows.partition_point(|x| *x < lo);
+        self.reordered();
+        self.lows.insert(i, lo);
+        self.slots.insert(i, slot as u32);
+        self.store.push(l);
+    }
+
+    fn decode_changes(d: &mut Dec, mut e: BtEst) -> Option<BtEst> {
+        let mut h = e.head();
+        let mask = d.varint()?;
+        for (bit, i) in [4, 3, 2, 1, 0].into_iter().enumerate() {
+            if mask & 1 << bit != 0 {
+                h.n[i] = d.diff(h.n[i] as u64)? as usize;
+            }
+        }
+        if mask & 1 << 5 != 0 {
+            h.blocks = d.diff(h.blocks as u64)? as u32;
+        }
+        if mask & 1 << 6 != 0 {
+            h.dedup = d.u8()? != 0;
+        }
+        if mask & 1 << 7 != 0 {
+            h.base = d.f64()?;
+        }
+        if mask & 1 << 8 != 0 {
+            h.pivot = d.f64()?;
+        }
+        e.set_head(h);
+        for _ in 0..d.varint()? {
+            let slot = d.varint()? as usize;
+            if slot < e.store.len() {
+                let m = d.u8()?;
+                let l = &mut e.store[slot];
+                if m & 1 << 4 != 0 {
+                    l.max = d.u128()?;
+                }
+                for (i, x) in [&mut l.used, &mut l.tuples, &mut l.tids, &mut l.keys].into_iter().enumerate() {
+                    if m & 1 << i != 0 {
+                        *x = d.fdiff(*x)?;
+                    }
+                }
+            } else if slot == e.store.len() {
+                let lo = (d.u128()?, d.varint()?);
+                let l = Leaf { max: d.u128()?, used: d.fdiff(0.0)?, tuples: d.fdiff(0.0)?, tids: d.fdiff(0.0)?, keys: d.fdiff(0.0)? };
+                e.add_leaf(slot, lo, l);
+            } else {
+                return None;
+            }
+        }
+        Some(e)
+    }
+
+    /// A full record, or the changed leaves whole (`CHANGED`).
+    fn decode_whole(d: &mut Dec, tag: u8, base: Option<BtEst>) -> Option<BtEst> {
         let dedup = d.u8()? != 0;
         let (base_size, pivot) = (d.f64()?, d.f64()?);
         let mut n = [0usize; 5];
@@ -578,6 +745,8 @@ impl BtEst {
                     dirty: Vec::new(),
                     dirty_bits: Vec::new(),
                     all_dirty: false,
+                    sent: None,
+                    sent_len: 0,
                     places: Vec::new(),
                 }
             }
@@ -590,11 +759,7 @@ impl BtEst {
                     if slot < e.store.len() {
                         e.store[slot] = l;
                     } else if slot == e.store.len() {
-                        let i = e.lows.partition_point(|x| *x < lo);
-                        e.reordered();
-                        e.lows.insert(i, lo);
-                        e.slots.insert(i, slot as u32);
-                        e.store.push(l);
+                        e.add_leaf(slot, lo, l);
                     } else {
                         return None;
                     }
@@ -603,10 +768,7 @@ impl BtEst {
             }
             _ => return None,
         };
-        e.dedup = dedup;
-        (e.base, e.pivot) = (base_size, pivot);
-        [e.inner_built, e.inner_base, e.free, e.stuck, e.hint] = n;
-        e.blocks = blocks;
+        e.set_head(Head { dedup, base: base_size, pivot, n, blocks });
         Some(e)
     }
 }
