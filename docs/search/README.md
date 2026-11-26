@@ -1370,23 +1370,26 @@ filtered listing; and the auth matrix's probe of storage's nested route (also br
 
 Ranked; the top item is in progress. Updated as work lands (the watchdog reads this list).
 
-Working order (2026-11-26, afternoon): the fourth sweep's fixes first (item 4: #1059 in its
-third round, #1096 in its second, #1084 in its second; each a HIGH or MED on main), then the
-work in review (item 11's RAG phase 2, #1068 in its third round; item 30's read-only ES|QL,
-#1111 in its second; item 12's shared-address `encoded`, #1115, in review), then item 33 (a
-Discover screen, the dashboard's largest gap against Kibana and OpenSearch Dashboards, and
-nobody is on it: the top open item), items 31 and 32 (re-embedding an index's documents, and
-resetting a branch from a copy for previews' restore points; both in progress), item 14
-(semantic search on OpenSearch-flavor clusters; in progress), item 15's next slice
-(conversions per index, zero results and latency per variant, promoting a winner), item 5's
-OpenSearch links (designed), and chat token metering (item 11's follow-up).
+Working order (2026-11-26, evening): the fourth sweep's last fixes first (item 4: #1096 in its
+re-check after round 2, #1084 in its second round; each a HIGH or MED on main), then the work
+in review (item 11's RAG phase 2, #1068 in its third round; item 30's read-only ES|QL, #1111 in
+its second; item 1's derived-key follow-ups, #1127 in its second; item 31's re-embed route,
+#1132, landing), then item 32 (resetting a branch from a copy for previews' restore points; in
+progress), item 33's second slice (saved searches, surrounding documents, a field's chart; in
+progress), item 15's confidence intervals and promoting from the Relevance tab (in progress),
+then its judgment lists and offline evaluation (the top open item), item 14 (semantic search on OpenSearch-flavor
+clusters; resumes after #1111), item 16 (cold start at size; resumes after #1127), OpenSearch's
+`_plugins/_sm` (item 9; in progress), item 5's OpenSearch links (designed), and chat token
+metering (item 11's follow-up; in progress).
 Landed 2026-11-26: the PIT and caches fix (#1021), a cluster's admin password kept in roll
 secrets and the MCP sweep's person flow (#1097), Terraform for synonyms sets and rulesets
 (#1071), inference endpoints from a secret answered redacted and limited to `api_key` services
 (#1076, #1104), the `semantic_text` default (#1093), click events with a `data` key (#1078), the
 help-articles sample (#1081), browser search on previews (#1054), the crawler's charsets,
-per-server politeness and parallel fetches (#1075), and A/B tests on search applications
-(#1090, item 15's first slice).
+per-server politeness and parallel fetches (#1075), A/B tests on search applications
+(#1090 and #1126, item 15's first two slices), names authorized as they resolve in lookups (#1059), an API
+key's `encoded` that works at the shared address (#1115), and a Discover screen (#1133, item
+33's first slice).
 
 Landed 2026-11-17: per-person cluster caps (#162: 50 clusters and 2 always-on per person,
 rolld flags, 409 past a cap, counted in the write's own transaction); the search playground (#159); the Relevance tab for
@@ -1699,8 +1702,8 @@ deterministic (#396).
    query landed (#658): one click loads 1,000 generated products or 2,000 ECS log lines on the
    Overview of a cluster with no indices or from the Indices tab, then three queries run in place
    with Open in Console, copy as curl, JavaScript or Python reading `$ELASTICSEARCH_API_KEY` as the
-   guides do; a 30-day `data` key made in the panel goes into the copied code, shown once). Left:
-   no screen is named Discover. In review (`fix/search-shared-host-keys`): an API key made anywhere
+   guides do; a 30-day `data` key made in the panel goes into the copied code, shown once). The
+   Discover screen is item 33 (#1133). Landed in #1115: an API key made anywhere
    but the cluster's own host (the shared address, the console) answers an `encoded` that names
    its cluster (`<id>@<cluster>:<key>`, as the keys route's `api_key` does), so a copied value
    works at the shared address too, while the cluster's own host keeps Elasticsearch's; only
@@ -1743,10 +1746,12 @@ deterministic (#396).
    the address) and answered with `X-Roll-Experiment` and `X-Roll-Variant`; `roll_conversion`
    events beside clicks, counted once per search per variant; browser keys' `limits.events`; and
    per-variant click-through and conversion with a two-proportion z-test in `GET …/analytics` and
-   the Relevance tab. The second slice adds conversions to the indices' analytics, zero-result
-   rate and p95 latency per variant, and promoting a variant into the application
-   (`…/_roll/experiments/{id}/_promote`). Left: judgment lists and offline evaluation (phase 1),
-   confidence intervals, the `roll_` rule types and dynamic re-ranking.
+   the Relevance tab. The second slice landed in #1126: conversions in the indices' analytics,
+   zero-result rate and p95 latency per variant, and promoting a variant into the application
+   (`…/_roll/experiments/{id}/_promote`). Next: confidence intervals beside the p-values and
+   promoting from the Relevance tab (in progress), then judgment lists and offline evaluation
+   (phase 1: OpenSearch's Search Relevance Workbench and `_rank_eval` with lists, for CI). Left:
+   the `roll_` rule types and dynamic re-ranking.
 16. **Cold start at size**: the 19.8 ms cold start is a 50k-document index from local cache;
    nothing measures the first query and p99 on a node with an empty cache for 1, 10 and 50 GB
    indices loaded from object storage, or on Graviton. Buyers comparing always-on Typesense or Algolia
@@ -2138,7 +2143,7 @@ deterministic (#396).
    it re-indexes each document in place, so a new field fed by `copy_to` embeds;
    `wait_for_completion=false` answers 202 `{task}`, with the tasks route catalogued as a read
    (roll MCP's wait tool follows it). Each document's E5 time is charged and rate-limited as bulk
-   indexing is. roll MCP maps it as `search_update_by_query`.
+   indexing is. roll MCP maps it as `search_update_by_query`. Landing in #1132.
 32. **Resetting a branch from a copy** (asked by roll previews, 2026-11-26, for search restore
    points): `POST /v1/search/clusters/{branch}/reset {"from": <copy>}` puts the branch's indices
    back to a copy's (previews' masked `Search::snapshot`, or another branch of the same parent
@@ -2147,7 +2152,7 @@ deterministic (#396).
    the branch, on its owner. Re-branching from the copy instead would tangle #1054's key chain
    (the copy as parent, copies of copies). In progress (`feature/search-branch-reset`).
 33. **A Discover screen** (Kibana's and OpenSearch Dashboards' first screen for logs). Slice 1
-   done (`feature/search-discover`): the cluster page's `discover` tab
+   landed in #1133: the cluster page's `discover` tab
    (`components/search/discover.tsx`, its requests in `lib/search-discover.ts`). A view is an
    index, alias, data stream or pattern (the cluster's own offered from `_resolve/index`), its time
    field from `_field_caps` (`@timestamp`, `timestamp`, else the one the user picks). The query is
@@ -2166,5 +2171,8 @@ deterministic (#396).
    table. The table shows the chosen columns (or the document) newest first, or by a column; a row
    opens the document's JSON. The view, time field, mode, query, range, columns and sort are the
    URL's hash (`#discover?view=…`), to bookmark or share; every request it sends can be shown and
-   opened in the console. Left for later slices: saved searches, field statistics beyond a
-   sample, a document's surrounding documents, and visualizing a field.
+   opened in the console. Slice 2 in progress (`feature/search-discover-2`): saved searches (roll's
+   control plane per cluster is the first choice, so they outlive an index and agents see them), a document's surrounding
+   documents (`search_after` both ways on the time field), a field's chart (top values, or a
+   histogram over the query and range) with whole-range statistics where they're cheap, and
+   timestamps in the viewer's zone.
