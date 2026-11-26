@@ -413,11 +413,15 @@ pub fn spawn(links: Arc<dyn Links>, local: String, r: &Remote, target: String, r
 pub fn refusal(ctx: &Ctx, r: &Remote) -> Option<EsError> {
     // OpenSearch: the remote decides who reads what; a link's own request reaches no further
     // (its ceiling holds on this cluster only).
+    // So does a principal that isn't an OpenSearch user (the per-index scope of the owner, a
+    // key): the remote maps users, and it would get a name it never had (as Elasticsearch
+    // refuses a key with no `remote_indices`).
     if ctx.cluster.dialect == crate::cluster::Dialect::OpenSearch {
         let p = crate::xpack::security::opensearch::principal(ctx);
         let id = p.os().cloned().unwrap_or_default();
         let action = crate::xpack::security::privileges::action_of(ctx.api.name()).1;
-        return id.link.is_some().then(|| crate::xpack::security::opensearch::denied(&p, &id, &action));
+        let not_a_user = ctx.principal.get().is_some_and(|raw| raw.os().is_none());
+        return (id.link.is_some() || not_a_user).then(|| crate::xpack::security::opensearch::denied(&p, &id, &action));
     }
     let p = crate::xpack::security::principal(ctx);
     if p.is_superuser() || !remote_roles(ctx, &r.alias).iter().any(|set| set.as_object().is_none_or(|m| m.values().all(|d| d.get("indices").and_then(Value::as_array).is_none_or(|a| a.is_empty())))) {
