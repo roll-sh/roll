@@ -444,6 +444,10 @@ pub struct Preview {
     /// check against today's production): asked for at a head, then how it went.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rehearsal: Option<Rehearsal>,
+    /// Columns its branches were masked with by default (they look like people's data, and no
+    /// rule names them): a rule, or `keep`, says otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub masked_by_default: Vec<MaskedByDefault>,
     /// The project's `release` (migrations) at its last head: how long it took on this
     /// preview's data, which is the parent's (PlanetScale's deploy requests show this before a
     /// merge: what's slow here locks production as long).
@@ -1347,6 +1351,16 @@ pub struct Rehearsal {
     /// What it failed with (one line, masked).
     #[serde(default)]
     pub error: Option<String>,
+}
+
+/// A column a branch was masked with by default: it looks like people's data and its parent's
+/// rules don't name it (`keep` leaves it as it is).
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct MaskedByDefault {
+    /// `kind:parent`.
+    pub resource: String,
+    pub column: String,
+    pub why: String,
 }
 
 /// Another open change's preview whose schema changes touch the same tables as this one's.
