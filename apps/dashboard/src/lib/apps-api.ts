@@ -1398,6 +1398,8 @@ export interface Metrics {
   over_capacity: number[];
   /** Each instance's own last hour by minute (those it has now), whatever the range. */
   by_instance?: InstanceSeries[];
+  /** Its volume's size by the hour (measured hourly), and when it'd be full at its last week's pace. */
+  volume?: { size_gb: number; points: { hour: number; bytes: number }[]; full_in_days: number | null };
 }
 
 /** One instance's last hour (Railway's per replica): cores in use on average each minute, and
