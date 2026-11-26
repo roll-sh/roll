@@ -18,11 +18,14 @@
 //! - Revoking the person's connection ends its tokens; removing the app ends every person's.
 //! - An app can also be a client that names itself by its Client ID Metadata Documents (Claude's
 //!   auto-connect: `https://claude.ai/oauth/mcp-oauth-client-metadata` and its
-//!   `/confidential_client`). A public document's client signs in with no credential of its own
-//!   (the assertion, one minute and used once, is it); one whose document names `private_key_jwt`
-//!   signs a client assertion with the keys at its document's `jwks_uri`. Claude's own issuer
-//!   (`https://identity.anthropic.com/issuers/<id>`, one per Claude organization) vouches for its
-//!   members' account emails without `email_verified`; the operator's domains still bound them.
+//!   `/confidential_client`). It keeps an `ent_…` id of roll's for its people's connections (the
+//!   same URL is people's own OAuth client: never theirs to touch). A public document's client
+//!   signs in with no credential of its own (the assertion, at most five minutes and used once, is
+//!   it); one whose document names `private_key_jwt` signs a client assertion with the keys at its
+//!   document's `jwks_uri`. Only Claude's issuer, or the providers the app names, vouch for it.
+//!   Claude's own issuer (`https://identity.anthropic.com/issuers/<id>`, one per Claude
+//!   organization, its keys fetched) vouches for its members' account emails without
+//!   `email_verified`; the operator's domains still bound them.
 
 use crate::client_credentials::{audit_sign_in, basic, same, verify};
 use crate::store::{Grant, NewGrant};
@@ -125,6 +128,11 @@ pub struct App {
     /// that client authenticates ([`client_document`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub metadata: Vec<String>,
+    /// For an app named by its documents: the trusted providers (issuers) that may vouch for it
+    /// besides Claude's own (an identity provider that runs Claude's auto-connect, "IdP-managed").
+    /// A provider trusted for other apps never signs anyone in to this one by itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub issuers: Vec<String>,
     /// The secret it had before a rotation, still accepted until `old_until` (Unix ms).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub old_secret_hash: Option<String>,
@@ -172,6 +180,10 @@ impl Access {
             if u.scheme() != "https" || i.issuer.len() > 300 {
                 return Err(Error::BadRequest(format!("an issuer is an https URL: {:?}", i.issuer)));
             }
+            // Claude's issuer as Claude's setup shows it, or it never matches its assertions.
+            if u.host_str().is_some_and(|h| h.eq_ignore_ascii_case("identity.anthropic.com")) && !claude_issuer(&i.issuer) {
+                return Err(Error::BadRequest(format!("Claude's issuer is https://identity.anthropic.com/issuers/<id>, as its auto-connect setup shows it (no trailing slash): {:?}", i.issuer)));
+            }
             if let Some(j) = &i.jwks
                 && serde_json::from_str::<Value>(j).ok().and_then(|v| v["keys"].as_array().map(|k| !k.is_empty())) != Some(true)
             {
@@ -203,7 +215,7 @@ impl Access {
     }
 
     /// Register an app; its secret (when it has no key) is answered once.
-    pub fn add_app(&self, name: &str, rules: Scope, jwk: Option<Value>, metadata: Vec<String>) -> Result<(App, Option<String>), Error> {
+    pub fn add_app(&self, name: &str, rules: Scope, jwk: Option<Value>, metadata: Vec<String>, issuers: Vec<String>) -> Result<(App, Option<String>), Error> {
         let name = name.trim();
         if name.is_empty() || name.len() > 100 || name.contains(char::is_control) {
             return Err(Error::BadRequest("name: 1 to 100 characters".into()));
@@ -215,11 +227,20 @@ impl Access {
         if metadata.len() > MAX_METADATA || metadata.iter().any(|m| !metadata_url(m)) {
             return Err(Error::BadRequest(format!("metadata: at most {MAX_METADATA} client metadata document URLs, each https with a path, no query or fragment")));
         }
+        if !issuers.is_empty() && metadata.is_empty() {
+            return Err(Error::BadRequest("issuers is for an app named by its client metadata documents".into()));
+        }
+        if issuers.len() > MAX_IDPS || issuers.iter().any(|i| !i.starts_with("https://") || i.len() > 300) {
+            return Err(Error::BadRequest(format!("issuers: at most {MAX_IDPS} trusted providers' issuer URLs")));
+        }
         let jwk = jwk.map(|j| crate::clients_api::check_jwk(&j)).transpose()?;
         let secret = (jwk.is_none() && metadata.is_empty()).then(|| new_secret("rlc_"));
         let app = App {
-            client_id: metadata.first().cloned().unwrap_or_else(|| crate::new_id("ent")),
+            // Always roll's own: a document's URL is also people's own OAuth client, whose
+            // connections are theirs (a shared id let the app's rules and removal reach them).
+            client_id: crate::new_id("ent"),
             metadata: metadata.clone(),
+            issuers,
             name: name.to_string(),
             rules,
             secret_hash: secret.as_deref().map(hash),
@@ -411,7 +432,7 @@ pub async fn token(a: Arc<Access>, headers: &axum::http::HeaderMap, f: &HashMap<
                     // Its document's keys, by the assertion's key id; a private_key_jwt client only.
                     let kid = jsonwebtoken::decode_header(jwt).ok().and_then(|h| h.kid);
                     let doc = client_document(&a2, &client_id, kid.as_deref())?;
-                    if !doc.confidential {
+                    if doc.method != Method::PrivateKeyJwt {
                         return Err(unknown());
                     }
                     doc.key(kid.as_deref()).ok_or_else(unknown)?
@@ -426,7 +447,7 @@ pub async fn token(a: Arc<Access>, headers: &axum::http::HeaderMap, f: &HashMap<
             // A public client: what its document says it is, never a confidential one's id
             // presented without its assertion.
             Credential::None => {
-                if !by_document || client_document(&a2, &client_id, None)?.confidential {
+                if !by_document || client_document(&a2, &client_id, None)?.method != Method::Public {
                     return Err(unknown());
                 }
             }
@@ -448,6 +469,21 @@ pub async fn token(a: Arc<Access>, headers: &axum::http::HeaderMap, f: &HashMap<
                 Some(_) if e.idps.iter().any(|i| i.issuer.trim_end_matches('/') == iss.trim_end_matches('/')) => refused("the assertion's tenant isn't one roll trusts at that issuer"),
                 _ => refused("the assertion's issuer isn't one roll trusts"),
             })?;
+        // An app named by its documents takes Claude's own issuer and the providers it names: one
+        // trusted for another app vouches for no one here (for a public client the assertion is
+        // the only credential).
+        if by_document && !claude_issuer(&idp.issuer) && !app.issuers.iter().any(|i| i.trim_end_matches('/') == idp.issuer.trim_end_matches('/')) {
+            return Err(refused("this app takes assertions from Claude's issuer or the providers it names"));
+        }
+        // With no credential of its own, an assertion is a bearer's: a short one only (Claude's
+        // live a minute), issued now.
+        if matches!(credential, Credential::None) {
+            let now_s = code_sql::now_ms() / 1000;
+            let (iat, exp) = (jwt.claims.get("iat").and_then(Value::as_i64), jwt.claims.get("exp").and_then(Value::as_i64));
+            if !matches!((iat, exp), (Some(i), Some(e)) if i <= now_s + 60 && e - i <= 300 && e - now_s <= 300) {
+                return Err(refused("a public client's assertion is issued now and lives at most five minutes (iat, exp)"));
+            }
+        }
         // One audience: roll (an array of exactly one is the same, the draft says; more is refused).
         if let Some(Value::Array(auds)) = jwt.claims.get("aud")
             && auds.len() != 1
@@ -491,7 +527,7 @@ pub async fn token(a: Arc<Access>, headers: &axum::http::HeaderMap, f: &HashMap<
                 // look-alike letter must never fold into someone else's address).
                 // Claude's own issuer vouches for its members' account emails, which it sends with
                 // no `email_verified` (Claude's connector docs); the domains below still bound them.
-                if !claude_issuer(&idp.issuer) && jwt.claims.get("email_verified").and_then(Value::as_bool) != Some(true) {
+                if !(claude_issuer(&idp.issuer) && idp.jwks.is_none()) && jwt.claims.get("email_verified").and_then(Value::as_bool) != Some(true) {
                     return Err(Error::OAuth("access_denied", "the identity provider doesn't say it verified the person's email (email_verified)".into()));
                 }
                 let email = jwt.str("email").filter(|m| m.is_ascii() && m.len() <= 320).map(str::to_ascii_lowercase).ok_or_else(|| refused("the assertion names no email"))?;
@@ -578,11 +614,21 @@ pub fn claude_issuer(issuer: &str) -> bool {
     })
 }
 
+/// How a client's metadata document says it authenticates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Method {
+    /// `token_endpoint_auth_method: none`.
+    Public,
+    /// `private_key_jwt`, with the document's keys.
+    PrivateKeyJwt,
+    /// Anything else, or left out (RFC 7591's default is a secret): roll takes neither.
+    Other,
+}
+
 /// What a client's metadata document says of how it authenticates, and its keys.
 #[derive(Clone)]
 struct Document {
-    /// It signs client assertions (`private_key_jwt`) rather than being a public client.
-    confidential: bool,
+    method: Method,
     /// Its keys (`jwks_uri`'s, or inline `jwks`), each a JWK as JSON.
     keys: Vec<(Option<String>, String)>,
 }
@@ -608,28 +654,44 @@ fn client_document(a: &Access, url: &str, kid: Option<&str>) -> Result<Document,
     use std::time::Instant;
     static CACHE: OnceLock<Mutex<HashMap<String, (Instant, Document)>>> = OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
-    if let Some((at, doc)) = cache.lock().unwrap().get(url).cloned() {
-        let missing = kid.is_some_and(|k| doc.key(Some(k)).is_none());
+    let kept = cache.lock().unwrap().get(url).cloned();
+    if let Some((at, doc)) = &kept {
+        let missing = doc.method == Method::PrivateKeyJwt && kid.is_some_and(|k| doc.key(Some(k)).is_none());
         if at.elapsed() < DOCUMENT_TTL && !(missing && at.elapsed() >= std::time::Duration::from_secs(30)) {
-            return Ok(doc);
+            return Ok(doc.clone());
         }
     }
+    // A read that fails keeps the copy roll has for up to an hour (a blip at the client's host
+    // doesn't sign everyone out); past that, or with none, the client is refused.
+    let stale = || kept.as_ref().filter(|(at, _)| at.elapsed() < std::time::Duration::from_secs(3600)).map(|(_, d)| d.clone());
+    match read_document(a, url) {
+        Ok(doc) => {
+            cache.lock().unwrap().insert(url.to_string(), (Instant::now(), doc.clone()));
+            Ok(doc)
+        }
+        Err(e) => stale().ok_or(e),
+    }
+}
+
+fn read_document(a: &Access, url: &str) -> Result<Document, Error> {
     let unread = || Error::OAuth("invalid_client", "the client's metadata document couldn't be read".into());
     let fetch = a.oidc_fetch.get().ok_or_else(unread)?;
     let doc: Value = serde_json::from_slice(&fetch.get(url, DOCUMENT_MAX).map_err(|_| unread())?).map_err(|_| unread())?;
     if doc["client_id"].as_str() != Some(url) {
         return Err(Error::OAuth("invalid_client", "the client's metadata document names another client_id".into()));
     }
-    let confidential = doc["token_endpoint_auth_method"].as_str() == Some("private_key_jwt");
+    let method = match doc["token_endpoint_auth_method"].as_str() {
+        Some("none") => Method::Public,
+        Some("private_key_jwt") => Method::PrivateKeyJwt,
+        _ => Method::Other,
+    };
     let jwks: Value = match (doc.get("jwks"), doc["jwks_uri"].as_str()) {
         (Some(inline), _) => inline.clone(),
         (None, Some(uri)) if metadata_url(uri) => serde_json::from_slice(&fetch.get(uri, DOCUMENT_MAX).map_err(|_| unread())?).map_err(|_| unread())?,
         _ => json!({ "keys": [] }),
     };
     let keys = jwks["keys"].as_array().into_iter().flatten().take(20).map(|k| (k["kid"].as_str().map(String::from), k.to_string())).collect();
-    let out = Document { confidential, keys };
-    cache.lock().unwrap().insert(url.to_string(), (Instant::now(), out.clone()));
-    Ok(out)
+    Ok(Document { method, keys })
 }
 
 fn jwt_claim(jwt: &str, name: &str) -> Option<String> {
@@ -703,6 +765,7 @@ fn view(app: &App) -> Value {
         "rules": app.rules,
         "signs_with_key": app.jwk.is_some(),
         "metadata": app.metadata,
+        "issuers": app.issuers,
         "old_until": app.old_until.filter(|u| *u > code_sql::now_ms()),
         "leaked": app.leaked,
         "created_at": app.created_at,
@@ -758,11 +821,14 @@ pub(crate) struct NewApp {
     /// Client ID Metadata Documents the app presents as its client id (Claude's auto-connect).
     #[serde(default)]
     metadata: Vec<String>,
+    /// Providers besides Claude's issuer that may vouch for such an app.
+    #[serde(default)]
+    issuers: Vec<String>,
 }
 
 pub(crate) async fn add_app(axum::extract::State(a): S, ext: axum::http::Extensions, axum::Json(b): axum::Json<NewApp>) -> crate::Result<(axum::http::StatusCode, axum::Json<Value>)> {
     crate::api::operator_only(&a, &ext, "register enterprise apps")?;
-    let (app, secret) = tokio::task::spawn_blocking(move || a.add_app(&b.name, b.rules, b.public_jwk, b.metadata)).await.map_err(|e| Error::Internal(e.to_string()))??;
+    let (app, secret) = tokio::task::spawn_blocking(move || a.add_app(&b.name, b.rules, b.public_jwk, b.metadata, b.issuers)).await.map_err(|e| Error::Internal(e.to_string()))??;
     let mut out = view(&app);
     if let Some(s) = secret {
         out["client_secret"] = json!(s);
