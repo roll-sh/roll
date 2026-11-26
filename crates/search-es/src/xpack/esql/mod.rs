@@ -308,8 +308,8 @@ tokio::task_local! {
 ///
 /// roll's own index-scoped principal (`/v1/search`'s ES|QL route, as a grant limited to some
 /// indices) holds no cluster privilege: the table is its policy's source indices, read here, so it
-/// needs `read` on every index the table was built from instead. A view's `ENRICH` is checked so too: views are spliced in before
-/// their policies load.
+/// needs `read` on every index the table was built from instead. A view's `ENRICH` is checked
+/// so too: views are spliced in before their policies load.
 pub(super) fn enrich_allowed(cluster: &crate::Cluster, name: &str) -> EsResult<()> {
     let check = |p: &crate::xpack::security::Principal| {
         if !p.is_index_scoped() {
