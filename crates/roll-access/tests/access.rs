@@ -3627,4 +3627,28 @@ async fn claude_sets_up_auto_connect_with_an_admins_consent() {
     let idp = e["idps"].as_array().unwrap().iter().find(|i| i["issuer"] == claude).unwrap_or_else(|| panic!("{e}"));
     assert_eq!((idp["domains"].clone(), idp["express"].clone()), (json!(["acme.test"]), json!(true)), "{e}");
     assert!(e["apps"].as_array().unwrap().iter().any(|a| a["metadata"][0] == client && a["rules"] == rules), "Claude registered: {e}");
+    // A mail service anyone can sign up at is never a domain it vouches for.
+    let mut public = consent(callback);
+    public["ema_domains"] = json!(["gmail.com"]);
+    assert_eq!(d.call(OPERATOR, Method::POST, "/v1/access/oauth/authorize", Some(public)).await.0, StatusCode::BAD_REQUEST);
+    // A provider the operator set up by hand stays; a second setup replaces the first's issuer and
+    // gives the existing Claude app the new consent's rules.
+    let mut idps = e["idps"].as_array().unwrap().clone();
+    idps.push(json!({ "issuer": "https://acme.okta.example", "jwks": json!({ "keys": [{ "kty": "EC", "crv": "P-256", "x": "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU", "y": "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0" }] }).to_string(), "domains": ["acme.test"] }));
+    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/enterprise/idps", Some(json!({ "idps": idps }))).await.0, StatusCode::OK);
+    let wider = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow", "write": "allow" } }]);
+    let mut again = consent(callback);
+    again["rules"] = wider.clone();
+    let (_, out) = d.call(OPERATOR, Method::POST, "/v1/access/oauth/authorize", Some(again)).await;
+    let back = url::Url::parse(out["redirect"].as_str().unwrap_or_else(|| panic!("{out}"))).unwrap();
+    let code = back.query_pairs().find(|(k, _)| k == "code").unwrap().1.into_owned();
+    let (_, got) = exchange(code).await;
+    let second = "https://identity.anthropic.com/issuers/iss_91c0";
+    let (s, _) = d.call(got["access_token"].as_str().unwrap(), Method::PUT, &path, Some(json!({ "ema_issuer": second }))).await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, e) = d.call(OPERATOR, Method::GET, "/v1/access/enterprise", None).await;
+    let issuers: Vec<&str> = e["idps"].as_array().unwrap().iter().filter_map(|i| i["issuer"].as_str()).collect();
+    assert_eq!(issuers, ["https://acme.okta.example", second], "{e}");
+    let claudes: Vec<&Value> = e["apps"].as_array().unwrap().iter().filter(|a| a["metadata"][0] == client).collect();
+    assert_eq!((claudes.len(), claudes[0]["rules"].clone()), (1, wider), "{e}");
 }
