@@ -6960,6 +6960,7 @@ async fn search_application_experiments() {
     };
     es(Method::PUT, "/products", json!({"mappings": {"properties": {"title": {"type": "text"}}}})).await;
     es(Method::PUT, "/products/_doc/1?refresh=true", json!({"title": "red shoes"})).await;
+    es(Method::PUT, "/products/_settings", json!({"index.roll.analytics.enabled": true})).await;
     let app = json!({
         "indices": ["products"],
         "template": {"script": {"source": {"query": {"match": {"title": "{{query}}"}}}, "params": {"query": ""}}},
@@ -7046,10 +7047,33 @@ async fn search_application_experiments() {
         }
         let value: f64 = ex["variants"].as_array().unwrap().iter().map(|v| v["value"].as_f64().unwrap()).sum();
         assert_eq!(value, 125.0, "{a}");
+        // Every search found the shoes; each variant's searches were timed.
+        for v in ex["variants"].as_array().unwrap() {
+            assert!(v["no_hit_rate"] == json!(0.0) && v["p95_latency_ms"].as_u64().is_some(), "{v}");
+        }
+        // The index's own analytics count every conversion (the one without a search too).
+        let idx = &a["totals"];
+        assert_eq!((idx["conversions"].as_u64(), idx["value"].as_f64()), (Some(11), Some(224.0)), "{a}");
     };
     check(&e.get("/v1/search/clusters/ab/analytics").await);
     e.control.sample().await.unwrap();
     check(&e.get("/v1/search/clusters/ab/analytics").await);
     // The browser key's events weren't stored with the owner's.
     assert_eq!(count().await, stored);
+
+    // Promoting the phrase variant: the application takes its template, the experiment ends, and
+    // searches get no variant any more. Once only, and never by a browser key.
+    let promote = "/_application/search_application/shop/_roll/experiments/ranking/_promote";
+    let r = e.http.post(format!("{}{promote}", e.es)).header("authorization", &key).json(&json!({"variant": "phrase"})).send().await.unwrap();
+    assert!(matches!(r.status().as_u16(), 400 | 403), "{}", r.status());
+    let done = es(Method::POST, promote, json!({"variant": "phrase"})).await;
+    assert_eq!((done["variant"].as_str(), done["ended_at"].is_i64()), (Some("phrase"), true), "{done}");
+    let (s, _) = e.es(&user, &pw, Method::POST, promote, Some(json!({"variant": "phrase"}))).await;
+    assert_eq!(s, 409);
+    let app = es(Method::GET, "/_application/search_application/shop", Value::Null).await;
+    assert!(app["template"]["script"]["source"].to_string().contains("match_phrase"), "{app}");
+    assert_eq!(app["experiments"][0]["promoted"]["variant"], "phrase", "{app}");
+    let r = e.http.post(format!("{}/_application/search_application/shop/_search", e.es)).header("authorization", &owner).header("x-roll-user", "v1").json(&json!({"params": {"query": "shoes"}})).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert!(r.headers().get("x-roll-variant").is_none());
 }
