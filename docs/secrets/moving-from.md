@@ -240,7 +240,7 @@ value. Choose one way:
       runs-on: ubuntu-latest
       steps:
         - run: curl -fsSL https://roll.sh/install.sh | sh
-        - run: printf 'STRIPE_KEY=%s\nSENDGRID_KEY=%s\n' "$STRIPE_KEY" "$SENDGRID_KEY" | ~/.local/bin/roll secrets import - -p shop -e staging
+        - run: printf 'STRIPE_KEY=%s\nSENDGRID_KEY=%s\n' "$STRIPE_KEY" "$SENDGRID_KEY" | ~/.local/bin/roll secrets import - -p prj_… -e staging
           env:
             ROLL_API_URL: https://roll.example.com
             ROLL_TOKEN: ${{ secrets.ROLL_IMPORT_TOKEN }}
@@ -248,7 +248,9 @@ value. Choose one way:
             SENDGRID_KEY: ${{ secrets.SENDGRID_KEY }}
   ```
 
-  GitLab is the same: a manual job whose script pipes its variables into `roll secrets import -`.
+  A token names the project by its id (`prj_…`), since it can't look a name up: `roll secrets
+  setup` prints it, and keeps it in `~/.config/roll/secrets.json`. GitLab is the same: a manual job
+  whose script pipes its variables into `roll secrets import -`.
   The values go from the runner to roll and are never printed. Revoke the token after the job:
   `roll secrets tokens ls` lists its id, and `roll secrets tokens revoke <id>` ends it.
 

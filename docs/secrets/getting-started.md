@@ -31,26 +31,33 @@ Then start it with a key of its own:
 
 ```sh
 mkdir -p ~/roll-eval && openssl rand -hex 32 > ~/roll-eval/secrets.key && chmod 600 ~/roll-eval/secrets.key
-ROLL_SECRET_KEY="$(cat ~/roll-eval/secrets.key)" ROLL_HOME=~/roll-eval/home ROLL_PRODUCTS=queues \
+ROLL_SECRET_KEY="$(cat ~/roll-eval/secrets.key)" ROLL_HOME=~/roll-eval/home ROLL_PRODUCTS=tasks \
   ./target/release/rolld --api 127.0.0.1:7070
 ```
 
 - `ROLL_SECRET_KEY` encrypts every value. Keep the file: without it, the values can't be read
   again.
-- roll secrets is always on. `ROLL_PRODUCTS` names one small product, so rolld starts nothing
-  else: no Postgres, no Docker, no other ports.
+- roll secrets is always on. `ROLL_PRODUCTS` must name at least one product, and `tasks` opens no
+  port of its own, so rolld listens on `127.0.0.1:7070` only: no Postgres, no Docker.
 - With no `ROLL_ADMIN_TOKEN` on `127.0.0.1`, the API is open to this machine only, and every
   command runs as its operator.
 
-In another terminal, point the CLI at it:
+The build gives you the CLI too (`./target/release/roll`), or install it as step 1 shows. Skip
+step 2: `roll login` signs a person in through the dashboard, and this node has no dashboard and no
+accounts. With no login, the CLI goes to a local rolld on `127.0.0.1:7070`, so there's nothing to
+set. On another port, `export ROLL_API_URL=http://127.0.0.1:<port>`.
+
+Then, in your repository:
 
 ```sh
-export ROLL_API_URL=http://127.0.0.1:7070
+roll secrets setup -p shop -e development --create
+roll secrets set STRIPE_KEY=sk_test_example LOG_LEVEL=debug
+roll run -- sh -c 'echo "LOG_LEVEL is $LOG_LEVEL"'
 ```
 
-That replaces `roll login` (step 2) on this node: `roll login` signs a person in through the
-dashboard, and this node has no accounts. Go on with step 3. To stop, press Ctrl-C in rolld's
-terminal; `rm -rf ~/roll-eval` deletes everything it made.
+Steps 3 to 7 work the same way. To stop, press Ctrl-C in rolld's terminal. `rm -rf ~/roll-eval`
+deletes everything it made, and `roll secrets setup` kept this directory's choice in
+`~/.config/roll/secrets.json`.
 
 For a server your team shares, with accounts, Postgres and several nodes, see ["Where it
 runs"](../secrets.md#where-it-runs).
@@ -106,7 +113,7 @@ In your repository, run:
 roll secrets setup -p shop -e development
 ```
 
-If `shop` doesn't exist yet, `setup` offers to create it. roll remembers the project and environment
+If `shop` doesn't exist yet, `setup` offers to create it (`--create` makes it without asking). roll remembers the project and environment
 for this directory and the ones under it, so later commands need no flags. With no flags, `setup`
 lists the projects and environments you can see and lets you pick.
 
