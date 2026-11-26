@@ -302,6 +302,7 @@ export function RuntimeLogs({
           </button>
         </p>
       )}
+      {found && (found.q || found.where) && found.lines.length > 0 && <Histogram lines={found.lines} since={Date.now() - days * 86_400_000} until={found.before ?? Date.now()} />}
       {trace && (
         <div className="rise mb-2 rounded-lg border border-line bg-panel px-3 py-2">
           <div className="mb-2 flex items-center justify-between text-[11.5px] text-muted">
@@ -353,4 +354,33 @@ function download(lines: LogLine[], name: string) {
   const a = Object.assign(document.createElement("a"), { href: url, download: name });
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+/** Matches over the searched window (Railway's Log Explorer, Cloud Logging's histogram): the
+ *  lines found, in 48 bars, their error lines (an error or fatal level, or stderr) marked. */
+export function histogram(lines: LogLine[], since: number, until: number, n = 48) {
+  const width = Math.max(1, (until - since) / n);
+  const bars = Array.from({ length: n }, (_, i) => ({ from: since + i * width, lines: 0, errors: 0 }));
+  for (const l of lines) {
+    const i = Math.min(n - 1, Math.max(0, Math.floor((l.t - since) / width)));
+    bars[i]!.lines++;
+    if (l.level === "error" || l.level === "fatal" || l.stream === "stderr") bars[i]!.errors++;
+  }
+  return { bars, width };
+}
+
+function Histogram({ lines, since, until }: { lines: LogLine[]; since: number; until: number }) {
+  const { bars, width } = histogram(lines, since, until);
+  const top = Math.max(1, ...bars.map((b) => b.lines));
+  const at = (ms: number) => new Date(ms).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  return (
+    <div className="mb-2 flex h-10 items-end gap-px" role="img" aria-label="Matches over time">
+      {bars.map((b) => (
+        <div key={b.from} className="relative flex-1" style={{ height: `${(b.lines / top) * 100}%`, minHeight: b.lines ? 2 : 0 }} title={`${b.lines} ${b.lines === 1 ? "line" : "lines"}${b.errors ? `, ${b.errors} errors` : ""} · ${at(b.from)} – ${at(b.from + width)}`}>
+          <div className="absolute inset-0 rounded-[1px] bg-fg/20" />
+          {b.errors > 0 && <div className="absolute inset-x-0 bottom-0 rounded-[1px] bg-danger/70" style={{ height: `${(b.errors / b.lines) * 100}%` }} />}
+        </div>
+      ))}
+    </div>
+  );
 }
