@@ -3418,6 +3418,15 @@ async fn a_secret_written_as_the_caller_is_asked_for_and_only_it_is_allowed() {
     root["secret"]["path"] = json!("/");
     let (s, out) = d.call(&asks, Method::POST, path, Some(root)).await;
     assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
+    // The root folder reaches every folder under it: the whole environment, remembered for 8 hours
+    // at most.
+    let root_id = out["approval"].as_str().unwrap().to_string();
+    let approve = |remember: &str| {
+        let (d, url, body) = (&d, format!("/v1/access/approvals/{root_id}/approve"), json!({ "remember": remember }));
+        async move { d.call(OPERATOR, Method::POST, &url, Some(body)).await.0 }
+    };
+    assert_eq!(approve("1d").await, StatusCode::BAD_REQUEST);
+    assert_eq!(approve("8h").await, StatusCode::OK);
     let (allows, _) = d.token(json!([search("allow"), { "product": "secrets", "resources": [{ "project": project }], "actions": { "write": "allow" } }]), json!({})).await;
     let (s, seen) = d.call(&allows, Method::POST, path, Some(body("production"))).await;
     assert_eq!((s, seen["here"].as_bool()), (StatusCode::OK, Some(true)), "{seen}");
