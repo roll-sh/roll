@@ -442,12 +442,13 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   resource, so remembering it allows revealing that one (all of reveal on it, not only the link);
   when several linked resources aren't allowed outright, the approval names them all and is
   approved once. Each linked resource's reveal is its own audit row.
-- A roll secret another product reads or writes as the caller is lent the same way:
-  - **The routes:** search's inference endpoint keyed by a secret (`POST …/inference/secrets`, `reveal`) and its admin password rotated into one (`POST …/password` with `secret`, `write`).
-  - **What's checked:** the action on that folder (`secret: {environment, path?, project?}`; the project left out is the one the cluster is on) as roll secrets decides it, protected environments included. Before this, an `ask` there was refused inside roll secrets with nothing to approve.
-  - **An approval** is about that folder, so remembering it allows exactly that folder and environment.
-  - **The grant the product gets** carries an exact rule allowing that one action on that folder, for this request only. roll secrets checks the caller again inside, and nothing else in the project opens.
-  - **Binding a `roll://` reference is the exception.** It is checked again as its maker at every use, so it keeps needing `reveal` allowed: an approval can't stand in for it.
+- A roll secret another product writes once as the caller is lent the same way:
+  - **The route:** search's admin password rotated into one (`POST …/password` with `secret: {environment, path?, project?}`, `write`; the project left out is the one the cluster is on).
+  - **What's checked:** `write` on that folder as roll secrets decides it, protected environments included. The environment and path are checked as roll secrets names them, so a pattern like `prod*` is refused rather than remembered as a wildcard.
+  - **An approval** names that folder, even when the route's own action asks too, and remembering it allows exactly that folder and environment.
+  - **The grant the product gets** carries one exact rule (that folder: `write`) for this request, plus `read` on that folder whenever the write passes, allowed outright or approved, since the product reads the version back. roll secrets checks the caller again inside, and nothing else in the project opens.
+  - **A remembered approval** keeps to what it named. When the route's own action asked too (admin on the cluster), only the secret is remembered, and the next call asks about the route's own action again.
+  - **A secret a product keeps following needs `reveal` allowed outright.** That covers an inference endpoint keyed by a secret (its sync) and a bound `roll://` reference: either is checked again as its maker at every use, so an approval can't stand in for it.
 - Comparing a local copy with a secrets folder (`POST …/environments/{env}/diff`, by fingerprint,
   names only) tests a guess at a value: `reveal` there, as reading the values is.
 - A secrets project's backup (every value, sealed to a key the caller chooses) and restore are
@@ -1184,8 +1185,9 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
     the chain at its next use. A login (`present_machine`) with a spent credential always ends it.
   - **Not in the workload caps.** They open nothing and live as long as their machine, so they'd
     fill the room every CI login shares: `MAX_WORKLOADS` and `OWNER_MAX_WORKLOADS` count only
-    workload grants with rules. Their caller caps them (roll secrets: 1,000 chains per identity,
-    counted in the write that records the chain, and 60 bootstrap tokens a minute per project).
+    workload grants with rules. Their caller caps them (roll secrets: 1,000 chains per identity
+    whose newest secret hasn't ended, revoked or not, counted in the write that records the chain,
+    and 60 bootstrap tokens a minute per project).
   - **Leaked**, either is revoked with its whole chain, as a token is (below).
   - `Access::revoke_chain(chain, why)` ends a chain (roll secrets: the identity deleted, disabled or
     cut off). Chains are listed with `?kind=workload`, and go a day after their last secret would

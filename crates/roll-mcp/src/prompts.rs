@@ -395,7 +395,7 @@ const PROMPTS: &[Prompt] = &[
                  provider, if you have them: search_list_inference_secrets shows endpoints already keyed by a roll \
                  secret; reuse one that fits, or ask me which provider and model and which roll secret holds its \
                  key (environment and key), then search_create_inference_endpoint with task_type text_embedding \
-                 (it needs admin on the cluster and reveal on the secret, which may wait for a person). Never ask me for the key itself, and \
+                 (it needs admin on the cluster and reveal allowed on the secret). Never ask me for the key itself, and \
                  never put one in a call. Then show me the mapping change and make it with search_put_mapping \
                  once I say (a field can't be taken out again, and every later write is embedded; offer to try it \
                  on a branch first with search_branch_cluster, if you have it): a new field <field>_semantic \
