@@ -1539,8 +1539,8 @@ impl Run {
         if let Some(r) = self.alerts.routes.iter().enumerate().find_map(|(i, r)| self.alerts.routes[..i].iter().any(|o| o.label() == r.label()).then_some(r)) {
             return Err(Error::BadRequest(format!("alerts.routes names {} twice", r.label())));
         }
-        if self.alerts.log_match.as_ref().is_some_and(|m| m.trim().is_empty() || m.len() > 200) || !(1..=10_000).contains(&self.alerts.log_count) {
-            return Err(Error::BadRequest("alerts.log_match is 1–200 characters, alerts.log_count 1–10000".into()));
+        if self.alerts.log_match.as_ref().is_some_and(|m| crate::logs::Search::parse(m).is_none() || m.len() > 200) || !(1..=10_000).contains(&self.alerts.log_count) {
+            return Err(Error::BadRequest("alerts.log_match is a log search (1–200 characters, a word in it), alerts.log_count 1–10000".into()));
         }
         let bad = |m: &str| Err(Error::BadRequest(format!("run.{m}")));
         if self.schedules.len() > 20 {
@@ -1638,7 +1638,7 @@ impl Run {
         }
         for (i, m) in self.log_metrics.iter().enumerate() {
             let name_ok = !m.name.is_empty() && m.name.len() <= 100 && m.name.bytes().enumerate().all(|(j, b)| b.is_ascii_alphabetic() || b == b'_' || (j > 0 && (b.is_ascii_digit() || b == b'.')));
-            if !name_ok || m.pattern.is_empty() || m.pattern.chars().count() > 200 || self.log_metrics[..i].iter().any(|o| o.name == m.name) {
+            if !name_ok || crate::logs::Search::parse(&m.pattern).is_none() || m.pattern.chars().count() > 200 || self.log_metrics[..i].iter().any(|o| o.name == m.name) {
                 return bad("log_metrics are {name: a metric's name (unique), pattern: 1–200 characters}");
             }
         }

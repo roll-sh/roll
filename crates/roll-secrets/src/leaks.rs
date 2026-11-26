@@ -78,6 +78,9 @@ enum Whence {
     /// Reported by a caller who holds the value (`POST …/leaks` with `leaked: true`): it rotates
     /// only where the caller may rotate (`write`) itself.
     Report { by: Caller },
+    /// In a push a pre-receive hook (`by`, its token) let through with break glass, into
+    /// `project`'s git server: the value is in the server's history and every clone now.
+    Breakglass { by: Caller, project: String, pusher: Option<String>, refs: Vec<String> },
 }
 
 /// Candidates shorter than this (in characters) are never matched: `true` and `8080` are values
@@ -111,12 +114,16 @@ pub const SCAN_MAX: usize = 20_000;
 
 /// The shortest candidate a scanner's check (`POST …/scan`) tries.
 pub const SCAN_MIN_LEN: usize = 16;
-/// A scanner's calls a minute per caller; candidates it tries a minute, per caller and per
-/// project; and an hour per project (a push is at most [`SCAN_MAX`], and a hook runs a few times
-/// a minute).
+/// A scanner's budget per token and pusher (as the hook names the pusher; calls naming none share
+/// one): calls a minute, and candidates it tries a minute and an hour. One push, or one pusher,
+/// spends only its own: a hook serving a whole organization's git server has one token.
 pub const SCANS_PER_MINUTE: i64 = 60;
-pub const SCAN_CANDIDATES_PER_MINUTE: i64 = 20_000;
-pub const SCAN_CANDIDATES_PER_HOUR: i64 = 200_000;
+pub const SCAN_CANDIDATES_PER_MINUTE: i64 = 200_000;
+pub const SCAN_CANDIDATES_PER_HOUR: i64 = 1_000_000;
+/// The project's, across every token and pusher: high enough that only abuse of a token (one
+/// naming made-up pushers) reaches it.
+pub const PROJECT_SCAN_CANDIDATES_PER_MINUTE: i64 = 2_000_000;
+pub const PROJECT_SCAN_CANDIDATES_PER_HOUR: i64 = 10_000_000;
 /// The most refs, and the longest pusher and ref, a hook's call names.
 const PUSH_REFS_MAX: usize = 100;
 const PUSHER_MAX: usize = 100;
@@ -218,7 +225,97 @@ fn bump(c: &code_sql::Conn<'_>, who: &str, minute: i64, n: i64) -> Result<(i64, 
     )?)
 }
 
-/// A scanner's calls per caller and minute (`POST …/scan`'s limit).
+/// The budget a scan would overspend ([`spend`]).
+#[derive(Clone, Copy)]
+enum Budget {
+    Calls,
+    Minute,
+    Hour,
+    ProjectMinute,
+    ProjectHour,
+}
+
+impl Budget {
+    /// `at most …`, for the 429 and the audit row.
+    fn said(self, principal: &str, pusher: Option<&str>) -> String {
+        let mine = match pusher {
+            Some(p) => format!("{principal}'s budget for pusher {p}"),
+            None => format!("{principal}'s budget for pushes naming no pusher"),
+        };
+        match self {
+            Budget::Calls => format!("{SCANS_PER_MINUTE} scans a minute ({mine})"),
+            Budget::Minute => format!("{SCAN_CANDIDATES_PER_MINUTE} candidates tried a minute ({mine})"),
+            Budget::Hour => format!("{SCAN_CANDIDATES_PER_HOUR} candidates tried an hour ({mine})"),
+            Budget::ProjectMinute => format!("{PROJECT_SCAN_CANDIDATES_PER_MINUTE} candidates tried a minute (the project's budget, across every token)"),
+            Budget::ProjectHour => format!("{PROJECT_SCAN_CANDIDATES_PER_HOUR} candidates tried an hour (the project's budget, across every token)"),
+        }
+    }
+}
+
+/// `scan_counts`' key for a scanner's budget: its token and the pusher its hook names.
+fn budget_key(principal: &str, pusher: Option<&str>) -> String {
+    match pusher {
+        // A pusher has no control characters (`Push::check`).
+        Some(p) => format!("{principal}\u{1f}{p}"),
+        None => principal.to_string(),
+    }
+}
+
+/// A scan of `n` tried candidates by `who` ([`budget_key`]) in `project`, counted only when it
+/// fits every budget, in one write: the budget it would overspend and when that has room again
+/// (ms) otherwise, so a refused push spends nothing and its retry isn't refused longer.
+fn spend(c: &Conn<'_>, project: &str, who: &str, minute: i64, n: i64) -> Result<Option<(Budget, i64)>> {
+    let mine: Vec<(i64, i64, i64)> = c.query("SELECT minute, calls, candidates FROM scan_counts WHERE principal = ? AND minute > ? ORDER BY minute", params![who, minute - 60], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    let theirs: Vec<(i64, i64)> = c.query("SELECT minute, candidates FROM scan_project_counts WHERE project_id = ? AND minute > ? ORDER BY minute", params![project, minute - 60], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let (calls, tried) = mine.iter().find(|r| r.0 == minute).map_or((0, 0), |r| (r.1, r.2));
+    let project_tried = theirs.iter().find(|r| r.0 == minute).map_or(0, |r| r.1);
+    let mine: Vec<(i64, i64)> = mine.into_iter().map(|(m, _, k)| (m, k)).collect();
+    let next = (minute + 1) * 60_000;
+    let over = if calls >= SCANS_PER_MINUTE {
+        Some((Budget::Calls, next))
+    } else if tried + n > SCAN_CANDIDATES_PER_MINUTE {
+        Some((Budget::Minute, next))
+    } else if let Some(at) = room(&mine, n, SCAN_CANDIDATES_PER_HOUR) {
+        Some((Budget::Hour, at))
+    } else if project_tried + n > PROJECT_SCAN_CANDIDATES_PER_MINUTE {
+        Some((Budget::ProjectMinute, next))
+    } else {
+        room(&theirs, n, PROJECT_SCAN_CANDIDATES_PER_HOUR).map(|at| (Budget::ProjectHour, at))
+    };
+    if over.is_none() {
+        bump(c, who, minute, n)?;
+        c.execute(
+            "INSERT INTO scan_project_counts (project_id, minute, candidates) VALUES (?, ?, ?) ON CONFLICT (project_id, minute) DO UPDATE SET candidates = scan_project_counts.candidates + excluded.candidates",
+            params![project, minute, n],
+        )?;
+    }
+    Ok(over)
+}
+
+/// When an hour of counts (per minute, oldest first) has room for `n` more under `cap` (ms, as
+/// its oldest minutes leave the hour); `None`: it has now.
+fn room(by_minute: &[(i64, i64)], n: i64, cap: i64) -> Option<i64> {
+    let mut total: i64 = by_minute.iter().map(|r| r.1).sum();
+    if total + n <= cap {
+        return None;
+    }
+    for &(m, k) in by_minute {
+        total -= k;
+        if total + n <= cap {
+            return Some((m + 60) * 60_000);
+        }
+    }
+    Some((by_minute.last().map_or(0, |r| r.0) + 60) * 60_000)
+}
+
+/// `in 40 s`, `in 12 min`: how long until `at` (ms).
+fn wait(at: i64, now: i64) -> String {
+    let secs = ((at - now).max(0) + 999) / 1000;
+    if secs >= 120 { format!("in {} min", (secs + 59) / 60) } else { format!("in {secs} s") }
+}
+
+/// A scanner's calls, per budget key and minute, for an hour (`POST …/scan`'s budgets), and a
+/// backup verify's (`backup.verify:<principal>`).
 pub(crate) const SCAN_COUNTS_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS scan_counts (
     principal TEXT NOT NULL,
@@ -360,16 +457,22 @@ impl Secrets {
     /// `candidates` are values of this project, in the environments and folders the caller may
     /// `scan`, without `read` or `reveal`. Only [`scannable`] candidates are tried, so it can't
     /// confirm a guess at a short or simple value, nor at a weak password inside text a guesser
-    /// knows; sensitive values and personal ones never match; [`SCANS_PER_MINUTE`] calls and
-    /// [`SCAN_CANDIDATES_PER_MINUTE`] tried candidates a minute per caller, and as many a minute
-    /// and [`SCAN_CANDIDATES_PER_HOUR`] an hour per project. A match names its key and folder only
-    /// where the caller may `read`. Every call is audited (`secrets.scan`, with the pusher and refs
-    /// the hook names and the keys found), never a candidate. A `breakglass` push goes through
-    /// anyway, audited as `secrets.scan.breakglass`, and only when the project's `breakglass`
-    /// list allows the hook's token or the pusher ([`Secrets::breakglass`]): 403 otherwise.
+    /// knows; sensitive values and personal ones never match; [`SCANS_PER_MINUTE`] calls,
+    /// [`SCAN_CANDIDATES_PER_MINUTE`] tried candidates a minute and [`SCAN_CANDIDATES_PER_HOUR`]
+    /// an hour per token and pusher, and the project's own, far higher ([`spend`]: 429 naming the
+    /// budget and when it has room). A match names its key and folder only where the caller may
+    /// `read`. Every call is audited (`secrets.scan`, with the pusher and refs the hook names and
+    /// the keys found), never a candidate. A `breakglass` push goes through anyway, audited as
+    /// `secrets.scan.breakglass`, and only when the project's `breakglass` list allows the hook's
+    /// token or the pusher ([`Secrets::breakglass`]): 403 otherwise. What it lets through is a
+    /// leak ([`Secrets::respond`]: `secret.leaked`, and `leaks.rotate`).
     pub fn scan_only(&self, project: &str, candidates: &[String], caller: &Caller, push: &Push) -> Result<Vec<ScanFound>> {
-        Ok(self
-            .scanned(project, candidates, caller, push)?
+        let found = self.scanned(project, candidates, caller, push)?;
+        // What break glass lets through is in the server's history now: a leak, answered as one.
+        if push.breakglass {
+            self.respond(&found, &Whence::Breakglass { by: caller.clone(), project: project.to_string(), pusher: push.pusher.clone(), refs: push.refs.clone() });
+        }
+        Ok(found
             .into_iter()
             .map(|m| {
                 let named = caller.allows(Action::Read, &Scope::at(project, &m.leak.environment, &m.leak.path));
@@ -415,21 +518,12 @@ impl Secrets {
         let tried: Vec<String> = candidates.iter().map(|c| if scannable(c) { c.clone() } else { String::new() }).collect();
         let n = tried.iter().filter(|c| !c.is_empty()).count() as i64;
         if caller.principal != "operator" {
-            let minute = self.db.now_ms()? / 60_000;
-            let (calls, mine, project_minute, project_hour): (i64, i64, i64, i64) = self.db.write(|c| {
-                let (calls, mine) = bump(c, &caller.principal, minute, n)?;
-                let at = c.query_row(
-                    "INSERT INTO scan_project_counts (project_id, minute, candidates) VALUES (?, ?, ?) ON CONFLICT (project_id, minute) DO UPDATE SET candidates = scan_project_counts.candidates + excluded.candidates RETURNING candidates",
-                    params![project, minute, n],
-                    |r| r.get(0),
-                )?;
-                let hour = c.query_row("SELECT COALESCE(SUM(candidates), 0) FROM scan_project_counts WHERE project_id = ? AND minute > ?", params![project, minute - 60], |r| r.get(0))?;
-                Ok::<_, Error>((calls, mine, at, hour))
-            })?;
-            if calls > SCANS_PER_MINUTE || mine > SCAN_CANDIDATES_PER_MINUTE || project_minute > SCAN_CANDIDATES_PER_MINUTE || project_hour > SCAN_CANDIDATES_PER_HOUR {
-                let limits = format!("{SCANS_PER_MINUTE} scans and {SCAN_CANDIDATES_PER_MINUTE} candidates tried a minute per token, {SCAN_CANDIDATES_PER_MINUTE} a minute and {SCAN_CANDIDATES_PER_HOUR} an hour per project");
-                self.audit_now(project, caller, action, None, None, &[], &format!("refused a scan of {} candidates{said}: over {limits}", candidates.len()));
-                return Err(Error::TooMany(format!("at most {limits}: try again later")));
+            let now = self.db.now_ms()?;
+            let who = budget_key(&caller.principal, push.pusher.as_deref());
+            if let Some((budget, at)) = self.db.write(|c| spend(c, project, &who, now / 60_000, n))? {
+                let limit = budget.said(&caller.principal, push.pusher.as_deref());
+                self.audit_now(project, caller, action, None, None, &[], &format!("refused a scan of {} candidates ({n} tried){said}: over {limit}", candidates.len()));
+                return Err(Error::TooMany(format!("scan budget spent: at most {limit}, and this call would try {n} more; it has room again {}", wait(at, now))));
             }
         }
         if push.breakglass
@@ -501,12 +595,11 @@ impl Secrets {
         self.db.write(|c| bump(c, who, minute, n))
     }
 
-    /// Minutes of scan counts that have passed (the sweeper): a caller's last minute, a project's
-    /// last hour.
+    /// Minutes of scan counts that have passed (the sweeper): the last hour's are kept.
     pub(crate) fn forget_scan_counts(&self) -> Result<()> {
         let minute = self.db.now_ms()? / 60_000;
         self.db.write(|c| {
-            c.execute("DELETE FROM scan_counts WHERE minute < ?", [minute - 1])?;
+            c.execute("DELETE FROM scan_counts WHERE minute <= ?", [minute - 60])?;
             c.execute("DELETE FROM scan_project_counts WHERE minute <= ?", [minute - 60])
         })?;
         Ok(())
@@ -599,6 +692,10 @@ impl Secrets {
         let (by, place, mark_place) = match whence {
             Whence::Code { repo, .. } => (Caller::consumer("roll:code"), format!("roll code repo {repo}"), repo.clone()),
             Whence::Report { by } => (by.clone(), format!("text {} reported published", by.principal), "report".to_string()),
+            Whence::Breakglass { by, pusher, refs, .. } => {
+                let said = Push { breakglass: true, pusher: pusher.clone(), refs: refs.clone() }.said();
+                (by.clone(), format!("a push let through with break glass{said}"), format!("breakglass:{}", pusher.as_deref().unwrap_or_default()))
+            }
         };
         let leaks = Caller::consumer(LEAKS);
         // (project, environment, its id, folder, key, credential), each claimed.
@@ -618,12 +715,19 @@ impl Secrets {
                 Whence::Code { repo, project } if project != holder => json!({ "repo": repo, "project": project }),
                 Whence::Code { repo, .. } => json!({ "repo": repo }),
                 Whence::Report { .. } => json!({ "reported": true }),
+                Whence::Breakglass { project, pusher, refs, .. } => {
+                    let mut d = json!({ "via": "breakglass", "pusher": pusher, "refs": refs });
+                    if project != holder {
+                        d["project"] = json!(project);
+                    }
+                    d
+                }
             };
             data["rotatable"] = json!(!creds.is_empty());
             // A report is the reporter's say-so: it rotates only what the reporter could rotate
             // through `…/rotate` (`write` there). Otherwise it's answered as `off` would be.
             let may_rotate = match whence {
-                Whence::Code { .. } => true,
+                Whence::Code { .. } | Whence::Breakglass { .. } => true,
                 Whence::Report { by } => by.allows(Action::Write, &Scope::at(holder, env, path)),
             };
             let res = self.db.write(|c| {

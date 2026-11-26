@@ -359,7 +359,7 @@ impl ReadSecurity {
     /// entries granting it on an alias of the index, which the index was read through.
     fn granting<'a>(&self, set: &'a [Permission], action: &str, index: &str) -> Vec<&'a IndexGrant> {
         let parent = self.0.eff.parents.get(index);
-        let restricted = privileges::is_restricted(index);
+        let restricted = self.0.eff.restricted(index);
         let entries = |names: &dyn Fn(&str) -> bool| -> Vec<&'a IndexGrant> {
             set.iter()
                 .flat_map(|r| r.indices.iter())

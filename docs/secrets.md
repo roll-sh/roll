@@ -614,8 +614,13 @@ server](secrets/platforms.md#a-vm-or-a-server).
   `identity.machine.reused` and `identity.machine.revoke`; deleting, disabling or cutting off the
   identity revokes all its machines. `GET …/identities/{id}/machines` lists them (the chain, when
   its credential was last replaced, live or revoked), and `DELETE …/machines/{chain}` revokes one,
-  as the dashboard's identities page does. An identity has at most 1,000 bootstrap tokens (one per
-  machine; delete it and make it again past that), and a project makes at most 60 a minute. Its
+  as the dashboard's identities page does. An identity has at most 1,000 machines at once: chains
+  whose newest bootstrap token or machine credential hasn't ended yet, revoked or not (a spent one
+  is kept until then, so its reuse is still caught). A machine that's revoked, or that stopped
+  refreshing, frees its place when its last credential would have ended; roll forgets it a day
+  after, and `POST …/identities/{id}/machines/prune` (admin, audited `identity.machine.prune`, the
+  dashboard's Forget ended) forgets the ended ones at once. A project makes at most 60 bootstrap
+  tokens a minute. Its
   machines' credentials don't count toward the workload token caps that every project's logins
   share (docs/permissions.md); their logins' tokens do, as any identity's. The bootstrap tokens and credentials are roll-access grants (docs/permissions.md,
   "Bootstrap tokens and machine credentials"), looked up on every use, and open nothing but these
@@ -633,7 +638,9 @@ Tests: `crates/roll-cli/tests/secrets.rs` (`the_local_agent_answers_only_request
 identity login's renewal is `relogin_tests` in `crates/roll-cli/src/secrets.rs`, which the agent
 shares. Bootstrap tokens over HTTP:
 `a_bootstrap_token_is_exchanged_once_and_a_spent_credential_ends_its_machine` in
-`crates/rolld/tests/secrets.rs` (with the machines list and an admin's revoke); the dashboard's
+`crates/rolld/tests/secrets.rs` (with the machines list and an admin's revoke);
+`a_revoked_machine_holds_its_place_until_its_credential_would_have_ended` in
+`crates/roll-secrets/tests/api.rs` (the cap, then forgetting the ended ones); the dashboard's
 bootstrap token, shown once, in `apps/dashboard/src/components/secrets/secrets-bootstrap.test.tsx`; their chains in roll-access:
 `a_spent_bootstrap_token_or_machine_credential_ends_its_chain` in `crates/roll-access/tests/access.rs`.
 ## Customer-managed keys
@@ -4141,12 +4148,18 @@ refuses any push whose new commits add a value of the project, whoever pushes it
 - **A time budget.** `--budget` (default `4s`, inside GitHub Enterprise Server's 5 s). A scan that
   can't finish (the budget runs out, the push is bigger than it reads, roll doesn't answer) fails
   closed: the push is refused and the hook says why. `--fail-open` lets such a push through with
-  a warning instead. A value it found is refused either way.
+  a warning instead. A value it found is refused either way. A spent scan budget (below: the
+  token's for this pusher, or the project's) refuses only the push that spends it, and the hook
+  prints which budget and when it has room again (`scan budget spent: at most 200000 candidates
+  tried a minute (token:…'s budget for pusher alice) …; it has room again in 40 s`), so it's told
+  apart from roll being down.
 - **Who pushed.** Each call names the pusher as the git server tells its hooks:
   `GITHUB_USER_LOGIN` (GitHub Enterprise Server), `GL_USERNAME` (GitLab), `GITEA_PUSHER_NAME`
-  (Gitea, Forgejo), `REMOTE_USER` (git over HTTP), or else `USER` (git over SSH, the account git
-  runs as), and the refs pushed. Both go in the audit row as text (`… by alice to
-  refs/heads/main`); a pusher counts for nothing but the break-glass list below.
+  (Gitea, Forgejo) or `REMOTE_USER` (git over HTTP), and the refs pushed. Both go in the audit
+  row as text (`… by alice to refs/heads/main`); a pusher counts for nothing but the break-glass
+  list and the scan budget below. Never `USER`: on plain git over SSH that's the account git runs
+  as (`git`), the same for everyone, so there the push names no pusher, and a break-glass push
+  warns that the server doesn't name pushers (only `token:<id>` or `*` can let it through).
 - **Break glass.** `git push -o breakglass` (the repo needs `receive.advertisePushOptions true`)
   lets the push through when the project allows it: `roll secrets breakglass alice bob` (pushers'
   logins), `token:<id>` (every push through that hook's token) or `*` (anyone), `off` for no one,
@@ -4154,7 +4167,11 @@ refuses any push whose new commits add a value of the project, whoever pushes it
   can rule it out everywhere with `no_breakglass`, "Guardrails"). The hook asks roll
   first: roll refuses a pusher the list doesn't name (403, audited), and records the push as
   `secrets.scan.breakglass` with the pusher and refs before anything is read. It's still scanned,
-  and the keys it found go in the same log. When roll can't be reached (no answer, a 5xx, the
+  and the keys it found go in the same log. What it lets through is leaked: the value is in the
+  server's history and every clone, so roll handles it as one found in code ("When a value
+  leaks"): `secret.leaked` with `via: "breakglass"`, the pusher and the refs, its managed keys
+  rotated under `leaks.rotate = managed` (or a change request where approvals are needed), and
+  on Health until rotated. When roll can't be reached (no answer, a 5xx, the
   budget gone), the push is refused: break glass never passes unrecorded. Only
   `--breakglass-unrecorded` on the hook's command line lets such a push through, saying it went
   unrecorded; set it only where the git server's own log names pushers.
@@ -4247,9 +4264,14 @@ server's token can't read production even if it leaks. What stops it from being 
   connection string isn't confirmed. Such a value is still found by `roll secrets scan`, by a
   token that may read it, and by roll code;
 - sensitive keys and personal values never match (as with `POST …/leaks`);
-- at most 60 calls and 20,000 candidates tried a minute per token, and 20,000 a minute and
-  200,000 an hour per project, whichever tokens ask (429 after that, audited), counted in the
-  database every node shares;
+- a budget per token and pusher (as the hook names the pusher; calls naming none share one): at
+  most 60 calls and 200,000 candidates tried a minute, and 1,000,000 an hour; and the project's,
+  across every token and pusher, 2,000,000 a minute and 10,000,000 an hour, which only a token
+  naming made-up pushers reaches. One push, or one pusher, spends only its own: a hook serving a
+  whole organization's git server has one token. Past a budget the call is a 429 naming the
+  budget and when it has room again (audited), and counts nothing, so a retry isn't refused for
+  longer. Counted in the database every node shares; roll code's GitHub App's scans are each
+  installation's and repo's own;
 - every call is audited (`secrets.scan`, the number of candidates and the keys found, never a
   candidate), and a finding is the feed's `scan.finding`.
 
@@ -4781,7 +4803,10 @@ opened archive; admin, audited `project.restore`), on this server or another. Ar
    roll secrets' policy as making it would. An admin enables or resumes each
    (`PATCH …/identities/{id}`, `PATCH …/syncs/{id}`) and becomes its maker then, so a restored
    workload acts only at the rights of a person who chose to turn it on. Enabling any identity runs
-   the same checks again, so one written before a rule existed stays off.
+   the same checks again, so one written before a rule existed stays off. A machine identity comes
+   back with no machines: their credentials are roll-access's, never in a backup, so each machine
+   needs a new bootstrap token. The restore's warnings name each machine identity and how many
+   machines were live at the backup.
 
 What can't be restored (a link to a resource that project doesn't have, an import of another
 project's folder, a registration that fails its check) comes back as a warning, by name, never a
@@ -4797,8 +4822,9 @@ secret key is, open the archive there, and write nothing:
   counts of environments, keys, registrations, identities and syncs; key names missing, changed
   (value or link compared by fingerprint, here and never answered) or added since;
   registrations missing or changed (key, certificate, credential); settings that differ; the
-  registrations a backup doesn't carry; and what a restore would leave out, and why (`refused`:
-  a registration or an identity that fails its checks). A sensitive key's value isn't in a backup,
+  registrations a backup doesn't carry; what a restore would leave out, and why (`refused`:
+  a registration or an identity that fails its checks); and the machine identities whose
+  machines need new bootstrap tokens after a restore (`machines`). A sensitive key's value isn't in a backup,
   so it's never compared. A token's verify answers counts only (`names: false`, each part's
   `counts`), compares registrations, encryption keys and syncs by name and count only (never
   by a key, a key's bytes or a sync's credential), and gets 10 a minute (as `/scan` limits a
@@ -4842,7 +4868,10 @@ To recover: restore the database, start rolld with the same key (or start it sea
 holders unseal it), and check `GET /v1/secrets/health` (`"key"`, `"resealed"`). Everything comes
 back as it was, including what a project backup leaves out (identities with their makers, syncs,
 sinks, AWS roles, gateways' registrations), because nothing moved: the project ids, the issuer's
-signing keys and every trust that names them are the same. A leaked deployment key with the
+signing keys and every trust that names them are the same. Machine identities' machines keep
+working only when roll-access's store (`<home>/access.db`, or the system database's `access`
+schema) comes back from the same moment: their credentials live there. Otherwise every machine
+needs a new bootstrap token. A leaked deployment key with the
 database is a leak of everything; rotate it as "Encryption" says.
 
 When only some projects are lost (deleted past their recovery window, or broken by hand), restore
@@ -6639,7 +6668,7 @@ roll-workspace's records, not secrets' audit rows: they're the workspace's own f
 | --- | --- | --- |
 | `secret.changed` | a change added, changed, linked or rotated stored values (a change that only edits comments, tags or expiry isn't one) | `via`, `change` (its number in the history), `version` (one key) or `versions` (`{key: version}`), `keys` when the row names more (the change's other keys only had their metadata edited or were deleted), `deleted` (keys the same change deleted), `folders` (a change across folders) |
 | `secret.deleted` | a change only deleted keys (a folder's delete too) | `via`, `change`, `version` or `versions` (the delete's), `folders` (a change across folders) |
-| `secret.leaked` | a stored value turned up in a roll code repository (a change's added lines, a scan, or a push to its GitHub repository: "On GitHub.com: roll code's GitHub App") or in text reported published (`POST …/leaks` with `leaked: true`), in the project holding the value, once a day for the same keys and place and whenever a rotation of them starts ("When a value leaks"); or GitHub's secret scanning found a placeholder (`secrets.placeholders.end`) | `repo` (and `project`, the repo's, when the value came from another's shared folder) or `reported: true`, with `rotatable` (roll can rotate one of the keys), `rotating` (the keys `leaks.rotate = managed` rotates now; `false` with `reason: "rotated within the hour"` when the keys rotated for a leak within the hour, or `reason: "already rotated"` when a public certificate's renewal cap holds the leak's renewal) and `requests` (the change requests opened for their rotation where approvals are needed), `revoking` (the serials of public certificates whose leaked key roll revokes at the CA first, `keyCompromise`); or `placeholder`, `consumer`, `reason` |
+| `secret.leaked` | a stored value turned up in a roll code repository (a change's added lines, a scan, or a push to its GitHub repository: "On GitHub.com: roll code's GitHub App") or in text reported published (`POST …/leaks` with `leaked: true`), or in a push a pre-receive hook let through with break glass, in the project holding the value, once a day for the same keys and place and whenever a rotation of them starts ("When a value leaks"); or GitHub's secret scanning found a placeholder (`secrets.placeholders.end`) | `repo` (and `project`, the repo's, when the value came from another's shared folder), `reported: true`, or `via: "breakglass"` with `pusher` and `refs` (and `project`, the hook's, when it's another's), with `rotatable` (roll can rotate one of the keys), `rotating` (the keys `leaks.rotate = managed` rotates now; `false` with `reason: "rotated within the hour"` when the keys rotated for a leak within the hour, or `reason: "already rotated"` when a public certificate's renewal cap holds the leak's renewal) and `requests` (the change requests opened for their rotation where approvals are needed), `revoking` (the serials of public certificates whose leaked key roll revokes at the CA first, `keyCompromise`); or `placeholder`, `consumer`, `reason` |
 | `scan.finding` | `roll secrets scan` or roll MCP's credential guard (`POST …/leaks`), or a pre-receive hook (`POST …/scan`), matched values: a row per folder | `candidates`, `matched`, `guard`, and `breakglass` from a hook |
 | `rotation.failed` | a managed key's scheduled rotation failed: once as a failing run starts (health's `rotation_failing` until one works); a leaked key's rotation failed | `reason`, `via: "leak"` (a leak's) |
 | `rotation.succeeded` | a rotation worked, scheduled, `--now` or for a leak: a managed key's new credential (the row right after its `secret.changed` via `rotation`, in the same transaction), or a live link's resource credential reset | `mode` (`managed` or `live`), `scheduled`, `version` and `change` (managed), `sharing` (the keys holding the same credential, when more than one), `via: "leak"` and `grace_minutes: 0` (a leak's: the leaked credential revoked at once), `revoked: <serial>` (a public certificate's key moving off a certificate roll revoked at the CA) |
@@ -6916,6 +6945,7 @@ isn't in the workspace is 404.
 | `POST /identities/{id}/bootstrap` | `{minutes?, allowed_ips?, credential_hours?}` | 201 `{identity, chain, secret, expires_at}` (admin; a person's; a `machine` identity's single-use `rlbt_…`, "On a VM") |
 | `GET /identities/{id}/machines` | | `MachineChain[]` newest first (admin): `{chain, state, credential_hours, created_at, created_by, refreshed_at, expires_at, revoked_at, revoked_why}`, `state` `waiting` (its bootstrap token not exchanged yet), `live`, `ended` or `revoked`; never a secret |
 | `DELETE /identities/{id}/machines/{chain}` | | 204 (admin, audited as `identity.machine.revoke`): the machine's credential and its logins' tokens revoked at once; it needs a new bootstrap token |
+| `POST /identities/{id}/machines/prune` | | `{pruned}` (admin, audited as `identity.machine.prune` when any): forgets the machines whose last credential has ended, revoked or not; one still within its credential's life stays (it holds its place in the 1,000) |
 | `POST /v1/secrets/login` | `{identity, token}`, `{identity, aws: {method, url, headers, body}}` or `{identity, machine}` | `{token, expires_at, project, identity}` (public; `aws`: a signed `GetCallerIdentity`, "AWS IAM"; `machine`: a machine credential) |
 | `POST /v1/secrets/login/bootstrap` | `{identity, token}` | `{identity, chain, secret, expires_at, refresh_at}` (public: a bootstrap token for a machine credential, `rlmc_…`; 401 for one used already, which revokes its machine) |
 | `POST /v1/secrets/login/refresh` | `{identity, credential}` | as `…/login/bootstrap` (public: the current machine credential for the next; the one presented is spent) |
@@ -6949,7 +6979,7 @@ isn't in the workspace is 404.
 | `GET /v1/secrets/findings` | | `{project, project_name, findings: Finding[]}[]`: every project's findings the caller may read, projects with none left out |
 | `GET /health?code=` | | `Finding[]`, worst first: every standard environment's findings the caller may read (`read` on the project) |
 | `POST /leaks` | `{candidates: string[], leaked?: boolean}` (at most 20,000; `leaked`: the text was published, so what it matches is a leak, answered as in "When a value leaks": it rotates a managed key only where the caller may `write`; 400 with the guard header); header `X-Roll-Guard: 1` from a credential guard (roll MCP's check of what a tool call would write), audited as `secrets.guard` instead of `secrets.scan`; rolld keeps the header only on a request roll MCP's guard tool makes in process, and removes anyone else's | `{index, key, environment, path}[]`: candidates that are values the caller may reveal (`read` on the project) |
-| `POST /scan` | `{candidates: string[], breakglass?: boolean, pusher?: string, refs?: string[]}` (at most 20,000 candidates and 100 refs; `breakglass`: the push it checks goes through anyway, audited as `secrets.scan.breakglass`, 403 unless the project's `breakglass` list names the token or `pusher`; `pusher` and `refs` go in the audit row as text) | `{index, environment, key?, path?}[]`: candidates that are values, in the environments and folders the caller may `scan`, with `key` and `path` only where it may also `read` ("On the git server: a pre-receive hook"); only candidates of 16 characters or more with fair entropy, in each part someone who knows the value's shape wouldn't know, are tried, never sensitive or personal values; 429 past 60 calls or 20,000 tried candidates a minute per caller, or 20,000 a minute or 200,000 an hour per project |
+| `POST /scan` | `{candidates: string[], breakglass?: boolean, pusher?: string, refs?: string[]}` (at most 20,000 candidates and 100 refs; `breakglass`: the push it checks goes through anyway, audited as `secrets.scan.breakglass`, 403 unless the project's `breakglass` list names the token or `pusher`; `pusher` and `refs` go in the audit row as text) | `{index, environment, key?, path?}[]`: candidates that are values, in the environments and folders the caller may `scan`, with `key` and `path` only where it may also `read` ("On the git server: a pre-receive hook"); only candidates of 16 characters or more with fair entropy, in each part someone who knows the value's shape wouldn't know, are tried, never sensitive or personal values; 429 past 60 calls or 200,000 tried candidates a minute, or 1,000,000 an hour, per token and `pusher`, or 2,000,000 a minute or 10,000,000 an hour per project, naming the budget and when it has room again |
 | `POST /validity` | `{credentials: {value, pair?}[]}` (at most 200; `pair`: an AWS access key id's secret access key) | `{validity_checks: "on" \| "off", results: Checked[]}`, one per credential in order (`write` on the project); while checks are off, `results` is empty and nothing is asked. `Checked` is `{fingerprint, kind, result: "live" \| "invalid" \| "unknown", account?, checked_at?, why?, rotator?: "aws-iam" \| "github-app"}` ("Is it live?") |
 | `GET /unstored/{fingerprint}` | | `Checked`: a credential's last check (`read`; 404 when it hasn't been checked) |
 | `GET /kms` | | `{key: string \| null}`: the customer-managed key wrapping the project's data key (admin) |
