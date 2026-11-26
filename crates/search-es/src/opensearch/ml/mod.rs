@@ -743,7 +743,7 @@ async fn deploy(ctx: &Ctx<'_>, on: bool) -> EsResult<Reply> {
 
 /// How a model is run.
 enum Runner {
-    Remote(connector::Connector),
+    Remote(Box<connector::Connector>),
     E5,
 }
 
@@ -752,11 +752,11 @@ fn runner(st: &crate::meta::ClusterState, id: &str, m: &Value) -> EsResult<Runne
         return Ok(Runner::E5);
     }
     if let Some(inline) = m.get("connector") {
-        return connector::from_record(inline, &format!("model:{id}")).map(Runner::Remote);
+        return connector::from_record(inline, &format!("model:{id}")).map(|c| Runner::Remote(Box::new(c)));
     }
     let cid = m.get("connector_id").and_then(Value::as_str).unwrap_or_default();
     let rec = st.metadata.xpack.get(CONNECTORS, cid).ok_or_else(|| connector_missing(cid))?;
-    connector::from_record(rec, cid).map(Runner::Remote)
+    connector::from_record(rec, cid).map(|c| Runner::Remote(Box::new(c)))
 }
 
 /// A remote model that isn't deployed is deployed by its first predict (`auto_deploy`), as
