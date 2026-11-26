@@ -564,11 +564,10 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             right,
             nondet,
             ..
-        } => Box::new(
-            SetOpNode::new(*kind, *all, left.clone(), right.clone())
-                .nondet(nondet)
-                .planned(plan.clone()),
-        ),
+        } => match SortedSetOpNode::of(*kind, *all, left, right, nondet, plan) {
+            Some(n) => n,
+            None => Box::new(SetOpNode::new(*kind, *all, left.clone(), right.clone()).nondet(nondet).planned(plan.clone())),
+        },
         Plan::Append { inputs, inh, .. } => open_append(inputs, inh.is_some(), ctx),
         Plan::Join {
             kind,
@@ -4468,6 +4467,261 @@ impl Node for UniqueNode {
     }
 }
 
+/// A sorted INTERSECT / EXCEPT [ALL] (EXPLAIN's SetOp over its inputs sorted on every column,
+/// `distinct_order`), of values that compare equal only when identical. The first input read
+/// (EXCEPT's left; INTERSECT's with fewer groups) is collected sized as the Sort below it counts
+/// its tuples (one in every 256); while it fits in work_mem the rows go to `SetOpNode`'s
+/// in-memory operation (`SetOpNode::combine`). Past it, each input is sorted through extsort as
+/// PostgreSQL's Sorts below it are (runs on disk), then merged a group of equal rows at a time
+/// (setop_retrieve_sorted): a group the first input has comes out as many times as the
+/// operation keeps it.
+struct SortedSetOpNode {
+    kind: SetOpKind,
+    all: bool,
+    /// The input read first (EXCEPT's left; INTERSECT's with fewer groups) and the other,
+    /// until opened; whether the first is the right one.
+    first: Option<Arc<Plan>>,
+    second: Option<Arc<Plan>>,
+    swapped: bool,
+    keys: Vec<SortKey>,
+    types: Vec<crate::types::DataType>,
+    left: Option<BoxNode>,
+    right: Option<BoxNode>,
+    /// The next row of each, read ahead.
+    l: Option<Row>,
+    r: Option<Row>,
+    /// The group being given out: its row and how many more copies of it.
+    out: Option<(Row, usize)>,
+    done: bool,
+    /// The first input fit in work_mem: the operation's rows, made in memory.
+    mem: Option<std::vec::IntoIter<Row>>,
+    set: SetOpNode,
+}
+
+impl SortedSetOpNode {
+    #[inline(never)]
+    fn of(kind: SetOpKind, all: bool, left: &Arc<Plan>, right: &Arc<Plan>, nondet: &[Option<String>], plan: &Arc<Plan>) -> Option<BoxNode> {
+        if !matches!(kind, SetOpKind::Intersect | SetOpKind::Except) || nondet.iter().any(Option::is_some) {
+            return None;
+        }
+        if matches!(**left, Plan::Context { .. }) || matches!(**right, Plan::Context { .. }) {
+            return None;
+        }
+        let types = row_types(left);
+        if types.is_empty()
+            || types.iter().any(|t| *t == crate::types::DataType::Unknown || t.holds_composite() || !equal_is_identical(t))
+        {
+            return None;
+        }
+        // (Whether EXPLAIN shows it sorted, and which input it reads first, are found as the
+        // in-memory operation finds them, when they are needed: a SetOp that fits costs what
+        // `SetOpNode`'s does.)
+        Some(Box::new(SortedSetOpNode {
+            kind,
+            all,
+            first: Some(left.clone()),
+            second: Some(right.clone()),
+            swapped: false,
+            keys: Vec::new(),
+            types,
+            left: None,
+            right: None,
+            l: None,
+            r: None,
+            out: None,
+            done: false,
+            mem: None,
+            set: SetOpNode::new(kind, all, left.clone(), right.clone()).nondet(nondet).planned(plan.clone()),
+        }))
+    }
+
+    /// The keys a SetOp EXPLAIN shows over sorted inputs sorts them on, when they are every
+    /// column (`distinct_order`); None: a hashed one.
+    fn sort_keys(plan: &Arc<Plan>, types: &[crate::types::DataType], ctx: &ExecCtx) -> Option<Vec<SortKey>> {
+        let cols = crate::sql::explain::distinct_order(plan, ctx)?;
+        let mut covered = vec![false; types.len()];
+        for &c in &cols {
+            *covered.get_mut(c)? = true;
+        }
+        if covered.contains(&false) {
+            return None;
+        }
+        Some(
+            cols.iter()
+                .map(|&c| SortKey { expr: Expr::Col(c, types[c].clone()), desc: false, nulls_first: false, using: None })
+                .collect(),
+        )
+    }
+
+    /// `plan`'s rows sorted on the keys.
+    fn sorted(&self, plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
+        ctx.statement(|| sort_all(open(plan, ctx)?, &self.keys, self.types.clone(), None, ctx))
+    }
+
+    fn cmp(keys: &[SortKey], a: &Row, b: &Row, ctx: &ExecCtx) -> Result<Ordering> {
+        for k in keys {
+            let Expr::Col(c, _) = k.expr else { unreachable!("column keys") };
+            match compare_values(&a[c], &b[c], k, ctx)? {
+                Ordering::Equal => {}
+                o => return Ok(o),
+            }
+        }
+        Ok(Ordering::Equal)
+    }
+
+    /// The first input read; within work_mem, the operation run in memory, else both inputs
+    /// sorted: an empty first input leaves the other unread.
+    #[inline(never)]
+    fn start(&mut self, ctx: &ExecCtx) -> Result<()> {
+        let (mut first, mut second) = (self.first.take().unwrap(), self.second.take().unwrap());
+        self.swapped = self.kind == SetOpKind::Intersect && crate::sql::explain::setop_shape(&first, &second, true, ctx).0;
+        if self.swapped {
+            std::mem::swap(&mut first, &mut second);
+        }
+        let (types, plan) = (&self.types, self.set.plan.as_ref().expect("a planned SetOp"));
+        let held = ctx.temp_cleanup.run(|| {
+            ctx.statement(|| {
+                let mut node = open(&first, ctx)?;
+                let allowed = super::workmem::work_mem(ctx);
+                // (One row's tuple in every `SAMPLE`, times `SAMPLE`, as a Sort counts it: the
+                // tuple and its SortTuple.)
+                const SAMPLE: usize = 256;
+                let mut est = 0i64;
+                // (None once a hashed SetOp is past work_mem: held in memory, as before.)
+                let mut sized = Some(allowed);
+                let mut rows = Vec::new();
+                while let Some(r) = node.next(ctx)? {
+                    if let Some(allowed) = sized
+                        && (rows.len() + 1).is_multiple_of(SAMPLE)
+                    {
+                        let t = super::workmem::minimal_tuple_len_cols(&r, types, None, ctx);
+                        est += SAMPLE as i64 * (super::workmem::maxalign(t) + 16 + 24);
+                        if est > allowed {
+                            let Some(keys) = Self::sort_keys(plan, types, ctx) else {
+                                sized = None;
+                                rows.push(r);
+                                continue;
+                            };
+                            rows.push(r);
+                            let rest = Box::new(PrefixNode { rows: rows.into_iter(), input: Some(node) });
+                            return Ok(Err((sort_all(rest, &keys, types.clone(), None, ctx)?, keys)));
+                        }
+                    }
+                    rows.push(r);
+                }
+                Ok(Ok(rows))
+            })
+        })?;
+        let mut a = match held {
+            Ok(rows) => {
+                if rows.is_empty() {
+                    self.done = true;
+                    return Ok(());
+                }
+                let b = collect(&second, ctx, None)?;
+                let (l, r) = if self.swapped { (b, rows) } else { (rows, b) };
+                self.mem = Some(self.set.combine(l, r, ctx)?.into_iter());
+                return Ok(());
+            }
+            Err((sorted, keys)) => {
+                self.keys = keys;
+                sorted
+            }
+        };
+        let ra = a.next(ctx)?;
+        if ra.is_none() {
+            self.done = true;
+            return Ok(());
+        }
+        let mut b = self.sorted(&second, ctx)?;
+        let rb = b.next(ctx)?;
+        if self.swapped {
+            (self.left, self.l, self.right, self.r) = (Some(b), rb, Some(a), ra);
+        } else {
+            (self.left, self.l, self.right, self.r) = (Some(a), ra, Some(b), rb);
+        }
+        Ok(())
+    }
+
+    /// The next group of the left input's rows: its row and how many times it comes out.
+    fn group(&mut self, ctx: &ExecCtx) -> Result<Option<(Row, usize)>> {
+        loop {
+            let Some(row) = self.l.take() else { return Ok(None) };
+            let mut nl = 1usize;
+            let (keys, left) = (&self.keys, self.left.as_mut().unwrap());
+            loop {
+                ctx.check()?;
+                match left.next(ctx)? {
+                    Some(x) => {
+                        if Self::cmp(keys, &x, &row, ctx)? == Ordering::Equal {
+                            nl += 1;
+                        } else {
+                            self.l = Some(x);
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+            let mut nr = 0usize;
+            while let Some(x) = self.r.take() {
+                match Self::cmp(&self.keys, &x, &row, ctx)? {
+                    Ordering::Less => {}
+                    Ordering::Equal => nr += 1,
+                    Ordering::Greater => {
+                        self.r = Some(x);
+                        break;
+                    }
+                }
+                ctx.check()?;
+                self.r = self.right.as_mut().unwrap().next(ctx)?;
+            }
+            let n = match (self.kind, self.all) {
+                (SetOpKind::Intersect, true) => nl.min(nr),
+                (SetOpKind::Intersect, false) => usize::from(nr > 0),
+                (_, true) => nl.saturating_sub(nr),
+                (_, false) => usize::from(nr == 0),
+            };
+            if n > 0 {
+                return Ok(Some((row, n)));
+            }
+        }
+    }
+}
+
+impl Node for SortedSetOpNode {
+    fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+        if self.first.is_some() {
+            self.start(ctx)?;
+        }
+        if let Some(m) = &mut self.mem {
+            return Ok(m.next());
+        }
+        if self.done {
+            return Ok(None);
+        }
+        // (A group kept more than once: its other copies, the last moved out.)
+        if let Some((row, n)) = self.out.as_mut() {
+            if *n > 1 {
+                *n -= 1;
+                return Ok(Some(row.clone()));
+            }
+            return Ok(self.out.take().map(|(r, _)| r));
+        }
+        match self.group(ctx)? {
+            Some((row, 1)) => Ok(Some(row)),
+            Some((row, n)) => {
+                self.out = Some((row.clone(), n - 1));
+                Ok(Some(row))
+            }
+            None => {
+                self.done = true;
+                Ok(None)
+            }
+        }
+    }
+}
+
 struct SetOpNode {
     kind: SetOpKind,
     all: bool,
@@ -4548,6 +4802,12 @@ impl SetOpNode {
         } else {
             (collect(&self.left, ctx, None)?, collect(&self.right, ctx, None)?)
         };
+        self.combine(left, right, ctx)
+    }
+
+    /// The operation over its inputs' rows (INTERSECT's and EXCEPT's in the order
+    /// nodeSetOp reads them).
+    fn combine(&self, left: Vec<Row>, right: Vec<Row>, ctx: &ExecCtx) -> Result<Vec<Row>> {
         // Rows compare by their keys: strings under a nondeterministic collation by what it
         // finds equal, bpchar without trailing spaces.
         let types = row_types(&self.left);
