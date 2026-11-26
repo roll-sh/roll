@@ -457,9 +457,21 @@ pub struct PreviewVisualReview {
     /// The head whose screenshots it's about (what an acceptance names).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
-    /// Each page that differs, and who accepted it at this head.
+    /// Each page that differs, and who accepted it at this head (with `untaken`, one more at
+    /// [`UNTAKEN_STORIES`]: those stories, accepted as not taken).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pages: Vec<PreviewPageReview>,
+    /// Stories the change touched that its preview's run didn't take: unreviewed.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub untaken: u32,
+}
+
+/// A visual review's entry (`pages[].path`) for the stories the change touched that the run
+/// didn't take: accepted as not taken, like a page.
+pub const UNTAKEN_STORIES: &str = "stories:untaken";
+
+fn is_zero_u32(n: &u32) -> bool {
+    *n == 0
 }
 
 /// One page of a visual review (`path` `""`: the first page).
@@ -474,6 +486,16 @@ pub struct PreviewPageReview {
 }
 
 impl PreviewVisualReview {
+    /// How many stories the change touched weren't taken, when nobody accepted them as not taken.
+    pub fn untaken_waiting(&self) -> Option<u32> {
+        (self.untaken > 0 && self.pages.iter().any(|p| p.path == UNTAKEN_STORIES && p.by.is_none())).then_some(self.untaken)
+    }
+
+    /// Whether a page (not the untaken stories) still waits for someone.
+    pub fn pages_waiting(&self) -> bool {
+        self.pages.iter().any(|p| p.path != UNTAKEN_STORIES && p.by.is_none())
+    }
+
     /// `(accepted, changed)` pages, when some but not all are accepted.
     pub fn partly(&self) -> Option<(usize, usize)> {
         let done = self.pages.iter().filter(|p| p.by.is_some()).count();

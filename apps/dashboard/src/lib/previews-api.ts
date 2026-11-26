@@ -143,6 +143,8 @@ export interface Preview {
     /** Each page that differs (`path` `""`: the first page) and who accepted it at this head: the change is accepted once every one is. */
     /** `group`: the pages changed the same way share one (accepted together with `…/visual/accept {group}`). */
     pages: { path: string; percent: number; by: string | null; at: number | null; unstable?: boolean; group?: string | null }[];
+    /** Stories the change touched that the run didn't take (past its 40, or out of its time): one more entry in `pages`, at `UNTAKEN_STORIES`, accepted as not taken. */
+    untaken?: number;
   } | null;
   /** It also has a phone-width screenshot. */
   phone_screenshot?: boolean;
@@ -260,6 +262,9 @@ export interface PageCheck {
   /** The interaction or assertion a failed one stopped at (`expect.toBeVisible`), from Storybook's interactions log. */
   play_step?: string | null;
 }
+
+/** The visual review's entry for the stories a change touched that its run didn't take. */
+export const UNTAKEN_STORIES = "stories:untaken";
 
 /** A page state (`github.states`): a page of the first service's, reached by its steps. */
 export interface PageState {

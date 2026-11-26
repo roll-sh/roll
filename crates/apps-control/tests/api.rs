@@ -3265,6 +3265,25 @@ async fn a_status_page_shows_the_projects_checks() {
     assert_eq!((at("/status.json").await, call(&w.api, "GET", &own, None).await.0), (StatusCode::NOT_FOUND, StatusCode::NOT_FOUND));
 }
 
+/// A project's board keeps the charts someone picked, in order: only the project's own services,
+/// and metrics there are.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_projects_board_keeps_its_panels() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "web", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap();
+    let board = format!("/v1/apps/projects/{}/board", w.project);
+    assert_eq!(call(&w.api, "GET", &board, None).await.1, json!({"panels": []}));
+    let panels = json!([{"service": id, "metric": "p95_ms"}, {"title": "Checkouts", "service": id, "environment": "staging", "metric": "app:checkouts_total"}]);
+    let (st, b) = call(&w.api, "PUT", &board, Some(json!({"panels": panels}))).await;
+    assert_eq!((st, b["panels"][0]["environment"].as_str(), b["panels"][1]["title"].as_str()), (StatusCode::OK, Some("production"), Some("Checkouts")), "{b}");
+    assert_eq!(call(&w.api, "GET", &board, None).await.1, b);
+    assert_eq!(call(&w.api, "PUT", &board, Some(json!({"panels": [{"service": id, "metric": "rm -rf"}]}))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(call(&w.api, "PUT", &board, Some(json!({"panels": [{"service": "svc_notmine00000", "metric": "cpu"}]}))).await.0, StatusCode::BAD_REQUEST, "only the project's own");
+    assert_eq!(call(&w.api, "PUT", &board, Some(json!({"panels": []}))).await.1, json!({"panels": []}));
+    assert_eq!(call(&w.api, "GET", &board, None).await.1, json!({"panels": []}));
+}
+
 /// Traffic mirroring (Envoy's): a copy of a share of bodiless requests goes to another
 /// environment of the service, in its own access log, while the visitor gets production's answer;
 /// a POST is never copied.
@@ -3308,11 +3327,12 @@ async fn a_mirror_copies_requests_to_another_environment() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn matching_log_lines_are_a_metric() {
     let w = world().await;
-    let (svc, _) = image_service(&w, "api", json!({"port": 80, "min_instances": 1, "log_metrics": [{"name": "payments_failed", "pattern": "Payment failed"}]})).await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80, "min_instances": 1, "log_metrics": [{"name": "payments_failed", "pattern": "\"Payment failed\" -fraud OR declined"}]})).await;
     let id = svc["id"].as_str().unwrap().to_string();
     assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"log_metrics": [{"name": "9bad", "pattern": "x"}]}}))).await.0, StatusCode::BAD_REQUEST);
     let out = w.apps.logs.sink(format!("env:{id}/production"), apps_control::logs::Stream::Stdout);
-    for line in ["payment failed: card declined", "PAYMENT FAILED: timeout", "payment ok", "payment failed: fraud"] {
+    // The Logs tab's search: a phrase without a word, or another word.
+    for line in ["payment failed: card declined", "PAYMENT FAILED: timeout", "payment ok", "payment failed: fraud", "refund declined"] {
         out.line(line);
     }
     let live = w.apps.live(&id, "production");

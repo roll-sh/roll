@@ -162,25 +162,24 @@ fn postgres() -> Router {
         )
         .route("/v1/search/clusters/{id}", get(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }).delete(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }))
         .route("/v1/search/clusters/{id}/branches", post(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }))
+        // What roll secrets would answer the caller inside, for a password stored in a secret: the
+        // grant handed over, on the folder the body names and on two it doesn't.
         .route(
             "/v1/search/clusters/{id}/password",
-            post(|ext: axum::http::Extensions| async move { axum::Json(json!({ "reveal": ext.get::<roll_auth::Capable>().is_some_and(|c| c.has(roll_auth::scope::Action::Reveal)) })) }),
-        )
-        .route("/v1/search/clusters/{id}/keys", post(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }))
-        // What roll secrets would answer the caller inside: the grant handed over, on the folder
-        // the body names and on two it doesn't.
-        .route(
-            "/v1/search/clusters/{id}/inference/secrets",
-            post(|ext: axum::http::Extensions, body: axum::Json<Value>| async move {
+            post(|ext: axum::http::Extensions, body: axum::body::Bytes| async move {
+                let reveal = ext.get::<roll_auth::Capable>().is_some_and(|c| c.has(roll_auth::scope::Action::Reveal));
+                let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                let Some(project) = body["secret"]["project"].as_str().map(String::from) else { return axum::Json(json!({ "reveal": reveal })) };
                 let g = roll_auth::Grant::on(&ext).unwrap();
-                let project = body["secret"]["project"].as_str().unwrap_or("").to_string();
-                let at = |env: &str, path: &str| {
+                let at = |env: &str, path: &str, action: roll_auth::scope::Action| {
                     let r = roll_auth::scope::Resource { product: "secrets".into(), id: Some(project.clone()), project: Some(project.clone()), environment: Some(env.into()), path: Some(path.into()), ..Default::default() };
-                    g.allows(&r, roll_auth::scope::Action::Reveal) == roll_auth::scope::Outcome::Allow
+                    g.allows(&r, action) == roll_auth::scope::Outcome::Allow
                 };
-                axum::Json(json!({ "here": at("production", "/ai"), "below": at("production", "/ai/x"), "elsewhere": at("production", "/"), "staging": at("staging", "/ai") }))
+                use roll_auth::scope::Action::{Read, Write};
+                axum::Json(json!({ "here": at("production", "/ai", Write), "read": at("production", "/ai", Read), "below": at("production", "/ai/x", Write), "elsewhere": at("production", "/", Write), "staging": at("staging", "/ai", Write) }))
             }),
         )
+        .route("/v1/search/clusters/{id}/keys", post(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }))
         .route("/v1/search/clusters/{id}/indices", get(|| async { axum::Json(json!([])) }))
         .route("/v1/search/clusters/{id}/request", post(|ext: axum::http::Extensions| async move { axum::Json(json!({ "reveal": ext.get::<roll_auth::Capable>().is_some_and(|c| c.has(roll_auth::scope::Action::Reveal)) })) }))
         .route("/v1/search/clusters/{id}/indices/{index}/bulk", post(|body: String| async move { axum::Json(json!({ "lines": body.lines().count() })) }))
@@ -3322,33 +3321,55 @@ async fn naming_lists_only_tokens_whose_rules_can_name_a_project() {
     assert_eq!(named(&Store::new(db).unwrap()), want);
 }
 
-/// A secret a route reads as the caller (search's inference endpoint keyed by a roll secret) is
-/// asked for at the gate: roll secrets treats `ask` as no inside, so before this an `ask` grant
-/// was refused with nothing to approve. Approved, the grant handed over allows exactly that folder
-/// in that environment, nothing beside it; a grant that allows it needs no approval, and one with
-/// no rule for it is refused.
+/// A secret a route writes once as the caller (search's admin password rotated into one) is asked
+/// for at the gate: roll secrets treats `ask` as no inside, so before #1113 an `ask` grant was
+/// refused with nothing to approve. The approval names the secret even when the route's own action
+/// asks too (an approval of "admin on the cluster" never hands the secret over). Approved, the
+/// grant handed over allows exactly that folder in that environment; one that allows it needs no
+/// approval, one with no rule for it is refused, and a pattern for an environment names nothing.
 #[tokio::test]
-async fn a_secret_read_as_the_caller_is_asked_for_and_only_it_is_allowed() {
+async fn a_secret_written_as_the_caller_is_asked_for_and_only_it_is_allowed() {
     let d = Daemon::new(50);
     let project = d.workspace.create("", "shop", "", None).unwrap().id;
-    let body = json!({ "inference_id": "emb", "task_type": "text_embedding", "config": { "service": "openai" }, "secret": { "project": project, "environment": "production", "path": "ai/", "key": "OPENAI_API_KEY" } });
-    let path = "/v1/search/clusters/cl_home/inference/secrets";
-    let search = json!({ "product": "search", "resources": "*", "actions": { "admin": "allow" } });
-    let (asks, _) = d.token(json!([search, { "product": "secrets", "resources": [{ "project": project }], "actions": { "reveal": "ask" } }]), json!({})).await;
-    let (s, out) = d.call(&asks, Method::POST, path, Some(body.clone())).await;
-    assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
-    let id = out["approval"].as_str().unwrap().to_string();
-    let (_, asked) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{id}"), None).await;
-    assert_eq!((asked["product"].as_str(), asked["action"].as_str(), asked["environment"].as_str()), (Some("secrets"), Some("reveal"), Some("production")), "{asked}");
-    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{id}/approve"), None).await.0, StatusCode::OK);
-    let (s, seen) = d.send(&asks, Method::POST, path, Some(body.clone()), &[("x-roll-approval", &id)]).await;
+    let body = |env: &str| json!({ "secret": { "project": project, "environment": env, "path": "/ai", "key": "ADMIN_PASSWORD" } });
+    let path = "/v1/search/clusters/cl_home/password";
+    let search = |effect: &str| json!({ "product": "search", "resources": "*", "actions": { "admin": effect, "reveal": "allow" } });
+    let write_asks = json!({ "product": "secrets", "resources": [{ "project": project }], "actions": { "write": "ask" } });
+    let asked = |token: String| {
+        let (d, body) = (&d, body("production"));
+        async move {
+            let (s, out) = d.call(&token, Method::POST, path, Some(body)).await;
+            assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
+            let id = out["approval"].as_str().unwrap().to_string();
+            let (_, asked) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{id}"), None).await;
+            assert_eq!((asked["product"].as_str(), asked["action"].as_str(), asked["environment"].as_str()), (Some("secrets"), Some("write"), Some("production")), "{asked}");
+            id
+        }
+    };
+    // The route's own action asks too: the approval still names the secret.
+    let (tie, _) = d.token(json!([search("ask"), write_asks]), json!({})).await;
+    asked(tie).await;
+    let (asks, _) = d.token(json!([search("allow"), write_asks]), json!({})).await;
+    let id = asked(asks.clone()).await;
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{id}/approve"), Some(json!({ "remember": "1h" }))).await.0, StatusCode::OK);
+    let (s, seen) = d.send(&asks, Method::POST, path, Some(body("production")), &[("x-roll-approval", &id)]).await;
     assert_eq!(s, StatusCode::OK, "{seen}");
-    assert_eq!(seen, json!({ "here": true, "below": true, "elsewhere": false, "staging": false }));
-    let (allows, _) = d.token(json!([search, { "product": "secrets", "resources": [{ "project": project }], "actions": { "reveal": "allow" } }]), json!({})).await;
-    let (s, seen) = d.call(&allows, Method::POST, path, Some(body.clone())).await;
+    assert_eq!(seen, json!({ "here": true, "read": true, "below": true, "elsewhere": false, "staging": false }));
+    // Remembered, it allows that folder again with no approval (and reading it, which the product
+    // does), and nothing beside it: another folder asks again.
+    let (s, seen) = d.call(&asks, Method::POST, path, Some(body("production"))).await;
+    assert_eq!((s, seen["read"].as_bool(), seen["elsewhere"].as_bool()), (StatusCode::OK, Some(true), Some(false)), "{seen}");
+    let mut root = body("production");
+    root["secret"]["path"] = json!("/");
+    let (s, out) = d.call(&asks, Method::POST, path, Some(root)).await;
+    assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
+    let (allows, _) = d.token(json!([search("allow"), { "product": "secrets", "resources": [{ "project": project }], "actions": { "write": "allow" } }]), json!({})).await;
+    let (s, seen) = d.call(&allows, Method::POST, path, Some(body("production"))).await;
     assert_eq!((s, seen["here"].as_bool()), (StatusCode::OK, Some(true)), "{seen}");
-    let (none, _) = d.token(json!([search]), json!({})).await;
-    let (s, out) = d.call(&none, Method::POST, path, Some(body)).await;
+    let (s, out) = d.call(&allows, Method::POST, path, Some(body("prod*"))).await;
+    assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("forbidden")), "{out}");
+    let (none, _) = d.token(json!([search("allow")]), json!({})).await;
+    let (s, out) = d.call(&none, Method::POST, path, Some(body("production"))).await;
     assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("forbidden")), "{out}");
 }
 
