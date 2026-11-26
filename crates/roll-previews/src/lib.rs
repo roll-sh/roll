@@ -1281,6 +1281,9 @@ pub struct VisualReview {
     pub reason: Option<String>,
 }
 
+/// What a masked base's branch is named after (`pvbase-<rules>-<when>`): no preview's name starts so.
+pub const MASK_BASE_PREFIX: &str = "pvbase-";
+
 /// The visual review's entry for the stories a change touched that its run didn't take.
 pub use code_control::model::UNTAKEN_STORIES;
 
