@@ -313,7 +313,61 @@ struct EstHeap {
     limit: u32,
     /// Rows whose latest version has a lock's xmax (`estlocks`), by their keys' hashes.
     locks: estlocks::Locks,
+    /// The pages updates changed (`EstPage`), at most `PAGES_SEEN_MAX`; in memory only.
+    seen: FastMap<u32, EstPage>,
+    /// The page of each updated row's newest version when it is known (by `key_hash`; at
+    /// most `ROWS_SEEN_MAX`): `moved` goes when a version's place isn't known (`unplace`),
+    /// this only loses that row.
+    seen_rows: HashedMap<u32>,
+    /// The kept pages a VACUUM left room on, in page order, and the next one to look at: the
+    /// free space map an update's new version finds a page in when its own has no room
+    /// (`fsm_page`).
+    fsm: Vec<u32>,
+    fsm_at: usize,
 }
+
+/// A page of a table too big to model that updates changed: what heap_update and an
+/// on-access prune (heap_page_prune_opt) find there, for whether an update's new version stays
+/// on its old one's page (a HOT update, or not when an indexed column changed) and how many
+/// dead tuples a prune reclaims (pg_stat's n_tup_hot_upd, n_tup_newpage_upd, n_dead_tup). A
+/// page first changed is taken as loaded: rows of the new version's size up to the
+/// fillfactor. The page being filled and the tail keep their room and line pointers in
+/// `EstHeap::room` / `Tail`; the rest here.
+#[derive(Clone, Default)]
+struct EstPage {
+    /// pd_upper - pd_lower, and the line pointers (all, and those unused).
+    free: usize,
+    lps: u16,
+    unused: u16,
+    /// Line pointers a prune left dead (a VACUUM frees them).
+    lp_dead: u16,
+    /// PD_PAGE_FULL: an update found no room here.
+    full: bool,
+    /// Versions an update left dead here, not pruned yet: (storage, the updater's xid, what
+    /// a prune leaves of the line pointer).
+    dead: Vec<(usize, u64, Pruned)>,
+    /// The rows (`key_hash`) whose newest version here is heap-only (a HOT update's).
+    heap_only: Vec<u64>,
+}
+
+/// What a prune leaves of a dead version's line pointer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pruned {
+    /// A HOT chain's root: a redirect (the tuple reclaimed).
+    Redirect,
+    /// A heap-only member of a HOT chain: unused (reclaimed, its line pointer free again).
+    Unused,
+    /// A version an update moved off the page, or changed an indexed column of: LP_DEAD,
+    /// until a VACUUM removes its index entries (not reclaimed: pg_stat counts it dead).
+    Dead,
+}
+
+/// The pages an estimate keeps `EstPage`s of: past them, an update of a row on a page
+/// not kept goes on as before (to the page being filled).
+const PAGES_SEEN_MAX: usize = 1 << 16;
+
+/// The updated rows an estimate keeps the pages of (`EstHeap::seen_rows`).
+const ROWS_SEEN_MAX: usize = 1 << 18;
 
 /// A map keyed by hashes already mixed (`key_hash`): used as they are.
 type HashedMap<V> = std::collections::HashMap<u64, V, std::hash::BuildHasherDefault<Hashed>>;
@@ -436,7 +490,178 @@ impl EstHeap {
             log: estkeep::Log::default(),
             limit: 0,
             locks: Default::default(),
+            seen: FastMap::default(),
+            seen_rows: HashedMap::default(),
+            fsm: Vec::new(),
+            fsm_at: 0,
         }
+    }
+
+    /// A page the free space map gives a new version of `len` bytes that its old one's page
+    /// (`not`) had no room for: the next kept page a VACUUM left room on that has room for
+    /// it, as RelationGetBufferForTuple finds one (GetPageWithFreeSpace). Its TID there.
+    fn fsm_page(&mut self, len: usize, not: u32) -> Option<Tid> {
+        let size = heapsim::maxalign(len);
+        let need = size + heapsim::ITEM_ID;
+        while let Some(&page) = self.fsm.get(self.fsm_at) {
+            if page != not
+                && let Some(p) = self.seen.get_mut(&page)
+                && (page != self.fill || self.pages == 0)
+                && self.tail.as_ref().is_none_or(|t| t.page != page)
+                && need <= p.free
+                && (p.unused > 0 || (p.lps as usize) < relsize::MAX_HEAP_TUPLES)
+            {
+                if p.unused > 0 {
+                    p.unused -= 1;
+                    p.free -= size;
+                } else {
+                    p.free -= need;
+                    p.lps += 1;
+                }
+                self.reusable = self.reusable.saturating_sub(need);
+                return Some((page, p.lps));
+            }
+            self.fsm_at += 1;
+        }
+        None
+    }
+
+    /// heap_update of a row whose version is on `page` (`row`: its key's hash), its new
+    /// version `len` bytes, by transaction `xid`, `hot`: no indexed column changes; prunable,
+    /// versions dead to every snapshot (xids below `horizon`). First heap_page_prune_opt as
+    /// the update's read of the page runs it (a page marked full, or with less than its
+    /// fillfactor's room or a tenth of a page free), then the new version stays on the page
+    /// when it fits. Some((the new version's TID when it stays, tuples the prune reclaimed)),
+    /// None: the page isn't kept (`PAGES_SEEN_MAX`).
+    fn update_on(&mut self, page: u32, row: u64, len: usize, fillfactor: usize, xid: u64, horizon: u64, hot: bool) -> Option<(Option<Tid>, u64)> {
+        let size = heapsim::maxalign(len);
+        let need = size + heapsim::ITEM_ID;
+        let reserve = heapsim::BLCKSZ * (100 - fillfactor.min(100)) / 100;
+        let minfree = reserve.max(heapsim::BLCKSZ / 10);
+        let fill = self.pages > 0 && page == self.fill;
+        let tail = !fill && self.tail.as_ref().is_some_and(|t| t.page == page);
+        if !self.seen.contains_key(&page) && self.seen.len() >= PAGES_SEEN_MAX {
+            return None;
+        }
+        let p = self.seen.entry(page).or_insert_with(|| {
+            let n = ((heapsim::BLCKSZ - heapsim::PAGE_HEADER - reserve) / need).min(relsize::MAX_HEAP_TUPLES);
+            EstPage { free: heapsim::BLCKSZ - heapsim::PAGE_HEADER - n * need, lps: n as u16, ..Default::default() }
+        });
+        let (mut free, mut lps) = if fill {
+            (self.room, self.items)
+        } else if tail {
+            let t = self.tail.as_ref().expect("the tail");
+            (t.room, t.items)
+        } else {
+            (p.free, p.lps)
+        };
+        let mut reclaimed = 0;
+        if (p.full || free.saturating_sub(heapsim::ITEM_ID) < minfree) && p.dead.iter().any(|d| d.1 < horizon) {
+            p.dead.retain(|&(size, x, kind)| {
+                if x >= horizon {
+                    return true;
+                }
+                free += size;
+                match kind {
+                    Pruned::Redirect => reclaimed += 1,
+                    Pruned::Unused => {
+                        reclaimed += 1;
+                        p.unused += 1;
+                    }
+                    Pruned::Dead => p.lp_dead += 1,
+                }
+                false
+            });
+            p.full = false;
+        }
+        let only = p.heap_only.iter().position(|&h| h == row);
+        let fits = need <= free && (p.unused > 0 || (lps as usize) < relsize::MAX_HEAP_TUPLES);
+        let stays = fits && hot;
+        let kind = match (only, stays) {
+            (Some(_), _) => Pruned::Unused,
+            (None, true) => Pruned::Redirect,
+            (None, false) => Pruned::Dead,
+        };
+        p.dead.push((size, xid, kind));
+        let tid = if fits {
+            if p.unused > 0 {
+                p.unused -= 1;
+                free -= size;
+            } else {
+                free -= need;
+                lps += 1;
+            }
+            Some((page, lps))
+        } else {
+            p.full = true;
+            None
+        };
+        match (only, stays) {
+            (None, true) => p.heap_only.push(row),
+            (Some(i), false) => {
+                p.heap_only.swap_remove(i);
+            }
+            _ => {}
+        }
+        if fill {
+            self.room = free;
+            self.items = lps;
+        } else if tail {
+            let t = self.tail.as_mut().expect("the tail");
+            t.room = free;
+            t.items = lps;
+        } else {
+            p.free = free;
+            p.lps = lps;
+        }
+        Some((tid, reclaimed))
+    }
+
+    /// The page of the row under `key`: its moved version's, else `stored` (the TID its
+    /// stored version carries), else its run's.
+    fn page_of(&self, key: &[u8], stored: Option<Tid>) -> Option<u32> {
+        let h = key_hash(key);
+        if let Some(&p) = self.seen_rows.get(&h) {
+            return Some(p);
+        }
+        if let Some(t) = self.moved.get(&h) {
+            return Some(t.0);
+        }
+        stored.or_else(|| self.rowid_tid(key)).map(|t| t.0)
+    }
+
+    /// The newest version of updated row `row` (`key_hash`) went in at `tid` (None: its
+    /// place isn't known).
+    fn row_seen(&mut self, row: u64, tid: Option<Tid>) {
+        match tid {
+            Some(t) if self.seen_rows.len() < ROWS_SEEN_MAX || self.seen_rows.contains_key(&row) => {
+                self.seen_rows.insert(row, t.0);
+            }
+            _ => {
+                self.seen_rows.remove(&row);
+            }
+        }
+    }
+
+    /// A lazy VACUUM: the dead versions and line pointers it removes on the kept pages
+    /// (their line pointers unused, their room free).
+    fn vacuum_seen(&mut self, horizon: u64) {
+        for p in self.seen.values_mut() {
+            p.dead.retain(|&(size, x, _)| {
+                if x >= horizon {
+                    return true;
+                }
+                p.free += size;
+                p.unused += 1;
+                false
+            });
+            p.unused += std::mem::take(&mut p.lp_dead);
+            p.full = false;
+        }
+        let mut fsm: Vec<u32> = self.seen.iter().filter(|(_, p)| p.free > heapsim::ITEM_ID).map(|(&page, _)| page).collect();
+        fsm.sort_unstable();
+        self.fsm = fsm;
+        self.fsm_at = 0;
     }
 
     /// A tuple of `len` bytes written (RelationGetBufferForTuple keeps a page's fillfactor
@@ -2724,7 +2949,7 @@ fn untracked_insert(
         }
         place_batch_past(db, bkey);
     }
-    untracked_write(t, indexes, key, row, None, vals, ctx, Some(tuple))
+    Ok(untracked_write(t, indexes, key, row, None, vals, ctx, Some(tuple))?.tid)
 }
 
 thread_local! {
@@ -2766,7 +2991,7 @@ fn untracked_write(
     vals: Option<&[Option<Vec<Value>>]>,
     ctx: &ExecCtx,
     len: Option<usize>,
-) -> Result<Option<Tid>> {
+) -> Result<Updated> {
     let (len, exts) = layout_len(t, row, ctx, &HashSet::new(), len);
     let (old_key, old) = (old.map(|o| o.0), old.map(|o| o.1));
     let changed = |c: usize| old.is_none_or(|o| !same(o.get(c), row.get(c)));
@@ -2780,18 +3005,64 @@ fn untracked_write(
     // version's page, or in space a VACUUM freed, with no indexed column changed).
     let entries = est_entries(t, indexes, row, old, vals, ctx)?;
     let txn = ctx.txn.borrow().id;
+    // (An update: the TID its old version is stored with, when it is; the updater; the
+    // horizon a prune removes versions below; whether it keeps every index's columns, the
+    // modelled heap's HOT test: `EstHeap::update_on`.)
+    let upd = match (old_key, old) {
+        (Some(k), Some(o)) => {
+            let stored = ctx.txn.borrow().get_raw(k)?.as_deref().and_then(super::scan::stored_tid);
+            let xid = ctx.txn.borrow_mut().cur_xid();
+            let hot_ok = k == key && indexes.iter().filter(|b| b.index.method != "brin").all(|bix| columns_unchanged(bix, o, row));
+            Some((k, stored, xid, ctx.sess.db.xids().horizon(), hot_ok))
+        }
+        _ => None,
+    };
     let mut rf = ctx.sess.db.relfiles.of(t.oid).write();
     let RelFiles { estimated, bulk, est_btrees, .. } = &mut *rf;
     let mut tid = None;
     let mut reused = false;
+    let mut stats = Updated::default();
+    let mut reclaimed = 0;
     if let Some(e) = estimated.get_mut(&t.oid) {
+        let ff = heap_fillfactor(t);
         // (A bulk load's, COPY's, extends the file as its model did: `add_in`.)
         let put = match old_key {
             Some(k) => Put::Update(k),
             None => Put::Row(Some(key)),
         };
-        tid = e.add_in(len, heap_fillfactor(t), Some((bulk, (t.oid, txn))), put);
+        let on = upd.and_then(|(k, stored, xid, horizon, hot_ok)| {
+            let page = e.page_of(k, stored)?;
+            Some((e.update_on(page, key_hash(k), len, ff, xid, horizon, hot_ok)?, hot_ok))
+        });
+        match on {
+            Some(((Some(at), n), hot_ok)) => {
+                tid = Some(at);
+                e.in_place = true;
+                reclaimed = n;
+                stats.hot = hot_ok;
+            }
+            Some(((None, n), _)) => {
+                reclaimed = n;
+                let from = upd.and_then(|(k, stored, ..)| e.page_of(k, stored)).unwrap_or(u32::MAX);
+                tid = match e.fsm_page(len, from) {
+                    Some(at) => Some(at),
+                    None => e.add_in(len, ff, Some((bulk, (t.oid, txn))), Put::Row(None)),
+                };
+                e.in_place = false;
+                stats.newpage = true;
+            }
+            None => {
+                tid = e.add_in(len, ff, Some((bulk, (t.oid, txn))), put);
+                if let Some((.., hot_ok)) = upd {
+                    stats.hot = hot_ok && e.in_place && tid.is_some();
+                    stats.newpage = !e.in_place;
+                }
+            }
+        }
         reused = tid.is_none() || e.in_place;
+        if let Some((k, ..)) = upd {
+            e.row_seen(key_hash(k), tid);
+        }
         // (A new row of a table keyed by row ids has a key past every other's.)
         e.placed(Some(key), tid, old.is_none() && t.has_rowid());
         estkeep::touched(&ctx.sess.db, e);
@@ -2807,7 +3078,9 @@ fn untracked_write(
     // (The TID isn't stored with the row: a scan in heap order asks the estimate for it,
     // `estimated_rank`, and the rows' bytes stay as they were.)
     let _ = tid;
-    Ok(None)
+    // (pgstat_update_heap_dead_tuples: what the update's prune reclaimed.)
+    super::pgstat::count_reclaimed(ctx, t.oid, reclaimed);
+    Ok(stats)
 }
 
 /// The btree entries a version of `row` of a table too big to model gets in those of
@@ -3210,6 +3483,15 @@ fn same_vals(a: &[Value], b: &[Value]) -> bool {
 
 /// A row is about to get a new version (heap_update: a HOT update when no indexed column
 /// changed and the new version fits on the old one's page; otherwise new index entries).
+/// What `updated` did: the new version's TID (None: not modelled), and whether the update was
+/// a HOT one and one that put the new version on another page (pgstat_count_heap_update).
+#[derive(Clone, Copy, Default)]
+pub struct Updated {
+    pub tid: Option<Tid>,
+    pub hot: bool,
+    pub newpage: bool,
+}
+
 pub fn updated(
     t: &Table,
     indexes: &[BoundIndex],
@@ -3218,7 +3500,7 @@ pub fn updated(
     new_key: &[u8],
     new: &[Value],
     ctx: &ExecCtx,
-) -> Result<Option<(Tid, bool)>> {
+) -> Result<Updated> {
     // (The new version's length, once for all three uses.)
     let tuple = {
         let fmt = ctx.fmt();
@@ -3228,7 +3510,7 @@ pub fn updated(
     if !ensure(t, indexes, ctx)? {
         let r = untracked_write(t, indexes, new_key, new, Some((old_key, old)), None, ctx, Some(tuple))?;
         estlocks::replaced(t, old_key, Some(new_key), ctx)?;
-        return Ok(r.map(|tid| (tid, false)));
+        return Ok(Updated { tid: r.tid, hot: r.hot, newpage: r.newpage });
     }
     let db = &ctx.sess.db;
     // Out-of-line values the new version keeps as they are (none without a TOAST relation).
@@ -3284,7 +3566,7 @@ pub fn updated(
                 ..
             } = &mut *rf;
             if !heaps.contains_key(&t.oid) {
-                return Ok(None);
+                return Ok(Updated::default());
             }
             if assumed
                 && let Some(o) = toast.get(&t.oid).and_then(|tt| tt.rows.get(old_key)).filter(|o| !o.is_empty())
@@ -3316,7 +3598,7 @@ pub fn updated(
                 }
             }
             let Some(heap) = heaps.get_mut(&t.oid) else {
-                return Ok(None);
+                return Ok(Updated::default());
             };
             let cid = ctx.txn.borrow_mut().output_cid();
             // (The old version's command id as HeapTupleHeaderAdjustCmax sets it and its
@@ -3380,7 +3662,9 @@ pub fn updated(
     if big {
         untrack(db, t, None);
     }
-    Ok(Some((tid, hot)))
+    // (pgstat_count_heap_update's newpage: the new version on another page than the old.)
+    let newpage = kept.is_some_and(|k| k.0.0 != tid.0);
+    Ok(Updated { tid: Some(tid), hot, newpage })
 }
 
 
@@ -6060,6 +6344,11 @@ pub fn vacuum(t: &Table, ctx: &ExecCtx) -> Result<Option<Vacuumed>> {
     if !ensure(t, &indexes, ctx)? {
         let (skip, freeze) = VACUUM_SKIP.with(|c| c.get());
         estlocks::vacuumed(t, freeze, skip != heapsim::Skip::AllVisible, ctx)?;
+        // (The dead versions it removes from the pages updates changed.)
+        let horizon = ctx.sess.db.xids().horizon();
+        if let Some(e) = ctx.sess.db.relfiles.of(t.oid).write().estimated.get_mut(&t.oid) {
+            e.vacuum_seen(horizon);
+        }
         return Ok(None);
     }
     let db = &ctx.sess.db;
@@ -7527,6 +7816,15 @@ pub fn heap_tuple_stats(oid: u32, ctx: &ExecCtx) -> Result<Option<(u64, u64, u64
         None if rf.untracked.contains(&heap) => None,
         None => Some((0, 0, 0, 0, 0)),
     })
+}
+
+/// ANALYZE's dead rows of table `oid` in its heap model (acquire_sample_rows' deadrows, the
+/// whole table as a full sample reads it): dead and recently dead tuples and the line pointers
+/// a prune left dead. None without a model.
+pub fn analyze_dead_rows(oid: u32, ctx: &ExecCtx) -> Result<Option<u64>> {
+    let Some(s) = heap_tuple_stats(oid, ctx)? else { return Ok(None) };
+    let rf = ctx.sess.db.relfiles.of(oid).read();
+    Ok(Some(s.2 + rf.heaps.get(&oid).map_or(0, |h| h.dead_items())))
 }
 
 /// Whether an index built on table `t` now finds a broken HOT chain in its heap model

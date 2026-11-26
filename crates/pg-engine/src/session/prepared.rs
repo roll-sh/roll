@@ -19,6 +19,12 @@ impl Session {
                 "cannot PREPARE a transaction that has created a cursor WITH HOLD",
             ));
         }
+        if self.txn.as_ref().is_some_and(|t| t.borrow().has_rewrite_views())
+            && let Err(e) = self.with_ctx(&[], |ctx| crate::session::ddl::apply_rewrite_views(ctx, None))
+        {
+            let _ = self.finish_txn(false);
+            return Err(e);
+        }
         // AfterTriggerFireDeferred.
         if self.txn.as_ref().is_some_and(|t| {
             !t.borrow().deferred.is_empty() || !t.borrow().deferred_triggers.is_empty()

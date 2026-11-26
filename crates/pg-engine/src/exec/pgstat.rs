@@ -880,6 +880,17 @@ pub fn count_update(ctx: &ExecCtx, rel: u32, hot: bool, newpage: bool) {
     }
 }
 
+/// The dead tuples pg_stat counts for `rel` now: its shared entry's, this backend's counts not
+/// flushed yet, and the transaction's own (whose dead versions ANALYZE's sample counts too).
+/// ANALYZE of a table too big to model reports these as acquire_sample_rows' dead rows.
+pub fn dead_now(ctx: &ExecCtx, rel: u32) -> i64 {
+    let shared = ctx.sess.db.pgstat.lock().tables.get(&rel).map_or(0, |t| t.dead_tuples);
+    let pending = ctx.sess.pgstat.borrow().tabs.get(&rel).map_or(0, |t| t.delta_dead_tuples);
+    let txn = ctx.txn.borrow();
+    let (_, upd, del) = txn.pgstat.live(rel);
+    shared + pending + upd + del + txn.pgstat.aborted_dead(rel)
+}
+
 /// Dead tuples of `rel` an on-access prune reclaimed (pgstat_update_heap_dead_tuples, from
 /// heap_page_prune_opt): not transactional, like PostgreSQL's.
 pub fn count_reclaimed(ctx: &ExecCtx, rel: u32, n: u64) {
