@@ -23506,10 +23506,12 @@ head `34964127c`: staleness 0.77%, 7 of 2,804 hot functions, agent 311's format 
 `b30d0ca8`): drop 1, keep 3, keep 10, drop 21 ddl x 12, drop 2, drop 4 off (222 lost as a
 suffix), keep 5 off (11), keep 7, drop 9 off (573), keep 11, drop 22 `--kinds prepare`, keep 23
 off `--kinds ddl,prepare,ack` (120), and release.sh's drop 1, keep 2, drop 3 off: 15 runs, 167
-cuts, all green. quick-check on the rebased head (`c743df223`): clippy 16 warnings, none new;
-159 tests in 20 binaries; crash seeds 1-3 x 2 and power_cut_at_every_point; regress 51,148 /
-51,150, 0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed, 0 failed (2,152 s).
-The new test passed in its `--features powerloss` build.
+cuts, all green. quick-check on the head rebased onto `eccf1d824` (`a72536013`): clippy 16
+warnings, none new; 159 tests in 20 binaries; crash seeds 1-3 x 2 and power_cut_at_every_point;
+regress 51,148 / 51,150, 0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed,
+0 failed (1,146 s; the same on `0037841bd` before). The new test passed in its `--features
+powerloss` build. The profile of this training is kept in `~/.cache/a325/pgo/roll-engine.profdata`
+(20 MB, trained on `5192a74c0e`) for `dist-pgo.sh --profdata`.
 
 **2. `tools/release.sh`**: the release build, one command (no release pipeline builds
 pg-engine; `.github/workflows/release-cli.yml` builds only the CLI; no workflow was added or
