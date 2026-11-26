@@ -295,7 +295,8 @@ pub fn request(ctx: &Ctx, alias: &str, method: &str, uri: &str, body: Option<Val
             format!("user [{}] with assigned roles [{}]", p.username, roles.join(","))
         }
     };
-    let access = obj! { "cluster" => ctx.cluster.name.clone(), "who" => who, "roles" => Value::Arr(remote_roles(ctx, alias)) };
+    let owner = crate::search::contexts::owner_of(ctx);
+    let access = obj! { "cluster" => ctx.cluster.name.clone(), "who" => who, "owner" => owner, "roles" => Value::Arr(remote_roles(ctx, alias)) };
     req.headers.push((REMOTE_ACCESS_HEADER.into(), access.to_json()));
     for h in ["x-opaque-id", "traceparent"] {
         if let Some(v) = ctx.request.header(h) {

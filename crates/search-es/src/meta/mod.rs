@@ -328,12 +328,18 @@ pub struct ClusterState {
     /// The cluster's REST dialect (from its configuration; not persisted): what index
     /// creation and other state changes follow where Elasticsearch and OpenSearch differ.
     pub dialect: crate::cluster::Dialect,
+    /// The inference endpoint a new index's `semantic_text` fields default to, recorded as its
+    /// `index.semantic_text.default_inference_id` when the index doesn't set one (from the
+    /// cluster's configuration; not persisted): the one the node runs (E5) rather than
+    /// Elasticsearch's ELSER, which needs ML nodes roll doesn't have. `None`: Elasticsearch's.
+    pub semantic_default: Option<String>,
 }
 
 impl ClusterState {
     pub fn new(cluster_uuid: &str) -> ClusterState {
         ClusterState {
             dialect: Default::default(),
+            semantic_default: None,
             version: 1,
             state_uuid: names::random_uuid(),
             metadata: Metadata { cluster_uuid: cluster_uuid.to_string(), version: 1, ..Default::default() },
@@ -580,6 +586,7 @@ impl ClusterState {
         md.xpack = Arc::new(crate::xpack::store::XpackState::from_stored(v.get("xpack")));
         Ok(ClusterState {
             dialect,
+            semantic_default: None,
             version: v.get("version").and_then(Value::as_i64).unwrap_or(1) as u64,
             state_uuid: v.get("state_uuid").map(Value::to_es_string).unwrap_or_else(names::random_uuid),
             metadata: md,

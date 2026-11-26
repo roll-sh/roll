@@ -171,6 +171,7 @@ impl Apps {
             let alert = self
                 .db(move |s| {
                     s.set_state(&used, &format!("{bytes} {now}"))?;
+                    s.put_volume_hour(&sid, &en, now / 3_600_000, bytes)?;
                     let was = s.get_state(&full)?.is_some_and(|v| !v.is_empty());
                     if pct >= 90 && !was {
                         s.set_state(&full, "1")?;

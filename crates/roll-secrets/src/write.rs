@@ -15,7 +15,7 @@ use serde_json::Value as Json;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// One operation of a batch, as the API takes it.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(tag = "op", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Op {
     Set {
@@ -53,6 +53,27 @@ pub enum Op {
     },
 }
 
+/// Never the value a set carries.
+impl std::fmt::Debug for Op {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Op::Set { key, value, comment, tags, kind, link, path, expires_at, if_version } => f
+                .debug_struct("Set")
+                .field("key", key)
+                .field("value", &crate::crypto::redacted(value))
+                .field("comment", comment)
+                .field("tags", tags)
+                .field("kind", kind)
+                .field("link", link)
+                .field("path", path)
+                .field("expires_at", expires_at)
+                .field("if_version", if_version)
+                .finish(),
+            Op::Delete { key, kind, path, if_version } => f.debug_struct("Delete").field("key", key).field("kind", kind).field("path", path).field("if_version", if_version).finish(),
+        }
+    }
+}
+
 fn some<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> std::result::Result<Option<T>, D::Error> {
     T::deserialize(d).map(Some)
 }
@@ -81,6 +102,16 @@ pub struct Batch {
     /// that isn't ([`Secrets::check_shared_certs`]).
     #[serde(default)]
     pub confirm: Option<String>,
+}
+
+/// Each op's `if_version`, by its item's index ([`expectations`]).
+type Expect = Vec<(usize, i64)>;
+
+/// A key's slot as [`Secrets::check_batch`] found it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SlotNow {
+    pub version: i64,
+    pub linked: bool,
 }
 
 /// Each op's `if_version`, by its item's index (each op makes one item, in order).
@@ -1143,15 +1174,60 @@ impl Secrets {
 
     /// [`Self::batch`], saying how the change came about (an import, a restore).
     pub(crate) fn batch_via(&self, project: &str, env: &str, b: Batch, via: Via, caller: &Caller) -> Result<Applied> {
+        let (items, expect) = self.batch_checks(project, env, &b, caller)?;
+        self.commit_with(project, env, items, &expect, via, b.message.as_deref().unwrap_or_default(), b.if_seq, false, caller)
+    }
+
+    /// What [`Self::batch`] and [`Self::check_batch`] both check before the write's transaction,
+    /// in one place so they can't drift: a check added here refuses a dry run too. The items and
+    /// their `if_version`s.
+    fn batch_checks(&self, project: &str, env: &str, b: &Batch, caller: &Caller) -> Result<(Vec<Item>, Expect)> {
         let path = names::path(b.path.as_deref().unwrap_or("/"))?;
         caller.need(Action::Write, &Scope::at(project, env, &path))?;
-        let message = b.message.unwrap_or_default();
-        names::message(&message)?;
+        names::message(b.message.as_deref().unwrap_or_default())?;
         let items = items(&path, &b.ops, caller)?;
         self.check_items(project, env, &items, caller)?;
         self.check_shared_certs(project, env, &items, b.confirm.as_deref())?;
         let expect = expectations(&b.ops)?;
-        self.commit_with(project, env, items, &expect, via, &message, b.if_seq, false, caller)
+        self.check_types(project, &items)?;
+        Ok((items, expect))
+    }
+
+    /// [`Self::batch`]'s checks, applying nothing: what the write would refuse (rights, names,
+    /// references, shared certificates, types, `if_version`s, a protected environment or a folder
+    /// policy that needs a change request), for a caller about to do something it can't take back
+    /// before writing (roll search rotates a cluster's password, then stores it). The write checks
+    /// it all again. Each op's slot as it is now, in order: its version (0: none), what its
+    /// `if_version` would be, and whether it's linked (a value written onto a live or dynamic link
+    /// isn't stored, and a managed link's next rotation replaces it).
+    pub fn check_batch(&self, project: &str, env: &str, b: &Batch, caller: &Caller) -> Result<Vec<SlotNow>> {
+        let (items, expect) = self.batch_checks(project, env, b, caller)?;
+        // The project's secrets as the write would find them: made (its key and default
+        // environments) the first time anything needs them, as every read and write does.
+        self.project(project)?;
+        // The write's own checks inside its transaction (it runs them again).
+        self.db.read(|c| {
+            let e = envs::by_slug(c, project, env)?;
+            check_versions(c, &e.id, &items, &expect)?;
+            if e.needs_request() {
+                return Err(Error::Conflict("approval_required", format!("{} is protected: open a change request", e.slug)));
+            }
+            let paths: Vec<&str> = items.iter().map(|i| i.path.as_str()).collect();
+            if let Some(p) = crate::folder_policy::covering(c, &e.id, &paths)?.first() {
+                return Err(Error::Conflict("approval_required", format!("changes to {} in {} need approval: open a change request", p.path, e.slug)));
+            }
+            let now_at = currents(c, &e.id, items.iter())?;
+            for i in &items {
+                // `apply`'s own refusal: sensitive is for good.
+                if let (ItemAction::Set { tags: Some(new), .. }, Some(cur)) = (&i.action, now_at.get(&i.slot()))
+                    && names::sensitive(&cur.tags)
+                    && !names::sensitive(new)
+                {
+                    return Err(Error::BadRequest(format!("{} is sensitive for good: delete it and set it again to have a value people can read", i.key)));
+                }
+            }
+            Ok(items.iter().map(|i| now_at.get(&i.slot()).map_or(SlotNow { version: 0, linked: false }, |c| SlotNow { version: c.version, linked: c.link.is_some() })).collect())
+        })
     }
 
     /// Every key and environment linked to one public certificate gets the same certificate and

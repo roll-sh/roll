@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { StatusPagePanel } from "./status-page";
 import type { Runner } from "./shared";
 
-const api = vi.hoisted(() => ({ statusPage: vi.fn(), incidents: vi.fn(), updateIncident: vi.fn(), postIncident: vi.fn(), putStatusPage: vi.fn(), deleteStatusPage: vi.fn() }));
+const api = vi.hoisted(() => ({ statusPage: vi.fn(), incidents: vi.fn(), updateIncident: vi.fn(), postIncident: vi.fn(), putStatusPage: vi.fn(), deleteStatusPage: vi.fn(), statusDomain: vi.fn(async () => Promise.reject(new Error("none"))) }));
 vi.mock("@/lib/apps-api", async (orig) => ({ ...(await orig<typeof import("@/lib/apps-api")>()), appsApi: api }));
 
 const runner: Runner = { busy: null, error: null, failed: null, setError: () => {}, run: async (_k, fn) => fn() } as Runner;

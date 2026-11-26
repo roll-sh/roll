@@ -693,6 +693,23 @@ fn an_app_in_a_js_workspace_builds_from_the_repo_root() {
 }
 
 #[test]
+fn a_workspace_package_watches_the_packages_it_depends_on() {
+    let files = [
+        ("package.json", r#"{"private":true,"workspaces":{"packages":["apps/*","packages/**"]}}"#),
+        ("yarn.lock", ""),
+        ("turbo.json", "{}"),
+        ("apps/web/package.json", r#"{"name":"web","dependencies":{"@acme/ui":"workspace:*","react":"19.0.0"}}"#),
+        ("apps/docs/package.json", r#"{"name":"docs","dependencies":{"@acme/ui":"*"}}"#),
+        ("packages/ui/package.json", r#"{"name":"@acme/ui","devDependencies":{"@acme/tokens":"workspace:^"}}"#),
+        ("packages/config/tokens/package.json", r#"{"name":"@acme/tokens"}"#),
+        ("packages/unused/package.json", r#"{"name":"@acme/unused"}"#),
+    ];
+    // Transitively, by name, and nothing it doesn't use (another app, an unused package).
+    assert_eq!(crate::workspace_deps(&tree(&files), "apps/web"), ["packages/config/tokens/**", "packages/ui/**", "package.json", "yarn.lock", "turbo.json"]);
+    assert!(crate::workspace_deps(&tree(&files), "elsewhere").is_empty(), "not a package of the workspace");
+}
+
+#[test]
 fn a_static_build_with_a_client_router_is_a_single_page_app() {
     let vite = |deps: &str| {
         detect(&[(

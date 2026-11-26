@@ -90,7 +90,7 @@ mod write;
 pub mod unseal;
 pub mod validity;
 
-pub use access::{Action, Approval, Caller, Chained, Minted, People, Person, Scope, Step, Workloads, PREVIEWS};
+pub use access::{Action, Approval, Caller, ChainState, Chained, Minted, People, Person, Scope, Step, Workloads, PREVIEWS};
 pub use api::router;
 pub use crypto::{Keyring, Value};
 pub use audit::{AuditEntry, AuditFilter, VerifyQuery};
@@ -115,7 +115,7 @@ pub use sweep::{Lease, Swept};
 pub use sinks::{Deliver, NewSink, Sink};
 pub use notifications::{Channel, NewNotification, Notification, Notifier};
 pub use syncs::{NewSync, Push, SecretSync, SyncField, SyncKind, SyncTarget, Syncs};
-pub use write::{Applied, Batch, Change, ItemDiff, Op, Promote, Rollback, SecretType, Written};
+pub use write::{Applied, Batch, Change, ItemDiff, Op, Promote, Rollback, SecretType, SlotNow, Written};
 
 use code_sql::{Db, OptionalExtension, Target};
 use std::sync::Arc;
@@ -630,6 +630,8 @@ impl Secrets {
         db.ensure_schema(leaks::SCHEMA)?;
         db.ensure_schema(leaks::SCAN_COUNTS_SCHEMA)?;
         db.ensure_schema(guardrails::SCHEMA)?;
+        // Who may push past a pre-receive hook (`breakglass`, leaks.rs): a JSON list; NULL is no one.
+        db.add_column("projects", "breakglass", "TEXT")?;
         // The key a leak rotation was found by (at most one an hour per key), and a rotation
         // request's leaked credential and what applying it did instead of rotating.
         db.add_column("leak_rotations", "path", "TEXT")?;
@@ -777,6 +779,11 @@ impl Secrets {
         }
         db.ensure_schema(outside::SCHEMA)?;
         db.ensure_schema(backup_schedule::SCHEMA)?;
+        // Whether a schedule's backups carry registrations' keys (its maker isn't a token), and an
+        // incident's pause (backup_schedule.rs).
+        db.add_column("backup_schedules", "registrations", "INTEGER NOT NULL DEFAULT 1")?;
+        db.add_column("backup_schedules", "paused_at", "INTEGER")?;
+        db.add_column("backup_schedules", "paused_why", "TEXT")?;
         // A rotation's new admin URL, kept until the server took it (outside.rs).
         db.add_column("outside_dbs", "url_next", "BLOB")?;
         db.add_column("outside_dbs", "url_next_at", "INTEGER")?;

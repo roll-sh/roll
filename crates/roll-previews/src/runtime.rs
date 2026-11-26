@@ -1436,6 +1436,12 @@ fn story_shots<'a>(said: &str, pngs: impl Iterator<Item = &'a str>) -> (Vec<crat
         errors: u32,
         #[serde(default)]
         a11y: Option<serde_json::Value>,
+        #[serde(default)]
+        play: Option<crate::Play>,
+        #[serde(default)]
+        play_error: Option<String>,
+        #[serde(default)]
+        play_step: Option<String>,
     }
     #[derive(Default, serde::Deserialize)]
     struct Run {
@@ -1461,11 +1467,22 @@ fn story_shots<'a>(said: &str, pngs: impl Iterator<Item = &'a str>) -> (Vec<crat
             continue;
         }
         // Read as a page's is (the same bounds): compared with main's same story like a page's.
-        let report = crate::PageReport { a11y: s.a11y.and_then(|a| crate::PageA11y::parse(&serde_json::json!({ "a11y": a }).to_string())), ..Default::default() };
+        // What it threw: one printable line, only beside a failed one (the preview's code's words).
+        let play_error = s.play_error.filter(|_| s.play == Some(crate::Play::Failed)).map(|t| t.chars().filter(|c| !c.is_control()).take(300).collect::<String>()).filter(|t| !t.trim().is_empty());
+        let play_step = play_step_of(s.play_step, s.play);
+        let report = crate::PageReport { a11y: s.a11y.and_then(|a| crate::PageA11y::parse(&serde_json::json!({ "a11y": a }).to_string())), play: s.play, play_error, play_step, ..Default::default() };
         out.push(crate::ports::PageShot { path, png, errors: s.errors.min(10_000), report });
     }
     (out, skipped)
 }
+/// A failed interaction test's step as the run said it (`expect.toBeVisible`): names and dots
+/// only, 120 characters at most, and only beside a failed test (the preview's code's words).
+fn play_step_of(step: Option<String>, play: Option<crate::Play>) -> Option<String> {
+    step.filter(|_| play == Some(crate::Play::Failed))
+        .map(|t| t.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '$')).take(120).collect::<String>())
+        .filter(|t| !t.is_empty())
+}
+
 /// How many of a change's first stories the other browsers take (`story:<id>@<browser>`).
 pub const STORIES_IN_BROWSERS: usize = 5;
 
@@ -1495,6 +1512,12 @@ fn browser_story_shots(out: &str, ids: &[&String], browsers: &[&String]) -> Vec<
         #[serde(default)]
         errors: u32,
         png: String,
+        #[serde(default)]
+        play: Option<crate::Play>,
+        #[serde(default)]
+        play_error: Option<String>,
+        #[serde(default)]
+        play_step: Option<String>,
     }
     let mut shots: Vec<crate::ports::PageShot> = Vec::new();
     for l in out.lines().filter_map(|l| serde_json::from_str::<Line>(l).ok()) {
@@ -1504,7 +1527,11 @@ fn browser_story_shots(out: &str, ids: &[&String], browsers: &[&String]) -> Vec<
         }
         let Ok(png) = base64::engine::general_purpose::STANDARD.decode(l.png.trim()) else { continue };
         if png.starts_with(b"\x89PNG") && png.len() <= STORY_MAX {
-            shots.push(crate::ports::PageShot { path, png, errors: l.errors.min(10_000), report: Default::default() });
+            // Its interaction test in that browser, as Chromium's run reads its own (one line).
+            let play_error = l.play_error.filter(|_| l.play == Some(crate::Play::Failed)).map(|t| t.chars().filter(|c| !c.is_control()).take(300).collect::<String>()).filter(|t| !t.trim().is_empty());
+            let play_step = play_step_of(l.play_step, l.play);
+            let report = crate::PageReport { play: l.play, play_error, play_step, ..Default::default() };
+            shots.push(crate::ports::PageShot { path, png, errors: l.errors.min(10_000), report });
         }
     }
     shots
@@ -2139,7 +2166,7 @@ impl Runtime {
             let started = std::time::Instant::now();
             let r = match opts.stories.as_deref().filter(|p| crate::settings::page_path_ok(p) && p.ends_with('/')) {
                 Some(at) => {
-                    let mut r = self.stories_in(name, port, at, &opts.changed).await;
+                    let mut r = self.stories_in(name, port, at, &opts.changed, &opts.stories_first).await;
                     // Then the first of them in the other browsers asked for, once Chromium's run
                     // knows which the change touched first. Best effort: Chromium's stand alone.
                     if let Ok((shots, _)) = &mut r
@@ -2238,7 +2265,7 @@ impl Runtime {
     /// A service's Storybook stories (`github.storybook`; Chromatic's stories), served at `at`: a
     /// run of their own in its network, locked down as the screenshot's is, each story a page
     /// (`story:<id>`).
-    async fn stories_in(&self, name: &str, port: u16, at: &str, changed: &[String]) -> anyhow::Result<(Vec<crate::ports::PageShot>, crate::Skipped)> {
+    async fn stories_in(&self, name: &str, port: u16, at: &str, changed: &[String], first: &[String]) -> anyhow::Result<(Vec<crate::ports::PageShot>, crate::Skipped)> {
         let shot = format!("roll-previews-story-{}", name.trim_start_matches("roll-previews-"));
         let mut args = shot_args(&shot, name, port);
         // axe-core for each story's accessibility, on stdin as the page run's is.
@@ -2255,6 +2282,10 @@ impl Runtime {
         }
         if !fit.is_empty() {
             args.extend(["--env".into(), format!("STORIES_CHANGED={}", serde_json::to_string(&fit)?)]);
+        }
+        let first: Vec<&String> = first.iter().filter(|i| crate::settings::story_id_ok(i)).take(crate::settings::MAX_STORIES).collect();
+        if !first.is_empty() {
+            args.extend(["--env".into(), format!("STORIES_FIRST={}", serde_json::to_string(&first)?)]);
         }
         args.extend([
             self.cfg.screenshot_image.clone(),
@@ -2698,6 +2729,9 @@ fn page_shots<'a>(asked: &[&String], said: &str, pngs: impl Iterator<Item = &'a 
                 step: s.step.map(|t| t.chars().filter(|c| !c.is_control()).take(200).collect()),
                 // The page's own number: one that could be a time (a minute at most).
                 step_ms: s.step_ms.filter(|m| m.is_finite() && (0.0..=60_000.0).contains(m)).map(|m| m.round() as u32),
+                play: None,
+                play_error: None,
+                play_step: None,
             };
             out.push(crate::ports::PageShot { path: s.path, png, errors: s.errors.min(10_000), report });
         }
@@ -3433,6 +3467,9 @@ mod tests {
         };
         assert_eq!(order(stats), "c--1,e--1,b--1,a--1,d--1");
         assert_eq!(order("null"), "c--1,b--1,a--1,d--1,e--1", "without a graph, by files alone");
+        // A default branch's preview: the stories asked for first, before the rest.
+        let out = std::process::Command::new("node").arg("-e").arg(format!("{src}\nconsole.log(touchedFirst({entries}, [], null, [\"d--1\"]).map((e) => e.id).join(','))")).output().expect("node");
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "d--1,a--1,b--1,c--1,e--1");
     }
 
     /// A stories run's report is the preview's code's: each story once, by an id Storybook would
@@ -3443,11 +3480,17 @@ mod tests {
         use base64::Engine as _;
         let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
         let (png, junk, big) = (b64(b"\x89PNG\r\n\x1a\n..."), b64(b"not a png"), b64(&[b"\x89PNG".as_slice(), &vec![0u8; STORY_MAX]].concat()));
-        let said = r#"{"stories":[{"id":"button--primary","errors":2,"a11y":{"issues":[{"kind":"color-contrast","count":2,"first":"<button>","impact":"serious"}],"lang":true,"title":true}},{"id":"../x--y"},{"id":"button--primary"},{"id":"card--empty"},{"id":"card--big"},{"id":"card--full"}],"left":12,"first_left":["button--danger","../evil"],"by_files":true}"#;
+        let said = r#"{"stories":[{"id":"button--primary","errors":2,"a11y":{"issues":[{"kind":"color-contrast","count":2,"first":"<button>","impact":"serious"}],"lang":true,"title":true},"play":"failed","play_error":"expected \"Pay\"\u0007 to be visible","play_step":"expect.toBeVisible<b>"},{"id":"../x--y"},{"id":"button--primary"},{"id":"card--empty"},{"id":"card--big"},{"id":"card--full"}],"left":12,"first_left":["button--danger","../evil"],"by_files":true}"#;
         let pngs = [&png, &png, &png, &junk, &big, &png];
         let (shots, left) = story_shots(said, pngs.iter().map(|s| s.as_str()));
-        // A story's accessibility as a page's (axe's rules, its language and title).
+        // A story's accessibility as a page's (axe's rules, its language and title), and its
+        // interaction test as Storybook ran it; one that fails where main's passes broke.
         assert_eq!(shots[0].report.a11y.as_ref().map(|a| a.problems()), Some(2), "{:?}", shots[0].report.a11y);
+        assert_eq!(shots[0].report.play, Some(crate::Play::Failed));
+        assert_eq!(shots[0].report.play_error.as_deref(), Some("expected \"Pay\" to be visible"), "what it threw, one printable line");
+        assert_eq!(shots[0].report.play_step.as_deref(), Some("expect.toBeVisibleb"), "the step it stopped at, names and dots only");
+        let passed = crate::PageReport { play: Some(crate::Play::Passed), ..Default::default() };
+        assert!(shots[0].report.against(&passed).play_broke && !passed.against(&shots[0].report).play_broke);
         let got: Vec<(String, u32)> = shots.into_iter().map(|p| (p.path, p.errors)).collect();
         assert_eq!(got, [("story:button--primary".to_string(), 2), ("story:card--full".to_string(), 0)]);
         assert_eq!((left.stories, left.first_stories, left.by_files), (12, vec!["button--danger".to_string()], true), "what it didn't take, by ids it could name, and that it chose by files alone");
@@ -3455,10 +3498,10 @@ mod tests {
         // The first of them in the other browsers: only a story and a browser asked for, once
         // each, a PNG within a story's cap.
         let (ids, browsers) = (["button--primary".to_string()], ["firefox".to_string()]);
-        let line = |story: &str, browser: &str, png: &str| serde_json::json!({ "story": story, "browser": browser, "errors": 1, "png": png }).to_string();
+        let line = |story: &str, browser: &str, png: &str| serde_json::json!({ "story": story, "browser": browser, "errors": 1, "png": png, "play": "failed", "play_error": "threw\u{7}" }).to_string();
         let out = [line("button--primary", "firefox", &png), line("button--primary", "firefox", &png), line("card--full", "firefox", &png), line("button--primary", "webkit", &png), line("button--primary", "firefox", &junk)].join("\n");
-        let got: Vec<(String, u32)> = browser_story_shots(&out, &ids.iter().collect::<Vec<_>>(), &browsers.iter().collect::<Vec<_>>()).into_iter().map(|p| (p.path, p.errors)).collect();
-        assert_eq!(got, [("story:button--primary@firefox".to_string(), 1)]);
+        let got: Vec<(String, u32, Option<crate::Play>, Option<String>)> = browser_story_shots(&out, &ids.iter().collect::<Vec<_>>(), &browsers.iter().collect::<Vec<_>>()).into_iter().map(|p| (p.path, p.errors, p.report.play, p.report.play_error)).collect();
+        assert_eq!(got, [("story:button--primary@firefox".to_string(), 1, Some(crate::Play::Failed), Some("threw".to_string()))], "with its interaction test in that browser");
         assert!(crate::settings::page_key_ok("story:button--primary@webkit-phone") && !crate::settings::page_key_ok("story:button--primary@lynx"));
     }
 

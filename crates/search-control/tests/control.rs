@@ -1264,6 +1264,85 @@ async fn derived_keys_narrow_their_parent_and_die_with_it() {
     assert_eq!(as_derived(&e, &renewed, reqwest::Method::POST, "/products/_search", None).await.0, 401);
 }
 
+/// Browser search on a preview: a branch's copy of its parent's browser key works only on the
+/// parent, so roll previews asks for keys of the branch's own (`…/browser-keys/from-parent`), and
+/// adds the preview's pages to the branch's allowed origins. Such a key searches the branch from
+/// the preview's origin and no other one, a derivable one signs with the branch's own secret, and
+/// asking again revokes the earlier ones.
+#[tokio::test]
+async fn browser_search_works_on_a_preview_branch() {
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "shop"})).await;
+    let path = format!("/v1/search/clusters/{}", c["id"].as_str().unwrap());
+    let r = e.post(&format!("{path}/request"), json!({"method": "PUT", "path": "/products/_doc/1?refresh=true", "body": {"title": "trail shoes"}})).await;
+    assert!(r["status"].as_u64() < Some(300), "{r}");
+    let (s, _) = e.call(reqwest::Method::PATCH, &path, Some(json!({"cors": {"allow_origin": ["https://shop.example.com"]}}))).await;
+    assert_eq!(s, 200);
+    let site = e.post(&format!("{path}/browser-keys"), json!({"name": "site", "indices": ["products"]})).await;
+    let saas = e.post(&format!("{path}/browser-keys"), json!({"name": "saas", "indices": ["products"], "derivable": true})).await;
+    let b = e.post(&format!("{path}/branches"), json!({"name": "pv-shop"})).await;
+    let branch = format!("/v1/search/clusters/{}", b["id"].as_str().unwrap());
+    let search = |key: &str, origin: &str| e.http.post(format!("{}/products/_search", e.es)).header("origin", origin).header("authorization", format!("ApiKey {key}")).json(&json!({})).send();
+    // The parent's key, named for the branch: refused there.
+    let on_branch = {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let shipped = String::from_utf8(b64.decode(site["api_key"].as_str().unwrap()).unwrap()).unwrap();
+        b64.encode(shipped.replace("@shop:", "@pv-shop:"))
+    };
+    assert_eq!(search(&on_branch, "https://shop.example.com").await.unwrap().status().as_u16(), 401);
+
+    let made = e.post(&format!("{branch}/browser-keys/from-parent"), json!({})).await;
+    let keys = made["keys"].as_array().unwrap();
+    assert_eq!(keys.len(), 2, "{made}");
+    let own = keys.iter().find(|k| k["parent_key"] == site["id"]).unwrap();
+    let derivable = keys.iter().find(|k| k["parent_key"] == saas["id"]).unwrap();
+    assert!(derivable["signing_secret"].as_str().is_some_and(|s| s != saas["signing_secret"].as_str().unwrap()), "a secret of the branch's own: {derivable}");
+    // The preview's page (as roll previews sets it: the parent's origins and the preview's).
+    let (s, v) = e.call(reqwest::Method::PATCH, &branch, Some(json!({"cors": {"allow_origin": ["https://shop.example.com", "https://web-pv-shop.preview.test"]}}))).await;
+    assert_eq!(s, 200, "{v}");
+    let key = own["api_key"].as_str().unwrap();
+    let r = search(key, "https://web-pv-shop.preview.test").await.unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert_eq!(r.headers()["access-control-allow-origin"], "https://web-pv-shop.preview.test");
+    assert_eq!(search(key, "https://elsewhere.test").await.unwrap().status().as_u16(), 403, "another origin");
+    // Made for the branch: refused on the parent.
+    let on_parent = {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let shipped = String::from_utf8(b64.decode(key).unwrap()).unwrap();
+        b64.encode(shipped.replace("@pv-shop:", "@shop:"))
+    };
+    assert_eq!(search(&on_parent, "https://shop.example.com").await.unwrap().status().as_u16(), 401);
+    let exp = unix_now() + 600;
+    let derived = search_es::xpack::security::derived::sign(derivable["signing_secret"].as_str().unwrap(), &json!({"key": derivable["id"], "cluster": "pv-shop", "exp": exp}).to_string());
+    assert_eq!(search(&derived, "https://web-pv-shop.preview.test").await.unwrap().status().as_u16(), 200);
+    // Asked again (a retried branch): one set, the earlier one revoked.
+    let again = e.post(&format!("{branch}/browser-keys/from-parent"), json!({})).await;
+    assert_eq!(again["keys"].as_array().unwrap().len(), 2, "{again}");
+    assert_eq!(search(key, "https://web-pv-shop.preview.test").await.unwrap().status().as_u16(), 401, "the earlier key");
+    // The parent's later changes reach the branch with roll previews' next pass (`…/prune`): the
+    // copy of a revoked key, and of a key whose secret rotated, are revoked; nothing else is.
+    let copies: Vec<Value> = again["keys"].as_array().unwrap().clone();
+    let copy_of = |parent: &Value| copies.iter().find(|k| k["parent_key"] == parent["id"]).unwrap().clone();
+    let (site_copy, saas_copy) = (copy_of(&site), copy_of(&saas));
+    let pruned = e.post(&format!("{branch}/browser-keys/from-parent/prune"), json!({})).await;
+    assert_eq!(pruned["revoked"], json!([]), "nothing changed yet");
+    let (s, _) = e.call(reqwest::Method::DELETE, &format!("{path}/browser-keys/{}", site["id"].as_str().unwrap()), None).await;
+    assert_eq!(s, 204);
+    e.post(&format!("{path}/browser-keys/{}/rotate", saas["id"].as_str().unwrap()), json!({})).await;
+    let pruned = e.post(&format!("{branch}/browser-keys/from-parent/prune"), json!({})).await;
+    let mut revoked: Vec<&str> = pruned["revoked"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    revoked.sort();
+    let mut want = vec![site_copy["id"].as_str().unwrap(), saas_copy["id"].as_str().unwrap()];
+    want.sort();
+    assert_eq!(revoked, want, "{pruned}");
+    assert_eq!(search(site_copy["api_key"].as_str().unwrap(), "https://web-pv-shop.preview.test").await.unwrap().status().as_u16(), 401);
+    // Only a branch has a parent to copy.
+    let (s, _) = e.call(reqwest::Method::POST, &format!("{path}/browser-keys/from-parent"), Some(json!({}))).await;
+    assert_eq!(s, 409);
+}
+
 /// A derived key pays its parent's limits, which stay the ceiling of all its derived keys
 /// together, and each `user` has its own share: a quarter of the parent's, or less if it asks.
 #[tokio::test]
@@ -3366,7 +3445,7 @@ impl FakeSecrets {
 
 fn refused(r: search_control::secret_refs::Refused) -> String {
     match r {
-        search_control::secret_refs::Refused::Forbidden(m) | search_control::secret_refs::Refused::Invalid(m) => m,
+        search_control::secret_refs::Refused::Forbidden(m) | search_control::secret_refs::Refused::Invalid(m) | search_control::secret_refs::Refused::Conflict(m) => m,
     }
 }
 
@@ -5347,7 +5426,10 @@ async fn search_analytics() {
         })
     };
     es(Method::POST, "/_application/analytics/web/event/search_click", Some(click("shoes", "2"))).await;
-    es(Method::POST, "/_application/analytics/web/event/search_click", Some(click("shoes", "1"))).await;
+    // The app's own `data` key records its clicks too: no second key for them.
+    let app = e.post("/v1/search/clusters/shop/keys", json!({"name": "app", "access": "data"})).await["api_key"].as_str().unwrap().to_string();
+    let r = e.http.post(format!("{}/_application/analytics/web/event/search_click", e.es)).header("authorization", format!("ApiKey {app}")).json(&click("shoes", "1")).send().await.unwrap();
+    assert!(r.status().is_success(), "a data key's click: {}", r.text().await.unwrap());
 
     let check = |a: &Value| {
         assert_eq!(a["totals"]["searches"].as_u64(), Some(8), "{a}");
