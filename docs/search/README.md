@@ -1814,7 +1814,9 @@ deterministic (#396).
    browsed as Discover does: range presets, documents over time (`auto_date_histogram`, counted
    from the points tree), a click on a bar narrows to it, newest first unless a column sorts; and
    a Data streams panel (backing indices, documents, size, the lifecycle's retention set in place
-   or the ILM policy that manages the stream), and a profiled console search (`"profile": true`)
+   or the ILM policy that manages the stream), a Discover tab at the cluster level (item 33: a
+   view of an index pattern or data stream, KQL/ES|QL or DQL/PPL, a field sidebar with top values
+   and filters, the view in the URL), and a profiled console search (`"profile": true`)
    drawn as Kibana's Search Profiler draws it (per shard: the query tree, collectors,
    aggregations and fetch with times and shares), and an Index templates panel (what each matches,
    its priority and what it sets; the built-in ones on request). On OpenSearch-flavor clusters a
@@ -2143,13 +2145,25 @@ deterministic (#396).
    data key, browser keys and origins (pg-control's `reset` with `from` is the model); `write` on
    the branch, on its owner. Re-branching from the copy instead would tangle #1054's key chain
    (the copy as parent, copies of copies). In progress (`feature/search-branch-reset`).
-33. **A Discover screen** (Kibana's and OpenSearch Dashboards' first screen for logs): today a
-   time-based index is browsed as Discover does (range presets, documents over time, a click on a
-   bar narrows), but one index at a time, from the index browser. Discover adds, at the cluster
-   level: an index pattern or data stream as the view (with its time field), a query bar in KQL
-   or ES|QL (both run here) with the time range, a field sidebar (each field's type and its top
-   values over a sample, filter in or out on a click), chosen columns with a document's JSON a
-   click away, and the view as a URL (index, query, range, columns) to share or bookmark; on
-   OpenSearch-flavor clusters PPL as well as DQL. Built from the existing pieces (the index
-   browser's histogram, the console's request preview, `_field_caps`, `auto_date_histogram`), as
-   requests the panel shows and opens in the console.
+33. **A Discover screen** (Kibana's and OpenSearch Dashboards' first screen for logs). Slice 1
+   done (`feature/search-discover`): the cluster page's `discover` tab
+   (`components/search/discover.tsx`, its requests in `lib/search-discover.ts`). A view is an
+   index, alias, data stream or pattern (the cluster's own offered from `_resolve/index`), its time
+   field from `_field_caps` (`@timestamp`, `timestamp`, else the one the user picks). The query is
+   KQL or ES|QL on Elasticsearch-flavor clusters, DQL or PPL on OpenSearch ones:
+   - KQL and DQL are sent as the `kql` query, filtered by the range (roll serves `kql` on both
+     flavors; OpenSearch Dashboards compiles DQL in the browser, roll's engine reads it). They get
+     the documents over time (`auto_date_histogram`; a click on a bar narrows the range).
+   - ES|QL is `FROM <view> | WHERE <time range> | <query>` and PPL `source=<view> | where … |
+     <query>`, their answers a table.
+   - A query the cluster refuses shows its own error.
+
+   The field sidebar lists every field with its type (a `*` when the view's indices map it as
+   several) and, on a click, its top 5 values over a sample (`sampler` of 500 documents a shard
+   plus `terms`, on its keyword multi-field when the field doesn't aggregate), with + and − to keep
+   or leave out a value (the query edited in its own language) and a button to add it to the
+   table. The table shows the chosen columns (or the document) newest first, or by a column; a row
+   opens the document's JSON. The view, time field, mode, query, range, columns and sort are the
+   URL's hash (`#discover?view=…`), to bookmark or share; every request it sends can be shown and
+   opened in the console. Left for later slices: saved searches, field statistics beyond a
+   sample, a document's surrounding documents, and visualizing a field.
