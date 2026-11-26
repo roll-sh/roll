@@ -156,10 +156,9 @@ async fn semantic_text_sends_the_node_model_batches_of_ten_with_no_deadline() {
 /// setting, a field that names its endpoint, and a node without the model keep Elasticsearch's.
 #[tokio::test]
 async fn semantic_text_defaults_to_the_model_the_node_runs() {
-    let get = |c: &Cluster, path: &str| {
-        let req = EsRequest::new("GET", path);
-        async move { search_es::handle(c, req).await.body_json() }
-    };
+    async fn get(c: &Cluster, path: &str) -> Value {
+        search_es::handle(c, EsRequest::new("GET", path)).await.body_json()
+    }
     let fake = Arc::new(Fake::default());
     let mut cfg = ClusterConfig::new("c");
     cfg.embedder = Some(fake.clone());
