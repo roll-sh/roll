@@ -5066,6 +5066,8 @@ async fn opensearch_flavor_clusters_link_with_the_remotes_own_mappings() {
     assert_eq!((m["responses"][0]["error"]["type"].as_str(), m["responses"][1]["hits"]["total"]["value"].as_i64()), (Some("security_exception"), Some(1)), "{m}");
     let (s, v) = es_as(&e, &near, Method::GET, "/loop:secret-near/_search", None).await;
     assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(1)), "{v}");
+    // The remote's refusals below as the remote's 403 (skip_unavailable off again).
+    assert_eq!(es_as(&e, &near, Method::PUT, "/_cluster/settings", Some(json!({"persistent": {"cluster.remote.r.skip_unavailable": false}}))).await.0, 200);
     // A link's request names no further remote, the remote's loopback included.
     assert_eq!(es_as(&e, &far, Method::PUT, "/_cluster/settings", Some(loopback("back", transport("os-far").await))).await.0, 200);
     let (s, v) = es_as(&e, &near, Method::GET, "/r:back:docs/_search", None).await;
