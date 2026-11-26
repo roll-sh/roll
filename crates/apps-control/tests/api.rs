@@ -1309,6 +1309,29 @@ async fn a_repo_service_builds_its_plan_deploys_on_push_and_rolls_back_without_a
     assert_eq!(count().await, before + 1);
 }
 
+/// A workspace package watching its own folder also follows the packages its build uses (Vercel's
+/// affected projects): a push into one it depends on deploys it, one into another package doesn't.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pushes_deploy_a_workspace_package_that_uses_what_changed() {
+    let w = world().await;
+    w.code.push("a1a1a1a1a1a1", "a workspace", &[
+        ("package.json", r#"{"private":true,"workspaces":["apps/*","packages/*"]}"#),
+        ("package-lock.json", "{}"),
+        ("apps/web/package.json", r#"{"name":"web","scripts":{"start":"node index.js"},"dependencies":{"@acme/ui":"*"}}"#),
+        ("apps/web/index.js", "v1"),
+        ("packages/ui/package.json", r#"{"name":"@acme/ui"}"#),
+        ("packages/other/package.json", r#"{"name":"@acme/other"}"#),
+    ]);
+    let (_, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "web", "source": {"kind": "repo", "repo": "acme/site", "root": "apps/web"}, "build": {"watch": ["apps/web/**"]} }))).await;
+    let id = svc["id"].as_str().unwrap_or_else(|| panic!("{svc}")).to_string();
+    let d = settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    assert_eq!((d["status"].as_str(), d["plan"]["watch_derived"].clone()), (Some("active"), json!(["packages/ui/**", "package.json", "package-lock.json"])), "{d}");
+    w.code.push("b2b2b2b2b2b2", "another package", &[("packages/other/x.js", "x")]);
+    w.code.push("c3c3c3c3c3c3", "the ui", &[("packages/ui/button.js", "b")]);
+    let revs = get_until(&w.api, &format!("/v1/apps/services/{id}/environments/production/deploys"), |a| a.to_string().contains("c3c3c3c3c3c3")).await;
+    assert!(!revs.to_string().contains("b2b2b2b2b2b2"), "{revs}");
+}
+
 /// Each environment keeps its newest built deployments to roll back to; older ones are pruned
 /// (history only, their images gone unless another deployment runs the same one), a rollback to
 /// one is refused with why, and the list pages back through all of them.

@@ -82,9 +82,12 @@ pub(crate) struct StatusCache {
     generation: std::sync::atomic::AtomicU64,
     /// Active own domains → their project, as last read (when, under which `hosts_gen`): every
     /// request with a Host asks, so it's one read a second at most, never one a request.
-    own: parking_lot::Mutex<Option<(std::time::Instant, u64, Arc<std::collections::HashMap<String, String>>)>>,
+    own: parking_lot::Mutex<Option<(std::time::Instant, u64, OwnHosts)>>,
     pages: parking_lot::Mutex<std::collections::HashMap<String, (std::time::Instant, Arc<Shown>)>>,
 }
+
+/// Active own domains → their project.
+type OwnHosts = Arc<std::collections::HashMap<String, String>>;
 
 /// A page's rows and its incidents.
 type Shown = (Vec<Row>, Vec<Value>);
@@ -326,7 +329,7 @@ impl Apps {
         self.db(move |s| s.status_page(&project)).await.ok().flatten()
     }
 
-    async fn own_status_hosts(self: &Arc<Self>) -> Arc<std::collections::HashMap<String, String>> {
+    async fn own_status_hosts(self: &Arc<Self>) -> OwnHosts {
         let generation = self.hosts_gen.load(std::sync::atomic::Ordering::SeqCst);
         if let Some((at, g, m)) = self.status_cache.own.lock().clone()
             && g == generation
