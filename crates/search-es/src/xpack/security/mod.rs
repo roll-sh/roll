@@ -553,6 +553,11 @@ impl Effective {
         self.allows(|p| p.allows_index(action, index, restricted) || parent.is_some_and(|ds| p.allows_index(action, ds, privileges::is_restricted(ds))))
     }
 
+    /// Whether the principal may read the failure store of `index` ([`Permission::reads_failure_store`]).
+    pub fn reads_failure_store(&self, index: &str) -> bool {
+        self.allows(|p| p.reads_failure_store(index))
+    }
+
     /// Whether some role grants `action` on some index (`IndicesPermission.check(action)`):
     /// how Elasticsearch authorizes the request of a composite action, whose items are then
     /// authorized one by one.
@@ -853,13 +858,38 @@ pub fn check_lookups(ctx: &Ctx, rendered: Option<&Value>) -> EsResult<()> {
     if reads.is_empty() {
         return Ok(());
     }
-    let eff = effective(&file_roles(ctx.cluster), &ctx.state(), p);
-    let denied_lookups: Vec<(&'static str, String)> = reads.into_iter().map(|(a, i)| (a, authz_name(&i, ctx.now_ms))).filter(|(a, i)| !eff.allows_index(a, i)).collect();
+    let st = ctx.state();
+    let eff = effective(&file_roles(ctx.cluster), &st, p);
+    let mut denied_lookups: Vec<(&'static str, String)> = Vec::new();
+    for (a, i) in reads {
+        denied_lookups.extend(denied_lookup(&eff, &st, ctx.now_ms, a, &i)?.into_iter().map(|n| (a, n)));
+    }
     if let Some((a, _)) = denied_lookups.first() {
         let on: Vec<String> = denied_lookups.iter().filter(|(x, _)| x == a).map(|(_, i)| i.clone()).collect();
         return Err(denied(p, a, Some(&on)));
     }
     Ok(())
+}
+
+/// The names a lookup of `expr` by `action` may not read, as the principal of `eff`: the name
+/// [`crate::meta::resolve::authorization_name`] gives (date math resolved, the selector split
+/// off; a failure store needs its own privilege), a wildcard resolved against `st` as a lookup
+/// resolves it. An expression that doesn't resolve fails the check, never passes it.
+pub(crate) fn denied_lookup(eff: &Effective, st: &crate::meta::ClusterState, now_ms: i64, action: &str, expr: &str) -> EsResult<Vec<String>> {
+    use crate::meta::resolve::{IndicesOptions, Selector, authorization_name, is_wildcard, resolve};
+    let (name, selector) = authorization_name(expr, now_ms)?;
+    let names = match is_wildcard(&name) {
+        true => resolve(st, std::slice::from_ref(&name), &IndicesOptions::STRICT_EXPAND_OPEN, now_ms)?,
+        false => vec![name],
+    };
+    Ok(names
+        .into_iter()
+        .filter(|n| match selector {
+            Selector::Data => !eff.allows_index(action, n),
+            Selector::Failures => !eff.reads_failure_store(n),
+        })
+        .map(|n| if selector == Selector::Failures { format!("{n}::failures") } else { n })
+        .collect())
 }
 
 /// A write an ingest pipeline moved to `index` (`_index`, `reroute`): authorized there as an
@@ -1765,7 +1795,7 @@ fn lookup_walk(v: &Value, parent: Option<&str>, out: &mut Vec<(&'static str, Str
                 }
             }
             if matches!(parent, Some("like" | "unlike")) && let Some(i) = s("_index") {
-                out.push((GET, i.to_string()));
+                out.push((crate::search::LOOKUP_TERM_VECTORS, i.to_string()));
             }
             if s("type") == Some("lookup") && let Some(i) = s("target_index") {
                 out.push((SEARCH, i.to_string()));

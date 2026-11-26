@@ -1949,7 +1949,7 @@ fn cacheable(req: &SearchRequest, t: &Target) -> bool {
     // writes the cache: its answers depend on what it may read, here and in every index its
     // queries look documents up in, which the key can't hold (Elasticsearch disables the cache
     // in similar cases, e.g. templated role queries).
-    if t.security.is_some() {
+    if t.security.as_ref().is_some_and(|s| s.restricts_anything()) {
         return false;
     }
     let text = format!("{src:?}");
@@ -1968,6 +1968,24 @@ pub(crate) fn is_request_cache_key(s: &str) -> bool {
     s.len() == 16 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// Whether the request (or its alias filter) reads documents of other indices: terms lookups,
+/// `percolate`, indexed shapes, `more_like_this` documents (any percolate and any document item
+/// of the parsed parts, from their text; the sections kept as JSON and parsed per shard, such
+/// as aggregations, by [`crate::query::reads::reads_elsewhere`]).
+fn reads_other_documents(req: &SearchRequest, t: &Target) -> bool {
+    let src = &req.source;
+    let text = format!("{src:?}");
+    let filter = format!("{:?}", t.filter);
+    if READS_OTHER_DOCUMENTS.iter().any(|p| text.contains(p) || filter.contains(p)) {
+        return true;
+    }
+    let json = src.aggs.iter().chain(src.retriever.iter()).chain(src.highlight.iter()).chain(src.knn.iter());
+    json.into_iter().any(crate::query::reads::reads_elsewhere)
+}
+
+/// How the parsed queries that read other documents print ([`reads_other_documents`]).
+const READS_OTHER_DOCUMENTS: &[&str] = &["Some(TermsLookup", "Indexed {", "Percolate {", "MltItem {"];
+
 fn request_cache_key(req: &SearchRequest, t: &Target) -> String {
     // The mapping and analysis settings decide how the request's queries are built
     // (`MappingLookup.cacheKey()`): an update to either busts the entries.
@@ -1976,6 +1994,15 @@ fn request_cache_key(req: &SearchRequest, t: &Target) -> String {
     // Terms lookups read other indices: key on every refresh anywhere.
     if k.contains("Some(TermsLookup") {
         k.push_str(&format!("|{}", crate::engine::refresh_epoch()));
+    }
+    // A lookup is authorized as its reader where it runs, which a hit skips: an answer that read
+    // other documents is the reader's own (by who it is and what its roles grant now), as
+    // Elasticsearch keys the query its lookups were rewritten into as that user. Superusers
+    // (no reader restrictions at all) share theirs.
+    if let Some(s) = &t.security
+        && reads_other_documents(req, t)
+    {
+        k.push_str(&format!("|reader:{:x}", s.cache_identity()));
     }
     k
 }
@@ -3761,6 +3788,13 @@ fn lookup_fields_of_hit(cluster: &Cluster, src: &SearchSource, table: &Arc<crate
             Some(Value::Arr(a)) => a,
             _ => Vec::new(),
         };
+        // The lookups are the reader's searches of `target_index` (`LookupRuntimeFieldType`'s,
+        // sent as the user).
+        if let Some(s) = security
+            && !values.is_empty()
+        {
+            s.authorize(&cluster.state(), crate::time::now_millis(), "indices:data/read/search", &target_index)?;
+        }
         let mut found = Vec::new();
         for v in values {
             let body = obj! {
@@ -4838,17 +4872,34 @@ fn complete_completion_options(cluster: &Cluster, st: &ClusterState, req: &Searc
 
 /// Whether document `id` of `shard` matches `q` (document level security of a get): the shard
 /// is refreshed first, so a realtime get of a document not yet searchable is judged too.
-/// Document `id` of `idx` as a query reads it on behalf of its request (a `percolate` query's
-/// or an `indexed_shape`'s document): `None` when it's missing or the reader's document level
-/// security hides it, else its version and `_source` (`None`: not stored) without the fields
-/// the reader's field level security hides, as a get by the reader answers.
-pub(crate) fn lookup_source(ctx: &QueryCtx, idx: &Arc<IndexMeta>, id: &str, routing: Option<&str>) -> EsResult<Option<(i64, Option<Value>)>> {
-    use crate::xpack::security::dls::READ;
+/// Elasticsearch's get for the user: a terms lookup's, `percolate`'s or `indexed_shape`'s.
+pub(crate) const LOOKUP_GET: &str = "indices:data/read/get";
+/// `more_like_this`'s documents, fetched as the user's multi term vectors request (its per shard
+/// request's action).
+pub(crate) const LOOKUP_TERM_VECTORS: &str = "indices:data/read/mtv[shard]";
+
+/// Document `id` of `idx` as a query reads it on behalf of its request (a terms lookup's,
+/// `percolate`'s, `more_like_this`'s or an `indexed_shape`'s document): the reader's read of it
+/// by `requested` (the name the query gave), authorized as `action` where it runs, as
+/// Elasticsearch's request for the user is ([`LOOKUP_GET`], [`LOOKUP_TERM_VECTORS`]). `None`
+/// when it's missing or the reader's document level security hides it, else its version and
+/// `_source` (`None`: not stored) without the fields the reader's field level security hides,
+/// as a get by the reader answers.
+///
+/// `requested: None` reads the index the search itself was authorized on (a `more_like_this`
+/// item without `_index`): not checked again, as OpenSearch's `search` action group, which
+/// doesn't hold term vectors, reads its own documents that way.
+pub(crate) fn lookup_source(ctx: &QueryCtx, action: &str, requested: Option<&str>, idx: &Arc<IndexMeta>, id: &str, routing: Option<&str>) -> EsResult<Option<(i64, Option<Value>)>> {
+    let sec = match requested {
+        Some(r) => ctx.security.read_lookup(ctx.st, ctx.now_ms, action, r)?,
+        None => ctx.security.read_as()?,
+    };
+    // The read's own document and field level security: the role entries granting `action`
+    // (a role may grant gets alone, with a query of their own).
     let engine = ctx.cluster.engine.index(ctx.cluster, ctx.st, idx)?;
     let shard = engine.shard(crate::meta::routing::shard_for(idx, id, routing));
-    let sec = ctx.security.read_as()?;
     let Some(doc) = shard.shard.get(id.as_bytes(), true).map_err(crate::engine::convert::index_error)? else { return Ok(None) };
-    let fields = match sec.map(|s| s.documents(ctx.cluster, READ, &idx.name)).transpose()?.flatten() {
+    let fields = match sec.map(|s| s.documents(ctx.cluster, action, &idx.name)).transpose()?.flatten() {
         None => doc.fields,
         // Under document level security the document is read from the searcher the filter is
         // checked on (a document not searchable yet isn't visible).
@@ -4862,7 +4913,7 @@ pub(crate) fn lookup_source(ctx: &QueryCtx, idx: &Arc<IndexMeta>, id: &str, rout
     };
     let Some(src) = crate::fetch::source_bytes(&fields) else { return Ok(Some((doc.version, None))) };
     let src = crate::fetch::parse_source(src)?;
-    Ok(Some((doc.version, Some(match sec.and_then(|s| s.fields(READ, &idx.name)) {
+    Ok(Some((doc.version, Some(match sec.and_then(|s| s.fields(action, &idx.name)) {
         Some(f) => f.filter_source(src),
         None => src,
     }))))
@@ -4870,10 +4921,11 @@ pub(crate) fn lookup_source(ctx: &QueryCtx, idx: &Arc<IndexMeta>, id: &str, rout
 
 /// Whether document `doc` of `searcher` matches a reader's document filter (`None`: none
 /// applies), on that searcher: the copy a request checks is the copy it reads. No request's
-/// runtime fields apply (one may be running on this thread: a `percolate` lookup's).
+/// runtime fields apply (one may be running on this thread: a `percolate` lookup's). A role
+/// query reads no other document ([`query::Reader::Unset`]), as Elasticsearch's can't.
 fn doc_allowed(cluster: &Cluster, st: &ClusterState, idx: &Arc<IndexMeta>, table: &Arc<crate::engine::fields::FieldTable>, searcher: &Searcher, doc: u32, filter: Option<&crate::query::Query>) -> EsResult<bool> {
     let Some(q) = filter else { return Ok(true) };
-    let qctx = QueryCtx::new(cluster, st, idx, table, searcher, crate::time::now_millis(), query::Reader::Unrestricted);
+    let qctx = QueryCtx::new(cluster, st, idx, table, searcher, crate::time::now_millis(), query::Reader::Unset);
     let query = qctx.for_security()?.to_filter(q)?;
     Ok(searcher.explain(&query, doc).map_err(crate::engine::convert::index_error)?.is_match())
 }
@@ -4889,7 +4941,8 @@ pub fn matches_doc(cluster: &Cluster, st: &ClusterState, idx: &Arc<IndexMeta>, e
     };
     let Some(doc) = find_doc(&searcher, id) else { return Ok(false) };
     let table = engine.table();
-    let qctx = QueryCtx::new(cluster, st, idx, &table, &searcher, crate::time::now_millis(), crate::search::query::Reader::Unrestricted);
+    // A role query reads no other document ([`query::Reader::Unset`]).
+    let qctx = QueryCtx::new(cluster, st, idx, &table, &searcher, crate::time::now_millis(), crate::search::query::Reader::Unset);
     let query = qctx.for_security()?.to_filter(q)?;
     Ok(searcher.explain(&query, doc).map_err(crate::engine::convert::index_error)?.is_match())
 }

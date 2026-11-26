@@ -28,13 +28,18 @@ use std::sync::Arc;
 /// grants searches grants gets too).
 pub const READ: &str = "indices:data/read/search";
 
-/// The restrictions of a principal's reads; `None` from [`ReadSecurity::of`] when none of its
-/// role entries restricts documents or fields.
+/// Whose reads a request makes, and their restrictions: `None` from [`ReadSecurity::of`] only
+/// for a principal nothing restricts (a superuser, the cluster's own calls). Anything else reads
+/// as itself: the documents and indices its queries look up ([`ReadSecurity::authorize`]),
+/// besides what its document and field level security hides.
 #[derive(Clone)]
 pub struct ReadSecurity(Arc<Inner>);
 
 struct Inner {
+    principal: Principal,
     eff: Effective,
+    /// Some role entry restricts documents or fields, or a browser key's policy applies.
+    restricted: bool,
     /// The aliases of each index that has some.
     aliases: std::collections::HashMap<String, Vec<String>>,
     /// `_user` of templated role queries.
@@ -49,6 +54,9 @@ struct Inner {
     inference_left: std::sync::atomic::AtomicI64,
     /// The searches collapse's `inner_hits` may still expand under the policy.
     sub_searches_left: std::sync::atomic::AtomicI64,
+    /// The lookups ([`ReadSecurity::authorize`]) the request's reader passed, by action and
+    /// name: one check each per request (a `lookup` runtime field asks for every hit).
+    authorized: parking_lot::Mutex<std::collections::HashSet<(String, String)>>,
 }
 
 impl std::fmt::Debug for ReadSecurity {
@@ -228,17 +236,21 @@ impl ReadSecurity {
         // A browser key is restricted whatever its roles: its policy rides with its reads. A key
         // derived from one is a browser key (its parent's policy), its narrowing in `eff.also`.
         let browser = super::browser::policy(ctx);
-        if !restricts && browser.is_none() {
-            return None;
-        }
+        let restricted = restricts || browser.is_some();
         let st = ctx.state();
-        let aliases = st.metadata.indices.values().filter(|i| !i.aliases.is_empty()).map(|i| (i.name.clone(), i.aliases.keys().cloned().collect())).collect();
+        // Only what decides restrictions reads the aliases ([`ReadSecurity::granting`]).
+        let aliases = match restricted {
+            true => st.metadata.indices.values().filter(|i| !i.aliases.is_empty()).map(|i| (i.name.clone(), i.aliases.keys().cloned().collect())).collect(),
+            false => Default::default(),
+        };
         let left = |n: fn(&super::browser::Policy) -> i64| std::sync::atomic::AtomicI64::new(browser.as_ref().map_or(i64::MAX, n));
         let fetch_left = left(|b| b.max_result_window);
         let inference_left = left(|b| b.max_inference);
         let sub_searches_left = left(|_| super::browser::MAX_SUB_SEARCHES);
         Some(ReadSecurity(Arc::new(Inner {
+            principal: p.clone(),
             eff,
+            restricted,
             aliases,
             user: user_params(p),
             salt: super::opensearch::masking_salt(ctx.cluster),
@@ -246,12 +258,48 @@ impl ReadSecurity {
             fetch_left,
             inference_left,
             sub_searches_left,
+            authorized: Default::default(),
         })))
     }
 
     /// The browser key policy its reads run under (`None`: not a browser key).
     pub fn browser(&self) -> Option<&super::browser::Policy> {
         self.0.browser.as_ref()
+    }
+
+    /// Who the reader is and what its roles grant, as a request cache key part: an answer whose
+    /// lookups were authorized for one reader is never another's, nor this one's once its roles
+    /// change.
+    pub fn cache_identity(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let e = &self.0.eff;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        format!("{:?}|{:?}|{:?}|{:?}", self.0.principal, e.own, e.limited_by, e.also).hash(&mut h);
+        h.finish()
+    }
+
+    /// Whether document or field level security, or a browser key's policy, restricts any of
+    /// the reader's reads (what an answer that may be shared, the request cache's, depends on).
+    pub fn restricts_anything(&self) -> bool {
+        self.0.restricted
+    }
+
+    /// A lookup a query makes in `index` as it runs (a terms lookup's, `percolate`'s,
+    /// `more_like_this`'s or `indexed_shape`'s document: `indices:data/read/get`; a `lookup`
+    /// runtime field's search: `indices:data/read/search`), authorized as the reader, as
+    /// Elasticsearch sends those requests as the user. `index` is the name it was asked by,
+    /// checked as resolved against `st` at `now_ms` (the request's: [`super::denied_lookup`]).
+    pub fn authorize(&self, st: &crate::meta::ClusterState, now_ms: i64, action: &str, index: &str) -> EsResult<()> {
+        let key = (action.to_string(), index.to_string());
+        if self.0.authorized.lock().contains(&key) {
+            return Ok(());
+        }
+        let denied = super::denied_lookup(&self.0.eff, st, now_ms, action, index)?;
+        if !denied.is_empty() {
+            return Err(super::denied(&self.0.principal, action, Some(&denied)));
+        }
+        self.0.authorized.lock().insert(key);
+        Ok(())
     }
 
     /// Takes one document from the request's fetch budget (a browser key's `max_result_window`,
@@ -330,6 +378,9 @@ impl ReadSecurity {
     /// in each set, an entry without a query, or one whose query rewrites to `match_all` on the
     /// index.
     pub fn reads_every_document(&self, cluster: &Cluster, action: &str, idx: &crate::meta::IndexMeta) -> EsResult<bool> {
+        if !self.0.restricted {
+            return Ok(true);
+        }
         for set in self.sets() {
             let entries = self.granting(set, action, &idx.name);
             if entries.is_empty() || entries.iter().any(|g| g.query.is_none()) {
@@ -352,6 +403,9 @@ impl ReadSecurity {
     /// The query a document of `index` must match to be read by `action`, `None` when every
     /// document may be.
     pub fn documents(&self, cluster: &Cluster, action: &str, index: &str) -> EsResult<Option<crate::query::Query>> {
+        if !self.0.restricted {
+            return Ok(None);
+        }
         let mut filters = Vec::new();
         for set in self.sets() {
             let entries = self.granting(set, action, index);
@@ -376,6 +430,9 @@ impl ReadSecurity {
 
     /// Whether document or field level security applies to `action` on `index`.
     pub fn restricts(&self, action: &str, index: &str) -> bool {
+        if !self.0.restricted {
+            return false;
+        }
         self.sets().any(|set| {
             let entries = self.granting(set, action, index);
             !entries.is_empty() && (entries.iter().all(|g| g.query.is_some()) || entries.iter().all(|g| g.field_security.is_some()) || entries.iter().any(|g| !g.masked.is_empty()))
@@ -384,6 +441,9 @@ impl ReadSecurity {
 
     /// The fields of `index` that `action` may read, `None` when every field.
     pub fn fields(&self, action: &str, index: &str) -> Option<FieldFilter> {
+        if !self.0.restricted {
+            return None;
+        }
         let mut sets = Vec::new();
         let mut masks = Vec::new();
         for set in self.sets() {
@@ -417,7 +477,11 @@ impl ReadSecurity {
         params.insert("_user".into(), self.0.user.clone());
         let compiled = cluster.scripts.engine.compile_template(&source, search_painless::Context::Template, &[]).map_err(crate::scripting::script_error)?;
         let rendered = compiled.render_json(&crate::scripting::to_serde(&Value::Obj(params))).map_err(crate::scripting::script_error)?;
-        Ok(crate::json::parse(rendered.as_bytes())?.unwrap_or_else(Value::object))
+        let rendered = crate::json::parse(rendered.as_bytes())?.unwrap_or_else(Value::object);
+        // `DocumentPermissions.evaluateAndVerifyRoleQuery`: rendered, it must be a query a role
+        // may hold (no lookups of other documents), as a plain one is checked when stored.
+        super::users::verify_role_query(&rendered)?;
+        Ok(rendered)
     }
 }
 
