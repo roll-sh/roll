@@ -58,6 +58,30 @@ pub struct Policy {
     pub updated_by: Option<String>,
 }
 
+/// A roll-access grant with a secrets rule that outlives `max_token_days` (made before it).
+#[derive(Debug, Serialize)]
+pub struct Outliving {
+    pub id: String,
+    pub name: String,
+    /// `token` (machine clients' too) or `oauth` (an MCP client's or an enterprise app's connection).
+    pub kind: String,
+    /// Whose it is (`None`: the operator's).
+    pub user: Option<String>,
+    pub created_at: i64,
+    /// `None`: it never ends.
+    pub expires_at: Option<i64>,
+}
+
+/// `GET /v1/secrets/policy/report`: every exception to the policy, across projects.
+#[derive(Debug, Serialize)]
+pub struct Report {
+    pub policy: Policy,
+    /// Each project below a floor, with its Health's `off_policy` findings.
+    pub projects: Vec<crate::health::ProjectFindings>,
+    /// Grants with a secrets rule that live past `max_token_days` from now, or never end.
+    pub grants: Vec<Outliving>,
+}
+
 /// The 403 for a write below a floor.
 pub(crate) fn below(floor: &str) -> Error {
     Error::Forbidden(refusal(floor))
@@ -234,6 +258,29 @@ impl Secrets {
         })?;
         tracing::info!(by = %by, "{summary}");
         Ok(Policy { floors: g, updated_at: Some(now), updated_by: Some(by) })
+    }
+
+    /// Every exception to the policy (the operator's, or an admin account's): each project below
+    /// a floor, as its Health says (`off_policy`), and the grants made before `max_token_days`
+    /// that outlive it. Projects aren't rewritten when the policy changes; this is the list.
+    pub fn policy_report(&self, caller: &Caller) -> Result<Report> {
+        let policy = self.guardrails(caller)?;
+        let projects: Vec<String> = self.db.read(|c| c.query("SELECT project_id FROM projects WHERE forgotten_at IS NULL ORDER BY project_id", (), |r| r.get(0)))?;
+        let mut below = vec![];
+        for project in projects {
+            let envs: Vec<crate::envs::EnvRow> = self.db.read(|c| crate::envs::all(c, &project))?.into_iter().filter(|e| e.kind == crate::envs::Kind::Standard).collect();
+            let findings = self.off_policy(&project, caller, &policy.floors, &envs)?;
+            if findings.is_empty() {
+                continue;
+            }
+            let project_name = self.workspace.get(roll_workspace::Scope::All, &project).map(|p| p.name).unwrap_or_else(|_| project.clone());
+            below.push(crate::health::ProjectFindings { project, project_name, findings });
+        }
+        let grants = match (policy.floors.max_token_days, &self.workloads) {
+            (Some(d), Some(w)) => w.outliving(d)?,
+            _ => vec![],
+        };
+        Ok(Report { policy, projects: below, grants })
     }
 
     /// The longest a roll-access token with a secrets rule may live, in days, and the refusal's

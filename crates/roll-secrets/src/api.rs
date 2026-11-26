@@ -34,6 +34,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route("/v1/secrets/whoami", get(whoami))
         // Guardrails: floors every project may only tighten (guardrails.rs).
         .route("/v1/secrets/policy", get(guardrails).put(set_guardrails))
+        .route("/v1/secrets/policy/report", get(policy_report))
         .route("/v1/secrets/search", get(find))
         // Deleted projects in their recovery window (docs/secrets.md, "When a secret, an
         // environment or the project goes").
@@ -305,6 +306,11 @@ async fn health(State(s): S, Who(c): Who) -> crate::Result<Response> {
 /// roll secrets' policy (the operator's, or an admin account's).
 async fn guardrails(State(s): S, Who(c): Who) -> crate::Result<Response> {
     Ok(ok(blocking(s, move |s| s.guardrails(&c)).await?))
+}
+
+/// Every exception to the policy across projects (the operator's, or an admin account's).
+async fn policy_report(State(s): S, Who(c): Who) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.policy_report(&c)).await?))
 }
 
 /// Replace the policy: `{production_approvals?, leaks_rotate?, sync_kinds?, no_stored_cloud_keys?,

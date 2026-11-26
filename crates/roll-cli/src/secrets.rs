@@ -969,7 +969,8 @@ pub fn grouped_help(cmd: clap::Command) -> clap::Command {
 
 #[derive(Subcommand)]
 pub enum PolicyCmd {
-    /// The floors, and who set them when.
+    /// The floors, who set them when, and every exception: each project below them, and grants
+    /// with a secrets rule that outlive `max_token_days`.
     Get,
     /// Replace the policy: a floor left out has none. Nothing existing is rewritten; Health lists
     /// each project's distance (`off_policy`).
@@ -2267,8 +2268,12 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
     }
     // roll secrets' policy binds every project.
     if let Secrets::Policy { cmd } = &cmd {
-        let v = match cmd {
-            PolicyCmd::Get => api.get("/v1/secrets/policy").await?,
+        // Get: the floors and every exception to them (the report).
+        let (v, report) = match cmd {
+            PolicyCmd::Get => {
+                let r = api.get("/v1/secrets/policy/report").await?;
+                (r["policy"].clone(), Some(r))
+            }
             PolicyCmd::Set { production_approvals, leaks_managed, sync_kinds, no_stored_cloud_keys, max_token_days, no_breakglass } => {
                 let kinds = sync_kinds.as_ref().map(|ks| ks.iter().map(|k| k.trim()).filter(|k| !k.is_empty()).collect::<Vec<_>>());
                 let body = json!({
@@ -2279,11 +2284,11 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     "max_token_days": max_token_days,
                     "no_breakglass": no_breakglass,
                 });
-                api.call(Method::PUT, "/v1/secrets/policy", Some(body)).await?
+                (api.call(Method::PUT, "/v1/secrets/policy", Some(body)).await?, None)
             }
         };
         if json_out {
-            println!("{}", serde_json::to_string_pretty(&v)?);
+            println!("{}", serde_json::to_string_pretty(report.as_ref().unwrap_or(&v))?);
             return Ok(());
         }
         let mut floors = vec![];
@@ -2315,6 +2320,23 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
         }
         if let (Some(by), Some(at)) = (v["updated_by"].as_str(), v["updated_at"].as_i64()) {
             println!("Set by {by} on {}", day(at));
+        }
+        if let Some(r) = report {
+            let none = vec![];
+            for p in r["projects"].as_array().unwrap_or(&none) {
+                println!("\n{} ({}) is below the policy:", s(&p["project_name"]), s(&p["project"]));
+                for f in p["findings"].as_array().unwrap_or(&none) {
+                    println!("  {}", s(&f["detail"]));
+                }
+            }
+            let grants = r["grants"].as_array().unwrap_or(&none);
+            if !grants.is_empty() {
+                println!("\n{} grant{} with a secrets rule outlive{} max_token_days (made before it):", grants.len(), if grants.len() == 1 { "" } else { "s" }, if grants.len() == 1 { "s" } else { "" });
+                for g in grants {
+                    let ends = g["expires_at"].as_i64().map_or("never expires".to_string(), |e| format!("expires {}", day(e)));
+                    println!("  {} {} ({}, {}), {ends}", s(&g["kind"]), s(&g["name"]), s(&g["id"]), g["user"].as_str().unwrap_or("operator"));
+                }
+            }
         }
         return Ok(());
     }
