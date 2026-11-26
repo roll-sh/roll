@@ -975,7 +975,7 @@ origins (browser search), once they're on main.
 | POST | `/v1/search/clusters/{id}/query_rules/{ruleset}/test` | `POST _query_rules/<ruleset>/_test` `{match_criteria}`: the rules that match |
 | POST | `/v1/search/clusters/{id}/indices/{index}/refresh` | `POST /<index>/_refresh` |
 | POST | `/v1/search/clusters/{id}/indices/{index}/analyze` | `POST /<index>/_analyze` (a read) |
-| POST | `/v1/search/clusters/{id}/indices/{index}/evaluate` | Offline relevance evaluation ([relevance-experiments.md](relevance-experiments.md), section 1): `{judgments: [{query, ratings: [{_id, rating, _index?}]}], configurations: [{name, request | template, query_param?}], metric?}`, one or two configurations, each a search body with `{{query}}` where each judged query goes (`request`) or a search template (`template`: `{id}` or `{source}`, with `params`; the query goes in `query_param`, by default `query`), up to 500 queries of 200 ratings (a rating's `_index` defaults to `{index}`; for a pattern or list each names its own, and for an alias each names its concrete index), `metric` one of `_rank_eval`'s (nDCG@10 by default). Each configuration is one `_rank_eval` on the index, run as the index's routes run. Answers `{metric, queries, configurations: [{name, score, failed, queries: [{query, score, unrated, failure?}]}], comparison?}`, with two the second against the first: `{baseline, candidate, difference, better, worse, unchanged, better_queries, worse_queries}` (50 each, the largest change first). A configuration the cluster refuses answers the cluster's error. A read |
+| POST | `/v1/search/clusters/{id}/indices/{index}/evaluate` | Offline relevance evaluation ([relevance-experiments.md](relevance-experiments.md), section 1): `{judgments: [{query, ratings: [{_id, rating, _index?}]}], configurations: [{name, request | template, query_param?}], metric?}`, one or two configurations, each a search body with `{{query}}` where each judged query goes (`request`), a search template (`template`: `{id}` or `{source}`, with `params`; the query goes in `query_param`, by default `query`), or a search application's own (`application`, evaluated on the application's name: each query rendered by its `_render_query` with `query_param` `query_string` unless said, and `variant: {experiment, variant}` puts that variant's params over it, so an A/B variant is scored before it takes traffic; a variant with a template of its own is a `template` configuration), up to 500 queries of 200 ratings (a rating's `_index` defaults to `{index}`; for a pattern or list each names its own, and for an alias each names its concrete index), `metric` one of `_rank_eval`'s (nDCG@10 by default). Each configuration is one `_rank_eval` on the index, run as the index's routes run. Answers `{metric, queries, configurations: [{name, score, failed, queries: [{query, score, unrated, failure?}]}], comparison?}`, with two the second against the first: `{baseline, candidate, difference, better, worse, unchanged, better_queries, worse_queries}` (50 each, the largest change first). A configuration the cluster refuses answers the cluster's error. A read |
 | POST | `/v1/search/clusters/{id}/indices/{index}/search` | `POST /<index>/_search` (reads take index expressions: `logs-*`, `a,b`) |
 | POST | `/v1/search/clusters/{id}/indices/{index}/docs` | `POST /<index>/_doc`: index a document under a new id |
 | GET, PUT, DELETE | `/v1/search/clusters/{id}/indices/{index}/docs/{doc}` | `/<index>/_doc/<id>` |
@@ -1382,7 +1382,7 @@ in review (item 11's RAG phase 2, #1068 in its third round; item 30's read-only 
 its second; item 1's derived-key follow-ups, #1127 in its second; item 31's re-embed route,
 #1132, landing), then item 32 (resetting a branch from a copy for previews' restore points; in
 progress), item 33's second slice (saved searches, surrounding documents, a field's chart; in
-progress), item 15's offline evaluation (in review; judgment lists from clicks next), item 14 (semantic search on OpenSearch-flavor
+progress), item 15's offline evaluation of applications and variants (in review; judgment lists from clicks next), item 14 (semantic search on OpenSearch-flavor
 clusters; resumes after #1111), item 16 (cold start at size; resumes after #1127), OpenSearch's
 `_plugins/_sm` (item 9; in progress), item 5's OpenSearch links (designed), and chat token
 metering (item 11's follow-up; in progress).
@@ -1755,10 +1755,10 @@ deterministic (#396).
    zero-result rate and p95 latency per variant, and promoting a variant into the application
    (`…/_roll/experiments/{id}/_promote`). Then 95% intervals for each rate and for each
    difference from the baseline, and promoting from the Relevance tab
-   (#1145). Offline evaluation's first slice in review (`feature/search-evaluate`:
-   `…/indices/{index}/evaluate`, `roll search index evaluate` for CI, `search_evaluate`, the
-   Relevance tab's Evaluate). Next: judgment lists kept as indices and built from clicks, and
-   evaluating a search application's template and its variants. Left: the `roll_` rule types and
+   (#1145). Offline evaluation landed in #1159 (`…/indices/{index}/evaluate`,
+   `roll search index evaluate` for CI, `search_evaluate`, the Relevance tab's Evaluate); a
+   search application's template and its experiment's variants scored the same way are in review
+   (`feature/search-evaluate-apps`). Next: judgment lists kept as indices and built from clicks. Left: the `roll_` rule types and
    dynamic re-ranking.
 16. **Cold start at size**: the 19.8 ms cold start is a 50k-document index from local cache;
    nothing measures the first query and p99 on a node with an empty cache for 1, 10 and 50 GB

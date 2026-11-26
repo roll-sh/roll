@@ -380,12 +380,15 @@ async fn open_changes_that_change_the_same_tables_name_each_other() {
     for (c, n) in [("chg_sa", 1), ("chg_sb", 2), ("chg_sc", 3)] {
         e.code.open(change(c, n));
     }
+    e.code.open(ChangeInfo { repo: "acme/api".into(), ..change("chg_sd", 4) });
     e.engine.pass().await.unwrap();
     let id = |c: &str| e.engine.store.row_by_change(c).unwrap().unwrap().id;
     let set = |c: &str, l: &str| e.engine.store.set_schema_changes(&id(c), "h", Some(&[l.to_string()]), &[]).unwrap();
     set("chg_sa", "+ column public.users.nickname text");
     set("chg_sb", "- constraint users_email_key on public.users UNIQUE (email)");
     set("chg_sc", "+ table public.orders");
+    // Another repo's change on the same table: never named on this one's (its comment could be public).
+    set("chg_sd", "+ column public.users.age int");
     let overlaps = |c: &str| e.engine.store.preview(&id(c)).unwrap().schema_overlaps.into_iter().map(|o| (o.preview, o.tables)).collect::<Vec<_>>();
     assert_eq!(overlaps("chg_sa"), [(id("chg_sb"), vec!["public.users".to_string()])]);
     assert_eq!(overlaps("chg_sb"), [(id("chg_sa"), vec!["public.users".to_string()])]);
@@ -428,6 +431,8 @@ async fn a_rehearsal_runs_the_release_on_a_fresh_masked_branch_then_drops_it() {
     let seeds = e.apps.seeds.lock().clone();
     assert_eq!(seeds.len(), ran + 1, "the release once more");
     assert_eq!(seeds.last().map(String::as_str), Some(format!("fake://{fresh}").as_str()), "on the fresh branch, not the preview's");
+    let host = e.apps.last_job_env.lock().iter().find(|(k, _)| k == "PGHOST").map(|(_, v)| v.clone());
+    assert_eq!(host.as_deref(), Some(fresh.as_str()), "the variables made from its URL too (PGHOST), never the preview's branch");
     assert!(e.pg.masks.lock().iter().any(|(b, _)| *b == fresh), "masked before it ran");
     assert!(!e.pg.branches.lock().contains(&fresh), "and gone after");
     let r = e.engine.store.preview(&p.id).unwrap().rehearsal.expect("how it went");
@@ -448,6 +453,11 @@ async fn a_change_queued_to_land_is_rehearsed_where_the_project_asks() {
     e.engine.pass().await.unwrap();
     let open = e.engine.store.row_by_change("chg_rn").unwrap().unwrap();
     assert!(e.engine.store.preview(&open.id).unwrap().rehearsal.is_none(), "an open change that isn't queued isn't rehearsed");
+    // Queued later, its preview settled: discovered, and rehearsed before the queue lands it.
+    e.code.edit("chg_rn", |c| c.queued = true);
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.engine.store.preview(&open.id).unwrap().rehearsal.and_then(|x| x.ok), Some(true), "rehearsed once it was queued");
     let p = e.engine.store.row_by_change("chg_rq").unwrap().unwrap();
     let r = e.engine.store.preview(&p.id).unwrap().rehearsal.expect("rehearsed");
     assert_eq!((r.by.as_str(), r.ok), ("roll", Some(true)));

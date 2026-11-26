@@ -7464,3 +7464,36 @@ async fn evaluate_compares_two_configurations_on_judged_queries() {
     let (s, v) = e.call(Method::POST, &path, Some(json!({"judgments": judgments, "configurations": configs, "size": 3}))).await;
     assert!(s == 400 && v.to_string().contains("no field [size]"), "{s} {v}");
 }
+
+/// An application's configuration renders each judged query through the application's own
+/// template, and a variant's through its experiment's params, so a variant is scored offline
+/// before it takes traffic.
+#[tokio::test]
+async fn evaluate_scores_an_applications_variant_offline() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "apps-judged"})).await;
+    let (u, p) = creds(&c);
+    let id = c["id"].as_str().unwrap().to_string();
+    for (i, (title, desc)) in [("sofa", "a red couch"), ("couch", "a blue chair")].iter().enumerate() {
+        assert_eq!(e.es(&u, &p, Method::PUT, &format!("/goods/_doc/{i}?refresh=true"), Some(json!({"title": title, "desc": desc}))).await.0, 201);
+    }
+    let app = json!({
+        "indices": ["goods"],
+        "template": {"script": {"source": {"query": {"match": {"{{field}}": "{{query_string}}"}}}, "params": {"field": "title", "query_string": "*"}}},
+        "experiments": [{"id": "e1", "variants": [{"name": "control", "weight": 1}, {"name": "desc", "weight": 1, "params": {"field": "desc"}}]}],
+    });
+    let (s, v) = e.es(&u, &p, Method::PUT, "/_application/search_application/shop", Some(app)).await;
+    assert!(s == 200 || s == 201, "{s} {v}");
+    let judgments = json!([{"query": "couch", "ratings": [{"_id": "0", "rating": 3}, {"_id": "1", "rating": 0}]}]);
+    let configs = json!([{"name": "live", "application": "shop"}, {"name": "desc", "application": "shop", "variant": {"experiment": "e1", "variant": "desc"}}]);
+    let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/indices/shop/evaluate"), Some(json!({"judgments": judgments, "configurations": configs}))).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!((v["configurations"][0]["score"].as_f64(), v["configurations"][1]["score"].as_f64()), (Some(0.0), Some(1.0)), "{v}");
+    assert_eq!(v["comparison"]["better_queries"][0]["query"], "couch", "{v}");
+    // On another name, and with a variant the experiment lacks: refused with what's wrong.
+    let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/indices/goods/evaluate"), Some(json!({"judgments": judgments, "configurations": [{"name": "live", "application": "shop"}]}))).await;
+    assert!(s == 400 && v.to_string().contains("indices/shop/evaluate"), "{s} {v}");
+    let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/indices/shop/evaluate"), Some(json!({"judgments": judgments, "configurations": [{"name": "x", "application": "shop", "variant": {"experiment": "e1", "variant": "nope"}}]}))).await;
+    assert!(s == 400 && v.to_string().contains("no variant [nope]"), "{s} {v}");
+}
