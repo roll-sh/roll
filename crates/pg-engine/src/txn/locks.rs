@@ -496,7 +496,8 @@ struct FastHolds {
 }
 
 struct FastHold {
-    key: Vec<u8>,
+    /// (Inline: a relation's or a transaction's key, so a hold allocates nothing.)
+    key: super::LockKey,
     owner: u64,
     mode: LockMode,
     count: u32,
@@ -939,9 +940,9 @@ impl LockManager {
         if self.fast.strong[fast_partition(key)].load(Ordering::SeqCst) != 0 {
             return false;
         }
-        match holds.iter_mut().find(|h| h.owner == owner && h.mode == mode && h.key == key) {
+        match holds.iter_mut().find(|h| h.owner == owner && h.mode == mode && h.key.as_slice() == key) {
             Some(h) => h.count += 1,
-            None => holds.push(FastHold { key: key.to_vec(), owner, mode, count: 1, seq: next_seq() }),
+            None => holds.push(FastHold { key: super::LockKey::from_slice(key), owner, mode, count: 1, seq: next_seq() }),
         }
         true
     }
@@ -951,7 +952,7 @@ impl LockManager {
     pub fn release_fast(&self, slot: &FastSlot, key: &[u8], owner: u64, mode: LockMode) -> bool {
         let mut fast = slot.holds.lock();
         let holds = &mut fast.holds;
-        let Some(i) = holds.iter().position(|h| h.owner == owner && h.mode == mode && h.key == key) else {
+        let Some(i) = holds.iter().position(|h| h.owner == owner && h.mode == mode && h.key.as_slice() == key) else {
             return false;
         };
         holds[i].count -= 1;
@@ -970,7 +971,8 @@ impl LockManager {
         if slot.xact.load(Ordering::Relaxed) == owner {
             slot.xact.store(0, Ordering::Relaxed);
         }
-        fast.moved.remove(&owner)
+        // (Mostly none moved: no hash of the owner.)
+        !fast.moved.is_empty() && fast.moved.remove(&owner)
     }
 
     /// Hold transaction `owner`'s own lock (`hold_xact_lock` in Exclusive mode, before its
@@ -980,7 +982,13 @@ impl LockManager {
     pub fn hold_xact_fast(&self, slot: &FastSlot, owner: u64) {
         let mut fast = slot.holds.lock();
         let holds = &mut fast.holds;
-        holds.push(FastHold { key: xact_key(owner), owner, mode: LockMode::Exclusive, count: 1, seq: next_seq() });
+        holds.push(FastHold {
+            key: super::LockKey::from_slice(&xact_key_bytes(owner)),
+            owner,
+            mode: LockMode::Exclusive,
+            count: 1,
+            seq: next_seq(),
+        });
         slot.xact.store(owner, Ordering::Release);
     }
 
@@ -1009,8 +1017,8 @@ impl LockManager {
             return;
         }
         let moved: Vec<FastHold> = match key {
-            Some(k) if holds.iter().any(|h| h.key == k) => {
-                let (m, kept) = std::mem::take(holds).into_iter().partition(|h| h.key == k);
+            Some(k) if holds.iter().any(|h| h.key.as_slice() == k) => {
+                let (m, kept) = std::mem::take(holds).into_iter().partition(|h| h.key.as_slice() == k);
                 *holds = kept;
                 m
             }
@@ -1019,7 +1027,7 @@ impl LockManager {
         };
         for h in moved {
             fast.moved.insert(h.owner);
-            let e = s.locks.entry(h.key).or_default();
+            let e = s.locks.entry(h.key.to_vec()).or_default();
             if let Some(x) = e.holds.iter_mut().find(|x| x.owner == h.owner && x.proc == slot.proc && x.mode == h.mode) {
                 x.count += h.count;
                 continue;
