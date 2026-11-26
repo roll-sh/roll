@@ -7696,8 +7696,8 @@ async fn members_reach_secrets_by_their_role() {
 }
 
 /// Guardrails (docs/secrets.md): with a policy of one production approval, a project's admin
-/// can't take production back to none, Health shows a project still below it, and a new project's
-/// production is born at it.
+/// can't take production back to none, Health and the operator's report show a project still
+/// below it, and a new project's production is born at it.
 #[tokio::test]
 async fn a_policy_floor_holds_against_a_project_admin_and_new_projects_are_born_at_it() {
     let api = Api::new().await;
@@ -7717,8 +7717,14 @@ async fn a_policy_floor_holds_against_a_project_admin_and_new_projects_are_born_
     let (s, h) = api.signed_in("cat", false, Method::GET, &at("/health"), None).await;
     assert_eq!(s, StatusCode::OK, "{h}");
     assert!(h.as_array().unwrap().iter().any(|f| f["issue"] == "off_policy" && f["environment"] == "production"), "{h}");
+    // And the operator's report lists it, across projects, until it meets the floor.
+    let below = |r: &Value| r["projects"].as_array().unwrap().iter().filter(|p| p["project"] == json!(before)).map(|p| p["findings"].clone()).collect::<Vec<_>>();
+    let r = api.ok(Method::GET, "/v1/secrets/policy/report", None).await;
+    assert!(below(&r).first().is_some_and(|f| f[0]["environment"] == "production" && f[0]["detail"].as_str().unwrap().contains("at least 1 approval")), "{r}");
+    assert_eq!(api.signed_in("cat", false, Method::GET, "/v1/secrets/policy/report", None).await.0, StatusCode::FORBIDDEN, "a project's admin isn't the operator");
     let (s, e) = api.signed_in("cat", false, Method::PUT, &at("/environments/production/policy"), Some(json!({ "protected": true, "approvals": 1 }))).await;
     assert!(s.is_success(), "{e}");
+    assert!(below(&api.ok(Method::GET, "/v1/secrets/policy/report", None).await).is_empty());
     let (s, e) = api.signed_in("cat", false, Method::PUT, &at("/environments/production/policy"), Some(json!({ "protected": true, "approvals": 0 }))).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "{e}");
     assert!(e["error"].as_str().unwrap().contains("roll secrets' policy") && e["error"].as_str().unwrap().contains("at least 1 approval"), "{e}");
