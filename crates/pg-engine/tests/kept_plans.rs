@@ -117,14 +117,23 @@ fn extended_custom_plans_run_the_generic_binding() {
     assert_eq!((row[0].clone(), row[1].clone()), (Value::Int8(3), Value::Int8(5)));
     // A growing table: kept data-modifying plans planned again (debug builds check each
     // against binding the statement again).
+    // A named statement (no Parse again) too: its custom plans are the binding planned again
+    // at the sizes that changed.
+    s.query("SET plan_cache_mode = force_custom_plan").unwrap();
+    let used = s.generic_custom_uses();
     for i in 51..=1500 {
         s.query(&format!("INSERT INTO t (id, c) VALUES ({i}, {})", i % 7)).unwrap();
         if i % 10 == 0 {
             s.query(&format!("UPDATE t SET v = v + 1 WHERE id = {}", i - 5)).unwrap();
             assert_eq!(ext(&mut s, "", upd, &[Some("1"), Some(&(i - 5).to_string())]).unwrap(), "UPDATE 1");
+            assert_eq!(ext(&mut s, "n", upd, &[Some("1"), Some(&(i - 4).to_string())]).unwrap(), "UPDATE 1");
         }
     }
+    // (All but the unnamed statement's first, bound afresh under the settings SET changed.)
+    assert!(s.generic_custom_uses() >= used + 2 * 145 - 1, "custom plans as the binding: {}", s.generic_custom_uses() - used);
+    s.query("RESET plan_cache_mode").unwrap();
     assert_eq!(one(&mut s, "SELECT v FROM t WHERE id = 1495"), Some(Value::Int4(2)));
+    assert_eq!(one(&mut s, "SELECT v FROM t WHERE id = 1496"), Some(Value::Int4(1)));
 }
 
 /// Queries whose literals have other lengths are one shape (`literals::Scan::shape`): one

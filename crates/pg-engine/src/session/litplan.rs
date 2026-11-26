@@ -235,7 +235,7 @@ impl Session {
         // committed since the last one began.)
         let cat = self.txn.as_ref().unwrap().borrow().next_catalog();
         let st = self.state.settings.borrow();
-        let who = (self.state.current_role(&cat), st.get_str("row_security") != Some("off"));
+        let who = (self.state.current_role(&cat), st.hot().row_security);
         Some(Env { version: cat.version, settings: st.generation(), path: self.state.shared_search_path(), who })
     }
 
@@ -875,11 +875,19 @@ impl Session {
         if e.env != env || e.parsed.param_types != p.param_types {
             return None;
         }
-        let (bq, mut reads, cost) = (e.parsed.bq.clone(), e.reads.clone(), e.custom_cost);
-        if !self.reads_hold(&mut reads) {
-            return None;
+        let (mut bq, mut reads, mut cost) = (e.parsed.bq.clone(), e.reads.clone(), e.custom_cost);
+        if self.reads_hold(&mut reads) {
+            self.param_entry(&p.sql, &oids)?.reads = reads;
+        } else {
+            // A size changed: its analysis planned again, as the next Parse would plan it
+            // (`param_parsed`), is the custom plan now (a named statement has no next Parse).
+            let u = self.param_entry(&p.sql, &oids)?.unplanned.clone()?;
+            let (b, reads) = self.lit_replan(&u, &env.path);
+            bq = Arc::new(b?);
+            cost = None;
+            let e = self.param_entry(&p.sql, &oids)?;
+            (e.parsed.bq, e.reads, e.custom_cost, e.kept) = (bq.clone(), Watched::new(reads), None, None);
         }
-        self.param_entry(&p.sql, &oids)?.reads = reads;
         let cost = match cost {
             _ if unnamed => None,
             Some(c) => Some(c),
