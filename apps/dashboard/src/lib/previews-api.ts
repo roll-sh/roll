@@ -248,11 +248,17 @@ export interface PageCheck {
   a11y?: { issues: A11yIssue[]; lang: boolean; title: boolean; seo?: PageSeo | null } | null;
   links?: { checked: number; broken: { path: string; status: number }[] } | null;
   /** Against main's page at the same path. */
-  against?: { a11y_added: number | null; links_added: number | null; seo_added: number | null; text: TextDiff | null; step_ms?: number | null } | null;
+  against?: { a11y_added: number | null; links_added: number | null; seo_added: number | null; text: TextDiff | null; step_ms?: number | null; play_broke?: boolean } | null;
   /** A page state's step that found nothing (the state taken as it was then). */
   step?: string | null;
   /** A page state's slowest click or typing to the next paint (ms): INP in the lab. */
   step_ms?: number | null;
+  /** A story's interaction test (its `play` function) as Storybook ran it: `failed` when it, or the story's render, threw. */
+  play?: "passed" | "failed" | null;
+  /** What a failed one threw, as Storybook's frame showed it (one line, masked). */
+  play_error?: string | null;
+  /** The interaction or assertion a failed one stopped at (`expect.toBeVisible`), from Storybook's interactions log. */
+  play_step?: string | null;
 }
 
 /** A page state (`github.states`): a page of the first service's, reached by its steps. */
@@ -410,8 +416,16 @@ export const endpointSlower = (e: EndpointTime) => e.slower ?? (e.main_ms != nul
 export const pageGroup = (path: string): "Pages" | "Views" | "States" | "Stories" =>
   /^@\d+$/.test(path) || path.startsWith("browser:") || path.startsWith("mode:") ? "Views" : path.startsWith("state:") ? "States" : path.startsWith("story:") ? "Stories" : "Pages";
 
+const BROWSER_NAMES: Record<string, string> = { firefox: "Firefox", webkit: "WebKit", "webkit-phone": "WebKit, phone" };
+
+/** `button--primary` → `button / primary`; `button--primary@firefox` (taken in another browser) → `button / primary · Firefox`. */
+function storyLabel(id: string): string {
+  const [story, browser] = id.split("@");
+  return `${story.replace("--", " / ")}${browser ? ` · ${BROWSER_NAMES[browser] ?? browser}` : ""}`;
+}
+
 export const pageLabel = (path: string) =>
-  /^@\d+$/.test(path) ? `${path.slice(1)} px` : path.startsWith("mode:") ? `${path.slice(5)} mode` : path.startsWith("story:") ? path.slice(6).replace("--", " / ") : path === "browser:firefox" ? "Firefox" : path === "browser:webkit" ? "WebKit" : path === "browser:webkit-phone" ? "WebKit, phone" : path || "/";
+  /^@\d+$/.test(path) ? `${path.slice(1)} px` : path.startsWith("mode:") ? `${path.slice(5)} mode` : path.startsWith("story:") ? storyLabel(path.slice(6)) : path === "browser:firefox" ? "Firefox" : path === "browser:webkit" ? "WebKit" : path === "browser:webkit-phone" ? "WebKit, phone" : path || "/";
 
 /** "1.2 s" or "380 ms". */
 export const duration = (ms: number) => (ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`);

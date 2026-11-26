@@ -145,6 +145,16 @@ pub fn merge(current: &Map, update: &Map) -> Map {
     out
 }
 
+/// The settings `service` marks sensitive (its credentials: `api_key`, Bedrock's `access_key` and
+/// `secret_key`, Vertex's `service_account_json`…), from the same configurations `_services`
+/// answers with. `None`: no such service.
+pub fn sensitive_settings(service: &str) -> Option<Vec<String>> {
+    let all = crate::json::parse(include_bytes!("../services.json")).ok().flatten()?;
+    let s = all.as_array()?.iter().find(|s| s.get("service").and_then(Value::as_str) == Some(service))?;
+    let Some(Value::Obj(c)) = s.get("configurations") else { return Some(Vec::new()) };
+    Some(c.iter().filter(|(_, v)| v.get("sensitive").and_then(Value::as_bool) == Some(true)).map(|(k, _)| k.clone()).collect())
+}
+
 /// The `_services` configurations roll's services answer with (`InferenceServiceConfiguration`),
 /// captured from Elasticsearch 9.5.5 and limited to what roll implements.
 pub fn configurations(cluster: &Cluster, task: Option<TaskType>) -> Value {

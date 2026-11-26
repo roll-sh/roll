@@ -151,6 +151,22 @@ anything but `1`, `true`, `0` or `false`, or the key spelled another way (`read_
 so a typo never means "not read-only". The connect panel has a checkbox
 for it, and it goes with toolsets (`?toolsets=postgres&readonly=1`).
 
+### Metadata only
+
+`/v1/mcp?metadata=1` (or `X-MCP-Metadata: true`) is read-only and leaves out every tool whose answer
+is what customers stored or what their code and visitors wrote (`roll_mcp::tools::DATA`, and roll
+code's `CODE_DATA`): rows, values, objects, documents, messages and payloads, run outputs, logs and
+error samples, pages, mail and pictures of pages, visitors and what they sent or searched, source.
+What's left is plans, schemas, metrics, usage, slow queries and settings, as PlanetScale's
+insights-only server offers: an agent tunes and explains without seeing a customer's data. A call
+to a data tool is an error result that says so, the instructions tell the model, and resources and
+event feeds that hang on a data tool go with it. Query text in `postgres_activity` and the slow
+logs is what the database reports, so a literal in a statement can show there. A test keeps every
+read-only tool whose name reads like data, or that may reveal (a value, a credential), in `DATA` or
+explained (`a_metadata_connection_keeps_data_out`), and rolld's `metadata_mode_names_code_tools_that_exist`
+keeps `CODE_DATA` to the names roll code's tools are fronted by (`search` and `fetch` keep theirs).
+Like read-only, it narrows, never widens, and a typo is a 400.
+
 ### Finding a resource
 
 `roll_find` (on every connection, search mode's too; read-only) finds any roll resource by its name
@@ -688,13 +704,17 @@ project, is theirs to make).
   - Approvals are Multi Round-Trip Requests (see Approvals).
   - `subscriptions/listen` (SEP-2575) is an open stream: first
     `notifications/subscriptions/acknowledged` with what roll will send of what was asked
-    (`toolsListChanged`, `promptsListChanged`), then `notifications/tools/list_changed` (and the
-    prompts one) whenever the connection's tools change: an access request approved, a rule
-    remembered, the token edited. Each carries `_meta["io.modelcontextprotocol/subscriptionId"]`.
+    (`toolsListChanged`, `promptsListChanged`, `eventsListChanged`), then
+    `notifications/tools/list_changed` (and the prompts one) whenever the connection's tools
+    change: an access request approved, a rule remembered, the token edited. With
+    `eventsListChanged` (SEP-3415; discovery says `listChanged: true` under the events extension)
+    it also hears `notifications/events/list_changed` when the event types it may poll change with
+    them (a feed is offered while its tool is), and calls `events/list` again. Each carries
+    `_meta["io.modelcontextprotocol/subscriptionId"]`.
     The grant is looked up again every 5 s, never cached; when it stops working, or after an hour,
     the stream answers the listen request (`result: {}`, the graceful end the spec added after
     SEP-2575) and closes, and the client listens again. At most 4 are open at once per token; a
-    listen asking for nothing roll sends is refused (`-32602`). A 2026-07-28 client hears list
+    listen asking for nothing roll sends (resource changes only) is refused (`-32602`). A 2026-07-28 client hears list
     changes only there; an older one hears `list_changed` on the call that approved an access
     request.
     Checked live with the official TypeScript SDK v2 (`live/sdk2/listen.mjs`): its `listChanged`
@@ -731,6 +751,16 @@ project, is theirs to make).
     with roll's approval page to open. A deploy or a job (`apps_get_deploy`, `apps_get_job` and their
     `apps_wait_*` twins) shows too: an object's own fields (status, commit) above its list (the
     steps).
+  - **Charts, and what the view shows told to the model** (as Grafana's server's views do): rows
+    that run over time (a time column, numeric ones, three points or more: metrics, usage,
+    activity by hour) get a chart above the table, up to four series each on its own scale (its
+    range in the legend), the first in the accent. Hovering shows the nearest point; a click holds
+    it and offers "Ask in chat", which sends the person's question as their message
+    (`ui/message`): the tool, the time and the numbers, never a row's text, so nothing a row holds
+    speaks as the person. Each new picture tells the model what the person sees for its next turn
+    (`ui/update-model-context`: rows, column names, each series' range and last value; sent only
+    when it changes). Column names leave the view only as identifiers. A test pins the methods the
+    view may send its host.
   - **Views that refresh themselves:** an answer that's still changing (a deploy building, a job
     or a tasks run running, a preview being made, a call waiting for a person) carries
     `_meta["roll/pending"]`, `{tool, arguments}`: the read that shows it again. A call waits for a
@@ -878,7 +908,10 @@ segments are percent-decoded and never empty, `.`, `..` or a hidden `/`, else "r
 roll's workflows as prompts a client offers as slash commands (`prompts/list`, `prompts/get`;
 `crates/roll-mcp/src/prompts.rs`), as GitHub's and Sentry's MCP servers ship theirs. A prompt is
 only text that walks the agent through roll's tools: it calls nothing, each tool it names is still
-decided by the gate, and a connection is offered only the prompts whose tools it has. Arguments are
+decided by the gate, and a connection is offered only the prompts whose tools it has (`needs`: what the
+workflow can't do without). A later step's tool the connection lacks (a write "once I say", a branch
+to try on, a read metadata mode leaves out) is named at the end of the text, so the agent skips that
+step and says so instead of calling a tool it doesn't have (15 of the 23 name one). Arguments are
 ids (letters, digits, `_`, `.`, `-`, at most 64), quoted in the message: anyone can name a project,
 and a prompt's text is the person's own message to the agent.
 
@@ -907,6 +940,7 @@ is `-32602`.
 | `ship_a_service` | `project` | A new app service from a repo, a Git URL or an image: what its project file would make (`apps_import`), what it would cost a month (`apps_quote`, you say go), the service with its links and variables, a deploy outside production first, checked (environment, logs, errors), and production only when you say. | `apps_quote`, `apps_create_service`, `apps_deploy`, `apps_wait_deploy`, `apps_get_environment`, `apps_logs` |
 | `ship_from_chat` | `project`, `owner`, `name` | An app from what you describe in the chat, with no git on your side (Vercel's `deploy_to_vercel`, on roll's own tools): a new roll code repo, its files landed, what the service would cost a month (`apps_quote`, you say go), the service deploying from it, a failed build fixed from its deploy logs (three tries, then it shows you), its URL; later changes are lands production follows. `apps_fetch` checks the page answers before it says it's live, if the connection has it. | `code_create_repo`, `code_land`, `apps_quote`, `apps_create_service`, `apps_wait_deploy`, `apps_deploy_logs`, `apps_get_environment` |
 | `tune_slow_search` | `cluster` | Why a search cluster answers slowly: its slowest requests, a profile of the worst, the usual causes in mapping and query, and a fix tried on a branch (`search_branch_cluster`) before the cluster. | `search_slowlog`, `search_cluster_metrics`, `search_get_mapping`, `search_query` |
+| `set_up_semantic_search` | `cluster`, `index`, `field` (optional) | An index searched by meaning: roll's own E5 embeddings (no key), or a provider keyed by a roll secret where the token may (`search_create_inference_endpoint` needs admin and reveal; the key never in a call). The mapping change is shown and made once you say (a `semantic_text` field fed by `copy_to`, its old targets kept). Documents already there are written again only when you say: up to a few thousand, paged on a unique field and written back with `if_seq_no`, so a document changed meanwhile is skipped, never overwritten. Then semantic, keyword and hybrid (`rrf`) results for three queries side by side. | `search_get_mapping`, `search_put_mapping`, `search_query`, `search_list_indices`, `search_bulk` |
 | `review_preview` | `preview` | Whether a change's preview is ready to land: why it failed or waits for `approve-run`, its schema changes (a dropped column, a `NOT NULL` with no default), new errors, routes slower than main's preview, its pages against the base (screenshots it looks at), people's notes. Changes nothing without asking. | `previews_wait`, `previews_get`, `previews_logs`, `previews_errors`, `previews_routes`, `previews_screenshot`, `previews_list_notes` |
 | `hand_to_agent` | `owner`, `repo` | A problem (an error group, a slow query, a bug described) as a work item with its evidence quoted as data, handed to a coding agent on one of your machines (a thread in its own worktree, `auto_edit`, the prompt shown to you first, the item bound to it), its requests left to you, its branch published as a change, checked and previewed, and queued only when you say. | roll code's and agents' (`code_create_work`, `agents_create_thread`, `agents_claim_work`, `agents_publish_thread`, `code_get_change`, `code_enqueue_change`, …; rolld's tests hold each name to one roll code fronts) |
 | `recover_deleted_objects` | `bucket` | Objects deleted by mistake: what's still in the bucket's trash, narrowed to what you describe, each restored only once you say and checked after. | `storage_list_trash`, `storage_restore_object`, `storage_head_object` |
@@ -1181,6 +1215,7 @@ previews are listed once those products are on.
 | `search_list_browser_keys` | A cluster's browser keys that still work: name, indices or application, filter, rate limit, expiry (never the key). | `GET /v1/search/clusters/{cluster}/browser-keys` |
 | `search_browser_key_usage` | One browser key's requests, 429s and other refusals by reason over time (`window` 1h, 24h, 14d), its top users and refused origins. | `GET /v1/search/clusters/{cluster}/browser-keys/{key}/usage` |
 | `search_revoke_browser_key` | Revoke a browser key at once. | `DELETE /v1/search/clusters/{cluster}/browser-keys/{key}` |
+| `search_create_inference_endpoint` | An inference endpoint (embeddings, sparse, rerank, completion) whose API key a roll secret holds: read as the caller (reveal), followed on rotation, never in the call or the answer (roll search #1076). | `POST /v1/search/clusters/{cluster}/inference/secrets` |
 | `search_list_inference_secrets` | Inference endpoints keyed by a roll secret, and what each follows (never the value). | `GET /v1/search/clusters/{id}/inference/secrets` |
 | `search_branch_cluster` | A copy-on-write branch of a cluster. | `POST /v1/search/clusters/{cluster}/branches` |
 | `search_update_cluster` | A cluster's idle timeout, request limits, flavor, IP allowlist (admin). | `PATCH /v1/search/clusters/{id}` |
@@ -1196,7 +1231,7 @@ previews are listed once those products are on.
 | `search_get_index` | An index's mappings, settings and aliases. | `GET /v1/search/clusters/{cluster}/indices/{index}` |
 | `search_create_index` | Create an index with mappings and settings. | `PUT /v1/search/clusters/{cluster}/indices/{index}` |
 | `search_delete_index` | Delete an index and its documents. | `DELETE /v1/search/clusters/{cluster}/indices/{index}` |
-| `search_put_mapping` | Add fields to an index's mapping. | `PUT /v1/search/clusters/{cluster}/indices/{index}/mapping` |
+| `search_put_mapping` | Add fields to an index's mapping, or change what can change: a field's `copy_to`, runtime fields, `dynamic`, dynamic templates, date and numeric detection, `_meta`. | `PUT /v1/search/clusters/{cluster}/indices/{index}/mapping` |
 | `search_get_mapping` | An index's field mappings. | `GET /v1/search/clusters/{cluster}/indices/{index}/mapping` |
 | `search_index_settings` | An index's settings. | `GET /v1/search/clusters/{cluster}/indices/{index}/settings` |
 | `search_put_index_settings` | Change an index's dynamic settings; a lifecycle policy needs delete (destructive). | `PUT /v1/search/clusters/{cluster}/indices/{index}/settings` |
@@ -1219,12 +1254,12 @@ previews are listed once those products are on.
 | `search_check_site_verification` | Check a site's token now: verified, or why not. | `POST /v1/search/clusters/{cluster}/site-verifications/{site}/check` |
 | `search_delete_site_verification` | Drop a site's verification. | `DELETE /v1/search/clusters/{cluster}/site-verifications/{site}` |
 | `search_refresh` | Make what was just indexed searchable now. | `POST /v1/search/clusters/{cluster}/indices/{index}/refresh` |
-| `search_analyze` | The tokens an index's analyzer makes of some text (read). | `POST /v1/search/clusters/{cluster}/indices/{index}/analyze` |
+| `search_analyze` | The tokens an index's analyzer makes of some text, or a chain tried inline (`tokenizer`, `filter`, `char_filter`, `explain`) (read). | `POST /v1/search/clusters/{cluster}/indices/{index}/analyze` |
 | `search_add_document` | Index a document under a new id. | `POST /v1/search/clusters/{cluster}/indices/{index}/docs` |
 | `search_bulk` | Index, update or delete many documents (NDJSON); deleting is delete. | `POST /v1/search/clusters/{cluster}/indices/{index}/bulk` |
-| `search_delete_by_query` | Delete every document that matches a query. | `POST /v1/search/clusters/{cluster}/indices/{index}/delete_by_query` |
+| `search_delete_by_query` | Delete every document that matches a query, at most `max_docs`, stopping or going on past conflicts. | `POST /v1/search/clusters/{cluster}/indices/{index}/delete_by_query` |
 | `search_list_indices` | A cluster's indices. | `GET /v1/search/clusters/{cluster}/indices` |
-| `search_query` | Run an Elasticsearch _search body on an index. | `POST /v1/search/clusters/{cluster}/indices/{index}/search` |
+| `search_query` | Run an Elasticsearch _search body on an index: a query or a retriever (hybrid: `rrf` or `linear`), `knn`, aggregations, highlighting, `_source`, paging with `search_after`, `profile`. Every key roll search's parser takes is an argument or left out with why (`a_search_takes_what_a_search_body_takes`). | `POST /v1/search/clusters/{cluster}/indices/{index}/search` |
 | `search_chat` | Answer a question from a chat profile's sources, with citations (the owner's model; documents quoted as data, no tools; answer and sources withheld in lockdown). | `POST /v1/search/clusters/{cluster}/chat/{profile}` |
 | `search_get_document` | A document by id. | `GET /v1/search/clusters/{cluster}/indices/{index}/docs/{doc}` |
 | `search_index_document` | Create or replace a document. | `PUT /v1/search/clusters/{cluster}/indices/{index}/docs/{doc}` |
@@ -1453,6 +1488,10 @@ previews are listed once those products are on.
 | `apps_visitors` | Who's signed in to a sign-in-gated environment now: each session's id, who, how, the entry that let them in. | `GET /v1/apps/services/{service}/environments/{env}/visitors` |
 | `apps_end_visit` | End one visitor's session in a sign-in-gated environment now. | `DELETE /v1/apps/services/{service}/environments/{env}/visitors/{visitor}` |
 | `apps_update_domain` | Redirect a domain to another hostname of the environment, or serve another port on it. | `PATCH /v1/apps/services/{service}/environments/{env}/domains/{host}` |
+| `apps_status_domain` | A status page's own domain: the name it answers on, its DNS state and TLS. | `GET /v1/apps/projects/{project}/status-page/domain` |
+| `apps_set_status_domain` | Put a project's status page on a domain of its own (answers the DNS record). | `POST /v1/apps/projects/{project}/status-page/domain` |
+| `apps_verify_status_domain` | Check a status page domain's DNS now. | `POST /v1/apps/projects/{project}/status-page/domain/verify` |
+| `apps_remove_status_domain` | Remove a status page's own domain. | `DELETE /v1/apps/projects/{project}/status-page/domain` |
 | `apps_preview_domain` | A project's preview domain: the wildcard its preview environments answer under. | `GET /v1/apps/projects/{project}/preview-domain` |
 | `apps_set_preview_domain` | Give a project's previews a wildcard of its own (answers the DNS record). | `POST /v1/apps/projects/{project}/preview-domain` |
 | `apps_verify_preview_domain` | Check a preview domain's DNS now. | `POST /v1/apps/projects/{project}/preview-domain/verify` |
@@ -1515,29 +1554,13 @@ gaps are in how results read and how roll is distributed):
 From a 2026-11-24 gap review (every tool run as an agent would against a fresh rolld with
 `mcp-sweep.py --report`, 1,161 calls, plus probes with scoped tokens):
 
-1. **Search mode lists what the token uses (this PR).** From a 2026-11-26 gap review of 15 MCP
-   servers (Grafana, Atlassian Rovo, PlanetScale, Sentry, Neon, Vercel, Stripe, GitHub,
-   Cloudflare…): search mode was all or nothing, so every everyday call cost a search first. It
-   now lists the tools this token ran in the last two weeks beside its own (Rovo v2's "primary"
-   tools, from the audit log rather than a fixed list).
-   Next from that review, roll MCP's own: MCP Apps views that draw charts and tell the model what
-   they show (Grafana's v2.1–2.4: `ui/message`-style "ask in chat" and the view's context), a
-   metadata-only connection (PlanetScale's insights-only server: performance and schema advice,
-   never a row or an object body; needs the catalogue to tell reading data from reading
-   metadata), `eventsListChanged` on `subscriptions/listen` when a token's feeds change
-   (SEP-3415), SEP-2792 (a request's language) watched with SEP-2643 and SEP-2848. For product
-   threads: failed queries grouped by fingerprint and cost per query tag (PlanetScale; Postgres),
-   restores checked before they take over (Neon; Postgres), what was received but dropped
-   (Sentry's `find_dropped_events`; apps' drains, streams' quotas, search's ingest refusals),
-   Claude as the identity provider for enterprise-managed sign-in (roll-access's
-   `enterprise.rs`). Checked, not a gap: Copilot CLI cuts a call off after 5 minutes of
-   progress, but a call without tasks waits at most a minute for an approval before it answers
-   `approval_pending`.
-   Watched, not followed yet (SEP status 2026-11-25): SEP-2643 (structured authorization denials) and SEP-2848
-   (asynchronous approval for tool calls), both drafts sent back to the Authorization Interest
-   Group on 2026-11-06; roll's refusals (`needs`, `widen`, `request`, the step-up challenge) and
-   approvals (URL elicitation, MCP tasks) already do what they describe, in roll's own fields
-   until one is accepted.
+1. **A secret read or written as the caller asks at the gate (this PR; agreed with roll secrets).**
+   `POST …/inference/secrets` and `POST …/password` with `secret` lend that folder (`Lend::Each`,
+   kind `secret`): the gate decides reveal (or write) there as roll secrets does, asks a person when
+   the grant says ask, keeps an approval to that folder, and hands the product a grant with an exact
+   allow for it, since roll secrets treats `ask` as no inside. Binds stay refused for an `ask` grant
+   (a reference is re-checked as its maker at every use); roll secrets rewords that refusal
+   (`fix/secrets-bind-refusal-says-why`).
 2. **Paging is the products'.** No list route takes a cursor (approvals take `limit` only). History
    and logs are all capped (a `LIMIT`, the latest N, or a retention window), so nothing grows
    without bound there; the lists of things people make are whole (buckets, queues, topics,
@@ -1620,7 +1643,7 @@ From a 2026-11-24 gap review (every tool run as an agent would against a fresh r
    stateless and search mode (`?tools=search`) covers clients that can't take the list; "remember this browser"; a preset that reveals development's values without asking
    (#354); a connection-level `?project=` (only a token's rules bound a project; a default that
    some tools can't honour would look like a boundary).
-14. **Landed 2026-11-23 and 24:** lockdown's instructions name what's withheld (#1053); an automation run for an issue anyone opened is an outsider's words (#1048); fixes from a review of #1009–#1038: a fork's changesets recorded where they enter, nested signatures, compare's base, the queue's batch, statuses (#1042); `fetch` uses the fork-revision rule; the guide names `scan` (#1038); every roll code tool says whether it answers an outsider's words; a fork's queue entries and checks withheld (#1035); lockdown withholds roll code reads at a fork's revision (#1030); every previews tool says whether it answers a fork's words; a fork's requests and activity marked (#1026); lockdown withholds a fork preview's caught mail and data branch rows (#1018); lockdown withholds a fork's pictures (`x-roll-outside`), and `previews_note_crop` (#1013); `apps_check_screenshot`, a browser check's failure as an image; a person's session forwarded to another node is decided again by the owner (#1009); fixes from a review of #808's access changes: an index-limited token reaches its cluster, `check` holds a person's token within their session, an `append` key needs `write` (#1003); fixes from a review of #940–#987: `approval` judged on all a call can be, a panicked call isn't an unknown tool, an empty optional choice is left out (#996); `previews_try` names the `choose` step, and search in the sweep's member pass (#987); roll search on members (#808) in the docs and `within_session`'s comment (#984); a public certificate key shared across protection is a person's call: `confirm` left out of two secrets tools (#982); every choice read from its product, and roll-access refuses an unknown approvals state (#978); a test keeps 15 choices' sets their products' own (#973); `secrets_list_saas` names Salesforce, and a test keeps it naming every vendor (#972); an unknown tool is a tool error the model reads, on roll's server and roll code's (SEP-2145, #970); the `approval` argument only on tools whose call can wait for a person, the policy's `agents_ask` included (#968); open-world marks on `apps_plan` and the domain checks, and a test that keeps a tool taking an outside address marked or explained (#965); `secrets_list_saas` names SonarQube and Jenkins (#961); roll search #888 (site verification per cluster, crawl tests) mapped by its thread; `apps_wait_cron_run`, a cron run started now followed to its end; every route that answers 202 has a wait but a secrets environment delete that becomes a change request (#958); the sweep reads back every dashboard link it's answered (#951); the sweep checks choice forms live (15 tools), and a call's cost measured: 3.3 ms over its route and `tools/list` 141 ms for 517 tools in a debug build, 6.5 ms at p50 in release as "Toolsets" records, so nothing is cached (#946); lockdown withholds a fork page's console errors and header values (#944); fixes from a review of #907–#933: lockdown withholds a guest's path and name, `unknown` severity, empty optional choices, choice forms after ids (#940); `secrets_list_requests` pages (`limit`, `before`; roll secrets #927) and its `state` is a choice (#933); a deploy's and a change's answers link to their pages (#931); an answer about one resource links to its dashboard page (`resource_link`, #928); 24 more fixed sets as choices, and a test that keeps values out of prose (#920); a refused member hears the weakest role that may and who changes roles (#914); lockdown withholds guests' notes and the leak prompt says when a report rotates (#917); a missing required choice asked for in a form, as a missing id is (#912); tool arguments with a fixed set as JSON Schema `enum`, checked before the call; three proses were short of their route's set (#910); refusals that say why: search's error objects, token rules' resources, axum's body rejections; a cut answer naming its tool's filters; the sweep's `--report` (#907, from the 2026-11-24 gap review); `workspace.event` (#817); MCP Apps views that refresh themselves (#820); `roll_find`, any resource by name, part of its id or a pasted dashboard link (#821), its page table (#845) and search mode (#849); `ship_from_chat` (#826); review fixes for #814–#826 (#832: lookups held by `agents_ask`, the inspector on `roll_find`, approvals only from the gate); lists answered as tables (#838: 20+ rows about 40% smaller); the ship prompts quote first (#840); `secrets_list_saas`'s eleven vendors (#843); the field test reading named body types, 46 fields mapped or explained (#854), and object arguments naming every key (#862); `previews_fetch` on roll previews #852 (#859); review fixes for #838–#868 (#871); `roll_find` links matches (#864) and reads Postgres and streams links, which now carry their selection (#878); `previews_tables` (#883); a browser step's typed text redacted from the audit (#887); `previews_try` and `previews_try_screenshot`, an agent driving a preview's page (#892); `respond_to_leaked_secret` checks for a rotation roll already started (#891).
+14. **Landed 2026-11-23 and 24:** workflows name the tools a connection lacks (#1107); fixes from a review of #1086–#1092: a safe rewrite in `set_up_semantic_search` and offered without admin, the endpoint tool's `task_type`, services and reveal, mapping replacements, more search keys (#1102); `search_put_mapping`, `search_delete_by_query` and `search_analyze` take their whole bodies (#1092); `search_query` takes the whole `_search` body (hybrid, `knn`, highlighting, `profile`; held to roll search's parser) and `set_up_semantic_search` (#1089); `search_create_inference_endpoint`, an inference endpoint keyed by a roll secret (#1086); fixes from a review of #1048–#1074: metadata mode covers roll code's search and fetch and event feeds, more data tools, usage labels, listen cost, outsiders' words in comment and review events, the chart's question (#1083); a metadata-only connection (#1074); a listen stream hears when the event types change (#1070); charts in the table view, a point asked about in the chat, and what the view shows told to the model (#1063); search mode lists the tools a token used lately (#1061); lockdown's instructions name what's withheld (#1053); an automation run for an issue anyone opened is an outsider's words (#1048); fixes from a review of #1009–#1038: a fork's changesets recorded where they enter, nested signatures, compare's base, the queue's batch, statuses (#1042); `fetch` uses the fork-revision rule; the guide names `scan` (#1038); every roll code tool says whether it answers an outsider's words; a fork's queue entries and checks withheld (#1035); lockdown withholds roll code reads at a fork's revision (#1030); every previews tool says whether it answers a fork's words; a fork's requests and activity marked (#1026); lockdown withholds a fork preview's caught mail and data branch rows (#1018); lockdown withholds a fork's pictures (`x-roll-outside`), and `previews_note_crop` (#1013); `apps_check_screenshot`, a browser check's failure as an image; a person's session forwarded to another node is decided again by the owner (#1009); fixes from a review of #808's access changes: an index-limited token reaches its cluster, `check` holds a person's token within their session, an `append` key needs `write` (#1003); fixes from a review of #940–#987: `approval` judged on all a call can be, a panicked call isn't an unknown tool, an empty optional choice is left out (#996); `previews_try` names the `choose` step, and search in the sweep's member pass (#987); roll search on members (#808) in the docs and `within_session`'s comment (#984); a public certificate key shared across protection is a person's call: `confirm` left out of two secrets tools (#982); every choice read from its product, and roll-access refuses an unknown approvals state (#978); a test keeps 15 choices' sets their products' own (#973); `secrets_list_saas` names Salesforce, and a test keeps it naming every vendor (#972); an unknown tool is a tool error the model reads, on roll's server and roll code's (SEP-2145, #970); the `approval` argument only on tools whose call can wait for a person, the policy's `agents_ask` included (#968); open-world marks on `apps_plan` and the domain checks, and a test that keeps a tool taking an outside address marked or explained (#965); `secrets_list_saas` names SonarQube and Jenkins (#961); roll search #888 (site verification per cluster, crawl tests) mapped by its thread; `apps_wait_cron_run`, a cron run started now followed to its end; every route that answers 202 has a wait but a secrets environment delete that becomes a change request (#958); the sweep reads back every dashboard link it's answered (#951); the sweep checks choice forms live (15 tools), and a call's cost measured: 3.3 ms over its route and `tools/list` 141 ms for 517 tools in a debug build, 6.5 ms at p50 in release as "Toolsets" records, so nothing is cached (#946); lockdown withholds a fork page's console errors and header values (#944); fixes from a review of #907–#933: lockdown withholds a guest's path and name, `unknown` severity, empty optional choices, choice forms after ids (#940); `secrets_list_requests` pages (`limit`, `before`; roll secrets #927) and its `state` is a choice (#933); a deploy's and a change's answers link to their pages (#931); an answer about one resource links to its dashboard page (`resource_link`, #928); 24 more fixed sets as choices, and a test that keeps values out of prose (#920); a refused member hears the weakest role that may and who changes roles (#914); lockdown withholds guests' notes and the leak prompt says when a report rotates (#917); a missing required choice asked for in a form, as a missing id is (#912); tool arguments with a fixed set as JSON Schema `enum`, checked before the call; three proses were short of their route's set (#910); refusals that say why: search's error objects, token rules' resources, axum's body rejections; a cut answer naming its tool's filters; the sweep's `--report` (#907, from the 2026-11-24 gap review); `workspace.event` (#817); MCP Apps views that refresh themselves (#820); `roll_find`, any resource by name, part of its id or a pasted dashboard link (#821), its page table (#845) and search mode (#849); `ship_from_chat` (#826); review fixes for #814–#826 (#832: lookups held by `agents_ask`, the inspector on `roll_find`, approvals only from the gate); lists answered as tables (#838: 20+ rows about 40% smaller); the ship prompts quote first (#840); `secrets_list_saas`'s eleven vendors (#843); the field test reading named body types, 46 fields mapped or explained (#854), and object arguments naming every key (#862); `previews_fetch` on roll previews #852 (#859); review fixes for #838–#868 (#871); `roll_find` links matches (#864) and reads Postgres and streams links, which now carry their selection (#878); `previews_tables` (#883); a browser step's typed text redacted from the audit (#887); `previews_try` and `previews_try_screenshot`, an agent driving a preview's page (#892); `respond_to_leaked_secret` checks for a rotation roll already started (#891).
 15. **Landed 2026-11-22 morning:** operator policy for agent connections: `agents_ask` and
    `mcp_lockdown` / `mcp_read_only` (#678), and `oauth_clients`, the OAuth clients that may connect,
    checked at consent, at every token and on every request, nothing revoked (#680). SQL sessions name who sent them (`application_name`: `roll tok_…`, so `postgres_activity` tells

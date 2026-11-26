@@ -116,11 +116,110 @@ const crop = async (c) => {
     if (browser) await browser.close().catch(() => null);
   }
 };
+// A story's interaction test as Storybook ran it (its render in Storybook's own preview, in the
+// page's world: a forged "passed" only hides its own failure), as shot.js reads it in Chromium:
+// "failed", "passed", "pending" while it runs, "none" without one; bounded to 2 s a read.
+const playOf = (page, id) =>
+  Promise.race([
+    page
+      .evaluate((id) => {
+        const p = globalThis.__STORYBOOK_PREVIEW__;
+        const r = p && Array.isArray(p.storyRenders) ? p.storyRenders.find((x) => x && x.id === id) : null;
+        if (!r) return "none";
+        if (r.phase === "errored") return "failed";
+        if (!(r.story && r.story.playFunction)) return "none";
+        if (["played", "completing", "completed", "afterEach", "finished"].includes(r.phase)) return "passed";
+        return r.phase === "aborted" ? "none" : "pending";
+      }, id)
+      .catch(() => null),
+    sleep(2000).then(() => null),
+  ]);
+// Where a failed one stopped (Storybook's interactions log, as shot.js reads it): its path and
+// method, bounded to 2 s.
+const stepOf = (page, id) =>
+  Promise.race([
+    page
+      .evaluate((id) => {
+        const st = (globalThis.__STORYBOOK_ADDON_INTERACTIONS_INSTRUMENTER_STATE__ || {})[id];
+        const calls = st && Array.isArray(st.calls) ? st.calls : [];
+        const c = calls.find((x) => x && String(x.status).toLowerCase() === "error");
+        if (!c) return "";
+        const named = (p) => (typeof p === "string" ? p : p && typeof p === "object" ? (calls.find((x) => x && x.id === p.__callId__) || {}).method : "");
+        const path = Array.isArray(c.path) ? c.path.map(named).filter((p) => typeof p === "string" && p).join(".") : "";
+        return ((path ? path + "." : "") + String(c.method || "")).slice(0, 120);
+      }, id)
+      .catch(() => ""),
+    sleep(2000).then(() => ""),
+  ]);
+// The change's first stories in each browser ($STORIES: where the service serves Storybook,
+// $STORY_IDS: the ids Chromium's run took first, at most 5; Chromatic's cross-browser stories):
+// each loaded alone and captured clipped to its root, a `{story, browser, errors, png}` line each.
+const stories = async (names) => {
+  let ids = [];
+  try {
+    ids = JSON.parse(process.env.STORY_IDS || "[]").filter((i) => typeof i === "string" && /^[a-z0-9][a-z0-9-]{0,99}--[a-z0-9][a-z0-9-]{0,99}$/.test(i)).slice(0, 5);
+  } catch {}
+  const base = new URL(process.env.STORIES || "/", process.env.URL);
+  for (const name of names) {
+    let browser = null;
+    try {
+      const phone = name === "webkit-phone";
+      browser = await pw[phone ? "webkit" : name].launch();
+      const page = await browser.newPage(phone ? { viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true } : { viewport: { width: 1280, height: 800 } });
+      let errors = 0;
+      page.on("pageerror", () => errors++);
+      page.on("console", (m) => m.type() === "error" && errors++);
+      page.on("requestfailed", () => errors++);
+      for (const id of ids) {
+        const before = errors;
+        try {
+          await page.goto(new URL(`iframe.html?id=${id}&viewMode=story`, base).href, { waitUntil: "load", timeout: 20000 });
+          const root = page.locator("#storybook-root, #root").first();
+          // A story renders after the load: until its root holds something, 3 s at most.
+          await root.locator(":scope > *").first().waitFor({ timeout: 3000 }).catch(() => null);
+          // Its interaction test, until it ends (5 s at most), so the picture is after it.
+          let play = null;
+          for (let i = 0; i < 50; i++) {
+            const v = await playOf(page, id);
+            if (v === "passed" || v === "failed") {
+              play = v;
+              break;
+            }
+            if (v !== "pending") break;
+            await sleep(100);
+          }
+          await page.addStyleTag({ content: STILL }).catch(() => null);
+          await sleep(150);
+          const png = await root.screenshot({ timeout: 5000 });
+          if (png.length > 256 * 1024) continue;
+          const line = { story: id, browser: name, errors: Math.min(errors - before, 10000), png: png.toString("base64") };
+          if (play) line.play = play;
+          // What a failed one threw, as Storybook's frame shows it (its error display).
+          if (play === "failed") {
+            const m = await page.locator("#error-message").first().textContent({ timeout: 1000 }).catch(() => null);
+            const said = (m || "").replace(/\s+/g, " ").trim().slice(0, 300);
+            if (said) line.play_error = said;
+            const at = await stepOf(page, id);
+            if (typeof at === "string" && at) line.play_step = at;
+          }
+          process.stdout.write(JSON.stringify(line) + "\n");
+        } catch (e) {
+          console.error(`${name} ${id}: ${e.message}`);
+        }
+      }
+    } catch (e) {
+      console.error(`${name}: ${e.message}`);
+    } finally {
+      if (browser) await browser.close().catch(() => null);
+    }
+  }
+};
 (async () => {
   let browsers = [];
   try {
     browsers = JSON.parse(process.env.BROWSERS || "[]").filter((b) => b === "firefox" || b === "webkit" || b === "webkit-phone");
   } catch {}
+  if (process.env.STORY_IDS) return stories(browsers);
   for (const name of browsers) {
     let browser = null;
     try {

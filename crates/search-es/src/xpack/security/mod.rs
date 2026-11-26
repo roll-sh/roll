@@ -96,6 +96,10 @@ pub struct RemoteUser {
     pub roles: Vec<Value>,
     /// How errors name the user (`user [u] with assigned roles [r]`).
     pub who: String,
+    /// Who the user is on the linking cluster (its cluster and
+    /// [`crate::search::contexts::owner_of`] there): the scrolls and points in time it opens
+    /// here are its own, not every user's of the link.
+    pub owner: String,
 }
 
 /// An authenticated user.

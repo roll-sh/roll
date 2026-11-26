@@ -34,6 +34,15 @@
   .live { color: var(--muted); font-size: 12px; margin-left: auto; display: inline-flex; align-items: center; gap: 6px; }
   .live[data-on]::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: pulse 1.6s ease-out infinite; }
   @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+  .chart { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; display: grid; gap: 6px; }
+  .chart svg { width: 100%; height: 140px; display: block; cursor: crosshair; }
+  .chart path { fill: none; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+  .chart line.at { stroke: var(--muted); stroke-dasharray: 2 3; vector-effect: non-scaling-stroke; }
+  .legend, .axis, .picked { display: flex; flex-wrap: wrap; gap: 4px 12px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .axis { justify-content: space-between; }
+  .legend i { display: inline-block; width: 10px; height: 2px; margin-right: 6px; vertical-align: middle; }
+  .picked { align-items: center; color: var(--fg); }
+  .picked button { margin-left: auto; }
   @media (prefers-reduced-motion: reduce) { .live[data-on]::before { animation: none; } }
 </style>
 </head>
@@ -43,10 +52,12 @@
   <div id="view"><p class="note">Waiting for the result…</p></div>
 </main>
 <script>
-// roll's MCP App view (io.modelcontextprotocol/ui): a tool's result as a table. It talks to its
-// host only (JSON-RPC over postMessage), has no network, and writes every value as text. The only
-// tool it calls is the read roll names on an answer that's still changing (`_meta["roll/pending"]`),
-// through the host, until the answer settles.
+// roll's MCP App view (io.modelcontextprotocol/ui): a tool's result as a table, with a chart when
+// its rows run over time. It talks to its host only (JSON-RPC over postMessage), has no network,
+// and writes every value as text. The only tool it calls is the read roll names on an answer that's
+// still changing (`_meta["roll/pending"]`), through the host, until the answer settles. What it
+// tells the model (ui/update-model-context) and what a person asks from it (ui/message) carry
+// counts, times, numbers and identifier-like column names only, never a row's text.
 (() => {
   let next = 1;
   const pending = new Map();
@@ -63,7 +74,7 @@
   // A time a route answers as Unix milliseconds (or seconds) under a `…_at` key, as a UTC time a
   // person reads; the raw value stays in the cell's title.
   const when = (k, v) => {
-    if (typeof v !== "number" || !/(_at$|^ts$)/.test(k)) return null;
+    if (typeof v !== "number" || !/(_at$|^ts$|^at$|^time$|^timestamp$)/.test(k)) return null;
     const ms = v > 1e12 && v < 1e14 ? v : v > 1e9 && v < 1e11 ? v * 1000 : null;
     return ms === null ? null : new Date(ms).toISOString().slice(0, 16).replace("T", " ") + " UTC";
   };
@@ -80,6 +91,29 @@
     return node;
   };
   const blank = (v) => v === null || v === undefined || v === "";
+  // A row's time, as milliseconds: Unix ms or s under a time-like key, or an ISO date string.
+  const timeKey = (k) => /(_at$|^ts$|^at$|^time$|^timestamp$|^day$|^date$|^hour$|^minute$|^bucket$|^period$|_start$)/.test(k);
+  const msOf = (v) => typeof v === "number" ? (v > 1e12 && v < 1e14 ? v : v > 1e9 && v < 1e11 ? v * 1000 : null)
+    : typeof v === "string" && /^\d{4}-\d{2}-\d{2}/.test(v) && !isNaN(Date.parse(v)) ? Date.parse(v) : null;
+  const stamp = (ms) => new Date(ms).toISOString().slice(0, 16).replace("T", " ") + " UTC";
+  // A column name as it may leave the view (the model's context, a message the person sends): a
+  // plain identifier, never free text a row could carry.
+  const safeName = (k) => /^[A-Za-z][A-Za-z0-9_.]{0,31}$/.test(k) ? k : null;
+  const fmt = (n) => Math.abs(n) >= 1e6 || (Math.abs(n) < 1e-3 && n !== 0) ? n.toExponential(2) : String(Math.round(n * 1000) / 1000);
+  // Rows over time (usage, metrics, activity by hour): a time column and numeric ones, at least
+  // three points. Up to four series; ids and times aren't series.
+  function series(rows) {
+    const sample = rows.slice(0, 200);
+    const keys = [...new Set(sample.flatMap((r) => Object.keys(r)))];
+    const t = keys.find((k) => timeKey(k) && sample.every((r) => blank(r[k]) || msOf(r[k]) !== null) && sample.filter((r) => msOf(r[k]) !== null).length >= 3);
+    if (!t) return null;
+    const nums = keys.filter((k) => k !== t && !/(^id$|_id$|_at$|^ts$)/.test(k) && safeName(k) && sample.every((r) => blank(r[k]) || typeof r[k] === "number") && sample.some((r) => typeof r[k] === "number")).slice(0, 4);
+    if (!nums.length) return null;
+    const points = rows.slice(0, 2000).map((r) => ({ at: msOf(r[t]), r })).filter((p) => p.at !== null).sort((a, b) => a.at - b.at);
+    // A series with no number in a timed row has nothing to draw.
+    const drawn = nums.filter((k) => points.some((p) => typeof p.r[k] === "number"));
+    return points.length >= 3 && drawn.length ? { t, nums: drawn, points } : null;
+  }
   const mono = (k, v) => typeof v === "number" || /(^id$|_id$|^ts$|_at$|hash|sha|offset)/.test(k);
   // The content's own size: the document's can't be smaller than the frame it's in.
   const resize = () => {
@@ -134,6 +168,9 @@
           view.append(dl);
         }
       }
+      const s = series(rows);
+      if (s) view.append(chart(s));
+      if (!(result && result._meta && result._meta["roll/pending"])) context(rows.length, cols, s);
       const wrap = el("div", undefined, "wrap"); wrap.append(table); view.append(wrap);
       document.getElementById("count").textContent = rows.length > 500 ? `first 500 of ${rows.length}` : `${rows.length} ${rows.length === 1 ? "row" : "rows"}`;
     } else if (data && typeof data === "object") {
@@ -145,6 +182,85 @@
       view.append(el("p", show(data)));
     }
     resize();
+  }
+
+  // The chart: one line a series, the first in the accent and the rest quieter; hovering or
+  // clicking picks the nearest time, and the person may ask about that point in the chat.
+  const SVG = "http://www.w3.org/2000/svg";
+  const shades = ["var(--accent)", "var(--fg)", "var(--muted)", "var(--line)"];
+  function chart({ t, nums, points }) {
+    const box = el("div", undefined, "chart");
+    const legend = el("div", undefined, "legend");
+    // Each series on its own scale (cpu in percent beside memory in MB would flatten one), its
+    // range in the legend.
+    const W = 600, H = 140, t0 = points[0].at, t1 = points[points.length - 1].at;
+    const range = Object.fromEntries(nums.map((k) => { const v = points.map((p) => p.r[k]).filter((x) => typeof x === "number"); return [k, [Math.min(...v), Math.max(...v)]]; }));
+    nums.forEach((k, i) => { const [a, b] = range[k]; const item = el("span", `${k} ${fmt(a)}–${fmt(b)}`); const sw = el("i"); sw.style.background = shades[i]; item.prepend(sw); legend.append(item); });
+    const x = (at) => t1 === t0 ? W / 2 : ((at - t0) / (t1 - t0)) * W;
+    const y = (k, v) => { const [a, b] = range[k]; return H - 4 - ((v - a) / (b - a || 1)) * (H - 8); };
+    const svg = document.createElementNS(SVG, "svg");
+    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    svg.setAttribute("preserveAspectRatio", "none");
+    svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", `${nums.join(", ")} over time`);
+    nums.forEach((k, i) => {
+      let d = "", pen = false;
+      points.forEach((p) => { const v = p.r[k]; if (typeof v !== "number") { pen = false; return; } d += `${pen ? "L" : "M"}${x(p.at).toFixed(1)},${y(k, v).toFixed(1)}`; pen = true; });
+      const path = document.createElementNS(SVG, "path"); path.setAttribute("d", d); path.style.stroke = shades[i]; svg.append(path);
+    });
+    const at = document.createElementNS(SVG, "line"); at.setAttribute("class", "at"); at.setAttribute("y1", 0); at.setAttribute("y2", H); at.style.display = "none"; svg.append(at);
+    const axis = el("div", undefined, "axis"); axis.append(el("span", stamp(t0)), el("span", stamp(t1)));
+    const picked = el("div", undefined, "picked");
+    const nearest = (ev) => {
+      const r = svg.getBoundingClientRect(), at = t0 + ((ev.clientX - r.left) / r.width) * (t1 - t0);
+      return points.reduce((b, p) => Math.abs(p.at - at) < Math.abs(b.at - at) ? p : b, points[0]);
+    };
+    const pick = (p, keep) => {
+      at.setAttribute("x1", x(p.at)); at.setAttribute("x2", x(p.at)); at.style.display = "";
+      picked.replaceChildren(el("span", stamp(p.at)), ...nums.filter((k) => typeof p.r[k] === "number").map((k) => el("span", `${k} ${fmt(p.r[k])}`)));
+      if (keep) {
+        const b = el("button", "Ask in chat");
+        b.addEventListener("click", () => ask(p, nums, b));
+        picked.append(b);
+      }
+    };
+    let held = null;
+    svg.addEventListener("mousemove", (ev) => { if (!held) pick(nearest(ev), false); });
+    svg.addEventListener("mouseleave", () => { if (!held) { at.style.display = "none"; picked.replaceChildren(); } });
+    svg.addEventListener("click", (ev) => { held = nearest(ev); pick(held, true); resize(); });
+    box.append(legend, svg, axis, picked);
+    return box;
+  }
+
+  // The person's question about a point, as their message in the chat (ui/message): the tool, the
+  // time and the numbers in the chart's order only, never a row's text nor a column's name (a name
+  // can come from what's stored), so nothing a row holds speaks as the person. The model has the
+  // names from the view's context.
+  function ask(p, nums, button) {
+    const values = nums.map((k, i) => typeof p.r[k] === "number" ? `line ${i + 1}: ${fmt(p.r[k])}` : null).filter(Boolean).join(", ");
+    const text = `In the ${safeName(tool) || "tool"} chart, at ${stamp(p.at)}: ${values}. What was going on then?`;
+    request("ui/message", { role: "user", content: { type: "text", text } })
+      .then(() => { button.textContent = "Asked"; button.disabled = true; })
+      .catch(() => { button.textContent = "The host didn't take it"; button.disabled = true; });
+  }
+
+  // What the view shows, for the model's next turn (ui/update-model-context): counts, column
+  // names and each series' range, never a row's text. Sent only when it changes (a refresh that
+  // shows the same doesn't).
+  let told = "";
+  function context(n, cols, s) {
+    const columns = cols.map(safeName).filter(Boolean);
+    const chartOf = s && {
+      from: stamp(s.points[0].at), to: stamp(s.points[s.points.length - 1].at),
+      series: s.nums.map((k) => { const v = s.points.map((p) => p.r[k]).filter((x) => typeof x === "number"); return { name: k, min: Math.min(...v), max: Math.max(...v), last: v[v.length - 1] }; }),
+    };
+    const structured = { view: "roll table", tool: safeName(tool), rows: n, columns, chart: chartOf || undefined, lines: chartOf ? chartOf.series.map((x, i) => `line ${i + 1}: ${x.name}`) : undefined };
+    const key = JSON.stringify(structured);
+    if (key === told) return;
+    told = key;
+    let text = `The person sees ${safeName(tool) || "a tool"}'s answer as a table: ${n} rows; columns ${columns.join(", ")}.`;
+    if (chartOf) text += ` A chart above it plots ${chartOf.series.map((x) => `${x.name} (${fmt(x.min)} to ${fmt(x.max)}, last ${fmt(x.last)})`).join(", ")} from ${chartOf.from} to ${chartOf.to}.`;
+    request("ui/update-model-context", { content: [{ type: "text", text }], structuredContent: structured }).catch(() => {});
   }
 
   // An answer still changing: read it again (the read roll named, through the host and so the

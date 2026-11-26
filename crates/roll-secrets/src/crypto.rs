@@ -24,6 +24,12 @@ impl Value {
     }
 }
 
+/// What a `Debug` shows for a field that holds a value or a credential: whether it's set, never
+/// what it is.
+pub(crate) fn redacted<T>(o: &Option<T>) -> Option<&'static str> {
+    o.as_ref().map(|_| "<redacted>")
+}
+
 impl std::fmt::Debug for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("Value(<redacted>)")
@@ -348,6 +354,32 @@ pub fn public_key(secret: &[u8; 32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// No request or answer type prints a value or a credential through `Debug` (AGENTS.md). A
+    /// type that holds one gets a line here.
+    #[test]
+    fn no_debug_prints_a_credential() {
+        use serde_json::json;
+        const CANARY: &str = "fake-canary-credential-0f3a";
+        let url = format!("postgres://admin:{CANARY}@db.example/main");
+        let printed = [
+            format!("{:?}", serde_json::from_value::<crate::Op>(json!({ "op": "set", "key": "K", "value": CANARY })).unwrap()),
+            format!("{:?}", serde_json::from_value::<crate::Batch>(json!({ "ops": [{ "op": "set", "key": "K", "value": CANARY }] })).unwrap()),
+            format!("{:?}", serde_json::from_value::<crate::transit::Plain>(json!({ "plaintext": CANARY })).unwrap()),
+            format!("{:?}", serde_json::from_value::<crate::sinks::NewSink>(json!({ "url": "https://sink.example", "token": CANARY })).unwrap()),
+            format!("{:?}", serde_json::from_value::<crate::github_app::NewGitHubApp>(json!({ "name": "a", "app_id": 1, "installation_id": 2, "private_key": CANARY, "repositories": [], "permissions": {} })).unwrap()),
+            format!("{:?}", serde_json::from_value::<crate::outside::NewOutsideDatabase>(json!({ "name": "a", "url": url })).unwrap()),
+            format!("{:?}", serde_json::from_value::<crate::outside::OutsideDatabaseChange>(json!({ "url": url })).unwrap()),
+            format!("{:?}", serde_json::from_value::<crate::rotators::NewRotator>(json!({ "name": "a", "url": format!("https://rotate.example/?token={CANARY}") })).unwrap()),
+            format!("{:?}", serde_json::from_value::<crate::rotators::RotatorChange>(json!({ "url": format!("https://rotate.example/?token={CANARY}") })).unwrap()),
+            format!("{:?}", serde_json::from_value::<crate::Policy>(json!({ "protected": true, "notify_url": format!("https://hooks.example/{CANARY}") })).unwrap()),
+            format!("{:?}", crate::identities::Login { token: CANARY.into(), expires_at: 0, project: "p".into(), identity: "i".into() }),
+            format!("{:?}", serde_json::from_value::<crate::aws_identity::SignedRequest>(json!({ "method": "POST", "url": "https://sts.amazonaws.com/", "headers": { "authorization": CANARY, "x-amz-security-token": CANARY }, "body": CANARY })).unwrap()),
+        ];
+        for p in printed {
+            assert!(!p.contains(CANARY), "{p}");
+        }
+    }
 
     #[test]
     fn values_are_bound_to_their_row_and_keys_rotate() {

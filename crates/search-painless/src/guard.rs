@@ -386,6 +386,13 @@ const STEP: i64 = 1 << 20;
 /// Room outside executions: far from 0 either way, so nothing looks at the account.
 const IDLE_ROOM: i64 = i64::MAX / 4;
 
+/// What this thread holds of what it allocated since `ROOM` was last set, negated: tests measure
+/// what a structure built on the thread holds by the difference.
+#[cfg(test)]
+pub(crate) fn room() -> i64 {
+    ROOM.get()
+}
+
 thread_local! {
     /// Bytes the running execution may still allocate before its account is looked at.
     /// [`Counting`] subtracts every allocation on this thread and adds every free back.

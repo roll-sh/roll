@@ -6,6 +6,7 @@
 //! [`Sink`]. A crawl that ends `completed` purges what proves gone and keeps what an outage hid
 //! ([`Crawl::purge`]).
 
+pub mod charset;
 pub mod config;
 pub mod fetch;
 pub mod hosts;
@@ -68,17 +69,68 @@ pub const STRIKE_MIN_AGE: &str = "roll.crawler.strike_min_age";
 /// One-off: the next full crawl deletes what it proves gone even past the purge guards, then
 /// turns itself off. For a site that really removed more than half its pages.
 pub const FORCE_PURGE: &str = "force_purge";
+/// The connector field choosing a preset (`docs`).
+pub const PRESET: &str = "preset";
 
-/// The mappings of an index a crawl creates (crawler.md, "Documents").
-pub fn mappings() -> Value {
+/// A page's validators and the link depth it was found at, kept in its documents (roll's: Open
+/// Crawler keeps none): the next crawl asks for the page conditionally, and the purge's re-check
+/// follows its links from where the crawl found it.
+pub const FIELD_ETAG: &str = "http_etag";
+pub const FIELD_LAST_MODIFIED: &str = "http_last_modified";
+pub const FIELD_DEPTH: &str = "crawl_depth";
+/// The digest of the configuration a document was made with (`config::Domain::fingerprint`).
+pub const FIELD_FINGERPRINT: &str = "crawl_fingerprint";
+
+/// The mappings of an index a crawl creates (crawler.md, "Documents"); with the docs preset, its
+/// records' (crawler.md, "The docs preset").
+pub fn mappings(docs: bool) -> Value {
     let t = |ty: &str| obj! { "type" => ty };
-    obj! { "mappings" => obj! { "properties" => obj! {
-        "title" => t("text"), "body" => t("text"), "headings" => t("text"), "meta_description" => t("text"),
-        "url" => t("keyword"), "url_host" => t("keyword"), "url_path" => t("keyword"), "url_scheme" => t("keyword"), "additional_urls" => t("keyword"),
-        "url_path_dir1" => t("keyword"), "url_path_dir2" => t("keyword"), "url_path_dir3" => t("keyword"),
-        "last_crawled_at" => t("date"), "url_port" => t("long"),
-        "links" => obj! { "type" => "keyword", "index" => false },
-    } } }
+    let stored = |ty: &str| obj! { "type" => ty, "index" => false };
+    let mut props = match docs {
+        false => obj! {
+            "title" => t("text"), "body" => t("text"), "headings" => t("text"), "meta_description" => t("text"),
+            "additional_urls" => t("keyword"),
+            "links" => stored("keyword"),
+        },
+        true => {
+            let level = |boost: bool| match boost {
+                true => obj! { "type" => "text", "fields" => obj! { "keyword" => obj! { "type" => "keyword", "ignore_above" => 256 } } },
+                false => t("text"),
+            };
+            obj! {
+                "hierarchy" => obj! { "properties" => obj! {
+                    "lvl0" => level(true), "lvl1" => level(true), "lvl2" => level(false), "lvl3" => level(false), "lvl4" => level(false), "lvl5" => level(false), "lvl6" => level(false),
+                } },
+                "content" => t("text"), "title" => t("text"),
+                "url_without_anchor" => t("keyword"), "anchor" => stored("keyword"), "type" => t("keyword"),
+                "weight" => obj! { "properties" => obj! { "level" => t("integer"), "position" => t("integer") } },
+            }
+        }
+    };
+    if let Value::Obj(m) = &mut props {
+        for (k, v) in [
+            ("url", t("keyword")), ("url_host", t("keyword")), ("url_path", t("keyword")), ("url_scheme", t("keyword")),
+            ("url_path_dir1", t("keyword")), ("url_path_dir2", t("keyword")), ("url_path_dir3", t("keyword")),
+            ("last_crawled_at", t("date")), ("url_port", t("long")),
+            (FIELD_ETAG, stored("keyword")), (FIELD_LAST_MODIFIED, stored("keyword")), (FIELD_DEPTH, stored("integer")), (FIELD_FINGERPRINT, stored("keyword")),
+        ] {
+            m.insert(k.into(), v);
+        }
+    }
+    obj! { "mappings" => obj! { "properties" => props } }
+}
+
+/// The search template a docs crawl's index gets (`<index>-docs-search`): a search-as-you-type
+/// query over the hierarchy (higher levels weigh more) and the content, highlighted, with the
+/// records' fields a docs search box shows. Its parameters: `query`, and `size` (10).
+pub fn docs_template() -> Value {
+    let source = r#"{"size": {{size}}{{^size}}10{{/size}}, "query": {"multi_match": {"query": "{{query}}", "type": "bool_prefix", "fields": ["hierarchy.lvl0^2", "hierarchy.lvl1^7", "hierarchy.lvl2^6", "hierarchy.lvl3^5", "hierarchy.lvl4^4", "hierarchy.lvl5^3", "hierarchy.lvl6^3", "content"]}}, "sort": ["_score", {"weight.level": "desc"}, {"weight.position": "asc"}], "_source": ["url", "url_without_anchor", "anchor", "type", "hierarchy", "content", "title"], "highlight": {"fields": {"content": {}, "hierarchy.lvl1": {}, "hierarchy.lvl2": {}, "hierarchy.lvl3": {}}}}"#;
+    obj! { "script" => obj! { "lang" => "mustache", "source" => source } }
+}
+
+/// The id of a page's `n`th section record (the docs preset).
+fn record_id(link: &Link, n: usize) -> String {
+    format!("{}-{n}", link.id())
 }
 
 /// The node's ceilings for crawl limits.
@@ -118,18 +170,72 @@ pub fn unverified_floor<'a>(setting: impl Fn(&str) -> Option<&'a str>) -> Durati
 /// The longest a `crawl-test` or verification check waits for one request turn.
 pub(crate) const TURN_WAIT: Duration = Duration::from_secs(10);
 
-/// Waits for `link`'s site's request turn on this node, `floor` after the last request to it
-/// (crawls, `crawl-test` and verification checks share the turns, `hosts::turn`); `Err` (sending
-/// nothing) when it wouldn't come by `until`.
-pub(crate) async fn polite_turn(link: &Link, floor: Duration, until: Instant) -> Result<(), String> {
-    let site = hosts::site_of(link);
-    while let Some(at) = hosts::turn(&site, floor) {
+/// Waits for `link`'s server's request turn on this node, `floor` after the last request to it
+/// (crawls, `crawl-test` and verification checks share the turns, `hosts::turn`, keyed by the
+/// address the egress check resolves the host to: [`fetch::Fetcher::server`]); `Err` (sending
+/// nothing) when it wouldn't come by `until`. A host that doesn't resolve takes its site's turn
+/// (its request then fails as it would have).
+pub(crate) async fn polite_turn(fetcher: &Fetcher, link: &Link, floor: Duration, until: Instant) -> Result<(), String> {
+    let server = fetcher.server(link).await.unwrap_or_else(|_| hosts::site_of(link));
+    while let Some(at) = hosts::turn(&server, floor) {
         if at > until {
-            return Err(format!("[{site}] is busy: its next request turn is too far off; try again shortly"));
+            return Err(format!("[{}] is busy: its next request turn is too far off; try again shortly", hosts::site_of(link)));
         }
         tokio::time::sleep_until(at.into()).await;
     }
     Ok(())
+}
+
+/// The URLs a crawl fetches at once, from different servers and origins (a node setting).
+pub const MAX_PARALLEL_FETCHES: &str = "roll.crawler.max_parallel_fetches";
+const PARALLEL_DEFAULT: u64 = 4;
+const PARALLEL_CEILING: u64 = 16;
+
+/// What waiting for a request's turns came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Turn {
+    Now,
+    /// The origin's turn comes after the deadline (a long `Crawl-delay`).
+    OriginLate,
+    /// The server's turn, or the request itself, would come after the deadline.
+    Late,
+}
+
+/// Waits for a request's two turns, the stricter winning: its origin's (`origin_at`: the larger
+/// of its robots.txt `Crawl-delay` and the node's interval after its last request) and its
+/// server's (`hosts::turn` at `floor`, shared by every crawl on the node, `server` from
+/// [`fetch::Fetcher::server`]). No wait outlasts `deadline`, and a cancel ends it.
+async fn take_turns(sink: &Sink<'_>, server: &str, origin_at: Option<Instant>, floor: Duration, deadline: Instant) -> Result<Turn, Stop> {
+    let sleep = |at: Instant| async move {
+        tokio::select! {
+            _ = tokio::time::sleep_until(at.min(deadline).into()) => Ok(()),
+            s = sink.stopped() => Err(s),
+        }
+    };
+    if let Some(at) = origin_at.filter(|at| *at > Instant::now()) {
+        if at >= deadline {
+            return Ok(Turn::OriginLate);
+        }
+        sleep(at).await?;
+    }
+    while let Some(at) = hosts::turn(server, floor) {
+        if Instant::now() >= deadline || at >= deadline {
+            return Ok(Turn::Late);
+        }
+        sleep(at).await?;
+    }
+    if Instant::now() >= deadline {
+        return Ok(Turn::Late);
+    }
+    Ok(Turn::Now)
+}
+
+/// A first request made with others at once ([`Crawl::drain`]): what its turns came to, and its
+/// response with when it was sent.
+enum Prefetched {
+    OriginLate,
+    Late,
+    Sent(Result<fetch::Response, fetch::Failure>, Instant),
 }
 
 /// Why a URL isn't fetched.
@@ -167,12 +273,18 @@ struct Stats {
     extraction_dropped: u64,
     /// URLs checked against the crawl rules and robots.txt.
     checked_urls: u64,
+    /// Pages that answered 304 to their validators: kept as they are, nothing extracted or written.
+    not_modified: u64,
+    /// Pages some of whose docs-preset sections were dropped (past a page's caps).
+    sections_dropped: u64,
     errors: Map,
     elastic_crawler_groups: Vec<String>,
 }
 
 struct Crawl<'s, 'a> {
     sink: &'s mut Sink<'a>,
+    /// A full crawl (it purges); else incremental (it never deletes anything).
+    full: bool,
     plan: Plan,
     fetcher: Fetcher,
     auth_origin: Option<String>,
@@ -180,6 +292,8 @@ struct Crawl<'s, 'a> {
     robots: HashMap<String, Robots>,
     next_at: HashMap<String, Instant>,
     floor: Duration,
+    /// URLs fetched at once at most ([`MAX_PARALLEL_FETCHES`]).
+    parallel: usize,
     skipped_origins: HashSet<String>,
     /// Hashes of URLs queued or visited.
     known: HashSet<u64>,
@@ -193,8 +307,13 @@ struct Crawl<'s, 'a> {
     /// Of `gone`: URLs the crawl's own configuration now leaves out (its domains, crawl rules,
     /// URL limits). No outage causes that, so they don't count against the purge guards.
     excluded: HashSet<u64>,
-    /// URLs indexed under themselves this crawl, and the pages naming each as canonical.
+    /// URLs indexed under themselves this crawl (304s too), and the pages naming each as
+    /// canonical.
     indexed: HashSet<u64>,
+    /// Of `indexed`: pages that answered 304, whose documents stand as they are.
+    not_modified: HashSet<u64>,
+    /// Pages written as the docs preset's records this crawl, and how many each got.
+    records: HashMap<u64, usize>,
     aliases: HashMap<u64, (Link, Vec<Link>)>,
     /// Redirects of documents re-checked by the purge, and how many led to each target.
     redirects: u64,
@@ -224,9 +343,6 @@ pub async fn sync(cid: &str, v: &Values, sink: &mut Sink<'_>, full: bool, cursor
     let cluster = sink.cluster;
     if !enabled(|k| cluster.config.node_setting(k)) {
         return Err(Stop::Failed(format!("web crawlers are turned off on this node ({ENABLED})")));
-    }
-    if !full {
-        return Err(Stop::Failed("roll's web crawler runs full crawls only; incremental crawls come later".into()));
     }
     let fields = fields_of(v)?;
     // Building the rules' DFAs is CPU work: off the async workers.
@@ -307,6 +423,7 @@ pub async fn sync(cid: &str, v: &Values, sink: &mut Sink<'_>, full: bool, cursor
     let sink_deadline = sink.deadline.checked_sub(Duration::from_secs(60)).unwrap_or(sink.deadline);
     let mut c = Crawl {
         sink,
+        full,
         plan,
         fetcher,
         auth_origin,
@@ -314,6 +431,7 @@ pub async fn sync(cid: &str, v: &Values, sink: &mut Sink<'_>, full: bool, cursor
         robots: HashMap::new(),
         next_at: HashMap::new(),
         floor,
+        parallel: number(cluster, MAX_PARALLEL_FETCHES, PARALLEL_DEFAULT).min(PARALLEL_CEILING) as usize,
         skipped_origins: HashSet::new(),
         known: HashSet::new(),
         queue: VecDeque::new(),
@@ -321,6 +439,8 @@ pub async fn sync(cid: &str, v: &Values, sink: &mut Sink<'_>, full: bool, cursor
         kept: HashSet::new(),
         excluded: HashSet::new(),
         indexed: HashSet::new(),
+        not_modified: HashSet::new(),
+        records: HashMap::new(),
         aliases: HashMap::new(),
         redirects: 0,
         redirect_targets: HashMap::new(),
@@ -353,7 +473,7 @@ pub async fn sync(cid: &str, v: &Values, sink: &mut Sink<'_>, full: bool, cursor
 /// The simple fields of a crawler's configuration.
 fn fields_of(v: &Values) -> Result<Fields, String> {
     let int = |k: &str| -> Result<Option<i64>, String> { v.text(k).map(|s| s.parse::<i64>().map_err(|_| format!("the connector's [{k}] isn't a number"))).transpose() };
-    Ok(Fields { urls: v.list("urls"), sitemap_urls: v.list("sitemap_urls"), sitemap_discovery: v.bool("sitemap_discovery", true), max_crawl_depth: int("max_crawl_depth")?, max_unique_url_count: int("max_unique_url_count")? })
+    Ok(Fields { urls: v.list("urls"), sitemap_urls: v.list("sitemap_urls"), sitemap_discovery: v.bool("sitemap_discovery", true), max_crawl_depth: int("max_crawl_depth")?, max_unique_url_count: int("max_unique_url_count")?, preset: v.text("preset").filter(|p| !p.is_empty()) })
 }
 
 /// The credential and its origin, from the sealed fields.
@@ -536,7 +656,22 @@ impl Crawl<'_, '_> {
             self.enqueue(s, 1);
         }
         self.read_sitemaps(sitemaps).await?;
-        while let Some((link, depth)) = self.queue.pop_front() {
+        self.drain().await?;
+        self.flush().await?;
+        self.purge(cursor, before, force_purge).await
+    }
+
+    /// Visits the frontier breadth first until it's empty, the budget is spent or the deadline
+    /// comes. Up to [`MAX_PARALLEL_FETCHES`] URLs at a time, each on another server and another
+    /// origin, have their first requests made at once (each waiting for its own turns); what they
+    /// answered is then handled one URL after the other, in queue order, as a single fetch is:
+    /// every count, verdict and document is the crawl's one task's, so the purge's guards and the
+    /// job's stats see exactly what a crawl one URL at a time would.
+    async fn drain(&mut self) -> Result<(), Stop> {
+        loop {
+            if self.queue.is_empty() {
+                break;
+            }
             if Instant::now() >= self.deadline {
                 self.limit_reached.get_or_insert("max_duration");
                 break;
@@ -545,15 +680,101 @@ impl Crawl<'_, '_> {
                 self.limit_reached = Some(self.budget_name);
                 break;
             }
+            let batch = self.take_batch().await;
+            if batch.len() <= 1 {
+                if let Some((link, depth, _, cond)) = batch.into_iter().next() {
+                    self.visit_from(link, depth, cond, None).await?;
+                    self.tick().await?;
+                }
+                continue;
+            }
+            // The first requests, at once: they read only the fetcher and the sink.
+            let (fetcher, sink, floor, deadline, max) = (&self.fetcher, &*self.sink, self.floor, self.deadline, self.plan.limits.usize(L::ResponseSize));
+            let origin_at: Vec<Option<Instant>> = batch.iter().map(|(l, ..)| self.next_at.get(&l.origin()).copied()).collect();
+            let futures = batch
+                .iter()
+                .zip(&origin_at)
+                .map(|((link, _, server, cond), at)| async move {
+                    match take_turns(sink, server, *at, floor, deadline).await? {
+                        Turn::OriginLate => Ok(Prefetched::OriginLate),
+                        Turn::Late => Ok(Prefetched::Late),
+                        Turn::Now => {
+                            let sent = Instant::now();
+                            tokio::select! {
+                                r = fetcher.get(link, true, max, cond.as_ref()) => Ok(Prefetched::Sent(r, sent)),
+                                s = sink.stopped() => Err(s),
+                            }
+                        }
+                    }
+                })
+                .collect();
+            let answers: Vec<Result<Prefetched, Stop>> = crate::api::by_query::join_all(futures).await;
+            for ((link, depth, _, cond), answer) in batch.into_iter().zip(answers) {
+                let first = match answer? {
+                    Prefetched::OriginLate => {
+                        self.visited += 1;
+                        self.stats.skipped_origin_urls += 1;
+                        self.skipped_origins.insert(link.origin());
+                        continue;
+                    }
+                    Prefetched::Late => {
+                        self.visited += 1;
+                        self.limit_reached.get_or_insert("max_duration");
+                        continue;
+                    }
+                    Prefetched::Sent(r, sent) => {
+                        self.next_at.insert(link.origin(), sent + self.origin_gap(&link));
+                        if let Ok(resp) = &r {
+                            self.sink.read(resp.wire_bytes);
+                            self.stats.fetched_bytes += resp.wire_bytes;
+                        }
+                        r
+                    }
+                };
+                self.visit_from(link, depth, cond, Some(first)).await?;
+                self.tick().await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The next URLs to fetch at once: from the queue's front, each on a server and an origin no
+    /// other in the batch is on (the rest go back to the front, in order), with the server each
+    /// is on and its document's validators. At most [`MAX_PARALLEL_FETCHES`], and within the
+    /// crawl's budget; a few more are looked at than taken, so a queue of one server's URLs costs
+    /// little.
+    async fn take_batch(&mut self) -> Vec<(Link, u64, String, Option<fetch::Validators>)> {
+        let cap = self.parallel.min((self.budget - self.visited).max(1) as usize);
+        let mut batch: Vec<(Link, u64, String, Option<fetch::Validators>)> = Vec::new();
+        let mut later: Vec<(Link, u64)> = Vec::new();
+        let mut looked = 0;
+        while batch.len() < cap && looked < cap * 4 {
+            let Some((link, depth)) = self.queue.pop_front() else { break };
+            looked += 1;
             if self.skipped_origins.contains(&link.origin()) {
                 self.stats.skipped_origin_urls += 1;
                 continue;
             }
-            self.visit(link, depth).await?;
-            self.tick().await?;
+            // Unresolved: a server of its own (its request fails as it would have).
+            let server = self.fetcher.server(&link).await.unwrap_or_else(|_| format!("unresolved {}", link.origin()));
+            if batch.iter().any(|(l, _, s, _)| *s == server || l.origin() == link.origin()) {
+                later.push((link, depth));
+                continue;
+            }
+            let cond = self.stored_validators(&link).await;
+            batch.push((link, depth, server, cond));
         }
-        self.flush().await?;
-        self.purge(cursor, before, force_purge).await
+        for l in later.into_iter().rev() {
+            self.queue.push_front(l);
+        }
+        batch
+    }
+
+    /// The gap after a request to `link`'s origin: the larger of its robots.txt `Crawl-delay` and
+    /// the node's interval.
+    fn origin_gap(&self, link: &Link) -> Duration {
+        let delay = self.robots.get(&link.origin()).and_then(|r| r.crawl_delay).map(|d| Duration::from_secs_f64(d.min(86_400.0))).unwrap_or_default();
+        self.floor.max(delay)
     }
 
     /// Writes the crawl's counts into the job's metadata (the heartbeat sends them).
@@ -575,6 +796,10 @@ impl Crawl<'_, '_> {
             m.insert("extraction_rules_dropped_page_count".into(), n(s.extraction_dropped));
         }
         m.insert("checked_url_count".into(), n(s.checked_urls));
+        m.insert("not_modified_count".into(), n(s.not_modified));
+        if s.sections_dropped > 0 {
+            m.insert("docs_sections_dropped_page_count".into(), n(s.sections_dropped));
+        }
         m.insert("error_count".into(), Value::Obj(s.errors.clone()));
         if !s.elastic_crawler_groups.is_empty() {
             m.insert("robots_elastic_crawler_group_ignored".into(), Value::Arr(s.elastic_crawler_groups.iter().cloned().map(Value::from).collect()));
@@ -697,58 +922,41 @@ impl Crawl<'_, '_> {
         Ok(())
     }
 
-    /// Sleeps until `at`, or the crawl's deadline if that comes first.
-    async fn sleep_until(&self, at: Instant) -> Result<(), Stop> {
-        tokio::select! {
-            _ = tokio::time::sleep_until(at.min(self.deadline).into()) => Ok(()),
-            s = self.sink.stopped() => Err(s),
-        }
-    }
 
-    /// Waits for `link`'s turn: one request at a time per origin, spaced by the larger of its
-    /// `Crawl-delay` and the node's interval, and one at a time per site across every crawl on
-    /// the node. No wait outlasts the crawl's deadline: a turn that would come after it is not
-    /// taken (`false`), and the request isn't made.
+    /// Waits for `link`'s turns ([`take_turns`]): its origin's (one request at a time, spaced by
+    /// the larger of its `Crawl-delay` and the node's interval) and its server's (by address,
+    /// across every crawl on the node). No wait outlasts the crawl's deadline: a turn that would
+    /// come after it is not taken (`false`), and the request isn't made. A turn of the origin's
+    /// after the deadline (a long `Crawl-delay`) leaves the origin for this crawl, rather than
+    /// holding every other origin until the deadline.
     async fn wait_turn(&mut self, link: &Link) -> Result<bool, Stop> {
         let origin = link.origin();
-        let delay = self.robots.get(&origin).and_then(|r| r.crawl_delay).map(|d| Duration::from_secs_f64(d.min(86_400.0))).unwrap_or_default();
-        let gap = self.floor.max(delay);
-        if let Some(at) = self.next_at.get(&origin).copied()
-            && at > Instant::now()
-        {
-            // A turn after the deadline (a long `Crawl-delay`): the origin is left for this
-            // crawl, rather than holding every other origin until the deadline.
-            if at >= self.deadline {
+        let server = self.fetcher.server(link).await.unwrap_or_else(|_| format!("unresolved {origin}"));
+        match take_turns(self.sink, &server, self.next_at.get(&origin).copied(), self.floor, self.deadline).await? {
+            Turn::Now => {}
+            Turn::OriginLate => {
                 self.stats.skipped_origin_urls += 1;
                 self.skipped_origins.insert(origin);
                 return Ok(false);
             }
-            self.sleep_until(at).await?;
-        }
-        let site = hosts::site_of(link);
-        while let Some(at) = hosts::turn(&site, self.floor) {
-            if Instant::now() >= self.deadline || at >= self.deadline {
+            Turn::Late => {
                 self.limit_reached.get_or_insert("max_duration");
                 return Ok(false);
             }
-            self.sleep_until(at).await?;
         }
-        if Instant::now() >= self.deadline {
-            self.limit_reached.get_or_insert("max_duration");
-            return Ok(false);
-        }
+        let gap = self.origin_gap(link);
         self.next_at.insert(origin, Instant::now() + gap);
         Ok(true)
     }
 
     /// One polite request; `clean`: every hop before it was at the credential's origin. `None`
     /// when its turn would come after the crawl's deadline: nothing was sent.
-    async fn get(&mut self, link: &Link, clean: bool, max: usize) -> Result<Option<Result<fetch::Response, fetch::Failure>>, Stop> {
+    async fn get(&mut self, link: &Link, clean: bool, max: usize, cond: Option<&fetch::Validators>) -> Result<Option<Result<fetch::Response, fetch::Failure>>, Stop> {
         if !self.wait_turn(link).await? {
             return Ok(None);
         }
         let r = tokio::select! {
-            r = self.fetcher.get(link, clean, max) => r,
+            r = self.fetcher.get(link, clean, max, cond) => r,
             s = self.sink.stopped() => return Err(s),
         };
         if let Ok(resp) = &r {
@@ -777,7 +985,7 @@ impl Crawl<'_, '_> {
             if self.fetcher.refused(&at) || self.blocked.iter().any(|b| host == *b || host.ends_with(&format!(".{b}"))) || hosts::site_of(&at) != site {
                 return Ok(Robots::unreachable());
             }
-            let resp = match self.get(&at, clean, robots::MAX_BYTES).await? {
+            let resp = match self.get(&at, clean, robots::MAX_BYTES, None).await? {
                 None => return Ok(Robots::unreachable()),
                 Some(Ok(r)) => r,
                 // Too large: what was read can't be trusted to be whole, so nothing is allowed.
@@ -830,7 +1038,7 @@ impl Crawl<'_, '_> {
             read += 1;
             let max = self.plan.limits.usize(L::ResponseSize);
             let clean = self.on_auth_origin(&link);
-            let body = match self.get(&link, clean, max).await? {
+            let body = match self.get(&link, clean, max, None).await? {
                 None => break,
                 Some(Ok(r)) if (200..300).contains(&r.status) => r.body,
                 _ => {
@@ -875,15 +1083,28 @@ impl Crawl<'_, '_> {
     /// what the URL proved: indexed, gone ([`Crawl::gone`]) or kept by an error
     /// ([`Crawl::kept`]).
     async fn visit(&mut self, link: Link, depth: u64) -> Result<(), Stop> {
+        let cond = self.stored_validators(&link).await;
+        self.visit_from(link, depth, cond, None).await
+    }
+
+    /// [`Crawl::visit`] with `link`'s document's validators read, and, when [`Crawl::drain`] made
+    /// it with others at once, the first request's answer (`first`).
+    async fn visit_from(&mut self, link: Link, depth: u64, cond: Option<fetch::Validators>, mut first: Option<Result<fetch::Response, fetch::Failure>>) -> Result<(), Stop> {
         self.visited += 1;
         let src = link.hash64();
+        // The validators of the URL's own document go only on the request for that URL: never
+        // on a redirect's next hop.
         let mut at = link;
         let mut clean = true;
         let mut hops = 0u64;
         let mut retries = 0usize;
         let max = self.plan.limits.usize(L::ResponseSize);
         let resp = loop {
-            let r = match self.get(&at, clean, max).await? {
+            let got = match first.take() {
+                Some(r) => Some(r),
+                None => self.get(&at, clean, max, cond.as_ref().filter(|_| hops == 0)).await?,
+            };
+            let r = match got {
                 // Its turn came after the deadline: not checked, so it proves nothing.
                 None => return Ok(()),
                 Some(Ok(r)) => r,
@@ -895,6 +1116,14 @@ impl Crawl<'_, '_> {
             };
             self.stats.fetched_pages += 1;
             match r.status {
+                // Unchanged since its document was written: seen, and left as it is.
+                304 if hops == 0 && cond.is_some() => {
+                    self.stats.not_modified += 1;
+                    self.not_modified.insert(src);
+                    self.indexed.insert(src);
+                    *self.indexed_by_origin.entry(at.origin()).or_default() += 1;
+                    return Ok(());
+                }
                 300..=399 if r.location.is_some() => {
                     hops += 1;
                     let next = r.location.as_deref().and_then(|l| Link::parse(l, Some(at.url())));
@@ -963,24 +1192,49 @@ impl Crawl<'_, '_> {
             self.kept.insert(src);
             return Ok(());
         }
-        self.index_page(src, at, depth, resp.body).await
+        self.index_page(src, at, depth, resp.body, &resp.content_type, resp.validators).await
+    }
+
+    /// The validators the document of `link` holds (its records' first, with the docs preset),
+    /// if it has one made with the configuration the crawl has now (its fingerprint): the crawl
+    /// asks for the page conditionally then. Made with another (rules, tags, the preset's
+    /// selectors or limits changed since), the page is read in full again.
+    async fn stored_validators(&self, link: &Link) -> Option<fetch::Validators> {
+        let now = &self.plan.domain(link)?.fingerprint;
+        let id = match self.plan.docs {
+            Some(_) => record_id(link, 0),
+            None => link.id(),
+        };
+        let path = format!("/{}/_doc/{}?_source_includes={FIELD_ETAG},{FIELD_LAST_MODIFIED},{FIELD_FINGERPRINT}", enc(&self.sink.index), enc(&id));
+        let doc = internal::call(self.sink.cluster, "GET", &path, None).await.ok()?;
+        let source = doc.get("_source")?;
+        if source.get(FIELD_FINGERPRINT).and_then(Value::as_str) != Some(now.as_str()) {
+            return None;
+        }
+        let v = fetch::Validators::of_document(source);
+        (!v.is_empty()).then_some(v)
     }
 
     /// Parses and indexes a page: the document under its canonical URL, its links queued.
-    async fn index_page(&mut self, src: u64, at: Link, depth: u64, body: Vec<u8>) -> Result<(), Stop> {
+    async fn index_page(&mut self, src: u64, at: Link, depth: u64, body: Vec<u8>, content_type: &str, validators: fetch::Validators) -> Result<(), Stop> {
         let mut held = self.sink.reserve();
-        if let Err(e) = held.add(body.len() as u64 * 2, "crawled page") {
+        if let Err(e) = held.add(body.len() as u64, "crawled page") {
             return self.failed(src, &at, e.reason());
         }
-        let text = String::from_utf8_lossy(&body).into_owned();
+        // In the page's own charset (BOM, header, `<meta>`, else windows-1252), the text no larger
+        // than the response's cap, and charged before the body goes.
+        let (text, _) = charset::decode(&body, content_type, self.plan.limits.usize(L::ResponseSize));
+        if let Err(e) = held.add(text.capacity() as u64, "crawled page") {
+            return self.failed(src, &at, e.reason());
+        }
         drop(body);
         let tags = self.plan.domain(&at).map(|d| d.exclude_tags.clone()).unwrap_or_default();
         let extraction = self.plan.domain(&at).map(|d| d.extraction.clone()).unwrap_or_default();
         // Off the async worker, against a deadline: a page can't hold a core past it.
-        let (url, limits) = (at.clone(), self.plan.limits.clone());
+        let (url, limits, docs) = (at.clone(), self.plan.limits.clone(), self.plan.docs.clone());
         let deadline = (Instant::now() + PAGE_PARSE_TIME).min(self.deadline.max(Instant::now() + Duration::from_secs(1)));
         let parse = tokio::task::spawn_blocking(move || {
-            let r = html::read_page(&text, held, &url, &tags, &extraction, &limits, deadline);
+            let r = html::read_page(&text, held, &url, &tags, &extraction, docs.as_deref(), &limits, deadline);
             (r, text)
         });
         // A cancel doesn't wait for the parse (it ends at its own deadline, and its result is
@@ -999,6 +1253,9 @@ impl Crawl<'_, '_> {
         };
         if page.extraction_dropped > 0 {
             self.stats.extraction_dropped += 1;
+        }
+        if page.sections_dropped > 0 {
+            self.stats.sections_dropped += 1;
         }
         // A canonical URL is honoured only once the crawl has fetched it and indexed it as
         // itself: then this page is one of its `additional_urls`, not a document of its own.
@@ -1043,16 +1300,40 @@ impl Crawl<'_, '_> {
         self.indexed.insert(at.hash64());
         *self.indexed_by_origin.entry(at.origin()).or_default() += 1;
         let primary = at;
-        let doc = document(&primary, None, page, self.plan.full_html.then_some(text), &self.started_at);
-        let id = primary.id();
-        let mut page_buf = std::mem::replace(&mut self.page, self.sink.new_page());
-        let pushed = self.sink.push_doc(&mut page_buf, &id, doc);
-        self.page = page_buf;
-        drop(held);
-        pushed?;
-        if self.page.sizes.len() >= PAGE_DOCS || self.page.bytes() >= PAGE_BYTES {
-            self.flush().await?;
+        let fingerprint = self.plan.domain(&primary).map(|d| d.fingerprint.clone()).unwrap_or_default();
+        let crawl = |d: &mut Map| {
+            if let Some(e) = &validators.etag {
+                d.insert(FIELD_ETAG.into(), e.clone().into());
+            }
+            if let Some(m) = &validators.last_modified {
+                d.insert(FIELD_LAST_MODIFIED.into(), m.clone().into());
+            }
+            d.insert(FIELD_DEPTH.into(), (depth as i64).into());
+            d.insert(FIELD_FINGERPRINT.into(), fingerprint.clone().into());
+        };
+        let docs: Vec<(String, Map)> = match self.plan.docs.is_some() {
+            false => {
+                let mut doc = document(&primary, None, page, self.plan.full_html.then_some(text), &self.started_at);
+                crawl(&mut doc);
+                vec![(primary.id(), doc)]
+            }
+            true => {
+                let mut records = records(&primary, &page, &self.started_at);
+                records.iter_mut().for_each(|(_, d)| crawl(d));
+                self.records.insert(primary.hash64(), records.len());
+                records
+            }
+        };
+        for (id, doc) in docs {
+            let mut page_buf = std::mem::replace(&mut self.page, self.sink.new_page());
+            let pushed = self.sink.push_doc(&mut page_buf, &id, doc);
+            self.page = page_buf;
+            pushed?;
+            if self.page.sizes.len() >= PAGE_DOCS || self.page.bytes() >= PAGE_BYTES {
+                self.flush().await?;
+            }
         }
+        drop(held);
         Ok(())
     }
 
@@ -1088,12 +1369,16 @@ impl Crawl<'_, '_> {
         // Ids to delete, with their origins.
         let mut delete: Vec<(String, String)> = Vec::new();
         let (mut gone, mut kept, mut struck, mut unchecked, mut excluded) = (0u64, 0u64, 0u64, 0u64, 0u64);
+        // Documents of pages rewritten this crawl in another shape: deleted by every crawl (an
+        // incremental one too), whatever the purge's guards say.
+        let mut replaced_ids: Vec<String> = Vec::new();
         // Per origin: stale documents seen, and how many of them weren't refreshed.
         let mut origins: HashMap<String, (u64, u64)> = HashMap::new();
-        let mut recheck: Vec<(String, Link, Option<i64>)> = Vec::new();
+        let mut recheck: Vec<(String, Link, Option<i64>, Option<u64>)> = Vec::new();
         let max_recheck = self.plan.limits.usize(L::QueueSize);
         let listing = |e: crate::error::EsError| Stop::Failed(format!("listing [{index}] for the purge failed: {}", e.reason()));
-        let first = obj! { "size" => 1000, "_source" => crate::arr!["url", "last_crawled_at"], "sort" => crate::arr!["_doc"], "query" => obj! { "range" => obj! { "last_crawled_at" => obj! { "lt" => self.started_at.clone() } } } };
+        let fields = crate::arr!["url", "url_without_anchor", "last_crawled_at", FIELD_DEPTH, "weight.position"];
+        let first = obj! { "size" => 1000, "_source" => fields, "sort" => crate::arr!["_doc"], "query" => obj! { "range" => obj! { "last_crawled_at" => obj! { "lt" => self.started_at.clone() } } } };
         let mut page = internal::call(cluster, "POST", &format!("/{}/_search?scroll=2m", enc(&index)), Some(&first)).await.map_err(listing)?;
         let mut scroll = page.get("_scroll_id").and_then(Value::as_str).map(str::to_string);
         // What this crawl learnt of one stale document.
@@ -1127,9 +1412,28 @@ impl Crawl<'_, '_> {
             }
             for h in hits {
                 let Some(id) = h.get("_id").and_then(Value::as_str) else { continue };
-                let Some(link) = h.pointer(&["_source", "url"]).and_then(Value::as_str).and_then(|u| Link::parse(u, None)) else { continue };
+                // A docs record is its page's.
+                let record = h.pointer(&["_source", "url_without_anchor"]).and_then(Value::as_str);
+                let Some(link) = record.or_else(|| h.pointer(&["_source", "url"]).and_then(Value::as_str)).and_then(|u| Link::parse(u, None)) else { continue };
                 let last = h.pointer(&["_source", "last_crawled_at"]).and_then(Value::as_str).and_then(ms_of);
+                let depth = h.pointer(&["_source", FIELD_DEPTH]).and_then(Value::as_i64).and_then(|d| u64::try_from(d).ok());
                 let k = link.hash64();
+                // Unchanged (a 304): seen, and left as it is.
+                if self.not_modified.contains(&k) {
+                    continue;
+                }
+                // Rewritten this crawl in another shape: a record past the page's sections now,
+                // a record of a page now indexed as one document, or the document of a page now
+                // in records. No outage causes that.
+                let position = h.pointer(&["_source", "weight", "position"]).and_then(Value::as_i64).and_then(|p| usize::try_from(p).ok());
+                let replaced = match record {
+                    Some(_) => self.indexed.contains(&k) && self.records.get(&k).is_none_or(|n| position.is_none_or(|p| p >= *n)),
+                    None => self.records.contains_key(&k),
+                };
+                if replaced {
+                    replaced_ids.push(id.to_string());
+                    continue;
+                }
                 origins.entry(link.origin()).or_default().0 += 1;
                 // Left out by the crawl's own configuration (its domains, crawl rules, URL
                 // limits): decided here, fetching nothing, whatever budget the crawl has left.
@@ -1140,7 +1444,7 @@ impl Crawl<'_, '_> {
                 if self.gone.contains(&k) || self.kept.contains(&k) {
                     settle(self, id.to_string(), &link, last, &mut delete, &mut origins);
                 } else if recheck.len() < max_recheck {
-                    recheck.push((id.to_string(), link, last));
+                    recheck.push((id.to_string(), link, last, depth));
                 } else {
                     unchecked += 1;
                     origins.entry(link.origin()).or_default().1 += 1;
@@ -1156,9 +1460,11 @@ impl Crawl<'_, '_> {
         if let Some(sid) = scroll {
             let _ = internal::call(cluster, "DELETE", "/_search/scroll", Some(&obj! { "scroll_id" => crate::arr![sid] })).await;
         }
-        // The rest is fetched again, within the crawl's limits.
+        // The rest is fetched again, within the crawl's limits, asked conditionally as every page
+        // is. A page that changed has its links followed from the depth it was found at (they may
+        // lead to pages no unchanged page shows the crawl), before the next one.
         self.rechecking = true;
-        for (n, (id, link, last)) in recheck.into_iter().enumerate() {
+        for (n, (id, link, last, depth)) in recheck.into_iter().enumerate() {
             // Verdicts that fetch nothing still take time: yield, and notice a cancel.
             if n % YIELD_EVERY == YIELD_EVERY - 1 {
                 tokio::task::yield_now().await;
@@ -1175,12 +1481,21 @@ impl Crawl<'_, '_> {
             match self.judge(&link) {
                 Verdict::Allowed => {
                     if !self.known.insert(k) {
-                        unchecked += 1;
-                        origins.entry(link.origin()).or_default().1 += 1;
+                        // Already visited (a re-checked page's link): what it proved stands.
+                        if self.gone.contains(&k) || self.kept.contains(&k) {
+                            settle(self, id, &link, last, &mut delete, &mut origins);
+                        } else if !self.indexed.contains(&k) {
+                            unchecked += 1;
+                            origins.entry(link.origin()).or_default().1 += 1;
+                        }
                         continue;
                     }
-                    self.visit(link.clone(), self.plan.limits.get(L::Depth)).await?;
+                    self.visit(link.clone(), depth.unwrap_or(self.plan.limits.get(L::Depth))).await?;
                     self.tick().await?;
+                    self.rechecking = false;
+                    let drained = self.drain().await;
+                    self.rechecking = true;
+                    drained?;
                 }
                 Verdict::RobotsDisallowed if self.robots.get(&link.origin()).is_some_and(Robots::disallows_root) => {
                     self.kept.insert(k);
@@ -1205,6 +1520,12 @@ impl Crawl<'_, '_> {
         }
         self.rechecking = false;
         self.flush().await?;
+        self.sink.counters.metadata.insert("replaced_document_count".into(), (replaced_ids.len() as i64).into());
+        self.delete_ids(&replaced_ids).await?;
+        // An incremental crawl deletes nothing else, and its cursor stays the full crawls'.
+        if !self.full {
+            return Ok(cursor.clone());
+        }
         let not_refreshed = gone + kept + unchecked;
         let funnel = self.redirect_targets.values().max().copied().unwrap_or(0);
         let skip = if force {
@@ -1246,14 +1567,7 @@ impl Crawl<'_, '_> {
             None => {
                 m.insert("deleted_after_three_kept_crawls_count".into(), (struck as i64).into());
                 let ids: Vec<String> = delete.into_iter().filter(|(_, o)| may_delete(o.as_str())).map(|(id, _)| id).collect();
-                for chunk in ids.chunks(500) {
-                    let mut body = String::new();
-                    for id in chunk {
-                        body.push_str(&obj! { "delete" => obj! { "_id" => id.clone() } }.to_json());
-                        body.push('\n');
-                    }
-                    self.bulk(body).await?;
-                }
+                self.delete_ids(&ids).await?;
             }
         }
         crawls.push(self.started_at.clone());
@@ -1273,13 +1587,22 @@ impl Crawl<'_, '_> {
             }
             let mut urls: Vec<String> = pages.iter().map(|p| p.as_str().to_string()).collect();
             urls.sort();
-            body.push_str(&obj! { "update" => obj! { "_id" => canonical.id() } }.to_json());
-            body.push('\n');
-            body.push_str(&obj! { "doc" => obj! { "additional_urls" => Value::Arr(urls.into_iter().map(Value::from).collect()) } }.to_json());
-            body.push('\n');
-            for p in pages.iter().filter(|p| self.indexed.contains(&p.hash64()) && may_delete(p.origin().as_str())) {
-                body.push_str(&obj! { "delete" => obj! { "_id" => p.id() } }.to_json());
+            // Docs records have no `additional_urls`: the canonical page's records stand alone.
+            if self.plan.docs.is_none() {
+                body.push_str(&obj! { "update" => obj! { "_id" => canonical.id() } }.to_json());
                 body.push('\n');
+                body.push_str(&obj! { "doc" => obj! { "additional_urls" => Value::Arr(urls.into_iter().map(Value::from).collect()) } }.to_json());
+                body.push('\n');
+            }
+            for p in pages.iter().filter(|p| self.indexed.contains(&p.hash64()) && may_delete(p.origin().as_str())) {
+                let ids = match self.records.get(&p.hash64()) {
+                    Some(n) => (0..*n).map(|i| record_id(p, i)).collect(),
+                    None => vec![p.id()],
+                };
+                for id in ids {
+                    body.push_str(&obj! { "delete" => obj! { "_id" => id } }.to_json());
+                    body.push('\n');
+                }
             }
         }
         if body.is_empty() {
@@ -1288,6 +1611,19 @@ impl Crawl<'_, '_> {
         let before = self.sink.counters.deleted;
         self.bulk(body).await?;
         Ok(self.sink.counters.deleted - before)
+    }
+
+    /// Deletes the crawler's own documents `ids`, 500 to a `_bulk`.
+    async fn delete_ids(&mut self, ids: &[String]) -> Result<(), Stop> {
+        for chunk in ids.chunks(500) {
+            let mut body = String::new();
+            for id in chunk {
+                body.push_str(&obj! { "delete" => obj! { "_id" => id.clone() } }.to_json());
+                body.push('\n');
+            }
+            self.bulk(body).await?;
+        }
+        Ok(())
     }
 
     /// A `_bulk` of updates and deletes of the crawler's own documents, into its index (as
@@ -1320,6 +1656,75 @@ async fn clear_force_purge(cluster: &Cluster, cid: &str) -> Result<(), String> {
 
 fn ms_of(t: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(t).ok().map(|d| d.timestamp_millis())
+}
+
+/// A page's records under the docs preset (DocSearch's shape), with their ids: one per section,
+/// at the page's URL plus the section's `#anchor`, with the hierarchy above it (`hierarchy.lvl0`
+/// to `lvl6`, `null` where the page has none), its content, its `type` (the level of its
+/// heading), `weight` (`level`: 100 for `lvl0`, 10 less a level down; `position`: its place in
+/// the page), the page's title and URL fields, and the page's extracted fields. A page with no
+/// section gets one record of its title and text.
+pub(crate) fn records(url: &Link, page: &html::Page, started_at: &str) -> Vec<(String, Map)> {
+    let mut sections = page.sections.clone();
+    if sections.is_empty() {
+        let mut levels: [String; 7] = Default::default();
+        levels[1] = page.title.clone();
+        sections.push(html::Section { levels, level: 1, anchor: None, content: html::limit_bytes(page.body.clone(), 32 << 10) });
+    }
+    let u = url.url();
+    let dirs: Vec<&str> = u.path().split('/').collect();
+    let mut out = Vec::with_capacity(sections.len());
+    for (n, s) in sections.into_iter().enumerate() {
+        let mut d = Map::new();
+        let mut full = u.clone();
+        full.set_fragment(s.anchor.as_deref());
+        d.insert("id".into(), record_id(url, n).into());
+        d.insert("url".into(), full.as_str().into());
+        d.insert("url_without_anchor".into(), url.as_str().into());
+        if let Some(a) = &s.anchor {
+            d.insert("anchor".into(), a.clone().into());
+        }
+        let mut h = Map::new();
+        for (l, v) in s.levels.iter().enumerate() {
+            h.insert(format!("lvl{l}"), if v.is_empty() { Value::Null } else { v.clone().into() });
+        }
+        d.insert("hierarchy".into(), Value::Obj(h));
+        if !s.content.is_empty() {
+            d.insert("content".into(), s.content.into());
+        }
+        d.insert("type".into(), format!("lvl{}", s.level).into());
+        d.insert("weight".into(), obj! { "level" => 100 - 10 * s.level as i64, "position" => n as i64 });
+        if !page.title.is_empty() {
+            d.insert("title".into(), page.title.clone().into());
+        }
+        d.insert("last_crawled_at".into(), started_at.into());
+        d.insert("url_scheme".into(), u.scheme().into());
+        d.insert("url_host".into(), u.host_str().unwrap_or_default().into());
+        if let Some(p) = u.port_or_known_default() {
+            d.insert("url_port".into(), (p as i64).into());
+        }
+        d.insert("url_path".into(), u.path().into());
+        for (i, key) in ["url_path_dir1", "url_path_dir2", "url_path_dir3"].into_iter().enumerate() {
+            if let Some(s) = dirs.get(i + 1).filter(|s| !s.is_empty()) {
+                d.insert(key.into(), (*s).into());
+            }
+        }
+        for (k, v) in &page.extracted {
+            if !d.contains_key(k) {
+                d.insert(k.clone(), match v {
+                    html::Extracted::One(s) => Value::from(s.clone()),
+                    html::Extracted::Many(a) => Value::Arr(a.iter().cloned().map(Value::from).collect()),
+                });
+            }
+        }
+        for (k, v) in &page.fields {
+            if !d.contains_key(k) {
+                d.insert(k.clone(), v.clone().into());
+            }
+        }
+        out.push((record_id(url, n), d));
+    }
+    out
 }
 
 /// A page's document, with Open Crawler's fields (`DocumentMapper#create_html_doc`); empty

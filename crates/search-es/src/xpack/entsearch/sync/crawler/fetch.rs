@@ -113,6 +113,41 @@ impl Inflate {
     }
 }
 
+/// A page's validators (RFC 9110 section 8.8): the `ETag` and `Last-Modified` its last full
+/// response carried, kept in its document and sent back as `If-None-Match` and
+/// `If-Modified-Since` on the next request for that same URL, so an unchanged page answers 304.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Validators {
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+}
+
+/// The longest validator kept: anything longer is a server's mistake, not a validator.
+const MAX_VALIDATOR: usize = 256;
+
+impl Validators {
+    pub fn is_empty(&self) -> bool {
+        self.etag.is_none() && self.last_modified.is_none()
+    }
+
+    /// A header's value, kept only when it can be sent back as it came (visible ASCII, short).
+    fn kept(v: Option<&str>) -> Option<String> {
+        let v = v?.trim();
+        (!v.is_empty() && v.len() <= MAX_VALIDATOR && v.bytes().all(|b| (0x20..0x7f).contains(&b))).then(|| v.to_string())
+    }
+
+    fn of(headers: &reqwest::header::HeaderMap) -> Validators {
+        let text = |k: &str| headers.get(k).and_then(|v| v.to_str().ok());
+        Validators { etag: Self::kept(text("etag")), last_modified: Self::kept(text("last-modified")) }
+    }
+
+    /// The validators a document holds ([`super::FIELD_ETAG`], [`super::FIELD_LAST_MODIFIED`]).
+    pub fn of_document(source: &crate::json::Value) -> Validators {
+        let text = |k: &str| source.get(k).and_then(crate::json::Value::as_str);
+        Validators { etag: Self::kept(text(super::FIELD_ETAG)), last_modified: Self::kept(text(super::FIELD_LAST_MODIFIED)) }
+    }
+}
+
 /// Why a request failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Failure {
@@ -150,6 +185,8 @@ pub struct Response {
     pub content_type: String,
     pub location: Option<String>,
     pub retry_after: Option<String>,
+    /// The response's `ETag` and `Last-Modified`.
+    pub validators: Validators,
     pub body: Vec<u8>,
     /// Bytes received (headers and the body as sent): what the rate counts.
     pub wire_bytes: u64,
@@ -160,20 +197,84 @@ pub struct Fetcher {
     egress: crate::egress::Egress,
     auth: Option<Auth>,
     ua: String,
+    /// The addresses [`Fetcher::server`] last resolved each name to: what the next connection to
+    /// that name uses, so the server a request was spaced for is the one it reaches.
+    pins: Pins,
+}
+
+type Pins = std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<String, Vec<std::net::SocketAddr>>>>;
+
+/// Names pinned at most; past it the pins start again (a name then resolves through the egress
+/// check at connect, as before it was pinned).
+const MAX_PINS: usize = 4096;
+
+/// The crawler's resolver: a name [`Fetcher::server`] resolved goes to the addresses it found
+/// (already checked by the egress check); any other through the egress check's own resolver.
+struct Pinned {
+    egress: crate::egress::Egress,
+    pins: Pins,
+}
+
+impl reqwest::dns::Resolve for Pinned {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        match self.pins.lock().get(&name.as_str().to_ascii_lowercase()).cloned() {
+            Some(addrs) => Box::pin(async move { Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs) }),
+            None => reqwest::dns::Resolve::resolve(&self.egress, name),
+        }
+    }
+}
+
+/// The server an address is: an IPv4 address itself, an IPv6 address by its /64 (one host's
+/// usual share), an IPv4-mapped IPv6 address as its IPv4 address.
+pub fn server_key(ip: std::net::IpAddr) -> String {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.to_string(),
+        std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None => {
+                let s = v6.segments();
+                format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+            }
+        },
+    }
 }
 
 impl Fetcher {
     pub fn new(egress: crate::egress::Egress, auth: Option<Auth>) -> Result<Fetcher, String> {
+        let pins: Pins = Default::default();
         let http = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .read_timeout(SOCKET_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .http1_max_headers(128)
             .no_proxy()
-            .dns_resolver(egress.resolver())
+            .dns_resolver(std::sync::Arc::new(Pinned { egress: egress.clone(), pins: pins.clone() }))
             .build()
             .map_err(|e| format!("the crawler's HTTP client: {e}"))?;
-        Ok(Fetcher { http, egress, auth, ua: user_agent() })
+        Ok(Fetcher { http, egress, auth, ua: user_agent(), pins })
+    }
+
+    /// The server `link` is on, for politeness (requests to one server are spaced across every
+    /// crawl on the node, whatever names lead there): its host resolved by the egress check (the
+    /// same resolution the request then connects with), keyed by [`server_key`] (the lowest IPv4
+    /// address it has, else the lowest IPv6 /64), so two names on one server share one key.
+    pub async fn server(&self, link: &Link) -> Result<String, Failure> {
+        let url = link.url();
+        let host = url.host_str().unwrap_or_default();
+        let addrs = self.egress.resolve(host, url.port_or_known_default().unwrap_or(0)).await.map_err(|r| match r {
+            crate::egress::Refused::Unresolved(_) => Failure::Network,
+            _ => Failure::Refused,
+        })?;
+        let key = |v4: bool| addrs.iter().filter(|a| a.is_ipv4() == v4).map(|a| server_key(a.ip())).min();
+        let server = key(true).or_else(|| key(false)).ok_or(Failure::Refused)?;
+        if host.parse::<std::net::IpAddr>().is_err() && !host.starts_with('[') {
+            let mut pins = self.pins.lock();
+            if pins.len() >= MAX_PINS {
+                pins.clear();
+            }
+            pins.insert(host.to_ascii_lowercase(), addrs);
+        }
+        Ok(server)
     }
 
     /// Whether `link` may get the credential: its origin is exactly the credential's, the chain
@@ -195,19 +296,22 @@ impl Fetcher {
     }
 
     /// One request, no redirect followed, within [`REQUEST_TIMEOUT`]. `clean`: every hop
-    /// before this one was at the credential's origin.
-    pub async fn get(&self, link: &Link, clean: bool, max: usize) -> Result<Response, Failure> {
+    /// before this one was at the credential's origin. `cond`: the validators of `link`'s own
+    /// document, sent as `If-None-Match` and `If-Modified-Since` (the caller sends them only on
+    /// the request for that URL, never after a redirect); they're sent with no other change, so
+    /// the credential still goes only where [`Fetcher::credential_for`] allows.
+    pub async fn get(&self, link: &Link, clean: bool, max: usize, cond: Option<&Validators>) -> Result<Response, Failure> {
         // Checked again with the node's names resolved afresh, failing closed until they are.
         if self.egress.check_url_now(link.url()).await.is_err() {
             return Err(Failure::Refused);
         }
-        match tokio::time::timeout(REQUEST_TIMEOUT, self.request(link, clean, max)).await {
+        match tokio::time::timeout(REQUEST_TIMEOUT, self.request(link, clean, max, cond)).await {
             Ok(r) => r,
             Err(_) => Err(Failure::Timeout),
         }
     }
 
-    async fn request(&self, link: &Link, clean: bool, max: usize) -> Result<Response, Failure> {
+    async fn request(&self, link: &Link, clean: bool, max: usize, cond: Option<&Validators>) -> Result<Response, Failure> {
         let mut req = self
             .http
             .get(link.url().clone())
@@ -216,6 +320,14 @@ impl Fetcher {
             .header("Accept-Encoding", "gzip, deflate");
         if let Some(h) = self.credential_for(link, clean) {
             req = req.header("Authorization", h);
+        }
+        if let Some(v) = cond {
+            if let Some(e) = &v.etag {
+                req = req.header("If-None-Match", e);
+            }
+            if let Some(m) = &v.last_modified {
+                req = req.header("If-Modified-Since", m);
+            }
         }
         let mut resp = req.send().await.map_err(|e| if e.is_timeout() { Failure::Timeout } else { Failure::Network })?;
         let headers = resp.headers();
@@ -227,6 +339,7 @@ impl Fetcher {
         let status = resp.status().as_u16();
         let content_type = text("content-type").unwrap_or_default().to_ascii_lowercase();
         let (location, retry_after) = (text("location"), text("retry-after"));
+        let validators = Validators::of(headers);
         let mut inflate = match text("content-encoding").map(|e| e.trim().to_ascii_lowercase()).as_deref() {
             None | Some("" | "identity") => Inflate::plain(max),
             Some("gzip" | "x-gzip") => Inflate::gzip(max),
@@ -251,7 +364,7 @@ impl Fetcher {
             inflate.write(&chunk).map_err(|e| if e.contains("larger") { Failure::TooLarge } else { Failure::Refused })?;
         }
         let body = if (200..300).contains(&status) { inflate.finish().map_err(|e| if e.contains("larger") { Failure::TooLarge } else { Failure::Refused })? } else { Vec::new() };
-        Ok(Response { status, content_type, location, retry_after, body, wire_bytes: wire })
+        Ok(Response { status, content_type, location, retry_after, validators, body, wire_bytes: wire })
     }
 }
 

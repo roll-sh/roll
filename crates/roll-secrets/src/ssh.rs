@@ -65,6 +65,54 @@ pub struct SshPolicy {
     pub max_host_days: u32,
 }
 
+impl SshPolicy {
+    /// What making an SSH CA checks of its policy (normalizing its domains); a restore asks it too.
+    fn check(&mut self) -> Result<()> {
+        for d in &mut self.host_domains {
+            *d = d.trim().trim_end_matches('.').to_ascii_lowercase();
+        }
+        if self.principals.len() > 64 || !self.principals.iter().all(|p| principal_ok(p)) {
+            return Err(Error::BadRequest("principals are the server logins it signs for (letters, digits, . _ -), 64 at most".into()));
+        }
+        if self.host_domains.len() > 50 || !self.host_domains.iter().all(|d| !d.starts_with("*.") && host_ok(d, std::slice::from_ref(d))) {
+            return Err(Error::BadRequest("host_domains are DNS domains whose hosts it signs (svc.internal takes db1.svc.internal), 50 at most".into()));
+        }
+        // A domain of the project's own, never a top-level or public one: a CA for `com` would
+        // stand in for every .com host to whoever trusts it.
+        if let Some(d) = self.host_domains.iter().find(|d| !d.contains('.') || PUBLIC_SUFFIXES.contains(&d.as_str())) {
+            return Err(Error::BadRequest(format!("{d} is a top-level or public domain: give a domain of your own (svc.example.com)")));
+        }
+        if self.principals.is_empty() && self.host_domains.is_empty() {
+            return Err(Error::BadRequest("an SSH CA signs for users (principals), hosts (host_domains), or both".into()));
+        }
+        if !(1..=168).contains(&self.max_hours) {
+            return Err(Error::BadRequest("max_hours is 1–168 (a week)".into()));
+        }
+        if !(1..=397).contains(&self.max_host_days) {
+            return Err(Error::BadRequest("max_host_days is 1–397".into()));
+        }
+        Ok(())
+    }
+}
+
+/// An SSH CA from a backup checked as making one is: its policy (`policy`, JSON), and its private
+/// key (base64 of the Ed25519 seed, as roll seals it) the one its `public_key` names. Answers the
+/// policy as checked.
+pub(crate) fn admit_archived(public_key: &str, policy: &str, private_key: &str) -> Result<SshPolicy> {
+    let bad = |why: &str| Error::BadRequest(why.to_string());
+    let mut policy: SshPolicy = serde_json::from_str(policy).map_err(|_| bad("its policy isn't one roll reads"))?;
+    policy.check()?;
+    let seed = zeroize::Zeroizing::new(base64::engine::general_purpose::STANDARD.decode(private_key).map_err(|_| bad("its private key isn't one roll reads"))?);
+    let seed = zeroize::Zeroizing::new(<[u8; 32]>::try_from(seed.as_slice()).map_err(|_| bad("its private key isn't one roll reads"))?);
+    let key = SigningKey::from_bytes(&seed);
+    let mut parts = public_key.split_whitespace();
+    let named = (parts.next() == Some("ssh-ed25519")).then(|| parts.next()).flatten().and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok());
+    if named.as_deref() != Some(ed25519_blob(&key.verifying_key().to_bytes()).as_slice()) {
+        return Err(bad("its public key isn't its private key's"));
+    }
+    Ok(policy)
+}
+
 fn max_hours() -> u32 {
     24
 }
@@ -485,29 +533,7 @@ impl Secrets {
             return Err(Error::BadRequest("an SSH CA's name is letters, digits, - and _ (64 at most)".into()));
         }
         let mut policy = n.policy;
-        for d in &mut policy.host_domains {
-            *d = d.trim().trim_end_matches('.').to_ascii_lowercase();
-        }
-        if policy.principals.len() > 64 || !policy.principals.iter().all(|p| principal_ok(p)) {
-            return Err(Error::BadRequest("principals are the server logins it signs for (letters, digits, . _ -), 64 at most".into()));
-        }
-        if policy.host_domains.len() > 50 || !policy.host_domains.iter().all(|d| !d.starts_with("*.") && host_ok(d, std::slice::from_ref(d))) {
-            return Err(Error::BadRequest("host_domains are DNS domains whose hosts it signs (svc.internal takes db1.svc.internal), 50 at most".into()));
-        }
-        // A domain of the project's own, never a top-level or public one: a CA for `com` would
-        // stand in for every .com host to whoever trusts it.
-        if let Some(d) = policy.host_domains.iter().find(|d| !d.contains('.') || PUBLIC_SUFFIXES.contains(&d.as_str())) {
-            return Err(Error::BadRequest(format!("{d} is a top-level or public domain: give a domain of your own (svc.example.com)")));
-        }
-        if policy.principals.is_empty() && policy.host_domains.is_empty() {
-            return Err(Error::BadRequest("an SSH CA signs for users (principals), hosts (host_domains), or both".into()));
-        }
-        if !(1..=168).contains(&policy.max_hours) {
-            return Err(Error::BadRequest("max_hours is 1–168 (a week)".into()));
-        }
-        if !(1..=397).contains(&policy.max_host_days) {
-            return Err(Error::BadRequest("max_host_days is 1–397".into()));
-        }
+        policy.check()?;
         let dek = self.project(project)?;
         let key = new_key();
         let id = names::new_id("sca", 16);

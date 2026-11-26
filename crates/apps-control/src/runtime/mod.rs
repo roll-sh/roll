@@ -217,6 +217,10 @@ pub trait Runtime: Send + Sync {
     async fn image_bytes(&self, _image: &str) -> Option<u64> {
         None
     }
+    /// The TCP ports a pulled image exposes (its `EXPOSE`), when the runtime can read them.
+    async fn image_ports(&self, _image: &str) -> Vec<u16> {
+        Vec::new()
+    }
     async fn verify_signature(&self, pinned: &str, keys: &[String], login: Option<&RegistryLogin>) -> anyhow::Result<usize> {
         crate::registry::Registry::new(None)?.verify_cosign(pinned, keys, login).await
     }
