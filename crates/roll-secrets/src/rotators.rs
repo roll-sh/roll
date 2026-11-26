@@ -48,21 +48,35 @@ pub struct Rotator {
     pub created_by: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NewRotator {
     pub name: String,
     pub url: String,
 }
 
+/// Never the URL (it may carry a token).
+impl std::fmt::Debug for NewRotator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NewRotator").field("name", &self.name).field("url", &"<redacted>").finish()
+    }
+}
+
 /// A rotator's changes (`PATCH …/rotators/{id}`): what's absent stays.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RotatorChange {
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
     pub url: Option<String>,
+}
+
+/// Never the URL (it may carry a token).
+impl std::fmt::Debug for RotatorChange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RotatorChange").field("name", &self.name).field("url", &crate::crypto::redacted(&self.url)).finish()
+    }
 }
 
 fn check_name(name: &str) -> Result<()> {
