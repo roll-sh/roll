@@ -35,7 +35,7 @@ pub struct SlotData {
 }
 
 /// PgStat_StatReplSlotEntry: pg_stat_replication_slots' counters.
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
 pub struct SlotStats {
     pub spill_txns: i64,
     pub spill_count: i64,
@@ -321,6 +321,14 @@ impl Slots {
         let _ = self.save(&slots, false);
         self.released.notify_all();
         dbs
+    }
+
+    /// pgstat_discard_stats (a start after a crash): every slot's statistics start again,
+    /// zeros never reset.
+    pub fn discard_stats(&self) {
+        for s in self.list().into_iter().filter(|s| s.data.stats != SlotStats::default()) {
+            let _ = self.update(&s.data.name, false, |d| d.stats = SlotStats::default());
+        }
     }
 
     /// Persist every slot (shutdown).

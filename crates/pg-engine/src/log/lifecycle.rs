@@ -56,6 +56,10 @@ pub fn startup(engine: &Engine) {
         if r.last_time != 0 {
             log(&format!("database system was shut down at {time}"));
         }
+        // (pgstat_restore_stats, in StartupXLOG.)
+        if let Some(t) = &r.stats_log {
+            log(t);
+        }
         return;
     }
     log(&format!("database system was interrupted; last known up at {time}"));

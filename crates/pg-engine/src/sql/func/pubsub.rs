@@ -200,6 +200,22 @@ pub fn count_subscription_stat(cat: &crate::catalog::Catalog, subid: u32, what: 
 }
 static RESETS: std::sync::LazyLock<parking_lot::Mutex<Resets>> = std::sync::LazyLock::new(Default::default);
 
+/// The subscriptions' statistics of the cluster whose oid counter is `oids`, as its clean
+/// shutdown writes them (`pgstat::file`): by subscription, the reset time and counters.
+pub fn saved_subscription_stats(oids: &std::sync::Arc<crate::catalog::shared::OidGen>) -> Vec<(u32, Option<i64>, [i64; 9])> {
+    let k = std::sync::Arc::as_ptr(oids) as usize;
+    RESETS.lock().iter().filter(|((c, _), _)| *c == k).map(|((_, sub), (_, st))| (*sub, st.reset, st.counts)).collect()
+}
+
+/// The subscriptions' statistics read back at the cluster's start.
+pub fn restore_subscription_stats(oids: &std::sync::Arc<crate::catalog::shared::OidGen>, saved: &[(u32, Option<i64>, [i64; 9])]) {
+    let k = std::sync::Arc::as_ptr(oids) as usize;
+    let mut r = RESETS.lock();
+    for (sub, reset, counts) in saved {
+        r.insert((k, *sub), (std::sync::Arc::downgrade(oids), SubStats { reset: *reset, counts: *counts }));
+    }
+}
+
 /// The cluster of the running statement (`RESETS`'s key) and a `Weak` holding it.
 fn cluster(c: &FnCtx) -> (usize, std::sync::Weak<crate::catalog::shared::OidGen>) {
     match &c.exec.catalog().oids {

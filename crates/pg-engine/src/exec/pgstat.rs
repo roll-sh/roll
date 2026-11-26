@@ -13,6 +13,8 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+pub mod file;
+
 /// A table's (or index's) counts a backend has not flushed yet (PgStat_TableCounts).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TabCounts {
@@ -105,6 +107,9 @@ pub struct Fixed {
     /// Reset times of the fixed-numbered statistics: archiver, bgwriter, checkpointer,
     /// io, recovery_prefetch, wal, and `slru:<name>`.
     pub resets: HashMap<String, i64>,
+    /// When the statistics were last discarded (a start after a crash, or without a
+    /// statistics file): the reset time of those not reset since. None: this server's start.
+    pub since: Option<i64>,
     pub checkpoints_requested: i64,
     pub checkpoints_performed: i64,
     pub wal_records: i64,
@@ -138,6 +143,9 @@ pub struct Backup {
     pub checkpoint: u64,
     pub time: i64,
 }
+
+/// The bytes of a checkpoint's two records (`Fixed::checkpoint_at`).
+const SHUTDOWN_RECORDS: u64 = 0x58 + 122;
 
 /// wal_segment_size.
 pub const WAL_SEGMENT_SIZE: u64 = 16 * 1024 * 1024;
@@ -214,6 +222,7 @@ impl Fixed {
     /// A checkpoint at `time`: its redo point, a running-transactions record, then its own
     /// record. Returns the redo and the checkpoint record's positions.
     pub fn checkpoint_at(&mut self, time: i64) -> (u64, u64) {
+        // (SHUTDOWN_RECORDS: these two's bytes.)
         let (redo, _) = self.write_record(0x58);
         let (ckpt, _) = self.write_record(122);
         self.checkpoint = Some((ckpt, redo, time));
@@ -1191,10 +1200,19 @@ pub fn checkpoint(
     if logging {
         checkpointer_log(format!("checkpoint starting: {flags}"));
     }
+    let shutdown = flags.starts_with("shutdown");
+    if shutdown {
+        // CheckpointerMain counts the shutdown checkpoint requested before ShutdownXLOG, and
+        // never done, and its WAL (its records, one write) before the statistics file is
+        // written (`flush`): the file has them so.
+        let mut s = fixed.lock();
+        s.checkpoints_requested += 1;
+        s.add_wal(2, SHUTDOWN_RECORDS as i64);
+        *s.io.entry(("checkpointer", "wal", "normal", "writes")).or_default() += 1;
+    }
     let io = crate::storage::fileio::FileIo::begin();
     flush()?;
     let io = io.end();
-    let shutdown = flags.starts_with("shutdown");
     let mut s = fixed.lock();
     if !shutdown {
         s.checkpoints_requested += 1;
@@ -1202,6 +1220,7 @@ pub fn checkpoint(
     // (A shutdown or end-of-recovery checkpoint's record is its own redo point.)
     let own_redo = shutdown || flags.starts_with("end-of-recovery");
     let prev_redo = s.checkpoint.map_or(s.start_lsn, |(_, redo, _)| redo);
+    let counted = (s.wal_records, s.wal_bytes);
     let (redo, ckpt) = s.checkpoint_at(now());
     let ckpt = if own_redo { redo } else { ckpt };
     s.checkpoints_performed += 1;
@@ -1210,9 +1229,13 @@ pub fn checkpoint(
             .entry(("checkpointer", "relation", "normal", op))
             .or_default() += 1;
     }
-    *s.io
-        .entry(("checkpointer", "wal", "normal", "writes"))
-        .or_default() += 1;
+    if shutdown {
+        (s.wal_records, s.wal_bytes) = counted;
+    } else {
+        *s.io
+            .entry(("checkpointer", "wal", "normal", "writes"))
+            .or_default() += 1;
+    }
     // UpdateCheckPointDistanceEstimate.
     let distance = redo.saturating_sub(prev_redo);
     s.distance_estimate = if s.distance_estimate < distance as f64 {
@@ -1330,11 +1353,84 @@ pub fn reset_shared(ctx: &ExecCtx, target: &str) {
 }
 
 /// When the fixed-numbered statistics were last reset: at first, when the statistics
-/// started (the server's start).
+/// started (the server's start, or the last start that discarded them: `Fixed::since`).
+/// recovery_prefetch's aren't cumulative statistics: they start at every start.
 pub fn reset_time(ctx: &ExecCtx, target: &str) -> Option<i64> {
     prepare_snapshot(ctx);
     let start = ctx.sess.cluster.start_time();
-    Some(*fixed(&ctx.sess.db).lock().resets.entry(target.to_string()).or_insert(start))
+    let fixed = fixed(&ctx.sess.db);
+    let mut f = fixed.lock();
+    let since = if target == "recovery_prefetch" { start } else { f.since.unwrap_or(start) };
+    Some(*f.resets.entry(target.to_string()).or_insert(since))
+}
+
+// ── across restarts (`file`) ──
+
+/// A database's statistics as a clean shutdown writes them: what its backends kept
+/// unflushed flushed in, the entries of objects no longer in its catalog left out.
+pub fn for_file(db: &crate::txn::Database) -> Shared {
+    let mut s = db.pgstat.lock();
+    let cat = db.catalog();
+    let slots: Vec<UnflushedSlot> = s.unflushed.drain().map(|(_, u)| u).collect();
+    for slot in slots {
+        let u = std::mem::take(&mut *slot.lock());
+        flush(&mut s, u, &cat);
+    }
+    let user = crate::catalog::FIRST_USER_OID;
+    Shared {
+        tables: s.tables.iter().filter(|(r, _)| **r < user || in_catalog(&cat, **r)).map(|(r, e)| (*r, e.clone())).collect(),
+        funcs: s.funcs.iter().filter(|(f, _)| **f < user || cat.functions.contains_key(f)).map(|(f, e)| (*f, *e)).collect(),
+        db: s.db.clone(),
+        shared_db: s.shared_db.clone(),
+        ..Shared::default()
+    }
+}
+
+/// The cluster's statistics a clean shutdown writes: the fixed-numbered ones (`start`: the
+/// server's start, their reset time when not reset) and databases `dbs`'.
+pub fn saved(fixed: &Fixed, start: i64, dbs: Vec<(u32, Shared)>) -> file::Saved {
+    file::Saved {
+        since: Some(fixed.since.unwrap_or(start)),
+        resets: fixed.resets.iter().filter(|(k, _)| *k != "recovery_prefetch").map(|(k, v)| (k.clone(), *v)).collect(),
+        checkpoints_requested: fixed.checkpoints_requested,
+        checkpoints_performed: fixed.checkpoints_performed,
+        wal_records: fixed.wal_records,
+        wal_bytes: fixed.wal_bytes,
+        io: fixed.io.iter().map(|(k, v)| (*k, *v)).collect(),
+        slru_zeroed: fixed.slru_zeroed.clone(),
+        dbs,
+        subscriptions: Vec::new(),
+    }
+}
+
+/// A start's fixed-numbered statistics from the file (None: discarded, they start now).
+pub fn restore(fixed: &mut Fixed, saved: Option<&file::Saved>, now: i64) {
+    let Some(s) = saved else {
+        fixed.since = Some(now);
+        return;
+    };
+    fixed.since = s.since;
+    fixed.resets = s.resets.clone();
+    fixed.checkpoints_requested = s.checkpoints_requested;
+    fixed.checkpoints_performed = s.checkpoints_performed;
+    fixed.wal_records = s.wal_records;
+    fixed.wal_bytes = s.wal_bytes;
+    fixed.io = s.io.iter().copied().collect();
+    fixed.slru_zeroed = s.slru_zeroed.clone();
+}
+
+/// A database's restored entries: the user tables whose counters autovacuum's thresholds
+/// read are looked at by its first visit (as PostgreSQL's launcher reads every table's
+/// entry); whether there are any.
+pub fn restored(s: &mut Shared) -> bool {
+    let user = crate::catalog::FIRST_USER_OID;
+    s.av_changed = s
+        .tables
+        .iter()
+        .filter(|(r, e)| **r >= user && (e.mod_since_analyze != 0 || e.ins_since_vacuum != 0 || e.dead_tuples != 0))
+        .map(|(r, _)| *r)
+        .collect();
+    !s.av_changed.is_empty()
 }
 
 // ── the end of a transaction ──
