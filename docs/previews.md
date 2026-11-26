@@ -2347,7 +2347,10 @@ type Settings = {
     tests): its `play` function runs as Storybook renders the story, and the run reads how it
     went from Storybook's own preview (`__STORYBOOK_PREVIEW__.storyRenders`, Storybook 7 and
     later: the story's render by id, its `phase` and whether it has a `playFunction`), waiting up
-    to 5 s for it to end before the picture. `play` on the story's page is `failed` when it threw
+    to 5 s for it to end before the picture. It's the one read from the page's own JavaScript
+    (every other check runs in an isolated world the page's code can't reach): what it answers is
+    the story's word about its own test, so a forged "passed" only hides its own failure; each
+    read is bounded to 2 s and taken as one of two words. `play` on the story's page is `failed` when it threw
     (or the story's render did: phase `errored`), `passed` when a play function ran to its end;
     against main's same story, one that fails where main's passes is `against.play_broke`. The
     sheet says which. Live: the fixture's preview object has Deep's play throw and the first
