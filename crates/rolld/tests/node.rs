@@ -210,6 +210,10 @@ async fn an_inference_endpoint_keyed_by_a_secret_follows_its_rotation() {
         "config": { "service": "openai", "service_settings": { "model_id": "m", "url": format!("{mock}/v1/embeddings") } },
         "secret": { "environment": "production", "key": "OPENAI_API_KEY" },
     });
+    // A service whose credential isn't an api_key can't take one from a secret.
+    let bedrock = json!({ "inference_id": "br", "task_type": "text_embedding", "config": { "service": "amazonbedrock", "service_settings": { "region": "us-east-1", "model": "m", "provider": "amazontitan" } }, "secret": { "environment": "production", "key": "OPENAI_API_KEY" } });
+    let (s, b) = send(Method::POST, &format!("/v1/search/clusters/{cluster}/inference/secrets"), bedrock).await;
+    assert!(s == 400 && b.to_string().contains("takes no api_key"), "{s} {b}");
     let (s, b) = send(Method::POST, &format!("/v1/search/clusters/{cluster}/inference/secrets"), made).await;
     assert_eq!(s, 201, "{b}");
     let sync = b["binding"]["sync"].as_str().unwrap().to_string();
