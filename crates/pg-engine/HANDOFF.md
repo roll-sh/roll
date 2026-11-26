@@ -15113,7 +15113,18 @@ lower candidate is a prefix of that stack; only the stack's head was checked. Ne
 320's) and `sorted_distinct_spills`, their temp file counts (2 and 1) PostgreSQL 18.6's for the
 same statements.
 
-**Dropped:** nothing measured and dropped. Not done this round: count / sum / avg(DISTINCT x)'s
+**Dropped:** a sorted INTERSECT / EXCEPT [ALL] as a node of its own (`SortedSetOpNode`,
+chosen when the plan is opened for a SetOp EXPLAIN shows over sorted inputs: both inputs sorted
+through extsort, then merged a group at a time, setop_retrieve_sorted's counts). Past work_mem it
+holds what PostgreSQL's does: `SELECT s FROM t EXCEPT SELECT s FROM t WHERE id % 2 = 0` over 1M
+rows, enable_hashagg off, 298.3 -> 55.8 MB (PostgreSQL 53.2), 2 temp files of 55.6 MB (PostgreSQL
+3, 50.1), hash equal. But when the inputs fit, sorting both whole costs more than the in-memory
+path's hash count of the second input and sort of the kept rows: 20,000-row EXCEPT +6.7%,
+INTERSECT ALL +9.8% user instructions (n2 against n3, two pairs; DISTINCT and window controls
+within 0.01%). Patch: `~/.cache/a326/patches/sorted-setop-n3.diff` (with its query_spill case,
+PostgreSQL's 2 temp files). To keep: decide when the first input passes work_mem (collect it
+sized as the Sort counts it, as the nested loop's inner side does) and only then sort and merge.
+Not done this round: count / sum / avg(DISTINCT x)'s
 hash set (`hash_distinct`; its size check would sit in `feed`, the aggregates' hot function: it
 needs a dispatch chosen per aggregate, e.g. a `Buffered::Sort` once the set passes work_mem).
 
