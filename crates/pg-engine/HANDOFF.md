@@ -23476,6 +23476,137 @@ the `TxnState` / `ExecCtx` drops) are ~60 functions of ~10-120 executed lines ea
 into fewer, denser ones is a refactor to gate on cycles, which the loaded lanes didn't allow
 tonight (6-8 foreign cores on lane A all night).
 
+## Point selects: the per-statement work a read runs through (agent 323, 2026-11-26)
+
+Base `5192a74c0` (the origin head when the round began); the candidate's code commit is the same
+change rebased onto `98bc2e3b6`. Harness `~/.cache/a323/inproc/` (agent 317's Intel PT scripts,
+plus `callers.py`: who enters a function, per select; `cov.sh` / `ptcov.py` bounded to 400
+whole ops; `ptins.py` with a `MARK` env for cases without the read check: `short_txn` counts
+between entries of `Session::query_copy`, two a transaction). Builds plain dist (`tools/dist.sh
+--example bench`). Lane A read 5-8 foreign cores the whole round: cycles below are context, the
+gate is instructions (exact) and `idq.mite_uops`.
+
+### What a select ran that it didn't need
+
+Counted first (base, exact, client thread): the extended protocol's select 36,348 instructions
+through 288 functions, the simple protocol's 56,718 through 314. Most of the simple protocol's
+extra 20,000 was not parsing: `callers.py` showed `Prepared`'s `Drop` taking its statement with
+`self.stmt.take()`, which goes through `StmtTree`'s `DerefMut` and so *instantiates* the
+template's tree (to_vec / clone of every node, `nodewalk`, the A_Const values, then the drop of
+all of it and the allocator's ~2,000) for a query that ran with its template's kept plan and
+never read a tree. The rest, by what repeated:
+
+- `sql::scs::with_long_identifiers` 2,687 a simple query: a full scan for identifiers over 63
+  bytes. `param_junk`'s `windows(2)` test for `$<digit>` 441.
+- `literals::scan` copied every token into the key and the shape (`extend_from_slice` twice per
+  token: 52 `memcpy` calls for the bench's 26 tokens).
+- The session's kept-plan map (`LitPlans`, by shape) and Parse-plan map hashed with std's SipHash:
+  ~500 a simple query.
+- `start_transaction` / `end_transaction` (every transaction): `transaction_isolation` and
+  `transaction_read_only` inserted into `values` with four new `String`s and removed again at the
+  end (the spare-string reuse only covered a session value of its own): get_mut misses 190,
+  inserts 280, removes 408, plus the allocations.
+- `shared_search_path` ran three times a select (both `bound_as` calls, Describe's at Bind and
+  Execute's, and `run_query`'s `with_ctx`), `current_role` seven times: six atomics each time
+  (the catalog copy's lock and Arc, the path memo's mutex, the path's Arc).
+- `execute_portal_here` looked the portal up twice (`contains_key`, then `remove`).
+
+### What changed (no behaviour change)
+
+- `Prepared::drop` moves its `StmtTree` out as it is (`mem::replace` with an empty one): a tree
+  nothing made stays unmade.
+- `long_identifiers` returns early when the text has no `"` and no run of more than 63
+  identifier bytes; such a run covers a byte whose index is 63 modulo 64, so only those are
+  looked at and the run around one that is an identifier byte measured (what the scan reports is
+  a quoted identifier or an unquoted run inside a maximal identifier run, so this is exact).
+  `param_junk` finds `$` with `memchr`.
+- `literals::scan` copies the text between literals at once (`copied`): the same key and shape.
+- `LitPlans` / `ParamPlans` maps: `hashbrown` (foldhash). Neither is iterated.
+- `Settings`: `end_transaction` takes the two entries out with `remove_entry` and keeps their key
+  and value strings (`txn_keys`, `txn_spare`); `start_transaction` puts the values in with one
+  `entry` probe each into those strings. The map's contents and bucket positions are the same.
+- `SessionState::shared_search_path` keeps its last answer by (`Database::catalog_generation`,
+  the settings' generation, the innermost SECURITY DEFINER owner): what `current_role`, the
+  user's name and the path depend on (`Published::generation` is new, an atomic load).
+- `execute_portal_here`: one `remove`; no portal of that name, then the cursor check, as before.
+- `Session::parse` writes the statement's text into its buffer (a new one when a long statement
+  left it over 4 kB).
+
+### Measured
+
+Exact instructions per op, in process, 1 client (Intel PT, client thread; 400 selects, 100 range
+reads, 100 short transactions):
+
+| case | base | candidate | |
+|---|---|---|---|
+| point select, simple protocol | 56,718 | 37,180 | -34.4% |
+| point select, extended | 36,348 | 35,251 | -3.0% |
+| range_scan_100 | 397,110 | 391,393 | -1.4% |
+| short_txn (a transaction) | 203,184 | 195,720 | -3.7% |
+
+Per change (two builds: n1 without the scan, litplan-hash and long-identifier sampling changes,
+n2 with them): the unmade tree about -10,000 (simple); the search path memo -570 (both);
+the transaction start's strings -350 with the allocator (the probe moved into `txn_settings`,
++333, from the separate get_mut / insert); the portal lookup -76; the identifier pre-check
+-2,590 (n1's branchless run-length loop cost 30 instructions a byte and saved only 500: the
+sampled form replaced it); the template scan -894 in `parse_scanned` and -727 in libc (`[unknown]`);
+foldhash -428 net.
+
+Process-wide `perf stat` (agent 317's `run2.sh` with `idq.mite_uops` and
+`idq_uops_not_delivered.cycles_0_uops_deliv.core`, (30 s - 10 s) / ops), one pair each, foreign
+load 6.3 (extended) and 7.8 (simple) cores, so the cycles don't count by the lane rule:
+
+| case | instructions | cycles | idq.mite_uops | 0-uop cycles |
+|---|---|---|---|---|
+| extended, base -> candidate | 38,513 -> 37,319 (-3.1%) | 38,087 -> 37,881 (-0.5%) | 35,600 -> 34,472 (-3.2%) | 6,883 -> 6,176 (-10.3%) |
+| simple, base -> candidate | 58,929 -> 39,153 (-33.6%) | 62,946 -> 45,274 (-28.1%) | 46,873 -> 34,355 (-26.7%) | 9,555 -> 7,084 (-25.9%) |
+
+The simple protocol's cycle gain is far past placement's 10%; the extended's -0.5% cycles can't
+be told from placement (no same-code control was built: two 45-90 minute builds were all the
+heavy queue allowed).
+
+Code executed over 400 selects (`cov.sh`, distinct 64-byte lines / 4 kB pages / functions):
+extended 2,399 / 255 / 288 -> 2,362 / 244 / 284; simple 2,577 / 273 / 314 -> 2,328 / 244 / 285.
+
+TPC-H SF 0.1 in process (lane C, the 22 once, process `instructions:u`): base 17.1376 / 17.1359 G,
+candidate 17.1370 G (level); every query's rows and hash equal.
+
+TPC-B-like over the wire, scale 32, 160,000 transactions (8 clients x 20,000, `-M prepared`),
+the server cgroup's user counts from the first transaction to 8 s after the last
+(`~/.cache/a323/tpcb/fixed.sh`, agent 322's fixed-count method, plain dist roll-engine of both
+arms; lane A at 6.2 / 5.4 foreign cores), two pairs in alternating order: user instructions a
+transaction base 609,003 / 773,269, candidate 777,733 / 762,461; cycles 1,355,105 / 1,434,722
+against 1,473,994 / 1,474,916; tps 2,082 / 3,710 against 3,462 / 3,291. The same binary reads
+609k and 773k in two runs (no compaction in any window): the in-process saving (about 7,500 a
+transaction, `short_txn` -3.7%) is about 1% here and under that spread. No direction; not a
+regression either way. 322's custom-plan cost (up to 116k a transaction) is agent 328's.
+
+Checks on the code commit rebased onto `98bc2e3b6`: `tools/quick-check.sh` with `QC_CHECKED=1`
+and `QC_TESTS=kept_plans`: clippy 16 warnings, none new in a changed file; 473 tests in 31
+binaries (`wire`, `wire_waits`, `golden`, `kept_plans` among them), and again built
+`verify-checked`; crash seeds 1-3 x 2 and power_cut_at_every_point; regress 51,148 / 51,150, 0
+newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed. `tools/crash-binary.py`
+against that build's roll-engine: `--seed 1` 7 rounds ok, `--seed 1 --power drop` 10 rounds ok.
+
+### For agent 328 (session/litplan.rs)
+
+The only change there: the two maps' types, `LitPlans::map` and `ParamPlans::map`, are
+`hashbrown::HashMap<Box<str>, _>` (hashbrown's default hasher, foldhash) where they were
+`std::collections::HashMap` (SipHash); every call on them is as it was (get / get_mut / insert /
+entry / contains_key / len / clear). Nothing else in the plan cache changed.
+
+### Left
+
+- The extended protocol's per-statement session work is now mostly what it must do; the counts
+  that stand out are outside session/: `TxnState::lock` 683 and its lock-set hash map (330 +
+  224), `pgstat::report` 400 (a slot lock and `Instant::now` each transaction), `ExecCtx`'s
+  construction (`with_search_path` 513), `[unknown]` ~4,000 (libc / vdso: `clock_gettime` 426 is
+  one). `bound_as` still runs twice (Describe at Bind, then Execute); its key test is cheap now.
+- The simple protocol's `parse_scanned` is still 3,549 (the template scan byte by byte) and
+  `run_query` 1,225.
+- Merging the ~60 per-statement session functions into fewer was not tried: the trace showed
+  repeated work, not call overhead, and function boundaries need a PGO gate (two more builds).
+
 ## Power cuts of the shipped binary, and a release script (agent 325, 2026-11-26)
 
 **Three durability bugs, found by power cuts of the shipped binary and fixed.** None of them is in

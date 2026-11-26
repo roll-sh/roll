@@ -285,6 +285,31 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Point selects: the per-statement work (2026-11-26, agent 323)
+
+HANDOFF "Point selects: the per-statement work a read runs through" has what changed. Plain dist
+`bench` (`tools/dist.sh --example bench`), base `5192a74c0`, the candidate's code on it; in
+process, 1 client, 100,000 rows. Exact instructions per op (Intel PT, the client thread,
+`~/.cache/a323/inproc/`):
+
+| case | base | candidate | |
+|---|---|---|---|
+| point select, simple protocol | 56,718 | 37,180 | -34.4% |
+| point select, extended | 36,348 | 35,251 | -3.0% |
+| range_scan_100 | 397,110 | 391,393 | -1.4% |
+| short_txn (a transaction) | 203,184 | 195,720 | -3.7% |
+
+Process-wide `perf stat`, one pair each (lane A at 6.3 / 7.8 foreign cores: cycles are context
+only): extended instructions -3.1%, cycles -0.5%, `idq.mite_uops` -3.2%, cycles delivering no
+uops -10.3%; simple instructions -33.6%, cycles -28.1%, `idq.mite_uops` -26.7%, no-uop cycles
+-25.9%. Code over 400 selects (64-byte lines / 4 kB pages / functions): extended 2,399 / 255 / 288
+-> 2,362 / 244 / 284, simple 2,577 / 273 / 314 -> 2,328 / 244 / 285. TPC-H SF 0.1 in process: 22
+queries 17.137 G user instructions either way, every hash equal. TPC-B-like over the wire, scale 32,
+160,000 transactions at 8 clients (`~/.cache/a323/tpcb/fixed.sh`, plain dist, two alternating
+pairs, lane A at 5.4-6.2 foreign cores): user instructions a transaction base 609,003 / 773,269,
+candidate 777,733 / 762,461: the same binary moves 27% between runs, the ~1% the session saves
+here doesn't show.
+
 ## Short write transactions, round 19: the TPC-B-like standing at fixed counts on the shipped build; the L0 merge's read cost itemized (2026-11-26, agent 322)
 
 HANDOFF "Short write transactions, round 19" has what it means. Builds: **roll PGO** = `tools/dist-pgo.sh --out` of
