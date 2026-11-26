@@ -169,6 +169,13 @@ pub enum Domains {
         #[command(flatten)]
         target: Target,
     },
+    /// Take a hostname another environment holds by proving it's yours: the first run prints the
+    /// TXT record to add, the next (once DNS has it) moves the domain here.
+    Claim {
+        hostname: String,
+        #[command(flatten)]
+        target: Target,
+    },
     /// Check a custom domain's DNS now; with `--cloudflare-token roll://…` (a roll secret holding a
     /// Cloudflare API token, Zone:DNS:Edit on its zone) its records are written there first.
     Verify {
@@ -3182,6 +3189,21 @@ pub async fn domains(api: &Api, json_out: bool, d: Domains) -> anyhow::Result<()
                 let h = s(&v["hostname"]);
                 println!("  TXT    _roll-challenge.{}  \"{}\"", h.strip_prefix("*.").unwrap_or(&h), s(&v["token"]));
                 println!("roll checks every minute; `roll domains verify {}` checks now.", s(&v["hostname"]));
+                return Ok(());
+            }
+            v
+        }
+        Domains::Claim { hostname, target } => {
+            let svc = service(api, &target).await?;
+            let v = api.post(&format!("{}/domains/{}/claim", env_path(&svc, &target.env), enc(&hostname)), json!({})).await?;
+            if !json_out {
+                if v["claimed"] == true {
+                    println!("{} is this environment's now ({})", s(&v["domain"]["hostname"]), s(&v["domain"]["status"]));
+                } else {
+                    println!("{hostname} is another environment's. Prove it's yours with this record (beside any value there):");
+                    println!("  TXT    {}  \"{}\"", s(&v["txt"]["name"]), s(&v["txt"]["value"]));
+                    println!("then run `roll domains claim {hostname}` again.");
+                }
                 return Ok(());
             }
             v

@@ -603,6 +603,10 @@ impl Apps {
                 format!("{what}: {}'s certificate failed", e.data["hostname"].as_str().unwrap_or("a domain")),
                 format!("Visitors over HTTPS get an error until it's issued: {}", e.data["error"].as_str().unwrap_or("its provider gave no reason")),
             ),
+            "domain.expired" if e.data["reason"] == "claimed" => (
+                format!("{what}: {} moved to another environment", e.data["hostname"].as_str().unwrap_or("a domain")),
+                "Someone proved they hold its DNS (a TXT record at its _roll-challenge name) and took it, so it no longer answers here.".to_string(),
+            ),
             "domain.expired" => (
                 format!("{what}: {} was removed", e.data["hostname"].as_str().unwrap_or("a domain")),
                 "It stayed unverified for 7 days, so the name is free again; add it again once its DNS is set.".to_string(),

@@ -3080,6 +3080,51 @@
         "x-roll-action": "deploy* (it changes what a hostname serves)"
       }
     },
+    "/v1/apps/services/{id}/environments/{env}/domains/{host}/claim": {
+      "post": {
+        "description": "Answers `{ claimed: false, txt: { name, value } }` (the `_roll-challenge` TXT to add, beside any value there: a token of this environment's own, kept a week) or, once DNS has it, `{ claimed: true, domain: Domain }`: the domain moved here in one write, verified, its certificate asked again, and the holder's `domain.expired` (`reason: claimed`); 400 when no other environment's custom domain holds the name, 409 when it moved meanwhile.",
+        "operationId": "postServicesIdEnvironmentsEnvDomainsHostClaim",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`{ claimed: false, txt: { name, value } }` (the `_roll-challenge` TXT to add, beside any value there: a token of this environment's own, kept a week) or, once DNS has it, `{ claimed: true, domain: Domain }`: the domain moved here in one write, verified, its certificate asked again, and the holder's `domain.expired` (`reason: claimed`); 400 when no other environment's custom domain holds the name, 409 when it moved meanwhile"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Claim domain",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "deploy on production, else write"
+      }
+    },
     "/v1/apps/services/{id}/environments/{env}/domains/{host}/configure": {
       "post": {
         "description": "Answers `Domain`, checked: where `record` asks, its `_roll-challenge` TXT, then its CNAME (flattened at an apex), written there first; 409 naming the name's A and AAAA records when it has some and `replace` isn't set (the TXT is written all the same) (400 with Cloudflare's answer when it refuses; 400 for a wildcard, whose records are added by hand).",
