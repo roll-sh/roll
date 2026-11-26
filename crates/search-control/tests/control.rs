@@ -1973,6 +1973,61 @@ async fn browser_keys_pay_per_item_and_leave_the_owner_permits() {
     assert_eq!(s, 409, "{v}");
 }
 
+/// An API key made anywhere but the cluster's own host (the shared address, roll's console)
+/// answers an `encoded` that names its cluster (`<id>@<cluster>:<secret>`), so a copied value
+/// works at the shared address as at the cluster's own host; made at its own host it's
+/// Elasticsearch's. No other cluster, and no other cluster's host, accepts it.
+#[tokio::test]
+async fn an_api_keys_encoded_works_at_the_shared_address_and_only_on_its_cluster() {
+    use base64::Engine;
+    let e = env_with(|c| c.domain = Some("search.example.test".into())).await;
+    let (user, pw) = creds(&e.post("/v1/search/clusters", json!({"name": "shop"})).await);
+    let (_, opw) = creds(&e.post("/v1/search/clusters", json!({"name": "other"})).await);
+    let r = e.post("/v1/search/clusters/shop/request", json!({"method": "POST", "path": "/_security/api_key", "body": {"name": "app"}})).await;
+    let k = body(&r);
+    let (id, secret, encoded) = (k["id"].as_str().unwrap(), k["api_key"].as_str().unwrap(), k["encoded"].as_str().unwrap());
+    let b64 = |s: String| base64::engine::general_purpose::STANDARD.encode(s);
+    assert_eq!(encoded, b64(format!("{id}@shop:{secret}")));
+    let auth = |key: String, host: Option<&'static str>| {
+        let mut r = e.http.get(format!("{}/_security/_authenticate", e.es)).header("authorization", format!("ApiKey {key}"));
+        if let Some(h) = host {
+            r = r.header("host", h);
+        }
+        async move { r.send().await.unwrap().status().as_u16() }
+    };
+    let (shop, other) = (Some("shop.search.example.test"), Some("other.search.example.test"));
+    // At the shared address and the cluster's own host, with the cluster's own credentials.
+    let made_at = |host: Option<&'static str>| {
+        let mut r = e.http.post(format!("{}/_security/api_key", e.es)).basic_auth(&user, Some(&pw)).json(&json!({"name": "copied"}));
+        if let Some(h) = host {
+            r = r.header("host", h);
+        }
+        async move {
+            let k: Value = r.send().await.unwrap().json().await.unwrap();
+            let (id, secret) = (k["id"].as_str().unwrap().to_string(), k["api_key"].as_str().unwrap().to_string());
+            (k["encoded"].as_str().unwrap().to_string(), id, secret)
+        }
+    };
+    let (shared, sid, ssecret) = made_at(None).await;
+    assert_eq!(shared, b64(format!("{sid}@shop:{ssecret}")));
+    let (own, oid, osecret) = made_at(shop).await;
+    assert_eq!(own, b64(format!("{oid}:{osecret}")));
+    // The shared address: the qualified key only (a bare id names no cluster there).
+    assert_eq!(auth(encoded.to_string(), None).await, 200);
+    assert_eq!(auth(b64(format!("{id}:{secret}")), None).await, 401);
+    assert_eq!(auth(b64(format!("{id}@other:{secret}")), None).await, 401);
+    // The cluster's own host: bare or its own qualifier; another cluster's host: neither.
+    assert_eq!(auth(encoded.to_string(), shop).await, 200);
+    assert_eq!(auth(b64(format!("{id}:{secret}")), shop).await, 200);
+    assert_eq!(auth(encoded.to_string(), other).await, 401);
+    assert_eq!(auth(b64(format!("{id}:{secret}")), other).await, 401);
+    // Host names are case-insensitive.
+    assert_eq!(auth(encoded.to_string(), Some("Shop.Search.Example.test")).await, 200);
+    // Another cluster's own token at this one's host: refused, not run on the other cluster.
+    let r = e.http.post(format!("{}/_security/api_key", e.es)).header("host", "shop.search.example.test").bearer_auth(format!("other_{opw}")).json(&json!({"name": "x"})).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 401);
+}
+
 #[tokio::test]
 async fn documents() {
     let e = env().await;
