@@ -446,7 +446,7 @@ fn secrets_area(method: &str, path: &str) -> Area {
             "audit" | "health" | "leaks" | "shares" | "rotations" | "backup" | "unstored" => "security",
             "transit" | "leases" | "cas" | "ssh-cas" | "public-certs" | "atlas-projects" | "aws-roles" | "aws-users" | "cloud-accounts" | "directories" | "gateways" | "github-apps"
             | "kubernetes" | "outside-databases" | "rotators" | "saas" | "snowflake-accounts" | "syncs" => "integrations",
-            "placeholders" => "security",
+            "placeholders" | "identities" => "security",
             _ => return Area::Unplaced,
         },
         _ => return Area::Unplaced,
@@ -1393,6 +1393,7 @@ static TOOLS: &[Tool] = &[
     t("secrets_list_value_requests", "List secret value requests", "A project's value requests, newest first: keys, folder, whether each is open, answered, expired or cancelled, and what an answer became (a change or a change request). Never a value.", "secrets", "GET", "/v1/secrets/projects/{project}/value-requests", &[SECRET_PROJECT]),
     t("secrets_cancel_value_request", "Cancel a secret value request", "Close a value request so its link stops working (whoever asked, or an admin of the folder).", "secrets", "DELETE", "/v1/secrets/projects/{project}/value-requests/{id}", &[SECRET_PROJECT, req("id", "Value request id")]),
     t("secrets_renew_lease", "Renew a lease", "Push a dynamic credential's expiry out, as a long-running consumer does instead of restarting.", "secrets", "POST", "/v1/secrets/projects/{project}/leases/{id}/renew", &[SECRET_PROJECT, req("id", "Lease id"), b("ttl_minutes", Ty::Int, "Minutes from now")]),
+    t("secrets_identity_machines", "A machine identity's machines", "A machine identity's machines (bare metal, VMs without a platform identity), newest first: each one's chain (its bootstrap token's id), state (waiting, live, ended or revoked, and why), when its credential was last replaced and ends, and who made its bootstrap token. Never a secret. After an identity.machine.reused alert: which machines are live and when they last refreshed. Revoking one is a person's, in the dashboard.", "secrets", "GET", "/v1/secrets/projects/{project}/identities/{id}/machines", &[SECRET_PROJECT, req("id", "Machine identity id (idn_…)")]),
     t("secrets_reach", "Who reaches a secret", "Which tokens and identities reach an environment's folder or key, whether code nobody vetted can, where it flows (syncs, shares, imports) and who read it in 30 days: names only. Who has to rotate what after a leak (the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/reach", &[SECRET_PROJECT, ENV, q("path", Ty::Str, "Folder"), q("key", Ty::Str, "One key")]),
     t("secrets_folder_policies", "Folder approval policies", "An environment's approval policies per folder: who must approve a change there.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/folder-policies", &[SECRET_PROJECT, ENV, q("path", Ty::Str, "Folder")]),
     t("secrets_list_rotators", "Rotators", "A project's rotators: which secrets roll rotates (a database password, an API key), how often and from what.", "secrets", "GET", "/v1/secrets/projects/{project}/rotators", &[SECRET_PROJECT]),
