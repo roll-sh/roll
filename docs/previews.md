@@ -2368,7 +2368,8 @@ type Settings = {
     compared again (a baseline on demand). A story main's Storybook doesn't have (the change added
     it) is asked for once per head, never again until main moves.
     `main_takes_the_stories_a_change_has_and_it_hasnt`.
-    Best effort: Chromium's stories stand without them. Live: the live Storybook's first story
+    Each with its interaction test in that browser too (`play` and `play_error`, read the same
+    way, through Playwright in the page's world). Best effort: Chromium's stories stand without them. Live: the live Storybook's first story
     in Firefox and in WebKit at a phone's size. A story gone from Storybook goes
     from the preview. The index is the preview's code's: an id Storybook wouldn't make
     (`components-button--primary`) is dropped. A Storybook on another service is kept with that
@@ -2900,25 +2901,27 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-Ranked again after an eighth product review (2026-11-26, morning), against Chromatic's
-interaction and accessibility tests and baselines, Vercel's and Netlify's comments, Render's and
-Railway's previews, Neon's branches.
+Ranked again after a ninth product review (2026-11-26, morning), against Chromatic's
+cross-browser and interaction tests, Percy's snapshots, Vercel's comments and toolbar, Render's
+previews.
 
-1. **Stories' interaction tests, in review** (Chromatic's): each story's `play` function, read as
-   Storybook ran it, `failed` or `passed` on its page and against main's. Next for it: the failing
-   step and its message (Storybook's interactions log), and the interaction tests in the other
-   browsers.
+1. **Interaction tests in the other browsers, in review**: each of a change's first stories'
+   `play` outcome and what it threw, in Firefox and WebKit as in Chromium.
 2. **Restore points for Redis, search and streams**: NoSQL's landed (#1028). A point is kept only
    where the product puts a branch back in place, keeping its id; each needs its control plane's
    reset `from` (roll search: feasible, about a day, with its user to schedule).
 3. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-4. **The data step's Postgres compute start** (pg-control's; watch): most of the data step is the
+4. **An interaction test's failing step** (Storybook's interactions log, the instrumenter's
+   calls): which interaction or `expect` stopped it, beside what it threw.
+5. **The data step's Postgres compute start** (pg-control's; watch): most of the data step is the
    Postgres branch's compute start and its masking, which needs that compute up.
-5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+6. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+7. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-26, morning: stories' interaction tests (#1087) and what a failed one threw (#1091).
 
 Landed 2026-11-26, early: a baseline on demand for stories (#1082); a change's first stories in the other browsers (#1064); roll apps lookups that miss remembered (#1066); a settled running preview's usage read alone too (#1069).
 

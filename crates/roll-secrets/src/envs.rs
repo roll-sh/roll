@@ -233,7 +233,7 @@ fn some<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> std::res
     T::deserialize(d).map(Some)
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Policy {
     pub protected: bool,
@@ -245,6 +245,18 @@ pub struct Policy {
     /// HTTPS URL); `null` stops it, absent keeps it. Kept sealed: the URL is a credential.
     #[serde(default, deserialize_with = "some")]
     pub notify_url: Option<Option<String>>,
+}
+
+/// Never the notify URL (a credential).
+impl std::fmt::Debug for Policy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Policy")
+            .field("protected", &self.protected)
+            .field("approvals", &self.approvals)
+            .field("approvers", &self.approvers)
+            .field("notify_url", &self.notify_url.as_ref().map(crate::crypto::redacted))
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
