@@ -499,7 +499,7 @@ fn former_node_key(home: &std::path::Path) -> anyhow::Result<Option<Arc<search_e
     Ok(Some(sealer))
 }
 
-fn random_string(n: usize) -> String {
+pub(crate) fn random_string(n: usize) -> String {
     let mut bytes = vec![0u8; n];
     getrandom::fill(&mut bytes).expect("os randomness");
     bytes.iter().map(|b| ALPHABET[*b as usize % ALPHABET.len()] as char).collect()

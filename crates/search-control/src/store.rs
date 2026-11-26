@@ -678,6 +678,12 @@ impl Store {
         db.ensure_schema(
             "CREATE TABLE IF NOT EXISTS search_browser_usage (cluster_id TEXT NOT NULL, key_id TEXT NOT NULL, res INTEGER NOT NULL, slot INTEGER NOT NULL, at INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (cluster_id, key_id, res, slot))",
         )?;
+        // Discover's saved searches (`crate::saved`): one view of the cluster under a name, its
+        // spec the dashboard's (checked by `saved::check_spec`).
+        db.ensure_schema(
+            "CREATE TABLE IF NOT EXISTS search_saved_searches (cluster_id TEXT NOT NULL, id TEXT NOT NULL, name TEXT NOT NULL, spec TEXT NOT NULL, made_by TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (cluster_id, id))",
+        )?;
+        db.ensure_schema("CREATE UNIQUE INDEX IF NOT EXISTS search_saved_searches_name ON search_saved_searches (cluster_id, name)")?;
         // Before tenants, every cluster without an owner (all of every project's) shared the key
         // `(no owner)`, and so one token per site: those verifications and counts go once, and
         // their clusters verify again under their own key ([`SearchCluster::tenant`]).
@@ -1163,6 +1169,7 @@ impl Store {
             x.execute("DELETE FROM search_experiments WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_suggestions WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_crawler_sites WHERE cluster_id = ?1", params![id])?;
+            x.execute("DELETE FROM search_saved_searches WHERE cluster_id = ?1", params![id])?;
             Ok(true)
         })?)
     }
@@ -2327,6 +2334,84 @@ pub struct SiteVerification {
 }
 
 const VERIFY_COLS: &str = "cluster_id, owner, site, kind, token, status, error, failures, created_at, verified_at, lapsed_at, checked_at, due_at";
+
+/// A saved search as kept: `spec` is its JSON (`crate::saved`).
+#[derive(Debug, Clone)]
+pub struct SavedRow {
+    pub id: String,
+    pub name: String,
+    pub spec: String,
+    pub made_by: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+const SAVED_COLS: &str = "id, name, spec, made_by, created_at, updated_at";
+
+fn saved_row(r: &Row) -> code_sql::Result<SavedRow> {
+    Ok(SavedRow { id: r.get(0)?, name: r.get(1)?, spec: r.get(2)?, made_by: r.get(3)?, created_at: r.get(4)?, updated_at: r.get(5)? })
+}
+
+/// Why a saved search wasn't written.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SavedRefused {
+    /// Another of the cluster's saved searches has the name.
+    Name,
+    /// The cluster keeps as many as it may.
+    Full,
+    NotFound,
+}
+
+impl Store {
+    /// Cluster `cluster`'s saved searches, by name.
+    pub fn saved_searches(&self, cluster: &str) -> anyhow::Result<Vec<SavedRow>> {
+        Ok(self.db.read(|x| x.query(&format!("SELECT {SAVED_COLS} FROM search_saved_searches WHERE cluster_id = ?1 ORDER BY name"), params![cluster], saved_row))?)
+    }
+
+    pub fn saved_search(&self, cluster: &str, id: &str) -> anyhow::Result<Option<SavedRow>> {
+        Ok(self.db.read(|x| x.query_row(&format!("SELECT {SAVED_COLS} FROM search_saved_searches WHERE cluster_id = ?1 AND id = ?2"), params![cluster, id], saved_row).optional())?)
+    }
+
+    /// Adds `row` to `cluster`'s saved searches unless its name is taken or the cluster has `max`.
+    pub fn add_saved_search(&self, cluster: &str, row: &SavedRow, max: i64) -> anyhow::Result<Result<(), SavedRefused>> {
+        Ok(self.db.write(|x| {
+            // Checked first: a failed insert would end a Postgres transaction.
+            if x.query_row("SELECT 1 FROM search_saved_searches WHERE cluster_id = ?1 AND name = ?2", params![cluster, row.name], |_| Ok(())).optional()?.is_some() {
+                return Ok::<_, code_sql::Error>(Err(SavedRefused::Name));
+            }
+            let n: i64 = x.query_row("SELECT COUNT(*) FROM search_saved_searches WHERE cluster_id = ?1", params![cluster], |r| r.get(0))?;
+            if n >= max {
+                return Ok(Err(SavedRefused::Full));
+            }
+            x.execute(
+                "INSERT INTO search_saved_searches (cluster_id, id, name, spec, made_by, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![cluster, row.id, row.name, row.spec, row.made_by, row.created_at, row.updated_at],
+            )?;
+            Ok(Ok(()))
+        })?)
+    }
+
+    /// Renames saved search `id` (`name`) and/or replaces its spec, unless another has the name.
+    pub fn update_saved_search(&self, cluster: &str, id: &str, name: Option<&str>, spec: Option<&str>, at: i64) -> anyhow::Result<Result<SavedRow, SavedRefused>> {
+        Ok(self.db.write(|x| {
+            let Some(cur) = x.query_row(&format!("SELECT {SAVED_COLS} FROM search_saved_searches WHERE cluster_id = ?1 AND id = ?2"), params![cluster, id], saved_row).optional()? else {
+                return Ok::<_, code_sql::Error>(Err(SavedRefused::NotFound));
+            };
+            let name = name.unwrap_or(&cur.name);
+            if name != cur.name && x.query_row("SELECT 1 FROM search_saved_searches WHERE cluster_id = ?1 AND name = ?2", params![cluster, name], |_| Ok(())).optional()?.is_some() {
+                return Ok(Err(SavedRefused::Name));
+            }
+            let spec = spec.unwrap_or(&cur.spec);
+            x.execute("UPDATE search_saved_searches SET name = ?3, spec = ?4, updated_at = ?5 WHERE cluster_id = ?1 AND id = ?2", params![cluster, id, name, spec, at])?;
+            Ok(Ok(SavedRow { name: name.to_string(), spec: spec.to_string(), updated_at: at, ..cur }))
+        })?)
+    }
+
+    /// Deletes saved search `id`; `false` when there's none.
+    pub fn delete_saved_search(&self, cluster: &str, id: &str) -> anyhow::Result<bool> {
+        Ok(self.db.write(|x| x.execute("DELETE FROM search_saved_searches WHERE cluster_id = ?1 AND id = ?2", params![cluster, id]))? == 1)
+    }
+}
 
 fn verification_row(r: &Row) -> code_sql::Result<SiteVerification> {
     Ok(SiteVerification {

@@ -109,6 +109,8 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/tasks/{task}", get(cluster_task))
         .route("/v1/search/clusters/{id}/indices/{index}/suggestions", get(suggestions))
         .route("/v1/search/clusters/{id}/indices/{index}/suggestions/rebuild", post(rebuild_suggestions))
+        .route("/v1/search/clusters/{id}/saved-searches", get(saved_searches).post(save_search))
+        .route("/v1/search/clusters/{id}/saved-searches/{search}", get(saved_search).put(update_saved_search).delete(delete_saved_search))
         .route("/v1/search/clusters/{id}/site-verifications", get(site_verifications).post(start_site_verification))
         .route("/v1/search/clusters/{id}/site-verifications/{site}", axum::routing::delete(delete_site_verification))
         .route("/v1/search/clusters/{id}/site-verifications/{site}/check", post(check_site_verification))
@@ -1154,6 +1156,52 @@ async fn prune_parent_browser_keys(State(c): State<AppState>, Path(id): Path<Str
 /// signing secret, in this answer only; keys derived under the old one stop working at once.
 async fn rotate_browser_key_secret(State(c): State<AppState>, Path((id, key)): Path<(String, String)>) -> ApiResult<Value> {
     Ok(Json(c.rotate_browser_key_secret(&id, &key).await?))
+}
+
+/// `GET /v1/search/clusters/{id}/saved-searches`: Discover's saved searches of the cluster
+/// (`crate::saved`), by name.
+async fn saved_searches(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    let d = c.get(&id).await?;
+    Ok(Json(c.saved_searches(&d).await?))
+}
+
+async fn saved_search(State(c): State<AppState>, Path((id, search)): Path<(String, String)>) -> ApiResult<Value> {
+    let d = c.get(&id).await?;
+    Ok(Json(c.saved_search(&d, &search).await?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SaveSearch {
+    name: String,
+    search: Value,
+}
+
+/// `POST /v1/search/clusters/{id}/saved-searches` `{name, search}`: 201 with the saved search.
+async fn save_search(State(c): State<AppState>, caller: Caller, Path(id): Path<String>, ext: Extensions, Json(b): Json<SaveSearch>) -> Result<Response, ControlError> {
+    let d = c.get(&id).await?;
+    let made_by = caller.user().or_else(|| ext.get::<roll_auth::SignedIn>().map(|s| s.user.as_str()));
+    let saved = c.save_search(&d, &b.name, &b.search, made_by).await?;
+    Ok((StatusCode::CREATED, Json(saved)).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateSearch {
+    name: Option<String>,
+    search: Option<Value>,
+}
+
+/// `PUT /v1/search/clusters/{id}/saved-searches/{search}` `{name?, search?}`: rename, replace, or both.
+async fn update_saved_search(State(c): State<AppState>, Path((id, search)): Path<(String, String)>, Json(b): Json<UpdateSearch>) -> ApiResult<Value> {
+    let d = c.get(&id).await?;
+    Ok(Json(c.update_saved_search(&d, &search, b.name.as_deref(), b.search.as_ref()).await?))
+}
+
+async fn delete_saved_search(State(c): State<AppState>, Path((id, search)): Path<(String, String)>) -> Result<Response, ControlError> {
+    let d = c.get(&id).await?;
+    c.delete_saved_search(&d, &search).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 /// `GET /v1/search/clusters/{id}/site-verifications`: the domains and origins the cluster's owner
