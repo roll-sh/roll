@@ -457,13 +457,15 @@ impl Secrets {
     /// `candidates` are values of this project, in the environments and folders the caller may
     /// `scan`, without `read` or `reveal`. Only [`scannable`] candidates are tried, so it can't
     /// confirm a guess at a short or simple value, nor at a weak password inside text a guesser
-    /// knows; sensitive values and personal ones never match; [`SCANS_PER_MINUTE`] calls and
-    /// [`SCAN_CANDIDATES_PER_MINUTE`] tried candidates a minute per caller, and as many a minute
-    /// and [`SCAN_CANDIDATES_PER_HOUR`] an hour per project. A match names its key and folder only
-    /// where the caller may `read`. Every call is audited (`secrets.scan`, with the pusher and refs
-    /// the hook names and the keys found), never a candidate. A `breakglass` push goes through
-    /// anyway, audited as `secrets.scan.breakglass`, and only when the project's `breakglass`
-    /// list allows the hook's token or the pusher ([`Secrets::breakglass`]): 403 otherwise.
+    /// knows; sensitive values and personal ones never match; [`SCANS_PER_MINUTE`] calls,
+    /// [`SCAN_CANDIDATES_PER_MINUTE`] tried candidates a minute and [`SCAN_CANDIDATES_PER_HOUR`]
+    /// an hour per token and pusher, and the project's own, far higher ([`spend`]: 429 naming the
+    /// budget and when it has room). A match names its key and folder only where the caller may
+    /// `read`. Every call is audited (`secrets.scan`, with the pusher and refs the hook names and
+    /// the keys found), never a candidate. A `breakglass` push goes through anyway, audited as
+    /// `secrets.scan.breakglass`, and only when the project's `breakglass` list allows the hook's
+    /// token or the pusher ([`Secrets::breakglass`]): 403 otherwise. What it lets through is a
+    /// leak ([`Secrets::respond`]: `secret.leaked`, and `leaks.rotate`).
     pub fn scan_only(&self, project: &str, candidates: &[String], caller: &Caller, push: &Push) -> Result<Vec<ScanFound>> {
         let found = self.scanned(project, candidates, caller, push)?;
         // What break glass lets through is in the server's history now: a leak, answered as one.

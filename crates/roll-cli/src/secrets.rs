@@ -485,7 +485,8 @@ pub enum Secrets {
         /// A git server's pre-receive hook: read `old new ref` lines on stdin and refuse a push
         /// whose new commits add a value of the project. A scan-only token (`tokens create
         /// --scan-only`) is enough. `git push -o breakglass` lets one through, audited with the
-        /// pusher, when the project's `roll secrets breakglass` list allows it.
+        /// pusher, when the project's `roll secrets breakglass` list allows it; a value it lets
+        /// through is a leak (reported, and rotated where `leaks.rotate` is managed).
         #[arg(long, conflicts_with_all = ["paths", "staged", "store", "allow_unstored"])]
         pre_receive: bool,
         /// With --pre-receive: how long it may take (`4s`, `1500ms`; default 4s, inside GitHub
