@@ -6,7 +6,7 @@
 export const PANELS = {
   syncs: ["syncs"],
   credentials: ["rotators", "saas-rotators", "outside-databases", "directories", "snowflake", "atlas", "gateways", "cloud-accounts", "aws-roles", "github-apps", "kubernetes"],
-  keys: ["transit-keys", "cas", "ssh-cas"],
+  keys: ["transit-keys", "cas", "public-certs", "ssh-cas"],
 } as const;
 
 export type PanelTab = keyof typeof PANELS;

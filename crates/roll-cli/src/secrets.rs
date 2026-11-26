@@ -635,6 +635,11 @@ pub enum Secrets {
     /// The project's SSH CAs: list, add, print one's public key (for TrustedUserCAKeys), remove.
     #[command(subcommand, name = "ssh-cas")]
     SshCas(SshCasCmd),
+    /// Publicly trusted certificates from Let's Encrypt, ZeroSSL or Google (ACME, dns-01 through
+    /// Cloudflare or Route 53): list, add (the DNS credential on stdin), show, change, renew,
+    /// revoke, remove.
+    #[command(subcommand, name = "public-certs", alias = "public-cert")]
+    PublicCerts(PublicCertsCmd),
     /// GCP and Azure accounts that trust roll's token for this project: list (with the issuer and
     /// subject to trust), add, remove.
     #[command(subcommand)]
@@ -927,7 +932,7 @@ pub(crate) const HELP_GROUPS: &[(&str, &[&str])] = &[
     (
         "Resources and rotation",
         &[
-            "rotate", "rotations", "leases", "databases", "aws-roles", "aws-users", "clouds", "saas", "cas", "ssh-cas", "transit", "github-apps", "kubernetes-clusters", "directories", "snowflake", "atlas",
+            "rotate", "rotations", "leases", "databases", "aws-roles", "aws-users", "clouds", "saas", "cas", "ssh-cas", "public-certs", "transit", "github-apps", "kubernetes-clusters", "directories", "snowflake", "atlas",
             "gateways",
         ],
     ),
@@ -1725,6 +1730,74 @@ pub enum CasCmd {
     /// Bindings.
     #[command(subcommand)]
     Acme(AcmeCmd),
+    Rm { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum PublicCertsCmd {
+    /// Each one's names, status, end, next renewal and the renewal caps.
+    #[command(alias = "list")]
+    Ls,
+    /// Register a certificate for these names; roll orders it in the background (minutes) and
+    /// renews it. The DNS provider's credential comes on stdin (asked for without echo on a
+    /// terminal): Cloudflare's API token, or Route 53's ACCESS_KEY_ID:SECRET_ACCESS_KEY unless
+    /// --aws-role names one of the project's AWS roles (no key kept). With --eab-kid, the EAB HMAC
+    /// key comes next (another line).
+    Add {
+        name: String,
+        /// A DNS name or a wildcard (*.example.com); repeatable.
+        #[arg(long = "domain", required = true, value_name = "NAME")]
+        domains: Vec<String>,
+        #[arg(long, value_parser = ["cloudflare", "route53"])]
+        dns: String,
+        /// Route 53 as this project AWS role (`roll secrets aws-roles`) instead of an access key.
+        #[arg(long, value_name = "ROLE")]
+        aws_role: Option<String>,
+        /// letsencrypt (the default), letsencrypt-staging, zerossl, google, google-test, or a
+        /// directory URL the operator allows.
+        #[arg(long, default_value = "letsencrypt")]
+        ca: String,
+        /// External Account Binding's key id (ZeroSSL and Google ask for one).
+        #[arg(long)]
+        eab_kid: Option<String>,
+        /// Days from issue to renewal (two thirds of the certificate's lifetime by default).
+        #[arg(long)]
+        rotate_days: Option<u64>,
+    },
+    /// One certificate in full: CA, names, DNS provider, serials, dates, revocations, last error.
+    Show { id: String },
+    /// Change its name, names or renewal days, or replace its DNS credential (--credential, on
+    /// stdin) or Route 53 role (--aws-role). New names or a new credential order at once.
+    Set {
+        id: String,
+        #[arg(long)]
+        name: Option<String>,
+        /// Every name it should have (replaces them); repeatable.
+        #[arg(long = "domain", value_name = "NAME")]
+        domains: Vec<String>,
+        /// Days from issue to renewal, or `default`.
+        #[arg(long)]
+        rotate_days: Option<String>,
+        /// Read a new DNS credential from stdin.
+        #[arg(long, conflicts_with = "aws_role")]
+        credential: bool,
+        #[arg(long, value_name = "ROLE")]
+        aws_role: Option<String>,
+    },
+    /// Order a new certificate now (one an hour, three a week: each spends the CA's limit for the
+    /// names); every linked key rotates once it's issued.
+    Renew { id: String },
+    /// Revoke the current certificate at the CA (a new one is ordered at once), or --previous, the
+    /// one the last renewal replaced.
+    Revoke {
+        id: String,
+        #[arg(long)]
+        previous: bool,
+        #[arg(long, value_parser = ["unspecified", "keyCompromise", "affiliationChanged", "superseded", "cessationOfOperation"])]
+        reason: Option<String>,
+    },
+    /// Remove a registration no key links to (its certificates stay valid until they end).
+    #[command(alias = "remove")]
     Rm { id: String },
 }
 
@@ -3770,6 +3843,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             CasCmd::Acme(cmd) => acme(&c, cmd, json_out).await?,
         },
+        Secrets::PublicCerts(cmd) => public_certs(&c, cmd, json_out).await?,
         Secrets::Transit(t) => match t {
             TransitCmd::Ls => {
                 let v = c.call(Method::GET, &format!("{}/transit", c.base()), None).await?;
@@ -7337,6 +7411,179 @@ async fn stop(child: &mut tokio::process::Child) {
 }
 
 /// `roll secrets cas acme …`: a CA's ACME directory, bindings and pre-authorization.
+/// The public CAs by short name (docs/secrets.md, "Publicly trusted certificates").
+const PUBLIC_CAS: &[(&str, &str)] = &[
+    ("letsencrypt", "https://acme-v02.api.letsencrypt.org/directory"),
+    ("letsencrypt-staging", "https://acme-staging-v02.api.letsencrypt.org/directory"),
+    ("zerossl", "https://acme.zerossl.com/v2/DV90"),
+    ("google", "https://dv.acme-v02.api.pki.goog/directory"),
+    ("google-test", "https://dv.acme-v02.test-api.pki.goog/directory"),
+];
+
+/// A credential from stdin, never argv: asked for without echo on a terminal, else the next line.
+fn credential_line(prompt: &str) -> anyhow::Result<zeroize::Zeroizing<String>> {
+    use std::io::BufRead as _;
+    let line = if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        read_hidden(prompt)?
+    } else {
+        let mut l = String::new();
+        std::io::stdin().lock().read_line(&mut l).context("reading the credential from stdin")?;
+        l
+    };
+    let line = zeroize::Zeroizing::new(line.trim().to_string());
+    anyhow::ensure!(!line.is_empty(), "{} (on stdin)", prompt.trim_end_matches([':', ' ']));
+    Ok(line)
+}
+
+async fn public_cert_id(c: &Client<'_>, id: &str) -> anyhow::Result<String> {
+    let list = c.call(Method::GET, &format!("{}/public-certs", c.base()), None).await?;
+    let p = list.as_array().into_iter().flatten().find(|p| p["id"] == id || p["name"] == id).ok_or_else(|| anyhow::anyhow!("no public certificate {id}"))?;
+    Ok(s(&p["id"]))
+}
+
+/// What the renewal caps allow now: `3 of 3 asked this week` and when the next may come.
+fn caps(p: &Value) -> String {
+    let asked = p["renewals_asked"].as_u64().unwrap_or_default();
+    match p["renew_after"].as_i64() {
+        Some(t) => format!("renewals held until {} ({asked} of 3 asked this week)", chrono::DateTime::from_timestamp_millis(t).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default()),
+        None => format!("{asked} of 3 renewals asked this week"),
+    }
+}
+
+async fn public_certs(c: &Client<'_>, cmd: PublicCertsCmd, json_out: bool) -> anyhow::Result<()> {
+    let base = format!("{}/public-certs", c.base());
+    let print = |v: &Value| -> anyhow::Result<()> {
+        println!("{}", serde_json::to_string_pretty(v)?);
+        Ok(())
+    };
+    let names = |p: &Value| p["domains"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(",");
+    let renews = |p: &Value| match (p["status"].as_str(), p["renews_at"].as_i64()) {
+        (_, Some(0)) => "renewing now".to_string(),
+        (_, Some(t)) => format!("renews {}", day(t)),
+        (Some("failing"), None) => "retried hourly".to_string(),
+        _ => "ordering".to_string(),
+    };
+    match cmd {
+        PublicCertsCmd::Ls => {
+            let v = c.call(Method::GET, &base, None).await?;
+            if json_out {
+                return print(&v);
+            }
+            for p in v.as_array().into_iter().flatten() {
+                let until = p["not_after"].as_i64().map(|t| format!("until {}  ", day(t))).unwrap_or_default();
+                println!("{}  {:<16} {:<8} {}  {until}{}  {}", s(&p["id"]), s(&p["name"]), s(&p["status"]), names(p), renews(p), caps(p));
+            }
+        }
+        PublicCertsCmd::Add { name, domains, dns, aws_role, ca, eab_kid, rotate_days } => {
+            let directory = PUBLIC_CAS.iter().find(|(n, _)| *n == ca).map_or(ca.clone(), |(_, url)| url.to_string());
+            let mut body = json!({ "name": name, "directory_url": directory, "domains": domains, "dns_provider": dns });
+            match (&aws_role, dns.as_str()) {
+                (Some(_), "cloudflare") => bail!("--aws-role is Route 53's"),
+                (Some(role), _) => body["aws_role"] = json!(role),
+                (None, "route53") => body["dns_credential"] = json!(*credential_line("Route 53 access key (ACCESS_KEY_ID:SECRET_ACCESS_KEY): ")?),
+                (None, _) => body["dns_credential"] = json!(*credential_line("Cloudflare API token (Zone DNS edit on the names' zones): ")?),
+            }
+            if let Some(kid) = eab_kid {
+                body["eab_kid"] = json!(kid);
+                body["eab_hmac_key"] = json!(*credential_line("EAB HMAC key: ")?);
+            }
+            if let Some(d) = rotate_days {
+                body["rotate_days"] = json!(d);
+            }
+            let v = c.call(Method::POST, &base, Some(body)).await?;
+            if json_out {
+                return print(&v);
+            }
+            println!("Registered {} ({}) for {}: roll orders it in the background; link TLS_CERT, TLS_KEY and TLS_FULLCHAIN to it once `roll secrets public-certs show {}` says issued.", s(&v["name"]), s(&v["id"]), names(&v), s(&v["name"]));
+        }
+        PublicCertsCmd::Show { id } => {
+            let id = public_cert_id(c, &id).await?;
+            let v = c.call(Method::GET, &base, None).await?;
+            let p = v.as_array().into_iter().flatten().find(|p| p["id"] == id.as_str()).cloned().unwrap_or_default();
+            if json_out {
+                return print(&p);
+            }
+            let dns = match p["aws_role"].as_str() {
+                Some(role) => format!("route53 as AWS role {role}"),
+                None => s(&p["dns_provider"]),
+            };
+            println!("{}  {}  {}", s(&p["id"]), s(&p["name"]), s(&p["status"]));
+            println!("  names     {}", names(&p).replace(',', ", "));
+            println!("  CA        {}", s(&p["directory_url"]));
+            println!("  DNS       {dns}");
+            if let Some(serial) = p["serial"].as_str() {
+                println!("  serial    {serial}, issued {}, until {}", day(p["issued_at"].as_i64().unwrap_or_default()), day(p["not_after"].as_i64().unwrap_or_default()));
+            }
+            if let Some(serial) = p["previous_serial"].as_str() {
+                println!("  previous  {serial} (revocable until it ends)");
+            }
+            println!("  renewal   {}; {}", renews(&p), caps(&p));
+            for r in p["revocations"].as_array().into_iter().flatten() {
+                let why = r["last_error"].as_str().map(|e| format!(": {e}")).unwrap_or_default();
+                println!("  revoked   {} ({}) {}{why}", s(&r["serial"]), s(&r["reason"]), s(&r["state"]));
+            }
+            if let Some(e) = p["last_error"].as_str() {
+                println!("  failing   {e}");
+            }
+            println!("  made by   {}, {}", s(&p["created_by"]), day(p["created_at"].as_i64().unwrap_or_default()));
+        }
+        PublicCertsCmd::Set { id, name, domains, rotate_days, credential, aws_role } => {
+            let id = public_cert_id(c, &id).await?;
+            let mut body = json!({});
+            if let Some(n) = name {
+                body["name"] = json!(n);
+            }
+            if !domains.is_empty() {
+                body["domains"] = json!(domains);
+            }
+            match rotate_days.as_deref() {
+                Some("default") => body["rotate_days"] = Value::Null,
+                Some(d) => body["rotate_days"] = json!(d.parse::<u64>().map_err(|_| anyhow::anyhow!("--rotate-days is a number of days or default"))?),
+                None => {}
+            }
+            if let Some(role) = aws_role {
+                body["aws_role"] = json!(role);
+            }
+            if credential {
+                body["dns_credential"] = json!(*credential_line("The DNS provider's new credential: ")?);
+            }
+            anyhow::ensure!(body.as_object().is_some_and(|b| !b.is_empty()), "nothing to change: --name, --domain, --rotate-days, --credential or --aws-role");
+            let v = c.call(Method::PATCH, &format!("{base}/{}", enc(&id)), Some(body)).await?;
+            if json_out {
+                return print(&v);
+            }
+            println!("Changed {}: {}, {}", s(&v["name"]), names(&v), renews(&v));
+        }
+        PublicCertsCmd::Renew { id } => {
+            let id = public_cert_id(c, &id).await?;
+            let v = c.call(Method::POST, &format!("{base}/{}/renew", enc(&id)), None).await?;
+            if json_out {
+                return print(&v);
+            }
+            println!("Ordering a new certificate for {}: linked keys rotate once the CA issues it ({}).", s(&v["name"]), caps(&v));
+        }
+        PublicCertsCmd::Revoke { id, previous, reason } => {
+            let id = public_cert_id(c, &id).await?;
+            let mut body = json!({ "serial": if previous { "previous" } else { "current" } });
+            if let Some(r) = reason {
+                body["reason"] = json!(r);
+            }
+            let v = c.call(Method::POST, &format!("{base}/{}/revoke", enc(&id)), Some(body)).await?;
+            if json_out {
+                return print(&v);
+            }
+            let r = &v["revocations"][0];
+            println!("Revoked {} of {} ({}){}", s(&r["serial"]), s(&v["name"]), s(&r["reason"]), if previous { "" } else { "; a new certificate is on its way" });
+        }
+        PublicCertsCmd::Rm { id } => {
+            let id = public_cert_id(c, &id).await?;
+            c.call(Method::DELETE, &format!("{base}/{}", enc(&id)), None).await?;
+            println!("Removed {id}");
+        }
+    }
+    Ok(())
+}
+
 async fn acme(c: &Client<'_>, cmd: AcmeCmd, json_out: bool) -> anyhow::Result<()> {
     let at = |ca: &str| format!("{}/cas/{}/acme", c.base(), enc(ca));
     let print = |v: &Value| -> anyhow::Result<()> {
