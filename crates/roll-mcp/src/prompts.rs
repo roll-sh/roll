@@ -772,7 +772,9 @@ mod tests {
         for text in &texts {
             for word in text.split(|c: char| !(c.is_ascii_lowercase() || c == '_')) {
                 let Some((product, _)) = word.split_once('_') else { continue };
-                if roll_auth::scope::PRODUCTS.contains(&product) && !matches!(product, "code" | "agents") {
+                // A tool's argument as its product spells it (`search_after`) isn't a tool.
+                let argument = crate::tools::all().iter().any(|t| t.params.iter().any(|p| p.name == word));
+                if roll_auth::scope::PRODUCTS.contains(&product) && !matches!(product, "code" | "agents") && !argument {
                     assert!(all.iter().any(|t| t == word), "a workflow or the guide names {word}, which isn't a tool");
                 }
             }

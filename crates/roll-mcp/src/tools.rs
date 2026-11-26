@@ -2437,7 +2437,9 @@ mod tests {
             let text = format!("{} {} {}", t.title, t.description, params.join(" "));
             for word in text.split(|c: char| !(c.is_ascii_lowercase() || c == '_')) {
                 let Some((product, _)) = word.split_once('_') else { continue };
-                if roll_auth::scope::PRODUCTS.contains(&product) && !matches!(product, "code" | "agents") && word != "access_denied" {
+                // An argument of its own, as the product spells it (`search_after`), isn't a tool.
+                let own = t.params.iter().any(|p| p.name == word);
+                if roll_auth::scope::PRODUCTS.contains(&product) && !matches!(product, "code" | "agents") && word != "access_denied" && !own {
                     assert!(names.contains(word), "{} names {word}, which isn't a tool", t.name);
                 }
             }
