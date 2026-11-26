@@ -980,6 +980,8 @@ origins (browser search), once they're on main.
 | GET, PUT, DELETE | `/v1/search/clusters/{id}/indices/{index}/docs/{doc}` | `/<index>/_doc/<id>` |
 | POST | `/v1/search/clusters/{id}/indices/{index}/bulk` | `POST /<index>/_bulk` (NDJSON) |
 | POST | `/v1/search/clusters/{id}/indices/{index}/delete_by_query` | `POST /<index>/_delete_by_query` |
+| POST | `/v1/search/clusters/{id}/indices/{index}/update_by_query` | `POST /<index>/_update_by_query` on one index named literally (no wildcard, list or date math): body `{query?, script?, max_docs?, conflicts?, slices?}` (`slices` a positive number or `auto`, moved to the URL; an unknown field is a 400), query `wait_for_completion`, `refresh`, `requests_per_second`, `scroll_size`, `timeout`. With no script each document is indexed again as it is, through the index's pipelines and inference: a `semantic_text` field added since (fed by `copy_to`) is embedded, its inference metered and limited as any write's. `wait_for_completion=false` answers 202 `{task}`. A write in roll's permissions, a delete with a `script` (which can delete) |
+| GET | `/v1/search/clusters/{id}/tasks/{task}` | `GET _tasks/<task>`: a task's status, and once it's done `completed: true` with its `response` or `error` (`wait_for_completion`, `timeout`); a read |
 
 The per-index routes are one Elasticsearch operation each, so the cluster, the index and the kind
 of access (read, write, delete) are in the route: roll's scoped tokens and MCP tools map onto
@@ -2115,11 +2117,15 @@ deterministic (#396).
    `ENRICH`) authorized against the grant's scope as it plans, sync only, storing nothing; the
    `search_esql` tool and `roll search esql`. Queued (`feature/search-esql-route`) behind item 4's
    ENRICH fix, which it depends on.
-31. **Re-embedding an index's own documents** (asked by roll MCP, 2026-11-26): an index whose
-   `semantic_text` field came after its documents has no embeddings, and an agent's only way is
-   reading pages and writing them back. `POST /v1/search/clusters/{id}/indices/{index}/update_by_query`
-   (`{query?, script?, max_docs?, conflicts?, slices?}`; a write on the index): with no script
-   it re-indexes each document in place, so a new field fed by `copy_to` embeds;
-   `wait_for_completion=false` answers 202 `{task}`, with the tasks route catalogued as a read
-   (roll MCP's wait tool follows it). Each document's E5 time is charged and rate-limited as bulk
-   indexing is. roll MCP maps it as `search_update_by_query`.
+31. **Re-embedding an index's own documents** (done, `feature/search-update-by-query-route`;
+   asked by roll MCP, 2026-11-26): an index whose `semantic_text` field came after its documents
+   had no embeddings, and an agent's only way was reading pages and writing them back.
+   `POST /v1/search/clusters/{id}/indices/{index}/update_by_query` (`{query?, script?, max_docs?,
+   conflicts?, slices?}`, one index by its literal name, run as the index's routes run) with no
+   script indexes each document again in place, through the index's pipelines and inference, so a
+   new field fed by `copy_to` embeds, metered and limited as any write is (the cluster's own
+   `_update_by_query` task machinery, `slices` held to `index.max_slices_per_scroll`).
+   `wait_for_completion=false` answers 202 `{task}`, and `GET /v1/search/clusters/{id}/tasks/{task}`
+   follows it. In roll's permissions it's a write on the index (a delete with a `script`, which
+   can delete), the task a read of the cluster. No MCP tool yet: roll MCP maps them as
+   `search_update_by_query` and a wait tool.
