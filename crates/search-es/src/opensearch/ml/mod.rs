@@ -811,12 +811,17 @@ pub async fn embed(cluster: &Cluster, id: &str, texts: &[String], p: Option<&Pri
     Ok(vectors)
 }
 
+/// A vector's element as Java prints a `float` (`0.1`, not `0.10000000149011612`).
+pub fn float_value(f: f32) -> Value {
+    Value::from(crate::json::write::java_float_value(f))
+}
+
 fn tensor(v: &[f32]) -> Value {
     obj! {
         "name" => "sentence_embedding",
         "data_type" => "FLOAT32",
         "shape" => Value::Arr(vec![(v.len() as i64).into()]),
-        "data" => Value::Arr(v.iter().map(|x| Value::from(*x as f64)).collect()),
+        "data" => Value::Arr(v.iter().map(|x| float_value(*x)).collect()),
     }
 }
 

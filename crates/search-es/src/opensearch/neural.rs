@@ -65,15 +65,16 @@ impl Neural {
         let mut boost = 1.0f32;
         let mut text = None;
         let mut image = false;
+        let mut current = String::new();
         while let Some(t) = p.next_token() {
             match t {
                 Token::EndObject => break,
-                Token::FieldName => {}
+                Token::FieldName => current = p.current_name().unwrap_or("").to_string(),
                 Token::StartObject => {
                     if !q.field.is_empty() {
                         return Err(p.parsing_error("[neural] query doesn't support multiple fields"));
                     }
-                    q.field = p.current_name().unwrap_or_default().to_string();
+                    q.field = current.clone();
                     p.object("neural", FIELDS, |p, i| {
                         match i {
                             0 => boost = p.float_value()?,

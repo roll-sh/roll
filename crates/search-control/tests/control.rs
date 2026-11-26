@@ -7354,3 +7354,112 @@ async fn search_application_experiments() {
     assert_eq!(r.status().as_u16(), 200);
     assert!(r.headers().get("x-roll-variant").is_none());
 }
+
+/// OpenSearch's semantic search guide on an opensearch-flavor cluster (docs/search/
+/// opensearch-neural.md), against a fake OpenAI: a connector, a model registered and deployed on
+/// it, `_predict`, an ingest pipeline's `text_embedding` into a `knn_vector` field, and `neural`
+/// inside `hybrid` through a search pipeline whose `neural_query_enricher` names the model. The
+/// provider gets the body OpenSearch 3.9 sends, byte for byte; the connector's key is in no
+/// answer, and a branch doesn't call out with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn opensearch_semantic_search_follows_the_guide() {
+    use reqwest::Method;
+    let sent: Arc<std::sync::Mutex<Vec<(String, String)>>> = Arc::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let log = sent.clone();
+    // A vector per text: which of "cat" and "dog" it names.
+    let router = axum::Router::new().fallback(move |headers: axum::http::HeaderMap, body: String| {
+        let auth = headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
+        log.lock().unwrap().push((auth, body.clone()));
+        let inputs: Vec<String> = serde_json::from_str::<Value>(&body).ok().and_then(|v| v["input"].as_array().cloned()).unwrap_or_default().iter().map(|t| t.as_str().unwrap_or_default().to_string()).collect();
+        let data: Vec<Value> = inputs.iter().enumerate().map(|(i, t)| json!({"index": i, "embedding": [if t.contains("cat") { 1.0 } else { 0.1 }, if t.contains("dog") { 1.0 } else { 0.1 }, 0.5]})).collect();
+        async move { axum::Json(json!({"object": "list", "data": data})) }
+    });
+    tokio::spawn(async move { axum::serve(listener, router).await });
+    let e = env_with(|c| {
+        c.sealer = search_control::Sealer::from_secret("0123456789abcdef0123456789abcdef-neural");
+        c.unsealed_secrets = false;
+        c.node_settings.push((search_control::INFERENCE_ALLOW_PRIVATE.into(), "true".into()));
+    })
+    .await;
+    let c = e.post("/v1/search/clusters", json!({"name": "neural-os", "flavor": "opensearch"})).await;
+    let (u, p) = creds(&c);
+    let ok = |(s, v): (u16, Value)| {
+        assert_eq!(s, 200, "{v}");
+        v
+    };
+    let connector = json!({
+        "name": "OpenAI embedding",
+        "description": "guide",
+        "version": 1,
+        "protocol": "http",
+        "parameters": {"model": "text-embedding-3-small"},
+        "credential": {"openAI_key": "sk-guide-1"},
+        "actions": [{
+            "action_type": "predict",
+            "method": "POST",
+            "url": format!("http://127.0.0.1:{port}/v1/embeddings"),
+            "headers": {"Authorization": "Bearer ${credential.openAI_key}"},
+            "request_body": "{ \"input\": ${parameters.input}, \"model\": \"${parameters.model}\" }",
+            "pre_process_function": "connector.pre_process.openai.embedding",
+            "post_process_function": "connector.post_process.openai.embedding"
+        }]
+    });
+    let cid = ok(e.es(&u, &p, Method::POST, "/_plugins/_ml/connectors/_create", Some(connector)).await)["connector_id"].as_str().unwrap().to_string();
+    let shown = ok(e.es(&u, &p, Method::GET, &format!("/_plugins/_ml/connectors/{cid}"), None).await);
+    assert_eq!((shown["version"].clone(), shown["actions"][0]["action_type"].clone(), shown.get("credential")), (json!("1"), json!("PREDICT"), None), "{shown}");
+    let listed = ok(e.es(&u, &p, Method::POST, "/_plugins/_ml/connectors/_search", Some(json!({"query": {"match_all": {}}}))).await);
+    assert_eq!(listed["hits"]["hits"][0]["_index"], ".plugins-ml-connector", "{listed}");
+    let gid = ok(e.es(&u, &p, Method::POST, "/_plugins/_ml/model_groups/_register", Some(json!({"name": "remote_group", "description": "g"}))).await)["model_group_id"].as_str().unwrap().to_string();
+    let reg = ok(e.es(&u, &p, Method::POST, "/_plugins/_ml/models/_register?deploy=true", Some(json!({"name": "openai embedding", "function_name": "remote", "model_group_id": gid, "connector_id": cid}))).await);
+    let mid = reg["model_id"].as_str().unwrap().to_string();
+    let task = ok(e.es(&u, &p, Method::GET, &format!("/_plugins/_ml/tasks/{}", reg["task_id"].as_str().unwrap()), None).await);
+    assert_eq!((task["state"].clone(), task["task_type"].clone(), task["function_name"].clone()), (json!("COMPLETED"), json!("REGISTER_MODEL"), json!("REMOTE")), "{task}");
+    let model = ok(e.es(&u, &p, Method::GET, &format!("/_plugins/_ml/models/{mid}"), None).await);
+    assert_eq!((model["model_state"].clone(), model["model_version"].clone(), model["algorithm"].clone()), (json!("DEPLOYED"), json!("1"), json!("REMOTE")), "{model}");
+    let (s, v) = e.es(&u, &p, Method::DELETE, &format!("/_plugins/_ml/connectors/{cid}"), None).await;
+    assert_eq!(s, 409, "a connector a model uses: {v}");
+
+    let out = ok(e.es(&u, &p, Method::POST, &format!("/_plugins/_ml/models/{mid}/_predict"), Some(json!({"parameters": {"input": ["hello world", "second"]}}))).await);
+    let tensors = &out["inference_results"][0]["output"];
+    assert_eq!((tensors[0]["name"].clone(), tensors[0]["shape"].clone(), tensors[1]["data"][0].clone()), (json!("sentence_embedding"), json!([3]), json!(0.1)), "{out}");
+    let first = sent.lock().unwrap()[0].clone();
+    assert_eq!(first, ("Bearer sk-guide-1".to_string(), "{ \"input\": [\"hello world\",\"second\"], \"model\": \"text-embedding-3-small\" }".to_string()), "OpenSearch's body");
+
+    ok(e.es(&u, &p, Method::PUT, "/_ingest/pipeline/nlp", Some(json!({"processors": [{"text_embedding": {"model_id": mid, "field_map": {"text": "text_vec"}}}]}))).await);
+    let index = json!({
+        "settings": {"index.knn": true, "default_pipeline": "nlp"},
+        "mappings": {"properties": {"text": {"type": "text"}, "text_vec": {"type": "knn_vector", "dimension": 3, "method": {"name": "hnsw", "space_type": "l2", "engine": "lucene"}}}}
+    });
+    ok(e.es(&u, &p, Method::PUT, "/docs", Some(index)).await);
+    for (id, text) in [("1", "a cat sleeps"), ("2", "a dog barks"), ("3", "the weather")] {
+        let (s, v) = e.es(&u, &p, Method::PUT, &format!("/docs/_doc/{id}?refresh=true"), Some(json!({"text": text}))).await;
+        assert_eq!(s, 201, "{v}");
+    }
+    let doc = ok(e.es(&u, &p, Method::GET, "/docs/_doc/2", None).await);
+    assert_eq!(doc["_source"]["text_vec"], json!([0.1, 1.0, 0.5]), "{doc}");
+    let pipeline = json!({
+        "request_processors": [{"neural_query_enricher": {"default_model_id": mid}}],
+        "phase_results_processors": [{"normalization-processor": {"normalization": {"technique": "min_max"}, "combination": {"technique": "arithmetic_mean", "parameters": {"weights": [0.3, 0.7]}}}}]
+    });
+    ok(e.es(&u, &p, Method::PUT, "/_search/pipeline/hybrid", Some(pipeline)).await);
+    let search = json!({"_source": {"excludes": ["text_vec"]}, "query": {"hybrid": {"queries": [{"match": {"text": "sleeps"}}, {"neural": {"text_vec": {"query_text": "cat", "k": 3}}}]}}});
+    let r = ok(e.es(&u, &p, Method::POST, "/docs/_search?search_pipeline=hybrid", Some(search.clone())).await);
+    assert_eq!(r["hits"]["hits"][0]["_id"], "1", "{r}");
+    let (s, v) = e.es(&u, &p, Method::POST, "/docs/_search", Some(json!({"query": {"neural": {"text_vec": {"query_text": "cat"}}}}))).await;
+    assert!(s == 400 && v.to_string().contains("Invalid neural query: model_id must be provided."), "{s} {v}");
+    let r = ok(e.es(&u, &p, Method::POST, "/docs/_search", Some(json!({"query": {"neural": {"text_vec": {"query_text": "a dog", "model_id": mid, "k": 1}}}}))).await);
+    assert_eq!(r["hits"]["hits"][0]["_id"], "2", "{r}");
+    for v in [&shown, &listed, &model, &reg] {
+        assert!(!v.to_string().contains("sk-guide-1"), "{v}");
+    }
+
+    // A branch has the connector without its key: its model refuses before calling out.
+    let calls = sent.lock().unwrap().len();
+    let b = e.post(&format!("/v1/search/clusters/{}/branches", c["id"].as_str().unwrap()), json!({"name": "neural-os-dev"})).await;
+    let (bu, bp) = creds(&b);
+    let (s, v) = e.es(&bu, &bp, Method::POST, &format!("/_plugins/_ml/models/{mid}/_predict"), Some(json!({"parameters": {"input": ["x"]}}))).await;
+    assert!(s == 400 && v.to_string().contains("doesn't have the parent's connector credentials"), "{s} {v}");
+    assert_eq!(sent.lock().unwrap().len(), calls, "the branch called out with the parent's key");
+}

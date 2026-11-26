@@ -74,7 +74,7 @@ pub async fn settle(cluster: &Cluster, d: &mut IngestDoc) -> EsResult<()> {
         let vectors = super::embed(cluster, &p.model_id, &texts, d.user.as_deref(), false).await?;
         let mut it = vectors.into_iter();
         for (target, list, t) in p.items {
-            let vs: Vec<Value> = it.by_ref().take(t.len()).map(|v| Value::Arr(v.into_iter().map(|x| Value::from(x as f64)).collect())).collect();
+            let vs: Vec<Value> = it.by_ref().take(t.len()).map(|v| Value::Arr(v.into_iter().map(super::float_value).collect())).collect();
             let value = if list { Value::Arr(vs.into_iter().map(|v| crate::obj! { "knn" => v }).collect()) } else { vs.into_iter().next().unwrap_or(Value::Null) };
             d.set(&target, value)?;
         }
