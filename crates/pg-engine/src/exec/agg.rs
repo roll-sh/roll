@@ -3632,8 +3632,21 @@ impl AggNode {
             }
             return Ok(out);
         };
-        // Grouping sets: buffer the input, then group once per set (past work_mem, they read
-        // it as it comes: `sets_past`, asked as the buffer fills).
+        self.grouping_sets(&sets, input, &colls, ctx)
+    }
+
+    /// Grouping sets: the input buffered, then grouped once per set (past work_mem, read as
+    /// it comes: `sets_past`, asked as the buffer fills). A function of its own, so that
+    /// neither the buffering nor the dispatch is in `run` (in it, fitting grouping sets took
+    /// +0.22-0.27% user instructions: `hashed_sets` was no longer inlined into `run`).
+    #[inline(never)]
+    fn grouping_sets(
+        &self,
+        sets: &[Vec<usize>],
+        mut input: BoxNode,
+        colls: &[Option<KeyNorm>],
+        ctx: &ExecCtx,
+    ) -> Result<Vec<Row>> {
         let mut rows = Vec::new();
         let mut sized = true;
         while let Some(r) = input.next(ctx)? {
@@ -3641,7 +3654,7 @@ impl AggNode {
             rows.push(r);
             if rows.len() == rows.capacity()
                 && sized
-                && let Some(out) = self.sets_past(&sets, &mut rows, &mut input, &colls, &mut sized, ctx)?
+                && let Some(out) = self.sets_past(sets, &mut rows, &mut input, colls, &mut sized, ctx)?
             {
                 return Ok(out);
             }
@@ -3659,9 +3672,9 @@ impl AggNode {
             || !crate::sql::paths::Gucs::read(ctx).hashagg
             || self.plan.as_ref().is_some_and(|p| crate::sql::explain::sets_sorted(p, ctx))
         {
-            self.sorted_sets(&sets, rows, fulls, &colls, ctx)
+            self.sorted_sets(sets, rows, fulls, colls, ctx)
         } else {
-            self.hashed_sets(&sets, &rows, &fulls, &colls, ctx)
+            self.hashed_sets(sets, &rows, &fulls, colls, ctx)
         }
     }
 
