@@ -1179,7 +1179,7 @@ pub(crate) async fn lend_outcome(access: &Arc<Access>, row: &'static Row, params
     let lent: Vec<catalog::Lent> = match row.lends? {
         // A route that names them otherwise than its row is refused, never let through.
         catalog::Lend::Path(k, r) => match (param(k), param(r)) {
-            (Some(kind), Some(r#ref)) => vec![catalog::Lent { kind, r#ref, action: Action::Reveal }],
+            (Some(kind), Some(r#ref)) => vec![catalog::Lent { kind, r#ref, action: Action::Reveal, folder: None }],
             _ => return Some(Lending { outcome: Outcome::Deny, product: row.product, action: Action::Reveal, id: "a link this route doesn't name".into(), all: Vec::new(), folder: None, grants: Vec::new() }),
         },
         catalog::Lend::Each(f) => f(body?),
