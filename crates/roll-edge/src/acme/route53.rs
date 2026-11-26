@@ -177,6 +177,13 @@ impl Route53 {
         anyhow::bail!("Route 53: no public hosted zone for {name} (do the credentials see it?)")
     }
 
+    /// Whether these credentials reach `name` (an `_acme-challenge` record) as an order needs: its
+    /// public hosted zone, and its TXT set read. Nothing is written.
+    pub async fn check(&self, name: &str) -> anyhow::Result<()> {
+        let zone = self.zone_for(name).await?;
+        self.read_set(&zone, name).await.map(drop)
+    }
+
     /// `name`'s TXT set as it stands: its TTL and values (as Route 53 has them, quoted), or `None`.
     async fn read_set(&self, zone: &str, name: &str) -> anyhow::Result<Option<(u32, Vec<String>)>> {
         // The sets from `name` on, in name and type order: the first may be another name's.
@@ -412,6 +419,7 @@ mod tests {
         let r53 = Route53::new(keys.clone(), &api, http.clone()).unwrap().with_poll(Duration::from_millis(10), Duration::from_secs(5));
 
         assert_eq!(r53.zone_for("_acme-challenge.www.example.com").await.unwrap(), "ZPUBLIC", "the public zone, past a neighbour and a private twin");
+        r53.check("_acme-challenge.www.example.com").await.unwrap();
         // A name only this order uses: both values in one set, then the set deleted as it stood.
         let name = "_acme-challenge.example.com";
         let apex = r53.create_txt(name, "apex-value").await.unwrap();

@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { NewPublicCert, PublicCert } from "@/lib/secrets-api";
+import type { NewPublicCert, PublicCert, PublicCertChange } from "@/lib/secrets-api";
 import { PublicCerts } from "./public-certs";
 
 const TOKEN = "cf-Zx91-secret-token";
@@ -13,6 +13,7 @@ const api = {
     listed.push(made);
     return made;
   }),
+  updatePublicCert: vi.fn(async (id: string, _ch: PublicCertChange) => listed.find((c) => c.id === id)!),
 };
 vi.mock("./secrets-page", () => ({ useSecrets: () => ({ api, project: { id: "prj_1", name: "shop" } }) }));
 
@@ -33,5 +34,25 @@ describe("adding a public certificate", () => {
     fireEvent.click(screen.getByRole("button", { name: /Add a public certificate/ }));
     expect(container.querySelector<HTMLInputElement>('input[type="password"]')!.value).toBe("");
     expect(shown()).not.toContain(TOKEN);
+  });
+});
+
+describe("replacing a certificate's DNS credential", () => {
+  it("sends the new credential once and never shows it again", async () => {
+    const NEW = "cf-Qq72-replaced-token";
+    listed.splice(0, listed.length, { id: "pcr_2", name: "api", directory_url: "https://acme-v02.api.letsencrypt.org/directory", domains: ["api.example.com"], dns_provider: "cloudflare", status: "failing", last_error: "Cloudflare: 403", renewals_asked: 0, created_at: 0, created_by: "operator" });
+    const { container } = render(<PublicCerts />);
+    const open = await screen.findByRole("button", { name: "Replace api's credential" });
+    fireEvent.click(open);
+    fireEvent.change(container.querySelector<HTMLInputElement>('input[type="password"]')!, { target: { value: NEW } });
+    fireEvent.click(screen.getByRole("button", { name: "Replace credential" }));
+    await waitFor(() => expect(api.updatePublicCert).toHaveBeenCalledWith("pcr_2", { dns_credential: NEW }));
+    await waitFor(() => expect(container.querySelector('input[type="password"]')).toBeNull());
+    const shown = () => [container.textContent ?? "", ...[...container.querySelectorAll("input")].map((i) => i.value)].join("\n");
+    expect(shown()).not.toContain(NEW);
+    // Opened again, the form starts empty: nothing reads the credential back.
+    fireEvent.click(screen.getByRole("button", { name: "Replace api's credential" }));
+    expect(container.querySelector<HTMLInputElement>('input[type="password"]')!.value).toBe("");
+    expect(shown()).not.toContain(NEW);
   });
 });
