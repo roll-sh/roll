@@ -38,6 +38,9 @@ const RETRY_MS: i64 = 3_600_000;
 const CAP_MS: i64 = 3_600_000;
 /// Why a leak didn't rotate a key it otherwise would have (the event's `reason`).
 const CAPPED: &str = "rotated within the hour";
+/// Why a leak didn't rotate a public certificate's key: its registration was renewed for a leak
+/// this week, and the renewal cap holds another (the event's `reason`).
+const ALREADY_ROTATED: &str = "already rotated";
 /// Who rotates a leaked managed key (the project's `leaks.rotate`, an admin's choice).
 pub(crate) const LEAKS: &str = "roll:leaks";
 
@@ -512,7 +515,8 @@ impl Secrets {
     /// leaked credential claimed in the same write, then rotated outside it, or, where the
     /// environment or folder needs approvals, a change request for its rotation opened instead.
     /// A caller's report claims only in folders where it may write, and no key whose credential
-    /// rotated for a leak within the hour is claimed again (the event says so instead).
+    /// rotated for a leak within the hour is claimed again, nor a public certificate's key whose
+    /// renewal the cap holds (`already rotated`: nothing revoked; the event says so instead).
     /// The holding projects' settings, as read.
     fn respond(&self, found: &[Match], whence: &Whence) -> HashMap<String, LeakRotate> {
         let mut settings: HashMap<String, LeakRotate> = HashMap::new();
@@ -568,12 +572,17 @@ impl Secrets {
                 let mut now_rotating: Vec<(String, String, String)> = vec![];
                 let mut requested: Vec<String> = vec![];
                 let mut capped: Vec<String> = vec![];
+                let mut held: Vec<String> = vec![];
                 if setting == LeakRotate::Managed && may_rotate && !creds.is_empty() {
                     let e = envs::by_slug(c, holder, env)?;
                     let approvals = e.needs_request() || !crate::folder_policy::covering(c, &e.id, &[path])?.is_empty();
                     for (&cred, &key) in &creds {
                         if rotated_lately(c, &e.id, cred, path, key, now)? {
                             capped.push(key.to_string());
+                            continue;
+                        }
+                        if let Some((name, next)) = crate::public_certs::leak_renewal_held(c, &e.id, path, key, now)? {
+                            held.push(format!("{key}: {}", crate::public_certs::leak_held_why(&name, next)));
                             continue;
                         }
                         if !claim(c, holder, &e.id, cred, path, key, now)? {
@@ -617,9 +626,18 @@ impl Secrets {
                     data["reason"] = json!(CAPPED);
                     summary = format!("{summary}; {} {CAPPED}, so roll doesn't rotate it again yet", capped.join(", "));
                 }
+                if !held.is_empty() {
+                    if now_rotating.is_empty() {
+                        data["rotating"] = json!(false);
+                    }
+                    if capped.is_empty() {
+                        data["reason"] = json!(ALREADY_ROTATED);
+                    }
+                    summary = format!("{summary}; {ALREADY_ROTATED}: {}", held.join("; "));
+                }
                 // The event once a day; a claim (above) whenever there's a credential to rotate,
                 // and a held one each time (whoever keeps reporting it hears why).
-                if crate::events::fresh(c, holder, &mark, now)? || !now_rotating.is_empty() || !requested.is_empty() || !capped.is_empty() {
+                if crate::events::fresh(c, holder, &mark, now)? || !now_rotating.is_empty() || !requested.is_empty() || !capped.is_empty() || !held.is_empty() {
                     crate::audit::record_event(c, mac, holder, &by, "secrets.leaked", Some(env), Some(path), &keys, &summary, now, Event::new(Kind::SecretLeaked, data))?;
                 }
                 Ok::<_, Error>(now_rotating)

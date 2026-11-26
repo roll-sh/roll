@@ -581,6 +581,16 @@ mod tests {
         assert_eq!(super::rename("respond_agent_request"), "agents_respond_request");
     }
 
+    /// A metadata-only connection hides roll code's data tools by their fronted names: each is one
+    /// roll code fronts (`search_code` is `code_search`; `search` and `fetch` keep theirs).
+    #[test]
+    fn metadata_mode_names_code_tools_that_exist() {
+        let names: Vec<String> = code_control::mcp::tools().iter().map(|t| super::rename(t["name"].as_str().unwrap())).collect();
+        for n in roll_mcp::tools::CODE_DATA {
+            assert!(names.iter().any(|m| m == n), "roll_mcp::tools::CODE_DATA names {n}, which roll code doesn't front");
+        }
+    }
+
     /// A workflow may need roll code's tools by their fronted names: each is one roll code has.
     #[test]
     fn workflows_need_code_tools_that_exist() {
