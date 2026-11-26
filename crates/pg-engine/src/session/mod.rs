@@ -4334,8 +4334,9 @@ fn default_txn_opts(state: &SessionState) -> (Isolation, bool) {
 fn txn_settings(state: &SessionState, iso: Isolation, ro: bool) {
     let mut s = state.settings.borrow_mut();
     s.start_transaction(iso.name(), ro);
-    s.changed
-        .retain(|n| n != "transaction_isolation" && n != "transaction_read_only");
+    if !s.changed.is_empty() {
+        s.changed.retain(|n| n != "transaction_isolation" && n != "transaction_read_only");
+    }
 }
 
 /// COMMIT / ROLLBACK [AND CHAIN] inside a procedure or DO block run non-atomically: end the

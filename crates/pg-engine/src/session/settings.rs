@@ -432,16 +432,15 @@ pub struct Settings {
     derived: DerivedCache,
     /// Effective stats_fetch_consistency and its assignment generation.
     stats_fetch: (u8, u64),
-    /// The values `start_transaction` replaced (of `TXN_START`'s parameters), and its nest
-    /// level: the GUC stack entries its SET LOCALs make, until something needs them there
-    /// (`stack_txn_start`).
+    /// The values `start_transaction` set (of `TXN_START`'s parameters) and its nest level,
+    /// while nothing else has needed them in `values` or the stack: the transaction's reads
+    /// take them from here (`txn_value`), and its end just clears them. A transaction starts
+    /// and ends with no map entry made and removed; what reads `values` or changes them
+    /// moves them there first (`stack_txn_start`).
+    txn_view: Option<([&'static str; 2], usize)>,
+    /// The values those SET LOCALs replaced, and their nest level, once they are in `values`:
+    /// the GUC stack entries they make, until something needs them there (`stack_txn_start`).
     txn_start: Option<(usize, [Option<String>; 2])>,
-    /// The strings `start_transaction` set last time, back from `end_transaction`: the next
-    /// transaction's values are written into them (no allocation per transaction).
-    txn_spare: [String; 2],
-    /// Their names, as `end_transaction` took their entries out of `values` (when the session
-    /// had no value of its own): the keys the next transaction's entries go in with.
-    txn_keys: [Option<String>; 2],
     /// The configuration files' values as of the last reload this session took
     /// (`adopt_file_layer`): below role / database defaults and `config`, above the built-in
     /// defaults (PGC_S_FILE).
@@ -488,9 +487,8 @@ impl Default for Settings {
             reported: Default::default(),
             derived: DerivedCache::default(),
             stats_fetch: (1, 0),
+            txn_view: None,
             txn_start: None,
-            txn_spare: Default::default(),
-            txn_keys: Default::default(),
             file: crate::sysconf::Loaded::empty(),
             argv: Vec::new(),
             pending: Vec::new(),
@@ -1763,11 +1761,19 @@ impl Settings {
 
     /// The value SET gave a parameter in this session, if any (for `restore_raw`).
     pub fn session_value(&self, name: &str) -> Option<String> {
-        self.values.get(&canonical_name(name)).cloned()
+        let canon = canonical_name(name);
+        self.txn_value(&canon).map(str::to_string).or_else(|| self.values.get(&canon).cloned())
+    }
+
+    /// `start_transaction`'s value of `canon`, while it is kept out of `values` (`txn_view`).
+    fn txn_value(&self, canon: &str) -> Option<&'static str> {
+        let (v, _) = self.txn_view.as_ref()?;
+        TXN_START.iter().position(|n| *n == canon).map(|i| v[i])
     }
 
     /// Put back a value saved with `session_value` (a function's SET clauses on exit).
     pub fn restore_raw(&mut self, name: &str, prev: Option<String>) {
+        self.stack_txn_start();
         let canon = canonical_name(name);
         self.touched(&canon);
         match prev {
@@ -1926,7 +1932,8 @@ impl Settings {
         };
         match self.def(name) {
             Some(d) => Some(
-                get(d.name)
+                self.txn_value(d.name)
+                    .or_else(|| get(d.name))
                     .or_else(|| self.config.get(d.name).map(String::as_str))
                     .or_else(|| self.file.differing(d.name))
                     .unwrap_or(d.default),
@@ -2104,10 +2111,11 @@ impl Settings {
 
     /// A transaction starts as `isolation` (`Isolation::name`) and `read_only`: SET LOCAL
     /// transaction_isolation and transaction_read_only. Unless they have stack entries
-    /// already, without making them yet (each transaction does this; few need them).
+    /// already, without making them yet, nor their entries in `values` (each transaction does
+    /// this; few need them): `txn_view`.
     pub fn start_transaction(&mut self, isolation: &'static str, read_only: bool) {
         let values = [isolation, if read_only { "on" } else { "off" }];
-        if self.txn_start.is_some() || TXN_START.iter().any(|n| self.stack.contains_key(*n)) {
+        if self.txn_start.is_some() || (!self.stack.is_empty() && TXN_START.iter().any(|n| self.stack.contains_key(*n))) {
             for (name, v) in TXN_START.iter().zip(values) {
                 let _ = self.set(name, Some(v), true, true);
             }
@@ -2115,28 +2123,19 @@ impl Settings {
         }
         // (What `set` does with these: user-context parameters, values in canonical form,
         // neither reported nor read by `Derived`.)
-        // (One probe each, into the strings the last transaction's end gave back.)
-        let mut priors = [None, None];
-        for ((((name, v), prior), spare), key) in
-            TXN_START.iter().zip(values).zip(&mut priors).zip(&mut self.txn_spare).zip(&mut self.txn_keys)
-        {
-            let mut new = std::mem::take(spare);
-            new.clear();
-            new.push_str(v);
-            let key = key.take().unwrap_or_else(|| name.to_string());
-            *prior = match self.values.entry(key) {
-                std::collections::hash_map::Entry::Occupied(mut e) => Some(e.insert(new)),
-                std::collections::hash_map::Entry::Vacant(e) => {
-                    e.insert(new);
-                    None
-                }
-            };
-        }
-        self.txn_start = Some((self.level, priors));
+        self.txn_view = Some((values, self.level));
     }
 
-    /// Make the stack entries `start_transaction` left out (before the stack is used).
+    /// Make the stack entries `start_transaction` left out (before the stack or `values` is
+    /// used): its values go into `values`, the ones they replace into the stack.
     fn stack_txn_start(&mut self) {
+        if let Some((values, level)) = self.txn_view.take() {
+            let mut priors = [None, None];
+            for ((name, v), prior) in TXN_START.iter().zip(values).zip(&mut priors) {
+                *prior = self.values.insert(name.to_string(), v.to_string());
+            }
+            self.txn_start = Some((level, priors));
+        }
         let Some((level, priors)) = self.txn_start.take() else {
             return;
         };
@@ -2429,7 +2428,7 @@ impl Settings {
 
     /// Whether a transaction's changes are pending (`end_transaction` has something to do).
     pub fn in_transaction(&self) -> bool {
-        !self.stack.is_empty() || self.txn_start.is_some() || self.level != 1
+        !self.stack.is_empty() || self.txn_view.is_some() || self.txn_start.is_some() || self.level != 1
     }
 
     /// An error aborts the (sub)transaction at the current nest level (AbortTransaction /
@@ -2441,25 +2440,19 @@ impl Settings {
 
     /// Transaction end: undo SET LOCAL, and on abort undo every SET made in the transaction.
     pub fn end_transaction(&mut self, committed: bool) {
-        if self.stack.is_empty()
+        // (Just `start_transaction`'s SET LOCALs, still out of `values`: nothing to undo.)
+        if self.stack.is_empty() && self.txn_view.take().is_some() {
+        } else if self.stack.is_empty()
             && let Some((_, priors)) = self.txn_start.take()
         {
             // Just `start_transaction`'s SET LOCALs: what `at_eoxact` does with their entries.
-            for (((name, prior), spare), key) in
-                TXN_START.iter().zip(priors).zip(&mut self.txn_spare).zip(&mut self.txn_keys)
-            {
+            for (name, prior) in TXN_START.iter().zip(priors) {
                 match prior {
                     Some(v) => {
-                        if let Some(slot) = self.values.get_mut(*name) {
-                            *spare = std::mem::replace(slot, v);
-                        } else {
-                            self.values.insert(name.to_string(), v);
-                        }
+                        self.values.insert(name.to_string(), v);
                     }
                     None => {
-                        if let Some((k, v)) = self.values.remove_entry(*name) {
-                            (*key, *spare) = (Some(k), v);
-                        }
+                        self.values.remove(*name);
                     }
                 }
             }
