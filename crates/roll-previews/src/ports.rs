@@ -82,6 +82,13 @@ pub trait Brancher: Send + Sync {
         false
     }
 
+    /// A masked base's branch of `parent` named `name`, made (or found again after a crash): one
+    /// nobody connects to, so with no credentials of its own (where a product's credentials
+    /// would take what its branches need, as Postgres's role takes the tables it's given).
+    async fn make_base(&self, parent: &str, name: &str) -> anyhow::Result<Branched> {
+        self.branch(parent, name, Mode::Branch).await
+    }
+
     /// A branch named `name` of `from`, itself a branch of `parent` (a masked base): copy-on-write,
     /// with credentials of its own, as [`Self::branch`] makes one.
     async fn branch_from(&self, _parent: &str, _from: &str, _name: &str, _mode: Mode) -> anyhow::Result<Option<Branched>> {

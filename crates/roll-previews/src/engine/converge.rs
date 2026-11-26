@@ -1610,7 +1610,7 @@ impl Engine {
             crate::store::BaseClaim::Busy => return Ok(None),
             crate::store::BaseClaim::Make { name: base } => {
                 let made = async {
-                    let made = b.branch(&res.parent, &base, Mode::Branch).await?;
+                    let made = b.make_base(&res.parent, &base).await?;
                     b.mask(&res.parent, &made.r#ref, made.kept.as_deref(), cols).await?;
                     anyhow::Ok(made)
                 }

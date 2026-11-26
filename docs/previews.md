@@ -1094,7 +1094,8 @@ thirty-fourth review found them in the clear.
     refreshed (as its owner), and a checkpoint.
     - **Masked once, branched many** (Neon's anonymized branches): a masked Postgres branch comes
       from its parent's masked base, a branch of the parent masked once by the rules (the rewrite
-      and `VACUUM (FULL)` above, once), which each preview's branch then branches copy-on-write,
+      and `VACUUM (FULL)` above, once; with no role of its own, which would take the tables, so
+      each branch's role gets them as from the parent), which each preview's branch then branches copy-on-write,
       masked as it is. One masked copy per parent and rules, not one per preview and reset, and
       the data step skips the rewrite. The base serves new branches for a day
       (`ROLL_PREVIEWS_MASK_BASE_HOURS`, 24, a week at most; 0 masks each branch's own copy),
