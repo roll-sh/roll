@@ -1045,40 +1045,37 @@ async fn agents_ask_what_the_policy_says() {
 }
 
 /// A product's own cap on the grants that reach it (rolld: roll secrets' `max_token_days`) binds
-/// every grant roll-access makes or widens, not only `/v1/access/tokens`: an MCP client's consent,
-/// and an approval remembered for good on a token that never expires.
+/// every grant roll-access makes or widens, not only `/v1/access/tokens`: an MCP client's consent
+/// with no end gets the cap's (as the consent screen says), and an approval remembered for good on
+/// a token that never expires is remembered until then. Neither is refused.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_products_lifetime_cap_binds_consents_and_remembered_approvals() {
     let d = Daemon::new(50);
     let cap: roll_access::LifetimeCap = Box::new(|rules| rules.0.iter().any(|r| r.product == "secrets").then(|| (30, "roll secrets' policy: at most 30 days".to_string())));
     let _ = d.access.lifetime_cap.set(cap);
-    let secrets = json!([{ "product": "secrets", "resources": "*", "actions": { "read": "allow" } }]);
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    let within = |t: &Value| t.as_i64().is_some_and(|t| t > now + 29 * 86_400_000 && t <= now + 31 * 86_400_000);
+    let (_, catalog) = d.call(OPERATOR, Method::GET, "/v1/access/catalog", None).await;
+    assert_eq!(catalog["lifetime_caps"], json!([{ "product": "secrets", "days": 30, "why": "roll secrets' policy: at most 30 days" }]));
+
     let redirect = "http://127.0.0.1:43111/callback";
     let (_, client) = d.call("", Method::POST, "/v1/access/oauth/register", Some(json!({ "client_name": "Claude Code", "redirect_uris": [redirect] }))).await;
-    let consent = |extra: Value| {
-        let mut c = json!({ "client_id": client["client_id"], "redirect_uri": redirect, "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", "code_challenge_method": "S256", "rules": secrets });
-        c.as_object_mut().unwrap().extend(extra.as_object().cloned().unwrap_or_default());
-        let d = &d;
-        async move { d.call(OPERATOR, Method::POST, "/v1/access/oauth/authorize", Some(c)).await }
-    };
-    let (s, out) = consent(json!({})).await;
-    assert_eq!(s, StatusCode::FORBIDDEN, "a consent with a secrets rule and no expiry: {out}");
-    assert!(out.to_string().contains("roll secrets' policy"), "{out}");
-    assert_eq!(consent(json!({ "expires_at": now + 29 * 86_400_000 })).await.0, StatusCode::OK);
+    let consent = json!({ "client_id": client["client_id"], "redirect_uri": redirect, "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", "code_challenge_method": "S256", "rules": [{ "product": "secrets", "resources": "*", "actions": { "read": "allow" } }] });
+    let (s, out) = d.call(OPERATOR, Method::POST, "/v1/access/oauth/authorize", Some(consent)).await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let conn = d.access.store.list().unwrap().into_iter().find(|g| g.kind == "oauth").unwrap();
+    assert!(within(&json!(conn.expires_at)), "a connection with no end ends at the cap: {:?}", conn.expires_at);
 
-    // A token that never expires, with no secrets rule, asks for the rest: remembering a secrets
-    // read for good would give it one past the cap; for an hour is within it.
-    let (token, _) = d.token(json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }]), json!({ "ask_otherwise": true })).await;
+    // A token that never expires, with no secrets rule, asks for the rest: a secrets read
+    // remembered for good is remembered for the cap's 30 days, its rules unchanged.
+    let (token, id) = d.token(json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }]), json!({ "ask_otherwise": true })).await;
     let (_, pending) = d.call(&token, Method::GET, "/v1/secrets/projects/pa/environments/development/secrets", None).await;
     let apr = pending["approval"].as_str().unwrap_or_else(|| panic!("{pending}")).to_string();
-    let approve = |remember: &'static str| {
-        let (d, path) = (&d, format!("/v1/access/approvals/{apr}/approve"));
-        async move { d.call(OPERATOR, Method::POST, &path, Some(json!({ "remember": remember }))).await }
-    };
-    let (s, out) = approve("always").await;
-    assert_eq!(s, StatusCode::FORBIDDEN, "{out}");
-    assert_eq!(approve("1h").await.0, StatusCode::OK, "nothing was decided");
+    let (s, out) = d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({ "remember": "always" }))).await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{id}"), None).await;
+    assert_eq!((g["rules"].as_array().map(Vec::len), g["expires_at"].is_null()), (Some(1), true), "{g}");
+    assert!(within(&g["temporary"][0]["until"]), "{g}");
 }
 
 /// The policy's `oauth_clients`: a client it leaves out can't be consented to, sign a device in,
