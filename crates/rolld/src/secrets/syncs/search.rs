@@ -352,7 +352,7 @@ async fn create(State(x): State<Ctx>, Path(id): Path<String>, parts: Parts, body
         // is something else (Bedrock's access keys, Vertex's service account) can't take one,
         // and no credential of the service's goes in the body in the clear.
         let service = config.get("service").and_then(Json::as_str).unwrap_or_default().to_string();
-        let Some(sensitive) = search_es::xpack::inference::services::sensitive_settings(&service) else {
+        let Some(sensitive) = search_control::inference_sensitive_settings(&service) else {
             return Err(bad(format!("{service:?} isn't an inference service roll runs")));
         };
         if !sensitive.iter().any(|k| k == "api_key") {
