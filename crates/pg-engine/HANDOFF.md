@@ -23355,6 +23355,160 @@ That is more than a small change in the shared txn/scan code, so it is left.
 4. Agent 310's difference 2 stays: snapshots older than an index's commit plan without it,
    where PostgreSQL uses it (results equal).
 
+## Table rewrites under REPEATABLE READ, pg_stat counters (agent 324, 2026-11-26)
+
+Probes in `~/.cache/a324/scripts/`, run against PostgreSQL 18.6 (own `a324-pg`), the base binary
+(`0037841bd2`) and the new one, all verify builds: `probe-rw.py` (rewrites), `probe-stats.py` /
+`probe-vac.py` / `rec-bt.py` (pg_stat counts; `ROLL_MODEL_MAX_VERSIONS=5000` takes their
+20,000-row tables past the model), `probe-dml.py` (DML statement classes), `cmpstats.py`.
+Outputs are beside them (`pg-*.txt`, `base-*.txt`, `new*-*.txt`).
+
+### 1. CLUSTER and the other rewrites inside REPEATABLE READ / SERIALIZABLE
+
+What PostgreSQL 18.6 does: `probe-rw.py`, 1,000 rows, another session's insert, delete, update,
+or key update committed after the transaction's first SELECT, then the statement, then what the
+transaction sees, what it can still do, and the committed result (167 cases, both levels):
+
+| statement | the transaction afterwards | base roll | now |
+|---|---|---|---|
+| CLUSTER (USING, or ALTER TABLE ... CLUSTER ON then CLUSTER) | **its snapshot's rows**, in the index's order, by scans and through the rebuilt indexes; UPDATE or DELETE of a row changed since: 40001 ("concurrent update" / "concurrent delete"), its row lock: 40001 "concurrent update"; a unique key committed since: 23505; CREATE INDEX or CLUSTER again: still the snapshot's rows; ROLLBACK TO a savepoint before it: the old order | the newest rows (1,001 for 1,000; a deleted row gone; an UPDATE of a changed row went through on the new value) | as PostgreSQL |
+| ALTER COLUMN TYPE, ADD COLUMN with a volatile default, SET UNLOGGED / LOGGED | the newest rows (the copy's tuples are the transaction's own) | as PostgreSQL | as PostgreSQL |
+| ALTER TABLE SET ACCESS METHOD heap (same method), REINDEX | the snapshot's rows (no rewrite) | as PostgreSQL | as PostgreSQL |
+| TRUNCATE | no rows | as PostgreSQL | as PostgreSQL |
+| VACUUM FULL | 25001 inside a block; alone, nothing to see after | as PostgreSQL | as PostgreSQL |
+| CREATE TABLE AS, REFRESH MATERIALIZED VIEW | the transaction's snapshot (agent 310) | as PostgreSQL | as PostgreSQL |
+
+So only CLUSTER needed a change. PostgreSQL's copy (`heapam_relation_copy_for_cluster`) keeps every
+tuple not dead to all, with its xmin and xmax; `rewrite_heap_tuple` writes a version an update
+replaced only after the newer version it points to (an updated key's old row comes after the new
+one in the new order).
+
+**The fix.**
+- `cluster_rel_inner`: when the snapshot misses changes to the table (`adopt_latest`),
+  `snapshot_and_latest` reads both the snapshot's rows (with the transaction's own writes) and the
+  newest, and the copy writes the union in the index's order: a row alike in both once, a changed
+  one as both versions (the replaced one right after the newer one when that sorts later), with
+  the xmin each had. `hold_for_commit` then takes the newer rows' writes (the row and its
+  out-of-line values) back out of the transaction's writes, before the indexes are built.
+- `Txn::RewriteView` (in `DdlReads`, kept per savepoint depth): those held rows, and the new keys
+  of the rows only the snapshot sees (and whether each was updated or deleted).
+  `ddl::apply_rewrite_views` puts the held rows in with their index entries (`put_index_entries`,
+  every index the table has then) and takes the snapshot-only rows out (`delete_index_entries`,
+  `sizing::deleted`). It runs at the commit (`finish_txn`, a procedure's COMMIT), at PREPARE, and
+  before any DDL statement but CREATE INDEX / REINDEX / CLUSTER (an ALTER TABLE rewrite then reads
+  the newest rows, as PostgreSQL's does). A savepoint rollback past where it ran makes the view
+  wait again.
+- A later CLUSTER of the same table takes its own writes as the snapshot's rows and the view put
+  in as the newest.
+- `Txn::changed_since_snapshot`: a row the view kept is changed since, so UPDATE, DELETE, the
+  batched DELETE and row locks fail with 40001 (`after_lock`, which now takes the `Xltw` and says
+  "concurrent update" for a row lock as ExecLockRows does). `committed_conflict`: a kept row
+  doesn't conflict, a held one does.
+
+Found on the way (item 3): **a row lock (FOR UPDATE / NO KEY UPDATE / SHARE / KEY SHARE, SKIP
+LOCKED, a cursor's) of a row deleted after the snapshot said "could not serialize access due to
+concurrent delete"**; PostgreSQL's ExecLockRows says "concurrent update". `probe-dml.py`: 12 of
+128 cases differed on the base, none now.
+
+**Checks.**
+- `probe-rw.py`: 167 / 167 lines as PostgreSQL (base: 45 differ, every CLUSTER case).
+- Isolation spec `roll-cluster-snapshot` (14 permutations: the snapshot's rows by scan and index,
+  UPDATE / DELETE / row lock of rows updated or deleted since, a key updated since, a unique key
+  inserted or deleted since, CREATE INDEX and CLUSTER after it, a savepoint, ALTER TABLE after it,
+  SERIALIZABLE, PREPARE / COMMIT PREPARED, a row lock without CLUSTER): 14 / 14 against PostgreSQL
+  18.6 live; the base 4 / 13 (before the 14th was added). All 28 roll specs: 28 / 28 (three timing
+  specs, `roll-index-progress`, `roll-exclusion-on-conflict`, `roll-migration-lock-timeout`,
+  each differed once in one of four runs on base and new binaries alike).
+- `tools/quick-check.sh` with `QC_CHECKED=1 QC_TESTS=big_tables` on `cand/a324-2`'s code
+  (`91ef0e7e0`, on `98bc2e3b6`): 488 tests in 31 binaries and again built `--profile
+  verify-checked`, clippy nothing new, crash seeds 1-3, regress 51,148 / 51,150 (0 newly
+  differing), isolation 1,647 / 1,648, pg_dump_tap 14,609 passed. `tools/crash-binary.py --seed 1`
+  on its verify binary: ok. The roll specs on it: 28 / 28.
+- `probe-dml.py` (UPDATE, DELETE, the four row locks, SKIP LOCKED, ON CONFLICT DO UPDATE /
+  NOTHING, MERGE update / delete / insert, foreign key child inserts, a FOR UPDATE cursor; after
+  an update, key update, delete or insert committed since; both levels): 128 / 128.
+
+### 2. pg_stat counters
+
+`probe-stats.py` (fillfactor 100, a primary key and an index, 2,000 and 20,000 rows: random
+updates, updates of an indexed column, one row updated 10 times, sequential updates, delete /
+insert / update / ANALYZE / VACUUM in turn, every tenth row updated twice around a VACUUM),
+counting n_tup_ins / upd / del / hot_upd / newpage_upd, n_live_tup, n_dead_tup,
+n_mod_since_analyze, n_ins_since_vacuum:
+
+| | base | `cand/a324-2` |
+|---|---|---|
+| n_tup_newpage_upd, modelled | **always 0** (`count_update` was given false) | PostgreSQL's in every case (`sizing::Updated`: the new version on another page than the old) |
+| n_dead_tup after ANALYZE, modelled | 99 for 168, 245 for 288: the dead line pointers a prune left weren't counted | PostgreSQL's (acquire_sample_rows counts LP_DEAD items: `Heap::dead_items`) |
+| n_dead_tup after ANALYZE past the model | 0 | what pg_stat counts dead (`pgstat::dead_now`; PostgreSQL's sample counts the same in the probes) |
+| n_tup_hot_upd, n_tup_newpage_upd, n_dead_tup past the model | 0, 0, no prune (385 / 14 / 21 PostgreSQL for 399 sequential updates) | **as the base** (below) |
+| n_tup_ins / upd / del, n_live_tup, n_mod_since_analyze, n_ins_since_vacuum | as PostgreSQL | as PostgreSQL |
+
+Test `big_tables::update_counts_modelled` (sequential updates, one row updated ten times,
+updates around a VACUUM: PostgreSQL 18.6's counts).
+
+**Past the model: tried, measured, kept as a patch** (`~/.cache/a324/patches/past-model-page-record.patch`,
+on `eccf1d824`; it was `cand/a324`). `EstHeap::seen` kept an `EstPage` for each page an update
+changed (free space, line pointers, PD_PAGE_FULL, the dead versions not pruned yet, the rows
+whose newest version there is heap-only; at most 65,536 pages a table), with `update_on` as
+heap_update's choice after heap_page_prune_opt, `seen_rows` (each updated row's page, at most
+262,144 a table), and a VACUUM's freed pages as the free space map. It made every probe count
+PostgreSQL's but a few (HOT 165 for 168 and 21 for 27 after a VACUUM, n_dead_tup 34 for 54).
+It is not kept because:
+- a row's page as loaded is only in its stored version's TID, so every past-model UPDATE of a row
+  not updated before did one more point lookup (`Txn::get_raw`), and each new page and row an
+  allocation in the record;
+- the record is bounded per table only (about 82 bytes a page in the map, plus about 130 bytes
+  of vectors, and 18 bytes a row in `seen_rows`: up to about 20 MB a table), not across tables.
+
+Measured (below): pgbench scale 32 accounts UPDATE alone -7.4% / -5.9% user instructions a
+transaction (its HOT updates skip the btree estimate's entries), but TPC-B-like +3.0% / -0.6% and
+peak anon+shmem +20 to +64 MiB for the one table. A cheap form needs the old version's page
+without a lookup (the scan that found the row has its stored TID; nothing carries it to
+`sizing::updated` now) and a record of fixed size a page with one budget for all tables. The
+split candidate's past-model update path is the base's: `untracked_write` returns no HOT or
+new-page flag. (A first split that set them from the estimate's own fill / tail placement was
++0.33% / +0.50% on TPC-B-like: a second pg_stat entry lookup on nearly every update; dropped.)
+
+### Measured
+
+**In process** (`bench --target inproc oltp --clients 1 --only <case>`, a fresh 100,000-row
+database each run, perf stat user instructions of the bench process, (I30 s - I10 s) / (ops30 -
+ops10); harness `~/.cache/a324/inproc/`, agent 317's; plain dist, base `0037841bd2` against
+`20e5dd1cbf`, the first candidate's code, whose modelled path `cand/a324-2` keeps): point_select
+36,391 -> 36,398 (+0.02%) and 36,434 -> 36,424 (-0.03%); short_txn 256,662 -> 260,782 (+1.6%),
+263,106 -> 263,400 (+0.1%), 264,072 -> 262,161 (-0.7%): median +0.1%.
+
+**pgbench scale 32** (`~/.cache/a324/pgb/run1.sh`, `pair.sh`: roll-engine in a container on lane
+A's server CPUs, 8 GiB, `-c autovacuum=off`; `pgbench -i -I dtGvp -s 32` (3.2 M accounts, past the
+400,000-version model), 200 transactions a client to warm, the server idle, then a FIXED 400,000
+transactions (8 clients x 50,000, `-M prepared`; the UPDATE alone `-f ua.sql -D scale=32`); perf
+stat user instructions of the server's cgroup over the run, divided by the transactions; anon+shmem
+of the cgroup every 0.25 s, its peak). Plain dist builds; base `eccf1d824e`; alternating pairs,
+one a hold through `tools/lane.sh a`; every hold had 6.2-7.6 foreign cores on the lane, so
+instruction counts only. 40,000-transaction runs were bimodal (117k or 288k a transaction for
+the UPDATE alone, both arms of a pair alike: a compaction in the run or not); 400,000 settle it.
+The second run of a pair reads about +0.2-0.5% higher (A/A: 202,391 -> 202,752, +0.18%; nine base
+runs of the UPDATE alone span 202.1-205.1k).
+
+| arm | UPDATE accounts alone, instr/txn base -> arm | TPC-B-like | peak anon+shmem |
+|---|---|---|---|
+| `cand/a324` (the page record) | 203,039 -> 188,060 (-7.4%), 204,673 -> 192,601 (-5.9%) | 480,935 -> 495,388 (+3.0%), 480,718 -> 478,033 (-0.6%) | 516, 546, 557, 493 MiB against 492-496 |
+| first split (flags from the estimate's placement) | +0.59%, -0.32%, +0.53% | +0.33%, +0.50% | as the base |
+| **`cand/a324-2`** | 202,064 -> 203,918 (+0.92%, base first), 203,202 -> 202,687 (-0.25%, base second); median of its runs 203.3k against the base's 203.2k | 483,252 -> 481,822 (-0.30%), 482,026 -> 480,558 (-0.30%) | 493-495 MiB against 491-493 |
+
+`cand/a324-2`'s past-model update path is the base's but for the returned struct; what its
+changes add on these paths is an empty `ddl_reads` test, a borrow in a unique check and one at the
+commit.
+
+### Left
+1. Past the model: n_tup_hot_upd / n_tup_newpage_upd / prunes (above): the old version's page
+   from the scan that found the row, a fixed-size record a page under one budget for all tables;
+   the patch has the decisions (`update_on`, `fsm_page`) and the probes.
+2. The modelled heap's n_dead_tup by 1-3 after random updates (451 for 448, 170 for 169).
+3. CLUSTER's held rows go in at the commit through `put_index_entries`: an extension access
+   method's index gets them as inserts then (its own build saw only the snapshot's rows).
+
 ## Point selects: what the snapshot / DDL fixes cost, and the code a read runs through (agent 317, 2026-11-25)
 
 Base `9efd42d19` (the head before agent 310), "head" `83a21ef3f` (agents 310 and 312 landed, and
