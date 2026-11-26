@@ -772,11 +772,16 @@ fn run_windows(
         for &ci in &wins[wi].1 {
             let call = &calls[ci];
             let mut out = vec![Value::Null; n];
+            let at_place = frame_value_at_place(call);
             for (part, pp) in parts.iter().zip(peers.iter_mut()) {
                 if pp.is_none() {
                     *pp = Some(peer_groups(part, &okeys, &call.order_by, ctx)?);
                 }
-                compute_partition(call, rows, &okeys, part, pp.as_deref().unwrap_or_default(), &mut out, ctx)?;
+                if at_place {
+                    frame_values(call, rows, &okeys, part, pp.as_deref().unwrap_or_default(), &mut out, ctx)?;
+                } else {
+                    compute_partition(call, rows, &okeys, part, pp.as_deref().unwrap_or_default(), &mut out, ctx)?;
+                }
             }
             for (i, v) in out.into_iter().enumerate() {
                 results[i * calls.len() + ci] = v;
@@ -1513,6 +1518,65 @@ fn compute_partition(
     }
     let _ = DataType::Bool;
     let _ = Interval::new(0, 0, 0);
+    Ok(())
+}
+
+/// first_value / last_value / nth_value over frames without an exclusion, counting NULLs
+/// (`frame_values`): the value is the arguments' at one row of the frame.
+fn frame_value_at_place(call: &WindowCall) -> bool {
+    matches!(call.func, WinFunc::Builtin(WinKind::FirstValue | WinKind::LastValue | WinKind::NthValue))
+        && call.frame.exclude == FrameExclude::NoOthers
+        && !call.ignore_nulls
+}
+
+/// `compute_partition` for a call `frame_value_at_place` takes: each row's value is the
+/// argument at the frame's first, last or nth row (WinGetFuncArgInFrame), evaluated there
+/// alone, not at every row of the frame (quadratic in the partition).
+#[inline(never)]
+fn frame_values(
+    call: &WindowCall,
+    rows: &[Row],
+    okeys: &[Vec<Value>],
+    part: &[usize],
+    peers: &[(usize, usize)],
+    out: &mut [Value],
+    ctx: &ExecCtx,
+) -> Result<()> {
+    let WinFunc::Builtin(kind) = &call.func else { unreachable!("a frame value call") };
+    let m = part.len();
+    let offset = |b: &FrameBound, start: bool| -> Result<Option<Value>> {
+        match b {
+            FrameBound::Preceding(e) | FrameBound::Following(e) => Ok(Some(offset_value(e, ctx, call.frame.unit, start)?)),
+            _ => Ok(None),
+        }
+    };
+    let offsets = (offset(&call.frame.start, true)?, offset(&call.frame.end, false)?);
+    for i in 0..m {
+        let (s, e) = frame_of(call, i, m, peers, part, okeys, &offsets, ctx)?;
+        let at = match kind {
+            WinKind::FirstValue => (s < e).then_some(s),
+            WinKind::LastValue => (s < e).then(|| e - 1),
+            _ => {
+                let nth = eval(&call.args[1], &rows[part[i]], ctx)?;
+                if nth.is_null() {
+                    None
+                } else {
+                    let k = nth.as_i64().unwrap_or(0);
+                    if k <= 0 {
+                        return Err(Error::new(
+                            code::INVALID_ARGUMENT_FOR_NTH_VALUE,
+                            "argument of nth_value must be greater than zero",
+                        ));
+                    }
+                    usize::try_from(k - 1).ok().and_then(|k| s.checked_add(k)).filter(|p| *p < e)
+                }
+            }
+        };
+        out[part[i]] = match at {
+            Some(p) => eval(&call.args[0], &rows[part[p]], ctx)?,
+            None => Value::Null,
+        };
+    }
     Ok(())
 }
 
