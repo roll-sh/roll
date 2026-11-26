@@ -1732,7 +1732,7 @@ static TOOLS: &[Tool] = &[
         ENV,
         q("since", Ty::Int, "From this time (unix ms)"),
         q("tail", Ty::Int, "Last lines (at most 2000)"),
-        q("q", Ty::Str, "Search the last 7 days"),
+        q("q", Ty::Str, "Search back to since (default a week): every word, any case; \"a phrase\"; -word absent; OR between alternatives (timeout OR refused). Log alerts and log metrics take the same syntax"),
         q("http", Ty::Bool, "The proxy's access log (one line per request) instead of the runtime's output"),
         q("status", Ty::Str, "With http: only these statuses (500, 5xx, 400-499)"),
         q("min_ms", Ty::Int, "With http: only requests that took at least this long"),
