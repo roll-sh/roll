@@ -2469,7 +2469,8 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
                         set.extend(vars.into_iter().map(|(k, v)| (k, Value::String(v))));
                     }
                 }
-                for k in wanted.iter().filter(|k| !set.contains_key(k.as_str()) && !provided.contains(k.as_str()) && k.as_str() != "PORT") {
+                let missing: Vec<String> = wanted.iter().filter(|k| !set.contains_key(k.as_str()) && !provided.contains(k.as_str()) && k.as_str() != "PORT").cloned().collect();
+                for k in &missing {
                     let v = prompt(&format!("{k} (its .env.example names it; enter leaves it unset): "))?;
                     if !v.is_empty() {
                         set.insert(k.clone(), Value::String(v));
