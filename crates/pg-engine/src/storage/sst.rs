@@ -2113,18 +2113,41 @@ impl Block {
         // (Two loops: without a stop the one runs before it had, which inlines as that one did.)
         match (stop, ov) {
             // (No entry of the list in the block: none stops the run.)
-            (_, Some(o)) if o.stop().is_none_or(|s| self.last_key().is_some_and(|l| short_cmp(l, s).is_lt())) => self.run_rows_to::<false, false>(pos, ts, max, resolve, batch, &[], None, 0, None),
-            (_, Some(o)) => self.run_rows_to::<true, false>(pos, ts, max, resolve, batch, &[], Some(o), 0, None),
-            (None, None) => self.run_rows_to::<false, false>(pos, ts, max, resolve, batch, &[], None, 0, None),
-            (Some(s), None) => self.run_rows_to::<true, false>(pos, ts, max, resolve, batch, s, None, 0, None),
+            (_, Some(o)) if o.stop().is_none_or(|s| self.last_key().is_some_and(|l| short_cmp(l, s).is_lt())) => self.run_rows_to::<false, false, false>(pos, ts, max, resolve, batch, &[], None, 0, None),
+            (_, Some(o)) => self.run_rows_ov(pos, ts, max, resolve, batch, o),
+            (None, None) => self.run_rows_to::<false, false, false>(pos, ts, max, resolve, batch, &[], None, 0, None),
+            (Some(s), None) => self.run_rows_to::<true, false, false>(pos, ts, max, resolve, batch, s, None, 0, None),
         }
+    }
+
+    /// `run_rows` with the list's next entry in the block: the entries before the restart
+    /// interval its user key is in (`first_restart`) are below it, so they run without a stop
+    /// (a run checking its stop at every row costs ~10-25 user instructions a row more), and
+    /// the rest of the block with it.
+    #[inline]
+    fn run_rows_ov(&self, pos: &mut BlockPos, ts: u64, max: usize, resolve: bool, batch: &mut super::batch::RowBatch, o: &mut Overlay) -> (usize, u64) {
+        if let Some(u) = o.next_user_key() {
+            // (Restart `r - 1`'s key is below `u`, and so is every entry up to it.)
+            let lim = (self.first_restart(u).saturating_sub(1) << self.rlog) + 1;
+            if lim > pos.i + 1 + FAR_MIN && lim - pos.i - 1 < max {
+                let m = lim - pos.i - 1;
+                let (n, ver) = self.run_rows_to::<false, false, true>(pos, ts, m, resolve, batch, &[], None, 0, None);
+                if n < m {
+                    return (n, ver);
+                }
+                // (On the entry before restart `r - 1`'s next, taken: the rest with the stop.)
+                let (n2, ver2) = self.run_rows_to::<true, false, false>(pos, ts, max - n, resolve, batch, &[], Some(o), 0, None);
+                return (n + n2, if n2 > 0 { ver2 } else { ver });
+            }
+        }
+        self.run_rows_to::<true, false, false>(pos, ts, max, resolve, batch, &[], Some(o), 0, None)
     }
 
     /// `run_rows` of a column block, without a stop: its rows into the batch unmade, as rows
     /// of its buffer `cbuf` (`LazyRows::buf_of`). (Never out of line: none of its rows are.)
     pub fn run_rows_col(&self, pos: &mut BlockPos, ts: u64, max: usize, batch: &mut super::batch::RowBatch, cbuf: u32, lazy: &mut super::batch::LazyRows) -> (usize, u64) {
         debug_assert!(self.is_cols());
-        self.run_rows_to::<false, true>(pos, ts, max, false, batch, &[], None, cbuf, Some(lazy))
+        self.run_rows_to::<false, true, false>(pos, ts, max, false, batch, &[], None, cbuf, Some(lazy))
     }
 
     /// Rows `rows` of a column block (in that order) onto `out`, each one's end pushed onto
@@ -2135,8 +2158,10 @@ impl Block {
     }
 
     /// `run_rows`, with (`STOP`) or without a stop, of a column block's rows (`COL`) or not.
+    /// `HOLD`: a run that took `max` rows ends on the last one taken, as on the head a run
+    /// starts from (`run_rows_ov` goes on from there with the stop).
     #[allow(clippy::too_many_arguments)]
-    fn run_rows_to<const STOP: bool, const COL: bool>(
+    fn run_rows_to<const STOP: bool, const COL: bool, const HOLD: bool>(
         &self,
         pos: &mut BlockPos,
         ts: u64,
@@ -2305,6 +2330,9 @@ impl Block {
             }
             pos.key.extend_from_slice(&ver);
             (pos.i, pos.next, pos.vnext) = (i - 1, p as u32, v as u32);
+            if HOLD && n == max {
+                return (n, !u64::from_be_bytes(rver));
+            }
         }
         self.step(pos);
         (n, !u64::from_be_bytes(rver))
@@ -2333,6 +2361,10 @@ fn stop_in(w: &[u8; ZK], sl: usize, kb: &[u8; ZK], klen: Option<usize>) -> ([u8;
     let d = klen.and_then(|k| below_at(kb, w, k.min(sl)));
     (*w, sl, d.unwrap_or(usize::MAX))
 }
+
+/// Rows before the restart interval of the list's next entry worth a run without a stop
+/// (`Block::run_rows_ov`).
+const FAR_MIN: usize = 4;
 
 /// What `Overlay::take` did at a run's stop.
 enum Took {
@@ -2498,6 +2530,12 @@ impl Overlay {
             Some(e) => Some((&e.key, e.klen as usize)),
             None => self.limited.then_some((&self.limit, self.limit_len)),
         }
+    }
+
+    /// The user key of the list's next entry (None: past them).
+    #[inline]
+    fn next_user_key(&self) -> Option<&[u8]> {
+        self.ents.get(self.at).map(|e| &e.key[..e.klen as usize - 8])
     }
 
     /// `stop_w` as a key.
