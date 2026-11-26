@@ -2133,7 +2133,7 @@ type Settings = {
   max_usd_month: number;              // 0: no cap; once the month's cost reaches it, new previews wait
   secrets: { base: string; allow_production: boolean };      // "development", false
   env: Record<string, string>;        // overrides every service gets
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string; endpoints?: string[]; states?: {name, page, steps}[]; login?: {page, steps} /* a type step's text may be "$NAME" */; modes?: {name: string; color_scheme?: "dark" | "light"; locale?: string; timezone?: string}[]; storybook?: string /* "web" or "web:/storybook/" */; browsers?: ("firefox" | "webkit" | "webkit-phone")[] };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's; endpoints: up to 5 GET paths timed against main's
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string; endpoints?: string[]; states?: {name, page, steps}[]; login?: {page, steps} /* a type step's text may be "$NAME" */; modes?: {name: string; color_scheme?: "dark" | "light"; locale?: string; timezone?: string}[]; storybook?: string /* "web" or "web:/storybook/" */; story_runs?: number /* 1 to 4 containers side by side, 40 stories each (1) */; browsers?: ("firefox" | "webkit" | "webkit-phone")[] };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's; endpoints: up to 5 GET paths timed against main's
   access: "link" | "team" | "public"; // "link": a preview's URLs need its link; "team": a person signed in to roll who may open the project
   visual_review: "off" | "check" | "required";   // the roll/visual review; required also blocks landing in roll ("off")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
@@ -2367,7 +2367,10 @@ type Settings = {
     Its Storybook's stories too (Chromatic's stories): with `github.storybook` (`web`, or
     `web:/storybook/` when the service serves it under a path: a static build or `storybook
     dev`), that service's run reads Storybook's index (`index.json`, Storybook 7 and later;
-    `stories.json` before), and takes 40 stories, those the change touched first (Chromatic's
+    `stories.json` before), and takes 40 stories (with `github.story_runs`, 1 to 4 screenshot
+    containers side by side, 40 each: every k-th of the order below, so each takes its share of
+    the ones that matter first, merged back in that order; each billed as a browser run, their
+    times added; `STORIES_SHARD`), those the change touched first (Chromatic's
     TurboSnap: a story whose own file the change changed since the default branch, then one that
     imports a changed file from anywhere, then one beside a file it changed, its component or its
     styles, then the rest in the index's order; a repo's path matches a story's `importPath` and a
@@ -2958,27 +2961,25 @@ requests, Vercel's toolbar and per-push URLs, Jam's replays. Its fixes landed wi
 preview up` refuses an untracked file named like a secret, and the stale lines it found (frozen
 services' stop, which products' restore points save, the CLI's commands).
 
-1. **Mask once, branch many, in review** (Neon's anonymized branches): a masked base per parent
-   and rules, made again daily, which previews branch copy-on-write.
-2. **More stories per run** (Chromatic has no per-build cap; L): runs sharded over several
-   screenshot containers past 40 stories, each change's touched ones first.
-3. **A migration rehearsed on today's production** (PlanetScale's deploy requests; M): before
+1. **More stories per run, in review** (Chromatic has no per-build cap): `github.story_runs`,
+   up to 4 containers side by side, 160 stories.
+2. **A migration rehearsed on today's production** (PlanetScale's deploy requests; M): before
    landing (or asked), branch fresh, run the release again and compare; open previews whose
    schema changes touch the same table are named on each other.
-4. **The feedback button for team-access visitors on roll apps previews** (S, with roll apps:
+3. **The feedback button for team-access visitors on roll apps previews** (S, with roll apps:
    `apps-control/src/public.rs` adds it for link and share visitors only).
-5. **This page on main, from the toolbar** (Vercel's deployment switcher; S): main's preview
+4. **This page on main, from the toolbar** (Vercel's deployment switcher; S): main's preview
    exists (`github.baseline`); the toolbar opens the same path there.
-6. **Older pushes past the last three, started on demand** (Vercel keeps every deployment's URL;
+5. **Older pushes past the last three, started on demand** (Vercel keeps every deployment's URL;
    S–M): kept as code only, on the preview's own data, started at the first visit.
-7. **What a note's reviewer saw, from their own browser** (Jam, Marker.io; M): an opt-in
+6. **What a note's reviewer saw, from their own browser** (Jam, Marker.io; M): an opt-in
    capture, labelled as theirs, and mentions of the team's members.
-8. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
+7. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
     (its Next 32); buckets need a put-back on roll storage's side.
-9. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+8. **Previews for the members thread's next products**: once roll apps' and roll search's routes
     become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
     follow the same roles, checked live against a member's session.
-10. **Watches on pg-control**: the data step's Postgres compute start (most of the data step is
+9. **Watches on pg-control**: the data step's Postgres compute start (most of the data step is
     it and its masking); cheap branches on ext4 through overlay volumes over a frozen base
     (measured 2026-11-17: 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole
     table file); recovery to a time seconds old (unowned).
@@ -2988,7 +2989,7 @@ pull request for less than the items above).
 
 Landed 2026-11-26, midday: restore points for streams (#1112), the TurboSnap test's race under
 load (#1114), the tenth review's fixes (#1119), the visual review holding on stories a change
-touched that its run didn't take (#1120), and a visual change refused (#1125).
+touched that its run didn't take (#1120), a visual change refused (#1125), and masked bases (#1130).
 
 Landed 2026-11-26, morning: stories' interaction tests (#1087), what a failed one threw (#1091), both in the other browsers (#1100), the step a failed one stopped at (#1105), and restore points for Redis (#1109).
 
