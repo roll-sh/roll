@@ -2126,7 +2126,7 @@ impl Block {
     /// the rest of the block with it.
     #[inline]
     fn run_rows_ov(&self, pos: &mut BlockPos, ts: u64, max: usize, resolve: bool, batch: &mut super::batch::RowBatch, o: &mut Overlay) -> (usize, u64) {
-        if let Some(u) = o.next_user_key() {
+        if !a322_nofar() && let Some(u) = o.next_user_key() {
             // (Restart `r - 1`'s key is below `u`, and so is every entry up to it.)
             let lim = (self.first_restart(u).saturating_sub(1) << self.rlog) + 1;
             if lim > pos.i + 1 + FAR_MIN && lim - pos.i - 1 < max {
@@ -2360,6 +2360,12 @@ fn stop_at(s: &[u8], kb: &[u8; ZK], klen: Option<usize>) -> ([u8; ZK], usize, us
 fn stop_in(w: &[u8; ZK], sl: usize, kb: &[u8; ZK], klen: Option<usize>) -> ([u8; ZK], usize, usize) {
     let d = klen.and_then(|k| below_at(kb, w, k.min(sl)));
     (*w, sl, d.unwrap_or(usize::MAX))
+}
+
+/// (Measuring switch of agent 322, not for landing.)
+fn a322_nofar() -> bool {
+    static O: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *O.get_or_init(|| std::env::var_os("A322_NOFAR").is_some())
 }
 
 /// Rows before the restart interval of the list's next entry worth a run without a stop
