@@ -24,6 +24,12 @@ impl Value {
     }
 }
 
+/// What a `Debug` shows for a field that holds a value or a credential: whether it's set, never
+/// what it is.
+pub(crate) fn redacted<T>(o: &Option<T>) -> Option<&'static str> {
+    o.as_ref().map(|_| "<redacted>")
+}
+
 impl std::fmt::Debug for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("Value(<redacted>)")

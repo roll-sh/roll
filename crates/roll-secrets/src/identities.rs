@@ -231,12 +231,19 @@ pub struct NewIdentity {
 }
 
 /// What a login gets: the token (shown once) and when it ends.
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct Login {
     pub token: String,
     pub expires_at: i64,
     pub project: String,
     pub identity: String,
+}
+
+/// Never the login's token.
+impl std::fmt::Debug for Login {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Login").field("token", &"<redacted>").field("expires_at", &self.expires_at).field("project", &self.project).field("identity", &self.identity).finish()
+    }
 }
 
 const COLUMNS: &str = "id, project_id, name, issuer, audience, subject, claims, environments, paths, actions, ttl_minutes, created_at, created_by, last_used_at, last_subject, allowed_ips, jwks, kind, gateway, disabled_at, disabled_why";
