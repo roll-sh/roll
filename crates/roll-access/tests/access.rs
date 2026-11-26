@@ -183,6 +183,8 @@ fn postgres() -> Router {
         .route("/v1/search/clusters/{id}/request", post(|ext: axum::http::Extensions| async move { axum::Json(json!({ "reveal": ext.get::<roll_auth::Capable>().is_some_and(|c| c.has(roll_auth::scope::Action::Reveal)) })) }))
         .route("/v1/search/clusters/{id}/indices/{index}/bulk", post(|body: String| async move { axum::Json(json!({ "lines": body.lines().count() })) }))
         .route("/v1/search/clusters/{id}/indices/{index}/settings", axum::routing::put(|| async { axum::Json(json!({ "acknowledged": true })) }))
+        .route("/v1/search/clusters/{id}/indices/{index}/update_by_query", post(|| async { axum::Json(json!({ "task": "n:1" })) }))
+        .route("/v1/search/clusters/{id}/tasks/{task}", get(|| async { axum::Json(json!({ "completed": true })) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/secrets", get(|| async { axum::Json(json!([])) }))
         .route("/v1/secrets/projects/{project}/health", get(|| async { axum::Json(json!({ "findings": [] })) }))
         .route("/v1/secrets/projects/{project}/transit", get(|| async { axum::Json(json!([])) }))
@@ -421,6 +423,17 @@ async fn a_scoped_token_does_only_what_its_rules_say() {
     assert_eq!(settings(r#"{"index.roll.suggestions.enabled": true}"#).await.0, StatusCode::OK);
     let (s, e) = settings(r#"{"index.lifecycle.name": "30-days-default", "index.lifecycle.indexing_complete": true, "index.lifecycle.origination_date": 0}"#).await;
     assert_eq!((s, e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("delete")));
+    // Re-indexing an index by query is write (a script, which can delete, needs delete); its
+    // task is a read, which a read-only token has and can't re-index with.
+    let daemon = &d;
+    let reindex = |token: String, body: &'static str| async move { daemon.raw(&token, Method::POST, "/v1/search/clusters/c1/indices/logs/update_by_query?wait_for_completion=false", Body::from(body), &[], None).await };
+    assert_eq!(reindex(indexer.clone(), "{}").await.0, StatusCode::OK);
+    let (s, e) = reindex(indexer.clone(), r#"{"script": {"source": "ctx.op = 'delete'"}}"#).await;
+    assert_eq!((s, e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("delete")));
+    let (reader, _) = d.token(json!([{ "product": "search", "resources": "*", "actions": { "read": "allow" } }]), json!({})).await;
+    let (s, e) = reindex(reader.clone(), "{}").await;
+    assert_eq!((s, e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("write")));
+    assert_eq!(d.call(&reader, Method::GET, "/v1/search/clusters/c1/tasks/n:1", None).await.0, StatusCode::OK);
 
     // A bucket in another storage account is `<account>/<bucket>`: a rule for one doesn't reach
     // the same name in the default account or in a third.

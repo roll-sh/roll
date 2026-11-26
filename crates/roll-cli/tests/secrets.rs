@@ -1603,3 +1603,47 @@ async fn infisical_brings_a_whole_project_with_its_folders_and_a_dry_run_writes_
     let listed = ok(&api, &[], &["--json", "secrets", "-p", "shop", "-e", "development", "ls"], None).await;
     assert!(listed.contains("where it runs"), "Infisical's comment is the key's comment: {listed}");
 }
+
+/// A public CA that takes one Cloudflare token and orders nothing (the API tests order).
+struct TokenOnlyCa(std::sync::Mutex<Vec<String>>);
+
+impl roll_secrets::public_certs::PublicCa for TokenOnlyCa {
+    fn allows(&self, directory: &str) -> bool {
+        roll_secrets::public_certs::PUBLIC_CAS.contains(&directory)
+    }
+    fn check(&self, dns: &roll_secrets::public_certs::DnsCredential, _: &[String]) -> Result<(), String> {
+        let roll_secrets::public_certs::DnsCredential::Cloudflare(token) = dns else { return Err("Route 53: no".into()) };
+        self.0.lock().unwrap().push(token.expose().to_string());
+        if token.expose() == "cf-token-from-stdin" { Ok(()) } else { Err("Cloudflare: find zone: HTTP 401".into()) }
+    }
+    fn order(&self, _: roll_secrets::public_certs::Order<'_>) -> Result<roll_secrets::public_certs::Ordered, String> {
+        Err("not in this test".into())
+    }
+    fn revoke(&self, _: roll_secrets::public_certs::Revoke<'_>) -> Result<roll_secrets::public_certs::RevokeReason, String> {
+        Err("not in this test".into())
+    }
+}
+
+/// `roll secrets public-certs`: the DNS credential comes on stdin and is never printed, a renewal
+/// past the caps says when the next may come, and the registration goes by name.
+#[tokio::test]
+async fn public_certs_take_the_dns_credential_on_stdin_and_say_the_renewal_caps() {
+    let s = start().await;
+    let ca = Arc::new(TokenOnlyCa(Default::default()));
+    s.secrets.set_public_ca(ca.clone());
+    let api = s.api.as_str();
+    let at = ["secrets", "-p", "shop", "public-certs"];
+    let run = |more: &'static [&'static str]| [&at[..], more].concat();
+    let added = ok(api, &[], &run(&["add", "web", "--domain", "www.example.com", "--domain", "*.example.com", "--dns", "cloudflare"]), Some("cf-token-from-stdin\n")).await;
+    assert!(added.contains("Registered web") && !added.contains("cf-token"), "{added}");
+    assert_eq!(*ca.0.lock().unwrap(), ["cf-token-from-stdin"], "the token from stdin, checked before it's kept");
+    let listed = ok(api, &[], &run(&["ls"]), None).await;
+    assert!(listed.contains("web") && listed.contains("pending") && listed.contains("www.example.com,*.example.com") && !listed.contains("cf-token"), "{listed}");
+    ok(api, &[], &run(&["renew", "web"]), None).await;
+    let held = roll(api, &[], &run(&["renew", "web"]), None).await;
+    assert!(held.code != Some(0) && held.stderr.contains("ask again after"), "{}", held.stderr);
+    let shown = ok(api, &[], &run(&["show", "web"]), None).await;
+    assert!(shown.contains("renewals held until") && shown.contains("1 of 3"), "{shown}");
+    ok(api, &[], &run(&["rm", "web"]), None).await;
+    assert_eq!(ok(api, &[], &run(&["ls"]), None).await.trim(), "");
+}
