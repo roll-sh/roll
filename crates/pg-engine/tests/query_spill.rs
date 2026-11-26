@@ -485,6 +485,27 @@ fn sliding_frames() {
         let f1 = int(&mut s, "SELECT temp_files FROM pg_stat_database WHERE datname = current_database()");
         assert_eq!(f1 - f0, files, "{inner}: temp files");
     }
+    // EXPLAIN ANALYZE streams them too: the window's store and the Sort below as PostgreSQL
+    // 18.6 shows them.
+    for (inner, lines) in [
+        (
+            "SELECT sum(a) OVER (ORDER BY a ROWS BETWEEN 5 PRECEDING AND 5 FOLLOWING) x FROM ws",
+            ["Storage: Memory  Maximum Storage: 17kB", "Sort Method: external merge  Disk: 512kB"],
+        ),
+        (
+            "SELECT first_value(t) OVER w x, last_value(t) OVER w y, nth_value(a, 3) OVER w z FROM ws \
+             WINDOW w AS (ORDER BY a ROWS BETWEEN 5000 PRECEDING AND UNBOUNDED FOLLOWING)",
+            // (PostgreSQL's Sort writes 1872kB, this one's counts 1848kB.)
+            ["Storage: Disk  Maximum Storage: 1993kB", "Sort Method: external merge"],
+        ),
+    ] {
+        let plan = q(&mut s, &format!("EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, BUFFERS OFF, SUMMARY OFF) {inner}")).unwrap();
+        let text: Vec<String> = plan.iter().map(|r| format!("{:?}", r[0])).collect();
+        for l in lines {
+            assert!(text.iter().any(|t| t.contains(l)), "{inner}: {l} in {text:#?}");
+        }
+        assert_no_spill_files(dir.path());
+    }
     drop(s);
     eng.shutdown();
 }
@@ -693,3 +714,4 @@ fn distinct_aggregates() {
     drop(s);
     eng.shutdown();
 }
+

@@ -100,8 +100,9 @@ impl Big {
                     b.on = Some((spec, mem));
                 }
                 // (Several windows, or one whose input isn't sorted for it: `Chain`, made by
-                // `stream_rest`, `on` left None.)
-                None if chained(calls, presorted, ctx) => return true,
+                // `stream_rest`, `on` left None. Not under EXPLAIN ANALYZE, whose WindowAggs
+                // and Sorts count the plan's nodes: computed in memory.)
+                None if !ctx.instrumented() && chained(calls, presorted, ctx) => return true,
                 None => {
                     *big = None;
                     return false;
@@ -383,12 +384,11 @@ impl WindowNode {
             self.store = Some(Stores {
                 keys: [std::sync::Arc::as_ptr(plan) as usize, std::sync::Arc::as_ptr(input) as usize],
                 types: crate::sql::paths::analyzejoins::col_types(input),
-                keep,
+                keep: keep.clone(),
                 wins: Vec::new(),
             });
-        } else {
-            self.shape = Shape { input: Some(input.clone()), types: None, keep };
         }
+        self.shape = Shape { input: Some(input.clone()), types: None, keep };
         self
     }
 
@@ -413,10 +413,9 @@ impl Node for WindowNode {
         if !self.started {
             self.started = true;
             self.stream = streamed_partitions(&self.calls, &self.presorted, ctx);
-            // (EXPLAIN ANALYZE counts the store over a whole partition: `count_store`.)
-            if self.store.is_none() {
-                self.big = Some(Big { allowed: None, est: 0, on: None });
-            }
+            // (EXPLAIN ANALYZE counts the store of a partition that fits by `count_store`, of
+            // one streamed as the stream holds it: `Streamed::record`.)
+            self.big = Some(Big { allowed: None, est: 0, on: None });
         }
         loop {
             if let Some(r) = self.out.next() {
@@ -526,6 +525,9 @@ impl WindowNode {
             && let Some(Streamed::Part { part, .. }) = self.streamed.take()
         {
             (*part).release(mem);
+            if let Some(st) = &self.store {
+                record_streamed(st, mem.stats(), self.sort.as_ref(), ctx);
+            }
         }
         Ok(r)
     }
@@ -591,6 +593,25 @@ impl WindowNode {
             out.push(r);
         }
         Ok(out)
+    }
+}
+
+/// EXPLAIN ANALYZE of a partition streamed (`winstream`): its store's figures (`StoreMem::stats`)
+/// join the WindowAgg's as `compute` records a partition counted whole, and the Sort the
+/// executor made shows as PostgreSQL's below.
+#[inline(never)]
+fn record_streamed(st: &Stores, (disk, bytes): (bool, i64), sort: Option<&std::sync::Arc<crate::sql::plan::Plan>>, ctx: &ExecCtx) {
+    let Some(instr) = ctx.instr.borrow().clone() else { return };
+    for key in st.keys {
+        instr.update(key, |s| {
+            let (d0, b0) = s.winstore[0].unwrap_or_default();
+            s.winstore[0] = Some((d0 || disk, b0.max(bytes as u64)));
+        });
+    }
+    if let Some(sp) = sort
+        && let Some(sort) = instr.get(std::sync::Arc::as_ptr(sp) as usize).and_then(|s| s.sort)
+    {
+        instr.update(st.keys[1], |s| s.sort = Some(sort));
     }
 }
 
