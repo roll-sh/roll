@@ -3504,7 +3504,7 @@ async fn a_held_domain_is_claimed_by_proving_its_dns() {
 }
 
 /// A custom domain's records written at the customer's Cloudflare (Vercel's own DNS): the token a
-/// `roll://` reference the caller may reveal, read as them for the call; then it's verified.
+/// `roll://` reference the caller may reveal, read once as them (nothing bound); then it's verified.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_domains_records_are_written_with_the_customers_token() {
     struct Cf;
@@ -3516,12 +3516,9 @@ async fn a_domains_records_are_written_with_the_customers_token() {
         async fn resolve(&self, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<apps_control::integrations::SecretVar>> {
             Ok(vec![])
         }
-        async fn bind_ref(&self, _: apps_control::integrations::Asker<'_>, _: &str, _: &str, reference: &str) -> anyhow::Result<String> {
-            anyhow::ensure!(reference == "roll://production/CF_TOKEN", "you may not reveal {reference}");
-            Ok("usr_ada".into())
-        }
-        async fn resolve_as(&self, _: &str, _: &str, _: &str, reference: &str, maker: &str) -> anyhow::Result<String> {
-            assert_eq!((reference, maker), ("roll://production/CF_TOKEN", "usr_ada"));
+        // Read once as the caller: nothing bound, no maker kept.
+        async fn use_once(&self, _: apps_control::integrations::Asker<'_>, _: &str, env: &str, _: &str, reference: &str, _: &str) -> anyhow::Result<String> {
+            anyhow::ensure!((env, reference) == ("production", "roll://production/CF_TOKEN"), "you may not reveal {reference}");
             Ok("cf-secret".into())
         }
     }

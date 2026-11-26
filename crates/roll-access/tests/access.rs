@@ -152,6 +152,7 @@ fn postgres() -> Router {
         .route("/v1/apps/services/{id}/links/{kind}/{ref}", axum::routing::put(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/v1/apps/services/{id}/environments/{env}", axum::routing::put(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/v1/apps/services/{id}/environments/{env}/redeploy", post(|| async { axum::Json(json!({ "ok": true })) }))
+        .route("/v1/apps/services/{id}/environments/{env}/domains/{host}/configure", post(|| async { axum::Json(json!({ "status": "active" })) }))
         .route("/v1/search/clusters/{id}/indices/{index}/search", post(|| async { axum::Json(json!({ "hits": [] })) }))
         .route(
             "/v1/search/clusters",
@@ -3426,6 +3427,23 @@ async fn a_secret_written_as_the_caller_is_asked_for_and_only_it_is_allowed() {
     let (none, _) = d.token(json!([search("allow")]), json!({})).await;
     let (s, out) = d.call(&none, Method::POST, path, Some(body("production"))).await;
     assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("forbidden")), "{out}");
+}
+
+/// A domain's Cloudflare token is a `roll://` reference apps reads once as the caller (nothing
+/// keeps it): a token whose reveal on its folder is `ask` gets an approval naming that folder, not
+/// a 403 with nothing to approve.
+#[tokio::test]
+async fn a_dns_token_read_once_is_asked_for_by_its_folder() {
+    let d = Daemon::new(50);
+    let project = d.workspace.create("", "shop", "", None).unwrap().id;
+    d.workspace.place(roll_workspace::Scope::All, &project, roll_workspace::Kind::Service, "svc_web", 0.0, 0.0).unwrap();
+    let rules = json!([{ "product": "apps", "resources": "*", "actions": { "write": "allow", "deploy": "allow" } }, { "product": "secrets", "resources": [{ "project": project }], "actions": { "reveal": "ask" } }]);
+    let (token, _) = d.token(rules, json!({})).await;
+    let path = "/v1/apps/services/svc_web/environments/production/domains/acme.dev/configure";
+    let (s, out) = d.call(&token, Method::POST, path, Some(json!({ "cloudflare_token": "roll://production/dns/CF_TOKEN" }))).await;
+    assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
+    let (_, asked) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{}", out["approval"].as_str().unwrap()), None).await;
+    assert_eq!((asked["product"].as_str(), asked["action"].as_str(), asked["environment"].as_str(), asked["path"].as_str()), (Some("secrets"), Some("reveal"), Some("production"), Some("/dns")), "{asked}");
 }
 
 /// Claude's auto-connect (its connector docs, "Enterprise Managed Auth"): Claude signs the
