@@ -541,6 +541,11 @@ fn value_request_defaults() -> Value {
     json!({ "ttl_minutes": 1440, "answers": 1 })
 }
 
+/// A search task that completed (its `response` or `error` in the answer).
+fn task_done(v: &Value) -> bool {
+    v["completed"].as_bool() == Some(true)
+}
+
 /// A tasks run that's over (`completed`, `failed` or `canceled`).
 fn run_over(v: &Value) -> bool {
     matches!(v["status"].as_str(), Some("completed" | "failed" | "canceled"))
@@ -1265,6 +1270,26 @@ static TOOLS: &[Tool] = &[
         &[req("cluster", "Cluster"), req("index", "Index"), P { name: "ndjson", ty: Ty::Str, at: At::RawNdjson, required: true, desc: "Action and document lines" }],
     ),
     t("search_delete_by_query", "Delete by query", "Delete every document of an index that matches a query (at most max_docs of them).", "search", "POST", "/v1/search/clusters/{cluster}/indices/{index}/delete_by_query", &[req("cluster", "Cluster"), req("index", "Index"), breq("query", Ty::Obj, "Query DSL"), b("max_docs", Ty::Int, "Delete at most this many"), b("conflicts", Ty::Choice(&["abort", "proceed"]), "On a document changed meanwhile: stop (the default) or go on")]),
+    t(
+        "search_update_by_query",
+        "Update by query",
+        "Index every document of one index that matches a query again, in place, through the index's pipelines and inference: with no script it embeds a semantic_text field added since, or a field a changed mapping now copies to. A script changes each document instead, and can delete (so it needs delete). With wait_for_completion false it answers a task at once; follow it with search_wait_task.",
+        "search",
+        "POST",
+        "/v1/search/clusters/{cluster}/indices/{index}/update_by_query",
+        &[
+            req("cluster", "Cluster id or name"),
+            req("index", "One index, by its name (no pattern or list)"),
+            b("query", Ty::Obj, "Query DSL: the documents to index again (default: every one)"),
+            b("script", Ty::Any, "A Painless script changing each document (it can delete: needs delete)"),
+            b("max_docs", Ty::Int, "At most this many"),
+            b("conflicts", Ty::Choice(&["abort", "proceed"]), "On a document changed meanwhile: stop (the default) or go on"),
+            b("slices", Ty::Any, "Parallel slices: a number, or \"auto\""),
+            q("wait_for_completion", Ty::Bool, "false: answer a task at once (an index past a few thousand documents)"),
+        ],
+    )
+    .open_world(),
+    t("search_wait_task", "Wait for a search task", "A search task (search_update_by_query's) once it completes, or as it is when the timeout passes: completed, and its response (updated, failures) or error. Pass wait_for_completion: true to wait.", "search", "GET", "/v1/search/clusters/{cluster}/tasks/{task}", &[req("cluster", "Cluster id or name"), req("task", "Task id, as search_update_by_query answered it (node:number)"), q("wait_for_completion", Ty::Bool, "true: wait until it completes or the timeout passes"), q("timeout", Ty::Str, "e.g. 30s (at most a minute)")]).until(task_done),
     t("search_query", "Search", "Run an Elasticsearch _search body on an index: a query or a retriever (hybrid search is an rrf or linear retriever over a standard and a knn one), knn, aggregations, highlighting, paging with search_after.", "search", "POST", "/v1/search/clusters/{cluster}/indices/{index}/search", &[
         req("cluster", "Cluster id or name"),
         req("index", "Index"),
@@ -1811,6 +1836,15 @@ static TOOLS: &[Tool] = &[
         "/v1/previews/{id}/reset",
         &[req("id", "Preview id"), b("resources", Ty::Arr, "Only these, as \"<kind>:<parent>\"")],
     ),
+    t(
+        "previews_rehearse",
+        "Rehearse a release on today's data",
+        "Run a change's release (its migrations) once more on fresh, masked branches of its Postgres parents as they are now, instead of the preview's branches from when it was made: how long it takes and whether it fails on today's data, before it lands. Answers at once; previews_wait, then the preview's rehearsal {head, ok, ms, error}. Refused for a default branch's preview, or one without a release or a Postgres branch.",
+        "previews",
+        "POST",
+        "/v1/previews/{id}/rehearse",
+        &[req("id", "Preview id")],
+    ),
     t("previews_keep", "Keep a preview", "Keep a preview past its time to live, for some hours (0 lets it go; a landed or closed change still ends it).", "previews", "POST", "/v1/previews/{id}/keep", &[req("id", "Preview id"), breq("hours", Ty::Int, "0 to 720")]),
     t("previews_activity", "Preview activity", "What happened to a preview, newest first.", "previews", "GET", "/v1/previews/{id}/activity", &[req("id", "Preview id")]),
     t("previews_sleep", "Sleep a preview", "Stop a preview's services until it's woken (its data stays).", "previews", "POST", "/v1/previews/{id}/sleep", &[req("id", "Preview id")]),
@@ -2049,6 +2083,7 @@ mod tests {
             ("search_browser_key_usage", "window", keys(between(include_str!("../../search-control/src/control.rs"), "impl MetricsRange {", "\n}\n"))),
             ("search_analytics", "range", keys(between(include_str!("../../search-control/src/analytics.rs"), "impl Range {", "\n}\n"))),
             ("search_delete_by_query", "conflicts", keys(between(include_str!("../../search-es/src/api/by_query_request.rs"), "fn set_conflicts(", "\n    }\n"))),
+            ("search_update_by_query", "conflicts", keys(between(include_str!("../../search-es/src/api/by_query_request.rs"), "fn set_conflicts(", "\n    }\n"))),
             ("secrets_create_environment", "kind", envs.clone()),
             ("secrets_ensure_environment", "kind", envs),
             ("secrets_get", "type", types.clone()),
@@ -2667,7 +2702,7 @@ mod tests {
         const FORK_WORDS: &[&str] = &[
             // The preview itself (`outside: !trusted`: its title is the fork's pull request's),
             // and every write that answers it.
-            "previews_list", "previews_get", "previews_wait", "previews_create", "previews_refresh", "previews_keep", "previews_sleep", "previews_wake", "previews_reset",
+            "previews_list", "previews_get", "previews_wait", "previews_create", "previews_refresh", "previews_keep", "previews_sleep", "previews_wake", "previews_reset", "previews_rehearse",
             "previews_errors", "previews_traces", "previews_get_trace", "previews_routes", "previews_logs", "previews_requests", "previews_activity",
             "previews_list_mail", "previews_read_mail", "previews_screenshot", "previews_fetch", "previews_try", "previews_try_screenshot", "previews_note_crop", "previews_tables",
             // A share link's guests' notes (`by` `guest:…`).

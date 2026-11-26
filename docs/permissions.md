@@ -1126,7 +1126,13 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   OAuth connections included (GitHub's organisation token policies, Cloudflare's TTLs). A
   product may cap tokens that reach it more tightly (`Access::lifetime_cap`): roll secrets'
   policy's `max_token_days` caps every grant with a `secrets` or `*` rule (docs/secrets.md,
-  "Guardrails"), refused as a 403 naming that policy.
+  "Guardrails"), refused as a 403 naming that policy. Both are one check,
+  `Access::meets_policy`, on every path that writes a grant's rules or lifetime or issues it a
+  secret: tokens and machine clients (refused past it), consents, devices and step-ups (the
+  connection ends within a product's cap instead, `Access::within_cap`, and the consent screen
+  says so from the catalogue's `lifetime_caps`), remembered approvals (a capped rule is remembered
+  until the cap at most) and enterprise apps' connections, which live as long as the policy
+  allows; `tests/policy_callers.rs` fails on a writer that doesn't ask.
   `max_idle_days` stops a grant nobody has used for that long (since its last use, or since it was
   made): an unused credential is risk with nothing to show for it. The evaluator reads the policy at
   most every 10 seconds, so a change reaches every node within that.
@@ -1374,7 +1380,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | route | who | what |
 | --- | --- | --- |
 | `GET /v1/access` | any grant | the caller: the operator, or its own grant (rules, expiry) |
-| `GET /v1/access/catalog` | any grant | products, actions, presets and every classified route |
+| `GET /v1/access/catalog` | any grant | products, actions, presets, every classified route, and `lifetime_caps` (`[{product, days, why}]`: products whose own policy caps the grants that reach them) |
 | `POST /v1/access/check` | any grant | `{method, path, body?, token?}` → `{decision, product, action, resource, route}`: what the evaluator would decide, without running it (a grant checks itself; the operator names `token`) |
 | `GET /v1/access/tokens` | access read | grants, newest first (no secrets), each with `activity`: its last day's requests `{allowed, denied, asked}`; `?product=` (and `&resource=`) only those with a rule on that product by name (naming that `{id}` or `{project}`), as a product's page lists its own tokens; `?kind=workload` the workload tokens instead |
 | `POST /v1/access/tokens` | access admin | `{name, rules, expires_at?, ip_allow?, rate_per_minute?, decoy?}` → 201 `{grant, token}`; `token` is shown this once; `decoy`: a honeytoken ("Decoy tokens"); 403 `reauth_required` from a session without a recent proof |

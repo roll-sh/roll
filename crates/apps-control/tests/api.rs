@@ -5659,6 +5659,43 @@ async fn a_previews_pages_carry_the_feedback_button_for_its_link_visitors() {
     assert_eq!(st, StatusCode::OK);
     assert_eq!(serde_json::from_str::<Value>(&list).unwrap(), json!([{"path": "/pricing", "selector": "h1", "note": "bigger", "by": "ana", "at": 1}]));
     assert_eq!(*said.0.lock(), [("pv-abc".to_string(), "/pricing".to_string())], "the preview and the page's path");
+    // A team member signed in to roll (team access) gets it too, its notes through roll's own path.
+    struct Team;
+    impl apps_control::integrations::Visitors for Team {
+        fn may_open(&self, user: &str, _project: &str) -> bool {
+            user == "usr_ada"
+        }
+        fn session_live(&self, _user: &str, _session: &str) -> bool {
+            true
+        }
+    }
+    w.apps.set_visitors(Arc::new(Team));
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"ephemeral": true, "access": {"signed_in": true}, "feedback": true}))).await.0, StatusCode::OK);
+    let load = |path: String, cookie: Option<String>| {
+        let mut r = Request::builder().uri(path).header("host", &h).header("accept", "text/html");
+        if let Some(c) = cookie {
+            r = r.header("cookie", c);
+        }
+        let public = w.public.clone();
+        async move {
+            let resp = public.oneshot(r.body(Body::empty()).unwrap()).await.unwrap();
+            let (st, hd) = (resp.status(), resp.headers().clone());
+            (st, hd, String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap())
+        }
+    };
+    let (_, hd, _) = load("/page".into(), None).await;
+    let state = hd["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_string();
+    let binding = hd["location"].to_str().unwrap().split_once("&state=").unwrap().1.to_string();
+    let mut ask = Request::builder().method("POST").uri(format!("{base}/visit")).header("content-type", "application/json").body(Body::from(json!({ "to": format!("http://{h}/page"), "state": binding }).to_string())).unwrap();
+    ask.extensions_mut().insert(roll_auth::SignedIn { user: "usr_ada".into(), handle: "ada".into(), admin: false, code_owner: None, session: "ses_1".into() });
+    let t: Value = serde_json::from_slice(&w.api.clone().oneshot(ask).await.unwrap().into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let url = t["url"].as_str().unwrap_or_else(|| panic!("{t}"));
+    let (_, hd, _) = load(url[url.find("/__roll/visit").unwrap()..].to_string(), Some(state)).await;
+    let session = hd["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_string();
+    let (st, _, page) = load("/page".into(), Some(session.clone())).await;
+    assert!(st == StatusCode::OK && page.ends_with(r#"<script src="/__roll/feedback.js" defer></script></body></html>"#), "a team member's page carries the button: {st} {page}");
+    assert_eq!(load("/__roll/feedback.json?path=%2Fteam".into(), Some(session)).await.0, StatusCode::OK);
+    assert_eq!(said.0.lock().last().cloned(), Some(("pv-abc".to_string(), "/team".to_string())), "read through roll's own notes, not a guest's");
 }
 
 /// A roll previews share link on a preview roll apps serves: followed, its cookie set and on
