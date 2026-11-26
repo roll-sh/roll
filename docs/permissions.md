@@ -270,6 +270,14 @@ roll token acting as that person, with no consent screen and no roll sign-in.
   `POST …/apps/{id}/rotate {public_jwk?, keep_old_for_s?}` gives it a new key, or a new secret
   answered once, keeping its client id and its people's connections; the old secret works up to a
   week longer while the provider moves over, or stops now with every token its people hold.
+- **Claude's auto-connect** (Claude's connector docs, "Enterprise Managed Auth"). Claude signs the identity assertion itself, under an issuer URL of the customer's Claude organization, and presents its Client ID Metadata Document as the client. Set-up and sign-in:
+  - **Register Claude as an app** by its documents: `POST …/apps {name, rules, metadata: ["https://claude.ai/oauth/mcp-oauth-client-metadata", "…/confidential_client"]}` (`roll token enterprise app create Claude --claude`, or the form's "Claude's auto-connect"). Its `client_id` is the first URL, and roll makes no secret.
+  - **How the client authenticates** depends on the document it presents. The public one, `token_endpoint_auth_method: none`, signs in with no credential of its own: the assertion is the credential, and it lives a minute and is used once. The confidential one, which roll's metadata invites because it lists `private_key_jwt`, signs a client assertion with the keys at its document's `jwks_uri`. That client's id without its assertion is refused.
+  - **Caching:** documents and keys are read through the guarded client and kept five minutes, and read again for a key id roll doesn't hold. They're a client's public claims, never a person's grant.
+  - **Rotation:** roll holds no credential of such an app, so there's nothing to rotate.
+  - **Trust the organization's issuer** (`https://identity.anthropic.com/issuers/<id>`, copied from Claude's auto-connect setup) as a provider with email matching and the domains its people use. Claude's issuer, matched exactly (host, path and id), vouches for its members' account emails, which it sends without `email_verified`. Any other issuer, a look-alike included, still needs `email_verified: true`, and the domains bound both.
+  - **The resource:** when the assertion names none, the token request's own `resource` holds the token: Claude names roll's MCP server, so its tokens are that server's only.
+  - **Not yet:** express admin setup (`ema_issuer:manage`), where Claude registers the issuer itself.
 - **A leaked app secret** (an `rlc_` with its checksum, found by roll code's push scan or reported
   by GitHub's secret scanning) is revoked like any other: roll drops the secret, the one kept from
   before a rotation, and every token the app's people hold, in one write, and audits it. The

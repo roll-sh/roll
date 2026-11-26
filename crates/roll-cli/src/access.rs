@@ -887,7 +887,12 @@ async fn enterprise(api: &Api, json_out: bool, cmd: Option<EnterpriseCmd>) -> an
                 if let Some(secret) = made["client_secret"].as_str() {
                     println!("client_secret (shown once; it's the app's, never the identity provider's): {secret}");
                 }
-                println!("Give the identity provider this client id for the app: it puts it in each person's assertion.");
+                if made["metadata"].as_array().is_some_and(|m| !m.is_empty()) {
+                    println!("Next: trust its organization's issuer (Claude's auto-connect setup shows it) with the email domains its people use:");
+                    println!("  roll token enterprise trust https://identity.anthropic.com/issuers/<id> --domain <domain>");
+                } else {
+                    println!("Give the identity provider this client id for the app: it puts it in each person's assertion.");
+                }
                 return Ok(());
             }
             made
