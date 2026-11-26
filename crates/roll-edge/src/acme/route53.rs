@@ -334,10 +334,12 @@ mod tests {
     /// Route 53 as much as DNS-01 uses: zones by name (a private twin and a neighbour first), record
     /// sets listed from a name on, UPSERTed whole and DELETEd only as they stand (TTL and values),
     /// each change PENDING once before it's INSYNC.
+    /// Name (with its dot) → TTL and values (quoted).
+    type Sets = std::collections::BTreeMap<String, (u32, Vec<String>)>;
+
     #[derive(Clone, Default)]
     struct Fake {
-        /// Name (with its dot) → TTL and values (quoted).
-        sets: Arc<Mutex<std::collections::BTreeMap<String, (u32, Vec<String>)>>>,
+        sets: Arc<Mutex<Sets>>,
         log: Arc<Mutex<Vec<String>>>,
         polled: Arc<Mutex<HashMap<String, u32>>>,
     }
