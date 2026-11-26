@@ -2367,7 +2367,9 @@ impl Store {
             }
             let others: Vec<String> = c.query("SELECT path FROM page_shots WHERE preview_id = ?", [id], |r| r.get(0))?;
             let pages: Vec<String> = match page {
-                None => std::iter::once(String::new()).chain(others).collect(),
+                // Every page, and the stories it didn't take (whether or not it left any).
+                None => std::iter::once(String::new()).chain(others).chain(std::iter::once(crate::UNTAKEN_STORIES.to_string())).collect(),
+                Some(p) if p == crate::UNTAKEN_STORIES => vec![p.to_string()],
                 // Every page changed the same way (its group: a signature's first 12 characters).
                 Some(p) if p.starts_with("group:") => {
                     let g = &p["group:".len()..];
@@ -2430,7 +2432,7 @@ impl Store {
     /// the change accepted once every one of them is.
     /// `first_unstable`: the first page moves by itself (its review says so).
     #[allow(clippy::too_many_arguments)]
-    fn visual_review(&self, r: &Row, rule: crate::settings::VisualReviewRule, threshold: f64, base: Option<&crate::BaseChange>, pages: &[crate::PageCheck], first_unstable: bool, shot: Option<String>) -> Result<Option<crate::VisualReview>> {
+    fn visual_review(&self, r: &Row, rule: crate::settings::VisualReviewRule, threshold: f64, base: Option<&crate::BaseChange>, pages: &[crate::PageCheck], first_unstable: bool, shot: Option<String>, untaken: u32) -> Result<Option<crate::VisualReview>> {
         if r.change_id.is_none() || rule == crate::settings::VisualReviewRule::Off {
             return Ok(None);
         }
@@ -2443,7 +2445,7 @@ impl Store {
         let sig_of = |path: &str| if path.is_empty() { first_sig.clone() } else { pages.iter().find(|p| p.path == path).and_then(|p| p.base_group.clone()) };
         let changed: Vec<(String, f64)> =
             std::iter::once((String::new(), first)).chain(pages.iter().filter_map(|p| Some((p.path.clone(), p.base_percent?)))).filter(|(_, pct)| *pct > threshold).collect();
-        let reviews: Vec<crate::PageReview> = changed
+        let mut reviews: Vec<crate::PageReview> = changed
             .iter()
             .map(|(path, percent)| {
                 let a = accepted(path);
@@ -2453,6 +2455,12 @@ impl Store {
                 crate::PageReview { path: path.clone(), percent: *percent, by: a.as_ref().map(|(by, _)| by.clone()), at: a.map(|(_, at)| at), unstable, group }
             })
             .collect();
+        // The stories the change touched that this head's run didn't take: unseen, so under
+        // review as one more entry (never carried to another head: each run leaves its own).
+        if untaken > 0 {
+            let a = accepted(crate::UNTAKEN_STORIES);
+            reviews.push(crate::PageReview { path: crate::UNTAKEN_STORIES.into(), percent: 0.0, by: a.as_ref().map(|(by, _)| by.clone()), at: a.map(|(_, at)| at), unstable: false, group: None });
+        }
         let percent = changed.iter().map(|(_, p)| *p).fold(0.0_f64, f64::max);
         let state = if reviews.is_empty() {
             crate::VisualState::Unchanged
@@ -2464,7 +2472,7 @@ impl Store {
         // Who accepted it: whoever accepted its last page.
         let last = reviews.iter().filter(|_| state == crate::VisualState::Accepted).max_by_key(|p| p.at);
         let (by, at) = (last.and_then(|p| p.by.clone()), last.and_then(|p| p.at));
-        Ok(Some(crate::VisualReview { state, branch: base.branch.clone(), percent, by, at, required: rule == crate::settings::VisualReviewRule::Required, head: shot.unwrap_or_default(), pages: reviews }))
+        Ok(Some(crate::VisualReview { state, branch: base.branch.clone(), percent, by, at, required: rule == crate::settings::VisualReviewRule::Required, head: shot.unwrap_or_default(), pages: reviews, untaken }))
     }
 
     /// Another page's screenshot (`previous`: the one before it).
@@ -3714,7 +3722,9 @@ impl Store {
             }).unwrap_or_default(),
         });
         let first_unstable = page_health.as_ref().is_some_and(|h| h.unstable);
-        let visual_review = self.visual_review(&r, settings.visual_review, settings.github.visual_threshold, base_change.as_ref(), &pages, first_unstable, f.head)?;
+        // What the run at the screenshot's head left out of what the change touched.
+        let untaken = self.runtime_fact::<crate::SkippedAt>(&r.id, "skipped")?.filter(|s| f.head.as_deref() == Some(s.head.as_str())).map_or(0, |s| s.skipped.touched_stories);
+        let visual_review = self.visual_review(&r, settings.visual_review, settings.github.visual_threshold, base_change.as_ref(), &pages, first_unstable, f.head, untaken)?;
         let page_speed = f.speed.map(|now| crate::PageSpeedView { now: now.without_shapes(), before: f.prev_speed.map(crate::PageSpeed::without_shapes) });
         // What the holder read against main's, for this head only (a push reads it again), and
         // whether it compared at this head at all (errors; routes too with traces).
