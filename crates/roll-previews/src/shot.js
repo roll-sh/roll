@@ -101,6 +101,10 @@ listeners.add((m) => {
 });
 const check = (params, sessionId) => (world == null ? Promise.resolve(null) : send("Runtime.evaluate", { ...params, contextId: world }, sessionId).catch(() => null));
 const checkIn = check;
+// The one read from the page's own JavaScript (its main world): a story's interaction test, which
+// only Storybook's own preview there knows. What it answers is the page's word about its own test
+// (a forged "passed" only hides its own failure): bounded to 2 s, and read as one of two words.
+const pageSays = (params, sessionId) => Promise.race([send("Runtime.evaluate", params, sessionId).catch(() => null), sleep(2000).then(() => null)]);
 // What a screen reader can't name, and what a document misses (WCAG's most common failures).
 const A11Y = `JSON.stringify((() => {
   const named = (el) => (el.getAttribute("aria-label") || "").trim() || el.getAttribute("aria-labelledby") || (el.getAttribute("title") || "").trim();
@@ -479,6 +483,20 @@ const ROOT_BOX = `JSON.stringify((() => {
   }
   return x2 > x1 && y2 > y1 ? { x: x1, y: y1, w: x2 - x1, h: y2 - y1 } : null;
 })())`;
+// A story's interaction test as Storybook ran it (Chromatic's interaction tests): its render in
+// Storybook's own preview (`__STORYBOOK_PREVIEW__.storyRenders`, 7 and later; read in the page's
+// own world, `pageSays`), "failed" when it
+// threw (its `play` function or its render: phase `errored`), "passed" when a `play` function ran
+// to its end, "pending" while it runs, "none" without one.
+const PLAY = (id) => `(() => {
+  const p = globalThis.__STORYBOOK_PREVIEW__;
+  const r = p && Array.isArray(p.storyRenders) ? p.storyRenders.find((x) => x && x.id === ${JSON.stringify(id)}) : null;
+  if (!r) return "none";
+  if (r.phase === "errored") return "failed";
+  if (!(r.story && r.story.playFunction)) return "none";
+  if (["played", "completing", "completed", "afterEach", "finished"].includes(r.phase)) return "passed";
+  return r.phase === "aborted" ? "none" : "pending";
+})()`;
 // touched-first: start
 // Stories the change touched first (Chromatic's TurboSnap): a story whose own file the change
 // changed, then one that imports a changed file from anywhere (through the bundler's module
@@ -584,6 +602,18 @@ const stories = async (sessionId) => {
       } catch {}
       if (!box) await sleep(100);
     }
+    // Its play function runs on render: until it ends (5 s at most), so the picture is after it.
+    let play = null;
+    for (let i = 0; i < 50 && Date.now() < until; i++) {
+      const r = await pageSays({ expression: PLAY(e.id), returnByValue: true }, sessionId);
+      const v = r?.result?.value;
+      if (v === "passed" || v === "failed") {
+        play = v;
+        break;
+      }
+      if (v !== "pending") break;
+      await sleep(100);
+    }
     await still(sessionId);
     const m = 8;
     const ok = box && [box.x, box.y, box.w, box.h].every(Number.isFinite);
@@ -595,6 +625,7 @@ const stories = async (sessionId) => {
     // than 30 s of the run are left, so a big Storybook still gets its pictures. 8 KB at most.
     const a11y = until - Date.now() > 30000 ? await axeReport(sessionId).catch(() => null) : null;
     const said = { id: e.id, errors: errors.length + failed.length - before };
+    if (play) said.play = play;
     if (a11y && JSON.stringify(a11y).length <= 8000) said.a11y = a11y;
     out.push(said);
   }

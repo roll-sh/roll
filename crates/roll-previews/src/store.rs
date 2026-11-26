@@ -2309,6 +2309,7 @@ impl Store {
                 unstable: report.unstable,
                 step: report.step,
                 step_ms: report.step_ms,
+                play: report.play,
                 base_group: sig.filter(|_| base.is_some()),
             })
             .collect())

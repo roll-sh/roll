@@ -2464,7 +2464,8 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
             let project = match &chosen {
                 Some(p) => match project_id(api, p).await {
                     Ok(id) => id,
-                    Err(_) if tty => {
+                    // A new project by a name; an id that isn't there is a typo, not a name.
+                    Err(_) if tty && !p.starts_with("prj_") => {
                         let id = s(&api.post("/v1/workspace/projects", json!({ "name": p })).await?["id"]);
                         eprintln!("made the project {p} ({id})");
                         id
@@ -2508,8 +2509,14 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
                 let mut set = serde_json::Map::new();
                 if let Ok(text) = std::fs::read_to_string(dir.join(".env")) {
                     let (vars, _) = parse_env(&text);
-                    if !vars.is_empty() && ask(&format!("set .env's {} variables on the service (names that read as secrets sealed)? [y/N] ", vars.len()), false)? {
-                        set.extend(vars.into_iter().map(|(k, v)| (k, Value::String(v))));
+                    // What a link set or roll sets stays theirs: a local DATABASE_URL would point the
+                    // first deploy at this machine, a PORT away from where roll routes.
+                    let (kept, theirs): (Vec<_>, Vec<_>) = vars.into_iter().partition(|(k, _)| !provided.contains(k.as_str()) && k != "PORT");
+                    if !kept.is_empty() && ask(&format!("set .env's {} variables on the service (secrets sealed)? [y/N] ", kept.len()), false)? {
+                        set.extend(kept.into_iter().map(|(k, v)| (k, Value::String(v))));
+                        if !theirs.is_empty() {
+                            eprintln!("left out: {} (the link or roll sets {})", theirs.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(", "), if theirs.len() == 1 { "it" } else { "them" });
+                        }
                     }
                 }
                 let missing: Vec<String> = wanted.iter().filter(|k| !set.contains_key(k.as_str()) && !provided.contains(k.as_str()) && k.as_str() != "PORT").cloned().collect();
@@ -2520,7 +2527,8 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
                     }
                 }
                 if !set.is_empty() {
-                    let seal: Vec<String> = set.keys().filter(|k| looks_secret(k)).cloned().collect();
+                    // A secret by its name, or a URL carrying a password (`mongodb://u:pw@…`).
+                    let seal: Vec<String> = set.iter().filter(|(k, v)| looks_secret(k) || v.as_str().is_some_and(url_with_password)).map(|(k, _)| k.clone()).collect();
                     api.call(reqwest::Method::PATCH, &format!("{}/variables", env_path(&svc, &u.target.env)), Some(json!({ "set": set, "seal": seal }))).await?;
                     eprintln!("set {} variables{}", set.len(), if seal.is_empty() { String::new() } else { format!(" ({} sealed)", seal.len()) });
                 }
@@ -2656,7 +2664,11 @@ fn fill_vars(app: &str, vars: &std::collections::BTreeMap<String, apps_build::pr
     Ok(out)
 }
 
-/// Whether a variable's name reads as a secret, as the dashboard's `looksSecret` does.
+/// Whether a value is a URL with a password in it (`scheme://user:password@host`).
+fn url_with_password(v: &str) -> bool {
+    v.split_once("://").and_then(|(_, rest)| rest.split(['/', '?', '#']).next()).and_then(|auth| auth.rsplit_once('@')).is_some_and(|(user, _)| user.split_once(':').is_some_and(|(_, pw)| !pw.is_empty()))
+}
+
 /// A line read from the terminal, trimmed.
 fn prompt(q: &str) -> anyhow::Result<String> {
     use std::io::{BufRead, Write};
@@ -2673,6 +2685,7 @@ fn ask(q: &str, yes: bool) -> anyhow::Result<bool> {
     Ok(if a.is_empty() { yes } else { a.starts_with('y') })
 }
 
+/// Whether a variable's name reads as a secret, as the dashboard's `looksSecret` does.
 fn looks_secret(name: &str) -> bool {
     let n = name.to_ascii_uppercase();
     let words = ["SECRET", "TOKEN", "PASSWORD", "PASSWD", "PASS", "PRIVATE_KEY", "API_KEY", "ACCESS_KEY", "KEY", "CREDENTIAL", "CREDENTIALS", "DSN"];
@@ -5885,6 +5898,12 @@ fn metric_alert(rule: &str) -> anyhow::Result<Value> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_url_with_a_password_is_sealed_whatever_its_name() {
+        assert!(super::url_with_password("mongodb://app:s3cret@db.example:27017/app"));
+        assert!(!super::url_with_password("https://example.com/a@b") && !super::url_with_password("redis://cache:6379") && !super::url_with_password("plain"));
+    }
+
     #[test]
     fn imports_know_files_by_name_and_metric_alerts_read_as_rules() {
         use std::path::Path;

@@ -779,6 +779,11 @@ impl Secrets {
         }
         db.ensure_schema(outside::SCHEMA)?;
         db.ensure_schema(backup_schedule::SCHEMA)?;
+        // Whether a schedule's backups carry registrations' keys (its maker isn't a token), and an
+        // incident's pause (backup_schedule.rs).
+        db.add_column("backup_schedules", "registrations", "INTEGER NOT NULL DEFAULT 1")?;
+        db.add_column("backup_schedules", "paused_at", "INTEGER")?;
+        db.add_column("backup_schedules", "paused_why", "TEXT")?;
         // A rotation's new admin URL, kept until the server took it (outside.rs).
         db.add_column("outside_dbs", "url_next", "BLOB")?;
         db.add_column("outside_dbs", "url_next_at", "INTEGER")?;
