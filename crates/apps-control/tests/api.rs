@@ -3472,6 +3472,37 @@ async fn status_page_incidents_open_and_close() {
     assert_eq!(state(&w, page).await, (json!("resolved"), true));
 }
 
+/// A hostname another environment holds is taken by whoever proves its DNS (Vercel's "linked to
+/// another team"): a TXT record of the claimant's own at its challenge name, then one write moves
+/// it, and the holder is told.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_held_domain_is_claimed_by_proving_its_dns() {
+    let w = world().await;
+    let (a, _) = image_service(&w, "squatter", json!({"port": 80})).await;
+    let (b, _) = image_service(&w, "owner", json!({"port": 80})).await;
+    let (a, b) = (a["id"].as_str().unwrap().to_string(), b["id"].as_str().unwrap().to_string());
+    let domains = |id: &str| format!("/v1/apps/services/{id}/environments/production/domains");
+    assert_eq!(call(&w.api, "POST", &domains(&a), Some(json!({"hostname": "shop.acme.dev"}))).await.0, StatusCode::CREATED);
+    let (st, v) = call(&w.api, "POST", &domains(&b), Some(json!({"hostname": "shop.acme.dev"}))).await;
+    assert!(st == StatusCode::CONFLICT && v["error"].as_str().unwrap().contains("/claim"), "{v}");
+    let claim = format!("{}/shop.acme.dev/claim", domains(&b));
+    let (st, c) = call(&w.api, "POST", &claim, None).await;
+    assert_eq!((st, c["claimed"].as_bool(), c["txt"]["name"].as_str()), (StatusCode::OK, Some(false), Some("_roll-challenge.shop.acme.dev")), "{c}");
+    assert_eq!(call(&w.api, "POST", &claim, None).await.1["txt"], c["txt"], "the same token until it's used");
+    // The holder's own challenge doesn't prove the claimant's.
+    let held = call(&w.api, "GET", &domains(&a), None).await.1;
+    let held_token = held.as_array().unwrap().iter().find(|d| d["hostname"] == "shop.acme.dev").unwrap()["token"].as_str().unwrap().to_string();
+    w.dns.add("_roll-challenge.shop.acme.dev", "TXT", &held_token);
+    assert_eq!(call(&w.api, "POST", &claim, None).await.1["claimed"], false);
+    w.dns.add("_roll-challenge.shop.acme.dev", "TXT", c["txt"]["value"].as_str().unwrap());
+    let (st, t) = call(&w.api, "POST", &claim, None).await;
+    assert_eq!((st, t["claimed"].as_bool(), t["domain"]["status"].as_str()), (StatusCode::OK, Some(true), Some("active")), "{t}");
+    assert!(!call(&w.api, "GET", &domains(&a), None).await.1.to_string().contains("shop.acme.dev"), "gone from the holder");
+    let events = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1;
+    assert!(events["events"].as_array().unwrap().iter().any(|e| e["kind"] == "domain.expired" && e["service"] == a.as_str() && e["data"]["reason"] == "claimed"), "the holder is told: {events}");
+    assert_eq!(call(&w.api, "POST", &format!("{}/free.acme.dev/claim", domains(&b)), None).await.0, StatusCode::BAD_REQUEST, "a free name is added, not claimed");
+}
+
 /// A custom domain's records written at the customer's Cloudflare (Vercel's own DNS): the token a
 /// `roll://` reference the caller may reveal, read as them for the call; then it's verified.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
