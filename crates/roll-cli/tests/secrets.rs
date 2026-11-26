@@ -1012,7 +1012,7 @@ async fn a_pre_receive_hook_refuses_a_push_adding_a_production_value_with_a_scan
     let (passed, said) = push_as(&["-o", "breakglass"], &alice);
     assert!(passed && said.contains("breakglass"), "{said}");
     let audit: serde_json::Value = reqwest::get(format!("{api}/v1/secrets/projects/{prj}/audit?action=secrets.scan.breakglass")).await.unwrap().json().await.unwrap();
-    assert_eq!(audit[0]["keys"], serde_json::json!(["DATABASE_URL"]), "{audit}");
+    assert_eq!(audit[0]["keys"], serde_json::json!(["API_KEY", "DATABASE_URL"]), "{audit}");
     let summary = audit[0]["summary"].as_str().unwrap_or_default();
     assert!(summary.contains("by alice to refs/heads/main"), "{audit}");
     // What it let through is leaked: reported as such, and the managed key rotated.
