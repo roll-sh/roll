@@ -760,6 +760,14 @@ lands on production while the preview is open isn't read as this one dropping it
 lines or the risks. A branch made before bases were kept, or whose base couldn't be read (said in
 its activity), is compared with its parent alone.
 
+Other open changes whose previews' schema changes touch the same tables are named under them
+(`schema_overlaps`, PlanetScale's conflicting deploy requests: a table added or dropped, a
+column, a constraint or an index on it, `roll_previews::schema::tables_touched`; 5 changes and 5
+tables each at most), on the sheet and in the pull request comment ("**Also changing these
+tables:** `feat/b` (`public.users`). Whichever lands second migrates a table the first one
+changed"), since the second to land migrates a table the first already changed
+(`engine.rs::open_changes_that_change_the_same_tables_name_each_other`).
+
 What in those lines would hurt production when the change lands is named above them
 (`schema_risks`, `roll_previews::schema::risks`; PlanetScale's deploy request warnings, Atlas's
 migration lint): a table that goes ("production's rows go with it"), a column that goes, a
@@ -2076,6 +2084,7 @@ type Preview = {
   cost: { sleeping_usd_month: number; active_usd_hour: number; month_to_date_usd: number; runs_usd: number; bytes: number }; // runs_usd: of month_to_date, its browsers' and jobs' containers
   schema_changes: string[] | null;    // "+ …"/"- …" against the parents, once read at `head`; null: not known
   schema_risks?: string[];            // what in them would hurt production when it lands (dropped tables and columns, type changes, NOT NULL)
+  schema_overlaps?: { preview: string; branch: string; tables: string[] }[]; // other open changes whose schema changes touch the same tables
   kept_until: number | null;          // kept past its TTL until then (POST …/keep)
   pull?: { number: number; url: string; fork: boolean; approved_head: string | null; approved_by: string | null };
                                       // a Git URL service's pull request (roll apps' push hook); a fork's runs only at approved_head
@@ -2964,8 +2973,8 @@ services' stop, which products' restore points save, the CLI's commands).
 1. **More stories per run, in review** (Chromatic has no per-build cap): `github.story_runs`,
    up to 4 containers side by side, 160 stories.
 2. **A migration rehearsed on today's production** (PlanetScale's deploy requests; M): before
-   landing (or asked), branch fresh, run the release again and compare; open previews whose
-   schema changes touch the same table are named on each other.
+   landing (or asked), branch fresh, run the release again and compare. Its other half, open
+   previews whose schema changes touch the same tables named on each other, in review.
 3. **The feedback button for team-access visitors on roll apps previews** (S, with roll apps:
    `apps-control/src/public.rs` adds it for link and share visitors only).
 4. **This page on main, from the toolbar** (Vercel's deployment switcher; S): main's preview

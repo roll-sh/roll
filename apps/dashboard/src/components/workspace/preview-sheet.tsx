@@ -446,6 +446,16 @@ export function PreviewSheet({
                     </div>
                   ))}
                 </pre>
+                {p.schema_overlaps && p.schema_overlaps.length > 0 && (
+                  <ul className="mt-1.5 space-y-0.5 text-[11.5px] text-soft" aria-label="Other changes changing these tables">
+                    {p.schema_overlaps.map((o) => (
+                      <li key={o.preview} className="break-words">
+                        <span className="font-mono text-[11px] text-fg">{o.branch || o.preview}</span> also changes{" "}
+                        <span className="font-mono text-[11px]">{o.tables.join(", ")}</span>: whichever lands second migrates a table the first changed.
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </>
             )}
 
