@@ -1255,6 +1255,7 @@ previews are listed once those products are on.
 | `search_delete_site_verification` | Drop a site's verification. | `DELETE /v1/search/clusters/{cluster}/site-verifications/{site}` |
 | `search_refresh` | Make what was just indexed searchable now. | `POST /v1/search/clusters/{cluster}/indices/{index}/refresh` |
 | `search_analyze` | The tokens an index's analyzer makes of some text, or a chain tried inline (`tokenizer`, `filter`, `char_filter`, `explain`) (read). | `POST /v1/search/clusters/{cluster}/indices/{index}/analyze` |
+| `search_evaluate` | One or two search configurations (a body with `{{query}}`, or a template) scored against judged queries by `_rank_eval` (nDCG@10 by default), and compared query by query: the difference and the queries that got better or worse (read). | `POST /v1/search/clusters/{cluster}/indices/{index}/evaluate` |
 | `search_add_document` | Index a document under a new id. | `POST /v1/search/clusters/{cluster}/indices/{index}/docs` |
 | `search_bulk` | Index, update or delete many documents (NDJSON); deleting is delete. | `POST /v1/search/clusters/{cluster}/indices/{index}/bulk` |
 | `search_delete_by_query` | Delete every document that matches a query, at most `max_docs`, stopping or going on past conflicts. | `POST /v1/search/clusters/{cluster}/indices/{index}/delete_by_query` |

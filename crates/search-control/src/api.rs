@@ -105,6 +105,7 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/indices/{index}/bulk", post(index_bulk))
         .route("/v1/search/clusters/{id}/indices/{index}/delete_by_query", post(index_delete_by_query))
         .route("/v1/search/clusters/{id}/indices/{index}/update_by_query", post(index_update_by_query))
+        .route("/v1/search/clusters/{id}/indices/{index}/evaluate", post(index_evaluate))
         .route("/v1/search/clusters/{id}/tasks/{task}", get(cluster_task))
         .route("/v1/search/clusters/{id}/indices/{index}/suggestions", get(suggestions))
         .route("/v1/search/clusters/{id}/indices/{index}/suggestions/rebuild", post(rebuild_suggestions))
@@ -822,6 +823,30 @@ index_route!(index_search, "POST", "/search", "/_search", true, EsBody::Json);
 index_route!(doc_create, "POST", "/docs", "/_doc", false, EsBody::Json);
 index_route!(index_bulk, "POST", "/bulk", "/_bulk", false, EsBody::Ndjson);
 index_route!(index_delete_by_query, "POST", "/delete_by_query", "/_delete_by_query", true, EsBody::Json);
+
+/// `POST …/indices/{index}/evaluate`: one or two search configurations scored against a judgment
+/// list by the cluster's `_rank_eval` on that index, run as the index's routes run (the owner
+/// narrowed to the index), and compared query by query ([`crate::evaluate`]). A configuration the
+/// cluster refuses answers the cluster's own error.
+async fn index_evaluate(State(c): State<AppState>, Path((id, index)): Path<(String, String)>, headers: HeaderMap, body: Body) -> Result<Response, ControlError> {
+    let seg = index_segment(&index, true)?;
+    let cluster = c.get(&id).await?;
+    let mut held = Reservation::none();
+    let bytes = read_limited(body, (cluster.max_body_mb.max(1) as usize) << 20, declared(&headers), c.node.body_budget(), &mut held).await.map_err(|e| read_error(&cluster, e))?;
+    let spec = crate::evaluate::parse(&bytes).map_err(ControlError::Invalid)?;
+    drop(held);
+    let mut answers = Vec::with_capacity(spec.configurations.len());
+    for conf in &spec.configurations {
+        let req = serde_json::to_vec(&crate::evaluate::rank_eval_body(&spec, conf, &index)).unwrap_or_default();
+        let (status, ct, out) = c.es(&id, "POST", &format!("/{seg}/_rank_eval"), Some(index.as_str()), Some("application/json"), bytes::Bytes::from(req)).await?;
+        if status != 200 {
+            let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+            return Ok((code, [(axum::http::header::CONTENT_TYPE, ct)], out).into_response());
+        }
+        answers.push(serde_json::from_slice::<Value>(&out).map_err(|e| ControlError::Internal(anyhow::anyhow!("rank_eval answered no JSON: {e}")))?);
+    }
+    Ok(Json(crate::evaluate::answer(&spec, &answers)).into_response())
+}
 
 /// What `…/update_by_query`'s body may hold: `_update_by_query`'s own, plus `slices` (Elasticsearch
 /// takes it in the URL; it's moved there).

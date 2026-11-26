@@ -1450,6 +1450,8 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/search/clusters/{id}/indices/{index}/search", "search", R, one(PG, "cluster")).index("index"),
     // Analyzing text with an index's analyzers reads the index.
     row("POST", "/v1/search/clusters/{id}/indices/{index}/analyze", "search", R, one(PG, "cluster")).index("index"),
+    // Scoring search configurations against judgments runs searches of the index, nothing else.
+    row("POST", "/v1/search/clusters/{id}/indices/{index}/evaluate", "search", R, one(PG, "cluster")).index("index"),
     row("POST", "/v1/search/clusters/{id}/indices/{index}/delete_by_query", "search", D, one(PG, "cluster")).index("index"),
     // Each document indexed again (embedding a field added since): write; a script can delete
     // (`ctx.op = 'delete'`), so with one it's delete, as a bulk's script is.
