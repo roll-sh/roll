@@ -233,7 +233,7 @@ fn some<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> std::res
     T::deserialize(d).map(Some)
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Policy {
     pub protected: bool,
@@ -245,6 +245,18 @@ pub struct Policy {
     /// HTTPS URL); `null` stops it, absent keeps it. Kept sealed: the URL is a credential.
     #[serde(default, deserialize_with = "some")]
     pub notify_url: Option<Option<String>>,
+}
+
+/// Never the notify URL (a credential).
+impl std::fmt::Debug for Policy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Policy")
+            .field("protected", &self.protected)
+            .field("approvals", &self.approvals)
+            .field("approvers", &self.approvers)
+            .field("notify_url", &self.notify_url.as_ref().map(crate::crypto::redacted))
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -553,6 +565,15 @@ impl Secrets {
                 c.execute("UPDATE environments SET trusted = 1 WHERE id = ?", [&env.id])?;
                 env.trusted = true;
             }
+            // A new `production` is born at roll secrets' policy, as a new project's is.
+            if kind == Kind::Standard
+                && new.slug == crate::PRODUCTION
+                && let Some(n) = crate::guardrails::read(c)?.born_approvals()
+            {
+                c.execute("UPDATE environments SET protected = 1, approvals = ? WHERE id = ?", params![n, env.id])?;
+                env.protected = true;
+                env.approvals = n;
+            }
             if !branched.is_empty() {
                 c.execute("UPDATE environments SET branches = ? WHERE id = ?", params![json(&branched), env.id])?;
                 env.branches = branched.clone();
@@ -601,6 +622,13 @@ impl Secrets {
                 env.max_age_days = d;
             }
             if let Some(new) = change.slug.as_deref().filter(|s| *s != slug) {
+                // Under a production floor, `production` stays one, and what becomes it meets it.
+                if env.kind == Kind::Standard && slug == crate::PRODUCTION {
+                    crate::guardrails::read(c)?.keeps_production()?;
+                }
+                if env.kind == Kind::Standard && new == crate::PRODUCTION {
+                    crate::guardrails::read(c)?.production(env.protected, env.approvals)?;
+                }
                 free(c, project, new)?;
                 c.execute("UPDATE environments SET slug = ? WHERE id = ?", [new, &env.id])?;
                 env.slug = new.to_string();
@@ -665,6 +693,9 @@ impl Secrets {
             }
             if env.kind == Kind::Ephemeral && p.protected {
                 return Err(Error::BadRequest("an ephemeral environment can't be protected".into()));
+            }
+            if slug == crate::PRODUCTION && env.kind == Kind::Standard {
+                crate::guardrails::read(c)?.production(p.protected, approvals)?;
             }
             c.execute("UPDATE environments SET protected = ?, approvals = ?, approvers = ? WHERE id = ?", params![p.protected as i64, approvals, json(&approvers), env.id])?;
             let summary = if p.protected { format!("protected, {approvals} approval{}", if approvals == 1 { "" } else { "s" }) } else { "unprotected".into() };
@@ -916,6 +947,9 @@ pub(crate) fn deletable(c: &Conn<'_>, project: &str, env: &EnvRow) -> Result<()>
     let dependants: i64 = c.query_row("SELECT COUNT(*) FROM environments WHERE base_id = ? AND forgotten_at IS NULL", [&env.id], |r| r.get(0))?;
     if dependants > 0 {
         return Err(Error::Conflict("conflict", format!("{dependants} ephemeral environment(s) are based on {}: delete them first", env.slug)));
+    }
+    if env.kind == Kind::Standard && env.slug == crate::PRODUCTION {
+        crate::guardrails::read(c)?.keeps_production()?;
     }
     Ok(())
 }

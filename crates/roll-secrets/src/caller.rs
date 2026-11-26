@@ -271,7 +271,7 @@ impl Secrets {
     }
 
     /// Who may replace a registration's credential (a SaaS rotator's, a public certificate's DNS
-    /// token, a rotator's endpoint): as [`Secrets::maker_of`], since the new credential makes them
+    /// token, a rotator's endpoint, an outside database's admin URL): as [`Secrets::maker_of`], since the new credential makes them
     /// its maker. Asked before the credential is checked with its vendor; a workload identity's
     /// login is refused (400).
     pub(crate) fn replacer(&self, caller: &Caller) -> Result<Replacer> {
@@ -370,6 +370,8 @@ pub(crate) enum Registration {
     PublicCertDns,
     /// `rotators.url`: the endpoint roll calls is what it trusts.
     RotatorUrl,
+    /// `outside_dbs.url`: the admin URL carries the database's admin password.
+    OutsideUrl,
 }
 
 /// Write a registration's new (sealed) credential and make `by` its maker in the same statement: a
@@ -382,6 +384,7 @@ pub(crate) fn replace_registration_credential(c: &code_sql::Conn<'_>, what: Regi
         Registration::Saas => ("saas_rotators", "credential"),
         Registration::PublicCertDns => ("public_certs", "dns_credential"),
         Registration::RotatorUrl => ("rotators", "url"),
+        Registration::OutsideUrl => ("outside_dbs", "url"),
     };
     let old: String = c.query_row(&format!("SELECT created_by FROM {table} WHERE id = ?"), [id], |r| r.get(0))?;
     c.execute(&format!("UPDATE {table} SET {column} = ?, created_by = ? WHERE id = ?"), code_sql::params![sealed, by.0, id])?;

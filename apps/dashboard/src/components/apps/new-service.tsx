@@ -30,6 +30,9 @@ const FROM: { value: From; label: string; Icon: typeof GitBranch }[] = [
 const field = "h-8 w-full rounded-lg border border-line-2 bg-canvas px-2.5 font-mono text-[12px] outline-none placeholder:text-subtle focus:border-accent/60";
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
+/** A folder's service name: its last segment, as a name may be (`apps/web` → `web`). */
+export const folderName = (root: string) =>
+  (root.split("/").filter(Boolean).pop() ?? "app").toLowerCase().replace(/[^a-z0-9-]+/g, "-").slice(0, 32).replace(/^-+|-+$/g, "") || "app";
 
 /** A word for `sh`: as is when it's plain, else in single quotes. */
 const shellQuote = (w: string) => (/^[A-Za-z0-9_./-]+$/.test(w) ? w : `'${w.replace(/'/g, `'\\''`)}'`);
@@ -67,7 +70,12 @@ export function NewServiceSheet({
   // Any public Git URL instead (GitHub, GitLab…): no app to install, no mirror.
   const [gitUrl, setGitUrl] = useState("");
   const [gitBranch, setGitBranch] = useState("");
+  // A roll code repo's branch to follow (Vercel's, Render's import): its default when empty.
+  const [repoBranch, setRepoBranch] = useState("");
+  const [migrate, setMigrate] = useState(true);
   const [root, setRoot] = useState("");
+  // A monorepo's folders picked at once (Railway's monorepo import): one service each.
+  const [pickedRoots, setPickedRoots] = useState<string[]>([]);
   const [image, setImage] = useState("");
   const [regUser, setRegUser] = useState("");
   const [regPassword, setRegPassword] = useState("");
@@ -140,7 +148,7 @@ export function NewServiceSheet({
   const loginKey = "git_login" in gitLogin ? `${regUser.trim()}:${loginRev}` : "";
   const planKey = `${git || repo}\n${gitBranch.trim()}\n${root.trim()}\n${loginKey}`;
   useEffect(() => {
-    if (from !== "repo" || (!git && !repo) || (git && !/^https?:\/\/[^/@\s]+\/\S+$/.test(git))) return;
+    if (from !== "repo" || (!git && !repo) || (git && !/^https:\/\/[^/@\s]+\/\S+$/.test(git))) return;
     let live = true;
     const at = root.trim() ? { root: root.trim() } : {};
     const t = setTimeout(() => {
@@ -158,7 +166,7 @@ export function NewServiceSheet({
   }, [from, repo, git, gitBranch, root, planKey]);
   const rootsKey = `${git || repo}\n${gitBranch.trim()}\n${loginKey}`;
   useEffect(() => {
-    if (from !== "repo" || (!git && !repo) || (git && !/^https?:\/\/[^/@\s]+\/\S+$/.test(git)) || roots?.key === rootsKey) return;
+    if (from !== "repo" || (!git && !repo) || (git && !/^https:\/\/[^/@\s]+\/\S+$/.test(git)) || roots?.key === rootsKey) return;
     let live = true;
     const t = setTimeout(() => {
       appsApi.roots(git ? { git, ...(gitBranch.trim() ? { branch: gitBranch.trim() } : {}), ...gitLogin } : { repo }).then(
@@ -217,10 +225,17 @@ export function NewServiceSheet({
   const parsed = useMemo(() => parseEnv(env), [env]);
   // What its `.env.example` names that isn't set yet (a database it links sets its own URL).
   const expects = from === "repo" && plan?.key === planKey ? (plan.plan?.variables ?? []) : [];
-  const linkedUrls = new Set([...(links.size || make.size ? ["DATABASE_URL", "PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGDATABASE", "REDIS_URL"] : [])]);
+  // By what's linked or made: a Redis link sets no DATABASE_URL.
+  const linkedKinds = new Set<string>([...make, ...[...links].map((k) => k.split(":")[0]!)]);
+  const linkedUrls = new Set([...(linkedKinds.has("postgres") ? ["DATABASE_URL", "PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGDATABASE"] : []), ...(linkedKinds.has("redis") ? ["REDIS_URL"] : [])]);
   const unset = expects.filter((n) => !(n in parsed.vars) && !linkedUrls.has(n));
-  const scheduleOk = kind !== "cron" || schedule.trim().split(/\s+/).length === 5;
+  // Five fields, or a macro the server reads (`@daily`, `@hourly`…).
+  const scheduleOk = kind !== "cron" || schedule.trim().split(/\s+/).length === 5 || /^@(yearly|annually|monthly|weekly|daily|midnight|hourly)$/.test(schedule.trim());
   const healthOk = !health.trim() || health.trim().startsWith("/");
+  // What the framework suggests (`fly launch`'s release command): its migrations before each
+  // deploy, offered ticked; its health route, as the health check's default.
+  const suggest = from === "repo" && plan?.key === planKey ? plan.plan?.suggest : undefined;
+  const healthPath = health.trim() || suggest?.health_path || "";
   const ready = !!source && gitOk && SERVICE_NAME.test(name) && portOk && healthOk && scheduleOk && parsed.errors.length === 0 && !busy;
 
   const create = async () => {
@@ -229,7 +244,7 @@ export function NewServiceSheet({
     setError(null);
     try {
       const variables = Object.keys(parsed.vars).length ? { variables: parsed.vars } : {};
-      const web = { ...(portN ? { port: portN } : {}), ...(health.trim() ? { health_path: health.trim() } : {}) };
+      const web = { ...(portN ? { port: portN } : {}), ...(healthPath ? { health_path: healthPath } : {}), ...(suggest?.pre_deploy && migrate ? { pre_deploy: suggest.pre_deploy } : {}) };
       const run = kind === "web" ? (Object.keys(web).length ? web : undefined) : kind === "cron" ? { type: kind, schedule: schedule.trim() } : { type: kind };
       const login = regUser.trim() && regPassword ? { username: regUser.trim(), password: regPassword } : null;
       const registry = from === "image" && login ? { registry: login } : from === "repo" && gitUrl.trim() && login ? { git_login: login } : {};
@@ -263,8 +278,38 @@ export function NewServiceSheet({
         ...fresh.map((r) => ({ kind: LINKABLE[r.kind]!, ref: r.ref })),
         ...linkable.filter((v) => links.has(resourceKey(v)) && !freshKeys.has(resourceKey(v))).map((v) => ({ kind: LINKABLE[v.kind]!, ref: v.ref })),
       ];
-      const branch = source.kind === "git" && gitBranch.trim() ? { branch: gitBranch.trim() } : {};
-      const s = await appsApi.create({ project: project.id, name, source, ...branch, ...(run ? { run } : {}), ...variables, ...registry, ...(chosen.length ? { links: chosen } : {}), ...spot });
+      const picked = source.kind === "git" ? gitBranch.trim() : source.kind === "repo" ? repoBranch.trim() : "";
+      const branch = picked ? { branch: picked } : {};
+      const common = { project: project.id, ...branch, ...variables, ...registry, ...(chosen.length ? { links: chosen } : {}) };
+      // Several folders: a service each, side by side, each watching its own folder.
+      if (pickedRoots.length > 1 && (source.kind === "repo" || source.kind === "git")) {
+        // What was typed only: the plan (its port, its framework's migrations and health route)
+        // is the first folder's, and another folder's framework may be another.
+        const typed = { ...(portN ? { port: portN } : {}), ...(health.trim() ? { health_path: health.trim() } : {}) };
+        const own = kind === "web" ? (Object.keys(typed).length ? { run: typed } : {}) : run ? { run } : {};
+        const taken = new Set([...ws.inventory.values()].map((v) => v.name));
+        const made: Service[] = [];
+        for (const [i, r] of pickedRoots.entries()) {
+          let n = folderName(r);
+          for (let k = 2; taken.has(n); k++) n = `${folderName(r).slice(0, 29).replace(/-+$/, "")}-${k}`;
+          taken.add(n);
+          setStep(`Making ${n}…`);
+          try {
+            made.push(await appsApi.create({ ...common, ...own, name: n, source: { ...source, root: r }, build: { watch: [`${r}/**`] }, x: spot.x + i * 300, y: spot.y }));
+          } catch (e) {
+            // Those made stay (on the canvas once it's read again); a retry takes the rest.
+            if (made.length) {
+              void refreshInventory();
+              setPickedRoots(pickedRoots.slice(i));
+              throw new Error(`made ${made.map((m) => m.name).join(", ")}; ${n} wasn't: ${message(e)}`);
+            }
+            throw e;
+          }
+        }
+        onCreated(made[made.length - 1]!);
+        return;
+      }
+      const s = await appsApi.create({ ...common, ...(run ? { run } : {}), name, source, ...spot });
       onCreated(s);
     } catch (e) {
       setError(message(e));
@@ -315,6 +360,14 @@ export function NewServiceSheet({
                 ))}
               </select>
             )}
+            {repo && !gitUrl.trim() && (
+              <>
+                <Label>
+                  Branch <span className="font-normal">optional; production follows it</span>
+                </Label>
+                <input value={repoBranch} onChange={(e) => setRepoBranch(e.target.value)} placeholder="its default branch" aria-label="Repository branch" className={field} spellCheck={false} />
+              </>
+            )}
             <FromGithub
               onPicked={(full) => {
                 setReload((n) => n + 1);
@@ -363,22 +416,41 @@ export function NewServiceSheet({
             <Label>
               Root directory <span className="font-normal">optional</span>
             </Label>
-            <input value={root} onChange={(e) => setRoot(e.target.value)} placeholder="apps/web" className={field} spellCheck={false} />
+            <input
+              value={root}
+              onChange={(e) => {
+                setRoot(e.target.value);
+                setPickedRoots([]);
+              }}
+              placeholder="apps/web"
+              className={field}
+              spellCheck={false}
+            />
             {roots?.key === rootsKey && roots.list.length > 0 && (
               <div className="mt-1.5 flex flex-wrap gap-1" aria-label="Folders that build">
                 {roots.list.map((c) => (
                   <button
                     key={c.root}
                     type="button"
-                    onClick={() => setRoot(root === c.root ? "" : c.root)}
-                    aria-pressed={root === c.root}
-                    className={`h-6 rounded-md border px-1.5 font-mono text-[11px] transition-colors ${root === c.root ? "border-accent/60 text-fg" : "border-line-2 text-muted hover:text-fg"}`}
+                    onClick={() => {
+                      const was = pickedRoots.length ? pickedRoots : root ? [root] : [];
+                      const next = was.includes(c.root) ? was.filter((r) => r !== c.root) : [...was, c.root];
+                      setPickedRoots(next);
+                      setRoot(next[0] ?? "");
+                    }}
+                    aria-pressed={(pickedRoots.length ? pickedRoots : [root]).includes(c.root)}
+                    className={`h-6 rounded-md border px-1.5 font-mono text-[11px] transition-colors ${(pickedRoots.length ? pickedRoots : [root]).includes(c.root) ? "border-accent/60 text-fg" : "border-line-2 text-muted hover:text-fg"}`}
                     title={`${c.framework ?? c.provider} builds there`}
                   >
                     {c.root}
                   </button>
                 ))}
               </div>
+            )}
+            {pickedRoots.length > 1 && (
+              <p className="mt-1.5 text-[11px] leading-relaxed text-subtle">
+                {pickedRoots.length} services, one per folder: each named after its folder and deployed only by changes in it (Settings → Watch paths adds a shared one).
+              </p>
             )}
           </>
         )}
@@ -450,13 +522,21 @@ export function NewServiceSheet({
             {kind === "web" && (
               <>
                 <Label>
-                  Port <span className="font-normal">{from === "repo" && plan?.plan ? `detected ${plan.plan.port}` : "default 8080"}</span>
+                  Port <span className="font-normal">{from === "repo" && plan?.plan ? `detected ${plan.plan.port}` : from === "image" ? "default: the one the image exposes" : "default 8080"}</span>
                 </Label>
-                <input value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))} placeholder={String(plan?.plan?.port ?? 8080)} inputMode="numeric" className={field} />
+                <input value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))} placeholder={from === "image" ? "its EXPOSE" : String(plan?.plan?.port ?? 8080)} inputMode="numeric" className={field} />
                 <Label>
                   Health check path <span className="font-normal">optional; none: the port accepting</span>
                 </Label>
-                <input value={health} onChange={(e) => setHealth(e.target.value)} placeholder="/healthz" spellCheck={false} className={`${field} font-mono ${health && !health.startsWith("/") ? "border-danger/60" : ""}`} />
+                <input value={health} onChange={(e) => setHealth(e.target.value)} placeholder={suggest?.health_path ?? "/healthz"} spellCheck={false} className={`${field} font-mono ${health && !health.startsWith("/") ? "border-danger/60" : ""}`} />
+                {suggest?.pre_deploy && (
+                  <label className="mt-2 flex items-start gap-2 text-[11.5px] text-muted">
+                    <input type="checkbox" checked={migrate} onChange={(e) => setMigrate(e.target.checked)} className="mt-0.5" />
+                    <span>
+                      Run its migrations before each deploy: <code className="font-mono text-fg">{suggest.pre_deploy}</code>
+                    </span>
+                  </label>
+                )}
               </>
             )}
             {kind === "cron" && (

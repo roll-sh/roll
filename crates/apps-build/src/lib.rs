@@ -48,7 +48,7 @@ use serde::{Deserialize, Serialize};
 
 pub use caches::{LAYERS_ARG, isolate_caches};
 pub use tree::{DirTree, MapTree, SubTree, Tree};
-pub use node::{WorkspaceApp, workspace_app};
+pub use node::{WorkspaceApp, workspace_app, workspace_deps};
 pub use uses::{Datastore, uses};
 /// A plan's start when it serves files from `/site` (busybox httpd): a static site.
 pub const STATIC_START: &str = static_site::START;
@@ -146,6 +146,10 @@ pub struct Plan {
     /// service sets none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release: Option<String>,
+    /// What the framework says a new service should set ([`suggest`]): offered when it's made,
+    /// never applied to a service on its own (unlike `release`).
+    #[serde(default, skip_serializing_if = "Suggest::is_empty")]
+    pub suggest: Suggest,
     /// vercel.json's `crons`: paths the service calls on a schedule ([`site_configs::vercel_crons`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub crons: Vec<Cron>,
@@ -332,6 +336,19 @@ pub fn plan(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
     {
         p.release = Some(cmd.clone());
         p.notes.push(format!("pre-deploy: the Procfile's release: {cmd}"));
+    }
+    // What its framework's migrations and health route say a new service should set.
+    if !own_dockerfile && p.provider != Provider::Static && overrides.process.as_deref().is_none_or(|w| w == "web") {
+        p.suggest = suggest(tree, p.provider);
+        if p.release.is_some() {
+            p.suggest.pre_deploy = None;
+        }
+        if let Some(cmd) = &p.suggest.pre_deploy {
+            p.notes.push(format!("its migrations: suggested as the pre-deploy command ({cmd})"));
+        }
+        if let Some(h) = &p.suggest.health_path {
+            p.notes.push(format!("its health route: suggested as the health check ({h})"));
+        }
     }
     // A runtime past (or near) its end of life: said, so a deploy isn't quietly unpatched.
     if let Some(v) = p.language_version.clone() {
@@ -608,6 +625,7 @@ impl Draft {
             uses: Vec::new(),
             variables: Vec::new(),
             release: None,
+            suggest: Suggest::default(),
             crons: Vec::new(),
             functions: Vec::new(),
             edge: Vec::new(),
@@ -653,4 +671,48 @@ pub(crate) fn join(dir: &str, path: &str) -> String {
     } else {
         format!("{dir}/{path}")
     }
+}
+
+/// A new service's settings its framework suggests (`fly launch`'s release command, Render's
+/// Pre-Deploy Command): migrations before each deploy, and the health route the app declares.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct Suggest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pre_deploy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health_path: Option<String>,
+}
+
+impl Suggest {
+    pub fn is_empty(&self) -> bool {
+        self.pre_deploy.is_none() && self.health_path.is_none()
+    }
+}
+
+/// Rails' `db:prepare` with `db/migrate`, Django's `migrate`, Laravel's `migrate --force` with
+/// `database/migrations`, Prisma's `migrate deploy` with `prisma/migrations`; Rails' and
+/// Laravel's `/up` when their routes declare it.
+fn suggest(tree: &dyn Tree, provider: Provider) -> Suggest {
+    let has = |f: &str, word: &str| text(tree, f).is_some_and(|t| t.contains(word));
+    let mut s = Suggest::default();
+    match provider {
+        Provider::Ruby if has("Gemfile", "rails") && tree.exists("db/migrate") => {
+            s.pre_deploy = Some(if tree.exists("bin/rails") { "bin/rails db:prepare" } else { "bundle exec rails db:prepare" }.into());
+            if has("config/routes.rb", "rails/health#show") {
+                s.health_path = Some("/up".into());
+            }
+        }
+        Provider::Python if tree.exists("manage.py") => s.pre_deploy = Some("python manage.py migrate --noinput".into()),
+        Provider::Php if tree.exists("artisan") => {
+            if tree.exists("database/migrations") {
+                s.pre_deploy = Some("php artisan migrate --force".into());
+            }
+            if has("bootstrap/app.php", "health: '/up'") {
+                s.health_path = Some("/up".into());
+            }
+        }
+        Provider::Node if has("package.json", "\"prisma\"") && tree.exists("prisma/migrations") => s.pre_deploy = Some("npx prisma migrate deploy".into()),
+        _ => {}
+    }
+    s
 }

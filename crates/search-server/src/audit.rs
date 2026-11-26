@@ -90,14 +90,18 @@ pub struct AuditPage {
     pub more: bool,
 }
 
+/// A sleeping cluster's catalog id and what it recorded.
+type Remembered = (Option<String>, Arc<Snapshot>);
+
 /// The node's audit logs, one per cluster with entries.
 pub struct AuditLogs {
     store: Option<search_store::Store>,
     cfg: AuditConfig,
     logs: Mutex<HashMap<String, Arc<ClusterLog>>>,
     /// What each sleeping cluster recorded when it was last loaded here (its filter), for the
-    /// failed logins the node refuses without waking it.
-    remembered: Mutex<HashMap<String, Arc<Snapshot>>>,
+    /// failed logins the node refuses without waking it, with its catalog id: a name taken again
+    /// by another cluster never gets the old one's.
+    remembered: Mutex<HashMap<String, Remembered>>,
     flusher: AtomicBool,
     me: Weak<AuditLogs>,
 }
@@ -119,14 +123,15 @@ impl AuditLogs {
         self.logs.lock().entry(cluster.to_string()).or_default().clone()
     }
 
-    /// Remembers what a cluster records, as it unloads.
-    pub fn remember(&self, cluster: &str, snapshot: Arc<Snapshot>) {
-        self.remembered.lock().insert(cluster.to_string(), snapshot);
+    /// Remembers what a cluster (catalog id `id`) records, as it unloads.
+    pub fn remember(&self, cluster: &str, id: Option<&str>, snapshot: Arc<Snapshot>) {
+        self.remembered.lock().insert(cluster.to_string(), (id.map(str::to_string), snapshot));
     }
 
-    /// What a sleeping cluster recorded when it was last loaded here.
-    pub fn remembered(&self, cluster: &str) -> Option<Arc<Snapshot>> {
-        self.remembered.lock().get(cluster).cloned()
+    /// What a sleeping cluster recorded when it was last loaded here, if it is the same cluster
+    /// (catalog id `id`) and not another one that took its name since.
+    pub fn remembered(&self, cluster: &str, id: Option<&str>) -> Option<Arc<Snapshot>> {
+        self.remembered.lock().get(cluster).filter(|(was, _)| was.as_deref() == id).map(|(_, s)| s.clone())
     }
 
     /// Drops a deleted cluster's log: entries still waiting are written first (a deleted cluster

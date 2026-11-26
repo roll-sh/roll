@@ -32,6 +32,10 @@ pub struct Row {
     /// A CA's certificates that haven't ended, revoked ones too: its CRL stays whole.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub certificates: Vec<Columns>,
+    /// A sync whose credential stayed behind (a token's backup): no signing secret, its target's
+    /// URLs by host only. It's restored paused until it's made again (`syncs::NO_CREDENTIAL`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub without_credential: bool,
 }
 
 impl Row {
@@ -198,7 +202,7 @@ pub(crate) fn export(c: &Conn<'_>, t: &Table, project: &str, dek: &Dek, now: i64
             Some(Cell::Text(id)) => id,
             _ => return Err(Error::Internal(format!("a {} row without an id", t.table))),
         };
-        let mut r = Row { kind: t.kind.to_string(), id, columns: Columns::new(), sealed: BTreeMap::new(), certificates: vec![] };
+        let mut r = Row { kind: t.kind.to_string(), id, columns: Columns::new(), sealed: BTreeMap::new(), certificates: vec![], without_credential: false };
         for column in t.plain {
             let v = cells.next().unwrap_or(Cell::Null);
             r.columns.insert(column.to_string(), to_json(t.table, column, v)?);

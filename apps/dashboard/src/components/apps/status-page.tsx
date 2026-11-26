@@ -1,10 +1,12 @@
-import { ExternalLink } from "lucide-react";
+import { ExternalLink, Globe, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
-import { appsApi, type Incident, type IncidentState, type StatusPage } from "@/lib/apps-api";
-import { btn, input, Panel, primary } from "../ui";
+import { appsApi, type Domain, type Incident, type IncidentState, type StatusPage } from "@/lib/apps-api";
+import { btn, input, Panel, primary, useCopy } from "../ui";
+import { Record } from "./domains";
 import { since, SureButton, type Runner } from "./shared";
 
-const STATES: IncidentState[] = ["investigating", "identified", "monitoring", "resolved"];
+const STATES: IncidentState[] = ["investigating", "identified", "monitoring", "maintenance", "resolved"];
+const when = (ms: number) => new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 
 /** The page's incidents, newest first: each open one updated here (a state and what visitors
  *  should know; `resolved` closes it), as the API and `roll apps status-page` do. */
@@ -23,6 +25,11 @@ function Incidents({ project, incidents, runner, reload }: { project: string; in
               <span className={open ? "text-accent" : "text-muted"}>{i.state}</span>
               <span className="text-subtle">{i.automatic ? "opened by its check" : "posted"} {since(i.started_at)}</span>
             </div>
+            {i.scheduled && (
+              <p className="text-[12px] text-fg">
+                {when(i.scheduled.from)} – {when(i.scheduled.until)}
+              </p>
+            )}
             {i.updates.length > 0 && <p className="text-[12px] text-muted">{i.updates[i.updates.length - 1]!.text}</p>}
             {open && (
               <form
@@ -56,6 +63,68 @@ function Incidents({ project, incidents, runner, reload }: { project: string; in
   );
 }
 
+/** The page on a domain of its own (status.acme.dev): the record to add, verified as a custom
+ *  domain is (and checked every minute), then served there with its own certificate. */
+function OwnDomain({ project, runner }: { project: string; runner: Runner }) {
+  const [d, setD] = useState<Domain | null | undefined>(undefined);
+  const [host, setHost] = useState("");
+  const { copied, copy } = useCopy();
+  useEffect(() => {
+    appsApi.statusDomain(project).then(setD, () => setD(null));
+  }, [project]);
+  const busy = runner.busy !== null;
+  if (d === undefined) return null;
+  if (d === null)
+    return (
+      <form
+        className="flex flex-wrap items-center gap-2 border-t border-line px-5 py-4"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void runner.run("status-domain", () => appsApi.setStatusDomain(project, host.trim())).then((x) => x && (setD(x), setHost("")));
+        }}
+      >
+        <input value={host} onChange={(e) => setHost(e.target.value)} placeholder="status.acme.dev" aria-label="Status page domain" spellCheck={false} className={`${input} min-w-56 flex-1 font-mono text-[12px]`} />
+        <button type="submit" className={btn} disabled={busy || !host.trim() || host.includes("*")}>
+          <Globe className="size-3.5" /> Use a domain of its own
+        </button>
+      </form>
+    );
+  return (
+    <div className="space-y-2 border-t border-line px-5 py-4 text-[12.5px]">
+      <div className="flex flex-wrap items-center gap-2">
+        {d.status === "active" ? (
+          <a href={`${d.tls === "issued" ? "https" : "http"}://${d.hostname}`} target="_blank" rel="noreferrer" className="min-w-0 flex-1 truncate font-mono text-[12px] text-accent hover:underline">
+            {d.hostname}
+          </a>
+        ) : (
+          <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-fg">{d.hostname}</span>
+        )}
+        <span className="text-[12px] text-muted">{d.status === "active" ? (d.tls === "issued" || d.tls === "none" ? "verified" : `certificate ${d.tls}`) : "waiting for its DNS"}</span>
+        {d.status !== "active" && (
+          <button type="button" className={btn} disabled={busy} onClick={() => void runner.run("status-domain", () => appsApi.verifyStatusDomain(project)).then((x) => x && setD(x))}>
+            <RefreshCw className="size-3.5" /> Verify
+          </button>
+        )}
+        <SureButton className="text-[12px] text-muted hover:text-fg" sure="Sure? The page stops answering there" disabled={busy} onSure={() => runner.run("status-domain", async () => { await appsApi.removeStatusDomain(project); setD(null); })}>
+          Remove
+        </SureButton>
+      </div>
+      {d.status !== "active" && (
+        <>
+          <table className="w-full overflow-hidden rounded-lg border border-line font-mono text-[12px]">
+            <tbody>
+              {d.record !== "txt" && <Record type="CNAME" name={d.hostname} value={d.target} copied={copied} copy={copy} />}
+              {d.record !== "cname" && <Record type="TXT" name={`_roll-challenge.${d.hostname}`} value={d.token} copied={copied} copy={copy} />}
+            </tbody>
+          </table>
+          {d.error && <p className="text-[12px] text-danger">{d.error}</p>}
+        </>
+      )}
+      {d.tls_error && <p className="text-[12px] text-danger">{d.tls_error}</p>}
+    </div>
+  );
+}
+
 /**
  * A project's status page (Better Stack's, Instatus'): its uptime checks and heartbeats, up or
  * down and their last 90 days, on a public address of its own. Names only, never a path or an
@@ -65,6 +134,8 @@ export function StatusPagePanel({ project, projectName, runner }: { project: str
   const [page, setPage] = useState<StatusPage | null | undefined>(undefined);
   const [title, setTitle] = useState("");
   const [incident, setIncident] = useState({ title: "", text: "" });
+  // A scheduled maintenance's window, as the browser's local time (datetime-local).
+  const [window_, setWindow] = useState<{ on: boolean; from: string; until: string }>({ on: false, from: "", until: "" });
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const reload = () => void appsApi.incidents(project).then(setIncidents, () => setIncidents([]));
   useEffect(() => {
@@ -89,23 +160,37 @@ export function StatusPagePanel({ project, projectName, runner }: { project: str
           </SureButton>
         </div>
       ) : null}
+      {page && <OwnDomain project={project} runner={runner} />}
       {page && (
         <form
           className="flex flex-wrap items-center gap-2 border-t border-line px-5 py-4"
           onSubmit={(e) => {
             e.preventDefault();
-            void runner.run("incident", () => appsApi.postIncident(project, incident)).then((r) => {
+            const body = window_.on ? { ...incident, state: "scheduled", starts_at: new Date(window_.from).getTime(), ends_at: new Date(window_.until).getTime() } : incident;
+            void runner.run("incident", () => appsApi.postIncident(project, body)).then((r) => {
               if (!r) return;
               setIncident({ title: "", text: "" });
+              setWindow({ on: false, from: "", until: "" });
               reload();
             });
           }}
         >
           <input value={incident.title} onChange={(e) => setIncident({ ...incident, title: e.target.value })} placeholder="An incident's title (slow checkouts)" aria-label="Incident title" maxLength={120} className={`${input} min-w-48 flex-1 text-[12px]`} />
           <input value={incident.text} onChange={(e) => setIncident({ ...incident, text: e.target.value })} placeholder="What visitors should know" aria-label="Incident text" maxLength={2000} className={`${input} min-w-64 flex-[2] text-[12px]`} />
-          <button type="submit" className={primary} disabled={busy || !incident.title.trim() || !incident.text.trim()}>
-            Post an incident
+          <button type="submit" className={primary} disabled={busy || !incident.title.trim() || !incident.text.trim() || (window_.on && (!window_.from || !window_.until))}>
+            {window_.on ? "Schedule it" : "Post an incident"}
           </button>
+          <label className="flex w-full items-center gap-2 text-[12px] text-muted">
+            <input type="checkbox" checked={window_.on} onChange={(e) => setWindow({ ...window_, on: e.target.checked })} />
+            Scheduled maintenance: shown ahead, begun and over on its own
+          </label>
+          {window_.on && (
+            <div className="flex w-full flex-wrap items-center gap-2">
+              <input type="datetime-local" value={window_.from} onChange={(e) => setWindow({ ...window_, from: e.target.value })} aria-label="Maintenance starts" className={`${input} w-52 text-[12px]`} />
+              <span className="text-[12px] text-subtle">to</span>
+              <input type="datetime-local" value={window_.until} onChange={(e) => setWindow({ ...window_, until: e.target.value })} aria-label="Maintenance ends" className={`${input} w-52 text-[12px]`} />
+            </div>
+          )}
           <span className="w-full text-[12px] text-muted">Checks going down and heartbeats missed open and close their own.</span>
         </form>
       )}

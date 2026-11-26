@@ -655,6 +655,11 @@ impl Store {
         db.ensure_schema("CREATE INDEX IF NOT EXISTS search_site_crawls_by ON search_site_crawls (owner, site, at)")?;
         db.ensure_schema("CREATE INDEX IF NOT EXISTS search_crawler_sites_due ON search_crawler_sites (due_at)")?;
         db.ensure_schema("CREATE INDEX IF NOT EXISTS search_crawler_sites_owner ON search_crawler_sites (owner, site)")?;
+        // A/B tests' counts per variant, since each started (`record_experiments`): totals, no
+        // query text and no user; a conversion's value in thousandths.
+        db.ensure_schema(
+            "CREATE TABLE IF NOT EXISTS search_experiments (cluster_id TEXT NOT NULL, app TEXT NOT NULL, experiment TEXT NOT NULL, variant TEXT NOT NULL, searches INTEGER NOT NULL, clicks INTEGER NOT NULL, conversions INTEGER NOT NULL, value_milli INTEGER NOT NULL, PRIMARY KEY (cluster_id, app, experiment, variant))",
+        )?;
         // Browser keys' usage, in the metrics' rings (`record_browser_usage`).
         db.ensure_schema(
             "CREATE TABLE IF NOT EXISTS search_browser_usage (cluster_id TEXT NOT NULL, key_id TEXT NOT NULL, res INTEGER NOT NULL, slot INTEGER NOT NULL, at INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (cluster_id, key_id, res, slot))",
@@ -1141,6 +1146,7 @@ impl Store {
             x.execute("DELETE FROM search_browser_usage WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_slowlog WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_analytics WHERE cluster_id = ?1", params![id])?;
+            x.execute("DELETE FROM search_experiments WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_suggestions WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_crawler_sites WHERE cluster_id = ?1", params![id])?;
             Ok(true)
@@ -1339,6 +1345,7 @@ impl Store {
             x.execute("DELETE FROM search_browser_usage WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_slowlog WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_analytics WHERE cluster_id = ?1", params![id])?;
+            x.execute("DELETE FROM search_experiments WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_suggestions WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_storage WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_remotes WHERE cluster_id = ?1", params![id])?;
@@ -1477,6 +1484,41 @@ impl Store {
             Ok::<_, code_sql::Error>(())
         })?;
         Ok(())
+    }
+
+    /// Adds what a node counted of a cluster's experiments, by variant, in one transaction.
+    pub async fn record_experiments(&self, id: &str, counts: &[(search_es::analytics::VariantKey, search_es::analytics::VariantStats)]) -> anyhow::Result<()> {
+        if counts.is_empty() {
+            return Ok(());
+        }
+        self.db.write(|x| {
+            for ((app, exp, variant), s) in counts {
+                let n = |v: u64| v.min(i64::MAX as u64) as i64;
+                let milli = (s.value * 1000.0).round().clamp(0.0, i64::MAX as f64) as i64;
+                x.execute(
+                    "INSERT INTO search_experiments (cluster_id, app, experiment, variant, searches, clicks, conversions, value_milli) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                     ON CONFLICT (cluster_id, app, experiment, variant) DO UPDATE SET searches = search_experiments.searches + excluded.searches,
+                       clicks = search_experiments.clicks + excluded.clicks, conversions = search_experiments.conversions + excluded.conversions,
+                       value_milli = search_experiments.value_milli + excluded.value_milli",
+                    params![id, app, exp, variant, n(s.searches), n(s.clicks), n(s.conversions), milli],
+                )?;
+            }
+            Ok::<_, code_sql::Error>(())
+        })?;
+        Ok(())
+    }
+
+    /// A cluster's experiments' counts, by (application, experiment, variant).
+    pub async fn experiments(&self, id: &str) -> anyhow::Result<Vec<(search_es::analytics::VariantKey, search_es::analytics::VariantStats)>> {
+        let rows: Vec<(String, String, String, i64, i64, i64, i64)> = self.db.read(|x| {
+            x.query(
+                "SELECT app, experiment, variant, searches, clicks, conversions, value_milli FROM search_experiments WHERE cluster_id = ?1 ORDER BY app, experiment, variant",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+            )
+        })?;
+        let u = |v: i64| u64::try_from(v).unwrap_or(0);
+        Ok(rows.into_iter().map(|(a, e, v, s, c, cv, m)| ((a, e, v), search_es::analytics::VariantStats { searches: u(s), clicks: u(c), conversions: u(cv), value: m as f64 / 1000.0 })).collect())
     }
 
     /// A cluster's analytics buckets of `res` seconds (3600 or 86400) from `since` (unix

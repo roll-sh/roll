@@ -222,6 +222,22 @@ pub enum Crawler {
         /// The connector's id (default: from `output_index`).
         #[arg(long)]
         connector: Option<String>,
+        /// `docs`: one record per section of a documentation site (lvl0 to lvl6, content, the
+        /// URL with its #anchor), as DocSearch makes them.
+        #[arg(long)]
+        preset: Option<String>,
+    },
+    /// Crawl a site from one URL: makes a crawler for it (`content-<connector>`) and starts its
+    /// first full crawl. Test the URL first with `roll search crawler test`.
+    Create {
+        cluster: String,
+        url: String,
+        /// The connector's id (default: from the URL's host).
+        #[arg(long)]
+        connector: Option<String>,
+        /// `docs`: one record per section of a documentation site, as DocSearch makes them.
+        #[arg(long)]
+        preset: Option<String>,
     },
     /// Test one URL through the crawler's path, writing nothing: robots.txt and the rule that
     /// decides it, the redirects, what would be indexed and which links would be queued.
@@ -603,8 +619,20 @@ pub enum Clusters {
         #[arg(long)]
         at: Option<String>,
     },
-    /// New password (printed once); the old one stops working at once.
-    Password { cluster: String },
+    /// New password (printed once); the old one stops working at once. With --secret it's kept in
+    /// roll secrets instead, written as you, and printed to nobody.
+    Password {
+        cluster: String,
+        /// Keep it in this secret of the cluster's project: ENV/KEY or ENV/folder/KEY.
+        #[arg(long, value_name = "ENV/KEY")]
+        secret: Option<String>,
+        /// The secret's tags (repeat): `sensitive` stops reveals and keeps `roll run` working.
+        #[arg(long = "tag", requires = "secret")]
+        tags: Vec<String>,
+        /// Store the current password without rotating it (a store that failed after its rotation).
+        #[arg(long, requires = "secret")]
+        no_rotate: bool,
+    },
     /// Scale to zero now (the next request wakes it).
     Unload { cluster: String },
     /// Print the URL (with credentials when given --password).
@@ -664,6 +692,19 @@ pub fn with_pretty(path: &str) -> String {
         return path.to_string();
     }
     format!("{path}{}pretty", if path.contains('?') { "&" } else { "?" })
+}
+
+/// `--secret`'s `ENV/KEY` or `ENV/folder/…/KEY`: the environment, the folder (`/` when none) and
+/// the key.
+fn secret_at(at: &str) -> anyhow::Result<(String, String, String)> {
+    let parts: Vec<&str> = at.split('/').collect();
+    match parts.as_slice() {
+        [env, rest @ .., key] if !env.is_empty() && !key.is_empty() && rest.iter().all(|p| !p.is_empty()) => {
+            let path = if rest.is_empty() { "/".to_string() } else { format!("/{}", rest.join("/")) };
+            Ok((env.to_string(), path, key.to_string()))
+        }
+        _ => anyhow::bail!("--secret is ENV/KEY or ENV/folder/KEY, not {at:?}"),
+    }
 }
 
 /// `http://host:port` → `http://user:password@host:port`.
@@ -864,7 +905,8 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                 Docs::Delete { cluster, index, id, refresh: r } => index_call(api, as_json, Method::DELETE, &cluster, &index, &doc(&id), (refresh(r), None)).await,
             };
         }
-        Search::Crawler(Crawler::Import { cluster, file, connector }) => return crate::search_crawler::import(api, as_json, &cluster, &file, connector.as_deref()).await,
+        Search::Crawler(Crawler::Import { cluster, file, connector, preset }) => return crate::search_crawler::import(api, as_json, &cluster, &file, connector.as_deref(), preset.as_deref()).await,
+        Search::Crawler(Crawler::Create { cluster, url, connector, preset }) => return crate::search_crawler::create(api, as_json, &cluster, &url, connector.as_deref(), preset.as_deref()).await,
         Search::Crawler(Crawler::Test { cluster, url, connector }) => return crate::search_crawler::test(api, as_json, &cluster, &url, connector.as_deref()).await,
         Search::Crawler(Crawler::Verify { cluster, domain, check }) => return crate::search_crawler::verify(api, as_json, &cluster, &domain, check).await,
         Search::Crawler(Crawler::Sites { cluster }) => return crate::search_crawler::sites(api, as_json, &cluster).await,
@@ -1250,11 +1292,31 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                 }
                 v
             }
-            Clusters::Password { cluster } => {
+            Clusters::Password { cluster, secret, tags, no_rotate } => {
                 let c = find(api, &cluster).await?;
-                let v = api.post(&format!("/v1/search/clusters/{}/password", s(&c["id"])), json!({})).await?;
+                let body = match &secret {
+                    None => json!({}),
+                    Some(at) => {
+                        let (env, path, key) = secret_at(at)?;
+                        let mut to = json!({ "environment": env, "path": path, "key": key });
+                        if !tags.is_empty() {
+                            to["tags"] = json!(tags);
+                        }
+                        json!({ "secret": to, "rotate": !no_rotate })
+                    }
+                };
+                let v = api.post(&format!("/v1/search/clusters/{}/password", s(&c["id"])), body).await?;
                 if !as_json {
-                    print_credentials(&v);
+                    match &secret {
+                        None => print_credentials(&v),
+                        Some(_) => {
+                            let st = &v["stored"];
+                            let what = if no_rotate { "kept" } else { "rotated and kept" };
+                            let folder = s(&st["path"]);
+                            let folder = folder.trim_end_matches('/');
+                            println!("{}'s password {what} in roll secrets: {}{folder}/{} (version {}); printed to nobody", s(&c["name"]), s(&st["environment"]), s(&st["key"]), st["version"]);
+                        }
+                    }
                     return Ok(());
                 }
                 v
@@ -1385,6 +1447,9 @@ mod tests {
     #[test]
     fn urls() {
         assert_eq!(url_with_password("http://127.0.0.1:59200", "app", "p@ss"), "http://app:p%40ss@127.0.0.1:59200");
+        assert_eq!(secret_at("prod/SEARCH_PASSWORD").unwrap(), ("prod".into(), "/".into(), "SEARCH_PASSWORD".into()));
+        assert_eq!(secret_at("prod/search/a/KEY").unwrap(), ("prod".into(), "/search/a".into(), "KEY".into()));
+        assert!(secret_at("prod").is_err() && secret_at("prod//KEY").is_err() && secret_at("/KEY").is_err());
         assert_eq!(url_with_password("https://web.search.example.com", "web", "x"), "https://web:x@web.search.example.com");
     }
 

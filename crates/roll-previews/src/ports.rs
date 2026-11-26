@@ -19,14 +19,20 @@ pub struct Usage {
 }
 
 /// A branch as the product made it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Branched {
     /// The branch's product id.
     pub r#ref: String,
     /// What the product hands out only once (a stream's SASL secret, a queue user's password, a
     /// bucket key's secret), kept with the branch so services can be given it again. Never
-    /// returned by the API.
+    /// returned by the API, nor printed.
     pub kept: Option<String>,
+}
+
+impl std::fmt::Debug for Branched {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Branched").field("ref", &self.r#ref).field("kept", &self.kept.as_ref().map(|_| "<redacted>")).finish()
+    }
 }
 
 impl Branched {
@@ -74,6 +80,12 @@ pub trait Brancher: Send + Sync {
         false
     }
 
+    /// Whether a restore point goes back only into the very branch it was saved from (put back
+    /// from that branch's own history: NoSQL, Redis), so a reset that makes a new branch drops it.
+    fn points_need_their_branch(&self) -> bool {
+        false
+    }
+
     /// Put `branch` back as `point` (a [`Self::snapshot`] of it) left it, in place where the
     /// product can (its ref and credentials kept). `None` where it can't.
     async fn restore(&self, _parent: &str, _branch: &str, _kept: Option<&str>, _point: &str, _name: &str, _mode: Mode) -> anyhow::Result<Option<Branched>> {
@@ -106,6 +118,17 @@ pub trait Brancher: Send + Sync {
     /// product that keeps a deleted branch restorable with them (roll search's restore window).
     /// Ok when they're already gone. Nothing by default.
     async fn retire(&self, _parent: &str, _branch: &str, _kept: Option<&str>) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// The pages using `branch` are served from `urls` now (the preview's services' URLs and its
+    /// earlier pushes' pinned ones; an earlier push with a copy of its own, its own URLs): a
+    /// product whose branch answers browsers itself lets those pages call it, and no others but
+    /// its parent's (roll search's browser keys: the branch's allowed origins; it reads each URL's
+    /// origin, and skips what isn't one), and follows what its parent changed since. Called once
+    /// the services are deployed, every pass, so it must change nothing when nothing moved; a
+    /// failure is a problem on the preview, never a failed pass. Nothing by default.
+    async fn serve(&self, _parent: &str, _branch: &str, _kept: Option<&str>, _urls: &[String]) -> anyhow::Result<()> {
         Ok(())
     }
 
@@ -420,6 +443,9 @@ pub struct ShotOptions {
     /// The paths the change touched since the default branch, for its stories (`stories`): the
     /// ones it touched are taken first.
     #[serde(default)]
+    /// Story ids to take before the rest (a default branch's preview: those the project's open
+    /// changes took and it hasn't, so each has a main to be compared with).
+    pub stories_first: Vec<String>,
     pub changed: Vec<String>,
     /// The app's sign-in before the pages (`github.login`, a trusted preview's), its typed
     /// variables resolved.

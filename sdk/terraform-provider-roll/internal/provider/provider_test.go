@@ -49,6 +49,26 @@ type fakeRolld struct {
 	leakRotate  string
 	historyDays any
 	patches     []map[string]any
+	// roll secrets' policy as last PUT (nil: never set).
+	guardrails map[string]any
+}
+
+// secretsPolicy serves GET and PUT /v1/secrets/policy as roll does: a PUT replaces it, a floor
+// left out has none, sync kinds come back sorted.
+func (f *fakeRolld) secretsPolicy(r *http.Request, write func(int, any)) {
+	if r.Method == http.MethodPut {
+		var b map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		if ks, ok := b["sync_kinds"].([]any); ok {
+			sort.Slice(ks, func(i, j int) bool { return ks[i].(string) < ks[j].(string) })
+		}
+		f.guardrails = b
+	}
+	out := map[string]any{"production_approvals": nil, "leaks_rotate": nil, "sync_kinds": nil, "no_stored_cloud_keys": false, "max_token_days": nil, "no_breakglass": false, "updated_at": nil, "updated_by": nil}
+	for k, v := range f.guardrails {
+		out[k] = v
+	}
+	write(200, out)
 }
 
 // projectSettings serves GET and PATCH /v1/secrets/projects/prj_a as roll does.
@@ -382,6 +402,10 @@ func (f *fakeRolld) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/v1/secrets/projects/prj_a" {
 		f.projectSettings(r, write)
+		return
+	}
+	if r.URL.Path == "/v1/secrets/policy" {
+		f.secretsPolicy(r, write)
 		return
 	}
 	if r.URL.Path == "/v1/secrets/projects/prj_a/required" || r.URL.Path == "/v1/secrets/projects/prj_a/kms" {

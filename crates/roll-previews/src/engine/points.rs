@@ -1,8 +1,9 @@
 //! Restore points (Neon's snapshots, Railway's volume backups): a preview's data saved as it is
 //! now, and put back later, after a test run, a demo or an agent changed it. A point is a
-//! copy-on-write branch of each of the preview's branches whose product can put one back in
-//! place ([`crate::ports::Brancher::restores`]: Postgres, whose branch keeps its endpoint,
-//! `DATABASE_URL` and role). Putting one back is a converge step, as a reset is: the services
+//! copy-on-write branch of each of the preview's branches whose product can put one back
+//! ([`crate::ports::Brancher::restores`]: Postgres, whose branch keeps its endpoint,
+//! `DATABASE_URL` and role; NoSQL and Redis, put back from their own history; streams, branched
+//! again from the point). Putting one back is a converge step, as a reset is: the services
 //! sleep meanwhile, the seed doesn't run again (the point holds what it made), and a point
 //! masked by other rules than the resource's now is never put back (changed rules delete them).
 
@@ -10,7 +11,7 @@ use super::Engine;
 use crate::store::{PointData, RestorePoint};
 use crate::{Desired, Error, Preview, Result, ResourceState, State, branch_name};
 
-/// Restore points a preview keeps at once (each holds a branch of every Postgres resource).
+/// Restore points a preview keeps at once (each holds a branch of every resource that restores).
 pub const MAX_POINTS: usize = 3;
 /// The longest label a point takes.
 const LABEL_CHARS: usize = 60;
@@ -58,7 +59,7 @@ impl Engine {
             self.store.add_point_data(id, label, by, at, &d)?;
         }
         let saved = self.store.restore_points(id)?.into_iter().find(|p| p.id == point);
-        let Some(saved) = saved else { return Err(Error::Conflict("nothing to save: restore points hold Postgres and NoSQL branches, and this preview has none ready".into())) };
+        let Some(saved) = saved else { return Err(Error::Conflict("nothing to save: restore points hold Postgres, NoSQL, Redis and stream branches, and this preview has none ready".into())) };
         self.store.log(id, &format!("{by} saved restore point {point}{} ({})", if label.is_empty() { String::new() } else { format!(" \"{label}\"") }, saved.data.join(", ")))?;
         Ok(saved)
     }

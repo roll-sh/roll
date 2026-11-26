@@ -229,6 +229,8 @@ ammonia = "4"
 quick-xml = "0.41"
 # roll search's web crawler parses pages with the WHATWG algorithm (`xpack/entsearch/sync/crawler/html.rs`).
 html5ever = "0.40"
+# ...and decodes them in the charset WHATWG's encoding sniffing finds (`crawler/charset.rs`).
+encoding_rs = "0.8"
 # roll search's web crawler: a URL's site (registrable domain) for per-site crawl limits.
 psl = "2"
 # Crawl rules as fully built DFAs (`search-es` `xpack/entsearch/sync/crawler/config.rs`).

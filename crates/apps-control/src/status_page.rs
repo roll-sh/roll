@@ -80,8 +80,14 @@ const CACHED: std::time::Duration = std::time::Duration::from_secs(10);
 #[derive(Default)]
 pub(crate) struct StatusCache {
     generation: std::sync::atomic::AtomicU64,
+    /// Active own domains → their project, as last read (when, under which `hosts_gen`): every
+    /// request with a Host asks, so it's one read a second at most, never one a request.
+    own: parking_lot::Mutex<Option<(std::time::Instant, u64, OwnHosts)>>,
     pages: parking_lot::Mutex<std::collections::HashMap<String, (std::time::Instant, Arc<Shown>)>>,
 }
+
+/// Active own domains → their project.
+type OwnHosts = Arc<std::collections::HashMap<String, String>>;
 
 /// A page's rows and its incidents.
 type Shown = (Vec<Row>, Vec<Value>);
@@ -117,6 +123,25 @@ impl Apps {
             Err(e) => {
                 tracing::warn!(error = %e, "apps: a status page's day wasn't counted");
                 false
+            }
+        }
+    }
+
+    /// Scheduled maintenances whose window began (now `maintenance`) or ended (`resolved`),
+    /// each said on its page as an update. Run with [`Self::status_sweep`], every minute, on one
+    /// node (`singleton:apps:maintenance`), and each step written only from the state it
+    /// expects, so a node that raced it or a person's update in between makes no second step.
+    pub(crate) async fn maintenance_pass(self: &Arc<Self>, now: i64) {
+        if !self.deps.cluster.singleton("apps:maintenance") {
+            return;
+        }
+        let Ok(due) = self.db(move |s| s.due_maintenance(now)).await else { return };
+        for (project, id, next) in due {
+            let (from, text) = if next == "maintenance" { ("scheduled", "The scheduled maintenance has begun.") } else { ("maintenance", "The scheduled maintenance is over.") };
+            // One that hasn't begun yet and is already over goes straight to resolved.
+            let from = if next == "resolved" { None } else { Some(from) };
+            if self.db(move |s| s.advance_maintenance(&project, &id, from, next, text, now)).await.unwrap_or(false) {
+                self.status_cache.forget();
             }
         }
     }
@@ -213,7 +238,8 @@ impl Apps {
         }
         let (title, state, text) = incident_fields(&body, true)?;
         let (p, at) = (project.to_string(), code_sql::now_ms());
-        let id = self.db(move |s| s.open_incident(&p, &title, &state, &text, None, at)).await?.expect("a person's always opens");
+        let window = maintenance_window(&body, &state, at)?;
+        let id = self.db(move |s| s.open_incident_in(&p, &title, &state, &text, None, at, window)).await?.expect("a person's always opens");
         self.status_cache.forget();
         Ok(json!({ "id": id }))
     }
@@ -222,6 +248,14 @@ impl Apps {
     /// `resolved` closes it.
     pub async fn update_incident(self: &Arc<Self>, project: &str, id: &str, body: Value) -> Result<()> {
         let (_, state, text) = incident_fields(&body, false)?;
+        // Under way is a scheduled maintenance's: an incident without a window would say
+        // "Under scheduled maintenance" with nothing to end it.
+        if state == "maintenance" {
+            let (p, i) = (project.to_string(), id.to_string());
+            if !self.db(move |s| s.incident_has_window(&p, &i)).await? {
+                return Err(Error::BadRequest("maintenance is a scheduled maintenance's state: post one with state scheduled, starts_at and ends_at".into()));
+            }
+        }
         let (p, i, at) = (project.to_string(), id.to_string(), code_sql::now_ms());
         match self.db(move |s| s.update_incident(&p, Some(&i), None, &state, &text, at)).await? {
             true => {
@@ -264,8 +298,10 @@ impl Apps {
 
     pub async fn delete_status_page(self: &Arc<Self>, project: &str) -> Result<()> {
         let p = project.to_string();
-        self.db(move |s| s.delete_status_page(&p)).await?;
+        let freed = self.db(move |s| s.delete_status_page(&p)).await?;
         self.status_cache.forget();
+        self.hosts_changed();
+        self.release_domains(&freed.into_iter().collect::<Vec<_>>()).await;
         Ok(())
     }
 
@@ -281,6 +317,145 @@ impl Apps {
             return None;
         }
         self.db(move |s| s.status_page_by_slug(&slug)).await.ok().flatten()
+    }
+
+    /// The page whose own domain (`…/status-page/domain`) is `host`, once it checked out.
+    pub(crate) async fn status_page_for_own_host(self: &Arc<Self>, host: &str) -> Option<Page> {
+        let name = host.rsplit_once(':').filter(|(_, p)| p.bytes().all(|b| b.is_ascii_digit())).map_or(host, |(h, _)| h).trim_end_matches('.').to_ascii_lowercase();
+        if name.is_empty() || name.len() > 253 {
+            return None;
+        }
+        let project = self.own_status_hosts().await.get(&name)?.clone();
+        self.db(move |s| s.status_page(&project)).await.ok().flatten()
+    }
+
+    async fn own_status_hosts(self: &Arc<Self>) -> OwnHosts {
+        let generation = self.hosts_gen.load(std::sync::atomic::Ordering::SeqCst);
+        if let Some((at, g, m)) = self.status_cache.own.lock().clone()
+            && g == generation
+            && at.elapsed() < std::time::Duration::from_secs(1)
+        {
+            return m;
+        }
+        // A failed read answers nothing this time and keeps nothing.
+        let Ok(rows) = self.db(|s| s.active_status_domains()).await else { return Default::default() };
+        let m = Arc::new(rows.into_iter().collect::<std::collections::HashMap<_, _>>());
+        *self.status_cache.own.lock() = Some((std::time::Instant::now(), generation, m.clone()));
+        m
+    }
+
+    // ── a status page's own domain ──
+
+    /// Where a status page's own domain's CNAME points: its `status-<slug>` name.
+    async fn status_target(self: &Arc<Self>, project: &str) -> Result<String> {
+        let p = project.to_string();
+        let page = self.db(move |s| s.status_page(&p)).await?.ok_or_else(|| Error::NotFound(format!("{project} has no status page")))?;
+        Ok(self.target(&format!("status-{}", page.slug)))
+    }
+
+    /// `GET /v1/apps/projects/{project}/status-page/domain`.
+    pub async fn status_domain(self: &Arc<Self>, project: &str) -> Result<crate::model::Domain> {
+        let p = project.to_string();
+        let (hostname, status, token, error, tls, tls_error, created_at) = self.db(move |s| s.status_domain(&p)).await?.ok_or_else(|| Error::NotFound(format!("{project}'s status page has no domain of its own")))?;
+        Ok(crate::model::Domain {
+            record: self.record(&hostname),
+            target: self.status_target(project).await?,
+            hostname,
+            kind: crate::model::DomainKind::Custom,
+            status,
+            token,
+            error,
+            tls,
+            tls_error,
+            created_at,
+            redirect_to: None,
+            port: None,
+        })
+    }
+
+    /// `POST …/status-page/domain {hostname}` (status.acme.dev): the page answers there too once
+    /// its DNS is verified, as a custom domain's is, with a certificate of its own. One a page (a
+    /// new one replaces it, pending again).
+    pub async fn set_status_domain(self: &Arc<Self>, project: &str, body: Value) -> Result<crate::model::Domain> {
+        self.status_target(project).await?;
+        let host = body.get("hostname").and_then(Value::as_str).ok_or_else(|| Error::BadRequest("hostname is a name like status.acme.dev".into()))?;
+        let mut reserved: Vec<&str> = self.cfg.reserved.iter().map(String::as_str).collect();
+        reserved.push(&self.cfg.domain);
+        let host = crate::model::check_hostname(host, &reserved)?;
+        if host.starts_with("*.") {
+            return Err(Error::BadRequest("a status page's domain is one name, not a wildcard".into()));
+        }
+        let tls = if self.deps.tls.issues() { crate::model::TlsStatus::Pending } else { crate::model::TlsStatus::None };
+        let (p, h) = (project.to_string(), host.clone());
+        let replaced = self.db(move |s| s.set_status_domain(&p, &h, tls)).await?;
+        self.hosts_changed();
+        self.release_domains(&replaced.into_iter().collect::<Vec<_>>()).await;
+        self.status_domain(project).await
+    }
+
+    /// `POST …/status-page/domain/verify`: its DNS checked now (the TXT challenge, or the CNAME
+    /// to the page's own name where that name is the project's alone), and its certificate.
+    /// Pending ones are checked every minute too.
+    pub async fn verify_status_domain(self: &Arc<Self>, project: &str) -> Result<crate::model::Domain> {
+        let p = project.to_string();
+        let (host, was, token, ..) = self.db(move |s| s.status_domain(&p)).await?.ok_or_else(|| Error::NotFound(format!("{project}'s status page has no domain of its own")))?;
+        // Once proven it stays (as a custom domain's `verified_at` does): a DNS hiccup later
+        // never takes the page off its name; only its certificate is looked at again.
+        if was == crate::model::DomainStatus::Active {
+            self.refresh_tls(&host).await;
+            return self.status_domain(project).await;
+        }
+        let target = self.status_target(project).await?;
+        let cnames = self.deps.resolver.cname(&host).await;
+        let cname_ok = cnames.contains(&target);
+        let challenge = crate::model::challenge_name(&host);
+        let txts = self.deps.resolver.txt(&challenge).await;
+        let shared = self.cfg.cname_target.is_some();
+        let (status, error) = if txts.contains(&token) || (cname_ok && !shared) {
+            (crate::model::DomainStatus::Active, None)
+        } else {
+            let seen = crate::model::DnsSeen { cnames, txts, host_txts: self.deps.resolver.txt(&host).await, addresses: if cname_ok { Vec::new() } else { self.deps.resolver.addresses(&host).await } };
+            (crate::model::DomainStatus::Pending, Some(crate::model::domain_diagnosis(&host, &target, &challenge, &token, &seen, shared)))
+        };
+        let (p, err) = (project.to_string(), error.clone());
+        self.db(move |s| s.set_status_domain_status(&p, status, err.as_deref())).await?;
+        self.hosts_changed();
+        if status == crate::model::DomainStatus::Active {
+            self.refresh_tls(&host).await;
+        }
+        self.status_domain(project).await
+    }
+
+    /// `DELETE …/status-page/domain`.
+    pub async fn delete_status_domain(self: &Arc<Self>, project: &str) -> Result<()> {
+        let p = project.to_string();
+        let Some(host) = self.db(move |s| s.delete_status_domain(&p)).await? else {
+            return Err(Error::NotFound(format!("{project}'s status page has no domain of its own")));
+        };
+        self.hosts_changed();
+        self.release_domains(&[host]).await;
+        Ok(())
+    }
+
+    /// The minute pass's share (`apps:domains`): claims unproven past [`crate::PENDING_CLAIM_TTL`]
+    /// expire, pending ones are checked, and a verified one's certificate only while it's coming
+    /// (the provider isn't asked about every page every minute).
+    pub(crate) async fn check_status_domains(self: &Arc<Self>) {
+        let age = crate::PENDING_CLAIM_TTL.as_millis() as i64;
+        if let Ok(gone) = self.db(move |s| s.expire_status_domains(s.now()? - age)).await
+            && !gone.is_empty()
+        {
+            self.hosts_changed();
+            self.release_domains(&gone).await;
+        }
+        let Ok(all) = self.db(|s| s.status_domains_to_check()).await else { return };
+        for (project, host, status) in all {
+            if status == crate::model::DomainStatus::Active {
+                self.refresh_tls(&host).await;
+            } else {
+                let _ = self.verify_status_domain(&project).await;
+            }
+        }
     }
 
     /// What a page shows now (each up or down and its days) and its incidents: read again
@@ -321,11 +496,32 @@ impl Apps {
     }
 }
 
-/// An incident's or update's fields: `title` (a new one's), `state` (investigating, identified,
-/// monitoring, resolved) and `text`, each bounded, as text.
+/// A scheduled maintenance's window from `starts_at` and `ends_at` (unix ms): in the future, at
+/// most 90 days ahead and a week long. Only a new `scheduled` incident has one.
+fn maintenance_window(body: &Value, state: &str, now: i64) -> Result<Option<(i64, i64)>> {
+    let (from, until) = (body.get("starts_at").and_then(Value::as_i64), body.get("ends_at").and_then(Value::as_i64));
+    if state != "scheduled" {
+        return match (from, until) {
+            (None, None) => Ok(None),
+            _ => Err(Error::BadRequest("starts_at and ends_at are a scheduled maintenance's (state scheduled)".into())),
+        };
+    }
+    match (from, until) {
+        (Some(f), Some(u)) if f > now && f <= now + 90 * 86_400_000 && u > f && u - f <= 7 * 86_400_000 => Ok(Some((f, u))),
+        _ => Err(Error::BadRequest("a scheduled maintenance takes starts_at (in the next 90 days) and ends_at (after it, at most a week later), unix ms".into())),
+    }
+}
+
+/// The states a new incident may be posted in (`scheduled`: a maintenance with its window).
+pub(crate) const NEW_STATES: [&str; 5] = ["investigating", "identified", "monitoring", "resolved", "scheduled"];
+/// The states an update may move one to (`maintenance`: a scheduled one under way).
+pub(crate) const UPDATE_STATES: [&str; 5] = ["investigating", "identified", "monitoring", "maintenance", "resolved"];
+
+/// An incident's or update's fields: `title` (a new one's), `state` ([`NEW_STATES`],
+/// [`UPDATE_STATES`]) and `text`, each bounded, as text.
 fn incident_fields(body: &Value, new: bool) -> Result<(String, String, String)> {
     let o = body.as_object().cloned().unwrap_or_default();
-    let allowed: &[&str] = if new { &["title", "state", "text"] } else { &["state", "text"] };
+    let allowed: &[&str] = if new { &["title", "state", "text", "starts_at", "ends_at"] } else { &["state", "text"] };
     if let Some(k) = o.keys().find(|k| !allowed.contains(&k.as_str())) {
         return Err(Error::BadRequest(format!("unknown field {k}")));
     }
@@ -337,10 +533,11 @@ fn incident_fields(body: &Value, new: bool) -> Result<(String, String, String)> 
         }
     };
     let title = if new { text_of("title", 120, true)? } else { String::new() };
+    let states: &[&str] = if new { &NEW_STATES } else { &UPDATE_STATES };
     let state = match o.get("state").and_then(Value::as_str) {
         None if new => "investigating".to_string(),
-        Some(s @ ("investigating" | "identified" | "monitoring" | "resolved")) => s.to_string(),
-        _ => return Err(Error::BadRequest("state is investigating, identified, monitoring or resolved".into())),
+        Some(s) if states.contains(&s) => s.to_string(),
+        _ => return Err(Error::BadRequest(format!("state is {}", states.join(", ")))),
     };
     Ok((title, state, text_of("text", 2000, true)?))
 }
@@ -366,11 +563,26 @@ pub(crate) async fn serve(apps: Arc<Apps>, page: Page, path: &str) -> Response {
     }
     let all_up = rows.iter().all(|r| r.up != Some(false));
     let clock = |ms: i64| chrono::DateTime::from_timestamp_millis(ms).map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default();
-    let mut history = String::new();
+    let (mut history, mut planned) = (String::new(), String::new());
     for i in incidents {
         let open = i["resolved_at"].is_null();
         let ups: String = i["updates"].as_array().into_iter().flatten().rev().map(|u| format!("<p><b>{}</b> · {}<br>{}</p>", crate::public::escape(u["state"].as_str().unwrap_or("")), clock(u["at"].as_i64().unwrap_or(0)), crate::public::escape(u["text"].as_str().unwrap_or("")))).collect();
-        history.push_str(&format!("<article class=\"{}\"><h2>{}</h2>{ups}</article>", if open { "inc open" } else { "inc" }, crate::public::escape(i["title"].as_str().unwrap_or(""))));
+        // A maintenance says its window; one still ahead is listed apart, before the incidents.
+        let window = match (i["scheduled"]["from"].as_i64(), i["scheduled"]["until"].as_i64()) {
+            (Some(f), Some(u)) => format!("<p class=when>{} – {}</p>", clock(f), clock(u)),
+            _ => String::new(),
+        };
+        let class = match (i["state"].as_str(), open) {
+            (Some("scheduled" | "maintenance"), true) => "inc maint",
+            (_, true) => "inc open",
+            _ => "inc",
+        };
+        let article = format!("<article class=\"{class}\"><h2>{}</h2>{window}{ups}</article>", crate::public::escape(i["title"].as_str().unwrap_or("")));
+        if i["state"] == "scheduled" {
+            planned.push_str(&article);
+        } else {
+            history.push_str(&article);
+        }
     }
     let esc = crate::public::escape;
     let mut list = String::new();
@@ -399,11 +611,20 @@ pub(crate) async fn serve(apps: Arc<Apps>, page: Page, path: &str) -> Response {
          li{{border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:0 0 12px}}.row{{display:flex;justify-content:space-between;gap:12px;margin:0 0 10px}}\
          .up{{color:var(--accent)}}.down{{color:var(--danger)}}.none{{color:var(--muted)}}.bars{{display:flex;gap:2px}}.bars i{{flex:1;height:28px;border-radius:2px;background:var(--none)}}\
          .bars i.g{{background:var(--accent)}}.bars i.b{{background:var(--danger)}}.foot{{display:flex;justify-content:space-between;color:var(--muted);font-size:12px;margin-top:6px}}\
-         .inc{{border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:0 0 12px}}.inc.open{{border-color:var(--danger)}}.inc h2{{font-size:14px;margin:0 0 6px}}.inc p{{color:var(--muted);margin:6px 0 0}}\
-         h3{{font-size:13px;font-weight:600;margin:28px 0 10px}}footer{{color:var(--muted);font-size:12px;margin-top:24px}}</style><link rel=alternate type=application/atom+xml href=/feed.xml><main><h1>{t}</h1><p class=all>{all}</p><ul>{list}</ul>{hist}<footer>Kept by roll · <a href=/feed.xml style=color:inherit>feed</a></footer></main>",
+         .inc{{border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:0 0 12px}}.inc.open{{border-color:var(--danger)}}.inc.maint{{border-color:var(--accent)}}.inc .when{{color:var(--fg);margin:0 0 6px}}.inc h2{{font-size:14px;margin:0 0 6px}}.inc p{{color:var(--muted);margin:6px 0 0}}\
+         h3{{font-size:13px;font-weight:600;margin:28px 0 10px}}footer{{color:var(--muted);font-size:12px;margin-top:24px}}</style><link rel=alternate type=application/atom+xml href=/feed.xml><main><h1>{t}</h1><p class=all>{all}</p>{plan}<ul>{list}</ul>{hist}<footer>Kept by roll · <a href=/feed.xml style=color:inherit>feed</a></footer></main>",
         hist = if history.is_empty() { String::new() } else { format!("<h3>Incidents</h3>{history}") },
+        plan = if planned.is_empty() { String::new() } else { format!("<h3>Scheduled maintenance</h3>{planned}") },
         t = esc(&page.title),
-        all = if rows.is_empty() { "Nothing to show yet." } else if all_up { "Everything is up." } else { "Something is down." },
+        all = if rows.is_empty() {
+            "Nothing to show yet."
+        } else if !all_up {
+            "Something is down."
+        } else if incidents.iter().any(|i| i["state"] == "maintenance" && i["resolved_at"].is_null()) {
+            "Under scheduled maintenance."
+        } else {
+            "Everything is up."
+        },
     );
     (StatusCode::OK, [(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "public, max-age=30")], html).into_response()
 }

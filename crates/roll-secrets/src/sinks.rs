@@ -135,7 +135,7 @@ pub struct Sink {
     pub created_by: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NewSink {
     pub url: String,
@@ -149,6 +149,13 @@ pub struct NewSink {
     /// never shown again.
     #[serde(default)]
     pub token: Option<String>,
+}
+
+/// Never the sink's token.
+impl std::fmt::Debug for NewSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NewSink").field("url", &self.url).field("from_start", &self.from_start).field("format", &self.format).field("token", &crate::crypto::redacted(&self.token)).finish()
+    }
 }
 
 fn sink_aad(project: &str, id: &str) -> String {
