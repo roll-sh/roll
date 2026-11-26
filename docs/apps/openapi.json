@@ -186,6 +186,72 @@
         "x-roll-action": "read"
       }
     },
+    "/v1/apps/projects/{project}/board": {
+      "get": {
+        "description": "Answers `{ panels: { title?, service, environment, metric }[] }`: the project's board, in order (none when nobody made one).",
+        "operationId": "getProjectsProjectBoard",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`{ panels: { title?, service, environment, metric }[] }`: the project's board, in order (none when nobody made one)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get board",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "read"
+      },
+      "put": {
+        "description": "Answers the board as kept.",
+        "operationId": "putProjectsProjectBoard",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "`{ panels: { title?: string /* 1–60 */, service: string /* the project's */, environment?: string /* default production */, metric: \"requests\" | \"errors\" | \"error_pct\" | \"p50_ms\" | \"p95_ms\" | \"p99_ms\" | \"cpu\" | \"memory_bytes\" | \"instances\" | \"cold_starts\" | \"egress_bytes\" | \"over_capacity\" | \\`app:${string}\\` /* one of the app's series */ }[] /* at most 24; none removes it */ }`"
+        },
+        "responses": {
+          "200": {
+            "description": "the board as kept"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Set board",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "write"
+      }
+    },
     "/v1/apps/projects/{project}/drains": {
       "get": {
         "description": "Answers `LogDrain[]` (the URL never returned, only its host).",

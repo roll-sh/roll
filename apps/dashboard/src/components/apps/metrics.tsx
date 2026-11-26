@@ -38,7 +38,7 @@ function niceMax(v: number) {
 }
 
 /** What a chart's headline says when nothing is hovered: the window's total (counts per minute) or its peak (gauges, latencies). */
-type Agg = "total" | "peak";
+export type Agg = "total" | "peak";
 
 const RANGES = [
   { minutes: 60, label: "hour", short: "1h" },
@@ -67,6 +67,52 @@ export function bucketed(m: MetricsData, size: number): MetricsData {
     for (const k of PEAKS) out[k].push(Math.max(0, ...m[k].slice(i, i + size).map((v) => v ?? 0)));
   }
   return out;
+}
+
+/** What a board's panel (`board.rs` METRICS) draws from a service's metrics, bucketed as this tab
+ *  buckets them: its values, how its headline sums them, and its unit. */
+export function panelSeries(m: MetricsData, metric: string): { minutes: number[]; values: number[]; agg: Agg; format: (v: number) => string } | null {
+  const b = bucketed(m, Math.ceil(m.minutes.length / MAX_POINTS));
+  const pct = (v: number) => `${v.toFixed(v < 10 ? 1 : 0)}%`;
+  const of = (values: number[], agg: Agg, format: (v: number) => string) => ({ minutes: b.minutes, values, agg, format });
+  switch (metric) {
+    case "error_pct":
+      return of(b.requests.map((r, i) => (r ? ((b.errors[i] ?? 0) * 100) / r : 0)), "peak", pct);
+    case "requests":
+    case "errors":
+    case "cold_starts":
+    case "over_capacity":
+      return of(b[metric] ?? [], "total", count);
+    case "egress_bytes":
+      return of(b.egress_bytes ?? [], "total", (v) => formatBytes(v));
+    case "p50_ms":
+    case "p95_ms":
+    case "p99_ms":
+      return of(b[metric], "peak", formatMs);
+    case "cpu":
+      return of(b.cpu, "peak", cores);
+    case "memory_bytes":
+      return of(b.memory_bytes, "peak", (v) => formatBytes(v));
+    case "instances":
+      return of(b.instances, "peak", count);
+    default:
+      return null;
+  }
+}
+
+/** One of the app's own series (`app:<name>`) as a board panel draws it: its first series by that
+ *  name, a point a bucket. */
+export function appPanelSeries(a: AppMetrics, name: string): { minutes: number[]; values: number[]; agg: Agg; format: (v: number) => string } | null {
+  const s = a.series.find((x) => x.name === name);
+  if (!s) return null;
+  return { minutes: s.points.map(([t]) => Math.floor(t / 60_000)), values: s.points.map(([, v]) => v), agg: "peak", format: count };
+}
+
+/** One series in the Metrics tab's chart (a project's board). */
+export function BoardChart({ title, minutes, values, agg, format, rangeMinutes }: { title: string; minutes: number[]; values: number[]; agg: Agg; format: (v: number) => string; rangeMinutes: number }) {
+  const range = RANGES.find((r) => r.minutes === rangeMinutes) ?? RANGES[0];
+  const headline = agg === "total" ? values.reduce((s, v) => s + v, 0) : Math.max(0, ...values);
+  return <Chart title={title} minutes={minutes} series={[{ label: title, values, color: "var(--soft)" }]} format={format} summary={`${agg} ${format(headline)} in the ${range.label}`} agg={agg} range={range} marks={[]} />;
 }
 
 /** A deployment going live, on the charts: `i` the point it fell in. */
