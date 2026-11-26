@@ -3472,6 +3472,37 @@ async fn status_page_incidents_open_and_close() {
     assert_eq!(state(&w, page).await, (json!("resolved"), true));
 }
 
+/// A hostname another environment holds is taken by whoever proves its DNS (Vercel's "linked to
+/// another team"): a TXT record of the claimant's own at its challenge name, then one write moves
+/// it, and the holder is told.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_held_domain_is_claimed_by_proving_its_dns() {
+    let w = world().await;
+    let (a, _) = image_service(&w, "squatter", json!({"port": 80})).await;
+    let (b, _) = image_service(&w, "owner", json!({"port": 80})).await;
+    let (a, b) = (a["id"].as_str().unwrap().to_string(), b["id"].as_str().unwrap().to_string());
+    let domains = |id: &str| format!("/v1/apps/services/{id}/environments/production/domains");
+    assert_eq!(call(&w.api, "POST", &domains(&a), Some(json!({"hostname": "shop.acme.dev"}))).await.0, StatusCode::CREATED);
+    let (st, v) = call(&w.api, "POST", &domains(&b), Some(json!({"hostname": "shop.acme.dev"}))).await;
+    assert!(st == StatusCode::CONFLICT && v["error"].as_str().unwrap().contains("/claim"), "{v}");
+    let claim = format!("{}/shop.acme.dev/claim", domains(&b));
+    let (st, c) = call(&w.api, "POST", &claim, None).await;
+    assert_eq!((st, c["claimed"].as_bool(), c["txt"]["name"].as_str()), (StatusCode::OK, Some(false), Some("_roll-challenge.shop.acme.dev")), "{c}");
+    assert_eq!(call(&w.api, "POST", &claim, None).await.1["txt"], c["txt"], "the same token until it's used");
+    // The holder's own challenge doesn't prove the claimant's.
+    let held = call(&w.api, "GET", &domains(&a), None).await.1;
+    let held_token = held.as_array().unwrap().iter().find(|d| d["hostname"] == "shop.acme.dev").unwrap()["token"].as_str().unwrap().to_string();
+    w.dns.add("_roll-challenge.shop.acme.dev", "TXT", &held_token);
+    assert_eq!(call(&w.api, "POST", &claim, None).await.1["claimed"], false);
+    w.dns.add("_roll-challenge.shop.acme.dev", "TXT", c["txt"]["value"].as_str().unwrap());
+    let (st, t) = call(&w.api, "POST", &claim, None).await;
+    assert_eq!((st, t["claimed"].as_bool(), t["domain"]["status"].as_str()), (StatusCode::OK, Some(true), Some("active")), "{t}");
+    assert!(!call(&w.api, "GET", &domains(&a), None).await.1.to_string().contains("shop.acme.dev"), "gone from the holder");
+    let events = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1;
+    assert!(events["events"].as_array().unwrap().iter().any(|e| e["kind"] == "domain.expired" && e["service"] == a.as_str() && e["data"]["reason"] == "claimed"), "the holder is told: {events}");
+    assert_eq!(call(&w.api, "POST", &format!("{}/free.acme.dev/claim", domains(&b)), None).await.0, StatusCode::BAD_REQUEST, "a free name is added, not claimed");
+}
+
 /// A custom domain's records written at the customer's Cloudflare (Vercel's own DNS): the token a
 /// `roll://` reference the caller may reveal, read as them for the call; then it's verified.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -5628,6 +5659,43 @@ async fn a_previews_pages_carry_the_feedback_button_for_its_link_visitors() {
     assert_eq!(st, StatusCode::OK);
     assert_eq!(serde_json::from_str::<Value>(&list).unwrap(), json!([{"path": "/pricing", "selector": "h1", "note": "bigger", "by": "ana", "at": 1}]));
     assert_eq!(*said.0.lock(), [("pv-abc".to_string(), "/pricing".to_string())], "the preview and the page's path");
+    // A team member signed in to roll (team access) gets it too, its notes through roll's own path.
+    struct Team;
+    impl apps_control::integrations::Visitors for Team {
+        fn may_open(&self, user: &str, _project: &str) -> bool {
+            user == "usr_ada"
+        }
+        fn session_live(&self, _user: &str, _session: &str) -> bool {
+            true
+        }
+    }
+    w.apps.set_visitors(Arc::new(Team));
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"ephemeral": true, "access": {"signed_in": true}, "feedback": true}))).await.0, StatusCode::OK);
+    let load = |path: String, cookie: Option<String>| {
+        let mut r = Request::builder().uri(path).header("host", &h).header("accept", "text/html");
+        if let Some(c) = cookie {
+            r = r.header("cookie", c);
+        }
+        let public = w.public.clone();
+        async move {
+            let resp = public.oneshot(r.body(Body::empty()).unwrap()).await.unwrap();
+            let (st, hd) = (resp.status(), resp.headers().clone());
+            (st, hd, String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap())
+        }
+    };
+    let (_, hd, _) = load("/page".into(), None).await;
+    let state = hd["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_string();
+    let binding = hd["location"].to_str().unwrap().split_once("&state=").unwrap().1.to_string();
+    let mut ask = Request::builder().method("POST").uri(format!("{base}/visit")).header("content-type", "application/json").body(Body::from(json!({ "to": format!("http://{h}/page"), "state": binding }).to_string())).unwrap();
+    ask.extensions_mut().insert(roll_auth::SignedIn { user: "usr_ada".into(), handle: "ada".into(), admin: false, code_owner: None, session: "ses_1".into() });
+    let t: Value = serde_json::from_slice(&w.api.clone().oneshot(ask).await.unwrap().into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let url = t["url"].as_str().unwrap_or_else(|| panic!("{t}"));
+    let (_, hd, _) = load(url[url.find("/__roll/visit").unwrap()..].to_string(), Some(state)).await;
+    let session = hd["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_string();
+    let (st, _, page) = load("/page".into(), Some(session.clone())).await;
+    assert!(st == StatusCode::OK && page.ends_with(r#"<script src="/__roll/feedback.js" defer></script></body></html>"#), "a team member's page carries the button: {st} {page}");
+    assert_eq!(load("/__roll/feedback.json?path=%2Fteam".into(), Some(session)).await.0, StatusCode::OK);
+    assert_eq!(said.0.lock().last().cloned(), Some(("pv-abc".to_string(), "/team".to_string())), "read through roll's own notes, not a guest's");
 }
 
 /// A roll previews share link on a preview roll apps serves: followed, its cookie set and on
