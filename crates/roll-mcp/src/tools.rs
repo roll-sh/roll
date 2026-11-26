@@ -2620,6 +2620,12 @@ mod tests {
             ("search_slowlog", "slow searches' timings and shapes"),
             ("secrets_list_value_requests", "who asked for which key, never a value"),
             ("tasks_list_runs", "runs' states and times"),
+            ("search_list_query_rulesets", "rules people set"),
+            ("search_get_query_ruleset", "rules people set"),
+            ("secrets_suggestions", "which keys a link would fill, never a value"),
+            ("apps_analytics", "counts by page, referrer and country"),
+            ("previews_mask_suggestions", "column names to mask"),
+            ("previews_visitors", "roll team members who opened it, not the app's users"),
         ];
         let ro = |t: &Tool| t.definition()["annotations"]["readOnlyHint"] == true;
         for n in DATA {
