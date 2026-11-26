@@ -3732,9 +3732,9 @@ impl TxnState {
                 self.lock_journal.reserve(8);
                 self.locks_held.reserve(8);
             }
-            let k = (LockKey::from_slice(key), mode);
-            self.lock_journal.push(k.clone());
-            self.locks_held.insert(k, self.savepoints.len());
+            // (Two copies of the key, not a SmallVec clone: its clone goes byte by byte.)
+            self.lock_journal.push((LockKey::from_slice(key), mode));
+            self.locks_held.insert((LockKey::from_slice(key), mode), self.savepoints.len());
             // A new lock may have waited for DDL that then committed: the statement reads the
             // catalog as it is now (LockRelationOid's AcceptInvalidationMessages).
             self.accept_catalog();
