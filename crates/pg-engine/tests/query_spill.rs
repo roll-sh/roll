@@ -366,7 +366,20 @@ const WINDOWS: &[&str] = &[
        WINDOW w AS (PARTITION BY a % 40 ORDER BY a ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)",
     "first_value(b) OVER w, nth_value(b, 2) OVER w FROM ws WINDOW w AS (PARTITION BY a % 40 ORDER BY b RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)",
     "sum(a) OVER w, last_value(b) OVER w FROM ws WINDOW w AS (PARTITION BY a % 40 ORDER BY b GROUPS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)",
+    // Sliding frames (a frame head pointer), exclusions, a moving aggregate (msum).
+    "sum(a) OVER w, count(*) OVER w, avg(n) OVER w, max(t) OVER w, first_value(t) OVER w, last_value(b) OVER w, nth_value(a, 3) OVER w \
+       FROM ws WINDOW w AS (PARTITION BY a % 40 ORDER BY a ROWS BETWEEN 5 PRECEDING AND 5 FOLLOWING)",
+    "sum(a) OVER w, first_value(a) OVER w, last_value(t) OVER w, nth_value(a, 3) OVER w, msum(a) OVER w FROM ws \
+       WINDOW w AS (PARTITION BY a % 40 ORDER BY a ROWS BETWEEN 2 PRECEDING AND 2 FOLLOWING EXCLUDE CURRENT ROW)",
+    "sum(a) OVER w, count(*) OVER w, first_value(a) OVER w, last_value(a) OVER w, msum(a) OVER w FROM ws \
+       WINDOW w AS (PARTITION BY a % 40 ORDER BY a DESC RANGE BETWEEN 200 PRECEDING AND 80 FOLLOWING)",
+    "sum(a) OVER w, count(*) OVER w, first_value(b) OVER w, last_value(b) OVER w, nth_value(b, 20) OVER w FROM ws \
+       WINDOW w AS (PARTITION BY a % 40 ORDER BY b GROUPS BETWEEN 2 PRECEDING AND 1 FOLLOWING EXCLUDE TIES)",
 ];
+
+/// The aggregate with a moving implementation the window cases use (PostgreSQL runs it with
+/// its inverse transition over a frame whose head moves).
+const MSUM: &str = "CREATE AGGREGATE msum(int) (sfunc = int4pl, stype = int, msfunc = int4pl, minvfunc = int4mi, mstype = int)";
 
 #[test]
 fn windows_stream_past_work_mem() {
@@ -381,6 +394,7 @@ fn windows_stream() {
         "CREATE TABLE ws (a int, b int, t text, n numeric)",
         "INSERT INTO ws SELECT g, g % 3000, md5(g::text), g % 1000 FROM generate_series(1, 40000) g",
         "ANALYZE ws",
+        MSUM,
         "SET work_mem = '256MB'",
     ] {
         q(&mut s, sql).unwrap();
@@ -412,6 +426,65 @@ fn windows_stream() {
     let e = q(&mut s, "SELECT count(x) FROM (SELECT sum(1 / (a - 39000)) OVER (ORDER BY a ROWS UNBOUNDED PRECEDING) x FROM ws) s").unwrap_err();
     assert!(e.starts_with("22012"), "{e}");
     assert_no_spill_files(dir.path());
+    drop(s);
+    eng.shutdown();
+}
+
+/// Sliding frames past work_mem (`exec::winstream`: frame head and tail pointers): the results
+/// PostgreSQL 18.6 gives for the same statements, and its temporary files (the Sort's, and the
+/// window's store where its frames hold more than work_mem).
+#[test]
+fn sliding_frames_spill() {
+    std::thread::Builder::new().stack_size(64 << 20).spawn(sliding_frames).unwrap().join().unwrap();
+}
+
+fn sliding_frames() {
+    let dir = tempfile::tempdir().unwrap();
+    let eng = open(dir.path());
+    let mut s = eng.connect(1, "postgres", "postgres", "postgres").unwrap();
+    for sql in [
+        "CREATE TABLE ws (a int, b int, t text, n numeric)",
+        "INSERT INTO ws SELECT g, g % 3000, md5(g::text), g % 1000 FROM generate_series(1, 40000) g",
+        "ANALYZE ws",
+        MSUM,
+        "SET work_mem = '64kB'",
+    ] {
+        q(&mut s, sql).unwrap();
+    }
+    // (PostgreSQL 18.6: md5 of the results, temp files of the statement.)
+    for (inner, want, files) in [
+        ("SELECT sum(a) OVER (ORDER BY a ROWS BETWEEN 5 PRECEDING AND 5 FOLLOWING) x FROM ws", "7dc0515f2ce854c32a858a27b5b4782a", 1),
+        (
+            "SELECT first_value(t) OVER w x, last_value(t) OVER w y, nth_value(a, 3) OVER w z FROM ws \
+             WINDOW w AS (ORDER BY a ROWS BETWEEN 5000 PRECEDING AND UNBOUNDED FOLLOWING)",
+            "6eeb3cd8156e5b199c277834770ebb25",
+            2,
+        ),
+        ("SELECT msum(a) OVER (ORDER BY a ROWS BETWEEN 3000 PRECEDING AND 3000 FOLLOWING) x FROM ws", "3d23ac469a876fa2fcbd0099fc5573e8", 2),
+        ("SELECT sum(a) OVER (ORDER BY a ROWS BETWEEN 600 PRECEDING AND 100 FOLLOWING) x FROM ws WHERE a <= 10000", "2c11311d375caa785231191b1dba7c6f", 1),
+        (
+            "SELECT count(*) OVER (ORDER BY b RANGE BETWEEN 50 PRECEDING AND 20 FOLLOWING EXCLUDE GROUP) x FROM ws WHERE a <= 10000",
+            "c012e4d370e82b73004140fe3b03f5f0",
+            1,
+        ),
+        ("SELECT sum(a) OVER (ORDER BY b GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING) x FROM ws", "08a3e7833dd3729fe5194cb28a929ef7", 1),
+        (
+            "SELECT last_value(c) OVER (ORDER BY b GROUPS BETWEEN CURRENT ROW AND 200 FOLLOWING EXCLUDE TIES) x \
+             FROM (SELECT b, md5(b::text) c FROM ws) w",
+            "18d2f92989221ac95271f24747f21213",
+            2,
+        ),
+    ] {
+        let md5 = format!("SELECT md5(string_agg(x::text, ',' ORDER BY x::text)) FROM ({inner}) s");
+        assert_eq!(one(&mut s, &md5), Value::Text(want.into()), "{inner}");
+        q(&mut s, "SELECT pg_stat_force_next_flush()").unwrap();
+        let f0 = int(&mut s, "SELECT temp_files FROM pg_stat_database WHERE datname = current_database()");
+        q(&mut s, &format!("SELECT count(x) FROM ({inner}) s")).unwrap();
+        assert_eq!(temp_files(dir.path()), 0);
+        q(&mut s, "SELECT pg_stat_force_next_flush()").unwrap();
+        let f1 = int(&mut s, "SELECT temp_files FROM pg_stat_database WHERE datname = current_database()");
+        assert_eq!(f1 - f0, files, "{inner}: temp files");
+    }
     drop(s);
     eng.shutdown();
 }
