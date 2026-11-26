@@ -668,6 +668,9 @@ impl Secrets {
         self.project(project)?;
         let now = self.db.now_ms()?;
         self.db.write(|c| {
+            if !who.is_empty() {
+                crate::guardrails::read(c)?.breakglass()?;
+            }
             let mut bound: Vec<String> = vec![];
             for w in &who {
                 match Entry::parse(w) {
@@ -693,9 +696,6 @@ impl Secrets {
             bound.dedup();
             if bound.len() > BREAKGLASS_MAX {
                 return Err(Error::BadRequest(format!("breakglass is at most {BREAKGLASS_MAX} entries, and {} binds to {}", who.join(" "), bound.len())));
-            }
-            if !bound.is_empty() {
-                crate::guardrails::read(c)?.breakglass()?;
             }
             c.execute("UPDATE projects SET breakglass = ? WHERE project_id = ?", params![(!bound.is_empty()).then(|| json!(bound).to_string()), project])?;
             let summary = if bound.is_empty() { "no one may push past a pre-receive hook".to_string() } else { format!("may push past a pre-receive hook: {}", bound.join(", ")) };

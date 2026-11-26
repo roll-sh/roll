@@ -841,9 +841,11 @@ pub enum Secrets {
         #[arg(value_parser = ["managed", "off"])]
         rotate: Option<String>,
     },
-    /// Who may push past the project's pre-receive hooks (`git push -o breakglass`): pushers'
-    /// logins as the git server names them, `token:<id>` for every push through one hook's
-    /// token, `*` for anyone; `off` for no one (the default). Without any: who may now.
+    /// Who may push past the project's pre-receive hooks (`git push -o breakglass`): a pusher's
+    /// login through one hook's token (`alice@token:<id>`; `alice` binds to each token whose hook
+    /// has named alice), `token:<id>` for every push through one hook's token, `*` for anyone;
+    /// `off` for no one (the default). Without any: who may now. Setting a list again binds the
+    /// bare logins it kept from before logins were bound.
     Breakglass { who: Vec<String> },
     /// When each key was last read and changed, and which are stale or unused.
     Insights {
@@ -4468,7 +4470,15 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             match v["breakglass"].as_array().filter(|a| !a.is_empty()) {
                 None => println!("No one may push past a pre-receive hook: `git push -o breakglass` is refused"),
-                Some(a) => println!("May push past a pre-receive hook (audited): {}", a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")),
+                Some(a) => {
+                    let who: Vec<&str> = a.iter().filter_map(Value::as_str).collect();
+                    println!("May push past a pre-receive hook (audited): {}", who.join(", "));
+                    // A list from before logins were bound: each bare login counts only through a
+                    // token whose hook named it, until the list is set again.
+                    if who.iter().any(|w| *w != "*" && !w.starts_with("token:") && !w.contains("@token:")) {
+                        println!("Bare logins aren't bound to a hook's token yet: `roll secrets breakglass {}` binds them", who.join(" "));
+                    }
+                }
             }
         }
         Secrets::Leaks { rotate } => {

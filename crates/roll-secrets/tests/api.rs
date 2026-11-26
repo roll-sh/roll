@@ -2565,25 +2565,63 @@ async fn a_scanner_never_confirms_a_weak_password_inside_text_it_knows() {
     assert_eq!((s, found.clone()), (StatusCode::OK, json!([{ "index": 1, "environment": "production" }])), "{found}");
 }
 
-/// A scanner's budget is its token's and pusher's: one pusher's spent minute is refused (429,
-/// naming the budget and when it has room), counting nothing, while another pusher's push through
-/// the same token goes on.
+/// A scanner's budget is its token's, and each pusher's share of it: one pusher's spent minute is
+/// refused (429, naming the budget and when it has room), counting nothing, while another pusher's
+/// push through the same token goes on; and pushers made up one per call buy nothing past the
+/// token's own budget.
 #[tokio::test]
-async fn one_pusher_spending_a_scan_budget_leaves_other_pushers_theirs() {
+async fn one_pusher_spends_its_share_and_made_up_pushers_only_the_tokens_budget() {
     let api = Api::new().await;
     let token = api.token(json!({ "actions": ["scan"] }));
     // All in one minute (the budget's window).
-    while std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() % 60_000 > 45_000 {
+    while std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() % 60_000 > 35_000 {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
-    let scan = |pusher: &str| json!({ "candidates": [], "pusher": pusher, "refs": ["refs/heads/main"] });
+    let scan = |pusher: &str, candidates: &[String]| json!({ "candidates": candidates, "pusher": pusher, "refs": ["refs/heads/main"] });
     for _ in 0..roll_secrets::leaks::SCANS_PER_MINUTE {
-        assert_eq!(api.req(Method::POST, "/scan", Some(scan("alice")), Some(&token)).await.0, StatusCode::OK);
+        assert_eq!(api.req(Method::POST, "/scan", Some(scan("alice", &[])), Some(&token)).await.0, StatusCode::OK);
     }
-    let (s, e) = api.req(Method::POST, "/scan", Some(scan("alice")), Some(&token)).await;
+    let (s, e) = api.req(Method::POST, "/scan", Some(scan("alice", &[])), Some(&token)).await;
     let said = e["error"].as_str().unwrap_or_default();
     assert!(s == StatusCode::TOO_MANY_REQUESTS && said.contains("for pusher alice") && said.contains("room again in"), "{s} {e}");
-    assert_eq!(api.req(Method::POST, "/scan", Some(scan("bob")), Some(&token)).await.0, StatusCode::OK, "bob's push isn't alice's");
+    assert_eq!(api.req(Method::POST, "/scan", Some(scan("bob", &[])), Some(&token)).await.0, StatusCode::OK, "bob's push isn't alice's");
+
+    // Each full scan names a new pusher: the token's minute is spent all the same.
+    let full = vec!["Kq8mZ3vT9xLr2WbN".to_string(); roll_secrets::leaks::SCAN_MAX];
+    let fits = roll_secrets::leaks::TOKEN_SCAN_CANDIDATES_PER_MINUTE / roll_secrets::leaks::SCAN_MAX as i64;
+    for i in 0..fits {
+        assert_eq!(api.req(Method::POST, "/scan", Some(scan(&format!("made-up-{i}"), &full)), Some(&token)).await.0, StatusCode::OK);
+    }
+    let (s, e) = api.req(Method::POST, "/scan", Some(scan("made-up-again", &full)), Some(&token)).await;
+    let said = e["error"].as_str().unwrap_or_default();
+    assert!(s == StatusCode::TOO_MANY_REQUESTS && said.contains("across every pusher its hook names"), "{s} {e}");
+}
+
+/// A login on the break-glass list is a pusher as one hook's token names it: `alice` is refused
+/// until a hook has named alice, then bound to that hook's token, so another scan token naming
+/// alice can't break glass; and the leak says the pusher is the hook's word.
+#[tokio::test]
+async fn a_break_glass_login_is_bound_to_the_hook_token_that_named_it() {
+    let api = Api::new().await;
+    let value = "fake-Kq8mZ3vT9xLr2WbN";
+    api.set("production", "API_KEY", value).await;
+    let (hook, other) = (api.token(json!({ "actions": ["scan"] })), api.token(json!({ "actions": ["reveal", "scan"] })));
+    let (s, e) = api.call(Method::PATCH, "", Some(json!({ "breakglass": ["alice"] }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "no hook has named alice yet: {e}");
+    let push = |breakglass: bool| json!({ "candidates": [value], "breakglass": breakglass, "pusher": "alice", "refs": ["refs/heads/main"] });
+    assert_eq!(api.req(Method::POST, "/scan", Some(push(false)), Some(&hook)).await.0, StatusCode::OK);
+    let set = api.ok(Method::PATCH, "", Some(json!({ "breakglass": ["alice"] }))).await;
+    let bound = set["breakglass"][0].as_str().unwrap_or_default().to_string();
+    let principal = bound.strip_prefix("alice@").filter(|t| t.starts_with("token:")).unwrap_or_else(|| panic!("{set}")).to_string();
+    assert_eq!(set["breakglass"].as_array().map(Vec::len), Some(1), "only the hook that named alice: {set}");
+
+    let (s, e) = api.req(Method::POST, "/scan", Some(push(true)), Some(&other)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "another token naming alice isn't her hook: {e}");
+    assert_eq!(api.req(Method::POST, "/scan", Some(push(true)), Some(&hook)).await.0, StatusCode::OK, "alice through her hook's token");
+    let leaked = api.ok(Method::GET, "/audit?action=secrets.leaked", None).await;
+    let summary = leaked[0]["summary"].as_str().unwrap_or_default();
+    assert!(summary.contains(&format!("by alice (as {principal} says)")), "{leaked}");
+    assert!(!leaked.to_string().contains(value), "never a value: {leaked}");
 }
 
 /// roll code's GitHub App checking a push to a repo on the project's canvas: a scanner of the
@@ -7826,7 +7864,7 @@ async fn a_restore_brings_back_nothing_below_the_policy() {
     let api = Api::new().await;
     api.set("staging", "PLATFORM_TOKEN", "fake-platform-token").await;
     api.ok(Method::POST, "/syncs", Some(json!({ "environment": "staging", "kind": "fake", "target": { "name": "x", "token_key": "PLATFORM_TOKEN" } }))).await;
-    api.ok(Method::PATCH, "", Some(json!({ "breakglass": ["alice"] }))).await;
+    api.ok(Method::PATCH, "", Some(json!({ "breakglass": ["*"] }))).await;
     let secret = [9u8; 32];
     let b = api.ok(Method::POST, "/backup", Some(json!({ "recipient": roll_secrets::crypto::public_key(&secret) }))).await;
     let sealed: roll_secrets::crypto::Sealed = serde_json::from_value(b["sealed"].clone()).unwrap();
