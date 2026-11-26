@@ -526,8 +526,9 @@ the key's `access` allows, as Elasticsearch 9's API key based model does.
 
 **OpenSearch-flavor links (design).** OpenSearch has no `cross_cluster` keys and no
 `remote_indices`. Its clusters trust each other's transport layer (node certificates), the
-coordinating cluster sends the user (name, backend roles, attributes), and the remote authorizes
-that user by **its own** role mappings: a user mapped on the local cluster only is refused there.
+coordinating cluster sends the user (name, backend roles, security roles, attributes), and the
+remote authorizes that user by **its own** role mappings and role definitions: a user mapped on
+the local cluster only is refused there.
 roll keeps that behaviour where clients can see it, and replaces the node certificates, which
 tenants don't hold, with a credential per link:
 
@@ -546,9 +547,11 @@ tenants don't hold, with a credential per link:
   user, so the user is bound to the remote's cluster id, as browser keys are
   (`stored_browser_key_cluster`).
 - *Who the part runs as*: `x-roll-remote-access` carries the OpenSearch identity (user name,
-  backend roles, attributes; bounded by `MAX_REMOTE_ACCESS`). The remote resolves it through its
-  own role mappings (`opensearch::mapped_roles`), so its DLS, FLS, masked fields and `${attr…}`
-  variables are the remote's. The result is limited by the link user's role
+  backend roles, the internal user's own `opendistro_security_roles`, attributes; bounded by
+  `MAX_REMOTE_ACCESS`). The remote resolves it as OpenSearch does: the security roles by name
+  plus what its own mappings give the name and backend roles (`opensearch::mapped_roles`), each
+  role as the remote defines it, so DLS, FLS and masked fields are the remote's; `${attr…}`
+  variables take the attributes sent. The result is limited by the link user's role
   (`Effective::limited_by`). The local `admin` has backend role `admin`, which OpenSearch's
   default mapping gives `all_access` on both clusters, so the owner gets the ceiling. Any other
   user gets what the remote maps them to, within the ceiling.
@@ -577,7 +580,10 @@ tenants don't hold, with a credential per link:
     `_clusters` has only `total`, `successful` and `skipped`, no `details`.
   - The remote maps by the user's name and backend roles as sent. The user needn't exist there
     (a backend role mapped on the remote is enough), and nothing local is needed for remote
-    indices (a user mapped only on the remote searches them).
+    indices (a user mapped only on the remote searches them). A local internal user's own
+    `opendistro_security_roles` count on the remote too, as the remote defines those roles: a
+    user given `readall` directly read the remote with no mapping there, whether or not a user
+    of that name existed on it.
   - DLS variables take the attributes from the local cluster: `${attr.internal.tenant}` was the
     local user's value, not that of the remote user of the same name.
   - `_remote/info` for a connected link: `connected: true`, `mode: sniff`, `seeds`,
