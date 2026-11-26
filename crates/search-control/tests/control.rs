@@ -6931,7 +6931,8 @@ async fn search_application_experiments() {
     // A browser key of the application: events only with limits.events, about what it reaches.
     let page = e.post("/v1/search/clusters/ab/browser-keys", json!({"name": "page", "application": "shop"})).await;
     let without = format!("ApiKey {}", page["api_key"].as_str().unwrap());
-    assert_eq!(event(&without, "v40", "search_click", json!({})).await, 400);
+    // Without it the event API needs a cluster privilege the key hasn't got.
+    assert_eq!(event(&without, "v40", "search_click", json!({})).await, 403);
     let page = e.post("/v1/search/clusters/ab/browser-keys", json!({"name": "events", "application": "shop", "limits": {"events": true}})).await;
     let key = format!("ApiKey {}", page["api_key"].as_str().unwrap());
     assert_eq!(event(&key, "v40", "search_click", json!({"document": {"index": "secrets", "id": "1"}})).await, 400, "a document it doesn't reach");
