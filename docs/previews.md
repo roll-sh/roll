@@ -1830,7 +1830,7 @@ land on the change.
   `GET /__roll/main?path=` on the preview's own host answers `{url}`, for a team visitor only (a
   share link's guest has no main to see), or 404 when main's preview doesn't run that service (the
   button then says "No main preview"); a path that isn't one on that host (`//…`) is none. The
-  script reads whether it's served by roll previews (`__ROLL_MAIN__`, unset on roll apps' hosts,
+  script reads whether it's served by roll previews (`__ROLL_MAIN__`: `false` on roll apps' hosts,
   whose pages keep the button hidden and never send it to the app)
   (`engine.rs::the_toolbars_main_is_the_same_page_on_mains_preview`).
 - A reviewer sets the project's feature flags for their own view (Vercel's Flags Explorer): with
