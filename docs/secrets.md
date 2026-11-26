@@ -3408,7 +3408,7 @@ roll secrets atlas   ls | add NAME --group-id ID --client-id ID [--user A --user
 roll secrets aws-users ls | add NAME USER --role ROLE | rm ID
 roll secrets clouds  ls | add-gcp NAME --audience A --service-account SA | add-azure NAME --tenant T --client-id C [--scope S] | rm ID
 roll secrets issuer rotate [--now --retire KID]   # the operator's: the next key now; --now --retire pulls a leaked one
-roll secrets policy get | set [--production-approvals N] [--leaks-managed] [--sync-kinds K,…] [--no-stored-cloud-keys] [--max-token-days D]   # the operator's ("Guardrails"); set replaces it
+roll secrets policy get | set [--production-approvals N] [--leaks-managed] [--sync-kinds K,…] [--no-stored-cloud-keys] [--max-token-days D]   # the operator's ("Guardrails"); get lists every exception too, set replaces it
 roll secrets kubernetes-clusters ls | add NAME API_URL [--ca FILE] (admin token on stdin) | rm ID
 roll secrets cas     ls | add NAME --domain D… [--allow-ip] [--max-days N] | cert ID | sign ID [CSR|-] [--days N] [--chain]
                      | certs ID | revoke ID SERIAL | rm ID
@@ -6521,11 +6521,19 @@ replaces it, and a floor left out has none:
   federated credential: "Syncing without a cloud key").
 - `max_token_days: d` (1–3650): a roll-access token whose rules reach roll secrets (a `secrets`
   rule, or `*`; a project's tokens, scan-only ones for a pre-receive hook included) lives at most
-  `d` days. roll-access makes and changes every token, so it asks roll
-  secrets on each make, each change of rules or lifetime, and each rotation
-  (`Access::lifetime_cap`), on top of its own `max_days` (docs/permissions.md). A token that never
-  expires is refused under it, and so is a gateway's long-lived token (log the gateway in through
-  a workload identity instead). Workload identities' logins and bootstrap tokens last 60
+  `d` days. roll-access makes and changes every grant, so it asks roll secrets
+  (`Access::lifetime_cap`, through `Access::meets_policy` with its own `max_days`,
+  docs/permissions.md) on every path that writes a grant's rules or lifetime or issues it a new
+  secret. A token's make, change and rotation, and a machine client's make and rotation, are
+  refused past it (set `expires_at`). What a person allows a client ends within it instead: an
+  MCP client's consent (and a device's) gets an end `d` days away when it asked for none or a
+  later one, and a step-up brings the connection's end forward (both consent screens say so). An
+  approval remembered for good, or for longer, on a secrets rule is remembered for `d` days. An
+  enterprise app's connection lives `d` days (a day when roll's policy requires an end and names no
+  length) and is made again at the next sign-in after (one made
+  before the policy is replaced then). A gateway's long-lived token is refused under it (log the
+  gateway in through a workload identity instead). roll-access's `tests/policy_callers.rs` fails
+  on a new writer that doesn't ask. Workload identities' logins and bootstrap tokens last 60
   minutes at most anyway. A machine identity's bootstrap token whose credentials would live longer
   is refused, and each
   machine credential issued after the policy (an exchange or a refresh) lives at most `d` days,
@@ -6547,7 +6555,12 @@ may only tighten it`.
   `no_breakglass`, each with a warning. A sync the policy rules out
   (its kind, or a stored cloud key) isn't restored, and the warning says which floor stopped it.
 - **Existing projects aren't rewritten.** Each project's Health lists how far it is from the
-  policy (`off_policy`), and the next write to each setting must meet it.
+  policy (`off_policy`), and the next write to each setting must meet it. `GET
+  /v1/secrets/policy/report` (the operator's and admin accounts'; `roll secrets policy get`, and
+  the Guardrails section of Health in the dashboard) lists every exception at once: each project
+  below a floor with those findings, and roll-access's grants with a secrets rule made before
+  `max_token_days` that live longer than it from now or never expire (not workload logins, decoys
+  or ones waiting for an admin). Grants aren't cut off at use: revoke or rotate them from there.
 - **Who sees it.** Setting the policy is audited in every project's log (`policy.set`, the floors
   as its summary). `GET /v1/secrets/policy` is the operator's and admin accounts' too, and the
   dashboard's Health view shows them the floors read-only. A member sees each floor in a refusal
@@ -7071,6 +7084,7 @@ isn't in the workspace is 404.
 | `GET /v1/secrets/oidc/.well-known/openid-configuration` | | roll's issuer's discovery document (public) |
 | `GET /v1/secrets/oidc/jwks` | | roll's issuer's public keys (public; served without clouds too, for the audit log's legacy digests): the key signing, the next one before it signs, the one it replaced until that one's tokens expire |
 | `GET /v1/secrets/policy` | | `Guardrails` (the operator's, or an admin account's): `{production_approvals: number \| null, leaks_rotate: "managed" \| null, sync_kinds: string[] \| null, no_stored_cloud_keys: boolean, max_token_days: number \| null, no_breakglass: boolean, updated_at: number \| null, updated_by: string \| null}` ("Guardrails") |
+| `GET /v1/secrets/policy/report` | | `{policy: Guardrails, projects: [{project, project_name, findings: Finding[]}], grants: [{id, name, kind: "token" \| "oauth", user: string \| null, created_at, expires_at: number \| null}]}` (the operator's, or an admin account's): each project below a floor (its `off_policy` findings), and grants with a secrets rule that outlive `max_token_days` ("Guardrails") |
 | `PUT /v1/secrets/policy` | `{production_approvals?, leaks_rotate?, sync_kinds?, no_stored_cloud_keys?, max_token_days?, no_breakglass?}` | `Guardrails` (the operator's, or an admin account's): replaces the policy, a field left out having no floor; 400 for an unknown sync kind or a number out of range; audited in every project as `policy.set`. A write below a floor anywhere else answers 403 naming it |
 | `POST /v1/secrets/issuer/rotate` | `{now?, retire?}` | `{kid, signs_from, pulled}` (the operator's): the next issuer key, published now, signing two days later; the one already waiting, if any. `{now: true, retire: kid}` (both or neither): a new key signs now and `kid` leaves the JWKS at once (`pulled`), and the digest keys' `legacy` list; 404 for a kid not in it |
 | `GET /v1/secrets/audit/jwks` | | `{keys, legacy, pulled}` (public): the audit log's digest keys (Ed25519 JWKs, retired ones too, never pulled ones), the issuer keys whose legacy digests count (RSA JWKs), and `[{kid, pulled_at}]` for keys pulled in an emergency, either kind. What `audit verify --file` takes |

@@ -1819,9 +1819,51 @@ impl Access {
         self.policy()
     }
 
-    /// Whether a grant with `rules` expiring at `expires_at` fits a product's own cap
-    /// ([`Access::lifetime_cap`]): 403 naming the product's policy otherwise.
-    pub fn check_lifetime_cap(&self, rules: &roll_auth::scope::Scope, expires_at: Option<i64>) -> Result<()> {
+    /// Whether a grant with `rules` expiring at `expires_at` meets the policy as it is now: roll's
+    /// token policy (`max_days`, `require_expiry`; a 400) and each product's own cap on grants
+    /// that reach it ([`Access::lifetime_cap`]; a 403 naming that product's policy). Every path
+    /// that writes a grant's rules or lifetime, or issues a grant a new secret, asks this
+    /// (tests/policy_callers.rs lists them).
+    pub fn meets_policy(&self, rules: &roll_auth::scope::Scope, expires_at: Option<i64>) -> Result<()> {
+        self.check_policy(expires_at)?;
+        self.check_lifetime_cap(rules, expires_at)
+    }
+
+    /// `expires_at` brought within each product's own cap on grants with `rules`
+    /// ([`Access::lifetime_cap`]): a person's connection (a consent, a step-up) ends when that
+    /// policy says instead of being refused. Unchanged when no cap applies.
+    pub fn within_cap(&self, rules: &roll_auth::scope::Scope, expires_at: Option<i64>) -> Option<i64> {
+        match self.lifetime_cap.get().and_then(|cap| cap(rules)) {
+            Some((d, _)) => {
+                let end = code_sql::now_ms() + i64::from(d) * 86_400_000;
+                Some(expires_at.map_or(end, |e| e.min(end)))
+            }
+            None => expires_at,
+        }
+    }
+
+    /// Each product whose own cap binds grants reaching it now, with the most days and the cap's
+    /// words (the consent screen says a connection ends then). A product's grants are those with a
+    /// rule on it, or on `*`.
+    pub fn lifetime_caps(&self) -> Vec<(&'static str, u32, String)> {
+        let Some(cap) = self.lifetime_cap.get() else { return vec![] };
+        roll_auth::scope::PRODUCTS
+            .iter()
+            .filter_map(|p| {
+                let rule = roll_auth::scope::Rule { product: (*p).to_string(), resources: roll_auth::scope::Resources::All, environments: None, paths: None, unprotected: false, actions: [(roll_auth::scope::Action::Read, roll_auth::scope::Effect::Allow)].into_iter().collect() };
+                cap(&roll_auth::scope::Scope(vec![rule])).map(|(d, why)| (*p, d, why))
+            })
+            .collect()
+    }
+
+    /// The most days a grant with `rules` may live now (roll's `max_days` and each product's cap,
+    /// the shorter), for a grant made with no lifetime asked for (an enterprise app's connection).
+    pub(crate) fn lifetime_days(&self, rules: &roll_auth::scope::Scope) -> Option<u32> {
+        let cap = self.lifetime_cap.get().and_then(|cap| cap(rules)).map(|(d, _)| d);
+        [self.policy().max_days, cap].into_iter().flatten().min()
+    }
+
+    fn check_lifetime_cap(&self, rules: &roll_auth::scope::Scope, expires_at: Option<i64>) -> Result<()> {
         let Some((days, why)) = self.lifetime_cap.get().and_then(|cap| cap(rules)) else { return Ok(()) };
         match expires_at {
             None => Err(Error::Forbidden(format!("{why} (set expires_at)"))),
@@ -1830,8 +1872,7 @@ impl Access {
         }
     }
 
-    /// Whether a grant expiring at `expires_at` fits the policy.
-    pub fn check_policy(&self, expires_at: Option<i64>) -> Result<()> {
+    fn check_policy(&self, expires_at: Option<i64>) -> Result<()> {
         let p = self.policy();
         match (expires_at, p.max_days) {
             (None, Some(d)) => Err(Error::BadRequest(format!("roll's policy: a token lives at most {d} days; set expires_at"))),
