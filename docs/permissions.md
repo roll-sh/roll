@@ -458,11 +458,11 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   resource, so remembering it allows revealing that one (all of reveal on it, not only the link);
   when several linked resources aren't allowed outright, the approval names them all and is
   approved once. Each linked resource's reveal is its own audit row.
-- A roll secret another product writes once as the caller is lent the same way:
-  - **The route:** search's admin password rotated into one (`POST …/password` with `secret: {environment, path?, project?}`, `write`; the project left out is the one the cluster is on).
-  - **What's checked:** `write` on that folder as roll secrets decides it, protected environments included. The environment and path are checked as roll secrets names them, so a pattern like `prod*` is refused rather than remembered as a wildcard.
+- A roll secret another product writes or reads once as the caller is lent the same way:
+  - **The routes:** search's admin password rotated into one (`POST …/password` with `secret: {environment, path?, project?}`, `write`; the project left out is the one the cluster is on), and roll apps' Cloudflare token for writing a domain's records (`POST …/domains/{host}/configure` with `cloudflare_token: "roll://[PROJECT@]ENV[/folder]/KEY"`, `reveal` on its folder, read once with `Secrets::use_once`; the project left out is the service's).
+  - **What's checked:** `write` (or `reveal`) on that folder as roll secrets decides it, protected environments included. The environment and path are checked as roll secrets names them, so a pattern like `prod*` is refused rather than remembered as a wildcard.
   - **An approval** names that folder, even when the route's own action asks too, and remembering it allows exactly that folder and environment.
-  - **The grant the product gets** carries one exact rule (that folder: `write`) for this request, plus `read` on that folder whenever the write passes, allowed outright or approved, since the product reads the version back. roll secrets checks the caller again inside, and nothing else in the project opens.
+  - **The grant the product gets** carries one exact rule (that folder: `write` or `reveal`) for this request, plus `read` on that folder whenever the action passes, allowed outright or approved, since the product reads the version back. roll secrets checks the caller again inside, and nothing else in the project opens.
   - **A remembered approval** keeps to what it named. When the route's own action asked too (admin on the cluster), only the secret is remembered, and the next call asks about the route's own action again.
   - **A secret a product keeps following needs `reveal` allowed outright.** That covers an inference endpoint keyed by a secret (its sync) and a bound `roll://` reference: either is checked again as its maker at every use, so an approval can't stand in for it.
 - Comparing a local copy with a secrets folder (`POST …/environments/{env}/diff`, by fingerprint,

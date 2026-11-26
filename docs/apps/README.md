@@ -949,8 +949,9 @@ service"), and a call the issuer gives no token for is `cron.failed` saying so. 
   `POST …/domains/{host}/configure {cloudflare_token}`, the Domains tab's "Write the records
   there", `roll domains verify <host> --cloudflare-token roll://…`): the token is a roll secret
   the caller names by its `roll://` reference, scoped to Zone:DNS:Edit on that one zone, bound to
-  them (`bind_ref`, refused unless they may reveal it; a sensitive key never) and read as them for
-  this call only, never kept, so it stops working the moment they lose the project. The TXT
+  them for this call only (roll secrets' `use_once`: refused unless they may reveal it, where an
+  approved `ask` is enough; a sensitive key never), audited as theirs and never kept, so it stops
+  working the moment they lose the project. The TXT
   challenge is written first where the domain needs one, then its CNAME, unproxied (flattened at
   an apex); a name still holding A or AAAA records (its old host) answers a 409 naming them, and
   `replace: true` (the tab's "Replace them") deletes them for the CNAME. All of it goes through
