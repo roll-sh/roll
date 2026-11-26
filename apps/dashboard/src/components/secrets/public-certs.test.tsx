@@ -15,7 +15,7 @@ const api = {
   }),
   updatePublicCert: vi.fn(async (id: string, _ch: PublicCertChange) => listed.find((c) => c.id === id)!),
 };
-vi.mock("./secrets-page", () => ({ useSecrets: () => ({ api, project: { id: "prj_1", name: "shop" } }) }));
+vi.mock("./secrets-page", () => ({ useSecrets: () => ({ api, project: { id: "prj_1", name: "shop" } }), secretsHref: () => "/dashboard/projects/prj_1/secrets" }));
 
 describe("adding a public certificate", () => {
   it("sends the DNS credential once and never shows it again", async () => {
