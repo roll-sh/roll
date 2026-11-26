@@ -14,9 +14,11 @@
 //! limits ([`CallerLimits`]: turns, prompt and output tokens a minute, answers at once) by its
 //! own identity, its API key, or its user and realm.
 //!
-//! **Everyone together** is held to the profile's `max_tokens_per_day` (prompt and output; 1M
-//! unless the profile says otherwise, `"unlimited"` explicitly), kept apart from the per-minute
-//! buckets so their eviction never gives a day's budget back.
+//! **Each side together** is held to the profile's `max_tokens_per_day` (prompt and output; 1M
+//! unless the profile says otherwise, `"unlimited"` explicitly): browser keys share one day, every
+//! other caller another, so a key or user that empties its side's day can't switch off the
+//! profile's public chat, nor a page the owner's own callers. The days are kept apart from the
+//! per-minute buckets, so their eviction never gives a day's budget back.
 //!
 //! An answer charges its turn when it starts, and its tokens once the prompt is built and before
 //! the model is called: the prompt's estimate, and the output cap in full. When it ends, what it
@@ -157,6 +159,15 @@ pub struct Payer {
     pub key: String,
     pub user: Option<String>,
     pub policy: ChatPolicy,
+    /// A browser key's (or a key derived from one): its profile's day is the browser keys' own.
+    pub browser: bool,
+}
+
+/// A profile's day of tokens for `payer`'s side: browser keys together, or every other caller
+/// together, each the whole `max_tokens_per_day`, so neither side can switch the other off.
+fn day_key(profile: &str, payer: Option<&Payer>) -> String {
+    let side = if payer.is_some_and(|p| p.browser) { "browser" } else { "callers" };
+    format!("{DAY_PREFIX}{profile}:{side}")
 }
 
 /// What a step charges: `(bucket, capacity per period, period, amount)`.
@@ -308,7 +319,7 @@ impl Limiter {
             asks.extend(p.each("out", p.policy.output_tokens_per_minute, output));
         }
         if let Some(d) = per_day {
-            asks.push((format!("{DAY_PREFIX}{profile}"), d, DAY, input + output));
+            asks.push((day_key(profile, payer), d, DAY, input + output));
         }
         self.take(&asks)
     }
@@ -324,7 +335,7 @@ impl Limiter {
             }
         }
         if per_day.is_some() {
-            self.give(&format!("{DAY_PREFIX}{profile}"), unused);
+            self.give(&day_key(profile, payer), unused);
         }
     }
 }
@@ -355,7 +366,7 @@ mod tests {
 
     fn payer(user: Option<&str>) -> Payer {
         let policy = ChatPolicy::of(Some(&crate::obj! { "chat" => crate::obj! { "profiles" => crate::arr!["help"], "turns_per_minute" => 8, "max_concurrent" => 2 } })).unwrap();
-        Payer { key: "k".into(), user: user.map(str::to_owned), policy }
+        Payer { key: "k".into(), user: user.map(str::to_owned), policy, browser: true }
     }
 
     #[test]
@@ -387,8 +398,13 @@ mod tests {
         assert!(l.charge_tokens(Some(&p), "help", Some(10_000), 100, 4000).is_err(), "5,000 output tokens a minute");
         l.refund_output(Some(&p), "help", Some(10_000), 3900);
         assert!(l.charge_tokens(Some(&p), "help", Some(10_000), 100, 4000).is_ok(), "the unused output came back");
-        // The day has 10,000 - 4,100 - 4,100 + 3,900 left, for every caller of the profile.
-        assert!(l.charge_tokens(None, "help", Some(10_000), 6000, 0).is_err());
+        // The browser keys' day has 10,000 - 4,100 - 4,100 + 3,900 left; the other callers have
+        // a day of their own, which the browser keys' spending didn't touch, and the reverse.
+        let browser = Payer { key: "k2".into(), user: None, policy: p.policy.clone(), browser: true };
+        assert!(l.charge_tokens(Some(&browser), "help", Some(10_000), 6000, 0).is_err());
+        assert!(l.charge_tokens(None, "help", Some(10_000), 9000, 0).is_ok());
+        assert!(l.charge_tokens(None, "help", Some(10_000), 2000, 0).is_err());
+        assert!(l.charge_tokens(Some(&browser), "help", Some(10_000), 5000, 0).is_ok());
         assert!(l.charge_tokens(None, "other", None, 100, 4000).is_ok());
     }
 }

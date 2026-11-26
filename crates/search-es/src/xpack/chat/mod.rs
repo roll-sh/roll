@@ -835,7 +835,7 @@ pub async fn run(ctx: &Ctx<'_>, profile: &Profile, ask: Ask) -> EsResult<Answeri
 /// chat policy, or whose policy doesn't list the profile, is refused.
 fn payer(ctx: &Ctx, profile: &Profile) -> EsResult<Option<limits::Payer>> {
     let Some(policy) = browser::policy(ctx) else {
-        return Ok(Some(limits::Payer { key: caller_key(ctx), user: None, policy: profile.per_caller.policy(profile.max_history_turns as usize) }));
+        return Ok(Some(limits::Payer { key: caller_key(ctx), user: None, policy: profile.per_caller.policy(profile.max_history_turns as usize), browser: false }));
     };
     let Some(chat) = policy.chat else { return Err(browser::refused("chat (its limits.chat names no profile)")) };
     if !chat.profiles.contains(&profile.name) {
@@ -843,7 +843,7 @@ fn payer(ctx: &Ctx, profile: &Profile) -> EsResult<Option<limits::Payer>> {
     }
     let Some(security::AuthKind::ApiKey(k)) = ctx.principal.get().map(|p| &p.kind) else { return Ok(None) };
     let user = k.derived.as_deref().and_then(|d| d.user.clone());
-    Ok(Some(limits::Payer { key: k.id.clone(), user, policy: chat }))
+    Ok(Some(limits::Payer { key: k.id.clone(), user, policy: chat, browser: true }))
 }
 
 /// A caller that isn't a browser key, as its chat limits are kept: its API key, else its user and

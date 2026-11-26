@@ -90,10 +90,14 @@ what the best of the four products does:
   in roles Elasticsearch clients write. The cost is bounded instead: a caller that isn't a browser
   key is held to the profile's `per_caller` limits (turns, prompt and output tokens a minute,
   answers at once) by its API key, or its user and realm (the owner's own calls share one), and
-  everyone together to the profile's `max_tokens_per_day`, 1M unless the owner says otherwise.
-  Without that day, one public browser key at its defaults could spend about 36M tokens a day.
-  The day's bucket is kept apart from the per-minute ones, so evicting those never hands a day
-  back.
+  each side together to the profile's `max_tokens_per_day`, 1M unless the owner says otherwise:
+  browser keys share one day, every other caller another. One caller at the `per_caller`
+  defaults (100k prompt and 20k output tokens a minute) can empty its side's day in about eight
+  minutes; with one day for everyone that would switch the profile's public chat off for up to a
+  day, so the sides are apart and the owner's own keys can't do that to the pages (nor a page to
+  them). Without a day at all, one public browser key at its defaults could spend about 36M
+  tokens a day. The days are kept apart from the per-minute buckets, so evicting those never
+  hands a day back.
 - **Workflows.** `_answer`, the OpenAI route and its model list run in the
   `search_application_query` workflow, so a key restricted to it chats over its application; it
   is refused a profile over an index (403).
