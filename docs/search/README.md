@@ -1679,7 +1679,9 @@ deterministic (#396).
    (#941); deletions and `_cleanup` show as running, so a snapshot starting meanwhile waits for
    them rather than take a removed snapshot as its base (#995); data streams restored whole, and
    a restore resumed after a takeover from the shard it reached (#1008).
-   Chunks of failed snapshots stay until `_cleanup` (compatibility.md says why).
+   Chunks of failed snapshots stay until `_cleanup` (compatibility.md says why). And
+   OpenSearch's snapshot management policies (`_plugins/_sm`), on SLM's scheduler and its
+   stored-user model, so OpenSearch-flavor clusters schedule their snapshots too.
 10. **Relevance tuning by MCP and Terraform**: `/v1/search` serves synonyms sets, query rulesets
    (and `_test`), writing an index's settings and `_explain` (the routes table), and `roll search`
    has `synonyms`, `rules`, `indices settings` and `explain` and makes `read` and `append` keys on
