@@ -600,6 +600,24 @@ impl Engine {
             self.store.set_released(&r.id, r.build(), ms)?;
             self.store.log(&r.id, &format!("released in {:.1} s", ms as f64 / 1000.0))?;
         }
+        // 3c'. A rehearsal asked for at this head: the release again on the parents as they are
+        // now. Asked by roll when the change is queued to land, where the project wants it.
+        if s.rehearse_when_queued
+            && s.release.is_some()
+            && let Some(change) = r.change_id.as_deref()
+            && self.store.runtime_fact::<crate::Rehearsal>(&r.id, "rehearsal")?.is_none_or(|x| x.head != r.build())
+            && self.source.change(change).await.ok().flatten().is_some_and(|c| c.queued)
+            && self.store.resources(&r.id)?.iter().any(|x| x.kind == Kind::Postgres && x.r#ref.is_some())
+        {
+            let asked = crate::Rehearsal { head: r.build().to_string(), by: "roll".into(), at: self.store.now_ms()?, ok: None, ms: None, error: None };
+            self.store.set_runtime_fact(&r.id, "rehearsal", Some(&asked))?;
+            self.store.log(&r.id, "the change is queued to land: rehearsing its release on today's data")?;
+        }
+        if let Some(release) = &s.release
+            && let Some(asked) = self.store.runtime_fact::<crate::Rehearsal>(&r.id, "rehearsal")?.filter(|x| x.ok.is_none() && x.head == r.build())
+        {
+            self.rehearse_release(r, &s, &vars, release, asked).await?;
+        }
         // 3d. What that did to the schema, once per head (best effort: a reviewer's aid). Only
         // after a seed or release could have changed it: reading the parent's starts its compute.
         if s.seed.is_none() && s.release.is_none() {
@@ -1480,6 +1498,61 @@ impl Engine {
             set(&mut vars, &k, v);
         }
         Ok(vars)
+    }
+
+    /// The release once more, on fresh branches of the preview's Postgres parents as they are now
+    /// (masked by the project's rules before anything connects), in place of its own branches'
+    /// variables; the branches go after, whatever happened. Its outcome is recorded (a failed
+    /// release is said, never the converge's failure).
+    async fn rehearse_release(&self, r: &Row, s: &Settings, vars: &[(String, String)], release: &crate::settings::Seed, asked: crate::Rehearsal) -> anyhow::Result<()> {
+        let name = format!("{}-r", branch_name(&r.id));
+        let mut made: Vec<(Arc<dyn Brancher>, String, String)> = Vec::new();
+        let prepared = async {
+            let mut vars = vars.to_vec();
+            for res in self.store.resources(&r.id)?.into_iter().filter(|x| x.kind == Kind::Postgres && x.mode == Mode::Branch) {
+                let (Some(branch), Ok(b)) = (&res.r#ref, self.brancher(res.kind)) else { continue };
+                let b = b.clone();
+                let fresh = b.branch(&res.parent, &name, Mode::Branch).await?;
+                made.push((b.clone(), res.parent.clone(), fresh.r#ref.clone()));
+                let key = format!("{}:{}", res.kind.as_str(), res.parent);
+                if let Some(cols) = s.masking.get(&key).filter(|c| !c.is_empty()) {
+                    b.mask(&res.parent, &fresh.r#ref, fresh.kept.as_deref(), cols).await?;
+                }
+                // Its variables in place of the preview's branch's: the same names, wherever their
+                // values went (a suffixed name too), by value (a branch's URL holds its own role's
+                // password, so it's that branch's alone).
+                let old = b.connect(&res.parent, branch, res.kept.as_deref()).await?;
+                let new = b.connect(&res.parent, &fresh.r#ref, fresh.kept.as_deref()).await?;
+                for (k, v) in &old {
+                    if let Some((_, nv)) = new.iter().find(|(nk, _)| nk == k) {
+                        for kv in vars.iter_mut().filter(|(_, vv)| vv == v) {
+                            kv.1 = nv.clone();
+                        }
+                    }
+                }
+            }
+            anyhow::Ok(vars)
+        }
+        .await;
+        let started = std::time::Instant::now();
+        let ran = match prepared {
+            Ok(vars) => self.run_job(r, s, &vars, "rehearsal", release).await,
+            Err(e) => Err(anyhow::anyhow!("branching today's data: {e:#}")),
+        };
+        let ms = started.elapsed().as_millis() as i64;
+        for (b, parent, branch) in made {
+            if let Err(e) = b.delete(&parent, &branch, &name).await {
+                warn!(preview = %r.id, error = %e, "previews: deleting a rehearsal's branch");
+            }
+        }
+        let error = match &ran {
+            Ok(()) => None,
+            Err(e) => Some(self.mask_text(&r.id, &format!("{e:#}").lines().next().unwrap_or("").chars().take(300).collect::<String>()).await?),
+        };
+        let done = crate::Rehearsal { ok: Some(ran.is_ok()), ms: Some(ms), error, ..asked };
+        self.store.set_runtime_fact(&r.id, "rehearsal", Some(&done))?;
+        self.store.log(&r.id, &format!("rehearsed the release on today's data: {} in {:.1} s", if ran.is_ok() { "it passed" } else { "it failed" }, ms as f64 / 1000.0))?;
+        Ok(())
     }
 
     async fn run_job(&self, r: &Row, s: &Settings, vars: &[(String, String)], what: &str, job: &crate::settings::Seed) -> anyhow::Result<()> {

@@ -89,7 +89,6 @@ POST /v1/search/clusters/{id}/browser-keys/from-parent                         a
 POST /v1/search/clusters/{id}/browser-keys/from-parent/prune                   roll previews' upkeep of a preview's search branch (the operator's): revokes copies of revoked parent keys
 POST /v1/search/clusters/{id}/browser-keys/{key}/rotate                        answers or sets a credential (a derivable browser key's signing secret)
 GET /v1/search/clusters/{id}/indices/{index}/docs                              no such handler (only POST exists)
-POST /v1/search/clusters/{id}/indices/{index}/update_by_query                  no tool yet
 POST /v1/search/clusters/{id}/keys                                             answers or sets a credential
 POST /v1/search/clusters/{id}/migrate                                          an outside integration's setup: an admin's, with the remote's credentials (#485)
 POST /v1/search/clusters/{id}/migrate/inspect                                  answers or sets a credential: the remote's credentials go in its body (#485)
@@ -97,12 +96,12 @@ POST /v1/search/clusters/{id}/password                                         a
 PUT /v1/search/clusters/{id}/remotes/{alias}                                   an admin's: it lends the remote cluster's credentials
 PUT /v1/search/clusters/{id}/repositories/{name}                               an outside integration's setup: an admin's, with its credentials (#361)
 POST /v1/search/clusters/{id}/request                                          the operator's (any Elasticsearch request, unscoped)
-GET /v1/search/clusters/{id}/tasks/{task}                                      no tool yet
 POST /v1/search/clusters/{id}/unload                                           the operator's (health, migrations, process control)
 GET /v1/secrets/gateways/{id}/connect                                          interactive (a shell, files, a forward): an admin's, live
 GET /v1/secrets/health                                                         the operator's (health, migrations, process control)
 GET /v1/secrets/policy                                                         the operator's (roll secrets' guardrails bind every project: operator-only in the catalogue; the floors show in each project's health as off_policy)
 PUT /v1/secrets/policy                                                         the operator's (roll secrets' guardrails: lowering a floor for every project is the operator's or an admin account's call, never an agent's)
+GET /v1/secrets/policy/report                                                  the operator's (roll secrets' guardrails: every project below them and every grant past max_token_days, across tenants: operator-only in the catalogue)
 PATCH /v1/secrets/projects/{project}                                           a person's call: how long old versions are kept (shortening it deletes history), and whether leaked keys rotate on their own
 POST /v1/secrets/projects/{project}/atlas-projects                             an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/atlas-projects/{id}                      an outside integration's setup: an admin's, with its credentials

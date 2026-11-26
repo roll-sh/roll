@@ -412,6 +412,57 @@ async fn the_toolbars_main_is_the_same_page_on_mains_preview() {
     assert_eq!(e.engine.main_page_url(&chg.id, "web", "//evil.example/").await.unwrap(), None, "only a path on main's host");
 }
 
+/// A release rehearsed on today's data (PlanetScale's deploy requests): at the next converge,
+/// the release runs once more on a fresh branch of the parent, masked by the rules before it
+/// runs, and the branch goes after; how it went is on the preview.
+#[tokio::test]
+async fn a_rehearsal_runs_the_release_on_a_fresh_masked_branch_then_drops_it() {
+    let e = env(json!({ "enabled": true, "release": { "image": "node:22", "run": "npm run migrate" }, "masking": { "postgres:prj_db": { "public.users.email": "email" } } }));
+    e.code.open(change("chg_rh", 1));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_rh").unwrap().unwrap();
+    let fresh = format!("prj_db~pv-{}-r", &p.id[3..]);
+    let ran = e.apps.seeds.lock().len();
+    e.engine.rehearse(&p.id, "ana").unwrap();
+    e.engine.pass().await.unwrap();
+    let seeds = e.apps.seeds.lock().clone();
+    assert_eq!(seeds.len(), ran + 1, "the release once more");
+    assert_eq!(seeds.last().map(String::as_str), Some(format!("fake://{fresh}").as_str()), "on the fresh branch, not the preview's");
+    assert!(e.pg.masks.lock().iter().any(|(b, _)| *b == fresh), "masked before it ran");
+    assert!(!e.pg.branches.lock().contains(&fresh), "and gone after");
+    let r = e.engine.store.preview(&p.id).unwrap().rehearsal.expect("how it went");
+    assert_eq!((r.ok, r.by.as_str(), r.head.as_str()), (Some(true), "ana", p.build()));
+    // Once a head: the next converge doesn't run it again.
+    e.engine.store.update(&p.id, |x| x.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.apps.seeds.lock().len(), ran + 1);
+}
+
+/// With `rehearse_when_queued`, a change queued to land has its release rehearsed on today's data
+/// by roll, once at that head; without it, nothing is asked.
+#[tokio::test]
+async fn a_change_queued_to_land_is_rehearsed_where_the_project_asks() {
+    let e = env(json!({ "enabled": true, "release": { "image": "node:22", "run": "npm run migrate" }, "rehearse_when_queued": true }));
+    e.code.open(ChangeInfo { queued: true, ..change("chg_rq", 1) });
+    e.code.open(change("chg_rn", 3));
+    e.engine.pass().await.unwrap();
+    let open = e.engine.store.row_by_change("chg_rn").unwrap().unwrap();
+    assert!(e.engine.store.preview(&open.id).unwrap().rehearsal.is_none(), "an open change that isn't queued isn't rehearsed");
+    let p = e.engine.store.row_by_change("chg_rq").unwrap().unwrap();
+    let r = e.engine.store.preview(&p.id).unwrap().rehearsal.expect("rehearsed");
+    assert_eq!((r.by.as_str(), r.ok), ("roll", Some(true)));
+    let ran = e.apps.seeds.lock().len();
+    e.engine.store.update(&p.id, |x| x.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.apps.seeds.lock().len(), ran, "once at that head");
+    // Not queued, or not asked for: none.
+    let quiet = env(json!({ "enabled": true, "release": { "image": "node:22", "run": "npm run migrate" } }));
+    quiet.code.open(ChangeInfo { queued: true, ..change("chg_rq2", 2) });
+    quiet.engine.pass().await.unwrap();
+    let q = quiet.engine.store.row_by_change("chg_rq2").unwrap().unwrap();
+    assert!(quiet.engine.store.preview(&q.id).unwrap().rehearsal.is_none());
+}
+
 /// A visual change refused (Chromatic's Deny): the review fails at that head, the change is told at
 /// once, an accept of the pages clears it, and a new head asks again.
 #[tokio::test]

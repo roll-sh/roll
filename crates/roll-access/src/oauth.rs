@@ -281,11 +281,14 @@ fn consented(a: &Arc<Access>, ext: &Extensions, client: &crate::store::Client, a
         }
         crate::api::Who::Grant(_) => return Err(Error::Forbidden("a token never connects an MCP client".into())),
     };
-    a.check_policy(allowed.expires_at)?;
+    // A connection a product caps (roll secrets' `max_token_days`) ends within it: the consent
+    // screen says so (the catalogue's `lifetime_caps`).
+    let expires_at = a.within_cap(&allowed.rules, allowed.expires_at);
+    a.meets_policy(&allowed.rules, expires_at)?;
     let new = NewGrant {
         name: allowed.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| client.name.clone()),
         rules: allowed.rules.clone(),
-        expires_at: allowed.expires_at,
+        expires_at,
         ip_allow: allowed.ip_allow.clone(),
         rate_per_minute: allowed.rate_per_minute,
         ask_otherwise: allowed.ask_otherwise,
@@ -392,13 +395,16 @@ pub(crate) async fn own_step_up(
 /// to any widened token, and the client gets a code for that connection: its other sessions widen
 /// too and nothing new is made.
 async fn step_up(a: &Arc<Access>, ext: &Extensions, c: &Consent, client: &crate::store::Client, id: String, res: Option<String>) -> crate::Result<Response> {
-    let (g, _rule, asker) = own_step_up(a, ext, &id, Some(&client.id)).await?;
-    // The token policy as it is now, as editing the connection would meet it.
-    a.check_policy(g.expires_at)?;
+    let (g, rule, asker) = own_step_up(a, ext, &id, Some(&client.id)).await?;
+    // The token policy as it is now, as editing the connection would meet it; a product's cap on
+    // the rules it then has brings its end forward (the step-up's consent says so).
+    let rules = with_rule(&g, rule);
+    let ends = a.within_cap(&rules, g.expires_at);
+    a.meets_policy(&rules, ends)?;
     let policy = a.policy_now();
     let person = asker.is_some();
     let (a2, id2, gid) = (a.clone(), id.clone(), g.id.clone());
-    let (updated, added) = tokio::task::spawn_blocking(move || a2.store.apply_step_up(&id2, &gid, &|rules, ask| person && policy.needs_approval(rules, ask)))
+    let (updated, added) = tokio::task::spawn_blocking(move || a2.store.apply_step_up(&id2, &gid, ends, &|rules, ask| person && policy.needs_approval(rules, ask)))
         .await
         .map_err(|e| Error::Internal(e.to_string()))??;
     if added {
@@ -423,15 +429,24 @@ async fn step_up(a: &Arc<Access>, ext: &Extensions, c: &Consent, client: &crate:
     Ok(out)
 }
 
+/// A connection's rules with a step-up's rule added.
+fn with_rule(g: &crate::store::Grant, rule: roll_auth::scope::Rule) -> roll_auth::scope::Scope {
+    let mut rules = g.rules.clone();
+    rules.0.push(rule);
+    rules
+}
+
 /// `GET /v1/access/oauth/step-ups/{id}`: what a step-up proposes, for its person's consent screen
 /// (the connection and the one rule), or one "no such step-up" for anyone else.
 pub async fn step_up_view(State(a): S, ext: Extensions, axum::extract::Path(id): axum::extract::Path<String>) -> crate::Result<Json<Value>> {
     let (g, rule, asker) = own_step_up(&a, &ext, &id, None).await?;
-    a.check_policy(g.expires_at)?;
-    let mut rules = g.rules.clone();
-    rules.0.push(rule.clone());
+    let rules = with_rule(&g, rule.clone());
+    let ends = a.within_cap(&rules, g.expires_at);
+    a.meets_policy(&rules, ends)?;
     let waits = asker.is_some() && a.policy_now().needs_approval(&rules, g.ask_otherwise);
-    Ok(Json(json!({ "id": id, "connection": { "id": g.id, "name": g.name, "client_id": g.client.as_ref().map(|c| c.id.clone()) }, "rule": rule, "waits_for_admin": waits })))
+    // When adding it brings the connection's end forward (a product's cap), until when and why.
+    let capped = (ends != g.expires_at).then(|| json!({ "until": ends, "why": a.lifetime_cap.get().and_then(|cap| cap(&rules)).map(|(_, why)| why) }));
+    Ok(Json(json!({ "id": id, "connection": { "id": g.id, "name": g.name, "client_id": g.client.as_ref().map(|c| c.id.clone()) }, "rule": rule, "waits_for_admin": waits, "ends": capped })))
 }
 
 /// A metadata document is fetched at most this often (it's kept between).

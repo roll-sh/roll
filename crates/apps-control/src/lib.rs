@@ -4175,6 +4175,41 @@ impl Apps {
         Ok(d)
     }
 
+    /// `POST …/domains/{host}/claim` (Vercel's "this domain is linked to another team"): take a
+    /// hostname another environment holds by proving it's yours. The first ask answers the TXT
+    /// record to add (`_roll-challenge.<host>`, a token of this environment's own, beside any value
+    /// there); once DNS has it, the next ask moves the domain here in one write, verified, and the
+    /// holder is told (`domain.expired`, `reason: claimed`).
+    pub async fn claim_domain(self: &Arc<Self>, service: &str, env: &str, host: &str) -> Result<Value> {
+        let h = host.to_ascii_lowercase();
+        let mut reserved: Vec<&str> = self.cfg.reserved.iter().map(String::as_str).collect();
+        reserved.push(&self.cfg.domain);
+        let h = check_hostname(&h, &reserved)?;
+        let (sid, e) = (service.to_string(), env.to_string());
+        self.db(move |s| s.environment(&sid, &e)).await?;
+        let (sid, e, hh) = (service.to_string(), env.to_string(), h.clone());
+        let Some(token) = self.db(move |s| s.claim_token(&hh, &sid, &e)).await? else {
+            return Err(Error::BadRequest(format!("{h} isn't another environment's custom domain: add it (POST …/domains)")));
+        };
+        let challenge = crate::model::challenge_name(&h);
+        if !self.deps.resolver.txt(&challenge).await.contains(&token) {
+            return Ok(json!({ "claimed": false, "txt": { "name": challenge, "value": token } }));
+        }
+        self.hosts_changed();
+        let tls = if self.deps.tls.issues() { TlsStatus::Pending } else { TlsStatus::None };
+        let (sid, e, hh, t) = (service.to_string(), env.to_string(), h.clone(), token.clone());
+        let Some((from_svc, from_env)) = self.db(move |s| s.take_domain(&hh, &sid, &e, &t, tls)).await? else {
+            return Err(Error::Conflict(format!("{h} moved meanwhile: ask again")));
+        };
+        self.hosts_changed();
+        tracing::info!(host = %h, from_service = %from_svc, from_env = %from_env, service, env, "apps: a domain was claimed by proving it");
+        // The provider's hostname is let go and asked for again, for this environment.
+        self.release_domains(std::slice::from_ref(&h)).await;
+        self.refresh_tls(&h).await;
+        let d = self.domains(service, env).await?.into_iter().find(|d| d.hostname == h).ok_or_else(|| Error::Internal(format!("{h} was claimed but isn't listed")))?;
+        Ok(json!({ "claimed": true, "domain": d }))
+    }
+
     // ── a project's preview domain (docs/apps/README.md, "A project's preview domain") ──
 
     /// Where a project's preview domain's CNAME points (a name of roll's that reaches it).

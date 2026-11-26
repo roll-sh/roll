@@ -8,6 +8,7 @@ import {
   denyRedirect,
   describeRule,
   EXPIRIES,
+  lifetimeCap,
   parseAuthorize,
   presetFor,
   parseRate,
@@ -284,6 +285,7 @@ export function StepUpConfirm({
         <p className="text-[12px] text-danger">This reaches far: it applies to every resource of the product, or lets it reveal or administer. Add it only if you meant to.</p>
       )}
       {proposal.waits_for_admin && <p className="text-[12px] text-muted">Your organization&apos;s policy has an admin approve this: the connection waits until they do.</p>}
+      {proposal.ends && <p className="text-[12px] text-muted">With it, this connection ends on {new Date(proposal.ends.until).toISOString().slice(0, 10)}: roll secrets&apos; policy.</p>}
       <p className="text-[12px] text-subtle">Its other rules and settings stay as they are, and every session of this connection gets it.</p>
       <ErrorNote error={error} />
       <div className="flex flex-wrap items-center gap-2">
@@ -380,6 +382,7 @@ export function AllowForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const rate = parseRate(rateText);
+  const cap = lifetimeCap(catalog, rules);
   if (me.kind !== "operator" && me.kind !== "user") return <Problem text="Connect clients signed in to your account, not with a token." />;
 
   const allow = async () => {
@@ -451,6 +454,11 @@ export function AllowForm({
           ))
         )}
       </div>
+      {cap && (EXPIRIES[expiry].ms ?? Infinity) > cap.days * 86_400_000 && (
+        <p className="text-[12px] text-muted">
+          This connection ends in {cap.days} {cap.days === 1 ? "day" : "days"}: {cap.product.endsWith("s") ? `roll ${cap.product}' policy` : `roll ${cap.product}'s policy`}.
+        </p>
+      )}
       {waitsForAdmin(me, rules, askOtherwise) && (
         <p className="text-[12px] text-accent">It reaches what an admin approves first: {clientName} connects now, and works once an admin approves it (they&apos;re mailed).</p>
       )}
