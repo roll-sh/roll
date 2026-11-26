@@ -82,7 +82,13 @@ else
   say "build ok $(($(now) - t))s dist-pgo.sh${PROF:+ --profdata $PROF}"
 fi
 BUILD_REV=$(sed -n 's/^commit \([0-9a-f]*\).*/\1/p' "$B/BUILD.txt" | head -1)
-case $REV in "$BUILD_REV"*) ;; *) fail build "$B was built from $BUILD_REV, the checkout is $REV" ;; esac
+# The binary must be this checkout's code: the same commit, or one that differs only in docs
+# and tools (what a later doc commit changes: nothing the build reads).
+case $REV in
+  "$BUILD_REV"*) ;;
+  *) git cat-file -e "$BUILD_REV^{commit}" 2>/dev/null && git diff --quiet "$BUILD_REV" HEAD -- . ':!*.md' ':!crates/pg-engine/tools' \
+       || fail build "$B was built from $BUILD_REV, the checkout is $REV and differs in what the build reads" ;;
+esac
 if grep -q 'NOT THE SHIPPED RECIPE' "$B/BUILD.txt"; then fail build "$(grep 'NOT THE SHIPPED RECIPE' "$B/BUILD.txt")"; fi
 if grep -q '^commit .*(uncommitted changes)' "$B/BUILD.txt" && [ -z "${RELEASE_DIRTY:-}" ]; then
   fail build "$B was built with uncommitted changes"
