@@ -4200,10 +4200,12 @@ refuses any push whose new commits add a value of the project, whoever pushes it
   first: roll refuses a pusher the list doesn't name (403, audited), and records the push as
   `secrets.scan.breakglass` with the pusher and refs before anything is read. It's still scanned,
   and the keys it found go in the same log. What it lets through is leaked: the value is in the
-  server's history and every clone, so roll handles it as one found in code ("When a value
-  leaks"): `secret.leaked` with `via: "breakglass"`, the pusher and the refs, its managed keys
-  rotated under `leaks.rotate = managed` (or a change request where approvals are needed), and
-  on Health until rotated. When roll can't be reached (no answer, a 5xx, the
+  server's history and every clone, so roll reports it ("When a value leaks"): `secret.leaked`
+  with `via: "breakglass"`, the pusher and the refs as the hook said them, and on Health until
+  rotated. Like a reported leak, it rotates only where the hook's token may `write` (under
+  `leaks.rotate = managed`, or a change request where approvals are needed): a scan-only token
+  rotates nothing, so the leak waits on Health for a writer. A token that may only scan can't
+  force a rotation by claiming a break-glass push. When roll can't be reached (no answer, a 5xx, the
   budget gone), the push is refused: break glass never passes unrecorded. Only
   `--breakglass-unrecorded` on the hook's command line lets such a push through, saying it went
   unrecorded; set it only where the git server's own log names pushers.
