@@ -3866,8 +3866,6 @@ impl Store {
         Ok((minutes, hours))
     }
 
-    /// An environment's hourly rollups since `since_hour`, as rows whose `minute` is the hour's
-    /// first.
     /// A volume's measured size this hour (one a service's owner takes hourly), and those past
     /// 90 days dropped.
     pub fn put_volume_hour(&self, service: &str, env: &str, hour: i64, bytes: u64) -> Result<()> {
@@ -3881,6 +3879,8 @@ impl Store {
         Ok(self.db.query("SELECT hour, bytes FROM volume_hours WHERE service = ? AND env = ? AND hour >= ? ORDER BY hour", params![service, env, since_hour], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as u64)))?)
     }
 
+    /// An environment's hourly rollups since `since_hour`, as rows whose `minute` is the hour's
+    /// first.
     pub fn hours(&self, service: &str, env: &str, since_hour: i64) -> Result<Vec<MinuteRow>> {
         Ok(self.db.query(
             "SELECT hour, requests, errors, p50_ms, p95_ms, p99_ms, cpu, memory_bytes, instances, cold_starts, cold_start_ms, egress_bytes, over_capacity FROM metrics_hourly WHERE service = ? AND env = ? AND hour >= ? ORDER BY hour",

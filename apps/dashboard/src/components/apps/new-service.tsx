@@ -31,7 +31,8 @@ const field = "h-8 w-full rounded-lg border border-line-2 bg-canvas px-2.5 font-
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 /** A folder's service name: its last segment, as a name may be (`apps/web` → `web`). */
-export const folderName = (root: string) => (root.split("/").filter(Boolean).pop() ?? "app").toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32) || "app";
+export const folderName = (root: string) =>
+  (root.split("/").filter(Boolean).pop() ?? "app").toLowerCase().replace(/[^a-z0-9-]+/g, "-").slice(0, 32).replace(/^-+|-+$/g, "") || "app";
 
 /** A word for `sh`: as is when it's plain, else in single quotes. */
 const shellQuote = (w: string) => (/^[A-Za-z0-9_./-]+$/.test(w) ? w : `'${w.replace(/'/g, `'\\''`)}'`);
@@ -279,22 +280,36 @@ export function NewServiceSheet({
       ];
       const picked = source.kind === "git" ? gitBranch.trim() : source.kind === "repo" ? repoBranch.trim() : "";
       const branch = picked ? { branch: picked } : {};
-      const common = { project: project.id, ...branch, ...(run ? { run } : {}), ...variables, ...registry, ...(chosen.length ? { links: chosen } : {}) };
+      const common = { project: project.id, ...branch, ...variables, ...registry, ...(chosen.length ? { links: chosen } : {}) };
       // Several folders: a service each, side by side, each watching its own folder.
       if (pickedRoots.length > 1 && (source.kind === "repo" || source.kind === "git")) {
+        // What was typed only: the plan (its port, its framework's migrations and health route)
+        // is the first folder's, and another folder's framework may be another.
+        const typed = { ...(portN ? { port: portN } : {}), ...(health.trim() ? { health_path: health.trim() } : {}) };
+        const own = kind === "web" ? (Object.keys(typed).length ? { run: typed } : {}) : run ? { run } : {};
         const taken = new Set([...ws.inventory.values()].map((v) => v.name));
-        let last: Service | null = null;
+        const made: Service[] = [];
         for (const [i, r] of pickedRoots.entries()) {
           let n = folderName(r);
-          for (let k = 2; taken.has(n); k++) n = `${folderName(r).slice(0, 29)}-${k}`;
+          for (let k = 2; taken.has(n); k++) n = `${folderName(r).slice(0, 29).replace(/-+$/, "")}-${k}`;
           taken.add(n);
           setStep(`Making ${n}…`);
-          last = await appsApi.create({ ...common, name: n, source: { ...source, root: r }, build: { watch: [`${r}/**`] }, x: spot.x + i * 300, y: spot.y });
+          try {
+            made.push(await appsApi.create({ ...common, ...own, name: n, source: { ...source, root: r }, build: { watch: [`${r}/**`] }, x: spot.x + i * 300, y: spot.y }));
+          } catch (e) {
+            // Those made stay (on the canvas once it's read again); a retry takes the rest.
+            if (made.length) {
+              void refreshInventory();
+              setPickedRoots(pickedRoots.slice(i));
+              throw new Error(`made ${made.map((m) => m.name).join(", ")}; ${n} wasn't: ${message(e)}`);
+            }
+            throw e;
+          }
         }
-        if (last) onCreated(last);
+        onCreated(made[made.length - 1]!);
         return;
       }
-      const s = await appsApi.create({ ...common, name, source, ...spot });
+      const s = await appsApi.create({ ...common, ...(run ? { run } : {}), name, source, ...spot });
       onCreated(s);
     } catch (e) {
       setError(message(e));

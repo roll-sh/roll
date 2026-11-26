@@ -809,7 +809,12 @@ impl Search {
                 chars.next();
                 continue;
             }
-            let negate = c == '-';
+            // `-word` or `-"phrase"` excludes; `-1`, `--verbose` or `-` alone are what they say.
+            let negate = c == '-' && {
+                let mut ahead = chars.clone();
+                ahead.next();
+                ahead.peek().is_some_and(|n| n.is_alphabetic() || *n == '"')
+            };
             if negate {
                 chars.next();
             }
@@ -825,7 +830,6 @@ impl Search {
                 w
             };
             match word.as_str() {
-                "" if negate => terms.push(("-".to_string(), false)),
                 "" => {}
                 "OR" if !negate => any.push(std::mem::take(&mut terms)),
                 w => terms.push((w.to_lowercase(), negate)),
@@ -852,6 +856,7 @@ mod search_tests {
         assert!(s("checkout error", "ERROR in Checkout for order 7") && !s("checkout error", "checkout ok"));
         assert!(s("\"order 7\"", "for order 7") && !s("\"order 7\"", "order 17 of 7"));
         assert!(s("error -health", "error saving") && !s("error -health", "error in /health"));
+        assert!(s("--verbose", "ran with --verbose") && s("-1", "exit -1"), "a flag or a number is a word");
         assert!(s("timeout OR refused", "connection refused") && s("timeout OR refused", "read timeout") && !s("timeout OR refused", "ok"));
         assert_eq!(Search::parse("   "), None);
     }
