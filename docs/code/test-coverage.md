@@ -1999,6 +1999,10 @@ holding a tiny ACP agent that answers `initialize`.
   daemon). It's type-checked and its decisions are the tested modules above, but a window can't
   start on the dev server (no GTK; Xvfb alone isn't enough). Packaging is checked by building the
   Linux AppImage and deb (`pnpm --filter @roll/desktop dist --linux`).
+- **Windows access lists** (`roll-cli/src/sys.rs`'s `acl`: the service's directories under
+  `%ProgramData%` refused when someone else made them or may change them, a token someone else made
+  replaced). Linux CI can't cover them: `roll-cli/src/sys.rs::a_directory_someone_else_owns_or_may_change_isnt_trusted_for_the_machine`
+  runs only in `release-cli.yml`'s `windows-check`, on pull requests that touch roll-cli.
 - **The CLI release workflow** (`.github/workflows/release-cli.yml`) runs only on a `cli-v*` tag;
   its builds are smoke-tested in the workflow itself (`roll --version`, `roll agent --help`), and
   the install script is tested against a local release by `pnpm test:agents`.
