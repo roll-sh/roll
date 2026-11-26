@@ -4755,8 +4755,10 @@ async fn opensearch_flavor_clusters_link_with_the_remotes_own_mappings() {
     assert_eq!((s, v["error"]["reason"].as_str()), (400, Some("invalid id: [null]")), "{v}");
 
     // The link's user signs in only on roll's own link requests, whatever its password.
-    assert!(es_as(&e, &far, Method::PATCH, &format!("{api}/internalusers/{user}"), Some(json!([{"op": "replace", "path": "/password", "value": "known-pass-word-9"}]))).await.0 < 300);
-    assert_eq!(e.es(&format!("{user}@os-far"), "known-pass-word-9", Method::GET, "/docs/_search", None).await.0, 401);
+    let bound = json!({"password": "Zq7-Mountain-River-90", "opendistro_security_roles": [user], "attributes": {"roll_remote_link": link["cluster_id"]}});
+    let (s, v) = es_as(&e, &far, Method::PUT, &format!("{api}/internalusers/{user}"), Some(bound)).await;
+    assert!(s < 300, "{v}");
+    assert_eq!(e.es(&format!("{user}@os-far"), "Zq7-Mountain-River-90", Method::GET, "/docs/_search", None).await.0, 401);
 
     // Unlinked: the user is gone on the remote.
     assert_eq!(e.call(Method::DELETE, "/v1/search/clusters/os-near/remotes/r", None).await.0, 204);
