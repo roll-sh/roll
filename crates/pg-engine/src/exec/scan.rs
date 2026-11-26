@@ -6803,7 +6803,7 @@ pub fn lock_row(t: &Table, key: &[u8], mark: RowMark, wait: Wait, oper: Xltw, ct
 }
 
 /// XLTW_Oper: what a wait for a row's locker or writer was for.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Xltw {
     /// heap_update.
     Update,
@@ -6873,13 +6873,13 @@ pub fn lock_row_with(
     if !got {
         return Ok(Locked::Skip);
     }
-    after_lock(t, key, mode, later, ctx)
+    after_lock(t, key, mode, oper, later, ctx)
 }
 
 /// What `lock_row_with` returns for row `key` once its lock is taken. (Inline: in
 /// `lock_row_with` as it was before a bulk DELETE's batches called it too.)
 #[inline(always)]
-pub fn after_lock(t: &Table, key: &[u8], mode: RowLockMode, later: bool, ctx: &ExecCtx) -> Result<Locked> {
+pub fn after_lock(t: &Table, key: &[u8], mode: RowLockMode, oper: Xltw, later: bool, ctx: &ExecCtx) -> Result<Locked> {
     let txn = ctx.txn.borrow();
     // Changed by a later command of this transaction (TM_SelfModified): skipped.
     if later
@@ -6892,9 +6892,12 @@ pub fn after_lock(t: &Table, key: &[u8], mode: RowLockMode, later: bool, ctx: &E
         return Ok(Locked::Same);
     }
     let latest = txn.get_latest(key)?;
+    // (A row a CLUSTER kept for our snapshot, gone or changed since: `RewriteView`.)
+    let kept = txn.rewrite_gone(key);
     // FOR KEY SHARE doesn't conflict with an update that left the key alone: the row stays
     // the version our snapshot saw (heap_lock_tuple, HEAP_KEYS_UPDATED unset).
     if mode == RowLockMode::KeyShare
+        && kept.is_none()
         && let Some((_, Some(new))) = &latest
         && let Some(old) = txn.get(key)?
     {
@@ -6907,9 +6910,12 @@ pub fn after_lock(t: &Table, key: &[u8], mode: RowLockMode, later: bool, ctx: &E
     }
     let moved = matches!(latest, Some((ts, None)) if txn.moved_at(key, ts));
     if txn.isolation.txn_snapshot() {
+        // (A row lock says "update" either way: ExecLockRows; UPDATE and DELETE tell a
+        // delete apart, ExecUpdate / ExecDelete.)
+        let updated = oper == Xltw::Lock || moved || kept.unwrap_or(matches!(latest, Some((_, Some(_)))));
         return Err(Error::new(
             code::SERIALIZATION_FAILURE,
-            if moved || matches!(latest, Some((_, Some(_)))) {
+            if updated {
                 "could not serialize access due to concurrent update"
             } else {
                 "could not serialize access due to concurrent delete"

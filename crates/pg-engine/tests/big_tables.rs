@@ -1227,3 +1227,47 @@ fn bulk_delete_batches() {
         });
     }
 }
+
+/// pg_stat_user_tables' update counts of a modelled table (agent 324): an update whose new
+/// version fits on its old one's page after the on-access prune is HOT, one that doesn't goes
+/// to another page (n_tup_newpage_upd), the prune reclaims dead HOT versions (n_dead_tup), and
+/// after a VACUUM a new version that doesn't fit goes to a page the VACUUM freed. The counts
+/// are PostgreSQL 18.6's for the same statements. (Past the model the estimate doesn't follow
+/// the loaded pages: HANDOFF, agent 324.)
+#[test]
+fn update_counts_modelled() {
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let eng = open(dir.path());
+        let go = || {
+            let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+            let counts = |s: &mut Session| {
+                run(s, "SELECT pg_stat_force_next_flush()");
+                rows(s, "SELECT n_tup_hot_upd, n_tup_newpage_upd, n_dead_tup FROM pg_stat_user_tables WHERE relname = 'u'").join("")
+            };
+            run(&mut s, "CREATE TABLE u (id int PRIMARY KEY, v int, k int, filler char(84)) WITH (autovacuum_enabled = off);\nINSERT INTO u SELECT g, 0, g, '' FROM generate_series(1, 20000) g");
+            for i in 1..400 {
+                run(&mut s, &format!("UPDATE u SET v = v + 1 WHERE id = {i}"));
+            }
+            assert_eq!(counts(&mut s), "[Int8(385), Int8(14), Int8(21)]", "modelled");
+            for _ in 0..10 {
+                run(&mut s, "UPDATE u SET v = v + 1 WHERE id = 5000");
+            }
+            assert_eq!(counts(&mut s), "[Int8(394), Int8(15), Int8(31)]", "modelled");
+            run(&mut s, "DROP TABLE u;\nCREATE TABLE u (id int PRIMARY KEY, v int, k int, filler char(84)) WITH (autovacuum_enabled = off);\nINSERT INTO u SELECT g, 0, g, '' FROM generate_series(1, 20000) g");
+            let each = |s: &mut Session, at: i32| {
+                for p in 0..20 {
+                    run(s, &format!("UPDATE u SET v = v + 1 WHERE id = {}", 61 * p + at));
+                }
+            };
+            each(&mut s, 1);
+            each(&mut s, 2);
+            assert_eq!(counts(&mut s), "[Int8(20), Int8(20), Int8(40)]", "modelled");
+            run(&mut s, "VACUUM u");
+            each(&mut s, 1);
+            each(&mut s, 2);
+            assert_eq!(counts(&mut s), "[Int8(39), Int8(41), Int8(34)]", "modelled");
+        };
+        go()
+    }
+}

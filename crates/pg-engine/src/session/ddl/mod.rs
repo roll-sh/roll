@@ -43,6 +43,7 @@ mod tblspc;
 mod stored;
 mod tsearch;
 mod vacuum;
+pub use vacuum::apply_rewrite_views;
 mod vacreport;
 mod parbuild;
 mod idxprogress;
@@ -159,6 +160,11 @@ pub fn execute(ctx: &ExecCtx, node: &NodeEnum, sql: &str) -> Result<String> {
     crate::sql::binder::note_catalog(&ctx.catalog());
     // Event triggers fire around the command (ddl_command_start, sql_drop, ddl_command_end).
     let evt = event_trigger::begin(ctx, node)?;
+    // (What a CLUSTER held for the commit goes in first, but for an index build or
+    // another CLUSTER: the statement reads the table, or changes it, as it is then.)
+    if !matches!(node, NodeEnum::ClusterStmt(_) | NodeEnum::IndexStmt(_) | NodeEnum::ReindexStmt(_)) {
+        apply_rewrite_views(ctx, None)?;
+    }
     let mut d = Ddl::new(ctx, sql);
     let am_before = d.am_index_storage();
     let latest = LatestReads::begin(ctx, node);

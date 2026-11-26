@@ -1332,6 +1332,12 @@ impl Heap {
         s
     }
 
+    /// Line pointers a prune left dead (LP_DEAD, their index entries not yet removed): ANALYZE
+    /// counts each as a dead row (heapam_scan_analyze_next_tuple).
+    pub fn dead_items(&self) -> u64 {
+        self.pages.iter().map(|p| p.lps.iter().filter(|l| matches!(l, Lp::Dead)).count() as u64).sum()
+    }
+
     /// The tuples a rewrite (heapam_relation_copy_for_cluster) leaves behind and those it
     /// must keep though dead: (HEAPTUPLE_DEAD, HEAPTUPLE_RECENTLY_DEAD).
     pub fn dead_counts(&self, v: &Vis) -> (u64, u64) {

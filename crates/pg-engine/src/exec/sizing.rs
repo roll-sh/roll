@@ -2724,7 +2724,7 @@ fn untracked_insert(
         }
         place_batch_past(db, bkey);
     }
-    untracked_write(t, indexes, key, row, None, vals, ctx, Some(tuple))
+    Ok(untracked_write(t, indexes, key, row, None, vals, ctx, Some(tuple))?.tid)
 }
 
 thread_local! {
@@ -2766,7 +2766,7 @@ fn untracked_write(
     vals: Option<&[Option<Vec<Value>>]>,
     ctx: &ExecCtx,
     len: Option<usize>,
-) -> Result<Option<Tid>> {
+) -> Result<Updated> {
     let (len, exts) = layout_len(t, row, ctx, &HashSet::new(), len);
     let (old_key, old) = (old.map(|o| o.0), old.map(|o| o.1));
     let changed = |c: usize| old.is_none_or(|o| !same(o.get(c), row.get(c)));
@@ -2807,7 +2807,10 @@ fn untracked_write(
     // (The TID isn't stored with the row: a scan in heap order asks the estimate for it,
     // `estimated_rank`, and the rows' bytes stay as they were.)
     let _ = tid;
-    Ok(None)
+    // (No HOT or new-page flag: the estimate doesn't follow the pages of the rows as loaded,
+    // and following them costs a past-model UPDATE more than the counters are worth here:
+    // HANDOFF, agent 324.)
+    Ok(Updated::default())
 }
 
 /// The btree entries a version of `row` of a table too big to model gets in those of
@@ -3210,6 +3213,15 @@ fn same_vals(a: &[Value], b: &[Value]) -> bool {
 
 /// A row is about to get a new version (heap_update: a HOT update when no indexed column
 /// changed and the new version fits on the old one's page; otherwise new index entries).
+/// What `updated` did: the new version's TID (None: not modelled), and whether the update was
+/// a HOT one and one that put the new version on another page (pgstat_count_heap_update).
+#[derive(Clone, Copy, Default)]
+pub struct Updated {
+    pub tid: Option<Tid>,
+    pub hot: bool,
+    pub newpage: bool,
+}
+
 pub fn updated(
     t: &Table,
     indexes: &[BoundIndex],
@@ -3218,7 +3230,7 @@ pub fn updated(
     new_key: &[u8],
     new: &[Value],
     ctx: &ExecCtx,
-) -> Result<Option<(Tid, bool)>> {
+) -> Result<Updated> {
     // (The new version's length, once for all three uses.)
     let tuple = {
         let fmt = ctx.fmt();
@@ -3228,7 +3240,7 @@ pub fn updated(
     if !ensure(t, indexes, ctx)? {
         let r = untracked_write(t, indexes, new_key, new, Some((old_key, old)), None, ctx, Some(tuple))?;
         estlocks::replaced(t, old_key, Some(new_key), ctx)?;
-        return Ok(r.map(|tid| (tid, false)));
+        return Ok(r);
     }
     let db = &ctx.sess.db;
     // Out-of-line values the new version keeps as they are (none without a TOAST relation).
@@ -3284,7 +3296,7 @@ pub fn updated(
                 ..
             } = &mut *rf;
             if !heaps.contains_key(&t.oid) {
-                return Ok(None);
+                return Ok(Updated::default());
             }
             if assumed
                 && let Some(o) = toast.get(&t.oid).and_then(|tt| tt.rows.get(old_key)).filter(|o| !o.is_empty())
@@ -3316,7 +3328,7 @@ pub fn updated(
                 }
             }
             let Some(heap) = heaps.get_mut(&t.oid) else {
-                return Ok(None);
+                return Ok(Updated::default());
             };
             let cid = ctx.txn.borrow_mut().output_cid();
             // (The old version's command id as HeapTupleHeaderAdjustCmax sets it and its
@@ -3380,7 +3392,9 @@ pub fn updated(
     if big {
         untrack(db, t, None);
     }
-    Ok(Some((tid, hot)))
+    // (pgstat_count_heap_update's newpage: the new version on another page than the old.)
+    let newpage = kept.is_some_and(|k| k.0.0 != tid.0);
+    Ok(Updated { tid: Some(tid), hot, newpage })
 }
 
 
@@ -7527,6 +7541,15 @@ pub fn heap_tuple_stats(oid: u32, ctx: &ExecCtx) -> Result<Option<(u64, u64, u64
         None if rf.untracked.contains(&heap) => None,
         None => Some((0, 0, 0, 0, 0)),
     })
+}
+
+/// ANALYZE's dead rows of table `oid` in its heap model (acquire_sample_rows' deadrows, the
+/// whole table as a full sample reads it): dead and recently dead tuples and the line pointers
+/// a prune left dead. None without a model.
+pub fn analyze_dead_rows(oid: u32, ctx: &ExecCtx) -> Result<Option<u64>> {
+    let Some(s) = heap_tuple_stats(oid, ctx)? else { return Ok(None) };
+    let rf = ctx.sess.db.relfiles.of(oid).read();
+    Ok(Some(s.2 + rf.heaps.get(&oid).map_or(0, |h| h.dead_items())))
 }
 
 /// Whether an index built on table `t` now finds a broken HOT chain in its heap model
