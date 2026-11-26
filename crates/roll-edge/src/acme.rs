@@ -1,7 +1,8 @@
 //! Certificates from an ACME CA (Let's Encrypt), proven by a [`Solver`]:
 //!
 //! - DNS-01 (the edge's own wildcards): every name in an order gets an `_acme-challenge` TXT
-//!   record through a [`DnsProvider`] (Cloudflare's API in the cloud).
+//!   record through a [`DnsProvider`] (Cloudflare's API in the cloud; [`Route53`] for roll secrets'
+//!   public certificates too).
 //! - HTTP-01 (custom domains on a node alone): the key authorization goes into [`Http01`], which
 //!   the plain-HTTP listener answers `/.well-known/acme-challenge/<token>` from.
 //!
@@ -23,11 +24,19 @@ use std::time::Duration;
 use tokio_rustls::rustls::pki_types::CertificateDer;
 use tracing::{info, warn};
 
+mod route53;
+pub use route53::{AwsKeys, Route53};
+
 /// Publishes and removes DNS TXT records.
 pub trait DnsProvider: Send + Sync + 'static {
     /// Create a TXT record `name` (no trailing dot) with `value`; returns the id to delete it by.
     fn create_txt<'a>(&'a self, name: &'a str, value: &'a str) -> BoxFuture<'a, anyhow::Result<String>>;
     fn delete_txt<'a>(&'a self, name: &'a str, id: &'a str) -> BoxFuture<'a, anyhow::Result<()>>;
+    /// Wait until every record created so far is live on the provider's servers (Route 53's
+    /// `INSYNC`), before an order's propagation wait. Most providers have nothing to wait for.
+    fn settle(&self) -> BoxFuture<'_, anyhow::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 /// Cloudflare's API with a token that may edit DNS in the zones (`ROLL_CLOUDFLARE_API_TOKEN`),
@@ -353,7 +362,8 @@ async fn order_inner(account: &Account, solver: &Solver, names: &[String], timin
         let ch = a.challenge(kind.clone()).with_context(|| format!("acme: the CA offers no {kind:?} challenge"))?;
         publish(solver, &ch, published).await?;
     }
-    if matches!(solver, Solver::Dns01(_)) {
+    if let Solver::Dns01(dns) = solver {
+        dns.settle().await?;
         tokio::time::sleep(timing.propagation).await;
     }
     let mut authzs = order.authorizations();
