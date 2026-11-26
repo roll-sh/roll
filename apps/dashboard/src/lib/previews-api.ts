@@ -133,7 +133,8 @@ export interface Preview {
   pages?: PageCheck[];
   /** Its visual review (`github.visual_review`): whether how its pages look against the baseline was accepted at this head. */
   visual_review?: {
-    state: "unchanged" | "changed" | "accepted";
+    /** `refused`: someone refused a page at this head (`by`, `reason`): it fails until a new push or an accept. */
+    state: "unchanged" | "changed" | "accepted" | "refused";
     branch: string;
     percent: number;
     by: string | null;
@@ -142,7 +143,9 @@ export interface Preview {
     head: string;
     /** Each page that differs (`path` `""`: the first page) and who accepted it at this head: the change is accepted once every one is. */
     /** `group`: the pages changed the same way share one (accepted together with `…/visual/accept {group}`). */
-    pages: { path: string; percent: number; by: string | null; at: number | null; unstable?: boolean; group?: string | null }[];
+    pages: { path: string; percent: number; by: string | null; at: number | null; unstable?: boolean; group?: string | null; refused?: { by: string; at: number; reason: string } | null }[];
+    /** Refused: why (one line). */
+    reason?: string | null;
     /** Stories the change touched that the run didn't take (past its 40, or out of its time): one more entry in `pages`, at `UNTAKEN_STORIES`, accepted as not taken. */
     untaken?: number;
   } | null;
@@ -621,6 +624,9 @@ export const previewsApi = {
   acceptRegressions: (id: string, head?: string) => call<Preview>("POST", `${one(id)}/regressions/accept`, head ? { head } : {}),
   acceptVisual: (id: string, head?: string, path?: string, group?: string) =>
     call<Preview>("POST", `${one(id)}/visual/accept`, { ...(head ? { head } : {}), ...(path !== undefined ? { path } : {}), ...(group ? { group } : {}) }),
+  /** Refuse how its pages look at `head` (every page, or `path` only), with why. */
+  refuseVisual: (id: string, head: string | undefined, reason: string, path?: string) =>
+    call<Preview>("POST", `${one(id)}/visual/refuse`, { ...(head ? { head } : {}), ...(path !== undefined ? { path } : {}), reason }),
   /** Its share links (never their tokens). */
   shares: (id: string) => call<PreviewShare[]>("GET", `${one(id)}/shares`),
   /** A link for someone outside the team, open for `hours`; `url` is in this answer only. */

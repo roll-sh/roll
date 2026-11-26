@@ -1994,6 +1994,7 @@ previews in it), the operator and admins see every project.
 | `GET /v1/previews/{id}/qr.png` | `service?` | The preview's link with its access (`share_url`, or that service's) as a QR code PNG, to open on a phone; `Cache-Control: no-store` (it carries the token); 404 with no link yet |
 | `POST /v1/previews/{id}/regressions/accept` | `{head?}` (the push looked at; a newer one is a 409) | `Preview`: its regressions against main accepted at its head (`regressions_accepted`), the change reported again. Not by the change's author; a `required` rule's only by a person (403 for a token). 400 for a branch's preview. Admin on the preview's project |
 | `POST /v1/previews/{id}/visual/accept` | `{head?, path?, group?}` (the screenshot's looked at, `visual_review.head`; `path`: that page only, `""` the first; `group`: every page changed the same way, `visual_review.pages[].group`; `stories:untaken`: the stories the change touched its run didn't take, accepted as not taken; else every page and those) | `Preview`: how a change's pages look at its latest screenshot is accepted (`visual_review`, `roll/visual`); 404 for a page it has no screenshot of; 409 with no screenshot yet, 400 for a branch's preview, 403 from the change's author (under any name they go by) or from a token or the operator's token when the review is required, 409 when the change's author isn't known or `head` isn't the latest screenshot's (a newer one came in) |
+| `POST /v1/previews/{id}/visual/refuse` | `{head?, path?, group?, reason?}` (as accept's; `reason`: why, one line of 200 characters at most) | `Preview`: how a change's pages look at its latest screenshot is refused (`visual_review.state` `refused`, `roll/visual` fails) until a new head or an accept; 400 for a longer reason, 404 for a page it has no screenshot of, 409 when a newer screenshot came in (`head`) |
 | `GET /v1/previews/{id}/logs?service=&lines=` | | `{service, lines: string[]}`, masked: every value the preview got from roll secrets, the project's `env` and the preview's own variables, and its branches' credentials (a password, key or token, a URL's password) are `***`, as checks' output is (each line of 6 characters or more). A preview's code, a fork's too, can print what it was given, and anyone who reads the preview reads its logs. 409 when what they must hide can't be read. A seed's, release's or teardown's output (the preview's error, a teardown's in the pull request's comment), what its page said in a screenshot run (its errors and failed requests, broken links, words, markup and API operations: the comment's "What went wrong") and the hosts its egress proxy refused (a name is its code's to choose) are masked the same way (a picture can't be: a page that renders a secret shows it). Masking matches values as written, so code that prints a secret encoded (base64, hex) gets it through, as with every log masker (GitHub Actions' too). It hides what a preview shows, not what its code sends: with egress open (the default) its code reaches the internet, DNS included. Under "Roll only" it can't: the preview's network is `--internal`, where Docker's embedded DNS doesn't forward outside names (SERVFAIL; checked on Docker 29.9) and no resolver is reachable, and the egress proxy checks a name against `egress_hosts` before it resolves it, so `<secret>.attacker.example` is never looked up; on roll apps, every variable previews sets in the `pv-` environment is sealed, so apps' own logs hide it and its API never returns it (`…/connect` and `…/env` reveal them) |
 | `GET /v1/previews/{id}/logs?service=&lines=&follow=1` | | `text/event-stream`: `event: service` (its name), then one event per line, the last `lines` first and then as they come; a line the service wrote on stderr is `event: stderr` (a stdout one the default event; `roll preview logs -f` writes them to its own stderr and stdout). `docker logs -f` for `roll.toml` services; for others the tail is read every 2 s (2,000 lines wide after the first read) and only new lines are sent, with a line saying so when some were missed. Runs on the preview's holder; the stream ends when the client goes |
 | `POST /v1/previews/{id}/shell/sessions` | `{ service?, cols?, rows? }` (the preview's first service without one; 120×32) | 201 `{ id }`: a login shell (bash where the image has it, else sh) in the running `roll.toml` service's container, started or thawed if it sleeps (up to 60 s), kept awake while the shell is open, its opener in the activity ("ana opened a shell in web"). At most 4 a preview (409); a roll apps service's is 409 (its own shell is on its `pv-` environment in roll apps). Runs on the preview's holder. A terminal isn't masked: it's an admin's, as roll apps' shells are, and reaches what the service does (the preview's branches and variables, never a parent's) |
@@ -2071,7 +2072,7 @@ type Preview = {
   phone_screenshot?: boolean;
   base_change?: { branch: string; percent: number; phone_percent: number | null; head?: string | null; load_ms?: number | null; lcp_ms?: number | null; a11y_added?: number | null; errors_added?: number | null; text?: TextDiff | null; links_added?: number | null; seo_added?: number | null; api?: TextDiff | null; api_breaking?: string[]; api_unread?: boolean; endpoints?: EndpointTime[] /* {path, ms, status, main_ms, shape_changes?: {path, main, now: string | null}[]} */ } | null;
   pages?: PageCheck[];
-  visual_review?: { state: "unchanged" | "changed" | "accepted"; branch: string; percent: number; by: string | null; at: number | null; required: boolean; head: string; pages: { path: string; percent: number; by: string | null; at: number | null; unstable?: boolean }[]; untaken?: number /* stories the change touched its run didn't take: one more page, `stories:untaken` */ } | null;
+  visual_review?: { state: "unchanged" | "changed" | "accepted" | "refused"; reason?: string /* refused: why */; branch: string; percent: number; by: string | null; at: number | null; required: boolean; head: string; pages: { path: string; percent: number; by: string | null; at: number | null; unstable?: boolean }[]; untaken?: number /* stories the change touched its run didn't take: one more page, `stories:untaken` */ } | null;
   page_speed?: { now: PageSpeed; before: PageSpeed | null } | null;
   page_health?: { errors: number; first_error: string | null; failed: number; first_failed: string | null } | null;
   page_a11y?: { issues: A11yIssue[]; lang: boolean; title: boolean; seo?: PageSeo | null } | null;
@@ -2268,6 +2269,17 @@ type Settings = {
     next push each accepted page that looks exactly as it did (the first page at both widths,
     each other page) keeps its acceptance, as Chromatic carries accepted baselines forward, so
     only the pages the push changed are asked about again.
+    A page can be refused instead (Chromatic's Deny, Percy's Request changes): `POST
+    …/visual/refuse {head?, path?, group?, reason?}` (the sheet's Refuse, asking why in one line;
+    `roll preview refuse --reason …`), every page or the ones named, with why (one line, 200
+    characters at most). One refused page is the change's: `visual_review.state` is `refused`
+    (`by`, `at` and `reason` the latest refusal's), `roll/visual` fails ("Refused by ada: the
+    Pay button moved"), the comment says so with the reason as plain text (no link, mention or
+    markup gets through), and a required review keeps the change from landing. It holds at that
+    head: a new push asks again, and an accept of those pages clears it, as a refusal clears
+    their accept (one verdict per page). Anyone who could accept may refuse, the change's own
+    author and a token too: it only holds the change back
+    (`engine.rs::a_refused_visual_change_fails_until_a_new_head_or_an_accept`).
     Stories the change touched that its run didn't take are under review too, though no picture
     differs (Chromatic captures every story): stories run touched-first, and those left (past the
     run's 40, or out of its time) that the change touched (their own file, a file they import, or
@@ -2928,35 +2940,32 @@ requests, Vercel's toolbar and per-push URLs, Jam's replays. Its fixes landed wi
 preview up` refuses an untracked file named like a secret, and the stale lines it found (frozen
 services' stop, which products' restore points save, the CLI's commands).
 
-1. **The visual review holds on a change's stories left out, in review** (Chromatic captures
-   every story): a run says how many stories the change touched it didn't take, and the review
-   stays `changed` until someone accepts them as not taken.
-2. **A visual change can be refused** (Chromatic's Deny, Percy's Request changes, Argos's Reject;
-   S): today a page is `unchanged`, `changed` or `accepted`; a writer's "not this" should hold
-   the status, beside a note, until a new head or an accept.
-3. **Mask once, branch many** (Neon's anonymized branches; M): every preview branch and reset
+1. **A visual change can be refused, in review** (Chromatic's Deny, Percy's Request changes,
+   Argos's Reject): `refused` holds the status, failing, with why, until a new head or an
+   accept.
+2. **Mask once, branch many** (Neon's anonymized branches; M): every preview branch and reset
    rewrites each masked table and then `VACUUM (FULL)`s it, so a masked table is a full copy per
    preview and minutes of the data step. A masked base per parent, masked again when the rules
    or a schedule say, which previews branch copy-on-write.
-4. **More stories per run** (Chromatic has no per-build cap; L): runs sharded over several
+3. **More stories per run** (Chromatic has no per-build cap; L): runs sharded over several
    screenshot containers past 40 stories, each change's touched ones first.
-5. **A migration rehearsed on today's production** (PlanetScale's deploy requests; M): before
+4. **A migration rehearsed on today's production** (PlanetScale's deploy requests; M): before
    landing (or asked), branch fresh, run the release again and compare; open previews whose
    schema changes touch the same table are named on each other.
-6. **The feedback button for team-access visitors on roll apps previews** (S, with roll apps:
+5. **The feedback button for team-access visitors on roll apps previews** (S, with roll apps:
    `apps-control/src/public.rs` adds it for link and share visitors only).
-7. **This page on main, from the toolbar** (Vercel's deployment switcher; S): main's preview
+6. **This page on main, from the toolbar** (Vercel's deployment switcher; S): main's preview
    exists (`github.baseline`); the toolbar opens the same path there.
-8. **Older pushes past the last three, started on demand** (Vercel keeps every deployment's URL;
+7. **Older pushes past the last three, started on demand** (Vercel keeps every deployment's URL;
    S–M): kept as code only, on the preview's own data, started at the first visit.
-9. **What a note's reviewer saw, from their own browser** (Jam, Marker.io; M): an opt-in
+8. **What a note's reviewer saw, from their own browser** (Jam, Marker.io; M): an opt-in
    capture, labelled as theirs, and mentions of the team's members.
-10. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
+9. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
     (its Next 32); buckets need a put-back on roll storage's side.
-11. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+10. **Previews for the members thread's next products**: once roll apps' and roll search's routes
     become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
     follow the same roles, checked live against a member's session.
-12. **Watches on pg-control**: the data step's Postgres compute start (most of the data step is
+11. **Watches on pg-control**: the data step's Postgres compute start (most of the data step is
     it and its masking); cheap branches on ext4 through overlay volumes over a frozen base
     (measured 2026-11-17: 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole
     table file); recovery to a time seconds old (unowned).
@@ -2964,8 +2973,9 @@ services' stop, which products' restore points save, the CLI's commands).
 Not to build: more lab checks on the first page (the sheet has a dozen; each adds noise to every
 pull request for less than the items above).
 
-Landed 2026-11-26, midday: restore points for streams (#1112) and the TurboSnap test's race under
-load (#1114).
+Landed 2026-11-26, midday: restore points for streams (#1112), the TurboSnap test's race under
+load (#1114), the tenth review's fixes (#1119), and the visual review holding on stories a change
+touched that its run didn't take (#1120).
 
 Landed 2026-11-26, morning: stories' interaction tests (#1087), what a failed one threw (#1091), both in the other browsers (#1100), the step a failed one stopped at (#1105), and restore points for Redis (#1109).
 

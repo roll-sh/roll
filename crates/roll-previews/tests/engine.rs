@@ -372,6 +372,50 @@ async fn pages_changed_the_same_way_are_accepted_together() {
     assert_eq!(waiting, ["/c"], "the three accepted at once; /c still waits");
 }
 
+/// A visual change refused (Chromatic's Deny): the review fails at that head, the change is told at
+/// once, an accept of the pages clears it, and a new head asks again.
+#[tokio::test]
+async fn a_refused_visual_change_fails_until_a_new_head_or_an_accept() {
+    let e = env(json!({ "enabled": true, "visual_review": "required", "github": { "screenshot": true } }));
+    let png = |v: u8| {
+        let mut out = Vec::new();
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([v, v, v, 255])).write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).unwrap();
+        out
+    };
+    *e.apps.shot.lock() = Some(png(0));
+    e.code.open(change("chg_r", 1));
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let chg = e.engine.store.row_by_change("chg_r").unwrap().unwrap();
+    let review = || e.engine.store.preview(&chg.id).unwrap().visual_review;
+    for _ in 0..3000 {
+        if review().is_some() && !e.engine.shooting() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let base = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.change_id.is_none()).unwrap();
+    let shoot = |head: &str| {
+        e.engine.store.set_screenshot(&chg.id, head, &png(255), None, None).unwrap();
+        e.engine.store.compare_with_base(&chg.id, &base.id, "main", None).unwrap();
+    };
+    shoot("cs_r1");
+    assert_eq!(review().map(|v| v.state), Some(VisualState::Changed));
+    let long = "x".repeat(201);
+    assert!(matches!(e.engine.refuse_visual(&chg.id, "ada", None, Some("cs_r1"), None, &long).await, Err(roll_previews::Error::BadRequest(_))), "one line of 200 at most");
+    let p = e.engine.refuse_visual(&chg.id, "ada", None, Some("cs_r1"), None, "the Pay button moved").await.unwrap();
+    assert_eq!(p.visual_review.map(|v| (v.state, v.by, v.reason)), Some((VisualState::Refused, Some("ada".into()), Some("the Pay button moved".into()))));
+    assert_eq!(e.code.last_report("chg_r").visual_review.map(|v| v.state), Some(VisualState::Refused), "the change is told at once");
+    // Someone accepts the pages anyway: the refusal goes with it.
+    let p = e.engine.accept_visual(&chg.id, "bob", &[], true, None, Some("cs_r1"), None).await.unwrap();
+    assert_eq!(p.visual_review.map(|v| v.state), Some(VisualState::Accepted));
+    // Refused again, then a new push: asked again.
+    e.engine.refuse_visual(&chg.id, "ada", None, Some("cs_r1"), None, "").await.unwrap();
+    assert_eq!(review().map(|v| v.state), Some(VisualState::Refused));
+    shoot("cs_r2");
+    assert_eq!(review().map(|v| v.state), Some(VisualState::Changed), "a new head is reviewed again");
+}
+
 /// Stories a change touched that its run didn't take (past its 40, or out of its time) are under
 /// review too, though no picture differs (Chromatic captures every story): accepted as not taken,
 /// at that head only.

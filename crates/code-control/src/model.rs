@@ -446,7 +446,8 @@ pub struct PreviewSpeedBudget {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PreviewVisualReview {
-    /// `unchanged`, `changed` (waiting for someone to accept it) or `accepted`.
+    /// `unchanged`, `changed` (waiting for someone to accept it), `accepted`, or `refused`
+    /// (someone refused a page at this head; `by` is who, `reason` why).
     pub state: String,
     pub branch: String,
     pub percent: f64,
@@ -464,6 +465,9 @@ pub struct PreviewVisualReview {
     /// Stories the change touched that its preview's run didn't take: unreviewed.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub untaken: u32,
+    /// Refused: why (one line).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// A visual review's entry (`pages[].path`) for the stories the change touched that the run

@@ -189,6 +189,7 @@ impl Code {
                 }
                 "changed" => out.push(Blocker::new("visual", format!("its pages differ from {} by {:.1}%: someone must accept them on its preview", v.branch, v.percent.max(0.1)))),
                 "accepted" if own => out.push(Blocker::new("visual", "its visual change was accepted by its own author: someone else must accept it")),
+                "refused" => out.push(Blocker::new("visual", format!("{} refused its visual change: push again, or someone accepts it on its preview", v.by.as_deref().unwrap_or("someone")))),
                 _ => {}
             }
         }
