@@ -10,6 +10,7 @@
 //! calls the tenant's own connector service makes.
 
 pub mod connectors;
+pub mod experiments;
 pub mod query_rules;
 pub mod search_application;
 pub mod sync;

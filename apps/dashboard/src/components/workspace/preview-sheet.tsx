@@ -5,7 +5,7 @@ import { appsApi, followShell as followAppsShell } from "@/lib/apps-api";
 import { codeApi } from "@/lib/code-api";
 import { Confirm } from "@/components/ui";
 import { TerminalScreen } from "@/components/terminal-screen";
-import { type RestorePoint, endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, followShell, downloadFiles, openUrl, pageGroup, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewVisitor, type PreviewKind, type PreviewShare, type RequestLine, type ServiceMetrics, type ErrorGroup, type TraceSummary, type TraceSpan, type RouteTime, type Repeated } from "@/lib/previews-api";
+import { type RestorePoint, endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, followShell, downloadFiles, openUrl, pageGroup, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewVisitor, type PreviewKind, type PreviewShare, type RequestLine, type ServiceMetrics, type ErrorGroup, type TraceSummary, type TraceSpan, type RouteTime, type Repeated, UNTAKEN_STORIES } from "@/lib/previews-api";
 import { workFromError, workFromNote } from "@/lib/preview-work";
 import { verdict, type VerdictTarget } from "@/lib/preview-verdict";
 import { isProblem, logFilter, logLevel } from "@/lib/preview-logs";
@@ -13,6 +13,9 @@ import { formatBytes } from "@/lib/roll-api";
 import { Head, Label, Rows, Stat, Tabs } from "./inspector";
 import { FeedbackForm, replyBody, replyOf, type PreviewFeedback } from "./preview-feedback";
 import { errorText, host, money, previewOf, since, STATE_LABEL, StateDot } from "./previews-common";
+
+/** "1 story", "3 stories". */
+const storiesUntaken = (n: number) => (n === 1 ? "1 story" : `${n} stories`);
 
 export const PREVIEW_KIND_ICON: Record<PreviewKind, LucideIcon> = {
   postgres: Database,
@@ -418,7 +421,10 @@ export function PreviewSheet({
                 ) : (
                   <>
                     <span className="text-soft">
-                      Differs from {p.visual_review.branch} by {Math.max(p.visual_review.percent, 0.1).toFixed(1)}%: waiting for a review{p.visual_review.required ? " before it can land" : ""}.
+                      {p.visual_review.pages.some((pg) => pg.path !== UNTAKEN_STORIES)
+                        ? `Differs from ${p.visual_review.branch} by ${Math.max(p.visual_review.percent, 0.1).toFixed(1)}%`
+                        : `${storiesUntaken(p.visual_review.untaken ?? 0)} the change touched weren't taken (past the run's 40, or out of its time)`}
+                      : waiting for a review{p.visual_review.required ? " before it can land" : ""}.
                     </span>
                     <button
                       type="button"
@@ -436,7 +442,7 @@ export function PreviewSheet({
               <ul className="mt-1 space-y-0.5 text-[11.5px]" aria-label="Pages to review">
                 {p.visual_review.pages.map((pg, i, all) => (
                   <li key={pg.path} className="flex min-w-0 items-center gap-2">
-                    <span className="truncate font-mono text-[11px] text-muted">{pageLabel(pg.path)}</span>
+                    <span className="truncate font-mono text-[11px] text-muted">{pg.path === UNTAKEN_STORIES ? `${storiesUntaken(p.visual_review?.untaken ?? 0)} not taken` : pageLabel(pg.path)}</span>
                     {pg.group && all.findIndex((x) => x.group === pg.group) === i && !pg.by && (
                       <button
                         type="button"
@@ -448,7 +454,7 @@ export function PreviewSheet({
                         {busy === `accept:group:${pg.group}` ? "Accepting…" : `Accept the ${all.filter((x) => x.group === pg.group).length} changed the same way`}
                       </button>
                     )}
-                    <span className="shrink-0 font-mono text-[11px] tabular-nums text-subtle">{Math.max(pg.percent, 0.1).toFixed(1)}%</span>
+                    {pg.path !== UNTAKEN_STORIES && <span className="shrink-0 font-mono text-[11px] tabular-nums text-subtle">{Math.max(pg.percent, 0.1).toFixed(1)}%</span>}
                     {pg.unstable && <span className="shrink-0 text-subtle" title="Two captures a second apart differ: the difference may be only that">moves by itself</span>}
                     {pg.by ? (
                       <span className="ml-auto shrink-0 text-subtle">accepted by {pg.by}</span>
@@ -459,7 +465,7 @@ export function PreviewSheet({
                         onClick={() => run(`accept:${pg.path}`, () => previewsApi.acceptVisual(p.id, p.visual_review?.head, pg.path))}
                         className="ml-auto h-6 shrink-0 rounded-md border border-line-2 px-2 text-[11.5px] text-fg hover:bg-white/[0.05] disabled:opacity-40"
                       >
-                        {busy === `accept:${pg.path}` ? "Accepting…" : "Accept"}
+                        {busy === `accept:${pg.path}` ? "Accepting…" : pg.path === UNTAKEN_STORIES ? "Accept as not taken" : "Accept"}
                       </button>
                     )}
                   </li>
@@ -1919,7 +1925,7 @@ function Errors({ preview: p }: { preview: Preview }) {
 
 /** A look at a data branch (Neon's Tables): its tables as the branch's own role sees them, and a
  * table's first rows, read-only, cells as text (the branch's data, masked as the preview's is). */
-/** Restore points (Neon's snapshots): the preview's Postgres, NoSQL and Redis data saved now and put back later,
+/** Restore points (Neon's snapshots): the preview's Postgres, NoSQL, Redis and stream data saved now and put back later,
  * after a test run or a demo changed it. Putting one back is the preview's next converge. */
 function RestorePoints({ previewId, busy, run }: { previewId: string; busy: string | null; run: (key: string, fn: () => Promise<Preview>) => Promise<boolean> }) {
   const [points, setPoints] = useState<{ points: RestorePoint[]; max: number } | null>(null);
