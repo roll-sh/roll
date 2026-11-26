@@ -469,8 +469,8 @@ def search_flow():
     res, text = dcall("search_query", {"cluster": "sweep-dev", "index": "notes", "query": {"match_all": {}}}, token=ro["token"])
     if res.get("isError") or '"n2"' in text:
         out.append(f"the read-only token should read the index, without n2: {text[:200]}")
-    # Short-lived: gone again with the operator's token (the person's can't delete).
-    rpc("tools/call", {"name": "search_delete_cluster", "arguments": {"cluster": "sweep-dev"}})
+    # Kept: the sweep reads back every link a tool answered (search_create_cluster's too), and its
+    # rolld is thrown away at the end.
     print("member: a person's search flow ok" if not out else f"member: a person's search flow: {len(out)} problems")
     return out
 if outbox and ws:
