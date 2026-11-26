@@ -545,15 +545,18 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             last: None,
             drain: input.writes(),
         }),
-        Plan::Distinct { input, on, hashed, .. } => Box::new(DistinctNode {
-            input: open(input, ctx)?,
-            on: on.clone(),
-            seen: HashMap::default(),
-            prev: None,
-            hashed: (on.is_none() || *hashed).then(|| plan.clone()),
-            out: None,
-            presort: None,
-        }),
+        Plan::Distinct { input, on, hashed, .. } => match UniqueNode::of(plan, input, on.is_none(), ctx)? {
+            Some(u) => u,
+            None => Box::new(DistinctNode {
+                input: open(input, ctx)?,
+                on: on.clone(),
+                seen: HashMap::default(),
+                prev: None,
+                hashed: (on.is_none() || *hashed).then(|| plan.clone()),
+                out: None,
+                presort: None,
+            }),
+        },
         Plan::SetOp {
             kind,
             all,
@@ -4358,6 +4361,73 @@ impl Node for DistinctNode {
                     return Ok(Some(r));
                 }
             }
+        }
+        Ok(None)
+    }
+}
+
+/// A plain DISTINCT that EXPLAIN shows as a Unique over its input sorted on every column
+/// (`distinct_order`), of values that compare equal only when identical: its input sorted
+/// through extsort as that Sort is (within work_mem in memory, else runs on disk), the first
+/// row of each run of equal rows given out as it comes. (`DistinctNode` held every row, a
+/// hash set of them and the rows kept.)
+struct UniqueNode {
+    input: Option<BoxNode>,
+    keys: Vec<SortKey>,
+    types: Vec<crate::types::DataType>,
+    norms: Vec<Option<super::agg::KeyNorm>>,
+    sorted: Option<BoxNode>,
+    prev: Option<Row>,
+}
+
+impl UniqueNode {
+    /// The node for `plan`, a DISTINCT over `input` (`plain`: not DISTINCT ON), when it is
+    /// one.
+    #[inline(never)]
+    fn of(plan: &Arc<Plan>, input: &Arc<Plan>, plain: bool, ctx: &ExecCtx) -> Result<Option<BoxNode>> {
+        if !plain {
+            return Ok(None);
+        }
+        let types = row_types(input);
+        if types.is_empty() || types.iter().any(|t| *t == crate::types::DataType::Unknown || !equal_is_identical(t)) {
+            return Ok(None);
+        }
+        let Some(cols) = crate::sql::explain::distinct_order(plan, ctx) else { return Ok(None) };
+        let mut covered = vec![false; types.len()];
+        for &c in &cols {
+            if let Some(x) = covered.get_mut(c) {
+                *x = true;
+            }
+        }
+        if covered.contains(&false) {
+            return Ok(None);
+        }
+        // (The comparisons `sort_rows_by` makes.)
+        let keys = cols
+            .iter()
+            .map(|&c| SortKey { expr: Expr::Col(c, types[c].clone()), desc: false, nulls_first: false, using: None })
+            .collect();
+        let norms = types
+            .iter()
+            .map(|t| matches!(t, crate::types::DataType::Bpchar(_)).then_some(super::agg::KeyNorm::Bpchar(None)))
+            .collect();
+        Ok(Some(Box::new(UniqueNode { input: Some(open(input, ctx)?), keys, types, norms, sorted: None, prev: None })))
+    }
+}
+
+impl Node for UniqueNode {
+    fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+        if let Some(input) = self.input.take() {
+            self.sorted = Some(sort_all(input, &self.keys, std::mem::take(&mut self.types), None, ctx)?);
+        }
+        let Some(sorted) = self.sorted.as_mut() else { return Ok(None) };
+        while let Some(r) = sorted.next(ctx)? {
+            let k = super::agg::group_key(&r, &self.norms);
+            if self.prev.as_ref() == Some(&k) {
+                continue;
+            }
+            self.prev = Some(k);
+            return Ok(Some(r));
         }
         Ok(None)
     }
