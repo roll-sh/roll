@@ -2718,9 +2718,7 @@ async fn main_takes_the_stories_a_change_has_and_it_hasnt() {
     let mut png = Vec::new();
     image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 0, 255])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
     *e.apps.shot.lock() = Some(png);
-    *e.apps.change_stories.lock() = vec!["card--new".into(), "card--added".into()];
     *e.apps.new_stories.lock() = vec!["card--added".into()];
-    e.code.paths.lock().insert("cs_5a".into(), vec!["src/Card.tsx".into()]);
     e.code.open(change("chg_bl", 5));
     let p = || e.engine.store.row_by_change("chg_bl").unwrap().unwrap();
     // Screenshots done, within 30 s: a preview asked for again and again never settles.
@@ -2734,6 +2732,15 @@ async fn main_takes_the_stories_a_change_has_and_it_hasnt() {
         panic!("screenshots never settled: {:?}", e.apps.stories_first.lock());
     }
     let compared = |e: &Env| e.engine.store.preview(&p().id).unwrap().pages.iter().find(|x| x.path == "story:card--new").and_then(|x| x.base_percent);
+    // Both took their pictures (main's in the index's order), then a push brings the change's
+    // own stories: only asking main again can give them a main to be compared with.
+    for _ in 0..10 {
+        e.engine.pass().await.unwrap();
+        settle(&e).await;
+    }
+    *e.apps.change_stories.lock() = vec!["card--new".into(), "card--added".into()];
+    e.code.paths.lock().insert("cs_5b".into(), vec!["src/Card.tsx".into()]);
+    e.code.edit("chg_bl", |c| c.head = "cs_5b".into());
     for _ in 0..40 {
         e.engine.pass().await.unwrap();
         settle(&e).await;

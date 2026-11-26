@@ -719,11 +719,12 @@ CQL "$BRANCH_NOSQL" "CREATE TABLE app.after_the_point (id int PRIMARY KEY)" >/de
 [ "$(CQL "$BRANCH_NOSQL" "SELECT id FROM app.after_the_point" | jq_ "'rows' in d")" = True ] || { echo "the NoSQL branch should have the table made after the point"; exit 1; }
 TR0=$(now_ms)
 api POST "/v1/previews/$PV/restore-points/$POINT/restore" >/dev/null
-# Put back: the line is looked for in the whole activity (the services' lines come after it),
-# and the preview settled, ready or asleep (its services slept for it; a visit wakes them).
+# Put back: each product's line is looked for in the whole activity (the services' lines come
+# after them; NoSQL's may come before Postgres'), and the preview settled, ready or asleep (its
+# services slept for it; a visit wakes them).
 PUT_BACK=""
 for _ in $(seq 1 240); do
-  api GET "/v1/previews/$PV/activity" | jq_ "any('back as restore point' in a['message'] for a in d)" | has True && case "$(api GET "/v1/previews/$PV" | jq_ "d['state']")" in ready|sleeping) true;; *) false;; esac && PUT_BACK=yes && break
+  api GET "/v1/previews/$PV/activity" | jq_ "all(any(a['message'].startswith('put ' + k + ':') and 'back as restore point' in a['message'] for a in d) for k in ('postgres', 'nosql'))" | has True && case "$(api GET "/v1/previews/$PV" | jq_ "d['state']")" in ready|sleeping) true;; *) false;; esac && PUT_BACK=yes && break
   sleep 0.5
 done
 RESTORE_MS=$(( $(now_ms) - TR0 ))
