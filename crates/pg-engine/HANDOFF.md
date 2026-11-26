@@ -24945,3 +24945,156 @@ apply session's progress, and one per unsynced slot save (a session's release of
    (ext4's journal makes more durable). dm-log-writes in a privileged container would replay real
    ext4 / XFS crash states; needs loop devices on the host.
 4. initdb and the first schema load are not cut (they run unwatched).
+
+## Cumulative statistics across restarts, pg_stat views compared (agent 335, 2026-11-26)
+
+Item 2 of agent 331's "Left": roll's cumulative statistics started from 0 at every start, clean
+or not; PostgreSQL 18.6 keeps them across a clean restart and discards them after a crash.
+Probes and scripts in `~/.cache/a335/scripts/` (`probe-views.py`, `cmpviews.py`, `startstop.py`),
+outputs in `~/.cache/a335/probe/` (`pg1.json` PostgreSQL 18.6 in my own `a335-pg`, `new2.json`
+roll, `cmp-new2.txt`).
+
+### What PostgreSQL 18.6 does (checked on `a335-pg`, the 18.6 image)
+
+- **Clean shutdown** (smart / fast): the checkpointer writes `pg_stat/pgstat.stat` as it exits
+  (pgstat_before_server_shutdown, after the shutdown checkpoint), tagged with the redo LSN.
+  **Not at checkpoints**: after CHECKPOINT `pg_stat/` stays empty (checked).
+- **Start** after a clean shutdown: the file is read (pgstat_restore_stats) and **removed**
+  (`pg_stat/` empty while running, checked). Everything comes back: tables' and indexes' counters
+  (n_tup_*, n_live_tup, n_dead_tup, n_mod_since_analyze, n_ins_since_vacuum, last_* times and
+  counts), functions, databases (with stats_reset), bgwriter / checkpointer / WAL / IO / SLRU /
+  archiver with their reset times, replication slots, subscriptions' counters and reset times.
+  A redo LSN other than the one the start begins from, or a file that doesn't parse: LOG
+  "corrupted statistics file", everything starts from 0 (pgstat_reset_after_failure).
+- **Start after a crash / immediate shutdown** (pgstat_discard_stats): the file removed unread,
+  every counter 0, every variable entry gone (a table's row reads 0s; pg_stat_database.stats_reset
+  NULL; a slot's and a subscription's stats_reset NULL); the fixed-numbered statistics' stats_reset
+  is the discard's time (the start). With no file at all (initdb) the same.
+- The shutdown checkpoint counts as requested (num_requested +1) but not done (num_done kept),
+  and its WAL (2 records, one checkpointer WAL write) is in the file.
+- pg_stat_recovery_prefetch isn't pgstat's: its stats_reset is every start's time.
+- stats_fetch_consistency and the pg_stat_reset* functions don't touch the file: a reset's time
+  is kept like any other value.
+
+### What changed
+
+- `exec/pgstat/file.rs` (new): the file `pg_stat/pgstat.stat`. A header (magic, format version,
+  the WAL position the shutdown recorded), the fixed-numbered statistics (reset times and the
+  time they were last discarded, checkpoints, WAL, pg_stat_io, SLRU), each database's table /
+  index / function entries and database entries, the subscriptions' counters; a CRC-32 of it all.
+  `write` through `storage::durable::replace` (fsync, rename, directory fsync: PostgreSQL's
+  durable_rename; agent 325's module), `take` reads and removes it (and a leftover `.tmp`).
+  Anything that doesn't decode (another format, another shutdown's WAL position, a torn or
+  truncated file, a flipped byte) or can't be read is discarded with PostgreSQL's LOG line
+  ("corrupted statistics file", "could not open statistics file"): a start never fails on it. The entry codecs name every field of their struct in a pattern, so a counter added to
+  `TabEntry` / `DbEntry` / `FuncCounts` doesn't compile until the file carries it.
+- `Engine::shutdown` (the first call): each open database's statistics (its backends' unflushed
+  counts flushed in, dropped objects' entries left out: `pgstat::for_file`) and those of
+  databases closed while idle, written before the registry records the clean shutdown.
+  `Engine::open`: the file taken before the registry says running; after a crash, or with no
+  file, nothing restored and the fixed-numbered statistics' reset time is this start
+  (`Fixed::since`, which `reset_time` falls back to; recovery_prefetch's is always the start).
+  A database's entries wait in `OpenDbs::kept` until it opens, as after an idle close.
+- Autovacuum after the restart: the restored user tables with modification counters are
+  marked changed and the launcher told about their databases (`pgstat::restored`), so the first
+  visit looks at them as PostgreSQL's launcher reads every table's entry.
+- Replication slots (their statistics live in `replslots.json`): zeroed after a crash or a start
+  without the file (`Slots::discard_stats`). Subscriptions' counters (in memory only) written to
+  and read from the file.
+- The shutdown checkpoint (`pgstat::checkpoint`): requested +1, its two records and checkpointer
+  WAL write counted before the file, done not counted, as PostgreSQL's file has them.
+
+Nothing here runs per statement: the file is written once at shutdown and read once at start.
+
+### Compared, every column of every cumulative view
+
+`probe-views.py`: a table with a primary key and an index, 1,000 rows, updates (HOT and of the
+indexed column), deletes, scans, a plpgsql function (track_functions = all), a sequence, a rolled
+back insert, a sort spilling to a temp file, ANALYZE and VACUUM of a second table, a logical slot
+(test_decoding) read, a subscription (connect = false) with its stats reset, pg_stat_reset_shared
+('bgwriter'), a single table's reset, CHECKPOINT; every cumulative pg_stat_* / pg_statio_* view
+dumped (user objects; pg_stat_io's client backend / checkpointer rows), then a clean restart and
+the dump again, more of the work, a kill (roll SIGKILL, PostgreSQL `pg_ctl stop -m immediate`)
+and the dump again. `cmpviews.py` compares each cell's transition (kept, grew, back to 0 / NULL,
+a new time) and user objects' counters exactly.
+
+| | before this change | now |
+|---|---|---|
+| user tables / indexes / functions / sequences, every counter and time, after the clean restart | 0 / NULL | **kept, as PostgreSQL's** (n_live_tup 995, n_dead_tup 66, n_mod_since_analyze 1065 ... equal) |
+| pg_stat_database (counts, stats_reset), its database-0 row | 0 / NULL | kept |
+| bgwriter / checkpointer / WAL / IO / SLRU / archiver reset times | the start | kept (PostgreSQL's: the first start's, or the last reset's) |
+| checkpointer num_requested / num_done, WAL records, checkpointer WAL writes after the clean restart | 0 | **+1 / kept / +2 / +1**, as PostgreSQL |
+| replication slot counters, stats_reset after a **crash** | kept (replslots.json) | 0, NULL |
+| subscription stats_reset after the clean restart | NULL | kept; after a crash NULL |
+| everything after a crash | 0 / the start | 0 / NULL, fixed reset times the start: as PostgreSQL |
+
+What differs still (none of it across a restart: the same before it):
+- Columns roll never counts (0 in every phase): pg_statio_* heap / index / sequence blocks,
+  pg_stat_database blks_read, blk_read/write_time, session_time, active_time,
+  idle_in_transaction_time, the database-0 row's tuple counts, pg_stat_bgwriter buffers_alloc,
+  pg_stat_checkpointer buffers_written / slru_written / write_time / sync_time, pg_stat_wal
+  wal_fpi, pg_stat_slru's counters but blks_zeroed of notify, pg_stat_io's reads / hits / bytes of
+  most rows, pg_stat_recovery_prefetch's counters.
+- pg_stat_database tup_returned / tup_fetched / blks_hit: PostgreSQL counts catalog reads (the
+  dump's own reads grow them on PostgreSQL only).
+- pg_stat_user_indexes idx_tup_read 66 for 67 (and 192 for 259 after the second round of
+  updates of the indexed column), the slot's total_bytes 9,060 for 10,048 (test_decoding's
+  bytes), pg_stat_io's vacuum reads of a 100-row table (PostgreSQL's were hits).
+- After a crash PostgreSQL's end-of-recovery checkpoint writes 11 buffers (pg_stat_io
+  checkpointer writes 11, fsyncs 6); roll counts 1 and 1.
+
+### Measured
+
+Plain dist builds, base `4c322b3d8` (the candidate's parent) against the candidate. Start and
+clean-shutdown time (`startstop.py`, the server on lane B's CPUs through `tools/lane.sh b`, three
+cycles each; 7.4 / 6.2 foreign cores on the lane, so a rough reading):
+
+| | base: shutdown / start (ms) | candidate |
+|---|---|---|
+| idle server | 52, 32, 24 / 85, 110, 85 | 16, 16, 17 / 41, 33, 40 |
+| 10,000 tables of a row each | 696, 326, 67 / 108, 89, 50 (their counts gone after each) | 164, 117, 114 / 80, 146, 150 (10,000 tables' counts kept) |
+
+The idle server's difference is the lane's noise (nothing changed there but one small file).
+With 10,000 tables the file is about 2 MB (computed from the format, 190-225 bytes an entry, not
+measured); its write and read sit inside these runs' spread, the start up to about +60 ms.
+
+In process (agent 324's harness, `~/.cache/a335/inproc/`: `bench --target inproc oltp
+--clients 1`, a fresh 100,000-row database a run, perf stat user instructions of the bench
+process, (I30 s - I10 s) / (ops30 - ops10)), one pair each through `tools/lane.sh a` (6.5 / 7.7
+foreign cores: instructions only): point_select 35,268 -> 35,291 (+0.06%), TPC-B-like
+(short_txn) 257,428 -> 257,335 (-0.04%): level, as expected (no statement path changed).
+
+### Checks
+
+- `tools/quick-check.sh` with `QC_CHECKED=1 QC_TESTS=big_tables` on `c8b4b851c` (the code of
+  this candidate, on `4c322b3d8`): clippy 16 warnings, none new in a changed file; 478 tests in 27
+  binaries, and again built `verify-checked`; crash seeds 1-3 x 2 and power_cut_at_every_point;
+  regress 51,148 / 51,150 (0 newly differing); isolation 1,647 / 1,648; pg_dump_tap 14,609 passed.
+- `tools/crash-binary.py` on the candidate's plain dist binary: SIGKILL seeds 1, 2, 3 and
+  `--power drop` seeds 1, 2, 3 (each ends with a clean shutdown followed by a cut, and a start
+  from what the cut left): all ok.
+- A damaged file (`~/.cache/a335/scripts/badfile.py`, the dist binary): after a clean shutdown
+  the file truncated to half, overwritten with junk, emptied: each start went through, the
+  counts from 0, the file removed, and the startup process's LOG line as PostgreSQL's
+  (`corrupted statistics file "pg_stat/pgstat.stat"`, after "database system was shut down
+  at": through the `StartupReport`, `log::lifecycle::startup`).
+- Tests: `crash_unlogged`'s restart / crash child now also checks a table's counters, the
+  checkpointer's and the database's reset times and the file's removal across the clean
+  restart, and 0 / NULL / a new reset time after the SIGKILL; `autovacuum`'s
+  `counts_kept_across_a_restart_drive_autovacuum` (a table loaded with autovacuum off is vacuumed
+  and analyzed after a restart with it on). With the file never read (a mutant of `take`) the
+  autovacuum test fails; `file::tests` reads every prefix of a file, another shutdown's and a
+  flipped byte as discarded.
+
+### Dropped
+
+Nothing measured and dropped.
+
+### Left
+1. 331's item 1 (deletes into the page record without a per-row lookup): not done. The batched
+   DELETE's rows carry no TID, and feeding the record is an update of its set per deleted row:
+   not free on the bulk DELETE path, so not started.
+2. pg_stat_statements' own file (`pg_stat/pg_stat_statements.stat` in PostgreSQL, kept across a
+   clean restart): roll's store is still in memory only.
+3. The counters roll doesn't count at all (above), and PostgreSQL's catalog reads in the
+   database's tuple counts.
