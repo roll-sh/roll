@@ -1496,6 +1496,8 @@ impl Node {
         deadline: Option<Instant>,
         epoch: u64,
     ) -> anyhow::Result<(Arc<Cluster>, Arc<crate::meta_guard::CheckedMeta>, Option<Arc<ClusterData>>, persist::RecoveryStats)> {
+        let ms = |t: Instant| t.elapsed().as_secs_f64() * 1e3;
+        let t = Instant::now();
         if let Some(ds) = &data_store
             && epoch > 0
         {
@@ -1507,6 +1509,8 @@ impl Node {
             }
             .map_err(|e| e.context(format!("claiming cluster [{}] (lease epoch {epoch})", spec.name)))?;
         }
+        let claim_ms = ms(t);
+        let t = Instant::now();
         // Only states that load again are saved: a cluster must never be left unwakeable.
         let meta = Arc::new(crate::meta_guard::CheckedMeta::new(self.stores.meta_store(&spec.name).await?, spec.dialect));
         let store: Arc<dyn search_es::MetaStore> = meta.clone();
@@ -1537,7 +1541,11 @@ impl Node {
         cfg.request_memory = Some(self.request_memory.clone());
         cfg.cache_memory = Some(self.cache_memory.clone());
         cfg.reindex_node = Some(self.reindex.clone());
+        let meta_ms = ms(t);
+        let t = Instant::now();
         let mut cluster = Cluster::open(cfg, store).await?;
+        let open_ms = ms(t);
+        let t = Instant::now();
         *cluster.reindex_whitelist.write() = spec.reindex_whitelist.clone();
         cluster.node.id = stable_node_id(&spec.name);
         if cluster.state().version <= 1 {
@@ -1563,6 +1571,8 @@ impl Node {
             Err(e) => tracing::warn!(cluster = spec.name, error = %e.reason(), "sealing secrets stored in the clear failed"),
         }
         Box::pin(search_es::xpack::entsearch::sync::adopt_existing(&cluster)).await.map_err(|e| anyhow::anyhow!("pausing the connectors from before roll ran syncs: {}", e.reason()))?;
+        let fixups_ms = ms(t);
+        let t = Instant::now();
         let mut stats = persist::RecoveryStats::default();
         let data = match data_store {
             Some(ds) => {
@@ -1597,6 +1607,21 @@ impl Node {
                 }
             });
         }
+        // Where a wake's time goes (docs/benchmarks/search.md, "Cold start").
+        tracing::debug!(
+            cluster = spec.name,
+            claim_ms,
+            meta_ms,
+            open_ms,
+            fixups_ms,
+            manifests_ms = stats.manifests.as_secs_f64() * 1e3,
+            segments_ms = stats.segments_time.as_secs_f64() * 1e3,
+            replay_ms = stats.replay.as_secs_f64() * 1e3,
+            data_ms = ms(t),
+            segments = stats.segments,
+            fetching = stats.fetching,
+            "cluster load phases"
+        );
         Ok((cluster, meta, data, stats))
     }
 
