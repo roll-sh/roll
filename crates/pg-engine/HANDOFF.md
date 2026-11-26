@@ -15046,6 +15046,87 @@ the loop. (2) The ring's per-block cost: three hash lookups a recycled block (`e
 looks the key up twice and then removes it). One `entry` would do. It is worth about 0.4% on
 scan-bound queries at small caches.
 
+## Query memory, round 3: nested loop inner sides, Incremental Sort, sorted DISTINCT, in-memory first / last / nth_value (agent 326)
+
+BENCH.md "Query memory, round 3" has the tables. Plain dist builds (`tools/dist.sh`): **b0**
+`0037841bd` (before agent 320's windows), **n1** the first three changes on it, **n2** all four on
+origin's `eccf1d824` (`cbfcb7229`; the candidates are the same code rebased on `98bc2e3b6`). Four commits, one a change, each its own candidate
+(`cand/a326` .. `cand/a326-4`, stacked in this order). Rule kept throughout (agent 320's lesson):
+the spilling or streaming path is a node or function of its own, chosen once, and the in-memory
+functions' text is left alone.
+
+**What changed:**
+- **first_value / last_value / nth_value in memory** (`exec/window.rs`): `compute_partition`
+  evaluated the argument at every row of each row's frame and took the first, last or nth:
+  quadratic in a partition (a 1M-row partition that fits didn't finish in 20 minutes). A call
+  whose frame has no exclusion and that counts NULLs (`frame_value_at_place`, decided per call in
+  `run_windows`) now runs `frame_values`: the frame's bounds as before (`frame_of`), then the
+  argument at that one row (WinGetFuncArgInFrame), the nth argument checked as before.
+  `compute_partition` is unchanged; IGNORE NULLS and EXCLUDE still go through it. Agent 320's
+  `window-n5.diff` with the dispatch moved out of `compute_partition`.
+- **A nested loop's inner side past work_mem** (`exec/nodes.rs`, `exec/tuplestore.rs`): an
+  unparameterized inner side was collected into an `Rc<Vec<Row>>` whatever its size. Its
+  collection (`collect_held`, out of line in `held_right`, run once) now sizes the rows as
+  PostgreSQL's Materialize tuplestore counts them (the columns the join reads, one tuple every 256
+  rows); past work_mem they go to a `Tuplestore` (`with_cols`, agent 320's), which writes its file
+  where PostgreSQL's does, and a `MaterialNode` reads it from its start for each outer row
+  (ExecReScanMaterial). The join reads that node as it reads a parameterized side
+  (`InnerRows::Stream`; `right_rows` now returns the `InnerRows`), so the join's loop has no new
+  code. RIGHT / FULL joins (unmatched inner rows kept by number), a side kept for rescans and
+  EXPLAIN ANALYZE (whose `material_stats` already reports PostgreSQL's Storage line) keep the rows
+  in memory. Agent 320's version chunked the in-memory loop (+0.11% on a join that fits).
+- **Incremental Sort** (`exec/pgsort.rs`, `exec/nodes.rs`): `incremental_sort_rows` sorted every
+  batch and collected the whole output before the first row went up. `pgsort::incremental_sort`'s
+  state machine is now a struct (`IncrSort`) that gives out one sorted batch at a time, with the
+  same batches, sorts, bound handling and statistics (`incremental_sort` is a loop over it, for
+  windows); a Sort with presorted keys is opened as `IncrSortNode` (`SortNode::boxed`), which
+  holds one batch (at least 32 rows to the end of a prefix group, or one prefix group) and counts
+  each batch's sorts for EXPLAIN ANALYZE as it makes them. `SortNode::next` lost its dead
+  incremental branch.
+- **A sorted DISTINCT** (`exec/nodes.rs`): a plain DISTINCT that EXPLAIN shows as a Unique over a
+  Sort (enable_hashagg off, or the cheaper path) held every row, a hash set of them and the kept
+  rows. When its Sort keys cover every column and the types' equal values are identical
+  (`equal_is_identical`, no unknown types), it is opened as `UniqueNode`: the input sorted
+  through extsort (`sort_all`: in memory within work_mem, runs on disk past it, temp files counted
+  as PostgreSQL's Sort's) with `sort_rows_by`'s comparisons, the first row of each run of equal
+  rows given out as it comes. Other DISTINCTs go to `DistinctNode` as before.
+
+**Measured** (lane C, 1M rows, work_mem 4 MB, peak anon+shmem over the level before, MB, b0 -> n2
+(PostgreSQL 18.6)): the nested loop's inner side 116.0 -> 16.9 (8.3), its temp file 14,000,000
+bytes as PostgreSQL's; Incremental Sort 293.1 -> 17.3 (13.2); sorted DISTINCT 288.9 -> 40.6
+(16.8), its temp file 37.1 MB as PostgreSQL's; first / last / nth_value over 30,000 rows in 10
+partitions in memory 8.78 -> 0.39 s (n1; PostgreSQL 0.30). Every result's hash, in order and
+sorted, equals PostgreSQL's. When the input fits nothing is slower (user instructions, two
+alternating pairs each, 1.1-3.8 foreign cores): window -0.15% (n1) / -0.10% (n2), nested loop
+-0.19%, Incremental Sort -0.50%, DISTINCT -26.2%; TPC-H q01 q02 q03 q11 q15 q18 (the queries with
+a nested loop, a Materialize, the Incremental Sort or a Sort) within -0.13 .. +0.03%, q18's b0
+runs 0.14% apart, hashes equal. Not gated on a PGO build: no hot function's inlining was changed
+on purpose (the new paths are out of line and the old ones' text is the same but for
+`right_rows`' return type and the Sort's dead branch); the point select pair wasn't run (no
+changed node runs in a point select).
+
+**Verification:** `tools/quick-check.sh` with `QC_CHECKED=1` on `79302a0ca` (the four code
+commits and this section on `98bc2e3b6`): Clippy 16 warnings, none new in a changed file; 398
+tests in 12 binaries passed, again built `--profile verify-checked` (398 passed); regress
+51,148 / 51,150, 0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed. Each
+lower candidate is a prefix of that stack; only the stack's head was checked. New query_spill cases: `nested_loop_inner_spills` (agent
+320's) and `sorted_distinct_spills`, their temp file counts (2 and 1) PostgreSQL 18.6's for the
+same statements.
+
+**Dropped:** nothing measured and dropped. Not done this round: count / sum / avg(DISTINCT x)'s
+hash set (`hash_distinct`; its size check would sit in `feed`, the aggregates' hot function: it
+needs a dispatch chosen per aggregate, e.g. a `Buffered::Sort` once the set passes work_mem).
+
+**Left** (largest first, BENCH's table, MB over PostgreSQL's): several windows of different
+orders (429.0 / 14.5: sorted inside one WindowAgg, whole input), sliding frames (352.5 / 10.2:
+frames that start after the partition's start aren't streamed by `winstream`), sorted EXCEPT /
+INTERSECT (298.3 / 53.2: both sides collected and sorted in memory), grouping sets (267.8 / 34.7:
+input buffered whole), count(DISTINCT) (242.2 / 14.2), a GroupAggregate over a Sort (36.4 / 10.3:
+groups held until the input ends), hashed DISTINCT / UNION (no spill), Recursive Union (7.9 /
+3.7), an Incremental Sort's single group larger than work_mem (sorted in memory; PostgreSQL's
+tuplesort spills), EXPLAIN ANALYZE of a nested loop past work_mem (rows kept in memory, its
+Storage line PostgreSQL's), and agent 318's two cells above PostgreSQL.
+
 ## Query memory: windows past work_mem, partitions streamed (agent 320)
 
 BENCH.md "Query memory: windows past work_mem" has the tables. Plain dist builds (`tools/dist.sh`): **b0**

@@ -450,6 +450,68 @@ The last against PGO, select-only at 8 clients, 3 alternating pairs: user instru
 31,777 -> 32,105 / 31,587 -> 34,607 / 34,026 -> 31,978, user cycles 69,268 -> 69,872 / 68,855 ->
 72,931 / 69,927 -> 68,111 (foreign 1.25-1.88): no direction, dropped.
 
+## Query memory, round 3: nested loop inner sides, Incremental Sort, sorted DISTINCT, in-memory first / last / nth_value (2026-11-26, agent 326)
+
+HANDOFF "Query memory, round 3" has what changed. Plain dist builds (`tools/dist.sh`): **b0**
+`0037841bd`, the base before agent 320's windows landed; **n1** this round's first three changes on
+it (WIP `0978468414`); **n2** all four on origin's `eccf1d824` (the candidates' code, `cbfcb7229`).
+PostgreSQL 18.6 by digest. Harness: agent 320's copied to `~/.cache/a326/bench` (lane C, one server
+a container on the lane's server CPUs, 2 GB cache, work_mem 4 MB, `mem.sh` with `mem-q1.txt`;
+`fpair.sh` and `tpair.sh` for the fitting queries and TPC-H). Foreign load on the lane was 1.1-6.8
+cores in every hold: instruction counts only, walls are not compared.
+
+### Peak memory a query (MB of the server cgroup's anon+shmem over the level before; 1M rows)
+
+`t (id, a, s)` as rounds 1 and 2 (`(g, g * 7919 % 1000003, md5(g::text))`), `u (k, s)` 1M rows
+`(g / 1000, md5(g::text))` with an index on `k`. Each query's rows go to the client as
+`md5(row::text)`; the result's hash in order and sorted equals PostgreSQL's on every row of every
+arm. temp = files / MB the query added in pg_stat_database.
+
+| query | b0 | n1 | n2 | PostgreSQL 18.6 | temp: n2 / PostgreSQL |
+|---|---:|---:|---:|---:|---|
+| nested loop, 4 outer rows over all of `t` (inner side Materialize) | 116.0 | 16.8 | 16.9 | 8.3 | 1 / 14.0, 1 / 14.0 |
+| `SELECT k, s FROM u ORDER BY k, s` (Incremental Sort) | 293.1 | 17.2 | 17.3 | 13.2 | none, none |
+| `SELECT DISTINCT s FROM t`, enable_hashagg off (Unique over Sort) | 288.9 | 304.5 | 40.6 | 16.8 | 1 / 37.1, 1 / 37.1 |
+| first / last / nth_value, 30,000 rows in 10 partitions, work_mem 1 GB (wall s) | 8.78 s | 0.39 s | 1.29 s | 0.30 s | none |
+| `count(DISTINCT s), count(DISTINCT a)` (not changed) | 238.7 | 241.6 | 242.2 | 14.2 | none / 2, 62.2 |
+| GROUP BY `a % 100000`, enable_hashagg off (not changed) | 35.9 | 35.6 | 36.4 | 10.3 | 1 / 54.2, 1 / 47.1 |
+| GROUPING SETS ((a % 1000), (id % 7)) (not changed) | 290.9 | 267.9 | 267.8 | 34.7 | none / 4, 102.4 |
+| EXCEPT, enable_hashagg off (not changed) | 310.4 | 300.8 | 298.3 | 53.2 | none / 3, 50.1 |
+| WITH RECURSIVE, 1M rows (not changed) | 8.3 | 8.4 | 7.9 | 3.7 | 1 / 47.0, 1 / 47.0 |
+| sum OVER ROWS 5 PRECEDING AND 5 FOLLOWING (not changed) | 352.5 | 352.6 | 352.5 | 10.2 | 1 / 18.1, 1 / 18.1 |
+| two windows of different orders (not changed) | 429.0 | 428.9 | 429.0 | 14.5 | none / 2, 105.3 |
+
+(n2's first / last / nth_value wall ran under 6.8 foreign cores and a quick-check build; n1's
+under 6.0. The query is in memory in all three roll builds; b0 evaluated the argument at every row of
+every frame.)
+
+### When the input fits (G user instructions, alternating pairs, both orders)
+
+Fitting queries (`fpair.sh`: 20,000-row tables, 40 runs in one perf window; results equal):
+
+| query | b0 | n1 | n1 / b0 | b0 (n2 pairs) | n2 | n2 / b0 |
+|---|---:|---:|---|---:|---:|---|
+| window: sum, lag, rank by `id % 10` (agent 320's) | 7.6528 / 7.6534 | 7.6414 / 7.6422 | -0.15%, -0.15% | 7.6462 / 7.6468 | 7.6381 / 7.6389 | -0.11%, -0.10% |
+| nested loop over a Materialize (agent 320's) | 48.1657 / 48.1655 | 48.0745 / 48.0751 | -0.19%, -0.19% | 48.1657 / 48.1658 | 48.0750 / 48.0754 | -0.19%, -0.19% |
+| Incremental Sort, groups of 100 | 7.4964 / 7.4969 | 7.4592 / 7.4592 | -0.50%, -0.50% | 7.4966 / 7.4966 | 7.4579 / 7.4585 | -0.52%, -0.51% |
+| DISTINCT, enable_hashagg off | | | | 5.4487 / 5.4483 | 4.0209 / 4.0211 | -26.2%, -26.2% |
+
+n2 includes agent 320's window code (in its base): its window row is against b0, as agent 320's
+own pairs were (+0.05%).
+
+TPC-H SF1 (`tpair.sh`, the queries that run a changed node: q18 an Incremental Sort and a
+Materialize, q02 / q11 / q15 nested loops, q01 / q03 a Sort; b0 against n1, two pairs; hashes
+equal):
+
+| query | b0 | n1 | n1 / b0 |
+|---|---:|---:|---|
+| q01 | 7.3173 / 7.3172 | 7.3172 / 7.3173 | -0.001%, +0.001% |
+| q02 | 2.2860 / 2.2862 | 2.2855 / 2.2855 | -0.02%, -0.03% |
+| q03 | 4.1166 / 4.1171 | 4.1171 / 4.1171 | +0.01%, 0.00% |
+| q11 | 0.8323 / 0.8323 | 0.8320 / 0.8324 | -0.04%, +0.01% |
+| q15 | 2.2992 / 2.2992 | 2.2998 / 2.2998 | +0.03%, +0.03% |
+| q18 | 15.5664 / 15.5887 | 15.5675 / 15.5691 | +0.01%, -0.13% (b0's two runs 0.14% apart) |
+
 ## Query memory: windows past work_mem, partitions streamed (2026-11-25, agent 320)
 
 HANDOFF "Query memory: windows past work_mem" has what changed. Plain dist builds (`tools/dist.sh`): **b0**
