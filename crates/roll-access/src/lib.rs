@@ -1829,6 +1829,33 @@ impl Access {
         self.check_lifetime_cap(rules, expires_at)
     }
 
+    /// `expires_at` brought within each product's own cap on grants with `rules`
+    /// ([`Access::lifetime_cap`]): a person's connection (a consent, a step-up) ends when that
+    /// policy says instead of being refused. Unchanged when no cap applies.
+    pub fn within_cap(&self, rules: &roll_auth::scope::Scope, expires_at: Option<i64>) -> Option<i64> {
+        match self.lifetime_cap.get().and_then(|cap| cap(rules)) {
+            Some((d, _)) => {
+                let end = code_sql::now_ms() + i64::from(d) * 86_400_000;
+                Some(expires_at.map_or(end, |e| e.min(end)))
+            }
+            None => expires_at,
+        }
+    }
+
+    /// Each product whose own cap binds grants reaching it now, with the most days and the cap's
+    /// words (the consent screen says a connection ends then). A product's grants are those with a
+    /// rule on it, or on `*`.
+    pub fn lifetime_caps(&self) -> Vec<(&'static str, u32, String)> {
+        let Some(cap) = self.lifetime_cap.get() else { return vec![] };
+        roll_auth::scope::PRODUCTS
+            .iter()
+            .filter_map(|p| {
+                let rule = roll_auth::scope::Rule { product: (*p).to_string(), resources: roll_auth::scope::Resources::All, environments: None, paths: None, unprotected: false, actions: [(roll_auth::scope::Action::Read, roll_auth::scope::Effect::Allow)].into_iter().collect() };
+                cap(&roll_auth::scope::Scope(vec![rule])).map(|(d, why)| (*p, d, why))
+            })
+            .collect()
+    }
+
     /// The most days a grant with `rules` may live now (roll's `max_days` and each product's cap,
     /// the shorter), for a grant made with no lifetime asked for (an enterprise app's connection).
     pub(crate) fn lifetime_days(&self, rules: &roll_auth::scope::Scope) -> Option<u32> {

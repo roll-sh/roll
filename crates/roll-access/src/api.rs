@@ -260,6 +260,9 @@ async fn catalog_view(State(a): S) -> Json<Value> {
         "routes": rows,
         "operator_only": catalog::OPERATOR_ONLY.iter().map(|(r, why)| json!({ "route": r, "why": why })).collect::<Vec<_>>(),
         "api_url": a.config.api_url,
+        // Products whose own policy caps the grants that reach them (roll secrets'
+        // `max_token_days`): a connection with such a rule ends within it.
+        "lifetime_caps": a.lifetime_caps().into_iter().map(|(product, days, why)| json!({ "product": product, "days": days, "why": why })).collect::<Vec<_>>(),
     }))
 }
 
@@ -1160,21 +1163,21 @@ async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate:
     if let Some(p) = roll_auth::scope::Scope(vec![rule.clone()]).problems().first() {
         return Err(Error::BadRequest(format!("this request can't be remembered ({p}): approve it once")));
     }
-    // For good is a change to the token: it meets the policy as it is now, with the rule. For a
-    // while, the rule lives until then (or the token's end): within each product's cap too.
-    let g = found.grant_id.clone();
-    let grant = blocking(a.clone(), move |a| a.store.get(&g)).await?;
-    match until {
+    // A rule a product caps (roll secrets' `max_token_days`) is remembered for that long at most:
+    // for good becomes until then.
+    let one = roll_auth::scope::Scope(vec![rule.clone()]);
+    let until = match a.within_cap(&one, until) {
+        capped @ Some(_) => capped,
         None => {
+            // For good is a change to the token: it meets the policy as it is now, with the rule.
+            let g = found.grant_id.clone();
+            let grant = blocking(a.clone(), move |a| a.store.get(&g)).await?;
             let mut rules = grant.rules.clone();
             rules.0.push(rule.clone());
             a.meets_policy(&rules, grant.expires_at)?;
+            None
         }
-        Some(until) => {
-            let ends = grant.expires_at.map_or(until, |e| e.min(until));
-            a.meets_policy(&roll_auth::scope::Scope(vec![rule.clone()]), Some(ends))?;
-        }
-    }
+    };
     Ok(Some((found.grant_id, rule, until)))
 }
 

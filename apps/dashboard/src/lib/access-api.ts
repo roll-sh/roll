@@ -68,6 +68,8 @@ export interface StepUp {
   rule: Rule;
   /** Adding it makes the connection wait for an admin's approval (the token policy). */
   waits_for_admin: boolean;
+  /** Adding it brings the connection's end forward to `until` (a product's cap, `why`). */
+  ends?: { until: number; why: string | null } | null;
 }
 
 /** Whether a rule reaches far: admin or reveal, or every resource of its product. */
@@ -399,6 +401,14 @@ export interface Catalog {
   routes: { method: string; route: string; product: string; action: string; target: string }[];
   operator_only: { route: string; why: string }[];
   api_url: string;
+  /** Products whose own policy caps the grants that reach them (roll secrets' `max_token_days`). */
+  lifetime_caps?: { product: string; days: number; why: string }[];
+}
+
+/** The shortest product cap binding a grant with `rules` (a rule on the product, or on `*`), if any: a connection ends within it. */
+export function lifetimeCap(catalog: Catalog, rules: Rule[]): { product: string; days: number; why: string } | null {
+  const caps = (catalog.lifetime_caps ?? []).filter((c) => rules.some((r) => r.product === "*" || r.product === c.product));
+  return caps.length ? caps.reduce((a, b) => (b.days < a.days ? b : a)) : null;
 }
 
 export type Me =

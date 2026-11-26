@@ -2376,7 +2376,9 @@ impl Store {
     /// decides on the merged rules whether it waits for an admin now (`needs_approval`), so a change
     /// made meanwhile is never lost or approved unseen. Nothing else about it changes. Answers the
     /// connection and whether the rule was new.
-    pub fn apply_step_up(&self, id: &str, grant_id: &str, needs_approval: &dyn Fn(&Scope, bool) -> bool) -> Result<(Grant, bool)> {
+    /// `ends`: the connection's end with the rule added (a product's cap may bring it forward;
+    /// never later than it is).
+    pub fn apply_step_up(&self, id: &str, grant_id: &str, ends: Option<i64>, needs_approval: &dyn Fn(&Scope, bool) -> bool) -> Result<(Grant, bool)> {
         let now = code_sql::now_ms();
         let added = self.db.write(|c| {
             let rule: Option<String> = c.query_row("SELECT rule FROM oauth_step_ups WHERE id = ? AND grant_id = ? AND expires_at > ?", params![id, grant_id, now], |r| r.get(0)).optional()?;
@@ -2401,6 +2403,9 @@ impl Store {
             check_rules(&scope)?;
             let waits = needs_approval(&scope, ask);
             c.execute("UPDATE grants SET pending = ? WHERE id = ?", params![waits, grant_id])?;
+            if let Some(t) = ends.filter(|t| expires.is_none_or(|e| e > *t)) {
+                c.execute("UPDATE grants SET expires_at = ? WHERE id = ?", params![t, grant_id])?;
+            }
             set_rules(c, grant_id, &serde_json::to_string(&scope).unwrap_or_default())?;
             Ok::<_, Error>(true)
         })?;
