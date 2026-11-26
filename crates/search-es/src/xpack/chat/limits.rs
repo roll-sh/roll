@@ -31,6 +31,8 @@ pub const MAX_BUCKETS: usize = 50_000;
 pub const MAX_HISTORY_TURNS: usize = 100;
 
 const MINUTE: Duration = Duration::from_secs(60);
+/// A profile's daily bucket's key prefix (kept apart, [`Limiter::days`]).
+const DAY_PREFIX: &str = "day:";
 const DAY: Duration = Duration::from_secs(86_400);
 
 /// A browser key's chat entry (`metadata.roll_browser.limits.chat`).
@@ -133,7 +135,10 @@ impl Bucket {
 /// One loaded cluster's chat buckets and running answers.
 #[derive(Default)]
 pub struct Limiter {
+    /// Per minute, by caller (bounded: the fullest go first, a full bucket being as good as none).
     buckets: Mutex<HashMap<String, Bucket>>,
+    /// Profiles' days, never evicted: forgetting one would hand its budget back. One per profile.
+    days: Mutex<HashMap<String, Bucket>>,
     running: Mutex<HashMap<String, u64>>,
 }
 
@@ -162,12 +167,18 @@ impl Limiter {
     /// Takes every ask or none; `Err`: seconds until the fullest refusal could pass.
     fn take(&self, asks: &[Ask]) -> Result<(), u64> {
         let now = Instant::now();
-        let mut b = self.buckets.lock();
+        let mut minutes = self.buckets.lock();
+        let mut days = self.days.lock();
         let mut wait = None;
         for (k, cap, period, n) in asks {
-            if !b.contains_key(k) && b.len() >= MAX_BUCKETS {
-                room(&mut b, now);
-            }
+            let b = if k.starts_with(DAY_PREFIX) {
+                &mut *days
+            } else {
+                if !minutes.contains_key(k) && minutes.len() >= MAX_BUCKETS {
+                    room(&mut minutes, now);
+                }
+                &mut *minutes
+            };
             let bucket = b.entry(k.clone()).or_insert_with(|| Bucket { tokens: *cap as f64, last: now, capacity: *cap, period: *period });
             bucket.refill(*cap, *period, now);
             if bucket.tokens < *n as f64 {
@@ -178,6 +189,7 @@ impl Limiter {
             return Err(w);
         }
         for (k, _, _, n) in asks {
+            let b = if k.starts_with(DAY_PREFIX) { &mut *days } else { &mut *minutes };
             if let Some(bucket) = b.get_mut(k) {
                 bucket.tokens -= *n as f64;
             }
@@ -187,7 +199,8 @@ impl Limiter {
 
     /// Gives back `n` of what [`Limiter::take`] took from bucket `k`.
     fn give(&self, k: &str, n: u64) {
-        if let Some(b) = self.buckets.lock().get_mut(k) {
+        let mut b = if k.starts_with(DAY_PREFIX) { self.days.lock() } else { self.buckets.lock() };
+        if let Some(b) = b.get_mut(k) {
             b.tokens = (b.tokens + n as f64).min(b.capacity as f64);
         }
     }
@@ -223,7 +236,7 @@ impl Limiter {
             asks.extend(p.each("out", p.policy.output_tokens_per_minute, output));
         }
         if let Some(d) = per_day {
-            asks.push((format!("day:{profile}"), d, DAY, input + output));
+            asks.push((format!("{DAY_PREFIX}{profile}"), d, DAY, input + output));
         }
         self.take(&asks)
     }
@@ -239,7 +252,7 @@ impl Limiter {
             }
         }
         if per_day.is_some() {
-            self.give(&format!("day:{profile}"), unused);
+            self.give(&format!("{DAY_PREFIX}{profile}"), unused);
         }
     }
 }
