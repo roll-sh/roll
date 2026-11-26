@@ -291,7 +291,7 @@ fn streamable(calls: &[WindowCall], presorted: &[String], stream: &Option<Vec<Ne
     if !keys.is_empty() && stream.is_none() {
         return None;
     }
-    super::winstream::Spec::of(calls)
+    super::winstream::Spec::of(calls, ctx)
 }
 
 /// A partition being streamed: the rows read before it went to `winstream`, its partition
@@ -1196,7 +1196,7 @@ fn peer_groups(
     Ok(out)
 }
 
-fn offset_value(
+pub(super) fn offset_value(
     e: &crate::sql::expr::Expr,
     ctx: &ExecCtx,
     unit: FrameUnit,
@@ -1497,6 +1497,29 @@ fn frame_of(
     Ok((s, e.max(s)))
 }
 
+/// `frame_of`'s test for a RANGE offset bound, for a streamed partition (`winstream`): whether
+/// the row whose ORDER BY value is `v` is where the bound of the current row (value `cur`)
+/// stops (the head: the first row in range; the tail: the first row after it), `key` the
+/// window's ORDER BY.
+pub(super) fn range_stop(v: &Value, cur: &Value, off: &Value, preceding: bool, is_start: bool, key: &SortKey, ctx: &ExecCtx) -> Result<bool> {
+    let (mut sub, mut less) = (preceding, !is_start);
+    if key.desc {
+        sub = !sub;
+        less = !less;
+    }
+    Ok(if v.is_null() || cur.is_null() {
+        if is_start {
+            if key.nulls_first { !v.is_null() || cur.is_null() } else { v.is_null() || !cur.is_null() }
+        } else if key.nulls_first {
+            !v.is_null()
+        } else {
+            !cur.is_null()
+        }
+    } else {
+        in_range(v, cur, off, sub, less, ctx)? == is_start
+    })
+}
+
 fn excluded(call: &WindowCall, i: usize, p: usize, peers: &[(usize, usize)]) -> bool {
     match call.frame.exclude {
         FrameExclude::NoOthers => false,
@@ -1777,10 +1800,126 @@ fn frame_values(
 }
 
 /// A moving aggregate's transition state (WindowStatePerAggData).
-struct MovingState {
+pub(super) struct MovingState {
     value: Value,
     /// transValueCount: rows aggregated and not yet removed.
     count: usize,
+}
+
+/// A user aggregate's moving-aggregate implementation (MSFUNC / MINVFUNC / MFINALFUNC /
+/// MINITCOND) as eval_windowaggregates runs it: what `moving_aggregate` and a streamed
+/// partition (`winstream`) both compute with.
+pub(super) struct Moving<'a> {
+    pub agg: &'a crate::sql::plan::AggCall,
+    pub mv: &'a crate::sql::plan::UserAgg,
+}
+
+impl Moving<'_> {
+    /// A call `compute_partition` runs in moving-aggregate mode: a frame whose head moves, an
+    /// aggregate with a moving implementation and no DISTINCT, ORDER BY or volatile input.
+    pub(super) fn of(call: &WindowCall) -> Option<Moving<'_>> {
+        let WinFunc::Agg(agg) = &call.func else { return None };
+        if matches!(call.frame.start, FrameBound::UnboundedPreceding)
+            || agg.distinct
+            || !agg.order_by.is_empty()
+            || agg.args.iter().chain(&agg.filter).any(|e| e.is_volatile())
+        {
+            return None;
+        }
+        let mv = agg.user.as_ref().and_then(|u| u.moving.as_deref())?;
+        Some(Moving { agg, mv })
+    }
+
+    pub(super) fn init(&self, ctx: &ExecCtx) -> Result<MovingState> {
+        Ok(MovingState {
+            value: match &self.mv.init {
+                Some(e) => eval(e, &[], ctx)?,
+                None => Value::Null,
+            },
+            count: 0,
+        })
+    }
+
+    /// The aggregate's inputs for a row; None when FILTERed out.
+    fn inputs(&self, row: &Row, ctx: &ExecCtx) -> Result<Option<Vec<Value>>> {
+        if let Some(f) = &self.agg.filter
+            && !crate::sql::expr::eval_bool(f, row, ctx)?
+        {
+            return Ok(None);
+        }
+        Ok(Some(eval_all(&self.agg.args, row, ctx)?))
+    }
+
+    fn call_with(e: &crate::sql::expr::Expr, st: &Value, args: &[Value], ctx: &ExecCtx) -> Result<Value> {
+        let mut r = Vec::with_capacity(args.len() + 1);
+        r.push(st.clone());
+        r.extend_from_slice(args);
+        eval(e, &r, ctx)
+    }
+
+    pub(super) fn advance(&self, st: &mut MovingState, row: &Row, ctx: &ExecCtx) -> Result<()> {
+        let Some(args) = self.inputs(row, ctx)? else {
+            return Ok(());
+        };
+        if self.mv.trans_strict {
+            if args.iter().any(Value::is_null) {
+                return Ok(());
+            }
+            if st.count == 0 && st.value.is_null() {
+                st.value = args.first().cloned().unwrap_or(Value::Null);
+                st.count = 1;
+                return Ok(());
+            }
+            if st.value.is_null() {
+                return Ok(());
+            }
+        }
+        st.count += 1;
+        let v = Self::call_with(&self.mv.trans, &st.value, &args, ctx)?;
+        if v.is_null() {
+            return Err(Error::new(
+                code::NULL_VALUE_NOT_ALLOWED,
+                "moving-aggregate transition function must not return null",
+            ));
+        }
+        st.value = v;
+        Ok(())
+    }
+
+    /// advance_windowaggregate_base: false when the inverse transition can't remove the row.
+    pub(super) fn remove(&self, st: &mut MovingState, row: &Row, ctx: &ExecCtx) -> Result<bool> {
+        let Some(args) = self.inputs(row, ctx)? else {
+            return Ok(true);
+        };
+        let (inv, inv_strict) = self.mv.inverse.as_ref().expect("inverse transition");
+        if *inv_strict && args.iter().any(Value::is_null) {
+            return Ok(true);
+        }
+        if st.value.is_null() {
+            return Err(crate::error::internal(
+                "aggregate transition value is NULL before inverse transition",
+            ));
+        }
+        if st.count == 1 {
+            *st = self.init(ctx)?;
+            return Ok(true);
+        }
+        let v = Self::call_with(inv, &st.value, &args, ctx)?;
+        if v.is_null() {
+            return Ok(false);
+        }
+        st.count -= 1;
+        st.value = v;
+        Ok(true)
+    }
+
+    pub(super) fn finalize(&self, st: &MovingState, ctx: &ExecCtx) -> Result<Value> {
+        match &self.mv.final_ {
+            Some(_) if self.mv.final_strict && st.value.is_null() => Ok(Value::Null),
+            Some(f) => eval(f, std::slice::from_ref(&st.value), ctx),
+            None => Ok(st.value.clone()),
+        }
+    }
 }
 
 /// eval_windowaggregates for a user aggregate in moving-aggregate mode: rows leaving the
@@ -1800,91 +1939,11 @@ fn moving_aggregate(
     ctx: &ExecCtx,
 ) -> Result<()> {
     let m = part.len();
-    let init = |ctx: &ExecCtx| -> Result<MovingState> {
-        Ok(MovingState {
-            value: match &mv.init {
-                Some(e) => eval(e, &[], ctx)?,
-                None => Value::Null,
-            },
-            count: 0,
-        })
-    };
-    // The aggregate's inputs for a row; None when FILTERed out.
-    let inputs = |row: &Row| -> Result<Option<Vec<Value>>> {
-        if let Some(f) = &agg.filter
-            && !crate::sql::expr::eval_bool(f, row, ctx)?
-        {
-            return Ok(None);
-        }
-        Ok(Some(eval_all(&agg.args, row, ctx)?))
-    };
-    let call_with = |e: &crate::sql::expr::Expr, st: &Value, args: &[Value]| -> Result<Value> {
-        let mut r = Vec::with_capacity(args.len() + 1);
-        r.push(st.clone());
-        r.extend_from_slice(args);
-        eval(e, &r, ctx)
-    };
-    let advance = |st: &mut MovingState, row: &Row| -> Result<()> {
-        let Some(args) = inputs(row)? else {
-            return Ok(());
-        };
-        if mv.trans_strict {
-            if args.iter().any(Value::is_null) {
-                return Ok(());
-            }
-            if st.count == 0 && st.value.is_null() {
-                st.value = args.first().cloned().unwrap_or(Value::Null);
-                st.count = 1;
-                return Ok(());
-            }
-            if st.value.is_null() {
-                return Ok(());
-            }
-        }
-        st.count += 1;
-        let v = call_with(&mv.trans, &st.value, &args)?;
-        if v.is_null() {
-            return Err(Error::new(
-                code::NULL_VALUE_NOT_ALLOWED,
-                "moving-aggregate transition function must not return null",
-            ));
-        }
-        st.value = v;
-        Ok(())
-    };
-    // advance_windowaggregate_base: false when the inverse transition can't remove the row.
-    let remove = |st: &mut MovingState, row: &Row| -> Result<bool> {
-        let Some(args) = inputs(row)? else {
-            return Ok(true);
-        };
-        let (inv, inv_strict) = mv.inverse.as_ref().expect("inverse transition");
-        if *inv_strict && args.iter().any(Value::is_null) {
-            return Ok(true);
-        }
-        if st.value.is_null() {
-            return Err(crate::error::internal(
-                "aggregate transition value is NULL before inverse transition",
-            ));
-        }
-        if st.count == 1 {
-            *st = init(ctx)?;
-            return Ok(true);
-        }
-        let v = call_with(inv, &st.value, &args)?;
-        if v.is_null() {
-            return Ok(false);
-        }
-        st.count -= 1;
-        st.value = v;
-        Ok(true)
-    };
-    let finalize = |st: &MovingState| -> Result<Value> {
-        match &mv.final_ {
-            Some(_) if mv.final_strict && st.value.is_null() => Ok(Value::Null),
-            Some(f) => eval(f, std::slice::from_ref(&st.value), ctx),
-            None => Ok(st.value.clone()),
-        }
-    };
+    let mova = Moving { agg, mv };
+    let init = |ctx: &ExecCtx| mova.init(ctx);
+    let advance = |st: &mut MovingState, row: &Row| mova.advance(st, row, ctx);
+    let remove = |st: &mut MovingState, row: &Row| mova.remove(st, row, ctx);
+    let finalize = |st: &MovingState| mova.finalize(st, ctx);
     let exclusion = call.frame.exclude != FrameExclude::NoOthers;
     let end_reuses = matches!(
         call.frame.end,
