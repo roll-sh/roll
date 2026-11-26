@@ -671,6 +671,50 @@ The last against PGO, select-only at 8 clients, 3 alternating pairs: user instru
 31,777 -> 32,105 / 31,587 -> 34,607 / 34,026 -> 31,978, user cycles 69,268 -> 69,872 / 68,855 ->
 72,931 / 69,927 -> 68,111 (foreign 1.25-1.88): no direction, dropped.
 
+## Query memory, round 5: sliding window frames, EXPLAIN ANALYZE of a streamed window; grouping sets dropped (2026-11-26, agent 334)
+
+HANDOFF "Query memory, round 5" has what changed. Plain dist builds (`tools/dist.sh`): **b0**
+agent 330's stack (`2ad810e0a`, landed as `9ca2d3685`); **n1** the first two changes on it;
+**b1** origin's `9ca2d3685`; **n2** the windows, EXPLAIN ANALYZE and grouping sets on b1 with the
+gate's fixes (`58baf4872`; its window.rs / winstream.rs are the candidates'); **n3** n2 with
+`hashed_sets` / `sorted_sets` forced inline into `run`. The grouping sets were dropped (HANDOFF). PostgreSQL 18.6 by digest. Harness: agent 330's
+copied to `~/.cache/a334/bench` (lane C, `mem.sh` with `mem-q1.txt` / `mem-q2.txt` / `mem-q3.txt`,
+`fpair.sh`, `tpair.sh`). Foreign load on lane C was 5.7-7.3 cores in every hold (3.1-3.9 in the
+perf windows): instruction counts only, walls are not compared.
+
+### Peak memory a query (MB of the server cgroup's anon+shmem over the level before; 1M rows, work_mem 4 MB)
+
+Result hashes in order and sorted equal PostgreSQL's in every cell.
+
+| query | base (b0) | new | PostgreSQL 18.6 | temp: new / PostgreSQL |
+|---|---:|---:|---:|---|
+| `sum(id) OVER (ORDER BY a ROWS BETWEEN 5 PRECEDING AND 5 FOLLOWING)` | 351.9 | 12.4 (n2) | 10.2 | 1 / 18.1, 1 / 18.1 |
+| `count(*)`, `last_value(s)` `OVER (ORDER BY a RANGE BETWEEN 50 PRECEDING AND 50 FOLLOWING EXCLUDE CURRENT ROW)` | not finished in 30 min (quadratic `frame_of`) | 12.0 (n1) | 10.3 | 1 / 47.1, 1 / 46.0 (its EXPLAIN) |
+| (dropped) `GROUP BY GROUPING SETS ((a % 1000), (id % 7))`, `count(*)`, `max(s)` (sorted) | 290.6 | 15.9 (n1) / 19.1 (n2) | 35.1 | 2 / 100.4, 4 / 102.4 (parallel) |
+| (dropped) `GROUP BY GROUPING SETS ((a % 100), ())`, `count(*)`, `sum(id)` (sorted) | 191.0 | 24.9 (n1) / 32.0 (n2) | 10.2 | 1 / 18.1, 1 / 18.1 |
+| EXPLAIN ANALYZE of the ROWS query | 406.4 | 67.4 (n2) | - | 1 / 18.1 |
+
+### When the input fits (G user instructions, 40 runs, 20,000 rows; alternating pairs; results equal)
+
+| query | base | new | new / base |
+|---|---:|---:|---|
+| window: sum, lag, rank by `id % 10` (agent 320's) | b1 7.6444 / 7.6442 | n2 7.6500 / 7.6499 | +0.07%, +0.07% |
+| `sum(id)`, `last_value(s)` over `ROWS BETWEEN 5 PRECEDING AND 5 FOLLOWING` | b1 6.6811 / 6.6813 | n2 6.6627 / 6.6628 | -0.28%, -0.28% |
+| `msum(a)` (CREATE AGGREGATE with msfunc / minvfunc) over 6 rows (n1, dropped form) | b0 6.7153 / 6.7141 | n1 6.7747 / 6.7773 | +0.89%, +0.94% |
+| the same (n2) | b1 6.7174 / 6.7159 | n2 6.6368 / 6.6343 | -1.20%, -1.22% |
+| two hashed grouping sets (n1, dropped form) | b0 4.9394 / 4.9394 | n1 4.9547 / 4.9543 | +0.31%, +0.30% |
+| the same (n2: `hashed_sets` outlined from `run`) | b1 4.9404 / 4.9396 | n2 4.9515 / 4.9514 | +0.22%, +0.24% |
+| the same (n3: both forced inline) | b1 4.9400 / 4.9394 | n3 5.0893 / 5.0896 | +3.02%, +3.04% |
+| a hashed set and () (n1, dropped form) | b0 3.6458 / 3.6476 | n1 3.6580 / 3.6590 | +0.33%, +0.31% |
+| the same (n2) | b1 3.6455 / 3.6454 | n2 3.6552 / 3.6552 | +0.26%, +0.27% |
+| the same (n3) | b1 3.6475 / 3.6485 | n3 3.7530 / 3.7526 | +2.89%, +2.85% |
+
+n3 also had the window +0.18 / +0.18%, sliding -0.16 / -0.16%, msum -1.10 / -1.09% (b1 7.6444 /
+7.6446, 6.6811 / 6.6813, 6.7175 / 6.7164). TPC-H SF1 for the dropped grouping sets (`tpair.sh`;
+`AggNode::run` changed: the aggregations; b1 against n2, two pairs; hashes equal): q01 7.3168 / 7.3168 -> 7.3169 / 7.3168 (0.00%), q13 4.1059 / 4.1023 -> 4.1052 / 4.1048
+(-0.02%, +0.06%), q18 15.5782 / 15.5531 -> 15.5746 / 15.5633 (-0.02%, +0.07%). No TPC-H query
+has a window or grouping sets.
+
 ## Query memory, round 4: several windows, sorted set operations, count(DISTINCT) (2026-11-26, agent 330)
 
 HANDOFF "Query memory, round 4" has what changed. Plain dist builds (`tools/dist.sh`): **b0**
