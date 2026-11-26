@@ -238,14 +238,17 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
 - **Restore points** (Neon's snapshots, Railway's volume backups): the preview's data saved as it
   is now and put back later, after a test run, a demo or an agent changed it. `POST
   …/restore-points` `{label?}` saves one: a copy-on-write branch of each branch whose product
-  puts a branch back in place (`Brancher::restores`: Postgres, pg-control's reset with `from`,
+  can put a branch back (`Brancher::restores`: Postgres, pg-control's reset with `from`,
   so the branch keeps its endpoint, `DATABASE_URL` and role; NoSQL, a zero-copy branch cut at a
   whole second, put back by NoSQL's point-in-time restore of the preview's own branch to that
   second, in place with the same id, endpoint and credentials, within its 7 days of history:
   what was written in the fraction of a second before saving isn't in the point; Redis, the same
   way, through redis-control's branch `at` and its restore in place, within the database's
-  `history_retention_s`: the same id, `REDIS_URL` and password, its clients disconnected), at
-  most 3 per preview. `POST
+  `history_retention_s`: the same id, `REDIS_URL` and password, its clients disconnected;
+  streams, a branch of the preview's stream (its chunk rows name the same objects), put back by
+  branching that copy again under the preview's stream's name, since a stream's offsets only move
+  forward: a new stream id and key, so its services are deployed again with them, and the point
+  outlives a reset), at most 3 per preview. `POST
   …/restore-points/{point}/restore` puts the data back on the next converge, as a reset does:
   the services sleep meanwhile, and the seed doesn't run again (the point holds what it made).
   A reset that makes a new branch (Redis's, a new database) deletes the points' part of it: they
@@ -1970,7 +1973,7 @@ previews in it), the operator and admins see every project.
 | `POST /v1/previews/{id}/wake` | | `Preview`: start its services now |
 | `POST /v1/previews/{id}/reset` | `{resources?: ["postgres:prj_…"]}` | `Preview`: re-branch from the parents |
 | `GET /v1/previews/{id}/restore-points` | | `{points: [{id, label, by, at, data}], max}`: oldest first, `data` the resources it holds (`postgres:prj_…`) |
-| `POST /v1/previews/{id}/restore-points` | `{label?}` (one line, 60 characters at most) | 201 `{id, label, by, at, data}`: its Postgres, NoSQL and Redis data saved now; 409 while it isn't ready, past `max`, or with nothing to save |
+| `POST /v1/previews/{id}/restore-points` | `{label?}` (one line, 60 characters at most) | 201 `{id, label, by, at, data}`: its Postgres, NoSQL, Redis and stream data saved now; 409 while it isn't ready, past `max`, or with nothing to save |
 | `POST /v1/previews/{id}/restore-points/{point}/restore` | | `Preview`: the data put back as the point left it, on its next converge (no seed); `delete`, as a reset is |
 | `DELETE /v1/previews/{id}/restore-points/{point}` | | 204 |
 | `GET /v1/previews/{id}/screenshot` | | `image/png`: the first service's page at the preview's head (404 when it has none); `?previous=1` the one before, `?view=phone` at a phone's width, `?base=1` the default branch's preview's, `?page=/pricing` another of `github.pages`, `?diff=base` or `?diff=previous` where it differs from that one or the one before (the page faded, changed pixels marked red) |
@@ -2911,11 +2914,10 @@ Ranked again after a ninth product review (2026-11-26, morning), against Chromat
 cross-browser and interaction tests, Percy's snapshots, Vercel's comments and toolbar, Render's
 previews.
 
-1. **Restore points for Redis, in review**, through redis-control's own point-in-time restore,
-   in place (and `data_at` for Redis from its history). Search and streams next: a point is kept
-   only where the product puts a branch back in place, keeping its id; each needs its control
-   plane's reset `from` (roll search: feasible, about a day, with its user to schedule; streams:
-   the broker has no reset of a stream to an earlier state yet).
+1. **Restore points for streams, in review**: a copy branched again under the preview's
+   stream's name (a new id and key; the services deployed again), since a stream can't go back in
+   place. Search's next: it needs its control plane's reset `from` (roll search: feasible, about a
+   day, with its user to schedule).
 2. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
@@ -2925,7 +2927,7 @@ previews.
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 5. **Watch: pg-control's recovery to a time seconds old** (unowned).
 
-Landed 2026-11-26, morning: stories' interaction tests (#1087), what a failed one threw (#1091), both in the other browsers (#1100), and the step a failed one stopped at (#1105).
+Landed 2026-11-26, morning: stories' interaction tests (#1087), what a failed one threw (#1091), both in the other browsers (#1100), the step a failed one stopped at (#1105), and restore points for Redis (#1109).
 
 Landed 2026-11-26, early: a baseline on demand for stories (#1082); a change's first stories in the other browsers (#1064); roll apps lookups that miss remembered (#1066); a settled running preview's usage read alone too (#1069).
 
