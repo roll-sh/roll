@@ -702,7 +702,7 @@ const CREDENTIAL_MIN_LEN: usize = 12;
 
 /// A line's candidates: runs of `[A-Za-z0-9_\-+/=.:@~]`, the right-hand side of `KEY=VALUE` and
 /// `key: value` (quotes and a trailing `,` or `;` stripped), and the whole trimmed line.
-fn candidates(line: &str, out: &mut HashSet<String>) {
+pub(crate) fn candidates(line: &str, out: &mut HashSet<String>) {
     let mut add = |s: &str| {
         if credential_like(s) {
             out.insert(s.to_string());
