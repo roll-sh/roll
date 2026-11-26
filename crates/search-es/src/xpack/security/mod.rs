@@ -906,7 +906,15 @@ fn authorize_action(ctx: &Ctx) -> EsResult<Option<String>> {
         if scope == Scope::Index && OS_WHOLE.contains(&ctx.api.name()) {
             let defaults = narrow_defaults(ctx.api.name());
             let opts = ctx.indices_options(defaults).unwrap_or(defaults);
-            return check_all(ctx, p, &eff, &action, crate::api::index_expressions(ctx), &opts).map(|_| None);
+            // Linked remotes' expressions are the remote's to authorize, as OpenSearch's are
+            // (`crate::remote::links`): a user needs nothing here for them.
+            let all = crate::api::index_expressions(ctx);
+            let named = !all.is_empty();
+            let exprs: Vec<String> = all.into_iter().filter(|e| !crate::remote::links::names_link(ctx, e)).collect();
+            if named && exprs.is_empty() {
+                return Ok(None);
+            }
+            return check_all(ctx, p, &eff, &action, exprs, &opts).map(|_| None);
         }
     }
     match scope {
