@@ -83,5 +83,7 @@ describe("NewServiceSheet", () => {
     await waitFor(() => expect(created).toHaveBeenCalled());
     const made = apps.create.mock.calls.map((c) => c[0]);
     expect(made.map((b) => [b.name, b.source.root, b.build.watch[0]])).toEqual([["web", "apps/web", "apps/web/**"], ["api", "apps/api", "apps/api/**"]]);
+    // The first folder's plan isn't the others': nothing it suggested is set on them.
+    expect(made.every((b) => b.run === undefined)).toBe(true);
   });
 });

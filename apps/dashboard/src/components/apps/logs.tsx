@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { appsApi, followLog, type LogLine, atLeast, type LogLevel } from "@/lib/apps-api";
-import { matchesTerms, splitFilter } from "@/lib/log-where";
+import { matchesTerms, splitFilter, wordsMatch } from "@/lib/log-where";
 import { btn } from "../ui";
 import { LogBar, LogView } from "./shared";
 import { TraceWaterfall } from "./metrics";
@@ -129,7 +129,6 @@ export function RuntimeLogs({
   const deployments = useMemo(() => [...new Set(lines.map((l) => l.deployment).filter((d): d is string => !!d))], [lines]);
   const shown = useMemo(() => {
     const split = splitFilter(filter);
-    const q = split.words.toLowerCase();
     const request = (l: LogLine) => {
       if (!requests || (!status && !slow)) return true;
       try {
@@ -142,7 +141,7 @@ export function RuntimeLogs({
     return lines.filter(
       (l) =>
         (!instance || l.instance === instance) &&
-        (!q || l.text.toLowerCase().includes(q)) &&
+        wordsMatch(split.words, l.text) &&
         matchesTerms(split.terms, l.text) &&
         request(l) &&
         (requests || (atLeast(l, level) && (!deployment || l.deployment === deployment) && (!stream || l.stream === stream))),

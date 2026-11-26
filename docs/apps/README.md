@@ -1325,7 +1325,7 @@ The product name is `apps`; the actions are `read`, `write`, `deploy`, `delete`,
   `log_retention_days`), shows a search hit's neighbours ("context": the lines up to half a minute
   after it, read back from there), and downloads what it found as NDJSON (Railway's Log Explorer,
   Cloud Run's Logs Explorer). A search takes `"a phrase"`, `-word` and `OR` (`logs::Search`;
-  every word otherwise, any case), and what it found is drawn over its window as 48 bars above
+  every word otherwise, any case; the live filter reads them the same way), and what it found is drawn over its window as 48 bars above
   the lines, error lines marked (Railway's Log Explorer). A search is kept in the page's URL (`?tab=logs&q=…&back=30`), and
   opening such a link runs it, so a teammate sees the same lines.
 - **Metrics** per service and environment, per minute: requests, 2xx/4xx/5xx, latency p50/p95/p99
@@ -2289,7 +2289,8 @@ directory prints the same finding with the two commands that do it, or on a term
 New service asks (`fly launch`'s, `railway add`'s questions), all before its first upload: the
 project (an existing one's name, or a new one), whether to make and link each database the code
 uses (then its URL is in the first deploy), whether to set the local `.env`'s variables (never
-uploaded; names that read as secrets sealed), and each name `.env.example` lists that's still
+uploaded; names that read as secrets, and URLs with a password in them, sealed; what a link or
+roll sets, like `DATABASE_URL` and `PORT`, left out and said), and each name `.env.example` lists that's still
 missing. Without a terminal (CI, a script) it asks nothing and does what it always did.
 
 ## Deploy hooks
@@ -4559,6 +4560,8 @@ so the next step (a Dockerfile, the root directory) is plain.
   another port, through its last `EXPOSE`. An image service with no port set is served on the
   port its image exposes (Fly's `fly launch`): the only one, else 80, 8080, 3000 or 8000, else
   the lowest, said in the deploy's log (`exposed_port`; on Docker, read from the pulled image).
+  That's a web service's first deploy only: later ones keep the port the live deployment has, so
+  a service that worked on 8080 isn't moved by a new image.
 - A **Procfile** (Heroku's; Nixpacks and Railpack read it too) moves a Heroku app over unchanged:
   `web:` is a web service's start command and `worker:` a worker's when the service names
   none, and `release:` is a web service's pre-deploy command (Heroku's release phase, once per

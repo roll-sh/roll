@@ -195,7 +195,7 @@ A `roll up` upload (`application/gzip`) may carry `X-Roll-Message` (percent-enco
 checkout's last commit, by default) and `X-Roll-Revision` (its sha), shown on the deployment.
 
 A log's `q` (1–200 characters) returns the lines with every word in it, any case (`"a phrase"` as
-it's written, `-word` absent, `OR` between alternatives: `checkout "order 7" -health`,
+it's written (any case), `-word` absent (`-1` and `--flag` are words), `OR` between alternatives: `checkout "order 7" -health`,
 `timeout OR refused`), from memory and then
 the stored chunks newest first (back to `since`), at most `tail` (2000); it reads at most 64 MiB
 of stored logs and says so with `X-Roll-Search-Truncated: 1`.
@@ -288,7 +288,7 @@ type Build = {
 
 type Run = {
   type: "web" | "worker" | "cron";
-  port?: number;            // web: the port the app listens on (default from the plan, an image's own EXPOSE, else 8080; PORT is set to it)
+  port?: number;            // web: the port the app listens on (default from the plan; an image's own EXPOSE on a web service's first deploy, then the port its live deployment has; else 8080; PORT is set to it)
   start?: string;           // overrides the image's command
   pre_deploy?: string;      // once per deploy, in a container of the new image with its variables and
                             // the project network (no volume), before the switch: a migration. A
