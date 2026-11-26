@@ -15,6 +15,7 @@ import {
   restoreProblem,
   restoreRequest,
   slmRows,
+  smRows,
   snapshotName,
   snapshotRows,
   type RecoveryProgress,
@@ -24,6 +25,9 @@ import {
   type RestoreForm,
   type SlmPolicyInfo,
   type SlmRow,
+  type SmDoc,
+  type SmExplain,
+  type SmRow,
   type SnapshotInfo,
   type SnapshotRow,
 } from "@/lib/search-snapshots";
@@ -32,6 +36,7 @@ import { ago, btn, ErrorNote, input, Panel, primary } from "../ui";
 import { Check, ConsoleButton, DeleteButton, useBusy } from "./actions";
 import { RequestPreview } from "./request-preview";
 import { Policies } from "./slm-policies";
+import { SmPolicies } from "./sm-policies";
 
 const enc = encodeURIComponent;
 /** roll's default repository: an `s3` repository on roll's side (`Repository::roll_default`). */
@@ -45,6 +50,7 @@ function useSnapshots(cluster: SearchCluster) {
   const [snapshots, setSnapshots] = useState<SnapshotRow[]>([]);
   const [policies, setPolicies] = useState<SlmRow[] | null>(null);
   const [slmMode, setSlmMode] = useState<string | null>(null);
+  const [smPolicies, setSmPolicies] = useState<SmRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -72,6 +78,13 @@ function useSnapshots(cluster: SearchCluster) {
         ]);
         setPolicies(slmRows(p));
         setSlmMode(s?.operation_mode ?? null);
+      } else {
+        // `_explain` answers 404 until the plugin's config index exists (no policy yet).
+        const [p, x] = await Promise.all([
+          esJson<{ policies: SmDoc[] }>(cluster.id, "GET", "/_plugins/_sm/policies"),
+          esJson<{ policies: SmExplain[] }>(cluster.id, "GET", "/_plugins/_sm/policies/*/_explain").catch(() => null),
+        ]);
+        setSmPolicies(smRows(p, x));
       }
       setError(null);
     } catch (e) {
@@ -92,7 +105,7 @@ function useSnapshots(cluster: SearchCluster) {
     return () => clearInterval(t);
   }, [running, load]);
 
-  return { repos, repoErrors, snapshots, policies, slmMode, error, load };
+  return { repos, repoErrors, snapshots, policies, slmMode, smPolicies, error, load };
 }
 
 /**
@@ -100,7 +113,8 @@ function useSnapshots(cluster: SearchCluster) {
  * settings, verified and removed; snapshots with their state, indices, size and failures, taken
  * by hand or by a policy, deleted, and restored (indices, a rename, aliases, global state,
  * partial) with the restored shards' recovery followed to the end; snapshot lifecycle policies
- * with their schedule, retention and last runs, run on demand. Every request goes through the
+ * with their schedule, retention and last runs, run on demand (OpenSearch's snapshot management
+ * policies, with their workflows' states, on an OpenSearch-flavor cluster). Every request goes through the
  * cluster's console route and can be opened in the console.
  */
 export function SnapshotsTab({ cluster, onOpenConsole }: { cluster: SearchCluster; onOpenConsole: (text: string) => void }) {
@@ -113,12 +127,7 @@ export function SnapshotsTab({ cluster, onOpenConsole }: { cluster: SearchCluste
       <Repositories cluster={cluster} repos={repos} errors={data.repoErrors} counts={countBy(data.snapshots)} reload={data.load} onOpenConsole={onOpenConsole} />
       <Snapshots cluster={cluster} repos={repos} snapshots={data.snapshots} reload={data.load} onOpenConsole={onOpenConsole} />
       {cluster.flavor === "opensearch" ? (
-        <Panel title="Policies">
-          <p className="px-5 py-4 text-[13px] text-muted">
-            OpenSearch&apos;s snapshot management policies (<span className="font-mono">_plugins/_sm</span>) aren&apos;t served by roll yet. Take snapshots here
-            by hand, or from an ISM policy&apos;s <span className="font-mono">snapshot</span> action.
-          </p>
-        </Panel>
+        <SmPolicies cluster={cluster} repos={repos} policies={data.smPolicies ?? []} reload={data.load} onOpenConsole={onOpenConsole} />
       ) : (
         <Policies cluster={cluster} repos={repos} policies={data.policies ?? []} mode={data.slmMode} reload={data.load} onOpenConsole={onOpenConsole} />
       )}
