@@ -96,6 +96,21 @@ lacks is a roll extension under a `roll_` name, and Elasticsearch's own APIs kee
 
 ## 1. Judgments and offline evaluation
 
+**First slice as built** (`feature/search-evaluate`): `POST /v1/search/clusters/{id}/indices/{index}/evaluate`
+(`crates/search-control/src/evaluate.rs`) takes the judgments in the request, `[{query, ratings:
+[{_id, rating, _index?}]}]` (up to 500 queries of 200 ratings), and one or two configurations:
+a search body with `{{query}}` where each query goes, or a search template (a stored one by `id`,
+or an inline `source`, with `params`). Each configuration is one `_rank_eval` on the index with
+the judged queries as its templated requests, run as the index's routes run (a read), so the
+cluster checks and meters them as any search; the metric is `_rank_eval`'s, nDCG@10 by default.
+With two, the second is compared against the first: the difference in score, how many queries
+got better, worse or stayed, and the 50 that moved most each way. `roll search index evaluate`
+reads judgments as JSON or CSV (`query,_id,rating`, Quepid's export) and fails a CI run with
+`--fail-below` or `--fail-on-worse`; MCP's `search_evaluate` maps the route; the Relevance tab's
+Evaluate panel takes a paste or a file and prints the CI line. Next: judgment lists kept as
+indices and built from clicks (below), and evaluating a search application's own template and
+its experiment's variants.
+
 - **Judgment lists.** A judgment list is an ordinary index the owner names
   (`roll-judgments-<name>`): documents `{query, index, doc_id, rating, source}`, with `source`
   being `manual`, `clicks` or `import`. It's a plain index, so it branches, snapshots and exports
