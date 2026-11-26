@@ -626,6 +626,12 @@ const stories = async (sessionId) => {
     const a11y = until - Date.now() > 30000 ? await axeReport(sessionId).catch(() => null) : null;
     const said = { id: e.id, errors: errors.length + failed.length - before };
     if (play) said.play = play;
+    // What it threw, as Storybook's frame shows it (its error display, `#error-message`: the DOM,
+    // so read in the isolated world), one line of 300 characters at most.
+    if (play === "failed") {
+      const m = await check({ expression: `(document.querySelector("#error-message")?.textContent || "").replace(/\\s+/g, " ").trim().slice(0, 300)`, returnByValue: true }, sessionId);
+      if (typeof m?.result?.value === "string" && m.result.value) said.play_error = m.result.value;
+    }
     if (a11y && JSON.stringify(a11y).length <= 8000) said.a11y = a11y;
     out.push(said);
   }

@@ -115,7 +115,7 @@ pub use sweep::{Lease, Swept};
 pub use sinks::{Deliver, NewSink, Sink};
 pub use notifications::{Channel, NewNotification, Notification, Notifier};
 pub use syncs::{NewSync, Push, SecretSync, SyncField, SyncKind, SyncTarget, Syncs};
-pub use write::{Applied, Batch, Change, ItemDiff, Op, Promote, Rollback, SecretType, Written};
+pub use write::{Applied, Batch, Change, ItemDiff, Op, Promote, Rollback, SecretType, SlotNow, Written};
 
 use code_sql::{Db, OptionalExtension, Target};
 use std::sync::Arc;
