@@ -3632,11 +3632,19 @@ impl AggNode {
             }
             return Ok(out);
         };
-        // Grouping sets: buffer the input, then group once per set.
+        // Grouping sets: buffer the input, then group once per set (past work_mem, they read
+        // it as it comes: `sets_past`, asked as the buffer fills).
         let mut rows = Vec::new();
+        let mut sized = true;
         while let Some(r) = input.next(ctx)? {
             ctx.check()?;
             rows.push(r);
+            if rows.len() == rows.capacity()
+                && sized
+                && let Some(out) = self.sets_past(&sets, &mut rows, &mut input, &colls, &mut sized, ctx)?
+            {
+                return Ok(out);
+            }
         }
         let fulls: Vec<Vec<Value>> = rows
             .iter()
@@ -3777,6 +3785,250 @@ impl AggNode {
             let mask = self.set_mask(set);
             let mut slots: Vec<Option<(Vec<Value>, Vec<AggState>)>> =
                 groups.into_iter().map(Some).collect();
+            for i in idx {
+                if let Some((key, states)) = slots[i].take() {
+                    out.push(self.finish_group(key, states, mask, ctx)?);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// The grouping sets' buffered input `rows` sized as its buffer fills (its rows times the
+    /// last one's tuple: a test only as often as the buffer grows; a size every 256th row
+    /// cost a fitting query +0.3% user instructions): once past work_mem, they are grouped over
+    /// the rest of the input as it comes, the result returned (`sized` false: never asked
+    /// again): hashed sets (`run`'s choice: no aggregate sorts its input, enable_hashagg on,
+    /// EXPLAIN shows them hashed) by `hashed_sets_streamed`, sorted ones by
+    /// `sorted_sets_streamed`.
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn sets_past(
+        &self,
+        sets: &[Vec<usize>],
+        rows: &mut Vec<Row>,
+        input: &mut BoxNode,
+        colls: &[Option<KeyNorm>],
+        sized: &mut bool,
+        ctx: &ExecCtx,
+    ) -> Result<Option<Vec<Row>>> {
+        let types = match self.plan.as_deref() {
+            Some(crate::sql::plan::Plan::Agg { input, .. }) => crate::sql::paths::analyzejoins::col_types(input),
+            _ => Vec::new(),
+        };
+        let row = rows.last().expect("a sampled row");
+        let t = super::workmem::minimal_tuple_len_cols(row, &types, None, ctx);
+        let est = rows.len() as i64 * (super::workmem::maxalign(t) + 16);
+        if est <= super::workmem::work_mem(ctx) {
+            return Ok(None);
+        }
+        *sized = false;
+        let hashed = !self.aggs.iter().any(|a| a.distinct || !a.order_by.is_empty())
+            && crate::sql::paths::Gucs::read(ctx).hashagg
+            && !self.plan.as_ref().is_some_and(|p| crate::sql::explain::sets_sorted(p, ctx));
+        let rows = std::mem::take(rows);
+        if hashed {
+            self.hashed_sets_streamed(sets, rows, input, colls, ctx).map(Some)
+        } else {
+            self.sorted_sets_streamed(sets, rows, input, types, colls, ctx).map(Some)
+        }
+    }
+
+    /// `sorted_sets` past work_mem, as PostgreSQL's GroupAggregate runs grouping sets: each
+    /// rollup's phase over its input sorted through extsort (the first phase's: `rows` read so
+    /// far, then the rest of `input`; runs on disk past work_mem, counted as tuplesort's, the
+    /// grouping expressions sorted on as resjunk columns), each row then fed to the next
+    /// phase's sort (agg_retrieve_direct's sort_out). While the sorts fit, the rows come in
+    /// `sorted_sets`' order and the groups are its; `types`: the input's columns.
+    #[inline(never)]
+    fn sorted_sets_streamed(
+        &self,
+        sets: &[Vec<usize>],
+        rows: Vec<Row>,
+        input: &mut BoxNode,
+        mut types: Vec<T>,
+        colls: &[Option<KeyNorm>],
+        ctx: &ExecCtx,
+    ) -> Result<Vec<Row>> {
+        // (The sorts' keys go after the rows' columns: types for as many as they have.)
+        types.resize(rows.first().map_or(types.len(), |r| r.len()), T::Unknown);
+        // (The input's columns the aggregates read; the others count as NULLs.)
+        let mut read = Vec::new();
+        let marked = self.aggs.iter().all(|a| {
+            a.args.iter().chain(&a.filter).chain(a.order_by.iter().map(|k| &k.expr)).all(|e| super::need::mark(e, &mut read))
+        });
+        let mask = marked.then(|| (0..types.len()).map(|i| read.get(i).copied().unwrap_or(false)).collect::<Vec<bool>>());
+        let chains = rollup_chains(sets);
+        let sorter = |cols: &[usize]| {
+            let keys: Vec<SortKey> = cols
+                .iter()
+                .map(|&c| SortKey { expr: self.groups[c].clone(), desc: false, nulls_first: false, using: None })
+                .collect();
+            super::extsort::ExtSort::new(&keys, types.clone(), mask.clone(), None, false, ctx)
+        };
+        let mut out = Vec::new();
+        let Some((_, cols0)) = chains.first() else { return Ok(out) };
+        let mut sort = sorter(cols0);
+        for r in rows {
+            sort.put(r, None, ctx)?;
+        }
+        while let Some(r) = input.next(ctx)? {
+            ctx.check()?;
+            sort.put(r, None, ctx)?;
+        }
+        let mut phase = Some(sort);
+        for (pi, (chain, cols)) in chains.iter().enumerate() {
+            let (mut sorted, _, _) = phase.take().expect("a phase's sort").finish(ctx)?;
+            let mut next = chains.get(pi + 1).map(|(_, c)| sorter(c));
+            // The sets of the chain (largest first) and their running groups.
+            let mut cur: Vec<Option<(Vec<Value>, Vec<AggState>)>> = (0..chain.len()).map(|_| None).collect();
+            let mut prev: Option<Vec<Value>> = None;
+            while let Some(row) = sorted.next(ctx)? {
+                ctx.check()?;
+                let full = eval_all(&self.groups, &row, ctx)?;
+                let hk = group_key(&full, colls);
+                if let Some(p) = &prev {
+                    // How many leading sort columns still agree.
+                    let same = cols.iter().take_while(|&&c| super::nodes::same_group(&p[c], &hk[c])).count();
+                    for (ci, &si) in chain.iter().enumerate() {
+                        if same < sets[si].len()
+                            && let Some((key, states)) = cur[ci].take()
+                        {
+                            out.push(self.finish_group(key, states, self.set_mask(&sets[si]), ctx)?);
+                        }
+                    }
+                }
+                for (ci, &si) in chain.iter().enumerate() {
+                    if cur[ci].is_none() {
+                        let key = self.set_key(&sets[si], &full);
+                        let states = self.states(&key, ctx)?;
+                        cur[ci] = Some((key, states));
+                    }
+                    let st = &mut cur[ci].as_mut().unwrap().1;
+                    for (a, s) in self.aggs.iter().zip(st.iter_mut()) {
+                        feed(a, s, &row, ctx)?;
+                    }
+                }
+                prev = Some(hk);
+                if let Some(n) = next.as_mut() {
+                    n.put(row, None, ctx)?;
+                }
+            }
+            for (ci, &si) in chain.iter().enumerate() {
+                match cur[ci].take() {
+                    Some((key, states)) => out.push(self.finish_group(key, states, self.set_mask(&sets[si]), ctx)?),
+                    None if sets[si].is_empty() => {
+                        let ng = self.groups.len();
+                        let states = self.states(&vec![Value::Null; ng], ctx)?;
+                        out.push(self.finish_group(vec![Value::Null; ng], states, self.set_mask(&sets[si]), ctx)?);
+                    }
+                    None => {}
+                }
+            }
+            phase = next;
+        }
+        Ok(out)
+    }
+
+    /// `hashed_sets` over the input as it comes, as PostgreSQL's hashed grouping sets read
+    /// it (lookup_hash_entries: each row into every set's hash table at once), no row kept:
+    /// `rows` read so far, then the rest of `input`. Each set's groups get the rows `hashed_sets`
+    /// feeds them, in the same order, so their states, their order and the sets' order are
+    /// that function's.
+    #[inline(never)]
+    fn hashed_sets_streamed(
+        &self,
+        sets: &[Vec<usize>],
+        rows: Vec<Row>,
+        input: &mut BoxNode,
+        colls: &[Option<KeyNorm>],
+        ctx: &ExecCtx,
+    ) -> Result<Vec<Row>> {
+        let plan_input = match self.plan.as_deref() {
+            Some(crate::sql::plan::Plan::Agg { input, .. }) => Some(input.clone()),
+            _ => None,
+        };
+        let estimates = plan_input
+            .as_ref()
+            .map(|i| crate::sql::explain::set_group_estimates(i, &self.groups, sets, ctx));
+        let mut order: Vec<(usize, Vec<usize>)> =
+            (0..sets.len()).filter(|&i| sets[i].is_empty()).map(|i| (i, Vec::new())).collect();
+        order.extend(hashed_sets_order(sets));
+        let red = self.redundant_keys(ctx);
+        let width = self.plan.as_ref().map_or(0.0, |p| super::pghash::agg_estimate(p, ctx).input_width);
+        let (num_trans, trans_space) = crate::sql::paths::parallel::agg_transitions(&self.aggs);
+        let hashed_sets: Vec<usize> = (0..sets.len()).filter(|&i| !sets[i].is_empty()).collect();
+        let sizing = |e: &[f64]| super::pghash::AggSizing {
+            input_width: width,
+            num_trans,
+            trans_space,
+            num_hashes: hashed_sets.len(),
+            total_groups: hashed_sets.iter().map(|&i| e[i]).sum(),
+        };
+        // One table a set, in `hashed_sets`' order.
+        struct Table {
+            si: usize,
+            set: Vec<usize>,
+            hset: Vec<usize>,
+            hashed: super::pghash::GroupOrder,
+            index: HashMap<Vec<Value>, usize>,
+            groups: Vec<(Vec<Value>, Vec<AggState>)>,
+        }
+        let mut tables: Vec<Table> = order
+            .into_iter()
+            .map(|(si, set)| {
+                let hset: Vec<usize> = set.iter().copied().filter(|&i| !red[i]).collect();
+                let types: Vec<T> = hset.iter().map(|&i| self.groups[i].ty()).collect();
+                Table { si, set, hset, hashed: super::pghash::GroupOrder::new(types, ctx), index: HashMap::default(), groups: Vec::new() }
+            })
+            .collect();
+        let mut add = |row: &Row| -> Result<()> {
+            let full = eval_all(&self.groups, row, ctx)?;
+            for t in tables.iter_mut() {
+                let key = self.set_key(&t.set, &full);
+                let hkey = group_key(&key, colls);
+                let gi = match t.index.get(&hkey) {
+                    Some(i) => *i,
+                    None => {
+                        let states = self.states(&key, ctx)?;
+                        t.groups.push((key, states));
+                        t.index.insert(hkey.clone(), t.groups.len() - 1);
+                        t.groups.len() - 1
+                    }
+                };
+                if !t.set.is_empty() {
+                    let hk: Vec<Value> = t.hset.iter().map(|&i| hkey[i].clone()).collect();
+                    t.hashed.row(&hk, gi);
+                }
+                for (a, st) in self.aggs.iter().zip(t.groups[gi].1.iter_mut()) {
+                    feed(a, st, row, ctx)?;
+                }
+            }
+            Ok(())
+        };
+        for r in rows {
+            add(&r)?;
+        }
+        while let Some(r) = input.next(ctx)? {
+            ctx.check()?;
+            add(&r)?;
+        }
+        let mut out = Vec::new();
+        for t in tables {
+            let Table { si, set, mut hashed, mut groups, .. } = t;
+            if groups.is_empty() && set.is_empty() {
+                let ng = self.groups.len();
+                let states = self.states(&vec![Value::Null; ng], ctx)?;
+                groups.push((vec![Value::Null; ng], states));
+            }
+            let idx: Vec<usize> = match &estimates {
+                Some(e) if !set.is_empty() && groups.len() > 1 => {
+                    hashed.order(sizing(e).nbuckets(e[si], super::pghash::hash_mem(ctx)))
+                }
+                _ => (0..groups.len()).collect(),
+            };
+            let mask = self.set_mask(&set);
+            let mut slots: Vec<Option<(Vec<Value>, Vec<AggState>)>> = groups.into_iter().map(Some).collect();
             for i in idx {
                 if let Some((key, states)) = slots[i].take() {
                     out.push(self.finish_group(key, states, mask, ctx)?);

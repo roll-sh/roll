@@ -715,3 +715,48 @@ fn distinct_aggregates() {
     eng.shutdown();
 }
 
+
+/// Grouping sets past work_mem: sorted ones as PostgreSQL's GroupAggregate runs them, a phase
+/// per rollup over its input sorted (the Sort below, then each phase's sort of the rows for the
+/// next: their files), hashed ones with every set's table fed as the input comes, no row kept.
+/// The rows, in their order, and the temporary files are PostgreSQL 18.6's.
+#[test]
+fn grouping_sets_spill() {
+    std::thread::Builder::new().stack_size(64 << 20).spawn(grouping_sets).unwrap().join().unwrap();
+}
+
+fn grouping_sets() {
+    let dir = tempfile::tempdir().unwrap();
+    let eng = open(dir.path());
+    let mut s = eng.connect(1, "postgres", "postgres", "postgres").unwrap();
+    for sql in [
+        "CREATE TABLE gs (id int, a int, s text)",
+        "INSERT INTO gs SELECT g, (g::int8 * 7919 % 20011)::int, md5(g::text) FROM generate_series(1, 20000) g",
+        "ANALYZE gs",
+    ] {
+        q(&mut s, sql).unwrap();
+    }
+    let two = "SELECT a % 1000, id % 7, count(*), max(s) FROM gs GROUP BY GROUPING SETS ((a % 1000), (id % 7))";
+    let mixed = "SELECT a % 100, count(*), sum(id) FROM gs GROUP BY GROUPING SETS ((a % 100), ())";
+    let md5 = |sql: &str| format!("SELECT md5(string_agg(x::text, ',')) FROM ({sql}) x");
+    // (The hashed sets' groups come in the order the in-memory path gives them, which isn't
+    // PostgreSQL's hash order: compared with that path's.)
+    q(&mut s, "SET work_mem = '256MB'").unwrap();
+    let hashed = one(&mut s, &md5(mixed));
+    for (work_mem, sql, want, files) in [
+        ("64kB", two, Value::Text("bc80177bd17f6bb7ea93189ef4399be4".into()), 2),
+        ("64kB", mixed, Value::Text("bea3a42c21c4f54f36253118f21ba1b0".into()), 1),
+        ("1MB", mixed, hashed, 0),
+    ] {
+        q(&mut s, &format!("SET work_mem = '{work_mem}'")).unwrap();
+        q(&mut s, "SELECT pg_stat_force_next_flush()").unwrap();
+        let f0 = int(&mut s, "SELECT temp_files FROM pg_stat_database WHERE datname = current_database()");
+        assert_eq!(one(&mut s, &md5(sql)), want, "{work_mem} {sql}");
+        assert_eq!(temp_files(dir.path()), 0);
+        q(&mut s, "SELECT pg_stat_force_next_flush()").unwrap();
+        let f1 = int(&mut s, "SELECT temp_files FROM pg_stat_database WHERE datname = current_database()");
+        assert_eq!(f1 - f0, files, "{work_mem} {sql}: temp files");
+    }
+    drop(s);
+    eng.shutdown();
+}
