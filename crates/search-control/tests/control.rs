@@ -2975,6 +2975,34 @@ async fn a_due_slm_run_wakes_its_sleeping_cluster() {
     }
 }
 
+/// OpenSearch's snapshot management policies on an OpenSearch-flavor cluster, through the
+/// cluster's API and the console route the dashboard's Snapshots tab uses: a policy is stored
+/// with its job and its deletion's schedule taken from its creation's, listed, explained (before
+/// its job's first run: its name alone), stopped and deleted. Its runs are tested tick by tick
+/// in search-es (`opensearch::sm`), where the job's minutes can be run by hand.
+#[tokio::test]
+async fn opensearch_snapshot_management_policies_are_served() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "smc", "flavor": "opensearch"})).await;
+    let (user, pw) = creds(&c);
+    let policy = json!({"creation": {"schedule": {"cron": {"expression": "30 1 * * *", "timezone": "UTC"}}}, "deletion": {"condition": {"max_count": 7}}, "snapshot_config": {"repository": "found-snapshots", "indices": "*"}});
+    let (s, v) = e.es(&user, &pw, Method::POST, "/_plugins/_sm/policies/nightly", Some(policy)).await;
+    let schedule = &v["sm_policy"]["deletion"]["schedule"]["cron"]["expression"];
+    assert_eq!((s, &v["_id"], schedule, &v["sm_policy"]["enabled"]), (201, &json!("nightly-sm-policy"), &json!("30 1 * * *"), &json!(true)), "{v}");
+    let console = |m: &str, p: &str| e.post("/v1/search/clusters/smc/request", json!({"method": m, "path": p, "body": null}));
+    let listed = body(&console("GET", "/_plugins/_sm/policies").await);
+    assert_eq!((&listed["total_policies"], &listed["policies"][0]["sm_policy"]["name"]), (&json!(1), &json!("nightly")), "{listed}");
+    let explained = body(&console("GET", "/_plugins/_sm/policies/*/_explain").await);
+    assert_eq!(explained["policies"], json!([{"name": "nightly", "enabled": true}]), "{explained}");
+    assert_eq!(body(&console("POST", "/_plugins/_sm/policies/nightly/_stop").await), json!({"acknowledged": true}));
+    let (_, v) = e.es(&user, &pw, Method::GET, "/_plugins/_sm/policies/nightly", None).await;
+    assert_eq!((&v["_version"], &v["sm_policy"]["enabled"], &v["sm_policy"]["enabled_time"]), (&json!(2), &json!(false), &Value::Null), "{v}");
+    assert_eq!(e.es(&user, &pw, Method::DELETE, "/_plugins/_sm/policies/nightly", None).await.0, 200);
+    let (s, v) = e.es(&user, &pw, Method::GET, "/_plugins/_sm/policies/nightly", None).await;
+    assert_eq!((s, &v["error"]["reason"]), (404, &json!("Snapshot management policy not found")), "{v}");
+}
+
 /// An S3-compatible bucket in memory (path-style requests): objects with ETags, `If-None-Match:
 /// *` and `If-Match` writes, ranged reads, `ListObjectsV2`, multipart uploads (listed by prefix),
 /// and the access key each request was signed with.
