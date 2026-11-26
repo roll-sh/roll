@@ -852,6 +852,10 @@ pub struct Control {
     /// Serializes changes of a cluster's description with applying it to the node, so the node
     /// never ends up with an older one than the catalog's.
     specs: tokio::sync::Mutex<()>,
+    /// Held across a password change, a store into roll secrets included (read, check, rotate,
+    /// write, re-read), so one can't land inside another and leave a secret holding a dead
+    /// password. Rare, so one for the node.
+    passwords: tokio::sync::Mutex<()>,
     /// Loaded clusters whose new settings need a reload (dialect, the
     /// `destructive_requires_name` default): unloaded once no request runs.
     reloads: Mutex<HashSet<String>>,
@@ -978,6 +982,7 @@ impl Control {
             wakes,
             suggest_locks: Mutex::new(HashMap::new()),
             specs: tokio::sync::Mutex::new(()),
+            passwords: tokio::sync::Mutex::new(()),
             reloads: Mutex::new(HashSet::new()),
             reloader: AtomicBool::new(false),
             me: OnceLock::new(),
@@ -1539,6 +1544,7 @@ impl Control {
     /// A new password. Requests with the old one fail from now on, loaded, waking or not (on a
     /// fleet this runs on the cluster's owner).
     pub async fn rotate_password(&self, id: &str) -> Result<SearchCluster> {
+        let _p = self.passwords.lock().await;
         self.rotate_password_to(id, None, random_string(32)).await
     }
 
@@ -1574,6 +1580,7 @@ impl Control {
             crate::secret_refs::Refused::Invalid(m) => ControlError::Invalid(m),
             crate::secret_refs::Refused::Conflict(m) => ControlError::Conflict(m),
         };
+        let _p = self.passwords.lock().await;
         let c = self.get(id).await?;
         if c.parent_id.is_some() {
             return Err(ControlError::Invalid(format!("{} is a branch: its password isn't kept in roll secrets (keep its parent's)", c.name)));
