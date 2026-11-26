@@ -3929,6 +3929,91 @@ async fn a_wildcard_key_reaches_no_watch_history() {
     assert!(v["hits"]["hits"][0]["_source"].get("leaked").is_none(), "{v}");
 }
 
+/// Names are authorized as the request resolves them. An alias's index comes from wherever
+/// the request names it (the body's `index` too), and an alias can't reach more than its index
+/// grants; date math (`<.async-search>`) and `::failures` are resolved before the check; a
+/// clone's target is authorized as its source is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn names_are_authorized_as_resolved() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "rn"})).await;
+    let (u, p) = creds(&c);
+    for (m, path, body) in [
+        (Method::PUT, "/mine/_doc/1?refresh=true", json!({"t": "mine"})),
+        (Method::PUT, "/secret/_doc/1?refresh=true", json!({"t": "top secret"})),
+        (Method::PUT, "/other/_doc/1?refresh=true", json!({"t": "other"})),
+        (Method::PUT, "/_index_template/logs", json!({"index_patterns": ["logs-*"], "data_stream": {}, "template": {"data_stream_options": {"failure_store": {"enabled": true}}}})),
+        (Method::PUT, "/_data_stream/logs-a", Value::Null),
+        (Method::POST, "/mine/_async_search?keep_on_completion=true&wait_for_completion_timeout=0", json!({})),
+        (Method::PUT, "/_security/role/limited", json!({"indices": [{"names": ["mine*", "secret"], "privileges": ["manage"]}, {"names": ["mine*"], "privileges": ["read"]}]})),
+        (Method::PUT, "/_security/user/lim", json!({"password": "lim-pass-1", "roles": ["limited"]})),
+        (Method::PUT, "/_security/role/reader", json!({"indices": [{"names": ["*"], "privileges": ["read"]}]})),
+        (Method::PUT, "/_security/user/rd", json!({"password": "rd-pass-1", "roles": ["reader"]})),
+        (Method::PUT, "/mine/_settings", json!({"index.blocks.write": true})),
+    ] {
+        let (s, v) = e.es(&u, &p, m, path, Some(body).filter(|b| !b.is_null())).await;
+        assert!(s < 300, "{path}: {v}");
+    }
+    let lim = |m: Method, path: &str, body: Option<Value>| {
+        let e = &e;
+        let path = path.to_string();
+        async move { e.es("lim@rn", "lim-pass-1", m, &path, body).await }
+    };
+    let rd = |path: &str| {
+        let e = &e;
+        let path = path.to_string();
+        async move { e.es("rd@rn", "rd-pass-1", Method::GET, &path, None).await }
+    };
+    // The body's index is the alias's: `secret` would read through `mine-x`'s grants.
+    let (s, v) = lim(Method::PUT, "/mine/_alias/mine-x", Some(json!({"index": "secret"}))).await;
+    assert!(s == 403 && v.to_string().contains("more permissions than any of the indices"), "{s} {v}");
+    let (s, v) = lim(Method::PUT, "/mine/_alias/mine-y", Some(json!({"index": "other"}))).await;
+    assert!(s == 403 && v.to_string().contains("indices:admin/aliases"), "{s} {v}");
+    assert_eq!(lim(Method::GET, "/mine-x/_search", None).await.0, 404, "no alias was made");
+    let (s, v) = lim(Method::PUT, "/mine/_alias/mine-ok", None).await;
+    assert_eq!(s, 200, "an alias that gives no more than its index: {v}");
+    // `_aliases` is authorized per action, never on every index: a user limited to `mine*` may.
+    let (s, v) = lim(Method::POST, "/_aliases", Some(json!({"actions": [{"add": {"index": "mine", "alias": "mine-x"}}]}))).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = lim(Method::POST, "/_aliases", Some(json!({"actions": [{"add": {"index": "other", "alias": "mine-z"}}]}))).await;
+    assert!(s == 403 && !v.to_string().contains("secret"), "the action's own indices only: {s} {v}");
+    // Date math and selectors are resolved before the check.
+    assert_eq!(e.es(&u, &p, Method::GET, "/.async-search/_count", None).await.0, 200, "the premise: kept async results");
+    for path in ["/%3C.async-search%3E/_search", "/.async-search/_search", "/logs-a::failures/_search"] {
+        let (s, v) = rd(path).await;
+        assert_eq!(s, 403, "{path}: {v}");
+    }
+    // A clone's target is authorized too.
+    let (s, v) = lim(Method::POST, "/mine/_clone/other-copy", None).await;
+    assert!(s == 403 && v.to_string().contains("indices:admin/resize"), "{s} {v}");
+    let (s, v) = lim(Method::POST, "/mine/_clone/mine-copy", None).await;
+    assert_eq!(s, 200, "{v}");
+}
+
+/// The same alias attack on OpenSearch: the body's index is authorized, and an alias can't
+/// reach more than its index grants.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_opensearch_alias_reaches_no_more_than_its_index() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "rno", "flavor": "opensearch"})).await;
+    let (u, p) = creds(&c);
+    let api = "/_plugins/_security/api";
+    for (m, path, body) in [
+        (Method::PUT, "/mine/_doc/1?refresh=true".to_string(), json!({"t": "mine"})),
+        (Method::PUT, "/secret/_doc/1?refresh=true".to_string(), json!({"t": "top secret"})),
+        (Method::PUT, format!("{api}/roles/limited"), json!({"index_permissions": [{"index_patterns": ["mine*", "secret"], "allowed_actions": ["manage_aliases"]}, {"index_patterns": ["mine*"], "allowed_actions": ["read"]}]})),
+        (Method::PUT, format!("{api}/internalusers/lim"), json!({"password": "Zq7-unrelated-Pw!93", "opendistro_security_roles": ["limited"]})),
+    ] {
+        let (s, v) = e.es(&u, &p, m, &path, Some(body)).await;
+        assert!(s < 300, "{path}: {v}");
+    }
+    let (s, v) = e.es("lim@rno", "Zq7-unrelated-Pw!93", Method::PUT, "/mine/_alias/mine-x", Some(json!({"index": "secret"}))).await;
+    assert_eq!(s, 403, "{v}");
+    assert_eq!(e.es("lim@rno", "Zq7-unrelated-Pw!93", Method::GET, "/mine-x/_search", None).await.0, 404, "no alias was made");
+}
+
 #[path = "control/cloud_repositories.rs"]
 mod cloud_repositories;
 

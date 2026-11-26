@@ -497,9 +497,27 @@ pub struct Effective {
     /// Aliases over watch records (`.watcher-history-*`), with those indices: a grant of the
     /// alias reaches them only when one reaches the indices too ([`privileges::grant_names`]).
     pub history_aliases: std::collections::HashMap<String, Vec<String>>,
+    /// Failure store indices by their data streams: reached only with the failure store's own
+    /// privileges ([`Effective::allows_index`]).
+    pub failure_parents: std::collections::HashMap<String, String>,
 }
 
 impl Effective {
+    /// Whether the failure store privilege `action` needs (`read_failure_store` for a read,
+    /// `manage_failure_store` otherwise) is granted on `name` by name (or `all`): `read`'s
+    /// actions would cover the failure store's, but Elasticsearch keeps it a component of its own.
+    fn failure_store(&self, action: &str, name: &str) -> bool {
+        let privilege = if action.starts_with("indices:data/read") { "read_failure_store" } else { "manage_failure_store" };
+        self.allows(|p| p.indices.iter().any(|g| privileges::grant_names(g, name) && g.privileges.iter().any(|x| x == privilege || x == "all")))
+    }
+
+    /// Whether every index privilege `wider` holds is held on `narrower` too: an alias or a
+    /// resize target can't give more than the index it's made from (Elasticsearch's
+    /// `validateIndexPermissionsAreSubset`).
+    pub fn no_wider(&self, wider: &str, narrower: &str) -> bool {
+        privileges::INDEX_PRIVILEGES.iter().all(|p| !self.has_index_privilege(p, wider) || self.has_index_privilege(p, narrower))
+    }
+
     fn allows(&self, f: impl Fn(&Permission) -> bool) -> bool {
         let own = self.own.iter().any(&f);
         let limited = match &self.limited_by {
@@ -514,6 +532,16 @@ impl Effective {
     }
 
     pub fn allows_index(&self, action: &str, index: &str) -> bool {
+        // A data stream's failure store (`logs::failures`, or one of its `.fs-` indices) by the
+        // failure store privileges alone, as Elasticsearch authorizes it: `read` on the data
+        // stream doesn't reach it.
+        if let Some(stream) = index.strip_suffix("::failures") {
+            return self.failure_store(action, stream);
+        }
+        let index = index.strip_suffix("::data").unwrap_or(index);
+        if let Some(stream) = self.failure_parents.get(index) {
+            return self.failure_store(action, stream) || self.failure_store(action, index);
+        }
         let restricted = privileges::is_restricted(index);
         let parent = self.parents.get(index);
         // Through an alias over watch records: the records themselves too.
@@ -668,7 +696,8 @@ pub fn effective(file: &FileRoles, st: &crate::meta::ClusterState, p: &Principal
             history_aliases.entry(alias.clone()).or_default().push(name.clone());
         }
     }
-    Effective { own, limited_by, also, parents, history_aliases }
+    let failure_parents = st.metadata.data_streams.values().flat_map(|d| d.failure_indices.iter().map(|i| (i.clone(), d.name.clone()))).collect();
+    Effective { own, limited_by, also, parents, history_aliases, failure_parents }
 }
 
 /// Read APIs whose wildcard index expressions Elasticsearch expands to the indices the user
@@ -825,7 +854,7 @@ pub fn check_lookups(ctx: &Ctx, rendered: Option<&Value>) -> EsResult<()> {
         return Ok(());
     }
     let eff = effective(&file_roles(ctx.cluster), &ctx.state(), p);
-    let denied_lookups: Vec<(&'static str, String)> = reads.into_iter().filter(|(a, i)| !eff.allows_index(a, i)).collect();
+    let denied_lookups: Vec<(&'static str, String)> = reads.into_iter().map(|(a, i)| (a, authz_name(&i, ctx.now_ms))).filter(|(a, i)| !eff.allows_index(a, i)).collect();
     if let Some((a, _)) = denied_lookups.first() {
         let on: Vec<String> = denied_lookups.iter().filter(|(x, _)| x == a).map(|(_, i)| i.clone()).collect();
         return Err(denied(p, a, Some(&on)));
@@ -985,8 +1014,11 @@ pub fn check_refresh(ctx: &Ctx, written: Option<&[String]>) -> EsResult<()> {
 /// APIs Elasticsearch authorizes by action name only (`RBACEngine.shouldAuthorizeIndexActionNameOnly`):
 /// the request when any role grants its action on some index, its items one by one. A
 /// reindex's items are its source's search and each write to its destination
-/// (`by_query::reindex`), both as the caller.
-const COMPOSITE: &[&str] = &["bulk", "mget", "mtermvectors", "msearch", "msearch_template", "reindex"];
+/// (`by_query::reindex`), both as the caller. `_aliases`'s items are its actions, each
+/// authorized on the indices it resolves to and its alias names (`aliases::authorize`): its
+/// path names no index, and asking for the action on every index would refuse a user limited to
+/// some, naming the others.
+const COMPOSITE: &[&str] = &["bulk", "mget", "mtermvectors", "msearch", "msearch_template", "reindex", "indices.update_aliases"];
 
 /// What a bulk item (or a single document request) writes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1296,7 +1328,7 @@ fn check_all(ctx: &Ctx, p: &Principal, eff: &Effective, action: &str, exprs: Vec
             list.extend(exprs.iter().filter(|x| x.starts_with('-')).cloned());
             names.extend(crate::meta::resolve::resolve(&st, &list, opts, ctx.now_ms).unwrap_or_default());
         } else {
-            names.push(e.clone());
+            names.push(authz_name(e, ctx.now_ms));
         }
     }
     // OpenSearch's 403 names no index (its audit entry does).
@@ -1377,7 +1409,7 @@ fn narrow_exprs(
     };
     let wildcard = |e: &str| e.contains('*') || e == "_all";
     if !exprs.is_empty() && !exprs.iter().any(|e| wildcard(e)) {
-        let mut names: Vec<String> = exprs.iter().map(|e| e.trim_start_matches('-').to_string()).collect();
+        let mut names: Vec<String> = exprs.iter().map(|e| authz_name(e, ctx.now_ms)).collect();
         names.sort();
         names.dedup();
         let denied_on: Vec<String> = names.into_iter().filter(|i| !eff.allows_index(action, i)).collect();
@@ -1406,16 +1438,91 @@ fn narrow_exprs(
                     out.push(n);
                 }
             }
-        } else if eff.allows_index(action, e) {
+        } else if eff.allows_index(action, &authz_name(e, ctx.now_ms)) {
             out.push(e.clone());
         } else if !ignore_unavailable {
-            denied_on.push(e.clone());
+            denied_on.push(authz_name(e, ctx.now_ms));
         }
     }
     if !denied_on.is_empty() {
         return Err(denied(p, action, Some(&denied_on)));
     }
     Ok(Some(with_linked(if out.is_empty() { vec!["-*".to_string()] } else { out })))
+}
+
+/// An index name as authorization checks it: what the request resolves it to, never the text
+/// as written (`resolve::resolve`'s order): its date math resolved (`<.async-search>` is
+/// `.async-search`, restricted), its `-` dropped, and a `::failures` selector kept for
+/// [`Effective::allows_index`], which reaches the failure store only with its privileges. Text
+/// that doesn't parse is checked as it is: the request fails on it the same way later.
+pub fn authz_name(expr: &str, now_ms: i64) -> String {
+    use crate::meta::resolve::{Selector, resolve_date_math, split_selector};
+    let Ok((base, selector)) = split_selector(expr) else { return expr.to_string() };
+    let name = resolve_date_math(base, now_ms).unwrap_or_else(|_| base.to_string());
+    let name = name.trim_start_matches('-');
+    match selector {
+        Selector::Failures => format!("{name}::failures"),
+        Selector::Data => name.to_string(),
+    }
+}
+
+/// An alias action on what it resolved to (`indices` concrete or data streams, `aliases` with
+/// their date math resolved), as Elasticsearch authorizes `_aliases` and `PUT _alias`:
+/// `indices:admin/aliases` on the indices and on the alias names, so a body's `index` can't
+/// point an alias at an index the request's path never named. Adding one is refused, as
+/// `IndicesAliasesRequestInterceptor` refuses it, when document or field level security
+/// applies to one of the indices for the caller, or when the alias would give more than the
+/// index it points at (`manage` on an index without `read` mustn't read it through an alias
+/// that `read` reaches).
+pub fn check_alias_action(ctx: &Ctx, adding: bool, indices: &[String], aliases: &[String]) -> EsResult<()> {
+    let Some(p) = ctx.principal.get().filter(|p| !p.is_superuser()) else { return Ok(()) };
+    const ACTION: &str = "indices:admin/aliases";
+    let eff = effective(&file_roles(ctx.cluster), &ctx.state(), p);
+    let denied_on: Vec<String> = indices.iter().chain(aliases).filter(|n| !eff.allows_index(ACTION, n)).cloned().collect();
+    if !denied_on.is_empty() {
+        return Err(denied(p, ACTION, Some(&denied_on)));
+    }
+    if !adding {
+        return Ok(());
+    }
+    if let Some(r) = dls::ReadSecurity::of(ctx)
+        && indices.iter().any(|i| r.restricts("indices:data/read/search", i))
+    {
+        return Err(EsError::security(403, "Alias requests are not allowed for users who have field or document level security enabled on one of the indices"));
+    }
+    if indices.iter().any(|i| aliases.iter().any(|a| !eff.no_wider(a, i))) {
+        return Err(EsError::security(403, "Adding an alias is not allowed when the alias has more permissions than any of the indices"));
+    }
+    Ok(())
+}
+
+/// Removing indices through `_aliases` (`remove_index`): `indices:admin/delete` on each.
+pub fn check_alias_index_removal(ctx: &Ctx, indices: &[String]) -> EsResult<()> {
+    let Some(p) = ctx.principal.get().filter(|p| !p.is_superuser()) else { return Ok(()) };
+    const ACTION: &str = "indices:admin/delete";
+    let eff = effective(&file_roles(ctx.cluster), &ctx.state(), p);
+    let denied_on: Vec<String> = indices.iter().filter(|n| !eff.allows_index(ACTION, n)).cloned().collect();
+    if denied_on.is_empty() { Ok(()) } else { Err(denied(p, ACTION, Some(&denied_on))) }
+}
+
+/// A resize (`_shrink`, `_split`, `_clone`) from `source` into `target`: `indices:admin/resize`
+/// on the target too, and, as `ResizeRequestInterceptor` does, no resize from a source under
+/// document or field level security for the caller, nor into a target the caller holds more on
+/// than the source (the copy would read what the source hides).
+pub fn check_resize(ctx: &Ctx, source: &str, target: &str) -> EsResult<()> {
+    let Some(p) = ctx.principal.get().filter(|p| !p.is_superuser()) else { return Ok(()) };
+    const ACTION: &str = "indices:admin/resize";
+    let eff = effective(&file_roles(ctx.cluster), &ctx.state(), p);
+    if !eff.allows_index(ACTION, target) {
+        return Err(denied(p, ACTION, Some(&[target.to_string()])));
+    }
+    if dls::ReadSecurity::of(ctx).is_some_and(|r| r.restricts("indices:data/read/search", source)) {
+        return Err(EsError::security(403, "Resize requests are not allowed for users when field or document level security is enabled on the source index"));
+    }
+    if !eff.no_wider(target, source) {
+        return Err(EsError::security(403, "Resizing an index is not allowed when the target index has more permissions than the source index"));
+    }
+    Ok(())
 }
 
 /// The `indices:admin/aliases` check of an alias the request creates on `indices` for its
@@ -1564,7 +1671,7 @@ fn request_indices(ctx: &Ctx) -> Vec<String> {
                 out.extend(names);
             }
         } else {
-            out.push(e.trim_start_matches('-').to_string());
+            out.push(authz_name(&e, ctx.now_ms));
         }
     }
     out.sort();

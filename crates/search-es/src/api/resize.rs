@@ -286,6 +286,7 @@ pub async fn handle(ctx: &Ctx<'_>, kind: ResizeType) -> EsResult<Reply> {
     let now = ctx.now_ms;
     let source = resolve_date_math(ctx.path_param("index").unwrap_or_default(), now)?;
     let target = resolve_date_math(ctx.path_param("target").unwrap_or_default(), now)?;
+    crate::xpack::security::check_resize(ctx, &source, &target)?;
     let t = target.clone();
     let src_name = source.clone();
     ctx.cluster.update(move |st| resize(st, kind, &source, &t, req, now)).await?;
@@ -304,6 +305,7 @@ async fn handle_opensearch(ctx: &Ctx<'_>, kind: ResizeType, req: ResizeRequest) 
     let now = ctx.now_ms;
     let source = resolve_date_math(ctx.path_param("index").unwrap_or_default(), now)?;
     let target = resolve_date_math(ctx.path_param("target").unwrap_or_default(), now)?;
+    crate::xpack::security::check_resize(ctx, &source, &target)?;
     let mut errors = Vec::new();
     if req.settings.keys().any(|k| k.starts_with("index.sort.")) {
         errors.push("can't override index sort when resizing an index".to_string());
