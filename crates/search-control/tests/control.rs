@@ -7026,6 +7026,8 @@ async fn enrich_connectors_and_show_tables_take_the_callers_privileges() {
     assert!(v.to_string().contains("resolve_policy") && !v.to_string().contains("s-of-b"), "{v}");
     let (s, v) = e.es(user, "u-password-1", Method::PUT, "/_connector/c1/_index_name", Some(json!({"index_name": "content-b"}))).await;
     assert_eq!(s, 403, "aimed at another index: {v}");
+    let (s, v) = e.es(user, "u-password-1", Method::PUT, "/_connector/c1", Some(json!({"index_name": "content-b", "is_native": false}))).await;
+    assert_eq!(s, 403, "put again, aimed at another index: {v}");
     let (_, v) = e.es(&owner, &pw, Method::GET, "/_connector/c1", None).await;
     assert_eq!(v["index_name"], "content-a", "{v}");
     let (s, v) = e.es(user, "u-password-1", Method::POST, "/_sql?format=json", Some(json!({"query": "SHOW TABLES"}))).await;
