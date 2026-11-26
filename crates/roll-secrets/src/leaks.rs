@@ -38,6 +38,9 @@ const RETRY_MS: i64 = 3_600_000;
 const CAP_MS: i64 = 3_600_000;
 /// Why a leak didn't rotate a key it otherwise would have (the event's `reason`).
 const CAPPED: &str = "rotated within the hour";
+/// Why a leak didn't rotate a public certificate's key: its registration was renewed for a leak
+/// this week, and the renewal cap holds another (the event's `reason`).
+const ALREADY_ROTATED: &str = "already rotated";
 /// Who rotates a leaked managed key (the project's `leaks.rotate`, an admin's choice).
 pub(crate) const LEAKS: &str = "roll:leaks";
 
@@ -204,6 +207,17 @@ fn strong(c: &str) -> bool {
     bits >= 3.0
 }
 
+/// One more call by `who` in `minute`, of `n` candidates: (calls, candidates) in that minute so far.
+/// The one counter `/scan` (by principal) and a backup verify (`backup.verify:<principal>`) share;
+/// inside a write, as each caller's read-then-write is one.
+fn bump(c: &code_sql::Conn<'_>, who: &str, minute: i64, n: i64) -> Result<(i64, i64)> {
+    Ok(c.query_row(
+        "INSERT INTO scan_counts (principal, minute, calls, candidates) VALUES (?, ?, 1, ?) ON CONFLICT (principal, minute) DO UPDATE SET calls = scan_counts.calls + 1, candidates = scan_counts.candidates + excluded.candidates RETURNING calls, candidates",
+        params![who, minute, n],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?)
+}
+
 /// A scanner's calls per caller and minute (`POST …/scan`'s limit).
 pub(crate) const SCAN_COUNTS_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS scan_counts (
@@ -220,6 +234,23 @@ CREATE TABLE IF NOT EXISTS scan_project_counts (
     PRIMARY KEY (project_id, minute)
 ) WITHOUT ROWID;
 ";
+
+/// A scanner of one project and nothing else: roll code's GitHub App for a push to a repo on the
+/// project's canvas ([`Secrets::scan_pushed`]).
+#[derive(Debug)]
+struct ScanOnly(String);
+
+impl crate::access::Grants for ScanOnly {
+    fn allows(&self, action: Action, at: &Scope<'_>) -> bool {
+        action == Action::Scan && at.project == self.0
+    }
+    fn project(&self) -> Option<&str> {
+        Some(&self.0)
+    }
+    fn sees(&self, project: &str) -> bool {
+        project == self.0
+    }
+}
 
 /// What a pre-receive hook says about the push it checks (`POST …/scan`): who pushed (as the git
 /// server tells the hook: `GITHUB_USER_LOGIN`, `GL_USERNAME`…) and to which refs. Text for the
@@ -337,6 +368,40 @@ impl Secrets {
     /// anyway, audited as `secrets.scan.breakglass`, and only when the project's `breakglass`
     /// list allows the hook's token or the pusher ([`Secrets::breakglass`]): 403 otherwise.
     pub fn scan_only(&self, project: &str, candidates: &[String], caller: &Caller, push: &Push) -> Result<Vec<ScanFound>> {
+        Ok(self
+            .scanned(project, candidates, caller, push)?
+            .into_iter()
+            .map(|m| {
+                let named = caller.allows(Action::Read, &Scope::at(project, &m.leak.environment, &m.leak.path));
+                ScanFound { index: m.index, key: named.then(|| m.leak.key.clone()), path: named.then(|| m.leak.path.clone()), environment: m.leak.environment }
+            })
+            .collect())
+    }
+
+    /// A push to GitHub repository `repo` (roll code's repo `owner/name`, on `project`'s canvas,
+    /// which roll secrets trusts for it), checked by roll code's GitHub App (docs/secrets.md, "On
+    /// GitHub.com: roll code's GitHub App"): the App's installation is a scanner of `project`
+    /// (`principal`, `github:<installation>:<repo>`), with the `scan` right and nothing else, so
+    /// it's [`Secrets::scan_only`]'s check (whole candidates, its floor, its limits, its audit),
+    /// never a sensitive or a personal value. What it finds already left: a leak in code, as a
+    /// change's is ([`Secrets::leaks_in_code`]), with its `secret.leaked` and `leaks.rotate`. Each
+    /// match names its key, as a `secret_leak` blocker does: the pusher holds the value.
+    pub fn scan_pushed(&self, project: &str, repo: &str, principal: &str, candidates: &[String], push: &Push) -> Result<Vec<(usize, Leak, bool)>> {
+        let caller = Caller::acting(principal.to_string(), std::sync::Arc::new(ScanOnly(project.to_string())));
+        let found = self.scanned(project, candidates, &caller, push)?;
+        let settings = self.respond(&found, &Whence::Code { repo: repo.to_string(), project: project.to_string() });
+        Ok(found
+            .into_iter()
+            .map(|m| {
+                let offer = m.credential.is_some() && settings.get(&m.project) == Some(&LeakRotate::Off);
+                (m.index, m.leak, offer)
+            })
+            .collect())
+    }
+
+    /// [`Secrets::scan_only`]'s check, audited: the candidates that are values the caller may
+    /// `scan`, with where they are.
+    fn scanned(&self, project: &str, candidates: &[String], caller: &Caller, push: &Push) -> Result<Vec<Match>> {
         caller.need(Action::Scan, &Scope::project(project))?;
         if candidates.len() > SCAN_MAX {
             return Err(Error::BadRequest(format!("at most {SCAN_MAX} candidates a scan")));
@@ -352,11 +417,7 @@ impl Secrets {
         if caller.principal != "operator" {
             let minute = self.db.now_ms()? / 60_000;
             let (calls, mine, project_minute, project_hour): (i64, i64, i64, i64) = self.db.write(|c| {
-                let (calls, mine) = c.query_row(
-                    "INSERT INTO scan_counts (principal, minute, calls, candidates) VALUES (?, ?, 1, ?) ON CONFLICT (principal, minute) DO UPDATE SET calls = scan_counts.calls + 1, candidates = scan_counts.candidates + excluded.candidates RETURNING calls, candidates",
-                    params![caller.principal, minute, n],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )?;
+                let (calls, mine) = bump(c, &caller.principal, minute, n)?;
                 let at = c.query_row(
                     "INSERT INTO scan_project_counts (project_id, minute, candidates) VALUES (?, ?, ?) ON CONFLICT (project_id, minute) DO UPDATE SET candidates = scan_project_counts.candidates + excluded.candidates RETURNING candidates",
                     params![project, minute, n],
@@ -381,11 +442,10 @@ impl Secrets {
             self.audit_now(project, caller, action, None, None, &[], &format!("refused break glass{said}: the project's breakglass list doesn't name this token or pusher"));
             return Err(Error::Forbidden(format!("break glass isn't allowed{said} in this project: an admin names who may with `roll secrets breakglass`")));
         }
-        let found: Vec<Found> = self
+        let found: Vec<Match> = self
             .matches(project, &tried, Some(&caller.principal), false)?
             .into_iter()
             .filter(|m| !m.leak.environment.contains('/') && caller.allows(Action::Scan, &Scope::at(project, &m.leak.environment, &m.leak.path)))
-            .map(|m| Found { index: m.index, leak: m.leak })
             .collect();
         let summary = format!("scanned {} candidates ({n} tried){said}: {} matched{}", candidates.len(), found.len(), if push.breakglass { ", let through with breakglass" } else { "" });
         if found.is_empty() {
@@ -400,13 +460,7 @@ impl Secrets {
             let event = Event::new(Kind::ScanFinding, json!({ "candidates": candidates.len(), "matched": found.len(), "guard": false, "breakglass": push.breakglass, "pusher": push.pusher }));
             self.audit_now_event(project, caller, action, Some(env), Some(path), &keys, &summary, Some(event));
         }
-        Ok(found
-            .into_iter()
-            .map(|f| {
-                let named = caller.allows(Action::Read, &Scope::at(project, &f.leak.environment, &f.leak.path));
-                ScanFound { index: f.index, key: named.then(|| f.leak.key.clone()), path: named.then(|| f.leak.path.clone()), environment: f.leak.environment }
-            })
-            .collect())
+        Ok(found)
     }
 
     /// Who may push past `project`'s pre-receive hooks (`git push -o breakglass`): pushers' logins
@@ -437,6 +491,14 @@ impl Secrets {
             crate::audit::record(c, self.keys()?, project, caller, "scan.breakglass", None, None, &[], &summary, now)
         })?;
         Ok(who)
+    }
+
+    /// One more call by `who` this minute, outside a scan (a backup verify counts as
+    /// `backup.verify:<principal>`): (calls, candidates) so far this minute, in `scan_counts` as
+    /// [`bump`] keeps it for `/scan`.
+    pub(crate) fn count_calls(&self, who: &str, n: i64) -> Result<(i64, i64)> {
+        let minute = self.db.now_ms()? / 60_000;
+        self.db.write(|c| bump(c, who, minute, n))
     }
 
     /// Minutes of scan counts that have passed (the sweeper): a caller's last minute, a project's
@@ -512,7 +574,8 @@ impl Secrets {
     /// leaked credential claimed in the same write, then rotated outside it, or, where the
     /// environment or folder needs approvals, a change request for its rotation opened instead.
     /// A caller's report claims only in folders where it may write, and no key whose credential
-    /// rotated for a leak within the hour is claimed again (the event says so instead).
+    /// rotated for a leak within the hour is claimed again, nor a public certificate's key whose
+    /// renewal the cap holds (`already rotated`: nothing revoked; the event says so instead).
     /// The holding projects' settings, as read.
     fn respond(&self, found: &[Match], whence: &Whence) -> HashMap<String, LeakRotate> {
         let mut settings: HashMap<String, LeakRotate> = HashMap::new();
@@ -568,12 +631,17 @@ impl Secrets {
                 let mut now_rotating: Vec<(String, String, String)> = vec![];
                 let mut requested: Vec<String> = vec![];
                 let mut capped: Vec<String> = vec![];
+                let mut held: Vec<String> = vec![];
                 if setting == LeakRotate::Managed && may_rotate && !creds.is_empty() {
                     let e = envs::by_slug(c, holder, env)?;
                     let approvals = e.needs_request() || !crate::folder_policy::covering(c, &e.id, &[path])?.is_empty();
                     for (&cred, &key) in &creds {
                         if rotated_lately(c, &e.id, cred, path, key, now)? {
                             capped.push(key.to_string());
+                            continue;
+                        }
+                        if let Some((name, next)) = crate::public_certs::leak_renewal_held(c, &e.id, path, key, now)? {
+                            held.push(format!("{key}: {}", crate::public_certs::leak_held_why(&name, next)));
                             continue;
                         }
                         if !claim(c, holder, &e.id, cred, path, key, now)? {
@@ -617,9 +685,18 @@ impl Secrets {
                     data["reason"] = json!(CAPPED);
                     summary = format!("{summary}; {} {CAPPED}, so roll doesn't rotate it again yet", capped.join(", "));
                 }
+                if !held.is_empty() {
+                    if now_rotating.is_empty() {
+                        data["rotating"] = json!(false);
+                    }
+                    if capped.is_empty() {
+                        data["reason"] = json!(ALREADY_ROTATED);
+                    }
+                    summary = format!("{summary}; {ALREADY_ROTATED}: {}", held.join("; "));
+                }
                 // The event once a day; a claim (above) whenever there's a credential to rotate,
                 // and a held one each time (whoever keeps reporting it hears why).
-                if crate::events::fresh(c, holder, &mark, now)? || !now_rotating.is_empty() || !requested.is_empty() || !capped.is_empty() {
+                if crate::events::fresh(c, holder, &mark, now)? || !now_rotating.is_empty() || !requested.is_empty() || !capped.is_empty() || !held.is_empty() {
                     crate::audit::record_event(c, mac, holder, &by, "secrets.leaked", Some(env), Some(path), &keys, &summary, now, Event::new(Kind::SecretLeaked, data))?;
                 }
                 Ok::<_, Error>(now_rotating)

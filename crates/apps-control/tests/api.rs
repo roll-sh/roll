@@ -3220,11 +3220,26 @@ async fn a_status_page_shows_the_projects_checks() {
     let (st, html) = get("/").await;
     assert!(st == StatusCode::OK && html.contains("Acme status") && html.contains("web · home") && html.contains("Everything is up"), "{html}");
     assert!(!html.contains("secret-health") && !j.to_string().contains("secret-health"), "names only, never a path");
+    // On a domain of its own once its DNS checks out; no service can take that name, and it
+    // goes with the page.
+    let own = format!("{page}/domain");
+    let (st, d) = call(&w.api, "POST", &own, Some(json!({"hostname": "status.acme.dev"}))).await;
+    assert_eq!((st, d["status"].as_str()), (StatusCode::CREATED, Some("pending")), "{d}");
+    let at = |path: &'static str| {
+        let public = w.public.clone();
+        async move { public.oneshot(Request::builder().uri(path).header("host", "status.acme.dev").body(Body::empty()).unwrap()).await.unwrap().status() }
+    };
+    assert_eq!(at("/status.json").await, StatusCode::NOT_FOUND, "not before it's verified");
+    w.dns.add("_roll-challenge.status.acme.dev", "TXT", d["token"].as_str().unwrap());
+    assert_eq!(call(&w.api, "POST", &format!("{own}/verify"), None).await.1["status"], "active");
+    assert_eq!(at("/status.json").await, StatusCode::OK);
+    assert_eq!(call(&w.api, "POST", &format!("{env}/domains"), Some(json!({"hostname": "status.acme.dev"}))).await.0, StatusCode::CONFLICT);
     // Kept by its address when changed; gone when deleted.
     let (_, p2) = call(&w.api, "PUT", &page, Some(json!({"title": "Acme"}))).await;
     assert_eq!(p2["url"], p["url"]);
     assert_eq!(call(&w.api, "DELETE", &page, None).await.0, StatusCode::NO_CONTENT);
     assert_eq!(get("/status.json").await.0, StatusCode::NOT_FOUND);
+    assert_eq!((at("/status.json").await, call(&w.api, "GET", &own, None).await.0), (StatusCode::NOT_FOUND, StatusCode::NOT_FOUND));
 }
 
 /// Traffic mirroring (Envoy's): a copy of a share of bodiless requests goes to another

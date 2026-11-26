@@ -505,30 +505,36 @@ pub fn resolve_targets(cluster: &Cluster, st: &ClusterState, req: &SearchRequest
             let b = crate::query::compound::Bool { should: filters, ..Default::default() };
             Some(crate::query::Query::from(b))
         };
-        // Document level security filters what the principal reads, as an alias filter does,
-        // but kept apart: the request's runtime fields don't apply to it.
-        let security = match &req.security {
-            Some(sec) => sec.documents(cluster, crate::xpack::security::dls::READ, &idx.name)?,
-            None => None,
-        };
-        // `DlsFlsRequestValidator`: suggesters read the terms of every document, and a profile
-        // shows the restriction's query, so neither runs where documents are restricted.
-        if security.is_some() {
-            let mut errors = Vec::new();
-            if req.source.suggest.is_some() {
-                errors.push("Suggest isn't supported if document level security is enabled".to_string());
-            }
-            if req.source.profile {
-                errors.push("A search request cannot be profiled if document level security is enabled".to_string());
-            }
-            if !errors.is_empty() {
-                return Err(EsError::action_request_validation(&errors));
-            }
-        }
+        let security = reader_documents(cluster, req, &idx.name)?;
         out.push((idx, query::DocFilter { alias, security }, routing));
     }
     out.sort_by(|a, b| a.0.name.cmp(&b.0.name));
     Ok(out)
+}
+
+/// The documents of `index` `req`'s reader may read ([`SearchRequest::security`], the caller's
+/// current rights): document level security filters what the principal reads, as an alias
+/// filter does, but kept apart, since the request's runtime fields don't apply to it.
+pub(crate) fn reader_documents(cluster: &Cluster, req: &SearchRequest, index: &str) -> EsResult<Option<crate::query::Query>> {
+    let security = match &req.security {
+        Some(sec) => sec.documents(cluster, crate::xpack::security::dls::READ, index)?,
+        None => None,
+    };
+    // `DlsFlsRequestValidator`: suggesters read the terms of every document, and a profile
+    // shows the restriction's query, so neither runs where documents are restricted.
+    if security.is_some() {
+        let mut errors = Vec::new();
+        if req.source.suggest.is_some() {
+            errors.push("Suggest isn't supported if document level security is enabled".to_string());
+        }
+        if req.source.profile {
+            errors.push("A search request cannot be profiled if document level security is enabled".to_string());
+        }
+        if !errors.is_empty() {
+            return Err(EsError::action_request_validation(&errors));
+        }
+    }
+    Ok(security)
 }
 
 /// The shards a request reaches.
@@ -1364,13 +1370,17 @@ fn query_phase_inner(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, 
         }
         k
     });
-    if let Some(key) = &cache_key {
-        let cached = t.shard.request_cache.lock().get(key).cloned();
+    // Entries are found by a hash of the key, and serve only the very key they were stored
+    // under: a hash two keys share never answers one with the other's result.
+    let cache_key = cache_key.map(|k| (request_cache_hash(&k), k));
+    if let Some((hash, key)) = &cache_key {
+        let cached = t.shard.request_cache.get(hash);
         // An entry an earlier instance of the shard had cached (a wake is no restart): computed
         // again below, counted as the hit it is.
         let warm = cached.as_ref().is_some_and(|a| a.is::<crate::engine::WarmCacheEntry>());
         if let Some(any) = cached
             && let Some(c) = any.downcast_ref::<CachedShard>()
+            && c.key == *key
         {
             t.shard.counters.request_cache_hit.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Ok(ShardResult {
@@ -1880,18 +1890,12 @@ fn query_phase_inner(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, 
             Some(_) => relation == TotalRelation::GreaterThanOrEqualTo && (wrapped || searcher.count_if_cheap(&q).ok().flatten().is_none()),
         };
     }
-    if let Some(key) = cache_key.filter(|_| !SHARD_TIMED_OUT.with(|c| c.get())) {
-        let entry = CachedShard { total, relation, max_score, aggs: aggs_out.clone(), terminated_early };
-        let mut cache = t.shard.request_cache.lock();
-        if cache.len() >= 1024 {
-            cache.clear();
-            t.shard.counters.request_cache_evictions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-        let bytes = key.len() as u64 + 256;
-        // A warm entry's memory is counted already.
-        if cache.insert(key, Arc::new(entry)).is_none_or(|old| !old.is::<crate::engine::WarmCacheEntry>()) {
-            t.shard.counters.request_cache_bytes.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
-        }
+    if let Some((hash, key)) = cache_key.filter(|_| !SHARD_TIMED_OUT.with(|c| c.get())) {
+        // What the entry holds: its key twice (the map's hash, the entry's text) and its
+        // aggregation tree, charged to the cluster's `request` breaker while it is kept.
+        let bytes = crate::engine::request_cache::ENTRY_OVERHEAD + (hash.len() + key.len() + aggs_out.as_ref().map_or(0, |a| a.ram_bytes())) as u64;
+        let entry = CachedShard { key, total, relation, max_score, aggs: aggs_out.clone(), terminated_early };
+        t.shard.request_cache.insert(hash, Arc::new(entry), bytes);
     }
     Ok(ShardResult {
         target: ti,
@@ -1916,6 +1920,8 @@ fn query_phase_inner(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, 
 
 /// A cached size-0 shard result.
 struct CachedShard {
+    /// The key it was computed for ([`request_cache_key`]).
+    key: String,
     total: u64,
     relation: TotalRelation,
     max_score: Option<f32>,
@@ -1934,6 +1940,11 @@ fn cacheable(req: &SearchRequest, t: &Target) -> bool {
     if req.request_cache.is_none() && t.idx.settings.get("index.requests.cache.enable") == Some("false") {
         return false;
     }
+    // A point in time (or any search on a kept searcher) reads a snapshot the key doesn't name:
+    // its entries would answer live searches after a refresh, and live entries it.
+    if t.searcher.is_some() {
+        return false;
+    }
     // A reader whose document or field level security restricts anything never reads or
     // writes the cache: its answers depend on what it may read, here and in every index its
     // queries look documents up in, which the key can't hold (Elasticsearch disables the cache
@@ -1943,6 +1954,18 @@ fn cacheable(req: &SearchRequest, t: &Target) -> bool {
     }
     let text = format!("{src:?}");
     !(text.contains("now") || text.contains("Script") || text.contains("random"))
+}
+
+/// What a request cache entry is found by: a hash of its key, as 16 hex digits. Persisted with
+/// a shard's warm entries, so it is xxh3 (a fixed algorithm), never the standard library's
+/// hasher, which may change with a Rust release.
+fn request_cache_hash(key: &str) -> String {
+    format!("{:016x}", xxhash_rust::xxh3::xxh3_64(key.as_bytes()))
+}
+
+/// Whether `s` is a [`request_cache_hash`] (a persisted key of this form).
+pub(crate) fn is_request_cache_key(s: &str) -> bool {
+    s.len() == 16 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 fn request_cache_key(req: &SearchRequest, t: &Target) -> String {
@@ -4292,7 +4315,7 @@ pub fn run(ctx: &Ctx, mut req: SearchRequest) -> EsResult<SearchOutcome> {
         if req.scroll.is_some() {
             return Err(EsError::action_request_validation(&["using [point in time] is not allowed in a scroll context".into()]));
         }
-        let targets = crate::opensearch::slice_targets(ctx, &req, contexts::pit_targets(ctx, &pit)?);
+        let targets = crate::opensearch::slice_targets(ctx, &req, contexts::pit_targets(ctx, &req, &pit)?);
         add_pit_tiebreaker(&mut req.source);
         let errs = validate(&req);
         if !errs.is_empty() {

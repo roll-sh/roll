@@ -1297,9 +1297,31 @@ Checked against Elasticsearch 9.5.5 (captures in
   bytes.`). Async search also enforces `search.max_async_search_response_size` (10mb) on a kept
   response, with Elasticsearch's error. Elasticsearch 9.5.5 applies no such limit to ES|QL.
 - Cross-cluster scroll and point-in-time contexts hold their parts' buffered hits on `request`,
-  at what they hold in memory, for as long as they live (`keep_alive`); local contexts hold only
-  shard searchers. Their number is bounded by `search.max_open_scroll_context` (500) and their
-  memory by the cluster's share of the node's budget (below).
+  at what they hold in memory, for as long as they live (`keep_alive`); local contexts hold
+  shard searchers, charged 64 KiB per shard they hold. Their number is bounded by
+  `search.max_open_scroll_context` (500) and their memory by the cluster's share of the node's
+  budget (below). A tenant's `search.max_keep_alive`, `search.max_open_scroll_context` (and
+  OpenSearch's `point_in_time.max_keep_alive`, `search.max_open_pit_context`) read as written but
+  can't raise the limits past their defaults (24h, 500 scrolls, 300 points in time). Contexts
+  keep a cluster loaded until the last expires, but at most 10 minutes past its last request:
+  then an idle cluster unloads and drops them, and a later page answers
+  `search_context_missing_exception`, as after an Elasticsearch node restart. Expired contexts
+  are dropped on every round of the node's reaper, busy cluster or not.
+- A point in time keeps only its alias filters: each search on it applies its reader's document
+  and field level security as the roles are then, as Elasticsearch does (a scroll keeps its
+  opener's, as Elasticsearch's scroll context does).
+- The shard request cache charges each entry what it holds (its aggregations and key) until it
+  goes, and the cluster's entries together hold at most `indices.requests.cache.size` (1% of the
+  node's budget), the least recently used going first. Searches on a point in time don't use
+  it. Compiled scripts hold at most 32 MiB per cluster. Both are caches, charged to no breaker
+  (as in Elasticsearch) but to the node's cache budget, which every cluster's caches share: 2%
+  of the node's budget (`cache_memory`), taken out of its budget for requests, so caches never
+  crowd out requests and requests, residents and caches together stay within the node's
+  memory. An entry that doesn't fit is answered uncached. Node stats show the request cache's
+  limit (`indices.request_cache.limit_size_in_bytes`: the cluster's cap within the node's cache
+  budget). Stored `_tasks` results hold at most 64 MiB per cluster on `request` and the node's
+  budget (a by-query result keeps its first 100 `failures`, with `failures_truncated` counting
+  the rest).
 - roll's differences in the `request` breaker, because one node serves many clusters:
   - everything charged to it (aggregations, ES|QL, kept results and contexts, buffered
     `_msearch` responses, snapshot transfers) is also charged to the node's budget, which only
@@ -1324,6 +1346,15 @@ The inference API of Elasticsearch 9.5.5's inference plugin (`crates/search-es/s
 `PUT/GET/DELETE _inference[/{task_type}]/{id}`, `PUT …/_update`, `POST _inference[/{task_type}]/{id}`
 to run one, `POST …/_stream` (completion and the unified `chat_completion`), `GET _inference/_services[/{task_type}]`,
 the region policy (`_inference/_region_policy`) and the `inference` section of `_xpack/usage`.
+
+A `semantic_text` field that names no `inference_id` defaults to Elasticsearch's ELSER
+(`.elser-2-elasticsearch`), which needs ML nodes roll doesn't run. On a node that runs E5, roll
+records `.multilingual-e5-small-elasticsearch` instead, as a new index's
+`index.semantic_text.default_inference_id` (shown in `GET _settings`) and in the field's mapping,
+the way Elastic Cloud picks its own service's default: a mapping copied from Elasticsearch's docs
+works as written. An index that sets the setting, a field that names its endpoint, and a node
+without the model (or whose operator sets `roll.semantic_text.default_inference_id`; empty:
+Elasticsearch's) keep the other. The setting is honoured as given either way.
 Task types `text_embedding`, `sparse_embedding`, `rerank`, `completion`, `chat_completion`.
 The services after `anthropic` were measured the same way, on a private Elasticsearch 9.5.5 whose
 provider hosts (`*.openai.azure.com`, `bedrock-runtime.*.amazonaws.com` over HTTP/2,

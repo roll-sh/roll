@@ -66,7 +66,7 @@ pub const SCROLL_KEEP_ALIVE_HEADER: &str = "x-roll-scroll-keep-alive";
 pub fn is_link_call(ctx: &Ctx) -> bool {
     match &crate::xpack::security::principal(ctx).kind {
         crate::xpack::security::AuthKind::ApiKey(a) => a.remote.is_some(),
-        crate::xpack::security::AuthKind::OpenSearch(id) => id.link_ceiling.is_some(),
+        crate::xpack::security::AuthKind::OpenSearch(id) => id.link.is_some(),
         _ => false,
     }
 }
@@ -299,7 +299,8 @@ pub fn request(ctx: &Ctx, alias: &str, method: &str, uri: &str, body: Option<Val
             format!("user [{}] with assigned roles [{}]", p.username, roles.join(","))
         }
     };
-    let mut access = obj! { "cluster" => ctx.cluster.name.clone(), "who" => who };
+    let owner = crate::search::contexts::owner_of(ctx);
+    let mut access = obj! { "cluster" => ctx.cluster.name.clone(), "who" => who, "owner" => owner };
     if let Some(m) = access.as_object_mut() {
         match ctx.cluster.dialect {
             // The user, as OpenSearch's coordinating cluster sends it: the remote maps it.
@@ -416,7 +417,7 @@ pub fn refusal(ctx: &Ctx, r: &Remote) -> Option<EsError> {
         let p = crate::xpack::security::opensearch::principal(ctx);
         let id = p.os().cloned().unwrap_or_default();
         let action = crate::xpack::security::privileges::action_of(ctx.api.name()).1;
-        return id.link_ceiling.is_some().then(|| crate::xpack::security::opensearch::denied(&p, &id, action));
+        return id.link.is_some().then(|| crate::xpack::security::opensearch::denied(&p, &id, action));
     }
     let p = crate::xpack::security::principal(ctx);
     if p.is_superuser() || !remote_roles(ctx, &r.alias).iter().any(|set| set.as_object().is_none_or(|m| m.values().all(|d| d.get("indices").and_then(Value::as_array).is_none_or(|a| a.is_empty())))) {

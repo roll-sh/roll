@@ -1,6 +1,7 @@
 import { Check, Copy, KeyRound, Plus, Send } from "lucide-react";
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
+import { ROLL_API } from "@/lib/roll-api";
 import { ACTIONS, type Action, type Environment, type NewToken, type ValueRequest } from "@/lib/secrets-api";
 import { CodeLeaks } from "./code-leaks";
 import { Identities } from "./identities";
@@ -16,6 +17,9 @@ const ACTION_HELP: Record<Action, string> = {
   admin: "rename, reorder, protection, review requests",
   scan: "whether text holds a value, never the value: a pre-receive hook",
 };
+
+/** A token that may only scan (`roll secrets tokens create --scan-only`): whether text holds a value, never a name or a value. */
+const isScanOnly = (actions: readonly Action[]) => actions.length === 1 && actions[0] === "scan";
 
 /** Tokens for this project (roll-access's `rlt_…`, for CI and services: `ROLL_TOKEN=… roll run …`), workload identities (OIDC logins), the leases of dynamic credentials, and one-time shares. */
 export function AccessView() {
@@ -35,7 +39,7 @@ function Tokens() {
   const { api, project, standard } = useSecrets();
   const tokens = useLoad(() => api.tokens(), [api]);
   const [creating, setCreating] = useState(false);
-  const [made, setMade] = useState<{ name: string; token: string; env: string } | null>(null);
+  const [made, setMade] = useState<{ name: string; token: string; env: string; scan: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const active = (tokens.data ?? []).filter((t) => !t.expires_at || t.expires_at > Date.now());
@@ -70,7 +74,7 @@ function Tokens() {
               Done
             </button>
           </div>
-          <p className="mt-2 font-mono text-[11px] text-subtle">ROLL_TOKEN=… roll run --env {made.env} -- &lt;cmd&gt;</p>
+          <p className="mt-2 font-mono text-[11px] text-subtle">{made.scan ? `ROLL_API_URL=${ROLL_API} ROLL_TOKEN=… ROLL_PROJECT=${project.id} roll secrets scan --pre-receive` : `ROLL_TOKEN=… roll run --env ${made.env} -- <cmd>`}</p>
         </div>
       )}
       {creating && (
@@ -81,7 +85,7 @@ function Tokens() {
             setError(null);
             try {
               const r = await api.createToken(t);
-              setMade({ name: r.name, token: r.token, env: t.environments?.[0] ?? "development" });
+              setMade({ name: r.name, token: r.token, env: t.environments?.[0] ?? "development", scan: isScanOnly(t.actions) });
               setCreating(false);
               tokens.reload();
             } catch (e) {
@@ -111,11 +115,17 @@ function Tokens() {
                     </Link>
                   </span>
                   <span className="flex flex-wrap gap-1 text-[10.5px]">
-                    {t.actions.map((a) => (
-                      <span key={a} className="rounded border border-line-2 px-1 text-muted">
-                        {a}
+                    {isScanOnly(t.actions) ? (
+                      <span className="rounded border border-line-2 px-1 text-muted" title="Only whether text holds a value (a pre-receive hook): it reads no name and reveals no value">
+                        scan-only
                       </span>
-                    ))}
+                    ) : (
+                      t.actions.map((a) => (
+                        <span key={a} className="rounded border border-line-2 px-1 text-muted">
+                          {a}
+                        </span>
+                      ))
+                    )}
                   </span>
                   <span className="text-[11px] text-subtle">
                     {t.environments ? t.environments.join(", ") : "all environments"}
@@ -160,6 +170,7 @@ function Revoke({ onRevoke, label = "Revoke" }: { onRevoke: () => void; label?: 
 const firstOpen = (envs: Environment[]) => (envs.find((e) => e.slug === "development" && !e.protected) ?? envs.find((e) => !e.protected))?.slug;
 
 function NewTokenForm({ envs: all, onCreate, onCancel }: { envs: Environment[]; onCreate: (t: NewToken) => Promise<void>; onCancel: () => void }) {
+  const { project } = useSecrets();
   const envs = all.map((e) => e.slug);
   const [name, setName] = useState("");
   const [allEnvs, setAllEnvs] = useState(false);
@@ -178,6 +189,14 @@ function NewTokenForm({ envs: all, onCreate, onCancel }: { envs: Environment[]; 
     if (n.has(v)) n.delete(v);
     else n.add(v);
     return n;
+  };
+  const scanOnly = isScanOnly([...actions]);
+  // A pre-receive hook's token: it checks pushes against every environment's values and reads none.
+  const presetScan = () => {
+    setActions(new Set(["scan"]));
+    setAllEnvs(true);
+    setPaths("");
+    if (!name.trim()) setName("pre-receive");
   };
   return (
     <form
@@ -198,6 +217,22 @@ function NewTokenForm({ envs: all, onCreate, onCancel }: { envs: Environment[]; 
       }}
       onKeyDown={(e) => e.key === "Escape" && onCancel()}
     >
+      <div>
+        <span className={label}>For</span>
+        <div className="flex flex-wrap gap-1">
+          <Chip on={!scanOnly} onClick={() => scanOnly && setActions(new Set(["read", "reveal"]))}>
+            CI or a service
+          </Chip>
+          <Chip on={scanOnly} onClick={presetScan} title={ACTION_HELP.scan}>
+            Scan-only (a pre-receive hook)
+          </Chip>
+        </div>
+        {scanOnly && (
+          <p className="mt-1.5 text-[11.5px] leading-snug text-muted">
+            It only asks whether a push adds a value, in every environment, and can&apos;t read a name or reveal a value. Give the hook <span className="font-mono">ROLL_API_URL</span>, <span className="font-mono">ROLL_TOKEN</span> and <span className="font-mono">ROLL_PROJECT={project.id}</span>.
+          </p>
+        )}
+      </div>
       <div className="grid gap-3 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
         <label>
           <span className={label}>Name</span>

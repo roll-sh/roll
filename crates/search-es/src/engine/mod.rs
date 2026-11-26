@@ -21,6 +21,7 @@ pub mod fields;
 pub mod ignored_source;
 pub mod pattern_text;
 pub mod ranges;
+pub mod request_cache;
 pub mod shapes;
 pub mod synthetic;
 pub mod source;
@@ -202,8 +203,9 @@ pub struct ShardCounters {
     pub warmer_total: AtomicU64,
     pub request_cache_hit: AtomicU64,
     pub request_cache_miss: AtomicU64,
+    /// Request cache evictions an earlier instance of the shard counted (its own:
+    /// [`request_cache::ShardCache::evictions`]).
     pub request_cache_evictions: AtomicU64,
-    pub request_cache_bytes: AtomicU64,
     /// Query and fetch counts per search `stats` group.
     pub groups: Mutex<std::collections::BTreeMap<String, (u64, u64)>>,
     /// What searches read, by field (`_field_usage_stats`).
@@ -304,7 +306,7 @@ pub struct ShardEngine {
     /// The last search (ms since the engine epoch).
     last_search: AtomicI64,
     /// The shard request cache (size-0 search results), cleared when a refresh publishes changes.
-    pub request_cache: parking_lot::Mutex<std::collections::HashMap<String, Arc<dyn std::any::Any + Send + Sync>>>,
+    pub request_cache: request_cache::ShardCache,
     /// Where applied operations are logged (search-server's WAL; `None` in memory).
     pub log: Option<Arc<dyn ShardLog>>,
 }
@@ -505,11 +507,12 @@ impl ShardEngine {
 
     /// Drops the request cache (refresh, `_cache/clear`).
     pub fn clear_request_cache(&self) {
-        let mut c = self.request_cache.lock();
-        if !c.is_empty() {
-            c.clear();
-            self.counters.request_cache_bytes.store(0, Ordering::Relaxed);
-        }
+        self.request_cache.clear();
+    }
+
+    /// Request cache evictions since the shard first opened.
+    pub fn request_cache_evictions(&self) -> u64 {
+        self.counters.request_cache_evictions.load(Ordering::Relaxed) + self.request_cache.evictions()
     }
 
     /// Makes writes visible that a scheduled refresh would have published by now; see the
@@ -578,8 +581,8 @@ impl ShardEngine {
         add("search", "suggest_total", ld(&c.suggest_total));
         add("request_cache", "hit_count", ld(&c.request_cache_hit));
         add("request_cache", "miss_count", ld(&c.request_cache_miss));
-        add("request_cache", "evictions", ld(&c.request_cache_evictions));
-        add("request_cache", "memory_size_in_bytes", ld(&c.request_cache_bytes));
+        add("request_cache", "evictions", self.request_cache_evictions() as i64);
+        add("request_cache", "memory_size_in_bytes", self.request_cache.bytes() as i64);
         add("segments", "count", st.segments as i64);
         add("segments", "memory_in_bytes", st.segment_heap_bytes as i64);
         add("segments", "index_writer_memory_in_bytes", st.buffer_bytes as i64);
@@ -1035,7 +1038,7 @@ impl Engine {
                             slowlog: self.slowlog.clone(),
                             dirty_since: AtomicI64::new(0),
                             last_search: AtomicI64::new(epoch_ms()),
-                            request_cache: Default::default(),
+                            request_cache: request_cache::ShardCache::new(cluster.request_cache.clone()),
                             log: self.storage.log(&idx.uuid, i),
                         }));
                     }

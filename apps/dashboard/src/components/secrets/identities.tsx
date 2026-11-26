@@ -1,19 +1,21 @@
-import { Check, Copy, Fingerprint, Plus } from "lucide-react";
+import { Check, ChevronDown, Copy, Fingerprint, Plus, Server } from "lucide-react";
 import { useState } from "react";
 import { useInstallLine } from "@/lib/install-line";
 import { ROLL_API } from "@/lib/roll-api";
 import { AZURE, AZURE_AUDIENCE, ciSnippets, GITHUB, GITLAB, type CiSnippet } from "@/lib/secrets-ci";
 import { ACTIONS, type Action, type Identity, type NewIdentity } from "@/lib/secrets-api";
 import { GatewayPicker } from "./gateways";
+import { BootstrapMaker, Machines } from "./machines";
 import { useSecrets } from "./secrets-page";
 import { ago, button, card, Chip, dangerButton, ErrorNote, errorText, field, ghost, label, primary, Section, textareaField, useLoad } from "./ui";
 
-type Provider = "github" | "gitlab" | "azure" | "aws" | "other";
+type Provider = "github" | "gitlab" | "azure" | "aws" | "machine" | "other";
 /** One role or user in one account; a `*` only ends a session name (the server checks it too). */
 const AWS_ARN = /^arn:aws(-cn|-us-gov)?:(iam::\d{12}:(role|user)\/([\w+=,.@-]+\/)*[\w+=,.@-]+|sts::\d{12}:assumed-role\/[\w+=,.@-]+\/[\w+=,.@-]*\*?)$/;
 
 /** What an identity takes, in a few words: `acme/web · refs/heads/main`. */
-function identitySummary(i: Pick<Identity, "issuer" | "subject" | "claims">): string {
+function identitySummary(i: Pick<Identity, "kind" | "issuer" | "subject" | "claims">): string {
+  if (i.kind === "machine") return "bootstrap tokens";
   const repo = i.issuer === GITHUB ? /^repo:([^:]+):/.exec(i.subject)?.[1] : i.issuer === GITLAB ? /^project_path:([^:]+):/.exec(i.subject)?.[1] : i.issuer.startsWith(AZURE) ? i.subject.replace(/^p:\/\//, "") : undefined;
   const claims = Object.entries(i.claims).map(([k, v]) => (k === "ref" ? v : `${k}=${v}`));
   return [repo ?? i.subject, ...claims].join(" · ");
@@ -57,6 +59,7 @@ function readyText(i: Identity): string {
   if (i.issuer === GITLAB) return " In the job:";
   if (i.issuer.startsWith(AZURE)) return " In the pipeline:";
   if (i.kind === "aws") return " On the machine (its instance profile, task role, IRSA or Pod Identity signs the login):";
+  if (i.kind === "machine") return " Make a bootstrap token for each machine: it's shown once, and the machine exchanges it for a credential of its own.";
   return ` Set ROLL_IDENTITY=${i.id} and ROLL_OIDC_TOKEN (or ROLL_OIDC_TOKEN_FILE) in the workload.`;
 }
 
@@ -69,6 +72,8 @@ export function Identities() {
   const identities = useLoad(() => api.identities(), [api]);
   const [creating, setCreating] = useState(false);
   const [made, setMade] = useState<Identity | null>(null);
+  // The machine identities whose machines are shown.
+  const [open, setOpen] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const install = useInstallLine();
   const env = made?.environments?.[0] ?? "production";
@@ -84,7 +89,7 @@ export function Identities() {
         </button>
       }
     >
-      <p className="mb-2 text-[11.5px] text-muted">CI jobs, clusters and machines on AWS log in with their own OIDC token (GitHub Actions, GitLab, Azure Pipelines, Kubernetes) or AWS role, and get a token for minutes: nothing to store or rotate.</p>
+      <p className="mb-2 text-[11.5px] text-muted">CI jobs, clusters and machines on AWS log in with their own OIDC token (GitHub Actions, GitLab, Azure Pipelines, Kubernetes) or AWS role, and get a token for minutes: nothing to store or rotate. A machine no platform vouches for (bare metal, on premises) starts from a bootstrap token an admin makes for it.</p>
       {made && (
         <div className="fade-in mb-3 rounded-xl border border-accent/40 bg-panel p-3 shadow-card inset-shadow-highlight" role="status">
           <p className="text-[12.5px]">
@@ -98,6 +103,11 @@ export function Identities() {
             snippets.map((snippet) => (
               <Snippet key={snippet.title} snippet={snippet} />
             ))}
+          {made.kind === "machine" && (
+            <div className="mt-2">
+              <BootstrapMaker identity={made} env={env} open onMade={() => setOpen((o) => new Set(o).add(made.id))} />
+            </div>
+          )}
           <div className="mt-2 flex justify-end">
             <button className={ghost} onClick={() => setMade(null)}>
               Done
@@ -128,40 +138,50 @@ export function Identities() {
         rows.length > 0 && (
           <div className={`${card} divide-y divide-line`}>
             {rows.map((i) => (
-              <div key={i.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2">
-                <Fingerprint className="size-3.5 text-muted" />
-                <span className="min-w-0 leading-tight">
-                  <span className="block text-[12.5px] font-medium">{i.name}</span>
-                  <span className="block truncate font-mono text-[10.5px] text-subtle" title={`${i.issuer}\n${i.subject}`}>
-                    {identitySummary(i)}
+              <div key={i.id}>
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2">
+                  {i.kind === "machine" ? <Server className="size-3.5 text-muted" /> : <Fingerprint className="size-3.5 text-muted" />}
+                  <span className="min-w-0 leading-tight">
+                    <span className="block text-[12.5px] font-medium">{i.name}</span>
+                    <span className="block truncate font-mono text-[10.5px] text-subtle" title={`${i.issuer}\n${i.subject}`}>
+                      {identitySummary(i)}
+                    </span>
                   </span>
-                </span>
-                {i.gateway ? (
-                  <span className="font-mono text-[11px] text-muted">logs in gateway {i.gateway}</span>
-                ) : (
-                  <span className="flex flex-wrap gap-1 text-[10.5px]">
-                    {i.actions.map((a) => (
-                      <span key={a} className="rounded border border-line-2 px-1 text-muted">
-                        {a}
-                      </span>
-                    ))}
+                  {i.gateway ? (
+                    <span className="font-mono text-[11px] text-muted">logs in gateway {i.gateway}</span>
+                  ) : (
+                    <span className="flex flex-wrap gap-1 text-[10.5px]">
+                      {i.actions.map((a) => (
+                        <span key={a} className="rounded border border-line-2 px-1 text-muted">
+                          {a}
+                        </span>
+                      ))}
+                    </span>
+                  )}
+                  <span className="text-[11px] text-subtle">
+                    {i.gateway ? "" : `${i.environments ? i.environments.join(", ") : "all environments"}${i.paths ? ` · ${i.paths.join(", ")}` : ""} · `}
+                    {i.ttl_minutes} min
+                    {i.allowed_ips ? ` · from ${i.allowed_ips.join(", ")}` : ""}
+                    {i.pinned_keys ? ` · ${i.pinned_keys} pinned ${i.pinned_keys === 1 ? "key" : "keys"}` : ""}
                   </span>
-                )}
-                <span className="text-[11px] text-subtle">
-                  {i.gateway ? "" : `${i.environments ? i.environments.join(", ") : "all environments"}${i.paths ? ` · ${i.paths.join(", ")}` : ""} · `}
-                  {i.ttl_minutes} min
-                  {i.allowed_ips ? ` · from ${i.allowed_ips.join(", ")}` : ""}
-                  {i.pinned_keys ? ` · ${i.pinned_keys} pinned ${i.pinned_keys === 1 ? "key" : "keys"}` : ""}
-                </span>
-                <span className="ml-auto truncate text-right font-mono text-[10.5px] text-subtle" title={i.last_subject ?? undefined}>
-                  {i.last_used_at ? `logged in ${ago(i.last_used_at)}` : "never used"} · {i.id}
-                </span>
-                {i.disabled_at && (
-                  <button className={button} onClick={() => api.setIdentityDisabled(i.id, false).then(identities.reload, (e) => setError(errorText(e)))} title={`Disabled ${ago(i.disabled_at)} by a cut-off${i.disabled_why ? `: ${i.disabled_why}` : ""}`}>
-                    Enable
-                  </button>
-                )}
-                <Delete onDelete={() => api.deleteIdentity(i.id).then(identities.reload, (e) => setError(errorText(e)))} />
+                  <span className="ml-auto truncate text-right font-mono text-[10.5px] text-subtle" title={i.last_subject ?? undefined}>
+                    {i.last_used_at ? `logged in ${ago(i.last_used_at)}` : "never used"} · {i.id}
+                  </span>
+                  <span className="ml-auto flex items-center gap-1">
+                    {i.disabled_at && (
+                      <button className={button} onClick={() => api.setIdentityDisabled(i.id, false).then(identities.reload, (e) => setError(errorText(e)))} title={`Disabled ${ago(i.disabled_at)} by a cut-off${i.disabled_why ? `: ${i.disabled_why}` : ""}`}>
+                        Enable
+                      </button>
+                    )}
+                    {i.kind === "machine" && (
+                      <button className={ghost} aria-expanded={open.has(i.id)} onClick={() => setOpen((o) => (o.has(i.id) ? new Set([...o].filter((x) => x !== i.id)) : new Set(o).add(i.id)))}>
+                        Machines <ChevronDown className={`size-3.5 transition-transform duration-200 motion-reduce:transition-none ${open.has(i.id) ? "rotate-180" : ""}`} />
+                      </button>
+                    )}
+                    <Delete onDelete={() => api.deleteIdentity(i.id).then(identities.reload, (e) => setError(errorText(e)))} />
+                  </span>
+                </div>
+                {i.kind === "machine" && open.has(i.id) && <Machines identity={i} env={i.environments?.[0] ?? "production"} />}
               </div>
             ))}
           </div>
@@ -237,15 +257,16 @@ function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreat
   const keysOk = jwks.trim() === "" || jwksHasKeys(jwks);
   const otherOk = provider !== "other" || ((jwks.trim() ? issuer.trim() !== "" : issuer.trim().startsWith("https://")) && keysOk && subject.trim() !== "" && subject.trim() !== "*");
   const arnOk = provider !== "aws" || AWS_ARN.test(arn.trim());
-  const ok = name.trim() !== "" && repoOk && otherOk && arnOk && (provider === "aws" || audience.trim() !== "") && (gateway !== "" || (picked.size > 0 && actions.size > 0)) && Number.isInteger(minutes) && minutes >= 5 && minutes <= 60;
+  const ok = name.trim() !== "" && repoOk && otherOk && arnOk && (provider === "aws" || provider === "machine" || audience.trim() !== "") && (gateway !== "" || (picked.size > 0 && actions.size > 0)) && Number.isInteger(minutes) && minutes >= 5 && minutes <= 60;
   const toggle = <T,>(set: Set<T>, v: T) => {
     const n = new Set(set);
     if (n.has(v)) n.delete(v);
     else n.add(v);
     return n;
   };
-  const shape = (): { kind: "aws"; arn: string } | { issuer: string; audience: string; subject: string; claims: Record<string, string>; jwks?: string } => {
+  const shape = (): { kind: "aws"; arn: string } | { kind: "machine" } | { issuer: string; audience: string; subject: string; claims: Record<string, string>; jwks?: string } => {
     if (provider === "aws") return { kind: "aws", arn: arn.trim() };
+    if (provider === "machine") return { kind: "machine" };
     const ref: Record<string, string> = branch.trim() ? { ref: `refs/heads/${branch.trim()}` } : {};
     const aud = audience.trim();
     if (provider === "github") return { issuer: GITHUB, audience: aud, subject: `repo:${repo.trim()}:*`, claims: ref };
@@ -281,6 +302,9 @@ function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreat
           <Chip on={provider === "aws"} onClick={() => pick("aws")}>
             AWS
           </Chip>
+          <Chip on={provider === "machine"} onClick={() => pick("machine")}>
+            Machine (bootstrap token)
+          </Chip>
           <Chip on={provider === "other"} onClick={() => pick("other")}>
             Other OIDC (Kubernetes…)
           </Chip>
@@ -291,7 +315,7 @@ function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreat
           <span className={label}>Name</span>
           <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="deploy" className={field} />
         </label>
-        {provider === "aws" ? (
+        {provider === "machine" ? null : provider === "aws" ? (
           <label>
             <span className={label}>Role or user ARN</span>
             <input value={arn} onChange={(e) => setArn(e.target.value)} placeholder="arn:aws:iam::123456789012:role/web" className={`${field} font-mono`} aria-invalid={arn.trim() !== "" && !arnOk} />
@@ -318,7 +342,7 @@ function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreat
             <input value={repo} onChange={(e) => setRepo(e.target.value)} placeholder={provider === "github" ? "acme/web" : "acme/platform/web"} className={`${field} font-mono`} aria-invalid={repo.trim() !== "" && !repoOk} />
           </label>
         )}
-        {provider === "azure" || provider === "aws" ? null : provider === "other" ? (
+        {provider === "azure" || provider === "aws" || provider === "machine" ? null : provider === "other" ? (
           <label>
             <span className={label}>Subject (sub; * for any run)</span>
             <input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="system:serviceaccount:prod:deployer" className={`${field} font-mono`} />
@@ -329,7 +353,7 @@ function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreat
             <input value={branch} onChange={(e) => setBranch(e.target.value)} placeholder="main" className={`${field} font-mono`} />
           </label>
         )}
-        {provider !== "aws" && (
+        {provider !== "aws" && provider !== "machine" && (
           <label>
             <span className={label}>Audience (aud)</span>
             <input value={audience} onChange={(e) => setAudience(e.target.value)} className={`${field} font-mono`} />
@@ -338,6 +362,11 @@ function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreat
         {provider === "aws" && (
           <p className="text-[11.5px] leading-snug text-muted sm:col-span-2">
             Any session of the role logs in (an EC2 instance profile, an ECS task role, IRSA, Pod Identity). For some sessions only, use <span className="font-mono">arn:aws:sts::…:assumed-role/web/i-*</span>. The machine signs a GetCallerIdentity with its role, roll checks it with STS: nothing to store.
+          </p>
+        )}
+        {provider === "machine" && (
+          <p className="text-[11.5px] leading-snug text-muted sm:col-span-2">
+            For bare metal and on-premises machines no platform vouches for. An admin makes a bootstrap token per machine (shown once, single-use, minutes long); the machine exchanges it for its own credential and keeps replacing it. Its logins get the environments and actions below.
           </p>
         )}
         {provider === "other" && (
@@ -390,7 +419,7 @@ function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreat
       </div>
       <label className="block">
         <span className={label}>Allowed addresses (CIDRs; empty for any)</span>
-        <input value={ips} onChange={(e) => setIps(e.target.value)} placeholder="the runners' egress ranges, e.g. 203.0.113.0/24" className={`${field} font-mono`} />
+        <input value={ips} onChange={(e) => setIps(e.target.value)} placeholder={provider === "machine" ? "the machines' addresses, e.g. 198.51.100.0/24" : "the runners' egress ranges, e.g. 203.0.113.0/24"} className={`${field} font-mono`} />
       </label>
       <div className="flex justify-end gap-2">
         <button type="button" className={ghost} onClick={onCancel}>
