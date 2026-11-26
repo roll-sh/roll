@@ -15105,7 +15105,16 @@ in-memory path's own calls: +0.14-0.17% on fitting EXCEPT / INTERSECT ALL (a per
 EXPLAIN model, not per row). n2 finds them where the in-memory path does. Patch of the move:
 `~/.cache/a330/patches/setop-n1-to-n2.diff`.
 
-**Verification:** see "quick-check" below.
+**Verification:** `tools/quick-check.sh` with `QC_CHECKED=1` on `27a86e091` (the three code
+commits and this section on `214433872`): Clippy 16 warnings, none new in a changed file (a first
+run flagged `Streamed`'s variant sizes: the streamed partition's state is boxed now, made only
+past work_mem; not re-measured, no fitting query reaches it); 393 tests in 10 binaries passed,
+again built `--profile verify-checked` (393 passed); regress 51,148 / 51,150, 0 newly differing;
+isolation 1,647 / 1,648; pg_dump_tap 14,609 passed. Each lower candidate is a prefix of that
+stack; only its head was checked. New query_spill cases: `several_windows_spill` (four
+statements, temp file counts 2, 2, 1, 1), `sorted_setops_spill` (agent 326's, 2 files a
+statement), `distinct_aggregates_spill` (2 and 1 files), each count PostgreSQL 18.6's for the
+same statements at work_mem 64 kB.
 
 **Left** (largest first, MB over PostgreSQL's): sliding window frames (352.5 / 10.2: `winstream`
 streams only frames starting at the partition's start; a sliding frame needs a frame-head pointer
