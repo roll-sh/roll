@@ -392,6 +392,26 @@ async fn open_changes_that_change_the_same_tables_name_each_other() {
     assert!(overlaps("chg_sc").is_empty(), "another table");
 }
 
+/// The toolbar's Main (Vercel's deployment switcher): the page a visitor is on, on main's preview
+/// of the same service, query kept; nothing for main's own preview, a service main's doesn't
+/// run, or a path that isn't one on that host.
+#[tokio::test]
+async fn the_toolbars_main_is_the_same_page_on_mains_preview() {
+    // Screenshots compared with main's: main's preview runs too.
+    let e = env(json!({ "enabled": true, "github": { "screenshot": true } }));
+    e.code.open(change("chg_tm", 1));
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let chg = e.engine.store.row_by_change("chg_tm").unwrap().unwrap();
+    let base = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.change_id.is_none()).expect("main's preview");
+    let main_web = e.engine.store.view(base.clone()).unwrap().services.into_iter().find(|s| s.name == "web").expect("main's web").url;
+    let got = e.engine.main_page_url(&chg.id, "web", "/pricing?plan=pro").await.unwrap();
+    assert_eq!(got, Some(format!("{}/pricing?plan=pro", main_web.trim_end_matches('/'))));
+    assert_eq!(e.engine.main_page_url(&base.id, "web", "/").await.unwrap(), None, "main's own preview has no main");
+    assert_eq!(e.engine.main_page_url(&chg.id, "nope", "/").await.unwrap(), None);
+    assert_eq!(e.engine.main_page_url(&chg.id, "web", "//evil.example/").await.unwrap(), None, "only a path on main's host");
+}
+
 /// A visual change refused (Chromatic's Deny): the review fails at that head, the change is told at
 /// once, an accept of the pages clears it, and a new head asks again.
 #[tokio::test]
