@@ -492,6 +492,12 @@ impl Permission {
         self.indices.iter().any(|g| grant_names(g, index) && g.privileges.iter().any(|p| p == "read_failure_store" || p == "all"))
     }
 
+    /// Whether the role may act otherwise on the failure store of `index` (roll over its
+    /// failure indices, read their settings and mappings): only `manage_failure_store` and `all`.
+    pub fn manages_failure_store(&self, index: &str) -> bool {
+        self.indices.iter().any(|g| grant_names(g, index) && g.privileges.iter().any(|p| p == "manage_failure_store" || p == "all"))
+    }
+
     /// Whether the role holds a named index privilege on `index` (directly, through `all`, or
     /// through a privilege granting every action of it).
     pub fn has_index_privilege(&self, privilege: &str, index: &str) -> bool {

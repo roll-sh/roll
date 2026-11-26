@@ -4162,7 +4162,7 @@ async fn names_are_authorized_as_resolved() {
     assert!(s == 403 && !v.to_string().contains("secret"), "the action's own indices only: {s} {v}");
     // Date math and selectors are resolved before the check.
     assert_eq!(e.es(&u, &p, Method::GET, "/.async-search/_count", None).await.0, 200, "the premise: kept async results");
-    for path in ["/%3C.async-search%3E/_search", "/.async-search/_search", "/logs-a::failures/_search"] {
+    for path in ["/%3C.async-search%3E/_search", "/.async-search/_search", "/logs-a::failures/_search", "/%3Clogs-a%3E::failures/_search"] {
         let (s, v) = rd(path).await;
         assert_eq!(s, 403, "{path}: {v}");
     }

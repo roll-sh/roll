@@ -503,12 +503,12 @@ pub struct Effective {
 }
 
 impl Effective {
-    /// Whether the failure store privilege `action` needs (`read_failure_store` for a read,
-    /// `manage_failure_store` otherwise) is granted on `name` by name (or `all`): `read`'s
-    /// actions would cover the failure store's, but Elasticsearch keeps it a component of its own.
+    /// Whether the failure store privilege `action` needs is granted on `name`: reading it
+    /// ([`Permission::reads_failure_store`], the lookups' check too) or anything else
+    /// ([`Permission::manages_failure_store`]). `read`'s actions would cover the failure store's,
+    /// but Elasticsearch keeps it a component of its own.
     fn failure_store(&self, action: &str, name: &str) -> bool {
-        let privilege = if action.starts_with("indices:data/read") { "read_failure_store" } else { "manage_failure_store" };
-        self.allows(|p| p.indices.iter().any(|g| privileges::grant_names(g, name) && g.privileges.iter().any(|x| x == privilege || x == "all")))
+        if action.starts_with("indices:data/read") { self.reads_failure_store(name) } else { self.allows(|p| p.manages_failure_store(name)) }
     }
 
     /// Whether every index privilege `wider` holds is held on `narrower` too: an alias or a
@@ -1480,19 +1480,19 @@ fn narrow_exprs(
     Ok(Some(with_linked(if out.is_empty() { vec!["-*".to_string()] } else { out })))
 }
 
-/// An index name as authorization checks it: what the request resolves it to, never the text
-/// as written (`resolve::resolve`'s order): its date math resolved (`<.async-search>` is
-/// `.async-search`, restricted), its `-` dropped, and a `::failures` selector kept for
-/// [`Effective::allows_index`], which reaches the failure store only with its privileges. Text
-/// that doesn't parse is checked as it is: the request fails on it the same way later.
+/// An index expression (no wildcard) as the checks that compare names see it, through the one
+/// resolution every index check shares ([`crate::meta::resolve::authorization_name`]: date math
+/// resolved, `<…>::failures` included, the selector split off): its `-` dropped, and a
+/// `::failures` selector kept as a suffix, which [`Effective::allows_index`] authorizes with the
+/// failure store's own privileges. Text that doesn't parse is checked as written: the request
+/// fails on it later, the same way, before it reads anything.
 pub fn authz_name(expr: &str, now_ms: i64) -> String {
-    use crate::meta::resolve::{Selector, resolve_date_math, split_selector};
-    let Ok((base, selector)) = split_selector(expr) else { return expr.to_string() };
-    let name = resolve_date_math(base, now_ms).unwrap_or_else(|_| base.to_string());
-    let name = name.trim_start_matches('-');
-    match selector {
-        Selector::Failures => format!("{name}::failures"),
-        Selector::Data => name.to_string(),
+    use crate::meta::resolve::{Selector, authorization_name};
+    let expr = expr.strip_prefix('-').unwrap_or(expr);
+    match authorization_name(expr, now_ms) {
+        Ok((name, Selector::Failures)) => format!("{name}::failures"),
+        Ok((name, Selector::Data)) => name,
+        Err(_) => expr.to_string(),
     }
 }
 
