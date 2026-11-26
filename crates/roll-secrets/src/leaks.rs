@@ -311,7 +311,7 @@ fn room(by_minute: &[(i64, i64)], n: i64, cap: i64) -> Option<i64> {
 /// `in 40 s`, `in 12 min`: how long until `at` (ms).
 fn wait(at: i64, now: i64) -> String {
     let secs = ((at - now).max(0) + 999) / 1000;
-    if secs >= 120 { format!("in {} min", secs.div_ceil(60)) } else { format!("in {secs} s") }
+    if secs >= 120 { format!("in {} min", (secs + 59) / 60) } else { format!("in {secs} s") }
 }
 
 /// A scanner's calls, per budget key and minute, for an hour (`POST …/scan`'s budgets), and a
