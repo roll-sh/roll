@@ -2815,6 +2815,9 @@ const HELD_BYTES: usize = 256 << 10;
 pub static HEAP_ORDER_STREAMED: crate::counter::Counter = crate::counter::Counter::new();
 #[doc(hidden)]
 pub static HEAP_ORDER_HELD: crate::counter::Counter = crate::counter::Counter::new();
+/// Held passes over a kept hot range with the filter's rejects left there (`open_kept`).
+#[doc(hidden)]
+pub static HEAP_ORDER_KEPT: crate::counter::Counter = crate::counter::Counter::new();
 
 /// The index columns (table column, type, direction) a bitmap's quals can be checked on
 /// from the index entries alone: a btree's plain columns of the types `index_only_columns`
@@ -4205,7 +4208,8 @@ impl ScanNode {
             self.hstream = Some(Box::new(Stream::Tids(Vec::new())));
         }
         let tid = |v: &[u8]| stored_tid(v).map(tid_rank);
-        loop {
+        let mut kept_ok = true;
+        'stream: loop {
             match self.hstream.as_deref_mut().expect("a stream") {
                 Stream::Tids(tids) => {
                     let mut tids = std::mem::take(tids);
@@ -4224,6 +4228,9 @@ impl ScanNode {
                     // UPDATE's `WHERE tid = $1` keeps one row of pgbench_tellers' 320.)
                     let early = hold && self.early_filter(ctx);
                     let mut rejected = 0u32;
+                    // (A kept hot range's rows read with those the comparisons reject left
+                    // where they are, counted here: none copied into the batch.)
+                    let kept = early && kept_ok && self.open_kept(ctx, &mut rejected);
                     // (The batch's rows read where they are.)
                     while self.next_plain(ctx)? {
                         ctx.check()?;
@@ -4239,6 +4246,9 @@ impl ScanNode {
                                 // table too big to model's as stored, having no other place.)
                                 self.hstream = None;
                                 self.restart();
+                                if kept {
+                                    self.spare = None;
+                                }
                                 if let Some(w) = est {
                                     super::sizing::estimated_order_found(&self.plan.table, super::sizing::EstOrder::Unplaced, w, &ctx.sess.db);
                                     self.streamed = true;
@@ -4254,6 +4264,14 @@ impl ScanNode {
                                 held_bytes += k.len() + v.len();
                                 if held.len() < HELD_ROWS && held_bytes <= HELD_BYTES {
                                     held.push((t, k.to_vec(), self.rb.value_bytes(self.rb.pos())));
+                                } else if kept {
+                                    // (Too many to hold: the other way takes every row's TID,
+                                    // the rejected ones' too. The pass made again over all.)
+                                    kept_ok = false;
+                                    self.restart();
+                                    self.spare = None;
+                                    self.hstream = Some(Box::new(Stream::Tids(Vec::new())));
+                                    continue 'stream;
                                 } else {
                                     hold = false;
                                     held = Vec::new();
@@ -4266,9 +4284,9 @@ impl ScanNode {
                         }
                     }
                     if hold {
-                        for _ in 0..rejected {
-                            self.count_row(ctx);
-                            ctx.filtered(self.key);
+                        self.count_rows(ctx, rejected);
+                        if rejected > 0 {
+                            ctx.count(self.key, |s| s.removed += rejected as u64);
                         }
                         // (Every row held: by TID, as the merge returns them; TIDs are distinct.
                         // The TIDs sorted with the rows' places, each row then moved once.)
@@ -4653,6 +4671,48 @@ impl ScanNode {
     /// fetch to note (a sequential scan's).
     /// Made ready here: the filter's kernel (`kfilter`), and whether it has stored-value
     /// comparisons.
+    /// `next_heap_ordered`'s held pass over a kept hot range (`Txn::scan_snap_kept`): its one
+    /// range opened as `seek` opens it, but only with the rows that the filter's stored-value
+    /// comparisons don't reject (`stored_rejects`), the others counted in `rejected`. A row
+    /// without its TID is taken (the pass then reads them all its other way). False: not
+    /// opened (no kept range holds it, or our writes may be in it).
+    fn open_kept(&mut self, ctx: &ExecCtx, rejected: &mut u32) -> bool {
+        if self.iter.is_some() || self.cur_range != 0 || self.ranges.len() != 1 || self.rev || self.skip.is_some() {
+            return false;
+        }
+        let Some(snap) = ctx.snapshot() else { return false };
+        let Some(Some((_, Some(c)))) = &self.kfilter else { return false };
+        let (start, end) = &self.ranges[0];
+        let mut keep = |v: &[u8]| {
+            if !matches!(v.first(), Some(&(ROW_HEADER_TID | ROW_HEADER_TID_EXT))) {
+                return true;
+            }
+            let rejects = !crate::storage::toast::has_external(v) && row_data_fast(v).and_then(|d| c.passes(d)) == Some(false);
+            *rejected += rejects as u32;
+            !rejects
+        };
+        let Some(it) = ctx.txn.borrow().scan_snap_kept(start, end, &snap, &mut keep) else {
+            return false;
+        };
+        // (As `seek` reads a plain scan's rows: as stored.)
+        let plain = self.plan.mark.is_none()
+            && self.sample.is_none()
+            && self.only.is_none()
+            && !self.plan.sys
+            && !matches!(self.plan.access, Access::Tid { .. } | Access::TidRange(_));
+        let it = match it.source() {
+            Some(src) if plain => {
+                self.toast = Some(std::cell::RefCell::new(crate::txn::toast::Reader::new(src.clone())));
+                it.raw()
+            }
+            _ => it,
+        };
+        self.iter = Some(StoreIter::Fwd(Box::new(it)));
+        self.cur_range = 1;
+        HEAP_ORDER_KEPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        true
+    }
+
     fn early_filter(&mut self, ctx: &ExecCtx) -> bool {
         let plan = &self.plan;
         if plan.filter.is_none()
@@ -6411,6 +6471,15 @@ impl ScanNode {
     /// What `next` returns for the stored row `bytes` under `key`: counted, read, checked
     /// against the filter and locked (None: skipped).
     /// A row handed out, counted as its scan counts it.
+    /// `count_row` of `n` rows.
+    fn count_rows(&self, ctx: &ExecCtx, n: u32) {
+        match self.stat {
+            StatTarget::Seq(t) if n > 0 => super::pgstat::count_returned(ctx, t, n as i64),
+            StatTarget::Seq(_) | StatTarget::Off => {}
+            _ => (0..n).for_each(|_| self.count_row(ctx)),
+        }
+    }
+
     fn count_row(&self, ctx: &ExecCtx) {
         match self.stat {
             StatTarget::Off => {}
