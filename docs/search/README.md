@@ -1194,9 +1194,10 @@ query-rule editors prefilled with it (`query, ` as a rule; an `exact` `query_str
   without `index`). A read for roll-access; a person sees only their own clusters' (404 otherwise).
   The answer adds what the cluster's owner recorded since the last pass. Its `experiments` list
   the A/B tests of the cluster's search applications ([relevance-experiments.md](relevance-experiments.md)):
-  `[{application, experiment, baseline, variants: [{name, searches, clicks, conversions, value, ctr, conversion_rate, vs_baseline?: {ctr, conversion_rate}}]}]`,
+  `[{application, experiment, baseline, variants: [{name, searches, clicks, conversions, value, ctr, conversion_rate, no_hits, no_hit_rate, p95_latency_ms, vs_baseline?: {ctr, conversion_rate}}]}]`,
   each comparison `{p_value, state}` with `state` one of `significant`, `not_yet_significant` or
-  `not_enough_data`; counted since each started, whatever `range` says.
+  `not_enough_data`; counted since each started, whatever `range` says. The totals, points and
+  query rows also count `roll_conversion` events (`conversions`, `conversion_rate`, `value`).
 
 **Privacy.** No `Authorization` header, credential, API key or document body is ever recorded:
 the only header read is `X-Roll-Search-Query`, and only a query's text, counted, is kept. Query
@@ -1699,13 +1700,11 @@ deterministic (#396).
    Overview of a cluster with no indices or from the Indices tab, then three queries run in place
    with Open in Console, copy as curl, JavaScript or Python reading `$ELASTICSEARCH_API_KEY` as the
    guides do; a 30-day `data` key made in the panel goes into the copied code, shown once). Left:
-   a sample dataset for RAG (passages with `semantic_text` on E5); and
-   what writing the guides found: an API key's `encoded` value works only at the cluster's own
-   host, so clients behind a shared address re-encode it as `<id>@<cluster>:<key>` (the shared
-   address routes keys by `<key id>@<cluster>`; Elasticsearch's own `_security/api_key` answers a
-   plain `encoded`: answer it qualified, as the keys route's `api_key` is, once the cluster's own
-   host accepts the qualifier; an authentication change, so with a review); and no screen is named
-   Discover. Landed: a `semantic_text` field with no `inference_id` defaults to the E5 the node
+   no screen is named Discover. In review (`fix/search-shared-host-keys`): an API key made anywhere
+   but the cluster's own host (the shared address, the console) answers an `encoded` that names
+   its cluster (`<id>@<cluster>:<key>`, as the keys route's `api_key` does), so a copied value
+   works at the shared address too, while the cluster's own host keeps Elasticsearch's; only
+   that cluster accepts the qualifier, and a cluster's own host refuses another cluster's. Landed: a `semantic_text` field with no `inference_id` defaults to the E5 the node
    runs (#1093), a `data` key records click events (#1078), and a help-articles sample on E5 with
    semantic, hybrid and passage queries (#1081).
 13. **A web crawler for site search** (design in [crawler.md](crawler.md); Elastic Open Crawler,
@@ -1744,8 +1743,10 @@ deterministic (#396).
    the address) and answered with `X-Roll-Experiment` and `X-Roll-Variant`; `roll_conversion`
    events beside clicks, counted once per search per variant; browser keys' `limits.events`; and
    per-variant click-through and conversion with a two-proportion z-test in `GET …/analytics` and
-   the Relevance tab. Left: judgment lists and offline evaluation (phase 1), promoting a winner,
-   zero-result rate and latency per variant, the `roll_` rule types and dynamic re-ranking.
+   the Relevance tab. The second slice adds conversions to the indices' analytics, zero-result
+   rate and p95 latency per variant, and promoting a variant into the application
+   (`…/_roll/experiments/{id}/_promote`). Left: judgment lists and offline evaluation (phase 1),
+   confidence intervals, the `roll_` rule types and dynamic re-ranking.
 16. **Cold start at size**: the 19.8 ms cold start is a 50k-document index from local cache;
    nothing measures the first query and p99 on a node with an empty cache for 1, 10 and 50 GB
    indices loaded from object storage, or on Graviton. Buyers comparing always-on Typesense or Algolia

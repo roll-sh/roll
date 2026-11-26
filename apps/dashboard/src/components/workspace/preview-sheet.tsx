@@ -14,6 +14,43 @@ import { Head, Label, Rows, Stat, Tabs } from "./inspector";
 import { FeedbackForm, replyBody, replyOf, type PreviewFeedback } from "./preview-feedback";
 import { errorText, host, money, previewOf, since, STATE_LABEL, StateDot } from "./previews-common";
 
+/** Refuse a visual change (Chromatic's Deny): asks why in one line first, then refuses every page. */
+function RefuseButton({ disabled, busy, onRefuse }: { disabled: boolean; busy: boolean; onRefuse: (why: string) => void }) {
+  const [asking, setAsking] = useState(false);
+  const [why, setWhy] = useState("");
+  if (!asking) {
+    return (
+      <button type="button" disabled={disabled} onClick={() => setAsking(true)} className="h-6 shrink-0 rounded-md px-2 text-[11.5px] text-muted hover:text-fg disabled:opacity-40">
+        Refuse
+      </button>
+    );
+  }
+  return (
+    <form
+      className="flex shrink-0 items-center gap-1"
+      onSubmit={(ev) => {
+        ev.preventDefault();
+        onRefuse(why.trim());
+        setAsking(false);
+        setWhy("");
+      }}
+    >
+      <input
+        autoFocus
+        value={why}
+        maxLength={200}
+        onChange={(ev) => setWhy(ev.target.value)}
+        placeholder="Why, for the change's author"
+        aria-label="Why it's refused"
+        className="h-6 w-48 rounded-md border border-line-2 bg-transparent px-2 text-[11.5px] text-fg placeholder:text-subtle"
+      />
+      <button type="submit" disabled={disabled} className="h-6 rounded-md border border-line-2 px-2 text-[11.5px] text-danger hover:bg-white/[0.05] disabled:opacity-40">
+        {busy ? "Refusing…" : "Refuse"}
+      </button>
+    </form>
+  );
+}
+
 /** "1 story", "3 stories". */
 const storiesUntaken = (n: number) => (n === 1 ? "1 story" : `${n} stories`);
 
@@ -418,6 +455,21 @@ export function PreviewSheet({
               <div className="mt-1.5 flex items-center gap-2 text-[11.5px]">
                 {p.visual_review.state === "accepted" ? (
                   <span className="text-subtle">Accepted by {p.visual_review.by ?? "someone"} at this push.</span>
+                ) : p.visual_review.state === "refused" ? (
+                  <>
+                    <span className="min-w-0 break-words text-danger">
+                      Refused by {p.visual_review.by ?? "someone"}
+                      {p.visual_review.reason ? `: ${p.visual_review.reason}` : ""}. A new push asks again{p.visual_review.required ? "; it can't land meanwhile" : ""}.
+                    </span>
+                    <button
+                      type="button"
+                      disabled={busy !== null || gone}
+                      onClick={() => run("accept", () => previewsApi.acceptVisual(p.id, p.visual_review?.head))}
+                      className="ml-auto h-6 shrink-0 rounded-md border border-line-2 px-2 text-[11.5px] text-fg hover:bg-white/[0.05] disabled:opacity-40"
+                    >
+                      {busy === "accept" ? "Accepting…" : "Accept anyway"}
+                    </button>
+                  </>
                 ) : (
                   <>
                     <span className="text-soft">
@@ -434,6 +486,7 @@ export function PreviewSheet({
                     >
                       {busy === "accept" ? "Accepting…" : p.visual_review.pages.length > 1 ? "Accept all" : "Accept"}
                     </button>
+                    <RefuseButton disabled={busy !== null || gone} busy={busy === "refuse"} onRefuse={(why) => run("refuse", () => previewsApi.refuseVisual(p.id, p.visual_review?.head, why))} />
                   </>
                 )}
               </div>

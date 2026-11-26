@@ -17,6 +17,7 @@ pub mod full_text;
 pub mod geo;
 pub mod joining;
 pub mod kql;
+pub mod reads;
 pub mod script;
 pub mod span;
 pub mod specialized;

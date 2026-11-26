@@ -1276,7 +1276,13 @@ pub struct VisualReview {
     /// its time): nobody saw them, so they're under review too (Chromatic captures every story).
     #[serde(skip_serializing_if = "is_zero")]
     pub untaken: u32,
+    /// Refused: why (the latest refusal's, one line; `by` and `at` are its).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
+
+/// What a masked base's branch is named after (`pvbase-<rules>-<when>`): no preview's name starts so.
+pub const MASK_BASE_PREFIX: &str = "pvbase-";
 
 /// The visual review's entry for the stories a change touched that its run didn't take.
 pub use code_control::model::UNTAKEN_STORIES;
@@ -1298,6 +1304,9 @@ pub struct PageReview {
     /// shares it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    /// Refused at this head: by whom, when, why.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<Refusal>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -1308,6 +1317,17 @@ pub enum VisualState {
     /// They differ, and nobody has accepted them at this head.
     Changed,
     Accepted,
+    /// Someone refused a page at this head (Chromatic's Deny): it fails until a new head, or
+    /// until someone accepts that page.
+    Refused,
+}
+
+/// Who refused a page of a visual review at its head, when, and why (one line).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Refusal {
+    pub by: String,
+    pub at: i64,
+    pub reason: String,
 }
 
 /// How much a change's page differs from the default branch's (Chromatic's baseline).

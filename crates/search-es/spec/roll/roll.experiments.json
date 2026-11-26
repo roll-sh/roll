@@ -1,0 +1,25 @@
+{
+  "roll.search_application.promote_experiment": {
+    "documentation": {
+      "url": "https://roll.sh/docs/search/relevance-experiments",
+      "description": "Promote an A/B test's variant: the search application takes its params or template, and the experiment ends"
+    },
+    "stability": "experimental",
+    "visibility": "public",
+    "headers": { "accept": ["application/json"], "content_type": ["application/json"] },
+    "url": {
+      "paths": [
+        {
+          "path": "/_application/search_application/{name}/_roll/experiments/{id}/_promote",
+          "methods": ["POST"],
+          "parts": {
+            "name": { "type": "string", "description": "The search application" },
+            "id": { "type": "string", "description": "The experiment" }
+          }
+        }
+      ]
+    },
+    "body": { "description": "{\"variant\": the variant to promote}", "required": true },
+    "params": {}
+  }
+}
