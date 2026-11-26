@@ -1,4 +1,4 @@
-//! Rotation windows (docs/secrets.md, "Rotation windows"): when a due scheduled rotation may run,
+//! Rotation windows (docs/secrets.md, "Links": `rotate_window`): when a due scheduled rotation may run,
 //! as AWS Secrets Manager's schedule window. `sun 02:00-04:00`, `mon,thu 22:00-01:00` (past
 //! midnight: it ends the next day), `daily 03:00-05:00`; times are UTC, an hour at least.
 

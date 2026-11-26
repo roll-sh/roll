@@ -352,7 +352,8 @@ The product should feel alive: dots react to the cursor and the marks "think". E
   (fake providers, file outbox) and `rolld/tests/auth.rs`.
 - **Secrets (roll secrets: a project's secrets and environment variables):**
   - The design and the HTTP contract are `docs/secrets.md`; `apps/dashboard/src/lib/secrets-api.ts`
-    is its client (change both together). `crates/roll-secrets` is the store, crypto and router
+    is its client (change both together). The guides (getting started, moving from another manager,
+    platforms) are `docs/secrets/`: steps only, linking to the reference's sections for the rules. `crates/roll-secrets` is the store, crypto and router
     (`/v1/secrets`); `crates/roll-secrets-chain` is the audit log's hash chain and signed digests (no
     I/O; `roll secrets audit verify --file` uses it offline); `crates/rolld/src/secrets.rs` mounts it and implements the link providers;
     `roll secrets …` and `roll run` are `crates/roll-cli/src/secrets.rs`. `roll` builds for Windows
