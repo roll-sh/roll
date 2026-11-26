@@ -250,6 +250,17 @@ impl Engine {
                                 self.store.log(&r.id, &format!("pushed: {}", short(&c.head)))?;
                             }
                         }
+                        // Queued to land where the project rehearses then, with none at this head:
+                        // converged now, not at the next whole converge (the queue lands first).
+                        if s.rehearse_when_queued
+                            && s.release.is_some()
+                            && c.queued
+                            && c.head == r.head
+                            && r.next_at > now
+                            && self.store.runtime_fact::<crate::Rehearsal>(&r.id, "rehearsal")?.is_none_or(|x| x.head != r.build())
+                        {
+                            self.store.update(&r.id, |row| row.next_at = 0)?;
+                        }
                         // Services kept on an earlier head redeploy once the path filters no
                         // longer leave out what changed since (they were edited or removed).
                         if c.head == r.head && let Some(runs) = &r.runs && !self.only_ignored(s, &r.repo, runs, &r.head).await {
