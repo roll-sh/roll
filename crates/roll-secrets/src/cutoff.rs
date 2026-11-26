@@ -16,6 +16,9 @@
 //! - **Shares**: one-time shares made from its keys expire, and the projects it's shared with
 //!   stop reading it (its exports are removed).
 //! - **Syncs** that push it are paused until an admin resumes them.
+//! - **Backups**: the project's backup schedule is paused (every value leaves in each backup)
+//!   until an admin sets it up again. Backups already taken can't be called back: the answer
+//!   lists who took one lately and may no longer read the folder, with what to rotate.
 //! - **Freeze** (optional): reads of its values answer 423 `frozen` to everyone but its admins,
 //!   who can still read and write, so they can rotate. An admin here is the operator, a signed-in
 //!   person or a roll-access token with `admin` there ([`Caller::reads_frozen`]): never roll's own
@@ -83,6 +86,8 @@ pub struct CutOffRequest {
     pub shares: bool,
     #[serde(default = "yes")]
     pub syncs: bool,
+    #[serde(default = "yes")]
+    pub backups: bool,
     #[serde(default)]
     pub freeze: bool,
 }
@@ -105,7 +110,7 @@ pub struct Skipped {
 /// What couldn't be cut, and why; the rest went on.
 #[derive(Debug, Serialize)]
 pub struct Failure {
-    /// `tokens`, `identities`, `logins`, `leases`, `placeholders`, `shares`, `syncs`, `freeze` or `audit`.
+    /// `tokens`, `identities`, `logins`, `leases`, `placeholders`, `shares`, `syncs`, `backups`, `freeze` or `audit`.
     pub what: &'static str,
     pub ids: Vec<String>,
     pub why: String,
@@ -134,6 +139,11 @@ pub struct CutOff {
     /// Projects that no longer read it (its exports removed).
     pub projects: Vec<String>,
     pub syncs: Vec<Cut>,
+    /// The project's backup schedule, paused now (its bucket).
+    pub backups: Vec<Cut>,
+    /// What left in backups taken by people who may no longer read it, and what to do about each
+    /// (rotate a credential, re-issue a CA): a backup can't be called back.
+    pub rotate: Vec<String>,
     /// The folder is frozen (now or already).
     pub frozen: bool,
     pub failed: Vec<Failure>,
@@ -151,6 +161,7 @@ impl CutOff {
             n(self.shares.len(), "share", "shares"),
             n(self.projects.len(), "project's import", "projects' imports"),
             n(self.syncs.len(), "sync", "syncs"),
+            n(self.backups.len(), "backup schedule", "backup schedules"),
         ]
         .into_iter()
         .flatten()
@@ -197,6 +208,8 @@ impl Secrets {
             shares: vec![],
             projects: vec![],
             syncs: vec![],
+            backups: vec![],
+            rotate: reach.knew.iter().filter(|k| k.via == "backup").flat_map(|k| k.registrations.iter().map(move |r| format!("{} took a backup: {r}", k.user))).collect(),
             frozen: reach.frozen.is_some(),
             failed: vec![],
         };
@@ -223,6 +236,7 @@ impl Secrets {
         let projects: Vec<&str> = if req.shares { reach.projects.iter().map(String::as_str).collect() } else { vec![] };
         let sync_ids: Vec<&str> = if req.syncs { reach.syncs.iter().filter(|s| s.paused_at.is_none()).map(|s| s.id.as_str()).collect() } else { vec![] };
         let placeholder_ids: Vec<&str> = if req.placeholders { reach.placeholders.iter().map(|p| p.id.as_str()).collect() } else { vec![] };
+        let pause_backups = req.backups && reach.backups.iter().any(|b| b.paused_at.is_none());
         let own = self.db.write(|c| {
             let env = envs::by_slug(c, project, slug)?;
             let mut disabled = vec![];
@@ -261,10 +275,14 @@ impl Secrets {
             if req.freeze && frozen(c, &env.id, &path)?.is_none() {
                 c.execute("INSERT INTO freezes (env_id, path, why, created_at, created_by) VALUES (?, ?, ?, ?, ?)", params![env.id, path, why, now, by])?;
             }
-            Ok::<_, Error>((disabled, logins, expired, unshared, paused, ended))
+            let backups = pause_backups && c.execute("UPDATE backup_schedules SET paused_at = ?, paused_why = ? WHERE project_id = ? AND paused_at IS NULL", params![now, why, project])? > 0;
+            Ok::<_, Error>((disabled, logins, expired, unshared, paused, ended, backups))
         });
         let logins = match own {
-            Ok((disabled, logins, expired, unshared, paused, ended)) => {
+            Ok((disabled, logins, expired, unshared, paused, ended, backups)) => {
+                if backups {
+                    out.backups = reach.backups.iter().map(|b| Cut { id: project.to_string(), name: format!("backups to bucket {}", b.bucket) }).collect();
+                }
                 out.placeholders = ended.iter().map(|id| Cut { id: id.clone(), name: reach.placeholders.iter().find(|p| &p.id == id).map(|p| format!("{} for {}", p.key, p.consumer)).unwrap_or_default() }).collect();
                 // Their consumers' interception CAs naming a host they no longer have end.
                 self.hosts_changed(reach.placeholders.iter().filter(|p| ended.contains(&p.id)).map(|p| p.consumer.as_str()));
@@ -278,7 +296,7 @@ impl Secrets {
             }
             Err(e) => {
                 let why = e.to_string();
-                for (what, on) in [("identities", req.identities), ("placeholders", req.placeholders), ("shares", req.shares), ("syncs", req.syncs), ("freeze", req.freeze)] {
+                for (what, on) in [("identities", req.identities), ("placeholders", req.placeholders), ("shares", req.shares), ("syncs", req.syncs), ("backups", req.backups), ("freeze", req.freeze)] {
                     if on {
                         out.failed.push(Failure { what, ids: vec![], why: why.clone() });
                     }

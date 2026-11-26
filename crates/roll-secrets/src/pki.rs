@@ -541,6 +541,57 @@ fn check_chain(req: &Chain, key: &[u8], policy: &mut Policy) -> Result<Checked> 
     })
 }
 
+/// An archived CA's row as a restore writes it ([`admit_archived`]).
+pub(crate) struct Admitted {
+    pub certificate: String,
+    pub chain: Option<String>,
+    pub policy: Policy,
+    pub unconstrained: bool,
+}
+
+/// A CA from a backup checked as making or installing it is: its policy, and its private key (PEM)
+/// matching what it claims to be. A pending intermediate's CSR is for that key; a root's
+/// certificate is for it, self-signed, a CA's that may sign certificates and CRLs, valid now and
+/// name-constrained to its domains, as roll makes one; an intermediate's certificate and chain pass
+/// [`check_chain`], as `install_chain` checks them (the path, validity, name constraints, the policy
+/// narrowed), with the archive's `unconstrained` asked as an install's.
+pub(crate) fn admit_archived(certificate: Option<&str>, csr: Option<&str>, chain: Option<&str>, unconstrained: bool, mut policy: Policy, key: &str) -> Result<Admitted> {
+    use x509_parser::prelude::FromDer;
+    let bad = |why: &str| Error::BadRequest(why.to_string());
+    policy.check()?;
+    let key = rcgen::KeyPair::from_pem(key).map_err(|_| bad("its private key isn't one roll reads"))?;
+    let raw = key.public_key_raw();
+    match (certificate, chain) {
+        (None, _) => {
+            let csr = csr.ok_or_else(|| bad("it has neither a certificate nor a CSR"))?;
+            let (_, p) = x509_parser::pem::parse_x509_pem(csr.trim().as_bytes()).map_err(|_| bad("its CSR isn't PEM"))?;
+            let (_, req) = x509_parser::certification_request::X509CertificationRequest::from_der(&p.contents).map_err(|_| bad("its CSR doesn't parse"))?;
+            if req.certification_request_info.subject_pki.subject_public_key.data.as_ref() != raw {
+                return Err(bad("its CSR isn't for its private key"));
+            }
+            Ok(Admitted { certificate: String::new(), chain: None, policy, unconstrained: false })
+        }
+        (Some(certificate), Some(chain)) => {
+            let checked = check_chain(&Chain { certificate: certificate.to_string(), chain: Some(chain.to_string()), unconstrained }, raw, &mut policy)?;
+            Ok(Admitted { certificate: checked.certificate, chain: Some(checked.parents), policy, unconstrained: !checked.constrained })
+        }
+        (Some(certificate), None) => {
+            let ders = certificates(certificate, "its certificate")?;
+            let [der] = ders.as_slice() else { return Err(bad("its certificate is one PEM certificate")) };
+            let cert = parse(der, "its certificate")?;
+            if cert.public_key().subject_public_key.data.as_ref() != raw {
+                return Err(bad("its certificate isn't for its private key"));
+            }
+            if !self_signed(&cert) {
+                return Err(bad("its certificate isn't self-signed, and the backup holds no chain for it"));
+            }
+            authority(&cert, "its certificate", 0, true)?;
+            constraint(&cert, &policy).map_err(|why| Error::BadRequest(format!("its certificate {why}")))?;
+            Ok(Admitted { certificate: certificate.to_string(), chain: None, policy, unconstrained: false })
+        }
+    }
+}
+
 /// A DNS name constraint's domain: no leading or trailing dot, lowercase (`""` is every name).
 fn dns_base(n: &str) -> String {
     n.trim_start_matches('.').trim_end_matches('.').to_ascii_lowercase()
