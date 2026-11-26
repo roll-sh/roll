@@ -134,6 +134,23 @@ const playOf = (page, id) =>
       .catch(() => null),
     sleep(2000).then(() => null),
   ]);
+// Where a failed one stopped (Storybook's interactions log, as shot.js reads it): its path and
+// method, bounded to 2 s.
+const stepOf = (page, id) =>
+  Promise.race([
+    page
+      .evaluate((id) => {
+        const st = (globalThis.__STORYBOOK_ADDON_INTERACTIONS_INSTRUMENTER_STATE__ || {})[id];
+        const calls = st && Array.isArray(st.calls) ? st.calls : [];
+        const c = calls.find((x) => x && String(x.status).toLowerCase() === "error");
+        if (!c) return "";
+        const named = (p) => (typeof p === "string" ? p : p && typeof p === "object" ? (calls.find((x) => x && x.id === p.__callId__) || {}).method : "");
+        const path = Array.isArray(c.path) ? c.path.map(named).filter((p) => typeof p === "string" && p).join(".") : "";
+        return ((path ? path + "." : "") + String(c.method || "")).slice(0, 120);
+      }, id)
+      .catch(() => ""),
+    sleep(2000).then(() => ""),
+  ]);
 // The change's first stories in each browser ($STORIES: where the service serves Storybook,
 // $STORY_IDS: the ids Chromium's run took first, at most 5; Chromatic's cross-browser stories):
 // each loaded alone and captured clipped to its root, a `{story, browser, errors, png}` line each.
@@ -182,6 +199,8 @@ const stories = async (names) => {
             const m = await page.locator("#error-message").first().textContent({ timeout: 1000 }).catch(() => null);
             const said = (m || "").replace(/\s+/g, " ").trim().slice(0, 300);
             if (said) line.play_error = said;
+            const at = await stepOf(page, id);
+            if (typeof at === "string" && at) line.play_step = at;
           }
           process.stdout.write(JSON.stringify(line) + "\n");
         } catch (e) {
