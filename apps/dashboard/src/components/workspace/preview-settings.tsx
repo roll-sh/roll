@@ -329,7 +329,7 @@ function Form({
             })}
           </div>
         )}
-        <Field label="Data as of" note="Branch the data as it was then, where the product keeps history (Postgres, NoSQL): -24h, -30m, -7d or a time. Empty: now.">
+        <Field label="Data as of" note="Branch the data as it was then, where the product keeps history (Postgres, NoSQL, Redis): -24h, -30m, -7d or a time. Empty: now.">
           <input
             value={s.data_at ?? ""}
             onChange={(e) => set("data_at", e.target.value.trim() || null)}

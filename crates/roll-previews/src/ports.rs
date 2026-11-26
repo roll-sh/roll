@@ -74,6 +74,12 @@ pub trait Brancher: Send + Sync {
         false
     }
 
+    /// Whether a restore point goes back only into the very branch it was saved from (put back
+    /// from that branch's own history: NoSQL, Redis), so a reset that makes a new branch drops it.
+    fn points_need_their_branch(&self) -> bool {
+        false
+    }
+
     /// Put `branch` back as `point` (a [`Self::snapshot`] of it) left it, in place where the
     /// product can (its ref and credentials kept). `None` where it can't.
     async fn restore(&self, _parent: &str, _branch: &str, _kept: Option<&str>, _point: &str, _name: &str, _mode: Mode) -> anyhow::Result<Option<Branched>> {

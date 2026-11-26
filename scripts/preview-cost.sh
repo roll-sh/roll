@@ -201,6 +201,20 @@ assert b"-" not in got[:1], got[:200]
 PY
 }
 resp "$REDIS_URL" 20000 parent
+rcmd() { # rcmd <redis url> <word>…: one command over RESP, its reply's first line
+  python3 - "$@" <<'PY'
+import socket, sys, urllib.parse
+u = urllib.parse.urlparse(sys.argv[1])
+s = socket.create_connection((u.hostname, u.port))
+def cmd(*a):
+    return b"*%d\r\n" % len(a) + b"".join(b"$%d\r\n%s\r\n" % (len(x), x) for x in a)
+s.sendall(cmd(b"AUTH", u.username.encode(), urllib.parse.unquote(u.password).encode()) + cmd(*[w.encode() for w in sys.argv[2:]]))
+got = b""
+while got.count(b"\r\n") < 2:
+    got += s.recv(65536)
+print(got.split(b"\r\n")[1].decode())
+PY
+}
 
 PRJ=$(api POST /v1/workspace/projects '{"name":"shop"}' | jq_ "d['id']")
 for r in "repo/acme%2Fweb" "repo/acme%2Fwiki" "postgres/$PG" "redis/$REDIS" "bucket/assets" "nosql/$NOSQL" "queue/jobs" "stream/$STREAM" "tasks/work" "search/$SEARCH"; do
@@ -721,13 +735,16 @@ curl -sS -o /dev/null -L -c "$JAR" -b "$JAR" -H "Host: $HOST" "http://$API/?$QUE
 say "a restore point (roll preview points): saved, a table made after it, put back"
 # A restore point (roll preview points): a table made after it is gone once it's put back, on
 # the same DATABASE_URL (pg-control's reset from the point: same endpoint and role), and in the
-# NoSQL branch (NoSQL's point-in-time restore in place, to the second the point was cut at).
+# NoSQL and Redis branches (their point-in-time restores in place, to the second the point was
+# cut at: the same database, URL and password).
 psql_app() { docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB" -Atc "$1" 2>&1 | head -1; }
 POINT=$(api POST "/v1/previews/$PV/restore-points" '{"label":"before the live check"}' | jq_ "d['id']")
 case "$POINT" in rp_*) ;; *) echo "a restore point should be saved: $POINT"; exit 1;; esac
 ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview points "$PV" | has "$POINT" || { echo "roll preview points should list $POINT"; exit 1; }
 psql_app "CREATE TABLE after_the_point (id int)" >/dev/null
 CQL "$BRANCH_NOSQL" "CREATE TABLE app.after_the_point (id int PRIMARY KEY)" >/dev/null
+POINT_REDIS_URL=$(api GET "/v1/redis/databases/$BRANCH_REDIS" | jq_ "d['redis_url']")
+[ "$(rcmd "$POINT_REDIS_URL" SET after:the:point 1)" = "+OK" ] || { echo "the Redis branch should take a key after the point"; exit 1; }
 [ "$(CQL "$BRANCH_NOSQL" "SELECT id FROM app.after_the_point" | jq_ "'rows' in d")" = True ] || { echo "the NoSQL branch should have the table made after the point"; exit 1; }
 TR0=$(now_ms)
 api POST "/v1/previews/$PV/restore-points/$POINT/restore" >/dev/null
@@ -736,7 +753,7 @@ api POST "/v1/previews/$PV/restore-points/$POINT/restore" >/dev/null
 # services slept for it; a visit wakes them).
 PUT_BACK=""
 for _ in $(seq 1 240); do
-  api GET "/v1/previews/$PV/activity" | jq_ "all(any(a['message'].startswith('put ' + k + ':') and 'back as restore point' in a['message'] for a in d) for k in ('postgres', 'nosql'))" | has True && case "$(api GET "/v1/previews/$PV" | jq_ "d['state']")" in ready|sleeping) true;; *) false;; esac && PUT_BACK=yes && break
+  api GET "/v1/previews/$PV/activity" | jq_ "all(any(a['message'].startswith('put ' + k + ':') and 'back as restore point' in a['message'] for a in d) for k in ('postgres', 'nosql', 'redis'))" | has True && case "$(api GET "/v1/previews/$PV" | jq_ "d['state']")" in ready|sleeping) true;; *) false;; esac && PUT_BACK=yes && break
   sleep 0.5
 done
 RESTORE_MS=$(( $(now_ms) - TR0 ))
@@ -745,6 +762,8 @@ RESTORED=$(psql_app "SELECT coalesce(to_regclass('public.after_the_point')::text
 [ "$RESTORED" = "gone $APP_MASKED" ] || { echo "putting the point back should drop what came after it, still masked, on the same DATABASE_URL: $RESTORED"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:8]]"; exit 1; }
 NOSQL_AFTER=$(CQL "$BRANCH_NOSQL" "SELECT id FROM app.after_the_point" | jq_ "'rows' in d")
 [ "$NOSQL_AFTER" = False ] || { echo "putting the point back should drop the NoSQL table made after it"; exit 1; }
+REDIS_AFTER="$(rcmd "$POINT_REDIS_URL" EXISTS after:the:point) $(rcmd "$POINT_REDIS_URL" EXISTS preview:999)"
+[ "$REDIS_AFTER" = ":0 :1" ] || { echo "putting the point back should drop the Redis key set after it, on the same URL, and keep the preview's own: $REDIS_AFTER"; exit 1; }
 api DELETE "/v1/previews/$PV/restore-points/$POINT" >/dev/null
 # Its services slept while the data went back: a visit wakes them, on the same DATABASE_URL.
 for _ in $(seq 1 120); do
