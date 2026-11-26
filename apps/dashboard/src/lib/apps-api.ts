@@ -340,6 +340,8 @@ export interface ProjectImport {
       source: { kind: "repo"; repo: string; root: string | null } | { kind: "git"; url: string; root: string | null } | { kind: "image"; image: string } | { kind: "upload"; root: string };
       branch: string | null;
       run: Partial<Run>;
+      /** Its `[apps.<name>.build]`: dockerfile, target (a stage), install, build, start. */
+      build?: Partial<Pick<Build, "dockerfile" | "target" | "install" | "build" | "start">>;
       /** A database's kind, or `service`: another app of the file, by its name. */
       links: { kind: "postgres" | "redis" | "bucket" | "stream" | "nosql" | "search" | "service"; name: string }[];
       /** What it's set to as it is. */
