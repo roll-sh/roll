@@ -308,20 +308,17 @@ tokio::task_local! {
 ///
 /// roll's own index-scoped principal (`/v1/search`'s ES|QL route, as a grant limited to some
 /// indices) holds no cluster privilege: the table is its policy's source indices, read here, so it
-/// needs `read` on them instead. A view's `ENRICH` is checked so too: views are spliced in before
+/// needs `read` on every index the table was built from instead. A view's `ENRICH` is checked so too: views are spliced in before
 /// their policies load.
 pub(super) fn enrich_allowed(cluster: &crate::Cluster, name: &str) -> EsResult<()> {
     let check = |p: &crate::xpack::security::Principal| {
         if !p.is_index_scoped() {
             return crate::xpack::security::check_cluster_action_of(cluster, p, ccs::RESOLVE_POLICY);
         }
-        let st = cluster.state();
-        let sources = st.metadata.xpack.get(crate::xpack::enrich::POLICIES, name).and_then(|p| p.get("config")).and_then(Value::as_object).and_then(|m| m.values().next()).and_then(|c| c.get("indices")).map(|i| match i {
-            Value::Arr(a) => a.iter().map(Value::to_es_string).collect(),
-            other => vec![other.to_es_string()],
-        });
-        let resolved = sources.map(|s: Vec<String>| crate::meta::resolve::resolve(&st, &s, &crate::meta::resolve::IndicesOptions::LENIENT_EXPAND_OPEN, crate::time::now_millis()).unwrap_or_default()).unwrap_or_default();
-        if !resolved.is_empty() && crate::xpack::security::allows_indices_of(cluster, p, "indices:data/read/esql", &resolved) {
+        // The indices the table was built from, a source deleted since included
+        // ([`crate::xpack::enrich::sources_of`]).
+        let built = crate::xpack::enrich::sources_of(&cluster.state(), name, crate::time::now_millis()).unwrap_or_default();
+        if !built.is_empty() && crate::xpack::security::allows_indices_of(cluster, p, "indices:data/read/esql", &built) {
             Ok(())
         } else {
             Err(EsError::security(403, format!("enrich policy [{name}] reads indices this request may not read")))
