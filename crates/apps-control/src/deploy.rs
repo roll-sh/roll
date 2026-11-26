@@ -3708,6 +3708,8 @@ impl Apps {
                 continue;
             }
             let _ = self.expire_domain_claims(PENDING_CLAIM_TTL).await;
+            let age = PENDING_CLAIM_TTL.as_millis() as i64;
+            let _ = self.db(move |s| s.expire_claim_tokens(s.now()? - age)).await;
             // A day before: the owner hears it's going (and what DNS says), not only after.
             let cutoff = code_sql::now_ms() - (PENDING_CLAIM_TTL.as_millis() as i64 - 86_400_000);
             let _ = self.db(move |s| s.warn_domain_claims(cutoff)).await;
