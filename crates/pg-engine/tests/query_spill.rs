@@ -493,3 +493,49 @@ fn sorted_distinct() {
     drop(s);
     eng.shutdown();
 }
+
+/// Several windows, and a window over input not sorted for it, past work_mem: computed as
+/// PostgreSQL's plan computes them, a WindowAgg a window over a Sort for it, each Sort's runs in
+/// a temporary file (PostgreSQL 18.6's counts for the same statements); the rows are those they
+/// give in memory, in the same order.
+#[test]
+fn several_windows_spill() {
+    std::thread::Builder::new().stack_size(64 << 20).spawn(several_windows).unwrap().join().unwrap();
+}
+
+fn several_windows() {
+    let dir = tempfile::tempdir().unwrap();
+    let eng = open(dir.path());
+    let mut s = eng.connect(1, "postgres", "postgres", "postgres").unwrap();
+    for sql in [
+        "CREATE TABLE wm (a int, b int, t text)",
+        "INSERT INTO wm SELECT g, (g::int8 * 7919 % 20011)::int, md5(g::text) FROM generate_series(1, 20000) g",
+        "ANALYZE wm",
+    ] {
+        q(&mut s, sql).unwrap();
+    }
+    for (sql, files) in [
+        ("SELECT row_number() OVER (ORDER BY b) r, rank() OVER (ORDER BY t) k, a FROM wm", 2),
+        (
+            "SELECT a, sum(a) OVER (PARTITION BY a % 7 ORDER BY b) s, count(*) OVER (ORDER BY t) c, \
+             lag(t) OVER (PARTITION BY a % 7 ORDER BY b) l FROM wm",
+            2,
+        ),
+        ("SELECT a, row_number() OVER (ORDER BY t) FROM (SELECT * FROM wm OFFSET 0) s", 1),
+        ("SELECT a, rank() OVER (PARTITION BY a % 3 ORDER BY b), dense_rank() OVER (PARTITION BY a % 3 ORDER BY b, t) FROM wm", 1),
+    ] {
+        q(&mut s, "SET work_mem = '256MB'").unwrap();
+        let want = q(&mut s, sql).unwrap();
+        assert_eq!(want.len(), 20000);
+        q(&mut s, "SET work_mem = '64kB'").unwrap();
+        q(&mut s, "SELECT pg_stat_force_next_flush()").unwrap();
+        let f0 = int(&mut s, "SELECT temp_files FROM pg_stat_database WHERE datname = current_database()");
+        assert!(q(&mut s, sql).unwrap() == want, "{sql}");
+        assert_eq!(temp_files(dir.path()), 0);
+        q(&mut s, "SELECT pg_stat_force_next_flush()").unwrap();
+        let f1 = int(&mut s, "SELECT temp_files FROM pg_stat_database WHERE datname = current_database()");
+        assert_eq!(f1 - f0, files, "{sql}: the Sorts' files");
+    }
+    drop(s);
+    eng.shutdown();
+}

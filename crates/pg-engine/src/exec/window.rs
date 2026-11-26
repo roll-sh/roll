@@ -99,6 +99,9 @@ impl Big {
                     let mem = super::workmem::StoreMem::new(b.allowed.unwrap_or_else(|| super::workmem::work_mem(ctx)), spec.backward);
                     b.on = Some((spec, mem));
                 }
+                // (Several windows, or one whose input isn't sorted for it: `Chain`, made by
+                // `stream_rest`, `on` left None.)
+                None if chained(calls, presorted, ctx) => return true,
                 None => {
                     *big = None;
                     return false;
@@ -106,6 +109,174 @@ impl Big {
             }
         }
         true
+    }
+}
+
+/// Whether past work_mem the calls run as PostgreSQL's plan runs them, a WindowAgg a window
+/// over a Sort for it (`Chain`): there are several windows, or one whose input isn't sorted
+/// on its keys. (Not with a partition key compared under a nondeterministic collation,
+/// which a Sort's key doesn't.)
+fn chained(calls: &[WindowCall], presorted: &[String], ctx: &ExecCtx) -> bool {
+    match active_windows(calls, ctx) {
+        Some(w) if w.len() > 1 => true,
+        Some(w) => w.first().is_some_and(|(_, need)| {
+            need.len() > presorted.len() || need.iter().zip(presorted).any(|(k, p)| k.repr != *p)
+        }),
+        None => false,
+    }
+}
+
+/// The calls' windows in the order PostgreSQL's WindowAggs compute them (bottom first,
+/// select_active_windows's, as `run_windows` orders them): each window's calls and the keys
+/// its input is sorted on (partition keys, then order keys). None when a partition key
+/// compares under a nondeterministic collation.
+fn active_windows(calls: &[WindowCall], ctx: &ExecCtx) -> Option<Vec<(Vec<usize>, Vec<NeedKey>)>> {
+    use crate::sql::binder::optimize::pseudo_constant;
+    let mut wins: Vec<(String, Vec<usize>)> = Vec::new();
+    for (ci, call) in calls.iter().enumerate() {
+        let part: Vec<String> = call.partition_by.iter().filter(|e| !pseudo_constant(e)).map(|e| key_repr(e, false, false)).collect();
+        let order: Vec<String> = call.order_by.iter().map(|k| key_repr(&k.expr, k.desc, k.nulls_first)).collect();
+        let spec = format!("{part:?}{order:?}{:?}", call.frame);
+        match wins.iter_mut().find(|w| w.0 == spec) {
+            Some(w) => w.1.push(ci),
+            None => wins.push((spec, vec![ci])),
+        }
+    }
+    let mut refs: Vec<String> = Vec::new();
+    let mut ref_of = |e: &crate::sql::expr::Expr| {
+        let k = format!("{e:?}");
+        match refs.iter().position(|r| *r == k) {
+            Some(i) => i,
+            None => {
+                refs.push(k);
+                refs.len() - 1
+            }
+        }
+    };
+    let mut unique_orders: Vec<Vec<(usize, bool, bool)>> = Vec::new();
+    for (_, cs) in &wins {
+        let call = &calls[cs[0]];
+        for k in &call.order_by {
+            ref_of(&k.expr);
+        }
+        for e in &call.partition_by {
+            ref_of(e);
+        }
+        let mut u: Vec<(usize, bool, bool)> = Vec::new();
+        for e in &call.partition_by {
+            let x = (ref_of(e), false, false);
+            if !u.contains(&x) {
+                u.push(x);
+            }
+        }
+        for k in &call.order_by {
+            let x = (ref_of(&k.expr), k.desc, k.nulls_first);
+            if !u.contains(&x) {
+                u.push(x);
+            }
+        }
+        unique_orders.push(u);
+    }
+    let mut sequence: Vec<usize> = (0..wins.len()).collect();
+    sequence.sort_by(|&a, &b| {
+        for (x, y) in unique_orders[a].iter().zip(&unique_orders[b]) {
+            let o = y.0.cmp(&x.0).then(x.1.cmp(&y.1).reverse()).then(x.2.cmp(&y.2).reverse());
+            if o != Ordering::Equal {
+                return o;
+            }
+        }
+        unique_orders[b].len().cmp(&unique_orders[a].len())
+    });
+    let mut out = Vec::with_capacity(wins.len());
+    for wi in sequence {
+        let call0 = &calls[wins[wi].1[0]];
+        let part_exprs: Vec<crate::sql::expr::Expr> = call0.partition_by.iter().filter(|e| !pseudo_constant(e)).cloned().collect();
+        let colls = partition_collations(&part_exprs, ctx);
+        let mut need: Vec<NeedKey> = Vec::new();
+        for (e, coll) in part_exprs.into_iter().zip(colls) {
+            if coll.is_some() {
+                return None;
+            }
+            let repr = key_repr(&e, false, false);
+            if !need.iter().any(|k| k.repr == repr) {
+                need.push(NeedKey { key: SortKey { expr: e, desc: false, nulls_first: false, using: None }, coll: None, repr });
+            }
+        }
+        for k in call0.order_by.iter().filter(|k| !pseudo_constant(&k.expr)) {
+            let repr = key_repr(&k.expr, k.desc, k.nulls_first);
+            if !need.iter().any(|x| x.repr == repr) {
+                need.push(NeedKey { key: k.clone(), coll: None, repr });
+            }
+        }
+        out.push((std::mem::take(&mut wins[wi].1), need));
+    }
+    Some(out)
+}
+
+/// The calls past work_mem as PostgreSQL's plan computes them: for each window (in
+/// `active_windows`' order) a Sort on its keys when its input isn't sorted on them (an
+/// Incremental Sort when a prefix is: `nodes::incremental_sort`; a full one through
+/// extsort, `nodes::sort_all`, runs on disk past work_mem as tuplesort's), then a WindowAgg
+/// of its calls alone (a `WindowNode`, which streams its partitions past work_mem), each over
+/// the one before; its rows carry the input's columns then the windows' results, put back in
+/// the calls' order as they go up. Its input: the rows read before it was made, then the rest.
+struct Chain {
+    pending: Option<(Vec<Row>, Option<BoxNode>)>,
+    calls: Vec<WindowCall>,
+    presorted: Vec<String>,
+    types: Vec<DataType>,
+    node: Option<BoxNode>,
+    /// Each call's result's place among the windows' results, and the input's width.
+    place: Vec<usize>,
+    width: usize,
+}
+
+impl Chain {
+    fn open(&mut self, ctx: &ExecCtx) -> Result<BoxNode> {
+        let (rows, input) = self.pending.take().expect("a chain not yet opened");
+        let wins = active_windows(&self.calls, ctx).expect("a chained window");
+        self.width = rows.first().map_or(self.types.len(), |r| r.len());
+        let mut types = self.types.clone();
+        types.resize(self.width, DataType::Unknown);
+        let mut node: BoxNode = Box::new(super::nodes::PrefixNode { rows: rows.into_iter(), input });
+        let mut sorted = std::mem::take(&mut self.presorted);
+        self.place = vec![0; self.calls.len()];
+        let mut at = 0;
+        for (cs, need) in wins {
+            let common = need.iter().zip(&sorted).take_while(|(k, s)| k.repr == **s).count();
+            if common < need.len() {
+                let keys: Vec<SortKey> = need.iter().map(|k| k.key.clone()).collect();
+                node = if common > 0 {
+                    super::nodes::incremental_sort(node, keys, common)
+                } else {
+                    super::nodes::sort_all(node, &keys, types.clone(), None, ctx)?
+                };
+                sorted = need.iter().map(|k| k.repr.clone()).collect();
+            }
+            let mut w = WindowNode::new(node, cs.iter().map(|&c| self.calls[c].clone()).collect());
+            w.presorted = sorted.clone();
+            w.shape = Shape { input: None, types: Some(types.clone()), keep: None };
+            for &c in &cs {
+                self.place[c] = at;
+                at += 1;
+                types.push(self.calls[c].ty.clone());
+            }
+            node = Box::new(w);
+        }
+        Ok(node)
+    }
+}
+
+impl Node for Chain {
+    fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+        if self.node.is_none() {
+            self.node = Some(self.open(ctx)?);
+        }
+        let Some(mut r) = self.node.as_mut().unwrap().next(ctx)? else { return Ok(None) };
+        let w = self.width;
+        let mut res: Vec<Value> = r.drain(w..).collect();
+        r.extend(self.place.iter().map(|&p| std::mem::replace(&mut res[p], Value::Null)));
+        Ok(Some(r))
     }
 }
 
@@ -125,10 +296,14 @@ fn streamable(calls: &[WindowCall], presorted: &[String], stream: &Option<Vec<Ne
 
 /// A partition being streamed: the rows read before it went to `winstream`, its partition
 /// keys' values, and its state.
-struct Streamed {
-    pre: std::collections::VecDeque<Row>,
-    pvals: Vec<Value>,
-    part: super::winstream::Part,
+enum Streamed {
+    Part {
+        pre: std::collections::VecDeque<Row>,
+        pvals: Vec<Value>,
+        part: Box<super::winstream::Part>,
+    },
+    /// The rest of the input, through a WindowAgg a window (`Chain`).
+    Chain(Box<Chain>),
 }
 
 /// The rest of a streamed partition: `pre`, then the input's rows until one of another
@@ -328,20 +503,29 @@ impl WindowNode {
     /// The streamed partition's next row; None once it is out (it is released).
     #[inline(never)]
     fn stream_next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
-        let (Some(st), Some(Big { on: Some((spec, mem)), .. })) = (self.streamed.as_mut(), self.big.as_mut()) else {
+        if let Some(Streamed::Chain(c)) = self.streamed.as_mut() {
+            let r = c.next(ctx)?;
+            if r.is_none() {
+                self.streamed = None;
+            }
+            return Ok(r);
+        }
+        let (Some(Streamed::Part { pre, pvals, part }), Some(Big { on: Some((spec, mem)), .. })) = (self.streamed.as_mut(), self.big.as_mut()) else {
             unreachable!("a streamed window")
         };
         let mut src = Src {
-            pre: &mut st.pre,
+            pre,
             input: &mut self.input,
             pending: &mut self.pending,
             keys: self.stream.as_deref(),
-            pvals: &st.pvals,
+            pvals,
         };
         let shape = super::winstream::Shape { types: self.shape.types.as_deref().unwrap_or_default(), keep: self.shape.keep.as_deref() };
-        let r = st.part.next(spec, &self.calls, &mut src, mem, &shape, ctx)?;
-        if r.is_none() {
-            self.streamed.take().unwrap().part.release(mem);
+        let r = part.next(spec, &self.calls, &mut src, mem, &shape, ctx)?;
+        if r.is_none()
+            && let Some(Streamed::Part { part, .. }) = self.streamed.take()
+        {
+            (*part).release(mem);
         }
         Ok(r)
     }
@@ -349,8 +533,20 @@ impl WindowNode {
     /// The partition `rows` began, past work_mem: the rest of it is streamed.
     #[inline(never)]
     fn stream_rest(&mut self, rows: Vec<Row>, pvals: Vec<Value>, ctx: &ExecCtx) {
-        let Some(Big { on: Some((spec, _)), .. }) = &self.big else { unreachable!("a streamed window") };
-        self.streamed = Some(Streamed { pre: rows.into(), pvals, part: super::winstream::Part::new(spec, ctx) });
+        let Some(Big { on: Some((spec, _)), .. }) = &self.big else {
+            // (Chained: `Big::resolve`.)
+            self.streamed = Some(Streamed::Chain(Box::new(Chain {
+                pending: Some((rows, self.input.take())),
+                calls: self.calls.clone(),
+                presorted: self.presorted.clone(),
+                types: self.shape.types.clone().unwrap_or_default(),
+                node: None,
+                place: Vec::new(),
+                width: 0,
+            })));
+            return;
+        };
+        self.streamed = Some(Streamed::Part { pre: rows.into(), pvals, part: Box::new(super::winstream::Part::new(spec, ctx)) });
     }
 
     /// The calls' results for `rows`, appended to them, in the order they come out.

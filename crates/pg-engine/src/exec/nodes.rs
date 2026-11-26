@@ -3793,6 +3793,41 @@ pub(super) fn sort_all(
     Ok(Box::new(SortedNode { out, held: if fits { held.map(|c| (c, width)) } else { None } }))
 }
 
+/// The rows read before, then the rest of `input`'s.
+pub(super) struct PrefixNode {
+    pub(super) rows: std::vec::IntoIter<Row>,
+    pub(super) input: Option<BoxNode>,
+}
+
+impl Node for PrefixNode {
+    fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+        if let Some(r) = self.rows.next() {
+            return Ok(Some(r));
+        }
+        let Some(input) = self.input.as_mut() else { return Ok(None) };
+        let r = input.next(ctx)?;
+        if r.is_none() {
+            self.input = None;
+        }
+        Ok(r)
+    }
+}
+
+/// `input`'s rows, sorted on its first `presorted` keys already, sorted on `keys` as an
+/// Incremental Sort sorts them (`IncrSortNode`), not counted for EXPLAIN ANALYZE: a window's
+/// past work_mem (`window::Chain`).
+pub(super) fn incremental_sort(input: BoxNode, keys: Vec<SortKey>, presorted: usize) -> BoxNode {
+    Box::new(IncrSortNode {
+        input,
+        keys,
+        presorted,
+        key: 0,
+        started: false,
+        sorter: super::pgsort::IncrSort::new(None),
+        batch: Vec::new().into_iter(),
+    })
+}
+
 impl SortNode {
     /// The node: an Incremental Sort's own when its input is sorted on its leading keys
     /// already (`IncrSortNode`).
