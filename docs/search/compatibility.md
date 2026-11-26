@@ -495,8 +495,11 @@ else (a node's shared address such as `http://127.0.0.1:59200`, roll's console) 
 `base64(<id>@<cluster>:<api_key>)`: roll's nodes route `<id>@<cluster>` to that cluster at any
 address, so the copied value works at the shared address and the cluster's own host alike. `id`
 and `api_key` are Elasticsearch's either way. A qualifier names one cluster: only that cluster
-accepts it, and a cluster's own host refuses another cluster's (`<id>@<other>`, and a Basic
-`<user>@<other>`) with a 401. A search with `ignore_unavailable`
+accepts it, and a cluster's own host refuses another cluster's (`<id>@<other>`, a Basic
+`<user>@<other>`, a derived key or `<cluster>_<secret>` token naming another) with a 401; host
+names are matched case-insensitively. APIs that take a key's id (`GET _security/api_key?id=`,
+`DELETE _security/api_key` `ids`, updates) take the `id` field, never the id decoded out of
+`encoded`, which may carry `@<cluster>`. A search with `ignore_unavailable`
 leaves out the explicitly named indices its user may not read (without it they are refused);
 ES|QL and SQL name their indices strictly either way.
 Background jobs run as the user or API key that set them up, and roll checks that user or key

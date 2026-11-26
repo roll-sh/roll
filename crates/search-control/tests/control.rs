@@ -1772,7 +1772,7 @@ async fn an_api_keys_encoded_works_at_the_shared_address_and_only_on_its_cluster
     use base64::Engine;
     let e = env_with(|c| c.domain = Some("search.example.test".into())).await;
     let (user, pw) = creds(&e.post("/v1/search/clusters", json!({"name": "shop"})).await);
-    e.post("/v1/search/clusters", json!({"name": "other"})).await;
+    let (_, opw) = creds(&e.post("/v1/search/clusters", json!({"name": "other"})).await);
     let r = e.post("/v1/search/clusters/shop/request", json!({"method": "POST", "path": "/_security/api_key", "body": {"name": "app"}})).await;
     let k = body(&r);
     let (id, secret, encoded) = (k["id"].as_str().unwrap(), k["api_key"].as_str().unwrap(), k["encoded"].as_str().unwrap());
@@ -1811,6 +1811,11 @@ async fn an_api_keys_encoded_works_at_the_shared_address_and_only_on_its_cluster
     assert_eq!(auth(b64(format!("{id}:{secret}")), shop).await, 200);
     assert_eq!(auth(encoded.to_string(), other).await, 401);
     assert_eq!(auth(b64(format!("{id}:{secret}")), other).await, 401);
+    // Host names are case-insensitive.
+    assert_eq!(auth(encoded.to_string(), Some("Shop.Search.Example.test")).await, 200);
+    // Another cluster's own token at this one's host: refused, not run on the other cluster.
+    let r = e.http.post(format!("{}/_security/api_key", e.es)).header("host", "shop.search.example.test").bearer_auth(format!("other_{opw}")).json(&json!({"name": "x"})).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 401);
 }
 
 #[tokio::test]

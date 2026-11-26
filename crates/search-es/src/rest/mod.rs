@@ -35,11 +35,12 @@ pub struct EsRequest {
     /// Who the host verified the request as, in process ([`Verified`]): no header says it, so
     /// nothing a client sends can.
     pub verified: Option<Verified>,
-    /// The client reached the cluster at an address of its own (its host name, or a node that
-    /// serves only it), set in process by the host: there the bare `<id>:<key>` of Elasticsearch's
-    /// `encoded` works, so a new API key's `encoded` is Elasticsearch's. Anywhere else (a shared
-    /// address, roll's console, in-process calls) it names the cluster
-    /// ([`crate::xpack::security::api_keys`]).
+    /// The client reached the cluster at an address of its own (its host label or SNI naming the
+    /// cluster it runs on, or a node that serves only it), set in process by the host from the
+    /// address it routed by: there the bare `<id>:<key>` of Elasticsearch's `encoded` works, so a
+    /// new API key's `encoded` is Elasticsearch's. Anywhere else (a shared address, roll's
+    /// console, in-process calls) it names the cluster ([`crate::xpack::security::api_keys`]).
+    /// A client influences it through `Host`; it only picks that output format.
     pub own_address: bool,
 }
 

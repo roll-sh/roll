@@ -2255,7 +2255,7 @@ impl Node {
                     .and_then(|s| auth::host_label(s, self.cfg.domain.as_deref()))
                     .or_else(|| req.header("host").and_then(|h| auth::host_label(h, self.cfg.domain.as_deref())));
                 let presented = auth::parse_authorization(req.header("authorization")).unwrap_or(Presented::None);
-                match auth::claim(&presented, host) {
+                match auth::claim(&presented, host.as_deref()) {
                     Some(c) => c.cluster,
                     None => return Ok(None),
                 }
@@ -2303,7 +2303,7 @@ impl Node {
                 host_cluster = sni
                     .and_then(|s| auth::host_label(s, self.cfg.domain.as_deref()))
                     .or_else(|| req.header("host").and_then(|h| auth::host_label(h, self.cfg.domain.as_deref())));
-                Some(auth::claim(&presented, host_cluster))
+                Some(auth::claim(&presented, host_cluster.as_deref()))
             }
         };
         // Why the cluster refused a derived key, from its one verification: said only once its
@@ -2335,12 +2335,13 @@ impl Node {
             (None, Some(name)) => name.as_str(),
             (None, None) => return Err(failed().into()),
         };
-        // Its own address: a host label (a qualifier naming another cluster was refused in the
-        // claim) or a node serving only this cluster.
-        let own_address = host_cluster.is_some() || self.cfg.default_cluster.is_some();
+        // Its own address: the host label (or SNI) names the cluster the request runs on, or the
+        // node serves only it. A client steers it through `Host`, which is harmless: it only
+        // picks the format of a new key's `encoded`, never what any credential reaches.
+        let own_address = host_cluster.as_deref() == Some(name) || self.cfg.default_cluster.is_some();
         // Credentials that aren't the cluster's own may be a principal of the cluster's
         // security (native user, API key, access token): checked once the cluster is loaded.
-        let native = claim.as_ref().and_then(|c| auth::native_authorization(&presented, c, host_cluster));
+        let native = claim.as_ref().and_then(|c| auth::native_authorization(&presented, c, host_cluster.as_deref()));
         // A linked remote cluster's request (roll's own, never a client's: the header is
         // ignored from anyone else) authenticates with a cross-cluster key of this cluster.
         let link = match origin {

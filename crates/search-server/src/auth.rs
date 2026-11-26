@@ -174,12 +174,13 @@ pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-/// The cluster label of a host name under `domain` (`c1.search.example.com` → `c1`).
-pub fn host_label<'a>(host: &'a str, domain: Option<&str>) -> Option<&'a str> {
-    let host = host.rsplit_once(':').filter(|(_, p)| p.bytes().all(|b| b.is_ascii_digit())).map(|(h, _)| h).unwrap_or(host);
-    let domain = domain?;
-    let label = host.strip_suffix(domain)?.strip_suffix('.')?;
-    (!label.is_empty() && !label.contains('.')).then_some(label)
+/// The cluster label of a host name under `domain` (`c1.search.example.com` → `c1`), lowercased:
+/// DNS names are case-insensitive (`Shop.search.example.com` is `shop`'s).
+pub fn host_label(host: &str, domain: Option<&str>) -> Option<String> {
+    let host = host.rsplit_once(':').filter(|(_, p)| p.bytes().all(|b| b.is_ascii_digit())).map(|(h, _)| h).unwrap_or(host).to_ascii_lowercase();
+    let domain = domain?.to_ascii_lowercase();
+    let label = host.strip_suffix(domain.as_str())?.strip_suffix('.')?;
+    (!label.is_empty() && !label.contains('.')).then(|| label.to_string())
 }
 
 /// The cluster a request names, read as [`crate::Node::enter`] reads it (the `Host` label under
@@ -190,7 +191,7 @@ pub fn cluster_named(headers: &hyper::HeaderMap, domain: Option<&str>) -> Option
     let host_cluster = host.and_then(|h| host_label(h, domain));
     let auth = headers.get(hyper::header::AUTHORIZATION).and_then(|h| h.to_str().ok());
     let presented = parse_authorization(auth).ok()?;
-    claim(&presented, host_cluster).map(|c| c.cluster)
+    claim(&presented, host_cluster.as_deref()).map(|c| c.cluster)
 }
 
 /// Which cluster a request is for and the secret to check (`None` when no secret was given).
@@ -248,11 +249,17 @@ pub fn claim(p: &Presented, host_cluster: Option<&str>) -> Option<Claim> {
                 return Some(Claim { cluster: c.to_string(), user: None, api_key_id: None, secret: Some(token.clone()) });
             }
             let (c, s) = token.rsplit_once('_')?;
+            if elsewhere(c) {
+                return None;
+            }
             Some(Claim { cluster: c.to_string(), user: None, api_key_id: None, secret: Some(s.to_string()) })
         }
         // Its cluster is the one it names (as `<key id>@<cluster>`); no secret of the cluster's own.
         Presented::Derived(token) => {
             let (key, cluster) = search_es::xpack::security::derived::names(token)?;
+            if elsewhere(&cluster) {
+                return None;
+            }
             Some(Claim { cluster, user: None, api_key_id: Some(key), secret: None })
         }
         Presented::None => host_cluster.map(|c| Claim { cluster: c.to_string(), user: None, api_key_id: None, secret: None }),
@@ -393,12 +400,15 @@ mod tests {
         assert_eq!((c.cluster.as_str(), c.api_key_id.as_deref()), ("c5", Some("k1")));
         assert_eq!(claim(&Presented::ApiKey { id: "k1@c6".into(), secret: "s".into() }, Some("c5")), None);
         assert_eq!(claim(&basic("bob@c6"), Some("c5")), None);
+        assert_eq!(claim(&Presented::Bearer("c6_s".into()), Some("c5")), None);
+        assert_eq!(claim(&Presented::Bearer("c5_s".into()), Some("c5")).unwrap().cluster, "c5");
     }
 
     #[test]
     fn hosts() {
-        assert_eq!(host_label("c1.search.example.com", Some("search.example.com")), Some("c1"));
-        assert_eq!(host_label("c1.search.example.com:9243", Some("search.example.com")), Some("c1"));
+        assert_eq!(host_label("c1.search.example.com", Some("search.example.com")).as_deref(), Some("c1"));
+        assert_eq!(host_label("c1.search.example.com:9243", Some("search.example.com")).as_deref(), Some("c1"));
+        assert_eq!(host_label("C1.Search.Example.com", Some("search.example.com")).as_deref(), Some("c1"));
         assert_eq!(host_label("a.b.search.example.com", Some("search.example.com")), None);
         assert_eq!(host_label("search.example.com", Some("search.example.com")), None);
         assert_eq!(host_label("c1.search.example.com", None), None);
