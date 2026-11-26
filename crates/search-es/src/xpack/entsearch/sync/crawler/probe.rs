@@ -28,6 +28,9 @@ const TIME: Duration = Duration::from_secs(75);
 const MORE_ROBOTS: usize = 5;
 const BODY_SHOWN: usize = 64 << 10;
 const LINKS_SHOWN: usize = 200;
+/// The docs preset's records shown, and the content shown of each.
+const RECORDS_SHOWN: usize = 20;
+const RECORD_CONTENT_SHOWN: usize = 1 << 10;
 
 impl Verdict {
     pub(crate) fn as_str(self) -> &'static str {
@@ -65,7 +68,7 @@ pub async fn test(cluster: &Cluster, connector: Option<&str>, url: &str) -> Resu
             let advanced = super::super::rules::advanced(&active).cloned();
             (super::fields_of(&values)?, advanced, Some(values))
         }
-        None => (Fields { urls: vec![format!("{}/", link.origin())], sitemap_urls: Vec::new(), sitemap_discovery: false, max_crawl_depth: None, max_unique_url_count: None }, None, None),
+        None => (Fields { urls: vec![format!("{}/", link.origin())], sitemap_urls: Vec::new(), sitemap_discovery: false, max_crawl_depth: None, max_unique_url_count: None, preset: None }, None, None),
     };
     let ceil = super::ceilings(cluster);
     let plan = tokio::task::spawn_blocking(move || config::plan(&fields, advanced.as_ref(), &ceil)).await.map_err(|_| "building the crawl's rules stopped on an internal error".to_string())??;
@@ -102,7 +105,7 @@ pub async fn test(cluster: &Cluster, connector: Option<&str>, url: &str) -> Resu
     let (mut at, mut clean, mut hops) = (link.clone(), true, Vec::new());
     let resp = loop {
         super::polite_turn(&at, floor, deadline.min(Instant::now() + super::TURN_WAIT)).await?;
-        let got = tokio::time::timeout_at(deadline.into(), fetcher.get(&at, clean, max)).await.map_err(|_| out_of_time())?;
+        let got = tokio::time::timeout_at(deadline.into(), fetcher.get(&at, clean, max, None)).await.map_err(|_| out_of_time())?;
         let r = match got {
             Ok(r) => r,
             Err(f) => {
@@ -147,10 +150,10 @@ pub async fn test(cluster: &Cluster, connector: Option<&str>, url: &str) -> Resu
     let text = String::from_utf8_lossy(&resp.body).into_owned();
     let tags = plan.domain(&at).map(|d| d.exclude_tags.clone()).unwrap_or_default();
     let extraction = plan.domain(&at).map(|d| d.extraction.clone()).unwrap_or_default();
-    let (page_url, limits, full_html) = (at.clone(), plan.limits.clone(), plan.full_html);
+    let (page_url, limits, full_html, docs) = (at.clone(), plan.limits.clone(), plan.full_html, plan.docs.clone());
     let parse_by = deadline.min(Instant::now() + super::PAGE_PARSE_TIME);
     let parsed = tokio::task::spawn_blocking(move || {
-        let r = html::read_page(&text, held, &page_url, &tags, &extraction, &limits, parse_by);
+        let r = html::read_page(&text, held, &page_url, &tags, &extraction, docs.as_deref(), &limits, parse_by);
         (r, text)
     })
     .await
@@ -185,7 +188,24 @@ pub async fn test(cluster: &Cluster, connector: Option<&str>, url: &str) -> Resu
     } else if !indexed {
         answer.insert("reason".into(), "the page has no title and no text".into());
     }
-    let mut doc = super::document(&at, None, page, full_html.then_some(text), &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    // The docs preset's records, the first ones, their content cut to fit the answer.
+    if plan.docs.is_some() {
+        let records = super::records(&at, &page, &now);
+        answer.insert("record_count".into(), (records.len() as i64).into());
+        let shown = records
+            .into_iter()
+            .take(RECORDS_SHOWN)
+            .map(|(_, mut r)| {
+                if let Some(Value::Str(s)) = r.get_mut("content") {
+                    *s = html::limit_bytes(std::mem::take(s), RECORD_CONTENT_SHOWN);
+                }
+                Value::Obj(r)
+            })
+            .collect();
+        answer.insert("records".into(), Value::Arr(shown));
+    }
+    let mut doc = super::document(&at, None, page, full_html.then_some(text), &now);
     // What's shown is cut to fit the answer; what a crawl indexes isn't.
     for k in ["body", "full_html"] {
         if let Some(Value::Str(s)) = doc.get_mut(k)
@@ -270,7 +290,7 @@ impl Robotses<'_> {
                 break;
             }
             super::polite_turn(&at, self.floor, self.deadline.min(Instant::now() + super::TURN_WAIT)).await?;
-            let got = tokio::time::timeout_at(self.deadline.into(), self.fetcher.get(&at, clean, super::robots::MAX_BYTES)).await.map_err(|_| out_of_time())?;
+            let got = tokio::time::timeout_at(self.deadline.into(), self.fetcher.get(&at, clean, super::robots::MAX_BYTES, None)).await.map_err(|_| out_of_time())?;
             let Ok(resp) = got else { break };
             if (300..400).contains(&resp.status) {
                 let Some(next) = resp.location.as_deref().and_then(|l| Link::parse(l, Some(at.url()))) else { break };

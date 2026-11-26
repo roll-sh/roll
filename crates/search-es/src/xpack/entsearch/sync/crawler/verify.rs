@@ -147,7 +147,7 @@ pub async fn check(egress: &Egress, blocked: &[String], kind: Kind, key: &str, t
         if let Err(why) = super::polite_turn(&at, floor, std::time::Instant::now() + turn_wait).await {
             return Checked::NotChecked(why);
         }
-        let resp = match fetcher.get(&at, false, FILE_BYTES).await {
+        let resp = match fetcher.get(&at, false, FILE_BYTES, None).await {
             Ok(r) => r,
             // Too large is an answer, but not the file; every other failure is `unreachable`.
             Err(super::fetch::Failure::TooLarge) => return Checked::Failed(format!("[{}] isn't the file", at.as_str())),

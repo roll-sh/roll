@@ -1096,13 +1096,13 @@ async fn a_refused_oauth_call_challenges_for_the_rule() {
 
 /// 2026-07-28's `subscriptions/listen` (SEP-2575): the stream starts with the acknowledgement of
 /// what roll will send, then says when the connection's tools change (an access request approved),
-/// tagged with the subscription's id.
+/// and the event types it may poll with them (SEP-3415), tagged with the subscription's id.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_subscription_hears_the_tools_change() {
-    let d = Daemon::new();
+    let d = Daemon::with_products(vec!["postgres".into(), "previews".into()]);
     let asker = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "delete": "ask" } }])).await;
     let meta = json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { "name": "t", "version": "1" }, "io.modelcontextprotocol/clientCapabilities": {} });
-    let listen = json!({ "jsonrpc": "2.0", "id": "listen:1", "method": "subscriptions/listen", "params": { "_meta": meta, "notifications": { "toolsListChanged": true, "resourcesListChanged": true } } });
+    let listen = json!({ "jsonrpc": "2.0", "id": "listen:1", "method": "subscriptions/listen", "params": { "_meta": meta, "notifications": { "toolsListChanged": true, "resourcesListChanged": true, "eventsListChanged": true } } });
     let req = Request::builder()
         .method(Method::POST)
         .uri("/v1/mcp")
@@ -1137,13 +1137,16 @@ async fn a_subscription_hears_the_tools_change() {
         }
     };
     let ack = next().await;
-    assert_eq!((ack["method"].as_str(), &ack["params"]["notifications"]), (Some("notifications/subscriptions/acknowledged"), &json!({ "toolsListChanged": true })), "only what roll sends");
+    assert_eq!((ack["method"].as_str(), &ack["params"]["notifications"]), (Some("notifications/subscriptions/acknowledged"), &json!({ "toolsListChanged": true, "eventsListChanged": true })), "only what roll sends");
     assert_eq!(ack["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"], "listen:1", "a client matches the ack by it");
-    let asked = d.tool(&asker, "access_request_access", json!({ "product": "postgres", "action": "read", "for": "15m", "reason": "list the databases" })).await;
+    let asked = d.tool(&asker, "access_request_access", json!({ "product": "previews", "action": "read", "for": "15m", "reason": "follow the previews" })).await;
     let apr = asked["structuredContent"]["id"].as_str().unwrap_or_else(|| panic!("{asked}")).to_string();
     assert_eq!(d.http(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), None).await.0, StatusCode::OK);
     let changed = next().await;
     assert_eq!((changed["method"].as_str(), &changed["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"]), (Some("notifications/tools/list_changed"), &json!("listen:1")), "{changed}");
+    // Reading previews offers previews.event too: the event types changed with the tools.
+    let types = next().await;
+    assert_eq!((types["method"].as_str(), &types["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"]), (Some("notifications/events/list_changed"), &json!("listen:1")), "{types}");
 }
 
 /// A credential headed where people and agents read it is refused before it's sent (guard.rs):
@@ -1198,7 +1201,7 @@ async fn an_agent_polls_what_happened() {
         }
     };
     let found = send(OPERATOR, "server/discover", json!({})).await;
-    assert!(found["result"]["capabilities"]["extensions"]["io.modelcontextprotocol/events"].is_object(), "{found}");
+    assert_eq!(found["result"]["capabilities"]["extensions"]["io.modelcontextprotocol/events"]["listChanged"], true, "{found}");
     let list = send(OPERATOR, "events/list", json!({})).await;
     assert_eq!((list["result"]["events"][0]["name"].as_str(), &list["result"]["events"][0]["delivery"]), (Some("apps.event"), &json!(["poll", "push"])), "{list}");
 

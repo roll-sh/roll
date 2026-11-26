@@ -937,6 +937,8 @@ export interface Plan {
   uses?: ("postgres" | "redis")[];
   /** The variables its `.env.example` (or `.env.sample`, `.env.template`, `.env.dist`, `example.env`) names: asked for before the first deploy. */
   variables?: string[];
+  /** What its framework suggests a new service sets (its migrations, its health route): offered, never applied on its own. */
+  suggest?: { pre_deploy?: string; health_path?: string };
   /** A static site's function directories (`netlify/functions`, `api`) the `functions` builder runs. */
   functions?: string[];
   /** A static site's edge functions: run before its files on their paths by its `-fn` service. */

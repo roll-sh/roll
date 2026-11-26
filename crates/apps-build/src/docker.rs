@@ -51,6 +51,7 @@ pub(crate) fn plan(tree: &dyn Tree, o: &Overrides) -> Result<Plan, Error> {
         uses: Vec::new(),
         variables: Vec::new(),
         release: None,
+        suggest: Default::default(),
         crons: Vec::new(),
         functions: Vec::new(),
         edge: Vec::new(),
