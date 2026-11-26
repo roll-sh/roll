@@ -1473,6 +1473,10 @@ pub enum AppsCmd {
         /// An image service: deploy when its tag points at a new image (`true`), or not.
         #[arg(long)]
         follow_tag: Option<bool>,
+        /// A Git URL service: deploy the repository's new tags that match (`v*`) from its hook,
+        /// each once (`none` stops it).
+        #[arg(long, value_name = "PATTERN")]
+        deploy_tags: Option<String>,
         /// Redeploy (the same image, the new values) when the project's secrets change (`true`),
         /// or not.
         #[arg(long)]
@@ -5584,7 +5588,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, data, wait_for_ci, run, follow_tag, redeploy_on_secrets, vitals, egress, egress_host, private, open, signed_in, sso, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, route, no_routes, redirects, no_redirects, error_page, maintenance_page, roll_pages, freeze, unfreeze, rotate_config, set } => {
+        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, data, wait_for_ci, run, follow_tag, deploy_tags, redeploy_on_secrets, vitals, egress, egress_host, private, open, signed_in, sso, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, route, no_routes, redirects, no_redirects, error_page, maintenance_page, roll_pages, freeze, unfreeze, rotate_config, set } => {
             let svc = service(api, &target).await?;
             if rotate_config {
                 let e = api.post(&format!("{}/config/rotate", env_path(&svc, &target.env)), json!({})).await?;
@@ -5629,6 +5633,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             if let Some(f) = follow_tag {
                 body.insert("follow_tag".into(), json!(f));
+            }
+            if let Some(p) = deploy_tags {
+                body.insert("deploy_tags".into(), if p == "none" { Value::Null } else { json!(p) });
             }
             if signed_in {
                 body.insert("access".into(), json!({ "signed_in": true }));
