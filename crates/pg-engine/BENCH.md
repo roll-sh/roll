@@ -444,6 +444,40 @@ checkpointer 4.4k, autovacuum 6.5k.
 the load's three L0 files: 2,155.8k. A one-client LBR profile of the range read, b0 against n1: −1.0%, no symbol past
 sampling noise.)
 
+### Second part: the memtable sized by memory (`cand/a333-2`) and the standing
+
+The schedule probe (`~/.cache/a333/patches/probe-schedule-env.patch` on n1, both arms on one binary), warmed windows,
+user instructions a transaction (connection threads at the run's plan mix; with no seq scan in brackets):
+
+| memtable / L0 trigger | clients | connection threads | flush thread | compactions | autovacuum (apart) | peak anon+shmem |
+|---|---|---|---|---|---|---|
+| 8 MB / 4 (before) | 8 | 317.9k | 136.5k | 4 | 14.7k | 493 MB |
+| 16 MB / 4 | 8 | 332.6k (319.3k with no seq scan) | 99.4k | 2 | 4.4k | 528 MB |
+| **32 MB / 4** | 8 | 305.0k | 64.3k | 1 | 16.2k | 598 MB |
+| 8 MB / 8 | 8 | 335.9k (326.0k) | 102.7k | 2 | 9.8k | 530 MB |
+| 8 MB / 4 (before) | 32 | 325.2k | 136.0k | 4 | 11.4k | 518 MB |
+| **32 MB / 4** | 32 | 317.6k, 306.7k | 66.7k, 65.0k | 1, 1 | 10.6k, 5.9k | 632, 668 MB |
+
+The standing by the stable measure (HANDOFF "Short write transactions, round 20" has the method), each run:
+
+| server | clients | run | tps | measure | of it: connections / backends | background (flush, checkpointer, WAL writer, ...) | time-driven, per second | peak anon+shmem |
+|---|---|---|---|---|---|---|---|---|
+| pg | 8 | st-pg-8-S1 | 1056 | **311.5k** | 307.3k | 4.2k | 10 M | 666.9 MB |
+| pgrust | 8 | st-pgrust-8-S1 | 543 | **328.3k** | 321.7k | 6.6k | 200 M | 902.3 MB |
+| pg | 32 | st-pg-32-S1 | 592 | **344.0k** | 339.8k | 4.3k | 7 M | 692.6 MB |
+| pgrust | 32 | st-pgrust-32-S1 | 2121 | **357.3k** | 352.3k | 5.0k | 250 M | 931.2 MB |
+| pgrust | 8 | st-pgrust-8-S2 | 1162 | **327.0k** | 321.2k | 5.7k | 211 M | 823.7 MB |
+| pg | 8 | st-pg-8-S2 | 1295 | **316.3k** | 312.1k | 4.2k | 9 M | 652.5 MB |
+| pgrust | 32 | st-pgrust-32-S2 | 1159 | **360.6k** | 355.0k | 5.6k | 230 M | 919.8 MB |
+| pg | 32 | st-pg-32-S2 | 1566 | **338.4k** | 334.1k | 4.2k | 12 M | 692.8 MB |
+| p2 | 8 | st-p2-8-S1 | 1646 | **306.7k** | 244.6k | 62.1k | 7 M | 632.0 MB |
+| p2 | 32 | st-p2-32-S1 | 1800 | **316.3k** | 251.5k | 64.8k | 16 M | 630.2 MB |
+| p2 | 8 | st-p2-8-S2 | 1614 | **305.2k** | 243.1k | 62.0k | 15 M | 595.0 MB |
+| p2 | 32 | st-p2-32-S2 | 2821 | **308.0k** | 248.3k | 59.6k | 17 M | 607.5 MB |
+
+(`p2`: the shipped build of `cand/a333-2`'s code, `tools/dist-pgo.sh` with its own training, staleness 0.00%. "measure":
+the run's user instructions a transaction without the time-driven threads, which are per second in their column.)
+
 ## Cheap custom plans, round 1: a named statement's custom plan stays its binding after a size change (2026-11-26, agent 328)
 
 HANDOFF "Cheap custom plans" has what changed. Builds: plain dist (`tools/dist.sh`). **b0** = `eccf1d824`,

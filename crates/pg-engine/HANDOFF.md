@@ -16253,6 +16253,75 @@ Left:
   plan mix), `stmt.sh` (the statement cells), `reads.sh` (exact read gates), `prof.sh`, `bulk.sh`, `lsm.py` (L0/L1 of a
   data directory from its MANIFESTs).
 
+### Round 20, second part: the server's memtable sized by its memory; the standing by the stable measure
+
+**What changed** (`cand/a333-2`, on `cand/a333`): `configuration::Profile` (the standalone server's memory-sized
+defaults) has `memtable_bytes`: 1/256 of the memory the server may use, 8 MB to 32 MB, so 32 MB from 8 GiB on (the
+harness's 8 GiB container, any machine with more); `roll-engine` passes it to `EngineOptions` (8 MB before, the engine
+default, which tests and embedders keep).
+
+Why: after the scan above, the flush thread is the largest item against PostgreSQL (134-137k a transaction against
+PostgreSQL's checkpointer, background writer and WAL writer at ~4.3k). Nearly all of it is the compactions: four in
+160,000 transactions, each 30-33k a transaction; per compaction zstd is about half (`ZSTD_compressBlock_fast_dictMatchState`
+27k, `ZSTD_encodeSequences` 9k), `SstWriter::add_from` 18k, `zip_entries` 14k, `Compacted::entry` 6k. The updates
+between two compactions (one per four 8 MB memtables) reach most of pgbench_accounts' 16 KB L1 blocks, so each
+compaction writes nearly the whole table again however few updates it carries: a memtable four times as big writes it
+a quarter as often, each compaction a little dearer.
+
+Measured with a probe build (not in any commit: `~/.cache/a333/patches/probe-schedule-env.patch`, the memtable size
+and the L0 trigger from the environment, both arms on one binary), warmed TPC-B-like windows, user instructions a
+transaction, connection threads at the run's own plan mix (and corrected to no seq scan where it had some):
+
+BENCH "Short write transactions, round 20" has the table: at 8 clients 8 MB -> 32 MB took the flush thread
+136.5k -> 64.3k (four compactions -> one), 16 MB 99.4k, an L0 trigger of 8 102.7k; at 32 clients 136.0k -> 66.7k / 65.0k.
+
+So 32 MB takes the flush thread from ~136k to ~65k a transaction (−52%) and the connection threads 1-4% lower (fewer
+reads of freshly compacted, not yet cached blocks); raising the L0 trigger instead costs every read more L0 files
+(the connection threads +8k). The price is memory: +105 MB at 8 clients, +115-150 MB at 32 (an active and a frozen
+memtable, and the skip list's nodes over the counted bytes); still under PostgreSQL's 652-693 MB and pgrust's
+824-931 MB at the same settings. Level elsewhere (the same probe, the connection threads exactly, pairs with the same
+start state): prepared point select 56.1k / 54.0k and 60.2k / 59.8k (8 MB / 32 MB), the 1,000-row range read 2,086.1k
+and 2,108.6k / 2,088.0k; `pgbench -i -s 32`'s server instructions 56.00-56.17 G / 56.00-56.20 G (its commits are
+ingested as SSTs either way); a mid-size bulk load (50 commits of 20,000 rows, ~2.5 MB each: ingested under 8 MB,
+memtable rows under 32 MB, which ingests from 8 MB a commit) 10,192 / 10,105 against 10,131 / 10,100 instructions a row,
+peak 34-40 MB either way. Crash recovery replays up to one memtable's WAL (32 MB instead of 8 MB).
+
+Checks: `configuration::tests::profiles` (32 MB at 8 GiB, 8 MB at 2 GiB); quick-check with QC_CHECKED=1 on `18fec612a` (on `cand/a333`, `4c322b3d8`): tests 469 passed in 31 binaries, crash
+seeds 1-3 x 2 and power_cut_at_every_point, checked 469 passed, regress 0 newly differing, isolation 1,647 / 1,648,
+pg_dump 14,609 passed; `tools/crash-binary.py` seeds 1-3 and `--power drop` seed 1 against the shipped build (`p2`,
+restarts in 0.06-0.16 s): ok.
+
+**The standing** (brief item 2's table; BENCH has the runs).
+
+Scale 32, 160,000 TPC-B-like transactions warmed (uncounted), then 160,000 counted under `enable_seqscan=off`
+(index plans on every server), from every client connected through 8 s after the last transaction and a CHECKPOINT;
+user instructions a transaction of everything but the time-driven threads (autovacuum workers on all three, pgrust's
+`poolpurge`), which are per second apart. roll: **the shipped build of `cand/a333-2`** (`tools/dist-pgo.sh`, its own
+training, profile staleness 0.00%); PostgreSQL 18.6 and pgrust (its published PGO image), same settings (2 GB cache),
+the same evening on lane A at 5-7 foreign cores (instruction counts; tps are readings):
+
+| | 8 clients | 32 clients | of it, connection threads / backends (8; 32) | background (8; 32) | peak anon+shmem |
+|---|---|---|---|---|---|
+| **roll** | **306.7k, 305.2k** | **316.3k, 308.0k** | 244.6k, 243.1k; 251.5k, 248.3k | 62.1k, 62.0k; 64.8k, 59.6k | 595-632 MB |
+| PostgreSQL 18.6 | 311.5k, 316.3k | 344.0k, 338.4k | 307.3k, 312.1k; 339.8k, 334.1k | 4.2k (checkpointer, bgwriter, WAL writer) | 653-693 MB |
+| pgrust | 328.3k, 327.0k | 357.3k, 360.6k | 321.7k, 321.2k; 352.3k, 355.0k | 5.0-6.6k | 824-931 MB |
+
+Time-driven, per second: roll's autovacuum 7-17 M instructions, PostgreSQL's 7-12 M, pgrust's 200-250 M (its
+`poolpurge` thread). The measure repeats to 0.2-0.8% for PostgreSQL and pgrust and for roll at 8 clients; roll at 32
+clients is 2.7% apart: with a 32 MB memtable one compaction falls in each window, and run S2's warm-up had run none (its
+window's compaction merged into a 38.7 MB L1, S1's into 49.7 MB). So by this measure roll's shipped build is 2-4% under
+PostgreSQL at 8 clients and 7-10% under it at 32, and under pgrust at both; its connection threads are 20-27% under
+PostgreSQL's backends, and its flush thread (60-65k) is what it spends that PostgreSQL doesn't.
+
+Left:
+
+- The flush thread at ~65k a transaction is still the largest item against PostgreSQL. Per compaction: zstd half, the
+  writer's `add_from` and the merge's `zip_entries`. What would cut it further: blocks a compaction rewrites only where
+  rows changed (smaller blocks for a big table's rows, or the L0 merge agent 327's round prepares), or the size model's
+  estimate records, which agent 290 found are ~63% of the memtable bytes an UPDATE adds (`estkeep`: agent 331's area),
+  spacing the compactions out again.
+- The memory of a memtable over its counted bytes (the skip list's nodes): the 32 MB memtable adds 105-150 MB at peak.
+
 ## Short write transactions, round 19: the TPC-B-like standing at fixed counts; the L0 merge left out, its read cost itemized (agent 322)
 
 BENCH "Short write transactions, round 19" has the tables. No engine code changed: what was tried is in
