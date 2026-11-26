@@ -368,7 +368,9 @@ impl Secrets {
         }
     }
 
-    /// The one project whose canvas holds `resource` and stands for it (and is `named`, if given).
+    /// The one project whose canvas holds `resource` and stands for it (and is `named`, if given),
+    /// by `Workspace::trusts`: never just any project whose canvas holds it. A refusal when none (or
+    /// more than one) does.
     pub fn project_for(&self, resource: &ResourceRef, named: Option<&str>) -> Result<String, Refusal> {
         let who = resource.consumer();
         let ws = |e: roll_workspace::Error| Error::Internal(e.to_string());

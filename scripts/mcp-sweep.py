@@ -468,7 +468,9 @@ def search_flow():
     res, text = dcall("search_query", {"cluster": "sweep-dev", "index": "notes", "query": {"match_all": {}}}, token=ro["token"])
     if res.get("isError") or '"n2"' in text:
         out.append(f"the read-only token should read the index, without n2: {text[:200]}")
-    print(f"search flow: a developer's scoped token made a cluster, bulk-indexed and found it; {len(out)} problems")
+    # Short-lived: gone again with the operator's token (the developer's can't delete).
+    rpc("tools/call", {"name": "search_delete_cluster", "arguments": {"cluster": "sweep-dev"}})
+    print("member: a developer's search flow ok" if not out else f"member: a developer's search flow: {len(out)} problems")
     return out
 if outbox and ws:
     member_fails += [f"search flow: {f}" for f in search_flow()]
