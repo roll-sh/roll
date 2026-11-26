@@ -846,8 +846,11 @@ impl Secrets {
                 .iter()
                 .map(|r| {
                     let label = sync_label(r);
+                    if !names {
+                        return (label, fingerprint(&()));
+                    }
                     let mut target = r.columns.get("target").and_then(Json::as_str).and_then(|t| serde_json::from_str::<Json>(t).ok()).unwrap_or_default();
-                    if !names || bare_syncs.contains(&label) {
+                    if bare_syncs.contains(&label) {
                         crate::syncs::mask_target(&mut target);
                     }
                     (label, fingerprint(&(target, r.columns.get("keys"), r.columns.get("prefix"))))

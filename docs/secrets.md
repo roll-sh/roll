@@ -4832,7 +4832,18 @@ whose row names the registrations it carried) is the call. Registrations' keys a
 (CAs', SSH CAs' and GitHub Apps' private keys, SaaS and DNS credentials, ACME accounts, rotators'
 and outside databases' URLs) leave only in a person's backup (signed in) or the operator's, never
 a token's: no route answers them to a token either. A token's backup holds the registrations by
-name only, in `left_out`, and its answer's `warnings` names them. Linked keys carry their
+name only, in `left_out`, and its answer's `warnings` names them. It leaves out two more things
+the same way, naming them in `warnings`:
+
+- **Syncs' credentials.** Each sync comes with its configuration but without its signing secret,
+  and with its target's URLs by host only (a deploy hook's URL is often a credential itself, and
+  no route shows it either). A restore brings it back paused with the reason `restored without
+  its credential: set it again`, and resuming it is refused (409): make the sync again.
+- **Encryption keys' bytes.** Each key is in the archive by name only, and named in `left_out`. A
+  restore doesn't make it, and **data encrypted under it can't be decrypted after a restore from
+  such a backup**: back the project up signed in, or as the operator, to keep it.
+
+Linked keys carry their
 link and no value: a restore issues its own credentials, from the restored registrations.
 Personal values, history, leases and tokens aren't in it, and neither are registrations whose
 trust names the project they were made in or that hold a token of the server's own: AWS roles and
@@ -4893,7 +4904,8 @@ secret key is, open the archive there, and write nothing:
   registrations a backup doesn't carry; and what a restore would leave out, and why (`refused`:
   a registration or an identity that fails its checks). A sensitive key's value isn't in a backup,
   so it's never compared. A token's verify answers counts only (`names: false`, each part's
-  `counts`), compares registrations without their keys, and gets 10 a minute (as `/scan` limits a
+  `counts`), compares registrations, encryption keys and syncs by name and count only (never
+  by a key, a key's bytes or a sync's credential), and gets 10 a minute (as `/scan` limits a
   scanner): names of what differs, and anything about a key it can't take out, are a person's or
   the operator's.
 - `roll secrets restore shop.backup --key … --dry-run` asks the same of the project it would load
@@ -6966,7 +6978,7 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/imports?path=` | | `Import[]` |
 | `PUT /environments/{env}/imports?path=` | `Import[]` | `Import[]` |
 | `GET /environments/{env}/exports?path=` | | `Export[]` |
-| `POST /backup` | `{recipient}` | `{sealed, context, warnings}`: the whole project, sealed to `recipient` (admin and reveal over the whole project: `admin` alone is a 403; archive version 2; a token's carries registrations by name only, `warnings` naming them) |
+| `POST /backup` | `{recipient}` | `{sealed, context, warnings}`: the whole project, sealed to `recipient` (admin and reveal over the whole project: `admin` alone is a 403; archive version 2; a token's carries registrations and encryption keys by name only and syncs without their credentials, `warnings` naming them) |
 | `POST /backup/verify` | `Archive` (an opened backup) | `{project, at, v, environments, keys, registrations, identities, syncs, refused, names, settings, left_out, live_keys}` (admin and reveal over the whole project; nothing written; 10 a minute for anyone but the operator, then 429): each part `{archive, live, missing, extra, changed, counts}`, by name; a token's has `names: false`, counts only and no `refused` |
 | `GET /backup/latest` | | `{sealed, context, key}`: the schedule's newest backup, still sealed (admin; 404 with no schedule or none landed yet) |
 | `GET /backup/schedule` | | `BackupSchedule` or null (admin): bucket, recipient, `every_hours`, `keep`, `next_at`, `last_at`, `last_key`, `last_error`, `created_by`, `registrations`, `paused_at`, `paused_why` |
