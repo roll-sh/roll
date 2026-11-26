@@ -245,7 +245,7 @@ async fn tools_follow_the_tokens_rules() {
     assert_eq!(init["protocolVersion"], "2025-06-18");
     // The instructions name every product by its tool prefix (with tool search a client loads only
     // tool names and these, cut at 4,096 characters in Claude Code), whatever the mode adds.
-    let (_, _, long) = d.http(OPERATOR, Method::POST, "/v1/mcp?lockdown=1&tools=search", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18" } }))).await;
+    let (_, _, long) = d.http(OPERATOR, Method::POST, "/v1/mcp?lockdown=1&tools=search&metadata=1", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18" } }))).await;
     let said = long["result"]["instructions"].as_str().unwrap();
     assert!(said.chars().count() < 4096, "{} characters", said.chars().count());
     for p in ["postgres_", "redis_", "storage_", "streams_", "queues_", "tasks_", "nosql_", "search_", "apps_", "previews_", "secrets_", "code_", "agents_", "workspace_", "access_"] {

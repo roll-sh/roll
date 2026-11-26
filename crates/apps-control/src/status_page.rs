@@ -83,6 +83,8 @@ pub(crate) struct StatusCache {
     /// Active own domains → their project, as last read (when, under which `hosts_gen`): every
     /// request with a Host asks, so it's one read a second at most, never one a request.
     own: parking_lot::Mutex<Option<(std::time::Instant, u64, OwnHosts)>>,
+    /// One request reads the map again; the others keep the last answer meanwhile.
+    refreshing: std::sync::atomic::AtomicBool,
     pages: parking_lot::Mutex<std::collections::HashMap<String, (std::time::Instant, Arc<Shown>)>>,
 }
 
@@ -331,14 +333,33 @@ impl Apps {
 
     async fn own_status_hosts(self: &Arc<Self>) -> OwnHosts {
         let generation = self.hosts_gen.load(std::sync::atomic::Ordering::SeqCst);
-        if let Some((at, g, m)) = self.status_cache.own.lock().clone()
-            && g == generation
+        use std::sync::atomic::Ordering::SeqCst;
+        let last = self.status_cache.own.lock().clone();
+        if let Some((at, g, m)) = &last
+            && *g == generation
             && at.elapsed() < std::time::Duration::from_secs(1)
         {
-            return m;
+            return m.clone();
         }
-        // A failed read answers nothing this time and keeps nothing.
-        let Ok(rows) = self.db(|s| s.active_status_domains()).await else { return Default::default() };
+        // Someone is reading it already: the last answer until theirs is in.
+        if let Some((_, _, m)) = &last
+            && self.status_cache.refreshing.swap(true, SeqCst)
+        {
+            return m.clone();
+        }
+        // Cleared however this ends (a request dropped mid-read too), or the map would stay old.
+        struct Done<'a>(&'a std::sync::atomic::AtomicBool);
+        impl Drop for Done<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let read = {
+            let _done = Done(&self.status_cache.refreshing);
+            self.db(|s| s.active_status_domains()).await
+        };
+        // A failed read answers what was there (nothing, the first time) and keeps nothing.
+        let Ok(rows) = read else { return last.map(|(_, _, m)| m).unwrap_or_default() };
         let m = Arc::new(rows.into_iter().collect::<std::collections::HashMap<_, _>>());
         *self.status_cache.own.lock() = Some((std::time::Instant::now(), generation, m.clone()));
         m
