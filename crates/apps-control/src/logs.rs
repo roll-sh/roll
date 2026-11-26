@@ -385,13 +385,14 @@ impl LogHub {
         lines.split_off(skip)
     }
 
-    /// How many of the lines still in memory since `since` contain `q` (any case) and came from
-    /// the app (stdout, stderr): cheap, for an alert judged every minute (nothing stored is read).
+    /// How many of the lines still in memory since `since` match `q` (the Logs tab's search:
+    /// [`Search`]) and came from the app (stdout, stderr): cheap, for an alert judged every minute
+    /// (nothing stored is read).
     pub fn count_recent(&self, key: &str, q: &str, since: i64) -> usize {
-        let q = q.to_lowercase();
+        let Some(q) = Search::parse(q) else { return 0 };
         let logs = self.logs.lock();
         let Some(l) = logs.get(key) else { return 0 };
-        l.ring.iter().rev().take_while(|ln| ln.t >= since).filter(|ln| matches!(ln.stream, Stream::Stdout | Stream::Stderr) && ln.text.to_lowercase().contains(&q)).count()
+        l.ring.iter().rev().take_while(|ln| ln.t >= since).filter(|ln| matches!(ln.stream, Stream::Stdout | Stream::Stderr) && q.matches(&ln.text)).count()
     }
 
     /// Lines that contain `q` (any case), newest last, at most `limit` ([`Self::read`]).
@@ -818,7 +819,8 @@ impl Search {
             if negate {
                 chars.next();
             }
-            let word: String = if chars.peek() == Some(&'"') {
+            let quoted = chars.peek() == Some(&'"');
+            let word: String = if quoted {
                 chars.next();
                 chars.by_ref().take_while(|c| *c != '"').collect()
             } else {
@@ -831,7 +833,8 @@ impl Search {
             };
             match word.as_str() {
                 "" => {}
-                "OR" if !negate => any.push(std::mem::take(&mut terms)),
+                // `"OR"` in quotes is the word.
+                "OR" if !negate && !quoted => any.push(std::mem::take(&mut terms)),
                 w => terms.push((w.to_lowercase(), negate)),
             }
         }
@@ -858,6 +861,7 @@ mod search_tests {
         assert!(s("error -health", "error saving") && !s("error -health", "error in /health"));
         assert!(s("--verbose", "ran with --verbose") && s("-1", "exit -1"), "a flag or a number is a word");
         assert!(s("timeout OR refused", "connection refused") && s("timeout OR refused", "read timeout") && !s("timeout OR refused", "ok"));
+        assert!(s("\"OR\"", "a OR b") && !s("\"OR\"", "a b"), "quoted, OR is a word");
         assert_eq!(Search::parse("   "), None);
     }
 }

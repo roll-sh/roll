@@ -6941,6 +6941,119 @@ async fn catching_up_and_cutting_over() {
     assert_eq!(n["count"], 4, "{n}");
 }
 
+/// A/B tests on a search application (relevance-experiments.md): each visitor stays in one
+/// variant and the weights hold over many visitors; the answer names the variant in its headers;
+/// clicks and `roll_conversion` events count once per search, per variant, for the visitor who
+/// searched; and a browser key posts events only with `limits.events`, about what it reaches,
+/// counted for its own visitor and never stored.
+#[tokio::test]
+async fn search_application_experiments() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "ab"})).await;
+    let (user, pw) = creds(&c);
+    // A `null` body sends none.
+    let es = async |m: Method, p: &str, b: Value| {
+        let (s, v) = e.es(&user, &pw, m, p, (!b.is_null()).then_some(b)).await;
+        assert!(s < 300, "{p}: {s} {v}");
+        v
+    };
+    es(Method::PUT, "/products", json!({"mappings": {"properties": {"title": {"type": "text"}}}})).await;
+    es(Method::PUT, "/products/_doc/1?refresh=true", json!({"title": "red shoes"})).await;
+    let app = json!({
+        "indices": ["products"],
+        "template": {"script": {"source": {"query": {"match": {"title": "{{query}}"}}}, "params": {"query": ""}}},
+        "experiments": [{"id": "ranking", "allow_user_header": true, "variants": [
+            {"name": "control", "weight": 70},
+            {"name": "phrase", "weight": 30, "template": {"script": {"source": {"query": {"match_phrase": {"title": "{{query}}"}}}}}},
+        ]}],
+    });
+    es(Method::PUT, "/_application/search_application/shop", app).await;
+    // A running experiment's arms can't change.
+    let mut changed = json!({"indices": ["products"], "experiments": [{"id": "ranking", "allow_user_header": true, "variants": [{"name": "control", "weight": 50}, {"name": "phrase", "weight": 50}]}]});
+    let (s, v) = e.es(&user, &pw, Method::PUT, "/_application/search_application/shop", Some(changed.take())).await;
+    assert!(s == 400 && v.to_string().contains("is running"), "{s} {v}");
+    es(Method::PUT, "/_application/analytics/web", Value::Null).await;
+
+    let search = async |auth: &str, visitor: &str| {
+        let r = e.http.post(format!("{}/_application/search_application/shop/_search", e.es)).header("authorization", auth).header("x-roll-user", visitor).json(&json!({"params": {"query": "shoes"}})).send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 200);
+        assert_eq!(r.headers().get("x-roll-experiment").and_then(|h| h.to_str().ok()), Some("ranking"));
+        r.headers().get("x-roll-variant").and_then(|h| h.to_str().ok()).unwrap().to_string()
+    };
+    let event = async |auth: &str, visitor: &str, kind: &str, extra: Value| {
+        let mut body = json!({"session": {"id": "s"}, "user": {"id": "u"}, "search": {"query": "Shoes", "search_application": "shop"}, "document": {"index": "products", "id": "1"}});
+        if let (Some(b), Some(x)) = (body.as_object_mut(), extra.as_object()) {
+            b.extend(x.clone());
+        }
+        let r = e.http.post(format!("{}/_application/analytics/web/event/{kind}", e.es)).header("authorization", auth).header("x-roll-user", visitor).json(&body).send().await.unwrap();
+        r.status().as_u16()
+    };
+    use base64::Engine;
+    let owner = format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pw}")));
+    // Stable per visitor; the weights hold over 300 visitors.
+    let mut arms: std::collections::HashMap<String, String> = Default::default();
+    for i in 0..300 {
+        arms.insert(format!("v{i}"), search(&owner, &format!("v{i}")).await);
+    }
+    assert_eq!(search(&owner, "v7").await, arms["v7"], "the same visitor, the same variant");
+    let control = arms.values().filter(|v| *v == "control").count();
+    assert!((180..=240).contains(&control), "{control} of 300 in a 70% arm");
+    // Clicks and conversions: once per search, for its visitor.
+    let clicked: Vec<String> = (0..40).map(|i| format!("v{i}")).collect();
+    for v in &clicked {
+        assert_eq!(event(&owner, v, "search_click", json!({})).await, 202);
+        assert_eq!(event(&owner, v, "search_click", json!({})).await, 202, "a second click on the same search");
+    }
+    for v in &clicked[..10] {
+        assert_eq!(event(&owner, v, "roll_conversion", json!({"value": 12.5, "currency": "EUR"})).await, 202);
+    }
+    assert_eq!(event(&owner, "never-searched", "roll_conversion", json!({"value": 99})).await, 202);
+
+    // A browser key of the application: events only with limits.events, about what it reaches.
+    let page = e.post("/v1/search/clusters/ab/browser-keys", json!({"name": "page", "application": "shop"})).await;
+    let without = format!("ApiKey {}", page["api_key"].as_str().unwrap());
+    // Without it the event API needs a cluster privilege the key hasn't got.
+    assert_eq!(event(&without, "v40", "search_click", json!({})).await, 403);
+    let page = e.post("/v1/search/clusters/ab/browser-keys", json!({"name": "events", "application": "shop", "limits": {"events": true}})).await;
+    let key = format!("ApiKey {}", page["api_key"].as_str().unwrap());
+    assert_eq!(event(&key, "v40", "search_click", json!({"document": {"index": "secrets", "id": "1"}})).await, 400, "a document it doesn't reach");
+    assert_eq!(event(&key, "nobody", "search_click", json!({})).await, 202, "accepted, but no search of that visitor to count");
+    assert_eq!(event(&key, "v40", "search_click", json!({})).await, 202);
+    let count = async || {
+        es(Method::POST, "/behavioral_analytics-events-web/_refresh", Value::Null).await;
+        es(Method::POST, "/behavioral_analytics-events-web/_count", json!({})).await["count"].clone()
+    };
+    let stored = count().await;
+
+    let mut expect: std::collections::BTreeMap<&str, [u64; 3]> = Default::default();
+    for (v, arm) in &arms {
+        let x = expect.entry(arm.as_str()).or_default();
+        x[0] += 1;
+        let n: u32 = v[1..].parse().unwrap();
+        x[1] += u64::from(n < 41);
+        x[2] += u64::from(n < 10);
+    }
+    let check = |a: &Value| {
+        let ex = &a["experiments"][0];
+        assert_eq!((ex["application"].as_str(), ex["experiment"].as_str(), ex["baseline"].as_str()), (Some("shop"), Some("ranking"), Some("control")), "{a}");
+        for v in ex["variants"].as_array().unwrap() {
+            let want = expect[v["name"].as_str().unwrap()];
+            assert_eq!([v["searches"].as_u64().unwrap(), v["clicks"].as_u64().unwrap(), v["conversions"].as_u64().unwrap()], want, "{v}");
+            if v["name"] == "phrase" {
+                assert!(["significant", "not_yet_significant", "not_enough_data"].contains(&v["vs_baseline"]["ctr"]["state"].as_str().unwrap()), "{v}");
+            }
+        }
+        let value: f64 = ex["variants"].as_array().unwrap().iter().map(|v| v["value"].as_f64().unwrap()).sum();
+        assert_eq!(value, 125.0, "{a}");
+    };
+    check(&e.get("/v1/search/clusters/ab/analytics").await);
+    e.control.sample().await.unwrap();
+    check(&e.get("/v1/search/clusters/ab/analytics").await);
+    // The browser key's events weren't stored with the owner's.
+    assert_eq!(count().await, stored);
+}
+
 /// `…/indices/{index}/update_by_query` re-embeds an index's own documents: a `semantic_text`
 /// field (fed by `copy_to`) added after the documents is filled by indexing each again in place,
 /// in the background (202 and a task the tasks route follows), and a semantic query then finds

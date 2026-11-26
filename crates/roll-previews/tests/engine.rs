@@ -372,6 +372,46 @@ async fn pages_changed_the_same_way_are_accepted_together() {
     assert_eq!(waiting, ["/c"], "the three accepted at once; /c still waits");
 }
 
+/// Stories a change touched that its run didn't take (past its 40, or out of its time) are under
+/// review too, though no picture differs (Chromatic captures every story): accepted as not taken,
+/// at that head only.
+#[tokio::test]
+async fn stories_a_change_touched_and_its_run_left_out_wait_for_review() {
+    let e = env(json!({ "enabled": true, "visual_review": "required", "github": { "screenshot": true } }));
+    let mut png = Vec::new();
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 0, 255])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    *e.apps.shot.lock() = Some(png.clone());
+    e.code.open(change("chg_u", 1));
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let chg = e.engine.store.row_by_change("chg_u").unwrap().unwrap();
+    let review = || e.engine.store.preview(&chg.id).unwrap().visual_review;
+    for _ in 0..3000 {
+        if review().is_some() && !e.engine.shooting() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let base = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.change_id.is_none()).unwrap();
+    // The same picture as main's, and 3 of the stories it touched left out at that head.
+    let shoot = |head: &str, touched: u32| {
+        e.engine.store.set_screenshot(&chg.id, head, &png, None, None).unwrap();
+        e.engine.store.compare_with_base(&chg.id, &base.id, "main", None).unwrap();
+        let skipped = roll_previews::Skipped { stories: 5, touched_stories: touched, ..Default::default() };
+        e.engine.store.set_runtime_fact(&chg.id, "skipped", Some(&roll_previews::SkippedAt { head: head.into(), skipped })).unwrap();
+    };
+    shoot("cs_u1", 3);
+    let r = review().unwrap();
+    assert_eq!((r.state, r.untaken, r.pages.iter().map(|p| p.path.as_str()).collect::<Vec<_>>()), (VisualState::Changed, 3, vec![roll_previews::UNTAKEN_STORIES]), "unseen stories hold it");
+    let p = e.engine.accept_visual(&chg.id, "ada", &[], true, None, Some("cs_u1"), Some(roll_previews::UNTAKEN_STORIES)).await.unwrap();
+    assert_eq!(p.visual_review.map(|v| v.state), Some(VisualState::Accepted), "accepted as not taken");
+    // Another head's run leaves its own: asked again; one that took them all has nothing to review.
+    shoot("cs_u2", 2);
+    assert_eq!(review().map(|v| (v.state, v.untaken)), Some((VisualState::Changed, 2)));
+    shoot("cs_u3", 0);
+    assert_eq!(review().map(|v| v.state), Some(VisualState::Unchanged));
+}
+
 #[tokio::test]
 async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     let e = env(json!({ "enabled": true, "visual_review": "check", "github": { "screenshot": true } }));
@@ -2281,8 +2321,15 @@ async fn a_service_that_didnt_change_keeps_its_pages() {
     e.code.open(c);
     e.engine.pass().await.unwrap();
     let p = e.engine.store.row_by_change("chg_ts").unwrap().unwrap();
-    // The change's run takes api's page, then web's.
+    // The change's run takes api's page, then web's, and records them (web's kept page and what
+    // it ran) before the next push: a push while it's still storing them takes web again.
     taken(&e.apps, "web", 1).await;
+    for _ in 0..3000 {
+        if e.engine.store.kept_page(&p.id, "web:/").unwrap().is_some() && e.engine.store.service_shot_key(&p.id, "web").unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     let web_before = runs("web");
     assert!(web_before >= 1, "web's page taken at first");
     let api_before = runs("api");

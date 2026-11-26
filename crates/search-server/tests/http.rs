@@ -342,7 +342,7 @@ async fn cors_preflights_are_answered_before_authentication() {
     let ok = format!("Authorization: {}\r\n", basic("elastic", "pw1"));
     let wrong = format!("Authorization: {}\r\n", basic("elastic", "nope"));
     let r = raw(get("https://shop.example", &ok)).await;
-    assert_eq!((r.status, r.header("access-control-allow-origin"), r.header("access-control-expose-headers")), (200, Some("https://shop.example"), Some("X-elastic-product")));
+    assert_eq!((r.status, r.header("access-control-allow-origin"), r.header("access-control-expose-headers")), (200, Some("https://shop.example"), Some("X-elastic-product,X-Roll-Experiment,X-Roll-Variant")));
     let r = raw(get("https://shop.example", &wrong)).await;
     assert_eq!((r.status, r.header("access-control-allow-origin")), (401, Some("https://shop.example")));
     let r = raw(get("https://evil.example", &ok)).await;

@@ -60,6 +60,10 @@ pub fn router(apps: Arc<Apps>) -> axum::Router {
             {
                 return crate::status_page::serve(apps, page, req.uri().path()).await;
             }
+            // A status page on a domain of its own (an exact name, before any wildcard).
+            if let Some(page) = apps.status_page_for_own_host(&host).await {
+                return crate::status_page::serve(apps, page, req.uri().path()).await;
+            }
             // A domain that redirects (www → apex): a 308 to the same path and query there.
             if let Some(to) = apps.redirect_for_host(&host).await {
                 let pq = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
@@ -84,8 +88,6 @@ pub fn router(apps: Arc<Apps>) -> axum::Router {
                 // (a preview on roll's own runtime), with the request as it came.
                 None => match apps.preview_router_for(&host).await {
                     Some(router) => router.serve(req).await,
-                    // A status page on a domain of its own.
-                    None if let Some(p) = apps.status_page_for_own_host(&host).await => crate::status_page::serve(apps, p, req.uri().path()).await,
                     None => page(StatusCode::NOT_FOUND, "Nothing here", "No roll apps service answers on this address."),
                 },
             }
