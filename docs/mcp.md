@@ -1211,6 +1211,7 @@ previews are listed once those products are on.
 | `search_list_browser_keys` | A cluster's browser keys that still work: name, indices or application, filter, rate limit, expiry (never the key). | `GET /v1/search/clusters/{cluster}/browser-keys` |
 | `search_browser_key_usage` | One browser key's requests, 429s and other refusals by reason over time (`window` 1h, 24h, 14d), its top users and refused origins. | `GET /v1/search/clusters/{cluster}/browser-keys/{key}/usage` |
 | `search_revoke_browser_key` | Revoke a browser key at once. | `DELETE /v1/search/clusters/{cluster}/browser-keys/{key}` |
+| `search_create_inference_endpoint` | An inference endpoint (embeddings, sparse, rerank, completion) whose API key a roll secret holds: read as the caller (reveal), followed on rotation, never in the call or the answer (roll search #1076). | `POST /v1/search/clusters/{cluster}/inference/secrets` |
 | `search_list_inference_secrets` | Inference endpoints keyed by a roll secret, and what each follows (never the value). | `GET /v1/search/clusters/{id}/inference/secrets` |
 | `search_branch_cluster` | A copy-on-write branch of a cluster. | `POST /v1/search/clusters/{cluster}/branches` |
 | `search_update_cluster` | A cluster's idle timeout, request limits, flavor, IP allowlist (admin). | `PATCH /v1/search/clusters/{id}` |
