@@ -1832,10 +1832,12 @@ deterministic (#396).
    words, retention, next run, last success and failure, run now, edit, and starting a stopped
    SLM), every request shown and a click from the console. Checked against Elasticsearch 9.5.5:
    SLM's readable times now carry milliseconds as `XContentBuilder.timeField` writes them
-   (`2026-11-19T01:30:00.000Z`). Left: OpenSearch's snapshot management policies
-   (`_plugins/_sm`) aren't served, so OpenSearch-flavor clusters take snapshots by hand or from an
-   ISM `snapshot` action; their snapshots show no size (OpenSearch has no `index_details`); `fs`
-   repositories need `path.repo`, which roll's clusters don't set.
+   (`2026-11-19T01:30:00.000Z`). On OpenSearch-flavor clusters the policies are OpenSearch's
+   snapshot management policies (`_plugins/_sm`, compatibility.md): the creation schedule and
+   deletion condition in words, each workflow's state and last outcome from `_explain`, start,
+   stop, edit (with the document's sequence number) and delete. Left: OpenSearch-flavor
+   clusters' snapshots show no size (OpenSearch has no `index_details`); `fs` repositories need
+   `path.repo`, which roll's clusters don't set.
    And a Pipelines tab, as Kibana's Ingest Pipelines does it: every pipeline with its processors
    and the indices whose `default_pipeline` or `final_pipeline` names it (built-in ones on
    request); a pipeline edited as a list of processors (the type, the options of the 26 types
