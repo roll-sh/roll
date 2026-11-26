@@ -760,3 +760,57 @@ fn grouping_sets() {
     drop(s);
     eng.shutdown();
 }
+
+/// RANGE and GROUPS frames with offset bounds in memory, over a 20,000-row partition: each
+/// bound found by a pointer moving forward (`window::FrameSearch`, as nodeWindowAgg.c), where
+/// a search from the partition's start each row took minutes; NULLs, DESC, floats, exclusions.
+/// The results are PostgreSQL 18.6's.
+#[test]
+fn offset_frames_in_memory() {
+    std::thread::Builder::new().stack_size(64 << 20).spawn(offset_frames).unwrap().join().unwrap();
+}
+
+fn offset_frames() {
+    let dir = tempfile::tempdir().unwrap();
+    let eng = open(dir.path());
+    let mut s = eng.connect(1, "postgres", "postgres", "postgres").unwrap();
+    for sql in [
+        "CREATE TABLE rf (id int, a int, f float8, s text)",
+        "INSERT INTO rf SELECT g, CASE WHEN g % 97 = 0 THEN NULL ELSE (g::int8 * 7919 % 20011)::int END, (g % 1000) / 7.0, md5(g::text) FROM generate_series(1, 20000) g",
+        "ANALYZE rf",
+        "SET work_mem = '64MB'",
+    ] {
+        q(&mut s, sql).unwrap();
+    }
+    for (w, want) in [
+        (
+            "count(*) OVER w c, last_value(s) OVER w l, sum(id) OVER w t FROM rf WINDOW w AS (ORDER BY a RANGE BETWEEN 50 PRECEDING AND 50 FOLLOWING EXCLUDE CURRENT ROW)",
+            "bd2fe4c1b2c7f75327c0769c89474e21",
+        ),
+        (
+            "first_value(id) OVER w f, nth_value(s, 2) OVER w n, max(a) OVER w m FROM rf WINDOW w AS (PARTITION BY id % 3 ORDER BY a DESC NULLS LAST RANGE BETWEEN 20 PRECEDING AND 7 PRECEDING)",
+            "7c41db6053212ea3a15cabe2fd31d19b",
+        ),
+        (
+            "count(*) OVER w c, min(id) OVER w m FROM rf WINDOW w AS (ORDER BY f RANGE BETWEEN 0.5 PRECEDING AND 1.5 FOLLOWING EXCLUDE GROUP)",
+            "9793d72bc093ac28d0ec538ec58542db",
+        ),
+        (
+            "count(*) OVER w c, sum(id) OVER w t, last_value(id) OVER w l FROM rf WINDOW w AS (ORDER BY f GROUPS BETWEEN 3 PRECEDING AND 2 FOLLOWING EXCLUDE TIES)",
+            "e0bfe7df1896b7bd852367a19b548ec0",
+        ),
+        (
+            "count(*) OVER w c, first_value(id) OVER w f FROM rf WINDOW w AS (ORDER BY a NULLS FIRST RANGE BETWEEN CURRENT ROW AND 100 FOLLOWING)",
+            "e34fa250717a1ae782fd533a531b1c77",
+        ),
+        (
+            "count(*) OVER w c FROM rf WINDOW w AS (ORDER BY a GROUPS BETWEEN 2 FOLLOWING AND UNBOUNDED FOLLOWING)",
+            "bf9f24130906f63e39e1107797ff7f7b",
+        ),
+    ] {
+        let sql = format!("SELECT md5(string_agg(x::text, ',' ORDER BY x::text)) FROM (SELECT {w}) x");
+        assert_eq!(one(&mut s, &sql), Value::Text(want.into()), "{w}");
+    }
+    drop(s);
+    eng.shutdown();
+}
