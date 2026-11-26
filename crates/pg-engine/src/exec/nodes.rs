@@ -466,7 +466,7 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
                     return Ok(node);
                 }
                 let need = nd::add(need.map(<[bool]>::to_vec), nd::keys(keys));
-                return Ok(Box::new(SortNode {
+                return Ok(SortNode::boxed(SortNode {
                     presorted: super::pghash::presorted_keys(plan, ctx).min(keys.len()),
                     key: Arc::as_ptr(plan) as usize,
                     input: Some(node),
@@ -497,7 +497,7 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
                 }));
             }
             let need = nd::add(need.map(<[bool]>::to_vec), nd::keys(keys));
-            Box::new(SortNode {
+            SortNode::boxed(SortNode {
                 presorted: super::pghash::presorted_keys(plan, ctx).min(keys.len()),
                 key: Arc::as_ptr(plan) as usize,
                 input: Some(open_need(input, need.clone(), ctx)?),
@@ -3497,75 +3497,108 @@ fn sort_input_bounded(input: &mut BoxNode, keys: &[SortKey], bound: usize, ctx: 
     Ok((sorted.into_iter().map(|(_, r)| r).collect(), n + skipped))
 }
 
-/// An Incremental Sort's rows: the input sorted on the first `presorted` keys already, read
-/// only as far as the sort needs (a LIMIT above may stop it early). `key`: the node's, for
-/// EXPLAIN ANALYZE's counts of its sorts.
-fn incremental_sort_rows(
-    input: &mut BoxNode,
-    keys: &[SortKey],
+/// An Incremental Sort: a Sort whose input is sorted on its first `presorted` keys
+/// already (`SortNode::boxed`). Its rows go up a sorted batch at a time as
+/// ExecIncrementalSort gives them (`pgsort::IncrSort`: at least 32 rows to the end of a prefix
+/// group, or one prefix group), the input read only as far as the next batch needs, so it
+/// holds one batch, not its whole output. `key`: the node's, for EXPLAIN ANALYZE's counts of
+/// its sorts.
+struct IncrSortNode {
+    input: BoxNode,
+    keys: Vec<SortKey>,
     presorted: usize,
-    bound: Option<usize>,
     key: usize,
-    ctx: &ExecCtx,
-) -> Result<Vec<Row>> {
-    let mut read_err: Option<crate::error::Error> = None;
-    let keyed = std::iter::from_fn(|| {
-        if read_err.is_some() {
-            return None;
+    started: bool,
+    sorter: super::pgsort::IncrSort<(Vec<Value>, Row)>,
+    batch: std::vec::IntoIter<(Vec<Value>, Row)>,
+}
+
+impl IncrSortNode {
+    /// The next batch, sorted (empty at the end).
+    #[inline(never)]
+    fn fill(&mut self, ctx: &ExecCtx) -> Result<()> {
+        if !self.started {
+            self.started = true;
+            // (tuplesort_begin_heap's checks of its keys, as SortNode makes them.)
+            if self.keys.iter().any(|k| k.using.as_ref().is_some_and(|u| crate::sql::binder::is_indeterminate(u))) {
+                return Err(Error::new(
+                    code::INDETERMINATE_COLLATION,
+                    "could not determine which collation to use for string comparison",
+                )
+                .hint("Use the COLLATE clause to set the collation explicitly."));
+            }
+            if let Some(e) = self.keys.iter().find_map(|k| missing_sort_support(&k.expr.ty(), ctx)) {
+                return Err(e);
+            }
         }
-        let r = (|| -> Result<Option<(Vec<Value>, Row)>> {
-            let Some(r) = input.next(ctx)? else { return Ok(None) };
-            ctx.check()?;
-            let k = keys
-                .iter()
-                .map(|k| eval(&k.expr, &r, ctx))
-                .collect::<Result<Vec<_>>>()?;
-            Ok(Some((k, r)))
-        })();
-        match r {
-            Ok(x) => x,
+        let (keys, input, presorted) = (&self.keys, &mut self.input, self.presorted);
+        let mut read_err: Option<crate::error::Error> = None;
+        let mut keyed = std::iter::from_fn(|| {
+            if read_err.is_some() {
+                return None;
+            }
+            let r = (|| -> Result<Option<(Vec<Value>, Row)>> {
+                let Some(r) = input.next(ctx)? else { return Ok(None) };
+                ctx.check()?;
+                let k = keys.iter().map(|k| eval(&k.expr, &r, ctx)).collect::<Result<Vec<_>>>()?;
+                Ok(Some((k, r)))
+            })();
+            match r {
+                Ok(x) => x,
+                Err(e) => {
+                    read_err = Some(e);
+                    None
+                }
+            }
+        });
+        let cmp_range = |a: &(Vec<Value>, Row), b: &(Vec<Value>, Row), from: usize, to: usize| {
+            for (i, k) in keys.iter().enumerate().take(to).skip(from) {
+                match compare_values(&a.0[i], &b.0[i], k, ctx)? {
+                    Ordering::Equal => {}
+                    o => return Ok(o),
+                }
+            }
+            Ok(Ordering::Equal)
+        };
+        let n = keys.len();
+        let mut full = |a: &(Vec<Value>, Row), b: &(Vec<Value>, Row)| cmp_range(a, b, 0, n);
+        let mut suffix = |a: &(Vec<Value>, Row), b: &(Vec<Value>, Row)| cmp_range(a, b, presorted, n);
+        let mut err = None;
+        let mut same = |a: &(Vec<Value>, Row), b: &(Vec<Value>, Row)| match cmp_range(a, b, 0, presorted) {
+            Ok(o) => o == Ordering::Equal,
             Err(e) => {
-                read_err = Some(e);
-                None
+                err.get_or_insert(e);
+                true
             }
+        };
+        let mut cf = super::pgsort::Cmp::new(&mut full);
+        let mut cs = super::pgsort::Cmp::new(&mut suffix);
+        let mut stats = super::pgsort::IncrStats::default();
+        let batch = self.sorter.next_batch(&mut keyed, &mut cf, &mut cs, &mut same, &mut stats);
+        if let Some(e) = read_err.or(err).or(cf.err).or(cs.err) {
+            return Err(e);
         }
-    });
-    let cmp_range = |a: &(Vec<Value>, Row), b: &(Vec<Value>, Row), from: usize, to: usize| {
-        for (i, k) in keys.iter().enumerate().take(to).skip(from) {
-            match compare_values(&a.0[i], &b.0[i], k, ctx)? {
-                Ordering::Equal => {}
-                o => return Ok(o),
+        ctx.count(self.key, |st| {
+            for g in 0..2 {
+                st.incr.groups[g] += stats.groups[g];
+                st.incr.methods[g] |= stats.methods[g];
+                st.incr.kept_total[g] += stats.kept_total[g];
+                st.incr.kept_max[g] = st.incr.kept_max[g].max(stats.kept_max[g]);
             }
-        }
-        Ok(Ordering::Equal)
-    };
-    let n = keys.len();
-    let mut full = |a: &(Vec<Value>, Row), b: &(Vec<Value>, Row)| cmp_range(a, b, 0, n);
-    let mut suffix = |a: &(Vec<Value>, Row), b: &(Vec<Value>, Row)| cmp_range(a, b, presorted, n);
-    let mut err = None;
-    let mut same = |a: &(Vec<Value>, Row), b: &(Vec<Value>, Row)| match cmp_range(a, b, 0, presorted) {
-        Ok(o) => o == Ordering::Equal,
-        Err(e) => {
-            err.get_or_insert(e);
-            true
-        }
-    };
-    let mut cf = super::pgsort::Cmp::new(&mut full);
-    let mut cs = super::pgsort::Cmp::new(&mut suffix);
-    let mut stats = super::pgsort::IncrStats::default();
-    let out = super::pgsort::incremental_sort(keyed, bound, &mut cf, &mut cs, &mut same, &mut stats);
-    if let Some(e) = read_err.or(err).or(cf.err).or(cs.err) {
-        return Err(e);
+        });
+        self.batch = batch.unwrap_or_default().into_iter();
+        Ok(())
     }
-    ctx.count(key, |st| {
-        for g in 0..2 {
-            st.incr.groups[g] += stats.groups[g];
-            st.incr.methods[g] |= stats.methods[g];
-            st.incr.kept_total[g] += stats.kept_total[g];
-            st.incr.kept_max[g] = st.incr.kept_max[g].max(stats.kept_max[g]);
+}
+
+impl Node for IncrSortNode {
+    fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+        if let Some((_, r)) = self.batch.next() {
+            return Ok(Some(r));
         }
-    });
-    Ok(out.into_iter().map(|(_, r)| r).collect())
+        self.fill(ctx)?;
+        Ok(self.batch.next().map(|(_, r)| r))
+    }
 }
 
 /// FinishSortSupportFunction's error for a sort key of made type `ty` whose ordering
@@ -3758,6 +3791,23 @@ pub(super) fn sort_all(
 }
 
 impl SortNode {
+    /// The node: an Incremental Sort's own when its input is sorted on its leading keys
+    /// already (`IncrSortNode`).
+    fn boxed(self) -> BoxNode {
+        if self.presorted == 0 {
+            return Box::new(self);
+        }
+        Box::new(IncrSortNode {
+            input: self.input.expect("a sort not yet run"),
+            keys: self.keys,
+            presorted: self.presorted,
+            key: self.key,
+            started: false,
+            sorter: super::pgsort::IncrSort::new(self.bound),
+            batch: Vec::new().into_iter(),
+        })
+    }
+
     /// The next sorted row, widened back when held narrowed.
     fn next_out(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
         Ok(match (self.out.next(ctx)?, &self.narrow) {
@@ -3788,9 +3838,7 @@ impl Node for SortNode {
             if let Some(e) = self.keys.iter().find_map(|k| missing_sort_support(&k.expr.ty(), ctx)) {
                 return Err(e);
             }
-            self.out = super::extsort::Sorted::Mem(if self.presorted > 0 {
-                incremental_sort_rows(&mut input, &self.keys, self.presorted, self.bound, self.key, ctx)?
-            } else {
+            self.out = super::extsort::Sorted::Mem({
                 match self.bound.filter(|&b| b > 0) {
                     Some(b) => {
                         // A numeric multikey sort can prune by its first key only when
