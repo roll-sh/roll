@@ -145,6 +145,24 @@ pub fn parse(body: &[u8]) -> Result<Spec, String> {
     Ok(Spec { judgments, configurations, metric })
 }
 
+/// Whether `index` names one index, alias or data stream (no pattern, list or exclusion): a
+/// rating without an `_index` is about a document of it only then.
+pub fn names_one(index: &str) -> bool {
+    !index.contains(['*', ',', '?']) && !index.starts_with('-')
+}
+
+/// Refuses a rating with no `_index` when the evaluated index is a pattern or list: its hits
+/// come back under their own index names, so the rating would match nothing.
+pub fn check_ratings_name(spec: &Spec, index: &str) -> Result<(), String> {
+    if names_one(index) {
+        return Ok(());
+    }
+    match spec.judgments.iter().enumerate().find(|(_, j)| j.ratings.iter().any(|r| r.0.is_empty())) {
+        Some((i, _)) => Err(bad(format!("[{index}] isn't one index: each rating names its document's [_index] ([judgments][{i}] has one that doesn't)"))),
+        None => Ok(()),
+    }
+}
+
 /// The `_rank_eval` body that scores configuration `c` on `index`: one templated request per
 /// judged query (ids `q0`, `q1` … in judgment order), its ratings on `index` unless they name one.
 pub fn rank_eval_body(spec: &Spec, c: &Configuration, index: &str) -> Value {
@@ -280,6 +298,14 @@ mod tests {
         assert_eq!((c["better"].as_u64(), c["worse"].as_u64(), c["unchanged"].as_u64()), (Some(1), Some(0), Some(0)));
         assert_eq!(c["better_queries"][0], json!({ "query": "red shoes", "baseline": 0.2, "candidate": 0.9, "difference": 0.7 }));
         assert_eq!(c["difference"], 0.1);
+    }
+
+    #[test]
+    fn a_pattern_needs_each_ratings_index() {
+        let s = spec();
+        assert!(check_ratings_name(&s, "products").is_ok());
+        let e = check_ratings_name(&s, "products-*").unwrap_err();
+        assert!(e.contains("[judgments][0]"), "{e}");
     }
 
     #[test]

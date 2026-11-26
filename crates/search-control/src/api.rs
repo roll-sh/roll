@@ -834,6 +834,7 @@ async fn index_evaluate(State(c): State<AppState>, Path((id, index)): Path<(Stri
     let mut held = Reservation::none();
     let bytes = read_limited(body, (cluster.max_body_mb.max(1) as usize) << 20, declared(&headers), c.node.body_budget(), &mut held).await.map_err(|e| read_error(&cluster, e))?;
     let spec = crate::evaluate::parse(&bytes).map_err(ControlError::Invalid)?;
+    crate::evaluate::check_ratings_name(&spec, &index).map_err(ControlError::Invalid)?;
     drop(held);
     let mut answers = Vec::with_capacity(spec.configurations.len());
     for conf in &spec.configurations {
