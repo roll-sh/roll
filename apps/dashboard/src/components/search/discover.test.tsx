@@ -6,9 +6,10 @@ import { DiscoverTab } from "./discover";
 
 const esJson = vi.hoisted(() => vi.fn());
 const esRaw = vi.hoisted(() => vi.fn());
+const saved = vi.hoisted(() => ({ savedSearches: vi.fn(), saveSearch: vi.fn(), updateSavedSearch: vi.fn(), deleteSavedSearch: vi.fn() }));
 vi.mock("@/lib/search-api", async (orig) => {
   const real = await orig<typeof import("@/lib/search-api")>();
-  return { ...real, esJson, esRaw };
+  return { ...real, esJson, esRaw, searchApi: { ...real.searchApi, ...saved } };
 });
 
 const cluster = { id: "c1", name: "logs", flavor: "elasticsearch" } as unknown as SearchCluster;
@@ -53,4 +54,77 @@ it("shows a view's fields, its documents over time and its rows, and a field's t
   await user.click(await within(fields).findByRole("button", { name: "Filter out host: web-2" }));
   expect(screen.getByRole("textbox", { name: "Query" })).toHaveValue('not host: "web-2"');
   expect(window.location.hash).toContain("q=not+host");
+});
+
+/** A cluster with one index, `logs-web`, its fields, and `esRaw` answering `hits` for every search. */
+function fakeCluster(hits: (body: Record<string, unknown>, path: string) => unknown[]) {
+  esJson.mockImplementation(async (_id: string, _method: string, path: string) => {
+    if (path.startsWith("/_resolve/index/")) return { indices: [{ name: "logs-web" }, { name: "logs-api" }], aliases: [], data_streams: [] };
+    if (path.includes("/_field_caps")) return { fields: { "@timestamp": { date: { type: "date", aggregatable: true } }, host: { keyword: { type: "keyword", aggregatable: true } } } };
+    return {};
+  });
+  esRaw.mockImplementation(async (_id: string, _method: string, path: string, body: Record<string, unknown>) => {
+    const value = { took: 1, hits: { total: { value: 1, relation: "eq" }, hits: hits(body, path) }, aggregations: { over_time: { buckets: [] } } };
+    return { value, text: JSON.stringify(value) };
+  });
+}
+
+const doc = (id: string, at: number, host: string) => ({ _index: "logs-web", _id: id, _source: { "@timestamp": new Date(at).toISOString(), host }, fields: { "@timestamp": [String(at)] }, sort: [at, Number(id)] });
+const T = Date.UTC(2026, 10, 26, 12, 0, 0);
+
+it("opens a saved search, and saves the view as a new one or over the one opened", async () => {
+  const user = userEvent.setup();
+  fakeCluster(() => [doc("1", T, "web-1")]);
+  const errors = { id: "ss_1", name: "errors", search: { view: "logs-api", time_field: "@timestamp", mode: "kql", query: "status >= 500", range: { last: "1h" }, columns: ["host"], sort: null }, made_by: "ana", created_at: 1, updated_at: 1 };
+  saved.savedSearches.mockResolvedValue({ saved_searches: [errors] });
+  saved.updateSavedSearch.mockImplementation(async (_c: string, id: string, change: { search: unknown }) => ({ ...errors, id, search: change.search }));
+  saved.saveSearch.mockImplementation(async (_c: string, name: string, search: unknown) => ({ ...errors, id: "ss_2", name, search }));
+  window.location.hash = "#discover?view=logs-web";
+  render(<DiscoverTab cluster={cluster} onOpenConsole={vi.fn()} />);
+
+  await user.click(await screen.findByRole("button", { name: "Saved searches" }));
+  await user.click(await screen.findByRole("button", { name: "Open errors" }));
+  expect(screen.getByRole("textbox", { name: "Query" })).toHaveValue("status >= 500");
+  expect(screen.getByRole("combobox", { name: "View" })).toHaveValue("logs-api");
+  await vi.waitFor(() => expect(window.location.hash).toContain("view=logs-api"));
+  // Unchanged, there's nothing to save over it.
+  expect(screen.getByRole("button", { name: "Save to errors" })).toBeDisabled();
+
+  await user.clear(screen.getByRole("textbox", { name: "Query" }));
+  await user.type(screen.getByRole("textbox", { name: "Query" }), "status >= 400{Enter}");
+  await user.click(screen.getByRole("button", { name: "Save to errors" }));
+  expect(saved.updateSavedSearch).toHaveBeenCalledWith("c1", "ss_1", { search: expect.objectContaining({ view: "logs-api", query: "status >= 400", range: { last: "1h" } }) });
+
+  await user.type(screen.getByRole("textbox", { name: "Saved search name" }), "4xx and 5xx{Enter}");
+  expect(saved.saveSearch).toHaveBeenCalledWith("c1", "4xx and 5xx", expect.objectContaining({ query: "status >= 400", columns: ["host"] }));
+  expect(screen.getByRole("button", { name: "Saved searches" })).toHaveTextContent("4xx and 5xx");
+});
+
+it("shows a document among the ones just before and after it in time", async () => {
+  const user = userEvent.setup();
+  fakeCluster((body, path) => {
+    if (path === "/logs-web/_search" && (body.query as { ids?: unknown }).ids) return [doc("5", T, "anchor-host")];
+    if (body.search_after) {
+      const asc = JSON.stringify(body.sort).includes('"asc"');
+      return asc ? [doc("6", T + 1000, "newer-host")] : [doc("4", T - 1000, "older-host")];
+    }
+    return [doc("5", T, "anchor-host")];
+  });
+  window.location.hash = "#discover?view=logs-web&col=host";
+  render(<DiscoverTab cluster={cluster} onOpenConsole={vi.fn()} />);
+
+  await user.click(await screen.findByText("anchor-host"));
+  await user.click(await screen.findByRole("button", { name: "Surrounding documents" }));
+  const around = await screen.findByRole("region", { name: "Surrounding documents" });
+  await within(around).findByText("older-host");
+  const rows = within(around).getAllByRole("row").slice(1).map((r) => r.textContent);
+  expect(rows.map((r) => r?.replace(/^.*\.\d{3}/, ""))).toEqual(["newer-host", "anchor-host", "older-host"]);
+  expect(within(around).getAllByRole("row").find((r) => r.getAttribute("aria-current"))).toHaveTextContent("anchor-host");
+  // Both sides search after the anchor's own sort values, over every time.
+  const after = esRaw.mock.calls.map((c) => c[3]).filter((b) => b?.search_after);
+  expect(after.map((b) => b.search_after)).toEqual([[T, 5], [T, 5]]);
+  expect(JSON.stringify(after)).not.toContain("now-24h");
+
+  await user.click(within(around).getByRole("button", { name: "Documents" }));
+  expect(screen.queryByRole("region", { name: "Surrounding documents" })).not.toBeInTheDocument();
 });

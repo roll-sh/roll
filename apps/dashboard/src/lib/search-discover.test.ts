@@ -1,5 +1,26 @@
 import { describe, expect, it } from "vitest";
-import { esqlText, hashToState, initialState, pplText, sampleBody, searchBody, stateToHash, viewFields, valuesField, withFilter, type DiscoverState } from "./search-discover";
+import {
+  anchorBody,
+  chartBody,
+  chartData,
+  chartOf,
+  edited,
+  esqlText,
+  fromSpec,
+  hashToState,
+  initialState,
+  localTime,
+  pplText,
+  sampleBody,
+  searchBody,
+  stateToHash,
+  surroundingBodies,
+  toSpec,
+  viewFields,
+  valuesField,
+  withFilter,
+  type DiscoverState,
+} from "./search-discover";
 
 const NOW = Date.UTC(2026, 10, 26, 12, 0, 0);
 const base: DiscoverState = { ...initialState("elasticsearch"), view: "logs-*", timeField: "@timestamp", query: "status >= 500", range: { last: "15m" } };
@@ -12,6 +33,7 @@ describe("Discover's requests", () => {
       size: 50,
       track_total_hits: true,
       sort: [{ "@timestamp": { order: "desc", unmapped_type: "date" } }],
+      fields: [{ field: "@timestamp", format: "epoch_millis" }],
       aggs: { over_time: { auto_date_histogram: { field: "@timestamp", buckets: 60 } } },
     });
     const page2 = searchBody({ ...base, query: "", timeField: null, sort: { column: "host", field: "host", order: "asc" } }, 50);
@@ -71,5 +93,85 @@ describe("Discover's URL", () => {
     const def = initialState("opensearch");
     expect(hashToState("#indices", def, ["dql", "ppl"])).toEqual(def);
     expect(hashToState("#discover?view=x&mode=esql&range=9-3", def, ["dql", "ppl"])).toEqual({ ...def, view: "x" });
+  });
+});
+
+describe("Discover's saved searches", () => {
+  it("keep the view as the control plane checks it, and say when the view moved on", () => {
+    const spec = toSpec({ ...base, columns: ["host"] });
+    expect(spec).toEqual({ view: "logs-*", time_field: "@timestamp", mode: "kql", query: "status >= 500", range: { last: "15m" }, columns: ["host"], sort: null });
+    expect(toSpec({ ...base, timeField: undefined }).time_field).toBeNull();
+    expect(fromSpec(spec, ["kql", "esql"])).toEqual({ ...base, columns: ["host"] });
+    expect(fromSpec({ ...spec, mode: "ppl" }, ["kql", "esql"]).mode).toBe("kql");
+    // The control plane answers with its keys in another order: still the same view.
+    const stored = JSON.parse(JSON.stringify({ sort: null, view: "logs-*", columns: ["host"], range: { last: "15m" }, query: "status >= 500", mode: "kql", time_field: "@timestamp" }));
+    expect(edited({ ...base, columns: ["host"] }, stored)).toBe(false);
+    expect(edited({ ...base, columns: ["host"], query: "status >= 400" }, stored)).toBe(true);
+  });
+});
+
+describe("Discover's surrounding documents", () => {
+  it("find the anchor by id, then search after its sort values both ways", () => {
+    expect(anchorBody("@timestamp", "abc")).toEqual({
+      size: 1,
+      query: { ids: { values: ["abc"] } },
+      sort: [{ "@timestamp": { order: "desc", unmapped_type: "date" } }, { _doc: { order: "desc" } }],
+      fields: [{ field: "@timestamp", format: "epoch_millis" }],
+      track_total_hits: false,
+    });
+    const { newer, older } = surroundingBodies(base, "@timestamp", [NOW, 7], { newer: 5, older: 10 }, false);
+    expect(newer).toMatchObject({ size: 5, query: { bool: { filter: [{ match_all: {} }] } }, search_after: [NOW, 7], sort: [{ "@timestamp": { order: "asc" } }, { _doc: { order: "asc" } }] });
+    expect(older).toMatchObject({ size: 10, search_after: [NOW, 7], sort: [{ "@timestamp": { order: "desc" } }, { _doc: { order: "desc" } }] });
+    // No range either way; the query only when kept.
+    expect(JSON.stringify(older)).not.toContain("range");
+    expect(surroundingBodies(base, "@timestamp", [NOW, 7], { newer: 5, older: 5 }, true).newer.query).toEqual({ bool: { filter: [{ kql: { query: "status >= 500" } }] } });
+  });
+});
+
+describe("Discover's field charts", () => {
+  const fields = viewFields({
+    fields: {
+      "@timestamp": { date: { type: "date", aggregatable: true } },
+      bytes: { long: { type: "long", aggregatable: true } },
+      message: { text: { type: "text", aggregatable: false } },
+      "message.keyword": { keyword: { type: "keyword", aggregatable: true } },
+      body: { text: { type: "text", aggregatable: false } },
+    },
+  });
+
+  it("draw a keyword's top values, a number's spread or a date over time, in one request over the range", () => {
+    expect([chartOf(fields, "message"), chartOf(fields, "bytes"), chartOf(fields, "@timestamp"), chartOf(fields, "body")]).toEqual([
+      { kind: "terms", field: "message.keyword" },
+      { kind: "number", field: "bytes" },
+      { kind: "date", field: "@timestamp" },
+      null,
+    ]);
+    const stats = { distinct: { cardinality: { field: "bytes" } }, missing: { missing: { field: "bytes" } } };
+    expect(chartBody(base, "number", "bytes")).toEqual({
+      size: 0,
+      track_total_hits: true,
+      query: searchBody(base).query,
+      aggs: { bars: { variable_width_histogram: { field: "bytes", buckets: 30 } }, ...stats, low: { min: { field: "bytes" } }, high: { max: { field: "bytes" } } },
+    });
+    expect(chartBody(base, "terms", "host").aggs).toEqual({ bars: { terms: { field: "host", size: 10 } }, distinct: { cardinality: { field: "host" } }, missing: { missing: { field: "host" } } });
+  });
+
+  it("read the bars and the whole range's statistics from the answer", () => {
+    const terms = chartData("terms", { hits: { total: { value: 90 } }, aggregations: { bars: { sum_other_doc_count: 5, buckets: [{ key: "web-1", doc_count: 85 }] }, distinct: { value: 2 }, missing: { doc_count: 0 } } });
+    expect(terms).toEqual({ bars: [{ key: "web-1", count: 85 }], total: 90, other: 5, distinct: 2, missing: 0, min: null, max: null });
+    const numbers = chartData("number", { aggregations: { bars: { buckets: [{ key: 15, min: 10, max: 20, doc_count: 3 }] }, low: { value: 10 }, high: { value: 20 } } });
+    expect(numbers.bars).toEqual([{ key: 15, from: 10, to: 20, count: 3 }]);
+    const dates = chartData("date", { aggregations: { bars: { buckets: [{ key: 0, doc_count: 1 }, { key: 60_000, doc_count: 2 }] } } });
+    expect(dates.bars.map((b) => [b.from, b.to])).toEqual([[0, 60_000], [60_000, 120_000]]);
+  });
+});
+
+describe("Discover's times", () => {
+  it("are the viewer's zone's, to the millisecond, from milliseconds or ISO text (UTC without an offset)", () => {
+    expect(localTime(Date.UTC(2026, 10, 26, 12, 0, 0, 5), "Europe/Budapest")).toBe("2026-11-26 13:00:00.005");
+    expect(localTime("2026-11-26T12:00:00", "America/New_York")).toBe("2026-11-26 07:00:00.000");
+    expect(localTime("2026-07-01T00:00:00.250+02:00", "UTC")).toBe("2026-06-30 22:00:00.250");
+    expect(localTime("1764158400000", "UTC")).toBe("2025-11-26 12:00:00.000");
+    expect(localTime("not a date", "UTC")).toBe("not a date");
   });
 });
