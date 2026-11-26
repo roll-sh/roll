@@ -324,6 +324,12 @@ pub struct FakeApps {
     pub metrics: Mutex<HashMap<String, (f64, u64)>>,
     /// What roll apps billed each service's environment this month (None: roll runs it).
     pub spent: Mutex<Option<f64>>,
+    /// Stories a change's run takes besides the Storybook's two (a run with changed paths).
+    pub change_stories: Mutex<Vec<String>>,
+    /// Stories only a change's Storybook has (one it added): a run without changed paths can't take them.
+    pub new_stories: Mutex<Vec<String>>,
+    /// Each run's `stories_first`: (preview, ids).
+    pub stories_first: Mutex<Vec<(String, Vec<String>)>>,
     /// Each hold_down asked: (preview, service, down).
     pub held: Mutex<Vec<(String, String, bool)>>,
     /// Each service's errors, by name.
@@ -546,14 +552,19 @@ impl Apps for FakeApps {
         let revs: Vec<String> = self.deployed.lock().iter().filter(|((p, _), _)| p == preview).map(|(_, r)| r.clone()).collect();
         let api = opts.openapi.as_ref().and_then(|_| revs.iter().find_map(|r| self.api.lock().get(r).cloned()));
         self.shots.lock().push(preview.to_string());
+        if !opts.stories_first.is_empty() {
+            self.stories_first.lock().push((preview.to_string(), opts.stories_first.clone()));
+        }
         self.states.lock().extend(opts.states.iter().map(|s| s.name.clone()));
         let pages = opts
             .pages
             .iter()
             .cloned()
             .chain(opts.browsers.iter().filter(|_| !self.no_browsers.load(Ordering::SeqCst)).map(|b| format!("browser:{b}")))
-            // A Storybook with two stories.
+            // A Storybook with two stories, those asked for first, and a change's own.
             .chain(opts.stories.iter().flat_map(|_| ["story:button--primary".to_string(), "story:button--secondary".to_string()]))
+            .chain(opts.stories.iter().flat_map(|_| opts.stories_first.iter().filter(|i| !self.new_stories.lock().contains(i)).map(|i| format!("story:{i}")).collect::<Vec<_>>()))
+            .chain(opts.stories.iter().filter(|_| !opts.changed.is_empty()).flat_map(|_| self.change_stories.lock().iter().map(|i| format!("story:{i}")).collect::<Vec<_>>()))
             .map(|path| roll_previews::ports::PageShot { path, png: png.clone(), errors: 0, report: Default::default() })
             .collect();
         self.crops_asked.lock().extend(opts.crops.iter().map(|c| c.note.clone()));

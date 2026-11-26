@@ -829,6 +829,13 @@ fn node_indices_stats(ctx: &Ctx) -> EsResult<Value> {
     for i in &open {
         crate::api::indices::add_index_stats(ctx.cluster, i, &mut idx, None);
     }
+    // The most the cluster's request cache may hold: its own cap, within the node's cache
+    // budget (Elasticsearch's node cache holds `indices.requests.cache.size`). What it holds is
+    // the cluster's own `memory_size_in_bytes`, never other tenants'.
+    if let Some(Value::Obj(rc)) = idx.as_object_mut().and_then(|o| o.get_mut("request_cache")) {
+        let node = ctx.cluster.cache_memory.parent().map_or(u64::MAX, |p| p.limit());
+        rc.insert("limit_size_in_bytes".into(), Value::from(ctx.cluster.request_cache.cap().min(node).min(i64::MAX as u64) as i64));
+    }
     if let Some(o) = idx.as_object_mut() {
         if os {
             // OpenSearch's per-status request counters, whatever metrics were asked for.

@@ -1216,7 +1216,8 @@ async fn listen(ctx: Arc<Ctx>, msg: &Value) -> Response {
             _ => None,
         };
         let now = ctx.as_now(g, session);
-        let types: Vec<String> = events::list(&now)["events"].as_array().into_iter().flatten().filter_map(|e| e["name"].as_str().map(str::to_string)).collect();
+        // Only a listen that asked for event types builds them (each look, every 5 s).
+        let types: Vec<String> = if event_types { events::list(&now)["events"].as_array().into_iter().flatten().filter_map(|e| e["name"].as_str().map(str::to_string)).collect() } else { Vec::new() };
         Some((tool_names(&now), types))
     };
     struct State {

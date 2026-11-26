@@ -38,6 +38,9 @@ const RETRY_MS: i64 = 3_600_000;
 const CAP_MS: i64 = 3_600_000;
 /// Why a leak didn't rotate a key it otherwise would have (the event's `reason`).
 const CAPPED: &str = "rotated within the hour";
+/// Why a leak didn't rotate a public certificate's key: its registration was renewed for a leak
+/// this week, and the renewal cap holds another (the event's `reason`).
+const ALREADY_ROTATED: &str = "already rotated";
 /// Who rotates a leaked managed key (the project's `leaks.rotate`, an admin's choice).
 pub(crate) const LEAKS: &str = "roll:leaks";
 
@@ -202,6 +205,17 @@ fn strong(c: &str) -> bool {
         })
         .sum();
     bits >= 3.0
+}
+
+/// One more call by `who` in `minute`, of `n` candidates: (calls, candidates) in that minute so far.
+/// The one counter `/scan` (by principal) and a backup verify (`backup.verify:<principal>`) share;
+/// inside a write, as each caller's read-then-write is one.
+fn bump(c: &code_sql::Conn<'_>, who: &str, minute: i64, n: i64) -> Result<(i64, i64)> {
+    Ok(c.query_row(
+        "INSERT INTO scan_counts (principal, minute, calls, candidates) VALUES (?, ?, 1, ?) ON CONFLICT (principal, minute) DO UPDATE SET calls = scan_counts.calls + 1, candidates = scan_counts.candidates + excluded.candidates RETURNING calls, candidates",
+        params![who, minute, n],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?)
 }
 
 /// A scanner's calls per caller and minute (`POST …/scan`'s limit).
@@ -403,11 +417,7 @@ impl Secrets {
         if caller.principal != "operator" {
             let minute = self.db.now_ms()? / 60_000;
             let (calls, mine, project_minute, project_hour): (i64, i64, i64, i64) = self.db.write(|c| {
-                let (calls, mine) = c.query_row(
-                    "INSERT INTO scan_counts (principal, minute, calls, candidates) VALUES (?, ?, 1, ?) ON CONFLICT (principal, minute) DO UPDATE SET calls = scan_counts.calls + 1, candidates = scan_counts.candidates + excluded.candidates RETURNING calls, candidates",
-                    params![caller.principal, minute, n],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )?;
+                let (calls, mine) = bump(c, &caller.principal, minute, n)?;
                 let at = c.query_row(
                     "INSERT INTO scan_project_counts (project_id, minute, candidates) VALUES (?, ?, ?) ON CONFLICT (project_id, minute) DO UPDATE SET candidates = scan_project_counts.candidates + excluded.candidates RETURNING candidates",
                     params![project, minute, n],
@@ -483,6 +493,14 @@ impl Secrets {
         Ok(who)
     }
 
+    /// One more call by `who` this minute, outside a scan (a backup verify counts as
+    /// `backup.verify:<principal>`): (calls, candidates) so far this minute, in `scan_counts` as
+    /// [`bump`] keeps it for `/scan`.
+    pub(crate) fn count_calls(&self, who: &str, n: i64) -> Result<(i64, i64)> {
+        let minute = self.db.now_ms()? / 60_000;
+        self.db.write(|c| bump(c, who, minute, n))
+    }
+
     /// Minutes of scan counts that have passed (the sweeper): a caller's last minute, a project's
     /// last hour.
     pub(crate) fn forget_scan_counts(&self) -> Result<()> {
@@ -556,7 +574,8 @@ impl Secrets {
     /// leaked credential claimed in the same write, then rotated outside it, or, where the
     /// environment or folder needs approvals, a change request for its rotation opened instead.
     /// A caller's report claims only in folders where it may write, and no key whose credential
-    /// rotated for a leak within the hour is claimed again (the event says so instead).
+    /// rotated for a leak within the hour is claimed again, nor a public certificate's key whose
+    /// renewal the cap holds (`already rotated`: nothing revoked; the event says so instead).
     /// The holding projects' settings, as read.
     fn respond(&self, found: &[Match], whence: &Whence) -> HashMap<String, LeakRotate> {
         let mut settings: HashMap<String, LeakRotate> = HashMap::new();
@@ -612,12 +631,17 @@ impl Secrets {
                 let mut now_rotating: Vec<(String, String, String)> = vec![];
                 let mut requested: Vec<String> = vec![];
                 let mut capped: Vec<String> = vec![];
+                let mut held: Vec<String> = vec![];
                 if setting == LeakRotate::Managed && may_rotate && !creds.is_empty() {
                     let e = envs::by_slug(c, holder, env)?;
                     let approvals = e.needs_request() || !crate::folder_policy::covering(c, &e.id, &[path])?.is_empty();
                     for (&cred, &key) in &creds {
                         if rotated_lately(c, &e.id, cred, path, key, now)? {
                             capped.push(key.to_string());
+                            continue;
+                        }
+                        if let Some((name, next)) = crate::public_certs::leak_renewal_held(c, &e.id, path, key, now)? {
+                            held.push(format!("{key}: {}", crate::public_certs::leak_held_why(&name, next)));
                             continue;
                         }
                         if !claim(c, holder, &e.id, cred, path, key, now)? {
@@ -661,9 +685,18 @@ impl Secrets {
                     data["reason"] = json!(CAPPED);
                     summary = format!("{summary}; {} {CAPPED}, so roll doesn't rotate it again yet", capped.join(", "));
                 }
+                if !held.is_empty() {
+                    if now_rotating.is_empty() {
+                        data["rotating"] = json!(false);
+                    }
+                    if capped.is_empty() {
+                        data["reason"] = json!(ALREADY_ROTATED);
+                    }
+                    summary = format!("{summary}; {ALREADY_ROTATED}: {}", held.join("; "));
+                }
                 // The event once a day; a claim (above) whenever there's a credential to rotate,
                 // and a held one each time (whoever keeps reporting it hears why).
-                if crate::events::fresh(c, holder, &mark, now)? || !now_rotating.is_empty() || !requested.is_empty() || !capped.is_empty() {
+                if crate::events::fresh(c, holder, &mark, now)? || !now_rotating.is_empty() || !requested.is_empty() || !capped.is_empty() || !held.is_empty() {
                     crate::audit::record_event(c, mac, holder, &by, "secrets.leaked", Some(env), Some(path), &keys, &summary, now, Event::new(Kind::SecretLeaked, data))?;
                 }
                 Ok::<_, Error>(now_rotating)

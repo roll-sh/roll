@@ -219,8 +219,10 @@ export type Reach = {
   services: { service: string; name: string; environment: string; through: string; last_deployed_at: number | null }[];
   /** Live agents sandboxes holding a copy of its values (`from`: `env` or `env:/path`). */
   sandboxes: { id: string; name: string; owner: string; by: string; from: string; keys: string[] }[];
-  /** People who read it in 30 days and may no longer reveal it (`why`): they still know it. */
-  knew: { user: string; last_at: number; reads: number; why: "left" | "role" | "gone" }[];
+  /** People who read it in 30 days and may no longer reveal it (`why`): they still know it. `via: "backup"`: they took (or compared) a backup, which holds every folder; `registrations`: what its keys carried out, and what to do about each. */
+  knew: { user: string; last_at: number; reads: number; why: "left" | "role" | "gone"; via: "read" | "backup"; registrations?: string[] }[];
+  /** The project's backup schedule: every value leaves in each backup, which only the holder of `recipient`'s secret key opens. `stopped`: its maker may no longer back the project up. */
+  backups: { bucket: string; recipient: string; created_by: string; registrations: boolean; last_at: number | null; paused_at: number | null; stopped: boolean }[];
   syncs: { id: string; kind: string; target: unknown; last_synced_at: number | null; paused_at: number | null }[];
   /** Live dynamic credentials issued for its keys. */
   leases: { id: string; key: string; consumer: string; issued_at: number; expires_at: number }[];
@@ -238,7 +240,7 @@ export type Reach = {
   frozen: Freeze | null;
 };
 /** `POST …/reach/cut-off`: what to cut (each on unless false; `freeze` off unless true), and why. */
-export type CutOffRequest = { why: string; tokens?: boolean; identities?: boolean; leases?: boolean; placeholders?: boolean; shares?: boolean; syncs?: boolean; freeze?: boolean };
+export type CutOffRequest = { why: string; tokens?: boolean; identities?: boolean; leases?: boolean; placeholders?: boolean; shares?: boolean; syncs?: boolean; backups?: boolean; freeze?: boolean };
 export type Cut = { id: string; name: string };
 /** What a cut-off did: what was cut, and what couldn't be with why (the rest went on). `skipped`: tokens that reach beyond the project, left for the operator to revoke. `batches`: calls to roll-access, 500 grants each at most. */
 export type CutOff = {
@@ -257,8 +259,12 @@ export type CutOff = {
   shares: Cut[];
   projects: string[];
   syncs: Cut[];
+  /** The project's backup schedule, paused. */
+  backups: Cut[];
+  /** What left in backups taken by people who may no longer read it, and what to do about each: a backup can't be called back. */
+  rotate: string[];
   frozen: boolean;
-  failed: { what: "tokens" | "identities" | "logins" | "leases" | "placeholders" | "shares" | "syncs" | "freeze" | "audit"; ids: string[]; why: string }[];
+  failed: { what: "tokens" | "identities" | "logins" | "leases" | "placeholders" | "shares" | "syncs" | "backups" | "freeze" | "audit"; ids: string[]; why: string }[];
 };
 export type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: KeyInsight[] };
 
@@ -387,6 +393,12 @@ type IdentityScope = { name: string; environments?: string[]; paths?: string[]; 
  * neither: its machines log in with bootstrap tokens made for it (docs/secrets.md, "On a VM").
  */
 export type NewIdentity = IdentityScope & ({ kind?: "oidc"; issuer: string; audience: string; subject: string; claims?: Record<string, string>; jwks?: string } | { kind: "aws"; arn: string } | { kind: "machine" });
+/** A machine identity's bootstrap token (`POST …/identities/{id}/bootstrap`): `minutes` 1–60 (default 10) to be exchanged, from `allowed_ips` only if given; each machine credential it leads to lives `credential_hours` (1–720, default 24). */
+export type NewBootstrap = { minutes?: number; allowed_ips?: string[]; credential_hours?: number };
+/** A bootstrap token (`rlbt_…`, in the answer this once) and the machine's chain. */
+export type MadeBootstrap = { identity: string; chain: string; secret: string; expires_at: number };
+/** One of a machine identity's machines (`GET …/identities/{id}/machines`): `waiting` until its bootstrap token is exchanged, `live`, `ended` (not replaced before it ended) or `revoked`. Never a secret. */
+export type MachineChain = { chain: string; state: "waiting" | "live" | "ended" | "revoked"; credential_hours: number; created_at: number; created_by: string; refreshed_at: number | null; expires_at: number | null; revoked_at: number | null; revoked_why: string | null };
 export type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number; allowed_ips?: string[] };
 /** `approval`: the approval that let the request through roll-access's gate (an `ask` approved; `until` when a rule it remembered allowed it). */
 /** `seq` and `hash` place a row in its project's chain (absent on rows from before it); an `audit.digest` row's `digest` is roll's signed JWS of it. */
@@ -507,7 +519,7 @@ export type DeletedProject = { project: string; name: string; environment?: stri
 export type Recovered = { project: string; name: string; recovered_at: number; rotated: number; rotation_failed: string[] };
 export type Place = { project: string; project_name: string; environment: string; path: string; key: string; version: number; updated_at: number; linked: boolean };
 /** One thing to fix (`GET …/health`), worst first: where, never a value. */
-export type Finding = { issue: "decoy_used" | "production_unprotected" | "off_policy" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "unplaced" | "operator_made" | "stored_cloud_key" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy };
+export type Finding = { issue: "decoy_used" | "production_unprotected" | "backup_left" | "off_policy" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "unplaced" | "operator_made" | "stored_cloud_key" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy };
 /** roll secrets' policy (`GET`/`PUT /v1/secrets/policy`, the operator's or an admin account's): floors every project may only tighten; `null` is no floor. */
 export type Guardrails = { production_approvals: number | null; leaks_rotate: "managed" | null; sync_kinds: string[] | null; no_stored_cloud_keys: boolean; max_token_days: number | null; no_breakglass: boolean; updated_at: number | null; updated_by: string | null };
 /** One project's findings (`GET /v1/secrets/findings`). */

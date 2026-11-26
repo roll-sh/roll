@@ -212,8 +212,12 @@ fn tool(f: &Feed) -> Option<&'static tools::Tool> {
     tools::all().iter().find(|t| t.name == f.tool)
 }
 
-/// Whether this connection has the feed's tool (roll's own, or a fronted set's it's offered).
+/// Whether this connection has the feed's tool (roll's own, or a fronted set's it's offered): a
+/// metadata-only connection has none that answers stored data, so neither its feed.
 fn usable(ctx: &Ctx, f: &Feed) -> bool {
+    if ctx.metadata && tools::reads_data(f.tool) {
+        return false;
+    }
     match tool(f) {
         Some(t) => ctx.usable(t),
         None => ctx.usable_tools().iter().any(|t| t["name"] == f.tool),
