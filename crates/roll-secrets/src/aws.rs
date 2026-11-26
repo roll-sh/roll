@@ -319,14 +319,14 @@ impl Secrets {
             format!("roll's role with sts:ExternalId = {}", external_id(project))
         };
         let probe = format!("prj_probe_{}", names::new_id("p", 12));
-        match session(&*sts, &self.db, issuing.as_ref(), &probe, role_arn, &trust, "roll-check", 900) {
+        match session(&*sts, &self.db, issuing.as_ref(), &probe, role_arn, &trust, "roll-check", 900, None) {
             Ok(_) => return Err(Error::BadRequest(format!("{}'s trust takes any of roll's projects: trust {pinned}, so roll assumes it for this project and nobody else's", role_arn))),
             // Only AWS refusing the made-up project shows the trust pins this one: any other error
             // (throttling, AWS unable to fetch roll's keys) proves nothing, and nothing is registered.
             Err(why) if !refused(&why) => return Err(Error::BadRequest(format!("roll couldn't check {}'s trust: {why}; try again", role_arn))),
             Err(_) => {}
         }
-        session(&*sts, &self.db, issuing.as_ref(), project, role_arn, &trust, "roll-check", 900).map_err(|why| Error::BadRequest(format!("roll couldn't assume {}: {why} (its trust policy must trust {pinned})", role_arn)))?;
+        session(&*sts, &self.db, issuing.as_ref(), project, role_arn, &trust, "roll-check", 900, None).map_err(|why| Error::BadRequest(format!("roll couldn't assume {}: {why} (its trust policy must trust {pinned})", role_arn)))?;
         Ok(())
     }
 
