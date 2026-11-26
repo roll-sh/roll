@@ -895,9 +895,10 @@ shards (`long`/`unsigned_long`/`double`) to doubles; `shape_field::ShapeValue::l
 ## `search-painless`
 
 ```rust
-pub struct Engine;   // Engine::new(Settings) / Default; Send + Sync. Compiled-script cache (script.cache.max_size/expire),
+pub struct Engine;   // Engine::new(Settings) / Default; Send + Sync. charge_to(Arc<dyn MemoryCharge>): the cache's bytes on a host budget.
+                     // Compiled-script cache (script.cache.max_size/expire),
                      // script.max_compilations_rate token bucket, script.max_size_in_bytes, painless regex/loop settings
-pub struct Settings { max_size_in_bytes, cache_max_size, cache_expire, max_compilations_rate: Option<(u32, Duration)>,
+pub struct Settings { max_size_in_bytes, cache_max_size, cache_max_bytes /* roll's: 32 MiB, compiled_bytes each */, cache_expire, max_compilations_rate: Option<(u32, Duration)>,
                       regex_enabled: RegexEnabled /* True|False|Limited */, regex_limit_factor, max_loop_counter,
                       max_object_bytes /* 256 MiB: largest array/string/collection a script builds → out_of_memory_error */,
                       stack_bytes /* 1 MiB of native stack per execution → stack_overflow_error */,
@@ -1718,7 +1719,7 @@ contexts of x-pack's version allowlist), `EsObj::Version`, `contexts::version_al
 | PATCH  | `/v1/search/clusters/{id}`                       | settings: idle timeout, flavor, limits, `protected` |
 | DELETE | `/v1/search/clusters/{id}`                       | |
 | POST   | `/v1/search/clusters/{id}/branches`              | branch `{name, at?}` |
-| POST   | `/v1/search/clusters/{id}/password`              | rotate |
+| POST   | `/v1/search/clusters/{id}/password`              | rotate (with `secret`: kept in roll secrets, answered without it) |
 | POST   | `/v1/search/clusters/{id}/unload`                | put it to sleep now |
 | GET    | `/v1/search/clusters/{id}/indices`               | indices with docs, size, health |
 | POST   | `/v1/search/clusters/{id}/request`               | run one REST request (dashboard console) |

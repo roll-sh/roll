@@ -1,6 +1,8 @@
 //! MCP Apps (`io.modelcontextprotocol/ui`, SEP-1865; docs/mcp.md, "Apps"): for a host that
 //! declares it, read-only tools that answer rows show them in [`TABLE`], a view the host renders
-//! in a sandboxed iframe, and `access_wait_approval` shows an approval waiting as a card. The view
+//! in a sandboxed iframe (with a chart when the rows run over time: a person may pick a point and
+//! ask about it in the chat, and the view tells the model what it shows, in counts, times and
+//! numbers only), and `access_wait_approval` shows an approval waiting as a card. The view
 //! gets the tool's result from its host only, has no network (its resource declares no domains),
 //! and writes every value as text. What a person decides (an approval) is decided on roll's own
 //! pages, which the view only asks the host to open (`ui/open-link`), never from a view an agent's
@@ -130,6 +132,20 @@ mod tests {
         assert!(shows("apps_wait_deploy", true) && shows("apps_get_job", true) && !shows("apps_get_service", true));
         assert!(shows("previews_wait", true) && shows("tasks_wait_run", true));
         assert!(declared(&json!({ "extensions": { EXT: { "mimeTypes": [MIME] } } })) && !declared(&json!({})));
+    }
+
+    /// What the view may ask its host, and nothing else: open roll's pages, read again through the
+    /// gate, tell the model what it shows, and send the person's own question. A new method is a
+    /// decision (a view runs inside the host, beside the person's chat).
+    #[test]
+    fn the_view_asks_its_host_only_for_what_it_needs() {
+        let html = include_str!("ui/table.html");
+        let mut sent: Vec<&str> = ["request(\"", "notify(\""].iter().flat_map(|call| html.split(call).skip(1).filter_map(|rest| rest.split('"').next())).collect();
+        sent.sort_unstable();
+        sent.dedup();
+        assert_eq!(sent, ["tools/call", "ui/initialize", "ui/message", "ui/notifications/initialized", "ui/notifications/size-changed", "ui/open-link", "ui/update-model-context"]);
+        // What leaves the view is a column's name, never a row's text.
+        assert!(html.contains("const safeName") && html.matches("safeName(").count() >= 4);
     }
 
     #[test]

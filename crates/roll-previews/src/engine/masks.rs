@@ -209,6 +209,7 @@ pub(super) fn secret_values(secrets: &[(String, String)], plain: &[String], own:
             out.push(v.clone());
         }
         out.extend(url_password(v));
+        out.extend(json_credentials(v).into_iter().map(|(_, s)| s));
     }
     out.retain(|v| v.lines().any(|l| l.trim().len() >= 6));
     out
@@ -238,9 +239,39 @@ pub(super) fn served_keyed(secrets: &[(String, String)], plain: &[String], own: 
             out.push((k.clone(), v.clone()));
         }
         out.extend(url_password(v).into_iter().map(|p| (k.clone(), p)));
+        out.extend(json_credentials(v).into_iter().map(|(_, s)| (k.clone(), s)));
     }
     // A user name isn't a secret, wherever it comes from (a linked database's `PGUSER`).
     out.retain(|(k, v)| v.trim().chars().count() >= 8 && !k.to_ascii_uppercase().ends_with("USER") && !k.to_ascii_uppercase().ends_with("USERNAME"));
+    out
+}
+
+/// The string fields named like a credential ([`credential_name`]) of a branch's value that is
+/// JSON (roll search's `ROLL_SEARCH_BROWSER_KEYS`: each key's `api_key` and `signing_secret`),
+/// at any depth: each one hidden as a value of its own, whatever its variable is called.
+fn json_credentials(v: &str) -> Vec<(String, String)> {
+    fn walk(v: &serde_json::Value, out: &mut Vec<(String, String)>) {
+        match v {
+            serde_json::Value::Object(m) => {
+                for (k, x) in m {
+                    match x {
+                        serde_json::Value::String(s) if credential_name(k) => out.push((k.clone(), s.clone())),
+                        x => walk(x, out),
+                    }
+                }
+            }
+            serde_json::Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+            _ => {}
+        }
+    }
+    let t = v.trim_start();
+    if !(t.starts_with('{') || t.starts_with('[')) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(t) {
+        walk(&parsed, &mut out);
+    }
     out
 }
 
@@ -313,6 +344,12 @@ mod tests {
         let line = "connecting to postgres://pv_abc:p@ss-word@pv-abc.postgres.internal with sk_test_abcdef, line-two";
         assert_eq!(code_preview::runner::mask(line, &v), "connecting to postgres://pv_abc:***@pv-abc.postgres.internal with ***, ***");
         // roll secrets' `plain` (a linked host): shown, but a URL's password in one isn't.
+        // A branch's JSON value (roll search's browser keys): each credential field on its own,
+        // never an id or a name.
+        let keys = vec![("ROLL_SEARCH_BROWSER_KEYS".to_string(), r#"[{"name":"site","id":"bk_1a2b3c","api_key":"YmtfMUAxOmJyb3dzZXI=","signing_secret":"rdks_signing-secret"}]"#.to_string())];
+        let v = secret_values(&[], &[], &[], &keys);
+        assert_eq!(v, ["YmtfMUAxOmJyb3dzZXI=", "rdks_signing-secret"]);
+        assert_eq!(served_keyed(&[], &[], &[], &keys).len(), 2);
         let linked = vec![("STAGING_HOST".to_string(), "staging-db.internal".to_string()), ("STAGING_URL".into(), "postgres://app:hunter22@staging-db.internal/app".into())];
         let plain = ["STAGING_HOST".to_string(), "STAGING_URL".to_string()];
         assert_eq!(secret_values(&linked, &plain, &[], &[]), ["hunter22"]);

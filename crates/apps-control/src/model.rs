@@ -3804,6 +3804,8 @@ pub fn fix_for(error: &str, detail: Option<&str>) -> Option<String> {
         "A script has Windows line endings (CRLF), so its `#!` line names a program that doesn't exist: convert it to LF (`dos2unix start.sh`, or `* text=auto eol=lf` in .gitattributes and `git add --renormalize .`)."
     } else if has("exec format error") {
         "The image is for another processor than the one it runs on (an Apple Silicon build is arm64): build it for linux/amd64 (`docker build --platform linux/amd64`), or for both with `docker buildx build --platform linux/amd64,linux/arm64`."
+    } else if (has("econnrefused") || has("connection refused")) && ["127.0.0.1:5432", "localhost:5432", "::1:5432", "127.0.0.1:6379", "localhost:6379", "127.0.0.1:3306", "localhost:3306", "127.0.0.1:27017", "localhost:27017"].iter().any(|a| has(a)) {
+        "It looks for a database on its own machine, which has none: link one (the service's Links, `roll apps link`) and read its address from DATABASE_URL or REDIS_URL instead of localhost."
     } else if has("eaddrinuse") || has("address already in use") {
         "Something in the container already listens on its port: start one server on $PORT, and give any second process another port."
     } else if has("permission denied") && (has(".sh") || has("exec ") || has("start script")) {
@@ -3833,6 +3835,7 @@ mod fix_tests {
         assert!(f("it crashed (exit 127)", Some("/usr/bin/env: 'bash\r': No such file or directory")).contains("CRLF"));
         assert!(f("it crashed (exit 1)", Some("Error: listen EADDRINUSE: address already in use :::8080")).contains("$PORT"));
         assert!(f("it crashed (exit 126)", Some("/bin/sh: ./start.sh: Permission denied")).contains("chmod"));
+        assert!(f("it crashed (exit 1)", Some("Error: connect ECONNREFUSED 127.0.0.1:5432")).contains("DATABASE_URL"));
         assert_eq!(super::fix_for("a reason nobody wrote down", None), None);
     }
 }

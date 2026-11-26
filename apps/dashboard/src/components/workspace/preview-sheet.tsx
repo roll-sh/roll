@@ -1,3 +1,4 @@
+import { HorizonMark } from "@roll/brand";
 import { Boxes, Check, Copy, Database, ExternalLink, Eye, Inbox, ListChecks, Moon, Package, Pin, RefreshCw, RotateCcw, Search, Smartphone, SquareTerminal, Sun, Trash2, Waves, X, Zap, type LucideIcon } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { appsApi, followShell as followAppsShell } from "@/lib/apps-api";
@@ -1091,10 +1092,23 @@ function PageChecks({ page, branch }: { page: PageCheck; branch: string }) {
   const seo = page.a11y?.seo ? seoWords(page.a11y.seo) : [];
   const broken = page.links?.broken ?? [];
   const slow = stepSlower(page.step_ms, page.against?.step_ms);
-  if (!page.step && !slow && !a11y.length && !seo.length && !broken.length && !page.against?.text?.added_n && !page.against?.text?.removed_n) return null;
+  if (!page.step && !page.play && !slow && !a11y.length && !seo.length && !broken.length && !page.against?.text?.added_n && !page.against?.text?.removed_n) return null;
   return (
     <div className="mb-1.5 space-y-0.5 text-[11.5px]">
       {page.step && <p className="break-words text-danger">Its steps stopped at {page.step}: taken as it was then.</p>}
+      {page.play === "failed" && (
+        <p className="break-words text-danger">
+          Its interaction test failed{page.against?.play_broke ? ", where main's passes" : ""}
+          {page.play_step && (
+            <>
+              {" at "}
+              <span className="font-mono text-[11px]">{page.play_step}</span>
+            </>
+          )}
+          : {page.play_error ? <span className="font-mono text-[11px]">{page.play_error}</span> : "the story's play function, or its render, threw."}
+        </p>
+      )}
+      {page.play === "passed" && <p className="text-soft">Its interaction test passed.</p>}
       {slow && (
         <p className="text-soft" title="Its slowest click or typing, to the next paint (Interaction to Next Paint, in roll's browser)">
           {slow}
@@ -1905,7 +1919,7 @@ function Errors({ preview: p }: { preview: Preview }) {
 
 /** A look at a data branch (Neon's Tables): its tables as the branch's own role sees them, and a
  * table's first rows, read-only, cells as text (the branch's data, masked as the preview's is). */
-/** Restore points (Neon's snapshots): the preview's Postgres data saved now and put back later,
+/** Restore points (Neon's snapshots): the preview's Postgres, NoSQL, Redis and stream data saved now and put back later,
  * after a test run or a demo changed it. Putting one back is the preview's next converge. */
 function RestorePoints({ previewId, busy, run }: { previewId: string; busy: string | null; run: (key: string, fn: () => Promise<Preview>) => Promise<boolean> }) {
   const [points, setPoints] = useState<{ points: RestorePoint[]; max: number } | null>(null);
@@ -2422,6 +2436,44 @@ function TimelineLine({ p }: { p: Preview }) {
     <div className="mb-3 flex flex-wrap items-baseline gap-x-1.5 text-[11.5px] text-muted" title={`How ${t.head.replace(/^cs_/, "").slice(0, 10)} came up, step by step`}>
       <span>{ready ? `Up in ${duration(ready.at - t.started_at)}:` : "So far:"}</span>
       <Dotted className="font-mono text-[11px] text-subtle tabular-nums" items={items} />
+    </div>
+  );
+}
+
+/** A note's Reply or Resolve from the preview's page in a small window of its own (Vercel's
+ * comment threads answer in place): the preview read, the note's thread alone, and the window
+ * closed once it's resolved. */
+export function ThreadPopup({ preview, review, close = () => window.close() }: { preview?: string; review: string; close?: () => void }) {
+  const [p, setP] = useState<Preview | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!preview) return;
+    let live = true;
+    previewsApi
+      .get(preview)
+      .then((x) => live && setP(x))
+      .catch((e: unknown) => live && setError(errorText(e)));
+    return () => {
+      live = false;
+    };
+  }, [preview]);
+  return (
+    <div className="mx-auto w-full max-w-md space-y-3 px-4 py-5">
+      <div className="flex items-center gap-2 text-[13px] font-semibold tracking-[-0.04em]">
+        <HorizonMark size={16} interactive={false} />
+        <span className="truncate">{p ? `Note on ${p.title || p.slug}` : "Note"}</span>
+      </div>
+      {!preview ? (
+        <p className="text-[12.5px] text-muted">This link doesn't name a preview.</p>
+      ) : error ? (
+        <p className="text-[12.5px] text-danger">{error}</p>
+      ) : !p ? (
+        <p className="shimmer text-[12.5px] text-muted">Opening the preview…</p>
+      ) : !p.change ? (
+        <p className="text-[12.5px] text-muted">Notes go on a change; this preview is a branch's.</p>
+      ) : (
+        <NoteThread previewId={p.id} change={p.change} review={review} where={p} onDone={() => setTimeout(close, 900)} />
+      )}
     </div>
   );
 }

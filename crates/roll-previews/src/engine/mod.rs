@@ -554,7 +554,7 @@ impl Engine {
         let Ok(_one) = gate.clone().acquire_owned().await else { return };
         let Ok(r) = self.store.row(id) else { return };
         let Ok(s) = self.store.settings(&r.project_id) else { return };
-        if r.state != State::Ready || !s.github.screenshot || self.store.screenshot_head(&r.id).ok().flatten().as_deref() == Some(r.build()) {
+        if r.state != State::Ready || !s.github.screenshot || (self.store.screenshot_head(&r.id).ok().flatten().as_deref() == Some(r.build()) && !self.stories_due(&r).await) {
             return;
         }
         if self.take_screenshot(&r).await

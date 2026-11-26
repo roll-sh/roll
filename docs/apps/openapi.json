@@ -1072,9 +1072,131 @@
         "x-roll-action": "admin (it makes the project's service names public: a person's call, not a token's write)"
       }
     },
+    "/v1/apps/projects/{project}/status-page/domain": {
+      "delete": {
+        "description": "Answers 204 (the page answers only on `status-<slug>`; taking the page down removes it too).",
+        "operationId": "deleteProjectsProjectStatusPageDomain",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "204 (the page answers only on `status-<slug>`; taking the page down removes it too)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Delete domain",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "delete"
+      },
+      "get": {
+        "description": "Answers `Domain` (404: none): the status page's own domain, where it answers besides `status-<slug>`.",
+        "operationId": "getProjectsProjectStatusPageDomain",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`Domain` (404: none): the status page's own domain, where it answers besides `status-<slug>`"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get domain",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "read"
+      },
+      "post": {
+        "description": "Answers 201 `Domain` (pending: a CNAME to `target`, the page's `status-<slug>` name, or the `_roll-challenge` TXT a custom domain takes).",
+        "operationId": "postProjectsProjectStatusPageDomain",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "`{ hostname: \"status.acme.dev\" }` (one name, no wildcard; one a page, a new one replaces it, pending again; 404 without a page; 409 when any service's, preview's or other page's domain has it)"
+        },
+        "responses": {
+          "201": {
+            "description": "201 `Domain` (pending: a CNAME to `target`, the page's `status-<slug>` name, or the `_roll-challenge` TXT a custom domain takes)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Domain project",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "write"
+      }
+    },
+    "/v1/apps/projects/{project}/status-page/domain/verify": {
+      "post": {
+        "description": "Answers `Domain` (active once its DNS checks out, then its certificate as a custom domain's; pending ones are checked every minute).",
+        "operationId": "postProjectsProjectStatusPageDomainVerify",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`Domain` (active once its DNS checks out, then its certificate as a custom domain's; pending ones are checked every minute)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Verify project",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "write"
+      }
+    },
     "/v1/apps/projects/{project}/status-page/incidents": {
       "get": {
-        "description": "Answers `{ incidents: { id, title, state, started_at, resolved_at, automatic, updates: { at, state, text }[] }[] }`: the last 90 days' and the open ones, newest first (at most 200).",
+        "description": "Answers `{ incidents: { id, title, state, started_at, resolved_at, automatic, updates: { at, state, text }[], scheduled: { from, until } | null /* a maintenance's window, ms */ }[] }`: the last 90 days' and the open ones, newest first (at most 200).",
         "operationId": "getProjectsProjectStatusPageIncidents",
         "parameters": [
           {
@@ -1088,7 +1210,7 @@
         ],
         "responses": {
           "200": {
-            "description": "`{ incidents: { id, title, state, started_at, resolved_at, automatic, updates: { at, state, text }[] }[] }`: the last 90 days' and the open ones, newest first (at most 200)"
+            "description": "`{ incidents: { id, title, state, started_at, resolved_at, automatic, updates: { at, state, text }[], scheduled: { from, until } | null /* a maintenance's window, ms */ }[] }`: the last 90 days' and the open ones, newest first (at most 200)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -1121,7 +1243,7 @@
               }
             }
           },
-          "description": "`{ title: string /* 1–120 */, state?: \"investigating\" | \"identified\" | \"monitoring\" | \"resolved\", text: string /* 1–2000 */ }`"
+          "description": "`{ title: string /* 1–120 */, state?: \"investigating\" | \"identified\" | \"monitoring\" | \"resolved\" | \"scheduled\", text: string /* 1–2000 */, starts_at?: number, ends_at?: number /* a scheduled maintenance's window (unix ms, only with state scheduled): starts in the next 90 days, lasts at most a week; roll moves it to maintenance at its start and resolves it at its end */ }`"
         },
         "responses": {
           "201": {
@@ -1168,7 +1290,7 @@
               }
             }
           },
-          "description": "`{ state, text }`"
+          "description": "`{ state, text }` (`state` as a new one's, or `maintenance`; never `scheduled`)"
         },
         "responses": {
           "204": {

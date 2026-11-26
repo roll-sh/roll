@@ -366,7 +366,7 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
         (outcome, action) = (copied, Action::Reveal);
     }
     let mut about: (&str, Option<String>) = (row.product, None);
-    if let Some(l) = crate::evaluate::lend_outcome(&a, row, &params, c.body.as_ref(), &scope, person).await
+    if let Some(l) = crate::evaluate::lend_outcome(&a, row, &params, c.body.as_ref(), &target, &scope, person).await
         && crate::evaluate::rank(l.outcome) < crate::evaluate::rank(outcome)
     {
         (outcome, action) = (l.outcome, l.action);
@@ -388,7 +388,7 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
         .await?;
         let own_create = matches!(target, Target::Create { project: None, .. }) && catalog::PERSON_OWN_UNPLACED.iter().any(|(m, r)| *m == method && *r == row.route);
         let reaches = matches!(row.target, catalog::Tgt::AnyGrant | catalog::Tgt::List { .. } | catalog::Tgt::Product) || own_create || session.outcome(&target, asked) == Outcome::Allow;
-        let lends = crate::evaluate::lend_outcome(&a, row, &params, c.body.as_ref(), &session, true).await.is_none_or(|l| l.outcome == Outcome::Allow);
+        let lends = crate::evaluate::lend_outcome(&a, row, &params, c.body.as_ref(), &target, &session, true).await.is_none_or(|l| l.outcome == Outcome::Allow);
         if !reaches || !lends {
             return Ok(Json(json!({ "decision": "deny", "why": "the token's person can't do this themselves: a person's token reaches only what their projects and their own resources let them do", "product": row.product, "action": asked, "route": format!("{} {}", row.method, row.route) })));
         }
@@ -633,6 +633,7 @@ impl Access {
             }
         };
         self.check_policy(new.expires_at)?;
+        self.check_lifetime_cap(&new.rules, new.expires_at)?;
         let made = blocking(self.clone(), move |a| a.store.create(&new, GrantKind::Token, &by, None, user.as_deref())).await?;
         self.tell_added(&made.0, Added::Token, ext);
         if let Some(handle) = asker {
@@ -794,6 +795,7 @@ async fn update(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum
     // A token whose rules, lifetime or addresses change meets the policy as it is now.
     if change.rules.is_some() || change.expires_at.is_some() || change.ip_allow.is_some() {
         a.check_policy(change.expires_at.unwrap_or(target.expires_at))?;
+        a.check_lifetime_cap(change.rules.as_ref().unwrap_or(&target.rules), change.expires_at.unwrap_or(target.expires_at))?;
     }
     // A person widening their own token past what the policy has an admin approve: it waits again.
     let asker = match &who_handle {
@@ -945,6 +947,7 @@ async fn rotate(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum
     }
     // A new secret is a new token: it meets the policy (set an expiry first if it must expire).
     a.check_policy(target.expires_at)?;
+    a.check_lifetime_cap(&target.rules, target.expires_at)?;
     let keep = body.keep_old_for_s.map(|s| s * 1000);
     let (grant, token) = blocking(a, move |a| a.store.rotate(&id, keep)).await?;
     Ok(Json(json!({ "grant": grant, "token": token })))

@@ -52,7 +52,7 @@ mod vm;
 pub mod xcontent;
 
 pub use contexts::Context;
-pub use engine::{compile_painless, Compiled, Engine, Instance, Lang, RegexEnabled, Script, Settings, Stats, Vars};
+pub use engine::{compile_painless, compiled_bytes, Compiled, Engine, Instance, Lang, MemoryCharge, RegexEnabled, Script, Settings, Stats, Vars};
 pub use error::{Position, ScriptError};
 /// Unit tests run with executions' memory accounts, as hosts do.
 #[cfg(test)]

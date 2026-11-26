@@ -358,13 +358,14 @@ impl Engine {
                     break;
                 }
             }
-            // A reset that's due, or the usage reading that's due, makes it converge too. A sleeping
-            // one between its whole converges (`settled_every`) only has its usage read (as Render
-            // and Vercel meter idle previews without waking them): roll secrets, its branches'
-            // products and its services aren't asked; over its size cap, it converges to sleep there.
+            // A reset that's due, or the usage reading that's due, makes it converge too. A settled
+            // one, asleep or running, between its whole converges (`settled_every`) only has its
+            // usage read (as Render and Vercel meter previews without touching them): roll secrets,
+            // its branches' products and its services aren't asked; over its size cap, it converges
+            // to sleep there. A deploy, a reset, a refresh or a service failing converges at once.
             let reset_due = s.reset_every_hours > 0 && r.last_reset_at.unwrap_or(r.created_at) + s.reset_every_hours as i64 * 3_600_000 <= now;
             let usage_due = self.usage_read.lock().get(&r.id).is_none_or(|t| *t + self.cfg.usage_every.as_millis() as i64 <= now);
-            let whole_due = r.state != State::Sleeping || self.converged_at.lock().get(&r.id).is_none_or(|t| *t + self.cfg.settled_every.as_millis() as i64 <= now);
+            let whole_due = self.converged_at.lock().get(&r.id).is_none_or(|t| *t + self.cfg.settled_every.as_millis() as i64 <= now);
             if r.next_at == SETTLED && (stale || reset_due || (usage_due && whole_due)) {
                 self.store.update(&r.id, |row| row.next_at = 0)?;
             } else if r.next_at == SETTLED && usage_due {

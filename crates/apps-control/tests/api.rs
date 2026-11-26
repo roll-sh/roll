@@ -1309,6 +1309,29 @@ async fn a_repo_service_builds_its_plan_deploys_on_push_and_rolls_back_without_a
     assert_eq!(count().await, before + 1);
 }
 
+/// A workspace package watching its own folder also follows the packages its build uses (Vercel's
+/// affected projects): a push into one it depends on deploys it, one into another package doesn't.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pushes_deploy_a_workspace_package_that_uses_what_changed() {
+    let w = world().await;
+    w.code.push("a1a1a1a1a1a1", "a workspace", &[
+        ("package.json", r#"{"private":true,"workspaces":["apps/*","packages/*"]}"#),
+        ("package-lock.json", "{}"),
+        ("apps/web/package.json", r#"{"name":"web","scripts":{"start":"node index.js"},"dependencies":{"@acme/ui":"*"}}"#),
+        ("apps/web/index.js", "v1"),
+        ("packages/ui/package.json", r#"{"name":"@acme/ui"}"#),
+        ("packages/other/package.json", r#"{"name":"@acme/other"}"#),
+    ]);
+    let (_, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "web", "source": {"kind": "repo", "repo": "acme/site", "root": "apps/web"}, "build": {"watch": ["apps/web/**"]} }))).await;
+    let id = svc["id"].as_str().unwrap_or_else(|| panic!("{svc}")).to_string();
+    let d = settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    assert_eq!((d["status"].as_str(), d["plan"]["watch_derived"].clone()), (Some("active"), json!(["packages/ui/**", "package.json", "package-lock.json"])), "{d}");
+    w.code.push("b2b2b2b2b2b2", "another package", &[("packages/other/x.js", "x")]);
+    w.code.push("c3c3c3c3c3c3", "the ui", &[("packages/ui/button.js", "b")]);
+    let revs = get_until(&w.api, &format!("/v1/apps/services/{id}/environments/production/deploys"), |a| a.to_string().contains("c3c3c3c3c3c3")).await;
+    assert!(!revs.to_string().contains("b2b2b2b2b2b2"), "{revs}");
+}
+
 /// Each environment keeps its newest built deployments to roll back to; older ones are pruned
 /// (history only, their images gone unless another deployment runs the same one), a rollback to
 /// one is refused with why, and the list pages back through all of them.
@@ -3220,11 +3243,26 @@ async fn a_status_page_shows_the_projects_checks() {
     let (st, html) = get("/").await;
     assert!(st == StatusCode::OK && html.contains("Acme status") && html.contains("web · home") && html.contains("Everything is up"), "{html}");
     assert!(!html.contains("secret-health") && !j.to_string().contains("secret-health"), "names only, never a path");
+    // On a domain of its own once its DNS checks out; no service can take that name, and it
+    // goes with the page.
+    let own = format!("{page}/domain");
+    let (st, d) = call(&w.api, "POST", &own, Some(json!({"hostname": "status.acme.dev"}))).await;
+    assert_eq!((st, d["status"].as_str()), (StatusCode::CREATED, Some("pending")), "{d}");
+    let at = |path: &'static str| {
+        let public = w.public.clone();
+        async move { public.oneshot(Request::builder().uri(path).header("host", "status.acme.dev").body(Body::empty()).unwrap()).await.unwrap().status() }
+    };
+    assert_eq!(at("/status.json").await, StatusCode::NOT_FOUND, "not before it's verified");
+    w.dns.add("_roll-challenge.status.acme.dev", "TXT", d["token"].as_str().unwrap());
+    assert_eq!(call(&w.api, "POST", &format!("{own}/verify"), None).await.1["status"], "active");
+    assert_eq!(at("/status.json").await, StatusCode::OK);
+    assert_eq!(call(&w.api, "POST", &format!("{env}/domains"), Some(json!({"hostname": "status.acme.dev"}))).await.0, StatusCode::CONFLICT);
     // Kept by its address when changed; gone when deleted.
     let (_, p2) = call(&w.api, "PUT", &page, Some(json!({"title": "Acme"}))).await;
     assert_eq!(p2["url"], p["url"]);
     assert_eq!(call(&w.api, "DELETE", &page, None).await.0, StatusCode::NO_CONTENT);
     assert_eq!(get("/status.json").await.0, StatusCode::NOT_FOUND);
+    assert_eq!((at("/status.json").await, call(&w.api, "GET", &own, None).await.0), (StatusCode::NOT_FOUND, StatusCode::NOT_FOUND));
 }
 
 /// Traffic mirroring (Envoy's): a copy of a share of bodiless requests goes to another
@@ -3386,14 +3424,30 @@ async fn status_page_incidents_open_and_close() {
     let (st, inc) = call(&w.api, "POST", &format!("{page}/incidents"), Some(json!({"title": "Slow checkouts", "text": "We're looking into slow checkouts."}))).await;
     assert_eq!(st, StatusCode::CREATED, "{inc}");
     let iid = inc["id"].as_str().unwrap();
+    assert_eq!(call(&w.api, "POST", &format!("{page}/incidents/{iid}/updates"), Some(json!({"state": "maintenance", "text": "x"}))).await.0, StatusCode::BAD_REQUEST, "only a scheduled one is under way");
     assert_eq!(call(&w.api, "POST", &format!("{page}/incidents/{iid}/updates"), Some(json!({"state": "resolved", "text": "Fixed: a slow query."}))).await.0, StatusCode::NO_CONTENT);
     let j: Value = serde_json::from_str(&get("/status.json".into(), h.clone()).await).unwrap();
     let mine = j["incidents"].as_array().unwrap().iter().find(|i| i["id"] == iid).unwrap();
     assert_eq!((mine["state"].as_str(), mine["updates"].as_array().map(Vec::len)), (Some("resolved"), Some(2)), "{j}");
     let html = get("/".into(), h.clone()).await;
     assert!(html.contains("Slow checkouts") && html.contains("Fixed: a slow query."), "{html}");
-    let feed = get("/feed.xml".into(), h).await;
+    let feed = get("/feed.xml".into(), h.clone()).await;
     assert!(feed.starts_with("<?xml") && feed.contains("Slow checkouts: resolved"), "{feed}");
+    // A scheduled maintenance: listed ahead with its window, begun and over by the sweep.
+    let at = code_sql::now_ms() + 5 * 3_600_000;
+    assert_eq!(call(&w.api, "POST", &format!("{page}/incidents"), Some(json!({"title": "x", "text": "y", "state": "scheduled", "starts_at": at, "ends_at": at - 1}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, m) = call(&w.api, "POST", &format!("{page}/incidents"), Some(json!({"title": "Database upgrade", "text": "Checkout may be slow.", "state": "scheduled", "starts_at": at, "ends_at": at + 3_600_000}))).await;
+    assert_eq!(st, StatusCode::CREATED, "{m}");
+    let html = get("/".into(), h.clone()).await;
+    assert!(html.contains("Scheduled maintenance") && html.contains("Database upgrade"), "{html}");
+    let state = |w: &World, page: String| {
+        let api = w.api.clone();
+        async move { call(&api, "GET", &format!("{page}/incidents"), None).await.1["incidents"].as_array().unwrap().iter().find(|i| i["title"] == "Database upgrade").map(|i| (i["state"].clone(), i["resolved_at"].is_i64())).unwrap() }
+    };
+    w.apps.cron_pass(at + 60_000).await;
+    assert_eq!(state(&w, page.clone()).await, (json!("maintenance"), false));
+    w.apps.cron_pass(at + 3_600_000 + 120_000).await;
+    assert_eq!(state(&w, page).await, (json!("resolved"), true));
 }
 
 /// An instance the kernel killed for its memory says so: in the log and in why it crashed.
@@ -3830,6 +3884,14 @@ async fn roll_up_deploys_an_uploaded_tree_and_cron_runs_on_demand() {
     assert_eq!(found.as_array().unwrap().len(), 1, "{found}");
     let (_, all) = call(&w.api, "GET", &format!("{base}/logs?q=job%20ran"), None).await;
     assert!(all.as_array().unwrap().len() >= 2, "{all}");
+    // `roll up --no-traffic`: the upload is built and checked at its own URL, nothing switched.
+    let live = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await.1["active"]["id"].clone();
+    let mut bundle = Vec::new();
+    roll_fetch::pack(&mut bundle, &Default::default(), Some(tree.path()), roll_fetch::Limits::default()).unwrap();
+    let req = Request::post(format!("/v1/apps/services/{id}/environments/production/deploys")).header("content-type", "application/gzip").header("x-roll-no-traffic", "1").body(Body::from(bundle)).unwrap();
+    let d: Value = serde_json::from_slice(&w.api.clone().oneshot(req).await.unwrap().into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(settled(&w, &id, "production", d["id"].as_str().unwrap()).await["status"], "ready", "{d}");
+    assert_eq!(call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await.1["active"]["id"], live);
     let _ = Ordering::SeqCst;
 }
 
@@ -8106,6 +8168,9 @@ async fn a_volume_filling_up_is_said_once() {
     assert_eq!(events().await, 1, "once while it stays full");
     let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await;
     assert_eq!(env["volume_used"]["bytes"], 1_000_000_000u64, "{env}");
+    // Kept by the hour too: Metrics charts it against its size.
+    let (_, m) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/metrics?minutes=60"), None).await;
+    assert_eq!((m["volume"]["size_gb"].as_u64(), m["volume"]["points"].as_array().and_then(|p| p.last()).map(|p| p["bytes"].clone())), (Some(1), Some(json!(1_000_000_000u64))), "{}", m["volume"]);
     w.fake.set_volume_used(&volume, 1_000);
     w.apps.measure_volumes().await;
     w.fake.set_volume_used(&volume, 1_050_000_000);
@@ -10198,4 +10263,7 @@ async fn a_forks_preview_pages_load_only_from_the_preview() {
     assert!(errors.get("outside").is_none(), "{errors}");
     let r = w.api.clone().oneshot(Request::get(format!("{env}/logs?tail=5")).body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(r.headers().get("x-roll-outside").and_then(|v| v.to_str().ok()), Some("true"));
+    let (_, ev) = call(&w.api, "GET", "/v1/apps/events?after=0", None).await;
+    let of = |env: &str| ev["events"].as_array().unwrap().iter().filter(|e| e["service"] == id.as_str() && e["environment"] == env).map(|e| e["outside"] == true).collect::<Vec<_>>();
+    assert!(!of("pv-7").is_empty() && of("pv-7").iter().all(|o| *o) && of("production").iter().all(|o| !o), "{ev}");
 }

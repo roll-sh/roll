@@ -335,6 +335,13 @@ CREATE TABLE IF NOT EXISTS status_incidents (
     updates TEXT NOT NULL
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS status_incidents_project ON status_incidents (project, started_at);
+CREATE TABLE IF NOT EXISTS volume_hours (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    hour INTEGER NOT NULL,
+    bytes INTEGER NOT NULL,
+    PRIMARY KEY (service, env, hour)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS status_days (
     key TEXT NOT NULL,
     day INTEGER NOT NULL,
@@ -520,6 +527,16 @@ CREATE TABLE IF NOT EXISTS domains (
 CREATE INDEX IF NOT EXISTS domains_env ON domains (service, env);
 -- A project's own preview domain (`*.preview.acme.dev`, roll previews' preview deployment
 -- suffix), and the label each preview environment answers to under it.
+CREATE TABLE IF NOT EXISTS status_domains (
+    project TEXT PRIMARY KEY,
+    hostname TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL,
+    token TEXT NOT NULL,
+    error TEXT,
+    tls TEXT NOT NULL DEFAULT 'none',
+    tls_error TEXT,
+    created_at INTEGER NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS preview_domains (
     project TEXT PRIMARY KEY,
     hostname TEXT NOT NULL UNIQUE,
@@ -900,6 +917,7 @@ pub struct Store {
 
 /// A project's preview domain: `(hostname, status, token, error, created_at)`.
 pub type PreviewDomainRow = (String, DomainStatus, String, Option<String>, i64);
+pub type StatusDomainRow = (String, DomainStatus, String, Option<String>, TlsStatus, Option<String>, i64);
 
 const SERVICE_COLS: &str = "id, project, name, source, build, run, created_at";
 /// An environment's (or any row with a `service` column's) service isn't deleted.
@@ -1112,6 +1130,10 @@ impl Store {
         // A `roll://` secret's maker (roll secrets' runtime binding: who chose it).
         db.add_column("git_auth", "secret_maker", "TEXT")?;
         db.add_column("domains", "tls_error", "TEXT")?;
+        // A scheduled maintenance's window (unix ms): its start moves it to `maintenance`, its
+        // end resolves it.
+        db.add_column("status_incidents", "scheduled_from", "INTEGER")?;
+        db.add_column("status_incidents", "scheduled_until", "INTEGER")?;
         db.add_column("domains", "verified_at", "INTEGER")?;
         db.add_column("env_access", "bypass_hash", "TEXT")?;
         db.add_column("env_access", "signed_in", "INTEGER NOT NULL DEFAULT 0")?;
@@ -1383,7 +1405,7 @@ impl Store {
             c.execute("DELETE FROM deploy_overrides WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
             c.execute("DELETE FROM status_days WHERE key LIKE ?", [format!("%:{id}/%")])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans", "env_data", "env_branches", "udp_ports", "env_unscheduled", "sandboxes", "env_peering"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans", "env_data", "env_branches", "udp_ports", "env_unscheduled", "sandboxes", "env_peering", "volume_hours"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -2161,6 +2183,12 @@ impl Store {
     /// An incident opened: a person's, or one a check or heartbeat opened (`auto_key`: one open
     /// at a time per key, a second open of the same key is none).
     pub fn open_incident(&self, project: &str, title: &str, state: &str, text: &str, auto_key: Option<&str>, at: i64) -> Result<Option<String>> {
+        self.open_incident_in(project, title, state, text, auto_key, at, None)
+    }
+
+    /// [`Self::open_incident`], a scheduled maintenance with its window (`from`, `until`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_incident_in(&self, project: &str, title: &str, state: &str, text: &str, auto_key: Option<&str>, at: i64, window: Option<(i64, i64)>) -> Result<Option<String>> {
         let id = format!("inc_{}", crate::model::random(12).to_ascii_lowercase());
         let updates = serde_json::to_string(&[serde_json::json!({ "at": at, "state": state, "text": text })]).expect("JSON");
         self.db.write(|c| {
@@ -2170,7 +2198,10 @@ impl Store {
                 return Ok(None);
             }
             let resolved = (state == "resolved").then_some(at);
-            c.execute("INSERT INTO status_incidents (id, project, title, state, started_at, resolved_at, auto_key, updates) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", params![id, project, title, state, at, resolved, auto_key, updates])?;
+            c.execute(
+                "INSERT INTO status_incidents (id, project, title, state, started_at, resolved_at, auto_key, updates, scheduled_from, scheduled_until) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![id, project, title, state, at, resolved, auto_key, updates, window.map(|w| w.0), window.map(|w| w.1)],
+            )?;
             Ok(Some(id.clone()))
         })
     }
@@ -2199,24 +2230,66 @@ impl Store {
     /// A project's incidents since `since` (unix ms) or still open, newest first.
     pub fn incidents(&self, project: &str, since: i64) -> Result<Vec<serde_json::Value>> {
         Ok(self.db.query(
-            "SELECT id, title, state, started_at, resolved_at, auto_key, updates FROM status_incidents WHERE project = ? AND (started_at >= ? OR resolved_at IS NULL) ORDER BY started_at DESC LIMIT 200",
+            "SELECT id, title, state, started_at, resolved_at, auto_key, updates, scheduled_from, scheduled_until FROM status_incidents WHERE project = ? AND (started_at >= ? OR resolved_at IS NULL) ORDER BY started_at DESC LIMIT 200",
             params![project, since],
             |r| {
                 let updates: String = r.get(6)?;
-                Ok(serde_json::json!({ "id": r.get::<_, String>(0)?, "title": r.get::<_, String>(1)?, "state": r.get::<_, String>(2)?, "started_at": r.get::<_, i64>(3)?, "resolved_at": r.get::<_, Option<i64>>(4)?, "automatic": r.get::<_, Option<String>>(5)?.is_some(), "updates": serde_json::from_str::<serde_json::Value>(&updates).unwrap_or(serde_json::Value::Null) }))
+                let window = match (r.get::<_, Option<i64>>(7)?, r.get::<_, Option<i64>>(8)?) {
+                    (Some(from), Some(until)) => serde_json::json!({ "from": from, "until": until }),
+                    _ => serde_json::Value::Null,
+                };
+                Ok(serde_json::json!({ "id": r.get::<_, String>(0)?, "title": r.get::<_, String>(1)?, "state": r.get::<_, String>(2)?, "started_at": r.get::<_, i64>(3)?, "resolved_at": r.get::<_, Option<i64>>(4)?, "automatic": r.get::<_, Option<String>>(5)?.is_some(), "updates": serde_json::from_str::<serde_json::Value>(&updates).unwrap_or(serde_json::Value::Null), "scheduled": window }))
             },
         )?)
     }
 
-    /// The page and its incidents, together.
-    pub fn delete_status_page(&self, project: &str) -> Result<()> {
+    /// The page, its incidents and its own domain, together: the domain's hostname returned.
+    pub fn delete_status_page(&self, project: &str) -> Result<Option<String>> {
         self.db.write(|c| {
             if c.execute("DELETE FROM status_pages WHERE project = ?", [project])? == 0 {
                 return Err(Error::NotFound(format!("{project} has no status page")));
             }
             c.execute("DELETE FROM status_incidents WHERE project = ?", [project])?;
-            Ok(())
+            let host: Option<String> = c.query_row("SELECT hostname FROM status_domains WHERE project = ?", [project], |r| r.get(0)).optional()?;
+            c.execute("DELETE FROM status_domains WHERE project = ?", [project])?;
+            Ok(host)
         })
+    }
+
+    /// A scheduled maintenance's next step, in one write: only while it's still `from` (any
+    /// open state for None), its update appended with it. False: it moved on meanwhile.
+    pub fn advance_maintenance(&self, project: &str, id: &str, from: Option<&str>, to: &str, text: &str, at: i64) -> Result<bool> {
+        self.db.write(|c| {
+            let Some((state, updates)): Option<(String, String)> = c.query_row("SELECT state, updates FROM status_incidents WHERE project = ? AND id = ? AND resolved_at IS NULL AND scheduled_from IS NOT NULL", params![project, id], |r| Ok((r.get(0)?, r.get(1)?))).optional()? else {
+                return Ok(false);
+            };
+            if from.is_some_and(|f| f != state) {
+                return Ok(false);
+            }
+            let mut list: Vec<serde_json::Value> = serde_json::from_str(&updates).unwrap_or_default();
+            list.push(serde_json::json!({ "at": at, "state": to, "text": text }));
+            let resolved = (to == "resolved").then_some(at);
+            c.execute("UPDATE status_incidents SET state = ?, updates = ?, resolved_at = COALESCE(?, resolved_at) WHERE id = ? AND state = ?", params![to, serde_json::to_string(&list).expect("JSON"), resolved, id, state])?;
+            Ok(true)
+        })
+    }
+
+    /// Whether an incident is a scheduled maintenance (it has a window).
+    pub fn incident_has_window(&self, project: &str, id: &str) -> Result<bool> {
+        Ok(self.db.query("SELECT 1 FROM status_incidents WHERE project = ? AND id = ? AND scheduled_from IS NOT NULL", params![project, id], |_| Ok(()))?.len() == 1)
+    }
+
+    /// Scheduled maintenances whose window has begun or ended by `now`: (project, id, its next
+    /// state: `maintenance` once it began, `resolved` once it's over).
+    pub fn due_maintenance(&self, now: i64) -> Result<Vec<(String, String, &'static str)>> {
+        Ok(self.db.query(
+            "SELECT project, id, state, scheduled_until FROM status_incidents WHERE resolved_at IS NULL AND scheduled_from IS NOT NULL AND ((state = 'scheduled' AND scheduled_from <= ?) OR (state = 'maintenance' AND scheduled_until <= ?))",
+            params![now, now],
+            |r| {
+                let (state, until): (String, i64) = (r.get(2)?, r.get(3)?);
+                Ok((r.get(0)?, r.get(1)?, if state == "scheduled" && until > now { "maintenance" } else { "resolved" }))
+            },
+        )?)
     }
 
     /// Every project's open incidents that a check or heartbeat opened: (project, its key).
@@ -2593,7 +2666,7 @@ impl Store {
         let (now, token) = (self.now()?, random(24));
         self.db.write(|c| {
             let other: Option<String> = c.query_row("SELECT project FROM preview_domains WHERE hostname = ?", [host], |r| r.get(0)).optional()?;
-            if other.is_some_and(|p| p != project) || c.query_row("SELECT 1 FROM domains WHERE hostname = ?", [host], |_| Ok(())).optional()?.is_some() {
+            if other.is_some_and(|p| p != project) || c.query_row("SELECT 1 FROM domains WHERE hostname = ?", [host], |_| Ok(())).optional()?.is_some() || c.query_row("SELECT 1 FROM status_domains WHERE hostname = ?", [host], |_| Ok(())).optional()?.is_some() {
                 return Err(Error::Conflict(format!("{host} is already a domain of roll apps")));
             }
             c.execute(
@@ -2703,8 +2776,73 @@ impl Store {
 
     /// Every active custom domain's hostname (what the edge holds certificates for).
     pub fn active_custom_domains(&self) -> Result<Vec<String>> {
-        Ok(self.db.query("SELECT hostname FROM domains WHERE kind = 'custom' AND status = 'active' ORDER BY hostname", (), |r| r.get(0))?)
+        Ok(self.db.query("SELECT hostname FROM domains WHERE kind = 'custom' AND status = 'active' UNION SELECT hostname FROM status_domains WHERE status = 'active' ORDER BY hostname", (), |r| r.get(0))?)
     }
+
+    /// A project's status page's own domain: (hostname, status, token, error, tls, tls error, made).
+    pub fn status_domain(&self, project: &str) -> Result<Option<StatusDomainRow>> {
+        Ok(self
+            .db
+            .query_row("SELECT hostname, status, token, error, tls, tls_error, created_at FROM status_domains WHERE project = ?", [project], |r| {
+                Ok((r.get(0)?, DomainStatus::parse(&r.get::<_, String>(1)?), r.get(2)?, r.get(3)?, TlsStatus::parse(&r.get::<_, String>(4)?), r.get(5)?, r.get(6)?))
+            })
+            .optional()?)
+    }
+
+    /// A status page's own domain (a new one replaces it, pending, with a new token): refused
+    /// when a service's domain, an environment's name or another page has it.
+    /// Returns the hostname it replaced, if another (for its certificate's provider to let go).
+    pub fn set_status_domain(&self, project: &str, host: &str, tls: TlsStatus) -> Result<Option<String>> {
+        let (now, token) = (self.now()?, random(24));
+        self.db.write(|c| {
+            let other: Option<String> = c.query_row("SELECT project FROM status_domains WHERE hostname = ?", [host], |r| r.get(0)).optional()?;
+            if other.is_some_and(|p| p != project) || c.query_row("SELECT 1 FROM domains WHERE hostname = ?", [host], |_| Ok(())).optional()?.is_some() || c.query_row("SELECT 1 FROM preview_domains WHERE hostname = ?", [host], |_| Ok(())).optional()?.is_some() {
+                return Err(Error::Conflict(format!("{host} is already a domain of roll apps")));
+            }
+            let was: Option<String> = c.query_row("SELECT hostname FROM status_domains WHERE project = ?", [project], |r| r.get(0)).optional()?;
+            c.execute(
+                "INSERT INTO status_domains (project, hostname, status, token, error, tls, tls_error, created_at) VALUES (?, ?, 'pending', ?, NULL, ?, NULL, ?) \
+                 ON CONFLICT (project) DO UPDATE SET hostname = excluded.hostname, status = 'pending', token = excluded.token, error = NULL, tls = excluded.tls, tls_error = NULL, created_at = excluded.created_at",
+                params![project, host, token, tls.as_str(), now],
+            )?;
+            Ok(was.filter(|w| w != host))
+        })
+    }
+
+    pub fn set_status_domain_status(&self, project: &str, status: DomainStatus, error: Option<&str>) -> Result<()> {
+        self.db.execute("UPDATE status_domains SET status = ?, error = ? WHERE project = ?", params![status.as_str(), error, project])?;
+        Ok(())
+    }
+
+    pub fn delete_status_domain(&self, project: &str) -> Result<Option<String>> {
+        self.db.write(|c| {
+            let host: Option<String> = c.query_row("SELECT hostname FROM status_domains WHERE project = ?", [project], |r| r.get(0)).optional()?;
+            c.execute("DELETE FROM status_domains WHERE project = ?", [project])?;
+            Ok(host)
+        })
+    }
+
+    /// Remove the status page domains still unverified since before `cutoff` (ms): a claim nobody
+    /// proves frees the hostname for its real owner, as a custom domain's does. Returns them.
+    pub fn expire_status_domains(&self, cutoff: i64) -> Result<Vec<String>> {
+        self.db.write(|c| {
+            let hosts: Vec<String> = c.query("SELECT hostname FROM status_domains WHERE status <> 'active' AND created_at < ?", [cutoff], |r| r.get(0))?;
+            c.execute("DELETE FROM status_domains WHERE status <> 'active' AND created_at < ?", [cutoff])?;
+            Ok(hosts)
+        })
+    }
+
+    /// Every active status page domain, by hostname: the project whose page answers there.
+    pub fn active_status_domains(&self) -> Result<Vec<(String, String)>> {
+        Ok(self.db.query("SELECT hostname, project FROM status_domains WHERE status = 'active'", (), |r| Ok((r.get(0)?, r.get(1)?)))?)
+    }
+
+    /// The status page domains the minute's pass looks at: unverified ones, and verified ones
+    /// whose certificate is still coming (project, hostname, status).
+    pub fn status_domains_to_check(&self) -> Result<Vec<(String, String, DomainStatus)>> {
+        Ok(self.db.query("SELECT project, hostname, status FROM status_domains WHERE status <> 'active' OR tls = 'pending'", (), |r| Ok((r.get(0)?, r.get(1)?, DomainStatus::parse(&r.get::<_, String>(2)?))))?)
+    }
+
 
     /// `tls`: where a new domain's certificate starts (`pending`, or `none` where nothing issues).
     pub fn add_domain(&self, service: &str, env: &str, host: &str, tls: TlsStatus) -> Result<Domain> {
@@ -2712,7 +2850,8 @@ impl Store {
         let token = random(24);
         self.db.write(|c| {
             let taken = c.query_row("SELECT 1 FROM domains WHERE hostname = ?", [host], |_| Ok(())).optional()?.is_some()
-                || c.query_row("SELECT 1 FROM environments WHERE slug = ?", [host], |_| Ok(())).optional()?.is_some();
+                || c.query_row("SELECT 1 FROM environments WHERE slug = ?", [host], |_| Ok(())).optional()?.is_some()
+                || c.query_row("SELECT 1 FROM status_domains WHERE hostname = ?", [host], |_| Ok(())).optional()?.is_some();
             if taken {
                 return Err(Error::Conflict(format!("{host} is already a domain of a service")));
             }
@@ -2761,7 +2900,8 @@ impl Store {
         let now = self.now()?;
         Ok(self.db.write(|c| {
             let was: Option<(String, String, String)> = c.query_row("SELECT service, env, tls FROM domains WHERE hostname = ? AND kind = 'custom'", [host], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
-            let Some((svc, env, before)) = was else { return Ok::<_, code_sql::Error>(false) };
+            // A status page's own domain (the edge reports for every active custom hostname).
+            let Some((svc, env, before)) = was else { return Ok::<_, code_sql::Error>(c.execute("UPDATE status_domains SET tls = ?, tls_error = ? WHERE hostname = ?", params![tls.as_str(), error, host])? > 0) };
             c.execute("UPDATE domains SET tls = ?, tls_error = ? WHERE hostname = ? AND kind = 'custom'", params![tls.as_str(), error, host])?;
             if tls == TlsStatus::Failed && before != TlsStatus::Failed.as_str() {
                 insert_event(c, now, "domain.tls_failed", &svc, &env, None, &serde_json::json!({ "hostname": host, "error": error }))?;
@@ -3804,6 +3944,19 @@ impl Store {
             .filter(|h| h.minute + 60 <= first)
             .collect();
         Ok((minutes, hours))
+    }
+
+    /// A volume's measured size this hour (one a service's owner takes hourly), and those past
+    /// 90 days dropped.
+    pub fn put_volume_hour(&self, service: &str, env: &str, hour: i64, bytes: u64) -> Result<()> {
+        self.db.execute("INSERT INTO volume_hours (service, env, hour, bytes) VALUES (?, ?, ?, ?) ON CONFLICT (service, env, hour) DO UPDATE SET bytes = excluded.bytes", params![service, env, hour, bytes as i64])?;
+        self.db.execute("DELETE FROM volume_hours WHERE service = ? AND env = ? AND hour < ?", params![service, env, hour - 90 * 24])?;
+        Ok(())
+    }
+
+    /// A volume's sizes by the hour since `since_hour`, oldest first.
+    pub fn volume_hours(&self, service: &str, env: &str, since_hour: i64) -> Result<Vec<(i64, u64)>> {
+        Ok(self.db.query("SELECT hour, bytes FROM volume_hours WHERE service = ? AND env = ? AND hour >= ? ORDER BY hour", params![service, env, since_hour], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as u64)))?)
     }
 
     /// An environment's hourly rollups since `since_hour`, as rows whose `minute` is the hour's

@@ -220,7 +220,9 @@ fn prefix_may_match(pattern: &str, prefix: &str) -> bool {
 }
 
 impl ReadSecurity {
-    /// The read restrictions of the request's principal.
+    /// The read restrictions of the request's principal, as its roles are now: every search
+    /// (a point in time's too) reads under these. The one place a principal's roles become
+    /// read restrictions: a later kind of identity plugs in here.
     pub fn of(ctx: &Ctx) -> Option<ReadSecurity> {
         // Not yet authenticated: nothing to keep.
         ctx.principal.get()?;

@@ -88,6 +88,17 @@ fn pr_trusted(code: &Code, r: &RepoRow, number: u64, head_repo: Option<&str>, ba
     head_repo.is_some_and(|h| h.eq_ignore_ascii_case(base_repo))
 }
 
+/// Whether this pull request's words are a fork's (MCP's lockdown), approved to run or not: roll
+/// marks its change outside; one roll doesn't have yet counts as a fork unless its head is the repo.
+fn fork_pr(code: &Code, r: &RepoRow, number: u64, head_repo: Option<&str>, base_repo: &str) -> bool {
+    if let Ok(Some(id)) = crate::github::sync::change_by_pr(code, &r.id, number)
+        && let Ok(Some(c)) = code.db.change(&id)
+    {
+        return !c.trusted;
+    }
+    !head_repo.is_some_and(|h| h.eq_ignore_ascii_case(base_repo))
+}
+
 /// Record the event a delivery part is for the repo owner's automations (before the part's own
 /// handling, which may fail and run again: the key makes that harmless).
 pub(crate) fn record(code: &Code, hub: &Hub, r: &RepoRow, link: &Link, receipt: &str, event: &Event) -> Result<()> {
@@ -156,6 +167,9 @@ fn describe(code: &Code, hub: &Hub, r: &RepoRow, link: &Link, event: &Event) -> 
                     "body": e.comment.body.clone().unwrap_or_default(), "prompt": prompt, "author": author,
                     "author_association": e.comment.author_association, "labels": labels(&e.issue.labels),
                     "change": change.as_ref().map(|c| json!({ "number": c.number, "branch": c.branch, "id": c.id })),
+                    // The issue's title and labels are its author's, who may not push, or a fork's
+                    // pull request's (MCP's lockdown marks such runs).
+                    "from_outside": !writer(e.issue.author_association.as_deref()) || change.as_ref().is_some_and(|c| !c.trusted),
                 }),
             );
             Some(("comment.mention", data, format!("@roll on {}#{}: {}", link.full_name(), e.issue.number, prompt.chars().take(80).collect::<String>())))
@@ -172,6 +186,8 @@ fn describe(code: &Code, hub: &Hub, r: &RepoRow, link: &Link, event: &Event) -> 
                     "number": e.number, "title": pr.title, "body": pr.body.clone().unwrap_or_default(), "url": pr.html_url, "reviewer": e.requested_reviewer,
                     "author": pr.user.as_ref().map(|u| u.login.clone()), "head_ref": pr.head.ref_name, "head_sha": pr.head.sha, "base_ref": pr.base.ref_name,
                     "sender": e.sender.as_ref().map(|u| u.login.clone()),
+                    // A fork's, even approved to run: its title and body are its author's.
+                    "from_outside": fork_pr(code, r, e.number, head_repo, &e.repository.full_name),
                 }),
             );
             Some(("review.requested", data, format!("review of {}#{} requested", link.full_name(), e.number)))
