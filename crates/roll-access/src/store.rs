@@ -2119,6 +2119,19 @@ impl Store {
             .collect())
     }
 
+    /// The MCP tools a grant ran since `since` (allowed, or run on an approval), most used first, at
+    /// most `limit`: search mode lists them beside its own (Atlassian's "primary" tools, from what
+    /// this token does rather than a fixed list).
+    pub fn tools_used(&self, grant: &str, since: i64, limit: usize) -> Result<Vec<String>> {
+        Ok(self.db.read(|c| {
+            c.query(
+                "SELECT tool FROM audit WHERE grant_id = ? AND at >= ? AND tool IS NOT NULL AND (decision = 'allow' OR (decision = 'ask' AND approval IS NOT NULL AND status <> 403)) GROUP BY tool ORDER BY COUNT(*) DESC, tool LIMIT ?",
+                params![grant, since, limit as i64],
+                |r| r.get::<_, String>(0),
+            )
+        })?)
+    }
+
     /// Each grant's requests in the last day, by decision: `grant id → (allowed, denied, asked)`.
     pub fn activity(&self) -> Result<std::collections::HashMap<String, (i64, i64, i64)>> {
         let since = code_sql::now_ms() - 24 * 3600 * 1000;
