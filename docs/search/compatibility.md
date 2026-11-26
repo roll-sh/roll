@@ -1650,6 +1650,21 @@ as given), the multimodal `embedding` task type and the new `semantic` field typ
 a `text_similarity_reranker` inside a compound retriever, its `chunk_rescorer`, and the reranker's
 explanation and profile details.
 
+### A/B tests on search applications (an extension)
+
+Elasticsearch's search applications have no experiments; roll's are an extension of the same
+APIs ([relevance-experiments.md](relevance-experiments.md), "First slice as built"):
+
+- `PUT _application/search_application/{name}` takes `experiments`, and `GET` prints them; an
+  application without them answers exactly as on Elasticsearch.
+- `POST _application/search_application/{name}/_search` with a running experiment renders the
+  visitor's variant and answers with `X-Roll-Experiment` and `X-Roll-Variant` headers; the body is
+  Elasticsearch's.
+- `POST _application/analytics/{collection}/event/roll_conversion` is a fourth event type
+  (`page_view`, `search` and `search_click` as Elasticsearch has them).
+- A browser key with `limits.events` may post `search_click` and `roll_conversion` events, which
+  are counted and not stored.
+
 ## Connectors (`_connector`)
 
 roll runs the syncs of Elastic-managed (`is_native: true`) `postgresql` and `s3` connectors

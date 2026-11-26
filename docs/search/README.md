@@ -929,7 +929,7 @@ origins (browser search), once they're on main.
 | DELETE | `/v1/search/clusters/{id}/keys/{key}` | revoke it (204; 404 when it's gone). On a deleted cluster (by its id) the revoke is kept and applied by its restore (204) |
 | GET | `/v1/search/clusters/{id}/browser-keys` | `{keys}`: the browser keys that still work, newest first, each `{id, name, indices or application, filter?, rate_limit, created_at, expires_at, usage_24h: {requests, throttled, refused, reasons}}` (no secret; `usage_24h` covers the hour in progress and the 23 before). Wakes the cluster |
 | GET | `/v1/search/clusters/{id}/browser-keys/{key}/usage?window=1h\|24h\|14d` | one browser key's usage (above; 24h by default): `{key, window, step_s, from, to, points: [{at, requests, throttled, refused, reasons}], totals: {requests, throttled, refused, reasons, users: [{user, requests, throttled}], origins: [{origin, refused}]}}`. `throttled` counts 429s, `refused` the other refusals, `reasons` both by name (`key_rate`, `address_rate`, `user_rate`, `concurrency`, `cluster_ceiling`, `origin`, `policy`, `body_too_large`, `invalid_key`); points only where the key made requests. 404 for a key that isn't one of the cluster's browser keys; 400 for another window |
-| POST | `/v1/search/clusters/{id}/browser-keys` | a key a web page ships (above) `{name, indices or application, filter?, expires_in_s?, rate_limit?: {per_minute?, per_ip_per_minute?}, limits?: {max_concurrent?, max_result_window?, max_buckets?, max_items?, max_inference?, max_rerank_window?, max_body_bytes?, inference_endpoints?, allow_scripts?, allow_expensive_queries?}}` → the same fields plus `api_key` (once) and `url`. 400 on an OpenSearch-flavor cluster; 409 past 20 browser keys |
+| POST | `/v1/search/clusters/{id}/browser-keys` | a key a web page ships (above) `{name, indices or application, filter?, expires_in_s?, rate_limit?: {per_minute?, per_ip_per_minute?}, limits?: {max_concurrent?, max_result_window?, max_buckets?, max_items?, max_inference?, max_rerank_window?, max_body_bytes?, inference_endpoints?, allow_scripts?, allow_expensive_queries?, events?}}` → the same fields plus `api_key` (once) and `url`. `limits.events` lets the page post `search_click` and `roll_conversion` events about what the key reaches (counted for its own visitor, never stored: relevance-experiments.md). 400 on an OpenSearch-flavor cluster; 409 past 20 browser keys |
 | DELETE | `/v1/search/clusters/{id}/browser-keys/{key}` | revoke a browser key (204; 404 for any other key of the cluster; on a deleted cluster, a browser key of it is kept for the restore, which revokes it: 202) |
 | GET | `/v1/search/clusters/{id}/remotes` | the remote clusters it holds credentials for: `{remotes: [{alias, cluster, cluster_id, key_id, minted, created_at, connected}]}` (never the key) |
 | PUT | `/v1/search/clusters/{id}/remotes/{alias}` | link another cluster of the same owner as remote `alias` (above): `{cluster, skip_unavailable?, access?}` or `{cluster, skip_unavailable?, api_key}` → `{alias, cluster, cluster_id, mode, proxy_address, key_id, minted, skip_unavailable?}`; 404 for a cluster the caller can't link to, missing or not. `admin` on both clusters for roll-access |
@@ -1166,7 +1166,11 @@ query-rule editors prefilled with it (`query, ` as a rule; an `exact` `query_str
   timer and writes no rows.
 - **Reading it**: `GET /v1/search/clusters/{id}/analytics?index=&range=24h|7d|30d` (all indices
   without `index`). A read for roll-access; a person sees only their own clusters' (404 otherwise).
-  The answer adds what the cluster's owner recorded since the last pass.
+  The answer adds what the cluster's owner recorded since the last pass. Its `experiments` list
+  the A/B tests of the cluster's search applications ([relevance-experiments.md](relevance-experiments.md)):
+  `[{application, experiment, baseline, variants: [{name, searches, clicks, conversions, value, ctr, conversion_rate, vs_baseline?: {ctr, conversion_rate}}]}]`,
+  each comparison `{p_value, state}` with `state` one of `significant`, `not_yet_significant` or
+  `not_enough_data`; counted since each started, whatever `range` says.
 
 **Privacy.** No `Authorization` header, credential, API key or document body is ever recorded:
 the only header read is `X-Roll-Search-Query`, and only a query's text, counted, is kept. Query
@@ -1694,10 +1698,15 @@ deterministic (#396).
    arrival. Map them onto roll's `_inference` services and E5 (#563).
 15. **Relevance evaluation, A/B tests and merchandising** (design in
    [relevance-experiments.md](relevance-experiments.md); Algolia A/B Testing, rules that
-   boost, bury, filter and redirect, conversion analytics, dynamic re-ranking): `_rank_eval` is served
-   without a UI or judgment lists, the Playground's A/B is offline, analytics records clicks only, and
-   rules stop at pin and exclude. Live traffic splits through search applications (#358), conversion
-   events, and rule actions beyond Elasticsearch's (designed first as roll extensions).
+   boost, bury, filter and redirect, conversion analytics, dynamic re-ranking). The first slice of
+   A/B tests is built (relevance-experiments.md, "First slice as built"): a search application's
+   `experiments` (variants by params or template, weights, an end), each search of it assigned a
+   variant by a stable hash of its visitor (a derived key's `user`, an allowed `X-Roll-User`, else
+   the address) and answered with `X-Roll-Experiment` and `X-Roll-Variant`; `roll_conversion`
+   events beside clicks, counted once per search per variant; browser keys' `limits.events`; and
+   per-variant click-through and conversion with a two-proportion z-test in `GET …/analytics` and
+   the Relevance tab. Left: judgment lists and offline evaluation (phase 1), promoting a winner,
+   zero-result rate and latency per variant, the `roll_` rule types and dynamic re-ranking.
 16. **Cold start at size**: the 19.8 ms cold start is a 50k-document index from local cache;
    nothing measures the first query and p99 on a node with an empty cache for 1, 10 and 50 GB
    indices loaded from object storage, or on Graviton. Buyers comparing always-on Typesense or Algolia

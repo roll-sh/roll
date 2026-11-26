@@ -37,6 +37,43 @@ export interface SearchAnalytics {
   top: QueryRow[];
   no_results: QueryRow[];
   low_ctr: QueryRow[];
+  /** A/B tests on search applications, since each started (roll's: relevance-experiments.md). */
+  experiments?: ExperimentResult[];
+}
+
+/** A variant's rate against the baseline's (a two-proportion z-test). */
+export interface Comparison {
+  p_value: number | null;
+  state: "significant" | "not_yet_significant" | "not_enough_data";
+}
+
+export interface VariantResult {
+  name: string;
+  /** Trials: one visitor's query in an hour. */
+  searches: number;
+  clicks: number;
+  conversions: number;
+  value: number;
+  ctr: number | null;
+  conversion_rate: number | null;
+  /** Absent on the baseline itself. */
+  vs_baseline?: { ctr: Comparison; conversion_rate: Comparison };
+}
+
+export interface ExperimentResult {
+  application: string;
+  experiment: string;
+  /** The variant named `control`, else the first by name. */
+  baseline: string;
+  variants: VariantResult[];
+}
+
+/** How a comparison reads: "p 0.012, significant", "not yet significant", "not enough data". */
+export function comparisonText(c: Comparison | undefined): string {
+  if (!c) return "baseline";
+  if (c.state === "not_enough_data") return "not enough data";
+  const p = c.p_value == null ? "" : `p ${c.p_value < 0.001 ? "<0.001" : c.p_value.toFixed(3)}, `;
+  return `${p}${c.state === "significant" ? "significant" : "not yet significant"}`;
 }
 
 export type AnalyticsList = "top" | "no_results" | "low_ctr";
