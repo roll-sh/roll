@@ -366,6 +366,27 @@ export interface CrawlTest {
   record_count?: number;
 }
 
+/** A Discover view as a saved search keeps it (the control plane checks its shape and sizes). */
+export interface SavedSpec {
+  view: string;
+  time_field: string | null;
+  mode: "kql" | "esql" | "dql" | "ppl";
+  query: string;
+  range: { last: string | null } | { gte: number; lt: number };
+  columns: string[];
+  sort: { column: string; field: string; order: "asc" | "desc" } | null;
+}
+
+/** One of a cluster's saved searches. */
+export interface SavedSearch {
+  id: string;
+  name: string;
+  search: SavedSpec;
+  made_by: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
 /**
  * A domain or origin the cluster's owner verified (or started verifying) for the crawler's higher
  * limits: a domain by a DNS TXT record (every origin on it), an origin by the file it serves
@@ -427,6 +448,12 @@ export const searchApi = {
   /** One URL through the web crawler's path, writing nothing (with a connector's configuration, or none). */
   crawlTest: (id: string, url: string, connector?: string) => call<CrawlTest>("POST", `${cl(id)}/crawl-test`, { url, connector }),
   siteVerifications: (id: string) => call<{ verifications: SiteVerification[] }>("GET", `${cl(id)}/site-verifications`),
+  /** Discover's saved searches (docs/search/README.md, "Saved searches"): the cluster's, by name. */
+  savedSearches: (id: string) => call<{ saved_searches: SavedSearch[] }>("GET", `${cl(id)}/saved-searches`),
+  saveSearch: (id: string, name: string, search: SavedSpec) => call<SavedSearch>("POST", `${cl(id)}/saved-searches`, { name, search }),
+  updateSavedSearch: (id: string, saved: string, change: { name?: string; search?: SavedSpec }) =>
+    call<SavedSearch>("PUT", `${cl(id)}/saved-searches/${encodeURIComponent(saved)}`, change),
+  deleteSavedSearch: (id: string, saved: string) => call<null>("DELETE", `${cl(id)}/saved-searches/${encodeURIComponent(saved)}`),
   /** Starts verifying a domain (by DNS) or one origin (by its file). */
   verifySite: (id: string, what: { domain: string } | { origin: string }) => call<SiteVerification>("POST", `${cl(id)}/site-verifications`, what),
   checkSite: (id: string, site: string) => call<SiteVerification>("POST", `${cl(id)}/site-verifications/${encodeURIComponent(site)}/check`, {}),

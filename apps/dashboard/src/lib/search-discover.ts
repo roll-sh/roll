@@ -6,6 +6,7 @@
  * and the view as the URL keeps it.
  */
 import { type MappedField, sortClause, type TableSort, timeFilter, type TimeRange } from "./search-docs";
+import type { SavedSpec } from "./search-api";
 
 /** The query languages: KQL and ES|QL on Elasticsearch-flavor clusters, DQL and PPL on OpenSearch ones. */
 export type DiscoverMode = "kql" | "esql" | "dql" | "ppl";
@@ -69,6 +70,7 @@ export function searchBody(s: DiscoverState, from = 0, size = DISCOVER_PAGE): Re
     size,
     track_total_hits: true,
     ...(sort ? { sort } : {}),
+    ...(s.timeField ? { fields: timeValue(s.timeField) } : {}),
     ...(s.timeField && from === 0 ? { aggs: { over_time: { auto_date_histogram: { field: s.timeField, buckets: 60 } } } } : {}),
   };
 }
@@ -244,4 +246,173 @@ export function hashToState(hash: string, base: DiscoverState, modes: DiscoverMo
     columns: p.getAll("col").length ? p.getAll("col") : base.columns,
     sort: sort && sort.length === 3 && (sort[2] === "asc" || sort[2] === "desc") ? { column: sort[0], field: sort[1], order: sort[2] } : base.sort,
   };
+}
+
+// ---- Saved searches (kept by roll's control plane: `crates/search-control/src/saved.rs`).
+
+/** A view as a saved search keeps it (an undecided time field is none). */
+export function toSpec(s: DiscoverState): SavedSpec {
+  return { view: s.view, time_field: s.timeField ?? null, mode: s.mode, query: s.query, range: s.range, columns: s.columns, sort: s.sort };
+}
+
+/** A saved search opened as a view; a mode this cluster's flavor hasn't falls back on its first. */
+export function fromSpec(spec: SavedSpec, modes: DiscoverMode[]): DiscoverState {
+  return {
+    view: spec.view,
+    timeField: spec.time_field,
+    mode: modes.includes(spec.mode) ? spec.mode : modes[0],
+    query: spec.query,
+    range: spec.range,
+    columns: spec.columns,
+    sort: spec.sort,
+  };
+}
+
+/** JSON with every object's keys sorted, so two specs compare by what they hold. */
+const canonical = (v: unknown): string =>
+  Array.isArray(v)
+    ? `[${v.map(canonical).join(",")}]`
+    : v && typeof v === "object"
+      ? `{${Object.keys(v)
+          .sort()
+          .map((k) => `${JSON.stringify(k)}:${canonical((v as Record<string, unknown>)[k])}`)
+          .join(",")}}`
+      : JSON.stringify(v ?? null);
+
+/** Whether a view differs from the saved search it was opened from. */
+export const edited = (s: DiscoverState, spec: SavedSpec) => canonical(toSpec(s)) !== canonical(spec);
+
+// ---- Surrounding documents (Kibana's "View surrounding documents").
+
+/** The order around an anchor: the time field, then `_doc` (Kibana's default tiebreaker), both
+ * the same way. Sort values of `_doc` are per shard, so documents of one millisecond on different
+ * shards keep a stable but arbitrary order. */
+const contextSort = (tf: string, order: "asc" | "desc") => [{ [tf]: { order, unmapped_type: "date" } }, { _doc: { order } }];
+
+/** The time field as epoch milliseconds in each hit's `fields`, whatever its format in `_source`. */
+export const timeValue = (tf: string) => [{ field: tf, format: "epoch_millis" }];
+
+/** `POST /<index>/_search` for the anchor itself (by id on its own index): its source, its time,
+ * and its sort values for `search_after`. */
+export function anchorBody(tf: string, id: string): Record<string, unknown> {
+  return { size: 1, query: { ids: { values: [id] } }, sort: contextSort(tf, "desc"), fields: timeValue(tf), track_total_hits: false };
+}
+
+/**
+ * `POST /<view>/_search` for the documents around an anchor: `newer` (ascending after its sort
+ * values; shown reversed above it) and `older` (descending after them). The range doesn't apply;
+ * the view's query does when `keepQuery`.
+ */
+export function surroundingBodies(s: Pick<DiscoverState, "query">, tf: string, anchorSort: unknown[], counts: { newer: number; older: number }, keepQuery: boolean): { newer: Record<string, unknown>; older: Record<string, unknown> } {
+  const query = { bool: { filter: [textQuery(keepQuery ? s.query : "")] } };
+  const one = (order: "asc" | "desc", size: number) => ({ size, query, sort: contextSort(tf, order), search_after: anchorSort, fields: timeValue(tf), track_total_hits: false });
+  return { newer: one("asc", counts.newer), older: one("desc", counts.older) };
+}
+
+/** How many more surrounding documents a click loads. */
+export const CONTEXT_STEP = 5;
+
+// ---- Visualizing a field.
+
+/** How a field is drawn: its top values, its numbers' spread, or its dates over time. */
+export type FieldChart = "terms" | "number" | "date";
+
+const NUMERIC = new Set(["long", "integer", "short", "byte", "double", "float", "half_float", "scaled_float", "unsigned_long"]);
+
+/** The chart a field gets (on the field the values come from), or `null` when it doesn't aggregate. */
+export function chartOf(fields: ViewField[], name: string): { kind: FieldChart; field: string } | null {
+  const f = fields.find((x) => x.name === name);
+  if (!f) return null;
+  if (f.type === "date" || f.type === "date_nanos") return f.aggregatable ? { kind: "date", field: name } : null;
+  if (NUMERIC.has(f.type)) return f.aggregatable ? { kind: "number", field: name } : null;
+  const on = valuesField(fields, name);
+  return on ? { kind: "terms", field: on } : null;
+}
+
+/** The bars a chart draws. */
+export const CHART_BARS = { terms: 10, number: 30, date: 40 } as const;
+
+/**
+ * One request for a field's chart over the view's whole query and range (not the sidebar's
+ * sample): the bars (`terms`, `variable_width_histogram` for numbers, `auto_date_histogram` for
+ * dates), with the distinct values (`cardinality`, approximate past 3,000), the documents
+ * without a value (`missing`) and, for numbers and dates, `min` and `max`.
+ */
+export function chartBody(s: Pick<DiscoverState, "query" | "range" | "timeField">, kind: FieldChart, field: string): Record<string, unknown> {
+  const bars =
+    kind === "terms"
+      ? { terms: { field, size: CHART_BARS.terms } }
+      : kind === "number"
+        ? { variable_width_histogram: { field, buckets: CHART_BARS.number } }
+        : { auto_date_histogram: { field, buckets: CHART_BARS.date } };
+  const extent = kind === "terms" ? {} : { low: { min: { field } }, high: { max: { field } } };
+  return { size: 0, track_total_hits: true, query: viewQuery(s), aggs: { bars, distinct: { cardinality: { field } }, missing: { missing: { field } }, ...extent } };
+}
+
+/** A chart's bar: its label (a value, or where a range of numbers or dates starts), its bounds
+ * for numbers and dates, and its documents. */
+export interface ChartBar {
+  key: string | number | boolean;
+  from?: number;
+  to?: number;
+  count: number;
+}
+
+/** What [`chartBody`]'s answer says. */
+export interface ChartData {
+  bars: ChartBar[];
+  /** The documents the query and range match. */
+  total: number;
+  /** In the top values (`terms` only): the documents with another value. */
+  other: number;
+  distinct: number | null;
+  missing: number | null;
+  min: number | null;
+  max: number | null;
+}
+
+export function chartData(kind: FieldChart, resp: unknown): ChartData {
+  type B = { key: string | number | boolean; key_as_string?: string; doc_count: number; min?: number; max?: number };
+  type A = { buckets?: B[]; sum_other_doc_count?: number; value?: number | null; doc_count?: number; interval?: string };
+  const r = (resp ?? {}) as { hits?: { total?: { value?: number } }; aggregations?: Record<string, A> };
+  const a = r.aggregations ?? {};
+  const buckets = a.bars?.buckets ?? [];
+  const step = kind === "date" && buckets.length > 1 ? Number(buckets[1].key) - Number(buckets[0].key) : 0;
+  const bars = buckets.map((b, i): ChartBar => {
+    if (kind === "terms") return { key: b.key_as_string ?? b.key, count: b.doc_count };
+    if (kind === "number") return { key: b.key, from: b.min ?? Number(b.key), to: b.max ?? Number(b.key), count: b.doc_count };
+    const from = Number(b.key);
+    return { key: from, from, to: Number(buckets[i + 1]?.key ?? from + (step || 1)), count: b.doc_count };
+  });
+  return {
+    bars,
+    total: r.hits?.total?.value ?? 0,
+    other: a.bars?.sum_other_doc_count ?? 0,
+    distinct: a.distinct?.value ?? null,
+    missing: a.missing?.doc_count ?? null,
+    min: a.low?.value ?? null,
+    max: a.high?.value ?? null,
+  };
+}
+
+// ---- Times in the viewer's zone.
+
+/** The viewer's time zone, shown next to the times (`Europe/Budapest`). */
+export function viewerZone(): string {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+}
+
+/** A time (epoch milliseconds, or ISO text: without an offset it's UTC, as Elasticsearch reads it)
+ * in `zone`, to the millisecond: `2026-11-26 13:59:00.000`. Anything else is shown as it is. */
+export function localTime(v: unknown, zone = viewerZone()): string {
+  const iso = (t: string) => (/T\d\d:\d\d(:\d\d(\.\d+)?)?$/.test(t) ? `${t}Z` : t);
+  const ms = typeof v === "number" ? v : typeof v === "string" && v.trim() ? (/^-?\d+(\.\d+)?$/.test(v.trim()) ? Number(v) : Date.parse(iso(v.trim()))) : NaN;
+  if (!Number.isFinite(ms) || Math.abs(ms) > 8.64e15) return v == null ? "" : String(v);
+  const p = Object.fromEntries(
+    new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" })
+      .formatToParts(new Date(ms))
+      .map((x) => [x.type, x.value]),
+  );
+  const milli = String(Math.floor(((ms % 1000) + 1000) % 1000)).padStart(3, "0");
+  return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}.${milli}`;
 }
