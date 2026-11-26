@@ -115,7 +115,7 @@ pub(crate) async fn create(State(a): S, ext: Extensions, body: axum::body::Bytes
     let person = owner(&a, &ext, "make machine clients")?;
     let mut new: NewClient = serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))?;
     let key = credential(&a, new.public_jwk.as_ref(), new.oidc.take())?;
-    a.check_policy(new.grant.expires_at)?;
+    a.meets_policy(&new.grant.rules, new.grant.expires_at)?;
     // A person's, past what the policy lets a person's token have unapproved, waits for an admin.
     new.grant.pending = person.as_ref().is_some_and(|_| a.policy_now().needs_approval(&new.grant.rules, new.grant.ask_otherwise));
     // An admin's is theirs too, as their tokens are.
@@ -216,7 +216,7 @@ pub(crate) async fn rotate(State(a): S, ext: Extensions, Path(id): Path<String>,
             return Err(missing());
         }
         // A new credential is a new way in: it meets the policy, as a token's rotation does.
-        a2.check_policy(grant.expires_at)?;
+        a2.meets_policy(&grant.rules, grant.expires_at)?;
         let secret = a2.store.rotate_machine_client(&id, key, body.keep_old_for_s.map(|s| s * 1000))?;
         Ok((a2.store.get(&grant_id)?, secret))
     })

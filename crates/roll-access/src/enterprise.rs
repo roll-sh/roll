@@ -520,7 +520,8 @@ fn connect(a: &Access, app: &App, idp: &Idp, user: &str, read_only: bool, mcp_on
         Some(g) if g.revoked_at.is_some() => {
             return Err(Error::OAuth("access_denied", "this person's connection to the app was revoked or denied in roll".into()));
         }
-        Some(g) if !g.live(now) || a.policy_now().idle(&g, now) => {
+        // Or one that no longer meets the policy with the app's rules now (made before a cap).
+        Some(g) if !g.live(now) || a.policy_now().idle(&g, now) || a.meets_policy(&app.rules, g.expires_at).is_err() => {
             a.store.revoke(&g.id)?;
             None
         }
@@ -546,7 +547,10 @@ fn connect(a: &Access, app: &App, idp: &Idp, user: &str, read_only: bool, mcp_on
         return Ok((a.store.get(&id)?, access));
     }
     let host = url::Url::parse(&idp.issuer).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
-    let new = NewGrant { name: format!("{} (via {})", app.name, idp.name.clone().unwrap_or(host)).chars().take(100).collect(), rules: app.rules.clone(), pending: a.policy_now().needs_approval(&app.rules, false), ..Default::default() };
+    // Nobody asks for a lifetime here: the policy's longest for these rules (none: none).
+    let expires_at = a.lifetime_days(&app.rules).map(|d| now + i64::from(d) * 86_400_000);
+    a.meets_policy(&app.rules, expires_at).map_err(|e| Error::OAuth("access_denied", e.to_string()))?;
+    let new = NewGrant { name: format!("{} (via {})", app.name, idp.name.clone().unwrap_or(host)).chars().take(100).collect(), rules: app.rules.clone(), expires_at, pending: a.policy_now().needs_approval(&app.rules, false), ..Default::default() };
     let (grant, access) = a.store.create(&new, GrantKind::Oauth, &format!("enterprise:{}", idp.issuer), Some(&app.client_id), Some(user))?;
     if grant.pending {
         return Err(waits());

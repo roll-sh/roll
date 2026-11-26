@@ -632,8 +632,7 @@ impl Access {
                 (g.id.to_string(), g.user.as_deref().map(str::to_string))
             }
         };
-        self.check_policy(new.expires_at)?;
-        self.check_lifetime_cap(&new.rules, new.expires_at)?;
+        self.meets_policy(&new.rules, new.expires_at)?;
         let made = blocking(self.clone(), move |a| a.store.create(&new, GrantKind::Token, &by, None, user.as_deref())).await?;
         self.tell_added(&made.0, Added::Token, ext);
         if let Some(handle) = asker {
@@ -794,8 +793,7 @@ async fn update(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum
     }
     // A token whose rules, lifetime or addresses change meets the policy as it is now.
     if change.rules.is_some() || change.expires_at.is_some() || change.ip_allow.is_some() {
-        a.check_policy(change.expires_at.unwrap_or(target.expires_at))?;
-        a.check_lifetime_cap(change.rules.as_ref().unwrap_or(&target.rules), change.expires_at.unwrap_or(target.expires_at))?;
+        a.meets_policy(change.rules.as_ref().unwrap_or(&target.rules), change.expires_at.unwrap_or(target.expires_at))?;
     }
     // A person widening their own token past what the policy has an admin approve: it waits again.
     let asker = match &who_handle {
@@ -946,8 +944,7 @@ async fn rotate(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum
         may_touch(&a, &g, &target).await?;
     }
     // A new secret is a new token: it meets the policy (set an expiry first if it must expire).
-    a.check_policy(target.expires_at)?;
-    a.check_lifetime_cap(&target.rules, target.expires_at)?;
+    a.meets_policy(&target.rules, target.expires_at)?;
     let keep = body.keep_old_for_s.map(|s| s * 1000);
     let (grant, token) = blocking(a, move |a| a.store.rotate(&id, keep)).await?;
     Ok(Json(json!({ "grant": grant, "token": token })))
@@ -1163,11 +1160,20 @@ async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate:
     if let Some(p) = roll_auth::scope::Scope(vec![rule.clone()]).problems().first() {
         return Err(Error::BadRequest(format!("this request can't be remembered ({p}): approve it once")));
     }
-    // For good is a change to the token: it meets the policy as it is now.
-    if until.is_none() {
-        let g = found.grant_id.clone();
-        let grant = blocking(a.clone(), move |a| a.store.get(&g)).await?;
-        a.check_policy(grant.expires_at)?;
+    // For good is a change to the token: it meets the policy as it is now, with the rule. For a
+    // while, the rule lives until then (or the token's end): within each product's cap too.
+    let g = found.grant_id.clone();
+    let grant = blocking(a.clone(), move |a| a.store.get(&g)).await?;
+    match until {
+        None => {
+            let mut rules = grant.rules.clone();
+            rules.0.push(rule.clone());
+            a.meets_policy(&rules, grant.expires_at)?;
+        }
+        Some(until) => {
+            let ends = grant.expires_at.map_or(until, |e| e.min(until));
+            a.meets_policy(&roll_auth::scope::Scope(vec![rule.clone()]), Some(ends))?;
+        }
     }
     Ok(Some((found.grant_id, rule, until)))
 }

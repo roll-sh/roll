@@ -1819,9 +1819,24 @@ impl Access {
         self.policy()
     }
 
-    /// Whether a grant with `rules` expiring at `expires_at` fits a product's own cap
-    /// ([`Access::lifetime_cap`]): 403 naming the product's policy otherwise.
-    pub fn check_lifetime_cap(&self, rules: &roll_auth::scope::Scope, expires_at: Option<i64>) -> Result<()> {
+    /// Whether a grant with `rules` expiring at `expires_at` meets the policy as it is now: roll's
+    /// token policy (`max_days`, `require_expiry`; a 400) and each product's own cap on grants
+    /// that reach it ([`Access::lifetime_cap`]; a 403 naming that product's policy). Every path
+    /// that writes a grant's rules or lifetime, or issues a grant a new secret, asks this
+    /// (tests/policy_callers.rs lists them).
+    pub fn meets_policy(&self, rules: &roll_auth::scope::Scope, expires_at: Option<i64>) -> Result<()> {
+        self.check_policy(expires_at)?;
+        self.check_lifetime_cap(rules, expires_at)
+    }
+
+    /// The most days a grant with `rules` may live now (roll's `max_days` and each product's cap,
+    /// the shorter), for a grant made with no lifetime asked for (an enterprise app's connection).
+    pub(crate) fn lifetime_days(&self, rules: &roll_auth::scope::Scope) -> Option<u32> {
+        let cap = self.lifetime_cap.get().and_then(|cap| cap(rules)).map(|(d, _)| d);
+        [self.policy().max_days, cap].into_iter().flatten().min()
+    }
+
+    fn check_lifetime_cap(&self, rules: &roll_auth::scope::Scope, expires_at: Option<i64>) -> Result<()> {
         let Some((days, why)) = self.lifetime_cap.get().and_then(|cap| cap(rules)) else { return Ok(()) };
         match expires_at {
             None => Err(Error::Forbidden(format!("{why} (set expires_at)"))),
@@ -1830,8 +1845,7 @@ impl Access {
         }
     }
 
-    /// Whether a grant expiring at `expires_at` fits the policy.
-    pub fn check_policy(&self, expires_at: Option<i64>) -> Result<()> {
+    fn check_policy(&self, expires_at: Option<i64>) -> Result<()> {
         let p = self.policy();
         match (expires_at, p.max_days) {
             (None, Some(d)) => Err(Error::BadRequest(format!("roll's policy: a token lives at most {d} days; set expires_at"))),
