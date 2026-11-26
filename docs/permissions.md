@@ -446,7 +446,8 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   - **The route:** search's admin password rotated into one (`POST …/password` with `secret: {environment, path?, project?}`, `write`; the project left out is the one the cluster is on).
   - **What's checked:** `write` on that folder as roll secrets decides it, protected environments included. The environment and path are checked as roll secrets names them, so a pattern like `prod*` is refused rather than remembered as a wildcard.
   - **An approval** names that folder, even when the route's own action asks too, and remembering it allows exactly that folder and environment.
-  - **The grant the product gets** carries one exact rule (that folder: `write` and `read`) for this request. roll secrets checks the caller again inside, and nothing else in the project opens.
+  - **The grant the product gets** carries one exact rule (that folder: `write`) for this request, plus `read` on that folder whenever the write passes, allowed outright or approved, since the product reads the version back. roll secrets checks the caller again inside, and nothing else in the project opens.
+  - **A remembered approval** keeps to what it named. When the route's own action asked too (admin on the cluster), only the secret is remembered, and the next call asks about the route's own action again.
   - **A secret a product keeps following needs `reveal` allowed outright.** That covers an inference endpoint keyed by a secret (its sync) and a bound `roll://` reference: either is checked again as its maker at every use, so an approval can't stand in for it.
 - Comparing a local copy with a secrets folder (`POST …/environments/{env}/diff`, by fingerprint,
   names only) tests a guess at a value: `reveal` there, as reading the values is.
