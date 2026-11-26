@@ -1559,7 +1559,7 @@ From a 2026-11-24 gap review (every tool run as an agent would against a fresh r
 
 From a 2026-11-26 comparison (the spec's anniversary post, Claude's connector docs, Atlassian's, Stripe's and GitHub's changelogs; no core SEP went final since 2026-11-15):
 
-1. **Claude Code's per-tool `_meta` and clients' limits, checked (this PR).**
+1. **Claude Code's per-tool `_meta` and clients' limits, checked (#1137).**
    - **`anthropic/alwaysLoad`:** `roll_find`, the way in from a name or a pasted link, now loads upfront where Claude Code defers tools behind its tool search, as search mode's tools already did.
    - **Server instructions:** Claude Code cuts them at 4,096 characters. The test now covers metadata, lockdown and search mode together (about 3,100 characters plus the token's name).
    - **Left as they are:**
@@ -1569,10 +1569,10 @@ From a 2026-11-26 comparison (the spec's anniversary post, Claude's connector do
      - Skills: one file and the workflows, far under 100 per server and 100 KB a file.
      - Tool descriptions: 965 characters at most, under 4,096.
    - **Events' final text** (SEP-3415, ext-events) was compared field by field: `{eventId, name, timestamp, data, cursor}`, `truncated`, `maxAgeMs`, `nextPollMs`, `payloadSchema`, `delivery`, and permission re-checked at delivery through the gate. Nothing to change.
-2. **Express admin setup for Claude's auto-connect.**
-   - **What it is:** `ema_issuer:manage`, granted only to Claude's client and only by an admin, with RFC 9207 `iss` in redirects, `ema_setup_endpoint` in the token answer, and `PUT` of the issuer. Claude registers its issuer, so the admin doesn't copy it.
-   - **Open question:** what domains the registered issuer vouches for (email matching needs them). Ask the operator in the consent screen, or take the SSO connection's proven domains.
-   - **Also:** the dashboard's form should name an app's `issuers`.
+2. **Express admin setup for Claude's auto-connect (this PR).**
+   - **The flow:** `ema_issuer:manage` in the metadata, a consent screen for roll's admins only, for Claude's client and callback exactly, then a five-minute single-use token with `ema_setup_endpoint`. The `PUT` of the issuer trusts it and registers Claude (docs/permissions.md, "Claude's auto-connect").
+   - **Decided (2026-11-26): what Claude's issuer vouches for is the email domains the approving admin names on the consent screen.** It's never any address, and never a guess from the person approving. The reason: every enterprise provider in roll vouches only for domains the operator named or DNS proved for an SSO connection (`domains`, `sso`). Claude's issuer would otherwise sign in whichever roll account shares a Claude member's email, and Claude's docs warn that an issuer URL isn't a secret. Asking at consent keeps one rule for every provider and costs the admin one field. The SSO connection's proven domains as a default is the follow-up, once the consent screen can read them.
+   - **Next:** the dashboard's app form naming `issuers` (the CLI has `--issuer`), and that SSO default.
 
 3. **An approval of two asks remembers one.** When the route's own action and the secret both ask, the card names the secret, and remembering it keeps only the secret's rule. The card should list both and remember both.
 

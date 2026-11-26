@@ -389,6 +389,37 @@ async fn fetch_filtered(r: &Remote<'_>, args: FetchArgs) -> anyhow::Result<code_
     }
 }
 
+/// The commits `to` brings since `from`, newest first, at most `limit` (Render's for GitLab and
+/// Bitbucket): one fetch of commits only (`tree:0`, `from` as what's had), walked back from `to`
+/// by its parents. The flag: whether it reached `from` (all of them). `None`: no fetch could say.
+pub async fn commits(r: &Remote<'_>, from: &str, to: &str, limit: usize) -> anyhow::Result<Option<(Vec<crate::integrations::CommitInfo>, bool)>> {
+    let (a, b): (ObjectId, ObjectId) = (from.parse().map_err(|_| anyhow::anyhow!("{from} isn't a commit id"))?, to.parse().map_err(|_| anyhow::anyhow!("{to} isn't a commit id"))?);
+    let args = FetchArgs { wants: vec![b], haves: vec![a], depth: Some(limit as u32 + 1), filter: Some(code_git::Filter::TreeNone) };
+    let objects: HashMap<ObjectId, Object> = fetch_filtered(r, args).await?.objects.into_iter().filter(|o| o.kind == Kind::Commit).map(|o| (o.id, o)).collect();
+    let (mut out, mut queue, mut seen, mut reached) = (Vec::new(), std::collections::VecDeque::from([b]), std::collections::HashSet::new(), false);
+    while let Some(c) = queue.pop_front() {
+        if c == a {
+            reached = true;
+            continue;
+        }
+        if out.len() >= limit || !seen.insert(c) {
+            continue;
+        }
+        // Past what came (a shallow edge): the rest is unknown.
+        let Some(o) = objects.get(&c) else { continue };
+        let info = parse_commit(&o.data).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let text = String::from_utf8_lossy(&o.data);
+        let (headers, message) = text.split_once("\n\n").unwrap_or((&text, ""));
+        let author = headers.lines().find_map(|l| l.strip_prefix("author ")).map(|a| a.split(" <").next().unwrap_or(a).to_string()).unwrap_or_default();
+        out.push(crate::integrations::CommitInfo { sha: c.to_string(), summary: message.lines().next().unwrap_or("").chars().take(200).collect(), author });
+        queue.extend(info.parents);
+    }
+    if out.is_empty() && !reached {
+        return Ok(None);
+    }
+    Ok(Some((out.clone(), reached && out.len() < limit)))
+}
+
 /// The paths that differ between the trees of commits `from` and `to`: one shallow fetch of
 /// both with no blob (trees compared by id, so an unchanged folder is never walked), at most
 /// 10,000 paths (past that, everything counts as changed: `None`).

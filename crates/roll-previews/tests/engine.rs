@@ -412,6 +412,32 @@ async fn the_toolbars_main_is_the_same_page_on_mains_preview() {
     assert_eq!(e.engine.main_page_url(&chg.id, "web", "//evil.example/").await.unwrap(), None, "only a path on main's host");
 }
 
+/// A release rehearsed on today's data (PlanetScale's deploy requests): at the next converge,
+/// the release runs once more on a fresh branch of the parent, masked by the rules before it
+/// runs, and the branch goes after; how it went is on the preview.
+#[tokio::test]
+async fn a_rehearsal_runs_the_release_on_a_fresh_masked_branch_then_drops_it() {
+    let e = env(json!({ "enabled": true, "release": { "image": "node:22", "run": "npm run migrate" }, "masking": { "postgres:prj_db": { "public.users.email": "email" } } }));
+    e.code.open(change("chg_rh", 1));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_rh").unwrap().unwrap();
+    let fresh = format!("prj_db~pv-{}-r", &p.id[3..]);
+    let ran = e.apps.seeds.lock().len();
+    e.engine.rehearse(&p.id, "ana").unwrap();
+    e.engine.pass().await.unwrap();
+    let seeds = e.apps.seeds.lock().clone();
+    assert_eq!(seeds.len(), ran + 1, "the release once more");
+    assert_eq!(seeds.last().map(String::as_str), Some(format!("fake://{fresh}").as_str()), "on the fresh branch, not the preview's");
+    assert!(e.pg.masks.lock().iter().any(|(b, _)| *b == fresh), "masked before it ran");
+    assert!(!e.pg.branches.lock().contains(&fresh), "and gone after");
+    let r = e.engine.store.preview(&p.id).unwrap().rehearsal.expect("how it went");
+    assert_eq!((r.ok, r.by.as_str(), r.head.as_str()), (Some(true), "ana", p.build()));
+    // Once a head: the next converge doesn't run it again.
+    e.engine.store.update(&p.id, |x| x.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.apps.seeds.lock().len(), ran + 1);
+}
+
 /// A visual change refused (Chromatic's Deny): the review fails at that head, the change is told at
 /// once, an accept of the pages clears it, and a new head asks again.
 #[tokio::test]
@@ -1645,6 +1671,23 @@ async fn masked_branches_come_from_one_masked_base() {
     let now = masked();
     assert!(now.len() >= 2 && now.iter().filter(|b| b.starts_with("prj_db~pvbase-")).count() >= 2, "a base for the new rules: {now:?}");
     assert!(!e.pg.branches.lock().contains(&base), "the old base is deleted once nothing comes from it");
+}
+
+/// A masked base that couldn't be made holds no branch up: the preview masks its own copy, and
+/// the next one takes the claim over at once (no wait on a claim nothing holds) and makes it.
+#[tokio::test]
+async fn a_masked_base_that_failed_holds_no_branch_up() {
+    let e = env_with_config(json!({ "enabled": true, "masking": { "postgres:prj_db": { "public.users.email": "email" } } }), |c| c.mask_base_for = std::time::Duration::from_secs(86_400));
+    e.pg.fail_masks.store(1, std::sync::atomic::Ordering::SeqCst);
+    e.code.open(change("chg_mf1", 1));
+    e.engine.pass().await.unwrap();
+    let masked = || e.pg.masks.lock().iter().map(|(b, _)| b.clone()).collect::<Vec<_>>();
+    assert!(masked().iter().all(|b| !b.starts_with("prj_db~pvbase-")) && masked().len() == 1, "its own copy masked: {:?}", masked());
+    e.code.open(change("chg_mf2", 2));
+    let started = std::time::Instant::now();
+    e.engine.pass().await.unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(30), "no wait on the failed claim: {:?}", started.elapsed());
+    assert!(masked().iter().any(|b| b.starts_with("prj_db~pvbase-")), "the base made now: {:?}", masked());
 }
 
 /// A restore point: the data saved (Postgres's and Redis's, the products that put a branch back
