@@ -1538,7 +1538,14 @@ pub fn check_cluster_action_of(cluster: &crate::Cluster, p: &Principal, action: 
 
 /// Whether the request runs as roll's own index-scoped principal ([`Principal::owner_scoped`]).
 pub fn is_index_scoped(ctx: &Ctx) -> bool {
-    matches!(&principal(ctx).kind, AuthKind::ApiKey(a) if a.id == INDEX_SCOPE_KEY)
+    principal(ctx).is_index_scoped()
+}
+
+impl Principal {
+    /// Whether it is roll's own index-scoped principal ([`Principal::owner_scoped`]).
+    pub fn is_index_scoped(&self) -> bool {
+        matches!(&self.kind, AuthKind::ApiKey(a) if a.id == INDEX_SCOPE_KEY)
+    }
 }
 
 /// Refuses unless the request's principal may run `action` on index `index` (a name, as given).
@@ -1551,11 +1558,15 @@ pub fn check_index_action(ctx: &Ctx, action: &str, index: &str) -> EsResult<()> 
 
 /// Whether the request's principal may run `action` on every index of `indices` (names).
 pub fn allows_indices(ctx: &Ctx, action: &str, indices: &[String]) -> bool {
-    let p = principal(ctx);
+    allows_indices_of(ctx.cluster, principal(ctx), action, indices)
+}
+
+/// [`allows_indices`] for principal `p`.
+pub fn allows_indices_of(cluster: &crate::Cluster, p: &Principal, action: &str, indices: &[String]) -> bool {
     if p.is_superuser() {
         return true;
     }
-    let eff = effective(&file_roles(ctx.cluster), &ctx.state(), p);
+    let eff = effective(&file_roles(cluster), &cluster.state(), p);
     indices.iter().all(|i| eff.allows_index(action, i))
 }
 

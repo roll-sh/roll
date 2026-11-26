@@ -4125,6 +4125,7 @@ async fn execute_inner(cluster: &Cluster, q: Query, filter: Option<Value>, w: &m
         super::ccs::check_remote_views(&cluster.state(), alias, sources)?;
     }
     let q = expand_views(&cluster.state(), q)?;
+    super::check_sources(&q.cmds)?;
     // An implicit `LIMIT 1000` ends every query without a limit; Elasticsearch doesn't warn of
     // it after a time series aggregation (`TS ... | STATS`, `PROMQL`).
     let ts_stats = matches!(q.cmds.first(), Some(Cmd::Ts { .. })) && q.cmds.iter().any(|c| matches!(c, Cmd::Stats { .. }));

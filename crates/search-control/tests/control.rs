@@ -7171,6 +7171,8 @@ async fn esql_reads_only_the_indices_the_grant_reaches() {
         (Method::PUT, "/tenant-b-lookup/_doc/1?refresh=true", json!({"t": "x", "secret": "s-of-b"})),
         (Method::PUT, "/_enrich/policy/p", json!({"match": {"indices": "tenant-b", "match_field": "t", "enrich_fields": ["secret"]}})),
         (Method::POST, "/_enrich/policy/p/_execute", Value::Null),
+        // A view over the grant's own index that enriches from tenant-b's table.
+        (Method::PUT, "/_query/view/v", json!({"query": "FROM tenant-a-1 | ENRICH p ON t"})),
     ] {
         let (s, v) = e.es(&owner, &pw, m.clone(), path, Some(body).filter(|b| !b.is_null())).await;
         assert!(s < 300, "{m} {path}: {s} {v}");
@@ -7191,7 +7193,7 @@ async fn esql_reads_only_the_indices_the_grant_reaches() {
     // says which).
     let (s, v) = esql(json!({"query": "FROM tenant-* METADATA _index | KEEP _index"})).await;
     assert_eq!((s, &v["values"]), (200, &json!([["tenant-a-1"]])), "{v}");
-    for query in ["FROM tenant-b", "FROM tenant-a-1, tenant-b", "FROM tenant-a-1 | LOOKUP JOIN tenant-b-lookup ON t", "FROM tenant-a-1 | ENRICH p ON t", "FROM far:tenant-a-1", "FROM *:*"] {
+    for query in ["FROM tenant-b", "FROM tenant-a-1, tenant-b", "FROM tenant-a-1 | LOOKUP JOIN tenant-b-lookup ON t", "FROM tenant-a-1 | ENRICH p ON t", "FROM v", "FROM far:tenant-a-1", "FROM *:*"] {
         let (s, v) = esql(json!({"query": query})).await;
         assert!((s == 400 || s == 403) && !v.to_string().contains("s-of-b"), "{query}: {s} {v}");
     }
