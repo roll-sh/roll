@@ -1362,7 +1362,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | route | who | what |
 | --- | --- | --- |
 | `GET /v1/access` | any grant | the caller: the operator, or its own grant (rules, expiry) |
-| `GET /v1/access/catalog` | any grant | products, actions, presets and every classified route |
+| `GET /v1/access/catalog` | any grant | products, actions, presets, every classified route, and `lifetime_caps` (`[{product, days, why}]`: products whose own policy caps the grants that reach them) |
 | `POST /v1/access/check` | any grant | `{method, path, body?, token?}` → `{decision, product, action, resource, route}`: what the evaluator would decide, without running it (a grant checks itself; the operator names `token`) |
 | `GET /v1/access/tokens` | access read | grants, newest first (no secrets), each with `activity`: its last day's requests `{allowed, denied, asked}`; `?product=` (and `&resource=`) only those with a rule on that product by name (naming that `{id}` or `{project}`), as a product's page lists its own tokens; `?kind=workload` the workload tokens instead |
 | `POST /v1/access/tokens` | access admin | `{name, rules, expires_at?, ip_allow?, rate_per_minute?, decoy?}` → 201 `{grant, token}`; `token` is shown this once; `decoy`: a honeytoken ("Decoy tokens"); 403 `reauth_required` from a session without a recent proof |
