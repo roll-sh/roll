@@ -272,15 +272,17 @@ struct Cursor {
 }
 
 // The cursors: the current row, the peer group's end, the aggregates' next row, the frame's
-// head and tail pointers, a frame's rows read again (aggregates that start again, a
-// moving aggregate's), then one per call (lag / lead's row, first / last / nth_value's).
+// head and tail pointers, a frame's rows read again (aggregates that start again, a moving
+// aggregate's rows coming in), the rows a moving aggregate removes, then one per call (lag /
+// lead's row, first / last / nth_value's).
 const CUR: usize = 0;
 const PEER: usize = 1;
 const AGG: usize = 2;
 const HEAD: usize = 3;
 const TAIL: usize = 4;
 const SCAN: usize = 5;
-const CALLS: usize = 6;
+const REMOVE: usize = 6;
+const CALLS: usize = 7;
 
 /// A RANGE / GROUPS frame pointer: the row it is at, its peer group's number (GROUPS) and
 /// its ORDER BY values.
@@ -900,7 +902,7 @@ impl Part {
         }
         let mut restart = i == 0 || exclusion || run.upto <= head;
         while !restart && run.base < head {
-            let row = self.at(SCAN, run.base)?;
+            let row = self.at(REMOVE, run.base)?;
             if !mova.remove(&mut run.st, row, ctx)? {
                 restart = true;
             }

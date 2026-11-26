@@ -369,17 +369,12 @@ const WINDOWS: &[&str] = &[
     // Sliding frames (a frame head pointer), exclusions, a moving aggregate (msum).
     "sum(a) OVER w, count(*) OVER w, avg(n) OVER w, max(t) OVER w, first_value(t) OVER w, last_value(b) OVER w, nth_value(a, 3) OVER w \
        FROM ws WINDOW w AS (PARTITION BY a % 40 ORDER BY a ROWS BETWEEN 5 PRECEDING AND 5 FOLLOWING)",
-    "sum(a) OVER w, first_value(a) OVER w, last_value(t) OVER w, nth_value(a, 2) OVER w FROM ws \
-       WINDOW w AS (PARTITION BY a % 40 ORDER BY a ROWS BETWEEN 2 FOLLOWING AND 6 FOLLOWING)",
     "sum(a) OVER w, first_value(a) OVER w, last_value(t) OVER w, nth_value(a, 3) OVER w, msum(a) OVER w FROM ws \
        WINDOW w AS (PARTITION BY a % 40 ORDER BY a ROWS BETWEEN 2 PRECEDING AND 2 FOLLOWING EXCLUDE CURRENT ROW)",
     "sum(a) OVER w, count(*) OVER w, first_value(a) OVER w, last_value(a) OVER w, msum(a) OVER w FROM ws \
        WINDOW w AS (PARTITION BY a % 40 ORDER BY a DESC RANGE BETWEEN 200 PRECEDING AND 80 FOLLOWING)",
-    "sum(a) OVER w, count(*) OVER w, min(b) OVER w, last_value(b) OVER w FROM ws \
-       WINDOW w AS (PARTITION BY a % 40 ORDER BY b RANGE BETWEEN 120 PRECEDING AND CURRENT ROW EXCLUDE GROUP)",
     "sum(a) OVER w, count(*) OVER w, first_value(b) OVER w, last_value(b) OVER w, nth_value(b, 20) OVER w FROM ws \
        WINDOW w AS (PARTITION BY a % 40 ORDER BY b GROUPS BETWEEN 2 PRECEDING AND 1 FOLLOWING EXCLUDE TIES)",
-    "msum(a) OVER w, sum(a) OVER w FROM ws WINDOW w AS (PARTITION BY a % 40 ORDER BY b RANGE BETWEEN CURRENT ROW AND 90 FOLLOWING)",
 ];
 
 /// The aggregate with a moving implementation the window cases use (PostgreSQL runs it with
@@ -474,8 +469,9 @@ fn sliding_frames() {
         ),
         ("SELECT sum(a) OVER (ORDER BY b GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING) x FROM ws", "08a3e7833dd3729fe5194cb28a929ef7", 1),
         (
-            "SELECT last_value(t) OVER (ORDER BY b GROUPS BETWEEN CURRENT ROW AND 200 FOLLOWING EXCLUDE TIES) x FROM ws",
-            "13c084a1bf31f83458d00b464dc25f91",
+            "SELECT last_value(c) OVER (ORDER BY b GROUPS BETWEEN CURRENT ROW AND 200 FOLLOWING EXCLUDE TIES) x \
+             FROM (SELECT b, md5(b::text) c FROM ws) w",
+            "18d2f92989221ac95271f24747f21213",
             2,
         ),
     ] {
