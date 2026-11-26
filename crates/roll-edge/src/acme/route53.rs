@@ -397,7 +397,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_wildcard_and_its_apex_share_one_record_set_written_whole_and_waited_on() {
+    async fn a_wildcard_and_its_apex_share_one_record_set_and_other_clients_values_stay() {
         let fake = Fake::default();
         let app = axum::Router::new()
             .route("/2013-04-01/hostedzonesbyname", get(zones))
