@@ -222,8 +222,26 @@ fn parse_deletion(v: &Value, creation: Option<&Map>) -> EsResult<Map> {
     Ok(out)
 }
 
-/// The request's body as an object (`request body is required` without one).
+/// The request's body as an object (`request body is required` without one). Text that isn't
+/// JSON fails with Jackson's own exception, as the plugin's handler lets it through: the source
+/// redacted from its location, at a byte offset.
 fn body_of(ctx: &Ctx) -> EsResult<Map> {
+    if let Err(e) = crate::json::parse(&ctx.body) {
+        let mut offset = 0usize;
+        let mut line = 1usize;
+        for (i, b) in ctx.body.iter().enumerate() {
+            if line == e.line {
+                offset = i;
+                break;
+            }
+            if *b == b'\n' {
+                line += 1;
+                offset = i + 1;
+            }
+        }
+        let reason = format!("{}\n at [Source: REDACTED (`StreamReadFeature.INCLUDE_SOURCE_IN_LOCATION` disabled); byte offset: #{}]", e.message, offset + e.column.saturating_sub(1));
+        return Err(EsError::new(400, "json_parse_exception", reason.clone()).caused_by(EsError::new(400, "stream_read_exception", reason)));
+    }
     match ctx.body()? {
         None => Err(EsError::new(400, "parse_exception", "request body is required")),
         Some(Value::Obj(m)) => Ok(m),
