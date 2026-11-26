@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 
 use super::links::{self, Answer, Leg, Split};
-use super::{Remote, remotes};
+use super::Remote;
 use crate::error::{EsError, EsResult};
 use crate::json::{Map, Value};
 use crate::obj;
