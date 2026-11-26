@@ -781,7 +781,7 @@ impl Apps {
         let (sid, e) = (service.to_string(), env.to_string());
         let (svc, row, all) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?, s.deployments(&sid, &e, 100, None)?))).await?;
         let none = json!({ "since": null, "commits": null, "complete": false });
-        let (Source::Repo { repo, .. }, Some(to), Some(sources)) = (&svc.source, d.revision.as_deref(), self.deps.sources.clone()) else { return Ok(none) };
+        let Some(to) = d.revision.as_deref() else { return Ok(none) };
         let since = if row.active.as_deref() == Some(dep) {
             all.iter().filter(|x| x.created_at < d.created_at && x.revision.is_some() && x.image.is_some() && x.status == DeployStatus::Inactive).max_by_key(|x| x.created_at)
         } else {
@@ -789,6 +789,15 @@ impl Apps {
         };
         let Some(since) = since.filter(|s| s.revision.is_some()) else { return Ok(none) };
         let from = since.revision.clone().unwrap_or_default();
+        // A Git URL's: from its host, as its push watch reads changed paths.
+        if let Source::Git { url, .. } = &svc.source {
+            return match crate::git_source::commits(&self.git_remote(&svc.id, url).await, &from, to, 50).await {
+                Ok(Some((commits, complete))) => Ok(json!({ "since": { "id": since.id, "revision": from }, "commits": commits, "complete": complete })),
+                Ok(None) => Ok(none),
+                Err(e) => Err(Error::BadRequest(format!("its repository's commits couldn't be read: {e:#}"))),
+            };
+        }
+        let (Source::Repo { repo, .. }, Some(sources)) = (&svc.source, self.deps.sources.clone()) else { return Ok(none) };
         match sources.commits(repo, &from, to, 50).await {
             Ok(Some((commits, complete))) => Ok(json!({ "since": { "id": since.id, "revision": from }, "commits": commits, "complete": complete })),
             Ok(None) => Ok(none),
