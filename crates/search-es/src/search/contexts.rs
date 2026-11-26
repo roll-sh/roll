@@ -1,7 +1,12 @@
 //! Scroll and point-in-time contexts: the shard searchers a search started with, kept for
 //! `keep_alive` so later pages (`_search/scroll`) and PIT searches see the same snapshot.
 //! Expiry is checked on access (no timer runs), bounded by `search.max_keep_alive` (24h) and
-//! `search.max_open_scroll_context` (500).
+//! `search.max_open_scroll_context` (500). Those settings read and write as on Elasticsearch,
+//! but a tenant can't raise them past roll's ceilings ([`KEEP_ALIVE_CEILING`],
+//! [`SCROLLS_CEILING`], [`OPENSEARCH_PITS_CEILING`]): a context's searchers hold segments on a
+//! node other tenants share. Each context's searchers are charged to the cluster's `request`
+//! breaker while it is open ([`SHARD_CONTEXT_BYTES`]), and they live only as long as the
+//! cluster is loaded: an unloaded cluster's contexts are gone, as after a node restart.
 //!
 //! A scroll page continues where the last one stopped, as Elasticsearch's
 //! `ScrollContext.lastEmittedDoc` does: when the scroll is sorted by score or by `_doc` (and
@@ -25,6 +30,10 @@ use std::time::{Duration, Instant};
 
 /// A kept search.
 pub struct SearchContext {
+    /// A scroll's targets keep the document and field level security of the search that
+    /// opened it, as Elasticsearch's scroll context keeps its opener's: every page continues
+    /// that one search. A point in time's keep only their alias filters: each search on it is
+    /// a new search, under its own caller's rights now ([`pit_targets`]).
     pub targets: Vec<Target>,
     /// The request of a scroll (pages advance `from`).
     pub request: Option<SearchRequest>,
@@ -40,17 +49,52 @@ pub struct SearchContext {
     /// Who opened it ([`owner_of`]): anyone else finds no such context, as Elasticsearch's
     /// `SecuritySearchOperationListener` answers.
     pub owner: String,
+    /// What its searchers are charged to the `request` breaker, given back when it goes (set
+    /// when it opens).
+    pub held: Option<crate::breaker::Reservation>,
+}
+
+/// The longest any scroll or point in time is kept alive, whatever `search.max_keep_alive`
+/// (or OpenSearch's `point_in_time.max_keep_alive`) says: their defaults.
+pub const KEEP_ALIVE_CEILING: TimeValue = TimeValue::hours(24);
+
+/// The most scrolls a cluster may hold open, whatever `search.max_open_scroll_context` says:
+/// its default.
+pub const SCROLLS_CEILING: usize = 500;
+
+/// The most points in time an OpenSearch-flavor cluster may hold open, whatever
+/// `search.max_open_pit_context` says: its default.
+pub const OPENSEARCH_PITS_CEILING: usize = 300;
+
+/// What an open context's searcher on one shard is charged (its reader context, the segment
+/// readers it keeps from closing, their per-segment state): an estimate, since the segments
+/// themselves are the shard's whether a context holds them or not.
+pub const SHARD_CONTEXT_BYTES: u64 = 64 << 10;
+
+/// Charges `c`'s searchers to the cluster's `request` breaker until it goes.
+fn hold(ctx: &Ctx, c: &mut SearchContext) -> EsResult<()> {
+    let mut r = crate::breaker::Reservation::new(ctx.cluster.breakers.request(ctx.cluster, &ctx.state()));
+    r.add(SHARD_CONTEXT_BYTES * c.targets.len().max(1) as u64, "<search_context>")?;
+    c.held = Some(r);
+    Ok(())
 }
 
 /// Who a scroll or point in time belongs to: the request's API key (a derived key's own, not
-/// its parent's), or its user and realm.
+/// its parent's), or its user and realm. A linked remote cluster's request belongs to the user
+/// it was sent for, under the link's key. The one place an identity is turned into an owner.
 pub(crate) fn owner_of(ctx: &Ctx) -> String {
     let p = crate::xpack::security::principal(ctx);
     match &p.kind {
-        crate::xpack::security::AuthKind::ApiKey(a) => match &a.derived {
-            Some(d) => format!("api_key:{}:derived:{}", a.id, d.id),
-            None => format!("api_key:{}", a.id),
-        },
+        crate::xpack::security::AuthKind::ApiKey(a) => {
+            let mut owner = format!("api_key:{}", a.id);
+            if let Some(d) = &a.derived {
+                owner.push_str(&format!(":derived:{}", d.id));
+            }
+            if let Some(r) = &a.remote {
+                owner.push_str(&format!(":{}", r.owner));
+            }
+            owner
+        }
         _ => format!("{}:{}", p.realm_name, p.username),
     }
 }
@@ -178,7 +222,12 @@ fn new_id(n: u64, pit: bool) -> String {
 
 fn max_keep_alive(ctx: &Ctx) -> TimeValue {
     let st = ctx.state();
-    st.metadata.cluster_setting("search.max_keep_alive").and_then(|v| TimeValue::parse(v, "search.max_keep_alive").ok()).unwrap_or(TimeValue::hours(24))
+    clamp_keep_alive(st.metadata.cluster_setting("search.max_keep_alive").and_then(|v| TimeValue::parse(v, "search.max_keep_alive").ok()).unwrap_or(KEEP_ALIVE_CEILING))
+}
+
+/// A keep-alive limit a tenant set, held to [`KEEP_ALIVE_CEILING`].
+pub(crate) fn clamp_keep_alive(max: TimeValue) -> TimeValue {
+    if max.as_millis() > KEEP_ALIVE_CEILING.as_millis() { KEEP_ALIVE_CEILING } else { max }
 }
 
 /// `SearchService.checkKeepAliveLimit`.
@@ -205,39 +254,26 @@ impl Contexts {
         }
     }
 
-    /// Opens a point in time unless `max` are open: the count and the insert happen under one
-    /// lock, so concurrent opens can't pass the limit together.
-    pub fn open_pit(&self, c: SearchContext, max: usize) -> Option<String> {
+    /// Opens `c` (a point in time or a scroll) unless `max` of its kind are open: the count and
+    /// the insert happen under one lock, so concurrent opens can't pass the limit together.
+    pub fn open(&self, c: SearchContext, max: usize) -> Option<String> {
         self.purge();
         let n = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        let id = new_id(n, true);
+        let id = new_id(n, c.pit);
         let mut map = self.map.lock();
-        if map.values().filter(|c| c.pit).count() >= max {
+        if map.values().filter(|o| o.pit == c.pit).count() >= max {
             return None;
         }
         map.insert(id.clone(), c);
         Some(id)
     }
 
-    pub fn open(&self, c: SearchContext) -> String {
-        self.purge();
-        let n = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        let id = new_id(n, c.pit);
-        self.map.lock().insert(id.clone(), c);
-        id
-    }
-
-    /// When the last open scroll or point in time expires (`None`: none is open). A cluster
-    /// holding one must stay loaded until then: their searchers live only in memory.
+    /// When the last open scroll or point in time expires (`None`: none is open).
     pub fn latest_expiry(&self) -> Option<Instant> {
         let now = Instant::now();
         let mut g = self.map.lock();
         g.retain(|_, c| c.expires > now);
         g.values().map(|c| c.expires).max()
-    }
-
-    pub fn count_scrolls(&self) -> usize {
-        self.map.lock().values().filter(|c| !c.pit).count()
     }
 
     /// Runs `f` on a live context of `owner`'s (extending its expiry by `keep_alive`).
@@ -308,14 +344,6 @@ pub(crate) fn missing(id: &str) -> EsError {
 /// Starts a scroll after its first page.
 pub fn start_scroll(ctx: &Ctx, req: &SearchRequest, targets: Vec<Target>, out: &mut SearchOutcome, returned: usize) -> EsResult<()> {
     let ka = check_keep_alive(ctx, req.scroll.unwrap_or(TimeValue::minutes(1)))?;
-    let max_open = ctx.state().metadata.cluster_setting("search.max_open_scroll_context").and_then(|v| v.parse::<usize>().ok()).unwrap_or(500);
-    if ctx.cluster.contexts.count_scrolls() >= max_open {
-        return Err(EsError::new(
-            500,
-            "exception",
-            format!("Trying to create too many scroll contexts. Must be less than or equal to: [{max_open}]. This limit can be set by changing the [search.max_open_scroll_context] setting."),
-        ));
-    }
     // A shard that failed this first page keeps no context (its reader context is freed), so
     // later pages and the clear-scroll count leave it out.
     let failed: Vec<(&str, i64)> = out.failures.iter().filter_map(|f| Some((f.get("index")?.as_str()?, f.get("shard")?.as_i64()?))).collect();
@@ -330,11 +358,21 @@ pub fn start_scroll(ctx: &Ctx, req: &SearchRequest, targets: Vec<Target>, out: &
     }
     let ranked: Vec<(usize, u32, f32)> = out.ranked.iter().filter(|r| keep[r.0]).map(|&(t, d, sc)| (renumber[t], d, sc)).collect();
     let targets: Vec<Target> = targets.into_iter().zip(&keep).filter_map(|(t, k)| k.then_some(t)).collect();
-    for t in &targets {
-        t.shard.counters.scroll_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
+    let shards: Vec<_> = targets.iter().map(|t| t.shard.clone()).collect();
     let n = targets.len();
-    let id = ctx.cluster.contexts.open(SearchContext { targets, request: Some(req.clone()), expires: Instant::now() + ka, pit: false, offset: returned, indices: req.indices.clone(), created_ms: ctx.now_ms, keep_alive_ms: ka.as_millis() as i64, owner: owner_of(ctx) });
+    let max_open = ctx.state().metadata.cluster_setting("search.max_open_scroll_context").and_then(|v| v.parse::<usize>().ok()).unwrap_or(SCROLLS_CEILING).min(SCROLLS_CEILING);
+    let mut c = SearchContext { targets, request: Some(req.clone()), expires: Instant::now() + ka, pit: false, offset: returned, indices: req.indices.clone(), created_ms: ctx.now_ms, keep_alive_ms: ka.as_millis() as i64, owner: owner_of(ctx), held: None };
+    hold(ctx, &mut c)?;
+    let Some(id) = ctx.cluster.contexts.open(c, max_open) else {
+        return Err(EsError::new(
+            500,
+            "exception",
+            format!("Trying to create too many scroll contexts. Must be less than or equal to: [{max_open}]. This limit can be set by changing the [search.max_open_scroll_context] setting."),
+        ));
+    };
+    for s in shards {
+        s.counters.scroll_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     if let Some(kind) = cursor_kind(req) {
         let mut last = vec![None; n];
         advance(&mut last, &ranked);
@@ -515,15 +553,23 @@ pub(crate) fn cleared(freed: usize, ids: &[String]) -> Reply {
 const MAX_OPEN_PITS: usize = 1000;
 
 /// Opens a point in time, refusing it past the limit as OpenSearch 3.9 does
-/// (`search.max_open_pit_context`: a 429 `rejected_execution_exception`).
-pub fn open_bounded_pit(ctx: &Ctx, c: SearchContext) -> EsResult<String> {
+/// (`search.max_open_pit_context`: a 429 `rejected_execution_exception`). Its targets keep only
+/// their alias filters: each search on it applies its caller's document and field level
+/// security as they are then ([`pit_targets`]).
+pub fn open_bounded_pit(ctx: &Ctx, mut c: SearchContext) -> EsResult<String> {
     let (max, setting) = match ctx.cluster.dialect {
         crate::cluster::Dialect::OpenSearch => {
-            (ctx.state().metadata.cluster_setting("search.max_open_pit_context").and_then(|v| v.parse::<usize>().ok()).unwrap_or(300), "search.max_open_pit_context")
+            let set = ctx.state().metadata.cluster_setting("search.max_open_pit_context").and_then(|v| v.parse::<usize>().ok()).unwrap_or(OPENSEARCH_PITS_CEILING);
+            (set.min(OPENSEARCH_PITS_CEILING), "search.max_open_pit_context")
         }
         crate::cluster::Dialect::Elasticsearch => (MAX_OPEN_PITS, ""),
     };
-    if let Some(id) = ctx.cluster.contexts.open_pit(c, max) {
+    for t in c.targets.iter_mut() {
+        t.filter.security = None;
+        t.security = None;
+    }
+    hold(ctx, &mut c)?;
+    if let Some(id) = ctx.cluster.contexts.open(c, max) {
         return Ok(id);
     }
     let change = if setting.is_empty() { String::new() } else { format!(" This limit can be set by changing the [{setting}] setting.") };
@@ -575,7 +621,7 @@ pub(crate) fn open_pit_for(ctx: &Ctx, mut req: SearchRequest, ka: Duration, inde
         targets = kept;
     }
     let skipped = n - targets.len();
-    let id = open_bounded_pit(ctx, SearchContext { targets, request: None, expires: Instant::now() + ka, pit: true, offset: 0, indices: req.indices.clone(), created_ms: ctx.now_ms, keep_alive_ms: ka.as_millis() as i64, owner: owner_of(ctx) })?;
+    let id = open_bounded_pit(ctx, SearchContext { targets, request: None, expires: Instant::now() + ka, pit: true, offset: 0, indices: req.indices.clone(), created_ms: ctx.now_ms, keep_alive_ms: ka.as_millis() as i64, owner: owner_of(ctx), held: None })?;
     Ok(obj! { "id" => id, "_shards" => obj! { "total" => n as i64, "successful" => n as i64, "skipped" => skipped as i64, "failed" => 0 } })
 }
 
@@ -728,8 +774,12 @@ fn check_pit_id(id: &str) -> EsResult<()> {
     Err(EsError::illegal_argument(format!("unknown transport version [{}] reading search context id", version as i32)))
 }
 
-/// The targets of a PIT search (extending its keep alive).
-pub fn pit_targets(ctx: &Ctx, pit: &crate::search_source::PointInTime) -> EsResult<Vec<Target>> {
+/// The targets of `req`, a search on point in time `pit` (extending its keep alive), under
+/// the document and field level security of `req`'s reader now, as Elasticsearch applies the
+/// current role to every search on a point in time: a role query added since it opened
+/// applies, a field removed is gone. (Index access was checked as now by
+/// [`crate::xpack::security::authorize_search_pit`].)
+pub fn pit_targets(ctx: &Ctx, req: &SearchRequest, pit: &crate::search_source::PointInTime) -> EsResult<Vec<Target>> {
     match ctx.cluster.dialect {
         crate::cluster::Dialect::OpenSearch => crate::opensearch::pit::check_id(&pit.id)?,
         crate::cluster::Dialect::Elasticsearch => check_pit_id(&pit.id)?,
@@ -738,10 +788,12 @@ pub fn pit_targets(ctx: &Ctx, pit: &crate::search_source::PointInTime) -> EsResu
         Some(k) => Some(check_keep_alive(ctx, *k)?),
         None => None,
     };
-    match ctx.cluster.contexts.with(&pit.id, &owner_of(ctx), keep, |c| c.targets.clone()) {
-        Some(t) => Ok(t),
-        None => Err(missing(&pit.id)),
+    let Some(mut targets) = ctx.cluster.contexts.with(&pit.id, &owner_of(ctx), keep, |c| c.targets.clone()) else { return Err(missing(&pit.id)) };
+    for t in targets.iter_mut() {
+        t.filter.security = super::reader_documents(ctx.cluster, req, &t.idx.name)?;
+        t.security = req.security.clone();
     }
+    Ok(targets)
 }
 
 #[allow(dead_code)]

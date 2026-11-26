@@ -8876,6 +8876,63 @@ async fn public_certificates_are_ordered_in_the_background_renewed_and_a_failed_
     assert!(health.as_array().unwrap().iter().any(|f| f["issue"] == "exposed" && f["environment"] == "production" && f["key"] == "TLS_KEY" && f["detail"].as_str().unwrap().contains("staging")), "{health}");
 }
 
+/// docs/secrets.md, "Publicly trusted certificates": a leak of a linked key revokes its certificate
+/// and renews at once, but leaks' renewals count toward the registration's caps, so a writer who
+/// keeps reporting each new key can't spend the CA's limit for the names: a held leak revokes and
+/// orders nothing, and its event says `already rotated`.
+#[tokio::test]
+async fn a_leaks_renewals_count_toward_the_public_certificates_caps() {
+    let api = Api::new().await;
+    let ca = Arc::new(FakeCa::new());
+    api.secrets.set_public_ca(ca.clone());
+    let le = roll_secrets::public_certs::PUBLIC_CAS[0];
+    let cert = api.ok(Method::POST, "/public-certs", Some(json!({ "name": "web", "directory_url": le, "domains": ["www.roll-fake.test"], "dns_provider": "cloudflare", "dns_credential": "fake-cf-dns-token", "eab_kid": "kid-roll-fake", "eab_hmac_key": "cm9sbC1mYWtlLWhtYWM" }))).await;
+    let id = cert["id"].as_str().unwrap().to_string();
+    let sweep = || {
+        let s = api.secrets.clone();
+        async move { tokio::task::spawn_blocking(move || s.sweep_public_certs().unwrap()).await.unwrap() }
+    };
+    sweep().await;
+    api.ok(Method::PUT, "/environments/production/secrets/TLS_KEY", Some(json!({ "link": { "kind": "public_cert", "ref": id, "field": "private_key", "mode": "managed" } }))).await;
+    api.ok(Method::PATCH, "", Some(json!({ "leaks": { "rotate": "managed" } }))).await;
+    let writer = api.token(json!({ "name": "deploy", "actions": ["read", "reveal", "write"] }));
+    let report = |key: Value| json!({ "candidates": [key], "leaked": true });
+    let start = api.ok(Method::GET, "/events?latest=1", None).await["next"].as_i64().unwrap();
+
+    // The week's first leak: revoked at once and replaced.
+    let first = api.values("production", "/").await["values"]["TLS_KEY"].clone();
+    api.req(Method::POST, "/leaks", Some(report(first.clone())), Some(writer.as_str())).await;
+    assert_eq!(ca.revoked.lock().unwrap().len(), 1);
+    sweep().await;
+    let second = api.values("production", "/").await["values"]["TLS_KEY"].clone();
+    assert_ne!(second, first, "replaced");
+    let orders = ca.orders.lock().unwrap().len();
+
+    // Later the same week, two renewals asked for since: the cap is spent, and the next report of
+    // the new key revokes and orders nothing.
+    let p = api.project.clone();
+    api.db
+        .write(move |c| {
+            let asked: String = c.query_row("SELECT asked_renewals FROM public_certs WHERE project_id = ?", [&p], |r| r.get(0))?;
+            let at = serde_json::from_str::<Vec<(i64, bool)>>(&asked).unwrap()[0].0 - 2 * 3_600_000;
+            let asked = json!([[at - 2 * 86_400_000i64, false], [at - 86_400_000i64, false], [at, true]]).to_string();
+            c.execute("UPDATE public_certs SET asked_renewals = ? WHERE project_id = ?", [&asked, &p])?;
+            c.execute("UPDATE leak_rotations SET at = at - ? WHERE project_id = ?", code_sql::params![2 * 3_600_000i64, p])
+        })
+        .unwrap();
+    api.req(Method::POST, "/leaks", Some(report(second.clone())), Some(writer.as_str())).await;
+    sweep().await;
+    assert_eq!((ca.revoked.lock().unwrap().len(), ca.orders.lock().unwrap().len()), (1, orders), "nothing revoked or ordered");
+    assert_eq!(api.values("production", "/").await["values"]["TLS_KEY"], second);
+    let leaked = api.ok(Method::GET, &format!("/events?after={start}&kinds=secret.leaked"), None).await;
+    let last = leaked["events"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!((&last["data"]["rotating"], &last["data"]["reason"]), (&json!(false), &json!("already rotated")), "{leaked}");
+    let audit = api.ok(Method::GET, "/audit?action=secrets.leaked", None).await;
+    assert!(audit[0]["summary"].as_str().unwrap().contains("already renewed for a leak this week"), "audited, saying when: {audit}");
+    let (s, e) = api.call(Method::POST, &format!("/public-certs/{id}/renew"), None).await;
+    assert!(s == StatusCode::TOO_MANY_REQUESTS && e.to_string().contains("3 renewals"), "leaks count toward people's cap: {s} {e}");
+}
+
 /// docs/secrets.md, "Public certificates": a new DNS credential is the registration made anew, so
 /// orders act at its replacer's rights from then on, never at the old maker's; a rename keeps the
 /// maker.
