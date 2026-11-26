@@ -46,6 +46,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}/restore-points", get(restore_points).post(save_point))
         .route("/v1/previews/{id}/restore-points/{point}", axum::routing::delete(delete_point))
         .route("/v1/previews/{id}/restore-points/{point}/restore", post(restore_point))
+        .route("/v1/previews/{id}/rehearse", post(rehearse))
         .route("/v1/previews/{id}/data/{resource}", get(browse_data))
         // roll's word for a preview's own service: the address is its credential (rolld's gate
         // lets it through, as the trace intake).
@@ -796,6 +797,14 @@ async fn save_point(AxState(e): S, Path(id): Path<String>, who: Option<axum::Ext
     let b: SavePointBody = if b.is_empty() { SavePointBody::default() } else { body(&b)? };
     let point = e.save_point(&id, &b.label, &asker(who, grant)).await?;
     Ok((axum::http::StatusCode::CREATED, Json(point)).into_response())
+}
+
+/// `POST …/rehearse`: the change's release once more on its Postgres parents as they are now
+/// (its next converge does it; `rehearsal` says how it went).
+async fn rehearse(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>) -> crate::Result<(axum::http::StatusCode, Json<Preview>)> {
+    check_id(&id)?;
+    let by = asker(who, grant);
+    blocking(e, move |e| e.rehearse(&id, &by)).await.map(|p| (axum::http::StatusCode::ACCEPTED, Json(p)))
 }
 
 async fn restore_point(AxState(e): S, Path((id, point)): Path<(String, String)>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>) -> crate::Result<Json<Preview>> {

@@ -79,6 +79,8 @@ export function DomainsTab({ service, env, runner }: { service: string; env: Env
   // Renaming the generated name: what's typed, while the field is open.
   const [rename, setRename] = useState<string | null>(null);
   const [renamed, setRenamed] = useState(false);
+  // A name another environment holds, offered to claim (its add answered so).
+  const [claiming, setClaiming] = useState<string | null>(null);
   const { copied, copy } = useCopy();
   const generated = env.url ? new URL(env.url).hostname : null;
   const [label, suffix] = generated ? [generated.split(".")[0]!, generated.slice(generated.indexOf("."))] : ["", ""];
@@ -100,8 +102,12 @@ export function DomainsTab({ service, env, runner }: { service: string; env: Env
   const pair = valid ? wwwPair(h) : null;
   const pairNew = pair && !env.domains.some((d) => d.hostname === pair) ? pair : null;
   const add = async () => {
+    setClaiming(null);
     const done = await runner.run("domain", async () => {
-      await appsApi.addDomain(service, env.name, h);
+      await appsApi.addDomain(service, env.name, h).catch((e: unknown) => {
+        if (e instanceof Error && e.message.includes("/claim")) setClaiming(h);
+        throw e;
+      });
       if (pairNew && pairToo) {
         await appsApi.addDomain(service, env.name, pairNew);
         await appsApi.redirectDomain(service, env.name, pairNew, h);
@@ -283,7 +289,37 @@ export function DomainsTab({ service, env, runner }: { service: string; env: Env
             </label>
           )}
         </form>
+        {claiming && <ClaimDomain key={claiming} service={service} env={env.name} host={claiming} runner={runner} copied={copied} copy={copy} onDone={() => (setClaiming(null), setHost(""))} />}
       </section>
+    </div>
+  );
+}
+
+/** A name another environment holds, taken by proving it (Vercel's "linked to another team"):
+ *  the TXT record to add, then a check that moves the domain here. */
+function ClaimDomain({ service, env, host, runner, copied, copy, onDone }: { service: string; env: string; host: string; runner: Runner; copied: string | null; copy: (k: string, t: string) => void; onDone: () => void }) {
+  const [txt, setTxt] = useState<{ name: string; value: string } | null>(null);
+  const ask = () =>
+    runner.run(`claim:${host}`, async () => {
+      const r = await appsApi.claimDomain(service, env, host);
+      if (r.claimed) onDone();
+      else setTxt(r.txt);
+    });
+  return (
+    <div className="space-y-2 border-t border-line px-5 py-3 text-[12.5px]">
+      <p className="text-muted">
+        {host} is another environment's. If its DNS is yours, prove it with a TXT record and take it: it stops answering there.
+      </p>
+      {txt && (
+        <table className="w-full overflow-hidden rounded-lg border border-line font-mono text-[12px]">
+          <tbody>
+            <Record type="TXT" name={txt.name} value={txt.value} copied={copied} copy={copy} />
+          </tbody>
+        </table>
+      )}
+      <button type="button" className={btn} disabled={runner.busy !== null} onClick={() => void ask()}>
+        {txt ? "Check it and take the domain" : "Claim it"}
+      </button>
     </div>
   );
 }

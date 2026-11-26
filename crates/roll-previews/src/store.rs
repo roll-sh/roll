@@ -1871,7 +1871,15 @@ impl Store {
         Ok(())
     }
 
-    /// Forget the masked base `name` (making it failed, or it was deleted).
+    /// Let go of the claim on making the masked base `name` (making it failed): the next
+    /// converge takes it over under the same name (its half-made branch found again), and nobody
+    /// waits on a claim nothing holds.
+    pub fn release_mask_base(&self, kind: Kind, parent: &str, name: &str) -> Result<()> {
+        self.db.write(|c| c.execute("UPDATE mask_bases SET claim_until = 0 WHERE kind = ? AND parent = ? AND name = ? AND state = 'making'", params![kind.as_str(), parent, name]).map(|_| ()))?;
+        Ok(())
+    }
+
+    /// Forget the masked base `name` (it was deleted).
     pub fn drop_mask_base(&self, kind: Kind, parent: &str, name: &str) -> Result<()> {
         self.db.write(|c| c.execute("DELETE FROM mask_bases WHERE kind = ? AND parent = ? AND name = ?", params![kind.as_str(), parent, name]).map(|_| ()))?;
         Ok(())
@@ -3855,6 +3863,7 @@ impl Store {
         let url = services.first().map(|(s, _)| s.url.clone());
         let share_url = url.as_deref().map(share);
         let (schema_changes, schema_risks, release) = self.release_facts(&r.id)?;
+        let rehearsal = self.runtime_fact::<crate::Rehearsal>(&r.id, "rehearsal")?;
         let schema_overlaps = self.schema_overlaps(&r, schema_changes.as_deref())?;
         let kept_until = self.kept_until(&r.id)?;
         // Its page as a link only when it's `https://` (it's kept whole to tell its repository).
@@ -3995,6 +4004,7 @@ impl Store {
             schema_risks,
             schema_changes,
             schema_overlaps,
+            rehearsal,
             release,
             kept_until,
             pull,

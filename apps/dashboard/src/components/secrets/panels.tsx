@@ -10,6 +10,7 @@ import { Gateways } from "./gateways";
 import { GitHubApps } from "./github-apps";
 import { KubernetesClusters } from "./kubernetes-clusters";
 import { OutsideDatabases } from "./outside-databases";
+import { PublicCerts } from "./public-certs";
 import { Rotators } from "./rotators";
 import { SaasRotators } from "./saas-rotators";
 import { SnowflakeAccounts } from "./snowflake-accounts";
@@ -30,6 +31,7 @@ const PANEL: Record<Exclude<Panel, "syncs">, () => ReactNode> = {
   kubernetes: KubernetesClusters,
   "transit-keys": TransitKeys,
   cas: Cas,
+  "public-certs": PublicCerts,
   "ssh-cas": SshCas,
 };
 
@@ -58,7 +60,7 @@ export function CredentialsView() {
   return <Panels panels={PANELS.credentials} />;
 }
 
-/** The keys roll holds for the project: transit encryption, and its TLS and SSH certificate authorities. */
+/** The keys roll holds for the project: transit encryption, its TLS and SSH certificate authorities, and its publicly trusted certificates. */
 export function KeysView() {
   return <Panels panels={PANELS.keys} />;
 }

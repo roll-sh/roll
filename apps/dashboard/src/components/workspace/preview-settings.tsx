@@ -487,6 +487,14 @@ function Form({
           placeholder={["node:22", "npm ci && npm run migrate"]}
           onChange={(j) => set("release", j)}
         />
+        {s.release && (
+          <Toggle
+            label="Rehearse when queued"
+            note="When a change is queued to land, its release runs once more on fresh branches of the parents as they are now (masked as the rules say): a preview's data may be days old."
+            checked={s.rehearse_when_queued ?? false}
+            onChange={(v) => set("rehearse_when_queued", v)}
+          />
+        )}
         <Job
           label="Teardown"
           note="Runs once when a preview goes, before its services and branches: remove what its code made outside roll (test webhooks, OAuth redirect URIs). A failure is logged; the preview goes anyway."

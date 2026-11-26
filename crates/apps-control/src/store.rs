@@ -527,6 +527,14 @@ CREATE TABLE IF NOT EXISTS domains (
 CREATE INDEX IF NOT EXISTS domains_env ON domains (service, env);
 -- A project's own preview domain (`*.preview.acme.dev`, roll previews' preview deployment
 -- suffix), and the label each preview environment answers to under it.
+CREATE TABLE IF NOT EXISTS domain_claims (
+    hostname TEXT NOT NULL,
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    token TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (hostname, service, env)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS project_boards (
     project TEXT PRIMARY KEY,
     panels TEXT NOT NULL,
@@ -2933,7 +2941,7 @@ impl Store {
                 || c.query_row("SELECT 1 FROM environments WHERE slug = ?", [host], |_| Ok(())).optional()?.is_some()
                 || c.query_row("SELECT 1 FROM status_domains WHERE hostname = ?", [host], |_| Ok(())).optional()?.is_some();
             if taken {
-                return Err(Error::Conflict(format!("{host} is already a domain of a service")));
+                return Err(Error::Conflict(format!("{host} is already a domain of a service: if it's yours, POST …/domains/{host}/claim (`roll domains claim {host}`) says how to prove it and take it")));
             }
             // A tenant's domains are bounded: certificates and their orders are shared by all.
             let per_service: i64 = c.query_row("SELECT COUNT(*) FROM domains WHERE service = ? AND kind = 'custom'", [service], |r| r.get(0))?;
@@ -2952,6 +2960,52 @@ impl Store {
             Ok(())
         })?;
         Ok(Domain { hostname: host.into(), record: "none", kind: DomainKind::Custom, status: DomainStatus::Pending, target: String::new(), token, error: None, tls, tls_error: None, created_at: now, redirect_to: None, port: None })
+    }
+
+    /// The token `service`'s `env` proves it holds `host` with (Vercel's "linked to another team"),
+    /// made the first time it's asked: None when no other environment's custom domain holds the
+    /// name (it's free to add, or isn't a custom domain at all).
+    pub fn claim_token(&self, host: &str, service: &str, env: &str) -> Result<Option<String>> {
+        let (now, fresh) = (self.now()?, random(24));
+        self.db.write(|c| {
+            let holder: Option<(String, String)> = c.query_row("SELECT service, env FROM domains WHERE hostname = ? AND kind = 'custom'", [host], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            if !holder.is_some_and(|(s, e)| (s.as_str(), e.as_str()) != (service, env)) {
+                return Ok(None);
+            }
+            c.execute("INSERT INTO domain_claims (hostname, service, env, token, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (hostname, service, env) DO NOTHING", params![host, service, env, fresh, now])?;
+            Ok(Some(c.query_row("SELECT token FROM domain_claims WHERE hostname = ? AND service = ? AND env = ?", params![host, service, env], |r| r.get(0))?))
+        })
+    }
+
+    /// `host` moved to `service`'s `env`, proven by `token` (its claim's): in one write, the
+    /// holder's domain removed (its `domain.expired`, `reason: claimed`) and the claimant's made
+    /// verified, with the claim's token as its own. The holder's (service, env), or None when
+    /// nothing holds it any more or the claim is gone.
+    pub fn take_domain(&self, host: &str, service: &str, env: &str, token: &str, tls: TlsStatus) -> Result<Option<(String, String)>> {
+        let now = self.now()?;
+        self.db.write(|c| {
+            let ok = c.query_row("SELECT 1 FROM domain_claims WHERE hostname = ? AND service = ? AND env = ? AND token = ?", params![host, service, env, token], |_| Ok(())).optional()?.is_some();
+            let holder: Option<(String, String)> = c.query_row("SELECT service, env FROM domains WHERE hostname = ? AND kind = 'custom'", [host], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            let Some((hs, he)) = holder.filter(|_| ok).filter(|(s, e)| (s.as_str(), e.as_str()) != (service, env)) else { return Ok(None) };
+            let per_service: i64 = c.query_row("SELECT COUNT(*) FROM domains WHERE service = ? AND kind = 'custom'", [service], |r| r.get(0))?;
+            if per_service >= MAX_DOMAINS_PER_SERVICE {
+                return Err(Error::Conflict(format!("at most {MAX_DOMAINS_PER_SERVICE} custom domains a service")));
+            }
+            c.execute("DELETE FROM domains WHERE hostname = ?", [host])?;
+            insert_event(c, now, "domain.expired", &hs, &he, None, &serde_json::json!({ "hostname": host, "reason": "claimed" }))?;
+            c.execute(
+                "INSERT INTO domains (hostname, service, env, kind, status, token, error, created_at, tls, verified_at) VALUES (?, ?, ?, 'custom', 'active', ?, NULL, ?, ?, ?)",
+                params![host, service, env, token, now, tls.as_str(), now],
+            )?;
+            c.execute("DELETE FROM domain_claims WHERE hostname = ?", [host])?;
+            Ok(Some((hs, he)))
+        })
+    }
+
+    /// Claims older than `cutoff` (ms) forgotten: one asked again gets a new token.
+    pub fn expire_claim_tokens(&self, cutoff: i64) -> Result<()> {
+        self.db.execute("DELETE FROM domain_claims WHERE created_at < ?", [cutoff])?;
+        Ok(())
     }
 
     /// A domain's DNS state; the first time it's `active` is kept (the claim no longer expires).

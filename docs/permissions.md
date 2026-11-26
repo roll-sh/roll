@@ -281,7 +281,23 @@ roll token acting as that person, with no consent screen and no roll sign-in.
   - **Rotation:** roll holds no credential of such an app, so there's nothing to rotate.
   - **Trust the organization's issuer:** `https://identity.anthropic.com/issuers/<id>`, exactly as Claude's auto-connect setup shows it (anything else at that host is refused), as a provider with email matching and the domains its people use. Its keys are fetched, never pasted. Claude's issuer then vouches for its members' account emails, which it sends without `email_verified`. Any other issuer (a look-alike, or Claude's with pasted keys) still needs `email_verified: true`, and the domains bound both.
   - **The resource:** when the assertion names none, the token request's own `resource` holds the token. Claude names roll's MCP server, so its tokens are that server's only.
-  - **Not yet:** express admin setup (`ema_issuer:manage`), where Claude registers the issuer itself.
+  - **Express admin setup** (`ema_issuer:manage`, advertised in `scopes_supported`): Claude registers its issuer itself, so the admin doesn't copy it.
+    - **Who and where:** only for Claude's client (its public document or `/confidential_client`), returning only to `https://claude.ai/api/mcp/auth_callback`, and approved only by roll's admins.
+    - **The consent screen** names what approving turns on and asks for the email domains Claude's issuer vouches for, plus the most Claude may do for a person (the app's rules).
+    - **The code** (with RFC 9207's `iss` in the redirect, as every roll redirect has) trades for a five-minute, single-use token, with `ema_setup_endpoint` and no refresh token. The confidential client signs a client assertion with its document's keys there.
+    - **`PUT /v1/access/enterprise/ema-setup {ema_issuer}`** takes that token, in front of the gate (the token is the credential). In one write it:
+      - spends the token;
+      - trusts the issuer, a Claude issuer only, for those domains with email matching;
+      - replaces what an earlier express setup trusted, keeping a provider the operator set up by hand;
+      - gives Claude's app the consent's rules: it registers the app, or narrows or widens an existing one along with its people's connections, as an edit of the app does.
+    - **Refusals** are `{error, error_description}`:
+      - `invalid_token` for a spent or old token;
+      - `invalid_request` for an issuer that isn't Claude's;
+      - `access_denied` when the admin who approved isn't one any more;
+      - 409 when there are already too many providers or apps;
+      - a generic 500 otherwise.
+    - **Also refused:** at consent, a mail service anyone can sign up at (gmail.com and the like) as a domain; and roll's client allow-list (`oauth_clients`) without Claude on it.
+    - **Audited** as `express_setup`, with who approved (`by`).
 - **A leaked app secret** (an `rlc_` with its checksum, found by roll code's push scan or reported
   by GitHub's secret scanning) is revoked like any other: roll drops the secret, the one kept from
   before a rotation, and every token the app's people hold, in one write, and audits it. The
@@ -1122,7 +1138,13 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   OAuth connections included (GitHub's organisation token policies, Cloudflare's TTLs). A
   product may cap tokens that reach it more tightly (`Access::lifetime_cap`): roll secrets'
   policy's `max_token_days` caps every grant with a `secrets` or `*` rule (docs/secrets.md,
-  "Guardrails"), refused as a 403 naming that policy.
+  "Guardrails"), refused as a 403 naming that policy. Both are one check,
+  `Access::meets_policy`, on every path that writes a grant's rules or lifetime or issues it a
+  secret: tokens and machine clients (refused past it), consents, devices and step-ups (the
+  connection ends within a product's cap instead, `Access::within_cap`, and the consent screen
+  says so from the catalogue's `lifetime_caps`), remembered approvals (a capped rule is remembered
+  until the cap at most) and enterprise apps' connections, which live as long as the policy
+  allows; `tests/policy_callers.rs` fails on a writer that doesn't ask.
   `max_idle_days` stops a grant nobody has used for that long (since its last use, or since it was
   made): an unused credential is risk with nothing to show for it. The evaluator reads the policy at
   most every 10 seconds, so a change reaches every node within that.
@@ -1370,7 +1392,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | route | who | what |
 | --- | --- | --- |
 | `GET /v1/access` | any grant | the caller: the operator, or its own grant (rules, expiry) |
-| `GET /v1/access/catalog` | any grant | products, actions, presets and every classified route |
+| `GET /v1/access/catalog` | any grant | products, actions, presets, every classified route, and `lifetime_caps` (`[{product, days, why}]`: products whose own policy caps the grants that reach them) |
 | `POST /v1/access/check` | any grant | `{method, path, body?, token?}` → `{decision, product, action, resource, route}`: what the evaluator would decide, without running it (a grant checks itself; the operator names `token`) |
 | `GET /v1/access/tokens` | access read | grants, newest first (no secrets), each with `activity`: its last day's requests `{allowed, denied, asked}`; `?product=` (and `&resource=`) only those with a rule on that product by name (naming that `{id}` or `{project}`), as a product's page lists its own tokens; `?kind=workload` the workload tokens instead |
 | `POST /v1/access/tokens` | access admin | `{name, rules, expires_at?, ip_allow?, rate_per_minute?, decoy?}` → 201 `{grant, token}`; `token` is shown this once; `decoy`: a honeytoken ("Decoy tokens"); 403 `reauth_required` from a session without a recent proof |

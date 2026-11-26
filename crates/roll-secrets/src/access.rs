@@ -326,6 +326,14 @@ pub trait Workloads: Send + Sync {
     fn grants_naming(&self, project: &str) -> crate::Result<Vec<roll_auth::Grant>> {
         Ok(self.grants()?.into_iter().filter(|g| g.scope.0.iter().any(|r| rule_may_name(r, project))).collect())
     }
+    /// roll-access's live tokens and connections whose rules reach roll secrets and that live
+    /// more than `days` from now, or never end: those `max_token_days` would refuse made now (the
+    /// operator's policy report). Not workload logins, decoys, or ones waiting for an admin.
+    /// Blocking.
+    fn outliving(&self, days: u32) -> crate::Result<Vec<crate::guardrails::Outliving>> {
+        let _ = days;
+        Ok(vec![])
+    }
     /// A long-lived roll token with `rule`, made for the request `ext` belongs to as `POST
     /// /v1/access/tokens` makes one (its owner the caller; a gateway's). Blocking.
     fn token(&self, ext: &axum::http::Extensions, name: &str, rule: roll_auth::scope::Rule) -> crate::Result<Minted> {

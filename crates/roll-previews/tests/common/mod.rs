@@ -162,6 +162,8 @@ pub struct FakeData {
     pub renames_on_reset: AtomicUsize,
     /// Branches made from another of the parent's (a masked base): branch → the one it came from.
     pub from: Mutex<HashMap<String, String>>,
+    /// How many masks to fail next.
+    pub fail_masks: AtomicUsize,
 }
 
 impl FakeData {
@@ -183,6 +185,7 @@ impl FakeData {
             restored: Mutex::new(Vec::new()),
             renames_on_reset: AtomicUsize::new(0),
             from: Mutex::new(HashMap::new()),
+            fail_masks: AtomicUsize::new(0),
         })
     }
 }
@@ -257,6 +260,10 @@ impl Brancher for FakeData {
         self.delete(parent, snapshot, name).await
     }
     async fn mask(&self, _parent: &str, branch: &str, _kept: Option<&str>, columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
+        if self.fail_masks.load(Ordering::SeqCst) > 0 {
+            self.fail_masks.fetch_sub(1, Ordering::SeqCst);
+            anyhow::bail!("the compute didn't start");
+        }
         self.masks.lock().push((branch.to_string(), columns.clone()));
         Ok(())
     }
@@ -772,6 +779,7 @@ pub fn change(id: &str, n: i64) -> ChangeInfo {
         branch: Some(format!("feat/{n}")),
         head: format!("cs_{n}a"),
         open: true,
+        queued: false,
         draft: false,
         labels: Vec::new(),
         trusted: true,
