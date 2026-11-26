@@ -2343,7 +2343,15 @@ type Settings = {
     is (Chromatic's accessibility tests: its rules, its language and title), while more than 30 s
     of the run are left so a big Storybook still gets its pictures, 8 KB of it at most; what it
     adds against main's same story counts like a page's (`a11y_added`). Live: the live
-    Storybook's stories carry it. With `github.browsers`, the change's first 5 stories (as the run
+    Storybook's stories carry it. Each story's interaction test too (Chromatic's interaction
+    tests): its `play` function runs as Storybook renders the story, and the run reads how it
+    went from Storybook's own preview (`__STORYBOOK_PREVIEW__.storyRenders`, Storybook 7 and
+    later: the story's render by id, its `phase` and whether it has a `playFunction`), waiting up
+    to 5 s for it to end before the picture. `play` on the story's page is `failed` when it threw
+    (or the story's render did: phase `errored`), `passed` when a play function ran to its end;
+    against main's same story, one that fails where main's passes is `against.play_broke`. The
+    sheet says which. Live: the fixture's preview object has Deep's play throw and the first
+    story's pass. With `github.browsers`, the change's first 5 stories (as the run
     ordered them: those it touched first) are taken in each of those browsers too, once
     Chromium's run knows which (Chromatic's cross-browser stories): `story:<id>@<browser>`
     ("button / primary · Firefox" on the sheet), each loaded alone and clipped to its root, in
@@ -2886,28 +2894,27 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-Ranked again after a seventh product review (2026-11-25, evening), against Vercel's comments,
-Chromatic's cross-browser and accessibility tests, Render's suspended services, Neon's snapshots.
+Ranked again after an eighth product review (2026-11-26, morning), against Chromatic's
+interaction and accessibility tests and baselines, Vercel's and Netlify's comments, Render's and
+Railway's previews, Neon's branches.
 
-1. **A baseline on demand for stories, in review**: main's preview takes the stories the open
-   changes keep and it hasn't, in Chromium and the other browsers, so each change's is compared
-   with main's (#1064 took a change's first 5 in the other browsers).
-2. **Restore points for Redis, search and streams**: NoSQL's landed (#1028, its point-in-time
-   restore). A point is kept only where the product puts a branch back in place, keeping its id
-   (their delete guards check it); each needs its control plane's reset `from`, as pg-control's:
-   ask the Redis, search and streams owners.
+1. **Stories' interaction tests, in review** (Chromatic's): each story's `play` function, read as
+   Storybook ran it, `failed` or `passed` on its page and against main's. Next for it: the failing
+   step and its message (Storybook's interactions log), and the interaction tests in the other
+   browsers.
+2. **Restore points for Redis, search and streams**: NoSQL's landed (#1028). A point is kept only
+   where the product puts a branch back in place, keeping its id; each needs its control plane's
+   reset `from` (roll search: feasible, about a day, with its user to schedule).
 3. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
    follow the same roles, checked live against a member's session.
-4. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
-   longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
-   0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start
-   (3.3 s in its log) and its masking, which needs that compute up: pg-control's to shorten.
+4. **The data step's Postgres compute start** (pg-control's; watch): most of the data step is the
+   Postgres branch's compute start and its masking, which needs that compute up.
 5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 6. **Watch: pg-control's recovery to a time seconds old** (unowned).
 
-Landed 2026-11-26, early: a change's first stories in the other browsers (#1064); roll apps lookups that miss remembered (#1066); a settled running preview's usage read alone too (#1069).
+Landed 2026-11-26, early: a baseline on demand for stories (#1082); a change's first stories in the other browsers (#1064); roll apps lookups that miss remembered (#1066); a settled running preview's usage read alone too (#1069).
 
 Landed 2026-11-25, night: a note's reply and resolve in roll's small window (#1052); branches' handed-out credentials sealed at rest (#1058).
 
