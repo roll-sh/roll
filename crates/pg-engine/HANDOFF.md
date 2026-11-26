@@ -15826,6 +15826,74 @@ failed: all passed.
 Not this round's: roll's `VACUUM (VERBOSE)` sends none of PostgreSQL's INFO lines (agent 205's
 note, still open).
 
+## Short write transactions, round 19: the TPC-B-like standing at fixed counts; the L0 merge left out, its read cost itemized (agent 322)
+
+BENCH "Short write transactions, round 19" has the tables. No engine code changed: what was tried is in
+`~/.cache/a322/patches/`.
+
+**The standing** (brief item 1). roll's shipped build (`tools/dist-pgo.sh --out` of `5192a74c0`, its own
+training), PostgreSQL 18.6 and pgrust, the same night on lane A, scale 32, 160,000 TPC-B-like
+transactions a run (fixed, not timed), counted to 8 s after the last and a CHECKPOINT. User instructions a
+transaction: roll 485-647k at 8 clients (five runs), 434-553k at 32 (five); PostgreSQL 459k / 528k and
+430k / 433k; pgrust 523k / 458k and 565k / 594k. Peak anon+shmem: roll 485-496 MB, PostgreSQL 638-679,
+pgrust 828-928. Bytes written a transaction: roll 8.9-11.4 KB, the others 19.9-26.4 KB. Agent 313's 335k /
+311k were 10 s windows without the checkpoint and its background work; 314's 494k / 469k are within this
+spread. Lane A carried 3.4-7.4 foreign cores in every hold, so tps and cycles are readings: roll reached
+664-4,368 tps, the others 3,010-5,698.
+
+So, in user instructions: in roll's runs that reached PostgreSQL-like throughput (3,023-4,368 tps at 8 clients,
+2,951 at 32) it read 541-647k and 553k, over PostgreSQL's 459-528k and 430-433k and over pgrust's at 8; its
+slow runs (664-1,853 tps) read 434-487k, level with PostgreSQL at 32 and under pgrust (565-594k at 32). Its
+own spread is the largest single item. It is **planning in the connection threads**: the profiled 32-client runs differ by 116k a
+transaction there (315k at 1,853 tps, 431k at 2,951), all of it parse / bind / plan code (`Expr::clone`,
+`Planner::rel`, `explain::Name::col`, `lit_env`, mimalloc). Behind it is the plan choice that PostgreSQL makes the
+same way (`bench/plans2.sh`, measured on both): after 160k transactions `pgbench_branches` and
+`pgbench_tellers` have grown (roll 1 -> 11 and 2 -> 16 pages, PostgreSQL 1 -> 17 and 2 -> 42), the re-costed
+generic plan (an index scan, 8.16) costs more than the first five custom plans' average (seq scans at 1-2
+pages), and a prepared UPDATE takes a custom plan on about half of its runs (both servers: branches 6
+generic / 7 custom of 13, tellers 8 / 5). How often depends on when the tables grew during the run; a
+custom plan of these one-row UPDATEs costs roll far more than it costs PostgreSQL. That is the largest cut
+left for TPC-B (session planning: agent 323's area, not touched here): a custom plan whose shape is
+the one the session planned last for the same statement, or cheaper replanning of a one-table UPDATE. The
+flush thread is ~78-83k a transaction (zstd ~38k, `Compacted::entry` 17k, `zip_entries` 8.5k): the L0
+merge's target.
+
+**The L0 merge** (brief item 3): **not landed**. The cycle pair on the head (`0037841bd` + 305's patch,
+one binary, the merge off by a switch) shows the same picture as rounds 15-18: select-only -1.2%, the
+100-row read +1.5%, the 1,000-row +1.6%. Exactly why a range read pays, from the read's profile across the
+cycle (+38.4k a 1,000-row read):
+
+- It isn't a seek per file or run: the merge leaves L0 with no more files (16 / 15 samples at 1 / 2
+  files against 10 / 8 / 9 spread over 1-3), and `Merge::min` and `position` are within 1k.
+- It is the newer versions met. The merged file keeps the big table's UPDATEs in L0 about three
+  flushes longer (10 merges and 2 compactions into L1 against 7 compactions), so a range meets about three
+  times as many newer versions of its rows: about 19 more a 1,000-row read at the ~2k a version below.
+- A newer version costs about ten rows. In process: a 1,000-row read with 10 / 30 newer versions in an L0 file
+  costs +20.3k / +46.4k over none (a version ~1.3k and ~7k a read that meets any; a row ~220). At the
+  server, the +38.4k splits into the run loop's rows moved into the stop-checking instance (+47.1k there,
+  -41.5k from the stop-free one), the list's setup and use (`Overlay::take` / `finish` / `past_limit` /
+  `push` / `value_span` +12.6k), `fill_batch_rows`' inlined `gather` / `ungather` / `position` +7.9k,
+  `zip_rows` tried after short runs +3.4k, more blocks read +1.9k, and `count_row` +4.1k (the
+  executor's, the same rows: not explained).
+- Level within 0.2% (4.4k) needs a newer version to cost about what the row it replaces costs. No single
+  item of the list above is over 6k net, so no check made cheaper gets there. The brief's far-stop check
+  was tried: a run that goes without a stop up to the restart interval of the list's next entry
+  (`Block::first_restart`). It lost in process (+0.3% / +1.5% with 10 / 30 newer versions; 16 entries
+  between restarts, ~30 in a block, so few rows run before the stop's interval and each stop pays the search
+  and a second run's setup): dropped, patch `run-rows-ov-restart-bounded.patch`.
+
+What would get the merge in: merging a sparse source's newer versions into the oldest source's blocks
+at about a row's cost. That means no list built per range (the merged file's entries are known when it is
+opened: a per-block index of L0 positions, or a merged view cached with the block for a given L0 state),
+no re-ranking after each run, and the superseded row skipped in the stop-free loop. The write side is as round 18 measured
+it (-9.9% user instructions a transaction at 32 clients). Until then the reads' gate holds.
+
+Harness for whoever goes on: `~/.cache/a322/bench` (314's `oltp.sh` with the compactions in the window
+and the by-thread split; `plans.sh` / `plans2.sh` the plan choice), `~/.cache/a322/b313` (313's
+`cycle.sh` / `epair.sh` / `recagg.py`, `cpair-run.sh` one pair a hold), the probe
+`crates/pg-engine/src/storage/a322_probe.rs` on `wip/a322` (with `A322_NO_MERGE` / `A322_NOFAR`
+switches, not for landing), the PGO profile `~/.cache/a322/pgo/roll-engine.profdata` (of `5192a74c0`).
+
 ## Short write transactions, round 18: a compaction's filter bits for keys the adopted file holds; a range read's newer versions taken in its runs' loop; the standing table; the L0 merge again (agent 313)
 
 BENCH.md "Short write transactions, round 18" has the counts. Plain dist builds (`tools/dist.sh`), b0 =

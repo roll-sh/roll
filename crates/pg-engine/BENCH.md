@@ -285,6 +285,113 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Short write transactions, round 19: the TPC-B-like standing at fixed counts on the shipped build; the L0 merge's read cost itemized (2026-11-26, agent 322)
+
+HANDOFF "Short write transactions, round 19" has what it means. Builds: **roll PGO** = `tools/dist-pgo.sh --out` of
+`5192a74c0` (its own training, profile staleness 0.00%); **n1** = plain dist (`tools/dist.sh`) of `0037841bd`
+with agent 305's L0 merge (`~/.cache/a305/patches/l0-merge-3f0f6d320.patch`) and a measuring switch
+`A322_NO_MERGE` (not in any commit), both arms of a pair on one binary. PostgreSQL 18.6 and pgrust (its
+published PGO image) as in "Standing, 2026-11-24". Harnesses: `~/.cache/a322/bench` (agent 314's `oltp.sh`,
+`lib.sh`; plus the compactions in the window and a by-thread split) and `~/.cache/a322/b313` (agent 313's
+`cycle.sh`, `epair.sh`, `recagg.py`). One cell or pair a `tools/lane.sh` hold; every hold read 3.4-7.4 foreign
+cores on lane A's 8 CPUs (over the 1.0 rule in all: tps, cycles and p99 are readings only).
+
+### TPC-B-like, scale 32, 160,000 transactions a run (lane A)
+
+`pgbench -i -I dtGvp -s 32`, CHECKPOINT, wait for a quiet server, then `pgbench -n -M prepared -j 4 -t
+160000/clients`; counts of the server's cgroup from the first transaction to 8 s after the last and a
+CHECKPOINT (deferred page writes counted on every server), a transaction. 2 GB cache on all three, fsync and
+synchronous_commit on. "foreign": busy cores on the 4 server CPUs that weren't the server's. Peak: the
+cgroup's anon+shmem, 0.2 s samples from the server's start. roll's connection / flush share: an
+`instructions:u` sample profile by thread name over the run (period 2,000,003); roll made 4-5 compactions in
+each window.
+
+| clients | server | tps | user instr | user cycles | kernel instr | fdatasync | bytes written | p99 ms | conn / flush | foreign | peak MB |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|
+| 8 | roll PGO | 4,368 | 646,644 | 1,063,258 | 321,353 | 0.68 | 10,208 | 14.1 | - | 1.80 | 495.7 |
+| 8 | roll PGO | 718 | 487,481 | 1,214,651 | 332,156 | 0.76 | 10,907 | 108.4 | - | 3.54 | 496.1 |
+| 8 | roll PGO | 1,034 | 485,058 | 1,126,292 | 331,627 | 0.76 | 11,445 | 90.3 | - | 3.33 | 493.8 |
+| 8 | roll PGO | 3,205 | 541,367 | 987,897 | 316,549 | 0.72 | 10,529 | 21.4 | 84% / 15% | 2.17 | 494.4 |
+| 8 | roll PGO | 3,023 | 589,731 | 1,112,785 | 322,851 | 0.72 | 10,507 | 14.8 | 85% / 14% | 2.20 | 493.0 |
+| 8 | PostgreSQL 18.6 | 5,016 | 458,926 | 856,143 | 398,993 | 0.79 | 26,209 | 5.9 | | 1.39 | 638.0 |
+| 8 | PostgreSQL 18.6 | 5,617 | 527,744 | 895,917 | 396,844 | 0.81 | 26,372 | 5.3 | | 1.18 | 666.9 |
+| 8 | pgrust | 4,723 | 523,363 | 933,391 | 334,218 | 0.80 | 26,207 | 5.6 | | 1.69 | 845.3 |
+| 8 | pgrust | 4,745 | 458,296 | 847,851 | 330,917 | 0.79 | 26,089 | 7.5 | | 1.64 | 828.0 |
+| 32 | roll PGO | 664 | 442,624 | 1,380,992 | 349,295 | 0.59 | 9,646 | 327.7 | - | 3.53 | 492.5 |
+| 32 | roll PGO | 887 | 454,533 | 1,373,504 | 345,191 | 0.60 | 9,575 | 275.5 | - | 3.36 | 496.1 |
+| 32 | roll PGO | 1,051 | 448,859 | 1,307,463 | 339,166 | 0.59 | 9,629 | 214.4 | 76% / 23% | 3.25 | 485.2 |
+| 32 | roll PGO | 2,951 | 552,603 | 1,379,401 | 330,073 | 0.53 | 8,902 | 69.5 | 84% / 15% | 2.00 | 486.9 |
+| 32 | roll PGO | 1,853 | 433,840 | 1,190,630 | 339,769 | 0.54 | 8,949 | 147.8 | 79% / 21% | 2.70 | 495.1 |
+| 32 | PostgreSQL 18.6 | 3,010 | 429,944 | 1,208,285 | 451,542 | 0.45 | 20,534 | 63.9 | | 1.83 | 678.7 |
+| 32 | PostgreSQL 18.6 | 3,783 | 432,747 | 1,173,627 | 448,372 | 0.44 | 20,471 | 35.9 | | 1.56 | 679.3 |
+| 32 | pgrust | 5,411 | 565,476 | 1,161,337 | 327,887 | 0.40 | 19,866 | 23.8 | | 1.13 | 900.4 |
+| 32 | pgrust | 5,698 | 594,016 | 1,169,922 | 326,654 | 0.41 | 19,942 | 24.8 | | 1.13 | 927.8 |
+
+What moves roll's count between runs of one binary (433.8k to 552.6k at 32 clients) is planning in the
+connection threads. The two profiled 32-client runs, per transaction: connection threads 315.4k (1,853 tps)
+against 431.4k (2,951 tps), flush thread 83.5k against 78.0k; the 116k is `Expr::clone` / `walk` / drop, mimalloc,
+`explain::Name::col`, `Planner::rel`, `Builder::scan`, pg_query's nodes, `lit_env`, `open_scan_as`,
+`Settings::get_str` (`~/.cache/a322/runs/sym-*.txt`). Behind it (`bench/plans2.sh`: one session prepares
+pgbench's five statements and runs them before and after 160k transactions at 32 clients), on roll and
+on PostgreSQL 18.6 alike:
+
+| | roll PGO | PostgreSQL 18.6 |
+|---|---|---|
+| pgbench_branches / pgbench_tellers relpages before -> after | 1 -> 11 / 2 -> 16 | 1 -> 17 / 2 -> 42 |
+| UPDATE pgbench_branches plan after (EXPLAIN EXECUTE) | Index Scan, cost 8.16 | Index Scan, cost 8.16 |
+| u3 (branches) generic / custom plans over 13 runs | 6 / 7 | 6 / 7 |
+| u2 (tellers) generic / custom | 8 / 5 | 8 / 5 |
+
+The plan choice is PostgreSQL's (`choose_custom_plan`): the generic plan, re-costed as the small hot tables
+grow, costs more than the average of the first five custom plans (seq scans at 1 and 2 pages), so a
+session plans some executions again. How often depends on when the tables grew in the run; a custom plan of
+those UPDATEs costs roll far more instructions than it costs PostgreSQL. The flush thread: zstd ~38k a
+transaction (`ZSTD_compressBlock_fast_dictMatchState` 18.2k), `Compacted::entry` 17.0k, `zip_entries` 8.5k.
+
+### The L0 merge on the head, across the write cycle (lane A, `cycle.sh`, one pair, n1)
+
+34 rounds of 7,040 TPC-B transactions at 32 clients, after each 2 s of each read at 8 clients; user
+instructions a read, by L0 file count at the sample's start. 6.26 foreign cores.
+
+| read | no merge (26 flushes, 7 compactions) | merge (26 flushes, 10 L0 merges, 2 compactions) | by L0 files, no merge | by L0 files, merge |
+|---|---:|---:|---|---|
+| select-only | 46,566 | 46,002 (-1.2%) | | |
+| 100-row BETWEEN | 336,697 | 341,681 (+1.5%) | 0: 329.1k, 1: 331.7k, 2: 340.5k, 3: 345.2k | 0: 332.9k, 1: 339.0k, 2: 344.1k, 3: 350.7k |
+| 1,000-row BETWEEN | 2,184,432 | 2,219,985 (+1.6%) | 0: 2,147k, 1: 2,174k, 2: 2,197k, 3: 2,214k | 0: 2,143k, 1: 2,212k, 2: 2,225k, 3: 2,279k |
+
+Where the 1,000-row read's +38.4k goes (an `instructions:u` profile of the read in every round, period
+2,000,003, summed by symbol and divided by the reads; `recagg.py`):
+
+| symbol | no merge | merge | difference |
+|---|---:|---:|---:|
+| `Block::run_rows_to::<true, false>` (the stop-checking run) | 69,524 | 116,663 | +47,139 |
+| `Block::run_rows_to::<false, false>` (the stop-free run) | 62,001 | 20,510 | -41,491 |
+| `Scan::fill_batch_rows` (`gather`, `ungather`, `position` inlined) | 93,503 | 101,368 | +7,865 |
+| `Overlay::take` | 1,269 | 6,915 | +5,646 |
+| `ScanNode::count_row` | 34,251 | 38,397 | +4,146 |
+| `zip_rows` | 390 | 3,812 | +3,422 |
+| `Overlay::finish` | 1,108 | 3,507 | +2,399 |
+| `Overlay::past_limit` | 452 | 2,615 | +2,163 |
+| `Block::read` | 108,524 | 110,418 | +1,894 |
+| `Overlay::push` | 316 | 1,853 | +1,537 |
+| `Cursor::head` | 8,934 | 10,011 | +1,077 |
+| `Block::value_span` | 198 | 1,144 | +946 |
+| all | 2,175,574 | 2,213,947 | +38,373 |
+
+In process (306's probe as `storage::a322_probe`, verify build of `0037841bd` + the merge, an L0 file of
+newer versions over the table in L1, user instructions a read): 1,000-row ranges with 0 / 10 / 30 newer
+versions 221,657 / 241,995 / 268,040 (a newer version ~1.3k, ~7k a read that meets any; a row ~220);
+100-row with 10 50,326 (none 34,149). A profile of 0 against 30 (period 200,003): the run loop 120.3k ->
+141.9k (every row through the stop-checking instance, ~25 more a row in this build), `Overlay::take` 6.1k,
+`Block::read` +3.6k, `fill_batch_rows` +3.6k, `zip_rows` +3.2k.
+
+Tried and dropped (`~/.cache/a322/patches/run-rows-ov-restart-bounded.patch`): a run with the list's next
+entry in its block goes without a stop up to that entry's restart interval (`Block::first_restart` of its
+user key), the rest with the stop. Same binary, the old path by switch, same hashes: 1,000-row with 10 newer
+242,267 -> 243,111 (+0.3%), with 30 267,891 -> 271,780 (+1.5%), 100-row with 10 +0.8%, none level: with 16
+entries between restarts and ~30 in a block, few rows come before the stop's interval, and each stop pays
+the search and a second run's setup.
+
 ## Point selects: the snapshot / DDL fixes' cost; the code a read runs through (2026-11-25, agent 317)
 
 HANDOFF "Point selects: what the snapshot / DDL fixes cost" has the method and what changed.
