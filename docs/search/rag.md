@@ -34,6 +34,8 @@ what the best of the four products does:
   `roll.inference.max_timeout`). The node caps
   `roll.chat.max_context_tokens` (32,000) and `roll.chat.max_output_tokens` (4,096) apply when a
   profile is put and again on every answer.
+- **`instructions` aren't secret.** Any caller of a profile can ask the model to repeat its
+  system message, and models do. Write nothing there that the profile's callers may not read.
 - **Endpoints:** a `completion` or `chat_completion` endpoint of a service that streams a chat
   completion with a system message (`openai`, `anthropic`, `azureopenai`, `googlevertexai`,
   `mistral`, `deepseek`, `hugging_face`): the frame must stay a system message, never text folded
