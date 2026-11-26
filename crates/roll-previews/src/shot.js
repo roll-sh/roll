@@ -497,6 +497,19 @@ const PLAY = (id) => `(() => {
   if (["played", "completing", "completed", "afterEach", "finished"].includes(r.phase)) return "passed";
   return r.phase === "aborted" ? "none" : "pending";
 })()`;
+// Where a failed one stopped, from Storybook's interactions log (the instrumenter's state, on
+// the frame itself when it's opened alone: `__STORYBOOK_ADDON_INTERACTIONS_INSTRUMENTER_STATE__`,
+// by story id, its `calls`): the call whose status is `error`, as its path and method (a chained
+// call's path names the call it hangs off by id: `expect(el).toBeVisible()` is `expect.toBeVisible`).
+const PLAY_STEP = (id) => `(() => {
+  const st = (globalThis.__STORYBOOK_ADDON_INTERACTIONS_INSTRUMENTER_STATE__ || {})[${JSON.stringify(id)}];
+  const calls = st && Array.isArray(st.calls) ? st.calls : [];
+  const c = calls.find((x) => x && String(x.status).toLowerCase() === "error");
+  if (!c) return "";
+  const named = (p) => (typeof p === "string" ? p : p && typeof p === "object" ? (calls.find((x) => x && x.id === p.__callId__) || {}).method : "");
+  const path = Array.isArray(c.path) ? c.path.map(named).filter((p) => typeof p === "string" && p).join(".") : "";
+  return ((path ? path + "." : "") + String(c.method || "")).slice(0, 120);
+})()`;
 // touched-first: start
 // Stories the change touched first (Chromatic's TurboSnap): a story whose own file the change
 // changed, then one that imports a changed file from anywhere (through the bundler's module
@@ -631,6 +644,8 @@ const stories = async (sessionId) => {
     if (play === "failed") {
       const m = await check({ expression: `(document.querySelector("#error-message")?.textContent || "").replace(/\\s+/g, " ").trim().slice(0, 300)`, returnByValue: true }, sessionId);
       if (typeof m?.result?.value === "string" && m.result.value) said.play_error = m.result.value;
+      const at = await pageSays({ expression: PLAY_STEP(e.id), returnByValue: true }, sessionId);
+      if (typeof at?.result?.value === "string" && at.result.value) said.play_step = at.result.value;
     }
     if (a11y && JSON.stringify(a11y).length <= 8000) said.a11y = a11y;
     out.push(said);

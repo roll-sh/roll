@@ -1194,7 +1194,7 @@ static TOOLS: &[Tool] = &[
     t("search_list_browser_keys", "List a cluster's browser keys", "The keys a cluster gave web pages for search from the browser (a site's search box) that still work, newest first: name, the indices or search application each may read, its filter, rate limit and when it expires (never the key). Making one answers a credential, so it has no tool.", "search", "GET", "/v1/search/clusters/{cluster}/browser-keys", &[req("cluster", "Cluster id or name")]),
     t("search_browser_key_usage", "Browser key usage", "One browser key's requests, 429s by reason (key_rate, address_rate, user_rate, concurrency, cluster_ceiling) and other refusals (origin, policy, body_too_large, invalid_key) over window 1h, 24h (default) or 14d, with a derived key's top users and the top refused origins: tells a broken page, a scraper or a limit set too low apart.", "search", "GET", "/v1/search/clusters/{cluster}/browser-keys/{key}/usage", &[req("cluster", "Cluster id or name"), req("key", "Browser key id (from search_list_browser_keys)"), q("window", Ty::Choice(&["1h", "24h", "14d"]), "How far back")]),
     t("search_revoke_browser_key", "Revoke a browser key", "Revoke one of a cluster's browser keys at once: pages shipping it stop getting answers (on a deleted cluster the revoke is applied by its restore).", "search", "DELETE", "/v1/search/clusters/{cluster}/browser-keys/{key}", &[req("cluster", "Cluster id or name"), req("key", "Browser key id (from search_list_browser_keys)")]),
-    t("search_create_inference_endpoint", "Create an inference endpoint keyed by a roll secret", "An inference endpoint (embeddings for semantic_text, sparse embeddings, reranking, completion) whose provider's API key comes from a roll secret of the project the cluster is in: roll reads the key as you (reveal on that secret), creates the endpoint with it and keeps it following the secret (a rotated value reaches the endpoint within seconds). The key is never in the call or the answer: config is {service (openai, cohere, elastic, …), service_settings (model_id and the like; no api_key), task_settings?, chunking_settings?}, secret is {environment, key, path?, project?}. The cluster then calls the provider.", "search", "POST", "/v1/search/clusters/{cluster}/inference/secrets", &[req("cluster", "Cluster id or name"), breq("inference_id", Ty::Str, "The endpoint's id, e.g. my-embeddings"), b("task_type", Ty::Choice(&["text_embedding", "sparse_embedding", "embedding", "rerank", "completion", "chat_completion"]), "What the endpoint does (default: the service's own)"), breq("config", Ty::Obj, "{service, service_settings (no api_key), task_settings?, chunking_settings?}"), breq("secret", Ty::Obj, "The roll secret holding the key: {environment, key, path?, project?}")]).open_world(),
+    t("search_create_inference_endpoint", "Create an inference endpoint keyed by a roll secret", "An inference endpoint (embeddings for semantic_text, sparse embeddings, reranking, completion) whose provider's API key comes from a roll secret of the project the cluster is in: roll reads the key as you (reveal on that secret), creates the endpoint with it and keeps it following the secret (a rotated value reaches the endpoint within seconds). The key is never in the call or the answer: config is {service, service_settings (model_id and the like; no api_key), task_settings?, chunking_settings?}, secret is {environment, key, path?, project?}. Services whose key is service_settings.api_key: openai, azureopenai, anthropic, cohere, mistral, voyageai, jinaai, googleaistudio, hugging_face, deepseek (not Bedrock's access keys or Vertex's service account; roll's own E5 needs no endpoint). Reveal on the secret must be allowed, not asked: an asked reveal is refused. The cluster then calls the provider.", "search", "POST", "/v1/search/clusters/{cluster}/inference/secrets", &[req("cluster", "Cluster id or name"), breq("inference_id", Ty::Str, "The endpoint's id, e.g. my-embeddings"), breq("task_type", Ty::Choice(&["text_embedding", "sparse_embedding", "embedding", "rerank", "completion", "chat_completion"]), "What the endpoint does"), breq("config", Ty::Obj, "{service, service_settings (no api_key), task_settings?, chunking_settings?}"), breq("secret", Ty::Obj, "The roll secret holding the key: {environment, key, path?, project?}")]).open_world(),
     t("search_list_inference_secrets", "Inference endpoints keyed by a roll secret", "A cluster's inference endpoints whose API key comes from a roll secret, with the project and key each follows (a rotated value reaches the endpoint within seconds; never the value), and the projects whose secrets it could use.", "search", "GET", "/v1/search/clusters/{cluster}/inference/secrets", &[req("cluster", "Cluster id or name")]),
     t("search_branch_cluster", "Branch a search cluster", "A copy-on-write branch of a cluster, now or at a time within its history.", "search", "POST", "/v1/search/clusters/{cluster}/branches", &[req("cluster", "Cluster id or name"), breq("name", Ty::Str, "Branch name"), b("at", Ty::Int, "Unix seconds")]),
     t("search_update_cluster", "Update a search cluster", "Change a cluster's settings: idle_timeout_s (0: always loaded), max_in_flight, max_body_mb at once; flavor or destructive_requires_name put it to sleep to reload once no request runs; ip_allowlist replaces the networks its endpoint answers (up to 64 CIDRs, each a string or {cidr, description}; [] answers everyone; this API isn't filtered by it).", "search", "PATCH", "/v1/search/clusters/{cluster}", &[req("cluster", "Cluster id or name"), b("idle_timeout_s", Ty::Int, "Seconds idle before it sleeps (0: never)"), b("max_in_flight", Ty::Int, "Requests at once"), b("max_body_mb", Ty::Int, "Largest request body"), b("destructive_requires_name", Ty::Bool, "Refuse wildcard deletes"), b("flavor", Ty::Choice(&["elasticsearch", "opensearch"]), "Which API it speaks"), b("ip_allowlist", Ty::Arr, "CIDRs its endpoint answers (strings or {cidr, description})"), b("protected", Ty::Bool, "Only the project's admins change its data")]),
@@ -1219,7 +1219,7 @@ static TOOLS: &[Tool] = &[
         &[req("cluster", "Cluster"), req("index", "Index"), b("mappings", Ty::Obj, "Mappings"), b("settings", Ty::Obj, "Settings"), b("aliases", Ty::Obj, "Aliases")],
     ),
     t("search_delete_index", "Delete an index", "Delete an index and its documents.", "search", "DELETE", "/v1/search/clusters/{cluster}/indices/{index}", &[req("cluster", "Cluster"), req("index", "Index")]),
-    t("search_put_mapping", "Update a mapping", "Add fields to an index's mapping, or change what can change (Elasticsearch's PUT /<index>/_mapping): new fields, a field's copy_to and other updatable parameters, runtime fields, dynamic templates.", "search", "PUT", "/v1/search/clusters/{cluster}/indices/{index}/mapping", &[
+    t("search_put_mapping", "Update a mapping", "Add fields to an index's mapping, or change what can change (Elasticsearch's PUT /<index>/_mapping): new fields, a field's copy_to and other updatable parameters, runtime fields, dynamic templates. A field can't be taken out again. A field's copy_to and the mapping's _meta are replaced, not added to: read them first (search_get_mapping) and keep what's there.", "search", "PUT", "/v1/search/clusters/{cluster}/indices/{index}/mapping", &[
         req("cluster", "Cluster"),
         req("index", "Index"),
         b("properties", Ty::Obj, "Field mappings by name"),
@@ -1229,7 +1229,7 @@ static TOOLS: &[Tool] = &[
         b("date_detection", Ty::Bool, "Whether new strings that look like dates map as dates"),
         b("numeric_detection", Ty::Bool, "Whether new strings that look like numbers map as numbers"),
         b("dynamic_date_formats", Ty::Arr, "The date formats date detection tries"),
-        b("_meta", Ty::Obj, "The application's own notes about the mapping"),
+        b("_meta", Ty::Obj, "The application's notes about the mapping, replacing the old ones whole (keep what's there: an imported index's record is in it)"),
     ]),
     t("search_get_mapping", "Get a mapping", "An index's field mappings (Elasticsearch's GET /<index>/_mapping).", "search", "GET", "/v1/search/clusters/{cluster}/indices/{index}/mapping", &[req("cluster", "Cluster"), req("index", "Index")]),
     t("search_index_settings", "Index settings", "An index's settings (Elasticsearch's GET /<index>/_settings).", "search", "GET", "/v1/search/clusters/{cluster}/indices/{index}/settings", &[req("cluster", "Cluster"), req("index", "Index")]),
@@ -1280,6 +1280,10 @@ static TOOLS: &[Tool] = &[
         b("highlight", Ty::Obj, "{fields: {name: {}}, …}: a semantic_text field highlights its best chunks"),
         b("_source", Ty::Any, "Which source fields come back: false, a field or pattern, a list, or {includes, excludes}"),
         b("fields", Ty::Arr, "Fields to return as the mapping reads them (patterns too)"),
+        b("stored_fields", Ty::Arr, "Stored fields to return (\"_none_\": no _source or metadata either)"),
+        b("docvalue_fields", Ty::Arr, "Fields to return from doc values"),
+        b("seq_no_primary_term", Ty::Bool, "Each hit's _seq_no and _primary_term, for a write back that skips what changed meanwhile (if_seq_no, if_primary_term)"),
+        b("version", Ty::Bool, "Each hit's version"),
         b("collapse", Ty::Obj, "One hit per value of a field: {field, inner_hits?}"),
         b("rescore", Ty::Any, "Rescore the top hits again: {window_size, query: {rescore_query}}, or a list"),
         b("track_total_hits", Ty::Any, "true for an exact count, false for none, or a number to count up to"),
@@ -1289,7 +1293,8 @@ static TOOLS: &[Tool] = &[
         b("explain", Ty::Bool, "How each hit's score was computed"),
         b("timeout", Ty::Str, "e.g. 2s: answer with what's found by then"),
         b("terminate_after", Ty::Int, "Stop each shard after this many hits"),
-        b("runtime_mappings", Ty::Obj, "Fields computed at search time, by name"),
+        b("runtime_mappings", Ty::Obj, "Fields computed at search time, by name (Elasticsearch clusters)"),
+        b("derived", Ty::Obj, "Fields computed at search time, by name (OpenSearch clusters)"),
         b("script_fields", Ty::Obj, "Fields a script computes per hit, by name"),
         b("suggest", Ty::Obj, "Suggesters (term, phrase, completion)"),
         b("indices_boost", Ty::Arr, "Weights for hits from each index of the expression: [{index: weight}]"),
@@ -1745,6 +1750,10 @@ static TOOLS: &[Tool] = &[
     t("apps_visitors", "Who's signed in", "Who's signed in to a sign-in-gated environment now, newest first: each session's id, who (a provider's verified email or a roll person's id), how (github, google, sso or roll), the access.sso entry that let them in, since and until.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/visitors", &[SERVICE, ENV]),
     t("apps_end_visit", "Sign a visitor out", "End one visitor's session in a sign-in-gated environment now (its id from apps_visitors): they sign in again to come back, if access still lets them.", "apps", "DELETE", "/v1/apps/services/{service}/environments/{env}/visitors/{visitor}", &[SERVICE, ENV, req("visitor", "The session's id, from apps_visitors")]),
     t("apps_update_domain", "Change a domain", "Redirect a domain to another hostname of the same environment (redirect_to; null serves the app again; no loops or chains), or serve another of the app's ports on it (port; null the main one). A field left out stays.", "apps", "PATCH", "/v1/apps/services/{service}/environments/{env}/domains/{host}", &[SERVICE, ENV, req("host", "Host name"), bnull("redirect_to", Ty::Str, "Another hostname of this environment to redirect to (clear it: serve the app)"), bnull("port", Ty::Int, "Another of the app's ports (clear it: the main one)")]),
+    t("apps_status_domain", "A status page's own domain", "The domain of its own a project's status page answers on (status.example.com), with its DNS state and TLS; 404 when it has none.", "apps", "GET", "/v1/apps/projects/{project}/status-page/domain", &[req("project", "Workspace project")]),
+    t("apps_set_status_domain", "Set a status page's domain", "Put a project's status page on a domain of its own (status.example.com; a new one replaces it): answers the DNS record to add, then apps_verify_status_domain.", "apps", "POST", "/v1/apps/projects/{project}/status-page/domain", &[req("project", "Workspace project"), breq("hostname", Ty::Str, "One name, status.example.com")]),
+    t("apps_verify_status_domain", "Check a status page's domain", "Check a status page's own domain's DNS now: active once it checks out (then its certificate is issued), else pending with what DNS answered.", "apps", "POST", "/v1/apps/projects/{project}/status-page/domain/verify", &[req("project", "Workspace project")]).open_world(),
+    t("apps_remove_status_domain", "Remove a status page's domain", "Remove a status page's own domain: the page answers only on its status-<slug> address after.", "apps", "DELETE", "/v1/apps/projects/{project}/status-page/domain", &[req("project", "Workspace project")]),
     t("apps_preview_domain", "A project's preview domain", "The wildcard a project's preview environments answer under (each by its preview_host), with its DNS state and TLS; 404 when it has none.", "apps", "GET", "/v1/apps/projects/{project}/preview-domain", &[req("project", "Workspace project")]),
     t("apps_set_preview_domain", "Set a project's preview domain", "Give a project's preview environments a wildcard of its own (*.preview.example.com; a new one replaces it): answers the DNS record to add, then apps_verify_preview_domain.", "apps", "POST", "/v1/apps/projects/{project}/preview-domain", &[req("project", "Workspace project"), breq("hostname", Ty::Str, "A wildcard, *.preview.example.com")]),
     t("apps_verify_preview_domain", "Check a preview domain", "Check a project's preview domain's DNS now: active once it checks out, else pending with what DNS answered.", "apps", "POST", "/v1/apps/projects/{project}/preview-domain/verify", &[req("project", "Workspace project")]).open_world(),
@@ -2108,17 +2117,12 @@ mod tests {
     fn a_search_takes_what_a_search_body_takes() {
         const LEFT_OUT: &[(&str, &str)] = &[
             ("aggregations", "aggs under its other name"),
-            ("stored_fields", "fields reads stored and doc-value fields too"),
-            ("docvalue_fields", "fields reads stored and doc-value fields too"),
-            ("version", "only for a conditional write, and no write tool takes one"),
-            ("seq_no_primary_term", "only for a conditional write, and no write tool takes one"),
             ("pit", "a point in time is opened by a route with no tool; paging is search_after"),
             ("slice", "splits a point in time's pages between workers"),
             ("rank", "retriever's rrf replaces it in Elasticsearch"),
             ("sub_searches", "retriever's rrf replaces it in Elasticsearch"),
             ("stats", "groups for the indices stats API, which no tool reads"),
             ("ext", "plugins' and search pipelines' sections; no tool names a pipeline"),
-            ("derived", "OpenSearch's own; runtime_mappings on Elasticsearch clusters"),
             ("verbose_pipeline", "OpenSearch's trace of a search pipeline; no tool names a pipeline"),
         ];
         let src = include_str!("../../search-es/src/search_source.rs");
@@ -2558,6 +2562,7 @@ mod tests {
             ("apps_remove_domain", "forgets it"),
             ("apps_update_domain", "a setting"),
             ("apps_set_preview_domain", "stores it; checking it is apps_verify_preview_domain"),
+            ("apps_set_status_domain", "stores it; checking it is apps_verify_status_domain"),
         ];
         let silent: Vec<&str> = all()
             .iter()

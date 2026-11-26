@@ -133,7 +133,7 @@ stats = {"modules": [{"name": "./lib/deep.js", "reasons": [{"moduleName": "./sto
 # Storybook's own preview as its frame exposes it (`__STORYBOOK_PREVIEW__.storyRenders`): Deep's
 # play function threw (phase `errored`), the first one's ran to its end, the rest have none.
 # Its error display says what Deep's threw, as Storybook's frame does (`#error-message`).
-play = '<div id="error-message"></div><script>const id = new URLSearchParams(location.search).get("id"); globalThis.__STORYBOOK_PREVIEW__ = { storyRenders: [{ id, phase: id === "deep--one" ? "errored" : "finished", story: id === "deep--one" || id === "s01--one" ? { playFunction() {} } : {} }] }; if (id === "deep--one") document.getElementById("error-message").textContent = "expected Pay to be visible";</script>'
+play = '<div id="error-message"></div><script>const id = new URLSearchParams(location.search).get("id"); globalThis.__STORYBOOK_PREVIEW__ = { storyRenders: [{ id, phase: id === "deep--one" ? "errored" : "finished", story: id === "deep--one" || id === "s01--one" ? { playFunction() {} } : {} }] }; if (id === "deep--one") { document.getElementById("error-message").textContent = "expected Pay to be visible"; globalThis.__STORYBOOK_ADDON_INTERACTIONS_INSTRUMENTER_STATE__ = { "deep--one": { calls: [{ id: "c1", path: ["userEvent"], method: "click", status: "done" }, { id: "c2", path: [], method: "expect", status: "done" }, { id: "c3", path: [{ __callId__: "c2" }], method: "toBeVisible", status: "error" }] } }; }</script>'
 frame = '<!doctype html><html lang="en"><title>story</title><div id="storybook-root"><button>a story</button></div>' + play
 files = {"storybook/index.json": json.dumps(index), "storybook/preview-stats.json": json.dumps(stats), "storybook/iframe.html": frame}
 print(json.dumps({"message": "storybook", "files": {k: {"content": v} for k, v in files.items()}}))
@@ -670,12 +670,15 @@ STORY_A11Y=$(api GET "/v1/previews/$PV" | jq_ "[(x.get('a11y') or {}).get('lang'
 # Their interaction tests as Storybook ran them (Chromatic's): Deep's failed, the first's passed.
 PLAYS=$(api GET "/v1/previews/$PV" | jq_ "sorted('%s %s' % (x['path'], x.get('play')) for x in d['pages'] if x['path'] in ('story:deep--one', 'story:s01--one', 'story:s02--one'))")
 [ "$PLAYS" = "['story:deep--one failed', 'story:s01--one passed', 'story:s02--one None']" ] || { echo "a story's interaction test should be read as Storybook ran it: $PLAYS"; exit 1; }
-PLAY_ERROR=$(api GET "/v1/previews/$PV" | jq_ "[x.get('play_error') for x in d['pages'] if x['path'] == 'story:deep--one']")
-[ "$PLAY_ERROR" = "['expected Pay to be visible']" ] || { echo "a failed interaction test should say what it threw: $PLAY_ERROR"; exit 1; }
+PLAY_ERROR=$(api GET "/v1/previews/$PV" | jq_ "[(x.get('play_step'), x.get('play_error')) for x in d['pages'] if x['path'] == 'story:deep--one']")
+[ "$PLAY_ERROR" = "[('expect.toBeVisible', 'expected Pay to be visible')]" ] || { echo "a failed interaction test should say where it stopped and what it threw: $PLAY_ERROR"; exit 1; }
 # The change's first stories in the other browsers asked for too (Chromatic's cross-browser
 # stories): Deep's, taken first, in Firefox and WebKit at a phone's size.
 STORY_BROWSERS=$(api GET "/v1/previews/$PV" | jq_ "sorted(x['path'] for x in d['pages'] if x['path'].startswith('story:deep--one@'))")
 [ "$STORY_BROWSERS" = "['story:deep--one@firefox', 'story:deep--one@webkit-phone']" ] || { echo "the change's first story should be taken in the other browsers asked for: $STORY_BROWSERS"; exit 1; }
+# And its interaction test in each of them, as Storybook ran it there.
+PLAY_BROWSERS=$(api GET "/v1/previews/$PV" | jq_ "sorted('%s %s %s' % (x['path'], x.get('play'), x.get('play_error')) for x in d['pages'] if x['path'].startswith('story:deep--one@'))")
+[ "$PLAY_BROWSERS" = "['story:deep--one@firefox failed expected Pay to be visible', 'story:deep--one@webkit-phone failed expected Pay to be visible']" ] || { echo "a story's interaction test should be read in the other browsers too: $PLAY_BROWSERS"; exit 1; }
 # Signed in first (github.login): its $GREETING put in by roll and handed to the browser through
 # its container's stdin. The page has no #nope, so the run says where it stopped, never what it
 # would have typed.

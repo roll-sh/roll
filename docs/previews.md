@@ -2353,8 +2353,10 @@ type Settings = {
     read is bounded to 2 s and taken as one of two words. `play` on the story's page is `failed`
     when it threw (or the story's render did: phase `errored`), with `play_error` what it threw as
     Storybook's frame shows it (its error display, `#error-message`, read in the isolated world: one
-    line of 300 characters at most, masked like the page's other words), and `passed` when a play
-    function ran to its end;
+    line of 300 characters at most, masked like the page's other words) and `play_step` the
+    interaction or assertion it stopped at (`expect.toBeVisible`, `userEvent.click`: the call
+    Storybook's instrumenter marks `error`, read in the page's world like `play` and kept to a
+    dotted name of 120 characters), and `passed` when a play function ran to its end;
     against main's same story, one that fails where main's passes is `against.play_broke`. The
     sheet says which. Live: the fixture's preview object has Deep's play throw and the first
     story's pass. With `github.browsers`, the change's first 5 stories (as the run
@@ -2368,7 +2370,8 @@ type Settings = {
     compared again (a baseline on demand). A story main's Storybook doesn't have (the change added
     it) is asked for once per head, never again until main moves.
     `main_takes_the_stories_a_change_has_and_it_hasnt`.
-    Best effort: Chromium's stories stand without them. Live: the live Storybook's first story
+    Each with its interaction test in that browser too (`play`, `play_error` and `play_step`, read the same
+    way, through Playwright in the page's world). Best effort: Chromium's stories stand without them. Live: the live Storybook's first story
     in Firefox and in WebKit at a phone's size. A story gone from Storybook goes
     from the preview. The index is the preview's code's: an id Storybook wouldn't make
     (`components-button--primary`) is dropped. A Storybook on another service is kept with that
@@ -2900,14 +2903,12 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-Ranked again after an eighth product review (2026-11-26, morning), against Chromatic's
-interaction and accessibility tests and baselines, Vercel's and Netlify's comments, Render's and
-Railway's previews, Neon's branches.
+Ranked again after a ninth product review (2026-11-26, morning), against Chromatic's
+cross-browser and interaction tests, Percy's snapshots, Vercel's comments and toolbar, Render's
+previews.
 
-1. **Stories' interaction tests, in review** (Chromatic's): each story's `play` function, read as
-   Storybook ran it, `failed` or `passed` on its page and against main's. Next for it: the failing
-   step and its message (Storybook's interactions log), and the interaction tests in the other
-   browsers.
+1. **An interaction test's failing step, in review** (Storybook's interactions log, the
+   instrumenter's calls): which interaction or `expect` stopped it, beside what it threw.
 2. **Restore points for Redis, search and streams**: NoSQL's landed (#1028). A point is kept only
    where the product puts a branch back in place, keeping its id; each needs its control plane's
    reset `from` (roll search: feasible, about a day, with its user to schedule).
@@ -2919,6 +2920,8 @@ Railway's previews, Neon's branches.
 5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+
+Landed 2026-11-26, morning: stories' interaction tests (#1087), what a failed one threw (#1091), and both in the other browsers (#1100).
 
 Landed 2026-11-26, early: a baseline on demand for stories (#1082); a change's first stories in the other browsers (#1064); roll apps lookups that miss remembered (#1066); a settled running preview's usage read alone too (#1069).
 
