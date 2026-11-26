@@ -808,6 +808,19 @@ impl Runtime {
 
     /// The notes left on `path` of the preview's pages, as JSON (the latest 50; for whoever has
     /// the button: link access or a team session, through roll).
+    /// The same page on main's preview, for the toolbar's Main (404 when there's none).
+    async fn main_page(&self, preview: &str, service: &str, path: &str) -> Response {
+        let url = match self.engine() {
+            Ok(e) => e.main_page_url(preview, service, path).await.ok().flatten(),
+            Err(_) => None,
+        };
+        let headers = [(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "private, no-store")];
+        match url {
+            Some(url) => (headers, axum::Json(serde_json::json!({ "url": url }))).into_response(),
+            None => (StatusCode::NOT_FOUND, headers, axum::Json(serde_json::json!({ "error": "no main preview of this page" }))).into_response(),
+        }
+    }
+
     async fn feedback_notes(&self, preview: &str, path: &str) -> Response {
         let here = match self.engine() {
             Ok(e) => e.notes_of(preview, path).await.unwrap_or_default(),
@@ -1259,6 +1272,8 @@ pub const FEEDBACK_PATH: &str = "/__roll/feedback.js";
 pub const FEEDBACK_NOTES_PATH: &str = "/__roll/feedback.json";
 /// Where a share link's guest posts a note from the button.
 pub const GUEST_NOTE_PATH: &str = "/__roll/notes";
+/// The toolbar's Main: the page on main's preview (`?path=`), as `{url}` (a team visitor's only).
+pub const MAIN_PAGE_PATH: &str = "/__roll/main";
 pub(crate) const FEEDBACK_TAG: &[u8] = b"<script src=\"/__roll/feedback.js\" defer></script>";
 /// Adds the feedback button's tag to a page as it streams: before the first `</body>` (matched
 /// across chunk boundaries, in any case), or at the end of a page without one. Chunks pass on as
@@ -1341,6 +1356,7 @@ fn feedback_script(target: &str, guest: bool, flags: &[crate::settings::FlagRule
     let js = include_str!("feedback.js")
         .replace("__ROLL_TARGET__", &serde_json::to_string(target).unwrap_or_else(|_| "\"\"".into()))
         .replace("__ROLL_GUEST__", if guest { "true" } else { "false" })
+        .replace("__ROLL_MAIN__", if guest { "false" } else { "true" })
         .replace("__ROLL_FLAGS__", &serde_json::to_string(flags).unwrap_or_else(|_| "[]".into()));
     ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8"), (header::CACHE_CONTROL, "private, max-age=300")], js).into_response()
 }
@@ -2925,6 +2941,12 @@ async fn serve(rt: Arc<Runtime>, preview: String, service: String, mut req: Requ
             Feedback::Team(_) => rt.feedback_notes(&preview, &path).await,
             Feedback::Guest(share) => rt.guest_notes(&preview, &share.id, &path).await,
         };
+    }
+    if req.uri().path() == MAIN_PAGE_PATH
+        && let Some(Feedback::Team(_)) = &target
+    {
+        let path = req.uri().query().unwrap_or("").split('&').filter_map(|kv| kv.split_once('=')).find(|(k, _)| *k == "path").map(|(_, v)| percent_decode(v)).unwrap_or_default();
+        return rt.main_page(&preview, &service, &path).await;
     }
     if req.uri().path() == GUEST_NOTE_PATH
         && req.method() == axum::http::Method::POST

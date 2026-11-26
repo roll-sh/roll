@@ -1260,7 +1260,62 @@ impl Store {
         db.add_column("domains", "redirect_to", "TEXT")?;
         let store = Store { db, sealer };
         store.mark_references()?;
+        store.quote_log_patterns()?;
         Ok(store)
+    }
+
+    /// Once (`state`'s `log-patterns-quoted`): log alerts' and log metrics' patterns saved while
+    /// they matched a substring (before they took the Logs search, #1121) quoted, so each matches
+    /// what it did (`connection refused` the phrase, `-ERR` the text, not every line without it).
+    /// One word was already the same either way. Services', environments' and deployments' runs.
+    fn quote_log_patterns(&self) -> Result<()> {
+        if self.get_state("log-patterns-quoted")?.is_some() {
+            return Ok(());
+        }
+        let quote = |p: &mut serde_json::Value| {
+            if let Some(t) = p.as_str()
+                && !t.contains('"')
+                && (t.contains(char::is_whitespace) || t.starts_with('-') || t == "OR")
+            {
+                *p = serde_json::Value::String(format!("\"{t}\""));
+            }
+        };
+        let fix = |run: &str| -> Option<String> {
+            let mut v: serde_json::Value = serde_json::from_str(run).ok()?;
+            let before = v.clone();
+            if let Some(m) = v.pointer_mut("/alerts/log_match") {
+                quote(m);
+            }
+            if let Some(ms) = v.get_mut("log_metrics").and_then(serde_json::Value::as_array_mut) {
+                for m in ms {
+                    if let Some(p) = m.get_mut("pattern") {
+                        quote(p);
+                    }
+                }
+            }
+            (v != before).then(|| v.to_string())
+        };
+        self.db.write(|c| {
+            // Another node may have just done it: once, in the same write as the mark.
+            if c.execute("INSERT INTO state (key, value) VALUES ('log-patterns-quoted', '1') ON CONFLICT (key) DO NOTHING", ())? == 0 {
+                return Ok(());
+            }
+            for (table, key) in [("services", "id"), ("deployments", "id")] {
+                let rows: Vec<(String, String)> = c.query(&format!("SELECT {key}, run FROM {table} WHERE run LIKE '%log_match%' OR run LIKE '%log_metrics%'"), (), |r| Ok((r.get(0)?, r.get(1)?)))?;
+                for (id, run) in rows {
+                    if let Some(new) = fix(&run) {
+                        c.execute(&format!("UPDATE {table} SET run = ? WHERE {key} = ?"), params![new, id])?;
+                    }
+                }
+            }
+            let rows: Vec<(String, String, String)> = c.query("SELECT service, name, run FROM environments WHERE run LIKE '%log_match%' OR run LIKE '%log_metrics%'", (), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            for (svc, name, run) in rows {
+                if let Some(new) = fix(&run) {
+                    c.execute("UPDATE environments SET run = ? WHERE service = ? AND name = ?", params![new, svc, name])?;
+                }
+            }
+            Ok(())
+        })
     }
 
     pub fn now(&self) -> Result<i64> {
@@ -2820,6 +2875,11 @@ impl Store {
                 return Err(Error::Conflict(format!("{host} is already a domain of roll apps")));
             }
             let was: Option<String> = c.query_row("SELECT hostname FROM status_domains WHERE project = ?", [project], |r| r.get(0)).optional()?;
+            // The same name again changes nothing: its proof, its token and its week stand (a
+            // re-post can't keep an unproven claim alive, nor take a verified one off its name).
+            if was.as_deref() == Some(host) {
+                return Ok(None);
+            }
             c.execute(
                 "INSERT INTO status_domains (project, hostname, status, token, error, tls, tls_error, created_at) VALUES (?, ?, 'pending', ?, NULL, ?, NULL, ?) \
                  ON CONFLICT (project) DO UPDATE SET hostname = excluded.hostname, status = 'pending', token = excluded.token, error = NULL, tls = excluded.tls, tls_error = NULL, created_at = excluded.created_at",
@@ -5054,6 +5114,29 @@ fn insert_event(c: &code_sql::Conn<'_>, now: i64, kind: &str, service: &str, env
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Patterns saved as substrings keep their meaning under the Logs search: quoted once, on
+    /// the next open, one word left alone.
+    #[test]
+    fn saved_log_patterns_are_quoted_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("apps.db");
+        let s = Store::new(Db::open_sqlite(&path, Default::default()).unwrap(), Sealer::new(&"k".repeat(32)).unwrap()).unwrap();
+        let run = r#"{"alerts":{"log_match":"connection refused"},"log_metrics":[{"name":"a","pattern":"-ERR"},{"name":"b","pattern":"panic"}]}"#;
+        s.db.execute("INSERT INTO environments (service, name, ephemeral, slug, created_at, run) VALUES ('svc_x', 'production', 0, 'x', 0, ?)", [run]).unwrap();
+        s.db.execute("DELETE FROM state WHERE key = 'log-patterns-quoted'", ()).unwrap();
+        drop(s);
+        let s = Store::new(Db::open_sqlite(&path, Default::default()).unwrap(), Sealer::new(&"k".repeat(32)).unwrap()).unwrap();
+        let got: String = s.db.query_row("SELECT run FROM environments WHERE service = 'svc_x'", (), |r| r.get(0)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&got).unwrap();
+        assert_eq!((v["alerts"]["log_match"].as_str(), v["log_metrics"][0]["pattern"].as_str(), v["log_metrics"][1]["pattern"].as_str()), (Some("\"connection refused\""), Some("\"-ERR\""), Some("panic")), "{got}");
+        // Once: a search saved since stays as it was written.
+        s.db.execute("UPDATE environments SET run = ? WHERE service = 'svc_x'", [r#"{"alerts":{"log_match":"timeout OR refused"}}"#]).unwrap();
+        drop(s);
+        let s = Store::new(Db::open_sqlite(&path, Default::default()).unwrap(), Sealer::new(&"k".repeat(32)).unwrap()).unwrap();
+        let got: String = s.db.query_row("SELECT run FROM environments WHERE service = 'svc_x'", (), |r| r.get(0)).unwrap();
+        assert!(got.contains("\"timeout OR refused\"") && !got.contains("\\\""), "{got}");
+    }
 
     /// Two notifiers (a handover) never queue an event twice for a target, the one whose
     /// cursor moved under it queues nothing, and a claimed delivery isn't handed out again.

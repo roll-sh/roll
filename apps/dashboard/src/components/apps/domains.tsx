@@ -260,6 +260,7 @@ export function DomainsTab({ service, env, runner }: { service: string; env: Env
                       : "Add the CNAME with your DNS provider, then Verify. At a zone's apex, where a CNAME isn't allowed, use your provider's ALIAS or flattening and add the TXT record. The certificate is issued once it resolves."}
                   </p>
                 )}
+                {d.kind === "custom" && d.status !== "active" && !d.hostname.startsWith("*.") && <OnCloudflare service={service} env={env.name} host={d.hostname} runner={runner} />}
               </li>
             );
           })}
@@ -284,6 +285,40 @@ export function DomainsTab({ service, env, runner }: { service: string; env: Env
         </form>
       </section>
     </div>
+  );
+}
+
+/** The records written at the customer's own Cloudflare with their token (Vercel's own DNS):
+ *  a `roll://` reference to it, read as the person for this one call, never kept. */
+function OnCloudflare({ service, env, host, runner }: { service: string; env: string; host: string; runner: Runner }) {
+  const [open, setOpen] = useState(false);
+  const [ref, setRef] = useState("");
+  // Its name's A and AAAA records (the old host's) deleted for roll's CNAME.
+  const [replace, setReplace] = useState(false);
+  if (!open)
+    return (
+      <button type="button" className="text-[12px] text-accent hover:underline" onClick={() => setOpen(true)}>
+        Its DNS is on Cloudflare? Write the records there
+      </button>
+    );
+  return (
+    <form
+      className="flex flex-wrap items-center gap-2"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void runner.run(`cloudflare:${host}`, () => appsApi.configureDomain(service, env, host, ref.trim(), replace));
+      }}
+    >
+      <input value={ref} onChange={(e) => setRef(e.target.value)} placeholder="roll://production/CLOUDFLARE_TOKEN" aria-label="Cloudflare token's roll:// reference" spellCheck={false} className={`${input} min-w-64 flex-1 font-mono text-[12px]`} />
+      <button type="submit" className={btn} disabled={runner.busy !== null || !ref.trim().startsWith("roll://")}>
+        {runner.busy === `cloudflare:${host}` ? <span className="shimmer">Writing…</span> : "Write and verify"}
+      </button>
+      <label className="flex items-center gap-1.5 text-[12px] text-muted">
+        <input type="checkbox" checked={replace} onChange={(e) => setReplace(e.target.checked)} />
+        Replace its A and AAAA records
+      </label>
+      <span className="w-full text-[12px] text-subtle">A roll secret holding a Cloudflare API token with Zone:DNS:Edit on this domain's zone, read as you for this once and never kept. A name still pointing at another host keeps its records unless you replace them.</span>
+    </form>
   );
 }
 
