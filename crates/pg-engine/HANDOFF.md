@@ -15108,7 +15108,15 @@ Not gated on a PGO build: the new paths are out of line; `Moving`'s methods are 
   in-memory `hashed_sets` then inlined into that, not into `run`) and gate again.
 - n1's `Moving` as plain methods (above): fitting msum +0.89 / +0.94% (`n1-to-n2.diff`).
 
-**Verification:** the quick-check on the stack's head follows below this section's commit (agent 334).
+**Verification:** `tools/quick-check.sh` with `QC_CHECKED=1` on `5bc82d40a` (the two code commits and
+this section on `4c322b3d8`): Clippy 16 warnings, none new in a changed file (a first run flagged
+winstream's `to_group` / `to_range` names: `group_bound` / `range_bound` now); 139 tests in 9
+binaries passed, again built `--profile verify-checked` (139 passed); regress 51,148 / 51,150, 0
+newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed. The lower candidate is a
+prefix of that stack; only its head was checked. New query_spill cases: four sliding frames in
+`windows_stream_past_work_mem` (against the in-memory path, 1,000-row partitions at 64 kB),
+`sliding_frames_spill` (seven statements: results and temp file counts PostgreSQL 18.6's, and three
+EXPLAIN ANALYZE Storage / Sort lines).
 
 **Left** (largest first): grouping sets (290.6 / 35.1: the dropped patch above); DISTINCT
 aggregates sharing an argument, under GROUP BY, over a join or with reltuples unknown (44.1 / 14.2,
