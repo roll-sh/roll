@@ -1382,8 +1382,7 @@ in review (item 11's RAG phase 2, #1068 in its third round; item 30's read-only 
 its second; item 1's derived-key follow-ups, #1127 in its second; item 31's re-embed route,
 #1132, landing), then item 32 (resetting a branch from a copy for previews' restore points; in
 progress), item 33's second slice (saved searches, surrounding documents, a field's chart; in
-progress), item 15's confidence intervals and promoting from the Relevance tab (in review),
-then its judgment lists and offline evaluation (the top open item), item 14 (semantic search on OpenSearch-flavor
+progress), item 15's offline evaluation (in review; judgment lists from clicks next), item 14 (semantic search on OpenSearch-flavor
 clusters; resumes after #1111), item 16 (cold start at size; resumes after #1127), OpenSearch's
 `_plugins/_sm` (item 9; in progress), item 5's OpenSearch links (designed), and chat token
 metering (item 11's follow-up; in progress).
@@ -1756,9 +1755,11 @@ deterministic (#396).
    zero-result rate and p95 latency per variant, and promoting a variant into the application
    (`…/_roll/experiments/{id}/_promote`). Then 95% intervals for each rate and for each
    difference from the baseline, and promoting from the Relevance tab
-   (`feature/search-exp-ci`). Next: judgment lists and offline evaluation (phase 1: OpenSearch's
-   Search Relevance Workbench and `_rank_eval` with lists, for CI). Left: the `roll_` rule types
-   and dynamic re-ranking.
+   (#1145). Offline evaluation's first slice in review (`feature/search-evaluate`:
+   `…/indices/{index}/evaluate`, `roll search index evaluate` for CI, `search_evaluate`, the
+   Relevance tab's Evaluate). Next: judgment lists kept as indices and built from clicks, and
+   evaluating a search application's template and its variants. Left: the `roll_` rule types and
+   dynamic re-ranking.
 16. **Cold start at size**: the 19.8 ms cold start is a 50k-document index from local cache;
    nothing measures the first query and p99 on a node with an empty cache for 1, 10 and 50 GB
    indices loaded from object storage, or on Graviton. Buyers comparing always-on Typesense or Algolia
