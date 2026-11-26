@@ -1864,15 +1864,32 @@ fn bitmap_keys(t: &Arc<Table>, q: &BitmapQual, kept: &mut Option<KeptRows>, note
                     sorted_keys.extend(entries.into_iter().map(|(_, v)| v.to_vec()));
                     continue;
                 }
+                // (The entries' rows at the statement's snapshot read together, by the sorted
+                // multi-get: a range's entries of one key name their rows in key order. As
+                // stored when the quals' columns' values are read by `qual_row`.)
+                let mut fetched = match ctx.snapshot().as_deref() {
+                    Some(sn) if secondary && entries.len() > 1 => {
+                        let dkeys: Vec<Vec<u8>> = entries.iter().map(|(_, v)| v.to_vec()).collect();
+                        let rows = get_sorted(&ctx.txn.borrow(), &dkeys, sn, values.is_none())?;
+                        Some(dkeys.into_iter().zip(rows))
+                    }
+                    _ => None,
+                };
                 for (k, v) in entries {
                     ctx.check()?;
                     let (dkey, bytes) = if secondary {
-                        let dkey = v.to_vec();
-                        let row = match ctx.snapshot().as_deref() {
-                            // (As stored: the quals' columns' values read by `qual_row`.)
-                            Some(sn) if values.is_some() => ctx.txn.borrow().get_many_snap_raw(std::slice::from_ref(&dkey), sn)?.pop().flatten(),
-                            Some(sn) => ctx.txn.borrow().get_snap(&dkey, sn)?,
-                            None => ctx.txn.borrow().get(&dkey)?,
+                        let (dkey, row) = match fetched.as_mut().and_then(Iterator::next) {
+                            Some(got) => got,
+                            None => {
+                                let dkey = v.to_vec();
+                                let row = match ctx.snapshot().as_deref() {
+                                    // (As stored: the quals' columns' values read by `qual_row`.)
+                                    Some(sn) if values.is_some() => ctx.txn.borrow().get_many_snap_raw(std::slice::from_ref(&dkey), sn)?.pop().flatten(),
+                                    Some(sn) => ctx.txn.borrow().get_snap(&dkey, sn)?,
+                                    None => ctx.txn.borrow().get(&dkey)?,
+                                };
+                                (dkey, row)
+                            }
                         };
                         match row {
                             Some(b) => (dkey, b),
