@@ -1835,6 +1835,15 @@ static TOOLS: &[Tool] = &[
         "/v1/previews/{id}/reset",
         &[req("id", "Preview id"), b("resources", Ty::Arr, "Only these, as \"<kind>:<parent>\"")],
     ),
+    t(
+        "previews_rehearse",
+        "Rehearse a release on today's data",
+        "Run a change's release (its migrations) once more on fresh, masked branches of its Postgres parents as they are now, instead of the preview's branches from when it was made: how long it takes and whether it fails on today's data, before it lands. Answers at once; previews_wait, then the preview's rehearsal {head, ok, ms, error}. Refused for a default branch's preview, or one without a release or a Postgres branch.",
+        "previews",
+        "POST",
+        "/v1/previews/{id}/rehearse",
+        &[req("id", "Preview id")],
+    ),
     t("previews_keep", "Keep a preview", "Keep a preview past its time to live, for some hours (0 lets it go; a landed or closed change still ends it).", "previews", "POST", "/v1/previews/{id}/keep", &[req("id", "Preview id"), breq("hours", Ty::Int, "0 to 720")]),
     t("previews_activity", "Preview activity", "What happened to a preview, newest first.", "previews", "GET", "/v1/previews/{id}/activity", &[req("id", "Preview id")]),
     t("previews_sleep", "Sleep a preview", "Stop a preview's services until it's woken (its data stays).", "previews", "POST", "/v1/previews/{id}/sleep", &[req("id", "Preview id")]),
@@ -2692,7 +2701,7 @@ mod tests {
         const FORK_WORDS: &[&str] = &[
             // The preview itself (`outside: !trusted`: its title is the fork's pull request's),
             // and every write that answers it.
-            "previews_list", "previews_get", "previews_wait", "previews_create", "previews_refresh", "previews_keep", "previews_sleep", "previews_wake", "previews_reset",
+            "previews_list", "previews_get", "previews_wait", "previews_create", "previews_refresh", "previews_keep", "previews_sleep", "previews_wake", "previews_reset", "previews_rehearse",
             "previews_errors", "previews_traces", "previews_get_trace", "previews_routes", "previews_logs", "previews_requests", "previews_activity",
             "previews_list_mail", "previews_read_mail", "previews_screenshot", "previews_fetch", "previews_try", "previews_try_screenshot", "previews_note_crop", "previews_tables",
             // A share link's guests' notes (`by` `guest:…`).
