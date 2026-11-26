@@ -239,6 +239,13 @@ pub struct Login {
     pub identity: String,
 }
 
+/// Never the login's token.
+impl std::fmt::Debug for Login {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Login").field("token", &"<redacted>").field("expires_at", &self.expires_at).field("project", &self.project).field("identity", &self.identity).finish()
+    }
+}
+
 const COLUMNS: &str = "id, project_id, name, issuer, audience, subject, claims, environments, paths, actions, ttl_minutes, created_at, created_by, last_used_at, last_subject, allowed_ips, jwks, kind, gateway, disabled_at, disabled_why";
 
 /// An identity, its project, and its pinned keys.
@@ -890,11 +897,4 @@ fn identity_needs<'a>(i: &'a Identity, project: &'a str) -> Vec<(Action, Scope<'
         }
     }
     out
-}
-
-/// Never the login's token.
-impl std::fmt::Debug for Login {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Login").field("token", &"<redacted>").field("expires_at", &self.expires_at).field("project", &self.project).field("identity", &self.identity).finish()
-    }
 }

@@ -151,6 +151,13 @@ pub struct NewSink {
     pub token: Option<String>,
 }
 
+/// Never the sink's token.
+impl std::fmt::Debug for NewSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NewSink").field("url", &self.url).field("from_start", &self.from_start).field("format", &self.format).field("token", &crate::crypto::redacted(&self.token)).finish()
+    }
+}
+
 fn sink_aad(project: &str, id: &str) -> String {
     format!("roll-secrets:sink:{project}:{id}")
 }
@@ -378,11 +385,4 @@ pub(crate) fn csv(rows: &[AuditEntry]) -> String {
         out.push('\n');
     }
     out
-}
-
-/// Never the sink's token.
-impl std::fmt::Debug for NewSink {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NewSink").field("url", &self.url).field("from_start", &self.from_start).field("format", &self.format).field("token", &crate::crypto::redacted(&self.token)).finish()
-    }
 }

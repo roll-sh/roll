@@ -138,6 +138,29 @@ pub struct ValueRequest {
     pub link: Option<String>,
 }
 
+/// Never the request's token, nor its link (which carries the token).
+impl std::fmt::Debug for ValueRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ValueRequest")
+            .field("id", &self.id)
+            .field("environment", &self.environment)
+            .field("path", &self.path)
+            .field("keys", &self.keys)
+            .field("note", &self.note)
+            .field("answers_left", &self.answers_left)
+            .field("created_by", &self.created_by)
+            .field("created_at", &self.created_at)
+            .field("expires_at", &self.expires_at)
+            .field("answered_at", &self.answered_at)
+            .field("cancelled_at", &self.cancelled_at)
+            .field("open", &self.open)
+            .field("outcome", &self.outcome)
+            .field("token", &crate::crypto::redacted(&self.token))
+            .field("link", &crate::crypto::redacted(&self.link))
+            .finish()
+    }
+}
+
 /// What a request's public page shows: the note, the key names, and the key to seal to.
 #[derive(Debug, Serialize)]
 pub struct ValuePeek {
@@ -506,28 +529,5 @@ mod tests {
         let b = Sealed { v: 1, epk: "E75P6uryBMf9M1j8nAByGIHRdCeBKCJ-xnTzf3_pe20".into(), nonce: "CQkJCQkJCQkJCQkJ".into(), ct: "1HuLapmEhhMzGSncJaIeQhH3fUE_nFEU".into() };
         assert_eq!(&*crypto::open_sealed(&secret, &answer_context("vrq_test", "VENDOR_KEY"), &b).unwrap(), b"fake-key");
         assert!(crypto::open_sealed(&secret, &answer_context("vrq_test", "OTHER"), &b).is_err());
-    }
-}
-
-/// Never the request's token, nor its link (which carries the token).
-impl std::fmt::Debug for ValueRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ValueRequest")
-            .field("id", &self.id)
-            .field("environment", &self.environment)
-            .field("path", &self.path)
-            .field("keys", &self.keys)
-            .field("note", &self.note)
-            .field("answers_left", &self.answers_left)
-            .field("created_by", &self.created_by)
-            .field("created_at", &self.created_at)
-            .field("expires_at", &self.expires_at)
-            .field("answered_at", &self.answered_at)
-            .field("cancelled_at", &self.cancelled_at)
-            .field("open", &self.open)
-            .field("outcome", &self.outcome)
-            .field("token", &crate::crypto::redacted(&self.token))
-            .field("link", &crate::crypto::redacted(&self.link))
-            .finish()
     }
 }

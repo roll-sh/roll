@@ -123,6 +123,13 @@ pub struct Plain {
     pub context: Option<String>,
 }
 
+/// Never the plaintext.
+impl std::fmt::Debug for Plain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Plain").field("plaintext", &"<redacted>").field("context", &self.context).finish()
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Cipher {
@@ -624,11 +631,4 @@ fn batch_limits(sizes: impl Iterator<Item = usize>) -> Result<()> {
         return Err(Error::BadRequest(format!("1–{BATCH_MAX} items, {} MiB at most in all", BATCH_BYTES >> 20)));
     }
     Ok(())
-}
-
-/// Never the plaintext.
-impl std::fmt::Debug for Plain {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Plain").field("plaintext", &"<redacted>").field("context", &self.context).finish()
-    }
 }

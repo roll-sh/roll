@@ -98,6 +98,13 @@ pub struct MadeGateway {
     pub token: Option<String>,
 }
 
+/// Never the gateway's token.
+impl std::fmt::Debug for MadeGateway {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MadeGateway").field("gateway", &self.gateway).field("token", &crate::crypto::redacted(&self.token)).finish()
+    }
+}
+
 /// Gateways' links, where they're held (rolld): re-check gateway `id`'s link now, closing it if
 /// its credential or its record is gone. Blocking; a holder that can't be reached isn't an error
 /// (the link checks before every stream it opens).
@@ -353,12 +360,5 @@ impl Secrets {
 
     pub fn open_hop(&self, gateway: &str, raw: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>> {
         self.keys()?.open_hop(&format!("gateway:{gateway}"), raw).map_err(|_| Error::BadRequest("a forwarded call that doesn't open".into()))
-    }
-}
-
-/// Never the gateway's token.
-impl std::fmt::Debug for MadeGateway {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MadeGateway").field("gateway", &self.gateway).field("token", &crate::crypto::redacted(&self.token)).finish()
     }
 }

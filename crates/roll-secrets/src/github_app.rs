@@ -81,6 +81,21 @@ pub struct NewGitHubApp {
     pub permissions: BTreeMap<String, String>,
 }
 
+/// Never the App's private key.
+impl std::fmt::Debug for NewGitHubApp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NewGitHubApp")
+            .field("name", &self.name)
+            .field("app_id", &self.app_id)
+            .field("installation_id", &self.installation_id)
+            .field("private_key", &"<redacted>")
+            .field("api_base", &self.api_base)
+            .field("repositories", &self.repositories)
+            .field("permissions", &self.permissions)
+            .finish()
+    }
+}
+
 const GITHUB: &str = "https://api.github.com";
 
 const FIELDS: &[Field] = &[Field { field: "token", label: "Installation token", modes: &[Mode::Dynamic], secret: true, suggest: "GITHUB_TOKEN", credential: Some("token") }];
@@ -347,20 +362,5 @@ mod tests {
         assert!(narrowing(&link(json!({ "permissions": { "contents": "admin" } })), ceiling).is_err(), "past the App's level");
         assert!(narrowing(&link(json!({ "permissions": { "administration": "read" } })), ceiling).is_err(), "a permission the App doesn't allow");
         assert!(narrowing(&link(json!({ "permissions": { "contents": "everything" } })), ceiling).is_err());
-    }
-}
-
-/// Never the App's private key.
-impl std::fmt::Debug for NewGitHubApp {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NewGitHubApp")
-            .field("name", &self.name)
-            .field("app_id", &self.app_id)
-            .field("installation_id", &self.installation_id)
-            .field("private_key", &"<redacted>")
-            .field("api_base", &self.api_base)
-            .field("repositories", &self.repositories)
-            .field("permissions", &self.permissions)
-            .finish()
     }
 }

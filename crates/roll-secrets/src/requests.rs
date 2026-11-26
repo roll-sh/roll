@@ -28,6 +28,23 @@ struct StoredOp {
     expires_at: Option<Option<i64>>,
 }
 
+/// Never the value an op carries.
+impl std::fmt::Debug for StoredOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredOp")
+            .field("path", &self.path)
+            .field("key", &self.key)
+            .field("owner", &self.owner)
+            .field("delete", &self.delete)
+            .field("value", &crate::crypto::redacted(&self.value))
+            .field("comment", &self.comment)
+            .field("tags", &self.tags)
+            .field("link", &self.link)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct Review {
     pub by: String,
@@ -843,21 +860,4 @@ pub(crate) fn close_superseded(c: &Conn<'_>, keys: &crate::crypto::Keyring, proj
         audit::record_event(c, keys, project, by, "request.apply", Some(&env.slug), Some(&path), &keys_of, &format!("applied {id}: {outcome}; nothing issued"), now, event)?;
     }
     Ok(())
-}
-
-/// Never the value an op carries.
-impl std::fmt::Debug for StoredOp {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StoredOp")
-            .field("path", &self.path)
-            .field("key", &self.key)
-            .field("owner", &self.owner)
-            .field("delete", &self.delete)
-            .field("value", &crate::crypto::redacted(&self.value))
-            .field("comment", &self.comment)
-            .field("tags", &self.tags)
-            .field("link", &self.link)
-            .field("expires_at", &self.expires_at)
-            .finish()
-    }
 }
