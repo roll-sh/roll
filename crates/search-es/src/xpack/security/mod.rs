@@ -1599,11 +1599,15 @@ fn request_indices(ctx: &Ctx) -> Vec<String> {
     // Wildcards as the API expands them: its handler's defaults, then the request's parameters
     // (`expand_wildcards=all` reaches hidden indices).
     let opts = handler_expansion(ctx);
+    // Naming none, the API acts on `_all` as its handler expands it (`PUT /_settings` reaches
+    // closed and non-hidden dot indices too): every one of them is authorized, and every
+    // non-dot index as before.
     if exprs.is_empty() {
-        if opts.expand_hidden {
-            return crate::meta::resolve::resolve(&st, &["_all".to_string()], &opts, ctx.now_ms).unwrap_or_default();
-        }
-        return st.metadata.indices.keys().filter(|k| !k.starts_with('.')).cloned().collect();
+        let mut out: Vec<String> = crate::meta::resolve::resolve(&st, &["_all".to_string()], &opts, ctx.now_ms).unwrap_or_default();
+        out.extend(st.metadata.indices.keys().filter(|k| !k.starts_with('.')).cloned());
+        out.sort();
+        out.dedup();
+        return out;
     }
     let mut out = Vec::new();
     for e in exprs {
