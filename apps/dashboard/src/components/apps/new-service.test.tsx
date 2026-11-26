@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { NewServiceSheet } from "./new-service";
 
-const apps = vi.hoisted(() => ({ plan: vi.fn(), roots: vi.fn(async () => ({ roots: [] })), create: vi.fn(), quote: vi.fn(async () => null) }));
+const apps = vi.hoisted(() => ({ plan: vi.fn(), roots: vi.fn(async (): Promise<{ roots: { root: string; provider: string; framework?: string }[] }> => ({ roots: [] })), create: vi.fn(), quote: vi.fn(async () => null) }));
 vi.mock("@/lib/apps-api", async (orig) => ({ ...(await orig<typeof import("@/lib/apps-api")>()), appsApi: apps }));
 const code = vi.hoisted(() => ({ repos: vi.fn(), github: vi.fn(), owners: vi.fn(async (): Promise<{ name: string }[]> => []), createRepo: vi.fn(), repo: vi.fn(), land: vi.fn() }));
 vi.mock("@/lib/code-api", async (orig) => ({ ...(await orig<typeof import("@/lib/code-api")>()), codeApi: code }));
@@ -65,5 +65,23 @@ describe("NewServiceSheet", () => {
     await userEvent.click(screen.getByRole("button", { name: "Deploy" }));
     await waitFor(() => expect(created).toHaveBeenCalled());
     expect(apps.create).toHaveBeenLastCalledWith(expect.objectContaining({ source: { kind: "repo", repo: "acme/api" } }));
+  });
+
+  it("makes a service per monorepo folder picked, each watching its own", async () => {
+    code.repos.mockResolvedValue([{ id: "r1", full_name: "acme/mono" }]);
+    code.github.mockRejectedValue(new Error("no app"));
+    apps.roots.mockResolvedValue({ roots: [{ root: "apps/web", provider: "node", framework: "next" }, { root: "apps/api", provider: "node" }] });
+    apps.plan.mockResolvedValue({ provider: "node", framework: null, language_version: null, install: null, build: null, start: "node server.js", port: 3000, dockerfile: "", notes: [] });
+    apps.create.mockReset().mockImplementation(async (b: { name: string }) => ({ id: `svc_${b.name}` }));
+    const created = vi.fn();
+    render(<NewServiceSheet project={project} spot={{ x: 48, y: 48 }} onClose={() => {}} onCreated={created} onImported={() => {}} />);
+    await userEvent.click(await screen.findByRole("button", { name: "apps/web" }));
+    await userEvent.click(screen.getByRole("button", { name: "apps/api" }));
+    expect(screen.getByText(/2 services, one per folder/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Deploy" })).toBeEnabled());
+    await userEvent.click(screen.getByRole("button", { name: "Deploy" }));
+    await waitFor(() => expect(created).toHaveBeenCalled());
+    const made = apps.create.mock.calls.map((c) => c[0]);
+    expect(made.map((b) => [b.name, b.source.root, b.build.watch[0]])).toEqual([["web", "apps/web", "apps/web/**"], ["api", "apps/api", "apps/api/**"]]);
   });
 });
