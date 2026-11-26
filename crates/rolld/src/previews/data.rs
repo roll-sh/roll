@@ -379,10 +379,49 @@ impl Brancher for Redis {
         self.branch(parent, name, mode).await
     }
 
-    /// A branch of the preview's own branch: an earlier push's data (redis-control branches any
-    /// database, and keeps a parent's history while its branches use it).
+    /// From the parent's history (`at`, unix seconds; redis-control keeps 7 days by default).
+    async fn branch_at(&self, parent: &str, name: &str, mode: Mode, at: i64) -> anyhow::Result<Option<Branched>> {
+        anyhow::ensure!(mode == Mode::Branch, "a Redis branch can't be structure-only");
+        let v = self.0.post(&format!("/v1/redis/databases/{}/branches", seg(parent)), json!({ "name": name, "at": at })).await?;
+        Ok(Some(Branched::plain(s(&v["id"]).ok_or_else(|| anyhow::anyhow!("a database without an id"))?)))
+    }
+
+    /// A new branch of the parent as it was then (a Redis reset is a new database anyway).
+    async fn reset_at(&self, parent: &str, branch: &str, _kept: Option<&str>, name: &str, mode: Mode, at: i64) -> anyhow::Result<Option<Branched>> {
+        self.delete(parent, branch, name).await?;
+        self.branch_at(parent, name, mode, at).await
+    }
+
+    /// A branch of the preview's own branch (an earlier push's data, a restore point), cut at a
+    /// whole second, `parent_at`: what [`Self::restore`] puts the branch back to. redis-control
+    /// branches any database, and keeps a parent's history while its branches use it.
     async fn snapshot(&self, _parent: &str, branch: &str, name: &str) -> anyhow::Result<Option<Branched>> {
-        self.branch(branch, name, Mode::Branch).await.map(Some)
+        let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+        match self.0.post(&format!("/v1/redis/databases/{}/branches", seg(branch)), json!({ "name": name, "at": at })).await {
+            Ok(v) => Ok(Some(Branched::plain(s(&v["id"]).ok_or_else(|| anyhow::anyhow!("a database without an id"))?))),
+            Err(e) if conflict_is_ours(&e) => self.branch(branch, name, Mode::Branch).await.map(Some),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn restores(&self) -> bool {
+        true
+    }
+
+    fn points_need_their_branch(&self) -> bool {
+        true
+    }
+
+    /// In place, from the branch's own history (Redis's point-in-time restore, within its
+    /// `history_retention_s`): back to the second its point was cut at, the point's `parent_at`.
+    /// Same id, URL and password; clients are disconnected, and the replaced state is archived by
+    /// redis-control. Only a point that's this branch's own.
+    async fn restore(&self, _parent: &str, branch: &str, _kept: Option<&str>, point: &str, _name: &str, _mode: Mode) -> anyhow::Result<Option<Branched>> {
+        let (p, b) = (self.0.get(&format!("/v1/redis/databases/{}", seg(point))).await?, self.0.get(&format!("/v1/redis/databases/{}", seg(branch))).await?);
+        anyhow::ensure!(!b["id"].is_null() && p["parent_id"] == b["id"], "restore point {point} isn't a copy of Redis database {branch}");
+        let at = p["parent_at"].as_i64().ok_or_else(|| anyhow::anyhow!("restore point {point} says no time"))?;
+        self.0.post(&format!("/v1/redis/databases/{}/restore", seg(branch)), json!({ "at": at })).await?;
+        Ok(Some(Branched::plain(branch)))
     }
 
     /// Its parent is the preview's branch it was copied from (gone after a reset: the guard then
@@ -524,6 +563,10 @@ impl Brancher for Nosql {
     }
 
     fn restores(&self) -> bool {
+        true
+    }
+
+    fn points_need_their_branch(&self) -> bool {
         true
     }
 

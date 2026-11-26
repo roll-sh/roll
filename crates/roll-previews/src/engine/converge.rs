@@ -225,6 +225,11 @@ impl Engine {
                     x.error = None;
                     x.bytes = 0;
                 })?;
+                // Restore points put back from the old branch's own history (Redis's reset is a
+                // new database) can't go into this one: they go.
+                if fresh.r#ref != *branch && b.points_need_their_branch() {
+                    self.drop_points(&r.id, |d| d.kind == res.kind && d.parent == res.parent).await?;
+                }
                 self.store.set_base_schema(&r.id, res.kind, &res.parent, None)?;
                 self.store.log(&r.id, &format!("reset {key} from its parent"))?;
                 self.store.set_seed_needed(&r.id, true)?;
