@@ -1623,6 +1623,13 @@ impl Store {
         s
     }
 
+    /// `scan_raw` of a kept hot range, only the rows whose stored value `keep` takes (see
+    /// `hot::Hot::scan_kept`); None when no kept range holds [start, end) (nothing called).
+    pub fn scan_raw_kept(&self, start: &[u8], end: &[u8], ts: u64, keep: &mut dyn FnMut(&[u8]) -> bool) -> Option<Scan> {
+        let rows = self.hot.scan_kept(start, end, ts, keep)?;
+        Some(Scan::of_rows(self.view(), rows, ts))
+    }
+
     /// Keep relation range `p` as version chains (`hot`), read from the sources under the
     /// commit lock. (Not waited for long: a scan under the commit lock, or a busy one,
     /// leaves it to a later scan.)

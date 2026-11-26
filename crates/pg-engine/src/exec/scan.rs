@@ -4167,7 +4167,8 @@ impl ScanNode {
             self.hstream = Some(Box::new(Stream::Tids(Vec::new())));
         }
         let tid = |v: &[u8]| stored_tid(v).map(tid_rank);
-        loop {
+        let mut kept_ok = true;
+        'stream: loop {
             match self.hstream.as_deref_mut().expect("a stream") {
                 Stream::Tids(tids) => {
                     let mut tids = std::mem::take(tids);
@@ -4186,6 +4187,9 @@ impl ScanNode {
                     // UPDATE's `WHERE tid = $1` keeps one row of pgbench_tellers' 320.)
                     let early = hold && self.early_filter(ctx);
                     let mut rejected = 0u32;
+                    // (A kept hot range's rows read with those the comparisons reject left
+                    // where they are, counted here: none copied into the batch.)
+                    let kept = early && kept_ok && self.open_kept(ctx, &mut rejected);
                     // (The batch's rows read where they are.)
                     while self.next_plain(ctx)? {
                         ctx.check()?;
@@ -4201,6 +4205,9 @@ impl ScanNode {
                                 // table too big to model's as stored, having no other place.)
                                 self.hstream = None;
                                 self.restart();
+                                if kept {
+                                    self.spare = None;
+                                }
                                 if let Some(w) = est {
                                     super::sizing::estimated_order_found(&self.plan.table, super::sizing::EstOrder::Unplaced, w, &ctx.sess.db);
                                     self.streamed = true;
@@ -4216,6 +4223,14 @@ impl ScanNode {
                                 held_bytes += k.len() + v.len();
                                 if held.len() < HELD_ROWS && held_bytes <= HELD_BYTES {
                                     held.push((t, k.to_vec(), self.rb.value_bytes(self.rb.pos())));
+                                } else if kept {
+                                    // (Too many to hold: the other way takes every row's TID,
+                                    // the rejected ones' too. The pass made again over all.)
+                                    kept_ok = false;
+                                    self.restart();
+                                    self.spare = None;
+                                    self.hstream = Some(Box::new(Stream::Tids(Vec::new())));
+                                    continue 'stream;
                                 } else {
                                     hold = false;
                                     held = Vec::new();
@@ -4600,6 +4615,47 @@ impl ScanNode {
     /// fetch to note (a sequential scan's).
     /// Made ready here: the filter's kernel (`kfilter`), and whether it has stored-value
     /// comparisons.
+    /// `next_heap_ordered`'s held pass over a kept hot range (`Txn::scan_snap_kept`): its one
+    /// range opened as `seek` opens it, but only with the rows that the filter's stored-value
+    /// comparisons don't reject (`stored_rejects`), the others counted in `rejected`. A row
+    /// without its TID is taken (the pass then reads them all its other way). False: not
+    /// opened (no kept range holds it, or our writes may be in it).
+    fn open_kept(&mut self, ctx: &ExecCtx, rejected: &mut u32) -> bool {
+        if self.iter.is_some() || self.cur_range != 0 || self.ranges.len() != 1 || self.rev || self.skip.is_some() {
+            return false;
+        }
+        let Some(snap) = ctx.snapshot() else { return false };
+        let Some(Some((_, Some(c)))) = &self.kfilter else { return false };
+        let (start, end) = &self.ranges[0];
+        let mut keep = |v: &[u8]| {
+            if !matches!(v.first(), Some(&(ROW_HEADER_TID | ROW_HEADER_TID_EXT))) {
+                return true;
+            }
+            let rejects = !crate::storage::toast::has_external(v) && row_data_fast(v).and_then(|d| c.passes(d)) == Some(false);
+            *rejected += rejects as u32;
+            !rejects
+        };
+        let Some(it) = ctx.txn.borrow().scan_snap_kept(start, end, &snap, &mut keep) else {
+            return false;
+        };
+        // (As `seek` reads a plain scan's rows: as stored.)
+        let plain = self.plan.mark.is_none()
+            && self.sample.is_none()
+            && self.only.is_none()
+            && !self.plan.sys
+            && !matches!(self.plan.access, Access::Tid { .. } | Access::TidRange(_));
+        let it = match it.source() {
+            Some(src) if plain => {
+                self.toast = Some(std::cell::RefCell::new(crate::txn::toast::Reader::new(src.clone())));
+                it.raw()
+            }
+            _ => it,
+        };
+        self.iter = Some(StoreIter::Fwd(Box::new(it)));
+        self.cur_range = 1;
+        true
+    }
+
     fn early_filter(&mut self, ctx: &ExecCtx) -> bool {
         let plan = &self.plan;
         if plan.filter.is_none()
