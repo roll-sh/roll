@@ -46,8 +46,9 @@
 //!   wake): a cluster past its own `max_resident_bytes` is committed (buffers become segment
 //!   files); past the node's `memory_budget`, the least recently used clusters with nothing in
 //!   flight are unloaded.
-//! - **Metering** ([`Node::take_request_counts`]): requests admitted per cluster since the last
-//!   call, counted per instance and carried over when an instance unloads. Counts and
+//! - **Metering** ([`Node::take_request_counts`], [`Node::take_tokens`]): requests admitted per
+//!   cluster since the last call, and completions' provider tokens, counted per instance and
+//!   carried over when an instance unloads. Counts and
 //!   observations are keyed by the cluster's catalog id ([`Loaded::id`]), never its name: a
 //!   name freed by a delete may be taken again before the next pass, and what the old cluster
 //!   left goes with it ([`Node::forget_cluster`]), never to the new one.
@@ -441,6 +442,9 @@ pub struct Node {
     /// Requests of unloaded instances not reported yet ([`Node::take_request_counts`]), by
     /// [`Loaded::id`].
     unmetered: Mutex<HashMap<String, u64>>,
+    /// Provider tokens of unloaded instances not reported yet ([`Node::take_tokens`]), by
+    /// [`Loaded::id`].
+    unmetered_tokens: Mutex<HashMap<String, (u64, u64)>>,
     /// Observations of unloaded instances not handed on yet ([`Node::take_observations`]), by
     /// [`Loaded::id`].
     unobserved: Mutex<HashMap<String, Observed>>,
@@ -1218,6 +1222,7 @@ impl Node {
             leases: OnceLock::new(),
             pending_specs: Mutex::new(HashMap::new()),
             unmetered: Mutex::new(HashMap::new()),
+            unmetered_tokens: Mutex::new(HashMap::new()),
             unobserved: Mutex::new(HashMap::new()),
             reaper_kick: Arc::new(tokio::sync::Notify::new()),
             tasks: Arc::new(TaskCount::default()),
@@ -1740,6 +1745,13 @@ impl Node {
         if left > 0 {
             *self.unmetered.lock().entry(loaded.id().to_string()).or_default() += left;
         }
+        // Streams ended before their lease came back, so they've counted theirs.
+        let (i, o) = loaded.cluster.xpack.tokens.take();
+        if i > 0 || o > 0 {
+            let mut t = self.unmetered_tokens.lock();
+            let e = t.entry(loaded.id().to_string()).or_default();
+            *e = (e.0.saturating_add(i), e.1.saturating_add(o));
+        }
         let seen = Observed::take_from(&loaded);
         if !seen.is_empty() {
             self.unobserved.lock().entry(loaded.id().to_string()).or_default().extend(seen);
@@ -1926,6 +1938,25 @@ impl Node {
         v
     }
 
+    /// Provider tokens of completions and chat answers per cluster since the previous call, as
+    /// `(input, output)` (metered, not priced: the provider bills them;
+    /// `search_es::xpack::inference::tokens`): loaded clusters and those unloaded meanwhile.
+    /// Keyed by [`Loaded::id`].
+    pub fn take_tokens(&self) -> Vec<(String, (u64, u64))> {
+        let loaded: Vec<Arc<Loaded>> = self.clusters.read().values().filter_map(|s| s.get().cloned()).collect();
+        let mut out: HashMap<String, (u64, u64)> = std::mem::take(&mut *self.unmetered_tokens.lock());
+        for l in loaded {
+            let (i, o) = l.cluster.xpack.tokens.take();
+            if i > 0 || o > 0 {
+                let e = out.entry(l.id().to_string()).or_default();
+                *e = (e.0.saturating_add(i), e.1.saturating_add(o));
+            }
+        }
+        let mut v: Vec<(String, (u64, u64))> = out.into_iter().collect();
+        v.sort_unstable();
+        v
+    }
+
     /// The CPU time each cluster's inputs took on the embedding pool since the previous call,
     /// keyed by [`Loaded::id`] like the other observations (metered as inference).
     pub fn take_inference_cpu(&self) -> Vec<(String, Duration)> {
@@ -1982,6 +2013,7 @@ impl Node {
     /// pass: its requests and observations (it was deleted, so nothing may bill or show them).
     pub fn forget_cluster(&self, id: &str) {
         self.unmetered.lock().remove(id);
+        self.unmetered_tokens.lock().remove(id);
         self.unobserved.lock().remove(id);
     }
 
