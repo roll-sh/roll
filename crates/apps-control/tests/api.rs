@@ -3386,6 +3386,7 @@ async fn status_page_incidents_open_and_close() {
     let (st, inc) = call(&w.api, "POST", &format!("{page}/incidents"), Some(json!({"title": "Slow checkouts", "text": "We're looking into slow checkouts."}))).await;
     assert_eq!(st, StatusCode::CREATED, "{inc}");
     let iid = inc["id"].as_str().unwrap();
+    assert_eq!(call(&w.api, "POST", &format!("{page}/incidents/{iid}/updates"), Some(json!({"state": "maintenance", "text": "x"}))).await.0, StatusCode::BAD_REQUEST, "only a scheduled one is under way");
     assert_eq!(call(&w.api, "POST", &format!("{page}/incidents/{iid}/updates"), Some(json!({"state": "resolved", "text": "Fixed: a slow query."}))).await.0, StatusCode::NO_CONTENT);
     let j: Value = serde_json::from_str(&get("/status.json".into(), h.clone()).await).unwrap();
     let mine = j["incidents"].as_array().unwrap().iter().find(|i| i["id"] == iid).unwrap();

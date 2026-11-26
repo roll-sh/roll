@@ -29,11 +29,13 @@ describe("NewServiceSheet", () => {
     const fresh = await screen.findByRole("button", { name: /new postgres/i });
     await waitFor(() => expect(fresh).toHaveAttribute("aria-pressed", "true"));
     expect(screen.getByRole("button", { name: /new redis/i })).toHaveAttribute("aria-pressed", "false");
+    await userEvent.type(screen.getByRole("textbox", { name: "Repository branch" }), "develop");
     await userEvent.click(screen.getByRole("button", { name: "Deploy" }));
 
     await waitFor(() => expect(created).toHaveBeenCalled());
     expect(ws.make).toHaveBeenCalledWith("prj_1", "postgres", "shop-db", expect.objectContaining({ x: expect.any(Number) }));
     expect(apps.create.mock.calls[0][0].links).toEqual([{ kind: "postgres", ref: "pg_9" }]);
+    expect(apps.create.mock.calls[0][0].branch).toBe("develop");
   });
 
   it("starts a repo from a code starter and deploys the service following it", async () => {
