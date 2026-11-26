@@ -2614,6 +2614,22 @@ async fn a_spent_bootstrap_token_or_machine_credential_ends_its_chain() {
     d.access.store.prune(30).unwrap();
 }
 
+/// The 40th review's item 4: bootstrap tokens and machine credentials open nothing and live as
+/// long as their machine, so they don't take the workload token room every login shares (roll
+/// secrets caps them per identity): with an owner's cap of them live, that owner still logs in.
+#[tokio::test(flavor = "multi_thread")]
+async fn machine_credentials_leave_the_workload_token_caps_to_logins() {
+    use roll_access::store::{ChainSecret, OWNER_MAX_WORKLOADS, Presented};
+    let d = Daemon::new(50);
+    for n in 0..OWNER_MAX_WORKLOADS {
+        let boot = d.access.store.create_bootstrap(&format!("rack-{n}"), 10, &[], "operator", None).unwrap();
+        assert!(matches!(d.access.store.redeem(&boot.secret, ChainSecret::Bootstrap, None, 24).unwrap(), Presented::Live(_)));
+    }
+    let within = serde_json::from_value::<roll_auth::scope::Scope>(json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }])).unwrap();
+    let new = serde_json::from_value::<roll_access::store::NewGrant>(json!({ "name": "ci", "rules": [{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }] })).unwrap();
+    d.access.mint_workload(new, &within, 15, None).await.expect("a CI login still gets its token");
+}
+
 /// Open registration (RFC 7591) can't be flooded: a network registers at most 20 clients a minute
 /// on a node, then 429 with Retry-After.
 #[tokio::test]
