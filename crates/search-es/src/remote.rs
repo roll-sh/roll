@@ -368,6 +368,18 @@ pub fn remote_cluster_stats(cluster: &Cluster, st: &ClusterState, local: &Value)
     Value::Obj(out)
 }
 
+/// `_clusters` as the dialect answers it: OpenSearch 3.9 counts `total`, `successful` and
+/// `skipped` only (no `running`, `partial`, `failed` or `details`).
+pub fn clusters_for(dialect: crate::cluster::Dialect, v: Value) -> Value {
+    match (dialect, v) {
+        (crate::cluster::Dialect::OpenSearch, Value::Obj(mut m)) => {
+            m.retain(|k, _| matches!(k.as_str(), "total" | "successful" | "skipped"));
+            Value::Obj(m)
+        }
+        (_, v) => v,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,14 +405,3 @@ mod tests {
     }
 }
 
-/// `_clusters` as the dialect answers it: OpenSearch 3.9 counts `total`, `successful` and
-/// `skipped` only (no `running`, `partial`, `failed` or `details`).
-pub fn clusters_for(dialect: crate::cluster::Dialect, v: Value) -> Value {
-    match (dialect, v) {
-        (crate::cluster::Dialect::OpenSearch, Value::Obj(mut m)) => {
-            m.retain(|k, _| matches!(k.as_str(), "total" | "successful" | "skipped"));
-            Value::Obj(m)
-        }
-        (_, v) => v,
-    }
-}
