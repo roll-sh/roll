@@ -727,6 +727,8 @@ export interface EnterpriseIdp {
   tenant?: string;
   /** The SSO connection that is this same provider (`sso_…`): its verified domains, as they are at each sign-in. */
   sso?: string;
+  /** Added by Claude's express setup (its next one replaces it); kept as it is when the list is saved. */
+  express?: boolean;
 }
 
 /** An app a trusted provider may vouch for: never its secret. */
