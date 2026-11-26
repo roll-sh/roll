@@ -26,6 +26,8 @@ pub mod ism_run;
 pub mod jobs;
 pub mod knn;
 pub mod knn_api;
+pub mod ml;
+pub mod neural;
 pub mod pit;
 pub mod ppl;
 pub mod profile;
@@ -59,6 +61,7 @@ pub fn implemented(api: Api) -> bool {
             | Api::PplGrammar
             | Api::QuerySettings
     ) || ism::implemented(api)
+        || ml::implemented(api)
         || crate::xpack::security::opensearch::api::implemented(api)
 }
 
@@ -88,6 +91,7 @@ async fn dispatch_api(ctx: &Ctx<'_>) -> EsResult<Reply> {
         Api::PplGrammar => ppl::grammar(ctx),
         Api::QuerySettings => ppl::settings(ctx).await,
         api if ism::implemented(api) => ism::dispatch(ctx).await,
+        api if ml::implemented(api) => ml::dispatch(ctx).await,
         api if crate::xpack::security::opensearch::api::implemented(api) => crate::xpack::security::opensearch::api::dispatch(ctx).await,
         other => Err(crate::error::EsError::not_implemented(other.name())),
     }

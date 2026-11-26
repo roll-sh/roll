@@ -478,7 +478,11 @@ fn apply(q: &mut Query, targets: &Targets, embedded: &[((String, String), super:
 /// every compound retriever's children (and the queries their totals are matched with), when
 /// the targets hold `semantic_text` fields or a query embeds a text.
 pub async fn rewrite_request(ctx: &Ctx<'_>, req: &mut crate::search::SearchRequest) -> EsResult<()> {
-    if ctx.cluster.dialect != crate::cluster::Dialect::Elasticsearch || (req.source.query.is_none() && req.source.fusion.is_none()) {
+    // OpenSearch's `neural` queries.
+    if ctx.cluster.dialect == crate::cluster::Dialect::OpenSearch {
+        return crate::opensearch::neural::rewrite_request(ctx, req).await;
+    }
+    if req.source.query.is_none() && req.source.fusion.is_none() {
         return Ok(());
     }
     let st = ctx.state();

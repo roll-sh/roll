@@ -4229,8 +4229,11 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let mut req = parse_request(ctx, body.as_ref(), ctx.raw_json())?;
     // A linked cluster's part of a cross-cluster search: aggregations partially reduced.
     req.partial_aggs = req.source.aggs.is_some() && crate::remote::links::wants_partial(ctx);
-    // Queries that need inference (`semantic`, and others on `semantic_text` fields).
-    crate::xpack::inference::query::rewrite_request(ctx, &mut req).await?;
+    // Queries that need inference (`semantic`, and others on `semantic_text` fields; OpenSearch's
+    // `neural`). With a search pipeline, after its request processors (`neural_query_enricher`).
+    if pipeline.is_none() {
+        crate::xpack::inference::query::rewrite_request(ctx, &mut req).await?;
+    }
     crate::xpack::entsearch::query_rules::check_rulesets(ctx, body.as_ref())?;
     let phase_took = crate::opensearch::phase_took_requested(ctx)?;
     // OpenSearch's `verbose_pipeline` (the URL parameter wins over the body's).
@@ -4266,6 +4269,7 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let mut rc = crate::opensearch::search_pipeline::RunContext::default();
     rc.verbose = verbose;
     pipeline.transform_request(&mut req, &mut rc)?;
+    crate::xpack::inference::query::rewrite_request(ctx, &mut req).await?;
     // The pipeline's phase-results processor fuses a top-level `hybrid` query's results.
     if let (Some(phase), Some(h)) = (pipeline.hybrid_phase(), req.source.query.as_mut().and_then(crate::opensearch::hybrid::top_level_mut)) {
         h.phase = Some(phase);

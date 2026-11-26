@@ -151,6 +151,8 @@ pub enum Kind {
     UserAgent(Box<super::user_agent::Processor>),
     /// `registered_domain`: a domain name split by the public suffix list.
     RegisteredDomain { field: String, target: String, ignore_missing: bool },
+    /// OpenSearch's `text_embedding` (`crate::opensearch::ml::ingest`): source → target fields.
+    TextEmbedding { model_id: String, field_map: Vec<(String, String)> },
     /// `enrich`: a lookup in a loaded enrich index (`crate::xpack::enrich`).
     Enrich(Box<crate::xpack::enrich::Processor>),
     /// `set_security_user`: the writing user's properties into `field`.
@@ -598,6 +600,10 @@ impl Kind {
                     Some(v) => return Err(config_error(ptype, tag, "properties", &format!("property isn't a list, but of type [{}]", java_type(v)))),
                 };
                 Kind::SetSecurityUser { field: f, properties }
+            }
+            "text_embedding" if cluster.dialect == crate::cluster::Dialect::OpenSearch => {
+                let (model_id, field_map) = crate::opensearch::ml::ingest::compile(cfg, tag)?;
+                Kind::TextEmbedding { model_id, field_map }
             }
             other => Kind::Unsupported(other.to_string()),
         })
@@ -1278,6 +1284,7 @@ pub fn run(cluster: &crate::Cluster, k: &Kind, d: &mut IngestDoc, depth: usize) 
             }
             d.set(field, Value::Obj(crate::json::java_hash_map(obj, 16)))?;
         }
+        Kind::TextEmbedding { model_id, field_map } => crate::opensearch::ml::ingest::collect(model_id, field_map, d)?,
         Kind::Unsupported(t) => {
             return Err(EsError::illegal_argument(format!("processor [{t}] is not available in roll search")));
         }
