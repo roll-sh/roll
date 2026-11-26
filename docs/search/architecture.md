@@ -541,12 +541,13 @@ tenants don't hold, with a credential per link:
   scrolls, their items checked on their indices), and no other cluster or security permission. The password is
   sealed in the local cluster's `search_remotes` row and bound to that row (cluster, alias,
   target), as a key is now. It's never returned or logged.
-- *A link user signs nothing in on its own*: its attributes name the local cluster's id
-  (`roll.remote_link`), and the remote authenticates it only on a link request (internal origin,
-  with `x-roll-remote-access`). As plain Basic auth it's refused, as Elasticsearch refuses a
+- *A link user signs nothing in on its own*: its attribute `roll_remote_link` names the cluster
+  it was made on (the remote's catalog id), and the remote authenticates it only on a link
+  request (internal origin, with `x-roll-remote-access`; `opensearch::authenticate_link`). As
+  plain Basic auth, or as a run-as target, it's refused, as Elasticsearch refuses a
   `cross_cluster` key from a REST client. A branch or restore of the remote holds a copy of the
-  user, so the user is bound to the remote's cluster id, as browser keys are
-  (`stored_browser_key_cluster`).
+  user, which doesn't authenticate there (another catalog id). The user the link sends never
+  configures the remote's security, whatever it's mapped to there.
 - *Who the part runs as*: `x-roll-remote-access` carries the OpenSearch identity (user name,
   backend roles, the internal user's own `opendistro_security_roles`, attributes; bounded by
   `MAX_REMOTE_ACCESS`). The remote resolves it as OpenSearch does: the security roles by name
