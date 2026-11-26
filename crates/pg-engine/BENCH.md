@@ -362,6 +362,59 @@ All 22 queries' user instructions -0.00% / -0.04%; per query within +-0.26% (q03
 / -0.15, q16 -0.10 / -0.13, the rest within 0.1%); hashes equal; peak anon+shmem 1,620.9 / 1,620.3 MB
 against 1,616.0 / 1,615.6. Foreign load 0.8-2.5 cores (wall times not compared).
 
+## Cheap custom plans, round 1: a named statement's custom plan stays its binding after a size change (2026-11-26, agent 328)
+
+HANDOFF "Cheap custom plans" has what changed. Builds: plain dist (`tools/dist.sh`). **b0** = `eccf1d824`,
+**b1** = the origin head `98bc2e3b6`, **n1** = b1 + `param_custom` planning again, **n2** = n1 + `lit_env`'s
+`row_security` from `Hot`. PostgreSQL 18.6 as in "Standing, 2026-11-24". Lane A, one cell or pair a
+`tools/lane.sh` hold; every hold read 4.2-7.6 foreign cores (all over the 1.0 rule; tps and cycles are
+readings). Harness `~/.cache/a328/bench`.
+
+### One statement, one client (`stmt.sh`)
+
+A fresh server, `pgbench -i -I dtGvp -s 32`, CHECKPOINT, quiet; per statement, 2,000 warm-up executions
+then 10,000 measured (`pgbench -M prepared -c 1 -t`, `PGOPTIONS=-cplan_cache_mode=...`); the server
+cgroup's user instructions an execution. Whole-cgroup cells can carry +400k spikes (a compaction, then cold
+reads), so the roll rows are warm cells without a spike (each mode run twice from the b1 / n2 rounds on).
+
+| statement | PostgreSQL custom / generic | b1 custom / generic | n2 custom / generic |
+|---|---|---|---|
+| UPDATE pgbench_accounts (past the size model) | 165k / 101k (+64k) | 323-371k / 128-131k | 126-171k / 127-141k |
+| SELECT abalance FROM pgbench_accounts | 99k / 51k (+48k) | 70.4-71.1k / 61.1-61.8k | 70.7k / 60.2k (n1) |
+| UPDATE pgbench_tellers | 237k / 252k (noise) | 120.1k / 117.0k | 118.4k / 113.4k (n1) |
+| UPDATE pgbench_branches | 137k / 89k (+48k) | 135.6k / 124.1k | 133.6k / 121.8k (n1) |
+| INSERT pgbench_history | 86k / 49k (+37k) | 65.6k / 63.0k | 63.5k / 61.3k (n1) |
+
+b0 read 1,006k / 142k for the accounts UPDATE (its first cell, without the second run).
+
+### TPC-B-like, scale 32, 160,000 transactions a run (`oltp.sh` T8 / T32)
+
+User instructions a transaction (server cgroup, through 8 s after the last transaction and a CHECKPOINT).
+
+| clients, plan_cache_mode | b1 | n2 |
+|---|---|---|
+| 8, force_custom_plan | 1,239k (914 tps) | 532k (3,658 tps) |
+| 32, force_custom_plan | 1,264k (840 tps) | 702k (1,621 tps) |
+| 8, force_generic_plan | 767k (2,759 tps) | 505k (952 tps) |
+| 8, auto | 792k, 585k, 707k, 537k | 670k, 773k, 556k, 600k |
+| 8, auto, connection threads only | 614k | 443k, 497k |
+| 32, auto | 551k (1,741 tps) | 474k (1,810 tps) |
+| 32, auto, connection threads only | 446k | 378k |
+
+On the head after agent 323's point-select work landed (**b3** = `214433872b`, **n4** = this change on it, two
+pairs at 8 clients, force_custom_plan): 1,187k / 1,103k -> 755k / 541k a transaction (585 / 1,400 -> 1,916 /
+4,071 tps); the accounts UPDATE's warm cells 319-365k -> 137k a custom plan (generic 127k / 130k).
+
+The force_generic and auto rows spread by ±150k a transaction for one build, so whole-server counts in auto
+mode don't decide the change; the force_custom_plan rows and the statement cells do.
+
+### Reads that must stay level (one client, auto, warm cells)
+
+| case | b1 | n2 |
+|---|---|---|
+| prepared point select | 73.1k, 76.9k | 76.6k, 77.7k |
+| 1,000-row range read (`aid BETWEEN $1 AND $1 + 999`) | 2,114k, 2,133k | 2,132k, 2,133k |
+
 ## Short write transactions, round 19: the TPC-B-like standing at fixed counts on the shipped build; the L0 merge's read cost itemized (2026-11-26, agent 322)
 
 HANDOFF "Short write transactions, round 19" has what it means. Builds: **roll PGO** = `tools/dist-pgo.sh --out` of

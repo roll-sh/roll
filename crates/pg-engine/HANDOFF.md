@@ -15997,6 +15997,89 @@ reads with the memtable among their sources: a memtable's entries in range read 
 keys into a buffer (the buffer is the cost there, list or not), then several sources merged at about
 this path's cost.
 
+## Cheap custom plans: a named statement's custom plan stays its binding after a size change (agent 328)
+
+BENCH "Cheap custom plans, round 1" has the counts. What changed (`session/litplan.rs`):
+
+- **`param_custom`**: a custom plan of a statement whose plan can't depend on its parameters'
+  values (`candidates`, checked once with `same_plan`: `custom_is_generic`) runs the kept generic
+  binding. That held only while the sizes the binding read still read the same. A Parse after a size
+  change plans the kept analysis again (`param_parsed`), but a **named** statement is never parsed
+  again. So after its table's first size change, every custom plan bound and planned the statement
+  afresh with its values, and then costed it through an EXPLAIN tree (`plan_cost`: an UPDATE isn't
+  a lone scan). Now `param_custom` plans the kept analysis again at the new sizes, as that Parse would,
+  and keeps it for the custom plans that follow. The choice is unchanged:
+  - the custom plan's cost is that plan's;
+  - generic_plans and custom_plans are counted as before;
+  - `p.bound`, the generic plan, is kept by catalog version as before;
+  - debug builds still check every use against binding the statement afresh.
+- **`lit_env`** read `row_security` with `Settings::get_str` on every kept-plan lookup. It now reads
+  `Hot::row_security`, which is the same expression cached per settings generation (the one
+  `bound_as` already uses for the binding's `who`).
+
+Why TPC-B hit it:
+
+- 322's finding: the prepared UPDATEs of `pgbench_tellers` / `pgbench_branches` take a custom plan
+  on about half their executions once the tables grow, and growing is exactly a size change.
+- `pgbench_accounts` at scale 32 is past the size model. Its estimated heap and index sizes grow with
+  the UPDATEs (the in-process probe: 103 changes in 3,000 UPDATEs of a 20,000-row table past
+  a 2,000-version model). So its named UPDATE's custom plans, the first five of every connection and
+  all of them under `force_custom_plan`, were bound afresh.
+- Profile of the base (b0, accounts UPDATE under force_custom_plan, LBR): binding 62%
+  (`bind_update_body`, `find_column`, `call_resolved`), `plan_cost`'s EXPLAIN tree 16%, `lit_env` 14%.
+- After the change: `planned_as` 8%, the replans (`lit_replan` + `plan_cost`) 1.4%.
+
+Measured (plain dist, b1 = the origin head `98bc2e3b6`, n2 = this change; lane A at 4.2-7.6 foreign
+cores in every hold, so none passes the 1.0 rule; the force_custom_plan cells and the statement cells
+are many times the spread):
+
+- Accounts UPDATE, one client, force_custom_plan: 323-371k -> 126-171k user instructions an
+  execution, against a generic plan of 127-141k. PostgreSQL 18.6's custom plan costs +64k over its
+  generic (165k / 101k); roll's now costs 0-35k over its own. The other TPC-B statements' custom plans
+  were already cheaper than PostgreSQL's (SELECT +9-13k against +48k, branches +11k against +48k,
+  INSERT +3k against +37k).
+- TPC-B-like, 160,000 transactions, force_custom_plan: 8 clients 1,239k -> 532k a transaction
+  (914 -> 3,658 tps), 32 clients 1,264k -> 702k (840 -> 1,621 tps).
+- Auto (the default), as readings: cgroup totals per transaction spread 505-792k for **either** build,
+  and force_generic_plan alone read 505k and 767k in two runs. So counts of the whole server don't
+  resolve it; that spread is not planning. The connection threads' share (perf record by thread name)
+  reads b1 614k / n2 443k and 497k at 8 clients, b1 446k / n2 378k at 32.
+- Rebased on `214433872b` (agent 323's per-statement work in): the same picture. force_custom_plan at
+  8 clients 1,187k / 1,103k -> 755k / 541k a transaction (two pairs). The accounts UPDATE's warm custom
+  plan 319-365k -> 137k (generic 127-130k).
+- Level: the prepared point select (73.1-76.9k / 76.6-77.7k) and the 1,000-row range read
+  (2,114-2,133k / 2,132-2,133k), whose paths don't reach the change.
+
+Not done: the PGO gate (no function boundary or inlining changed; `param_custom` gained a branch
+that runs only after a size change).
+
+Checks: the `kept_plans` case `extended_custom_plans_run_the_generic_binding`: a named statement
+under force_custom_plan while its table grows runs the binding for every custom plan but the unnamed
+statement's first one after the SET (verify-checked: each checked against binding afresh); `wire`
+under verify-checked (74 passed); quick-check with QC_CHECKED=1 on `f21544ce7` (the rebased head): tests and
+checked 155 passed, regress 0 newly differing, isolation 1,647 / 1,648, pg_dump 14,609 passed;
+`tools/crash-binary.py` seed 1 against n4: ok.
+
+Left:
+
+- **Cell noise.** Whole-cgroup counts of a 10,000-execution cell carry spikes of about +400k an
+  execution: a compaction of the loaded table, then cold reads decompressing in the connection
+  threads (ZSTD was 30% of a profile). Compare cells that run twice, or count the connection threads.
+  The thread split by `perf record -c 200003` under-counted by about 40% (throttled); 2,000,003 holds.
+- **What is left of a custom plan** after this: the replan at each size change (about one in 30
+  executions of a table past the model; cheaper would be re-costing only the size-dependent paths,
+  `paths::ScanChoice` as `values_custom` does for lone scans). Then `perms::lock_some` (6% of a custom
+  UPDATE's profile) and `shared_search_path` in `lit_env` (agent 323's per-session cache is coming).
+- **`values_custom` never serves an UPDATE**: its analysis with values put in falls back to binding
+  afresh (`Custom::Rebind` / `Plan(Err)`, by the probe's counters). A statement that isn't
+  `candidates` (a range UPDATE, say) still binds every custom plan afresh.
+- **The simple protocol** keeps templates' plans across size changes already (`lit_plan` plans
+  again); it shares only the `lit_env` change.
+
+Harness: `~/.cache/a328/bench` (`stmt.sh`: per-statement cells, custom against generic, each mode twice;
+`prof.sh`: an LBR profile of one cell; `oltp.sh` from 322 with `PCM=<plan_cache_mode>`), the probe test and
+its trace prints in `~/.cache/a328/patches/` (`a328_probe.rs`, `probe-trace2.patch`; not for landing).
+
 ## Short write transactions, round 19: the TPC-B-like standing at fixed counts; the L0 merge left out, its read cost itemized (agent 322)
 
 BENCH "Short write transactions, round 19" has the tables. No engine code changed: what was tried is in
