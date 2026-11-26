@@ -347,11 +347,22 @@ async fn create(State(x): State<Ctx>, Path(id): Path<String>, parts: Parts, body
         };
         let path = s.path.clone().unwrap_or_else(|| "/".into());
         let mut config = n.config;
-        let settings = config.entry("service_settings").or_insert_with(|| json!({}));
-        let Some(settings) = settings.as_object_mut() else { return Err(bad("config.service_settings is an object")) };
-        if settings.contains_key("api_key") {
-            return Err(bad(format!("leave service_settings.api_key out: it comes from {}", s.key)));
+        config.entry("service_settings").or_insert_with(|| json!({}));
+        // The key comes from the secret, and only through `api_key`: a service whose credential
+        // is something else (Bedrock's access keys, Vertex's service account) can't take one,
+        // and no credential of the service's goes in the body in the clear.
+        let service = config.get("service").and_then(Json::as_str).unwrap_or_default().to_string();
+        let Some(sensitive) = search_control::inference_sensitive_settings(&service) else {
+            return Err(bad(format!("{service:?} isn't an inference service roll runs")));
+        };
+        if !sensitive.iter().any(|k| k == "api_key") {
+            return Err(bad(format!("{service} takes no api_key, so its credential can't come from a roll secret here: create the endpoint with its own settings")));
         }
+        let Some(settings) = config.get("service_settings").and_then(Json::as_object) else { return Err(bad("config.service_settings is an object")) };
+        if let Some(k) = sensitive.iter().find(|k| settings.contains_key(k.as_str())) {
+            return Err(bad(format!("leave service_settings.{k} out: the credential comes from {}", s.key)));
+        }
+        let settings = config.get_mut("service_settings").and_then(Json::as_object_mut).ok_or_else(|| bad("config.service_settings is an object"))?;
         // A dynamic credential ends with its lease: an endpoint keeps its key.
         let info = x.secrets.secret(&project, &s.environment, &path, &s.key, Some(roll_secrets::SecretType::Shared), &caller)?;
         if info.link.as_ref().is_some_and(|l| l.mode == roll_secrets::Mode::Dynamic) {
