@@ -706,18 +706,14 @@ fn action_value(a: &Action, targeted: Option<&Vec<String>>) -> Value {
     }
 }
 
-/// Authorizes each action on what it resolves to, as [`apply`] resolves it: the indices (or
-/// data streams) it reaches, whatever named them (the path, the body's `index`), and the alias
-/// names ([`AliasAuth`]). What doesn't resolve fails in
-/// `apply` as before.
-fn authorize(ctx: &Ctx, actions: &[Action]) -> EsResult<()> {
-    let auth = AliasAuth::of(ctx);
-    let st = ctx.state();
-    let now = ctx.now_ms;
+/// Authorizes each action on what it resolves to in `st`, the state it applies to: the indices
+/// (or data streams) it reaches, whatever named them (the path, the body's `index`), and the
+/// alias names ([`AliasAuth`]). What doesn't resolve fails in `apply` as before.
+fn authorize(auth: &AliasAuth, st: &ClusterState, actions: &[Action], now: i64) -> EsResult<()> {
     let lenient = IndicesOptions { expand_closed: true, allow_aliases: false, include_data_streams: false, ignore_unavailable: true, allow_no_indices: true, ..IndicesOptions::STRICT_EXPAND_OPEN };
     let targets = |indices: &[String]| -> Vec<String> {
-        let mut out = data_streams_matching(&st, indices, now).unwrap_or_default();
-        out.extend(resolve::resolve(&st, indices, &lenient, now).unwrap_or_default());
+        let mut out = data_streams_matching(st, indices, now).unwrap_or_default();
+        out.extend(resolve::resolve(st, indices, &lenient, now).unwrap_or_default());
         out
     };
     for a in actions {
@@ -745,11 +741,12 @@ fn authorize(ctx: &Ctx, actions: &[Action]) -> EsResult<()> {
 }
 
 async fn run_actions(ctx: &Ctx<'_>, actions: Vec<Action>) -> EsResult<Reply> {
-    authorize(ctx, &actions)?;
+    let auth = AliasAuth::of(ctx);
     let now = ctx.now_ms;
     let (outcomes, actions) = ctx
         .cluster
         .update(move |st| {
+            authorize(&auth, st, &actions, now)?;
             let outcomes = apply(st, &actions, now)?;
             // Everything failed: nothing to acknowledge. Missing aliases are reported together.
             if outcomes.iter().all(|(e, _)| e.is_some()) {
