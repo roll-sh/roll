@@ -438,6 +438,21 @@ async fn search_mode_finds_and_runs_through_the_same_checks() {
     assert_eq!(direct["isError"].as_bool(), Some(false), "{direct}");
 }
 
+/// Metadata only (`?metadata=1`): plans, schemas and usage listed, no tool that answers stored
+/// data or changes anything; such a call is refused saying why, and the instructions say so.
+#[tokio::test]
+async fn a_metadata_connection_lists_no_data() {
+    let d = Daemon::new();
+    let (_, _, listed) = d.http(OPERATOR, Method::POST, "/v1/mcp?metadata=1", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
+    let names = names(&listed["result"]);
+    assert!(names.contains(&"postgres_list_projects".into()) && names.contains(&"postgres_explain".into()), "{names:?}");
+    assert!(!names.contains(&"postgres_query".into()) && !names.contains(&"postgres_execute".into()), "{names:?}");
+    let (_, _, refused) = d.http(OPERATOR, Method::POST, "/v1/mcp?metadata=1", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "postgres_query", "arguments": { "endpoint": "ep_1", "sql": "select 1" } } }))).await;
+    assert!(refused["result"]["isError"] == true && refused["result"]["content"][0]["text"].as_str().unwrap_or_default().contains("metadata only"), "{refused}");
+    let (_, _, init) = d.http(OPERATOR, Method::POST, "/v1/mcp?metadata=1", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18" } }))).await;
+    assert!(init["result"]["instructions"].as_str().unwrap_or_default().contains("metadata only"), "{init}");
+}
+
 /// The operator's policy holds every token's MCP to lockdown and to reading, whatever its URL asks
 /// (`mcp_lockdown`, `mcp_read_only`); the operator's own connection isn't held.
 #[tokio::test]
