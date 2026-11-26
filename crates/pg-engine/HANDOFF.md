@@ -25045,7 +25045,9 @@ What differs still (none of it across a restart: the same before it):
 
 ### Measured
 
-Plain dist builds, base `4c322b3d8` (the candidate's parent) against the candidate. Start and
+Plain dist builds, base `4c322b3d8` (the candidate's parent then; the later rebases brought
+other agents' changes only, and the LOG line, which runs at a start that discards the file)
+against the candidate. Start and
 clean-shutdown time (`startstop.py`, the server on lane B's CPUs through `tools/lane.sh b`, three
 cycles each; 7.4 / 6.2 foreign cores on the lane, so a rough reading):
 
@@ -25066,14 +25068,16 @@ foreign cores: instructions only): point_select 35,268 -> 35,291 (+0.06%), TPC-B
 
 ### Checks
 
-- `tools/quick-check.sh` with `QC_CHECKED=1 QC_TESTS=big_tables` on `c8b4b851c` (the code of
-  this candidate, on `4c322b3d8`): clippy 16 warnings, none new in a changed file; 478 tests in 27
-  binaries, and again built `verify-checked`; crash seeds 1-3 x 2 and power_cut_at_every_point;
-  regress 51,148 / 51,150 (0 newly differing); isolation 1,647 / 1,648; pg_dump_tap 14,609 passed.
-- `tools/crash-binary.py` on the candidate's plain dist binary: SIGKILL seeds 1, 2, 3 and
-  `--power drop` seeds 1, 2, 3 (each ends with a clean shutdown followed by a cut, and a start
-  from what the cut left): all ok.
-- A damaged file (`~/.cache/a335/scripts/badfile.py`, the dist binary): after a clean shutdown
+- `tools/quick-check.sh` with `QC_CHECKED=1 QC_TESTS=big_tables` on `9904fcf0e` (this
+  candidate's code on `2676ea37a`): clippy 16 warnings, none new in a changed file; 484 tests in
+  32 binaries, and again built `verify-checked`; crash seeds 1-3 x 2 and power_cut_at_every_point;
+  regress 51,148 / 51,150 (0 newly differing); isolation 1,647 / 1,648; pg_dump_tap 14,609
+  passed. (Before the last two rebases, on `4c322b3d8` without the LOG line: the same, 478 tests
+  in 27 binaries.)
+- `tools/crash-binary.py`: SIGKILL seeds 1, 2, 3 and `--power drop` seeds 1, 2, 3 (each ends with
+  a clean shutdown followed by a cut, and a start from what the cut left): all ok, on the plain
+  dist binary of the code on `4c322b3d8` and again on quick-check's verify binary of `9904fcf0e`.
+- A damaged file (`~/.cache/a335/scripts/badfile.py`, quick-check's binary): after a clean shutdown
   the file truncated to half, overwritten with junk, emptied: each start went through, the
   counts from 0, the file removed, and the startup process's LOG line as PostgreSQL's
   (`corrupted statistics file "pg_stat/pgstat.stat"`, after "database system was shut down
