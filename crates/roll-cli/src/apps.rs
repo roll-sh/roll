@@ -169,11 +169,14 @@ pub enum Domains {
         #[command(flatten)]
         target: Target,
     },
-    /// Check a custom domain's DNS now.
+    /// Check a custom domain's DNS now; with `--cloudflare-token roll://…` (a roll secret holding a
+    /// Cloudflare API token, Zone:DNS:Edit on its zone) its records are written there first.
     Verify {
         hostname: String,
         #[command(flatten)]
         target: Target,
+        #[arg(long, value_name = "ROLL_REF")]
+        cloudflare_token: Option<String>,
     },
     /// Remove a custom domain.
     #[command(alias = "rm")]
@@ -3091,9 +3094,12 @@ pub async fn domains(api: &Api, json_out: bool, d: Domains) -> anyhow::Result<()
             }
             v
         }
-        Domains::Verify { hostname, target } => {
+        Domains::Verify { hostname, target, cloudflare_token } => {
             let svc = service(api, &target).await?;
-            api.post(&format!("{}/domains/{}/verify", env_path(&svc, &target.env), enc(&hostname)), json!({})).await?
+            match cloudflare_token {
+                Some(r) => api.post(&format!("{}/domains/{}/configure", env_path(&svc, &target.env), enc(&hostname)), json!({ "cloudflare_token": r })).await?,
+                None => api.post(&format!("{}/domains/{}/verify", env_path(&svc, &target.env), enc(&hostname)), json!({})).await?,
+            }
         }
         Domains::Remove { hostname, target } => {
             let svc = service(api, &target).await?;
