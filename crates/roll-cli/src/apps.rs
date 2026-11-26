@@ -2779,6 +2779,9 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
                 if !run.is_empty() {
                     body["run"] = Value::Object(run);
                 }
+                if let Some(b) = a.build.as_ref().filter(|b| !b.is_empty()) {
+                    body["build"] = serde_json::to_value(b)?;
+                }
                 if !a.variables.is_empty() {
                     let vars = fill_vars(n, &a.variables)?;
                     // Secrets made for it, and names that read as secrets, sealed from the start
