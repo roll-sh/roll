@@ -274,8 +274,9 @@ pub struct Portal {
     run: PortalRun,
     pub cols: Option<Arc<[OutCol]>>,
     /// A SELECT suspended after an Execute's row count: its executor, which the next
-    /// Execute runs on (PORTAL_ONE_SELECT runs as its rows are asked for).
-    lazy: Option<cursor::Lazy>,
+    /// Execute runs on (PORTAL_ONE_SELECT runs as its rows are asked for). (Boxed: a portal
+    /// moves into and out of `portals` with every Bind and Execute.)
+    lazy: Option<Box<cursor::Lazy>>,
     /// The plan the Bind made (GetCachedPlan), when it planned: the Execute runs it.
     planned: Option<Arc<BoundQuery>>,
 }
@@ -448,7 +449,7 @@ pub struct Session {
     /// An Execute's row count for the portal's SELECT `run_query` runs next (0: all of it).
     fetch_limit: usize,
     /// The executor of the SELECT `run_query` stopped after `fetch_limit` rows.
-    suspended: Option<cursor::Lazy>,
+    suspended: Option<Box<cursor::Lazy>>,
     /// Executor trees prepared statements' plans ran to their ends, the latest last
     /// (`KeptTree`).
     kept: Vec<KeptTree>,
@@ -2419,7 +2420,7 @@ impl Session {
                     parallel = true;
                     run_as_parallel_worker(ctx, &bq.plan, &mut put)?;
                 } else if streams && fetch > 0 {
-                    suspended = Some(run_suspendable(ctx, &bq.plan, params, fetch, &mut put)?);
+                    suspended = Some(Box::new(run_suspendable(ctx, &bq.plan, params, fetch, &mut put)?));
                 } else if streams && let Some(k) = kept.take() {
                     // (Rows a plain index scan gives as stored go out from their stored
                     // values where the sink can send them so: `RowSink::row_stored`.)
@@ -3342,7 +3343,8 @@ impl Session {
             return r;
         }
         let stmt = pt.stmt.clone();
-        let params = pt.params.clone();
+        // (Lent for the run, not copied: the portal is out of `portals` meanwhile.)
+        let params = std::mem::take(&mut pt.params);
         // A SELECT runs only as far as the row count (PortalRunSelect); its executor waits
         // in the portal for the next Execute.
         if max_rows > 0 && matches!(stmt.stmt.as_ref().and_then(inner), Some(NodeEnum::SelectStmt(_))) {
@@ -3350,6 +3352,7 @@ impl Session {
         }
         self.portal_plan = pt.planned.take();
         let out = self.execute_with(&stmt, &params, max_rows);
+        pt.params = params;
         self.portal_plan = None;
         self.fetch_limit = 0;
         pt.lazy = self.suspended.take();
@@ -3464,7 +3467,7 @@ impl Session {
     fn execute_suspended(
         &mut self,
         pt: &mut Portal,
-        mut lazy: cursor::Lazy,
+        mut lazy: Box<cursor::Lazy>,
         max_rows: usize,
     ) -> Result<(Outcome, bool)> {
         if self.status == TxnStatus::Failed {
