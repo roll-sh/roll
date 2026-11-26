@@ -1185,7 +1185,7 @@ pub(crate) async fn ema_setup(axum::extract::State(a): S, headers: axum::http::H
 async fn still_admin(a: &Arc<Access>, token: &str) -> Result<(), EmaRefusal> {
     let h = hash(token);
     let a2 = a.clone();
-    let by = tokio::task::spawn_blocking(move || a2.store.db.read(|c| read_setups(c)).ok().and_then(|all| all.into_iter().find(|s| s.token.as_deref().is_some_and(|t| same(t, &h))).map(|s| s.by)))
+    let by = tokio::task::spawn_blocking(move || a2.store.db.read(read_setups).ok().and_then(|all| all.into_iter().find(|s| s.token.as_deref().is_some_and(|t| same(t, &h))).map(|s| s.by)))
         .await
         .ok()
         .flatten()
