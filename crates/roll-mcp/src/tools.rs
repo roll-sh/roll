@@ -1938,6 +1938,8 @@ mod tests {
         let runs = arms(include_str!("../../tasks/src/model.rs"), "impl RunStatus {");
         let previews = arms(include_str!("../../roll-previews/src/lib.rs"), "impl State {");
         let exchanges = quoted(include_str!("../../mq-core/src/exchange.rs"), "fn name(", "\n    }\n", "=> \"");
+        // `any` matches every task in a lookup; an endpoint is made for one.
+        let tasks = quoted(include_str!("../../search-es/src/xpack/inference/mod.rs"), "pub fn name(self)", "\n    }\n", "=> \"").into_iter().filter(|t| t != "any").collect();
         let roles: Vec<String> = roll_auth::roles::Role::ALL.iter().map(|r| r.as_str().to_string()).collect();
         let actions: Vec<String> = roll_auth::scope::Action::ALL.iter().map(|a| a.as_str().to_string()).collect();
         let sets: Vec<(&str, &str, Vec<String>)> = vec![
@@ -1952,6 +1954,7 @@ mod tests {
             ("tasks_list_runs", "status", runs),
             ("previews_list", "state", previews),
             ("queues_declare_exchange", "type", exchanges),
+            ("search_create_inference_endpoint", "task_type", tasks),
             ("workspace_invite_member", "role", roles.clone()),
             ("workspace_set_member_role", "role", roles.clone()),
             ("workspace_set_group_role", "role", roles.into_iter().filter(|r| r != "owner").collect()),
