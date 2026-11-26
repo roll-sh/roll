@@ -2147,11 +2147,15 @@ the rest are skipped by the tests' own prerequisites.
   and a remote's `took` is its part's.
 - OpenSearch-flavor clusters' `cluster.remote.*` and `_remote/info` follow OpenSearch 3.9
   (`skip_unavailable` defaults to `false`, a seed or proxy address must be `host:port`, no
-  `cluster_credentials`), but a search naming `alias:index` on them is refused (400), loopback
-  remotes included, where OpenSearch 3.9 searches a loopback. Linking OpenSearch-flavor
-  clusters is left: it needs a credential model of its own, since OpenSearch has no
-  `cross_cluster` API keys (probably an internal user on the remote with a search-only role,
-  issued and sealed as links' keys are).
+  `cluster_credentials`). Linked ones search each other as OpenSearch 3.9's do (checked on a
+  private 3.9.0 pair; architecture.md, "Cross-cluster search"): the remote authorizes the user
+  sent (name, backend roles, security roles, attributes) with its own mappings and roles, and
+  refuses one it doesn't map with its own 403 for the whole request, or skips that cluster with
+  `skip_unavailable: true`. `_clusters` has `total`, `successful` and `skipped` only. A point in
+  time on a remote index is a 400 (`invalid id: [null]`), and SQL and PPL don't reach remotes,
+  as there. What differs: the link authenticates with an internal user roll makes on the remote
+  (OpenSearch's clusters trust each other's node certificates instead), and that user's role
+  bounds what the link reaches. Loopback remotes are searched as OpenSearch 3.9 searches them.
 - Aggregations and sorting on keyed flattened sub-fields, `_index_mode` aggregations,
   nested sorts inside `top_hits`, and shard-level aggregation failures as partial results.
 - Compound retrievers (`rrf`, `linear`, `pinned`, `rule` and `rescorer` over them) follow

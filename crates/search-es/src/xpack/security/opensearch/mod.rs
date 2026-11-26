@@ -47,7 +47,15 @@ pub const OWNER: &str = "admin";
 /// The names of the internal users (and their roles) roll's control plane makes for keys and
 /// links: an OpenSearch-flavor cluster's API keys ([`super::revoke_roll_key`] revokes one under
 /// either dialect).
-pub const KEY_USER_PREFIXES: [&str; 2] = ["roll-key-", "roll-link-"];
+pub const KEY_USER_PREFIXES: [&str; 3] = ["roll-key-", "roll-link-", REMOTE_LINK_PREFIX];
+/// The internal users roll's control plane makes on a remote cluster for a cross-cluster link
+/// (docs/search/architecture.md, "Cross-cluster search"): one per link, holding the link's
+/// ceiling as its one role.
+pub const REMOTE_LINK_PREFIX: &str = "roll-remote-";
+/// The attribute of a link's user naming the cluster it was made on (its catalog id): it
+/// authenticates only there, only on a link's request ([`authenticate_link`]), never with Basic
+/// auth of its own.
+pub const REMOTE_LINK_ATTRIBUTE: &str = "roll_remote_link";
 /// The key of a stored entry that hides a default of its name.
 const DELETED: &str = "_deleted";
 /// `plugins.security.compliance.salt`'s default (masked fields' BLAKE2b salt).
@@ -157,6 +165,9 @@ pub struct Identity {
     pub owner: bool,
     /// A reserved internal user (`is_reserved` of the account API).
     pub reserved: bool,
+    /// A linked cluster's user (a link's request, [`authenticate_link`]): the roles of the
+    /// link's own user, which limit everything this user's roles allow.
+    pub link_ceiling: Option<Vec<String>>,
 }
 
 /// The principal of an internal user.
@@ -177,6 +188,7 @@ fn principal_of(st: &ClusterState, name: &str, user: &Value, owner: bool) -> Pri
             attributes: user.get("attributes").and_then(Value::as_object).cloned().unwrap_or_default(),
             owner,
             reserved: flag(user, "reserved"),
+            link_ceiling: None,
         })),
     }
 }
@@ -205,9 +217,82 @@ pub fn authenticate_password(cluster: &Cluster, user: &str, password: &str, nati
     if user == OWNER {
         return (!native).then(|| owner(&st));
     }
-    let u = entry(&st, Kind::Users, user).filter(|u| !expired(u))?;
+    let u = entry(&st, Kind::Users, user).filter(|u| !expired(u) && !is_link_user(u))?;
     let hash = u.get("hash").and_then(Value::as_str).filter(|h| !h.is_empty())?;
     super::users::check_password_with(cluster, user, password, hash, verify_hash).then(|| principal_of(&st, user, &u, false))
+}
+
+/// Whether an internal user is a link's ([`REMOTE_LINK_ATTRIBUTE`]): it never signs in or is run
+/// as, as Elasticsearch never takes a `cross_cluster` key from a REST client.
+fn is_link_user(u: &Value) -> bool {
+    u.pointer(&["attributes", REMOTE_LINK_ATTRIBUTE]).is_some()
+}
+
+/// Authenticates a linked cluster's request (`user:password` of a link's user of this cluster,
+/// `access` its remote access header) as the user it was sent for, as OpenSearch's remote
+/// cluster takes the user the coordinating cluster sends: that user's name, backend roles,
+/// security roles and attributes as sent, its roles those plus what this cluster's mappings give
+/// it, each as this cluster defines it, all limited by the link user's own roles (the link's
+/// ceiling). Never the owner: the sent user is authorized like any other, `admin` too. `None`:
+/// not a link's user of this very cluster (a branch or restore holds a copy that isn't), a wrong
+/// password, or an access header that isn't one.
+pub fn authenticate_link(cluster: &Cluster, user: &str, password: &str, access: &str) -> Option<Principal> {
+    if !user.starts_with(REMOTE_LINK_PREFIX) || access.len() > crate::remote::links::MAX_REMOTE_ACCESS {
+        return None;
+    }
+    let st = cluster.state();
+    let u = entry(&st, Kind::Users, user).filter(|u| !expired(u))?;
+    let made_on = u.pointer(&["attributes", REMOTE_LINK_ATTRIBUTE]).map(Value::to_es_string)?;
+    if Some(made_on.as_str()) != cluster.config.catalog_id.as_deref() {
+        return None;
+    }
+    let hash = u.get("hash").and_then(Value::as_str).filter(|h| !h.is_empty())?;
+    if !super::users::check_password_with(cluster, user, password, hash, verify_hash) {
+        return None;
+    }
+    let access = crate::json::parse(access.as_bytes()).ok().flatten()?;
+    let sent = access.get("os")?;
+    let name = sent.get("user").and_then(Value::as_str).filter(|n| !n.is_empty())?.to_string();
+    let texts = |k: &str| -> Option<Vec<String>> {
+        match sent.get(k) {
+            None => Some(Vec::new()),
+            Some(Value::Arr(a)) => a.iter().map(|v| v.as_str().map(str::to_owned)).collect(),
+            Some(_) => None,
+        }
+    };
+    let (backend_roles, security_roles) = (texts("backend_roles")?, texts("security_roles")?);
+    let attributes = match sent.get("attributes") {
+        None => Map::new(),
+        Some(Value::Obj(m)) if m.values().all(|v| matches!(v, Value::Str(_))) => m.clone(),
+        Some(_) => return None,
+    };
+    // Its own roles only: a mapping of this cluster (`users: ["*"]`) never widens a link.
+    let ceiling = strs(u.get("opendistro_security_roles"));
+    Some(Principal {
+        username: name.clone(),
+        roles: mapped_roles(&st, &name, &backend_roles, &security_roles),
+        full_name: Value::Null,
+        email: Value::Null,
+        metadata: Value::object(),
+        realm_name: "internal",
+        realm_type: "internal",
+        authenticating: None,
+        kind: AuthKind::OpenSearch(Box::new(Identity { backend_roles, attributes, owner: false, reserved: false, link_ceiling: Some(ceiling) })),
+    })
+}
+
+/// What a link's request says of its user ([`authenticate_link`]'s `access`): `os` beside the
+/// header's `cluster` and `who`.
+pub fn link_identity(st: &ClusterState, p: &Principal) -> Value {
+    let id = p.os().cloned().unwrap_or_default();
+    // The internal user's own roles (OpenSearch's security roles travel with the user).
+    let security_roles = entry(st, Kind::Users, &p.username).map(|u| strs(u.get("opendistro_security_roles"))).unwrap_or_default();
+    crate::obj! {
+        "user" => p.username.clone(),
+        "backend_roles" => Value::Arr(id.backend_roles.iter().cloned().map(Value::from).collect()),
+        "security_roles" => Value::Arr(security_roles.iter().cloned().map(Value::from).collect()),
+        "attributes" => Value::Obj(id.attributes.clone()),
+    }
 }
 
 /// The internal user `name` without its credentials.
@@ -216,7 +301,7 @@ pub fn lookup_user(cluster: &Cluster, name: &str) -> Option<Principal> {
     if name == OWNER {
         return Some(owner(&st));
     }
-    entry(&st, Kind::Users, name).filter(|u| !expired(u)).map(|u| principal_of(&st, name, &u, false))
+    entry(&st, Kind::Users, name).filter(|u| !expired(u) && !is_link_user(u)).map(|u| principal_of(&st, name, &u, false))
 }
 
 /// The attribute roll keeps an internal user's expiry in (unix ms; roll search's keys route
@@ -366,7 +451,12 @@ pub fn descriptor(st: &ClusterState, role: &Value, p: &Principal, id: &Identity)
 
 /// The permissions of an OpenSearch principal's roles (roles that don't exist grant nothing).
 pub fn permissions(st: &ClusterState, p: &Principal, id: &Identity) -> Vec<Permission> {
-    p.roles.iter().filter_map(|r| entry(st, Kind::Roles, r)).map(|r| Permission::of_descriptor(&descriptor(st, &r, p, id))).collect()
+    role_permissions(st, &p.roles, p, id)
+}
+
+/// The permissions of roles `roles` for `p` (its variables substituted).
+pub fn role_permissions(st: &ClusterState, roles: &[String], p: &Principal, id: &Identity) -> Vec<Permission> {
+    roles.iter().filter_map(|r| entry(st, Kind::Roles, r)).map(|r| Permission::of_descriptor(&descriptor(st, &r, p, id))).collect()
 }
 
 /// Actions the plugin checks against cluster permissions (`PrivilegesEvaluator.isClusterPerm`)

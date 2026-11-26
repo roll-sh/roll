@@ -4609,6 +4609,77 @@ async fn cross_cluster_search_between_a_persons_own_clusters() {
     assert!(info.get("logs").is_none(), "{info}");
 }
 
+/// OpenSearch-flavor clusters link as OpenSearch's do (docs/search/architecture.md,
+/// "Cross-cluster search"): the remote maps the user sent with its own mappings, within the
+/// link's ceiling. A user mapped only on the local cluster is refused there (the whole request:
+/// `skip_unavailable` is off by default), a mapped one reads what the remote maps it to, DLS
+/// variables take the local user's attributes, the link's user never signs in by itself, a
+/// point in time doesn't span clusters, and unlinking removes the user on the remote.
+#[tokio::test]
+async fn opensearch_flavor_clusters_link_with_the_remotes_own_mappings() {
+    use reqwest::Method;
+    let e = env().await;
+    let near = creds(&e.post("/v1/search/clusters", json!({"name": "os-near", "flavor": "opensearch"})).await);
+    let far = creds(&e.post("/v1/search/clusters", json!({"name": "os-far", "flavor": "opensearch"})).await);
+    let as_ = |c: &(String, String), method: Method, p: &str, body: Option<Value>| e.es(&c.0, &c.1, method, p, body);
+    for (p, doc) in [("/docs/_doc/1", json!({"tenant": "a"})), ("/docs/_doc/2", json!({"tenant": "b"})), ("/secret/_doc/1", json!({"tenant": "a"}))] {
+        assert_eq!(as_(&far, Method::PUT, &format!("{p}?refresh=true"), Some(doc)).await.0, 201);
+    }
+    let api = "/_plugins/_security/api";
+    let dls = json!({"index_permissions": [{"index_patterns": ["docs"], "dls": "{\"term\":{\"tenant\":\"${attr.internal.tenant}\"}}", "allowed_actions": ["read"]}]});
+    for (c, p, body) in [
+        (&near, "internalusers/alice", json!({"password": "pass-word-alice-1"})),
+        (&near, "internalusers/bob", json!({"password": "pass-word-bob-12"})),
+        (&near, "internalusers/carol", json!({"password": "pass-word-carol-1", "attributes": {"tenant": "a"}})),
+        (&near, "rolesmapping/readall", json!({"users": ["alice"]})),
+        (&far, "rolesmapping/readall", json!({"users": ["bob"]})),
+        (&far, "roles/tenant_docs", dls),
+        (&far, "rolesmapping/tenant_docs", json!({"users": ["carol"]})),
+    ] {
+        let (s, v) = as_(c, Method::PUT, &format!("{api}/{p}"), Some(body)).await;
+        assert!(s < 300, "{p}: {s} {v}");
+    }
+    // Elasticsearch and OpenSearch clusters don't link to each other.
+    e.post("/v1/search/clusters", json!({"name": "es-x"})).await;
+    let (s, _) = e.call(Method::PUT, "/v1/search/clusters/os-near/remotes/x", Some(json!({"cluster": "es-x"}))).await;
+    assert_eq!(s, 404);
+    let (s, link) = e.call(Method::PUT, "/v1/search/clusters/os-near/remotes/r", Some(json!({"cluster": "os-far", "access": {"search": [{"names": ["docs*"]}]}}))).await;
+    assert_eq!((s, link["minted"].as_bool()), (200, Some(true)), "{link}");
+    let user = link["key_id"].as_str().unwrap().to_string();
+    assert!(user.starts_with("roll-remote-"), "{link}");
+
+    // The owner: the ceiling, in OpenSearch's `_clusters` shape.
+    let (s, v) = as_(&near, Method::GET, "/r:docs/_search", None).await;
+    assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(2)), "{v}");
+    assert_eq!(v["_clusters"], json!({"total": 1, "successful": 1, "skipped": 0}), "{v}");
+    let (s, v) = as_(&near, Method::GET, "/r:secret/_search", None).await;
+    assert_eq!((s, v["error"]["type"].as_str()), (403, Some("security_exception")), "outside the ceiling: {v}");
+    let (_, info) = as_(&near, Method::GET, "/_remote/info", None).await;
+    assert_eq!(info["r"]["connected"], true, "{info}");
+    // Users: the remote's mappings decide, with the local user's attributes.
+    let (s, v) = e.es("alice@os-near", "pass-word-alice-1", Method::GET, "/r:docs/_search", None).await;
+    assert_eq!(s, 403, "{v}");
+    assert_eq!(v["error"]["reason"], "no permissions for [indices:data/read/search] and User [name=alice, backend_roles=[], requestedTenant=null]", "{v}");
+    let (s, v) = e.es("bob@os-near", "pass-word-bob-12", Method::GET, "/r:docs/_search", None).await;
+    assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(2)), "{v}");
+    let (s, v) = e.es("carol@os-near", "pass-word-carol-1", Method::GET, "/r:docs/_search", None).await;
+    assert_eq!((s, v["hits"]["hits"][0]["_source"]["tenant"].as_str(), v["hits"]["total"]["value"].as_i64()), (200, Some("a"), Some(1)), "{v}");
+    // Skipped instead, once the remote may be.
+    assert_eq!(as_(&near, Method::PUT, "/_cluster/settings", Some(json!({"persistent": {"cluster.remote.r.skip_unavailable": true}}))).await.0, 200);
+    let (s, v) = e.es("alice@os-near", "pass-word-alice-1", Method::GET, "/r:docs/_search", None).await;
+    assert_eq!((s, &v["_clusters"]), (200, &json!({"total": 1, "successful": 0, "skipped": 1})), "{v}");
+    let (s, v) = as_(&near, Method::POST, "/r:docs/_search/point_in_time?keep_alive=1m", None).await;
+    assert_eq!((s, v["error"]["reason"].as_str()), (400, Some("invalid id: [null]")), "{v}");
+
+    // The link's user signs in only on roll's own link requests, whatever its password.
+    assert!(as_(&far, Method::PATCH, &format!("{api}/internalusers/{user}"), Some(json!([{"op": "replace", "path": "/password", "value": "known-pass-word-9"}]))).await.0 < 300);
+    assert_eq!(e.es(&format!("{user}@os-far"), "known-pass-word-9", Method::GET, "/docs/_search", None).await.0, 401);
+
+    // Unlinked: the user is gone on the remote.
+    assert_eq!(e.call(Method::DELETE, "/v1/search/clusters/os-near/remotes/r", None).await.0, 204);
+    assert_eq!(as_(&far, Method::GET, &format!("{api}/internalusers/{user}"), None).await.0, 404);
+}
+
 /// Only the node says who a request authenticated as, on the request in process: no header
 /// does (the old `x-roll-derived-key` and `x-roll-authenticated-user`, any case), whatever the
 /// credentials beside it. And what it verified reaches the request's internal calls: a derived

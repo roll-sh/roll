@@ -65,10 +65,42 @@ pub fn target(address: &str, domain: Option<&str>) -> Option<String> {
     crate::control::valid_name(&label).then_some(label)
 }
 
-/// Whether `local` can name `target` as a remote at all: two Elasticsearch-flavor clusters, not the
-/// same one. Who may link them is the caller's decision ([`Control::link_remote`]).
+/// Whether `local` can name `target` as a remote at all: two clusters of one flavor (Elasticsearch
+/// and OpenSearch don't link to each other, as outside roll), not the same one. Who may link them
+/// is the caller's decision ([`Control::link_remote`]).
 pub fn linkable(local: &SearchCluster, target: &SearchCluster) -> bool {
-    local.id != target.id && local.flavor == "elasticsearch" && target.flavor == "elasticsearch"
+    local.id != target.id && local.flavor == target.flavor && matches!(local.flavor.as_str(), "elasticsearch" | "opensearch")
+}
+
+/// Whether a link's credentials are an OpenSearch-flavor link's user (else a `cross_cluster` key).
+fn is_os_link(key_id: &str) -> bool {
+    key_id.starts_with(search_es::xpack::security::opensearch::REMOTE_LINK_PREFIX)
+}
+
+/// An OpenSearch-flavor link's ceiling, the one role of its user on the target, from the link's
+/// `access` (`{"search": [{"names": [...]}]}`, every non-hidden index when unset): reading and the
+/// shard lookups a scroll's part asks for, on those names only; no cluster or security
+/// permission.
+fn os_ceiling(access: Option<&Value>, local: &str) -> Result<Value> {
+    let bad = || ControlError::Invalid("access: an OpenSearch-flavor link takes {\"search\": [{\"names\": [...]}]}: index names or patterns, none hidden".into());
+    let mut names = Vec::new();
+    match access {
+        None => names.push("*".to_string()),
+        Some(Value::Object(a)) if a.len() == 1 => {
+            for e in a.get("search").and_then(Value::as_array).filter(|s| !s.is_empty()).ok_or_else(bad)? {
+                let e = e.as_object().filter(|e| e.len() == 1).ok_or_else(bad)?;
+                for n in e.get("names").and_then(Value::as_array).filter(|n| !n.is_empty()).ok_or_else(bad)? {
+                    let n = n.as_str().filter(|n| !n.is_empty() && n.len() <= 255 && !n.starts_with(['.', '-', '_']) && !n.contains([':', ',', ' '])).ok_or_else(bad)?;
+                    names.push(n.to_string());
+                }
+            }
+        }
+        Some(_) => return Err(bad()),
+    }
+    Ok(json!({
+        "description": format!("roll: remote cluster link from {local}"),
+        "index_permissions": [{ "index_patterns": names, "allowed_actions": ["read", "indices:admin/shards/search_shards"] }],
+    }))
 }
 
 /// Who a link the operator (or an admin) made was made by.
@@ -141,6 +173,10 @@ impl Links for ControlLinks {
         }
         let Some(encoded) = c.open_remote_credentials(&row) else { return Err(unreachable(Some("its credentials can't be opened on this node"))) };
         let Some((key_id, secret)) = decode_key(&encoded) else { return Err(unreachable(Some("its credentials aren't an API key"))) };
+        // Made for the target's flavor: a cluster that switched since has the other kind.
+        if is_os_link(&key_id) != (t.flavor == "opensearch") {
+            return Err(unreachable(Some("its credentials were made for the cluster's other flavor: link it again through roll's API")));
+        }
         Ok(c.send_link(&t, &key_id, &secret, req).await)
     }
 }
@@ -215,7 +251,9 @@ impl Control {
     async fn send_link(&self, t: &SearchCluster, key_id: &str, secret: &str, mut req: EsRequest) -> EsResponse {
         link_headers(&mut req);
         let token = base64::engine::general_purpose::STANDARD.encode(format!("{key_id}@{}:{secret}", t.name));
-        req.headers.push(("Authorization".into(), format!("ApiKey {token}")));
+        // An OpenSearch-flavor link's user signs in with Basic auth, a cross-cluster key as itself.
+        let scheme = if is_os_link(key_id) { "Basic" } else { "ApiKey" };
+        req.headers.push(("Authorization".into(), format!("{scheme} {token}")));
         self.on_owner(&t.name, req).await
     }
 
@@ -274,7 +312,16 @@ impl Control {
             Ok(t) if may_admin(&t) && linkable(&c, &t) => t,
             _ => return Err(no_target(target)),
         };
+        let os = t.flavor == "opensearch";
         let (key_id, encoded, minted) = match api_key {
+            Some(_) if os => return Err(ControlError::Invalid("api_key: OpenSearch-flavor clusters have no cross-cluster API keys; leave it out and roll makes the link's user on the target".into())),
+            None if os => {
+                let made_on = t.id.clone();
+                let (name, password) = self
+                    .os_user(&t, search_es::xpack::security::opensearch::REMOTE_LINK_PREFIX, Some(os_ceiling(access.as_ref(), &c.name)?), &format!("roll: remote cluster link from {} as {alias}", c.name), None, &[(search_es::xpack::security::opensearch::REMOTE_LINK_ATTRIBUTE, made_on.as_str())])
+                    .await?;
+                (name.clone(), base64::engine::general_purpose::STANDARD.encode(format!("{name}:{password}")), true)
+            }
             Some(k) => {
                 let Some((key_id, secret)) = decode_key(k) else { return Err(ControlError::Invalid("api_key: the encoded cross-cluster API key (base64 of id:secret)".into())) };
                 // It must authenticate on the target as one of its cross-cluster keys.
@@ -367,13 +414,21 @@ impl Control {
         Ok(())
     }
 
-    /// Revokes cross-cluster key `key_id` on cluster `target_id` (gone already counts).
+    /// Revokes cross-cluster key `key_id` on cluster `target_id`, or an OpenSearch-flavor link's
+    /// user (gone already counts).
     async fn revoke_remote_key(&self, target_id: &str, key_id: &str) -> Result<()> {
         let t = match self.get(target_id).await {
             Ok(t) => t,
             Err(ControlError::NotFound(_)) => return Ok(()),
             Err(e) => return Err(e),
         };
+        if is_os_link(key_id) {
+            // An OpenSearch-flavor link's user and its one role.
+            let api = "/_plugins/_security/api";
+            let r = self.call(&t, EsRequest::new("DELETE", &format!("{api}/internalusers/{}", urlencoding::encode(key_id)))).await;
+            let _ = self.call(&t, EsRequest::new("DELETE", &format!("{api}/roles/{}", urlencoding::encode(key_id)))).await;
+            return if r.status < 300 || r.status == 404 { Ok(()) } else { Err(ControlError::Internal(anyhow::anyhow!("removing remote link user {key_id} of cluster {} failed ({})", t.name, r.status))) };
+        }
         let body = serde_json::to_vec(&json!({ "ids": [key_id] })).unwrap_or_default();
         let r = self.call(&t, EsRequest::json("DELETE", "/_security/api_key", body)).await;
         if r.status < 300 || r.status == 404 { Ok(()) } else { Err(ControlError::Internal(anyhow::anyhow!("revoking remote key {key_id} of cluster {} failed ({})", t.name, r.status))) }

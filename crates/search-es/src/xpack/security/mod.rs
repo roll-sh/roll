@@ -472,6 +472,15 @@ pub fn authenticate_native(cluster: &Cluster, header: &str) -> Option<Principal>
 /// header): a `cross_cluster` key of this cluster only.
 pub fn authenticate_native_link(cluster: &Cluster, header: &str, access: &str) -> Option<Principal> {
     let (scheme, value) = header.trim().split_once(' ')?;
+    // OpenSearch: a link's own internal user, for the user it was sent for.
+    if cluster.dialect == crate::cluster::Dialect::OpenSearch {
+        if !scheme.eq_ignore_ascii_case("basic") {
+            return None;
+        }
+        let text = String::from_utf8(b64_decode(value.trim()).ok()?).ok()?;
+        let (user, password) = text.split_once(':')?;
+        return opensearch::authenticate_link(cluster, user, password, access);
+    }
     if !scheme.eq_ignore_ascii_case("apikey") || !es_credentials(cluster) {
         return None;
     }
@@ -654,7 +663,8 @@ pub fn effective(file: &FileRoles, st: &crate::meta::ClusterState, p: &Principal
             let d = tokens::service_account_descriptor(&p.username).unwrap_or(Value::Null);
             (vec![Permission::of_descriptor(&d)], None)
         }
-        AuthKind::OpenSearch(id) => (opensearch::permissions(st, p, id), None),
+        // A link's user: what this cluster gives the user sent, within the link's ceiling.
+        AuthKind::OpenSearch(id) => (opensearch::permissions(st, p, id), id.link_ceiling.as_ref().map(|roles| opensearch::role_permissions(st, roles, p, id))),
         _ => (permissions_of_roles(file, st, &p.roles), None),
     };
     let parents = st.metadata.data_streams.values().flat_map(|d| d.indices.iter().map(|i| (i.clone(), d.name.clone()))).collect();

@@ -4363,7 +4363,7 @@ pub fn run(ctx: &Ctx, mut req: SearchRequest) -> EsResult<SearchOutcome> {
     if !errs.is_empty() {
         return Err(EsError::action_request_validation(&errs));
     }
-    let ccs = if ctx.cluster.dialect == crate::cluster::Dialect::Elasticsearch { crate::remote::plan(ctx.cluster, &st, &req.indices)? } else { None };
+    let ccs = crate::remote::plan(ctx.cluster, &st, &req.indices)?;
     let targets = match &ccs {
         None => {
             crate::meta::resolve::reject_remote(&req.indices)?;
@@ -4400,7 +4400,7 @@ pub fn run(ctx: &Ctx, mut req: SearchRequest) -> EsResult<SearchOutcome> {
     if let Some(plan) = &ccs {
         let mrt = ctx.query("ccs_minimize_roundtrips").is_none_or(|v| v != "false");
         ctx.cluster.ccs.record(plan, out.took_ms, out.failures.is_empty(), mrt);
-        out.clusters = Some(clusters_section(plan, &per_cluster, &out));
+        out.clusters = Some(crate::remote::clusters_for(ctx.cluster.dialect, clusters_section(plan, &per_cluster, &out)));
     }
     Ok(out)
 }

@@ -12,8 +12,9 @@ function StateDot({ state }: { state: RemoteRow["state"] }) {
 
 /**
  * Remote clusters (cross-cluster search): another of the person's own clusters, searched from
- * this one as `<alias>:<index>`. Linking makes a cross-cluster API key on the target that roll
- * keeps sealed; unlinking removes the remote and revokes that key. The links come from roll's
+ * this one as `<alias>:<index>`. Linking makes a cross-cluster API key on the target (an
+ * OpenSearch-flavor one: an internal user with the link's role) that roll keeps sealed;
+ * unlinking removes the remote and revokes it. The links come from roll's
  * catalog (no wake); how each is set and whether it connects comes from the cluster's
  * `_remote/info`, read when the cluster is awake or on request.
  */
@@ -30,6 +31,7 @@ export function Remotes({ cluster }: { cluster: SearchCluster }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const awake = cluster.status.state === "loaded";
+  const os = cluster.flavor === "opensearch";
 
   const act = async <T,>(label: string, f: () => Promise<T>): Promise<{ value: T } | null> => {
     setBusy(label);
@@ -81,8 +83,10 @@ export function Remotes({ cluster }: { cluster: SearchCluster }) {
     >
       <div className="space-y-4 px-5 py-4">
         <p className="max-w-[70ch] text-[13px] text-muted">
-          Search another of your clusters from this one as <span className="font-mono">alias:index</span>. roll makes a cross-cluster API key on it and keeps it
-          sealed; the key&apos;s index patterns are all the link reaches.
+          Search another of your clusters from this one as <span className="font-mono">alias:index</span>.{" "}
+          {os
+            ? "roll makes a user on it for the link and keeps its password sealed; the link's index patterns are all it reaches, and the other cluster's role mappings decide what each of your users reads there."
+            : "roll makes a cross-cluster API key on it and keeps it sealed; the key's index patterns are all the link reaches."}
         </p>
 
         {rows && rows.length > 0 && (
@@ -113,7 +117,7 @@ export function Remotes({ cluster }: { cluster: SearchCluster }) {
                         <span className="text-[12px] text-subtle">set in settings</span>
                       ) : unlinking === r.alias ? (
                         <span className="inline-flex items-center gap-2">
-                          <span className="text-[12px] text-muted">{r.minted ? "Its key is revoked." : "Searches of it fail."}</span>
+                          <span className="text-[12px] text-muted">{r.minted ? (os ? "Its user is removed." : "Its key is revoked.") : "Searches of it fail."}</span>
                           <button
                             disabled={busy !== null}
                             onClick={async () => {

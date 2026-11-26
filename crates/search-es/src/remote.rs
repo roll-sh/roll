@@ -147,7 +147,7 @@ pub fn plan(cluster: &Cluster, st: &ClusterState, expressions: &[String]) -> EsR
     if !expressions.iter().any(|e| split_expression(e.trim_start_matches('-')).is_some()) {
         return Ok(None);
     }
-    let configured = remotes(st);
+    let configured = remotes_in(cluster.dialect, st);
     let mut local: Vec<String> = Vec::new();
     let mut remote: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut skipped: Vec<String> = Vec::new();
@@ -390,5 +390,17 @@ mod tests {
         }
         assert_eq!(t.to_value(), obj! { "max" => 10, "avg" => 5, "p90" => 9 });
         assert_eq!(Took::default().to_value(), obj! { "max" => 0, "avg" => 0, "p90" => 0 });
+    }
+}
+
+/// `_clusters` as the dialect answers it: OpenSearch 3.9 counts `total`, `successful` and
+/// `skipped` only (no `running`, `partial`, `failed` or `details`).
+pub fn clusters_for(dialect: crate::cluster::Dialect, v: Value) -> Value {
+    match (dialect, v) {
+        (crate::cluster::Dialect::OpenSearch, Value::Obj(mut m)) => {
+            m.retain(|k, _| matches!(k.as_str(), "total" | "successful" | "skipped"));
+            Value::Obj(m)
+        }
+        (_, v) => v,
     }
 }

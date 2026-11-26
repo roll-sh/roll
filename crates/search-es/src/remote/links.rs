@@ -64,7 +64,11 @@ pub const SCROLL_KEEP_ALIVE_HEADER: &str = "x-roll-scroll-keep-alive";
 /// Whether the request is a linked remote cluster's (a `cross_cluster` key with the remote
 /// access header, which only roll's own calls carry).
 pub fn is_link_call(ctx: &Ctx) -> bool {
-    matches!(&crate::xpack::security::principal(ctx).kind, crate::xpack::security::AuthKind::ApiKey(a) if a.remote.is_some())
+    match &crate::xpack::security::principal(ctx).kind {
+        crate::xpack::security::AuthKind::ApiKey(a) => a.remote.is_some(),
+        crate::xpack::security::AuthKind::OpenSearch(id) => id.link_ceiling.is_some(),
+        _ => false,
+    }
 }
 
 /// Whether a link's search asks for its aggregations partially reduced.
@@ -173,7 +177,7 @@ pub fn is_link(cluster: &crate::cluster::Cluster, r: &Remote) -> bool {
 pub fn names_link(ctx: &Ctx, e: &str) -> bool {
     let Some(links) = ctx.cluster.config.links.as_deref() else { return false };
     let Some((pattern, _)) = split_expression(e) else { return false };
-    let configured = remotes(&ctx.state());
+    let configured = crate::remote::remotes_in(ctx.cluster.dialect, &ctx.state());
     let mut matched = configured.iter().filter(|r| glob_match(pattern, &r.alias)).peekable();
     matched.peek().is_some() && matched.all(|r| r.link(links).is_some())
 }
@@ -295,7 +299,14 @@ pub fn request(ctx: &Ctx, alias: &str, method: &str, uri: &str, body: Option<Val
             format!("user [{}] with assigned roles [{}]", p.username, roles.join(","))
         }
     };
-    let access = obj! { "cluster" => ctx.cluster.name.clone(), "who" => who, "roles" => Value::Arr(remote_roles(ctx, alias)) };
+    let mut access = obj! { "cluster" => ctx.cluster.name.clone(), "who" => who };
+    if let Some(m) = access.as_object_mut() {
+        match ctx.cluster.dialect {
+            // The user, as OpenSearch's coordinating cluster sends it: the remote maps it.
+            crate::cluster::Dialect::OpenSearch => m.insert("os".into(), crate::xpack::security::opensearch::link_identity(&ctx.state(), &crate::xpack::security::opensearch::principal(ctx))),
+            crate::cluster::Dialect::Elasticsearch => m.insert("roles".into(), Value::Arr(remote_roles(ctx, alias))),
+        };
+    }
     req.headers.push((REMOTE_ACCESS_HEADER.into(), access.to_json()));
     for h in ["x-opaque-id", "traceparent"] {
         if let Some(v) = ctx.request.header(h) {
@@ -399,6 +410,14 @@ pub fn spawn(links: Arc<dyn Links>, local: String, r: &Remote, target: String, r
 /// Why the request's principal may not reach remote `r`, as Elasticsearch's querying cluster
 /// refuses it: none of its `remote_indices` privileges names the remote.
 pub fn refusal(ctx: &Ctx, r: &Remote) -> Option<EsError> {
+    // OpenSearch: the remote decides who reads what; a link's own request reaches no further
+    // (its ceiling holds on this cluster only).
+    if ctx.cluster.dialect == crate::cluster::Dialect::OpenSearch {
+        let p = crate::xpack::security::opensearch::principal(ctx);
+        let id = p.os().cloned().unwrap_or_default();
+        let action = crate::xpack::security::privileges::action_of(ctx.api.name()).1;
+        return id.link_ceiling.is_some().then(|| crate::xpack::security::opensearch::denied(&p, &id, action));
+    }
     let p = crate::xpack::security::principal(ctx);
     if p.is_superuser() || !remote_roles(ctx, &r.alias).iter().any(|set| set.as_object().is_none_or(|m| m.values().all(|d| d.get("indices").and_then(Value::as_array).is_none_or(|a| a.is_empty())))) {
         return None;
@@ -444,10 +463,10 @@ pub struct Split {
 /// they name none (or the cluster has no links).
 pub fn split(ctx: &Ctx, expressions: &[String]) -> EsResult<Option<Split>> {
     let Some(links) = ctx.cluster.config.links.as_deref() else { return Ok(None) };
-    if ctx.cluster.dialect != crate::cluster::Dialect::Elasticsearch || !expressions.iter().any(|e| split_expression(e).is_some()) {
+    if !expressions.iter().any(|e| split_expression(e).is_some()) {
         return Ok(None);
     }
-    let configured = remotes(&ctx.state());
+    let configured = crate::remote::remotes_in(ctx.cluster.dialect, &ctx.state());
     let linked: Vec<(&Remote, String)> = configured.iter().filter_map(|r| r.link(links).map(|t| (r, t))).collect();
     if linked.is_empty() {
         return Ok(None);
@@ -835,7 +854,7 @@ pub(crate) async fn merge(ctx: &Ctx<'_>, req: &SearchRequest, sort: &[Sort], tie
         n => n + 1,
     });
     ctx.cluster.ccs.record_parts(parts.iter().map(|p| (p.name.as_str(), p.status == "skipped")), wildcards, out.took_ms, out.failures.is_empty(), ctx.query("ccs_minimize_roundtrips").is_none_or(|v| v != "false"));
-    out.clusters = Some(clusters_section(&parts));
+    out.clusters = Some(crate::remote::clusters_for(ctx.cluster.dialect, clusters_section(&parts)));
     Ok(Merged { out, hits, answers })
 }
 

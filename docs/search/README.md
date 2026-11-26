@@ -563,8 +563,8 @@ API key based remote cluster security; `search-control` `remotes.rs`, `search-es
 `<alias>:<index>`, when both have the same owner: one person's, or both the operator's (admins
 act for the owner, they can't link two owners' clusters). Never across owners: names are global,
 so a remote naming another person's cluster is refused exactly as one naming a cluster that
-doesn't exist (404 from the route, the same 400 from `PUT _cluster/settings`). Both must be
-Elasticsearch-flavor.
+doesn't exist (404 from the route, the same 400 from `PUT _cluster/settings`). Both must be of
+one flavor (Elasticsearch and OpenSearch clusters don't link to each other, as outside roll).
 
 - **Linking**: `PUT /v1/search/clusters/{id}/remotes/{alias}` `{cluster, skip_unavailable?,
   access?}` makes a `cross_cluster` API key on the remote with `access` (Elasticsearch's shape,
@@ -638,14 +638,23 @@ Elasticsearch-flavor.
   one cluster is its opener's alone too. `search_after` with a point in time pages exactly: each hit's `_shard_doc`
   tiebreaker carries its cluster above its shard, and every cluster continues from the last
   hit's place in that order.
-- **OpenSearch-flavor clusters**: `cluster.remote.*` and `_remote/info` answer as OpenSearch
-  3.9 does (`skip_unavailable` defaults to `false`, a seed or proxy address must be
-  `host:port`, no `cluster_credentials`), and a remote naming a roll cluster goes through the
-  same owner check. Linking them is left: OpenSearch has no `cross_cluster` API keys, so links
-  between OpenSearch-flavor clusters need a credential model of their own (probably an
-  internal user on the remote with a search-only role, issued and sealed as links' keys are).
-  Until then a search naming `alias:index` on them is refused (400), loopback remotes included,
-  where OpenSearch searches a loopback.
+- **OpenSearch-flavor clusters** link as OpenSearch's clusters do (architecture.md,
+  "Cross-cluster search"). `cluster.remote.*` and `_remote/info` answer as OpenSearch 3.9 does
+  (`skip_unavailable` defaults to `false`, a seed or proxy address must be `host:port`, no
+  `cluster_credentials`), with the same owner check. The route makes an internal user
+  `roll-remote-<random>` on the remote whose one role is the link's ceiling (`access`:
+  `{"search": [{"names": [...]}]}` only, `read` and shard lookups on those names), its password
+  sealed as a key is; no `api_key` (OpenSearch has no cross-cluster keys). That user signs in only
+  on roll's own link calls, never with Basic auth, and only on the cluster it was made on. The
+  remote takes the user the local cluster sends (name, backend roles, its own security roles,
+  attributes) and authorizes it with its own role mappings and roles, within the ceiling, so a
+  user mapped only locally is refused there (one 403 for the request, or the cluster skipped
+  with `skip_unavailable: true`). Anyone who can manage the local cluster's security can assert
+  any user, as between OpenSearch clusters: the ceiling is what the link reaches. `_search`,
+  `_count`, `_msearch`, `_field_caps`, `_resolve/index`, scrolls and asynchronous search cross
+  the link; `_clusters` has OpenSearch's `total`, `successful` and `skipped`; a point in time on
+  a remote index is OpenSearch's 400 (`invalid id: [null]`); SQL and PPL stay local, as in
+  OpenSearch. Loopback remotes are searched as OpenSearch searches them.
 - **ES|QL** (`search-es` `xpack/esql/ccs.rs`): `FROM <alias>:<index>` (`*:logs-*`,
   `local,remote:idx`) answers as one cluster holding all the data would, as Elasticsearch 9.5.5
   answers it. Each cluster runs its **part**: the source, the commands that work row by row
@@ -1519,8 +1528,9 @@ deterministic (#396).
    with one final reduce, `scroll` and point in time across clusters, the dashboard's Remote
    clusters panel, OpenSearch 3.9's `cluster.remote.*` answers, ES|QL `FROM <alias>:<index>`
    (each cluster's part up to its first breaker, `STATS` merged from partial states,
-   `ENRICH`'s remote modes, `_clusters`). Left: linking OpenSearch-flavor clusters (no `cross_cluster` keys there:
-   it needs a credential model and a review of its own).
+   `ENRICH`'s remote modes, `_clusters`). In review (`feature/search-os-remote-links`): linking
+   OpenSearch-flavor clusters as OpenSearch's link, the remote mapping the user sent within the
+   link's ceiling (architecture.md, "Cross-cluster search"; a security review of its own).
 6. **The Rally losses left by the full rerun** (Round 10, vectors, #268: Elasticsearch 9.1+ runs no merge while less than ~93.5 GB of disk is free, and this host was 91-98% full, so Round 9's Elasticsearch races were held on vectors and noaa (4 of 6); the harness now sets `indices.merge.disk.check_interval=0`. With merges flowing, the force-merged vector losses are gone and dense_vector `100-1000_multiple_segments` (2.30x) was the one loss with ranges apart; Round 12 makes it a tie (0.97, 6.13 against 6.35 ms; 0.83 at equal foreign load): each segment now searches a beam sized to its share of the shard, as Lucene 10.5 does, −33% instructions per query, recall unchanged. Round 11, noaa and nyc_taxis rerun with merges flowing at `769dd6744` (#340): Round 9's noaa claims held (every range-field query ahead in median, all ties; `conjunction_big_range_big_term` 7.4 against 12.2 ms, faster in 6 of 6 rounds; indexing 0.75, ahead in 6 of 6), and nyc_taxis wasn't held at all (its 0-merge races are Elasticsearch's merge policy). What changed: nyc_taxis `distance_amount_agg` leads by less (46 against 78 ms, 0.59; Round 9's 118 was load), its `range` now leads (0.88), and Elasticsearch now indexes nyc_taxis faster in median (1.03 docs/s, bulk p50 1.04, ties)) (docs/benchmarks/search.md: Round 8, every Rally
    track against Elasticsearch 9.5.5 and OpenSearch 3.9 at `83fac5982`; Round 9, the four tracks
    #29 fixed rerun at `c2b47b251`, three alternating rounds each, noaa six; Round 11, noaa and
