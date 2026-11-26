@@ -383,6 +383,9 @@ export const secretsHealth = () => req<Health>("GET", "/v1/secrets/health");
 export const secretsWhoami = () => req<WhoAmI>("GET", "/v1/secrets/whoami");
 /** roll secrets' policy: floors every project may only tighten (403 unless the operator or an admin account). */
 export const secretsGuardrails = () => req<Guardrails>("GET", "/v1/secrets/policy");
+/** Every exception to the policy: each project below a floor (its `off_policy` findings), and grants with a secrets rule that outlive `max_token_days` (same 403). */
+export type PolicyReport = { policy: Guardrails; projects: ProjectFindings[]; grants: { id: string; name: string; kind: string; user: string | null; created_at: number; expires_at: number | null }[] };
+export const secretsPolicyReport = () => req<PolicyReport>("GET", "/v1/secrets/policy/report");
 /** roll's OIDC issuer, which a GCP pool or an Azure federated credential trusts (public). */
 export const secretsIssuer = () => req<{ issuer: string; jwks_uri: string }>("GET", "/v1/secrets/oidc/.well-known/openid-configuration");
 /** Every project, environment and folder holding `key` (`PREFIX*` for a prefix) that the caller may read. */
