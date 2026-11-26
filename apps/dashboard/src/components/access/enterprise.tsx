@@ -24,6 +24,9 @@ import { relative } from "./shell";
  * provider's ID-JAG for a token acting as the person, with no consent screen. The operator's only:
  * hidden when the config doesn't answer.
  */
+/** Claude's public client metadata document; its confidential one is `${CLAUDE_CLIENT}/confidential_client`. */
+const CLAUDE_CLIENT = "https://claude.ai/oauth/mcp-oauth-client-metadata";
+
 export function EnterprisePanel() {
   const [e, setE] = useState<Enterprise | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -270,7 +273,7 @@ function Apps({ apps, tokenEndpoint, refresh, hasIdp }: { apps: EnterpriseApp[];
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                 <span className="font-medium">{a.name}</span>
                 <code className="font-mono text-subtle">{a.client_id}</code>
-                <span className="text-muted">{a.signs_with_key ? "signs with a key" : "signs with a secret"}</span>
+                <span className="text-muted">{a.metadata?.length ? "signs with its client metadata's keys" : a.signs_with_key ? "signs with a key" : "signs with a secret"}</span>
                 <span className="text-subtle">{rulesSummary(a.rules)}</span>
                 <span className="text-subtle">added {relative(a.created_at)}</span>
                 {a.old_until && <span className="text-subtle">old secret stops {relative(a.old_until)}</span>}
@@ -280,9 +283,11 @@ function Apps({ apps, tokenEndpoint, refresh, hasIdp }: { apps: EnterpriseApp[];
                     <button onClick={() => setOpen({ id: a.client_id, what: "rules" })} className="text-muted hover:text-fg">
                       Edit rules
                     </button>
-                    <button onClick={() => setOpen({ id: a.client_id, what: "rotate" })} className={a.leaked ? "font-medium text-danger" : "text-muted hover:text-fg"}>
-                      Rotate
-                    </button>
+                    {!a.metadata?.length && (
+                      <button onClick={() => setOpen({ id: a.client_id, what: "rotate" })} className={a.leaked ? "font-medium text-danger" : "text-muted hover:text-fg"}>
+                        Rotate
+                      </button>
+                    )}
                     <button onClick={() => setRemoving(a.client_id)} className="text-muted hover:text-danger">
                       Remove
                     </button>
@@ -463,6 +468,7 @@ function NewApp({ onMade, onCancel }: { onMade: (m: EnterpriseApp & { client_sec
   const [name, setName] = useState("");
   const [rules, setRules] = useState<Rule[]>([]);
   const [key, setKey] = useState("");
+  const [claude, setClaude] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -476,14 +482,15 @@ function NewApp({ onMade, onCancel }: { onMade: (m: EnterpriseApp & { client_sec
       })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
   }, []);
-  const parsed = key.trim() ? publicJwk(key) : null;
+  const parsed = key.trim() && !claude ? publicJwk(key) : null;
   const problems = [...(name.trim() ? [] : ["Name the app"]), ...(rules.length ? [] : ["Allow at least one action"]), ...(parsed && "problem" in parsed ? [parsed.problem] : [])];
   const create = async () => {
     setBusy(true);
     setError(null);
     try {
       const public_jwk = parsed && "jwk" in parsed ? parsed.jwk : null;
-      await onMade(await accessApi.addEnterpriseApp({ name: name.trim(), rules, ...(public_jwk ? { public_jwk } : {}) }));
+      const metadata = claude ? [CLAUDE_CLIENT, `${CLAUDE_CLIENT}/confidential_client`] : [];
+      await onMade(await accessApi.addEnterpriseApp({ name: name.trim(), rules, ...(public_jwk ? { public_jwk } : {}), ...(metadata.length ? { metadata } : {}) }));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -499,6 +506,25 @@ function NewApp({ onMade, onCancel }: { onMade: (m: EnterpriseApp & { client_sec
         <span className="block text-[12px] text-subtle">Name</span>
         <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Claude, the support desk" maxLength={64} className={`${input} w-full sm:w-1/2`} />
       </label>
+      <label className="flex items-start gap-2 text-[12px]">
+        <input
+          type="checkbox"
+          checked={claude}
+          onChange={(e) => {
+            setClaude(e.target.checked);
+            if (e.target.checked && !name.trim()) setName("Claude");
+          }}
+          className="mt-0.5"
+        />
+        <span>
+          <span className="font-medium">Claude&apos;s auto-connect</span>
+          <span className="block text-subtle">
+            Claude presents its client metadata documents as the client and signs with their keys: roll holds no secret of it. Its
+            organization&apos;s issuer (from Claude&apos;s auto-connect setup) goes under Providers.
+          </span>
+        </span>
+      </label>
+      {!claude && (
       <label className="block space-y-1.5">
         <span className="block text-[12px] text-subtle">
           Public key (optional: the app signs private_key_jwt with it; an Ed25519 or P-256 PEM, or a JWK). Without one, roll makes a secret and
@@ -513,10 +539,11 @@ function NewApp({ onMade, onCancel }: { onMade: (m: EnterpriseApp & { client_sec
           className={`${input} w-full resize-y font-mono text-[12px]`}
         />
       </label>
+      )}
       <ErrorNote error={error} />
       <div className="flex items-center gap-3">
         <button onClick={create} disabled={busy || problems.length > 0} className={primary}>
-          {busy ? <span className="shimmer">Registering…</span> : parsed && "jwk" in parsed ? "Register with this key" : "Register with a secret"}
+          {busy ? <span className="shimmer">Registering…</span> : claude ? "Register Claude" : parsed && "jwk" in parsed ? "Register with this key" : "Register with a secret"}
         </button>
         <button onClick={onCancel} className={btn}>
           Cancel
@@ -546,11 +573,18 @@ function Made({ made, tokenEndpoint }: { made: EnterpriseApp & { client_secret?:
         {field("Token endpoint", "enterprise-token-endpoint", tokenEndpoint)}
       </div>
       {made.client_secret && field("Client secret: copy it now, it isn't shown again", "enterprise-client-secret", made.client_secret)}
+      {made.metadata?.length ? (
+        <p className="text-[12px] text-muted">
+          Next: copy the Issuer URL from Claude&apos;s auto-connect setup for this connector into Providers, with the email domains your people
+          sign in to Claude with, then run Claude&apos;s connection test. Claude finds each person by their account&apos;s email.
+        </p>
+      ) : (
       <p className="text-[12px] text-muted">
         The app sends the provider&apos;s ID-JAG as <code className="font-mono">assertion</code> with{" "}
         <code className="font-mono">grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer</code>, authenticating as itself
         {made.client_secret ? " with this secret." : " with a JWT its key signed."}
       </p>
+      )}
     </div>
   );
 }

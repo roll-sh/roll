@@ -3255,6 +3255,8 @@ async fn a_status_page_shows_the_projects_checks() {
     assert_eq!(at("/status.json").await, StatusCode::NOT_FOUND, "not before it's verified");
     w.dns.add("_roll-challenge.status.acme.dev", "TXT", d["token"].as_str().unwrap());
     assert_eq!(call(&w.api, "POST", &format!("{own}/verify"), None).await.1["status"], "active");
+    let (_, again) = call(&w.api, "POST", &own, Some(json!({"hostname": "status.acme.dev"}))).await;
+    assert_eq!((again["status"].as_str(), again["token"].clone()), (Some("active"), d["token"].clone()), "the same name again changes nothing");
     assert_eq!(at("/status.json").await, StatusCode::OK);
     assert_eq!(call(&w.api, "POST", &format!("{env}/domains"), Some(json!({"hostname": "status.acme.dev"}))).await.0, StatusCode::CONFLICT);
     // Kept by its address when changed; gone when deleted.
@@ -3263,6 +3265,25 @@ async fn a_status_page_shows_the_projects_checks() {
     assert_eq!(call(&w.api, "DELETE", &page, None).await.0, StatusCode::NO_CONTENT);
     assert_eq!(get("/status.json").await.0, StatusCode::NOT_FOUND);
     assert_eq!((at("/status.json").await, call(&w.api, "GET", &own, None).await.0), (StatusCode::NOT_FOUND, StatusCode::NOT_FOUND));
+}
+
+/// A project's board keeps the charts someone picked, in order: only the project's own services,
+/// and metrics there are.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_projects_board_keeps_its_panels() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "web", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap();
+    let board = format!("/v1/apps/projects/{}/board", w.project);
+    assert_eq!(call(&w.api, "GET", &board, None).await.1, json!({"panels": []}));
+    let panels = json!([{"service": id, "metric": "p95_ms"}, {"title": "Checkouts", "service": id, "environment": "staging", "metric": "app:checkouts_total"}]);
+    let (st, b) = call(&w.api, "PUT", &board, Some(json!({"panels": panels}))).await;
+    assert_eq!((st, b["panels"][0]["environment"].as_str(), b["panels"][1]["title"].as_str()), (StatusCode::OK, Some("production"), Some("Checkouts")), "{b}");
+    assert_eq!(call(&w.api, "GET", &board, None).await.1, b);
+    assert_eq!(call(&w.api, "PUT", &board, Some(json!({"panels": [{"service": id, "metric": "rm -rf"}]}))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(call(&w.api, "PUT", &board, Some(json!({"panels": [{"service": "svc_notmine00000", "metric": "cpu"}]}))).await.0, StatusCode::BAD_REQUEST, "only the project's own");
+    assert_eq!(call(&w.api, "PUT", &board, Some(json!({"panels": []}))).await.1, json!({"panels": []}));
+    assert_eq!(call(&w.api, "GET", &board, None).await.1, json!({"panels": []}));
 }
 
 /// Traffic mirroring (Envoy's): a copy of a share of bodiless requests goes to another
@@ -3449,6 +3470,62 @@ async fn status_page_incidents_open_and_close() {
     assert_eq!(state(&w, page.clone()).await, (json!("maintenance"), false));
     w.apps.cron_pass(at + 3_600_000 + 120_000).await;
     assert_eq!(state(&w, page).await, (json!("resolved"), true));
+}
+
+/// A custom domain's records written at the customer's Cloudflare (Vercel's own DNS): the token a
+/// `roll://` reference the caller may reveal, read as them for the call; then it's verified.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_domains_records_are_written_with_the_customers_token() {
+    struct Cf;
+    #[async_trait]
+    impl apps_control::integrations::SecretSource for Cf {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+        async fn resolve(&self, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<apps_control::integrations::SecretVar>> {
+            Ok(vec![])
+        }
+        async fn bind_ref(&self, _: apps_control::integrations::Asker<'_>, _: &str, _: &str, reference: &str) -> anyhow::Result<String> {
+            anyhow::ensure!(reference == "roll://production/CF_TOKEN", "you may not reveal {reference}");
+            Ok("usr_ada".into())
+        }
+        async fn resolve_as(&self, _: &str, _: &str, _: &str, reference: &str, maker: &str) -> anyhow::Result<String> {
+            assert_eq!((reference, maker), ("roll://production/CF_TOKEN", "usr_ada"));
+            Ok("cf-secret".into())
+        }
+    }
+    struct Writer(Arc<apps_control::integrations::StaticDns>, Mutex<Vec<(String, String)>>);
+    #[async_trait]
+    impl apps_control::integrations::DnsWriter for Writer {
+        async fn put_record(&self, token: &str, kind: &str, name: &str, content: &str, replace: bool) -> anyhow::Result<Vec<String>> {
+            assert_eq!(token, "cf-secret");
+            // The name still has the old host's address: a CNAME waits for `replace`.
+            if kind == "CNAME" && !replace {
+                return Ok(vec!["A 192.0.2.7".into()]);
+            }
+            self.1.lock().push((kind.to_string(), name.to_string()));
+            self.0.add(name, if kind == "TXT" { "TXT" } else { "CNAME" }, content);
+            Ok(Vec::new())
+        }
+    }
+    let w = world_full(|_| {}, false, |d| d.secrets = Arc::new(Cf)).await;
+    let writer = Arc::new(Writer(w.dns.clone(), Mutex::new(Vec::new())));
+    w.apps.set_dns_writer(writer.clone());
+    let (svc, _) = image_service(&w, "web", json!({"port": 80})).await;
+    let base = format!("/v1/apps/services/{}/environments/production/domains", svc["id"].as_str().unwrap());
+    let (st, d) = call(&w.api, "POST", &base, Some(json!({"hostname": "acme.dev"}))).await;
+    assert_eq!((st, d["status"].as_str()), (StatusCode::CREATED, Some("pending")), "{d}");
+    let configure = format!("{base}/acme.dev/configure");
+    assert_eq!(call(&w.api, "POST", &configure, Some(json!({"cloudflare_token": "cf-secret"}))).await.0, StatusCode::BAD_REQUEST, "a reference, never the token");
+    assert_eq!(call(&w.api, "POST", &configure, Some(json!({"cloudflare_token": "roll://production/OTHER"}))).await.0, StatusCode::FORBIDDEN);
+    let (st, v) = call(&w.api, "POST", &configure, Some(json!({"cloudflare_token": "roll://production/CF_TOKEN"}))).await;
+    assert!(st == StatusCode::CONFLICT && v.to_string().contains("A 192.0.2.7"), "the old host's address is named, not deleted: {v}");
+    let (st, v) = call(&w.api, "POST", &configure, Some(json!({"cloudflare_token": "roll://production/CF_TOKEN", "replace": true}))).await;
+    assert_eq!((st, v["status"].as_str()), (StatusCode::OK, Some("active")), "{v}");
+    // An apex: the challenge first (each time), then its CNAME (Cloudflare flattens it).
+    assert_eq!(writer.1.lock().last().cloned(), Some(("CNAME".to_string(), "acme.dev".to_string())));
+    assert!(writer.1.lock().iter().any(|r| *r == ("TXT".to_string(), "_roll-challenge.acme.dev".to_string())));
+    assert!(!v.to_string().contains("cf-secret"));
 }
 
 /// An instance the kernel killed for its memory says so: in the log and in why it crashed.

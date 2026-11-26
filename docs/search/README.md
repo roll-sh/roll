@@ -1196,9 +1196,10 @@ query-rule editors prefilled with it (`query, ` as a rule; an `exact` `query_str
   without `index`). A read for roll-access; a person sees only their own clusters' (404 otherwise).
   The answer adds what the cluster's owner recorded since the last pass. Its `experiments` list
   the A/B tests of the cluster's search applications ([relevance-experiments.md](relevance-experiments.md)):
-  `[{application, experiment, baseline, variants: [{name, searches, clicks, conversions, value, ctr, conversion_rate, vs_baseline?: {ctr, conversion_rate}}]}]`,
+  `[{application, experiment, baseline, variants: [{name, searches, clicks, conversions, value, ctr, conversion_rate, no_hits, no_hit_rate, p95_latency_ms, vs_baseline?: {ctr, conversion_rate}}]}]`,
   each comparison `{p_value, state}` with `state` one of `significant`, `not_yet_significant` or
-  `not_enough_data`; counted since each started, whatever `range` says.
+  `not_enough_data`; counted since each started, whatever `range` says. The totals, points and
+  query rows also count `roll_conversion` events (`conversions`, `conversion_rate`, `value`).
 
 **Privacy.** No `Authorization` header, credential, API key or document body is ever recorded:
 the only header read is `X-Roll-Search-Query`, and only a query's text, counted, is kept. Query
@@ -1371,23 +1372,26 @@ filtered listing; and the auth matrix's probe of storage's nested route (also br
 
 Ranked; the top item is in progress. Updated as work lands (the watchdog reads this list).
 
-Working order (2026-11-26, afternoon): the fourth sweep's fixes first (item 4: #1059 in its
-third round, #1096 in its second, #1084 in its second; each a HIGH or MED on main), then the
-work in review (item 11's RAG phase 2, #1068 in its third round; item 30's read-only ES|QL,
-#1111 in its second; item 12's shared-address `encoded`, #1115, in review), then item 33 (a
-Discover screen, the dashboard's largest gap against Kibana and OpenSearch Dashboards, and
-nobody is on it: the top open item), items 31 and 32 (re-embedding an index's documents, and
-resetting a branch from a copy for previews' restore points; both in progress), item 14
-(semantic search on OpenSearch-flavor clusters; in progress), item 15's next slice
-(conversions per index, zero results and latency per variant, promoting a winner), item 5's
-OpenSearch links (designed), and chat token metering (item 11's follow-up).
+Working order (2026-11-26, evening): the fourth sweep's last fixes first (item 4: #1096 in its
+re-check after round 2, #1084 in its second round; each a HIGH or MED on main), then the work
+in review (item 11's RAG phase 2, #1068 in its third round; item 30's read-only ES|QL, #1111 in
+its second; item 1's derived-key follow-ups, #1127 in its second; item 31's re-embed route,
+#1132, landing), then item 32 (resetting a branch from a copy for previews' restore points; in
+progress), item 33's second slice (saved searches, surrounding documents, a field's chart; in
+progress), item 15's confidence intervals and promoting from the Relevance tab (in progress),
+then its judgment lists and offline evaluation (the top open item), item 14 (semantic search on OpenSearch-flavor
+clusters; resumes after #1111), item 16 (cold start at size; resumes after #1127), OpenSearch's
+`_plugins/_sm` (item 9; in progress), item 5's OpenSearch links (designed), and chat token
+metering (item 11's follow-up; in progress).
 Landed 2026-11-26: the PIT and caches fix (#1021), a cluster's admin password kept in roll
 secrets and the MCP sweep's person flow (#1097), Terraform for synonyms sets and rulesets
 (#1071), inference endpoints from a secret answered redacted and limited to `api_key` services
 (#1076, #1104), the `semantic_text` default (#1093), click events with a `data` key (#1078), the
 help-articles sample (#1081), browser search on previews (#1054), the crawler's charsets,
-per-server politeness and parallel fetches (#1075), and A/B tests on search applications
-(#1090, item 15's first slice).
+per-server politeness and parallel fetches (#1075), A/B tests on search applications
+(#1090 and #1126, item 15's first two slices), names authorized as they resolve in lookups (#1059), an API
+key's `encoded` that works at the shared address (#1115), and a Discover screen (#1133, item
+33's first slice).
 
 Landed 2026-11-17: per-person cluster caps (#162: 50 clusters and 2 always-on per person,
 rolld flags, 409 past a cap, counted in the write's own transaction); the search playground (#159); the Relevance tab for
@@ -1700,14 +1704,12 @@ deterministic (#396).
    query landed (#658): one click loads 1,000 generated products or 2,000 ECS log lines on the
    Overview of a cluster with no indices or from the Indices tab, then three queries run in place
    with Open in Console, copy as curl, JavaScript or Python reading `$ELASTICSEARCH_API_KEY` as the
-   guides do; a 30-day `data` key made in the panel goes into the copied code, shown once). Left:
-   a sample dataset for RAG (passages with `semantic_text` on E5); and
-   what writing the guides found: an API key's `encoded` value works only at the cluster's own
-   host, so clients behind a shared address re-encode it as `<id>@<cluster>:<key>` (the shared
-   address routes keys by `<key id>@<cluster>`; Elasticsearch's own `_security/api_key` answers a
-   plain `encoded`: answer it qualified, as the keys route's `api_key` is, once the cluster's own
-   host accepts the qualifier; an authentication change, so with a review); and no screen is named
-   Discover. Landed: a `semantic_text` field with no `inference_id` defaults to the E5 the node
+   guides do; a 30-day `data` key made in the panel goes into the copied code, shown once). The
+   Discover screen is item 33 (#1133). Landed in #1115: an API key made anywhere
+   but the cluster's own host (the shared address, the console) answers an `encoded` that names
+   its cluster (`<id>@<cluster>:<key>`, as the keys route's `api_key` does), so a copied value
+   works at the shared address too, while the cluster's own host keeps Elasticsearch's; only
+   that cluster accepts the qualifier, and a cluster's own host refuses another cluster's. Landed: a `semantic_text` field with no `inference_id` defaults to the E5 the node
    runs (#1093), a `data` key records click events (#1078), and a help-articles sample on E5 with
    semantic, hybrid and passage queries (#1081).
 13. **A web crawler for site search** (design in [crawler.md](crawler.md); Elastic Open Crawler,
@@ -1746,8 +1748,12 @@ deterministic (#396).
    the address) and answered with `X-Roll-Experiment` and `X-Roll-Variant`; `roll_conversion`
    events beside clicks, counted once per search per variant; browser keys' `limits.events`; and
    per-variant click-through and conversion with a two-proportion z-test in `GET …/analytics` and
-   the Relevance tab. Left: judgment lists and offline evaluation (phase 1), promoting a winner,
-   zero-result rate and latency per variant, the `roll_` rule types and dynamic re-ranking.
+   the Relevance tab. The second slice landed in #1126: conversions in the indices' analytics,
+   zero-result rate and p95 latency per variant, and promoting a variant into the application
+   (`…/_roll/experiments/{id}/_promote`). Next: confidence intervals beside the p-values and
+   promoting from the Relevance tab (in progress), then judgment lists and offline evaluation
+   (phase 1: OpenSearch's Search Relevance Workbench and `_rank_eval` with lists, for CI). Left:
+   the `roll_` rule types and dynamic re-ranking.
 16. **Cold start at size**: the 19.8 ms cold start is a 50k-document index from local cache;
    nothing measures the first query and p99 on a node with an empty cache for 1, 10 and 50 GB
    indices loaded from object storage, or on Graviton. Buyers comparing always-on Typesense or Algolia
@@ -1816,7 +1822,9 @@ deterministic (#396).
    browsed as Discover does: range presets, documents over time (`auto_date_histogram`, counted
    from the points tree), a click on a bar narrows to it, newest first unless a column sorts; and
    a Data streams panel (backing indices, documents, size, the lifecycle's retention set in place
-   or the ILM policy that manages the stream), and a profiled console search (`"profile": true`)
+   or the ILM policy that manages the stream), a Discover tab at the cluster level (item 33: a
+   view of an index pattern or data stream, KQL/ES|QL or DQL/PPL, a field sidebar with top values
+   and filters, the view in the URL), and a profiled console search (`"profile": true`)
    drawn as Kibana's Search Profiler draws it (per shard: the query tree, collectors,
    aggregations and fetch with times and shares), and an Index templates panel (what each matches,
    its priority and what it sets; the built-in ones on request). On OpenSearch-flavor clusters a
@@ -2130,7 +2138,7 @@ deterministic (#396).
    `ENRICH`) authorized against the grant's scope as it plans, sync only, storing nothing; the
    `search_esql` tool and `roll search esql`. Queued (`feature/search-esql-route`) behind item 4's
    ENRICH fix, which it depends on.
-31. **Re-embedding an index's own documents** (done, `feature/search-update-by-query-route`;
+31. **Re-embedding an index's own documents** (landed in #1132;
    asked by roll MCP, 2026-11-26): an index whose `semantic_text` field came after its documents
    had no embeddings, and an agent's only way was reading pages and writing them back.
    `POST /v1/search/clusters/{id}/indices/{index}/update_by_query` (`{query?, script?, max_docs?,
@@ -2149,13 +2157,28 @@ deterministic (#396).
    data key, browser keys and origins (pg-control's `reset` with `from` is the model); `write` on
    the branch, on its owner. Re-branching from the copy instead would tangle #1054's key chain
    (the copy as parent, copies of copies). In progress (`feature/search-branch-reset`).
-33. **A Discover screen** (Kibana's and OpenSearch Dashboards' first screen for logs): today a
-   time-based index is browsed as Discover does (range presets, documents over time, a click on a
-   bar narrows), but one index at a time, from the index browser. Discover adds, at the cluster
-   level: an index pattern or data stream as the view (with its time field), a query bar in KQL
-   or ES|QL (both run here) with the time range, a field sidebar (each field's type and its top
-   values over a sample, filter in or out on a click), chosen columns with a document's JSON a
-   click away, and the view as a URL (index, query, range, columns) to share or bookmark; on
-   OpenSearch-flavor clusters PPL as well as DQL. Built from the existing pieces (the index
-   browser's histogram, the console's request preview, `_field_caps`, `auto_date_histogram`), as
-   requests the panel shows and opens in the console.
+33. **A Discover screen** (Kibana's and OpenSearch Dashboards' first screen for logs). Slice 1
+   landed in #1133: the cluster page's `discover` tab
+   (`components/search/discover.tsx`, its requests in `lib/search-discover.ts`). A view is an
+   index, alias, data stream or pattern (the cluster's own offered from `_resolve/index`), its time
+   field from `_field_caps` (`@timestamp`, `timestamp`, else the one the user picks). The query is
+   KQL or ES|QL on Elasticsearch-flavor clusters, DQL or PPL on OpenSearch ones:
+   - KQL and DQL are sent as the `kql` query, filtered by the range (roll serves `kql` on both
+     flavors; OpenSearch Dashboards compiles DQL in the browser, roll's engine reads it). They get
+     the documents over time (`auto_date_histogram`; a click on a bar narrows the range).
+   - ES|QL is `FROM <view> | WHERE <time range> | <query>` and PPL `source=<view> | where … |
+     <query>`, their answers a table.
+   - A query the cluster refuses shows its own error.
+
+   The field sidebar lists every field with its type (a `*` when the view's indices map it as
+   several) and, on a click, its top 5 values over a sample (`sampler` of 500 documents a shard
+   plus `terms`, on its keyword multi-field when the field doesn't aggregate), with + and − to keep
+   or leave out a value (the query edited in its own language) and a button to add it to the
+   table. The table shows the chosen columns (or the document) newest first, or by a column; a row
+   opens the document's JSON. The view, time field, mode, query, range, columns and sort are the
+   URL's hash (`#discover?view=…`), to bookmark or share; every request it sends can be shown and
+   opened in the console. Slice 2 in progress (`feature/search-discover-2`): saved searches (roll's
+   control plane per cluster is the first choice, so they outlive an index and agents see them), a document's surrounding
+   documents (`search_after` both ways on the time field), a field's chart (top values, or a
+   histogram over the query and range) with whole-range statistics where they're cheap, and
+   timestamps in the viewer's zone.

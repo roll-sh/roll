@@ -6,6 +6,7 @@ use reqwest::Method;
 use roll_previews::Kind;
 use roll_previews::Mode;
 use roll_previews::ports::{Branched, Brancher, Usage};
+use roll_previews::MASK_BASE_PREFIX;
 use serde_json::{Value, json};
 
 // ── Postgres: a branch of the project's main ──
@@ -76,6 +77,35 @@ impl Brancher for Postgres {
     /// earlier push's data, copy-on-write.
     async fn snapshot(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<Option<Branched>> {
         self.create_from(parent, Some(branch), name, Mode::Branch, None).await.map(Some)
+    }
+
+    fn branches_from_base(&self) -> bool {
+        true
+    }
+
+    /// A branch of `parent` with no role of its own: pg-control gives a branch's role the objects
+    /// the superuser owns, so a base with one would keep the tables, and its branches' roles none.
+    async fn make_base(&self, parent: &str, name: &str) -> anyhow::Result<Branched> {
+        let id = match self.find(parent, name).await? {
+            Some(b) => s(&b["id"]).unwrap_or_default(),
+            None => match self.0.post(&format!("/v1/projects/{}/branches", seg(parent)), json!({ "name": name, "app_role": false })).await {
+                Ok(v) => s(&v["branch"]["id"]).ok_or_else(|| anyhow::anyhow!("a branch without an id"))?,
+                Err(e) if conflict_is_ours(&e) => self.find(parent, name).await?.and_then(|b| s(&b["id"])).ok_or(e)?,
+                Err(e) => return Err(e),
+            },
+        };
+        Ok(Branched { r#ref: id, kept: None })
+    }
+
+    /// A branch of the project's branch `from` (pg-control's `parent`), with a role of its own.
+    async fn branch_from(&self, parent: &str, from: &str, name: &str, mode: Mode) -> anyhow::Result<Option<Branched>> {
+        self.create_from(parent, Some(from), name, mode, None).await.map(Some)
+    }
+
+    /// The project's branches whose parent is `branch`.
+    async fn children(&self, parent: &str, branch: &str) -> anyhow::Result<usize> {
+        let p = self.0.get(&format!("/v1/projects/{}", seg(parent))).await?;
+        Ok(p["branches"].as_array().map_or(0, |bs| bs.iter().filter(|b| b["parent_id"] == branch).count()))
     }
 
     fn restores(&self) -> bool {
@@ -178,7 +208,11 @@ impl Brancher for Postgres {
         let p = self.0.get(&format!("/v1/projects/{}", seg(parent))).await?;
         let branches = p["branches"].as_array().cloned().unwrap_or_default();
         let b = branches.iter().find(|b| b["id"] == branch).ok_or_else(|| anyhow::anyhow!("no Postgres branch {branch}"))?;
-        let from = branches.iter().find(|x| x["id"] == b["parent_id"]).ok_or_else(|| anyhow::anyhow!("Postgres branch {branch} has no parent"))?;
+        let mut from = branches.iter().find(|x| x["id"] == b["parent_id"]).ok_or_else(|| anyhow::anyhow!("Postgres branch {branch} has no parent"))?;
+        // A branch of a masked base is compared with the parent the base was made from, as it is now.
+        while from["name"].as_str().is_some_and(|n| n.starts_with(MASK_BASE_PREFIX)) {
+            from = branches.iter().find(|x| x["id"] == from["parent_id"]).ok_or_else(|| anyhow::anyhow!("Postgres branch {branch}'s masked base has no parent"))?;
+        }
         // pg-control names a branch's role after the branch.
         let role = b["app_connection_uri"].is_string().then(|| s(&b["id"])).flatten();
         Ok(Some((pg_schema_lines(&self.0, s(&from["endpoint"]["id"]), None).await?, pg_schema_lines(&self.0, s(&b["endpoint"]["id"]), role).await?)))

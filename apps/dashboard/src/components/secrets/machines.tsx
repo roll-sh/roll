@@ -133,16 +133,27 @@ function standing(m: MachineChain): string {
   return m.state === "live" ? `${refreshed} · ends ${m.expires_at ? until(m.expires_at) : ""}` : `ended · ${refreshed}`;
 }
 
-/** A machine identity's machines: one chain each (its bootstrap token's id), live or not, with revoke and a new token. */
+/** A machine whose last credential has ended, revoked or not: it holds no place in the identity's cap, and can be forgotten. */
+const over = (m: MachineChain) => m.state === "ended" || (m.state === "revoked" && (m.expires_at ?? 0) <= Date.now());
+
+/** A machine identity's machines: one chain each (its bootstrap token's id), live or not, with revoke, forget ended ones, and a new token. */
 export function Machines({ identity, env }: { identity: Identity; env: string }) {
   const { api } = useSecrets();
   const machines = useLoad(() => api.machines(identity.id), [api, identity.id]);
   const [error, setError] = useState<string | null>(null);
   const [sure, setSure] = useState<string | null>(null);
   const rows = machines.data ?? [];
+  const ended = rows.filter(over).length;
   return (
     <div className="space-y-2 border-t border-line px-3 py-2.5">
       <BootstrapMaker identity={identity} env={env} onMade={machines.reload} />
+      {ended > 0 && (
+        <div className="flex justify-end">
+          <button className={ghost} onClick={() => api.pruneMachines(identity.id).then(machines.reload, (e) => setError(errorText(e)))} title="Machines whose last credential has ended; roll forgets them a day after anyway">
+            Forget {ended} ended
+          </button>
+        </div>
+      )}
       <ErrorNote error={error ?? machines.error} onDismiss={error ? () => setError(null) : undefined} />
       {machines.data && rows.length === 0 ? (
         <p className="text-[11.5px] text-muted">No machines yet. Each machine gets its own bootstrap token.</p>
