@@ -72,6 +72,9 @@ pub struct StoreTo {
     /// The secret's tags, as the caller chooses (`sensitive` stops reveals and keeps `roll run`).
     #[serde(default)]
     pub tags: Option<Vec<String>>,
+    /// The project (`prj_…` or its name), when more than one stands for the cluster.
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 fn root() -> String {

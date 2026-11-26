@@ -2098,7 +2098,7 @@ impl search_control::secret_refs::ResourceSecrets for ForSearch {
         let (secrets, who, to) = (self.0.clone(), who.clone(), to.clone());
         tokio::task::spawn_blocking(move || {
             let caller = secrets.caller_of(who.operator, who.user.as_ref(), who.grant.as_ref()).map_err(|e| Refused::Forbidden(e.to_string()))?;
-            let project = secrets.project_for(&resource, None).map_err(|e| Refused::Invalid(e.to_string()))?;
+            let project = secrets.project_for(&resource, to.project.as_deref()).map_err(|e| Refused::Invalid(e.to_string()))?;
             if !caller.allows(roll_secrets::Action::Write, &roll_secrets::Scope::at(&project, &to.environment, &to.path)) {
                 return Err(Refused::Forbidden(format!("you can't write secrets in {}{} of the cluster's project", to.environment, to.path)));
             }
