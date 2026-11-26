@@ -432,6 +432,10 @@ pub struct Preview {
     /// `release` (or seed) ran at `head`: `+ …` added, `- …` removed (`schema::diff`). `None`:
     /// not known (no Postgres branch, or not read yet).
     pub schema_changes: Option<Vec<String>>,
+    /// The project's other open changes whose schema changes touch the same tables (PlanetScale's
+    /// conflicting deploy requests): whichever lands second migrates a table the first changed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schema_overlaps: Vec<SchemaOverlap>,
     /// What in `schema_changes` would hurt production when the change lands (`schema::risks`:
     /// a dropped table or column, a type change, a column made NOT NULL).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1320,6 +1324,15 @@ pub enum VisualState {
     /// Someone refused a page at this head (Chromatic's Deny): it fails until a new head, or
     /// until someone accepts that page.
     Refused,
+}
+
+/// Another open change's preview whose schema changes touch the same tables as this one's.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct SchemaOverlap {
+    pub preview: String,
+    pub branch: String,
+    /// The tables both change (`schema.table`).
+    pub tables: Vec<String>,
 }
 
 /// Who refused a page of a visual review at its head, when, and why (one line).
