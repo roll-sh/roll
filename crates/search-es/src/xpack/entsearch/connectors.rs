@@ -851,6 +851,11 @@ pub async fn update(ctx: &Ctx<'_>) -> EsResult<Reply> {
         Api::ConnectorUpdateActiveFiltering => validate_id(ctx, "connector_id", EMPTY_ID)?,
         _ => {}
     }
+    // A connector's syncs write to its index as whoever last changed where or what it writes
+    // (below): one aimed at another index must be by someone who may write there.
+    if let Some(Value::Str(i)) = &index_name {
+        crate::xpack::security::check_index_action(ctx, "indices:data/write/bulk", i)?;
+    }
     let id = ctx.path_param("connector_id").unwrap_or_default().to_string();
     let now_ms = ctx.now_ms;
     let (sealer, unsealed) = (ctx.cluster.config.sealer.clone(), ctx.cluster.config.unsealed_secrets);
@@ -1012,6 +1017,13 @@ pub async fn update(ctx: &Ctx<'_>) -> EsResult<Reply> {
                     }
                     remember_user(st, &id, &m, user, now_ms)?;
                     sync::adopt(st, &id, now_ms)?;
+                }
+                // Where it writes (its index, its pipeline, which can reroute) and what (its
+                // filtering, which decides what a full sync deletes): its syncs run as whoever
+                // changed them last, as transforms run as whoever updated them, never as an
+                // earlier configurer someone else aims elsewhere.
+                Api::ConnectorUpdateIndexName | Api::ConnectorUpdatePipeline | Api::ConnectorUpdateFiltering | Api::ConnectorUpdateActiveFiltering => {
+                    remember_user(st, &id, &m, user, now_ms)?;
                 }
                 _ => {}
             }

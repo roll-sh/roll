@@ -1148,9 +1148,7 @@ Checked against Elasticsearch 9.5.5 (captures in
   `suppressed`, as Elasticsearch prints it), the request's other items unaffected. An update by
   query reads as the caller, as Elasticsearch's scroll does: only the documents it sees, their
   `_source` without the fields it can't see, and it writes them back so: those fields are
-  dropped from the documents (a script reading one gets `null`). Difference: Elasticsearch
-  refreshes a by-query `refresh=true` as the caller (403 without `maintenance`); roll refreshes
-  it as the cluster. A
+  dropped from the documents (a script reading one gets `null`). A
   stored result (async search, ES|QL, EQL, SQL, and SQL cursors) is its opener's (the API key, or
   the user and realm): anyone else gets 404 for it, its status and its delete (a cursor: unknown),
   except that `cancel_task` may delete it. One stored before owners were recorded is the

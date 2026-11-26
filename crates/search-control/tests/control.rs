@@ -2022,7 +2022,8 @@ async fn narrowed_keys() {
 /// would: a data key on `tenant-a-*` copies within its indices only, on either flavor, whether
 /// the other index is the source, the destination, or where a script moves a document. On
 /// Elasticsearch, a role with `read` on the source and `write` on the destination reindexes
-/// (no cluster privilege), and copies only what its document and field level security shows.
+/// (no cluster privilege), and copies only what its document and field level security shows; its
+/// `refresh=true` needs `maintenance` there, as on Elasticsearch.
 #[tokio::test]
 async fn reindex_reads_and_writes_as_its_caller() {
     let e = env().await;
@@ -2092,8 +2093,12 @@ async fn reindex_reads_and_writes_as_its_caller() {
     let v = body(&r);
     use base64::Engine;
     let mover = json!({"api_key": base64::engine::general_purpose::STANDARD.encode(format!("{}@{name}:{}", v["id"].as_str().unwrap(), v["api_key"].as_str().unwrap()))});
-    let (s, v) = call(&mover, reqwest::Method::POST, "/_reindex?refresh=true", Some(reindex("src", "dst"))).await;
+    let (s, v) = call(&mover, reqwest::Method::POST, "/_reindex", Some(reindex("src", "dst"))).await;
     assert_eq!((s, &v["created"]), (200, &json!(1)), "only the visible document: {v}");
+    // Its `refresh=true` refreshes as the caller, as Elasticsearch's does: `write` holds no
+    // `maintenance`.
+    let (s, v) = call(&mover, reqwest::Method::POST, "/_reindex?refresh=true", Some(reindex("src", "dst"))).await;
+    assert!(s == 403 && v.to_string().contains("indices:admin/refresh"), "{s} {v}");
     let doc = body(&console("GET", "/dst/_doc/1", Value::Null).await);
     assert_eq!(doc["_source"], json!({"title": "open", "public": true}), "without the hidden field: {doc}");
 }
@@ -6857,4 +6862,92 @@ async fn catching_up_and_cutting_over() {
     assert_eq!(index_names(&a), ["live-v1"], "{a}");
     let (_, n) = e.shop("GET", "/live/_count", None).await;
     assert_eq!(n["count"], 4, "{n}");
+}
+
+/// An index API's wildcards are authorized as the API expands them: a data key on `tenant-a-*`
+/// can't open, set or map another tenant's closed index through a wildcard that, expanded as
+/// open indices only, would have matched nothing to check (`_open` expands closed indices,
+/// `PUT _settings` and `PUT _mapping` open and closed ones), on either flavor.
+#[tokio::test]
+async fn index_apis_authorize_the_indices_their_wildcards_reach() {
+    let e = env().await;
+    let e = &e;
+    let call = |k: &Value, m: reqwest::Method, path: &str, b: Option<Value>| {
+        let path = path.to_string();
+        let k = k.clone();
+        async move {
+            match k["api_key"].as_str() {
+                Some(key) => as_key(e, key, m, &path, b).await,
+                None => e.es(k["username"].as_str().unwrap(), k["password"].as_str().unwrap(), m, &path, b).await,
+            }
+        }
+    };
+    use reqwest::Method;
+    for flavor in ["elasticsearch", "opensearch"] {
+        let name = format!("wild-{flavor}");
+        let c = e.post("/v1/search/clusters", json!({"name": name, "flavor": flavor})).await;
+        let owner = json!({"username": c["username"], "password": c["password"]});
+        for path in ["/tenant-a-1/_doc/1?refresh=true", "/tenant-b-1/_doc/1?refresh=true"] {
+            let (s, v) = call(&owner, Method::PUT, path, Some(json!({"t": "x"}))).await;
+            assert!(s < 300, "{flavor} {path}: {s} {v}");
+        }
+        assert_eq!(call(&owner, Method::POST, "/tenant-b-1/_close", None).await.0, 200, "{flavor}");
+        let key = e.post(&format!("/v1/search/clusters/{name}/keys"), json!({"name": "a", "access": "data", "indices": ["tenant-a-*"]})).await;
+        for (m, path, body) in [
+            (Method::POST, "/tenant-b-*/_open", None),
+            (Method::PUT, "/tenant-b-*/_settings", Some(json!({"index.blocks.read_only": true}))),
+            (Method::PUT, "/tenant-b-*/_mapping", Some(json!({"properties": {"n": {"type": "long"}}}))),
+        ] {
+            let (s, v) = call(&key, m.clone(), path, body).await;
+            assert_eq!(s, 403, "{flavor} {m} {path}: {v}");
+        }
+        let (_, v) = call(&owner, Method::GET, "/_cat/indices/tenant-b-1?format=json&h=status&expand_wildcards=all", None).await;
+        assert_eq!(v[0]["status"], "close", "{flavor}: tenant-b-1 still closed: {v}");
+        let (_, v) = call(&owner, Method::GET, "/tenant-b-1/_settings?expand_wildcards=all", None).await;
+        assert!(v["tenant-b-1"]["settings"]["index"]["blocks"].is_null(), "{flavor}: no block set: {v}");
+        // Its own: opened.
+        assert_eq!(call(&owner, Method::POST, "/tenant-a-1/_close", None).await.0, 200, "{flavor}");
+        let (s, v) = call(&key, Method::POST, "/tenant-a-*/_open", None).await;
+        assert_eq!(s, 200, "{flavor}: {v}");
+    }
+}
+
+/// Elasticsearch: what reads or writes beyond the request's own indices takes the caller's
+/// privileges there. A local ES|QL `ENRICH` needs `monitor_enrich` (its policy's table is read
+/// by the system); a connector aimed at another index needs write there (its syncs write as
+/// whoever aimed it); SQL's `SHOW TABLES` lists only what the caller may read.
+#[tokio::test]
+async fn enrich_connectors_and_show_tables_take_the_callers_privileges() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "indirect"})).await;
+    let (owner, pw) = creds(&c);
+    for (m, path, body) in [
+        (Method::PUT, "/tenant-a-1/_doc/1?refresh=true", json!({"t": "x"})),
+        (Method::PUT, "/tenant-b-src/_doc/1?refresh=true", json!({"t": "x", "secret": "s-of-b"})),
+        (Method::PUT, "/_enrich/policy/p", json!({"match": {"indices": "tenant-b-src", "match_field": "t", "enrich_fields": ["secret"]}})),
+        (Method::POST, "/_enrich/policy/p/_execute", Value::Null),
+        (Method::PUT, "/content-b/_doc/1?refresh=true", json!({"t": "keep"})),
+        (Method::PUT, "/_connector/c1", json!({"index_name": "content-a", "service_type": "postgresql"})),
+        (Method::PUT, "/_security/role/r", json!({"cluster": ["manage_connector"], "indices": [{"names": ["tenant-a-*", "content-a"], "privileges": ["all"]}]})),
+        (Method::PUT, "/_security/user/u", json!({"password": "u-password-1", "roles": ["r"]})),
+    ] {
+        let (s, v) = e.es(&owner, &pw, m.clone(), path, Some(body).filter(|b| !b.is_null())).await;
+        assert!(s < 300, "{m} {path}: {s} {v}");
+    }
+    let user = "u@indirect";
+    let enrich = json!({"query": "FROM tenant-a-1 | ENRICH p ON t | KEEP secret"});
+    let (s, v) = e.es(&owner, &pw, Method::POST, "/_query", Some(enrich.clone())).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e.es(user, "u-password-1", Method::POST, "/_query", Some(enrich)).await;
+    assert_eq!(s, 403, "{v}");
+    assert!(v.to_string().contains("resolve_policy") && !v.to_string().contains("s-of-b"), "{v}");
+    let (s, v) = e.es(user, "u-password-1", Method::PUT, "/_connector/c1/_index_name", Some(json!({"index_name": "content-b"}))).await;
+    assert_eq!(s, 403, "aimed at another index: {v}");
+    let (_, v) = e.es(&owner, &pw, Method::GET, "/_connector/c1", None).await;
+    assert_eq!(v["index_name"], "content-a", "{v}");
+    let (s, v) = e.es(user, "u-password-1", Method::POST, "/_sql?format=json", Some(json!({"query": "SHOW TABLES"}))).await;
+    assert_eq!(s, 200, "{v}");
+    let names: Vec<&str> = v["rows"].as_array().unwrap().iter().filter_map(|r| r[1].as_str()).collect();
+    assert!(names.contains(&"tenant-a-1") && !names.contains(&"tenant-b-src") && !names.contains(&"content-b"), "{names:?}");
 }
