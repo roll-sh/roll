@@ -733,3 +733,32 @@ async fn ilm_rolls_an_index_over_on_its_own() {
     .await
     .expect("the first document rolls the index over");
 }
+
+/// A reset asked of a node that doesn't own the branch runs on its owner, whose load carries it
+/// out under its claim (the commit points are fenced writes): either front reads the copy's data.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_branch_resets_on_its_owner() {
+    use reqwest::Method;
+    let (a, b) = two_nodes("reset", |_| {}).await;
+    let http = reqwest::Client::new();
+    let (s, p) = call(&http, Method::POST, format!("{}/v1/search/clusters", a.api), None, Some(json!({"name": "rsf"}))).await;
+    assert_eq!(s, 200, "{p}");
+    let (s, v) = call(&http, Method::PUT, format!("{}/docs/_doc/1?refresh=true", a.rest), Some(("rsf", p["password"].as_str().unwrap())), Some(json!({"v": "seed"}))).await;
+    assert_eq!(s, 201, "{v}");
+    let (s, br) = call(&http, Method::POST, format!("{}/v1/search/clusters/rsf/branches", a.api), None, Some(json!({"name": "pv-rsf"}))).await;
+    assert_eq!(s, 200, "{br}");
+    let auth = Some(("pv-rsf", br["password"].as_str().unwrap()));
+    let put = async |v: &str| call(&http, Method::PUT, format!("{}/docs/_doc/1?refresh=true", a.rest), auth, Some(json!({"v": v}))).await.0;
+    assert_eq!(put("A").await, 200);
+    let (s, copy) = call(&http, Method::POST, format!("{}/v1/search/clusters/pv-rsf/branches", b.api), None, Some(json!({"name": "pv-rsf-copy"}))).await;
+    assert_eq!(s, 200, "{copy}");
+    assert_eq!(put("B").await, 200);
+    let key = search_control::cluster::key("pv-rsf");
+    let other = if a.cluster.owns(&key) { &b } else { &a };
+    let (s, v) = call(&http, Method::POST, format!("{}/v1/search/clusters/pv-rsf/reset", other.api), None, Some(json!({"from": "pv-rsf-copy"}))).await;
+    assert_eq!(s, 200, "{v}");
+    for n in [&a, &b] {
+        let (s, v) = call(&http, Method::GET, format!("{}/docs/_doc/1", n.rest), auth, None).await;
+        assert_eq!((s, &v["_source"]["v"]), (200, &json!("A")), "{v}");
+    }
+}

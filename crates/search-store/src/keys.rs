@@ -291,6 +291,17 @@ pub fn state_key(cluster: &str, v: Version) -> String {
     format!("{CLUSTER_PREFIX}{cluster}/state/{v}.json.zst")
 }
 
+/// A reset in progress (`Store::begin_reset`): under the state prefix, which loading lists
+/// anyway, so a load notices it at no extra cost. Neither name parses as a state version.
+pub fn reset_key(cluster: &str) -> String {
+    format!("{CLUSTER_PREFIX}{cluster}/state/reset.json")
+}
+
+/// The state a reset in progress writes last.
+pub fn reset_state_key(cluster: &str) -> String {
+    format!("{CLUSTER_PREFIX}{cluster}/state/reset-state.zst")
+}
+
 pub fn shards_prefix(cluster: &str) -> String {
     format!("{CLUSTER_PREFIX}{cluster}/i/")
 }

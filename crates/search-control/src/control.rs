@@ -1489,6 +1489,77 @@ impl Control {
         Ok(())
     }
 
+    /// Resets branch `b` in place to `from`, a copy of it (roll previews' restore points,
+    /// copies made by branching it) or another branch of its parent: its indices, data streams
+    /// and their aliases become `from`'s, and the rest stays its own: its id, name, parent,
+    /// password, data key, browser keys and their origins, users, keys and settings
+    /// (`search_es::branch::reset_state`). Anything else for `from` is refused (400).
+    ///
+    /// The branch is unloaded for it (its running requests are waited for, 409 if they don't end
+    /// within 30 s) and refuses requests meanwhile. The reset is recorded durably
+    /// ([`search_store::Store::begin_reset`]) and carried out by the load that follows, before
+    /// the branch answers anything: through the manifests' compare-and-swap, as commit points
+    /// that name `from`'s segments. Answers once that load is done.
+    pub async fn reset(&self, b: &SearchCluster, from: &SearchCluster) -> Result<SearchCluster> {
+        if b.id == from.id {
+            return Err(ControlError::Invalid("from: a cluster can't be reset to itself".into()));
+        }
+        let Some(parent) = b.parent_id.as_deref() else {
+            return Err(ControlError::Invalid(format!("{} is not a branch: only a branch can be reset", b.name)));
+        };
+        let from_parent = from.parent_id.as_deref();
+        if from_parent != Some(b.id.as_str()) && from_parent != Some(parent) {
+            return Err(ControlError::Invalid(format!("from: {} is neither a copy of {} nor another branch of its parent", from.name, b.name)));
+        }
+        if from.flavor != b.flavor {
+            return Err(ControlError::Invalid(format!("from: {} is {}, {} is {}", from.name, from.flavor, b.name, b.flavor)));
+        }
+        {
+            // From here a wake can't open it, and a loaded (or waking) instance checks against an
+            // unguessable secret.
+            let _g = self.specs.lock().await;
+            self.wakes.set_deleting(&b.name, true);
+            self.apply_spec(&b.name).await;
+        }
+        let r = self.reset_inner(b, from).await;
+        {
+            let _g = self.specs.lock().await;
+            self.wakes.set_deleting(&b.name, false);
+            self.apply_spec(&b.name).await;
+        }
+        let staged = r?;
+        if staged {
+            // The load carries the reset out before anything reads the branch.
+            self.node.open(spec_for(b)).await.map_err(ControlError::Internal)?;
+            if let Err(e) = self.refresh_stats(&b.id, now_ms()).await {
+                tracing::warn!(cluster = b.name, error = %e, "reading a reset branch's figures failed");
+                self.meter.mark_dirty(&b.id);
+            }
+        }
+        self.get(&b.id).await
+    }
+
+    /// Unloads `b` and records its reset; `false` when there is nothing to reset (neither has
+    /// stored anything).
+    async fn reset_inner(&self, b: &SearchCluster, from: &SearchCluster) -> Result<bool> {
+        self.settle(&b.name).await;
+        if !self.unload_retrying(&b.name, Duration::from_secs(30)).await {
+            return Err(ControlError::Conflict(format!("cluster {} has requests running; retry", b.name)));
+        }
+        let from_state = self.data.read_cluster(&from.name).await?;
+        let Some(current) = self.data.read_cluster(&b.name).await? else {
+            if from_state.is_none() {
+                return Ok(false);
+            }
+            // Nothing of its own to keep (not even its security): it never stored anything.
+            return Err(ControlError::Conflict(format!("{} has never stored anything; write to it once before resetting it", b.name)));
+        };
+        let dialect = dialect(&b.flavor).unwrap_or(Dialect::Elasticsearch);
+        let state = search_es::branch::reset_state(&current.json, from_state.as_ref().map(|s| &s.json[..]), dialect)?;
+        self.data.begin_reset(&b.name, &from.name, state.into()).await?;
+        Ok(true)
+    }
+
     fn check_window(&self, p: &SearchCluster, at: i64, now: i64) -> Result<()> {
         if at > now + 1 {
             return Err(ControlError::Invalid("that point in time is in the future".into()));

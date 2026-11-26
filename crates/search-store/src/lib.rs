@@ -51,6 +51,7 @@ mod audit;
 mod branch;
 mod gc;
 mod pins;
+mod reset;
 
 pub use audit::AuditObject;
 pub use cache::{CacheStats, SegmentData, SegmentFetch, Verifier};
@@ -299,6 +300,19 @@ struct ShardTrack {
 }
 
 type ShardKey = (String, ShardId);
+
+/// What [`Store::put_manifest`] writes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Put {
+    /// The next commit point of a shard that isn't deleted.
+    Next,
+    /// A deletion's tombstone.
+    Tombstone,
+    /// The next commit point even over a tombstone: a reset bringing back a shard its cluster
+    /// deleted after the commit point it resets to ([`Store::begin_reset`]). Garbage collection
+    /// deletes an expired history by the keys it listed, so a generation written after them stays.
+    Revive,
+}
 
 /// Per cluster: serializes state writes and remembers `written_ms` of retained state versions
 /// (for windowed retention).
@@ -812,7 +826,7 @@ impl Store {
             s.from = wal.replay_from(cluster, shard, m.local_checkpoint).max(s.from);
         }
         m.wal = sources.clone();
-        let written = self.put_manifest(&mut t, cluster, shard, m, false).await?;
+        let written = self.put_manifest(&mut t, cluster, shard, m, Put::Next).await?;
         if t.wal.is_some() {
             t.wal = Some(sources);
         }
@@ -821,17 +835,21 @@ impl Store {
         Ok(written)
     }
 
-    /// Write `m` as the next generation (a tombstone with `tombstone`) under this node's epoch
-    /// and apply retention. Caller holds the shard's lock. Lists the prefix every time: that is
-    /// what notices a newer owner, and a deletion.
-    async fn put_manifest(&self, t: &mut ShardTrack, cluster: &str, shard: &ShardId, mut m: ShardManifest, tombstone: bool) -> anyhow::Result<ShardManifest> {
+    /// Write `m` as the next generation (a tombstone with [`Put::Tombstone`]) under this node's
+    /// epoch and apply retention. Caller holds the shard's lock. Lists the prefix every time:
+    /// that is what notices a newer owner, and a deletion.
+    async fn put_manifest(&self, t: &mut ShardTrack, cluster: &str, shard: &ShardId, mut m: ShardManifest, put: Put) -> anyhow::Result<ShardManifest> {
+        let tombstone = put == Put::Tombstone;
+        if put == Put::Revive {
+            t.deleted = false;
+        }
         if t.deleted {
             bail!("shard {shard} of cluster [{cluster}] was deleted");
         }
         let (versions, claimed) = futures::future::join(self.list_shard_versions(cluster, shard), self.claimed_epoch(cluster)).await;
         let mut versions = versions?;
         m.epoch = self.fence_check(cluster, versions.last().map(|v| v.version.epoch).max(claimed?))?;
-        if versions.last().is_some_and(|v| v.deleted) {
+        if put != Put::Revive && versions.last().is_some_and(|v| v.deleted) {
             t.deleted = true;
             bail!("shard {shard} of cluster [{cluster}] was deleted");
         }
@@ -904,7 +922,7 @@ impl Store {
             Some(top) if top.deleted => {}
             Some(_) if self.inner.cfg.manifest_retain_ms > 0 => {
                 t.deleted = false;
-                self.put_manifest(&mut t, cluster, shard, ShardManifest::default(), true).await?;
+                self.put_manifest(&mut t, cluster, shard, ShardManifest::default(), Put::Tombstone).await?;
             }
             Some(_) => {
                 self.inner.objects.delete_prefix(&keys::manifest_prefix(cluster, shard)).await?;
@@ -995,7 +1013,7 @@ impl Store {
         sources.push(WalSource { since_ms: Some(wal.mark_ms()), epoch: (epoch > 0).then_some(epoch), ..WalSource::open(&self.inner.cfg.node, &rec.cluster, cur) });
         let mut m = rec.manifest.take().unwrap_or_default();
         m.wal = sources.clone();
-        let written = self.put_manifest(&mut t, &rec.cluster, &rec.shard, m, false).await?;
+        let written = self.put_manifest(&mut t, &rec.cluster, &rec.shard, m, Put::Next).await?;
         t.wal = Some(sources);
         Ok((handle, written))
     }
@@ -1037,7 +1055,7 @@ impl Store {
         };
         let Some(mut m) = latest else { return Ok(()) };
         m.wal = sources;
-        self.put_manifest(&mut t, &cluster, &shard, m, false).await?;
+        self.put_manifest(&mut t, &cluster, &shard, m, Put::Next).await?;
         Ok(())
     }
 

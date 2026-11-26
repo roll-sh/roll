@@ -67,6 +67,7 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/password", post(rotate))
         .route("/v1/search/clusters/{id}/unload", post(unload))
         .route("/v1/search/clusters/{id}/restore", post(restore))
+        .route("/v1/search/clusters/{id}/reset", post(reset))
         .route("/v1/search/clusters/{id}/indices", get(indices))
         .route("/v1/search/clusters/{id}/request", post(request))
         .route("/v1/search/clusters/{id}/usage", get(usage))
@@ -528,6 +529,30 @@ async fn branch(State(c): State<AppState>, caller: Caller, Path(id): Path<String
         c.branched(&parent, &d).await?;
     }
     Ok(Json(view(&c, &caller, d, true).await?).into_response())
+}
+
+/// `POST …/reset`'s body: the copy (or other branch) the branch is reset to, by id or name.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResetReq {
+    from: String,
+}
+
+/// Resets a branch in place to a copy of it ([`Control::reset`]).
+async fn reset(State(c): State<AppState>, caller: Caller, Path(id): Path<String>, method: Method, headers: HeaderMap, body: bytes::Bytes) -> Result<Response, ControlError> {
+    let r: ResetReq = serde_json::from_slice(&body).map_err(|e| ControlError::Invalid(format!("invalid request: {e}")))?;
+    let b = c.get(&id).await?;
+    // The copy is one the caller may read, like the branch (whose check is the gate's).
+    let from = match c.get(&r.from).await {
+        Ok(f) if caller.sees(&f).await => f,
+        Ok(_) | Err(ControlError::NotFound(_)) => return Err(ControlError::NotFound(format!("no search cluster {}", r.from))),
+        Err(e) => return Err(e),
+    };
+    if let Some(resp) = forward(&c, &b.name, method, &format!("/v1/search/clusters/{id}/reset"), &headers, body.clone()).await {
+        return Ok(resp);
+    }
+    let d = c.reset(&b, &from).await?;
+    Ok(Json(view(&c, &caller, d, false).await?).into_response())
 }
 
 async fn branches(State(c): State<AppState>, caller: Caller, Path(id): Path<String>) -> ApiResult<Vec<ClusterView>> {

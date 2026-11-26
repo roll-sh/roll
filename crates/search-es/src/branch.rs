@@ -215,3 +215,27 @@ pub async fn mark_inherited(cluster: &Cluster) -> EsResult<()> {
 pub fn paused_policy(rec: &Value) -> bool {
     rec.pointer(&["_roll", "inherited"]).and_then(Value::as_bool) == Some(true)
 }
+
+/// The state a branch takes when it is reset in place to `from`, a copy of it or another branch
+/// of its parent line (`None`: one that never stored anything): `from`'s indices, data streams
+/// and data stream aliases, and everything else the branch's own as it is now (users, keys,
+/// roles, browser keys' settings, templates, pipelines, repositories, settings, what it marked
+/// as inherited). A reset so never brings back a key revoked or a password changed since the
+/// copy was made, nor a parent's secret. Its version moves on from the branch's.
+pub fn reset_state(branch: &[u8], from: Option<&[u8]>, dialect: crate::cluster::Dialect) -> anyhow::Result<Vec<u8>> {
+    let read = |b: &[u8]| -> anyhow::Result<ClusterState> {
+        let v = crate::json::parse(b).map_err(|e| anyhow::anyhow!("corrupt cluster state: {e}"))?.unwrap_or(Value::Null);
+        ClusterState::from_json_in(&v, dialect).map_err(|e| anyhow::anyhow!("corrupt cluster state: {}", e.reason()))
+    };
+    let mut st = read(branch)?;
+    let md = match from {
+        Some(f) => read(f)?.metadata,
+        None => ClusterState::new(&st.metadata.cluster_uuid).metadata,
+    };
+    st.metadata.indices = md.indices;
+    st.metadata.data_streams = md.data_streams;
+    st.metadata.data_stream_aliases = md.data_stream_aliases;
+    st.version += 1;
+    st.metadata.version += 1;
+    Ok(st.to_json().to_json().into_bytes())
+}

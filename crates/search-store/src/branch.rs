@@ -80,27 +80,8 @@ impl Store {
                 None => self.branch_point(parent, &shard, cut, listings).await?,
             };
             let Some((base, sources)) = point else { return anyhow::Ok(()) };
-            let mut m = ShardManifest {
-                generation: 1,
-                epoch,
-                written_ms: now,
-                wal: sources,
-                wal_head: None,
-                base: Some(BranchBase { cluster: parent.to_string(), generation: base.generation, at_ms, branched_ms: now }),
-                ..base
-            };
-            m.user_data.retain(|k, _| !k.starts_with(crate::manifest::INSTANCE_DATA_PREFIX));
-            for s in &mut m.wal {
-                s.until_ms = Some(s.until_ms.map_or(cut, |u| u.min(cut)));
-                if s.to.is_none() && s.node == self.node() {
-                    // This node's range, live now or from an earlier run (a point-in-time range
-                    // can span runs): everything up to `cut` was shipped above, in files before
-                    // the current one.
-                    s.to = Some(cur - 1);
-                }
-            }
-            self.wal().freeze(&mut m.wal, listings).await?;
-            m.wal.retain(|s| s.to.is_none_or(|to| to >= s.from) && s.max_seq_no.is_none_or(|x| x > m.local_checkpoint));
+            let mut m = self.copied_manifest(parent, base, sources, Copied { at_ms, branched_ms: now, cut, cur }, listings).await?;
+            (m.generation, m.epoch) = (1, epoch);
             self.objects().put(&keys::manifest_key(child, &shard, keys::Version::fresh(epoch, 1)), Bytes::from(m.to_json())).await?;
             Ok(())
         }))
@@ -112,6 +93,34 @@ impl Store {
         self.write_cluster(child, &ClusterState::new(state.json.clone())).await?;
         self.inner.counters.branches.fetch_add(1, Relaxed);
         Ok(())
+    }
+
+    /// `base`, a commit point of `parent`, as the first commit point of a copy of it: from
+    /// `parent`'s objects, with WAL ranges `sources` frozen and cut at `copied.cut` (Unix ms), so
+    /// the copy's first open replays the operations `parent` hadn't flushed up to then. Call
+    /// after shipping this node's WAL ([`crate::wal::Wal::sync_remote`]); `copied.cur` is the WAL
+    /// file current after it. The store numbers it when it writes it.
+    pub(crate) async fn copied_manifest(&self, parent: &str, base: ShardManifest, sources: Vec<WalSource>, copied: Copied, listings: &Listings) -> anyhow::Result<ShardManifest> {
+        let Copied { at_ms, branched_ms, cut, cur } = copied;
+        let mut m = ShardManifest {
+            written_ms: branched_ms,
+            wal: sources,
+            wal_head: None,
+            base: Some(BranchBase { cluster: parent.to_string(), generation: base.generation, at_ms, branched_ms }),
+            ..base
+        };
+        m.user_data.retain(|k, _| !k.starts_with(crate::manifest::INSTANCE_DATA_PREFIX));
+        for s in &mut m.wal {
+            s.until_ms = Some(s.until_ms.map_or(cut, |u| u.min(cut)));
+            if s.to.is_none() && s.node == self.node() {
+                // This node's range, live now or from an earlier run (a point-in-time range can
+                // span runs): everything up to `cut` was shipped, in files before the current one.
+                s.to = Some(cur - 1);
+            }
+        }
+        self.wal().freeze(&mut m.wal, listings).await?;
+        m.wal.retain(|s| s.to.is_none_or(|to| to >= s.from) && s.max_seq_no.is_none_or(|x| x > m.local_checkpoint));
+        Ok(m)
     }
 
     /// The parent commit point a point-in-time branch of `shard` starts from (the newest at or
@@ -161,6 +170,16 @@ impl Store {
         self.wal().freeze(&mut ranges, listings).await?;
         Ok(Some((all[i].clone(), merge_sources(ranges))))
     }
+}
+
+/// How [`Store::copied_manifest`] copies a commit point: the point in time asked for (`None`:
+/// now), when the copy is made, where its WAL ranges are cut, and the WAL file current then.
+#[derive(Clone, Copy)]
+pub(crate) struct Copied {
+    pub at_ms: Option<u64>,
+    pub branched_ms: u64,
+    pub cut: u64,
+    pub cur: u64,
 }
 
 /// Turn the WAL ranges of successive commit points (in history order) into a list replay can

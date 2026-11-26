@@ -726,6 +726,64 @@ async fn people_are_held_to_their_cluster_caps() {
     assert_eq!(e.call_as("admin", Method::POST, &format!("/v1/search/clusters/{fix}/restore"), None).await.0, 200);
 }
 
+/// A branch reset to a copy of it (roll previews' restore points) holds what the copy held
+/// again, in place: the same id and password, its API key and browser key still work; an index
+/// made since is gone, one deleted since is back, and it writes on from there. A cluster outside
+/// the branch's line is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_branch_resets_to_its_copy() {
+    use reqwest::Method;
+    let e = env().await;
+    let p = e.post("/v1/search/clusters", json!({"name": "rs"})).await;
+    let parent = format!("/v1/search/clusters/{}", p["id"].as_str().unwrap());
+    e.post(&format!("{parent}/request"), json!({"method": "PUT", "path": "/seed/_doc/0?refresh=true", "body": {"v": "seed"}})).await;
+    let b = e.post(&format!("{parent}/branches"), json!({"name": "pv-rs"})).await;
+    let id = b["id"].as_str().unwrap().to_string();
+    let branch = format!("/v1/search/clusters/{id}");
+    let (u, pw) = creds(&b);
+    let es = |m: Method, path: &str, body: Option<Value>| {
+        let (e, u, pw, path) = (&e, &u, &pw, path.to_string());
+        async move { e.es(u, pw, m, &path, body).await }
+    };
+    for (path, v) in [("/docs/_doc/1?refresh=true", "A"), ("/gone/_doc/1?refresh=true", "kept")] {
+        assert!(es(Method::PUT, path, Some(json!({"v": v}))).await.0 < 300, "{path}");
+    }
+    let (s, key) = es(Method::POST, "/_security/api_key", Some(json!({"name": "k"}))).await;
+    assert_eq!(s, 200, "{key}");
+    let (s, v) = e.call(Method::PATCH, &branch, Some(json!({"cors": {"allow_origin": ["https://pv.test"]}}))).await;
+    assert_eq!(s, 200, "{v}");
+    let site = e.post(&format!("{branch}/browser-keys"), json!({"name": "site", "indices": ["docs"]})).await;
+    let copy = e.post(&format!("{branch}/branches"), json!({"name": "pv-rs-copy"})).await;
+    // After the copy.
+    assert!(es(Method::PUT, "/docs/_doc/1?refresh=true", Some(json!({"v": "B"}))).await.0 < 300);
+    assert_eq!(es(Method::DELETE, "/gone", None).await.0, 200);
+    assert!(es(Method::PUT, "/later/_doc/1?refresh=true", Some(json!({"v": "B"}))).await.0 < 300);
+    // Only from a copy of the branch, or another branch of its parent.
+    let other = e.post("/v1/search/clusters", json!({"name": "rs-other"})).await;
+    for from in [json!("rs"), other["id"].clone(), json!(id)] {
+        let (s, v) = e.call(Method::POST, &format!("{branch}/reset"), Some(json!({"from": from}))).await;
+        assert_eq!(s, 400, "{from}: {v}");
+    }
+    let r = e.post(&format!("{branch}/reset"), json!({"from": copy["id"]})).await;
+    assert_eq!(r["id"], id.as_str(), "{r}");
+    let (s, v) = es(Method::GET, "/docs/_doc/1", None).await;
+    assert_eq!((s, &v["_source"]["v"]), (200, &json!("A")), "{v}");
+    let (s, v) = es(Method::GET, "/gone/_doc/1", None).await;
+    assert_eq!((s, &v["_source"]["v"]), (200, &json!("kept")), "deleted after the copy, back: {v}");
+    assert_eq!(es(Method::GET, "/later", None).await.0, 404, "made after the copy");
+    let with_key = e.http.get(format!("{}/docs/_doc/1", e.es)).header("authorization", format!("ApiKey {}", key["encoded"].as_str().unwrap())).send().await.unwrap();
+    assert_eq!(with_key.status().as_u16(), 200, "the branch's API key");
+    let browser = e.http.post(format!("{}/docs/_search", e.es)).header("origin", "https://pv.test").header("authorization", format!("ApiKey {}", site["api_key"].as_str().unwrap())).json(&json!({})).send().await.unwrap();
+    assert_eq!(browser.status().as_u16(), 200, "the branch's browser key");
+    // It writes on from the copy; the copy and the parent are as they were.
+    assert!(es(Method::PUT, "/docs/_doc/2?refresh=true", Some(json!({"v": "C"}))).await.0 < 300);
+    assert_eq!(es(Method::GET, "/docs/_count", None).await.1["count"], 2);
+    let (cu, cp) = creds(&copy);
+    assert_eq!(e.es(&cu, &cp, Method::GET, "/docs/_count", None).await.1["count"], 1);
+    let (pu, ppw) = creds(&p);
+    assert_eq!(e.es(&pu, &ppw, Method::GET, "/_cat/indices?h=index&format=json", None).await.1, json!([{"index": "seed"}]));
+}
+
 #[tokio::test]
 async fn branches() {
     let e = env().await;
