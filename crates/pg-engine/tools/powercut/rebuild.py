@@ -281,7 +281,7 @@ def content(rep, ino, path, mode, rng, stats):
                         buf.extend(bytes(hi - len(buf)))
                     buf[lo:hi] = nxt[lo:hi]
         stats['torn'] += 1
-    stats['files_cut'] += 1
+    stats['files_cut'] += k < n
     stats['bytes_dropped'] += max(0, before - len(buf))
     stats['writes_dropped'] += n - k
     return bytes(buf)
@@ -306,7 +306,7 @@ def cut(state, mode='drop', seed=0, keep_old=None):
         kmeta = rep.meta[i - 1] + 1 if i else 0
     loc = rep.where(root, grave)
     stats = {'records': len(recs), 'files_cut': 0, 'writes_dropped': 0, 'bytes_dropped': 0, 'torn': 0,
-             'entries_dropped': 0, 'entries_back': 0, 'unmatched': diffs}
+             'entries_dropped': 0, 'entries_back': 0, 'unmatched': diffs, 'cut_files': []}
     out = root.rstrip('/') + '.cut'
     shutil.rmtree(out, ignore_errors=True)
     done = {}
@@ -330,6 +330,8 @@ def cut(state, mode='drop', seed=0, keep_old=None):
                 raise ToolError(f'{p}: inode {ino} is nowhere (not under the root, not in the grave)')
             if ino not in done:
                 done[ino] = content(rep, ino, src, mode, rng, stats)
+                if done[ino] is not None and done[ino] != open(src, 'rb').read():
+                    stats['cut_files'].append(os.path.relpath(p, out))
             data = done[ino]
             if data is None:
                 os.link(src, p)

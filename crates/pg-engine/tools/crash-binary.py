@@ -990,6 +990,7 @@ def main():
         return (f'; cut ({st["records"]} records): {st["writes_dropped"]} writes to {st["files_cut"]} files dropped '
                 f'({st["bytes_dropped"]} bytes{", " + str(st["torn"]) + " torn" if st["torn"] else ""}), '
                 f'{st["entries_dropped"]} entries undone, {st["entries_back"]} back'
+                + (f' (files cut: {", ".join(st["cut_files"][:4])}{" ..." if len(st["cut_files"]) > 4 else ""})' if st['cut_files'] else '')
                 + (f', 1 unrecorded: {st["unmatched"][0]}' if st['unmatched'] else ''))
 
     def start():
