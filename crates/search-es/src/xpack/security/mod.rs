@@ -751,6 +751,13 @@ pub fn authorized_names(ctx: &Ctx) -> impl Fn(&str) -> bool {
     move |n| check.as_ref().is_none_or(|(eff, action)| eff.allows_index(action, n))
 }
 
+/// Whether the request's principal may read (search) a name: an index, alias or pattern, or a
+/// search application's name (its alias).
+pub fn may_read(ctx: &Ctx) -> impl Fn(&str) -> bool {
+    let check = ctx.principal.get().filter(|p| !p.is_superuser()).map(|p| effective(&file_roles(ctx.cluster), &ctx.state(), p));
+    move |n| check.as_ref().is_none_or(|eff| eff.allows_index("indices:data/read/search", n))
+}
+
 tokio::task_local! {
     /// The workflow of the REST request being dispatched: its internal calls run in it too, as
     /// Elasticsearch keeps the workflow in the thread context.
@@ -760,7 +767,9 @@ tokio::task_local! {
 /// `Workflow`s: the workflow a REST API starts (`WorkflowResolver`).
 fn workflow_of(api: &str) -> Option<&'static str> {
     match api {
-        "search_application.search" => Some("search_application_query"),
+        // A page's analytics events about its application's searches (roll's: a browser key with
+        // `limits.events`, `browser::Policy::events`) belong to the same flow.
+        "search_application.search" | "search_application.post_behavioral_analytics_event" => Some("search_application_query"),
         _ => None,
     }
 }
@@ -845,6 +854,11 @@ fn authorize_action(ctx: &Ctx) -> EsResult<Option<String>> {
     let Some(p) = ctx.principal.get() else { return Ok(None) };
     check_workflow(ctx, p)?;
     if p.is_superuser() {
+        return Ok(None);
+    }
+    // A browser key with `limits.events` posts its page's events without a cluster privilege:
+    // the handler holds them to what the key reaches, counts them and stores none.
+    if ctx.api.name() == "search_application.post_behavioral_analytics_event" && browser::policy(ctx).is_some_and(|b| b.events) {
         return Ok(None);
     }
     let (scope, action) = privileges::action_of(ctx.api.name());
