@@ -285,6 +285,10 @@ pub struct Skipped {
     /// The first of those stories, by id (10 at most).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub first_stories: Vec<String>,
+    /// How many of them the change touched (their own file, or one they import): unreviewed, so
+    /// the visual review holds on them ([`UNTAKEN_STORIES`]).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub touched_stories: u32,
     /// The change's stories were chosen by its files alone: its Storybook served no module graph
     /// (`preview-stats.json`, `--stats-json`; a `storybook dev` server has none), so a story that
     /// imports a changed file from elsewhere may be among those left.
@@ -1176,6 +1180,9 @@ pub struct PageCheck {
     /// What a failed one threw (one line, masked).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub play_error: Option<String>,
+    /// The interaction or assertion it stopped at (`expect.toBeVisible`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub play_step: Option<String>,
     /// What its change against the baseline is ([`crate::visual::compare`]'s signature): pages
     /// with the same one changed the same way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1204,6 +1211,10 @@ pub struct PageReport {
     /// What a failed one threw, as Storybook's frame showed it (one line, the preview's code's).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub play_error: Option<String>,
+    /// The interaction or assertion it stopped at (`expect.toBeVisible`, `userEvent.click`), from
+    /// Storybook's interactions log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub play_step: Option<String>,
 }
 
 /// How a story's interaction test went (Chromatic's interaction tests): its `play` function ran
@@ -1258,9 +1269,23 @@ pub struct VisualReview {
     /// The head whose screenshots it's about: what an acceptance names (`seen`).
     pub head: String,
     /// Each page that differs from the baseline's, and who accepted it at this head (Chromatic
-    /// reviews per snapshot): the change is accepted once every one of them is.
+    /// reviews per snapshot): the change is accepted once every one of them is. With
+    /// [`Self::untaken`], one more at [`UNTAKEN_STORIES`]: those stories, accepted as not taken.
     pub pages: Vec<PageReview>,
+    /// Stories the change touched that the run at this head didn't take (past its 40, or out of
+    /// its time): nobody saw them, so they're under review too (Chromatic captures every story).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub untaken: u32,
+    /// Refused: why (the latest refusal's, one line; `by` and `at` are its).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
+
+/// What a masked base's branch is named after (`pvbase-<rules>-<when>`): no preview's name starts so.
+pub const MASK_BASE_PREFIX: &str = "pvbase-";
+
+/// The visual review's entry for the stories a change touched that its run didn't take.
+pub use code_control::model::UNTAKEN_STORIES;
 
 /// One page of a visual review.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -1279,6 +1304,9 @@ pub struct PageReview {
     /// shares it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    /// Refused at this head: by whom, when, why.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<Refusal>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -1289,6 +1317,17 @@ pub enum VisualState {
     /// They differ, and nobody has accepted them at this head.
     Changed,
     Accepted,
+    /// Someone refused a page at this head (Chromatic's Deny): it fails until a new head, or
+    /// until someone accepts that page.
+    Refused,
+}
+
+/// Who refused a page of a visual review at its head, when, and why (one line).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Refusal {
+    pub by: String,
+    pub at: i64,
+    pub reason: String,
 }
 
 /// How much a change's page differs from the default branch's (Chromatic's baseline).

@@ -497,6 +497,19 @@ const PLAY = (id) => `(() => {
   if (["played", "completing", "completed", "afterEach", "finished"].includes(r.phase)) return "passed";
   return r.phase === "aborted" ? "none" : "pending";
 })()`;
+// Where a failed one stopped, from Storybook's interactions log (the instrumenter's state, on
+// the frame itself when it's opened alone: `__STORYBOOK_ADDON_INTERACTIONS_INSTRUMENTER_STATE__`,
+// by story id, its `calls`): the call whose status is `error`, as its path and method (a chained
+// call's path names the call it hangs off by id: `expect(el).toBeVisible()` is `expect.toBeVisible`).
+const PLAY_STEP = (id) => `(() => {
+  const st = (globalThis.__STORYBOOK_ADDON_INTERACTIONS_INSTRUMENTER_STATE__ || {})[${JSON.stringify(id)}];
+  const calls = st && Array.isArray(st.calls) ? st.calls : [];
+  const c = calls.find((x) => x && String(x.status).toLowerCase() === "error");
+  if (!c) return "";
+  const named = (p) => (typeof p === "string" ? p : p && typeof p === "object" ? (calls.find((x) => x && x.id === p.__callId__) || {}).method : "");
+  const path = Array.isArray(c.path) ? c.path.map(named).filter((p) => typeof p === "string" && p).join(".") : "";
+  return ((path ? path + "." : "") + String(c.method || "")).slice(0, 120);
+})()`;
 // touched-first: start
 // Stories the change touched first (Chromatic's TurboSnap): a story whose own file the change
 // changed, then one that imports a changed file from anywhere (through the bundler's module
@@ -505,7 +518,7 @@ const PLAY = (id) => `(() => {
 // the rest in the index's order. `changed` are paths in the repo; a story's `importPath` and a
 // module's name are its project's (`./src/Button.stories.tsx`), so a path matches by its end.
 // The graph is the preview's code's: it only orders, and its walk is bounded.
-const touchedFirst = (listed, changed, stats, first = []) => {
+const scored = (listed, changed, stats, first = []) => {
   const norm = (p) => String(p || "").replace(/ \+ \d+ modules?$/, "").replace(/[?#].*$/, "").replace(/^\.\//, "").replace(/^\/+/, "");
   const ends = (path, tail) => !!tail && (path === tail || path.endsWith("/" + tail));
   const dir = (p) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
@@ -538,8 +551,12 @@ const touchedFirst = (listed, changed, stats, first = []) => {
     const d = dir(own);
     return d && changed.some((c) => ends(dir(c), d)) ? 1 : 0;
   };
-  return listed.map((e, i) => [score(e), i, e]).sort((a, b) => b[0] - a[0] || a[1] - b[1]).map((x) => x[2]);
+  return listed.map((e, i) => [score(e), i, e]).sort((a, b) => b[0] - a[0] || a[1] - b[1]);
 };
+const touchedFirst = (listed, changed, stats, first = []) => scored(listed, changed, stats, first).map((x) => x[2]);
+// The change touched it: its own file, or (through the module graph) a file it imports; without
+// a graph, a file beside it too, the only sign a component's change reaches its story.
+const touchedBy = (score, stats) => score === 3 || score === 2 || (score === 1 && !stats);
 // touched-first: end
 // The stories to take before the rest ($STORIES_FIRST, roll's: a default branch's preview takes
 // those the open changes took and it hasn't, so each has main's to be compared with).
@@ -583,7 +600,15 @@ const stories = async (sessionId) => {
     } catch {}
   }
   // The ones the change touched first, so the 40 a run takes are those that matter.
-  const listed = touchedFirst(entries.filter((e) => e && typeof e.id === "string" && STORY_ID.test(e.id) && (e.type == null || e.type === "story")), CHANGED, stats, FIRST);
+  const ranked = scored(entries.filter((e) => e && typeof e.id === "string" && STORY_ID.test(e.id) && (e.type == null || e.type === "story")), CHANGED, stats, FIRST);
+  // This container's share when several take them (`$STORIES_SHARD`, `i/k`: every k-th from the
+  // i-th), so each takes its part of the ones that matter first.
+  const [shard, shards] = (() => {
+    const m = /^([0-3])\/([1-4])$/.exec(process.env.STORIES_SHARD || "");
+    return m && +m[1] < +m[2] ? [+m[1], +m[2]] : [0, 1];
+  })();
+  const listed = ranked.map((x) => x[2]).filter((_, n) => n % shards === shard);
+  const touched = new Set(ranked.filter(([score]) => touchedBy(score, stats)).map((x) => x[2].id));
   const picked = listed.slice(0, 40);
   const out = [];
   const until = Date.now() + 100000;
@@ -631,13 +656,17 @@ const stories = async (sessionId) => {
     if (play === "failed") {
       const m = await check({ expression: `(document.querySelector("#error-message")?.textContent || "").replace(/\\s+/g, " ").trim().slice(0, 300)`, returnByValue: true }, sessionId);
       if (typeof m?.result?.value === "string" && m.result.value) said.play_error = m.result.value;
+      const at = await pageSays({ expression: PLAY_STEP(e.id), returnByValue: true }, sessionId);
+      if (typeof at?.result?.value === "string" && at.result.value) said.play_step = at.result.value;
     }
     if (a11y && JSON.stringify(a11y).length <= 8000) said.a11y = a11y;
     out.push(said);
   }
   // And what it didn't take (past the first 40, or out of its time), so roll can say so.
   const left = listed.filter((e) => !out.some((o) => o.id === e.id)).map((e) => e.id);
-  fs.writeFileSync(process.env.OUT + ".stories.json", JSON.stringify({ stories: out, left: left.length, first_left: left.slice(0, 10), by_files: CHANGED.length > 0 && !stats }));
+  // Of those, the ones the change touched: unreviewed, so the visual review holds on them.
+  const touched_left = left.filter((id) => touched.has(id)).length;
+  fs.writeFileSync(process.env.OUT + ".stories.json", JSON.stringify({ stories: out, left: left.length, first_left: left.slice(0, 10), touched_left, by_files: CHANGED.length > 0 && !stats }));
 };
 // A run an agent asked for ($TRY: {path, steps}; roll previews' `…/try`): the page loaded, its
 // steps taken as a page state's are (10 at most, 15 s), then its picture to $OUT, and to

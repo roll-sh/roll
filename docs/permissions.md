@@ -270,6 +270,18 @@ roll token acting as that person, with no consent screen and no roll sign-in.
   `POST …/apps/{id}/rotate {public_jwk?, keep_old_for_s?}` gives it a new key, or a new secret
   answered once, keeping its client id and its people's connections; the old secret works up to a
   week longer while the provider moves over, or stops now with every token its people hold.
+- **Claude's auto-connect** (Claude's connector docs, "Enterprise Managed Auth"). Claude signs the identity assertion itself, under an issuer URL of the customer's Claude organization, and presents its Client ID Metadata Document as the client. Set-up and sign-in:
+  - **Register Claude as an app** by its documents: `POST …/apps {name, rules, metadata: ["https://claude.ai/oauth/mcp-oauth-client-metadata", "…/confidential_client"], issuers?}` (`roll token enterprise app create Claude --claude`, or the form's "Claude's auto-connect"). It keeps an `ent_…` id of roll's, and roll makes no secret. Its people's connections are kept under that id: the documents' URL is also the client of people's own Claude connections (roll's consent screen), and those stay theirs, never touched by the app's rules or its removal.
+  - **Who may vouch for it:** Claude's own issuer, and the trusted providers it names in `issuers` (`--issuer`, for an identity provider that runs Claude's auto-connect, "IdP-managed"). A provider trusted for other apps signs no one in to it.
+  - **How the client authenticates** depends on the document it presents:
+    - The public one (`token_endpoint_auth_method: none`) signs in with no credential of its own. The assertion is the credential, so it must be issued now (`iat`) and live at most five minutes; Claude's live a minute, and each is used once.
+    - The confidential one, which roll's metadata invites because it lists `private_key_jwt`, signs a client assertion with the keys at its document's `jwks_uri`. That client's id without its assertion is refused.
+    - A document naming any other method, or none, is refused.
+  - **Caching:** documents and keys are read through the guarded client and kept five minutes, read again for a key id roll doesn't hold, and kept up to an hour through a failed read. They're a client's public claims, never a person's grant.
+  - **Rotation:** roll holds no credential of such an app, so there's nothing to rotate.
+  - **Trust the organization's issuer:** `https://identity.anthropic.com/issuers/<id>`, exactly as Claude's auto-connect setup shows it (anything else at that host is refused), as a provider with email matching and the domains its people use. Its keys are fetched, never pasted. Claude's issuer then vouches for its members' account emails, which it sends without `email_verified`. Any other issuer (a look-alike, or Claude's with pasted keys) still needs `email_verified: true`, and the domains bound both.
+  - **The resource:** when the assertion names none, the token request's own `resource` holds the token. Claude names roll's MCP server, so its tokens are that server's only.
+  - **Not yet:** express admin setup (`ema_issuer:manage`), where Claude registers the issuer itself.
 - **A leaked app secret** (an `rlc_` with its checksum, found by roll code's push scan or reported
   by GitHub's secret scanning) is revoked like any other: roll drops the secret, the one kept from
   before a rotation, and every token the app's people hold, in one write, and audits it. The
@@ -442,6 +454,13 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   resource, so remembering it allows revealing that one (all of reveal on it, not only the link);
   when several linked resources aren't allowed outright, the approval names them all and is
   approved once. Each linked resource's reveal is its own audit row.
+- A roll secret another product writes once as the caller is lent the same way:
+  - **The route:** search's admin password rotated into one (`POST …/password` with `secret: {environment, path?, project?}`, `write`; the project left out is the one the cluster is on).
+  - **What's checked:** `write` on that folder as roll secrets decides it, protected environments included. The environment and path are checked as roll secrets names them, so a pattern like `prod*` is refused rather than remembered as a wildcard.
+  - **An approval** names that folder, even when the route's own action asks too, and remembering it allows exactly that folder and environment.
+  - **The grant the product gets** carries one exact rule (that folder: `write`) for this request, plus `read` on that folder whenever the write passes, allowed outright or approved, since the product reads the version back. roll secrets checks the caller again inside, and nothing else in the project opens.
+  - **A remembered approval** keeps to what it named. When the route's own action asked too (admin on the cluster), only the secret is remembered, and the next call asks about the route's own action again.
+  - **A secret a product keeps following needs `reveal` allowed outright.** That covers an inference endpoint keyed by a secret (its sync) and a bound `roll://` reference: either is checked again as its maker at every use, so an approval can't stand in for it.
 - Comparing a local copy with a secrets folder (`POST …/environments/{env}/diff`, by fingerprint,
   names only) tests a guess at a value: `reveal` there, as reading the values is.
 - A secrets project's backup (every value, sealed to a key the caller chooses) and restore are
@@ -1178,8 +1197,9 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
     the chain at its next use. A login (`present_machine`) with a spent credential always ends it.
   - **Not in the workload caps.** They open nothing and live as long as their machine, so they'd
     fill the room every CI login shares: `MAX_WORKLOADS` and `OWNER_MAX_WORKLOADS` count only
-    workload grants with rules. Their caller caps them (roll secrets: 1,000 chains per identity,
-    counted in the write that records the chain, and 60 bootstrap tokens a minute per project).
+    workload grants with rules. Their caller caps them (roll secrets: 1,000 chains per identity
+    whose newest secret hasn't ended, revoked or not, counted in the write that records the chain,
+    and 60 bootstrap tokens a minute per project).
   - **Leaked**, either is revoked with its whole chain, as a token is (below).
   - `Access::revoke_chain(chain, why)` ends a chain (roll secrets: the identity deleted, disabled or
     cut off). Chains are listed with `?kind=workload`, and go a day after their last secret would

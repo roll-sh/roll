@@ -1,7 +1,7 @@
 # Project members and roles (design)
 
 Status: **v1 built** (workspace and secrets; [Phasing](#phasing), and [What v1 leaves out](#what-v1-leaves-out)).
-This is roll secrets' long-standing gap R1 (docs/secrets.md, "Next"), and it covers every product
+This is roll secrets' long-standing gap R1 (docs/secrets-next.md, "Next"), and it covers every product
 whose resources sit on a workspace project. Before it, a person reached only the projects they
 made, and a team shared only through the operator or through tokens. This document is the plan
 for people sharing a project, each with a role. v1 takes option (a) of every open decision

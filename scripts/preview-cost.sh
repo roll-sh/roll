@@ -133,7 +133,7 @@ stats = {"modules": [{"name": "./lib/deep.js", "reasons": [{"moduleName": "./sto
 # Storybook's own preview as its frame exposes it (`__STORYBOOK_PREVIEW__.storyRenders`): Deep's
 # play function threw (phase `errored`), the first one's ran to its end, the rest have none.
 # Its error display says what Deep's threw, as Storybook's frame does (`#error-message`).
-play = '<div id="error-message"></div><script>const id = new URLSearchParams(location.search).get("id"); globalThis.__STORYBOOK_PREVIEW__ = { storyRenders: [{ id, phase: id === "deep--one" ? "errored" : "finished", story: id === "deep--one" || id === "s01--one" ? { playFunction() {} } : {} }] }; if (id === "deep--one") document.getElementById("error-message").textContent = "expected Pay to be visible";</script>'
+play = '<div id="error-message"></div><script>const id = new URLSearchParams(location.search).get("id"); globalThis.__STORYBOOK_PREVIEW__ = { storyRenders: [{ id, phase: id === "deep--one" ? "errored" : "finished", story: id === "deep--one" || id === "s01--one" ? { playFunction() {} } : {} }] }; if (id === "deep--one") { document.getElementById("error-message").textContent = "expected Pay to be visible"; globalThis.__STORYBOOK_ADDON_INTERACTIONS_INSTRUMENTER_STATE__ = { "deep--one": { calls: [{ id: "c1", path: ["userEvent"], method: "click", status: "done" }, { id: "c2", path: [], method: "expect", status: "done" }, { id: "c3", path: [{ __callId__: "c2" }], method: "toBeVisible", status: "error" }] } }; }</script>'
 frame = '<!doctype html><html lang="en"><title>story</title><div id="storybook-root"><button>a story</button></div>' + play
 files = {"storybook/index.json": json.dumps(index), "storybook/preview-stats.json": json.dumps(stats), "storybook/iframe.html": frame}
 print(json.dumps({"message": "storybook", "files": {k: {"content": v} for k, v in files.items()}}))
@@ -201,6 +201,20 @@ assert b"-" not in got[:1], got[:200]
 PY
 }
 resp "$REDIS_URL" 20000 parent
+rcmd() { # rcmd <redis url> <word>…: one command over RESP, its reply's first line
+  python3 - "$@" <<'PY'
+import socket, sys, urllib.parse
+u = urllib.parse.urlparse(sys.argv[1])
+s = socket.create_connection((u.hostname, u.port))
+def cmd(*a):
+    return b"*%d\r\n" % len(a) + b"".join(b"$%d\r\n%s\r\n" % (len(x), x) for x in a)
+s.sendall(cmd(b"AUTH", u.username.encode(), urllib.parse.unquote(u.password).encode()) + cmd(*[w.encode() for w in sys.argv[2:]]))
+got = b""
+while got.count(b"\r\n") < 2:
+    got += s.recv(65536)
+print(got.split(b"\r\n")[1].decode())
+PY
+}
 
 PRJ=$(api POST /v1/workspace/projects '{"name":"shop"}' | jq_ "d['id']")
 for r in "repo/acme%2Fweb" "repo/acme%2Fwiki" "postgres/$PG" "redis/$REDIS" "bucket/assets" "nosql/$NOSQL" "queue/jobs" "stream/$STREAM" "tasks/work" "search/$SEARCH"; do
@@ -467,6 +481,9 @@ KEY_MINT=$(curl -s -o /dev/null -w '%{http_code}' -XPOST -H "Authorization: ApiK
 APP_WAL=$(docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB" -Atc "SELECT length(pg_read_binary_file('pg_wal/' || pg_walfile_name(pg_current_wal_lsn())))" 2>&1 | head -1 || true)
 case "$APP_WAL" in *"permission denied"*) ;; *) echo "the branch's role should be refused the WAL: $APP_WAL"; exit 1;; esac
 APP_MASKED=$(docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB" -Atc "SELECT email FROM users WHERE id = 1" 2>&1 | head -1 || true)
+# Its Postgres branch comes from the parent's masked base (masked once for these rules), masked as
+# it is (APP_MASKED, checked below).
+[ "$(api GET "/v1/previews/$PV/activity" | jq_ "any('from its masked base' in a['message'] for a in d)")" = True ] || { echo "the preview's Postgres branch should come from the parent's masked base: $(api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d if 'postgres' in a['message']][:6]")"; exit 1; }
 # Logs are pushed: a request made while following shows up on the stream.
 FOLLOW="$HOME_DIR/follow.txt"
 curl -sN --max-time 20 "http://$API/v1/previews/$PV/logs?follow=1&lines=1" >"$FOLLOW" &
@@ -670,8 +687,8 @@ STORY_A11Y=$(api GET "/v1/previews/$PV" | jq_ "[(x.get('a11y') or {}).get('lang'
 # Their interaction tests as Storybook ran them (Chromatic's): Deep's failed, the first's passed.
 PLAYS=$(api GET "/v1/previews/$PV" | jq_ "sorted('%s %s' % (x['path'], x.get('play')) for x in d['pages'] if x['path'] in ('story:deep--one', 'story:s01--one', 'story:s02--one'))")
 [ "$PLAYS" = "['story:deep--one failed', 'story:s01--one passed', 'story:s02--one None']" ] || { echo "a story's interaction test should be read as Storybook ran it: $PLAYS"; exit 1; }
-PLAY_ERROR=$(api GET "/v1/previews/$PV" | jq_ "[x.get('play_error') for x in d['pages'] if x['path'] == 'story:deep--one']")
-[ "$PLAY_ERROR" = "['expected Pay to be visible']" ] || { echo "a failed interaction test should say what it threw: $PLAY_ERROR"; exit 1; }
+PLAY_ERROR=$(api GET "/v1/previews/$PV" | jq_ "[(x.get('play_step'), x.get('play_error')) for x in d['pages'] if x['path'] == 'story:deep--one']")
+[ "$PLAY_ERROR" = "[('expect.toBeVisible', 'expected Pay to be visible')]" ] || { echo "a failed interaction test should say where it stopped and what it threw: $PLAY_ERROR"; exit 1; }
 # The change's first stories in the other browsers asked for too (Chromatic's cross-browser
 # stories): Deep's, taken first, in Firefox and WebKit at a phone's size.
 STORY_BROWSERS=$(api GET "/v1/previews/$PV" | jq_ "sorted(x['path'] for x in d['pages'] if x['path'].startswith('story:deep--one@'))")
@@ -721,13 +738,24 @@ curl -sS -o /dev/null -L -c "$JAR" -b "$JAR" -H "Host: $HOST" "http://$API/?$QUE
 say "a restore point (roll preview points): saved, a table made after it, put back"
 # A restore point (roll preview points): a table made after it is gone once it's put back, on
 # the same DATABASE_URL (pg-control's reset from the point: same endpoint and role), and in the
-# NoSQL branch (NoSQL's point-in-time restore in place, to the second the point was cut at).
+# NoSQL and Redis branches (their point-in-time restores in place, to the second the point was
+# cut at: the same database, URL and password), and in the stream (branched again from the
+# point: a new stream and key, its records as the point holds them).
 psql_app() { docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB" -Atc "$1" 2>&1 | head -1; }
+stream_ref() { api GET "/v1/previews/$PV" | jq_ "[r['ref'] for r in d['resources'] if r['kind']=='stream'][0]"; }
+srec() { api POST "/v1/streams/$1/topics/clicks/records" "{\"value\":\"$2\"}" | jq_ "'offsets' in d"; }
+sread() { api GET "/v1/streams/$1/topics/clicks/records?from=earliest&limit=1000" | jq_ "' '.join(w for w in ('before-the-point', 'after-the-point') if w in str(d))"; }
+POINT_STREAM=$(stream_ref)
+[ "$(srec "$POINT_STREAM" before-the-point)" = True ] || { echo "the preview's stream should take a record before the point"; exit 1; }
 POINT=$(api POST "/v1/previews/$PV/restore-points" '{"label":"before the live check"}' | jq_ "d['id']")
 case "$POINT" in rp_*) ;; *) echo "a restore point should be saved: $POINT"; exit 1;; esac
 ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview points "$PV" | has "$POINT" || { echo "roll preview points should list $POINT"; exit 1; }
 psql_app "CREATE TABLE after_the_point (id int)" >/dev/null
 CQL "$BRANCH_NOSQL" "CREATE TABLE app.after_the_point (id int PRIMARY KEY)" >/dev/null
+POINT_REDIS_URL=$(api GET "/v1/redis/databases/$BRANCH_REDIS" | jq_ "d['redis_url']")
+[ "$(rcmd "$POINT_REDIS_URL" SET after:the:point 1)" = "+OK" ] || { echo "the Redis branch should take a key after the point"; exit 1; }
+srec "$POINT_STREAM" after-the-point >/dev/null
+[ "$(sread "$POINT_STREAM")" = "before-the-point after-the-point" ] || { echo "the preview's stream should hold both records before the point goes back: $(sread "$POINT_STREAM")"; exit 1; }
 [ "$(CQL "$BRANCH_NOSQL" "SELECT id FROM app.after_the_point" | jq_ "'rows' in d")" = True ] || { echo "the NoSQL branch should have the table made after the point"; exit 1; }
 TR0=$(now_ms)
 api POST "/v1/previews/$PV/restore-points/$POINT/restore" >/dev/null
@@ -736,7 +764,7 @@ api POST "/v1/previews/$PV/restore-points/$POINT/restore" >/dev/null
 # services slept for it; a visit wakes them).
 PUT_BACK=""
 for _ in $(seq 1 240); do
-  api GET "/v1/previews/$PV/activity" | jq_ "all(any(a['message'].startswith('put ' + k + ':') and 'back as restore point' in a['message'] for a in d) for k in ('postgres', 'nosql'))" | has True && case "$(api GET "/v1/previews/$PV" | jq_ "d['state']")" in ready|sleeping) true;; *) false;; esac && PUT_BACK=yes && break
+  api GET "/v1/previews/$PV/activity" | jq_ "all(any(a['message'].startswith('put ' + k + ':') and 'back as restore point' in a['message'] for a in d) for k in ('postgres', 'nosql', 'redis', 'stream'))" | has True && case "$(api GET "/v1/previews/$PV" | jq_ "d['state']")" in ready|sleeping) true;; *) false;; esac && PUT_BACK=yes && break
   sleep 0.5
 done
 RESTORE_MS=$(( $(now_ms) - TR0 ))
@@ -745,6 +773,11 @@ RESTORED=$(psql_app "SELECT coalesce(to_regclass('public.after_the_point')::text
 [ "$RESTORED" = "gone $APP_MASKED" ] || { echo "putting the point back should drop what came after it, still masked, on the same DATABASE_URL: $RESTORED"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:8]]"; exit 1; }
 NOSQL_AFTER=$(CQL "$BRANCH_NOSQL" "SELECT id FROM app.after_the_point" | jq_ "'rows' in d")
 [ "$NOSQL_AFTER" = False ] || { echo "putting the point back should drop the NoSQL table made after it"; exit 1; }
+REDIS_AFTER="$(rcmd "$POINT_REDIS_URL" EXISTS after:the:point) $(rcmd "$POINT_REDIS_URL" EXISTS preview:999)"
+[ "$REDIS_AFTER" = ":0 :1" ] || { echo "putting the point back should drop the Redis key set after it, on the same URL, and keep the preview's own: $REDIS_AFTER"; exit 1; }
+BACK_STREAM=$(stream_ref)
+STREAM_AFTER="$([ "$BACK_STREAM" != "$POINT_STREAM" ] && echo new) $(sread "$BACK_STREAM")"
+[ "$STREAM_AFTER" = "new before-the-point" ] || { echo "putting the point back should give the preview a stream with the point's records and not the one after it: $STREAM_AFTER"; exit 1; }
 api DELETE "/v1/previews/$PV/restore-points/$POINT" >/dev/null
 # Its services slept while the data went back: a visit wakes them, on the same DATABASE_URL.
 for _ in $(seq 1 120); do
@@ -1344,6 +1377,10 @@ SEARCH_LEFT=$(api GET /v1/search/clusters | jq_ "len([c for c in (d if isinstanc
 BRANCHES_LEFT=$(api GET /v1/redis/databases | jq_ "len([x for x in d if x['name'].startswith('pv-')])")
 # The Postgres branch and every earlier push's copy of it went with the preview.
 PG_LEFT=$(api GET "/v1/projects/$PG" | jq_ "len([b for b in d['branches'] if b['name'].startswith('pv-')])")
+# At most the masked base for the rules now (kept for the next preview a day; an older one goes
+# with its last branch).
+MASK_BASES=$(api GET "/v1/projects/$PG" | jq_ "len([b for b in d['branches'] if b['name'].startswith('pvbase-')])")
+[ "$MASK_BASES" -le 1 ] || { echo "older masked bases should go with their last branch: $(api GET "/v1/projects/$PG" | jq_ "[b['name'] for b in d['branches']]")"; exit 1; }
 [ "$PG_LEFT" = 0 ] || { echo "no Postgres branch of the preview (its own or an earlier push's copy) should outlive it: $(api GET "/v1/projects/$PG" | jq_ "[b['name'] for b in d['branches']]")"; exit 1; }
 
 cat <<EOF

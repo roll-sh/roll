@@ -158,6 +158,10 @@ pub struct FakeData {
     pub columns: Mutex<std::collections::HashMap<String, Result<Vec<roll_previews::mask::Column>, roll_previews::ports::Asleep>>>,
     /// Branches put back to a restore point: (the branch, the point's copy).
     pub restored: Mutex<Vec<(String, String)>>,
+    /// A reset makes a new branch with a new id (Redis's), the nth `<parent>~<name>~r<n>`.
+    pub renames_on_reset: AtomicUsize,
+    /// Branches made from another of the parent's (a masked base): branch → the one it came from.
+    pub from: Mutex<HashMap<String, String>>,
 }
 
 impl FakeData {
@@ -177,6 +181,8 @@ impl FakeData {
             columns: Mutex::new(Default::default()),
             branch_now: Mutex::new(None),
             restored: Mutex::new(Vec::new()),
+            renames_on_reset: AtomicUsize::new(0),
+            from: Mutex::new(HashMap::new()),
         })
     }
 }
@@ -219,7 +225,24 @@ impl Brancher for FakeData {
         Ok(Some(Branched::plain(id)))
     }
     fn restores(&self) -> bool {
+        matches!(self.kind, Kind::Postgres | Kind::Redis)
+    }
+    fn points_need_their_branch(&self) -> bool {
+        self.kind == Kind::Redis
+    }
+    fn branches_from_base(&self) -> bool {
         self.kind == Kind::Postgres
+    }
+    async fn branch_from(&self, parent: &str, from: &str, name: &str, _mode: Mode) -> anyhow::Result<Option<Branched>> {
+        anyhow::ensure!(self.branches.lock().contains(from), "no branch {from} to branch from");
+        let id = format!("{parent}~{name}");
+        self.branches.lock().insert(id.clone());
+        self.from.lock().insert(id.clone(), from.to_string());
+        Ok(Some(Branched::plain(id)))
+    }
+    async fn children(&self, _parent: &str, branch: &str) -> anyhow::Result<usize> {
+        let live = self.branches.lock().clone();
+        Ok(self.from.lock().iter().filter(|(child, of)| *of == branch && live.contains(*child)).count())
     }
     async fn restore(&self, _parent: &str, branch: &str, _kept: Option<&str>, point: &str, _name: &str, _mode: Mode) -> anyhow::Result<Option<Branched>> {
         anyhow::ensure!(self.branches.lock().contains(point), "no restore point {point}");
@@ -266,10 +289,16 @@ impl Brancher for FakeData {
     }
     async fn reset(&self, parent: &str, branch: &str, _kept: Option<&str>, name: &str, mode: Mode) -> anyhow::Result<Branched> {
         self.delete(parent, branch, name).await?;
+        if self.renames_on_reset.load(Ordering::SeqCst) > 0 {
+            let id = format!("{parent}~{name}~r{}", self.renames_on_reset.fetch_add(1, Ordering::SeqCst));
+            self.branches.lock().insert(id.clone());
+            return Ok(Branched::plain(id));
+        }
         self.branch(parent, name, mode).await
     }
     async fn delete(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<()> {
-        anyhow::ensure!(branch == format!("{parent}~{name}"), "refusing to delete {branch}: not {parent}'s branch {name}");
+        let own = format!("{parent}~{name}");
+        anyhow::ensure!(branch == own || branch.strip_prefix(&own).is_some_and(|r| r.starts_with("~r")), "refusing to delete {branch}: not {parent}'s branch {name}");
         self.branches.lock().remove(branch);
         Ok(())
     }
@@ -803,7 +832,8 @@ fn env_of(settings: serde_json::Value, with_search: bool, cfg: impl FnOnce(&mut 
     let search = FakeData::new(Kind::Search, &["srch_logs"]);
     let apps = Arc::new(FakeApps::default());
     let secrets = Arc::new(FakeSecrets::default());
-    let mut config = Config { domain: "preview.test".into(), otlp: Some("127.0.0.1:7070".into()), ..Config::default() };
+    // Masked bases off unless a test turns them on: the others test a branch masking its own copy.
+    let mut config = Config { domain: "preview.test".into(), otlp: Some("127.0.0.1:7070".into()), mask_base_for: std::time::Duration::ZERO, ..Config::default() };
     cfg(&mut config);
     let engine = Engine::new(
         config,

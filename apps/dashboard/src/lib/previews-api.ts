@@ -133,7 +133,8 @@ export interface Preview {
   pages?: PageCheck[];
   /** Its visual review (`github.visual_review`): whether how its pages look against the baseline was accepted at this head. */
   visual_review?: {
-    state: "unchanged" | "changed" | "accepted";
+    /** `refused`: someone refused a page at this head (`by`, `reason`): it fails until a new push or an accept. */
+    state: "unchanged" | "changed" | "accepted" | "refused";
     branch: string;
     percent: number;
     by: string | null;
@@ -142,7 +143,11 @@ export interface Preview {
     head: string;
     /** Each page that differs (`path` `""`: the first page) and who accepted it at this head: the change is accepted once every one is. */
     /** `group`: the pages changed the same way share one (accepted together with `…/visual/accept {group}`). */
-    pages: { path: string; percent: number; by: string | null; at: number | null; unstable?: boolean; group?: string | null }[];
+    pages: { path: string; percent: number; by: string | null; at: number | null; unstable?: boolean; group?: string | null; refused?: { by: string; at: number; reason: string } | null }[];
+    /** Refused: why (one line). */
+    reason?: string | null;
+    /** Stories the change touched that the run didn't take (past its 40, or out of its time): one more entry in `pages`, at `UNTAKEN_STORIES`, accepted as not taken. */
+    untaken?: number;
   } | null;
   /** It also has a phone-width screenshot. */
   phone_screenshot?: boolean;
@@ -257,7 +262,12 @@ export interface PageCheck {
   play?: "passed" | "failed" | null;
   /** What a failed one threw, as Storybook's frame showed it (one line, masked). */
   play_error?: string | null;
+  /** The interaction or assertion a failed one stopped at (`expect.toBeVisible`), from Storybook's interactions log. */
+  play_step?: string | null;
 }
+
+/** The visual review's entry for the stories a change touched that its run didn't take. */
+export const UNTAKEN_STORIES = "stories:untaken";
 
 /** A page state (`github.states`): a page of the first service's, reached by its steps. */
 export interface PageState {
@@ -455,7 +465,7 @@ export interface PreviewSettings {
   secrets: { base: string; allow_production: boolean };
   /** A patch replaces the whole map. */
   env: Record<string, string>;
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot?: boolean; baseline?: boolean; pages?: string[]; hide?: string[]; budget?: SpeedBudget; visual_threshold?: number; widths?: number[]; openapi?: string | null; endpoints?: string[]; states?: PageState[]; browsers?: ("firefox" | "webkit" | "webkit-phone")[]; storybook?: string | null; modes?: { name: string; color_scheme?: "dark" | "light"; locale?: string; timezone?: string }[] };
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot?: boolean; baseline?: boolean; pages?: string[]; hide?: string[]; budget?: SpeedBudget; visual_threshold?: number; widths?: number[]; openapi?: string | null; endpoints?: string[]; states?: PageState[]; browsers?: ("firefox" | "webkit" | "webkit-phone")[]; storybook?: string | null; /** How many containers take the stories side by side, each up to 40 (1 to 4). */ story_runs?: number; modes?: { name: string; color_scheme?: "dark" | "light"; locale?: string; timezone?: string }[] };
   /** "link": a preview's URLs need its link (its access token once, then a cookie). "team": only people signed in to roll who may open the project (they sign in on the way; the link's token lets nobody in). */
   access: "link" | "team" | "public";
   /** Chromatic's UI Review: `check` posts `roll/visual`; `required` also keeps a change waiting for one from landing in roll. */
@@ -614,6 +624,9 @@ export const previewsApi = {
   acceptRegressions: (id: string, head?: string) => call<Preview>("POST", `${one(id)}/regressions/accept`, head ? { head } : {}),
   acceptVisual: (id: string, head?: string, path?: string, group?: string) =>
     call<Preview>("POST", `${one(id)}/visual/accept`, { ...(head ? { head } : {}), ...(path !== undefined ? { path } : {}), ...(group ? { group } : {}) }),
+  /** Refuse how its pages look at `head` (every page, or `path` only), with why. */
+  refuseVisual: (id: string, head: string | undefined, reason: string, path?: string) =>
+    call<Preview>("POST", `${one(id)}/visual/refuse`, { ...(head ? { head } : {}), ...(path !== undefined ? { path } : {}), reason }),
   /** Its share links (never their tokens). */
   shares: (id: string) => call<PreviewShare[]>("GET", `${one(id)}/shares`),
   /** A link for someone outside the team, open for `hours`; `url` is in this answer only. */

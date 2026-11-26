@@ -38,6 +38,8 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/projects/{project}/status-page/incidents` | | `{ incidents: { id, title, state, started_at, resolved_at, automatic, updates: { at, state, text }[], scheduled: { from, until } \| null /* a maintenance's window, ms */ }[] }`: the last 90 days' and the open ones, newest first (at most 200) | read |
 | `POST /v1/apps/projects/{project}/status-page/incidents` | `{ title: string /* 1–120 */, state?: "investigating" \| "identified" \| "monitoring" \| "resolved" \| "scheduled", text: string /* 1–2000 */, starts_at?: number, ends_at?: number /* a scheduled maintenance's window (unix ms, only with state scheduled): starts in the next 90 days, lasts at most a week; roll moves it to maintenance at its start and resolves it at its end */ }` | 201 `{ id }`: a person's incident on the page; 404 without a page | write |
 | `POST /v1/apps/projects/{project}/status-page/incidents/{iid}/updates` | `{ state, text }` (`state` as a new one's, or `maintenance`; never `scheduled`) | 204: an update (at most 100 an incident); `resolved` closes it | write |
+| `GET /v1/apps/projects/{project}/board` | | `{ panels: { title?, service, environment, metric }[] }`: the project's board, in order (none when nobody made one) | read |
+| `PUT /v1/apps/projects/{project}/board` | `{ panels: { title?: string /* 1–60 */, service: string /* the project's */, environment?: string /* default production */, metric: "requests" \| "errors" \| "error_pct" \| "p50_ms" \| "p95_ms" \| "p99_ms" \| "cpu" \| "memory_bytes" \| "instances" \| "cold_starts" \| "egress_bytes" \| "over_capacity" \| \`app:${string}\` /* one of the app's series */ }[] /* at most 24; none removes it */ }` | the board as kept | write |
 | `GET /v1/apps/projects/{project}/status-page/domain` | | `Domain` (404: none): the status page's own domain, where it answers besides `status-<slug>` | read |
 | `POST /v1/apps/projects/{project}/status-page/domain` | `{ hostname: "status.acme.dev" }` (one name, no wildcard; one a page, a new one replaces it, pending again; 404 without a page; 409 when any service's, preview's or other page's domain has it) | 201 `Domain` (pending: a CNAME to `target`, the page's `status-<slug>` name, or the `_roll-challenge` TXT a custom domain takes) | write |
 | `POST /v1/apps/projects/{project}/status-page/domain/verify` | | `Domain` (active once its DNS checks out, then its certificate as a custom domain's; pending ones are checked every minute) | write |
@@ -196,11 +198,13 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
   use as zeros.
 
 A `roll up` upload (`application/gzip`) may carry `X-Roll-Message` (percent-encoded UTF-8: the
-checkout's last commit, by default) and `X-Roll-Revision` (its sha), shown on the deployment.
+checkout's last commit, by default) and `X-Roll-Revision` (its sha), shown on the deployment,
+and `X-Roll-No-Traffic: 1` (`roll up --no-traffic`): built and health-checked to `ready` at its
+own URL, as `no_traffic` is, not put live.
 
 A log's `q` (1–200 characters) returns the lines with every word in it, any case (`"a phrase"` as
 it's written (any case), `-word` absent (`-1` and `--flag` are words), `OR` between alternatives: `checkout "order 7" -health`,
-`timeout OR refused`), from memory and then
+`timeout OR refused`; `"OR"` quoted is the word), from memory and then
 the stored chunks newest first (back to `since`), at most `tail` (2000); it reads at most 64 MiB
 of stored logs and says so with `X-Roll-Search-Truncated: 1`.
 
@@ -316,7 +320,7 @@ type Run = {
   suspend_after_s: number;  // default 30; 0 never suspends
   sleep_after_s: number;    // default 600; min_instances > 0 never sleeps below min
   volume?: { mount: string; size_gb: number; shared?: boolean /* every instance mounts it: the service scales past one and deploys overlap (concurrent writers are the app's to coordinate); off: one instance, the old stopped before the new starts */; backups?: { every_hours: number /* 0–168; 0: by hand only */; keep: number /* 1–90 */ } /* none: daily, seven kept */ };
-  alerts: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct: number; log_match?: string; log_count?: number; cpu_pct: number; metrics?: { name: string; above?: number; below?: number; minutes?: number; sum?: boolean }[]; routes?: { route: string /* a route group as `…/routes` names it ("/users/:id/orders"; a path is folded the same way), or a prefix "/api/*" */; method?: string; error_pct?: number /* 1–100, 0 off */; p95_ms?: number /* 0 off */ }[] /* at most 10, each with a threshold: one route's 5xx share or p95 over five minutes (20 requests at least), `alert.route` */ }; // default 90, 5, 0, 10 (0 off); cpu_pct: each instance's share of its cpu every minute of five, default 0 (off), `alert.cpu`; metrics (at most 10): one of the app's own gauges (each series' newest point, the largest, or their sum) above or below its one threshold in `minutes` (1–5, default 3) judgments running, `alert.metric`; capacity_pct: the share of five minutes' requests that found every instance busy at max_instances, `alert.capacity`: `alert.*` events over five minutes; log_match: text its stdout/stderr holds log_count times (default 10) in five minutes, `alert.log`
+  alerts: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct: number; log_match?: string /* the Logs search: words, "phrase", -word, OR */; log_count?: number; cpu_pct: number; metrics?: { name: string; above?: number; below?: number; minutes?: number; sum?: boolean }[]; routes?: { route: string /* a route group as `…/routes` names it ("/users/:id/orders"; a path is folded the same way), or a prefix "/api/*" */; method?: string; error_pct?: number /* 1–100, 0 off */; p95_ms?: number /* 0 off */ }[] /* at most 10, each with a threshold: one route's 5xx share or p95 over five minutes (20 requests at least), `alert.route` */ }; // default 90, 5, 0, 10 (0 off); cpu_pct: each instance's share of its cpu every minute of five, default 0 (off), `alert.cpu`; metrics (at most 10): one of the app's own gauges (each series' newest point, the largest, or their sum) above or below its one threshold in `minutes` (1–5, default 3) judgments running, `alert.metric`; capacity_pct: the share of five minutes' requests that found every instance busy at max_instances, `alert.capacity`: `alert.*` events over five minutes; log_match: text its stdout/stderr holds log_count times (default 10) in five minutes, `alert.log`
   /** A gradual rollout (README "Gradual rollouts"): increasing percents 1–99 (at most five; []
    *  switches at once, the default), each for step_s (1–3600, default 120); a step whose 5xx
    *  share reaches error_pct (1–100, default 5) of 20+ requests, and beats the old one's, rolls
@@ -402,7 +406,7 @@ type Run = {
   /** Counts of its log lines: each minute, the lines of its output (stdout, stderr) matching pattern (any case, at most
    *  200 characters) as a gauge named name (a metric's name, unique), on …/app-metrics with source=log and for scale; at
    *  most 10. Changing it is a write. */
-  log_metrics?: { name: string; pattern: string }[];
+  log_metrics?: { name: string; pattern: string /* the Logs search, as alerts.log_match */ }[];
   /** Commands on a schedule on any service: each a job of the live deployment at its due times, skipped while its
    *  last job runs; at most 20; name a-z, 0-9 and - (unique, 32 at most), command 1–2000, timeout_s 1–86400. */
   schedules?: { name: string; schedule: string; command?: string; path?: string /* a web service's path GET'd instead of a command (Vercel's crons): through its own proxy on the owner, past its allow list, firewall, rate limit and access gate, with Authorization: Bearer $CRON_SECRET when the environment has one; a call still out skips the next; a non-2xx/3xx or no answer is cron.failed (data.path, http_status or error); timeout_s default 300 */; timezone?: string; timeout_s?: number; cpu?: number /* a command's run at its own size: 0.25–8 */; memory_mb?: number /* 256–16384 */; auth?: "oidc" /* a path's call: roll's OIDC token for the service (sub roll-apps:<project>:<service>:<env>, aud the environment's URL) as the bearer instead of CRON_SECRET; none issued is cron.failed */ }[];

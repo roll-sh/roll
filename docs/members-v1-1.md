@@ -2,7 +2,7 @@
 
 Status: **phase 1 built** (groups, group roles and SCIM `Groups`, with D10–D12 and D18 as option
 (a)); time-boxed elevation (D13–D17) is still a design. This is item 6 of roll secrets' thirty-fourth product review
-(docs/secrets.md, "Next"), and it builds on members v1 ([members.md](members.md), on main since
+(docs/secrets-next.md, "Next"), and it builds on members v1 ([members.md](members.md), on main since
 #501). members.md's v1.1 also covers apps, previews and search becoming member products (previews
 is built, #524). This document is the other half: who holds a role, besides a person.
 

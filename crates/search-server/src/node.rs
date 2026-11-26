@@ -1547,6 +1547,10 @@ impl Node {
         }
         // Before any job can run: a branch's inherited jobs must not act as its parent's.
         Box::pin(search_es::branch::mark_inherited(&cluster)).await.map_err(|e| anyhow::anyhow!("marking what the branch inherited: {}", e.reason()))?;
+        // Task results an earlier version kept in a `.tasks` that isn't hidden: hidden now.
+        if let Err(e) = Box::pin(search_es::api::tasks::hide_results_index(&cluster)).await {
+            tracing::warn!(cluster = spec.name, error = %e.reason(), "hiding the task results index failed");
+        }
         // Secrets a node without a key kept in the clear are sealed now that this one has one.
         match Box::pin(search_es::seal::seal_leftovers(&cluster)).await {
             Ok(l) if l.changed == 0 => {}
@@ -1959,10 +1963,11 @@ impl Node {
             out.analytics.cleared = o.analytics.cleared.clone();
             out.analytics.enabled = o.analytics.enabled.clone();
             out.analytics.hours = o.analytics.hours.clone();
+            out.analytics.experiments = o.analytics.experiments.clone();
             out.browser.extend(o.browser.iter().cloned());
         }
         if let Some(l) = self.get_loaded(name).filter(|l| l.id() == id) {
-            let analytics = search_es::analytics::Taken { hours: l.cluster.analytics.peek(), ..Default::default() };
+            let analytics = search_es::analytics::Taken { hours: l.cluster.analytics.peek(), experiments: l.cluster.analytics.peek_experiments(), ..Default::default() };
             out.extend(Observed { minutes: l.metrics.peek(), slow: l.cluster.engine.slowlog.peek(), analytics, browser: l.browser_usage.peek() });
             // Loaded here: which indices have analytics on now decides what reads may show.
             out.analytics.enabled = Some(l.cluster.analytics.enabled_names());

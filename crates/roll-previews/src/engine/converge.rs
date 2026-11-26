@@ -13,6 +13,11 @@ pub(super) struct KeptBuild {
 /// How long one resource's columns are read for mask suggestions before it's named in `unread`.
 pub const SUGGEST_READ_FOR: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// How long a converge holds its claim on making a masked base (a dead one's lapses).
+const MASK_BASE_HOLD_MS: i64 = 30 * 60_000;
+/// How long a branch waits for a masked base another converge is making.
+const MASK_BASE_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
 impl Engine {
     pub(super) async fn converge_one(&self, r: Row) {
         let id = r.id.clone();
@@ -49,6 +54,15 @@ impl Engine {
                     }
                 }
             }
+        }
+    }
+
+    /// A product's error as a preview may show it: masked as its logs are (its branches'
+    /// credentials, its secrets); when what to mask can't be read, without its details.
+    async fn masked_error(&self, id: &str, e: &anyhow::Error) -> String {
+        match self.masks(id).await {
+            Ok(hide) => code_preview::runner::mask(&format!("{e:#}"), &hide),
+            Err(_) => "(its details are hidden: what to mask in them couldn't be read)".into(),
         }
     }
 
@@ -187,7 +201,11 @@ impl Engine {
                 if at.is_some() && past.is_none() {
                     self.store.log(&r.id, &format!("{key} keeps no history: branched as of now, not data_at"))?;
                 }
-                let made = match past {
+                // A masked resource from its parent's masked base (masked once, then
+                // copy-on-write), where the product can and the data is as of now.
+                let based = if past.is_none() && at.is_none() { self.branch_from_mask_base(r, s, &key, &res, &b, name).await? } else { None };
+                let from_base = based.is_some();
+                let made = match past.or(based) {
                     Some(m) => m,
                     None => b.branch(&res.parent, name, res.mode).await.map_err(|e| anyhow::anyhow!("branching {key}: {e:#}"))?,
                 };
@@ -201,7 +219,12 @@ impl Engine {
                 self.store.set_base_schema(&r.id, res.kind, &res.parent, None)?;
                 self.store.log(&r.id, &format!("branched {key} as {}", made.r#ref))?;
                 self.store.set_seed_needed(&r.id, true)?;
-                self.mask(&r.id, &b, &key, &made.r#ref, s).await?;
+                if from_base {
+                    // Its base was masked by these rules: nothing to rewrite here.
+                    self.store.set_mask_digest(&r.id, res.kind, &res.parent, &mask_digest_of(s.masking.get(&key)))?;
+                } else {
+                    self.mask(&r.id, &b, &key, &made.r#ref, s).await?;
+                }
                 self.keep_base(&r.id, &b, &res, &made.r#ref, s).await?;
                 self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.state = ResourceState::Ready)?;
             }
@@ -225,6 +248,11 @@ impl Engine {
                     x.error = None;
                     x.bytes = 0;
                 })?;
+                // Restore points put back from the old branch's own history (Redis's reset is a
+                // new database) can't go into this one: they go.
+                if fresh.r#ref != *branch && b.points_need_their_branch() {
+                    self.drop_points(&r.id, |d| d.kind == res.kind && d.parent == res.parent).await?;
+                }
                 self.store.set_base_schema(&r.id, res.kind, &res.parent, None)?;
                 self.store.log(&r.id, &format!("reset {key} from its parent"))?;
                 self.store.set_seed_needed(&r.id, true)?;
@@ -845,6 +873,25 @@ impl Engine {
                 self.store.log(&r.id, &format!("removed service {}", svc.name))?;
             }
         }
+        // 4a. Where its pages are served from, for the branches that answer browsers themselves
+        // (roll search: a page that searches from the browser). Best effort: a branch that
+        // couldn't be told is a problem on the preview, the pass goes on.
+        let pinned = self.store.pinned(&r.id)?;
+        let urls: Vec<String> = self.store.services(&r.id)?.into_iter().map(|s| s.url).chain(pinned.iter().map(|p| p.url.clone())).collect();
+        for res in self.store.resources(&r.id)? {
+            let (Some(branch), Ok(b)) = (&res.r#ref, self.brancher(res.kind)) else { continue };
+            if let Err(e) = b.serve(&res.parent, branch, res.kept.as_deref(), &urls).await {
+                problems.push(format!("the preview's pages can't reach the {} branch from the browser: {}", res.kind.as_str(), self.masked_error(&r.id, &e).await));
+            }
+        }
+        // An earlier push with its own copy of the data: its pages, at its own URLs.
+        for d in self.store.pinned_data(&r.id)? {
+            let Ok(b) = self.brancher(d.kind) else { continue };
+            let own: Vec<String> = pinned.iter().filter(|p| p.revision == d.revision).map(|p| p.url.clone()).collect();
+            if let Err(e) = b.serve(&d.parent, &d.r#ref, d.kept.as_deref(), &own).await {
+                problems.push(format!("an earlier push's pages can't reach its {} copy from the browser: {}", d.kind.as_str(), self.masked_error(&r.id, &e).await));
+            }
+        }
         // 4b. Health: a service with a `health` path counts once it answers 2xx/3xx there, asked
         // once per revision (Render's and Railway's checks). Anything else fails the preview, and
         // the retry asks again.
@@ -1110,7 +1157,8 @@ impl Engine {
         // (whichever of its services serves the Storybook; recorded once its run is kept).
         let asked_first = if storybook.is_some() && r.change_id.is_none() { self.stories_wanted(r) } else { Vec::new() };
         let stories_first = if stories.is_some() { asked_first.clone() } else { Vec::new() };
-        let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone(), openapi, endpoints, states, browsers, crops, stories, modes, login, changed, stories_first };
+        let story_runs = self.story_runs(r);
+        let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone(), openapi, endpoints, states, browsers, crops, stories, modes, login, changed, stories_first, story_runs };
         let started = std::time::Instant::now();
         // The page's words are its code's: what it was given is masked before they're kept (and
         // reach the pull request's comment); a run whose masks can't be read fails as a run.
@@ -1150,7 +1198,7 @@ impl Engine {
                 // `<first>:/` is the screenshot itself (which service is first isn't the person's to know).
                 if let Some(e) = entries.iter().find(|e| crate::settings::page_entry(e) == Some((Some(first.name.as_str()), "/"))) {
                     let errors = shot.health.as_ref().map_or(0, |h| h.errors + h.failed);
-                    let report = crate::PageReport { a11y: shot.a11y.clone(), links: shot.links.clone(), text: shot.text.clone(), unstable: shot.health.as_ref().is_some_and(|h| h.unstable), step: None, step_ms: None, play: None, play_error: None };
+                    let report = crate::PageReport { a11y: shot.a11y.clone(), links: shot.links.clone(), text: shot.text.clone(), unstable: shot.health.as_ref().is_some_and(|h| h.unstable), step: None, step_ms: None, play: None, play_error: None, play_step: None };
                     pages.push(crate::ports::PageShot { path: e.clone(), png: shot.png.clone(), errors, report });
                 }
                 pages.extend(self.other_services_pages(r, &first.name, &entries, &hide, storybook.as_ref()).await);
@@ -1289,7 +1337,7 @@ impl Engine {
                 out.extend(kept_stories);
                 continue;
             }
-            let opts = crate::ports::ShotOptions { pages: paths.iter().filter(|p| **p != "/").map(|p| p.to_string()).collect(), hide: hide.to_vec(), stories, changed, stories_first, ..Default::default() };
+            let opts = crate::ports::ShotOptions { pages: paths.iter().filter(|p| **p != "/").map(|p| p.to_string()).collect(), hide: hide.to_vec(), stories, changed, stories_first, story_runs: self.story_runs(r), ..Default::default() };
             match self.apps.screenshot(&r.id, svc, &opts).await {
                 Ok(Some(mut shot)) => {
                     let _ = self.store.add_run_usage(&r.id, crate::runtime::BROWSER_GIB, shot.container_ms as i64);
@@ -1302,7 +1350,7 @@ impl Engine {
                     }
                     if paths.contains(&"/") {
                         let errors = shot.health.as_ref().map_or(0, |h| h.errors + h.failed);
-                        let report = crate::PageReport { a11y: shot.a11y.clone(), links: shot.links.clone(), text: shot.text.clone(), unstable: shot.health.as_ref().is_some_and(|h| h.unstable), step: None, step_ms: None, play: None, play_error: None };
+                        let report = crate::PageReport { a11y: shot.a11y.clone(), links: shot.links.clone(), text: shot.text.clone(), unstable: shot.health.as_ref().is_some_and(|h| h.unstable), step: None, step_ms: None, play: None, play_error: None, play_step: None };
                         out.push(crate::ports::PageShot { path: format!("{svc}:/"), png: shot.png.clone(), errors, report });
                     }
                     // A story is a story whichever service serves it (`story:<id>`).
@@ -1346,7 +1394,12 @@ impl Engine {
                 }
             }
         }
-        want.into_iter().take(crate::settings::MAX_STORIES).collect()
+        want.into_iter().take(crate::settings::MAX_STORIES * self.story_runs(base)).collect()
+    }
+
+    /// How many containers take `r`'s stories side by side (`github.story_runs`).
+    fn story_runs(&self, r: &Row) -> usize {
+        self.store.settings(&r.project_id).map_or(1, |s| s.github.story_runs as usize).clamp(1, crate::settings::MAX_STORY_RUNS)
     }
 
     /// Whether `r`, a default branch's or the baseline's preview, takes its stories again at its
@@ -1536,6 +1589,74 @@ impl Engine {
         }
     }
 
+    /// A branch named `name` of `res`'s parent's masked base for its rules (Neon's anonymized
+    /// branches): the base is a branch of the parent masked once (the newest made within
+    /// `mask_base_for`), made now when there's none, and each preview's branch is a copy-on-write
+    /// branch of it, so a masked table is one rewrite per rules and day, not one per preview and
+    /// reset. `None` (the caller branches the parent and masks that) when the resource isn't
+    /// masked, the product can't, bases are off, or another converge is making the base; a base
+    /// that couldn't be made is said and left to the next converge.
+    async fn branch_from_mask_base(&self, r: &Row, s: &Settings, key: &str, res: &ResourceRow, b: &Arc<dyn Brancher>, name: &str) -> anyhow::Result<Option<crate::ports::Branched>> {
+        let Some(cols) = s.masking.get(key).filter(|c| !c.is_empty()) else { return Ok(None) };
+        if !b.branches_from_base() || res.mode != Mode::Branch || self.cfg.mask_base_for.is_zero() {
+            return Ok(None);
+        }
+        let digest = mask_digest_of(Some(cols));
+        let fresh_since = self.store.now_ms()? - self.cfg.mask_base_for.as_millis() as i64;
+        // Another converge making it: waited for (as long as masking a copy would take), then
+        // this branch masks its own.
+        let mut claim = self.store.claim_mask_base(res.kind, &res.parent, &digest, fresh_since, MASK_BASE_HOLD_MS)?;
+        let waited = std::time::Instant::now();
+        while claim == crate::store::BaseClaim::Busy && waited.elapsed() < MASK_BASE_WAIT {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            claim = self.store.claim_mask_base(res.kind, &res.parent, &digest, fresh_since, MASK_BASE_HOLD_MS)?;
+        }
+        let base = match claim {
+            crate::store::BaseClaim::Ready { r#ref, .. } => r#ref,
+            crate::store::BaseClaim::Busy => return Ok(None),
+            crate::store::BaseClaim::Make { name: base } => {
+                let made = async {
+                    let made = b.make_base(&res.parent, &base).await?;
+                    b.mask(&res.parent, &made.r#ref, made.kept.as_deref(), cols).await?;
+                    anyhow::Ok(made)
+                }
+                .await;
+                match made {
+                    Ok(made) => {
+                        self.store.mask_base_ready(res.kind, &res.parent, &base, &made.r#ref)?;
+                        self.store.log(&r.id, &format!("made {key}'s masked base {base}: {} column(s) masked once, for every preview masked so", cols.len()))?;
+                        made.r#ref
+                    }
+                    Err(e) => {
+                        // Its half-made branch is found again by name next time, and masked again.
+                        self.store.log(&r.id, &self.mask_text(&r.id, &format!("couldn't make {key}'s masked base, so its branch is masked itself: {e:#}")).await?)?;
+                        return Ok(None);
+                    }
+                }
+            }
+        };
+        let made = b.branch_from(&res.parent, &base, name, Mode::Branch).await.map_err(|e| anyhow::anyhow!("branching {key} from its masked base: {e:#}"))?;
+        if made.is_some() {
+            self.store.log(&r.id, &format!("branched {key} from its masked base"))?;
+            self.drop_old_mask_bases(b, res.kind, &res.parent).await;
+        }
+        Ok(made)
+    }
+
+    /// Delete `kind:parent`'s masked bases that aren't the one to branch from any more and that
+    /// no branch comes from (best effort: one still in use waits for its last preview).
+    pub(super) async fn drop_old_mask_bases(&self, b: &Arc<dyn Brancher>, kind: Kind, parent: &str) {
+        if !b.branches_from_base() {
+            return;
+        }
+        let fresh_since = self.store.now_ms().unwrap_or(0) - self.cfg.mask_base_for.as_millis() as i64;
+        for (name, base) in self.store.old_mask_bases(kind, parent, fresh_since).unwrap_or_default() {
+            if matches!(b.children(parent, &base).await, Ok(0)) && b.delete(parent, &base, &name).await.is_ok() {
+                let _ = self.store.drop_mask_base(kind, parent, &name);
+            }
+        }
+    }
+
     pub(super) async fn mask(&self, id: &str, b: &Arc<dyn Brancher>, key: &str, branch: &str, s: &Settings) -> anyhow::Result<()> {
         let (kind, parent) = key.split_once(':').unwrap_or((key, ""));
         let kind = Kind::parse(kind)?;
@@ -1701,6 +1822,9 @@ impl Engine {
         self.brancher(res.kind)?.retire(&res.parent, branch, res.kept.as_deref()).await.map_err(|e| anyhow::anyhow!("revoking what the {} branch {branch} handed out: {e:#}", res.kind.as_str()))?;
         self.brancher(res.kind)?.delete(&res.parent, branch, name).await.map_err(|e| anyhow::anyhow!("deleting the {} branch {branch}: {e:#}", res.kind.as_str()))?;
         self.store.log(id, &format!("deleted the {} branch {branch}", res.kind.as_str()))?;
+        // Its masked base may have had it as its last branch.
+        let b = self.brancher(res.kind)?.clone();
+        self.drop_old_mask_bases(&b, res.kind, &res.parent).await;
         Ok(())
     }
 

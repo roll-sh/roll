@@ -7,6 +7,9 @@
  * Analytics are off until the owner turns them on for an index (`index.roll.analytics.enabled`):
  * query text is the tenant's data. Turning them off deletes what's kept.
  *
+ * A/B tests on search applications show under the lists (counted whether or not an index has
+ * analytics on: counts only, no query text).
+ *
  * The chart follows the Performance tab's: neutral ink for searches, the danger token for the
  * searches with no results, a hairline grid and a value on hover or focus. Nothing animates.
  */
@@ -16,12 +19,14 @@ import { useCallback, useEffect, useState } from "react";
 import {
   ANALYTICS_RANGES,
   ANALYTICS_SETTING,
+  comparisonText,
   emptyText,
   enabledIndices,
   fillPoints,
   percent,
   type AnalyticsList,
   type AnalyticsRange,
+  type ExperimentResult,
   type Prefill,
   type QueryRow,
   type SearchAnalytics,
@@ -159,6 +164,59 @@ function Rows({ list, rows, a, onAct }: { list: AnalyticsList; rows: QueryRow[];
 }
 
 /** Which indices have analytics on, and turning it on or off for one. */
+/** A/B tests on search applications: each variant's trials, click-through and conversion rate,
+ * against the baseline's, with the z-test's p-value or why it can't call one yet. */
+function Experiments({ list }: { list: ExperimentResult[] }) {
+  if (list.length === 0) return null;
+  return (
+    <div className="border-t border-line px-5 pt-4 pb-2">
+      <div className="pb-2 text-[13px] font-medium">Experiments</div>
+      {list.map((x) => (
+        <div key={`${x.application}/${x.experiment}`} className="relative mb-4 overflow-x-auto">
+          <div className="pb-1 font-mono text-[12px] text-muted">
+            {x.application} · {x.experiment}
+          </div>
+          <table className="w-full min-w-[52rem] table-fixed text-[13px]">
+            <thead>
+              <tr className="border-b border-line text-left text-[11px] text-subtle">
+                <th className="py-2 font-normal">Variant</th>
+                <th className="px-2 py-2 text-right font-normal">Searches</th>
+                <th className="px-2 py-2 text-right font-normal">Click-through</th>
+                <th className="px-2 py-2 text-right font-normal">Conversion</th>
+                <th className="px-2 py-2 text-right font-normal">Value</th>
+                <th className="px-2 py-2 text-right font-normal">No results</th>
+                <th className="px-2 py-2 text-right font-normal">p95</th>
+              </tr>
+            </thead>
+            <tbody>
+              {x.variants.map((v) => (
+                <tr key={v.name} className="border-b border-line last:border-0 align-top">
+                  <td className="py-2 font-mono text-[12px]">
+                    {v.name}
+                    {v.name === x.baseline && <span className="ml-2 text-[11px] text-subtle">baseline</span>}
+                  </td>
+                  <td className="px-2 py-2 text-right font-mono text-[12px] tabular-nums">{v.searches.toLocaleString("en-US")}</td>
+                  <td className="px-2 py-2 text-right font-mono text-[12px] tabular-nums">
+                    {percent(v.ctr)}
+                    {v.vs_baseline && <div className="text-[11px] text-subtle">{comparisonText(v.vs_baseline.ctr)}</div>}
+                  </td>
+                  <td className="px-2 py-2 text-right font-mono text-[12px] tabular-nums">
+                    {percent(v.conversion_rate)}
+                    {v.vs_baseline && <div className="text-[11px] text-subtle">{comparisonText(v.vs_baseline.conversion_rate)}</div>}
+                  </td>
+                  <td className="px-2 py-2 text-right font-mono text-[12px] tabular-nums text-muted">{v.value.toLocaleString("en-US")}</td>
+                  <td className="px-2 py-2 text-right font-mono text-[12px] tabular-nums text-muted">{percent(v.no_hit_rate)}</td>
+                  <td className="px-2 py-2 text-right font-mono text-[12px] tabular-nums text-muted">{v.p95_latency_ms == null ? "—" : `<${v.p95_latency_ms} ms`}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function Switches({ cluster, indices, enabled, onChanged }: { cluster: SearchCluster; indices: string[]; enabled: string[]; onChanged: () => void }) {
   const [pick, setPick] = useState("");
   const [off, setOff] = useState<string | null>(null);
@@ -298,6 +356,7 @@ export function SearchAnalyticsPanel({ cluster, onAct }: { cluster: SearchCluste
             them with a synonym or a query rule. It&apos;s off until you turn it on, because query text is your users&apos; data.
           </p>
         </div>
+        <Experiments list={data.experiments ?? []} />
         {indices.length === 0 ? <p className="px-5 pb-6 text-[13px] text-subtle">Create an index first.</p> : <Switches cluster={cluster} indices={indices} enabled={enabled} onChanged={reload} />}
       </Panel>
     );
@@ -309,6 +368,7 @@ export function SearchAnalyticsPanel({ cluster, onAct }: { cluster: SearchCluste
         <Stat label="No results" value={percent(data.totals.no_hit_rate)} />
         <Stat label="Clicks" value={data.totals.clicks.toLocaleString("en-US")} />
         <Stat label="Click-through" value={data.totals.clicks ? percent(data.totals.ctr) : "—"} />
+        {(data.totals.conversions ?? 0) > 0 && <Stat label="Conversions" value={`${(data.totals.conversions ?? 0).toLocaleString("en-US")} · ${percent(data.totals.conversion_rate)}`} />}
       </div>
       <Volume a={data} />
       <div className="px-5 pt-5 pb-2">
@@ -323,6 +383,7 @@ export function SearchAnalyticsPanel({ cluster, onAct }: { cluster: SearchCluste
         />
       </div>
       <Rows list={list} rows={rows} a={data} onAct={onAct} />
+      <Experiments list={data.experiments ?? []} />
       <Switches cluster={cluster} indices={indices} enabled={enabled} onChanged={reload} />
     </Panel>
   );

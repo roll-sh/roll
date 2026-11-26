@@ -60,7 +60,8 @@ pub enum Preview {
         /// Give up waiting after this many seconds (exit 1).
         #[arg(long, default_value_t = 600)]
         timeout: u64,
-        /// Push untracked files over 50 MB too (refused without it).
+        /// Push untracked files over 50 MB, or named like a secret (`.env`, `.env.local`, a
+        /// private key), too (refused without it).
         #[arg(long)]
         force: bool,
     },
@@ -115,6 +116,21 @@ pub enum Preview {
         #[arg(long, conflicts_with = "group")]
         first: bool,
         /// Every page changed the same way (`visual_review.pages[].group`).
+        #[arg(long)]
+        group: Option<String>,
+    },
+    /// Refuse how a change's pages look at its latest screenshot (Chromatic's Deny): every page,
+    /// --page one, --first the first page, or --group those changed the same way. Its visual
+    /// review fails until a new push, or until someone accepts them.
+    Refuse {
+        preview: String,
+        /// Why (one line, 200 characters at most).
+        #[arg(long, default_value = "")]
+        reason: String,
+        #[arg(long, conflicts_with_all = ["first", "group"])]
+        page: Option<String>,
+        #[arg(long, conflicts_with = "group")]
+        first: bool,
         #[arg(long)]
         group: Option<String>,
     },
@@ -537,6 +553,10 @@ impl Working {
         if !big.is_empty() && !force {
             bail!("untracked and not ignored, so it would be pushed: {} (over {}): add it to .gitignore, or say --force", big.join(", "), bytes(BIG as f64));
         }
+        let secret: Vec<&str> = others.iter().map(|(p, _)| *p).filter(|p| named_like_a_secret(p)).collect();
+        if !secret.is_empty() && !force {
+            bail!("untracked and not ignored, so it would be pushed where whoever can read {} reads it: {} (named like a secret): add it to .gitignore, or say --force", self.repo, secret.join(", "));
+        }
         if !others.is_empty() {
             let total: u64 = others.iter().map(|(_, n)| n).sum();
             eprintln!("adding {} untracked file{} ({}), readable by whoever can read {}:", others.len(), if others.len() == 1 { "" } else { "s" }, bytes(total as f64), self.repo);
@@ -698,6 +718,17 @@ fn segment(name: &str) -> String {
 
 /// An untracked file `roll preview up` refuses to push without `--force`.
 const BIG: u64 = 50 << 20;
+
+/// A file name that usually holds credentials: `.env` and its local variants (not an example
+/// or template one), private keys and keystores, registry and login files. `roll preview up`
+/// never pushes one untracked without `--force`: the branch is readable by the repo's readers.
+fn named_like_a_secret(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+    let env = name == ".env" || (name.starts_with(".env.") && !matches!(name.rsplit('.').next(), Some("example" | "sample" | "template" | "dist" | "defaults" | "schema")));
+    let key = [".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".tfvars"].iter().any(|x| name.ends_with(x))
+        || (["id_rsa", "id_ecdsa", "id_ed25519", "id_dsa"].iter().any(|x| name.starts_with(x)) && !name.ends_with(".pub"));
+    env || key || matches!(name.as_str(), ".npmrc" | ".pypirc" | ".netrc" | ".dockercfg" | "credentials.json" | "service-account.json")
+}
 
 /// `git <args>` in `dir`, its trimmed stdout; a failure is its stderr.
 fn git(dir: &std::path::Path, args: &[&str], env: &[(&str, std::ffi::OsString)]) -> anyhow::Result<String> {
@@ -1087,6 +1118,16 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
                 (None, false, None) => json!({}),
             };
             api.post(&format!("/v1/previews/{preview}/visual/accept"), body).await?
+        }
+        Preview::Refuse { preview, reason, page, first, group } => {
+            let mut body = match (page, first, group) {
+                (_, _, Some(g)) => json!({ "group": g }),
+                (Some(p), _, None) => json!({ "path": p }),
+                (None, true, None) => json!({ "path": "" }),
+                (None, false, None) => json!({}),
+            };
+            body["reason"] = json!(reason);
+            api.post(&format!("/v1/previews/{preview}/visual/refuse"), body).await?
         }
         Preview::Keep { preview, hours, release } => api.post(&format!("/v1/previews/{preview}/keep"), json!({ "hours": if release { 0 } else { hours } })).await?,
         Preview::Share { preview, hours, label, notes, list, revoke } => {

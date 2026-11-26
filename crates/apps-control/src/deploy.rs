@@ -1031,7 +1031,14 @@ impl Apps {
                         None => None,
                     };
                     match live {
-                        Some(kept) => run.port = kept,
+                        Some(kept) => {
+                            // A new image that exposes another port is said, not followed.
+                            let exposed = exposed_port(&self.deps.runtime.image_ports(&pinned).await);
+                            if let Some(p) = exposed.filter(|p| Some(*p) != kept) {
+                                log.line(format!("the image exposes port {p}; it's served on {}, the live deployment's (set a port to move it)", kept.map_or("the default".to_string(), |k| k.to_string())));
+                            }
+                            run.port = kept;
+                        }
                         None => {
                             if let Some(p) = exposed_port(&self.deps.runtime.image_ports(&pinned).await) {
                                 log.line(format!("the image exposes port {p}: it's served there (set a port to choose another)"));
@@ -1842,6 +1849,17 @@ impl Apps {
         };
         let log = &log;
         let mut plan_json = serde_json::to_value(&plan)?;
+        // A workspace package's: what else in the repo its build reads (the packages it depends
+        // on, the root's manifests), which a push may touch instead of its own directory.
+        if from_root
+            && let Some(r) = root.clone()
+        {
+            let t = tree.clone();
+            let derived = tokio::task::spawn_blocking(move || apps_build::workspace_deps(&apps_build::DirTree::new(t), &r)).await?;
+            if !derived.is_empty() {
+                plan_json["watch_derived"] = serde_json::json!(derived);
+            }
+        }
         // What the repo's `.env.example` names and the environment doesn't set: said before the
         // build, rather than found as a crash after it.
         let unset: Vec<&String> = plan.variables.iter().filter(|n| !build_env.iter().any(|(k, _)| k == *n) && !runtime_only.contains(*n)).collect();
@@ -3125,9 +3143,10 @@ impl Apps {
         // A Git URL's: the paths between the live commit and this one, matched as a repo's are.
         if let (Source::Git { url, .. }, Some(sources)) = (&svc.source, &self.deps.sources) {
             let Some(active) = env.active.clone() else { return true };
-            let Ok(Some(from)) = self.db(move |s| s.deployment(&active).map(|d| d.revision)).await else { return true };
+            let Ok((Some(from), plan)) = self.db(move |s| s.deployment(&active).map(|d| (d.revision, d.plan))).await else { return true };
+            let patterns = with_derived(patterns, plan.as_ref());
             return match crate::git_source::changed_paths(&self.git_remote(&svc.id, url).await, &from, revision).await {
-                Ok(Some(paths)) => sources.any_path_matches(patterns, &paths),
+                Ok(Some(paths)) => sources.any_path_matches(&patterns, &paths),
                 Ok(None) => true,
                 Err(e) => {
                     self.logs.sink(format!("env:{}/{}", svc.id, env.name), Stream::System).line(format!("{}'s changed paths couldn't be read ({e:#}): deployed as if it touched a watched one", &revision[..revision.len().min(12)]));
@@ -3137,8 +3156,8 @@ impl Apps {
         }
         let (Source::Repo { repo, .. }, Some(sources)) = (&svc.source, &self.deps.sources) else { return true };
         let Some(active) = env.active.clone() else { return true };
-        let Ok(Some(from)) = self.db(move |s| s.deployment(&active).map(|d| d.revision)).await else { return true };
-        sources.touches(repo, &from, revision, patterns).await.unwrap_or(true)
+        let Ok((Some(from), plan)) = self.db(move |s| s.deployment(&active).map(|d| (d.revision, d.plan))).await else { return true };
+        sources.touches(repo, &from, revision, &with_derived(patterns, plan.as_ref())).await.unwrap_or(true)
     }
 
     /// Queue the deploys a landing makes. One service failing (or capped) doesn't hold up the
@@ -3699,6 +3718,15 @@ impl Apps {
     pub async fn shutdown(&self) {
         self.stop.cancel();
     }
+}
+
+/// The watch paths and, for a workspace package, what its live build read elsewhere in the repo
+/// (`watch_derived`: its packages, the root's lockfile), so a change in `packages/ui` deploys the
+/// app using it.
+fn with_derived(patterns: &[String], plan: Option<&serde_json::Value>) -> Vec<String> {
+    let mut out = patterns.to_vec();
+    out.extend(plan.and_then(|p| p["watch_derived"].as_array()).into_iter().flatten().filter_map(|v| v.as_str().map(str::to_string)));
+    out
 }
 
 /// Whether a canary step fails: the new deployment answered `error_pct` or more of at least

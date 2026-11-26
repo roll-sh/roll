@@ -625,6 +625,39 @@ impl Engine {
         self.store.view(self.store.row(id)?)
     }
 
+    /// `by` refuses how the change's pages look at its latest screenshot (Chromatic's Deny):
+    /// `page` only, or all of them, with why (one line, 200 characters at most). The review fails
+    /// until a new head, or until someone accepts those pages; the change and its pull request say
+    /// so at once. Anyone who could accept may refuse, a token and the change's own author too:
+    /// it only holds the change back. `writer` as [`Engine::accept_visual`]'s.
+    pub async fn refuse_visual(&self, id: &str, by: &str, writer: Option<Option<&str>>, seen: Option<&str>, page: Option<&str>, reason: &str) -> Result<Preview> {
+        let reason = reason.trim();
+        if reason.chars().count() > 200 || reason.chars().any(char::is_control) {
+            return Err(Error::BadRequest("why it's refused is one line of 200 characters at most".into()));
+        }
+        let r = self.store.row(id)?;
+        if r.change_id.is_none() {
+            return Err(Error::BadRequest("only a change's preview has a visual review".into()));
+        }
+        if let Some(owner) = writer {
+            let change = r.change_id.as_deref().unwrap_or_default();
+            let c = self.source.change(change).await.map_err(|e| Error::Internal(format!("reading the change: {e}")))?.ok_or_else(|| Error::NotFound(format!("no change {change}")))?;
+            if owner != Some(c.owner_id.as_str()) {
+                return Err(Error::Forbidden(format!("refusing {}'s visual change needs write access to it in roll code", r.repo)));
+            }
+        }
+        let head = self.store.refuse_visual(id, by, seen, page, reason)?.ok_or_else(|| Error::Conflict("the preview has no screenshot to refuse yet".into()))?;
+        let what = match page {
+            None => "its pages look".to_string(),
+            Some("") => "its first page looks".to_string(),
+            Some(p) if p.starts_with("group:") => "the pages changed the same way look".to_string(),
+            Some(p) => format!("{p} looks"),
+        };
+        self.store.log(id, &format!("{by} refused how {what} at {}{}", short(&head), if reason.is_empty() { String::new() } else { format!(": {reason}") }))?;
+        self.report(r.clone()).await;
+        self.store.view(self.store.row(id)?)
+    }
+
     /// Someone accepts a change's regressions against main's preview at its head (`seen`: the head
     /// they looked at; a newer one is a 409), as a visual change is accepted: not by its own author,
     /// and a required rule's only by a person.
