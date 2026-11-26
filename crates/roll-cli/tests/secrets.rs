@@ -164,13 +164,13 @@ async fn start() -> Server {
     start_with(false).await
 }
 
-/// A product whose access keys roll manages (`keys`): each one issued is new.
+/// A bucket whose access keys roll manages: each one issued is new.
 #[derive(Default)]
 struct Keys(std::sync::atomic::AtomicU32);
 
 impl roll_secrets::LinkProvider for Keys {
     fn kind(&self) -> &str {
-        "keys"
+        "bucket"
     }
     fn fields(&self) -> &[roll_secrets::links::Field] {
         &[roll_secrets::links::Field { field: "secret", label: "Secret", modes: &[roll_secrets::Mode::Managed], secret: true, suggest: "API_KEY", credential: Some("key") }]
@@ -995,9 +995,9 @@ async fn a_pre_receive_hook_refuses_a_push_adding_a_production_value_with_a_scan
 
     // Break glass is the project's to allow, names the pusher, and never passes unrecorded.
     let http = reqwest::Client::new();
-    let placed = http.put(format!("{api}/v1/workspace/projects/{prj}/resources/keys/k1")).json(&serde_json::json!({ "x": 0, "y": 0 })).send().await.unwrap();
+    let placed = http.put(format!("{api}/v1/workspace/projects/{prj}/resources/bucket/k1")).json(&serde_json::json!({ "x": 0, "y": 0 })).send().await.unwrap();
     assert!(placed.status().is_success(), "{}", placed.text().await.unwrap());
-    let link = serde_json::json!({ "link": { "kind": "keys", "ref": "k1", "field": "secret", "mode": "managed" } });
+    let link = serde_json::json!({ "link": { "kind": "bucket", "ref": "k1", "field": "secret", "mode": "managed" } });
     let linked = http.put(format!("{api}/v1/secrets/projects/{prj}/environments/production/secrets/API_KEY")).json(&link).send().await.unwrap();
     assert!(linked.status().is_success(), "{}", linked.text().await.unwrap());
     ok(&api, &[], &["secrets", "-p", "shop", "leaks", "managed"], None).await;
