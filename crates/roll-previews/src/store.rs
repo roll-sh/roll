@@ -2311,6 +2311,7 @@ impl Store {
                 step_ms: report.step_ms,
                 play: report.play,
                 play_error: report.play_error,
+                play_step: report.play_step,
                 base_group: sig.filter(|_| base.is_some()),
             })
             .collect())
