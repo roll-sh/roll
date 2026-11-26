@@ -325,15 +325,22 @@ async fn a_document_cannot_steer_retrieval_or_the_prompt() {
     assert_eq!(sent[0].get("messages").and_then(Value::as_array).map(Vec::len), Some(2));
 }
 
-/// Nothing in an answer renders as a link, an image, a definition, a tag or an autolink: no
-/// `](`, no unescaped `<`, every URL inside a code span.
+/// Nothing in an answer renders as a link, an image or HTML when read as GitHub-flavored
+/// markdown (extended autolinks included), and no text in it holds a URL a renderer could link.
 fn inert(out: &str) {
-    assert!(!out.contains("]("), "{out}");
-    for (i, _) in out.match_indices('<') {
-        assert_eq!(out[..i].chars().last(), Some('\\'), "{out}");
-    }
-    for (i, _) in out.match_indices("://") {
-        assert_eq!(out[..i].matches('`').count() % 2, 1, "a URL outside a code span: {out}");
+    use comrak::nodes::NodeValue;
+    let mut o = comrak::Options::default();
+    o.extension.autolink = true;
+    o.extension.footnotes = true;
+    o.extension.table = true;
+    let arena = comrak::Arena::new();
+    for n in comrak::parse_document(&arena, out, &o).descendants() {
+        match &n.data().value {
+            NodeValue::Link(l) | NodeValue::Image(l) => panic!("a link or image to {} in {out:?}", l.url),
+            NodeValue::HtmlInline(_) | NodeValue::HtmlBlock(_) => panic!("HTML in {out:?}"),
+            NodeValue::Text(t) => assert!(!t.contains("://"), "linkable text {t:?} in {out:?}"),
+            _ => {}
+        }
     }
 }
 

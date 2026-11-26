@@ -90,6 +90,8 @@ serde_json.workspace = true
 
 [dev-dependencies]
 search-test-support.workspace = true
+# The chat answer sanitizer's tests parse its output as GitHub-flavored markdown.
+comrak.workspace = true
 reqwest.workspace = true
 # Inference tests: a throwaway service account key for Vertex AI's token flow.
 rsa.workspace = true
