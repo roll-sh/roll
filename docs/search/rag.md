@@ -28,7 +28,10 @@ what the best of the four products does:
   `query_param`, `query_fields`, `context` (`fields`, `passages`, `max_sources` 1-20 (5),
   `max_source_bytes` 256-16,384 (4,096), `max_context_tokens` (6,000), `max_history_tokens`
   (2,000), `max_history_turns` (20, at most 100)), `max_output_tokens` (1,024), `min_score`,
-  `max_tokens_per_day`, `timeout` (60s, at most `roll.inference.max_timeout`). The node caps
+  `max_tokens_per_day` (1,000,000 unless set; `"unlimited"` explicitly), `per_caller`
+  (`turns_per_minute` 30, `input_tokens_per_minute` 100,000, `output_tokens_per_minute` 20,000,
+  `max_concurrent` 4), `allow_links` (false), `timeout` (60s, at most
+  `roll.inference.max_timeout`). The node caps
   `roll.chat.max_context_tokens` (32,000) and `roll.chat.max_output_tokens` (4,096) apply when a
   profile is put and again on every answer.
 - **Endpoints:** a `completion` or `chat_completion` endpoint of a service that streams a chat
@@ -68,6 +71,17 @@ what the best of the four products does:
   key's node rate limits when it starts, its estimated prompt tokens and its whole output cap
   before the model is called, and gives back the output it didn't use when it ends; refusals are
   429s with `Retry-After`. The buckets are per loaded cluster, in memory, bounded.
+- **Every caller pays, by its own identity.** `indices:data/read/roll/chat` is covered by `read`
+  (as `indices:data/read/*` covers every read), so any key or user that may read a profile's
+  target can chat. That stays: chat reads nothing its search doesn't, roll's own console route
+  and MCP tool call it as the cluster's owner, and a separate privilege would be a roll-only name
+  in roles Elasticsearch clients write. The cost is bounded instead: a caller that isn't a browser
+  key is held to the profile's `per_caller` limits (turns, prompt and output tokens a minute,
+  answers at once) by its API key, or its user and realm (the owner's own calls share one), and
+  everyone together to the profile's `max_tokens_per_day`, 1M unless the owner says otherwise.
+  Without that day, one public browser key at its defaults could spend about 36M tokens a day.
+  The day's bucket is kept apart from the per-minute ones, so evicting those never hands a day
+  back.
 - **Workflows.** `_answer`, the OpenAI route and its model list run in the
   `search_application_query` workflow, so a key restricted to it chats over its application; it
   is refused a profile over an index (403).

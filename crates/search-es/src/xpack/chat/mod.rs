@@ -78,6 +78,9 @@ pub const MAX_ANSWER_BYTES: usize = 256 * 1024;
 pub const MAX_INSTRUCTIONS_BYTES: usize = 8 * 1024;
 /// An answer's deadline when its profile sets none.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+/// A profile's tokens a day when it sets none: modest, so a key that may read can't spend the
+/// owner's model without bound (`"unlimited"` lifts it, said explicitly).
+pub const DEFAULT_TOKENS_PER_DAY: u64 = 1_000_000;
 
 /// Where a profile retrieves from.
 #[derive(Clone, Debug, PartialEq)]
@@ -108,7 +111,13 @@ pub struct Profile {
     pub max_history_turns: u64,
     pub max_output_tokens: u64,
     pub min_score: Option<f64>,
+    /// Prompt and output tokens a day, for every caller together (`None`: `"unlimited"`, set
+    /// explicitly; [`DEFAULT_TOKENS_PER_DAY`] when left out).
     pub max_tokens_per_day: Option<u64>,
+    /// What one caller that isn't a browser key may use ([`limits::CallerLimits`]).
+    pub per_caller: limits::CallerLimits,
+    /// Whether the answer may link to the sources' own URLs ([`answer`]); never anything else.
+    pub allow_links: bool,
     pub timeout: Duration,
     pub updated_at_millis: i64,
 }
@@ -151,7 +160,7 @@ fn valid_name(name: &str) -> bool {
 impl Profile {
     /// Parses and checks a `PUT` body against the cluster (its endpoint and target exist).
     fn parse(ctx: &Ctx, name: &str, body: &Map) -> EsResult<Profile> {
-        const FIELDS: &[&str] = &["index", "search_application", "inference_id", "instructions", "query_param", "query_fields", "context", "max_output_tokens", "min_score", "max_tokens_per_day", "timeout"];
+        const FIELDS: &[&str] = &["index", "search_application", "inference_id", "instructions", "query_param", "query_fields", "context", "max_output_tokens", "min_score", "max_tokens_per_day", "per_caller", "allow_links", "timeout"];
         for k in body.keys() {
             if !FIELDS.contains(&k.as_str()) {
                 return Err(crate::xpack::unknown_field(ctx, "chat_profile", k));
@@ -224,8 +233,14 @@ impl Profile {
             Some(v) => Some(v.as_f64().ok_or_else(|| EsError::illegal_argument("[min_score] must be a number"))?),
         };
         let max_tokens_per_day = match body.get("max_tokens_per_day") {
-            None | Some(Value::Null) => None,
-            v => Some(ranged(v, "max_tokens_per_day", 1, u64::MAX / 4, 1)?),
+            None | Some(Value::Null) => Some(DEFAULT_TOKENS_PER_DAY),
+            Some(Value::Str(u)) if u == "unlimited" => None,
+            v => Some(ranged(v, "max_tokens_per_day", 1, u64::MAX / 4, 1).map_err(|_| EsError::illegal_argument("[max_tokens_per_day] is a number of tokens from 1, or \"unlimited\""))?),
+        };
+        let per_caller = limits::CallerLimits::parse(body.get("per_caller"))?;
+        let allow_links = match body.get("allow_links") {
+            None | Some(Value::Null) => false,
+            Some(v) => v.as_bool().ok_or_else(|| EsError::illegal_argument("[allow_links] is true or false"))?,
         };
         Ok(Profile {
             name: name.to_string(),
@@ -244,6 +259,8 @@ impl Profile {
             max_output_tokens: ranged(body.get("max_output_tokens"), "max_output_tokens", 1, max_output, 1_024)?,
             min_score,
             max_tokens_per_day,
+            per_caller,
+            allow_links,
             timeout,
             updated_at_millis: ctx.now_ms,
         })
@@ -280,9 +297,9 @@ impl Profile {
         if let Some(s) = self.min_score {
             m.insert("min_score".into(), s.into());
         }
-        if let Some(d) = self.max_tokens_per_day {
-            m.insert("max_tokens_per_day".into(), (d as i64).into());
-        }
+        m.insert("max_tokens_per_day".into(), self.max_tokens_per_day.map_or(Value::from("unlimited"), |d| Value::from(d as i64)));
+        m.insert("per_caller".into(), self.per_caller.to_value());
+        m.insert("allow_links".into(), self.allow_links.into());
         m.insert("timeout".into(), format!("{}ms", self.timeout.as_millis()).into());
         m.insert("updated_at_millis".into(), self.updated_at_millis.into());
         Value::Obj(m)
@@ -315,7 +332,12 @@ impl Profile {
             max_history_turns: n("max_history_turns").unwrap_or(20),
             max_output_tokens: v.get("max_output_tokens").and_then(Value::as_i64).and_then(|n| u64::try_from(n).ok()).unwrap_or(1_024),
             min_score: v.get("min_score").and_then(Value::as_f64),
-            max_tokens_per_day: v.get("max_tokens_per_day").and_then(Value::as_i64).and_then(|n| u64::try_from(n).ok()),
+            max_tokens_per_day: match v.get("max_tokens_per_day") {
+                Some(Value::Str(u)) if u == "unlimited" => None,
+                other => Some(other.and_then(Value::as_i64).and_then(|n| u64::try_from(n).ok()).unwrap_or(DEFAULT_TOKENS_PER_DAY)),
+            },
+            per_caller: limits::CallerLimits::parse(v.get("per_caller")).unwrap_or_default(),
+            allow_links: v.get("allow_links").and_then(Value::as_bool).unwrap_or(false),
             timeout,
             updated_at_millis: v.get("updated_at_millis").and_then(Value::as_i64).unwrap_or(0),
         })
@@ -691,11 +713,11 @@ pub async fn run(ctx: &Ctx<'_>, profile: &Profile, ask: Ask) -> EsResult<Answeri
     }
     let limiter = c.xpack.chat.clone();
     let slot = match &payer {
-        Some(p) => Some(limiter.enter(p).ok_or_else(|| limits::too_many(api, 1, format!("API key [{}] already runs [{}] answers at once (its limits.chat.max_concurrent; a derived key's user, one)", p.key, p.policy.max_concurrent)))?),
+        Some(p) => Some(limiter.enter(p).ok_or_else(|| limits::too_many(api, 1, format!("[{}] already runs [{}] answers at once (a browser key's limits.chat.max_concurrent, a derived key's user one; anyone else's, the profile's per_caller)", p.key, p.policy.max_concurrent)))?),
         None => None,
     };
     if let Some(p) = &payer {
-        limits::refused(api, limiter.charge_turn(p), || format!("API key [{}] has used its [{}] answers a minute (limits.chat.turns_per_minute; a derived key's user, a quarter)", p.key, p.policy.turns_per_minute))?;
+        limits::refused(api, limiter.charge_turn(p), || format!("[{}] has used its [{}] answers a minute (a browser key's limits.chat.turns_per_minute, a derived key's user a quarter; anyone else's, the profile's per_caller)", p.key, p.policy.turns_per_minute))?;
         browser::charge_work(ctx, "chat answer", p.policy.cost)?;
     }
     let st = ctx.state();
@@ -763,10 +785,13 @@ pub async fn run(ctx: &Ctx<'_>, profile: &Profile, ask: Ask) -> EsResult<Answeri
     Ok(answering)
 }
 
-/// Who pays for an answer: a browser key under its chat policy (`None`: any other caller). A
-/// browser key without one, or whose policy doesn't list the profile, is refused.
+/// Who pays for an answer: a browser key under its chat policy, every other caller under the
+/// profile's `per_caller` limits, by its own identity ([`caller_key`]). A browser key without a
+/// chat policy, or whose policy doesn't list the profile, is refused.
 fn payer(ctx: &Ctx, profile: &Profile) -> EsResult<Option<limits::Payer>> {
-    let Some(policy) = browser::policy(ctx) else { return Ok(None) };
+    let Some(policy) = browser::policy(ctx) else {
+        return Ok(Some(limits::Payer { key: caller_key(ctx), user: None, policy: profile.per_caller.policy(profile.max_history_turns as usize) }));
+    };
     let Some(chat) = policy.chat else { return Err(browser::refused("chat (its limits.chat names no profile)")) };
     if !chat.profiles.contains(&profile.name) {
         return Err(browser::refused(format!("chat profile [{}] (one its limits.chat.profiles name)", profile.name)));
@@ -774,6 +799,18 @@ fn payer(ctx: &Ctx, profile: &Profile) -> EsResult<Option<limits::Payer>> {
     let Some(security::AuthKind::ApiKey(k)) = ctx.principal.get().map(|p| &p.kind) else { return Ok(None) };
     let user = k.derived.as_deref().and_then(|d| d.user.clone());
     Ok(Some(limits::Payer { key: k.id.clone(), user, policy: chat }))
+}
+
+/// A caller that isn't a browser key, as its chat limits are kept: its API key, else its user and
+/// realm, else (no security, or roll's own calls as the owner) the owner.
+fn caller_key(ctx: &Ctx) -> String {
+    match ctx.principal.get() {
+        Some(p) => match &p.kind {
+            security::AuthKind::ApiKey(k) => format!("caller:key:{}", k.id),
+            _ => format!("caller:user:{}/{}", p.realm_name, p.username),
+        },
+        None => "caller:owner".into(),
+    }
 }
 
 /// The text and `semantic_text` fields of the indices `expr` names that the caller may read:

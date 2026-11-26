@@ -9,7 +9,14 @@
 //! each rate, one answer at once. Every answer is also charged `cost` items to the key's rate
 //! limits on the node ([`crate::xpack::security::browser::charge_work`]), as its searches are.
 //!
-//! **Every caller** is held to the profile's `max_tokens_per_day` (prompt and output together).
+//! **Every other caller** (any key or user that may read the profile's target, roll's own
+//! console route and MCP tool as the owner included) is held to the profile's `per_caller`
+//! limits ([`CallerLimits`]: turns, prompt and output tokens a minute, answers at once) by its
+//! own identity, its API key, or its user and realm.
+//!
+//! **Everyone together** is held to the profile's `max_tokens_per_day` (prompt and output; 1M
+//! unless the profile says otherwise, `"unlimited"` explicitly), kept apart from the per-minute
+//! buckets so their eviction never gives a day's budget back.
 //!
 //! An answer charges its turn when it starts, and its tokens once the prompt is built and before
 //! the model is called: the prompt's estimate, and the output cap in full. When it ends, what it
@@ -71,6 +78,71 @@ impl ChatPolicy {
             max_history_turns: n("max_history_turns").map_or(Self::DEFAULT_MAX_HISTORY_TURNS, |n| (n as usize).min(MAX_HISTORY_TURNS)),
             cost: n("cost").unwrap_or(Self::DEFAULT_COST),
         })
+    }
+}
+
+/// What one caller that isn't a browser key may use of a profile (its `per_caller`): any key
+/// or user that may read the profile's target can chat, so each is held to these, by its own
+/// identity, besides the profile's daily tokens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CallerLimits {
+    pub turns_per_minute: u64,
+    pub input_tokens_per_minute: u64,
+    pub output_tokens_per_minute: u64,
+    pub max_concurrent: u64,
+}
+
+impl Default for CallerLimits {
+    fn default() -> CallerLimits {
+        CallerLimits { turns_per_minute: 30, input_tokens_per_minute: 100_000, output_tokens_per_minute: 20_000, max_concurrent: 4 }
+    }
+}
+
+impl CallerLimits {
+    /// A profile's `per_caller` (left out: the defaults).
+    pub fn parse(v: Option<&Value>) -> EsResult<CallerLimits> {
+        let d = CallerLimits::default();
+        let Some(v) = v.filter(|v| !v.is_null()) else { return Ok(d) };
+        let m = v.as_object().ok_or_else(|| EsError::illegal_argument("[per_caller] must be an object"))?;
+        for k in m.keys() {
+            if !matches!(k.as_str(), "turns_per_minute" | "input_tokens_per_minute" | "output_tokens_per_minute" | "max_concurrent") {
+                return Err(EsError::illegal_argument(format!("[per_caller] unknown field [{k}]")));
+            }
+        }
+        let n = |k: &str, max: u64, default: u64| -> EsResult<u64> {
+            match m.get(k) {
+                None | Some(Value::Null) => Ok(default),
+                Some(x) => x.as_i64().and_then(|n| u64::try_from(n).ok()).filter(|n| (1..=max).contains(n)).ok_or_else(|| EsError::illegal_argument(format!("[per_caller.{k}] from 1 to {max}"))),
+            }
+        };
+        Ok(CallerLimits {
+            turns_per_minute: n("turns_per_minute", 10_000, d.turns_per_minute)?,
+            input_tokens_per_minute: n("input_tokens_per_minute", 100_000_000, d.input_tokens_per_minute)?,
+            output_tokens_per_minute: n("output_tokens_per_minute", 10_000_000, d.output_tokens_per_minute)?,
+            max_concurrent: n("max_concurrent", 256, d.max_concurrent)?,
+        })
+    }
+
+    pub fn to_value(&self) -> Value {
+        crate::obj! {
+            "turns_per_minute" => self.turns_per_minute as i64,
+            "input_tokens_per_minute" => self.input_tokens_per_minute as i64,
+            "output_tokens_per_minute" => self.output_tokens_per_minute as i64,
+            "max_concurrent" => self.max_concurrent as i64,
+        }
+    }
+
+    /// As a payer's policy (nothing charged to a browser key's items).
+    pub fn policy(&self, max_history_turns: usize) -> ChatPolicy {
+        ChatPolicy {
+            profiles: Vec::new(),
+            turns_per_minute: self.turns_per_minute,
+            input_tokens_per_minute: self.input_tokens_per_minute,
+            output_tokens_per_minute: self.output_tokens_per_minute,
+            max_concurrent: self.max_concurrent,
+            max_history_turns: max_history_turns.min(MAX_HISTORY_TURNS),
+            cost: 0,
+        }
     }
 }
 
